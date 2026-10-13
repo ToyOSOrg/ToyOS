@@ -344,7 +344,7 @@ impl Liveness {
 /// this buys is that the summary says which of the two kinds of red it is.
 ///
 /// It lives here rather than beside the classifier because [`Liveness`] is what
-/// produces the evidence for it, and [`QemuInstance::run_test_paced`] is a
+/// produces the evidence for it, and [`QemuInstance::run_test`] is a
 /// second producer: a test's own ceiling is a guard of exactly this kind.
 pub const STALLED: &str = "STALLED:";
 
@@ -677,11 +677,6 @@ pub enum Profile {
     /// `iommu_platform=on`, and the harness sets that only where a unit exists,
     /// so the guest's own negotiation comes out the other way here.
     HeadlessNoIommu,
-    /// [`Profile::Headless`] with QEMU's `e1000e` for its NIC, the 82574L
-    /// `toyos-i219` drives beside the T14's I219: the one guest in which
-    /// netstack runs its Intel driver, a ring of fifteen frames and a wake
-    /// for transmit room.
-    HeadlessE1000e,
     /// [`Profile::Headless`] with no USB controller: the machine whose NVMe
     /// disk is the only storage it has, and the only device its firmware can
     /// boot.
@@ -704,13 +699,6 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
-    /// [`Profile::Metal`]'s machine with a USB keyboard and an absolute USB
-    /// tablet beside its i8042, on a smaller panel: the desktop driven as a
-    /// person at QEMU's window drives it, so a test injects keys and a pointer
-    /// position through the compositor's own devices and reads the panel back.
-    /// The i8042 stays; QEMU activates one input handler per device class, so
-    /// every injected keystroke and position goes to the USB device.
-    Desktop,
     /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
@@ -770,12 +758,10 @@ impl Profile {
             }
             Self::Headless
             | Self::HeadlessNoIommu
-            | Self::HeadlessE1000e
             | Self::HeadlessNoUsb
             | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
             | Self::Metal
-            | Self::Desktop
             | Self::MetalNoX2apic
             | Self::MetalAmdVi => Arch::X86_64,
         }
@@ -887,8 +873,6 @@ impl Virtio {
 enum Nic {
     Absent,
     Virtio,
-    /// QEMU's model of the 82574L.
-    E1000e,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -1036,15 +1020,9 @@ impl Profile {
                 rng: false,
                 virtio_gpu: false,
             },
-            Self::Desktop => Shape {
-                panel: Some((1280, 800)),
-                usb: &["usb-kbd,bus=xhci.0", "usb-tablet,bus=xhci.0"],
-                ..Self::Metal.shape()
-            },
             Self::MetalNoX2apic => Self::Metal.shape(),
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi), ..Self::Metal.shape() },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
-            Self::HeadlessE1000e => Shape { nic: Nic::E1000e, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
@@ -1104,10 +1082,6 @@ pub struct BootOptions {
     /// calling CPU's affinity: the firmware side's own account of what the
     /// kernel asked of it.
     pub psci_trace: Option<PathBuf>,
-    /// A second slot beside the one the image boots, with room for an
-    /// update's ROOT of this many bytes: a machine that updates itself.
-    /// `None` for every guest whose subject is not the update.
-    pub second_slot: Option<u64>,
     /// The instant the machine's RTC starts at, as QEMU's `-rtc base=` takes
     /// it, and the host's own UTC with `None`.
     pub rtc_base: Option<&'static str>,
@@ -1148,7 +1122,6 @@ impl Default for BootOptions {
             ready_marker: DEFAULT_READY,
             extra_root_files: Vec::new(),
             psci_trace: None,
-            second_slot: None,
             rtc_base: None,
         }
     }
@@ -1195,10 +1168,6 @@ pub struct QemuInstance {
     smp: u32,
     /// The test binaries this boot put on ROOT, by the name `run` takes.
     carried: BTreeSet<String>,
-    /// What this machine was booted with, and the 16550's file: what a
-    /// second wait for its ready marker reads.
-    options: BootOptions,
-    uart_log: PathBuf,
 }
 
 /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants.
@@ -1231,7 +1200,6 @@ fn build_boot_image_with(
     kernel_features: &[&str],
     kernel_params: &[&str],
     debug_wait: bool,
-    second_slot: Option<u64>,
 ) -> Vec<u8> {
     // **The two fields have the same type, so swapping them compiles.** It
     // happened once, in this file's own conversion: the shared boot handed
@@ -1297,8 +1265,7 @@ fn build_boot_image_with(
     assert!(config.is_file(), "no image config at {}", config.display());
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
-    let mut plan = toyos_build::build::Plan::new(arch, config, kernel_features, kernel_params);
-    plan.second = second_slot.map(|root_bytes| toyos_build::image::SecondSlot { root_bytes });
+    let plan = toyos_build::build::Plan::new(arch, config, kernel_features, kernel_params);
     toyos_build::build::build_test_image(&compile::repo_root(), &plan, quiet, &extra_files)
 }
 
@@ -1380,7 +1347,6 @@ impl QemuInstance {
             &features,
             &params,
             options.debug_wait,
-            options.second_slot,
         );
         let storage = options.profile.shape().storage;
         match storage {
@@ -1457,20 +1423,6 @@ impl QemuInstance {
         )
     }
 
-    /// From here a reset this guest asks for resets the machine, its memory
-    /// and its disks kept, where `-no-reboot` would have ended QEMU with it.
-    pub fn reset_on_reboot(&mut self) {
-        let socket = self.sockets.qmp.clone().expect("reset_on_reboot needs BootOptions { qmp: true }");
-        Qmp::connect(&socket).execute("{\"execute\":\"set-action\",\"arguments\":{\"reboot\":\"reset\"}}");
-    }
-
-    /// Wait for this machine to reach its ready marker again, on the boot
-    /// after a reset: [`Self::boot_log`] is that boot's from here, opening
-    /// with what the boot before it said last.
-    pub fn await_boot(&mut self) {
-        self.boot_log = wait_for_ready(&mut self.child, &self.rx, &self.options, &self.uart_log);
-    }
-
     /// A span of the guest's *physical* memory, as QEMU reads it.
     ///
     /// **The oracle for anything a guest leaves in DRAM for a later boot.** The
@@ -1544,12 +1496,6 @@ impl QemuInstance {
             }
         });
         dump(&mut qmp, &out)
-    }
-
-    /// Where [`Self::screendump`] has QEMU write the scanout, for a
-    /// [`QmpInput::screendump`] made from inside a paced step.
-    pub fn screendump_file(&self) -> PathBuf {
-        self.screendump.clone()
     }
 
     /// Screendump until the decoded screen carries `needle`, or the timeout.
@@ -1682,27 +1628,7 @@ impl QemuInstance {
         self.sockets.qmp.as_deref().expect("qmp_socket needs BootOptions { qmp: true }")
     }
 
-    /// The disk this guest booted from, which it writes: read back while the
-    /// guest runs, since the instance's end deletes it.
-    pub fn boot_image(&self) -> &Path {
-        &self.boot_image
-    }
-
     pub fn run_test(&mut self, name: &str, timeout: Duration) -> TestResult {
-        self.run_test_paced(name, timeout, |_, _| {})
-    }
-
-    /// `run_test`, with `step` run on every console line the guest prints.
-    ///
-    /// A step driven by the guest's own output can stay behind it, which is
-    /// how an injection test costs a slow guest wall-clock instead of a
-    /// verdict.
-    pub fn run_test_paced(
-        &mut self,
-        name: &str,
-        timeout: Duration,
-        mut step: impl FnMut(Option<&Path>, &str),
-    ) -> TestResult {
         writeln!(self.stdin, "run {name}").expect("Failed to write to QEMU stdin");
         self.stdin.flush().expect("Failed to flush QEMU stdin");
 
@@ -1764,7 +1690,6 @@ impl QemuInstance {
                 Ok(line) => {
                     last_line = Instant::now();
                     lines += 1;
-                    step(self.sockets.qmp.as_deref(), &line);
                     if dying.is_none()
                         && super::serial::died(&line) == Some(super::serial::Died::Kernel)
                     {
@@ -2133,38 +2058,7 @@ impl QmpInput {
         self.send(&body);
     }
 
-    /// The pointer to pixel `at` of a `screen`-sized panel, by an absolute
-    /// tablet position, which the compositor maps back to the pixel
-    /// (`toyos_desktop::cursor_from_abs`): the least position at or past it.
-    pub fn point(&mut self, at: (i32, i32), screen: (usize, usize)) {
-        let abs = |pixel: i32, size: usize| {
-            let size = size as i64;
-            ((i64::from(pixel) * ABS_RANGE + size - 1) / size).min(ABS_RANGE - 1)
-        };
-        let (x, y) = (abs(at.0, screen.0), abs(at.1, screen.1));
-        self.send(&[
-            format!("{{\"type\":\"abs\",\"data\":{{\"axis\":\"x\",\"value\":{x}}}}}"),
-            format!("{{\"type\":\"abs\",\"data\":{{\"axis\":\"y\",\"value\":{y}}}}}"),
-        ]);
-    }
-
-    /// The left button pressed at `at`, then released, each its own report.
-    pub fn click(&mut self, at: (i32, i32), screen: (usize, usize)) {
-        self.point(at, screen);
-        for down in [true, false] {
-            self.send(&[format!("{{\"type\":\"btn\",\"data\":{{\"down\":{down},\"button\":\"left\"}}}}")]);
-        }
-    }
-
-    /// [`QemuInstance::screendump`] on this connection, into `out`, for a
-    /// step that holds no instance.
-    pub fn screendump(&mut self, out: &Path) -> super::screen::Ppm {
-        dump(&mut self.0, out)
-    }
 }
-
-/// The span of QEMU's absolute axes, which the USB tablet reports unscaled.
-const ABS_RANGE: i64 = 32768;
 
 /// The argv `options` would launch QEMU with, built against placeholder
 /// paths. A profile's claim about which devices exist is a claim about this
@@ -2396,9 +2290,6 @@ fn qemu_command(
                 "virtio-net-pci-non-transitional,netdev=net0{platform}"
             ));
         }
-        Nic::E1000e => {
-            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg("e1000e,netdev=net0");
-        }
     }
     if shape.virtio.present() {
         if shape.virtio.sound() {
@@ -2596,8 +2487,6 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         boot_log,
         smp: options.smp,
         carried,
-        options,
-        uart_log,
     }
 }
 
@@ -2677,7 +2566,7 @@ fn wait_for_ready(
             // The words are the same words — `panicked at` — and who wrote the
             // line is the whole of what tells them apart. `super::serial::died`
             // is where that is decided, for this wait and for [`await_guest`]
-            // and [`QemuInstance::run_test_paced`] alike, so the three cannot
+            // and [`QemuInstance::run_test`] alike, so the three cannot
             // drift into disagreeing about a spelling.
             Ok(ref line)
                 if panic_aborts

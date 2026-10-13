@@ -163,6 +163,26 @@ embedded-controller query the tables define, a T14 row reads the battery's
 state as the interpreter evaluated it beside Linux's reading of the same
 machine, and the press issue is closed by its own exit.
 
+**Three T14 rows drive the server on a boot, which the testing ruling
+refuses** (owner, #890: integration between modules is tested only for the
+kernel): `acpi_server_events` reads each embedded-controller query number
+once with its count, `acpi_tables_loaded` the 14 definition blocks loaded
+and `\_S5`'s `SLP_TYPa` of 7, and `battery_read` the battery and adapter as
+the interpreter evaluated them over the controller. `acpi_server_events`
+and `battery_read` stay until host tests hold what each reads, because
+nothing else reads the T14's firmware.
+The oracle is the firmware's own table bytes, not another OS's reading of
+them (the orchestrator, ruling on #893); what the tree keeps of them is
+extracts only, as "Extracts only" says. A definition block's load takes
+the whole block, which no extract is, so each block's load and `\_S5`
+stay held by the T14's metal row that loads its own tables whole,
+`acpi_tables_loaded`. Owner: this stage.
+**Exit**: extracts of the T14's tables, masked, are committed with their
+provenance; host tests evaluate each query method the controller raises,
+and the battery's and adapter's methods, over a scripted host and
+controller; and `acpi_server_events` and `battery_read` leave
+`tests/toyos.rs` in that diff.
+
 What that check found, which whoever builds on the interpreter would
 otherwise pay to find again:
 

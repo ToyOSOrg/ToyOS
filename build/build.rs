@@ -973,8 +973,6 @@ pub struct Plan {
     pub params: Vec<String>,
     /// The version the image's signed header names.
     pub version: u64,
-    /// Room for a second slot, or none: a machine that cannot update itself.
-    pub second: Option<image::SecondSlot>,
 }
 
 impl Plan {
@@ -985,7 +983,6 @@ impl Plan {
             features: features.iter().map(|f| (*f).to_string()).collect(),
             params: params.iter().map(|p| (*p).to_string()).collect(),
             version: image::version_now(),
-            second: None,
         }
     }
 }
@@ -1014,7 +1011,6 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
         features: features.split(',').filter(|f| !f.is_empty()).map(Into::into).collect(),
         params: param,
         version: image::version_now(),
-        second: None,
     }
 }
 
@@ -1950,7 +1946,7 @@ pub fn build_test_image(
         &parts.root,
         &plan.params.join(","),
         image::Signing { key: crate::signing::key(), version: plan.version },
-        plan.second,
+        None,
     )
 }
 
@@ -3016,18 +3012,14 @@ mod tests {
         "images/diag.toml",
         "images/console.toml",
         "tests/images/acpicase.toml",
-        "tests/images/blockgrantcase.toml",
-        "tests/images/consentcase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
-        "tests/images/logstallcase.toml",
         "tests/images/metalcase.toml",
         "tests/images/metaldevicecase.toml",
         "tests/images/netcase.toml",
         "tests/images/panelcase.toml",
         "tests/images/proctreecase.toml",
-        "tests/images/slotscase.toml",
         "tests/images/testcases.toml",
         "tests/images/virtjobcase.toml",
         "tests/images/virtpaniccase.toml",

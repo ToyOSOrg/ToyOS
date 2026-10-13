@@ -9,6 +9,9 @@ use crate::sys::fs::File;
 use crate::sys::pipe::Pipe;
 use crate::{fmt, io};
 
+#[path = "launch_route.rs"]
+mod launch_route;
+
 ////////////////////////////////////////////////////////////////////////////////
 // Command
 ////////////////////////////////////////////////////////////////////////////////
@@ -131,7 +134,7 @@ impl Command {
     pub fn prepare(&mut self) -> io::Result<()> {
         let program = self.resolve_program()?;
         let cwd = self.child_cwd()?;
-        let source = self.image_path.clone().unwrap_or_else(|| program.clone());
+        let source = launch_route::image_and_name(program.as_os_str(), self.image_path.as_deref()).0.to_owned();
         let kept = self.image.as_ref().is_some_and(|(read, _)| *read == source);
         if !kept {
             self.image = None;
@@ -281,24 +284,15 @@ impl Command {
         default: Stdio,
         _needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
-        // The supervisor is reached only by a launch, which carries no endowment and no
-        // slot beyond stdio.
-        if matches!(self.parent, Parent::Supervisor)
-            && (!self.endowments.is_empty() || !self.extra_slots.is_empty())
-        {
-            return Err(io::const_error!(
-                io::ErrorKind::PermissionDenied,
-                "the supervisor starts only a launch, which carries no endowment and no extra slot",
-            ));
-        }
-        // A launch runs the program its row names, never one the caller chose.
-        if self.image_path.is_some()
-            && (matches!(self.parent, Parent::Supervisor) || !self.provided.is_empty())
-        {
-            return Err(io::const_error!(
-                io::ErrorKind::PermissionDenied,
-                "a launch runs its row's own program, so it takes no image the caller names",
-            ));
+        let route = launch_route::route(launch_route::Asked {
+            supervisor: matches!(self.parent, Parent::Supervisor),
+            endowed: !self.endowments.is_empty(),
+            extra_slots: !self.extra_slots.is_empty(),
+            image_named: self.image_path.is_some(),
+            provided: !self.provided.is_empty(),
+        });
+        if let launch_route::Route::Refused(why) = route {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
         }
         let prepared = self.prepared.take();
         let image = self.image.take().map(|(_, image)| image);
@@ -306,8 +300,9 @@ impl Command {
             Some(Prepared { program, cwd }) => (program, cwd, image),
             None => (self.resolve_program()?, self.child_cwd()?, None),
         };
+        let (source, name) = launch_route::image_and_name(resolved.as_os_str(), self.image_path.as_deref());
         let mut argv_buf = Vec::new();
-        argv_buf.extend_from_slice(resolved.as_encoded_bytes());
+        argv_buf.extend_from_slice(name.as_encoded_bytes());
         for arg in &self.args[1..] {
             argv_buf.push(0);
             argv_buf.extend_from_slice(arg.as_encoded_bytes());
@@ -337,20 +332,11 @@ impl Command {
         let capture = self.env.capture();
         let env_buf = env_blob(&capture);
 
-        // **The routing rule.**
-        // A caller that endowed a handle, named an extra slot or named the image
-        // has decided what its child holds or runs, and the launcher would
-        // overwrite that decision with a manifest row — so those spawn directly.
-        // Everything else asks the launcher when it holds one, and falls back for
-        // a program the image does not declare. A caller with no `launcher` connector gets plain
-        // inheritance, which is what a program endowed nothing should get —
-        // of everything but `HOME` (`direct_env`). A child asked of the supervisor is a
-        // launch or nothing.
-        let decided = !self.endowments.is_empty()
-            || !self.extra_slots.is_empty()
-            || self.image_path.is_some();
+        // A caller with no `launcher` connector gets plain inheritance, which is
+        // what a program endowed nothing should get — of everything but `HOME`
+        // (`direct_env`).
         let mut home_from_supervisor = None;
-        if !decided {
+        if route == launch_route::Route::Launch {
             match self.launch(&resolved, &argv_buf, &env_buf, &cwd, &slot_map)? {
                 Routed::Started(process) => {
                     drop(child_pipes);
@@ -393,7 +379,6 @@ impl Command {
         // A program on a file server is read here, into a memory object of
         // this process's own that the kernel pages the child from: the kernel
         // opens only what it serves itself.
-        let source = self.image_path.as_deref().unwrap_or(&resolved);
         let image = match prepared_image {
             Some(image) => Some(image),
             None if crate::sys::fs::is_served(Path::new(source)) => {
@@ -508,16 +493,11 @@ impl Command {
 
         let for_supervisor = matches!(self.parent, Parent::Supervisor);
         // Where a launch that is not made goes: the direct spawn, which places
-        // the child where this one would have, or nowhere for the supervisor.
-        let direct = |home: Option<OsString>| {
-            if for_supervisor {
-                Err(io::const_error!(
-                    io::ErrorKind::PermissionDenied,
-                    "the supervisor did not launch it"
-                ))
-            } else {
-                Ok(Routed::Direct { home })
-            }
+        // the child where this one would have, or a refusal.
+        let unmade = |why, home: Option<OsString>| match launch_route::unmade(why, for_supervisor) {
+            launch_route::Unlaunched::Direct => Ok(Routed::Direct { home }),
+            launch_route::Unlaunched::Refused(why) => Err(io::Error::new(io::ErrorKind::PermissionDenied, why)),
+            launch_route::Unlaunched::Failed(e) => Err(crate::sys::to_io_error(e)),
         };
 
         // A `provide` is a statement that the child's authority comes from its
@@ -527,11 +507,7 @@ impl Command {
         let Some(conn) =
             toyos::endow::launcher().and_then(|held| held.open(toyos::launch::LAUNCHER).ok())
         else {
-            return if self.provided.is_empty() {
-                direct(None)
-            } else {
-                Err(io::Error::from(io::ErrorKind::PermissionDenied))
-            };
+            return unmade(launch_route::Unmade::NoLauncher { provided: !self.provided.is_empty() }, None);
         };
 
         // The whole path, not a key: `/bin/ls` is a symlink to `/bin/toybox`
@@ -556,9 +532,10 @@ impl Command {
         };
         let parent = match place {
             None => launch::Parent::Supervisor,
-            Some(place) => launch::Parent::Place(
-                toyos_abi::syscall::dup(place).map_err(crate::sys::to_io_error)?,
-            ),
+            Some(place) => match toyos_abi::syscall::dup(place) {
+                Ok(copy) => launch::Parent::Place(copy),
+                Err(e) => return unmade(launch_route::Unmade::PlaceNotCopied(e), None),
+            },
         };
         let release = |slots: &[(u32, toyos_abi::RawHandle)]| {
             for (_, h) in slots {
@@ -610,14 +587,14 @@ impl Command {
             // is where that is written down.
             // It carries the `HOME` the supervisor decided for the program, which the
             // direct spawn hands on in place of this process's own.
-            Ok(Outcome::NotDeclared { home }) => direct(Some(home.into())),
+            Ok(Outcome::NotDeclared { home }) => unmade(launch_route::Unmade::NotDeclared, Some(home.into())),
             Ok(Outcome::Refused) | Err(LaunchError::Sent(_)) => {
                 Err(io::Error::from(io::ErrorKind::Other))
             }
             Ok(Outcome::Gone) => Err(crate::sys::to_io_error(toyos_abi::syscall::SyscallError::Gone)),
             Err(LaunchError::NotSent(_)) => {
                 release(&slots);
-                direct(None)
+                unmade(launch_route::Unmade::NotSent, None)
             }
         }
     }

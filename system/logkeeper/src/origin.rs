@@ -19,8 +19,8 @@
 //! at most [`ROUND_RECORDS`] records a round from each program so none can hold
 //! the loop.
 
-use toyos::log::region::{Body, Ring, LANES, RING_BYTES, SHARED_SLOTS};
-use toyos::log::ring::{Reader, Slots};
+use toyos::log::region::{Body, Ring, LANES, RING_BYTES};
+use toyos::log::ring::Reader;
 use toyos::log::Severity;
 use toyos::shm::SharedMemory;
 use toyos::Pipe;
@@ -249,13 +249,6 @@ impl Origin {
     /// Every line held for its end, said as far as it got.
     pub fn say_held(&mut self, out: &mut Vec<Said>) {
         self.joins.say_held(out);
-    }
-
-    /// Records its shared ring holds unread, as its writers' `head` says, of
-    /// the ring's slots: a report, bounded, never a position.
-    pub fn waiting(&self) -> (u64, u64) {
-        let head = self.ring.head().load(core::sync::atomic::Ordering::Relaxed);
-        (head.saturating_sub(self.shared.position()).min(SHARED_SLOTS), SHARED_SLOTS)
     }
 }
 

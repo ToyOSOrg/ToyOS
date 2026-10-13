@@ -38,10 +38,36 @@ dispatch on the kernel clock; quantiles are bucket upper bounds, accurate to
 With 7 spinners every wake to a busy target waited out a whole quantum on
 both machines, while the slowest wake to a sleeping one took 2.16 µs (T14)
 and 3.17 µs (AMD bench), and the pair fell from about 181,600 (T14) and
-205,200 (AMD bench) rounds a second with no spinners to 100. The kill condition fixed before the run, the change
-dropped if the busy-target p99 is under about 100 µs with 7 and with 8
-spinners on both benches, did not fire: it reads 68 to 105 times that.
+205,200 (AMD bench) rounds a second with no spinners to 100.
+
+With 7 spinners this is the Overload-on-Wakeup bug of Lozi et al., "The Linux
+Scheduler: a Decade of Wasted Cores" (EuroSys 2016, §3.3): a thread that was
+asleep wakes on an overloaded core while other cores are idle. Its fix wakes
+the thread on the core it last ran on if that core is idle, and otherwise on
+the core idle longest, where one is; the paper applies it only where the power
+policy keeps cores out of low-power states, since waking a core from one costs
+power. The 7-spinner arm does not take that condition: a wake goes to an idle
+core in whatever state it waits, so once
+`issues/idle-cpus-enter-the-c-states-cst-names.md` lets cores sleep deeper,
+the 100 µs row's p99 also holds the woken core's exit from its state, and the
+row names the states its idle CPUs entered. With 8 spinners no core idles, and
+a wake onto a CPU running a task is the fair band's pick to decide, which is
+the vruntime/lag family (`kernel/pure/sched/fair.rs:1-3`) of EEVDF. There the
+resource is "allocated in time quanta of size at most q. At the beginning of
+each time quantum a client is selected", and "A new quantum is allocated to
+the client which has the eligible request with the earliest virtual deadline"
+(Stoica et al., "A Proportional Share Resource Allocation Algorithm for
+Real-Time, Time-Shared Systems", RTSS 1996, the algorithm of Stoica and
+Abdel-Wahab's TR-95-22), so a task woken inside a quantum is picked no sooner
+than the next one's start. That arm follows it with a wake's q the protected
+slice, 1 ms (`PROTECTED_RUN_NS`, https://github.com/ToyOSOrg/ToyOS/pull/874,
+not on `main`, so that arm is blocked on #874), so its test is that a woken
+task runs within one protected slice, and its p99 against 100 µs is reported.
+With 7 spinners the 100 µs bound is the exit's test that the stage works, not
+the judge of its design.
 
 **Exit**: a metal row on the T14 and the AMD bench that wakes a task onto a
-CPU running a CPU-bound thread, with 7 and with 8 such threads on 8 CPUs, and
-holds its post-to-dispatch p99 under 100 µs.
+CPU running a CPU-bound thread, with 7 and with 8 such threads on 8 CPUs:
+with 7 it holds the post-to-dispatch p99 under 100 µs, and with 8 it holds
+that a woken task runs within one protected slice and reports its p99, once
+#874 has landed `PROTECTED_RUN_NS`.

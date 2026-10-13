@@ -1,5 +1,4 @@
-//! `/` is a synthesized read-only directory, and `/apps` and `/home` are two
-//! paths into one filesystem.
+//! `/` is a synthesized read-only directory.
 //!
 //! The listing of `/` is a closed set, so a stray top-level name cannot appear
 //! because some volume happens to carry a directory by that name; `/` is no
@@ -7,7 +6,6 @@
 //! refused the way a read-only mount refuses one, and the machine survives it.
 
 use std::fs;
-use std::io::Write;
 
 use toyos_abi::syscall::{self, OpenFlags, SyscallError};
 
@@ -15,14 +13,6 @@ use toyos_abi::syscall::{self, OpenFlags, SyscallError};
 /// hierarchy, so a boot that grew another entry reds here.
 const ROOT_ENTRIES: [&str; 9] =
     ["apps", "boot", "config", "home", "log", "media", "state", "system", "tmp"];
-
-const IN_HOME: &str = "/home/hierarchy-home.bin";
-const IN_APPS: &str = "/apps/hierarchy-apps.bin";
-const LEN: usize = 2 * 4096 + 61;
-
-fn payload(seed: u8) -> Vec<u8> {
-    (0..LEN).map(|i| (i.wrapping_mul(53) ^ seed as usize) as u8).collect()
-}
 
 fn names(dir: &str) -> Vec<String> {
     let mut out: Vec<String> = fs::read_dir(dir)
@@ -40,7 +30,6 @@ fn main() {
 
     root_refuses_every_way_of_changing_it();
     media_is_an_empty_directory();
-    apps_and_home_take_writes();
 
     println!("all hierarchy tests passed");
 }
@@ -96,22 +85,4 @@ fn media_is_an_empty_directory() {
     assert!(listed.is_empty(), "/media holds {listed:?}");
     assert!(fs::read("/media/anything").is_err(), "/media served a file");
     println!("  PASS /media is an empty directory");
-}
-
-/// One file under each name DATA answers to, fsynced, so the host's reader finds
-/// them on the device rather than in a cache.
-fn apps_and_home_take_writes() {
-    for (path, seed) in [(IN_HOME, 0xA5u8), (IN_APPS, 0x5A)] {
-        let data = payload(seed);
-        let mut f = fs::File::create(path).unwrap_or_else(|e| panic!("create {path}: {e}"));
-        f.write_all(&data).unwrap_or_else(|e| panic!("write {path}: {e}"));
-        f.sync_all().unwrap_or_else(|e| panic!("fsync {path}: {e}"));
-        drop(f);
-        let back = fs::read(path).unwrap_or_else(|e| panic!("read back {path}: {e}"));
-        assert_eq!(back, data, "{path} did not read back as it was written");
-    }
-    // Two paths, not two names for one file: a symlink between them would break this.
-    assert!(fs::read("/apps/hierarchy-home.bin").is_err(), "/apps answered for a /home file");
-    assert!(fs::read("/home/hierarchy-apps.bin").is_err(), "/home answered for an /apps file");
-    println!("  PASS {LEN} bytes under each of /home and /apps, and neither is the other");
 }

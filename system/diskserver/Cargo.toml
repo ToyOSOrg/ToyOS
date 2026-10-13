@@ -21,6 +21,8 @@ toyos = { path = "../../sdk/toyos" }
 toyos-blockring = { path = "../../lib/blockring" }
 toyos-blockhold = { path = "../../lib/blockhold" }
 toyos-gpt = { path = "../../lib/gpt" }
+# The trait every partition is read and written through.
+toyos-disk = { path = "../../lib/disk" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the NVMe controller ToyOS claims for it"

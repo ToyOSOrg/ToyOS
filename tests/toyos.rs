@@ -2,8 +2,6 @@
 extern crate toyos_build;
 
 mod common;
-#[path = "guest/rust-tests/src/stream_ends.rs"]
-mod stream_ends;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -141,43 +139,15 @@ const RUST_SKIP: &[&str] = &[
     // Needs a launcher whose row lists `/apps`, which `tests/images/testcases.toml` does
     // not give: the `app_view` metal row runs it on tests/images/proctreecase.toml.
     "app_view",
-    // Needs a desktop driven by a person's keys and pointer: `consent_prompt`
-    // runs it on tests/images/consentcase.toml.
-    "consent",
-    // Needs a launcher whose row lists a shell, and a shell whose row opens a
-    // login session and lists a shell, so that a login session and its
-    // launches ask DATA's server while this job's share holds all it may: the
-    // `fs_share` metal row runs it on tests/images/proctreecase.toml.
-    "fs_share",
-    // It needs a NIC in front of netstack, a host server behind it and a host
-    // that dials its listener: `netstack_streams` runs it on `tests/images/netcase.toml`.
-    "netstack_streams",
-    // It needs a host that dials its listeners when it says they wait:
-    // `libc_sockets` runs it on `tests/images/netcase.toml`.
-    "nodelay_accepted",
-    // It needs a NIC in front of netstack and HTTPS servers behind it:
-    // `https_fetch` runs it on `tests/images/netcase.toml`.
-    "https_get",
-    // `https_fetch` runs it on the boot its fetches run on, so that test
-    // carries its own oracle; a shared run would be the same QEMU CPU twice.
-    "ring_kat",
-    // It needs a host peer that ends each stream as the stream asks:
-    // `libc_sockets` runs it on `tests/images/netcase.toml`.
-    "stream_ends_std",
     // Fills /tmp to the VFS listing limit, so it needs a boot nothing else
     // shares — every later `read_dir("/tmp")` in it would be refused.
     // `readdir_bound` gives it one.
     "readdir_bound",
     // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
     "mkdir_cap",
-    // Audio is judged on the T14 and nowhere else: the `hda_client_stall`,
-    // `hda_tone`, `audio_idle_suspend`, `shipped_client_departures` and
-    // `soundserver_log_stall` metal rows run these.
-    "hda_client_stall",
+    // Audio is judged on the T14 and nowhere else: the `hda_tone` metal row
+    // runs it.
     "audio_tone",
-    "audio_idle_suspend",
-    "null_sink_client_exits",
-    "soundserver_log_stall",
     // It hands the ACPI claim to a server of its own and kills it, which needs
     // a boot that starts none: the `acpi_server_death` metal row runs it on
     // tests/images/acpicase.toml.
@@ -193,28 +163,20 @@ const RUST_SKIP: &[&str] = &[
     // It claims the fixed hardware itself, which needs a boot that starts no
     // server, and stages the firmware's side of the Global Lock and finds the
     // i8042's row another claim's, which need the test kernel and its
-    // `i8042-withheld`: `acpi_mediated_access` runs it on
-    // tests/images/acpicase.toml.
+    // `i8042-withheld`: `acpi_mediated_access` and `acpi_press_is_one_sci`
+    // run it on tests/images/acpicase.toml.
     "acpi_mediated",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
     "stop_short",
     // It claims QEMU's virtio NIC, which the T14 has none of: `bar_map_again`
     // runs it.
     "bar_map_again",
-    // It lends fileserver the virtio NIC's BAR, which the T14 has none of:
-    // `lent_device_memory_refused` runs it.
+    // It claims the virtio NIC and asks how its BAR is lent, and the T14 has
+    // no virtio NIC: `lent_device_memory_refused` runs it.
     "lent_device_memory_refused",
     // It needs ToyOS's own clang and LLD on ROOT, which only its boot stages:
     // `hosted_clang_hello` runs it on tests/images/hostedclangcase.toml.
     "hosted_clang_hello",
-    // It claims the NVMe controller a boot off that disk starts no server
-    // for, and reads the inventory: `block_grants_reach_their_partitions`
-    // runs it on tests/images/blockgrantcase.toml.
-    "partition_grant",
-    // It installs the image its machine test staged into a second slot on
-    // the disk diskserver drives: `update_writes_the_idle_slot_through_the_block_service`
-    // runs it on tests/images/slotscase.toml.
-    "update_idle_slot",
     // It claims the xHCI controller `xhci-leave=` leaves alone, which no other
     // boot's kernel does: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.
@@ -326,13 +288,6 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_random_differs", qemu::Profile::Virt),
     ("virt_smmu", qemu::Profile::VirtSmmu),
     ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
-    // A package's launch from the desktop asks the person at the screen, in
-    // the prompt layer, over a hostile fullscreen window: the supervisor
-    // parking a launch, filepicker drawing through `prompt` and the compositor
-    // giving it every key, run together. Driven through the desktop's own
-    // keyboard and tablet and read off the panel, neither of which the T14's
-    // loop can do; each rule alone is a host test.
-    ("consent_prompt", qemu::Profile::Desktop),
     ("virt_wall_clock_utc", qemu::Profile::Virt),
     ("virt_low_ecam", qemu::Profile::VirtLowEcam),
 ];
@@ -349,35 +304,14 @@ const MACHINE_TESTS: &[&str] = &[
     // in reach, and the register sequence and the DMA it frees are no host
     // test's.
     "amdvi_firmware_left",
-    // The stack against a TCP its writers did not write, the host kernel's
-    // behind QEMU's user network, through the kernel's own pipes and each of
-    // netstack's two drivers: netstack has no host build, the stack's host
-    // tests answer it from the tests' own script, and the T14's bench may
-    // open no peer that echoes megabytes or dials in.
-    "netstack_streams",
-    "netstack_streams_e1000e",
-    // What libc's and std's socket calls ask of netstack, read back from a
-    // peer that answers, and each way a stream ends as libc and std read it:
-    // the calls are requests on netstack's port, an end is what netstack, the
-    // kernel's pipes and the library read together, netstack has no host
-    // build, and the T14's bench has no peer that answers or resets on cue.
-    "libc_sockets",
-    // An HTTPS client's fetch from a peer on the host, and its refusals:
-    // `ring`'s ToyOS build, the random source and wall clock it trusts a
-    // certificate by and the sockets under it exist in a ToyOS guest alone,
-    // and the T14's row is the next stage's, against a server on the bench.
-    "https_fetch",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
-    // The power-off itself: the metal loop reaches the T14 over `ssh` and has
-    // no way to turn it back on, so only a machine QEMU reports stopping can
-    // be asked. `acpi_tables_loaded` reads the sleep type the T14's server
-    // handed its kernel.
-    "machine_shutdown",
-    // The press itself: QEMU raises the fixed power-button event on demand,
-    // and nothing presses the T14's button but a hand.
-    "acpi_power_button",
+    // A press of the fixed power button reaches the `acpi` claim's holder as
+    // one SCI, its line masked until the holder serves it: the kernel's SCI
+    // and its mask have no host build, QEMU raises the event on demand, and
+    // nothing presses the T14's button but a hand.
+    "acpi_press_is_one_sci",
     // What the kernel reads and writes for the `acpi` claim's holder and what
     // it refuses. A red here is a write the kernel made — to RAM, to the
     // firmware's tables, to COM1, to `PM1a_CNT`, to a function's configuration
@@ -413,9 +347,9 @@ const MACHINE_TESTS: &[&str] = &[
     // function is its I219, and a kernel that dies on this takes the bench's
     // machine down with it.
     "bar_map_again",
-    // A region that is not memory the kernel allocated, lent to a file server:
-    // the BAR of a function no program of the boot holds, which on the T14 is
-    // its I219, as `bar_map_again` says.
+    // A region that is not memory the kernel allocated, lent as a window: the
+    // kernel describes the BAR of a function no program of the boot holds,
+    // which on the T14 is its I219, as `bar_map_again` says.
     "lent_device_memory_refused",
     // `images/console.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
@@ -425,48 +359,26 @@ const MACHINE_TESTS: &[&str] = &[
     // which no host build has and the T14, whose CPUs offer x2APIC, never
     // reaches; the AMD laptop that needs it is not on the bench.
     "desktop_without_x2apic",
-    // A machine whose one NVMe disk is all it has: its firmware boots the
-    // image off it, and `/log` and `/home` are `diskserver`'s partitions of
-    // it across a reset. The claim on the controller and the firmware that
-    // reads it have no host build, and the T14 boots from a stick beside an
-    // NVMe disk that is another system's.
-    "nvme_disk_keeps_log_and_home",
+    // A machine whose one NVMe disk is all it has boots the image off it: the
+    // firmware that reads it and the loader and kernel it hands the image to
+    // have no host build, and the T14 boots from a stick beside an NVMe disk
+    // that is another system's.
+    "nvme_disk_boots",
     // clang and LLD built for ToyOS, compiling and linking inside it: the
     // claim is that they run on ToyOS, which no host test can make, and the
     // T14 would read nothing a guest does not. On demand: [`ON_DEMAND`].
     "hosted_clang_hello",
-    // A badge the kernel stamps on a connection to diskserver, judged by
-    // diskserver on the disk it drives: the grant's decisions are host-tested
-    // in diskserver and toyos-blockring, but whether the badge diskserver
-    // reads is the one a connector was minted with, and whether a refused
-    // open stays refused against a partition nothing else holds, is the
-    // kernel's port and a claimed controller, which have no host build; and
-    // the T14 boots from a stick, so no disk diskserver drives holds a
-    // partition the loader named.
-    "block_grants_reach_their_partitions",
-    // The supervisor reading the slot table through a block session and
-    // minting `update` the idle slot's partitions, which `update` writes and
-    // marks through diskserver: the supervisor, the launcher and diskserver
-    // have no host build, and the T14's slots are on its stick, which only
-    // the kernel drives until usbd.
-    "update_writes_the_idle_slot_through_the_block_service",
-    // usbd on a controller the kernel leaves alone, with two devices on it,
-    // and a transfer aimed past its claim's grants: usbd is one binary that
-    // owns its controller, with no host build; `toyos-xhci`'s host tests and
-    // simulator hold every decision it takes, and none of them holds the
-    // effects — the rings, the interrupt through the claim, the unit. The
-    // T14's spare controller has no device on it and its unit is not
-    // asked to fault.
+    // A controller the kernel leaves alone, handed over to a claim whose
+    // holder's No-Op is answered by an interrupt through it, and a transfer
+    // aimed past the claim's grants: the hand-over, the interrupt through the
+    // claim and the unit have no host build, and the T14's unit is not asked
+    // to fault. What usbd names on the bus is `toyos-xhci`'s and its
+    // simulator's to hold.
     "usbd_drives_the_spare",
     // A boot keyboard reporting more keys than its six slots name: the
     // kernel's driver reading a report a device delivered over xHCI has no host
     // build, and the T14 binds no USB keyboard.
     "usb_keyboard_rollover",
-    // What `toyfetch` reads through the `sysinfo` fork's ToyOS backend: the
-    // backend calls `SYS_SYSINFO` and reads ROOT, which no host has, and the
-    // CPU count is held to the `-smp` this boot gave QEMU, a count the
-    // kernel did not make.
-    "toyfetch_reports",
     // Every vector register a thread holds, across switches to threads holding
     // others, against a scheduler, which no host build has. The shared boot's
     // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
@@ -543,56 +455,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // The shipped tone client, twice in series, plays to completion and
-        // exits 0, and soundserver names how each left.
-        "shipped_client_departures",
-        metal::Metal {
-            arms: TESTCASES,
-            judge: |b| {
-                b[0].job_passed("test_rs_null_sink_client_exits")?;
-                audio::departures_on_metal(&b[0].log())
-            },
-        },
-    ),
-    (
-        // soundserver with no client costs no CPU, before any client has connected.
-        "audio_idle_suspend",
-        metal::Metal {
-            arms: TESTCASES,
-            judge: |b| {
-                b[0].job_passed("test_rs_audio_idle_suspend")?;
-                audio::idle_suspend_on_metal(&b[0].log())
-            },
-        },
-    ),
-    (
         "hda_tone",
         metal::Metal {
             arms: TESTCASES,
             judge: |b| {
                 b[0].job_passed("test_rs_audio_tone")?;
                 audio::tone_on_metal(&b[0].log())
-            },
-        },
-    ),
-    (
-        "hda_client_stall",
-        metal::Metal {
-            arms: TESTCASES,
-            judge: |b| {
-                b[0].job_passed("test_rs_hda_client_stall")?;
-                audio::client_stall_on_metal(&b[0].log())
-            },
-        },
-    ),
-    // ---- the audio boot of its own ----
-    (
-        "soundserver_log_stall",
-        metal::Metal {
-            arms: LOGSTALLCASE,
-            judge: |b| {
-                b[0].job_passed("test_rs_soundserver_log_stall")?;
-                audio::log_stall_on_metal(&b[0].log())
             },
         },
     ),
@@ -928,12 +796,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_port_badge") },
     ),
     (
-        // One share holding all a file server lets it hold leaves the server
-        // answering a login session, whose launches all spend its one share.
-        "fs_share",
-        metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_fs_share") },
-    ),
-    (
         // An installed package sees its own directory read-only and its own
         // folder as `HOME`, and nothing else of `/apps` or `/home`.
         "app_view",
@@ -1075,8 +937,8 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // The Type-C controller left to a claim, and usbd driving it: handed
         // over, MSI armed through remapping, and the No-Op answered by an
-        // interrupt; usbd is killed and started again, so the release says
-        // which reset the function advertises.
+        // interrupt; usbd is killed, so the release says which reset the
+        // function advertises.
         "usbd_drives_the_type_c_controller",
         metal::Metal {
             arms: &[metal::once("testcases-xhci-leave", "tests/images/testcases.toml", &["xhci-leave=8086:9a13"], &["test_rs_usbd_spare"])],
@@ -1142,13 +1004,9 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
     &[
         "test_rs_wake_storm_cost",
         "test_rs_wake_onto_busy",
-        // Before any client connects, which is `audio_idle_suspend`'s premise.
-        "test_rs_audio_idle_suspend",
         "test_rs_audio_tone",
-        "test_rs_hda_client_stall",
         "test_rs_syscall_cost",
         "test_rs_spawn_cost",
-        "test_rs_null_sink_client_exits",
         claims::RECLAIM,
     ],
 )];
@@ -1194,10 +1052,6 @@ fn windows_load_exited() -> String {
     format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(WINDOWS_LOAD))
 }
 
-/// A `logkeeper` that leaves soundserver's ring unread until the job says the tone played.
-const LOGSTALLCASE: &[metal::Arm] =
-    &[metal::once("logstallcase", "tests/images/logstallcase.toml", &[], &["test_rs_soundserver_log_stall"])];
-
 /// The two boots the reset ruling is judged on: the device boot for a reset
 /// with megabytes behind it, and `metalcase` for one with no job behind it.
 const USB_RESET_BOOTS: &[metal::Arm] = &[
@@ -1213,20 +1067,13 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/images/metalcase.toml", &[], &[])];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
-/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
-/// shells `fs_share` asks DATA's server through, under its share and in a
-/// login session, and the `/apps` `app_view` launches its package from.
+/// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
+/// the `/apps` `app_view` launches its package from.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/images/proctreecase.toml",
     &[],
-    &[
-        "test_rs_process_tree",
-        "test_rs_launch_toctou",
-        "test_rs_port_badge",
-        "test_rs_fs_share",
-        "test_rs_app_view",
-    ],
+    &["test_rs_process_tree", "test_rs_launch_toctou", "test_rs_port_badge", "test_rs_app_view"],
 )];
 
 /// Every in-kernel self-test that logs its verdict at init and does nothing
@@ -2094,6 +1941,48 @@ fn acpi_supply_outlives_holder() -> Result<(), String> {
         return Err(format!("QEMU stopped this guest for {stopped:?}, not for the power-off on the sleep type a dead holder supplied:\n{}", said.text()));
     }
     eprintln!("  [acpi] QEMU stopped the guest for guest-shutdown, with no claim held, on the sleep type a holder that is gone supplied");
+    Ok(())
+}
+
+/// What `acpi_mediated`'s `press` arm says once the fixed power button alone
+/// is enabled and the SCI acknowledged, which is when the button is pressed.
+const PRESS_ARMED: &str = "acpi: the fixed power button is enabled alone and the SCI acknowledged";
+
+/// What it says once the press was served.
+const PRESS_SERVED: &str = "acpi: the press came as one SCI with its status latched, and no second while it was unserved";
+
+/// Boot `tests/images/acpicase.toml` on the shipping kernel with `acpi_mediated`'s
+/// `press` arm staged: the probe holds the `acpi` claim, and QEMU presses the
+/// power button once the probe says it is armed. The press reaches the probe
+/// as one SCI, and the kernel holds the line masked until the probe has
+/// served it; the probe's verdict is its own exit and its last line.
+fn acpi_press_is_one_sci() -> Result<(), String> {
+    const JOB: &str = "test_rs_acpi_mediated";
+    let case = compile::repo_root().join("tests/images/acpicase.toml");
+    let mut qemu = QemuInstance::boot_with_options(
+        &case,
+        &[],
+        &[],
+        BootOptions {
+            ready_marker: "acpi: the ACPI row: ",
+            extra_root_files: vec![
+                suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated"),
+                // The arm's name is the file's: `acpi_mediated` asks whether it is there.
+                ("share/acpi_mediated_press".to_string(), b"press\n".to_vec()),
+            ],
+            qmp: true,
+            ..Default::default()
+        },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, PRESS_ARMED, "the probe to arm the power button")?;
+    qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET)).power_button();
+    let ended = format!("===TEST_END {JOB} ");
+    await_guest(&mut qemu, &mut console, "the probe to serve the press", |said| said.contains(&ended))?;
+    let said = serial::Serial::named("the pressed boot", console);
+    said.must_be_clean()?;
+    said.must_say(&format!("{ended}exit=0"))?;
+    eprintln!("  [acpi] {}", said.must_say_after(PRESS_ARMED, PRESS_SERVED)?.trim());
     Ok(())
 }
 
@@ -3222,7 +3111,6 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_reboot_wire_kept" => virt_reboot(profile, power::wire_staged(true)),
         "virt_off_names_the_cpus_left_on" => virt_off_names_the_cpus_left_on(profile),
         "virt_reboot_refused_without_psci" => virt_reboot_refused_without_psci(profile),
-        "consent_prompt" => consent_prompt(profile),
         "screen_fatal_behind_a_painter" => {
             // The fatal halt with a painter holding the panel's latch and
             // never giving it back — which is what a painter is when the halt
@@ -3490,436 +3378,14 @@ fn scanout_wc(console: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// What one job of netstack's said, as its verdict: it ended by itself, with
-/// 0, and with its last line.
-fn job_ok(job: &str, result: &qemu::TestResult) -> Result<(), String> {
-    if let Some(why) = &result.error {
-        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
-    }
-    if !result.stdout.lines().any(|l| l.trim_end().ends_with(&format!("{job}: ok"))) {
-        return Err(format!("the guest never said it was done:\n{}", result.stdout));
-    }
-    Ok(())
-}
-
-/// Megabytes out to the host kernel's TCP and back unchanged, and two host
-/// peers that dial the guest's listener before it accepts either, both
-/// accepted, answered and read their stream's end: through netstack on
-/// `profile`'s card. The host server here sends back what it reads; the
-/// guest's comparisons and each peer's answer are the verdict.
-fn netstack_streams(profile: qemu::Profile) -> Result<(), String> {
-    use std::io::Read;
-    const JOB: &str = "netstack_streams";
-    /// The port the job listens on in the guest, which nothing else on its
-    /// boot binds.
-    const LISTENER: u16 = 7010;
-    const WAITS: &str = "netstack_streams: the listener waits for two peers";
-    /// A hang ceiling on a peer's answer, which the job wrote before it
-    /// ended.
-    const ANSWERED: Duration = Duration::from_secs(30);
-    let echo = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the echoing server: {e}"))?;
-    let port = echo.local_addr().map_err(|e| format!("the echoing server's port: {e}"))?.port();
-    // Ends with the process: a guest that never dials leaves it in `accept`.
-    thread::spawn(move || {
-        for stream in echo.incoming().flatten() {
-            thread::spawn(move || {
-                let mut back = stream.try_clone().expect("a second handle on an accepted stream");
-                // A guest that resets the stream ends its echo, and reads the
-                // loss itself.
-                let _ = std::io::copy(&mut &stream, &mut back);
-            });
-        }
-    });
-
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
-    let options = BootOptions { qmp: true, profile, ..Default::default() };
-    let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], options)?;
-    let [to_listener] = forwards_into(&qemu, [LISTENER])?;
-    let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
-    // The connections QEMU's user network has taken off the forwarded port
-    // and is carrying to the guest's listener: every row of its table that
-    // names the guest's port, but the forward's own.
-    let mut carried = move || {
-        let table = monitor.human("info usernet");
-        table
-            .lines()
-            .map(|row| row.split_whitespace().collect::<Vec<_>>())
-            .filter(|row| row.first().is_some_and(|kind| kind.starts_with("TCP[") && *kind != "TCP[HOST_FORWARD]"))
-            .filter(|row| [3, 5].iter().any(|&at| row.get(at) == Some(&LISTENER.to_string().as_str())))
-            .count()
-    };
-    // Each peer says its own byte as soon as it has dialled, and the next
-    // dials once QEMU carries this one: its forward queues one connection,
-    // and resets a dial that arrives while one is queued.
-    let mut dial = |said: u8| -> Result<std::net::TcpStream, String> {
-        let before = carried();
-        let mut peer = std::net::TcpStream::connect(("127.0.0.1", to_listener)).map_err(|e| e.to_string())?;
-        peer.write_all(&[said]).map_err(|e| e.to_string())?;
-        peer.set_read_timeout(Some(ANSWERED)).map_err(|e| e.to_string())?;
-        let dialled = Instant::now();
-        // QEMU says nothing when it carries a connection, so its table is
-        // asked again after a wait that doubles to 64 ms.
-        let mut pause = Duration::from_millis(1);
-        while carried() == before {
-            if dialled.elapsed() > ANSWERED {
-                return Err(format!("QEMU's user network took no connection off its forward in {ANSWERED:?}"));
-            }
-            thread::sleep(pause);
-            pause = (pause * 2).min(Duration::from_millis(64));
-        }
-        Ok(peer)
-    };
-    let mut peers = Vec::new();
-    let result =
-        qemu.run_test_paced(&format!("test_rs_{JOB} {port} {LISTENER}"), Duration::from_secs(240), |_, line| {
-            if line.trim_end().ends_with(WAITS) {
-                peers.extend(b"12".iter().map(|&said| dial(said).map(|peer| (said, peer))));
-            }
-        });
-    // A dial that failed first: it is why the job's wakes did not come.
-    let peers: Vec<_> = peers.into_iter().collect::<Result<_, _>>().map_err(|e| {
-        format!("the host could not dial the guest's listener: {e}\nthe job said:\n{}", result.stdout)
-    })?;
-    job_ok(JOB, &result)?;
-    if peers.len() != 2 {
-        return Err(format!("the job never said its listener waits:\n{}", result.stdout));
-    }
-    for (said, mut peer) in peers {
-        let mut answer = [0u8; 1];
-        peer.read_exact(&mut answer).map_err(|e| format!("the peer that said {:?} was not answered: {e}", said as char))?;
-        if answer[0] != said {
-            return Err(format!("the peer that said {:?} was answered {:?}", said as char, answer[0] as char));
-        }
-        // The guest closed the stream behind its answer.
-        match peer.read(&mut answer) {
-            Ok(0) => {}
-            ended => return Err(format!("the peer that said {:?} read {ended:?} where its stream ends", said as char)),
-        }
-    }
-    Ok(())
-}
-
-/// A host server that holds each connection it accepts and reads none of it,
-/// for as long as the process lives: its port. A guest that never dials
-/// leaves it in `accept`.
-fn holding_server() -> Result<u16, String> {
-    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the holding server: {e}"))?;
-    let port = holder.local_addr().map_err(|e| format!("the holding server's port: {e}"))?.port();
-    thread::spawn(move || holder.incoming().collect::<Vec<_>>());
-    Ok(port)
-}
-
-/// The peer `stream_ends` dials, for as long as the process lives: its port.
-/// Each connection's first byte names how it ends, and each end waits on what
-/// the client did before it.
-fn ending_server() -> Result<u16, String> {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-    /// A close that sends a reset (RFC 9293 §3.10.4's ABORT): a zero linger.
-    fn reset(stream: std::net::TcpStream) {
-        let linger = libc::linger { l_onoff: 1, l_linger: 0 };
-        // SAFETY: a live socket, and an option of the size its type says.
-        let set = unsafe {
-            libc::setsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_LINGER,
-                (&raw const linger).cast(),
-                size_of::<libc::linger>() as libc::socklen_t,
-            )
-        };
-        assert_eq!(set, 0, "a zero linger: {}", std::io::Error::last_os_error());
-    }
-    fn serve(mut stream: std::net::TcpStream) {
-        let mut what = [0u8; 1];
-        if stream.read_exact(&mut what).is_err() {
-            return;
-        }
-        match what[0] {
-            stream_ends::PEER_FIN_FIRST => {}
-            stream_ends::RESET_MID_STREAM => {
-                let ahead: Vec<u8> = (0..stream_ends::AHEAD).map(stream_ends::pattern).collect();
-                if stream.write_all(&ahead).is_ok() && stream.read_exact(&mut what).is_ok() {
-                    reset(stream);
-                }
-            }
-            stream_ends::RESET_AFTER_HALF_CLOSE => {
-                if stream.read_to_end(&mut Vec::new()).is_ok() {
-                    reset(stream);
-                }
-            }
-            stream_ends::BOTH_CLOSE => {
-                let _ = stream.write_all(b"bye");
-            }
-            stream_ends::SHUT_FIRST => {
-                let _ = stream
-                    .write_all(b".")
-                    .and_then(|()| stream.read_to_end(&mut Vec::new()))
-                    .and_then(|_| stream.write_all(b"late"));
-            }
-            _ => {}
-        }
-    }
-    let peer = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the ending peer: {e}"))?;
-    let port = peer.local_addr().map_err(|e| format!("the ending peer's port: {e}"))?.port();
-    thread::spawn(move || {
-        for stream in peer.incoming().flatten() {
-            thread::spawn(move || serve(stream));
-        }
-    });
-    Ok(port)
-}
-
-/// A host server that answers each datagram with itself, for as long as the
-/// process lives: its port.
-fn answering_server() -> Result<u16, String> {
-    let echo = std::net::UdpSocket::bind(("127.0.0.1", 0)).map_err(|e| format!("the answering server: {e}"))?;
-    let port = echo.local_addr().map_err(|e| format!("the answering server's port: {e}"))?.port();
-    thread::spawn(move || {
-        let mut datagram = [0u8; 64];
-        while let Ok((len, from)) = echo.recv_from(&mut datagram) {
-            echo.send_to(&datagram[..len], from).expect("answer a datagram");
-        }
-    });
-    Ok(port)
-}
-
-/// Boot `tests/images/netcase.toml` with these binaries staged, to netstack's lease, since
-/// its jobs name their peer by an address, and then to the claim of its name:
-/// a responder whose probing never ends leaves the machine nameless, and
-/// nothing else on a boot reads the name.
-fn boot_netcase(
-    c_bins: &[(String, Vec<u8>)],
-    rust_bins: &[(String, Vec<u8>)],
-    options: BootOptions,
-) -> Result<QemuInstance, String> {
-    const LEASED: &str = "netstack: DHCP: lease ";
-    /// `system/netstack/src/serve.rs`'s line for a probing no host answered.
-    const CLAIMED: &str = "netstack: mDNS: no host answered for ";
-    let case = compile::repo_root().join("tests/images/netcase.toml");
-    let mut qemu = QemuInstance::boot_with_options(&case, c_bins, rust_bins, options);
-    let mut console = qemu.boot_log().to_string();
-    await_marker(&mut qemu, &mut console, LEASED, "netstack's lease").map_err(|e| format!("{e}\n{console}"))?;
-    await_marker(&mut qemu, &mut console, CLAIMED, "netstack to claim its name").map_err(|e| format!("{e}\n{console}"))?;
-    Ok(qemu)
-}
-
-/// Have the guest's network carry what dials a loopback port of QEMU's
-/// choosing to each of `guest_ports`: those host ports, in that order.
-fn forwards_into<const N: usize>(qemu: &QemuInstance, guest_ports: [u16; N]) -> Result<[u16; N], String> {
-    const FORWARD: &str = "TCP[HOST_FORWARD]";
-    let mut monitor = qemu::QmpMonitor::open(qemu.qmp_socket());
-    for port in guest_ports {
-        // `net0` is the NIC's backend in `common::qemu`'s argv.
-        let said = monitor.human(&format!("hostfwd_add net0 tcp:127.0.0.1:0-:{port}"));
-        if !said.trim().is_empty() {
-            return Err(format!("QEMU forwards nothing to the guest's port {port}: {said}"));
-        }
-    }
-    // A row is the protocol, a descriptor, the host's address and port, then
-    // the guest's.
-    let table = monitor.human("info usernet");
-    let mut host_ports = [0u16; N];
-    for (host, guest) in host_ports.iter_mut().zip(guest_ports) {
-        *host = table
-            .lines()
-            .map(|row| row.split_whitespace().collect::<Vec<_>>())
-            .find(|row| row.first() == Some(&FORWARD) && row.get(5) == Some(&guest.to_string().as_str()))
-            .and_then(|row| row[3].parse().ok())
-            .ok_or_else(|| format!("QEMU names no host port forwarded to the guest's {guest}:\n{table}"))?;
-    }
-    Ok(host_ports)
-}
-
-/// libc's sockets as a C program uses them and std's as a Rust one does, on
-/// one boot of `tests/images/netcase.toml`: each job dials a host server that holds what
-/// it accepts, or sends to one that answers each datagram with itself, at the
-/// address the guest's network gives the host; and each time a job says its
-/// listeners wait, the host dials them through the ports QEMU forwards; and
-/// `stream_ends` in C and in std dial a host peer that ends each stream as
-/// its first byte names, std's report first read on this host's TCP. A job's
-/// own comparisons are its verdict.
-fn libc_sockets() -> Result<(), String> {
-    const HOST: &str = "10.0.2.2";
-    /// The ports `nodelay_kept` and then `nodelay_accepted` listen on in the
-    /// guest, which nothing else on its boot binds.
-    const LISTENERS: [u16; 4] = [7001, 7002, 7003, 7004];
-    const RUST_JOBS: [&str; 2] = ["nodelay_accepted", "stream_ends_std"];
-    let (holding, answering, ending) = (holding_server()?, answering_server()?, ending_server()?);
-    // The oracle: the report std's job owes is this host's TCP's.
-    let mut host = Vec::new();
-    stream_ends::run("127.0.0.1", ending, |line| host.push(line));
-    if host != stream_ends::EXPECTED {
-        return Err(format!("this host's TCP reports\n{}\nand not\n{}", host.join("\n"), stream_ends::EXPECTED.join("\n")));
-    }
-
-    let sources = compile::repo_root().join("tests/guest/c");
-    let c_bins: Vec<(String, Vec<u8>)> = ["addr_order", "nodelay_kept", "sendto_unbound", "stream_ends"]
-        .map(|name| (name.to_string(), compile::link_toyos(&compile::compile_own_c(&sources, name), name)))
-        .into();
-    let rust_bins: Vec<(String, Vec<u8>)> = RUST_JOBS
-        .map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), job)))
-        .into();
-    let mut qemu = boot_netcase(&c_bins, &rust_bins, BootOptions { qmp: true, ..Default::default() })?;
-    let [held, clear, std_port, pipe_port] = LISTENERS;
-    let [to_held, to_clear, to_std, to_pipe] = forwards_into(&qemu, LISTENERS)?;
-    /// Each line a job says its listeners wait in, the constants of its
-    /// source, and the forwarded ports the host dials when it does.
-    type Waits<'a> = &'a [(&'a str, &'a [u16])];
-    // The address first: every job names its peer by one.
-    let jobs: [(&str, String, Waits); 6] = [
-        ("test_c_addr_order", holding.to_string(), &[]),
-        (
-            "test_c_nodelay_kept",
-            format!("{holding} {held} {clear}"),
-            &[
-                ("nodelay_kept: both listeners wait for a peer", &[to_held, to_clear]),
-                ("nodelay_kept: both listeners wait for a second peer", &[to_held, to_clear]),
-            ],
-        ),
-        ("test_c_sendto_unbound", answering.to_string(), &[]),
-        (
-            "test_rs_nodelay_accepted",
-            format!("{holding} {std_port} {pipe_port}"),
-            &[
-                ("nodelay_accepted: both listeners wait for a peer", &[to_std, to_pipe]),
-                ("nodelay_accepted: the listener waits for a second peer", &[to_pipe]),
-            ],
-        ),
-        ("test_c_stream_ends", ending.to_string(), &[]),
-        ("test_rs_stream_ends_std", ending.to_string(), &[]),
-    ];
-    // Held to the test's end: a peer gone before a job's `accept` is a
-    // connection its listener no longer holds.
-    let mut dialled = Vec::new();
-    for (job, ports, waits) in jobs {
-        let name = job.trim_start_matches("test_c_").trim_start_matches("test_rs_");
-        let result = qemu.run_test_paced(&format!("{job} {HOST} {ports}"), Duration::from_secs(120), |_, line| {
-            for (_, dial) in waits.iter().filter(|(waiting, _)| line.trim_end().ends_with(waiting)) {
-                dialled.extend(dial.iter().map(|&port| std::net::TcpStream::connect(("127.0.0.1", port))));
-            }
-        });
-        if let Some(Err(e)) = dialled.iter().find(|dial| dial.is_err()) {
-            return Err(format!("{name}: the host could not dial a port QEMU forwards to the guest: {e}"));
-        }
-        if qemu::VERBOSE.load(std::sync::atomic::Ordering::Relaxed) {
-            eprintln!("  [libc] {name} ended {:?} and said:\n{}", result.exit_code, result.stdout);
-        }
-        if let Some(why) = &result.error {
-            return Err(format!("{name}: {why}\nthe job said:\n{}", result.stdout));
-        }
-        if result.exit_code != Some(0) {
-            return Err(format!("{name} ended {:?}:\n{}", result.exit_code, result.stdout));
-        }
-        if !result.stdout.lines().any(|l| l.trim_end().ends_with(&format!("{name}: ok"))) {
-            return Err(format!("{name} never said it was done:\n{}", result.stdout));
-        }
-    }
-    Ok(())
-}
-
-/// An unchanged HTTPS client — `ureq` on `rustls` on `ring`, as published but
-/// for `ring`'s ToyOS arms — trusting `build::trust_roots` and this run's
-/// authority, and sending the project's `User-Agent`, on one boot of
-/// `tests/images/netcase.toml` against servers this run starts on the host: it fetches a body over TLS 1.3 whole, by a hash over
-/// every byte the host computes with another SHA-256 than the guest's; and it
-/// refuses a certificate for another address and one from an authority the
-/// roots file does not hold, each by its own name, at the handshake. First,
-/// on the same CPU, `ring_kat` holds `ring` to its specifications' answers:
-/// the server is `rustls` on `ring` too, so the handshake alone would pass a
-/// `ring` wrong at both ends.
-fn https_fetch() -> Result<(), String> {
-    use common::https::{self, Authority, Seen, Server};
-    const JOB: &str = "https_get";
-    const KAT: &str = "ring_kat";
-    /// Root `CLAUDE.md`'s, spelled again here so the guest's copy is checked
-    /// against the rule and not against itself.
-    const USER_AGENT: &str = "toyos-build (https://github.com/ToyOSOrg/ToyOS)";
-    const WAIT: Duration = Duration::from_secs(30);
-    let host: std::net::IpAddr = https::HOST.parse().expect("an address");
-    let trusted = Authority::new("ToyOS harness test authority");
-    let stranger = Authority::new("ToyOS harness authority nothing trusts");
-    let body = std::sync::Arc::new(https::body());
-    let hex: String = toyos_sha2_hw::sha256_digest(body.as_slice()).iter().map(|b| format!("{b:02x}")).collect();
-    let want = format!("{JOB}: ok bytes={} sha256={hex}", body.len());
-    let fetched = Server::start(trusted.leaf(host), body.clone())?;
-    let wrong_name = Server::start(trusted.leaf([192, 0, 2, 1].into()), body.clone())?;
-    let untrusted = Server::start(stranger.leaf(host), body)?;
-
-    // The shipped roots and the harness's authority, under a name of the
-    // test's own: the client reads the file its argument names.
-    const ROOTS: &str = "etc/ssl/harness-cert.pem";
-    let mut roots = toyos_build::build::trust_roots();
-    roots.extend_from_slice(trusted.pem().as_bytes());
-    let crate_path = compile::repo_root().join("tests/guest/rust-tests");
-    let bins = [JOB, KAT].map(|name| (name.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &crate_path, name)));
-    let options = BootOptions { extra_root_files: vec![(ROOTS.to_string(), roots)], ..Default::default() };
-    let mut qemu = boot_netcase(&[], &bins, options)?;
-    let kat = qemu.run_test("test_rs_ring_kat", Duration::from_secs(120));
-    if kat.error.is_some() || kat.exit_code != Some(0) || !kat.stdout.lines().any(|l| l.trim_end() == "ring_kat: ok") {
-        return Err(format!("{KAT} ended {:?} ({:?}):\n{}", kat.exit_code, kat.error, kat.stdout));
-    }
-    let roots = format!("/system/{ROOTS}");
-    let fetches: [(&str, &Server, String, i32); 3] = [
-        ("the trusted server", &fetched, want, 0),
-        ("the server named for another address", &wrong_name, format!("{JOB}: refused not-valid-for-name"), 2),
-        ("the server no root vouches for", &untrusted, format!("{JOB}: refused unknown-issuer"), 2),
-    ];
-    for (what, server, line, code) in &fetches {
-        let url = format!("https://{}:{}/body", https::HOST, server.port);
-        let result = qemu.run_test(&format!("test_rs_{JOB} {url} {roots}"), Duration::from_secs(120));
-        if let Some(why) = &result.error {
-            return Err(format!("{what}: {why}\nthe job said:\n{}", result.stdout));
-        }
-        if result.exit_code != Some(*code) || !result.stdout.lines().any(|l| l.trim_end() == line) {
-            return Err(format!(
-                "{what}: the client ended {:?} and was to end {code} saying {line:?}:\n{}",
-                result.exit_code, result.stdout
-            ));
-        }
-    }
-
-    // Of a refused handshake the server sees the connection arrive and no
-    // more: this client sends it no alert, on the host as here, and the close
-    // after it need not arrive
-    // (`issues/a-guest-close-after-a-refused-handshake-can-leave-its-peer-waiting.md`).
-    for (what, server, _, code) in &fetches {
-        if !matches!(server.next(WAIT).map_err(|e| format!("{what}: {e}"))?, Seen::Accepted) {
-            return Err(format!("{what} saw something before a connection"));
-        }
-        if *code != 0 {
-            continue;
-        }
-        match server.next(WAIT).map_err(|e| format!("{what}: {e}"))? {
-            Seen::Served { version: Some(rustls::ProtocolVersion::TLSv1_3), path, user_agents }
-                if path == "/body" && user_agents == [USER_AGENT] => {}
-            other => return Err(format!("{what} saw {other:?}, not a TLS 1.3 GET of /body as {USER_AGENT:?}")),
-        }
-    }
-    for (what, server, _, _) in &fetches {
-        if let Some(seen) = server.more().into_iter().find(|seen| !matches!(seen, Seen::Failed)) {
-            return Err(format!("{what} saw more than the one connection it was asked for: {seen:?}"));
-        }
-    }
-    Ok(())
-}
-
 /// Run the machine-shape test, which owns its QEMU: the machine shape *is* the
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
-        "netstack_streams" => netstack_streams(qemu::Profile::Headless),
-        "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
-        "libc_sockets" => libc_sockets(),
-        "https_fetch" => https_fetch(),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
-        "machine_shutdown" => power::machine_shutdown(test_config),
-        "acpi_power_button" => power::acpi_power_button(test_config),
+        "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),
         "acpi_supply_outlives_holder" => acpi_supply_outlives_holder(),
@@ -3931,638 +3397,25 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
         "desktop_without_x2apic" => desktop_without_x2apic(),
-        "nvme_disk_keeps_log_and_home" => nvme_disk_keeps_log_and_home(test_config),
+        "nvme_disk_boots" => nvme_disk_boots(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
-        "block_grants_reach_their_partitions" => block_grants_reach_their_partitions(),
-        "update_writes_the_idle_slot_through_the_block_service" => update_writes_the_idle_slot_through_the_block_service(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
-        "toyfetch_reports" => toyfetch_reports(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         other => Err(format!("unknown machine test {other}")),
     }
 }
 
-/// What each role's file server says once it serves a volume it mounted, up to
-/// the volume's own counts.
-const SERVED_FROM_DISK: [&str; 3] = [
-    "fileserver: Data serving /apps, /config, /home, /state — bcachefs, ",
-    "fileserver: Log serving /log — FAT32, ",
-    "fileserver: Boot serving /boot — FAT32 read-only, ",
-];
-
-/// Wait for the three file servers of a machine with no disk the kernel
-/// drives to say what they serve: each a volume it mounted, on a session of
-/// its own that `diskserver` opened, and ROOT's partition refused to all.
-fn served_by_diskserver(qemu: &mut QemuInstance, console: &mut String) -> Result<(), String> {
-    await_guest(qemu, console, "the three file servers to say what they serve", |c| {
-        ["Data", "Log", "Boot"].iter().all(|role| c.contains(&format!("fileserver: {role} serving ")))
-    })
-    .map_err(|e| format!("{e}\n{console}"))?;
-    let said = serial::Serial::named("the boot", console.clone());
-    for served in SERVED_FROM_DISK {
-        said.must_say(served)?;
-    }
-    said.must_say("is the ROOT this machine runs from; refusing every session to it")?;
-    let sessions: BTreeSet<&str> = said
-        .text()
-        .lines()
-        .filter(|line| line.contains("diskserver: session "))
-        .filter_map(|line| line.split_once(" opened ")?.1.split_whitespace().next())
-        .collect();
-    if sessions.len() != SERVED_FROM_DISK.len() {
-        return Err(format!(
-            "diskserver opened sessions on {sessions:?}, and DATA, the log and the slot's volume are three partitions\n{console}"
-        ));
-    }
-    // The boot volume's grant does not write, and only that one.
-    let read_only = said.text().lines().filter(|line| line.contains("diskserver: session ") && line.contains(", read-only)")).count();
-    if read_only != 1 {
-        return Err(format!("diskserver opened {read_only} read-only sessions, and only the slot's volume is granted one\n{console}"));
-    }
-    Ok(())
-}
-
-/// `consent`'s steps, driven through the desktop's own keyboard and tablet
-/// (`tests/guest/rust-tests/src/bin/consent.rs`), and each held to what the
-/// panel, the supervisor and the package said.
-///
-/// **Every step is the guest's line and the host's answer to it**: the job
-/// says `CONSENT <step>`, and the host clicks the package in the launcher;
-/// the compositor says its prompt is on the panel, and the host reads the
-/// panel and answers with keys; the package says what it saw, and the host
-/// taps F12, which the job waits on through its hostile window. Nothing here
-/// waits on a clock but the run's own ceiling.
-fn consent_prompt(profile: qemu::Profile) -> Result<(), String> {
-    let case = compile::repo_root().join("tests/images/consentcase.toml");
-    let (_, job) = suite_bin(profile.arch(), "consent");
-    let digest: String = toyos_sha2_hw::sha256_digest(&job).iter().map(|b| format!("{b:02x}")).collect();
-    let options = BootOptions { profile, qmp: true, ..Default::default() };
-    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[("consent".to_string(), job)], options);
-    let mut drive = Consent { digest, out: qemu.screendump_file(), ..Consent::default() };
-    let result = qemu.run_test_paced("test_rs_consent", Duration::from_secs(300), |qmp, line| {
-        drive.line(qmp.expect("consent_prompt boots with QMP"), line)
-    });
-    if let Some(why) = &result.error {
-        drive.red.push(format!("the job did not finish: {why}"));
-    } else if result.exit_code != Some(0) {
-        drive.red.push(format!("the job ended {:?}", result.exit_code));
-    }
-    let all = ["always", "again", "deny", "denied", "skip", "once", "ssh"];
-    if drive.done != all {
-        drive.red.push(format!("the steps finished were {:?}, not {all:?}", drive.done));
-    }
-    match drive.red.is_empty() {
-        true => Ok(()),
-        false => Err(format!("{:#?}\nthe job said:\n{}", drive.red, result.stdout)),
-    }
-}
-
-/// [`consent_prompt`]'s side of the conversation.
-#[derive(Default)]
-struct Consent {
-    /// The SHA-256 of the binary the job installs as the package, computed
-    /// here, which an answer the supervisor keeps is keyed on.
-    digest: String,
-    out: std::path::PathBuf,
-    /// The panel's size, from the first dump.
-    screen: Option<(usize, usize)>,
-    step: Option<ConsentStep>,
-    done: Vec<String>,
-    /// The panel above the taskbar before the launch off the screen.
-    before: Option<Vec<[u8; 3]>>,
-    red: Vec<String>,
-}
-
-#[derive(Default)]
-struct ConsentStep {
-    name: String,
-    /// Where Games is in the prompt's list, from the job.
-    games: usize,
-    /// The supervisor's word on the answer.
-    answer: Option<String>,
-    /// What the package saw.
-    saw: Option<String>,
-    /// The prompt came up, and went.
-    up: bool,
-    down: bool,
-}
-
-/// What the hostile window paints.
-const HOSTILE_RGB: [u8; 3] = [0xff, 0x00, 0xff];
-const ROM_SEEN: &str = "cwd=/home/toy/Games roms=[\"test.gba\"] saved=Ok";
-const NOTHING_SEEN: &str = "cwd=/ roms=[] saved=Err";
-
-impl ConsentStep {
-    /// Whether this step asks, the keys that answer it, the supervisor's word
-    /// on the answer, and what the package sees.
-    fn expected(&self) -> (bool, Vec<&'static str>, Option<&'static str>, &'static str) {
-        let down = || std::iter::repeat_n("down", self.games);
-        let tabs = |n| std::iter::repeat_n("tab", n);
-        match self.name.as_str() {
-            "always" => (
-                true,
-                down().chain(tabs(3)).chain(["ret"]).collect(),
-                Some("always, /home/toy/Games read-write"),
-                ROM_SEEN,
-            ),
-            "again" => (false, Vec::new(), None, ROM_SEEN),
-            "deny" => (true, tabs(4).chain(["ret"]).collect(), Some("denied, until `grants revoke`"), NOTHING_SEEN),
-            "denied" => (false, Vec::new(), None, NOTHING_SEEN),
-            "skip" => (true, vec!["esc"], Some("skipped, so its next launch asks again"), NOTHING_SEEN),
-            "once" => (
-                true,
-                down().chain(tabs(2)).chain(["ret"]).collect(),
-                Some("once, /home/toy/Games read-write"),
-                ROM_SEEN,
-            ),
-            other => panic!("consent_prompt: the job asked for a step `{other}` this side has no answer for"),
-        }
-    }
-}
-
-impl Consent {
-    fn line(&mut self, qmp: &Path, line: &str) {
-        let after = |marker: &str| line.find(marker).map(|at| line[at + marker.len()..].trim().to_string());
-        if let Some(step) = after("CONSENT ") {
-            self.begin(qmp, &step);
-        } else if line.contains("compositor: the prompt is on the panel") {
-            self.prompt_up(qmp);
-        } else if line.contains("compositor: the prompt is down") {
-            match &mut self.step {
-                Some(step) => step.down = true,
-                None => self.red.push("the prompt went down outside any step".to_string()),
-            }
-        } else if let Some(answer) = after("supervisor: consent: consentee: ") {
-            match &mut self.step {
-                Some(step) => step.answer = Some(answer),
-                None => self.red.push(format!("the supervisor took an answer outside any step: {answer}")),
-            }
-        } else if let Some(saw) = after("CONSENTEE ") {
-            match &mut self.step {
-                Some(step) => step.saw = Some(saw),
-                None => self.red.push(format!("the package ran outside any step and saw {saw}")),
-            }
-        } else if let Some(stored) = after("STORE ") {
-            self.stored(&stored);
-        }
-        self.finish(qmp);
-    }
-
-    fn dump(&mut self, qmp: &Path) -> screen::Ppm {
-        let dump = qemu::QmpInput::open(qmp).screendump(&self.out);
-        self.screen.get_or_insert((dump.width, dump.height));
-        dump
-    }
-
-    fn begin(&mut self, qmp: &Path, said: &str) {
-        let mut words = said.split_whitespace();
-        let name = words.next().unwrap_or_default().to_string();
-        let games = words.find_map(|w| w.strip_prefix("down=")).map_or(0, |n| n.parse().unwrap_or(0));
-        match name.as_str() {
-            // Off the screen: the panel above the taskbar is unchanged across
-            // it, and no prompt comes up (`prompt_up` reds one outside a step).
-            "ssh" if said == "ssh" => self.before = Some(self.above_taskbar(qmp)),
-            "ssh" => {
-                let after = self.above_taskbar(qmp);
-                if self.before.take().is_none_or(|before| before != after) {
-                    self.red.push("the panel changed across the launch off the screen".to_string());
-                }
-                self.done.push(name);
-                Self::tap_done(qmp);
-            }
-            _ => {
-                if self.screen.is_none() {
-                    self.dump(qmp);
-                }
-                let (w, h) = self.screen.expect("the first dump measured the panel");
-                // The `+`, then the launcher's last row, which is the one
-                // package installed: built-in rows come first.
-                let desk = toyos_desktop::Desk {
-                    chrome: toyos_desktop::Chrome::DEFAULT,
-                    screen: toyos_desktop::Rect::new(0, 0, w as i32, h as i32),
-                    font_w: 8,
-                    apps: 1,
-                };
-                let bar = desk.taskbar(1);
-                let centre = |r: toyos_desktop::Rect| (i32::midpoint(r.x0, r.x1), i32::midpoint(r.y0, r.y1));
-                // **The row is clicked once the launcher is on the panel**: the
-                // compositor folds two clicks it reads at once into one at
-                // the second's place (issues/two-clicks-the-compositor-reads-at-once-are-one-click.md).
-                let row = bar.launcher_item(0);
-                let shown = |dump: &screen::Ppm| -> Vec<[u8; 3]> {
-                    (row.y0 as usize..row.y1 as usize)
-                        .flat_map(|y| dump.pixels[y * dump.width + row.x0 as usize..y * dump.width + row.x1 as usize].to_vec())
-                        .collect()
-                };
-                let mut input = qemu::QmpInput::open(qmp);
-                let closed = shown(&input.screendump(&self.out));
-                input.click(centre(bar.new_button()), (w, h));
-                let deadline = Instant::now() + Duration::from_secs(20);
-                while shown(&input.screendump(&self.out)) == closed {
-                    if Instant::now() >= deadline {
-                        self.red.push(format!("{name}: the launcher did not open in 20 s"));
-                        return;
-                    }
-                    thread::sleep(Duration::from_millis(50));
-                }
-                input.click(centre(row), (w, h));
-                self.step = Some(ConsentStep { name, games, ..ConsentStep::default() });
-            }
-        }
-    }
-
-    fn above_taskbar(&mut self, qmp: &Path) -> Vec<[u8; 3]> {
-        let dump = self.dump(qmp);
-        let rows = dump.height - toyos_desktop::Chrome::DEFAULT.taskbar as usize;
-        dump.pixels[..rows * dump.width].to_vec()
-    }
-
-    /// The prompt is on the panel: it is drawn over the hostile window, and a
-    /// press outside it and the keys that answer it go in.
-    fn prompt_up(&mut self, qmp: &Path) {
-        let asks = match &self.step {
-            Some(step) => step.expected().0,
-            None => false,
-        };
-        if !asks {
-            let name = self.step.as_ref().map_or("none", |s| s.name.as_str()).to_string();
-            self.red.push(format!("a prompt came up in step {name}, which asks nothing"));
-            return;
-        }
-        let dump = self.dump(qmp);
-        let framed: Vec<(usize, usize)> = (0..dump.height)
-            .flat_map(|y| (0..dump.width).map(move |x| (x, y)))
-            .filter(|&(x, y)| dump.pixels[y * dump.width + x] == toyos_desktop::PROMPT_FRAME)
-            .collect();
-        let at = |x: usize, y: usize| dump.pixels[y * dump.width + x];
-        let (x0, x1) = match (framed.iter().map(|p| p.0).min(), framed.iter().map(|p| p.0).max()) {
-            (Some(x0), Some(x1)) if x1 - x0 >= 600 => (x0, x1),
-            other => {
-                self.red.push(format!("no prompt's frame on the panel: {} pixels, across {other:?}", framed.len()));
-                return;
-            }
-        };
-        let y0 = framed.iter().map(|p| p.1).min().unwrap_or(0);
-        let y1 = framed.iter().map(|p| p.1).max().unwrap_or(0);
-        if at(usize::midpoint(x0, x1), usize::midpoint(y0, y1)) == HOSTILE_RGB || at(x0, y0 + 2) != toyos_desktop::PROMPT_FRAME {
-            self.red.push(format!("the prompt at ({x0}, {y0})-({x1}, {y1}) is under the hostile window"));
-        }
-        if at(8, 40) != HOSTILE_RGB {
-            self.red.push(format!("the hostile window is not on the panel beside the prompt: {:?}", at(8, 40)));
-        }
-        let screen = (dump.width, dump.height);
-        let prompt = |dump: &screen::Ppm| -> Vec<[u8; 3]> {
-            (y0..=y1).flat_map(|y| dump.pixels[y * dump.width + x0..=y * dump.width + x1].to_vec()).collect()
-        };
-        let mut shown = prompt(&dump);
-        let mut input = qemu::QmpInput::open(qmp);
-        // A press on the hostile window around the prompt, which nothing takes.
-        input.click((8, 40), screen);
-        // **Each key is paced against the prompt it changes.** QEMU's keyboard
-        // loses a press or a release sent behind another before the guest has
-        // read it, so the next key goes only once the panel shows the last.
-        let keys = self.step.as_ref().map(|s| s.expected().1).unwrap_or_default();
-        for key in keys {
-            input.keys(&[(key, true), (key, false)]);
-            let deadline = Instant::now() + Duration::from_secs(20);
-            loop {
-                let now = prompt(&input.screendump(&self.out));
-                if now != shown {
-                    shown = now;
-                    break;
-                }
-                if Instant::now() >= deadline {
-                    self.red.push(format!("`{key}` changed nothing on the prompt in 20 s"));
-                    return;
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-        }
-        if let Some(step) = &mut self.step {
-            step.up = true;
-        }
-    }
-
-    /// A step that has said all it will: held to what it should have said,
-    /// and its F12 tapped.
-    fn finish(&mut self, qmp: &Path) {
-        let Some(step) = &self.step else { return };
-        let (asks, _, answer, seen) = step.expected();
-        if step.saw.is_none() || (asks && !(step.up && step.down)) {
-            return;
-        }
-        let step = self.step.take().expect("a step is under way");
-        if step.answer.as_deref() != answer {
-            self.red.push(format!("{}: the supervisor said {:?}, not {answer:?}", step.name, step.answer));
-        }
-        if step.saw.as_deref() != Some(seen) {
-            self.red.push(format!("{}: the package saw {:?}, not {seen:?}", step.name, step.saw));
-        }
-        self.done.push(step.name);
-        Self::tap_done(qmp);
-    }
-
-    /// The store's line after a step, held to the binary's own digest.
-    fn stored(&mut self, said: &str) {
-        let (step, line) = said.split_once(':').unwrap_or((said, ""));
-        let want = match step {
-            "always" => format!("grant toy consentee {} read-write /home/toy/Games", self.digest),
-            "deny" => format!("deny toy consentee {}", self.digest),
-            _ => String::new(),
-        };
-        if line.trim() != want {
-            self.red.push(format!("{step}: the store holds {:?}, not {want:?}", line.trim()));
-        }
-    }
-
-    fn tap_done(qmp: &Path) {
-        qemu::QmpInput::open(qmp).keys(&[("f12", true), ("f12", false)]);
-    }
-}
-
-/// Run `command` as a job of the boot, to exit 0: what it said.
-fn job_said(qemu: &mut QemuInstance, command: &str) -> Result<String, String> {
-    let result = qemu.run_test(command, Duration::from_secs(60));
-    if let Some(why) = &result.error {
-        return Err(format!("`{command}`: {why}\nit said:\n{}", result.stdout));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!("`{command}` ended {:?}:\n{}", result.exit_code, result.stdout));
-    }
-    Ok(result.stdout)
-}
-
-/// `toyfetch` names the build the image's os-release does, the CPUs this boot
-/// gave QEMU, and the memory total `free` reads off the same ambient header.
-fn toyfetch_reports(test_config: &Path) -> Result<(), String> {
-    const CPUS: u32 = 3;
-    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], BootOptions { smp: CPUS, ..Default::default() });
-    let (_, bytes) = toyos_build::image::root_file_on(qemu.boot_image(), toyos_osrelease::PATH)?;
-    let release = toyos_osrelease::parse(&bytes).map_err(|why| format!("the image's {}: {why:?}", toyos_osrelease::PATH))?;
-    // `free`'s second line is the total, used and free mebibytes.
-    let free = job_said(&mut qemu, "free")?;
-    let total: u64 = free
-        .lines()
-        .find_map(|line| line.trim().strip_suffix('M')?.split_whitespace().next()?.strip_suffix('M')?.parse().ok())
-        .ok_or_else(|| format!("`free` said no total:\n{free}"))?;
-
-    // The console carries an escape as the four characters `\x1b`.
-    let said = job_said(&mut qemu, "toyfetch")?.replace('\x1b', "\\x1b");
-    // The text a terminal shows: every SGR sequence taken out.
-    let mut shown = String::new();
-    let mut rest = said.as_str();
-    while let Some(at) = rest.find("\\x1b[") {
-        shown.push_str(&rest[..at]);
-        let end = rest[at..].find('m').ok_or_else(|| format!("an SGR sequence that never ends:\n{said}"))?;
-        rest = &rest[at + end + 1..];
-    }
-    shown.push_str(rest);
-    let field = |label: &str| -> Result<String, String> {
-        let at = format!("{label}: ");
-        let mut values = shown.lines().filter_map(|line| Some(line[line.find(&at)? + at.len()..].to_string()));
-        match (values.next(), values.next()) {
-            (Some(value), None) => Ok(value),
-            _ => Err(format!("toyfetch said no single {label} line:\n{shown}")),
-        }
-    };
-
-    let wanted = [
-        ("OS", release.pretty_name().to_string()),
-        ("Kernel", format!("{} {}", toyos_osrelease::NAME, release.uname_release())),
-        ("Arch", release.arch.machine().to_string()),
-    ];
-    for (label, value) in wanted {
-        if field(label)? != value {
-            return Err(format!("toyfetch's {label} is not {value:?}:\n{shown}"));
-        }
-    }
-    // x86-64 reads its model off CPUID; QEMU names one.
-    let cpu = field("CPU")?;
-    if !cpu.ends_with(&format!(" ({CPUS})")) || cpu.starts_with("model not reported") {
-        return Err(format!("toyfetch's CPU is {cpu:?}, on a boot QEMU gave {CPUS} CPUs:\n{shown}"));
-    }
-    let memory = field("Memory")?;
-    if !memory.ends_with(&format!(" / {total} MiB")) {
-        return Err(format!("toyfetch's Memory is {memory:?}, and `free` says {total}M in all:\n{shown}"));
-    }
-    field("Uptime")?;
-    eprintln!("  [toyfetch] OS {}, CPU {cpu}, Memory {memory}", field("OS")?);
-    Ok(())
-}
-
 /// A machine with one NVMe disk and no USB controller boots the image off
-/// that disk, and what one boot wrote to `/home` and said into `/log` the next
-/// boot reads back: a file under a name of this run's, line for line, and a
-/// line of this run's in a log file the first boot listed.
-fn nvme_disk_keeps_log_and_home(test_config: &Path) -> Result<(), String> {
-    let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, qmp: true, ..Default::default() };
+/// that disk to ready, and says nothing a clean boot does not.
+fn nvme_disk_boots(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, ..Default::default() };
     if let Some(usb) = qemu::profile_argv(&options).iter().find(|arg| arg.contains("usb") || arg.contains("xhci")) {
         return Err(format!("this machine was to have no USB controller, and QEMU is given {usb}"));
     }
-    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("this host's clock is past 1970");
-    let nonce = format!("kept-{}-{}", std::process::id(), since.as_nanos());
-    let kept = format!("/home/{nonce}/release");
-    let source = toyos_osrelease::GUEST_PATH;
-
-    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-    let mut console = qemu.boot_log().to_string();
-    served_by_diskserver(&mut qemu, &mut console)?;
-    job_said(&mut qemu, &format!("mkdir /home/{nonce}"))?;
-    job_said(&mut qemu, &format!("cp {source} {kept}"))?;
-    job_said(&mut qemu, &format!("echo {nonce}"))?;
-    // `ls` says a file as two spaces, its name, and its size in brackets.
-    let logs: Vec<String> = job_said(&mut qemu, "ls /log")?
-        .lines()
-        .filter_map(|line| Some(line.strip_prefix("  ")?.split_once(" (")?.0.to_string()))
-        .collect();
-    if logs.is_empty() {
-        return Err(format!("the first boot's /log lists no file\n{console}"));
-    }
-
-    // The reset the guest asks for, and the one its loader makes of the pass
-    // that reads how that boot ended: the boot after both is the one waited for.
-    qemu.reset_on_reboot();
-    writeln!(qemu.stdin_mut(), "run reboot").expect("write to QEMU stdin");
-    qemu.flush_stdin();
-    qemu.await_boot();
-    let mut console = qemu.boot_log().to_string();
-    if !console.contains(bootlog::REBOOTING) {
-        return Err(format!("the machine reached {} again without saying {}\n{console}", qemu::DEFAULT_READY, bootlog::REBOOTING));
-    }
-    // What the second boot said, and none of the first's servers' lines.
-    console = console.split_once(bootlog::REBOOTING).expect("checked above").1.to_string();
-    served_by_diskserver(&mut qemu, &mut console)?;
-    // A job's capture is every program's lines of its window, a server's
-    // late ones among them: the file's are the ones of its own form,
-    // `KEY=value`, which no program says.
-    let assignments = |said: &str| -> Vec<String> {
-        let key = |line: &str| line.split_once('=').is_some_and(|(key, _)| !key.is_empty() && key.bytes().all(|b| b.is_ascii_uppercase() || b == b'_'));
-        said.lines().filter(|line| key(line)).map(str::to_string).collect()
-    };
-    let shipped = assignments(&job_said(&mut qemu, &format!("cat {source}"))?);
-    let read_back = assignments(&job_said(&mut qemu, &format!("cat {kept}"))?);
-    if shipped.is_empty() || read_back != shipped {
-        return Err(format!("{kept} reads back after the reboot as\n{read_back:#?}\nand {source} is\n{shipped:#?}"));
-    }
-    // The line as the first boot's `logkeeper` filed it: `echo`'s own, whose
-    // whole text is the nonce, which nothing the second boot says is.
-    let mut found = None;
-    for log in &logs {
-        let lines = job_said(&mut qemu, &format!("grep {nonce} /log/{log}"))?;
-        found = found.or(lines.lines().find_map(|line| {
-            toyos_logstream::program_line(line).filter(|said| said.text == nonce).map(|said| format!("{log}: {}", said.tag))
-        }));
-    }
-    let Some(found) = found else {
-        return Err(format!("none of {logs:?}, the first boot's log files, holds its line {nonce} after the reboot"));
-    };
-    eprintln!("  [disk] after the reboot {kept} is the {} lines of {source}, and /log/{found} said {nonce}", read_back.len());
-    Ok(())
+    let qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    serial::Serial::boot(&qemu).must_be_clean()
 }
-
-/// What `partition_grant` says, a line per grant it was refused through.
-const GRANTS_SAID: [&str; 5] = [
-    "partition_grant: the log's grant opened the log and was refused the boot volume NotGranted",
-    "partition_grant: DATA's grant opened DATA and was refused the log NotGranted",
-    "partition_grant: the boot volume's read-only grant read it and was refused a write ReadOnly",
-    "partition_grant: the port's own connector was refused a listing and an open NotGranted",
-    "partition_grant: the running ROOT was refused Held to the grant naming it",
-];
-
-/// A connection to diskserver opens only what the badge on its connector
-/// grants, on the NVMe disk the machine booted from: `partition_grant` starts
-/// diskserver itself and mints each grant, and diskserver names each refusal.
-fn block_grants_reach_their_partitions() -> Result<(), String> {
-    const JOB: &str = "partition_grant";
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
-    let case = compile::repo_root().join("tests/images/blockgrantcase.toml");
-    let options = BootOptions { profile: qemu::Profile::HeadlessNoUsb, ..Default::default() };
-    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
-    let result = qemu.run_test("test_rs_partition_grant", Duration::from_secs(60));
-    if let Some(why) = &result.error {
-        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
-    }
-    let said = serial::Serial::named("the job", result.stdout);
-    for line in GRANTS_SAID {
-        eprintln!("  [grant] {}", said.must_say(line)?.trim());
-    }
-    // diskserver's own word for each refusal, beside the job's.
-    for refused in ["refused: NotGranted", "refused: Held"] {
-        if !said.text().lines().any(|l| l.contains("diskserver: an open of ") && l.trim_end().ends_with(refused)) {
-            return Err(format!("diskserver never said an open was {refused}:\n{}", said.text()));
-        }
-    }
-    Ok(())
-}
-
-/// The update image `update_writes_the_idle_slot_through_the_block_service`
-/// stages: a ROOT of one file, signed with this run's key at a version past
-/// any a build signs; the ROOT's length, which the second slot is made to
-/// hold exactly, so the host mounts the partition whole; its file; and the
-/// three files the slot's FAT volume is to carry, each with its bytes.
-struct StagedUpdate {
-    image: Vec<u8>,
-    version: u64,
-    root_bytes: u64,
-    marker: Vec<u8>,
-    volume: [(&'static str, Vec<u8>); 3],
-}
-
-/// Where the staged ROOT's one file is, and the path the guest reads the
-/// update image at.
-const UPDATE_MARKER: &str = "etc/update-test";
-const UPDATE_IMAGE: &str = "share/update-test.img";
-
-fn staged_update() -> StagedUpdate {
-    let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).expect("this host's clock is past 1970");
-    let marker = format!("update {} {}\n", std::process::id(), since.as_nanos()).into_bytes();
-    let root = toyos_build::image::create_root_image(&[(UPDATE_MARKER.to_string(), marker.clone())], &[], true);
-    // Past every version a build signs, which is its Unix time.
-    let version = u64::from(u32::MAX) << 8;
-    let signing = toyos_build::image::Signing { key: toyos_build::signing::key(), version };
-    let kernel = b"update test kernel";
-    let image = toyos_build::image::update_image(kernel, &root, "", signing);
-    // The image is the signed header, the kernel, the boot parameter and
-    // ROOT, end to end (`toyos_update::image`).
-    let signed = toyos_update::image::SIGNED_BYTES;
-    let volume = [
-        (toyos_update::slots::SIGNED_FILE, image[..signed].to_vec()),
-        (toyos_update::slots::KERNEL_FILE, kernel.to_vec()),
-        (toyos_update::slots::CMDLINE_FILE, image[signed + kernel.len()..image.len() - root.len()].to_vec()),
-    ];
-    StagedUpdate { image, version, root_bytes: root.len() as u64, marker, volume }
-}
-
-/// `update` on a machine booted off its NVMe disk: the supervisor reads the
-/// slot table through a session on diskserver and grants `update` the idle
-/// slot's partitions as connectors minted for each, and `update` writes the
-/// signed image there and marks it — read back off the disk by the host, and
-/// its FAT volume judged by toyos-fat32-check, which shares no code with it.
-fn update_writes_the_idle_slot_through_the_block_service() -> Result<(), String> {
-    const JOB: &str = "update_idle_slot";
-    let staged = staged_update();
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
-    let case = compile::repo_root().join("tests/images/slotscase.toml");
-    let options = BootOptions {
-        profile: qemu::Profile::HeadlessNoUsb,
-        extra_root_files: vec![(UPDATE_IMAGE.to_string(), staged.image.clone())],
-        second_slot: Some(staged.root_bytes),
-        ..Default::default()
-    };
-    let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
-    let result = qemu.run_test("test_rs_update_idle_slot", Duration::from_secs(120));
-    if let Some(why) = &result.error {
-        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
-    }
-    let said = serial::Serial::named("the job", result.stdout);
-    eprintln!(
-        "  [update] {}",
-        said.must_say("supervisor: the idle slot is B, granted with the slot table read through the block service")?.trim()
-    );
-    eprintln!("  [update] {}", said.must_say(&format!("update: installed version {} in slot B", staged.version))?.trim());
-
-    let mut disk = fs::File::open(qemu.boot_image()).map_err(|e| format!("{}: {e}", qemu.boot_image().display()))?;
-    let table = toyos_build::image::slot_table_of(&mut disk)?;
-    let marked = table.slot(table.marked).ok_or("the slot table marks a slot it does not carry")?;
-    if table.marked.letter() != 'B' || marked.version != staged.version {
-        return Err(format!("after the update the slot table marks {} at version {}, not B at {}", table.marked.letter(), marked.version, staged.version));
-    }
-    let (_, read_back) = toyos_build::image::root_file_on(qemu.boot_image(), UPDATE_MARKER)?;
-    if read_back != staged.marker {
-        return Err(format!("slot B's ROOT carries {:?} at {UPDATE_MARKER}, and the update carried {:?}", String::from_utf8_lossy(&read_back), String::from_utf8_lossy(&staged.marker)));
-    }
-    eprintln!("  [update] the disk's slot table marks B at version {}, and B's ROOT mounts carrying the update's {UPDATE_MARKER}", staged.version);
-
-    use std::io::{Read as _, Seek as _};
-    // B's FAT volume: judged whole by the checker that is no part of the
-    // driver `update` wrote it with, then each file read back byte for byte.
-    let (at, len) = toyos_build::image::partition_extent(&mut disk, marked.boot)?;
-    let mut volume = vec![0u8; usize::try_from(len).map_err(|_| format!("a {len}-byte volume"))?];
-    disk.seek(std::io::SeekFrom::Start(at))
-        .and_then(|_| disk.read_exact(&mut volume))
-        .map_err(|e| format!("slot B's volume at byte {at}: {e}"))?;
-    let complaints = toyos_fat32_check::check(&volume);
-    if !complaints.is_empty() {
-        return Err(format!("toyos-fat32-check refuses slot B's volume:\n{}", toyos_fat32_check::describe(&complaints)));
-    }
-    for (name, staged) in &staged.volume {
-        let read = toyos_build::image::read_file_on(&mut disk, marked.boot, name)
-            .map_err(|why| format!("slot B's volume: {why}"))?;
-        if read != *staged {
-            return Err(format!("slot B's {name} is {} bytes that are not the {} the update carried", read.len(), staged.len()));
-        }
-    }
-    eprintln!("  [update] slot B's volume checks out, carrying the update's {} byte for byte", staged.volume.iter().map(|(name, _)| *name).collect::<Vec<_>>().join(", "));
-    Ok(())
-}
-
 /// Run `command` as a job of the boot, to exit 0: everything said in its
 /// window, the kernel's records with the program lines.
 fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> {
@@ -4576,26 +3429,16 @@ fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> 
     Ok(result.serial)
 }
 
-/// The devices `qemu-xhci` carries on [`qemu::Profile::HeadlessUsbSpare`],
-/// as `usbd_spare` prints usbd's answer: QEMU 11.1's `usb-storage`, which
-/// trains on a USB3 port, and `usb-kbd`, each by its id, its speed and its
-/// class triple.
-const SPARE_DEVICES: [(&str, &str, &str); 2] = [
-    ("46f4:0001", "super", "08:06:50"),
-    ("0627:0001", "high", "03:01:01"),
-];
-
 /// What usbd says once the bring-up's No-Op has completed: its ring and the
 /// interrupt through the claim both work.
 const USBD_NOOP: &str = "usbd: a No-Op command completed, announced by an interrupt";
 
-/// The controller `xhci-leave=` names, claimed by `usbd_spare` and driven by
-/// usbd: each device named by id, speed and class on a fresh claim and again
-/// after usbd is killed and started on the next; every event announced by an
-/// interrupt; nothing waking usbd while it has nothing to do. Then the two
-/// controls: the function aimed past every grant is the kernel's `DMA FAULT`
-/// record against its slot and the claim's refusal, and on a kernel without
-/// the switch the claim is refused because the kernel drives the function.
+/// The controller `xhci-leave=` names, handed over to `usbd_spare`'s claim and
+/// driven by usbd as far as its No-Op, answered by an interrupt through the
+/// claim, with every event announced by one. Then the two controls: the
+/// function aimed past every grant is the kernel's `DMA FAULT` record against
+/// its slot and the claim's refusal, and on a kernel without the switch the
+/// claim is refused because the kernel drives the function.
 fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "usbd_spare";
     const SPARE: &str = "1b36:000d";
@@ -4618,25 +3461,11 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     let said = job_window(&mut qemu, "test_rs_usbd_spare")?;
     let run = serial::Serial::named("usbd_spare", said.clone());
     run.must_be_clean()?;
-    for when in ["settled", "restarted"] {
-        let named: Vec<&str> = said.lines().filter(|l| l.contains(&format!("usbd_spare: {when}: usb.device."))).collect();
-        for (id, speed, class) in SPARE_DEVICES {
-            let port = named
-                .iter()
-                .find_map(|l| l.split_once("usb.device.")?.1.split_once(&format!(".id = {id}")).map(|(p, _)| p.to_string()))
-                .ok_or_else(|| format!("usbd named no {id} once {when}:\n{said}"))?;
-            for (field, want) in [("speed", speed), ("class", class)] {
-                run.must_say(&format!("usbd_spare: {when}: usb.device.{port}.{field} = {want}"))?;
-            }
-        }
-        run.must_say(&format!("usbd_spare: {when}: usb.devices = {}", SPARE_DEVICES.len()))?;
-    }
     run.must_say(USBD_NOOP)?;
     run.must_say("usbd_spare: settled: usb.events.unannounced = 0")?;
-    run.must_say("usbd_spare: 2 device(s) named, the same after a restart")?;
     let handed = format!("pcidev: PCI {at} [{SPARE}] handed over on slot ");
-    if said.matches(&handed).count() != 2 {
-        return Err(format!("{at} was not handed over once for each usbd:\n{said}"));
+    if said.matches(&handed).count() != 1 {
+        return Err(format!("{at} was not handed over once, to the one usbd:\n{said}"));
     }
     run.must_say(&format!("PCI {at}: msi address="))?;
 
@@ -4655,7 +3484,7 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     if u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok() != u64::from_str_radix(aimed.trim_start_matches("0x"), 16).ok() {
         return Err(format!("the record faults {addr}, and the job aimed at {aimed}: {record}"));
     }
-    eprintln!("  [usbd] {at}: two devices named twice; aimed at {aimed}: {}", record.trim());
+    eprintln!("  [usbd] {at}: handed over, its No-Op answered; aimed at {aimed}: {}", record.trim());
     drop(qemu);
 
     // The control: the same machine and no switch, so the kernel drives it.
@@ -4788,11 +3617,11 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// fileserver refuses a hello whose window is the virtio NIC's BAR, by the
-/// kernel's answer and by name, and answers the next client as the process
-/// that refused it.
+/// The kernel answers a lent window that is the virtio NIC's BAR as no memory
+/// it allocated, by `fstat`, so no reader maps it as a region.
 fn lent_device_memory_refused(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "lent_device_memory_refused";
+    const SAID: &str = "lent_device_memory_refused: a device's BAR lent as a window is not memory the kernel allocated";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let mut qemu =
         QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
@@ -4804,15 +3633,10 @@ fn lent_device_memory_refused(test_config: &Path) -> Result<(), String> {
     if result.exit_code != Some(0) {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
     }
-    for said in [
-        ": its window is not memory the kernel allocated",
-        "lent_device_memory_refused: the server that let go answers the next client",
-    ] {
-        let Some(line) = result.stdout.lines().find(|l| l.contains(said)) else {
-            return Err(format!("nobody said `{said}`:\n{}", result.stdout));
-        };
-        eprintln!("  [claims] {}", line.trim());
-    }
+    let Some(line) = result.stdout.lines().find(|l| l.contains(SAID)) else {
+        return Err(format!("the job never said `{SAID}`:\n{}", result.stdout));
+    };
+    eprintln!("  [claims] {}", line.trim());
     Ok(())
 }
 
