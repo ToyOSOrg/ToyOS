@@ -8,4 +8,4 @@ mod arch;
 #[path = "aarch64.rs"]
 mod arch;
 
-pub(in crate::resample) use arch::interpolators;
+pub(crate) use arch::interpolators;

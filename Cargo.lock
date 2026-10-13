@@ -3677,6 +3677,7 @@ dependencies = [
  "toyos-inspect",
  "toyos-mixer",
  "toyos-pci-claim",
+ "toyos-resample",
  "toyos-virtio",
  "toyos-virtio-sound",
 ]
@@ -4388,6 +4389,14 @@ version = "0.1.0"
 [[package]]
 name = "toyos-random"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-resample"
+version = "0.1.0"
+dependencies = [
+ "rubato",
+ "toyos-mixer",
+]
 
 [[package]]
 name = "toyos-root"

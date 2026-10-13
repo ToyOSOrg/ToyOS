@@ -6,7 +6,7 @@ use rubato::sinc_interpolator::SincInterpolator;
 use rubato::WindowFunction;
 
 /// Built with the sinc length and cutoff rubato's own dispatch derives.
-pub(in crate::resample) fn interpolators(
+pub(crate) fn interpolators(
     sinc_len: usize,
     oversampling: usize,
     cutoff: f32,

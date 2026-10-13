@@ -2,7 +2,7 @@
 //! `rubato`'s windowed sinc, with the parameters its two rates take.
 //!
 //! Held to the dithered 16-bit wire by published practice, on every
-//! interpolator rubato can take on a CPU ToyOS runs on (the tests below):
+//! interpolator rubato can take on a CPU ToyOS runs on (`tests.rs`):
 //! - the passband, 20 Hz to 0.4535 of the lower rate and at most 20 kHz,
 //!   within ±0.007 dB: the TI SRC4192/SRC4193 datasheet's (SBFS022C)
 //!   interpolation filter;
@@ -49,7 +49,7 @@ fn parameters(client_rate: u32, device_rate: u32) -> SincInterpolationParameters
 
 /// The resampler for one stream: `client_rate` in, `device_rate` out in
 /// periods of `period_frames`, over `channels`.
-pub(crate) fn build(
+pub fn build(
     client_rate: u32,
     device_rate: u32,
     period_frames: usize,

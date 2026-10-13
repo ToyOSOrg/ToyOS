@@ -13,7 +13,6 @@
 //! | [`ring`] | the lock-free ring every hand-off to or from the mix thread is |
 //! | [`log`] | soundserver's lines, and why the mix thread's never wait |
 //! | [`hda`], [`virtio`] | the two drivers |
-//! | [`resample`] | the resampler a client at another rate than the device's is carried by |
 //! | [`volume`] | the `volume` port: the master level and mute, on the codec |
 //!
 //! This file is the fourth thing: which of them the machine gets. A sound card
@@ -45,7 +44,6 @@ mod hda;
 mod inspect;
 mod mix;
 mod log;
-mod resample;
 mod ring;
 mod virtio;
 mod volume;

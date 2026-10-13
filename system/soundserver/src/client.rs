@@ -10,7 +10,7 @@
 //! channel conversion, the interleave and the sum are calls into the crate,
 //! whose corpus holds the answer each of them used to give inline.
 //!
-//! The resampler is `rubato`'s, built and held to its bounds in [`crate::resample`].
+//! The resampler is `rubato`'s, built and held to its bounds in `toyos-resample`.
 
 use rubato::{Resampler, SincFixedOut};
 
@@ -222,7 +222,7 @@ pub(crate) fn open_stream(
     }
 
     let resampler = if req.sample_rate != device_sample_rate {
-        let resampler = crate::resample::build(
+        let resampler = toyos_resample::build(
             req.sample_rate,
             device_sample_rate,
             device_period_frames as usize,
