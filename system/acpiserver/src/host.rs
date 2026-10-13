@@ -720,7 +720,7 @@ pub mod tests {
     pub const EC_COMMAND: u64 = 0x66;
 
     /// A kernel that answers reads from bytes at addresses, each range with a
-    /// memory type, refuses `kept` ranges as the real one refuses memory of a
+    /// memory type, refuses `typed_refused` ranges as the real one refuses memory of a
     /// type it passes no access to and every other address as it refuses RAM,
     /// writes memory where the real one does, which later reads see, but a
     /// register it `keeps`, writes a listed function's configuration space,
@@ -731,7 +731,7 @@ pub mod tests {
         /// The bytes of `memory` a write changed, by address.
         pub written: RefCell<std::collections::BTreeMap<u64, u8>>,
         /// `(start, end, memory type)`.
-        pub kept: Vec<(u64, u64, u8)>,
+        pub typed_refused: Vec<(u64, u64, u8)>,
         /// `(start, end)` of what the kernel drives, refused as device memory.
         pub driven: Vec<(u64, u64)>,
         /// `(start, end)` of registers the kernel keeps, whose write is
@@ -815,7 +815,7 @@ pub mod tests {
                         None if self.driven.iter().any(|(start, end)| (*start..*end).contains(&access.address)) => {
                             Answer { made: Err(Refused::DeviceMemory), memory_type: UNLISTED }
                         }
-                        None => match self.kept.iter().find(|(start, end, _)| (*start..*end).contains(&access.address)) {
+                        None => match self.typed_refused.iter().find(|(start, end, _)| (*start..*end).contains(&access.address)) {
                             Some(&(.., memory_type)) => Answer { made: Err(Refused::MemoryType), memory_type },
                             None => Answer { made: Err(Refused::UsableMemory), memory_type: 7 },
                         },
@@ -1010,7 +1010,7 @@ pub mod tests {
         use toyos_aml::Access::{Byte, DWord, QWord};
         let mut kernel = machine();
         kernel.memory.push((0x7fb0_0000, 9, vec![0; 8]));
-        kernel.kept = vec![(0xfe00_0000, 0xfe00_1000, 5)];
+        kernel.typed_refused = vec![(0xfe00_0000, 0xfe00_1000, 5)];
         let mut host = Firmware::new(&kernel);
         assert_eq!(host.write(Address::Memory(NVS + 4), DWord, 0xdead_beef), Ok(()));
         assert_eq!(host.read(Address::Memory(NVS), QWord), Ok(0xdead_beef_4433_2211));

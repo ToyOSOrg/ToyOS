@@ -74,8 +74,8 @@ Owner: the AML track
 
 ## Exit condition
 
-Each item is fenced once fencing it is cheap, or the orchestrator rules it
-a residual of the trust model and moves it to the policy's module header;
-and the owner rules who owns the other CPUs' range registers, the kernel
-then programming and asserting them, or this issue recording that it never
-will.
+Each item is fenced once fencing it is cheap, or ruled an accepted residual
+of the trust model and removed from this list, with the ruling in the commit
+that removes it; and the owner rules who owns the other CPUs' range
+registers, the kernel then programming and asserting them, or this issue
+recording that it never will.

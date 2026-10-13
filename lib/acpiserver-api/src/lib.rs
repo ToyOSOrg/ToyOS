@@ -39,7 +39,10 @@ pub const OWN: &str = "acpiserver: (this machine's own, quoted in no record) ";
 pub const KEPT_WRITE: &str = "acpiserver: a SystemMemory write the kernel refused KernelRegister was not made, and the evaluation went on";
 
 /// The first write the kernel made into each page of memory the firmware's
-/// map lists nowhere, then the page's type, and into each function's
-/// configuration space: the write itself is the next line, under [`OWN`].
+/// map lists nowhere or types memory-mapped I/O, then the page's type: the
+/// write itself is the next line, under [`OWN`].
 pub const FIRST_WRITE_IN_PAGE: &str = "acpiserver: a SystemMemory write made for the first time in a page of ";
+
+/// The first write the kernel made into each function's configuration
+/// space: the write itself is the next line, under [`OWN`].
 pub const FIRST_WRITE_TO_FUNCTION: &str = "acpiserver: a PCI_Config write made for the first time to a function";

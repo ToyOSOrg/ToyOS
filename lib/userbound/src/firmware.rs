@@ -123,7 +123,8 @@ const KEPT: [(u64, u64); 4] = [
     (0x5410, 0x5418),
     // §3.4.5 INTRDIRCTL: how a lowest-priority MSI picks its CPU.
     (0x5418, 0x541C),
-    // §3.3.31 PACKAGE_RAPL_LIMIT, PL1 and PL2: the performance track's
+    // §3.3.31 PACKAGE_RAPL_LIMIT, PL1 and PL2: the performance track's,
+    // which plans to write it; nothing writes it yet
     // (`issues/the-kernel-owns-cpu-performance-state.md`).
     (0x59A0, 0x59A8),
 ];

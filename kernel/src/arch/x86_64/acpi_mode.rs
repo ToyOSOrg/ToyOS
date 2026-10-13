@@ -683,12 +683,12 @@ fn config(hardware: &Hardware, _acting: &Holder, segment: u16, function: PciFunc
     Ok(0)
 }
 
-/// Whether a read of `len` bytes at `at` through the direct map is uncached:
+/// Whether an access of `len` bytes at `at` through the direct map is uncached:
 /// its leaves select the PAT's write-back entry, under which the range
 /// registers decide (Intel SDM Vol. 3A, Table 12-7). The boot processor's
 /// decide it, as read at boot, so the answer is one whichever CPU asks: a
 /// CPU whose own are off answers nothing of what firmware typed the range,
-/// and reads it uncached all the same.
+/// and accesses it uncached all the same.
 fn uncached(at: u64, len: u64) -> bool {
     let (def_type, pairs) = super::mtrr::boot();
     kernel::mtrr::range_type(def_type, pairs.iter().copied(), at, at + (len - 1)).typed_uncacheable()
