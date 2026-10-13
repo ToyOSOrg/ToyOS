@@ -137,6 +137,55 @@ fn retain_active(streams: &mut Vec<ClientStream>) {
     });
 }
 
+/// How long one wait of the mix loop may last, and the grid point it is armed
+/// on, `now` being the instant it is armed. **With no client it arms no timer
+/// at all**, so an audience of zero costs no wake; before the DLL locks there is
+/// no prediction, and the wait is one period.
+fn armed(streaming: bool, dll: &Dll, period_nanos: u64, now: f64) -> (u64, Option<f64>) {
+    if !streaming {
+        return (u64::MAX, None);
+    }
+    match dll.t_estimated {
+        None => (period_nanos, None),
+        Some(t_est) => {
+            let target = if t_est > now {
+                t_est
+            } else {
+                // Past due: arm for the next future grid point, not a
+                // blind full period from now.
+                let k = ((now - t_est) / dll.period).floor() + 1.0;
+                t_est + k * dll.period
+            };
+            // timeout 0 is the kernel's non-blocking sentinel
+            (((target - now) as u64).max(1), Some(t_est))
+        }
+    }
+}
+
+/// The free list a wake fills from. On a [`Pipeline::Ring`] it is the engine's
+/// to state and never a tally kept across a wake: a stopped engine holds no
+/// period, so the whole ring is the next client's prime; a running one with no
+/// client to mix for is given every period back rather than holding one it
+/// would replay.
+fn fillable(pipeline: Pipeline, started: bool, streaming: bool, free_mask: u32, num_buffers: usize) -> u32 {
+    match pipeline {
+        Pipeline::Queue => free_mask,
+        Pipeline::Ring if !started => (1u32 << num_buffers) - 1,
+        Pipeline::Ring if !streaming => 0,
+        Pipeline::Ring => free_mask,
+    }
+}
+
+/// Whether a free period is left unfilled for a client that is mid-refill,
+/// which `mid_refill` is asked only where it could decide: on a
+/// [`Pipeline::Queue`], and only while what is already on the wire
+/// (`unplayed_nanos`) outlasts the deferral floor. A ring's engine reaches the
+/// period again whatever soundserver does, so there a deferral buys the very
+/// gap it exists to avoid.
+fn defers(pipeline: Pipeline, floor: Option<u64>, mid_refill: impl FnOnce() -> bool, unplayed_nanos: u64) -> bool {
+    pipeline == Pipeline::Queue && floor.is_some_and(|floor| unplayed_nanos >= floor) && mid_refill()
+}
+
 pub(crate) fn mix_thread(
     backend: &mut dyn Backend,
     cmd_ring: &CommandRing,
@@ -262,29 +311,8 @@ pub(crate) fn mix_thread(
         // Lateness is only defined relative to an instant soundserver asked to be
         // woken at, and two waits name none: the idle path arms no timer
         // at all, and before the DLL locks there is no prediction to arm on.
-        let mut armed_on: Option<f64> = None;
-
-        let timeout = if streams.is_empty() {
-            u64::MAX
-        } else {
-            match dll.t_estimated {
-                None => period_nanos,
-                Some(t_est) => {
-                    let now = toyos_abi::clock::nanos_since_boot() as f64;
-                    let target = if t_est > now {
-                        t_est
-                    } else {
-                        // Past due: arm for the next future grid point, not a
-                        // blind full period from now.
-                        let k = ((now - t_est) / dll.period).floor() + 1.0;
-                        t_est + k * dll.period
-                    };
-                    armed_on = Some(t_est);
-                    // timeout 0 is the kernel's non-blocking sentinel
-                    ((target - now) as u64).max(1)
-                }
-            }
-        };
+        let (timeout, armed_on) =
+            armed(!streams.is_empty(), &dll, period_nanos, toyos_abi::clock::nanos_since_boot() as f64);
 
         poller.watch_raw(backend.handle(), READABLE, TOKEN_AUDIO);
         poller.watch_raw(cmd_pipe_read, READABLE, TOKEN_CMD);
@@ -440,13 +468,7 @@ pub(crate) fn mix_thread(
         // soundserver's: that is the free list the next client's prime fills, and
         // it starts at the cursor because the engine froze inside the period
         // after the last one it completed and carries on there.
-        if pipeline == Pipeline::Ring {
-            if !started {
-                free_mask = (1u32 << num_buffers) - 1;
-            } else if streams.is_empty() {
-                free_mask = 0;
-            }
-        }
+        free_mask = fillable(pipeline, started, !streams.is_empty(), free_mask, num_buffers);
         // Where the fill starts: the beginning of the run soundserver may write,
         // which is as many periods back from where the engine now stands as
         // there are of them. A stopped engine's whole lap lands on the same
@@ -499,13 +521,8 @@ pub(crate) fn mix_thread(
             // in time: the client's period lands one period later than the
             // engine wanted it either way.
             let now = toyos_abi::clock::nanos_since_boot();
-            let mid_refill = pipeline == Pipeline::Queue
-                && refill_floor_nanos.is_some()
-                && streams.iter().any(|s| s.is_streaming() && s.slot_reader.peek().is_none());
-            if mid_refill
-                && refill_floor_nanos
-                    .is_some_and(|floor| playout_until_ns.saturating_sub(now) >= floor)
-            {
+            let mid_refill = || streams.iter().any(|s| s.is_streaming() && s.slot_reader.peek().is_none());
+            if defers(pipeline, refill_floor_nanos, mid_refill, playout_until_ns.saturating_sub(now)) {
                 deferred |= 1 << idx;
                 stats.deferred += 1;
                 continue;
@@ -798,6 +815,40 @@ pub(crate) fn null_sink_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **soundserver with no client costs no CPU and starts no stream.** Its
+    /// wait arms no timer, and a ring it was playing on is given every period
+    /// back, so nothing is filled: the stream stops once the pipeline plays
+    /// out, and only a client's connect, a command, wakes it.
+    #[test]
+    fn with_no_client_the_mix_loop_arms_no_timer_and_fills_nothing() {
+        let mut locked = Dll::new(1e6);
+        locked.update(5e6, 1);
+        for dll in [Dll::new(1e6), locked] {
+            assert_eq!(armed(false, &dll, 1_000_000, 4e6), (u64::MAX, None));
+        }
+        assert_eq!(fillable(Pipeline::Ring, true, false, 0b1111, 4), 0, "a running ring with no client is handed every period back");
+        assert_eq!(armed(true, &Dll::new(1e6), 1_000_000, 4e6), (1_000_000, None), "a client's first wait is a period");
+    }
+
+    /// **A client stalled past a lap of a ring that replays every period.** No
+    /// period is deferred for it, however much is on the wire, so each the
+    /// engine hands back is filled — the stall's silence counted, never a
+    /// replay — and after a suspend the resume primes the whole ring; a queue
+    /// defers for the same client while the wire outlasts its floor.
+    #[test]
+    fn a_ring_defers_no_period_for_a_stalled_client_and_resumes_from_the_whole_ring() {
+        let floor = Some(2_000_000);
+        let stalled = || true;
+        assert!(!defers(Pipeline::Ring, floor, stalled, u64::MAX));
+        assert!(defers(Pipeline::Queue, floor, stalled, 2_000_000));
+        assert!(!defers(Pipeline::Queue, floor, || false, u64::MAX), "a client that has a period ready is mixed");
+        assert!(!defers(Pipeline::Queue, floor, stalled, 1_999_999), "past the floor a queue fills with silence");
+        assert!(!defers(Pipeline::Queue, None, stalled, u64::MAX), "with no floor nothing is deferred");
+        assert_eq!(fillable(Pipeline::Ring, false, true, 0, 4), 0b1111, "a stopped ring's resume primes every period");
+        assert_eq!(fillable(Pipeline::Ring, true, true, 0b0110, 4), 0b0110, "a running ring fills what it handed back");
+        assert_eq!(fillable(Pipeline::Queue, false, true, 0b0010, 4), 0b0010);
+    }
 
     fn window(submitted: u32, underruns: u32, drains: u32, late_wakes: u32) -> MixStats {
         let mut stats = MixStats::default();

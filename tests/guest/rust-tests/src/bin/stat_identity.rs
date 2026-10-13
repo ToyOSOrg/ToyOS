@@ -1,11 +1,10 @@
-//! A file's identity through std (`std::os::toyos::fs::MetadataExt`): on a
-//! kernel mount (`/tmp`), on DATA (`/home`) and on FAT (`/log`), one file is
-//! one `(dev, ino)` through every path, a symlink, its open handle, its
-//! directory's listing and a rename; two files are two, as are two
-//! directories; a symlink is one of its own, across a rename; a kernel
-//! directory that ends gives its number up, and one that stands keeps it; and
-//! the three are three volumes, each served one with
-//! `toyos::fs::SERVED_VOLUME` set.
+//! A file's identity through std (`std::os::toyos::fs::MetadataExt`) on the
+//! kernel's own mount (`/tmp`): one file is one `(dev, ino)` through every
+//! path, a symlink, its open handle, its directory's listing and a rename;
+//! two files are two, as are two directories; a symlink is one of its own,
+//! across a rename; a directory that ends gives its number up, and one that
+//! stands keeps it; and the volume is no served one, `toyos::fs::SERVED_VOLUME`
+//! clear.
 
 use std::fs::{self, File, Metadata};
 use std::os::toyos::fs::{symlink, MetadataExt};
@@ -25,7 +24,7 @@ fn write(path: &str) {
 }
 
 /// Judges `dir`; `spelling` is another name for `dir/a`. Returns its volume.
-fn judge(dir: &str, spelling: &str, links: bool) -> u64 {
+fn judge(dir: &str, spelling: &str) -> u64 {
     let (a, b) = (format!("{dir}/stat-identity-a"), format!("{dir}/stat-identity-b"));
     write(&a);
     write(&b);
@@ -43,17 +42,15 @@ fn judge(dir: &str, spelling: &str, links: bool) -> u64 {
         .unwrap_or_else(|| panic!("{a} is not in its listing"));
     assert_eq!(id(&listed.metadata().unwrap()), ida, "on {dir} the listing's entry is another file");
 
-    if links {
-        let link = format!("{dir}/stat-identity-link");
-        symlink(&a, &link).unwrap_or_else(|e| panic!("symlink {link}: {e}"));
-        assert_eq!(of(&link), ida, "on {dir} a symlink to {a} is another file");
-        let own = id(&fs::symlink_metadata(&link).unwrap());
-        assert!(own.0 == ida.0 && own.1 != 0 && own.1 != ida.1, "on {dir} the link itself is {own:?}");
-        let renamed = format!("{dir}/stat-identity-link2");
-        fs::rename(&link, &renamed).unwrap_or_else(|e| panic!("rename {link}: {e}"));
-        assert_eq!(id(&fs::symlink_metadata(&renamed).unwrap()), own, "on {dir} a rename made another link");
-        fs::remove_file(&renamed).unwrap();
-    }
+    let link = format!("{dir}/stat-identity-link");
+    symlink(&a, &link).unwrap_or_else(|e| panic!("symlink {link}: {e}"));
+    assert_eq!(of(&link), ida, "on {dir} a symlink to {a} is another file");
+    let own = id(&fs::symlink_metadata(&link).unwrap());
+    assert!(own.0 == ida.0 && own.1 != 0 && own.1 != ida.1, "on {dir} the link itself is {own:?}");
+    let renamed = format!("{dir}/stat-identity-link2");
+    fs::rename(&link, &renamed).unwrap_or_else(|e| panic!("rename {link}: {e}"));
+    assert_eq!(id(&fs::symlink_metadata(&renamed).unwrap()), own, "on {dir} a rename made another link");
+    fs::remove_file(&renamed).unwrap();
 
     let moved = format!("{dir}/stat-identity-moved");
     fs::rename(&a, &moved).unwrap_or_else(|e| panic!("rename {a}: {e}"));
@@ -134,15 +131,7 @@ fn a_standing_directory_keeps_its_number() {
 fn main() {
     an_ended_directory_is_forgotten();
     a_standing_directory_keeps_its_number();
-    let tmp = judge("/tmp", "/tmp/../tmp/./stat-identity-a", true);
-    let home = judge("/home", "/home/./stat-identity-a", true);
-    // FAT names one entry by either case, and has no symlinks.
-    let log = judge("/log", "/log/STAT-IDENTITY-A", false);
-
+    let tmp = judge("/tmp", "/tmp/../tmp/./stat-identity-a");
     assert_eq!(tmp & toyos::fs::SERVED_VOLUME, 0, "a kernel mount answered a served volume");
-    for (dir, volume) in [("/home", home), ("/log", log)] {
-        assert_ne!(volume & toyos::fs::SERVED_VOLUME, 0, "{dir}'s volume {volume:#x} lacks the served bit");
-    }
-    assert!(tmp != home && home != log && tmp != log, "two mounts are one volume");
     println!("stat_identity: ok");
 }

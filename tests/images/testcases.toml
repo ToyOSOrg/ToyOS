@@ -16,8 +16,8 @@ syscap = ["logread"]
 serves = ["log"]
 
 # The machine's ACPI fixed hardware, as `images/system.toml` serves it: on the T14
-# every row of this image runs in ACPI mode, and on q35 `acpi_power_button`
-# presses the button it serves.
+# every row of this image runs in ACPI mode, and on q35 the stop tests power off
+# on the sleep type it hands the kernel.
 [programs.acpiserver]
 service = true
 devices = ["acpi"]
@@ -41,9 +41,9 @@ syscap = ["rt"]
 # carried it would make vacuous. `run shutdown` does not use it: the applet asks
 # the supervisor through the `power` connector, and the supervisor has `logkeeper` make the log whole
 # before it stops the machine.
-# `roster` because guest binaries read `SYS_SYSINFO`'s per-thread entries —
-# soundserver's, for the idle-suspend certification, and their own, which arrive in
-# the same machine-wide answer and have no narrower question in the ABI. It is
+# `roster` because guest binaries read their own of `SYS_SYSINFO`'s per-thread
+# entries, which arrive in the same machine-wide answer as every other process's
+# and have no narrower question in the ABI. It is
 # also what `endowment_denied` narrows *away* to prove the refusal, so an estate
 # without it would make that arm vacuous rather than red.
 # `counters` and `trace` because `counters_read` reads every counter there is,
@@ -56,12 +56,6 @@ syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace"]
 
 [programs.toybox]
 receives = ["soundserver"]
-
-# `disk_backtrace` names its child's crash record with it.
-[programs.symbolize]
-
-# `toyfetch_reports` runs it, holding nothing, as the image's row does.
-[programs.toyfetch]
 
 # One xHCI controller driven from userland: `usbd_spare` claims the controller
 # the kernel was told to leave alone (`xhci-leave=`, `pci:1b36:000d` on the
@@ -84,9 +78,8 @@ receives = ["soundserver"]
 "bin/reboot" = "/system/bin/toybox"
 "bin/rm" = "/system/bin/toybox"
 "bin/shutdown" = "/system/bin/toybox"
-# The shipped audio client, and the one the T14 hangs on. The raw-API tone in
-# `toyos-rust-tests` drains the same sink perfectly, so a suite that ran only
-# that one certified a path no user takes.
+# The one applet that needs the `soundserver` this image's toybox receives:
+# `endowment_denied` holds every other applet's grant of it as declared.
 "bin/tone" = "/system/bin/toybox"
 
 # The block service: the NVMe controller this machine's DATA is on, driven
