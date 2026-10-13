@@ -183,7 +183,10 @@ Beside that order, each waiting on something outside it:
        to the owner of input over the `input` port and mass storage over
        `toyos-blockring`. A USB keyboard's transitions never reach the
        kernel, whose keyboard and mouse streams go when their last kernel
-       source leaves (the ruling on #899, applied to usbd on #901).
+       source leaves (the ruling on #899, applied to usbd on #901). It
+       depends on stage 7 step 2 landing first, because at step 10 usbd's
+       is the kernel's last input source (the ruling on #904,
+       https://github.com/ToyOSOrg/ToyOS/pull/904#issuecomment-6139079945).
        Its decoders are `toyos-xhci`'s Bulk-Only and SCSI modules and
        `toyos-usbhid`. **Exit**: the kernel's part, usbd's claims handed
        over again at its death: the controller's by `usbd_drives_the_spare`
