@@ -87,13 +87,20 @@ const FONTS_ONLY: &[&str] = &["OFL-1.1"];
 /// CDLA-Permissive-2.0 for the Mozilla roots.
 const DATA_ONLY: &[&str] = &["CDLA-Permissive-2.0"];
 
-/// What a licence is judged as: [`FONTS_ONLY`] passes only for a font and
-/// [`DATA_ONLY`] only for the trust roots.
+/// Allowed for a [`Terms::Firmware`] row, and nowhere else: the owner's
+/// ruling that vendor firmware a device or CPU verifies by its maker's
+/// signature may ship, pinned and unmodified (root `CLAUDE.md`).
+const FIRMWARE_ONLY: &[&str] = &["LicenseRef-Intel-Microcode"];
+
+/// What a licence is judged as: [`FONTS_ONLY`] passes only for a font,
+/// [`DATA_ONLY`] only for the trust roots and [`FIRMWARE_ONLY`] only for
+/// vendor firmware.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scope {
     Code,
     Font,
     Data,
+    Firmware,
 }
 
 impl Scope {
@@ -103,6 +110,7 @@ impl Scope {
                 Scope::Code => false,
                 Scope::Font => FONTS_ONLY.contains(&id),
                 Scope::Data => DATA_ONLY.contains(&id),
+                Scope::Firmware => FIRMWARE_ONLY.contains(&id),
             }
     }
 }
@@ -119,12 +127,15 @@ pub enum Terms {
     /// A font's glyphs, or a raster of them, under an SPDX expression: the one
     /// place [`FONTS_ONLY`] passes.
     Font(&'static str),
+    /// Vendor firmware a device or CPU verifies by its maker's signature,
+    /// under an SPDX expression: the one place [`FIRMWARE_ONLY`] passes.
+    Firmware(&'static str),
 }
 
 impl Terms {
     fn expr(self) -> &'static str {
         match self {
-            Terms::Spdx(e) | Terms::Font(e) => e,
+            Terms::Spdx(e) | Terms::Font(e) | Terms::Firmware(e) => e,
         }
     }
 }
@@ -577,13 +588,13 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "kernel/microcode/intel-ucode/06-8c-01",
         "efe83e312b90f7fe4b8f75260087edf03e048d2f4f80caef2ef631c842714bb3",
         "NOTICE",
-        Terms::Spdx("LicenseRef-Intel-Microcode"),
+        Terms::Firmware("LicenseRef-Intel-Microcode"),
     ),
     (
         "kernel/microcode/intel-ucode/06-cc-02",
         "4e43bb4d23c3638f8c16967d61e8f6456ae0da2ddd1da82ab579a50715147bb1",
         "NOTICE",
-        Terms::Spdx("LicenseRef-Intel-Microcode"),
+        Terms::Firmware("LicenseRef-Intel-Microcode"),
     ),
 ];
 
@@ -1136,6 +1147,7 @@ fn judge_files(ledger: &[Row], tracked: &[String], shipping: &Shipping, report: 
             let scope = match terms {
                 Terms::Spdx(_) => Scope::Code,
                 Terms::Font(_) => Scope::Font,
+                Terms::Firmware(_) => Scope::Firmware,
             };
             report.judge(Finding::at(Kind::File, path, terms.expr(), String::new()), scope);
         }
@@ -1493,6 +1505,12 @@ mod tests {
         assert!(verdict_of("CDLA-Permissive-2.0").is_some(), "CDLA passed outside data");
         assert!(judge_licence("CDLA-Permissive-2.0", Scope::Font).is_some(), "CDLA passed for a font");
         assert_eq!(judge_licence("CDLA-Permissive-2.0", Scope::Data), None);
+        for firmware in FIRMWARE_ONLY {
+            assert!(verdict_of(firmware).is_some(), "{firmware} passed outside firmware");
+            assert!(judge_licence(firmware, Scope::Font).is_some(), "{firmware} passed for a font");
+            assert_eq!(judge_licence(firmware, Scope::Firmware), None);
+        }
+        assert!(judge_licence("OFL-1.1", Scope::Firmware).is_some(), "OFL passed as firmware");
         assert_eq!(verdict_of("MPL-2.0"), None);
     }
 

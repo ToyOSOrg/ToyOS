@@ -4,7 +4,7 @@
 
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
-use super::{apic, control_regs, idt, ioapic, pat, percpu};
+use super::{apic, control_regs, idt, ioapic, microcode, pat, percpu};
 use crate::drivers::acpi::{self, MadtInfo};
 use crate::log;
 use crate::mm::Region;
@@ -58,6 +58,10 @@ pub fn after_console(_args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     // `CD` — which would make every mapping uncacheable whatever the PAT
     // says — ends here.
     control_regs::init_cr0(0);
+    // The first point with every channel a refusal reaches, and before
+    // anything reads what an update changes: `random::key`'s RDRAND and
+    // RDSEED, and `control_regs::init`'s CPUID.
+    microcode::load(0);
 
     // The read-back `pat::init` owes, on a boot that now has three channels to
     // carry a refusal.

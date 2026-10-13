@@ -815,6 +815,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
     ),
     (
+        // Every CPU's microcode line, held to what its bench is held to:
+        // `microcode_on_metal` says which machine is held to what.
+        "microcode",
+        metal::Metal { arms: METALCASE, judge: |b| microcode_on_metal(b[0].kernel().text(), b[0].cpus()?) },
+    ),
+    (
         // Two boots the suite already flashes: the device boot writes and
         // fsyncs megabytes before its reset, and `metalcase` is the same reset
         // with no job behind it.
@@ -4347,6 +4353,93 @@ fn ioapic_topology(log: &str) -> Result<(), String> {
     }
     eprintln!("  [ioapic] {} unit(s), overrides {isos}", units.len());
     Ok(())
+}
+
+/// What each CPU's `microcode:` line says: one line from each CPU this
+/// machine brought up, all of one signature, none refused, and each saying
+/// what a bench of that signature is held to.
+///
+/// - **The T14**, 0x806c1: every CPU runs 0xbe, the update Intel's
+///   `06-8c-01` holds for it, whether it found it `current` or `loaded` it.
+/// - **The AMD bench**, 0x860f01: ToyOS has no AMD loader, and every CPU says
+///   so and reads nothing.
+fn microcode_on_metal(log: &str, cpus: u32) -> Result<(), String> {
+    const T14: u32 = 0x0008_06c1;
+    const AMD_BENCH: u32 = 0x0086_0f01;
+    let lines = microcode_lines(log)?;
+    let ids: BTreeSet<u32> = lines.iter().map(|line| line.cpu).collect();
+    let want: BTreeSet<u32> = (0..cpus).collect();
+    if ids != want || lines.len() != want.len() {
+        return Err(format!("expected one microcode line from each of {want:?}, got {lines:?}"));
+    }
+    let signature = lines[0].signature;
+    if let Some(other) = lines.iter().find(|line| line.signature != signature) {
+        return Err(format!("cpu0 is signature {signature:#x} and {other:?} is not"));
+    }
+    let (holds, held_to): (fn(&MicrocodeSaid) -> bool, &str) = match signature {
+        T14 => (
+            |said| matches!(said, MicrocodeSaid::Read { outcome, running: 0xbe } if ["current", "loaded"].contains(&outcome.as_str())),
+            "every CPU runs 0xbe, which Intel's 06-8c-01 holds for it",
+        ),
+        AMD_BENCH => (
+            |said| matches!(said, MicrocodeSaid::Unread(why) if why == "ToyOS has no Amd microcode loader"),
+            "every CPU says ToyOS has no Amd microcode loader",
+        ),
+        _ => return Err(format!("no bench of signature {signature:#x} says what its CPUs are held to")),
+    };
+    if let Some(line) = lines.iter().find(|line| !holds(&line.said)) {
+        return Err(format!("{line:?}: on signature {signature:#x} {held_to}"));
+    }
+    eprintln!("  [microcode] {} CPUs of signature {signature:#x}: {held_to}", lines.len());
+    Ok(())
+}
+
+/// One `microcode:` line, the fields [`microcode_on_metal`] holds.
+#[derive(Debug)]
+struct MicrocodeLine {
+    cpu: u32,
+    signature: u32,
+    said: MicrocodeSaid,
+}
+
+#[derive(Debug)]
+enum MicrocodeSaid {
+    /// It read its revision: `loaded`, `current`, `refused`, or `loads` for
+    /// one that loads nothing, and the revision it runs.
+    Read { outcome: String, running: u32 },
+    /// It read nothing, for this reason.
+    Unread(String),
+}
+
+/// Every `microcode:` line in `log`, or the first CPU that refused the update
+/// it was handed, on any machine.
+fn microcode_lines(log: &str) -> Result<Vec<MicrocodeLine>, String> {
+    let mut out = Vec::new();
+    for line in log.lines() {
+        let Some(rest) = line.split("microcode: cpu").nth(1) else { continue };
+        let words: Vec<&str> = rest.split_whitespace().collect();
+        let field = |name: &str| words.iter().position(|w| *w == name).and_then(|at| words.get(at + 1));
+        let hex = |name: &str| -> Option<u32> { u32::from_str_radix(field(name)?.trim_start_matches("0x"), 16).ok() };
+        let unreadable = || format!("unreadable microcode line: {line:?}");
+        let said = match words.iter().position(|w| *w == "found") {
+            Some(found) => MicrocodeSaid::Read {
+                outcome: words.get(found + 2).ok_or_else(unreadable)?.to_string(),
+                running: hex("running").ok_or_else(unreadable)?,
+            },
+            None => MicrocodeSaid::Unread(rest.split_once("loads nothing: ").ok_or_else(unreadable)?.1.to_string()),
+        };
+        out.push(MicrocodeLine {
+            cpu: words.first().and_then(|id| id.parse().ok()).ok_or_else(unreadable)?,
+            signature: hex("signature").ok_or_else(unreadable)?,
+            said,
+        });
+        if let Some(line @ MicrocodeLine { said: MicrocodeSaid::Read { outcome, running }, .. }) = out.last() {
+            if outcome == "refused" {
+                return Err(format!("cpu{} refused the update it was handed and runs {running:#x}: {line:?}", line.cpu));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Every CPU's `CR0`, `CR4` and `XCR0`, against what a CPU running this

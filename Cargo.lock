@@ -1831,6 +1831,7 @@ dependencies = [
  "toyos-gpt",
  "toyos-hda",
  "toyos-its",
+ "toyos-microcode",
  "toyos-pci",
  "toyos-phys",
  "toyos-ps2",
@@ -4279,6 +4280,9 @@ dependencies = [
 [[package]]
 name = "toyos-microcode"
 version = "0.1.0"
+dependencies = [
+ "toyos-cpuvuln",
+]
 
 [[package]]
 name = "toyos-mixer"
