@@ -17,8 +17,14 @@ The same launch with only the machine changed to
 by hand) arms the ITS and maps each claim's DeviceID to its slot's LPI,
 and still hands over none: each of the four is refused with `its BAR was
 moved onto 8 64-bit address(es) inside the windows firmware declared and
-the function answered at none of them`, its config space answering
-`0x0f0107ff` and the moved BAR `0xffffffff` (or another function's ID).
+the function answered at none of them` (lines 343, 418, 450, 487 of
+[the boot's log](https://github.com/ToyOSOrg/evidence/blob/e626cced7ab73c04efdbbfd0b98a2f0a0ff8d86b/fix2-60f08b937/aarch64-its-boot.log)).
+Each answers at its firmware BAR: `0x0f0107ff`, `0x79000000`,
+`0x30bf8024` and `0x00000103` (lines 327, 386, 433, 470). At every
+address it is moved onto the read is `0xffffffff`, except the first,
+`0x4010000000`, the ECAM base (line 212), which line 225 lists among the
+windows firmware declared: there the NVMe's read is `0x00081b36`
+(line 327) and the other three's `0x00000000`.
 The kernel's own xHCI driver is given no LPI there (`not armed — a driver
 in this kernel is given no LPI`) and initialises no controller, so no USB
 keyboard reaches the compositor, which panics on "the manifest gives this
