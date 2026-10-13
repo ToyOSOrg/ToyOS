@@ -4406,6 +4406,15 @@ name = "toyos-random"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-root"
+version = "0.1.0"
+dependencies = [
+ "getrandom 0.3.4",
+ "toyos-tmpdir",
+ "toyos-update",
+]
+
+[[package]]
 name = "toyos-rootimage"
 version = "0.1.0"
 
@@ -4436,6 +4445,7 @@ name = "toyos-ssh"
 version = "0.1.0"
 dependencies = [
  "ring",
+ "toyos-update",
 ]
 
 [[package]]

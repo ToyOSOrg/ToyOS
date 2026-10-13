@@ -22,6 +22,7 @@ members = [
     "apps/paint",
     "apps/snake",
     "apps/toyfetch",
+    "build/root",
     "build/ssh",
     "kernel",
     "kernel/cpuvuln",

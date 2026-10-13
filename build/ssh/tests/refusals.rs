@@ -131,7 +131,7 @@ fn an_unlisted_key_is_refused_at_the_offer_and_signed() {
     assert_eq!(c.recv(), [failure()]);
     c.sign_in(USER, &stranger).unwrap();
     assert_eq!(c.recv(), [failure()]);
-    let declined = Event::Declined(Declined::Key { user: USER.into(), fingerprint: toyos_ssh::hostkey::fingerprint(&public) });
+    let declined = Event::Declined(Declined::Key { user: USER.into(), fingerprint: toyos_update::repo::fingerprint(&public) });
     assert_eq!(c.events, [declined.clone(), declined]);
     // The authorizer is asked for the user too: another user's key is not
     // this one's.
