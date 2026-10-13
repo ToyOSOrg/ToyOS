@@ -5949,8 +5949,10 @@ struct Bench {
 
 /// The T14: 14 blocks; its `\_S5`'s `SLP_TYPa` read by a byte scan of its
 /// DSDT, with no interpreter; the first processor's commit loads one block,
-/// of 459 bytes; and the controller's `_INI` writes memory outside every
-/// range the map lists, which the owner ruled refused and recorded.
+/// of 459 bytes; and the controller's `_INI` and its hotkey device's write
+/// memory outside every range the map lists, which the owner ruled refused
+/// and recorded
+/// (`issues/the-t14s-controller-and-hotkey-ini-are-refused-for-writes-outside-the-map.md`).
 const T14: Bench = Bench {
     row: "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high",
     blocks: 14,
