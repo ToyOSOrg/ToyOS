@@ -478,13 +478,18 @@ ACPI Interface Specification (302223-007) for a processor's `_OSC` on Intel:
     each expected by its bench by name;
   - each block a processor's `_OSC` loads under ToyOS's claims is loaded;
   - each `_STA` the walk reads is said, and each battery reading is read
-    whole by §6.3.7 and §10.2.2, with no value unknown.
+    whole by §6.3.7 and §10.2.2, with no value unknown but the AMD bench's
+    adapter, `AC unknown` where its ruled `_PSR` refusal leaves the adapter's
+    state absent.
 
 Not in finished:
 
 - concurrent method execution, which §5.5.2 permits and does not require;
 - the PCI host bridges' `_OSC`;
 - sleep states;
+- `_CST`, which no part of this track reads: idle CPUs entering the states
+  it names read it (`issues/idle-cpus-enter-the-c-states-cst-names.md`,
+  #870);
 - `_PDC`, which Intel deprecated in favour of `_OSC` in ACPI 3.0 and which
   ACPI 6.5 does not define.
 
