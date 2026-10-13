@@ -179,9 +179,11 @@ Beside that order, each waiting on something outside it:
 
       Each half measures the kernel's lines and its longest interrupts-off
       and preemption-off windows, by stage 6 step 2's rule.
-   10. **usbd**, stage 5's second half: the whole xHCI moves, HID to the
-       keyboard claim and mass storage over `toyos-blockring`. A USB
-       keyboard's transitions reach the kernel only as usbd's keyboard claim.
+   10. **usbd**, stage 5's second half: the whole xHCI moves, HID delivered
+       to the screen's owner over the `input` port and mass storage over
+       `toyos-blockring`. A USB keyboard's transitions never reach the
+       kernel, whose keyboard and mouse streams go when their last kernel
+       source leaves (the ruling on #899, applied to usbd on #901).
        Its decoders are `toyos-xhci`'s Bulk-Only and SCSI modules and
        `toyos-usbhid`. **Exit**: the kernel's part, usbd's claims handed
        over again at its death: the controller's by `usbd_drives_the_spare`
@@ -305,8 +307,10 @@ Beside that order, each waiting on something outside it:
    **Partly done**: step 1.
    1. **The panic console takes no input, and an `isa` claim grants a process
       exact ports and its ISA lines.** **Done** (#592).
-   2. **ps2server**, the server over that claim, feeding the kernel's keyboard
-      and mouse streams so the merge with USB HID stays where it is; the
+   2. **ps2server**, the server over that claim, delivering to the screen's
+      owner over the `input` port, where userland merges it with USB HID (the
+      ruling on #899); the kernel's keyboard and mouse streams go when their
+      last kernel source leaves; the
       kernel's driver, its vector, its actuators and the
       `keyboard_controller` seam deleted. A keyboard claim is refused while no
       source exists, which the supervisor's order of endowment then decides.
