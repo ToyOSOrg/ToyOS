@@ -1,6 +1,7 @@
 //! Programs `IA32_PAT` with one write-combining entry for the GOP scanout;
 //! SDM Vol. 3A Table 11-7 makes an MTRR range register unnecessary.
 
+use crate::arch::control_regs::flush_global;
 use crate::arch::cpu;
 
 const IA32_PAT: u32 = 0x277;
@@ -57,15 +58,14 @@ pub fn init() {
     unsafe {
         core::arch::asm!("pushfq", "pop {}", "cli", out(reg) flags);
         let cr0 = cpu::read_cr0();
-        let cr4 = cpu::read_cr4();
         // CD set with NW clear is no-fill mode: writes still hit, nothing new caches.
         cpu::write_cr0((cr0 | CR0_CD) & !CR0_NW);
         cpu::wbinvd();
-        flush_tlb(cr4);
+        flush_global();
 
         cpu::wrmsr(IA32_PAT, PAT_VALUE);
 
-        flush_tlb(cr4);
+        flush_global();
         cpu::wbinvd();
         cpu::write_cr0(cr0);
     }
@@ -88,20 +88,7 @@ pub fn check() {
 
 const CR0_NW: u64 = 1 << 29;
 const CR0_CD: u64 = 1 << 30;
-const CR4_PGE: u64 = 1 << 7;
 const RFLAGS_IF: u64 = 1 << 9;
-
-/// Flush every TLB entry, including global ones (SDM Vol. 3A §4.10.4.1).
-/// # Safety
-/// `cr4` must be this CPU's live `CR4`; both arms restore it verbatim.
-unsafe fn flush_tlb(cr4: u64) {
-    if cr4 & CR4_PGE != 0 {
-        cpu::write_cr4(cr4 & !CR4_PGE);
-        cpu::write_cr4(cr4);
-    } else {
-        cpu::write_cr3(cpu::read_cr3());
-    }
-}
 
 /// This CPU's live `IA32_PAT`.
 pub fn msr() -> u64 {

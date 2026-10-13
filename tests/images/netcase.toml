@@ -33,8 +33,6 @@ serves = ["soundserver"]
 devices = ["pci:1af4:1059"]
 syscap = ["rt"]
 
-# `netstack` because `netstack_socket_churn` connects through it and reads its
-# counts.
 [programs.test-runner]
 receives = ["netstack"]
 
