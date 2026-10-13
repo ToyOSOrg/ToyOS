@@ -1197,6 +1197,7 @@ dependencies = [
  "toyos-abi",
  "toyos-blockring",
  "toyos-fat32",
+ "toyos-fat32-check",
  "toyos-gpt",
  "toyos-manifest",
 ]
