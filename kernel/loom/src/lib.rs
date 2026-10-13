@@ -1,15 +1,14 @@
 //! Loom harness for the kernel's memory-ordering primitives.
 //!
-//! `kernel/src/sync.rs`, `kernel/src/shootdown.rs`,
-//! `kernel/src/sched/reap_gate.rs` and `kernel/src/arch/x86_64/i8042/tally.rs` are
-//! compiled into this crate with `feature = "loom"` on, so their atomics and
+//! `kernel/src/sync.rs`, `kernel/src/shootdown.rs` and
+//! `kernel/src/sched/reap_gate.rs` are compiled into this crate with `feature = "loom"` on, so their atomics and
 //! cells resolve to loom's instrumented ones and the models drive the real
 //! primitives rather than transliterations of them — a transliteration is
 //! exactly the divergence risk a model checker is meant to remove. What the
 //! kernel files name through `crate::` is supplied below: the lock takes a
 //! preempt count and a log macro from its environment, and neither is what the
-//! models are about; `shootdown.rs`, `reap_gate.rs` and `tally.rs` name nothing
-//! at all, which is why none of the three has a shim here.
+//! models are about; `shootdown.rs` and `reap_gate.rs` name nothing at all,
+//! which is why neither has a shim here.
 //!
 //! Scope for the lock, stated because it is narrower than the file: the models
 //! drive `try_lock` and `LockGuard::drop`. `lock()`'s spin cannot be modelled —
@@ -378,13 +377,6 @@ pub mod sleeplock;
 /// sleep lock above by `tests/console_handoff.rs`. Atomics and nothing else.
 #[path = "../../src/log/handoff.rs"]
 pub mod log_handoff;
-
-/// The i8042's interrupt tally. `tests/i8042_tally.rs` is the only model whose
-/// subject is a *driver*, and it is here for the reason the others are: the
-/// property is "no reader ever sees this pair disagree", which is a claim about
-/// instants that no guest test can express and that x86's TSO hides.
-#[path = "../../src/arch/x86_64/i8042/tally.rs"]
-pub mod i8042_tally;
 
 /// The panic snapshot's owner and access state, driven together by
 /// `tests/panic_capture.rs`.

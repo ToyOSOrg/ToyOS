@@ -24,7 +24,6 @@ pub mod entry;
 pub mod fpu;
 pub mod hw;
 pub mod irqchip;
-pub mod keyboard_controller;
 pub mod paging;
 pub mod percpu;
 pub mod pio;

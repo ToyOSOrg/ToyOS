@@ -14,17 +14,15 @@ use crate::scheduler::MAX_CPUS;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum IrqSource {
     Xhci = 2,
-    I8042 = 3,
 }
 
 impl IrqSource {
-    pub const COUNT: usize = 2;
+    pub const COUNT: usize = 1;
 
     /// This source's record in a CPU's slots.
     const fn slot(self) -> usize {
         match self {
             Self::Xhci => 0,
-            Self::I8042 => 1,
         }
     }
 }

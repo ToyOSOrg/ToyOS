@@ -554,6 +554,7 @@ dependencies = [
  "toyos-abi",
  "toyos-desktop",
  "toyos-font",
+ "toyos-input",
  "toyos-inspect",
  "toyos-manifest",
  "toyos-window",
@@ -577,6 +578,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-font",
+ "toyos-input",
  "toyos-logstream",
  "toyos-window",
 ]
@@ -1835,7 +1837,6 @@ dependencies = [
  "toyos-microcode",
  "toyos-pci",
  "toyos-phys",
- "toyos-ps2",
  "toyos-quiesce",
  "toyos-random",
  "toyos-rootimage",
@@ -2925,6 +2926,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "ps2server"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-input",
+ "toyos-ps2",
 ]
 
 [[package]]
@@ -4109,6 +4120,7 @@ dependencies = [
  "toyos-fat32",
  "toyos-fat32-check",
  "toyos-gpt",
+ "toyos-input",
  "toyos-keymap",
  "toyos-logstream",
  "toyos-manifest",
@@ -4139,6 +4151,7 @@ name = "toyos-desktop"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
+ "toyos-input",
 ]
 
 [[package]]
@@ -4215,6 +4228,13 @@ name = "toyos-i219"
 version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
+]
+
+[[package]]
+name = "toyos-input"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
 ]
 
 [[package]]
@@ -4501,6 +4521,9 @@ dependencies = [
 [[package]]
 name = "toyos-usbhid"
 version = "0.1.0"
+dependencies = [
+ "toyos-input",
+]
 
 [[package]]
 name = "toyos-userbound"

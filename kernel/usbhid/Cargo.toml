@@ -7,3 +7,7 @@ description = "USB HID boot keyboard and pointer reports in, key transitions and
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
+
+# One keyboard's held set, which the owner of input holds per source too.
+[dependencies]
+toyos-input = { path = "../../lib/input" }

@@ -9,22 +9,24 @@
 assets = ["assets"]
 
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "sshserver", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "sshserver", "test-runner", "ps2server"]
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and writes no file at all, so a
 # boot config without `logkeeper` is a boot whose `/log` is empty —
 # `every_boot_config_runs_logkeeper` is what refuses one.
-# It claims no device and serves no port: its row's authority is `logread`,
-# which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands
-# it every program's output beside that.
+# It claims no device: its row's authority is `logread`, which is
+# `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands
+# it every program's output beside that. `log` is the port it hands a reader
+# the log on.
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log"]
 
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt", "clipboard"]
+serves = ["compositor", "prompt", "clipboard", "input"]
 receives = ["soundserver"]
 devices = ["framebuffer", "keyboard", "mouse"]
 
@@ -45,9 +47,21 @@ devices = ["pci:1af4:1041"]
 service = true
 receives = ["netstack"]
 
-# The union its guest binaries need on this machine shape.
+# The i8042, driven from userland: its ports and its two lines are this
+# program's `isa` claim, and the keys and pointer reports it decodes go to the
+# owner of input over `input`, which no other row may receive
+# (`build/build.rs`). Started again when it ends other than by exit 0, which it
+# says only on a machine with nothing to serve.
+[programs.ps2server]
+restart = true
+receives = ["input"]
+devices = ["isa:0060,0064:1,12"]
+
+
+# The union its guest binaries need on this machine shape; `log` is what
+# `ps2server_hold` reads ps2server's probe off.
 [programs.test-runner]
-receives = ["compositor", "soundserver", "netstack"]
+receives = ["compositor", "soundserver", "netstack", "log"]
 syscap = ["logread"]
 
 # The block service: the NVMe controller this machine's DATA is on, driven
