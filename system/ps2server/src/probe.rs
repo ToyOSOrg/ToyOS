@@ -14,12 +14,12 @@
 //!    (C 10), set 2 is set 1 on the wire, whatever set firmware or a
 //!    predecessor left. The `0xAA` is taken whenever it comes inside the
 //!    stage's ceiling: K 11's 300-500 ms window decides nothing here.
-//! 3. **`0xAD`:** the keyboard holds what it would send (K88 39).
-//! 4. **Aux:** the command byte with the aux interrupt alone and the keyboard
-//!    interface still disabled, `0xA8`; `0xD4 0xFF`, answered `0xFA 0xAA`
-//!    and its id (TP 9, 12), and `0xD4 0xF4` (TP 13). A device that does not
-//!    answer its reset is absent.
-//! 5. **Arming:** the command byte whole, read back with `0x20` while the
+//! 3. **Aux:** the command byte with the aux interrupt alone and the keyboard
+//!    interface disabled again, so the keyboard holds what it would send
+//!    (K88 39); `0xA8`; `0xD4 0xFF`, answered `0xFA 0xAA` and its id (TP 9,
+//!    12), and `0xD4 0xF4` (TP 13). A device that does not answer its reset
+//!    is absent.
+//! 4. **Arming:** the command byte whole, read back with `0x20` while the
 //!    keyboard interface is disabled, so the answer is the controller's; then
 //!    `0xAE`, and the keyboard sends what it held.
 //!
@@ -31,8 +31,7 @@
 
 use crate::bus::*;
 
-/// The controller-only steps' ceiling: the quiet stage, each `0xAD`, the
-/// arming.
+/// The controller-only stages' ceiling: the quiet stage and the arming.
 const CONTROLLER_NS: u64 = 250_000_000;
 /// The keyboard stage's, inside which its reset's `0xAA` is taken.
 pub const KEYBOARD_NS: u64 = 750_000_000;
@@ -98,8 +97,6 @@ impl<C: Controller> Probe<'_, C> {
     fn run(&mut self) -> Result<Probed, Stopped> {
         self.quiet()?;
         let keyboard = self.keyboard()?;
-        let deadline = self.deadline(CONTROLLER_NS);
-        self.command(DISABLE_KEYBOARD, deadline, "0xAD after the keyboard stage")?;
         let aux = self.aux()?;
         if !keyboard && !aux {
             (self.say)("ps2server: neither the keyboard nor a pointer to serve".to_string());
@@ -228,7 +225,7 @@ impl<C: Controller> Probe<'_, C> {
         Ok(true)
     }
 
-    /// Step 4: whether the aux device reports.
+    /// Step 3: whether the aux device reports.
     fn aux(&mut self) -> Result<bool, Stopped> {
         let deadline = self.deadline(AUX_NS);
         self.command_byte(AUX_STAGE, deadline)?;
@@ -280,7 +277,7 @@ impl<C: Controller> Probe<'_, C> {
         Ok(false)
     }
 
-    /// Step 5.
+    /// Step 4.
     fn arm(&mut self, keyboard: bool, aux: bool) -> Result<(), Stopped> {
         let deadline = self.deadline(CONTROLLER_NS);
         let mut byte = CB_SYSTEM_FLAG | CB_KEYBOARD_DISABLED | CB_TRANSLATE;
@@ -494,14 +491,15 @@ mod tests {
         assert!(fake.commands.is_empty(), "a byte written to ports nothing decodes: {:02x?}", fake.commands);
     }
 
+    /// The arming's own byte dropped: the aux stage's is what keeps the
+    /// keyboard interface disabled at the `0x20`, and is read back.
     #[test]
     fn a_command_byte_the_controller_dropped_is_said_by_name() {
         let mut fake = Fake::t14();
-        fake.cb = 0x07;
-        fake.drops_command_byte = true;
+        fake.drops_command_byte = Some(0x57);
         let (probed, said) = probed(&mut fake);
         assert_eq!(probed, Probed::Failed);
-        line(&said, "ps2server: DISABLED — command byte 0x57 did not take (read back 0x17)");
+        line(&said, "ps2server: DISABLED — command byte 0x57 did not take (read back 0x56)");
     }
 
     #[test]

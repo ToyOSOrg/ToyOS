@@ -10,7 +10,7 @@
 //!   acknowledgement arrives as a record and a byte, gives the claim up, and
 //!   has the keyboard acknowledge once more, on a line then masked.
 //! - `dies` holds the next claim: it has the keyboard acknowledge, so a record
-//!   is pending on the claim, and ends without reading it.
+//!   is pending on the claim, and ends having read no record.
 //! - `after` holds the claim after that, and finds no record on it: the next
 //!   claimant is handed the row and none of the dead holder's interrupts.
 
@@ -238,12 +238,13 @@ fn line_on() -> u8 {
 }
 
 /// Hold the claim with the keyboard's line on, have the keyboard acknowledge,
-/// and end once the claim holds a record of it, unread.
+/// and end once the claim holds a record, having read none: a read would
+/// have the kernel announce this claim's first interrupt as `device`'s did.
 fn dies(claim: Device) {
     bind(&claim);
     let config = line_on();
     let poller = Poller::new(1);
-    arm(&poller, &claim);
+    poller.watch(&claim, READABLE, 0);
     acknowledged("with a record pending");
     let mut woke = false;
     poller.wait(1, RECORD.as_nanos() as u64, |_| woke = true);

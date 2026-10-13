@@ -105,8 +105,8 @@ pub struct Fake {
     pub aux: Aux,
     /// Nothing decodes the ports.
     pub absent: bool,
-    /// The controller drops a `0x60`'s byte.
-    pub drops_command_byte: bool,
+    /// The controller drops a `0x60` whose byte is this one.
+    pub drops_command_byte: Option<u8>,
     /// The output buffer is full again the moment it is read.
     pub wedged: bool,
     /// The keyboard's bytes are translated whatever bit 6 says.
@@ -147,7 +147,7 @@ impl Fake {
                 sends: VecDeque::new(),
             },
             absent: false,
-            drops_command_byte: false,
+            drops_command_byte: None,
             wedged: false,
             translates_always: false,
             latency: 0,
@@ -414,7 +414,7 @@ impl Controller for Fake {
     fn write(&mut self, byte: u8) {
         self.written(&format!("the data byte {byte:#04x}"));
         match self.arg.take() {
-            Some(Arg::CommandByte) if self.drops_command_byte => {}
+            Some(Arg::CommandByte) if self.drops_command_byte == Some(byte) => {}
             Some(Arg::CommandByte) => {
                 if self.cb & 0x10 != 0 && byte & 0x10 == 0 {
                     self.kbd_enabled_at = self.now;

@@ -15,12 +15,14 @@ start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "
 # image does. The kernel keeps the record ring and writes no file at all, so a
 # boot config without `logkeeper` is a boot whose `/log` is empty —
 # `every_boot_config_runs_logkeeper` is what refuses one.
-# It claims no device and serves no port: its row's authority is `logread`,
-# which is `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands
-# it every program's output beside that.
+# It claims no device: its row's authority is `logread`, which is
+# `Rights::LOG | Rights::WAIT` on a `SysCap` duplicate, and the supervisor hands
+# it every program's output beside that. `log` is the port it hands a reader
+# the log on.
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+serves = ["log"]
 
 [programs.compositor]
 service = true
@@ -56,9 +58,10 @@ receives = ["input"]
 devices = ["isa:0060,0064:1,12"]
 
 
-# The union its guest binaries need on this machine shape.
+# The union its guest binaries need on this machine shape; `log` is what
+# `ps2server_hold` reads ps2server's probe off.
 [programs.test-runner]
-receives = ["compositor", "soundserver", "netstack"]
+receives = ["compositor", "soundserver", "netstack", "log"]
 syscap = ["logread"]
 
 # The block service: the NVMe controller this machine's DATA is on, driven

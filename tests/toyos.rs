@@ -156,6 +156,9 @@ const RUST_SKIP: &[&str] = &[
     // has a battery: the `acpi_tables_loaded`, `acpi_server_events` and
     // `battery_read` metal rows end their boot on it.
     "acpi_hold",
+    // It waits for ps2server's probe to end, which only a boot that starts
+    // ps2server has: every `metalcase` row ends its boot on it.
+    "ps2server_hold",
     // It waits for the ACPI server's count of its embedded controller's
     // queries, and no guest's machine has that controller: the
     // `acpi_server_events` metal row runs it.
@@ -805,7 +808,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         "app_view",
         metal::Metal { arms: PROCTREECASE, judge: |b| app_view(b[0]) },
     ),
-    // ---- one image: tests/images/metalcase.toml, which runs no job ----
+    // ---- one image: tests/images/metalcase.toml, whose one job is the hold ----
     //
     // The rows after the first read what any boot that hands the machine back
     // writes, so they ride this one.
@@ -824,7 +827,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // Two boots the suite already flashes: the device boot writes and
         // fsyncs megabytes before its reset, and `metalcase` is the same reset
-        // with no job behind it.
+        // with nothing written behind it but the hold's line.
         "usb_reset_hands_devices_back",
         metal::Metal {
             arms: USB_RESET_BOOTS,
@@ -1062,7 +1065,8 @@ fn windows_load_exited() -> String {
 }
 
 /// The two boots the reset ruling is judged on: the device boot for a reset
-/// with megabytes behind it, and `metalcase` for one with no job behind it.
+/// with megabytes behind it, and `metalcase` for one with nothing written
+/// behind it but the hold's line.
 const USB_RESET_BOOTS: &[metal::Arm] = &[
     metal::once(
         devices::BOOT,
@@ -1073,7 +1077,12 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
     metal::once("metalcase", "tests/images/metalcase.toml", &[], &[]),
 ];
 
-const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/images/metalcase.toml", &[], &[])];
+/// `tests/images/metalcase.toml`, ended once ps2server's probe has: a boot
+/// that ended sooner would cut off what `ps2server_arms` reads.
+const METALCASE: &[metal::Arm] = &[metal::Arm {
+    last: Some("test_rs_ps2server_hold"),
+    ..metal::once("metalcase", "tests/images/metalcase.toml", &[], &[])
+}];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
