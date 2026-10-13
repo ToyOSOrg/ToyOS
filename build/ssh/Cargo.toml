@@ -16,3 +16,6 @@ publish = false
 # verify, `chacha20_poly1305_openssh` (made for exactly this packet layout),
 # SHA-256 and the system's randomness.
 ring = "0.17"
+# The one `SHA256:` fingerprint a key is named by, the one the package
+# repository's keys are named by too.
+toyos-update = { path = "../../lib/update" }
