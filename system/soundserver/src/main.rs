@@ -128,7 +128,7 @@ fn run_virtio(ports: Ports, virtio: virtio::Virtio, rate: u32, channels: u8) {
 }
 
 fn run_hda(ports: Ports, claimed: hda::Claimed) {
-    let hda::Claimed { hda, rate, channels, codec } = claimed;
+    let hda::Claimed { hda, rate, channels, master } = claimed;
     let info = hda.info();
     let num_buffers = info.periods as usize;
     let period_bytes = info.period_bytes as usize;
@@ -141,7 +141,7 @@ fn run_hda(ports: Ports, claimed: hda::Claimed) {
 
     run_with_device(
         ports,
-        codec,
+        master,
         "hda",
         &mut HdaBackend { hda, buffers, period_bytes },
         num_buffers,
@@ -153,7 +153,7 @@ fn run_hda(ports: Ports, claimed: hda::Claimed) {
 
 fn run_with_device(
     ports: Ports,
-    codec: Option<hda::Codec>,
+    master: Option<hda::MasterControl>,
     kind: &'static str,
     backend: &mut dyn Backend,
     num_buffers: usize,
@@ -202,7 +202,7 @@ fn run_with_device(
             control_thread(
                 ports.acceptor,
                 ports.volume,
-                codec,
+                master,
                 &cmd_ring2,
                 cmd_pipe.write,
                 device_sample_rate,

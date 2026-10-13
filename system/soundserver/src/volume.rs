@@ -11,7 +11,7 @@ use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_S
 use toyos::ipc::{self, RxStep};
 use toyos::Connection;
 
-use crate::hda::{Answer, Codec};
+use crate::hda::{Answer, MasterControl};
 
 /// The widest request decoded, plus one, so an over-long frame is refused
 /// rather than truncated into a request.
@@ -46,7 +46,7 @@ pub(crate) fn accepted(clients: &mut Vec<VolumeClient>, conn: Connection) {
 }
 
 /// Serve every request the client has framed; `false` once it is to go.
-pub(crate) fn serve(client: &mut VolumeClient, mut codec: Option<&mut Codec>) -> bool {
+pub(crate) fn serve(client: &mut VolumeClient, mut master: Option<&mut MasterControl>) -> bool {
     loop {
         let (msg_type, payload_len) = match client.rx.pump(&client.conn) {
             RxStep::Idle => return true,
@@ -61,9 +61,9 @@ pub(crate) fn serve(client: &mut VolumeClient, mut codec: Option<&mut Codec>) ->
             Request::Step => {
                 let step: VolumeStep = ipc::decode_payload(client.rx.payload(payload_len))
                     .expect("a payload as long as the struct decodes");
-                codec.as_deref_mut().and_then(|codec| codec.step(step.delta))
+                master.as_deref_mut().and_then(|master| master.step(step.delta))
             }
-            Request::Mute => codec.as_deref_mut().and_then(Codec::toggle_mute),
+            Request::Mute => master.as_deref_mut().and_then(MasterControl::toggle_mute),
             Request::Violation => {
                 say!("soundserver: volume protocol violation (msg {msg_type}), disconnecting");
                 return false;

@@ -28,10 +28,6 @@ use toyos_input::{Merge, Pointer, Slot, State};
 use toyos_desktop::clipboard::{Landing, Watch};
 use toyos_desktop::volume::{overlay_rect, Overlay, Request, Requests, Shown};
 use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_STEP, MSG_VOLUME_UNAVAILABLE};
-
-/// The widest answer on the `volume` port, plus one, so an over-long frame is
-/// refused rather than truncated into an answer.
-const VOLUME_KEPT_PAYLOAD: usize = std::mem::size_of::<Volume>() + 1;
 use toyos_desktop::{
     cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, set_mode, tab_action, Chrome,
     CursorStyle, Damage, Desk, Grab, Held, Hit, KeyAction, Level, Point, Port, PromptGate, Rect,
@@ -51,6 +47,10 @@ use crate::{
     FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, INPUT_POLL_HANDLES, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
     VOLUME_POLL_HANDLES,
 };
+
+/// The widest answer on the `volume` port, plus one, so an over-long frame is
+/// refused rather than truncated into an answer.
+const VOLUME_KEPT_PAYLOAD: usize = std::mem::size_of::<Volume>() + 1;
 
 /// The most frames one source's turn takes before the others are served.
 const SOURCE_FRAMES: usize = 64;
@@ -395,7 +395,7 @@ impl Session {
             }
         }
         self.tick_taskbar();
-        if self.overlay.expire(self.boot_nanos()) {
+        if self.overlay.expire(self.overlay_now()) {
             self.damage.add(overlay_rect(&self.desk));
         }
         self.present();
@@ -484,8 +484,8 @@ impl Session {
         true
     }
 
-    /// Nanoseconds on the clock the overlay is timed by.
-    fn boot_nanos(&self) -> u64 {
+    /// Nanoseconds since the session's epoch, the clock the overlay is timed by.
+    fn overlay_now(&self) -> u64 {
         self.epoch.elapsed().as_nanos() as u64
     }
 
@@ -551,7 +551,7 @@ impl Session {
                     return;
                 }
             };
-            self.overlay.answered(shown, self.boot_nanos());
+            self.overlay.answered(shown, self.overlay_now());
             self.damage.add(overlay_rect(&self.desk));
             if let Some(next) = self.volume_requests.answered() {
                 self.send_volume(next);
@@ -1739,7 +1739,7 @@ impl Session {
         }
 
         // Above every window and the taskbar, under the cursor.
-        if let Some(shown) = self.overlay.visible(self.boot_nanos()) {
+        if let Some(shown) = self.overlay.visible(self.overlay_now()) {
             let rect = overlay_rect(&self.desk);
             if regions.iter().any(|r| r.overlaps(rect)) {
                 render::draw_overlay(&self.back.surface, &self.font, rect, &shown.text());

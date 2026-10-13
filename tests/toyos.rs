@@ -149,12 +149,13 @@ const RUST_SKIP: &[&str] = &[
     "readdir_bound",
     // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
     "mkdir_cap",
-    // Audio is judged on the T14 and nowhere else: the `hda_tone` and
-    // `hda_tone_resampled` metal rows run these.
+    // No guest's sound device plays audio: the `hda_tone` and
+    // `hda_tone_resampled` metal rows run these on the T14 and the AMD bench.
     "audio_tone",
     "audio_tone_resampled",
     // It steps the codec's master and reads it back, which no guest's sound
-    // device has: the `hda_volume_step` metal row runs it.
+    // device has: the `hda_volume_step` metal row runs it on the T14 and the
+    // AMD bench.
     "volume_step",
     // It hands the ACPI claim to a server of its own and kills it, which needs
     // a boot that starts none: the `acpi_server_death` metal row runs it on
@@ -470,6 +471,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // A tone through soundserver's HDA path. The T14 and the AMD bench.
         "hda_tone",
         metal::Metal {
             arms: TESTCASES,
@@ -482,6 +484,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // A tone at the device rate the device does not run, through cpal,
         // played to its end with every period covered: soundserver resamples it.
+        // The T14 (44.1 kHz) and the AMD bench (48 kHz).
         "hda_tone_resampled",
         metal::Metal {
             arms: TESTCASES,
@@ -493,7 +496,8 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // One step of the codec's master and back, each read back from the
-        // codec, on the HDA path soundserver configured.
+        // codec, on the HDA path soundserver configured. The T14 and the AMD
+        // bench.
         "hda_volume_step",
         metal::Metal {
             arms: TESTCASES,

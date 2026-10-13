@@ -9,7 +9,7 @@
 //!
 //! What this file itself owns is the I/O: one verb over the immediate-command
 //! registers, the bind, and the stream's run bit. After the claim, the control
-//! thread owns the codec's verbs ([`Codec`]) and the mix thread the run bit
+//! thread owns the codec's verbs ([`MasterControl`]) and the mix thread the run bit
 //! ([`Hda`]).
 
 use std::sync::Arc;
@@ -19,7 +19,7 @@ use toyos_abi::hda::{HdaController, HdaInfo, Reg};
 use toyos_abi::syscall::{RegWidth, SyscallError};
 use toyos_hda::caps::PcmCaps;
 use toyos_hda::config::{self, Master, NoMaster, Setting};
-use toyos_hda::graph::Codec as Graph;
+use toyos_hda::graph::Codec;
 use toyos_hda::path::{PathError, Unchosen};
 use toyos_hda::verb::{Address, Node, Response, Verb};
 use toyos_hda::probe;
@@ -121,7 +121,7 @@ pub struct Hda {
 }
 
 /// The codec's master: the control thread's, which sets and reads it back.
-pub struct Codec {
+pub struct MasterControl {
     link: Link,
     master: Master,
     setting: Setting,
@@ -134,7 +134,7 @@ pub struct Claimed {
     pub channels: u8,
     /// `None` where the path has no master, which soundserver names and serves
     /// as unavailable.
-    pub codec: Option<Codec>,
+    pub master: Option<MasterControl>,
 }
 
 /// Why this machine's HDA controllers cannot carry audio. Each is a line
@@ -234,7 +234,7 @@ struct NoMasterLine(NoMaster);
 
 /// Every listed controller's codecs, walked over its own verb interface, in
 /// list order.
-fn walk(dev: &Arc<HdaDev>, listed: &[HdaController]) -> Vec<Vec<Graph>> {
+fn walk(dev: &Arc<HdaDev>, listed: &[HdaController]) -> Vec<Vec<Codec>> {
     let mut walks = Vec::new();
     for (index, controller) in listed.iter().enumerate() {
         let mut link = Link { dev: dev.clone(), controller: index as u8 };
@@ -323,14 +323,14 @@ impl Hda {
         hda.write(SD_FMT, RegWidth::U16, format as u32).map_err(Refusal::Kernel)?;
         say!("soundserver: hda path configured in {sent} verbs, stream tag {}", info.stream_tag);
 
-        let codec = match config::master(&path) {
-            Ok(master) => Some(Codec { link, master, setting: Setting::TOP }),
+        let master = match config::master(&path) {
+            Ok(master) => Some(MasterControl { link, master, setting: Setting::TOP }),
             Err(why) => {
                 say!("soundserver: hda path has no master ({}); volume answers unavailable", NoMasterLine(why));
                 None
             }
         };
-        Ok(Claimed { hda, rate, channels, codec })
+        Ok(Claimed { hda, rate, channels, master })
     }
 
     pub fn info(&self) -> HdaInfo {
@@ -380,7 +380,7 @@ pub struct Answer {
     pub bottom: u8,
 }
 
-impl Codec {
+impl MasterControl {
     /// Move the level by `delta` positions; a step while muted unmutes.
     pub fn step(&mut self, delta: i32) -> Option<Answer> {
         self.apply(self.master.step(self.setting, delta))
@@ -395,7 +395,10 @@ impl Codec {
     /// unanswered or the answers name no setting.
     fn apply(&mut self, setting: Setting) -> Option<Answer> {
         for verb in self.master.set(setting) {
-            self.link.send(verb)?;
+            if self.link.send(verb).is_none() {
+                say!("soundserver: hda master set went unanswered ({:#010x})", verb.raw());
+                return None;
+            }
         }
         let mut answers = Vec::new();
         for verb in self.master.read() {

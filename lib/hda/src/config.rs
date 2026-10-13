@@ -549,12 +549,11 @@ mod tests {
 
     #[test]
     fn every_setting_reads_back_as_itself() {
-        for (codecs, path) in [laptop(), {
+        for (_, path) in [laptop(), {
             let codecs = fixture::qemu();
             let path = find_output_path(&codecs).unwrap();
             (codecs, path)
         }] {
-            let _ = codecs;
             let master = master(&path).unwrap();
             for position in 0..=master.bottom() {
                 for muted in [false, true] {

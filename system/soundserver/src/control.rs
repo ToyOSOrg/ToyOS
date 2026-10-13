@@ -150,7 +150,7 @@ fn description(device: &Device) -> DeviceDescription {
 pub(crate) fn control_thread(
     acceptor: Acceptor,
     volume_acceptor: Acceptor,
-    mut codec: Option<crate::hda::Codec>,
+    mut master: Option<crate::hda::MasterControl>,
     cmd_ring: &CommandRing,
     cmd_pipe_write: RawHandle,
     device_sample_rate: u32,
@@ -238,7 +238,7 @@ pub(crate) fn control_thread(
         volume_clients.retain_mut(|client| {
             let token = at;
             at += 1;
-            !ready.contains(&token) || volume::serve(client, codec.as_mut())
+            !ready.contains(&token) || volume::serve(client, master.as_mut())
         });
 
         let mut dead: Vec<usize> = Vec::new();

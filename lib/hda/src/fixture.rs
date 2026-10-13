@@ -26,9 +26,8 @@ pub fn qemu() -> Vec<Codec> {
     parse(include_str!("../fixtures/qemu-intel-hda.txt"))
 }
 
-/// The AMD bench's two controllers, as soundserver's walk read them on
-/// 2026-10-13: `03:00.1`, the GPU's display audio, and `03:00.6`, the analog
-/// codec.
+/// The AMD bench's two controllers, as soundserver's walk read them:
+/// `03:00.1`, the GPU's display audio, and `03:00.6`, the analog codec.
 ///
 /// The file is the kernel's `listed as controller` line for each controller's
 /// `STATESTS` and one `m1:` line per verb the walk sent, with the codec's raw
