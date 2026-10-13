@@ -707,6 +707,10 @@ pub enum Profile {
     /// stick's controller behind an AMD-Vi unit, which the kernel finds by the
     /// IVRS and switches off.
     MetalAmdVi,
+    /// [`Profile::MetalAmdVi`] with two of QEMU's `iommu-testdev` behind the
+    /// unit: the only machine on which a translating AMD-Vi unit's refusal
+    /// can be made and read.
+    MetalAmdViTestdev,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
     /// stick on an xHCI, the PL011, a virtio-rng for firmware's
     /// `EFI_RNG_PROTOCOL`, and nothing else — no NIC, NVMe or IOMMU. The
@@ -763,7 +767,8 @@ impl Profile {
             | Self::HeadlessUsbSpare
             | Self::Metal
             | Self::MetalNoX2apic
-            | Self::MetalAmdVi => Arch::X86_64,
+            | Self::MetalAmdVi
+            | Self::MetalAmdViTestdev => Arch::X86_64,
         }
     }
 
@@ -909,8 +914,10 @@ struct Shape {
     /// profile because absence is a shape and because the unit's own
     /// capabilities are what the kernel reads at boot.
     iommu: Option<Unit>,
-    /// `virt`'s SMMUv3, which is a machine property rather than a device.
-    smmu: Smmu,
+    /// Two of QEMU's `iommu-testdev`, behind the machine's unit: on `virt`
+    /// its SMMUv3, a machine property rather than a device, which comes
+    /// with them; on a q35, [`Shape::iommu`].
+    testdevs: Testdevs,
     /// A virtio-rng, which is firmware's alone: edk2's driver puts
     /// `EFI_RNG_PROTOCOL` behind it for the loader's seed, and the kernel
     /// drives no such device. `virt` has it because an HVF guest's CPU has no
@@ -921,13 +928,13 @@ struct Shape {
     virtio_gpu: bool,
 }
 
-/// Whether `virt` has its SMMUv3. With it come two of QEMU's `iommu-testdev`,
-/// whose writes are the only DMA a guest of this suite can aim at an address
-/// of its choosing: a unit no function writes through is a unit no test reads.
+/// Whether a machine has two of QEMU's `iommu-testdev`, whose writes are the
+/// only DMA a guest of this suite can aim at an address of its choosing: a
+/// unit no function writes through is a unit no test reads.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Smmu {
+enum Testdevs {
     Absent,
-    WithTestdev,
+    Two,
 }
 
 /// Where a machine's image and its DATA are. A size is stated because a
@@ -974,7 +981,7 @@ impl Profile {
         match self {
             Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtLowEcam => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
-            Self::VirtSmmu => Shape { smmu: Smmu::WithTestdev, ..Self::Virt.shape() },
+            Self::VirtSmmu => Shape { testdevs: Testdevs::Two, ..Self::Virt.shape() },
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -985,7 +992,7 @@ impl Profile {
                 blockdevs: &[],
                 storage: Storage::Stick { nvme_bytes: 0 },
                 iommu: None,
-                smmu: Smmu::Absent,
+                testdevs: Testdevs::Absent,
                 rng: true,
                 virtio_gpu: false,
             },
@@ -999,7 +1006,7 @@ impl Profile {
                 blockdevs: &[],
                 storage: Storage::Disk { data_bytes: NVME_SMALL },
                 iommu: Some(Unit::Vtd(IOMMU_DEFAULT)),
-                smmu: Smmu::Absent,
+                testdevs: Testdevs::Absent,
                 rng: false,
                 virtio_gpu: false,
             },
@@ -1017,12 +1024,13 @@ impl Profile {
                 blockdevs: &[],
                 storage: Storage::Stick { nvme_bytes: NVME_SMALL },
                 iommu: Some(Unit::Vtd(IOMMU_DEFAULT)),
-                smmu: Smmu::Absent,
+                testdevs: Testdevs::Absent,
                 rng: false,
                 virtio_gpu: false,
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi), ..Self::Metal.shape() },
+            Self::MetalAmdViTestdev => Shape { testdevs: Testdevs::Two, ..Self::MetalAmdVi.shape() },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
@@ -2119,7 +2127,10 @@ fn qemu_command(
     // always been.
     let mut machine = match arch {
         Arch::X86_64 => {
-            assert!(shape.smmu == Smmu::Absent, "a q35 has no SMMUv3");
+            assert!(
+                shape.testdevs == Testdevs::Absent || shape.iommu.is_some(),
+                "an iommu-testdev on a q35 writes through no unit"
+            );
             arch.machine().to_string()
         }
         Arch::Aarch64 => {
@@ -2132,9 +2143,9 @@ fn qemu_command(
                 Profile::VirtLowEcam => format!("{},gic-version=3,highmem-ecam=off", arch.machine()),
                 _ => format!("{},gic-version=3", arch.machine()),
             };
-            match shape.smmu {
-                Smmu::Absent => machine,
-                Smmu::WithTestdev => format!("{machine},iommu=smmuv3"),
+            match shape.testdevs {
+                Testdevs::Absent => machine,
+                Testdevs::Two => format!("{machine},iommu=smmuv3"),
             }
         }
     };
@@ -2274,9 +2285,10 @@ fn qemu_command(
     if shape.virtio_gpu {
         qemu.arg("-device").arg(format!("virtio-gpu-pci{platform}"));
     }
-    if shape.smmu == Smmu::WithTestdev {
-        // Two, the first enumerated below the second: the kernel's selftest
-        // routes nothing for the first, whose entry the table holds.
+    if shape.testdevs == Testdevs::Two {
+        // Two, the first enumerated below the second: the SMMU's selftest
+        // routes nothing for the first, whose entry the table holds; the
+        // AMD-Vi's moves the first to a domain and leaves the second.
         qemu.arg("-device").arg("iommu-testdev");
         qemu.arg("-device").arg("iommu-testdev");
     }

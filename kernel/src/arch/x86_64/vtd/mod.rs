@@ -26,7 +26,7 @@ use crate::mm::Mmio;
 use crate::sync::Lock;
 use crate::time::{Duration, Tripwire};
 
-use super::iommu_unit::yn;
+use super::iommu_unit::{yn, MAX_UNITS};
 use dmar::{Dmar, Malformed, Scope, Scopes, Structure};
 use queue::Queue;
 use table::{Table, Tables};
@@ -78,8 +78,6 @@ const COMMAND_TIMEOUT: Tripwire = Tripwire::absurd(
     "a unit half-way through being enabled is a unit whose reach nothing can state",
 );
 
-/// Ceiling on units inventoried; a machine past it is told, not silently truncated.
-pub(super) const MAX_UNITS: usize = 16;
 
 /// Remapping tables outlive `init`: the unit keeps reading them while it is on.
 static TABLES: Lock<Tables> = Lock::new(Tables::new());

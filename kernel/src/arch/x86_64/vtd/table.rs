@@ -123,38 +123,7 @@ impl Table {
     /// the one or the other, never a half of each (§6.2.2.1).
     fn replace_pair(self, index: usize, old: (u64, u64), new: (u64, u64)) {
         let entry = self.window().subregion(index as u64 * 16, 16);
-        let (found_lo, found_hi): (u64, u64);
-        // SAFETY: `entry` is 16 bytes of a table `Tables::alloc` never frees,
-        // 16-byte aligned since a table is 4 KiB-aligned; `rbx`, which LLVM
-        // reserves, holds `new`'s low half only between the two moves.
-        // Every operand names its register: LLVM may give `rbx` to a `reg`
-        // operand, and the `xchg` would then swap the address out of it.
-        unsafe {
-            core::arch::asm!(
-                "xchg r8, rbx",
-                "lock cmpxchg16b xmmword ptr [rsi]",
-                "mov rbx, r8",
-                in("rsi") entry.addr(),
-                inout("r8") new.0 => _,
-                in("rcx") new.1,
-                inout("rax") old.0 => found_lo,
-                inout("rdx") old.1 => found_hi,
-                options(nostack),
-            );
-        }
-        let found = (found_lo, found_hi);
-        // `found` is `old` exactly when the swap happened; nothing else
-        // writes an entry under `UNITS`, so anything else is a kernel bug.
-        assert!(
-            found == old,
-            "iommu: entry {index} of table {:#x} held {:#x}:{:#x}, not the {:#x}:{:#x} read before \
-             it was replaced",
-            self.phys,
-            found.1,
-            found.0,
-            old.1,
-            old.0
-        );
+        super::super::iommu_unit::exchange16(entry, [old.0, old.1], [new.0, new.1]);
         flush(entry.addr() as usize);
     }
 

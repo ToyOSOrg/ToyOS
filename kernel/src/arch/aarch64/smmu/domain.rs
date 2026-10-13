@@ -86,6 +86,13 @@ impl Live {
     }
 }
 
+/// Whether firmware reserves memory `function` must keep reaching, which a
+/// domain of its own would not map: nothing this kernel reads of the IORT
+/// says so.
+pub fn firmware_reserves(_function: StreamId) -> bool {
+    false
+}
+
 /// A new domain, with `room` bytes of it handed out first: refused, with no id
 /// spent, where it would have less than that.
 pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {

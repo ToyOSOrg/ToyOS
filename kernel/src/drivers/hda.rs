@@ -377,7 +377,7 @@ pub fn init(devices: &[PciDevice]) {
     let stream_offset = STREAM_BASE + stream_index as u64 * STREAM_STRIDE;
     let stream = regs.subregion(stream_offset, STREAM_STRIDE);
 
-    let space = crate::iommu::DeviceSpace::create();
+    let space = crate::iommu::DeviceSpace::create(pci);
     let bdl = super::DmaPool::alloc_in(PERIODS * 16, space);
     let pcm = super::DmaPool::alloc_in(PERIODS * PERIOD_BYTES, space);
     // Before `SD_BDPL` tells the device an address, and after both pools' mappings.

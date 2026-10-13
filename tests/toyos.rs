@@ -299,11 +299,15 @@ const MACHINE_TESTS: &[&str] = &[
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
     "iommu_virtio_platform",
-    // An AMD-Vi unit left blocking every device, switched off before the boot
-    // stick is driven behind it: the T14 is an Intel machine, no AMD one is
-    // in reach, and the register sequence and the DMA it frees are no host
-    // test's.
+    // An AMD-Vi unit left blocking every device, switched off and programmed
+    // before the boot stick is driven behind it: the register sequence and the
+    // DMA it lets through are no host test's, and the AMD bench is staged by
+    // hand rather than by the merge queue.
     "amdvi_firmware_left",
+    // A translating AMD-Vi unit's refusal, recorded and read: a kernel-owned
+    // record halts the machine, so no metal row reaches it, and only QEMU's
+    // `iommu-testdev` aims a DMA where no domain maps.
+    "amdvi_selftest",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
@@ -930,6 +934,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         // above where they start.
         "domain_ends_below_the_host_bridges",
         metal::Metal { arms: TESTCASES, judge: |b| claims::clear_of_host_bridges(&b[0].kernel()) },
+    ),
+    (
+        // An AMD-Vi unit programmed, and the boot stick's controller read
+        // through a domain of its own: the register sequence, the device
+        // table and the host tables on real silicon. The AMD bench's row.
+        "amdvi_translates_the_stick_controller",
+        metal::Metal { arms: TESTCASES, judge: |b| amdvi_translates(&b[0].kernel()) },
     ),
     (
         // A machine whose units do not remap: the claim is refused before
@@ -3395,6 +3406,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
+        "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "acpi_mediated_access" => acpi_mediated_access(2),
@@ -3535,6 +3547,36 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     let refused = serial::Serial::named("usbd_spare refused", said);
     refused.must_say(&format!("usbd_spare: the claim on pci:{SPARE} was refused: PermissionDenied"))?;
     refused.must_say(&format!("pcidev: PCI {at} is driven by this kernel and cannot be claimed"))?;
+    Ok(())
+}
+
+/// Every AMD-Vi unit translating, every xHCI controller the kernel drives
+/// moved to a domain of its own, the boot stick bound through one, and no
+/// DMA refused.
+fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
+    let text = kernel.text();
+    let units: Vec<&str> =
+        text.lines().filter(|l| l.contains("iommu: amdvi unit") && l.contains(" translating control=")).collect();
+    if units.is_empty() {
+        return Err(format!("no AMD-Vi unit is translating:\n{text}"));
+    }
+    kernel.must_not_say("isolates no device")?;
+    kernel.must_not_say("iommu: DMA FAULT")?;
+    let controllers: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.split_once("xHCI: found at PCI ")?.1.split_whitespace().next())
+        .collect();
+    if controllers.is_empty() {
+        return Err(format!("the kernel drove no xHCI controller:\n{text}"));
+    }
+    for at in &controllers {
+        kernel.must_say(&format!("iommu: {at} moves to domain"))?;
+    }
+    kernel.must_say("usb-storage: 1 device(s)")?;
+    for unit in units {
+        eprintln!("  [amdvi] {}", unit.trim());
+    }
+    eprintln!("  [amdvi] {} controller(s) on domains of their own, the stick bound", controllers.len());
     Ok(())
 }
 

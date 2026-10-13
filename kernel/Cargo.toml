@@ -479,6 +479,7 @@ toyos-abi = { path = "../sdk/abi" }
 [target.'cfg(target_os = "none")'.dependencies]
 bcachefs = { path = "../lib/bcachefs", default-features = false }
 toyos-acpi = { path = "../lib/acpi" }
+toyos-amdvi = { path = "amdvi" }
 toyos-dma = { path = "dma" }
 toyos-blackbox = { path = "../lib/blackbox" }
 toyos-blockhold = { path = "../lib/blockhold" }

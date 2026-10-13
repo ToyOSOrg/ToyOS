@@ -1821,6 +1821,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "toyos-abi",
  "toyos-acpi",
+ "toyos-amdvi",
  "toyos-blackbox",
  "toyos-blockhold",
  "toyos-bootmap",
@@ -4051,6 +4052,13 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi",
  "toyos-bootmap",
+]
+
+[[package]]
+name = "toyos-amdvi"
+version = "0.1.0"
+dependencies = [
+ "toyos-phys",
 ]
 
 [[package]]

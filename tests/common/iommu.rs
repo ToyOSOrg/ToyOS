@@ -367,9 +367,11 @@ const AMDVI_SUPERSEDED: &str = "iommu: IVRS IVHD 0x10 at +48 describes 00:02.0 a
 /// The xHCI the boot stick is on, among the functions the unit serves.
 const AMDVI_SERVES_XHCI: &str = "iommu: amdvi unit0 serves 00:03.0 data=0x00";
 const AMDVI_OFF: &str = "iommu: amdvi unit0 @0xfed80000 switched off control=0x0000000000000000";
-const AMDVI_NO_ISOLATION: &str = "iommu: AMD-Vi isolates no device this boot: 1 unit(s) described, 1 switched off";
-/// A kernel driver's domain refused for want of a unit that translates.
-const NO_DOMAIN: &str = "iommu: no domain of its own for a device: no unit on this machine translates";
+/// The unit programmed and on.
+const AMDVI_TRANSLATING: &str = "iommu: amdvi unit0 @0xfed80000 translating control=";
+/// The boot stick's controller on the first domain a driver made, the one
+/// past the identity domain.
+const XHCI_MOVED: &str = "iommu: 00:03.0 moves to domain2";
 /// The USB gate: the boot stick bound through the controller behind the unit,
 /// which only DMA the unit lets through can do.
 const STICK_BOUND: &str = "usb-storage: 1 device(s)";
@@ -381,12 +383,13 @@ pub(crate) fn amdvi_left_on(unit: &str) -> [String; 3] {
         .map(|field| format!("iommu: amdvi {unit} was handed over with {field} on; it goes off"))
 }
 
-/// **A unit an AMD machine's firmware left on is switched off, and the boot
-/// stick's DMA reaches memory.** QEMU's `amd-iommu` is the only AMD-Vi unit
+/// **A unit an AMD machine's firmware left on is switched off and programmed,
+/// and the boot stick's DMA reaches memory through its controller's own
+/// domain.** QEMU's `amd-iommu` is the only AMD-Vi unit
 /// the merge queue runs: the T14 is an Intel machine, and the hand-over's
 /// register sequence and the DMA it frees are neither of them a host test's.
 /// Two boots: the shipped kernel finds a unit nothing left on and switches
-/// nothing; the test kernel's `iommu-firmware-left` leaves the unit blocking
+/// nothing off; the test kernel's `iommu-firmware-left` leaves the unit blocking
 /// every device's DMA with its command buffer and event log running, and
 /// each goes off by its own write before the stick is driven. With the
 /// switch-off reverted that boot reds on the fields' lines and on `control`
@@ -414,8 +417,9 @@ pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
         log.must_say(AMDVI_SUPERSEDED)?;
         log.must_say(AMDVI_SERVES_XHCI)?;
         log.must_say(AMDVI_OFF)?;
-        log.must_say(AMDVI_NO_ISOLATION)?;
-        log.must_say(NO_DOMAIN)?;
+        log.must_say(AMDVI_TRANSLATING)?;
+        log.must_say(XHCI_MOVED)?;
+        log.must_not_say("isolates no device")?;
         log.must_not_say("no DMAR or IVRS table")?;
         let handed = log.must_say("iommu: amdvi unit0 handed over control=")?;
         if left {
@@ -433,6 +437,76 @@ pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
             log.must_not_say("was handed over with")?;
         }
         eprintln!("  [amdvi] left on = {left}: {handed}; the stick bound behind the unit");
+    }
+    Ok(())
+}
+
+/// **A translating AMD-Vi unit refuses what no domain maps, and the handler
+/// reads its record.** `amdvi-selftest` (`kernel/src/arch/x86_64/amdvi/selftest.rs`)
+/// on QEMU's `amd-iommu` with two `iommu-testdev` behind it: the first, on a
+/// domain of its own, lands a write where that domain maps it; the second,
+/// on the identity domain, lands one in memory and is refused one where the
+/// identity domain maps nothing, recorded as the kernel's, and the machine
+/// halts. QEMU 11.1.1 reads no record of that write unless an
+/// `INVALIDATE_DEVTAB_ENTRY` named the function: with the per-function
+/// invalidations at boot removed, the write is refused and the selftest
+/// fails on no record read. A kernel-owned record halts, so no metal row
+/// reaches the event log of a unit that translates for the kernel alone.
+pub fn amdvi_selftest(test_config: &Path) -> Result<(), String> {
+    let halted = |l: &str| l.contains("panic: rebooting") || l.contains("panic: holding this panel");
+    let options = BootOptions {
+        profile: Profile::MetalAmdViTestdev,
+        kernel_params: &["amdvi-selftest"],
+        ready_marker: "iommu: IVRS rev=",
+        ..Default::default()
+    };
+    let argv = qemu::profile_argv(&options);
+    if argv.iter().filter(|a| a.as_str() == "iommu-testdev").count() != 2 {
+        return Err(format!("the machine has not two iommu-testdevs: {argv:?}"));
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let rest = qemu.drain_until(std::time::Duration::from_secs(30), halted);
+    let serial = format!("{}\n{rest}", qemu.boot_log());
+    let lines: Vec<&str> = serial.lines().collect();
+    let at = |want: &str| lines.iter().position(|l| l.contains(want));
+    if let Some(failed) = at("amdvi-selftest: FAIL") {
+        return Err(format!("{}\nserial:\n{serial}", lines[failed]));
+    }
+    let stop = lines
+        .iter()
+        .position(|l| halted(l))
+        .ok_or_else(|| format!("the machine never reached the halt path's line past the stop\nserial:\n{serial}"))?;
+    at(AMDVI_TRANSLATING).ok_or_else(|| format!("the unit was never programmed\nserial:\n{serial}"))?;
+    let mut said = Vec::new();
+    for (step, verdict) in
+        [("mapped to", "landed there"), ("on the identity domain", "landed there"), ("which the identity domain does not map", "refused")]
+    {
+        let found = at(step).map(|i| lines[i]).ok_or_else(|| format!("the selftest never said {step:?}\nserial:\n{serial}"))?;
+        eprintln!("  [amdvi] {found}");
+        if !found.ends_with(verdict) {
+            return Err(format!("{found}\nserial:\n{serial}"));
+        }
+        said.push(found);
+    }
+    // `<function>'s write at <address>, which the identity domain …`. The
+    // record is held to its function alone: QEMU 11.1.1 writes it with no
+    // address and its flags off 48882's positions
+    // (`issues/qemus-amd-iommu-page-fault-record-carries-no-address.md`).
+    let function = said[2]
+        .split_once("amdvi-selftest: ")
+        .and_then(|(_, rest)| rest.split_once("'s write at "))
+        .map(|(function, _)| function)
+        .ok_or_else(|| format!("{:?} names no function", said[2]))?;
+    let record = format!("iommu: DMA FAULT owner=kernel unit0 stream={function} ");
+    let faults: Vec<usize> = (0..lines.len()).filter(|&i| lines[i].contains("iommu: DMA FAULT owner=")).collect();
+    match faults.as_slice() {
+        [one] if lines[*one].contains(&record) && lines[*one].ends_with("IO_PAGE_FAULT") && *one < stop => {
+            eprintln!("  [amdvi] {}", lines[*one]);
+        }
+        _ => return Err(format!("not one record {record:?} … IO_PAGE_FAULT before the stop\nserial:\n{serial}")),
+    }
+    if let Some(death) = lines.iter().find(|l| super::serial::died(l).is_some() && !l.contains("owner=kernel")) {
+        return Err(format!("the machine died of something other than the record: {death}\nserial:\n{serial}"));
     }
     Ok(())
 }

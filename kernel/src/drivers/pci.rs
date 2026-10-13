@@ -382,6 +382,18 @@ impl PciDevice {
         true
     }
 
+    /// Point an IOMMU unit's own function's MSI at `address`/`data` and
+    /// enable it: the one message no unit remaps (AMD 48882 Capability Offset
+    /// 10h), so it is armed here rather than through [`Self::message`].
+    /// `false` where the function has no MSI capability.
+    pub(crate) fn arm_unit_msi(&self, address: u32, data: u32) -> bool {
+        let Ok(cap) = self.capability(msi::CAP_ID) else {
+            return false;
+        };
+        self.write_msi(cap, address, data);
+        true
+    }
+
     fn write_msi(&self, cap: Capability<'_>, address: u32, data: u32) {
         let control = cap.read_u16(msi::MESSAGE_CONTROL);
         let msi = msi::Msi::decode(control);

@@ -22,32 +22,11 @@
 //! recorded nothing.
 
 use crate::drivers::pci::PciDevice;
+use crate::iommu::testdev::{registers, verdict, write, DEVICE, LANDED, REFUSED, VENDOR};
 use crate::iommu::OwnSpace;
 use crate::log;
-use crate::mm::policy::MmioPolicy;
-use crate::mm::{Mmio, PAGE_2M};
+use crate::mm::PAGE_2M;
 use crate::time::{Duration, Tripwire};
-
-/// `hw/misc/iommu-testdev.h`: Red Hat's vendor and its test device.
-const VENDOR: u16 = 0x1b36;
-const DEVICE: u16 = 0x0005;
-
-/// Its BAR0: reading `TRIGGERING` runs an armed DMA; `GVA` is the device
-/// address written, `GPA` the physical one read back, `LEN` the bytes,
-/// `DBELL` bit 0 arms, and `RESULT` says how it went.
-const TRIGGERING: u64 = 0x00;
-const GVA_LO: u64 = 0x04;
-const GVA_HI: u64 = 0x08;
-const LEN: u64 = 0x0c;
-const RESULT: u64 = 0x10;
-const DBELL: u64 = 0x14;
-const GPA_LO: u64 = 0x1c;
-const GPA_HI: u64 = 0x20;
-const BAR_BYTES: u64 = 0x1000;
-
-/// `RESULT`: the word landed at `GPA`; the write was refused.
-const LANDED: u32 = 0;
-const REFUSED: u32 = 0xdead_0002;
 
 /// How long a refused write's events are given to reach this CPU once it
 /// unmasks.
@@ -61,35 +40,6 @@ const EVENT_TIMEOUT: Tripwire = Tripwire::absurd(
 pub(super) fn stands_unrouted(device: &PciDevice, devices: &[PciDevice]) -> bool {
     let at = |d: &PciDevice| (d.bus, d.dev, d.func);
     device.is_id(VENDOR, DEVICE) && devices.iter().any(|d| d.is_id(VENDOR, DEVICE) && at(d) > at(device))
-}
-
-/// `device`'s registers, its memory decode on. No Bus Master Enable: the
-/// device writes through the unit's address space whatever its `COMMAND` says.
-fn registers(device: &PciDevice) -> Mmio {
-    let bar = device.memory_bar(0).expect("smmu-selftest: an iommu-testdev's BAR0 is unassigned").address();
-    let regs = crate::mm::paging::map_mmio(bar, BAR_BYTES, MmioPolicy::Uncacheable);
-    device.enable_memory_space();
-    regs
-}
-
-/// The device's write of four bytes at `at`, read back at `phys`: its `RESULT`.
-fn write(regs: Mmio, at: u64, phys: u64) -> u32 {
-    regs.write_u32(GVA_LO, at as u32);
-    regs.write_u32(GVA_HI, (at >> 32) as u32);
-    regs.write_u32(GPA_LO, phys as u32);
-    regs.write_u32(GPA_HI, (phys >> 32) as u32);
-    regs.write_u32(LEN, 4);
-    regs.write_u32(DBELL, 1);
-    regs.read_u32(TRIGGERING);
-    regs.read_u32(RESULT)
-}
-
-fn verdict(result: u32, want: u32) -> &'static str {
-    match (result == want, want) {
-        (true, REFUSED) => "refused",
-        (true, _) => "landed there",
-        (false, _) => "FAIL",
-    }
 }
 
 pub(super) fn run(devices: &[PciDevice]) {

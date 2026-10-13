@@ -14,6 +14,8 @@ use crate::arch::message_unit as messages;
 
 pub(crate) mod domains;
 pub(crate) mod fault;
+#[cfg(feature = "boot-actuators")]
+pub(crate) mod testdev;
 pub(crate) mod window;
 
 /// The address width a device's translations cover.
@@ -167,9 +169,14 @@ pub enum DeviceSpace {
 }
 
 impl DeviceSpace {
-    /// One of a device's own, or the machine's own with the reason. For a
+    /// One of `function`'s own, or the machine's own with the reason. For a
     /// driver **in this kernel**, whose addresses are the kernel's either way.
-    pub fn create() -> Self {
+    pub fn create(function: &crate::drivers::pci::PciDevice) -> Self {
+        let stream = StreamId::pci(function.bus, function.dev, function.func);
+        if unit::domain::firmware_reserves(stream) {
+            log!("iommu: {stream} keeps the machine's addresses: firmware reserves memory it must keep reaching");
+            return Self::Untranslated;
+        }
         match unit::domain::create(0) {
             Ok((id, _)) => Self::Own(id),
             Err(why) => {
