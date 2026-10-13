@@ -14,10 +14,14 @@ holder asks at an address the firmware's memory map does not list
 (`toyos_userbound::firmware`).
 
 **Ruled** (owner, 2026-10-12, #875): a memory write outside every range the
-map describes is refused by name and recorded, not admitted. The T14 row
-expects the refusal (`T14` in `tests/toyos.rs`).
+map describes is refused by name and recorded, not admitted. Ruled again on
+the two writes read below (#875, comment 6135767889): both stay refused
+under that ruling, since a write outside the firmware's map reaches a device
+another driver may own, the GPIO community for the pad and MCHBAR for the
+hotkey device's, so isolation decides. The T14 row expects both `_INI`s
+refused by path and the census's count of two (`T14` in `tests/toyos.rs`).
 
-**The controller's write**, read on the T14 at #875's `639ce1374` and
+**The controller's write**, read on the T14 at #875's `ddc243eaf` and
 reproduced on the host by the T14's own tables (`ToyOSOrg/evidence`
 `pr-875`, `round5/`): `EC._INI` calls `HKEY.WGIN`, which stores what the
 firmware's SMI answers for `WGSV(1)` and, where `WIN8` is set and that

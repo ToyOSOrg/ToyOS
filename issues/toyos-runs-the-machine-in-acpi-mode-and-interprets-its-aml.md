@@ -467,11 +467,18 @@ ACPI Interface Specification (302223-007) for a processor's `_OSC` on Intel:
     honours;
   - runs every runtime GPE's method;
   - delivers every Notify.
-- On the T14 and the AMD bench:
-  - every block loads, and no method is refused;
-  - under every capability bit, the blocks Linux loaded come out: the
-    capabilities Linux passed a processor are in no memory a dump holds;
-  - each `_STA`, `_CST` and battery reading equals Linux's on the same machine.
+- On the T14 and the AMD bench, in the state the owner ruled, ACPI 6.5
+  deciding what each reading means:
+  - every block loads but the AMD bench's SSDT8, refused whole
+    (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`);
+  - no method is refused but the AMD bench's `_REG(3, 1)` and `_PSR`
+    (`issues/the-amd-benchs-ec-reg-and-psr-are-refused-for-a-write-to-the-root-complexs-index.md`)
+    and the T14's controller and hotkey `_INI`
+    (`issues/the-t14s-controller-and-hotkey-ini-are-refused-for-writes-outside-the-map.md`),
+    each expected by its bench by name;
+  - each block a processor's `_OSC` loads under ToyOS's claims is loaded;
+  - each `_STA` the walk reads is said, and each battery reading is read
+    whole by §6.3.7 and §10.2.2, with no value unknown.
 
 Not in finished:
 
@@ -483,7 +490,7 @@ Not in finished:
 
 All six slices land as #875 (`wt/toyos-aml`): the owner accepted its design
 with "do the full aml in one pr". A check outside the tree on both benches'
-tables, NVS and Linux's readings (#875's M1) fixes the order inside it. The
+tables and NVS (#875's M1) fixes the order inside it. The
 T14's processors' `_OSC` read `\OSYS`, which `\_SB.PC00._INI` writes, so S3's
 `_STA`/`_INI` walk runs before S1's `_OSC`. That walk writes `SMI_CMD`, and
 memory outside the map, so S2's ruling on those writes comes before both.
@@ -495,13 +502,9 @@ machines:
   the one block ToyOS's claims load loaded, nothing refused.
 - **S2**: the AMD bench's `acpi_tables_loaded` reads 16 of its 17 tables
   loaded and `\_S5` handed, SSDT8 refused as the owner ruled
-  (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`),
-  which meets
-  `issues/acpiserver-refuses-the-amd-benchs-dsdt-for-a-read-in-memory-mapped-io.md`'s
-  exit.
-- **S3**: the T14's `acpi_tables_loaded` reads every `_INI` run, none refused
-  but by the owner's ruling, and `_REG(3, 1)` after them; every device's
-  `_STA` there equal to Linux's, compared outside the tree.
+  (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`).
+- **S3**: the T14's `acpi_tables_loaded` reads every `_INI` run but the two
+  the owner ruled refused, held by path, and `_REG(3, 1)` after them.
 - **S5**: the T14's held boot reads every runtime GPE that fired served
   with its method, none refused.
 - **S6**: the full-interpreter bullet above, by the design #875 proposes;

@@ -22,7 +22,7 @@ among them; passing it, or every write past the standard header of a
 function nothing claims, would put the server in the trusted base, against
 "isolation is non-negotiable".
 
-**What it costs**, read on the bench at #875's `855eff969`
+**What it costs**, read on the bench at #875's `b3bfc9742`
 (`ToyOSOrg/evidence` `pr-875`, `round3/amd-acpi_tables_loaded.log`, and
 the terms by offset in `round3/amd-aml-chain.txt`):
 
