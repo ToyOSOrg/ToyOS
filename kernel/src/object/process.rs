@@ -26,7 +26,7 @@ pub struct Exit {
 }
 
 impl Exit {
-    pub fn new(code: i32, stats: ProcessStats, released: Released) -> Self {
+    pub(crate) fn new(code: i32, stats: ProcessStats, released: Released) -> Self {
         Self { code, stats, _released: released }
     }
 }
