@@ -43,20 +43,22 @@
 //! the parent, which supplied none, ask for the power-off after the child's
 //! claim and one more have been released.
 //!
-//! **A press is served across the server's wait for the firmware's release**
-//! ([`held`]), on a boot whose ROOT carries [`HELD`] and whose firmware lists
-//! a table that takes the Global Lock at its load: the firmware's side of the
-//! lock is staged owned before `/system/bin/acpiserver` is handed the claim.
-//! The press, the wait's timeout and the power-off are the harness's to read.
+//! **A press is one SCI, masked until it is served** ([`press`]), on a boot
+//! whose ROOT carries [`PRESS`]: the fixed power button is enabled alone and
+//! the SCI acknowledged, the harness presses it, and the press is read off
+//! the claim as one interrupt with `PWRBTN_STS` latched, and no second while
+//! the status stays set and the claim unacknowledged.
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use toyos::endow::{Endowments, DEV_PREFIX, SYSCAP_LABEL};
+use toyos::endow::{Endowments, SYSCAP_LABEL};
+use toyos::ioport::{in16, out16, out8};
+use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
 use toyos::{AsHandle, Device};
-use toyos_abi::acpi::{pci_address, Access, AcpiInfo, Refused, Space, Width, UNLISTED};
+use toyos_abi::acpi::{pci_address, Access, AcpiInfo, Refused, Space, Width, ACK, FIXED_POWER_BUTTON, UNLISTED};
 use toyos_abi::counters::{Counter, RawRecord, Record};
 use toyos_abi::syscall::{self, debug_action, DeviceType, SyscallError};
 use toyos_abi::RawHandle;
@@ -71,8 +73,8 @@ const CLAIM_LABEL: &str = "acpi-claim";
 /// binary's name and takes no argument.
 const OUTLIVED: &str = "/system/share/acpi_mediated_outlived";
 
-/// The file whose presence on ROOT makes this boot [`held`]'s.
-const HELD: &str = "/system/share/acpi_mediated_held";
+/// The file whose presence on ROOT makes this boot [`press`]'s.
+const PRESS: &str = "/system/share/acpi_mediated_press";
 
 /// `EFI_MEMORY_TYPE`s: what the kernel hands out as RAM, and ACPI's two.
 const USABLE: [u8; 5] = [1, 2, 3, 4, 7];
@@ -121,7 +123,7 @@ impl Holder {
 fn main() {
     match std::env::args().nth(1).as_deref() {
         None if std::fs::exists(OUTLIVED).expect("acpi: ask ROOT for this boot's arm") => outlived(),
-        None if std::fs::exists(HELD).expect("acpi: ask ROOT for this boot's arm") => held(),
+        None if std::fs::exists(PRESS).expect("acpi: ask ROOT for this boot's arm") => press(),
         None => probe(),
         Some("keeper") => keeper(),
         Some("supplier") => supplier(),
@@ -649,19 +651,60 @@ fn outlived() {
     panic!("acpi: the power-off was refused: {refused:?}");
 }
 
-/// What [`held`] says once the server has the claim, with the firmware's
-/// side of the lock owned.
-const STAGED: &str = "acpi: the firmware's side of the Global Lock staged owned, and the server handed the claim";
+/// `PWRBTN_STS` in the PM1 status register and `PWRBTN_EN` in the enable
+/// register beside it (ACPI 6.5 Tables 4.13 and 4.15).
+const PWRBTN: u16 = 1 << 8;
 
-fn held() {
+/// What [`press`] says once the button alone is enabled and the SCI
+/// acknowledged, the harness's word to press.
+const PRESS_ARMED: &str = "acpi: the fixed power button is enabled alone and the SCI acknowledged";
+
+/// What it says once the press is served.
+const PRESS_SERVED: &str = "acpi: the press came as one SCI with its status latched, and no second while it was unserved";
+
+/// The claim's interrupts since its last read, or `None` for none.
+fn sci(claim: &Device) -> Option<u64> {
+    let mut record = [0u8; toyos_abi::pci::DeviceIrqRecord::SIZE];
+    match syscall::read_nonblock(claim.as_handle(), &mut record) {
+        Ok(n) => {
+            assert_eq!(n, record.len(), "acpi: an interrupt record of {n} bytes");
+            Some(u64::from(u32::from_ne_bytes(record[..4].try_into().expect("a count's four bytes"))))
+        }
+        Err(SyscallError::WouldBlock) => None,
+        Err(other) => panic!("acpi: the claim's record answered {other:?}"),
+    }
+}
+
+fn press() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
     let claim = claim(&cap);
-    assert_eq!(syscall::debug_with(debug_action::ACPI_FIRMWARE_LOCK, debug_action::FIRMWARE_OWNS), 0, "acpi: the lock was not free before the server ran");
-    let mut server = Command::new("/system/bin/acpiserver")
-        .endow(&format!("{DEV_PREFIX}{}", DeviceType::Acpi.class_name()), claim.into_raw().0)
-        .spawn()
-        .expect("acpi: spawn the server");
-    println!("{STAGED}");
-    let ended = server.wait().expect("acpi: wait for the server");
-    panic!("acpi: the server ended {ended:?}, where a press powers the machine off");
+    let info = bind(&claim);
+    assert!(info.flags & FIXED_POWER_BUTTON != 0, "acpi: this guest's FADT has no fixed power button");
+    let (status, enable) = (info.pm1_event.port, info.pm1_event.enable());
+    // Every event off, a press latched before now cleared, then the button
+    // alone on.
+    out16(enable, 0);
+    out16(status, PWRBTN);
+    for i in 0..info.gpe0.len / 2 {
+        out8(info.gpe0.enable() + i, 0);
+        out8(info.gpe0.port + i, 0xFF);
+    }
+    out16(enable, PWRBTN);
+    syscall::write(claim.as_handle(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
+    assert_eq!(sci(&claim), None, "acpi: an SCI before the press, with every event but the button off");
+    println!("{PRESS_ARMED}");
+
+    let poller = Poller::new(1);
+    poller.watch(&claim, READABLE, 0);
+    poller.wait(1, u64::MAX, |_| {});
+    let first = sci(&claim).expect("acpi: the claim woke its poller with no interrupt on it");
+    assert_eq!(first, 1, "acpi: the press came as {first} SCIs before it was served");
+    assert!(in16(status) & PWRBTN != 0, "acpi: an SCI with PWRBTN_STS clear ({:#06x})", in16(status));
+    // Still set and unacknowledged: a line the kernel had unmasked would be
+    // taken again for the same status.
+    assert_eq!(sci(&claim), None, "acpi: a second SCI while the press was unserved");
+    out16(status, PWRBTN);
+    assert_eq!(in16(status) & PWRBTN, 0, "acpi: PWRBTN_STS stayed set after its clear");
+    syscall::write(claim.as_handle(), &ACK.to_ne_bytes()).expect("acpi: the claim's acknowledgement");
+    println!("{PRESS_SERVED}");
 }

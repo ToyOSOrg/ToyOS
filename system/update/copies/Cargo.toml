@@ -1,0 +1,24 @@
+[package]
+name = "update-copies"
+description = "A host test of update's install over a disk in memory: its module that names nothing of ToyOS's SDK, compiled as it is."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A package of its own because `update` reads its key with `env!`, which a
+# host's test step sets for no package, and links the SDK: this compiles only
+# its install, the way `toyos-libc-copies` compiles libc's modules.
+
+[lib]
+doctest = false
+
+[dev-dependencies]
+toyos-disk = { path = "../../../lib/disk" }
+# The tests sign the image they install, as the host that holds the key does.
+toyos-update = { path = "../../../lib/update", features = ["sign"] }
+toyos-fat32 = { path = "../../../lib/fat32" }
+toyos-sha2-hw = { path = "../../../lib/sha2-hw" }
+# The volume an install wrote, judged by the checker that shares no code with
+# the driver it was written with.
+toyos-fat32-check = { path = "../../../lib/fat32/check" }

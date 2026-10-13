@@ -16,7 +16,7 @@ const BUF_BYTES: usize = 64 * 1024;
 /// unbounded one is not a bound. 256 pages, against a file cache whose smallest
 /// possible budget is the 2048-page floor in `block::file_cache_pages`. Policy,
 /// not physics; reaching it costs a flush, never a refusal.
-const FLUSH_BYTES: u64 = 1024 * 1024;
+pub const FLUSH_BYTES: u64 = 1024 * 1024;
 
 pub fn main(args: Vec<String>) {
     let [source, dest] = args.as_slice() else {
@@ -57,7 +57,7 @@ fn is_dir(path: &Path) -> bool {
 /// straight to the destination would instead leave a short file wearing the
 /// name of a complete one, which nothing downstream can tell from the real
 /// thing.
-fn copy(source: &Path, dest: &Path) -> Result<(), String> {
+pub fn copy(source: &Path, dest: &Path) -> Result<(), String> {
     let meta = fs::metadata(source).map_err(|e| format!("{}: {e}", source.display()))?;
     if meta.is_dir() {
         return Err(format!("{}: is a directory", source.display()));

@@ -18,28 +18,31 @@ pub fn main(args: Vec<String>) {
         eprintln!("Usage: mv <source> <dest>");
         process::exit(1);
     };
+    if let Err(refusal) = move_file(Path::new(source), Path::new(dest)) {
+        eprintln!("{refusal}");
+        process::exit(1);
+    }
+}
 
-    let source = Path::new(source);
-    let dest = crate::cp::destination(source, Path::new(dest));
+/// `source` renamed onto where `dest` lands it ([`crate::cp::destination`]),
+/// or the refusal, said as `mv` says it.
+pub fn move_file(source: &Path, dest: &Path) -> Result<(), String> {
+    let dest = crate::cp::destination(source, dest);
 
     // Asked before the rename so the commonest cause gets its own answer
     // rather than the one the kernel returns for everything.
     if let Err(e) = fs::metadata(source) {
-        eprintln!("mv: {}: {e}", source.display());
-        process::exit(1);
+        return Err(format!("mv: {}: {e}", source.display()));
     }
 
-    if let Err(e) = fs::rename(source, &dest) {
-        eprintln!(
-            "mv: {} -> {}: {e} — but the source is there, so it is the rename being refused",
+    fs::rename(source, &dest).map_err(|e| {
+        format!(
+            "mv: {} -> {}: {e} — but the source is there, so it is the rename being refused\n\
+             mv: most likely the two paths are on different mounts, which is not one rename. \
+             SYS_RENAME reports one error for every cause, so mv cannot tell that from a rename \
+             defect and will not copy behind your back — use cp then rm.",
             source.display(),
             dest.display()
-        );
-        eprintln!(
-            "mv: most likely the two paths are on different mounts, which is not one rename. \
-             SYS_RENAME reports one error for every cause, so mv cannot tell that from a rename \
-             defect and will not copy behind your back — use cp then rm."
-        );
-        process::exit(1);
-    }
+        )
+    })
 }

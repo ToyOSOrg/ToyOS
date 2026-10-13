@@ -1,0 +1,19 @@
+[package]
+name = "toybox-copies"
+description = "A host test of toybox's cp, mv, hexdump and the roster ps reads: its files that name nothing of ToyOS's SDK, compiled as they are."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+# A package of its own because toybox builds on no host: this compiles only
+# the files a host builds, the way `toyos-libc-copies` compiles libc's.
+
+[lib]
+doctest = false
+
+[dev-dependencies]
+# The roster's header and entry, as the kernel lays them out.
+toyos-abi = { path = "../../../sdk/abi" }
+# A directory of each test's own, gone with it.
+toyos-tmpdir = { path = "../../../lib/tmpdir" }

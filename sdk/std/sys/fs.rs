@@ -21,7 +21,7 @@ use crate::fs::TryLockError;
 use crate::hash::Hash;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut, SeekFrom};
 use crate::path::{Path, PathBuf};
-use crate::sync::{Arc, Condvar, Mutex, MutexGuard};
+use crate::sync::{Arc, Mutex};
 pub use crate::sys::fs::common::Dir;
 use crate::sys::time::SystemTime;
 use crate::sys::to_io_error;
@@ -53,67 +53,23 @@ struct Position {
     offset: u64,
 }
 
-/// One directory capability this process holds, connected.
+#[path = "turns.rs"]
+mod turns;
+
+/// One directory capability this process holds, connected: threads sharing it
+/// are served in turn.
 struct Capability {
     prefix: String,
-    dir: Mutex<toyos::fs::Dir>,
-    /// Hands `dir` over in ticket order: std's mutex lets the thread that let
-    /// go barge ahead of the one it woke.
-    turns: Mutex<Turns>,
-    served: Condvar,
+    dir: turns::Turnstile<toyos::fs::Dir>,
 }
-
-struct Turns {
-    next: u64,
-    serving: u64,
-}
-
-/// A directory's connection, held in turn.
-struct Held<'a> {
-    // Dropped before `_turn`, so the next ticket finds `dir` free.
-    dir: MutexGuard<'a, toyos::fs::Dir>,
-    _turn: Turn<'a>,
-}
-
-struct Turn<'a>(&'a Capability);
 
 impl Capability {
     fn new(prefix: &str, dir: toyos::fs::Dir) -> Self {
-        Self {
-            prefix: String::from(prefix),
-            dir: Mutex::new(dir),
-            turns: Mutex::new(Turns { next: 0, serving: 0 }),
-            served: Condvar::new(),
-        }
+        Self { prefix: String::from(prefix), dir: turns::Turnstile::new(dir) }
     }
 
-    fn lock(&self) -> Held<'_> {
-        let mut turns = self.turns.lock().unwrap();
-        let ticket = turns.next;
-        turns.next += 1;
-        drop(self.served.wait_while(turns, |t| t.serving != ticket).unwrap());
-        let turn = Turn(self);
-        Held { dir: self.dir.lock().unwrap(), _turn: turn }
-    }
-}
-
-impl Drop for Turn<'_> {
-    fn drop(&mut self) {
-        self.0.turns.lock().unwrap().serving += 1;
-        self.0.served.notify_all();
-    }
-}
-
-impl crate::ops::Deref for Held<'_> {
-    type Target = toyos::fs::Dir;
-    fn deref(&self) -> &toyos::fs::Dir {
-        &self.dir
-    }
-}
-
-impl crate::ops::DerefMut for Held<'_> {
-    fn deref_mut(&mut self) -> &mut toyos::fs::Dir {
-        &mut self.dir
+    fn lock(&self) -> turns::Turn<'_, toyos::fs::Dir> {
+        self.dir.lock()
     }
 }
 
