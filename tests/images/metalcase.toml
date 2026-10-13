@@ -24,7 +24,7 @@ syscap = ["logread"]
 
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt"]
+serves = ["compositor", "prompt", "clipboard"]
 receives = ["soundserver"]
 devices = ["framebuffer", "keyboard", "mouse"]
 

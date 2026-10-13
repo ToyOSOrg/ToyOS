@@ -106,8 +106,9 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         }
 
         // Every function the kernel drives itself: all QEMU created but the
-        // NIC and the sound function, whose drivers are processes.
-        let expected = created.len() - 2;
+        // NIC, the sound function and the clipboard's channel, whose drivers
+        // are processes.
+        let expected = created.len() - 3;
         let mut negotiated = Vec::new();
         for line in log.text().lines().filter(|line| is_kernel_line(line)) {
             let Some(rest) = line.split("VirtIO: PCI ").nth(1) else { continue };

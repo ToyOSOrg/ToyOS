@@ -21,7 +21,8 @@ use toyos::shm::SharedMemory;
 use toyos::{ipc, AsHandle, Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
-use toyos_desktop::Window;
+use toyos_desktop::clipboard::Watch;
+use toyos_desktop::{Port, Window};
 
 /// Connections accepted but not yet identified by a first frame.
 ///
@@ -82,8 +83,8 @@ pub struct ClientFrame {
     pub conn: Option<Connection>,
     /// The connection's [`PendingConn::copy`].
     pub copy: Option<CopyRegion>,
-    /// The connection's [`PendingConn::prompt`].
-    pub prompt: bool,
+    /// The connection's [`PendingConn::port`].
+    pub port: Port,
 }
 
 impl ClientFrame {
@@ -95,7 +96,7 @@ impl ClientFrame {
             payload_len: 0,
             conn: None,
             copy: None,
-            prompt: false,
+            port: Port::Compositor,
         }
     }
 
@@ -118,9 +119,10 @@ pub struct PendingConn {
     pub conn: Connection,
     pub rx: ClientRx,
     pub since: Instant,
-    /// It came in on the prompt port, whose one holder's window goes above every
-    /// other: its first frame may only ask for that window.
-    pub prompt: bool,
+    /// The port it came in on. A connection off the prompt port, whose one
+    /// holder's window goes above every other, may only ask for that window
+    /// with its first frame; one off the clipboard port may only ask to watch.
+    pub port: Port,
     /// The region a `MSG_COPY_BEGIN` was answered with. A connection holding
     /// one may send `MSG_COPY_COMMIT` and nothing else, within
     /// [`HANDSHAKE_TIMEOUT`] of `since`.
@@ -143,6 +145,14 @@ impl CopyRegion {
     pub fn take(self) -> Vec<u8> {
         self.0.as_atomic().iter().map(|b| b.load(Ordering::Relaxed)).collect()
     }
+}
+
+/// The clipboard's watcher: its connection, and what it has asked and is
+/// writing.
+pub struct Watcher {
+    pub conn: Connection,
+    pub rx: ClientRx,
+    pub watch: Watch<CopyRegion>,
 }
 
 /// Why a client is going.

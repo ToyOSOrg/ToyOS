@@ -51,6 +51,7 @@ pub mod sysroot;
 pub mod tether;
 pub mod toolchain;
 pub mod userlandhost;
+pub mod vdagent;
 pub mod wallpaper;
 
 use std::path::{Path, PathBuf};

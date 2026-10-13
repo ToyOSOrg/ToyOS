@@ -713,38 +713,42 @@ impl core::fmt::Display for Refusal {
 /// Claim `id`, bring the function up to the point a driver takes over, and
 /// answer what that driver needs to know.
 pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
-    let (pci, driven) = {
+    // Among the functions this kernel does not drive (`toyos_pci::claimed`):
+    // the console's virtio-serial and a process's carry one ID.
+    let (matches, resolved) = {
         let machine = MACHINE.lock();
-        let mut found: Option<PciDevice> = None;
-        for device in machine.functions.iter() {
-            if !device.is_id(id.vendor, id.device) {
-                continue;
-            }
-            if found.is_some() {
-                // Refused by name rather than resolved to the first match: a
-                // config that names a card this machine has two of is asking
-                // for one of them and cannot say which.
-                log!(
-                    "pcidev: {:04x}:{:04x} names more than one function on this machine",
-                    id.vendor,
-                    id.device
-                );
-                return Err(ClaimError::Ambiguous);
-            }
-            found = Some(*device);
-        }
-        let pci = found.ok_or(ClaimError::Absent)?;
-        (pci, machine.kernel_driven.contains(&requester(&pci)))
+        let matches: Vec<PciDevice> =
+            machine.functions.iter().filter(|d| d.is_id(id.vendor, id.device)).copied().collect();
+        let resolved =
+            toyos_pci::claimed(matches.iter().map(|d| machine.kernel_driven.contains(&requester(d))));
+        (matches, resolved)
     };
-    if driven {
-        log!(
-            "pcidev: PCI {:02x}:{:02x}.{} is driven by this kernel and cannot be claimed",
-            pci.bus,
-            pci.dev,
-            pci.func
-        );
-        return Err(ClaimError::KernelDriven);
-    }
+    let pci = match resolved {
+        Ok(at) => matches[at],
+        Err(toyos_pci::Unclaimable::Absent) => return Err(ClaimError::Absent),
+        Err(toyos_pci::Unclaimable::Ambiguous) => {
+            // Refused by name rather than resolved to the first match: a
+            // config that names a card this machine has two of is asking
+            // for one of them and cannot say which.
+            log!(
+                "pcidev: {:04x}:{:04x} names more than one function this kernel does not drive",
+                id.vendor,
+                id.device
+            );
+            return Err(ClaimError::Ambiguous);
+        }
+        Err(toyos_pci::Unclaimable::KernelDriven) => {
+            for pci in &matches {
+                log!(
+                    "pcidev: PCI {:02x}:{:02x}.{} is driven by this kernel and cannot be claimed",
+                    pci.bus,
+                    pci.dev,
+                    pci.func
+                );
+            }
+            return Err(ClaimError::KernelDriven);
+        }
+    };
 
     // `Owned` before `Exhausted`: a second claim on a function somebody holds
     // is a different fact from a machine with no slot left.
