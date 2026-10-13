@@ -11,8 +11,9 @@
 //! handling for every other client.
 
 use toyos::audio::{
-    StreamOpenRequest, StreamSetVolume, FORMAT_S16LE, MSG_STREAM_CLOSE, MSG_STREAM_ERROR,
-    MSG_STREAM_OPEN, MSG_STREAM_SET_VOLUME,
+    DeviceDescription, StreamOpenRequest, StreamSetVolume, FORMAT_S16LE, MSG_DEVICE_DESCRIBE,
+    MSG_DEVICE_DESCRIBED, MSG_STREAM_CLOSE, MSG_STREAM_ERROR, MSG_STREAM_OPEN,
+    MSG_STREAM_SET_VOLUME,
 };
 use toyos::ipc::{self, RxStep};
 use toyos::poller::{Poller, READABLE};
@@ -24,6 +25,7 @@ use toyos_mixer::{period_nanos, Gain, MAX_CLIENT_RATE, MIN_CLIENT_RATE};
 use crate::client::{open_stream, Departure};
 use crate::command::{remove, submit, CommandRing, MixCommand};
 use crate::inspect::{self, Device, Published};
+use crate::volume::{self, VolumeClient};
 
 /// Control connections soundserver will hold at once.
 ///
@@ -86,6 +88,9 @@ enum Control {
     Close { idx: usize },
     /// `inspect`, on a connection that carries no stream: answered and closed.
     Inspect,
+    /// What device soundserver runs, on a connection that carries no stream:
+    /// answered and closed.
+    Describe,
     /// An unknown message type, a payload the wrong width for its type, or a
     /// message this connection is not in the state to send. All three are the
     /// client getting it wrong, and all three end the connection.
@@ -112,6 +117,7 @@ fn classify(msg_type: u32, payload_len: usize, stream_idx: Option<usize>) -> Con
         }
         (MSG_STREAM_CLOSE, Some(idx)) => Control::Close { idx },
         (toyos_inspect::MSG_INSPECT, None) if payload_len == 0 => Control::Inspect,
+        (MSG_DEVICE_DESCRIBE, None) if payload_len == 0 => Control::Describe,
         _ => Control::Violation,
     }
 }
@@ -129,8 +135,22 @@ fn reject_open(req: &StreamOpenRequest) -> Option<&'static str> {
     None
 }
 
+/// What a client asking [`MSG_DEVICE_DESCRIBE`] is told.
+fn description(device: &Device) -> DeviceDescription {
+    DeviceDescription {
+        sample_rate: device.rate,
+        period_frames: device.period_frames,
+        min_client_rate: MIN_CLIENT_RATE,
+        max_client_rate: MAX_CLIENT_RATE,
+        channels: device.channels,
+        _pad: 0,
+    }
+}
+
 pub(crate) fn control_thread(
     acceptor: Acceptor,
+    volume_acceptor: Acceptor,
+    mut codec: Option<crate::hda::Codec>,
     cmd_ring: &CommandRing,
     cmd_pipe_write: RawHandle,
     device_sample_rate: u32,
@@ -163,14 +183,22 @@ pub(crate) fn control_thread(
     }
 
     let mut clients: Vec<ControlClient> = Vec::new();
+    let mut volume_clients: Vec<VolumeClient> = Vec::new();
     let mut next_idx: usize = 0;
 
     const TOKEN_ACCEPT: u64 = u64::MAX;
+    const TOKEN_VOLUME_ACCEPT: u64 = u64::MAX - 1;
+    /// A `volume` connection's token: its index above every control client's.
+    const TOKEN_VOLUME: u64 = 1 << 32;
 
     loop {
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPT);
+        poller.watch(&volume_acceptor, READABLE, TOKEN_VOLUME_ACCEPT);
         for (i, client) in clients.iter().enumerate() {
             poller.watch(&client.conn, READABLE, i as u64);
+        }
+        for (i, client) in volume_clients.iter().enumerate() {
+            poller.watch(&client.conn, READABLE, TOKEN_VOLUME + i as u64);
         }
 
         let mut ready: Vec<u64> = Vec::new();
@@ -197,6 +225,21 @@ pub(crate) fn control_thread(
                 Err(e) => say!("soundserver: accept failed: {e:?}"),
             }
         }
+
+        if ready.contains(&TOKEN_VOLUME_ACCEPT) {
+            match volume_acceptor.accept() {
+                // The compositor holds the one connector, so a second
+                // connection is a reconnect and the first is dropped.
+                Ok(conn) => volume::accepted(&mut volume_clients, conn),
+                Err(e) => say!("soundserver: volume accept failed: {e:?}"),
+            }
+        }
+        let mut at = TOKEN_VOLUME;
+        volume_clients.retain_mut(|client| {
+            let token = at;
+            at += 1;
+            !ready.contains(&token) || volume::serve(client, codec.as_mut())
+        });
 
         let mut dead: Vec<usize> = Vec::new();
         for i in 0..clients.len() {
@@ -305,6 +348,16 @@ pub(crate) fn control_thread(
                         disconnected = true;
                         break 'msgs;
                     }
+                    Control::Describe => {
+                        if let Err(e) =
+                            clients[i].conn.try_send(MSG_DEVICE_DESCRIBED, &description(device))
+                        {
+                            say!("soundserver: a device description was not answered ({e:?})");
+                        }
+                        dead.push(i);
+                        disconnected = true;
+                        break 'msgs;
+                    }
                     Control::Violation => {
                         say!("soundserver: protocol violation (msg {msg_type}), disconnecting client");
                         if let Some(idx) = clients[i].stream_idx {
@@ -408,8 +461,13 @@ mod tests {
         assert_eq!(classify(toyos_inspect::MSG_INSPECT, 0, Some(3)), Control::Violation);
         assert_eq!(classify(toyos_inspect::MSG_INSPECT, 1, None), Control::Violation);
 
+        // The device's description likewise.
+        assert_eq!(classify(MSG_DEVICE_DESCRIBE, 0, None), Control::Describe);
+        assert_eq!(classify(MSG_DEVICE_DESCRIBE, 0, Some(3)), Control::Violation);
+        assert_eq!(classify(MSG_DEVICE_DESCRIBE, 1, None), Control::Violation);
+
         // Nothing else is a message — including the two soundserver only ever sends.
-        for other in [0, MSG_STREAM_OPENED, MSG_STREAM_ERROR, u32::MAX] {
+        for other in [0, MSG_STREAM_OPENED, MSG_STREAM_ERROR, MSG_DEVICE_DESCRIBED, u32::MAX] {
             for stream_idx in [None, Some(3)] {
                 for len in [0, VOL, OPEN] {
                     assert_eq!(classify(other, len, stream_idx), Control::Violation);

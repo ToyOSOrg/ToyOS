@@ -53,10 +53,12 @@ fn every_usage_the_rest_of_the_tree_names_is_reachable() {
         reachable[usage as usize] = true;
     }
     // Letters, digits and punctuation (layout_lookup's 0x04..=0x38), the ISO
-    // key, the escape-sequence keys, and every modifier.
+    // key, the escape-sequence keys, Mute and the two volume keys the
+    // compositor keeps, and every modifier.
     let required: Vec<u8> = (0x04u8..=0x38)
         .chain([0x64])
         .chain(0x4Au8..=0x52)
+        .chain(0x7Fu8..=0x81)
         .chain(0xE0u8..=0xE7)
         .collect();
     for usage in required {

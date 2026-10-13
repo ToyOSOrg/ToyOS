@@ -125,6 +125,31 @@ pub fn find_output_path(codecs: &[Codec]) -> Result<OutputPath, PathError> {
     }))
 }
 
+/// Which of a machine's controllers carries its audio: the one whose codecs
+/// reach an output ([`find_output_path`]), with that output.
+///
+/// None, or several, is [`Unchosen`], carrying what each controller's walk
+/// found: choosing between two audible outputs is a default-device policy, and
+/// nothing here keeps one.
+pub fn choose(controllers: &[Vec<Codec>]) -> Result<(usize, OutputPath), Unchosen> {
+    let found: Vec<Result<OutputPath, PathError>> =
+        controllers.iter().map(|codecs| find_output_path(codecs)).collect();
+    if found.iter().filter(|walk| walk.is_ok()).count() != 1 {
+        return Err(Unchosen(found));
+    }
+    let (index, path) = found
+        .into_iter()
+        .enumerate()
+        .find_map(|(i, walk)| walk.ok().map(|path| (i, path)))
+        .expect("counted one");
+    Ok((index, path))
+}
+
+/// Every controller's walk, in the order [`choose`] was given them, where none
+/// or several reach an output.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Unchosen(pub Vec<Result<OutputPath, PathError>>);
+
 /// `Err(None)` is a group with no wired output pin to try, which is not a
 /// fault — display audio is exactly that, and it is the ordinary case on a
 /// machine with two codecs.
@@ -262,6 +287,52 @@ fn descend(
 mod tests {
     use super::*;
     use crate::fixture;
+
+    /// The laptop's two codecs, each alone on a controller of its own: the
+    /// analog one and its display audio, as real words a machine sent.
+    fn analog_and_display() -> (Vec<Codec>, Vec<Codec>) {
+        let mut codecs = fixture::laptop();
+        let display = codecs.split_off(1);
+        (codecs, display)
+    }
+
+    #[test]
+    fn the_one_controller_of_the_laptop_is_chosen() {
+        let (index, path) = choose(&[fixture::laptop()]).unwrap();
+        assert_eq!(index, 0);
+        assert_eq!(path, find_output_path(&fixture::laptop()).unwrap());
+    }
+
+    #[test]
+    fn the_controller_whose_codec_reaches_a_speaker_is_chosen_over_display_audio() {
+        let (analog, display) = analog_and_display();
+        assert_eq!(choose(&[display.clone(), analog.clone()]).unwrap().0, 1);
+        assert_eq!(choose(&[analog, display]).unwrap().0, 0);
+    }
+
+    #[test]
+    fn two_controllers_that_each_reach_an_output_are_refused_naming_both() {
+        let Err(Unchosen(found)) = choose(&[fixture::laptop(), fixture::qemu()]) else {
+            panic!("two audible outputs were chosen between");
+        };
+        assert_eq!(found.len(), 2);
+        assert!(found.iter().all(Result::is_ok));
+    }
+
+    #[test]
+    fn controllers_none_of_which_reaches_an_output_are_refused_naming_both() {
+        let (_, display) = analog_and_display();
+        let Err(Unchosen(found)) = choose(&[display, fixture::synthetic_dead_end()]) else {
+            panic!("a controller with no output was chosen");
+        };
+        assert_eq!(
+            found,
+            [
+                Err(PathError::NoOutputPin { codecs: alloc::vec![Address::new(2).unwrap()] }),
+                Err(PathError::NoConverter { pin: Node(0x20) }),
+            ]
+        );
+    }
 
     #[test]
     fn the_laptop_picks_its_internal_speaker_and_the_jack_that_shares_a_converter() {

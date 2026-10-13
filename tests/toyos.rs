@@ -145,9 +145,13 @@ const RUST_SKIP: &[&str] = &[
     "readdir_bound",
     // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
     "mkdir_cap",
-    // Audio is judged on the T14 and nowhere else: the `hda_tone` metal row
-    // runs it.
+    // Audio is judged on the T14 and nowhere else: the `hda_tone` and
+    // `hda_tone_resampled` metal rows run these.
     "audio_tone",
+    "audio_tone_resampled",
+    // It steps the codec's master and reads it back, which no guest's sound
+    // device has: the `hda_volume_step` metal row runs it.
+    "volume_step",
     // It hands the ACPI claim to a server of its own and kills it, which needs
     // a boot that starts none: the `acpi_server_death` metal row runs it on
     // tests/images/acpicase.toml.
@@ -466,6 +470,30 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| {
                 b[0].job_passed("test_rs_audio_tone")?;
                 audio::tone_on_metal(&b[0].log())
+            },
+        },
+    ),
+    (
+        // A tone at the device rate the device does not run, through cpal,
+        // played to its end with every period covered: soundserver resamples it.
+        "hda_tone_resampled",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed("test_rs_audio_tone_resampled")?;
+                audio::resampled_tone_on_metal(&b[0].log())
+            },
+        },
+    ),
+    (
+        // One step of the codec's master and back, each read back from the
+        // codec, on the HDA path soundserver configured.
+        "hda_volume_step",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed("test_rs_volume_step")?;
+                b[0].log().must_say("soundserver: hda path configured in").map(|_| ())
             },
         },
     ),
@@ -1010,6 +1038,8 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_wake_storm_cost",
         "test_rs_wake_onto_busy",
         "test_rs_audio_tone",
+        "test_rs_audio_tone_resampled",
+        "test_rs_volume_step",
         "test_rs_syscall_cost",
         "test_rs_spawn_cost",
         claims::RECLAIM,

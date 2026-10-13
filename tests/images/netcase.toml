@@ -29,7 +29,7 @@ devices = ["pci:1af4:1041"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver"]
+serves = ["soundserver", "volume"]
 devices = ["pci:1af4:1059"]
 syscap = ["rt"]
 

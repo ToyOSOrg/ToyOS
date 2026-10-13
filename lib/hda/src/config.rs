@@ -12,10 +12,10 @@
 
 use alloc::vec::Vec;
 
-use crate::caps::AmpCaps;
+use crate::caps::{AmpCaps, GainRange, PcmCaps};
 use crate::graph::{Codec, FunctionGroup};
 use crate::path::{OutputPath, PinSetup};
-use crate::verb::{self, Address, Node, Verb};
+use crate::verb::{self, Address, Node, Response, Verb};
 
 /// `Set Power State`'s fully-on value.
 const POWER_D0: u8 = 0x00;
@@ -36,6 +36,7 @@ const EAPD_ENABLE: u8 = 1 << 1;
 const AMP_SET_OUTPUT: u16 = 1 << 15;
 const AMP_SET_LEFT: u16 = 1 << 13;
 const AMP_SET_RIGHT: u16 = 1 << 12;
+const AMP_SET_MUTE: u16 = 1 << 7;
 
 /// The whole configuration sequence for one output path, in the order it has to
 /// be sent.
@@ -141,22 +142,178 @@ fn nodes(path: &OutputPath) -> Vec<Node> {
     out
 }
 
-/// The rate and width this driver asks a converter for, and whether the
-/// converter offers them.
-pub const RATE: u32 = 44_100;
+/// The width this driver asks a converter for.
 pub const WIDTH: u8 = 16;
 
-/// `SDnFMT` and the codec's `Set Converter Format` payload for this path, or
-/// `None` where the converter does not offer [`RATE`] at [`WIDTH`].
-pub fn format(codecs: &[Codec], path: &OutputPath) -> Option<(u16, u8)> {
+/// The first of `rates`, best first, that the path's converter offers at
+/// [`WIDTH`]; or, where it offers none of them, the converter's own PCM word
+/// (`None` where it has none), so a refusal can name what it does offer.
+///
+/// The converter's own word, never its function group's: every converter in
+/// reach sets Format Override, and one that did not would take the group's.
+pub fn rate(codecs: &[Codec], path: &OutputPath, rates: &[u32]) -> Result<u32, Option<PcmCaps>> {
+    let pcm = group_of(codecs, path)
+        .and_then(|group| group.widget(path.converter))
+        .and_then(|converter| converter.pcm)
+        .ok_or(None)?;
+    rates.iter().copied().find(|&rate| pcm.supports(rate, WIDTH)).ok_or(Some(pcm))
+}
+
+/// `SDnFMT` and the codec's `Set Converter Format` payload for this path at
+/// `rate`, or `None` where the converter does not offer `rate` at [`WIDTH`].
+pub fn format(codecs: &[Codec], path: &OutputPath, rate: u32) -> Option<(u16, u8)> {
     let group = group_of(codecs, path)?;
     let converter = group.widget(path.converter)?;
     let pcm = converter.pcm?;
-    if !pcm.supports(RATE, WIDTH) {
+    if !pcm.supports(rate, WIDTH) {
         return None;
     }
     let channels = converter.caps.channels.min(2);
-    Some((crate::stream::stream_format(RATE, WIDTH, channels)?, channels))
+    Some((crate::stream::stream_format(rate, WIDTH, channels)?, channels))
+}
+
+/// One position of the master level, in quarter-decibels: 3 dB, quantised up
+/// to whole steps of the amplifier that carries it.
+const POSITION_QUARTER_DB: u8 = 12;
+
+/// `Get Amplifier Gain/Mute`'s payload: the output amplifier, left channel.
+const AMP_GET_OUTPUT_LEFT: u16 = (1 << 15) | (1 << 13);
+
+/// A `Get Amplifier Gain/Mute` answer's mute bit, and its gain index.
+const AMP_ANSWER_MUTE: u32 = 1 << 7;
+const AMP_ANSWER_GAIN: u32 = 0x7F;
+
+/// The path's master level and mute, on the codec.
+///
+/// The level is on the path's amplifier that has a gain range, and moves in
+/// positions of 3 dB from its 0 dB, position 0, down to its minimum. Mute is
+/// on every output pin amplifier with a mute bit, or else on the converter's.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Master {
+    codec: Address,
+    gain: Node,
+    range: GainRange,
+    mute: Vec<Node>,
+}
+
+/// Where the master stands: a position below the top, and whether it is muted.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Setting {
+    pub position: u8,
+    pub muted: bool,
+}
+
+impl Setting {
+    /// 0 dB and unmuted: what [`verbs`] leaves a path at.
+    pub const TOP: Self = Self { position: 0, muted: false };
+}
+
+/// Why a path has no master.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NoMaster {
+    /// No amplifier on the path has a gain range.
+    NoGain,
+    /// Neither an output pin nor the converter has a mute bit.
+    NoMute,
+}
+
+/// The master `path` carries, or which half it lacks.
+pub fn master(path: &OutputPath) -> Result<Master, NoMaster> {
+    let pin_amps = || pins(path).filter_map(|pin| pin.amp.map(|amp| (pin.node, amp)));
+    let amps = path.converter_amp.map(|amp| (path.converter, amp)).into_iter().chain(pin_amps());
+    let (gain, range) = amps
+        .filter_map(|(node, amp)| amp.gain.map(|range| (node, range)))
+        .next()
+        .ok_or(NoMaster::NoGain)?;
+    let mut mute: Vec<Node> = pin_amps().filter(|(_, amp)| amp.mute).map(|(node, _)| node).collect();
+    if mute.is_empty() && path.converter_amp.is_some_and(|amp| amp.mute) {
+        mute.push(path.converter);
+    }
+    if mute.is_empty() {
+        return Err(NoMaster::NoMute);
+    }
+    Ok(Master { codec: path.codec, gain, range, mute })
+}
+
+impl Master {
+    /// Amplifier steps per position: 3 dB rounded up to whole steps.
+    fn per_position(&self) -> u8 {
+        POSITION_QUARTER_DB.div_ceil(self.range.step_size_quarter_db)
+    }
+
+    /// The lowest position, the amplifier's minimum.
+    pub fn bottom(&self) -> u8 {
+        self.range.zero_db.div_ceil(self.per_position())
+    }
+
+    /// `setting` moved by `delta` positions, clamped to the range, and
+    /// unmuted: a step while muted unmutes.
+    pub fn step(&self, setting: Setting, delta: i32) -> Setting {
+        let position = (setting.position as i32).saturating_add(delta).clamp(0, self.bottom() as i32) as u8;
+        Setting { position, muted: false }
+    }
+
+    fn index(&self, position: u8) -> u8 {
+        self.range.zero_db.saturating_sub(position.min(self.bottom()) * self.per_position())
+    }
+
+    /// The verbs that set `setting`, gain and mute both, on every amplifier
+    /// the master names.
+    pub fn set(&self, setting: Setting) -> Vec<Verb> {
+        let amp = |node: Node, gain: u8, muted: bool| {
+            let mute = if muted { AMP_SET_MUTE } else { 0 };
+            Verb::long(
+                self.codec,
+                node,
+                verb::SET_AMP_GAIN_MUTE as u8,
+                AMP_SET_OUTPUT | AMP_SET_LEFT | AMP_SET_RIGHT | mute | gain as u16,
+            )
+        };
+        let gain = self.index(setting.position);
+        let mut out = alloc::vec![amp(self.gain, gain, setting.muted && self.mute.contains(&self.gain))];
+        for &node in self.mute.iter().filter(|&&node| node != self.gain) {
+            out.push(amp(node, 0, setting.muted));
+        }
+        out
+    }
+
+    /// The verbs that read the master back: the gain amplifier, then every
+    /// mute amplifier that is not it.
+    pub fn read(&self) -> Vec<Verb> {
+        let get = |node: Node| {
+            Verb::long(self.codec, node, verb::GET_AMP_GAIN_MUTE as u8, AMP_GET_OUTPUT_LEFT)
+        };
+        core::iter::once(self.gain)
+            .chain(self.mute.iter().copied().filter(|&node| node != self.gain))
+            .map(get)
+            .collect()
+    }
+
+    /// The setting the answers to [`Self::read`] say, or `None` where they
+    /// name no setting: a count that is not the read's, a gain above 0 dB or
+    /// between two positions, or mute amplifiers that disagree.
+    pub fn decode(&self, answers: &[Response]) -> Option<Setting> {
+        let [gain, rest @ ..] = answers else { return None };
+        if answers.len() != self.read().len() {
+            return None;
+        }
+        let index = (gain.raw() & AMP_ANSWER_GAIN) as u8;
+        let below = self.range.zero_db.checked_sub(index)?;
+        let position = below.div_ceil(self.per_position());
+        if self.index(position) != index {
+            return None;
+        }
+        let mute_answers: Vec<bool> = if self.mute.contains(&self.gain) {
+            core::iter::once(gain).chain(rest).map(|a| a.raw() & AMP_ANSWER_MUTE != 0).collect()
+        } else {
+            rest.iter().map(|a| a.raw() & AMP_ANSWER_MUTE != 0).collect()
+        };
+        let muted = mute_answers[0];
+        if mute_answers.iter().any(|&m| m != muted) {
+            return None;
+        }
+        Some(Setting { position, muted })
+    }
 }
 
 fn group_of<'a>(codecs: &'a [Codec], path: &OutputPath) -> Option<&'a FunctionGroup> {
@@ -173,9 +330,10 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::path::find_output_path;
+    use toyos_mixer::DEVICE_RATES;
 
-    /// The bit this sequence never sets, which is why it lives only here.
-    const AMP_MUTE: u16 = 1 << 7;
+    /// The bit this sequence never sets.
+    const AMP_MUTE: u16 = AMP_SET_MUTE;
 
     fn laptop() -> (Vec<Codec>, OutputPath) {
         let codecs = fixture::laptop();
@@ -282,28 +440,147 @@ mod tests {
         assert_eq!(selects, [0x0207_0100, 0x0307_0101]);
     }
 
-    #[test]
-    fn both_machines_offer_the_one_rate_this_driver_asks_for() {
-        let (codecs, path) = laptop();
-        assert_eq!(format(&codecs, &path), Some((0x4011, 2)));
-
-        let codecs = fixture::qemu();
+    /// The laptop's path with its converter's PCM word replaced by `word`.
+    fn converter_offering(word: u32) -> (Vec<Codec>, OutputPath) {
+        let mut codecs = fixture::laptop();
+        let group = &mut codecs[0].groups[0];
+        let dac = group.widgets.iter_mut().find(|w| w.node == Node(0x02)).unwrap();
+        dac.pcm = Some(PcmCaps::decode(crate::verb::Response::new(word).unwrap()));
         let path = find_output_path(&codecs).unwrap();
-        assert_eq!(format(&codecs, &path), Some((0x4011, 2)));
+        (codecs, path)
     }
 
     #[test]
-    fn a_converter_that_does_not_offer_the_rate_is_a_refusal_and_not_a_substitution() {
-        let mut codecs = fixture::laptop();
-        // 48 kHz only, at 16 bits: a converter that exists and cannot play the
-        // one rate this pipeline runs at.
-        let group = &mut codecs[0].groups[0];
-        let dac = group.widgets.iter_mut().find(|w| w.node == Node(0x02)).unwrap();
-        dac.pcm = Some(crate::caps::PcmCaps::decode(
-            crate::verb::Response::new(0x0002_0040).unwrap(),
-        ));
+    fn a_converter_offering_44100_runs_at_44100_as_both_machines_do() {
+        let (codecs, path) = laptop();
+        assert_eq!(rate(&codecs, &path, &DEVICE_RATES), Ok(44_100));
+        assert_eq!(format(&codecs, &path, 44_100), Some((0x4011, 2)));
+
+        let codecs = fixture::qemu();
         let path = find_output_path(&codecs).unwrap();
-        assert_eq!(format(&codecs, &path), None);
+        assert_eq!(rate(&codecs, &path, &DEVICE_RATES), Ok(44_100));
+        assert_eq!(format(&codecs, &path, 44_100), Some((0x4011, 2)));
+    }
+
+    #[test]
+    fn a_converter_offering_48000_alone_runs_at_48000() {
+        // The AMD bench's speaker converter's own word: 48 kHz at 16, 20 and 24 bits.
+        let (codecs, path) = converter_offering(0x000e_0040);
+        assert_eq!(rate(&codecs, &path, &DEVICE_RATES), Ok(48_000));
+        assert_eq!(format(&codecs, &path, 48_000), Some((0x0011, 2)));
+    }
+
+    #[test]
+    fn a_converter_offering_48000_beside_others_but_not_44100_runs_at_48000() {
+        // 32, 48 and 96 kHz at 16 bits.
+        let (codecs, path) = converter_offering(0x0002_0150);
+        assert_eq!(rate(&codecs, &path, &DEVICE_RATES), Ok(48_000));
+    }
+
+    #[test]
+    fn a_converter_offering_neither_rate_is_refused_naming_what_it_offers() {
+        // 32 and 96 kHz at 16 bits.
+        let (codecs, path) = converter_offering(0x0002_0110);
+        let Err(Some(pcm)) = rate(&codecs, &path, &DEVICE_RATES) else {
+            panic!("a converter offering neither rate was given one");
+        };
+        assert_eq!(pcm.rates().collect::<Vec<_>>(), [32_000, 96_000]);
+        assert_eq!(format(&codecs, &path, 44_100), None);
+        assert_eq!(format(&codecs, &path, 48_000), None);
+    }
+
+    /// What a codec answers a `Get Amplifier Gain/Mute` with after `verbs`:
+    /// the gain and mute each amplifier was last set to, left channel.
+    fn answers(master: &Master, sent: &[Verb]) -> Vec<Response> {
+        master
+            .read()
+            .iter()
+            .map(|get| {
+                let node = (get.raw() >> 20) & 0xFF;
+                let set = sent.iter().rev().find(|v| (v.raw() >> 20) & 0xFF == node).unwrap();
+                Response::new(set.raw() & 0xFF).unwrap()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_laptop_s_master_gains_on_the_converter_and_mutes_on_both_pins() {
+        let (_, path) = laptop();
+        let master = master(&path).unwrap();
+        // 88 steps of 0.75 dB, 0 dB at 87: four steps a position, 22 positions down.
+        assert_eq!(master.bottom(), 22);
+        let raw: Vec<u32> = master.set(Setting { position: 1, muted: true }).iter().map(|v| v.raw()).collect();
+        assert_eq!(raw, [0x0023_B053, 0x0143_B080, 0x0213_B080]);
+        let read: Vec<u32> = master.read().iter().map(|v| v.raw()).collect();
+        assert_eq!(read, [0x002B_A000, 0x014B_A000, 0x021B_A000]);
+    }
+
+    #[test]
+    fn qemus_master_gains_and_mutes_on_its_converter() {
+        let codecs = fixture::qemu();
+        let path = find_output_path(&codecs).unwrap();
+        let master = master(&path).unwrap();
+        let raw: Vec<u32> = master.set(Setting { position: 2, muted: true }).iter().map(|v| v.raw()).collect();
+        // 0 dB at 74, 1 dB steps: three steps a position.
+        assert_eq!(raw, [0x0023_B0C4]);
+        assert_eq!(master.read().len(), 1);
+    }
+
+    #[test]
+    fn every_setting_reads_back_as_itself() {
+        for (codecs, path) in [laptop(), {
+            let codecs = fixture::qemu();
+            let path = find_output_path(&codecs).unwrap();
+            (codecs, path)
+        }] {
+            let _ = codecs;
+            let master = master(&path).unwrap();
+            for position in 0..=master.bottom() {
+                for muted in [false, true] {
+                    let setting = Setting { position, muted };
+                    assert_eq!(master.decode(&answers(&master, &master.set(setting))), Some(setting));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_step_is_clamped_to_the_range_and_unmutes() {
+        let (_, path) = laptop();
+        let master = master(&path).unwrap();
+        let muted_top = Setting { position: 0, muted: true };
+        assert_eq!(master.step(muted_top, -1), Setting::TOP);
+        assert_eq!(master.step(Setting::TOP, 1), Setting { position: 1, muted: false });
+        let bottom = Setting { position: master.bottom(), muted: false };
+        assert_eq!(master.step(bottom, 1), bottom);
+        assert_eq!(master.step(Setting::TOP, i32::MAX), bottom);
+        assert_eq!(master.step(bottom, i32::MIN), Setting::TOP);
+        // The bottom is the amplifier's minimum, index 0, not past it.
+        assert_eq!(master.set(bottom)[0].raw() & 0x7F, 0);
+    }
+
+    #[test]
+    fn answers_that_name_no_setting_are_refused() {
+        let (_, path) = laptop();
+        let master = master(&path).unwrap();
+        let r = |raw| Response::new(raw).unwrap();
+        // Above 0 dB, between two positions, the pins disagreeing, and one answer short.
+        assert_eq!(master.decode(&[r(0x58), r(0), r(0)]), None);
+        assert_eq!(master.decode(&[r(0x56), r(0), r(0)]), None);
+        assert_eq!(master.decode(&[r(0x57), r(0x80), r(0)]), None);
+        assert_eq!(master.decode(&[r(0x57), r(0)]), None);
+        assert_eq!(master.decode(&[r(0x57), r(0x80), r(0x80)]), Some(Setting { position: 0, muted: true }));
+    }
+
+    #[test]
+    fn a_path_with_no_gain_range_or_no_mute_bit_has_no_master() {
+        let (_, mut path) = laptop();
+        let converter = path.converter_amp.take();
+        assert_eq!(master(&path), Err(NoMaster::NoGain));
+        path.converter_amp = converter;
+        path.output.amp = None;
+        path.headphone.as_mut().unwrap().amp = None;
+        assert_eq!(master(&path), Err(NoMaster::NoMute));
     }
 
     #[test]

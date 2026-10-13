@@ -4,6 +4,7 @@ use crate::hit::{hit_test, Hit};
 use crate::layout::{set_mode, Desk};
 use crate::rect::{Point, Rect};
 use crate::stack::Stack;
+use crate::volume::VolumeKey;
 use crate::window::{WindowId, WindowMode};
 
 /// HID usage codes for the keys the desktop keeps for itself.
@@ -21,6 +22,9 @@ mod usage {
     pub const LEFT: u8 = 0x50;
     pub const DOWN: u8 = 0x51;
     pub const UP: u8 = 0x52;
+    pub const MUTE: u8 = 0x7F;
+    pub const VOLUME_UP: u8 = 0x80;
+    pub const VOLUME_DOWN: u8 = 0x81;
 }
 
 /// What a key transition means to the desktop.
@@ -43,6 +47,8 @@ pub enum KeyAction {
     CloseFocused,
     Paste,
     SpawnTerminal,
+    /// A volume key's press: the desktop's, whatever has focus.
+    Volume(VolumeKey),
 }
 
 /// What `ev` does, given the focused window's mode and whether the launcher is
@@ -56,13 +62,28 @@ pub enum KeyAction {
 /// saw the press of a key it is holding needs the release of it too, and
 /// swallowing that leaves the window believing the key is still down.
 ///
+/// **The volume keys are the desktop's**: a press is [`KeyAction::Volume`],
+/// and its release is swallowed, since no window saw the press.
+///
 /// **While a prompt is up every transition is the prompt's**, the focused
 /// window's, and no chord is the desktop's: nothing closes, cycles,
 /// minimizes or opens a window under it, and nothing is pasted into it, the
 /// clipboard being any client's to write. [`PromptGate`] says which of them
 /// reach it.
 pub fn key_action(ev: RawKeyEvent, focused: Option<WindowMode>, launcher_open: bool, prompt: bool) -> KeyAction {
-    if prompt || !ev.pressed() {
+    if prompt {
+        return KeyAction::Forward;
+    }
+    let volume = match ev.keycode {
+        usage::MUTE => Some(VolumeKey::Mute),
+        usage::VOLUME_UP => Some(VolumeKey::Up),
+        usage::VOLUME_DOWN => Some(VolumeKey::Down),
+        _ => None,
+    };
+    if let Some(key) = volume {
+        return if ev.pressed() { KeyAction::Volume(key) } else { KeyAction::Ignore };
+    }
+    if !ev.pressed() {
         return KeyAction::Forward;
     }
     if launcher_open && ev.keycode == usage::ESCAPE {
@@ -496,6 +517,23 @@ mod tests {
         for code in [usage::Q, usage::LEFT, usage::TAB, usage::ESCAPE] {
             let ev = key(code, MOD_GUI | MOD_ALT | MOD_RELEASED);
             assert_eq!(key_action(ev, Some(WindowMode::Normal), true, false), KeyAction::Forward);
+        }
+    }
+
+    #[test]
+    fn a_volume_key_s_press_is_the_desktop_s_and_its_release_is_swallowed() {
+        for (code, want) in [
+            (usage::MUTE, VolumeKey::Mute),
+            (usage::VOLUME_UP, VolumeKey::Up),
+            (usage::VOLUME_DOWN, VolumeKey::Down),
+        ] {
+            for focused in [None, Some(WindowMode::Normal)] {
+                assert_eq!(key_action(key(code, 0), focused, false, false), KeyAction::Volume(want));
+                assert_eq!(key_action(key(code, MOD_RELEASED), focused, false, false), KeyAction::Ignore);
+            }
+            // Under a prompt every transition is the prompt's.
+            assert_eq!(key_action(key(code, 0), None, false, true), KeyAction::Forward);
+            assert_eq!(key_action(key(code, MOD_RELEASED), None, false, true), KeyAction::Forward);
         }
     }
 

@@ -70,18 +70,20 @@ receives = ["power"]
 # shell. `prompt` is the layer above every window, which `filepicker` alone
 # reaches: serving it makes the sessions its launches open the screen's, whose
 # packages may ask the person at it for a folder. `clipboard` is sent every copy
-# made in the session, and `vdagent` alone receives it.
+# made in the session, and `vdagent` alone receives it. `volume` is
+# soundserver's master level and mute, which the volume keys set and no other
+# row receives.
 [programs.compositor]
 service = true
 serves = ["compositor", "prompt", "clipboard"]
-receives = ["soundserver", "filepicker"]
+receives = ["soundserver", "filepicker", "volume"]
 devices = ["framebuffer", "keyboard", "mouse"]
 starts = ["terminal", "files", "/apps"]
 login = true
 
 [programs.soundserver]
 service = true
-serves = ["soundserver"]
+serves = ["soundserver", "volume"]
 devices = ["hda-audio", "pci:1af4:1059"]
 syscap = ["rt"]
 

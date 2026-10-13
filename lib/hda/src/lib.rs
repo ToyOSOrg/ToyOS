@@ -30,6 +30,6 @@ mod fixture;
 
 pub use caps::{AmpCaps, ConfigDefault, GainRange, PinCaps, WidgetCaps, WidgetKind};
 pub use graph::{Codec, FunctionGroup, Widget};
-pub use path::{find_output_path, Hop, OutputPath, PathError, PinSetup};
+pub use path::{choose, find_output_path, Hop, OutputPath, PathError, PinSetup, Unchosen};
 pub use probe::{enumerate, CodecFault, Verbs};
 pub use verb::{Address, Node, Response, Verb};

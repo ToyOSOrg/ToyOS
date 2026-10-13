@@ -238,7 +238,7 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             Ok(DeviceClaim::new(class, DeviceInfo::Acpi(info), claim))
         }
         DeviceType::HdaAudio => {
-            let (info, pcm) = crate::drivers::hda::info().ok_or(ClaimError::Absent)?;
+            let (info, pcm) = crate::drivers::hda::describe()?;
             let claim = Claim::acquire(class)?;
             Ok(DeviceClaim::new(class, DeviceInfo::Hda(info, shm(pcm)), claim))
         }

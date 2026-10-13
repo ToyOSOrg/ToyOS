@@ -1,8 +1,7 @@
 //! Scancode set 1 → HID usage.
 //!
 //! Set 1 is what arrives when the keyboard is in set 2 and the controller's
-//! translation bit is on — Linux's default configuration, and therefore the
-//! best-trodden path on an EC we cannot debug. The translation table lives in
+//! translation bit is on, as the i8042 driver sets it. The translation table lives in
 //! the controller, so it costs this crate nothing; what is left is three
 //! states (base, `0xE0`, `0xE1`) and two 128-byte tables.
 
@@ -174,8 +173,8 @@ impl KeyDecoder {
                 // **So a keyboard that resets itself is undetectable on this
                 // wire, and that is a property of the mode rather than of this
                 // decoder.** The driver runs the keyboard in set 2 with the
-                // controller translating to set 1 — Linux's default and the
-                // best-trodden EC path — and `0xAA`, the BAT-complete byte a
+                // controller translating to set 1,
+                // and `0xAA`, the BAT-complete byte a
                 // self-reset sends, is bit-identical to `0x2A | 0x80`. The
                 // T14's EC does reset the keyboard after suspend and after a
                 // lid event, so this is reached on real hardware rather than in

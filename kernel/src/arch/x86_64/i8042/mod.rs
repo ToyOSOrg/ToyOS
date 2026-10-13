@@ -902,10 +902,8 @@ enum SetQuery {
     Silent,
 }
 
-/// Ask which scancode set the keyboard is in. Read, never write: nothing
-/// else in the machine's life sends the matching `0xF0 0x02` either (Linux's
-/// `atkbd_select_set`, EDK2's `Ps2KeyboardDxe`), and a write cannot improve
-/// on a read that already answers.
+/// Ask which scancode set the keyboard is in. Read, never write: a write
+/// cannot improve on a read that already answers.
 fn query_scancode_set(deadline: u64) -> SetQuery {
     if !write_data(0xF0, deadline) {
         return SetQuery::Silent;
