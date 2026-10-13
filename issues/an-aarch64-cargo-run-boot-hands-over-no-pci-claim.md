@@ -6,18 +6,13 @@ opened: 2026-10-13
 
 # An aarch64 `cargo run` boot hands over no PCI claim
 
-`cargo run -- --arch aarch64` launches `virt,gic-version=3,iommu=smmuv3`
-under HVF (`build/qemu.rs`, `machine`). HVF's own GIC has no ITS, so the
-MADT names none (`ITS: the MADT names none`), and every claim is refused:
-`pcidev: PCI … NOT HANDED OVER — its interrupts would not be remapped on
-this machine`, for diskserver's NVMe, soundserver, netstack and vdagent.
-
-The same launch with only the machine changed to
-`virt,gic-version=3,its=on,iommu=smmuv3,kernel-irqchip=off` (QEMU 11.1.1,
-by hand) arms the ITS and maps each claim's DeviceID to its slot's LPI,
-and still hands over none: each of the four is refused with `its BAR was
-moved onto 8 64-bit address(es) inside the windows firmware declared and
-the function answered at none of them` (lines 343, 418, 450, 487 of
+`cargo run -- --arch aarch64` launches `virt` with the GICv3's ITS, on
+QEMU's own GIC under HVF (`Arch::irqchip`), which arms it and maps each
+claim's DeviceID to its slot's LPI: the same launch by hand with
+`its=on,kernel-irqchip=off` (QEMU 11.1.1) showed it. It still hands over
+none: diskserver's NVMe, soundserver, netstack and vdagent are each
+refused with `its BAR was moved onto 8 64-bit address(es) inside the
+windows firmware declared and the function answered at none of them` (lines 343, 418, 450, 487 of
 [the boot's log](https://github.com/ToyOSOrg/evidence/blob/e626cced7ab73c04efdbbfd0b98a2f0a0ff8d86b/fix2-60f08b937/aarch64-its-boot.log)).
 Each answers at its firmware BAR: `0x0f0107ff`, `0x79000000`,
 `0x30bf8024` and `0x00000103` (lines 327, 386, 433, 470). At every

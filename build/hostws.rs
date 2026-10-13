@@ -83,28 +83,29 @@ pub(crate) fn rel(root: &Path, path: &Path) -> String {
         .replace('\\', "/")
 }
 
+/// The library members built for a guest: the SDK, its window, font and
+/// file-picker clients and the two shared crates that link the SDK, whose
+/// `toyos` is not clippy-clean on a host; and `sprite`, whose blit no clippy
+/// shape passes (`issues/sprite-dereferences-a-raw-pointer-behind-a-safe-fn.md`).
+/// Their tests run in a step of their own ([`guest_libraries`]).
+const GUEST_LIBRARIES: [&str; 7] = [
+    crate::ci::SDK_DIR,
+    "sdk/window",
+    "sdk/font",
+    "sdk/filepicker",
+    "lib/logkeeper-api",
+    "lib/pci-claim",
+    "system/compositor/sprite",
+];
+
 /// Whether the member at `member` is built for a guest: the kernel, whose
-/// library alone a host tests, and the SDK, each from a step of its own; the
-/// loader; the SDK's window, font and file-picker clients and the two shared
-/// crates that link the SDK, whose `toyos` is not clippy-clean on a host;
-/// `sprite`, whose blit no clippy shape passes
-/// (`issues/sprite-dereferences-a-raw-pointer-behind-a-safe-fn.md`); and every
-/// program, a crate directly under a [`crate::build::PROGRAM_ROOTS`] entry,
-/// which `build/userlandhost.rs` surveys. A crate nested in a program, as in the
-/// kernel, is a host member.
+/// library alone a host tests, from a step of its own; the loader; the
+/// [`GUEST_LIBRARIES`]; and every program, a crate directly under a
+/// [`crate::build::PROGRAM_ROOTS`] entry, which `build/userlandhost.rs`
+/// surveys. A crate nested in a program, as in the kernel, is a host member.
 fn guest_built(member: &str) -> bool {
-    [
-        crate::ci::KERNEL_DIR,
-        crate::ci::SDK_DIR,
-        crate::build::LOADER_DIR,
-        "sdk/window",
-        "sdk/font",
-        "sdk/filepicker",
-        "lib/logkeeper-api",
-        "lib/pci-claim",
-        "system/compositor/sprite",
-    ]
-    .contains(&member)
+    [crate::ci::KERNEL_DIR, crate::build::LOADER_DIR].contains(&member)
+        || GUEST_LIBRARIES.contains(&member)
         || crate::build::PROGRAM_ROOTS.iter().any(|r| {
             member.strip_prefix(r).and_then(|m| m.strip_prefix('/')).is_some_and(|name| !name.contains('/'))
         })
@@ -118,8 +119,17 @@ pub fn host_members(root: &Path) -> BTreeSet<String> {
 /// The package names of the [`guest_built`] members, which a `cargo` run over
 /// the workspace on a host excludes.
 pub fn guest_packages(root: &Path) -> Vec<String> {
-    let guests = members(root).into_iter().filter(|m| guest_built(m));
-    guests
+    packages(root, members(root).into_iter().filter(|m| guest_built(m)))
+}
+
+/// The package names of the [`GUEST_LIBRARIES`], whose tests link no syscall
+/// on a host.
+pub fn guest_libraries(root: &Path) -> Vec<String> {
+    packages(root, GUEST_LIBRARIES.iter().map(|m| m.to_string()))
+}
+
+fn packages(root: &Path, members: impl Iterator<Item = String>) -> Vec<String> {
+    members
         .map(|member| {
             let path = root.join(&member).join("Cargo.toml");
             let text = std::fs::read_to_string(&path)

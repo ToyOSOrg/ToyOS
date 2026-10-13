@@ -170,6 +170,23 @@ impl Arch {
         }
     }
 
+    /// The interrupt controller's `-machine` options, read by `cargo run` and
+    /// the harness both. `remapped` asks for the controller that tells one PCI
+    /// function's message from another's, which a claim requires: VT-d's
+    /// interrupt remapping, which QEMU emulates only in its half of a split
+    /// irqchip; or the GICv3 ITS. HVF's in-kernel vGIC refuses an ITS and
+    /// KVM's runs one, so under HVF alone QEMU's own GIC takes its place
+    /// (QEMU 11.1.1 `hw/arm/virt.c`, `finalize_msi_controller`).
+    pub const fn irqchip(self, accel: Accel, remapped: bool) -> Option<&'static str> {
+        match (self, remapped, accel) {
+            (Arch::X86_64, false, _) => None,
+            (Arch::X86_64, true, _) => Some("kernel-irqchip=split"),
+            (Arch::Aarch64, false, _) => Some("gic-version=3"),
+            (Arch::Aarch64, true, Accel::Hvf) => Some("gic-version=3,msi=its,kernel-irqchip=off"),
+            (Arch::Aarch64, true, Accel::Kvm | Accel::Tcg) => Some("gic-version=3,msi=its"),
+        }
+    }
+
     /// The machine's three targets: userland, kernel, loader.
     pub const fn targets(self) -> [&'static str; 3] {
         [self.userland(), self.kernel(), self.loader()]
