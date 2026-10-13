@@ -28,22 +28,15 @@
 //! `usbkbd` reads every slot byte above 3 through a 256-entry table. What a
 //! usage means is the translator's to say.
 
+pub use toyos_input::keys::{Transition, Transitions};
+use toyos_input::keys::{Keys, Usages};
+
 /// Bytes in a boot keyboard report, and what its interrupt transfer asks for.
 pub const REPORT: usize = 8;
 
 const ERROR_ROLL_OVER: u8 = 0x01;
 const POST_FAIL: u8 = 0x02;
 const ERROR_UNDEFINED: u8 = 0x03;
-
-/// The first modifier's usage; byte 0's bit n is `MODIFIER + n`.
-const MODIFIER: u8 = 0xE0;
-
-/// One key went down or up, named by its Keyboard/Keypad page usage.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Transition {
-    pub usage: u8,
-    pub pressed: bool,
-}
 
 /// Why a report was not believed at all; the keyboard's state is the last
 /// report that was.
@@ -56,16 +49,6 @@ pub enum Refused {
     /// ErrorUndefined in a slot: an error the keyboard does not name.
     Undefined,
 }
-
-/// Every usage, one bit each.
-type Usages = [u64; 4];
-
-fn bit(usage: u8) -> (usize, u64) {
-    (usize::from(usage / 64), 1 << (usage % 64))
-}
-
-/// The eight modifiers' bits, which sit in the last word.
-const MODIFIERS: Usages = [0, 0, 0, 0xFF << (MODIFIER % 64)];
 
 /// What a believed report did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -84,7 +67,7 @@ pub enum Read {
 #[derive(PartialEq, Eq, Debug, Default)]
 #[cfg_attr(test, derive(Clone))]
 pub struct Keyboard {
-    held: Usages,
+    keys: Keys,
 }
 
 impl Keyboard {
@@ -92,8 +75,7 @@ impl Keyboard {
     /// is not believed.
     pub fn report(&mut self, report: &[u8]) -> Result<Read, Refused> {
         let report: &[u8; REPORT] = report.try_into().map_err(|_| Refused::Length(report.len()))?;
-        // Byte 0's bit n is usage `MODIFIER + n`, which is bit `MODIFIER % 64 + n` of the last word.
-        let modifiers: Usages = [0, 0, 0, u64::from(report[0]) << (MODIFIER % 64)];
+        let modifiers = Usages::modifier_byte(report[0]);
         let mut now = modifiers;
         let mut rolled_over = false;
         for &usage in &report[2..] {
@@ -102,75 +84,19 @@ impl Keyboard {
                 ERROR_ROLL_OVER => rolled_over = true,
                 POST_FAIL => return Err(Refused::PostFail),
                 ERROR_UNDEFINED => return Err(Refused::Undefined),
-                usage => {
-                    let (word, mask) = bit(usage);
-                    now[word] |= mask;
-                }
+                usage => now.insert(usage),
             }
         }
         if rolled_over {
-            let kept = core::array::from_fn(|w| self.held[w] & !MODIFIERS[w] | modifiers[w]);
-            return Ok(Read::RollOver(self.hold(kept)));
+            let kept = self.keys.held().keys().union(modifiers);
+            return Ok(Read::RollOver(self.keys.hold(kept)));
         }
-        Ok(Read::Keys(self.hold(now)))
+        Ok(Read::Keys(self.keys.hold(now)))
     }
 
     /// Every held key released: a keyboard leaving the bus says nothing more.
     pub fn release(&mut self) -> Transitions {
-        self.hold([0; 4])
-    }
-
-    fn hold(&mut self, now: Usages) -> Transitions {
-        let changed = core::array::from_fn(|w| self.held[w] ^ now[w]);
-        self.held = now;
-        Transitions { changed, now, pass: Pass::Modifiers }
-    }
-}
-
-/// Which transitions [`Transitions`] is yielding. **Modifiers first**, so a
-/// report pressing Shift and a key together is a shifted key and one
-/// pressing Ctrl, Alt and D together is the chord; then releases, then
-/// presses.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Pass {
-    Modifiers,
-    Released,
-    Pressed,
-}
-
-/// The transitions one report made, each usage at most once and in ascending
-/// usage within each pass.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Transitions {
-    changed: Usages,
-    now: Usages,
-    pass: Pass,
-}
-
-impl Iterator for Transitions {
-    type Item = Transition;
-
-    fn next(&mut self) -> Option<Transition> {
-        loop {
-            // The modifiers' pass has cleared their bits before the others run.
-            let wanted = |w: usize| match self.pass {
-                Pass::Modifiers => self.changed[w] & MODIFIERS[w],
-                Pass::Released => self.changed[w] & !self.now[w],
-                Pass::Pressed => self.changed[w] & self.now[w],
-            };
-            if let Some(w) = (0..4).find(|&w| wanted(w) != 0) {
-                let at = wanted(w).trailing_zeros();
-                self.changed[w] &= !(1 << at);
-                // `w < 4` and `at < 64`, so the usage is a byte.
-                let usage = (w as u32 * 64 + at) as u8;
-                return Some(Transition { usage, pressed: self.now[w] & (1 << at) != 0 });
-            }
-            self.pass = match self.pass {
-                Pass::Modifiers => Pass::Released,
-                Pass::Released => Pass::Pressed,
-                Pass::Pressed => return None,
-            };
-        }
+        self.keys.hold(Usages::NONE)
     }
 }
 

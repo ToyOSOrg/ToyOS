@@ -8,9 +8,9 @@
 //! a bug that is invisible in QEMU and un-single-steppable on the laptop
 //! this exists for.
 //!
-//! The kernel side of the driver (`kernel/src/arch/x86_64/i8042/`) owns the
-//! controller, the interrupt and the queues. Nothing in here touches
-//! hardware, allocates, or knows what a lock is.
+//! `/system/bin/ps2server` owns the controller, the interrupt and the
+//! connection to the owner of input. Nothing in here touches hardware,
+//! allocates, or knows what a lock is.
 
 #![no_std]
 

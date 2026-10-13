@@ -52,13 +52,10 @@ actuators! {
     /// AMD `SYSRET` SS-attributes workaround's only guest-observable proof.
     sysret_ss_probe = "sysret-ss-probe";
 
-    /// Leave the i8042 unprobed, so this kernel drives no controller and an
-    /// `isa` claim on it is granted. Judged by `isa_ports_are_the_binders_alone`
-    /// and `isa_lines_reach_their_holder`.
-    i8042_withheld = "i8042-withheld";
-
-    /// Script the input core directly at end of boot.
-    test_input_merge = "test-input-merge";
+    /// Declare the i8042's command port to the kernel at boot, as a FADT
+    /// reset register at 0x64 is, so an `isa` claim on its row is refused by
+    /// name. Judged by `isa_claim_refused_on_a_kernel_port`.
+    isa_port_declared = "isa-port-declared";
 
     /// Run the xHCI extended-capability walk over eight malformed lists at init.
     xhci_xecp_selftest = "xhci-xecp-selftest";

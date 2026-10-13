@@ -1,6 +1,7 @@
 //! Wire-format types for HID input devices (keyboard, mouse).
 //!
-//! These cross the kernel→userland boundary as reads on a device handle.
+//! These cross the kernel→userland boundary as reads on a device handle, and
+//! a source's connection to the owner of input (`toyos-input`).
 
 /// Keyboard modifier flags.
 pub const MOD_SHIFT: u8 = 1;
@@ -10,17 +11,15 @@ pub const MOD_GUI: u8 = 8;
 pub const MOD_RELEASED: u8 = 0x10;
 
 crate::user_safe! {
-    /// One key transition, as the kernel delivers it through the keyboard handle.
+    /// One key transition: which physical key moved, by its HID Keyboard-page
+    /// usage, and which way. There is no layout in it, so there is nothing
+    /// here that a layout could change.
     ///
-    /// The whole of what the kernel knows about a key: which physical key moved,
-    /// which way, and what the machine's modifiers were when it did. There is no
-    /// layout in the kernel, so there is nothing here that a layout could change.
-    ///
-    /// **`modifiers` is the union across every keyboard the machine has**, which
-    /// is why it is here rather than derived by whoever translates: Shift held on
-    /// one keyboard and a letter typed on another must produce a capital, and a
-    /// surface that reconstructs the mask from the transitions it saw has not seen
-    /// the ones that arrived while another surface had the focus.
+    /// **From a source, `modifiers` is `MOD_RELEASED` or nothing**: a source
+    /// knows one keyboard's keys. The owner of input merges every source's
+    /// (`toyos_input::Merge`) and hands on each transition with the modifier
+    /// mask across every keyboard, so Shift held on one keyboard and a letter
+    /// typed on another is a capital.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct RawKeyEvent {
         pub keycode: u8,
@@ -37,14 +36,31 @@ impl RawKeyEvent {
     pub fn gui(&self) -> bool { self.modifiers & MOD_GUI != 0 }
 }
 
+/// [`MouseEvent::kind`]: `x` and `y` are a movement, in the device's counts.
+pub const POINTER_RELATIVE: u8 = 0;
+/// [`MouseEvent::kind`]: `x` and `y` are a position, each in
+/// `0..=`[`POINTER_ABSOLUTE_MAX`].
+pub const POINTER_ABSOLUTE: u8 = 1;
+/// The far edge of an absolute axis.
+pub const POINTER_ABSOLUTE_MAX: i16 = 32767;
+
 crate::user_safe! {
-    /// A mouse/tablet event as delivered by the kernel through the mouse handle.
-    /// Carries absolute coordinates (0–32767) from the USB tablet.
-    #[derive(Clone, Copy)]
+    /// One pointer report, as the device gave it: nothing is integrated or
+    /// merged before the owner of input, which ORs every pointer's buttons
+    /// and keeps the one position (`toyos_input::Pointer`).
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct MouseEvent {
+        /// Which of its sender's pointers this is.
+        pub source: u8,
+        /// This pointer's own buttons, in HID boot-mouse order: bit 0 left,
+        /// 1 right, 2 middle, then two more.
         pub buttons: u8,
+        /// Wheel notches, away from the user positive.
         pub scroll: i8,
-        pub abs_x: u16,
-        pub abs_y: u16,
+        /// [`POINTER_RELATIVE`] or [`POINTER_ABSOLUTE`].
+        pub kind: u8,
+        pub x: i16,
+        /// Down the screen positive, in either kind.
+        pub y: i16,
     }
 }

@@ -30,13 +30,17 @@ use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 
 use terminal::Console;
+use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::endow;
 use toyos::port::{self, Connector};
 use toyos::surface::{self, Delivery, Host, Notice};
 use toyos::{FramebufferDev, Keyboard, Pipe};
+use toyos_abi::input::RawKeyEvent;
 use toyos_abi::syscall::{DeviceType, SyscallError};
+use toyos_input::wire::{self, Record, CONNECTIONS, KEEP, KEY_LEN};
+use toyos_input::{Merge, Slot};
 use toyos_logstream::{Lines, Showing, Source};
 use window::Screen;
 
@@ -46,6 +50,9 @@ const FONT: &str = "/system/share/fonts/JetBrainsMono-Regular-8x16.font";
 /// sequences; this program consumes them before it asks.
 const KEY_PAGE_UP: u8 = 0x4B;
 const KEY_PAGE_DOWN: u8 = 0x4E;
+
+/// The most frames one input source's turn takes.
+const SOURCE_FRAMES: usize = 64;
 
 /// The most of the boot so far [`seed_tail`] will look at.
 ///
@@ -199,6 +206,12 @@ fn main() {
 
     let kb: Keyboard = endow::device(DeviceType::Keyboard)
         .expect("the manifest gives this program the keyboard");
+    // The `input` port and its sources, merged with the kernel's keyboard
+    // stream. Their pointer reports are read and moved by nothing: this
+    // program draws no pointer.
+    let inputs = endow::acceptor(wire::PORT).expect("the manifest declares this program serves `input`");
+    let mut sources: [Option<(Connection, FrameRx<KEEP>)>; CONNECTIONS] = Default::default();
+    let mut merge = Merge::default();
     // What the panel cost, on a machine whose only instrument is the panel.
     // The seed is the heaviest thing this program ever draws — a screenful of
     // log per scrolled row — so a boot that felt slow says so here.
@@ -210,14 +223,18 @@ fn main() {
     );
 
     // The declared set: the shell's two output pipes, the keyboard, the log,
-    // and this console's own surface listener and its clients.
-    let poller = Poller::new(4 + Host::POLL_HANDLES);
+    // this console's own surface listener and its clients, and the `input`
+    // port's listener and sources.
+    let poller = Poller::new(4 + Host::POLL_HANDLES + 1 + CONNECTIONS as u32);
     const TOKEN_STDOUT: u64 = 0;
     const TOKEN_STDERR: u64 = 1;
     const TOKEN_KEYBOARD: u64 = 2;
     const TOKEN_LISTEN: u64 = 3;
     const TOKEN_CLIENT: u64 = 4;
     const TOKEN_LOG: u64 = 5;
+    const TOKEN_INPUT: u64 = 6;
+    /// Source `n`'s is this plus `n`.
+    const TOKEN_SOURCE: u64 = 7;
 
     // The shell's unfinished line — a prompt, and what is being typed at it —
     // as it wrote it, for a line of the log to be drawn above.
@@ -233,8 +250,14 @@ fn main() {
         if let Ok(log) = &log {
             poller.watch(&log.pipe, READABLE, TOKEN_LOG);
         }
+        poller.watch(&inputs, READABLE, TOKEN_INPUT);
+        for (n, source) in sources.iter().enumerate() {
+            if let Some((conn, _)) = source {
+                poller.watch(conn, READABLE, TOKEN_SOURCE + n as u64);
+            }
+        }
 
-        let mut ready = [false; 6];
+        let mut ready = [false; TOKEN_SOURCE as usize + CONNECTIONS];
         poller.wait(1, u64::MAX, |token| {
             if (token as usize) < ready.len() {
                 ready[token as usize] = true;
@@ -317,45 +340,94 @@ fn main() {
             }
         }
 
+        // Every transition of the merged keyboard this turn made, in order.
+        let mut keys: Vec<RawKeyEvent> = Vec::new();
+        if ready[TOKEN_INPUT as usize] {
+            match inputs.accept() {
+                Err(e) => eprintln!("console: an input source could not be accepted ({e:?})"),
+                Ok(conn) => match sources.iter().position(Option::is_none) {
+                    None => eprintln!("console: refusing an input source — {CONNECTIONS} are connected"),
+                    Some(n) => sources[n] = Some((conn, FrameRx::new())),
+                },
+            }
+        }
+        for n in 0..CONNECTIONS {
+            if !ready[TOKEN_SOURCE as usize + n] {
+                continue;
+            }
+            let slot = Slot::connection(n).expect("a source's index is a slot");
+            let Some((conn, rx)) = &mut sources[n] else { continue };
+            let mut ended = None;
+            // A bounded turn, so a source with a frame always ready cannot
+            // keep the shell's output from being drawn.
+            for _ in 0..SOURCE_FRAMES {
+                let record = match rx.pump(conn) {
+                    RxStep::Idle => break,
+                    RxStep::Eof => {
+                        ended = Some("its connection ended".to_string());
+                        break;
+                    }
+                    RxStep::Malformed => {
+                        ended = Some("a frame no protocol here can make".to_string());
+                        break;
+                    }
+                    RxStep::Frame { msg_type, payload_len } => wire::decode(msg_type, rx.payload(payload_len)),
+                };
+                match record {
+                    Ok(Record::Key(key)) => keys.extend(merge.key(slot, key)),
+                    Ok(Record::Pointer(_)) => {}
+                    Ok(Record::Lost) => keys.extend(merge.end(slot)),
+                    Err(why) => {
+                        ended = Some(format!("a record refused: {why:?}"));
+                        break;
+                    }
+                }
+            }
+            if let Some(why) = ended {
+                eprintln!("console: dropping input source {n} — {why}");
+                sources[n] = None;
+                keys.extend(merge.end(slot));
+            }
+        }
         if ready[TOKEN_KEYBOARD as usize] {
-            let mut events = [toyos_abi::input::RawKeyEvent { keycode: 0, modifiers: 0 }; 16];
-            let buf = unsafe {
-                std::slice::from_raw_parts_mut(
-                    events.as_mut_ptr() as *mut u8,
-                    std::mem::size_of_val(&events),
-                )
-            };
+            let mut buf = [0u8; 16 * KEY_LEN];
             // Non-blocking for the reason `Keyboard::read_nonblock` documents:
             // an event loop that can park on an empty queue is a frozen screen.
-            let n = kb.read_nonblock(buf).unwrap_or(0);
-            for &event in &events[..n / std::mem::size_of::<toyos_abi::input::RawKeyEvent>()] {
-                // A client that asked for the keys gets the transition whole,
-                // releases included, and the translator is left where it is.
-                if host.deliver(event) == Delivery::Sent {
-                    continue;
+            let n = kb.read_nonblock(&mut buf).unwrap_or(0);
+            for raw in buf[..n].as_chunks::<KEY_LEN>().0 {
+                match wire::key(raw) {
+                    Ok(key) => keys.extend(merge.key(Slot::KERNEL, key)),
+                    Err(why) => eprintln!("console: the kernel's keyboard stream carried {raw:02x?}, refused: {why:?}"),
                 }
-                if !event.pressed() {
-                    continue;
+            }
+        }
+        for event in keys {
+            // A client that asked for the keys gets the transition whole,
+            // releases included, and the translator is left where it is.
+            if host.deliver(event) == Delivery::Sent {
+                continue;
+            }
+            if !event.pressed() {
+                continue;
+            }
+            match event.keycode {
+                // Unchorded, unlike a windowed terminal's Shift+PageUp:
+                // nothing in this image reads PageUp, and most of what the
+                // panel has to show is the kernel log seeded above the
+                // prompt. A scrollback that needs a chord is one the owner
+                // does not reach for with a laptop in his hands.
+                KEY_PAGE_UP => {
+                    console.scroll_view_up(page_rows);
+                    painted = true;
                 }
-                match event.keycode {
-                    // Unchorded, unlike a windowed terminal's Shift+PageUp:
-                    // nothing in this image reads PageUp, and most of what the
-                    // panel has to show is the kernel log seeded above the
-                    // prompt. A scrollback that needs a chord is one the owner
-                    // does not reach for with a laptop in his hands.
-                    KEY_PAGE_UP => {
-                        console.scroll_view_up(page_rows);
-                        painted = true;
-                    }
-                    KEY_PAGE_DOWN => {
-                        console.scroll_view_down(page_rows);
-                        painted = true;
-                    }
-                    usage => {
-                        let text = translator.press(usage, window::KeyEvent::from(event).mods());
-                        if !text.is_empty() {
-                            shell.stdin.write_all(text.as_bytes()).ok();
-                        }
+                KEY_PAGE_DOWN => {
+                    console.scroll_view_down(page_rows);
+                    painted = true;
+                }
+                usage => {
+                    let text = translator.press(usage, window::KeyEvent::from(event).mods());
+                    if !text.is_empty() {
+                        shell.stdin.write_all(text.as_bytes()).ok();
                     }
                 }
             }

@@ -2,9 +2,8 @@
 //! kernel reads and writes for it, what it refuses and by which name, and the
 //! firmware's Global Lock taken, found owned and given back.
 //!
-//! Run on a boot that starts no ACPI server (`tests/images/acpicase.toml`) and whose
-//! kernel leaves the i8042 to a claim (`i8042-withheld`), so its row is
-//! another claim's; on a guest: every write here that must be refused is one
+//! Run on a boot that starts no ACPI server (`tests/images/acpicase.toml`),
+//! where the i8042's row is another claim's; on a guest: every write here that must be refused is one
 //! a kernel that made it would make for real — to RAM, to the tables, to
 //! COM1, to `PM1a_CNT`, to a function's configuration space — and the
 //! firmware's side of the lock is staged on the FACS itself, which only a
@@ -322,8 +321,8 @@ fn ports(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(holder.read(Space::SystemIo, 0x1_0000, Width::Byte), Err(Refused::PortSpan));
     assert_eq!(holder.read(Space::SystemIo, 0x80, Width::QWord), Err(Refused::PortSpan));
 
-    // The i8042's row, which another claim is for: this boot's kernel leaves
-    // the controller unprobed, so nothing declared its ports.
+    // The i8042's row, which another claim is for: no kernel drives the
+    // controller, so nothing declared its ports.
     for port in [0x60u64, 0x64] {
         assert_eq!(holder.read(Space::SystemIo, port, Width::Byte), Err(Refused::ClaimedPort), "acpi: port {port:#x} was read");
         assert_eq!(holder.write(Space::SystemIo, port, Width::Byte, 0), Err(Refused::ClaimedPort), "acpi: port {port:#x} was written");

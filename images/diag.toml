@@ -5,8 +5,7 @@
 # phase boundary and returns immediately once anything claims
 # DEVICE_FRAMEBUFFER. On the image that was flashed to the T14 the compositor
 # claimed it tens of milliseconds after the last checkpoint, so every line the
-# kernel logged — including the one `i8042:` line that says why the integrated
-# keyboard is dead — was on screen for about a tenth of a second and then gone.
+# kernel logged was on screen for about a tenth of a second and then gone.
 #
 # `/system/bin/supervisor` is in every image and holds the one `SysCap`, so the
 # guarantee is that this config declares no `devices`, which

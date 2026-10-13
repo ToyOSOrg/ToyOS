@@ -752,11 +752,13 @@ pub const FLASHABLE: &[&str] = &[
     "unclaimed-vector-selftest",
     "xhci-xecp-selftest",
     "xhci-descriptor-selftest",
-    // Two probes rather than staged inputs, and both are reads: the SS-reload
-    // one runs inside the first syscall's own context switch, and the input-core one merges
-    // events it made up itself.
+    // A probe rather than staged inputs, and a read: it runs inside the first
+    // syscall's own context switch.
     "sysret-ss-probe",
-    "test-input-merge",
+    // It enters one port in the kernel's table of declared ports at boot. No
+    // kernel path reads or writes a port for that entry, so it reaches no
+    // device; what it changes is that a claim on the i8042's row is refused.
+    "isa-port-declared",
     // Three nested `scheduler::Operation`s with known deadlines, in both homes,
     // each printing what it asked for and what it observed. It establishes and
     // drops them and reaches nothing else.
@@ -807,12 +809,6 @@ pub const FLASHABLE: &[&str] = &[
     // hold, reaches no firmware state, and the worst
     // it leaves is a stick a replug clears — the defect the arm exists to stage.
     "usb-transport-break",
-    // The kernel leaves the i8042 unprobed and a test process drives it through
-    // an `isa` claim: it reads the configuration byte, has the keyboard
-    // acknowledge `0xF4` and writes the byte back, each a command this kernel's
-    // own driver sends the controller on every boot. It reaches no firmware
-    // state, and firmware programs the controller again at the next power-on.
-    "i8042-withheld",
     // The kernel leaves the Type-C xHCI controller to a claim, and `usbd`
     // drives it through the unit: the handoff, a reset and its own rings, as
     // this kernel's driver does every boot. Firmware owns neither of the
