@@ -384,6 +384,11 @@ const MACHINE_TESTS: &[&str] = &[
     // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
     // the SDM, and the KVM runner's CPU.
     "vector_state_survives_a_switch",
+    // The clipboard agent's opening exchange with QEMU's own vdagent: the
+    // device exists only under QEMU, so no metal row reaches it, and the other
+    // end of the handshake and of the request is QEMU's vdagent chardev and
+    // virtio-serial device, which no host test runs.
+    "the_opening_exchange_with_qemus_agent_completes",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -3402,7 +3407,32 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
+        "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
         other => Err(format!("unknown machine test {other}")),
+    }
+}
+
+/// The clipboard agent opens its port and QEMU's vdagent answers its opening
+/// `REQUEST` with no data, since `-display none` gives QEMU's clipboard no
+/// peer: the agent said both, in this order.
+fn the_opening_exchange_with_qemus_agent_completes() -> Result<(), String> {
+    const OPEN: &str = "vdagent: port 1 open, the host announces capabilities 0x00020060";
+    const ANSWERED: &str = "vdagent: the host's clipboard, 0 bytes";
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/clipboardcase.toml"),
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::HeadlessVirtioGpu, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "the agent's opening exchange", |t| t.contains(ANSWERED))
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let said = serial::Serial::named("the clipboard boot", console);
+    said.must_be_clean()?;
+    let text = said.text();
+    match (text.find(OPEN), text.find(ANSWERED)) {
+        (Some(open), Some(answered)) if open < answered => Ok(()),
+        _ => Err(format!("the agent did not say {OPEN:?} before {ANSWERED:?}:\n{text}")),
     }
 }
 
