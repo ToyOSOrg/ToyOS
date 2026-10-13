@@ -66,11 +66,10 @@ Beside that order, each waiting on something outside it:
    `every_request_is_answered_exactly_once`,
    `what_a_flush_calls_durable_is_on_the_medium` and
    `what_was_on_the_wire_at_the_end_is_refused_and_what_was_not_waits` for
-   the transport, by the restart test
-   `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md` owes
-   for diskserver's part, a session reopened over the page a killed server
-   left, red under the mutation that moves the server's stores after its
-   answer, by fileserver's
+   the transport, for diskserver's part by `wire::Opened::over`, whose type
+   makes a server's ends before its answer, and by the client test
+   `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md` owes, a
+   session reopened over the page a killed server left, by fileserver's
    `a_directory_rename_is_whole_under_one_name_wherever_the_server_is_killed`
    for DATA, and for LOG by the FAT test step 10 owes. **Partly done**
    (#525, #536): diskserver drives NVMe, and the kernel's NVMe driver is
@@ -207,10 +206,10 @@ Beside that order, each waiting on something outside it:
        same controller delivering every report, red on a usbd that waits on
        the stick before it reads the keyboard's ring. `/log`'s, what a killed
        usbd had on the wire: stage 3's `toyos-blockring` tests for the
-       transport, and for usbd's session open the reopen test
+       transport, and for usbd's session open `wire::Opened::over`, moved with
+       the open, and the client test
        `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md`
-       owes, red under the mutation that moves usbd's stores after its
-       answer; with one test this step owes in
+       owes; with one test this step owes in
        `system/fileserver/src/fat.rs`: a disk stopped after each block write
        in turn of an append and its sync mounts at every stop and reads back
        all the last whole sync held, red on a sync that writes a growing
