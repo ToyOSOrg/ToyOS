@@ -54,13 +54,16 @@ if it meets the bar above; otherwise it is a NOTE.
   userland could own; a design made worse to spare the ABI; a design choice made because of a
   test or development environment's capability (QEMU, CI, the dev host), a particular test
   machine's, or another OS's practice, for a design is chosen on its merits for the modern hardware
-  ToyOS targets, and an environment that cannot run it changes or the gap is filed; where that
-  hardware's manufacturers or the published state of the art back a design, one that does not
-  follow and cite them, or leaves them while they still back it. Bench numbers on a design they back
-  are reported and never send it back, but a metal timing past twice its machine's record reds every
-  design: that ceiling is a bug guard, not a bench verdict. A design nothing published covers is
-  reviewed on its correctness and simplicity, and a speed claim does not decide by itself unless
-  speed is the design's only purpose. A new
+  ToyOS targets, and an environment that cannot run it changes or the gap is filed; a citation of
+  another implementation's source as authority; Linux named in source, a test or a manifest but as
+  a host platform, or the name of an interface defined outside ToyOS (a `libc` item, a firmware's
+  `_OSI` string, a partition type); where the vendor's documentation, the published
+  specifications or the published state of the art back a design, a value or a test's oracle, one
+  that does not follow and cite them, or leaves them while they still back it. Bench numbers on a
+  design they back are reported and never send it back, but a metal timing past twice its
+  machine's record reds every design: that ceiling is a bug guard, not a bench verdict. A design
+  nothing published covers is reviewed on its correctness and simplicity, and a speed claim does
+  not decide by itself unless speed is the design's only purpose. A new
   dependency only where it is the cleanest path, a general and widely used crate the pull request
   says why it takes; no new fetch. Nothing outside the brief's fence.
   Assembly, a naked function and a `core::arch` or `std::arch` path live only in an
@@ -137,11 +140,15 @@ if it meets the bar above; otherwise it is a NOTE.
   hang ceiling, and timing is valid only on metal. A timing row on the T14 is a test, and it goes
   red past its bound. A measurement, a number held to no bound — throughput, latency, a
   comparison against Ubuntu — is not a test: it is its pull request's evidence and never becomes
-  a suite row. Another OS's or a reference implementation's output, recorded or
-  live, is an oracle only when it is committed with its provenance and read hermetically, and a
-  timing held to another's only when it was read on the same machine. A policy another OS chose is
-  never an oracle for what ToyOS's own setting must be, and its copy of a fact a primary source
-  states is never an oracle. A test or row the diff adds or changes that breaks this is a BLOCKER.
+  a suite row. A test's oracle for what hardware does is the vendor's document, or ToyOS's own
+  read checked against it; a reading of hardware captured under another OS, timing included, is
+  evidence and never a suite row. A reference implementation's recorded output is an oracle only
+  when it is committed with its provenance and read hermetically, and never when it was captured
+  under Linux. A host test may compare live against the host's own implementation of a published
+  interface, its TCP or its `libc`, as a differential implementation on every host the suite runs
+  on; where the two disagree, the specification decides and the row says so. A policy another OS
+  chose is never an oracle for what ToyOS's own setting must be, and its copy of a fact a primary
+  source states is never an oracle. A test or row the diff adds or changes that breaks this is a BLOCKER.
 - **Edges.** Untrusted input never panics the kernel; it is refused. Check-then-act races. A lock
   held across a user copy or a device wait. Arithmetic on a value the caller chooses. A short
   read, an exit status nobody reads. An `at_most(<int>::MAX)` or `index(usize::MAX)` on an
@@ -160,7 +167,8 @@ if it meets the bar above; otherwise it is a NOTE.
   arm reads or writes is touched only under that guard or inside an item compiled only with an
   actuator feature (`#[cfg(feature = "…-actuators")]`); a `cfg(not(feature = …))` item compiles
   into shipping and does not count, and any other touch runs on the shipping kernel.
-- **Forks.** A broken rule of `implementer.md`'s "A fork" is a BLOCKER, and so is a lockfile or
+- **Forks.** A broken rule of `implementer.md`'s "A fork" is a BLOCKER, a ToyOS arm whose
+  authority is another platform's arm among them, and so is a lockfile or
   gitlink left naming a fork branch whose consumed commit the pull request changes. A search for
   callers that skipped the fork clones and `~/.cargo/git/checkouts/` searched part of the tree.
   LLVM and Rust are never changed to suit a ToyOS tool; a tool that cannot build them unchanged is
@@ -178,8 +186,8 @@ request's body that is false of the tree or of the record is one line under NOTE
 orchestrator corrects it himself. An issue file's staleness is never raised, and no branch is asked
 to edit one; an edit to an existing one other than the issue the branch takes up, or one a rule names as where
 it records something, is a NOTE. A source comment's
-wording, count, date, line number or citation, and every cosmetic finding — naming, wording,
-formatting, a comment that could be shorter — are not raised.
+wording, count, date, line number or citation but one **Fit** refuses, and every cosmetic finding
+— naming, wording, formatting, a comment that could be shorter — are not raised.
 
 ## Output
 

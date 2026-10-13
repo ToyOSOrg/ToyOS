@@ -903,3 +903,10 @@ pub fn scanout_whole_pages(phys: u64, size: u64) -> Result<(), &'static str> {
     }
     Ok(())
 }
+
+/// x86-64's stages a global kernel leaf going stale, and this architecture's
+/// kernel leaves are not judged by it: refused.
+#[cfg(feature = "test-actuators")]
+pub fn debug_global_leaf(_how: u64) -> u64 {
+    toyos_abi::syscall::SyscallError::NotSupported.to_u64()
+}

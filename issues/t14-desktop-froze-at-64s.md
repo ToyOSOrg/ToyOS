@@ -58,10 +58,14 @@ ruled it out.
 **What the next boot should capture.** Nothing new, which is the point: the
 compositor now names every client it drops and why. A recurrence with no
 `compositor: dropping pid` line and no telemetry is a mechanism none of the
-four closed ones covers, and that is itself the finding. If it is worth
-narrowing further before then, the cheap change is a `pipes=` field on the
-compositor's own 2 s report — same cadence as the thing that goes missing,
-where the PMM dump's is not.
+four closed ones covers, and that is itself the finding.
+
+**Nothing replaces the 2 s report as a heartbeat.** It left the log (#891),
+and with it the `pipes=` field this issue once proposed for it, so a
+recurrence's log no longer says when the compositor last composited. On a
+machine still up, `inspect display` says it: `frames.composited` asked twice
+a few seconds apart, the taskbar damaging itself every second, or a `did not
+answer` from a compositor no longer in its loop. After the fact, nothing does.
 
 Do not read the 9.58 s of no kernel output as evidence. It is the longest gap
 in the log, but an idle desktop in this same session goes 4–6 s between

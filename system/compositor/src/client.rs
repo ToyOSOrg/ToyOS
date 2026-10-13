@@ -257,15 +257,11 @@ pub fn announce(dead: &[Dead]) {
 
 /// Say that a window was deliberately closed, and by what.
 ///
-/// A client that *dies* is already announced — `dropping client N — why` — and
-/// a window somebody closed was not, so the desktop's only record of one was the
-/// `windows=N` count in the statistics line. That is a sample of a level taken
-/// every two seconds: two closes inside one interval are indistinguishable
-/// from one, and from none if a window opened in between. Every report the
-/// owner has made about this desktop begins "I closed a window and then", so
-/// which window went, why, and how many are left is the first thing anyone
-/// asks of the log — and a caller that re-sends a close because it could not
-/// tell whether the first one landed closes the next window down.
+/// A client that *dies* is already announced — `dropping client N — why`.
+/// Every report the owner has made about this desktop begins "I closed a window
+/// and then", so which window went, why, and how many are left is the first
+/// thing anyone asks of the log — and a caller that re-sends a close because it
+/// could not tell whether the first one landed closes the next window down.
 pub fn note_closed(by: &str, win: &Win, remaining: usize) {
     println!(
         "compositor: window closed client={} by {by}, {remaining} left, presents={} frames={}",

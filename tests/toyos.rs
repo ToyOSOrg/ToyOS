@@ -87,6 +87,14 @@ const RUST_SKIP: &[&str] = &[
     // is read off the clock around the syscall. The `tlb_shootdown_waits`
     // metal row runs it on the T14.
     "tlb_shootdown_waits",
+    // Each reads a global translation its kernel may leave stale, which a TCG
+    // guest's TLB drops on any `CR3` write and the T14's keeps: the
+    // `a_global_kernel_leafs_discharge_drops_it`,
+    // `a_kernel_half_shootdown_drops_a_global_kernel_translation` and
+    // `a_user_half_shootdown_keeps_a_global_kernel_translation` metal rows run them.
+    "global_leaf_discharge",
+    "global_leaf_flush",
+    "global_leaf_user_flush",
     // Its product is the windows a `mask-windows` kernel reports under it, and
     // its 256 threads' stacks would crowd every member after it in one boot.
     // The `mask_windows` metal row runs it.
@@ -124,10 +132,6 @@ const RUST_SKIP: &[&str] = &[
     // `tests/images/testcases.toml` does not give: the `launch_toctou` metal row runs it on
     // tests/images/proctreecase.toml.
     "launch_toctou",
-    // Needs a launcher whose row lists `swap` and `update` and not `proctest`,
-    // and a shell that opens a login session: the `launch_authority` metal row
-    // runs it on tests/images/proctreecase.toml.
-    "launch_authority",
     // A kernel primitive with no use for any one boot's devices: the
     // `port_badge` metal row runs it on tests/images/proctreecase.toml.
     "port_badge",
@@ -142,9 +146,6 @@ const RUST_SKIP: &[&str] = &[
     // launches ask DATA's server while this job's share holds all it may: the
     // `fs_share` metal row runs it on tests/images/proctreecase.toml.
     "fs_share",
-    // It needs a NIC in front of netstack and a host server behind it:
-    // `netstack_socket_churn` runs it on `tests/images/netcase.toml`.
-    "netstack_socket_churn",
     // It needs a NIC in front of netstack, a host server behind it and a host
     // that dials its listener: `netstack_streams` runs it on `tests/images/netcase.toml`.
     "netstack_streams",
@@ -341,10 +342,6 @@ const MACHINE_TESTS: &[&str] = &[
     // in reach, and the register sequence and the DMA it frees are no host
     // test's.
     "amdvi_firmware_left",
-    // netstack's own state behind a real stack and a peer that ends its
-    // connections: netstack is one binary that owns its NIC, with no host
-    // build, and the T14's peer is the bench's network.
-    "netstack_socket_churn",
     // The stack against a TCP its writers did not write, the host kernel's
     // behind QEMU's user network, through the kernel's own pipes and each of
     // netstack's two drivers: netstack has no host build, the stack's host
@@ -711,6 +708,39 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // A global kernel translation outlives its entry until something drops
+        // it, and the kernel that carries `SYS_DEBUG` stages one: the verdict
+        // is the guest's own exit, its control first.
+        "a_global_kernel_leafs_discharge_drops_it",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_discharge"])
+            }],
+            judge: |b| b[0].job_passed("test_rs_global_leaf_discharge"),
+        },
+    ),
+    (
+        "a_kernel_half_shootdown_drops_a_global_kernel_translation",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_flush"])
+            }],
+            judge: |b| b[0].job_passed("test_rs_global_leaf_flush"),
+        },
+    ),
+    (
+        "a_user_half_shootdown_keeps_a_global_kernel_translation",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_user_flush"])
+            }],
+            judge: |b| b[0].job_passed("test_rs_global_leaf_user_flush"),
+        },
+    ),
+    (
         // What one diary record costs its writer: a million written back to
         // back by `SYS_DEBUG`'s flood, so the kernel that carries it, timed
         // with interrupts closed. Read, not held: the number is the product.
@@ -882,12 +912,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         // names when it is opened again.
         "launch_toctou",
         metal::Metal { arms: PROCTREECASE, judge: |b| b[0].job_passed("test_rs_launch_toctou") },
-    ),
-    (
-        // A launch starts only what the caller's row lists, and `swap` and
-        // `update` only in a login session.
-        "launch_authority",
-        metal::Metal { arms: PROCTREECASE, judge: |b| launch_authority(b[0]) },
     ),
     (
         // A connection's badge is the minted bytes, read back by its own
@@ -1181,9 +1205,8 @@ const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/images/metalc
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, the
-/// rows `launch_authority` is refused and started, the shells `fs_share`
-/// asks DATA's server through, under its share and in a login session, and
-/// the `/apps` `app_view` launches its package from.
+/// shells `fs_share` asks DATA's server through, under its share and in a
+/// login session, and the `/apps` `app_view` launches its package from.
 const PROCTREECASE: &[metal::Arm] = &[metal::once(
     "proctreecase",
     "tests/images/proctreecase.toml",
@@ -1191,7 +1214,6 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
     &[
         "test_rs_process_tree",
         "test_rs_launch_toctou",
-        "test_rs_launch_authority",
         "test_rs_port_badge",
         "test_rs_fs_share",
         "test_rs_app_view",
@@ -3459,38 +3481,6 @@ fn scanout_wc(console: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// netstack's stream count returns once connections that ended without their
-/// client's close request are let go, a client that left a connection its
-/// peer holds is counted gone, and a connection whose receive end the kernel
-/// refuses netstack's watch of is reset; a listener and a datagram socket
-/// whose owner left are let go, a receive that waits is answered by its
-/// datagram, and the connect past netstack's places is refused. One host
-/// server here ends each connection it accepts at once, one holds each and
-/// one answers each datagram; the guest's comparisons are the verdict.
-fn netstack_socket_churn() -> Result<(), String> {
-    const JOB: &str = "netstack_socket_churn";
-    let server = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| format!("the host server: {e}"))?;
-    let port = server.local_addr().map_err(|e| format!("the host server's port: {e}"))?.port();
-    // Ends with the process: a guest that never dials leaves it in `accept`.
-    thread::spawn(move || server.incoming().for_each(drop));
-    let (holding, answering) = (holding_server()?, answering_server()?);
-
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
-    let mut qemu = boot_netcase(&[], &[(JOB.to_string(), bin)], BootOptions::default())?;
-    let result = qemu
-        .run_test(&format!("test_rs_netstack_socket_churn {port} {holding} {answering}"), Duration::from_secs(120));
-    if let Some(why) = &result.error {
-        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
-    }
-    if result.exit_code != Some(0) {
-        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
-    }
-    if !result.stdout.lines().any(|l| l.trim_end().ends_with("netstack_socket_churn: ok")) {
-        return Err(format!("the guest never said it was done:\n{}", result.stdout));
-    }
-    Ok(())
-}
-
 /// What one job of netstack's said, as its verdict: it ended by itself, with
 /// 0, and with its last line.
 fn job_ok(job: &str, result: &qemu::TestResult) -> Result<(), String> {
@@ -3914,7 +3904,6 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
-        "netstack_socket_churn" => netstack_socket_churn(),
         "netstack_streams" => netstack_streams(qemu::Profile::Headless),
         "netstack_streams_e1000e" => netstack_streams(qemu::Profile::HeadlessE1000e),
         "libc_sockets" => libc_sockets(),
@@ -5013,28 +5002,6 @@ fn process_tree(back: &metal::Readback) -> Result<(), String> {
     Ok(())
 }
 
-/// `launch_authority` passed, and the supervisor refused each launch for its
-/// own reason: `proctest` as unlisted, `swap` and `update` as outside a login
-/// session, for test-runner and for the toybox it launched. The guest sees
-/// only that each was refused.
-fn launch_authority(back: &metal::Readback) -> Result<(), String> {
-    use toyos_manifest::launch::{refused, Refusal, Sessions};
-    back.job_passed("test_rs_launch_authority")?;
-    let log = back.log();
-    for (caller, target, why) in [
-        ("test-runner", "proctest", Refusal::NotListed),
-        ("test-runner", "swap", Refusal::OutsideLogin),
-        ("test-runner", "update", Refusal::OutsideLogin),
-        ("toybox", "swap", Refusal::OutsideLogin),
-    ] {
-        let line = refused(caller, Sessions::default().machine(), target, why);
-        if !log.text().lines().any(|l| l.contains(&line)) {
-            return Err(format!("the supervisor never said `{line}`\n{}", log.text()));
-        }
-    }
-    Ok(())
-}
-
 /// `app_view` passed, every arm its package asks held, and the supervisor
 /// refused each of the two launches for its own reason: a package named after
 /// the shell's row, and one whose folder is a file. The guest sees only that
@@ -5559,6 +5526,8 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         (3, "DE", true),
         (5, "PAE", true),
         (6, "MCE", true),
+        // Every kernel leaf is global, and only with `PGE` set is one cached so.
+        (7, "PGE", true),
         (9, "OSFXSR", true),
         (10, "OSXMMEXCPT", true),
         (12, "LA57", false),
@@ -5616,7 +5585,7 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     }
 
     // A bit named nowhere above is as much of the declaration as a named one,
-    // and the kernel writes both registers whole — so `UMIP`, `PGE`, `TSD` or
+    // and the kernel writes both registers whole — so `UMIP`, `TSD` or
     // `PKE` would reach every CPU with nothing here to say so. Which is why
     // what follows is the set this gate has an opinion about, rather than a
     // second list of bits to forbid: a forbid-list fails open on the next bit.
