@@ -292,7 +292,7 @@ impl<'a> Image<'a> {
     }
 
     fn headers(&self) -> impl Iterator<Item = Phdr> + 'a {
-        self.phdrs.chunks_exact(PHDR_SIZE).filter_map(Phdr::parse)
+        self.phdrs.as_chunks::<PHDR_SIZE>().0.iter().filter_map(|phdr| Phdr::parse(phdr))
     }
 
     fn loads(&self) -> impl Iterator<Item = Phdr> + 'a {
@@ -322,7 +322,7 @@ impl<'a> Image<'a> {
     fn rela(&self, dynamic: &[u8]) -> Result<Option<Span>, Refusal> {
         let (mut rela, mut size, mut jmprel, mut plt) = (None, None, false, None);
         let aarch64 = self.relative == R_AARCH64_RELATIVE;
-        for entry in dynamic.chunks_exact(DYN_SIZE) {
+        for entry in dynamic.as_chunks::<DYN_SIZE>().0 {
             let (Some(tag), Some(value)) = (u64_at(entry, 0), u64_at(entry, 8)) else { break };
             match tag {
                 DT_NULL => break,
@@ -366,7 +366,7 @@ impl<'a> Image<'a> {
     /// Write `bias + addend` at every entry of `rela` through `write`, which
     /// is handed the entry's link-time address; the first refusal stops it.
     fn apply(&self, rela: &[u8], bias: u64, mut write: impl FnMut(u64, u64)) -> Result<(), Refusal> {
-        for entry in rela.chunks_exact(RELA_SIZE) {
+        for entry in rela.as_chunks::<RELA_SIZE>().0 {
             let (Some(offset), Some(info), Some(addend)) = (u64_at(entry, 0), u64_at(entry, 8), u64_at(entry, 16))
             else {
                 return Err(Refusal::RelaShape);

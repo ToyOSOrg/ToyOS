@@ -18,6 +18,9 @@ toyos-net-shard = { path = "../shard" }
 toyos-net-tcp = { path = "../shard/tcp" }
 toyos-net-udp = { path = "../udp" }
 toyos-net-wire = { path = "../wire" }
+# The stream protocol's one declaration, the region's layout, and the session's server end.
+toyos = { path = "../../../sdk/toyos" }
+toyos-transport = { path = "../../../lib/blockring/transport" }
 
 [dev-dependencies]
 # The outside reader of every frame the node emits: a published Ethernet, ARP,

@@ -10,4 +10,7 @@ pub mod fs;
 pub mod io;
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
+pub mod net;
+
+#[stable(feature = "toyos_ext", since = "1.0.0")]
 pub mod process;

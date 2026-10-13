@@ -31,12 +31,6 @@ pub struct PipeWriteEnd {
 }
 
 impl PipeReadEnd {
-    /// A second counted reference to the same pipe, for `SYS_CONNECTION_JOIN`
-    /// to build another object over it.
-    pub fn reference(&self) -> PipeReader {
-        self.reference.get().expect("a live handle names this end")
-    }
-
     pub fn new(reader: PipeReader) -> Arc<Self> {
         Arc::new(Self {
             core: Self::new_core(),
@@ -62,10 +56,6 @@ impl PipeReadEnd {
 }
 
 impl PipeWriteEnd {
-    pub fn reference(&self) -> PipeWriter {
-        self.reference.get().expect("a live handle names this end")
-    }
-
     pub fn new(writer: PipeWriter) -> Arc<Self> {
         Arc::new(Self {
             core: Self::new_core(),

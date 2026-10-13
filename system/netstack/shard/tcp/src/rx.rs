@@ -22,12 +22,13 @@
 //! shorter would never be sampled. Without timestamps, the time the peer took to fill the window
 //! offered is at least one round trip, and the least such time is kept.
 
+use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::time::Duration;
 
 use toyos_net_wire::tcp::SackBlock;
 
-use crate::ring::Ring;
+use crate::ring::{Lent, Ring};
 use crate::seq::Seq;
 use crate::Instant;
 
@@ -446,13 +447,29 @@ impl Rx {
         self.buf.read(out)
     }
 
-    /// Shows `take` the oldest bytes held, as far as they lie in one piece, and lets go of as
-    /// many of them as it answers it took.
-    pub fn read_with(&mut self, take: impl FnOnce(&[u8]) -> usize) -> usize {
-        let (held, _) = self.buf.slices(0, self.buf.len());
-        let n = take(held).min(held.len());
+    /// The user read the `n` oldest bytes held out of a lent ring itself: they are let go of.
+    pub fn consume(&mut self, n: usize) -> usize {
+        let n = n.min(self.buf.len());
         self.buf.consume(n);
         n
+    }
+
+    /// Received text goes into `lent` from here on, everything held moved there at its offset:
+    /// in-order text and out-of-order ranges, the FIN staying this side's state. The capacity
+    /// grows no further than its length. Only where [`Self::lendable`] says so.
+    pub fn lend(&mut self, lent: Box<dyn Lent>) {
+        self.max = self.max.min(lent.len());
+        self.buf.lend(lent);
+    }
+
+    pub fn lendable(&self, len: usize) -> bool {
+        self.buf.lendable(len)
+    }
+
+    /// The window last offered is below the update threshold, so a read owes the peer the
+    /// segment that opens it (RFC 9293 §3.8.6.2.2).
+    pub fn starved(&self, mss: u32) -> bool {
+        self.last_window < self.threshold(mss)
     }
 
     /// `shutdown_read`: what is held is dropped, and later text is dropped as if read.

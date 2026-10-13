@@ -1,13 +1,18 @@
 //! A client's requests onto the node's calls, and the node's answers back
-//! onto the pipe ABI (`toyos::net`).
+//! onto `toyos::net`'s protocol.
 //!
 //! **One request is one call of the node's**, and every decision about a
-//! socket is the node's: what is here is the number a client names a socket
-//! by, the clients that wait for an answer, the pipe ends netstack watches,
-//! and the word each of the node's refusals is written in. Two requests reach
-//! no call: a datagram's bytes travel in the socket's own pipes, which are
-//! netstack's and not the node's, and a shutdown of the receiving half alone
-//! asks nothing of the stack, std keeping that half's state itself.
+//! socket is the node's: what is here is the number a client names a listener
+//! or a datagram socket by, the clients that wait for an answer, the handles
+//! netstack watches, and the word each of the node's refusals is written in. A
+//! datagram's bytes travel in the socket's own pipes, which are netstack's and
+//! not the node's, and reach no call.
+//!
+//! **A stream is its region and the connection its connect or accept came on**
+//! (`toyos::net::stream`): netstack judges the region before it maps it
+//! (`lent`), makes the stream's bell, answers once with the bell, and from then
+//! watches the connection once, for the client's rings and its hang-up, which
+//! is the stream's close. A client names no stream by a number.
 //!
 //! **Untrusted input.** A request's every field is its client's number: an id
 //! that names nothing, or a socket of another kind, is refused
@@ -34,21 +39,24 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
+use std::rc::{Rc, Weak};
+
 use toyos::net::*;
-use toyos::poller::{OTHER_END_GONE, READABLE, WRITABLE};
+use toyos::poller::{OTHER_END_GONE, READABLE};
 use toyos::port::Acceptor;
-use toyos::{ipc, say, AsHandle, Pipe};
+use toyos::{ipc, say, AsHandle, Connection, OwnedHandle, Pipe};
 use toyos_abi::syscall::{SyscallError, MAX_BADGE};
 use toyos_inspect::Snapshot;
 use toyos_net_node::{
     AcceptRefused, ConnectRefused, DatagramId, Ended, Event, ListenRefused, ListenerId, LookupId, Node, NotStarted,
-    PipeEnd, Pipes, Refused, Resolving, StreamEvent, StreamId, WriteRefusal,
+    Refused, Resolving, StreamEvent, StreamId, WriteRefusal,
 };
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{Endpoint, Failure};
 use toyos_net_wire::{Instant, Port};
 
 use crate::client::{Client, Request};
+use crate::lent::Region;
 use crate::pipes::{self, Watched};
 use crate::watches::Watches;
 use crate::HOSTNAME;
@@ -56,17 +64,13 @@ use crate::HOSTNAME;
 /// A watch's token names the socket it was asked of by its id, in the low
 /// word, and never a place in a list: an answer can arrive after its socket
 /// is gone, and must then name nothing.
-const TOKEN_FROM_CLIENT: u64 = 1 << 32;
-const TOKEN_TO_CLIENT: u64 = 2 << 32;
+const TOKEN_STREAM: u64 = 1 << 32;
 const TOKEN_LISTENER: u64 = 3 << 32;
 const TOKEN_DATAGRAM: u64 = 4 << 32;
 /// A client that waits for its lookup's answer, by its connection's handle.
 /// Clear of the loop's own tokens and of a pending connection's.
 const TOKEN_LOOKUP: u64 = 5 << 32;
 const TOKEN_KIND: u64 = !(u32::MAX as u64);
-
-/// Watches one place makes at most: a stream's two pipes.
-pub const WATCHES_PER_PLACE: u32 = 2;
 
 /// Watches the lookups make: each waiting client's connection.
 pub const LOOKUP_WATCHES: u32 = toyos_dns::MAX_LOOKUPS as u32;
@@ -78,7 +82,6 @@ const MAX_ANSWERED: usize = (256 - 1) / 5;
 
 /// What a client's id names.
 enum Socket {
-    Stream(StreamId),
     Listener { id: ListenerId, wakes: Watched },
     Datagram(Datagram),
 }
@@ -91,13 +94,14 @@ struct Datagram {
     from_client: Pipe,
 }
 
-/// The pipe ends of a stream the node holds, for as long as it holds either:
-/// longer than its client's id names it, since a closed stream's pipe is
-/// still read until it is empty.
-struct Ends {
-    stream: StreamId,
-    to_client: Watched,
-    from_client: Watched,
+/// A stream's connection as netstack watches it, for as long as the node
+/// holds the stream's session.
+struct Stream {
+    id: StreamId,
+    connection: Weak<Connection>,
+    /// The connect not yet answered: its connection, and the bell's read end
+    /// its answer hands over.
+    answer: Option<(Rc<Connection>, Pipe)>,
 }
 
 /// A client waiting for a datagram to reach its socket.
@@ -109,35 +113,51 @@ struct Receiving {
 pub struct Sockets {
     ids: HashMap<u32, Socket>,
     next_id: u32,
-    ends: HashMap<u32, Ends>,
-    /// The id each stream's ends are kept under.
+    /// Each stream by the key its watch's token carries.
+    streams: HashMap<u32, Stream>,
+    /// The key each stream is kept under.
     by_stream: BTreeMap<StreamId, u32>,
-    /// The client each unanswered connect is answered to, and the id it is
-    /// told.
-    connecting: BTreeMap<StreamId, (Client, u32)>,
     lookups: Vec<(LookupId, Client)>,
     /// At most one receive waits on a socket, so a client's requests alone
     /// hold no more of netstack's handles than its sockets do.
     receiving: BTreeMap<u32, Receiving>,
     /// The places the node was given.
     places: usize,
-    /// A stream's pipe was answered ready in this wake: one pass over the
+    /// A stream's connection was answered in this wake: one pass over the
     /// streams follows the wake, however many answers it carried.
     bridge: bool,
-    /// The streams whose send pipe was answered readable in this wake.
-    readable: Vec<StreamId>,
+    /// The streams whose client rang in this wake.
+    rung: Vec<StreamId>,
 }
 
-/// The two ends a connect or an accept moves, each split into the node's half
-/// and the watched one.
-fn data_pipes(client: &Client) -> Option<(Pipes, Watched, Watched)> {
-    let [to_client, from_client] = client.conn.recv_handles_exact::<{ DATA_HANDLES }>()?;
-    // SAFETY: the kernel moved both handles into this process with the frame
-    // just read, and nothing else answers for either.
-    let (to_client, from_client) = unsafe { (Pipe::from_raw(to_client), Pipe::from_raw(from_client)) };
-    let (to_held, to_watched) = pipes::hold(to_client);
-    let (from_held, from_watched) = pipes::hold(from_client);
-    Some((Pipes { to_client: Box::new(to_held), from_client: Box::new(from_held) }, to_watched, from_watched))
+/// A stream's region off a request's connection, judged, and its bell made:
+/// the session the node is lent and the bell's read end the answer hands
+/// over. Refused by name, nothing is mapped.
+fn lend(client: Client) -> Result<(Region, Pipe, Rc<Connection>), (Client, u32)> {
+    let Some([region]) = client.conn.recv_handles_exact::<1>() else { return Err((client, ERR_INVALID_INPUT)) };
+    let Ok((bell, ring)) = toyos::pipe_pair() else {
+        // The handle is consumed either way.
+        toyos_abi::syscall::close(region);
+        return Err((client, ERR_RESOURCE_EXHAUSTED));
+    };
+    let connection = Rc::new(client.conn);
+    match Region::lent(region, connection.clone(), ring) {
+        Ok(session) => Ok((session, bell, connection)),
+        Err(why) => {
+            say!("netstack: refusing a stream's region — {why}");
+            let Ok(conn) = Rc::try_unwrap(connection) else { unreachable!("a refused region shares its connection") };
+            Err((Client { conn }, ERR_INVALID_INPUT))
+        }
+    }
+}
+
+/// Answers a stream's request with its bell and `answer`, on the connection
+/// that is the stream's from here on.
+fn hand_over<T: ipc::IpcPayload>(connection: &Connection, bell: Pipe, answer: &T) {
+    let sent = connection.send_handles([OwnedHandle::from(bell)]).map_err(ipc::TrySendError::Syscall);
+    if let Err(why) = sent.and_then(|()| connection.try_send(RespType::Result as u32, answer)) {
+        say!("netstack: a stream's client left before its answer: {why:?}");
+    }
 }
 
 /// The pipe ABI's word for each of the node's.
@@ -198,7 +218,7 @@ fn listen_refused(refusal: ListenRefused) -> u32 {
 fn accept_refused(refusal: AcceptRefused) -> u32 {
     match refusal {
         AcceptRefused::NoListener | AcceptRefused::Nothing => ERR_NOT_CONNECTED,
-        AcceptRefused::NoPipes => ERR_INVALID_INPUT,
+        AcceptRefused::NoRegion => ERR_INVALID_INPUT,
         AcceptRefused::Full => ERR_RESOURCE_EXHAUSTED,
     }
 }
@@ -244,18 +264,17 @@ impl Sockets {
         Self {
             ids: HashMap::new(),
             next_id: first_id.max(1),
-            ends: HashMap::new(),
+            streams: HashMap::new(),
             by_stream: BTreeMap::new(),
-            connecting: BTreeMap::new(),
             lookups: Vec::new(),
             receiving: BTreeMap::new(),
             places,
             bridge: false,
-            readable: Vec::new(),
+            rung: Vec::new(),
         }
     }
 
-    /// An id no socket and no stream's ends are kept under, and never 0.
+    /// An id no socket and no stream is kept under, and never 0.
     fn alloc_id(&mut self) -> u32 {
         loop {
             let id = self.next_id;
@@ -263,38 +282,30 @@ impl Sockets {
                 0 => 1,
                 next => next,
             };
-            if !self.ids.contains_key(&id) && !self.ends.contains_key(&id) {
+            if !self.ids.contains_key(&id) && !self.streams.contains_key(&id) {
                 return id;
             }
         }
     }
 
-    fn hold_stream(&mut self, stream: StreamId, to_client: Watched, from_client: Watched) -> u32 {
-        let id = self.alloc_id();
-        self.ids.insert(id, Socket::Stream(stream));
-        self.ends.insert(id, Ends { stream, to_client, from_client });
-        self.by_stream.insert(stream, id);
-        id
-    }
-
-    fn stream(&self, socket_id: u32) -> Option<StreamId> {
-        match self.ids.get(&socket_id) {
-            Some(Socket::Stream(id)) => Some(*id),
-            Some(Socket::Listener { .. } | Socket::Datagram(_)) | None => None,
-        }
+    fn hold_stream(&mut self, id: StreamId, connection: &Rc<Connection>, answer: Option<Pipe>) {
+        let key = self.alloc_id();
+        let answer = answer.map(|bell| (connection.clone(), bell));
+        self.streams.insert(key, Stream { id, connection: Rc::downgrade(connection), answer });
+        self.by_stream.insert(id, key);
     }
 
     fn listener(&self, socket_id: u32) -> Option<ListenerId> {
         match self.ids.get(&socket_id) {
             Some(Socket::Listener { id, .. }) => Some(*id),
-            Some(Socket::Stream(_) | Socket::Datagram(_)) | None => None,
+            Some(Socket::Datagram(_)) | None => None,
         }
     }
 
     fn datagram(&self, socket_id: u32) -> Option<&Datagram> {
         match self.ids.get(&socket_id) {
             Some(Socket::Datagram(socket)) => Some(socket),
-            Some(Socket::Stream(_) | Socket::Listener { .. }) | None => None,
+            Some(Socket::Listener { .. }) | None => None,
         }
     }
 
@@ -304,18 +315,16 @@ impl Sockets {
     pub fn request(&mut self, node: &mut Node, now: Instant, req: Request, acceptor: &Acceptor, draw: fn() -> u32) {
         match MsgType::from_u32(req.msg_type) {
             Some(MsgType::TcpClose) => self.close(node, now, &req),
-            Some(MsgType::TcpShutdown) => self.shutdown(node, now, &req),
             Some(MsgType::UdpBind) => self.udp_bind(node, &req, draw),
             Some(MsgType::UdpSendTo) => self.udp_send_to(node, now, &req),
             Some(MsgType::UdpRecvFrom) => self.udp_recv_from(node, now, req),
             Some(MsgType::UdpClose) => self.udp_close(node, now, &req),
             Some(MsgType::DnsLookup) => self.lookup(node, now, req, acceptor, draw),
-            Some(MsgType::TcpSetOption) => self.set_option(node, now, &req),
             Some(MsgType::TcpListenerSetOption) => self.listener_set_option(node, &req),
             Some(MsgType::UdpSetOption) => self.udp_set_option(node, &req),
-            Some(MsgType::TcpConnectPiped) => self.connect(node, now, req),
+            Some(MsgType::TcpConnect) => self.connect(node, now, req),
             Some(MsgType::TcpBindPiped) => self.listen(node, &req, draw),
-            Some(MsgType::TcpAcceptPiped) => self.accept(node, now, &req),
+            Some(MsgType::TcpAccept) => self.accept(node, now, req),
             None => {
                 say!("netstack: unknown message type {}", req.msg_type);
                 req.client.error(ERR_INVALID_INPUT);
@@ -323,15 +332,14 @@ impl Sockets {
         }
     }
 
-    /// The client lets go of whatever its id names; an id that names nothing
-    /// is let go already.
+    /// The client lets go of the listener or datagram socket its id names; an
+    /// id that names nothing is let go already.
     fn close(&mut self, node: &mut Node, now: Instant, msg: &Request) {
         let Ok(req) = ipc::decode_payload::<SocketCloseRequest>(msg.payload()) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
         match self.ids.remove(&req.socket_id) {
-            Some(Socket::Stream(id)) => node.close(now, id),
             Some(Socket::Listener { id, .. }) => {
                 node.close_listener(now, id);
             }
@@ -339,48 +347,6 @@ impl Sockets {
             None => {}
         }
         msg.client.done();
-    }
-
-    fn shutdown(&mut self, node: &mut Node, now: Instant, msg: &Request) {
-        let Ok(req) = ipc::decode_payload::<TcpShutdownRequest>(msg.payload()) else {
-            msg.client.error(ERR_INVALID_INPUT);
-            return;
-        };
-        let Some(id) = self.stream(req.socket_id) else {
-            msg.client.error(ERR_NOT_CONNECTED);
-            return;
-        };
-        let known = match req.how {
-            // The receiving half alone: std keeps its state, and the id names
-            // a stream.
-            0 => true,
-            1 | 2 => node.shutdown_write(now, id),
-            _ => {
-                msg.client.error(ERR_INVALID_INPUT);
-                return;
-            }
-        };
-        if known {
-            msg.client.done();
-        } else {
-            msg.client.error(ERR_NOT_CONNECTED);
-        }
-    }
-
-    fn set_option(&mut self, node: &mut Node, now: Instant, msg: &Request) {
-        let Ok(req) = ipc::decode_payload::<SocketOptionRequest>(msg.payload()) else {
-            msg.client.error(ERR_INVALID_INPUT);
-            return;
-        };
-        let Some(id) = self.stream(req.socket_id) else {
-            msg.client.error(ERR_NOT_CONNECTED);
-            return;
-        };
-        match req.option {
-            OPT_NODELAY if node.set_nodelay(now, id, req.value != 0) => msg.client.done(),
-            OPT_NODELAY => msg.client.error(ERR_NOT_CONNECTED),
-            _ => msg.client.error(ERR_INVALID_INPUT),
-        }
     }
 
     fn listener_set_option(&mut self, node: &mut Node, msg: &Request) {
@@ -417,27 +383,31 @@ impl Sockets {
         }
     }
 
+    /// A stream's connect: its region lent, its connection the stream's from
+    /// here, and its answer once the node has one ([`Self::settle`]).
     fn connect(&mut self, node: &mut Node, now: Instant, msg: Request) {
-        let Ok(req) = ipc::decode_payload::<TcpConnectPipedRequest>(msg.payload()) else {
+        let Ok(req) = ipc::decode_payload::<TcpConnectRequest>(msg.payload()) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let (Some((pipes, to_client, from_client)), Some(port)) = (data_pipes(&msg.client), Port::new(req.port)) else {
+        let Some(port) = Port::new(req.port) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
+        };
+        let (session, bell, connection) = match lend(msg.client) {
+            Ok(lent) => lent,
+            Err((client, code)) => return client.error(code),
         };
         let remote = Endpoint { addr: Ipv4Addr::from(req.addr), port };
         let timeout = (req.timeout_ms > 0).then(|| Duration::from_millis(u64::from(req.timeout_ms)));
-        match node.connect(now, remote, timeout, pipes) {
-            Ok(stream) => {
-                let id = self.hold_stream(stream, to_client, from_client);
-                self.connecting.insert(stream, (msg.client, id));
-            }
+        match node.connect(now, remote, timeout, Box::new(session)) {
+            Ok(stream) => self.hold_stream(stream, &connection, Some(bell)),
             Err(refusal) => {
                 if refusal == ConnectRefused::Full {
                     say!("netstack: refusing connect, {} of {} places held", node.held(), self.places);
                 }
-                msg.client.error(connect_refused(refusal));
+                let Ok(conn) = Rc::try_unwrap(connection) else { unreachable!("a refused connect kept its session") };
+                Client { conn }.error(connect_refused(refusal));
             }
         }
     }
@@ -464,37 +434,41 @@ impl Sockets {
         }
     }
 
-    fn accept(&mut self, node: &mut Node, now: Instant, msg: &Request) {
-        let Ok(req) = ipc::decode_payload::<TcpAcceptPipedRequest>(msg.payload()) else {
+    /// A stream's accept: its region lent, and the oldest connection waiting
+    /// at the listener the stream on it, answered at once.
+    fn accept(&mut self, node: &mut Node, now: Instant, msg: Request) {
+        let Ok(req) = ipc::decode_payload::<TcpAcceptRequest>(msg.payload()) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let moved = data_pipes(&msg.client);
-        let Some(listener) = self.listener(req.socket_id) else {
+        let Some(listener) = self.listener(req.listener) else {
             msg.client.error(accept_refused(AcceptRefused::NoListener));
             return;
         };
-        let (pipes, watched) = match moved {
-            Some((pipes, to_client, from_client)) => (Some(pipes), Some((to_client, from_client))),
-            None => (None, None),
+        let (session, bell, connection) = match lend(msg.client) {
+            Ok(lent) => lent,
+            Err((client, code)) => {
+                // Refused, the accept still spends its wake.
+                let _ = node.accept(now, listener, None);
+                return client.error(code);
+            }
         };
-        match (node.accept(now, listener, pipes), watched) {
-            (Ok(accepted), Some((to_client, from_client))) => {
-                let socket_id = self.hold_stream(accepted.id, to_client, from_client);
-                msg.client.result(&TcpAcceptPipedResponse {
-                    socket_id,
+        match node.accept(now, listener, Some(Box::new(session))) {
+            Ok(accepted) => {
+                hand_over(&connection, bell, &TcpAcceptResponse {
                     remote_addr: accepted.remote.addr.octets(),
                     remote_port: accepted.remote.port.get(),
                     local_port: accepted.local.get(),
-                    options: TcpOptions::new(accepted.nodelay),
+                    nodelay: u32::from(accepted.nodelay),
                 });
+                self.hold_stream(accepted.id, &connection, None);
             }
-            (Ok(_), None) => unreachable!("the node made a stream of an accept that moved no pipes"),
-            (Err(refusal), _) => {
+            Err(refusal) => {
                 if refusal == AcceptRefused::Full {
                     say!("netstack: refusing accept, {} of {} places held", node.held(), self.places);
                 }
-                msg.client.error(accept_refused(refusal));
+                let Ok(conn) = Rc::try_unwrap(connection) else { unreachable!("a refused accept kept its session") };
+                Client { conn }.error(accept_refused(refusal));
             }
         }
     }
@@ -685,19 +659,22 @@ impl Sockets {
                 StreamEvent::Connected { id, local } => (id, Ok(local)),
                 StreamEvent::Failed { id, failure } => (id, Err(connect_failed(failure))),
                 StreamEvent::TimedOut { id } => (id, Err(ERR_TIMED_OUT)),
-                // Its client closed it from another connection.
+                // Its client left first, and nobody reads the answer.
                 StreamEvent::Closed { id } => (id, Err(ERR_CONNECTION_REFUSED)),
-                StreamEvent::Cut { .. } => {
-                    say!("netstack: resetting a connection — its client is gone and its peer took none of its bytes in 100 s");
+                StreamEvent::Violated { violation, .. } => {
+                    say!("netstack: resetting a stream — its client wrote what no client writes: {violation:?}");
                     continue;
                 }
             };
-            let Some((client, socket_id)) = self.connecting.remove(&id) else {
-                unreachable!("the node answered a connect nobody waits for")
-            };
+            let answer_to = self.by_stream.get(&id).and_then(|key| self.streams.get_mut(key)?.answer.take());
+            let Some((connection, bell)) = answer_to else { unreachable!("the node answered a connect nobody waits for") };
             match answer {
-                Ok(local) => client.result(&TcpConnectResponse { socket_id, local_port: local.get(), _pad: 0 }),
-                Err(code) => client.error(code),
+                Ok(local) => hand_over(&connection, bell, &TcpConnectResponse { local_port: local.get(), _pad: 0 }),
+                Err(code) => {
+                    if let Err(why) = connection.try_send(RespType::Error as u32, &ErrorResponse { code }) {
+                        say!("netstack: a stream's client left before its answer: {why:?}");
+                    }
+                }
             }
         }
 
@@ -713,7 +690,7 @@ impl Sockets {
         for (ended, refusal) in ended {
             let found = self.ids.iter().find_map(|(socket_id, socket)| match socket {
                 Socket::Listener { id, .. } if *id == ended => Some(*socket_id),
-                Socket::Listener { .. } | Socket::Stream(_) | Socket::Datagram(_) => None,
+                Socket::Listener { .. } | Socket::Datagram(_) => None,
             });
             // None where its owner's close arrived in the pass that ended it.
             let Some(socket_id) = found else { continue };
@@ -741,39 +718,28 @@ impl Sockets {
             }
         }
 
-        // A stream the node let go holds neither end, and its id names
-        // nothing from then.
-        let (ids, by_stream) = (&mut self.ids, &mut self.by_stream);
-        self.ends.retain(|socket_id, ends| {
-            let held = ends.to_client.held().is_some() || ends.from_client.held().is_some();
+        // A stream the node let go holds no session, and its key names nothing
+        // from then.
+        let by_stream = &mut self.by_stream;
+        self.streams.retain(|_, stream| {
+            let held = stream.connection.strong_count() > 0;
             if !held {
-                by_stream.remove(&ends.stream);
-                if matches!(ids.get(socket_id), Some(Socket::Stream(_))) {
-                    ids.remove(socket_id);
-                }
+                by_stream.remove(&stream.id);
             }
             held
         });
     }
 
-    /// Asks the kernel about every pipe a pass could be owed for: a stream's
-    /// as the node's last pass left them, the wake pipe of each listener and
-    /// one pipe of each datagram socket for its owner's leaving, and the
-    /// connection of each client that waits for a lookup, which hangs up by
-    /// closing it.
-    pub fn watch(&self, node: &Node, poller: &mut Watches) {
-        for (stream, watch) in node.watches() {
-            let Some((socket_id, ends)) = self.by_stream.get(&stream).and_then(|id| Some((*id, self.ends.get(id)?))) else {
-                unreachable!("the node holds a stream whose ends netstack does not")
-            };
-            let from = if watch.readable { READABLE } else { 0 } | if watch.writer { OTHER_END_GONE } else { 0 };
-            if let (true, Some(pipe)) = (from != 0, ends.from_client.held()) {
-                poller.watch(&*pipe, from, TOKEN_FROM_CLIENT | u64::from(socket_id));
-            }
-            let to = if watch.writable { WRITABLE } else { 0 } | if watch.reader { OTHER_END_GONE } else { 0 };
-            if let (true, Some(pipe)) = (to != 0, ends.to_client.held()) {
-                poller.watch(&*pipe, to, TOKEN_TO_CLIENT | u64::from(socket_id));
-            }
+    /// Asks the kernel about everything a pass could be owed for: each
+    /// stream's connection, for its client's rings once it is answered and its
+    /// hang-up always, the wake pipe of each listener and one pipe of each
+    /// datagram socket for its owner's leaving, and the connection of each
+    /// client that waits for a lookup, which hangs up by closing it.
+    pub fn watch(&self, poller: &mut Watches) {
+        for (key, stream) in &self.streams {
+            let Some(connection) = stream.connection.upgrade() else { continue };
+            let flags = if stream.answer.is_some() { OTHER_END_GONE } else { READABLE | OTHER_END_GONE };
+            poller.watch(&*connection, flags, TOKEN_STREAM | u64::from(*key));
         }
         for (socket_id, socket) in &self.ids {
             match socket {
@@ -783,7 +749,6 @@ impl Sockets {
                     }
                 }
                 Socket::Datagram(socket) => poller.watch(&socket.to_client, OTHER_END_GONE, TOKEN_DATAGRAM | u64::from(*socket_id)),
-                Socket::Stream(_) => {}
             }
         }
         for (_, client) in &self.lookups {
@@ -792,32 +757,28 @@ impl Sockets {
     }
 
     /// What the kernel answered one of [`Self::watch`]'s watches, or `false`
-    /// for a token that is none of them. An answer about a socket that is
-    /// gone since, or a pipe end the node let go, says nothing: closing an
-    /// end ends its watch, and that end is an answer too.
+    /// for a token that is none of them. An answer about a socket or a stream
+    /// that is gone since says nothing.
     pub fn answered(&mut self, node: &mut Node, now: Instant, token: u64, answer: Result<u32, SyscallError>) -> bool {
         let socket_id = token as u32;
         match token & TOKEN_KIND {
-            kind @ (TOKEN_FROM_CLIENT | TOKEN_TO_CLIENT) => {
-                let Some(ends) = self.ends.get(&socket_id) else { return true };
-                let (end, held) = if kind == TOKEN_FROM_CLIENT {
-                    (PipeEnd::FromClient, ends.from_client.held().is_some())
-                } else {
-                    (PipeEnd::ToClient, ends.to_client.held().is_some())
-                };
-                match answer {
-                    _ if !held => {}
+            TOKEN_STREAM => {
+                let Some(stream) = self.streams.get(&socket_id) else { return true };
+                let Some(connection) = stream.connection.upgrade() else { return true };
+                let left = match answer {
                     Err(why) => {
-                        say!("netstack: resetting a connection — the kernel refused the watch of its {end:?} pipe: {why:?}");
-                        node.pipe_broken(now, ends.stream, end);
+                        say!("netstack: closing a stream — the kernel refused the watch of its connection: {why:?}");
+                        true
                     }
-                    Ok(met) if met & OTHER_END_GONE != 0 => node.pipe_gone(now, ends.stream, end),
-                    Ok(_) => {
-                        if end == PipeEnd::FromClient {
-                            self.readable.push(ends.stream);
-                        }
-                        self.bridge = true;
-                    }
+                    Ok(met) if met & OTHER_END_GONE != 0 => true,
+                    // Doorbells, all taken: what they rang for is the pass's to find.
+                    Ok(_) => drained(&connection),
+                };
+                if left {
+                    node.left(now, stream.id);
+                } else {
+                    self.rung.push(stream.id);
+                    self.bridge = true;
                 }
             }
             TOKEN_LISTENER => {
@@ -861,26 +822,39 @@ impl Sockets {
     /// The pass over the streams the last wake's answers asked for, once.
     pub fn bridge(&mut self, node: &mut Node, now: Instant) {
         if std::mem::take(&mut self.bridge) {
-            node.bridge(now, self.readable.drain(..));
+            node.bridge(now, self.rung.drain(..));
         }
     }
 
     /// The socket table as `inspect` reads it: counts, and no endpoint,
     /// because every client holding `netstack` can ask.
     pub fn inspect(&self, node: &Node, snap: &mut Snapshot) {
-        let (mut streams, mut listeners, mut udp) = (0u32, 0u32, 0u32);
+        let (mut listeners, mut udp) = (0u32, 0u32);
         for socket in self.ids.values() {
             match socket {
-                Socket::Stream(_) => streams += 1,
                 Socket::Listener { .. } => listeners += 1,
                 Socket::Datagram(_) => udp += 1,
             }
         }
-        snap.put("sockets.tcp", streams);
+        snap.put("sockets.tcp", self.streams.len() as u32);
         snap.put("sockets.listeners", listeners);
         snap.put("sockets.udp", udp);
-        snap.put("piped.live", node.streams());
+        snap.put("streams.live", node.streams());
         snap.put("places.held", node.held());
         snap.put("places.max", self.places);
+    }
+}
+
+/// Takes every ring a stream's client wrote on its connection: `true` where
+/// the client hung up instead.
+fn drained(connection: &Connection) -> bool {
+    let mut bytes = [0u8; 64];
+    loop {
+        match connection.read_nonblock(&mut bytes) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(SyscallError::WouldBlock) => return false,
+            Err(_) => return true,
+        }
     }
 }

@@ -129,6 +129,12 @@ ipc_payload! {
     }
 }
 
+impl Default for Request {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Request {
     pub const fn new() -> Self {
         Self { fid: 0, offset: 0, len: 0, len2: 0, flags: 0 }

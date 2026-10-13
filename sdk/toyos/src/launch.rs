@@ -299,7 +299,7 @@ impl<'a> Request<'a> {
 
     /// The child slots the first handles of the batch are for, in order.
     pub fn slot_numbers(&self) -> impl Iterator<Item = u32> + '_ {
-        self.slots.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        self.slots.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c))
     }
 
     pub fn slot_count(&self) -> usize {
