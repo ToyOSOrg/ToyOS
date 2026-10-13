@@ -27,16 +27,18 @@ child's stdio, the handle would wait for ever or read doorbells as data, and
 netstack would drain what the child writes as doorbells, with no error on
 either side. Stage 3 makes std refuse both loudly instead.
 `File::from_raw_fd` of a stream's handle panics with `toyos::net`'s refusal.
-A spawn that would put a stream's handle in a child's stdio slot answers that
-refusal and starts no child. And `toyos::net` refuses by name a handle the
-process holds no end for, std's `TcpStream::from_raw_fd` included. A program
-that hands a stream to another process through a `File` or a child's stdio,
-as an inetd-style server does, then fails loudly on ToyOS where today it
-works, and one that takes a moved stream back as a `TcpStream`, as socket
-activation does and as no ToyOS std builds today, is refused, though root
-`CLAUDE.md` says existing Rust just works. ToyOS's own
-`CommandExt::inherit_handle` past the stdio slots and `CommandExt::endow`
-still hand a child a stream's handle with no refusal.
+Every path that moves a handle into another process answers that refusal
+before anything moves: a spawn's stdio slots, `CommandExt::inherit_handle`
+into any slot, `CommandExt::endow` and `Command::provide`, each starting no
+child, and `toyos::ipc`'s `send_handles`, which sends nothing. And
+`toyos::net` refuses by name a handle the process holds no end for, std's
+`TcpStream::from_raw_fd` included. A program that hands a stream to another
+process by any of these, as an inetd-style server does through its child's
+stdio, then fails loudly on ToyOS where today it works, and one that takes a
+moved stream back as a `TcpStream`, as socket activation does and as no
+ToyOS std builds today, is refused, though root `CLAUDE.md` says existing
+Rust just works. The bare `dup`, `SYS_HANDLE_SEND` and `SYS_SPAWN` syscalls
+are not checked.
 
 Owner: the orchestrator, who stages
 `issues/netstack-moves-every-byte-through-two-kernel-pipes.md`.

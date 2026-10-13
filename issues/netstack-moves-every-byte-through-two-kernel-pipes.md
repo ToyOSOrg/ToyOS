@@ -80,8 +80,15 @@ The design and its roast are PR #863's body.
   through `toyos::net`. Today a stream's handle reads
   and writes the stream through a `File` or a child's stdio; over the region
   it would read doorbells, so `File::from_raw_fd` of a stream's handle panics
-  with `toyos::net`'s refusal and a spawn that would put one in a child's
-  stdio slot answers it and starts no child: a regression,
+  with `toyos::net`'s refusal, and every path that moves a handle into
+  another process asks `toyos::net` of each handle before anything moves and
+  answers its refusal: a spawn's stdio slots, `CommandExt::inherit_handle`
+  into any slot, `CommandExt::endow` and `Command::provide`, each with no
+  child started and the handle still the caller's, and `toyos::ipc`'s
+  `send_handles`, which sends nothing and lets its batch go as every refused
+  move does, a stream's handle through `toyos::net`. So no refused move
+  leaves an entry that outlives its handle's number. The bare `dup`,
+  `SYS_HANDLE_SEND` and `SYS_SPAWN` syscalls stay unchecked. A regression,
   `issues/a-stream-cannot-move-between-processes.md`. Exit: three loom models
   that drive the client end and netstack's ringing code as stage 3 lands
   them, each red under a control that reverts its decision. In one, a
@@ -103,9 +110,16 @@ The design and its roast are PR #863's body.
   given out by `into_raw_fd` or `From<TcpStream> for OwnedFd` or made by
   `try_clone_to_owned`, and taken back, shares the one end and its cursors,
   red when giving the handle out lets its entry go. A test:
-  `File::from_raw_fd` of a stream's handle panics with that refusal, and a
-  spawn whose stdio slot holds one answers it and starts no child, each red
-  when it takes the handle silently. A test: a `write` with room after a
+  `File::from_raw_fd` of a stream's handle panics with that refusal, red when
+  it takes the handle silently. A test per moving path, each handed a
+  stream's handle: a spawn's stdio slot, `inherit_handle` into a slot past
+  the stdio slots, `endow` and `provide` each answer the refusal and start no
+  child, and the stream then reads and writes through that handle; each is
+  red when its path takes the handle silently, and `endow`'s and `provide`'s
+  are red when the handle moves and its entry stays. `send_handles` answers
+  the refusal and sends nothing, and the stream's entry goes with the
+  handle; red when it sends, and red when the refused batch closes the handle
+  past `toyos::net`. A test: a `write` with room after a
   reset answers `ConnectionReset` and copies nothing, red when `write` copies
   before it reads the `end`. And a T14 boot of round 3's `internet_download`
   on stage 3's head reads, in every run, `pipe_copy_bytes` under 0.01 per
@@ -125,9 +139,18 @@ The design and its roast are PR #863's body.
   carries the peer's address and the `nodelay` the child inherited from its
   listener. netstack copies each datagram record's `len`, `port` and `addr`
   out of the region once and judges the copy: a `len` past the bytes the
-  record holds ends that socket alone, and [udp] refuses by its counter, as
-  it does today, a payload past `MAX_PAYLOAD`, port 0 or an address it
-  cannot send to. Exit: over the region,
+  record holds ends that socket alone. `toyos::net`'s `send_to` refuses
+  what a sender can judge and writes no record: a payload past the bound
+  that `toyos-abi`'s `net` module declares and [udp] reads in place of its
+  own `limits::MAX_PAYLOAD`, as POSIX's `sendto` fails `[EMSGSIZE]`; port 0;
+  an unspecified address. [udp] still refuses each by its counter at the
+  trust boundary. What only netstack can judge, a connected socket's other
+  destination, a route, broadcast permission, a source address and a pending
+  ICMP error, netstack stores in the region's `pending` word and rings, and
+  the socket's next call answers it and clears it, as POSIX's pending error
+  is "returned in response to a subsequent send(), recv(), or getsockopt()
+  operation" (XSH 2.10.10). netstack takes a record only while [udp]'s send
+  queue has room. Exit: over the region,
   `system/netstack/node/tests/listeners.rs`'s
   `a_listener_answers_a_syn_and_wakes_its_owner_when_the_handshake_ends`
   passes, and so does a case in which a child holds, before its accept, text
@@ -137,7 +160,10 @@ The design and its roast are PR #863's body.
   the child held: its in-order bytes, which also reds the first, its
   out-of-order range, its FIN. And a datagram record whose `len` is past the
   bytes it holds is refused while netstack serves on, red when netstack takes
-  that `len` as written.
+  that `len` as written. A case per refusal: an oversized payload, port 0
+  and an unspecified address each answer their error at `send_to` with no
+  record written, and each refusal only netstack judges answers on the
+  socket's next call; each is red when that call answers `Ok`.
 
 Owner: the orchestrator, who stages it.
 
