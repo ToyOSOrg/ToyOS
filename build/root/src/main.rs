@@ -8,8 +8,10 @@
 //! ```
 //!
 //! `new` mints the root key, `0600`, into a file that must not exist yet: its
-//! seed as `toyos_update::sig::seed_text` writes one. It prints the key's
-//! fingerprint and public line. `sign` writes root 1
+//! seed as `toyos_update::sig::seed_text` writes one. It reads the new file's
+//! mode back before it writes the seed, and where the filesystem keeps no Unix
+//! mode and reads back anything else, it removes the file and refuses. It
+//! prints the key's fingerprint and public line. `sign` writes root 1
 //! (`toyos_update::repo::render::first_root`): the root key alone holds the
 //! root role and the signing key, named by the public line
 //! `cargo run -- --repo-signing-key-new` printed, the timestamp and targets
@@ -19,8 +21,11 @@
 //! `0600`.
 //!
 //! **The ceremony.** The owner brings a machine that is offline for good, two
-//! USB sticks A and B for the root key, formatted on that machine, and a third,
-//! C, that carries files between it and the online machine.
+//! USB sticks A and B for the root key, and a third, C, that carries files
+//! between it and the online machine. A and B are erased to APFS on the
+//! offline machine, `diskutil eraseDisk APFS <name> GPT <disk>`, with `<disk>`
+//! the stick's whole disk as `diskutil list` names it: exFAT and FAT32, the
+//! formats sticks come in, keep no Unix mode, and `new` refuses them.
 //!
 //! 1. Online, before.
 //!    1. `cargo run -q -- --repo-signing-key-new > <C>/signing.pub` mints the
@@ -34,12 +39,14 @@
 //!       unmeasured.
 //! 2. Offline.
 //!    1. `date -u`: the clock must say today, since root 1 expires a year from
-//!       it.
-//!    2. `toyos-root new <A>/root-key` mints the root key `0600`. Write its
+//!       it. Where it does not, set it by hand, `sudo date -u <MMDDhhmmCCYY>`,
+//!       and read `date -u` again.
+//!    2. `<C>/toyos-root new <A>/root-key` mints the root key `0600`. Write its
 //!       fingerprint on the paper.
-//!    3. `cp <A>/root-key <B>/root-key && cmp <A>/root-key <B>/root-key`.
-//!    4. `toyos-root sign --key <A>/root-key --signing <C>/signing.pub --out
-//!       <C>/root.1.txt`. Both fingerprints it prints must be the paper's,
+//!    3. `cp <A>/root-key <B>/root-key && cmp <A>/root-key <B>/root-key`, and
+//!       `stat -f %Sp <B>/root-key` reads `-rw-------`.
+//!    4. `<C>/toyos-root sign --key <A>/root-key --signing <C>/signing.pub
+//!       --out <C>/root.1.txt`. Both fingerprints it prints must be the paper's,
 //!       and its expiry a year from today.
 //!    5. Unmount and unplug A and B, and keep them apart, offline, each in a
 //!       place of its own. Only `<C>/root.1.txt` goes back.
@@ -54,7 +61,7 @@
 //! machine holding root 1 is held to its keys until they are.
 
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -89,7 +96,16 @@ fn main() {
 fn new(path: &Path) -> Result<String, String> {
     let mut seed = [0u8; 32];
     getrandom::fill(&mut seed).map_err(|e| format!("the operating system's randomness: {e}"))?;
-    write_new(path, toyos_update::sig::seed_text(&seed).as_bytes(), 0o600)?;
+    let file = create_new(path, 0o600)?;
+    let mode = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        let removed = std::fs::remove_file(path).map_or_else(|e| format!(", and removing it failed: {e}"), |()| String::new());
+        return Err(format!(
+            "{} reads back {mode:04o}, not 0600: its filesystem keeps no Unix mode, so the root key is not written there{removed}",
+            path.display()
+        ));
+    }
+    fill(file, path, toyos_update::sig::seed_text(&seed).as_bytes())?;
     let public = toyos_update::sig::public_of(&seed);
     Ok(format!("root key {}\n{}\n", repo::fingerprint(&public), repo::public_line(&public)))
 }
@@ -109,7 +125,7 @@ fn sign(key: &Path, signing: &Path, out: &Path, now: u64) -> Result<String, Stri
     }
     let bytes = repo::render::first_root(&seed, &signing_key, now + LIFE);
     let root = repo::self_signed(&bytes).expect("the root this signed is self-signed");
-    write_new(out, &bytes, 0o644)?;
+    fill(create_new(out, 0o644)?, out, &bytes)?;
     Ok(format!(
         "{}root key {}\nsigning key {}\nexpires {}\n",
         String::from_utf8(bytes).expect("a root is ASCII"),
@@ -119,19 +135,22 @@ fn sign(key: &Path, signing: &Path, out: &Path, now: u64) -> Result<String, Stri
     ))
 }
 
-/// `bytes` written to `path` at `mode` and synced, where no file is there.
-fn write_new(path: &Path, bytes: &[u8], mode: u32) -> Result<(), String> {
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(path).map_err(|e| match e.kind() {
+/// A file created at `path` asking for `mode`, where no file is there.
+fn create_new(path: &Path, mode: u32) -> Result<std::fs::File, String> {
+    std::fs::OpenOptions::new().write(true).create_new(true).mode(mode).open(path).map_err(|e| match e.kind() {
         std::io::ErrorKind::AlreadyExists => format!("{} already exists, and it is not replaced", path.display()),
         _ => format!("{}: {e}", path.display()),
-    })?;
+    })
+}
+
+/// `bytes` written to `file`, the one at `path`, and synced.
+fn fill(mut file: std::fs::File, path: &Path, bytes: &[u8]) -> Result<(), String> {
     file.write_all(bytes).and_then(|()| file.sync_all()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     use toyos_tmpdir::TempDir;
 
     /// 2026-10-09T00:00:00Z.
