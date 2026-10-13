@@ -20,8 +20,7 @@ runners: the median of 11 runs with its spread, taken by the program of
 `issues/no-program-measures-toyos-against-linux-on-one-machine.md`.
 A stage that its hardware's manufacturers or the published state of the art
 back follows and cites them, and its figure is reported and never blocks it: a
-slowdown, or a gap to that program's Linux figure, is filed as a defect
-carrying both figures and investigated. A stage nothing published covers is
+slowdown is filed as a defect carrying both figures and investigated. A stage nothing published covers is
 reviewed on its correctness and simplicity, its figure reported and deciding
 nothing by itself unless speed is the stage's only purpose. What no proving
 machine is known to offer is

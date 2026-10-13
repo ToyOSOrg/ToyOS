@@ -21,22 +21,21 @@ documents MWAIT as a wait for another processor's store to the range MONITOR
 set up, sized by CPUID 0000_0005h (24594 rev. 3.36, Vol. 3, MONITOR and
 MWAIT), and neither it, its Vol. 2 (24593 rev. 3.42) nor its optimization
 guide for family 17h models 30h and greater (56305 rev. 3.02) names an idle
-loop. AMD's own Linux commit aebef63cf7ff (v6.0, by AMD's Wyes Karny) does:
-"AMD Family 17h onwards supports MWAIT as well as MWAIT C1. And it is
-preferable to use MWAIT as the default idle state on these systems, as it has
-lower exit latencies", and at v7.2 Linux's `prefer_mwait_c1_over_halt` checks
-no vendor (`arch/x86/kernel/process.c`). So the stage is backed on
-both benches: on Intel by §11.10.4 and §11.10.6.4, and on AMD from family 17h,
-the AMD bench's, by aebef63cf7ff. A CPU whose MONITOR loses wakes keeps the
-kick, as Linux keeps it: Intel's c9a4b55431e5 (v6.13, by Len Brown) adds Lunar
-Lake to Goldmont in `X86_BUG_MONITOR` because "MONITOR wakeups on Lunar Lake
-processors can be lost, resulting in significant user-visible delays", "so
-that wake_up_idle_cpu() always sends an IPI"; at v7.2 such a CPU's MWAIT idle
-sets no polling flag, so every wake of it is an IPI
-(`arch/x86/include/asm/mwait.h`), and `prefer_mwait_c1_over_halt` gives it
-`hlt`. The T14 enumerates MONITOR/MWAIT (`monitor`,
-`kernel/cpuvuln/fixtures/t14/cpuinfo.txt:20`); whether the AMD bench does is
-unread. `issues/idle-cpus-enter-the-c-states-cst-names.md` is which state the
+loop. Nor does the AMD bench's own reference: it enumerates MONITOR/MWAIT
+unless firmware disables them, gives the monitor line as 64 bytes, and has
+MWAIT support one C1 sub-state (PPR 55922 rev. 3.06, `CPUID_Fn00000001_ECX`
+bit 3, `CPUID_Fn00000005`). So the stage is backed on Intel by §11.10.4 and
+§11.10.6.4. On AMD it follows the firmware's `_CST` (the ground of
+`issues/idle-cpus-enter-the-c-states-cst-names.md`): a C1 the AMD bench's
+`_CST` enters through Functional Fixed Hardware is the firmware declaring C1
+entered by MWAIT, and that `_CST` is unread. A CPU whose vendor's erratum says
+a store may not wake MWAIT keeps the kick: Intel's APL30, "A Store
+Instruction May Not Wake Up MWAIT", names Goldmont (family 6 model 5Ch), and
+its workaround is that "Software needs to use interrupts to wake processors
+from MWAIT-induced sleep states" (specification update 334820-010). The T14's
+lists no MONITOR or MWAIT erratum (631123-034). The T14 enumerates
+MONITOR/MWAIT (`monitor`, `kernel/cpuvuln/fixtures/t14/cpuinfo.txt:20`);
+whether the AMD bench does is unread. `issues/idle-cpus-enter-the-c-states-cst-names.md` is which state the
 wait enters; this file is what ends it. The doorbell shares a line with its
 neighbours' published counters
 (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`),
@@ -62,6 +61,11 @@ wake from the store, which no run has timed and which delivery's C1 exit
 stands in for here, so the share is an upper bound on what the doorbell
 saves.
 
-**Exit**: an idle CPU on every proving machine that enumerates MONITOR/MWAIT
-woken by its doorbell's store with no IPI, a CPU whose MONITOR loses wakes
-still kicked, and the split above read again on both benches after it.
+**Exit**: an idle CPU on every Intel proving machine that enumerates
+MONITOR/MWAIT woken by its doorbell's store with no IPI, and the split above
+read again on the T14 after it; the kick kept on a CPU a vendor erratum names,
+by a verdict that is a pure function of CPUID's vendor, family and model and
+is host-tested, red where Goldmont is woken by the store alone or the T14 is
+kicked; and the AMD bench's `_CST` read, the doorbell taken there and the
+split read again where its C1 is FFH MWAIT, and `hlt` with the kick kept where
+it is not.

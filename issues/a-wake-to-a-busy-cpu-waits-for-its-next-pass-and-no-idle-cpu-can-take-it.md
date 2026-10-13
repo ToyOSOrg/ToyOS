@@ -47,17 +47,17 @@ wakes the thread on the core it last ran on if that core is idle, and
 otherwise on the core idle longest, where one is; the paper applies it only
 where the power policy keeps cores out of low-power states, since waking a
 core from one costs power. With 8 spinners no core idles, and a wake onto a
-CPU running a task is what wakeup preemption decides: Linux's fair class has
-preempted the running task for a woken one since CFS (`check_preempt_curr_fair`,
-`kernel/sched_fair.c` at v2.6.23), and since v6.6 by virtual deadline
-(147f3efaa241, "wakeup preemption is driven by the deadline"), the
-vruntime/lag family of ToyOS's fair band (`kernel/pure/sched/fair.rs:1-3`).
-The same release curbs it (63304558ba5d): under `RUN_TO_PARITY`, on by default
-at v7.2, a wake does not preempt "until the current task has either matched
-the 0-lag point or until is has exhausted it's slice"
-(`kernel/sched/features.h`). That arm follows EEVDF whole, the curb included,
-so its test is that a woken task runs within one protected slice, 1 ms
-(`PROTECTED_RUN_NS`, https://github.com/ToyOSOrg/ToyOS/pull/874), and its p99
+CPU running a task is the fair band's pick to decide, which is the
+vruntime/lag family (`kernel/pure/sched/fair.rs:1-3`) of EEVDF. There the
+resource is "allocated in time quanta of size at most q. At the beginning of
+each time quantum a client is selected", and "A new quantum is allocated to
+the client which has the eligible request with the earliest virtual deadline"
+(Stoica et al., "A Proportional Share Resource Allocation Algorithm for
+Real-Time, Time-Shared Systems", RTSS 1996, the algorithm of Stoica and
+Abdel-Wahab's TR-95-22), so a task woken inside a quantum is picked no
+sooner than the next one's start. That arm follows it with a wake's q the protected
+slice, 1 ms (`PROTECTED_RUN_NS`, https://github.com/ToyOSOrg/ToyOS/pull/874),
+so its test is that a woken task runs within one protected slice, and its p99
 against 100 µs is reported. With 7 spinners the 100 µs bound is the exit's
 test that the stage works, not the judge of its design.
 

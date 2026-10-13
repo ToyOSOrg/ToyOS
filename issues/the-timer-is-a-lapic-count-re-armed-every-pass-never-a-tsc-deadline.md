@@ -24,20 +24,16 @@ with no calibration of a second timebase (SDM 325462-093, Vol. 3A §13.5.4.1).
 The T14 enumerates it (`tsc_deadline_timer`,
 `kernel/cpuvuln/fixtures/t14/cpuinfo.txt:20`). AMD documents no such mode: its
 CPUID reference has CPUID.01H:ECX[24] reserved (APM 24594 rev. 3.36, Vol. 3,
-§E.3.2), so the AMD bench keeps the count, its calibration and its spin.
+§E.3.2), and so does the AMD bench's own (PPR 55922 rev. 3.06,
+`CPUID_Fn00000001_ECX`), so the AMD bench keeps the count, its calibration
+and its spin.
 
-**The published state of the art backs it.** Linux has armed its one-shot
-through `IA32_TSC_DEADLINE` on every CPU that enumerates the mode since v3.8:
-279f1461432c, by Intel's Suresh Siddha, "enables us to skip the APIC
-calibration during boot. Also, in xapic mode, this enables us to skip the
-uncached apic access to re-arm the APIC timer". At v7.2 its
-`calibrate_APIC_clock` returns at once where the mode is, and
-`setup_APIC_timer` registers `lapic-deadline` there
-(`arch/x86/kernel/apic/apic.c`); its errata table, `deadline_match`, does not
-name the T14's family 6 model 140. Since v7.1 the deadline is handed over in
-TSC cycles "without reading the TSC at all" (f246ec3478cf), the absolute
-write this stage takes. The stage follows them, and its figure is reported
-and decides nothing.
+**Its speed reading decides it.** The SDM defines the mode and recommends it
+over the count nowhere, and AMD documents none, so nothing published covers
+the choice. Intel's specification update for the T14's processor lists no
+TSC, TSC-deadline or APIC-timer erratum (631123-034, the UP3 line, CPUID
+000806C1h). Nothing but speed is its purpose: a deadline removes no path,
+since a CPU without one keeps the count.
 
 **Measured** (`wt/toyos-scout-tlb` at `d4c2f8ebe`, `main`'s `177e72a9e` plus
 the scout; https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119443198),
@@ -62,8 +58,17 @@ the deadline into a span, and a deadline written as an absolute
 is an upper bound on what deadline mode saves, which still writes once to arm
 and once to stop; on the AMD bench both sit at its TSC's floor.
 
-**Exit**: a deadline armed on every CPU that enumerates TSC-deadline as one
-`IA32_TSC_DEADLINE` write of the absolute value; and on the T14, the split
-above read again after it, and the 1 ms timer lateness of
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md` read with
-the count and with the deadline, each reported.
+**Next: a TSC-deadline twin on the T14**, `main` plus the scout with the
+one-shot armed and stopped through `IA32_TSC_DEADLINE`, beside `main` plus
+the scout in the same session. Each arm reads the 1 ms timer lateness of
+`issues/no-program-measures-toyos-against-linux-on-one-machine.md` and the
+split above, its re-arm segment opening at `set_timer` (`kernel/src/hw.rs:49`)
+in both. The arm whose lateness measures better is kept, and the split is
+reported. The twin is a measurement arm, deleted once it has answered.
+
+**Exit**: the twin's reading, posted, and the twin deleted. Where the
+deadline's lateness measures better, a deadline is armed on every CPU that
+enumerates TSC-deadline as one `IA32_TSC_DEADLINE` write of the absolute
+value, and the split above is read again after it; where the count's does,
+this file becomes `rejected` with both readings, and the boot's 10 ms
+calibration spin stays the count's price.

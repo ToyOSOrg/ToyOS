@@ -43,16 +43,15 @@ the parts it links):
 Intel's optimization manual has critical data and locks allocated apart,
 aligned to no less than the false-sharing threshold, the CLFLUSH line size of
 CPUID.01H:EBX[15:8] (248966-051, Vol. 1 §11.4.5, User/Source Coding Rule
-17). Linux keeps each CPU's run queue on lines of its own,
-`DEFINE_PER_CPU_SHARED_ALIGNED(struct rq, runqueues)` (`kernel/sched/core.c`
-at v7.2), which aligns it by `____cacheline_aligned_in_smp` to
-`SMP_CACHE_BYTES`, x86's L1 line (`include/linux/percpu-defs.h`,
-`include/linux/cache.h`, `include/vdso/cache.h`,
-`arch/x86/include/asm/cache.h`). AMD documents the line through the same CPUID
-field (APM 24594 rev. 3.36, Vol. 3, CLFLUSH) and gives it as 64 bytes on
-family 17h models 30h and greater (56305 rev. 3.02, §2.6.1, §2.6.2), and none
-of APM Vol. 2 (24593 rev. 3.42), Vol. 3 and 56305 says anything on false
-sharing. So the stage is backed on both benches.
+17), which backs the stage on the T14. AMD documents the line through the
+same CPUID field (APM 24594 rev. 3.36, Vol. 3, CLFLUSH), as 8 quadwords on the
+AMD bench (PPR 55922 rev. 3.06, `CPUID_Fn00000001_EBX`), and its family's
+optimization guide gives the 64-byte line and has a line another core's L2
+holds reach the reader by a cache-to-cache transfer (Software Optimization
+Guide for AMD Family 17h Processors, 55723 rev. 3.00, §2.6.1, §2.6.4). None
+of it, the APM's Vol. 2 (24593 rev. 3.42) and Vol. 3, nor the guide for
+models 30h and greater (56305 rev. 3.02) says anything on false sharing, so on
+the AMD bench AMD documents the cost and recommends nothing.
 
 Nothing in the run attributes a miss to the `BITMAP` lock, `IN_PASS`,
 `CpuHandle` or `Frontier`, and the AMD bench was not read. The next
