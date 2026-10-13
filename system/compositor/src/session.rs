@@ -283,10 +283,7 @@ impl Session {
             total_mem / (1024 * 1024),
         );
 
-        // Sized for the slot ceiling rather than for `max_windows`: the batch
-        // between two `wait` calls is the four fixed registrations, one per
-        // live window and one per pending connection, the prompt's two, the
-        // clipboard's two and the input port's beside them, and
+        // Sized for the slot ceiling rather than for `max_windows`:
         // `MSG_SET_RESOLUTION` can raise `max_windows` mid-run.
         let poller = Poller::new(
             FIXED_POLL_HANDLES

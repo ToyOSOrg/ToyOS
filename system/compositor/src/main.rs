@@ -49,10 +49,9 @@ pub const INPUT_POLL_HANDLES: u32 = 1 + toyos_input::wire::CONNECTIONS as u32;
 
 /// Hard ceiling on live client windows, from the poller rather than from memory.
 ///
-/// Every window's handle is registered in the same batch as the four fixed
-/// ones, the pending connections, the prompt's two, the clipboard's two and
-/// the input port's, and [`Poller::MAX_HANDLES`] is the widest set one poller
-/// can carry. Unlike the memory budget this does not move when the
+/// Every window's handle is registered in the same batch as every other
+/// handle the compositor watches, counted below, and [`Poller::MAX_HANDLES`]
+/// is the widest set one poller can carry. Unlike the memory budget this does not move when the
 /// resolution does, which is why the poller is sized from it:
 /// `MSG_SET_RESOLUTION` can make windows cheaper mid-run, and a poller sized
 /// for the old screen would then be too small. At any resolution this machine
