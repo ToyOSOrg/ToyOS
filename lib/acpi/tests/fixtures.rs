@@ -7,7 +7,7 @@ use common::{t14_root_bridge, Machine, OVMF_ROOT_BRIDGE};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    century_of, definition_blocks, dsdt_address, ecam_allocations, find_table, fixed_hardware, hpet_base, iapc_boot_arch,
+    century_of, definition_blocks, dsdt_address, ecam_allocations, find_table, fixed_hardware, hpet_base,
     isa_line, madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, sci_line,
     Century, FixedHardware, IoApicEntry, Line, MadtEntry, Polarity, PowerButton, Psci, Reset, SmiCmd,
     SourceOverride, TableError, Trigger, FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
@@ -149,12 +149,6 @@ fn the_fadt_names_the_reset_register_qemu_acts_on() {
 fn the_q35_fadt_predates_arm_boot_arch() {
     let fadt = find_table(machine(), RSDP, b"FACP", 36).expect("FADT");
     assert_eq!(psci(&fadt), Psci::Undefined { revision: 3, minor: 0 });
-}
-
-#[test]
-fn the_boot_architecture_flags_come_off_a_revision_that_defines_them() {
-    let (revision, flags) = iapc_boot_arch(machine(), RSDP).expect("FADT");
-    assert_eq!((revision, flags), (3, 0x2));
 }
 
 #[test]

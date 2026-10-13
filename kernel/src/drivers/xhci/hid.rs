@@ -79,7 +79,10 @@ impl HidDevice {
                 Err(why) => return self.refuse(format_args!("{why:?}")),
             },
             HidRole::Pointer(source, pointer) => match pointer.decode(delivered) {
-                Ok(read) => mouse::handle_motion(*source, read.buttons, motion(read.motion), read.wheel),
+                Ok(read) => {
+                    mouse::report(*source, read.buttons, motion(read.motion), read.wheel);
+                    true
+                }
                 Err(why) => return self.refuse(format_args!("{why:?}")),
             },
         };
@@ -105,12 +108,15 @@ impl HidDevice {
     }
 
     /// Releases everything this device was holding, on its way off the bus.
-    /// Its own keys, not `keyboard::release_all`: only its `Keyboard` records which held keys are this device's.
+    /// Its own keys: only its `Keyboard` records which held keys are this device's.
     pub fn unbind(&mut self) {
         let queued = match &mut self.role {
             HidRole::Keyboard(keys) => keyboard::apply(keys.release()) != 0,
-            // Also frees this device's button-table entry, so replugging costs the machine nothing.
-            HidRole::Pointer(source, _) => mouse::unbind(*source),
+            // Also frees this device's source, so replugging costs the machine nothing.
+            HidRole::Pointer(source, _) => {
+                mouse::unbind(*source);
+                true
+            }
         };
         if queued {
             self.wake();
