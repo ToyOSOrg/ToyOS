@@ -12,6 +12,7 @@
 use crate::arch::iommu_unit as unit;
 use crate::arch::message_unit as messages;
 
+pub(crate) mod domains;
 pub(crate) mod fault;
 pub(crate) mod window;
 
@@ -238,7 +239,7 @@ impl OwnSpace {
     /// and write no record of it: for a mapping its holder makes and takes back
     /// as often as it likes.
     pub fn place(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
-        unit::domain::place(self.0, Iova::translated(at), phys, bytes).map(|_| ())
+        unit::domain::place(self.0, Iova::translated(at), phys, bytes)
     }
 
     /// [`DeviceSpace::unmap`].
