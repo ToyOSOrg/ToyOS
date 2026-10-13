@@ -18,9 +18,12 @@ completes its boot and reds the row on cpu0's `refused` line; every guest
 loads nothing, for its CPU reports a hypervisor or a vendor ToyOS has no
 loader for.
 
-**AMD.** AMD documents MSR0000_008B (55922) and not the patch loader. A
-loader built from AMD's own parser by somebody who also read another
-implementation is not clean-room, and #886's was taken out for that.
+**AMD.** AMD documents MSR0000_008B (55922) and not the patch loader, so
+the loader rests on AMD's own parser, `amd_ucode_info`. Root `CLAUDE.md`
+("Zero legacy") lets that source be read only clean-room: one agent writes
+from it a specification of facts citing no implementation, and another
+builds from that specification alone. #886's loader was not built that way
+and was taken out.
 
 Owner: the orchestrator.
 
@@ -28,10 +31,11 @@ Owner: the orchestrator.
 embedded container holds for it, and a CPU that does not take one says so
 and runs what it reads back:
 
-- the loader is built from a facts specification of the container format,
-  written by a separate reader of AMD's `amd_ucode_info` with no other
-  implementation read, its provenance kept in that reader's evidence and the
-  specification never committed;
+- the loader is built clean-room: one agent reads `amd_ucode_info` and
+  writes from it a specification of facts of the container format citing no
+  implementation, keeping the provenance in its own evidence, and another
+  builds the loader from that specification alone, handed to it in its
+  brief and never committed;
 - a patch is matched through the container's equivalence table, CPUID.01H:EAX
   to processor ID and processor ID to patch, and a malformed table is refused
   by name; a host test whose table maps 0x00860f01 to a processor ID other
