@@ -661,7 +661,7 @@ pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::Pi
         });
     }
     // Outside the block: it waits, and a sibling can be spinning on this lock.
-    crate::arch::tlb::shootdown(crate::invalidation::Origin::Pipe);
+    crate::arch::tlb::shootdown(crate::invalidation::Origin::Pipe, crate::invalidation::Half::User);
 }
 
 /// One live `mmap` and its physical pages; the range's registration in the address space's `regions` is separate (placement search, `munmap`).

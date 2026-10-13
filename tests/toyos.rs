@@ -90,6 +90,14 @@ const RUST_SKIP: &[&str] = &[
     // is read off the clock around the syscall. The `tlb_shootdown_waits`
     // metal row runs it on the T14.
     "tlb_shootdown_waits",
+    // Each reads a global translation its kernel may leave stale, which a TCG
+    // guest's TLB drops on any `CR3` write and the T14's keeps: the
+    // `a_global_kernel_leafs_discharge_drops_it`,
+    // `a_kernel_half_shootdown_drops_a_global_kernel_translation` and
+    // `a_user_half_shootdown_keeps_a_global_kernel_translation` metal rows run them.
+    "global_leaf_discharge",
+    "global_leaf_flush",
+    "global_leaf_user_flush",
     // Its product is the windows a `mask-windows` kernel reports under it, and
     // its 256 threads' stacks would crowd every member after it in one boot.
     // The `mask_windows` metal row runs it.
@@ -700,6 +708,39 @@ const METAL: &[(&str, metal::Metal)] = &[
                 ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_tlb_shootdown_waits"])
             }],
             judge: |b| b[0].job_passed("test_rs_tlb_shootdown_waits"),
+        },
+    ),
+    (
+        // A global kernel translation outlives its entry until something drops
+        // it, and the kernel that carries `SYS_DEBUG` stages one: the verdict
+        // is the guest's own exit, its control first.
+        "a_global_kernel_leafs_discharge_drops_it",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_discharge"])
+            }],
+            judge: |b| b[0].job_passed("test_rs_global_leaf_discharge"),
+        },
+    ),
+    (
+        "a_kernel_half_shootdown_drops_a_global_kernel_translation",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_flush"])
+            }],
+            judge: |b| b[0].job_passed("test_rs_global_leaf_flush"),
+        },
+    ),
+    (
+        "a_user_half_shootdown_keeps_a_global_kernel_translation",
+        metal::Metal {
+            arms: &[metal::Arm {
+                features: ACTUATOR_KERNEL,
+                ..metal::once("shared-debug", "tests/images/testcases.toml", SELFTEST_PARAMS, &["test_rs_global_leaf_user_flush"])
+            }],
+            judge: |b| b[0].job_passed("test_rs_global_leaf_user_flush"),
         },
     ),
     (
@@ -5495,6 +5536,8 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
         (3, "DE", true),
         (5, "PAE", true),
         (6, "MCE", true),
+        // Every kernel leaf is global, and only with `PGE` set is one cached so.
+        (7, "PGE", true),
         (9, "OSFXSR", true),
         (10, "OSXMMEXCPT", true),
         (12, "LA57", false),
@@ -5552,7 +5595,7 @@ fn control_regs(log: &str, cpus: u32) -> Result<(), String> {
     }
 
     // A bit named nowhere above is as much of the declaration as a named one,
-    // and the kernel writes both registers whole — so `UMIP`, `PGE`, `TSD` or
+    // and the kernel writes both registers whole — so `UMIP`, `TSD` or
     // `PKE` would reach every CPU with nothing here to say so. Which is why
     // what follows is the set this gate has an opinion about, rather than a
     // second list of bits to forbid: a forbid-list fails open on the next bit.

@@ -25,7 +25,7 @@ use crate::arch::{irqchip, percpu, IrqGuard};
 use crate::irq_census::Source;
 use crate::scheduler::{Parkable, MAX_CPUS};
 use crate::seqlock::Published;
-use crate::shootdown::{Generation, Shootdown};
+use crate::shootdown::{Generation, Reach, Shootdown};
 use crate::sync::Lock;
 use crate::time::{Budget, Cadence, Deadline, Duration, Instant};
 use crate::user_ptr::UserBytesMut;
@@ -151,7 +151,7 @@ fn answer(kick: bool) {
         if deaf::DEAF.load(core::sync::atomic::Ordering::Relaxed) == me {
             return;
         }
-        ROUNDS.serve_if_owed(me, || BLOCKS[me].publish(sample(me)))
+        ROUNDS.serve_if_owed(me, |_| BLOCKS[me].publish(sample(me)))
     };
     if served {
         ANSWERED.post_in_place();
@@ -175,7 +175,7 @@ pub fn read(rights: Rights, out: &mut UserBytesMut) -> Result<usize, SyscallErro
         match *last {
             Some((generation, issued)) if now < issued + JOIN.duration() => (generation, issued, false),
             _ => {
-                let generation = ROUNDS.issue();
+                let generation = ROUNDS.issue(Reach::Narrow);
                 *last = Some((generation, now));
                 (generation, now, true)
             }
