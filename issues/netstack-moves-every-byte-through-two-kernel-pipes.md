@@ -173,17 +173,23 @@ The design and its roast are PR #863's body.
   that `len` as written. A case per refusal: an oversized payload, port 0
   and an unspecified address each answer their error at `send_to` with no
   record written, and each refusal only netstack judges answers on the
-  socket's next call; each is red when that call answers `Ok`. Two loom
+  socket's next call; each is red when that call answers `Ok`. A case: a
+  nonblocking `send_to` over a full send ring answers `WouldBlock` and
+  writes no record, red when `set_nonblocking` sets nothing. Two loom
   models drive the client end and netstack's code as stage 4 lands them. In
   one, a `recv_from` asleep with nothing to receive, and a `send_to` asleep
   over a full send ring, each answers a refusal only netstack judges that
   lands meanwhile; each is red when the look reads `pending` before it arms,
   red when netstack exchanges the wants before it stores `pending`, and red
   under `want-relaxed`, and the sender's is red when netstack rings only
-  `rx_data`. In the other, a sender that fills the send ring while [udp]'s
-  queue is full, beside a `recv_from` asleep on the connection, has every
-  record sent, in order, none refused; red when netstack refuses a record at
-  the full queue, and red when it rings `tx_room` on the connection.
+  `rx_data`. In the other, [udp]'s queue starts full and a datagram leaves
+  it as its own step, interleaved with netstack's looks, so netstack can find
+  a published record while the queue is full and hold it; a sender that
+  fills the send ring, beside a `recv_from` asleep on the connection, has
+  every record sent, in order, none refused. It is red when netstack refuses
+  a record at the full queue, red when it rings `tx_room` on the connection,
+  red when after the leave it waits for the client's next ring without
+  looking at the send ring again, and red under `want-relaxed`.
 
 Owner: the orchestrator, who stages it.
 
