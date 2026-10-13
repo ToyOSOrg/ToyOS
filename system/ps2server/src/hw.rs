@@ -7,7 +7,7 @@ use toyos_abi::ioport;
 use toyos_abi::pci::DeviceIrqRecord;
 use toyos_abi::syscall::{self, SyscallError};
 
-use crate::bus::{Controller, Irq};
+use crate::bus::{Controller, Irq, Records};
 
 const DATA: u16 = 0x60;
 const STATUS: u16 = 0x64;
@@ -28,9 +28,15 @@ impl Hw {
         assert_eq!(n, description.len(), "ps2server: a description of {n} bytes");
         Self { claim, poller: Poller::new(1), watching: false }
     }
+}
+
+impl Records for Hw {
+    fn clock(&mut self) -> u64 {
+        toyos_abi::clock::nanos_since_boot()
+    }
 
     /// The claim's record, if it holds one.
-    fn record(&self) -> Option<Irq> {
+    fn take(&mut self) -> Option<Irq> {
         let mut record = [0u8; DeviceIrqRecord::SIZE];
         match syscall::read_nonblock(self.claim.as_handle(), &mut record) {
             Ok(n) => {
@@ -40,6 +46,19 @@ impl Hw {
             }
             Err(SyscallError::WouldBlock) => None,
             Err(other) => panic!("ps2server: a bound claim's read answered {other:?}"),
+        }
+    }
+
+    fn park(&mut self, now: u64, deadline: u64) {
+        if !self.watching {
+            self.poller.watch(&self.claim, READABLE, 0);
+            self.watching = true;
+        }
+        let timeout = if deadline == u64::MAX { u64::MAX } else { deadline - now };
+        let mut fired = false;
+        self.poller.wait(1, timeout, |_| fired = true);
+        if fired {
+            self.watching = false;
         }
     }
 }
@@ -62,29 +81,10 @@ impl Controller for Hw {
     }
 
     fn now(&mut self) -> u64 {
-        toyos_abi::clock::nanos_since_boot()
+        self.clock()
     }
 
     fn wait(&mut self, deadline: u64) -> Option<Irq> {
-        loop {
-            let now = self.now();
-            let past = now >= deadline;
-            if let Some(irq) = self.record() {
-                return Some(irq);
-            }
-            if past {
-                return None;
-            }
-            if !self.watching {
-                self.poller.watch(&self.claim, READABLE, 0);
-                self.watching = true;
-            }
-            let timeout = if deadline == u64::MAX { u64::MAX } else { deadline - now };
-            let mut fired = false;
-            self.poller.wait(1, timeout, |_| fired = true);
-            if fired {
-                self.watching = false;
-            }
-        }
+        self.first(deadline)
     }
 }

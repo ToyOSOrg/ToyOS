@@ -140,3 +140,73 @@ pub trait Bus: Controller {
         }
     }
 }
+
+/// A claim's interrupt records, as a [`Controller::wait`] reaches them.
+pub trait Records {
+    /// The clock the records are stamped with.
+    fn clock(&mut self) -> u64;
+    /// The record the claim holds, if any, taken.
+    fn take(&mut self) -> Option<Irq>;
+    /// Sleep until a record may have landed, or `deadline`; `now` is the clock
+    /// read before the last [`Self::take`].
+    fn park(&mut self, now: u64, deadline: u64);
+
+    /// A record, waited for until `deadline`: the clock is read before the
+    /// look, so a record that lands after the deadline's read is still found.
+    fn first(&mut self, deadline: u64) -> Option<Irq> {
+        loop {
+            let now = self.clock();
+            if let Some(irq) = self.take() {
+                return Some(irq);
+            }
+            if now >= deadline {
+                return None;
+            }
+            self.park(now, deadline);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Irq, Records};
+
+    /// One instant per call, as a waiter preempted between every two of its
+    /// steps sees the machine; the record lands at [`Self::LANDS`].
+    struct Preempted {
+        at: u64,
+    }
+
+    impl Preempted {
+        const LANDS: u64 = 4;
+
+        fn step(&mut self) -> u64 {
+            let at = self.at;
+            self.at += 1;
+            at
+        }
+    }
+
+    impl Records for Preempted {
+        fn clock(&mut self) -> u64 {
+            self.step()
+        }
+
+        fn take(&mut self) -> Option<Irq> {
+            (self.step() >= Self::LANDS).then_some(Irq { first_nanos: Self::LANDS })
+        }
+
+        fn park(&mut self, _: u64, _: u64) {
+            self.step();
+        }
+    }
+
+    /// The deadline passes between the waiter's look and its clock read, and
+    /// the record lands with it: a waiter that read the clock after its look
+    /// would call that silence.
+    #[test]
+    fn a_record_landing_as_the_deadline_passes_is_found() {
+        let mut records = Preempted { at: 0 };
+        assert_eq!(records.first(Preempted::LANDS), Some(Irq { first_nanos: Preempted::LANDS }));
+    }
+}

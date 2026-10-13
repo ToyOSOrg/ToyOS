@@ -6,7 +6,8 @@
 //! each by its own page; **TP** is IBM's *TrackPoint System Version 4.0
 //! Engineering Specification*, the auxiliary device's protocol.
 //!
-//! 1. **Quiet:** `0xAD`, `0xA7` (C 12), and the output buffer drained.
+//! 1. **Quiet:** the output buffer drained, `0xAD`, `0xA7` (C 12), and it
+//!    drained again.
 //! 2. **Keyboard:** the command byte with the keyboard's interrupt alone,
 //!    translation on and both interfaces still disabled; `0xAE`; then IBM's
 //!    Reset, `0xFF` (K 13), answered `0xFA` and the completion code `0xAA`,
@@ -38,7 +39,7 @@ pub const KEYBOARD_NS: u64 = 750_000_000;
 /// The aux stage's: TP 9's 500 ms of diagnostics, and its acknowledgements.
 const AUX_NS: u64 = 600_000_000;
 
-/// The most the quiet stage reads before it calls the output buffer wedged.
+/// The most one drain reads before it calls the output buffer wedged.
 const DRAIN: usize = 32;
 
 /// The keyboard's Reset, its acknowledgement and its completion code (K 13).
@@ -141,6 +142,7 @@ impl<C: Controller> Probe<'_, C> {
             self.route(b);
         }
         sent.map_err(|NotTaken { status }| {
+            self.said_drained(&format!("waiting to write {what}"));
             (self.say)(format!("ps2server: the controller never took {what} (status {status:#04x})"));
             Stopped
         })
@@ -173,18 +175,23 @@ impl<C: Controller> Probe<'_, C> {
         }
     }
 
-    /// Step 1.
+    /// Step 1, drained before its first write too, so a wedged output buffer
+    /// is found by [`DRAIN`] reads and no write is made into it (C 14).
     fn quiet(&mut self) -> Result<(), Stopped> {
+        self.drain()?;
         let deadline = self.deadline(CONTROLLER_NS);
         self.command(DISABLE_KEYBOARD, deadline, "0xAD")?;
         self.command(DISABLE_AUX, deadline, "0xA7")?;
+        self.drain()?;
+        self.said_drained("before the probe");
+        Ok(())
+    }
+
+    fn drain(&mut self) -> Result<(), Stopped> {
         for _ in 0..DRAIN {
             match self.c.poll() {
                 Some(byte) => self.route(byte),
-                None => {
-                    self.said_drained("before the probe");
-                    return Ok(());
-                }
+                None => return Ok(()),
             }
         }
         self.said_drained("before the probe");
@@ -501,6 +508,17 @@ mod tests {
         let (probed, said) = probed(&mut fake);
         assert_eq!(probed, Probed::Failed);
         line(&said, "ps2server: DISABLED — command byte 0x57 did not take (read back 0x56)");
+    }
+
+    #[test]
+    fn a_wedged_output_buffer_is_said_after_32_reads_with_nothing_written() {
+        let mut fake = Fake::t14();
+        fake.wedged = true;
+        let (probed, said) = probed(&mut fake);
+        assert_eq!(probed, Probed::Failed);
+        line(&said, "ps2server: drained 32 byte(s) before the probe: [0x55, 0x55");
+        line(&said, "ps2server: the output buffer never drains — 32 reads left it full");
+        assert!(fake.commands.is_empty(), "C 14: a write into a full output buffer: {:02x?}", fake.commands);
     }
 
     #[test]
