@@ -10,9 +10,9 @@ Virtio 1.2 §4.1.2.2: "Drivers for device types listed in section 4.1.2 MUST
 match devices with the PCI Vendor ID 0x1AF4 and the Transitional PCI Device ID
 indicated in section 4.1.2" — `0x1000` for a network card, `0x1003` for a
 console, among others — beside the `0x1040`-based id. A transitional device
-also publishes the virtio PCI capabilities, and §4.1.4 has a non-transitional
-driver drive it through them, and "fail gracefully" where they are absent. That
-is not the legacy interface, which this tree refuses.
+also publishes the virtio PCI capabilities (§4.1.4), and §4.1.5.1.1.1 has a
+non-transitional driver look for them and "fail gracefully" where they are
+absent. That is not the legacy interface, which this tree refuses.
 
 The tree matches the `0x1040`-based id alone:
 

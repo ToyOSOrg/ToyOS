@@ -34,13 +34,21 @@ off. A transitional virtio function cannot offer the bit in QEMU at all, and
 VirtualBox's virtio core offers it nowhere
 (`issues/the-virtio-drivers-match-only-a-non-transitional-device-id.md`).
 
-The check cannot be the holder's: the holder is who the domain protects the
-machine from.
+The check is not the holder's, for the holder is who the domain protects the
+machine from, nor the kernel's, which the owner's target keeps free of virtio
+(`issues/every-driver-is-still-in-the-kernel.md`; `kernel/src/pcidev` and
+`kernel/src/iommu` name none today). By the orchestrator's ruling (#896,
+issuecomment-6131213771, ruling 1) it is the supervisor's, which mints the
+claim and is trusted: it reads the function's offered features before it moves
+the claim in, and on a machine whose functions are translated refuses a virtio
+function that does not offer the bit. How it reads the word is the stage's
+design.
 
 **Owner**: whoever holds `issues/toyos-runs-in-any-open-source-hypervisor.md`.
 
-**Exit**: a claim on a virtio function that does not offer
-`VIRTIO_F_ACCESS_PLATFORM` behind a unit is refused by a `Refusal` of its own;
-a guest boot under the harness's VT-d with netstack's virtio-net created
-without `iommu_platform=on` reads that refusal on its `pcidev: … NOT HANDED
-OVER —` line, and is handed over with the check deleted.
+**Exit**: a guest boot under the harness's VT-d with netstack's virtio-net
+created without `iommu_platform=on` reads the supervisor's line refusing
+netstack that function for its missing `VIRTIO_F_ACCESS_PLATFORM`, and
+`netstack: no NIC on this machine`; the same boot with the check deleted
+endows netstack the function; and `git grep -i virtio kernel/src/pcidev
+kernel/src/iommu` still finds nothing.
