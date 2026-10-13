@@ -12,7 +12,7 @@ use common::{declare_len, entry, madt, rsdp, sdt, t14_root_bridge, xsdt, Machine
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
-    definition_blocks, dsdt_address, ecam_allocations, find_by_id, find_table, fixed_hardware, hpet_base, iapc_boot_arch, isa_line,
+    definition_blocks, dsdt_address, ecam_allocations, find_by_id, find_table, fixed_hardware, hpet_base, isa_line,
     madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, sci_line, Century,
     Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci, SmiCmd,
     Reset, SourceOverride, Table, TableError, Trigger,
@@ -254,27 +254,18 @@ fn a_fadt_of_the_acpi_1_0_length_is_read_without_its_x_fields() {
     let fadt = find_table(m, RSDP_AT, b"FACP", 109).expect("FADT");
     assert_eq!(dsdt_address(&fadt), 0x7ffb_9000);
     assert_eq!(rtc_century(m, RSDP_AT), Ok(Century::At(0x32)));
-    // The flags word at 109 is inside 116 bytes, so it is *read* — and it comes
-    // back with revision 1 beside it, which is the whole of what tells the
-    // caller that bit 1 means nothing on this firmware.
-    assert_eq!(iapc_boot_arch(m, RSDP_AT), Ok((1, 0)));
 }
 
-/// A FADT that stops before the flags word: a refusal, never a zero.
+/// A FADT that ends with the century byte reads it.
 #[test]
-fn a_fadt_too_short_for_the_boot_architecture_flags_is_refused() {
+fn a_fadt_that_ends_at_the_century_byte_reads_it() {
     let t = sdt(b"FACP", 1, &[0u8; 73]);
     assert_eq!(t.len(), 109);
     let head = rsdp(XSDT_AT, 2, 36);
     let root = xsdt(&[TABLE_AT]);
     let regions: &[(u64, &[u8])] = &[(RSDP_AT, &head), (XSDT_AT, &root), (TABLE_AT, &t)];
     let m = Machine { regions };
-    assert_eq!(
-        iapc_boot_arch(m, RSDP_AT).err(),
-        Some(TableError::Length { declared: 109, needed: 111 }),
-        "a FADT too short for the flags is not a FADT the i8042 driver may read"
-    );
-    // The century byte at 108 is the last one it does hold.
+    // The century byte at 108 is the last one it holds.
     assert_eq!(rtc_century(m, RSDP_AT), Ok(Century::Absent));
 }
 
@@ -351,7 +342,7 @@ const FIXTURES: &[(&str, &[u8], u64)] = &[
 
 /// **No panic and no unbounded walk, over every byte of every table this crate
 /// decodes.** Each byte of each fixture takes each of its 255 other values in
-/// turn, and the MCFG walk, `hpet_base`, `rtc_century`, `iapc_boot_arch` and the
+/// turn, and the MCFG walk, `hpet_base`, `rtc_century` and the
 /// MADT walk to exhaustion all run over it. A panic anywhere — including the
 /// reader's own, which fires on a read no bound accepted — reds this.
 ///
@@ -398,7 +389,6 @@ fn no_single_byte_mutation_of_a_real_table_panics_or_runs_away() {
                     }
                     let _ = hpet_base(m, rsdp_at);
                     let _ = rtc_century(m, rsdp_at);
-                    let _ = iapc_boot_arch(m, rsdp_at);
                     if let Ok(blocks) = definition_blocks(m, rsdp_at) {
                         // The DSDT, and at most an item an 8-byte entry of the largest XSDT.
                         assert!(blocks.count() <= 1 + MAX_TABLE_LEN / 8, "{which}[{offset}]={value:#04x}: the block walk is not ending");

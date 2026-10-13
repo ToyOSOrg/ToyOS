@@ -49,7 +49,7 @@ pub enum MouseOutcome {
 /// returns to `Head`, and stays misaligned for as long as the motion lasts.
 ///
 /// Timing settles it. A PS/2 byte is 11 bits at 10–16.7 kHz, so a 3-byte packet
-/// occupies at most ~3.3 ms; the driver programs 100 samples/s, so the line is
+/// occupies at most ~3.3 ms; a device reports 100 samples/s after its reset, so the line is
 /// then idle for ~6.7 ms. 5 ms falls in that trough and nowhere else, which
 /// makes an idle gap the frame delimiter the format itself lacks.
 pub const PACKET_GAP_NS: u64 = 5_000_000;
