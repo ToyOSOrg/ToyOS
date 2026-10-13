@@ -158,7 +158,7 @@ impl Agent {
 
 fn main() {
     let Some(claim) = endow::pci_function::<PciDev>(VIRTIO_SERIAL) else {
-        say!("vdagent: no virtio-serial function on this machine, exiting");
+        say!("vdagent: no virtio-serial function was handed to this program, exiting");
         return;
     };
     let watcher = Watcher::connect(toyos_manifest::clipboard::PORT)

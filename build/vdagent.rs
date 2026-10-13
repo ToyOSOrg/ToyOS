@@ -58,15 +58,17 @@ pub fn gtk(arch: Arch) -> Result<(), String> {
     })
 }
 
-/// What `<qemu> <option> help` lists.
+/// What `<qemu> -machine none <option> help` lists. The machine is named
+/// because `qemu-system-aarch64` has no default one and lists nothing without
+/// it; `none` is the empty machine on both.
 fn help(arch: Arch, option: &str) -> Result<String, String> {
     let out = Command::new(arch.qemu())
-        .args([option, "help"])
+        .args(["-machine", "none", option, "help"])
         .output()
-        .map_err(|e| format!("{} {option} help: {e}", arch.qemu()))?;
+        .map_err(|e| format!("{} -machine none {option} help: {e}", arch.qemu()))?;
     if !out.status.success() {
         return Err(format!(
-            "{} {option} help: {}: {}",
+            "{} -machine none {option} help: {}: {}",
             arch.qemu(),
             out.status,
             String::from_utf8_lossy(&out.stderr)
