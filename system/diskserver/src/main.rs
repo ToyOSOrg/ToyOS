@@ -51,7 +51,6 @@
 
 
 use std::collections::BTreeMap;
-use std::sync::atomic::AtomicU32;
 use std::time::{Duration, Instant};
 
 use diskserver::region::Region;
@@ -64,7 +63,7 @@ use toyos_abi::part::{PartGuid, GUID_TEXT_LEN};
 use toyos_abi::syscall::{DEV_PREFIX, MAX_BADGE, SyscallError};
 use toyos_blockhold::Holds;
 use toyos_blockring::entry::{Completion, Op};
-use toyos_blockring::layout::{ServerRings, DEPTH, RING_WORDS};
+use toyos_blockring::layout::{ServerRings, DEPTH};
 use toyos_blockring::server::{ServerSession, Taken};
 use toyos_blockring::wire::{self, Grant, Opened, Refusal};
 use toyos_blockring::{BLOCK_BYTES, PORT};
@@ -369,8 +368,8 @@ impl Service {
         }
     }
 
-    /// The client heard its session is open, over the ends [`answer`] made:
-    /// from here it is served.
+    /// The client heard its session is open, over the ends `Opened::over`
+    /// made: from here it is served.
     fn admit(&mut self, opening: Opening, rings: ServerRings, opened: Opened, conn: Connection) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -725,21 +724,6 @@ fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
     }
 }
 
-/// A server's ends of the session `page` it was sent, and the answer that
-/// `tell` sends its client, **told only once the ends are made**: a client
-/// looks at the page the moment it hears, and one that opens a session again
-/// sends the cursors its last server left on it.
-fn answer<R>(
-    page: &[AtomicU32; RING_WORDS],
-    blocks: u64,
-    unique: [u8; 16],
-    tell: impl FnOnce(&Opened) -> R,
-) -> (ServerRings, Opened, R) {
-    let (rings, opened) = Opened::over(page, blocks, unique);
-    let told = tell(&opened);
-    (rings, opened, told)
-}
-
 /// The grant `conn`, accepted from `acceptor`, was minted with; `None` for a
 /// connection through an unbadged connector or with bytes no minter stamps.
 fn grant(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<Grant> {
@@ -785,10 +769,8 @@ fn handshake(service: &mut Service, acceptor: &toyos::port::Acceptor, p: Pending
             refuse(&p.conn, why);
         }
         Ok(opening) => {
-            let (rings, opened, sent) = answer(opening.region.words(), opening.blocks, guid, |opened| {
-                p.conn.try_send_bytes(wire::MSG_OPENED, &opened.encode())
-            });
-            if sent.is_err() {
+            let (rings, opened) = Opened::over(opening.region.words(), opening.blocks, guid);
+            if p.conn.try_send_bytes(wire::MSG_OPENED, &opened.encode()).is_err() {
                 service.abandon(opening);
                 return;
             }
@@ -884,33 +866,5 @@ mod tests {
         assert_eq!(listed(Ok(&parts), roots).map(decoded), Ok(vec![ROOT]));
         assert_eq!(listed(Ok(&parts), unique([9; 16])).map(decoded), Ok(vec![]));
         assert_eq!(listed(Ok(&parts), None), Err(Refusal::NotGranted));
-    }
-
-    /// A client that opens its session again sends the page a killed server
-    /// left, its own two cursors made again (`Session::reconnect`): the moment
-    /// it is told the session is open, every request has room and nothing of
-    /// the dead session is there to read.
-    #[test]
-    fn a_session_opened_over_a_killed_servers_page_is_told_after_its_ends_are_made() {
-        use toyos_blockring::layout::client;
-        use toyos_blockring::{Request, Status};
-
-        let page: [AtomicU32; RING_WORDS] = core::array::from_fn(|_| AtomicU32::new(0));
-        let mut first = client(&page);
-        let (mut killed, _, ()) = answer(&page, 100, LOG, |_| ());
-        assert_eq!(first.0.push(&page, Request { op: Op::Flush, tag: 1 }.encode()), Ok(true));
-        first.0.publish(&page);
-        assert!(killed.0.pop(&page).expect("a published request").is_some());
-        killed.0.release(&page);
-        let answered = Completion { tag: 1, status: Status::Ok }.encode();
-        assert_eq!(killed.1.push(&page, answered), Ok(true));
-        killed.1.publish(&page);
-
-        let mut again = client(&page);
-        let (_, _, (room, stale)) =
-            answer(&page, 100, LOG, |_| (again.0.space(&page), again.1.pop(&page).map(|c| c.is_some())));
-
-        assert_eq!(room, Ok(DEPTH));
-        assert_eq!(stale, Ok(false));
     }
 }
