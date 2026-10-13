@@ -11,7 +11,7 @@ use toyos_elf::section::SectionTable;
 use toyos_elf::{rela, ImageOffset, Op, RelaTable, SymTab};
 use efi::{
     cstr16, CStr16, DevicePath, Gop, Handle, HardDrive, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
-    SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE,
+    SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE, SMBIOS3_GUID, SMBIOS_GUID,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
 use toyos_bootmap::{Plan, Table, BOOT_MAP_BYTES, MAX_PAGES};
@@ -433,7 +433,7 @@ fn report_reach(what: &str, at: u64, len: u64) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, smbios_addr: u64, system_table: SystemTable) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -571,6 +571,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         wall_clock_secs: 0,
         wall_clock_counter: 0,
         wall_clock_known: 0,
+        smbios_addr,
     };
     kernel_args.loader_seed_len = seed::read(&system_table, &mut kernel_args.loader_seed);
     if let Some((civil, counter)) = wall_clock {
@@ -816,6 +817,13 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
         .expect("ACPI 2.0 RSDP not found in UEFI config table");
     println!("RSDP address: {:#x}", rsdp_addr);
 
+    let smbios = |guid| system_table.config_table().iter().find(|entry| entry.guid == guid).map(|entry| entry.address as u64);
+    let smbios_addr = smbios(SMBIOS3_GUID).or_else(|| smbios(SMBIOS_GUID)).unwrap_or(0);
+    match smbios_addr {
+        0 => println!("SMBIOS: firmware publishes no entry point"),
+        at => println!("SMBIOS: entry point at {at:#x}"),
+    }
+
     let boot_part = boot_partition(handle, &system_table);
     match &boot_part {
         Some(p) => println!(
@@ -895,5 +903,5 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_counter, wall_clock, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_counter, wall_clock, smbios_addr, system_table);
 }

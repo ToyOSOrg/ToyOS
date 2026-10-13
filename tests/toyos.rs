@@ -820,6 +820,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         "microcode",
         metal::Metal { arms: METALCASE, judge: |b| microcode_on_metal(b[0].kernel().text(), b[0].cpus()?) },
     ),
+    // ---- one image: metalcase's config, armed with `amd-ucode-scout` ----
+    (
+        // The AMD microcode scout's reading, whole: `amd_ucode_scout` holds
+        // that it ended and every CPU spoke, and prints it for the loader's
+        // builder. What the CPU did is the measurement, and nothing judges it.
+        "amd_ucode_scout",
+        metal::Metal { arms: AMD_UCODE_SCOUT, judge: |b| amd_ucode_scout(b[0].kernel().text(), b[0].cpus()?) },
+    ),
     (
         // Two boots the suite already flashes: the device boot writes and
         // fsyncs megabytes before its reset, and `metalcase` is the same reset
@@ -1076,6 +1084,11 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
 ];
 
 const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/images/metalcase.toml", &[], &[])];
+
+/// **Its own boot**: the scout leaves the CPUs running AMD's patch, or one it
+/// was handed a bit wrong, for the rest of the boot, and its kernel is built
+/// with the actuators the shipping one riding `metalcase` lacks.
+const AMD_UCODE_SCOUT: &[metal::Arm] = &[metal::once("amducode", "tests/images/metalcase.toml", &["amd-ucode-scout"], &[])];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
@@ -4391,6 +4404,34 @@ fn microcode_on_metal(log: &str, cpus: u32) -> Result<(), String> {
         return Err(format!("{line:?}: on signature {signature:#x} {held_to}"));
     }
     eprintln!("  [microcode] {} CPUs of signature {signature:#x}: {held_to}", lines.len());
+    Ok(())
+}
+
+/// The scout's reading is whole: the M10 signature line first, one M0 line
+/// per CPU wherever the ladder reached M0, one ending (`done`, or the `stop`
+/// that says why it went no further), and the APs released after it.
+fn amd_ucode_scout(log: &str, cpus: u32) -> Result<(), String> {
+    let lines: Vec<&str> = log.lines().filter_map(|l| l.split_once("amducode: ").map(|(_, rest)| rest)).collect();
+    eprintln!("  [amducode] the reading, {} lines:", lines.len());
+    for line in &lines {
+        eprintln!("  [amducode]   {line}");
+    }
+    if !lines.first().is_some_and(|l| l.starts_with("M10 cpu0 signature ")) {
+        return Err(format!("the reading does not open with cpu0's M10 signature line: {lines:?}"));
+    }
+    let endings: Vec<&str> =
+        lines.iter().copied().filter(|l| *l == "done" || l.starts_with("stop: ") || l.contains(" stop: ")).collect();
+    if endings.len() != 1 {
+        return Err(format!("the reading has {} endings, not one: {endings:?}", endings.len()));
+    }
+    if lines.last() != Some(&"the APs leave the station") {
+        return Err(format!("the APs were not released after the reading: {:?}", lines.last()));
+    }
+    let m0 = lines.iter().filter(|l| l.starts_with("M0 cpu")).count();
+    let lost = endings[0].starts_with("M0 stop: cpu") && endings[0].ends_with("did not answer");
+    if lines.iter().any(|l| l.starts_with("patch level ")) && !endings[0].starts_with("stop: ") && !lost && m0 != cpus as usize {
+        return Err(format!("{m0} M0 lines from {cpus} CPUs"));
+    }
     Ok(())
 }
 

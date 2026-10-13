@@ -364,6 +364,8 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     match Vector::from_raw(frame.vector) {
         Vector::DoubleFault => exceptions::double_fault_handler(frame),
         Vector::MachineCheck => exceptions::machine_check_handler(frame),
+        #[cfg(feature = "boot-actuators")]
+        Vector::GeneralProtection if super::amducode::caught(frame) => {}
         Vector::PageFault => {
             #[cfg(feature = "mask-windows")]
             windows_entered(frame);

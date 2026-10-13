@@ -316,6 +316,12 @@ const _: () = assert!(core::mem::offset_of!(ConfigurationTable, address) == 16);
 /// `EFI_ACPI_20_TABLE_GUID` (UEFI 2.10 §4.6.1).
 pub const ACPI2_GUID: Guid = Guid::new(0x8868e871, 0xe4f1, 0x11d3, [0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81]);
 
+/// `SMBIOS3_TABLE_GUID` (UEFI 2.10 §4.6.1): the SMBIOS 3.0 entry point.
+pub const SMBIOS3_GUID: Guid = Guid::new(0xf2fd1544, 0x9794, 0x4a2c, [0x99, 0x2e, 0xe5, 0xbb, 0xcf, 0x20, 0xe3, 0x94]);
+
+/// `SMBIOS_TABLE_GUID` (UEFI 2.10 §4.6.1): the SMBIOS 2.1 entry point.
+pub const SMBIOS_GUID: Guid = Guid::new(0xeb9d2d31, 0x2d88, 0x11d3, [0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d]);
+
 /// The system table firmware handed `efi_main`, while boot services live:
 /// null before the entry and from [`SystemTable::exit_boot_services`] on. The
 /// console and the allocator read it; nothing else does.

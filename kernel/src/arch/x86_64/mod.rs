@@ -10,6 +10,8 @@
 //! (`keyboard_controller`, `watchdog`, `iommu_unit`, …), never by its name.
 
 pub mod acpi_mode;
+#[cfg(feature = "boot-actuators")]
+pub mod amducode;
 pub mod amdvi;
 pub mod apic;
 pub mod barrier;

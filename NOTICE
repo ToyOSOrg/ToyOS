@@ -437,6 +437,30 @@ nothing derived from it; and no reverse engineering, decompilation or
 disassembly.
 
 
+kernel/microcode/amd-ucode/* — AMD microcode, redistributable unmodified
+------------------------------------------------------------------------
+
+    microcode_amd_fam17h.bin  22,596 bytes, AMD's Family 17h container; its
+              patch for CPUID 0x00860f01 (equivalence ID 0x8601, the AMD
+              bench's Renoir) is level 0x0860010d, 3,200 bytes at 0x262c
+      sha256 966e4b796ec689c618868d08f8a37f347b0e7bfce4ae9df793e08471d363b7d0
+    Upstream: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git,
+    `amd-ucode/` at commit 48bb90cceb882cab8e9ab692bc5779d3bf3a13b8, byte
+    for byte
+    Licence text: licenses/AMD-microcode-license.txt (upstream's
+    `LICENSE.amd-ucode` at that commit,
+    sha256 27907ae1d74b94fd6f1159971158ed3199e472f129ea1ff748ea13aded2a59d5)
+    SPDX-License-Identifier: LicenseRef-AMD-Microcode
+
+A kernel built with `boot-actuators` embeds it for the `amd-ucode-scout`
+instrument, and `kernel`'s library tests read it. The licence permits
+redistribution in binary form on conditions like Intel's: the copyright
+notice and the licence are reproduced with it, which every x86-64 image does
+as /system/share/licenses/AMD-microcode-license.txt; AMD's name endorses
+nothing derived from it; no reverse engineering, decompilation or
+disassembly; and export law is observed.
+
+
 tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
 ----------------------------------------------------
 
