@@ -595,6 +595,46 @@ impl Gop {
     }
 }
 
+/// UEFI 2.10's `EFI_EDID_ACTIVE_PROTOCOL` and `EFI_EDID_DISCOVERED_PROTOCOL`:
+/// one layout under two GUIDs, on the child handle of the video output they
+/// describe.
+#[repr(C)]
+pub struct EdidOf<const ACTIVE: bool> {
+    size_of_edid: u32,
+    edid: *const u8,
+}
+
+pub type EdidActive = EdidOf<true>;
+pub type EdidDiscovered = EdidOf<false>;
+
+const _: () = {
+    assert!(size_of::<EdidActive>() == 16);
+    assert!(offset_of!(EdidActive, edid) == 8);
+};
+
+// SAFETY: the specification's layout, under its GUID.
+unsafe impl Protocol for EdidActive {
+    const GUID: Guid = Guid::new(0xbd8c1056, 0x9f36, 0x44ec, [0x92, 0xa8, 0xa6, 0x33, 0x7f, 0x81, 0x79, 0x86]);
+}
+
+// SAFETY: the specification's layout, under its GUID.
+unsafe impl Protocol for EdidDiscovered {
+    const GUID: Guid = Guid::new(0x1c0c34f6, 0xd380, 0x41fa, [0xa0, 0x49, 0x8a, 0xd0, 0x6c, 0x1a, 0x66, 0xaa]);
+}
+
+impl<const ACTIVE: bool> EdidOf<ACTIVE> {
+    /// The EDID's bytes, empty where the output gave none: `SizeOfEdid` is 0
+    /// and `Edid` null then.
+    pub fn bytes(&self) -> &[u8] {
+        if self.edid.is_null() {
+            return &[];
+        }
+        // SAFETY: firmware's read-only buffer of `SizeOfEdid` bytes, live while
+        // the protocol is open.
+        unsafe { core::slice::from_raw_parts(self.edid, self.size_of_edid as usize) }
+    }
+}
+
 /// `EFI_RNG_PROTOCOL` (UEFI 2.10 §37.5.1).
 #[repr(C)]
 pub struct Rng {

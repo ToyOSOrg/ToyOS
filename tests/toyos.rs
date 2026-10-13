@@ -304,6 +304,17 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_low_ecam", qemu::Profile::VirtLowEcam),
 ];
 
+/// M1 (PR #895): every `EDID:` line the loader wrote, printed for the reading;
+/// red only where it wrote none, which is a loader that did not ask.
+fn m1_edid_reading(loader: &str) -> Result<(), String> {
+    let lines: Vec<&str> = loader.lines().filter(|l| l.contains("EDID: ")).collect();
+    if lines.is_empty() {
+        return Err(format!("loader.log carries no EDID: line, so the loader never asked\n{loader}"));
+    }
+    lines.iter().for_each(|line| eprintln!("  [m1] {line}"));
+    Ok(())
+}
+
 /// The tests whose machine shape *is* the test, each on a boot of its own.
 /// `run_machine_test` dispatches them.
 const MACHINE_TESTS: &[&str] = &[
@@ -825,6 +836,13 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "metal_sim_scanout_wc",
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
+    ),
+    (
+        // M1 (PR #895): what the firmware publishes of the panel's EDID, read
+        // from `loader.log`. A reading for S2's design, replaced by its
+        // `gop_edid_scale` row.
+        "m1_edid_reading",
+        metal::Metal { arms: METALCASE, judge: |b| m1_edid_reading(b[0].loader().text()) },
     ),
     (
         // The machine's own i8042 and EC, driven from userland: the keyboard

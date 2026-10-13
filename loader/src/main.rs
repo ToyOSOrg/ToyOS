@@ -10,7 +10,7 @@ use alloc::alloc::Layout;
 use toyos_elf::section::SectionTable;
 use toyos_elf::{rela, ImageOffset, Op, RelaTable, SymTab};
 use efi::{
-    cstr16, CStr16, DevicePath, Gop, Handle, HardDrive, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
+    cstr16, CStr16, DevicePath, EdidActive, EdidDiscovered, Gop, Handle, HardDrive, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
     SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
@@ -360,6 +360,7 @@ struct GopInfo {
 /// §12.9.2.2's `SetMode` is never called.
 fn query_gop(system_table: &SystemTable) -> Option<GopInfo> {
     let bs = system_table.boot_services();
+    report_edid(bs);
     let gop_handle = bs.handle_for::<Gop>().ok()?;
     let gop = bs.get::<Gop>(gop_handle).ok()?;
 
@@ -395,6 +396,44 @@ fn query_gop(system_table: &SystemTable) -> Option<GopInfo> {
         stride,
         pixel_format,
     })
+}
+
+/// M1 (PR #895): what each handle carrying a GOP publishes of its output's
+/// EDID, the first being the one [`query_gop`] takes, and the base block of
+/// each one present. A reading, replaced by S2's copy into the handoff.
+fn report_edid(bs: &efi::BootServices) {
+    let Ok(handles) = bs.handles::<Gop>() else {
+        println!("{} no handle carries a GOP", loaderlog::EDID_AT);
+        return;
+    };
+    for (index, handle) in handles.iter().enumerate() {
+        let active = bs.get::<EdidActive>(*handle);
+        let discovered = bs.get::<EdidDiscovered>(*handle);
+        let size = |bytes: Option<&[u8]>| match bytes {
+            Some(bytes) => alloc::format!("{}", bytes.len()),
+            None => alloc::string::String::from("absent"),
+        };
+        println!(
+            "{} GOP handle {index} of {} active={} discovered={}",
+            loaderlog::EDID_AT,
+            handles.len(),
+            size(active.as_deref().ok().map(|p| p.bytes())),
+            size(discovered.as_deref().ok().map(|p| p.bytes())),
+        );
+        for (which, bytes) in [
+            ("active", active.as_deref().ok().map(|p| p.bytes())),
+            ("discovered", discovered.as_deref().ok().map(|p| p.bytes())),
+        ] {
+            if let Some(base) = bytes.and_then(|b| b.get(..128)) {
+                let mut hex = alloc::string::String::with_capacity(256);
+                for byte in base {
+                    use core::fmt::Write;
+                    let _ = write!(hex, "{byte:02x}");
+                }
+                println!("{} GOP handle {index} {which} base {hex}", loaderlog::EDID_AT);
+            }
+        }
+    }
 }
 
 /// Every range firmware's map says is write-back memory, `(base, length)`:

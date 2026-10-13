@@ -23,6 +23,9 @@ pub const BEGINS_AT: &str = "ToyOS Bootloader 1.0";
 /// tells this line from the kernel's own `GOP:` line on a console with both.
 pub const GOP_AT: &str = "GOP: mode";
 
+/// What `report_edid` begins each line with.
+pub const EDID_AT: &str = "EDID:";
+
 /// The file's last line: [`close`] runs before the memory map is sized, and a
 /// write after that could grow the map the kernel is about to be handed.
 const ENDS_AT: &str = "Loader log: the kernel handoff begins, so this file ends here";
