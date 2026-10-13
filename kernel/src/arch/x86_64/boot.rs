@@ -150,10 +150,6 @@ pub fn start_other_cpus(platform: &Platform, args: &KernelArgs) {
     // Before the first of them starts: each compares its own to these.
     super::mtrr::init();
     super::smp::boot_aps(&platform.madt, args.boot_pml4_addr);
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::amd_ucode_scout() {
-        super::amducode::run(args.smbios_addr);
-    }
 }
 
 /// The interrupt-controller selftests an actuator asks for, once the timer ticks.

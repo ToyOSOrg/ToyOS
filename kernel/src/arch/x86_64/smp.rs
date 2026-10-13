@@ -300,11 +300,6 @@ extern "C" fn ap_entry() -> ! {
     // Echo this attempt's token, so the BSP counts this AP for its own attempt.
     ROSTER.echo(percpu::ap_token());
 
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::amd_ucode_scout() {
-        crate::arch::amducode::station();
-    }
-
     process::ap_idle();
 }
 

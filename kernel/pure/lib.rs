@@ -1,5 +1,4 @@
-//! What the kernel decides without touching the machine: the AMD microcode
-//! scout's ladder ([`amducode`]), the scheduler core
+//! What the kernel decides without touching the machine: the scheduler core
 //! ([`sched`]), the process and thread lifecycle ([`proclife`]), which PCID an
 //! address space is handed ([`pcid`]), what type the range registers give a
 //! range ([`mtrr`]), what a pipe's ends are told of each other ([`pipe`]), what
@@ -18,7 +17,6 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
-pub mod amducode;
 pub mod bootwrite;
 pub mod clock;
 pub mod dirnodes;

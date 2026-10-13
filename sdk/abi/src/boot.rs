@@ -127,10 +127,6 @@ pub struct KernelArgs {
     /// failed or answered one that does not, which is a machine and not an
     /// error: the loader's line says which, and the kernel has no wall clock.
     pub wall_clock_known: u64,
-    /// Where the UEFI configuration table says firmware's SMBIOS entry point
-    /// is: the 3.0 one where firmware publishes it, else the 2.1 one, and 0
-    /// where it publishes neither. The kernel reads the anchor to tell which.
-    pub smbios_addr: u64,
 }
 
 /// The bytes of [`KernelArgs::loader_seed`].
@@ -256,8 +252,7 @@ const _: () = {
     assert!(offset_of!(KernelArgs, wall_clock_secs) == 1312);
     assert!(offset_of!(KernelArgs, wall_clock_counter) == 1320);
     assert!(offset_of!(KernelArgs, wall_clock_known) == 1328);
-    assert!(offset_of!(KernelArgs, smbios_addr) == 1336);
-    assert!(size_of::<KernelArgs>() == 1344);
+    assert!(size_of::<KernelArgs>() == 1336);
     assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
@@ -357,7 +352,6 @@ mod tests {
         wall_clock_secs: 0,
         wall_clock_counter: 0,
         wall_clock_known: 0,
-        smbios_addr: 0,
     };
 
     #[test]

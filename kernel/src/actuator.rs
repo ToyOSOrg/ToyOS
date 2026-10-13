@@ -144,12 +144,6 @@ actuators! {
     #[allow(dead_code)]
     microcode_reseal = "microcode-reseal";
 
-    /// Run the AMD microcode scout's measurement ladder once every CPU is up,
-    /// the APs held in its station until it ends (`arch::amducode`).
-    // An x86-64 instrument, so AArch64 builds an accessor it never reads.
-    #[allow(dead_code)]
-    amd_ucode_scout = "amd-ucode-scout";
-
     /// Skip the startup for the AP that would be cpu2, so a non-last AP never starts.
     smp_skip_ap = "smp-skip-ap";
 

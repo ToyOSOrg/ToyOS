@@ -452,12 +452,12 @@ kernel/microcode/amd-ucode/* — AMD microcode, redistributable unmodified
     sha256 27907ae1d74b94fd6f1159971158ed3199e472f129ea1ff748ea13aded2a59d5)
     SPDX-License-Identifier: LicenseRef-AMD-Microcode
 
-A kernel built with `boot-actuators` embeds it for the `amd-ucode-scout`
-instrument, and `kernel`'s library tests read it. The licence permits
-redistribution in binary form on conditions like Intel's: the copyright
-notice and the licence are reproduced with it, which every x86-64 image does
-as /system/share/licenses/AMD-microcode-license.txt; AMD's name endorses
-nothing derived from it; no reverse engineering, decompilation or
+Nothing reads it yet: it is the container the AMD loader that
+`issues/the-kernel-loads-no-amd-microcode.md` stages will embed. The licence
+permits redistribution in binary form on conditions like Intel's: the
+copyright notice and the licence are reproduced with it, which every x86-64
+image does as /system/share/licenses/AMD-microcode-license.txt; AMD's name
+endorses nothing derived from it; no reverse engineering, decompilation or
 disassembly; and export law is observed.
 
 

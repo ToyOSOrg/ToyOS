@@ -778,13 +778,6 @@ pub const FLASHABLE: &[&str] = &[
     // ran, and the boot goes on to userland and ends the way an unarmed one
     // does. Nothing it writes outlives a hard reset (SDM Vol. 3A §12.11.6.1).
     "microcode-reseal",
-    // AMD's published patch for the AMD bench's part, written to the patch
-    // loader on every CPU, and copies a bit wrong in their patch data or their
-    // header's level, each write guarded so a #GP is a reading. A patch lives
-    // in patch RAM: MSR0000_008B is reset to 0 by a warm or cold reset (55922
-    // §1.4.4.11), and firmware loads its own at the next power-on. On an Intel
-    // CPU it writes nothing.
-    "amd-ucode-scout",
     // It seals this boot's own record under an identity one bit from this
     // stick's, so the pass that finds it clears it and boots a kernel. The page
     // is memory the loader allocated and the machine is what it was after.
