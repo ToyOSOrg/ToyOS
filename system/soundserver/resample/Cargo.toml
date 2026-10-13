@@ -1,0 +1,23 @@
+# A member of the host workspace (root `Cargo.toml`), like `toyos-mixer` beside
+# it: its tests run on the host, on every interpolator rubato can take on the
+# host's architecture, and soundserver depends on it by path.
+
+[package]
+name = "toyos-resample"
+description = "soundserver's resampler: rubato's windowed sinc with the parameters a client rate and a device rate take, held to the dithered 16-bit wire."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+rubato = { version = "0.16", default-features = false }
+
+[dev-dependencies]
+# The device rates the tests hold the resampler to.
+toyos-mixer = { path = "../mixer" }
+
+[lints.rust]
+warnings = "deny"

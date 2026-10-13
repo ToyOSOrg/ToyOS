@@ -1,16 +1,16 @@
-//! Graphs to test against: one real machine's, and the states no real machine
-//! in reach constructs.
+//! Graphs to test against: real machines', and the states no real machine in
+//! reach constructs.
 //!
-//! The real ones are the boot-time codec probe's own `hda:` lines, committed
-//! verbatim — the second life that log format was designed for, and it outlives
-//! the probe: the diagnostic has since been deleted and the fixtures stay as
-//! artifacts.
+//! The real ones are committed verbatim from a boot: the codec probe's `hda:`
+//! lines (the laptop, QEMU), or soundserver's walk recorded verb by verb (the
+//! AMD bench).
 
 use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::caps::{AmpCaps, ConfigDefault, PcmCaps, PinCaps, WidgetCaps};
 use crate::graph::{Codec, FunctionGroup, FunctionKind, Pin, Widget};
+use crate::probe;
 use crate::verb::{Address, Node, Response, Subordinates};
 
 /// The laptop's ALC257 and its display audio, as the probe read
@@ -24,6 +24,62 @@ pub fn laptop() -> Vec<Codec> {
 /// exercises is a graph and not a hand-written expectation of one.
 pub fn qemu() -> Vec<Codec> {
     parse(include_str!("../fixtures/qemu-intel-hda.txt"))
+}
+
+/// The AMD bench's two controllers, as soundserver's walk read them:
+/// `03:00.1`, the GPU's display audio, and `03:00.6`, the analog codec.
+///
+/// The file is the kernel's `listed as controller` line for each controller's
+/// `STATESTS` and one `m1:` line per verb the walk sent, with the codec's raw
+/// answer. Replaying them through [`probe::enumerate`] builds the graphs
+/// soundserver built on that boot.
+pub fn amd_bench() -> Vec<Vec<Codec>> {
+    recorded(include_str!("../fixtures/amd-bench.txt"))
+}
+
+/// Every controller a recorded walk lists, walked again against its answers,
+/// in list order.
+fn recorded(text: &'static str) -> Vec<Vec<Codec>> {
+    text.lines()
+        .filter(|l| l.contains(" listed as controller "))
+        .map(|l| {
+            let statests = l.split_once("statests=").and_then(|(_, w)| hex(w.split(',').next()?));
+            statests.expect("a listed controller names its STATESTS") as u16
+        })
+        .enumerate()
+        .map(|(controller, statests)| {
+            probe::enumerate(&mut Recorded { text, controller }, statests)
+                .into_iter()
+                .map(|codec| codec.expect("the recorded codec answered"))
+                .collect()
+        })
+        .collect()
+}
+
+/// A codec that answers what the recorded one answered, and refuses to make up
+/// an answer to a verb the recorded walk never sent.
+struct Recorded {
+    text: &'static str,
+    controller: usize,
+}
+
+impl probe::Verbs for Recorded {
+    fn get(&mut self, codec: Address, node: Node, verb: u16, payload: u8) -> Option<Response> {
+        let asked = alloc::format!(
+            "m1: hda controller {} codec{codec} node={:#04x} verb={verb:#05x} payload={payload:#04x} answer=",
+            self.controller,
+            node.0
+        );
+        let answer = self
+            .text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(asked.as_str()))
+            .unwrap_or_else(|| panic!("the recorded walk never sent `{asked}`"));
+        match answer {
+            "none" => None,
+            word => Some(Response::new(hex(word).expect("a recorded answer is a word")).expect("not all ones")),
+        }
+    }
 }
 
 fn hex(text: &str) -> Option<u32> {
@@ -261,6 +317,19 @@ mod tests {
         assert_eq!(display.address, Address::new(2).unwrap());
         assert_eq!(display.vendor, 0x8086);
         assert_eq!(display.device, 0x2812);
+    }
+
+    #[test]
+    fn the_amd_bench_s_recorded_walk_replays_to_both_controllers_codecs() {
+        // As soundserver named them on that boot: `03:00.1 codec0
+        // vendor=1002 device=aa01` and `03:00.6 codec0 vendor=10ec device=0287`,
+        // each with one function group.
+        let bench = amd_bench();
+        let ids: Vec<(u16, u16, usize)> =
+            bench.iter().flatten().map(|c| (c.vendor, c.device, c.groups.len())).collect();
+        assert_eq!(ids, [(0x1002, 0xaa01, 1), (0x10ec, 0x0287, 1)]);
+        let analog = &bench[1][0].groups[0];
+        assert_eq!(analog.range.count as usize, analog.widgets.len());
     }
 
     #[test]

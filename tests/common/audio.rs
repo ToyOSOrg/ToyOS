@@ -71,6 +71,40 @@ pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
+/// The resampled tone client played to its end through the HDA controller, at
+/// a rate the device does not run, and no period of it went unfilled.
+pub fn resampled_tone_on_metal(log: &Serial) -> Result<(), String> {
+    log.must_say("soundserver: hda path configured in")?;
+    log.must_not_say(NULL_SINK)?;
+    let device = rate_after(log.text(), "soundserver: ready, ")
+        .ok_or("soundserver never said the rate it runs the device at")?;
+    let window = job_window(log.text(), "test_rs_audio_tone_resampled")?;
+    let client = rate_after(window, "soundserver: opening stream: ")
+        .ok_or_else(|| format!("soundserver opened no stream in the job's window:\n{window}"))?;
+    if client == device {
+        return Err(format!(
+            "the stream opened at the device's own rate, {device} Hz, so nothing was resampled:\n{window}"
+        ));
+    }
+    let underruns = sum_field(window, "underruns");
+    if underruns != 0 {
+        return Err(format!(
+            "soundserver filled {underruns} period(s) the {client} Hz tone had not covered on a \
+             {device} Hz device:\n{window}"
+        ));
+    }
+    Ok(())
+}
+
+/// The first `<digits>Hz` after `marker` in `text`.
+fn rate_after(text: &str, marker: &str) -> Option<u32> {
+    let at = text.find(marker)? + marker.len();
+    let rest = &text[at..];
+    let hz = rest.find("Hz")?;
+    let digits = rest[..hz].rsplit(|c: char| !c.is_ascii_digit()).next()?;
+    digits.parse().ok()
+}
+
 /// soundserver's own word for the sink it took when the machine has none.
 pub const NULL_SINK: &str = "soundserver: no audio device, presenting a null sink";
 

@@ -33,6 +33,7 @@ pub mod rect;
 pub mod scale;
 pub mod stack;
 pub mod taskbar;
+pub mod volume;
 pub mod window;
 
 pub use budget::{create_verdict, max_windows, pending_admits, window_bytes, Port, Verdict};
