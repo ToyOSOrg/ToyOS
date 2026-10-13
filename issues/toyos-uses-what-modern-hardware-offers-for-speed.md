@@ -51,20 +51,23 @@ is nothing to enable.
 
 **Unexplained, and the measurement each needs next.**
 
-- **The T14's clock under load.** Over the `internet_download` row's
-  download windows ToyOS's median effective clock reads 2.67 GHz
-  (`wt/toyos-scout-clock` at `fa6a2a829`), and read 2.53 GHz in round 1 of
-  PR #861, and what holds it there is unread. Ruled out: the power limits
+- **The T14's clock under load.** Intel rates the T14's i5-1135G7 at a Max
+  Turbo Frequency of 4.20 GHz, the most one core reaches under Turbo Boost,
+  over a base of 2.40 GHz at its 28 W configurable TDP-up and 900 MHz at its
+  12 W TDP-down (Intel's specification of the part,
+  https://www.intel.com/content/www/us/en/products/sku/208658/intel-core-i51135g7-processor-8m-cache-up-to-4-20-ghz/specifications.html).
+  Over the `internet_download` row's download windows ToyOS's median
+  effective clock reads 2.67 GHz (`wt/toyos-scout-clock` at `fa6a2a829`), and
+  read 2.53 GHz in round 1 of PR #861: above that base and 1.53 GHz short of
+  that turbo, and what holds it there is unread. Ruled out: the power limits
   (5.65 W median against a 20 W PL1, no power, thermal or current limit bit
   logged), the HWP request (`0x80002a04`) and C1E promotion (allowed); the one
-  limit bit logged is multi-core turbo. ToyOS's cores never go below C1/C1E,
+  limit bit logged is multi-core turbo, whose ceiling per active core count
+  that specification does not give. ToyOS's cores never go below C1/C1E,
   its package never leaves PC0, and its idle package draws 3.16 W, which is
   `issues/idle-cpus-enter-the-c-states-cst-names.md`'s to answer; that the
   idle state reaches HWP's clock choice is inference. Next: a T14 scout whose
   idle CPUs wait in a deep C-state, read over the same windows.
-- **Cycles per MB.** ToyOS spends 6.09 ms of C0 time and 16.20 Mcyc per MB
-  over the same windows, at an IPC of 0.94. Next: cycles and instructions per
-  MB split by where they run, app, network stack and kernel.
 - **Global-line contention** is bounded at 2 to 3 % of C0 on the T14 and not
   attributed; next, the HITM count attributed to its lines on both benches
   (`issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`).
