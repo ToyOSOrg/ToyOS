@@ -100,7 +100,9 @@ Beside that order, each waiting on something outside it:
    `toyos_manifest::RESTARTS` ends inside the window and is then closed with
    its clients answered `Gone`, red on a supervisor that restarts without
    bound, and that a restart whose partition claim another process holds is
-   refused by name.
+   refused by name, red on a supervisor that starts the role again while its
+   claim is held or that drops the name from the `AlreadyExists` refusal
+   (`refused` in `system/supervisor/src/main.rs`).
    **Partly done**: steps 1, 2, 3, 6 and 7 are done, and 4, 5, 8, 9 and 10
    partly.
 
