@@ -32,7 +32,7 @@ devices = ["framebuffer", "keyboard", "mouse"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver"]
+serves = ["soundserver", "volume"]
 devices = ["hda-audio", "pci:1af4:1059"]
 syscap = ["rt"]
 

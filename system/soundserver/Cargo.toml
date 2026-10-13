@@ -13,6 +13,7 @@ toyos-virtio-sound = { path = "virtio-sound" }
 toyos-virtio = { path = "../../lib/virtio" }
 toyos-pci-claim = { path = "../../lib/pci-claim" }
 toyos-inspect = { path = "../../lib/inspect" }
+toyos-resample = { path = "resample" }
 rubato = { version = "0.16", default-features = false }
 
 [package.metadata.toyos.host]

@@ -3,18 +3,22 @@
 //! The kernel touches only registers whose value is an address, indexes a
 //! kernel structure, or acknowledges the interrupt; everything else a driver
 //! reaches goes through [`reg_write`] and [`reg_read`], gated by a positive
-//! list and refused by name. Codec and pin decisions belong to soundserver, never
-//! to this file.
+//! list and refused by name. Which controller carries the stream, and every
+//! codec and pin decision, belong to soundserver, never to this file: [`init`]
+//! lists every controller it can bind and [`bind`] binds the one it is told.
 
 use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use toyos_abi::audio::AudioCompletionRecord;
-use toyos_abi::hda::HdaInfo;
+use alloc::vec::Vec;
+
+use toyos_abi::hda::{HdaController, HdaInfo, Reg, MAX_CONTROLLERS};
 use toyos_abi::syscall::{RegWidth, SyscallError};
 use toyos_hda::stream;
 
 use super::pci::PciDevice;
+use crate::device::ClaimError;
 use crate::log;
 use crate::mm::policy::{CachePolicy, MmioPolicy};
 use crate::mm::Mmio;
@@ -117,8 +121,8 @@ struct StreamIsr {
     named_error: AtomicBool,
 }
 
-// SAFETY: `stream` is written once at init before the vector is armed and is
-// read-only afterwards; every other field is atomic.
+// SAFETY: `stream` is written once, by the bind that left `Listed`, before its controller can
+// raise the vector, and is read-only afterwards; every other field is atomic.
 unsafe impl Sync for StreamIsr {}
 
 static ISR: StreamIsr = StreamIsr {
@@ -131,7 +135,7 @@ static ISR: StreamIsr = StreamIsr {
 };
 
 fn isr_stream() -> Option<Mmio> {
-    // SAFETY: sole writer is `init`, before the vector is armed.
+    // SAFETY: sole writer is `bind_listed`, before any controller can raise the vector.
     unsafe { *ISR.stream.get() }
 }
 
@@ -205,34 +209,115 @@ pub fn drain_completed(buf: &mut crate::user_ptr::UserBytesMut) -> usize {
 }
 
 
-struct HdaController {
+/// One controller [`init`] can bind: out of reset with its link up, its message armed at the HDA
+/// vector, and bus mastering off and `INTCTL` clear, so it raises nothing.
+struct Listed {
+    pci: PciDevice,
     regs: Mmio,
+    /// Its output stream descriptor's own window.
     stream: Mmio,
-    /// Kept so the pages outlive the mappings that name them, and so a refused controller gives
-    /// them back.
-    _bdl: super::DmaPool,
-    _pcm: super::DmaPool,
+    stream_index: u8,
+    stream_offset: u32,
+    statests: u16,
+    message: Message,
 }
 
-static CONTROLLER: Lock<Option<HdaController>> = Lock::new(None);
-static INFO: Lock<Option<(HdaInfo, Region)>> = Lock::new(None);
+/// Which of the function's two message capabilities [`arm_interrupt`] armed, so the one that is
+/// turned off is the one that is on.
+#[derive(Clone, Copy)]
+enum Message {
+    MsiX,
+    Msi,
+}
+
+/// The stream's memory, taken once at boot and kept for it: its shape is the driver's constants,
+/// the same for every controller, and every claim's PCM object maps the PCM pool.
+#[derive(Clone)]
+struct StreamMemory {
+    space: crate::iommu::DeviceSpace,
+    /// The descriptor list's device address, already written.
+    bdl: u64,
+    pcm: Region,
+}
+
+/// What every call on the HDA claim is decided by. One-shot: `Listed` → `Binding` → `Bound` or
+/// `Refused`, and nothing returns to `Listed`.
+enum State {
+    /// Every controller the kernel can bind, in PCI order. The register calls reach `ICS`, `ICW`
+    /// and `IRR` on any of them.
+    Listed(Vec<Listed>),
+    /// One bind owns every listed controller; every other call is refused, and nothing waits.
+    Binding,
+    /// The stream runs on this controller, which the claim lists alone, at index 0.
+    Bound(Listed),
+    /// The bind failed on the device; the log line names how.
+    Refused,
+}
+
+struct Hda {
+    state: State,
+    memory: StreamMemory,
+}
+
+/// No device wait is made under this lock: [`bind`] moves the list out of it and runs its waits
+/// with nothing held.
+static CONTROLLER: Lock<Option<Hda>> = Lock::new(None);
 static REFUSALS: AtomicUsize = AtomicUsize::new(0);
 
-pub fn info() -> Option<(HdaInfo, Region)> {
-    INFO.lock().clone()
+/// What an `hda-audio` claim describes: the stream's shape and the controllers it lists, read
+/// from the one state every call is decided by.
+pub fn describe() -> Result<(HdaInfo, Region), ClaimError> {
+    let guard = CONTROLLER.lock();
+    let hda = guard.as_ref().ok_or(ClaimError::Absent)?;
+    let listed = match &hda.state {
+        State::Listed(list) => list.as_slice(),
+        State::Bound(controller) => core::slice::from_ref(controller),
+        // The binder's frame holds the claim until the bind returns.
+        State::Binding => return Err(ClaimError::Owned),
+        State::Refused => return Err(ClaimError::Unusable),
+    };
+    let mut controllers = [HdaController {
+        stream_offset: 0,
+        statests: 0,
+        bus: 0,
+        dev: 0,
+        func: 0,
+        _pad: [0; 3],
+    }; MAX_CONTROLLERS];
+    for (slot, controller) in controllers.iter_mut().zip(listed) {
+        *slot = HdaController {
+            stream_offset: controller.stream_offset,
+            statests: controller.statests,
+            bus: controller.pci.bus,
+            dev: controller.pci.dev,
+            func: controller.pci.func,
+            _pad: [0; 3],
+        };
+    }
+    let info = HdaInfo {
+        pcm: toyos_abi::HANDLE_INVALID,
+        period_bytes: PERIOD_BYTES as u32,
+        stream_tag: STREAM_TAG,
+        periods: PERIODS as u8,
+        count: listed.len() as u8,
+        _pad: 0,
+        controllers,
+    };
+    Ok((info, hda.memory.pcm.clone()))
 }
 
-
 /// A register is on the list only if its value is not an address and indexes nothing the kernel
-/// allocated; `SDnCBL` and `SDnLVI` are absent because the kernel writes them itself.
-fn write_permit(stream_offset: u64, offset: u64, width: RegWidth) -> Result<&'static str, ()> {
-    let sd = |field: u64| stream_offset + field;
+/// allocated; `SDnCBL` and `SDnLVI` are absent because the kernel writes them itself. `stream` is
+/// the bound controller's descriptor offset, and `None` before a bind: an unbound controller has
+/// no stream for a driver to touch.
+fn write_permit(stream: Option<u64>, offset: u64, width: RegWidth) -> Result<&'static str, ()> {
+    let sd = |field: u64| stream.map(|at| at + field);
     match (offset, width) {
         (IMMEDIATE_COMMAND, RegWidth::U32) => Ok("ICW: a codec verb, which names no memory"),
         (IMMEDIATE_STATUS, RegWidth::U16) => Ok("ICS: the immediate-command busy and valid bits"),
-        (o, RegWidth::U8) if o == sd(SD_CTL) => Ok("SDnCTL: run and interrupt enables"),
-        (o, RegWidth::U8) if o == sd(SD_CTL_TAG) => Ok("SDnCTL: the stream tag"),
-        (o, RegWidth::U16) if o == sd(SD_FMT) => Ok("SDnFMT: the format word"),
+        (o, RegWidth::U8) if Some(o) == sd(SD_CTL) => Ok("SDnCTL: run and interrupt enables"),
+        (o, RegWidth::U8) if Some(o) == sd(SD_CTL_TAG) => Ok("SDnCTL: the stream tag"),
+        (o, RegWidth::U16) if Some(o) == sd(SD_FMT) => Ok("SDnFMT: the format word"),
         _ => Err(()),
     }
 }
@@ -247,51 +332,72 @@ fn read_permit(offset: u64, width: RegWidth) -> Result<&'static str, ()> {
     }
 }
 
-fn refuse(what: &str, offset: u64, width: RegWidth) -> SyscallError {
+fn refuse(what: &str, reg: Reg, width: RegWidth) -> SyscallError {
     if REFUSALS.fetch_add(1, Ordering::Relaxed) < MAX_NAMED_REFUSALS {
-        log!("hda: refused a {width:?} {what} of {offset:#x} — not on the allow-list");
+        log!(
+            "hda: refused a {width:?} {what} of {:#x} on controller {} — not on the allow-list",
+            reg.offset,
+            reg.controller
+        );
     }
     SyscallError::PermissionDenied
 }
 
-pub fn reg_read(offset: u64, width: RegWidth) -> Result<u32, SyscallError> {
-    if read_permit(offset, width).is_err() {
-        return Err(refuse("read", offset, width));
-    }
+/// `f` over the controller `reg` names in the claim's current list, and whether the stream is
+/// bound to it, for one register access under [`CONTROLLER`].
+fn on_controller<R>(
+    reg: Reg,
+    f: impl FnOnce(&Listed, bool) -> Result<R, SyscallError>,
+) -> Result<R, SyscallError> {
     let guard = CONTROLLER.lock();
-    let controller = guard.as_ref().ok_or(SyscallError::NotFound)?;
-    Ok(match width {
-        RegWidth::U8 => controller.regs.read_u8(offset) as u32,
-        RegWidth::U16 => controller.regs.read_u16(offset) as u32,
-        RegWidth::U32 => controller.regs.read_u32(offset),
+    let hda = guard.as_ref().ok_or(SyscallError::NotFound)?;
+    match &hda.state {
+        State::Listed(list) => f(list.get(reg.controller as usize).ok_or(SyscallError::InvalidArgument)?, false),
+        State::Bound(controller) if reg.controller == 0 => f(controller, true),
+        State::Bound(_) => Err(SyscallError::InvalidArgument),
+        State::Binding => Err(SyscallError::WouldBlock),
+        State::Refused => Err(SyscallError::Io),
+    }
+}
+
+pub fn reg_read(reg: Reg, width: RegWidth) -> Result<u32, SyscallError> {
+    if read_permit(reg.offset as u64, width).is_err() {
+        return Err(refuse("read", reg, width));
+    }
+    on_controller(reg, |controller, _| {
+        let offset = reg.offset as u64;
+        Ok(match width {
+            RegWidth::U8 => controller.regs.read_u8(offset) as u32,
+            RegWidth::U16 => controller.regs.read_u16(offset) as u32,
+            RegWidth::U32 => controller.regs.read_u32(offset),
+        })
     })
 }
 
-pub fn reg_write(offset: u64, width: RegWidth, value: u32) -> Result<(), SyscallError> {
-    let stream_offset = info().ok_or(SyscallError::NotFound)?.0.stream_offset as u64;
-    if write_permit(stream_offset, offset, width).is_err() {
-        return Err(refuse("write", offset, width));
-    }
+pub fn reg_write(reg: Reg, width: RegWidth, value: u32) -> Result<(), SyscallError> {
     if value > width.max_value() {
         return Err(SyscallError::InvalidArgument);
     }
-
-    let guard = CONTROLLER.lock();
-    let controller = guard.as_ref().ok_or(SyscallError::NotFound)?;
-
-    if offset == stream_offset + SD_CTL {
-        return start_stop(controller, value as u8);
-    }
-    match width {
-        RegWidth::U8 => controller.regs.write_u8(offset, value as u8),
-        RegWidth::U16 => controller.regs.write_u16(offset, value as u16),
-        RegWidth::U32 => controller.regs.write_u32(offset, value),
-    }
-    Ok(())
+    on_controller(reg, |controller, bound| {
+        let offset = reg.offset as u64;
+        let stream = bound.then_some(controller.stream_offset as u64);
+        if write_permit(stream, offset, width).is_err() {
+            return Err(refuse("write", reg, width));
+        }
+        if Some(offset) == stream.map(|at| at + SD_CTL) {
+            return start_stop(controller, value as u8);
+        }
+        match width {
+            RegWidth::U8 => controller.regs.write_u8(offset, value as u8),
+            RegWidth::U16 => controller.regs.write_u16(offset, value as u16),
+            RegWidth::U32 => controller.regs.write_u32(offset, value),
+        }
+        Ok(())
+    })
 }
 
 /// `SDnCTL`'s first byte, where the driver starts and stops the engine.
-fn start_stop(controller: &HdaController, value: u8) -> Result<(), SyscallError> {
+fn start_stop(controller: &Listed, value: u8) -> Result<(), SyscallError> {
     // Refused: stream reset clears the descriptor's address and length registers, which the
     // driver cannot write back, so `RUN` would point the DMA engine at physical address zero.
     if value & SD_CTL_SRST != 0 {
@@ -314,102 +420,59 @@ fn start_stop(controller: &HdaController, value: u8) -> Result<(), SyscallError>
     Ok(())
 }
 
-
-/// Bring up the one HDA controller this machine has a codec behind; more than one live link is a
-/// refusal naming every controller found, never a first match.
-pub fn init(devices: &[PciDevice]) {
-    let controllers: alloc::vec::Vec<&PciDevice> = devices
-        .iter()
-        .filter(|d| d.matches_class(CLASS_MULTIMEDIA, SUBCLASS_HDA, None))
-        .collect();
-    if controllers.is_empty() {
-        return;
-    }
-
-    let mut live: alloc::vec::Vec<(&PciDevice, Mmio, u16, u16)> = alloc::vec::Vec::new();
-    for pci in &controllers {
-        if let Some((regs, gcap, statests)) = probe(pci) {
-            live.push((pci, regs, gcap, statests));
+/// Bind the stream to the listed controller at `index`, and put every other one back into reset.
+///
+/// Takes no memory: the domain, the pools and the descriptor list are [`init`]'s, so nothing here
+/// can be refused for want of it. The waits run with no lock held, on the caller's thread.
+pub fn bind(index: u8) -> Result<(), SyscallError> {
+    let (list, memory) = {
+        let mut guard = CONTROLLER.lock();
+        let hda = guard.as_mut().ok_or(SyscallError::NotFound)?;
+        match &hda.state {
+            State::Listed(list) if (index as usize) < list.len() => {}
+            State::Listed(_) => return Err(SyscallError::InvalidArgument),
+            State::Binding => return Err(SyscallError::WouldBlock),
+            State::Bound(_) if index == 0 => return Ok(()),
+            State::Bound(_) => return Err(SyscallError::InvalidArgument),
+            State::Refused => return Err(SyscallError::Io),
         }
-    }
-
-    let (pci, regs, gcap, statests) = match live.len() {
-        0 => {
-            log!(
-                "hda: {} class 0403 function(s) and no codec on any link — no HDA audio on this \
-                 machine",
-                controllers.len()
-            );
-            return;
-        }
-        1 => live.remove(0),
-        n => {
-            for (pci, _, _, statests) in &live {
-                log!(
-                    "hda: {:02x}:{:02x}.{} has a live link (statests={statests:#06x})",
-                    pci.bus,
-                    pci.dev,
-                    pci.func
-                );
-            }
-            log!(
-                "hda: {n} controllers answer on this machine and choosing between them means \
-                 walking their codec graphs, which is the driver's — refused by name, no HDA audio"
-            );
-            return;
-        }
+        let State::Listed(list) = core::mem::replace(&mut hda.state, State::Binding) else {
+            unreachable!("matched as listed under the same guard")
+        };
+        (list, hda.memory.clone())
     };
+    let outcome = bind_listed(list, index as usize, &memory);
+    let bound = matches!(outcome, State::Bound(_));
+    CONTROLLER.lock().as_mut().expect("a bind leaves the state it took").state = outcome;
+    if bound { Ok(()) } else { Err(SyscallError::Io) }
+}
 
-    let output_streams = (gcap >> 12) & 0xF;
-    let input_streams = (gcap >> 8) & 0xF;
-    if output_streams == 0 {
-        log!(
-            "hda: {:02x}:{:02x}.{} reports no output stream descriptor (gcap={gcap:#06x}) — \
-             refused",
-            pci.bus,
-            pci.dev,
-            pci.func
-        );
-        return;
-    }
-
-    let stream_index = input_streams as u8;
-    let stream_offset = STREAM_BASE + stream_index as u64 * STREAM_STRIDE;
-    let stream = regs.subregion(stream_offset, STREAM_STRIDE);
-
-    let space = crate::iommu::DeviceSpace::create();
-    let bdl = super::DmaPool::alloc_in(PERIODS * 16, space);
-    let pcm = super::DmaPool::alloc_in(PERIODS * PERIOD_BYTES, space);
+/// The bind's body, over the list it took out of [`CONTROLLER`]; answers the state it leaves.
+fn bind_listed(mut list: Vec<Listed>, index: usize, memory: &StreamMemory) -> State {
+    let chosen = list.remove(index);
+    let pci = chosen.pci;
     // Before `SD_BDPL` tells the device an address, and after both pools' mappings.
-    space.attach(pci.bus, pci.dev, pci.func);
-    // Unaligned: the descriptor layout is the HDA specification's (§3.6.2), not a Rust one.
-    let bdl_view = bdl.view().unaligned();
-    let pcm_view = pcm.view();
-    // Nothing races these writes: the controller is not told this address until `SD_BDPL`, below.
-    bdl_view.zero();
-    pcm_view.zero();
+    memory.space.attach(pci.bus, pci.dev, pci.func);
 
-    let entries = stream::build_bdl(pcm_view.device_addr(), PERIOD_BYTES as u32, PERIODS)
-        .expect("hda: the pipeline's own shape builds a descriptor list");
-    for (i, entry) in entries.iter().enumerate() {
-        // `build_bdl` returns exactly `PERIODS` entries, matching the pool's `PERIODS * 16` bytes.
-        bdl_view.write::<u64>(i * 16, entry.address);
-        bdl_view.write::<u32>(i * 16 + 8, entry.length);
-        bdl_view.write::<u32>(i * 16 + 12, u32::from(entry.interrupt_on_completion));
-    }
-
-    if !reset_stream(stream) {
+    if !reset_stream(chosen.stream) {
         log!(
-            "hda: {:02x}:{:02x}.{} stream {stream_index} never left reset — refused",
+            "hda: {:02x}:{:02x}.{} stream {} never left reset — refused, and every listed \
+             controller goes back into reset",
             pci.bus,
             pci.dev,
-            pci.func
+            pci.func,
+            chosen.stream_index
         );
-        return;
+        silence(&chosen);
+        for other in &list {
+            silence(other);
+        }
+        return State::Refused;
     }
 
-    stream.write_u32(SD_BDPL, bdl_view.device_addr() as u32);
-    stream.write_u32(SD_BDPU, (bdl_view.device_addr() >> 32) as u32);
+    let stream = chosen.stream;
+    stream.write_u32(SD_BDPL, memory.bdl as u32);
+    stream.write_u32(SD_BDPU, (memory.bdl >> 32) as u32);
     stream.write_u32(
         SD_CBL,
         stream::cyclic_length(PERIOD_BYTES as u32, PERIODS).expect("fits a u32"),
@@ -419,43 +482,168 @@ pub fn init(devices: &[PciDevice]) {
     stream.write_u8(SD_CTL, SD_CTL_IOCE | SD_CTL_FEIE | SD_CTL_DEIE);
     stream.write_u8(SD_STS, SD_STS_WRITE_CLEAR);
 
-    // SAFETY: no vector is armed yet, so nothing can observe a half-written
-    // Option.
+    // SAFETY: the bind that left `Listed` is this field's one writer, and no state returns there;
+    // no listed controller raises the vector before the bus mastering and `INTCTL` below. Bus
+    // mastering is armed here, after the attach, and never at boot.
     unsafe {
         *ISR.stream.get() = Some(stream);
     }
-
     pci.enable_bus_master();
-    if !arm_interrupt(pci) {
+    chosen.regs.write_u32(INTCTL, INTCTL_GIE | (1 << chosen.stream_index));
+
+    for other in &list {
+        silence(other);
+    }
+    log!(
+        "hda: {:02x}:{:02x}.{} bound, statests={:#06x}, output stream {} at {:#x}, tag {STREAM_TAG}, \
+         {PERIODS} periods of {PERIOD_BYTES} bytes; {} other listed controller(s) back into reset",
+        pci.bus,
+        pci.dev,
+        pci.func,
+        chosen.statests,
+        chosen.stream_index,
+        chosen.stream_offset,
+        list.len()
+    );
+    State::Bound(chosen)
+}
+
+/// Turn a listed controller's message off and put it back into reset. Nothing reaches it again
+/// either way, so one that never reads back is named and left.
+fn silence(controller: &Listed) {
+    let pci = controller.pci;
+    match controller.message {
+        Message::MsiX => pci.disable_msix(),
+        Message::Msi => pci.disable_msi(),
+    }
+    let regs = controller.regs;
+    regs.write_u32(GCTL, 0);
+    if !crate::clock::settles(SETTLE_NS, || regs.read_u32(GCTL) & GCTL_CRST == 0) {
+        log!(
+            "hda: {:02x}:{:02x}.{} never went back into reset (gctl={:#010x})",
+            pci.bus,
+            pci.dev,
+            pci.func,
+            regs.read_u32(GCTL)
+        );
+    }
+}
+
+/// List every controller this machine has a codec behind and take the stream's memory once;
+/// bind none. Which one carries the audio is the driver's to choose, by walking their codecs.
+pub fn init(devices: &[PciDevice]) {
+    let controllers: Vec<&PciDevice> = devices
+        .iter()
+        .filter(|d| d.matches_class(CLASS_MULTIMEDIA, SUBCLASS_HDA, None))
+        .collect();
+    if controllers.is_empty() {
         return;
     }
-    regs.write_u32(INTCTL, INTCTL_GIE | (1 << stream_index));
 
+    let mut live: Vec<(&PciDevice, Mmio, u16, u16)> = Vec::new();
+    for pci in &controllers {
+        if let Some((regs, gcap, statests)) = probe(pci) {
+            live.push((pci, regs, gcap, statests));
+        }
+    }
+    if live.is_empty() {
+        log!(
+            "hda: {} class 0403 function(s) and no codec on any link — no HDA audio on this \
+             machine",
+            controllers.len()
+        );
+        return;
+    }
+    if live.len() > MAX_CONTROLLERS {
+        for (pci, _, _, statests) in &live {
+            log!(
+                "hda: {:02x}:{:02x}.{} has a live link (statests={statests:#06x})",
+                pci.bus,
+                pci.dev,
+                pci.func
+            );
+        }
+        log!(
+            "hda: {} controllers answer on this machine and a claim lists at most {MAX_CONTROLLERS} \
+             — refused by name, no HDA audio",
+            live.len()
+        );
+        return;
+    }
+
+    let mut list: Vec<Listed> = Vec::new();
+    for (pci, regs, gcap, statests) in live {
+        let output_streams = (gcap >> 12) & 0xF;
+        let input_streams = (gcap >> 8) & 0xF;
+        if output_streams == 0 {
+            log!(
+                "hda: {:02x}:{:02x}.{} reports no output stream descriptor (gcap={gcap:#06x}) — \
+                 refused",
+                pci.bus,
+                pci.dev,
+                pci.func
+            );
+            continue;
+        }
+        let Some(message) = arm_interrupt(pci) else { continue };
+        // Its registers are the kernel's to serve from boot, bound or not.
+        crate::pcidev::note_kernel_driver(pci);
+        let stream_index = input_streams as u8;
+        let stream_offset = STREAM_BASE + stream_index as u64 * STREAM_STRIDE;
+        log!(
+            "hda: {:02x}:{:02x}.{} listed as controller {}, statests={statests:#06x}, output \
+             stream {stream_index} at {stream_offset:#x}",
+            pci.bus,
+            pci.dev,
+            pci.func,
+            list.len()
+        );
+        list.push(Listed {
+            pci: *pci,
+            regs,
+            stream: regs.subregion(stream_offset, STREAM_STRIDE),
+            stream_index,
+            stream_offset: stream_offset as u32,
+            statests,
+            message,
+        });
+    }
+    if list.is_empty() {
+        return;
+    }
+
+    let space = crate::iommu::DeviceSpace::create();
+    let bdl = super::DmaPool::alloc_in(PERIODS * 16, space).leak();
+    let pcm = super::DmaPool::alloc_in(PERIODS * PERIOD_BYTES, space).leak();
+    // Unaligned: the descriptor layout is the HDA specification's (§3.6.2), not a Rust one.
+    let bdl_view = bdl.unaligned();
+    // Nothing races these writes: no controller is told this address until a bind's `SD_BDPL`.
+    bdl_view.zero();
+    pcm.zero();
+    let entries = stream::build_bdl(pcm.device_addr(), PERIOD_BYTES as u32, PERIODS)
+        .expect("hda: the pipeline's own shape builds a descriptor list");
+    for (i, entry) in entries.iter().enumerate() {
+        // `build_bdl` returns exactly `PERIODS` entries, matching the pool's `PERIODS * 16` bytes.
+        bdl_view.write::<u64>(i * 16, entry.address);
+        bdl_view.write::<u32>(i * 16 + 8, entry.length);
+        bdl_view.write::<u32>(i * 16 + 12, u32::from(entry.interrupt_on_completion));
+    }
     let pcm_region = Region {
-        phys: crate::DirectMap::from_phys(pcm_view.host_phys()),
+        phys: crate::DirectMap::from_phys(pcm.host_phys()),
         size: crate::mm::PAGE_2M,
         cache: CachePolicy::Normal,
         pages: None,
     };
 
-    *CONTROLLER.lock() = Some(HdaController { regs, stream, _bdl: bdl, _pcm: pcm });
-    *INFO.lock() = Some((HdaInfo {
-        pcm: toyos_abi::HANDLE_INVALID,
-        period_bytes: PERIOD_BYTES as u32,
-        stream_offset: stream_offset as u32,
-        statests,
-        stream_tag: STREAM_TAG,
-        periods: PERIODS as u8,
-    }, pcm_region));
-
     log!(
-        "hda: {:02x}:{:02x}.{} bound, statests={statests:#06x}, output stream {stream_index} at \
-         {stream_offset:#x}, tag {STREAM_TAG}, {PERIODS} periods of {PERIOD_BYTES} bytes",
-        pci.bus,
-        pci.dev,
-        pci.func
+        "hda: {} controller(s) listed, none bound; the stream's descriptor list and {PERIODS} \
+         periods of {PERIOD_BYTES} bytes taken once",
+        list.len()
     );
-
+    *CONTROLLER.lock() = Some(Hda {
+        state: State::Listed(list),
+        memory: StreamMemory { space, bdl: bdl.device_addr(), pcm: pcm_region },
+    });
 }
 
 /// Take one controller out of reset and ask whether anything is on its link; `None` for every way
@@ -574,21 +762,24 @@ fn reset_stream(stream: Mmio) -> bool {
     crate::clock::settles(SETTLE_NS, || stream.read_u8(SD_CTL) & SD_CTL_SRST == 0)
 }
 
-/// Arm the completion interrupt, or say why this machine has no HDA audio; a refusal, never a
+/// Arm the completion interrupt, or say why this controller cannot be listed; a refusal, never a
 /// panic, over a peripheral.
-fn arm_interrupt(pci: &PciDevice) -> bool {
+fn arm_interrupt(pci: &PciDevice) -> Option<Message> {
     let vector = crate::arch::trap::HDA_VECTOR;
-    if pci.enable_msix(vector).is_some() || pci.enable_msi(vector) {
-        return true;
+    if pci.enable_msix(vector).is_some() {
+        return Some(Message::MsiX);
+    }
+    if pci.enable_msi(vector) {
+        return Some(Message::Msi);
     }
     log!(
         "hda: {:02x}:{:02x}.{} has no interrupt this driver can arm — the line above says whether \
-         a capability was missing or a message was refused — NOT INITIALISED",
+         a capability was missing or a message was refused — not listed",
         pci.bus,
         pci.dev,
         pci.func
     );
-    false
+    None
 }
 
 fn spin_ns(duration: u64) {

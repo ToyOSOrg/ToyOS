@@ -23,7 +23,7 @@ use super::HANDLE_LEN;
 #[cfg(feature = "test-actuators")]
 use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
-    holds_claim, sys_acpi, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
+    holds_claim, sys_acpi, sys_hda_bind, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
     sys_device_dma_unmap,
     sys_device_reg, sys_gpu_reset_scanout, sys_partition_transfer, Transfer,
 };
@@ -687,6 +687,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_ACPI => sys_acpi(&ctx, RawHandle(a1 as u32), a2, a3),
         SYS_DEVICE_REG_READ => sys_device_reg(RawHandle(a1 as u32), a2, a3, None),
         SYS_DEVICE_REG_WRITE => sys_device_reg(RawHandle(a1 as u32), a2, a3, Some(a4)),
+        SYS_HDA_BIND => sys_hda_bind(RawHandle(a1 as u32), a2),
         _ => SyscallError::InvalidArgument.to_u64(),
     } })();
 
