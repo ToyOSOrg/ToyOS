@@ -146,7 +146,7 @@ pub struct TakenBack(());
 /// shootdown returns only once every other CPU has answered it from Ring 0,
 /// so no thread that was in Ring 3 before is there still.
 pub fn take_back(_stopping: &crate::quiesce::Stopping) -> TakenBack {
-    super::tlb::shootdown(crate::invalidation::Origin::Stop);
+    super::tlb::shootdown(crate::invalidation::Origin::Stop, crate::invalidation::Half::User);
     TakenBack(())
 }
 
