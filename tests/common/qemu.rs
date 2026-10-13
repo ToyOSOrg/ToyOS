@@ -741,6 +741,10 @@ pub enum Profile {
     /// buses: q35's is as long as firmware programs `PCIEXBAR`, which OVMF
     /// sets to 256 MiB and QEMU offers no option to change.
     VirtLowEcam,
+    /// [`Profile::Virt`] with its SMMUv3 and the GICv3's ITS, QEMU's `edu`, a
+    /// function that sends an MSI when told to, and an `e1000e` the IORT
+    /// routes past the SMMUv3.
+    VirtIts,
 }
 
 impl Profile {
@@ -753,7 +757,8 @@ impl Profile {
             | Self::VirtEl2NoVhe
             | Self::VirtTcg
             | Self::VirtSmmu
-            | Self::VirtLowEcam => {
+            | Self::VirtLowEcam
+            | Self::VirtIts => {
                 Arch::Aarch64
             }
             Self::Headless
@@ -928,6 +933,12 @@ struct Shape {
 enum Smmu {
     Absent,
     WithTestdev,
+    /// With the ITS behind it ([`Arch::irqchip`]), one `edu`, whose message is
+    /// the only one a guest of this suite can raise on demand, and an
+    /// `e1000e` behind a root port of a `pxb-pcie` with `bypass_iommu=on`,
+    /// which QEMU's IORT routes straight to the ITS: a plain root port's
+    /// buses it routes through the unit.
+    WithIts,
 }
 
 /// Where a machine's image and its DATA are. A size is stated because a
@@ -975,6 +986,7 @@ impl Profile {
             Self::VirtEl2 | Self::VirtEl2NoVhe | Self::VirtTcg | Self::VirtLowEcam => Self::Virt.shape(),
             Self::VirtNoRng => Shape { rng: false, ..Self::Virt.shape() },
             Self::VirtSmmu => Shape { smmu: Smmu::WithTestdev, ..Self::Virt.shape() },
+            Self::VirtIts => Shape { smmu: Smmu::WithIts, ..Self::Virt.shape() },
             Self::Virt => Shape {
                 vga: "std",
                 panel: None,
@@ -2113,34 +2125,31 @@ fn qemu_command(
     // is the option that does it, and it leaves i8042/ps2-kbd/ps2-mouse alone.
     qemu.arg("-nodefaults");
 
-    // `kernel-irqchip=split` only for VT-d: its interrupt remapping needs the
-    // userspace half of the irqchip, AMD-Vi is staged with none, and a machine
-    // with no unit has no reason to be built differently from the one it has
-    // always been.
-    let mut machine = match arch {
-        Arch::X86_64 => {
-            assert!(shape.smmu == Smmu::Absent, "a q35 has no SMMUv3");
-            arch.machine().to_string()
-        }
+    // AMD-Vi is staged with no interrupt remapping, and `virt_smmu`'s unit
+    // needs no message of a function's.
+    let remapped = match (&shape.iommu, shape.smmu) {
+        (Some(Unit::Vtd(unit)), _) => unit.intremap,
+        (_, Smmu::WithIts) => true,
+        _ => false,
+    };
+    let mut machine = vec![arch.machine()];
+    machine.extend(arch.irqchip(accel, remapped));
+    match arch {
+        Arch::X86_64 => assert!(shape.smmu == Smmu::Absent, "a q35 has no SMMUv3"),
         Arch::Aarch64 => {
             // A unit a profile declares is VT-d or AMD-Vi, which `virt` has none of.
             assert!(shape.iommu.is_none(), "`virt` has no VT-d or AMD-Vi");
-            let machine = match options.profile {
-                Profile::VirtEl2 | Profile::VirtEl2NoVhe => {
-                    format!("{},gic-version=3,virtualization=on", arch.machine())
-                }
-                Profile::VirtLowEcam => format!("{},gic-version=3,highmem-ecam=off", arch.machine()),
-                _ => format!("{},gic-version=3", arch.machine()),
-            };
-            match shape.smmu {
-                Smmu::Absent => machine,
-                Smmu::WithTestdev => format!("{machine},iommu=smmuv3"),
+            machine.extend(match options.profile {
+                Profile::VirtEl2 | Profile::VirtEl2NoVhe => Some("virtualization=on"),
+                Profile::VirtLowEcam => Some("highmem-ecam=off"),
+                _ => None,
+            });
+            if shape.smmu != Smmu::Absent {
+                machine.push("iommu=smmuv3");
             }
         }
-    };
-    if let Some(Unit::Vtd(_)) = shape.iommu {
-        machine.push_str(",kernel-irqchip=split");
     }
+    let machine = machine.join(",");
 
     // `virt` puts RAM at 1 GiB and AAVMF allocates from its top, so with 4 GiB
     // the loader's allocations land past the 4 GiB its boot map reaches and it
@@ -2279,6 +2288,13 @@ fn qemu_command(
         // routes nothing for the first, whose entry the table holds.
         qemu.arg("-device").arg("iommu-testdev");
         qemu.arg("-device").arg("iommu-testdev");
+    }
+    if shape.smmu == Smmu::WithIts {
+        qemu.arg("-device").arg("edu");
+        qemu.arg("-device").arg("pxb-pcie,id=bypass,bus_nr=8,bypass_iommu=on");
+        qemu.arg("-device").arg("pcie-root-port,id=bypassport,bus=bypass,chassis=1");
+        // No option ROM: firmware has no use for the NIC.
+        qemu.arg("-device").arg("e1000e,bus=bypassport,romfile=");
     }
 
     // The NIC before the virtio block, so a profile that has one and not the

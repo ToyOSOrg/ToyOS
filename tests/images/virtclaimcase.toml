@@ -1,0 +1,18 @@
+# Three jobs on `virt` with its ITS, each one of the suite's, which the harness
+# puts on ROOT: `test_rs_claim_lpi` claims QEMU's `edu` and reads the
+# interrupts it raises; `test_rs_claim_unrouted` is refused the `e1000e` the
+# IORT routes past the SMMUv3; `test_rs_claim_bar_fault` faults in edu's BAR
+# and names it as a syscall's buffer.
+[boot]
+start = ["logkeeper", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+# `device` because the job mints the claim, `dup` because test-runner hands a
+# job its capability as a duplicate and hands none without it.
+[programs.test-runner]
+receives = ["power"]
+args = ["--bound-ms=240000", "test_rs_claim_lpi", "test_rs_claim_unrouted", "test_rs_claim_bar_fault"]
+syscap = ["device", "dup"]

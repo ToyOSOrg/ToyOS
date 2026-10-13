@@ -51,7 +51,7 @@ use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use toyos_build::arch::Arch;
+use toyos_build::arch::{Accel, Arch};
 use toyos_build::kernelconsole;
 
 /// The hardware shape QEMU presents to the guest.
@@ -169,7 +169,7 @@ pub fn launch(opts: &Options) {
     }
     qemu.arg("-display").arg(display);
     qemu.arg("-machine")
-        .arg(machine(arch, shape.iommu))
+        .arg(machine(arch, accel, shape.iommu))
         .arg("-smp")
         .arg(format!("cores={}", opts.smp))
         .arg("-m")
@@ -337,14 +337,13 @@ pub fn launch(opts: &Options) {
 
 /// The machine a profile runs on, with its IOMMU where the machine carries one
 /// as a property rather than a device.
-fn machine(arch: Arch, iommu: bool) -> String {
-    let base = arch.machine();
-    match (arch, iommu) {
-        (Arch::X86_64, true) => format!("{base},kernel-irqchip=split"),
-        (Arch::X86_64, false) => base.to_string(),
-        (Arch::Aarch64, true) => format!("{base},gic-version=3,iommu=smmuv3"),
-        (Arch::Aarch64, false) => format!("{base},gic-version=3"),
+fn machine(arch: Arch, accel: Accel, iommu: bool) -> String {
+    let mut options = vec![arch.machine()];
+    options.extend(arch.irqchip(accel, iommu));
+    if arch == Arch::Aarch64 && iommu {
+        options.push("iommu=smmuv3");
     }
+    options.join(",")
 }
 
 /// The IOMMU as a device, in the one configuration this project builds
