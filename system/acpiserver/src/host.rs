@@ -13,12 +13,18 @@
 //! (`toyos_userbound::firmware::PROTECTED` among them), and makes a byte to the FADT's
 //! `SMI_CMD` a call into the firmware, or refuses it by the byte and the rate.
 //!
-//! **A write to memory is the kernel's to make or refuse, as a read is**:
-//! firmware records what it was told in its own NVS, `_OSC`'s capabilities
-//! among it, and the kernel passes NVS and reserved memory and refuses every
-//! other by name, a write outside every range the firmware's map lists
-//! among them, which is counted with every refusal. A write to configuration
-//! space is denied by name.
+//! **A write to memory or configuration space is the kernel's to make or
+//! refuse, as a read is**, and a refusal denies the evaluation, with one
+//! exception: a register the kernel keeps for itself
+//! ([`Refused::KernelRegister`]) is not written, said the first time per
+//! register, and answered as written, so the method goes on. ACPI gives AML no
+//! notion of a refused write, and the rest of the firmware's method, its own
+//! record of what it set among it, is kept.
+//!
+//! **The first write the kernel makes into each page of memory firmware's map
+//! lists nowhere or types memory-mapped I/O, and into each function's
+//! configuration space, is said** with its address, width and value under
+//! [`OWN`]: no fence of the kernel's knows what it is.
 //!
 //! **The spaces this server serves are SystemMemory, SystemIO, PCI_Config
 //! and EmbeddedControl.** Every other space of Table 5.182 reaches it and is
@@ -95,6 +101,7 @@ use crate::ledger::Ledger;
 use crate::sci::Latched;
 
 pub use acpiserver_api::OWN;
+use acpiserver_api::{FIRST_WRITE_IN_PAGE, FIRST_WRITE_TO_FUNCTION, KEPT_WRITE};
 
 /// The most the firmware may hold the Global Lock after a take the AML set no
 /// bound on left it the pending bit: this server's bound, and no measurement,
@@ -310,6 +317,11 @@ pub struct Firmware<'k, K> {
     said: Ledger,
     /// The port writes asked of the kernel, by port and width.
     written: Ledger,
+    /// The writes the kernel made into a register's page or a function's
+    /// configuration space, by page and by function.
+    registers: Ledger,
+    /// The writes the kernel kept from a register of its own, by register.
+    pub kept: Ledger,
     /// The paths of the control-method power buttons this server serves.
     pub buttons: Vec<String>,
     /// What a Sleep took of the SCI, for the server to serve.
@@ -347,6 +359,8 @@ impl<'k, K: Kernel> Firmware<'k, K> {
             refused: Ledger::default(),
             said: Ledger::default(),
             written: Ledger::default(),
+            registers: Ledger::default(),
+            kept: Ledger::default(),
             buttons: Vec::new(),
             latched: Latched::default(),
             notified: Default::default(),
@@ -392,11 +406,33 @@ impl<'k, K: Kernel> Firmware<'k, K> {
     }
 
     /// A write the kernel makes or refuses, a refusal denied under its name
-    /// and, for memory, the type of what it was refused in.
+    /// and, for memory, the type of what it was refused in; but a register
+    /// the kernel keeps, which is answered as written.
     fn written_through(&mut self, space: Space, address: u64, width: toyos_aml::Access, value: u64, at: Address) -> Result<(), Denied> {
         match self.kernel.access(Access::write(space, address, wide(width), value)) {
             Err(Stopping) => Err(self.stopped()),
-            Ok(Answer { made: Ok(_), .. }) => Ok(()),
+            Ok(Answer { made: Ok(_), memory_type }) => {
+                let first = match space {
+                    Space::SystemMemory if matches!(memory_type, UNLISTED | EFI_MMIO) => Some((format!("{FIRST_WRITE_IN_PAGE}{}", type_name(memory_type)), address >> 12)),
+                    Space::PciConfig => Some((FIRST_WRITE_TO_FUNCTION.into(), address >> 16)),
+                    _ => None,
+                };
+                if let Some((what, place)) = first {
+                    if self.registers.see(&format!("{space:?} {place:#x}")) {
+                        println!("{what}");
+                        println!("{OWN}that was {width:?} {value:#x} to {at:x?}");
+                    }
+                }
+                Ok(())
+            }
+            Ok(Answer { made: Err(Refused::KernelRegister), .. }) => {
+                // Every register the kernel keeps is a qword or narrower, on its own qword.
+                if self.kept.see(&format!("{:#x}", address & !7)) {
+                    println!("{KEPT_WRITE}");
+                    println!("{OWN}that was {width:?} {value:#x} to {at:x?}");
+                }
+                Ok(())
+            }
             Ok(Answer { made: Err(refused), memory_type }) => {
                 let what = match space {
                     Space::SystemMemory => format!("a SystemMemory write the kernel refused {refused:?}, in {}", type_name(memory_type)),
@@ -492,6 +528,9 @@ fn wide(width: toyos_aml::Access) -> Width {
 
 const NO_CONTROLLER: &str = "EmbeddedControl: no controller is attached to this server's AML";
 
+/// `EfiMemoryMappedIO`.
+const EFI_MMIO: u8 = 11;
+
 impl<K: Kernel> Host for Firmware<'_, K> {
     fn read(&mut self, at: Address, width: toyos_aml::Access) -> Result<u64, Denied> {
         let (space, address) = match at {
@@ -523,9 +562,8 @@ impl<K: Kernel> Host for Firmware<'_, K> {
                 self.written_through(Space::SystemIo, u64::from(port), width, value, at)
             }
             Address::Memory(address) => self.written_through(Space::SystemMemory, address, width, value, at),
-            Address::PciConfig { .. } => {
-                let what = "a write to PCI_Config: this server writes no configuration space for AML".into();
-                Err(self.deny(what, format_args!("{width:?} {value:#x} to {at:x?}")))
+            Address::PciConfig { segment, bus, device, function, offset } => {
+                self.written_through(Space::PciConfig, pci_address(segment, bus, device, function, offset), width, value, at)
             }
             Address::EmbeddedControl(address) => {
                 let byte = u8::try_from(value).expect("a byte access writes a byte");
@@ -684,8 +722,9 @@ pub mod tests {
     /// A kernel that answers reads from bytes at addresses, each range with a
     /// memory type, refuses `kept` ranges as the real one refuses memory of a
     /// type it passes no access to and every other address as it refuses RAM,
-    /// writes memory where the real one does, which later reads see, and
-    /// answers the Global Lock from a script.
+    /// writes memory where the real one does, which later reads see, but a
+    /// register it `keeps`, writes a listed function's configuration space,
+    /// and answers the Global Lock from a script.
     #[derive(Default)]
     pub struct Scripted {
         pub memory: Vec<(u64, u8, Vec<u8>)>,
@@ -695,6 +734,9 @@ pub mod tests {
         pub kept: Vec<(u64, u64, u8)>,
         /// `(start, end)` of what the kernel drives, refused as device memory.
         pub driven: Vec<(u64, u64)>,
+        /// `(start, end)` of registers the kernel keeps, whose write is
+        /// refused `KernelRegister`.
+        pub keeps: Vec<(u64, u64)>,
         pub ports: Vec<(u64, u64)>,
         pub config: Vec<(u64, u64)>,
         pub asked: RefCell<Vec<Access>>,
@@ -743,8 +785,8 @@ pub mod tests {
         fn access(&self, access: Access) -> Result<Answer, Stopping> {
             self.stopping()?;
             self.asked.borrow_mut().push(access);
-            assert!(access.write == 0 || access.space != Space::PciConfig as u8, "this server asks the kernel for no configuration write");
             let width = Width::from_raw(access.width).expect("a width").bytes();
+            let kept = self.keeps.iter().any(|&(start, end)| access.address < end && start < access.address + width);
             let listed = |values: &[(u64, u64)]| values.iter().find(|(at, _)| *at == access.address).map(|&(_, value)| value);
             Ok(match Space::from_raw(access.space).expect("a space") {
                 Space::SystemMemory => {
@@ -752,6 +794,7 @@ pub mod tests {
                         access.address >= *base && access.address + width <= base + bytes.len() as u64
                     });
                     match held {
+                        _ if access.write != 0 && kept => Answer { made: Err(Refused::KernelRegister), memory_type: UNLISTED },
                         // ACPI reclaim and runtime-services data, as the real one refuses them.
                         Some((_, memory_type @ (6 | 9), _)) if access.write != 0 => Answer { made: Err(Refused::TableWrite), memory_type: *memory_type },
                         Some((_, memory_type, _)) if access.write != 0 => {
@@ -799,6 +842,7 @@ pub mod tests {
                     Answer { made: Ok(u64::from(read)), memory_type: UNLISTED }
                 }
                 Space::SystemIo => Answer { made: listed(&self.ports).ok_or(Refused::KernelPort), memory_type: UNLISTED },
+                Space::PciConfig if access.write != 0 => Answer { made: listed(&self.config).map(|_| 0).ok_or(Refused::ConfigUnreachable), memory_type: UNLISTED },
                 Space::PciConfig => Answer { made: listed(&self.config).ok_or(Refused::ConfigUnreachable), memory_type: UNLISTED },
             })
         }
@@ -919,11 +963,11 @@ pub mod tests {
     }
 
     /// Every port write is asked of the kernel and made or refused as it
-    /// answers, as the owner ruled on #875: the AMD bench's interrupt
-    /// router's index and data, the POST port's word and a byte to
-    /// `SMI_CMD`, made, and a port the kernel keeps, denied under its name
-    /// for the refusal. Configuration space, and the controller's space with
-    /// no controller attached, are denied by name and ask the kernel nothing.
+    /// answers: the AMD bench's interrupt router's index and data, the POST
+    /// port's word and a byte to `SMI_CMD`, made, and a port the kernel
+    /// keeps, denied under its name for the refusal. A configuration write is
+    /// asked as one; the controller's space with no controller attached is
+    /// denied by name and asks the kernel nothing.
     #[test]
     fn every_port_write_is_asked_of_the_kernel_and_made_or_refused_as_it_answers() {
         use toyos_aml::Access::{Byte, Word};
@@ -947,27 +991,26 @@ pub mod tests {
             ]
         );
         let function = Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 3, offset: 0x40 };
-        let config = "a write to PCI_Config: this server writes no configuration space for AML";
-        assert_eq!(host.write(function, Byte, 0), Err(Denied(config.into())));
+        assert_eq!(host.write(function, Byte, 0x5A), Ok(()));
+        assert_eq!(kernel.asked.borrow()[5], Access::write(Space::PciConfig, 0x00FB_0040, Width::Byte, 0x5A));
         let controller = Address::EmbeddedControl(0x38);
         assert_eq!(host.write(controller, Byte, 1), Err(Denied(format!("a write to {NO_CONTROLLER}"))));
         assert_eq!(host.read(controller, Byte), Err(Denied(format!("a read of {NO_CONTROLLER}"))));
-        assert_eq!(kernel.asked.borrow().len(), 5, "the kernel was asked for an access this server denies itself");
+        assert_eq!(kernel.asked.borrow().len(), 6, "the kernel was asked for an access this server denies itself");
         assert_eq!(host.reads, [0, 0, 0]);
         assert_eq!(host.written.counts(), "0x80 Word x1; 0xb2 Byte x1; 0xc00 Byte x1; 0xc01 Byte x1; 0xcf9 Byte x1");
     }
 
     /// A write to memory is the kernel's to make or refuse: NVS and reserved
     /// memory are written, which a later read sees, and a write the kernel
-    /// refuses, to the tables' memory or to memory the firmware's map lists
-    /// nowhere, is denied under the kernel's name for it and the type, and
-    /// counted.
+    /// refuses, to the tables' memory or to runtime-services code, is denied
+    /// under the kernel's name for it and the type, and counted.
     #[test]
     fn a_memory_write_is_the_kernels_to_make_or_refuse() {
         use toyos_aml::Access::{Byte, DWord, QWord};
         let mut kernel = machine();
         kernel.memory.push((0x7fb0_0000, 9, vec![0; 8]));
-        kernel.kept = vec![(0xfe00_0000, 0xfe00_1000, UNLISTED)];
+        kernel.kept = vec![(0xfe00_0000, 0xfe00_1000, 5)];
         let mut host = Firmware::new(&kernel);
         assert_eq!(host.write(Address::Memory(NVS + 4), DWord, 0xdead_beef), Ok(()));
         assert_eq!(host.read(Address::Memory(NVS), QWord), Ok(0xdead_beef_4433_2211));
@@ -975,11 +1018,58 @@ pub mod tests {
         assert_eq!(host.read(Address::Memory(NVS + 0x2000), Byte), Ok(1));
         let tables = "a SystemMemory write the kernel refused TableWrite, in memory of type 9";
         assert_eq!(host.write(Address::Memory(0x7fb0_0000), Byte, 1), Err(Denied(tables.into())));
-        let unlisted = "a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory";
+        let code = "a SystemMemory write the kernel refused MemoryType, in memory of type 5";
         for _ in 0..2 {
-            assert_eq!(host.write(Address::Memory(0xfe00_0010), DWord, 0), Err(Denied(unlisted.into())));
+            assert_eq!(host.write(Address::Memory(0xfe00_0010), DWord, 0), Err(Denied(code.into())));
         }
-        assert_eq!(host.refused.counts(), format!("{unlisted} x2; {tables} x1"));
+        assert_eq!(host.refused.counts(), format!("{code} x2; {tables} x1"));
+        assert!(host.registers.is_empty(), "a write to firmware memory or a refused one counted as a register's");
+    }
+
+    /// A write the kernel refuses `KernelRegister` is answered as made and
+    /// denies nothing, said once per register, a register's being its
+    /// aligned qword: the T14's two bytes of PL1 at 59A0h and 59A1h are one.
+    /// Every other refusal still denies ([`a_memory_write_is_the_kernels_to_make_or_refuse`]).
+    #[test]
+    fn a_write_to_a_register_the_kernel_keeps_is_answered_as_made_and_said_once_a_register() {
+        use toyos_aml::Access::{Byte, DWord};
+        let mut kernel = machine();
+        kernel.keeps = vec![(0xfedc_59a0, 0xfedc_59a8), (0xfedc_5418, 0xfedc_541c)];
+        let mut host = Firmware::new(&kernel);
+        for (at, width) in [(0xfedc_59a0, Byte), (0xfedc_59a1, Byte), (0xfedc_59a0, Byte), (0xfedc_59a4, DWord), (0xfedc_5418, DWord)] {
+            assert_eq!(host.write(Address::Memory(at), width, 0x5A), Ok(()), "{at:#x}");
+        }
+        assert_eq!(kernel.asked.borrow().len(), 5, "each write was asked of the kernel");
+        assert_eq!(host.kept.counts(), "0xfedc5418 x1; 0xfedc59a0 x4");
+        assert!(host.refused.is_empty() && host.registers.is_empty());
+    }
+
+    /// The first write the kernel makes into each 4 KiB page firmware's map
+    /// lists nowhere or types memory-mapped I/O, and into each function's
+    /// configuration space, is said once: a later write there is counted, and
+    /// a write to NVS or reserved memory is none of them.
+    #[test]
+    fn the_first_write_into_each_page_and_function_is_said_once() {
+        use toyos_aml::Access::{Byte, DWord};
+        let mut kernel = machine();
+        kernel.memory.extend([(0xfd6e_0000, UNLISTED, vec![0; 0x2000]), (0xf800_0000, 11, vec![0; 0x100])]);
+        kernel.config.push((pci_address(0, 0, 0x1F, 3, 0x44), 0));
+        let mut host = Firmware::new(&kernel);
+        let writes = [
+            Address::Memory(0xfd6e_0a70),
+            Address::Memory(0xfd6e_0a74),
+            Address::Memory(0xfd6e_1000),
+            Address::Memory(0xf800_00b8),
+            Address::Memory(0xf800_00bc),
+            Address::Memory(NVS),
+            Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 3, offset: 0x40 },
+            Address::PciConfig { segment: 0, bus: 0, device: 0x1F, function: 3, offset: 0x44 },
+        ];
+        for at in writes {
+            assert_eq!(host.write(at, Byte, 1), Ok(()), "{at:x?}");
+        }
+        assert_eq!(host.write(Address::Memory(0xf800_00b8), DWord, 0x3b1_0564), Ok(()));
+        assert_eq!(host.registers.counts(), "PciConfig 0xfb x2; SystemMemory 0xf8000 x3; SystemMemory 0xfd6e0 x2; SystemMemory 0xfd6e1 x1");
     }
 
     /// Every space of Table 5.182 this server serves no AML in is denied by

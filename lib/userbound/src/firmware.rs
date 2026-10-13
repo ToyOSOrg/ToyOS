@@ -3,62 +3,51 @@
 //! port or a function's configuration space, each decided here by what the
 //! address is.
 //!
+//! **The holder is trusted platform code, and every check here is a bug
+//! fence.** The claim is granted by name in the signed image's manifest, and
+//! the firmware whose AML it runs already holds the machine: a write the AML
+//! asks for is made unless a fence below refuses it. A fence keeps a write
+//! off what the kernel owns: RAM, the tables, the FACS, a device the kernel
+//! knows decodes, a function a driver holds, a register that places what the
+//! kernel enumerated or declared, and a register the kernel keeps. What no
+//! fence sees is recorded in
+//! `issues/the-acpi-servers-firmware-writes-reach-itss-and-registers-no-fence-sees.md`.
+//!
 //! **An access is made only through a witness this module answered**
-//! ([`MemoryAt`], [`PortAt`], [`ConfigAt`], and [`LockWordAt`] for the
-//! compare-and-exchange on the FACS): none has another constructor, so a
-//! refusal cannot reach an accessor.
+//! ([`MemoryAt`], [`PortAt`], [`ConfigAt`], [`ConfigWriteAt`], and
+//! [`LockWordAt`] for the compare-and-exchange on the FACS): none has another
+//! constructor, so a refusal cannot reach an accessor.
 //!
-//! **Memory is the firmware's or it is refused.** The UEFI memory map types
-//! every range (UEFI 2.10 §7.2, `EFI_MEMORY_TYPE`): what the kernel hands out
-//! as RAM is refused whole, ACPI NVS and reserved memory pass both ways, ACPI
-//! reclaim memory, where the tables are, is read and never written, a
-//! register is read as the paragraphs below say, and every other type is
-//! refused with its type, for whoever reads the holder's log to rule on.
+//! **Memory is typed by the UEFI memory map** (UEFI 2.10 §7.2,
+//! `EFI_MEMORY_TYPE`): what the kernel hands out as RAM is refused whole,
+//! ACPI NVS and reserved memory pass both ways, ACPI reclaim memory and
+//! runtime-services data are read and never written, an address the map does
+//! not list and memory it types `EfiMemoryMappedIO` are accessed where they
+//! are a register, and every other type is refused with its type.
+//! Runtime-services data is read because some firmware keeps every table its
+//! XSDT lists there (UEFI 2.10 §2.3.4 recommends ACPI reclaim); no memory the
+//! kernel hands out carries the type (`toyos_bootmap::is_usable_type`).
 //!
-//! **Runtime-services data is read and never written, as the tables'
-//! memory is, because on some machines it is.** UEFI 2.10 §2.3.4 has "ACPI
-//! Tables loaded at boot time ... contained in memory of type
-//! EfiACPIReclaimMemory (recommended) or EfiACPIMemoryNVS", and a firmware
-//! that keeps every table its XSDT lists in `EfiRuntimeServicesData` exists
-//! all the same; the kernel's own reader reads them there. No memory the
-//! kernel hands out carries the type (`toyos_bootmap::is_usable_type`). What
-//! the holder reads there beside the tables is whatever else that firmware
-//! keeps in it. Runtime-services code is refused both ways.
+//! **A register is an address the map does not list or types
+//! `EfiMemoryMappedIO`, at or above [`FIXED_RANGE_END`], inside what the
+//! kernel maps, that the processor's range registers type uncacheable
+//! ([`Memory::uncached`]), on a machine none of whose CPUs holds range
+//! registers that are on and differ ([`Memory::registers_differ`]).** That
+//! makes one access of it one access on any CPU. It does not keep RAM out,
+//! since the range registers are not the effective type everywhere: the
+//! allocator hands out only memory the map lists as usable, so memory the map
+//! does not list holds nothing ToyOS put there.
 //!
-//! **An address the map does not list, and memory it types
-//! `EfiMemoryMappedIO`, is read where it is a register, and never written.**
-//! A chipset keeps registers at addresses its firmware lists nowhere, or lists
-//! as memory-mapped I/O, and a machine's AML reads them as it loads: the
-//! firmware's map declaring a range a device's registers is the bound, the
-//! owner's "if thats the best way to do it then yes", since nothing but the
-//! holder's interpreter knows which regions the tables define. Such a read passes at
-//! or above [`FIXED_RANGE_END`] where the kernel maps the address and the
-//! processor's range registers type it uncacheable ([`Memory::uncached`]):
-//! that is what makes a read of a register one read of it, on a machine
-//! whose CPUs all read it under those registers; where some CPU's are on
-//! and are not those ([`Memory::registers_differ`]) no such read passes.
-//! It is not what
-//! keeps RAM out, since the range registers are not the effective type
-//! everywhere: the allocator hands out only memory the map lists as usable
-//! ([`toyos_bootmap::is_usable_type`]), so memory the map does not list holds
-//! nothing ToyOS put there. The read may have an effect in the device that
-//! nothing here knows of. Inside that, every page a device the kernel knows
-//! of decodes in is refused, whatever firmware types it and whoever drives
-//! the device, and an address in an ECAM window is a configuration access
-//! and is decided as one.
-//!
-//! **What the allocator hands out is refused wherever the map lists it.** A
-//! map's ranges may overlap, and the allocator takes every usable one: an
-//! access is refused where any usable range holds a byte of it, whatever
+//! **Whatever firmware types it, every page a device the kernel knows of
+//! decodes in is refused, and a write to a register the kernel keeps
+//! ([`HostBridge`]) is refused [`Refused::KernelRegister`].** An address in an
+//! ECAM window is a configuration access and is decided as one. What the
+//! allocator hands out is refused wherever the map lists it, even where
 //! another range types the same byte.
 //!
 //! **A port is the kernel's to answer where the kernel declared it**
 //! ([`crate::port::Mediated`]), another claim's where a row names it, refused
-//! where [`PROTECTED`] names it, and passes otherwise, a write as a read, as
-//! the owner ruled on #875: ACPI 6.5 has control methods hold "exclusive
-//! access to any address accessed via fields declared in Operation Regions"
-//! (§5.5.2.4, Operation Regions), which a port of a device the kernel drives
-//! cannot give them.
+//! where [`PROTECTED`] names it, and passes otherwise, a write as a read.
 //!
 //! **A byte written to the port that commands the firmware is no port write:
 //! it is a call into the firmware, the kernel's to make** ([`FirmwareCall`]).
@@ -69,7 +58,10 @@
 //! handler has not answered, and each call stops every CPU of the machine
 //! for as long as that handler takes.
 //!
-//! **Configuration space is read and never written.**
+//! **Configuration space is read whole and written past what places the
+//! machine** ([`ConfigAt::write`]): never a function a driver holds, an
+//! interrupt controller or an IOMMU, any function's header, or a register
+//! that places what the kernel enumerated or declared.
 //!
 //! **The sleep type of the power-off is the holder's to supply and the
 //! kernel's to write** ([`SleepType`]): `\_S5`'s `SLP_TYPa` is in the
@@ -107,6 +99,64 @@ pub const FIXED_RANGE_END: u64 = 0x10_0000;
 /// Bytes of configuration space a function has.
 const CONFIG_BYTES: u16 = 0x1000;
 
+/// One past every function's header, Type 0 and Type 1 alike (PCI Express
+/// Base 6.0 §7.5.1): its decode enables and BARs, and a bridge's buses and
+/// windows.
+const HEADER_END: u16 = 0x40;
+
+/// The host bridges Intel's 11th Generation Core datasheet, volume 2a
+/// (631122-003), covers, by device ID: UP3, UP4, UP3-Refresh, H35 and
+/// H35-Refresh (631121-012 Table 15-3). Its registers are where the rows
+/// below have them on these and no other host bridge.
+const MCH_631122: [u16; 5] = [0x9A02, 0x9A04, 0x9A12, 0x9A14, 0x9A1A];
+
+/// Offset 48h's `MCHBAR` (631122 §3.1.14): bits 38:17 the base of a 128 KiB
+/// window, bit 0 its enable.
+const MCHBAR_BASE: u64 = 0x7F_FFFE_0000;
+const MCHBAREN: u64 = 1;
+
+/// The registers in MCHBAR the kernel keeps, each `(first, end)` as an offset
+/// into the window (631122):
+const KEPT: [(u64, u64); 4] = [
+    // §3.4.2 GFXVTBAR and §3.4.4 VTDPVC0BAR: where the two VT-d units decode.
+    (0x5400, 0x5408),
+    (0x5410, 0x5418),
+    // §3.4.5 INTRDIRCTL: how a lowest-priority MSI picks its CPU.
+    (0x5418, 0x541C),
+    // §3.3.31 PACKAGE_RAPL_LIMIT, PL1 and PL2: the performance track's
+    // (`issues/the-kernel-owns-cpu-performance-state.md`).
+    (0x59A0, 0x59A8),
+];
+
+/// What the kernel read of 00:00.0 once it enumerated.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct HostBridge {
+    pub vendor: u16,
+    pub device: u16,
+    /// Its quadword at 48h.
+    pub at_48h: u64,
+}
+
+impl HostBridge {
+    /// Nothing answered at 00:00.0.
+    pub const ABSENT: Self = Self { vendor: 0xFFFF, device: 0xFFFF, at_48h: u64::MAX };
+
+    fn covered(vendor: u16, device: u16) -> bool {
+        vendor == 0x8086 && MCH_631122.contains(&device)
+    }
+
+    /// Where its MCHBAR window is, on a host bridge 631122 covers that
+    /// decodes one.
+    fn mchbar(&self) -> Option<u64> {
+        (Self::covered(self.vendor, self.device) && self.at_48h & MCHBAREN != 0).then_some(self.at_48h & MCHBAR_BASE)
+    }
+
+    /// Whether `first..=last` overlaps a register of [`KEPT`].
+    fn keeps(&self, first: u64, last: u64) -> bool {
+        self.mchbar().is_some_and(|base| KEPT.iter().any(|&(start, end)| overlaps(first, last, (base + start, base + end))))
+    }
+}
+
 /// One PCI function on the segment group the kernel enumerated.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Function {
@@ -130,14 +180,16 @@ pub struct Memory<'a, D> {
     pub devices: D,
     /// The FACS, as `(start, end)`.
     pub facs: Option<(u64, u64)>,
-    /// Whether the processor reads `len` bytes at an address uncached,
-    /// whatever maps them: asked only of a register's read, at an address the
-    /// map does not list or types `EfiMemoryMappedIO`, at or above
+    /// Whether the processor accesses `len` bytes at an address uncached,
+    /// whatever maps them: asked only of a register's access, at an address
+    /// the map does not list or types `EfiMemoryMappedIO`, at or above
     /// [`FIXED_RANGE_END`].
     pub uncached: fn(u64, u64) -> bool,
     /// Some CPU's range registers are on and are not the ones `uncached`
-    /// answers from: what it answers is not known of a read that CPU makes.
+    /// answers from: what it answers is not known of an access that CPU
+    /// makes.
     pub registers_differ: bool,
+    pub host_bridge: HostBridge,
 }
 
 /// A memory access the policy passed.
@@ -219,6 +271,9 @@ impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
         if overlaps(at, last, LOCAL_APIC) || self.devices.into_iter().any(|device| overlaps(at, last, pages(device))) {
             return No(Refused::DeviceMemory);
         }
+        if write && self.host_bridge.keeps(at, last) {
+            return No(Refused::KernelRegister);
+        }
         let ty = type_of(self.map, at);
         if type_of(self.map, last) != ty {
             return No(Refused::Straddles);
@@ -228,9 +283,8 @@ impl<D: IntoIterator<Item = (u64, u64)>> Memory<'_, D> {
         }
         match ty {
             Some(EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) if write => return No(Refused::TableWrite),
-            Some(EFI_RESERVED | EFI_ACPI_NVS | EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA) => {}
-            None | Some(EFI_MMIO) if !write => {}
-            Some(_) | None => return No(Refused::MemoryType),
+            Some(EFI_RESERVED | EFI_ACPI_NVS | EFI_ACPI_RECLAIM | EFI_RUNTIME_DATA | EFI_MMIO) | None => {}
+            Some(_) => return No(Refused::MemoryType),
         }
         if last >= self.mapped_end {
             return No(Refused::Unmapped);
@@ -448,7 +502,8 @@ impl CallRate {
     }
 }
 
-/// A configuration read the policy passed.
+/// A configuration access the policy passed the shape of: a read, or a
+/// write still to be decided by [`ConfigAt::write`].
 ///
 /// ```compile_fail,E0451
 /// fn forged(function: toyos_userbound::firmware::Function) {
@@ -474,17 +529,76 @@ impl ConfigAt {
     pub const fn width(&self) -> Width {
         self.width
     }
+
+    /// Decide a write here, where the kernel enumerated `enumerated`, or
+    /// nothing. A write is refused [`Refused::HeldFunction`] anywhere in a
+    /// function a driver holds, an interrupt controller or an IOMMU (PCI Code
+    /// and ID Assignment Specification, base class 08h, subclasses 00h and
+    /// 06h): its configuration is its driver's, or the kernel's whether or
+    /// not it programs it; and [`Refused::AddressMap`] in any function's
+    /// header and in a register [`placing`] names.
+    pub fn write(self, enumerated: Option<Enumerated>) -> Result<ConfigWriteAt, Refused> {
+        if enumerated.is_some_and(|found| found.held || found.class == 0x08 && matches!(found.subclass, 0x00 | 0x06)) {
+            return Err(Refused::HeldFunction);
+        }
+        let last = self.offset + (self.width.bytes() as u16 - 1);
+        if self.offset < HEADER_END || enumerated.is_some_and(|found| placing(found).any(|(first, end)| self.offset < end && first <= last)) {
+            return Err(Refused::AddressMap);
+        }
+        Ok(ConfigWriteAt { at: self })
+    }
 }
 
-/// Decide a configuration access. A write is refused, whatever it names: a
-/// function's configuration space holds what the kernel reads its own
-/// configuration from and what moves the ports it declared. A read is held to
-/// its shape: a function the window reaches, and at most a dword that crosses
-/// no dword boundary, the unit a configuration register is defined in.
-pub fn config(ecam: &[EcamWindow], segment: u16, function: Function, offset: u16, width: Width, write: bool) -> Result<ConfigAt, Refused> {
-    if write {
-        return Err(Refused::ConfigWrite);
+/// A configuration write the policy passed.
+///
+/// ```compile_fail,E0451
+/// fn forged(at: toyos_userbound::firmware::ConfigAt) {
+///     let _ = toyos_userbound::firmware::ConfigWriteAt { at };
+/// }
+/// ```
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ConfigWriteAt {
+    at: ConfigAt,
+}
+
+impl ConfigWriteAt {
+    pub const fn at(&self) -> ConfigAt {
+        self.at
     }
+}
+
+/// What the kernel enumerated at one function.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Enumerated {
+    pub vendor: u16,
+    pub device: u16,
+    pub class: u8,
+    pub subclass: u8,
+    /// A kernel driver drives it or a claim holds it.
+    pub held: bool,
+}
+
+/// The registers past the header of a function of this identity that place
+/// what the kernel enumerated or declared, each `(first, end)`.
+fn placing(found: Enumerated) -> impl Iterator<Item = (u16, u16)> {
+    let Enumerated { vendor, device, .. } = found;
+    // 631122 §3.1.13–§3.1.34: where the egress port, MCHBAR, graphics
+    // memory, the ECAM window, DMIBAR, the legacy ranges and the top of each
+    // RAM range are.
+    let host_bridge = HostBridge::covered(vendor, device).then_some((0x40, 0xC0));
+    // An eSPI controller of the 500 Series PCH (631119-007 Table 6:
+    // A080h–A09Fh), whose ESPI_IOD_IOE (631120-002 §2.1.6) enables the decode
+    // of COM1 and the i8042's ports.
+    let espi = (vendor == 0x8086 && (0xA080..=0xA09F).contains(&device)).then_some((0x80, 0x84));
+    // Where a chipset the watchdog knows places its TCO block, and turns it on.
+    let tco = toyos_tco::chipset(vendor, device).into_iter().flat_map(|row| [(row.base_reg, row.base_reg + 4), (row.enable.reg, row.enable.reg + 4)]);
+    host_bridge.into_iter().chain(espi).chain(tco)
+}
+
+/// Decide a configuration access's shape: a function the window reaches, and
+/// at most a dword that crosses no dword boundary, the unit a configuration
+/// register is defined in.
+pub fn config(ecam: &[EcamWindow], segment: u16, function: Function, offset: u16, width: Width) -> Result<ConfigAt, Refused> {
     let Function { bus, device, function: number } = function;
     let reached = segment == SEGMENT_GROUP && ecam.iter().any(|window| window.offset(bus, device, number).is_some());
     if !reached {

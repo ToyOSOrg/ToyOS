@@ -1792,11 +1792,11 @@ const ACPI_MEDIATED_SAID: [&str; 10] = [
     "acpi: an unbound claim was refused its access, the lock and the power-off's sleep type",
     "acpi: RAM was refused both ways as UsableMemory",
     "acpi: the RSDP read through as type 9 and its write was refused TableWrite",
-    "acpi: an unlisted register was read and refused its write MemoryType, an unlisted address below 1 MiB was refused RegisterCached, and the interrupt controllers, the HPET and a function's BAR DeviceMemory",
+    "acpi: an unlisted register was read and written, an unlisted address below 1 MiB was refused RegisterCached both ways, and the interrupt controllers, the HPET and a function's BAR DeviceMemory",
     "acpi: the FACS read through as type 10, its write was refused FacsWrite, and the memory after it was written and put back",
     "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; the i8042's row ClaimedPort; PM1a_CNT read and refused its write ReadOnlyPort; the POST port was written",
     "acpi: ACPI_ENABLE and ACPI_DISABLE were refused SMI_CMD as KernelCommand and SCI_EN stayed set, a write wider than a byte was refused CommandSpan, every firmware call made was read back from the port and counted on the boot processor, and a storm of them was refused CommandRate",
-    "by its address and through ECAM, and every write to configuration space was refused ConfigWrite",
+    "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the NVMe controller diskserver holds HeldFunction, and the host bridge's 0x44 was written",
     "acpi: the lock a dead holder left taken read free; it was taken and given back, given back with GBL_RLS where the firmware had asked, and found pending while the firmware owned it",
     "acpi: a sleep type wider than three bits was refused InvalidArgument, the next holder's replaced a dead one's, and a second under one claim was refused AlreadyExists",
 ];
@@ -4890,98 +4890,77 @@ struct Bench {
     /// The blocks the processors' `_OSC` load under ToyOS's claims, by
     /// signature and length.
     loaded: &'static [&'static str],
-    /// The host's refusal the owner ruled, which this machine's AML meets: it
-    /// is met, and said, not red.
-    ruled: Ruled,
-    /// What the census says of `_REG(3, 1)`, after every `_INI`.
-    reg: &'static str,
+    /// Each register the kernel keeps that this machine's AML writes: the
+    /// server says it once, and its evaluation goes on.
+    kept: &'static [At],
+    /// Pages of registers this machine's AML writes, each of which the
+    /// server says the kernel's first write into.
+    first_written: &'static [At],
 }
 
-/// A refusal the owner ruled, which a bench's AML meets.
-struct Ruled {
-    /// Its kind, as the server says it.
-    kind: &'static str,
-    /// Each line the server says of it by kind, whole.
-    said: &'static [&'static str],
-    /// Each evaluation it refuses, by the path the server says under
-    /// [`acpiserver_api::OWN`].
-    paths: &'static [&'static str],
-    /// What the namespace's census counts of it.
-    census: &'static str,
+/// Where a write the server says lands: at an address, or at an offset into
+/// the 128 KiB MCHBAR window (631122 §3.1.14), wherever 00:00.0 places it.
+#[derive(Clone, Copy, Debug)]
+enum At {
+    Address(u64),
+    Mchbar(u64),
 }
 
-impl Ruled {
-    /// `line` is one the server says of this refusal: one of [`Self::said`],
-    /// or one of [`Self::paths`] refused under it.
-    fn says(&self, line: &str) -> bool {
-        self.said.iter().any(|said| line.ends_with(said))
-            || self.paths.iter().any(|path| line.ends_with(&format!("{}{path} was refused Host({:?})", acpiserver_api::OWN, self.kind)))
+impl At {
+    fn holds(self, address: u64) -> bool {
+        match self {
+            At::Address(at) => address == at,
+            At::Mchbar(offset) => address & 0x1_FFFF == offset,
+        }
     }
+}
 
-    /// Of the server's `lines`, each that carries this refusal's kind but the
-    /// census is one it says of it, and each it says of it is there.
-    fn held(&self, lines: &[&str]) -> Result<(), String> {
-        let stray: Vec<&&str> = lines.iter().filter(|l| l.contains(self.kind) && !l.contains("acpiserver: the namespace initialised: ") && !self.says(l)).collect();
-        if !stray.is_empty() {
-            return Err(format!("the server said the refusal the owner ruled of what he did not rule: {stray:#?}"));
-        }
-        let owned = self.paths.iter().map(|path| format!("{}{path} was refused Host({:?})", acpiserver_api::OWN, self.kind));
-        if let Some(unmet) = self.said.iter().map(|said| said.to_string()).chain(owned).find(|said| !lines.iter().any(|l| l.ends_with(said.as_str()))) {
-            return Err(format!("this bench's AML meets the refusal the owner ruled, and the server never said: {unmet}"));
-        }
-        Ok(())
-    }
+/// The address of each write the server said under `head`, which it details
+/// on the next line, under [`acpiserver_api::OWN`], as `... to Memory(<hex>)`.
+fn said_writes(lines: &[&str], head: &str) -> Result<Vec<u64>, String> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains(head))
+        .map(|(i, l)| {
+            let own = lines.get(i + 1).filter(|next| next.contains(acpiserver_api::OWN)).ok_or_else(|| format!("{l:?} is followed by no line of the machine's own"))?;
+            u64::from_str_radix(field_between(own, " to Memory(", ")")?, 16).map_err(|_| format!("{own:?} names no address"))
+        })
+        .collect()
 }
 
 /// The T14: 14 blocks; its `\_S5`'s `SLP_TYPa` read by a byte scan of its
 /// DSDT, with no interpreter; the first processor's commit loads one block,
-/// of 459 bytes; and the controller's `_INI` and its hotkey device's write
-/// memory outside every range the map lists, which the owner ruled refused
-/// and recorded
-/// (`issues/the-t14s-controller-and-hotkey-ini-are-refused-for-writes-outside-the-map.md`).
+/// of 459 bytes. Its controller's `_INI` writes its GPIO pad
+/// `PAD_CFG_DW0_GPPC_A_13` at 0xFD6E0A70 (631120-002 §27.1.114), and its
+/// hotkey device's `_INI` writes MCHBAR's cTDP control and turbo activation
+/// ratio, at 5F50h and 5F54h, and PL1 at 59A0h, which the kernel keeps
+/// (`issues/the-t14s-thermal-modes-do-not-move-its-package-power-limits.md`).
 const T14: Bench = Bench {
     row: "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high",
     blocks: 14,
     refused: &[],
     s5: "power: S5 is PM1a 0x1804 with SLP_TYPa=7,",
     loaded: &["SSDT, 459 bytes"],
-    ruled: Ruled {
-        kind: "a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory",
-        said: &[
-            "acpiserver: refused for the first time: a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory",
-            "acpiserver: an evaluation of the initialisation was refused for the first time: _INI: denied by this server: a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory",
-        ],
-        paths: &["\\_SB_.PC00.LPCB.EC__._INI", "\\_SB_.PC00.LPCB.EC__.HKEY._INI"],
-        census: "_INI: denied by this server: a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory x2",
-    },
-    reg: "_REG(3, 1) in 1 scope(s)",
+    kept: &[At::Mchbar(0x59A0)],
+    first_written: &[At::Address(0xFD6E_0000), At::Mchbar(0x5000)],
 };
 
 /// The AMD bench: 17 blocks; its SSDT8 ends in a `Scope` of an `EC0` no
 /// table defines, refused whole as the owner ruled
 /// (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`);
 /// its `\_S5`'s `SLP_TYPa` as the check outside the tree evaluated it; no
-/// processor names an `_OSC`; and the controller's `_REG(3, 1)` and the
-/// adapter's `_PSR` each write the root complex's index, a configuration
-/// write the owner ruled refused
-/// (`issues/the-amd-benchs-ec-reg-and-psr-are-refused-for-a-write-to-the-root-complexs-index.md`).
+/// processor names an `_OSC`. Its controller's `_REG(3, 1)` and its
+/// adapter's `_PSR` each reach `ALIB`, whose mailbox writes the root
+/// complex's 0xB8 and 0xBC through ECAM, in 00:00.0's page at 0xF8000000.
 const AMD: Bench = Bench {
     row: "acpi: the ACPI row: PM1a events 0x400+4, GPE0 0x420+8, SCI gsi 9 level/low",
     blocks: 17,
     refused: &[(9, "a name that does not resolve")],
     s5: "with SLP_TYPa=5,",
     loaded: &[],
-    ruled: Ruled {
-        kind: "a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
-        said: &[
-            "acpiserver: refused for the first time: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
-            "acpiserver: an evaluation of the initialisation was refused for the first time: _REG: denied by this server: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
-            "acpiserver: a method read for the power sources refused: _PSR: denied by this server: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
-        ],
-        paths: &["\\_SB_.PCI0.LPC0.EC__._REG"],
-        census: "_REG: denied by this server: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11 x1",
-    },
-    reg: "no _REG run",
+    kept: &[],
+    first_written: &[At::Address(0xF800_0000)],
 };
 
 /// The server's load of a bench's tables, every access the kernel's to make
@@ -4990,9 +4969,11 @@ const AMD: Bench = Bench {
 /// it, and loaded or refused as its [`Bench`] says; `\_S5`'s `SLP_TYPa`
 /// handed to the kernel, which says it powers this machine off with that
 /// value, and never does on this row. Then the namespace initialised (ACPI
-/// 6.5 §6.5.1): every `_STA` and `_INI` the walk runs, none refused but by a
-/// ruled refusal, each of which is met, and the controller's `_REG(3, 1)`
-/// after them as the bench says; `\_SB._OSC`
+/// 6.5 §6.5.1): every `_STA` and `_INI` the walk runs, none refused, and the
+/// controller's `_REG(3, 1)` after them; each register the kernel keeps that
+/// the bench's AML writes said once, and each page of registers it writes
+/// said with the kernel's first write into it; every battery reading names
+/// the adapter online or offline; `\_SB._OSC`
 /// negotiated, and on an Intel machine each processor's, none refused; every
 /// block they load loaded, none refused. Every other CPU of the machine said
 /// how its range registers stand beside the boot processor's, and none holds
@@ -5048,22 +5029,33 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     let refused: Vec<&&str> = lines
         .iter()
         .filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ") || l.contains("was refused for the first time"))
-        .filter(|l| !l.contains("acpiserver: table ") && !bench.ruled.says(l))
+        .filter(|l| !l.contains("acpiserver: table "))
         .collect();
     if !refused.is_empty() {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
     }
-    bench.ruled.held(&lines)?;
-    for line in lines.iter().filter(|l| bench.ruled.said.iter().any(|said| l.ends_with(said))) {
-        eprintln!("  [acpi] a refusal the owner ruled: {}", line.trim());
+    let kept = said_writes(&lines, acpiserver_api::KEPT_WRITE)?;
+    let unmatched = |expected: &[At], said: &[u64]| expected.iter().copied().filter(|at| !said.iter().any(|&address| at.holds(address))).collect::<Vec<At>>();
+    if kept.len() != bench.kept.len() || !unmatched(bench.kept, &kept).is_empty() {
+        return Err(format!("the server said the kernel kept writes to {kept:#x?}, where this bench's AML writes {:x?}", bench.kept));
     }
+    let pages: Vec<u64> = said_writes(&lines, acpiserver_api::FIRST_WRITE_IN_PAGE)?.iter().map(|address| address & !0xFFF).collect();
+    let missing = unmatched(bench.first_written, &pages);
+    if !missing.is_empty() {
+        return Err(format!("the server said no first write into {missing:x?}; it said {pages:#x?}"));
+    }
+    eprintln!("  [acpi] writes the kernel kept: {kept:#x?}; pages first written: {pages:#x?}");
     let census = log.must_say("acpiserver: the namespace initialised: ")?;
     let refusals = census.split_once("evaluations refused, by kind: ").map_or("", |(_, kinds)| kinds.trim());
-    if refusals != bench.ruled.census {
-        return Err(format!("the namespace's initialisation refused other than {:?}: {census}", bench.ruled.census));
+    if refusals != "none" {
+        return Err(format!("the namespace's initialisation refused an evaluation: {census}"));
     }
-    if !census.contains(&format!("_INI run, {}; ", bench.reg)) {
-        return Err(format!("the census says other than {:?} of the controller's _REG(3, 1): {census}", bench.reg));
+    if !census.contains("_INI run, _REG(3, 1) in 1 scope(s); ") {
+        return Err(format!("the census says the controller's _REG(3, 1) ran in no one scope: {census}"));
+    }
+    let readings: Vec<&&str> = lines.iter().filter(|l| l.contains(acpiserver_api::BATTERY_READ)).collect();
+    if readings.is_empty() || readings.iter().any(|l| !(l.ends_with("; AC online") || l.ends_with("; AC offline"))) {
+        return Err(format!("a battery reading names the adapter neither online nor offline: {readings:#?}"));
     }
     log.must_say("acpiserver: \\_SB._OSC negotiated: ")?;
     if bench.loaded.is_empty() {
@@ -5105,8 +5097,7 @@ const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-metho
 
 /// The T14's battery as the server read it: the one battery its tables name
 /// found present once the controller's `_REG` ran, its information read,
-/// and at least one reading of it with the adapter's state; nothing refused
-/// but [`T14`]'s ruled refusal, of its two `_INI`s by path and nothing else.
+/// and at least one reading of it with the adapter's state; nothing refused.
 /// The census's Global Lock counts are printed and held to nothing: an
 /// evaluation gives back the lock it still holds as it ends
 /// (`finish`, `system/acpiserver/aml/src/exec.rs`), and the real lock
@@ -5124,15 +5115,10 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
         return Err(format!("the server died: {fired}"));
     }
-    let refused: Vec<&&str> = lines
-        .iter()
-        .filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: "))
-        .filter(|l| !T14.ruled.says(l))
-        .collect();
+    let refused: Vec<&&str> = lines.iter().filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ")).collect();
     if !refused.is_empty() {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
     }
-    T14.ruled.held(&lines)?;
     let found = log.must_say(T14_POWER_SOURCES)?;
     let info = log.must_say(&format!("acpiserver: {}battery 1 of 1 from ", acpiserver_api::BATTERY_INFO))?;
     let read: Vec<&&str> = lines.iter().filter(|l| l.contains(acpiserver_api::BATTERY_READ)).collect();

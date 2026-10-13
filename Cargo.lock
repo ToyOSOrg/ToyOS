@@ -4509,6 +4509,7 @@ dependencies = [
  "toyos-abi",
  "toyos-acpi",
  "toyos-bootmap",
+ "toyos-tco",
 ]
 
 [[package]]

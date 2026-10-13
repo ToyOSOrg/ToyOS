@@ -58,8 +58,11 @@ serves = ["log"]
 # The machine's ACPI fixed hardware: the kernel puts the machine in ACPI mode
 # when it mints the `acpi` claim and back when the claim goes, so the SCI,
 # the power button and the embedded controller's events are this program's
-# while it runs and the firmware's otherwise. `power` is how a press stops
-# the machine: through the supervisor, which has `logkeeper` make the log whole.
+# while it runs and the firmware's otherwise. The claim also hands it the
+# firmware's own access: the kernel makes the AML's reads and writes for it,
+# inside the fences of `toyos_userbound::firmware`. `power` is how a press
+# stops the machine: through the supervisor, which has `logkeeper` make the
+# log whole.
 [programs.acpiserver]
 service = true
 devices = ["acpi"]
