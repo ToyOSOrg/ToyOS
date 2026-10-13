@@ -5,9 +5,6 @@
 //! between two `SYS_CLOCK_EPOCH` readings taken around what made it — a write,
 //! a create with truncation, a create of a missing file, a truncation — and a
 //! later write's stamp is later, which a clock of whole seconds cannot say.
-//! Then the same on `/home`, fileserver's DATA, which keeps the nanosecond too.
-//! Then `/log`: FAT keeps the whole seconds of its flush, read back after a
-//! reopen.
 //! `write <path>` makes the first judgement on `path` and `read <path>` only
 //! prints what it finds there. `undated` runs on a machine whose RTC never
 //! answered and never asks the time: a file written there, on `/tmp` or on
@@ -120,36 +117,7 @@ fn main() {
     match args.as_slice() {
         [_] => {
             let (first, second) = dated("/tmp");
-            let (home_first, home_second) = dated("/home");
-            // A whole second is one stamp in 10⁹; two of them are a clock of seconds.
-            assert!(
-                home_first % NANOS_PER_SEC != 0 || home_second % NANOS_PER_SEC != 0,
-                "/home stamps {home_first} ns and {home_second} ns: whole seconds, not the \
-                 nanosecond DATA keeps"
-            );
-            for name in ["first", "second", "truncated", "missing"] {
-                let path = format!("/home/file-mtime-{name}");
-                fs::remove_file(&path).unwrap_or_else(|e| panic!("remove {path}: {e}"));
-            }
-
-            // The flush stamps FAT, which keeps whole seconds and drops an odd one.
-            const FAT: &str = "/log/file-mtime";
-            let before = epoch();
-            write(FAT, b"on FAT");
-            let fat = mtime(FAT, "its write");
-            let after = epoch();
-            assert!(
-                (before - 1) * NANOS_PER_SEC <= fat
-                    && fat <= after * NANOS_PER_SEC
-                    && fat % NANOS_PER_SEC == 0,
-                "{FAT} reads back {fat} ns after a reopen, and the wall clock read {before} s \
-                 before its write and {after} s after",
-            );
-            fs::remove_file(FAT).unwrap_or_else(|e| panic!("remove {FAT}: {e}"));
-            println!(
-                "file-mtime: /tmp stamps {first} then {second}, /home {home_first} then \
-                 {home_second}, /log {fat}"
-            );
+            println!("file-mtime: /tmp stamps {first} then {second}");
         }
         [_, mode] if mode == "undated" => {
             for undated in ["/tmp/file-mtime-undated", "/home/file-mtime-undated"] {

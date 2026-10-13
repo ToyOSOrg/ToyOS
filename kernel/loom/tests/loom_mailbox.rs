@@ -9,9 +9,8 @@
 //! * `irq`    — CPU0 IRQ context: pushes (interrupting `local`'s push in some
 //!   interleavings), then at IRQ exit runs a pass *if* preemption
 //!   is enabled.
-//! * `remote` — another CPU: pushes and rings with `Urgency::Normal`, so a
-//!   busy target gets no IPI — its message is the one
-//!   that ends up behind the unlinked suffix.
+//! * `remote` — another CPU: pushes and rings with `Urgency::Normal`; its
+//!   message is the one that ends up behind the unlinked suffix.
 //!
 //! Two properties are checked.
 //!

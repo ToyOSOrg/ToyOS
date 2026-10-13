@@ -1,8 +1,9 @@
 //! Everything the desktop decides, as pure functions over pure state.
 //!
 //! Where a window is, what changed since the last frame, what the pointer is
-//! over, who has the keyboard, what a key means, what is visible inside a
-//! damaged region and which pixels of a client's buffer reach the screen. No
+//! over, who has the keyboard, what a key means, what the clipboard's watcher
+//! is sent, what is visible inside a damaged region and which pixels of a
+//! client's buffer reach the screen. No
 //! I/O, no drawing, no shared memory, no connections — those are the
 //! compositor's, and it is the only caller.
 //!
@@ -22,6 +23,7 @@
 extern crate alloc;
 
 pub mod budget;
+pub mod clipboard;
 pub mod damage;
 pub mod hit;
 pub mod input;
@@ -32,12 +34,12 @@ pub mod stack;
 pub mod taskbar;
 pub mod window;
 
-pub use budget::{create_verdict, max_windows, pending_admits, window_bytes, Verdict};
+pub use budget::{create_verdict, max_windows, pending_admits, window_bytes, Port, Verdict};
 pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use hit::{hit_test, Hit};
 pub use input::{
     cursor_from_abs, cursor_style, edge_snap, fold_mouse, key_action, tab_action, CursorStyle, Grab,
-    Held, KeyAction, MouseSample, PromptGate, Released, TabAction, DRAG_THRESHOLD, MOUSE_EVENT_LEN,
+    Held, KeyAction, MouseSample, PromptGate, Released, TabAction, DRAG_THRESHOLD,
 };
 pub use layout::{set_mode, Chrome, Desk};
 pub use plan::{compose, content_blit, Blit, Layer};

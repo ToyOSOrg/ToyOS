@@ -596,12 +596,16 @@ const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::
 
 /// The ports that one row alone may receive, each with that row: the swap
 /// port, whose holder replaces any service's binary, the grants port, whose
-/// holder writes which folder of the home a package sees, and the prompt
-/// port, whose holder draws above every window and has every key while it does.
+/// holder writes which folder of the home a package sees, the prompt port,
+/// whose holder draws above every window and has every key while it does, the
+/// input port, whose holder types into the focused window, and the clipboard
+/// port, whose holder is sent every copy made in the session.
 const HELD_ALONE: &[(&str, &str)] = &[
     (toyos_swap::PORT, toyos_swap::HOLDER),
     (toyos_manifest::grants::PORT, toyos_manifest::grants::HOLDER),
     (toyos_manifest::consent::PROMPT, toyos_manifest::consent::SERVER),
+    (toyos_input::wire::PORT, toyos_input::wire::HOLDER),
+    (toyos_manifest::clipboard::PORT, toyos_manifest::clipboard::HOLDER),
 ];
 
 /// Who may hold the authorities that change what the machine runs or what a
@@ -673,13 +677,48 @@ fn starts_name_what_a_launch_can_start(config: &SystemConfig) -> Result<(), Stri
     Ok(())
 }
 
+/// What a row receives reaches a server that runs: a port the supervisor
+/// serves, one a row `[boot] start` names serves, since a launch starts no row
+/// that serves ([`starts_name_what_a_launch_can_start`]), or one a row
+/// provides, never `netstack`; and never a port the row serves itself.
+/// `[apps] receives` is narrower: nobody makes a `provides` port for a package.
+///
+/// **Checked on every manifest rendered**: the supervisor mints `netstack`
+/// from its running server's acceptor, under the lock that server's own start
+/// holds, and never from a provider, so a row receiving it where none runs is
+/// endowed nothing, and the server's own row receiving it waits at boot for
+/// ever.
+fn receives_reach_a_running_server(config: &SystemConfig) -> Result<(), String> {
+    let running = |port: &String| {
+        SUPERVISOR_SERVED.contains(&port.as_str())
+            || config.boot.start.iter().any(|key| config.programs.get(key).is_some_and(|row| row.serves.contains(port)))
+    };
+    for (name, program) in &config.programs {
+        if program.provides.iter().any(|port| port == "netstack") {
+            return Err(format!("`{name}` provides `netstack`, which the supervisor mints from its started server alone"));
+        }
+        for port in &program.receives {
+            if program.serves.contains(port) {
+                return Err(format!("`{name}` receives `{port}`, which it serves itself"));
+            }
+            if !running(port) && !config.programs.values().any(|row| row.provides.contains(port)) {
+                return Err(format!("`{name}` receives `{port}`, which no row in `[boot] start` serves and no row provides"));
+            }
+        }
+    }
+    match config.apps.receives.iter().find(|port| !running(port)) {
+        Some(port) => Err(format!("`[apps] receives` names `{port}`, which no row in `[boot] start` serves")),
+        None => Ok(()),
+    }
+}
+
 /// The resolved config as the records `/system/bin/supervisor` reads.
 ///
 /// The format, the renderer and the parser are `lib/manifest/`, whose
 /// round-trip test is what makes "what the build writes is what the supervisor reads" a
 /// fact rather than two hand-matched implementations.
 fn render_manifest(config: &SystemConfig) -> Vec<u8> {
-    for gate in [held_by_their_holders_alone, starts_name_what_a_launch_can_start] {
+    for gate in [held_by_their_holders_alone, starts_name_what_a_launch_can_start, receives_reach_a_running_server] {
         if let Err(why) = gate(config) {
             panic!("the image config cannot be rendered as a manifest: {why}");
         }
@@ -766,6 +805,13 @@ pub const TRUST_ROOTS_LICENCE: (&str, &[u8]) = (
     include_bytes!("../licenses/CDLA-Permissive-2.0-webpki-root-certs.txt"),
 );
 
+/// Where on ROOT the licence of the Intel microcode an x86-64 kernel embeds
+/// is, and its text: the licence asks that a redistribution carry it.
+pub const MICROCODE_LICENCE: (&str, &[u8]) = (
+    "share/licenses/Intel-microcode-license.txt",
+    include_bytes!("../licenses/Intel-microcode-license.txt"),
+);
+
 /// The Mozilla root program's authorities as `webpki-root-certs` publishes
 /// them, each certificate a PEM block in the published order.
 pub fn trust_roots() -> Vec<u8> {
@@ -800,6 +846,10 @@ fn build_and_assemble(
 
     root_files.push((TRUST_ROOTS.to_string(), trust_roots()));
     root_files.push((TRUST_ROOTS_LICENCE.0.to_string(), TRUST_ROOTS_LICENCE.1.to_vec()));
+    match arch {
+        Arch::X86_64 => root_files.push((MICROCODE_LICENCE.0.to_string(), MICROCODE_LICENCE.1.to_vec())),
+        Arch::Aarch64 => {}
+    }
 
     // Extra files (test binaries, shared libs)
     for (name, data) in extra_files {
@@ -938,8 +988,6 @@ pub struct Plan {
     pub params: Vec<String>,
     /// The version the image's signed header names.
     pub version: u64,
-    /// Room for a second slot, or none: a machine that cannot update itself.
-    pub second: Option<image::SecondSlot>,
 }
 
 impl Plan {
@@ -950,7 +998,6 @@ impl Plan {
             features: features.iter().map(|f| (*f).to_string()).collect(),
             params: params.iter().map(|p| (*p).to_string()).collect(),
             version: image::version_now(),
-            second: None,
         }
     }
 }
@@ -979,7 +1026,6 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
         features: features.split(',').filter(|f| !f.is_empty()).map(Into::into).collect(),
         params: param,
         version: image::version_now(),
-        second: None,
     }
 }
 
@@ -1915,7 +1961,7 @@ pub fn build_test_image(
         &parts.root,
         &plan.params.join(","),
         image::Signing { key: crate::signing::key(), version: plan.version },
-        plan.second,
+        None,
     )
 }
 
@@ -2981,18 +3027,15 @@ mod tests {
         "images/diag.toml",
         "images/console.toml",
         "tests/images/acpicase.toml",
-        "tests/images/blockgrantcase.toml",
-        "tests/images/consentcase.toml",
+        "tests/images/clipboardcase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
-        "tests/images/logstallcase.toml",
         "tests/images/metalcase.toml",
         "tests/images/metaldevicecase.toml",
         "tests/images/netcase.toml",
         "tests/images/panelcase.toml",
         "tests/images/proctreecase.toml",
-        "tests/images/slotscase.toml",
         "tests/images/testcases.toml",
         "tests/images/virtjobcase.toml",
         "tests/images/virtpaniccase.toml",
@@ -3004,36 +3047,41 @@ mod tests {
         parse_config(&Path::new(env!("CARGO_MANIFEST_DIR")).join(cfg))
     }
 
-    /// Every name a program `receives` must be served or provided by some
-    /// program in the *same* config, or served by the supervisor. The build-time form of
-    /// "a client cannot name a service the system does not have", and the gate
-    /// with the sharpest teeth: no guest, no mutated tree.
-    fn receives_have_providers(cfg: &SystemConfig) -> Result<(), String> {
-        let mut providers: Vec<&str> = SUPERVISOR_SERVED.to_vec();
-        for prog in cfg.programs.values() {
-            providers.extend(prog.serves.iter().map(String::as_str));
-            providers.extend(prog.provides.iter().map(String::as_str));
-        }
-        for (name, prog) in &cfg.programs {
-            for r in &prog.receives {
-                if !providers.contains(&r.as_str()) {
-                    return Err(format!(
-                        "program `{name}` receives `{r}`, which no program serves or provides"
-                    ));
-                }
+    /// A received name reaches the supervisor, a started row's port or a row's
+    /// own, and each refusal has a config that takes it and nothing else.
+    /// `every_config_renders_its_manifest` runs it over every committed config.
+    #[test]
+    fn a_received_name_reaches_a_server_that_runs_and_never_its_own() {
+        let gate = |text: &str| receives_reach_a_running_server(&toml::from_str(text).unwrap());
+        assert_eq!(
+            gate("[boot]\nstart = [\"netstack\"]\n[programs.netstack]\nserves = [\"netstack\"]\n\
+                  [programs.host]\nreceives = [\"netstack\", \"power\", \"surface\"]\n\
+                  [programs.terminal]\nprovides = [\"surface\"]\n[apps]\nreceives = [\"netstack\", \"power\"]\n"),
+            Ok(())
+        );
+        for (text, said) in [
+            ("[programs.host]\nreceives = [\"ghost\"]\n", "`host` receives `ghost`, which no row in `[boot] start` serves"),
+            (
+                "[programs.netstack]\nserves = [\"netstack\"]\n[programs.host]\nreceives = [\"netstack\"]\n",
+                "`host` receives `netstack`, which no row in `[boot] start` serves",
+            ),
+            (
+                "[boot]\nstart = [\"netstack\"]\n[programs.netstack]\nserves = [\"netstack\"]\nreceives = [\"netstack\"]\n",
+                "`netstack` receives `netstack`, which it serves itself",
+            ),
+            (
+                "[programs.relay]\nprovides = [\"netstack\"]\n[programs.host]\nreceives = [\"netstack\"]\n",
+                "`relay` provides `netstack`, which the supervisor mints from its started server alone",
+            ),
+            ("[apps]\nreceives = [\"ghost\"]\n", "`[apps] receives` names `ghost`"),
+            ("[programs.netstack]\nserves = [\"netstack\"]\n[apps]\nreceives = [\"netstack\"]\n", "`[apps] receives` names `netstack`"),
+            ("[programs.terminal]\nprovides = [\"surface\"]\n[apps]\nreceives = [\"surface\"]\n", "`[apps] receives` names `surface`"),
+        ] {
+            match gate(text) {
+                Err(why) if why.contains(said) => {}
+                other => panic!("{text:?}: {other:?}, not {said:?}"),
             }
         }
-        Ok(())
-    }
-
-    #[test]
-    fn every_receives_names_a_provider() {
-        for cfg in ALL_CONFIGS {
-            receives_have_providers(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
-        }
-        let bad: SystemConfig =
-            toml::from_str("[programs.client]\nreceives = [\"ghost\"]\n").unwrap();
-        assert!(receives_have_providers(&bad).is_err());
     }
 
     /// The swap port reaches `swap` and nothing else, and the idle slot
@@ -3066,6 +3114,10 @@ mod tests {
         assert!(held_by_their_holders_alone(&shell).is_err());
         let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"grants\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&apps).is_err());
+        let vdagent: SystemConfig = toml::from_str("[programs.vdagent]\nreceives = [\"clipboard\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&vdagent).is_ok());
+        let editor: SystemConfig = toml::from_str("[programs.editor]\nreceives = [\"clipboard\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&editor).is_err());
     }
 
     /// The prompt port reaches its server alone, and the consent port no row,
@@ -3085,6 +3137,23 @@ mod tests {
             ("[programs.shell]\nreceives = [\"consent\"]\n", "`shell` receives `consent`"),
             ("[apps]\nreceives = [\"consent\"]\n", "`[apps] receives` names `consent`"),
             ("[programs.paint]\nserves = [\"consent\"]\n", "`paint` serves `consent`, which only `filepicker` may serve"),
+        ] {
+            match gate(text) {
+                Err(why) if why.contains(said) => {}
+                other => panic!("{text:?}: {other:?}, not {said:?}"),
+            }
+        }
+    }
+
+    /// The input port reaches ps2server alone, and never `[apps]`: a
+    /// connector types into the focused window.
+    #[test]
+    fn only_ps2server_holds_the_input_port() {
+        let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
+        assert_eq!(gate("[programs.ps2server]\nreceives = [\"input\"]\n[programs.compositor]\nserves = [\"input\"]\n"), Ok(()));
+        for (text, said) in [
+            ("[programs.paint]\nreceives = [\"input\"]\n", "`paint` receives `input`, which only `ps2server` may hold"),
+            ("[apps]\nreceives = [\"input\"]\n", "`[apps] receives` names `input`"),
         ] {
             match gate(text) {
                 Err(why) if why.contains(said) => {}
@@ -3121,38 +3190,6 @@ mod tests {
         assert!(gate("[programs.shell]\nstarts = [\"compositor\"]\n[programs.compositor]\nserves = [\"compositor\"]\n").is_err());
         assert!(gate("[programs.shell]\nstarts = [\"fileserver\"]\n[programs.fileserver]\nroles = [\"data\"]\n").is_err());
         assert!(toml::from_str::<SystemConfig>("[programs.shell]\nstart = [\"toybox\"]\n").is_err());
-    }
-
-    /// `[apps] receives` is narrower than a program's: a `provides` name is one
-    /// port per instance and nobody makes one for a package, so naming one here
-    /// is a namespace the supervisor cannot build.
-    fn apps_receive_a_served_name(cfg: &SystemConfig) -> Result<(), String> {
-        let mut served: Vec<&str> = SUPERVISOR_SERVED.to_vec();
-        for prog in cfg.programs.values() {
-            served.extend(prog.serves.iter().map(String::as_str));
-        }
-        for name in &cfg.apps.receives {
-            if !served.contains(&name.as_str()) {
-                return Err(format!("`[apps] receives` names `{name}`, which no program serves"));
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn an_installed_app_receives_only_names_the_supervisor_holds() {
-        for cfg in ALL_CONFIGS {
-            apps_receive_a_served_name(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
-        }
-        let provided: SystemConfig = toml::from_str(
-            "[apps]\nreceives = [\"surface\"]\n\
-             [programs.terminal]\nprovides = [\"surface\"]\n",
-        )
-        .unwrap();
-        assert!(apps_receive_a_served_name(&provided).is_err());
-        let ghost: SystemConfig =
-            toml::from_str("[apps]\nreceives = [\"ghost\"]\n").unwrap();
-        assert!(apps_receive_a_served_name(&ghost).is_err());
     }
 
     /// A `serves` name is one port machine-wide; a `provides` name is one port

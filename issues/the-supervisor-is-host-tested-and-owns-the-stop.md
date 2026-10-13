@@ -59,11 +59,30 @@ nothing.
    **Exit**: the crate's tests pass in
    `cargo test --workspace --exclude toyos-build`; a host test refuses a
    manifest whose dependencies form an undeclared cycle; each refusal and
-   each decision above has a mutation that reds a host test, named in the PR;
-   and the stage deletes each decision from `system/supervisor`, which calls
+   each decision above has a mutation that reds a host test, named in the PR,
+   namespace selection's among them: a row's launcher endowed as an entry of
+   `svc` (`launcher_namespace`), which a child its holder spawns directly
+   would inherit, and no such child holding one is what the `launch_authority`
+   metal row, deleted in #889, last asserted; and the stage deletes each
+   decision from `system/supervisor`, which calls
    the crate for it, named per decision in the PR; `toyos_manifest::launch`,
    who may start what and the launcher's badge codec, moves into the crate
    and out of `toyos-manifest`. No decision exists in two places.
+   **The guest arms this stage cuts.** The owner's testing ruling refuses
+   them, and they stand until this stage's host tests hold what they judge:
+   the `launch_toctou` metal row (a launch resolves to its row's own image,
+   never the caller's reopened path), the `app_view` metal row (an installed
+   package's view, the launcher refusing a package whose folder is a file,
+   grants refused in the machine's session) and `process_tree`'s launcher arms
+   (D launched and E asked of the supervisor, a launch whose place is a pipe
+   refused, and a `cat` a shell `detach`es outliving it). Two arms the test
+   sweep cut are this stage's to hold: the supervisor stopping the machine on
+   `acpiserver`'s press (`acpi_power_button`), and its grant of the idle
+   slot's partitions to `update` through the block service
+   (`update_writes_the_idle_slot_through_the_block_service`).
+   **Exit**, beside the one above: each behaviour named here has a host test
+   in the crate and a mutation that reds it, and the PR deletes the two rows
+   and the arms.
 3. **The supervisor owns the stop.** It asks each service it started to
    finish by a quit with reason terminate
    (`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`

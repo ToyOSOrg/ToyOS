@@ -29,6 +29,11 @@ pub fn counter() -> u64 {
     now
 }
 
+/// Whether the processor is Intel's: no Intel processor implements AArch64.
+pub fn processor_is_intel() -> bool {
+    false
+}
+
 /// AArch64 has no port space, and no grant names a port on it: each of these
 /// dies naming the port it was asked for.
 pub mod ioport {

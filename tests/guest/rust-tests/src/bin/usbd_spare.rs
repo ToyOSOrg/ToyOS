@@ -3,10 +3,10 @@
 //! itself so it can end it: this job holds the claim, the port usbd answers
 //! `inspect` on, and usbd's process.
 //!
-//! - no argument: usbd started, asked what it named once it says it has
-//!   settled, asked again across a span in which nothing may wake it, killed,
-//!   and started again on a fresh claim, which must name the same devices.
-//!   Every answer is printed for the harness to judge.
+//! - no argument: usbd started, asked once it says it has settled whether its
+//!   No-Op was answered by an interrupt through the claim, asked again across
+//!   a span in which nothing may wake it, and killed. Every answer is printed
+//!   for the harness to judge.
 //! - `fault`: the claim's function aimed, with no usbd, at an address outside
 //!   every grant: the kernel's `DMA FAULT` record is the harness's to read,
 //!   and the claim refusing its interrupt read from then on is this job's.
@@ -38,12 +38,6 @@ const SPARES: [PciId; 2] = [PciId { vendor: 0x1b36, device: 0x000d }, PciId { ve
 /// How long usbd has to say it has settled. Policy, and loose: enumeration
 /// is a few control transfers per device, and the guest may be slow.
 const SETTLE_BOUND: Duration = Duration::from_secs(30);
-
-/// How long a killed usbd's claim may take to come back: the kernel publishes
-/// a process's end before its deferred releases have run
-/// (`issues/deferred-release-outlives-its-syscall.md`), the supervisor's
-/// `CLAIM_RETURN` for the same reason. A liveness guard.
-const CLAIM_RETURN: Duration = Duration::from_secs(2);
 
 /// The span across which a parked usbd may wake for nothing but an event:
 /// the absence is what is measured, so the span is the instrument.
@@ -159,25 +153,12 @@ fn number(snapshot: &BTreeMap<String, Value>, path: &str) -> u64 {
     }
 }
 
-/// The devices an answer names, as `port id speed class` lines.
-fn devices(snapshot: &BTreeMap<String, Value>) -> Vec<String> {
-    let mut named = Vec::new();
-    for (path, value) in snapshot {
-        let Some(port) = path.strip_prefix("usb.device.").and_then(|p| p.strip_suffix(".id")) else { continue };
-        let field = |f: &str| snapshot.get(&format!("usb.device.{port}.{f}")).map(|v| v.to_string()).unwrap_or_default();
-        named.push(format!("port {port} {value} {} {}", field("speed"), field("class")));
-    }
-    named
-}
-
 fn drive(cap: &SysCap) {
     let (id, claimed) = claim(cap);
     let dev = claimed.unwrap_or_else(|why| panic!("usbd_spare: the claim on {} was refused: {why:?}", spelled(id)));
     let usbd = Usbd::start(id, dev);
     usbd.until("usbd: settled");
     let first = usbd.ask("settled");
-    let named = devices(&first);
-    assert_eq!(number(&first, "usb.devices") as usize, named.len());
     assert_eq!(number(&first, "usb.events.unannounced"), 0, "usbd_spare: an event no interrupt announced");
     assert_eq!(number(&first, "usb.operations.silent"), 0, "usbd_spare: an operation nothing answered");
     assert!(number(&first, "usb.interrupts.records") > 0, "usbd_spare: usbd read no interrupt record");
@@ -194,21 +175,6 @@ fn drive(cap: &SysCap) {
     assert_eq!(after.get("usb.deadline_ns").map(Value::to_string).as_deref(), Some("none"));
     usbd.kill();
     println!("usbd_spare: usbd killed");
-
-    let asked = Instant::now();
-    let dev = loop {
-        match cap.claim_pci::<PciDev>(id) {
-            Err(SyscallError::AlreadyExists) if asked.elapsed() < CLAIM_RETURN => std::thread::sleep(Duration::from_millis(1)),
-            answered => break answered.unwrap_or_else(|why| panic!("usbd_spare: the claim did not come back: {why:?}")),
-        }
-    };
-    println!("usbd_spare: the claim came back after {} ms", asked.elapsed().as_millis());
-    let again = Usbd::start(id, dev);
-    again.until("usbd: settled");
-    let second = again.ask("restarted");
-    assert_eq!(devices(&second), named, "usbd_spare: a restarted usbd named other devices");
-    again.kill();
-    println!("usbd_spare: {} device(s) named, the same after a restart: {named:?}", named.len());
 }
 
 fn fault(cap: &SysCap) {

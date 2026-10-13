@@ -21,7 +21,7 @@ use toyos::shm::SharedMemory;
 use toyos::{ipc, AsHandle, Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
-use toyos_desktop::Window;
+use toyos_desktop::{Port, Window};
 
 /// Connections accepted but not yet identified by a first frame.
 ///
@@ -82,8 +82,8 @@ pub struct ClientFrame {
     pub conn: Option<Connection>,
     /// The connection's [`PendingConn::copy`].
     pub copy: Option<CopyRegion>,
-    /// The connection's [`PendingConn::prompt`].
-    pub prompt: bool,
+    /// The connection's [`PendingConn::port`].
+    pub port: Port,
 }
 
 impl ClientFrame {
@@ -95,7 +95,7 @@ impl ClientFrame {
             payload_len: 0,
             conn: None,
             copy: None,
-            prompt: false,
+            port: Port::Compositor,
         }
     }
 
@@ -118,9 +118,10 @@ pub struct PendingConn {
     pub conn: Connection,
     pub rx: ClientRx,
     pub since: Instant,
-    /// It came in on the prompt port, whose one holder's window goes above every
-    /// other: its first frame may only ask for that window.
-    pub prompt: bool,
+    /// The port it came in on. A connection off the prompt port, whose one
+    /// holder's window goes above every other, may only ask for that window
+    /// with its first frame; one off the clipboard port may only ask to watch.
+    pub port: Port,
     /// The region a `MSG_COPY_BEGIN` was answered with. A connection holding
     /// one may send `MSG_COPY_COMMIT` and nothing else, within
     /// [`HANDSHAKE_TIMEOUT`] of `since`.
@@ -143,6 +144,12 @@ impl CopyRegion {
     pub fn take(self) -> Vec<u8> {
         self.0.as_atomic().iter().map(|b| b.load(Ordering::Relaxed)).collect()
     }
+}
+
+/// The clipboard's watcher: its connection.
+pub struct Watcher {
+    pub conn: Connection,
+    pub rx: ClientRx,
 }
 
 /// Why a client is going.
@@ -257,15 +264,11 @@ pub fn announce(dead: &[Dead]) {
 
 /// Say that a window was deliberately closed, and by what.
 ///
-/// A client that *dies* is already announced — `dropping client N — why` — and
-/// a window somebody closed was not, so the desktop's only record of one was the
-/// `windows=N` count in the statistics line. That is a sample of a level taken
-/// every two seconds: two closes inside one interval are indistinguishable
-/// from one, and from none if a window opened in between. Every report the
-/// owner has made about this desktop begins "I closed a window and then", so
-/// which window went, why, and how many are left is the first thing anyone
-/// asks of the log — and a caller that re-sends a close because it could not
-/// tell whether the first one landed closes the next window down.
+/// A client that *dies* is already announced — `dropping client N — why`.
+/// Every report the owner has made about this desktop begins "I closed a window
+/// and then", so which window went, why, and how many are left is the first
+/// thing anyone asks of the log — and a caller that re-sends a close because it
+/// could not tell whether the first one landed closes the next window down.
 pub fn note_closed(by: &str, win: &Win, remaining: usize) {
     println!(
         "compositor: window closed client={} by {by}, {remaining} left, presents={} frames={}",

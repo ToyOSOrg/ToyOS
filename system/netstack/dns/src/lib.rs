@@ -1,8 +1,9 @@
 //! A stub resolver's decisions (RFC 1035): the question it asks for a name's
 //! IPv4 addresses, which datagram answers that question, what the answer says,
-//! and when the question is asked again. Pure: `core` and `alloc`, no
-//! `unsafe`, no I/O, and no clock or randomness of its own. The caller hands in
-//! the time, the draw of every query's ID and every datagram with its source.
+//! when the question is asked again, and how long an answer is kept and for
+//! whom. Pure: `core` and `alloc`, no `unsafe`, no I/O, and no clock or
+//! randomness of its own. The caller hands in the time, the draw of every
+//! query's ID and every datagram with its source.
 //!
 //! **A reply has crossed a trust boundary.** Anyone on the path can send a
 //! datagram to the port a query left from, so a reply is read only if it
@@ -26,7 +27,23 @@
 //! 512 bytes a UDP reply may carry (RFC 1035 §4.2.1), which an `A` question
 //! for an ordinary name does not reach.
 //!
-//! **No cache.** Every lookup asks.
+//! **An answer is kept for the view that asked it, under the name it asked**
+//! ([`Cache`]): a view is one program's, and no view is answered from another's,
+//! so no program learns from the time a lookup takes which names another asked.
+//! No alias target, additional or authority record is kept in its own right,
+//! so a reply for one name plants nothing for another.
+//!
+//! **One clock a lookup.** Every TTL a lookup reads counts from its first
+//! query's send, which is no later than any resolver sent any record it read,
+//! so no record outlives what its own reply said. An answer is kept until then
+//! plus the least TTL of the aliases followed and the address RRset, its TTLs
+//! read at their lowest where they differ (RFC 2181 §5.2); a name's absence,
+//! NXDOMAIN or NODATA (RFC 2308 §2.1, §2.2), until then plus the least of the
+//! aliases that led to it and its zone's SOA's TTL and MINIMUM (§5), where the
+//! authority section holds an SOA owned by the denied name or an ancestor of
+//! it, and never where it holds none. A TTL is read unsigned (RFC 8767 §4) and
+//! capped at [`KEEP_CAP_S`]; one of zero keeps nothing (RFC 1035 §4.1.3), and
+//! neither does a failure.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -59,6 +76,21 @@ pub const MAX_ALIASES: usize = 8;
 /// number of them.
 pub const MAX_LOOKUPS: usize = 16;
 
+/// The longest any answer is kept, in seconds, whatever its TTL says. Policy:
+/// it bounds how long a wrong answer that passed every check, forged or for a
+/// host that moved, outlives its correction, at a query an hour for each name
+/// a program keeps asking.
+pub const KEEP_CAP_S: u32 = 3_600;
+
+/// The names one view keeps at once. Policy, against what one desktop session
+/// resolves.
+pub const VIEW_ENTRIES: usize = 128;
+
+/// The views a [`Cache`] keeps at once. Policy, as [`VIEW_ENTRIES`]. An entry
+/// is a name of at most 255 bytes and the addresses of one reply, so the two
+/// counts bound the bytes.
+pub const MAX_VIEWS: usize = 32;
+
 /// RFC 1035 §4.1.1.
 const HEADER: usize = 12;
 const QR: u16 = 0x8000;
@@ -71,6 +103,7 @@ const NXDOMAIN: u8 = 3;
 /// RFC 1035 §3.2.2 and §3.2.4.
 const TYPE_A: u16 = 1;
 const TYPE_CNAME: u16 = 5;
+const TYPE_SOA: u16 = 6;
 const CLASS_IN: u16 = 1;
 
 /// RFC 1035 §2.3.4: a label is at most 63 octets, and a name at most 255 in
@@ -145,6 +178,21 @@ impl Name {
     pub fn same(&self, other: &Name) -> bool {
         self.wire.eq_ignore_ascii_case(&other.wire)
     }
+
+    /// This name is `zone` or a name below it: `zone` is this one, or this one
+    /// with labels taken off its front.
+    fn within(&self, zone: &Name) -> bool {
+        let mut at = 0;
+        loop {
+            if self.wire[at..].eq_ignore_ascii_case(&zone.wire) {
+                return true;
+            }
+            match usize::from(self.wire[at]) {
+                0 => return false,
+                len => at += 1 + len,
+            }
+        }
+    }
 }
 
 /// A standard query (RFC 1035 §4.1.1, §4.1.2) with ID `id`, asking with
@@ -188,8 +236,9 @@ pub enum Verdict {
     /// not define), which asks the next server.
     ServerFailed(u8),
     /// RCODE 3: the name, or the name an alias leads to, does not exist
-    /// (RFC 2308 §2.1).
-    NoSuchName,
+    /// (RFC 2308 §2.1); and for how many seconds that may be kept, by the
+    /// aliases followed to it and its zone's SOA, zero with no SOA.
+    NoSuchName(u32),
     /// The answer, read along the alias chain from the asked name.
     Answer(Answer),
     /// The alias chain is longer than the bound it was read under.
@@ -204,6 +253,10 @@ pub struct Answer {
     pub aliases: Vec<Name>,
     /// Addresses of the chain's last name, each once, in the reply's order.
     pub addrs: Vec<[u8; 4]>,
+    /// For how many seconds what this reply says may be kept: the least TTL
+    /// among the aliases followed and the chain's last name's addresses; with
+    /// neither, the denied name's SOA's, zero with no SOA.
+    pub keep: u32,
 }
 
 impl PartialEq for Name {
@@ -271,6 +324,11 @@ impl<'a> Message<'a> {
         Ok(u16::from_be_bytes([b[0], b[1]]))
     }
 
+    fn u32(&self, at: usize) -> Result<u32, Stray> {
+        let b = self.slice(at, 4)?;
+        Ok(u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
     /// The name at `at`, and where the bytes after it begin.
     ///
     /// **A pointer must point before the run of labels it ends**, which is
@@ -323,6 +381,8 @@ struct Record {
     owner: Name,
     rtype: u16,
     class: u16,
+    /// Capped, as [`keep`] reads one.
+    ttl: u32,
     data: usize,
     end: usize,
 }
@@ -331,10 +391,59 @@ fn record(msg: &Message, at: usize) -> Result<Record, Stray> {
     let (owner, fixed) = msg.name(at)?;
     let rtype = msg.u16(fixed)?;
     let class = msg.u16(fixed + 2)?;
+    let ttl = keep(msg.u32(fixed + 4)?);
     let len = usize::from(msg.u16(fixed + 8)?);
     let data = fixed + 10;
     msg.slice(data, len)?;
-    Ok(Record { owner, rtype, class, data, end: data + len })
+    Ok(Record { owner, rtype, class, ttl, data, end: data + len })
+}
+
+/// A TTL as seconds to keep: unsigned (RFC 8767 §4), and at most
+/// [`KEEP_CAP_S`].
+fn keep(ttl: u32) -> u32 {
+    ttl.min(KEEP_CAP_S)
+}
+
+/// The aliases from `asked` along `cnames`, each with its TTL, or `None` for a
+/// chain longer than `budget`.
+fn chain<'n>(asked: &Name, cnames: &'n [(Name, Name, u32)], budget: usize) -> Option<Vec<(&'n Name, u32)>> {
+    let mut chain: Vec<(&Name, u32)> = Vec::new();
+    loop {
+        let now = chain.last().map_or(asked, |(name, _)| *name);
+        let Some((_, target, ttl)) = cnames.iter().find(|(owner, ..)| owner.same(now)) else { return Some(chain) };
+        if chain.len() == budget {
+            return None;
+        }
+        chain.push((target, *ttl));
+    }
+}
+
+/// For how many seconds `denied`'s absence may be kept, by the `count` records
+/// of the authority section at `at`: the least, over each SOA there owned by
+/// `denied` or an ancestor of it, of its TTL and its MINIMUM (RFC 2308 §5);
+/// zero where there is none.
+fn absence(msg: &Message, mut at: usize, count: u16, denied: &Name) -> Result<u32, Stray> {
+    let mut least: Option<u32> = None;
+    for _ in 0..count {
+        let r = record(msg, at)?;
+        at = r.end;
+        if r.class != CLASS_IN || r.rtype != TYPE_SOA {
+            continue;
+        }
+        // MNAME and RNAME, then SERIAL, REFRESH, RETRY, EXPIRE and MINIMUM
+        // (RFC 1035 §3.3.13).
+        let (_, rname) = msg.name(r.data)?;
+        let (_, fields) = msg.name(rname)?;
+        if fields + 20 != r.end {
+            return Err(Stray::Malformed("an SOA record whose data is not two names and five numbers"));
+        }
+        if !denied.within(&r.owner) {
+            continue;
+        }
+        let soa = r.ttl.min(keep(msg.u32(fields + 16)?));
+        least = Some(least.map_or(soa, |least| least.min(soa)));
+    }
+    Ok(least.unwrap_or(0))
 }
 
 /// What `msg`, a datagram that carries `id` from a server a query went to,
@@ -367,14 +476,13 @@ fn read_checked(msg: &Message, id: u16, asked: &Name, budget: usize) -> Result<V
     if flags & TC != 0 {
         return Ok(Verdict::Truncated);
     }
-    match (flags & RCODE) as u8 {
-        0 => {}
-        NXDOMAIN => return Ok(Verdict::NoSuchName),
-        rcode => return Ok(Verdict::ServerFailed(rcode)),
+    let rcode = (flags & RCODE) as u8;
+    if rcode != 0 && rcode != NXDOMAIN {
+        return Ok(Verdict::ServerFailed(rcode));
     }
 
-    let mut cnames: Vec<(Name, Name)> = Vec::new();
-    let mut addrs: Vec<(Name, [u8; 4])> = Vec::new();
+    let mut cnames: Vec<(Name, Name, u32)> = Vec::new();
+    let mut addrs: Vec<(Name, [u8; 4], u32)> = Vec::new();
     let mut at = after + 4;
     for _ in 0..msg.u16(6)? {
         let r = record(msg, at)?;
@@ -387,7 +495,7 @@ fn read_checked(msg: &Message, id: u16, asked: &Name, budget: usize) -> Result<V
                 let data = msg.slice(r.data, r.end - r.data)?;
                 let addr: [u8; 4] =
                     data.try_into().map_err(|_| Stray::Malformed("an A record whose data is not four bytes"))?;
-                addrs.push((r.owner, addr));
+                addrs.push((r.owner, addr, r.ttl));
             }
             TYPE_CNAME => {
                 let (target, end) = msg.name(r.data)?;
@@ -396,32 +504,46 @@ fn read_checked(msg: &Message, id: u16, asked: &Name, budget: usize) -> Result<V
                 }
                 // One alias per name (RFC 1034 §3.6.2, RFC 2181 §10.1): a
                 // second leaves the chain with two ways to go.
-                if cnames.iter().any(|(owner, _)| owner.same(&r.owner)) {
+                if cnames.iter().any(|(owner, ..)| owner.same(&r.owner)) {
                     return Err(Stray::Malformed("two CNAME records for one name"));
                 }
-                cnames.push((r.owner, target));
+                cnames.push((r.owner, target, r.ttl));
             }
             _ => {}
         }
     }
+    let authority = msg.u16(8)?;
 
-    let mut chain: Vec<Name> = Vec::new();
-    loop {
-        let now = chain.last().unwrap_or(asked);
-        let Some((_, target)) = cnames.iter().find(|(owner, _)| owner.same(now)) else { break };
-        if chain.len() == budget {
-            return Ok(Verdict::TooManyAliases);
-        }
-        chain.push(target.clone());
+    let chain = chain(asked, &cnames, budget);
+    if rcode == NXDOMAIN {
+        // The name denied is the chain's last (RFC 2308 §2.1). A chain too
+        // long to read keeps nothing, and the name is no less denied.
+        let keep = match chain {
+            Some(chain) => {
+                let denied = chain.last().map_or(asked, |(name, _)| *name);
+                chain.iter().map(|(_, ttl)| *ttl).fold(absence(msg, at, authority, denied)?, u32::min)
+            }
+            None => 0,
+        };
+        return Ok(Verdict::NoSuchName(keep));
     }
-    let owner = chain.last().unwrap_or(asked);
+    let Some(chain) = chain else { return Ok(Verdict::TooManyAliases) };
+    let owner = chain.last().map_or(asked, |(name, _)| *name);
     let mut found: Vec<[u8; 4]> = Vec::new();
-    for (_, addr) in addrs.iter().filter(|(name, _)| name.same(owner)) {
+    let mut least = chain.iter().map(|(_, ttl)| *ttl).min();
+    for (_, addr, ttl) in addrs.iter().filter(|(name, ..)| name.same(owner)) {
+        least = Some(least.map_or(*ttl, |least| least.min(*ttl)));
         if !found.contains(addr) {
             found.push(*addr);
         }
     }
-    Ok(Verdict::Answer(Answer { aliases: chain, addrs: found }))
+    let keep = match least {
+        Some(least) => least,
+        // Neither an alias nor an address: the name has no `A` record (RFC
+        // 2308 §2.2), and its absence is the SOA's to time.
+        None => absence(msg, at, authority, asked)?,
+    };
+    Ok(Verdict::Answer(Answer { aliases: chain.into_iter().map(|(name, _)| name.clone()).collect(), addrs: found, keep }))
 }
 
 /// How a lookup ended without an address.
@@ -529,6 +651,10 @@ pub struct Lookup {
     /// The RCODE of the last server failure, which is what a lookup that runs
     /// out of queries reports if any server answered at all.
     failed: Option<u8>,
+    /// When the first query was sent, which every TTL read counts from.
+    began: u64,
+    /// The least TTL of every record read so far, in seconds.
+    keep: u32,
 }
 
 impl Lookup {
@@ -547,6 +673,8 @@ impl Lookup {
             asked: 0,
             due: now,
             failed: None,
+            began: now,
+            keep: KEEP_CAP_S,
         };
         let step = lookup.ask(now, id);
         Some((lookup, step))
@@ -555,6 +683,13 @@ impl Lookup {
     /// When the lookup must be woken if no datagram arrives first.
     pub fn due(&self) -> u64 {
         self.due
+    }
+
+    /// Until when what the lookup ended with may be answered again without
+    /// asking: its first query's send plus the least TTL of every record it
+    /// read, and `None` where that is zero.
+    pub fn keep_until(&self) -> Option<u64> {
+        (self.keep > 0).then(|| self.began.saturating_add(u64::from(self.keep) * 1_000))
     }
 
     /// The queries whose answer is still read, oldest first. The port of any
@@ -658,7 +793,10 @@ impl Lookup {
         match read(msg, carried, &self.name, MAX_ALIASES - self.aliases) {
             Verdict::Stray(_) => Step::Wait,
             Verdict::Truncated => Step::Done(Err(Failure::Truncated)),
-            Verdict::NoSuchName => Step::Done(Err(Failure::NoSuchName)),
+            Verdict::NoSuchName(keep) => {
+                self.keep = self.keep.min(keep);
+                Step::Done(Err(Failure::NoSuchName))
+            }
             Verdict::TooManyAliases => Step::Done(Err(Failure::TooManyAliases)),
             Verdict::ServerFailed(rcode) => {
                 self.failed = Some(rcode);
@@ -674,25 +812,133 @@ impl Lookup {
                     Step::Wait
                 }
             }
-            Verdict::Answer(answer) if !answer.addrs.is_empty() => Step::Done(Ok(answer.addrs)),
-            Verdict::Answer(answer) => match answer.aliases.last() {
-                None => Step::Done(Err(Failure::NoAddress)),
-                // The chain ends at a name this reply holds nothing for: that
-                // name is asked in its own right (RFC 1034 §5.3.3), with every
-                // query and server afresh.
-                Some(last) => {
-                    self.aliases += answer.aliases.len();
-                    self.name = last.clone();
-                    self.sent.clear();
-                    self.asked = 0;
-                    self.failed = None;
-                    for (_, free) in &mut self.servers {
-                        *free = now;
+            Verdict::Answer(answer) => {
+                self.keep = self.keep.min(answer.keep);
+                match answer.aliases.last() {
+                    _ if !answer.addrs.is_empty() => Step::Done(Ok(answer.addrs)),
+                    None => Step::Done(Err(Failure::NoAddress)),
+                    // The chain ends at a name this reply holds nothing for:
+                    // that name is asked in its own right (RFC 1034 §5.3.3),
+                    // with every query and server afresh.
+                    Some(last) => {
+                        self.aliases += answer.aliases.len();
+                        self.name = last.clone();
+                        self.sent.clear();
+                        self.asked = 0;
+                        self.failed = None;
+                        for (_, free) in &mut self.servers {
+                            *free = now;
+                        }
+                        self.ask(now, id)
                     }
-                    self.ask(now, id)
                 }
-            },
+            }
         }
+    }
+}
+
+/// Which emptying of a [`Cache`] a lookup started after: its answer is kept
+/// only where no emptying came since.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Generation(u64);
+
+/// One name a view keeps.
+#[derive(Debug)]
+struct Entry {
+    name: Name,
+    answer: Result<Vec<[u8; 4]>, Failure>,
+    /// Answered before this time, and never at it or after.
+    until: u64,
+}
+
+/// One program's names, least recently used first.
+#[derive(Debug)]
+struct View {
+    key: Vec<u8>,
+    entries: Vec<Entry>,
+}
+
+/// Every view's answers, and what empties them all at once.
+///
+/// **A view is named by bytes the caller vouches for**, and is answered only
+/// from its own entries. A full view drops its expired entries, then its least
+/// recently used one, so no view's lookup takes another's entry. With
+/// [`MAX_VIEWS`] held a new view replaces another whole: one whose entries
+/// have all expired, which tells its program nothing, and with none the least
+/// recently used, live entries and all, whose program then finds its next
+/// lookup asked (`issues/netstack-replaces-one-programs-cached-answers-to-keep-anothers.md`).
+///
+/// **An emptying is a new generation**: an answer whose lookup started under
+/// an older one is not kept, so a lookup in flight across an emptying keeps
+/// nothing.
+#[derive(Debug, Default)]
+pub struct Cache {
+    /// Least recently used first.
+    views: Vec<View>,
+    generation: u64,
+}
+
+impl Cache {
+    /// The generation a lookup starting now carries to [`Self::keep`].
+    pub fn generation(&self) -> Generation {
+        Generation(self.generation)
+    }
+
+    /// Forgets every answer of every view.
+    pub fn empty(&mut self) {
+        self.views.clear();
+        self.generation += 1;
+    }
+
+    /// What `view` keeps for `name` at `now`, if it keeps anything still.
+    pub fn answer(&mut self, view: &[u8], name: &Name, now: u64) -> Option<Result<Vec<[u8; 4]>, Failure>> {
+        let at = self.views.iter().position(|kept| kept.key == view)?;
+        let mut kept = self.views.remove(at);
+        let answer = kept.entries.iter().position(|entry| entry.name.same(name)).and_then(|at| {
+            let entry = kept.entries.remove(at);
+            (now < entry.until).then(|| {
+                let answer = entry.answer.clone();
+                kept.entries.push(entry);
+                answer
+            })
+        });
+        self.views.push(kept);
+        answer
+    }
+
+    /// Keeps for `view` what a lookup of `name` that started under `started`
+    /// ended with, until `until`: addresses or the name's absence, and never a
+    /// failure, an answer [`Lookup::keep_until`] gives no time, or one from
+    /// before an emptying. A later answer for the name replaces an earlier one.
+    pub fn keep(&mut self, view: &[u8], name: &Name, started: Generation, answer: Result<&[[u8; 4]], Failure>, until: Option<u64>, now: u64) {
+        let answer = match answer {
+            Ok(addrs) => Ok(addrs.to_vec()),
+            Err(absent @ (Failure::NoSuchName | Failure::NoAddress)) => Err(absent),
+            Err(Failure::TimedOut | Failure::Unreachable | Failure::Truncated | Failure::ServerFailed(_) | Failure::TooManyAliases) => return,
+        };
+        let Some(until) = until.filter(|until| now < *until) else { return };
+        if started != self.generation() {
+            return;
+        }
+        let mut kept = match self.views.iter().position(|kept| kept.key == view) {
+            Some(at) => self.views.remove(at),
+            None => {
+                if self.views.len() == MAX_VIEWS {
+                    let spent = self.views.iter().position(|kept| kept.entries.iter().all(|entry| entry.until <= now));
+                    self.views.remove(spent.unwrap_or(0));
+                }
+                View { key: view.to_vec(), entries: Vec::new() }
+            }
+        };
+        kept.entries.retain(|entry| !entry.name.same(name));
+        if kept.entries.len() == VIEW_ENTRIES {
+            kept.entries.retain(|entry| now < entry.until);
+        }
+        if kept.entries.len() == VIEW_ENTRIES {
+            kept.entries.remove(0);
+        }
+        kept.entries.push(Entry { name: name.clone(), answer, until });
+        self.views.push(kept);
     }
 }
 

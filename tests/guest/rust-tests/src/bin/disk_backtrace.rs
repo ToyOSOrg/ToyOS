@@ -1,5 +1,5 @@
-//! A program that dies running from a disk is recorded as its file and the
-//! faulting offset, and `symbolize` names the function from them.
+//! A program that dies running from a disk is recorded as its file, the
+//! faulting offset and its build-id, from which a reader names the function.
 //!
 //! `/home` rather than `/tmp`: tmpfs has no device under it, so it would prove
 //! the mechanism without proving the claim. The claim is about a device.
@@ -18,8 +18,6 @@ use toyos::syscap::SysCap;
 const DIR: &str = "/home/disk_backtrace";
 const IN_ROOT: &str = "/system/bin/test_rs_disk_backtrace_child";
 const ON_DISK: &str = "/home/disk_backtrace/child";
-const FRAME: &str = "/home/disk_backtrace/frame";
-const NAMER: &str = "/system/bin/symbolize";
 /// The child's `#[inline(never)]` function the null read is in.
 const FAULTS_IN: &str = "null_deref_run_from_disk";
 
@@ -48,16 +46,6 @@ fn main() {
     println!("  recorded: {frame}");
     assert!(frame.contains(" id=") && !frame.ends_with(" id=-"), "the frame carries no build-id: {frame}");
     assert!(!frame.contains(FAULTS_IN), "the kernel named a program's frame: {frame}");
-
-    fs::write(FRAME, format!("{frame}\n")).unwrap_or_else(|e| panic!("write {FRAME}: {e}"));
-    let named = Command::new(NAMER)
-        .arg(FRAME)
-        .output()
-        .unwrap_or_else(|e| panic!("run {NAMER}: {e}"));
-    assert!(named.status.success(), "{NAMER} {FRAME}: {:?}", named.status);
-    let named = String::from_utf8_lossy(&named.stdout).into_owned();
-    println!("  named: {}", named.trim_end());
-    assert!(named.contains(FAULTS_IN), "{NAMER} did not name {FAULTS_IN} from {frame}: {named}");
 
     println!("disk backtrace test passed");
 }

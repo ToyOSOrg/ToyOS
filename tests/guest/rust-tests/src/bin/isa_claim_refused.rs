@@ -1,5 +1,8 @@
-//! Where the kernel drives the i8042, an `isa` claim on it is refused: two
-//! drivers on one controller is not something a claim may create.
+//! Where the kernel declared a port of the i8042's row, an `isa` claim on the
+//! row is refused: a claim may not hand a process a port the kernel drives.
+//!
+//! Run under `isa-port-declared`, which declares the command port to the
+//! kernel as a FADT reset register at 0x64 is.
 
 use toyos::endow::Endowments;
 use toyos::syscap::SysCap;
@@ -14,10 +17,9 @@ fn main() {
     match cap.claim_isa::<Device>(set) {
         Err(SyscallError::PermissionDenied) => {}
         other => panic!(
-            "a claim on the i8042 answered {:?}, not PermissionDenied: the kernel does not drive \
-             the controller here, or let a claim share it",
+            "a claim on a row whose port the kernel declared answered {:?}, not PermissionDenied",
             other.map(|_| ())
         ),
     }
-    println!("the claim on a controller the kernel drives was refused PermissionDenied");
+    println!("the claim on a row with a port the kernel declared was refused PermissionDenied");
 }

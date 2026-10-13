@@ -1,5 +1,4 @@
-//! RFC 4648 base64, the armour of an OpenSSH key file and the digits of a
-//! fingerprint.
+//! RFC 4648 base64, the armour of an OpenSSH key file.
 
 const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

@@ -752,11 +752,13 @@ pub const FLASHABLE: &[&str] = &[
     "unclaimed-vector-selftest",
     "xhci-xecp-selftest",
     "xhci-descriptor-selftest",
-    // Two probes rather than staged inputs, and both are reads: the SS-reload
-    // one runs inside the first syscall's own context switch, and the input-core one merges
-    // events it made up itself.
+    // A probe rather than staged inputs, and a read: it runs inside the first
+    // syscall's own context switch.
     "sysret-ss-probe",
-    "test-input-merge",
+    // It enters one port in the kernel's table of declared ports at boot. No
+    // kernel path reads or writes a port for that entry, so it reaches no
+    // device; what it changes is that a claim on the i8042's row is refused.
+    "isa-port-declared",
     // Three nested `scheduler::Operation`s with known deadlines, in both homes,
     // each printing what it asked for and what it observed. It establishes and
     // drops them and reaches nothing else.
@@ -770,6 +772,12 @@ pub const FLASHABLE: &[&str] = &[
     // without interrupt remapping. It writes no register a reset does not
     // return to firmware.
     "iommu-no-remap",
+    // The BSP is handed the T14's Intel update with its header's revision
+    // raised by one and its checksum sealed again. Its payload is Intel's own,
+    // the revision the CPU already runs, so the CPU refuses it or runs what it
+    // ran, and the boot goes on to userland and ends the way an unarmed one
+    // does. Nothing it writes outlives a hard reset (SDM Vol. 3A §12.11.6.1).
+    "microcode-reseal",
     // It seals this boot's own record under an identity one bit from this
     // stick's, so the pass that finds it clears it and boots a kernel. The page
     // is memory the loader allocated and the machine is what it was after.
@@ -801,12 +809,6 @@ pub const FLASHABLE: &[&str] = &[
     // hold, reaches no firmware state, and the worst
     // it leaves is a stick a replug clears — the defect the arm exists to stage.
     "usb-transport-break",
-    // The kernel leaves the i8042 unprobed and a test process drives it through
-    // an `isa` claim: it reads the configuration byte, has the keyboard
-    // acknowledge `0xF4` and writes the byte back, each a command this kernel's
-    // own driver sends the controller on every boot. It reaches no firmware
-    // state, and firmware programs the controller again at the next power-on.
-    "i8042-withheld",
     // The kernel leaves the Type-C xHCI controller to a claim, and `usbd`
     // drives it through the unit: the handoff, a reset and its own rings, as
     // this kernel's driver does every boot. Firmware owns neither of the

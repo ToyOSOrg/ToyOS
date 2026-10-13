@@ -5,7 +5,10 @@
 //! Between them the volume holds clusters its entry does not reach, which
 //! fatgen103 refuses, so every open file is brought level — its entry written,
 //! its chain reconciled — at its last close, at an fsync and at a sync, as
-//! the kernel's adapter did.
+//! the kernel's adapter did. **The two are a cache flush apart**: the cache
+//! writes lowest block first and the disk keeps no order until a flush, so an
+//! entry put into the cache beside its chain and data would reach the disk
+//! before the clusters it names.
 //!
 //! **A create makes the directories on its way**, as the kernel's did: a log
 //! file's path is its own, and FAT has the directories to carry it. A
@@ -180,6 +183,11 @@ impl<D: Disk> FatVolume<D> {
         let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
         if open.gone {
             return Ok(());
+        }
+        // The chain and the data on the disk before the entry that reaches
+        // them is in the cache.
+        if open.file.needs_reconcile() {
+            self.cache.flush().map_err(|_| logged("the chain", &open.path, Error::Io))?;
         }
         self.fs.flush_meta(&mut open.file, time).map_err(|e| logged("the entry", &open.path, e))?;
         if open.file.needs_reconcile() {
@@ -548,6 +556,11 @@ mod tests {
     /// The specification's fixture volume, writable, on a disk with room past
     /// it for [`evict`] to read, and the handle that moves its refused block.
     fn spec_fat() -> (FatVolume<Refusing>, Rc<Cell<u64>>, spec_volume::Volume) {
+        spec_fat_on(|| 1_717_245_296 * NANOS_PER_SEC)
+    }
+
+    /// [`spec_fat`], stamping by `clock`.
+    fn spec_fat_on(clock: fn() -> u64) -> (FatVolume<Refusing>, Rc<Cell<u64>>, spec_volume::Volume) {
         let spec = spec_volume::fixture();
         let blocks = spec.bytes.len().div_ceil(BLOCK);
         let mut image = spec.bytes.clone();
@@ -555,8 +568,30 @@ mod tests {
         let mut ram = Ram::new((blocks + 2 * CLEAN_LIMIT) as u64);
         ram.write(0, &image).unwrap();
         let refused = Rc::new(Cell::new(u64::MAX));
-        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, true, || 1_717_245_296 * NANOS_PER_SEC).unwrap();
+        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, true, clock).unwrap();
         (v, refused, spec)
+    }
+
+    /// What [`the_flush_stamps_its_even_second_and_not_the_write_s`]'s volume
+    /// reads as the time, which only that test sets.
+    static NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// FAT stamps a file's entry with the flush that levels it, read back off
+    /// the disk: the whole second of that flush, kept to the even one at or
+    /// before it (`FatTime`'s two-second resolution), and never the write's.
+    #[test]
+    fn the_flush_stamps_its_even_second_and_not_the_write_s() {
+        use std::sync::atomic::Ordering::Relaxed;
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        let (mut v, _, _) = spec_fat_on(|| NOW.load(Relaxed));
+        NOW.store(1_717_245_296 * NANOS_PER_SEC, Relaxed);
+        let a = v.open("a.txt", CREATE).unwrap();
+        v.write(a, 0, &[1; 3000]).unwrap();
+        NOW.store(1_717_245_301 * NANOS_PER_SEC + 500_000_000, Relaxed);
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        v.close(a).unwrap();
+        evict(&v);
+        assert_eq!(v.lstat("a.txt").unwrap().mtime, 1_717_245_300 * NANOS_PER_SEC);
     }
 
     /// Every clean block out of the cache, so the next read of one asks the disk.
@@ -695,6 +730,135 @@ mod tests {
         assert!(out == spec.bytes[spec_volume::cluster_offset(spec.at("short.txt").first)..][..100], "the file reads as the fixture wrote it");
         v.close(n).unwrap();
         assert_eq!(v.sync(), Ok(Vec::new()));
+    }
+
+    /// A disk whose bytes are the volume's, whole in memory.
+    struct Image(Vec<u8>);
+
+    impl Disk for Image {
+        fn blocks(&self) -> u64 {
+            (self.0.len() / BLOCK) as u64
+        }
+        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
+            let at = first as usize * BLOCK;
+            out.copy_from_slice(&self.0[at..at + out.len()]);
+            Ok(())
+        }
+        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
+            let at = first as usize * BLOCK;
+            self.0[at..at + data.len()].copy_from_slice(data);
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), DiskError> {
+            Ok(())
+        }
+    }
+
+    /// The blocks a disk was written, in order, one epoch to each flush: the
+    /// disk keeps no order among one epoch's writes, and has all of an epoch
+    /// before any of the next.
+    type Epochs = Rc<std::cell::RefCell<Vec<Vec<(u64, Vec<u8>)>>>>;
+
+    /// A disk that keeps every block it is written in its flush epoch, so a
+    /// test can stop it with any of one epoch's writes on it.
+    struct Traced {
+        image: Image,
+        epochs: Epochs,
+    }
+
+    impl Disk for Traced {
+        fn blocks(&self) -> u64 {
+            self.image.blocks()
+        }
+        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
+            self.image.read(first, out)
+        }
+        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
+            let mut epochs = self.epochs.borrow_mut();
+            let epoch = epochs.last_mut().expect("an epoch is always open");
+            for (i, block) in data.chunks_exact(BLOCK).enumerate() {
+                epoch.push((first + i as u64, block.to_vec()));
+            }
+            self.image.write(first, data)
+        }
+        fn flush(&mut self) -> Result<(), DiskError> {
+            self.epochs.borrow_mut().push(Vec::new());
+            self.image.flush()
+        }
+    }
+
+    fn written<'a>(image: &mut [u8], writes: impl IntoIterator<Item = &'a (u64, Vec<u8>)>) {
+        for (block, data) in writes {
+            let at = *block as usize * BLOCK;
+            image[at..at + BLOCK].copy_from_slice(data);
+        }
+    }
+
+    /// An append and its sync, stopped with every flush epoch before one on
+    /// the disk and any of that one's writes, leave a volume fatgen103's
+    /// checker refuses only for clusters no file's size reaches, and that mounts and
+    /// holds the file as the last whole sync left it or as the append made
+    /// it: never an entry naming bytes its chain does not reach or its
+    /// clusters do not hold yet. With every epoch on the disk the checker
+    /// refuses nothing and the file is the append's.
+    #[test]
+    fn an_append_stopped_with_any_writes_of_a_flush_on_the_disk_reads_back_the_last_sync() {
+        use toyos_fat32_check::{check, describe, Complaint};
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        const OPEN: OpenHow = OpenHow { create: false, create_new: false, truncate: false };
+        let clock = || 1_717_245_296 * NANOS_PER_SEC;
+        let spec = spec_volume::fixture();
+        let mut image = spec.bytes.clone();
+        image.resize(spec.bytes.len().div_ceil(BLOCK) * BLOCK, 0);
+        let epochs: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
+        let mut v = FatVolume::mount(Traced { image: Image(image.clone()), epochs: Rc::clone(&epochs) }, true, clock)
+            .unwrap();
+        let held: Vec<u8> = (0..3000u32).map(|i| (i % 251 + 1) as u8).collect();
+        let appended: Vec<u8> = (0..3 * BLOCK as u32).map(|i| (i % 241 + 2) as u8).collect();
+        let a = v.open("a.txt", CREATE).unwrap();
+        v.write(a, 0, &held).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let synced = epochs.borrow().len() - 1;
+        v.write(a, held.len() as u64, &appended).unwrap();
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        let epochs = epochs.borrow().clone();
+        let whole = [&held[..], &appended[..]].concat();
+        written(&mut image, epochs[..synced].iter().flatten());
+
+        for (e, epoch) in epochs.iter().enumerate().skip(synced) {
+            for kept in 0..1u32 << epoch.len() {
+                let stop = format!("stopped in flush epoch {e} of {} with writes {kept:#b} of its {}", epochs.len(), epoch.len());
+                let mut bytes = image.clone();
+                written(&mut bytes, epoch.iter().enumerate().filter(|(i, _)| kept >> i & 1 == 1).map(|(_, w)| w));
+                let synced_whole = kept == (1 << epoch.len()) - 1 && epochs[e + 1..].iter().all(Vec::is_empty);
+                // Clusters no entry reaches yet, and the last sync's entry over
+                // the append's chain: the window between the chain and its
+                // entry, closed once the sync is whole on the disk.
+                let refused: Vec<_> = check(&bytes)
+                    .into_iter()
+                    .filter(|c| match c {
+                        _ if synced_whole => true,
+                        Complaint::LostChain { .. } | Complaint::FsInfoFreeCount { .. } | Complaint::FatMirror { .. } => false,
+                        Complaint::ChainTooLong { path, size, .. } => !(path == "/a.txt" && *size == held.len() as u64),
+                        _ => true,
+                    })
+                    .collect();
+                assert!(refused.is_empty(), "{stop}: {}", describe(&refused));
+                let mut after = FatVolume::mount(Image(bytes), false, clock).unwrap_or_else(|e| panic!("{stop}: {e}"));
+                let n = after.open("a.txt", OPEN).unwrap();
+                let size = after.lstat("a.txt").unwrap().size as usize;
+                let mut out = vec![0u8; size];
+                let read = after.read(n, 0, &mut crate::volume::Buf(&mut out));
+                assert_eq!(read, Ok(size), "{stop}: a {size}-byte file");
+                assert!(
+                    out == whole || out == held && !synced_whole,
+                    "{stop}: the file is {size} bytes and neither the {} the last sync held nor the {} the append made",
+                    held.len(),
+                    whole.len()
+                );
+            }
+            written(&mut image, epoch);
+        }
     }
 
     /// What the driver says of a volume that stopped answering is `Io`, which

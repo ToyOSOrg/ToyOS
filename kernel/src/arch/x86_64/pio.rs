@@ -146,7 +146,7 @@ pub struct TakenBack(());
 /// shootdown returns only once every other CPU has answered it from Ring 0,
 /// so no thread that was in Ring 3 before is there still.
 pub fn take_back(_stopping: &crate::quiesce::Stopping) -> TakenBack {
-    super::tlb::shootdown(crate::invalidation::Origin::Stop);
+    super::tlb::shootdown(crate::invalidation::Origin::Stop, crate::invalidation::Half::User);
     TakenBack(())
 }
 
@@ -254,4 +254,7 @@ pub fn fill_i8042_row() {
             wires,
         },
     );
+    if crate::actuator::isa_port_declared() {
+        declare("the isa-port-declared actuator", Ports::one(0x64), Mediated::Kept).expect("isa: 0x64 declared before the actuator");
+    }
 }

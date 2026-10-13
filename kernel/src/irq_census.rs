@@ -26,8 +26,6 @@ pub enum Source {
     /// claim an interrupt belonged to is the claim's own record, and the census
     /// is about this machine's interrupt routing.
     UserDev,
-    /// Vector 0x24, the i8042's I/O APIC pin — both PS/2 lines.
-    I8042,
     /// Vector 0x25, the remapping unit's fault event.
     DmaFault,
     /// Vector 0x26, HDA stream completion.
@@ -45,11 +43,11 @@ pub enum Source {
 }
 
 impl Source {
-    pub const COUNT: usize = 11;
+    pub const COUNT: usize = 10;
 
     /// Order `tests/toyos.rs`'s `irq_census_conservation` parses back; must match variant order.
     pub const NAMES: [&'static str; Self::COUNT] = [
-        "timer", "kick", "xhci", "userdev", "i8042", "dmafault", "hda", "tlb", "nmi",
+        "timer", "kick", "xhci", "userdev", "dmafault", "hda", "tlb", "nmi",
         "spurious", "unclaimed",
     ];
 }

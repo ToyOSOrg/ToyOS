@@ -1,8 +1,7 @@
 //! The `isa` claim's ports: the i8042's two, opened in the I/O permission
 //! bitmap for the one process that bound them and for no other.
 //!
-//! Run where the kernel drives no i8042 (`i8042-withheld`), so the claim is
-//! granted. Every port access that must be refused is made in a child of its
+//! Run on a boot that starts no ps2server, so the claim is granted. Every port access that must be refused is made in a child of its
 //! own, which prints a marker, makes the one access and must never print again;
 //! the kernel's record of each kill is the harness's to read.
 //!

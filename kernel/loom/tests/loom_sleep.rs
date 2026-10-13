@@ -2,34 +2,38 @@
 //! (invariant I2).
 //!
 //! The handshake is: publish SLEEPING, drain, check the mailbox one last
-//! time, then halt. A producer that posts after that check raises the KICK
-//! edge with SLEEPING already visible, so it sends the targeted IPI and the
-//! halt cannot be a sleep-through. The IPI is modelled as a counter, because
-//! its only relevant effect is "the target cannot stay halted".
+//! time, then halt. A producer kicks on the doorbell's 0→1 edge, busy target
+//! or asleep, and the one behind it coalesces into that kick. The IPI is
+//! modelled by its one effect, the target's `need_resched`: the pass clears
+//! it before it begins, as the kernel's `sched::driver::pass` does, and the
+//! halt decision reads it last, as the driver's final look before `hlt` does.
+//! A CPU that halts with work queued must have one raised after that look —
+//! an IPI still on its way to wake it.
 //!
-//! Two producers, so the edge-coalescing rule (a normal wake to a busy CPU
-//! costs zero IPIs; a sleeping CPU always gets one) is exercised rather than
-//! assumed.
+//! Two producers, so the edge-coalescing rule is exercised rather than
+//! assumed: the second can elide only into a kick that may already have been
+//! spent.
 //!
-//! The edge the property rests on is `ring`'s read of the doorbell's bits: it
-//! is what lets a producer see a target's freshly published SLEEPING before
-//! deciding to elide the IPI. On x86 every read-modify-write is a full fence,
-//! so a build with it relaxed behaves identically to this one and no guest
-//! test can fail here. The negative case is a cargo feature rather than a
-//! comment:
+//! The edge the property rests on is the release half of `ring`'s
+//! read-modify-write: a producer that coalesces leaves its message for the
+//! pass the earlier kick buys, and only `begin_pass`'s acquire of the edge it
+//! left puts that message in the drain. On x86 every read-modify-write is a
+//! full fence, so a build with it relaxed behaves identically to this one and
+//! no guest test can fail here. The negative case is a cargo feature rather
+//! than a comment:
 //!
 //! ```text
 //! cargo test -p kernel-loom --features doorbell-kick-relaxed \
 //!   --test loom_sleep
 //! ```
 //!
-//! makes that read relaxed and this file must red, at
+//! makes that read-modify-write relaxed and this file must red, at
 //! [`a_halted_cpu_with_queued_work_was_kicked`], whose assertion names the
 //! failure exactly: halted with messages still queued and no IPI in flight.
 
 #![cfg(feature = "loom")]
 
-use loom::sync::atomic::{AtomicUsize, Ordering};
+use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use loom::sync::Arc;
 use kernel_loom::sched::mailbox::{
     mailbox, Doorbell, Kick, MailboxConsumer, MailboxNode, MailboxProducer, Urgency,
@@ -42,6 +46,8 @@ struct World {
     preempt: PreemptModel,
     nodes: [MailboxNode<Msg>; 2],
     ipis: AtomicUsize,
+    /// The target's `need_resched`, which is all an IPI does here.
+    resched: AtomicBool,
 }
 
 impl World {
@@ -52,6 +58,7 @@ impl World {
             preempt: PreemptModel::new(),
             nodes: [MailboxNode::new(), MailboxNode::new()],
             ipis: AtomicUsize::new(0),
+            resched: AtomicBool::new(false),
         }
     }
 
@@ -63,6 +70,7 @@ impl World {
         );
         if self.doorbell.ring(Urgency::Normal) == Kick::Send {
             self.ipis.fetch_add(1, Ordering::AcqRel);
+            self.resched.store(true, Ordering::SeqCst);
         }
     }
 
@@ -70,16 +78,17 @@ impl World {
     /// the CPU would halt.
     fn pass(&self, rx: &mut MailboxConsumer<Msg>, drained: &mut Vec<Msg>) -> bool {
         let guard = self.preempt.disable();
+        self.resched.store(false, Ordering::SeqCst);
         self.doorbell.begin_pass();
         while let Some(msg) = rx.pop(&guard) {
             drained.push(msg);
         }
-        self.doorbell.arm_sleep().confirm(rx).is_ok()
+        self.doorbell.arm_sleep().confirm(rx).is_ok() && !self.resched.load(Ordering::SeqCst)
     }
 }
 
-/// I2: if the CPU halts while work is still queued, an IPI must already be on
-/// its way — otherwise nothing would ever wake it.
+/// I2: if the CPU halts while work is still queued, an IPI must be on its way
+/// that its last look did not see — otherwise nothing would ever wake it.
 #[test]
 fn a_halted_cpu_with_queued_work_was_kicked() {
     model(|| {
@@ -102,7 +111,7 @@ fn a_halted_cpu_with_queued_work_was_kicked() {
 
         if halted && drained.len() < 2 {
             assert!(
-                world.ipis.load(Ordering::SeqCst) >= 1,
+                world.resched.load(Ordering::SeqCst),
                 "halted with {} of 2 messages queued and no IPI in flight — \
                  a sleep-through",
                 2 - drained.len(),

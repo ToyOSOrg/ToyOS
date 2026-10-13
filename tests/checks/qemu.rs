@@ -107,7 +107,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     // 2b. The same two cases for the wait that holds a whole capture rather
     //     than a line at a time — `await_guest`, whose `it went quiet` is the
     //     wording #156's signature is stated in.
-    let halted = format!("[ 0.400 cpu0 kernel] compositor: frames=120\n{KERNEL}\n");
+    let halted = format!("[ 0.400 cpu0 kernel] compositor: ready\n{KERNEL}\n");
     let Some(found) = super::serial::kernel_death(&halted) else {
         return Err(String::from("a capture ending in a kernel panic reads as a guest that merely \
                                  stopped, which is the verdict that threw the cause away"));
@@ -115,7 +115,7 @@ pub fn ceiling_self_check() -> Result<(), String> {
     if kernel_died_here(found) != panic {
         return Err(String::from("the two waits word one panic differently"));
     }
-    let program_died = format!("[ 0.400 cpu0 kernel] compositor: frames=120\n{USER}\n");
+    let program_died = format!("[ 0.400 cpu0 kernel] compositor: ready\n{USER}\n");
     if super::serial::kernel_death(&program_died).is_some() {
         return Err(format!(
             "a capture whose only panic is a program's reads as a halted machine:\n{program_died}"

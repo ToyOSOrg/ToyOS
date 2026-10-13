@@ -15,6 +15,7 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+mod ecdt;
 mod facs;
 mod fadt;
 mod gtdt;
@@ -27,9 +28,10 @@ mod spcr;
 
 use toyos_bootmap::DirectMapEnd;
 
+pub use ecdt::{ecdt, Ec, EcRefused, EcRegister, ECDT_NEEDED};
 pub use facs::{acquire, facs, release, Facs, FacsRefused, FACS_GLOBAL_LOCK, OWNED, PENDING};
 pub use fadt::{
-    century_of, dsdt_address, fixed_hardware, iapc_boot_arch, pm1a_control, psci, reset_register,
+    century_of, dsdt_address, fixed_hardware, pm1a_control, psci, reset_register,
     rtc_century,
     Century, Field, FixedHardware, FixedRefused, LegacyMode, PowerButton, Psci, Reset, SmiCmd, CMOS_RAM,
     FADT_FOR_FIXED_HARDWARE, FADT_PM1A_CNT_BLK,
@@ -311,6 +313,37 @@ pub fn find_table<P: Phys>(
         }
     }
     Err(TableError::Absent)
+}
+
+/// The table the XSDT lists whose signature, OEM ID and OEM Table ID
+/// (§5.2.6) are these, compared byte for byte, a shorter identifier matching
+/// a field it begins whose rest is NULs or spaces (ACPI 6.5 §19.6.77): `None`
+/// where none matches. An entry that does not open is passed over.
+pub fn find_by_id<P: Phys>(phys: P, rsdp_addr: u64, signature: &[u8], oem_id: &[u8], oem_table_id: &[u8]) -> Result<Option<Table<P>>, TableError> {
+    const OEM_ID: u64 = 10;
+    const OEM_TABLE_ID: u64 = 16;
+    let xsdt = xsdt(phys, rsdp_addr)?;
+    let same = |at: u64, len: u64, id: &[u8]| {
+        id.len() as u64 <= len
+            && (0..len).all(|i| {
+                let byte = phys.byte(at + i);
+                match id.get(i as usize) {
+                    Some(&want) => byte == want,
+                    None => byte == 0 || byte == b' ',
+                }
+            })
+    };
+    for i in 0..entries(&xsdt) {
+        let Some(at) = xsdt.u64_at(SDT_HEADER_LEN + i * 8) else { break };
+        if at == 0 || !phys.readable(at, SDT_HEADER_LEN) {
+            continue;
+        }
+        if same(at, 4, signature) && same(at + OEM_ID, 6, oem_id) && same(at + OEM_TABLE_ID, 8, oem_table_id) {
+            let signature: [u8; 4] = core::array::from_fn(|k| phys.byte(at + k as u64));
+            return Table::open(phys, at, &signature, SDT_HEADER_LEN).map(Some);
+        }
+    }
+    Ok(None)
 }
 
 /// How many 8-byte entries an XSDT holds.

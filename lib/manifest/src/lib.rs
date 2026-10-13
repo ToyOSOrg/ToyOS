@@ -35,8 +35,10 @@
 //! [`package`] is the other half: what an installed package says about itself,
 //! which is which of its own binaries a launch starts and never what it holds.
 //! [`launch`] is who may start what, [`grants`] which folder of the home a
-//! package is granted, and [`consent`] how the person at the screen is asked.
+//! package is granted, [`consent`] how the person at the screen is asked, and
+//! [`clipboard`] who watches the clipboard.
 
+pub mod clipboard;
 pub mod consent;
 pub mod grants;
 pub mod launch;
@@ -158,6 +160,15 @@ fn data_dir(dir: String, write: bool) -> View {
 pub const RESTARTS: u32 = 3;
 pub const RESTART_WINDOW_SECS: u64 = 10;
 
+/// One start of a row, as the supervisor asks [`Program::supervised`] about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Start {
+    /// It was just spawned.
+    Spawned,
+    /// It ended with this exit code.
+    Ended(i32),
+}
+
 pub use toyos_abi::handle::Rights;
 pub use toyos_abi::syscall::{DeviceRequest, DeviceType};
 
@@ -274,6 +285,18 @@ pub struct Program {
 }
 
 impl Program {
+    /// Whether the supervisor acts on `start` of this row. At its spawn,
+    /// whether a waiter sees it end: it serves ports, which close with an end
+    /// no restart is owed, or it is `restart`. At its end, whether it is
+    /// started again: it is `restart`, and it ended other than by exit 0,
+    /// which a program says only when it has nothing to serve.
+    pub fn supervised(&self, start: Start) -> bool {
+        match start {
+            Start::Spawned => self.restart || !self.serves.is_empty() || !self.roles.is_empty(),
+            Start::Ended(exit) => self.restart && exit != 0,
+        }
+    }
+
     /// It replaces what the machine runs — the swap port's holder, or the idle
     /// slot's — so it starts only in a login session.
     pub fn login_only(&self) -> bool {
@@ -557,6 +580,47 @@ pub fn parse(text: &str) -> Manifest {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn row(serves: &[&str], roles: &[&str], restart: bool) -> Program {
+        Program {
+            serves: serves.iter().map(|s| s.to_string()).collect(),
+            roles: roles.iter().map(|s| s.to_string()).collect(),
+            restart,
+            ..Program::default()
+        }
+    }
+
+    /// A `restart` row that serves no port has no port to close, and is the
+    /// one row a waiter for ported starts alone would never see end.
+    #[test]
+    fn a_restart_row_with_no_port_is_waited_on() {
+        assert!(row(&[], &[], true).supervised(Start::Spawned));
+    }
+
+    #[test]
+    fn a_row_with_ports_is_waited_on_and_one_that_is_neither_is_not() {
+        assert!(row(&["block"], &[], false).supervised(Start::Spawned));
+        assert!(row(&[], &["data"], false).supervised(Start::Spawned));
+        assert!(!row(&[], &[], false).supervised(Start::Spawned));
+    }
+
+    #[test]
+    fn a_restart_rows_end_other_than_exit_0_is_owed_a_start_and_exit_0_is_not() {
+        for exit in [1, -1, 101, 139] {
+            assert!(row(&[], &[], true).supervised(Start::Ended(exit)), "exit {exit}");
+            assert!(row(&["block"], &[], true).supervised(Start::Ended(exit)), "exit {exit}");
+        }
+        assert!(!row(&[], &[], true).supervised(Start::Ended(0)));
+        assert!(!row(&["block"], &[], true).supervised(Start::Ended(0)));
+    }
+
+    #[test]
+    fn a_row_that_is_not_restart_is_never_owed_a_start() {
+        for exit in [0, 1, 139] {
+            assert!(!row(&["log"], &[], false).supervised(Start::Ended(exit)), "exit {exit}");
+            assert!(!row(&[], &[], false).supervised(Start::Ended(exit)), "exit {exit}");
+        }
+    }
 
     fn sample() -> Manifest {
         Manifest {

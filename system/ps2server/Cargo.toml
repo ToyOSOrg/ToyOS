@@ -1,0 +1,17 @@
+[package]
+name = "ps2server"
+description = "The i8042 PS/2 controller, served from userland: its probe, the keyboard's and the pointer's decode, and their records to the owner of input."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../sdk/toyos" }
+toyos-abi = { path = "../../sdk/abi" }
+toyos-input = { path = "../../lib/input" }
+# The device's bytes are input from outside this program's trust, so their
+# decode is a crate of its own.
+toyos-ps2 = { path = "ps2" }
+
+[package.metadata.toyos.host]
+exempt.owns = "ToyOS's i8042, claimed from the kernel with the two lines it raises"

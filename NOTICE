@@ -428,6 +428,14 @@ kernel/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
     sha256 03efb1491c7e899feb2665fa299363e64035e5444c1b8bc1f6ebed30de964e12)
     SPDX-License-Identifier: LicenseRef-Intel-Microcode
 
+The kernel embeds 06-8c-01 and loads it on the CPU it names; 06-cc-02 is
+`toyos-microcode`'s test input. The licence permits redistribution in binary
+form, unmodified, on three conditions: the copyright notice and the
+disclaimer are reproduced with the distribution, which every x86-64 image does
+as /system/share/licenses/Intel-microcode-license.txt; Intel's name endorses
+nothing derived from it; and no reverse engineering, decompilation or
+disassembly.
+
 
 tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
 ----------------------------------------------------

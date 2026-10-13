@@ -246,16 +246,6 @@ pub fn kernel_records(log: &str) -> String {
     log.split_inclusive('\n').filter(|line| !is_program_line(line)).collect()
 }
 
-/// One program's lines, by the name the supervisor started it under, as `logkeeper` read them
-/// out of its log ring: each line's text, newline-terminated.
-pub fn lines_of(log: &str, name: &str) -> String {
-    log.lines()
-        .filter_map(toyos_logstream::program_line)
-        .filter(|said| said.tag == name)
-        .map(|said| format!("{}\n", said.text))
-        .collect()
-}
-
 /// The AP bring-up record, in `kernel/src/arch/x86_64/smp.rs`. A reader asks for the
 /// trailing ` online` as a separate word: the same head carries the failure.
 pub const AP_BRINGUP: &str = "SMP: AP cpu";
@@ -268,7 +258,7 @@ const NAME_LEN: usize = 28;
 /// truncated to what [`NAME_LEN`] holds.
 ///
 /// **A predicate looking for the whole name finds nothing on a good boot**:
-/// `test_rs_null_sink_client_exits` is `test_rs_null_sink_client_ex` on the wire.
+/// `test_rs_munmap_reissues_read_window` is `test_rs_munmap_reissues_rea` on the wire.
 pub fn recorded_name(binary: &str) -> String {
     let base = binary.rsplit('/').next().unwrap_or(binary);
     base[..base.len().min(NAME_LEN - 1)].to_string()
@@ -800,8 +790,8 @@ mod tests {
     }
 
     /// A program writing a kernel verdict's words, or another program's head,
-    /// is left out of the kernel's records and read as its own; a kernel
-    /// record's continuation line is the kernel's.
+    /// is left out of the kernel's records; a kernel record's continuation
+    /// line is the kernel's.
     #[test]
     fn a_programs_line_is_never_the_kernels() {
         let log = "[2026-09-08 16:08:23  2.100 cpu0 kernel] exit: test_rs_job pid=4 code=3 cpu=1ms\n\
@@ -812,8 +802,6 @@ mod tests {
         let kernel = kernel_records(log);
         assert!(!kernel.contains("code=0"), "{kernel}");
         assert!(kernel.contains("code=3") && kernel.contains("  its second line\n"), "{kernel}");
-        assert_eq!(lines_of(log, "netstack"), "netstack: MAC 52:54:00:12:34:56\n");
-        assert_eq!(lines_of(log, "test-runner").lines().count(), 2);
         assert!(is_program_line(log.lines().nth(3).expect("five lines")));
     }
 
@@ -821,7 +809,7 @@ mod tests {
     #[test]
     fn a_long_binarys_record_is_the_prefix_the_kernel_keeps() {
         assert_eq!(recorded_name("test_rs_mkdir_cap"), "test_rs_mkdir_cap");
-        assert_eq!(recorded_name("test_rs_null_sink_client_exits"), "test_rs_null_sink_client_ex");
+        assert_eq!(recorded_name("test_rs_munmap_reissues_read_window"), "test_rs_munmap_reissues_rea");
         assert_eq!(recorded_name("/system/bin/echo"), "echo");
         assert_eq!(recorded_name("").len(), 0);
     }

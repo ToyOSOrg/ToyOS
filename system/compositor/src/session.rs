@@ -6,6 +6,8 @@
 //! devices, draining the client connections without ever blocking on one,
 //! allocating and granting the shared buffers, and handing finished rectangles
 //! to the panel.
+//!
+//! **No clipboard byte is ever logged**: a refusal names a length and a client.
 
 use std::process::Command;
 use std::sync::mpsc;
@@ -13,31 +15,44 @@ use std::time::{Duration, Instant};
 
 use sprite::Sprite;
 use toyos::endow;
-use toyos::ipc::RxStep;
+use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
 use toyos::{ipc, system, AsHandle, FramebufferDev, Keyboard, Mouse};
+use toyos_abi::input::RawKeyEvent;
 use toyos_abi::syscall::DeviceType;
 use toyos_abi::RawHandle;
+use toyos_input::wire::{self, Record, CONNECTIONS, KEEP, KEY_LEN, POINTER_LEN};
+use toyos_input::{Merge, Pointer, Slot, State};
+use toyos_desktop::clipboard::{Landing, Watch};
 use toyos_desktop::{
     cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, set_mode, tab_action, Chrome,
-    CursorStyle, Damage, Desk, Grab, Held, Hit, KeyAction, Level, Point, PromptGate, Rect, Released,
-    Stack, TabAction, Verdict, Window, WindowId, WindowMode,
+    CursorStyle, Damage, Desk, Grab, Held, Hit, KeyAction, Level, Point, Port, PromptGate, Rect,
+    Released, Stack, TabAction, Verdict, Window, WindowId, WindowMode,
 };
 use window::Screen;
 
 use crate::client::{
     announce, deliver, deliver_signal, deliver_with_handle, mark_dead, note_closed, note_opened,
-    Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, PendingConn, Win,
+    Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, PendingConn, Watcher, Win,
     HANDSHAKE_TIMEOUT, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
 };
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
-use crate::stats::{FrameStats, FrameTotals};
+use crate::stats::FrameTotals;
 use crate::{
-    launcher_apps, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
-    FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES, STATS_INTERVAL,
+    launcher_apps, CLIPBOARD_POLL_HANDLES, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
+    FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, INPUT_POLL_HANDLES, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
 };
+
+/// The most frames one source's turn takes before the others are served.
+const SOURCE_FRAMES: usize = 64;
+
+/// One connection on the `input` port: a source of keys and pointer reports.
+struct Source {
+    conn: Connection,
+    rx: FrameRx<KEEP>,
+}
 
 const _: () = assert!(
     toyos_inspect::MAX_SNAPSHOT_BYTES == ipc::MAX_FRAME_LEN as usize,
@@ -100,12 +115,25 @@ pub struct Session {
     /// The last prompt's gate once it is gone: the releases of what it was
     /// given, which no other window saw the press of.
     owed: PromptGate,
+    /// The clipboard's port ([`toyos_manifest::clipboard::PORT`]), which one
+    /// program alone holds: its one connection is sent every copy.
+    clipboards: Acceptor,
+    watcher: Option<Watcher>,
+    /// What the watcher has asked and is sent, for the compositor's whole life:
+    /// a copy made while no watcher is there is the next one's.
+    watch: Watch<CopyRegion>,
     /// Where a launch is made: off the loop, since the supervisor answers one
     /// whose package asks a question only once the question is answered,
     /// through this loop.
     launcher: mpsc::Sender<String>,
     kb: Keyboard,
     mouse: Mouse,
+    /// The `input` port, and the sources on it, by their slot.
+    inputs: Acceptor,
+    sources: [Option<Source>; CONNECTIONS],
+    /// Every source's keys and pointers, the kernel's streams among them.
+    merge: Merge,
+    pointers: Pointer,
     poller: Poller,
 
     /// The claim, and the thing every screen call is made *through*: closing it
@@ -148,16 +176,11 @@ pub struct Session {
     /// Tokens the last `wait` reported ready.
     ready: Vec<u64>,
 
-    stats: FrameStats,
-    /// Every window `stats` has reported, summed, for `inspect`.
     totals: FrameTotals,
     cached_stats: SystemStats,
     prev_busy_ticks: u64,
     prev_total_ticks: u64,
     last_taskbar_update: Instant,
-    next_stats_report: Instant,
-    reported_traffic: (u64, u64),
-    reported_composed: window::Traffic,
 }
 
 impl Session {
@@ -171,10 +194,14 @@ impl Session {
             .expect("the manifest declares this program serves `compositor`");
         let prompts = endow::acceptor(toyos_manifest::consent::PROMPT)
             .expect("the manifest declares this program serves `prompt`");
+        let clipboards = endow::acceptor(toyos_manifest::clipboard::PORT)
+            .expect("the manifest declares this program serves `clipboard`");
         let kb: Keyboard = endow::device(DeviceType::Keyboard)
             .expect("the manifest gives this program the keyboard");
         let mouse: Mouse = endow::device(DeviceType::Mouse)
             .expect("the manifest gives this program the mouse");
+        let inputs = endow::acceptor(wire::PORT)
+            .expect("the manifest declares this program serves `input`");
         let fb_dev: FramebufferDev = endow::device(DeviceType::Framebuffer)
             .expect("the manifest gives this program the framebuffer");
 
@@ -243,14 +270,23 @@ impl Session {
 
         // Sized for the slot ceiling rather than for `max_windows`: the batch
         // between two `wait` calls is the four fixed registrations, one per
-        // live window
-        // and one per pending connection, the prompt's two beside them, and
+        // live window and one per pending connection, the prompt's two, the
+        // clipboard's two and the input port's beside them, and
         // `MSG_SET_RESOLUTION` can raise `max_windows` mid-run.
-        let poller = Poller::new(FIXED_POLL_HANDLES + MAX_WINDOW_SLOTS + MAX_PENDING_CONNS + PROMPT_POLL_HANDLES);
+        let poller = Poller::new(
+            FIXED_POLL_HANDLES
+                + MAX_WINDOW_SLOTS
+                + MAX_PENDING_CONNS
+                + PROMPT_POLL_HANDLES
+                + CLIPBOARD_POLL_HANDLES
+                + INPUT_POLL_HANDLES,
+        );
+        poller.watch(&inputs, READABLE, inputs.as_handle().0 as u64);
         poller.watch(&kb, READABLE, kb.as_handle().0 as u64);
         poller.watch(&mouse, READABLE, mouse.as_handle().0 as u64);
         poller.watch(&acceptor, READABLE, acceptor.as_handle().0 as u64);
         poller.watch(&prompts, READABLE, prompts.as_handle().0 as u64);
+        poller.watch(&clipboards, READABLE, clipboards.as_handle().0 as u64);
 
         let cursor = Point { x: desk.screen.w() / 2, y: desk.screen.h() / 2 };
         if hw_cursor {
@@ -265,15 +301,20 @@ impl Session {
 
         let now = Instant::now();
         Self {
-            reported_traffic: screen.traffic(),
-            reported_composed: back.surface.traffic(),
             acceptor,
             prompts,
             prompt: None,
             owed: PromptGate::default(),
+            clipboards,
+            watcher: None,
+            watch: Watch::default(),
             launcher,
             kb,
             mouse,
+            inputs,
+            sources: Default::default(),
+            merge: Merge::default(),
+            pointers: Pointer::new(fb_info.width, fb_info.height),
             poller,
             fb_dev,
             fb_info,
@@ -303,13 +344,11 @@ impl Session {
             max_windows,
             dead: Vec::new(),
             ready: Vec::new(),
-            stats: FrameStats::default(),
             totals: FrameTotals::default(),
             cached_stats: SystemStats { used_mb: 0, total_mb: 0, cpu_pct: 0 },
             prev_busy_ticks: 0,
             prev_total_ticks: 0,
             last_taskbar_update: now,
-            next_stats_report: now + STATS_INTERVAL,
         }
     }
 
@@ -349,10 +388,16 @@ impl Session {
 
         let kb_ready = self.is_ready(self.kb.as_handle());
         let mouse_ready = self.is_ready(self.mouse.as_handle());
+        let inputs_ready = self.is_ready(self.inputs.as_handle());
+        let sources_ready: Vec<usize> = (0..CONNECTIONS)
+            .filter(|&n| self.sources[n].as_ref().is_some_and(|s| self.is_ready(s.conn.as_handle())))
+            .collect();
         let accept_ready = self.is_ready(self.acceptor.as_handle());
         let prompt_ready = self.is_ready(self.prompts.as_handle());
+        let clipboard_ready = self.is_ready(self.clipboards.as_handle());
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle()))
-            || self.pending.iter().any(|p| self.is_ready(p.conn.as_handle()));
+            || self.pending.iter().any(|p| self.is_ready(p.conn.as_handle()))
+            || self.watcher.as_ref().is_some_and(|w| self.is_ready(w.conn.as_handle()));
 
         // A handshake that never completes is the reason this deadline exists,
         // and the sweep has to happen on a pass that found nothing ready too —
@@ -368,7 +413,15 @@ impl Session {
         }
         self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
-        if !kb_ready && !mouse_ready && !accept_ready && !prompt_ready && !client_ready {
+        if !kb_ready
+            && !mouse_ready
+            && !inputs_ready
+            && sources_ready.is_empty()
+            && !accept_ready
+            && !prompt_ready
+            && !clipboard_ready
+            && !client_ready
+        {
             return false;
         }
 
@@ -379,17 +432,27 @@ impl Session {
         if mouse_ready {
             self.pointer();
         }
+        if inputs_ready {
+            self.admit();
+        }
+        for n in sources_ready {
+            self.source(n);
+        }
         if accept_ready {
-            self.accept(false);
+            self.accept(Port::Compositor);
         }
         if prompt_ready {
-            self.accept(true);
+            self.accept(Port::Prompt);
+        }
+        if clipboard_ready {
+            self.accept(Port::Clipboard);
         }
         let frames = self.take_frames();
         self.dispatch(frames);
+        self.watched();
         self.reap();
         self.prompt_gone();
-        self.rearm(kb_ready, mouse_ready, accept_ready, prompt_ready);
+        self.rearm(kb_ready, mouse_ready, inputs_ready, accept_ready, prompt_ready, clipboard_ready);
         true
     }
 
@@ -401,88 +464,118 @@ impl Session {
         self.screen.pixel_format_raw()
     }
 
+    /// The kernel's keyboard stream, one source to the merge.
     fn keys(&mut self) {
-        const EVENT: usize = std::mem::size_of::<window::KeyEvent>();
-        let mut buf = [0u8; 8 * EVENT];
+        let mut buf = [0u8; 8 * KEY_LEN];
         // Never read blocking here. The kernel wakes only when a report queued
         // an event, so readiness and `has_data` agree — but a blocking read on
         // an empty queue parks the compositor until the next real key, and one
         // spurious wake anywhere would freeze it.
         let n = self.kb.read_nonblock(&mut buf).unwrap_or(0);
-        let (events, torn) = buf[..n].as_chunks::<EVENT>();
+        let (events, torn) = buf[..n].as_chunks::<KEY_LEN>();
         assert!(torn.is_empty(), "compositor: the keyboard read {n} bytes, not whole events");
         for raw in events {
-            let event = ipc::decode_payload::<window::KeyEvent>(raw)
-                .expect("a chunk is exactly one event long");
-            let focused = self.stack.focused();
-            let action = key_action(
-                event.into(),
-                focused.map(|i| self.stack[i].mode),
-                self.launcher_open,
-                self.prompt.is_some(),
-            );
-            match action {
-                KeyAction::Ignore => {}
-                KeyAction::Forward => {
-                    // While a prompt is up it is the focused window, and is
-                    // given what its gate lets through and nothing else is.
-                    let given = match &mut self.prompt {
-                        Some((_, gate)) => gate.key(event.into()),
-                        None => !self.owed.owed(event.into()),
-                    };
-                    if !given {
-                        continue;
-                    }
-                    if let Some(i) = focused {
-                        deliver(&mut self.dead, &self.stack[i], window::MSG_KEY_INPUT, &event);
-                    }
-                }
-                KeyAction::CloseLauncher => {
-                    self.launcher_open = false;
-                    self.damage.add(self.launcher_rect());
-                }
-                KeyAction::CycleFocus => {
-                    if self.stack.cycle() {
-                        self.damage_all();
-                    }
-                }
-                KeyAction::SpawnTerminal => self.launch("/system/bin/terminal"),
-                KeyAction::Paste => {
-                    if let Some(i) = focused {
-                        self.paste(i);
-                    }
-                }
-                // The three that move a window. Each damages the rect it is
-                // vacating first, because that is only knowable before it
-                // moves.
-                KeyAction::SetMode(mode) => {
-                    let Some(idx) = focused else { continue };
-                    self.damage.add(self.stack[idx].frame(&self.desk.chrome));
-                    self.retarget(idx, mode);
-                    self.damage_all();
-                }
-                KeyAction::Minimize => {
-                    let Some(idx) = focused else { continue };
-                    self.damage.add(self.stack[idx].frame(&self.desk.chrome));
-                    self.stack[idx].minimized = true;
-                    self.damage_all();
-                }
-                KeyAction::CloseFocused => {
-                    let Some(idx) = focused else { continue };
-                    self.damage.add(self.stack[idx].frame(&self.desk.chrome));
-                    let win = self.stack.remove(idx);
-                    note_closed("GUI+Q", &win, self.stack.len());
-                    let _ = win.client.conn.try_signal(window::MSG_WINDOW_CLOSE);
-                    self.damage_all();
-                }
+            match wire::key(raw) {
+                Ok(key) => self.merged_key(Slot::KERNEL, key),
+                Err(why) => eprintln!("compositor: the kernel's keyboard stream carried {raw:02x?}, refused: {why:?}"),
             }
         }
     }
 
+    /// `key` from `slot`, and whatever it changed of the merged keyboard.
+    fn merged_key(&mut self, slot: Slot, key: RawKeyEvent) {
+        let delivered: Vec<RawKeyEvent> = self.merge.key(slot, key).collect();
+        for event in delivered {
+            self.key(event);
+        }
+    }
+
+    /// One transition of the merged keyboard.
+    fn key(&mut self, raw: RawKeyEvent) {
+        let event = window::KeyEvent::from(raw);
+        let focused = self.stack.focused();
+        let action = key_action(
+            event.into(),
+            focused.map(|i| self.stack[i].mode),
+            self.launcher_open,
+            self.prompt.is_some(),
+        );
+        match action {
+            KeyAction::Ignore => {}
+            KeyAction::Forward => {
+                // While a prompt is up it is the focused window, and is
+                // given what its gate lets through and nothing else is.
+                let given = match &mut self.prompt {
+                    Some((_, gate)) => gate.key(event.into()),
+                    None => !self.owed.owed(event.into()),
+                };
+                if !given {
+                    return;
+                }
+                if let Some(i) = focused {
+                    deliver(&mut self.dead, &self.stack[i], window::MSG_KEY_INPUT, &event);
+                }
+            }
+            KeyAction::CloseLauncher => {
+                self.launcher_open = false;
+                self.damage.add(self.launcher_rect());
+            }
+            KeyAction::CycleFocus => {
+                if self.stack.cycle() {
+                    self.damage_all();
+                }
+            }
+            KeyAction::SpawnTerminal => self.launch("/system/bin/terminal"),
+            KeyAction::Paste => {
+                if let Some(i) = focused {
+                    self.paste(i);
+                }
+            }
+            // The three that move a window. Each damages the rect it is
+            // vacating first, because that is only knowable before it
+            // moves.
+            KeyAction::SetMode(mode) => {
+                let Some(idx) = focused else { return };
+                self.damage.add(self.stack[idx].frame(&self.desk.chrome));
+                self.retarget(idx, mode);
+                self.damage_all();
+            }
+            KeyAction::Minimize => {
+                let Some(idx) = focused else { return };
+                self.damage.add(self.stack[idx].frame(&self.desk.chrome));
+                self.stack[idx].minimized = true;
+                self.damage_all();
+            }
+            KeyAction::CloseFocused => {
+                let Some(idx) = focused else { return };
+                self.damage.add(self.stack[idx].frame(&self.desk.chrome));
+                let win = self.stack.remove(idx);
+                note_closed("GUI+Q", &win, self.stack.len());
+                let _ = win.client.conn.try_signal(window::MSG_WINDOW_CLOSE);
+                self.damage_all();
+            }
+        }
+    }
+
+    /// The kernel's mouse stream, one source to the merge.
     fn pointer(&mut self) {
-        let mut buf = [0u8; 512];
+        let mut buf = [0u8; 64 * POINTER_LEN];
         let n = self.mouse.read_nonblock(&mut buf).unwrap_or(0);
-        let sample = fold_mouse(self.prev_buttons, &buf[..n]);
+        let (reports, torn) = buf[..n].as_chunks::<POINTER_LEN>();
+        assert!(torn.is_empty(), "compositor: the mouse read {n} bytes, not whole reports");
+        let mut states = Vec::with_capacity(reports.len());
+        for raw in reports {
+            match wire::pointer(raw) {
+                Ok(report) => states.push(self.pointers.report(Slot::KERNEL, report)),
+                Err(why) => eprintln!("compositor: the kernel's mouse stream carried {raw:02x?}, refused: {why:?}"),
+            }
+        }
+        self.motion(&states);
+    }
+
+    /// What the merged pointer did over `states`.
+    fn motion(&mut self, states: &[State]) {
+        let sample = fold_mouse(self.prev_buttons, states);
         if sample.reports == 0 {
             return;
         }
@@ -692,24 +785,98 @@ impl Session {
         }
     }
 
-    /// One connection off `compositor`, or off `prompt` where `prompt`.
-    fn accept(&mut self, prompt: bool) {
+    /// A source's connection off `input`, in the first free slot, or refused
+    /// by name when every slot is taken.
+    fn admit(&mut self) {
+        match self.inputs.accept() {
+            Err(e) => eprintln!("compositor: an input source could not be accepted ({e:?})"),
+            Ok(conn) => match self.sources.iter().position(Option::is_none) {
+                None => eprintln!("compositor: refusing an input source — {CONNECTIONS} are connected"),
+                Some(n) => {
+                    self.poller.watch(&conn, READABLE, conn.as_handle().0 as u64);
+                    self.sources[n] = Some(Source { conn, rx: FrameRx::new() });
+                }
+            },
+        }
+    }
+
+    /// What source `n` sent, each frame whole; one that does not decode, or
+    /// ends, drops it, and everything it held is released.
+    fn source(&mut self, n: usize) {
+        let slot = Slot::connection(n).expect("a source's index is a slot");
+        let mut states = Vec::new();
+        let mut ended = None;
+        for _ in 0..SOURCE_FRAMES {
+            let source = self.sources[n].as_mut().expect("a ready source is held");
+            let record = match source.rx.pump(&source.conn) {
+                RxStep::Idle => break,
+                RxStep::Eof => {
+                    ended = Some("its connection ended".to_string());
+                    break;
+                }
+                RxStep::Malformed => {
+                    ended = Some("a frame no protocol here can make".to_string());
+                    break;
+                }
+                RxStep::Frame { msg_type, payload_len } => wire::decode(msg_type, source.rx.payload(payload_len)),
+            };
+            match record {
+                Ok(Record::Key(key)) => self.merged_key(slot, key),
+                Ok(Record::Pointer(report)) => states.push(self.pointers.report(slot, report)),
+                Ok(Record::Lost) => {
+                    let released: Vec<RawKeyEvent> = self.merge.end(slot).collect();
+                    released.into_iter().for_each(|key| self.key(key));
+                }
+                Err(why) => {
+                    ended = Some(format!("a record refused: {why:?}"));
+                    break;
+                }
+            }
+        }
+        match ended {
+            None => {
+                let conn = &self.sources[n].as_ref().expect("a ready source is held").conn;
+                self.poller.watch(conn, READABLE, conn.as_handle().0 as u64);
+            }
+            Some(why) => {
+                eprintln!("compositor: dropping input source {n} — {why}");
+                self.sources[n] = None;
+                let released: Vec<RawKeyEvent> = self.merge.end(slot).collect();
+                released.into_iter().for_each(|key| self.key(key));
+                states.push(self.pointers.end(slot));
+            }
+        }
+        self.motion(&states);
+    }
+
+    /// One connection off `port`.
+    fn accept(&mut self, port: Port) {
         // `accept` installs a descriptor, so it answers `ResourceExhausted` on
         // a full handle table — and clients drive that table, one handle per
         // connection. The connection is lost either way; the desktop is not.
-        let acceptor = if prompt { &self.prompts } else { &self.acceptor };
+        let acceptor = match port {
+            Port::Compositor => &self.acceptor,
+            Port::Prompt => &self.prompts,
+            Port::Clipboard => &self.clipboards,
+        };
         match acceptor.accept() {
             Err(e) => eprintln!("compositor: a connection could not be accepted ({e:?})"),
+            Ok(_) if port == Port::Clipboard && self.watcher.is_some() => {
+                eprintln!("compositor: refusing a clipboard watcher's connection — one is watching");
+            }
             Ok(conn)
                 if !toyos_desktop::pending_admits(
-                    prompt,
-                    self.pending.iter().map(|p| p.prompt),
+                    port,
+                    self.pending.iter().map(|p| p.port),
                     MAX_PENDING_CONNS as usize,
                 ) =>
             {
-                match prompt {
-                    true => eprintln!("compositor: refusing a prompt's connection — another is waiting"),
-                    false => eprintln!(
+                match port {
+                    Port::Prompt => eprintln!("compositor: refusing a prompt's connection — another is waiting"),
+                    Port::Clipboard => {
+                        eprintln!("compositor: refusing a clipboard watcher's connection — another is waiting")
+                    }
+                    Port::Compositor => eprintln!(
                         "compositor: refusing client {} — {MAX_PENDING_CONNS} connections are already \
                          waiting to say what they want",
                         conn.as_handle().0
@@ -723,7 +890,7 @@ impl Session {
                     rx: ClientRx::new(),
                     since: Instant::now(),
                     copy: None,
-                    prompt,
+                    port,
                 });
             }
         }
@@ -767,7 +934,7 @@ impl Session {
                     let p = self.pending.remove(i);
                     frame.conn = Some(p.conn);
                     frame.copy = p.copy;
-                    frame.prompt = p.prompt;
+                    frame.port = p.port;
                     out.push(frame);
                     break;
                 }
@@ -824,10 +991,17 @@ impl Session {
                 }
                 (None, _) => {}
             }
-            // A connection on the prompt port is for its window and nothing else.
-            if frame.prompt && frame.msg_type != window::MSG_CREATE_WINDOW {
-                mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
-                continue;
+            match (frame.port, frame.msg_type) {
+                // A connection on the prompt port is for its window and nothing else.
+                (Port::Prompt, window::MSG_CREATE_WINDOW) | (Port::Compositor, _) => {}
+                (Port::Clipboard, window::MSG_CLIPBOARD_WATCH) if frame.payload().is_empty() => {
+                    self.watch_begins(frame);
+                    continue;
+                }
+                (Port::Prompt | Port::Clipboard, _) => {
+                    mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+                    continue;
+                }
             }
             match frame.msg_type {
                 window::MSG_CREATE_WINDOW => self.create_window(frame),
@@ -852,7 +1026,7 @@ impl Session {
                         self.damage_all();
                     }
                 }
-                window::MSG_CLIPBOARD_SET => self.set_clipboard(handle, frame.payload().to_vec()),
+                window::MSG_CLIPBOARD_SET => self.client_copy(handle, frame.payload().to_vec()),
                 window::MSG_RETIRED_CLIPBOARD_SET_SHM => {
                     mark_dead(&mut self.dead, handle, DropReason::Retired);
                 }
@@ -920,10 +1094,10 @@ impl Session {
             return;
         };
 
-        let level = match (frame.prompt, req.flags & window::WINDOW_FLAG_TOPMOST != 0) {
-            (true, _) => Level::Prompt,
-            (false, true) => Level::Topmost,
-            (false, false) => Level::Ordinary,
+        let level = match (frame.port, req.flags & window::WINDOW_FLAG_TOPMOST != 0) {
+            (Port::Prompt, _) => Level::Prompt,
+            (_, true) => Level::Topmost,
+            (_, false) => Level::Ordinary,
         };
         // One prompt at a time: the prompt layer is full.
         if !self.stack.admits(level) {
@@ -1099,7 +1273,7 @@ impl Session {
             rx: ClientRx::new(),
             since: Instant::now(),
             copy: Some(CopyRegion::new(region)),
-            prompt: false,
+            port: Port::Compositor,
         });
     }
 
@@ -1110,19 +1284,147 @@ impl Session {
             mark_dead(&mut self.dead, frame.handle, DropReason::OutOfProtocol);
             return;
         }
-        self.set_clipboard(frame.handle, region.take());
+        self.client_copy(frame.handle, region.take());
     }
 
-    /// The clipboard, from bytes that are the compositor's own: validated
-    /// only once no client can change them.
-    fn set_clipboard(&mut self, from: RawHandle, bytes: Vec<u8>) {
-        match String::from_utf8(bytes) {
-            Ok(text) => self.clipboard = text,
-            Err(e) => eprintln!(
-                "compositor: refusing a clipboard from client {} — it is not UTF-8 ({})",
-                from.0,
-                e.utf8_error()
+    /// A client's copy: the clipboard, and the watcher's next delivery.
+    fn client_copy(&mut self, from: RawHandle, bytes: Vec<u8>) {
+        let Some(text) = text(from, bytes) else { return };
+        self.clipboard = text;
+        if self.watch.client_set() {
+            self.deliver_clipboard();
+        }
+    }
+
+    /// `MSG_CLIPBOARD_WATCH` as the first frame off the clipboard port: the
+    /// connection is the watcher, and has asked.
+    fn watch_begins(&mut self, frame: ClientFrame) {
+        let Some(conn) = frame.conn else {
+            mark_dead(&mut self.dead, frame.handle, DropReason::OutOfProtocol);
+            return;
+        };
+        self.poller.watch(&conn, READABLE, frame.handle.0 as u64);
+        println!("compositor: the clipboard is watched by client {}", frame.handle.0);
+        self.watcher = Some(Watcher { conn, rx: ClientRx::new() });
+        self.watcher_asks();
+    }
+
+    /// One frame off the watcher's connection, if it sent a whole one.
+    fn watched(&mut self) {
+        let Some(w) = self.watcher.as_mut() else { return };
+        let handle = w.conn.as_handle();
+        if !self.ready.contains(&(handle.0 as u64)) {
+            return;
+        }
+        let (msg_type, len) = match w.rx.pump(&w.conn) {
+            RxStep::Idle => return,
+            RxStep::Eof => return mark_dead(&mut self.dead, handle, DropReason::Gone),
+            RxStep::Malformed => return mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol),
+            RxStep::Frame { msg_type, payload_len } => (msg_type, payload_len),
+        };
+        if len >= MAX_KEPT_PAYLOAD {
+            return mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+        }
+        let payload = w.rx.payload(len).to_vec();
+        match msg_type {
+            window::MSG_CLIPBOARD_WATCH if payload.is_empty() => self.watcher_asks(),
+            window::MSG_CLIPBOARD_SET => {
+                let landing = self.watch.set();
+                self.watcher_sets(handle, landing, payload);
+            }
+            window::MSG_COPY_BEGIN => self.watcher_begins(handle, &payload),
+            window::MSG_COPY_COMMIT if payload.is_empty() => {
+                let Some((region, landing)) = self.watch.commit() else {
+                    return mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+                };
+                self.watcher_sets(handle, landing, region.take());
+            }
+            _ => mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol),
+        }
+    }
+
+    fn watcher_asks(&mut self) {
+        if self.watch.ask() {
+            self.deliver_clipboard();
+        }
+    }
+
+    /// The watcher's set: it lands only where `toyos_desktop::clipboard` says,
+    /// and is answered whether or not it did, so the watcher has one in flight.
+    fn watcher_sets(&mut self, from: RawHandle, landing: Landing, bytes: Vec<u8>) {
+        match (landing, text(from, bytes)) {
+            (_, None) => {}
+            (Landing::Lands, Some(text)) => self.clipboard = text,
+            (Landing::Stale, Some(text)) => eprintln!(
+                "compositor: refusing a clipboard of {} bytes from the watcher, client {} — it was \
+                 made before the watcher saw the copy now in its pipe",
+                text.len(),
+                from.0
             ),
+        }
+        let w = self.watcher.as_ref().expect("a set is read only off the watcher");
+        if let Err(e) = w.conn.try_signal(window::MSG_CLIPBOARD_SET_ANSWERED) {
+            mark_dead(&mut self.dead, from, e.into());
+        }
+    }
+
+    /// `MSG_COPY_BEGIN` from the watcher: the region its set goes into, held
+    /// until its commit.
+    fn watcher_begins(&mut self, from: RawHandle, payload: &[u8]) {
+        let exact = payload.len() == std::mem::size_of::<window::ClipboardShmMsg>();
+        let (Ok(info), true) = (ipc::decode_payload::<window::ClipboardShmMsg>(payload), exact) else {
+            return mark_dead(&mut self.dead, from, DropReason::OutOfProtocol);
+        };
+        let len = info.len as usize;
+        if !window::copy_fits(len) {
+            return mark_dead(&mut self.dead, from, DropReason::OutOfProtocol);
+        }
+        let (region, theirs) = match SharedMemory::create(len).and_then(|r| r.share().map(|h| (r, h))) {
+            Ok(made) => made,
+            Err(e) => {
+                eprintln!("compositor: the watcher gets no region — no memory for {len} bytes ({e:?})");
+                return mark_dead(&mut self.dead, from, DropReason::Refused(e));
+            }
+        };
+        if self.watch.begin(CopyRegion::new(region)).is_err() {
+            return mark_dead(&mut self.dead, from, DropReason::OutOfProtocol);
+        }
+        let w = self.watcher.as_ref().expect("a region is opened only off the watcher");
+        if let Err(e) = w.conn.send_handles([theirs]) {
+            return mark_dead(&mut self.dead, from, e.into());
+        }
+        if let Err(e) = w.conn.try_signal(window::MSG_COPY_REGION) {
+            mark_dead(&mut self.dead, from, e.into());
+        }
+    }
+
+    /// Send the watcher the clipboard, in the paste's two encodings, empty
+    /// included. A refused send drops it by name.
+    fn deliver_clipboard(&mut self) {
+        let w = self.watcher.as_ref().expect("an ask is outstanding only while a watcher watches");
+        let handle = w.conn.as_handle();
+        let len = self.clipboard.len();
+        let sent = if len <= window::MAX_INLINE_PAYLOAD {
+            w.conn.try_send_bytes(window::MSG_CLIPBOARD_PASTE, self.clipboard.as_bytes()).map_err(DropReason::from)
+        } else {
+            match SharedMemory::create(len).and_then(|mut r| {
+                r.as_mut_slice()[..len].copy_from_slice(self.clipboard.as_bytes());
+                r.share()
+            }) {
+                Ok(theirs) => w
+                    .conn
+                    .send_handles([theirs])
+                    .map_err(DropReason::from)
+                    .and_then(|()| {
+                        w.conn
+                            .try_send(window::MSG_CLIPBOARD_PASTE_SHM, &window::ClipboardShmMsg { len: len as u32 })
+                            .map_err(DropReason::from)
+                    }),
+                Err(e) => Err(DropReason::Refused(e)),
+            }
+        };
+        if let Err(reason) = sent {
+            mark_dead(&mut self.dead, handle, reason);
         }
     }
 
@@ -1144,7 +1446,7 @@ impl Session {
         snap.put("cursor", if self.hw_cursor { "hardware" } else { "software" });
         snap.put("windows.open", self.stack.len());
         snap.put("windows.max", self.max_windows);
-        self.totals.plus(&self.stats).inspect(&mut snap);
+        self.totals.inspect(&mut snap);
         let encoded =
             snap.encode().unwrap_or_else(|why| panic!("compositor: its snapshot: {why}"));
         if let Err(e) = ipc::try_send_bytes(handle, toyos_inspect::MSG_SNAPSHOT, &encoded) {
@@ -1169,11 +1471,8 @@ impl Session {
         );
         self.back =
             BackBuffer::new(self.screen.width(), self.screen.height(), self.pixel_format());
-        // The counters belong to the mapping, and this is a new one starting at
-        // zero.
-        self.reported_traffic = self.screen.traffic();
-        self.reported_composed = self.back.surface.traffic();
         self.desk = desk_of(&self.screen, &self.font, self.apps.len());
+        self.pointers.screen(info.width, info.height);
         // What a window costs moved, so what we can afford moved with it.
         // Windows already open are left alone if the new figure is below their
         // count — the cap gates creation, it does not evict.
@@ -1212,6 +1511,10 @@ impl Session {
         let dead = std::mem::take(&mut self.dead);
         self.stack.retain(|w| !dead.iter().any(|(handle, _)| *handle == w.client.conn.as_handle()));
         self.pending.retain(|p| !dead.iter().any(|(handle, _)| *handle == p.conn.as_handle()));
+        if self.watcher.as_ref().is_some_and(|w| dead.iter().any(|(handle, _)| *handle == w.conn.as_handle())) {
+            self.watcher = None;
+            self.watch.leave();
+        }
         self.dead = dead;
         if self.stack.len() != before {
             for rect in vacated {
@@ -1222,9 +1525,21 @@ impl Session {
     }
 
     /// Re-arm the one-shot poll registrations for every handle that fired.
-    fn rearm(&mut self, kb: bool, mouse: bool, acceptor: bool, prompts: bool) {
+    fn rearm(&mut self, kb: bool, mouse: bool, inputs: bool, acceptor: bool, prompts: bool, clipboards: bool) {
+        if inputs {
+            self.poller.watch(&self.inputs, READABLE, self.inputs.as_handle().0 as u64);
+        }
         if prompts {
             self.poller.watch(&self.prompts, READABLE, self.prompts.as_handle().0 as u64);
+        }
+        if clipboards {
+            self.poller.watch(&self.clipboards, READABLE, self.clipboards.as_handle().0 as u64);
+        }
+        if let Some(w) = &self.watcher {
+            let handle = w.conn.as_handle();
+            if self.is_ready(handle) {
+                self.poller.watch(&w.conn, READABLE, handle.0 as u64);
+            }
         }
         if kb {
             self.poller.watch(&self.kb, READABLE, self.kb.as_handle().0 as u64);
@@ -1321,7 +1636,6 @@ impl Session {
             );
             if regions.iter().any(|r| r.overlaps(rect)) {
                 render::draw_software_cursor(&self.back.surface, sprite, self.cursor);
-                self.stats.cursor_draws += 1;
             }
         }
 
@@ -1337,12 +1651,7 @@ impl Session {
             );
             damage_px += region.area();
         }
-        let composited_at = Instant::now();
-        self.stats.record(
-            composited_at.duration_since(started).as_nanos() as u64,
-            regions.len(),
-            damage_px,
-        );
+        self.totals.record(started.elapsed().as_nanos() as u64, regions.len(), damage_px);
 
         for region in &regions {
             self.fb_dev
@@ -1356,21 +1665,6 @@ impl Session {
         }
 
         self.frame_callbacks(&regions);
-
-        if composited_at >= self.next_stats_report {
-            let traffic = self.screen.traffic();
-            let composed = self.back.surface.traffic();
-            self.stats.report(
-                (traffic.0 - self.reported_traffic.0, traffic.1 - self.reported_traffic.1),
-                composed.since(self.reported_composed),
-                self.stack.len(),
-            );
-            self.totals.fold(&self.stats);
-            self.stats = FrameStats::default();
-            self.reported_traffic = traffic;
-            self.reported_composed = composed;
-            self.next_stats_report = composited_at + STATS_INTERVAL;
-        }
     }
 
     /// Tell every window that presented and was composited that its frame is
@@ -1503,6 +1797,20 @@ impl Session {
             &window::ClipboardShmMsg { len: self.clipboard.len() as u32 },
         );
     }
+}
+
+/// Bytes a client sent as clipboard text, validated only once no client can
+/// change them.
+fn text(from: RawHandle, bytes: Vec<u8>) -> Option<String> {
+    String::from_utf8(bytes)
+        .map_err(|e| {
+            eprintln!(
+                "compositor: refusing a clipboard from client {} — it is not UTF-8 ({})",
+                from.0,
+                e.utf8_error()
+            )
+        })
+        .ok()
 }
 
 /// The thread every launch is made on, and the channel to it: one at a time,
