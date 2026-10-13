@@ -1283,30 +1283,37 @@ fn a_claim_that_refuses_during_the_test_is_handed_up() {
     );
 }
 
-/// §10.2.4.1 clears `ICR` on a read with an interrupt asserted only "if auto
-/// mask is active", and the model sends a message only as `INT_ASSERTED`
-/// rises. A cause landing between a pass's read and its acknowledgement is
-/// therefore lost behind an assertion that never fell — unless the read
-/// cleared and masked, and the pass's unmask raises it as a new message.
+/// A cause landing between a pass's read of `ICR` and its acknowledgement
+/// raises a message at the pass's unmask, whichever way the model takes the
+/// two latitudes around it: what an asserted read without auto-mask does,
+/// which §10.2.4.1 does not define, and whether a cause landing while one is
+/// asserted is a message of its own.
 #[test]
 fn a_cause_after_the_read_is_a_message_at_the_unmask() {
     for (part, _) in PARTS {
-        let permits = Permits { spurious_interrupts: false, ..Permits::default() };
-        let nic = Nic::with(78, part, permits);
-        let mut driver = open(&nic);
-        link_up(&nic, &mut driver);
+        for (keeps, one_per) in [(true, true), (true, false), (false, true), (false, false)] {
+            let permits = Permits {
+                spurious_interrupts: false,
+                asserted_read_without_auto_mask_keeps_icr: keeps,
+                one_message_per_assertion: one_per,
+                ..Permits::default()
+            };
+            let nic = Nic::with(78, part, permits);
+            let mut driver = open(&nic);
+            link_up(&nic, &mut driver);
 
-        nic.deliver(&frame(0x78, 200));
-        nic.run();
-        assert!(nic.pending() > 0);
-        nic.cause_after_next_icr_read(cause::LSC);
-        let pass = one_pass(&mut driver);
-        assert_eq!(pass.causes & cause::LSC, 0);
-        assert_eq!(drain(&nic, &mut driver).len(), 1);
-        assert!(nic.pending() > 0, "{}", nic.because("the cause after the read raised no message"));
-        let next = one_pass(&mut driver);
-        assert_ne!(next.causes & cause::LSC, 0, "{}", nic.because("the next pass did not see it"));
-        assert_eq!(nic.peek(regs::IMS) & cause::ENABLED, cause::ENABLED, "{}", nic.because("a pass left a cause masked"));
+            nic.deliver(&frame(0x78, 200));
+            nic.run();
+            assert!(nic.pending() > 0);
+            nic.cause_after_next_icr_read(cause::LSC);
+            let pass = one_pass(&mut driver);
+            assert_eq!(pass.causes & cause::LSC, 0);
+            assert_eq!(drain(&nic, &mut driver).len(), 1);
+            assert!(nic.pending() > 0, "{}", nic.because("the cause after the read raised no message"));
+            let next = one_pass(&mut driver);
+            assert_ne!(next.causes & cause::LSC, 0, "{}", nic.because("the next pass did not see it"));
+            assert_eq!(nic.peek(regs::IMS) & cause::ENABLED, cause::ENABLED, "{}", nic.because("a pass left a cause masked"));
+        }
     }
 }
 

@@ -25,16 +25,40 @@ fn log(text: &str) -> serial::Serial {
     serial::Serial::named("T14 log", text)
 }
 
-/// One entry for both claims, not present after each release; the recorded
-/// second entry, and a release that leaves its entry present, red.
+/// The first claim's record, which the re-claim job's spawn precedes.
+const FIRST_CLAIM: &str = "[2026-09-29 12:10:34  1.191 cpu0 kernel] iommu: irte";
+
+/// `records` with its claims inside the re-claim job's spawn and exit, and
+/// `after` past the exit: what another job on the same boot did.
+fn in_the_job(records: &str, after: &str) -> String {
+    let spawn = "[2026-09-29 12:10:34  1.190 cpu3 kernel] spawn: /system/bin/test_rs_pci_reclaim pid=7 (layout=0ms tls=0ms total=0ms)\n";
+    let exit = "[2026-09-29 12:10:55 22.001 cpu1 kernel] exit: test_rs_pci_reclaim pid=7 code=0 cpu=1ms\n";
+    format!("{}{exit}{after}", records.replacen(FIRST_CLAIM, &format!("{spawn}{FIRST_CLAIM}"), 1))
+}
+
+/// A third claim of the same function, by the job after the re-claim.
+const ANOTHER_JOBS_CLAIM: &str = "[2026-09-29 12:10:56 23.000 cpu0 kernel] iommu: irte0 source=00:1f.6 p=1 sid=0x00fe svt=1 sq=0 vector=0x28 apic=0x0 dst=0x0 trigger=edge
+[2026-09-29 12:10:56 23.001 cpu0 kernel] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
+";
+
+/// One entry for both claims, not present after each release, whatever
+/// another job on the boot claims after it; the recorded second entry, and a
+/// release that leaves its entry present, red.
 pub fn one_entry_per_slot() {
     let cleared = "[2026-09-29 12:10:53 20.234 cpu1 kernel] iommu: irte0 source=00:1f.6 p=0 released\n";
-    let green = format!("{RECORDED}{cleared}{RELEASED}{cleared}")
-        .replace("irte5 ", "irte0 ")
-        .replace("irte6 ", "irte0 ");
+    let green = in_the_job(
+        &format!("{RECORDED}{cleared}{RELEASED}{cleared}")
+            .replace("irte5 ", "irte0 ")
+            .replace("irte6 ", "irte0 "),
+        ANOTHER_JOBS_CLAIM,
+    );
     assert_eq!(claims::reuses_its_entry(&log(&green)), Ok(()));
 
-    let recorded = format!("{RECORDED}{RELEASED}");
+    let unscoped = green.replace("pid=7 code=0", "pid=8 code=0");
+    let why = claims::reuses_its_entry(&log(&unscoped)).expect_err("a job that never exited");
+    assert!(why.contains("never exited"), "{why}");
+
+    let recorded = in_the_job(&format!("{RECORDED}{RELEASED}"), "");
     let why = claims::reuses_its_entry(&log(&recorded)).expect_err("the recorded second entry");
     assert!(why.contains(r#"wrote remapping entries ["5", "6"]"#), "{why}");
 

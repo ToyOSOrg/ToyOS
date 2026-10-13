@@ -1,9 +1,9 @@
-//! The T14's I219 measured where its interrupts are concerned, on one claim:
-//! its capability list, the register at `0x000E4` before anything writes it,
+//! The T14's I219, judged on what `toyos-i219` rests on where its interrupts
+//! are concerned, on one claim: a capability list with MSI and no MSI-X,
 //! causes forced through `ICS` counted on the claim's vector unmasked and
-//! masked, what a read of `ICR` does with auto-mask off and on, and then
-//! `toyos-i219` driving it under traffic. Every reading is printed; its exit is
-//! whether the readings the driver rests on held.
+//! masked, an asserted read of `ICR` under auto-mask, and then the driver
+//! itself under traffic. Every reading is printed; the exit is whether each
+//! held.
 //!
 //! The PCH datasheet (631120 §8.1) and the 82574's (§10.2.4) are what each
 //! reading is held to; no other machine has this function.
@@ -20,6 +20,7 @@ use toyos_abi::syscall::{PciId, RegWidth, SyscallError, SYSCAP_LABEL};
 use toyos_device_memory::Registers;
 use toyos_i219::regs::{self, cause, ctrl_ext};
 use toyos_i219::{Clock, Delivery, Interrupts, Part, I219};
+use toyos_pci::caps::CapWalk;
 use toyos_pci_claim::{Bar, Grant};
 
 const I219_ID: PciId = PciId { vendor: 0x8086, device: 0x15fc };
@@ -41,9 +42,6 @@ const BURST: usize = 4 * toyos_i219::TX_RING;
 /// How long the burst and the discover behind it are given to leave: a gigabit
 /// link takes them in well under a millisecond.
 const SEND_NANOS: u64 = 5_000_000_000;
-/// What the old driver wrote to `0x000E4`, `IVAR`'s allocation of every cause
-/// to vector 0.
-const IVAR_SHAPED: u32 = 0x0008_8888;
 
 struct Monotonic;
 
@@ -96,19 +94,23 @@ fn fail(what: &str) -> ! {
     std::process::exit(1)
 }
 
-/// Each capability on the list from `34h`: (offset, id, next, Message
-/// Control).
+/// Each capability on the list from `34h`, walked as the kernel walks it:
+/// (offset, id, next, Message Control).
 fn capabilities(dev: &PciDev) -> Vec<(u8, u8, u8, u16)> {
     let read = |at: u8| {
         dev.config_read(at.into(), RegWidth::U32)
             .unwrap_or_else(|why| fail(&format!("config read at {at:#x} refused: {why:?}")))
     };
+    let mut walk = CapWalk::new();
     let mut found = Vec::new();
     let mut next = read(0x34) as u8;
-    while next != 0 && found.len() < 48 {
-        let header = read(next & !3);
-        found.push((next, header as u8, (header >> 8) as u8, (header >> 16) as u16));
+    while let Some(at) = walk.step(next) {
+        let header = read(at);
         next = (header >> 8) as u8;
+        found.push((at, header as u8, next, (header >> 16) as u16));
+    }
+    if walk.truncated() {
+        fail("the capability list breaks off at a forbidden link");
     }
     found
 }
@@ -129,19 +131,20 @@ fn force<R: Registers>(regs: &R, claim: &Claim, forced: u32, unmask: u32) -> (u3
     (count, after, icr)
 }
 
-/// One read of `ICR` with an interrupt asserted, under `auto_mask`: the first
-/// read, `IMS` after it, and a second read.
-fn read_semantics<R: Registers>(regs: &R, claim: &Claim, auto_mask: bool) -> (u32, u32, u32) {
-    let ext = regs.read32(regs::CTRL_EXT) & !ctrl_ext::IAME;
-    regs.write32(regs::CTRL_EXT, if auto_mask { ext | ctrl_ext::IAME } else { ext });
-    regs.write32(regs::IAM, if auto_mask { u32::MAX } else { 0 });
+/// One read of `ICR` with an interrupt asserted under auto-mask, as every
+/// pass of the driver makes it: the read, `IMS` after it, and a second read.
+/// §10.2.4.1's case 2 says the read clears `ICR` and writes `IAM` into `IMC`.
+fn auto_masked_read<R: Registers>(regs: &R, claim: &Claim) -> (u32, u32, u32) {
+    let ext = regs.read32(regs::CTRL_EXT);
+    regs.write32(regs::CTRL_EXT, ext | ctrl_ext::IAME);
+    regs.write32(regs::IAM, u32::MAX);
     regs.write32(regs::IMC, u32::MAX);
     let _ = regs.read32(regs::ICR);
     let _ = claim.taken();
     regs.write32(regs::IMS, RXSEQ);
     regs.write32(regs::ICS, RXSEQ);
     if messages(claim, WINDOW_NANOS) == 0 {
-        fail("a forced cause raised no message for the read measurement");
+        fail("a forced cause raised no message for the auto-masked read");
     }
     let first = regs.read32(regs::ICR);
     let mask = regs.read32(regs::IMS);
@@ -253,8 +256,6 @@ fn main() {
 
     // A second mapping of the same BAR, for what is read beside the driver.
     let (regs, _held) = Bar::map(&dev, index, bytes).unwrap_or_else(|why| fail(&format!("{why}")));
-    let at_claim = regs.read32(regs::IVAR);
-    say(&format!("0x000e4 at the claim: {at_claim:#010x}"));
 
     // The grant is what lets the function master the bus, and a message is a
     // write it masters.
@@ -279,19 +280,17 @@ fn main() {
         fail("a forced cause was not exactly one message unmasked and none masked");
     }
 
-    for auto_mask in [false, true] {
-        let (first, mask, second) = read_semantics(&regs, &claim, auto_mask);
-        say(&format!(
-            "IAME {}: the first ICR read {first:#010x}, IMS after it {mask:#010x}, the second read {second:#010x}",
-            if auto_mask { "on" } else { "off" }
-        ));
+    let (first, mask, second) = auto_masked_read(&regs, &claim);
+    say(&format!(
+        "IAME on: the asserted ICR read {first:#010x}, IMS after it {mask:#010x}, the second read {second:#010x}"
+    ));
+    if first != cause::INT_ASSERTED | RXSEQ || mask != 0 || second != 0 {
+        fail("the asserted read under auto-mask did not clear ICR and mask every cause");
     }
 
     let mut driver = I219::open(Part::I219, delivery, driven, Monotonic, grant, Claim(Rc::clone(&dev)))
         .unwrap_or_else(|why| fail(&format!("the driver refused the function: {why}")));
     say(&format!("the driver: {}", driver.brought_up().delivered));
-    let after_reset = regs.read32(regs::IVAR);
-    say(&format!("0x000e4 after the driver's reset: {after_reset:#010x}"));
 
     let mut tally = Tally::default();
     let opened = Monotonic.nanos();
@@ -346,7 +345,7 @@ fn main() {
     say(&format!(
         "traffic: {} pass(es) on a message; with RXT0 {}, TXDW {}, LSC {}, ECCER {}; {received} frame(s) \
          received, {} descriptor(s) written back, the ring full {} time(s), {} wake(s) asked and {} taken, \
-         {} stranded; the MAC counted {} sent, {} received; PBECCSTS {ecc:#010x}",
+         {} stranded; the MAC counted {} sent; PBECCSTS {ecc:#010x}",
         tally.passes,
         tally.rxt0,
         tally.txdw,
@@ -358,30 +357,24 @@ fn main() {
         counters.tx_wake_taken,
         counters.stranded,
         wire.sent,
-        wire.received,
     ));
 
-    // The old driver's write, as the negative control on its read-back: the
-    // register takes the word and echoes it whatever it routes. Put back at
-    // once.
-    let before = regs.read32(regs::IVAR);
-    regs.write32(regs::IVAR, IVAR_SHAPED);
-    let echoed = regs.read32(regs::IVAR);
-    regs.write32(regs::IVAR, before);
-    say(&format!(
-        "an IVAR-shaped write: {before:#010x}, wrote {IVAR_SHAPED:#010x}, read back {echoed:#010x}, put back {:#010x}",
-        regs.read32(regs::IVAR)
-    ));
     drop(driver);
 
     if received == 0 || tally.rxt0 == 0 {
         fail("no frame arrived on a message under traffic");
     }
+    if tally.lsc == 0 {
+        fail("the link came up and no message carried LSC");
+    }
+    if counters.tx_full == 0 || counters.tx_wake_taken == 0 {
+        fail("the burst never filled the ring, or the transmit wake it asked for never came");
+    }
+    if counters.sent as u64 != wire.sent || counters.stranded != 0 {
+        fail("the descriptors written back are not the frames the MAC sent");
+    }
     if tally.eccer != 0 || ecc & regs::pbeccsts::COUNTS != 0 {
         fail("the packet buffer reported an ECC error");
-    }
-    if after_reset != at_claim {
-        say("0x000e4 changed across the driver's reset, which writes nothing there");
     }
     say("done");
 }

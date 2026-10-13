@@ -128,10 +128,11 @@ pub struct Permits {
     /// are of the same specification, so the model takes one or the other and
     /// a driver has to be right under either.
     pub icr_read_has_no_side_effect: bool,
-    /// §10.2.4.1 clears `ICR` on a read with an interrupt asserted only "if
-    /// auto mask is active" and does not say what the same read does without
-    /// it, so the model leaves `ICR` standing — and its `INT_ASSERTED` with it.
-    pub asserted_read_clears_only_under_auto_mask: bool,
+    /// §10.2.4.1 defines a read with an interrupt asserted for auto-mask
+    /// active (case 2) and says nothing of the same read without it. On, the
+    /// model leaves `ICR` standing there, and its `INT_ASSERTED` with it; off,
+    /// it clears, which is what the T14's part does.
+    pub asserted_read_without_auto_mask_keeps_icr: bool,
     /// §10.2.4.1: "a PCIe interrupt is generated whenever one of the bits in
     /// this register is set, and the corresponding interrupt is enabled", which
     /// does not say whether a cause landing while one is already asserted is
@@ -242,7 +243,7 @@ impl Default for Permits {
             spurious_interrupts: true,
             link_loss_strands_the_ring: true,
             icr_read_has_no_side_effect: true,
-            asserted_read_clears_only_under_auto_mask: true,
+            asserted_read_without_auto_mask_keeps_icr: true,
             one_message_per_assertion: true,
             master_takes_time_to_quiesce: true,
             firmware_takes_the_mdio_interface: true,
@@ -1098,7 +1099,7 @@ impl Model {
                 let clears = masked_all
                     || auto_mask
                     || !self.permits.icr_read_has_no_side_effect
-                    || (asserted && !self.permits.asserted_read_clears_only_under_auto_mask);
+                    || (asserted && !self.permits.asserted_read_without_auto_mask_keeps_icr);
                 if clears {
                     self.set(regs::ICR, 0);
                 }

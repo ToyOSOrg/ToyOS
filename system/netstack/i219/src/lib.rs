@@ -98,10 +98,9 @@
 //!   has to arrive as a message within [`DELIVERY_DEADLINE_NANOS`] or the
 //!   function is refused. Nothing falls back to a legacy interrupt.
 //! - **A pass reads `ICR` with auto-mask on and unmasks again when it ends.**
-//!   §10.2.4.1 says a read with an interrupt asserted clears `ICR` only "if
-//!   auto mask is active", and with it the read also masks every cause, so a
-//!   cause that lands after the read is a fresh message at the unmask instead
-//!   of a level that never fell.
+//!   §10.2.4.1's case 2, an interrupt asserted and auto-mask active, is the
+//!   only asserted read it defines: the read clears `ICR` and masks every
+//!   cause, and a cause recorded after it raises its message at the unmask.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -1348,9 +1347,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             }
         }
         // The read masked every cause if one was asserted. Unmasked again now,
-        // a cause recorded since the read is §10.2.4.5's "interrupt condition"
-        // under a mask bit being set: the next message, and not one lost
-        // behind an assertion that never fell.
+        // a cause recorded since the read raises the next message (§10.2.4.5).
         self.regs.write32(regs::IMS, self.causes.wanted);
         Ok(Pass { messages, causes, link_changed: self.link != before })
     }

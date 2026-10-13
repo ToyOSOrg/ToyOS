@@ -940,10 +940,11 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     (
         // The I219's interrupts on the function itself, which QEMU's e1000e
-        // is not: no MSI-X capability, `0x000E4` read before anything writes
-        // it, causes forced through `ICS` counted on the claim's MSI vector
-        // unmasked and masked, `ICR`'s read with auto-mask off and on, and
-        // the driver under traffic on the bench's wire.
+        // is not: no MSI-X capability, causes forced through `ICS` counted on
+        // the claim's MSI vector unmasked and masked, `ICR`'s asserted read
+        // under auto-mask, and the driver under traffic on the bench's wire.
+        // It shares the boot with `claim_reuses_its_remapping_entry`, whose
+        // judge reads only its own job's records.
         "i219_messages_on_its_msi_vector",
         metal::Metal {
             arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &[claims::MSI])],

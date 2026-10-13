@@ -29,6 +29,27 @@ fn records(log: &Serial) -> impl Iterator<Item = &str> {
     log.text().lines().filter_map(bootlog::message)
 }
 
+/// The kernel's records from `job`'s spawn to its exit: what it did, apart
+/// from every other job on a shared boot. Both ends are the kernel's own
+/// records, so nothing another channel carries can reorder them.
+fn job_records<'a>(log: &'a Serial, job: &str) -> Result<Vec<&'a str>, String> {
+    let spawned = format!("/{job} pid=");
+    let mut all = records(log);
+    let pid = all
+        .by_ref()
+        .find_map(|m| m.strip_prefix("spawn: ")?.split_once(&spawned)?.1.split_whitespace().next())
+        .ok_or_else(|| format!("no spawn record names {job}:\n{}", log.text()))?;
+    let exited = format!("{}{} pid={pid} ", bootlog::EXIT, bootlog::recorded_name(job));
+    let mut window = Vec::new();
+    for record in all {
+        if record.starts_with(&exited) {
+            return Ok(window);
+        }
+        window.push(record);
+    }
+    Err(format!("{job} pid={pid} never exited:\n{}", log.text()))
+}
+
 /// One `key=value` word of a record.
 fn field<'a>(record: &'a str, key: &str) -> Option<&'a str> {
     record.split_whitespace().find_map(|word| word.strip_prefix(key)?.strip_prefix('='))
@@ -53,9 +74,10 @@ fn function(log: &Serial) -> Result<String, String> {
 /// that entry not present.
 pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
     let at = function(log)?;
+    let window = job_records(log, RECLAIM)?;
     let mut written = Vec::new();
     let mut cleared = Vec::new();
-    for record in records(log) {
+    for &record in &window {
         let Some(rest) = record.strip_prefix("iommu: irte") else { continue };
         if field(record, "source") != Some(at.as_str()) {
             continue;
@@ -72,7 +94,7 @@ pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
     }
     let count = |what: &str| {
         let needle = format!("[{I219}] {what} slot ");
-        records(log).filter(|m| m.starts_with("pcidev: PCI ") && m.contains(&needle)).count()
+        window.iter().filter(|m| m.starts_with("pcidev: PCI ") && m.contains(&needle)).count()
     };
     let (handed, released) = (count("handed over on"), count("released from"));
     if (handed, released) != (2, 2) {
@@ -153,28 +175,14 @@ pub fn refused_unremapped(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// The I219's claim armed on MSI and its slot answered by a message while the
-/// I219 held it, and the job's readings — each its own line, judged by the
-/// job's exit — read out.
+/// The job's claim of the I219 armed on MSI and not MSI-X, and the job's
+/// readings — each judged by the job's own exit — read out.
 pub fn messages_on_its_msi_vector(kernel: &Serial, log: &Serial) -> Result<(), String> {
     let at = function(kernel)?;
-    kernel.must_say(&format!("PCI {at}: msi address="))?;
-    kernel.must_not_say(&format!("PCI {at}: msix address="))?;
-    // A slot is any claim's in turn, so a first message is the I219's only
-    // where the slot's newest hand-over before it was.
-    let mut holder = std::collections::BTreeMap::new();
-    let mut answered = false;
-    for record in records(kernel) {
-        if let Some((what, rest)) = record.split_once("] handed over on slot ") {
-            let slot = rest.split(',').next().unwrap_or_default().to_string();
-            holder.insert(slot, what.ends_with(I219));
-        } else if let Some(rest) = record.strip_prefix("pcidev: slot ") {
-            let slot = rest.split_whitespace().next().unwrap_or_default();
-            answered |= rest.contains(" took its first message on ") && holder.get(slot) == Some(&true);
-        }
-    }
-    if !answered {
-        return Err(format!("no slot took a first message while {I219} held it:\n{}", kernel.text()));
+    let window = job_records(kernel, MSI)?;
+    let says = |needle: &str| window.iter().any(|m| m.contains(needle));
+    if !says(&format!("PCI {at}: msi address=")) || says(&format!("PCI {at}: msix address=")) {
+        return Err(format!("{MSI}'s claim of {at} was not armed on MSI alone:\n{}", window.join("\n")));
     }
     let said: Vec<&str> = log.text().lines().filter_map(|l| Some(l.split_once(MSI_SAYS)?.1)).collect();
     if said.last() != Some(&"done") {
