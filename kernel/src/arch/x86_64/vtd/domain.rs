@@ -41,16 +41,17 @@ struct Domains {
     /// By id minus [`FIRST`]; never shrinks, since a released id would name a
     /// domain some unit may still have cached.
     live: Vec<Domain>,
-    /// What no domain's addresses may reach: the root bridges' windows and
-    /// the regions firmware reserved, as `(start, end)`.
-    reserved: Vec<(u64, u64)>,
+    /// What no domain's addresses may reach: the root bridges' declared
+    /// windows and the regions firmware reserved, as `(start, end)`; `None`
+    /// where no declaration is held.
+    reserved: Option<Vec<(u64, u64)>>,
 }
 
 static DOMAINS: Lock<Domains> =
-    Lock::new(Domains { agreement: Agreement::None, live: Vec::new(), reserved: Vec::new() });
+    Lock::new(Domains { agreement: Agreement::None, live: Vec::new(), reserved: None });
 
 /// Before any domain is made: every one is built clear of these.
-pub fn avoid(reserved: Vec<(u64, u64)>) {
+pub fn avoid(reserved: Option<Vec<(u64, u64)>>) {
     DOMAINS.lock().reserved = reserved;
 }
 
@@ -78,7 +79,7 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     if u32::from(id) >= ceiling {
         return Err(IommuError::DomainsExhausted(ceiling));
     }
-    let (domain, first) = Domain::new(&mut TABLES.lock(), id, width, mgaw, &domains.reserved, room)?;
+    let (domain, first) = Domain::new(&mut TABLES.lock(), id, width, mgaw, domains.reserved.as_deref(), room)?;
     log!(
         "iommu: domain{id} root={:#x} aw={} mgaw={} addresses from {:#x} to {:#x}",
         domain.root().phys(),

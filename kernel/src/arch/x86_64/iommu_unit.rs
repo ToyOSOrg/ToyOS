@@ -20,7 +20,7 @@ pub use super::vtd::{domain, fault, interrupt};
 const MAX_PHYS: u64 = 1 << 52;
 
 /// The units of whichever table firmware published.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow]) {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeWindow]>) {
     if super::vtd::init(rsdp_addr, devices, windows) || super::amdvi::init(rsdp_addr) {
         return;
     }

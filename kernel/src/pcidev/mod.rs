@@ -579,6 +579,14 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
     machine.high = high;
 }
 
+/// The root bridges' memory, where a declaration of it is held.
+pub fn declared() -> Option<Vec<RootBridgeWindow>> {
+    match &MACHINE.lock().apertures {
+        Apertures::Declared(windows) => Some(windows.clone()),
+        Apertures::Unknown | Apertures::Refused(_) => None,
+    }
+}
+
 /// Say what memory firmware declared the root bridges decode, and which
 /// assigned BAR lies inside none of it.
 ///

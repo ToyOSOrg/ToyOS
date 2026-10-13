@@ -250,7 +250,7 @@ impl Domain {
         id: u16,
         width: AddressWidth,
         mgaw: u8,
-        reserved: &[(u64, u64)],
+        reserved: Option<&[(u64, u64)]>,
         room: u64,
     ) -> Result<(Self, Iova), IommuError> {
         let (window, first) = Window::new(Self::translatable_bits(width, mgaw), reserved, room)?;

@@ -124,8 +124,9 @@ struct Live {
     /// at an ITS.
     routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
     domains: Vec<domain::Domain>,
-    /// What no domain's addresses may reach, as `(start, end)`.
-    reserved: Vec<(u64, u64)>,
+    /// What no domain's addresses may reach, as `(start, end)`; `None` where
+    /// no declaration is held.
+    reserved: Option<Vec<(u64, u64)>>,
 }
 
 impl Live {
@@ -209,7 +210,7 @@ fn window(phys: u64, bytes: u64) -> Mmio {
 
 /// The SMMUv3, armed; a refusal leaves every unit the IORT names aborting
 /// what it is given, or says why one could not be told to.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[toyos_abi::boot::RootBridgeWindow]) {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[toyos_abi::boot::RootBridgeWindow]>) {
     let iort = match toyos_acpi::iort(direct_phys(), rsdp_addr) {
         Ok(iort) => iort,
         Err(IortRefused::Table(TableError::Absent)) => {
@@ -270,7 +271,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[toyos_abi::boot::R
             Err(why) => log!("IOMMU: {function}'s IORT route is refused: {why:?}"),
         }
     }
-    let reserved = windows.iter().map(|w| (w.base, w.end())).collect();
+    let reserved = windows.map(|w| w.iter().map(|w| (w.base, w.end())).collect());
     let Some(live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, reserved) else {
         return;
     };
@@ -328,7 +329,7 @@ fn program(
     coherent_override: bool,
     event: Option<core::num::NonZeroU32>,
     routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
-    reserved: Vec<(u64, u64)>,
+    reserved: Option<Vec<(u64, u64)>>,
 ) -> Option<Live> {
     let refused = |why: core::fmt::Arguments<'_>| log!("IOMMU: the SMMUv3 at {base:#x} is left aborting: {why}");
     let (idr0, idr1, idr5) = (regs.read(reg::IDR0), regs.read(reg::IDR1), regs.read(reg::IDR5));

@@ -99,7 +99,7 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     let domains = if live.unit.asid(0x100).is_some() { 1 << 16 } else { 1 << 8 };
     let id = u16::try_from(usize::from(FIRST) + live.domains.len()).map_err(|_| IommuError::DomainsExhausted(domains))?;
     let asid = live.unit.asid(id).ok_or(IommuError::DomainsExhausted(domains))?;
-    let (addresses, first) = Window::new(INPUT_BITS as u8, &live.reserved, room)?;
+    let (addresses, first) = Window::new(INPUT_BITS as u8, live.reserved.as_deref(), room)?;
     let root = Phys::new(live.memory.alloc(PAGE_SIZE)).expect("SMMU: a table below the unit's output size");
     let context = Phys::new(live.memory.alloc(64)).expect("SMMU: a descriptor below the unit's output size");
     let words = Cd::new(root, asid, &live.unit).expect("SMMU: a table below the unit's output size").words();

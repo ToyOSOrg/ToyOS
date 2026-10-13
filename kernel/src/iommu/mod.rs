@@ -118,6 +118,10 @@ pub enum IommuError {
     /// What this machine's units translate does not reach above its memory, so
     /// a device window has nowhere to sit that a stale descriptor would miss.
     WindowBelowMemory { translatable: u8, floor: u64, top: u64 },
+    /// The units translate no further than the CPU's physical addresses, so a
+    /// domain has to end under the root bridges' windows, and no declaration
+    /// of them is held.
+    Undeclared { translatable: u8, cpu: u8 },
     /// From the floor to the first root-bridge window or reserved region above
     /// it is less than a new domain was asked to hand out.
     NoRoom { floor: u64, ceiling: u64, room: u64 },
@@ -143,6 +147,12 @@ impl core::fmt::Display for IommuError {
                 f,
                 "this machine's units translate {translatable} bits, whose device window would \
                  start at {floor:#x}, at or below the {top:#x} its memory reaches"
+            ),
+            Self::Undeclared { translatable, cpu } => write!(
+                f,
+                "this machine's units translate {translatable} bits and its CPUs issue {cpu}, so a \
+                 domain has to end under the root bridges' windows, and no declaration of them \
+                 is held"
             ),
             Self::NoRoom { floor, ceiling, room } => write!(
                 f,
@@ -265,11 +275,12 @@ impl core::fmt::Display for StreamId {
 ///
 /// The device list must be the complete enumeration: enabling translation with an unenumerated device left off it can brick the machine's own boot disk.
 ///
-/// No domain's addresses reach into one of `windows`, the memory firmware says the root bridges decode.
+/// No domain's addresses reach into one of `windows`, the root bridges'
+/// declared memory, or `None` where no declaration is held ([`window`]).
 pub fn init(
     rsdp_addr: u64,
     devices: &[crate::drivers::pci::PciDevice],
-    windows: &[toyos_abi::boot::RootBridgeWindow],
+    windows: Option<&[toyos_abi::boot::RootBridgeWindow]>,
 ) {
     unit::init(rsdp_addr, devices, windows);
 }
