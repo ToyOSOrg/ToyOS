@@ -437,32 +437,6 @@ nothing derived from it; and no reverse engineering, decompilation or
 disassembly.
 
 
-kernel/microcode/amd-ucode/* — AMD microcode, redistributable unmodified
-------------------------------------------------------------------------
-
-    microcode_amd_fam17h.bin  22,596 bytes, a container of seven patches for
-              family 0x17 CPUs, 0x0860010d for CPUID 0x00860f01 (Renoir, the
-              AMD bench's Ryzen 7 4800U) among them
-      sha256 966e4b796ec689c618868d08f8a37f347b0e7bfce4ae9df793e08471d363b7d0
-    Upstream: https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git,
-    `amd-ucode/` at tag 20260916
-    (commit ab23307cfe7f9366c819025ca3e4778299bc2db2), byte for byte
-    Licence text: licenses/AMD-ucode-license.txt (upstream's
-    `LICENSES/LICENSE.amd-ucode`, sha256
-    2103bd999f77522c5ab5fd35df0579ed00e2a6b885f6f8ebd444e97ffa482991)
-    SPDX-License-Identifier: LicenseRef-AMD-ucode
-
-The kernel embeds it whole and loads, on a CPU one of its patches names, that
-patch. The licence grants redistribution free of fees on five terms: the
-copyright notice and the licence travel with the software, which every x86-64
-image does as /system/share/licenses/AMD-ucode-license.txt; AMD is not
-referenced in promoting a product in a way that implies AMD endorses or
-certified it; no reverse engineering, decompilation or disassembly; the rights
-to third-party technologies the software may implement are the
-redistributor's to obtain, AMD conveying none; and U.S. and European export
-law binds whoever uses it.
-
-
 tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
 ----------------------------------------------------
 

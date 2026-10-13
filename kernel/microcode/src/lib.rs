@@ -1,23 +1,24 @@
-//! CPU microcode as Intel and AMD publish it, matched to one CPU, and the
-//! files the kernel loads it from, pure.
+//! CPU microcode as Intel publishes it, matched to one CPU, and the file the
+//! kernel loads it from, pure.
 //!
-//! [`intel`] reads Intel's update files as SDM Vol. 3A §12.11 defines them,
-//! [`amd`] AMD's containers as AMD's own parser reads them.
-//! Each validates the whole file, refuses it by name and offset where any
-//! part is malformed, and answers with the update a CPU loads, or why it loads
-//! none. Only the documented headers are read: an update's body is its
-//! maker's signed payload, handed on whole and never interpreted.
+//! A file Intel publishes for one processor signature is updates laid end to
+//! end, and so is any number of such files laid end to end. [`select`]
+//! validates every update against SDM Vol. 3A §12.11 (order number
+//! 325384-093US) — header, checksum and the optional extended signature table
+//! — and answers with the newest that names a CPU's signature and platform,
+//! or why it loads none. One malformed update refuses the whole file. Only
+//! the documented headers are read: an update's data is Intel's signed
+//! payload, handed on whole and never interpreted.
 //!
-//! Before any file is read, [`Maker::of`] says whose interface a CPU's
-//! revision is read through and [`may_load`] whether it loads at all.
+//! Only an update newer than the revision the CPU runs loads (Example 12-10):
+//! the CPU "may or may not reload" an equal one, and loading an update on one
+//! logical processor loads it on every other in its core.
 //!
-//! [`INTEL`] and [`AMD`] are the files the kernel embeds, one per CPU ToyOS
-//! has a bench for, each as its maker publishes it and pinned by its digest
-//! in `NOTICE`. **On an AMD CPU whose own signature check can be made to take
-//! a patch AMD did not sign (CVE-2024-36347, AMD-SB-7033), that pin is the
-//! only check**: the files are inside the kernel image, so no other patch
-//! reaches the loader, and a microcode source outside the image brings a
-//! check of its own.
+//! Before any file is read, [`loader`] says whether ToyOS has a loader for a
+//! CPU's vendor and [`may_load`] whether the CPU loads at all.
+//!
+//! [`INTEL`] is the file the kernel embeds, as Intel publishes it and pinned
+//! by its digest in `NOTICE`.
 //!
 //! Pure: no I/O, no allocation, no `unsafe`. The caller reads the CPU.
 //!
@@ -41,9 +42,6 @@ use core::fmt;
 
 use toyos_cpuvuln::Vendor;
 
-pub mod amd;
-pub mod intel;
-
 #[cfg(test)]
 mod tests;
 
@@ -58,17 +56,12 @@ pub struct Aligned<Bytes: ?Sized>(pub Bytes);
 /// `intel-ucode/06-8c-01`, the T14's i5-1135G7.
 pub static INTEL: &Aligned<[u8]> = &Aligned(*include_bytes!("../intel-ucode/06-8c-01"));
 
-/// AMD's container for the CPUs ToyOS has a bench for:
-/// `amd-ucode/microcode_amd_fam17h.bin`, the AMD bench's Ryzen 7 4800U among
-/// them.
-pub static AMD: &Aligned<[u8]> = &Aligned(*include_bytes!("../amd-ucode/microcode_amd_fam17h.bin"));
-
-/// CPUID.01H:EAX, which both makers' updates name their CPU by.
+/// CPUID.01H:EAX, which Intel's updates name their CPU by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Signature(pub u32);
 
-/// A microcode revision: Intel's update revision, AMD's patch level, each the
-/// dword its maker reports it in MSR 8BH, compared unsigned.
+/// An Intel update revision, the dword MSR 8BH reports it in, compared
+/// unsigned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Revision(pub u32);
 
@@ -76,15 +69,10 @@ impl Revision {
     /// The highest revision, which no update loads over.
     pub const DISABLED: Self = Self(u32::MAX);
 
-    /// Intel's: MSR 8BH read after writing it 0 and executing CPUID.01H, whose
-    /// upper dword the revision is (SDM §12.11.7.1).
+    /// MSR 8BH read after writing it 0 and executing CPUID.01H, whose upper
+    /// dword the revision is (SDM §12.11.7.1).
     pub const fn from_sign_id(msr: u64) -> Self {
         Self((msr >> 32) as u32)
-    }
-
-    /// AMD's: MSR 8BH's lower dword, the patch level (55922, MSR0000_008B).
-    pub const fn from_patch_level(msr: u64) -> Self {
-        Self(msr as u32)
     }
 }
 
@@ -96,33 +84,22 @@ impl fmt::LowerHex for Revision {
 
 /// What a valid file holds for one CPU.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Choice<Update> {
-    /// The newest update naming the CPU, which it loads.
-    Load(Update),
-    /// The newest update naming the CPU is this revision, and the CPU runs
-    /// one its maker's rule does not load it over.
+pub enum Choice<'a> {
+    /// The newest update naming the CPU, newer than the revision it runs.
+    Load(Update<'a>),
+    /// The newest update naming the CPU is this revision, and the CPU already
+    /// runs it or a newer one.
     Current(Revision),
     /// No update in the file names the CPU.
     NoMatch,
 }
 
-/// A maker whose files the kernel embeds: whose file a CPU chooses from, and
-/// whose half of MSR 8BH its revision is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Maker {
-    Intel,
-    Amd,
-}
-
-impl Maker {
-    /// The maker a CPU of `vendor` loads from, or why it loads nothing.
-    pub fn of(vendor: Vendor) -> Result<Self, Unloaded> {
-        match vendor {
-            Vendor::Intel => Ok(Self::Intel),
-            Vendor::Amd => Ok(Self::Amd),
-            Vendor::Hygon | Vendor::Centaur | Vendor::Zhaoxin | Vendor::Unknown => {
-                Err(Unloaded::Vendor(vendor))
-            }
+/// Whether ToyOS has a loader for a CPU of `vendor`: Intel's alone.
+pub fn loader(vendor: Vendor) -> Result<(), Unloaded> {
+    match vendor {
+        Vendor::Intel => Ok(()),
+        Vendor::Amd | Vendor::Hygon | Vendor::Centaur | Vendor::Zhaoxin | Vendor::Unknown => {
+            Err(Unloaded::Vendor(vendor))
         }
     }
 }
@@ -130,7 +107,7 @@ impl Maker {
 /// Why a CPU loads nothing, said before any file is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unloaded {
-    /// No embedded file is from this vendor, so nothing of its CPU is read.
+    /// ToyOS has no loader for this vendor, so nothing of its CPU is read.
     Vendor(Vendor),
     /// CPUID.01H:ECX[31], which a hypervisor sets for its guest (AMD's APM
     /// Vol. 3, 24594 rev 3.36, §E.3.2): the guest's microcode is the
@@ -142,15 +119,15 @@ pub enum Unloaded {
 
 impl fmt::Display for Unloaded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Vendor(_) => "no embedded file is from this vendor",
-            Self::Hypervisor => "a hypervisor owns this CPU's microcode",
-            Self::Disabled => "revision 0xffffffff, which no update loads over",
-        })
+        match self {
+            Self::Vendor(vendor) => write!(f, "ToyOS has no {vendor:?} microcode loader"),
+            Self::Hypervisor => f.write_str("a hypervisor owns this CPU's microcode"),
+            Self::Disabled => f.write_str("revision 0xffffffff, which no update loads over"),
+        }
     }
 }
 
-/// Whether a CPU whose maker [`Maker::of`] names may load, from its
+/// Whether a CPU [`loader`] admits may load, from its
 /// CPUID.01H:ECX and the revision it reports. A guest loads nothing whatever
 /// it reports.
 pub fn may_load(cpuid_1_ecx: u32, found: Revision) -> Result<(), Unloaded> {
@@ -163,6 +140,210 @@ pub fn may_load(cpuid_1_ecx: u32, found: Revision) -> Result<(), Unloaded> {
     Ok(())
 }
 
+/// The header's length, and so the offset of the update data (Table 12-7).
+const HEADER: usize = 48;
+/// The extended signature table's header: count, checksum, 12 reserved bytes
+/// (Table 12-9).
+const EXT_HEADER: usize = 20;
+/// One extended signature: signature, processor flags, checksum (Table 12-10).
+const EXT_SIGNATURE: usize = 12;
+/// Total Size is "always a multiple of 1024" (Table 12-7).
+const GRANULE: usize = 1024;
+
+/// Which bit of an update's processor flags names this CPU's platform
+/// (§12.11.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlatformId(u8);
+
+impl PlatformId {
+    /// `IA32_PLATFORM_ID` (MSR 17H): bits 52:50 (Table 12-11).
+    pub const fn from_msr(msr: u64) -> Self {
+        Self((msr >> 50) as u8 & 7)
+    }
+
+    const fn flag(self) -> u32 {
+        // `self.0` < 8: the field is private and `from_msr` masks it.
+        1 << self.0
+    }
+}
+
+impl fmt::Display for PlatformId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
+
+/// What one CPU reports, read on that CPU.
+#[derive(Clone, Copy, Debug)]
+pub struct Cpu {
+    pub signature: Signature,
+    pub platform: PlatformId,
+    pub revision: Revision,
+}
+
+/// One update out of a file, validated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Update<'a> {
+    revision: Revision,
+    signature: u32,
+    flags: u32,
+    data: &'a [u8],
+    extended: &'a [[u8; EXT_SIGNATURE]],
+}
+
+impl<'a> Update<'a> {
+    pub fn revision(&self) -> Revision {
+        self.revision
+    }
+
+    /// The update data. `IA32_BIOS_UPDT_TRIG` is written its linear address,
+    /// which must be 16-byte aligned and mapped present (§12.11.6).
+    pub fn data(&self) -> &'a [u8] {
+        self.data
+    }
+
+    /// The header's signature and flags, then each extended signature's
+    /// (Examples 12-5 and 12-6).
+    fn names(&self, cpu: &Cpu) -> bool {
+        let extended = self.extended.iter().map(|entry| {
+            let [signature, flags, _] = dwords(entry);
+            (signature, flags)
+        });
+        core::iter::once((self.signature, self.flags))
+            .chain(extended)
+            .any(|(signature, flags)| signature == cpu.signature.0 && flags & cpu.platform.flag() != 0)
+    }
+}
+
+/// Why a file is refused: the offset of the update that is malformed, and how.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Refused {
+    pub at: usize,
+    pub why: Refusal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// The bytes end before the header does, or before Total Size says the
+    /// update does.
+    Truncated { need: usize, have: usize },
+    /// Header Version is not 1, the only version §12.11 defines.
+    HeaderVersion(u32),
+    /// Loader Revision is not 1, the only loader §12.11.6 describes.
+    LoaderRevision(u32),
+    /// Data Size is 0, which Table 12-7 reads as 2000 bytes: the form of
+    /// updates for CPUs older than any ToyOS runs on.
+    ZeroDataSize,
+    /// Data Size is not a multiple of a dword.
+    DataSize(usize),
+    /// Total Size is not a multiple of 1024.
+    TotalSize(usize),
+    /// Total Size is smaller than the header and data it holds.
+    TotalBelowData { total: usize, data: usize },
+    /// The header's and data's dwords sum to this, not to 0 (§12.11.5).
+    Checksum(u32),
+    /// The extended signature table is not 20 bytes and 12 for each signature
+    /// its count names.
+    ExtendedTableSize { len: usize },
+    /// The extended signature table's dwords sum to this, not to 0 (§12.11.2).
+    ExtendedTableChecksum(u32),
+    /// This extended signature's checksum does not stand in for the header's
+    /// (Table 12-10).
+    ExtendedSignatureChecksum { index: usize },
+}
+
+/// The update in `file` to load on `cpu`, or why there is none. A file holds
+/// at least one update.
+pub fn select<'a>(file: &'a [u8], cpu: &Cpu) -> Result<Choice<'a>, Refused> {
+    let mut newest: Option<Update<'a>> = None;
+    let mut rest = file;
+    loop {
+        // `rest` is a suffix of `file`.
+        let at = file.len().wrapping_sub(rest.len());
+        let (update, after) = parse(rest).map_err(|why| Refused { at, why })?;
+        if update.names(cpu) && newest.is_none_or(|n| update.revision > n.revision) {
+            newest = Some(update);
+        }
+        if after.is_empty() {
+            break;
+        }
+        rest = after;
+    }
+    Ok(match newest {
+        None => Choice::NoMatch,
+        Some(update) if update.revision > cpu.revision => Choice::Load(update),
+        Some(update) => Choice::Current(update.revision),
+    })
+}
+
+/// The update `bytes` starts with, and the bytes after it.
+fn parse(bytes: &[u8]) -> Result<(Update<'_>, &[u8]), Refusal> {
+    let have = bytes.len();
+    let (header, rest) =
+        bytes.split_first_chunk::<HEADER>().ok_or(Refusal::Truncated { need: HEADER, have })?;
+    let [version, revision, _, signature, checksum, loader, flags, data, total, ..]: [u32; 12] =
+        dwords(header);
+    if version != 1 {
+        return Err(Refusal::HeaderVersion(version));
+    }
+    if loader != 1 {
+        return Err(Refusal::LoaderRevision(loader));
+    }
+    let (data, total) = (data as usize, total as usize);
+    if data == 0 {
+        return Err(Refusal::ZeroDataSize);
+    }
+    if !data.is_multiple_of(4) {
+        return Err(Refusal::DataSize(data));
+    }
+    if !total.is_multiple_of(GRANULE) {
+        return Err(Refusal::TotalSize(total));
+    }
+    let table = HEADER
+        .checked_add(data)
+        .and_then(|signed| total.checked_sub(signed))
+        .ok_or(Refusal::TotalBelowData { total, data })?;
+    let truncated = Refusal::Truncated { need: total, have };
+    let (data, rest) = rest.split_at_checked(data).ok_or(truncated)?;
+    let (table, rest) = rest.split_at_checked(table).ok_or(truncated)?;
+
+    match sum(header).wrapping_add(sum(data)) {
+        0 => {}
+        sum => return Err(Refusal::Checksum(sum)),
+    }
+    let extended = match table {
+        [] => &[],
+        table => extended(table, signature.wrapping_add(checksum).wrapping_add(flags))?,
+    };
+    let update = Update { revision: Revision(revision), signature, flags, data, extended };
+    Ok((update, rest))
+}
+
+/// The entries of an extended signature table whose update's header
+/// signature, checksum and flags sum to `primary`.
+fn extended(table: &[u8], primary: u32) -> Result<&[[u8; EXT_SIGNATURE]], Refusal> {
+    let size = Refusal::ExtendedTableSize { len: table.len() };
+    let (header, entries) = table.split_first_chunk::<EXT_HEADER>().ok_or(size)?;
+    let [count, ..]: [u32; 5] = dwords(header);
+    if (count as usize).checked_mul(EXT_SIGNATURE) != Some(entries.len()) {
+        return Err(size);
+    }
+    match sum(table) {
+        0 => {}
+        sum => return Err(Refusal::ExtendedTableChecksum(sum)),
+    }
+    let (entries, _) = entries.as_chunks::<EXT_SIGNATURE>();
+    // An extended signature, flags and checksum replace the header's three in
+    // the update it stands for, so the two triples sum alike.
+    for (index, entry) in entries.iter().enumerate() {
+        let [signature, flags, checksum] = dwords(entry);
+        if signature.wrapping_add(flags).wrapping_add(checksum) != primary {
+            return Err(Refusal::ExtendedSignatureChecksum { index });
+        }
+    }
+    Ok(entries)
+}
+
 /// `bytes` as little-endian dwords; a `LEN` that is not `4 * N` does not build.
 fn dwords<const LEN: usize, const N: usize>(bytes: &[u8; LEN]) -> [u32; N] {
     const { assert!(LEN == 4 * N) };
@@ -171,4 +352,9 @@ fn dwords<const LEN: usize, const N: usize>(bytes: &[u8; LEN]) -> [u32; N] {
         *dword = u32::from_le_bytes(*bytes);
     }
     dwords
+}
+
+/// Every dword of `bytes` summed, unsigned, with wrap (§12.11.5).
+fn sum(bytes: &[u8]) -> u32 {
+    bytes.as_chunks::<4>().0.iter().fold(0, |sum, &w| sum.wrapping_add(u32::from_le_bytes(w)))
 }

@@ -1,4 +1,4 @@
-//! This CPU's microcode, loaded from the files `toyos_microcode` embeds
+//! This CPU's microcode, loaded from the Intel file `toyos_microcode` embeds
 //! before anything reads what an update changes: Intel asks it "on each core
 //! as early as possible in the OS boot sequence, before any CPUID feature
 //! flags or other enumeration values are cached". The BSP loads in
@@ -9,24 +9,23 @@
 //!
 //! **Both run before this kernel's IDT**, so a fault inside a trigger reports
 //! nothing: the BSP's vectors into firmware's table, an AP's into the kernel's
-//! with `CR4.OSFXSR` still clear, a triple fault. Neither maker documents a
-//! fault for a valid update at a present, canonical address.
+//! with `CR4.OSFXSR` still clear, a triple fault. Intel documents no fault for
+//! a valid update at a present, canonical address.
 //!
 //! **A CPU's verdict on an update is the revision it reads back, and a
 //! refusal is reported, not a panic.** Intel judges a load by MSR 8BH read
 //! after it, equal to the update's revision or a failure (SDM Vol. 3A
 //! §12.11.7.2, Example 12-10), and the register reports "the currently
-//! functioning revision" (§12.11.7.1). AMD's PPR for family 17h model 60h
-//! (55922 rev 3.06, MSR0000_008B) has it return "an identification number for
-//! the microcode patch that has been loaded". So a CPU that does not take an
-//! update runs the revision it reads back: its line says `refused` with the
+//! functioning revision" (§12.11.7.1). So a CPU that does not take an update
+//! runs the revision it reads back: its line says `refused` with the
 //! update it was handed, its `running` is that read-back, and it is held to
 //! the machine's like any other.
 //!
 //! One line per CPU says what it found, what the file holds for it and what
-//! it runs; a CPU that loads nothing says why. Every CPU that reads a revision
-//! runs the one the first did, or the boot stops naming it: whatever reads the
-//! revision assumes one.
+//! it runs; a CPU that loads nothing says why, and a CPU of a vendor ToyOS
+//! has no loader for says so by the vendor's name and reads nothing more.
+//! Every CPU that reads a revision runs the one the first did, or the boot
+//! stops naming it: whatever reads the revision assumes one.
 //!
 //! INIT keeps an update and a hard reset clears it (§12.11.6.1): a resume
 //! path, when one exists, loads again.
@@ -35,7 +34,7 @@ use core::arch::asm;
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use toyos_microcode::{amd, intel, Choice, Maker, Revision, Signature, Unloaded};
+use toyos_microcode::{Choice, Cpu, PlatformId, Revision, Signature, Unloaded};
 
 use super::cpu;
 use crate::log;
@@ -43,11 +42,9 @@ use crate::log;
 /// `IA32_PLATFORM_ID`.
 const PLATFORM_ID: u32 = 0x17;
 /// `IA32_BIOS_UPDT_TRIG`.
-const INTEL_TRIGGER: u32 = 0x79;
-/// `IA32_BIOS_SIGN_ID`; AMD's `PATCH_LEVEL` (55922, MSR0000_008B).
+const TRIGGER: u32 = 0x79;
+/// `IA32_BIOS_SIGN_ID`.
 const SIGN_ID: u32 = 0x8b;
-/// AMD's patch loader, which no AMD document in hand describes.
-const AMD_TRIGGER: u32 = 0xc001_0020;
 
 /// The revision every CPU runs, as the first to read one published it.
 static MACHINE: AtomicU64 = AtomicU64::new(UNPUBLISHED);
@@ -58,25 +55,18 @@ const UNPUBLISHED: u64 = u64::MAX;
 pub fn load(cpu_id: u32) {
     let vendor = cpu::vendor();
     let (eax, _, ecx, _) = cpu::cpuid(1, 0);
-    let signature = Signature(eax);
-    let maker = match Maker::of(vendor) {
-        Ok(maker) => maker,
-        Err(why) => {
-            log!("microcode: cpu{cpu_id} {vendor:?} signature {eax:#x} loads nothing: {why}");
-            return;
-        }
-    };
-    let found = revision(maker);
+    if let Err(why) = toyos_microcode::loader(vendor) {
+        log!("microcode: cpu{cpu_id} {vendor:?} signature {eax:#x} loads nothing: {why}");
+        return;
+    }
+    let found = revision();
     let (platform, outcome) = match toyos_microcode::may_load(ecx, found) {
         Err(why) => (None, Outcome::Unloaded(why)),
-        Ok(()) => match maker {
-            Maker::Intel => {
-                let platform = intel::PlatformId::from_msr(cpu::rdmsr(PLATFORM_ID));
-                let cpu = intel::Cpu { signature, platform, revision: found };
-                (Some(platform), load_intel(cpu_id, &cpu))
-            }
-            Maker::Amd => (None, load_amd(signature, found)),
-        },
+        Ok(()) => {
+            let platform = PlatformId::from_msr(cpu::rdmsr(PLATFORM_ID));
+            let cpu = Cpu { signature: Signature(eax), platform, revision: found };
+            (Some(platform), load_intel(cpu_id, &cpu))
+        }
     };
     let running = match outcome {
         Outcome::Loaded(loaded) => loaded,
@@ -88,7 +78,7 @@ pub fn load(cpu_id: u32) {
     agree(cpu_id, running);
 }
 
-/// What one CPU did with the file its maker's is.
+/// What one CPU did with the embedded file.
 enum Outcome {
     Unloaded(Unloaded),
     NoMatch,
@@ -112,8 +102,8 @@ impl fmt::Display for Outcome {
     }
 }
 
-/// An Intel CPU's platform, where it was read.
-struct Platform(Option<intel::PlatformId>);
+/// A CPU's platform, where it was read.
+struct Platform(Option<PlatformId>);
 
 impl fmt::Display for Platform {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -124,22 +114,17 @@ impl fmt::Display for Platform {
     }
 }
 
-/// The revision this CPU runs, read as its maker reports it.
-fn revision(maker: Maker) -> Revision {
-    match maker {
-        Maker::Intel => {
-            // SAFETY: writing `IA32_BIOS_SIGN_ID` 0 is §12.11.7.1's own first
-            // step, and loads nothing.
-            unsafe { cpu::wrmsr(SIGN_ID, 0) };
-            cpu::cpuid(1, 0);
-            Revision::from_sign_id(cpu::rdmsr(SIGN_ID))
-        }
-        Maker::Amd => Revision::from_patch_level(cpu::rdmsr(SIGN_ID)),
-    }
+/// The revision this CPU runs (§12.11.7.1).
+fn revision() -> Revision {
+    // SAFETY: writing `IA32_BIOS_SIGN_ID` 0 is §12.11.7.1's own first step,
+    // and loads nothing.
+    unsafe { cpu::wrmsr(SIGN_ID, 0) };
+    cpu::cpuid(1, 0);
+    Revision::from_sign_id(cpu::rdmsr(SIGN_ID))
 }
 
-fn load_intel(cpu_id: u32, cpu: &intel::Cpu) -> Outcome {
-    let choice = intel::select(reseal::intel_file(cpu_id), cpu).unwrap_or_else(|refused| {
+fn load_intel(cpu_id: u32, cpu: &Cpu) -> Outcome {
+    let choice = toyos_microcode::select(reseal::intel_file(cpu_id), cpu).unwrap_or_else(|refused| {
         panic!("microcode: the embedded Intel file is refused at byte {}: {:?}", refused.at, refused.why)
     });
     match choice {
@@ -149,51 +134,30 @@ fn load_intel(cpu_id: u32, cpu: &intel::Cpu) -> Outcome {
             // SAFETY: a validated update's data, which `INTEL`'s alignment and
             // every update's 1024-byte granule start 16-byte aligned, inside
             // the kernel image and so canonical and present (§12.11.6).
-            unsafe { trigger(INTEL_TRIGGER, update.data().as_ptr()) };
-            taken(Maker::Intel, update.revision())
+            unsafe { trigger(update.data().as_ptr()) };
+            taken(update.revision())
         }
     }
 }
 
-fn load_amd(signature: Signature, found: Revision) -> Outcome {
-    let choice = amd::select(&toyos_microcode::AMD.0, signature, found).unwrap_or_else(|refused| {
-        panic!("microcode: the embedded AMD container is refused at byte {}: {:?}", refused.at, refused.why)
-    });
-    match choice {
-        Choice::NoMatch => Outcome::NoMatch,
-        Choice::Current(newest) => Outcome::Current(newest),
-        Choice::Load(patch) => {
-            let bytes = patch.bytes().as_ptr_range();
-            // SAFETY: a validated patch inside the kernel image, so its
-            // address is canonical and present.
-            unsafe { trigger(AMD_TRIGGER, bytes.start) };
-            if patch.leaves_its_mapping_uncached() {
-                cpu::invlpg(bytes.start as u64);
-                cpu::invlpg(bytes.end as u64 - 1);
-            }
-            taken(Maker::Amd, patch.revision())
-        }
-    }
-}
-
-/// A trigger MSR written the address of the bytes the CPU loads from. Not
+/// `IA32_BIOS_UPDT_TRIG` written the address of the data the CPU loads. Not
 /// `cpu::wrmsr`, which is `nomem`: the CPU reads memory through this write.
 ///
 /// # Safety
-/// `msr` is a maker's trigger on a CPU of that maker, and `at` the start of
-/// one of that maker's validated updates, placed as its trigger asks.
-unsafe fn trigger(msr: u32, at: *const u8) {
+/// The CPU is Intel's, and `at` the start of a validated update's data,
+/// placed as §12.11.6 asks.
+unsafe fn trigger(at: *const u8) {
     let at = at as u64;
     // SAFETY: the caller's.
     unsafe {
-        asm!("wrmsr", in("ecx") msr, in("eax") at as u32, in("edx") (at >> 32) as u32, options(nostack));
+        asm!("wrmsr", in("ecx") TRIGGER, in("eax") at as u32, in("edx") (at >> 32) as u32, options(nostack));
     }
 }
 
 /// What the CPU made of the update of revision `update` it was handed: the
 /// revision it reads back, which it runs.
-fn taken(maker: Maker, update: Revision) -> Outcome {
-    match revision(maker) {
+fn taken(update: Revision) -> Outcome {
+    match revision() {
         running if running == update => Outcome::Loaded(update),
         running => Outcome::Refused { update, running },
     }
