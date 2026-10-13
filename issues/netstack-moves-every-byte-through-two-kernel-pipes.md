@@ -80,15 +80,17 @@ The design and its roast are PR #863's body.
   through `toyos::net`. Today a stream's handle reads
   and writes the stream through a `File` or a child's stdio; over the region
   it would read doorbells, so `File::from_raw_fd` of a stream's handle panics
-  with `toyos::net`'s refusal, and every path that moves a handle into
-  another process asks `toyos::net` of each handle before anything moves and
-  answers its refusal: a spawn's stdio slots, `CommandExt::inherit_handle`
-  into any slot, `CommandExt::endow` and `Command::provide`, each with no
-  child started and the handle still the caller's, and `toyos::ipc`'s
-  `send_handles`, which sends nothing and lets its batch go as every refused
-  move does, a stream's handle through `toyos::net`. So no refused move
-  leaves an entry that outlives its handle's number. The bare `dup`,
-  `SYS_HANDLE_SEND` and `SYS_SPAWN` syscalls stay unchecked. A regression,
+  with `toyos::net`'s refusal, and every path std offers to move a raw
+  handle into another process asks `toyos::net` of each handle before
+  anything moves and answers its refusal: a spawn's stdio slots,
+  `CommandExt::inherit_handle` into any slot, `CommandExt::endow` and
+  `Command::provide`, each with no child started and the handle still the
+  caller's, so no refused move leaves an entry that outlives its handle's
+  number. `toyos::ipc`'s `send_handles` is refused by its type: it takes
+  `OwnedHandle`s, and a stream's handle becomes one only through
+  `OwnedHandle::from_raw`, whose `# Safety` stage 3 extends to exclude a
+  handle `toyos::net` answers for. The bare `dup`, `SYS_HANDLE_SEND` and
+  `SYS_SPAWN` syscalls stay unchecked. A regression,
   `issues/a-stream-cannot-move-between-processes.md`. Exit: three loom models
   that drive the client end and netstack's ringing code as stage 3 lands
   them, each red under a control that reverts its decision. In one, a
@@ -116,18 +118,15 @@ The design and its roast are PR #863's body.
   the stdio slots, `endow` and `provide` each answer the refusal and start no
   child, and the stream then reads and writes through that handle; each is
   red when its path takes the handle silently, and `endow`'s and `provide`'s
-  are red when the handle moves and its entry stays. `send_handles` answers
-  the refusal and sends nothing, and the stream's entry goes with the
-  handle; red when it sends, and red when the refused batch closes the handle
-  past `toyos::net`. A test: a `write` with room after a
-  reset answers `ConnectionReset` and copies nothing, red when `write` copies
-  before it reads the `end`. And a T14 boot of round 3's `internet_download`
-  on stage 3's head reads, in every run, `pipe_copy_bytes` under 0.01 per
-  byte downloaded, its C0, hold and spin per MB posted beside the scout's
-  rows. No tree that lands has that row or that counter: the boot carries the
-  scout's instrument, `git diff 777c96b2b 2f9e090b8`
-  (`wt/toyos-netring-scout` over its base), onto stage 3's head, less the
-  netstack stamps on the pipe writes stage 3 deletes.
+  are red when the handle moves and its entry stays. A test: a `write` with
+  room after a reset answers `ConnectionReset` and copies nothing, red when
+  `write` copies before it reads the `end`. And a T14 boot of round 3's
+  `internet_download` on stage 3's head reads, in every run,
+  `pipe_copy_bytes` under 0.01 per byte downloaded, its C0, hold and spin
+  per MB posted beside the scout's rows. No tree that lands has that row or
+  that counter: the boot carries the scout's instrument, `git diff
+  777c96b2b 2f9e090b8` (`wt/toyos-netring-scout` over its base), onto stage
+  3's head, less the netstack stamps on the pipe writes stage 3 deletes.
 - Stage 4: a listener and a datagram socket the same way, and the pipe ABI's
   messages, `SYS_CONNECTION_JOIN` and `toyos::net`'s pipe handles go. A
   passive child's bytes wait in [tcp]'s heap storage, at most
@@ -140,17 +139,28 @@ The design and its roast are PR #863's body.
   listener. netstack copies each datagram record's `len`, `port` and `addr`
   out of the region once and judges the copy: a `len` past the bytes the
   record holds ends that socket alone. `toyos::net`'s `send_to` refuses
-  what a sender can judge and writes no record: a payload past the bound
-  that `toyos-abi`'s `net` module declares and [udp] reads in place of its
-  own `limits::MAX_PAYLOAD`, as POSIX's `sendto` fails `[EMSGSIZE]`; port 0;
-  an unspecified address. [udp] still refuses each by its counter at the
+  what a sender can judge and writes no record: a payload past
+  `toyos_abi::net::UDP_MAX_PAYLOAD`, as POSIX's `sendto` fails
+  `[EMSGSIZE]`; port 0; an unspecified address. That bound is the one
+  declaration: [udp]'s `limits::MAX_PAYLOAD` goes, and [udp], the node's
+  `name.rs` and `resolve.rs`, netstack's `serve.rs` and [udp]'s
+  `tests/send.rs` read it. [udp] still refuses each by its counter at the
   trust boundary. What only netstack can judge, a connected socket's other
   destination, a route, broadcast permission, a source address and a pending
-  ICMP error, netstack stores in the region's `pending` word and rings, and
-  the socket's next call answers it and clears it, as POSIX's pending error
-  is "returned in response to a subsequent send(), recv(), or getsockopt()
-  operation" (XSH 2.10.10). netstack takes a record only while [udp]'s send
-  queue has room. Exit: over the region,
+  ICMP error, netstack stores in the region's `pending` word if it is 0,
+  then exchanges both client wants for 0 and rings each that was set, as it
+  does for a stream's fatal `end`; a call's look after it arms reads
+  `pending` beside its ring, and the socket's next call answers it and
+  clears it, as POSIX's pending error is "returned in response to a
+  subsequent send(), recv(), or getsockopt() operation" (XSH 2.10.10).
+  netstack takes a record off the send ring only while [udp]'s queue for
+  the socket has room, and looks again when a datagram leaves it, so a full
+  queue holds the ring and refuses nothing. A `send_to` over a full send
+  ring waits as a stream's writer does, on a bell of the socket's own that
+  netstack makes at the bind and alone writes, its want `tx_room`, as
+  POSIX's `sendto` "shall block until space is available or a timeout
+  occurs"; nonblocking, which std's `UdpSocket::set_nonblocking` then sets,
+  it answers `WouldBlock`. Exit: over the region,
   `system/netstack/node/tests/listeners.rs`'s
   `a_listener_answers_a_syn_and_wakes_its_owner_when_the_handshake_ends`
   passes, and so does a case in which a child holds, before its accept, text
@@ -163,7 +173,17 @@ The design and its roast are PR #863's body.
   that `len` as written. A case per refusal: an oversized payload, port 0
   and an unspecified address each answer their error at `send_to` with no
   record written, and each refusal only netstack judges answers on the
-  socket's next call; each is red when that call answers `Ok`.
+  socket's next call; each is red when that call answers `Ok`. Two loom
+  models drive the client end and netstack's code as stage 4 lands them. In
+  one, a `recv_from` asleep with nothing to receive, and a `send_to` asleep
+  over a full send ring, each answers a refusal only netstack judges that
+  lands meanwhile; each is red when the look reads `pending` before it arms,
+  red when netstack exchanges the wants before it stores `pending`, and red
+  under `want-relaxed`, and the sender's is red when netstack rings only
+  `rx_data`. In the other, a sender that fills the send ring while [udp]'s
+  queue is full, beside a `recv_from` asleep on the connection, has every
+  record sent, in order, none refused; red when netstack refuses a record at
+  the full queue, and red when it rings `tx_room` on the connection.
 
 Owner: the orchestrator, who stages it.
 
