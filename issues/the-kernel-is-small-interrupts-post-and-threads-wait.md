@@ -188,8 +188,11 @@ Beside that order, each waiting on something outside it:
        `toyos-usbhid`. **Exit**: the kernel's part, usbd's claims handed
        over again at its death: the controller's by `usbd_drives_the_spare`
        on the default `qemu-xhci` (below) and
-       `usbd_drives_the_type_c_controller`, the keyboard's by stage 7 step
-       2's kernel test on usbd's claim. usbd's, a device that stops answering
+       `usbd_drives_the_type_c_controller`; there is no keyboard claim. The
+       owner of input's, a key usbd held at its death released:
+       `toyos-input`'s test that a connection's end releases every device it
+       carried and a `gone` only its own `source`, red with either release
+       widened or removed. usbd's, a device that stops answering
        costing only itself: `toyos-xhci-sim`'s
        `a_controller_that_never_answers_still_releases_the_port`,
        `a_recovery_the_controller_refuses_lets_the_device_go` and
@@ -312,16 +315,17 @@ Beside that order, each waiting on something outside it:
       ruling on #899); the kernel's keyboard and mouse streams go when their
       last kernel source leaves; the
       kernel's driver, its vector, its actuators and the
-      `keyboard_controller` seam deleted. A keyboard claim is refused while no
-      source exists, which the supervisor's order of endowment then decides.
+      `keyboard_controller` seam deleted. ps2server's one kernel claim is the
+      `isa` row; it takes no keyboard claim, and the owner reads its
+      transitions from its `input` acceptor's connections.
       **Exit**: no i8042 code in the kernel (`arch/x86_64/i8042/`,
       `arch/x86_64/idt/i8042.rs` and both architectures'
       `keyboard_controller` gone from `kernel/src`, and `toyos-ps2`, whose
       one kernel user is `kernel/src/arch/x86_64/i8042/mod.rs`, gone from
-      `kernel/Cargo.toml`); a kernel test this step owes, that a keyboard
-      claim whose holder dies is handed to the next claimant and the
-      keyboard stream delivers its transitions and none of the dead
-      holder's, red on a kernel that keeps the dead holder as the source;
+      `kernel/Cargo.toml`); a kernel test this step owes, that the `isa`
+      row whose holder dies is handed to the next claimant with none of the
+      dead holder's records pending (`isa_lines_reach_their_holder`), red
+      on a kernel whose release keeps the dead holder's record;
       and ps2server's restart mid-packet held by `toyos-ps2`'s
       `a_lost_scancode_byte_never_wedges_the_prefix_state` and
       `a_stream_truncated_at_any_offset_resyncs_within_two_packets`.
