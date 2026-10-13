@@ -7,9 +7,9 @@
 //! pointer's buttons and keeps the one position (`toyos_input::Pointer`).
 
 use alloc::collections::VecDeque;
-use core::sync::atomic::{AtomicU64, Ordering};
 use crate::sync::Lock;
 use crate::watch::Watch;
+use kernel::pointers::Sources;
 pub use toyos_abi::input::MouseEvent;
 use toyos_abi::input::{POINTER_ABSOLUTE, POINTER_RELATIVE};
 
@@ -20,36 +20,16 @@ pub const MAX_QUEUED_EVENTS: usize = 512;
 /// What a pointer poll waits on; no read blocks on the mouse.
 pub static WATCH: Watch = Watch::new();
 
-/// The buttons a record carries: boot-mouse order's five, which are what the
-/// owner merges.
-const BUTTONS: u8 = 0x1F;
-
 /// Which physical pointer a report came from, keyed by device and not by bus.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PointerSource(u8);
 
-/// One bit per source a [`PointerSource`] can name.
-static IN_USE: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static IN_USE: Sources = Sources::new();
 
 impl PointerSource {
     /// The lowest free source, or `None` when every one is held; a caller that gets `None` must not bind the device, or two devices' buttons share one record.
     pub fn claim() -> Option<Self> {
-        for (word, bits) in IN_USE.iter().enumerate() {
-            let mut seen = bits.load(Ordering::Relaxed);
-            while seen != u64::MAX {
-                let bit = seen.trailing_ones();
-                match bits.compare_exchange_weak(
-                    seen,
-                    seen | (1 << bit),
-                    Ordering::Relaxed,
-                    Ordering::Relaxed,
-                ) {
-                    Ok(_) => return Some(Self((word as u32 * 64 + bit) as u8)),
-                    Err(now) => seen = now,
-                }
-            }
-        }
-        None
+        IN_USE.claim().map(Self)
     }
 
     /// What the records of this source carry as theirs.
@@ -66,7 +46,8 @@ pub enum Motion {
     Absolute { x: u16, y: u16 },
 }
 
-/// Queue one report of `source`'s.
+/// Queue one report of `source`'s; `buttons` as `toyos_usbhid` decodes them,
+/// boot-mouse order's five.
 pub fn report(source: PointerSource, buttons: u8, motion: Motion, scroll: i8) {
     let (kind, x, y) = match motion {
         Motion::Relative { dx, dy } => (POINTER_RELATIVE, dx, dy),
@@ -77,7 +58,7 @@ pub fn report(source: PointerSource, buttons: u8, motion: Motion, scroll: i8) {
     if buf.len() >= MAX_QUEUED_EVENTS {
         buf.pop_front();
     }
-    buf.push_back(MouseEvent { source: source.0, buttons: buttons & BUTTONS, scroll, kind, x, y });
+    buf.push_back(MouseEvent { source: source.0, buttons, scroll, kind, x, y });
 }
 
 /// Throw away everything queued, for the reason [`crate::keyboard::discard_queued`] gives.
@@ -94,7 +75,7 @@ pub fn release_buttons(source: PointerSource) {
 pub fn unbind(source: PointerSource) {
     release_buttons(source);
     // Released before the source frees, or the next device's records follow a stale button.
-    IN_USE[source.0 as usize / 64].fetch_and(!(1u64 << (source.0 % 64)), Ordering::Relaxed);
+    IN_USE.give_back(source.0);
 }
 
 pub fn has_data() -> bool {

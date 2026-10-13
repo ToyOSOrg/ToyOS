@@ -34,7 +34,7 @@ pub const POINTER_LEN: usize = core::mem::size_of::<MouseEvent>();
 pub const KEEP: usize = POINTER_LEN + 1;
 
 /// The buttons boot-mouse order names.
-const BUTTONS: u8 = 0x1F;
+pub const BUTTONS: u8 = 0x1F;
 
 /// Where a pointer report puts the pointer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
