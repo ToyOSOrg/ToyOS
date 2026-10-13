@@ -20,4 +20,4 @@ pub mod merge;
 pub mod wire;
 
 pub use keys::Keys;
-pub use merge::{rel_scale_for, Merge, Pointer, Slot, State};
+pub use merge::{Merge, Pointer, Slot, State};

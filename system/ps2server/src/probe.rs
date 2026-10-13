@@ -58,9 +58,10 @@ const AUX_STAGE: u8 = CB_AUX_IRQ | CB_SYSTEM_FLAG | CB_KEYBOARD_DISABLED | CB_TR
 pub enum Probed {
     /// Nothing decodes the controller's ports.
     Absent,
-    /// The keyboard, the pointer or both scan. `backlog` is every byte read
+    /// The keyboard, the pointer or both scan, and the armed line says which;
+    /// `aux` is whether the pointer is served. `backlog` is every byte read
     /// since they did, in order, for the stream's decoders first.
-    Armed { keyboard: bool, aux: bool, backlog: Vec<Byte> },
+    Armed { aux: bool, backlog: Vec<Byte> },
     /// Neither is served, and each was said by name.
     Failed,
 }
@@ -103,7 +104,7 @@ impl<C: Controller> Probe<'_, C> {
             return Err(Stopped);
         }
         self.arm(keyboard, aux)?;
-        Ok(Probed::Armed { keyboard, aux, backlog: core::mem::take(&mut self.backlog) })
+        Ok(Probed::Armed { aux, backlog: core::mem::take(&mut self.backlog) })
     }
 
     fn deadline(&mut self, ns: u64) -> u64 {
@@ -342,9 +343,9 @@ mod tests {
         (probed, said)
     }
 
-    fn armed(fake: &mut Fake) -> (bool, bool, Vec<Byte>, Vec<String>) {
+    fn armed(fake: &mut Fake) -> (bool, Vec<Byte>, Vec<String>) {
         match probed(fake) {
-            (Probed::Armed { keyboard, aux, backlog }, said) => (keyboard, aux, backlog, said),
+            (Probed::Armed { aux, backlog }, said) => (aux, backlog, said),
             (other, said) => panic!("probed {other:?}: {said:#?}"),
         }
     }
@@ -383,8 +384,8 @@ mod tests {
     #[test]
     fn qemu_arms_its_keyboard_set_2_translated_and_its_mouse() {
         let mut fake = Fake::qemu();
-        let (keyboard, aux, backlog, said) = armed(&mut fake);
-        assert!(keyboard && aux, "{said:#?}");
+        let (aux, backlog, said) = armed(&mut fake);
+        assert!(aux, "{said:#?}");
         assert_eq!(fake.cb, 0x47, "both interrupts, the System Flag, translation, both clocks on");
         line(&said, "ps2server: armed, command byte 0x57 — keyboard on, aux on");
         line(&said, "ps2server: aux reset");
@@ -396,20 +397,21 @@ mod tests {
     #[test]
     fn the_t14_arms_its_keyboard_and_its_trackpoint() {
         let mut fake = Fake::t14();
-        let (keyboard, aux, _, said) = armed(&mut fake);
-        assert!(keyboard && aux, "{said:#?}");
+        let (aux, _, said) = armed(&mut fake);
+        assert!(aux, "{said:#?}");
         let (acked, passed) = reset_times(&said);
         assert!((80..100).contains(&acked), "the 0xfa {acked} us after the reset");
         assert!((516_000..516_100).contains(&passed), "the 0xaa {passed} us after the 0xfa");
         assert!(line(&said, "ps2server: aux reset").contains("0xaa 367"), "{said:#?}");
         assert_eq!(fake.cb, 0x47);
+        line(&said, "ps2server: armed, command byte 0x57 — keyboard on, aux on");
     }
 
     #[test]
     fn the_amd_bench_arms_its_keyboard_and_finds_no_pointer() {
         let mut fake = Fake::amd();
-        let (keyboard, aux, backlog, said) = armed(&mut fake);
-        assert!(keyboard && !aux, "{said:#?}");
+        let (aux, backlog, said) = armed(&mut fake);
+        assert!(!aux, "{said:#?}");
         let (_, passed) = reset_times(&said);
         assert!((2_200..2_300).contains(&passed), "the 0xaa {passed} us after the 0xfa");
         line(&said, "ps2server: aux absent — its reset went unanswered in 600 ms");
@@ -429,8 +431,8 @@ mod tests {
         // The keyboard stage ends 516 ms in; the aux device answers its reset
         // 369.5 ms after that.
         fake.type_a(700 * MS);
-        let (keyboard, aux, backlog, said) = armed(&mut fake);
-        assert!(keyboard && aux, "{said:#?}");
+        let (aux, backlog, said) = armed(&mut fake);
+        assert!(aux, "{said:#?}");
         assert!(!said.iter().any(|l| l.contains("drained")), "{said:#?}");
         let until = fake.now + 10 * MS;
         let records = records(&mut fake, aux, &backlog, until);
@@ -446,8 +448,8 @@ mod tests {
         let mut fake = Fake::t14();
         fake.cb = 0x07;
         fake.kbd.set = 1;
-        let (keyboard, aux, backlog, said) = armed(&mut fake);
-        assert!(keyboard && aux, "{said:#?}");
+        let (aux, backlog, said) = armed(&mut fake);
+        assert!(aux, "{said:#?}");
         let at = fake.now + MS;
         fake.type_a(at);
         assert!(typed_a(&records(&mut fake, aux, &backlog, at + 10 * MS)));
@@ -457,18 +459,18 @@ mod tests {
     fn a_reset_answered_0xfc_disables_the_keyboard_by_name() {
         let mut fake = Fake::t14();
         fake.kbd.reset = Reset { ack: Some(80 * US), then: Some((516 * MS, 0xFC)) };
-        let (keyboard, aux, _, said) = armed(&mut fake);
-        assert!(!keyboard && aux, "{said:#?}");
+        let (aux, _, said) = armed(&mut fake);
+        assert!(aux, "{said:#?}");
         line(&said, "ps2server: kbd DISABLED — the reset's 0xfa was followed by 0xfc, not 0xaa");
         assert_eq!(fake.cb, 0x56, "the keyboard's interrupt off and its interface disabled");
+        line(&said, "ps2server: armed, command byte 0x56 — keyboard off, aux on");
     }
 
     #[test]
     fn an_0xaa_past_the_keyboard_stages_ceiling_disables_the_keyboard_by_name() {
         let mut fake = Fake::t14();
         fake.kbd.reset = Reset::answered(80 * US, KEYBOARD_NS + MS);
-        let (keyboard, _, _, said) = armed(&mut fake);
-        assert!(!keyboard, "{said:#?}");
+        let (_, _, said) = armed(&mut fake);
         line(&said, "ps2server: kbd DISABLED — no 0xaa in 750 ms of the reset (the output buffer empty)");
     }
 
@@ -476,8 +478,7 @@ mod tests {
     fn a_reset_with_no_0xfa_disables_the_keyboard_by_name() {
         let mut fake = Fake::t14();
         fake.kbd.reset = Reset { ack: None, then: None };
-        let (keyboard, _, _, said) = armed(&mut fake);
-        assert!(!keyboard, "{said:#?}");
+        let (_, _, said) = armed(&mut fake);
         line(&said, "ps2server: kbd DISABLED — no 0xfa to the reset in 750 ms (the output buffer empty)");
     }
 
@@ -506,7 +507,7 @@ mod tests {
     fn bytes_waiting_before_the_probe_are_drained_by_name() {
         let mut fake = Fake::t14();
         fake.kbd_sends(0, &[0x1C, 0x1C]);
-        let (_, _, backlog, said) = armed(&mut fake);
+        let (_, backlog, said) = armed(&mut fake);
         assert!(backlog.is_empty(), "{backlog:?}");
         assert!(said.iter().any(|l| l.starts_with("ps2server: drained") && l.contains("0x1e")), "{said:#?}");
     }

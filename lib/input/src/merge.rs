@@ -98,7 +98,7 @@ const REL_SCALE: i32 = 64;
 /// as far across as down: `x * width == y * height`. Per-axis, not a single
 /// scalar: the absolute space is square and screens are not, so one shared
 /// scalar would skew diagonal motion by the screen's aspect ratio.
-pub fn rel_scale_for(width: u32, height: u32) -> (u16, u16) {
+fn rel_scale_for(width: u32, height: u32) -> (u16, u16) {
     let short = width.min(height) as i32;
     (
         (REL_SCALE * short / width.max(1) as i32).max(1) as u16,
@@ -162,5 +162,26 @@ impl Pointer {
         let buttons = self.buttons.iter().flatten().fold(0, |all, &held| all | held);
         // Both are clamped to `0..=POINTER_ABSOLUTE_MAX`.
         State { buttons, scroll, x: self.x as u16, y: self.y as u16 }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::rel_scale_for;
+
+    /// Relative motion lands in a square space mapped by width and height, so
+    /// the counts per pixel differ per axis or the pointer skews by the aspect
+    /// ratio.
+    #[test]
+    fn a_count_moves_as_far_across_as_down() {
+        for (w, h) in [(1920u32, 1200u32), (1024, 768), (3840, 2160), (1200, 1920), (800, 800)] {
+            let (sx, sy) = rel_scale_for(w, h);
+            assert!(sx >= 1 && sy >= 1, "{w}x{h} scaled a count to nothing");
+            let across = sx as u64 * w as u64;
+            let down = sy as u64 * h as u64;
+            // Each scale is a truncated integer, so each product carries under
+            // one screen dimension of error.
+            assert!(across.abs_diff(down) < (w + h) as u64, "{w}x{h} moves {across} across and {down} down per count");
+        }
     }
 }

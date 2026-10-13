@@ -2,7 +2,7 @@
 
 use toyos_abi::input::{MouseEvent, RawKeyEvent, MOD_RELEASED, MOD_SHIFT, POINTER_ABSOLUTE, POINTER_RELATIVE};
 use toyos_input::wire::{self, Motion, Record, Refused, Report, KEY_LEN, MSG_KEY, MSG_LOST, MSG_POINTER, POINTER_LEN};
-use toyos_input::{rel_scale_for, Merge, Pointer, Slot, State};
+use toyos_input::{Merge, Pointer, Slot, State};
 
 const SHIFT: u8 = 0xE1;
 const A: u8 = 0x04;
@@ -145,13 +145,12 @@ fn a_connections_end_clears_its_pointers_buttons_and_no_others() {
 
 #[test]
 fn relative_motion_scales_by_the_screen_and_absolute_motion_sets() {
-    let (width, height) = (1920, 1080);
-    let (sx, sy) = rel_scale_for(width, height);
-    let mut pointer = Pointer::new(width, height);
+    // 1080 rows' worth of 64 counts each, so a count is 64 down and 64 * 1080 / 1920 = 36 across.
+    let mut pointer = Pointer::new(1920, 1080);
     let start = pointer.report(slot(0), relative(0, 0, 0, 0));
     assert_eq!((start.x, start.y), (16384, 16384), "it starts in the middle");
     let moved = pointer.report(slot(0), relative(0, 0, 10, -3));
-    assert_eq!((moved.x, moved.y), (16384 + 10 * sx, 16384 - 3 * sy));
+    assert_eq!((moved.x, moved.y), (16384 + 10 * 36, 16384 - 3 * 64));
     let set = pointer.report(slot(1), Report { source: 0, buttons: 0, scroll: 1, motion: Motion::Absolute { x: 7, y: 9 } });
     assert_eq!(set, State { buttons: 0, scroll: 1, x: 7, y: 9 });
     let clamped = pointer.report(slot(0), relative(0, 0, i16::MIN, i16::MAX));
@@ -159,19 +158,4 @@ fn relative_motion_scales_by_the_screen_and_absolute_motion_sets() {
     pointer.screen(800, 800);
     let square = pointer.report(slot(0), relative(0, 0, 1, -1));
     assert_eq!((square.x, square.y), (64, 32767 - 64));
-}
-
-/// Relative motion lands in a square space mapped by width and height, so the
-/// counts per pixel differ per axis or the pointer skews by the aspect ratio.
-#[test]
-fn a_count_moves_as_far_across_as_down() {
-    for (w, h) in [(1920u32, 1200u32), (1024, 768), (3840, 2160), (1200, 1920), (800, 800)] {
-        let (sx, sy) = rel_scale_for(w, h);
-        assert!(sx >= 1 && sy >= 1, "{w}x{h} scaled a count to nothing");
-        let across = sx as u64 * w as u64;
-        let down = sy as u64 * h as u64;
-        // Each scale is a truncated integer, so each product carries under one
-        // screen dimension of error.
-        assert!(across.abs_diff(down) < (w + h) as u64, "{w}x{h} moves {across} across and {down} down per count");
-    }
 }

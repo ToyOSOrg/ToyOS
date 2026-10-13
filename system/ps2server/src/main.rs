@@ -49,7 +49,7 @@ fn main() {
     let (aux, backlog) = match probe::probe(&mut hw, &mut say) {
         Probed::Absent => std::process::exit(0),
         Probed::Failed => std::process::exit(1),
-        Probed::Armed { aux, backlog, .. } => (aux, backlog),
+        Probed::Armed { aux, backlog } => (aux, backlog),
     };
     let (mut stream, records) = stream::Stream::new(&mut hw, aux, &backlog, &mut say);
     deliver(&mut owner, &records);
