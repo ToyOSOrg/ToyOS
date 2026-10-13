@@ -154,13 +154,14 @@ The design and its roast are PR #863's body.
   clears it, as POSIX's pending error is "returned in response to a
   subsequent send(), recv(), or getsockopt() operation" (XSH 2.10.10).
   netstack takes a record off the send ring only while [udp]'s queue for
-  the socket has room, and looks again when a datagram leaves it, so a full
-  queue holds the ring and refuses nothing. A `send_to` over a full send
-  ring waits as a stream's writer does, on a bell of the socket's own that
-  netstack makes at the bind and alone writes, its want `tx_room`, as
-  POSIX's `sendto` "shall block until space is available or a timeout
-  occurs"; nonblocking, which std's `UdpSocket::set_nonblocking` then sets,
-  it answers `WouldBlock`. Exit: over the region,
+  the socket has room, and looks again when a datagram leaves it or is
+  dropped, so a full queue holds the ring and refuses nothing. A
+  `send_to` over a full send ring waits as a stream's writer does, on a
+  bell of the socket's own that netstack makes at the bind and alone
+  writes, its want `tx_room`, as POSIX's `sendto` "shall block until space
+  is available or a timeout occurs"; nonblocking, which std's
+  `UdpSocket::set_nonblocking` then sets, it answers `WouldBlock`. Exit:
+  over the region,
   `system/netstack/node/tests/listeners.rs`'s
   `a_listener_answers_a_syn_and_wakes_its_owner_when_the_handshake_ends`
   passes, and so does a case in which a child holds, before its accept, text
@@ -175,7 +176,11 @@ The design and its roast are PR #863's body.
   record written, and each refusal only netstack judges answers on the
   socket's next call; each is red when that call answers `Ok`. A case: a
   nonblocking `send_to` over a full send ring answers `WouldBlock` and
-  writes no record, red when `set_nonblocking` sets nothing. Two loom
+  writes no record, red when `set_nonblocking` sets nothing. A case: the
+  socket's queue is full to a next hop that never answers and a `send_to`
+  sleeps over a full send ring; when [ip] gives the hop up and [udp]'s
+  `Udp::fail` drops the queue, netstack takes the held record and the sender
+  wakes, red when netstack looks again only after a datagram leaves. Two loom
   models drive the client end and netstack's code as stage 4 lands them. In
   one, a `recv_from` asleep with nothing to receive, and a `send_to` asleep
   over a full send ring, each answers a refusal only netstack judges that
