@@ -171,8 +171,8 @@ The oracle is the firmware's own table bytes, not another OS's reading of
 them (the orchestrator, ruling on #893); what the tree keeps of them is
 extracts only, as "Extracts only" says. A definition block's load takes
 the whole block, which no extract is, so each block's load and `\_S5`
-stay held by the metal rows that load a machine's own tables whole:
-`acpi_tables_loaded` on the T14, and the AMD bench's. Owner: this stage.
+stay held by the T14's metal row that loads its own tables whole,
+`acpi_tables_loaded`. Owner: this stage.
 **Exit**: extracts of the T14's tables, masked, are committed with their
 provenance; host tests evaluate each query method the controller raises,
 and the battery's and adapter's methods, over a scripted host and
