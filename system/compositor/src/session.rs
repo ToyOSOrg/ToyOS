@@ -13,13 +13,16 @@ use std::time::{Duration, Instant};
 
 use sprite::Sprite;
 use toyos::endow;
-use toyos::ipc::RxStep;
+use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
 use toyos::{ipc, system, AsHandle, FramebufferDev, Keyboard, Mouse};
+use toyos_abi::input::RawKeyEvent;
 use toyos_abi::syscall::DeviceType;
 use toyos_abi::RawHandle;
+use toyos_input::wire::{self, Record, CONNECTIONS, KEEP, KEY_LEN, POINTER_LEN};
+use toyos_input::{Merge, Pointer, Slot, State};
 use toyos_desktop::{
     cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, set_mode, tab_action, Chrome,
     CursorStyle, Damage, Desk, Grab, Held, Hit, KeyAction, Level, Point, PromptGate, Rect, Released,
@@ -36,8 +39,17 @@ use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
 use crate::stats::FrameTotals;
 use crate::{
     launcher_apps, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
-    FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
+    FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, INPUT_POLL_HANDLES, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
 };
+
+/// The most frames one source's turn takes before the others are served.
+const SOURCE_FRAMES: usize = 64;
+
+/// One connection on the `input` port: a source of keys and pointer reports.
+struct Source {
+    conn: Connection,
+    rx: FrameRx<KEEP>,
+}
 
 const _: () = assert!(
     toyos_inspect::MAX_SNAPSHOT_BYTES == ipc::MAX_FRAME_LEN as usize,
@@ -106,6 +118,12 @@ pub struct Session {
     launcher: mpsc::Sender<String>,
     kb: Keyboard,
     mouse: Mouse,
+    /// The `input` port, and the sources on it, by their slot.
+    inputs: Acceptor,
+    sources: [Option<Source>; CONNECTIONS],
+    /// Every source's keys and pointers, the kernel's streams among them.
+    merge: Merge,
+    pointers: Pointer,
     poller: Poller,
 
     /// The claim, and the thing every screen call is made *through*: closing it
@@ -170,6 +188,8 @@ impl Session {
             .expect("the manifest gives this program the keyboard");
         let mouse: Mouse = endow::device(DeviceType::Mouse)
             .expect("the manifest gives this program the mouse");
+        let inputs = endow::acceptor(wire::PORT)
+            .expect("the manifest declares this program serves `input`");
         let fb_dev: FramebufferDev = endow::device(DeviceType::Framebuffer)
             .expect("the manifest gives this program the framebuffer");
 
@@ -239,9 +259,13 @@ impl Session {
         // Sized for the slot ceiling rather than for `max_windows`: the batch
         // between two `wait` calls is the four fixed registrations, one per
         // live window
-        // and one per pending connection, the prompt's two beside them, and
+        // and one per pending connection, the prompt's two and the input
+        // port's beside them, and
         // `MSG_SET_RESOLUTION` can raise `max_windows` mid-run.
-        let poller = Poller::new(FIXED_POLL_HANDLES + MAX_WINDOW_SLOTS + MAX_PENDING_CONNS + PROMPT_POLL_HANDLES);
+        let poller = Poller::new(
+            FIXED_POLL_HANDLES + MAX_WINDOW_SLOTS + MAX_PENDING_CONNS + PROMPT_POLL_HANDLES + INPUT_POLL_HANDLES,
+        );
+        poller.watch(&inputs, READABLE, inputs.as_handle().0 as u64);
         poller.watch(&kb, READABLE, kb.as_handle().0 as u64);
         poller.watch(&mouse, READABLE, mouse.as_handle().0 as u64);
         poller.watch(&acceptor, READABLE, acceptor.as_handle().0 as u64);
@@ -267,6 +291,10 @@ impl Session {
             launcher,
             kb,
             mouse,
+            inputs,
+            sources: Default::default(),
+            merge: Merge::default(),
+            pointers: Pointer::new(fb_info.width, fb_info.height),
             poller,
             fb_dev,
             fb_info,
@@ -340,6 +368,10 @@ impl Session {
 
         let kb_ready = self.is_ready(self.kb.as_handle());
         let mouse_ready = self.is_ready(self.mouse.as_handle());
+        let inputs_ready = self.is_ready(self.inputs.as_handle());
+        let sources_ready: Vec<usize> = (0..CONNECTIONS)
+            .filter(|&n| self.sources[n].as_ref().is_some_and(|s| self.is_ready(s.conn.as_handle())))
+            .collect();
         let accept_ready = self.is_ready(self.acceptor.as_handle());
         let prompt_ready = self.is_ready(self.prompts.as_handle());
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle()))
@@ -359,7 +391,7 @@ impl Session {
         }
         self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
-        if !kb_ready && !mouse_ready && !accept_ready && !prompt_ready && !client_ready {
+        if !kb_ready && !mouse_ready && !inputs_ready && sources_ready.is_empty() && !accept_ready && !prompt_ready && !client_ready {
             return false;
         }
 
@@ -369,6 +401,12 @@ impl Session {
         }
         if mouse_ready {
             self.pointer();
+        }
+        if inputs_ready {
+            self.admit();
+        }
+        for n in sources_ready {
+            self.source(n);
         }
         if accept_ready {
             self.accept(false);
@@ -380,7 +418,7 @@ impl Session {
         self.dispatch(frames);
         self.reap();
         self.prompt_gone();
-        self.rearm(kb_ready, mouse_ready, accept_ready, prompt_ready);
+        self.rearm(kb_ready, mouse_ready, inputs_ready, accept_ready, prompt_ready);
         true
     }
 
@@ -392,88 +430,118 @@ impl Session {
         self.screen.pixel_format_raw()
     }
 
+    /// The kernel's keyboard stream, one source to the merge.
     fn keys(&mut self) {
-        const EVENT: usize = std::mem::size_of::<window::KeyEvent>();
-        let mut buf = [0u8; 8 * EVENT];
+        let mut buf = [0u8; 8 * KEY_LEN];
         // Never read blocking here. The kernel wakes only when a report queued
         // an event, so readiness and `has_data` agree — but a blocking read on
         // an empty queue parks the compositor until the next real key, and one
         // spurious wake anywhere would freeze it.
         let n = self.kb.read_nonblock(&mut buf).unwrap_or(0);
-        let (events, torn) = buf[..n].as_chunks::<EVENT>();
+        let (events, torn) = buf[..n].as_chunks::<KEY_LEN>();
         assert!(torn.is_empty(), "compositor: the keyboard read {n} bytes, not whole events");
         for raw in events {
-            let event = ipc::decode_payload::<window::KeyEvent>(raw)
-                .expect("a chunk is exactly one event long");
-            let focused = self.stack.focused();
-            let action = key_action(
-                event.into(),
-                focused.map(|i| self.stack[i].mode),
-                self.launcher_open,
-                self.prompt.is_some(),
-            );
-            match action {
-                KeyAction::Ignore => {}
-                KeyAction::Forward => {
-                    // While a prompt is up it is the focused window, and is
-                    // given what its gate lets through and nothing else is.
-                    let given = match &mut self.prompt {
-                        Some((_, gate)) => gate.key(event.into()),
-                        None => !self.owed.owed(event.into()),
-                    };
-                    if !given {
-                        continue;
-                    }
-                    if let Some(i) = focused {
-                        deliver(&mut self.dead, &self.stack[i], window::MSG_KEY_INPUT, &event);
-                    }
-                }
-                KeyAction::CloseLauncher => {
-                    self.launcher_open = false;
-                    self.damage.add(self.launcher_rect());
-                }
-                KeyAction::CycleFocus => {
-                    if self.stack.cycle() {
-                        self.damage_all();
-                    }
-                }
-                KeyAction::SpawnTerminal => self.launch("/system/bin/terminal"),
-                KeyAction::Paste => {
-                    if let Some(i) = focused {
-                        self.paste(i);
-                    }
-                }
-                // The three that move a window. Each damages the rect it is
-                // vacating first, because that is only knowable before it
-                // moves.
-                KeyAction::SetMode(mode) => {
-                    let Some(idx) = focused else { continue };
-                    self.damage.add(self.stack[idx].frame(&self.desk.chrome));
-                    self.retarget(idx, mode);
-                    self.damage_all();
-                }
-                KeyAction::Minimize => {
-                    let Some(idx) = focused else { continue };
-                    self.damage.add(self.stack[idx].frame(&self.desk.chrome));
-                    self.stack[idx].minimized = true;
-                    self.damage_all();
-                }
-                KeyAction::CloseFocused => {
-                    let Some(idx) = focused else { continue };
-                    self.damage.add(self.stack[idx].frame(&self.desk.chrome));
-                    let win = self.stack.remove(idx);
-                    note_closed("GUI+Q", &win, self.stack.len());
-                    let _ = win.client.conn.try_signal(window::MSG_WINDOW_CLOSE);
-                    self.damage_all();
-                }
+            match wire::key(raw) {
+                Ok(key) => self.merged_key(Slot::KERNEL, key),
+                Err(why) => eprintln!("compositor: the kernel's keyboard stream carried {raw:02x?}, refused: {why:?}"),
             }
         }
     }
 
+    /// `key` from `slot`, and whatever it changed of the merged keyboard.
+    fn merged_key(&mut self, slot: Slot, key: RawKeyEvent) {
+        let delivered: Vec<RawKeyEvent> = self.merge.key(slot, key).collect();
+        for event in delivered {
+            self.key(event);
+        }
+    }
+
+    /// One transition of the merged keyboard.
+    fn key(&mut self, raw: RawKeyEvent) {
+        let event = window::KeyEvent::from(raw);
+        let focused = self.stack.focused();
+        let action = key_action(
+            event.into(),
+            focused.map(|i| self.stack[i].mode),
+            self.launcher_open,
+            self.prompt.is_some(),
+        );
+        match action {
+            KeyAction::Ignore => {}
+            KeyAction::Forward => {
+                // While a prompt is up it is the focused window, and is
+                // given what its gate lets through and nothing else is.
+                let given = match &mut self.prompt {
+                    Some((_, gate)) => gate.key(event.into()),
+                    None => !self.owed.owed(event.into()),
+                };
+                if !given {
+                    return;
+                }
+                if let Some(i) = focused {
+                    deliver(&mut self.dead, &self.stack[i], window::MSG_KEY_INPUT, &event);
+                }
+            }
+            KeyAction::CloseLauncher => {
+                self.launcher_open = false;
+                self.damage.add(self.launcher_rect());
+            }
+            KeyAction::CycleFocus => {
+                if self.stack.cycle() {
+                    self.damage_all();
+                }
+            }
+            KeyAction::SpawnTerminal => self.launch("/system/bin/terminal"),
+            KeyAction::Paste => {
+                if let Some(i) = focused {
+                    self.paste(i);
+                }
+            }
+            // The three that move a window. Each damages the rect it is
+            // vacating first, because that is only knowable before it
+            // moves.
+            KeyAction::SetMode(mode) => {
+                let Some(idx) = focused else { return };
+                self.damage.add(self.stack[idx].frame(&self.desk.chrome));
+                self.retarget(idx, mode);
+                self.damage_all();
+            }
+            KeyAction::Minimize => {
+                let Some(idx) = focused else { return };
+                self.damage.add(self.stack[idx].frame(&self.desk.chrome));
+                self.stack[idx].minimized = true;
+                self.damage_all();
+            }
+            KeyAction::CloseFocused => {
+                let Some(idx) = focused else { return };
+                self.damage.add(self.stack[idx].frame(&self.desk.chrome));
+                let win = self.stack.remove(idx);
+                note_closed("GUI+Q", &win, self.stack.len());
+                let _ = win.client.conn.try_signal(window::MSG_WINDOW_CLOSE);
+                self.damage_all();
+            }
+        }
+    }
+
+    /// The kernel's mouse stream, one source to the merge.
     fn pointer(&mut self) {
-        let mut buf = [0u8; 512];
+        let mut buf = [0u8; 64 * POINTER_LEN];
         let n = self.mouse.read_nonblock(&mut buf).unwrap_or(0);
-        let sample = fold_mouse(self.prev_buttons, &buf[..n]);
+        let (reports, torn) = buf[..n].as_chunks::<POINTER_LEN>();
+        assert!(torn.is_empty(), "compositor: the mouse read {n} bytes, not whole reports");
+        let mut states = Vec::with_capacity(reports.len());
+        for raw in reports {
+            match wire::pointer(raw) {
+                Ok(report) => states.push(self.pointers.report(Slot::KERNEL, report)),
+                Err(why) => eprintln!("compositor: the kernel's mouse stream carried {raw:02x?}, refused: {why:?}"),
+            }
+        }
+        self.motion(&states);
+    }
+
+    /// What the merged pointer did over `states`.
+    fn motion(&mut self, states: &[State]) {
+        let sample = fold_mouse(self.prev_buttons, states);
         if sample.reports == 0 {
             return;
         }
@@ -681,6 +749,71 @@ impl Session {
                 self.damage.add(to);
             }
         }
+    }
+
+    /// A source's connection off `input`, in the first free slot, or refused
+    /// by name when every slot is taken.
+    fn admit(&mut self) {
+        match self.inputs.accept() {
+            Err(e) => eprintln!("compositor: an input source could not be accepted ({e:?})"),
+            Ok(conn) => match self.sources.iter().position(Option::is_none) {
+                None => eprintln!("compositor: refusing an input source — {CONNECTIONS} are connected"),
+                Some(n) => {
+                    self.poller.watch(&conn, READABLE, conn.as_handle().0 as u64);
+                    self.sources[n] = Some(Source { conn, rx: FrameRx::new() });
+                }
+            },
+        }
+    }
+
+    /// What source `n` sent, each frame whole; one that does not decode, or
+    /// ends, drops it, and everything it held is released.
+    fn source(&mut self, n: usize) {
+        let slot = Slot::connection(n).expect("a source's index is a slot");
+        let mut states = Vec::new();
+        let mut ended = None;
+        for _ in 0..SOURCE_FRAMES {
+            let source = self.sources[n].as_mut().expect("a ready source is held");
+            let record = match source.rx.pump(&source.conn) {
+                RxStep::Idle => break,
+                RxStep::Eof => {
+                    ended = Some("its connection ended".to_string());
+                    break;
+                }
+                RxStep::Malformed => {
+                    ended = Some("a frame no protocol here can make".to_string());
+                    break;
+                }
+                RxStep::Frame { msg_type, payload_len } => wire::decode(msg_type, source.rx.payload(payload_len)),
+            };
+            match record {
+                Ok(Record::Key(key)) => self.merged_key(slot, key),
+                Ok(Record::Pointer(report)) => states.push(self.pointers.report(slot, report)),
+                Ok(Record::Lost) => {
+                    let released: Vec<RawKeyEvent> = self.merge.end(slot).collect();
+                    released.into_iter().for_each(|key| self.key(key));
+                    states.push(self.pointers.end(slot));
+                }
+                Err(why) => {
+                    ended = Some(format!("a record refused: {why:?}"));
+                    break;
+                }
+            }
+        }
+        match ended {
+            None => {
+                let conn = &self.sources[n].as_ref().expect("a ready source is held").conn;
+                self.poller.watch(conn, READABLE, conn.as_handle().0 as u64);
+            }
+            Some(why) => {
+                eprintln!("compositor: dropping input source {n} — {why}");
+                self.sources[n] = None;
+                let released: Vec<RawKeyEvent> = self.merge.end(slot).collect();
+                released.into_iter().for_each(|key| self.key(key));
+                states.push(self.pointers.end(slot));
+            }
+        }
+        self.motion(&states);
     }
 
     /// One connection off `compositor`, or off `prompt` where `prompt`.
@@ -1161,6 +1294,7 @@ impl Session {
         self.back =
             BackBuffer::new(self.screen.width(), self.screen.height(), self.pixel_format());
         self.desk = desk_of(&self.screen, &self.font, self.apps.len());
+        self.pointers.screen(info.width, info.height);
         // What a window costs moved, so what we can afford moved with it.
         // Windows already open are left alone if the new figure is below their
         // count — the cap gates creation, it does not evict.
@@ -1209,7 +1343,10 @@ impl Session {
     }
 
     /// Re-arm the one-shot poll registrations for every handle that fired.
-    fn rearm(&mut self, kb: bool, mouse: bool, acceptor: bool, prompts: bool) {
+    fn rearm(&mut self, kb: bool, mouse: bool, inputs: bool, acceptor: bool, prompts: bool) {
+        if inputs {
+            self.poller.watch(&self.inputs, READABLE, self.inputs.as_handle().0 as u64);
+        }
         if prompts {
             self.poller.watch(&self.prompts, READABLE, self.prompts.as_handle().0 as u64);
         }

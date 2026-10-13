@@ -19,7 +19,7 @@ assets = ["assets"]
 # while the compositor had no way to ask for a program's *declared* authority —
 # the launcher gives it one, and starting a service from `[boot] start` is not
 # the thing that needed fixing.
-start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver"]
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "ps2server"]
 
 # What every program launched out of `/apps` holds, whatever its own directory
 # says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
@@ -69,14 +69,25 @@ receives = ["power"]
 # makes the local desktop a login session, so `swap` and `update` run from its
 # shell. `prompt` is the layer above every window, which `filepicker` alone
 # reaches: serving it makes the sessions its launches open the screen's, whose
-# packages may ask the person at it for a folder.
+# packages may ask the person at it for a folder. `input` is where a source of
+# keys and pointer reports reaches the owner of input, which it is.
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt"]
+serves = ["compositor", "prompt", "input"]
 receives = ["soundserver", "filepicker"]
 devices = ["framebuffer", "keyboard", "mouse"]
 starts = ["terminal", "files", "/apps"]
 login = true
+
+# The i8042, driven from userland: its ports and its two lines are this
+# program's `isa` claim, and the keys and pointer reports it decodes go to the
+# owner of input over `input`, which no other row may receive
+# (`build/build.rs`). Started again when it ends other than by exit 0, which it
+# says only on a machine with nothing to serve.
+[programs.ps2server]
+restart = true
+receives = ["input"]
+devices = ["isa:0060,0064:1,12"]
 
 [programs.soundserver]
 service = true

@@ -1,14 +1,18 @@
 //! The `isa` claim's lines: an interrupt the i8042 raises reaches the claim's
-//! holder as a record, and one it raises once the claim is gone reaches nobody.
+//! holder as a record, one it raises once the claim is gone reaches nobody,
+//! and a holder that dies takes its record with it.
 //!
-//! Run where the kernel drives no i8042 (`i8042-withheld`), with no key to
-//! press: the keyboard is told to enable scanning (`0xF4`) and its
-//! acknowledgement (`0xFA`) is the byte that raises the line.
+//! Run on a boot that starts no ps2server, with no key to press: the keyboard
+//! is told to enable scanning (`0xF4`) and its acknowledgement (`0xFA`) is the
+//! byte that raises the line.
 //!
 //! - `device` holds the claim: it drives the controller until the
 //!   acknowledgement arrives as a record and a byte, gives the claim up, and
 //!   has the keyboard acknowledge once more, on a line then masked.
-//! - `after` holds the next claim on the row, and finds no record on it.
+//! - `dies` holds the next claim: it has the keyboard acknowledge, so a record
+//!   is pending on the claim, and ends without reading it.
+//! - `after` holds the claim after that, and finds no record on it: the next
+//!   claimant is handed the row and none of the dead holder's interrupts.
 
 use std::os::toyos::process::CommandExt;
 use std::process::Command;
@@ -60,6 +64,7 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         None => lines(&syscap()),
         Some("device") => device(taken()),
+        Some("dies") => dies(taken()),
         Some("after") => after(taken()),
         other => panic!("isa_lines: unknown role {other:?}"),
     }
@@ -93,8 +98,13 @@ fn lines(cap: &SysCap) {
     role("device", isa_row::claim_after(cap, set(), "the job before this one"));
     // The row comes back with `device`, whose keyboard acknowledged once more
     // after its claim was gone.
-    role("after", isa_row::claim_after(cap, set(), "device"));
-    println!("isa lines: the holder's interrupt reached it, and the one after its claim reached nobody");
+    role("dies", isa_row::claim_after(cap, set(), "device"));
+    // And with `dies`, which ended holding a record it never read.
+    role("after", isa_row::claim_after(cap, set(), "dies"));
+    println!(
+        "isa lines: the holder's interrupt reached it, the one after its claim reached nobody, and a \
+         dead holder's record went with it"
+    );
 }
 
 fn inb(port: u16) -> u8 {
@@ -182,18 +192,7 @@ fn arm(poller: &Poller, claim: &Device) {
 /// acknowledge again.
 fn device(claim: Device) {
     bind(&claim);
-    drain();
-    // Read the configuration byte, then write it back with the keyboard's line
-    // on and its clock running, and the aux port's clock stopped so that every
-    // byte from here on is the keyboard's (i8042: 0x20 reads it, 0x60 writes
-    // it, 0xAE enables the keyboard's port).
-    command(0x20);
-    wait_status("answered its configuration", |s| s & OBF != 0);
-    let config = inb(DATA);
-    command(0x60);
-    data((config | CFG_KEYBOARD_IRQ | CFG_AUX_CLOCK_OFF) & !CFG_KEYBOARD_CLOCK_OFF);
-    command(0xAE);
-    drain();
+    let config = line_on();
     println!("isa device: config {config:#04x}, keyboard line on");
 
     // Armed before the keyboard is asked anything, so the watch is completed
@@ -222,14 +221,47 @@ fn device(claim: Device) {
     println!("isa device: the keyboard acknowledged once more after the claim went");
 }
 
-/// The claim after `device`'s: nothing raised the line under it, so it holds
-/// no record.
+/// Read the configuration byte, then write it back with the keyboard's line
+/// on and its clock running, and the aux port's clock stopped so that every
+/// byte from here on is the keyboard's (i8042: 0x20 reads it, 0x60 writes it,
+/// 0xAE enables the keyboard's port); answer the byte it came with.
+fn line_on() -> u8 {
+    drain();
+    command(0x20);
+    wait_status("answered its configuration", |s| s & OBF != 0);
+    let config = inb(DATA);
+    command(0x60);
+    data((config | CFG_KEYBOARD_IRQ | CFG_AUX_CLOCK_OFF) & !CFG_KEYBOARD_CLOCK_OFF);
+    command(0xAE);
+    drain();
+    config
+}
+
+/// Hold the claim with the keyboard's line on, have the keyboard acknowledge,
+/// and end once the claim holds a record of it, unread.
+fn dies(claim: Device) {
+    bind(&claim);
+    let config = line_on();
+    let poller = Poller::new(1);
+    arm(&poller, &claim);
+    acknowledged("with a record pending");
+    let mut woke = false;
+    poller.wait(1, RECORD.as_nanos() as u64, |_| woke = true);
+    assert!(woke, "isa dies: no record in {RECORD:?} of the keyboard's acknowledgement");
+    // The configuration the controller came with; the record stays unread.
+    command(0x60);
+    data(config);
+    println!("isa dies: ending with the keyboard's acknowledgement unread on the claim");
+}
+
+/// The claim after `dies`'s: the record it left went with its claim, and
+/// nothing raised the line since, so it holds none.
 fn after(claim: Device) {
     bind(&claim);
     if let Some(count) = record(&claim) {
         panic!(
             "isa after: a claim nothing raised a line under carries a record of {count}: the line \
-             was open while no claim held it"
+             was open while no claim held it, or a dead holder's record outlived its claim"
         );
     }
     println!("isa after: no record on a claim nothing raised a line under");

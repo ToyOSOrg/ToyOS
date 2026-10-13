@@ -93,7 +93,7 @@ use toyos_manifest::consent;
 use toyos_manifest::grants::{self, Answer, Decision, Store};
 use toyos_manifest::launch::{self as authority, Authority, Session, Sessions, Target};
 use toyos_manifest::package::{self, Package};
-use toyos_manifest::{Manifest, Program, View};
+use toyos_manifest::{Manifest, Program, Start, View};
 use toyos::endow::Endowments;
 use toyos::fs::{Access, Grant, CAPABILITY_PREFIX};
 use toyos::ipc::{self, Connection, RxStep};
@@ -639,8 +639,8 @@ struct Kept {
     /// A swap owns the service: its process ending is expected and the port
     /// stays open for the next one.
     swapping: bool,
-    /// The row says the supervisor starts it again when it ends.
-    restart: bool,
+    /// The row, which says what its end is owed ([`Program::supervised`]).
+    row: Program,
     /// It ended, and the loop owes it a new process on the same ports.
     ended: bool,
     /// The write end of [`Supervisor::wake`].
@@ -665,7 +665,7 @@ impl<'a> Service<'a> {
                 acceptors,
                 generation: 0,
                 swapping: false,
-                restart: program.restart,
+                row: program.clone(),
                 ended: false,
                 wake,
             })),
@@ -723,7 +723,7 @@ impl<'a> Service<'a> {
         )?;
         kept.generation += 1;
         kept.ended = false;
-        if !kept.acceptors.is_empty() {
+        if self.program.supervised(Start::Spawned) {
             let process = toyos_abi::syscall::dup(toyos::RawHandle(child.as_raw_handle()))
                 .unwrap_or_else(|e| panic!("supervisor: {}'s process handle: {e:?}", self.program.name));
             let (shared, generation) = (Arc::clone(&self.kept), kept.generation);
@@ -779,11 +779,12 @@ impl std::fmt::Display for StartError {
 /// Wait for one start of a service to end, and close its ports if nothing was
 /// expecting it to, or wake the loop to start it again if its row says so.
 fn close_when_it_ends(kept: &Mutex<Kept>, generation: u64, process: toyos::RawHandle) {
-    let _ = toyos_abi::syscall::process_wait(process);
+    let exit = toyos_abi::syscall::process_wait(process)
+        .unwrap_or_else(|e| panic!("supervisor: a service's own process handle refused its wait: {e:?}"));
     toyos_abi::syscall::close(process);
     let mut kept = kept.lock().expect("supervisor: a service's state is poisoned");
     if kept.generation == generation && !kept.swapping {
-        if kept.restart {
+        if kept.row.supervised(Start::Ended(exit)) {
             kept.ended = true;
             // A full pipe is a wake already pending, which is all this is.
             let _ = toyos_abi::syscall::write_nonblock(kept.wake, &[1]);

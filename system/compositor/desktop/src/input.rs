@@ -1,4 +1,5 @@
-use toyos_abi::input::{MouseEvent, RawKeyEvent};
+use toyos_abi::input::RawKeyEvent;
+use toyos_input::State;
 
 use crate::hit::{hit_test, Hit};
 use crate::layout::{set_mode, Desk};
@@ -100,32 +101,14 @@ pub fn key_action(ev: RawKeyEvent, focused: Option<WindowMode>, launcher_open: b
     KeyAction::Forward
 }
 
-/// One report off the mouse claim.
-pub const MOUSE_EVENT_LEN: usize = 6;
-
-const _: () = {
-    assert!(core::mem::size_of::<MouseEvent>() == MOUSE_EVENT_LEN);
-    assert!(core::mem::offset_of!(MouseEvent, buttons) == 0);
-    assert!(core::mem::offset_of!(MouseEvent, scroll) == 1);
-    assert!(core::mem::offset_of!(MouseEvent, abs_x) == 2);
-    assert!(core::mem::offset_of!(MouseEvent, abs_y) == 4);
-};
-
-fn decode(b: &[u8]) -> MouseEvent {
-    MouseEvent {
-        buttons: b[0],
-        scroll: b[1] as i8,
-        abs_x: u16::from_le_bytes([b[2], b[3]]),
-        abs_y: u16::from_le_bytes([b[4], b[5]]),
-    }
-}
-
-/// A whole read of the mouse claim, folded into the one thing that happened.
+/// What the one pointer did over a batch of its states, folded into the one
+/// thing that happened.
 ///
-/// The kernel queues reports and one read drains them, so a batch can contain
-/// a press and its release, several scroll notches and a dozen positions. The
-/// desktop acts on the *transitions* and the last position: replaying every
-/// intermediate one would hit-test against a pointer that is no longer there.
+/// A batch is every record the sources sent since the last pass, so it can
+/// contain a press and its release, several scroll notches and a dozen
+/// positions. The desktop acts on the *transitions* and the last position:
+/// replaying every intermediate one would hit-test against a pointer that is
+/// no longer there.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct MouseSample {
     pub reports: usize,
@@ -145,18 +128,14 @@ impl MouseSample {
     }
 }
 
-/// Fold a read of the mouse claim, given what the buttons were before it.
-///
-/// A trailing partial report is ignored rather than being decoded from
-/// whatever follows it in the buffer.
-pub fn fold_mouse(prev_buttons: u8, bytes: &[u8]) -> MouseSample {
+/// Fold the pointer's `states`, given what the buttons were before them.
+pub fn fold_mouse(prev_buttons: u8, states: &[State]) -> MouseSample {
     let mut s = MouseSample { buttons: prev_buttons, ..MouseSample::default() };
-    for chunk in bytes.as_chunks::<MOUSE_EVENT_LEN>().0 {
-        let ev = decode(chunk);
+    for ev in states {
         s.reports += 1;
         s.scroll += ev.scroll as i32;
-        s.abs_x = ev.abs_x;
-        s.abs_y = ev.abs_y;
+        s.abs_x = ev.x;
+        s.abs_y = ev.y;
         let was = s.buttons & 1 != 0;
         let now = ev.buttons & 1 != 0;
         s.pressed |= now && !was;
@@ -166,10 +145,10 @@ pub fn fold_mouse(prev_buttons: u8, bytes: &[u8]) -> MouseSample {
     s
 }
 
-/// Full scale of the absolute axes the USB tablet reports on.
+/// Full scale of the pointer's absolute axes.
 const ABS_RANGE: i32 = 32768;
 
-/// Where a tablet's absolute position lands on the screen.
+/// Where the pointer's absolute position lands on the screen.
 pub fn cursor_from_abs(abs_x: u16, abs_y: u16, screen: Rect) -> Point {
     Point {
         x: (screen.x0 + abs_x as i32 * screen.w() / ABS_RANGE)
@@ -631,22 +610,13 @@ mod tests {
         assert!(!gate.owed(key(escape, MOD_RELEASED)), "a release was taken twice");
     }
 
-    fn report(buttons: u8, scroll: i8, x: u16, y: u16) -> [u8; 6] {
-        let mut b = [0u8; 6];
-        b[0] = buttons;
-        b[1] = scroll as u8;
-        b[2..4].copy_from_slice(&x.to_le_bytes());
-        b[4..6].copy_from_slice(&y.to_le_bytes());
-        b
+    fn report(buttons: u8, scroll: i8, x: u16, y: u16) -> State {
+        State { buttons, scroll, x, y }
     }
 
     #[test]
     fn a_batch_folds_to_its_transitions_and_its_last_position() {
-        let mut buf = [0u8; 18];
-        buf[0..6].copy_from_slice(&report(0, 1, 100, 100));
-        buf[6..12].copy_from_slice(&report(1, 1, 200, 200));
-        buf[12..18].copy_from_slice(&report(0, -1, 300, 400));
-        let s = fold_mouse(0, &buf);
+        let s = fold_mouse(0, &[report(0, 1, 100, 100), report(1, 1, 200, 200), report(0, -1, 300, 400)]);
         assert_eq!(s.reports, 3);
         assert!(s.pressed && s.released);
         assert!(!s.left_held());
@@ -656,17 +626,8 @@ mod tests {
 
     #[test]
     fn a_button_already_down_is_not_a_press() {
-        let s = fold_mouse(1, &report(1, 0, 10, 10));
+        let s = fold_mouse(1, &[report(1, 0, 10, 10)]);
         assert!(!s.pressed && !s.released && s.left_held());
-    }
-
-    #[test]
-    fn a_truncated_report_is_not_decoded_from_what_follows_it() {
-        let mut buf = [0u8; 9];
-        buf[0..6].copy_from_slice(&report(1, 0, 7, 9));
-        let s = fold_mouse(0, &buf);
-        assert_eq!(s.reports, 1);
-        assert_eq!((s.abs_x, s.abs_y), (7, 9));
     }
 
     #[test]

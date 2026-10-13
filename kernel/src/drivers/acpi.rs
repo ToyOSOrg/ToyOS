@@ -165,12 +165,6 @@ pub fn ecam_windows(rsdp_addr: u64) -> Vec<toyos_acpi::EcamWindow> {
     windows
 }
 
-/// FADT revision and the IA-PC boot architecture flags.
-// `Err` is not "absent" and must not be treated as one by the caller.
-pub fn iapc_boot_arch(rsdp_addr: u64) -> Result<(u8, u16), TableError> {
-    toyos_acpi::iapc_boot_arch(direct_phys(), rsdp_addr)
-}
-
 /// Which CMOS register holds the RTC's century, as the FADT names it.
 // `Ok(None)` is "no century register", distinct from `Err`, which the caller must not treat as one.
 pub fn rtc_century_register(rsdp_addr: u64) -> Result<Option<u8>, TableError> {

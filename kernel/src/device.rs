@@ -139,8 +139,6 @@ impl Drop for Claim {
 }
 
 pub fn set_framebuffer_info(screen: Screen) {
-    // Mouse motion maps into a fixed 0..32767 space scaled by this geometry, so it must track every mode change.
-    crate::mouse::set_screen(screen.info.width, screen.info.height);
     *FB_INFO.lock() = Some(screen);
 }
 
@@ -180,20 +178,12 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
         DeviceType::Keyboard => {
-            // A claim is evidence: with no i8042 keyboard armed and no xHCI
-            // controller bound, nothing can ever feed the stream it names.
-            if !keyboard::source_exists() {
-                return Err(ClaimError::Absent);
-            }
             let claim = Claim::acquire(class)?;
             // Keystrokes queued before this claim belong to no one; delivering them would leak them to the new owner.
             keyboard::discard_queued();
             Ok(DeviceClaim::new(class, DeviceInfo::Events, claim))
         }
         DeviceType::Mouse => {
-            if !mouse::source_exists() {
-                return Err(ClaimError::Absent);
-            }
             let claim = Claim::acquire(class)?;
             mouse::discard_queued();
             Ok(DeviceClaim::new(class, DeviceInfo::Events, claim))

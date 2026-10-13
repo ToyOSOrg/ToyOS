@@ -17,18 +17,17 @@ kernel's part of a restart, and named module tests hold each program's
 
 ## What is left, in order
 
-1. **ps2server**: stage 7 step 2, with stage 6 step 3.
-2. **Step 9's file half** (stage 4), once libc is a file server's client
+1. **Step 9's file half** (stage 4), once libc is a file server's client
    (`issues/c-programs-name-no-file-a-file-server-holds.md`).
-3. **Step 8's exit** (stage 4). Its empty view needs step 9's file half:
+2. **Step 8's exit** (stage 4). Its empty view needs step 9's file half:
    until then the kernel serves `/system` and `/tmp` to every process.
-4. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
+3. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
    where firmware put it, handed over in 4 KiB pages with its MSI-X table's
    page, under the owner's Q2 ruling. The orchestrator ruled on #900 that
    this route serves usbd's claim (step 10).
-5. **usbd's whole xHCI**: step 10, with stage 6 step 4, step 4's tail and
+4. **usbd's whole xHCI**: step 10, with stage 6 step 4, step 4's tail and
    step 9's block half, which serve the stick until usbd does.
-6. **Stage 6 step 5, then stage 5's windows.**
+5. **Stage 6 step 5, then stage 5's windows.**
 
 Beside that order, each waiting on something outside it:
 - stage 1's NVMe boot-time measurement, on a ROOT on the T14's NVMe, which
@@ -288,7 +287,7 @@ Beside that order, each waiting on something outside it:
    3. **The i8042's thread is ps2server's** (stage 7 step 2): `irq_ring`'s
       `I8042`, `keyboard_controller::service` and the idle loop's
       `verdict_due` go with the kernel's driver. **Exit**: that step's.
-      **Not started.**
+      **Done** (#899).
    4. **xHCI's thread is usbd's** (stage 4 step 10): `Xhci`,
       `poll_if_pending` and `port_work_pending` go with the kernel's driver,
       and `irq_ring` and `sync::OwedLock`, whose one user is `XHCI`, with
@@ -302,26 +301,25 @@ Beside that order, each waiting on something outside it:
       are met. **Not started.**
 7. **The i8042 leaves the kernel.** Owner ruling, 2026-09-28: drivers are
    userland, and a dead kernel takes no input, with no emergency way.
-   **Partly done**: step 1.
+   **Done**.
    1. **The panic console takes no input, and an `isa` claim grants a process
       exact ports and its ISA lines.** **Done** (#592).
-   2. **ps2server**, the server over that claim, feeding the kernel's keyboard
-      and mouse streams so the merge with USB HID stays where it is; the
-      kernel's driver, its vector, its actuators and the
-      `keyboard_controller` seam deleted. A keyboard claim is refused while no
-      source exists, which the supervisor's order of endowment then decides.
-      **Exit**: no i8042 code in the kernel (`arch/x86_64/i8042/`,
-      `arch/x86_64/idt/i8042.rs` and both architectures'
-      `keyboard_controller` gone from `kernel/src`, and `toyos-ps2`, whose
-      one kernel user is `kernel/src/arch/x86_64/i8042/mod.rs`, gone from
-      `kernel/Cargo.toml`); a kernel test this step owes, that a keyboard
-      claim whose holder dies is handed to the next claimant and the
-      keyboard stream delivers its transitions and none of the dead
-      holder's, red on a kernel that keeps the dead holder as the source;
+   2. **ps2server**, the server over that claim, delivering over IPC to the
+      owner of input, which merges every source; the kernel's merge deleted,
+      its keyboard and mouse streams carrying its own sources' records
+      unmerged until usbd takes the last of them (step 10), which deletes
+      them; the kernel's driver, its vector, its actuators and the
+      `keyboard_controller` seam deleted. **Exit**: no i8042 code in the
+      kernel (`arch/x86_64/i8042/`, `arch/x86_64/idt/i8042.rs` and both
+      architectures' `keyboard_controller` gone from `kernel/src`, and
+      `toyos-ps2` gone from `kernel/Cargo.toml`); a kernel test that an
+      `isa` claim whose holder dies is handed to the next claimant with none
+      of the dead holder's interrupts, red on a kernel whose release keeps
+      the dead holder's record: `isa_lines_reach_their_holder`'s `dies` role;
       and ps2server's restart mid-packet held by `toyos-ps2`'s
       `a_lost_scancode_byte_never_wedges_the_prefix_state` and
       `a_stream_truncated_at_any_offset_resyncs_within_two_packets`.
-      **Not started.**
+      **Done** (#899).
 
 ## Standing
 

@@ -5,9 +5,9 @@
 //! [`percpu`] owns every `gs:` access; nothing outside this directory writes one.
 //!
 //! The PC platform's own devices live here too, because no other architecture
-//! has them: the i8042, the I/O APIC, the CMOS RTC, the chipset's TCO
-//! watchdog, VT-d and AMD-Vi. Generic code reaches each through the concept it serves
-//! (`keyboard_controller`, `watchdog`, `iommu_unit`, …), never by its name.
+//! has them: the I/O APIC, the CMOS RTC, the chipset's TCO watchdog, VT-d and
+//! AMD-Vi. Generic code reaches each through the concept it serves
+//! (`watchdog`, `iommu_unit`, …), never by its name.
 
 pub mod acpi_mode;
 pub mod amdvi;
@@ -24,7 +24,6 @@ pub mod entry;
 pub mod fpu;
 pub mod hpet;
 pub mod hw;
-pub mod i8042;
 pub mod idt;
 pub mod iommu_unit;
 pub mod ioapic;
@@ -45,7 +44,6 @@ pub mod vtd;
 pub mod watchdog;
 
 pub use apic as irqchip;
-pub use i8042 as keyboard_controller;
 pub use idt as trap;
 pub use iommu_unit::interrupt as message_unit;
 

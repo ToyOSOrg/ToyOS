@@ -760,7 +760,7 @@ fn bind_hid(
     let report_size = pointer.map_or(keyboard::REPORT, Pointer::request) as u32;
     let role = match pointer {
         None => HidRole::Keyboard(keyboard::Keyboard::default()),
-        // A pointer with no free button-table entry can't be bound; sharing one would publish another's releases.
+        // A pointer with no free source can't be bound; sharing one would publish another's releases.
         Some(pointer) => match crate::mouse::PointerSource::claim() {
             Some(source) => HidRole::Pointer(source, pointer),
             None => {

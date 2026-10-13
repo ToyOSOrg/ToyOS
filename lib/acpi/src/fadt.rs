@@ -9,7 +9,6 @@ pub(crate) const FADT_FIRMWARE_CTRL: usize = 36;
 pub const FADT_DSDT: usize = 40;
 pub const FADT_PM1A_CNT_BLK: usize = 64;
 const FADT_CENTURY: usize = 108;
-const FADT_IAPC_BOOT_ARCH: usize = 109;
 const FADT_FLAGS: usize = 112;
 /// A Generic Address Structure (§5.2.3.2): space at +0, bit width at +1, bit offset at +2, address at +4.
 const FADT_RESET_REG: usize = 116;
@@ -28,17 +27,6 @@ const RESET_REG_SUP: u32 = 1 << 10;
 const SPACE_SYSTEM_MEMORY: u8 = 0;
 const SPACE_SYSTEM_IO: u8 = 1;
 const SPACE_PCI_CONFIG: u8 = 2;
-
-// `Err` is not "absent" and must not be treated as one by the caller.
-// Bit 1 of the flags is the port 60/64 keyboard-controller bit, defined only from FADT revision 3 onward.
-pub fn iapc_boot_arch<P: Phys>(phys: P, rsdp_addr: u64) -> Result<(u8, u16), TableError> {
-    const NEEDED: usize = FADT_IAPC_BOOT_ARCH + 2;
-    let fadt = find_table(phys, rsdp_addr, b"FACP", NEEDED)?;
-    let short = || TableError::Length { declared: fadt.len() as u32, needed: NEEDED };
-    let revision = fadt.byte(SDT_REVISION).ok_or_else(short)?;
-    let flags = fadt.u16_at(FADT_IAPC_BOOT_ARCH).ok_or_else(short)?;
-    Ok((revision, flags))
-}
 
 /// What the FADT says about the RTC's century register.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
