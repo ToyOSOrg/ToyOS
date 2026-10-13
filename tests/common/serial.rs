@@ -98,7 +98,7 @@ pub(crate) const DEATHS: &[(&str, Died, Died)] = &[
     ("MACHINE CHECK", Died::Kernel, Died::Kernel),
     // kernel/src/iommu/fault.rs — a fault on a function this kernel drives has
     // nobody to hand it to, so the handler halts. One a *process* drives says
-    // `owner=slot<N>`, and one naming no enumerated function `owner=none`, and
+    // `owner=process`, and one naming no enumerated function `owner=none`, and
     // the machine goes on, which is why the needle is the owner rather than
     // the fault.
     ("iommu: DMA FAULT owner=kernel", Died::Kernel, Died::Kernel),
@@ -354,7 +354,7 @@ const NEVER_CLEAN: &[&str] = &[
     // refuses every later call, so this is not a death; it is a driver whose
     // descriptors are wrong, and a netstack that did it on every boot would
     // otherwise pass everywhere.
-    "iommu: DMA FAULT owner=slot",
+    "iommu: DMA FAULT owner=process",
     // The same file — a requester no enumerated function is: refused by the
     // unit, and on a boot that staged none, a device nothing here accounts for.
     "iommu: DMA FAULT owner=none",

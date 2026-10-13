@@ -14,7 +14,8 @@ Refusals of `kernel/src/pcidev/mod.rs` that no test reaches:
 - `ClaimError::Ambiguous`, a config naming a device this machine has two of;
 - `ClaimError::KernelDriven`, a claim on a function one of this kernel's own
   drivers bound;
-- `ClaimError::Exhausted`, a claim past `MAX_FUNCTIONS` slots;
+- `ClaimError::Exhausted`, a claim past the vectors, remapping entries or
+  LPIs a machine has;
 - every window refusal — `Refusal::NoWindow`, `BarUnsizable`, `BarUnplaceable`,
   `BarResized` and `Dead`;
 - every bound `SYS_DEVICE_BAR_MAP` and `SYS_DEVICE_DMA_ALLOC` check, which is

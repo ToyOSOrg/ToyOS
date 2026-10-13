@@ -67,7 +67,7 @@ pub fn self_check() -> Result<(), String> {
             Serial::named(
                 "test capture",
                 "[ 0.001 cpu0 kernel] NVMe: found\n[ 4.100 cpu0 kernel] iommu: DMA FAULT \
-                 owner=slot0 unit0 stream=00:03.0 addr=0x1000 access=read reason=0x06 \
+                 owner=process unit0 stream=00:03.0 addr=0x1000 access=read reason=0x06 \
                  read-permission\n",
             )
             .must_be_clean()
@@ -173,7 +173,7 @@ pub fn self_check() -> Result<(), String> {
         // two lines differ in one field, which is what makes the case worth
         // stating rather than assuming.
         (
-            "[ 4.100 cpu0 kernel] iommu: DMA FAULT owner=slot0 unit0 stream=00:03.0 \
+            "[ 4.100 cpu0 kernel] iommu: DMA FAULT owner=process unit0 stream=00:03.0 \
              addr=0x1000 access=read reason=0x06 read-permission",
             None,
         ),

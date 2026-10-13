@@ -30,9 +30,6 @@ use crate::drivers::pci::{self, PciDevice};
 use crate::iommu::StreamId;
 use crate::mm::{DirectMap, Mmio, PAGE_SIZE};
 
-/// A `pcidev` slot number no claim has: this function is not driven by one.
-const NO_SLOT: u32 = u32::MAX;
-
 /// One enumerated function, published before any unit is armed.
 struct Function {
     who: StreamId,
@@ -41,9 +38,6 @@ struct Function {
     domain: AtomicU32,
     // Faults a unit has reported against it; non-zero is the per-domain flag.
     faults: AtomicU32,
-    /// The `pcidev` slot a process drives this function on, or [`NO_SLOT`].
-    /// What decides whether a fault on it is terminal for the machine.
-    user_slot: AtomicU32,
 }
 
 /// Exactly the functions this machine enumerated, leaked once by [`describe`]:
@@ -97,7 +91,6 @@ pub fn describe(devices: &[PciDevice]) {
             config: DirectMap::phys_of(device.config_window().addr() as *const u8),
             domain: AtomicU32::new(0),
             faults: AtomicU32::new(0),
-            user_slot: AtomicU32::new(NO_SLOT),
         })
         .collect();
     let functions: &'static [Function] = Box::leak(functions.into_boxed_slice());
@@ -114,18 +107,6 @@ pub fn describe(devices: &[PciDevice]) {
 pub fn attached(stream: StreamId, domain: u16) {
     if let Some(function) = find(Who::Function(stream)) {
         function.domain.store(u32::from(domain), Ordering::Relaxed);
-    }
-}
-
-/// Record that a process drives this function on `slot`, or no longer does.
-///
-/// The handler reads it to decide what a fault on this stream is *terminal
-/// for*: a kernel-driven function has nothing to hand a fault to and the
-/// response is the halt in [`conclude`]; one a process drives has an owner, so
-/// the record goes to that owner's claim and the machine stays up.
-pub fn user_owned(stream: StreamId, slot: Option<usize>) {
-    if let Some(function) = find(Who::Function(stream)) {
-        function.user_slot.store(slot.map_or(NO_SLOT, |slot| slot as u32), Ordering::Release);
     }
 }
 
@@ -216,15 +197,14 @@ pub fn report(unit: usize, count: &AtomicU32, fault: Fault) -> bool {
         None => stray_fault(key),
     };
     let _ = FIRST.compare_exchange(u64::MAX, key, Ordering::AcqRel, Ordering::Relaxed);
-    // Before the line, so `owner=` in it is what was actually told.
-    let owner = match function.map(|f| f.user_slot.load(Ordering::Acquire)) {
+    // Before the line, so `owner=` in it is what was actually told: a
+    // function a claim holds has its holder to refuse, and one only this
+    // kernel drives has nobody.
+    let owner = match function {
         None => Owner::Nobody,
-        Some(NO_SLOT) => Owner::Kernel,
-        Some(slot) => Owner::Slot(slot as usize),
+        Some(function) if crate::pcidev::note_fault(function.who.requester()) => Owner::Process,
+        Some(_) => Owner::Kernel,
     };
-    if let Owner::Slot(slot) = owner {
-        crate::pcidev::note_fault(slot);
-    }
     let count = count.fetch_add(1, Ordering::Relaxed) + 1;
     // A stray's line is bounded by its count, never by the device: the next
     // line it writes says how many were read in between.
@@ -287,8 +267,8 @@ fn config_window(phys: u64) -> Mmio {
 enum Owner {
     /// An enumerated function only this kernel drives: the halt.
     Kernel,
-    /// An enumerated function the process on this `pcidev` slot drives.
-    Slot(usize),
+    /// An enumerated function a process holds a claim on.
+    Process,
     /// No enumerated function: a requester this kernel never took on.
     Nobody,
 }
@@ -297,7 +277,7 @@ impl core::fmt::Display for Owner {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Kernel => write!(f, "kernel"),
-            Self::Slot(slot) => write!(f, "slot{slot}"),
+            Self::Process => write!(f, "process"),
             Self::Nobody => write!(f, "none"),
         }
     }
