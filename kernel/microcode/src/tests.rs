@@ -1,5 +1,6 @@
-//! Intel's updates as Intel publishes them, and updates built here to the
-//! SDM's layout for every refusal and every arm the real files do not reach.
+//! Intel's updates as Intel publishes them, updates built here to the SDM's
+//! layout for every refusal and every arm the real files do not reach, and
+//! whether a CPU loads at all.
 
 #![allow(
     clippy::indexing_slicing,
@@ -120,7 +121,6 @@ fn the_msrs_are_read_where_the_sdm_puts_them() {
     // `IA32_PLATFORM_ID` as all eight of the T14's CPUs read it.
     assert_eq!(PlatformId::from_msr(0x001c_0000_0000_0000), PlatformId(7));
     assert_eq!(PlatformId::from_msr(!(7 << 50)), PlatformId(0));
-    assert_eq!(Revision::from_sign_id(0xbe << 32 | 0xffff_ffff), Revision(0xbe));
 }
 
 #[test]
@@ -251,8 +251,31 @@ fn the_newest_update_naming_the_cpu_is_chosen_wherever_it_sits() {
 }
 
 #[test]
-fn a_revision_is_signed() {
-    let negative = build(T14.signature.0, 0x80, 0x8000_0000, &[]);
-    let cpu = Cpu { revision: Revision(0x7fff_ffff), ..T14 };
-    assert_eq!(select(&negative, &cpu), Ok(Choice::Current(Revision(i32::MIN))));
+fn a_vendor_toyos_has_no_loader_for_loads_nothing() {
+    assert_eq!(loader(Vendor::Intel), Ok(()));
+    for vendor in [Vendor::Amd, Vendor::Hygon, Vendor::Centaur, Vendor::Zhaoxin, Vendor::Unknown] {
+        assert_eq!(loader(vendor), Err(Unloaded::Vendor(vendor)));
+    }
+}
+
+#[test]
+fn a_guest_loads_nothing_whatever_revision_it_reports() {
+    for found in [Revision(0xbe), Revision::DISABLED] {
+        assert_eq!(may_load(1 << 31, found), Err(Unloaded::Hypervisor));
+    }
+}
+
+#[test]
+fn revision_0xffffffff_loads_nothing() {
+    assert_eq!(may_load(0, Revision::DISABLED), Err(Unloaded::Disabled));
+    assert_eq!(may_load(0, Revision(0xffff_fffe)), Ok(()));
+}
+
+/// The T14's i5-1135G7 below the update its firmware already runs.
+#[test]
+fn the_embedded_intel_file_hands_the_t14_its_update_16_byte_aligned() {
+    let below = Cpu { revision: Revision(0xbd), ..T14 };
+    let Ok(Choice::Load(update)) = select(&INTEL.0, &below) else { panic!("0xbe is newer than 0xbd") };
+    assert_eq!(update.revision(), Revision(0xbe));
+    assert_eq!(update.data().as_ptr().align_offset(16), 0, "SDM §12.11.6 takes the data 16-byte aligned");
 }
