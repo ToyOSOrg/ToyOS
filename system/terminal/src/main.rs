@@ -101,13 +101,11 @@ fn main() {
                 let n = shell_stderr.read(&mut buf).unwrap_or(0);
                 if n > 0 {
                     console.write_bytes(&buf[..n]);
-                    std::io::stdout().lock().write_all(&buf[..n]).ok();
                     present(&console, &window);
                 }
                 break;
             }
             console.write_bytes(&buf[..n]);
-            std::io::stdout().lock().write_all(&buf[..n]).ok();
             present(&console, &window);
         }
 
@@ -116,7 +114,6 @@ fn main() {
             let n = shell_stderr.read(&mut buf).unwrap_or(0);
             if n > 0 {
                 console.write_bytes(&buf[..n]);
-                std::io::stdout().lock().write_all(&buf[..n]).ok();
                 present(&console, &window);
             }
         }

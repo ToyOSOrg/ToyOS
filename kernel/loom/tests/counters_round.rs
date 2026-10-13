@@ -20,7 +20,7 @@
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
 use kernel_loom::seqlock::Published;
-use kernel_loom::shootdown::Shootdown;
+use kernel_loom::shootdown::{Reach, Shootdown};
 use loom::sync::Arc;
 
 /// What the CPU's block held before the round, and what it answers the round with.
@@ -44,11 +44,11 @@ fn a_cpu_read_as_answered_is_read_with_its_answer() {
         let rounds = Arc::new(Shootdown::new());
         let block = Arc::new(Published::new());
         block.publish(BEFORE);
-        let generation = rounds.issue();
+        let generation = rounds.issue(Reach::Narrow);
 
         let cpu1 = {
             let (rounds, block) = (rounds.clone(), block.clone());
-            loom::thread::spawn(move || rounds.serve(1, || block.publish(ANSWER)))
+            loom::thread::spawn(move || rounds.serve(1, |_| block.publish(ANSWER)))
         };
 
         for _ in 0..POLLS {

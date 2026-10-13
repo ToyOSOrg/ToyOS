@@ -342,7 +342,7 @@ mod checks {
     fn control_regs_verdict() -> Result<(), String> {
         // `xcr0=0x0` is what the kernel prints for a CPU without `CR4.OSXSAVE`.
         const AP_BEFORE: (u64, u64, u64) = (0xe000_0011, 0x0031_0620, 0);
-        const DECLARED: (u64, u64, u64) = (0x8001_0033, 0x0034_0668, 0x7);
+        const DECLARED: (u64, u64, u64) = (0x8001_0033, 0x0034_06e8, 0x7);
         const AVX512: u64 = 0xe0;
 
         fn log(cpus: &[(u64, u64, u64)]) -> String {
@@ -396,15 +396,16 @@ mod checks {
         )?;
         // Two bits a machine could hold uniformly, each one line of kernel diff
         // away, and neither reachable by an actuator. `AM` is named clear above and
-        // answers by name; `PGE` is named nowhere, which is the case the whole
-        // never-named rule exists for — `TSD` and `PKE` are the same case.
+        // answers by name; `PKE` is named nowhere, which is the case the whole
+        // never-named rule exists for — `TSD` is the same case.
         refused("every CPU with AM set", &[(DECLARED.0 | (1 << 18), DECLARED.1, DECLARED.2); 4], "AM")?;
         refused(
-            "every CPU with PGE set",
-            &[(DECLARED.0, DECLARED.1 | (1 << 7), DECLARED.2); 4],
+            "every CPU with PKE set",
+            &[(DECLARED.0, DECLARED.1 | (1 << 22), DECLARED.2); 4],
             "never named",
         )?;
         refused("every CPU without SMEP", &[(DECLARED.0, DECLARED.1 & !(1 << 20), DECLARED.2); 4], "SMEP")?;
+        refused("every CPU without PGE", &[(DECLARED.0, DECLARED.1 & !(1 << 7), DECLARED.2); 4], "PGE")?;
         // A CPU that agrees about every named bit and differs in one the CPU is
         // allowed to withhold, so nothing above it can object.
         refused(
@@ -416,7 +417,7 @@ mod checks {
         // died before the check looks like.
         refused("three lines for four CPUs", &[DECLARED; 3], "{0, 1, 2, 3}")?;
 
-        eprintln!("  [control_regs] the verdict refuses 14 machines and accepts the two declared ones");
+        eprintln!("  [control_regs] the verdict refuses 15 machines and accepts the two declared ones");
         Ok(())
     }
 
@@ -1153,7 +1154,7 @@ mod checks {
     #[test]
     fn a_shared_chunk_stages_every_binary_its_members_name() {
         let source = "const CHILD: &str = \"/system/bin/test_rs_child\";\n";
-        let bins: Vec<(String, Vec<u8>)> = ["parent", "child", "fs_large_file", "libfoo.so"]
+        let bins: Vec<(String, Vec<u8>)> = ["parent", "child", "stranger", "libfoo.so"]
             .iter()
             .map(|name| ((*name).to_string(), Vec::new()))
             .collect();

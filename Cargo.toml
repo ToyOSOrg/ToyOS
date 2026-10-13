@@ -22,6 +22,7 @@ members = [
     "apps/paint",
     "apps/snake",
     "apps/toyfetch",
+    "build/root",
     "build/ssh",
     "kernel",
     "kernel/cpuvuln",
@@ -45,6 +46,7 @@ members = [
     "lib/blockring/transport",
     "lib/bootmap",
     "lib/device-memory",
+    "lib/disk",
     "lib/elf",
     "lib/elide",
     "lib/fat32",
@@ -70,6 +72,7 @@ members = [
     "lib/untrusted",
     "lib/update",
     "lib/userbound",
+    "lib/vdagent",
     "lib/virtio",
     "lib/wallclock",
     "lib/xhci",
@@ -80,6 +83,7 @@ members = [
     "sdk/font",
     "sdk/keymap",
     "sdk/libc/arch",
+    "sdk/std/copies",
     "sdk/osrelease",
     "sdk/toyos",
     "sdk/window",
@@ -119,12 +123,15 @@ members = [
     "system/symbolize",
     "system/terminal",
     "system/toybox",
+    "system/toybox/copies",
     "system/trace",
     "system/update",
+    "system/update/copies",
     "system/usbd",
+    "system/vdagent",
+    "system/vdagent/bridge",
     "tests/guest/kernelprobe",
     "tests/guest/metalprobe",
-    "tests/guest/proctest",
     "tests/guest/test-runner",
     "tests/metal",
 ]
@@ -213,6 +220,9 @@ toyos-osrelease = { path = "sdk/osrelease" }
 # The swap port's name and the one program the image may give it to, so the
 # gate on every manifest reads what the supervisor reads.
 toyos-swap = { path = "lib/swap" }
+# QEMU's clipboard channel's port name, id and port count, so the launch reads
+# the declaration the guest's agent drives.
+toyos-vdagent = { path = "lib/vdagent" }
 # The watchdog's parameter name, so the gate over `kernel/src/params.rs` reads
 # the same constant the kernel and the bootloader do.
 toyos-tco = { path = "lib/tco" }
@@ -236,8 +246,7 @@ toyos-ssh = { path = "build/ssh" }
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "lib/wallclock" }
 # Every SHA-256 the build takes: `NOTICE`'s record of a committed file, a
-# store key, a ROOT's name, a release asset's digest, and the harness's of a
-# body a guest fetches over TLS.
+# store key, a ROOT's name and a release asset's digest.
 toyos-sha2-hw = { path = "lib/sha2-hw" }
 # The toolchain release's tarball, packed in-process (`build/release.rs`): Rust's
 # own tar and gzip, where the binaries are hosts' tools.
@@ -270,13 +279,6 @@ toyos-xhci = { path = "lib/xhci" }
 # The ACPI server's count line, so the judge reads the words the server writes
 # and the job that waits for them matches.
 acpiserver-api = { path = "lib/acpiserver-api" }
-# The desktop's geometry and the prompt's colour, so `consent_prompt` clicks
-# where the compositor draws and finds the prompt by what the compositor paints.
-toyos-desktop = { path = "system/compositor/desktop" }
-# `common::https`'s server, the peer a guest's HTTPS client is judged
-# against, and the authority and certificates it presents, made per run.
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-rcgen = "0.14"
 # The metal loop, the suite's command line, and what the metal profile
 # derives, times and reads off a boot.
 toyos-metal = { path = "tests/metal" }

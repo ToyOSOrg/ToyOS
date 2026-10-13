@@ -31,7 +31,8 @@
 //! bytes, never a lower sequence for an item. A held floor counts only while
 //! the final root gives its role the keys the root held beside it did, which is
 //! how a rotation recovers from a stolen key's fast-forward. [`Archive`] checks
-//! the archive's bytes as they stream.
+//! the archive's bytes as they stream. The root a machine pins is trusted as
+//! pinned; [`self_signed`] is what a root 1 is held to before it is.
 
 use alloc::format;
 use alloc::string::String;
@@ -288,6 +289,29 @@ pub fn key_id(key: &PublicKey) -> Digest {
     sha256(&public_blob(key))
 }
 
+/// `SHA256:<base64>` of the key's ID, unpadded: what `ssh-keygen -l` prints,
+/// and the one name a person compares a key by.
+pub fn fingerprint(key: &PublicKey) -> String {
+    format!("SHA256:{}", base64_encode(&key_id(key)).trim_end_matches('='))
+}
+
+/// `ssh-ed25519 <base64 blob>`: a public key as an OpenSSH `.pub` file and an
+/// `allowed_signers` line carry it, and as a root declares one.
+pub fn public_line(key: &PublicKey) -> String {
+    format!("ssh-ed25519 {}", base64_encode(&public_blob(key)))
+}
+
+/// The key a [`public_line`] names, and nothing else, or `None`.
+pub fn parse_public_line(text: &str) -> Option<PublicKey> {
+    let [kind, blob] = text.split(' ').collect::<Vec<_>>()[..] else { return None };
+    public_key(kind, blob)
+}
+
+fn public_key(kind: &str, blob: &str) -> Option<PublicKey> {
+    let blob = base64_decode(blob).filter(|_| kind == "ssh-ed25519")?;
+    (blob.len() == 51 && blob[..19] == public_blob(&[0; 32])[..19]).then(|| blob[19..].try_into().expect("32 bytes"))
+}
+
 /// One role's signers in a root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grant {
@@ -371,11 +395,7 @@ impl Root {
                 return Err(c.last("a key is not `key <id> ssh-ed25519 <public key>`"));
             };
             let id = hex32(id).ok_or_else(|| c.last("a key ID that is not 64 lowercase hex digits"))?;
-            let blob = base64_decode(blob).filter(|_| kind == "ssh-ed25519");
-            let key: PublicKey = blob
-                .filter(|b| b.len() == 51 && b[..19] == public_blob(&[0; 32])[..19])
-                .map(|b| b[19..].try_into().expect("32 bytes"))
-                .ok_or_else(|| c.last("a key that is not an ssh-ed25519 public key"))?;
+            let key = public_key(kind, blob).ok_or_else(|| c.last("a key that is not an ssh-ed25519 public key"))?;
             if key_id(&key) != id {
                 return Err(c.last("a key ID that is not its key's SHA-256"));
             }
@@ -416,6 +436,16 @@ impl Root {
         let grants: [Grant; 3] = grants.try_into().expect("one grant per role");
         Ok(Root { version: doc.version, expires: doc.expires, keys, grants })
     }
+}
+
+/// `bytes` as a root its own keys vouch for at its own root threshold: what a
+/// root 1 is held to before an image pins it, since [`refresh`] trusts the
+/// root it is handed as pinned.
+pub fn self_signed(bytes: &[u8]) -> Result<Root, Refused> {
+    let doc = document(bytes, Role::Root)?;
+    let root = Root::of(&doc)?;
+    vouched(&doc, &root)?;
+    Ok(root)
 }
 
 impl Timestamp {
@@ -1009,6 +1039,7 @@ pub fn base64_decode(text: &str) -> Option<Vec<u8>> {
 #[cfg(any(test, feature = "sign"))]
 pub mod render {
     use super::*;
+    use alloc::vec;
 
     /// `root`'s signed bytes, unsigned.
     pub fn root(root: &Root) -> String {
@@ -1016,7 +1047,7 @@ pub mod render {
         let mut keys: Vec<(Digest, &PublicKey)> = root.keys.iter().map(|k| (key_id(k), k)).collect();
         keys.sort();
         for (id, key) in keys {
-            out += &format!("key {} ssh-ed25519 {}\n", hex(&id), base64_encode(&public_blob(key)));
+            out += &format!("key {} {}\n", hex(&id), public_line(key));
         }
         for role in Role::ALL {
             let grant = root.grant(role);
@@ -1027,6 +1058,21 @@ pub mod render {
             out.push('\n');
         }
         out
+    }
+
+    /// Root 1 as the root-key ceremony signs it: `root`'s key alone holds
+    /// the root role and `signing` the timestamp and targets roles, each at
+    /// threshold 1, signed by `root`.
+    pub fn first_root(root: &[u8; 32], signing: &PublicKey, expires: u64) -> Vec<u8> {
+        let public = sig::public_of(root);
+        assert_ne!(&public, signing, "the root key holds the root role alone");
+        let grant = |key: &PublicKey| Grant { threshold: 1, keys: vec![key_id(key)] };
+        let mut keys = vec![public, *signing];
+        keys.sort_by_key(key_id);
+        let first = Root { version: 1, expires, keys, grants: [grant(&public), grant(signing), grant(signing)] };
+        let body = self::root(&first);
+        let line = signature(root, Role::Root, body.as_bytes());
+        (body + &line).into_bytes()
     }
 
     pub fn timestamp(timestamp: &Timestamp) -> String {
@@ -1613,6 +1659,74 @@ mod tests {
         assert_eq!(time_text(NOW), "2026-10-09T00:00:00Z");
         for bad in ["2026-10-09 00:00:00Z", "2026-10-09T00:00:00", "2026-13-01T00:00:00Z", "2027-02-29T00:00:00Z", "+026-10-09T00:00:00Z"] {
             assert_eq!(parse_time(bad), None, "{bad}");
+        }
+    }
+
+    /// Root 1 as the ceremony signs it is self-signed.
+    #[test]
+    fn the_ceremonys_root_is_self_signed() {
+        let first = render::first_root(&seed(1), &public(2), NOW + 365 * DAY);
+        assert_eq!(self_signed(&first).map(|r| r.version), Ok(1));
+    }
+
+    /// Root 1 as the ceremony signs it grants the signing key the targets and
+    /// timestamp roles: a repository that key signs is one a machine pinning
+    /// that root accepts.
+    #[test]
+    fn the_ceremonys_root_accepts_what_the_signing_key_signs() {
+        let first = render::first_root(&seed(1), &public(2), NOW + 365 * DAY);
+        let mut repo = Repo::default();
+        repo.publish(1, &targets(1, vec![item(3, ARCHIVE)]), 2);
+        let image = Held { root: &first, timestamp: None, targets: None };
+        refresh(&mut repo, image, None, NOW).expect("targets and timestamp the signing key signed");
+    }
+
+    /// Root 1 as the ceremony signs it gives its root key the root role
+    /// alone: a timestamp that key signs is refused.
+    #[test]
+    fn the_ceremonys_root_refuses_a_timestamp_the_root_key_signs() {
+        let first = render::first_root(&seed(1), &public(2), NOW + 365 * DAY);
+        let mut by_root = Repo::default();
+        by_root.publish(1, &targets(1, vec![item(3, ARCHIVE)]), 1);
+        let image = Held { root: &first, timestamp: None, targets: None };
+        assert!(matches!(
+            refused(refresh(&mut by_root, image, None, NOW)),
+            Refused::Threshold { role: Role::Timestamp, first: Some(SigRefused::NotTheRolesKey), .. }
+        ));
+    }
+
+    /// A root signed by a key it does not give the root role is not
+    /// self-signed, however well-formed.
+    #[test]
+    fn a_root_its_own_root_key_did_not_sign_is_refused() {
+        let body = render::root(&root(1, [(1, &[1]), (1, &[2]), (1, &[2])]));
+        let by_signing_key = signed(body, Role::Root, &[2]);
+        assert_eq!(
+            self_signed(&by_signing_key),
+            Err(Refused::Threshold {
+                role: Role::Root,
+                version: 1,
+                root: 1,
+                valid: 0,
+                needed: 1,
+                first: Some(SigRefused::NotTheRolesKey)
+            })
+        );
+    }
+
+    /// A public line reads back as its key.
+    #[test]
+    fn a_public_line_reads_back_as_its_key() {
+        assert_eq!(parse_public_line(&public_line(&public(1))), Some(public(1)));
+    }
+
+    /// Nothing but the two words of an Ed25519 public line reads as a key.
+    #[test]
+    fn a_line_that_is_not_an_ed25519_public_line_is_refused() {
+        let line = public_line(&public(1));
+        let blob = line.split(' ').nth(1).unwrap();
+        for bent in [format!("{line} comment"), format!("ssh-rsa {blob}"), format!(" {line}"), blob.to_string()] {
+            assert_eq!(parse_public_line(&bent), None, "{bent:?}");
         }
     }
 }

@@ -293,7 +293,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         // `map_window`'s shootdown reached only this CPU, so the rest of the
         // machine is told here.
         if matches!(lib.memory, crate::elf::LibMemory::Shared { .. }) {
-            crate::arch::tlb::shootdown(crate::invalidation::Origin::Dlopen);
+            crate::arch::tlb::shootdown(crate::invalidation::Origin::Dlopen, crate::invalidation::Half::User);
         }
         if vaddr != lib.user_base {
             lib.user_base = vaddr;
@@ -316,7 +316,7 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         process::with_process_data(|_data| {
             pt.lock().free_and_unmap(base);
         });
-        crate::arch::tlb::shootdown(crate::invalidation::Origin::Dlopen);
+        crate::arch::tlb::shootdown(crate::invalidation::Origin::Dlopen, crate::invalidation::Half::User);
     });
 
     let lib_tls = lib.tls().and_then(toyos_elf::TlsSegment::occupied);

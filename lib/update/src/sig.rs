@@ -120,6 +120,24 @@ pub fn sign<S: Signed + ?Sized>(seed: &[u8; 32], signed: &S) -> [u8; SIGNATURE_B
     ed25519_dalek::SigningKey::from_bytes(seed).sign(message(signed).as_bytes()).to_bytes()
 }
 
+/// A seed as a key file holds it: 64 lowercase hex digits and a newline.
+#[cfg(any(test, feature = "sign"))]
+pub fn seed_text(seed: &[u8; 32]) -> alloc::string::String {
+    let mut digits = [0u8; 64];
+    alloc::format!("{}\n", crate::hex(seed, &mut digits))
+}
+
+/// The seed a [`seed_text`] holds, and `None` for any other text.
+#[cfg(any(test, feature = "sign"))]
+pub fn seed_of_text(text: &str) -> Option<[u8; 32]> {
+    let digits = text.strip_suffix('\n').filter(|d| d.len() == 64 && d.is_ascii())?;
+    let mut seed = [0u8; 32];
+    for (i, byte) in seed.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&digits[2 * i..2 * i + 2], 16).ok()?;
+    }
+    (seed_text(&seed) == text).then_some(seed)
+}
+
 /// A 32-byte key from 64 hex digits, at compile time: how the loader and the
 /// updater take the key the build embeds. Anything else fails the build.
 pub const fn key_from_hex(text: &str) -> [u8; 32] {
@@ -228,5 +246,31 @@ mod tests {
         assert_eq!(&m[29..35], b"sha512");
         assert_eq!(&m[35..39], &64u32.to_be_bytes());
         assert_eq!(&m[39..], &Sha512::digest(header)[..]);
+    }
+
+    /// A seed's key-file text reads back as the seed.
+    #[test]
+    fn a_seed_text_reads_back_as_its_seed() {
+        let seed: [u8; 32] = core::array::from_fn(|i| (i * 37) as u8);
+        assert_eq!(seed_of_text(&seed_text(&seed)), Some(seed));
+    }
+
+    /// A text that is not exactly 64 lowercase hex digits and one newline is
+    /// no seed, however near.
+    #[test]
+    fn a_text_not_in_the_seed_texts_form_is_refused() {
+        let text = seed_text(&[0xab; 32]);
+        let digits = text.trim_end();
+        for bent in [
+            digits.to_string(),
+            text.to_uppercase(),
+            format!("{digits}\n\n"),
+            format!("{digits} \n"),
+            format!(" {text}"),
+            format!("+b{}\n", &digits[2..]),
+            format!("{}\n", &digits[2..]),
+        ] {
+            assert_eq!(seed_of_text(&bent), None, "{bent:?}");
+        }
     }
 }

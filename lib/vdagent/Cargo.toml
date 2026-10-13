@@ -1,0 +1,19 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-virtio: it is
+# pure and its tests run on the host. It is an input boundary of its own: every
+# word it decodes is the host's, written by QEMU's vdagent chardev and its
+# virtio-serial device.
+
+[package]
+name = "toyos-vdagent"
+description = "QEMU's clipboard channel, pure: the channel's declaration, virtio-serial's control messages and the spice vdagent stream, decoded bounded and encoded byte for byte."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# The type a host word stays in until it has met its bound.
+toyos-untrusted = { path = "../untrusted" }
+
+[lib]
+doctest = false

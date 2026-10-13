@@ -75,6 +75,10 @@ jobs:
   tcg:
     needs: toolchain
     if: ${{ !cancelled() }}
+    # Its container's pull.
+    permissions:
+      contents: read
+      packages: read
     uses: ./.github/workflows/guest.yml
     with:
       kvm: false

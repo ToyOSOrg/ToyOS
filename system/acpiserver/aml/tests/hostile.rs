@@ -291,6 +291,19 @@ fn iterations(setup: &[u8], scopes: usize, op: &[u8]) -> u64 {
     }
 }
 
+/// How often `While (One) { MAKE  Increment (\CNT) }` ran in a method that
+/// first defines `names`, MAKE defining one name more, before the step bound
+/// refused it.
+fn crowded(names: &[u8]) -> u64 {
+    let main = method("MAIN", 0, &cat(&[names, &while_(&int(1), &cat(&[&name("MAKE"), &increment(&name("\\CNT"))]))]));
+    let (mut i, mut m) = loaded(&cat(&[&def_name("CNT", &int(0)), &method("MAKE", 0, &def_name("TMP", &int(0))), &main]));
+    assert!(matches!(i.evaluate(&mut m, "\\MAIN", &[]), Err(Error::Bound(_))));
+    match i.evaluate(&mut m, "\\CNT", &[]) {
+        Ok(Value::Integer(n)) => n,
+        other => panic!("{other:?}"),
+    }
+}
+
 /// The work one step may hide is a table's to size wherever a name is read
 /// or walked, wherever an operator reads more of an object than it makes and
 /// wherever a definition moves the namespace's arena to make room: each is
@@ -301,13 +314,12 @@ fn a_walk_or_a_read_a_table_sizes_is_charged_for_all_of_it() {
     const STEPS: u64 = 1 << 20;
     const SCOPES: usize = 200;
     const BYTES: usize = 1 << 14;
-    // The arena is full at 1,024 nodes when MAIN runs: the root and the nine
-    // predefined names, CNT, these 1,011, MAKE and MAIN. MAKE's name is one
-    // more, and its exit gives the slots back; a node is more than a step's
-    // worth of bytes to move.
+    // The method arena is full at 1,024 nodes when the loop runs: MAIN's own
+    // names. MAKE's name is one more, and its exit gives the slots back; a
+    // node is more than a step's worth of bytes to move.
     const NODES: usize = 1024;
-    let crowd: Vec<Vec<u8>> = (0..NODES - 13).map(|n| def_name(&format!("X{n:03X}"), &int(0))).collect();
-    let crowd = cat(&[&crowd.concat(), &method("MAKE", 0, &def_name("TMP", &int(0)))]);
+    let crowd: Vec<Vec<u8>> = (0..NODES).map(|n| def_name(&format!("X{n:03X}"), &int(0))).collect();
+    let crowd = crowd.concat();
     let cond_ref_of = |n: &[u8]| cat(&[&[0x5B, 0x12], n, &local(0)]);
     let deep: Vec<String> = (0..SCOPES).map(|d| format!("N{d:03}")).collect();
     let deep = format!("\\{}", deep.join("."));
@@ -331,7 +343,7 @@ fn a_walk_or_a_read_a_table_sizes_is_charged_for_all_of_it() {
             per_scope,
             iterations(&cat(&[&chain, &method("MAKE", 0, &def_name(&format!("{deep}.TMP"), &int(0)))]), 0, &name("MAKE")),
         ),
-        ("a definition that moves the arena, which its method's exit moves back", STEPS / NODES as u64, iterations(&crowd, 0, &name("MAKE"))),
+        ("a definition that moves the method arena, which its method's exit moves back", STEPS / NODES as u64, crowded(&crowd)),
         ("Notify, which names its device by its path", per_scope, iterations(&[], SCOPES, &cat(&[&[0x86], &name("^"), &int(0x80)]))),
         ("a long buffer stored to a short one", per_byte, iterations(&cat(&[&big, &small]), 0, &store(&name("BIG"), &name("SMAL")))),
         (

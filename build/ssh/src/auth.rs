@@ -117,7 +117,7 @@ impl PreAuth {
                 } else {
                     let key = ed25519_key(blob)?;
                     if !authorizer.authorizes(user, &key) {
-                        Declined::Key { user: user.to_string(), fingerprint: hostkey::fingerprint(&key) }
+                        Declined::Key { user: user.to_string(), fingerprint: toyos_update::repo::fingerprint(&key) }
                     } else if let Some(signature) = signature {
                         let signature = ed25519_signature(signature)?;
                         let mut data = Vec::new();

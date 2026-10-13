@@ -714,40 +714,30 @@ pub struct VirtioDevice {
     config: VirtioPciConfig,
 }
 
-impl VirtioDevice {
-    /// Initialize a VirtIO PCI device: reset, negotiate features, prepare for queue setup.
-    /// `Err` says why the device was refused — a capability its chain never
-    /// published a usable window for, or a reset it never acknowledged.
-    pub fn init(pci_dev: &PciDevice, accepted_features: u64) -> Result<Self, InitRefusal> {
-        // Bus mastering only after the chain parses: a refused device keeps no DMA,
-        // and firmware may have armed the bit before the kernel ran.
-        let config = match VirtioPciConfig::parse(pci_dev) {
-            Ok(config) => config,
-            Err(missing) => {
-                pci_dev.disable_bus_master();
-                return Err(missing.into());
-            }
-        };
+/// A device reset and acknowledged, and the features it offers: virtio 1.2
+/// §3.1.1's first four steps, read before the function masters the bus.
+///
+/// **Before bus mastering because [`PciDevice::enable_bus_master`] is what
+/// records a function as this kernel's**: a driver that reads what a device
+/// offers to decide whether to drive it has not yet driven it.
+pub struct Offered {
+    config: VirtioPciConfig,
+    pub features: u64,
+}
+
+impl Offered {
+    /// Leave the device to someone else: reset again, so nothing this driver
+    /// wrote outlives the read.
+    pub fn decline(self) {
+        self.config.common.write_u32(COMMON_DEVICE_STATUS, 0);
+    }
+
+    /// The rest of §3.1.1 up to queue setup: the function masters the bus from
+    /// here, and negotiates `accepted_features` of what it offered.
+    pub fn accept(self, pci_dev: &PciDevice, accepted_features: u64) -> Result<VirtioDevice, InitRefusal> {
+        let Self { config, features: device_features } = self;
         pci_dev.enable_bus_master();
         let common = config.common;
-
-        // Order fixed by virtio 1.2 §3.1.1: reset, ACKNOWLEDGE, DRIVER, negotiate features, FEATURES_OK, verify.
-        common.write_u32(COMMON_DEVICE_STATUS, 0);
-        if !crate::clock::settles(RESET.nanos(), || common.read_u32(COMMON_DEVICE_STATUS) == 0) {
-            pci_dev.disable_bus_master();
-            return Err(InitRefusal::ResetUnanswered);
-        }
-
-        common.write_u32(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE as u32);
-
-        common.write_u32(COMMON_DEVICE_STATUS,
-            STATUS_ACKNOWLEDGE as u32 | STATUS_DRIVER as u32);
-
-        common.write_u32(COMMON_DEVICE_FEATURE_SELECT, 0);
-        let device_features_lo = common.read_u32(COMMON_DEVICE_FEATURE);
-        common.write_u32(COMMON_DEVICE_FEATURE_SELECT, 1);
-        let device_features_hi = common.read_u32(COMMON_DEVICE_FEATURE);
-        let device_features = (device_features_hi as u64) << 32 | device_features_lo as u64;
 
         let features = device_features & (accepted_features | platform_addressing(pci_dev));
         log!(
@@ -773,7 +763,50 @@ impl VirtioDevice {
             return Err(InitRefusal::FeaturesRefused { offered: features, status: answered });
         }
 
-        Ok(Self { config })
+        Ok(VirtioDevice { config })
+    }
+}
+
+impl VirtioDevice {
+    /// Reset `pci_dev` and read what it offers. `Err` says why the device was
+    /// refused — a capability its chain never published a usable window for,
+    /// or a reset it never acknowledged — and it keeps no bus mastering.
+    pub fn offer(pci_dev: &PciDevice) -> Result<Offered, InitRefusal> {
+        // Firmware may have armed bus mastering before the kernel ran, and a
+        // refused device keeps no DMA.
+        let config = match VirtioPciConfig::parse(pci_dev) {
+            Ok(config) => config,
+            Err(missing) => {
+                pci_dev.disable_bus_master();
+                return Err(missing.into());
+            }
+        };
+        pci_dev.enable_memory_space();
+        let common = config.common;
+
+        // Order fixed by virtio 1.2 §3.1.1: reset, ACKNOWLEDGE, DRIVER, read the features.
+        common.write_u32(COMMON_DEVICE_STATUS, 0);
+        if !crate::clock::settles(RESET.nanos(), || common.read_u32(COMMON_DEVICE_STATUS) == 0) {
+            pci_dev.disable_bus_master();
+            return Err(InitRefusal::ResetUnanswered);
+        }
+
+        common.write_u32(COMMON_DEVICE_STATUS, STATUS_ACKNOWLEDGE as u32);
+
+        common.write_u32(COMMON_DEVICE_STATUS,
+            STATUS_ACKNOWLEDGE as u32 | STATUS_DRIVER as u32);
+
+        common.write_u32(COMMON_DEVICE_FEATURE_SELECT, 0);
+        let device_features_lo = common.read_u32(COMMON_DEVICE_FEATURE);
+        common.write_u32(COMMON_DEVICE_FEATURE_SELECT, 1);
+        let device_features_hi = common.read_u32(COMMON_DEVICE_FEATURE);
+        let features = (device_features_hi as u64) << 32 | device_features_lo as u64;
+        Ok(Offered { config, features })
+    }
+
+    /// Initialize a VirtIO PCI device: reset, negotiate features, prepare for queue setup.
+    pub fn init(pci_dev: &PciDevice, accepted_features: u64) -> Result<Self, InitRefusal> {
+        Self::offer(pci_dev)?.accept(pci_dev, accepted_features)
     }
 
     /// Configure a virtqueue's addresses and size; does not enable it — call `enable_queue()` after MSI-X vectors are set.

@@ -356,6 +356,10 @@ struct Silent;
 
 impl Kicker for Silent {
     fn kick(&self, _target: CpuId) {}
+
+    fn runs_on(&self, _cpu: CpuId) -> bool {
+        false
+    }
 }
 
 impl Machine for Silent {

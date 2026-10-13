@@ -133,6 +133,9 @@ mod tests {
         fn kick(&self, target: CpuId) {
             self.0.lock().unwrap().push(target);
         }
+        fn runs_on(&self, _cpu: CpuId) -> bool {
+            false
+        }
     }
 
     /// A [`Kicker`] that samples the victim's kill bit at the instant the IPI
@@ -145,6 +148,9 @@ mod tests {
     impl Kicker for SamplingKicks {
         fn kick(&self, _target: CpuId) {
             self.seen.lock().unwrap().push(self.task.kill_pending());
+        }
+        fn runs_on(&self, _cpu: CpuId) -> bool {
+            false
         }
     }
 

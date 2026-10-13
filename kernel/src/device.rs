@@ -153,12 +153,13 @@ pub enum ClaimError {
     Owned,
     /// This machine has no such device — no driver ever registered one.
     Absent,
-    /// The name matches more than one function on this machine. Refused rather
-    /// than resolved to the first: a config asking for one of two identical
-    /// cards cannot say which, and picking would be the kernel deciding.
+    /// The name matches more than one function this kernel does not drive.
+    /// Refused rather than resolved to the first: a config asking for one of
+    /// two identical cards cannot say which, and picking would be the kernel
+    /// deciding.
     Ambiguous,
-    /// A driver in this kernel already binds that function; two drivers on one
-    /// device is not something a claim may create.
+    /// A driver in this kernel already binds every function the name matches;
+    /// two drivers on one device is not something a claim may create.
     KernelDriven,
     /// Every slot that can carry a driven function is taken.
     Exhausted,

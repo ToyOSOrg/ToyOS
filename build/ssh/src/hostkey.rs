@@ -1,7 +1,6 @@
 //! An Ed25519 key in OpenSSH's unencrypted `openssh-key-v1` file
-//! (`PROTOCOL.key`), read and written, and its `SHA256:` fingerprint: the
-//! server's host key, and the one parser the build's image-signing key is read
-//! with too.
+//! (`PROTOCOL.key`), read and written: the server's host key, and the one
+//! parser the build's image-signing key is read with too.
 
 use ring::signature::{Ed25519KeyPair, KeyPair};
 
@@ -47,12 +46,6 @@ impl HostKey {
         put_string(&mut out, self.pair.sign(data).as_ref());
         out
     }
-}
-
-/// `SHA256:<base64>` of the public key blob, as `ssh-keygen -l` prints it.
-pub fn fingerprint(public: &[u8; 32]) -> String {
-    let digest = ring::digest::digest(&ring::digest::SHA256, &public_blob(public));
-    format!("SHA256:{}", base64::encode(digest.as_ref()).trim_end_matches('='))
 }
 
 /// `string ssh-ed25519 | string key`, the OpenSSH public key blob (RFC 8709 §4).
@@ -221,14 +214,13 @@ mod tests {
     }
 
     /// A file `ssh-keygen -t ed25519` wrote reads, and makes the public key
-    /// and fingerprint `ssh-keygen -l` printed for it.
+    /// its `.pub` names.
     #[test]
-    fn a_key_ssh_keygen_minted_reads_with_its_fingerprint() {
+    fn a_key_ssh_keygen_minted_reads() {
         let text = include_str!("../tests/fixtures/host_ed25519");
         let public = include_str!("../tests/fixtures/host_ed25519.pub");
         let key = HostKey::from_openssh(text).expect("ssh-keygen's key");
         let blob = base64::decode(public.split(' ').nth(1).unwrap()).unwrap();
         assert_eq!(blob, key.blob());
-        assert_eq!(fingerprint(&key.public()), include_str!("../tests/fixtures/host_ed25519.fingerprint").trim());
     }
 }

@@ -11,8 +11,7 @@
 //! at each: the kernel tells the two cases apart and `std`'s `is_dir` reads
 //! anything the kernel accepted as a directory. A machine carrying one half and
 //! not the other passes the first block below and reds in the second, which is
-//! how they are kept from drifting apart again. `toybox_file_tools` is where
-//! the pair is judged by a program rather than by assertions.
+//! how they are kept from drifting apart again.
 
 use std::fs;
 

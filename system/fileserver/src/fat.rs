@@ -548,6 +548,11 @@ mod tests {
     /// The specification's fixture volume, writable, on a disk with room past
     /// it for [`evict`] to read, and the handle that moves its refused block.
     fn spec_fat() -> (FatVolume<Refusing>, Rc<Cell<u64>>, spec_volume::Volume) {
+        spec_fat_on(|| 1_717_245_296 * NANOS_PER_SEC)
+    }
+
+    /// [`spec_fat`], stamping by `clock`.
+    fn spec_fat_on(clock: fn() -> u64) -> (FatVolume<Refusing>, Rc<Cell<u64>>, spec_volume::Volume) {
         let spec = spec_volume::fixture();
         let blocks = spec.bytes.len().div_ceil(BLOCK);
         let mut image = spec.bytes.clone();
@@ -555,8 +560,30 @@ mod tests {
         let mut ram = Ram::new((blocks + 2 * CLEAN_LIMIT) as u64);
         ram.write(0, &image).unwrap();
         let refused = Rc::new(Cell::new(u64::MAX));
-        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, true, || 1_717_245_296 * NANOS_PER_SEC).unwrap();
+        let v = FatVolume::mount(Refusing { ram, refused: Rc::clone(&refused) }, true, clock).unwrap();
         (v, refused, spec)
+    }
+
+    /// What [`the_flush_stamps_its_even_second_and_not_the_write_s`]'s volume
+    /// reads as the time, which only that test sets.
+    static NOW: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    /// FAT stamps a file's entry with the flush that levels it, read back off
+    /// the disk: the whole second of that flush, kept to the even one at or
+    /// before it (`FatTime`'s two-second resolution), and never the write's.
+    #[test]
+    fn the_flush_stamps_its_even_second_and_not_the_write_s() {
+        use std::sync::atomic::Ordering::Relaxed;
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        let (mut v, _, _) = spec_fat_on(|| NOW.load(Relaxed));
+        NOW.store(1_717_245_296 * NANOS_PER_SEC, Relaxed);
+        let a = v.open("a.txt", CREATE).unwrap();
+        v.write(a, 0, &[1; 3000]).unwrap();
+        NOW.store(1_717_245_301 * NANOS_PER_SEC + 500_000_000, Relaxed);
+        assert_eq!(v.sync(), Ok(Vec::new()));
+        v.close(a).unwrap();
+        evict(&v);
+        assert_eq!(v.lstat("a.txt").unwrap().mtime, 1_717_245_300 * NANOS_PER_SEC);
     }
 
     /// Every clean block out of the cache, so the next read of one asks the disk.
