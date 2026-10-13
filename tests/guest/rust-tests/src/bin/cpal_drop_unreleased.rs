@@ -1,6 +1,7 @@
 //! cpal's ToyOS host, dropped while its stream's server never lets go of it.
 //!
-//! This binary is the stream's server: it answers the open as soundserver does, and
+//! This binary is the stream's server: it describes its device and answers the
+//! open as soundserver does, and
 //! then holds the signal pipe open without writing it until the client's
 //! `Drop` has come back — a soundserver whose mix loop has stopped. Its child, the
 //! same binary with `client`, reaches it as `soundserver`, builds a stream through
@@ -19,7 +20,8 @@ use std::sync::mpsc;
 
 use cpal::traits::{DeviceTrait, HostTrait};
 use toyos::audio::{
-    StreamOpenRequest, StreamOpenResponse, MSG_STREAM_CLOSE, MSG_STREAM_OPEN, MSG_STREAM_OPENED,
+    DeviceDescription, StreamOpenRequest, StreamOpenResponse, MSG_DEVICE_DESCRIBE,
+    MSG_DEVICE_DESCRIBED, MSG_STREAM_CLOSE, MSG_STREAM_OPEN, MSG_STREAM_OPENED,
 };
 use toyos::ipc::IpcError;
 use toyos::shm::SharedMemory;
@@ -32,14 +34,25 @@ const SELF: &str = "/system/bin/test_rs_cpal_drop_unreleased";
 /// cpal's ToyOS host's words for a soundserver that did not let go.
 const REFUSAL: &str = "soundserver did not let go of the closed stream within ";
 
-/// What soundserver answers a 44100 Hz stereo open with, which is the one stream
-/// cpal's ToyOS host opens.
+/// The device this server describes: soundserver's on the T14.
+const DEVICE: DeviceDescription = DeviceDescription {
+    sample_rate: 44_100,
+    period_frames: 128,
+    min_client_rate: 8_000,
+    max_client_rate: 192_000,
+    channels: 2,
+    _pad: 0,
+};
+
+/// What soundserver answers an open at the device's own config with, which is
+/// the one stream the client opens.
 const OPENED: StreamOpenResponse = StreamOpenResponse {
     client_period_frames: 128,
     client_period_bytes: 512,
     device_sample_rate: 44_100,
     device_channels: 2,
     slot_count: 8,
+    fade_frames: 220,
 };
 
 fn main() {
@@ -64,9 +77,20 @@ fn serve() {
         .spawn()
         .expect("spawn the client");
 
-    let conn = acceptor.accept().expect("the client's connection");
-    let (kind, _): (u32, StreamOpenRequest) = conn.recv().expect("the client's open");
-    assert_eq!(kind, MSG_STREAM_OPEN, "the client's first frame is not an open");
+    // cpal asks for the device on a connection of its own each time it needs
+    // it, and the stream is the connection whose first frame is an open.
+    let conn = loop {
+        let conn = acceptor.accept().expect("the client's connection");
+        let header = conn.recv_header().expect("the client's first frame");
+        match header.msg_type {
+            MSG_DEVICE_DESCRIBE => conn.send(MSG_DEVICE_DESCRIBED, &DEVICE).expect("the description"),
+            MSG_STREAM_OPEN => {
+                let _: StreamOpenRequest = conn.recv_payload(&header).expect("the client's open");
+                break conn;
+            }
+            other => panic!("the client's first frame is message {other}, neither a describe nor an open"),
+        }
+    };
     let ring = SharedMemory::create(
         AudioSlotHeader::SIZE + OPENED.slot_count as usize * OPENED.client_period_bytes as usize,
     )

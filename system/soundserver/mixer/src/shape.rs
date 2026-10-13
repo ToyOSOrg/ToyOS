@@ -23,6 +23,11 @@ pub const DEFERRAL_RESERVE: usize = 5;
 /// the power-of-two rule below, 16 is the deepest that does.
 pub const MAX_PIPELINE: usize = 16;
 
+/// The rates soundserver runs a device at, best first: a device runs at the
+/// first one it offers. 44.1 kHz leads, so a converter that offers it is
+/// unchanged; 48 kHz is the one every other converter offers.
+pub const DEVICE_RATES: [u32; 2] = [44_100, 48_000];
+
 /// The rates a client may ask for. Outside them the open is refused, which is
 /// what keeps [`client_period_frames`] inside [`scratch_frames`].
 pub const MIN_CLIENT_RATE: u32 = 8_000;

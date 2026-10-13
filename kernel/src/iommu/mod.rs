@@ -169,13 +169,17 @@ pub enum DeviceSpace {
 }
 
 impl DeviceSpace {
-    /// One of `function`'s own, or the machine's own with the reason. For a
-    /// driver **in this kernel**, whose addresses are the kernel's either way.
-    pub fn create(function: &crate::drivers::pci::PciDevice) -> Self {
-        let stream = StreamId::pci(function.bus, function.dev, function.func);
-        if let Some(why) = unit::domain::untranslated(stream) {
-            log!("iommu: {stream} keeps the machine's addresses: {why}");
-            return Self::Untranslated;
+    /// One for whichever of `functions` is attached to it, or the machine's
+    /// own with the reason: the machine's own where any of them keeps it, so
+    /// the one attached reaches what its device addresses name. For a driver
+    /// **in this kernel**, whose addresses are the kernel's either way.
+    pub fn create(functions: &[crate::drivers::pci::PciDevice]) -> Self {
+        for function in functions {
+            let stream = StreamId::pci(function.bus, function.dev, function.func);
+            if let Some(why) = unit::domain::untranslated(stream) {
+                log!("iommu: {stream} keeps the machine's addresses: {why}");
+                return Self::Untranslated;
+            }
         }
         match unit::domain::create(0) {
             Ok((id, _)) => Self::Own(id),
