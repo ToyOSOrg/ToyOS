@@ -5950,11 +5950,47 @@ struct Bench {
     /// The blocks the processors' `_OSC` load under ToyOS's claims, by
     /// signature and length.
     loaded: &'static [&'static str],
-    /// The host's refusals the owner ruled, which this machine's AML meets:
-    /// each is met, and said, not red.
-    ruled: &'static [&'static str],
+    /// The host's refusal the owner ruled, which this machine's AML meets: it
+    /// is met, and said, not red.
+    ruled: Ruled,
     /// What the census says of `_REG(3, 1)`, after every `_INI`.
     reg: &'static str,
+}
+
+/// A refusal the owner ruled, which a bench's AML meets.
+struct Ruled {
+    /// Its kind, as the server says it.
+    kind: &'static str,
+    /// Each line the server says of it by kind, whole.
+    said: &'static [&'static str],
+    /// Each evaluation it refuses, by the path the server says under
+    /// [`acpiserver_api::OWN`].
+    paths: &'static [&'static str],
+    /// What the namespace's census counts of it.
+    census: &'static str,
+}
+
+impl Ruled {
+    /// `line` is one the server says of this refusal: one of [`Self::said`],
+    /// or one of [`Self::paths`] refused under it.
+    fn says(&self, line: &str) -> bool {
+        self.said.iter().any(|said| line.ends_with(said))
+            || self.paths.iter().any(|path| line.ends_with(&format!("{}{path} was refused Host({:?})", acpiserver_api::OWN, self.kind)))
+    }
+
+    /// Of the server's `lines`, each that carries this refusal's kind but the
+    /// census is one it says of it, and each it says of it is there.
+    fn held(&self, lines: &[&str]) -> Result<(), String> {
+        let stray: Vec<&&str> = lines.iter().filter(|l| l.contains(self.kind) && !l.contains("acpiserver: the namespace initialised: ") && !self.says(l)).collect();
+        if !stray.is_empty() {
+            return Err(format!("the server said the refusal the owner ruled of what he did not rule: {stray:#?}"));
+        }
+        let owned = self.paths.iter().map(|path| format!("{}{path} was refused Host({:?})", acpiserver_api::OWN, self.kind));
+        if let Some(unmet) = self.said.iter().map(|said| said.to_string()).chain(owned).find(|said| !lines.iter().any(|l| l.ends_with(said.as_str()))) {
+            return Err(format!("this bench's AML meets the refusal the owner ruled, and the server never said: {unmet}"));
+        }
+        Ok(())
+    }
 }
 
 /// The T14: 14 blocks; its `\_S5`'s `SLP_TYPa` read by a byte scan of its
@@ -5969,7 +6005,15 @@ const T14: Bench = Bench {
     refused: &[],
     s5: "power: S5 is PM1a 0x1804 with SLP_TYPa=7,",
     loaded: &["SSDT, 459 bytes"],
-    ruled: &["a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory"],
+    ruled: Ruled {
+        kind: "a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory",
+        said: &[
+            "acpiserver: refused for the first time: a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory",
+            "acpiserver: an evaluation of the initialisation was refused for the first time: _INI: denied by this server: a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory",
+        ],
+        paths: &["\\_SB_.PC00.LPCB.EC__._INI", "\\_SB_.PC00.LPCB.EC__.HKEY._INI"],
+        census: "_INI: denied by this server: a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory x2",
+    },
     reg: "_REG(3, 1) in 1 scope(s)",
 };
 
@@ -5987,7 +6031,16 @@ const AMD: Bench = Bench {
     refused: &[(9, "a name that does not resolve")],
     s5: "with SLP_TYPa=5,",
     loaded: &[],
-    ruled: &["a SystemMemory write the kernel refused ConfigWrite, in memory of type 11"],
+    ruled: Ruled {
+        kind: "a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
+        said: &[
+            "acpiserver: refused for the first time: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
+            "acpiserver: an evaluation of the initialisation was refused for the first time: _REG: denied by this server: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
+            "acpiserver: a method read for the power sources refused: _PSR: denied by this server: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
+        ],
+        paths: &["\\_SB_.PCI0.LPC0.EC__._REG"],
+        census: "_REG: denied by this server: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11 x1",
+    },
     reg: "no _REG run",
 };
 
@@ -6052,25 +6105,22 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     let off = compared.iter().filter(|l| l.contains("range registers are off")).count();
     eprintln!("  [acpi] {others} other CPUs' range registers compared with the boot processor's: {off} off, none on and different");
-    let ruled = |l: &&&str| bench.ruled.iter().any(|ruled| l.contains(ruled));
     let refused: Vec<&&str> = lines
         .iter()
         .filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ") || l.contains("was refused for the first time"))
-        .filter(|l| !l.contains("acpiserver: table ") && !ruled(l))
+        .filter(|l| !l.contains("acpiserver: table ") && !bench.ruled.says(l))
         .collect();
     if !refused.is_empty() {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
     }
-    if let Some(unmet) = bench.ruled.iter().find(|ruled| !lines.iter().any(|l| l.contains(*ruled))) {
-        return Err(format!("this bench's AML meets the refusal the owner ruled, and the server never said it: {unmet}"));
-    }
-    for line in lines.iter().filter(ruled) {
+    bench.ruled.held(&lines)?;
+    for line in lines.iter().filter(|l| bench.ruled.said.iter().any(|said| l.ends_with(said))) {
         eprintln!("  [acpi] a refusal the owner ruled: {}", line.trim());
     }
     let census = log.must_say("acpiserver: the namespace initialised: ")?;
     let refusals = census.split_once("evaluations refused, by kind: ").map_or("", |(_, kinds)| kinds.trim());
-    if !(refusals == "none" || refusals.split("; ").all(|kind| bench.ruled.iter().any(|ruled| kind.contains(ruled)))) {
-        return Err(format!("the namespace's initialisation refused an evaluation: {census}"));
+    if refusals != bench.ruled.census {
+        return Err(format!("the namespace's initialisation refused other than {:?}: {census}", bench.ruled.census));
     }
     if !census.contains(&format!("_INI run, {}; ", bench.reg)) {
         return Err(format!("the census says other than {:?} of the controller's _REG(3, 1): {census}", bench.reg));
@@ -6116,7 +6166,7 @@ const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-metho
 /// The T14's battery as the server read it: the one battery its tables name
 /// found present once the controller's `_REG` ran, its information read,
 /// and at least one reading of it with the adapter's state; nothing refused
-/// but [`T14`]'s ruled refusals, which `acpi_tables_on_metal` holds met.
+/// but [`T14`]'s ruled refusal, of its two `_INI`s by path and nothing else.
 /// The census's Global Lock counts are printed and held to nothing: an
 /// evaluation gives back the lock it still holds as it ends
 /// (`finish`, `system/acpiserver/aml/src/exec.rs`), and the real lock
@@ -6137,11 +6187,12 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     let refused: Vec<&&str> = lines
         .iter()
         .filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: "))
-        .filter(|l| !T14.ruled.iter().any(|ruled| l.contains(ruled)))
+        .filter(|l| !T14.ruled.says(l))
         .collect();
     if !refused.is_empty() {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
     }
+    T14.ruled.held(&lines)?;
     let found = log.must_say(T14_POWER_SOURCES)?;
     let info = log.must_say(&format!("acpiserver: {}battery 1 of 1 from ", acpiserver_api::BATTERY_INFO))?;
     let read: Vec<&&str> = lines.iter().filter(|l| l.contains(acpiserver_api::BATTERY_READ)).collect();

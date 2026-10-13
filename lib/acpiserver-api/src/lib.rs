@@ -28,3 +28,7 @@ pub const BATTERY_INFO: &str = "battery information: ";
 /// remaining and full capacity, its state, rate, voltage and the power it
 /// moves in mW, then the adapters' state.
 pub const BATTERY_READ: &str = "battery read: ";
+
+/// What opens a line that carries an address, a PCI function or a name the
+/// firmware chose: this machine's own, and quoted in no record.
+pub const OWN: &str = "acpiserver: (this machine's own, quoted in no record) ";

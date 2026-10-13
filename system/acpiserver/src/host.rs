@@ -94,9 +94,7 @@ use crate::ec::{Do, Transaction, Wait};
 use crate::ledger::Ledger;
 use crate::sci::Latched;
 
-/// What opens a line that carries an address, a PCI function or a name the
-/// firmware chose: this machine's own, and quoted in no record.
-pub const OWN: &str = "acpiserver: (this machine's own, quoted in no record) ";
+pub use acpiserver_api::OWN;
 
 /// The most the firmware may hold the Global Lock after a take the AML set no
 /// bound on left it the pending bit: this server's bound, and no measurement,
