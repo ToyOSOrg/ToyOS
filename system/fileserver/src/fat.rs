@@ -732,82 +732,128 @@ mod tests {
         assert_eq!(v.sync(), Ok(Vec::new()));
     }
 
-    /// A disk that keeps every block it is written, in order, so a test can
-    /// stop it after any one of them.
+    /// A disk whose bytes are the volume's, whole in memory.
+    struct Image(Vec<u8>);
+
+    impl Disk for Image {
+        fn blocks(&self) -> u64 {
+            (self.0.len() / BLOCK) as u64
+        }
+        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
+            let at = first as usize * BLOCK;
+            out.copy_from_slice(&self.0[at..at + out.len()]);
+            Ok(())
+        }
+        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
+            let at = first as usize * BLOCK;
+            self.0[at..at + data.len()].copy_from_slice(data);
+            Ok(())
+        }
+        fn flush(&mut self) -> Result<(), DiskError> {
+            Ok(())
+        }
+    }
+
+    /// The blocks a disk was written, in order, one epoch to each flush: the
+    /// disk keeps no order among one epoch's writes, and has all of an epoch
+    /// before any of the next.
+    type Epochs = Rc<std::cell::RefCell<Vec<Vec<(u64, Vec<u8>)>>>>;
+
+    /// A disk that keeps every block it is written in its flush epoch, so a
+    /// test can stop it with any of one epoch's writes on it.
     struct Traced {
-        ram: Ram,
-        writes: Rc<std::cell::RefCell<Vec<(u64, Vec<u8>)>>>,
+        image: Image,
+        epochs: Epochs,
     }
 
     impl Disk for Traced {
         fn blocks(&self) -> u64 {
-            self.ram.blocks()
+            self.image.blocks()
         }
         fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
-            self.ram.read(first, out)
+            self.image.read(first, out)
         }
         fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
-            let mut writes = self.writes.borrow_mut();
+            let mut epochs = self.epochs.borrow_mut();
+            let epoch = epochs.last_mut().expect("an epoch is always open");
             for (i, block) in data.chunks_exact(BLOCK).enumerate() {
-                writes.push((first + i as u64, block.to_vec()));
+                epoch.push((first + i as u64, block.to_vec()));
             }
-            self.ram.write(first, data)
+            self.image.write(first, data)
         }
         fn flush(&mut self) -> Result<(), DiskError> {
-            self.ram.flush()
+            self.epochs.borrow_mut().push(Vec::new());
+            self.image.flush()
         }
     }
 
-    /// An append and its sync, stopped after each block write in turn, leave
-    /// a volume that mounts and holds the file as the last whole sync left it
-    /// or as the append made it: never an entry naming bytes its chain does
-    /// not reach or its clusters do not hold yet.
+    fn written<'a>(image: &mut [u8], writes: impl IntoIterator<Item = &'a (u64, Vec<u8>)>) {
+        for (block, data) in writes {
+            let at = *block as usize * BLOCK;
+            image[at..at + BLOCK].copy_from_slice(data);
+        }
+    }
+
+    /// An append and its sync, stopped with every flush epoch before one on
+    /// the disk and any of that one's writes, leave a volume fatgen103's
+    /// checker refuses only for clusters no file's size reaches, and that mounts and
+    /// holds the file as the last whole sync left it or as the append made
+    /// it: never an entry naming bytes its chain does not reach or its
+    /// clusters do not hold yet.
     #[test]
-    fn an_append_stopped_after_any_block_write_reads_back_the_last_sync() {
+    fn an_append_stopped_with_any_writes_of_a_flush_on_the_disk_reads_back_the_last_sync() {
+        use toyos_fat32_check::{check, describe, Complaint};
         const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
         const OPEN: OpenHow = OpenHow { create: false, create_new: false, truncate: false };
         let clock = || 1_717_245_296 * NANOS_PER_SEC;
         let spec = spec_volume::fixture();
-        let blocks = spec.bytes.len().div_ceil(BLOCK);
         let mut image = spec.bytes.clone();
-        image.resize(blocks * BLOCK, 0);
-        let disk = |trace: &[(u64, Vec<u8>)]| {
-            let mut ram = Ram::new(blocks as u64);
-            ram.write(0, &image).unwrap();
-            for (block, data) in trace {
-                ram.write(*block, data).unwrap();
-            }
-            ram
-        };
-        let writes = Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut v = FatVolume::mount(Traced { ram: disk(&[]), writes: Rc::clone(&writes) }, true, clock).unwrap();
+        image.resize(spec.bytes.len().div_ceil(BLOCK) * BLOCK, 0);
+        let epochs: Epochs = Rc::new(std::cell::RefCell::new(vec![Vec::new()]));
+        let mut v = FatVolume::mount(Traced { image: Image(image.clone()), epochs: Rc::clone(&epochs) }, true, clock)
+            .unwrap();
         let held: Vec<u8> = (0..3000u32).map(|i| (i % 251 + 1) as u8).collect();
         let appended: Vec<u8> = (0..3 * BLOCK as u32).map(|i| (i % 241 + 2) as u8).collect();
         let a = v.open("a.txt", CREATE).unwrap();
         v.write(a, 0, &held).unwrap();
         assert_eq!(v.sync(), Ok(Vec::new()));
-        let synced = writes.borrow().len();
+        let synced = epochs.borrow().len() - 1;
         v.write(a, held.len() as u64, &appended).unwrap();
         assert_eq!(v.sync(), Ok(Vec::new()));
-        let trace = writes.borrow().clone();
+        let epochs = epochs.borrow().clone();
         let whole = [&held[..], &appended[..]].concat();
+        written(&mut image, epochs[..synced].iter().flatten());
 
-        for stop in synced..=trace.len() {
-            let mut after = FatVolume::mount(disk(&trace[..stop]), false, clock)
-                .unwrap_or_else(|e| panic!("stopped after block write {stop} of {}: {e}", trace.len()));
-            let n = after.open("a.txt", OPEN).unwrap();
-            let size = after.lstat("a.txt").unwrap().size as usize;
-            let mut out = vec![0u8; size];
-            let read = after.read(n, 0, &mut crate::volume::Buf(&mut out));
-            assert_eq!(read, Ok(size), "stopped after block write {stop} of {}: a {size}-byte file", trace.len());
-            assert!(
-                out == held || out == whole,
-                "stopped after block write {stop} of {}: the file is {size} bytes and neither the {} the last \
-                 sync held nor the {} the append made",
-                trace.len(),
-                held.len(),
-                whole.len()
-            );
+        for (e, epoch) in epochs.iter().enumerate().skip(synced) {
+            for kept in 0..1u32 << epoch.len() {
+                let stop = format!("stopped in flush epoch {e} of {} with writes {kept:#b} of its {}", epochs.len(), epoch.len());
+                let mut bytes = image.clone();
+                written(&mut bytes, epoch.iter().enumerate().filter(|(i, _)| kept >> i & 1 == 1).map(|(_, w)| w));
+                // Clusters no entry reaches yet, and the last sync's entry over
+                // the append's chain: the window between the chain and its entry.
+                let refused: Vec<_> = check(&bytes)
+                    .into_iter()
+                    .filter(|c| match c {
+                        Complaint::LostChain { .. } | Complaint::FsInfoFreeCount { .. } | Complaint::FatMirror { .. } => false,
+                        Complaint::ChainTooLong { path, size, .. } => !(path == "/a.txt" && *size == held.len() as u64),
+                        _ => true,
+                    })
+                    .collect();
+                assert!(refused.is_empty(), "{stop}: {}", describe(&refused));
+                let mut after = FatVolume::mount(Image(bytes), false, clock).unwrap_or_else(|e| panic!("{stop}: {e}"));
+                let n = after.open("a.txt", OPEN).unwrap();
+                let size = after.lstat("a.txt").unwrap().size as usize;
+                let mut out = vec![0u8; size];
+                let read = after.read(n, 0, &mut crate::volume::Buf(&mut out));
+                assert_eq!(read, Ok(size), "{stop}: a {size}-byte file");
+                assert!(
+                    out == held || out == whole,
+                    "{stop}: the file is {size} bytes and neither the {} the last sync held nor the {} the append made",
+                    held.len(),
+                    whole.len()
+                );
+            }
+            written(&mut image, epoch);
         }
     }
 

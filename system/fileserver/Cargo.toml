@@ -24,5 +24,10 @@ toyos-fat32 = { path = "../../lib/fat32" }
 bcachefs = { path = "../../lib/bcachefs" }
 diskserver = { path = "../diskserver" }
 
+[dev-dependencies]
+# The volumes the FAT role leaves, judged by the checker that shares no code
+# with the driver it wrote them with.
+toyos-fat32-check = { path = "../../lib/fat32/check" }
+
 [package.metadata.toyos.host]
 exempt.owns = "ToyOS's storage roles, served from the partitions ToyOS claims for it"
