@@ -462,12 +462,33 @@ mod tests {
         assert_eq!(format(&codecs, &path, 44_100), Some((0x4011, 2)));
     }
 
+    /// The AMD bench's analog controller's codecs and the path chosen on them.
+    fn amd_bench() -> (Vec<Codec>, OutputPath) {
+        let mut bench = fixture::amd_bench();
+        let (index, path) = crate::path::choose(&bench).unwrap();
+        (bench.swap_remove(index), path)
+    }
+
     #[test]
-    fn a_converter_offering_48000_alone_runs_at_48000() {
-        // The AMD bench's speaker converter's own word: 48 kHz at 16, 20 and 24 bits.
-        let (codecs, path) = converter_offering(0x000e_0040);
+    fn the_amd_bench_s_converter_offering_48000_alone_runs_at_48000() {
+        // Its own word is `0x000e0040`: 48 kHz at 16, 20 and 24 bits. The
+        // recorded boot read `format 0x0011 (48000 Hz 2 ch 16-bit)` and `path
+        // configured in 14 verbs, stream tag 1`.
+        let (codecs, path) = amd_bench();
         assert_eq!(rate(&codecs, &path, &DEVICE_RATES), Ok(48_000));
         assert_eq!(format(&codecs, &path, 48_000), Some((0x0011, 2)));
+        assert_eq!(verbs(&codecs, &path, 0x0011, 1).unwrap().len(), 14);
+    }
+
+    #[test]
+    fn the_amd_bench_s_master_gains_on_the_converter_and_mutes_on_both_pins() {
+        let (_, path) = amd_bench();
+        let master = master(&path).unwrap();
+        // The converter's amplifier is 88 steps of 0.75 dB with 0 dB at 87,
+        // and both pins' are mute-only.
+        assert_eq!(master.bottom(), 22);
+        let raw: Vec<u32> = master.set(Setting { position: 1, muted: true }).iter().map(|v| v.raw()).collect();
+        assert_eq!(raw, [0x0023_B053, 0x0143_B080, 0x0213_B080]);
     }
 
     #[test]

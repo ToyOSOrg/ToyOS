@@ -304,10 +304,20 @@ mod tests {
     }
 
     #[test]
-    fn the_controller_whose_codec_reaches_a_speaker_is_chosen_over_display_audio() {
-        let (analog, display) = analog_and_display();
-        assert_eq!(choose(&[display.clone(), analog.clone()]).unwrap().0, 1);
-        assert_eq!(choose(&[analog, display]).unwrap().0, 0);
+    fn the_amd_bench_binds_its_analog_controller_over_the_gpu_s_display_audio() {
+        // As soundserver read it on the recorded boot: `hda bound 03:00.6, not
+        // 03:00.1`, `converter 0x02 -> pin 0x14 (speaker), headphone 0x21`.
+        let mut bench = fixture::amd_bench();
+        let (index, path) = choose(&bench).unwrap();
+        assert_eq!(index, 1);
+        assert_eq!(path.converter, Node(0x02));
+        assert_eq!(path.output.node, Node(0x14));
+        assert_eq!(path.device, DefaultDevice::Speaker);
+        assert_eq!(path.headphone.expect("the jack").node, Node(0x21));
+        assert!(matches!(find_output_path(&bench[0]), Err(PathError::NoOutputPin { .. })));
+
+        bench.reverse();
+        assert_eq!(choose(&bench).unwrap().0, 0);
     }
 
     #[test]
