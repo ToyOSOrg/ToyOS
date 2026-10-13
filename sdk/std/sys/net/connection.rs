@@ -1,5 +1,5 @@
 use toyos::AsHandle;
-use toyos::net::{NetError, TcpSocketId, UdpSocketId};
+use toyos::net::{NetError, StreamRefusal, TcpSocketId, UdpSocketId};
 use toyos::poller::{Poller, READABLE, WRITABLE};
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, SyscallError};
@@ -87,6 +87,15 @@ const TIMED_OUT: io::Error = io::const_error!(io::ErrorKind::TimedOut, "timed ou
 
 /// The connection was reset, or ended by netstack: its send pipe has no reader.
 const RESET: io::Error = io::const_error!(io::ErrorKind::ConnectionReset, "connection reset");
+
+/// What std answers for a stream's refusal.
+fn stream_refused(refusal: StreamRefusal) -> io::Error {
+    match refusal {
+        StreamRefusal::Reset => RESET,
+        StreamRefusal::Again => io::ErrorKind::WouldBlock.into(),
+        StreamRefusal::Other => io::Error::new(io::ErrorKind::Other, "syscall error"),
+    }
+}
 
 const SHUT_DOWN: io::Error =
     io::const_error!(io::ErrorKind::BrokenPipe, "the stream was shut down for writing");
@@ -221,16 +230,10 @@ impl TcpStream {
         }
     }
 
-    /// Whether the receive pipe's end was the peer's FIN or not. netstack ends
-    /// the send pipe too, and first, when the connection did not end in
-    /// order — a reset, a timeout — so a send pipe with no
-    /// reader behind a receive pipe at its end is a reset.
+    /// Whether the receive pipe's end was the peer's FIN or not
+    /// (`toyos::net::read_end`).
     fn ended(&self) -> io::Result<()> {
-        match syscall::write_nonblock(self.raw_handle(), &[]) {
-            Ok(_) | Err(SyscallError::WouldBlock) => Ok(()),
-            Err(SyscallError::Gone) => Err(RESET),
-            Err(e) => Err(syscall_err(e)),
-        }
+        toyos::net::read_end(syscall::write_nonblock(self.raw_handle(), &[])).map_err(stream_refused)
     }
 
     pub fn read_buf(&self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
@@ -264,10 +267,7 @@ impl TcpStream {
                     .ok_or(TIMED_OUT)?,
             }
         };
-        written.map_err(|e| match e {
-            SyscallError::Gone => RESET,
-            e => syscall_err(e),
-        })
+        written.map_err(|e| stream_refused(toyos::net::write_refused(e)))
     }
 
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {

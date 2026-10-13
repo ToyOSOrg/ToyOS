@@ -391,6 +391,46 @@ fn hangup(e: IpcError) -> NetError {
     }
 }
 
+/// What a call on a stream answers instead of bytes, for libc and std alike.
+///
+/// A stream is two of netstack's pipes, and the receive pipe says only that it
+/// ended: netstack lets the send pipe go first when the connection failed, and
+/// keeps it after an orderly end for as long as its writer holds it, so what a
+/// zero-byte write into it answers after the end is the end's kind — the
+/// peer's FIN (RFC 9293 §3.6) or a reset (§3.5.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamRefusal {
+    /// The connection failed: `ECONNRESET`, `ConnectionReset`.
+    Reset,
+    /// The pipe has no room or nothing to read yet.
+    Again,
+    /// The handle is not the pipe end the stream was made with.
+    Other,
+}
+
+/// A read of 0 from a stream's receive pipe, given what a zero-byte write into
+/// its send pipe then answered: `Ok` is the peer's FIN, after its last byte.
+pub fn read_end(probe: Result<usize, toyos_abi::syscall::SyscallError>) -> Result<(), StreamRefusal> {
+    use toyos_abi::syscall::SyscallError;
+    match probe {
+        Ok(_) | Err(SyscallError::WouldBlock) => Ok(()),
+        Err(SyscallError::Gone) => Err(StreamRefusal::Reset),
+        Err(_) => Err(StreamRefusal::Other),
+    }
+}
+
+/// A write a stream's send pipe refused. One after a shutdown of the sending
+/// half is refused before it reaches the pipe, which netstack reads no more
+/// but keeps.
+pub fn write_refused(refused: toyos_abi::syscall::SyscallError) -> StreamRefusal {
+    use toyos_abi::syscall::SyscallError;
+    match refused {
+        SyscallError::Gone => StreamRefusal::Reset,
+        SyscallError::WouldBlock => StreamRefusal::Again,
+        _ => StreamRefusal::Other,
+    }
+}
+
 pub struct PendingResponse(NetstackConn);
 
 impl PendingResponse {
@@ -624,6 +664,29 @@ pub fn dns_lookup(hostname: &str, results: &mut [[u8; 4]]) -> Result<usize, NetE
 mod tests {
     use super::*;
     use toyos_abi::syscall::SyscallError;
+
+    /// Every refusal but the two a pipe answers on purpose.
+    const OTHERS: [SyscallError; 4] =
+        [SyscallError::InvalidArgument, SyscallError::PermissionDenied, SyscallError::BadAddress, SyscallError::Io];
+
+    #[test]
+    fn a_read_of_zero_is_the_peer_s_fin_only_while_the_send_pipe_is_read() {
+        assert_eq!(read_end(Ok(0)), Ok(()));
+        assert_eq!(read_end(Err(SyscallError::WouldBlock)), Ok(()), "a full send pipe still has its reader");
+        assert_eq!(read_end(Err(SyscallError::Gone)), Err(StreamRefusal::Reset));
+        for other in OTHERS {
+            assert_eq!(read_end(Err(other)), Err(StreamRefusal::Other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn a_write_the_send_pipe_refuses_for_its_reader_is_a_reset() {
+        assert_eq!(write_refused(SyscallError::Gone), StreamRefusal::Reset);
+        assert_eq!(write_refused(SyscallError::WouldBlock), StreamRefusal::Again);
+        for other in OTHERS {
+            assert_eq!(write_refused(other), StreamRefusal::Other, "{other:?}");
+        }
+    }
 
     /// `SYS_HANDLE_SEND` into a connection whose server end has gone. The first
     /// refusal a `tcp_bind` can meet, because a request that hands netstack pipe

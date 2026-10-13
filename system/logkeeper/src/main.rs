@@ -182,7 +182,6 @@ fn main() {
         degraded: false,
         boot_secs,
         hub,
-        stall: Stall::from_args(),
         stopping: None,
     };
     log.run(&published);
@@ -209,7 +208,6 @@ struct Log {
     degraded: bool,
     boot_secs: Option<u64>,
     hub: Arc<serve::Hub>,
-    stall: Option<Stall>,
     /// The supervisor's flush was answered and the machine stops: the file's text held
     /// back since, which a refused stop writes, to [`STOPPING_BYTES`].
     stopping: Option<Stopping>,
@@ -326,10 +324,7 @@ impl Log {
                     // SAFETY: the kernel moved this handle into this table with
                     // the frame that names it, and nothing else answers for it.
                     let alive = unsafe { Pipe::from_raw(alive) };
-                    match &mut self.stall {
-                        Some(stall) if stall.origin == name => stall.held.push((registration.pid, ring, alive)),
-                        _ => self.take(registration.tag, registration.pid, ring, alive),
-                    }
+                    self.take(registration.tag, registration.pid, ring, alive);
                 }
                 // **The flush runs before the next frame is read**: the supervisor sends
                 // RESUME when the stop it flushed for was refused, which can be
@@ -435,7 +430,6 @@ impl Log {
             gone.push(i);
         }
         ended.clear();
-        self.release_stall(&read);
 
         let tags: Vec<(Arc<str>, u32)> =
             self.origins.iter().map(|o| (Arc::from(o.tag.as_str()), o.pid)).collect();
@@ -691,57 +685,10 @@ impl Log {
         self.to_volume(held.text.as_bytes(), true);
         self.hub.append(held.text.as_bytes());
     }
-
-    /// End a `--stall` once any program has said its `--stall-until` line.
-    fn release_stall(&mut self, read: &[Said]) {
-        let Some(stall) = self.stall.take_if(|s| read.iter().any(|r| r.text == s.until.as_bytes())) else {
-            return;
-        };
-        let origin = stall.origin;
-        for (pid, ring, alive) in stall.held {
-            self.take(Tag::new(&origin).expect("a name the supervisor registered is a tag"), pid, ring, alive);
-        }
-        let (waiting, slots) =
-            self.origins.iter().find(|o| o.tag == origin).map_or((0, 0), |o| o.waiting());
-        say!(
-            "logkeeper: reading {origin} again, as `--stall-until` asked, with {waiting} of its \
-             ring's {slots} records waiting"
-        );
-    }
 }
 
 fn ahead_note(ahead: u64, tag: &str) -> String {
     format!("logkeeper: {ahead} record(s) of {tag}'s were stamped ahead of the clock and are written as read")
-}
-
-/// The origin this program leaves unread (`--stall=<name>`), and the exact
-/// line, from any program, that ends that (`--stall-until=<line>`): a test's
-/// actuator, armed by nothing but a boot config's `args`.
-///
-/// It is how a boot stages a `logkeeper` that stops reading one program while the
-/// rest of the log — the test's own lines among them — still flows: that
-/// program's ring fills and its writes are refused, which is the state a
-/// writer that must never wait on logging is tested in.
-struct Stall {
-    origin: String,
-    until: String,
-    /// Its rings as the supervisor registered them, taken only once the stall ends, so
-    /// nothing a ring's writers are kept to rests on this program's reading.
-    held: Vec<(u32, toyos::RawHandle, Pipe)>,
-}
-
-impl Stall {
-    fn from_args() -> Option<Stall> {
-        let arg = |key: &str| std::env::args().find_map(|a| a.strip_prefix(key).map(str::to_string));
-        match (arg("--stall="), arg("--stall-until=")) {
-            (Some(origin), Some(until)) => Some(Stall { origin, until, held: Vec::new() }),
-            (None, None) => None,
-            (origin, until) => panic!(
-                "logkeeper: `--stall` and `--stall-until` are armed together or not at all, and this \
-                 boot gave {origin:?} and {until:?}"
-            ),
-        }
-    }
 }
 
 /// This boot's file stem, and the epoch second its counter started at: where

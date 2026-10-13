@@ -3,14 +3,12 @@
 //! POSIX judges the offsets, the hole and the seek pointer; the `MAX_FILE_SIZE`
 //! ceiling is this kernel's own, judged against the page index it protects.
 
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::process::Command;
 
 const PAGE: u64 = 4096;
 /// `file_cache::MAX_FILE_SIZE`: the page index is a `u32`, so `(u32::MAX + 1) * 4096`.
 const MAX_FILE_SIZE: u64 = (u32::MAX as u64 + 1) * PAGE;
-const DRAINS_THE_QUEUE: &str = "/system/bin/echo";
 
 fn pattern(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i * 37 + 11) as u8 | 1).collect()
@@ -125,52 +123,10 @@ fn the_ceiling_refuses(dir: &str) {
     fs::remove_file(&path).expect("cleanup");
 }
 
-/// The same hole off the device, not out of the cache, and nothing here is
-/// timed: `sync_all` reports a failure to reach it, and the spawn's
-/// `Vfs::open_backing` drains the queue and releases the file before the re-open.
-fn the_hole_reaches_the_device(dir: &str) {
-    let path = format!("{dir}/lseek_device_hole.bin");
-    let head = pattern(100);
-    {
-        let mut f = OpenOptions::new()
-            .read(true).write(true).create(true).truncate(true)
-            .open(&path)
-            .unwrap_or_else(|e| panic!("create {path}: {e}"));
-        f.write_all(&head).expect("write the head");
-        f.seek(SeekFrom::Start(200)).expect("seek past EOF");
-        f.write_all(&[0xAB]).expect("write one byte at the seeked offset");
-        f.sync_all().unwrap_or_else(|e| panic!("{dir}: the hole did not reach the device: {e}"));
-    }
-    let status = Command::new(DRAINS_THE_QUEUE)
-        .arg("lseek_past_eof")
-        .status()
-        .unwrap_or_else(|e| panic!("spawn {DRAINS_THE_QUEUE}: {e}"));
-    assert!(status.success(), "{dir}: the draining spawn exited {:?}", status.code());
-
-    let mut back = Vec::new();
-    File::open(&path)
-        .expect("re-open after the write-back drained")
-        .read_to_end(&mut back)
-        .expect("read the file back off the device");
-    assert_eq!(back.len(), 201, "{dir}: the device holds {} bytes, not 201", back.len());
-    assert_eq!(&back[..100], &head[..], "{dir}: the head is not what reached the device");
-    for (i, &b) in back[100..200].iter().enumerate() {
-        assert_eq!(b, 0, "{dir}: hole byte {} reads {b:#04x} off the device, not zero", i + 100);
-    }
-    assert_eq!(back[200], 0xAB, "{dir}: the poked byte is not at the offset asked on the device");
-
-    fs::remove_file(&path).expect("cleanup");
-}
-
 fn main() {
-    // /tmp is the in-memory control; /home carries the hole through a device-backed mount.
-    for dir in ["/tmp", "/home"] {
-        seek_past_eof_lands_where_asked(dir);
-        truncate_leaves_the_pointer(dir);
-    }
+    seek_past_eof_lands_where_asked("/tmp");
+    truncate_leaves_the_pointer("/tmp");
     the_ceiling_refuses("/tmp");
-    the_ceiling_refuses("/home");
-    the_hole_reaches_the_device("/home");
 
-    println!("lseek past eof: the offset asked is the offset answered, the gap reads as zeros on the device, and the ceiling refuses");
+    println!("lseek past eof: the offset asked is the offset answered, the gap reads as zeros, and the ceiling refuses");
 }

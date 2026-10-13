@@ -19,12 +19,9 @@
 //! it holds, on a read-only grant or a read-only volume, is refused before the
 //! volume sees it (`fileserver::rights`).
 //!
-//! **One share cannot take the server.** Beneath each machine-wide bound —
-//! connections waiting on their hello, connections served, streams — each
-//! share a grant names has a part of its own, so one holding all it may leaves
-//! the rest of each bound to the others. A share is one service the
-//! supervisor started itself or one login session, with every child spawned
-//! in it and every launch made from it that opens no session
+//! **One share cannot take the server** (`fileserver::bounds`). A share is one
+//! service the supervisor started itself or one login session, with every
+//! child spawned in it and every launch made from it that opens no session
 //! (`toyos_manifest::launch`). Four at their parts take the server
 //! (`issues/four-shares-take-a-file-server.md`).
 //!
@@ -43,6 +40,7 @@ use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use fileserver::absent::Absent;
+use fileserver::bounds::{self, Hello, MAX_HANDSHAKES, MAX_SERVED, MAX_STREAMS};
 use fileserver::data::{DataVolume, Located, Probed};
 use diskserver::disk::{Claimed, Disk, Served};
 use fileserver::ram::Ram;
@@ -56,35 +54,13 @@ use toyos::fs::*;
 use toyos::ipc::{self, Connection, RxStep, TrySendError};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
-use toyos::shm::{Lent, SharedMemory};
+use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::Pipe;
 use toyos_abi::syscall::{SyscallError, DEV_PREFIX, MAX_BADGE, SERVE_PREFIX};
 
-/// Clients served at once, machine-wide: one connection per directory per
-/// process. The next is answered `ResourceExhausted` at its hello and let go,
-/// by name.
-const MAX_SERVED: usize = 128;
-
-/// Connections taken and not yet answered at their hello. While this many
-/// wait, the next waits in the port's queue — for at most
-/// [`HANDSHAKE_TIMEOUT`], by which each of these is answered or let go.
-const MAX_HANDSHAKES: usize = 32;
-
 /// Files one client holds open at once.
 const MAX_FIDS: usize = 1024;
-
-/// Streams served at once, machine-wide.
-const MAX_STREAMS: usize = 64;
-
-/// One share's parts of [`MAX_SERVED`], [`MAX_HANDSHAKES`] and
-/// [`MAX_STREAMS`]. Past its part of served clients a hello is answered
-/// `ResourceExhausted`, and past its part of streams a `STREAM` is; past its
-/// part of handshakes a connection is, as it is taken, and let go. A quarter
-/// of each bound, so a share at its parts leaves the bound to three more.
-const SERVED_SHARE: usize = MAX_SERVED / 4;
-const HANDSHAKE_SHARE: usize = MAX_HANDSHAKES / 4;
-const STREAM_SHARE: usize = MAX_STREAMS / 4;
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
@@ -92,7 +68,8 @@ const STREAM_READ: usize = 64 * 1024;
 // One wait watches the acceptor, every connection and every stream at once.
 const _: () = assert!(1 + MAX_SERVED + MAX_HANDSHAKES + MAX_STREAMS <= Poller::MAX_HANDLES as usize);
 
-/// How long an accepted connection may take to lend its window.
+/// How long an accepted connection may take to lend its window: while
+/// [`MAX_HANDSHAKES`] wait, the next waits in the port's queue for at most this.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Why a client asking for a request number the wire does not have is let go,
@@ -453,13 +430,10 @@ impl Server {
             Err(why) => return println!("fileserver: letting a connection go: it carries no grant ({why:?})"),
         };
         let mine = self.clients.values().filter(|c| c.share == grant.share && c.window.is_none()).count();
-        if mine >= HANDSHAKE_SHARE {
+        if let Err(why) = bounds::handshake(grant.share, mine) {
             // Let go whether or not the refusal went: either way it is said.
             let _ = conn.try_send(REPLY, &Reply::refused(SyscallError::ResourceExhausted));
-            return println!(
-                "fileserver: letting a connection go: share {} has {HANDSHAKE_SHARE} waiting on their hello",
-                grant.share
-            );
+            return println!("fileserver: letting a connection go: {why}");
         }
         let id = self.next_client;
         self.next_client += 1;
@@ -537,20 +511,15 @@ impl Server {
     /// A path from the window: `len` bytes at `at`, UTF-8.
     fn path(&self, id: u64, at: u64, len: u64) -> Result<String, SyscallError> {
         let window = self.clients[&id].window.as_ref().ok_or(SyscallError::InvalidArgument)?;
-        let (at, len) = (at as usize, len as usize);
-        if len > MAX_PATH || at.checked_add(len).is_none_or(|end| end > WINDOW_BYTES) {
-            return Err(SyscallError::InvalidArgument);
-        }
+        let (at, len) = bounds::path_span(at, len)?;
         let mut bytes = vec![0u8; len];
         window_take(window_of(window), at, &mut bytes);
-        String::from_utf8(bytes).map_err(|_| SyscallError::InvalidArgument)
+        bounds::path(bytes)
     }
 
     /// `rel`, from the client's directory, as a volume path.
     fn resolve(&mut self, id: u64, rel: &str, follow_last: bool) -> Result<Resolved, SyscallError> {
-        if !canonical(rel) {
-            return Err(SyscallError::InvalidArgument);
-        }
+        bounds::relative(rel)?;
         let root = self.clients[&id].root.clone();
         let volume = &mut self.volume;
         let mut lookup = |p: &str| match volume.lstat(p) {
@@ -581,22 +550,11 @@ impl Server {
             if client.window.is_some() {
                 return Answer::Drop("it lent a second window");
             }
-            if all >= MAX_SERVED {
-                let why = format!("it is refused, since {MAX_SERVED} clients are served already");
-                return Answer::Refuse(SyscallError::ResourceExhausted, why);
-            }
-            if mine >= SERVED_SHARE {
-                let why = format!("it is refused, since its share is served {SERVED_SHARE} clients already");
-                return Answer::Refuse(SyscallError::ResourceExhausted, why);
-            }
-            let Some([lent]) = client.conn.recv_handles_exact::<1>() else {
-                return Answer::Drop("its hello carried no window");
-            };
-            match SharedMemory::lent(lent, WINDOW_BYTES) {
-                Ok(window) => client.window = Some(window),
-                Err(Lent::Kernel(_)) => return Answer::Drop("its window would not map"),
-                Err(Lent::NotRam) => return Answer::Drop("its window is not memory the kernel allocated"),
-                Err(Lent::Length { .. }) => return Answer::Drop("its window is not WINDOW_BYTES long"),
+            let lent = || client.conn.recv_handles_exact::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
+            match bounds::hello(all, mine, lent) {
+                Hello::Served(window) => client.window = Some(window),
+                Hello::Refused(why) => return Answer::Refuse(SyscallError::ResourceExhausted, why),
+                Hello::Dropped(why) => return Answer::Drop(why),
             }
             let granted = if client.writes { RIGHT_WRITE } else { 0 };
             // The volume is this start's pid, which the kernel never issues
@@ -708,9 +666,7 @@ impl Server {
                 let window = window_of(self.clients[&id].window.as_ref().expect("lent"));
                 window_take(window, 0, &mut self.scratch[..len]);
                 let at = if append { self.volume.node_meta(node)?.size } else { r.offset };
-                if at.checked_add(len as u64).is_none_or(|end| end > MAX_FILE_BYTES) {
-                    return Err(SyscallError::InvalidArgument);
-                }
+                bounds::in_a_file(at, len as u64)?;
                 self.volume.write(node, at, &self.scratch[..len])?;
                 self.dirtied();
                 Ok(Answer::Reply(Reply { value: len as u64, value2: at + len as u64, ..Reply::ok() }))
@@ -726,9 +682,7 @@ impl Server {
                     return Err(SyscallError::PermissionDenied);
                 }
                 let node = f.node;
-                if r.offset > MAX_FILE_BYTES {
-                    return Err(SyscallError::InvalidArgument);
-                }
+                bounds::in_a_file(r.offset, 0)?;
                 self.volume.truncate(node, r.offset)?;
                 self.dirtied();
                 Ok(Answer::Reply(Reply::ok()))
@@ -743,17 +697,10 @@ impl Server {
                 if !f.write {
                     return Err(SyscallError::PermissionDenied);
                 }
-                // Every client number this server keeps is bounded where it is
-                // kept: a stream's offset grows by what it drains.
-                if r.offset > MAX_FILE_BYTES {
-                    return Err(SyscallError::InvalidArgument);
-                }
                 let node = f.node;
                 let share = self.clients[&id].share;
                 let mine = self.streams.values().filter(|s| s.share == share).count();
-                if self.streams.len() >= MAX_STREAMS || mine >= STREAM_SHARE {
-                    return Err(SyscallError::ResourceExhausted);
-                }
+                bounds::stream(r.offset, self.streams.len(), mine)?;
                 let (read, write) = toyos::pipe_pair()?;
                 self.volume.hold(node);
                 let sid = self.next_stream;
@@ -888,7 +835,7 @@ impl Server {
             Err(e) => Some(format!("its pipe would not read ({e:?})")),
             Ok(n) => {
                 let (node, at) = (stream.node, stream.offset);
-                match at.checked_add(n as u64).filter(|&end| end <= MAX_FILE_BYTES) {
+                match bounds::in_a_file(at, n as u64).ok() {
                     None => Some("it reached the largest offset a file has".to_string()),
                     Some(end) => {
                         stream.offset = end;

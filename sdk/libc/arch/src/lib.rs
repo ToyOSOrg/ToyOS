@@ -8,9 +8,9 @@
 //! IEEE 754's rounding of hexadecimal input computed exactly, AArch64's
 //! `long double` widening against compiler-builtins', the errno codes against
 //! `include/errno.h`, IPv4 addresses and their texts against the host C
-//! library's, and the socket option rule against the host's `setsockopt` and
-//! `getsockopt`, the rule that reads a stream's end, and `realpath`'s
-//! resolution over a tree laid out here.
+//! library's, the socket option rule against the host's `setsockopt` and
+//! `getsockopt`, a datagram send's bind, and `realpath`'s resolution over a
+//! tree laid out here.
 
 #[cfg(test)]
 extern crate alloc;
@@ -26,6 +26,9 @@ mod arch;
 // Every code libc answers with, of which the modules here use a few.
 #[allow(dead_code)]
 mod errcode;
+#[cfg(test)]
+#[path = "../../src/dgramreq.rs"]
+mod dgramreq;
 #[cfg(test)]
 #[path = "../../src/elfsym.rs"]
 mod elfsym;
@@ -60,9 +63,6 @@ mod sigmask;
 #[path = "../../src/sockopt.rs"]
 mod sockopt;
 #[cfg(test)]
-#[path = "../../src/streamend.rs"]
-mod streamend;
-#[cfg(test)]
 #[path = "../../src/strtonum.rs"]
 mod strtonum;
 #[cfg(test)]
@@ -74,6 +74,8 @@ mod utf8;
 
 #[cfg(test)]
 mod alarm_requests;
+#[cfg(test)]
+mod datagram_sends;
 #[cfg(test)]
 mod descriptor_requests;
 #[cfg(test)]
@@ -106,8 +108,6 @@ mod prototypes;
 mod signal_masks;
 #[cfg(test)]
 mod socket_options;
-#[cfg(test)]
-mod stream_ends;
 #[cfg(test)]
 mod strtonum_differential;
 #[cfg(test)]

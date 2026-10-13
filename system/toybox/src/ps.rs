@@ -6,6 +6,7 @@
 //! `roster` there builds an image whose `ps` says it cannot and changes nothing
 //! else. Nothing here asks for the capability: it is either in the endowment
 //! table `/system/bin/supervisor` filled at spawn or it does not exist for this process.
+//! What the roster says is [`crate::roster`]'s to read.
 //!
 //! `free` is the other half of the same syscall and needs none of this: the
 //! machine header is ambient.
@@ -17,6 +18,7 @@
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
 use toyos::system;
+use crate::roster::{rows, Row};
 
 const HEADER: usize = system::SYSINFO_HEADER_SIZE;
 const ENTRY: usize = system::SYSINFO_ENTRY_SIZE;
@@ -31,45 +33,11 @@ const ENTRY: usize = system::SYSINFO_ENTRY_SIZE;
 /// a command may keep somebody waiting.
 const SAMPLE_NS: u64 = 100_000_000;
 
-/// One live thread, as the roster describes it.
-struct Row {
-    pid: u32,
-    tid: u32,
-    state: u8,
-    is_thread: bool,
-    memory: u64,
-    cpu_ns: u64,
-    name: String,
-}
-
-/// The machine's uptime, the CPU nanoseconds it has ever run, and every row.
-///
-/// `None` is a capability carrying no `ROSTER`: the kernel answers the ambient
-/// header alone, which is short of one entry and says so by its length.
+/// The machine's uptime, the CPU nanoseconds it has ever run, and every row,
+/// out of the roster the kernel answered.
 fn sample(cap: &SysCap, buf: &mut [u8]) -> Option<(u64, u64, Vec<Row>)> {
     let n = cap.roster(buf);
-    if n < HEADER {
-        return None;
-    }
-    let header = toyos_abi::syscall::SysinfoHeader::decode(buf[..HEADER].try_into().unwrap());
-    let (uptime_ns, total_cpu_ns) = (header.uptime_ns, header.total_cpu_ns);
-    let mut rows = Vec::new();
-    let mut pos = HEADER;
-    while pos + ENTRY <= n {
-        let name_bytes = &buf[pos + 32..pos + 60];
-        let name_len = name_bytes.iter().position(|&b| b == 0).unwrap_or(28);
-        rows.push(Row {
-            pid: u32::from_le_bytes(buf[pos..pos + 4].try_into().unwrap()),
-            tid: u32::from_le_bytes(buf[pos + 4..pos + 8].try_into().unwrap()),
-            state: buf[pos + 8],
-            is_thread: buf[pos + 9] != 0,
-            memory: u64::from_le_bytes(buf[pos + 16..pos + 24].try_into().unwrap()),
-            cpu_ns: u64::from_le_bytes(buf[pos + 24..pos + 32].try_into().unwrap()),
-            name: std::str::from_utf8(&name_bytes[..name_len]).unwrap_or("?").to_string(),
-        });
-        pos += ENTRY;
-    }
-    Some((uptime_ns, total_cpu_ns, rows))
+    rows(&buf[..n])
 }
 
 fn format_cpu_time(ns: u64) -> String {

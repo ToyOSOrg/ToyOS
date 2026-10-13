@@ -13,34 +13,17 @@ const HEX_WIDTH: usize = LINE * 2 + LINE.div_ceil(2) - 1;
 /// One read buffer, whole lines, never derived from the file's size or from
 /// `-l`: a dump of a whole disk allocates what a dump of one byte does.
 const BUF_BYTES: usize = 4096;
-const _: () = assert!(BUF_BYTES % LINE == 0, "the buffer must hold whole lines");
+const _: () = assert!(BUF_BYTES.is_multiple_of(LINE), "the buffer must hold whole lines");
 
 pub fn main(args: Vec<String>) {
-    let mut skip = 0u64;
-    let mut length: Option<u64> = None;
-    let mut path: Option<&str> = None;
-
-    let mut args = args.iter();
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "-s" => skip = number(args.next(), "-s"),
-            "-l" => length = Some(number(args.next(), "-l")),
-            _ if arg.starts_with('-') => refuse(format!("{arg}: unknown option")),
-            _ => match path {
-                None => path = Some(arg),
-                Some(first) => refuse(format!("{arg}: one file at a time, already given {first}")),
-            },
-        }
-    }
-
+    let (path, skip, length) = request(&args).unwrap_or_else(|refusal| refuse(refusal));
     let Some(path) = path else {
         eprintln!("Usage: hexdump [-s offset] [-l length] <file>");
         process::exit(1);
     };
-
-    if let Err(refusal) = dump(Path::new(path), skip, length) {
-        eprintln!("hexdump: {refusal}");
-        process::exit(1);
+    let stdout = io::stdout();
+    if let Err(refusal) = dump(Path::new(&path), skip, length, &mut BufWriter::new(stdout.lock())) {
+        refuse(refusal);
     }
 }
 
@@ -49,20 +32,41 @@ fn refuse(what: String) -> ! {
     process::exit(1);
 }
 
+/// The file, the offset and the length `args` ask for — no file where they
+/// name none — or what is wrong with them.
+pub fn request(args: &[String]) -> Result<(Option<String>, u64, Option<u64>), String> {
+    let mut skip = 0u64;
+    let mut length: Option<u64> = None;
+    let mut path: Option<&str> = None;
+
+    let mut args = args.iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "-s" => skip = number(args.next(), "-s")?,
+            "-l" => length = Some(number(args.next(), "-l")?),
+            _ if arg.starts_with('-') => return Err(format!("{arg}: unknown option")),
+            _ => match path {
+                None => path = Some(arg),
+                Some(first) => return Err(format!("{arg}: one file at a time, already given {first}")),
+            },
+        }
+    }
+    Ok((path.map(str::to_string), skip, length))
+}
+
 /// Decimal, or hexadecimal with an `0x` prefix — the two forms xxd takes.
-fn number(arg: Option<&String>, flag: &str) -> u64 {
-    let Some(text) = arg else { refuse(format!("{flag}: needs a number")) };
+fn number(arg: Option<&String>, flag: &str) -> Result<u64, String> {
+    let text = arg.ok_or_else(|| format!("{flag}: needs a number"))?;
     let parsed = match text.strip_prefix("0x").or_else(|| text.strip_prefix("0X")) {
         Some(hex) => u64::from_str_radix(hex, 16),
         None => text.parse(),
     };
-    match parsed {
-        Ok(n) => n,
-        Err(_) => refuse(format!("{flag}: {text} is not a number")),
-    }
+    parsed.map_err(|_| format!("{flag}: {text} is not a number"))
 }
 
-fn dump(path: &Path, skip: u64, length: Option<u64>) -> Result<(), String> {
+/// `length` bytes of `path` from `skip`, at most what the file holds, onto
+/// `out` as xxd lays them out.
+pub fn dump(path: &Path, skip: u64, length: Option<u64>, out: &mut impl Write) -> Result<(), String> {
     let mut file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let size = file.metadata().map_err(|e| format!("{}: {e}", path.display()))?.len();
 
@@ -77,8 +81,6 @@ fn dump(path: &Path, skip: u64, length: Option<u64>) -> Result<(), String> {
     // loop below has a byte count and not a "no limit" marker to test against.
     let mut left = length.map_or(size - skip, |l| l.min(size - skip));
 
-    let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
     let mut buf = vec![0u8; BUF_BYTES];
     let mut offset = skip;
 
@@ -89,7 +91,7 @@ fn dump(path: &Path, skip: u64, length: Option<u64>) -> Result<(), String> {
         // end of the dump.
         file.read_exact(&mut buf[..want]).map_err(|e| format!("{}: {e}", path.display()))?;
         for line in buf[..want].chunks(LINE) {
-            write_line(&mut out, offset, line).map_err(|e| format!("stdout: {e}"))?;
+            write_line(out, offset, line).map_err(|e| format!("stdout: {e}"))?;
             offset += line.len() as u64;
         }
         left -= want as u64;

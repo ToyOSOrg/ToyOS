@@ -213,7 +213,7 @@ fn a_second_firmwares_bytes_decode_to_that_machines_own_windows() {
 }
 
 /// q35's ICH9 power-management block at the base QEMU's firmware put it,
-/// 0x600, as the FADT names it: the blocks the `acpi_power_button` guest test
+/// 0x600, as the FADT names it: the blocks the `acpi_press_is_one_sci` guest test
 /// takes its SCI through, and the 32-bit fields and their `X_` twins agreeing.
 #[test]
 fn the_q35_fadt_names_the_fixed_hardware_its_sci_is_served_through() {

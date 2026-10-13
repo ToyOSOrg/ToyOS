@@ -322,6 +322,34 @@ fn a_real_time_write_allocates_nothing() {
     assert_eq!(allocated, 0, "a write allocated");
 }
 
+/// **soundserver's mix thread never waits on its log.** Its lines are composed
+/// on its own stack and pushed into the lane it claimed (`say_lane`): with
+/// nobody reading, the lane takes its slots and every line after is refused at
+/// once, a count its reader says, and the writer comes back each time.
+#[test]
+fn a_full_lane_counts_the_mix_thread_s_line_and_returns() {
+    let (words, ring) = region();
+    let (words, ring, answers) = never_waits(move || {
+        let lane = ring.claim_lane(7, 3).expect("a fresh ring has free lanes");
+        let mut answers = Vec::new();
+        for window in 0..LANE_SLOTS + 4 {
+            compose(Severity::Info, format_args!("soundserver: wakes={window} underruns=0"), &mut |body: &mut Body| {
+                answers.push(lane.push(body));
+            });
+        }
+        (words, ring, answers)
+    });
+    let kept = LANE_SLOTS as usize;
+    assert!(answers[..kept].iter().all(|a| *a == Pushed::Written), "{answers:?}");
+    assert!(answers[kept..].iter().all(|a| *a == Pushed::Refused), "{answers:?}");
+    let (lane, mut reader) = (ring.lane(0), Reader::new());
+    let read: Vec<Body> = std::iter::from_fn(|| reader.next_lane(&lane)).collect();
+    assert_eq!(read.len(), kept);
+    assert_eq!(read[0].text(), b"soundserver: wakes=0 underruns=0");
+    assert_eq!(reader.refused(&lane), 4, "a line the full lane refused went uncounted");
+    drop(words);
+}
+
 /// The real layout, end to end: what one view pushes the reader reads back
 /// whole, from the shared ring and from a lane.
 #[test]

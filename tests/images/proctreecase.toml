@@ -2,15 +2,10 @@
 #
 # A launcher for test-runner, which it endows every job, because the subtree
 # under test has children the supervisor launches; a declared `cat`, which runs
-# until its input ends; and a declared shell, which a depth chain launches and
-# which detaches a `cat`.
+# until its input ends; and a declared shell, whose row lists `toybox` because
+# it detaches a `cat`.
 #
 # `launch_toctou` rides it too: a launch of `toybox` through a link it re-points.
-#
-# And `fs_share`: a shell test-runner launches opens no session and spends
-# test-runner's share of DATA's server; a shell that shell launches is in a
-# login session its row opens, which has a share of its own, and so is every
-# shell launched down from it, whose `login` row opens none there.
 #
 # And `app_view`: test-runner's row lists `/apps`, so a job launches the
 # package it installed under the image's `[apps]` row and the view an

@@ -12,6 +12,7 @@ mod ps;
 mod pwd;
 mod reboot;
 mod rm;
+mod roster;
 mod screen;
 mod shutdown;
 mod stats;
