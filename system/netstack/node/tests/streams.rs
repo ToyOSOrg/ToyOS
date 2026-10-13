@@ -821,6 +821,49 @@ fn room_in_the_pipe_opens_the_window_at_the_next_opportunity() {
     assert_eq!((update.ack, update.window, update.text.len()), (Some(net.far.snd_nxt), 65_535, 0));
 }
 
+// RFC 9293 §3.8.6 and §3.6: an echo of more than both windows moves whole both ways at once,
+// each end sending only what the other's window allows, and the peer's FIN and then the client's
+// end close it with nothing reset.
+#[test]
+fn an_echo_past_both_windows_arrives_whole_both_ways_and_ends_in_both_fins() {
+    let (mut net, _, client) = established();
+    client.borrow_mut().room = 4_096;
+    let sent = text(200_000);
+    let mut offset = 0;
+    for _ in 0..100_000 {
+        if net.far.received.len() == sent.len() {
+            break;
+        }
+        let len = net.far.open().min(1_460).min(sent.len() - offset);
+        if len > 0 {
+            let frame = net.far.text(&sent[offset..offset + len]);
+            offset += len;
+            net.deliver(&frame);
+            continue;
+        }
+        // The client echoes what its pipe holds; with nothing to echo the clock moves.
+        let taken = std::mem::take(&mut client.borrow_mut().inbox);
+        client.borrow_mut().outbox.extend(taken);
+        let before = (net.far.received.len(), client.borrow().outbox.len());
+        net.bridge();
+        if (net.far.received.len(), client.borrow().outbox.len()) == before {
+            let at = net.node.next_deadline().expect("the lease's renewal, if nothing else");
+            net.fire(at);
+        }
+    }
+    assert_eq!(offset, sent.len(), "the node's window let all of it through");
+    assert!(net.far.received == sent, "the echo is the peer's stream byte for byte: {} of {} bytes", net.far.received.len(), sent.len());
+
+    let frame = net.far.fin();
+    net.deliver(&frame);
+    client.borrow_mut().writer_gone = true;
+    net.bridge();
+    assert!(net.far.fin, "the client's end is a FIN");
+    assert_eq!(net.far.acked, net.far.snd_nxt, "the peer's FIN is acknowledged");
+    assert_eq!((dropped(&client), net.node.streams()), ((true, true), 0));
+    assert!(net.far.resets.is_empty(), "{:?}", net.far.resets);
+}
+
 // ---- the stream's ends ----
 
 // RFC 9293 §3.6, case 1: our FIN follows our last byte, and in FIN-WAIT-2 the peer's text is

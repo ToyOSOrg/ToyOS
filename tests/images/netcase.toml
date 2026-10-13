@@ -25,7 +25,7 @@ syscap = ["logread"]
 [programs.netstack]
 service = true
 serves = ["netstack"]
-devices = ["pci:1af4:1041", "pci:8086:10d3"]
+devices = ["pci:1af4:1041"]
 
 [programs.soundserver]
 service = true
@@ -34,7 +34,6 @@ devices = ["pci:1af4:1059"]
 syscap = ["rt"]
 
 [programs.test-runner]
-receives = ["netstack"]
 
 # The block service: the NVMe controller this machine's DATA is on, driven
 # from userland through its claim. Started again when it ends; the claim goes

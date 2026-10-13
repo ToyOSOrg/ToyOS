@@ -596,12 +596,14 @@ const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::
 
 /// The ports that one row alone may receive, each with that row: the swap
 /// port, whose holder replaces any service's binary, the grants port, whose
-/// holder writes which folder of the home a package sees, and the prompt
-/// port, whose holder draws above every window and has every key while it does.
+/// holder writes which folder of the home a package sees, the prompt port,
+/// whose holder draws above every window and has every key while it does, and
+/// the clipboard port, whose holder is sent every copy made in the session.
 const HELD_ALONE: &[(&str, &str)] = &[
     (toyos_swap::PORT, toyos_swap::HOLDER),
     (toyos_manifest::grants::PORT, toyos_manifest::grants::HOLDER),
     (toyos_manifest::consent::PROMPT, toyos_manifest::consent::SERVER),
+    (toyos_manifest::clipboard::PORT, toyos_manifest::clipboard::HOLDER),
 ];
 
 /// Who may hold the authorities that change what the machine runs or what a
@@ -984,8 +986,6 @@ pub struct Plan {
     pub params: Vec<String>,
     /// The version the image's signed header names.
     pub version: u64,
-    /// Room for a second slot, or none: a machine that cannot update itself.
-    pub second: Option<image::SecondSlot>,
 }
 
 impl Plan {
@@ -996,7 +996,6 @@ impl Plan {
             features: features.iter().map(|f| (*f).to_string()).collect(),
             params: params.iter().map(|p| (*p).to_string()).collect(),
             version: image::version_now(),
-            second: None,
         }
     }
 }
@@ -1025,7 +1024,6 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
         features: features.split(',').filter(|f| !f.is_empty()).map(Into::into).collect(),
         params: param,
         version: image::version_now(),
-        second: None,
     }
 }
 
@@ -1961,7 +1959,7 @@ pub fn build_test_image(
         &parts.root,
         &plan.params.join(","),
         image::Signing { key: crate::signing::key(), version: plan.version },
-        plan.second,
+        None,
     )
 }
 
@@ -3027,18 +3025,15 @@ mod tests {
         "images/diag.toml",
         "images/console.toml",
         "tests/images/acpicase.toml",
-        "tests/images/blockgrantcase.toml",
-        "tests/images/consentcase.toml",
+        "tests/images/clipboardcase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
-        "tests/images/logstallcase.toml",
         "tests/images/metalcase.toml",
         "tests/images/metaldevicecase.toml",
         "tests/images/netcase.toml",
         "tests/images/panelcase.toml",
         "tests/images/proctreecase.toml",
-        "tests/images/slotscase.toml",
         "tests/images/testcases.toml",
         "tests/images/virtjobcase.toml",
         "tests/images/virtpaniccase.toml",
@@ -3117,6 +3112,10 @@ mod tests {
         assert!(held_by_their_holders_alone(&shell).is_err());
         let apps: SystemConfig = toml::from_str("[apps]\nreceives = [\"grants\"]\n").unwrap();
         assert!(held_by_their_holders_alone(&apps).is_err());
+        let vdagent: SystemConfig = toml::from_str("[programs.vdagent]\nreceives = [\"clipboard\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&vdagent).is_ok());
+        let editor: SystemConfig = toml::from_str("[programs.editor]\nreceives = [\"clipboard\"]\n").unwrap();
+        assert!(held_by_their_holders_alone(&editor).is_err());
     }
 
     /// The prompt port reaches its server alone, and the consent port no row,

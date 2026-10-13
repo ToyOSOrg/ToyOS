@@ -1,32 +1,28 @@
-//! A file server lets go a hello whose window the kernel says is not a region
-//! `WINDOW_BYTES` long, whatever the client says: a pipe end, or a region
-//! twice that; and the server that let it go answers the next client as the
-//! same process.
+//! What the kernel says of a handle lent as a window, asked as a file server
+//! asks it (`SharedMemory::lent`): a pipe end is no memory it allocated to a
+//! region, a region twice `WINDOW_BYTES` long is refused by its length, and a
+//! region of `WINDOW_BYTES` maps.
 
 use toyos::fs::WINDOW_BYTES;
-use toyos_abi::syscall::SyscallError;
+use toyos::shm::{Lent, SharedMemory};
+use toyos_abi::syscall;
+use toyos_abi::RawHandle;
 
-#[path = "../lent_hello.rs"]
-mod lent_hello;
-use lent_hello::{hello, region, window};
+/// A region of `bytes`, as a peer lends it.
+fn region(bytes: usize) -> RawHandle {
+    syscall::shm_create(bytes).expect("lent_window_refused: a region")
+}
 
 fn main() {
-    let served = hello(window()).expect("lent_window_refused: a window of WINDOW_BYTES is served");
+    assert!(SharedMemory::lent(region(WINDOW_BYTES), WINDOW_BYTES).is_ok(), "lent_window_refused: a region of WINDOW_BYTES was refused");
     let (read, _write) = toyos::pipe_pair().expect("lent_window_refused: a pipe");
-
-    // Every hostile hello is made before any is judged, so a server that serves one is seen serving each.
-    let answers = [
-        ("a pipe end", hello(read.into())),
-        ("a region twice WINDOW_BYTES long", hello(region(2 * WINDOW_BYTES))),
-    ];
-    let again = hello(window()).expect("lent_window_refused: a window after the refusals is served");
-
-    for (what, answer) in &answers {
-        println!("lent_window_refused: a hello lending {what} answered {answer:?}");
-    }
-    assert!(
-        answers.iter().all(|(_, answer)| *answer == Err(SyscallError::Gone)),
-        "lent_window_refused: a hostile hello was not let go unanswered"
+    let pipe = SharedMemory::lent(read.into_raw(), WINDOW_BYTES).err();
+    assert_eq!(pipe, Some(Lent::NotRam), "lent_window_refused: a pipe end lent as a window");
+    let twice = SharedMemory::lent(region(2 * WINDOW_BYTES), WINDOW_BYTES).err();
+    assert_eq!(
+        twice,
+        Some(Lent::Length { is: 2 * WINDOW_BYTES, bytes: WINDOW_BYTES }),
+        "lent_window_refused: a region twice WINDOW_BYTES long lent as a window"
     );
-    assert_eq!(again, served, "lent_window_refused: the server that let go is not the one that answers");
+    println!("lent_window_refused: a pipe end is no region, and a region twice the window's length is refused by it");
 }

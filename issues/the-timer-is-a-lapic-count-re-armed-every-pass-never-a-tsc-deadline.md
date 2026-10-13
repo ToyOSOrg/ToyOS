@@ -20,9 +20,20 @@ https://github.com/ToyOSOrg/ToyOS/pull/861#issuecomment-6113257693). A timer fir
 calibration spins the boot for 10 ms (`apic.rs:315-320`, from
 `kernel/src/arch/x86_64/boot.rs:135`). TSC-deadline mode (CPUID.01H:ECX[24])
 takes the absolute deadline in TSC units as one `IA32_TSC_DEADLINE` write,
-with no calibration of a second timebase. The T14 enumerates it
-(`tsc_deadline_timer`, `kernel/cpuvuln/fixtures/t14/cpuinfo.txt:20`); whether
-the AMD bench does is unread.
+with no calibration of a second timebase (SDM 325462-093, Vol. 3A §13.5.4.1).
+Whether the T14 enumerates it is ToyOS's own read to make, and no boot prints
+CPUID.01H:ECX yet. AMD documents no such mode: its
+CPUID reference has CPUID.01H:ECX[24] reserved (APM 24594 rev. 3.36, Vol. 3,
+§E.3.2), and so does the AMD bench's own (PPR 55922 rev. 3.06,
+`CPUID_Fn00000001_ECX`), so the AMD bench keeps the count, its calibration
+and its spin.
+
+**Its speed reading decides it.** The SDM defines the mode and recommends it
+over the count nowhere, and AMD documents none, so nothing published covers
+the choice. Intel's specification update for the T14's processor lists no
+TSC, TSC-deadline or APIC-timer erratum (631123-034, the UP3 line, CPUID
+000806C1h). Nothing but speed is its purpose: a deadline removes no path,
+since a CPU without one keeps the count.
 
 **Measured** (`wt/toyos-scout-tlb` at `d4c2f8ebe`, `main`'s `177e72a9e` plus
 the scout; https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119443198),
@@ -48,22 +59,21 @@ is an upper bound on what deadline mode saves, which still writes once to arm
 and once to stop; on the AMD bench both sit at its TSC's floor.
 
 **Next: a TSC-deadline twin on the T14**, `main` plus the scout with the
-one-shot armed and stopped through `IA32_TSC_DEADLINE`, timed by the same
-split beside `main` in the same session, with the re-arm segment opening at
-`set_timer` (`kernel/src/hw.rs:49`) in both arms. Its kill line, fixed here
-before it runs: deadline mode is not worth building for speed if what it
-takes off a pass, `main`'s re-arm p50 less the twin's, is under 5 % of
-`main`'s pick plus switch in either direction (221 and 216 ticks on the
-scout's figures). Its clock control, fixed with the line: each arm reads
-APERF and MPERF on CPUs 4 and 5 before and after the split, and where the two
-arms' ratios of APERF's advance to MPERF's differ by more than 1 % on either
-CPU, both arms' readings are void and decide nothing. Where the line fires,
-this file becomes `rejected` with both readings, and the boot's 10 ms
-calibration spin stays the count's price.
+one-shot armed and stopped through `IA32_TSC_DEADLINE`, beside `main` plus
+the scout in the same session. Each arm reads the 1 ms timer lateness of
+`issues/no-program-measures-toyos-against-linux-on-one-machine.md` and the
+split above, its re-arm segment opening at `set_timer` (`kernel/src/hw.rs:49`)
+in both. Each arm runs 11 times; a run's figure is the median lateness of
+its 1 ms timers, and an arm's is the median of its 11 with their spread,
+lowest to highest. The deadline measures better only where its median is the
+lower and the two spreads do not overlap; where they overlap, the count, the
+path every CPU has, is kept. The split is reported. The twin is a measurement
+arm, deleted once it has answered.
 
-**Exit**: the twin's reading, posted, and the AMD bench's CPUID.01H:ECX[24]
-read. Where the twin clears the line, a deadline is armed on every CPU that
+**Exit**: a boot line printing CPUID.01H:ECX, and a T14 boot carrying it
+cited for bit 24; the twin's reading, posted, and the twin deleted. Where the
+deadline's lateness measures better, a deadline is armed on every CPU that
 enumerates TSC-deadline as one `IA32_TSC_DEADLINE` write of the absolute
-value, and the T14's 1 ms timer lateness of
-`issues/no-program-measures-toyos-against-linux-on-one-machine.md` is no worse
-than the count's.
+value, and the split above is read again after it; where it does not, this
+file becomes `rejected` with both readings, and the boot's 10 ms
+calibration spin stays the count's price.

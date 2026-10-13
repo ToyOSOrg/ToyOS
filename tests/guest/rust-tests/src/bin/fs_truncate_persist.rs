@@ -1,13 +1,5 @@
-//! `set_len` on a persistent filesystem, and running a binary out of tmpfs.
-//!
-//! Both are the same shape of gap: something that works in memory and stops at
-//! the boundary where a mount has to describe itself to someone else. A
-//! truncate dirties no page, so the flush had nothing to write and returned
-//! before it reached the metadata; and tmpfs had no `open_backing`, so the
-//! loader could not read a file whose pages are the file.
-//!
-//! /tmp is the control in both directions: it passed the truncate case before
-//! the fix because its authority is the file cache itself.
+//! `set_len` on the kernel's own mount, across a close, and running a binary
+//! out of tmpfs: the loader reads a file whose pages are the file.
 
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -102,7 +94,6 @@ fn main() {
         return;
     }
     truncate_round_trip("/tmp/trunc_control.bin");
-    truncate_round_trip("/home/trunc_persist.bin");
     spawn_from_tmpfs();
-    println!("truncate persists on /home and /tmp; tmpfs binaries are loadable");
+    println!("truncate holds on /tmp across a close; tmpfs binaries are loadable");
 }

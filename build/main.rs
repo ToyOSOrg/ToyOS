@@ -123,6 +123,23 @@ fn main() {
         }
         return;
     }
+    // Writes one file outside the checkout and builds nothing. The public
+    // line alone goes to stdout, so it can be redirected onto the stick the
+    // root-key ceremony carries it on.
+    if asked(&flags::REPO_SIGNING_KEY_NEW) {
+        let minted = toyos_build::signing::repo_key_path().and_then(|path| toyos_build::signing::mint_repo_key(&path).map(|key| (path, key)));
+        match minted {
+            Ok((path, key)) => {
+                eprintln!("The repository's signing key is at {} ({}).", path.display(), key.fingerprint());
+                println!("{}", toyos_update::repo::public_line(&key.public()));
+            }
+            Err(why) => {
+                eprintln!("Error: {why}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     // Before anything is built, so a missing key is refused before any lock
     // and no image this run writes is signed by two keys.
     let update_image = CARGO_RUN.value(&args, &flags::UPDATE_IMAGE).map(PathBuf::from);
@@ -135,23 +152,27 @@ fn main() {
             }
         }
     }
-    // Writes the key's package repository and builds nothing.
+    // Writes the package repository and builds nothing.
     if let Some(manifest) = CARGO_RUN.value(&args, &flags::PUBLISH) {
-        let key = toyos_build::signing::key();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("a clock after 1970")
             .as_secs();
-        let published = toyos_build::publish::repository(&root, key)
-            .and_then(|dir| toyos_build::publish::publish(Path::new(manifest), &dir, key, now).map(|p| (dir, p)));
+        let published = toyos_build::signing::repo_key_path()
+            .and_then(|path| toyos_build::signing::read_repo_key(&path))
+            .and_then(|key| {
+                let home = env::var_os("HOME").ok_or("no $HOME, which the repository is under")?;
+                let dir = PathBuf::from(home).join(toyos_build::publish::REPOSITORY_DIR);
+                toyos_build::publish::publish(Path::new(manifest), &dir, &key, now).map(|p| (dir, p, key.fingerprint()))
+            });
         match published {
-            Ok((dir, p)) => println!(
-                "Published into {}: root {}, targets {}, timestamp {}, signed by {}.",
+            Ok((dir, p, fingerprint)) => println!(
+                "Published into {}: root {}, targets {}, timestamp {}, signed by {fingerprint}; pruned {}.",
                 dir.display(),
                 p.root,
                 p.targets,
                 p.timestamp,
-                key.fingerprint()
+                p.pruned.len()
             ),
             Err(why) => {
                 eprintln!("Error: {why}");

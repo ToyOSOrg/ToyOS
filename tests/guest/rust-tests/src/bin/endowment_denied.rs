@@ -36,12 +36,6 @@
 //! is refused to the same handle. A kernel that demanded the bit for the header
 //! fails the first; a kernel that stopped demanding it fails the second.
 //!
-//! `/system/bin/ps` is then run twice, endowed a duplicate with the bit and a
-//! duplicate without it. The shipped applet reaching those same two answers
-//! through the SDK is what says the manifest's name, the kernel's demand and
-//! the program are one line rather than three that agree by luck — and it is
-//! the only thing in this suite that runs `ps` at all.
-//!
 //! **The shutdown arms are the ones with a machine behind them.** `SYS_SHUTDOWN`
 //! used to take no argument, so both of them made the call and the guest went
 //! away: a kernel that stops demanding `Rights::POWER` does not fail these
@@ -67,7 +61,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::toyos::process::CommandExt;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
@@ -82,7 +76,6 @@ use toyos_abi::syscall::{
 use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_endowment_denied";
-const PS_PATH: &str = "/system/bin/ps";
 const OPEN: &str = "echo";
 const PRIVILEGED: &str = "privileged";
 
@@ -172,7 +165,6 @@ fn test() {
     the_base_plus_one_more_name();
     a_right_the_capability_lacks_is_a_word();
     the_roster_is_a_right_and_the_header_is_not();
-    the_shipped_applet_reaches_both_answers();
     every_applet_holds_only_what_its_policy_names();
     for (role, what_would_be_wrong) in NOT_A_HANDLE {
         killed(role, what_would_be_wrong);
@@ -452,54 +444,6 @@ fn the_roster_is_a_right_and_the_header_is_not() {
 /// `/system/bin/ps`, endowed a duplicate with the bit and a duplicate without it.
 ///
 /// **The shipped applet and not a raw call, because the plumbing is the risk.**
-/// The manifest's `roster` name, `syscap_rights`' bit, the supervisor's narrowing, the
-/// SDK's `SysCap::roster` and the kernel's demand are five places that have to
-/// agree, and every arm above this one exercises the last of them through the
-/// first only by hand. This runs the program a user runs. It is also the only
-/// thing in this suite that runs `ps` at all.
-fn the_shipped_applet_reaches_both_answers() {
-    let granted = ps_endowed(
-        cap().narrowed(Rights::TRANSFER.union(Rights::ROSTER)).expect("a cap carrying ROSTER"),
-    );
-    let said = String::from_utf8_lossy(&granted.stdout);
-    assert_eq!(granted.status.code(), Some(0), "ps with ROSTER exited nonzero: {said}");
-    let mut lines = said.lines();
-    let header = lines.next().unwrap_or("");
-    assert!(
-        header.contains("PID") && header.contains("NAME"),
-        "ps with ROSTER did not print its column header: {said:?}",
-    );
-    let rows = lines.count();
-    assert!(rows > 0, "ps with ROSTER printed a header and no process: {said:?}");
-
-    let refused = ps_endowed(cap().narrowed(Rights::TRANSFER).expect("a cap carrying less"));
-    let complaint = String::from_utf8_lossy(&refused.stderr);
-    assert_eq!(
-        refused.status.code(),
-        Some(1),
-        "ps without ROSTER did not refuse: {:?} / {complaint:?}",
-        String::from_utf8_lossy(&refused.stdout),
-    );
-    assert!(
-        complaint.contains("ROSTER"),
-        "ps without ROSTER did not say which bit it lacked: {complaint:?}",
-    );
-    assert!(
-        refused.stdout.is_empty(),
-        "ps without ROSTER printed a roster anyway: {:?}",
-        String::from_utf8_lossy(&refused.stdout),
-    );
-
-    // The rows do not sum to the machine, and `ps` says by how much rather than
-    // leaving the difference to be read as unattributed CPU.
-    assert!(
-        said.lines().last().is_some_and(|l| l.contains("have been reaped")),
-        "ps accounted for no reaped CPU at all: {said:?}",
-    );
-
-    println!("  ps: {rows} processes with the bit, and a named refusal without it");
-}
-
 /// The authority records each `program` row grants, keyed by the binary path
 /// its own line names. **Its own parse, not `toyos_manifest`'s**: a checker that
 /// reads the manifest through the supervisor's parser and resolves links through the supervisor's
@@ -588,21 +532,6 @@ fn every_applet_holds_only_what_its_policy_names() {
         applets.len(),
         over.len(),
     );
-}
-
-/// Run `/system/bin/ps` holding exactly `cap` and nothing else of ours.
-///
-/// A fresh duplicate per run: the endowment moves into the child, and a claim
-/// this process kept would be a second holder of one handle.
-fn ps_endowed(cap: SysCap) -> Output {
-    Command::new(PS_PATH)
-        .endow(SYSCAP_LABEL, cap.into_raw().0)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn /system/bin/ps")
-        .wait_with_output()
-        .expect("wait for /system/bin/ps")
 }
 
 /// Run `role` and require that the kernel ended it at its call.

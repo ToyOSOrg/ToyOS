@@ -13,8 +13,10 @@
 //! the batteries' and adapters' own methods alone: the controller's `_REG`
 //! and the walk that named the devices ran before it, and are not theirs.
 //!
-//! **Every [`POLL`]** each battery's `_BST` and each adapter's `_PSR` are
-//! evaluated ([`Power::read`]), and a line is said on the first reading and
+//! **Every [`POLL`]**, and on a Notify of a status change (§10.2.1), each
+//! battery's `_BST` and each adapter's `_PSR` are evaluated
+//! ([`Power::read`]); on a battery's Notify of an information change they are
+//! found again. A line is said on the first reading and
 //! wherever a battery's whole percent or state, or the adapter's, moved since
 //! the line before: a draining battery says a line a percent, never one a
 //! poll.
@@ -358,7 +360,7 @@ impl Power {
         if present == 0 {
             return (None, Some(format!("acpiserver: no battery: {found}")));
         }
-        let line = format!("acpiserver: power sources: {found}, the first reading's included; each read every {} s", POLL.as_secs());
+        let line = format!("{}{found}, the first reading's included; each read every {} s", acpiserver_api::POWER_SOURCES, POLL.as_secs());
         (Some(power), Some(line))
     }
 
@@ -555,12 +557,14 @@ pub mod tests {
     }
 
     /// The fixture loaded and its controller found and attached, as the
-    /// server arms it ([`crate::attach`]).
+    /// server arms it ([`devices::attach`]).
     fn armed(kernel: &Scripted) -> (Aml<'_, Scripted>, Found) {
         let (_, aml) = crate::aml::load(kernel, CRAFTED_RSDP);
         let mut aml = aml.expect("the fixture's DSDT loads");
-        let found = devices::find(&mut aml.interpreter, &mut aml.host, GPE0, false);
-        crate::attach(&mut aml, found.ec.as_ref().expect("the fixture's controller")).expect("no port of it refused");
+        let names = crate::init::Names::read(&aml.interpreter).expect("the namespace reads");
+        let found = devices::find(&mut aml.interpreter, &mut aml.host, &names, GPE0, false);
+        let ec = found.ec.clone().expect("the fixture's controller");
+        devices::attach(&mut aml, ec, &names, &mut crate::init::Census::default()).expect("no port of it refused");
         (aml, found)
     }
 
@@ -677,19 +681,27 @@ pub mod tests {
     }
 
     /// §6.5.7: a controller whose `_GLK` is 1 wants the Global Lock around
-    /// each transaction, which this server does not take: its space is not
-    /// attached to AML, its `_REG` is not run, and the battery, which says
-    /// it is present only after, is not read, nor is the controller reached.
+    /// each transaction: its space is attached, its `_REG` run and its
+    /// battery read, every transaction AML makes on it under the lock, which
+    /// the kernel's stand-in holds it to, and the lock given back after each.
+    /// One whose `_GLK` is absent or 0 is reached without the lock, and one
+    /// whose `_GLK` is another value is not attached, nor its battery read,
+    /// nor the controller reached.
     #[test]
-    fn a_controller_that_wants_the_global_lock_is_not_attached_and_no_battery_is_read() {
-        for (glk, attached) in [(Some(1), false), (Some(0), true), (None, true)] {
-            let kernel = laptop_machine(glk);
+    fn a_controller_that_wants_the_global_lock_is_reached_under_it_alone() {
+        for (glk, attached, locked) in [(Some(1), true, true), (Some(0), true, false), (None, true, false), (Some(2), false, false)] {
+            let mut kernel = laptop_machine(glk);
+            kernel.lock_rule = locked;
             let (mut aml, power) = found(&kernel);
             assert_eq!(power.is_some(), attached, "_GLK {glk:?}");
-            assert_eq!(aml.host.ec.is_some(), attached, "_GLK {glk:?}");
+            assert_eq!(aml.host.ec.as_ref().map(|ec| ec.glk), attached.then_some(locked), "_GLK {glk:?}");
             let ecok = aml.interpreter.evaluate(&mut aml.host, "\\_SB_.EC0_.ECOK", &[]);
             assert_eq!(ecok, Ok(Value::Integer(u64::from(attached))), "_GLK {glk:?}");
             assert_eq!(done(&kernel).is_empty(), !attached, "_GLK {glk:?}: {:x?}", done(&kernel));
+            assert!(!kernel.held.get(), "_GLK {glk:?}: the lock was left taken");
+            if locked {
+                assert!(aml.host.takes as usize > done(&kernel).len(), "_GLK {glk:?}: fewer takes than transactions");
+            }
         }
     }
 

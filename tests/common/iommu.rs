@@ -1,23 +1,18 @@
-//! `iommu_virtio_platform`: whether each virtio function QEMU creates behind
-//! its emulated VT-d unit, and none created without one, negotiated
-//! `VIRTIO_F_ACCESS_PLATFORM`, and that a process's claim on one is refused
-//! where no unit is. `amdvi_firmware_left`: whether an AMD-Vi unit firmware
-//! left blocking is switched off before the boot stick is driven.
+//! `iommu_virtio_platform`: whether each virtio function the kernel drives
+//! itself negotiated `VIRTIO_F_ACCESS_PLATFORM` behind QEMU's emulated VT-d
+//! unit and none without one, and that a process's claim on one is handed
+//! over behind the unit and refused where no unit is.
+//! `amdvi_firmware_left`: whether an AMD-Vi unit firmware left blocking is
+//! switched off before the boot stick is driven.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use super::qemu::{self, BootOptions, Profile, QemuInstance};
+use super::qemu::{self, is_kernel_line, BootOptions, Profile, QemuInstance};
 use super::serial::Serial;
 
 /// The function `tests/images/netcase.toml`'s netstack claims, as its `devices` row spells it.
 const NETSTACK_CLAIMS: &str = "1af4:1041";
-
-/// soundserver's feature line, the kernel's shape under soundserver's name.
-const SOUNDSERVER_NEGOTIATED: &str = "soundserver: VirtIO: PCI ";
-
-/// fileserver's word for DATA's directories served from memory.
-const IN_MEMORY: &str = "are in memory and will not survive a reboot";
 
 /// The boot config that runs `netstack` with a virtio NIC in front of it.
 fn netcase() -> std::path::PathBuf {
@@ -30,8 +25,10 @@ fn netcase() -> std::path::PathBuf {
 /// whatever the tables say — unless it is created with `iommu_platform=on`
 /// (`hw/virtio/virtio-bus.c:86-99`, `hw/virtio/virtio-pci.c:1400-1405` at
 /// v11.1.1), and under identity mapping the two are indistinguishable. So the
-/// argv says which functions were created behind a unit and the console says
-/// which negotiated `VIRTIO_F_ACCESS_PLATFORM`. On [`Profile::HeadlessNoIommu`]
+/// argv says which functions were created behind a unit and the kernel's
+/// records say which of those it drives negotiated `VIRTIO_F_ACCESS_PLATFORM`;
+/// the NIC's and the sound function's drivers are processes', whose
+/// negotiation is `toyos-virtio`'s and host-tested there. On [`Profile::HeadlessNoIommu`]
 /// the guest reports `n` because QEMU never *offers* the bit
 /// (`hw/virtio/virtio-bus.c:87-94`), not because the driver declined — it offers
 /// blindly; the independence comes from [`declining_is_not_free`].
@@ -66,28 +63,18 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         }
 
         // `netcase`: the NIC's driver is a process, and this is the one config
-        // that runs it. A daemon's line is waited for on the stream: the boot
-        // log ends at test-runner's `===READY===`, its first act, and nothing
-        // orders that against what the programs the supervisor started before it print.
-        // And the kernel's records of a claim with them: those reach the
-        // console by the kernel's own road, which nothing orders against a
-        // program's line either.
+        // that runs it. The kernel's records of a claim are waited for on the
+        // stream: the boot log ends at test-runner's `===READY===`, its first
+        // act, and nothing orders that against the claims of the programs the
+        // supervisor started before it.
         let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
         let said: Vec<String> = if behind_unit {
-            vec![
-                NETSTACK_NEGOTIATED.to_string(),
-                SOUNDSERVER_NEGOTIATED.to_string(),
-                bar_moved(),
-                msix_armed(),
-            ]
+            vec![bar_moved(), msix_armed()]
         } else {
             vec![
-                DISKSERVER_REFUSED.to_string(),
-                FILESERVER_WITHOUT_DATA.to_string(),
                 not_handed_over(CLAIMED_AT, NOT_REMAPPED),
                 not_handed_over(NVME_AT, NOT_REMAPPED),
                 not_handed_over(SOUND_AT, NOT_REMAPPED),
-                super::audio::NULL_SINK.to_string(),
             ]
         };
         let mut text = qemu.boot_log().to_string();
@@ -98,7 +85,6 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         let log = Serial::named("boot console", text);
         log.must_be_clean()?;
         log.must_say("Boot: complete")?;
-        log.must_say("supervisor: started netstack")?;
         // The CPU's own source in the generator's key, which firmware's seed
         // alone would key without it wherever firmware answers EFI_RNG_PROTOCOL.
         log.must_say("random: RDRAND is mixed into the generator's key")?;
@@ -107,25 +93,24 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         // machine's answer, not a choice.** A process driving a device writes
         // addresses into descriptors, so the substrate refuses a claim on a
         // function this machine cannot give an address space of its own — and
-        // on a machine with no unit that is every function. So the arm with a
-        // unit has three negotiators, one of them across the boundary, and the
-        // arm without one has two and a refusal.
-        let expected = if behind_unit {
+        // on a machine with no unit that is every function.
+        if behind_unit {
             // The two things a hand-over spends, on the same function and the
             // same machine the arm below requires to be unspent. Without this
             // pair those `must_not_say`s would pass against a kernel that had
             // stopped writing either line.
             log.must_say(&bar_moved())?;
             log.must_say(&msix_armed())?;
-            created.len()
         } else {
             no_unit_is_no_claim(&log)?;
-            // The NIC's and the sound function's claims, refused.
-            created.len() - 2
-        };
+        }
 
+        // Every function the kernel drives itself: all QEMU created but the
+        // NIC, the sound function and the clipboard's channel, whose drivers
+        // are processes.
+        let expected = created.len() - 3;
         let mut negotiated = Vec::new();
-        for line in log.text().lines() {
+        for line in log.text().lines().filter(|line| is_kernel_line(line)) {
             let Some(rest) = line.split("VirtIO: PCI ").nth(1) else { continue };
             let Some((who, _)) = rest.split_once(' ') else {
                 return Err(format!("{name}: unreadable feature line: {line:?}"));
@@ -136,8 +121,8 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
         }
         if negotiated.len() != expected {
             return Err(format!(
-                "{name}: QEMU created {} virtio function(s), {expected} of them for a driver \
-                 this machine can bring up, and the guest negotiated features with {} — \
+                "{name}: QEMU created {} virtio function(s), {expected} of them for the kernel's \
+                 own drivers, and the kernel negotiated features with {} — \
                  {negotiated:?} against {created:?}",
                 created.len(),
                 negotiated.len()
@@ -158,37 +143,14 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
                 ));
             }
         }
-        let sound = class_function(&log, "0401")
-            .ok_or_else(|| format!("{name}: this machine enumerated no audio function"))?;
-        if sound != SOUND_AT {
-            return Err(format!("{name}: the audio function is {sound}, where {SOUND_AT} is owed"));
-        }
-        if behind_unit != negotiated.iter().any(|(who, _)| *who == sound) {
-            return Err(format!(
-                "{name}: the audio function {sound} negotiated features = {}, where a process's \
-                 claim on it is owed = {behind_unit}: {negotiated:?}",
-                !behind_unit
-            ));
-        }
         eprintln!(
-            "  [iommu] {name}: {} virtio function(s) negotiated, behind a unit = {behind_unit}; {}",
+            "  [iommu] {name}: the kernel's {} virtio function(s) negotiated, behind a unit = {behind_unit}; {}",
             negotiated.len(),
-            if behind_unit {
-                format!("the audio function {sound} among them")
-            } else {
-                format!("the NIC's and the audio function {sound}'s claims refused for want of a unit")
-            }
+            if behind_unit { "the NIC's claim handed over" } else { "every claim refused for want of a unit" }
         );
     }
     declining_is_not_free(test_config)
 }
-
-/// netstack's feature line, the kernel's shape under netstack's name.
-const NETSTACK_NEGOTIATED: &str = "netstack: VirtIO: PCI ";
-const DISKSERVER_REFUSED: &str =
-    "diskserver: NOT SERVING — pci:1b36:0010 is on this machine and the kernel refused this service its claim";
-const FILESERVER_WITHOUT_DATA: &str =
-    "fileserver: the block service would not list its partitions (Refused(ClaimRefused)); DATA is absent this boot";
 
 /// The slot QEMU's `-device` order puts `tests/images/netcase.toml`'s NVMe controller on,
 /// the one its diskserver row claims.
@@ -206,31 +168,24 @@ fn not_handed_over(at: &str, why: &str) -> String {
     format!("pcidev: PCI {at} NOT HANDED OVER — {why}")
 }
 
-/// **A machine with no unit hands no function to a process**, and says so
-/// three times over.
+/// **A machine with no unit hands no function to a process**, and the
+/// supervisor that asked is told so.
 ///
 /// The ordering ruling this whole stage stands on
 /// (`issues/every-driver-is-still-in-the-kernel.md`) is that moving a
 /// driver out without the unit costs security: a message nothing remaps raises
 /// any vector on any CPU, and a descriptor holding a physical address is an
-/// arbitrary read and write over all of memory. So the kernel
-/// refuses the claim by name, the supervisor says which device it could not
-/// mint, and netstack exits rather than driving anything — and the machine
-/// finishes booting, which is the half a refusal that panicked would fail. The
-/// NVMe controller is refused the same, and DATA with it by name: a disk that
-/// is there and cannot be used is never answered with memory. So is the
-/// virtio-sound function, and soundserver takes its null sink.
+/// arbitrary read and write over all of memory. So the kernel refuses the
+/// claim by name and the supervisor says which device it could not mint — and
+/// the machine finishes booting, which is the half a refusal that panicked
+/// would fail. The NVMe controller and the virtio-sound function are refused
+/// the same.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
-    // netstack's own exit is the third saying, and is not read here.
     refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[NVME_AT, SOUND_AT])?;
     log.must_say(&not_handed_over(SOUND_AT, NOT_REMAPPED))?;
     log.must_say("supervisor: soundserver: pci:1af4:1059 is on this machine and could not be handed over")?;
-    log.must_say(super::audio::NULL_SINK)?;
     log.must_say(&not_handed_over(NVME_AT, NOT_REMAPPED))?;
     log.must_say("supervisor: diskserver: pci:1b36:0010 is on this machine and could not be handed over")?;
-    log.must_say(DISKSERVER_REFUSED)?;
-    log.must_say(FILESERVER_WITHOUT_DATA)?;
-    log.must_not_say(IN_MEMORY)?;
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be
     // given an address space for.
@@ -403,27 +358,6 @@ fn enumerated_functions(log: &Serial) -> BTreeSet<String> {
             tail.starts_with('[').then(|| bdf.to_string())
         })
         .collect()
-}
-
-/// The one function `pci::enumerate` printed with this class, or none.
-///
-/// `None` rather than a first match over several: two controllers of one class
-/// would make "the one the actuator skipped" ambiguous, and a gate that picked
-/// either would be asserting against a guess.
-fn class_function(log: &Serial, class: &str) -> Option<String> {
-    let mut found: Option<String> = None;
-    for line in log.text().lines() {
-        let Some((bdf, tail)) = line.split("PCI ").nth(1).and_then(|r| r.split_once(' ')) else {
-            continue;
-        };
-        if tail.starts_with(&format!("[{class}]")) {
-            if found.is_some() {
-                return None;
-            }
-            found = Some(bdf.to_string());
-        }
-    }
-    found
 }
 
 /// What the kernel says of the one unit QEMU's IVRS describes, as an 11h over

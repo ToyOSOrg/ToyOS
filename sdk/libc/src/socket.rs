@@ -11,8 +11,9 @@ use crate::errcode::{
     EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOPROTOOPT,
     ENOSPC, ENOTCONN, EOPNOTSUPP, EPIPE, ETIMEDOUT,
 };
-use crate::streamend::{self, Refusal};
+use toyos::net::{read_end, write_refused, StreamRefusal};
 use crate::inaddr::{self, SockaddrIn, AF_INET};
+use crate::dgramreq;
 use crate::sockopt::{self, Kept};
 
 // C types matching POSIX
@@ -151,6 +152,23 @@ fn bind_datagram(entry: &mut SocketEntry, ip: [u8; 4], port: u16) -> Result<(), 
     entry.tx_fd = bound.tx.into_raw().0 as i32;
     entry.rx_fd = bound.rx.into_raw().0 as i32;
     Ok(())
+}
+
+/// A datagram socket's calls of netstack, answered in `errno`s: its bytes go
+/// down its pipe, then the request that names where they go.
+impl dgramreq::Datagrams for SocketEntry {
+    type Error = i32;
+    fn held(&self) -> bool {
+        self.netstack_id != 0
+    }
+    fn bind(&mut self, ip: [u8; 4], port: u16) -> Result<(), i32> {
+        bind_datagram(self, ip, port).map_err(net_err_to_errno)
+    }
+    fn send(&mut self, data: &[u8], ip: [u8; 4], port: u16) -> Result<usize, i32> {
+        syscall::write(RawHandle(self.tx_fd as u32), data).map_err(|_| EIO)?;
+        let sent = toyos::net::udp_send_to(UdpSocketId(self.netstack_id), ip, port, data.len() as u16);
+        sent.map(|sent| sent as usize).map_err(net_err_to_errno)
+    }
 }
 
 // BSD socket API
@@ -361,7 +379,7 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
             let data = core::slice::from_raw_parts(buf, len);
             match syscall::write(RawHandle(entry.tx_fd as u32), data) {
                 Ok(n) => n as isize,
-                Err(e) => { set_errno(stream_errno(streamend::write_refused(e))); -1 }
+                Err(e) => { set_errno(stream_errno(write_refused(e))); -1 }
             }
         }
         SocketKind::Udp => {
@@ -396,8 +414,8 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, _flags: i32) ->
                 return 0;
             }
             let data = core::slice::from_raw_parts_mut(buf, len);
-            let read = syscall::read(RawHandle(entry.rx_fd as u32), data).map_err(|_| Refusal::Other).and_then(|n| match n {
-                0 => streamend::read_end(syscall::write_nonblock(RawHandle(entry.tx_fd as u32), &[])).map(|()| 0),
+            let read = syscall::read(RawHandle(entry.rx_fd as u32), data).map_err(|_| StreamRefusal::Other).and_then(|n| match n {
+                0 => read_end(syscall::write_nonblock(RawHandle(entry.tx_fd as u32), &[])).map(|()| 0),
                 n => Ok(n),
             });
             match read {
@@ -442,24 +460,10 @@ pub unsafe extern "C" fn sendto(
                 Some(v) => v,
                 None => { set_errno(EINVAL); return -1; }
             };
-            // POSIX: a socket not yet bound is bound at its first send, to a
-            // port the stack chooses.
-            if entry.netstack_id == 0 {
-                if let Err(e) = bind_datagram(entry, [0; 4], 0) {
-                    set_errno(net_err_to_errno(e));
-                    return -1;
-                }
-            }
-            // Write data to tx pipe
             let data = core::slice::from_raw_parts(buf, len);
-            if let Err(_) = syscall::write(RawHandle(entry.tx_fd as u32), data) {
-                set_errno(EIO);
-                return -1;
-            }
-            // Send control message with metadata
-            match toyos::net::udp_send_to(UdpSocketId(entry.netstack_id), ip, port, len as u16) {
+            match dgramreq::send_to(entry, data, ip, port) {
                 Ok(sent) => sent as isize,
-                Err(e) => { set_errno(net_err_to_errno(e)); -1 }
+                Err(errno) => { set_errno(errno); -1 }
             }
         }
     }
@@ -543,11 +547,11 @@ const SHUT_RD: i32 = 0;
 const SHUT_WR: i32 = 1;
 const SHUT_RDWR: i32 = 2;
 
-fn stream_errno(refusal: Refusal) -> i32 {
+fn stream_errno(refusal: StreamRefusal) -> i32 {
     match refusal {
-        Refusal::Reset => ECONNRESET,
-        Refusal::Again => EAGAIN,
-        Refusal::Other => EIO,
+        StreamRefusal::Reset => ECONNRESET,
+        StreamRefusal::Again => EAGAIN,
+        StreamRefusal::Other => EIO,
     }
 }
 

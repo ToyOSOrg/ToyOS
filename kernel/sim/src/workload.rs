@@ -173,9 +173,8 @@ pub enum MigrateShape {
     /// argument is unchanged by that.
     ReapTheCorpse,
     /// The balance path before it read the kill bit: a killed ready task is
-    /// migrated like any other, and its unwind then waits on an
-    /// `Urgency::Normal` adopt reaching a CPU that owes it nothing sooner than
-    /// its next voluntary pass. See `scenarios::old_migrate_kept_the_corpse`.
+    /// migrated like any other, and its unwind then waits for the destination's
+    /// pick. See `scenarios::old_migrate_kept_the_corpse`.
     KeepTheCorpse,
 }
 

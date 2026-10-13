@@ -38,6 +38,29 @@ pub fn counter() -> u64 {
     }
 }
 
+/// Whether the processor is Intel's, by CPUID leaf 0's vendor string,
+/// `GenuineIntel` in EBX, EDX and ECX (Intel SDM Vol. 2A, "CPUID"): the
+/// vendor whose interface a processor object's `_OSC` speaks under Intel's
+/// UUID (Intel 302223-007 §2.2).
+pub fn processor_is_intel() -> bool {
+    let (ebx, ecx, edx): (u64, u32, u32);
+    // SAFETY: CPUID is unprivileged, and the kernel enables no CPUID
+    // faulting; RBX, which LLVM reserves, is put back as it was.
+    unsafe {
+        core::arch::asm!(
+            "mov {rbx}, rbx",
+            "cpuid",
+            "xchg {rbx}, rbx",
+            rbx = out(reg) ebx,
+            inout("eax") 0u32 => _,
+            inout("ecx") 0u32 => ecx,
+            out("edx") edx,
+            options(nomem, nostack, preserves_flags),
+        );
+    }
+    [ebx as u32, edx, ecx] == [*b"Genu", *b"ineI", *b"ntel"].map(u32::from_le_bytes)
+}
+
 /// `in` and `out` from Ring 3: a port this process holds no grant for, which
 /// its CPU's I/O permission bitmap refuses, faults it.
 pub mod ioport {

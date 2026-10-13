@@ -201,8 +201,8 @@ fn an_unlisted_register_is_read_where_it_is_uncached_and_never_written() {
     }
     // The last byte the range registers type so, and the first they do not.
     assert!(passes(&laptop, REGISTERS, Width::Byte, false));
-    assert_eq!(refused(&laptop, REGISTERS - 1, Width::Byte, false), Refused::UnlistedCached);
-    assert_eq!(refused(&laptop, REGISTERS - 1, Width::Word, false), Refused::UnlistedCached, "a read that begins outside it");
+    assert_eq!(refused(&laptop, REGISTERS - 1, Width::Byte, false), Refused::RegisterCached);
+    assert_eq!(refused(&laptop, REGISTERS - 1, Width::Word, false), Refused::RegisterCached, "a read that begins outside it");
     assert!(passes(&laptop, 4 * GIB - 9, Width::QWord, false));
     // Past what the kernel maps there is nothing to read it through.
     assert_eq!(refused(&laptop, 4 * GIB - 4, Width::QWord, false), Refused::Unmapped);
@@ -214,13 +214,58 @@ fn an_unlisted_register_is_read_where_it_is_uncached_and_never_written() {
     assert_eq!(refused(&decoding, AT + 0x110, Width::Byte, false), Refused::DeviceMemory);
     assert_eq!(refused(&q35(), 0xfee0_0000, Width::DWord, false), Refused::DeviceMemory, "the local APIC");
     // Listed memory is decided by its type, whatever the range registers say of it.
-    const TYPED: [MemoryMapEntry; 3] = [e(7, REGISTERS, REGISTERS + 0x1000), e(11, REGISTERS + 0x1000, REGISTERS + 0x2000), e(0, REGISTERS + 0x2000, REGISTERS + 0x3000)];
+    const TYPED: [MemoryMapEntry; 3] = [e(7, REGISTERS, REGISTERS + 0x1000), e(5, REGISTERS + 0x1000, REGISTERS + 0x2000), e(0, REGISTERS + 0x2000, REGISTERS + 0x3000)];
     let typed = bare(&TYPED, &[]);
     assert_eq!(refused(&typed, REGISTERS, Width::Byte, false), Refused::UsableMemory);
     assert_eq!(refused(&typed, REGISTERS + 0x1000, Width::Byte, false), Refused::MemoryType);
     assert!(passes(&typed, REGISTERS + 0x2000, Width::Byte, true));
     // A read across listed memory and a hole is two things.
     assert_eq!(refused(&typed, REGISTERS + 0x3000 - 1, Width::Word, false), Refused::Straddles);
+}
+
+/// Memory the firmware's map types `EfiMemoryMappedIO` is a device's
+/// registers, as the AMD bench's DSDT reads one while it loads: read, in each
+/// width, exactly where an unlisted register is (inside the direct map, at or
+/// above 1 MiB, typed uncacheable by the range registers every CPU holds),
+/// and never written. A page the kernel knows a device decodes in, the local
+/// APIC's and an ECAM window typed so are what they are whatever the map
+/// says, and a read that leaves the range for RAM is refused.
+#[test]
+fn memory_mapped_io_is_read_as_a_register_is_and_never_written() {
+    const AT: u64 = REGISTERS + 0x10_0000;
+    const MMIO: [MemoryMapEntry; 4] = [
+        e(7, 0x0, 0x8000_0000),
+        e(11, 0x8000_0000, 0x8010_0000),
+        e(7, AT - 0x1000, AT),
+        e(11, AT, AT + 0x10_0000),
+    ];
+    let memory = bare(&MMIO, &[]);
+    assert_eq!(type_word(&MMIO, AT), 11);
+    for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
+        assert!(passes(&memory, AT + 0x110, width, false), "{width:?}");
+        assert!(passes(&memory, AT + 0x10_0000 - width.bytes(), width, false), "{width:?} at its last byte");
+        assert_eq!(refused(&memory, AT + 0x110, width, true), Refused::MemoryType, "{width:?}");
+    }
+    // Typed memory-mapped I/O the range registers cache is no register.
+    assert_eq!(refused(&memory, 0x8000_0000, Width::Byte, false), Refused::RegisterCached);
+    assert_eq!(refused(&memory, 0x8000_0000, Width::Byte, true), Refused::MemoryType);
+    // A read across it and the RAM beside it, from either side.
+    assert_eq!(refused(&memory, AT - 1, Width::Word, false), Refused::Straddles);
+    assert_eq!(refused(&memory, AT - 1, Width::Byte, false), Refused::UsableMemory);
+    // Some CPU's range registers on and not the boot processor's.
+    let differing = Memory { registers_differ: true, ..bare(&MMIO, &[]) };
+    assert_eq!(refused(&differing, AT + 0x110, Width::DWord, false), Refused::RangeRegistersDiffer);
+    // Past what the kernel maps there is nothing to read it through.
+    let low = Memory { mapped_end: AT + 0x110, ..bare(&MMIO, &[]) };
+    assert_eq!(refused(&low, AT + 0x110, Width::Byte, false), Refused::Unmapped);
+    // A page a driven window or a function's BAR holds, and the local APIC.
+    let decoding = bare(&MMIO, &[(AT + 0x2000, AT + 0x2004)]);
+    assert_eq!(refused(&decoding, AT + 0x2ff8, Width::QWord, false), Refused::DeviceMemory);
+    assert!(passes(&decoding, AT + 0x3000, Width::QWord, false));
+    const APIC: [MemoryMapEntry; 1] = [e(11, 0xfee0_0000, 0xfef0_0000)];
+    assert_eq!(refused(&bare(&APIC, &[]), 0xfee0_0030, Width::DWord, false), Refused::DeviceMemory);
+    // An ECAM window the map types memory-mapped I/O is configuration space.
+    assert!(matches!(laptop().decide(0xc000_8000, Width::DWord, false), MemoryVerdict::AsConfig(..)));
 }
 
 /// The range registers the cache check answers from are the boot processor's.
@@ -260,13 +305,13 @@ fn an_unlisted_address_below_1_mib_is_refused_whatever_the_range_registers_answe
     let memory = Memory { uncached: |_, _| true, ..bare(HOLE, &[]) };
     for width in [Width::Byte, Width::Word, Width::DWord, Width::QWord] {
         for at in [0xa_0000, 0xc_0000, FIXED_RANGE_END - 8, FIXED_RANGE_END - width.bytes()] {
-            assert_eq!(refused(&memory, at, width, false), Refused::UnlistedCached, "{at:#x} {width:?}");
+            assert_eq!(refused(&memory, at, width, false), Refused::RegisterCached, "{at:#x} {width:?}");
             assert_eq!(refused(&memory, at, width, true), Refused::MemoryType, "{at:#x} {width:?}");
         }
         assert!(passes(&memory, FIXED_RANGE_END, width, false), "{width:?} at the bound");
     }
-    assert_eq!(refused(&memory, FIXED_RANGE_END - 1, Width::Byte, false), Refused::UnlistedCached);
-    assert_eq!(refused(&memory, FIXED_RANGE_END - 1, Width::Word, false), Refused::UnlistedCached, "a read that begins below the bound");
+    assert_eq!(refused(&memory, FIXED_RANGE_END - 1, Width::Byte, false), Refused::RegisterCached);
+    assert_eq!(refused(&memory, FIXED_RANGE_END - 1, Width::Word, false), Refused::RegisterCached, "a read that begins below the bound");
     // Listed memory below the bound is decided by its type, as anywhere.
     assert!(passes(&laptop(), 0x9f000, Width::DWord, false));
 }
@@ -327,7 +372,7 @@ fn every_other_type_and_an_unlisted_address_is_refused_with_its_type() {
     // A hole the map does not list, which no register is in: its write is
     // refused by the map, and its read by the range registers.
     assert_eq!(refused(&laptop, 0x8000_0000, Width::Byte, true), Refused::MemoryType);
-    assert_eq!(refused(&laptop, 0x8000_0000, Width::Byte, false), Refused::UnlistedCached);
+    assert_eq!(refused(&laptop, 0x8000_0000, Width::Byte, false), Refused::RegisterCached);
     assert_eq!(type_word(&LAPTOP, 0x8000_0000), toyos_abi::acpi::UNLISTED);
     // Every type but the four the policy names, as the only range of a map.
     for ty in (0..=0x20u32).chain([0x7000_0000, 0x8000_0000, u32::MAX]) {
@@ -339,6 +384,8 @@ fn every_other_type_and_an_unlisted_address_is_refused_with_its_type() {
         match ty {
             0 | 10 => assert!(through(read) && through(write), "type {ty}"),
             6 | 9 => assert!(through(read) && write == MemoryVerdict::Refused(Refused::TableWrite), "type {ty}"),
+            // Below 1 MiB, where no register is read.
+            11 => assert!(read == MemoryVerdict::Refused(Refused::RegisterCached) && write == MemoryVerdict::Refused(Refused::MemoryType)),
             1 | 2 | 3 | 4 | 7 => assert!(read == write && read == MemoryVerdict::Refused(Refused::UsableMemory), "type {ty}"),
             _ => assert!(read == write && read == MemoryVerdict::Refused(Refused::MemoryType), "type {ty}"),
         }
@@ -582,6 +629,29 @@ fn a_port_answers_as_its_declaration_says() {
     for (at, width) in [(0x604, Width::Word), (0x605, Width::Byte), (0x660, Width::DWord)] {
         assert!(through(port(standing, at, width, None)).is_some(), "{at:#x} reads");
         assert_eq!(port(standing, at, width, Some(0)), refused_port(Refused::ReadOnlyPort), "{at:#x}");
+    }
+}
+
+/// The 8259 pair's edge/level control, which no declaration holds, is
+/// refused both ways, an access at either end of it or across into it as
+/// well; the ports beside it, the PIT, which the kernel neither declares nor
+/// drives, and the PCI interrupt router's index and data, pass.
+#[test]
+fn the_8259s_edge_level_control_is_refused_though_nothing_declares_it() {
+    for write in [None, Some(0)] {
+        for (at, width) in [(0x4D0, Width::Byte), (0x4D1, Width::Byte), (0x4D0, Width::Word), (0x4CE, Width::DWord)] {
+            assert_eq!(port(standing, at, width, write), refused_port(Refused::ProtectedPort), "{width:?} at {at:#x}");
+        }
+        for (at, width) in [
+            (0x40, Width::DWord),
+            (0x48, Width::DWord),
+            (0x4CC, Width::DWord),
+            (0x4D2, Width::Word),
+            (0xC00, Width::Byte),
+            (0xC01, Width::Byte),
+        ] {
+            assert_eq!(through(port(standing, at, width, write)), Some((at, width)), "{width:?} at {at:#x}");
+        }
     }
 }
 

@@ -60,6 +60,7 @@ fn heap() -> isize {
 }
 
 const BOUND: isize = MAX_LIVE as isize;
+const RUNNING: isize = toyos_aml::MAX_RUNNING as isize;
 
 /// The refusal that is this bound's, and not the step bound's.
 const FULL: &str = "more held live than one interpreter holds";
@@ -91,9 +92,11 @@ impl Filled {
         Filled { held: HELD.get() - before, peak: PEAK.get() - before, refused }
     }
 
-    /// The harm first: the heap held, then that the bound is what ended the fill.
+    /// The harm first: the heap held, and the most held while it ran, then
+    /// that the bound is what ended the fill.
     fn within_the_bound(&self) {
         assert!(self.held <= BOUND, "{} bytes held, {} at most on the way", self.held, self.peak);
+        assert!(self.peak <= RUNNING, "{} bytes held on the way, past the {RUNNING} a running interpreter holds", self.peak);
         assert_eq!(self.refused, Some(Error::Bound(FULL)), "nothing filled the interpreter");
     }
 }
@@ -210,16 +213,16 @@ fn devices_of_one_child_each_fill_it_to_the_bound() {
 }
 
 /// A device nothing is named below holds no map, and none again once a
-/// method has named an object below it and exited: 40,000 such devices, two
+/// method has named an object below it and exited: 30,000 such devices, two
 /// evaluations that each name an object below half of them, then empty
 /// buffers to the bound.
 #[test]
 fn a_parent_whose_last_child_is_unwound_holds_no_map() {
-    let devices: Vec<Vec<u8>> = (0..40_000).map(|d| device(&seg(d), &[])).collect();
+    let devices: Vec<Vec<u8>> = (0..30_000).map(|d| device(&seg(d), &[])).collect();
     let devices = table(b"SSDT", 2, &devices.concat());
-    let (fill, fills) = fillers(8, &buffer(&int(0), &[]));
+    let (fill, fills) = fillers(16, &buffer(&int(0), &[]));
     let below = |half: usize| {
-        let names: Vec<Vec<u8>> = (0..20_000).map(|d| def_name(&format!("\\{}.T", seg(half * 20_000 + d)), &int(0))).collect();
+        let names: Vec<Vec<u8>> = (0..15_000).map(|d| def_name(&format!("\\{}.T", seg(half * 15_000 + d)), &int(0))).collect();
         method(&format!("M{half}"), 0, &names.concat())
     };
     let methods = table(b"SSDT", 2, &cat(&[&below(0), &below(1)]));
@@ -235,7 +238,7 @@ fn a_parent_whose_last_child_is_unwound_holds_no_map() {
     let maps = PEAK.get() - before - held;
     let refused = fills.iter().find_map(|m| i.evaluate(&mut Sink, m, &[]).err());
     Filled::of(before, refused).within_the_bound();
-    // The names were made: 20,000 parents each held a map while one ran.
+    // The names were made: 15,000 parents each held a map while one ran.
     assert!(maps >= 1 << 20, "{maps} bytes held by an evaluation while it ran");
     assert_eq!(kept, held, "bytes held after the two evaluations, and before them");
 }
@@ -475,4 +478,54 @@ fn a_full_interpreter_reads_a_field_that_fits_an_integer() {
     assert_eq!(refused, Some(Error::Bound(FULL)));
     assert_eq!(i.evaluate(&mut Sink, "\\NARW", &[]), Ok(Value::Integer(0)));
     assert_eq!(i.evaluate(&mut Sink, "\\WIDE", &[]), Err(Error::Bound(FULL)));
+}
+
+/// One evaluation holds at most 256 Mutex acquisitions at once: the 257th of
+/// one Mutex acquired again and again is refused at the bound, and the
+/// evaluation holds nothing at its end.
+#[test]
+fn an_evaluation_holds_at_most_256_mutexes() {
+    let acquires = |n: usize| {
+        let acquire = cat(&[&[0x5B, 0x23], &name("MUT0"), &0xFFFFu16.to_le_bytes()]);
+        cat(&[&[0x5B, 0x01], &name("MUT0"), &[0x00], &method("MAIN", 0, &cat(&[&acquire.repeat(n), &ret(&int(1))]))])
+    };
+    let (mut i, _) = start(&acquires(256));
+    assert_eq!(i.evaluate(&mut Sink, "\\MAIN", &[]), Err(Error::Rule("a method exits holding a Mutex it acquired (§19.6.88)")));
+    let (mut i, _) = start(&acquires(257));
+    assert_eq!(i.evaluate(&mut Sink, "\\MAIN", &[]), Err(Error::Bound("more Mutexes held at once than one evaluation holds")));
+}
+
+/// A method refused at the bound ends as any other: what it made, a named object and its
+/// locals' buffers, is given back to the byte, the Global Lock it held is
+/// let go, so the next Acquire of it takes it from the firmware again, and
+/// it is refused by the bound's name; the next method builds a buffer of a
+/// mebibyte. What a method stores into an object that outlives it stays
+/// (`what_is_held_live_is_bounded_in_sum`).
+#[test]
+fn a_method_refused_at_the_bound_gives_back_what_it_made() {
+    let acquire = cat(&[&[0x5B, 0x23], &name("\\_GL"), &0xFFFFu16.to_le_bytes()]);
+    let body = cat(&[
+        &method("MAKE", 0, &ret(&buffer(&int(0x10_0000), &[]))),
+        &method("TAKE", 0, &cat(&[&acquire, &[0x5B, 0x27], &name("\\_GL"), &ret(&int(1))])),
+        &method(
+            "FILL",
+            0,
+            &cat(&[
+                &acquire,
+                &def_name("MINE", &buffer(&int(0x10_0000), &[])),
+                &store(&var_package(&int(64), &[]), &local(0)),
+                &store(&int(0), &local(1)),
+                &while_(&int(1), &cat(&[&store(&buffer(&int(0x10_0000), &[]), &index(&local(0), &local(1), &[0x00])), &increment(&local(1))])),
+            ]),
+        ),
+    ]);
+    let (mut i, _) = start(&body);
+    let (live, held) = (i.usage().live, HELD.get());
+    assert_eq!(i.evaluate(&mut Sink, "\\FILL", &[]), Err(Error::Bound(FULL)));
+    assert_eq!((i.usage().live, HELD.get()), (live, held), "what the refused method made is held");
+    assert_eq!(i.evaluate(&mut Sink, "\\FILL.MINE", &[]), Err(Error::NotFound("\\FILL.MINE".into())));
+    let mut firmware = Machine::default();
+    assert_eq!(i.evaluate(&mut firmware, "\\TAKE", &[]), Ok(Value::Integer(1)));
+    assert_eq!(firmware.log, [Event::GlobalTake(None), Event::GlobalRelease], "the refused method's hold of the Global Lock is kept");
+    assert_eq!(i.evaluate(&mut Sink, "\\MAKE", &[]), Ok(Value::Buffer(vec![0; 0x10_0000])));
 }

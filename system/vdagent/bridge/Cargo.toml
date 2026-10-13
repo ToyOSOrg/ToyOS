@@ -1,0 +1,13 @@
+[package]
+name = "toyos-vdagent-bridge"
+description = "Every decision the clipboard agent makes between QEMU's vdagent and the compositor, pure: who owns the clipboard, the grab serials, and what each transmit owes."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+toyos-vdagent = { path = "../../../lib/vdagent" }
+
+[lib]
+doctest = false

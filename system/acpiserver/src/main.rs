@@ -17,21 +17,36 @@
 //! the load latches and is served when it ends. A table refused, and a DSDT
 //! refused, are each said and survived; the power button is served either
 //! way. The load hands the kernel `\_S5`'s sleep type, without which the
-//! kernel refuses every power-off.
+//! kernel refuses every power-off. A controller the ECDT names is attached to
+//! AML before the first table loads.
+//!
+//! **Then what latched during the load is served** ([`Server::loaded`]), a
+//! press taken by a table's Sleep and any SCI the load left latched: a press
+//! then powers the machine off on the `\_S5` the load handed over, and waits
+//! for no initialisation.
+//!
+//! **Then the namespace is initialised** ([`init`]): PCI_Config announced
+//! where §6.5.4 asks it be, `\_SB._INI`, and the `_STA` and `_INI` of each
+//! device at or above an `_INI` by Table 6.67, again over whatever a table
+//! loaded meanwhile added.
 //!
 //! **Then the embedded controller is found in the namespace and armed**
-//! ([`devices::find`]): attached to the AML host, so its space reaches it,
-//! and told so by its `_REG` (ACPI 6.5 §6.5.4), where its `_GLK` asks for no
-//! Global Lock around its transactions (§6.5.7), which this server takes
-//! around none; then its GPE enabled and its backlog drained. Its two
-//! ports are no row's, so every access to them is the kernel's to make
-//! ([`Claim`]), and one it refuses ends the controller, said by name, the
-//! server's own or AML's. A machine whose DSDT did not load has no
-//! controller served.
+//! ([`devices::find`], [`devices::attach`]): attached to the AML host in the ECDT's place, so its
+//! space reaches it, under the Global Lock where its `_GLK` asks for it
+//! (ACPI 6.5 §6.5.7), and announced by `_REG(3, 1)` in each scope that
+//! declares a region of it (§6.5.4), after every `_INI`; then its GPE
+//! enabled and its backlog drained. Its two ports are no row's, so every
+//! access to them is the kernel's to make ([`Claim`]), and one it refuses
+//! ends the controller, said by name, the server's own or AML's. A machine
+//! whose DSDT did not load has no controller served.
 //! **Where the FADT says the power button is a control method device**, the
 //! buttons the namespace names are found too, and where one is, each query
 //! is run as its method ([`run_query`]): a Notify of a press is a press.
 //! Elsewhere no query's method runs.
+//!
+//! **Then `_OSC` is negotiated** ([`osc`]): `\_SB._OSC`, and each
+//! processor's on an Intel processor, query then commit, claiming what ToyOS
+//! honours; whatever a table they loaded added is initialised in turn.
 //!
 //! **Each SCI** is read off both blocks ([`sci::events`]): a press stops the
 //! machine through the supervisor, or is said and dropped on a machine with
@@ -57,8 +72,11 @@ mod aml;
 mod battery;
 mod devices;
 mod ec;
+mod gpe;
 mod host;
+mod init;
 mod ledger;
+mod osc;
 mod sci;
 mod tables;
 
@@ -73,14 +91,14 @@ use toyos::power::{self, Stop};
 use toyos::AcpiDev;
 use toyos_abi::acpi::{Access, AcpiInfo, Block, FIXED_POWER_BUTTON};
 use toyos_abi::syscall::{DeviceType, SyscallError};
-use toyos_aml::Value;
 
 use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED};
 use aml::Aml;
 use battery::Power;
 use devices::{Ec, Queried};
 use ec::Transaction;
-use host::{port_in, transact, Answer, Kernel, Stopping, Take, Unmade, OWN};
+use host::{port_in, Answer, Kernel, Stopping, Take, Unmade, OWN};
+use init::{Census, Names};
 use sci::{Bits, Event, Fixed, Served, Unserved, Unstopped, PM1_STATUS, PWRBTN};
 
 /// The most queries one drain takes before the controller is a storm.
@@ -109,6 +127,20 @@ struct Server<'a, K, P> {
     empty: u32,
     /// The kernel was handed `\_S5`'s sleep type: a press powers the machine off.
     power_off: bool,
+    /// What the namespace's initialisation ran.
+    census: Census,
+    /// What `_OSC` answered.
+    negotiated: osc::Negotiated,
+    /// The processor is Intel's, whose `_OSC` interface a processor object
+    /// speaks ([`toyos_abi::processor_is_intel`]).
+    intel: bool,
+    /// The batteries and adapters the namespace names, which a Notify of an
+    /// information change reads again.
+    sources: (Vec<String>, Vec<String>),
+    /// Each runtime GPE's methods run, by GPE.
+    gpe_runs: BTreeMap<u16, u64>,
+    /// Each Notify delivered, by object and value.
+    delivered: ledger::Ledger,
 }
 
 fn main() {
@@ -121,10 +153,15 @@ fn main() {
     let mut server = Server::new(&claim, Machine, info);
     server.arm(&dev);
     let (loaded, kept) = aml::load(&claim, server.info.rsdp);
-    server.power_off = loaded.handed;
-    server.aml = kept;
-    let (batteries, adapters) = server.arm_controller();
+    let names = server.loaded(loaded.handed, kept);
+    let (batteries, adapters) = server.arm_controller(names.as_ref());
+    if let Some(names) = server.negotiate(names) {
+        println!("{}", server.census.line());
+        server.arm_gpes(&names);
+    }
+    server.sources = (batteries.clone(), adapters.clone());
     server.find_power(batteries, adapters);
+    server.served_aml();
     server.serve();
 }
 
@@ -213,11 +250,32 @@ impl Kernel for Claim<'_> {
         sci::await_release(&mut Waiting(self), until)
     }
 
+    fn sleep(&self, until: Instant, ec_gpe: Option<u16>) -> sci::Latched {
+        let served = Served { power_button: self.info.flags & FIXED_POWER_BUTTON != 0, ec_gpe, ..Default::default() };
+        sci::await_sleep(&mut Waiting(self), until, &served)
+    }
+
     fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
         match self.dev.s5(slp_typ_a) {
             Err(SyscallError::InvalidArgument) => Ok(false),
             answer => Self::answered("the power-off's sleep type", answer).map(|()| true),
         }
+    }
+
+    fn latched(&self) -> Option<u32> {
+        match self.dev.irq() {
+            Ok(record) => Some(record.count),
+            Err(SyscallError::WouldBlock) => None,
+            Err(other) => panic!("acpiserver: the claim's record answered {other:?}"),
+        }
+    }
+
+    fn ack(&self) {
+        self.dev.ack().expect("acpiserver: the claim's acknowledgement");
+    }
+
+    fn power_off(&self) -> power::Refused {
+        power::stop(Stop::Shutdown)
     }
 }
 
@@ -231,6 +289,11 @@ impl Fixed for Waiting<'_, '_> {
 
     fn pm1_clear(&mut self, bits: u16) {
         out16(self.0.info.pm1_event.port, bits);
+    }
+
+    fn gpe_clear(&mut self, n: u16) {
+        let (status, _) = bytes(self.0.info.gpe0).nth(usize::from(n / 8)).expect("a GPE this server serves is in the block");
+        out8(status, 1 << (n % 8));
     }
 
     fn enables(&mut self) -> Bits {
@@ -256,7 +319,7 @@ impl Fixed for Waiting<'_, '_> {
     }
 
     fn ack(&mut self) {
-        self.0.dev.ack().expect("acpiserver: the claim's acknowledgement");
+        Kernel::ack(self.0);
     }
 }
 
@@ -271,7 +334,7 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             kernel,
             ports,
             info,
-            served: Served { power_button: info.flags & FIXED_POWER_BUTTON != 0, ec_gpe: None },
+            served: Served { power_button: info.flags & FIXED_POWER_BUTTON != 0, ..Default::default() },
             ec: None,
             aml: None,
             power: None,
@@ -282,6 +345,12 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             scis: 0,
             empty: 0,
             power_off: false,
+            census: Census::default(),
+            negotiated: osc::Negotiated::default(),
+            intel: toyos_abi::processor_is_intel(),
+            sources: (Vec::new(), Vec::new()),
+            gpe_runs: BTreeMap::new(),
+            delivered: ledger::Ledger::default(),
         }
     }
 
@@ -303,25 +372,113 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
         );
     }
 
+    /// Take what the load kept: what latched during it is served first, so a
+    /// press then powers the machine off on the `\_S5` it handed over and
+    /// waits for no initialisation, and then the namespace is initialised
+    /// ([`Server::initialise`]).
+    fn loaded(&mut self, handed: bool, kept: Option<Aml<'a, K>>) -> Option<Names> {
+        self.power_off = handed;
+        self.aml = kept;
+        self.served_aml();
+        self.latched();
+        self.initialise()
+    }
+
+    /// Each SCI already latched, served without waiting for one.
+    fn latched(&mut self) {
+        let Some(count) = self.kernel.latched() else { return };
+        self.scis += u64::from(count);
+        self.take();
+        self.kernel.ack();
+    }
+
+    /// Initialise the namespace the load kept ([`init`]), and again whatever
+    /// a table its initialisation loaded added, until none did; what comes
+    /// back is the namespace as it then stands.
+    fn initialise(&mut self) -> Option<Names> {
+        let aml = self.aml.as_mut()?;
+        let names = match Names::read(&aml.interpreter) {
+            Ok(names) => names,
+            Err(why) => {
+                println!("acpiserver: the namespace is not initialised: its walk was refused, {why}");
+                return None;
+            }
+        };
+        let defined = aml.interpreter.defined();
+        init::initialise(aml, &names, &mut self.census);
+        self.settle(defined, names)
+    }
+
+    /// Run what each table loaded since `since` added ([`init::loaded`]),
+    /// until an initialisation loads nothing more; `names` is the namespace
+    /// as it stood at `since`.
+    fn settle(&mut self, mut since: u32, mut names: Names) -> Option<Names> {
+        let aml = self.aml.as_mut()?;
+        while aml.interpreter.defined() > since && !aml.host.stopping {
+            names = match Names::read(&aml.interpreter) {
+                Ok(names) => names,
+                Err(why) => {
+                    println!("acpiserver: what a table loaded at run time added is not initialised: the walk was refused, {why}");
+                    return None;
+                }
+            };
+            let added = since;
+            since = aml.interpreter.defined();
+            init::loaded(aml, &names, added, &mut self.census);
+        }
+        Some(names)
+    }
+
+    /// Negotiate `_OSC` ([`osc`]), then initialise what the tables it loaded
+    /// added; what comes back is the namespace as it then stands, and its
+    /// size is said, after the machine's last table.
+    fn negotiate(&mut self, names: Option<Names>) -> Option<Names> {
+        let (names, aml) = (names?, self.aml.as_mut()?);
+        let before = aml.interpreter.defined();
+        self.negotiated = osc::negotiate_all(aml, &names, self.intel);
+        let names = self.settle(before, names)?;
+        let aml = self.aml.as_ref()?;
+        println!(
+            "acpiserver: {} table(s) loaded at run time and {} refused; the namespace holds {} objects in {} slots, and the interpreter {} bytes of heap, of the {} it holds between evaluations and the {} while one runs",
+            aml.host.loaded,
+            aml.host.loads_refused,
+            aml.interpreter.defined(),
+            aml.interpreter.slots(),
+            aml.interpreter.usage().live,
+            toyos_aml::MAX_LIVE,
+            toyos_aml::MAX_RUNNING
+        );
+        Some(names)
+    }
+
     /// Find the controller, and the buttons where they are control method
     /// devices, in the namespace the load kept; attach the controller to the
-    /// AML host ([`attach`]), enable its GPE and drain its backlog. What
+    /// AML host ([`devices::attach`]), enable its GPE and drain its backlog. What
     /// comes back is the namespace's batteries and adapters, by path.
-    fn arm_controller(&mut self) -> (Vec<String>, Vec<String>) {
-        let Some(aml) = &mut self.aml else {
+    fn arm_controller(&mut self, names: Option<&Names>) -> (Vec<String>, Vec<String>) {
+        let (Some(aml), Some(names)) = (&mut self.aml, names) else {
             if !self.served.power_button {
                 println!("acpiserver: no control-method power button served: no namespace was kept");
             }
             println!("{CONTROLLER_NONE}no namespace was kept");
             return (Vec::new(), Vec::new());
         };
-        let found = devices::find(&mut aml.interpreter, &mut aml.host, self.info.gpe0, !self.served.power_button);
+        let found = devices::find(&mut aml.interpreter, &mut aml.host, names, self.info.gpe0, !self.served.power_button);
         if !self.served.power_button {
             println!("acpiserver: {} control-method power button(s) served, each by the queries' Notify", found.buttons.len());
         }
         aml.host.buttons = found.buttons;
         let sources = (found.batteries, found.adapters);
-        let Some(ec) = found.ec else { return sources };
+        let early = aml.host.ec.take();
+        let Some(ec) = found.ec else {
+            if early.is_some() {
+                println!("{CONTROLLER_NONE}the namespace names no controller it serves, and the ECDT's is detached from AML");
+            }
+            return sources;
+        };
+        if early.is_some_and(|early| (early.path.as_str(), early.command, early.data) != (ec.path.as_str(), ec.command, ec.data)) {
+            println!("acpiserver: the ECDT's embedded controller is not the namespace's, which is served");
+        }
         // Its status register, which a read leaves as it was; the data
         // register's read takes a byte, and a port refused later ends the
         // controller then ([`Server::unserve`]).
@@ -333,10 +490,13 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
             }
             Ok(_) => {}
         }
-        if let Err(why) = attach(aml, &ec) {
-            println!("{CONTROLLER_NONE}{why}");
-            return sources;
-        }
+        let ec = match devices::attach(aml, ec, names, &mut self.census) {
+            Ok(ec) => ec,
+            Err(why) => {
+                println!("{CONTROLLER_NONE}{why}");
+                return sources;
+            }
+        };
         if aml.host.stopping {
             return sources;
         }
@@ -421,16 +581,140 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
                     self.ports.out8(status, 1 << (n % 8));
                     self.drain();
                 }
+                Event::Gpe(n) => self.gpe(n),
             }
         }
         self.run_queued();
+        self.served_aml();
+    }
+
+    /// Enable each runtime GPE the namespace names ([`gpe::runtime`]), its
+    /// status cleared first.
+    fn arm_gpes(&mut self, names: &Names) {
+        let Some(aml) = &mut self.aml else { return };
+        let runtime = gpe::runtime(aml, names, self.info.gpe0, self.served.ec_gpe);
+        for &n in runtime.keys() {
+            let (status, enable) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("a runtime GPE is in GPE0");
+            self.ports.out8(status, 1 << (n % 8));
+            self.ports.out8(enable, self.ports.in8(enable) | 1 << (n % 8));
+        }
+        self.served.gpes = runtime;
+    }
+
+    /// GPE `n` served by its method (ACPI 6.5 §5.6.4): its enable cleared,
+    /// an edge's status cleared, the method run, a level's status cleared,
+    /// and its enable set again; a method refused leaves it disabled, said
+    /// by name, and served no more.
+    fn gpe(&mut self, n: u16) {
+        let trigger = self.served.gpes[&n];
+        let (status, enable) = bytes(self.info.gpe0).nth(usize::from(n / 8)).expect("a runtime GPE is in GPE0");
+        let bit = 1 << (n % 8);
+        self.ports.out8(enable, self.ports.in8(enable) & !bit);
+        if trigger == sci::Trigger::Edge {
+            self.ports.out8(status, bit);
+        }
+        let method = format!("\\_GPE._{}{n:02X}", if trigger == sci::Trigger::Edge { 'E' } else { 'L' });
+        let aml = self.aml.as_mut().expect("a GPE is served only in a namespace");
+        let ran = aml.interpreter.evaluate(&mut aml.host, &method, &[]);
+        if trigger == sci::Trigger::Level {
+            self.ports.out8(status, bit);
+        }
+        let runs = self.gpe_runs.entry(n).or_insert(0);
+        *runs += 1;
+        match ran {
+            Ok(_) => {
+                self.ports.out8(enable, self.ports.in8(enable) | bit);
+                if *runs == 1 {
+                    println!("acpiserver: GPE {n:#x} taken for the first time; its method ran");
+                }
+            }
+            Err(_) if aml.host.stopping => {}
+            Err(why) => {
+                self.served.gpes.remove(&n);
+                println!("acpiserver: GPE {n:#x}'s method was refused, so the GPE is served no more: {}", aml::kind(&why));
+                println!("{OWN}that was {method}, refused {why:x?}");
+            }
+        }
+        self.ended();
+    }
+
+    /// What the namespace's evaluations left to serve: each press a Sleep
+    /// took, the controller's queries a Sleep found waiting, and each Notify
+    /// delivered ([`Server::deliver`]). What these evaluations leave in turn
+    /// waits for the next SCI or poll.
+    fn served_aml(&mut self) {
+        let Some(aml) = &mut self.aml else { return };
+        let latched = std::mem::take(&mut aml.host.latched);
+        let notified = std::mem::take(&mut aml.host.notified);
+        if latched.ec {
+            self.drain();
+            self.run_queued();
+        }
+        self.deliver(notified);
+        for _ in 0..latched.presses {
+            self.press();
+        }
+    }
+
+    /// Each Notify to its owner (ACPI 6.5 §5.6.6): a battery's or adapter's
+    /// status change (0x80) reads the power sources again, and a battery's
+    /// information change (0x81) finds them again; `\_SB`'s or a negotiated
+    /// processor's 0x08 negotiates its `_OSC` again with the same claim
+    /// (§6.2.11); a processor's performance, idle or throttling change
+    /// (0x80, 0x81, 0x82, §8.4) is counted, since nothing reads those states
+    /// yet; anything else is served by nothing and counted.
+    fn deliver(&mut self, notified: std::collections::BTreeSet<(String, u64)>) {
+        let (mut status, mut info) = (false, false);
+        for (object, value) in notified {
+            let source = self.sources.0.contains(&object) || self.sources.1.contains(&object);
+            let processor = self.negotiated.processors.iter().any(|(path, _)| *path == object);
+            let served = match value {
+                0x80 if source => {
+                    status = true;
+                    "the power sources read again"
+                }
+                0x81 if self.sources.0.contains(&object) => {
+                    info = true;
+                    "the power sources found again"
+                }
+                0x08 if object == "\\_SB_" || processor => {
+                    self.renegotiate(&object);
+                    "its _OSC negotiated again"
+                }
+                0x80..=0x82 if processor => "counted: nothing reads the processors' performance, idle or throttling states",
+                _ => "served by nothing",
+            };
+            if self.delivered.see(&format!("{object} {value:#x}")) {
+                println!("{OWN}Notify({object}, {value:#x}) for the first time: {served}");
+            }
+        }
+        if info {
+            let (batteries, adapters) = self.sources.clone();
+            self.find_power(batteries, adapters);
+        } else if status {
+            self.read_power();
+        }
+    }
+
+    /// `object`'s `_OSC` negotiated again with its claim.
+    fn renegotiate(&mut self, object: &str) {
+        let Some(aml) = &mut self.aml else { return };
+        let claim = if object == "\\_SB_" { &osc::PLATFORM } else { &osc::PROCESSOR };
+        let before = aml.interpreter.defined();
+        match osc::negotiate(aml, &format!("{object}._OSC"), claim) {
+            Ok(answered) => println!("{OWN}{object}._OSC negotiated again: {answered:x?}"),
+            Err(why) => println!("{OWN}{object}._OSC was refused again: {why}"),
+        }
+        if let Ok(names) = Names::read(&aml.interpreter) {
+            self.settle(before, names);
+        }
     }
 
     /// A press: the machine stops, and this comes back only where it has no
     /// power-off, which the load said and this says again.
     fn press(&mut self) {
         println!("acpiserver: the power button was pressed, on SCI {} of this boot; asking the supervisor to power off", self.scis);
-        let refused = power::stop(Stop::Shutdown);
+        let refused = self.kernel.power_off();
         match sci::unstopped(refused, self.power_off) {
             Unstopped::Dropped => toyos::error!("acpiserver: the press is dropped: {}", aml::NO_S5_HANDED.trim_start_matches("acpiserver: ")),
             Unstopped::Defect => panic!("acpiserver: the power-off was refused: {refused:?}"),
@@ -447,15 +731,15 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
     }
 
     fn take_queries(&mut self) -> Result<(), Unmade> {
-        let Some(ec) = &self.ec else { return Ok(()) };
-        let (command, data) = (ec.command, ec.data);
+        let (Some(ec), Some(aml)) = (&self.ec, &mut self.aml) else { return Ok(()) };
+        let (command, data, glk) = (ec.command, ec.data, ec.glk);
         let mut taken = 0;
         loop {
             let status = port_in(self.kernel, command)?;
             if status & ec::SCI_EVT == 0 {
                 return Ok(());
             }
-            let q = transact(self.kernel, command, data, Transaction::query())?;
+            let q = aml.host.transaction(command, data, glk, Transaction::query())?;
             if q == 0 {
                 return Ok(());
             }
@@ -527,48 +811,9 @@ impl<'a, P: Ports> Server<'a, Claim<'a>, P> {
                 self.log_counts();
                 next_count = Instant::now() + COUNTS;
             }
-            match self.kernel.dev.irq() {
-                Ok(record) => self.scis += u64::from(record.count),
-                Err(SyscallError::WouldBlock) => continue,
-                Err(other) => panic!("acpiserver: the claim's record answered {other:?}"),
-            }
-            self.take();
-            self.kernel.dev.ack().expect("acpiserver: the claim's acknowledgement");
+            self.latched();
         }
     }
-}
-
-/// Attach `ec` to the AML host, so its space reaches the controller, where
-/// its `_GLK` asks for no Global Lock around a transaction (ACPI 6.5 §6.5.7):
-/// absent or 0. Then tell its `_REG` the space is there (§6.5.4: Arg0 3 the
-/// EmbeddedControl space, Arg1 1 connect). `Err` is why a port of it the
-/// kernel refused ended it.
-fn attach<K: Kernel>(aml: &mut Aml<'_, K>, ec: &Ec) -> Result<(), String> {
-    let evaluate = |aml: &mut Aml<'_, K>, method: &str, args: &[Value]| {
-        let path = format!("{}.{method}", ec.path);
-        match aml.interpreter.evaluate(&mut aml.host, &path, args) {
-            Err(toyos_aml::Error::NotFound(named)) if named == path => Ok(None),
-            answer => answer.map(Some),
-        }
-    };
-    let unattached: Option<String> = match evaluate(aml, "_GLK", &[]) {
-        Ok(None | Some(Value::Integer(0))) => None,
-        Ok(Some(Value::Integer(_))) => Some("its _GLK asks for the Global Lock around each transaction, which this server takes around none".into()),
-        Ok(Some(_)) => Some("its _GLK is no Integer".into()),
-        Err(why) => Some(format!("its _GLK was refused, {}", aml::kind(&why))),
-    };
-    if let Some(why) = unattached {
-        println!("acpiserver: the embedded controller's space is not attached to AML: {why}");
-        return Ok(());
-    }
-    aml.host.ec = Some(ec.clone());
-    if let Err(why) = evaluate(aml, "_REG", &[Value::Integer(3), Value::Integer(1)]) {
-        if !aml.host.stopping {
-            println!("acpiserver: the embedded controller's _REG refused: {}", aml::kind(&why));
-            println!("{OWN}that was {}._REG", ec.path);
-        }
-    }
-    aml.host.ended.take().map_or(Ok(()), Err)
 }
 
 /// What a query no method runs for is said to be.
@@ -587,9 +832,15 @@ fn run_query<K: Kernel>(aml: Option<&mut Aml<'_, K>>, ec: Option<&Ec>, q: u8) ->
     }
 }
 
+/// The interpreter's own test encodings of §20.2.
+#[cfg(test)]
+#[path = "../aml/tests/common/mod.rs"]
+mod common;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use toyos_aml::Value;
     use toyos_abi::acpi::{Space, Width};
     use crate::aml::load;
     use crate::aml::tests::{crafted, sealed, CRAFTED_RSDP};
@@ -597,9 +848,11 @@ mod tests {
     use crate::host::tests::Scripted;
     use std::cell::RefCell;
 
-    /// The row's registers as bytes a write leaves as written.
+    /// The row's registers as bytes a write leaves as written, but those in
+    /// `.1`, status registers, where a one written clears its bit (ACPI 6.5
+    /// §4.8.4.1) once something has set them.
     #[derive(Default)]
-    struct Bytes(RefCell<BTreeMap<u16, u8>>);
+    struct Bytes(RefCell<BTreeMap<u16, u8>>, std::collections::BTreeSet<u16>);
 
     impl Ports for Bytes {
         fn in8(&self, port: u16) -> u8 {
@@ -607,15 +860,22 @@ mod tests {
         }
 
         fn out8(&self, port: u16, byte: u8) {
-            self.0.borrow_mut().insert(port, byte);
+            let mut bytes = self.0.borrow_mut();
+            let written = match bytes.get(&port) {
+                Some(&was) if self.1.contains(&port) => was & !byte,
+                _ => byte,
+            };
+            bytes.insert(port, written);
         }
 
         fn in16(&self, port: u16) -> u16 {
-            panic!("a PM1 read of {port:#x}, which no test here makes")
+            u16::from_le_bytes([self.in8(port), self.in8(port + 1)])
         }
 
-        fn out16(&self, port: u16, _: u16) {
-            panic!("a PM1 write of {port:#x}, which no test here makes")
+        fn out16(&self, port: u16, word: u16) {
+            let [lo, hi] = word.to_le_bytes();
+            self.out8(port, lo);
+            self.out8(port + 1, hi);
         }
     }
 
@@ -641,13 +901,15 @@ mod tests {
                 ],
             ),
         ] {
-            let kernel = Scripted { ports, ..Default::default() };
-            let info = AcpiInfo { rsdp: 0, pm1_event: Block::NONE, gpe0: GPE0, flags: 0, reserved: [0; 3] };
+            let kernel = Scripted { ports, ..crafted(&sealed(b"DSDT", &[]), &[]) };
+            let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: 0, reserved: [0; 3] };
             let mut server = Server::new(&kernel, Bytes::default(), info);
+            server.aml = load(&kernel, CRAFTED_RSDP).1;
+            kernel.asked.borrow_mut().clear();
             let enable = GPE0.enable();
             server.ports.out8(enable, 0b1000_1001);
             server.served.ec_gpe = Some(gpe);
-            server.ec = Some(Ec { path: "\\_SB_.EC0_".into(), command: command as u16, data: data as u16, gpe, queries: Default::default() });
+            server.ec = Some(Ec { path: "\\_SB_.EC0_".into(), command: command as u16, data: data as u16, gpe, queries: Default::default(), glk: false });
             // Taken by an earlier event of the same SCI, and not yet run.
             server.queued.push_back(0x28);
             server.drain();
@@ -676,7 +938,8 @@ mod tests {
                 server.ports.out8(enable, 0);
             }
             server.aml = load(&kernel, CRAFTED_RSDP).1;
-            let (batteries, adapters) = server.arm_controller();
+            let names = server.initialise();
+            let (batteries, adapters) = server.arm_controller(names.as_ref());
             assert_eq!(server.served.ec_gpe, Some(3));
             assert!(server.aml.as_ref().is_some_and(|aml| aml.host.ec.is_some()), "the served controller is not attached to AML");
             server.find_power(batteries, adapters);
@@ -719,12 +982,328 @@ mod tests {
             server.ports.out8(enable, 0);
         }
         server.aml = load(&kernel, CRAFTED_RSDP).1;
-        server.arm_controller();
+        let names = server.initialise();
+        server.arm_controller(names.as_ref());
         assert_eq!(server.counts, BTreeMap::from([(0x28, 1)]), "the query waiting was not drained");
         let refused = &server.aml.as_ref().expect("the namespace").host.refused;
         assert!(refused.is_empty(), "{}", refused.counts());
         let done = kernel.controller.borrow().as_ref().expect("a controller").done.clone();
         assert_eq!(done, [(WR, CONNECTED, 1), (0x84, 0, 0), (RD, AC, 0)], "_REG's write, the drain's query, the method's read");
+    }
+
+    /// The track's `_REG` bullet and §6.5.4: the controller's `_REG(3, 1)`
+    /// runs after every `_INI`, and an `_INI` that writes the controller's
+    /// space reaches it only where the ECDT named the controller, which is
+    /// attached before any control method runs; without one it is refused,
+    /// and the controller is attached by its device after the walk.
+    #[test]
+    fn the_controllers_reg_runs_after_every_ini_which_reaches_it_through_the_ecdt() {
+        use crate::aml::tests::{crafted_with, ecdt};
+        use crate::devices::tests::{byte, crs, device, dword, pkg, PNP0C09};
+        use crate::ec::tests::Emulated;
+        // OperationRegion (ECOR, EmbeddedControl, 0, 0x100); Field (ECOR,
+        // ByteAcc) { Offset (0x10), INIB, 8, REGB, 8 }; Method (_INI) { INIB =
+        // One }; Method (_REG, 2) { REGB = Arg1 }.
+        let region = [&[0x5B, 0x80][..], b"ECOR", &[0x03, 0x00, 0x0B, 0x00, 0x01]].concat();
+        let field = [&[0x5B, 0x81][..], &pkg(&[&b"ECOR"[..], &[0x01, 0x00, 0x40, 0x08], b"INIB", &[0x08], b"REGB", &[0x08]].concat())].concat();
+        let ini = [&[0x14][..], &pkg(&[&b"_INI"[..], &[0x00, 0x70, 0x01], b"INIB"].concat())].concat();
+        let reg = [&[0x14][..], &pkg(&[&b"_REG"[..], &[0x02, 0x70, 0x69], b"REGB"].concat())].concat();
+        let ec = device(&[b"_SB_", b"EC0_"], &[dword(b"_HID", PNP0C09), crs(&[0x62, 0x66]), byte(b"_GPE", 3), region, field, ini, reg].concat());
+        for with_ecdt in [true, false] {
+            let others: Vec<Vec<u8>> = if with_ecdt { vec![ecdt(b"\\_SB.EC0")] } else { vec![] };
+            let others: Vec<&[u8]> = others.iter().map(Vec::as_slice).collect();
+            let kernel = crafted_with(&sealed(b"DSDT", &ec), &[], &others);
+            *kernel.controller.borrow_mut() = Some(Emulated::new([0; 256]));
+            let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
+            let mut server = Server::new(&kernel, Bytes::default(), info);
+            for (_, enable) in bytes(GPE0) {
+                server.ports.out8(enable, 0);
+            }
+            server.aml = load(&kernel, CRAFTED_RSDP).1;
+            let names = server.initialise();
+            server.arm_controller(names.as_ref());
+            let done = kernel.controller.borrow().as_ref().expect("a controller").done.clone();
+            let (wr, inib, regb) = (0x81, 0x10, 0x11);
+            match with_ecdt {
+                true => assert_eq!(done, [(wr, inib, 1), (wr, regb, 1)], "the _INI's write, then _REG's"),
+                false => {
+                    assert_eq!(done, [(wr, regb, 1)], "only _REG's write");
+                    assert_eq!(server.census.refused.counts(), "_INI: denied by this server: a write to EmbeddedControl: no controller is attached to this server's AML x1");
+                }
+            }
+            assert_eq!((server.census.ini, server.census.reg.get(&3).copied()), (u64::from(with_ecdt), Some(1)));
+            assert_eq!(server.served.ec_gpe, Some(3));
+        }
+    }
+
+    /// A platform `_OSC` and an Intel processor's that record what they are
+    /// passed in firmware memory and offer bit 0 alone to a query; the
+    /// processor's commit loads a block from reserved memory, whose device's
+    /// `_INI` sets a byte.
+    fn osc_machine(block_type: u8) -> Scripted {
+        use crate::common::{arg, buffer, cat, device, else_, field, if_, int, method, name, op_region, pkg, ret, scope, ssdt_named, store, unit};
+        const NVS: u64 = 0x7700_0000;
+        const BLOCK: u64 = 0x7800_0000;
+        let block = ssdt_named("CPU0PSD", &device("\\_SB.NEWD", &method("_INI", 0, &store(&int(0x77), &name("\\NEWI")))));
+        let dword = |n: &str| unit(n, 32);
+        let nvs = cat(&[
+            &op_region("NVSR", 0x00, &int(NVS), &int(0x30)),
+            &field("NVSR", 0x03, &["PUU", "PQ1", "PQ2", "PC1", "PC2", "CUU", "CQ1", "CQ2", "CC1", "CC2", "NEWI"].map(dword)),
+            &op_region("BLKR", 0x00, &int(BLOCK), &int(block.len() as u64)),
+        ]);
+        // CreateDWordField (Arg3, n, CDWn) (§19.6.20).
+        let created = |at: u64, n: &str| cat(&[&[0x8A], &arg(3), &int(at), &name(n)]);
+        let osc = |p: &str, uuid: &[u8; 16], commit: &[u8]| {
+            method(
+                "_OSC",
+                4,
+                &cat(&[
+                    &created(0, "CDW1"),
+                    &created(4, "CDW2"),
+                    &if_(&cat(&[&[0x93], &arg(0), &buffer(&int(16), uuid)]), &store(&int(1), &name(&format!("\\{p}UU")))),
+                    &if_(
+                        &cat(&[&[0x7B], &name("CDW1"), &int(1), &[0x00]]),
+                        &cat(&[
+                            &store(&name("CDW1"), &name(&format!("\\{p}Q1"))),
+                            &store(&name("CDW2"), &name(&format!("\\{p}Q2"))),
+                            &store(&int(0x10), &name("CDW1")),
+                            &store(&int(1), &name("CDW2")),
+                        ]),
+                    ),
+                    &else_(&cat(&[&store(&name("CDW1"), &name(&format!("\\{p}C1"))), &store(&name("CDW2"), &name(&format!("\\{p}C2"))), commit])),
+                    &ret(&arg(3)),
+                ]),
+            )
+        };
+        let load = cat(&[&[0x5B, 0x20], &name("\\BLKR"), &[0x60]]);
+        // Processor (\_PR.CPU0, 0, 0x410, 6) (ACPI 6.3A §19.6.108).
+        let processor = cat(&[&[0x5B, 0x83], &pkg(&cat(&[&name("\\_PR.CPU0"), &[0x00], &0x410u32.to_le_bytes(), &[0x06], &osc("C", &osc::PROCESSOR.uuid, &load)]))]);
+        let dsdt = cat(&[&nvs, &scope("\\_SB", &osc("P", &osc::PLATFORM.uuid, &[])), &processor]);
+        let mut kernel = crafted(&sealed(b"DSDT", &dsdt), &[]);
+        kernel.memory.push((NVS, 10, vec![0; 0x30]));
+        kernel.memory.push((BLOCK, block_type, block));
+        kernel
+    }
+
+    /// §6.2.11: `\_SB._OSC` and, on an Intel processor, each processor's are
+    /// queried with what ToyOS claims, nothing, and committed with what the
+    /// query granted of it, nothing, though the firmware offered a bit;
+    /// the block the processor's commit loads from reserved memory loads, and
+    /// its device's `_INI` runs. On another vendor's processor its `_OSC` is
+    /// not evaluated, and a block in ACPI reclaim memory, which Table 15.6
+    /// calls neither reserved nor NVS, is refused and keeps nothing.
+    #[test]
+    fn osc_commits_only_what_toyos_claims_and_what_its_load_adds_is_initialised() {
+        for (intel, block_type, loaded) in [(true, 0, true), (false, 0, false), (true, 9, false)] {
+            let kernel = osc_machine(block_type);
+            let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
+            let mut server = Server::new(&kernel, Bytes::default(), info);
+            server.intel = intel;
+            server.aml = load(&kernel, CRAFTED_RSDP).1;
+            let names = server.initialise();
+            server.arm_controller(names.as_ref());
+            server.negotiate(names).expect("the namespace stands");
+            let aml = server.aml.as_mut().expect("the namespace");
+            let mut read = |path: &str| match aml.interpreter.evaluate(&mut aml.host, path, &[]) {
+                Ok(Value::Integer(v)) => v,
+                other => panic!("{path}: {other:?}"),
+            };
+            let platform: Vec<u64> = ["\\PUU", "\\PQ1", "\\PQ2", "\\PC1", "\\PC2"].map(&mut read).to_vec();
+            assert_eq!(platform, [1, 1, 0, 0, 0], "the platform's UUID, the query flag and nothing claimed, then the commit of nothing");
+            let processor: Vec<u64> = ["\\CUU", "\\CQ1", "\\CQ2", "\\CC1", "\\CC2"].map(&mut read).to_vec();
+            assert_eq!(processor, if intel { [1, 1, 0, 0, 0] } else { [0; 5] }, "intel {intel}");
+            assert_eq!(read("\\NEWI"), if loaded { 0x77 } else { 0 }, "intel {intel}, block in type {block_type}");
+            assert_eq!((aml.host.loaded, aml.host.loads_refused), (u64::from(loaded), u64::from(intel && !loaded)));
+            let answered = osc::Answered { query: 0x10, offered: 0, commit: Some((0, 0)) };
+            assert_eq!(server.negotiated.platform, Some(Ok(answered)));
+            assert_eq!(server.negotiated.processors.len(), usize::from(intel));
+            assert_eq!(server.census.ini, u64::from(loaded), "the loaded device's _INI");
+        }
+    }
+
+    /// The POST port as a word field, `\\P80`, and a method `name` that writes
+    /// `tag` to it: what the kernel's stand-in was asked to write there is
+    /// which methods ran, in order.
+    fn posting(name: &str, tag: u64) -> Vec<u8> {
+        use crate::common::{int, method, store};
+        method(name, 0, &store(&int(tag), &crate::common::name("\\P80")))
+    }
+
+    fn post() -> Vec<u8> {
+        use crate::common::{cat, field, int, op_region, unit};
+        cat(&[&op_region("P80R", 0x01, &int(0x80), &int(2)), &field("P80R", 0x02, &[unit("P80", 16)])])
+    }
+
+    fn posted(kernel: &Scripted) -> Vec<u64> {
+        kernel.asked.borrow().iter().filter(|access| access.write == 1 && access.space == Space::SystemIo as u8 && access.address == 0x80).map(|access| access.value).collect()
+    }
+
+    /// A server over `dsdt`, its namespace loaded and initialised, its GPE0
+    /// and PM1 registers all clear.
+    fn served(kernel: &Scripted, flags: u16) -> (Server<'_, Scripted, Bytes>, Option<Names>) {
+        let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block { port: 0x400, len: 4 }, gpe0: GPE0, flags, reserved: [0; 3] };
+        let statuses = bytes(GPE0).map(|(status, _)| status).chain([0x400, 0x401]).collect();
+        let mut server = Server::new(kernel, Bytes(RefCell::default(), statuses), info);
+        for port in 0x400..0x404 {
+            server.ports.0.borrow_mut().insert(port, 0);
+        }
+        for (status, enable) in bytes(GPE0) {
+            server.ports.0.borrow_mut().insert(status, 0);
+            server.ports.out8(enable, 0);
+        }
+        server.aml = load(kernel, CRAFTED_RSDP).1;
+        let names = server.initialise();
+        (server, names)
+    }
+
+    /// §5.6.4: each `\\_GPE._Lxx` and `_Exx` in GPE0 is a runtime GPE and
+    /// enabled, but one the `_PRW` of a device other than the buttons and the
+    /// PCI host bridge names (§5.6.4.2), the controller's, and one past
+    /// GPE0. On its SCI its method runs, its status is cleared and its enable
+    /// set again; a method refused leaves it disabled and served no more.
+    #[test]
+    fn runtime_gpes_are_enabled_and_served_by_their_methods() {
+        use crate::common::{cat, def_name, device, int, method, package, scope};
+        use crate::devices::tests::PNP0C0C;
+        let gpe = scope(
+            "\\_GPE",
+            &cat(&[
+                &posting("_L10", 0x10),
+                &posting("_E11", 0x11),
+                // A Divide by zero.
+                &method("_L12", 0, &[0x78, 0x01, 0x00, 0x00, 0x00]),
+                &posting("_L13", 0x13),
+                &posting("_L14", 0x14),
+                &posting("_L50", 0x50),
+                &posting("_L03", 0x03),
+            ]),
+        );
+        let devices = scope(
+            "\\_SB",
+            &cat(&[
+                &device("WAKE", &cat(&[&def_name("_HID", &int(0x0105_D041)), &def_name("_PRW", &package(&[int(0x13), int(3)]))])),
+                &device("LID0", &cat(&[&def_name("_HID", &int(u64::from(PNP0C0C))), &def_name("_PRW", &package(&[int(0x14), int(4)]))])),
+            ]),
+        );
+        let mut kernel = crafted(&sealed(b"DSDT", &cat(&[&post(), &gpe, &devices, &crate::devices::tests::laptop(&[])])), &[]);
+        kernel.ports = vec![(0x80, 0), (0x66, 0)];
+        *kernel.controller.borrow_mut() = Some(crate::ec::tests::Emulated::new([0; 256]));
+        let (mut server, names) = served(&kernel, FIXED_POWER_BUTTON);
+        server.arm_controller(names.as_ref());
+        let names = server.negotiate(names).expect("the namespace stands");
+        server.arm_gpes(&names);
+        use sci::Trigger::{Edge, Level};
+        assert_eq!(server.served.gpes, BTreeMap::from([(0x10, Level), (0x11, Edge), (0x12, Level), (0x14, Level)]));
+        let enables: Vec<u8> = bytes(GPE0).map(|(_, enable)| server.ports.in8(enable)).collect();
+        assert_eq!(enables, [0b1000, 0, 0b0001_0111, 0], "the controller's GPE 3 and the runtime GPEs");
+        let (status, _) = bytes(GPE0).nth(2).expect("byte 2");
+        server.ports.0.borrow_mut().insert(status, 0b0000_0111);
+        kernel.asked.borrow_mut().clear();
+        server.take();
+        assert_eq!(posted(&kernel), [0x10, 0x11]);
+        assert_eq!(server.ports.in8(status), 0, "a status left set");
+        assert_eq!(server.served.gpes.keys().copied().collect::<Vec<_>>(), [0x10, 0x11, 0x14], "a GPE whose method was refused is still served");
+        let (_, enable) = bytes(GPE0).nth(2).expect("byte 2");
+        assert_eq!(server.ports.in8(enable), 0b0001_0011, "the refused GPE left enabled, or a served one disabled");
+    }
+
+    /// §5.6.6: a battery's status change reads the power sources again, a
+    /// battery's information change finds them again, `\\_SB`'s 0x08
+    /// negotiates its `_OSC` again, and anything else is served by nothing:
+    /// each said once and nothing evaluated for it.
+    #[test]
+    fn a_notify_is_delivered_to_its_owner() {
+        let kernel = crate::battery::tests::laptop_machine(None);
+        let (mut server, names) = served(&kernel, FIXED_POWER_BUTTON);
+        let (batteries, adapters) = server.arm_controller(names.as_ref());
+        server.sources = (batteries.clone(), adapters.clone());
+        server.find_power(batteries.clone(), adapters);
+        let done = || kernel.controller.borrow().as_ref().expect("a controller").done.len();
+        let before = done();
+        server.deliver([(batteries[0].clone(), 0x80)].into());
+        assert!(done() > before, "a battery's status change read no battery");
+        let before = done();
+        server.deliver([("\\_SB_.NONE".to_string(), 0x80), (batteries[0].clone(), 0x02)].into());
+        assert_eq!(done(), before, "a Notify nobody owns evaluated something");
+        server.deliver([(batteries[0].clone(), 0x81)].into());
+        assert!(done() > before, "a battery's information change found no battery");
+        assert_eq!(server.delivered.counts().matches(" x1").count(), 4);
+
+        let kernel = osc_machine(0);
+        let (mut server, names) = served(&kernel, FIXED_POWER_BUTTON);
+        server.arm_controller(names.as_ref());
+        server.negotiate(names).expect("the namespace stands");
+        let nvs = || kernel.asked.borrow().iter().filter(|access| access.write == 1 && access.address == 0x7700_0000).count();
+        let before = nvs();
+        server.deliver([("\\_SB_".to_string(), 0x08)].into());
+        assert_eq!(nvs(), before + 2, "the platform's _OSC queried and committed again");
+    }
+
+    /// What a Sleep took of the SCI is served after its evaluation: the
+    /// controller's queries it found waiting are drained and counted, and
+    /// the Sleep served the controller's GPE.
+    #[test]
+    fn what_a_sleep_took_is_served_after_its_evaluation() {
+        use crate::common::{cat, method};
+        let sleeps = method("SLP", 0, &[0x5B, 0x22, 0x01]);
+        let kernel = crafted(&sealed(b"DSDT", &cat(&[&crate::devices::tests::laptop(&[]), &sleeps])), &[]);
+        *kernel.controller.borrow_mut() = Some(crate::ec::tests::Emulated::new([0; 256]));
+        let (mut server, names) = served(&kernel, FIXED_POWER_BUTTON);
+        server.arm_controller(names.as_ref());
+        kernel.controller.borrow_mut().as_mut().expect("a controller").queries.push(0x1C);
+        kernel.sleeps.borrow_mut().push_back(sci::Latched { presses: 0, ec: true });
+        let aml = server.aml.as_mut().expect("the namespace");
+        aml.interpreter.evaluate(&mut aml.host, "\\SLP_", &[]).expect("SLP runs");
+        assert_eq!(*kernel.slept.borrow(), [Some(3)], "the Sleep did not serve the controller's GPE");
+        assert_eq!(server.counts.get(&0x1C), None);
+        server.served_aml();
+        assert_eq!(server.counts.get(&0x1C), Some(&1), "the query a Sleep found waiting was not drained");
+    }
+
+    /// A press a table's Sleep took during the load powers the machine off
+    /// before the namespace is initialised: the `_INI` whose Acquire of the
+    /// Global Lock has no bound, while the firmware holds it past
+    /// [`host::RELEASE`], is never reached.
+    #[test]
+    fn a_press_latched_during_the_load_powers_off_before_an_ini_that_waits_on_the_firmware() {
+        use crate::common::{cat, device, method, scope};
+        use crate::host::tests::POWERED_OFF;
+        use crate::host::Take;
+        // Sleep (One); Device (\_SB.GLI) { Method (_INI) { Acquire (\_GL, 0xFFFF) Release (\_GL) } }.
+        let unbounded = cat(&[&[0x5B, 0x23], b"\\_GL_", &[0xFF, 0xFF], &[0x5B, 0x27], b"\\_GL_"]);
+        let dsdt = cat(&[&[0x5B, 0x22, 0x01], &scope("\\_SB", &device("GLI", &method("_INI", 0, &unbounded)))]);
+        let kernel = Scripted {
+            sleeps: RefCell::new([sci::Latched { presses: 1, ec: false }].into()),
+            takes: RefCell::new([Take::Pending].into()),
+            ..crafted(&sealed(b"DSDT", &dsdt), &[])
+        };
+        let info = AcpiInfo { rsdp: CRAFTED_RSDP, pm1_event: Block::NONE, gpe0: GPE0, flags: FIXED_POWER_BUTTON, reserved: [0; 3] };
+        let mut server = Server::new(&kernel, Bytes::default(), info);
+        let (loaded, kept) = load(&kernel, CRAFTED_RSDP);
+
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| server.loaded(loaded.handed, kept)));
+
+        let why = stopped.err().map(|payload| payload.downcast_ref::<String>().cloned().unwrap_or_default());
+        assert_eq!(why.as_deref(), Some(POWERED_OFF), "the press did not power the machine off first");
+        assert_eq!(*kernel.takes.borrow(), [Take::Pending], "the _INI took the Global Lock before the press was served");
+    }
+
+    /// §6.2.11.1.3: a commit sends what the query offered of the claim, and a
+    /// bit claimed that the query did not offer is dropped; what the commit
+    /// grants is read of what it sent.
+    #[test]
+    fn a_commit_sends_only_what_the_query_offered_of_the_claim() {
+        let kernel = osc_machine(0);
+        let (mut server, _) = served(&kernel, FIXED_POWER_BUTTON);
+        let aml = server.aml.as_mut().expect("the namespace");
+        let claim = osc::Claim { uuid: osc::PLATFORM.uuid, capabilities: 0b11 };
+        let answered = osc::negotiate(aml, "\\_SB_._OSC", &claim);
+        assert_eq!(answered, Ok(osc::Answered { query: 0x10, offered: 0b01, commit: Some((0, 0b01)) }));
+        let mut read = |path: &str| match aml.interpreter.evaluate(&mut aml.host, path, &[]) {
+            Ok(Value::Integer(v)) => v,
+            other => panic!("{path}: {other:?}"),
+        };
+        assert_eq!((read("\\PQ2"), read("\\PC2")), (0b11, 0b01), "the query asks the claim, the commit sends the offer");
     }
 
     /// The owner's ruling: a machine whose power button is a control method
@@ -740,7 +1319,8 @@ mod tests {
         for (_, enable) in bytes(GPE0) {
             server.ports.out8(enable, 0);
         }
-        server.arm_controller();
+        let names = server.initialise();
+        server.arm_controller(names.as_ref());
         assert!(!server.served.power_button, "a control-method button is served as the fixed one");
         assert_eq!((server.ec.is_some(), server.served.ec_gpe), (false, None), "a controller is served with no namespace");
         assert!(bytes(GPE0).all(|(_, enable)| server.ports.in8(enable) == 0), "a GPE is enabled with no namespace");
@@ -759,7 +1339,8 @@ mod tests {
             kernel.ports = vec![(0x80, 0)];
             let (_, kept) = load(&kernel, CRAFTED_RSDP);
             let mut aml = kept.expect("the DSDT loads");
-            let found = devices::find(&mut aml.interpreter, &mut aml.host, GPE0, control_method);
+            let names = crate::init::Names::read(&aml.interpreter).expect("the namespace reads");
+            let found = devices::find(&mut aml.interpreter, &mut aml.host, &names, GPE0, control_method);
             aml.host.buttons = found.buttons;
             let ec = found.ec.expect("the controller");
             let served = run_query(Some(&mut aml), Some(&ec), 0x28);

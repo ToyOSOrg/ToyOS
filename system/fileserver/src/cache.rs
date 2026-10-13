@@ -353,6 +353,34 @@ mod tests {
         assert_eq!(out, vec![1; BLOCK]);
     }
 
+    /// Block `b`'s bytes: its index first, so a block read back from anywhere
+    /// else is seen, and the rest varying with the offset in it.
+    fn pattern(b: u64) -> [u8; BLOCK] {
+        let mut data = [0u8; BLOCK];
+        data[..8].copy_from_slice(&b.to_le_bytes());
+        for (i, byte) in data.iter_mut().enumerate().skip(8) {
+            *byte = (b as usize ^ i.wrapping_mul(7)) as u8;
+        }
+        data
+    }
+
+    #[test]
+    fn every_evicted_clean_block_reads_back_off_the_disk_byte_for_byte() {
+        let blocks = (CLEAN_LIMIT + 2048) as u64;
+        let c = Cache::new(Counting { ram: Ram::new(blocks), reads: 0, writes: 0, flushes: 0 });
+        for b in 0..blocks {
+            c.write(b, &pattern(b)).unwrap();
+        }
+        c.flush().unwrap();
+        assert_eq!(c.counts().dirty, 0, "a flushed cache holds no dirty block");
+        let mut out = [0u8; BLOCK];
+        for b in 0..blocks {
+            c.read_block(b, &mut out).unwrap();
+            assert!(out == pattern(b), "block {b} read back other bytes than were written");
+        }
+        assert!(c.inner.borrow().disk.reads > 0, "no block was evicted, so none came back off the disk");
+    }
+
     /// A disk that takes writes until it is told to refuse them.
     struct Refusing {
         ram: Ram,

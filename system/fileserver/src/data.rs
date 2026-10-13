@@ -992,6 +992,28 @@ mod tests {
         assert_eq!(v.lstat("home/b/f").unwrap().size, 0, "replaced");
     }
 
+    /// A clock that reads no whole second.
+    fn nanosecond_clock() -> u64 {
+        1_717_245_296_123_456_789
+    }
+
+    /// DATA stamps a write with the nanosecond its clock read, and the entry
+    /// keeps it whole across a remount: a stamp of whole seconds would round
+    /// it away.
+    #[test]
+    fn a_write_s_stamp_keeps_its_nanosecond_across_a_remount() {
+        let mut v = DataVolume::format(Ram::new(4096), &["home"], nanosecond_clock).unwrap();
+        let n = v.open("home/stamped", CREATE).unwrap();
+        v.write(n, 0, b"stamped").unwrap();
+        v.close(n).unwrap();
+        v.sync().unwrap();
+        let DataVolume { fs, cache, .. } = v;
+        drop(fs);
+        let disk = Rc::try_unwrap(cache).ok().expect("one owner").into_disk();
+        let Probed::Mounted(mut again) = DataVolume::probe(disk, &["home"], nanosecond_clock) else { panic!("remount") };
+        assert_eq!(again.lstat("home/stamped").unwrap().mtime, nanosecond_clock());
+    }
+
     fn remount(v: DataVolume<Ram>) -> DataVolume<Ram> {
         let DataVolume { fs, cache, .. } = v;
         drop(fs);

@@ -2,10 +2,6 @@
 //! block service serves ([`Served`]), or one the kernel's own disk serves
 //! through a claim ([`Claimed`]), until usbd serves the stick.
 //!
-//! **A block is 4 KiB here, on every source.** A partition that is not whole
-//! 4 KiB blocks is refused before it is served (diskserver's table read, the
-//! kernel's claim), so nothing below has a second block size.
-//!
 //! **A block service that ends is survived, not hidden**: a [`Served`] disk
 //! whose session ended reconnects through the same name and issues again every
 //! write no flush had covered (`toyos_blockring::client`), then asks what it
@@ -18,43 +14,7 @@ use toyos::PartitionDev;
 use toyos_abi::part::{Block, MAX_BLOCKS_PER_CALL};
 use toyos_blockring::MAX_REQUEST_BLOCKS;
 
-pub const BLOCK: usize = 4096;
-
-/// Why a disk did not do what it was asked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DiskError {
-    /// The device's own word: the transfer was attempted and did not happen,
-    /// or a flush left writes the device would not keep.
-    Device,
-    /// The block service is gone and would not come back.
-    Gone,
-    /// Past the end of the partition.
-    Range,
-    /// A write the block service's grant to this holder does not make.
-    ReadOnly,
-}
-
-/// A partition, a block at a time or several.
-pub trait Disk {
-    fn blocks(&self) -> u64;
-    /// `out.len()` is whole blocks.
-    fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError>;
-    /// `data.len()` is whole blocks; durable once [`Disk::flush`] answers `Ok`.
-    fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError>;
-    /// Every write answered before this, out of the device's cache.
-    fn flush(&mut self) -> Result<(), DiskError>;
-}
-
-/// How many blocks `len` bytes from `first` are, or `Range` past the end of
-/// a partition `blocks` long.
-pub fn span(first: u64, len: usize, blocks: u64) -> Result<u64, DiskError> {
-    assert!(len % BLOCK == 0, "a transfer of {len} bytes is no whole blocks");
-    let count = (len / BLOCK) as u64;
-    match first.checked_add(count) {
-        Some(end) if end <= blocks => Ok(count),
-        _ => Err(DiskError::Range),
-    }
-}
+pub use toyos_disk::{span, Disk, DiskError, BLOCK};
 
 /// A partition the kernel's own disk serves: the stick, until usbd serves it.
 pub struct Claimed {
