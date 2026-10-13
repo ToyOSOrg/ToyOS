@@ -428,6 +428,9 @@ mod tests {
     struct NoKick;
     impl Kicker for NoKick {
         fn kick(&self, _target: CpuId) {}
+        fn runs_on(&self, _cpu: CpuId) -> bool {
+            false
+        }
     }
 
     /// A poll: one-shot, and it remembers what fired it.

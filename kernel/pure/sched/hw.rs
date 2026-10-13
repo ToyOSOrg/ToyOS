@@ -74,8 +74,12 @@ pub enum TraceKind {
 /// [`Machine`] so a watch's post and the retire protocol — which run at any wake
 /// site, not inside a scheduler pass — depend on nothing else.
 pub trait Kicker: Sync {
-    /// Targeted kick IPI. Never broadcast.
+    /// Targeted kick IPI. Never broadcast. A kick aimed at the calling CPU is
+    /// its own `need_resched`, never an IPI to itself.
     fn kick(&self, target: CpuId);
+
+    /// Whether the calling code runs on `cpu`.
+    fn runs_on(&self, cpu: CpuId) -> bool;
 }
 
 /// The half of the hardware surface that says nothing about tasks: clock,
@@ -103,9 +107,11 @@ pub trait Machine: Kicker + 'static {
     /// state, so it lives above the boundary and its proof is [`SleepToken`].
     fn halt(&self);
 
-    /// Ask `cpu` to take its next safe point. Needed for one case: a `Retire`
+    /// Ask `cpu` to take its next safe point. Needed for two cases: a `Retire`
     /// whose target is the *running* task cannot be yanked mid-syscall, so it
-    /// is asked to die at its next safe point instead.
+    /// is asked to die at its next safe point instead; and a steal probe that
+    /// only the task this CPU still stands on could answer waits for the pass
+    /// after the switch.
     fn need_resched(&self, cpu: CpuId);
 
     fn trace(&self, ev: TraceEvent);
