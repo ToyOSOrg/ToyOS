@@ -78,7 +78,10 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
     match value {
         None => {
             let read = match target {
-                RegTarget::Hda => crate::drivers::hda::reg_read(offset, width),
+                RegTarget::Hda => match toyos_abi::hda::Reg::from_wire(offset) {
+                    Some(reg) => crate::drivers::hda::reg_read(reg, width),
+                    None => Err(SyscallError::InvalidArgument),
+                },
                 // The one place a caller's offset becomes an access: the
                 // witness `pcidev::config_window` answers is the only thing
                 // the register read takes, so an unchecked number cannot
@@ -98,7 +101,10 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
         Some(value) => match u32::try_from(value) {
             Ok(value) => {
                 let written = match target {
-                    RegTarget::Hda => crate::drivers::hda::reg_write(offset, width, value),
+                    RegTarget::Hda => match toyos_abi::hda::Reg::from_wire(offset) {
+                        Some(reg) => crate::drivers::hda::reg_write(reg, width, value),
+                        None => Err(SyscallError::InvalidArgument),
+                    },
                     // Config space has no write path from userland at all.
                     RegTarget::PciConfig(_) => Err(SyscallError::NotSupported),
                 };
@@ -109,6 +115,22 @@ pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: 
             }
             Err(_) => SyscallError::InvalidArgument.to_u64(),
         },
+    }
+}
+
+/// Bind the `hda-audio` claim's stream to the listed controller `controller`
+/// names (`toyos_abi::syscall::hda_bind`). Its waits run on the caller's
+/// thread with no lock held, and nothing is copied to the caller.
+pub(super) fn sys_hda_bind(handle: RawHandle, controller: u64) -> u64 {
+    if let Err(e) = holds_claim(handle, device::DeviceType::HdaAudio) {
+        return e.refuse();
+    }
+    let Ok(controller) = u8::try_from(controller) else {
+        return SyscallError::InvalidArgument.to_u64();
+    };
+    match crate::drivers::hda::bind(controller) {
+        Ok(()) => 0,
+        Err(e) => e.to_u64(),
     }
 }
 

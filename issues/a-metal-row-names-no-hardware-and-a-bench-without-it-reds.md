@@ -18,9 +18,6 @@ that most rows ride:
   NotFound`: the job claims the T14's I219, which that bench has not. The
   `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
   rows read that job.
-- `test_rs_hda_client_stall` exited 101 on the null sink, which the
-  `hda_client_stall` row reads:
-  `issues/the-amd-bench-answers-on-two-hda-controllers-and-plays-on-the-null-sink.md`.
 
 That run asked for `blackbox_unclaimed_page` alone, which passed. An
 unfiltered `cargo test --test toyos-build -- --metal --metal-host
