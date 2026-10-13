@@ -118,7 +118,7 @@ mod tests {
     const KEPT: u64 = 0x7000_0000;
 
     fn machine() -> Scripted {
-        Scripted { memory: vec![(AT, 9, (0..=40u8).collect())], kept: vec![(KEPT, KEPT + 0x1000, 5)], ..Default::default() }
+        Scripted { memory: vec![(AT, 9, (0..=40u8).collect())], typed_refused: vec![(KEPT, KEPT + 0x1000, 5)], ..Default::default() }
     }
 
     #[test]

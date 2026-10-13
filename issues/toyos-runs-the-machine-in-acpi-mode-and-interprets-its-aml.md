@@ -491,16 +491,10 @@ ACPI Interface Specification (302223-007) for a processor's `_OSC` on Intel:
   deciding what each reading means:
   - every block loads but the AMD bench's SSDT8, refused whole
     (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`);
-  - no method is refused but the AMD bench's `_REG(3, 1)` and `_PSR`
-    (`issues/the-amd-benchs-ec-reg-and-psr-are-refused-for-a-write-to-the-root-complexs-index.md`)
-    and the T14's controller and hotkey `_INI`
-    (`issues/the-t14s-controller-and-hotkey-ini-are-refused-for-writes-outside-the-map.md`),
-    each expected by its bench by name;
+  - no method is refused;
   - each block a processor's `_OSC` loads under ToyOS's claims is loaded;
   - each `_STA` the walk reads is said, and each battery reading is read
-    whole by §6.3.7 and §10.2.2, with no value unknown but the AMD bench's
-    adapter, `AC unknown` where its ruled `_PSR` refusal leaves the adapter's
-    state absent.
+    whole by §6.3.7 and §10.2.2, with no value unknown.
 
 Not in finished:
 
