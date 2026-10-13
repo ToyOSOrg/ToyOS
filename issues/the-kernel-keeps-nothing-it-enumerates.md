@@ -37,7 +37,7 @@ On top of retention, in dependency order:
    is taken by an HTTP GET demo that should be renamed `http` first, which is
    the owner's call.
 6. **Master gain, and `audio volume`** — see
-   `issues/hda-has-no-jack-detection-volume-or-keys.md`, which needs the
+   `issues/hda-has-no-jack-detection-and-nothing-persists.md`, which needs the
    same thing.
 7. **Adopting a disk from inside the guest**, so designation stops being a
    host-side whole-device stamp minted by the build system. Blocked on the

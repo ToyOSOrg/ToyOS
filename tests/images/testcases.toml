@@ -25,7 +25,7 @@ receives = ["power"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver"]
+serves = ["soundserver", "volume"]
 devices = ["hda-audio", "pci:1af4:1059"]
 syscap = ["rt"]
 
@@ -48,10 +48,11 @@ syscap = ["rt"]
 # without it would make that arm vacuous rather than red.
 # `counters` and `trace` because `counters_read` reads every counter there is,
 # and narrows each away to prove its refusal.
+# `volume` because `volume_step` steps soundserver's master and back.
 # `log` because `counters_metal` measures its idle second only once the log
 # holds its own line, read back off logkeeper.
 [programs.test-runner]
-receives = ["soundserver", "power", "log"]
+receives = ["soundserver", "volume", "power", "log"]
 syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace"]
 
 [programs.toybox]

@@ -11,6 +11,23 @@ pub const MSG_STREAM_SET_VOLUME: u32 = 3;
 pub const MSG_STREAM_CLOSE: u32 = 4;
 /// soundserver rejected `MSG_STREAM_OPEN` (unsupported format/channels/rate).
 pub const MSG_STREAM_ERROR: u32 = 5;
+/// On a connection that carries no stream: ask what device soundserver runs.
+/// Answered once with [`MSG_DEVICE_DESCRIBED`] by a write that does not wait,
+/// and the connection is closed.
+pub const MSG_DEVICE_DESCRIBE: u32 = 6;
+/// [`DeviceDescription`].
+pub const MSG_DEVICE_DESCRIBED: u32 = 7;
+
+/// On soundserver's `volume` port, which the compositor alone holds: move the
+/// master level by [`VolumeStep::delta`] positions. A step while muted unmutes.
+pub const MSG_VOLUME_STEP: u32 = 1;
+/// On the `volume` port: mute, or unmute at the level it had. A bare header.
+pub const MSG_VOLUME_MUTE: u32 = 2;
+/// The answer to either: [`Volume`], read back from the device after the set.
+pub const MSG_VOLUME: u32 = 3;
+/// The answer to either where the device has no master, or a set did not
+/// read back: a bare header.
+pub const MSG_VOLUME_UNAVAILABLE: u32 = 4;
 
 /// The only sample format currently implemented end-to-end.
 pub const FORMAT_S16LE: u16 = 0;
@@ -31,6 +48,33 @@ crate::ipc_payload! {
         pub device_sample_rate: u32,
         pub device_channels: u16,
         pub slot_count: u16,
+        /// The device frames soundserver fades a closed stream out over, so a
+        /// client can derive how long it may take to let go of one.
+        pub fade_frames: u32,
+    }
+
+    /// The device soundserver runs, and the client rates it takes: a client at
+    /// any of them is resampled to the device's rate.
+    pub struct DeviceDescription {
+        pub sample_rate: u32,
+        pub period_frames: u32,
+        pub min_client_rate: u32,
+        pub max_client_rate: u32,
+        pub channels: u16,
+        pub _pad: u16,
+    }
+
+    pub struct VolumeStep {
+        pub delta: i32,
+    }
+
+    /// The master as the device reads back: `position` positions below the
+    /// top, of `bottom`, and whether it is muted (`1`) or not (`0`).
+    pub struct Volume {
+        pub position: u8,
+        pub bottom: u8,
+        pub muted: u8,
+        pub _pad: u8,
     }
 
     pub struct StreamSetVolume {
@@ -195,6 +239,20 @@ pub struct AudioStream {
     period_frames: u32,
     device_sample_rate: u32,
     device_channels: u16,
+    slot_count: u32,
+    fade_frames: u32,
+}
+
+/// What device soundserver runs, asked on a connection of its own before any
+/// stream exists.
+pub fn describe_device() -> Result<DeviceDescription, AudioError> {
+    let control = AudioStream::connect_soundserver()?;
+    control.signal(MSG_DEVICE_DESCRIBE).map_err(AudioError::Ipc)?;
+    let header = control.recv_header().map_err(AudioError::Ipc)?;
+    match header.msg_type {
+        MSG_DEVICE_DESCRIBED => control.recv_payload(&header).map_err(AudioError::Ipc),
+        other => Err(AudioError::Protocol(other)),
+    }
 }
 
 impl AudioStream {
@@ -227,6 +285,8 @@ impl AudioStream {
             period_frames: resp.client_period_frames,
             device_sample_rate: resp.device_sample_rate,
             device_channels: resp.device_channels,
+            slot_count,
+            fade_frames: resp.fade_frames,
         })
     }
 
@@ -259,6 +319,16 @@ impl AudioStream {
 
     pub fn device_channels(&self) -> u16 {
         self.device_channels
+    }
+
+    /// The periods of the stream's ring.
+    pub fn slot_count(&self) -> u32 {
+        self.slot_count
+    }
+
+    /// The device frames soundserver fades this stream out over once it closes.
+    pub fn fade_frames(&self) -> u32 {
+        self.fade_frames
     }
 
     pub fn set_volume(&self, gain: f32) -> Result<(), AudioError> {

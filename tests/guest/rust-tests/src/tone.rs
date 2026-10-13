@@ -3,7 +3,7 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::traits::{DeviceTrait, StreamTrait};
 
 const FREQ_HZ: f64 = 440.0;
 const DURATION_SECS: f64 = 3.0;
@@ -11,17 +11,15 @@ const DURATION_SECS: f64 = 3.0;
 /// so mixing can never clip.
 const AMPLITUDE: f64 = 16000.0;
 
-/// Play a deterministic 440Hz sine and block until it has drained.
+/// Play a deterministic 440Hz sine on `device` at `config` and block until it
+/// has drained.
 ///
 /// The sample value is derived from the absolute sample index, not from
 /// per-callback state, so the generated signal is identical regardless of
 /// how the callback invocations are sized or timed.
-pub fn play_tone() {
-    let host = cpal::default_host();
-    let device = host.default_output_device().expect("no audio output device");
-    let config = device.default_output_config().expect("no audio config");
-    let sample_rate = config.sample_rate() as f64;
-    let channels = config.channels() as usize;
+pub fn play(device: &cpal::Device, config: cpal::StreamConfig) {
+    let sample_rate = config.sample_rate as f64;
+    let channels = config.channels as usize;
     let total_samples = (sample_rate * DURATION_SECS) as u64;
 
     let done = Arc::new(AtomicBool::new(false));
@@ -32,7 +30,7 @@ pub fn play_tone() {
 
     let stream = device
         .build_output_stream(
-            config.into(),
+            config,
             move |data: &mut [i16], _: &cpal::OutputCallbackInfo| {
                 let mut n = position.load(Ordering::Relaxed);
                 for frame in data.chunks_exact_mut(channels) {
