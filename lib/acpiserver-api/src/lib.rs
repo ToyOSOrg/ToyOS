@@ -32,3 +32,17 @@ pub const BATTERY_READ: &str = "battery read: ";
 /// What opens a line that carries an address, a PCI function or a name the
 /// firmware chose: this machine's own, and quoted in no record.
 pub const OWN: &str = "acpiserver: (this machine's own, quoted in no record) ";
+
+/// The first write to each register the kernel keeps for itself, which the
+/// server answered as written: the write itself is the next line, under
+/// [`OWN`].
+pub const KEPT_WRITE: &str = "acpiserver: a SystemMemory write the kernel refused KernelRegister was not made, and the evaluation went on";
+
+/// The first write the kernel made into each page of memory the firmware's
+/// map lists nowhere or types memory-mapped I/O, then the page's type: the
+/// write itself is the next line, under [`OWN`].
+pub const FIRST_WRITE_IN_PAGE: &str = "acpiserver: a SystemMemory write made for the first time in a page of ";
+
+/// The first write the kernel made into each function's configuration
+/// space: the write itself is the next line, under [`OWN`].
+pub const FIRST_WRITE_TO_FUNCTION: &str = "acpiserver: a PCI_Config write made for the first time to a function";

@@ -597,12 +597,14 @@ const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::
 /// The ports that one row alone may receive, each with that row: the swap
 /// port, whose holder replaces any service's binary, the grants port, whose
 /// holder writes which folder of the home a package sees, the prompt port,
-/// whose holder draws above every window and has every key while it does, and
-/// the clipboard port, whose holder is sent every copy made in the session.
+/// whose holder draws above every window and has every key while it does, the
+/// input port, whose holder types into the focused window, and the clipboard
+/// port, whose holder is sent every copy made in the session.
 const HELD_ALONE: &[(&str, &str)] = &[
     (toyos_swap::PORT, toyos_swap::HOLDER),
     (toyos_manifest::grants::PORT, toyos_manifest::grants::HOLDER),
     (toyos_manifest::consent::PROMPT, toyos_manifest::consent::SERVER),
+    (toyos_input::wire::PORT, toyos_input::wire::HOLDER),
     (toyos_manifest::clipboard::PORT, toyos_manifest::clipboard::HOLDER),
 ];
 
@@ -3035,6 +3037,7 @@ mod tests {
         "tests/images/panelcase.toml",
         "tests/images/proctreecase.toml",
         "tests/images/testcases.toml",
+        "tests/images/virtclaimcase.toml",
         "tests/images/virtjobcase.toml",
         "tests/images/virtpaniccase.toml",
         "tests/images/virtrebootcase.toml",
@@ -3135,6 +3138,23 @@ mod tests {
             ("[programs.shell]\nreceives = [\"consent\"]\n", "`shell` receives `consent`"),
             ("[apps]\nreceives = [\"consent\"]\n", "`[apps] receives` names `consent`"),
             ("[programs.paint]\nserves = [\"consent\"]\n", "`paint` serves `consent`, which only `filepicker` may serve"),
+        ] {
+            match gate(text) {
+                Err(why) if why.contains(said) => {}
+                other => panic!("{text:?}: {other:?}, not {said:?}"),
+            }
+        }
+    }
+
+    /// The input port reaches ps2server alone, and never `[apps]`: a
+    /// connector types into the focused window.
+    #[test]
+    fn only_ps2server_holds_the_input_port() {
+        let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
+        assert_eq!(gate("[programs.ps2server]\nreceives = [\"input\"]\n[programs.compositor]\nserves = [\"input\"]\n"), Ok(()));
+        for (text, said) in [
+            ("[programs.paint]\nreceives = [\"input\"]\n", "`paint` receives `input`, which only `ps2server` may hold"),
+            ("[apps]\nreceives = [\"input\"]\n", "`[apps] receives` names `input`"),
         ] {
             match gate(text) {
                 Err(why) if why.contains(said) => {}

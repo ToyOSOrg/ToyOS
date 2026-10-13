@@ -150,9 +150,6 @@ pub fn init(devices: &[PciDevice]) {
     let hid: usize = controllers.iter().map(|c| c.devices.len()).sum();
     log!("xHCI: {} controller(s), {} HID device(s)", controllers.len(), hid);
     log!("usb-storage: {} device(s)", storage_count());
-    // Hot-plug can put either input class on any bound controller.
-    crate::keyboard::declare_source();
-    crate::mouse::declare_source();
     // Before the lock takes them: from here every reset this kernel performs
     // stops these controllers, and it reads them out of `stop`'s atomics rather
     // than out of `XHCI`, because a panicked CPU may take no lock.

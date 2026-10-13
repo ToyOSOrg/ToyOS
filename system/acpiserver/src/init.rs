@@ -413,6 +413,53 @@ mod tests {
         );
     }
 
+    /// A register the kernel keeps for itself is not written, and the
+    /// evaluation goes on: as the T14's `HKEY._INI` writes PL1's two bytes at
+    /// MCHBAR + 59A0h and then records its mode in NVS, this `_INI` runs and
+    /// its record is made, and the register is said once. Every other
+    /// refusal still denies the evaluation: an `_INI` that writes a page the
+    /// kernel drives is refused, and what follows its write is not made.
+    #[test]
+    fn a_write_the_kernel_keeps_is_not_made_and_the_evaluation_goes_on() {
+        const PL1: u64 = 0xFEDC_59A0;
+        const DRIVEN: u64 = 0xFED9_0000;
+        const NVS: u64 = 0x7700_0000;
+        let dsdt = cat(&[
+            &post(),
+            &op_region("MCHB", 0x00, &int(PL1), &int(2)),
+            // ByteAcc (§20.2.5.2).
+            &field("MCHB", 0x01, &[unit("PL1L", 8), unit("PL1H", 8)]),
+            &op_region("VTDR", 0x00, &int(DRIVEN), &int(1)),
+            &field("VTDR", 0x01, &[unit("VTD0", 8)]),
+            &op_region("NVSR", 0x00, &int(NVS), &int(2)),
+            &field("NVSR", 0x01, &[unit("MODE", 8), unit("LAST", 8)]),
+            &scope(
+                "\\_SB",
+                &cat(&[
+                    &device("HKEY", &method("_INI", 0, &cat(&[&store(&int(0x5A), &name("\\PL1L")), &store(&int(0xA5), &name("\\PL1H")), &store(&int(3), &name("\\MODE"))]))),
+                    &device("VTDU", &method("_INI", 0, &cat(&[&store(&int(1), &name("\\VTD0")), &store(&int(4), &name("\\LAST"))]))),
+                ]),
+            ),
+        ]);
+        let mut kernel = crafted(&sealed(b"DSDT", &dsdt), &[]);
+        kernel.ports = vec![(0x80, 0)];
+        kernel.memory.extend([(NVS, 10, vec![0; 2]), (PL1, toyos_abi::acpi::UNLISTED, vec![0; 8])]);
+        kernel.keeps = vec![(PL1, PL1 + 8)];
+        kernel.driven = vec![(DRIVEN, DRIVEN + 0x1000)];
+        let (_, aml) = crate::aml::load(&kernel, CRAFTED_RSDP);
+        let mut aml = aml.expect("the DSDT loads");
+        let names = Names::read(&aml.interpreter).expect("the namespace reads");
+        let mut census = Census::default();
+        initialise(&mut aml, &names, &mut census);
+        assert_eq!(census.ini, 1, "{}", census.refused.counts());
+        assert_eq!(census.refused.counts(), "_INI: denied by this server: a SystemMemory write the kernel refused DeviceMemory, in unlisted firmware memory x1");
+        let written = kernel.written.borrow();
+        assert_eq!(written.get(&NVS), Some(&3), "the method's record after the kept write");
+        assert_eq!(written.get(&(NVS + 1)), None, "a write after a refused one");
+        assert!(!written.contains_key(&PL1) && !written.contains_key(&(PL1 + 1)), "a register the kernel keeps was written");
+        assert_eq!(aml.host.kept.counts(), "0xfedc59a0 x2");
+    }
+
     /// §6.5.1's walk looks for `_INI` methods: a device with no `_INI` at or below it is not
     /// examined, so a battery's `_STA` that reads the controller's space
     /// before any controller is attached is not asked, nor one that would

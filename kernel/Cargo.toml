@@ -497,7 +497,6 @@ toyos-phys = { path = "phys" }
 toyos-smmu = { path = "smmu" }
 toyos-tco = { path = "../lib/tco" }
 toyos-tsc = { path = "../lib/tsc" }
-toyos-ps2 = { path = "ps2" }
 toyos-rootimage = { path = "../lib/rootimage" }
 toyos-quiesce = { path = "../lib/quiesce" }
 toyos-random = { path = "../lib/random" }

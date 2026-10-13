@@ -9,13 +9,15 @@
 //!         byte 5 the wheel
 //! ```
 //!
-//! Buttons are carried whole: the bits past the boot three are further
-//! buttons on every pointer this decoder reads, QEMU's included.
+//! Buttons are boot-mouse order's five, which is what an owner of input
+//! merges (`toyos_input::wire::BUTTONS`): the bits past them are dropped.
 //!
 //! Appendix B.2 lays out bytes 0 to 2 and leaves the rest to the device.
 //! Byte 3 is read as the wheel because QEMU's `usb-mouse` report descriptor
 //! puts it there and Linux's boot mouse driver `usbmouse` reads it so; a
 //! mouse that puts something else there scrolls.
+
+use toyos_input::wire::BUTTONS;
 
 /// The largest absolute coordinate, which is the tablet's logical maximum and
 /// the edge of the space every pointer's motion is merged into.
@@ -64,6 +66,11 @@ impl Pointer {
 
     /// `report`, as this layout reads it, or why it does not.
     pub fn decode(self, report: &[u8]) -> Result<Report, Refused> {
+        let read = self.layout(report)?;
+        Ok(Report { buttons: read.buttons & BUTTONS, ..read })
+    }
+
+    fn layout(self, report: &[u8]) -> Result<Report, Refused> {
         match (self, report) {
             (Self::Mouse, &[buttons, dx, dy]) => Ok(Report {
                 buttons,
@@ -108,7 +115,14 @@ mod tests {
     fn a_mouse_report_is_read_as_appendix_b_lays_it_out() {
         assert_eq!(Pointer::Mouse.decode(&[0x01, 0x05, 0xFB]), mouse(0x01, 5, -5, 0));
         assert_eq!(Pointer::Mouse.decode(&[0x07, 0x80, 0x7F, 0xFF]), mouse(0x07, -128, 127, -1));
-        assert_eq!(Pointer::Mouse.decode(&[0xF8, 0, 0, 1]), mouse(0xF8, 0, 0, 1), "every button bit is carried");
+    }
+
+    /// Every record an owner of input reads names boot-mouse order's five
+    /// buttons at most, so one a mouse sends past them decodes.
+    #[test]
+    fn a_button_past_the_fifth_is_dropped() {
+        assert_eq!(Pointer::Mouse.decode(&[0xF8, 0, 0, 1]), mouse(0x18, 0, 0, 1));
+        assert_eq!(Pointer::Tablet.decode(&[0xE1, 0, 0, 0, 0, 0]), tablet(0x01, 0, 0, 0));
     }
 
     #[test]
@@ -185,7 +199,7 @@ mod tests {
                 match pointer.decode(&report) {
                     Ok(read) => {
                         assert!(len <= pointer.request(), "case {case}: {pointer:?} read {len} bytes");
-                        assert_eq!(read.buttons, report[0], "case {case}");
+                        assert_eq!(read.buttons, report[0] & BUTTONS, "case {case}");
                         match read.motion {
                             Motion::Relative { dx, dy } => {
                                 assert_eq!(pointer, Pointer::Mouse, "case {case}");

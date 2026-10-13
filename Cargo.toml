@@ -34,7 +34,6 @@ members = [
     "kernel/microcode",
     "kernel/pci",
     "kernel/phys",
-    "kernel/ps2",
     "kernel/sim",
     "kernel/smmu",
     "kernel/usbhid",
@@ -54,6 +53,7 @@ members = [
     "lib/fat32/check",
     "lib/gpt",
     "lib/hda",
+    "lib/input",
     "lib/inspect",
     "lib/logkeeper-api",
     "lib/logstream",
@@ -114,6 +114,8 @@ members = [
     "system/netstack/udp",
     "system/netstack/wire",
     "system/pkg",
+    "system/ps2server",
+    "system/ps2server/ps2",
     "system/shell",
     "system/soundserver",
     "system/soundserver/mixer",
@@ -212,6 +214,9 @@ toyos-fat32 = { path = "lib/fat32" }
 # not published until they have both passed on it.
 toyos-fat32-check = { path = "lib/fat32/check" }
 toyos-gpt = { path = "lib/gpt" }
+# The `input` port's name and the one program the image may give it to, so the
+# gate on every manifest reads what its owners and its source read.
+toyos-input = { path = "lib/input" }
 toyos-keymap = { path = "sdk/keymap" }
 # The form a program's line takes in a boot's log and the port `logkeeper` serves it
 # on, so the judges reading the log and `logkeeper` writing it read one declaration.

@@ -254,4 +254,7 @@ pub fn fill_i8042_row() {
             wires,
         },
     );
+    if crate::actuator::isa_port_declared() {
+        declare("the isa-port-declared actuator", Ports::one(0x64), Mediated::Kept).expect("isa: 0x64 declared before the actuator");
+    }
 }

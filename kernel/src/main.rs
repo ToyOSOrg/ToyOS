@@ -43,8 +43,6 @@ mod power;
 mod keyboard;
 mod mouse;
 #[cfg(feature = "boot-actuators")]
-mod input_merge_test;
-#[cfg(feature = "boot-actuators")]
 mod usb_gate;
 #[cfg(feature = "boot-actuators")]
 mod sched_gate;
@@ -547,12 +545,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     }
 
     boot_phase!("devices ready", t_devices);
-
-    // Before userland, so nothing else is reading the input queues.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::test_input_merge() {
-        input_merge_test::run();
-    }
 
     report_log_destination();
     let complete = cpu::counter();

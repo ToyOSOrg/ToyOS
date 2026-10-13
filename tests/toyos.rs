@@ -14,7 +14,7 @@ use common::qemu::{
     self, await_guest, await_marker, BootOptions, QemuInstance,
     STALLED, TIMED_OUT,
 };
-use common::{audio, claims, compile, devices, faults, isa, metal, power, screen, serial, usb};
+use common::{audio, claims, compile, devices, faults, isa, metal, power, ps2server, screen, serial, usb};
 use toyos_build::bootlog::{self};
 use toyos_metal::testargs::{self, SUITE};
 
@@ -108,11 +108,15 @@ const RUST_SKIP: &[&str] = &[
     "ccheck",
     "disk_backtrace_child",
     "fault_gate_child",
-    // Each needs a boot whose i8042 the kernel does not drive: the
+    // Each drives the machine's own i8042 through its `isa` claim: the
     // `isa_ports_are_the_binders_alone` and `isa_lines_reach_their_holder`
     // metal rows run them.
     "isa_grant",
     "isa_lines",
+    // It needs a kernel that declared a port of the i8042's row, which only
+    // the `isa-port-declared` actuator makes: the
+    // `isa_claim_refused_on_a_kernel_port` metal row runs it.
+    "isa_claim_refused",
     // It claims the T14's I219, which no guest has: the
     // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
     // metal rows run it.
@@ -126,6 +130,11 @@ const RUST_SKIP: &[&str] = &[
     "trace_flood",
     // It takes the machine down; `virt_fatal_halts_the_others_first` runs it.
     "panic_halts_first",
+    // They claim QEMU's `edu` and `e1000e`, which only `virt_claim_lpi`'s
+    // machine has.
+    "claim_lpi",
+    "claim_unrouted",
+    "claim_bar_fault",
     // Needs a launcher and a declared `cat` and shell, which `tests/images/testcases.toml`
     // does not give: the `process_tree` metal row runs it on tests/images/proctreecase.toml.
     "process_tree",
@@ -156,14 +165,16 @@ const RUST_SKIP: &[&str] = &[
     // has a battery: the `acpi_tables_loaded`, `acpi_server_events` and
     // `battery_read` metal rows end their boot on it.
     "acpi_hold",
+    // It waits for ps2server's probe to end, which only a boot that starts
+    // ps2server has: every `metalcase` row ends its boot on it.
+    "ps2server_hold",
     // It waits for the ACPI server's count of its embedded controller's
     // queries, and no guest's machine has that controller: the
     // `acpi_server_events` metal row runs it.
     "acpi_counted",
     // It claims the fixed hardware itself, which needs a boot that starts no
-    // server, and stages the firmware's side of the Global Lock and finds the
-    // i8042's row another claim's, which need the test kernel and its
-    // `i8042-withheld`: `acpi_mediated_access` and `acpi_press_is_one_sci`
+    // server, and stages the firmware's side of the Global Lock, which needs
+    // the test kernel: `acpi_mediated_access` and `acpi_press_is_one_sci`
     // run it on tests/images/acpicase.toml.
     "acpi_mediated",
     // It powers the machine off: `machine_shutdown_short_stop` runs it.
@@ -287,6 +298,7 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_jobs_at_el2", qemu::Profile::VirtEl2),
     ("virt_random_differs", qemu::Profile::Virt),
     ("virt_smmu", qemu::Profile::VirtSmmu),
+    ("virt_claim_lpi", qemu::Profile::VirtIts),
     ("virt_no_seed_refused", qemu::Profile::VirtNoRng),
     ("virt_wall_clock_utc", qemu::Profile::Virt),
     ("virt_low_ecam", qemu::Profile::VirtLowEcam),
@@ -810,13 +822,21 @@ const METAL: &[(&str, metal::Metal)] = &[
         "app_view",
         metal::Metal { arms: PROCTREECASE, judge: |b| app_view(b[0]) },
     ),
-    // ---- one image: tests/images/metalcase.toml, which runs no job ----
+    // ---- one image: tests/images/metalcase.toml, whose one job is the hold ----
     //
     // The rows after the first read what any boot that hands the machine back
     // writes, so they ride this one.
     (
         "metal_sim_scanout_wc",
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
+    ),
+    (
+        // The machine's own i8042 and EC, driven from userland: the keyboard
+        // reset and armed set 2 translated, its `0xAA`'s time named, the aux
+        // device armed or found absent by name, and no i8042 source in the
+        // kernel's interrupt census.
+        "ps2server_arms",
+        metal::Metal { arms: METALCASE, judge: |b| ps2server::armed(&b[0].log(), &b[0].kernel()) },
     ),
     (
         // Every CPU's microcode line, held to what its bench is held to:
@@ -827,7 +847,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // Two boots the suite already flashes: the device boot writes and
         // fsyncs megabytes before its reset, and `metalcase` is the same reset
-        // with no job behind it.
+        // with nothing written behind it but the hold's line.
         "usb_reset_hands_devices_back",
         metal::Metal {
             arms: USB_RESET_BOOTS,
@@ -898,10 +918,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: SELFTESTS, judge: |b| sysret_ss(b[0].kernel().text()) },
     ),
     (
-        "input_merge",
-        metal::Metal { arms: SELFTESTS, judge: |b| input_merge_ok(b[0].kernel().text()) },
-    ),
-    (
         "operation_nesting",
         metal::Metal {
             arms: SELFTESTS,
@@ -970,14 +986,14 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
-    // ---- the `isa` claim: one image whose i8042 the kernel leaves alone ----
+    // ---- the `isa` claim: the machine's i8042, driven by a test process ----
     (
         // The I/O permission bitmap on the machine's own processor: the ports
         // open to the process that bound them, and every other access killed
         // by name.
         "isa_ports_are_the_binders_alone",
         metal::Metal {
-            arms: ISA_WITHHELD,
+            arms: ISA,
             judge: |b| {
                 b[0].job_passed("test_rs_isa_grant")?;
                 isa::ports(&b[0].kernel())
@@ -989,10 +1005,27 @@ const METAL: &[(&str, metal::Metal)] = &[
         // the claim's holder, and to nobody once the claim is gone.
         "isa_lines_reach_their_holder",
         metal::Metal {
-            arms: ISA_WITHHELD,
+            arms: ISA,
             judge: |b| {
                 b[0].job_passed("test_rs_isa_lines")?;
                 isa::lines(&b[0].kernel())
+            },
+        },
+    ),
+    (
+        // A port of the row the kernel declared, as a FADT reset register at
+        // 0x64 is: the claim is refused naming who holds it.
+        "isa_claim_refused_on_a_kernel_port",
+        metal::Metal {
+            arms: &[metal::once(
+                "isa-port-declared",
+                "tests/images/testcases.toml",
+                &["isa-port-declared"],
+                &["test_rs_isa_claim_refused"],
+            )],
+            judge: |b| {
+                b[0].job_passed("test_rs_isa_claim_refused")?;
+                isa::refused(&b[0].kernel())
             },
         },
     ),
@@ -1008,12 +1041,13 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
 ];
 
-/// A boot whose kernel leaves the i8042 unprobed, so the one grantable row is
-/// free: the ports' job first, since its last holder keeps them until it ends.
-const ISA_WITHHELD: &[metal::Arm] = &[metal::once(
-    "isa-withheld",
+/// The plain `tests/images/testcases.toml` boot, which starts no ps2server, so
+/// the one grantable row is free: the ports' job first, since its last holder
+/// keeps them until it ends.
+const ISA: &[metal::Arm] = &[metal::once(
+    "isa",
     "tests/images/testcases.toml",
-    &["i8042-withheld"],
+    &[],
     &["test_rs_isa_grant", "test_rs_isa_lines"],
 )];
 
@@ -1075,7 +1109,8 @@ fn windows_load_exited() -> String {
 }
 
 /// The two boots the reset ruling is judged on: the device boot for a reset
-/// with megabytes behind it, and `metalcase` for one with no job behind it.
+/// with megabytes behind it, and `metalcase` for one with nothing written
+/// behind it but the hold's line.
 const USB_RESET_BOOTS: &[metal::Arm] = &[
     metal::once(
         devices::BOOT,
@@ -1086,7 +1121,12 @@ const USB_RESET_BOOTS: &[metal::Arm] = &[
     metal::once("metalcase", "tests/images/metalcase.toml", &[], &[]),
 ];
 
-const METALCASE: &[metal::Arm] = &[metal::once("metalcase", "tests/images/metalcase.toml", &[], &[])];
+/// `tests/images/metalcase.toml`, ended once ps2server's probe has: a boot
+/// that ended sooner would cut off what `ps2server_arms` reads.
+const METALCASE: &[metal::Arm] = &[metal::Arm {
+    last: Some("test_rs_ps2server_hold"),
+    ..metal::once("metalcase", "tests/images/metalcase.toml", &[], &[])
+}];
 
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
@@ -1115,7 +1155,6 @@ const SELFTEST_PARAMS: &[&str] = &[
     "xhci-xecp-selftest",
     "xhci-descriptor-selftest",
     "sysret-ss-probe",
-    "test-input-merge",
     "sched-operation-nesting",
     "iommu-firmware-left",
 ];
@@ -1803,11 +1842,11 @@ const ACPI_MEDIATED_SAID: [&str; 10] = [
     "acpi: an unbound claim was refused its access, the lock and the power-off's sleep type",
     "acpi: RAM was refused both ways as UsableMemory",
     "acpi: the RSDP read through as type 9 and its write was refused TableWrite",
-    "acpi: an unlisted register was read and refused its write MemoryType, an unlisted address below 1 MiB was refused RegisterCached, and the interrupt controllers, the HPET and a function's BAR DeviceMemory",
+    "acpi: an unlisted register was read and written, an unlisted address below 1 MiB was refused RegisterCached both ways, and the interrupt controllers, the HPET and a function's BAR DeviceMemory",
     "acpi: the FACS read through as type 10, its write was refused FacsWrite, and the memory after it was written and put back",
     "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; the i8042's row ClaimedPort; PM1a_CNT read and refused its write ReadOnlyPort; the POST port was written",
     "acpi: ACPI_ENABLE and ACPI_DISABLE were refused SMI_CMD as KernelCommand and SCI_EN stayed set, a write wider than a byte was refused CommandSpan, every firmware call made was read back from the port and counted on the boot processor, and a storm of them was refused CommandRate",
-    "by its address and through ECAM, and every write to configuration space was refused ConfigWrite",
+    "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the NVMe controller diskserver holds HeldFunction, and the host bridge's 0x44 was written",
     "acpi: the lock a dead holder left taken read free; it was taken and given back, given back with GBL_RLS where the firmware had asked, and found pending while the firmware owned it",
     "acpi: a sleep type wider than three bits was refused InvalidArgument, the next holder's replaced a dead one's, and a second under one claim was refused AlreadyExists",
 ];
@@ -1842,8 +1881,8 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
         &[],
         &[],
         BootOptions {
-            // The test kernel, for the Global Lock's actuator too.
-            kernel_params: &["i8042-withheld"],
+            // The test kernel, for the Global Lock's actuator.
+            kernel_features: ACTUATOR_KERNEL,
             ready_marker: "acpi: the ACPI row: ",
             smp: cpus,
             extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, "acpi_mediated")],
@@ -1861,7 +1900,6 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     })?;
     let said = serial::Serial::named("the probe's boot", console);
     said.must_be_clean()?;
-    said.must_say(isa::WITHHELD)?;
     said.must_say("acpi: the Global Lock is the FACS's at ")?;
     said.must_say("acpi: the Global Lock given back for a holder that left it taken (its claim is gone)")?;
     // Whose range registers passed the unlisted read, and how this
@@ -2010,7 +2048,8 @@ fn acpi_press_is_one_sci() -> Result<(), String> {
 
 /// Boot the image `--console-boot` builds, on the machine shape with a panel
 /// for `/system/bin/console` to claim, and wait for what that image owes at
-/// boot: the console up on its panel, having read the log and the keyboard.
+/// boot: the console up on its panel, having read the log and the keyboard,
+/// and ps2server's i8042 armed, its keyboard and QEMU's PS/2 mouse both.
 /// Nothing is typed at its shell, whose only input is the i8042:
 /// `issues/the-console-loses-typed-keystrokes-under-host-load.md`.
 fn console_image_boots() -> Result<(), String> {
@@ -2022,7 +2061,10 @@ fn console_image_boots() -> Result<(), String> {
     );
     let mut console = format!("{}\n", qemu.boot_log());
     await_marker(&mut qemu, &mut console, "console: ready ", "the console to take its panel")?;
-    serial::Serial::named("the console image's boot", console).must_be_clean()
+    await_marker(&mut qemu, &mut console, ps2server::ARMED_BOTH, "ps2server to arm the i8042")?;
+    let said = serial::Serial::named("the console image's boot", console);
+    eprintln!("  [ps2server] {}", said.must_say(ps2server::KEYBOARD_RESET)?.trim());
+    said.must_be_clean()
 }
 
 /// Boot `tests/images/panelcase.toml` on [`qemu::Profile::MetalNoX2apic`]'s CPUs, which
@@ -2380,6 +2422,153 @@ fn virt_smmu(profile: qemu::Profile, test_config: &Path) -> Result<(), String> {
         return Err(format!("the machine died of something other than the record: {death}\nserial:\n{serial}"));
     }
     Ok(())
+}
+
+/// `tests/guest/rust-tests`' binaries that `tests/images/virtclaimcase.toml` runs as its
+/// jobs, each `test_rs_` and its name.
+const VIRT_CLAIM_LPI: &str = "claim_lpi";
+const VIRT_CLAIM_UNROUTED: &str = "claim_unrouted";
+const VIRT_CLAIM_BAR_FAULT: &str = "claim_bar_fault";
+
+/// What `claim_bar_fault` keeps in edu's two DMA address registers while its
+/// children fault in the BAR (`MARK_SOURCE`, `MARK_DESTINATION` there): on
+/// the console only if the kernel read through the BAR for a crash report.
+const BAR_MARKS: [u64; 2] = [0xbad0_c0de_0000_5eed, 0xbad1_c0de_0000_5eed];
+
+/// A claimed function's message, translated by the ITS into its claim slot's
+/// LPI, and the claims the kernel refuses beside it, on `tests/images/virtclaimcase.toml`.
+/// Its first job claims QEMU's `edu` and reads every message it asks it for as
+/// one interrupt of its claim (`tests/guest/rust-tests/src/bin/claim_lpi.rs`),
+/// judged beside it on the kernel's lines: the ITS armed from the MADT; the
+/// function handed over on a slot, its DeviceID the requester ID QEMU's IORT
+/// maps it to, its slot's LPI raised; and at the claim's end the DeviceID
+/// unmapped again. The second is refused the `e1000e` the IORT routes past
+/// the SMMUv3, by the kernel's name for it, and claims edu after it. The
+/// third faults twice in edu's BAR, and names it as a syscall's buffer; no
+/// crash report reads through it. And no access of a function's is refused
+/// at the SMMUv3.
+fn virt_claim_lpi(profile: qemu::Profile) -> Result<(), String> {
+    const JOB: &str = "test_rs_claim_lpi";
+    const SAID: &str = "claim_lpi: 16 messages edu sent were read as 16 interrupts of its claim, one each";
+    const EDU: &str = "[1234:11e8]";
+    let config = compile::repo_root().join("tests/images/virtclaimcase.toml");
+    // One CPU, so each message is taken where the job wrote the register
+    // that sends it: at EL0, which holds the preempt count at zero.
+    let options = BootOptions {
+        profile,
+        smp: 1,
+        ready_marker: "control registers: SCTLR_EL1=",
+        extra_root_files: vec![
+            suite_bin(profile.arch(), VIRT_CLAIM_LPI),
+            suite_bin(profile.arch(), VIRT_CLAIM_UNROUTED),
+            suite_bin(profile.arch(), VIRT_CLAIM_BAR_FAULT),
+        ],
+        ..Default::default()
+    };
+    let argv = qemu::profile_argv(&options);
+    for want in ["msi=its", "iommu=smmuv3", "edu", "bypass_iommu=on", "e1000e"] {
+        if !argv.iter().any(|a| a.contains(want)) {
+            return Err(format!("the machine has no {want}: {argv:?}"));
+        }
+    }
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    let mut serial = virt_console(&qemu);
+    judge_virt_job(&mut qemu, &mut serial, JOB, SAID)?;
+    // The release's own line, its last: the DeviceID's unmapping comes before it.
+    await_marker(&mut qemu, &mut serial, " released from slot ", "the claim's release")?;
+    let line = |want: &str| serial.lines().find(|l| l.contains(want)).map(str::to_string);
+    let Some(armed) = line("ITS: 0 at 0x8080000 armed") else {
+        return Err(format!("the MADT's ITS was never armed
+serial:
+{serial}"));
+    };
+    eprintln!("  [virt] {armed}");
+    let Some(handed) = line(&format!("{EDU} handed over on slot ")) else {
+        return Err(format!("edu was never handed over
+serial:
+{serial}"));
+    };
+    eprintln!("  [virt] {handed}");
+    // `pcidev: PCI bb:dd.f [1234:11e8] handed over on slot N, LPI M`.
+    let parsed = handed.split_once("pcidev: PCI ").and_then(|(_, rest)| {
+        let (at, rest) = rest.split_once(' ')?;
+        let (slot, lpi) = rest.split_once("on slot ")?.1.split_once(", LPI ")?;
+        Some((at.to_string(), slot.parse::<u32>().ok()?, lpi.trim().parse::<u32>().ok()?))
+    });
+    let Some((at, slot, lpi)) = parsed else {
+        return Err(format!("{handed:?} names no function, slot and LPI"));
+    };
+    if lpi != 8192 + slot {
+        return Err(format!("slot {slot}'s LPI is {lpi}, not the {} its slot names", 8192 + slot));
+    }
+    // QEMU's IORT maps a function's requester ID to the SMMUv3's StreamID and
+    // that to the ITS's DeviceID unchanged.
+    let (bus, rest) = at.split_once(':').ok_or_else(|| format!("{at} is no bus:device.function"))?;
+    let (dev, func) = rest.split_once('.').ok_or_else(|| format!("{at} is no bus:device.function"))?;
+    let hex = |text: &str| u32::from_str_radix(text, 16).map_err(|e| format!("{text}: {e}"));
+    let rid = hex(bus)? << 8 | hex(dev)? << 3 | hex(func)?;
+    for want in [
+        format!("ITS: {at}, DeviceID {rid:#x}, event 0 is slot {slot}'s LPI {lpi}"),
+        format!("pcidev: slot {slot} took its first message on LPI {lpi}"),
+        format!("pcidev: PCI {at} {EDU} released from slot {slot}"),
+        format!("ITS: {at}, DeviceID {rid:#x}, unmapped from slot {slot}"),
+    ] {
+        let Some(found) = line(&want) else {
+            return Err(format!("the kernel never said {want:?}
+serial:
+{serial}"));
+        };
+        eprintln!("  [virt] {found}");
+    }
+
+    judge_virt_job(
+        &mut qemu,
+        &mut serial,
+        "test_rs_claim_unrouted",
+        "claim_unrouted: e1000e, routed past the SMMUv3, was refused, and edu was claimed after",
+    )?;
+    await_kernel_exit(&mut qemu, &mut serial, "test_rs_claim_unrouted")?;
+    // `pcidev::Refusal::NoMessage` of the ITS's `Refused::NoDeviceId`.
+    const UNROUTED: &str = "NOT HANDED OVER — no message of its own could be made for it — the IORT gives it no \
+                            DeviceID at this kernel's ITS behind the SMMUv3";
+    let Some(refused) = serial.lines().find(|l| l.contains(UNROUTED)) else {
+        return Err(format!("the kernel never refused e1000e by {UNROUTED:?}\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {refused}");
+
+    judge_virt_job(
+        &mut qemu,
+        &mut serial,
+        "test_rs_claim_bar_fault",
+        "claim_bar_fault: two faults in the BAR ended their processes, and a syscall naming it was refused",
+    )?;
+    await_kernel_exit(&mut qemu, &mut serial, "test_rs_claim_bar_fault")?;
+    let faults: Vec<&str> = serial.lines().filter(|l| l.contains("FAULT pc=")).collect();
+    if faults.len() != 2 {
+        return Err(format!("{} user faults reported, not claim_bar_fault's two: {faults:?}\nserial:\n{serial}", faults.len()));
+    }
+    let console = serial.to_lowercase();
+    for mark in BAR_MARKS {
+        if console.contains(&format!("{mark:x}")) {
+            return Err(format!("{mark:#x}, in edu's BAR, is on the console: a crash report read through it\nserial:\n{serial}"));
+        }
+    }
+    if let Some(fault) = serial.lines().find(|l| l.contains("DMA FAULT")) {
+        return Err(format!("the unit refused an access: {fault}\nserial:\n{serial}"));
+    }
+    Ok(())
+}
+
+/// Wait for the kernel's line of `job`'s own exit, its `code=0` telling it from
+/// a child of the same name a fault ended: the kernel's lines can reach the
+/// PL011 after test-runner's line of the job's end, so that line is no sign
+/// the kernel has said all it will of the job.
+fn await_kernel_exit(qemu: &mut QemuInstance, serial: &mut String, job: &str) -> Result<(), String> {
+    let exit = format!("exit: {job} pid=");
+    await_guest(qemu, serial, &format!("the kernel's line of {job}'s exit"), |log| {
+        log.lines().any(|l| l.contains(&exit) && l.contains(" code=0 "))
+    })
+    .map_err(|why| format!("{why}\nserial:\n{serial}"))
 }
 
 /// Everything the PL011 has carried on `qemu`'s boot: the capture each
@@ -3110,6 +3299,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
         "virt_wall_clock_utc" => virt_wall_clock_utc(profile),
         "virt_no_seed_refused" => virt_no_seed_refused(profile, test_config),
         "virt_smmu" => virt_smmu(profile, test_config),
+        "virt_claim_lpi" => virt_claim_lpi(profile),
         "virt_low_ecam" => virt_low_ecam(profile, test_config),
         "virt_mask_windows" => virt_mask_windows(profile),
         "virt_irq_storm" => {
@@ -4114,14 +4304,6 @@ fn sysret_ss(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// The input core merged what it was handed.
-fn input_merge_ok(log: &str) -> Result<(), String> {
-        if !log.contains("input-merge: ok") {
-            return Err(format!("the input core check never reported:\n{log}"));
-        }
-        Ok(())
-}
-
 /// Every unit this kernel went on to program, and every AMD-Vi unit it
 /// switched off, said it was handed over with what the actuator left on.
 ///
@@ -4932,98 +5114,77 @@ struct Bench {
     /// The blocks the processors' `_OSC` load under ToyOS's claims, by
     /// signature and length.
     loaded: &'static [&'static str],
-    /// The host's refusal the owner ruled, which this machine's AML meets: it
-    /// is met, and said, not red.
-    ruled: Ruled,
-    /// What the census says of `_REG(3, 1)`, after every `_INI`.
-    reg: &'static str,
+    /// Each register the kernel keeps that this machine's AML writes: the
+    /// server says it once, and its evaluation goes on.
+    kept: &'static [At],
+    /// Pages of registers this machine's AML writes, each of which the
+    /// server says the kernel's first write into.
+    first_written: &'static [At],
 }
 
-/// A refusal the owner ruled, which a bench's AML meets.
-struct Ruled {
-    /// Its kind, as the server says it.
-    kind: &'static str,
-    /// Each line the server says of it by kind, whole.
-    said: &'static [&'static str],
-    /// Each evaluation it refuses, by the path the server says under
-    /// [`acpiserver_api::OWN`].
-    paths: &'static [&'static str],
-    /// What the namespace's census counts of it.
-    census: &'static str,
+/// Where a write the server says lands: at an address, or at an offset into
+/// the 128 KiB MCHBAR window (631122 §3.1.14), wherever 00:00.0 places it.
+#[derive(Clone, Copy, Debug)]
+enum At {
+    Address(u64),
+    Mchbar(u64),
 }
 
-impl Ruled {
-    /// `line` is one the server says of this refusal: one of [`Self::said`],
-    /// or one of [`Self::paths`] refused under it.
-    fn says(&self, line: &str) -> bool {
-        self.said.iter().any(|said| line.ends_with(said))
-            || self.paths.iter().any(|path| line.ends_with(&format!("{}{path} was refused Host({:?})", acpiserver_api::OWN, self.kind)))
+impl At {
+    fn holds(self, address: u64) -> bool {
+        match self {
+            At::Address(at) => address == at,
+            At::Mchbar(offset) => address & 0x1_FFFF == offset,
+        }
     }
+}
 
-    /// Of the server's `lines`, each that carries this refusal's kind but the
-    /// census is one it says of it, and each it says of it is there.
-    fn held(&self, lines: &[&str]) -> Result<(), String> {
-        let stray: Vec<&&str> = lines.iter().filter(|l| l.contains(self.kind) && !l.contains("acpiserver: the namespace initialised: ") && !self.says(l)).collect();
-        if !stray.is_empty() {
-            return Err(format!("the server said the refusal the owner ruled of what he did not rule: {stray:#?}"));
-        }
-        let owned = self.paths.iter().map(|path| format!("{}{path} was refused Host({:?})", acpiserver_api::OWN, self.kind));
-        if let Some(unmet) = self.said.iter().map(|said| said.to_string()).chain(owned).find(|said| !lines.iter().any(|l| l.ends_with(said.as_str()))) {
-            return Err(format!("this bench's AML meets the refusal the owner ruled, and the server never said: {unmet}"));
-        }
-        Ok(())
-    }
+/// The address of each write the server said under `head`, which it details
+/// on the next line, under [`acpiserver_api::OWN`], as `... to Memory(<hex>)`.
+fn said_writes(lines: &[&str], head: &str) -> Result<Vec<u64>, String> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.contains(head))
+        .map(|(i, l)| {
+            let own = lines.get(i + 1).filter(|next| next.contains(acpiserver_api::OWN)).ok_or_else(|| format!("{l:?} is followed by no line of the machine's own"))?;
+            u64::from_str_radix(field_between(own, " to Memory(", ")")?, 16).map_err(|_| format!("{own:?} names no address"))
+        })
+        .collect()
 }
 
 /// The T14: 14 blocks; its `\_S5`'s `SLP_TYPa` read by a byte scan of its
 /// DSDT, with no interpreter; the first processor's commit loads one block,
-/// of 459 bytes; and the controller's `_INI` and its hotkey device's write
-/// memory outside every range the map lists, which the owner ruled refused
-/// and recorded
-/// (`issues/the-t14s-controller-and-hotkey-ini-are-refused-for-writes-outside-the-map.md`).
+/// of 459 bytes. Its controller's `_INI` writes its GPIO pad
+/// `PAD_CFG_DW0_GPPC_A_13` at 0xFD6E0A70 (631120-002 §27.1.114), and its
+/// hotkey device's `_INI` writes MCHBAR's cTDP control and turbo activation
+/// ratio, at 5F50h and 5F54h, and PL1 at 59A0h, which the kernel keeps
+/// (`issues/the-t14s-thermal-modes-do-not-move-its-package-power-limits.md`).
 const T14: Bench = Bench {
     row: "acpi: the ACPI row: PM1a events 0x1800+4, GPE0 0x1860+32, SCI gsi 9 level/high",
     blocks: 14,
     refused: &[],
     s5: "power: S5 is PM1a 0x1804 with SLP_TYPa=7,",
     loaded: &["SSDT, 459 bytes"],
-    ruled: Ruled {
-        kind: "a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory",
-        said: &[
-            "acpiserver: refused for the first time: a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory",
-            "acpiserver: an evaluation of the initialisation was refused for the first time: _INI: denied by this server: a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory",
-        ],
-        paths: &["\\_SB_.PC00.LPCB.EC__._INI", "\\_SB_.PC00.LPCB.EC__.HKEY._INI"],
-        census: "_INI: denied by this server: a SystemMemory write the kernel refused MemoryType, in unlisted firmware memory x2",
-    },
-    reg: "_REG(3, 1) in 1 scope(s)",
+    kept: &[At::Mchbar(0x59A0)],
+    first_written: &[At::Address(0xFD6E_0000), At::Mchbar(0x5000)],
 };
 
 /// The AMD bench: 17 blocks; its SSDT8 ends in a `Scope` of an `EC0` no
 /// table defines, refused whole as the owner ruled
 /// (`issues/the-amd-benchs-ssdt8-scopes-a-controller-no-table-defines.md`);
 /// its `\_S5`'s `SLP_TYPa` as the check outside the tree evaluated it; no
-/// processor names an `_OSC`; and the controller's `_REG(3, 1)` and the
-/// adapter's `_PSR` each write the root complex's index, a configuration
-/// write the owner ruled refused
-/// (`issues/the-amd-benchs-ec-reg-and-psr-are-refused-for-a-write-to-the-root-complexs-index.md`).
+/// processor names an `_OSC`. Its controller's `_REG(3, 1)` and its
+/// adapter's `_PSR` each reach `ALIB`, whose mailbox writes the root
+/// complex's 0xB8 and 0xBC through ECAM, in 00:00.0's page at 0xF8000000.
 const AMD: Bench = Bench {
     row: "acpi: the ACPI row: PM1a events 0x400+4, GPE0 0x420+8, SCI gsi 9 level/low",
     blocks: 17,
     refused: &[(9, "a name that does not resolve")],
     s5: "with SLP_TYPa=5,",
     loaded: &[],
-    ruled: Ruled {
-        kind: "a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
-        said: &[
-            "acpiserver: refused for the first time: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
-            "acpiserver: an evaluation of the initialisation was refused for the first time: _REG: denied by this server: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
-            "acpiserver: a method read for the power sources refused: _PSR: denied by this server: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11",
-        ],
-        paths: &["\\_SB_.PCI0.LPC0.EC__._REG"],
-        census: "_REG: denied by this server: a SystemMemory write the kernel refused ConfigWrite, in memory of type 11 x1",
-    },
-    reg: "no _REG run",
+    kept: &[],
+    first_written: &[At::Address(0xF800_0000)],
 };
 
 /// The server's load of a bench's tables, every access the kernel's to make
@@ -5032,9 +5193,11 @@ const AMD: Bench = Bench {
 /// it, and loaded or refused as its [`Bench`] says; `\_S5`'s `SLP_TYPa`
 /// handed to the kernel, which says it powers this machine off with that
 /// value, and never does on this row. Then the namespace initialised (ACPI
-/// 6.5 §6.5.1): every `_STA` and `_INI` the walk runs, none refused but by a
-/// ruled refusal, each of which is met, and the controller's `_REG(3, 1)`
-/// after them as the bench says; `\_SB._OSC`
+/// 6.5 §6.5.1): every `_STA` and `_INI` the walk runs, none refused, and the
+/// controller's `_REG(3, 1)` after them; each register the kernel keeps that
+/// the bench's AML writes said once, and each page of registers it writes
+/// said with the kernel's first write into it; every battery reading names
+/// the adapter online or offline; `\_SB._OSC`
 /// negotiated, and on an Intel machine each processor's, none refused; every
 /// block they load loaded, none refused. Every other CPU of the machine said
 /// how its range registers stand beside the boot processor's, and none holds
@@ -5090,22 +5253,33 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
     let refused: Vec<&&str> = lines
         .iter()
         .filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ") || l.contains("was refused for the first time"))
-        .filter(|l| !l.contains("acpiserver: table ") && !bench.ruled.says(l))
+        .filter(|l| !l.contains("acpiserver: table "))
         .collect();
     if !refused.is_empty() {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
     }
-    bench.ruled.held(&lines)?;
-    for line in lines.iter().filter(|l| bench.ruled.said.iter().any(|said| l.ends_with(said))) {
-        eprintln!("  [acpi] a refusal the owner ruled: {}", line.trim());
+    let kept = said_writes(&lines, acpiserver_api::KEPT_WRITE)?;
+    let unmatched = |expected: &[At], said: &[u64]| expected.iter().copied().filter(|at| !said.iter().any(|&address| at.holds(address))).collect::<Vec<At>>();
+    if kept.len() != bench.kept.len() || !unmatched(bench.kept, &kept).is_empty() {
+        return Err(format!("the server said the kernel kept writes to {kept:#x?}, where this bench's AML writes {:x?}", bench.kept));
     }
+    let pages: Vec<u64> = said_writes(&lines, acpiserver_api::FIRST_WRITE_IN_PAGE)?.iter().map(|address| address & !0xFFF).collect();
+    let missing = unmatched(bench.first_written, &pages);
+    if !missing.is_empty() {
+        return Err(format!("the server said no first write into {missing:x?}; it said {pages:#x?}"));
+    }
+    eprintln!("  [acpi] writes the kernel kept: {kept:#x?}; pages first written: {pages:#x?}");
     let census = log.must_say("acpiserver: the namespace initialised: ")?;
     let refusals = census.split_once("evaluations refused, by kind: ").map_or("", |(_, kinds)| kinds.trim());
-    if refusals != bench.ruled.census {
-        return Err(format!("the namespace's initialisation refused other than {:?}: {census}", bench.ruled.census));
+    if refusals != "none" {
+        return Err(format!("the namespace's initialisation refused an evaluation: {census}"));
     }
-    if !census.contains(&format!("_INI run, {}; ", bench.reg)) {
-        return Err(format!("the census says other than {:?} of the controller's _REG(3, 1): {census}", bench.reg));
+    if !census.contains("_INI run, _REG(3, 1) in 1 scope(s); ") {
+        return Err(format!("the census says the controller's _REG(3, 1) ran in no one scope: {census}"));
+    }
+    let readings: Vec<&&str> = lines.iter().filter(|l| l.contains(acpiserver_api::BATTERY_READ)).collect();
+    if readings.is_empty() || readings.iter().any(|l| !(l.ends_with("; AC online") || l.ends_with("; AC offline"))) {
+        return Err(format!("a battery reading names the adapter neither online nor offline: {readings:#?}"));
     }
     log.must_say("acpiserver: \\_SB._OSC negotiated: ")?;
     if bench.loaded.is_empty() {
@@ -5147,8 +5321,7 @@ const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-metho
 
 /// The T14's battery as the server read it: the one battery its tables name
 /// found present once the controller's `_REG` ran, its information read,
-/// and at least one reading of it with the adapter's state; nothing refused
-/// but [`T14`]'s ruled refusal, of its two `_INI`s by path and nothing else.
+/// and at least one reading of it with the adapter's state; nothing refused.
 /// The census's Global Lock counts are printed and held to nothing: an
 /// evaluation gives back the lock it still holds as it ends
 /// (`finish`, `system/acpiserver/aml/src/exec.rs`), and the real lock
@@ -5166,15 +5339,10 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     if let Some(fired) = lines.iter().find(|l| l.contains("panicked")) {
         return Err(format!("the server died: {fired}"));
     }
-    let refused: Vec<&&str> = lines
-        .iter()
-        .filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: "))
-        .filter(|l| !T14.ruled.says(l))
-        .collect();
+    let refused: Vec<&&str> = lines.iter().filter(|l| l.contains("acpiserver: refused") || l.contains(" refused: ")).collect();
     if !refused.is_empty() {
         return Err(format!("the server refused something of this machine's AML: {refused:#?}"));
     }
-    T14.ruled.held(&lines)?;
     let found = log.must_say(T14_POWER_SOURCES)?;
     let info = log.must_say(&format!("acpiserver: {}battery 1 of 1 from ", acpiserver_api::BATTERY_INFO))?;
     let read: Vec<&&str> = lines.iter().filter(|l| l.contains(acpiserver_api::BATTERY_READ)).collect();

@@ -247,6 +247,14 @@ pub fn partition<T: FromHandle>(guid: toyos_abi::part::PartGuid) -> Option<T> {
     with_prefixed(DEV_PREFIX, name, |label| Endowments::get().take::<T>(label))
 }
 
+/// The claim for one legacy ISA function the manifest says this program gets,
+/// looked up by the entry's own spelling exactly as [`pci_function`] is.
+pub fn isa<T: FromHandle>(set: toyos_abi::syscall::IsaId) -> Option<T> {
+    let mut buf = [0u8; DeviceRequest::MAX_NAME];
+    let name = DeviceRequest::Isa(set).write_name(&mut buf);
+    with_prefixed(DEV_PREFIX, name, |label| Endowments::get().take::<T>(label))
+}
+
 /// Compose `<prefix><name>` on the stack. Nothing in the SDK allocates, and a
 /// name past the label bound matches nothing rather than being truncated into
 /// a label that happens to exist.

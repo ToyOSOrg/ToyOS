@@ -12,7 +12,7 @@ the firmware, which the kernel makes for it
 `toyos_userbound::firmware::port`). The byte selects a handler that runs in
 system management mode, above the kernel, and reads whatever the holder wrote
 to firmware's memory before the call, which the mediated access passes both
-ways (`issues/the-acpi-claims-holder-reaches-every-port-and-firmware-range-the-kernel-did-not-declare.md`).
+ways (`issues/the-acpi-servers-firmware-writes-reach-itss-and-registers-no-fence-sees.md`).
 So a bug in `/system/bin/acpiserver`, or AML it runs, reaches whatever the
 machine's firmware does on any byte with any argument block.
 
@@ -36,7 +36,7 @@ What the kernel bounds:
   else that raises a firmware interrupt: the chipset's own SMI enable
   register sits at a port no table names and nothing declared, so the holder
   writes it as it writes any port
-  (`issues/the-acpi-claims-holder-reaches-every-port-and-firmware-range-the-kernel-did-not-declare.md`).
+  (`issues/the-acpi-servers-firmware-writes-reach-itss-and-registers-no-fence-sees.md`).
   Eight a second is no bound on the firmware interrupts a holder can ask
   for.
 

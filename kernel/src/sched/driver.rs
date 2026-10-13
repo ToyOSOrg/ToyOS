@@ -642,8 +642,6 @@ fn execute(action: Action<KernelPayload>) {
             let awake = cpus().get(cpu).doorbell().kick_pending()
                 || crate::preempt::need_resched()
                 || !with_cpu(|c| c.mailbox_is_empty())
-                // The i8042 verdict needs a pass to notice its deadline; a quiet machine after boot runs none otherwise.
-                || crate::arch::keyboard_controller::verdict_due()
                 // No log condition here: a log to write means a runnable process, covered above. A pending
                 // root-hub port needs a pass too — no interrupt is coming.
                 || crate::drivers::xhci::port_work_pending();
@@ -660,7 +658,6 @@ fn execute(action: Action<KernelPayload>) {
 /// Consume this CPU's `irq_ring` records into wakes, before the mailbox drain, so a wake posted here reaches this pass's pick.
 fn drain_irqs() {
     crate::drivers::xhci::poll_if_pending();
-    crate::arch::keyboard_controller::service();
 }
 
 /// Leave the current stack for this CPU's idle stack and never come back.

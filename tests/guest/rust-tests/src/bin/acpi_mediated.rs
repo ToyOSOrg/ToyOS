@@ -2,11 +2,10 @@
 //! kernel reads and writes for it, what it refuses and by which name, and the
 //! firmware's Global Lock taken, found owned and given back.
 //!
-//! Run on a boot that starts no ACPI server (`tests/images/acpicase.toml`) and whose
-//! kernel leaves the i8042 to a claim (`i8042-withheld`), so its row is
-//! another claim's; on a guest: every write here that must be refused is one
+//! Run on a boot that starts no ACPI server (`tests/images/acpicase.toml`),
+//! where the i8042's row is another claim's; on a guest: every write here that must be refused is one
 //! a kernel that made it would make for real — to RAM, to the tables, to
-//! COM1, to `PM1a_CNT`, to a function's configuration space — and the
+//! COM1, to `PM1a_CNT`, to a function's header or a held function — and the
 //! firmware's side of the lock is staged on the FACS itself, which only a
 //! machine whose firmware is not using it can take. Each address is found as
 //! a holder finds it, from the RSDP the claim's description names.
@@ -213,6 +212,9 @@ fn probe() {
     panic!("acpi: the power-off was refused: {refused:?}");
 }
 
+/// What [`memory`] says of the addresses firmware's map does not list.
+const UNLISTED_SAID: &str = "acpi: an unlisted register was read and written, an unlisted address below 1 MiB was refused RegisterCached both ways, and the interrupt controllers, the HPET and a function's BAR DeviceMemory";
+
 /// What the probe says once every arm above has passed, holding the lock.
 const HELD_INTO_THE_STOP: &str = "acpi: holding the Global Lock, and asking for the power-off with it";
 
@@ -242,21 +244,23 @@ fn memory(holder: &Holder, info: &AcpiInfo) {
 
     // An address firmware's map does not list, between the PCI hole's start
     // and the ECAM window, where this guest's firmware has the boot processor's range registers
-    // type everything from the top of low RAM to 4 GiB uncacheable: a
-    // register's address, read and never written. And one the map does not
-    // list below 1 MiB, the legacy video hole, which the kernel calls no
-    // register: the fixed range registers decide there, and it reads none.
+    // type everything from the top of low RAM to 4 GiB uncacheable, and no
+    // device decodes: a register's address, read and written. And one the
+    // map does not list below 1 MiB, the legacy video hole, which the kernel
+    // calls no register: the fixed range registers decide there, and it reads
+    // none.
     let (hole, ty) = holder.ask(Access::read(Space::SystemMemory, 0xD000_0000, Width::DWord));
     assert!(hole.is_ok() && ty == UNLISTED, "acpi: an unlisted address the range registers type uncacheable answered {hole:?}, type {ty}");
     let (hole, ty) = holder.ask(Access::write(Space::SystemMemory, 0xD000_0000, Width::DWord, 0));
-    assert_eq!((hole, ty), (Err(Refused::MemoryType), UNLISTED), "acpi: an unlisted address was written");
-    let (hole, ty) = holder.ask(Access::read(Space::SystemMemory, 0xA_0000, Width::DWord));
-    assert_eq!((hole, ty), (Err(Refused::RegisterCached), UNLISTED), "acpi: an unlisted address below 1 MiB");
+    assert_eq!((hole, ty), (Ok(0), UNLISTED), "acpi: an unlisted register was not written");
+    for access in [Access::read(Space::SystemMemory, 0xA_0000, Width::DWord), Access::write(Space::SystemMemory, 0xA_0000, Width::DWord, 0)] {
+        assert_eq!(holder.ask(access), (Err(Refused::RegisterCached), UNLISTED), "acpi: an unlisted address below 1 MiB");
+    }
     // The local APIC; the I/O APIC, which the kernel drives through its
     // first 0x20 bytes, at its first register, at the EOI register a chipset
     // keeps at 0x40 and at its page's last dword; and the HPET. Each is a
     // device's by the kernel's own record of it: this firmware's map lists
-    // none of them, and an address it does not list answers `MemoryType`.
+    // none of them, and an address it does not list is a register's.
     for device in [0xFEE0_0000u64, 0xFEC0_0000, 0xFEC0_0040, 0xFEC0_0FFC, 0xFED0_0000] {
         assert_eq!(holder.read(Space::SystemMemory, device, Width::DWord), Err(Refused::DeviceMemory), "acpi: {device:#x} was read");
         assert_eq!(holder.write(Space::SystemMemory, device, Width::DWord, 0), Err(Refused::DeviceMemory), "acpi: {device:#x} was written");
@@ -268,7 +272,7 @@ fn memory(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(holder.read(Space::SystemMemory, bar, Width::DWord), Err(Refused::DeviceMemory), "acpi: a function's BAR at {bar:#x} was read");
     assert_eq!(holder.write(Space::SystemMemory, bar + 0x14, Width::DWord, 0), Err(Refused::DeviceMemory), "acpi: a function's BAR was written");
     assert_eq!(holder.read(Space::SystemMemory, u64::MAX, Width::Word), Err(Refused::Unmapped));
-    println!("acpi: an unlisted register was read and refused its write MemoryType, an unlisted address below 1 MiB was refused RegisterCached, and the interrupt controllers, the HPET and a function's BAR DeviceMemory");
+    println!("{UNLISTED_SAID}");
 
     // Non-volatile memory, both ways: the FACS, and the bytes after it.
     let fadt = holder.table(info.rsdp, b"FACP");
@@ -322,8 +326,8 @@ fn ports(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(holder.read(Space::SystemIo, 0x1_0000, Width::Byte), Err(Refused::PortSpan));
     assert_eq!(holder.read(Space::SystemIo, 0x80, Width::QWord), Err(Refused::PortSpan));
 
-    // The i8042's row, which another claim is for: this boot's kernel leaves
-    // the controller unprobed, so nothing declared its ports.
+    // The i8042's row, which another claim is for: no kernel drives the
+    // controller, so nothing declared its ports.
     for port in [0x60u64, 0x64] {
         assert_eq!(holder.read(Space::SystemIo, port, Width::Byte), Err(Refused::ClaimedPort), "acpi: port {port:#x} was read");
         assert_eq!(holder.write(Space::SystemIo, port, Width::Byte, 0), Err(Refused::ClaimedPort), "acpi: port {port:#x} was written");
@@ -522,19 +526,41 @@ fn configuration(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(holder.read(Space::SystemMemory, ecam, Width::DWord), Ok(id), "acpi: the host bridge through ECAM");
     assert_eq!(holder.read(Space::SystemMemory, ecam, Width::QWord), Err(Refused::ConfigSpan));
 
-    // No write, by a function's address or through the ECAM window: the
-    // header, a register past it with the value it holds, extended space, a
-    // function nothing answers at, and a shape no read has.
-    let held = holder.read(Space::PciConfig, host_bridge(0x44), Width::Byte).expect("acpi: a register past the header");
-    for (offset, width, value) in [(0x04, Width::Word, 0), (0x10, Width::DWord, 0), (0x3C, Width::Byte, 0), (0x44, Width::Byte, held), (0x44, Width::Byte, !held & 0xFF), (0x100, Width::DWord, 0)] {
-        assert_eq!(holder.write(Space::PciConfig, host_bridge(offset), width, value), Err(Refused::ConfigWrite), "acpi: {offset:#x} by address");
-        assert_eq!(holder.write(Space::SystemMemory, ecam + u64::from(offset), width, value), Err(Refused::ConfigWrite), "acpi: {offset:#x} through ECAM");
+    // Every function's header is refused AddressMap, by a function's
+    // address and through the ECAM window.
+    for (offset, width) in [(0x04, Width::Word), (0x10, Width::DWord), (0x3C, Width::Byte)] {
+        let value = holder.read(Space::PciConfig, host_bridge(offset), width).expect("acpi: the host bridge's header reads");
+        assert_eq!(holder.write(Space::PciConfig, host_bridge(offset), width, value), Err(Refused::AddressMap), "acpi: {offset:#x} by address");
+        assert_eq!(holder.write(Space::SystemMemory, ecam + u64::from(offset), width, value), Err(Refused::AddressMap), "acpi: {offset:#x} through ECAM");
     }
-    assert_eq!(holder.read(Space::PciConfig, host_bridge(0x44), Width::Byte), Ok(held), "acpi: a refused write reached the host bridge");
-    assert_eq!(holder.write(Space::PciConfig, pci_address(0, 0xFF, 31, 7, 0x44), Width::Byte, 0), Err(Refused::ConfigWrite));
-    assert_eq!(holder.write(Space::PciConfig, host_bridge(2), Width::DWord, 0), Err(Refused::ConfigWrite));
-    println!("acpi: the host bridge read as {id:#010x} by its address and through ECAM, and every write to configuration space was refused ConfigWrite");
+    // Past it q35's MCH, no host bridge whose address map the kernel knows,
+    // is written, with the value its register holds, both ways.
+    let held = holder.read(Space::PciConfig, host_bridge(0x44), Width::Byte).expect("acpi: a register past the header");
+    assert_eq!(holder.write(Space::PciConfig, host_bridge(0x44), Width::Byte, held), Ok(()), "acpi: 0x44 by address");
+    assert_eq!(holder.write(Space::SystemMemory, ecam + 0x44, Width::Byte, held), Ok(()), "acpi: 0x44 through ECAM");
+    assert_eq!(holder.read(Space::PciConfig, host_bridge(0x44), Width::Byte), Ok(held));
+    // The NVMe controller diskserver holds is its driver's whole. Each write
+    // below is of the value the register holds, so one a broken fence let
+    // through would be red here and nowhere else.
+    const NVME: u64 = 0x0010_1b36;
+    let nvme = (0..32).find(|&device| holder.read(Space::PciConfig, pci_address(0, 0, device, 0, 0), Width::DWord) == Ok(NVME)).expect("acpi: no NVMe controller on this guest's bus 0");
+    for offset in [0x44u16, 0x100] {
+        let at = pci_address(0, 0, nvme, 0, offset);
+        let value = holder.read(Space::PciConfig, at, Width::DWord).expect("acpi: a held function reads");
+        assert_eq!(holder.write(Space::PciConfig, at, Width::DWord, value), Err(Refused::HeldFunction), "acpi: the NVMe controller's {offset:#x}");
+        let through = ecam + (u64::from(nvme) << 15 | u64::from(offset));
+        assert_eq!(holder.write(Space::SystemMemory, through, Width::DWord, value), Err(Refused::HeldFunction), "acpi: the NVMe controller's {offset:#x} through ECAM");
+    }
+    // ICH9's LPC bridge places the ACPI and TCO blocks the kernel declared at 40h.
+    let pmbase = pci_address(0, 0, 0x1F, 0, 0x40);
+    let value = holder.read(Space::PciConfig, pmbase, Width::DWord).expect("acpi: the LPC bridge's PMBASE reads");
+    assert_eq!(holder.write(Space::PciConfig, pmbase, Width::DWord, value), Err(Refused::AddressMap), "acpi: the LPC bridge's PMBASE");
+    assert_eq!(holder.write(Space::PciConfig, host_bridge(2), Width::DWord, 0), Err(Refused::ConfigSpan));
+    println!("acpi: the host bridge read as {id:#010x} {CONFIGURATION_SAID}");
 }
+
+/// What [`configuration`] says after the host bridge's identity.
+const CONFIGURATION_SAID: &str = "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the NVMe controller diskserver holds HeldFunction, and the host bridge's 0x44 was written";
 
 fn lock(holder: &Holder, info: &AcpiInfo) {
     let fadt = holder.table(info.rsdp, b"FACP");
