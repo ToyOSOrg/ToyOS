@@ -13,8 +13,8 @@ suite's last guest and booted alone. Its console stopped after the firmware's
 `UsbBootExecCmd: Success to Exec 0x0 Cmd (Result = 1)`, the line a green boot
 follows with `BdsDxe: loading Boot0001 "UEFI QEMU QEMU USB HARDDRIVE
 TOYOS0BOOTSTICK1"`, and said nothing more in the 63 s `BOOT_CEILING`
-(`tests/common/qemu.rs`) gives it. Its machine is `Profile::VirtIts`, the one
-HVF profile on QEMU's own GICv3 (`its=on,kernel-irqchip=off`).
+(`tests/common/qemu.rs`) gives it. Its machine is `Profile::VirtIts`, then the
+one HVF profile on QEMU's own GICv3 (`its=on,kernel-irqchip=off`).
 
 The ceiling is not the cause. The same machine, booted from its image and
 waited on `SCTLR_EL1=`, reached it in at most 7 s in each of about 4,000
