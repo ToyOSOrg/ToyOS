@@ -180,6 +180,11 @@ impl<X: SchedPayload> RunQueue<X> {
         self.fair.len()
     }
 
+    /// Is `key` queued in the fair band?
+    pub fn holds_fair(&self, key: TaskKey) -> bool {
+        self.fair.values().any(|task| task.key() == key)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.rt.is_empty() && self.fair.is_empty()
     }

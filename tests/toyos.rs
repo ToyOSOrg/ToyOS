@@ -77,6 +77,9 @@ const RUST_SKIP: &[&str] = &[
     // Its verdict is a ratio of cycle counts, which a guest's host moves: the
     // `wake_storm_cost` metal row runs it on the T14.
     "wake_storm_cost",
+    // Its exit code is a round trip's p99 in microseconds, which a guest's host
+    // sets: the `wake_onto_busy` metal row runs it on the T14.
+    "wake_onto_busy",
     // Its product is a cycle count per syscall and the clock rate beside it,
     // which a guest's host sets: the `syscall_cost` metal row runs it.
     "syscall_cost",
@@ -835,6 +838,12 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    (
+        // A ping-pong whose partner parks beside a spinner, with idle CPUs
+        // beside them: the partner's wake lands on a busy CPU.
+        "wake_onto_busy",
+        metal::Metal { arms: TESTCASES, judge: |b| wake_onto_busy(b[0]) },
+    ),
     // ---- tests/images/jobcase.toml, each image armed to end its boot its own way ----
     (
         // Its own boot, and it must not share one: it is the only arm in this
@@ -1133,6 +1142,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
     &[],
     &[
         "test_rs_wake_storm_cost",
+        "test_rs_wake_onto_busy",
         // Before any client connects, which is `audio_idle_suspend`'s premise.
         "test_rs_audio_idle_suspend",
         "test_rs_audio_tone",
@@ -6351,6 +6361,32 @@ fn wake_latency_recorded(boot: &metal::Readback) -> Result<(), String> {
         ));
     }
     boot.measured("latency.p99_us", u64::try_from(code).expect("a non-negative code"))
+}
+
+/// What `wake_onto_busy`'s round trip may take at its 99th percentile: the
+/// partner's wake served within microseconds by an idle CPU, against the
+/// spinner's quantum a wake left on the busy CPU waits out every round.
+const WAKE_ONTO_BUSY_P99_US: u64 = 1_000;
+
+/// `wake_onto_busy`'s exit code is its p99 in microseconds, or a refusal.
+fn wake_onto_busy(boot: &metal::Readback) -> Result<(), String> {
+    for said in boot.log().text().lines().filter(|l| l.contains("wake_onto_busy: ")) {
+        eprintln!("  [wake] {}", said.trim());
+    }
+    let code = boot.exit_code("test_rs_wake_onto_busy")?;
+    let p99 = u64::try_from(code).map_err(|_| {
+        format!(
+            "wake_onto_busy exited {code}, which is a refusal and not a measurement; its own \
+             last line in the boot's log says which"
+        )
+    })?;
+    if p99 >= WAKE_ONTO_BUSY_P99_US {
+        return Err(format!(
+            "a round trip's p99 is {p99} µs, at or past {WAKE_ONTO_BUSY_P99_US} µs: a wake onto \
+             a busy CPU is waiting for its quantum rather than for the idle one"
+        ));
+    }
+    Ok(())
 }
 
 fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) {

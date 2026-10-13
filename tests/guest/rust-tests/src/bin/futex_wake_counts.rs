@@ -247,14 +247,14 @@ const ATTEMPTS: usize = 6;
 /// questions are about the window between "the kernel claimed it" and "it ran"
 /// — and that window used to be whatever the machine felt like giving.
 ///
-/// **The window is the scheduler's own contract, not a sleep.** An ordinary
-/// wake is `Urgency::Normal`, which `kernel::sched::mailbox` defines as "a busy
-/// target drains at its next safe point (≤ one quantum, matching today's
-/// contract) and needs no interrupt; a sleeping target is always kicked". One
-/// spinner per CPU is therefore the whole arrangement: no CPU is sleeping, so
-/// no wake sends an IPI, and a task the kernel has made `Ready` cannot be
-/// dispatched until a quantum ends — 10 ms, against the microseconds the three
-/// wakes below take between them.
+/// **The window is the scheduler's own contract, not a sleep.** A woken waiter
+/// is handed to an idle CPU if there is one, and otherwise runs ahead of the
+/// task it finds only on a key strictly below that task's
+/// (`kernel::sched::cpu`'s `CpuSched::place`) — and a spinner of this process
+/// shares the waiter's key. One spinner per CPU is therefore the whole
+/// arrangement: no CPU is idle and no key is owed, so a task the kernel has
+/// made `Ready` cannot be dispatched until a quantum ends — 10 ms, against the
+/// microseconds the three wakes below take between them.
 ///
 /// The waiters park **before** the spinners start, and are proved parked by the
 /// roster, as [`counts`]' are: a probe is a wake, and the waiters it claims are
@@ -374,8 +374,8 @@ fn await_armed_and_blocked(cap: &SysCap, armed: &AtomicU32, want: u32) {
     });
 }
 
-/// One never-yielding thread per CPU, so the kernel has no sleeping target to
-/// kick and no free CPU to dispatch a woken task onto.
+/// One never-yielding thread per CPU, so the kernel has no free CPU to
+/// dispatch a woken task onto.
 fn start_spinners() -> Vec<thread::JoinHandle<()>> {
     SPINNERS_STOP.store(0, Ordering::SeqCst);
     (0..syscall::cpu_count())

@@ -136,6 +136,10 @@ struct NoKick;
 
 impl Kicker for NoKick {
     fn kick(&self, _target: CpuId) {}
+
+    fn runs_on(&self, _cpu: CpuId) -> bool {
+        false
+    }
 }
 
 /// 0 armed, 1 fired, 2 withdrawn.
