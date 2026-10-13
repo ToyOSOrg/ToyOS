@@ -190,7 +190,7 @@ impl Decoder {
                     let take = (*left).min(bytes.len());
                     // Doubling, as `Vec` grows, but never past what is declared.
                     if data.capacity() - data.len() < take {
-                        let want = (data.len() * 2).max(take).min(data.len() + *left);
+                        let want = (data.len() * 2).max(data.len() + take).min(data.len() + *left);
                         data.reserve_exact(want - data.len());
                     }
                     data.extend_from_slice(&bytes[..take]);
@@ -460,15 +460,19 @@ mod tests {
         }
     }
 
-    /// The largest message the bound admits, fed as QEMU 11.1.1 chunks it,
-    /// keeps no more than it declares.
+    /// A message fed as QEMU 11.1.1 chunks it keeps no more than it declares:
+    /// one whose second chunk outgrows twice the first, and the largest the
+    /// bound admits.
     #[test]
     fn a_kept_message_buffers_no_more_than_it_declares() {
-        let mut data = words(&[wire::UTF8_TEXT]);
-        data.extend(vec![b'x'; crate::MAX_TEXT]);
-        let (out, _) = decode(&host(wire::CLIPBOARD, &data));
-        let [Ok(Message::Clipboard { data, .. })] = out.as_slice() else { panic!("{} messages", out.len()) };
-        assert!(data.capacity() <= MAX_DATA, "{} bytes held for {MAX_DATA} declared", data.capacity());
+        for text in [2048, crate::MAX_TEXT] {
+            let mut data = words(&[wire::UTF8_TEXT]);
+            data.extend(vec![b'x'; text]);
+            let declared = data.len();
+            let (out, _) = decode(&host(wire::CLIPBOARD, &data));
+            let [Ok(Message::Clipboard { data, .. })] = out.as_slice() else { panic!("{} messages", out.len()) };
+            assert!(data.capacity() <= declared, "{} bytes held for {declared} declared", data.capacity());
+        }
     }
 
     #[test]
