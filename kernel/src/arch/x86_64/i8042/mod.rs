@@ -17,7 +17,7 @@ use crate::arch::idt::I8042_VECTOR;
 use crate::irq_ring::IrqSource;
 use crate::log;
 use crate::sync::Lock;
-use crate::time::{Budget, Cadence, Duration};
+use crate::time::{Bound, Budget, Cadence, Duration};
 use super::ioapic::{self, Gsi};
 
 mod tally;
@@ -746,6 +746,15 @@ const KEYBOARD: Budget = Budget::of(
     Duration::from_millis(750),
     "the keyboard stage is named as the one that ran out",
 );
+/// The set byte's wait, from the kernel's read of the second ack: taken out of
+/// [`KEYBOARD`], so `0xF4` keeps the stage's remainder.
+const SET_BYTE: Bound = Bound::from_spec(
+    Duration::from_micros(21_125),
+    "IBM PS/2 Hardware Interface Technical Reference (October 1990): the keyboard responds \
+     within 20 ms (Keyboards (101- and 102-Key), pp. 21 and 39), and an 11-bit frame (p. 38) \
+     takes at most 1.125 ms, its first clock within 25 us and each bit within 100 us \
+     (Keyboard/Auxiliary Device Controller, p. 14, Figure 6, T1, T3 and T4)",
+);
 /// The aux port's `0xFF` is a device reset, answered with a real self-test:
 /// this stage must not be shortened to fix an arithmetic error elsewhere.
 const AUX_RESET: Budget = Budget::of(
@@ -885,7 +894,11 @@ enum SetQuery {
     Told(u8),
     /// A non-ack byte came back; the device does not implement the exchange.
     Refused(u8),
-    /// Nothing came back, or the controller never took the write.
+    /// Both bytes were acked and no set byte came within [`SET_BYTE`]: the
+    /// device answered on this wire and does not implement the read-back.
+    Unanswered,
+    /// The exchange stopped before both acks: the controller never took a
+    /// write, or an ack never came.
     Silent,
 }
 
@@ -911,9 +924,9 @@ fn query_scancode_set(deadline: u64) -> SetQuery {
         Some(other) => return SetQuery::Refused(other),
         None => return SetQuery::Silent,
     }
-    match read_data(deadline) {
+    match read_data((crate::clock::nanos_since_boot() + SET_BYTE.nanos()).min(deadline)) {
         Some(set) => SetQuery::Told(set),
-        None => SetQuery::Silent,
+        None => SetQuery::Unanswered,
     }
 }
 
@@ -1110,6 +1123,21 @@ pub fn init(rsdp_addr: u64) {
             log!(
                 "i8042: kbd DISABLED - the set query answered {:#04x} and firmware's cfg {:#04x} has translate off, so nothing says what the wire carries",
                 byte,
+                before
+            );
+            return;
+        }
+        SetQuery::Unanswered if before & CFG_TRANSLATE != 0 => {
+            log!(
+                "i8042: kbd acked both bytes of the set query and sent no set byte within {}us; firmware's own cfg {:#04x} has translate on, so the wire is set 1",
+                SET_BYTE.nanos() / 1_000,
+                before
+            );
+            ("set2+xlat", "assumed, the set query went unanswered")
+        }
+        SetQuery::Unanswered => {
+            log!(
+                "i8042: kbd DISABLED - the set query went unanswered and firmware's cfg {:#04x} has translate off, so nothing says what the wire carries",
                 before
             );
             return;
