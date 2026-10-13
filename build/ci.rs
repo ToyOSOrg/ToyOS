@@ -432,6 +432,8 @@ pub(crate) const KERNEL_DIR: &str = "kernel";
 pub(crate) const SDK: &str = "toyos";
 /// [`SDK`]'s directory, as the workspace's `members` names it.
 pub(crate) const SDK_DIR: &str = "sdk/toyos";
+/// The SDK's window client, tested beside [`SDK`]: no other step runs it.
+const SDK_WINDOW: &str = "toyos-window";
 const KERNEL_LOOM: &str = "kernel-loom";
 const KERNEL_SIM: &str = "kernel-sim";
 const BLOCKRING: &str = "toyos-blockring";
@@ -720,7 +722,7 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// library, clippy with warnings denied, the concurrency models' negative
 /// controls, every userland crate with a host test ([`crate::userlandhost`],
 /// which also reds on a userland test none of them runs), every app the images
-/// ship for each host ([`apps_for`]), and the SDK.
+/// ship for each host ([`apps_for`]), and the SDK with its window client.
 ///
 /// **Every step runs against a `$TMPDIR` of this job's own, and the last step
 /// reds on anything left in it** but the lock `toyos_tmpdir` keeps there: a test
@@ -826,7 +828,7 @@ fn host(root: &Path) -> Vec<Step> {
         }
         Err(why) => steps.push(Step { label: "the apps".into(), verdict: Err(why) }),
     }
-    steps.push(step("the toyos SDK", || cargo(root, &["test", "-p", SDK])));
+    steps.push(step("the toyos SDK and its window client", || cargo(root, &["test", "-p", SDK, "-p", SDK_WINDOW])));
     steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
     steps
 }
