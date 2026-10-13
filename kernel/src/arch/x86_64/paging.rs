@@ -3,8 +3,9 @@
 // A live-structure write's TLB invalidation is derived from the entry it
 // replaced, never chosen by the caller, and discharges only on this CPU —
 // `arch::tlb::shootdown` is the caller's job for the rest of the machine.
-// No mapping here is global, which is what makes a single-address
-// invalidation (INVPCID or INVLPG) complete.
+// A leaf is global if and only if it is the same in every root that will ever
+// be loaded, which is the kernel half and only [`kernel_leaf`] writes it; a
+// mapping that differs between roots needs a constructor of its own.
 
 use crate::log;
 use alloc::boxed::Box;
@@ -31,6 +32,9 @@ const PAGE_CACHE_DISABLE: u64 = 1 << 4;
 const PAGE_ACCESSED: u64 = 1 << 5;
 const PAGE_DIRTY: u64 = 1 << 6;
 const PAGE_SIZE_BIT: u64 = 1 << 7;
+/// Cached across every `CR3` and every PCID, because `arch::control_regs`
+/// declares `CR4.PGE`; the same bit in a 2 MiB leaf and a 4 KiB one.
+const PAGE_GLOBAL: u64 = 1 << 8;
 /// In a 4 KiB PTE this bit is bit 7 instead, so flags can't cross a split unmoved.
 const PAGE_PAT_2M: u64 = 1 << 12;
 /// Not-executable only because `arch::control_regs` asserts `EFER.NXE` on every CPU.
@@ -42,7 +46,7 @@ const ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000;
 const TABLE_FLAGS: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
 
 impl Prot {
-    /// The permission bits a leaf entry carries; address and cache policy stay the caller's.
+    /// The permission bits a user leaf carries; address and cache policy stay the caller's.
     fn leaf_bits(self) -> u64 {
         let common = PAGE_PRESENT | PAGE_USER;
         match self {
@@ -51,6 +55,13 @@ impl Prot {
             Self::ReadExec => common,
         }
     }
+}
+
+/// Every bit of a 2 MiB kernel-half leaf but its address and size: the one
+/// writer of [`PAGE_GLOBAL`]. Writable and executable, because the kernel's
+/// image is in the direct map.
+fn kernel_leaf(cache: CachePolicy) -> u64 {
+    PAGE_PRESENT | PAGE_WRITE | PAGE_GLOBAL | cache.pde_bits()
 }
 
 /// Which PAT entry a 2 MiB mapping selects: `Normal` is entry 0 (WB), whose
@@ -144,7 +155,7 @@ impl PageTablePage {
     fn write_pde(&mut self, idx: usize, va: u64, value: u64) -> Owed {
         let prior = core::mem::replace(&mut self.0[idx], value);
         if prior & PAGE_PRESENT != 0 && prior & PAGE_SIZE_BIT == 0 {
-            Owed::Context
+            Owed::Context { va }
         } else {
             Owed::of(prior, va)
         }
@@ -152,10 +163,10 @@ impl PageTablePage {
 
     /// Owes `Context` only if the widen actually changed a bit — a stale
     /// narrower entry can raise a spurious fault.
-    fn widen(&mut self, idx: usize, flags: u64) -> Owed {
+    fn widen(&mut self, idx: usize, va: u64, flags: u64) -> Owed {
         let before = self.0[idx];
         self.0[idx] = before | flags;
-        if self.0[idx] == before { Owed::Nothing } else { Owed::Context }
+        if self.0[idx] == before { Owed::Nothing } else { Owed::Context { va } }
     }
 
     /// Not yet linked into a live structure, so nothing can be stale.
@@ -175,8 +186,8 @@ enum Owed {
     /// One linear address, whose leaf changed under it.
     Address { va: u64, prior: u64 },
     /// Everything under an upper-level entry that widened, or a PDE that
-    /// stopped naming its page table.
-    Context,
+    /// stopped naming its page table; `va` is an address under it.
+    Context { va: u64 },
 }
 
 impl Owed {
@@ -193,10 +204,19 @@ impl Owed {
     /// `INVPCID` names its tag directly (SDM Vol. 3A §4.10.4.1), so writing a
     /// child's tables invalidates only the child; without PCID, a CPU holds
     /// entries only for its loaded CR3, so nothing is owed unless `target`
-    /// is that CR3.
+    /// is that CR3. A global translation is the exception to both: it is held
+    /// under every CR3 and every PCID, and neither `INVPCID` type 0 or 1 nor
+    /// a CR3 write drops it.
     fn discharge(self, target: Cr3) {
         match self {
             Self::Nothing => {}
+            // With PCID, `INVPCID` type 2: Intel's ADL063 and RPL043 let an
+            // `INVLPG` keep the global translation in every PCID but the current
+            // one, and name type 2 "instead of INVLPG" as the software workaround.
+            Self::Address { va, prior } if prior & PAGE_GLOBAL != 0 => match pcid_active() {
+                Some(have) => crate::arch::cpu::invpcid(have, Invpcid::AllIncludingGlobal, 0, 0),
+                None => crate::arch::cpu::invlpg(va),
+            },
             Self::Address { va, .. } => {
                 if let Some(have) = pcid_active() {
                     crate::arch::cpu::invpcid(have, Invpcid::Address, target.pcid(), va);
@@ -204,11 +224,13 @@ impl Owed {
                     crate::arch::cpu::invlpg(va);
                 }
             }
-            Self::Context => {
+            // Every kernel-half leaf is global.
+            Self::Context { va } if crate::mm::is_kernel_addr(va) => flush_tlb_all(),
+            Self::Context { .. } => {
                 if let Some(have) = pcid_active() {
                     crate::arch::cpu::invpcid(have, Invpcid::SinglePcid, target.pcid(), 0);
                 } else if Cr3::current().phys() == target.phys() {
-                    flush_tlb_all();
+                    flush_tlb_user();
                 }
             }
         }
@@ -222,7 +244,7 @@ impl Owed {
             Self::Address { va, prior } => {
                 panic!("{what}: an install at {va:#x} found the present entry {prior:#x}")
             }
-            Self::Context => panic!("{what}: an install widened an upper-level entry"),
+            Self::Context { .. } => panic!("{what}: an install widened an upper-level entry"),
         }
     }
 
@@ -256,18 +278,25 @@ pub fn pcid_active() -> Option<PcidActive> {
     crate::arch::control_regs::PcidActive::ask()
 }
 
-/// Flush all TLB entries on this CPU, all PCIDs.
+/// Flush all TLB entries on this CPU, all PCIDs, global ones included: what a
+/// kernel-half change owes.
 pub fn flush_tlb_all() {
     if let Some(have) = pcid_active() {
         crate::arch::cpu::invpcid(have, Invpcid::AllIncludingGlobal, 0, 0);
     } else {
-        // SAFETY: the value is exactly what `read_cr3` just read on this
-        // CPU, so writing it back is a valid CR3 write that only flushes
-        // the TLB (there is no `PAGE_GLOBAL` in this kernel).
-        unsafe {
-            let cr3 = crate::arch::cpu::read_cr3();
-            crate::arch::cpu::write_cr3(cr3);
-        }
+        crate::arch::control_regs::flush_global();
+    }
+}
+
+/// Flush every TLB entry on this CPU but the global ones, all PCIDs: what a
+/// user-half change owes, since no user leaf is global.
+pub fn flush_tlb_user() {
+    if let Some(have) = pcid_active() {
+        crate::arch::cpu::invpcid(have, Invpcid::AllButGlobal, 0, 0);
+    } else {
+        // SAFETY: the value is exactly what `read_cr3` just read on this CPU,
+        // so writing it back is a valid CR3 write that only flushes the TLB.
+        unsafe { crate::arch::cpu::write_cr3(crate::arch::cpu::read_cr3()) };
     }
 }
 
@@ -351,7 +380,7 @@ fn alloc_pcid() -> Option<PcidGuard> {
         match pool.alloc() {
             Alloc::Ready(p) => return Some(PcidGuard(p)),
             Alloc::NeedsFlush => {
-                crate::arch::tlb::shootdown(crate::invalidation::Origin::Pcid);
+                crate::arch::tlb::shootdown(crate::invalidation::Origin::Pcid, crate::invalidation::Half::User);
                 pool.reclaim();
             }
             Alloc::Exhausted => return None,
@@ -667,7 +696,7 @@ impl AddressSpace {
         let end = (phys + size + PAGE_2M - 1) & !(PAGE_2M - 1);
         let mut cur = start;
         while cur < end {
-            self.map_2m(cur, PAGE_PRESENT | PAGE_WRITE | cache.pde_bits());
+            self.map_2m(cur, kernel_leaf(cache));
             cur += PAGE_2M;
         }
         crate::mm::Mmio::new(crate::mm::DirectMap::from_phys(phys), size)
@@ -720,6 +749,11 @@ impl AddressSpace {
         let pd = unsafe { PageTablePage::from_phys_mut(pd_phys) };
         let pde = pd[pd_idx];
         assert!(pde & PAGE_PRESENT != 0, "guard_4k: {phys:#x} is not in the direct map");
+        // Both writes discharge on this CPU alone: the guard belongs to one
+        // CPU, so only it dereferences the removed page; `alloc_idle_stack`
+        // runs on the BSP before an AP's TLB exists, and a sibling's stale
+        // 2 MiB entry stays correct for the other 511 pages it still maps.
+        let target = self.root();
 
         // Already split: an earlier guard in the same 2 MiB region.
         if pde & PAGE_SIZE_BIT != 0 {
@@ -735,9 +769,7 @@ impl AddressSpace {
             }
             let pt_phys = pt.phys();
             self.children.push(pt);
-            // Covered by the flush below, wider than either write could owe.
-            pd.write_pde(pd_idx, virt, pt_phys | PAGE_PRESENT | PAGE_WRITE)
-                .subsumed_by_flush();
+            pd.write_pde(pd_idx, virt, pt_phys | PAGE_PRESENT | PAGE_WRITE).discharge(target);
         }
 
         // SAFETY: `pd[pd_idx]` names a page table either way, permanently —
@@ -745,13 +777,7 @@ impl AddressSpace {
         let pt = unsafe { PageTablePage::from_phys_mut(pd[pd_idx] & ADDR_MASK) };
         let idx = ((phys >> 12) & 0x1FF) as usize;
         assert!(pt[idx] & PAGE_PRESENT != 0, "guard_4k: {phys:#x} is already unmapped");
-        pt.write(idx, virt, 0).subsumed_by_flush();
-
-        // Local only: the guard belongs to one CPU, so only it dereferences
-        // the removed page; `alloc_idle_stack` runs on the BSP before an
-        // AP's TLB exists, and a sibling's stale 2 MiB entry stays correct
-        // for the other 511 pages it still maps unchanged.
-        flush_tlb_all();
+        pt.write(idx, virt, 0).discharge(target);
     }
 
     /// Replaces whatever is there; a page `guard_4k` already split must not
@@ -789,7 +815,7 @@ impl AddressSpace {
             self.children.push(child);
         } else {
             // Upper-level entries: widen only (OR), never narrow.
-            self.root.widen(pml4_idx, flags).discharge(target);
+            self.root.widen(pml4_idx, va, flags).discharge(target);
         }
 
         // SAFETY: the branch above guaranteed PRESENT, so `& ADDR_MASK`
@@ -803,7 +829,7 @@ impl AddressSpace {
                 .expect_install("ensure_table: pdpt");
             self.children.push(child);
         } else {
-            pdpt.widen(pdpt_idx, flags).discharge(target);
+            pdpt.widen(pdpt_idx, va, flags).discharge(target);
         }
 
         // SAFETY: same argument as `pdpt` above, one level down.
@@ -891,7 +917,7 @@ pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
             driven.push((phys, phys + size));
         }
     }
-    crate::arch::tlb::shootdown(crate::invalidation::Origin::Mmio);
+    crate::arch::tlb::shootdown(crate::invalidation::Origin::Mmio, crate::invalidation::Half::Kernel);
     // Read back off the table and logged beside firmware's MTRR verdict: the
     // boot's own evidence that no register window trusts firmware.
     let installed =
@@ -902,6 +928,95 @@ pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
         crate::arch::mtrr::range_type(phys, size).name()
     );
     mmio
+}
+
+/// Where [`debug_global_leaf`] maps: the kernel half's last 2 MiB, under a root
+/// slot [`seal_kernel_half`] installed, as far past the direct map as it goes.
+#[cfg(feature = "test-actuators")]
+const SCRATCH: u64 = 0u64.wrapping_sub(PAGE_2M);
+
+/// `SYS_DEBUG`'s `GLOBAL_LEAF_REWRITE`: a [`kernel_leaf`] at [`SCRATCH`] over one
+/// frame, read so this CPU caches it global; the leaf pointed at a second frame
+/// and read again with nothing invalidated, the control; invalidated as `how`
+/// asks; read a third time. Answers which frame the third read saw, or refuses:
+/// where the control already saw the second frame, or where a user-half
+/// shootdown's answer here reached wide because another CPU's kernel-half
+/// generation landed inside it. The kernel's lock keeps it on one CPU and
+/// interrupts stay closed, so no flush but `how`'s lands between the reads.
+#[cfg(feature = "test-actuators")]
+pub fn debug_global_leaf(how: u64) -> u64 {
+    use crate::invalidation::{Half, Origin};
+    use toyos_abi::syscall::debug_action as da;
+    use toyos_abi::syscall::SyscallError;
+
+    enum How {
+        Discharged,
+        ShotDown(Half),
+    }
+    let how = match how {
+        da::GLOBAL_LEAF_DISCHARGED => How::Discharged,
+        da::GLOBAL_LEAF_KERNEL_SHOT_DOWN => How::ShotDown(Half::Kernel),
+        da::GLOBAL_LEAF_USER_SHOT_DOWN => How::ShotDown(Half::User),
+        _ => return SyscallError::InvalidArgument.to_u64(),
+    };
+    let (Some(old), Some(new)) = (crate::mm::pmm::alloc_page(), crate::mm::pmm::alloc_page()) else {
+        return SyscallError::ResourceExhausted.to_u64();
+    };
+    // Each frame's first word is its own address, so a read names its frame.
+    for page in [&old, &new] {
+        let at = page.direct_map();
+        // SAFETY: a frame this call owns, through the direct map.
+        unsafe { core::ptr::write_volatile(at.as_mut_ptr::<u64>(), at.phys()) };
+    }
+    let (old_phys, new_phys) = (old.direct_map().phys(), new.direct_map().phys());
+    let leaf = kernel_leaf(CachePolicy::Normal) | PAGE_SIZE_BIT;
+    // SAFETY: every read below is made while `SCRATCH` maps one of the two
+    // frames this call owns, or a translation of one of them.
+    let read = || unsafe { core::ptr::read_volatile(SCRATCH as *const u64) };
+
+    let (held, widened, seen) = {
+        let mut space = kernel().lock();
+        let _closed = crate::arch::IrqGuard::close();
+        let target = space.root();
+        let pd = space.ensure_table(SCRATCH, leaf);
+        let idx = indices(SCRATCH).2;
+        if pd[idx] & PAGE_PRESENT != 0 {
+            return SyscallError::AlreadyExists.to_u64();
+        }
+        pd.write_pde(idx, SCRATCH, old_phys | leaf).expect_install("debug_global_leaf");
+        let first = read();
+        assert!(first == old_phys, "debug_global_leaf: a fresh leaf over {old_phys:#x} read {first:#x}");
+        let owed = pd.write_pde(idx, SCRATCH, new_phys | leaf);
+        let held = read();
+        let widened = match how {
+            How::Discharged => {
+                owed.discharge(target);
+                false
+            }
+            // The write's own invalidation is withheld: the arm asks what the shootdown drops.
+            How::ShotDown(half) => {
+                let _ = owed;
+                crate::arch::tlb::debug_shootdown_answered_wide(Origin::Staged, half) && matches!(half, Half::User)
+            }
+        };
+        let seen = read();
+        pd.write_pde(idx, SCRATCH, 0).discharge(target);
+        (held, widened, seen)
+    };
+    // No CPU keeps a translation of either frame past its free.
+    crate::arch::tlb::shootdown(Origin::Staged, Half::Kernel);
+    drop((old, new));
+    let old_frame = |at: u64| match at {
+        _ if at == old_phys => true,
+        _ if at == new_phys => false,
+        _ => panic!("debug_global_leaf: the leaf over {old_phys:#x} then {new_phys:#x} read {at:#x}"),
+    };
+    match (old_frame(held), widened, old_frame(seen)) {
+        (false, _, _) => da::GLOBAL_LEAF_UNHELD,
+        (true, true, _) => da::GLOBAL_LEAF_WIDENED,
+        (true, false, true) => da::GLOBAL_LEAF_SAW_OLD,
+        (true, false, false) => da::GLOBAL_LEAF_SAW_NEW,
+    }
 }
 
 /// Build kernel page tables: the direct map in the high half, in 2 MiB pages,
@@ -928,7 +1043,7 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry], _scanout: Option<(u64, u64)>) 
     }
     let mut addr: u64 = 0;
     while addr < end {
-        kernel.map_2m(addr, PAGE_PRESENT | PAGE_WRITE);
+        kernel.map_2m(addr, kernel_leaf(CachePolicy::Normal));
         addr += PAGE_2M;
     }
     crate::log!("paging: the direct map covers 0x0..{end:#x}");

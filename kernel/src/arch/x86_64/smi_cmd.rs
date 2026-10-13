@@ -54,7 +54,7 @@ use toyos_userbound::{KeptCommands, Mediated, Ports, Undeclared};
 
 use super::pio::{self, Declared, Slot, TakenBack};
 use super::{apic, cpu, percpu, IrqGuard};
-use crate::shootdown::Shootdown;
+use crate::shootdown::{Reach, Shootdown};
 use crate::sync::Lock;
 use crate::time::{Duration, DEAF_CPU};
 use kernel::bootwrite::{self, Turn};
@@ -143,7 +143,7 @@ pub fn write(value: u8) -> Option<Written> {
     let asked_from = percpu::cpu_id();
     ASKED.store(value, Relaxed);
     TAKEN_NS.store(UNTAKEN, Relaxed);
-    let generation = ROUND.issue();
+    let generation = ROUND.issue(Reach::Narrow);
     // The boot processor's own ask, unless a kick taken since the issue has answered it already.
     answer();
     if !ROUND.served(BOOT as usize, generation) {
@@ -196,7 +196,7 @@ fn answer() {
     if percpu::cpu_id() != BOOT {
         return;
     }
-    ROUND.serve_if_owed(BOOT as usize, || {
+    ROUND.serve_if_owed(BOOT as usize, |_| {
         let port = PORT.get().expect("smi_cmd: a write asked of a machine whose FADT names no SMI_CMD").port(0);
         let value = ASKED.load(Relaxed);
         let smi = || super::counters::read().smi.unwrap_or(UNREAD);

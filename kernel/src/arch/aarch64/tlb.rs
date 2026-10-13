@@ -12,7 +12,7 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::invalidation::Origin;
+use crate::invalidation::{Half, Origin};
 
 /// Issuer-side census, as x86-64's counts it; there is no receiver side.
 static ISSUED: [AtomicU64; Origin::COUNT] = [const { AtomicU64::new(0) }; Origin::COUNT];
@@ -61,7 +61,7 @@ pub(super) fn all(origin: Origin) {
 
 /// Nothing to drop: every caller follows an `AddressSpace` edit whose own
 /// `page` or `asid` already reached every CPU before it returned.
-pub fn shootdown(_origin: Origin) {}
+pub fn shootdown(_origin: Origin, _half: Half) {}
 
 /// Nothing to answer: no CPU waits on another's acknowledgement here.
 pub fn poll() {}
