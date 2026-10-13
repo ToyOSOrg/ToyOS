@@ -1135,7 +1135,7 @@ pub fn stats_from(
     }
 }
 
-/// The last thread out's teardown of its process, on its own stack: free what the process holds, then keep its exit until every end below it is published. Every other thread has left, so none can run in what is freed.
+/// The last thread out's teardown of its process, on its own stack: free what the process holds, run every release its handles owed, then keep its exit until every end below it is published. Every other thread has left, so none can run in what is freed.
 /// The thread is in the process until the last table section marks it, so a machine stop waits for every record and release here.
 /// Waits on nothing: it runs on a killed thread whose one cancel may be spent, and at the exit boundary's preempt depth, where a park asserts.
 /// The section that marks it also lets the teardown's own hold on the publication go: the exit is published here when nothing below it is left, and otherwise by the last end below it.
@@ -1145,7 +1145,9 @@ fn teardown(pid: Pid, tid: Tid, code: i32, mark: i32, process_data: &Arc<Lock<Pr
         let proc = guard.as_ref().unwrap().get(pid).expect("teardown: the process its last thread is in");
         Arc::clone(&proc.threads.get(proc.main_tid).expect("teardown: a claimed process gives up no thread").thread_data)
     };
+    let releases = crate::object::Releases::open();
     let consumed = teardown_resources(process_data, &main_thread_data, pid);
+    let released = releases.run();
     let cpu_ns = {
         let mut guard = PROCESS_TABLE.lock();
         teardown_bookkeeping(guard.as_mut().unwrap(), pid, code, &consumed)
@@ -1156,7 +1158,7 @@ fn teardown(pid: Pid, tid: Tid, code: i32, mark: i32, process_data: &Arc<Lock<Pr
         let table = guard.as_mut().unwrap();
         proclife::torn_down(table, pid, tid, mark);
         table.get_mut(pid).expect("teardown: the process its last thread is in").exit =
-            Some(crate::object::process::Exit { code, stats });
+            Some(crate::object::process::Exit::new(code, stats, released));
         tree::teardown_done(table, pid)
     };
     // The table says zombie now, which a sweep counts as nothing left to stop.

@@ -4,7 +4,7 @@
 //!
 //! An object ends with its last handle and is never handed out again: a holder that answers more than once keeps what an object is made over (`device::Screen`, a claim's BAR windows) and makes a fresh object for each answer.
 //!
-//! `handle_count`, not the Arc strong count, is what userland-visible lifecycle rides: a syscall's `Arc` can be stranded on a killed thread's kernel stack, so release is deferred through [`ZERO_QUEUE`] — see `issues/deferred-release-outlives-its-syscall.md`.
+//! `handle_count`, not the Arc strong count, is what userland-visible lifecycle rides: a syscall's `Arc` can be stranded on a killed thread's kernel stack, so release is deferred: through a dying process's own [`Releases`], run before its end is published, or else through [`ZERO_QUEUE`] — see `issues/deferred-release-outlives-its-syscall.md`.
 
 // `warn` here gates via CI's `-D warnings`; the rest of the kernel is not yet swept.
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -125,8 +125,9 @@ impl Drop for ObjectCore {
 /// What an object does when its last handle goes; a `deferred` row must
 /// implement it, `immediate` gets an empty impl from the macro.
 pub trait ZeroHandles {
-    /// Runs exactly once, from the deferred queue with no lock held — never
-    /// inline at drop, and never taking a sleep lock: no drain site can park.
+    /// Runs exactly once with no lock held, from the deferred queue or a dying
+    /// process's [`Releases`] — never inline at drop, and never taking a sleep
+    /// lock: neither can park.
     fn on_zero_handles(&self);
 }
 
@@ -267,10 +268,80 @@ static ZERO_QUEUE: Lock<Vec<KObjectRef>> = Lock::new(Vec::new());
 /// says empty over a queued object.
 static ZERO_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// A deferred object whose last handle has gone: owed to the running thread's
+/// open [`Releases`], or else to [`ZERO_QUEUE`].
 pub(crate) fn enqueue_zero_handles(object: KObjectRef) {
+    let owned = crate::sched::driver::with_current_handle(|task| {
+        task.releases().lock().as_mut().map(|owed| owed.push(object.clone())).is_some()
+    });
+    if owned == Some(true) {
+        return;
+    }
     let mut queue = ZERO_QUEUE.lock();
     queue.push(object);
     ZERO_PENDING.store(true, Ordering::Release);
+}
+
+/// The releases a dying process's last thread owes before its end is
+/// published: while one is open, every deferred object whose last handle
+/// that thread drops, a hook's included, is collected on the thread rather
+/// than [`ZERO_QUEUE`], so no other CPU's drain can take it. Carried by the
+/// thread's `TaskHandle`, so a migration mid-teardown keeps it.
+///
+/// [`Releases::run`] is the only way to end one, and the [`Released`] it
+/// answers is what a process's [`process::Exit`] is built from.
+pub(crate) struct Releases {
+    task: Arc<crate::sched::payload::TaskHandle>,
+    /// The preempt depth it was opened at: a run at any other depth holds a
+    /// lock, under which no hook may run.
+    depth: u32,
+}
+
+/// Every release the dying process's handles owed has run.
+pub struct Released(());
+
+impl Releases {
+    /// Open the running thread's scope. Opened with no lock held.
+    pub(crate) fn open() -> Self {
+        let task = crate::sched::driver::current_handle()
+            .expect("object: a process's releases are opened on one of its threads");
+        let previous = task.releases().lock().replace(Vec::new());
+        assert!(previous.is_none(), "object: a thread opened a second release scope");
+        Self { task, depth: crate::preempt::count() }
+    }
+
+    /// Run every collected hook on this thread, those the hooks retire
+    /// included, then close the scope.
+    pub(crate) fn run(self) -> Released {
+        let depth = crate::preempt::count();
+        assert!(
+            depth == self.depth,
+            "object: a release scope run at preempt depth {depth}, opened at {}: a lock is held",
+            self.depth,
+        );
+        loop {
+            let batch = core::mem::take(
+                self.task.releases().lock().as_mut().expect("object: an open scope holds its list"),
+            );
+            if batch.is_empty() {
+                break;
+            }
+            for object in batch {
+                object.run_zero_handles();
+            }
+        }
+        *self.task.releases().lock() = None;
+        Released(())
+    }
+}
+
+impl Drop for Releases {
+    fn drop(&mut self) {
+        assert!(
+            self.task.releases().lock().is_none(),
+            "object: a release scope was dropped with its releases unrun",
+        );
+    }
 }
 
 /// Runs the hooks of every object whose last handle has gone; called at

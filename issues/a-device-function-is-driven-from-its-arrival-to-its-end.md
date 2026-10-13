@@ -6,18 +6,13 @@ opened: 2026-10-13
 
 # A device function is driven from its arrival to its end
 
-Held by the orchestrator. #910 carries stage 1's design.
+Held by the orchestrator. #910 is stage 1a.
 
 Today the kernel enumerates PCI once (`pcidev::publish`), and the supervisor
 mints each claim only when it spawns a `[boot] start` row. A row names a PCI
 function by vendor and device, and the kernel refuses the claim `Ambiguous` on
-a machine with two. A process's end is published before the releases its
-handles queued have run (`issues/deferred-release-outlives-its-syscall.md`), so
-a restart retries a claim for up to 2 s (`CLAIM_RETURN` in
-`system/supervisor/src/main.rs`) and the `isa` tests retry for up to 5 s
-(`claim_after` in `tests/guest/rust-tests/src/isa_row.rs`). One thread per
-serving service parks in `SYS_PROCESS_WAIT`. Nothing reaches userland when a
-device arrives or leaves.
+a machine with two. One thread per serving service parks in
+`SYS_PROCESS_WAIT`. Nothing reaches userland when a device arrives or leaves.
 
 **Ruled** (owner, 2026-10-13):
 
@@ -60,12 +55,16 @@ device arrives or leaves.
 
 **Measured**:
 
-- **Releases versus the end** (QEMU, `usbd_drives_the_spare` at
+- **Releases versus the end**, before stage 1a (`usbd_drives_the_spare` on
+  QEMU and `usbd_drives_the_type_c_controller` on the T14, each at
   `ed1ec1512` with a timing probe; evidence
-  https://github.com/ToyOSOrg/evidence/tree/c5d84905cf952576a337ee5c76cc9a86ad438ff5/lifecycle-s1/release-vs-end): the killed usbd's claim
-  was released on another CPU and finished about 1.4 ms after its end was
-  published. Each PCI claim's release took 0.26 ms and 3.9 ms under TCG,
-  including two log lines, with no reset advertised.
+  https://github.com/ToyOSOrg/evidence/tree/c5d84905cf952576a337ee5c76cc9a86ad438ff5/lifecycle-s1/release-vs-end
+  and `f91e37932`, `lifecycle-s1/t14-release-bound/`, on the same branch): on
+  QEMU a killed usbd's claim was released on another CPU about 1.4 ms after
+  its end was publishable. A PCI claim's release hook took 0.26 and 3.9 ms
+  under TCG. On the T14 the Type-C xHCI's hook, 162 µs (it advertises no
+  reset), started on cpu3 before the killed usbd's end was publishable on
+  cpu5 and finished after it.
 - **PCIe hot-plug on QEMU** (QEMU 11.1.1 q35, OVMF, `ef684e4fc`; evidence
   https://github.com/ToyOSOrg/evidence/tree/309cdaf44da547b3b29742d9dc2a39b25e364954/lifecycle-s1/pcie-hotplug-qemu):
   - An empty `pcie-root-port` gets one bus, a 2 MiB non-prefetchable window
@@ -80,15 +79,34 @@ device arrives or leaves.
 ## Stages
 
 1. **A holder's end is the event.**
-   - The kernel publishes a process's end only once every claim it held, of
-     every kind, has been released, by the ending thread. The supervisor
-     restarts on that end.
-   - `CLAIM_RETURN` and `claim_after` go.
-   - The supervisor's lifecycle decisions move into a pure crate.
-   - A row starts one instance per matching function, and the claim names its
-     function by arrival number.
-   - The kernel's claim by vendor and device goes.
-   - The waiter threads go.
+   1. **Done** (#910): a process's end is published only after every release
+      its handles owed, of every kind, has run on its last thread
+      (`object::Releases`), so `CLAIM_RETURN` and the guest tests' claim
+      retries went.
+   2. **Instances per function**, one pull request, which also updates the
+      three tracks folded here:
+      - `toyos_abi::inventory::Pci` gains an `arrival` number, never reused,
+        and a claim names its function by it; `DeviceRequest::Pci`,
+        `toyos_pci::claimed` and `ClaimError::Ambiguous` go.
+      - `lib/manifest` owns the matcher grammar (`pci:CC:SS:PP`, and
+        `pci:CC:SS:PP/VVVV:DDDD`). A `drives` row starts one instance per
+        matching function the kernel does not drive, is never in
+        `[boot] start`, may not `serves`, and reaches its consumer through
+        `receives`. A single-instance `devices` entry matching two functions
+        refuses that row's start, naming both.
+      - Two matchers that can match one function are a build refusal naming
+        both rows, which replaces `one_claimant_per_device` and keeps its
+        refusal of duplicate class, `isa` and `part:` names.
+      - The supervisor's lifecycle decisions move into
+        `system/supervisor/lifecycle`, host-tested. A refused start marks its
+        function refused until the inventory record changes and counts
+        against the arrival's restart budget.
+      - The supervisor watches each child's `Process` handle, and the waiter
+        threads go. vdagent becomes a `drives` row, and its "no such
+        function" path goes with it.
+      - Its guest arm, a q35 profile with two `edu` functions after the
+        claim-slot pull request, holds two instances up until judged, each
+        reporting its own function. `test-runner` gains `inventory`.
 2. **Functions arrive and leave.**
    - Readers get a device-set object, minted from `DEVICE`.
    - The kernel provides native PCIe hot-plug on a port whose host bridge
@@ -98,7 +116,7 @@ device arrives or leaves.
 3. **Drivers leave the shared services.** netstack, soundserver and diskserver
    each become a driver per function plus the service its clients use. The
    client port carries a per-device source and `gone`.
-4. **usbd drives every xHCI**, one per controller, started by stage 1's rows.
+4. **usbd drives every xHCI**, one per controller, started by stage 1's `drives` rows.
    This is step 10 of
    `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`, whose
    `input` port is this track's per-device source and `gone`.
@@ -106,10 +124,9 @@ device arrives or leaves.
 ## Folded here
 
 - Stage 1 of `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
-  (the waiter threads) is this track's stage 1.
+  (the waiter threads) is this track's stage 1.2.
 - Stage 2 of `issues/the-supervisor-is-host-tested-and-owns-the-stop.md`
-  extends the crate stage 1 makes. Restart policy and the claims a restart is
-  owed move with stage 1.
+  extends the crate stage 1.2 makes. Restart policy and the claims a restart
+  is owed move with stage 1.2.
 - Step 10 of `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`
   is stage 4.
-- The pull request that takes up stage 1 updates all three.

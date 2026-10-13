@@ -187,6 +187,9 @@ const RUST_SKIP: &[&str] = &[
     // boot's kernel does: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.
     "usbd_spare",
+    // The same controller, handed to a holder that is killed and claimed
+    // again at once, in the same boots as `usbd_spare`.
+    "end_returns_claims",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -959,13 +962,21 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The Type-C controller left to a claim, and usbd driving it: handed
         // over, MSI armed through remapping, and the No-Op answered by an
         // interrupt; usbd is killed, so the release says which reset the
-        // function advertises.
+        // function advertises. Then a holder of it is killed and the claim
+        // asked for again at once, each round: its end follows its release.
         "usbd_drives_the_type_c_controller",
         metal::Metal {
-            arms: &[metal::once("testcases-xhci-leave", "tests/images/testcases.toml", &["xhci-leave=8086:9a13"], &["test_rs_usbd_spare"])],
+            arms: &[metal::once(
+                "testcases-xhci-leave",
+                "tests/images/testcases.toml",
+                &["xhci-leave=8086:9a13"],
+                &["test_rs_usbd_spare", "test_rs_end_returns_claims"],
+            )],
             judge: |b| {
                 b[0].job_passed("test_rs_usbd_spare")?;
-                usbd_on_metal(&b[0].kernel(), &b[0].log())
+                usbd_on_metal(&b[0].kernel(), &b[0].log())?;
+                b[0].job_passed("test_rs_end_returns_claims")?;
+                ends_returned_claims(b[0].log().text()).map(drop)
             },
         },
     ),
@@ -3501,6 +3512,20 @@ fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> 
     Ok(result.serial)
 }
 
+/// The job that kills a holder of the `xhci-leave=` controller and claims it
+/// again at once, in `usbd_spare`'s boots.
+const END_RETURNS_CLAIMS: &str = "end_returns_claims";
+
+/// `end_returns_claims`'s summary: every round's claim granted after its
+/// holder's end. The times it prints are evidence, never judged.
+fn ends_returned_claims(said: &str) -> Result<String, String> {
+    said.lines()
+        .find_map(|l| l.split_once("end_returns_claims: ").map(|(_, rest)| rest))
+        .filter(|rest| rest.contains("every claim granted after its holder's end"))
+        .map(str::to_string)
+        .ok_or_else(|| format!("end_returns_claims never said every claim came back:\n{said}"))
+}
+
 /// What usbd says once the bring-up's No-Op has completed: its ring and the
 /// interrupt through the claim both work.
 const USBD_NOOP: &str = "usbd: a No-Op command completed, announced by an interrupt";
@@ -3510,17 +3535,26 @@ const USBD_NOOP: &str = "usbd: a No-Op command completed, announced by an interr
 /// claim, with every event announced by one. Then the two controls: the
 /// function aimed past every grant is the kernel's `DMA FAULT` record against
 /// its slot and the claim's refusal, and on a kernel without the switch the
-/// claim is refused because the kernel drives the function.
+/// claim is refused because the kernel drives the function. Between them, a
+/// holder of the function is killed and the claim asked for again at once,
+/// each round, which only a release finished before the end grants.
 fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "usbd_spare";
     const SPARE: &str = "1b36:000d";
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
+    let ends = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, END_RETURNS_CLAIMS);
     let options = BootOptions {
         profile: qemu::Profile::HeadlessUsbSpare,
         kernel_params: &["xhci-leave=1b36:000d"],
         ..Default::default()
     };
-    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin.clone())], options);
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[(JOB.to_string(), bin.clone()), (END_RETURNS_CLAIMS.to_string(), ends)],
+        options,
+    );
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
     let left = format!(" {SPARE} to a claim (xhci-leave)");
@@ -3557,6 +3591,9 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
         return Err(format!("the record faults {addr}, and the job aimed at {aimed}: {record}"));
     }
     eprintln!("  [usbd] {at}: handed over, its No-Op answered; aimed at {aimed}: {}", record.trim());
+    let ended = job_window(&mut qemu, "test_rs_end_returns_claims")?;
+    let line = ends_returned_claims(&ended)?;
+    eprintln!("  [usbd] {line}");
     drop(qemu);
 
     // The control: the same machine and no switch, so the kernel drives it.
