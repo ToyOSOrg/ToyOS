@@ -130,32 +130,43 @@ fn each_command_is_its_code_and_operands() {
     assert_eq!(Command::InvalidateAll.words(), [word(&[(63, 60, 8)]), 0]);
 }
 
-/// Figure 56 / Table 57: `DeviceID` [15:0], `D/P` [47:32], `I` [51], `RW`
-/// [53], the address in the second doubleword.
+/// Figure 56 / Table 57: `DeviceID` [15:0], `I` [51], `RW` [53], the
+/// address in the second doubleword.
 #[test]
-fn a_page_fault_names_its_requester_domain_address_and_access() {
+fn a_page_fault_is_its_requesters_with_its_access() {
     let read = [word(&[(15, 0, 0x0303), (47, 32, 2), (52, 52, 1), (63, 60, 2)]), 0x4000_0000_0000];
-    assert_eq!(
-        event(read),
-        Event::PageFault { device: 0x0303, domain: 2, address: 0x4000_0000_0000, write: false, interrupt: false }
-    );
+    assert_eq!(event(read), Event::Requester { code: 2, device: 0x0303, address: 0x4000_0000_0000, write: Some(false) });
     let write = [read[0] | word(&[(53, 53, 1)]), read[1]];
-    assert!(matches!(event(write), Event::PageFault { write: true, interrupt: false, .. }));
-    let message = [word(&[(15, 0, 0x0303), (51, 51, 1), (63, 60, 2)]), 0xFEE0_0000];
-    assert!(matches!(event(message), Event::PageFault { interrupt: true, .. }));
+    assert!(matches!(event(write), Event::Requester { write: Some(true), .. }));
+    let message = [word(&[(15, 0, 0x0303), (51, 51, 1), (53, 53, 1), (63, 60, 2)]), 0xFEE0_0000];
+    assert!(matches!(event(message), Event::Requester { device: 0x0303, write: None, .. }));
 }
 
-/// Figure 62: `DeviceID` [15:0], code 1000b, the address in the second
-/// doubleword; every other code is no requester's (Table 42).
+/// Every record a requester can cause is its, never the unit's: Figure 62
+/// (`INVALID_DEVICE_REQUEST`), Figure 61 (`IOTLB_INV_TIMEOUT`), and Figure
+/// 64 (`INVALID_PPR_REQUEST`, `RX` [+04 16] clear, `WP` [+04 21]), whose
+/// `DeviceID` is the peripheral's (Table 67); with `RX` set it is a command
+/// of this driver's (Figure 65).
 #[test]
-fn every_other_record_is_named_by_its_code() {
+fn a_record_a_requester_causes_is_its_own() {
     let request = [word(&[(15, 0, 0x00A2), (63, 60, 0b1000)]), 0xFD_F800_0000];
-    assert_eq!(event(request), Event::DeviceRequest { device: 0x00A2, address: 0xFD_F800_0000 });
-    for code in [0b0001u64, 0b0011, 0b0100, 0b0101, 0b0110, 0b0111, 0b1001, 0b1111] {
-        assert_eq!(event([code << 60 | 0x0303, 0]), Event::Other { code: code as u8 });
+    assert_eq!(event(request), Event::Requester { code: 0b1000, device: 0x00A2, address: 0xFD_F800_0000, write: None });
+    let timeout = [word(&[(15, 0, 0x0318), (63, 60, 0b0111)]), 0x1000];
+    assert!(matches!(event(timeout), Event::Requester { code: 0b0111, device: 0x0318, write: None, .. }));
+    let ppr = [word(&[(15, 0, 0xFF07), (53, 53, 1), (63, 60, 0b1001)]), 0x7000];
+    assert_eq!(event(ppr), Event::Requester { code: 0b1001, device: 0xFF07, address: 0x7000, write: Some(true) });
+    let completion = [ppr[0] | word(&[(48, 48, 1)]), 0x10];
+    assert_eq!(event(completion), Event::Unit { code: 0b1001 });
+}
+
+/// Table 42: every other code is a table, command or the unit's own.
+#[test]
+fn every_other_record_is_the_units() {
+    for code in [0b0000u64, 0b0001, 0b0011, 0b0100, 0b0101, 0b0110, 0b1010, 0b1111] {
+        assert_eq!(event([code << 60 | 0x0303, 0]), Event::Unit { code: code as u8 });
     }
     assert_eq!(name(0b0001), "ILLEGAL_DEV_TABLE_ENTRY");
-    assert_eq!(name(0b0101), "ILLEGAL_COMMAND_ERROR");
+    assert_eq!(name(0b1001), "INVALID_PPR_REQUEST");
     assert_eq!(name(0b0000), "reserved");
 }
 

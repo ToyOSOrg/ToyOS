@@ -8,10 +8,11 @@
 //!    domain maps to itself, and lands there;
 //! 3. the second writes at an address the identity domain does not map, and
 //!    is refused and recorded, and the machine halts: the function is one
-//!    this kernel drives. A unit passing its DMA untranslated lands it
-//!    instead.
+//!    this kernel drives.
 //!
-//! The write of 3 is made with this CPU's interrupts masked, so its verdict
+//! The record is what says the unit translated: a write the unit passed
+//! untranslated to 2^46 reaches no memory on a guest of 40 physical bits,
+//! and the device answers it refused all the same. The write of 3 is made with this CPU's interrupts masked, so its verdict
 //! is on the console before its event is taken. Each step says what it saw
 //! on its own line; the harness judges them, and the record by the handler's.
 

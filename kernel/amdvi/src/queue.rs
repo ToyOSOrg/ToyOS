@@ -38,30 +38,32 @@ impl Command {
 /// One event record, decoded as far as what it ends.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Event {
-    /// `IO_PAGE_FAULT` (Figure 56, Table 57): a requester's access the unit
-    /// refused, a memory one or an interrupt.
-    PageFault { device: u16, domain: u16, address: u64, write: bool, interrupt: bool },
-    /// `INVALID_DEVICE_REQUEST` (Figure 62): a requester asked for something
-    /// its entry forbids outright.
-    DeviceRequest { device: u16, address: u64 },
-    /// Every other code: a table or command of this driver's the unit
+    /// A record a requester caused, which the unit has already refused or
+    /// dropped: `IO_PAGE_FAULT` (Figure 56), `IOTLB_INV_TIMEOUT` (Figure 61),
+    /// `INVALID_DEVICE_REQUEST` (Figure 62), and `INVALID_PPR_REQUEST` with
+    /// `RX` clear (Figure 64). `write` is the access where the record states
+    /// one; `address` is the record's, whatever it names.
+    Requester { code: u8, device: u16, address: u64, write: Option<bool> },
+    /// Every other record: an entry or command of this driver's the unit
     /// refused, or the unit's own hardware failing.
-    Other { code: u8 },
+    Unit { code: u8 },
 }
 
 pub const fn event(words: [u64; 2]) -> Event {
     let device = words[0] as u16;
-    match (words[0] >> CODE_SHIFT) as u8 {
-        0b0010 => Event::PageFault {
-            device,
-            domain: (words[0] >> 32) as u16,
-            address: words[1],
-            write: words[0] & 1 << 53 != 0,
-            interrupt: words[0] & 1 << 51 != 0,
-        },
-        0b1000 => Event::DeviceRequest { device, address: words[1] },
-        code => Event::Other { code },
-    }
+    let code = (words[0] >> CODE_SHIFT) as u8;
+    let write = match code {
+        // `I` [51]: an interrupt carries no read or write; else `RW` [53].
+        0b0010 if words[0] & 1 << 51 != 0 => None,
+        0b0010 => Some(words[0] & 1 << 53 != 0),
+        // `RX` [48] set is a `COMPLETE_PPR_REQUEST` of this driver's failing.
+        0b1001 if words[0] & 1 << 48 != 0 => return Event::Unit { code },
+        // `WP` [53]: the write permission the peripheral asked for.
+        0b1001 => Some(words[0] & 1 << 53 != 0),
+        0b0111 | 0b1000 => None,
+        _ => return Event::Unit { code },
+    };
+    Event::Requester { code, device, address: words[1], write }
 }
 
 /// The name 48882 gives an event code, for a record's line.

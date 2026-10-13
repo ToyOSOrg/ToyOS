@@ -75,6 +75,8 @@ const COMMAND_TIMEOUT: Tripwire = Tripwire::absurd(
 /// The 4 KiB tables every unit reads, carved out of 2 MiB pages and never
 /// freed: a unit may still be walking any of them.
 struct Tables {
+    /// The device table's own page.
+    device_table: Option<PhysPage>,
     pages: Vec<PhysPage>,
     /// Bytes taken from the newest page; starts full so the first call allocates one.
     used: u64,
@@ -82,7 +84,7 @@ struct Tables {
 
 impl Tables {
     const fn new() -> Self {
-        Self { pages: Vec::new(), used: PAGE_2M }
+        Self { device_table: None, pages: Vec::new(), used: PAGE_2M }
     }
 
     /// One zeroed 4 KiB table.
@@ -158,6 +160,9 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     let mut settings = alloc::vec![Setting(0); DEVICE_IDS];
     let mut ready: Vec<Ready> = Vec::new();
     let mut ivmds: Vec<Ivmd> = Vec::new();
+    // The ids a unit that will be programmed serves: a function outside them
+    // is behind a unit left off, and no domain of its own would translate.
+    let mut translated: Vec<(u16, u16)> = Vec::new();
     let mut units = 0usize;
     for block in ivrs.blocks() {
         match block {
@@ -169,12 +174,14 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
                 describe(units, &unit);
                 let function = describe_function(units, &unit, devices);
                 let mut usable = Ok(());
+                let mut serves: Vec<(u16, u16)> = Vec::new();
                 for entry in ivrs.devices(&unit) {
                     match entry {
                         Ok(entry) => {
                             log!("iommu: amdvi unit{units} serves {}", served(&ivrs, &entry));
-                            if let Err(why) = declare(&entry, &mut settings, enumerated) {
-                                usable = Err(why);
+                            match declare(&entry, &mut settings, enumerated) {
+                                Ok(ids) => serves.extend(ids),
+                                Err(why) => usable = Err(why),
                             }
                         }
                         Err(e) => usable = Err(format!("its device entries are refused: {e:?}")),
@@ -187,7 +194,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
                     }
                     switch_off(units, &unit, regs);
                     match usable.and_then(|()| usable_unit(&unit, regs, function)) {
-                        Ok(function) => ready.push(Ready { index: units, base: unit.base, regs, function }),
+                        Ok(function) => {
+                            translated.extend(serves);
+                            ready.push(Ready { index: units, base: unit.base, regs, function });
+                        }
                         Err(why) => log!("iommu: amdvi unit{units} is left off: {why}"),
                     }
                 }
@@ -220,11 +230,13 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     }
     if let Some(m) = ivmds.iter().find(|m| m.flags & IVMD_EXCLUSION != 0 || m.flags & IVMD_UNITY == 0) {
         log!(
-            "iommu: AMD-Vi isolates no device this boot: firmware's IVMD at {:#x}+{:#x} asks for {}, which this \
-             kernel does not honour, so every unit is left off",
+            "iommu: AMD-Vi isolates no device this boot: firmware's IVMD at {:#x}+{:#x} is {}, which this kernel \
+             does not honour, so every unit is left off",
             m.start,
             m.length,
-            if m.flags & IVMD_EXCLUSION != 0 { "an exclusion range" } else { "memory no device may reach" },
+            // Table 113: `ExclusionRange` overrides the rest; `Unity` clear
+            // lets the range sit at any device address.
+            if m.flags & IVMD_EXCLUSION != 0 { "an exclusion range" } else { "a range without Unity" },
         );
         return true;
     }
@@ -248,7 +260,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     }
     let identity = build(devices, &settings);
     let reserved = windows.iter().map(|w| (w.base, w.end())).chain(ivmds.iter().map(|m| (m.start, m.start + m.length)));
-    domain::start(reserved.collect(), settings, ivmds.iter().map(|m| m.requesters).collect());
+    domain::start(reserved.collect(), settings, ivmds.iter().map(|m| m.requesters).collect(), translated);
     log!("iommu: amdvi identity domain covers 0x0..{top:#x}, root={:#x}", identity.get());
     for unit in ready {
         program(unit, devices);
@@ -256,24 +268,29 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     true
 }
 
-/// The ids `entry` declares a DTE setting for, combined into `settings`;
+/// The ids `entry` declares a DTE setting for, combined into `settings`, and
+/// the ids whose requests reach the unit under them, which it serves;
 /// refused where it makes an enumerated function issue its requests under
 /// another's id, which would share that id's domain.
-fn declare(entry: &DeviceEntry, settings: &mut [Setting], enumerated: impl Fn(u16) -> bool) -> Result<(), String> {
+fn declare(
+    entry: &DeviceEntry,
+    settings: &mut [Setting],
+    enumerated: impl Fn(u16) -> bool,
+) -> Result<Option<(u16, u16)>, String> {
     let mut set = |first: u16, last: u16, data: u8| {
         for id in first..=last {
             settings[usize::from(id)].0 |= data;
         }
     };
-    match *entry {
-        DeviceEntry::All { data } => set(0, u16::MAX, data),
+    let (first, last, data) = match *entry {
+        DeviceEntry::All { data } => (0, u16::MAX, data),
         DeviceEntry::Select { id, data } | DeviceEntry::Extended { id, data, .. } | DeviceEntry::Hid { id, data, .. } => {
-            set(id, id, data)
+            (id, id, data)
         }
         DeviceEntry::Range { first, last, data } | DeviceEntry::ExtendedRange { first, last, data, .. } => {
-            set(first, last, data)
+            (first, last, data)
         }
-        DeviceEntry::Special { used, data, .. } => set(used, used, data),
+        DeviceEntry::Special { used, data, .. } => (used, used, data),
         DeviceEntry::Alias { id: first, used, data } | DeviceEntry::AliasRange { first, used, data, .. } => {
             let last = match *entry {
                 DeviceEntry::AliasRange { last, .. } => last,
@@ -282,11 +299,12 @@ fn declare(entry: &DeviceEntry, settings: &mut [Setting], enumerated: impl Fn(u1
             if let Some(id) = (first..=last).find(|&id| id != used && enumerated(id)) {
                 return Err(format!("the IVRS has {} issue its requests as {}", requester(id), requester(used)));
             }
-            set(used, used, data);
+            (used, used, data)
         }
-        DeviceEntry::Other(_) => {}
-    }
-    Ok(())
+        DeviceEntry::Other(_) => return Ok(None),
+    };
+    set(first, last, data);
+    Ok(Some((first, last)))
 }
 
 /// The unit's function, where this driver can program the unit: segment 0,
@@ -316,8 +334,8 @@ fn build(devices: &[PciDevice], settings: &[Setting]) -> Address<12> {
     let mut tables = TABLES.lock();
     let page = pmm::alloc_page().expect("amdvi: no physical memory for the device table");
     let at = page.direct_map().phys();
-    // Kept in `tables`, never freed: every unit reads it for the machine's life.
-    tables.pages.insert(0, page);
+    // Kept, never freed: every unit reads it for the machine's life.
+    tables.device_table = Some(page);
     DEVICE_TABLE.store(at, Ordering::Release);
     for (id, setting) in (0..=u16::MAX).zip(settings) {
         let words = Dte::blocked(domain::BLOCKED, *setting).words();
@@ -398,7 +416,7 @@ fn submit(commands: &[Command]) {
 /// Programs the unit in the order §2.3.1 gives — the device table, the
 /// command buffer and the event log, then `CONTROL` — with the event
 /// interrupt armed and the exclusion range cleared before the unit is on;
-/// then empties every cache it holds and has it reread each enumerated
+/// then empties every cache it holds and names each enumerated
 /// function's entry.
 fn program(unit: Ready, devices: &[PciDevice]) {
     let Ready { index, base, regs, function } = unit;
@@ -420,16 +438,21 @@ fn program(unit: Ready, devices: &[PciDevice]) {
     assert!(function.arm_unit_msi(address, data), "amdvi: unit{index}'s function lost its MSI capability");
     // `Coherent`, its reset value and the one Table 97 recommends, has the
     // unit snoop its device table fetches: nothing here flushes a table.
+    // Written whole: a field firmware left, `DevTblSegEn` among them, would
+    // otherwise change how the unit reads this table. `switch_off` logged
+    // what it was handed over with.
     let on = control::COHERENT | control::EVENT_LOG_EN | control::EVENT_INT_EN | control::CMD_BUF_EN | control::IOMMU_EN;
-    regs.write_u64(reg::CONTROL, regs.read_u64(reg::CONTROL) | on);
+    regs.write_u64(reg::CONTROL, on);
     let running = status::CMD_BUF_RUN | status::EVENT_LOG_RUN;
     spin_until(
         || regs.read_u32(reg::STATUS) & running == running,
         || format!("iommu: amdvi unit{index} never ran its command buffer and event log: STATUS={:#010x}", regs.read_u32(reg::STATUS)),
     );
     let mut live = Live { index, regs, commands: memory(commands.get(), PAGE_SIZE), tail: 0, done, waited: 0 };
-    // Every entry afresh, then each enumerated function's by its own id:
-    // a unit may track an entry by the invalidation that names it.
+    // §2.4.8 needs `INVALIDATE_IOMMU_ALL` alone. QEMU 11.1.1 moves a function
+    // off pass-through only on an `INVALIDATE_DEVTAB_ENTRY` that names it
+    // (`issues/qemus-invalidate-iommu-all-leaves-every-function-untranslated.md`),
+    // so each enumerated function is named too, at one command each.
     let reread = devices.iter().map(|d| Command::InvalidateDevice(StreamId::pci(d.bus, d.dev, d.func).requester()));
     live.submit(&[Command::InvalidateAll].into_iter().chain(reread).collect::<Vec<_>>());
     log!(

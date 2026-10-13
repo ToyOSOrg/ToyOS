@@ -447,11 +447,13 @@ pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
 /// domain of its own, lands a write where that domain maps it; the second,
 /// on the identity domain, lands one in memory and is refused one where the
 /// identity domain maps nothing, recorded as the kernel's, and the machine
-/// halts. QEMU 11.1.1 reads no record of that write unless an
-/// `INVALIDATE_DEVTAB_ENTRY` named the function: with the per-function
-/// invalidations at boot removed, the write is refused and the selftest
-/// fails on no record read. A kernel-owned record halts, so no metal row
-/// reaches the event log of a unit that translates for the kernel alone.
+/// halts. The record, not the device's answer, says the unit translated: a
+/// write passed through to 2^46 reaches nothing on this 40-bit guest and the
+/// device answers it refused either way. QEMU 11.1.1 passes a function
+/// through until an `INVALIDATE_DEVTAB_ENTRY` names it, so with the
+/// per-function invalidations at boot removed no record is read and this
+/// reds. A kernel-owned record halts, so no metal row reaches the event log
+/// of a unit that translates for the kernel alone.
 pub fn amdvi_selftest(test_config: &Path) -> Result<(), String> {
     let halted = |l: &str| l.contains("panic: rebooting") || l.contains("panic: holding this panel");
     let options = BootOptions {

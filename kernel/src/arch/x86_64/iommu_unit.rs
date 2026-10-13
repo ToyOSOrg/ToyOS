@@ -137,10 +137,15 @@ pub mod domain {
         }
     }
 
-    /// Whether firmware reserves memory `stream` must keep reaching, which a
-    /// domain of its own would not map: an AMD-Vi IVMD names it.
-    pub fn firmware_reserves(stream: StreamId) -> bool {
-        backend() == Backend::AmdVi && amdvi::domain::keeps_identity(stream)
+    /// Why `stream` keeps the machine's own addresses rather than a domain of
+    /// its own, if it does: AMD-Vi's reasons. VT-d answers `None` for every
+    /// function, an RMRR's included, which it moves off the identity domain
+    /// like any other.
+    pub fn untranslated(stream: StreamId) -> Option<&'static str> {
+        match backend() {
+            Backend::AmdVi => amdvi::domain::untranslated(stream),
+            Backend::Vtd | Backend::None => None,
+        }
     }
 
     /// The backend that minted a `DomainId`; there is one, or none was minted.

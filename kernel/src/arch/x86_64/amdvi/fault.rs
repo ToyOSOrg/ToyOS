@@ -3,9 +3,11 @@
 //! fixed array of atomics, published before the unit is switched on. What a
 //! record ends is `crate::iommu::fault`'s.
 //!
-//! A record no requester caused — an entry or command of this driver's the
-//! unit refused, or the unit's own hardware failing — is a panic: past it
-//! nothing can state what the unit lets through.
+//! A record a requester caused is that requester's, whatever it names, and
+//! never stops the machine on its own. A record no requester caused — an
+//! entry or command of this driver's the unit refused, or the unit's own
+//! hardware failing — is a panic: past it nothing can state what the unit
+//! lets through.
 
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -65,7 +67,7 @@ fn drain(index: usize, regs: Mmio, log: Mmio) -> usize {
     // Cleared first, so a record written after the tail is read raises the
     // interrupt again (MMIO 2020h `EventLogInt`).
     let seen = regs.read_u32(reg::STATUS);
-    regs.write_u32(reg::STATUS, seen & (status::EVENT_LOG_INT | status::EVENT_OVERFLOW));
+    regs.write_u32(reg::STATUS, seen & status::EVENT_LOG_INT);
     let tail = reg::slot(regs.read_u64(reg::EVENT_TAIL));
     let mut head = reg::slot(regs.read_u64(reg::EVENT_HEAD));
     let mut halts = 0;
@@ -73,21 +75,18 @@ fn drain(index: usize, regs: Mmio, log: Mmio) -> usize {
         let at = reg::offset(head);
         let words = [log.read_u64(at), log.read_u64(at + 8)];
         let fault = match event(words) {
-            Event::PageFault { device, address, write, .. } => Fault {
+            Event::Requester { code, device, address, write } => Fault {
                 who: Who::Function(requester(device)),
                 address,
-                access: if write { Access::Write } else { Access::Read },
-                reason: 0b0010,
-                name: name(0b0010),
+                access: match write {
+                    Some(true) => Access::Write,
+                    Some(false) => Access::Read,
+                    None => Access::Unrecorded,
+                },
+                reason: code,
+                name: name(code),
             },
-            Event::DeviceRequest { device, address } => Fault {
-                who: Who::Function(requester(device)),
-                address,
-                access: Access::Unrecorded,
-                reason: 0b1000,
-                name: name(0b1000),
-            },
-            Event::Other { code } => panic!(
+            Event::Unit { code } => panic!(
                 "iommu: amdvi unit{index} recorded {} ({code:#x}): {:#018x}:{:#018x}",
                 name(code),
                 words[1],

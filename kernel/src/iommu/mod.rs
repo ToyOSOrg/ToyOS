@@ -173,8 +173,8 @@ impl DeviceSpace {
     /// driver **in this kernel**, whose addresses are the kernel's either way.
     pub fn create(function: &crate::drivers::pci::PciDevice) -> Self {
         let stream = StreamId::pci(function.bus, function.dev, function.func);
-        if unit::domain::firmware_reserves(stream) {
-            log!("iommu: {stream} keeps the machine's addresses: firmware reserves memory it must keep reaching");
+        if let Some(why) = unit::domain::untranslated(stream) {
+            log!("iommu: {stream} keeps the machine's addresses: {why}");
             return Self::Untranslated;
         }
         match unit::domain::create(0) {

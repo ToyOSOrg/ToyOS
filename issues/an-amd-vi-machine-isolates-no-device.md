@@ -25,7 +25,9 @@ special entries, `claim_msi`, a claim clearing its entry's pass bits and
 
 Constraints a reader would otherwise pay to re-derive:
 
-- QEMU 11.1.1's `amd-iommu` translates only with `dma-remap=on`; it takes a
+- QEMU 11.1.1's `amd-iommu` translates a function only with `dma-remap=on`,
+  and only once an `INVALIDATE_DEVTAB_ENTRY` names it
+  (`issues/qemus-invalidate-iommu-all-leaves-every-function-untranslated.md`); it takes a
   device table entry of `Mode` 0 as pass-through whatever `IR` and `IW` say,
   where the specification blocks it, so the blocked default is unobservable
   there; and its `IO_PAGE_FAULT` record carries no address

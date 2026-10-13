@@ -46,21 +46,36 @@ struct Amd {
     settings: Vec<Setting>,
     /// The requesters an IVMD names.
     kept: Vec<Requesters>,
+    /// The ids a programmed unit serves, as inclusive ranges.
+    translated: Vec<(u16, u16)>,
 }
 
 static DOMAINS: Lock<Option<Amd>> = Lock::new(None);
 
 /// Before any domain is made, once a unit will translate: every one is built
-/// clear of `reserved`, and `kept`'s requesters stay on the identity domain.
-pub(super) fn start(reserved: Vec<(u64, u64)>, settings: Vec<Setting>, kept: Vec<Requesters>) {
+/// clear of `reserved`, `kept`'s requesters stay on the identity domain, and
+/// only a requester in `translated` is given one.
+pub(super) fn start(reserved: Vec<(u64, u64)>, settings: Vec<Setting>, kept: Vec<Requesters>, translated: Vec<(u16, u16)>) {
     let mut domains = Domains::new(IDENTITY + 1);
     domains.avoid(reserved);
-    *DOMAINS.lock() = Some(Amd { domains, settings, kept });
+    *DOMAINS.lock() = Some(Amd { domains, settings, kept, translated });
 }
 
-/// Whether `stream` stays on the identity domain because an IVMD names it.
-pub fn keeps_identity(stream: StreamId) -> bool {
-    DOMAINS.lock().as_ref().is_some_and(|amd| keeps_named(amd, stream.requester()))
+/// Why `stream` keeps the machine's own addresses rather than a domain of its
+/// own, if it does: no programmed unit serves it, so nothing would translate
+/// one; or an IVMD names it, so firmware reserves memory it must keep
+/// reaching, which the identity domain maps and a domain of its own would not.
+pub fn untranslated(stream: StreamId) -> Option<&'static str> {
+    let held = DOMAINS.lock();
+    let amd = held.as_ref()?;
+    let id = stream.requester();
+    if !amd.translated.iter().any(|&(first, last)| (first..=last).contains(&id)) {
+        Some("no unit this kernel programmed serves it")
+    } else if keeps_named(amd, id) {
+        Some("firmware reserves memory it must keep reaching")
+    } else {
+        None
+    }
 }
 
 /// A new domain, with `room` bytes of it handed out first: refused, with no id
@@ -68,7 +83,7 @@ pub fn keeps_identity(stream: StreamId) -> bool {
 pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     let mut held = DOMAINS.lock();
     let amd = held.as_mut().ok_or(IommuError::NoUnit)?;
-    let next = amd.domains.prepare(48, 1 << 16, room)?;
+    let next = amd.domains.prepare(9 * ROOT_LEVEL + 12, 1 << 16, room)?;
     let space = Space { root: TABLES.lock().alloc() };
     Ok(amd.domains.add(next, space, alloc::format!("root={:#x} mode={ROOT_LEVEL}", space.root.get())))
 }
@@ -128,7 +143,10 @@ pub fn attach(stream: StreamId, id: DomainId) {
     let held = DOMAINS.lock();
     let amd = held.as_ref().expect("amdvi: a domain exists only once a unit translates");
     let requester = stream.requester();
-    assert!(!keeps_named(amd, requester), "amdvi: {stream}, which an IVMD names, was moved off the identity domain");
+    assert!(
+        amd.translated.iter().any(|&(first, last)| (first..=last).contains(&requester)) && !keeps_named(amd, requester),
+        "amdvi: {stream} was moved to a domain of its own, which `untranslated` refuses it"
+    );
     let space = amd.domains.space(id);
     let slot = super::entry(requester);
     let old = [slot.read_u64(0), slot.read_u64(8)];
