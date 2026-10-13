@@ -28,7 +28,7 @@ use toyos_input::{Merge, Pointer, Slot, State};
 use toyos_desktop::clipboard::{Landing, Watch};
 use toyos_desktop::{
     cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, set_mode, tab_action, Chrome,
-    CursorStyle, Damage, Desk, Grab, Held, Hit, KeyAction, Level, Point, Port, PromptGate, Rect,
+    CursorStyle, Damage, Desk, Scale, Grab, Held, Hit, KeyAction, Level, Point, Port, PromptGate, Rect,
     Released, Stack, TabAction, Verdict, Window, WindowId, WindowMode,
 };
 use window::Screen;
@@ -105,6 +105,33 @@ impl Wallpaper {
     }
 }
 
+/// The scale for the mode `info` describes, from the panel's size in the EDID
+/// block the claim carries; 1 where it carries none or no size, each said.
+fn panel_scale(info: &toyos_abi::FramebufferInfo) -> Scale {
+    let mode = (info.width, info.height);
+    let said = format!("compositor: display {}x{}", mode.0, mode.1);
+    let edid = &info.edid[..(info.edid_len as usize).min(info.edid.len())];
+    if edid.is_empty() {
+        eprintln!("{said}, no panel size, scale 1");
+        return Scale::ONE;
+    }
+    match toyos_edid::BaseBlock::parse(edid).map(|block| block.image_size()) {
+        Ok(toyos_edid::ImageSize::Millimetres { width, height }) => {
+            let scale = Scale::auto(mode, (width, height));
+            eprintln!("{said}, panel {width}x{height} mm, scale {scale}");
+            scale
+        }
+        Ok(size) => {
+            eprintln!("{said}, the panel's EDID gives no size ({size:?}), scale 1");
+            Scale::ONE
+        }
+        Err(why) => {
+            eprintln!("{said}, the panel's EDID is refused: {why}; scale 1");
+            Scale::ONE
+        }
+    }
+}
+
 pub struct Session {
     acceptor: Acceptor,
     /// The prompt layer's port ([`toyos_manifest::consent::PROMPT`]), which
@@ -141,6 +168,8 @@ pub struct Session {
     /// present with.
     fb_dev: FramebufferDev,
     fb_info: toyos_abi::FramebufferInfo,
+    /// The scale the panel's EDID gives the mode the claim was handed.
+    scale: Scale,
     /// Held because [`Session::screen`] points into it.
     _fb_shm: SharedMemory,
     screen: Screen,
@@ -206,6 +235,7 @@ impl Session {
             .expect("the manifest gives this program the framebuffer");
 
         let fb_info = fb_dev.info().expect("failed to read framebuffer info");
+        let scale = panel_scale(&fb_info);
         let fb_size = fb_info.stride as usize * fb_info.height as usize * 4;
         // The scanout and cursor buffers are handles the claim's own read
         // installed, so a refusal here is the kernel contradicting itself and
@@ -342,6 +372,7 @@ impl Session {
             apps,
             total_mem,
             max_windows,
+            scale,
             dead: Vec::new(),
             ready: Vec::new(),
             totals: FrameTotals::default(),
@@ -1443,6 +1474,7 @@ impl Session {
         let mut snap = toyos_inspect::Snapshot::new(toyos_inspect::DISPLAY);
         snap.put("width", self.fb_info.width);
         snap.put("height", self.fb_info.height);
+        snap.put("scale", self.scale.to_string());
         snap.put("cursor", if self.hw_cursor { "hardware" } else { "software" });
         snap.put("windows.open", self.stack.len());
         snap.put("windows.max", self.max_windows);

@@ -47,6 +47,7 @@ members = [
     "lib/device-memory",
     "lib/disk",
     "lib/elf",
+    "lib/edid",
     "lib/elide",
     "lib/fat32",
     "lib/fat32/check",

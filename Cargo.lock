@@ -553,6 +553,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-desktop",
+ "toyos-edid",
  "toyos-font",
  "toyos-input",
  "toyos-inspect",
@@ -4177,6 +4178,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-dns"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-edid"
 version = "0.1.0"
 
 [[package]]

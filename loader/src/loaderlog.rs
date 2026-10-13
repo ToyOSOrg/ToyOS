@@ -23,7 +23,7 @@ pub const BEGINS_AT: &str = "ToyOS Bootloader 1.0";
 /// tells this line from the kernel's own `GOP:` line on a console with both.
 pub const GOP_AT: &str = "GOP: mode";
 
-/// What `report_edid` begins each line with.
+/// What `scanout_edid` begins its line with.
 pub const EDID_AT: &str = "EDID:";
 
 /// The file's last line: [`close`] runs before the memory map is sized, and a
