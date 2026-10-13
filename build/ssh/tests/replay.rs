@@ -117,7 +117,7 @@ fn a_session_the_client_rekeyed_three_times_replays() {
 #[test]
 fn a_key_the_server_does_not_name_is_refused_at_the_offer() {
     let events = replay(STRANGER);
-    let stranger = toyos_ssh::hostkey::fingerprint(&public_key(include_str!("fixtures/stranger_ed25519.pub")));
+    let stranger = toyos_update::repo::fingerprint(&public_key(include_str!("fixtures/stranger_ed25519.pub")));
     assert_eq!(events, [Event::Declined(Declined::Key { user: USER.into(), fingerprint: stranger })]);
 }
 

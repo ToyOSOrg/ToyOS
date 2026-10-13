@@ -1,0 +1,20 @@
+# A member of the host workspace (root `Cargo.toml`), built for the offline
+# machine's Unix triple and run there alone.
+
+[package]
+name = "toyos-root"
+description = "The package repository's offline root-key ceremony: mints the root key and signs root 1, and nothing else."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+# The repository's format, its renderer and its signer: what root 1 is written
+# in and read back through.
+toyos-update = { path = "../../lib/update", features = ["sign"] }
+# The operating system's randomness, for the root key's seed.
+getrandom = "0.3"
+
+[dev-dependencies]
+toyos-tmpdir = { path = "../../lib/tmpdir" }
