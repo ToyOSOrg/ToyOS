@@ -2,7 +2,8 @@
 #
 # A launcher for test-runner, which it endows every job, because the subtree
 # under test has children the supervisor launches; a declared `cat`, which runs
-# until its input ends; and a declared shell, which detaches a `cat`.
+# until its input ends; and a declared shell, whose row lists `toybox` because
+# it detaches a `cat`.
 #
 # `launch_toctou` rides it too: a launch of `toybox` through a link it re-points.
 #
@@ -38,7 +39,7 @@ starts = ["toybox", "shell", "grants", "/apps"]
 syscap = ["roster"]
 
 [programs.shell]
-starts = ["shell", "grants"]
+starts = ["toybox", "shell", "grants"]
 login = true
 
 [programs.grants]
