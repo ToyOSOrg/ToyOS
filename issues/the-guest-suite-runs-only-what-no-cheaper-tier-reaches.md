@@ -115,10 +115,13 @@ and NVMe. Exit: as stage A.
   protocol, its restart, and its refusals with no controller.
 - host `nvme_large_device`, `nvme_wide_sector`: a device past 2 TiB and an 8 KiB namespace.
 - host `fsd_two_data`: two DATA partitions are refused by name.
-- metal `fsd_restart`, `fsd_end_at_mount`, `fsd_claim_held`: a file server ended under its
-  clients is restarted, or refused while its claim is held.
-- metal `home_overwrite_reads_back`, `apps_and_home_are_one_filesystem`, `layout_fresh_boot`:
-  `/home`'s bytes and layout on the disk.
+- `fsd_restart`, `fsd_end_at_mount` and `fsd_claim_held` are out under #890. Of
+  `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`, stage 3's module tests hold
+  the bytes a file server ended under its clients had flushed, and stage 4 owes the client's
+  `Gone` and reconnect, and the supervisor's restart, its bound and its refusal by name of a
+  restart whose claim is held, as module tests. The kernel's `AlreadyExists` on a held partition
+  is `partition_claim`'s.
+- metal `layout_fresh_boot`: `/home`'s layout on the disk.
 - metal `pkg_install_gbae`: `pkg install` lands a package that runs.
 - metal `partition_claim`: a partition claimed as a device, and its refusals.
 - metal `kernel_log_file`, `log_partition_layout`, `log_partition_identity`: `/log` on the stick
