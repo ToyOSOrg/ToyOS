@@ -248,9 +248,15 @@ machine proves `cargo run` works on it.
 
 ```
 cargo run                  # build everything, boot QEMU
+cargo run -- --scale 2     # the same, the desktop drawn at twice its pixels
 cargo run -- --build-only  # build everything, boot nothing
 cargo test                 # boot the OS and run the integration suite
 ```
+
+QEMU's firmware gives the guest no panel size, so the desktop is drawn at
+scale 1 there. On a HiDPI host QEMU's window shows one guest pixel per panel
+pixel, so pass `--scale 2` (or `1.5`); the build cannot ask the host's screen.
+`screen scale 1.5` in the guest changes it live.
 
 The first run initializes submodules and bootstraps the custom Rust toolchain
 into `~/.cache/toyos`, where every checkout on the machine finds it.

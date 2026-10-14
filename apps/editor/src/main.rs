@@ -1435,7 +1435,7 @@ fn main() {
         None => "editor".to_string(),
     };
 
-    let mut window = Window::create_with_title(0, 0, &title).unwrap_or_else(|e| {
+    let mut window = Window::create_with_title(window::Size::Any, &title).unwrap_or_else(|e| {
         eprintln!("editor: {e}");
         std::process::exit(1);
     });

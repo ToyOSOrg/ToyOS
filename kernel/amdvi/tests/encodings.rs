@@ -3,9 +3,10 @@
 //! specification's figures and tables give them, and compared whole, so a
 //! field in the wrong place and a stray bit are both a difference.
 
-use toyos_amdvi::dte::{Dte, Setting, DEVICE_IDS, ENTRY_BYTES};
-use toyos_amdvi::queue::{event, name, Command, Event, ENTRIES};
-use toyos_amdvi::reg::{device_table, offset, ring, slot, Features};
+use toyos_amdvi::dte::{interrupts_blocked, interrupts_remapped, Dte, Setting, DEVICE_IDS, ENTRY_BYTES, INTERRUPT_ENTRIES};
+use toyos_amdvi::irte::{self, Destination};
+use toyos_amdvi::queue::{disposition, event, message_type, name, Command, Disposition, Event, ENTRIES};
+use toyos_amdvi::reg::{control, device_table, offset, ring, slot, smi_filter, Features, SmiFilter, SMI_FILTER};
 use toyos_amdvi::table::{directory, entry, index, leaf, Entry, LEAF_LEVEL, ROOT_LEVEL};
 use toyos_phys::Phys;
 
@@ -139,7 +140,7 @@ fn a_page_fault_is_its_requesters_with_its_access() {
     let write = [read[0] | word(&[(53, 53, 1)]), read[1]];
     assert!(matches!(event(write), Event::Requester { write: Some(true), .. }));
     let message = [word(&[(15, 0, 0x0303), (51, 51, 1), (53, 53, 1), (63, 60, 2)]), 0xFEE0_0000];
-    assert!(matches!(event(message), Event::Requester { device: 0x0303, write: None, .. }));
+    assert_eq!(event(message), Event::Interrupt { device: 0x0303, address: 0xFEE0_0000 });
 }
 
 /// Every record a requester can cause is its, never the unit's: Figure 62
@@ -180,4 +181,164 @@ fn the_feature_register_says_invalidate_all_and_host_levels() {
     assert!(!Features(word(&[(5, 0, 0x3F), (7, 7, 1)])).invalidate_all());
     assert_eq!(Features(0).host_levels(), Some(4));
     assert_eq!(Features(word(&[(11, 10, 0b11)])).host_levels(), None);
+}
+
+/// Table 7, the interrupt half as bits 191:128 numbered from 128: `IV` [128],
+/// `IntCtl` [189:188] 00b, and Table 106's pass bits where Table 7 puts them
+/// (`INITPass` 184, `EIntPass` 185, `NMIPass` 186, `Lint0Pass` 190,
+/// `Lint1Pass` 191). `SysMgt` and `ATCPermit` reach no interrupt half.
+#[test]
+fn a_blocked_interrupt_half_aborts_and_carries_firmwares_passes() {
+    let half = |fields: &[(u32, u32, u64)]| word(&fields.iter().map(|&(m, l, v)| (m - 128, l - 128, v)).collect::<Vec<_>>());
+    assert_eq!(interrupts_blocked(Setting(0)), half(&[(128, 128, 1)]));
+    let ioapic = Setting(0xD7);
+    assert_eq!(
+        interrupts_blocked(ioapic),
+        half(&[(128, 128, 1), (184, 184, 1), (185, 185, 1), (186, 186, 1), (190, 190, 1), (191, 191, 1)])
+    );
+}
+
+/// Table 7: the table root at [179:134], 128-byte aligned, `IntTabLen`
+/// [132:129] 1000b for 256 entries, `IntCtl` 10b; a claim's setting clears
+/// every pass bit and `SysMgt` (Table 10, Table 7 bits 105:104).
+#[test]
+fn a_remapped_interrupt_half_names_its_table_and_a_claim_passes_nothing() {
+    const TABLE: u64 = 0x7_6543_2000;
+    let half = |fields: &[(u32, u32, u64)]| word(&fields.iter().map(|&(m, l, v)| (m - 128, l - 128, v)).collect::<Vec<_>>());
+    let table = Phys::new(TABLE).expect("aligned");
+    assert_eq!(INTERRUPT_ENTRIES * 16, 4096);
+    assert_eq!(
+        interrupts_remapped(table, Setting::CLAIMED),
+        half(&[(128, 128, 1), (132, 129, 0b1000), (179, 134, TABLE >> 6), (189, 188, 0b10)])
+    );
+    assert_eq!(
+        interrupts_remapped(table, Setting(0xFF)),
+        half(&[
+            (128, 128, 1),
+            (132, 129, 0b1000),
+            (179, 134, TABLE >> 6),
+            (184, 184, 1),
+            (185, 185, 1),
+            (186, 186, 1),
+            (189, 188, 0b10),
+            (190, 190, 1),
+            (191, 191, 1)
+        ])
+    );
+    let translated = Dte::translated(Phys::new(ROOT).expect("aligned"), 9, Setting::CLAIMED).words();
+    assert_eq!(translated[1], word(&[(15, 0, 9)]));
+}
+
+/// Figure 17 / Table 22 and Figure 19, `GuestMode` 0: `RemapEn` [0], `IntType`
+/// [4:2] 000b, `DM` [6] 0, the vector at [71:64]; the destination at [15:8]
+/// alone without `XTEn`, and at [31:8] and [127:120] with it.
+#[test]
+fn a_remapping_entry_delivers_its_vector_to_its_destination() {
+    let narrow = layout::<2>(&[(0, 0, 1), (15, 8, 0x07), (71, 64, 0x41)]);
+    assert_eq!(irte::entry(0x41, Destination::Narrow(7)), narrow);
+    let wide = layout::<2>(&[(0, 0, 1), (31, 8, 0x34_5678), (71, 64, 0xFB), (127, 120, 0x12)]);
+    let words = irte::entry(0xFB, Destination::Extended(0x1234_5678));
+    assert_eq!(words, wide);
+    assert!(irte::present(words));
+    assert_eq!((irte::vector(words), irte::destination(words)), (0xFB, 0x1234_5678));
+    assert!(!irte::present(irte::ABSENT));
+}
+
+/// Figure 48: `INVALIDATE_INTERRUPT_TABLE`, code 05h, the id at [15:0].
+#[test]
+fn invalidating_an_interrupt_table_names_its_requester() {
+    assert_eq!(Command::InvalidateInterrupts(0x00A2).words(), [word(&[(15, 0, 0x00A2), (63, 60, 5)]), 0]);
+}
+
+/// MMIO 0018h `GAEn` [17] and `XTEn` [50]; MMIO 0030h `XTSup` [2], `GASup`
+/// [7]. The AMD bench's unit reads 0x206d73ef22254ade.
+#[test]
+fn the_remapping_fields_sit_where_48882_puts_them() {
+    assert_eq!((control::GA_EN, control::XT_EN), (word(&[(17, 17, 1)]), word(&[(50, 50, 1)])));
+    let bench = Features(0x206d_73ef_2225_4ade);
+    assert!(bench.guest_apic() && bench.x2apic());
+    assert!(!Features(!word(&[(7, 7, 1)])).guest_apic());
+    assert!(!Features(!word(&[(2, 2, 1)])).x2apic());
+}
+
+/// MMIO 0018h `SmiFEn` [22], `SmiFLogEn` [24]; MMIO 0030h `SmiFSup` [17:16]
+/// 01b and `SmiFRC` [20:18] counting 1, 2, 4, 8, 16; the filter registers at
+/// 0060h, `SmiDID` [15:0], `SmiDV` [16], `SmiFLock` [17]. The bench's EFR
+/// reads `SmiFSup` 01b and `SmiFRC` 001b: two registers.
+#[test]
+fn the_smi_filter_sits_where_48882_puts_it() {
+    assert_eq!((control::SMIF_EN, control::SMIF_LOG_EN), (word(&[(22, 22, 1)]), word(&[(24, 24, 1)])));
+    assert_eq!(Features(0x206d_73ef_2225_4ade).smi_filters(), Some(2));
+    assert_eq!(Features(word(&[(17, 16, 0b01), (20, 18, 0b100)])).smi_filters(), Some(16));
+    assert_eq!(Features(word(&[(17, 16, 0b01), (20, 18, 0b101)])).smi_filters(), None);
+    assert_eq!(Features(word(&[(17, 16, 0b00), (20, 18, 0b001)])).smi_filters(), None);
+    assert_eq!(Features(word(&[(17, 16, 0b10)])).smi_filters(), None);
+    assert_eq!(SMI_FILTER, 0x60);
+    let valid = SmiFilter(word(&[(15, 0, 0x00A3), (16, 16, 1), (17, 17, 1)]));
+    assert_eq!((valid.passes(), valid.locked()), (Some(0x00A3), true));
+    let unset = SmiFilter(word(&[(15, 0, 0x00A3)]));
+    assert_eq!((unset.passes(), unset.locked()), (None, false));
+}
+
+/// Table 3: an `IO_PAGE_FAULT` at an address in the interrupt range,
+/// `FDF8h` at [39:24] with [63:40] all zero (Table 4) or all ones (§2.2.5's
+/// base), is a refused message, whatever its type; anything else is a
+/// requester's access.
+#[test]
+fn a_refused_message_is_told_from_a_dma_fault() {
+    let fault = |address: u64| event([word(&[(15, 0, 0x00A3), (63, 60, 2)]), address]);
+    let smi_at = word(&[(39, 24, 0xFDF8), (4, 2, 0b010)]);
+    let fixed = word(&[(63, 40, 0xFF_FFFF), (39, 24, 0xFDF8), (5, 5, 1)]);
+    for message in [smi_at, smi_at | word(&[(23, 16, 0xFF), (15, 8, 0xFF), (5, 5, 1)]), smi_at | word(&[(63, 40, 0xFF_FFFF)]), fixed] {
+        assert_eq!(fault(message), Event::Interrupt { device: 0x00A3, address: message }, "{message:#x}");
+    }
+    for access in [smi_at | word(&[(40, 40, 1)]), smi_at | word(&[(63, 48, 0xFFFF)]), word(&[(39, 24, 0xFDF9)]), 0x4000_0000_0000, 0xFEE0_0008] {
+        assert!(matches!(fault(access), Event::Requester { .. }), "{access:#x}");
+    }
+    assert_eq!(message_type(smi_at | word(&[(7, 7, 1)])), 0b1010);
+    // `I` [51] set: an interrupt request, whatever address it names.
+    let flagged = event([word(&[(15, 0, 0x00A3), (51, 51, 1), (63, 60, 2)]), 0x4000_0000_0000]);
+    assert_eq!(flagged, Event::Interrupt { device: 0x00A3, address: 0x4000_0000_0000 });
+}
+
+/// The ruling on #921: an interrupt-range record from an id the IVRS gives
+/// the platform is the platform's, whatever its type; the round-3 panic's
+/// record (`00:14.0`, `0xfffffffdf8000020`, `MT` 000b) among them. From
+/// anyone else, a claim's is its holder's, an SMI (Table 4: `MT` 0010b, `DM`
+/// and [1:0] zero) is said, and any other is a fault.
+#[test]
+fn a_platform_message_is_the_platforms_whatever_its_type() {
+    let round3 = 0xFFFF_FFFD_F800_0020;
+    assert_eq!(message_type(round3), 0b0000);
+    assert_eq!(disposition(round3, true, false), Disposition::Platform);
+    assert_eq!(disposition(round3, false, false), Disposition::Fault);
+    assert_eq!(disposition(round3, false, true), Disposition::Holder);
+    let smi = word(&[(39, 24, 0xFDF8), (4, 2, 0b010)]);
+    assert_eq!(disposition(smi, true, true), Disposition::Platform);
+    assert_eq!(disposition(smi, false, true), Disposition::Holder);
+    assert_eq!(disposition(smi, false, false), Disposition::RefusedSmi);
+    for not_smi in [smi | word(&[(7, 7, 1)]), smi | word(&[(6, 6, 1)]), smi | 1] {
+        assert_eq!(disposition(not_smi, false, false), Disposition::Fault, "{not_smi:#x}");
+    }
+}
+
+/// §2.1.5.3: the filter keeps every id firmware left valid, takes each
+/// platform id it left out in an unlocked invalid register, and locks every
+/// register; with too few such registers it is not one to turn on.
+#[test]
+fn the_smi_filter_passes_firmwares_and_the_platforms_sources_locked() {
+    let free = SmiFilter(0);
+    let held = SmiFilter(word(&[(15, 0, 0x00A3), (16, 16, 1)]));
+    let barred = SmiFilter(word(&[(15, 0, 0x0011), (17, 17, 1)]));
+    let passing = |id: u64| SmiFilter(word(&[(15, 0, id), (16, 16, 1), (17, 17, 1)]));
+    let locked_invalid = SmiFilter(word(&[(17, 17, 1)]));
+    let plan = |mut registers: Vec<SmiFilter>, platform: &[u16]| smi_filter(&mut registers, platform).map(|()| registers);
+    assert_eq!(plan(vec![free, free], &[0x00A0, 0x0001, 0x00A0]), Ok(vec![passing(0x00A0), passing(0x0001)]));
+    assert_eq!(
+        plan(vec![held, free, barred, free], &[0x00A3, 0x00A0]),
+        Ok(vec![passing(0x00A3), passing(0x00A0), barred, locked_invalid])
+    );
+    assert_eq!(plan(vec![free, barred], &[0x00A0, 0x0001]), Err(0x0001));
+    assert_eq!(plan(vec![barred], &[0x0011]), Err(0x0011));
+    assert_eq!(plan(vec![], &[]), Ok(vec![]));
 }

@@ -21,21 +21,58 @@ const SYS_MGT_SHIFT: u32 = 40;
 pub const MODE: u8 = 4;
 
 /// What an IVHD device entry's DTE-setting byte declares for its requesters
-/// (§5.2.2, Table 106). Of it, a translation entry carries `SysMgt` alone:
-/// the pass bits are the interrupt half's, which nothing here sets valid.
+/// (§5.2.2, Table 106): the `SysMgt` its translation half carries, and the
+/// pass bits its interrupt half does.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Setting(pub u8);
 
 impl Setting {
+    /// What a function a process drives is given whatever firmware declared:
+    /// no `SysMgt`, and no NMI, INIT, ExtInt or LINT forwarded unremapped
+    /// (Table 10), so its device reaches no CPU but by its own vectors.
+    pub const CLAIMED: Self = Self(0);
+
     /// Bits 5:4, the `SysMgt` firmware declares the requester needs.
     pub const fn sys_mgt(self) -> u64 {
         (self.0 as u64 >> 4) & 0b11
     }
+
+    /// The pass bits, at their places in the interrupt half's doubleword
+    /// (Table 106 bits 0, 1, 2, 6, 7 to Table 7 bits 184, 185, 186, 190, 191).
+    const fn passes(self) -> u64 {
+        let byte = self.0 as u64;
+        (byte & 0b111) << 56 | (byte >> 6 & 0b11) << 62
+    }
+}
+
+/// `IV`, bit 128: the interrupt half is valid.
+const IV: u64 = 1 << 0;
+const INT_TAB_LEN_SHIFT: u32 = 1;
+/// `IntCtl`, bits 189:188.
+const INT_CTL_SHIFT: u32 = 60;
+const INT_CTL_REMAPPED: u64 = 0b10;
+
+/// Entries in a requester's remapping table: 256, `IntTabLen` 1000b, one
+/// per vector, 4 KiB of 128-bit entries.
+pub const INTERRUPT_ENTRIES: usize = 256;
+
+/// One entry's interrupt half, bits 191:128, which an interrupt change
+/// replaces in one 64-bit write (§2.2.2.2).
+pub const fn interrupts_blocked(setting: Setting) -> u64 {
+    // `IntCtl` 00b: every fixed and arbitrated message target-aborted (Table 9).
+    IV | setting.passes()
+}
+
+/// The interrupt half remapping every fixed and arbitrated message through
+/// the 256-entry table at `table` (Table 7: root pointer 179:134, `IntTabLen`
+/// 132:129).
+pub const fn interrupts_remapped(table: Phys<12>, setting: Setting) -> u64 {
+    IV | 0b1000 << INT_TAB_LEN_SHIFT | table.get() | INT_CTL_REMAPPED << INT_CTL_SHIFT | setting.passes()
 }
 
 /// One entry's translation half, the 128 bits a translation change replaces
-/// in one write (§2.2.2.2); the interrupt half above it stays zero, `IV`
-/// clear, so the unit forwards a requester's interrupts unremapped (Table 9).
+/// in one write (§2.2.2.2); the interrupt half above it is replaced on its
+/// own.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Dte([u64; 2]);
 

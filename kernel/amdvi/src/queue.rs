@@ -20,6 +20,9 @@ pub enum Command {
     /// `INVALIDATE_IOMMU_PAGES` (Figure 46) over every address of one domain,
     /// directories with them: `S` and `PDE` set, address 7_FFFF_FFFF_FFFFh.
     InvalidateDomain(u16),
+    /// `INVALIDATE_INTERRUPT_TABLE` (Figure 48): everything the unit cached
+    /// of this id's remapping table.
+    InvalidateInterrupts(u16),
     /// `INVALIDATE_IOMMU_ALL` (Figure 51): every cache the unit holds.
     InvalidateAll,
 }
@@ -30,6 +33,7 @@ impl Command {
             Self::CompletionWait { store, data } => [1 << CODE_SHIFT | store.get() | 1, data],
             Self::InvalidateDevice(id) => [2 << CODE_SHIFT | id as u64, 0],
             Self::InvalidateDomain(domain) => [3 << CODE_SHIFT | (domain as u64) << 32, 0x7_FFFF_FFFF_FFFF << 12 | 0b11],
+            Self::InvalidateInterrupts(id) => [5 << CODE_SHIFT | id as u64, 0],
             Self::InvalidateAll => [8 << CODE_SHIFT, 0],
         }
     }
@@ -44,6 +48,11 @@ pub enum Event {
     /// `RX` clear (Figure 64). `write` is the access where the record states
     /// one; `address` is the record's, whatever it names.
     Requester { code: u8, device: u16, address: u64, write: Option<bool> },
+    /// An `IO_PAGE_FAULT` with `I` set (Table 57) or at an address in the
+    /// interrupt range: a message from `device` the unit refused, an SMI the
+    /// filter refused among them (§2.1.5.1), no access of memory.
+    /// [`disposition`] says whose it is.
+    Interrupt { device: u16, address: u64 },
     /// Every other record: an entry or command of this driver's the unit
     /// refused, or the unit's own hardware failing.
     Unit { code: u8 },
@@ -53,8 +62,10 @@ pub const fn event(words: [u64; 2]) -> Event {
     let device = words[0] as u16;
     let code = (words[0] >> CODE_SHIFT) as u8;
     let write = match code {
-        // `I` [51]: an interrupt carries no read or write; else `RW` [53].
-        0b0010 if words[0] & 1 << 51 != 0 => None,
+        // `I` [51]: an interrupt, which carries no read or write; else `RW` [53].
+        0b0010 if words[0] & 1 << 51 != 0 || interrupt_range(words[1]) => {
+            return Event::Interrupt { device, address: words[1] }
+        }
         0b0010 => Some(words[0] & 1 << 53 != 0),
         // `RX` [48] set is a `COMPLETE_PPR_REQUEST` of this driver's failing.
         0b1001 if words[0] & 1 << 48 != 0 => return Event::Unit { code },
@@ -64,6 +75,53 @@ pub const fn event(words: [u64; 2]) -> Event {
         _ => return Event::Unit { code },
     };
     Event::Requester { code, device, address: words[1], write }
+}
+
+/// Whether a record's address is in the interrupt range, `FD_F8xx_xxxxh`
+/// (Table 3): bits 63:40 Table 4's zero or, as the unit writes the range's
+/// base (`FFFF_FFFD_F800_0000h`, §2.2.5), all ones.
+const fn interrupt_range(address: u64) -> bool {
+    let above = address >> 40;
+    (above == 0 || above == 0xFF_FFFF) && address & 0xFF_FF00_0000 == 0xFD_F800_0000
+}
+
+/// A message's type, `MT[3]` at bit 7 over `MT[2:0]` at 4:2 (Figure 3).
+pub const fn message_type(address: u64) -> u8 {
+    ((address >> 4) & 0b1000 | (address >> 2) & 0b111) as u8
+}
+
+/// Whether an interrupt-range address is an SMI's (§2.1.5.2, Table 4): `MT`
+/// 0010b, `DM` and bits 1:0 zero.
+const fn smi(address: u64) -> bool {
+    message_type(address) == 0b0010 && address & 0b100_0011 == 0
+}
+
+/// Whose an [`Event::Interrupt`] is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Disposition {
+    /// From a requester id the IVRS gives the platform, whatever its type:
+    /// the platform's message, said, and nothing of the kernel's went wrong.
+    Platform,
+    /// From a function a claim holds: its holder's fault.
+    Holder,
+    /// An SMI the filter refused from any other requester: said.
+    RefusedSmi,
+    /// Any other message the unit refused: a fault on its requester.
+    Fault,
+}
+
+/// What an interrupt-range record at `address` ends, from a requester the
+/// platform speaks as (`platform`) or a claim holds (`held`).
+pub const fn disposition(address: u64, platform: bool, held: bool) -> Disposition {
+    if platform {
+        Disposition::Platform
+    } else if held {
+        Disposition::Holder
+    } else if smi(address) {
+        Disposition::RefusedSmi
+    } else {
+        Disposition::Fault
+    }
 }
 
 /// The name 48882 gives an event code, for a record's line.

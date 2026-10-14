@@ -767,9 +767,9 @@ pub const FLASHABLE: &[&str] = &[
     // writes only the units' registers, which a reset returns to firmware, and
     // tables in memory this boot owns.
     "iommu-firmware-left",
-    // The DMAR's flags read with INTR_REMAP clear, so every IOMMU unit is left
-    // without interrupt remapping. It writes no register a reset does not
-    // return to firmware.
+    // No interrupt remapping: the DMAR's flags read with INTR_REMAP clear, or
+    // every AMD-Vi unit's interrupt halves left invalid. It writes no
+    // register a reset does not return to firmware.
     "iommu-no-remap",
     // Every CPU is handed the loader's Intel update with its header's revision
     // raised by one and its checksum sealed again. Its payload is Intel's own,
@@ -814,13 +814,23 @@ pub const FLASHABLE: &[&str] = &[
     // hold, reaches no firmware state, and the worst
     // it leaves is a stick a replug clears — the defect the arm exists to stage.
     "usb-transport-break",
-    // The kernel leaves the Type-C xHCI controller to a claim, and `usbd`
-    // drives it through the unit: the handoff, a reset and its own rings, as
-    // this kernel's driver does every boot. Firmware owns neither of the
-    // T14's two (each reads `USBLEGSUP 0x01002201`, every SMI enable clear),
-    // and firmware takes the controller back at the next power-on. Only this
-    // id: the other controller carries the boot stick.
-    "xhci-leave=8086:9a13",
+    // The kernel leaves the T14's Type-C xHCI controller, `00:0d.0`, to a
+    // claim, and `usbd` drives it through the unit: the handoff, a reset and
+    // its own rings, as this kernel's driver does every boot. Firmware owns
+    // neither of the T14's two (each reads `USBLEGSUP 0x01002201`, every SMI
+    // enable clear). Whatever state a boot leaves it in, the reset that ends
+    // every boot resets the function and runs POST again, which takes it
+    // back. Only this address: the other controller carries the boot stick.
+    "xhci-leave=00:0d.0",
+    // The AMD bench's `03:00.4`, the xHCI the Bluetooth module is on, left to
+    // a claim the same way. Firmware owns it (`USBLEGSUP 0x00010401`) until
+    // `usbd` takes it; a boot may leave it halted with bus mastering off
+    // after the fault arm, or, where the claim is refused, still firmware's
+    // with its SMI on an ownership change armed. Either way the reset that
+    // ends every boot resets the function and runs POST again, which takes
+    // the controller back. Only this address: `03:00.3`, which shares its id,
+    // carries the boot stick.
+    "xhci-leave=03:00.4",
 ];
 
 /// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and

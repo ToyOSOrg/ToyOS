@@ -1,3 +1,4 @@
+use crate::layout::Desk;
 use crate::rect::Rect;
 use crate::window::Level;
 use toyos_abi::syscall::SHM_PAGE;
@@ -10,19 +11,24 @@ use toyos_abi::syscall::SHM_PAGE;
 /// eighths for the kernel, the other daemons, and the clients' own heaps.
 pub const WINDOW_BUDGET_SHARE: u64 = 8;
 
-/// Most physical memory one window can cost at this screen size.
+/// Most physical memory one window can cost at this screen size: two
+/// screen-sized buffers.
 ///
 /// A screen-sized content buffer is the largest the compositor ever hands out:
-/// `MSG_CREATE_WINDOW` refuses a request bigger than the screen, and every
-/// path that grows a window afterwards — maximize, snap, drag-resize — is
-/// bounded by the screen too. A buffer costs whole [`SHM_PAGE`]s, so a
-/// one-pixel window still costs one.
+/// `MSG_CREATE_WINDOW` refuses a physical request bigger than the screen and
+/// fits a logical one to the work area, and every path that grows a window
+/// afterwards — maximize, snap, drag-resize, a relay at a larger scale — is
+/// bounded by the screen too. **A window holds two from a resize until its
+/// client presents into the new one, and never more** ([`crate::Buffers`]) —
+/// every window at once on a change of scale, and for as long as a client
+/// that never presents again lives. A buffer costs whole [`SHM_PAGE`]s, so a
+/// one-pixel window still costs two.
 ///
 /// Deliberately a function of the screen — a bigger screen means bigger
 /// windows means fewer of them — which no bare constant expresses.
 pub fn window_bytes(screen: Rect) -> u64 {
     let page = SHM_PAGE as u64;
-    (screen.area() * 4).div_ceil(page).max(1) * page
+    2 * (screen.area() * 4).div_ceil(page).max(1) * page
 }
 
 /// How many windows the compositor will hold at this screen size.
@@ -78,6 +84,40 @@ pub fn create_verdict(requested: (u32, u32), screen: Rect, level: Level, clients
     Verdict::Allow
 }
 
+/// The physical size a window's request comes to on `desk`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Requested {
+    /// No size: the desktop chooses.
+    Any,
+    /// This size, which [`create_verdict`] still judges.
+    Exact(u32, u32),
+    /// A logical size whose frame would pass the work area at the scale,
+    /// fitted to it: a toolkit's preference, shrunk and said, never refused.
+    Fitted { asked: (u32, u32), given: (u32, u32) },
+}
+
+impl Requested {
+    /// What [`create_verdict`] is asked about: `(0, 0)` for no size.
+    pub fn size(self) -> (u32, u32) {
+        match self {
+            Self::Any => (0, 0),
+            Self::Exact(w, h) | Self::Fitted { given: (w, h), .. } => (w, h),
+        }
+    }
+}
+
+/// `size` as `desk` gives it: a physical size as it is, a logical one at the
+/// desk's scale and fitted to the work area.
+pub fn requested(size: window::Size, desk: &Desk) -> Requested {
+    let Some(asked) = size.physical(desk.scale.wire()) else { return Requested::Any };
+    if !matches!(size, window::Size::Logical { .. }) {
+        return Requested::Exact(asked.0, asked.1);
+    }
+    let (w, h) = desk.chrome.largest_content(desk.screen);
+    let given = (asked.0.min(w as u32), asked.1.min(h as u32));
+    if given == asked { Requested::Exact(asked.0, asked.1) } else { Requested::Fitted { asked, given } }
+}
+
 /// Which of the compositor's ports a connection came in on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Port {
@@ -87,13 +127,15 @@ pub enum Port {
     Prompt,
     /// `clipboard`, its watcher's.
     Clipboard,
+    /// `display`, its settings' holder's.
+    Display,
 }
 
 /// Whether a connection just accepted off `port` may wait for its first frame,
-/// beside the ones already `waiting`: **one off `prompt` and one off
-/// `clipboard` each have a slot of their own**, and the clients' share `max`,
-/// so no client filling the table keeps the prompt from being made or the
-/// clipboard from being watched.
+/// beside the ones already `waiting`: **one off each port but `compositor`
+/// has a slot of its own**, and the clients' share `max`, so no client filling
+/// the table keeps the prompt from being made, the clipboard from being
+/// watched or the display from being set.
 pub fn pending_admits(port: Port, waiting: impl IntoIterator<Item = Port>, max: usize) -> bool {
     let mut waiting = waiting.into_iter();
     match port {
@@ -108,13 +150,14 @@ mod tests {
 
     const HD: Rect = Rect::new(0, 0, 1920, 1080);
 
+    /// Two buffers, each of whole pages.
     #[test]
-    fn a_window_costs_whole_pages() {
+    fn a_window_costs_two_buffers_of_whole_pages() {
         let page = SHM_PAGE as u64;
-        assert_eq!(window_bytes(Rect::new(0, 0, 1, 1)), page);
+        assert_eq!(window_bytes(Rect::new(0, 0, 1, 1)), 2 * page);
         // 1920*1080*4 = 8_294_400, which is three pages and most of a fourth.
-        assert_eq!(window_bytes(HD), 4 * page);
-        assert_eq!(window_bytes(Rect::new(0, 0, 2048, 2048)), 8 * page);
+        assert_eq!(window_bytes(HD), 2 * 4 * page);
+        assert_eq!(window_bytes(Rect::new(0, 0, 2048, 2048)), 2 * 8 * page);
     }
 
     #[test]
@@ -169,6 +212,35 @@ mod tests {
         assert!(pending_admits(Port::Prompt, full, 32));
         assert!(!pending_admits(Port::Prompt, full.iter().copied().chain([Port::Prompt]), 32));
         assert!(pending_admits(Port::Compositor, [Port::Prompt].into_iter().chain([Port::Compositor; 31]), 32));
+    }
+
+    /// doom asks for 960x600 logical. At 2 on a 1920x1080 panel that is
+    /// 1920x1200, past the work area: it is fitted and given a window, where
+    /// a physical request that large is refused.
+    #[test]
+    fn a_logical_request_past_the_work_area_is_fitted_and_a_physical_one_refused() {
+        let at = |s: &str| crate::Scale::step(s.parse().unwrap()).unwrap();
+        let desk = Desk::new(HD, at("2"), 0);
+        let doom = window::Size::Logical { width: 960, height: 600 };
+        let (w, h) = desk.chrome.largest_content(HD);
+        let Requested::Fitted { asked, given } = requested(doom, &desk) else { panic!("{:?}", requested(doom, &desk)) };
+        assert_eq!((asked, given), ((1920, 1200), (w as u32, h as u32)));
+        let content = desk.chrome.initial_content(Some((w, h)), 0, HD);
+        assert!(desk.work_area().contains(desk.chrome.frame(content)), "{content:?}");
+        assert_eq!(create_verdict(given, HD, Level::Ordinary, 0, 10), Verdict::Allow);
+        assert_eq!(requested(doom, &Desk::new(HD, crate::Scale::ONE, 0)), Requested::Exact(960, 600));
+        let physical = window::Size::Physical { width: 1920, height: 1200 };
+        assert_eq!(requested(physical, &desk), Requested::Exact(1920, 1200));
+        assert_eq!(create_verdict((1920, 1200), HD, Level::Ordinary, 0, 10), Verdict::TooLarge);
+        assert_eq!(requested(window::Size::Any, &desk), Requested::Any);
+    }
+
+    /// The display's holder waits in a slot of its own, as the prompt does.
+    #[test]
+    fn a_display_request_is_admitted_past_every_client_ceiling() {
+        let full = [Port::Compositor; 32];
+        assert!(pending_admits(Port::Display, full.iter().copied().chain([Port::Clipboard]), 32));
+        assert!(!pending_admits(Port::Display, full.iter().copied().chain([Port::Display]), 32));
     }
 
     /// The clipboard's watcher waits in a slot of its own, as the prompt does.

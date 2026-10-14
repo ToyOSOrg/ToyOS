@@ -18,7 +18,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use font::Font;
 use toyos::ipc::{self, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::Connection;
@@ -27,12 +26,12 @@ use toyos_manifest::grants::{self, Access, Folder};
 use window::{Color, Event, Framebuffer, KeyPress, MouseEvent, Window};
 
 use crate::{
-    ACCENT_BG, ACCENT_FG, BG, BUTTON_BG, BUTTON_FG, DIM_FG, DIR_FG, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESCAPE,
+    Ui, ACCENT_BG, ACCENT_FG, BG, BUTTON_BG, BUTTON_FG, DIM_FG, DIR_FG, KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_ESCAPE,
     KEY_LEFT, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP, PATH_BG, SEL_BG, TEXT_FG,
 };
 
-const WIDTH: u32 = 600;
-const HEIGHT: u32 = 400;
+/// The prompt's size, in logical pixels.
+const SIZE: window::Size = window::Size::Logical { width: 600, height: 400 };
 
 /// What has the keyboard, in Tab's order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -182,13 +181,13 @@ impl Question {
         None
     }
 
-    fn mouse(&mut self, mouse: &MouseEvent, font: &Font) -> Option<Reply> {
-        let at = target(self, font, mouse.x as usize, mouse.y as usize);
+    fn mouse(&mut self, mouse: &MouseEvent, ui: &Ui, size: (usize, usize)) -> Option<Reply> {
+        let at = target(self, ui, size, mouse.x as usize, mouse.y as usize);
         match mouse.event_type {
             window::MOUSE_PRESS if mouse.changed == 1 => {
                 self.pressed = at;
                 if let Some(Focus::List) = at {
-                    if let Some(row) = row_at(font, mouse.y as usize) {
+                    if let Some(row) = row_at(ui, mouse.y as usize) {
                         if self.scroll + row < self.folders.len() {
                             self.selected = self.scroll + row;
                         }
@@ -227,67 +226,69 @@ fn grantable(dir: &Path) -> Vec<String> {
 const ROWS: usize = 12;
 
 /// Where the folder list's first row is.
-fn list_y(font: &Font) -> usize {
-    (font.height() + 8) * 3
+fn list_y(ui: &Ui) -> usize {
+    (ui.font.height() + ui.px(8)) * 3
 }
 
-fn row_at(font: &Font, y: usize) -> Option<usize> {
-    let top = list_y(font);
-    (y >= top && y < top + ROWS * font.height()).then(|| (y - top) / font.height())
+fn row_at(ui: &Ui, y: usize) -> Option<usize> {
+    let (top, fh) = (list_y(ui), ui.font.height());
+    (y >= top && y < top + ROWS * fh).then(|| (y - top) / fh)
 }
 
 /// The read-only box's row.
-fn toggle_y(font: &Font) -> usize {
-    list_y(font) + ROWS * font.height() + 8
+fn toggle_y(ui: &Ui) -> usize {
+    list_y(ui) + ROWS * ui.font.height() + ui.px(8)
 }
 
-fn buttons_y() -> usize {
-    HEIGHT as usize - 36
+fn buttons_y(ui: &Ui, height: usize) -> usize {
+    height.saturating_sub(ui.px(36))
 }
 
 /// Each button's left edge and width, right to left from the window's edge.
-fn button_rects(font: &Font) -> [(Choice, usize, usize); 3] {
-    let mut x = WIDTH as usize - 8;
+fn button_rects(ui: &Ui, width: usize) -> [(Choice, usize, usize); 3] {
+    let mut x = width.saturating_sub(ui.px(8));
     let mut out = [(Choice::Deny, 0, 0); 3];
     for (i, (choice, label)) in CHOICES.iter().enumerate().rev() {
-        let w = label.len() * font.width();
-        x -= w;
+        let w = label.len() * ui.font.width();
+        x = x.saturating_sub(w);
         out[i] = (*choice, x, w);
-        x -= 8;
+        x = x.saturating_sub(ui.px(8));
     }
     out
 }
 
-/// What is at `(x, y)`.
-fn target(question: &Question, font: &Font, x: usize, y: usize) -> Option<Focus> {
-    if row_at(font, y).is_some() {
+/// What is at `(x, y)` of a prompt `size` pixels big.
+fn target(question: &Question, ui: &Ui, size: (usize, usize), x: usize, y: usize) -> Option<Focus> {
+    if row_at(ui, y).is_some() {
         return Some(Focus::List);
     }
-    let toggle = toggle_y(font);
-    if question.ask.access == Access::ReadWrite && (toggle..toggle + font.height()).contains(&y) {
+    let (toggle, fh) = (toggle_y(ui), ui.font.height());
+    if question.ask.access == Access::ReadWrite && (toggle..toggle + fh).contains(&y) {
         return Some(Focus::ReadOnly);
     }
-    let top = buttons_y();
-    if !(top..top + font.height() + 8).contains(&y) {
+    let top = buttons_y(ui, size.1);
+    if !(top..top + fh + ui.px(8)).contains(&y) {
         return None;
     }
-    button_rects(font)
+    button_rects(ui, size.0)
         .into_iter()
         .find(|(_, left, w)| (*left..left + w).contains(&x))
         .map(|(choice, _, _)| Focus::Button(choice))
 }
 
-fn render(fb: &Framebuffer, font: &Font, question: &Question) {
-    let (w, fh) = (fb.width(), font.height());
+fn render(fb: &Framebuffer, ui: &Ui, question: &Question) {
+    let (w, font) = (fb.width(), &ui.font);
+    let fh = font.height();
+    let (pad, half) = (ui.px(8), ui.px(4));
     fb.clear(BG);
-    font.draw_string(fb, 8, 8, &question.ask.words(), TEXT_FG, BG);
+    font.draw_string(fb, pad, pad, &question.ask.words(), TEXT_FG, BG);
     let shown = question.dir.to_string_lossy();
-    fb.fill_rect(0, fh + 16, w, fh + 8, PATH_BG);
-    font.draw_string(fb, 8, fh + 20, &format!("Choose the folder, in {shown}"), TEXT_FG, PATH_BG);
+    fb.fill_rect(0, fh + 2 * pad, w, fh + pad, PATH_BG);
+    font.draw_string(fb, pad, fh + 2 * pad + half, &format!("Choose the folder, in {shown}"), TEXT_FG, PATH_BG);
 
-    let top = list_y(font);
+    let top = list_y(ui);
     if question.folders.is_empty() {
-        font.draw_string(fb, 8, top, "  (no folder here can be given; Left goes back)", DIM_FG, BG);
+        font.draw_string(fb, pad, top, "  (no folder here can be given; Left goes back)", DIM_FG, BG);
     }
     for (row, name) in question.folders.iter().enumerate().skip(question.scroll).take(ROWS) {
         let y = top + (row - question.scroll) * fh;
@@ -298,37 +299,37 @@ fn render(fb: &Framebuffer, font: &Font, question: &Question) {
             (false, _) => BG,
         };
         fb.fill_rect(0, y, w, fh, bg);
-        font.draw_string(fb, 8, y, &format!("  {name}/"), DIR_FG, bg);
+        font.draw_string(fb, pad, y, &format!("  {name}/"), DIR_FG, bg);
     }
 
     if question.ask.access == Access::ReadWrite {
-        let y = toggle_y(font);
+        let y = toggle_y(ui);
         let bg = if question.focus == Focus::ReadOnly { SEL_BG } else { BG };
         let mark = if question.read_only { "[x]" } else { "[ ]" };
         let line = format!("{mark} Only let it open the files, not change them");
         fb.fill_rect(0, y, w, fh, bg);
-        font.draw_string(fb, 8, y, &line, TEXT_FG, bg);
+        font.draw_string(fb, pad, y, &line, TEXT_FG, bg);
     }
 
-    let y = buttons_y();
-    fb.fill_rect(0, y - 4, w, fh + 16, PATH_BG);
-    font.draw_string(fb, 8, y + 4, "Esc: not now", DIM_FG, PATH_BG);
-    for (choice, left, width) in button_rects(font) {
+    let y = buttons_y(ui, fb.height());
+    fb.fill_rect(0, y.saturating_sub(half), w, fh + 2 * pad, PATH_BG);
+    font.draw_string(fb, pad, y + half, "Esc: not now", DIM_FG, PATH_BG);
+    for (choice, left, width) in button_rects(ui, w) {
         let label = CHOICES.iter().find(|(c, _)| *c == choice).map_or("", |(_, l)| l);
         let (bg, fg): (Color, Color) = match question.focus == Focus::Button(choice) {
             true => (ACCENT_BG, ACCENT_FG),
             false => (BUTTON_BG, BUTTON_FG),
         };
-        fb.fill_rect(left, y, width, fh + 8, bg);
-        font.draw_string(fb, left, y + 4, label, fg, bg);
+        fb.fill_rect(left, y, width, fh + pad, bg);
+        font.draw_string(fb, left, y + half, label, fg, bg);
     }
 }
 
 /// Ask `ask` of the person at the screen and answer the supervisor on `conn`,
 /// unless the supervisor withdraws it first.
-pub fn ask(ask: Ask, conn: &Connection, font: &Font) {
+pub fn ask(ask: Ask, conn: &Connection, ttf: &[u8]) {
     let package = ask.package.clone();
-    let mut window = match Window::create_on(consent::PROMPT, WIDTH, HEIGHT, "") {
+    let mut window = match Window::create_on(consent::PROMPT, SIZE, "") {
         Ok(window) => window,
         Err(e) => {
             // The supervisor starts the package with no folder and asks again
@@ -339,8 +340,9 @@ pub fn ask(ask: Ask, conn: &Connection, font: &Font) {
         }
     };
     let mut fb = window.framebuffer();
+    let mut ui = Ui::at(ttf, window.scale());
     let mut question = Question::new(ask);
-    render(&fb, font, &question);
+    render(&fb, &ui, &question);
     window.present();
     println!("filepicker: asking about {package}");
 
@@ -373,17 +375,18 @@ pub fn ask(ask: Ask, conn: &Connection, font: &Font) {
             Event::Close => Some(Reply::Skip),
             Event::Resized => {
                 fb = window.framebuffer();
+                ui.follow(ttf, &window);
                 None
             }
             Event::KeyInput(key) => question.key(&window.press(key)),
-            Event::MouseInput(mouse) => question.mouse(&mouse, font),
+            Event::MouseInput(mouse) => question.mouse(&mouse, &ui, (fb.width(), fb.height())),
             _ => continue,
         };
         if let Some(answer) = answer {
             reply(conn, &package, answer);
             return;
         }
-        render(&fb, font, &question);
+        render(&fb, &ui, &question);
         window.present();
     }
 }

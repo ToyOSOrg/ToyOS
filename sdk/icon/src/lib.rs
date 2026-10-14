@@ -1,11 +1,6 @@
-//! The desktop's icons, drawn at build time: every `icons/<stem>.svg` an image
-//! carries ships as `share/icons/<stem>.alpha`, its coverage at the one size
-//! [`SIZES`] gives it, and the program that draws it only colours that mask —
-//! no program carries a rasterizer, and none needs one while no icon is drawn
-//! at a size the build did not know.
-//!
-//! An `.alpha` file is the width and height as little-endian `u32`, then one
-//! byte of coverage per pixel, row by row.
+//! The desktop's icons: an SVG in the subset they are written in, its
+//! coverage at any edge, and that coverage blended onto a canvas in one
+//! colour.
 //!
 //! The SVG is read as the subset the icons are written in, and anything past it
 //! is refused by name: a root `svg` with a square `viewBox`, then `path`,
@@ -13,46 +8,67 @@
 //! colour is refused because the mask cannot carry it; an attribute this does
 //! not read is refused because it would ship drawn without it. A stroke must be
 //! round-capped and round-joined, which makes it exactly the points within half
-//! its width of its path, the region drawn here.
+//! its width of its path, the region drawn here. **[`Icon::parse`] panics on a
+//! refusal**: the build parses every icon an image ships, so a program reading
+//! one off its image never meets one.
 //!
-//! The pixels follow resvg's, which drew these icons before the build did,
+//! The pixels follow resvg's, which drew these icons before ToyOS did,
 //! because the desktop's look is not this file's to change: a pixel
 //! samples four rows of four points, a sample worth 16 of 255; a fill is
 //! nonzero, its arcs become cubics as `kurbo` splits them and each cubic, cut
 //! where it turns in y, becomes `2^shift` chords by tiny-skia's count; and each
-//! shape is laid over the ones before it.
-
-/// Each icon and the edge, in pixels, it is drawn at: the compositor's cursors
-/// at 20, its title-bar buttons at 14, and `files`' entries at 32.
-const SIZES: &[(&str, u32)] = &[
-    ("cursor-bold", 20),
-    ("arrow-down-right-bold", 20),
-    ("crosshair-simple-bold", 20),
-    ("minus-bold", 14),
-    ("square-bold", 14),
-    ("x-bold", 14),
-    ("folder-bold", 32),
-    ("file-bold", 32),
-];
+//! shape is laid over the ones before it. The transcendental functions are
+//! `libm`'s, so a host and a guest draw the same pixels.
 
 /// Sample points per pixel along each axis.
 const GRID: usize = 4;
 
 type Point = (f64, f64);
 
-/// The `.alpha` file the icon `stem` ships as.
-pub fn rasterize(stem: &str, svg: &[u8]) -> Vec<u8> {
-    let size = SIZES
-        .iter()
-        .find(|(name, _)| *name == stem)
-        .unwrap_or_else(|| panic!("icons/{stem}.svg has no size in build/icons.rs's SIZES"))
-        .1;
-    let svg = std::str::from_utf8(svg).unwrap_or_else(|e| panic!("icons/{stem}.svg: {e}"));
-    let mut out = Vec::with_capacity(8 + (size * size) as usize);
-    out.extend(size.to_le_bytes());
-    out.extend(size.to_le_bytes());
-    out.extend(coverage(&Icon::parse(svg), size as usize));
-    out
+/// An icon's coverage at one edge: one byte per pixel, row by row, 255 where
+/// the icon covers the pixel whole.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Mask {
+    edge: usize,
+    alpha: Vec<u8>,
+}
+
+/// What a [`Mask`] is drawn onto: pixels read and written as red, green and
+/// blue, each place inside the canvas.
+pub trait Canvas {
+    fn size(&self) -> (usize, usize);
+    fn get(&self, x: usize, y: usize) -> [u8; 3];
+    fn put(&self, x: usize, y: usize, rgb: [u8; 3]);
+}
+
+impl Mask {
+    pub fn edge(&self) -> usize {
+        self.edge
+    }
+
+    pub fn alpha(&self) -> &[u8] {
+        &self.alpha
+    }
+
+    /// Blended onto `canvas` in `color`, its top-left corner at (`x`, `y`),
+    /// clipped to the canvas on every side.
+    pub fn draw(&self, canvas: &impl Canvas, x: i64, y: i64, color: [u8; 3]) {
+        let (w, h) = canvas.size();
+        for (i, &alpha) in self.alpha.iter().enumerate() {
+            let (px, py) = (x + (i % self.edge) as i64, y + (i / self.edge) as i64);
+            if alpha == 0 || px < 0 || py < 0 || px >= w as i64 || py >= h as i64 {
+                continue;
+            }
+            let (px, py) = (px as usize, py as usize);
+            canvas.put(px, py, over(color, canvas.get(px, py), alpha));
+        }
+    }
+}
+
+/// `color` laid over `under` at `alpha` of 255.
+fn over(color: [u8; 3], under: [u8; 3], alpha: u8) -> [u8; 3] {
+    let (a, inv) = (u16::from(alpha), u16::from(255 - alpha));
+    core::array::from_fn(|i| ((u16::from(color[i]) * a + u16::from(under[i]) * inv) / 255) as u8)
 }
 
 /// A subpath: its start, then one cubic per segment, a line as the cubic
@@ -71,7 +87,7 @@ struct Shape {
     stroke: Option<f64>,
 }
 
-struct Icon {
+pub struct Icon {
     /// The `viewBox`'s origin and edge, in user units.
     origin: Point,
     edge: f64,
@@ -79,7 +95,8 @@ struct Icon {
 }
 
 impl Icon {
-    fn parse(svg: &str) -> Icon {
+    /// `svg`'s shapes; panics naming what of it is past the subset.
+    pub fn parse(svg: &str) -> Icon {
         let mut tags = Tags { rest: svg.trim() };
         let (name, attrs, open) = tags.next().expect("an empty SVG");
         assert!(name == "svg" && open, "the root element is <{name}>, not an open <svg>");
@@ -363,7 +380,7 @@ impl Path {
         if rx <= 1e-5 || ry <= 1e-5 {
             return self.line_to(p);
         }
-        let (sin, cos) = degrees.to_radians().sin_cos();
+        let (sin, cos) = libm::sincos(degrees.to_radians());
         let (hx, hy) = ((p0.0 - p.0) / 2.0, (p0.1 - p.1) / 2.0);
         let (x1, y1) = (cos * hx + sin * hy, -sin * hx + cos * hy);
         let lambda = (x1 * x1) / (rx * rx) + (y1 * y1) / (ry * ry);
@@ -376,20 +393,20 @@ impl Path {
         let k = (num / den).abs().sqrt() * if large == sweep { -1.0 } else { 1.0 };
         let (cx1, cy1) = (k * rx * y1 / ry, -k * ry * x1 / rx);
         let centre = (cos * cx1 - sin * cy1 + f64::midpoint(p0.0, p.0), sin * cx1 + cos * cy1 + f64::midpoint(p0.1, p.1));
-        let start = ((y1 - cy1) / ry).atan2((x1 - cx1) / rx);
+        let start = libm::atan2((y1 - cy1) / ry, (x1 - cx1) / rx);
         let tau = std::f64::consts::TAU;
-        let mut delta = (((-y1 - cy1) / ry).atan2((-x1 - cx1) / rx) - start) % tau;
+        let mut delta = (libm::atan2((-y1 - cy1) / ry, (-x1 - cx1) / rx) - start) % tau;
         if sweep && delta < 0.0 {
             delta += tau;
         } else if !sweep && delta > 0.0 {
             delta -= tau;
         }
 
-        let n = ((1.1163 * rx.max(ry) / 0.1).powf(1.0 / 6.0).max(3.999_999) * delta.abs() / tau).ceil();
+        let n = (libm::pow(1.1163 * rx.max(ry) / 0.1, 1.0 / 6.0).max(3.999_999) * delta.abs() / tau).ceil();
         let step = delta / n;
-        let arm = 4.0 / 3.0 * (step / 4.0).tan();
+        let arm = 4.0 / 3.0 * libm::tan(step / 4.0);
         let at = |angle: f64| {
-            let (s, c) = angle.sin_cos();
+            let (s, c) = libm::sincos(angle);
             (rx * cos * c - ry * sin * s, rx * sin * c + ry * cos * s)
         };
         for i in 0..n as usize {
@@ -500,7 +517,7 @@ fn dot6(v: f64) -> i64 {
 fn stroked(c: &[Point; 4], r: f64) -> Vec<Point> {
     let tangent = |t: f64| {
         let (x, y) = derivative(c, t);
-        let length = x.hypot(y);
+        let length = libm::hypot(x, y);
         assert!(length > 0.0, "a stroked curve with no direction at {t}");
         (x / length, y / length)
     };
@@ -524,7 +541,7 @@ fn stroked(c: &[Point; 4], r: f64) -> Vec<Point> {
         let mid = ((o0.0 + 2.0 * q.0 + o1.0) / 4.0, (o0.1 + 2.0 * q.1 + o1.1) / 4.0);
         let half = f64::midpoint(t0, t1);
         let want = offset(half);
-        if (mid.0 - want.0).hypot(mid.1 - want.1) > 0.25 {
+        if libm::hypot(mid.0 - want.0, mid.1 - want.1) > 0.25 {
             pieces.push((half, t1));
             pieces.push((t0, half));
             continue;
@@ -593,6 +610,13 @@ fn stepped(c: &[Point; 4]) -> Vec<Point> {
         out.extend((1..=n).map(|i| at(i as f64 / n as f64)));
     }
     out
+}
+
+impl Icon {
+    /// The icon drawn `edge` pixels square.
+    pub fn mask(&self, edge: usize) -> Mask {
+        Mask { edge, alpha: coverage(self, edge) }
+    }
 }
 
 /// Each pixel's coverage, `size` by `size`, row by row.
@@ -693,7 +717,7 @@ fn capsule(a: Point, b: Point, r: f64, y: f64) -> Option<(f64, f64)> {
         }
     }
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let length = dx.hypot(dy);
+    let length = libm::hypot(dx, dy);
     if length > 0.0 {
         // Along the segment, 0..=1, and across it, -r..=r, are each linear in x.
         let along = solve(dx / (length * length), (y - a.1) * dy / (length * length), 0.0, 1.0);
@@ -760,15 +784,34 @@ mod tests {
         assert!((area(&ring) - want).abs() < want * 5e-3, "ring: {} of {want}", area(&ring));
     }
 
+    /// Each committed icon and the edge, in pixels, it is drawn at at scale
+    /// 1: the compositor's cursors at 20, its title-bar buttons at 14, and
+    /// `files`' entries at 32.
+    const SHIPPED: &[(&str, u32)] = &[
+        ("cursor-bold", 20),
+        ("arrow-down-right-bold", 20),
+        ("crosshair-simple-bold", 20),
+        ("minus-bold", 14),
+        ("square-bold", 14),
+        ("x-bold", 14),
+        ("folder-bold", 32),
+        ("file-bold", 32),
+    ];
+
     /// The committed icons draw to the pixels the owner accepted against
-    /// resvg's, which no reading of this file can see.
+    /// resvg's, which no reading of this file can see, at the edges they
+    /// were compared at: each as the width, the height and the coverage, the
+    /// form the build shipped them in.
     #[test]
     fn the_icons_are_the_pixels_compared_with_resvg() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let mut digest = toyos_sha2_hw::sha256();
-        for (stem, _) in SIZES {
+        for &(stem, edge) in SHIPPED {
             let svg = std::fs::read(root.join(format!("assets/icons/{stem}.svg"))).expect("a committed icon");
-            digest.update(rasterize(stem, &svg));
+            let mask = Icon::parse(std::str::from_utf8(&svg).unwrap()).mask(edge as usize);
+            digest.update(edge.to_le_bytes());
+            digest.update(edge.to_le_bytes());
+            digest.update(mask.alpha());
         }
         let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
         assert_eq!(
@@ -778,6 +821,48 @@ mod tests {
              posted on pull request #814, and ask the owner again on any visible change before \
              pinning the new digest"
         );
+    }
+
+    /// An icon at twice the edge is drawn at that edge: not the smaller
+    /// mask doubled, whose every 2x2 block is one value.
+    #[test]
+    fn a_larger_edge_is_drawn_at_its_size() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/icons/x-bold.svg");
+        let icon = Icon::parse(&std::fs::read_to_string(root).unwrap());
+        let (one, two) = (icon.mask(14), icon.mask(28));
+        let doubled: Vec<u8> = (0..28 * 28).map(|i| one.alpha()[(i / 28 / 2) * 14 + (i % 28) / 2]).collect();
+        assert_eq!(two.edge(), 28);
+        assert_ne!(two.alpha(), &doubled[..]);
+    }
+
+    struct Pixels(core::cell::RefCell<Vec<[u8; 3]>>, usize, usize);
+
+    impl Canvas for Pixels {
+        fn size(&self) -> (usize, usize) {
+            (self.1, self.2)
+        }
+        fn get(&self, x: usize, y: usize) -> [u8; 3] {
+            self.0.borrow()[y * self.1 + x]
+        }
+        fn put(&self, x: usize, y: usize, rgb: [u8; 3]) {
+            self.0.borrow_mut()[y * self.1 + x] = rgb;
+        }
+    }
+
+    /// A mask hanging off the canvas's corners is drawn as far as the canvas
+    /// goes; a covered pixel takes the colour and a quarter-covered one is a
+    /// quarter of the way to it.
+    #[test]
+    fn a_mask_is_blended_and_clipped_to_its_canvas() {
+        let mask = Mask { edge: 2, alpha: vec![255, 64, 0, 255] };
+        let canvas = Pixels(core::cell::RefCell::new(vec![[0, 0, 0]; 4]), 2, 2);
+        mask.draw(&canvas, 1, 1, [200, 100, 40]);
+        assert_eq!(*canvas.0.borrow(), [[0, 0, 0], [0, 0, 0], [0, 0, 0], [200, 100, 40]]);
+        mask.draw(&canvas, 0, 0, [255, 255, 255]);
+        assert_eq!(canvas.0.borrow()[1], [64, 64, 64]);
+        mask.draw(&canvas, -1, -1, [9, 9, 9]);
+        assert_eq!(canvas.0.borrow()[0], [9, 9, 9]);
+        assert_eq!(canvas.0.borrow()[1], [64, 64, 64]);
     }
 
     /// A contour wound against its outer one is a hole; one wound with it is not.

@@ -21,6 +21,7 @@
 //! the last claim on them is released. §6.7.1.5's five seconds in which a
 //! second press cancels the removal are not offered.
 
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -28,7 +29,7 @@ use toyos_abi::inventory::Arrival;
 use toyos_pci::bridge::Bridge;
 use toyos_pci::hotplug::{self, Next, Seen};
 
-use super::{function, functions, record, requester, Armed, Function, MACHINE};
+use super::{function, functions, record, requester, Armed, Function, Refusal, MACHINE};
 use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, NoCapability, NoEntry, PciDevice, MSIX_ENTRY};
 use crate::sync::{Lock, Masked};
 
@@ -133,34 +134,28 @@ pub fn arm(bridges: &[HostBridge]) {
     }
 }
 
-/// Take `port` for this kernel and arm its slot's interrupt.
-fn arm_one(number: usize, port: &'static Function, express: u64, slot: hotplug::Slot, bridge: Bridge) -> Result<&'static HotPlug, &'static str> {
+/// Take `port` for this kernel and arm its slot's interrupt, on the message
+/// a claim's would be: remapped for the port alone.
+fn arm_one(number: usize, port: &'static Function, express: u64, slot: hotplug::Slot, bridge: Bridge) -> Result<&'static HotPlug, String> {
     if usize::from(slot.message) != usize::from(MSIX_ENTRY) {
-        return Err("its slot signals on a message other than the one entry this kernel arms");
+        return Err("its slot signals on a message other than the one entry this kernel arms".into());
     }
     if port.held.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed).is_err() {
-        return Err("a claim holds the port");
+        return Err("a claim holds the port".into());
     }
     let pci = port.pci;
-    let Ok(remapping) = crate::iommu::remapping() else {
+    let refused = |why: Refusal| {
         port.held.store(false, Ordering::Release);
-        return Err("its interrupt would not be remapped on this machine");
+        why.to_string()
     };
-    let message = match crate::iommu::claim_msi(remapping, number, &pci) {
-        Ok(message) => message,
-        Err(_) => {
-            port.held.store(false, Ordering::Release);
-            return Err("no message of its own could be made for it");
-        }
-    };
+    let remapping = crate::iommu::remapping().map_err(|why| refused(Refusal::NotRemapped(why)))?;
+    crate::iommu::isolates(&pci).map_err(|why| refused(Refusal::NotIsolated(why)))?;
+    let message = crate::iommu::claim_msi(remapping, number, &pci).map_err(|why| refused(Refusal::NoMessage(why)))?;
     pci.enable_memory_space();
     let armed = match arm_claimed_msix(&message) {
-        Ok(entry) => Armed::Msix(entry, message),
+        Ok(at) => Armed::Msix(at, message),
         Err(NoEntry::NoTable(NoCapability::Absent)) if arm_claimed_msi(&message) => Armed::Msi(message),
-        Err(_) => {
-            port.held.store(false, Ordering::Release);
-            return Err("neither its MSI-X nor its MSI could be armed");
-        }
+        Err(_) => return Err(refused(Refusal::NoInterrupt)),
     };
     // A port's own message is a write it masters (PCI 3.0 §6.2.2, bit 2),
     // and what arrives behind it reaches memory through it.

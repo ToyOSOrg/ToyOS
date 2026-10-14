@@ -6,7 +6,6 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-sprite = { path = "sprite" }
 toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
 toyos-desktop = { path = "desktop" }
@@ -14,6 +13,7 @@ toyos-edid = { path = "../../lib/edid" }
 toyos-input = { path = "../../lib/input" }
 toyos-inspect = { path = "../../lib/inspect" }
 toyos-font = { path = "../../sdk/font" }
+toyos-icon = { path = "../../sdk/icon" }
 toyos-manifest = { path = "../../lib/manifest" }
 toyos-pci-claim = { path = "../../lib/pci-claim" }
 toyos-virtio = { path = "../../lib/virtio" }

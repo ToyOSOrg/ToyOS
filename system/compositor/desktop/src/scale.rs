@@ -1,23 +1,26 @@
-//! How many panel pixels the desktop's pixel is, chosen from the panel's
-//! density.
+//! How many panel pixels the desktop's pixel is: chosen from the panel's
+//! density, or kept as the person's own choice.
 //!
 //! ToyOS's own rule. The desktop's pixel is CSS Values 3 §5.2's reference
 //! pixel, the visual angle of 1/96 inch at 28 inches, and every panel is
 //! assumed viewed from 24 inches, so it is held to 96 x 28 / 24 = 112 dots
 //! per inch. One distance for every panel makes the scale a function of
 //! density alone; 24 inches is ToyOS's choice, not a published figure.
+//!
+//! The pixels a scale gives are [`window::Scale::px`]'s, the window
+//! protocol's one rounding.
 
 use core::fmt;
 
 use crate::mode::LEAST;
 
-/// A scale in 120ths: a quarter step from 1 to 4.
+/// A quarter step from 1 to 4: every scale the desktop draws at.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Scale(u16);
+pub struct Scale(window::Scale);
 
 /// Every scale is a quarter step: 4/4 to 16/4.
 const QUARTERS: core::ops::RangeInclusive<u32> = 4..=16;
-const PER_QUARTER: u16 = 30;
+const PER_QUARTER: u32 = window::scale::DENOMINATOR / 4;
 
 /// The reference pixel's density at the assumed distance, as the ratio
 /// `96 * 28 / 24`.
@@ -25,11 +28,46 @@ const TARGET_DPI: (u64, u64) = (96 * 28, 24);
 /// Millimetres per inch, as a ratio.
 const MM_PER_INCH: (u64, u64) = (254, 10);
 
+/// Why a scale asked for is not drawn at.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    NotAStep,
+    /// The mode at that scale would hold less than [`LEAST`] logical pixels.
+    BelowLeast,
+}
+
+impl Refusal {
+    /// As the display port answers it.
+    pub fn wire(self) -> window::display::Refused {
+        match self {
+            Self::NotAStep => window::display::Refused::NotAStep,
+            Self::BelowLeast => window::display::Refused::BelowLeast,
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.wire().fmt(f)
+    }
+}
+
 impl Scale {
-    pub const ONE: Self = Self(120);
+    pub const ONE: Self = Self(window::Scale::ONE);
 
     fn quarters(q: u32) -> Self {
-        Self(q as u16 * PER_QUARTER)
+        Self(window::Scale::from_wire(q * PER_QUARTER).expect("a quarter step is a wire scale"))
+    }
+
+    /// `scale` if it is a quarter step.
+    pub fn step(scale: window::Scale) -> Option<Self> {
+        scale.wire().is_multiple_of(PER_QUARTER).then_some(Self(scale))
+    }
+
+    /// `scale` as what `mode` is drawn at, or why not.
+    pub fn asked(scale: window::Scale, mode: (u32, u32)) -> Result<Self, Refusal> {
+        let step = Self::step(scale).ok_or(Refusal::NotAStep)?;
+        if step.holds_least(mode) { Ok(step) } else { Err(Refusal::BelowLeast) }
     }
 
     /// The scale for a `mode` in pixels on a panel of `mm`: the quarter step
@@ -48,32 +86,47 @@ impl Scale {
             .clone()
             .find(|&q| 64 * a <= u128::from(2 * q + 1).pow(2) * b)
             .unwrap_or(*QUARTERS.end());
-        (*QUARTERS.start()..=nearest)
+        Self::quarters(nearest).fitted(mode)
+    }
+
+    /// The largest step at or below this one whose logical screen at `mode`
+    /// is at least the least; 1 where none is.
+    pub fn fitted(self, mode: (u32, u32)) -> Self {
+        (*QUARTERS.start()..=self.0.wire() / PER_QUARTER)
             .rev()
             .map(Self::quarters)
             .find(|s| s.holds_least(mode))
             .unwrap_or(Self::ONE)
     }
 
+    /// What `mode` is drawn at: the person's kept choice where it is one,
+    /// held down to what the mode can hold, and `base` otherwise.
+    pub fn shown(kept: Option<Self>, base: Self, mode: (u32, u32)) -> Self {
+        kept.unwrap_or(base).fitted(mode)
+    }
+
     /// Whether `mode` at this scale is at least [`LEAST`] in logical pixels.
     fn holds_least(self, mode: (u32, u32)) -> bool {
-        let n = u64::from(self.0);
-        u64::from(mode.0) * 120 >= u64::from(LEAST.width) * n
-            && u64::from(mode.1) * 120 >= u64::from(LEAST.height) * n
+        let n = u64::from(self.0.wire());
+        let den = u64::from(window::scale::DENOMINATOR);
+        u64::from(mode.0) * den >= u64::from(LEAST.width) * n
+            && u64::from(mode.1) * den >= u64::from(LEAST.height) * n
+    }
+
+    pub const fn wire(self) -> window::Scale {
+        self.0
+    }
+
+    /// `l` logical pixels in physical ones.
+    pub const fn px(self, l: i32) -> i32 {
+        self.0.px(l)
     }
 }
 
 /// As a decimal: `1`, `1.25`, `1.5`, `1.75`.
 impl fmt::Display for Scale {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let (whole, frac) = (self.0 / 120, self.0 % 120);
-        match frac {
-            0 => write!(f, "{whole}"),
-            30 => write!(f, "{whole}.25"),
-            60 => write!(f, "{whole}.5"),
-            90 => write!(f, "{whole}.75"),
-            _ => unreachable!("a scale is a quarter step"),
-        }
+        self.0.fmt(f)
     }
 }
 
@@ -84,6 +137,10 @@ mod tests {
 
     fn auto(w: u32, h: u32, wmm: u32, hmm: u32) -> alloc::string::String {
         Scale::auto((w, h), (wmm, hmm)).to_string()
+    }
+
+    fn at(text: &str) -> Scale {
+        Scale::step(text.parse().unwrap()).unwrap()
     }
 
     /// The panels M1 read: 309x173 mm and 309x174 mm at 1920x1080.
@@ -141,6 +198,31 @@ mod tests {
     #[test]
     fn the_largest_step_is_four() {
         assert_eq!(auto(7680, 4320, 100, 56), "4");
+    }
+
+    #[test]
+    fn only_a_quarter_step_is_asked_for() {
+        assert_eq!(Scale::asked("1.25".parse().unwrap(), (1920, 1080)), Ok(at("1.25")));
+        assert_eq!(Scale::asked("1.1".parse().unwrap(), (1920, 1080)), Err(Refusal::NotAStep));
+        assert_eq!(Scale::asked(window::Scale::from_wire(121).unwrap(), (1920, 1080)), Err(Refusal::NotAStep));
+    }
+
+    /// 1920x1080 at 2.5 is 768x432, short of 446 rows.
+    #[test]
+    fn a_scale_that_leaves_less_than_the_least_screen_is_refused() {
+        assert_eq!(Scale::asked("2.5".parse().unwrap(), (1920, 1080)), Err(Refusal::BelowLeast));
+        assert_eq!(Scale::asked("2.25".parse().unwrap(), (1920, 1080)), Ok(at("2.25")));
+    }
+
+    /// A kept 2 on a 1280x720 mode is drawn at the 1.5 that mode holds, and
+    /// is still the choice: the next mode that holds it gets it back.
+    #[test]
+    fn a_kept_choice_a_mode_cannot_hold_is_held_down_and_kept() {
+        let kept = Some(at("2"));
+        assert_eq!(Scale::shown(kept, Scale::ONE, (1280, 720)), at("1.5"));
+        assert_eq!(Scale::shown(kept, Scale::ONE, (2560, 1600)), at("2"));
+        assert_eq!(Scale::shown(None, at("1.5"), (1920, 1080)), at("1.5"));
+        assert_eq!(Scale::shown(None, at("2"), (642, 446)), Scale::ONE);
     }
 
     #[test]

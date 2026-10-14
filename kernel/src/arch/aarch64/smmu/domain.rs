@@ -92,11 +92,12 @@ pub fn untranslated(_function: StreamId) -> Option<&'static str> {
     None
 }
 
-/// Whether `function` can be attached to a domain: the IORT routes it through
-/// this unit. Its routes are read for the functions enumerated when the unit
-/// was programmed, so one that arrived later is not.
-pub fn translates(function: StreamId) -> bool {
-    UNIT.lock().as_ref().is_some_and(|live| live.routes.iter().any(|(rid, ..)| *rid == function))
+/// Why no claim may have `function`: the IORT routes it through no unit this
+/// kernel programmed. Routes are read for the functions enumerated when the
+/// unit was programmed, so one that arrived since has none.
+pub fn unclaimable(function: StreamId) -> Option<&'static str> {
+    let routed = UNIT.lock().as_ref().is_some_and(|live| live.routes.iter().any(|(rid, ..)| *rid == function));
+    (!routed).then_some("the IORT routes it through no unit this kernel programmed")
 }
 
 /// A new domain, with `room` bytes of it handed out first: refused, with no id
