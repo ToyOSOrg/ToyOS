@@ -42,6 +42,7 @@ use std::time::Duration;
 use std::rc::{Rc, Weak};
 
 use toyos::net::*;
+use toyos::net::stream;
 use toyos::poller::{OTHER_END_GONE, READABLE};
 use toyos::port::Acceptor;
 use toyos::{ipc, say, AsHandle, Connection, OwnedHandle, Pipe};
@@ -731,15 +732,13 @@ impl Sockets {
     }
 
     /// Asks the kernel about everything a pass could be owed for: each
-    /// stream's connection, for its client's rings once it is answered and its
-    /// hang-up always, the wake pipe of each listener and one pipe of each
+    /// stream's connection, for its client's rings and its hang-up, the wake pipe of each listener and one pipe of each
     /// datagram socket for its owner's leaving, and the connection of each
     /// client that waits for a lookup, which hangs up by closing it.
     pub fn watch(&self, poller: &mut Watches) {
         for (key, stream) in &self.streams {
             let Some(connection) = stream.connection.upgrade() else { continue };
-            let flags = if stream.answer.is_some() { OTHER_END_GONE } else { READABLE | OTHER_END_GONE };
-            poller.watch(&*connection, flags, TOKEN_STREAM | u64::from(*key));
+            poller.watch(&*connection, stream::SERVER_WATCH, TOKEN_STREAM | u64::from(*key));
         }
         for (socket_id, socket) in &self.ids {
             match socket {
@@ -770,8 +769,7 @@ impl Sockets {
                         say!("netstack: closing a stream — the kernel refused the watch of its connection: {why:?}");
                         true
                     }
-                    Ok(met) if met & OTHER_END_GONE != 0 => true,
-                    // Doorbells, all taken: what they rang for is the pass's to find.
+                    // Doorbells, all taken, or the end: a ring is the pass's to find.
                     Ok(_) => drained(&connection),
                 };
                 if left {

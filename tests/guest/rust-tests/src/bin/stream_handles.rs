@@ -14,6 +14,9 @@
 //!   `inherit_handle`, `endow` and `provide` each answer the refusal, start no
 //!   child, and leave the stream reading and writing through the handle.
 //!
+//! - **netstack's watch of a stream's connection** (`SERVER_WATCH`) is one
+//!   the kernel takes, and is answered by the client's hang-up.
+//!
 //! **This test is netstack for its children**: a port of its own served to each
 //! as `netstack`, as `netstack_gone_mid_bind` does, which answers a connect
 //! with the region judged, [`PEER`]'s bytes published into it as netstack
@@ -28,7 +31,8 @@ use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
-use toyos::net::stream::{Misuse, Server, Words, LAYOUT, RECEIVE_RING, REGION_BYTES};
+use toyos::net::stream::{Misuse, Server, Words, LAYOUT, RECEIVE_RING, REGION_BYTES, SERVER_WATCH};
+use toyos::poller::Poller;
 use toyos::net::{MsgType, RespType, TcpConnectRequest, TcpConnectResponse};
 use toyos::shm::SharedMemory;
 use toyos::{namespace, port, AsHandle, Connection, OwnedHandle, Pipe};
@@ -69,7 +73,7 @@ fn test() {
 
 /// The handles given out and taken back share one end, and no spawn moves one.
 fn shares_and_refuses_moves() {
-    let (mut child, _netstack) = run("client");
+    let (mut child, netstack) = run("client");
     let out = BufReader::new(child.stdout.take().expect("the child's stdout"));
     let said: Vec<String> = out.lines().map(|line| line.expect("a line")).collect();
     let status = child.wait().expect("wait the client");
@@ -80,6 +84,22 @@ fn shares_and_refuses_moves() {
     );
     assert!(status.success(), "the client exited {status:?}");
     println!("  given out and taken back: one end; every spawn path refused, and the stream still serves");
+    hang_up_answers_the_server_watch(&netstack.conn);
+}
+
+/// netstack's watch of a stream's connection, made after its client left: the
+/// kernel takes it and answers it, and the connection then reads its rings and
+/// its end.
+fn hang_up_answers_the_server_watch(conn: &Connection) {
+    let poller = Poller::new(1);
+    poller.watch_raw(conn.as_handle(), SERVER_WATCH, 0);
+    let mut answers = Vec::new();
+    poller.wait_answers(1, 10_000_000_000, |_, answer| answers.push(answer));
+    assert!(matches!(answers[..], [Ok(_)]), "the kernel answered netstack's watch {answers:?}");
+    let mut bytes = [0u8; 64];
+    while syscall::read_nonblock(conn.as_handle(), &mut bytes).is_ok_and(|n| n > 0) {}
+    assert_eq!(syscall::read_nonblock(conn.as_handle(), &mut bytes), Ok(0), "the hang-up is the connection's end");
+    println!("  netstack's watch of a stream's connection: taken, and answered by the hang-up");
 }
 
 /// A bare `dup` of a stream's handle is no stream of the process: refused by

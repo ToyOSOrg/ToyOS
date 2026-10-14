@@ -74,6 +74,11 @@ pub type Words = [AtomicU32; WORDS];
 /// netstack's end of a stream.
 pub type Server = session::Server<RECEIVE_BYTES, SEND_BYTES, WORDS>;
 
+/// What netstack watches a stream's connection for: the client's rings, and
+/// its hang-up, which the connection reads as its end. A connection is no pipe
+/// end, so the kernel refuses it `OTHER_END_GONE`.
+pub const SERVER_WATCH: u32 = crate::poller::READABLE;
+
 /// The receive ring's `end`: the peer's reset, or netstack's own.
 pub const RESET: u32 = 2;
 /// The receive ring's `end`: [tcp] gave the connection up, by its user timeout
