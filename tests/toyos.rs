@@ -3982,7 +3982,13 @@ fn a_claim_waits_out_an_undeclared_machine() -> Result<(), String> {
     said.must_not_say("pcidev: the acpi claim declared")?;
     let waited = said.must_say(WAITED)?;
     let took = waited.split_once(WAITED).and_then(|(_, rest)| rest.split(" for ").next()).unwrap_or_default().to_string();
-    let millis: u64 = took.strip_suffix("ms").and_then(|ms| ms.parse().ok()).ok_or_else(|| format!("{waited:?} names no duration in ms"))?;
+    // The kernel writes a wait under a millisecond in ns.
+    let millis: u64 = match (took.strip_suffix("ms"), took.strip_suffix("ns")) {
+        (Some(ms), _) => ms.parse().ok(),
+        (None, Some(ns)) => ns.parse::<u64>().ok().map(|_| 0),
+        (None, None) => None,
+    }
+    .ok_or_else(|| format!("{waited:?} names no duration"))?;
     if u128::from(millis) < DEADLINE.as_millis() {
         return Err(format!("the claim waited {took}, short of its {DEADLINE:?} deadline:\n{console}"));
     }
