@@ -207,6 +207,12 @@ fn main() {
             .collect();
         println!("https_download: lan idle lan_ms={}", spread(idle_lan));
 
+        // The file once, untimed, so the CDN holds every part of it before a timed run: a
+        // node answers HIT for a body it still fetches parts of, and the first read of a boot
+        // pauses on them. Its instrument line says what the warm-up met.
+        let warm = netperf::fetch(https_client::config(&roots), &url, |_| {});
+        println!("https_download: warm-up bytes={} {}", warm.bytes, warm.first_run);
+
         // MEASUREMENT ONLY: the file once per `K`, back to back.
         for (index, k) in K_ORDER.into_iter().enumerate() {
             let run = index + 1;
