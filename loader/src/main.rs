@@ -384,7 +384,11 @@ fn query_gop(system_table: &SystemTable) -> Option<GopInfo> {
     };
 
     let (framebuffer, framebuffer_size) = gop.frame_buffer();
-    let edid = scanout_edid(bs, (framebuffer, GopModeKey::of(mode)));
+    let shown = (framebuffer, GopModeKey::of(mode));
+    // Closed before the handles are asked again: a second GET_PROTOCOL open by
+    // this image shares the first's entry, so two closes would be one too many.
+    drop(gop);
+    let edid = scanout_edid(bs, shown);
 
     println!("{} {}x{} stride={} format={} fb={:#x} size={}",
         loaderlog::GOP_AT, width, height, stride, pixel_format, framebuffer, framebuffer_size);
