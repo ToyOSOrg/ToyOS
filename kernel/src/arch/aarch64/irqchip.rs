@@ -5,8 +5,8 @@
 //! GTDT names.
 //!
 //! **What this kernel takes is SGIs, the timer's PPI, the IOMMU's event SPI
-//! ([`route_iommu_events`]) and one LPI per claim slot ([`its`]), and nothing
-//! else.** No other SPI is routed: a device's interrupt is a message the ITS
+//! ([`route_iommu_events`]) and one LPI per claimed function ([`its`]), and
+//! nothing else.** No other SPI is routed: a device's interrupt is a message the ITS
 //! translates, and only a claimed function's is.
 //!
 //! **The virtual timer, not the physical**: it is the one EL1 owns outright —

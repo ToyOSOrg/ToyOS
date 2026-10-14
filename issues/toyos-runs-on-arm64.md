@@ -367,7 +367,7 @@ Each stage names its exit; "measured" means a number from a run.
    before its body) get a test here that reds with `put` written back as one
    `self.buf.write(off, trb)`; x86's TSO hides all three from every guest
    test until then.
-   A claimed function's message is its claim slot's LPI through the GICv3
+   A claimed function's message is its function's LPI through the GICv3
    ITS (`kernel/src/arch/aarch64/irqchip/its.rs`), which `Arch::irqchip`
    gives `cargo run`'s machine and `Profile::VirtIts`, on QEMU's own GIC
    under HVF, whose in-kernel vGIC refuses an ITS. QEMU's SMMUv3
@@ -378,16 +378,16 @@ Each stage names its exit; "measured" means a number from a run.
    the claim the IORT routes past the SMMUv3 and a fault in a claimed BAR.
    `irq()` holds the preempt count across every device arm, as x86-64's
    `device_irq_entry` does, and `pcidev::isr` asserts it.
-   A released function's stream stays on its slot's domain, which maps
+   A released function's stream stays on its own domain, which maps
    the doorbell; its bus mastering off and its message masked are what
    stop its writes, and a write it makes regardless reaches the ITS, where
    the release's `DISCARD` and `MAPD` with `V` clear leave its DeviceID
    translating nothing. That last is read, not tested: no function QEMU
    offers writes once mastering is off but `iommu-testdev`, which no claim
    can tell to write. **Owed**: a `smmu-selftest` arm that puts an
-   `iommu-testdev` on a domain, maps its DeviceID to a slot and unmaps it as
+   `iommu-testdev` on a domain, maps its DeviceID to an LPI and unmaps it as
    a release does, has it write event 0 to `GITS_TRANSLATER`, and is red
-   when the slot's LPI is raised.
+   when that LPI is raised.
 
 7. **Userland boots.** `init`, `logd`, the compositor, netd, soundd and sshd,
    built for `aarch64-unknown-toyos`. Every program of `system.toml` builds

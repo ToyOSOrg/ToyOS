@@ -25,9 +25,9 @@
 //! One table serves every unit, which Section 5.1.3 permits explicitly, so an
 //! index names the same interrupt whichever unit walks it.
 //!
-//! **Its first entries are the claim slots', one each**, not present until a
-//! claim writes its slot's and not present again once the claim is released;
-//! the kernel's own sources take the entries after them, one per arming.
+//! **An entry is the lowest one free**, held by the kernel's own sources for
+//! the boot, one per arming, and by a claim until its release, when it goes
+//! not present and is free again.
 //!
 //! This module's lock is taken before `UNITS` and before `TABLES`, never after
 //! either.
@@ -35,8 +35,10 @@
 use crate::log;
 use alloc::vec::Vec;
 
-use super::super::apic::{narrow_destination, MSG_DEST, MSG_DEST_NARROW};
-use super::super::idt::DriverIrq;
+use kernel::owners::Owners;
+
+use super::super::apic::{narrow_destination, MSG_DEST};
+use super::super::idt::{self, ClaimVector, DriverIrq};
 use crate::iommu::StreamId;
 use crate::sync::Lock;
 
@@ -51,7 +53,7 @@ pub const COMPATIBILITY_FORMAT: u32 = 1 << 23;
 
 /// `2^(7+1)` entries of 128 bits is exactly the 4 KiB [`Tables::alloc`] hands out.
 const SIZE_FIELD: u64 = 7;
-const ENTRIES: u16 = 256;
+const ENTRIES: usize = 256;
 
 const EXTENDED_INTERRUPT_MODE: u64 = 1 << 11;
 
@@ -81,8 +83,18 @@ pub enum Refused {
     DestinationTooWide(u32),
     /// Every entry in the table is already spoken for.
     TableFull,
+    /// Every vector a claim's message may carry is held by another claim.
+    NoVector,
     /// Firmware's device scopes named no requester id for this interrupt controller.
     ControllerUnnamed(u8),
+}
+
+impl Refused {
+    /// Whether this machine has run out of something a claim spends, rather
+    /// than this source being one no entry can be written for.
+    pub fn exhausted(self) -> bool {
+        matches!(self, Self::TableFull | Self::NoVector)
+    }
 }
 
 impl core::fmt::Display for Refused {
@@ -92,6 +104,7 @@ impl core::fmt::Display for Refused {
                 write!(f, "apic id {id:#x} does not fit a remapping entry's destination")
             }
             Self::TableFull => write!(f, "the interrupt remapping table is full"),
+            Self::NoVector => write!(f, "every vector a claimed function's message may carry is held"),
             Self::ControllerUnnamed(id) => {
                 write!(f, "firmware named no requester id for interrupt controller {id}")
             }
@@ -107,7 +120,8 @@ pub struct Pin {
 struct Remap {
     /// `None` until a unit is armed, which is what "no source may use the remappable format" means.
     table: Option<Table>,
-    used: u16,
+    /// The requester each entry is held for.
+    held: Owners<ENTRIES>,
     /// `ECAP.EIM` on every unit. Clear bounds a destination to the eight bits `DST` then holds.
     extended: bool,
     /// Requester ids firmware gave this machine's I/O APICs, which Section 8.3.1.1 requires it to name.
@@ -115,12 +129,7 @@ struct Remap {
 }
 
 static REMAP: Lock<Remap> =
-    Lock::new(Remap { table: None, used: CLAIMS, extended: false, apics: Vec::new() });
-
-/// Entries `0..CLAIMS` are the claim slots'; the kernel's own sources take them
-/// from here up.
-const CLAIMS: u16 = crate::pcidev::MAX_FUNCTIONS as u16;
-const _: () = assert!(crate::pcidev::MAX_FUNCTIONS < ENTRIES as usize);
+    Lock::new(Remap { table: None, held: Owners::new(), extended: false, apics: Vec::new() });
 
 pub fn describe_apic(apic_id: u8, source: StreamId) {
     REMAP.lock().apics.push((apic_id, source));
@@ -176,7 +185,7 @@ fn entry(source: StreamId, vector: u8, dest: Destination, level: bool) -> (u64, 
 /// the words meant for it: a line restating the intent agrees with itself
 /// however the entry was composed, and these fields keep one device off
 /// another's entry.
-fn report(index: u16, source: StreamId, dest: u32, (lo, hi): (u64, u64)) {
+fn report(index: usize, source: StreamId, dest: u32, (lo, hi): (u64, u64)) {
     log!(
         // `apic=` is the id this was asked for, `dst=` the field it encoded
         // into; printing only the second leaves the encoding compared against
@@ -193,38 +202,9 @@ fn report(index: u16, source: StreamId, dest: u32, (lo, hi): (u64, u64)) {
     );
 }
 
-/// Fills the next free entry for `source` and returns its index.
-fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16, Refused> {
-    let written = {
-        let mut remap = REMAP.lock();
-        // Unreachable behind `is_armed`, which every caller passes first.
-        let Some(table) = remap.table else {
-            return Err(Refused::TableFull);
-        };
-        let destination = if remap.extended {
-            Ok(Destination::Extended(dest))
-        } else {
-            narrow_destination(dest)
-                .map(Destination::Narrow)
-                .map_err(|_| Refused::DestinationTooWide(dest))
-        };
-        match destination {
-            Err(why) => Err(why),
-            Ok(_) if remap.used == ENTRIES => Err(Refused::TableFull),
-            Ok(destination) => {
-                let index = remap.used;
-                remap.used += 1;
-                let (lo, hi) = entry(source, vector, destination, level);
-                table.write_pair(index as usize, lo, hi);
-                // Under the same lock as the write, so no other entry can be
-                // written between an entry and the invalidation that publishes it.
-                // Section 6.4: a unit reporting `CAP.CM`, as these do, may cache the
-                // entry a fault was taken on.
-                super::invalidate_interrupt_entries();
-                Ok((index, table.read_pair(index as usize)))
-            }
-        }
-    };
+/// Fills the lowest free entry for `source` and returns its index.
+fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<usize, Refused> {
+    let written = REMAP.lock().write(source, vector, dest, level);
     match written {
         Ok((index, read)) => {
             report(index, source, dest, read);
@@ -237,8 +217,36 @@ fn allocate(source: StreamId, vector: u8, dest: u32, level: bool) -> Result<u16,
     }
 }
 
+impl Remap {
+    /// The entry [`allocate`] fills, published to every unit, and what it
+    /// reads back.
+    fn write(&self, source: StreamId, vector: u8, dest: u32, level: bool) -> Result<(usize, (u64, u64)), Refused> {
+        // Unreachable behind `is_armed`, which every caller passes first.
+        let Some(table) = self.table else {
+            return Err(Refused::TableFull);
+        };
+        let destination = if self.extended {
+            Destination::Extended(dest)
+        } else {
+            Destination::Narrow(narrow_destination(dest).map_err(|_| Refused::DestinationTooWide(dest))?)
+        };
+        let index = self.held.take(source.requester().into()).ok_or(Refused::TableFull)?;
+        // Not present since its last holder's release, so the high half
+        // written first reaches nothing the unit can walk.
+        assert!(table.read_pair(index).0 & PRESENT == 0, "iommu: irte{index} is free and still present");
+        let (lo, hi) = entry(source, vector, destination, level);
+        table.write_pair(index, lo, hi);
+        // Under the same lock as the write, so no other entry can be
+        // written between an entry and the invalidation that publishes it.
+        // Section 6.4: a unit reporting `CAP.CM`, as these do, may cache the
+        // entry a fault was taken on.
+        super::invalidate_interrupt_entries();
+        Ok((index, table.read_pair(index)))
+    }
+}
+
 /// The message that indexes entry `index` by its handle alone (Section 5.1.3).
-fn message(index: u16) -> Msi {
+fn message(index: usize) -> Msi {
     let index = index as u32;
     Msi {
         address: crate::arch::MSI_DOORBELL
@@ -261,53 +269,49 @@ pub fn msi(source: StreamId, irq: DriverIrq) -> Result<Msi, Refused> {
     Ok(message(allocate(source, irq.vector(), MSG_DEST, false)?))
 }
 
-/// Claim slot `slot`'s entry, written for `source` at the slot's vector and
-/// published to every unit before this returns, and the message that reaches
-/// it.
-pub fn claim(slot: usize, source: StreamId) -> Result<Msi, Refused> {
-    let vector = super::super::idt::claim_vector(slot);
-    let (index, read) = {
-        let remap = REMAP.lock();
-        let Some(table) = remap.table else {
-            panic!("iommu: claim slot {slot} written with no table armed");
-        };
-        let index = u16::try_from(slot)
-            .ok()
-            .filter(|index| *index < CLAIMS)
-            .unwrap_or_else(|| panic!("iommu: claim slot {slot} has no entry of its own"));
-        // Not present since the last release, so the high half written first
-        // reaches nothing the unit can walk.
-        assert!(
-            table.read_pair(slot).0 & PRESENT == 0,
-            "iommu: claim slot {slot}'s entry is still present"
-        );
-        let destination = if remap.extended {
-            Destination::Extended(MSG_DEST)
-        } else {
-            Destination::Narrow(MSG_DEST_NARROW)
-        };
-        let (lo, hi) = entry(source, vector, destination, false);
-        table.write_pair(slot, lo, hi);
-        super::invalidate_interrupt_entries();
-        (index, table.read_pair(slot))
-    };
-    report(index, source, MSG_DEST, read);
-    Ok(message(index))
+/// A claimed function's entry and the vector it delivers, held until
+/// [`release`].
+pub struct Claimed {
+    pub msi: Msi,
+    entry: usize,
+    vector: ClaimVector,
 }
 
-/// Claim slot `slot`'s entry not present again, and gone from every unit's
-/// cache before this returns.
-pub fn release(slot: usize, source: StreamId) {
+impl Claimed {
+    /// What the message raises, for the record.
+    pub fn interrupt(&self) -> impl core::fmt::Display {
+        self.vector
+    }
+}
+
+/// A vector for `pcidev` function `function` and an entry delivering it, written
+/// for `source` and published to every unit before this returns.
+pub fn claim(function: usize, source: StreamId) -> Result<Claimed, Refused> {
+    let vector = idt::user_dev::take(function).ok_or(Refused::NoVector)?;
+    match allocate(source, vector.vector(), MSG_DEST, false) {
+        Ok(entry) => Ok(Claimed { msi: message(entry), entry, vector }),
+        Err(why) => {
+            idt::user_dev::give_back(vector);
+            Err(why)
+        }
+    }
+}
+
+/// A claim's entry not present again and gone from every unit's cache, and
+/// then its entry and vector free.
+pub fn release(claimed: &Claimed, source: StreamId) {
     let lo = {
         let remap = REMAP.lock();
         let Some(table) = remap.table else {
-            panic!("iommu: claim slot {slot} released with no table armed");
+            panic!("iommu: irte{} released with no table armed", claimed.entry);
         };
-        table.clear_pair(slot);
+        table.clear_pair(claimed.entry);
         super::invalidate_interrupt_entries();
-        table.read_pair(slot).0
+        remap.held.give_back(claimed.entry);
+        table.read_pair(claimed.entry).0
     };
-    log!("iommu: irte{slot} source={source} p={} released", lo & PRESENT);
+    idt::user_dev::give_back(claimed.vector);
+    log!("iommu: irte{} source={source} p={} released", claimed.entry, lo & PRESENT);
 }
 
 pub fn pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Result<Pin, Refused> {
