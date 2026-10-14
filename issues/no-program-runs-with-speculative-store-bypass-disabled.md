@@ -13,6 +13,6 @@ The kernel never sets SSBD, so no process can have it. Linux at
 
 **Exit**: on every proving machine a flagged program runs with SSBD set,
 through the control
-`issues/a-pure-function-decides-a-cpus-speculation-mitigations-as-linux-does.md`
+`issues/a-pure-function-decides-a-cpus-speculation-mitigations-from-its-vendors-guidance.md`
 names for its CPU, and so does its child, while an unflagged one runs with it
 clear. **Mutation**: no inheritance. **Oracle**: the CPU's own register.
