@@ -92,11 +92,15 @@
 //!   written back to `ICR` explicitly rather than assumed cleared by the read.
 //! - **The link goes away.** §10.2.4.1: `LSC` "is set whenever the link status
 //!   changes (either from up to down, or from down to up)".
-//! - **`IVAR` is written and read back, and a part that does not take it is
-//!   refused.** §10.2.4.9 says the register "is only valid in MSI-X mode" and
-//!   allocates no cause to a vector at reset; what a part outside that mode
-//!   answers instead is not in the document, so it is refused by name rather
-//!   than guessed at.
+//! - **The message is proven before the function is driven.** [`Delivery`]
+//!   is the mode the kernel armed, read off the capability list; `IVAR` is
+//!   written in MSI-X mode only, the 82574's, and a cause forced through `ICS`
+//!   has to arrive as a message within [`DELIVERY_DEADLINE_NANOS`] or the
+//!   function is refused. Nothing falls back to a legacy interrupt.
+//! - **A pass reads `ICR` with auto-mask on and unmasks again when it ends.**
+//!   §10.2.4.1's case 2, an interrupt asserted and auto-mask active, is the
+//!   only asserted read it defines: the read clears `ICR` and masks every
+//!   cause, and a cause recorded after it raises its message at the unmask.
 
 #![no_std]
 #![forbid(unsafe_code)]
@@ -104,6 +108,7 @@
 #[cfg(test)]
 extern crate std;
 
+mod delivery;
 mod pch;
 pub mod phy;
 pub mod power;
@@ -117,7 +122,8 @@ mod tests;
 
 use toyos_device_memory::{DmaBuffers, Registers};
 
-use regs::{cause, ctrl, ivar, rah, rctl, rx_desc, status, tctl, tx_desc, txdctl};
+pub use delivery::{Delivery, NoDelivery};
+use regs::{cause, ctrl, ctrl_ext, ivar, rah, rctl, rx_desc, status, tctl, tx_desc, txdctl};
 
 /// The clock, and the one way this driver gives the processor away.
 pub trait Clock {
@@ -146,6 +152,9 @@ pub trait Interrupts {
     /// Messages that have arrived since the last call. The count is never what
     /// a message *meant* — that is in `ICR` and in the rings.
     fn taken(&self) -> Result<u32, Self::Refused>;
+    /// [`Self::taken`], once a message has arrived or `nanos` have passed
+    /// without one.
+    fn taken_within(&self, nanos: u64) -> Result<u32, Self::Refused>;
 }
 
 /// How much memory the driver asks to be granted, in one region: one 2 MiB
@@ -223,9 +232,9 @@ const _: () = {
 
 /// Why the function was not brought up. Each keeps its own word: a caller asks
 /// different things of a grant that is too small and of a part with no station
-/// address.
+/// address. `C` is the claim's own refusal.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Refusal {
+pub enum Refusal<C> {
     /// The register window is smaller than the register file this driver
     /// reaches, so an access it makes would land outside the mapping.
     Window { given: usize, needed: usize },
@@ -242,9 +251,16 @@ pub enum Refusal {
     /// A register did not read back what was written to it, so this window is
     /// not the register file it was taken for.
     NotAccepted { reg: usize, wrote: u32, read: u32 },
+    /// The claim was armed with MSI-X on a part with no `IVAR` to allocate its
+    /// causes to the vector.
+    MsixWithoutAllocation,
+    /// The causes forced through `ICS` raised no message in the deadline.
+    Undelivered { forced: u32, waited_nanos: u64 },
+    /// The claim refused its interrupt record, in its own word.
+    Claim(C),
 }
 
-impl core::fmt::Display for Refusal {
+impl<C: core::fmt::Debug> core::fmt::Display for Refusal<C> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Window { given, needed } => write!(
@@ -272,6 +288,16 @@ impl core::fmt::Display for Refusal {
                 f,
                 "register {reg:#x} was written {wrote:#x} and reads back {read:#x}"
             ),
+            Self::MsixWithoutAllocation => write!(
+                f,
+                "its claim is armed with MSI-X, and this part has no IVAR to route a cause to it"
+            ),
+            Self::Undelivered { forced, waited_nanos } => write!(
+                f,
+                "ICS forced cause(s) {forced:#x} unmasked and no message arrived in {} ms",
+                waited_nanos / 1_000_000
+            ),
+            Self::Claim(why) => write!(f, "its claim refused an interrupt read: {why:?}"),
         }
     }
 }
@@ -401,6 +427,10 @@ pub enum PassRefused<C> {
     /// The part still holds `left` of the descriptors a link change left
     /// in its transmit ring, this long after the link was read up over them.
     Stranded { left: usize, after_nanos: u64 },
+    /// The PCH's MAC raised [`cause::ECCER`]: its packet buffer held an error
+    /// its ECC could not correct, so a frame in it may be corrupt.
+    /// `status` is [`regs::PBECCSTS`]'s counts.
+    PacketBufferEcc { status: u32 },
 }
 
 impl<C: core::fmt::Debug> core::fmt::Display for PassRefused<C> {
@@ -412,6 +442,13 @@ impl<C: core::fmt::Debug> core::fmt::Display for PassRefused<C> {
                 "a link change left its transmit ring holding frames, and {} ms after the link \
                  returned it has not written {left} of their descriptor(s) back",
                 after_nanos / 1_000_000
+            ),
+            Self::PacketBufferEcc { status } => write!(
+                f,
+                "its packet buffer reported an uncorrectable ECC error ({} corrected and {} \
+                 uncorrected so far)",
+                status & 0xFF,
+                (status >> 8) & 0xFF
             ),
         }
     }
@@ -533,6 +570,14 @@ const MASTER_QUIESCE_DEADLINE_NANOS: u64 = 10_000_000;
 const STRANDED_DEADLINE_NANOS: u64 =
     (TX_RING as u64 - 1) * 16 * (TX_BUF_BYTES as u64 + (1 << 10) * 64) * 800;
 
+/// How long [`I219::open`] waits for the message a cause forced through `ICS`
+/// raises.
+///
+/// **A driver-chosen bound, not a datasheet one**: a message is one memory
+/// write the function makes, and a tenth of a second is far past any machine's
+/// delivery of it and still a bound on a vector that never fires.
+pub const DELIVERY_DEADLINE_NANOS: u64 = 100_000_000;
+
 /// The transmit control [`I219::open`] writes: §4.6.6's suggested values with
 /// the transmitter enabled.
 const TX_CONTROL: u32 = tctl::EN | tctl::PSP | tctl::CT | tctl::COLD_FULL_DUPLEX;
@@ -580,11 +625,11 @@ pub fn quiesce<R: Registers>(regs: &R) {
 }
 
 /// §4.6.1's reset, with every interrupt masked on both sides of it.
-fn reset<R: Registers, C: Clock>(
+fn reset<R: Registers, C: Clock, E>(
     regs: &R,
     clock: &C,
     whole: Whole,
-) -> Result<Reset, Refusal> {
+) -> Result<Reset, Refusal<E>> {
     // A window nothing decodes answers ones on every access, and a driver
     // that went on would read a MAC address of `ff:ff:ff:ff:ff:ff` out of
     // it and never say why nothing arrived.
@@ -727,27 +772,101 @@ pub enum Part {
     I219,
 }
 
-impl Part {
-    /// The cause that says a transmit descriptor was written back, as this
-    /// part raises a message for it.
-    ///
-    /// §7.2.8: "Any write backs are performed; either with the RS bit set or
-    /// when accumulated descriptors are written back [...] Transmit Descriptor
-    /// Write Back (ICR.TXDW)", and §10.2.4.1 gives the 82574 the same event a
-    /// second time as `TxQ0`, "Indicates transmit queue 0 write back" — the
-    /// name §7.4.2 maps to a vector, where "the ICR[24:20] bits reflect
-    /// specific interrupt causes" in MSI-X mode. Both are unmasked on it.
-    ///
-    /// **The PCH's MAC is never in that mode, and gets `TXDW` alone**: its
-    /// function publishes a Message Signaled Interrupt capability and no MSI-X
-    /// one (631120 §8.1, §8.1.15), so §7.4.1's fixed mapping is the only one
-    /// it has, and what its bit 22 means no Intel document publishes.
-    fn tx_done(self) -> u32 {
-        match self {
-            Self::E82574 => cause::TXDW | cause::TXQ0,
-            Self::I219 => cause::TXDW,
+/// The cause bits this claim raises a message for, by its mode and part.
+#[derive(Clone, Copy)]
+struct Causes {
+    /// What stays unmasked: §4.6.5's four, under the names the mode delivers,
+    /// and [`Self::ecc`].
+    wanted: u32,
+    /// §7.2.8's "Transmit Descriptor Write Back (ICR.TXDW)", and in MSI-X mode
+    /// §10.2.4.1's second name for it, `TxQ0`, the one §7.4.2 maps to a vector.
+    tx_done: u32,
+    /// The link change under every name the mode delivers it by: what the
+    /// self-test forces, because §10.2.4.1 defines it on both parts.
+    forced: u32,
+    /// The PCH's uncorrectable packet-buffer error, and nothing on the 82574.
+    ecc: u32,
+}
+
+impl Causes {
+    fn of(part: Part, delivery: Delivery) -> Self {
+        let ecc = match part {
+            Part::I219 => cause::ECCER,
+            Part::E82574 => 0,
+        };
+        match delivery {
+            Delivery::Msi => {
+                Self { wanted: cause::ENABLED | ecc, tx_done: cause::TXDW, forced: cause::LSC, ecc }
+            }
+            Delivery::Msix => Self {
+                wanted: cause::ENABLED | cause::ENABLED_MSIX | ecc,
+                tx_done: cause::TXDW | cause::TXQ0,
+                forced: cause::LSC | cause::OTHER,
+                ecc,
+            },
         }
     }
+}
+
+/// What the delivery self-test in [`I219::open`] found.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Delivered {
+    pub delivery: Delivery,
+    /// From the `ICS` write to the claim answering a message.
+    pub after_nanos: u64,
+    /// Messages the claim had taken by then.
+    pub messages: u32,
+    /// `ICR` after them.
+    pub causes: u32,
+}
+
+impl core::fmt::Display for Delivered {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mode = match self.delivery {
+            Delivery::Msi => "MSI",
+            Delivery::Msix => "MSI-X",
+        };
+        write!(
+            f,
+            "its {mode} message answered a forced cause in {} us ({} message(s), ICR {:#010x})",
+            self.after_nanos / 1_000,
+            self.messages,
+            self.causes
+        )
+    }
+}
+
+/// Force `causes.forced` through `ICS` and wait for the message, every other
+/// cause masked; everything is masked again before it returns.
+///
+/// `IMS` is clear on entry, so §10.2.4.1's case 1 makes each `ICR` read here a
+/// clear.
+fn prove_delivery<R: Registers, C: Clock, I: Interrupts>(
+    regs: &R,
+    clock: &C,
+    irq: &I,
+    delivery: Delivery,
+    causes: Causes,
+) -> Result<Delivered, Refusal<I::Refused>> {
+    let taken = |answer: Result<u32, I::Refused>| match answer {
+        Ok(count) => Ok(count),
+        Err(why) if why == I::IDLE => Ok(0),
+        Err(why) => Err(Refusal::Claim(why)),
+    };
+    // A message older than the forced cause would pass the test for it.
+    taken(irq.taken())?;
+    let _ = regs.read32(regs::ICR);
+    regs.write32(regs::IMS, causes.forced);
+    let forced_at = clock.nanos();
+    regs.write32(regs::ICS, causes.forced);
+    let messages = taken(irq.taken_within(DELIVERY_DEADLINE_NANOS))?;
+    let after_nanos = clock.nanos().saturating_sub(forced_at);
+    regs.write32(regs::IMC, u32::MAX);
+    let seen = regs.read32(regs::ICR);
+    if messages == 0 {
+        return Err(Refusal::Undelivered { forced: causes.forced, waited_nanos: after_nanos });
+    }
+    Ok(Delivered { delivery, after_nanos, messages, causes: seen })
 }
 
 /// What [`I219::open`] found on the way up, for the one line a caller prints
@@ -763,6 +882,8 @@ pub struct BringUp {
     pub reset: Option<wake::FullReset>,
     /// What the PHY answered, or why it was not reached.
     pub phy: Result<phy::Phy, phy::PhyRefusal>,
+    /// The message the claim was proven to deliver.
+    pub delivered: Delivered,
 }
 
 /// The function, brought up and driving.
@@ -772,6 +893,7 @@ pub struct BringUp {
 /// leaves that runs its destructors.
 pub struct I219<R: Registers, C, D, I> {
     part: Part,
+    causes: Causes,
     regs: R,
     clock: C,
     dma: D,
@@ -795,8 +917,8 @@ pub struct I219<R: Registers, C, D, I> {
     tx_next: usize,
     /// Next transmit descriptor to reclaim.
     tx_clean: usize,
-    /// Whether [`Part::tx_done`] is unmasked: a caller found the ring full
-    /// and no pass has begun since.
+    /// Whether the transmit write-back is unmasked: a caller found the ring
+    /// full and no pass has begun since.
     tx_wake: bool,
     /// The descriptors a link change left in the transmit ring that the part
     /// has not yet written back.
@@ -828,14 +950,26 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// Bring the function up in the order §4.6 fixes: reset with every
     /// interrupt masked, the station address, the multicast table, the PHY, the
     /// link, both rings, then the transmitter, then the receiver, then the
-    /// interrupt mask. On the I219 the PHY is brought within reach first and
+    /// interrupt mask. Before the multicast table its message is proven, while
+    /// a refusal still needs no drop. On the I219 the PHY is brought within reach first and
     /// the reset takes it with the MAC ([`wake`]).
     ///
     /// **The PHY is between the multicast table and `CTRL.SLU`**, because
     /// §4.6.3.2 makes `STATUS.LU` the MAC's report of a link "from the PHY
     /// qualified with CTRL.SLU": a driver that let the MAC look before the PHY
     /// was configured would read the answer to the wrong question.
-    pub fn open(part: Part, regs: R, clock: C, dma: D, irq: I) -> Result<Self, Refusal> {
+    pub fn open(
+        part: Part,
+        delivery: Delivery,
+        regs: R,
+        clock: C,
+        dma: D,
+        irq: I,
+    ) -> Result<Self, Refusal<I::Refused>> {
+        if part == Part::I219 && delivery == Delivery::Msix {
+            return Err(Refusal::MsixWithoutAllocation);
+        }
+        let causes = Causes::of(part, delivery);
         if regs.bytes() < regs::REGISTER_BYTES {
             return Err(Refusal::Window { given: regs.bytes(), needed: regs::REGISTER_BYTES });
         }
@@ -870,6 +1004,27 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             high as u8,
             (high >> 8) as u8,
         ];
+
+        // §10.2.4.7: "If any bits are set in EIAC, the ICR register should not
+        // be read" — and this driver reads it, so auto-clear stays off and
+        // every cause is acknowledged by the write-back in `begin_pass`. With
+        // `IAME` set and `IAM` all ones, a read of `ICR` with an interrupt
+        // asserted is §10.2.4.1's case 2: it clears `ICR` and masks every
+        // cause until `begin_pass` unmasks them again.
+        regs.write32(regs::EIAC, 0);
+        regs.write32(regs::IAM, u32::MAX);
+        regs.write32(regs::CTRL_EXT, regs.read32(regs::CTRL_EXT) | ctrl_ext::IAME);
+
+        // §10.2.4.9: `IVAR` allocates every cause to no vector at reset, so a
+        // part in MSI-X mode with it unprogrammed fills `ICR` and delivers
+        // nothing — which the self-test below refuses. Outside that mode
+        // §7.4.1's mapping "is not configurable", and on the PCH's MAC this
+        // offset is another register.
+        if delivery == Delivery::Msix {
+            regs.write32(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
+        }
+
+        let delivered = prove_delivery(&regs, &clock, &irq, delivery, causes)?;
 
         // What the PCH's MAC is given after its reset and before its rings:
         // [`pch`]'s header. After the last refusal that comes before `Self`
@@ -921,19 +1076,15 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             | ctrl::SLU;
         regs.write32(regs::CTRL, wanted);
 
-        // §10.2.4.7: "If any bits are set in EIAC, the ICR register should not
-        // be read" — and this driver reads it, so auto-clear stays off and
-        // every cause is acknowledged by the write-back in `begin_pass`.
-        regs.write32(regs::EIAC, 0);
-
         let mut nic = Self {
             part,
+            causes,
             regs,
             clock,
             dma,
             irq,
             mac,
-            brought_up: BringUp { master_quiet, woke, reset: full, phy },
+            brought_up: BringUp { master_quiet, woke, reset: full, phy, delivered },
             link: Link::default(),
             opened_at: 0,
             link_up_at: None,
@@ -947,15 +1098,6 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
             counters: Counters::default(),
             wire: Wire::default(),
         };
-
-        // §10.2.4.9: `IVAR` allocates every cause to no vector at reset, so a
-        // part in MSI-X mode with it unprogrammed fills `ICR` and delivers
-        // nothing. Read back, because the document defines the register only
-        // "in MSI-X mode" and says nothing about what a part outside that mode
-        // answers — so a part that does not take the write is refused here
-        // rather than driven on a guess about which interrupt it would raise.
-        nic.regs.write32(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO);
-        nic.accepted(regs::IVAR, ivar::ALL_ON_VECTOR_ZERO)?;
 
         // The throttle alone: the two receive timers hold back every frame's
         // interrupt, the first after a quiet spell too, and the throttle none
@@ -984,7 +1126,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
 
         // §4.6.5: and only now the mask, so no cause can arrive before there
         // is a ring to answer it with.
-        nic.regs.write32(regs::IMS, cause::ENABLED | cause::ENABLED_MSIX);
+        nic.regs.write32(regs::IMS, nic.causes.wanted);
 
         nic.opened_at = nic.clock.nanos();
         nic.refresh_link();
@@ -1006,7 +1148,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
 
     /// A register wrote what it was told, so a window that is not this register
     /// file is refused here instead of looking like a dead network.
-    fn accepted(&self, reg: usize, wrote: u32) -> Result<(), Refusal> {
+    fn accepted(&self, reg: usize, wrote: u32) -> Result<(), Refusal<I::Refused>> {
         let read = self.regs.read32(reg);
         if read & wrote == wrote {
             Ok(())
@@ -1138,19 +1280,25 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // again in [`Self::wake_on_room`].
         let waited = core::mem::take(&mut self.tx_wake);
         if waited {
-            self.regs.write32(regs::IMC, self.part.tx_done());
+            self.regs.write32(regs::IMC, self.causes.tx_done);
         }
 
-        // Once, and written back. §10.2.4.1's case 3 says a read with no
-        // interrupt asserted has no side effect at all, so a driver that
-        // treated the read as the acknowledgement would see the same causes
-        // for ever; and §7.4.5's "Write to Clear" is the arm that always
-        // works. `INT_ASSERTED` is left out because the same section says
-        // writing it has no effect and it clears when its causes do.
+        // Once, and written back. With an interrupt asserted the read is
+        // §10.2.4.1's case 2 — `ICR` cleared and every cause masked by `IAM`
+        // — and without one it is case 3, which "has no side affect", so a
+        // driver that treated the read as the acknowledgement would see the
+        // same masked causes for ever; §7.4.5's "Write to Clear" is the arm
+        // that always works. `INT_ASSERTED` is left out because the same
+        // section says writing it has no effect and it clears when its causes
+        // do.
         let causes = self.regs.read32(regs::ICR);
         let acknowledged = causes & !cause::INT_ASSERTED;
         if acknowledged != 0 {
             self.regs.write32(regs::ICR, acknowledged);
+        }
+        if causes & self.causes.ecc != 0 {
+            let status = self.regs.read32(regs::PBECCSTS) & regs::pbeccsts::COUNTS;
+            return Err(PassRefused::PacketBufferEcc { status });
         }
 
         if causes & cause::RXO != 0 {
@@ -1168,8 +1316,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         // other unmasked cause is there to have raised it.
         if waited
             && messages > 0
-            && causes & self.part.tx_done() != 0
-            && causes & (cause::ENABLED | cause::ENABLED_MSIX) == 0
+            && causes & self.causes.tx_done != 0
+            && causes & self.causes.wanted == 0
         {
             self.counters.tx_wake_taken = self.counters.tx_wake_taken.saturating_add(1);
         }
@@ -1198,6 +1346,9 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
                 return Err(PassRefused::Stranded { left, after_nanos: waited });
             }
         }
+        // The read masked every cause if one was asserted. Unmasked again now,
+        // a cause recorded since the read raises the next message (§10.2.4.5).
+        self.regs.write32(regs::IMS, self.causes.wanted);
         Ok(Pass { messages, causes, link_changed: self.link != before })
     }
 
@@ -1360,8 +1511,8 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
     /// back, and answer the room there is now that it has been asked.
     ///
     /// §10.2.4.5: "A particular interrupt can be enabled by writing a 1b to
-    /// the corresponding mask bit", and [`Part::tx_done`] stays unmasked until
-    /// the next [`Self::begin_pass`]. Each frame sent is a write-back and each
+    /// the corresponding mask bit", and the transmit write-back stays unmasked
+    /// until the next [`Self::begin_pass`]. Each frame sent is a write-back and each
     /// write-back the cause: `TXDCTL`'s description has "all descriptors
     /// written back" with `GRAN` set, §7.2.4.2 writes them back "only when
     /// TXDCTL.WTHRESH number of descriptors are ready", which at one is each,
@@ -1383,7 +1534,7 @@ impl<R: Registers, C: Clock, D: DmaBuffers, I: Interrupts> I219<R, C, D, I> {
         }
         self.counters.tx_full = self.counters.tx_full.saturating_add(1);
         if !self.tx_wake {
-            self.regs.write32(regs::IMS, self.part.tx_done());
+            self.regs.write32(regs::IMS, self.causes.tx_done);
             self.tx_wake = true;
             self.counters.tx_wake_armed = self.counters.tx_wake_armed.saturating_add(1);
         }

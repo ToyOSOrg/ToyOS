@@ -139,8 +139,8 @@ fn find(who: Who) -> Option<&'static Function> {
 /// Whom a record names.
 #[derive(Clone, Copy)]
 pub enum Who {
-    /// A requester id: VT-d's source-id, or the function the IORT routes an
-    /// SMMU StreamID from.
+    /// A requester id: VT-d's source-id, AMD-Vi's DeviceID, or the function
+    /// the IORT routes an SMMU StreamID from.
     Function(StreamId),
     /// An SMMU StreamID no enumerated function is routed from.
     // The SMMUv3 is AArch64's alone, so x86-64 builds a variant it never makes.
@@ -172,9 +172,7 @@ impl core::fmt::Display for Who {
 pub enum Access {
     Read,
     Write,
-    /// An SMMU event that carries no transaction.
-    // The SMMUv3 is AArch64's alone, so x86-64 builds a variant it never makes.
-    #[allow(dead_code)]
+    /// A record that carries no transaction.
     Unrecorded,
 }
 

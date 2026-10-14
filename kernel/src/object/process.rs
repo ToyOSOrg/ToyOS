@@ -15,12 +15,20 @@ use crate::process::Pid;
 use crate::watch::Watch;
 use crate::sync::Lock;
 
-use super::{KObjectVariant, ObjectCore};
+use super::{KObjectVariant, ObjectCore, Released};
 
-/// What is left of a process once it has stopped running.
+/// What is left of a process once it has stopped running, built only once
+/// its own releases have run.
 pub struct Exit {
     pub code: i32,
     pub stats: ProcessStats,
+    _released: Released,
+}
+
+impl Exit {
+    pub(crate) fn new(code: i32, stats: ProcessStats, released: Released) -> Self {
+        Self { code, stats, _released: released }
+    }
 }
 
 pub struct ProcessObject {

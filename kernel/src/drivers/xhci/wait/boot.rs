@@ -336,7 +336,7 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
 
     // An address space of this controller's own, holding one pool and nothing
     // else; attached before the first address is written to a register.
-    let space = crate::iommu::DeviceSpace::create();
+    let space = crate::iommu::DeviceSpace::create(&[*pci_dev]);
     // After the reset: a controller refused above never allocates, and
     // `DmaPool` frees the pool — and takes it back out of the domain — on every
     // refusal below when it drops.

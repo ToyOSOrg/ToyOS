@@ -18,13 +18,12 @@
 use crate::log;
 use alloc::vec::Vec;
 
+use crate::iommu::domains::{self, Domains};
 use crate::iommu::{AddressWidth, DomainId, IommuError, Iova, StreamId};
 use crate::sync::Lock;
 
-use super::table::{self, Domain};
+use super::table::{self, Space};
 use super::{TABLES, UNITS};
-
-const FIRST: u16 = table::KERNEL_DOMAIN + 1;
 
 /// What every enabled unit agreed on, which is what a domain can be built to.
 enum Agreement {
@@ -36,27 +35,22 @@ enum Agreement {
     Split,
 }
 
-struct Domains {
+struct Vtd {
     agreement: Agreement,
-    /// By id minus [`FIRST`]; never shrinks, since a released id would name a
-    /// domain some unit may still have cached.
-    live: Vec<Domain>,
-    /// What no domain's addresses may reach: the root bridges' windows and
-    /// the regions firmware reserved, as `(start, end)`.
-    reserved: Vec<(u64, u64)>,
+    domains: Domains<Space>,
 }
 
-static DOMAINS: Lock<Domains> =
-    Lock::new(Domains { agreement: Agreement::None, live: Vec::new(), reserved: Vec::new() });
+static DOMAINS: Lock<Vtd> =
+    Lock::new(Vtd { agreement: Agreement::None, domains: Domains::new(table::KERNEL_DOMAIN + 1) });
 
 /// Before any domain is made: every one is built clear of these.
 pub fn avoid(reserved: Vec<(u64, u64)>) {
-    DOMAINS.lock().reserved = reserved;
+    DOMAINS.lock().domains.avoid(reserved);
 }
 
 pub fn unit_agrees(width: AddressWidth, ceiling: u32, mgaw: u8) {
-    let mut domains = DOMAINS.lock();
-    domains.agreement = match domains.agreement {
+    let mut held = DOMAINS.lock();
+    held.agreement = match held.agreement {
         Agreement::None => Agreement::One(width, ceiling, mgaw),
         Agreement::One(seen, cap, seen_mgaw) if seen == width => {
             Agreement::One(width, cap.min(ceiling), seen_mgaw.min(mgaw))
@@ -68,113 +62,76 @@ pub fn unit_agrees(width: AddressWidth, ceiling: u32, mgaw: u8) {
 /// A new domain, with `room` bytes of it handed out first: refused, with no id
 /// spent, where the domain would have less than that.
 pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
-    let mut domains = DOMAINS.lock();
-    let (width, ceiling, mgaw) = match domains.agreement {
+    let mut held = DOMAINS.lock();
+    let (width, ceiling, mgaw) = match held.agreement {
         Agreement::None => return Err(IommuError::NoUnit),
         Agreement::Split => return Err(IommuError::WidthsDisagree),
         Agreement::One(width, ceiling, mgaw) => (width, ceiling, mgaw),
     };
-    let id = FIRST + domains.live.len() as u16;
-    if u32::from(id) >= ceiling {
-        return Err(IommuError::DomainsExhausted(ceiling));
-    }
-    let (domain, first) = Domain::new(&mut TABLES.lock(), id, width, mgaw, &domains.reserved, room)?;
-    log!(
-        "iommu: domain{id} root={:#x} aw={} mgaw={} addresses from {:#x} to {:#x}",
-        domain.root().phys(),
-        width.bits(),
-        mgaw,
-        domain.window().floor(),
-        domain.window().ceiling()
-    );
-    domains.live.push(domain);
-    Ok((DomainId::new(id), first))
+    let next = held.domains.prepare(table::translatable_bits(width, mgaw), ceiling, room)?;
+    let space = Space { root: TABLES.lock().alloc(), width };
+    let what = alloc::format!("root={:#x} aw={} mgaw={mgaw}", space.root.phys(), width.bits());
+    Ok(held.domains.add(next, space, what))
 }
 
 pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
-    if !phys.is_multiple_of(crate::mm::PAGE_2M) {
-        return Err(IommuError::Unaligned(phys));
-    }
-    let mut domains = DOMAINS.lock();
-    let domain = domains.at(id);
-    let at = domain.window_mut().reserve(bytes).ok_or(IommuError::AddressesExhausted(domain.window().ceiling()))?;
-    let (did, domain) = (domain.id(), *domain);
-    let mut units = UNITS.lock();
-    table::map(&mut TABLES.lock(), &domain, at, phys, bytes);
-    for unit in units.iter_mut() {
-        unit.invalidate_domain(did);
-    }
-    log!(
-        "iommu: domain{did} maps {:#x}..{:#x} at {:#x}",
-        phys,
-        phys + bytes.next_multiple_of(crate::mm::PAGE_2M),
-        at.raw(),
-    );
+    let mut held = DOMAINS.lock();
+    let (space, at) = held.domains.map(id, phys, bytes)?;
+    put(id, space, at, phys, bytes);
     Ok(at)
 }
 
 /// Put `bytes` at `phys` at `at`, room this domain handed out before and whose
 /// mapping was taken back: a device still aimed there reaches these pages.
-/// Room it never handed out is a kernel bug, since [`map`] may yet hand it out.
 pub fn map_at(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
-    let did = place(id, at, phys, bytes)?;
-    log!(
-        "iommu: domain{did} maps {:#x}..{:#x} at {:#x} again",
-        phys,
-        phys + bytes.next_multiple_of(crate::mm::PAGE_2M),
-        at.raw(),
-    );
+    place(id, at, phys, bytes)?;
+    domains::placed_again(id, at, phys, bytes);
     Ok(())
 }
 
 /// [`map_at`] without its record line, for a mapping a holder makes and
 /// takes back as often as it likes: a line each would let one process flood
 /// the record ring.
-pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<u16, IommuError> {
-    if !phys.is_multiple_of(crate::mm::PAGE_2M) {
-        return Err(IommuError::Unaligned(phys));
-    }
-    let mut domains = DOMAINS.lock();
-    let domain = *domains.at(id);
-    assert!(
-        domain.window().handed_out(at, bytes),
-        "iommu: domain{} never handed out {:#x}+{bytes:#x}",
-        domain.id(),
-        at.raw()
-    );
-    let mut units = UNITS.lock();
-    table::map(&mut TABLES.lock(), &domain, at, phys, bytes);
-    for unit in units.iter_mut() {
-        unit.invalidate_domain(domain.id());
-    }
-    Ok(domain.id())
-}
-
-pub fn unmap(id: DomainId, at: Iova, bytes: u64) -> Result<(), IommuError> {
-    let mut domains = DOMAINS.lock();
-    let domain = *domains.at(id);
-    let mut units = UNITS.lock();
-    table::unmap(&domain, at, bytes)?;
-    for unit in units.iter_mut() {
-        unit.invalidate_domain(domain.id());
-    }
+pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
+    let held = DOMAINS.lock();
+    let space = held.domains.place(id, at, phys, bytes)?;
+    put(id, space, at, phys, bytes);
     Ok(())
 }
 
-pub fn attach(stream: StreamId, id: DomainId) {
-    let mut domains = DOMAINS.lock();
-    let domain = *domains.at(id);
+/// Under `DOMAINS`: the leaves, then every unit's cache of the domain.
+fn put(id: DomainId, space: Space, at: Iova, phys: u64, bytes: u64) {
     let mut units = UNITS.lock();
-    for unit in units.iter_mut() {
-        unit.attach(stream, &domain);
+    let mut tables = TABLES.lock();
+    for (at, phys) in domains::leaves(at, phys, bytes) {
+        table::put(&mut tables, space, at, phys);
     }
-    crate::iommu::fault::attached(stream, domain.id());
-    log!("iommu: {stream} moves to domain{}", domain.id());
+    for unit in units.iter_mut() {
+        unit.invalidate_domain(id.raw());
+    }
 }
 
-impl Domains {
-    /// A `DomainId` only [`create`] mints, so the index is always in range.
-    fn at(&mut self, id: DomainId) -> &mut Domain {
-        &mut self.live[usize::from(id.raw() - FIRST)]
+/// Take `bytes` at `at` back; whatever was cleared before a refusal is gone
+/// from every unit too.
+pub fn unmap(id: DomainId, at: Iova, bytes: u64) -> Result<(), IommuError> {
+    let held = DOMAINS.lock();
+    let space = held.domains.space(id);
+    let mut units = UNITS.lock();
+    let result = domains::leaves(at, 0, bytes)
+        .try_for_each(|(here, _)| if table::take(space, here) { Ok(()) } else { Err(IommuError::NotMapped(Iova::translated(here))) });
+    for unit in units.iter_mut() {
+        unit.invalidate_domain(id.raw());
     }
+    result
+}
+
+pub fn attach(stream: StreamId, id: DomainId) {
+    let held = DOMAINS.lock();
+    let space = held.domains.space(id);
+    let mut units = UNITS.lock();
+    for unit in units.iter_mut() {
+        unit.attach(stream, id.raw(), space);
+    }
+    crate::iommu::fault::attached(stream, id.raw());
+    log!("iommu: {stream} moves to domain{}", id.raw());
 }

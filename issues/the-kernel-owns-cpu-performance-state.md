@@ -18,7 +18,7 @@ or read at boot by the declaration's own check before a read can reach it.
 
 Declared and read back: the HWP request, its package's and the energy/
 performance bias, on every CPU that has all of them
-(`toyos_cpuvuln::hwp`). Still to build:
+(`kernel::cpu::hwp`). Still to build:
 
 - **RAPL**: PL1, PL2 and their windows through `MSR_PKG_POWER_LIMIT` and the
   MMIO mirror in the host bridge's MCHBAR, at the bar's values; a limit

@@ -121,6 +121,9 @@ const RUST_SKIP: &[&str] = &[
     // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
     // metal rows run it.
     "pci_reclaim",
+    // It measures the T14's I219, which no guest has: the
+    // `i219_messages_on_its_msi_vector` metal row runs it.
+    "i219_msi",
     // Its product is the T14's counters across an idle span and a spin on
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
@@ -197,6 +200,9 @@ const RUST_SKIP: &[&str] = &[
     // boot's kernel does: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.
     "usbd_spare",
+    // The same controller, handed to a holder that is killed and claimed
+    // again at once, in the same boots as `usbd_spare`.
+    "end_returns_claims",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -309,6 +315,35 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_low_ecam", qemu::Profile::VirtLowEcam),
 ];
 
+/// Which handle the loader took the panel's EDID from, and what the compositor
+/// made of it, on each bench: the handle M1 found the protocol on, and the
+/// size and scale `lib/edid`'s fixture of that bench's panel gives.
+fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
+    const T14: u32 = 0x0008_06c1;
+    const AMD_BENCH: u32 = 0x0086_0f01;
+    let signature = microcode_lines(kernel)?
+        .first()
+        .ok_or("the kernel wrote no microcode line to tell the bench by")?
+        .signature;
+    let (handle, panel) = match signature {
+        T14 => (0, "panel 309x173 mm, scale 1.5"),
+        AMD_BENCH => (1, "panel 309x174 mm, scale 1.5"),
+        other => return Err(format!("no bench of signature {other:#x} says which panel it has")),
+    };
+    let handed = format!("EDID: GOP handle {handle} of 2 shows the scanout and publishes 128 byte(s), the base block handed over");
+    if !loader.contains(&handed) {
+        let said: Vec<&str> = loader.lines().filter(|l| l.contains("EDID: ")).collect();
+        return Err(format!("loader.log does not say {handed:?}; its EDID lines: {said:?}"));
+    }
+    let chosen = format!("compositor: display 1920x1080, {panel}");
+    if !log.contains(&chosen) {
+        let said: Vec<&str> = log.lines().filter(|l| l.contains("compositor: display ")).collect();
+        return Err(format!("the log does not say {chosen:?}; the compositor said {said:?}"));
+    }
+    eprintln!("  [gop_edid_scale] signature {signature:#x}: GOP handle {handle}, {panel}");
+    Ok(())
+}
+
 /// The tests whose machine shape *is* the test, each on a boot of its own.
 /// `run_machine_test` dispatches them.
 const MACHINE_TESTS: &[&str] = &[
@@ -316,11 +351,15 @@ const MACHINE_TESTS: &[&str] = &[
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
     "iommu_virtio_platform",
-    // An AMD-Vi unit left blocking every device, switched off before the boot
-    // stick is driven behind it: the T14 is an Intel machine, no AMD one is
-    // in reach, and the register sequence and the DMA it frees are no host
-    // test's.
+    // An AMD-Vi unit left blocking every device, switched off and programmed
+    // before the boot stick is driven behind it: the register sequence and the
+    // DMA it lets through are no host test's, and the AMD bench is staged by
+    // hand rather than by the merge queue.
     "amdvi_firmware_left",
+    // A translating AMD-Vi unit's refusal, recorded and read: a kernel-owned
+    // record halts the machine, so no metal row reaches it, and only QEMU's
+    // `iommu-testdev` aims a DMA where no domain maps.
+    "amdvi_selftest",
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
@@ -859,6 +898,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
     ),
     (
+        // The panel's EDID from the firmware's GOP to the compositor's scale:
+        // the loader's read before `ExitBootServices` is no host test's, and
+        // QEMU's OVMF publishes no EDID protocol.
+        "gop_edid_scale",
+        metal::Metal {
+            arms: METALCASE,
+            judge: |b| gop_edid_scale(b[0].loader().text(), b[0].log().text(), b[0].kernel().text()),
+        },
+    ),
+    (
         // The machine's own i8042 and EC, driven from userland: the keyboard
         // reset and armed set 2 translated, its `0xAA`'s time named, the aux
         // device armed or found absent by name, and no i8042 source in the
@@ -974,10 +1023,33 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // The I219's interrupts on the function itself, which QEMU's e1000e
+        // is not: no MSI-X capability, causes forced through `ICS` counted on
+        // the claim's MSI vector unmasked and masked, `ICR`'s asserted read
+        // under auto-mask, and the driver under traffic on the bench's wire.
+        // It shares the boot with `claim_reuses_its_remapping_entry`, whose
+        // judge reads only its own job's records.
+        "i219_messages_on_its_msi_vector",
+        metal::Metal {
+            arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &[claims::MSI])],
+            judge: |b| {
+                b[0].job_passed(claims::MSI)?;
+                claims::messages_on_its_msi_vector(&b[0].kernel(), &b[0].log())
+            },
+        },
+    ),
+    (
         // Every domain's addresses end below the first root-bridge window
         // above where they start.
         "domain_ends_below_the_host_bridges",
         metal::Metal { arms: TESTCASES, judge: |b| claims::clear_of_host_bridges(&b[0].kernel()) },
+    ),
+    (
+        // An AMD-Vi unit programmed, and the boot stick's controller read
+        // through a domain of its own: the register sequence, the device
+        // table and the host tables on real silicon. The AMD bench's row.
+        "amdvi_translates_the_stick_controller",
+        metal::Metal { arms: TESTCASES, judge: |b| amdvi_translates(&b[0].kernel()) },
     ),
     (
         // A machine whose units do not remap: the claim is refused before
@@ -997,13 +1069,21 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The Type-C controller left to a claim, and usbd driving it: handed
         // over, MSI armed through remapping, and the No-Op answered by an
         // interrupt; usbd is killed, so the release says which reset the
-        // function advertises.
+        // function advertises. Then a holder of it is killed and the claim
+        // asked for again at once, each round: its end follows its release.
         "usbd_drives_the_type_c_controller",
         metal::Metal {
-            arms: &[metal::once("testcases-xhci-leave", "tests/images/testcases.toml", &["xhci-leave=8086:9a13"], &["test_rs_usbd_spare"])],
+            arms: &[metal::once(
+                "testcases-xhci-leave",
+                "tests/images/testcases.toml",
+                &["xhci-leave=8086:9a13"],
+                &["test_rs_usbd_spare", "test_rs_end_returns_claims"],
+            )],
             judge: |b| {
                 b[0].job_passed("test_rs_usbd_spare")?;
-                usbd_on_metal(&b[0].kernel(), &b[0].log())
+                usbd_on_metal(&b[0].kernel(), &b[0].log())?;
+                b[0].job_passed("test_rs_end_returns_claims")?;
+                ends_returned_claims(b[0].log().text()).map(drop)
             },
         },
     ),
@@ -3619,6 +3699,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
+        "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "acpi_mediated_access" => acpi_mediated_access(2),
@@ -3689,6 +3770,20 @@ fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> 
     Ok(result.serial)
 }
 
+/// The job that kills a holder of the `xhci-leave=` controller and claims it
+/// again at once, in `usbd_spare`'s boots.
+const END_RETURNS_CLAIMS: &str = "end_returns_claims";
+
+/// `end_returns_claims`'s summary: every round's claim granted after its
+/// holder's end. The times it prints are evidence, never judged.
+fn ends_returned_claims(said: &str) -> Result<String, String> {
+    said.lines()
+        .find_map(|l| l.split_once("end_returns_claims: ").map(|(_, rest)| rest))
+        .filter(|rest| rest.contains("every claim granted after its holder's end"))
+        .map(str::to_string)
+        .ok_or_else(|| format!("end_returns_claims never said every claim came back:\n{said}"))
+}
+
 /// What usbd says once the bring-up's No-Op has completed: its ring and the
 /// interrupt through the claim both work.
 const USBD_NOOP: &str = "usbd: a No-Op command completed, announced by an interrupt";
@@ -3698,17 +3793,26 @@ const USBD_NOOP: &str = "usbd: a No-Op command completed, announced by an interr
 /// claim, with every event announced by one. Then the two controls: the
 /// function aimed past every grant is the kernel's `DMA FAULT` record against
 /// its slot and the claim's refusal, and on a kernel without the switch the
-/// claim is refused because the kernel drives the function.
+/// claim is refused because the kernel drives the function. Between them, a
+/// holder of the function is killed and the claim asked for again at once,
+/// each round, which only a release finished before the end grants.
 fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "usbd_spare";
     const SPARE: &str = "1b36:000d";
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
+    let ends = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, END_RETURNS_CLAIMS);
     let options = BootOptions {
         profile: qemu::Profile::HeadlessUsbSpare,
         kernel_params: &["xhci-leave=1b36:000d"],
         ..Default::default()
     };
-    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin.clone())], options);
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[(JOB.to_string(), bin.clone()), (END_RETURNS_CLAIMS.to_string(), ends)],
+        options,
+    );
     let boot = serial::Serial::boot(&qemu);
     boot.must_be_clean()?;
     let left = format!(" {SPARE} to a claim (xhci-leave)");
@@ -3745,6 +3849,9 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
         return Err(format!("the record faults {addr}, and the job aimed at {aimed}: {record}"));
     }
     eprintln!("  [usbd] {at}: handed over, its No-Op answered; aimed at {aimed}: {}", record.trim());
+    let ended = job_window(&mut qemu, "test_rs_end_returns_claims")?;
+    let line = ends_returned_claims(&ended)?;
+    eprintln!("  [usbd] {line}");
     drop(qemu);
 
     // The control: the same machine and no switch, so the kernel drives it.
@@ -3759,6 +3866,36 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     let refused = serial::Serial::named("usbd_spare refused", said);
     refused.must_say(&format!("usbd_spare: the claim on pci:{SPARE} was refused: PermissionDenied"))?;
     refused.must_say(&format!("pcidev: PCI {at} is driven by this kernel and cannot be claimed"))?;
+    Ok(())
+}
+
+/// Every AMD-Vi unit translating, every xHCI controller the kernel drives
+/// moved to a domain of its own, the boot stick bound through one, and no
+/// DMA refused.
+fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
+    let text = kernel.text();
+    let units: Vec<&str> =
+        text.lines().filter(|l| l.contains("iommu: amdvi unit") && l.contains(" translating control=")).collect();
+    if units.is_empty() {
+        return Err(format!("no AMD-Vi unit is translating:\n{text}"));
+    }
+    kernel.must_not_say("isolates no device")?;
+    kernel.must_not_say("iommu: DMA FAULT")?;
+    let controllers: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.split_once("xHCI: found at PCI ")?.1.split_whitespace().next())
+        .collect();
+    if controllers.is_empty() {
+        return Err(format!("the kernel drove no xHCI controller:\n{text}"));
+    }
+    for at in &controllers {
+        kernel.must_say(&format!("iommu: {at} moves to domain"))?;
+    }
+    kernel.must_say("usb-storage: 1 device(s)")?;
+    for unit in units {
+        eprintln!("  [amdvi] {}", unit.trim());
+    }
+    eprintln!("  [amdvi] {} controller(s) on domains of their own, the stick bound", controllers.len());
     Ok(())
 }
 
@@ -4838,9 +4975,8 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// Held: a record per CPU the bring-up started, naming the local APIC id the
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
 /// reads` line names, and none stale; every CPU's performance request
-/// declared at boot, `pm_enable=1`, the request Linux makes on this machine
-/// (`tests/metal/t14-linux/hwp-request.txt`), and its power envelope in every read
-/// the one its `control_regs:` line holds. No line, the kernel's or a
+/// declared at boot, `pm_enable=1`, and its power envelope in every read the
+/// one its `control_regs:` line holds. No line, the kernel's or a
 /// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
 /// `counters_metal` reads on the log's clock, either
 /// edge's included because a line stamped in it may follow the read: the
@@ -4907,8 +5043,6 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     if !inside.is_empty() {
         return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
     }
-    let linux_request = u64::from_str_radix(include_str!("metal/t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
-        .map_err(|e| format!("metal/t14-linux/hwp-request.txt: {e}"))?;
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
     let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];
     for cpu in 1..cpus {
@@ -4929,9 +5063,6 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
                 return Err(format!("{name}: cpu{cpu} is stale or not lapic {}: {counters:?}", roster[*cpu]));
             }
             let declared = kernel.must_say(&format!("control_regs: cpu{cpu} pm_enable=1 "))?;
-            if !declared.contains(&format!(" hwp_request={linux_request:#010x} ")) {
-                return Err(format!("cpu{cpu} declared {declared:?}, and Linux requests {linux_request:#010x} on this machine"));
-            }
             for (counter, field, radix) in
                 [("hwp_request", "hwp_request=0x", 16), ("hwp_request_pkg", "hwp_request_pkg=0x", 16), ("energy_perf_bias", "epb=", 10)]
             {

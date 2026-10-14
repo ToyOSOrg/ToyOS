@@ -17,9 +17,16 @@ use crate::*;
 
 type Driver = I219<crate::stub::Bar, crate::stub::Ticker, crate::stub::Grant, crate::stub::Line>;
 
+/// The mode the claim was armed in, read off the modelled configuration space
+/// the way netstack reads the claim's.
+fn delivery(nic: &Nic) -> Delivery {
+    Delivery::of(|at| Ok::<_, ()>(nic.config(at)))
+        .unwrap_or_else(|why| panic!("{}", nic.because(&format!("no delivery: {why}"))))
+}
+
 fn open(nic: &Nic) -> Driver {
     let (bar, clock, grant, line) = nic.parts();
-    I219::open(nic.part(), bar, clock, grant, line)
+    I219::open(nic.part(), delivery(nic), bar, clock, grant, line)
         .unwrap_or_else(|why| panic!("{}", nic.because(&format!("open refused it: {why}"))))
 }
 
@@ -142,7 +149,7 @@ fn a_part_with_no_station_address_is_refused() {
     nic.without_nvm();
     let (bar, clock, grant, line) = nic.parts();
     assert_eq!(
-        I219::open(nic.part(), bar, clock, grant, line).err(),
+        I219::open(nic.part(), delivery(&nic), bar, clock, grant, line).err(),
         Some(Refusal::NoStationAddress)
     );
 }
@@ -220,10 +227,14 @@ fn a_window_or_grant_too_small_is_refused() {
         fn taken(&self) -> Result<u32, ()> {
             Err(())
         }
+        fn taken_within(&self, _: u64) -> Result<u32, ()> {
+            Err(())
+        }
     }
 
     let narrow = I219::open(
         Part::E82574,
+        Delivery::Msix,
         Narrow(regs::REGISTER_BYTES - 4),
         NoClock,
         Small(GRANT_BYTES as usize),
@@ -239,7 +250,7 @@ fn a_window_or_grant_too_small_is_refused() {
 
     let nic = Nic::new(3);
     let (bar, clock, _, line) = nic.parts();
-    let short = I219::open(nic.part(), bar, clock, Small(GRANT_BYTES as usize - 1), line);
+    let short = I219::open(nic.part(), delivery(&nic), bar, clock, Small(GRANT_BYTES as usize - 1), line);
     assert_eq!(
         short.err(),
         Some(Refusal::Grant {
@@ -291,11 +302,14 @@ fn a_window_that_reads_ones_is_refused() {
         fn taken(&self) -> Result<u32, ()> {
             Err(())
         }
+        fn taken_within(&self, _: u64) -> Result<u32, ()> {
+            Err(())
+        }
     }
     let nic = Nic::new(4);
     let (_, _, grant, _) = nic.parts();
     assert_eq!(
-        I219::open(Part::E82574, Dead, NoClock, grant, NoIrq).err(),
+        I219::open(Part::E82574, Delivery::Msix, Dead, NoClock, grant, NoIrq).err(),
         Some(Refusal::Dead)
     );
 }
@@ -817,7 +831,7 @@ fn the_transmit_cause_is_armed_only_when_asked() {
         let permits = Permits { spurious_interrupts: false, ..Permits::default() };
         let (nic, mut driver) = held_with_a_link(24, part, permits);
         let unasked = nic.peek(regs::IMS);
-        assert_eq!(unasked & (cause::TXDW | cause::TXQ0), 0);
+        assert_eq!(unasked & tx_done, 0);
 
         // Not asked: the ring fills and empties, and nothing is said about it.
         fill(&nic, &mut driver, 1);
@@ -1149,23 +1163,173 @@ fn a_part_is_told_which_vector_each_cause_uses() {
     assert_eq!(drain(&nic, &mut driver).len(), 1);
 }
 
-/// §10.2.4.9 defines `IVAR` only "in MSI-X mode" and says nothing about what a
-/// part outside that mode answers, so a part that does not take the write is
-/// refused by name — this driver does not guess which interrupt such a part
-/// would raise instead.
+/// An allocation the 82574 did not take routes nothing to the vector, and the
+/// self-test refuses the function by name rather than reading back a word
+/// that proves nothing about routing.
 #[test]
-fn a_part_that_does_not_take_ivar_is_refused() {
+fn an_allocation_that_routes_nothing_is_refused_as_undelivered() {
     let nic = Nic::new(17);
     nic.refuses_writes_to(regs::IVAR);
     let (bar, clock, grant, line) = nic.parts();
+    match I219::open(nic.part(), delivery(&nic), bar, clock, grant, line).err() {
+        Some(Refusal::Undelivered { forced, .. }) => assert_eq!(forced, cause::LSC | cause::OTHER),
+        other => panic!("{}", nic.because(&format!("an unrouted vector was answered {other:?}"))),
+    }
+}
+
+// --- interrupt delivery ---
+
+/// §7.4.1: outside MSI-X mode the mapping "is not configurable" — so `IVAR`
+/// is not written, the four causes §4.6.5 names are unmasked under their own
+/// bits and no second name beside them, and a frame raises the message. Read
+/// off the capability list and not the part: the 82574 armed with MSI is
+/// driven exactly as the PCH's MAC is, less the PCH's own packet-buffer error.
+#[test]
+fn outside_msix_mode_causes_are_their_fixed_bits() {
+    for (part, wanted) in [
+        (Part::E82574, cause::ENABLED),
+        (Part::I219, cause::ENABLED | cause::ECCER),
+    ] {
+        let permits = Permits { spurious_interrupts: false, ..Permits::default() };
+        let nic = Nic::armed(70, part, Delivery::Msi, permits);
+        let mut driver = open(&nic);
+        assert!(!nic.written().contains(&regs::IVAR), "{}", nic.because("IVAR was written outside MSI-X mode"));
+        assert_eq!(nic.peek(regs::IMS), wanted, "{}", nic.because("the unmasked set is not the fixed causes"));
+        assert_eq!(driver.brought_up().delivered.delivery, Delivery::Msi);
+
+        link_up(&nic, &mut driver);
+        nic.deliver(&frame(0x70, 300));
+        nic.run();
+        let pass = one_pass(&mut driver);
+        assert!(pass.messages > 0 && pass.causes & cause::RXT0 != 0, "{}", nic.because("a frame raised no message"));
+        assert_eq!(pass.causes & (cause::RXQ0 | cause::OTHER), 0);
+        assert_eq!(drain(&nic, &mut driver).len(), 1);
+    }
+}
+
+/// The claim's mode is the kernel's: a PCH part armed with MSI-X is a claim
+/// this driver has no allocation for, and is refused before a register is
+/// touched — `0x000E4` above all.
+#[test]
+fn a_pch_part_armed_with_msix_is_refused_untouched() {
+    let nic = Nic::armed(71, Part::I219, Delivery::Msix, Permits::default());
+    let (bar, clock, grant, line) = nic.parts();
     assert_eq!(
-        I219::open(nic.part(), bar, clock, grant, line).err(),
-        Some(Refusal::NotAccepted {
-            reg: regs::IVAR,
-            wrote: ivar::ALL_ON_VECTOR_ZERO,
-            read: 0
-        })
+        I219::open(Part::I219, Delivery::Msix, bar, clock, grant, line).err(),
+        Some(Refusal::MsixWithoutAllocation)
     );
+    assert!(nic.written().is_empty(), "{}", nic.because("a refused claim had registers written"));
+}
+
+/// The self-test forces the link change through `ICS` with it alone unmasked
+/// and is answered by the message, in either mode; everything is masked again
+/// before the rings, and what it found is the bring-up's to report.
+#[test]
+fn the_message_is_proven_before_the_function_is_driven() {
+    for nic in [Nic::new(72), Nic::i219(73)] {
+        let driver = open(&nic);
+        let delivered = driver.brought_up().delivered;
+        assert!(delivered.messages >= 1, "{}", nic.because("no message was counted"));
+        assert!(delivered.after_nanos < DELIVERY_DEADLINE_NANOS);
+        assert_eq!(delivered.causes & cause::LSC, cause::LSC, "{}", nic.because("ICR did not hold the forced cause"));
+        assert!(nic.written().contains(&regs::ICS));
+    }
+}
+
+/// A vector that never fires is refused once the deadline has passed, by
+/// name, before the PCH's firmware is told a driver holds the function — and
+/// nothing is left unmasked for a legacy interrupt to carry.
+#[test]
+fn a_vector_that_never_fires_is_refused_at_the_deadline() {
+    for nic in [Nic::new(74), Nic::i219(75)] {
+        nic.vector_never_fires();
+        let (bar, clock, grant, line) = nic.parts();
+        match I219::open(nic.part(), delivery(&nic), bar, clock, grant, line).err() {
+            Some(Refusal::Undelivered { waited_nanos, .. }) => assert!(
+                waited_nanos >= DELIVERY_DEADLINE_NANOS,
+                "{}",
+                nic.because("the wait gave up early")
+            ),
+            other => panic!("{}", nic.because(&format!("a dead vector was answered {other:?}"))),
+        }
+        assert_eq!(nic.peek(regs::IMS), 0, "{}", nic.because("a cause was left unmasked"));
+        let word = nic.peek(regs::CTRL_EXT) & regs::ctrl_ext::DRIVER_HOLDS_THE_FUNCTION;
+        assert_eq!(word, 0, "{}", nic.because("the firmware was told a driver holds it"));
+    }
+}
+
+/// A message the claim already held is not the forced cause's: it is taken
+/// first, so it cannot pass the test for a vector that never fires.
+#[test]
+fn a_message_from_before_the_test_does_not_pass_it() {
+    let nic = Nic::i219(76);
+    nic.spurious();
+    nic.vector_never_fires();
+    let (bar, clock, grant, line) = nic.parts();
+    assert!(matches!(
+        I219::open(nic.part(), delivery(&nic), bar, clock, grant, line),
+        Err(Refusal::Undelivered { .. })
+    ));
+}
+
+#[test]
+fn a_claim_that_refuses_during_the_test_is_handed_up() {
+    let nic = Nic::i219(77);
+    nic.claim_taken_away();
+    let (bar, clock, grant, line) = nic.parts();
+    assert_eq!(
+        I219::open(nic.part(), delivery(&nic), bar, clock, grant, line).err(),
+        Some(Refusal::Claim(Unanswered::Gone))
+    );
+}
+
+/// A cause landing between a pass's read of `ICR` and its acknowledgement
+/// raises a message at the pass's unmask, whichever way the model takes the
+/// two latitudes around it: what an asserted read without auto-mask does,
+/// which §10.2.4.1 does not define, and whether a cause landing while one is
+/// asserted is a message of its own.
+#[test]
+fn a_cause_after_the_read_is_a_message_at_the_unmask() {
+    for (part, _) in PARTS {
+        for (keeps, one_per) in [(true, true), (true, false), (false, true), (false, false)] {
+            let permits = Permits {
+                spurious_interrupts: false,
+                asserted_read_without_auto_mask_keeps_icr: keeps,
+                one_message_per_assertion: one_per,
+                ..Permits::default()
+            };
+            let nic = Nic::with(78, part, permits);
+            let arm = |what: &str| nic.because(&format!("{what}, with keeps={keeps} one_per={one_per}"));
+            let mut driver = open(&nic);
+            link_up(&nic, &mut driver);
+
+            nic.deliver(&frame(0x78, 200));
+            nic.run();
+            assert!(nic.pending() > 0, "{}", arm("the frame raised no message"));
+            nic.cause_after_next_icr_read(cause::LSC);
+            let pass = one_pass(&mut driver);
+            assert_eq!(pass.causes & cause::LSC, 0);
+            assert_eq!(drain(&nic, &mut driver).len(), 1);
+            assert!(nic.pending() > 0, "{}", arm("the cause after the read raised no message"));
+            let next = one_pass(&mut driver);
+            assert_ne!(next.causes & cause::LSC, 0, "{}", arm("the next pass did not see it"));
+            assert_eq!(nic.peek(regs::IMS) & cause::ENABLED, cause::ENABLED, "{}", arm("a pass left a cause masked"));
+        }
+    }
+}
+
+/// Bit 22 of the PCH's `ICR` is its packet buffer's uncorrectable ECC error,
+/// not a transmit cause: it is unmasked, raises a message, and the pass that
+/// reads it is refused with `PBECCSTS`'s counts — a frame from that buffer
+/// may be corrupt.
+#[test]
+fn an_uncorrectable_packet_buffer_error_refuses_the_pass() {
+    let nic = Nic::i219(79);
+    let mut driver = open(&nic);
+    link_up(&nic, &mut driver);
+    nic.packet_buffer_error();
+    assert!(nic.pending() > 0, "{}", nic.because("the error raised no message"));
+    assert_eq!(driver.begin_pass(), Err(PassRefused::PacketBufferEcc { status: 0x100 }));
 }
 
 /// The receiver is the last register §4.6.5.1 has a driver write, and a window
@@ -1176,7 +1340,7 @@ fn a_part_that_does_not_take_rctl_is_refused() {
     nic.refuses_writes_to(regs::RCTL);
     let (bar, clock, grant, line) = nic.parts();
     assert_eq!(
-        I219::open(nic.part(), bar, clock, grant, line).err(),
+        I219::open(nic.part(), delivery(&nic), bar, clock, grant, line).err(),
         Some(Refusal::NotAccepted {
             reg: regs::RCTL,
             wrote: rctl::EN | rctl::BAM | rctl::SECRC | rctl::BSIZE_2048,
@@ -1194,7 +1358,7 @@ fn a_reset_that_never_finishes_is_refused() {
     nic.reset_never_clears();
     let (bar, clock, grant, line) = nic.parts();
     let Some(Refusal::ResetUnfinished { after_nanos }) =
-        I219::open(nic.part(), bar, clock, grant, line).err()
+        I219::open(nic.part(), delivery(&nic), bar, clock, grant, line).err()
     else {
         panic!("{}", nic.because("a reset that never cleared was not refused"));
     };
@@ -2521,7 +2685,7 @@ fn a_mac_that_keeps_its_phy_down_is_a_phy_no_cycle_reaches() {
     let nic = Nic::i219(121);
     nic.refuses_writes_to(regs::CTRL);
     let (bar, clock, grant, line) = nic.parts();
-    let driver = I219::open(nic.part(), bar, clock, grant, line).expect("the function opens");
+    let driver = I219::open(nic.part(), delivery(&nic), bar, clock, grant, line).expect("the function opens");
     let why = driver.brought_up().phy.expect_err("a PHY held down is not brought up");
     assert!(
         matches!(why, PhyRefusal::MdiUnready { .. }),
@@ -2543,7 +2707,7 @@ fn an_interconnect_in_transition_is_waited_out_and_never_written_over() {
     let nic = Nic::i219(123);
     nic.interconnect_never_leaves_its_transition();
     let (bar, clock, grant, line) = nic.parts();
-    let driver = I219::open(nic.part(), bar, clock, grant, line).expect("the function opens");
+    let driver = I219::open(nic.part(), delivery(&nic), bar, clock, grant, line).expect("the function opens");
     let why = driver.brought_up().phy.expect_err("no transaction may be issued");
     assert!(
         matches!(why, PhyRefusal::MdiWaiting { .. }),
@@ -2931,12 +3095,12 @@ fn what_the_wake_and_the_full_reset_write() {
 
 // --- the PCH's own bits, host wake-up and the counts ---
 
-/// The PCH's MAC is given `pch`'s three registers before its rings, every
-/// other bit of each carried, and the 82574 — whose datasheet this driver is
-/// otherwise written from — is given none of them.
+/// The PCH's MAC is given `pch`'s registers before its rings, every other bit
+/// of each carried, and the 82574 — whose datasheet this driver is otherwise
+/// written from — is given none of them.
 #[test]
-fn the_pchs_mac_gets_its_three_registers_and_the_82574_none() {
-    use regs::{ctrl_ext, pcie_control, txdctl, wake_up};
+fn the_pchs_mac_gets_its_registers_and_the_82574_none() {
+    use regs::{ctrl_ext, pbeccsts, pcie_control, txdctl, wake_up};
     let nic = Nic::i219(130);
     let _driver = open(&nic);
     let has = |reg, bits: u32| nic.peek(reg) & bits == bits;
@@ -2949,6 +3113,8 @@ fn the_pchs_mac_gets_its_three_registers_and_the_82574_none() {
     assert_eq!(nic.peek(regs::WAKE_UP) & wake_up::APM_WAKE, 0);
     assert_eq!(nic.peek(regs::PCIE_CONTROL) & pcie_control::NO_SNOOP, 0);
     assert_eq!(nic.peek(regs::TXDCTL), txdctl::SUGGESTED, "{}", nic.because("§4.6.6's policy"));
+    assert!(has(regs::PBECCSTS, pbeccsts::ECC_ENABLE), "{}", nic.because("the buffer's ECC is off"));
+    assert!(has(regs::CTRL, ctrl::MEMORY_ERROR_HANDLING), "{}", nic.because("memory error handling is off"));
     for reg in [regs::WAKE_UP, regs::PCIE_CONTROL] {
         assert!(nic.written().contains(&reg), "{}", nic.because(&format!("{reg:#x} unwritten")));
     }
@@ -2956,7 +3122,10 @@ fn the_pchs_mac_gets_its_three_registers_and_the_82574_none() {
     let nic = Nic::new(131);
     let _driver = open(&nic);
     assert_eq!(nic.peek(regs::TXDCTL), txdctl::SUGGESTED);
-    for reg in [regs::CTRL_EXT, regs::WAKE_UP, regs::PCIE_CONTROL] {
+    let pch_only = ctrl_ext::STRICT_WRITE_ORDER | ctrl_ext::DRIVER_HOLDS_THE_FUNCTION;
+    assert_eq!(nic.peek(regs::CTRL_EXT) & pch_only, 0, "{}", nic.because("the 82574 had the PCH's CTRL_EXT bits"));
+    assert_eq!(nic.peek(regs::CTRL) & ctrl::MEMORY_ERROR_HANDLING, 0);
+    for reg in [regs::WAKE_UP, regs::PCIE_CONTROL, regs::PBECCSTS] {
         assert!(
             !nic.written().contains(&reg),
             "{}",
@@ -2986,21 +3155,23 @@ fn the_word_to_the_firmware_goes_with_the_driver() {
     let nic = Nic::i219(141);
     nic.refuses_writes_to(regs::RCTL);
     let (bar, clock, grant, line) = nic.parts();
-    let refused = I219::open(nic.part(), bar, clock, grant, line);
+    let refused = I219::open(nic.part(), delivery(&nic), bar, clock, grant, line);
     assert!(matches!(refused, Err(Refusal::NotAccepted { reg: regs::RCTL, .. })));
     assert!(!holds(&nic), "{}", nic.because("a refused open left the word standing"));
 
     let nic = Nic::i219(142);
     nic.without_nvm();
     let (bar, clock, grant, line) = nic.parts();
-    let refused = I219::open(nic.part(), bar, clock, grant, line);
+    let refused = I219::open(nic.part(), delivery(&nic), bar, clock, grant, line);
     assert!(matches!(refused, Err(Refusal::NoStationAddress)));
     assert!(!holds(&nic), "{}", nic.because("an open refused before prepare gave the word"));
 
     let nic = Nic::new(143);
-    drop(open(&nic));
+    let driver = open(&nic);
+    let opened = nic.trace().len();
+    drop(driver);
     assert!(
-        !nic.written().contains(&regs::CTRL_EXT),
+        !nic.trace()[opened..].contains(&Access::Write { reg: regs::CTRL_EXT }),
         "{}",
         nic.because("the 82574 had the PCH's CTRL_EXT written on the way out")
     );

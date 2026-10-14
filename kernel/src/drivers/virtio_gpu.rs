@@ -452,6 +452,8 @@ impl GpuController {
             stride: self.width,
             pixel_format: 1, // BGR (B8G8R8X8_UNORM)
             flags: FLAG_HARDWARE_CURSOR,
+            edid: [0; toyos_abi::boot::EDID_BLOCK],
+            edid_len: 0,
         }
     }
 }
@@ -534,7 +536,7 @@ fn fb_size_bytes(width: u32, height: u32) -> Option<u32> {
 pub fn init(devices: &[PciDevice]) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     let pci_dev = *devices.iter().find(|d| d.is_id(VIRTIO_VENDOR, VIRTIO_GPU_DEVICE))?;
     log!("VirtIO GPU: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
-    let space = DeviceSpace::create();
+    let space = DeviceSpace::create(&[pci_dev]);
     // Leaked rather than held in a `static`: the display is never unbound.
     let dma = DmaPool::alloc_in(DMA_SIZE, space).leak();
     // Before the device is told any address, and after the command pool's mapping.
