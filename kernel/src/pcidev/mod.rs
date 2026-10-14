@@ -1145,8 +1145,11 @@ fn place_bars(
         // as unassigned, and it is the window that moved, not a BAR that is
         // not there.
         // A BAR firmware assigned no address is placed only behind a bridge,
-        // whose windows say where it routes ([`place_unassigned`]).
-        let unassigned = matches!(pci.memory_bar(index), Err(bar::Unusable::Unassigned)) && behind_a_bridge(pci);
+        // whose windows say where it routes ([`place_unassigned`]); a register
+        // that sizes to nothing is no BAR at all.
+        let unassigned = matches!(pci.memory_bar(index), Err(bar::Unusable::Unassigned))
+            && behind_a_bridge(pci)
+            && pci.bar_size(index) != Err(bar::BadSize::Unimplemented);
         if pci.memory_bar(index).is_err() && !unassigned && !was_cut(pci, index) {
             index += step;
             continue;
