@@ -126,7 +126,8 @@ struct End {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Slot {
     Free,
-    /// Taken by a connect or an accept that has not answered.
+    /// Reserved: by a connect or an accept that has not answered, or by an end
+    /// [`free`] is letting go of.
     Making,
     Live(End),
 }

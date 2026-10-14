@@ -732,9 +732,10 @@ impl Sockets {
     }
 
     /// Asks the kernel about everything a pass could be owed for: each
-    /// stream's connection, for its client's rings and its hang-up, the wake pipe of each listener and one pipe of each
-    /// datagram socket for its owner's leaving, and the connection of each
-    /// client that waits for a lookup, which hangs up by closing it.
+    /// stream's connection, for its client's rings and its hang-up, the wake
+    /// pipe of each listener and one pipe of each datagram socket for its
+    /// owner's leaving, and the connection of each client that waits for a
+    /// lookup, which hangs up by closing it.
     pub fn watch(&self, poller: &mut Watches) {
         for (key, stream) in &self.streams {
             let Some(connection) = stream.connection.upgrade() else { continue };
