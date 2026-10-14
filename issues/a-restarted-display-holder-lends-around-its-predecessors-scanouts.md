@@ -21,6 +21,7 @@ included, until the next holder's own reset (§3.1.1, which
 The supervisor does not restart the compositor, so nothing reaches this
 today.
 
-Exit: a residue a holder's own §3.1.1 reset retires — the function's status
+Owner: pcidev, on the small-kernel track. Exit: a residue a holder's own
+§3.1.1 reset retires — the function's status
 read 0 after the reset is the proof it holds nothing — so the window is whole
 again for the next holder.

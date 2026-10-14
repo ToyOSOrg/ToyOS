@@ -11,7 +11,7 @@ use toyos_abi::FramebufferInfo;
 
 use crate::device::{Claim, DeviceType};
 
-use super::handle::HandleTable;
+use super::handle::{HandleEntry, HandleTable};
 use super::shm::SharedMemObject;
 use super::{Held, KObjectRef, KObjectVariant, ObjectCore, ZeroHandles};
 
@@ -37,27 +37,22 @@ pub enum DeviceInfo {
 // MAP is required; DUP and TRANSFER let a daemon hand the buffer to another process.
 const BUFFER_RIGHTS: Rights = Rights::MAP.union(Rights::DUP).union(Rights::TRANSFER);
 
-fn install_buffers(
-    table: &mut HandleTable,
-    buffers: &[&Arc<SharedMemObject>],
-) -> Result<alloc::vec::Vec<RawHandle>, SyscallError> {
-    let objects = buffers
-        .iter()
-        .map(|b| (KObjectRef::SharedMem((*b).clone()), BUFFER_RIGHTS))
-        .collect();
-    table.install_all(objects).map_err(|_| SyscallError::ResourceExhausted)
+fn install_buffer(table: &mut HandleTable, buffer: &Arc<SharedMemObject>) -> Result<RawHandle, SyscallError> {
+    table
+        .install(HandleEntry::new(KObjectRef::SharedMem(Arc::clone(buffer)), BUFFER_RIGHTS))
+        .map_err(|_| SyscallError::ResourceExhausted)
 }
 
 impl DeviceInfo {
-    /// The description as bytes, with a handle installed for every named buffer.
-    // All-or-nothing: a table too full for the whole batch installs none and leaves
-    // `described.bytes` unset, so the next read re-mints instead of binding stranded handles.
+    /// The description as bytes, with a handle installed for the one buffer it
+    /// names. A table with no room leaves `described.bytes` unset, so the next
+    /// read mints again.
     fn mint(&self, table: &mut HandleTable) -> Result<Box<[u8]>, SyscallError> {
         Ok(match self {
             Self::Events => Box::new([]),
             Self::Framebuffer(info, scanout) => {
                 let mut info = *info;
-                info.scanout = install_buffers(table, &[scanout])?[0];
+                info.scanout = install_buffer(table, scanout)?;
                 bytes(&info).into()
             }
             // Nothing to install: every address in it is a size, and the memory
@@ -68,7 +63,7 @@ impl DeviceInfo {
             Self::Acpi(info) => bytes(info).into(),
             Self::Hda(info, pcm) => {
                 let mut info = *info;
-                info.pcm = install_buffers(table, &[pcm])?[0];
+                info.pcm = install_buffer(table, pcm)?;
                 bytes(&info).into()
             }
         })
@@ -181,32 +176,6 @@ impl DeviceClaim {
         self.info_read.store(true, Ordering::Relaxed);
         count as u64
     }
-}
-
-/// Negative control for the mint's all-or-nothing rule: a framebuffer
-/// description minted into a table with no room installs nothing.
-#[cfg(feature = "boot-actuators")]
-pub(crate) fn mint_rollback_selftest() {
-    use crate::object::shm::{Region, SharedMemObject};
-    let mut table = HandleTable::new();
-    table.stage_room(0);
-    let info = DeviceInfo::Framebuffer(
-        FramebufferInfo {
-            scanout: toyos_abi::HANDLE_INVALID,
-            width: 0,
-            height: 0,
-            stride: 0,
-            pixel_format: 0,
-            edid: [0; toyos_abi::boot::EDID_BLOCK],
-            edid_len: 0,
-        },
-        SharedMemObject::over(Region::empty()),
-    );
-    let before = table.iter().count();
-    let refused = info.mint(&mut table).is_err();
-    let installed = table.iter().count() - before;
-    let verdict = if refused && installed == 0 { "PASS" } else { "FAIL" };
-    crate::log!("leak-selftest: device-mint {verdict} (refused={refused} installed={installed})");
 }
 
 // Released on last handle, not last Arc: a parked daemon can strand an Arc without releasing.

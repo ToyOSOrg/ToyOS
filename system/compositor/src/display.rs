@@ -52,16 +52,14 @@ pub enum Display {
 
 impl Display {
     /// The display this machine gives the compositor; ends it where there is
-    /// none, since a desktop with no panel has nothing to draw on.
+    /// none, since a desktop with no panel has nothing to draw on, and where
+    /// the virtio-gpu function it was given cannot be brought up.
     pub fn claim() -> (Self, Scale) {
         if let Some(dev) = endow::pci_function::<PciDev>(PCI_ID) {
-            match Virtio::open(dev) {
-                Ok(virtio) => {
-                    let scale = virtio.scale;
-                    return (Self::Virtio(virtio), scale);
-                }
-                Err(why) => eprintln!("compositor: the virtio-gpu function cannot show the desktop: {why}"),
-            }
+            let virtio = Virtio::open(dev)
+                .unwrap_or_else(|why| panic!("compositor: the virtio-gpu function cannot show the desktop: {why}"));
+            let scale = virtio.scale;
+            return (Self::Virtio(virtio), scale);
         }
         let claim: FramebufferDev = endow::device(DeviceType::Framebuffer)
             .expect("compositor: this machine gives it neither a virtio-gpu function nor a framebuffer");
@@ -291,8 +289,6 @@ impl Virtio {
             Grant::alloc(&dev, toyos_virtio_gpu::GRANT_BYTES as u64).map_err(|why| why.to_string())?;
         grant.window().zero();
         let queues = Queues::new(grant);
-        // `num_scanouts` read, so the structure is known to hold the two
-        // event fields before it.
         let (setup, scanouts) = setup
             .config_vector(MSIX_ENTRY)
             .and_then(|s| s.enable(&queues.control, MSIX_ENTRY))

@@ -118,7 +118,8 @@ impl core::fmt::Display for MissingCap {
     }
 }
 
-/// Why [`VirtioDevice::init`] refused the device; either way it keeps no DMA.
+/// Why [`VirtioDevice::offer`] or [`Offered::accept`] refused the device;
+/// either way it keeps no DMA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitRefusal {
     /// Its chain never produced a window for a required capability.

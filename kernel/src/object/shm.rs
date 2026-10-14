@@ -41,15 +41,6 @@ pub struct Region {
     pub pages: Option<Arc<Pages>>,
 }
 
-impl Region {
-    /// Size zero, which maps nothing: a description's buffer where a control
-    /// needs one and no pages.
-    #[cfg(feature = "boot-actuators")]
-    pub fn empty() -> Self {
-        Self { phys: DirectMap::from_phys(0), size: 0, cache: CachePolicy::Normal, pages: None }
-    }
-}
-
 pub struct SharedMemObject {
     pub(super) core: ObjectCore,
     region: Region,

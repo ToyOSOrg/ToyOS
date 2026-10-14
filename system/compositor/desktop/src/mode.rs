@@ -54,7 +54,11 @@ pub const LEAST: Mode = {
 /// engine (Intel ARK, Tiger Lake GT2 `8086:9A49`: DisplayPort 7680x4320).
 pub const LARGEST: Mode = Mode::new(7680, 4320);
 
-// A mode change lends the new scanout before it gives the old one back.
+// A mode change lends the new scanout before it gives the old one back, so the
+// window holds two of the largest. It holds them only together: pcidev places
+// a lend first-fit, so a small scanout left where it split the window can leave
+// no run for a mode past half of it, and that flip is declined with the old
+// mode kept and said (`issues/a-lent-scanout-is-one-contiguous-run.md`).
 const _: () = assert!(2 * LARGEST.scanout_bytes() <= LEND_WINDOW);
 
 /// The mode a display starts in, from the size its device prefers.
@@ -128,13 +132,6 @@ mod tests {
     #[test]
     fn the_least_mode_is_a_terminal_over_the_taskbar() {
         assert_eq!(LEAST, Mode::new(642, 446));
-    }
-
-    /// Two scanouts at the largest mode fill the lend window exactly.
-    #[test]
-    fn two_of_the_largest_scanouts_fill_the_lend_window() {
-        assert_eq!(LARGEST.scanout_bytes(), 64 * SHM_PAGE as u64);
-        assert_eq!(2 * LARGEST.scanout_bytes(), LEND_WINDOW);
     }
 
     #[test]

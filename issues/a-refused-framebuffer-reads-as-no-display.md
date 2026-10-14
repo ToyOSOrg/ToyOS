@@ -30,14 +30,14 @@ the bootloader's line above the second — printed by `query_gop`
 metal-sim boot with `mute: true` and the T14 itself do not have. Nothing reaches
 the kernel, so nothing reaches `/log`, the panel, or a crash report.
 
-`main.rs:520` then branches on `kernel_args.gop_framebuffer != 0` and takes the
-same arm for both. On this harness the second shape is rescued by the
-compositor's `pci:1af4:1050` claim on the same device. On a
-machine whose Blt-only display has no kernel driver — which the T14 is until an
-Intel display engine driver exists — the branch falls to `main.rs:529` and both
-shapes print `GPU: the firmware handed over no framebuffer`. That inference is from the
-branch, not measured: QEMU cannot stage a Blt-only GOP on a device this kernel
-has no driver for.
+`kernel/src/main.rs` then branches on `kernel_args.gop_framebuffer != 0` and
+takes the same arm for both: both print `GPU: the firmware handed over no
+framebuffer`, measured for the Blt-only shape on `Profile::HeadlessVirtioGpu`
+(`the_compositor_drives_the_virtio_gpu`'s boot log). There the compositor's
+`pci:1af4:1050` claim draws the desktop, but nothing in the kernel's record
+tells the two shapes apart, and on a machine whose Blt-only display no
+process drives — the T14, until an Intel display engine driver exists — the
+record is all there is.
 
 The distinction is the difference between "this machine has no panel" and "this
 machine has a panel and something upstream refused it", which are different

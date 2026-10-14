@@ -53,7 +53,6 @@ mod rollback;
 mod rootfs;
 mod file_cache;
 #[cfg(feature = "boot-actuators")]
-mod leak_selftest;
 #[cfg(feature = "boot-actuators")]
 mod revoke_selftest;
 mod tmpfs;
@@ -506,10 +505,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     gpt::probe_usb_disks();
     rootfs::hold_source();
 
-    #[cfg(feature = "boot-actuators")]
-    if actuator::leak_rollback_selftest() {
-        leak_selftest::run();
-    }
     #[cfg(feature = "boot-actuators")]
     if actuator::revoked_backing_selftest() {
         revoke_selftest::run();

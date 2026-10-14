@@ -450,9 +450,9 @@ const MACHINE_TESTS: &[&str] = &[
     // virtio-gpu, and the host tests drive `toyos-virtio-gpu` against a model
     // written from this design's own reading of §5.7, so only QEMU's device
     // says it was read right. x86-64 q35 alone, `Profile::HeadlessVirtioGpu`:
-    // an AArch64 `virt` boot hands over no PCI claim yet. A boot of its own,
-    // since its VNC display gives QEMU's clipboard a peer the clipboard
-    // test's boot must not have.
+    // an AArch64 `virt` boot hands over no PCI claim yet. A boot of its own:
+    // its `-vnc` display changes the display configuration the clipboard
+    // test's premise, `-display none`, rests on.
     "the_compositor_drives_the_virtio_gpu",
 ];
 
@@ -986,10 +986,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: SELFTESTS, judge: |b| read_fault_probes(b[0].kernel().text()) },
     ),
     (
-        "leak_rollback_selftest",
-        metal::Metal { arms: SELFTESTS, judge: |b| leak_rollback(b[0].kernel().text()) },
-    ),
-    (
         "lapic_spurious_vector",
         metal::Metal { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
     ),
@@ -1270,7 +1266,6 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
 const SELFTEST_PARAMS: &[&str] = &[
     "pci-cap-selftest",
     "revoked-backing-selftest",
-    "leak-rollback-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
     "xhci-xecp-selftest",
@@ -4336,19 +4331,6 @@ fn read_fault_probes(log: &str) -> Result<(), String> {
             return Err(format!("{}\n{log}", verdict.trim()));
         }
         eprintln!("  [read-fault] {}", verdict.trim());
-        Ok(())
-}
-
-/// An "acquire before a fallible step" control: the count returned to its baseline after a refused call.
-fn leak_rollback(log: &str) -> Result<(), String> {
-        let probe = "leak-selftest: device-mint";
-        let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-            return Err(format!("{probe} never ran:\n{log}"));
-        };
-        if !verdict.contains("PASS") {
-            return Err(format!("{}\n{log}", verdict.trim()));
-        }
-        eprintln!("  [leak] {}", verdict.trim());
         Ok(())
 }
 

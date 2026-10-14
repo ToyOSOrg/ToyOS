@@ -347,14 +347,13 @@ fn publish(fb: Fb) {
     FB.publish(fb.words());
 }
 
-/// Stop painting until the next [`rearm`]: no console, never a write into
-/// memory the scanout no longer is.
-pub fn detach() {
+/// Stop painting: no console, never a write into memory that is no scanout.
+fn detach() {
     publish(Fb::DETACHED);
 }
 
-/// Re-publish the armed descriptor.
-pub fn rearm() {
+/// Publish the armed descriptor.
+fn rearm() {
     // SAFETY: `PENDING`'s one writer is `arm`, single-threaded at boot; `Fb`
     // is `Copy`, so this holds no reference into the cell.
     let fb = unsafe { *PENDING.0.get() };

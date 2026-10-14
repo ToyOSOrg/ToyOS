@@ -2306,7 +2306,9 @@ fn qemu_command(
         qemu.arg("-device").arg("virtio-rng-pci");
     }
     if shape.virtio_gpu {
-        qemu.arg("-device").arg(format!("virtio-gpu-pci{platform}"));
+        // The size the device prefers at start, stated rather than QEMU's
+        // default: `the_compositor_drives_the_virtio_gpu` reads it back.
+        qemu.arg("-device").arg(format!("virtio-gpu-pci,xres=1280,yres=800{platform}"));
     }
     if shape.probes == Probes::Testdevs {
         // Two, the first enumerated below the second: the SMMU's selftest

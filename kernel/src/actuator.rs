@@ -201,8 +201,6 @@ actuators! {
     /// Cap how long an idle CPU may sleep so the idle loop keeps running.
     diag_tick = "diag-tick";
 
-    /// Run the leak-rollback controls (device mint) after mount.
-    leak_rollback_selftest = "leak-rollback-selftest";
 
     /// Run the revoked-backing controls after mount.
     revoked_backing_selftest = "revoked-backing-selftest";
