@@ -37,6 +37,7 @@ pub mod libc;
 pub mod libcxx;
 pub mod llvm;
 pub mod licence;
+pub mod microcode;
 pub mod miscompile;
 pub mod n2;
 pub mod publish;

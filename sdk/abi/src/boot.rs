@@ -134,6 +134,13 @@ pub struct KernelArgs {
     /// are firmware's, decoded by whoever reads them.
     pub gop_edid: [u8; EDID_BLOCK],
     pub gop_edid_len: u64,
+    /// The microcode patch for this machine's CPU that the loader found on
+    /// ROOT, read into `LoaderData` pages of its own: one update in its
+    /// vendor's form (`toyos-microcode`), page-aligned, which the kernel
+    /// keeps out of its allocator by this address. Zero length where ROOT
+    /// holds none for the CPU, or the CPU's architecture loads none.
+    pub microcode_addr: u64,
+    pub microcode_len: u64,
 }
 
 /// The bytes of [`KernelArgs::gop_edid`]: one EDID base block.
@@ -264,7 +271,9 @@ const _: () = {
     assert!(offset_of!(KernelArgs, wall_clock_known) == 1328);
     assert!(offset_of!(KernelArgs, gop_edid) == 1336);
     assert!(offset_of!(KernelArgs, gop_edid_len) == 1464);
-    assert!(size_of::<KernelArgs>() == 1472);
+    assert!(offset_of!(KernelArgs, microcode_addr) == 1472);
+    assert!(offset_of!(KernelArgs, microcode_len) == 1480);
+    assert!(size_of::<KernelArgs>() == 1488);
     assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
@@ -366,6 +375,8 @@ mod tests {
         wall_clock_known: 0,
         gop_edid: [0; EDID_BLOCK],
         gop_edid_len: 0,
+        microcode_addr: 0,
+        microcode_len: 0,
     };
 
     #[test]

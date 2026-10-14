@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-09-29
 ---
@@ -7,47 +7,35 @@ opened: 2026-09-29
 # The kernel loads no AMD microcode
 
 The kernel is to load CPU microcode signed by the CPU's maker, pinned by
-version and hash the way vendor device firmware is (owner, 2026-09-30).
-It loads Intel's (`toyos-microcode`, `kernel/src/arch/x86_64/microcode.rs`)
-and no AMD CPU's: on one, every CPU's line says ToyOS has no AMD microcode
-loader, and the `microcode` metal row holds the AMD bench to that line.
+version and hash the way vendor device firmware is (owner, 2026-09-30), and
+does not embed it for every CPU (owner, 2026-10-14): the build splits each
+pinned vendor file into one patch per CPU on ROOT, the loader hands the
+kernel its CPU's, and the kernel loads that on every CPU. On `main` it loads
+Intel's alone, and on an AMD CPU every CPU's line says ToyOS has no AMD
+microcode loader.
+
+Assigned to branch `toyos-microcode-files`, which carries the design above
+and AMD's loader with it; it closes this issue once both benches' runs meet
+the exit. AMD's container parser (`build/microcode/amd.rs`) and guarded
+write (`kernel/src/arch/x86_64/microcode.rs`) were built clean-room in
+#920 from a specification of facts of `amd_ucode_info`, as root `CLAUDE.md`
+asks: one agent wrote the specification citing no implementation, another
+built from it alone. The AMD bench's answers to the specification's open
+questions were measured at ToyOSOrg/evidence `32c335ece`,
+`metal/amd-bench/`.
 
 **Met** by #886: on the T14 every CPU runs Intel's 0xbe for 0x806c1
 platform 7, `current` or `loaded`; the T14 armed with `microcode-reseal`
-completes its boot and reds the row on cpu0's `refused` line; every guest
-loads nothing, for its CPU reports a hypervisor or a vendor ToyOS has no
-loader for.
-
-**AMD.** AMD documents MSR0000_008B (55922) and not the patch loader, so
-the loader rests on AMD's own parser, `amd_ucode_info`. Root `CLAUDE.md`
-("Zero legacy") lets that source be read only clean-room: one agent writes
-from it a specification of facts citing no implementation, and another
-builds from that specification alone. #886's loader was not built that way
-and was taken out.
-
-The AMD bench's answers to the specification's open questions (M0–M6, M9,
-M10) were measured by the scout at #914's `ca217141d` (`f7a07b1db`), its
-reading at ToyOSOrg/evidence `32c335ece`, `metal/amd-bench/`; the scout was
-taken out before #914 landed.
+completes its boot and reds the row on a `refused` line; every guest loads
+nothing, for its CPU reports a hypervisor or a vendor ToyOS has no loader
+for.
 
 Owner: the orchestrator.
 
-**Exit**: the kernel loads, early on every AMD CPU, the newest patch the
-embedded container holds for it, and a CPU that does not take one says so
-and runs what it reads back:
-
-- the loader is built clean-room: one agent reads `amd_ucode_info` and
-  writes from it a specification of facts of the container format citing no
-  implementation, keeping the provenance in its own evidence, and another
-  builds the loader from that specification alone, handed to it in its
-  brief and never committed;
-- a patch is matched through the container's equivalence table, CPUID.01H:EAX
-  to processor ID and processor ID to patch, and a malformed table is refused
-  by name; a host test whose table maps 0x00860f01 to a processor ID other
-  than the one in a patch whose ID decodes to 0x00860f01 expects no match;
-- every behaviour neither AMD's documents nor that specification states is
-  named undocumented in the module header with the measurement behind it,
-  or is not in the loader;
-- the `microcode` row is green on the AMD bench with every CPU running the
-  container's patch, and the bench with its trigger write removed completes
-  its boot and reds the row on a `refused` line.
+**Exit**: the `microcode` metal row is green on both benches with the
+loader naming the patch it handed — on the T14 `intel/06-8c-01/80` and
+every CPU running 0xbe; on the AMD bench `amd/17-60-01` and every CPU
+`loaded` 0x860010d — and the AMD bench armed with `microcode-amd-flip`,
+whose patch data has one byte flipped, completes its boot and reds the row
+on a `refused` line: a refusal the CPU raises as `#GP` is the one the
+guarded write has to survive.
