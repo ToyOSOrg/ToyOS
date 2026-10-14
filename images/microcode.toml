@@ -1,0 +1,11 @@
+# The CPU microcode an image carries, each patch by the name its vendor gives
+# it: `/system/share/microcode/<name>` on ROOT, where the loader looks up its
+# CPU's (`lib/microcode`). The build splits them out of the vendor files
+# `NOTICE` pins (`build/microcode.rs`); a QEMU image carries none.
+
+# Every image the metal harness flashes: the T14's i5-1135G7 and the AMD
+# bench's Ryzen 7 4800U.
+benches = ["intel/06-8c-01/80", "amd/17-60-01"]
+
+# Every image built to leave this host: `--build-only`'s and `--update-image`'s.
+release = ["intel/06-8c-01/80", "amd/17-60-01"]

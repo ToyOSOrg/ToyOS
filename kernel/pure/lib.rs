@@ -13,6 +13,7 @@ pub mod bootwrite;
 pub mod clock;
 pub mod cpu;
 pub mod dirnodes;
+pub mod microcode;
 pub mod mtrr;
 pub mod owners;
 pub mod pcid;
