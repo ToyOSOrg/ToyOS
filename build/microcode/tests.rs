@@ -1,6 +1,8 @@
 //! The pinned files split into the patches each CPU is handed, and the lists
 //! of the patches an image carries.
 
+use toyos_microcode::Cpu;
+
 use super::*;
 
 /// The patches the pinned files split into, which a build that cannot split
@@ -64,14 +66,25 @@ fn two_different_patches_at_a_cpus_newest_level_are_refused() {
 }
 
 /// Every name `images/microcode.toml` lists is a patch the pinned files
-/// hold, and a QEMU image carries none.
+/// hold, which `root_files` refuses the build on otherwise, and a QEMU image
+/// carries none.
 #[test]
 fn every_listed_patch_is_one_the_pinned_files_hold() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     assert!(root_files(root, Machines::Qemu).is_empty());
     for machines in [Machines::Benches, Machines::Release] {
-        let files = root_files(root, machines);
-        let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(names, ["share/microcode/intel/06-8c-01/80", "share/microcode/amd/17-60-01"], "{machines:?}");
+        assert!(!root_files(root, machines).is_empty(), "{machines:?}");
     }
+}
+
+#[test]
+fn two_cpus_under_one_name_are_refused() {
+    let t14 = Cpu::Intel { signature: 0x0008_06c1, platform: toyos_microcode::PlatformId::from_msr(7 << 50) };
+    let typed = Cpu::Intel { signature: 0x0008_26c1, platform: toyos_microcode::PlatformId::from_msr(7 << 50) };
+    let patch = patch(0xbe, b"t14");
+    assert!(named_cpus([(t14, patch), (t14, patch)].into_iter()).is_ok(), "one CPU named twice");
+    assert_eq!(
+        named_cpus([(t14, patch), (typed, patch)].into_iter()).map(|_| ()),
+        Err(Refused::Collision { name: "intel/06-8c-01/80".into() }),
+    );
 }

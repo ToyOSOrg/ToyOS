@@ -965,7 +965,7 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     println!("Loading kernel elf...");
     let loaded_kernel = load_kernel_elf(&kernel_bytes);
 
-    let microcode = microcode::find(&chosen.root);
+    let microcode = microcode::find(system_table.boot_services(), &chosen.root);
 
     // Query UEFI GOP before exiting boot services
     let gop = query_gop(&system_table);

@@ -1,16 +1,18 @@
 //! The microcode patch for the CPU this loader runs on: the file on ROOT that
-//! `toyos_microcode` names for it, copied out of the image into pages of its
-//! own, which the kernel loads on every CPU and keeps out of its allocator.
+//! `toyos_microcode` names for it, copied out of the image into `LoaderData`
+//! pages of its own, which the kernel loads on every CPU and keeps out of its
+//! allocator.
 //!
 //! Read from ROOT in memory after its slot's header has verified it, so the
 //! patch is bytes that header covers. Page-aligned, which every alignment a
 //! vendor's trigger asks is a divisor of (SDM Vol. 3A §12.11.6).
 
-use alloc::alloc::Layout;
 use alloc::string::ToString;
 
 use bcachefs::{BlockBuf, BlockIO, BlockNum, DeviceError, FsError, Mounted, ReadOnly, TransferError};
+use toyos_bootmap::BOOT_MAP_BYTES;
 
+use crate::efi::{AllocateType, BootServices, PAGE_SIZE};
 use crate::rootimage::RootImage;
 
 /// The line every answer here is said on.
@@ -18,7 +20,7 @@ pub const SAID: &str = "Microcode:";
 
 /// The patch for this CPU, or `None` where ROOT holds none for it or its
 /// architecture loads none; either way said on [`SAID`]'s line.
-pub fn find(root: &RootImage) -> Option<&'static [u8]> {
+pub fn find(bs: &BootServices, root: &RootImage) -> Option<&'static [u8]> {
     let cpu = match crate::arch::microcode_cpu()? {
         Ok(cpu) => cpu,
         Err(why) => {
@@ -43,16 +45,21 @@ pub fn find(root: &RootImage) -> Option<&'static [u8]> {
             return None;
         }
     };
-    let layout = Layout::from_size_align(bytes.len(), 4096).expect("a page-aligned layout");
-    // SAFETY: `layout` has non-zero size: `bytes` is not empty.
-    let at = unsafe { alloc::alloc::alloc(layout) };
-    assert!(!at.is_null(), "{} bytes for the microcode patch", bytes.len());
-    // SAFETY: `at` is a fresh allocation of `layout`, `bytes.len()` bytes,
-    // which nothing else holds and this loader never frees: the kernel keeps
-    // it by the address it is handed.
-    let patch = unsafe { core::slice::from_raw_parts_mut(at, bytes.len()) };
+    // Inside the boot map: the BSP loads it before `mm::init`, through that map.
+    let at = match bs.allocate_pages(AllocateType::MaxAddress(BOOT_MAP_BYTES - 1), bytes.len().div_ceil(PAGE_SIZE)) {
+        Ok(at) => at,
+        Err(e) => {
+            println!("{SAID} firmware would not give {} bytes for /system/{path} ({e:?}): none handed over", bytes.len());
+            return None;
+        }
+    };
+    // SAFETY: `at` is the first of the pages just allocated to this loader,
+    // identity-mapped while boot services live, which nothing else holds and
+    // this loader never frees: the kernel keeps them by the address it is
+    // handed.
+    let patch = unsafe { core::slice::from_raw_parts_mut(at as *mut u8, bytes.len()) };
     patch.copy_from_slice(&bytes);
-    println!("{SAID} /system/{path}, {} bytes at {:#x}, handed over", patch.len(), at as u64);
+    println!("{SAID} /system/{path}, {} bytes at {at:#x}, handed over", patch.len());
     Some(patch)
 }
 

@@ -62,6 +62,9 @@ pub enum Refused {
     Amd { file: &'static str, refused: amd::Refused },
     /// Two different patches name one CPU at the newest level any names it.
     Tie { name: String, revision: u32 },
+    /// Two different signatures, or an Intel one on two platforms, take one
+    /// name: the bits a name leaves out tell them apart.
+    Collision { name: String },
 }
 
 /// Every patch the pinned files hold, by the name the loader looks it up by.
@@ -75,7 +78,23 @@ pub fn split() -> Result<BTreeMap<String, Patch<'static>>, Refused> {
     for (file, bytes) in AMD {
         named.extend(amd::patches(bytes).map_err(|refused| Refused::Amd { file, refused })?);
     }
-    newest(named.into_iter().map(|(cpu, patch)| (cpu.to_string(), patch)))
+    newest(named_cpus(named.into_iter())?.into_iter())
+}
+
+/// Each patch under its CPU's name, refusing two CPUs under one.
+fn named_cpus<'a>(
+    named: impl Iterator<Item = (toyos_microcode::Cpu, Patch<'a>)>,
+) -> Result<Vec<(String, Patch<'a>)>, Refused> {
+    let mut cpus: BTreeMap<String, toyos_microcode::Cpu> = BTreeMap::new();
+    named
+        .map(|(cpu, patch)| {
+            let name = cpu.to_string();
+            match *cpus.entry(name.clone()).or_insert(cpu) == cpu {
+                true => Ok((name, patch)),
+                false => Err(Refused::Collision { name }),
+            }
+        })
+        .collect()
 }
 
 /// For each name, the patch of the highest level naming it. Two different
