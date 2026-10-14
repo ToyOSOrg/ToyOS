@@ -1,5 +1,5 @@
 ---
-status: assigned
+status: open
 kind: defect
 opened: 2026-10-12
 ---
