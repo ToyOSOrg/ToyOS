@@ -1,6 +1,5 @@
-use toyos::AsHandle;
-use toyos::net::{NetError, StreamRefusal, TcpSocketId, UdpSocketId};
-use toyos::poller::{Poller, READABLE, WRITABLE};
+use toyos::net::stream::{self, Refused, Wait};
+use toyos::net::{NetError, TcpSocketId, UdpSocketId};
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, SyscallError};
 
@@ -11,7 +10,7 @@ use crate::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
 use crate::sync::Arc;
 use crate::sync::atomic::Ordering::Relaxed;
 use crate::sync::atomic::{AtomicBool, AtomicU32};
-use crate::time::{Duration, Instant};
+use crate::time::Duration;
 
 // --- Helpers ---
 
@@ -54,60 +53,39 @@ fn syscall_err(e: SyscallError) -> io::Error {
 /// How long `TcpStream::connect` waits for each address to answer.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Wait until `handle` is ready for `flags` or `left` passes.
-fn wait_ready(handle: RawHandle, flags: u32, left: Duration) {
-    let poller = Poller::new(1);
-    poller.watch_raw(handle, flags, 0);
-    poller.wait(1, left.as_nanos().min(u64::MAX as u128) as u64, |_| {});
-}
-
-/// Run `op` until it does not answer `WouldBlock`, waiting for `flags` on
-/// `handle` in between; `None` once `timeout_ms` has passed.
-fn with_timeout(
-    handle: RawHandle,
-    flags: u32,
-    timeout_ms: u32,
-    mut op: impl FnMut() -> Result<usize, SyscallError>,
-) -> Option<Result<usize, SyscallError>> {
-    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-    loop {
-        match op() {
-            Err(SyscallError::WouldBlock) => {}
-            done => return Some(done),
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return None;
-        }
-        wait_ready(handle, flags, left);
-    }
-}
-
 const TIMED_OUT: io::Error = io::const_error!(io::ErrorKind::TimedOut, "timed out");
-
-/// The connection was reset, or ended by netstack: its send pipe has no reader.
-const RESET: io::Error = io::const_error!(io::ErrorKind::ConnectionReset, "connection reset");
-
-/// What std answers for a stream's refusal.
-fn stream_refused(refusal: StreamRefusal) -> io::Error {
-    match refusal {
-        StreamRefusal::Reset => RESET,
-        StreamRefusal::Again => io::ErrorKind::WouldBlock.into(),
-        StreamRefusal::Other => io::Error::new(io::ErrorKind::Other, "syscall error"),
-    }
-}
 
 const SHUT_DOWN: io::Error =
     io::const_error!(io::ErrorKind::BrokenPipe, "the stream was shut down for writing");
 
-/// Join rx/tx pipes into a single duplex kernel handle.
-fn make_socket_fd(rx: toyos::Pipe, tx: toyos::Pipe) -> io::Result<OwnedFd> {
-    let socket_fd =
-        syscall::connection_join(rx.as_handle(), tx.as_handle()).map_err(syscall_err)?;
-    // The join takes references of its own; these two are consumed here.
-    drop(rx);
-    drop(tx);
-    Ok(unsafe { OwnedFd::from_raw_fd(socket_fd.0 as i32) })
+/// What std answers for a stream's refusal. netstack gone is
+/// `ConnectionAborted`: neither the peer's reset nor its FIN.
+fn stream_refused(refusal: Refused) -> io::Error {
+    match refusal {
+        Refused::NotThisProcess(handle) => {
+            io::Error::new(io::ErrorKind::InvalidInput, stream::Misuse::NotThisProcess(handle).to_string())
+        }
+        Refused::WouldBlock => io::ErrorKind::WouldBlock.into(),
+        Refused::TimedOut => TIMED_OUT,
+        Refused::Reset => io::const_error!(io::ErrorKind::ConnectionReset, "connection reset"),
+        Refused::ConnectionTimedOut => io::const_error!(io::ErrorKind::TimedOut, "the connection timed out"),
+        Refused::Unreachable => io::const_error!(io::ErrorKind::HostUnreachable, "the peer is unreachable"),
+        Refused::Aborted => io::const_error!(io::ErrorKind::ConnectionAborted, "netstack ended the stream"),
+        Refused::Shut => SHUT_DOWN,
+    }
+}
+
+/// How a call waits: not at all on a nonblocking stream, and otherwise until
+/// its direction is ready or `timeout_ms`, 0 for no timeout, passes.
+fn wait(nonblocking: bool, timeout_ms: u32) -> Wait {
+    match (nonblocking, timeout_ms) {
+        (true, _) => Wait::Nonblocking,
+        (false, 0) => Wait::Blocking(None),
+        (false, ms) => {
+            let now = toyos_abi::clock::nanos_since_boot();
+            Wait::Blocking(Some(now.saturating_add(u64::from(ms) * 1_000_000)))
+        }
+    }
 }
 
 // --- Shared socket ownership (prevents double-close on duplicate) ---
@@ -128,46 +106,29 @@ impl Drop for NetstackSocket {
 
 // --- TcpStream ---
 
+/// A stream's handle, which `toyos::net::stream` holds its one end by: every
+/// handle of it in this process shares the region, its cursors and its
+/// waiters. The handle's drop lets the end go (`OwnedFd`'s ToyOS arm).
 pub struct TcpStream {
     fd: OwnedFd,
-    socket: Arc<NetstackSocket>,
-    /// `shutdown` was asked for this half, on this stream or a duplicate.
-    read_shut: Arc<AtomicBool>,
-    write_shut: Arc<AtomicBool>,
-    peer: SocketAddr,
-    local_port: u16,
     read_timeout_ms: AtomicU32,
     write_timeout_ms: AtomicU32,
-    /// What netstack holds for the connection every duplicate names, locked
-    /// across the request that changes it so the two cannot come to differ.
-    nodelay: Arc<crate::sync::Mutex<bool>>,
     nonblocking: AtomicBool,
 }
 
 impl TcpStream {
-    /// A stream on a connection netstack holds with `nodelay`: off for one a
-    /// connect made, and what its accept answered for one a listener was
-    /// handed.
-    fn new(fd: OwnedFd, id: TcpSocketId, peer: SocketAddr, local_port: u16, nodelay: bool) -> TcpStream {
+    /// A stream on `fd`, a handle `toyos::net::stream` holds an end for.
+    pub(crate) fn from_fd(fd: OwnedFd) -> TcpStream {
         TcpStream {
             fd,
-            socket: Arc::new(NetstackSocket::Tcp(id)),
-            read_shut: Arc::new(AtomicBool::new(false)),
-            write_shut: Arc::new(AtomicBool::new(false)),
-            peer,
-            local_port,
             read_timeout_ms: AtomicU32::new(0),
             write_timeout_ms: AtomicU32::new(0),
-            nodelay: Arc::new(crate::sync::Mutex::new(nodelay)),
             nonblocking: AtomicBool::new(false),
         }
     }
 
-    fn socket_id(&self) -> TcpSocketId {
-        match *self.socket {
-            NetstackSocket::Tcp(id) => id,
-            _ => unreachable!(),
-        }
+    pub(crate) fn into_fd(self) -> OwnedFd {
+        self.fd
     }
 
     pub fn connect<A: ToSocketAddrs>(addr: A) -> io::Result<TcpStream> {
@@ -176,13 +137,12 @@ impl TcpStream {
 
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         let (ip, port) = addr_to_v4(addr)?;
-        let conn = toyos::net::tcp_connect(ip, port, duration_to_ms(Some(timeout)))
-            .map_err(net_err_to_io)?;
-        let fd = make_socket_fd(conn.rx, conn.tx)?;
-        Ok(TcpStream::new(fd, conn.socket_id, *addr, conn.local_port, false))
+        let connected = stream::connect(ip, port, duration_to_ms(Some(timeout)), false).map_err(net_err_to_io)?;
+        // SAFETY: the connect made this handle for this stream and nothing else answers for it.
+        Ok(TcpStream::from_fd(unsafe { OwnedFd::from_raw_fd(connected.handle.0 as i32) }))
     }
 
-    fn raw_handle(&self) -> RawHandle {
+    fn handle(&self) -> RawHandle {
         RawHandle(self.fd.as_raw_fd() as u32)
     }
 
@@ -211,29 +171,8 @@ impl TcpStream {
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() || self.read_shut.load(Relaxed) {
-            return Ok(0);
-        }
-        let handle = self.raw_handle();
-        let read = if self.nonblocking.load(Relaxed) {
-            syscall::read_nonblock(handle, buf)
-        } else {
-            match self.read_timeout_ms.load(Relaxed) {
-                0 => syscall::read(handle, buf),
-                ms => with_timeout(handle, READABLE, ms, || syscall::read_nonblock(handle, buf))
-                    .ok_or(TIMED_OUT)?,
-            }
-        };
-        match read.map_err(syscall_err)? {
-            0 => self.ended().map(|()| 0),
-            n => Ok(n),
-        }
-    }
-
-    /// Whether the receive pipe's end was the peer's FIN or not
-    /// (`toyos::net::read_end`).
-    fn ended(&self) -> io::Result<()> {
-        toyos::net::read_end(syscall::write_nonblock(self.raw_handle(), &[])).map_err(stream_refused)
+        let wait = wait(self.nonblocking.load(Relaxed), self.read_timeout_ms.load(Relaxed));
+        stream::read(self.handle(), buf, wait).map_err(stream_refused)
     }
 
     pub fn read_buf(&self, mut cursor: BorrowedCursor<'_, u8>) -> io::Result<()> {
@@ -251,23 +190,8 @@ impl TcpStream {
     }
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        if self.write_shut.load(Relaxed) {
-            return Err(SHUT_DOWN);
-        }
-        let handle = self.raw_handle();
-        let written = if self.nonblocking.load(Relaxed) {
-            syscall::write_nonblock(handle, buf)
-        } else {
-            match self.write_timeout_ms.load(Relaxed) {
-                0 => syscall::write(handle, buf),
-                ms => with_timeout(handle, WRITABLE, ms, || syscall::write_nonblock(handle, buf))
-                    .ok_or(TIMED_OUT)?,
-            }
-        };
-        written.map_err(|e| stream_refused(toyos::net::write_refused(e)))
+        let wait = wait(self.nonblocking.load(Relaxed), self.write_timeout_ms.load(Relaxed));
+        stream::write(self.handle(), buf, wait).map_err(stream_refused)
     }
 
     pub fn write_vectored(&self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -279,43 +203,35 @@ impl TcpStream {
     }
 
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        Ok(self.peer)
+        let ((addr, port), _) = stream::endpoints(self.handle()).map_err(stream_refused)?;
+        Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(addr), port)))
     }
 
     pub fn socket_addr(&self) -> io::Result<SocketAddr> {
-        Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 2, 15), self.local_port)))
+        let (_, local_port) = stream::endpoints(self.handle()).map_err(stream_refused)?;
+        Ok(SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 2, 15), local_port)))
     }
 
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
-        let how_val = match how {
-            Shutdown::Read => 0u32,
-            Shutdown::Write => 1,
-            Shutdown::Both => 2,
-        };
-        toyos::net::tcp_shutdown(self.socket_id(), how_val).map_err(net_err_to_io)?;
         if matches!(how, Shutdown::Read | Shutdown::Both) {
-            self.read_shut.store(true, Relaxed);
+            stream::shutdown_read(self.handle()).map_err(stream_refused)?;
         }
         if matches!(how, Shutdown::Write | Shutdown::Both) {
-            self.write_shut.store(true, Relaxed);
+            stream::shutdown_write(self.handle()).map_err(stream_refused)?;
         }
         Ok(())
     }
 
     pub fn duplicate(&self) -> io::Result<TcpStream> {
-        let new_fd = syscall::dup(self.raw_handle()).map_err(syscall_err)?;
-        Ok(TcpStream {
-            fd: unsafe { OwnedFd::from_raw_fd(new_fd.0 as i32) },
-            socket: Arc::clone(&self.socket),
-            read_shut: Arc::clone(&self.read_shut),
-            write_shut: Arc::clone(&self.write_shut),
-            peer: self.peer,
-            local_port: self.local_port,
+        let copy = stream::duplicate(self.handle()).map_err(syscall_err)?;
+        let duplicate = TcpStream {
+            // SAFETY: `duplicate` made this handle of the same stream, entered against its end.
+            fd: unsafe { OwnedFd::from_raw_fd(copy.0 as i32) },
             read_timeout_ms: AtomicU32::new(self.read_timeout_ms.load(Relaxed)),
             write_timeout_ms: AtomicU32::new(self.write_timeout_ms.load(Relaxed)),
-            nodelay: Arc::clone(&self.nodelay),
             nonblocking: AtomicBool::new(self.nonblocking.load(Relaxed)),
-        })
+        };
+        Ok(duplicate)
     }
 
     pub fn set_linger(&self, _linger: Option<Duration>) -> io::Result<()> {
@@ -327,15 +243,11 @@ impl TcpStream {
     }
 
     pub fn set_nodelay(&self, nodelay: bool) -> io::Result<()> {
-        let mut held = self.nodelay.lock().unwrap();
-        toyos::net::tcp_set_option(self.socket_id(), toyos::net::OPT_NODELAY, nodelay as u32)
-            .map_err(net_err_to_io)?;
-        *held = nodelay;
-        Ok(())
+        stream::set_nodelay(self.handle(), nodelay).map_err(stream_refused)
     }
 
     pub fn nodelay(&self) -> io::Result<bool> {
-        Ok(*self.nodelay.lock().unwrap())
+        stream::nodelay(self.handle()).map_err(stream_refused)
     }
 
     pub fn set_keepalive(&self, _keepalive: bool) -> io::Result<()> {
@@ -354,8 +266,10 @@ impl TcpStream {
         Ok(64)
     }
 
+    /// The failure that ended the stream: the receive ring's `end`.
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
-        Ok(None)
+        let failure = stream::failure(self.handle()).map_err(stream_refused)?;
+        Ok(failure.map(stream_refused))
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
@@ -370,14 +284,23 @@ impl TcpStream {
     pub fn as_raw_fd(&self) -> i32 {
         self.fd.as_raw_fd()
     }
-}
 
-// No Drop impl — Arc<NetstackSocket> handles close on last drop.
-// OwnedFd drop closes the pipe-backed socket fd.
+    /// The stream's bell: the handle a watch for room is made on, for reading.
+    pub fn bell(&self) -> io::Result<i32> {
+        let bell = stream::doorbell(self.handle(), stream::Way::Send).map_err(stream_refused)?;
+        Ok(bell.0 as i32)
+    }
+
+    /// Registered for readiness: each named way's want armed, and netstack rung
+    /// where one is ready, so the first event comes.
+    pub fn register(&self, readable: bool, writable: bool) -> io::Result<()> {
+        stream::register(self.handle(), readable, writable).map_err(stream_refused)
+    }
+}
 
 impl fmt::Debug for TcpStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "TcpStream(fd={}, peer={})", self.fd.as_raw_fd(), self.peer)
+        write!(f, "TcpStream(fd={})", self.fd.as_raw_fd())
     }
 }
 
@@ -426,15 +349,14 @@ impl TcpListener {
             syscall::read(notify_fd, &mut byte).map_err(syscall_err)?;
         }
 
-        let accepted = toyos::net::tcp_accept(self.socket_id()).map_err(net_err_to_io)?;
-        let fd = make_socket_fd(accepted.rx, accepted.tx)?;
-
+        let accepted = stream::accept(self.socket_id()).map_err(net_err_to_io)?;
         let peer = SocketAddr::V4(SocketAddrV4::new(
             Ipv4Addr::from(accepted.remote_addr),
             accepted.remote_port,
         ));
-        let nodelay = accepted.options.nodelay();
-        Ok((TcpStream::new(fd, accepted.socket_id, peer, accepted.local_port, nodelay), peer))
+        // SAFETY: the accept made this handle for this stream and nothing else answers for it.
+        let fd = unsafe { OwnedFd::from_raw_fd(accepted.handle.0 as i32) };
+        Ok((TcpStream::from_fd(fd), peer))
     }
 
     pub fn duplicate(&self) -> io::Result<TcpListener> {

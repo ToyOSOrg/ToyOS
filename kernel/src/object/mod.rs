@@ -63,13 +63,6 @@ impl<T> Held<T> {
     }
 }
 
-impl<T: Clone> Held<T> {
-    /// A second reference to what is held, or `None` after the last handle released it.
-    pub(crate) fn get(&self) -> Option<T> {
-        self.0.lock().clone()
-    }
-}
-
 /// A kernel object's identity: diagnostic and internal-key only, never an authority — no syscall turns a koid into access.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Koid(NonZeroU64);

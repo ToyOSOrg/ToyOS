@@ -6,8 +6,8 @@
 //!
 //! The node carries out what the client asks and tells it what became of its address. What the
 //! interface holds is `lease`'s to write and nobody else's: see that module for the three rules
-//! its types keep. A client's TCP connection and its two pipes are `streams`', a passive open and
-//! its owner's wakes `listeners`'.
+//! its types keep. A client's TCP connection and the region it lent are `streams`', a passive open
+//! and its owner's wakes `listeners`'.
 //!
 //! A client's datagram sockets are `datagram`'s, the machine's `<host>.local` name is `name`'s
 //! and the lookups of other machines' names are `resolve`'s: each reads the lease and writes none
@@ -46,8 +46,8 @@ mod places;
 mod resolve;
 mod streams;
 
-pub use listeners::{AcceptRefused, Accepted, ListenRefused, ListenerId, Wake};
-pub use streams::{ConnectRefused, FromClient, PipeEnd, Pipes, ReadRefusal, StreamEvent, StreamId, ToClient, Watch, WriteRefusal};
+pub use listeners::{AcceptRefused, Accepted, ListenRefused, ListenerId, Wake, WriteRefusal};
+pub use streams::{ConnectRefused, Session, StreamEvent, StreamId};
 
 use alloc::vec;
 use alloc::vec::Vec;

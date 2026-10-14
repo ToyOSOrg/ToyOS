@@ -35,9 +35,9 @@ use crate::{clamp, word, Span, Untrusted, Violation, Word, PUBLISH};
 /// seen by the look that follows.
 const ARM: Ordering = Ordering::Acquire;
 #[cfg(not(feature = "want-relaxed"))]
-const WAKE: Ordering = Ordering::Release;
+pub(crate) const WAKE: Ordering = Ordering::Release;
 #[cfg(feature = "want-relaxed")]
-const WAKE: Ordering = Ordering::Relaxed;
+pub(crate) const WAKE: Ordering = Ordering::Relaxed;
 /// The head's edge: a producer that loads the head copies into a byte only
 /// after the consumer's copy out of it, which the consumer's store carries.
 const GIVE_BACK: Ordering = if cfg!(feature = "head-relaxed") { Ordering::Relaxed } else { Ordering::Release };
@@ -91,6 +91,11 @@ impl<const C: u32, const N: usize> Place<C, N> {
             assert!(BASE.checked_add(bytes(C)).is_some(), "a ring ends inside the address space");
         }
         Self { head: HEAD, tail: TAIL, data: DATA, room: ROOM, base: BASE }
+    }
+
+    /// Its four words: head, tail and the two wants.
+    pub(crate) const fn words(&self) -> [usize; 4] {
+        [self.head, self.tail, self.data, self.room]
     }
 
     /// `at` moved `n` on; both are below the lap.
@@ -187,6 +192,18 @@ impl<const C: u32, const N: usize> Producer<C, N> {
         word(page, self.place.room).swap(1, ARM);
         self.room(page)
     }
+
+    /// The consumer asked to be rung back: `true`, and its want exchanged for
+    /// 0, if it is set and the consumer has bytes past its head or the ring
+    /// `ended`. With neither, nothing is exchanged and the want waits for the
+    /// next publish.
+    pub fn ring_back<W: Word>(&self, page: &[W; N], ended: bool) -> Result<bool, Violation> {
+        let head = Untrusted::new(word(page, self.place.head).load(TAKE_BACK));
+        let published = self.published;
+        let held =
+            Place::<C, N>::reach(head, |head| Place::<C, N>::distance(head, published), Violation::HeadPastTail)?;
+        Ok((held > 0 || ended) && word(page, self.place.data).swap(0, WAKE) != 0)
+    }
 }
 
 /// The end of a ring that reads bytes; like [`Producer`], it holds cursors and
@@ -252,6 +269,18 @@ impl<const C: u32, const N: usize> Consumer<C, N> {
     pub fn arm<W: Word>(&mut self, page: &[W; N]) -> Result<u32, Violation> {
         word(page, self.place.data).swap(1, ARM);
         self.ready(page)
+    }
+
+    /// The producer asked to be rung back: `true`, and its want exchanged for
+    /// 0, if it is set and the producer has room past what this end released,
+    /// or `fatal`. With neither, nothing is exchanged and the want waits for
+    /// the next release.
+    pub fn ring_back<W: Word>(&self, page: &[W; N], fatal: bool) -> Result<bool, Violation> {
+        let tail = Untrusted::new(word(page, self.place.tail).load(Ordering::Acquire));
+        let released = self.released;
+        let unreleased =
+            Place::<C, N>::reach(tail, |tail| Place::<C, N>::distance(released, tail), Violation::TailPastDepth)?;
+        Ok((unreleased < C || fatal) && word(page, self.place.room).swap(0, WAKE) != 0)
     }
 }
 
@@ -536,6 +565,32 @@ mod tests {
             assert!(rx.advance(1));
             let _ = rx.release(&page);
         }
+    }
+
+    /// A ring back exchanges a want only of a peer whose direction is ready,
+    /// so the want of one that is not stays for the move that makes it ready.
+    #[test]
+    fn a_ring_back_answers_only_a_peer_that_armed_and_is_ready() {
+        const C: u32 = 2;
+        let page = page();
+        let (mut tx, mut rx) = (Producer::new(&page, place::<C>()), Consumer::new(&page, place::<C>()));
+        assert_eq!(rx.arm(&page), Ok(0));
+        assert_eq!(tx.ring_back(&page, false), Ok(false), "nothing to read: the want stays");
+        assert_eq!(tx.ring_back(&page, true), Ok(true), "the ring ended");
+        assert_eq!(tx.ring_back(&page, true), Ok(false), "the want was exchanged");
+        assert!(tx.advance(2));
+        assert!(!tx.publish(&page), "nobody armed");
+        assert_eq!(rx.arm(&page), Ok(2));
+        assert_eq!(tx.ring_back(&page, false), Ok(true), "bytes past the head");
+        assert_eq!(tx.arm(&page), Ok(0), "a full ring");
+        assert_eq!(rx.ring_back(&page, false), Ok(false), "no room: the want stays");
+        assert_eq!(rx.ring_back(&page, true), Ok(true), "a fatal end");
+        assert_eq!(tx.arm(&page), Ok(0));
+        assert!(rx.advance(1));
+        assert_eq!(rx.ring_back(&page, false), Ok(false), "this end released nothing yet");
+        assert!(rx.release(&page), "the release rings it");
+        assert_eq!(tx.arm(&page), Ok(1));
+        assert_eq!(rx.ring_back(&page, false), Ok(true), "room past what was released");
     }
 
     /// An end rings exactly when the peer armed since the last ring, and only

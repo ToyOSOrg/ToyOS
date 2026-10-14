@@ -3,9 +3,9 @@
 //! **A session is one connection and, at most, one region.** The connection
 //! carries the hello, handles, doorbells and the hang-up; the region carries
 //! [`Producer`]/[`Consumer`] queues of fixed-size entries and an arena of
-//! [`Run`]s, or byte [`stream`]s and the wants that say when to ring. A
-//! protocol says what the entries and bytes mean; this crate says only what is
-//! safe.
+//! [`Run`]s, or byte [`stream`]s and the wants that say when to ring, two of
+//! which with their `end`s are a duplex [`session`]. A protocol says what the
+//! entries and bytes mean; this crate says only what is safe.
 //!
 //! **Nothing here holds the region.** An adapter hands every call the `N`
 //! [`Word`]s an end was made over, and copies bytes itself, through a run's
@@ -30,6 +30,7 @@
 mod arena;
 mod inflight;
 mod queue;
+pub mod session;
 pub mod stream;
 
 use core::sync::atomic::{AtomicU32, Ordering};

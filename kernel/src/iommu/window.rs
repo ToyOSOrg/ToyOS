@@ -1,14 +1,18 @@
 //! A domain's device addresses — where they start, where they end and which
 //! of them are handed out — for every backend.
 //!
-//! They start a quarter of the way up what the unit translates and above all
-//! memory, so a descriptor still carrying one names nothing a domain maps and
-//! faults rather than landing on a page. They end under the first root-bridge
-//! window or reserved region over that start: a bridge may route a window
-//! peer-to-peer before the unit sees the request (PCIe Base §2.4), and a
-//! region firmware reserved is not a domain's (VT-d §3.16). An address is
-//! handed out once, unmapped or not: a device holding a stale one would reach
-//! whatever took its place.
+//! They lie above all memory, so a descriptor still carrying one names
+//! nothing a domain maps and faults rather than landing on a page, and clear
+//! of every root-bridge window: a bridge may route a window peer-to-peer
+//! before the unit sees the request (PCIe Base §2.4). Where the unit
+//! translates past every address the CPU issues, they lie above every such
+//! address, and nothing needs declaring. Where it translates no more bits
+//! than the CPU's physical addresses, whatever the backend, they start a
+//! quarter of the way up and end under the first declared window or region
+//! firmware reserved for a device (an RMRR or IVMD) over that start, and with
+//! no declaration accepted there is no domain. An address is handed out once,
+//! unmapped or not: a device holding a stale one would reach whatever took
+//! its place.
 
 use crate::iommu::{IommuError, Iova};
 use crate::mm::PAGE_2M;
@@ -43,17 +47,30 @@ const fn ceiling(translatable: u8, floor: u64, reserved: &[(u64, u64)]) -> u64 {
     ceiling
 }
 
+/// Where a domain over `translatable` bits begins and ends on a CPU issuing
+/// `cpu`-bit physical addresses, `reserved` the declared root-bridge windows
+/// and firmware's reserved regions, or `None` where no declaration is held.
+const fn bounds(translatable: u8, cpu: u8, reserved: Option<&[(u64, u64)]>) -> Result<(u64, u64), IommuError> {
+    if translatable > cpu {
+        return Ok((1 << cpu, 1 << translatable));
+    }
+    let floor = first_address(translatable);
+    match reserved {
+        Some(reserved) => Ok((floor, ceiling(translatable, floor, reserved))),
+        None => Err(IommuError::Undeclared { translatable, cpu }),
+    }
+}
+
 impl Window {
-    /// A new domain's window over `translatable` bits, clear of `reserved`,
-    /// with `room` bytes of it handed out first; refused where it would start
-    /// at or below memory or hold less than that, and at least one leaf.
-    pub fn new(translatable: u8, reserved: &[(u64, u64)], room: u64) -> Result<(Self, Iova), IommuError> {
-        let floor = first_address(translatable);
+    /// A new domain's window over `translatable` bits ([`bounds`]), with
+    /// `room` bytes of it handed out first; refused where it would start at or
+    /// below memory or hold less than that, and at least one leaf.
+    pub fn new(translatable: u8, reserved: Option<&[(u64, u64)]>, room: u64) -> Result<(Self, Iova), IommuError> {
+        let (floor, ceiling) = bounds(translatable, crate::arch::cpu::physical_address_bits(), reserved)?;
         let top = crate::mm::pmm::top();
         if floor <= top {
             return Err(IommuError::WindowBelowMemory { translatable, floor, top });
         }
-        let ceiling = ceiling(translatable, floor, reserved);
         let mut window = Self::starting_at(floor, ceiling);
         match window.reserve(room) {
             Some(first) if ceiling.saturating_sub(floor) >= PAGE_2M => Ok((window, first)),
@@ -153,4 +170,19 @@ const _: () = {
     assert!(ceiling(39, FLOOR, &[(0x10_0000_0000, FLOOR + 1)]) < FLOOR);
     const VIRT: [(u64, u64); 2] = [(0x1000_0000, 0x3f00_0000), (0x80_0000_0000, 0x100_0000_0000)];
     assert!(ceiling(48, first_address(48), &VIRT) == 1 << 48);
+};
+
+/// [`bounds`] on each kind of machine: a unit wider than the CPU's addresses
+/// places above them, declared or not; a unit no wider places under its
+/// first declared window, and with nothing declared nowhere.
+const _: () = {
+    const T14: [(u64, u64); 1] = [(0x40_0000_0000, 0x60_3DC0_0000)];
+    assert!(matches!(bounds(48, 40, None), Ok((0x100_0000_0000, 0x1_0000_0000_0000))));
+    assert!(matches!(bounds(48, 40, Some(&T14)), Ok((0x100_0000_0000, 0x1_0000_0000_0000))));
+    assert!(matches!(bounds(39, 39, Some(&T14)), Ok((0x20_0000_0000, 0x40_0000_0000))));
+    assert!(matches!(bounds(39, 39, None), Err(IommuError::Undeclared { translatable: 39, cpu: 39 })));
+    assert!(matches!(bounds(39, 46, None), Err(IommuError::Undeclared { .. })));
+    // The AMD bench: 48-bit host tables on a CPU of 48, all its windows below
+    // the quarter floor, so the whole of the upper quarter.
+    assert!(matches!(bounds(48, 48, Some(&[(0x4_5020_0000, 0xfc_9000_0000)])), Ok((0x4000_0000_0000, 0x1_0000_0000_0000))));
 };

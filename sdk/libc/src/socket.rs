@@ -1,17 +1,19 @@
-// BSD sockets — TCP and UDP use pipe-backed data transfer via netstack.
+// BSD sockets over netstack: a TCP stream is `toyos::net::stream`'s region
+// and connection, and a listener's wakes and a datagram socket's bytes travel
+// in pipes.
 
 use alloc::alloc::{alloc as heap_alloc, dealloc as heap_dealloc};
 use alloc::vec::Vec;
 use core::ptr;
 use toyos_abi::RawHandle;
 use toyos_abi::syscall;
-use toyos::net::{NetError, TcpOptions, TcpSocketId, UdpSocketId, OPT_BROADCAST, OPT_NODELAY};
+use toyos::net::stream::{self, Refused, Wait};
+use toyos::net::{NetError, TcpOptions, TcpSocketId, UdpSocketId, OPT_BROADCAST};
 
 use crate::errcode::{
-    EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, ECONNREFUSED, ECONNRESET, EFAULT, EINVAL, EIO, ENOMEM, ENOPROTOOPT,
-    ENOSPC, ENOTCONN, EOPNOTSUPP, EPIPE, ETIMEDOUT,
+    EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, ECONNABORTED, ECONNREFUSED, ECONNRESET, EFAULT, EHOSTUNREACH, EINVAL, EIO,
+    ENOMEM, ENOPROTOOPT, ENOSPC, ENOTCONN, EOPNOTSUPP, EPIPE, ETIMEDOUT,
 };
-use toyos::net::{read_end, write_refused, StreamRefusal};
 use crate::inaddr::{self, SockaddrIn, AF_INET};
 use crate::dgramreq;
 use crate::sockopt::{self, Kept};
@@ -59,7 +61,10 @@ struct SocketEntry {
     local_port: u16,
     remote_addr: [u8; 4],
     remote_port: u16,
-    // Pipe fds for data path (0 = not set)
+    /// A stream's connection, which `toyos::net::stream` holds its end by
+    /// (0 = none).
+    stream: i32,
+    // A datagram socket's pipe fds (0 = not set)
     rx_fd: i32,         // read end of rx pipe (netstack→client)
     tx_fd: i32,         // write end of tx pipe (client→netstack)
     notify_fd: i32,     // read end of listener notify pipe
@@ -68,12 +73,9 @@ struct SocketEntry {
     // netstack does not hold yet keeps each for the call that makes it there:
     // a listener's `nodelay` goes in its `bind`'s request, `broadcast` is
     // handed over after a datagram socket's bind, and a stream's `nodelay`
-    // after its `connect`.
+    // into its region before its connect.
     nodelay: bool,
     broadcast: bool,
-    /// `shutdown` was asked for this half of a stream.
-    read_shut: bool,
-    write_shut: bool,
 }
 
 const MAX_SOCKETS: usize = 128;
@@ -195,13 +197,12 @@ pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, _protocol: i32) -> 
         local_port: 0,
         remote_addr: [0; 4],
         remote_port: 0,
+        stream: 0,
         rx_fd: 0,
         tx_fd: 0,
         notify_fd: 0,
         nodelay: false,
         broadcast: false,
-        read_shut: false,
-        write_shut: false,
     };
     let fd = alloc_socket(entry);
     if fd < 0 {
@@ -227,25 +228,16 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 
     match entry.kind {
         SocketKind::Tcp => {
-            let conn = match toyos::net::tcp_connect(ip, port, 30000) {
+            // Nagle's algorithm off from the first segment where it was set before.
+            let connected = match stream::connect(ip, port, 30000, entry.nodelay) {
                 Ok(c) => c,
                 Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
             };
-            if entry.nodelay {
-                if let Err(e) = toyos::net::tcp_set_option(conn.socket_id, OPT_NODELAY, 1) {
-                    // `conn`'s pipe ends close where it drops.
-                    let _ = toyos::net::tcp_close(conn.socket_id);
-                    set_errno(net_err_to_errno(e));
-                    return -1;
-                }
-            }
-            entry.netstack_id = conn.socket_id.0;
-            entry.local_port = conn.local_port;
+            entry.local_port = connected.local_port;
             entry.remote_addr = ip;
             entry.remote_port = port;
             entry.connected = true;
-            entry.rx_fd = conn.rx.into_raw().0 as i32;
-            entry.tx_fd = conn.tx.into_raw().0 as i32;
+            entry.stream = connected.handle.0 as i32;
             0
         }
         SocketKind::Udp => {
@@ -321,7 +313,7 @@ pub unsafe extern "C" fn accept(
     let mut notify_byte = [0u8; 1];
     let _ = syscall::read(RawHandle(notify_fd as u32), &mut notify_byte);
 
-    let accepted = match toyos::net::tcp_accept(listener_id) {
+    let accepted = match stream::accept(listener_id) {
         Ok(a) => a,
         Err(e) => { set_errno(net_err_to_errno(e)); return -1; }
     };
@@ -332,25 +324,23 @@ pub unsafe extern "C" fn accept(
 
     let new_entry = SocketEntry {
         kind: SocketKind::Tcp,
-        netstack_id: accepted.socket_id.0,
+        netstack_id: 0,
         connected: true,
         bound: false,
         local_port: accepted.local_port,
         remote_addr: accepted.remote_addr,
         remote_port: accepted.remote_port,
-        rx_fd: accepted.rx.into_raw().0 as i32,
-        tx_fd: accepted.tx.into_raw().0 as i32,
+        stream: accepted.handle.0 as i32,
+        rx_fd: 0,
+        tx_fd: 0,
         notify_fd: 0,
-        nodelay: accepted.options.nodelay(),
+        nodelay: accepted.nodelay,
         broadcast: false,
-        read_shut: false,
-        write_shut: false,
     };
     let new_fd = alloc_socket(new_entry);
     if new_fd < 0 {
-        syscall::close(RawHandle(new_entry.rx_fd as u32));
-        syscall::close(RawHandle(new_entry.tx_fd as u32));
-        let _ = toyos::net::tcp_close(accepted.socket_id);
+        // The client's leaving: netstack closes the connection.
+        stream::let_go(accepted.handle);
         set_errno(ENOMEM);
     }
     new_fd
@@ -372,14 +362,10 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
 
     match entry.kind {
         SocketKind::Tcp => {
-            if entry.write_shut {
-                set_errno(EPIPE);
-                return -1;
-            }
             let data = core::slice::from_raw_parts(buf, len);
-            match syscall::write(RawHandle(entry.tx_fd as u32), data) {
+            match stream::write(RawHandle(entry.stream as u32), data, Wait::Blocking(None)) {
                 Ok(n) => n as isize,
-                Err(e) => { set_errno(stream_errno(write_refused(e))); -1 }
+                Err(refused) => { set_errno(stream_errno(refused)); -1 }
             }
         }
         SocketKind::Udp => {
@@ -410,17 +396,10 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, _flags: i32) ->
 
     match entry.kind {
         SocketKind::Tcp => {
-            if entry.read_shut {
-                return 0;
-            }
             let data = core::slice::from_raw_parts_mut(buf, len);
-            let read = syscall::read(RawHandle(entry.rx_fd as u32), data).map_err(|_| StreamRefusal::Other).and_then(|n| match n {
-                0 => read_end(syscall::write_nonblock(RawHandle(entry.tx_fd as u32), &[])).map(|()| 0),
-                n => Ok(n),
-            });
-            match read {
+            match stream::read(RawHandle(entry.stream as u32), data, Wait::Blocking(None)) {
                 Ok(n) => n as isize,
-                Err(refusal) => { set_errno(stream_errno(refusal)); -1 }
+                Err(refused) => { set_errno(stream_errno(refused)); -1 }
             }
         }
         SocketKind::Udp => {
@@ -533,12 +512,21 @@ pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
     };
 
     if let SocketKind::Tcp = entry.kind {
-        if let Err(e) = toyos::net::tcp_shutdown(TcpSocketId(entry.netstack_id), how as u32) {
-            set_errno(net_err_to_errno(e));
+        if entry.stream == 0 {
+            set_errno(ENOTCONN);
             return -1;
         }
-        entry.read_shut |= matches!(how, SHUT_RD | SHUT_RDWR);
-        entry.write_shut |= matches!(how, SHUT_WR | SHUT_RDWR);
+        let handle = RawHandle(entry.stream as u32);
+        if !matches!(how, SHUT_RD | SHUT_WR | SHUT_RDWR) {
+            set_errno(EINVAL);
+            return -1;
+        }
+        if matches!(how, SHUT_RD | SHUT_RDWR) {
+            let _ = stream::shutdown_read(handle);
+        }
+        if matches!(how, SHUT_WR | SHUT_RDWR) {
+            let _ = stream::shutdown_write(handle);
+        }
     }
     0
 }
@@ -547,12 +535,31 @@ const SHUT_RD: i32 = 0;
 const SHUT_WR: i32 = 1;
 const SHUT_RDWR: i32 = 2;
 
-fn stream_errno(refusal: StreamRefusal) -> i32 {
-    match refusal {
-        StreamRefusal::Reset => ECONNRESET,
-        StreamRefusal::Again => EAGAIN,
-        StreamRefusal::Other => EIO,
+/// A stream's refusal in POSIX's word: `send`'s and `recv`'s.
+fn stream_errno(refused: Refused) -> i32 {
+    match refused {
+        Refused::NotThisProcess(_) => EBADF,
+        Refused::WouldBlock => EAGAIN,
+        Refused::TimedOut | Refused::ConnectionTimedOut => ETIMEDOUT,
+        Refused::Reset => ECONNRESET,
+        Refused::Unreachable => EHOSTUNREACH,
+        Refused::Aborted => ECONNABORTED,
+        Refused::Shut => EPIPE,
     }
+}
+
+/// The handle of the stream a socket descriptor is, for `poll`.
+pub(crate) fn stream_of(fd: i32) -> Option<RawHandle> {
+    let entry = sock_from_fd(fd)?.as_ref()?;
+    (matches!(entry.kind, SocketKind::Tcp) && entry.stream != 0).then_some(RawHandle(entry.stream as u32))
+}
+
+/// The kernel handle a socket descriptor that is no stream is watched by,
+/// for `poll`: a listener's wake pipe, a datagram socket's receive pipe.
+pub(crate) fn watched_of(fd: i32) -> Option<RawHandle> {
+    let entry = sock_from_fd(fd)?.as_ref()?;
+    let handle = if entry.notify_fd != 0 { entry.notify_fd } else { entry.rx_fd };
+    (handle != 0).then_some(RawHandle(handle as u32))
 }
 
 
@@ -569,6 +576,8 @@ pub unsafe extern "C" fn close_socket(fd: i32) -> bool {
         None => return false,
     };
 
+    // A stream's leaving is its connection's hang-up.
+    if entry.stream != 0 { stream::let_go(RawHandle(entry.stream as u32)); }
     // Close pipe fds
     if entry.rx_fd != 0 { syscall::close(RawHandle(entry.rx_fd as u32)); }
     if entry.tx_fd != 0 { syscall::close(RawHandle(entry.tx_fd as u32)); }
@@ -624,17 +633,18 @@ pub unsafe extern "C" fn setsockopt(
     };
     match option {
         Kept::NoDelay => {
-            // netstack holds a listener from `bind` and a connection from
-            // `connect` or `accept`, and each has its own request.
-            let id = TcpSocketId(entry.netstack_id);
-            let asked = match (entry.connected, entry.bound) {
-                (true, _) => toyos::net::tcp_set_option(id, OPT_NODELAY, on as u32),
-                (false, true) => toyos::net::tcp_listener_set_option(id, OPT_NODELAY, on as u32),
-                (false, false) => Ok(()),
-            };
-            if let Err(e) = asked {
-                set_errno(net_err_to_errno(e));
-                return -1;
+            // A stream's is a word of its region, a listener's a request.
+            if entry.stream != 0 {
+                if let Err(refused) = stream::set_nodelay(RawHandle(entry.stream as u32), on) {
+                    set_errno(stream_errno(refused));
+                    return -1;
+                }
+            } else if entry.bound {
+                let id = TcpSocketId(entry.netstack_id);
+                if let Err(e) = toyos::net::tcp_listener_set_option(id, toyos::net::OPT_NODELAY, on as u32) {
+                    set_errno(net_err_to_errno(e));
+                    return -1;
+                }
             }
             entry.nodelay = on;
         }

@@ -73,8 +73,8 @@ and owns each one this list gives no other owner.
 
 - **Writers.** Every W stage's owner is the orchestrator, who briefs a
   writer for it: an implementer told never to read the references or the
-  demo. The stage's design round is that writer's. The first W stage's pull
-  request, briefed to, adds that sentence to `.claude/agents/implementer.md`.
+  demo. The stage's design round is that writer's. Root `CLAUDE.md`'s
+  clean-room rule is that sentence; no prompt carries another.
 - **Reviews.** The orchestrator's brief for each W stage's review and design
   acceptance says that they quote no reference. A defect found through a
   reference reaches the writer only as a reader's revision of the
@@ -230,6 +230,48 @@ Depends on: nothing; W6 waits on it.
   `build/ssh/tests/fuzz.rs`; and a third-party capture corpus from outside the
   references, beside the crate, with provenance, terms and `NOTICE` rows,
   pinned by hash.
+- **Owed: `lib/ieee80211`'s readings checked against the text.** W1 was
+  written without IEEE 802.11-2020, 802.11ax-2021 or the WFA WMM
+  Specification v1.2 at hand; each reading below rests on the writer's
+  knowledge, and on the captures where `lib/ieee80211/tests/corpus.rs` reads
+  them. Owner: the orchestrator.
+  - **Exit:** every reading below checked against the text; each one the text
+    contradicts fixed, and each leniency the text rules out turned into a
+    refusal by name.
+  - **Frame structure:** the protocol version, type 3 as Extension, the
+    reserved and contention-free subtypes; non-QoS Order as strictly
+    ordered; the four-address layout; Fragment Number and More Fragments;
+    `ManagementWithDs`; `GroupTransmitter` for a management SA and a data TA.
+  - **Control:** the BAR and BA Type values and TID_INFO; a BlockAckReq's
+    Fragment Number being 0; the HE bitmap sizes by Fragment Number bits 2
+    and 1, bit 0 a fragment level, bit 3 refused; the bandwidth-signaling TA.
+  - **Management bodies:** a beacon interval of 0 refused; the AID's two high
+    bits and its range of 1 to 2007.
+  - **Elements:** the Element ID Extension octet; each typed element allowed
+    once, WMM's included; the SSID's 32 octets; 1 to 8 Supported Rates and
+    Extended Supported Rates of length 0 refused; the selectors 127, 126, 123
+    and 122; the TIM's offset as N1/2, its bound of 251 octets and its minimum
+    of one bitmap octet; Country's string, triplets, operating triplet from
+    201 and channel bound of 200; MFPR as bit 6, MFPC as bit 7 and MFPR
+    without MFPC refused; the RSNXE's Field Length and SAE-H2E as bit 5; the
+    HT and VHT field splits and reserved values; Extended Capabilities' bit
+    numbering; HE Capabilities' 6, 11 and 4 octet fields, the 160 and 80+80
+    MCS sets under PHY Capabilities B3 and B4, PPE Thresholds Present as
+    B55, and the PPE length of 7 + 6 × (NSTS + 1) × RU count bits; HE
+    Operation's bits 14, 15 and 17 and its five-octet 6 GHz field; WMM's
+    layouts, version 1, AIFSN of at least 2 and each ACI once, and its exact
+    length.
+  - **Data and the window:** the A-MSDU subframe header and its padding; the
+    bridge-tunnel types 0x80F3 and 0x8137; CCMP's Ext IV bit; the §10.25.6
+    rules with the half-space boundary of 2048; the HE buffer of 256.
+  - **Each refusal's class**, `Malformed` or `Unsupported`.
+  - **The leniencies**, each to become a refusal if the text rules it out:
+    octets past the RSNE's and the RSNXE's last field ignored; octets past
+    the fields of HT and VHT Capabilities and Operation and of HE
+    Capabilities and Operation ignored (fewer refused); a Country element
+    accepted without its pad octet, and with one where none is needed. The
+    strict side, padding after an A-MSDU's last subframe refused, is checked
+    too.
 
 **W2, the handshakes, in `wlan`**, sans-IO: the 4-way and group-key
 handshakes, SAE by hash-to-element, PMF's keys, and the Transition Disable

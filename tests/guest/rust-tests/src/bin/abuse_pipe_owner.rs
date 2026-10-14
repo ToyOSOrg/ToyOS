@@ -53,7 +53,6 @@ const REACHES: &[(&str, &str)] = &[
     ("read", "read as if it named something"),
     ("write", "took a write"),
     ("map", "handed over a ring page"),
-    ("join", "a connection was joined out of a sibling's ends"),
     ("control", "a slot nobody ever published answered"),
 ];
 
@@ -66,13 +65,8 @@ fn main() {
 }
 
 fn test() {
-    // Pipes this process created are its own business, and joining two of them
-    // into one duplex object is too: `SYS_CONNECTION_JOIN` grants nothing,
-    // because everything it reaches is already the caller's.
+    // Pipes this process created are its own business.
     let (own_read, own_write) = toyos::pipe_pair().expect("a pipe of our own");
-    let joined = syscall::connection_join(own_read.as_handle(), own_write.as_handle())
-        .expect("two ends this process holds must join");
-    syscall::close(joined);
     own_write.write(b"round trip").expect("write our own pipe");
     let mut buf = [0u8; 16];
     let n = own_read.read(&mut buf).expect("read our own pipe");
@@ -146,7 +140,6 @@ fn attacker(role: &str) -> ! {
         "read" => format!("{:?}", syscall::read_nonblock(read, &mut buf)),
         "write" => format!("{:?}", syscall::write_nonblock(write, b"injected")),
         "map" => format!("{:?}", syscall::pipe_map(read).map(|_| ())),
-        "join" => format!("{:?}", syscall::connection_join(read, write)),
         "control" => {
             format!("{:?}", syscall::read_nonblock(RawHandle(UNPUBLISHED_SLOT), &mut buf))
         }

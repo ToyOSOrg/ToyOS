@@ -459,6 +459,55 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "NOTICE",
         Terms::Spdx("(MIT OR Apache-2.0) AND BSD-2-Clause"),
     ),
+    // Captures from tcpdump's test suite, read hermetically by `lib/ieee80211/tests/corpus.rs`.
+    (
+        "lib/ieee80211/tests/fixtures/tcpdump/ieee802.11_exthdr.pcap",
+        "5d1179c7045f3fe6a4a6621b758ee25c7a8ec1eece9d3d7be707969aa96a5236",
+        "NOTICE",
+        Terms::Spdx("BSD-3-Clause"),
+    ),
+    (
+        "lib/ieee80211/tests/fixtures/tcpdump/ieee802.11_htc.pcap",
+        "a762951573320132a595a91833a1bc6c39c2bfd7f526c43f1402c307438fbb13",
+        "NOTICE",
+        Terms::Spdx("BSD-3-Clause"),
+    ),
+    (
+        "lib/ieee80211/tests/fixtures/tcpdump/ieee802.11_meshhdr-oobr.pcap",
+        "cf4cff158b93f4e983abdf4d2fd97a6996bbfe36d82795b610fb128674794038",
+        "NOTICE",
+        Terms::Spdx("BSD-3-Clause"),
+    ),
+    (
+        "lib/ieee80211/tests/fixtures/tcpdump/ieee802.11_meshid.pcap",
+        "9c64693b3f9d72365c198574ec0f4443c91c3d6dfa7f7a7d7ec420b14eb0cdbf",
+        "NOTICE",
+        Terms::Spdx("BSD-3-Clause"),
+    ),
+    (
+        "lib/ieee80211/tests/fixtures/tcpdump/ieee802.11_parse_elements_oobr.pcap",
+        "5b89c6377bc6ada50619abce34ec0cbb3031790a79fffccaf44da610b9e91748",
+        "NOTICE",
+        Terms::Spdx("BSD-3-Clause"),
+    ),
+    (
+        "lib/ieee80211/tests/fixtures/tcpdump/ieee802.11_rates_oobr.pcap",
+        "dff15ca82eb9814a34ea0d875ea5f63c0f1a5d178bf390ddc919bec7b3421c85",
+        "NOTICE",
+        Terms::Spdx("BSD-3-Clause"),
+    ),
+    (
+        "lib/ieee80211/tests/fixtures/tcpdump/ieee802.11_rx-stbc.pcap",
+        "04322b0ee0cf314941e7e30c41378fbe96618a2b3952458dd04b9e8fbd581d75",
+        "NOTICE",
+        Terms::Spdx("BSD-3-Clause"),
+    ),
+    (
+        "lib/ieee80211/tests/fixtures/tcpdump/ieee802.11_tim_ie_oobr.pcap",
+        "fbb8b20efb233ec789214ecf96d5365cc8a34c275dae2685061ac72486a20bda",
+        "NOTICE",
+        Terms::Spdx("BSD-3-Clause"),
+    ),
     (
         "assets/DOOM1.WAD",
         "1d7d43be501e67d927e415e0b8f3e29c3bf33075e859721816f652a526cac771",

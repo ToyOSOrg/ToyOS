@@ -44,7 +44,7 @@ static DOMAINS: Lock<Vtd> =
     Lock::new(Vtd { agreement: Agreement::None, domains: Domains::new(table::KERNEL_DOMAIN + 1) });
 
 /// Before any domain is made: every one is built clear of these.
-pub fn avoid(reserved: Vec<(u64, u64)>) {
+pub fn avoid(reserved: Option<Vec<(u64, u64)>>) {
     DOMAINS.lock().domains.avoid(reserved);
 }
 

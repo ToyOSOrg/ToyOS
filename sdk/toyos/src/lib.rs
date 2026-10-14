@@ -30,6 +30,7 @@ pub mod relocate;
 pub mod surface;
 pub mod shm;
 pub mod syscap;
+pub mod sync;
 pub mod system;
 pub mod volatile;
 
@@ -79,7 +80,10 @@ impl OwnedHandle {
     ///
     /// # Safety
     /// `raw` must be a live handle in this process's table that nothing else
-    /// answers for: this closes it when it drops.
+    /// answers for: this closes it when it drops. A handle
+    /// [`net::stream`](crate::net::stream) answers for, a stream's, is never
+    /// one: it reaches its end only through that module, and a stream does not
+    /// move between processes.
     pub unsafe fn from_raw(raw: RawHandle) -> Self {
         Self(raw)
     }
@@ -90,6 +94,7 @@ impl OwnedHandle {
     /// it.
     pub(crate) fn into_raw(self) -> RawHandle {
         let raw = self.0;
+        #[allow(clippy::disallowed_methods, reason = "the handle is the caller's from here, so this drop must not close it")]
         core::mem::forget(self);
         raw
     }

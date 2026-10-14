@@ -74,6 +74,12 @@ impl SharedMemory {
         self.ptr
     }
 
+    /// Give up ownership: the handle and its mapping stay, and the mapping goes
+    /// when the caller closes the handle.
+    pub fn into_raw(self) -> (RawHandle, *mut u8) {
+        (self.handle.into_raw(), self.ptr)
+    }
+
     pub fn len(&self) -> usize {
         self.size
     }

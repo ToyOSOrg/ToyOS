@@ -4,7 +4,9 @@
 use core::net::Ipv4Addr;
 
 use toyos_net_shard::{ConnectError, ListenError};
-use toyos_net_tcp::{ConnId, Endpoint, Error, ListenerId, Options, Received, Status, Tuple};
+use alloc::boxed::Box;
+
+use toyos_net_tcp::{ConnId, Endpoint, Error, Lent, ListenerId, Options, Status, Tuple};
 use toyos_net_wire::{Instant, Port};
 
 use super::Stack;
@@ -31,17 +33,19 @@ impl Stack {
         held(self.shard.tuple(id)).local.port
     }
 
-    /// Queues `data`, all of it: the caller offers no more than [`Status::writable`].
-    pub(crate) fn tcp_send(&mut self, now: Instant, id: ConnId, data: &[u8]) {
-        let taken = held(self.shard.send(now, id, data));
-        if taken != data.len() {
-            unreachable!("[tcp] took {taken} of {} bytes it had room for", data.len());
-        }
+    /// [`toyos_net_tcp::Tcp::lend`].
+    pub(crate) fn tcp_lend(&mut self, id: ConnId, rx: Box<dyn Lent>, tx: Box<dyn Lent>) -> Result<(), Error> {
+        self.shard.lend(id, rx, tx)
     }
 
-    /// [`toyos_net_tcp::Tcp::recv_with`].
-    pub(crate) fn tcp_recv(&mut self, now: Instant, id: ConnId, take: impl FnOnce(&[u8]) -> usize) -> Result<Received, Error> {
-        self.shard.recv_with(now, id, take)
+    /// The client read `n` bytes out of its lent receive buffer.
+    pub(crate) fn tcp_consume(&mut self, now: Instant, id: ConnId, n: u32) {
+        held(self.shard.consume(now, id, usize::try_from(n).unwrap_or(usize::MAX)));
+    }
+
+    /// The client placed `n` more bytes in its lent send buffer: how many [tcp] had room for.
+    pub(crate) fn tcp_queue(&mut self, now: Instant, id: ConnId, n: u32) -> Result<usize, Error> {
+        self.shard.queue(now, id, usize::try_from(n).unwrap_or(usize::MAX))
     }
 
     /// The connection's FIN, after what is queued. Of a synchronized connection that has not

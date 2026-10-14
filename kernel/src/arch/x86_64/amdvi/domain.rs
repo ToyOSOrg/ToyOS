@@ -55,7 +55,7 @@ static DOMAINS: Lock<Option<Amd>> = Lock::new(None);
 /// Before any domain is made, once a unit will translate: every one is built
 /// clear of `reserved`, `kept`'s requesters stay on the identity domain, and
 /// only a requester in `translated` is given one.
-pub(super) fn start(reserved: Vec<(u64, u64)>, settings: Vec<Setting>, kept: Vec<Requesters>, translated: Vec<(u16, u16)>) {
+pub(super) fn start(reserved: Option<Vec<(u64, u64)>>, settings: Vec<Setting>, kept: Vec<Requesters>, translated: Vec<(u16, u16)>) {
     let mut domains = Domains::new(IDENTITY + 1);
     domains.avoid(reserved);
     *DOMAINS.lock() = Some(Amd { domains, settings, kept, translated });
@@ -83,6 +83,7 @@ pub fn untranslated(stream: StreamId) -> Option<&'static str> {
 pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     let mut held = DOMAINS.lock();
     let amd = held.as_mut().ok_or(IommuError::NoUnit)?;
+    // Mode-4 host tables translate 48 bits of device address (48882 §2.2.3).
     let next = amd.domains.prepare(9 * ROOT_LEVEL + 12, 1 << 16, room)?;
     let space = Space { root: TABLES.lock().alloc() };
     Ok(amd.domains.add(next, space, alloc::format!("root={:#x} mode={ROOT_LEVEL}", space.root.get())))

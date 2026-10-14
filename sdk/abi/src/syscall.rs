@@ -105,9 +105,6 @@ pub const SYS_GET_ENV: u64 = 73;
 /// [`dup2`].
 pub const SYS_HANDLE_DUP_AT: u64 = 74;
 pub const SYS_CLOCK_EPOCH: u64 = 75;
-/// Join a pipe read end and a pipe write end into one duplex `Connection`.
-/// See [`connection_join`].
-pub const SYS_CONNECTION_JOIN: u64 = 76;
 pub const SYS_PIPE_MAP: u64 = 77;
 pub const SYS_SYMLINK: u64 = 81;
 pub const SYS_READLINK: u64 = 82;
@@ -1929,17 +1926,6 @@ pub fn port_badge(
 /// about itself and already distrusted.
 pub fn accept(acceptor: RawHandle) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_ACCEPT, acceptor.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
-}
-
-/// Join a pipe read end and a pipe write end into one duplex connection.
-///
-/// The two ends stay open and this takes references of its own, so the caller
-/// closes what it handed in. The result carries no handle-transfer queue: a
-/// connection made this way has no peer holding the other half, so
-/// [`handle_send`] on one answers [`SyscallError::Gone`].
-pub fn connection_join(rx: RawHandle, tx: RawHandle) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_CONNECTION_JOIN, rx.0 as u64, tx.0 as u64, 0, 0))
-        .map(|v| RawHandle(v as u32))
 }
 
 /// Handles one [`handle_send`] may carry.

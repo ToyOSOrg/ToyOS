@@ -1,0 +1,7 @@
+[package]
+name = "toyos-ieee80211"
+description = "IEEE 802.11 frames a station receives and sends, parsed in place and refused by name: management, block-ack control and data frames, their elements, A-MSDU, 802.11-to-Ethernet translation and the block-ack reorder window (pure, no_std with alloc, forbid(unsafe_code))."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
