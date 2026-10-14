@@ -102,8 +102,9 @@ enum User {
 
 struct Ended {
     failure: Option<Failure>,
-    /// After both FINs or the peer's reset: what the user has still to read, ahead of the failure
-    /// (Linux and the BSDs, not RFC 9293 §3.10.7.4's SHOULD-flush).
+    /// After both FINs or the peer's reset: what the user has still to read, ahead of the failure.
+    /// RFC 9293 §3.10.7.4 has a reset flush every queue; these bytes were acknowledged, and a reader
+    /// reads them whether they and the reset arrive in one batch or two.
     rx: Option<Box<Rx>>,
 }
 

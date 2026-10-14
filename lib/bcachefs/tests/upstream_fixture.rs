@@ -111,9 +111,6 @@ fn resolve(volume: &Volume<FixtureIo>, path: &str) -> (u64, FileKind) {
 }
 
 /// The whole tree, read back out of a volume upstream wrote.
-///
-/// This is the judgement the suite used to make by booting a Linux
-/// distribution: same assertions, against bytes that are committed.
 #[test]
 fn the_upstream_volume_reads_back_as_what_upstream_wrote() {
     let volume = open("crc32c.img.gz");

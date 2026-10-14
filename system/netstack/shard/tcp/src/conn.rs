@@ -25,8 +25,9 @@ const TS_OPTION: u32 = 12;
 const MIN_MTU: u16 = 576;
 /// RFC 8985 §7.2's WCDelAckT: the longest a peer may delay the ACK of one segment.
 const WORST_DELAYED_ACK: Duration = Duration::from_millis(200);
-/// What a probe waits past two round trips with more than one segment out: Linux's
-/// `TCP_TIMEOUT_MIN`, so an ACK on time is never raced.
+/// What a probe waits past RFC 8985 §7.2's two round trips with more than one segment out, so
+/// an ACK on time is never raced. No document names 2 ms:
+/// `issues/values-no-document-states-stand-where-another-os-was-their-source.md`.
 const PROBE_SLACK: Duration = Duration::from_millis(2);
 
 /// A parsed segment as TCP reads it.
