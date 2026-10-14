@@ -18,12 +18,13 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use toyos::poller::{Poller, READABLE};
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::{DmaRegion, PciDev};
-use toyos_abi::syscall::SyscallError;
+use toyos_abi::syscall::{RegWidth, SyscallError};
 use toyos_device_memory::Registers;
-use toyos_i219::{Clock, Interrupts};
+use toyos_i219::{Clock, Delivery, Interrupts, NoDelivery};
 use toyos_pci_claim::{Bar, Grant, KernelRefused};
 
 /// The machine's monotonic clock: one syscall, which the kernel serves from an
@@ -55,6 +56,13 @@ impl Interrupts for Claim {
     fn taken(&self) -> Result<u32, SyscallError> {
         self.0.irq().map(|record| record.count)
     }
+
+    fn taken_within(&self, nanos: u64) -> Result<u32, SyscallError> {
+        let poller = Poller::new(1);
+        poller.watch(&*self.0, READABLE, 0);
+        poller.wait(1, nanos, |_| {});
+        self.taken()
+    }
 }
 
 type Driver = toyos_i219::I219<Bar, Monotonic, Grant, Claim>;
@@ -65,8 +73,10 @@ pub enum Opening {
     Kernel(KernelRefused),
     /// The claim published no memory BAR this driver may map.
     NoWindow,
+    /// The claim's configuration space named no message the kernel armed.
+    Delivery(NoDelivery<SyscallError>),
     /// The part itself refused, and the word is the driver's.
-    Driver(toyos_i219::Refusal),
+    Driver(toyos_i219::Refusal<SyscallError>),
 }
 
 impl std::fmt::Display for Opening {
@@ -74,6 +84,7 @@ impl std::fmt::Display for Opening {
         match self {
             Self::Kernel(why) => write!(f, "{why}"),
             Self::NoWindow => write!(f, "the claim published no BAR this driver may map"),
+            Self::Delivery(why) => write!(f, "{why}"),
             Self::Driver(why) => write!(f, "{why}"),
         }
     }
@@ -144,7 +155,7 @@ fn granted(dev: &PciDev) -> Result<(Bar, Grant, SharedMemory, DmaRegion), Openin
 /// What a bring-up says about itself: a sentence each for what it asked the
 /// I219's PHY before its reset and what that reset did, and one for the rest.
 fn brought_up_words(brought_up: toyos_i219::BringUp) -> Vec<String> {
-    let mut words = Vec::new();
+    let mut words = vec![brought_up.delivered.to_string()];
     match brought_up.woke {
         Some(Ok(woke)) => words.push(format!("before the reset the PHY was asked: {woke}")),
         Some(Err(why)) => words.push(format!("the PHY was not asked before the reset: {why}")),
@@ -181,9 +192,11 @@ impl Nic {
         // Bound before the driver, so one that is refused lets its part go
         // while both are still mapped.
         let (bar, grant, mapped, region) = granted(&dev)?;
+        let delivery = Delivery::of(|at| dev.config_read(at.into(), RegWidth::U32))
+            .map_err(Opening::Delivery)?;
         let frames = grant.window();
         let driver =
-            toyos_i219::I219::open(part, bar, Monotonic, grant, Claim(Rc::clone(&dev)))
+            toyos_i219::I219::open(part, delivery, bar, Monotonic, grant, Claim(Rc::clone(&dev)))
                 .map_err(Opening::Driver)?;
         let mac = driver.mac();
         say_brought_up(driver.brought_up());
