@@ -48,7 +48,8 @@ syscap = ["rt"]
 # without it would make that arm vacuous rather than red.
 # `counters` and `trace` because `counters_read` reads every counter there is,
 # and narrows each away to prove its refusal.
-# `volume` because `volume_step` steps soundserver's master and back.
+# `volume` because the tone jobs mute soundserver's master and `volume_step`
+# steps it.
 # `log` because `counters_metal` measures its idle second only once the log
 # holds its own line, read back off logkeeper.
 [programs.test-runner]
