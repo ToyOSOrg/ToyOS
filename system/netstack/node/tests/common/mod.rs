@@ -9,6 +9,8 @@
 
 #![allow(dead_code)]
 
+pub mod client;
+
 use std::net::Ipv4Addr;
 use std::time::Duration;
 

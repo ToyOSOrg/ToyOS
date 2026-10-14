@@ -16,7 +16,8 @@ use toyos_net_wire::icmp::UnreachableCode;
 use toyos_net_wire::tcp::{Control, EstablishedOptions, RawWindow, TcpBuilder, TcpSegment};
 use toyos_net_wire::Port;
 
-use crate::conn::{screen, Ctx, In, Kind, Out, Rst, Screened, Sync, Tick, Ts, Verdict, NO_PAYLOAD};
+use crate::conn::{screen, Ctx, In, Kind, Out, Payload, Rst, Screened, Sync, Tick, Ts, Verdict, NO_PAYLOAD};
+use crate::ring::Lent;
 use crate::counters::{Counter, Counters, Log};
 use crate::open::{negotiate, refuse_syn_extras, Local, Origin, Rcvd, Sent, SynRcvd, SynSent};
 use crate::rx::Rx;
@@ -48,8 +49,9 @@ pub enum Served {
     Done,
 }
 
-/// A segment at the moment it leaves: headers from the state of now, payload borrowed from the
-/// send buffer.
+/// A segment at the moment it leaves: headers from the state of now, and its payload, borrowed
+/// from the send buffer where it lies in one piece of [tcp]'s own storage and otherwise copied out
+/// of it first, as a lent buffer's always is.
 #[derive(Clone, Copy, Debug)]
 pub struct Outgoing<'a> {
     pub source: Ipv4Addr,
@@ -192,16 +194,9 @@ impl<T, H: FnMut(&Tuple) -> Hop<T>, S: FnMut(&Outgoing<'_>, T)> Exit<T> for Way<
         (self.hop)(&self.tuple).ready()
     }
 
-    fn send(&mut self, via: T, segment: &Out, (first, second): (&[u8], &[u8])) {
+    fn send(&mut self, via: T, segment: &Out, payload: Payload<'_>) {
         let Self { tuple, sink, scratch, .. } = self;
-        let payload = if second.is_empty() {
-            first
-        } else {
-            scratch.clear();
-            scratch.extend_from_slice(first);
-            scratch.extend_from_slice(second);
-            scratch.as_slice()
-        };
+        let payload = payload.ring.map_or(&[][..], |ring| ring.payload(payload.offset, payload.len, scratch));
         sink(&builder(segment, tuple, payload), via);
     }
 }
@@ -1021,22 +1016,41 @@ impl Tcp {
         result
     }
 
-    /// [`Self::recv`] for a reader that may take less than it is shown, such as a pipe that is
-    /// nearly full: `take` sees the oldest bytes held, as far as they lie in one piece, and answers
-    /// how many of them it took; no other byte leaves the buffer. With nothing held it is not
-    /// called, and the answer is [`Self::recv`]'s; `Data(0)` is a reader that took nothing.
-    pub fn recv_with(&mut self, now: Instant, id: ConnId, take: impl FnOnce(&[u8]) -> usize) -> Result<Received, Error> {
+    /// The user's buffers from here on are `rx` and `tx`, which it reads and writes itself: what
+    /// the connection holds moves there at its offsets, out-of-order text included, and the
+    /// buffers grow no further than their lengths. Of a synchronized connection whose buffers
+    /// are its own and fit; otherwise [`Error::NotConnected`], and nothing is lent.
+    pub fn lend(&mut self, id: ConnId, rx: Box<dyn Lent>, tx: Box<dyn Lent>) -> Result<(), Error> {
+        match &mut self.conn(id)?.state {
+            Tcb::Sync(sync) => sync.lend(rx, tx).then_some(()).ok_or(Error::NotConnected),
+            Tcb::SynSent(_) | Tcb::SynRcvd(_) | Tcb::Ended(_) => Err(Error::NotConnected),
+        }
+    }
+
+    /// The user read the `n` oldest bytes held out of its lent receive buffer: they leave it,
+    /// and the window opens by them. Answers how many were held.
+    pub fn consume(&mut self, now: Instant, id: ConnId, n: usize) -> Result<usize, Error> {
         let conn = self.conn(id)?;
-        let result = match &mut conn.state {
-            Tcb::SynSent(_) | Tcb::SynRcvd(_) => Err(Error::WouldBlock),
-            Tcb::Sync(sync) => sync.recv_with(take, now),
-            Tcb::Ended(Ended { failure, rx }) => match rx.as_mut() {
-                Some(rx) if rx.unread() > 0 => Ok(Received::Data(rx.read_with(take))),
-                _ => failure.map_or(Ok(Received::End), |f| Err(Error::Failed(f))),
-            },
+        let consumed = match &mut conn.state {
+            Tcb::SynSent(_) | Tcb::SynRcvd(_) => Err(Error::NotConnected),
+            Tcb::Sync(sync) => Ok(sync.consume(n, now)),
+            Tcb::Ended(Ended { rx, .. }) => Ok(rx.as_mut().map_or(0, |rx| rx.consume(n))),
         };
         self.settle(id.index, now);
-        result
+        consumed
+    }
+
+    /// The user placed `n` more bytes in its lent send buffer behind those queued: they are
+    /// queued, as [`Self::send`] queues its copy. Answers how many the buffer had room for.
+    pub fn queue(&mut self, now: Instant, id: ConnId, n: usize) -> Result<usize, Error> {
+        let conn = self.conn(id)?;
+        let queued = match &mut conn.state {
+            Tcb::SynSent(_) | Tcb::SynRcvd(_) => Err(Error::NotConnected),
+            Tcb::Sync(sync) => sync.queue(n, now),
+            Tcb::Ended(ended) => Err(ended.failure.map_or(Error::Closing, Error::Failed)),
+        };
+        self.settle(id.index, now);
+        queued
     }
 
     pub fn shutdown_write(&mut self, now: Instant, id: ConnId) -> Result<(), Error> {
@@ -1124,19 +1138,20 @@ impl Tcp {
     pub fn status(&mut self, id: ConnId) -> Result<Status, Error> {
         let in_time_wait = |demux: &BTreeMap<Tuple, Entry>, tuple| matches!(demux.get(tuple), Some(Entry::TimeWait(_)));
         let conn = slot(&mut self.conns, id.index, id.generation).filter(|c| c.user == User::Held).ok_or(Error::NoSuchSocket)?;
-        let (state, readable, writable, delivery_problem, failure) = match &conn.state {
-            Tcb::SynSent(sent) => (State::SynSent, 0, sent.buf.room(), sent.timer.stalled >= 3, None),
-            Tcb::SynRcvd(rcvd) => (State::SynReceived, 0, 0, rcvd.timer.stalled >= 3, None),
+        let (state, readable, writable, queued, starved, delivery_problem, failure) = match &conn.state {
+            Tcb::SynSent(sent) => (State::SynSent, 0, sent.buf.room(), sent.buf.len(), false, sent.timer.stalled >= 3, None),
+            Tcb::SynRcvd(rcvd) => (State::SynReceived, 0, 0, 0, false, rcvd.timer.stalled >= 3, None),
             Tcb::Sync(sync) => {
                 let writable = if sync.tx.fin.is_some() { 0 } else { sync.tx.buf.room() };
-                (sync.state(), sync.rx.unread(), writable, sync.delivery_problem, None)
+                let starved = sync.rx.starved(sync.smss());
+                (sync.state(), sync.rx.unread(), writable, sync.tx.buf.len(), starved, sync.delivery_problem, None)
             }
             Tcb::Ended(ended) => {
                 let state = if in_time_wait(&self.demux, &conn.tuple) { State::TimeWait } else { State::Closed };
-                (state, ended.rx.as_ref().map_or(0, |rx| rx.unread()), 0, false, ended.failure)
+                (state, ended.rx.as_ref().map_or(0, |rx| rx.unread()), 0, 0, false, false, ended.failure)
             }
         };
-        Ok(Status { state, readable, writable, failure, soft_error: conn.soft, delivery_problem })
+        Ok(Status { state, readable, writable, queued, starved, failure, soft_error: conn.soft, delivery_problem })
     }
 
     /// Any live connection, orphans included: what inspect lists.

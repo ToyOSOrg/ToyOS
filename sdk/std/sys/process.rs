@@ -284,6 +284,7 @@ impl Command {
         default: Stdio,
         _needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
+        self.refuse_streams(&default)?;
         let route = launch_route::route(launch_route::Asked {
             supervisor: matches!(self.parent, Parent::Supervisor),
             endowed: !self.endowments.is_empty(),
@@ -442,6 +443,30 @@ impl Command {
             Process { handle: unsafe { toyos::process::Process::from_raw(handle) } },
             StdioPipes { stdin: stdin_pipe, stdout: stdout_pipe, stderr: stderr_pipe },
         ))
+    }
+
+    /// Refuses, before anything moves, a spawn that would put a stream's handle
+    /// in another process: in a child's slot, by `Stdio::inherit()`, a `File`
+    /// or `inherit_handle`, or endowed or provided. A stream belongs to the
+    /// process that connected or accepted it, and `toyos::net` answers for its
+    /// handles.
+    fn refuse_streams(&self, default: &Stdio) -> io::Result<()> {
+        let stdio = [&self.stdin, &self.stdout, &self.stderr];
+        let slots = stdio.into_iter().zip(0u32..).filter_map(|(stdio, slot)| match stdio.as_ref().unwrap_or(default) {
+            Stdio::Inherit => Some(slot),
+            Stdio::ParentStdout => Some(1),
+            Stdio::ParentStderr => Some(2),
+            Stdio::InheritFile(file) => Some(file.raw_fd() as u32),
+            Stdio::Null | Stdio::MakePipe | Stdio::MakeTtyPipe | Stdio::InheritPipe(_) => None,
+        });
+        let moved = self.extra_slots.iter().map(|&[_, parent]| parent);
+        let given = self.endowments.iter().chain(&self.provided).map(|&(_, handle)| handle);
+        for handle in slots.chain(moved).chain(given).map(toyos_abi::RawHandle) {
+            if toyos::net::stream::is_stream(handle) {
+                return Err(io::Error::new(io::ErrorKind::InvalidInput, toyos::net::stream::Misuse::Moved(handle).to_string()));
+            }
+        }
+        Ok(())
     }
 
     /// The environment a direct spawn carries: the caller's, except `HOME`.

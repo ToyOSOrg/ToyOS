@@ -4,17 +4,20 @@
 # in. Nothing here maps, copies or blocks.
 #
 # Its defects are orders, lost wakes and hostile peers, so `tests/loom.rs`
-# holds the publication edge, the wake handshake and a hostile peer.
+# holds the publication edge, the wake handshake, a hostile peer and a
+# session's three waits.
 
 [package]
 name = "toyos-transport"
-version = "0.1.0"
+version = "0.1.0" # never bumped; crates.io's is assigned on publish (build/sdkversion.rs)
 edition = "2021"
-description = "The transport every client/server session runs over: entry rings, byte streams and their wakes, an arena of runs and a tag table, decided over words an adapter hands in."
+description = "The transport every client/server session runs over: entry rings, byte streams, sessions and their wakes, an arena of runs and a tag table, decided over words an adapter hands in."
 license = "MIT OR Apache-2.0"
-publish = false
+repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [features]
+# std links it through `toyos`, whose stream end is a session's client.
+rustc-dep-of-std = ["core", "toyos-untrusted/rustc-dep-of-std"]
 # Declared, never enabled by any build that ships: each reverts one decision so
 # the model that refuses it is shown able to red at all. `build/ci.rs`'s
 # `CONTROLS` runs each and demands the named test's own FAILED line.
@@ -36,8 +39,28 @@ want-relaxed = []
 # `Inflight::end` answers nothing and keeps every tag in flight, so a session's
 # requests outlive it unanswered and a late completion answers one.
 end-keeps-inflight = []
+# A session's server rings a writer waiting for room on the connection, the
+# doorbell a reader waits on, so either can take the other's wake.
+one-doorbell = []
+# A thread that took a direction's doorbell leaves it with another waiter
+# counted and passes nothing on, so that waiter sleeps over what the take
+# announced.
+no-pass-on = []
+# A registration looks without arming, so a direction that becomes ready after
+# its look rings nobody.
+register-no-arm = []
+# A registration arms and looks but rings nobody for a direction it found
+# ready, so its first event never comes.
+register-no-ring = []
+# Both of the two above.
+register-neither = ["register-no-arm", "register-no-ring"]
+# A look that arms the send direction, and the server's ring back of it, read
+# only the room and not a failure, so a writer over a full ring sleeps through
+# a reset.
+head-only = []
 
 [dependencies]
+core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
 toyos-untrusted = { path = "../../untrusted" }
 
 [dev-dependencies]

@@ -1,5 +1,6 @@
 //! Listeners and the node's places, against peers the test scripts, at 192.0.2.2 unless a test
-//! puts one elsewhere, and pipe ends it fakes. No scenario ids: the specifications' listening
+//! puts one elsewhere, and clients that are `toyos_transport::session`'s own client end over a
+//! region on the heap (`common::client`). No scenario ids: the specifications' listening
 //! scenarios are `toyos-net-tcp`'s; these are what the node does between [tcp]'s queues, an
 //! owner's wakes and its accepts.
 //!
@@ -13,14 +14,18 @@
 mod common;
 
 use std::cell::RefCell;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::BTreeSet;
 use std::net::Ipv4Addr;
 use std::rc::Rc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use common::client::Client;
 use common::{arp, batch, terms, Segment, Wire, A, BUDGET, ELSEWHERE, MAC, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
-use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, FromClient, ListenRefused, ListenerId, Node, PipeEnd, Pipes, ReadRefusal, Refused, StreamEvent, StreamId, ToClient, Wake, WriteRefusal};
+use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, ListenRefused, ListenerId, Node, Refused, StreamEvent, StreamId, Wake, WriteRefusal};
+use toyos_transport::session::Refused as Read;
+use toyos_transport::Violation;
 use toyos_net_tcp::{limits, Counter, Endpoint};
 use toyos_net_wire::{Instant, Port};
 
@@ -61,8 +66,6 @@ const P3: Peer = Peer { addr: B, port: 40_003 };
 const WEB: Peer = Peer { addr: B, port: 80 };
 /// Every peer's initial sequence number.
 const ISS: u32 = 5000;
-/// [tcp]'s send buffer, as `common::Wire` configures it.
-const SEND_BUFFER: usize = 65_535;
 
 const SYN: u8 = 1;
 const FIN: u8 = 2;
@@ -104,60 +107,13 @@ fn wakes(owner: &Owner) -> usize {
     owner.borrow().wakes
 }
 
-// ---- a client's pipes ----
+// ---- a client ----
 
-#[derive(Debug, Default)]
-struct Ends {
-    /// What the node wrote: the pipe takes everything.
-    inbox: Vec<u8>,
-    /// What the client wrote and the node has not read.
-    outbox: VecDeque<u8>,
-    /// How many of the two ends the node dropped.
-    dropped: usize,
-}
-
-type Client = Rc<RefCell<Ends>>;
-
-struct WriteEnd(Client);
-struct ReadEnd(Client);
-
-impl ToClient for WriteEnd {
-    fn write(&mut self, bytes: &[u8]) -> Result<usize, WriteRefusal> {
-        self.0.borrow_mut().inbox.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-}
-
-impl FromClient for ReadEnd {
-    fn read(&mut self, out: &mut [u8]) -> Result<usize, ReadRefusal> {
-        let mut ends = self.0.borrow_mut();
-        let read = out.len().min(ends.outbox.len());
-        if read == 0 {
-            return Err(ReadRefusal::Empty);
-        }
-        for slot in &mut out[..read] {
-            *slot = ends.outbox.pop_front().unwrap();
-        }
-        Ok(read)
-    }
-}
-
-impl Drop for WriteEnd {
-    fn drop(&mut self) {
-        self.0.borrow_mut().dropped += 1;
-    }
-}
-
-impl Drop for ReadEnd {
-    fn drop(&mut self) {
-        self.0.borrow_mut().dropped += 1;
-    }
-}
-
-fn client() -> (Client, Pipes) {
-    let client = Client::default();
-    let pipes = Pipes { to_client: Box::new(WriteEnd(client.clone())), from_client: Box::new(ReadEnd(client.clone())) };
-    (client, pipes)
+/// What the client reads now, short of the end.
+fn inbox(client: &Client) -> Vec<u8> {
+    let (bytes, stopped) = client.read_all();
+    assert_eq!(stopped, Err(Read::WouldBlock), "the stream did not end");
+    bytes
 }
 
 // ---- the peers ----
@@ -375,44 +331,43 @@ impl Net {
         (id, owner)
     }
 
-    /// The owner's accept, on a new client's pipes.
-    fn accept(&mut self, id: ListenerId) -> Result<(Accepted, Client), AcceptRefused> {
-        let (client, pipes) = client();
-        let answer = self.node.accept(self.now, id, Some(pipes));
+    /// The owner's accept, on a new client's region.
+    fn accept(&mut self, id: ListenerId) -> Result<(Accepted, Rc<Client>), AcceptRefused> {
+        let (client, session) = Client::new();
+        let answer = self.node.accept(self.now, id, Some(session));
         self.pump();
         answer.map(|accepted| (accepted, client))
     }
 
     /// An accept that takes `peer`'s connection.
-    fn accepts(&mut self, id: ListenerId, peer: Peer) -> (StreamId, Client) {
+    fn accepts(&mut self, id: ListenerId, peer: Peer) -> (StreamId, Rc<Client>) {
         let (accepted, client) = self.accept(id).expect("a connection and a place");
         assert_eq!((accepted.remote, accepted.local), (peer.endpoint(), Port::new(SSH).unwrap()));
         (accepted.id, client)
     }
 
     /// A connect to [`WEB`].
-    fn connect(&mut self) -> (Result<StreamId, ConnectRefused>, Client) {
-        let (client, pipes) = client();
-        let answer = self.node.connect(self.now, WEB.endpoint(), None, pipes);
+    fn connect(&mut self) -> (Result<StreamId, ConnectRefused>, Rc<Client>) {
+        let (client, session) = Client::new();
+        let answer = self.node.connect(self.now, WEB.endpoint(), None, session);
         self.pump();
         (answer, client)
     }
 
-    /// The client of stream `id` writes `text`, and the pass netstack runs when its pipe has
-    /// bytes.
+    /// The client of stream `id` writes `text`, and the pass its ring brings.
     fn says(&mut self, id: StreamId, client: &Client, text: &[u8]) {
-        client.borrow_mut().outbox.extend(text);
+        assert_eq!(client.write(text), Ok(text.len()));
         self.node.bridge(self.now, [id]);
         self.pump();
     }
 
-    /// The stream's client writes 100,000 bytes and lets go of it: [tcp] has room for
-    /// [`SEND_BUFFER`] of them, and the rest stays in its pipe.
+    /// The stream's client writes 100,000 bytes and leaves: [tcp] queues them all, its send
+    /// buffer being the client's ring, and finishes the connection alone.
     fn departs(&mut self, id: StreamId, client: &Client) {
-        client.borrow_mut().outbox.extend(vec![7u8; 100_000]);
-        self.node.close(self.now, id);
+        assert_eq!(client.write(&[7u8; 100_000]), Ok(100_000));
+        self.node.left(self.now, id);
         self.pump();
-        assert_eq!(client.borrow().outbox.len(), 100_000 - SEND_BUFFER);
+        assert!(client.dropped());
     }
 
     fn events(&mut self) -> Vec<StreamEvent> {
@@ -449,17 +404,36 @@ fn a_listener_answers_a_syn_and_wakes_its_owner_when_the_handshake_ends() {
     net.text(P1, b"hello");
     assert_eq!((net.node.streams(), net.node.listeners(), net.node.held()), (0, 1, 1), "a connection that waits is nobody's stream");
 
-    let (client, pipes) = client();
-    let accepted = net.node.accept(net.now, id, Some(pipes)).unwrap();
+    let (client, session) = Client::new();
+    let accepted = net.node.accept(net.now, id, Some(session)).unwrap();
     assert_eq!((accepted.remote, accepted.local), (P1.endpoint(), Port::new(SSH).unwrap()));
-    assert_eq!(client.borrow().inbox, b"hello", "what arrived before the accept moves in it");
+    assert_eq!(inbox(&client), b"hello", "what arrived before the accept moves in it");
     assert_eq!((net.node.streams(), net.node.listeners(), net.node.held()), (1, 1, 2));
-    client.borrow_mut().outbox.extend(b"welcome");
+    assert_eq!(client.write(b"welcome"), Ok(7));
     net.node.bridge(net.now, [accepted.id]);
     net.pump();
     let said = net.last(P1);
     assert_eq!((said.text.as_slice(), said.seq), (&b"welcome"[..], synack.seq.wrapping_add(1)));
-    assert_eq!((wakes(&owner), client.borrow().dropped), (1, 0));
+    assert_eq!((wakes(&owner), client.dropped()), (1, false));
+}
+
+// RFC 9293 §3.10.7.4 holds text past RCV.NXT for later processing and takes a FIN only once every
+// byte before it is in. A child holds, before its accept, text in order, text past a hole and a
+// FIN behind that; the hole is filled after the accept, and the client reads all of it in order,
+// then the end, and the FIN is acknowledged.
+#[test]
+fn what_a_child_held_in_order_past_a_hole_and_its_fin_reaches_its_stream() {
+    let mut net = Net::new();
+    let (id, _owner) = net.listen(SSH);
+    net.handshake(P1);
+    let ack = net.iss(P1).wrapping_add(1);
+    net.deliver(&frame(P1, SSH, ISS + 1, Some(ack), 0, b"he"));
+    net.deliver(&frame(P1, SSH, ISS + 4, Some(ack), FIN, b"lo"));
+    assert_eq!(net.last(P1).ack, Some(ISS + 3), "a hole at the third byte");
+    let (_stream, client) = net.accepts(id, P1);
+    net.deliver(&frame(P1, SSH, ISS + 3, Some(ack), 0, b"l"));
+    assert_eq!(client.read_all(), (b"hello".to_vec(), Ok(())), "every byte, in order, then the end");
+    assert_eq!(net.last(P1).ack, Some(ISS + 7), "the FIN acknowledged");
 }
 
 // One SYN and nothing more: the next peer is answered at once, and the first handshake is given up within [tcp]'s bound, after which its
@@ -528,8 +502,8 @@ fn an_accept_spends_a_wake_whatever_it_answers() {
 
     net.handshake(P2);
     assert_eq!(wakes(&owner), 2, "the wake that accept spent is not counted against the next connection");
-    assert_eq!(net.node.accept(net.now, id, None), Err(AcceptRefused::NoPipes));
-    assert_eq!(wakes(&owner), 3, "the connection an accept without pipes left is announced again");
+    assert_eq!(net.node.accept(net.now, id, None), Err(AcceptRefused::NoRegion));
+    assert_eq!(wakes(&owner), 3, "the connection an accept without a region left is announced again");
     net.accepts(id, P2);
     assert_eq!(wakes(&owner), 3);
 }
@@ -561,7 +535,7 @@ fn a_wake_is_owed_only_for_a_connection_there_is_a_place_for() {
     assert_eq!(net.accept(id).unwrap_err(), AcceptRefused::Full);
     assert_eq!((wakes(&owner), net.node.held()), (1, 2), "no place, no wake");
 
-    net.node.close(net.now, first);
+    net.node.left(net.now, first);
     net.pump();
     assert!(net.last(P1).fin);
     assert_eq!((net.node.streams(), net.node.held(), wakes(&owner)), (0, 2, 1), "a connection [tcp] is finishing holds its place");
@@ -570,23 +544,23 @@ fn a_wake_is_owed_only_for_a_connection_there_is_a_place_for() {
     net.accepts(id, P2);
 }
 
-// A client that left with bytes its peer never takes is still a stream, by `streams`' rule for a
-// departed client, and holds its place until that rule cuts it.
+// A client that left with bytes its peer never takes is [tcp]'s to finish, and its connection
+// holds the place its stream had until [tcp] gives it up, `limits::ORPHAN_IDLE` without
+// progress.
 #[test]
-fn a_departed_clients_connection_holds_its_place_until_it_is_cut() {
+fn a_departed_clients_connection_holds_its_place_until_tcp_gives_it_up() {
     let mut net = with_places(2);
     let (id, owner) = net.listen(SSH);
     net.handshake(P1);
     let (stream, client) = net.accepts(id, P1);
     net.handshake(P2);
-    client.borrow_mut().outbox.extend(vec![7u8; 100_000]);
-    net.node.close(net.now, stream);
-    net.pump();
-    assert_eq!((net.node.streams(), net.node.held(), wakes(&owner)), (1, 2, 1), "its pipe still holds what [tcp] had no room for");
+    net.departs(stream, &client);
+    assert_eq!((net.node.streams(), net.node.held(), wakes(&owner)), (0, 2, 1), "a connection [tcp] is finishing holds its place");
     let (refused, _other) = net.connect();
     assert_eq!(refused, Err(ConnectRefused::Full));
-    net.run(Duration::from_secs(101));
-    assert_eq!((net.node.streams(), net.node.held(), wakes(&owner)), (0, 1, 2), "cut, and its place is the connection's that waited");
+    net.run(limits::ORPHAN_IDLE + Duration::from_secs(1));
+    assert!(net.last(P1).rst, "given up");
+    assert_eq!((net.node.held(), wakes(&owner)), (1, 2), "its place is the connection's that waited");
 }
 
 #[test]
@@ -596,19 +570,21 @@ fn closing_a_connect_gives_its_place_to_a_connection_that_waits() {
     let (connecting, _client) = net.connect();
     net.handshake(P1);
     assert_eq!(wakes(&owner), 0);
-    net.node.close(net.now, connecting.unwrap());
+    net.node.left(net.now, connecting.unwrap());
     assert_eq!(wakes(&owner), 1);
 }
 
 #[test]
-fn a_stream_reset_for_its_pipe_gives_its_place_to_a_connection_that_waits() {
+fn a_stream_reset_for_its_clients_violation_gives_its_place_to_a_connection_that_waits() {
     let mut net = with_places(2);
     let (id, owner) = net.listen(SSH);
     net.handshake(P1);
-    let (stream, _client) = net.accepts(id, P1);
+    let (stream, client) = net.accepts(id, P1);
     net.handshake(P2);
     assert_eq!(wakes(&owner), 1);
-    net.node.pipe_broken(net.now, stream, PipeEnd::ToClient);
+    client.word(0).store(7, Ordering::Release);
+    net.node.bridge(net.now, [stream]);
+    assert_eq!(net.events(), [StreamEvent::Violated { id: stream, violation: Violation::HeadPastTail }]);
     assert_eq!(wakes(&owner), 2);
 }
 
@@ -641,11 +617,11 @@ fn a_connect_past_the_places_is_refused_and_sends_nothing() {
     assert!(first.is_ok() && second.is_ok(), "{first:?} {second:?}");
     let (third, client) = net.connect();
     assert_eq!(third, Err(ConnectRefused::Full), "a connect not yet answered holds a place");
-    assert_eq!((client.borrow().dropped, net.node.held()), (2, 2));
+    assert_eq!((client.dropped(), net.node.held()), (true, 2));
     let sources: BTreeSet<u16> = net.to(WEB).iter().map(|segment| segment.from_port).collect();
     assert_eq!(sources.len(), 2, "no SYN left for the connect refused: {:?}", net.heard);
 
-    net.node.close(net.now, first.unwrap());
+    net.node.left(net.now, first.unwrap());
     let (fourth, _c) = net.connect();
     assert!(fourth.is_ok(), "{fourth:?}");
 }
@@ -864,10 +840,12 @@ fn a_stream_starts_with_the_options_its_connection_took_from_its_listener() {
     assert_eq!(net.texts(P2), [b"a".to_vec(), b"b".to_vec()], "the second write waits for no acknowledgment");
 
     // An accepted stream's options are its own from then on, and the listener's its own.
-    assert!(net.node.set_nodelay(net.now, second, false));
+    b.set_nodelay(false);
+    net.node.bridge(net.now, [second]);
     net.says(second, &b, b"c");
     assert_eq!(net.texts(P2), [b"a".to_vec(), b"b".to_vec()], "the third write waits");
-    assert!(net.node.set_nodelay(net.now, first, true));
+    a.set_nodelay(true);
+    net.node.bridge(net.now, [first]);
     net.pump();
     assert_eq!(net.texts(P1), [b"a".to_vec(), b"b".to_vec()], "and the first stream's second waits no longer");
 
@@ -932,103 +910,39 @@ fn a_handshake_reset_before_it_ends_leaves_the_next_connection_its_listeners_opt
     }
 }
 
-/// The write end of a client's pipe whose reader is gone for good: the node resets the stream.
-struct BrokenEnd;
-
-impl ToClient for BrokenEnd {
-    fn write(&mut self, _: &[u8]) -> Result<usize, WriteRefusal> {
-        Err(WriteRefusal::Broken)
-    }
-}
-
-// The accept's own pass moves what the connection already received, and a pipe that refuses it
-// for good ends the stream there (RFC 9293 §3.10.7.4's reset is the peer's notice). The answer
-// still says what the stream was handed over with, though no stream is left to answer for it.
+// A stream the node let go, its connection ended by both FINs, names nothing from then: its
+// client's hang-up does nothing to the stream that took its place, since no id is used twice.
 #[test]
-fn an_accept_answers_the_option_of_a_stream_its_own_pass_let_go() {
-    let mut net = Net::new();
-    let (id, _owner) = net.listen_with(SSH, true);
-    net.handshake(P1);
-    net.text(P1, b"hello");
-    let (client, Pipes { from_client, .. }) = client();
-    let accepted = net.node.accept(net.now, id, Some(Pipes { to_client: Box::new(BrokenEnd), from_client })).unwrap();
-    net.pump();
-    assert!(net.last(P1).rst, "{:?}", net.heard);
-    assert_eq!((accepted.remote, accepted.nodelay), (P1.endpoint(), true));
-    assert_eq!((net.node.streams(), client.borrow().dropped), (0, 2));
-}
-
-// `streams` counts a stream its client can see no more by its peer's address, and lets an
-// address keep sixteen alive at once. Seventeen are accepted from 192.0.2.2 and one from
-// 192.0.2.3, each client leaves bytes behind, and each peer takes a segment of them fifty
-// seconds on: only the seventeenth from 192.0.2.2 has no more than its 100 seconds.
-#[test]
-fn an_accepted_stream_is_one_of_its_peers_addresss_sixteen() {
-    let mut net = Net::new();
-    let (id, _owner) = net.listen(SSH);
-    let peers: Vec<Peer> = (0..17).map(|nth| Peer { addr: B, port: 41_000 + nth }).chain([Peer { addr: C, port: 41_000 }]).collect();
-    let mut streams = Vec::new();
-    for peer in &peers {
-        net.handshake(*peer);
-        let (stream, client) = net.accepts(id, *peer);
-        net.departs(stream, &client);
-        streams.push(stream);
-    }
-    assert_eq!((net.node.streams(), net.events()), (18, vec![]));
-
-    net.run(Duration::from_secs(50));
-    for peer in &peers {
-        net.takes(*peer, 1_460);
-    }
-    net.run(Duration::from_secs(51));
-    assert_eq!((net.node.streams(), net.events()), (17, vec![StreamEvent::Cut { id: streams[16] }]));
-    let reset: Vec<Peer> = net.heard.iter().filter(|segment| segment.rst).map(|segment| Peer { addr: segment.to, port: segment.to_port }).collect();
-    assert_eq!(reset, [peers[16]]);
-}
-
-// `streams` cuts a stream whose client still holds it, once the peer's FIN ended its reading
-// and it shut its writing down: what that client asks of the stream afterwards names nothing,
-// and not the stream that took its place either, since no id is used twice.
-#[test]
-fn a_request_for_a_stream_that_was_cut_names_nothing() {
+fn a_hang_up_of_a_stream_the_node_let_go_names_nothing() {
     let mut net = with_places(2);
     let (id, owner) = net.listen(SSH);
     net.handshake(P1);
-    let (cut, client) = net.accepts(id, P1);
+    let (ended, client) = net.accepts(id, P1);
     net.handshake(P2);
-    let ack = net.iss(P1).wrapping_add(1);
-    net.deliver(&frame(P1, SSH, ISS + 1, Some(ack), FIN, &[]));
-    client.borrow_mut().outbox.extend(vec![7u8; 100_000]);
-    assert!(net.node.shutdown_write(net.now, cut));
+    client.shutdown();
+    net.node.bridge(net.now, [ended]);
     net.pump();
-    assert_eq!((net.node.streams(), client.borrow().dropped, wakes(&owner)), (1, 1, 1), "the client reads the end and may still close");
-
-    net.run(Duration::from_secs(101));
-    assert_eq!(net.events(), [StreamEvent::Cut { id: cut }]);
-    assert!(net.last(P1).rst);
-    assert_eq!((net.node.streams(), net.node.held(), client.borrow().dropped, wakes(&owner)), (0, 1, 2, 2));
+    assert!(net.last(P1).fin);
+    net.fin(P1);
+    assert_eq!(client.read_all(), (Vec::new(), Ok(())), "the client reads the end");
+    assert_eq!((net.node.streams(), client.dropped(), wakes(&owner)), (0, true, 2));
     let (next, other) = net.accepts(id, P2);
-    assert_ne!(next, cut);
+    assert_ne!(next, ended);
 
     let said = net.heard.len();
-    net.node.close(net.now, cut);
-    assert!(!net.node.shutdown_write(net.now, cut));
-    assert!(!net.node.set_nodelay(net.now, cut, true));
-    net.node.pipe_gone(net.now, cut, PipeEnd::FromClient);
-    net.node.pipe_broken(net.now, cut, PipeEnd::FromClient);
+    net.node.left(net.now, ended);
     net.pump();
-    assert_eq!((net.node.streams(), net.node.held(), other.borrow().dropped, wakes(&owner)), (1, 2, 0, 2), "the stream in its place stands");
+    assert_eq!((net.node.streams(), net.node.held(), other.dropped(), wakes(&owner)), (1, 2, false, 2), "the stream in its place stands");
     assert_eq!((net.heard.len(), net.events()), (said, vec![]));
 }
 
-// The track's exit for the bound across peer addresses. `streams` lets each address keep
-// sixteen streams their clients can see no more alive and counts no addresses, so the places
-// are what bounds the node. Four addresses, more than the node has places for, bring sixteen
-// connections each, and every peer whose connection is accepted keeps its departed client's
-// bytes coming for 250 seconds: the node holds two streams at a time, announces no connection
-// it has no place for, and refuses every accept and connect past them.
+// The places bound what peers at however many addresses make the node hold. Four addresses, more
+// than the node has places for, bring sixteen connections each, and every peer whose connection
+// is accepted takes its departed client's bytes for 250 seconds, keeping [tcp]'s connection alive:
+// the node holds two at a time, announces no connection it has no place for, and refuses every
+// accept and connect past them, until [tcp] gives up a connection whose peer takes no more.
 #[test]
-fn peers_at_more_addresses_than_there_are_places_hold_no_stream_past_them() {
+fn peers_at_more_addresses_than_there_are_places_hold_no_connection_past_them() {
     let mut net = with_places(3);
     let (id, owner) = net.listen(SSH);
     for nth in 0..16 {
@@ -1040,15 +954,14 @@ fn peers_at_more_addresses_than_there_are_places_hold_no_stream_past_them() {
 
     for (round, pair) in [[B, C], [D, E]].into_iter().enumerate() {
         let peers = pair.map(|addr| Peer { addr, port: 42_000 });
-        let held = peers.map(|peer| {
+        for peer in peers {
             let (stream, client) = net.accepts(id, peer);
             net.departs(stream, &client);
-            (stream, client)
-        });
+        }
         let full = |net: &mut Net| {
             assert_eq!(net.accept(id).unwrap_err(), AcceptRefused::Full, "round {round}");
             assert_eq!(net.connect().0, Err(ConnectRefused::Full), "round {round}");
-            assert_eq!((net.node.streams(), net.node.held(), wakes(&owner)), (2, 3, 2 + 2 * round));
+            assert_eq!((net.node.streams(), net.node.held(), wakes(&owner)), (0, 3, 2 + 2 * round));
         };
         full(&mut net);
         for step in 1..=5 {
@@ -1058,13 +971,11 @@ fn peers_at_more_addresses_than_there_are_places_hold_no_stream_past_them() {
             }
             full(&mut net);
         }
-        assert!(held.iter().all(|(_, client)| client.borrow().outbox.len() < 100_000 - SEND_BUFFER), "round {round}: each pipe gave bytes up");
 
-        // The peers take no more: both streams are cut, and two of the connections that wait
-        // are announced.
-        net.run(Duration::from_secs(101));
-        let cut: Vec<StreamEvent> = held.iter().map(|(stream, _)| StreamEvent::Cut { id: *stream }).collect();
-        assert_eq!(net.events(), cut, "round {round}");
+        // The peers take no more: [tcp] gives both connections up, and two of the connections
+        // that wait are announced.
+        net.run(limits::ORPHAN_IDLE + Duration::from_secs(1));
+        assert_eq!(net.events(), vec![], "round {round}");
         assert_eq!((net.node.streams(), net.node.held(), wakes(&owner)), (0, 1, 4 + 2 * round));
     }
 }

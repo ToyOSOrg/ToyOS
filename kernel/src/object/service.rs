@@ -21,11 +21,6 @@ impl HandleQueue {
         Arc::new(Self(Lock::new(Some(VecDeque::new()))))
     }
 
-    /// No reader and never one: what a joined connection's queues are.
-    fn dead() -> Arc<Self> {
-        Arc::new(Self(Lock::new(None)))
-    }
-
     /// A refusal hands the batch back: dropped here, it would be capabilities destroyed silently.
     fn push(&self, batch: Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, SyscallError)> {
         let mut guard = self.0.lock();
@@ -69,7 +64,7 @@ pub struct ConnectionEnd {
     inbox: Arc<HandleQueue>,
     outbox: Arc<HandleQueue>,
     reference: Held<(PipeReader, PipeWriter)>,
-    /// The server's end of a port's connection; `None` on a client's end and a joined one.
+    /// The server's end of a port's connection; `None` on a client's end.
     stamp: Option<Stamp>,
 }
 
@@ -109,11 +104,6 @@ impl ConnectionEnd {
             reference: Held::new((rx, tx)),
             stamp,
         })
-    }
-
-    /// Two pipe ends that were never a port's, so both handle queues are dead.
-    pub fn joined(rx: PipeReader, tx: PipeWriter) -> Arc<Self> {
-        Self::new(rx, tx, HandleQueue::dead(), HandleQueue::dead())
     }
 
     pub fn stamp(&self) -> Option<&Stamp> {

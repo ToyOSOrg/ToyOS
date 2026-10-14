@@ -598,8 +598,19 @@ pub struct pollfd {
     pub revents: i16,
 }
 
+/// A stream socket is asked its rings first, so a level-triggered `poll` of
+/// one that is ready answers at once; a direction that is not is counted in,
+/// drained, armed and looked at again (`toyos::net::stream::watch`), and its
+/// doorbell watched for reading: the connection for `POLLIN`, the bell for
+/// `POLLOUT`. Every other descriptor, a listener's wake pipe and a datagram
+/// socket's receive pipe for a socket's, is watched as it is.
 #[no_mangle]
 pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 {
+    use toyos::net::stream::{self, Poll, Way};
+
+    const POLLIN: i16 = 1;
+    const POLLOUT: i16 = 4;
+
     if nfds == 0 {
         if timeout > 0 {
             syscall::nanosleep(timeout as u64 * 1_000_000);
@@ -611,33 +622,76 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     // rather than by quietly handing back a smaller ring. A C caller asking to
     // watch more is not a bug in this library, so it gets POSIX's own answer
     // for an nfds it cannot serve.
-    if nfds > toyos::poller::Poller::MAX_HANDLES {
+    let n = nfds as usize;
+    let entries: alloc::vec::Vec<(i32, i16)> = (0..n).map(|i| ((*fds.add(i)).fd, (*fds.add(i)).events)).collect();
+    let ways = |events: i16| [(POLLIN, Way::Receive), (POLLOUT, Way::Send)].into_iter().filter(move |(flag, _)| events & flag != 0);
+    let doorbells: usize = entries.iter().filter(|(fd, _)| crate::socket::stream_of(*fd).is_some()).map(|(_, events)| ways(*events).count()).sum();
+    if nfds as usize + doorbells > toyos::poller::Poller::MAX_HANDLES as usize {
         crate::errno::set(EINVAL);
         return -1;
     }
 
-    let timeout_ns = if timeout < 0 { None } else { Some(timeout as u64 * 1_000_000) };
-
-    let n = nfds as usize;
-    let entries: alloc::vec::Vec<(i32, i16)> = (0..n).map(|i| ((*fds.add(i)).fd, (*fds.add(i)).events)).collect();
-    let poller = toyos::poller::Poller::new(n as u32);
-    for (entry, fd, interest) in crate::pollreq::watches(&entries) {
-        poller.watch_raw(toyos_abi::RawHandle(fd as u32), interest, entry as u64);
-    }
-
-    let mut ready_set = alloc::vec![false; n];
-    poller.wait(1, timeout_ns.unwrap_or(u64::MAX), |token| {
-        if (token as usize) < n { ready_set[token as usize] = true; }
-    });
-    let mut ready = 0i32;
-    for i in 0..n {
-        let answered = ready_set[crate::pollreq::watch_of(&entries, i)];
-        let pfd = &mut *fds.add(i);
-        pfd.revents = 0;
-        if answered {
-            pfd.revents = pfd.events;
-            ready += 1;
+    let deadline = (timeout >= 0).then(|| toyos_abi::clock::nanos_since_boot().saturating_add(timeout as u64 * 1_000_000));
+    // The descriptors that are no stream, each as the kernel handle it is watched by.
+    let others: alloc::vec::Vec<(i32, i16)> = entries
+        .iter()
+        .map(|&(fd, events)| match crate::socket::stream_of(fd) {
+            Some(_) => (-1, 0),
+            None => (crate::socket::watched_of(fd).map_or(fd, |handle| handle.0 as i32), events),
+        })
+        .collect();
+    loop {
+        let mut revents = alloc::vec![0i16; n];
+        let mut watching = alloc::vec::Vec::new();
+        for (i, &(fd, events)) in entries.iter().enumerate() {
+            let Some(handle) = crate::socket::stream_of(fd) else { continue };
+            for (flag, way) in ways(events) {
+                match stream::watch(handle, way) {
+                    Ok(Poll::Ready) | Err(_) => revents[i] |= flag,
+                    Ok(Poll::Watching(w)) => watching.push((i, flag, stream::doorbell(handle, way), w)),
+                }
+            }
+        }
+        let ready_now = revents.iter().any(|&r| r != 0);
+        let left = match deadline {
+            _ if ready_now => 0,
+            None => u64::MAX,
+            Some(at) => at.saturating_sub(toyos_abi::clock::nanos_since_boot()),
+        };
+        let poller = toyos::poller::Poller::new((n + watching.len()) as u32);
+        for (entry, fd, interest) in crate::pollreq::watches(&others) {
+            if fd >= 0 {
+                poller.watch_raw(toyos_abi::RawHandle(fd as u32), interest, entry as u64);
+            }
+        }
+        for (k, (_, _, doorbell, _)) in watching.iter().enumerate() {
+            if let Ok(doorbell) = doorbell {
+                poller.watch_raw(*doorbell, toyos::poller::READABLE, (n + k) as u64);
+            }
+        }
+        let mut answered = alloc::vec![false; n + watching.len()];
+        poller.wait(if ready_now { 0 } else { 1 }, left, |token| {
+            if let Some(slot) = answered.get_mut(token as usize) {
+                *slot = true;
+            }
+        });
+        for (i, flag, _, w) in watching {
+            if stream::unwatch(w) {
+                revents[i] |= flag;
+            }
+        }
+        for i in 0..n {
+            if others[i].0 >= 0 && answered[crate::pollreq::watch_of(&others, i)] {
+                revents[i] = entries[i].1;
+            }
+        }
+        let ready = revents.iter().filter(|&&r| r != 0).count();
+        let expired = deadline.is_some_and(|at| toyos_abi::clock::nanos_since_boot() >= at);
+        if ready > 0 || expired {
+            for (i, r) in revents.into_iter().enumerate() {
+                (*fds.add(i)).revents = r;
+            }
+            return ready as i32;
         }
     }
-    ready
 }

@@ -1,7 +1,8 @@
 //! Listeners: a passive open of [tcp]'s and the pipe its owner reads its wakes from. The queues
 //! are [tcp]'s: handshakes in progress, and connections that finished theirs and wait, oldest
-//! first. A connection that waits is nobody's stream yet; an accept makes the oldest one a
-//! stream on the pipes the accept hands over.
+//! first. A connection that waits is nobody's stream yet, its text held in [tcp]'s own storage;
+//! an accept makes the oldest one a stream on the region the accept lends, and what it held moves
+//! there at its offsets, text past a hole included, the FIN staying [tcp]'s state.
 //!
 //! **The owner holds one unspent wake for each connection that waits and that there is a place
 //! for, and an accept spends one whatever it answers.** The owner reads a wake and then accepts,
@@ -39,8 +40,18 @@ use toyos_net_shard::ListenError;
 use toyos_net_tcp::{Endpoint, Error, Options};
 use toyos_net_wire::{Instant, Port};
 
-use crate::streams::{Pipes, StreamId, WriteRefusal};
+use crate::streams::{Session, StreamId};
 use crate::Node;
+
+/// Why the write end of a listener's wake pipe took nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WriteRefusal {
+    Full,
+    /// Nobody holds the read end.
+    Gone,
+    /// Anything else: the handle is not the pipe end its owner said it was.
+    Broken,
+}
 
 /// The write end of the pipe a listener's owner reads its wakes from. Dropped, the owner reads
 /// the end.
@@ -76,13 +87,13 @@ pub struct Accepted {
     pub nodelay: bool,
 }
 
-/// Why an accept took no connection. Whatever waits still waits, and the pipe ends are dropped.
+/// Why an accept took no connection. Whatever waits still waits, and the session is dropped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AcceptRefused {
     /// The id names no listener.
     NoListener,
-    /// The request carried no pipes.
-    NoPipes,
+    /// The request carried no region.
+    NoRegion,
     /// The node holds all it has places for (`places`), whatever waits.
     Full,
     /// No connection waits.
@@ -149,25 +160,24 @@ impl Node {
         true
     }
 
-    /// The owner's accept: the oldest connection waiting at `id` becomes a stream on `pipes`,
-    /// and what it already received moves at once.
-    pub fn accept(&mut self, now: Instant, id: ListenerId, pipes: Option<Pipes>) -> Result<Accepted, AcceptRefused> {
+    /// The owner's accept: the oldest connection waiting at `id` becomes a stream on `session`'s
+    /// region, and what it already received moves there at once.
+    pub fn accept(&mut self, now: Instant, id: ListenerId, session: Option<Box<dyn Session>>) -> Result<Accepted, AcceptRefused> {
         let Some(listener) = self.listeners.live.get_mut(&id) else { return Err(AcceptRefused::NoListener) };
         listener.unspent = listener.unspent.saturating_sub(1);
         let bound = listener.bound;
-        let answer = self.take(bound, pipes);
+        let answer = self.take(bound, session);
         self.pass(now, false);
         answer
     }
 
-    fn take(&mut self, bound: toyos_net_tcp::ListenerId, pipes: Option<Pipes>) -> Result<Accepted, AcceptRefused> {
-        let Some(pipes) = pipes else { return Err(AcceptRefused::NoPipes) };
+    fn take(&mut self, bound: toyos_net_tcp::ListenerId, session: Option<Box<dyn Session>>) -> Result<Accepted, AcceptRefused> {
+        let Some(session) = session else { return Err(AcceptRefused::NoRegion) };
         if self.room() == 0 {
             return Err(AcceptRefused::Full);
         }
         let Some((conn, tuple, options)) = self.stack.tcp_accept(bound) else { return Err(AcceptRefused::Nothing) };
-        // The peer's address is what `streams` counts a stream its client can see no more by.
-        let id = self.streams.accepted(conn, tuple.remote.addr, options, pipes);
+        let id = self.streams.accepted(&mut self.stack, conn, options, session);
         Ok(Accepted { id, remote: tuple.remote, local: tuple.local.port, nodelay: options.nodelay })
     }
 
