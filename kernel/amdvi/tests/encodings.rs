@@ -282,20 +282,24 @@ fn the_smi_filter_sits_where_48882_puts_it() {
 
 /// Figure 3 / Table 4, as the SMI filter records a refused SMI (§2.1.5.1):
 /// an `IO_PAGE_FAULT` whose address is `FDF8h` at [39:24], `MT[2:0]` 010b at
-/// [4:2], `MT[3]` [7] and `DM` [6] zero, [1:0] and [47:40] zero; the vector
-/// [23:16], destination [15:8], `TM` [5] and [63:48] are not read.
+/// [4:2], `MT[3]` [7] and `DM` [6] zero, [1:0] zero, and [63:40] all zero
+/// or, as the unit writes the interrupt range (§2.2.5), all ones; the
+/// vector [23:16], destination [15:8] and `TM` [5] are not read.
 #[test]
 fn an_smi_the_filter_refused_is_told_from_a_dma_fault() {
     let fault = |address: u64| event([word(&[(15, 0, 0x00A3), (63, 60, 2)]), address]);
     let smi_at = word(&[(39, 24, 0xFDF8), (4, 2, 0b010)]);
     assert_eq!(fault(smi_at), Event::RefusedSmi { device: 0x00A3, address: smi_at });
-    let ignored = smi_at | word(&[(23, 16, 0xFF), (15, 8, 0xFF), (5, 5, 1), (63, 48, 0xFFFF)]);
+    let ignored = smi_at | word(&[(23, 16, 0xFF), (15, 8, 0xFF), (5, 5, 1)]);
     assert_eq!(fault(ignored), Event::RefusedSmi { device: 0x00A3, address: ignored });
+    let extended = smi_at | word(&[(63, 40, 0xFF_FFFF)]);
+    assert_eq!(fault(extended), Event::RefusedSmi { device: 0x00A3, address: extended });
     for not_smi in [
         word(&[(39, 24, 0xFDF8), (4, 2, 0b000)]),
         smi_at | word(&[(7, 7, 1)]),
         smi_at | word(&[(6, 6, 1)]),
         smi_at | word(&[(40, 40, 1)]),
+        smi_at | word(&[(63, 48, 0xFFFF)]),
         0x4000_0000_0000,
         0xFEE0_0008,
     ] {
