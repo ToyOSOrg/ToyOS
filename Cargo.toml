@@ -93,6 +93,7 @@ members = [
     "system/compositor",
     "system/compositor/desktop",
     "system/compositor/sprite",
+    "system/compositor/virtio-gpu",
     "system/console",
     "system/diskserver",
     "system/filepicker",

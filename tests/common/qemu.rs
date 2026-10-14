@@ -681,9 +681,9 @@ pub enum Profile {
     /// disk is the only storage it has, and the only device its firmware can
     /// boot.
     HeadlessNoUsb,
-    /// [`Profile::Headless`] with a virtio-gpu behind the unit: a virtio
-    /// function the kernel still drives itself beside the console, which is
-    /// what `virtio-no-access-platform` withholds the bit from.
+    /// [`Profile::Headless`] with a virtio-gpu behind the unit: the suite's
+    /// one machine whose display a process drives, the compositor through
+    /// its claim.
     HeadlessVirtioGpu,
     /// [`Profile::Headless`] with a second controller, QEMU's `qemu-xhci`
     /// on MSI and with no MSI-X, carrying a stick and a keyboard: the
@@ -929,7 +929,7 @@ struct Shape {
     /// RNDR for firmware or the kernel to draw from; a q35's firmware answers
     /// the protocol from RDRAND without one.
     rng: bool,
-    /// A virtio-gpu, which the kernel drives.
+    /// A virtio-gpu, which the compositor drives.
     virtio_gpu: bool,
 }
 
@@ -1076,6 +1076,9 @@ pub struct BootOptions {
     /// Open a per-instance QMP socket, which `screendump` needs. Per-instance
     /// because screen tests boot their own QEMU and several may exist at once.
     pub qmp: bool,
+    /// Serve the display over a per-instance VNC socket: a host window a
+    /// client resizes ([`super::vnc::resize`]).
+    pub vnc: bool,
     /// Which of [`DECLARED_KERNEL_BUILDS`] this boot wants, and empty for the
     /// kernel an image ships. Only a test whose subject *is* a build sets it;
     /// everything else names an actuator in [`BootOptions::kernel_params`]
@@ -1140,6 +1143,7 @@ impl Default for BootOptions {
             smp: 2,
             profile: Profile::Headless,
             qmp: false,
+            vnc: false,
             kernel_features: &[],
             kernel_params: &[],
             mute: false,
@@ -1650,6 +1654,10 @@ impl QemuInstance {
     /// `BootOptions { qmp: true }`.
     pub fn qmp_socket(&self) -> &Path {
         self.sockets.qmp.as_deref().expect("qmp_socket needs BootOptions { qmp: true }")
+    }
+
+    pub fn vnc_socket(&self) -> &Path {
+        self.sockets.vnc.as_deref().expect("vnc_socket needs BootOptions { vnc: true }")
     }
 
     pub fn run_test(&mut self, name: &str, timeout: Duration) -> TestResult {
@@ -2237,6 +2245,9 @@ fn qemu_command(
         (Arch::Aarch64, other) => panic!("`virt` has no `-vga {other}`"),
     }
     qemu.arg("-display").arg("none").arg("-no-reboot");
+    if let Some(socket) = vnc_socket(socket_dir, options) {
+        qemu.arg("-vnc").arg(format!("unix:{}", socket.display()));
+    }
     if let Some(base) = options.rtc_base {
         qemu.arg("-rtc").arg(format!("base={base}"));
     }
@@ -2388,19 +2399,26 @@ fn qemu_command(
 struct Sockets {
     dir: TempDir,
     qmp: Option<PathBuf>,
+    vnc: Option<PathBuf>,
 }
 
 impl Sockets {
     fn new(options: &BootOptions) -> Sockets {
         let dir = TempDir::short("boot");
         let qmp = qmp_socket(&dir, options);
-        Sockets { dir, qmp }
+        let vnc = vnc_socket(&dir, options);
+        Sockets { dir, qmp, vnc }
     }
 }
 
 /// The QMP socket `options` asks for, named in `dir`.
 fn qmp_socket(dir: &Path, options: &BootOptions) -> Option<PathBuf> {
     options.qmp.then(|| dir.join("qmp.sock"))
+}
+
+/// The VNC socket `options` asks for, named in `dir`.
+fn vnc_socket(dir: &Path, options: &BootOptions) -> Option<PathBuf> {
+    options.vnc.then(|| dir.join("vnc.sock"))
 }
 
 /// Every file one boot owns, so that adding another does not lengthen a

@@ -3,8 +3,8 @@
 //! Renders log records as an 8x16 text grid onto the UEFI GOP framebuffer,
 //! through `LogRecord`'s `Display`, so no second formatter can drift from
 //! `logkeeper`. [`capture`] freezes the report before `panic_flush` drains it;
-//! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. virtio-gpu
-//! is unsupported: its scanout needs the unbounded-poll wedge this module avoids.
+//! [`render`] paints it inside `halt_all_cpus`, before `panic_flush`. A display
+//! a process drives, virtio-gpu's, is no scanout this module can reach.
 //!
 //! The hold this module ends a panic in, [`hold_the_panel`], is also where
 //! `crate::panic_reboot`'s bound is watched. It reads no input and scrolls
@@ -341,34 +341,26 @@ static PENDING: FbCell = FbCell(UnsafeCell::new(Fb::DETACHED));
 static RAW_PHYS: AtomicU64 = AtomicU64::new(0);
 static RAW_SIZE: AtomicU64 = AtomicU64::new(0);
 
-/// Boot-time and `set_resolution`-window only: publishers never race.
+/// Boot-time only: publishers never race.
 fn publish(fb: Fb) {
     forget_the_glass();
     FB.publish(fb.words());
 }
 
-/// Stop painting until the next [`rearm`], for a window where the framebuffer may be freed and reallocated.
-/// Worst case becomes no console, never a write into memory that has been freed and reused.
+/// Stop painting until the next [`rearm`]: no console, never a write into
+/// memory the scanout no longer is.
 pub fn detach() {
     publish(Fb::DETACHED);
 }
 
-/// Re-publish the armed descriptor after such a window.
+/// Re-publish the armed descriptor.
 pub fn rearm() {
-    // SAFETY: `PENDING` has one writer at a time (`arm`/`disable`,
-    // single-threaded, or `set_resolution`'s single-CPU window); `Fb` is `Copy`, so this holds no reference into the cell.
+    // SAFETY: `PENDING`'s one writer is `arm`, single-threaded at boot; `Fb`
+    // is `Copy`, so this holds no reference into the cell.
     let fb = unsafe { *PENDING.0.get() };
     if validate(&fb) {
         publish(fb);
     }
-}
-
-/// Give up the display permanently when virtio-gpu wins device selection; clearing `PENDING` stops a later `rearm` resurrecting it.
-pub fn disable() {
-    // SAFETY: sound as `rearm`'s read — `PENDING` has one writer, called from the single-threaded boot sequence.
-    unsafe { *PENDING.0.get() = Fb::DETACHED };
-    RAW_PHYS.store(0, Ordering::Relaxed);
-    detach();
 }
 
 /// One publication whole, or nothing: a descriptor still changing is no
@@ -453,7 +445,7 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
         return;
     }
 
-    // SAFETY: sound as `disable`'s write — `arm` runs once, single-threaded, before any AP starts.
+    // SAFETY: `arm` runs once, single-threaded, before any AP starts.
     unsafe { *PENDING.0.get() = fb };
     RAW_PHYS.store(args.gop_framebuffer, Ordering::Relaxed);
     RAW_SIZE.store(args.gop_framebuffer_size, Ordering::Relaxed);
@@ -499,7 +491,7 @@ pub fn arm(args: &KernelArgs, maps: &[MemoryMapEntry]) {
             uefi_type
         );
         // Cleared too, so a later `rearm` cannot resurrect a scanout the PMM owns.
-        // SAFETY: sound as `disable`'s write — one writer, in the single-threaded boot sequence.
+        // SAFETY: still `arm`'s single-threaded run, before any AP starts.
         unsafe { *PENDING.0.get() = Fb::DETACHED };
         RAW_PHYS.store(0, Ordering::Relaxed);
         detach();

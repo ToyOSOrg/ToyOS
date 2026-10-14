@@ -1,7 +1,8 @@
-# The boot `the_opening_exchange_with_qemus_agent_completes` reads: the
-# clipboard agent against QEMU's own vdagent, with the compositor whose
-# clipboard it watches, on `Profile::HeadlessVirtioGpu`, the one virtio machine
-# with a framebuffer for the compositor to claim.
+# The boot `the_opening_exchange_with_qemus_agent_completes` and
+# `the_compositor_drives_the_virtio_gpu` read: the clipboard agent against
+# QEMU's own vdagent, with the compositor whose clipboard it watches, on
+# `Profile::HeadlessVirtioGpu`, the one virtio machine with a display for the
+# compositor to drive.
 #
 # test-runner makes the boot announce itself.
 
@@ -18,7 +19,7 @@ syscap = ["logread"]
 [programs.compositor]
 service = true
 serves = ["compositor", "prompt", "clipboard", "input"]
-devices = ["framebuffer", "keyboard", "mouse"]
+devices = ["pci:1af4:1050", "keyboard", "mouse"]
 
 [programs.vdagent]
 devices = ["pci:1af4:1043"]

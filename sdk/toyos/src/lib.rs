@@ -16,7 +16,6 @@ pub mod census;
 pub mod device;
 pub mod endow;
 pub mod fs;
-pub mod gpu;
 pub mod poller;
 pub mod power;
 pub mod wake;

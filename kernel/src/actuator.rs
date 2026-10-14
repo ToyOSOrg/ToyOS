@@ -120,9 +120,6 @@ actuators! {
     /// a quantum, and take its interrupts with them open.
     timer_floor = "timer-floor";
 
-    /// Withhold `VIRTIO_F_ACCESS_PLATFORM` from every virtio device but the console, staging a function whose addresses the unit never translates.
-    virtio_no_access_platform = "virtio-no-access-platform";
-
     /// Leave every IOMMU unit as firmware may hand one over, just before this
     /// kernel takes it: a VT-d unit queueing, translating and remapping
     /// through tables of its own, an AMD-Vi unit blocking every device's DMA

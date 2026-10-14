@@ -27,11 +27,14 @@ What is left:
    drawing its chrome, text, icons and cursor at it and relaying windows out
    on a change, terminal, filepicker and `files` at the scale, and the winit
    fork's `scale_factor()`.
-2. **virtio-gpu leaves the kernel** (stage 1 of
+2. Done: **virtio-gpu left the kernel** (stage 1 of
    `issues/every-driver-is-still-in-the-kernel.md`): the compositor drives it
-   through a `pci:1af4:1050` claim and follows the host window's display
-   events. Blocked on `issues/a-cargo-run-boot-claims-every-pcidev-slot.md`:
-   the Virtio profile's fifth claim is refused until a slot is free.
+   through a `pci:1af4:1050` claim, takes the mode the device prefers and
+   flips to the one each display event asks for, and
+   `the_compositor_drives_the_virtio_gpu` resizes QEMU's display over VNC and
+   reads the guest's new mode. The scale is chosen per event and drawn at by
+   nothing yet, as on GOP; `screen WxH` is still the window protocol's
+   `MSG_SET_RESOLUTION` until the `display` port of item 1.
 
 Constraints already paid for:
 

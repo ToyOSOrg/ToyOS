@@ -9,7 +9,7 @@
 
 use core::fmt;
 
-use crate::layout::Chrome;
+use crate::mode::LEAST;
 
 /// A scale in 120ths: a quarter step from 1 to 4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -24,19 +24,6 @@ const PER_QUARTER: u16 = 30;
 const TARGET_DPI: (u64, u64) = (96 * 28, 24);
 /// Millimetres per inch, as a ratio.
 const MM_PER_INCH: (u64, u64) = (254, 10);
-
-/// A terminal's grid and its cell, which the least screen must hold.
-const TERMINAL: (i32, i32) = (80, 24);
-const CELL: (i32, i32) = (8, 16);
-
-/// The least logical screen: an 80x24 terminal of 8x16 cells in a window
-/// frame, above the taskbar.
-const LEAST: (u32, u32) = {
-    let c = Chrome::DEFAULT;
-    let w = TERMINAL.0 * CELL.0 + c.chrome_w();
-    let h = TERMINAL.1 * CELL.1 + c.chrome_h() + c.taskbar;
-    (w as u32, h as u32)
-};
 
 impl Scale {
     pub const ONE: Self = Self(120);
@@ -71,8 +58,8 @@ impl Scale {
     /// Whether `mode` at this scale is at least [`LEAST`] in logical pixels.
     fn holds_least(self, mode: (u32, u32)) -> bool {
         let n = u64::from(self.0);
-        u64::from(mode.0) * 120 >= u64::from(LEAST.0) * n
-            && u64::from(mode.1) * 120 >= u64::from(LEAST.1) * n
+        u64::from(mode.0) * 120 >= u64::from(LEAST.width) * n
+            && u64::from(mode.1) * 120 >= u64::from(LEAST.height) * n
     }
 }
 
@@ -97,11 +84,6 @@ mod tests {
 
     fn auto(w: u32, h: u32, wmm: u32, hmm: u32) -> alloc::string::String {
         Scale::auto((w, h), (wmm, hmm)).to_string()
-    }
-
-    #[test]
-    fn the_least_screen_is_a_terminal_over_the_taskbar() {
-        assert_eq!(LEAST, (642, 446));
     }
 
     /// The panels M1 read: 309x173 mm and 309x174 mm at 1920x1080.

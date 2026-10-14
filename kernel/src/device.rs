@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use crate::object::device::{DeviceClaim, DeviceInfo, FramebufferBuffers};
+use crate::object::device::{DeviceClaim, DeviceInfo};
 use crate::object::shm::Region;
 use crate::{keyboard, mouse};
 use toyos_abi::FramebufferInfo;
@@ -12,16 +12,15 @@ static TAKEN: [Lock<bool>; DeviceType::ALL.len()] =
     [const { Lock::new(false) }; DeviceType::ALL.len()];
 static FB_INFO: Lock<Option<Screen>> = Lock::new(None);
 
-/// What the display driver published, as a claim needs it.
+/// The firmware's framebuffer, as a claim needs it.
 ///
-/// Screen stores `Region`s rather than `SharedMemObject`s because each claim
-/// mints its own object, and a `SharedMemObject` is retired once its handle
-/// count reaches zero while the screen itself outlives any single claim.
+/// A `Region` rather than a `SharedMemObject` because each claim mints its own
+/// object, and a `SharedMemObject` is retired once its handle count reaches
+/// zero while the screen outlives any single claim.
 #[derive(Clone)]
 pub struct Screen {
     pub info: FramebufferInfo,
-    pub scanout: [Region; 2],
-    pub cursor: Region,
+    pub scanout: Region,
 }
 
 fn taken(class: DeviceType) -> &'static Lock<bool> {
@@ -288,11 +287,8 @@ fn shm(region: Region) -> Arc<crate::object::shm::SharedMemObject> {
     crate::object::shm::SharedMemObject::over(region)
 }
 
-/// The description a framebuffer claim answers with, over freshly minted buffer objects.
-pub fn framebuffer_info(screen: Screen) -> DeviceInfo {
-    let Screen { info, scanout: [front, back], cursor } = screen;
-    DeviceInfo::Framebuffer(
-        info,
-        FramebufferBuffers { scanout: [shm(front), shm(back)], cursor: shm(cursor) },
-    )
+/// The description a framebuffer claim answers with, over a freshly minted
+/// scanout object.
+fn framebuffer_info(screen: Screen) -> DeviceInfo {
+    DeviceInfo::Framebuffer(screen.info, shm(screen.scanout))
 }

@@ -29,12 +29,6 @@ const _: () = assert!(toyos_abi::syscall::SHM_PAGE as u64 == PAGE_2M);
 #[expect(dead_code)]
 pub struct Pages(Vec<pmm::PhysPage>);
 
-impl Pages {
-    pub fn new(pages: Vec<pmm::PhysPage>) -> Self {
-        Self(pages)
-    }
-}
-
 /// A physical range and the memory type every mapping of it must carry:
 /// SDM Vol. 3A §11.12.4 forbids one physical page under two memory types.
 #[derive(Clone)]
@@ -48,8 +42,9 @@ pub struct Region {
 }
 
 impl Region {
-    /// A placeholder for a driver struct built before its buffers exist:
-    /// size zero maps nothing.
+    /// Size zero, which maps nothing: a description's buffer where a control
+    /// needs one and no pages.
+    #[cfg(feature = "boot-actuators")]
     pub fn empty() -> Self {
         Self { phys: DirectMap::from_phys(0), size: 0, cache: CachePolicy::Normal, pages: None }
     }

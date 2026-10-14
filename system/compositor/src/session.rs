@@ -19,7 +19,7 @@ use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
-use toyos::{ipc, system, AsHandle, FramebufferDev, Keyboard, Mouse};
+use toyos::{ipc, system, AsHandle, Keyboard, Mouse};
 use toyos_abi::input::RawKeyEvent;
 use toyos_abi::syscall::DeviceType;
 use toyos_abi::RawHandle;
@@ -30,7 +30,7 @@ use toyos_desktop::volume::{overlay_rect, Overlay, Request, Requests, Shown};
 use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_STEP, MSG_VOLUME_UNAVAILABLE};
 use toyos_desktop::{
     cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, set_mode, tab_action, Chrome,
-    CursorStyle, Damage, Desk, Scale, Grab, Held, Hit, KeyAction, Level, Point, Port, PromptGate, Rect,
+    CursorStyle, Damage, Desk, Scale, Grab, Held, Hit, KeyAction, Level, Mode, Point, Port, PromptGate, Rect,
     Released, Stack, TabAction, Verdict, Window, WindowId, WindowMode,
 };
 use window::Screen;
@@ -40,11 +40,12 @@ use crate::client::{
     Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, PendingConn, Watcher, Win,
     HANDSHAKE_TIMEOUT, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
 };
+use crate::display::Display;
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
 use crate::stats::FrameTotals;
 use crate::{
     launcher_apps, CLIPBOARD_POLL_HANDLES, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
-    FLAG_HARDWARE_CURSOR, FRAME_INTERVAL, INPUT_POLL_HANDLES, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
+    FRAME_INTERVAL, INPUT_POLL_HANDLES, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
     VOLUME_POLL_HANDLES,
 };
 
@@ -100,45 +101,15 @@ struct Wallpaper {
 }
 
 impl Wallpaper {
-    fn rescale(&mut self, screen: &Screen) {
+    fn rescale(&mut self, mode: Mode, pixel_format: u32) {
         self.scaled = render::scale_wallpaper(
             &self.raw[8..],
             self.w,
             self.h,
-            screen.width(),
-            screen.height(),
-            screen.pixel_format_raw() != 0,
+            mode.width as usize,
+            mode.height as usize,
+            pixel_format != 0,
         );
-    }
-}
-
-/// The scale for the mode `info` describes, from the panel's size in the EDID
-/// block the claim carries; 1 where it carries none or no size, each said.
-fn panel_scale(info: &toyos_abi::FramebufferInfo) -> Scale {
-    let mode = (info.width, info.height);
-    let said = format!("compositor: display {}x{}", mode.0, mode.1);
-    let edid = info
-        .edid
-        .get(..info.edid_len as usize)
-        .expect("the kernel hands over an EDID length of 0 or one block");
-    if edid.is_empty() {
-        println!("{said}, no panel size, scale 1");
-        return Scale::ONE;
-    }
-    match toyos_edid::BaseBlock::parse(edid).map(|block| block.image_size()) {
-        Ok(toyos_edid::ImageSize::Millimetres { width, height }) => {
-            let scale = Scale::auto(mode, (width, height));
-            println!("{said}, panel {width}x{height} mm, scale {scale}");
-            scale
-        }
-        Ok(size) => {
-            println!("{said}, the panel's EDID gives no size ({size:?}), scale 1");
-            Scale::ONE
-        }
-        Err(why) => {
-            eprintln!("{said}, the panel's EDID is refused: {why}; scale 1");
-            Scale::ONE
-        }
     }
 }
 
@@ -173,20 +144,10 @@ pub struct Session {
     pointers: Pointer,
     poller: Poller,
 
-    /// The claim, and the thing every screen call is made *through*: closing it
-    /// gives the framebuffer back to the kernel, and there is then no handle to
-    /// present with.
-    fb_dev: FramebufferDev,
-    fb_info: toyos_abi::FramebufferInfo,
-    /// The scale the panel's EDID gives the mode the claim was handed.
+    display: Display,
+    /// The scale the panel's EDID gives the mode on screen.
     scale: Scale,
-    /// Held because [`Session::screen`] points into it.
-    _fb_shm: SharedMemory,
-    screen: Screen,
     back: BackBuffer,
-    hw_cursor: bool,
-    /// The hardware cursor's 64x64 BGRA image.
-    cursor_shm: SharedMemory,
     cursors: Cursors,
     current_cursor: CursorStyle,
 
@@ -249,35 +210,15 @@ impl Session {
             .expect("the manifest gives this program the mouse");
         let inputs = endow::acceptor(wire::PORT)
             .expect("the manifest declares this program serves `input`");
-        let fb_dev: FramebufferDev = endow::device(DeviceType::Framebuffer)
-            .expect("the manifest gives this program the framebuffer");
-
-        let fb_info = fb_dev.info().expect("failed to read framebuffer info");
-        let scale = panel_scale(&fb_info);
-        let fb_size = fb_info.stride as usize * fb_info.height as usize * 4;
-        // The scanout and cursor buffers are handles the claim's own read
-        // installed, so a refusal here is the kernel contradicting itself and
-        // not a client doing anything.
-        let fb_shm = SharedMemory::adopt(fb_info.scanout[0], fb_size)
-            .expect("the scanout buffer the framebuffer claim just handed over");
-        let screen = Screen::new(
-            fb_shm.as_ptr(),
-            fb_info.width as usize,
-            fb_info.height as usize,
-            fb_info.stride as usize,
-            fb_info.pixel_format,
-        );
+        let (mut display, scale) = Display::claim();
+        let screen = display.screen();
         let back = BackBuffer::new(screen.width(), screen.height(), screen.pixel_format_raw());
 
-        let hw_cursor = fb_info.flags & FLAG_HARDWARE_CURSOR != 0;
-        let mut cursor_shm = SharedMemory::adopt(fb_info.cursor, 64 * 64 * 4)
-            .expect("the cursor buffer the framebuffer claim just handed over");
         let cursors = Cursors {
             default: Sprite::icon("cursor-bold", [255, 255, 255]),
             resize: Sprite::icon("arrow-down-right-bold", [255, 255, 255]),
             crosshair: Sprite::icon("crosshair-simple-bold", [0, 0, 0]),
         };
-        render::upload_cursor(&fb_dev, cursor_shm.as_mut_slice(), &cursors.default, hw_cursor);
 
         let font_data = std::fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font")
             .expect("failed to read font");
@@ -290,14 +231,9 @@ impl Session {
             raw,
             scaled: Vec::new(),
         };
-        println!(
-            "compositor: wallpaper {}x{}, scaling to {}x{}",
-            wallpaper.w,
-            wallpaper.h,
-            screen.width(),
-            screen.height()
-        );
-        wallpaper.rescale(&screen);
+        let mode = display.mode();
+        println!("compositor: wallpaper {}x{}, scaling to {mode}", wallpaper.w, wallpaper.h);
+        wallpaper.rescale(mode, display.screen().pixel_format_raw());
 
         let icons = TitleBarIcons {
             minimize: Sprite::icon("minus-bold", [255, 255, 255]),
@@ -306,7 +242,7 @@ impl Session {
         };
 
         let apps = launcher_apps();
-        let desk = desk_of(&screen, &font, apps.len());
+        let desk = desk_of(mode, &font, apps.len());
         let total_mem = total_memory();
         let max_windows =
             toyos_desktop::max_windows(total_mem, desk.screen, MAX_WINDOW_SLOTS as usize);
@@ -316,8 +252,8 @@ impl Session {
             total_mem / (1024 * 1024),
         );
 
-        // Sized for the slot ceiling rather than for `max_windows`:
-        // `MSG_SET_RESOLUTION` can raise `max_windows` mid-run.
+        // Sized for the slot ceiling rather than for `max_windows`: a mode
+        // change can raise `max_windows` mid-run.
         let poller = Poller::new(
             FIXED_POLL_HANDLES
                 + MAX_WINDOW_SLOTS
@@ -333,11 +269,13 @@ impl Session {
         poller.watch(&acceptor, READABLE, acceptor.as_handle().0 as u64);
         poller.watch(&prompts, READABLE, prompts.as_handle().0 as u64);
         poller.watch(&clipboards, READABLE, clipboards.as_handle().0 as u64);
+        if let Some(handle) = display.handle() {
+            poller.watch_raw(handle, READABLE, handle.0 as u64);
+        }
 
         let cursor = Point { x: desk.screen.w() / 2, y: desk.screen.h() / 2 };
-        if hw_cursor {
-            fb_dev.move_cursor(cursor.x as u32, cursor.y as u32)
-                .expect("compositor holds the framebuffer claim");
+        if display.hw_cursor() {
+            display.set_cursor(&render::cursor_image(&cursors.default), (cursor.x as u32, cursor.y as u32));
         }
         let mut damage = Damage::default();
         damage.add(desk.screen);
@@ -360,15 +298,10 @@ impl Session {
             inputs,
             sources: Default::default(),
             merge: Merge::default(),
-            pointers: Pointer::new(fb_info.width, fb_info.height),
+            pointers: Pointer::new(mode.width, mode.height),
             poller,
-            fb_dev,
-            fb_info,
-            _fb_shm: fb_shm,
-            screen,
+            display,
             back,
-            hw_cursor,
-            cursor_shm,
             cursors,
             current_cursor: CursorStyle::Default,
             font,
@@ -430,6 +363,7 @@ impl Session {
             self.damage.add(overlay_rect(&self.desk));
         }
         self.present();
+        self.follow_display();
         self.prompt_gone();
     }
 
@@ -450,6 +384,7 @@ impl Session {
         let prompt_ready = self.is_ready(self.prompts.as_handle());
         let clipboard_ready = self.is_ready(self.clipboards.as_handle());
         let volume_ready = self.volume.as_ref().is_some_and(|(conn, _)| self.is_ready(conn.as_handle()));
+        let display_ready = self.display.handle().is_some_and(|handle| self.is_ready(handle));
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle()))
             || self.pending.iter().any(|p| self.is_ready(p.conn.as_handle()))
             || self.watcher.as_ref().is_some_and(|w| self.is_ready(w.conn.as_handle()));
@@ -477,11 +412,15 @@ impl Session {
             && !clipboard_ready
             && !client_ready
             && !volume_ready
+            && !display_ready
         {
             return false;
         }
 
         self.dead.clear();
+        if display_ready {
+            self.display.woke();
+        }
         if kb_ready {
             self.keys();
         }
@@ -595,7 +534,7 @@ impl Session {
     }
 
     fn pixel_format(&self) -> u32 {
-        self.screen.pixel_format_raw()
+        self.display.screen().pixel_format_raw()
     }
 
     /// The kernel's keyboard stream, one source to the merge.
@@ -721,9 +660,8 @@ impl Session {
 
         let was = self.cursor;
         self.cursor = cursor_from_abs(sample.abs_x, sample.abs_y, self.desk.screen);
-        if self.hw_cursor {
-            self.fb_dev.move_cursor(self.cursor.x as u32, self.cursor.y as u32)
-                .expect("compositor holds the framebuffer claim");
+        if self.display.hw_cursor() {
+            self.display.move_cursor((self.cursor.x as u32, self.cursor.y as u32));
         } else {
             let (w, h) = self.cursors.extent();
             self.damage.add(Rect::new(was.x, was.y, w, h));
@@ -735,12 +673,10 @@ impl Session {
             cursor_style(&self.desk, &self.stack, &self.grab, self.cursor, self.launcher_open);
         if wanted != self.current_cursor {
             self.current_cursor = wanted;
-            render::upload_cursor(
-                &self.fb_dev,
-                self.cursor_shm.as_mut_slice(),
-                self.cursors.get(wanted),
-                self.hw_cursor,
-            );
+            if self.display.hw_cursor() {
+                let image = render::cursor_image(self.cursors.get(wanted));
+                self.display.set_cursor(&image, (self.cursor.x as u32, self.cursor.y as u32));
+            }
         }
 
         if sample.pressed {
@@ -1197,7 +1133,12 @@ impl Session {
                         mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
                         continue;
                     };
-                    self.set_resolution(req.width, req.height);
+                    match toyos_desktop::mode::follow(Mode::new(req.width, req.height)) {
+                        Ok(mode) => {
+                            self.change_mode(mode);
+                        }
+                        Err(why) => println!("compositor: a client asks for a mode refused: {why}"),
+                    }
                     self.answer_resolution(handle);
                 }
                 // The one message a client can ask for faster than it can read
@@ -1568,8 +1509,8 @@ impl Session {
     }
 
     fn answer_resolution(&mut self, handle: RawHandle) {
-        let reply =
-            window::ResolutionInfo { width: self.fb_info.width, height: self.fb_info.height };
+        let mode = self.display.mode();
+        let reply = window::ResolutionInfo { width: mode.width, height: mode.height };
         if ipc::try_send(handle, window::MSG_RESOLUTION_CHANGED, &reply).is_err() {
             mark_dead(&mut self.dead, handle, DropReason::NotReading);
         }
@@ -1580,10 +1521,11 @@ impl Session {
     /// client holding `compositor` can ask.
     fn answer_inspect(&mut self, handle: RawHandle) {
         let mut snap = toyos_inspect::Snapshot::new(toyos_inspect::DISPLAY);
-        snap.put("width", self.fb_info.width);
-        snap.put("height", self.fb_info.height);
+        let mode = self.display.mode();
+        snap.put("width", mode.width);
+        snap.put("height", mode.height);
         snap.put("scale", self.scale.to_string());
-        snap.put("cursor", if self.hw_cursor { "hardware" } else { "software" });
+        snap.put("cursor", if self.display.hw_cursor() { "hardware" } else { "software" });
         snap.put("windows.open", self.stack.len());
         snap.put("windows.max", self.max_windows);
         self.totals.inspect(&mut snap);
@@ -1594,32 +1536,19 @@ impl Session {
         }
     }
 
-    fn set_resolution(&mut self, width: u32, height: u32) {
-        let Ok(info) = self.fb_dev.set_resolution(width, height) else {
-            return;
-        };
-        self.fb_info = info;
-        let size = info.stride as usize * info.height as usize * 4;
-        self._fb_shm = SharedMemory::adopt(info.scanout[0], size)
-            .expect("the scanout buffer the mode set just handed over");
-        self.screen = Screen::new(
-            self._fb_shm.as_ptr(),
-            info.width as usize,
-            info.height as usize,
-            info.stride as usize,
-            info.pixel_format,
-        );
-        self.back =
-            BackBuffer::new(self.screen.width(), self.screen.height(), self.pixel_format());
-        self.desk = desk_of(&self.screen, &self.font, self.apps.len());
-        self.pointers.screen(info.width, info.height);
+    /// Everything sized by the screen, for `mode`: the back buffer, the desk,
+    /// the pointer's range, the window budget and the wallpaper; every window
+    /// reflowed onto it and the whole screen damaged.
+    fn relayout(&mut self, mode: Mode) {
+        self.back = BackBuffer::new(mode.width as usize, mode.height as usize, self.pixel_format());
+        self.desk = desk_of(mode, &self.font, self.apps.len());
+        self.pointers.screen(mode.width, mode.height);
         // What a window costs moved, so what we can afford moved with it.
         // Windows already open are left alone if the new figure is below their
         // count — the cap gates creation, it does not evict.
         self.max_windows =
             toyos_desktop::max_windows(self.total_mem, self.desk.screen, MAX_WINDOW_SLOTS as usize);
-        self.wallpaper.rescale(&self.screen);
-
+        self.wallpaper.rescale(mode, self.pixel_format());
         for i in 0..self.stack.len() {
             match self.stack[i].mode {
                 WindowMode::Normal => {
@@ -1632,6 +1561,51 @@ impl Session {
         self.cursor.x = self.cursor.x.min(self.desk.screen.x1 - 1);
         self.cursor.y = self.cursor.y.min(self.desk.screen.y1 - 1);
         self.damage.add(self.desk.screen);
+    }
+
+    /// Take the mode the display's output now asks for, where it asks.
+    fn follow_display(&mut self) {
+        if let Some((mode, scale)) = self.display.followed() {
+            if self.change_mode(mode) {
+                self.scale = scale;
+            }
+        }
+    }
+
+    /// Flip to `mode` (§5.7.6.3 on virtio-gpu): its scanout made, the whole
+    /// desktop laid out and composed into it while the old mode is on screen,
+    /// then shown. A mode the display declines leaves the old one, said;
+    /// whether `mode` is on screen.
+    fn change_mode(&mut self, mode: Mode) -> bool {
+        let old = self.display.mode();
+        if mode == old {
+            return true;
+        }
+        let pending = match self.display.prepare(mode) {
+            Ok(pending) => pending,
+            Err(why) => {
+                println!("compositor: mode {mode} declined, {old} stays: {why}");
+                return false;
+            }
+        };
+        self.relayout(mode);
+        let regions = self.compose();
+        blit(&pending.screen, &self.back, &regions);
+        match self.display.show(pending) {
+            Ok(()) => {
+                println!("compositor: mode {mode}");
+                if self.display.hw_cursor() {
+                    self.display.move_cursor((self.cursor.x as u32, self.cursor.y as u32));
+                }
+                self.frame_callbacks(&regions);
+                true
+            }
+            Err(why) => {
+                println!("compositor: mode {mode} declined, {old} stays: {why}");
+                self.relayout(old);
+                false
+            }
+        }
     }
 
     fn reap(&mut self) {
@@ -1666,6 +1640,9 @@ impl Session {
 
     /// Re-arm the one-shot poll registrations for every handle that fired.
     fn rearm(&mut self, kb: bool, mouse: bool, inputs: bool, acceptor: bool, prompts: bool, clipboards: bool) {
+        if let Some(handle) = self.display.handle().filter(|handle| self.is_ready(*handle)) {
+            self.poller.watch_raw(handle, READABLE, handle.0 as u64);
+        }
         if let Some((conn, _)) = &self.volume {
             let handle = conn.as_handle();
             if self.is_ready(handle) {
@@ -1742,16 +1719,28 @@ impl Session {
     }
 
     fn present(&mut self) {
-        if self.damage.is_empty() {
-            return;
-        }
-        let regions = self.damage.take(self.desk.screen);
-        if regions.is_empty() {
-            return;
-        }
         // Two clock syscalls per composited frame — 120/s at the frame cap —
         // which is what any measure of a frame costs here.
         let started = Instant::now();
+        let regions = self.compose();
+        if regions.is_empty() {
+            return;
+        }
+        let damage_px = blit(self.display.screen(), &self.back, &regions);
+        self.totals.record(started.elapsed().as_nanos() as u64, regions.len(), damage_px);
+        self.display.present(&regions);
+        if self.totals.frames() == 1 {
+            println!("compositor: the first frame is on the panel");
+        }
+        self.frame_callbacks(&regions);
+    }
+
+    /// Compose every damaged region into the back buffer, and answer them.
+    fn compose(&mut self) -> Vec<Rect> {
+        if self.damage.is_empty() {
+            return Vec::new();
+        }
+        let regions = self.damage.take(self.desk.screen);
         let assets = Assets {
             font: &self.font,
             icons: &self.icons,
@@ -1780,7 +1769,7 @@ impl Session {
 
         // Into the back buffer, so a region containing the cursor carries it
         // over with everything else rather than the panel being touched twice.
-        if !self.hw_cursor {
+        if !self.display.hw_cursor() {
             let sprite = self.cursors.get(self.current_cursor);
             let rect = Rect::new(
                 self.cursor.x,
@@ -1792,33 +1781,7 @@ impl Session {
                 render::draw_software_cursor(&self.back.surface, sprite, self.cursor);
             }
         }
-
-        let mut damage_px = 0;
-        for region in &regions {
-            self.screen.blit(
-                region.x0 as usize,
-                region.y0 as usize,
-                region.w() as usize,
-                region.h() as usize,
-                self.back.surface.width(),
-                self.back.region(*region),
-            );
-            damage_px += region.area();
-        }
-        self.totals.record(started.elapsed().as_nanos() as u64, regions.len(), damage_px);
-
-        for region in &regions {
-            self.fb_dev
-                .present(
-                    region.x0 as u32,
-                    region.y0 as u32,
-                    region.w() as u32,
-                    region.h() as u32,
-                )
-                .expect("compositor holds the framebuffer claim");
-        }
-
-        self.frame_callbacks(&regions);
+        regions
     }
 
     /// Tell every window that presented and was composited that its frame is
@@ -1984,10 +1947,27 @@ fn launcher() -> mpsc::Sender<String> {
     launches
 }
 
-fn desk_of(screen: &Screen, font: &font::Font, apps: usize) -> Desk {
+/// Carry `regions` of the back buffer to `screen`, and answer the pixels.
+fn blit(screen: &Screen, back: &BackBuffer, regions: &[Rect]) -> u64 {
+    let mut pixels = 0;
+    for region in regions {
+        screen.blit(
+            region.x0 as usize,
+            region.y0 as usize,
+            region.w() as usize,
+            region.h() as usize,
+            back.surface.width(),
+            back.region(*region),
+        );
+        pixels += region.area();
+    }
+    pixels
+}
+
+fn desk_of(mode: Mode, font: &font::Font, apps: usize) -> Desk {
     Desk {
         chrome: Chrome::DEFAULT,
-        screen: Rect::new(0, 0, screen.width() as i32, screen.height() as i32),
+        screen: Rect::new(0, 0, mode.width as i32, mode.height as i32),
         font_w: font.width() as i32,
         apps,
     }

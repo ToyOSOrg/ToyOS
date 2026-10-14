@@ -88,7 +88,6 @@ mod pipe;
 mod device;
 mod pcidev;
 mod isa;
-mod gpu;
 mod user_ptr;
 mod vma;
 mod syscall;
@@ -108,7 +107,7 @@ mod late_panic {
 
 use alloc::boxed::Box;
 use arch::{cpu, percpu};
-use drivers::{acpi, gop, pci, serial, virtio_console, virtio_gpu, xhci};
+use drivers::{acpi, gop, pci, serial, virtio_console, xhci};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_rootimage::handoff::{held, Descriptor};
 
@@ -177,10 +176,6 @@ fn gop_edid(args: &KernelArgs) -> ([u8; toyos_abi::boot::EDID_BLOCK], u32) {
         len if len == toyos_abi::boot::EDID_BLOCK as u64 => (args.gop_edid, len as u32),
         other => panic!("the loader wrote {other} as gop_edid_len, which is 0 or {}", toyos_abi::boot::EDID_BLOCK),
     }
-}
-
-fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
-    gpu::register(driver, info);
 }
 
 /// The boot from power-on, off the loader's [`cpu::counter`] readings and
@@ -535,12 +530,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
 
     drivers::hda::init(&pci_devices);
 
-    if let Some((gpu_driver, gpu_info)) = virtio_gpu::init(&pci_devices) {
-        log!("GPU: using VirtIO");
-        // virtio's scanout is only reachable through a virtqueue round trip behind GPU.lock(), which the panic path may not take.
-        drivers::panic_console::disable();
-        register_gpu(gpu_driver, gpu_info);
-    } else if kernel_args.gop_framebuffer != 0 {
+    if kernel_args.gop_framebuffer != 0 {
         log!("GPU: using UEFI GOP");
         match gop::init(
             kernel_args.gop_framebuffer,
@@ -551,11 +541,11 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
             kernel_args.gop_pixel_format,
             gop_edid(kernel_args),
         ) {
-            Some((gpu_driver, gpu_info)) => register_gpu(gpu_driver, gpu_info),
+            Some(screen) => device::set_framebuffer_info(screen),
             None => log!("GPU: none this boot, running headless"),
         }
     } else {
-        log!("GPU: none found, running headless");
+        log!("GPU: the firmware handed over no framebuffer");
     }
 
     boot_phase!("devices ready", t_devices);

@@ -19,7 +19,8 @@ use super::{Held, KObjectRef, KObjectVariant, ObjectCore, ZeroHandles};
 pub enum DeviceInfo {
     // Keyboard and mouse answer with events, not a description.
     Events,
-    Framebuffer(FramebufferInfo, FramebufferBuffers),
+    /// The scanout, whose handle the mint installs.
+    Framebuffer(FramebufferInfo, Arc<SharedMemObject>),
     /// The function. No buffer handle beside it: a PCI claimant asks for its
     /// own memory, so this mint installs nothing.
     PciFunction(toyos_abi::pci::PciFunctionInfo),
@@ -31,12 +32,6 @@ pub enum DeviceInfo {
     Isa(toyos_abi::syscall::IsaId),
     /// The fixed hardware's blocks.
     Acpi(toyos_abi::acpi::AcpiInfo),
-}
-
-/// The two scanout buffers and the cursor plane.
-pub struct FramebufferBuffers {
-    pub scanout: [Arc<SharedMemObject>; 2],
-    pub cursor: Arc<SharedMemObject>,
 }
 
 // MAP is required; DUP and TRANSFER let a daemon hand the buffer to another process.
@@ -60,14 +55,9 @@ impl DeviceInfo {
     fn mint(&self, table: &mut HandleTable) -> Result<Box<[u8]>, SyscallError> {
         Ok(match self {
             Self::Events => Box::new([]),
-            Self::Framebuffer(info, buffers) => {
+            Self::Framebuffer(info, scanout) => {
                 let mut info = *info;
-                let h = install_buffers(
-                    table,
-                    &[&buffers.scanout[0], &buffers.scanout[1], &buffers.cursor],
-                )?;
-                info.scanout = [h[0], h[1]];
-                info.cursor = h[2];
+                info.scanout = install_buffers(table, &[scanout])?[0];
                 bytes(&info).into()
             }
             // Nothing to install: every address in it is a size, and the memory
@@ -98,7 +88,6 @@ pub struct DeviceClaim {
 // Minted once: re-minting on a second read would leak a handle each time.
 struct Described {
     info: DeviceInfo,
-    // Shares this lock with `info`: SYS_GPU_SET_RESOLUTION must replace both together.
     bytes: Option<Box<[u8]>>,
 }
 
@@ -192,45 +181,26 @@ impl DeviceClaim {
         self.info_read.store(true, Ordering::Relaxed);
         count as u64
     }
-
-    /// Replace the description, for a mode set that reallocated the buffers — old handles keep working; nothing is revoked.
-    pub fn remint(
-        &self,
-        table: &mut HandleTable,
-        info: DeviceInfo,
-    ) -> Result<Box<[u8]>, SyscallError> {
-        let mut described = self.described.lock();
-        let minted = info.mint(table)?;
-        described.info = info;
-        described.bytes = Some(minted.clone());
-        Ok(minted)
-    }
 }
 
-/// Negative control for the mint's all-or-nothing rule: a three-handle
-/// framebuffer batch minted into a table with room for two must install none.
+/// Negative control for the mint's all-or-nothing rule: a framebuffer
+/// description minted into a table with no room installs nothing.
 #[cfg(feature = "boot-actuators")]
 pub(crate) fn mint_rollback_selftest() {
     use crate::object::shm::{Region, SharedMemObject};
     let mut table = HandleTable::new();
-    table.stage_room(2);
-    let buffers = FramebufferBuffers {
-        scanout: [SharedMemObject::over(Region::empty()), SharedMemObject::over(Region::empty())],
-        cursor: SharedMemObject::over(Region::empty()),
-    };
+    table.stage_room(0);
     let info = DeviceInfo::Framebuffer(
         FramebufferInfo {
-            scanout: [toyos_abi::HANDLE_INVALID; 2],
-            cursor: toyos_abi::HANDLE_INVALID,
+            scanout: toyos_abi::HANDLE_INVALID,
             width: 0,
             height: 0,
             stride: 0,
             pixel_format: 0,
-            flags: 0,
             edid: [0; toyos_abi::boot::EDID_BLOCK],
             edid_len: 0,
         },
-        buffers,
+        SharedMemObject::over(Region::empty()),
     );
     let before = table.iter().count();
     let refused = info.mint(&mut table).is_err();

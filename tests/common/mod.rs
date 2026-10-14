@@ -20,3 +20,5 @@ pub mod qemu;
 pub mod screen;
 pub mod serial;
 pub mod usb;
+/// A VNC client, as far as resizing a host window takes one.
+pub mod vnc;
