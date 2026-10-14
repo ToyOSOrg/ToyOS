@@ -124,6 +124,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use record::Interrupt;
 use toyos_abi::boot::{MemoryMapEntry, RootBridgeWindow};
+use toyos_abi::inventory::Arrival;
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
@@ -174,9 +175,8 @@ struct Function {
     ///
     /// **This is where a function's exclusivity is decided.**
     /// `Claim::acquire`'s per-class flag does not answer for a class that
-    /// names several devices, `build/build.rs`'s `one_claimant_per_device`
-    /// compares `system.toml` strings, and a host-side gate is not the
-    /// capability boundary.
+    /// names several devices, and the manifest's refusal of two matchers on
+    /// one function is a host-side gate, not the capability boundary.
     held: AtomicBool,
     irq: Interrupt,
     /// What its holder's poll waits on: two processes each driving a function
@@ -201,7 +201,8 @@ impl core::fmt::Display for Function {
 
 /// Exactly the functions [`publish`] took, in [`Machine::functions`]' order,
 /// leaked once: null until then and never written again, so a handler reaches
-/// a function's record with no lock.
+/// a function's record with no lock. A function's place here is its
+/// [`Arrival`]'s ([`arrival_of`]), which is therefore never another's.
 static FUNCTIONS: AtomicPtr<&'static [Function]> = AtomicPtr::new(core::ptr::null_mut());
 
 fn functions() -> &'static [Function] {
@@ -212,6 +213,12 @@ fn functions() -> &'static [Function] {
     // SAFETY: non-null only as `publish` stored it: a leaked box, never freed
     // or written again, published with Release once it was whole.
     unsafe { *published }
+}
+
+/// The arrival of function `number`, counted from 1 so a zeroed record names
+/// none.
+fn arrival_of(number: usize) -> Arrival {
+    Arrival(u32::try_from(number + 1).expect("pcidev: fewer functions than a u32 counts"))
 }
 
 /// Function `number`, which a claim or an interrupt named.
@@ -619,8 +626,11 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
     assert!(first.is_ok(), "pcidev: the functions were published twice");
     let mut machine = MACHINE.lock();
     machine.functions = devices.to_vec();
-    machine.identities =
-        devices.iter().map(|d| d.identity(addr_of(segment, requester(d)))).collect();
+    machine.identities = devices
+        .iter()
+        .enumerate()
+        .map(|(number, d)| d.identity(arrival_of(number), addr_of(segment, requester(d))))
+        .collect();
     machine.segment = segment;
     machine.decoded = decoded;
     machine.apertures = apertures;
@@ -794,45 +804,20 @@ impl core::fmt::Display for Refusal {
     }
 }
 
-/// Claim `id`, bring the function up to the point a driver takes over, and
-/// answer what that driver needs to know.
-pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
-    // Among the functions this kernel does not drive (`toyos_pci::claimed`):
-    // the console's virtio-serial and a process's carry one ID.
-    let (matches, resolved) = {
+/// Claim the function that arrived as `arrival`, bring it up to the point a
+/// driver takes over, and answer what that driver needs to know.
+pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
+    let (number, pci, id, driven) = {
         let machine = MACHINE.lock();
-        let matches: Vec<(usize, PciDevice)> =
-            machine.functions.iter().copied().enumerate().filter(|(_, d)| d.is_id(id.vendor, id.device)).collect();
-        let resolved =
-            toyos_pci::claimed(matches.iter().map(|(_, d)| machine.kernel_driven.contains(&requester(d))));
-        (matches, resolved)
+        let number = machine.identities.iter().position(|pci| pci.arrival == arrival).ok_or(ClaimError::Absent)?;
+        let (pci, identity) = (machine.functions[number], &machine.identities[number]);
+        let driven = machine.kernel_driven.contains(&requester(&pci));
+        (number, pci, PciId { vendor: identity.vendor, device: identity.device }, driven)
     };
-    let (number, pci) = match resolved {
-        Ok(at) => matches[at],
-        Err(toyos_pci::Unclaimable::Absent) => return Err(ClaimError::Absent),
-        Err(toyos_pci::Unclaimable::Ambiguous) => {
-            // Refused by name rather than resolved to the first match: a
-            // config that names a card this machine has two of is asking
-            // for one of them and cannot say which.
-            log!(
-                "pcidev: {:04x}:{:04x} names more than one function this kernel does not drive",
-                id.vendor,
-                id.device
-            );
-            return Err(ClaimError::Ambiguous);
-        }
-        Err(toyos_pci::Unclaimable::KernelDriven) => {
-            for (_, pci) in &matches {
-                log!(
-                    "pcidev: PCI {:02x}:{:02x}.{} is driven by this kernel and cannot be claimed",
-                    pci.bus,
-                    pci.dev,
-                    pci.func
-                );
-            }
-            return Err(ClaimError::KernelDriven);
-        }
-    };
+    if driven {
+        log!("pcidev: PCI {:02x}:{:02x}.{} is driven by this kernel and cannot be claimed", pci.bus, pci.dev, pci.func);
+        return Err(ClaimError::KernelDriven);
+    }
 
     // Before anything is taken or touched: with no declaration held, no
     // read this claim would make is known to reach the bus.

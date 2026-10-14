@@ -208,6 +208,9 @@ const RUST_SKIP: &[&str] = &[
     // The same controller, handed to a holder that is killed and claimed
     // again at once, in the same boots as `usbd_spare`.
     "end_returns_claims",
+    // It reads two `edu` functions each held by a `drives` row's process,
+    // which only `a_drives_row_holds_one_process_per_function`'s boot has.
+    "drives_judged",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -361,6 +364,13 @@ fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
 /// The tests whose machine shape *is* the test, each on a boot of its own.
 /// `run_machine_test` dispatches them.
 const MACHINE_TESTS: &[&str] = &[
+    // A `drives` row's one process per function, on QEMU x86-64's q35 with
+    // two `edu` (`Profile::HeadlessTwoEdu`): which functions get one is
+    // `toyos-supervisor`'s, host-tested, and this is the supervisor
+    // performing it — two claims by arrival on identical functions, two
+    // spawns, each process holding its own — which no host build has. No
+    // bench has two identical functions the kernel leaves to a claim.
+    "a_drives_row_holds_one_process_per_function",
     // Whether QEMU's virtio functions negotiated `VIRTIO_F_ACCESS_PLATFORM`
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
@@ -3759,6 +3769,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nvme_disk_boots" => nvme_disk_boots(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
+        "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
@@ -3995,6 +4006,47 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     let refused = serial::Serial::named("usbd_spare refused", said);
     refused.must_say(&format!("usbd_spare: the claim on pci:{SPARE} was refused: PermissionDenied"))?;
     refused.must_say(&format!("pcidev: PCI {at} is driven by this kernel and cannot be claimed"))?;
+    Ok(())
+}
+
+/// A `drives` row's processes on a q35 with two `edu`, which the kernel drives
+/// neither of: the kernel hands each function over once, two `pciholder`s
+/// each say they hold one of the two, and the job reads both still held,
+/// each by a process of its own.
+fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
+    const JOB: &str = "drives_judged";
+    const HOLDING: &str = "pciholder: holding PCI ";
+    const HANDED: &str = " [1234:11e8] handed over, ";
+    let options = BootOptions { profile: qemu::Profile::HeadlessTwoEdu, ..Default::default() };
+    let edus = qemu::profile_argv(&options).iter().filter(|arg| *arg == "edu").count();
+    if edus != 2 {
+        return Err(format!("the machine was to have two edu functions, and QEMU is given {edus}"));
+    }
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let config = compile::repo_root().join("tests/images/drivescase.toml");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], options);
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "both holders' lines", |t| t.matches(HOLDING).count() >= 2)
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let said = serial::Serial::named("the drives boot", console.clone());
+    said.must_be_clean()?;
+    let mut handed: Vec<&str> =
+        console.lines().filter_map(|l| l.split_once("pcidev: PCI ")?.1.split_once(HANDED).map(|(at, _)| at)).collect();
+    let mut holding: Vec<&str> =
+        console.lines().filter_map(|l| l.split_once(HOLDING)?.1.split_whitespace().next()).collect();
+    handed.sort_unstable();
+    holding.sort_unstable();
+    // Each function handed over once, to one holder: a list, so a second
+    // hand-over or a second holder of one function is red.
+    if handed.len() != 2 || handed[0] == handed[1] || holding != handed {
+        return Err(format!("the kernel handed over {handed:?} and the holders say they hold {holding:?}:\n{console}"));
+    }
+    let judged = job_window(&mut qemu, "test_rs_drives_judged")?;
+    let line = judged
+        .lines()
+        .find(|l| l.contains("drives_judged: PCI "))
+        .ok_or_else(|| format!("the job never said who holds the functions:\n{judged}"))?;
+    eprintln!("  [drives] {}", line.trim());
     Ok(())
 }
 

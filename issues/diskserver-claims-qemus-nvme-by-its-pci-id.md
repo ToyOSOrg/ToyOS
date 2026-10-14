@@ -6,11 +6,11 @@ opened: 2026-10-12
 
 # diskserver claims QEMU's NVMe by its PCI id and no other controller
 
-Both shipped boot configs give diskserver one device, `pci:1b36:0010`
-(`images/system.toml`, `images/console.toml`): the vendor and device id of
-QEMU's own `nvme` model, under Red Hat's vendor id. A claim matches the id exactly (`pcidev::claim`,
-`kernel/src/pcidev/mod.rs`), so on any other NVMe controller the supervisor
-endows diskserver nothing, it says `no NVMe controller this row names is on
+Both shipped boot configs give diskserver one device, `pci:01:08:02/1b36:0010`
+(`images/system.toml`, `images/console.toml`): the NVMe class with the vendor and device id of
+QEMU's own `nvme` model, under Red Hat's vendor id. The supervisor matches the id exactly
+(`toyos_manifest::device::PciMatch`, `toyos_supervisor::claims`), so on any other NVMe controller it
+endows diskserver nothing, diskserver says `no NVMe controller this row names is on
 this machine; serving no partition`, and DATA, LOG and BOOT are absent unless
 the image is on a USB stick the kernel drives. The driver is not QEMU's:
 `Controller::open` (`system/diskserver/src/nvme.rs`) takes any function whose
@@ -35,15 +35,15 @@ same for NICs ("init binds drivers to hardware from a declared match table by
 vendor, device and class").
 
 Two constraints a class row meets that an id row does not: a machine with two
-NVMe controllers matches twice, which `pcidev::claim` refuses as `Ambiguous`
-today; and a machine whose NVMe holds another operating system, as the T14's
+NVMe controllers matches twice, which refuses diskserver's start, naming both
+(`toyos_supervisor::claims`); and a machine whose NVMe holds another operating system, as the T14's
 holds Ubuntu, is handed to diskserver, which then serves only the partitions
 its table and grants name (`system/diskserver/src/main.rs`).
 
 **Owner**: whoever holds `issues/toyos-runs-in-any-open-source-hypervisor.md`.
 
 **Exit**: a `devices` row names a PCI function by class code, which
-`toyos_abi::syscall::DeviceRequest::parse` takes and refuses malformed; both
+`toyos_manifest::device::PciMatch::parse` takes and refuses malformed (#926); both
 shipped configs name NVMe that way; and a guest boot whose controller is
 QEMU's `nvme` with `use-intel-id=on` serves DATA through diskserver, which a
 row naming `1b36:0010` instead reds. The configs the T14 boots keep their id

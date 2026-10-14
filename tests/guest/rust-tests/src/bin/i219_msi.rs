@@ -8,6 +8,9 @@
 //! The PCH datasheet (631120 §8.1) and the 82574's (§10.2.4) are what each
 //! reading is held to; no other machine has this function.
 
+#[path = "../function.rs"]
+mod function;
+
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -237,7 +240,7 @@ fn send(driver: &mut Driver, frames: &Window, bytes: &[u8]) {
 
 fn main() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("the test estate is endowed a device-minting capability");
-    let dev = Rc::new(cap.claim_pci::<PciDev>(I219_ID).unwrap_or_else(|why| fail(&format!("the claim was refused: {why:?}"))));
+    let dev = Rc::new(function::claim::<PciDev>(&cap, I219_ID).unwrap_or_else(|why| fail(&format!("the claim was refused: {why:?}"))));
     let info = dev.describe().unwrap_or_else(|why| fail(&format!("the description was refused: {why:?}")));
     let (index, bytes) = info
         .bar_bytes

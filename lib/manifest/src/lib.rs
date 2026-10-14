@@ -18,7 +18,8 @@
 //! serve <name>              the supervisor makes one machine-wide port and endows the acceptor
 //! provide <name>            this program makes its own port, once per instance
 //! receive <name>            a connector in this program's namespace
-//! device <class>            a claim the supervisor mints and endows
+//! device <entry>            a claim the supervisor mints and endows ([`device`])
+//! drive <matcher>           one process of it per PCI function the matcher names
 //! syscap <right>            a right on the SysCap dup the supervisor endows
 //! slots                     the idle slot's partitions and the slot table
 //! service                   a system service: its `HOME` is `/state/<name>`, not the session's
@@ -32,7 +33,8 @@
 //! login                     a launch it makes from the machine's session opens a login session
 //! ```
 //!
-//! [`package`] is the other half: what an installed package says about itself,
+//! [`device`] is what a `devices` or `drives` entry names. [`package`] is the
+//! other half: what an installed package says about itself,
 //! which is which of its own binaries a launch starts and never what it holds.
 //! [`launch`] is who may start what, [`grants`] which folder of the home a
 //! package is granted, [`consent`] how the person at the screen is asked,
@@ -40,6 +42,7 @@
 
 pub mod clipboard;
 pub mod consent;
+pub mod device;
 pub mod display;
 pub mod grants;
 pub mod launch;
@@ -155,21 +158,6 @@ fn data_dir(dir: String, write: bool) -> View {
     View { role, dir, root, write }
 }
 
-/// How often a `restart` row is started again before the supervisor gives up on it: at
-/// most this many ends inside [`RESTART_WINDOW_SECS`]. Past it the row's ports
-/// close, and a client's next connection is answered `Gone`.
-pub const RESTARTS: u32 = 3;
-pub const RESTART_WINDOW_SECS: u64 = 10;
-
-/// One start of a row, as the supervisor asks [`Program::supervised`] about it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Start {
-    /// It was just spawned.
-    Spawned,
-    /// It ended with this exit code.
-    Ended(i32),
-}
-
 pub use toyos_abi::handle::Rights;
 pub use toyos_abi::syscall::{DeviceRequest, DeviceType};
 
@@ -249,7 +237,13 @@ pub struct Program {
     pub provides: Vec<String>,
     /// Names in this program's namespace, each a connector.
     pub receives: Vec<String>,
+    /// Claims the supervisor mints for the one process of this row ([`device::Entry`]).
     pub devices: Vec<String>,
+    /// PCI matchers ([`device::PciMatch`]): the supervisor starts one process
+    /// of this row per function one names and the kernel does not drive,
+    /// holding that function's claim. Such a row serves nothing and is never
+    /// in [`Manifest::start`]; it reaches its consumer through `receives`.
+    pub drives: Vec<String>,
     /// Rights on the `SysCap` duplicate the supervisor endows this program, by the names
     /// [`syscap_rights`] takes. Empty for all but a handful: nothing else in
     /// the system may enter the RT band, mint a device claim, read the machine
@@ -269,8 +263,8 @@ pub struct Program {
     /// the binary once per role, with the role as its argument and the
     /// acceptor of the role's port ([`role_dirs`] are the grants on it).
     pub roles: Vec<String>,
-    /// The supervisor starts it again when it ends, on the same ports, for as long as
-    /// it does not end faster than [`RESTARTS`] allows.
+    /// The supervisor starts it again when it ends other than by exit 0, on the
+    /// same ports or function, within the supervisor's restart budget.
     pub restart: bool,
     /// The folder of the session's home a package's launch was granted
     /// ([`grants::decide`]): set by the supervisor on the row it synthesizes
@@ -286,18 +280,6 @@ pub struct Program {
 }
 
 impl Program {
-    /// Whether the supervisor acts on `start` of this row. At its spawn,
-    /// whether a waiter sees it end: it serves ports, which close with an end
-    /// no restart is owed, or it is `restart`. At its end, whether it is
-    /// started again: it is `restart`, and it ended other than by exit 0,
-    /// which a program says only when it has nothing to serve.
-    pub fn supervised(&self, start: Start) -> bool {
-        match start {
-            Start::Spawned => self.restart || !self.serves.is_empty() || !self.roles.is_empty(),
-            Start::Ended(exit) => self.restart && exit != 0,
-        }
-    }
-
     /// It replaces what the machine runs — the swap port's holder, or the idle
     /// slot's — so it starts only in a login session.
     pub fn login_only(&self) -> bool {
@@ -416,9 +398,21 @@ pub enum RenderError {
     ServesWithoutService(String),
     /// A `roles` entry naming no file-server role.
     NoSuchRole { program: String, role: String },
+    /// A `devices` entry that names no device, or a `drives` entry that is
+    /// no PCI matcher.
+    NoSuchDevice { program: String, entry: String },
+    /// Two entries one device can answer, by row and entry: the second claim
+    /// would be refused at boot, or two rows would race for one function.
+    Overlap { first: (String, String), second: (String, String) },
+    /// A `drives` row that also has what one process per function cannot
+    /// carry: `serves`, `roles` or `devices`, or a place in `[boot] start` or
+    /// another row's `starts`, either of which would start it holding no
+    /// function.
+    Drives { program: String, also: &'static str },
 }
 
 pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
+    claims_apart(manifest)?;
     let mut out = String::new();
     for program in &manifest.programs {
         if program.name.len() > MAX_PROGRAM_NAME {
@@ -439,6 +433,7 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
             ("provides", &program.provides),
             ("receives", &program.receives),
             ("devices", &program.devices),
+            ("drives", &program.drives),
             ("syscap", &program.syscap),
         ] {
             let word = match field {
@@ -446,6 +441,7 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
                 "provides" => "provide",
                 "receives" => "receive",
                 "devices" => "device",
+                "drives" => "drive",
                 _ => "syscap",
             };
             for value in values {
@@ -492,6 +488,43 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         out.push_str(&format!("start {name}\n"));
     }
     Ok(out.into_bytes())
+}
+
+/// Every entry names a device, a `drives` row is one process per function and
+/// nothing else, and no device can answer two entries.
+fn claims_apart(manifest: &Manifest) -> Result<(), RenderError> {
+    let mut seen: Vec<(&str, &str, device::Entry)> = Vec::new();
+    for program in &manifest.programs {
+        let refused = |entry: &String| RenderError::NoSuchDevice { program: program.name.clone(), entry: entry.clone() };
+        if !program.drives.is_empty() {
+            let also = [
+                (!program.serves.is_empty(), "serves"),
+                (!program.roles.is_empty(), "roles"),
+                (!program.devices.is_empty(), "devices"),
+                (manifest.start.contains(&program.name), "[boot] start"),
+                (manifest.programs.iter().any(|row| row.starts.contains(&program.name)), "starts"),
+            ];
+            if let Some((_, also)) = also.into_iter().find(|(has, _)| *has) {
+                return Err(RenderError::Drives { program: program.name.clone(), also });
+            }
+        }
+        let devices = program.devices.iter().map(|e| device::Entry::parse(e).ok_or_else(|| refused(e)).map(|p| (e, p)));
+        let drives = program.drives.iter().map(|e| match device::Entry::parse(e) {
+            Some(parsed @ device::Entry::Pci(_)) => Ok((e, parsed)),
+            _ => Err(refused(e)),
+        });
+        for entry in devices.chain(drives) {
+            let (text, parsed) = entry?;
+            if let Some((row, other, _)) = seen.iter().find(|(_, _, earlier)| earlier.overlaps(&parsed)) {
+                return Err(RenderError::Overlap {
+                    first: (row.to_string(), other.to_string()),
+                    second: (program.name.clone(), text.clone()),
+                });
+            }
+            seen.push((&program.name, text, parsed));
+        }
+    }
+    Ok(())
 }
 
 /// A field that becomes a whole record: no whitespace at all, because the
@@ -563,6 +596,7 @@ pub fn parse(text: &str) -> Manifest {
                     "provide" => program.provides.push(rest.to_string()),
                     "receive" => program.receives.push(rest.to_string()),
                     "device" => program.devices.push(rest.to_string()),
+                    "drive" => program.drives.push(rest.to_string()),
                     "syscap" => program.syscap.push(rest.to_string()),
                     "slots" if rest.is_empty() => program.slots = true,
                     "service" => program.service = true,
@@ -582,47 +616,6 @@ pub fn parse(text: &str) -> Manifest {
 mod tests {
     use super::*;
 
-    fn row(serves: &[&str], roles: &[&str], restart: bool) -> Program {
-        Program {
-            serves: serves.iter().map(|s| s.to_string()).collect(),
-            roles: roles.iter().map(|s| s.to_string()).collect(),
-            restart,
-            ..Program::default()
-        }
-    }
-
-    /// A `restart` row that serves no port has no port to close, and is the
-    /// one row a waiter for ported starts alone would never see end.
-    #[test]
-    fn a_restart_row_with_no_port_is_waited_on() {
-        assert!(row(&[], &[], true).supervised(Start::Spawned));
-    }
-
-    #[test]
-    fn a_row_with_ports_is_waited_on_and_one_that_is_neither_is_not() {
-        assert!(row(&["block"], &[], false).supervised(Start::Spawned));
-        assert!(row(&[], &["data"], false).supervised(Start::Spawned));
-        assert!(!row(&[], &[], false).supervised(Start::Spawned));
-    }
-
-    #[test]
-    fn a_restart_rows_end_other_than_exit_0_is_owed_a_start_and_exit_0_is_not() {
-        for exit in [1, -1, 101, 139] {
-            assert!(row(&[], &[], true).supervised(Start::Ended(exit)), "exit {exit}");
-            assert!(row(&["block"], &[], true).supervised(Start::Ended(exit)), "exit {exit}");
-        }
-        assert!(!row(&[], &[], true).supervised(Start::Ended(0)));
-        assert!(!row(&["block"], &[], true).supervised(Start::Ended(0)));
-    }
-
-    #[test]
-    fn a_row_that_is_not_restart_is_never_owed_a_start() {
-        for exit in [0, 1, 139] {
-            assert!(!row(&["log"], &[], false).supervised(Start::Ended(exit)), "exit {exit}");
-            assert!(!row(&[], &[], false).supervised(Start::Ended(exit)), "exit {exit}");
-        }
-    }
-
     fn sample() -> Manifest {
         Manifest {
             programs: vec![
@@ -641,7 +634,7 @@ mod tests {
                     name: "soundserver".into(),
                     path: "/system/bin/soundserver".into(),
                     serves: vec!["soundserver".into()],
-                    devices: vec!["hda-audio".into(), "pci:1af4:1059".into()],
+                    devices: vec!["hda-audio".into(), "pci:04:01:00/1af4:1059".into()],
                     syscap: vec!["rt".into()],
                     service: true,
                     ..Program::default()
@@ -658,6 +651,13 @@ mod tests {
                     receives: vec!["block".into()],
                     roles: vec!["data".into(), "log".into()],
                     restart: true,
+                    ..Program::default()
+                },
+                Program {
+                    name: "vdagent".into(),
+                    path: "/system/bin/vdagent".into(),
+                    receives: vec!["clipboard".into()],
+                    drives: vec!["pci:07:80:00/1af4:1043".into()],
                     ..Program::default()
                 },
                 Program {
@@ -918,6 +918,92 @@ mod tests {
             render(&bad),
             Err(RenderError::NoSuchRole { program: "fileserver".into(), role: "tmp".into() })
         );
+    }
+
+    /// A row's name, its `devices` and its `drives`.
+    type Row<'a> = (&'a str, &'a [&'a str], &'a [&'a str]);
+
+    fn with_rows(rows: &[Row<'_>]) -> Manifest {
+        Manifest {
+            programs: rows
+                .iter()
+                .map(|(name, devices, drives)| Program {
+                    name: name.to_string(),
+                    path: format!("/system/bin/{name}"),
+                    devices: devices.iter().map(|d| d.to_string()).collect(),
+                    drives: drives.iter().map(|d| d.to_string()).collect(),
+                    ..Program::default()
+                })
+                .collect(),
+            ..Manifest::default()
+        }
+    }
+
+    fn overlap(first: (&str, &str), second: (&str, &str)) -> Result<Vec<u8>, RenderError> {
+        Err(RenderError::Overlap {
+            first: (first.0.into(), first.1.into()),
+            second: (second.0.into(), second.1.into()),
+        })
+    }
+
+    /// **Two entries one device can answer are refused where the image is
+    /// built, naming both**: across rows and within one, a `devices` entry
+    /// and a `drives` matcher alike, and a fixed name written twice.
+    #[test]
+    fn two_entries_one_device_can_answer_are_refused_by_name() {
+        let cases: [(&[Row<'_>], _, _); 7] = [
+            (&[("a", &["framebuffer"], &[]), ("b", &["framebuffer"], &[])], ("a", "framebuffer"), ("b", "framebuffer")),
+            (&[("a", &["isa:0060,0064:1,12"], &[]), ("b", &["isa:0060,0064:1,12"], &[])], ("a", "isa:0060,0064:1,12"), ("b", "isa:0060,0064:1,12")),
+            (
+                &[("a", &["part:0FC63DAF-8483-4772-8E79-3D69D8477DE4"], &[]), ("b", &["part:0FC63DAF-8483-4772-8E79-3D69D8477DE4"], &[])],
+                ("a", "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4"),
+                ("b", "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4"),
+            ),
+            (&[("a", &["pci:01:08:02/1b36:0010"], &[]), ("b", &[], &["pci:01:08:02"])], ("a", "pci:01:08:02/1b36:0010"), ("b", "pci:01:08:02")),
+            (&[("a", &[], &["pci:0c:03:30"]), ("b", &[], &["pci:0c:03:30/1b36:000d"])], ("a", "pci:0c:03:30"), ("b", "pci:0c:03:30/1b36:000d")),
+            (&[("a", &["pci:02:00:00", "pci:02:00:00/1af4:1041"], &[])], ("a", "pci:02:00:00"), ("a", "pci:02:00:00/1af4:1041")),
+            (&[("a", &[], &["pci:ff:00:00", "pci:ff:00:00"])], ("a", "pci:ff:00:00"), ("a", "pci:ff:00:00")),
+        ];
+        for (rows, first, second) in cases {
+            assert_eq!(render(&with_rows(rows)), overlap(first, second), "{rows:?}");
+        }
+        let apart = with_rows(&[
+            ("a", &["framebuffer", "pci:01:08:02/1b36:0010"], &[]),
+            ("b", &["keyboard", "pci:01:08:02/144d:a808"], &[]),
+            ("c", &[], &["pci:0c:03:30"]),
+        ]);
+        assert!(render(&apart).is_ok());
+    }
+
+    #[test]
+    fn an_entry_that_names_no_device_is_refused() {
+        for (devices, drives, entry) in [
+            (&["gpu"][..], &[][..], "gpu"),
+            (&["pci:1af4:1041"], &[], "pci:1af4:1041"),
+            (&[], &["keyboard"], "keyboard"),
+            (&[], &["pci:01:08"], "pci:01:08"),
+        ] {
+            let refused = RenderError::NoSuchDevice { program: "a".into(), entry: entry.into() };
+            assert_eq!(render(&with_rows(&[("a", devices, drives)])), Err(refused));
+        }
+    }
+
+    /// A `drives` row is one process per function, so it serves no port, holds
+    /// no claim but its function's and is started by no `[boot] start`.
+    #[test]
+    fn a_drives_row_is_one_process_per_function_and_nothing_else() {
+        let drives = |change: fn(&mut Manifest)| {
+            let mut m = with_rows(&[("a", &[], &["pci:ff:00:00/1234:11e8"])]);
+            change(&mut m);
+            render(&m)
+        };
+        let refused = |also| Err(RenderError::Drives { program: "a".into(), also });
+        assert!(drives(|_| {}).is_ok());
+        assert_eq!(drives(|m| m.programs[0].serves = vec!["edu".into()]), refused("serves"));
+        assert_eq!(drives(|m| m.programs[0].roles = vec!["data".into()]), refused("roles"));
+        assert_eq!(drives(|m| m.programs[0].devices = vec!["keyboard".into()]), refused("devices"));
+        assert_eq!(drives(|m| m.start = vec!["a".into()]), refused("[boot] start"));
+        assert_eq!(drives(|m| m.programs[0].starts = vec!["a".into()]), refused("starts"));
     }
 
     #[test]

@@ -177,7 +177,10 @@ Beside that order, each waiting on something outside it:
 
       Each half measures the kernel's lines and its longest interrupts-off
       and preemption-off windows, by stage 6 step 2's rule.
-   10. **usbd**, stage 5's second half: the whole xHCI moves, HID delivered
+   10. **usbd**, stage 5's second half, and stage 4 of
+       `issues/a-device-function-is-driven-from-its-arrival-to-its-end.md`:
+       usbd is a `drives` row, one process per xHCI controller the kernel
+       leaves. The whole xHCI moves, HID delivered
        to the owner of input over the `input` port and mass storage over
        `toyos-blockring`. A USB keyboard's transitions never reach the
        kernel, whose keyboard and mouse streams go when their last kernel
