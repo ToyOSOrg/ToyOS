@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 cpal = "0.18"
 toyos-abi = { path = "../../sdk/abi" }
 toyos-keymap = { path = "../../sdk/keymap" }
+toyos-manifest = { path = "../../lib/manifest" }
 toyos = { path = "../../sdk/toyos" }
 toyos-window = { path = "../../sdk/window" }
 

@@ -13,18 +13,16 @@ where every bridge on the function's path forwards
 (`placement::behind_bridges`, `kernel/pci/src/placement.rs`); where none of
 that is free, the BAR stays where firmware put it and is handed to nobody,
 named `NoRoutedRun`, and a function with no other mappable BAR is refused.
-A bridge firmware sized to its BARs leaves no such 2 MiB. Where the BAR is
-also the one holding the function's MSI-X table, a claim withholds it and
-the function is refused `NoMappableBar` before placement; a claim that
-handed the table's BAR over, as #921 does, would meet `NoRoutedRun`:
+A bridge firmware sized to its BARs leaves no such 2 MiB. The BAR holding
+a function's MSI-X table is placed like any other (PR #921), so it meets
+the same refusal:
 
 - **The AMD bench**: the AX200 at 01:00.0 has BAR 0 at 0xd0600000, behind
   bridge 00:02.2, which forwards 0xd0600000..0xd0700000 (#884's E13 §1,
   https://github.com/ToyOSOrg/evidence/blob/2eb315326d1b4d0363b4c918da8dd2bfaabd1234/e13-amd-ax200-bar.log);
   the xHCI at 03:00.4 is behind 00:08.1, whose 0xd0000000..0xd0500000
-  bus 3 fills. Its one BAR holds its MSI-X table, which a claim withholds,
-  so it is refused `NoMappableBar` before placement; a claim that handed
-  the table's BAR over, as #921 does, would meet `NoRoutedRun` there.
+  bus 3 fills. Its one BAR, which holds its MSI-X table, meets
+  `NoRoutedRun`, and with no other BAR the claim is refused `NoMappableBar`.
 - **The T14**, as S1 read it (lines 111 to 116,
   https://github.com/ToyOSOrg/evidence/blob/cd368b25b2259a76b80dc31f4219dac1c91d84dc/s1/wifi-s1-a-kernel.log):
   the AX210 at 09:00.0 has BAR 0 at 0xbc300000, 16 KiB, its MSI-X table

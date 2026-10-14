@@ -205,6 +205,9 @@ fn window(phys: u64, bytes: u64) -> Mmio {
     unsafe { Mmio::over_phys(DirectMap::from_phys(phys), bytes) }
 }
 
+/// Nothing waits on the kernel's drivers: the SMMUv3 filters nothing by them.
+pub fn drivers_settled() {}
+
 /// The SMMUv3, armed; a refusal leaves every unit the IORT names aborting
 /// what it is given, or says why one could not be told to.
 pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {

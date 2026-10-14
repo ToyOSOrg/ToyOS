@@ -1,42 +1,48 @@
-use toyos::endow;
+//! `screen`: what the display shows, and its mode or scale set, over the
+//! compositor's `display` port.
+//!
+//! ```text
+//! screen                     the mode and the scale
+//! screen WIDTHxHEIGHT        take this mode
+//! screen scale 1.25|auto     draw at this scale, kept across boots; or the panel's
+//! ```
+
+use toyos_manifest::display::PORT;
+use window::display::{self, Setting, Shown};
+use window::Scale;
+
+const USAGE: &str = "usage: screen [WIDTHxHEIGHT | scale SCALE | scale auto]";
 
 pub fn main(args: Vec<String>) {
-    // `ls` and `screen` are the same binary, so this applet's authority is
-    // toybox's row rather than its own. A toybox started somewhere with no
-    // compositor — the diagnostic image, a test runner — says so and leaves;
-    // it does not take the shell down with it.
-    let conn = match endow::service("compositor") {
-        Ok(conn) => conn,
-        Err(e) => {
-            eprintln!("screen: no compositor to ask ({e:?})");
-            std::process::exit(1);
-        }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let shown = match args[..] {
+        [] => display::get(PORT),
+        ["scale", "auto"] => display::set_scale(PORT, Setting::Auto),
+        ["scale", scale] => match scale.parse::<Scale>() {
+            Ok(scale) => display::set_scale(PORT, Setting::Kept(scale)),
+            Err(why) => fail(&format!("{scale:?} is no scale: {why}")),
+        },
+        [mode] => match mode.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))) {
+            Some((width, height)) => display::set_mode(PORT, width, height),
+            None => fail(&format!("{mode:?} is no mode\n{USAGE}")),
+        },
+        _ => fail(USAGE),
     };
-
-    if args.is_empty() {
-        conn.signal(window::MSG_GET_RESOLUTION).ok();
-        let (msg_type, info): (u32, window::ResolutionInfo) = conn.recv().expect("compositor disconnected");
-        assert_eq!(msg_type, window::MSG_RESOLUTION_CHANGED);
-        println!("{}x{}", info.width, info.height);
-    } else {
-        let (width, height) = if args.len() == 1 {
-            let parts: Vec<&str> = args[0].split('x').collect();
-            if parts.len() != 2 {
-                eprintln!("Usage: screen [WIDTHxHEIGHT]");
-                return;
-            }
-            let w: u32 = parts[0].parse().unwrap_or_else(|_| { eprintln!("invalid width"); std::process::exit(1); });
-            let h: u32 = parts[1].parse().unwrap_or_else(|_| { eprintln!("invalid height"); std::process::exit(1); });
-            (w, h)
-        } else {
-            let w: u32 = args[0].parse().unwrap_or_else(|_| { eprintln!("invalid width"); std::process::exit(1); });
-            let h: u32 = args[1].parse().unwrap_or_else(|_| { eprintln!("invalid height"); std::process::exit(1); });
-            (w, h)
-        };
-
-        conn.send(window::MSG_SET_RESOLUTION, &window::ResolutionRequest { width, height }).ok();
-        let (msg_type, info): (u32, window::ResolutionInfo) = conn.recv().expect("compositor disconnected");
-        assert_eq!(msg_type, window::MSG_RESOLUTION_CHANGED);
-        println!("{}x{}", info.width, info.height);
+    match shown {
+        Ok(shown) => say(shown),
+        Err(e) => fail(&e.to_string()),
     }
+}
+
+fn say(shown: Shown) {
+    let setting = match shown.setting {
+        Setting::Auto => "auto".to_string(),
+        Setting::Kept(scale) => format!("kept {scale}"),
+    };
+    println!("{}x{} scale {} ({setting})", shown.width, shown.height, shown.scale);
+}
+
+fn fail(why: &str) -> ! {
+    eprintln!("screen: {why}");
+    std::process::exit(1);
 }

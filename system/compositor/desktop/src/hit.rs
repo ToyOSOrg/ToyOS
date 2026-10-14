@@ -99,17 +99,11 @@ pub fn hit_test<C>(desk: &Desk, stack: &Stack<C>, p: Point, launcher_open: bool)
 mod tests {
     use super::*;
     use crate::input::CursorStyle;
-    use crate::layout::Chrome;
     use crate::rect::Rect;
     use crate::window::{Level, Window};
     use alloc::string::ToString;
 
-    const DESK: Desk = Desk {
-        chrome: Chrome::DEFAULT,
-        screen: Rect::new(0, 0, 1920, 1080),
-        font_w: 8,
-        apps: 2,
-    };
+    const DESK: Desk = Desk::new(Rect::new(0, 0, 1920, 1080), crate::Scale::ONE, 2);
 
     fn at(x: i32, y: i32) -> Point {
         Point { x, y }

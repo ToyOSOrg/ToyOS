@@ -20,9 +20,9 @@ So `amdvi_selftest` (`tests/common/iommu.rs`) holds the record to its
 requester and its name, not its address or its access, and the record's
 `addr=`/`access=` under QEMU are QEMU's, not the device's.
 
-Owner: the orchestrator's AMD laptop track
-(`issues/an-amd-vi-machine-isolates-no-device.md`); the AMD bench's
-`usbd` fault row reads a real unit's record at its aimed address.
+Owner: the orchestrator's AMD laptop track; the AMD bench's claim of
+`03:00.4`, in P1's exit (`issues/there-is-no-wifi.md`), reads a real unit's
+record at its aimed address.
 
 **Exit:** under the QEMU `build/ci/qemu-version` names, the record of
 `amdvi-selftest`'s refused write names `0x400000000000` and a write, and

@@ -26,7 +26,7 @@ serves = ["log"]
 
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt", "clipboard", "input"]
+serves = ["compositor", "prompt", "clipboard", "input", "display"]
 receives = ["soundserver"]
 devices = ["framebuffer", "keyboard", "mouse"]
 

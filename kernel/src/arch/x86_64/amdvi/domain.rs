@@ -42,12 +42,15 @@ pub struct Space {
 struct Amd {
     domains: Domains<Space>,
     /// Firmware's DTE setting for each requester id, which an entry keeps
-    /// whichever domain it names.
+    /// whichever domain it names; [`Setting::CLAIMED`] from a function's first
+    /// claim on, for the boot.
     settings: Vec<Setting>,
     /// The requesters an IVMD names.
     kept: Vec<Requesters>,
     /// The ids a programmed unit serves, as inclusive ranges.
     translated: Vec<(u16, u16)>,
+    /// Requester ids the platform speaks as, and why no claim may have one.
+    platform: Vec<(u16, &'static str)>,
 }
 
 static DOMAINS: Lock<Option<Amd>> = Lock::new(None);
@@ -55,10 +58,39 @@ static DOMAINS: Lock<Option<Amd>> = Lock::new(None);
 /// Before any domain is made, once a unit will translate: every one is built
 /// clear of `reserved`, `kept`'s requesters stay on the identity domain, and
 /// only a requester in `translated` is given one.
-pub(super) fn start(reserved: Vec<(u64, u64)>, settings: Vec<Setting>, kept: Vec<Requesters>, translated: Vec<(u16, u16)>) {
+pub(super) fn start(
+    reserved: Vec<(u64, u64)>,
+    settings: Vec<Setting>,
+    kept: Vec<Requesters>,
+    translated: Vec<(u16, u16)>,
+    platform: Vec<(u16, &'static str)>,
+) {
     let mut domains = Domains::new(IDENTITY + 1);
     domains.avoid(reserved);
-    *DOMAINS.lock() = Some(Amd { domains, settings, kept, translated });
+    *DOMAINS.lock() = Some(Amd { domains, settings, kept, translated, platform });
+}
+
+/// Why no claim may have `stream`, if none may: [`untranslated`]'s reasons,
+/// and a requester id the platform speaks as, an I/O APIC's, an HPET's, or
+/// one whose SMIs the unit's filter passes.
+pub fn unclaimable(stream: StreamId) -> Option<&'static str> {
+    untranslated(stream).or_else(|| {
+        let id = stream.requester();
+        DOMAINS.lock().as_ref()?.platform.iter().find(|(platform, _)| *platform == id).map(|(_, why)| *why)
+    })
+}
+
+/// What requester `id`'s entry carries of firmware's declaration.
+pub(super) fn setting(id: u16) -> Setting {
+    DOMAINS.lock().as_ref().expect("amdvi: an entry is written only once a unit translates").settings[usize::from(id)]
+}
+
+/// Requester `id` is driven by a process: from now on its entry passes
+/// nothing firmware declared and gives no `SysMgt`, whichever domain it names.
+pub(super) fn claimed(id: u16) {
+    let mut held = DOMAINS.lock();
+    let amd = held.as_mut().expect("amdvi: a claim exists only once a unit translates");
+    amd.settings[usize::from(id)] = Setting::CLAIMED;
 }
 
 /// Why `stream` keeps the machine's own addresses rather than a domain of its

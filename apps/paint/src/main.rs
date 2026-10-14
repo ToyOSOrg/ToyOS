@@ -159,7 +159,7 @@ struct PaintApp {
 
 impl PaintApp {
     fn new() -> Self {
-        let window = Window::create_with_title(0, 0, "Paint").unwrap_or_else(|e| {
+        let window = Window::create_with_title(window::Size::Any, "Paint").unwrap_or_else(|e| {
             eprintln!("paint: {e}");
             std::process::exit(1);
         });

@@ -69,12 +69,11 @@ What is left of the staged work:
   splitting the controller.** It shares the controller, the event ring and the
   lock with the boot disk.
 - **Where each xHCI keeps its MSI-X table**, which decides whether usbd's
-  claim is handed over (`pcidev::msix_bar`). QEMU 11.1's `nec-usb-xhci` arms
-  MSI-X and publishes one memory BAR, BAR 0, so its table is there and the
-  claim is refused as
-  `issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`
-  says; the device's `msix=off` leaves it on MSI, as `msix-exclusive-bar=on`
-  moves NVMe's table for blockd. The T14's two xHCI functions each publish
+  claim arms MSI-X or MSI (`bring_up`, `kernel/src/pcidev/mod.rs`). QEMU
+  11.1's `nec-usb-xhci` arms MSI-X and publishes one memory BAR, BAR 0, so
+  its table is there, and a claim hands that BAR over with the rest where
+  the machine remaps; the device's `msix=off` leaves it on MSI, as
+  `msix-exclusive-bar=on` moves NVMe's table for blockd. The T14's two xHCI functions each publish
   only BAR 0 and armed MSI in the kernel's own bring-up, with no `MSI-X not
   armed` line and one remapping entry each (a `testcases` readback): no MSI-X
   capability came off either walk, so a claim arms MSI and hands BAR 0 over —

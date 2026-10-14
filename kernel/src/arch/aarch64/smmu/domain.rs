@@ -93,6 +93,11 @@ pub fn untranslated(_function: StreamId) -> Option<&'static str> {
     None
 }
 
+/// Why no claim may have `function`: never, as [`untranslated`].
+pub fn unclaimable(_function: StreamId) -> Option<&'static str> {
+    None
+}
+
 /// A new domain placed as `placement` says: refused, with no id spent, where
 /// it would not hold what was asked.
 pub fn create(placement: Placement) -> Result<(DomainId, Option<Iova>), IommuError> {

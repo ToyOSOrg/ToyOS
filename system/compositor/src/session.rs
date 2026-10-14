@@ -13,7 +13,6 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use sprite::Sprite;
 use toyos::endow;
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
@@ -29,23 +28,25 @@ use toyos_desktop::clipboard::{Landing, Watch};
 use toyos_desktop::volume::{overlay_rect, Overlay, Request, Requests, Shown};
 use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_STEP, MSG_VOLUME_UNAVAILABLE};
 use toyos_desktop::{
-    cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, set_mode, tab_action, Chrome,
-    CursorStyle, Damage, Desk, Scale, Grab, Held, Hit, KeyAction, Level, Mode, Point, Port, PromptGate, Rect,
-    Released, Stack, TabAction, Verdict, Window, WindowId, WindowMode,
+    cursor, cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, relayout, set_mode, tab_action,
+    Buffers, CursorStyle, Presented, Requested, Damage, Desk, Scale, Grab, Held, Hit, KeyAction, Level, Mode, Point, Port, PromptGate,
+    Rect, Released, Stack, TabAction, Verdict, Window, WindowId, WindowMode,
 };
+use toyos_icon::{Icon, Mask};
+use window::display::{self, Refused, Setting};
 use window::Screen;
 
 use crate::client::{
     announce, deliver, deliver_signal, deliver_with_handle, mark_dead, note_closed, note_opened,
-    Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, PendingConn, Watcher, Win,
+    Buffer, Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, PendingConn, Watcher, Win,
     HANDSHAKE_TIMEOUT, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
 };
 use crate::display::Display;
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
 use crate::stats::FrameTotals;
 use crate::{
-    launcher_apps, CLIPBOARD_POLL_HANDLES, DOUBLE_CLICK_TIME, DRAIN_BUDGET, FIXED_POLL_HANDLES,
-    FRAME_INTERVAL, INPUT_POLL_HANDLES, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
+    launcher_apps, CLIPBOARD_POLL_HANDLES, DISPLAY_PORT_POLL_HANDLES, DOUBLE_CLICK_TIME, DRAIN_BUDGET,
+    FIXED_POLL_HANDLES, FRAME_INTERVAL, INPUT_POLL_HANDLES, MAX_WINDOW_SLOTS, PROMPT_POLL_HANDLES,
     VOLUME_POLL_HANDLES,
 };
 
@@ -67,29 +68,90 @@ const _: () = assert!(
     "a snapshot is one frame"
 );
 
-struct Cursors {
-    default: Sprite,
-    crosshair: Sprite,
-    resize: Sprite,
+/// The desktop's font and icons as the image ships them, which every scale
+/// is drawn from.
+struct Shapes {
+    font: Vec<u8>,
+    cursor: Icon,
+    resize: Icon,
+    crosshair: Icon,
+    minimize: Icon,
+    maximize: Icon,
+    close: Icon,
 }
 
-impl Cursors {
-    fn get(&self, style: CursorStyle) -> &Sprite {
-        match style {
-            CursorStyle::Crosshair => &self.crosshair,
-            CursorStyle::Resize => &self.resize,
-            CursorStyle::Default => &self.default,
+/// Where the image carries the desktop's font, and its icons.
+const FONT_PATH: &str = "/system/share/fonts/JetBrainsMono-Regular.ttf";
+const ICONS_DIR: &str = "/system/share/icons";
+
+/// A title-bar button's icon, in logical pixels.
+const BUTTON_ICON: i32 = 14;
+
+impl Shapes {
+    fn read() -> Self {
+        let icon = |stem: &str| {
+            let path = format!("{ICONS_DIR}/{stem}.svg");
+            let svg = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("compositor: {path}: {e}"));
+            Icon::parse(&svg)
+        };
+        Self {
+            font: std::fs::read(FONT_PATH).unwrap_or_else(|e| panic!("compositor: {FONT_PATH}: {e}")),
+            cursor: icon("cursor-bold"),
+            resize: icon("arrow-down-right-bold"),
+            crosshair: icon("crosshair-simple-bold"),
+            minimize: icon("minus-bold"),
+            maximize: icon("square-bold"),
+            close: icon("x-bold"),
         }
     }
 
-    /// What the software cursor damages, whichever cursor it moves from and to.
-    fn extent(&self) -> (i32, i32) {
-        let all = [&self.default, &self.crosshair, &self.resize];
-        let w = all.iter().map(|s| s.width()).max().unwrap();
-        let h = all.iter().map(|s| s.height()).max().unwrap();
-        (w as i32, h as i32)
+    /// The font at `desk`'s text cell.
+    fn font(&self, desk: &Desk) -> font::Font {
+        let (w, h) = desk.cell();
+        font::Font::from_ttf(&self.font, w, h)
+            .unwrap_or_else(|e| panic!("compositor: {FONT_PATH}: {e}"))
+    }
+
+    fn buttons(&self, scale: Scale) -> TitleBarIcons {
+        let edge = scale.px(BUTTON_ICON) as usize;
+        TitleBarIcons {
+            minimize: self.minimize.mask(edge),
+            maximize: self.maximize.mask(edge),
+            close: self.close.mask(edge),
+        }
+    }
+
+    fn cursors(&self, scale: Scale) -> Cursors {
+        let edge = cursor::edge(scale) as usize;
+        Cursors {
+            default: self.cursor.mask(edge),
+            resize: self.resize.mask(edge),
+            crosshair: self.crosshair.mask(edge),
+        }
     }
 }
+
+/// The pointer's sprites at the desk's scale.
+struct Cursors {
+    default: Mask,
+    crosshair: Mask,
+    resize: Mask,
+}
+
+impl Cursors {
+    /// `style`'s mask and the colour it is drawn in.
+    fn get(&self, style: CursorStyle) -> (&Mask, [u8; 3]) {
+        match style {
+            CursorStyle::Crosshair => (&self.crosshair, [0, 0, 0]),
+            CursorStyle::Resize => (&self.resize, [255, 255, 255]),
+            CursorStyle::Default => (&self.default, [255, 255, 255]),
+        }
+    }
+}
+
+/// The file in the compositor's `HOME` that keeps the person's own scale,
+/// set by `screen scale`: a decimal, or no file for the panel's.
+const KEPT_SCALE: &str = "scale";
 
 /// The wallpaper as it is stored: width, height, then RGB triples.
 struct Wallpaper {
@@ -113,6 +175,56 @@ impl Wallpaper {
     }
 }
 
+/// The scale this image's own row starts the desktop at
+/// ([`toyos_manifest::display::SCALE_ARG`]), if it names one; a word that is
+/// no quarter step is refused by name.
+fn image_scale() -> Option<Scale> {
+    use toyos_manifest::display::SCALE_ARG;
+    let word = std::env::args().skip(1).find_map(|a| a.strip_prefix(SCALE_ARG).map(str::to_string))?;
+    let scale = word
+        .parse::<window::Scale>()
+        .map_err(|e| e.to_string())
+        .and_then(|s| Scale::step(s).ok_or_else(|| Refused::NotAStep.to_string()));
+    scale.map_err(|why| eprintln!("compositor: the image's {SCALE_ARG}{word} is refused: {why}")).ok()
+}
+
+/// Where the person's own scale is kept, in this program's `HOME`.
+fn kept_path() -> std::path::PathBuf {
+    std::env::home_dir().expect("the supervisor starts a service with HOME").join(KEPT_SCALE)
+}
+
+/// The person's own scale, as `screen scale` last kept it; a file that does
+/// not hold one is refused by name.
+fn kept_scale() -> Option<Scale> {
+    let path = kept_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!("compositor: the kept scale in {} is not read, and is not drawn at: {e}", path.display());
+            return None;
+        }
+    };
+    match text.trim().parse::<window::Scale>().ok().and_then(Scale::step) {
+        Some(scale) => Some(scale),
+        None => {
+            eprintln!("compositor: the kept scale {:?} is no quarter step, and is not drawn at", text.trim());
+            None
+        }
+    }
+}
+
+/// What `mode` is drawn at ([`Scale::shown`]); a scale the mode cannot hold
+/// is said by name, and stays what was asked for.
+fn scale_for(kept: Option<Scale>, base: Scale, mode: Mode) -> Scale {
+    let asked = kept.unwrap_or(base);
+    let scale = Scale::shown(kept, base, (mode.width, mode.height));
+    if scale != asked {
+        println!("compositor: scale {asked} leaves {mode} less than the least screen; drawing at {scale}, {asked} still asked");
+    }
+    scale
+}
+
 pub struct Session {
     acceptor: Acceptor,
     /// The prompt layer's port ([`toyos_manifest::consent::PROMPT`]), which
@@ -126,6 +238,9 @@ pub struct Session {
     /// The clipboard's port ([`toyos_manifest::clipboard::PORT`]), which one
     /// program alone holds: its one connection is sent every copy.
     clipboards: Acceptor,
+    /// The display's settings' port ([`toyos_manifest::display::PORT`]), which
+    /// one program alone holds.
+    settings: Acceptor,
     watcher: Option<Watcher>,
     /// What the watcher has asked and is sent, for the compositor's whole life:
     /// a copy made while no watcher is there is the next one's.
@@ -145,12 +260,18 @@ pub struct Session {
     poller: Poller,
 
     display: Display,
+    /// The scale this image's row starts the desktop at, where it names one.
+    image: Option<Scale>,
     /// The scale the panel's EDID gives the mode on screen.
-    scale: Scale,
+    panel: Scale,
+    /// The person's own scale, kept across boots; drawn at as far as the
+    /// mode holds it ([`Scale::shown`]).
+    kept: Option<Scale>,
     back: BackBuffer,
     cursors: Cursors,
     current_cursor: CursorStyle,
 
+    shapes: Shapes,
     font: font::Font,
     icons: TitleBarIcons,
     wallpaper: Wallpaper,
@@ -204,25 +325,28 @@ impl Session {
             .expect("the manifest declares this program serves `prompt`");
         let clipboards = endow::acceptor(toyos_manifest::clipboard::PORT)
             .expect("the manifest declares this program serves `clipboard`");
+        let settings = endow::acceptor(toyos_manifest::display::PORT)
+            .expect("the manifest declares this program serves `display`");
         let kb: Keyboard = endow::device(DeviceType::Keyboard)
             .expect("the manifest gives this program the keyboard");
         let mouse: Mouse = endow::device(DeviceType::Mouse)
             .expect("the manifest gives this program the mouse");
         let inputs = endow::acceptor(wire::PORT)
             .expect("the manifest declares this program serves `input`");
-        let (mut display, scale) = Display::claim();
+        let (mut display, panel) = Display::claim();
+        let mode = display.mode();
+        let (image, kept) = (image_scale(), kept_scale());
+        let scale = scale_for(kept, image.unwrap_or(panel), mode);
+        match (kept, image) {
+            (Some(k), _) => println!("compositor: drawing at scale {scale}, kept {k}"),
+            (None, Some(_)) => println!("compositor: drawing at scale {scale}, the image's"),
+            (None, None) => println!("compositor: drawing at scale {scale}"),
+        }
         let screen = display.screen();
         let back = BackBuffer::new(screen.width(), screen.height(), screen.pixel_format_raw());
 
-        let cursors = Cursors {
-            default: Sprite::icon("cursor-bold", [255, 255, 255]),
-            resize: Sprite::icon("arrow-down-right-bold", [255, 255, 255]),
-            crosshair: Sprite::icon("crosshair-simple-bold", [0, 0, 0]),
-        };
-
-        let font_data = std::fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font")
-            .expect("failed to read font");
-        let font = font::Font::from_prebuilt(&font_data);
+        let shapes = Shapes::read();
+        let cursors = shapes.cursors(scale);
 
         let raw = std::fs::read("/system/share/wallpaper.rgb").expect("failed to read wallpaper");
         let mut wallpaper = Wallpaper {
@@ -235,14 +359,11 @@ impl Session {
         println!("compositor: wallpaper {}x{}, scaling to {mode}", wallpaper.w, wallpaper.h);
         wallpaper.rescale(mode, display.screen().pixel_format_raw());
 
-        let icons = TitleBarIcons {
-            minimize: Sprite::icon("minus-bold", [255, 255, 255]),
-            maximize: Sprite::icon("square-bold", [255, 255, 255]),
-            close: Sprite::icon("x-bold", [255, 255, 255]),
-        };
+        let icons = shapes.buttons(scale);
 
         let apps = launcher_apps();
-        let desk = desk_of(mode, &font, apps.len());
+        let desk = Desk::new(mode_rect(mode), scale, apps.len());
+        let font = shapes.font(&desk);
         let total_mem = total_memory();
         let max_windows =
             toyos_desktop::max_windows(total_mem, desk.screen, MAX_WINDOW_SLOTS as usize);
@@ -253,13 +374,14 @@ impl Session {
         );
 
         // Sized for the slot ceiling rather than for `max_windows`: a mode
-        // change can raise `max_windows` mid-run.
+        // or a scale set on the display port can raise `max_windows` mid-run.
         let poller = Poller::new(
             FIXED_POLL_HANDLES
                 + MAX_WINDOW_SLOTS
                 + MAX_PENDING_CONNS
                 + PROMPT_POLL_HANDLES
                 + CLIPBOARD_POLL_HANDLES
+                + DISPLAY_PORT_POLL_HANDLES
                 + INPUT_POLL_HANDLES
                 + VOLUME_POLL_HANDLES,
         );
@@ -269,13 +391,16 @@ impl Session {
         poller.watch(&acceptor, READABLE, acceptor.as_handle().0 as u64);
         poller.watch(&prompts, READABLE, prompts.as_handle().0 as u64);
         poller.watch(&clipboards, READABLE, clipboards.as_handle().0 as u64);
+        poller.watch(&settings, READABLE, settings.as_handle().0 as u64);
         if let Some(handle) = display.handle() {
             poller.watch_raw(handle, READABLE, handle.0 as u64);
         }
 
         let cursor = Point { x: desk.screen.w() / 2, y: desk.screen.h() / 2 };
-        if display.hw_cursor() {
-            display.set_cursor(&render::cursor_image(&cursors.default), (cursor.x as u32, cursor.y as u32));
+        if display.hw_cursor() && cursor::in_hardware(scale) {
+            let (mask, color) = cursors.get(CursorStyle::Default);
+            let hot = cursor::hot_spot(CursorStyle::Default, scale);
+            display.set_cursor(&render::cursor_image(mask, color), (hot.x as u32, hot.y as u32), (cursor.x as u32, cursor.y as u32));
         }
         let mut damage = Damage::default();
         damage.add(desk.screen);
@@ -290,6 +415,7 @@ impl Session {
             prompt: None,
             owed: PromptGate::default(),
             clipboards,
+            settings,
             watcher: None,
             watch: Watch::default(),
             launcher,
@@ -302,8 +428,12 @@ impl Session {
             poller,
             display,
             back,
+            image,
+            panel,
+            kept,
             cursors,
             current_cursor: CursorStyle::Default,
+            shapes,
             font,
             icons,
             wallpaper,
@@ -321,7 +451,6 @@ impl Session {
             apps,
             total_mem,
             max_windows,
-            scale,
             dead: Vec::new(),
             ready: Vec::new(),
             totals: FrameTotals::default(),
@@ -383,6 +512,7 @@ impl Session {
         let accept_ready = self.is_ready(self.acceptor.as_handle());
         let prompt_ready = self.is_ready(self.prompts.as_handle());
         let clipboard_ready = self.is_ready(self.clipboards.as_handle());
+        let settings_ready = self.is_ready(self.settings.as_handle());
         let volume_ready = self.volume.as_ref().is_some_and(|(conn, _)| self.is_ready(conn.as_handle()));
         let display_ready = self.display.handle().is_some_and(|handle| self.is_ready(handle));
         let client_ready = self.stack.iter().any(|w| self.is_ready(w.client.conn.as_handle()))
@@ -410,6 +540,7 @@ impl Session {
             && !accept_ready
             && !prompt_ready
             && !clipboard_ready
+            && !settings_ready
             && !client_ready
             && !volume_ready
             && !display_ready
@@ -442,6 +573,9 @@ impl Session {
         if clipboard_ready {
             self.accept(Port::Clipboard);
         }
+        if settings_ready {
+            self.accept(Port::Display);
+        }
         if volume_ready {
             self.volume_answers();
         }
@@ -450,7 +584,7 @@ impl Session {
         self.watched();
         self.reap();
         self.prompt_gone();
-        self.rearm(kb_ready, mouse_ready, inputs_ready, accept_ready, prompt_ready, clipboard_ready);
+        self.rearm(kb_ready, mouse_ready, inputs_ready, accept_ready, prompt_ready, clipboard_ready, settings_ready);
         true
     }
 
@@ -658,25 +792,23 @@ impl Session {
             return;
         }
 
-        let was = self.cursor;
+        let (was, was_style) = (self.cursor, self.current_cursor);
         self.cursor = cursor_from_abs(sample.abs_x, sample.abs_y, self.desk.screen);
-        if self.display.hw_cursor() {
-            self.display.move_cursor((self.cursor.x as u32, self.cursor.y as u32));
-        } else {
-            let (w, h) = self.cursors.extent();
-            self.damage.add(Rect::new(was.x, was.y, w, h));
-            self.damage.add(Rect::new(self.cursor.x, self.cursor.y, w, h));
-        }
         let delta = Point { x: self.cursor.x - was.x, y: self.cursor.y - was.y };
 
         let wanted =
             cursor_style(&self.desk, &self.stack, &self.grab, self.cursor, self.launcher_open);
-        if wanted != self.current_cursor {
-            self.current_cursor = wanted;
-            if self.display.hw_cursor() {
-                let image = render::cursor_image(self.cursors.get(wanted));
-                self.display.set_cursor(&image, (self.cursor.x as u32, self.cursor.y as u32));
+        if self.hw_cursor() {
+            if wanted != self.current_cursor {
+                self.current_cursor = wanted;
+                self.show_cursor();
+            } else {
+                self.display.move_cursor((self.cursor.x as u32, self.cursor.y as u32));
             }
+        } else {
+            self.current_cursor = wanted;
+            self.damage.add(cursor::drawn(was_style, was, self.desk.scale));
+            self.damage.add(cursor::drawn(wanted, self.cursor, self.desk.scale));
         }
 
         if sample.pressed {
@@ -832,7 +964,7 @@ impl Session {
             }
             Released::Resized { window: idx } => {
                 let pf = self.pixel_format();
-                settle(&mut self.stack[idx], pf, &mut self.dead);
+                settle(&mut self.stack[idx], pf, self.desk.scale.wire(), &mut self.dead);
                 self.damage_all();
             }
         }
@@ -850,7 +982,7 @@ impl Session {
             }
             Held::Restored { window: idx } => {
                 let pf = self.pixel_format();
-                settle(&mut self.stack[idx], pf, &mut self.dead);
+                settle(&mut self.stack[idx], pf, self.desk.scale.wire(), &mut self.dead);
                 self.damage.add(self.desk.screen);
             }
             Held::Moved { from, to, .. } => {
@@ -933,6 +1065,7 @@ impl Session {
             Port::Compositor => &self.acceptor,
             Port::Prompt => &self.prompts,
             Port::Clipboard => &self.clipboards,
+            Port::Display => &self.settings,
         };
         match acceptor.accept() {
             Err(e) => eprintln!("compositor: a connection could not be accepted ({e:?})"),
@@ -951,6 +1084,7 @@ impl Session {
                     Port::Clipboard => {
                         eprintln!("compositor: refusing a clipboard watcher's connection — another is waiting")
                     }
+                    Port::Display => eprintln!("compositor: refusing a display request — another is waiting"),
                     Port::Compositor => eprintln!(
                         "compositor: refusing client {} — {MAX_PENDING_CONNS} connections are already \
                          waiting to say what they want",
@@ -1077,18 +1211,47 @@ impl Session {
                     mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
                     continue;
                 }
+                (Port::Display, _) => {
+                    self.display_request(frame);
+                    continue;
+                }
             }
             match frame.msg_type {
                 window::MSG_CREATE_WINDOW => self.create_window(frame),
                 window::MSG_COPY_BEGIN => self.copy_begin(frame),
                 window::MSG_PRESENT => {
-                    let Ok(rect) = ipc::decode_payload::<window::Rect>(frame.payload()) else {
+                    let Ok(rect) = ipc::decode_payload::<window::PresentRect>(frame.payload()) else {
                         mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
                         continue;
                     };
                     if let Some(i) = self.stack.find(|w| w.client.conn.as_handle() == handle) {
-                        self.stack[i].presented = true;
-                        self.stack[i].client.presents += 1;
+                        let pf = self.pixel_format();
+                        let win = &mut self.stack[i];
+                        win.presented = true;
+                        win.client.presents += 1;
+                        match win.client.buffers.presented(rect.generation) {
+                            Presented::Shown => {}
+                            // Drawn into the buffer a resize gave: shown whole
+                            // from here, and the buffer the window was owed
+                            // meanwhile given now.
+                            Presented::Swapped { owed, .. } => {
+                                let shown = win.client.buffers.shown();
+                                (win.buf_w, win.buf_h) = (shown.width, shown.height);
+                                self.damage.add(win.frame(&self.desk.chrome));
+                                let wanted = (win.content.w(), win.content.h(), self.desk.scale.wire());
+                                if owed && wanted != (shown.width, shown.height, shown.scale) {
+                                    settle(win, pf, self.desk.scale.wire(), &mut self.dead);
+                                }
+                            }
+                            Presented::Unknown => {
+                                eprintln!(
+                                    "compositor: client {} presented generation {}, a buffer it was never given",
+                                    handle.0, rect.generation
+                                );
+                                mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+                                continue;
+                            }
+                        }
                         let claim = Rect::from_wire(rect.x, rect.y, rect.w, rect.h);
                         self.damage.add(self.stack[i].present_damage(claim));
                     }
@@ -1126,25 +1289,6 @@ impl Session {
                         self.stack[i].cursor_style = cursor_from_wire(style);
                     }
                 }
-                window::MSG_SET_RESOLUTION => {
-                    let Ok(req) =
-                        ipc::decode_payload::<window::ResolutionRequest>(frame.payload())
-                    else {
-                        mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
-                        continue;
-                    };
-                    match toyos_desktop::mode::follow(Mode::new(req.width, req.height)) {
-                        Ok(mode) => {
-                            self.change_mode(mode);
-                        }
-                        Err(why) => println!("compositor: a client asks for a mode refused: {why}"),
-                    }
-                    self.answer_resolution(handle);
-                }
-                // The one message a client can ask for faster than it can read
-                // the answer: eight bytes in, sixteen out. Blocking here is a
-                // client filling its own pipe and taking the desktop with it.
-                window::MSG_GET_RESOLUTION => self.answer_resolution(handle),
                 // A connection's first frame, bare, answered and closed with
                 // `frame.conn`; one with a payload, or on a window's
                 // connection, is not this protocol.
@@ -1187,10 +1331,23 @@ impl Session {
             return;
         }
 
+        // A size in logical pixels is the output's scale's to convert, and a
+        // toolkit's preference to fit to the work area.
+        let size = match toyos_desktop::requested(window::Size::of(&req), &self.desk) {
+            Requested::Fitted { asked, given } => {
+                println!(
+                    "compositor: client {} asked for {}x{} logical, {}x{} at scale {}; given {}x{}, what the work area holds",
+                    handle.0, req.width, req.height, asked.0, asked.1, self.desk.scale, given.0, given.1
+                );
+                given
+            }
+            requested => requested.size(),
+        };
+
         // Every refusal below is an answer to untrusted input, so none of them
         // is a panic and none is a silent shrink of what was asked for.
         let refusal = match toyos_desktop::create_verdict(
-            (req.width, req.height),
+            size,
             self.desk.screen,
             level,
             self.stack.clients(),
@@ -1204,8 +1361,8 @@ impl Session {
             eprintln!(
                 "compositor: refusing {}x{} window from client {} ({} live, max {}), reason \
                  {reason}",
-                req.width,
-                req.height,
+                size.0,
+                size.1,
                 handle.0,
                 self.stack.clients(),
                 self.max_windows
@@ -1216,7 +1373,7 @@ impl Session {
         }
 
         let content = self.desk.chrome.initial_content(
-            Some((req.width as i32, req.height as i32)),
+            Some((size.0 as i32, size.1 as i32)),
             self.stack.len(),
             self.desk.screen,
         );
@@ -1264,8 +1421,9 @@ impl Session {
         } else {
             String::new()
         };
+        let buffer = Buffer { shm, width: content.w(), height: content.h(), scale: self.desk.scale.wire() };
         let at = self.stack.insert(Window::new(
-            Client { conn, shm, rx: ClientRx::new(), presents: 0, frames: 0 },
+            Client { conn, buffers: Buffers::new(buffer), rx: ClientRx::new(), presents: 0, frames: 0 },
             content,
             title,
             level,
@@ -1295,6 +1453,8 @@ impl Session {
                 height: content.h() as u32,
                 stride: content.w() as u32,
                 pixel_format,
+                scale: self.desk.scale.wire().wire(),
+                generation: 0,
             },
         );
         self.damage_all();
@@ -1508,11 +1668,44 @@ impl Session {
         }
     }
 
-    fn answer_resolution(&mut self, handle: RawHandle) {
-        let mode = self.display.mode();
-        let reply = window::ResolutionInfo { width: mode.width, height: mode.height };
-        if ipc::try_send(handle, window::MSG_RESOLUTION_CHANGED, &reply).is_err() {
-            mark_dead(&mut self.dead, handle, DropReason::NotReading);
+    /// One request off the display port, answered and its connection
+    /// closed. One the port cannot carry is not answered: the connection is
+    /// dropped by name.
+    fn display_request(&mut self, frame: ClientFrame) {
+        let handle = frame.handle;
+        let (msg_type, len) = (frame.msg_type, frame.payload().len());
+        let request = display::Request::decode(msg_type, frame.payload());
+        let (Some(request), Some(conn)) = (request, frame.conn) else {
+            eprintln!(
+                "compositor: refusing a display request, message {msg_type} of {len} bytes, that the port does not carry"
+            );
+            mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+            return;
+        };
+        let done = match request {
+            display::Request::Get => Ok(()),
+            display::Request::SetMode { width, height } => self.set_mode(width, height),
+            display::Request::SetScale(setting) => self.set_scale(setting),
+        };
+        let sent = match done {
+            Ok(()) => conn.try_send(display::MSG_STATE, &self.shown().wire()),
+            Err(why) => {
+                println!("compositor: a display request is refused: {why}");
+                conn.try_send(display::MSG_REFUSED, &display::Refusal { reason: why.wire() })
+            }
+        };
+        if let Err(e) = sent {
+            mark_dead(&mut self.dead, handle, e.into());
+        }
+    }
+
+    /// What the display shows, as its port answers it.
+    fn shown(&self) -> display::Shown {
+        display::Shown {
+            width: self.display.mode().width,
+            height: self.display.mode().height,
+            scale: self.desk.scale.wire(),
+            setting: self.kept.map_or(Setting::Auto, |k| Setting::Kept(k.wire())),
         }
     }
 
@@ -1524,8 +1717,8 @@ impl Session {
         let mode = self.display.mode();
         snap.put("width", mode.width);
         snap.put("height", mode.height);
-        snap.put("scale", self.scale.to_string());
-        snap.put("cursor", if self.display.hw_cursor() { "hardware" } else { "software" });
+        snap.put("scale", self.desk.scale.to_string());
+        snap.put("cursor", if self.hw_cursor() { "hardware" } else { "software" });
         snap.put("windows.open", self.stack.len());
         snap.put("windows.max", self.max_windows);
         self.totals.inspect(&mut snap);
@@ -1536,26 +1729,81 @@ impl Session {
         }
     }
 
-    /// Everything sized by the screen, for `mode`: the back buffer, the desk,
-    /// the pointer's range, the window budget and the wallpaper; every window
-    /// reflowed onto it and the whole screen damaged.
-    fn relayout(&mut self, mode: Mode) {
-        self.back = BackBuffer::new(mode.width as usize, mode.height as usize, self.pixel_format());
-        self.desk = desk_of(mode, &self.font, self.apps.len());
-        self.pointers.screen(mode.width, mode.height);
+    /// Take `width` by `height` pixels where the display sets modes, drawn at
+    /// the scale it holds.
+    fn set_mode(&mut self, width: u32, height: u32) -> Result<(), Refused> {
+        if !self.display.sets_modes() {
+            return Err(Refused::NoModes);
+        }
+        let mode = toyos_desktop::mode::follow(Mode::new(width, height)).map_err(|why| {
+            println!("compositor: mode {width}x{height} is refused: {why}");
+            Refused::OutOfBounds
+        })?;
+        let scale = scale_for(self.kept, self.image.unwrap_or(self.panel), mode);
+        if self.change_mode(mode, scale) { Ok(()) } else { Err(Refused::Declined) }
+    }
+
+    /// Draw at `setting`, and keep it in this program's `HOME` for the next
+    /// boot; a write that fails is said, and the scale is drawn at anyway.
+    fn set_scale(&mut self, setting: Setting) -> Result<(), Refused> {
+        let mode = self.display.mode();
+        let kept = match setting {
+            Setting::Auto => None,
+            Setting::Kept(scale) => Some(Scale::asked(scale, (mode.width, mode.height)).map_err(|why| why.wire())?),
+        };
+        let path = kept_path();
+        let written = match kept {
+            Some(scale) => std::fs::write(&path, format!("{scale}\n")),
+            None => std::fs::remove_file(&path).or_else(|e| match e.kind() {
+                std::io::ErrorKind::NotFound => Ok(()),
+                _ => Err(e),
+            }),
+        };
+        if let Err(e) = written {
+            eprintln!("compositor: {} is not written, so this scale is not kept: {e}", path.display());
+        }
+        self.kept = kept;
+        let scale = scale_for(kept, self.image.unwrap_or(self.panel), mode);
+        match kept {
+            Some(k) => println!("compositor: scale {scale}, kept {k}"),
+            None => println!("compositor: scale {scale}, auto"),
+        }
+        self.lay_out(mode, scale);
+        Ok(())
+    }
+
+    /// Everything the desktop draws, laid out again for `mode` at `scale`:
+    /// the back buffer, the desk and its furniture, the pointer's range, the
+    /// window budget and the wallpaper; the font, the icons and the cursor at
+    /// the scale; and every window placed by [`toyos_desktop::relayout`] and
+    /// given a buffer of its new size — every one at a new scale, since its
+    /// client draws at it. The whole screen is damaged.
+    fn lay_out(&mut self, mode: Mode, scale: Scale) {
+        let old = self.desk;
+        let rescaled = scale != old.scale;
+        if mode_rect(mode) != old.screen {
+            self.back = BackBuffer::new(mode.width as usize, mode.height as usize, self.pixel_format());
+            self.pointers.screen(mode.width, mode.height);
+            self.wallpaper.rescale(mode, self.pixel_format());
+        }
+        self.desk = Desk::new(mode_rect(mode), scale, self.apps.len());
+        if rescaled {
+            self.font = self.shapes.font(&self.desk);
+            self.icons = self.shapes.buttons(scale);
+            self.cursors = self.shapes.cursors(scale);
+            self.show_cursor();
+        }
         // What a window costs moved, so what we can afford moved with it.
         // Windows already open are left alone if the new figure is below their
         // count — the cap gates creation, it does not evict.
         self.max_windows =
             toyos_desktop::max_windows(self.total_mem, self.desk.screen, MAX_WINDOW_SLOTS as usize);
-        self.wallpaper.rescale(mode, self.pixel_format());
-        for i in 0..self.stack.len() {
-            match self.stack[i].mode {
-                WindowMode::Normal => {
-                    self.stack[i].content =
-                        self.desk.chrome.reflow(self.stack[i].content, self.desk.screen)
-                }
-                mode => self.retarget(i, mode),
+        relayout(&old, &self.desk, &mut self.stack);
+        let (pf, wire) = (self.pixel_format(), scale.wire());
+        for win in self.stack.iter_mut() {
+            let drawn = win.client.buffers.drawn();
+            if rescaled || (drawn.width, drawn.height) != (win.content.w(), win.content.h()) {
+                settle(win, pf, wire, &mut self.dead);
             }
         }
         self.cursor.x = self.cursor.x.min(self.desk.screen.x1 - 1);
@@ -1563,22 +1811,50 @@ impl Session {
         self.damage.add(self.desk.screen);
     }
 
-    /// Take the mode the display's output now asks for, where it asks.
+    /// The current cursor on the display's cursor plane where it carries it
+    /// at this scale, and the plane emptied where the cursor is drawn in
+    /// software.
+    fn show_cursor(&mut self) {
+        if !self.display.hw_cursor() {
+            return;
+        }
+        let at = (self.cursor.x as u32, self.cursor.y as u32);
+        if self.hw_cursor() {
+            let (mask, color) = self.cursors.get(self.current_cursor);
+            let hot = cursor::hot_spot(self.current_cursor, self.desk.scale);
+            self.display.set_cursor(&render::cursor_image(mask, color), (hot.x as u32, hot.y as u32), at);
+        } else {
+            self.display.set_cursor(&[0; render::CURSOR_PIXELS], (0, 0), at);
+        }
+    }
+
+    /// Whether the cursor is the display's: where it has a cursor plane and
+    /// the sprite fits it at this scale.
+    fn hw_cursor(&self) -> bool {
+        self.display.hw_cursor() && cursor::in_hardware(self.desk.scale)
+    }
+
+    /// Take the mode the display's output now asks for, where it asks, at the
+    /// scale its panel's size gives where nothing else is asked.
     fn follow_display(&mut self) {
-        if let Some((mode, scale)) = self.display.followed() {
-            if self.change_mode(mode) {
-                self.scale = scale;
+        if let Some((mode, panel)) = self.display.followed() {
+            let scale = scale_for(self.kept, self.image.unwrap_or(panel), mode);
+            if self.change_mode(mode, scale) {
+                self.panel = panel;
             }
         }
     }
 
-    /// Flip to `mode` (§5.7.6.3 on virtio-gpu): its scanout made, the whole
-    /// desktop laid out and composed into it while the old mode is on screen,
-    /// then shown. A mode the display declines leaves the old one, said;
-    /// whether `mode` is on screen.
-    fn change_mode(&mut self, mode: Mode) -> bool {
-        let old = self.display.mode();
+    /// Flip to `mode` at `scale` (§5.7.6.3 on virtio-gpu): its scanout made,
+    /// the whole desktop laid out and composed into it while the old mode is
+    /// on screen, then shown. A mode the display declines leaves the old one,
+    /// said; whether `mode` is on screen.
+    fn change_mode(&mut self, mode: Mode, scale: Scale) -> bool {
+        let (old, old_scale) = (self.display.mode(), self.desk.scale);
         if mode == old {
+            if scale != old_scale {
+                self.lay_out(mode, scale);
+            }
             return true;
         }
         let pending = match self.display.prepare(mode) {
@@ -1588,13 +1864,13 @@ impl Session {
                 return false;
             }
         };
-        self.relayout(mode);
+        self.lay_out(mode, scale);
         let regions = self.compose();
         blit(&pending.screen, &self.back, &regions);
         match self.display.show(pending) {
             Ok(()) => {
                 println!("compositor: mode {mode}");
-                if self.display.hw_cursor() {
+                if self.hw_cursor() {
                     self.display.move_cursor((self.cursor.x as u32, self.cursor.y as u32));
                 }
                 self.frame_callbacks(&regions);
@@ -1602,7 +1878,7 @@ impl Session {
             }
             Err(why) => {
                 println!("compositor: mode {mode} declined, {old} stays: {why}");
-                self.relayout(old);
+                self.lay_out(old, old_scale);
                 false
             }
         }
@@ -1639,7 +1915,16 @@ impl Session {
     }
 
     /// Re-arm the one-shot poll registrations for every handle that fired.
-    fn rearm(&mut self, kb: bool, mouse: bool, inputs: bool, acceptor: bool, prompts: bool, clipboards: bool) {
+    fn rearm(
+        &mut self,
+        kb: bool,
+        mouse: bool,
+        inputs: bool,
+        acceptor: bool,
+        prompts: bool,
+        clipboards: bool,
+        settings: bool,
+    ) {
         if let Some(handle) = self.display.handle().filter(|handle| self.is_ready(*handle)) {
             self.poller.watch_raw(handle, READABLE, handle.0 as u64);
         }
@@ -1657,6 +1942,9 @@ impl Session {
         }
         if clipboards {
             self.poller.watch(&self.clipboards, READABLE, self.clipboards.as_handle().0 as u64);
+        }
+        if settings {
+            self.poller.watch(&self.settings, READABLE, self.settings.as_handle().0 as u64);
         }
         if let Some(w) = &self.watcher {
             let handle = w.conn.as_handle();
@@ -1769,16 +2057,11 @@ impl Session {
 
         // Into the back buffer, so a region containing the cursor carries it
         // over with everything else rather than the panel being touched twice.
-        if !self.display.hw_cursor() {
-            let sprite = self.cursors.get(self.current_cursor);
-            let rect = Rect::new(
-                self.cursor.x,
-                self.cursor.y,
-                sprite.width() as i32,
-                sprite.height() as i32,
-            );
+        if !self.hw_cursor() {
+            let (mask, color) = self.cursors.get(self.current_cursor);
+            let rect = cursor::drawn(self.current_cursor, self.cursor, self.desk.scale);
             if regions.iter().any(|r| r.overlaps(rect)) {
-                render::draw_software_cursor(&self.back.surface, sprite, self.cursor);
+                render::draw_software_cursor(&self.back.surface, mask, color, rect.origin());
             }
         }
         regions
@@ -1860,7 +2143,7 @@ impl Session {
     fn retarget(&mut self, idx: usize, mode: WindowMode) {
         let pf = self.pixel_format();
         set_mode(&self.desk, &mut self.stack, idx, mode);
-        settle(&mut self.stack[idx], pf, &mut self.dead);
+        settle(&mut self.stack[idx], pf, self.desk.scale.wire(), &mut self.dead);
     }
 
     /// GUI+V: hand the window at `idx` the clipboard.
@@ -1947,6 +2230,10 @@ fn launcher() -> mpsc::Sender<String> {
     launches
 }
 
+fn mode_rect(mode: Mode) -> Rect {
+    Rect::new(0, 0, mode.width as i32, mode.height as i32)
+}
+
 /// Carry `regions` of the back buffer to `screen`, and answer the pixels.
 fn blit(screen: &Screen, back: &BackBuffer, regions: &[Rect]) -> u64 {
     let mut pixels = 0;
@@ -1962,15 +2249,6 @@ fn blit(screen: &Screen, back: &BackBuffer, regions: &[Rect]) -> u64 {
         pixels += region.area();
     }
     pixels
-}
-
-fn desk_of(mode: Mode, font: &font::Font, apps: usize) -> Desk {
-    Desk {
-        chrome: Chrome::DEFAULT,
-        screen: Rect::new(0, 0, mode.width as i32, mode.height as i32),
-        font_w: font.width() as i32,
-        apps,
-    }
 }
 
 /// Total physical memory, as the kernel reports it.
@@ -2020,7 +2298,11 @@ fn mouse_event(
     }
 }
 
-/// Give `win` a buffer the size of its content rect, and say whether it got one.
+/// Give `win` a buffer the size of its content rect, to draw at `scale`, and
+/// say whether it got one or is owed one. The buffer it was shown from stays
+/// until its first present into the new one, and a window with a buffer
+/// given and not yet presented is owed this one, given once it presents
+/// ([`Buffers`]).
 ///
 /// **Neither refusal is fatal.** The memory is the compositor's own rather than
 /// the client's doing, so a refusal keeps the window at a size it can afford —
@@ -2029,7 +2311,10 @@ fn mouse_event(
 /// is how the desktop used to die: `SharedMemory::grant` was infallible over an
 /// `InvalidArgument` that a maximize could reach, and it took every other
 /// window with it.
-fn rebuffer(win: &mut Win, pixel_format: u32, dead: &mut Vec<Dead>) -> bool {
+fn rebuffer(win: &mut Win, pixel_format: u32, scale: window::Scale, dead: &mut Vec<Dead>) -> bool {
+    if win.client.buffers.owe() {
+        return true;
+    }
     let (w, h) = (win.content.w(), win.content.h());
     let new_shm = match SharedMemory::create(w as usize * h as usize * 4) {
         Ok(shm) => shm,
@@ -2052,12 +2337,10 @@ fn rebuffer(win: &mut Win, pixel_format: u32, dead: &mut Vec<Dead>) -> bool {
         );
         return false;
     };
-    win.client.shm = new_shm;
-    win.buf_w = w;
-    win.buf_h = h;
-    // The one message a window cannot afford to miss — the old mapping is
-    // already gone — so a client that will not take it is dropped rather than
-    // left drawing into memory it no longer owns.
+    let generation = win.client.buffers.give(Buffer { shm: new_shm, width: w, height: h, scale });
+    // The one message a window cannot afford to miss — its next present is
+    // read from the new buffer — so a client that will not take it is dropped
+    // rather than left drawing into memory that is no longer shown.
     deliver_with_handle(
         dead,
         win,
@@ -2068,6 +2351,8 @@ fn rebuffer(win: &mut Win, pixel_format: u32, dead: &mut Vec<Dead>) -> bool {
             height: h as u32,
             stride: w as u32,
             pixel_format,
+            scale: scale.wire(),
+            generation,
         },
     );
     true
@@ -2078,8 +2363,8 @@ fn rebuffer(win: &mut Win, pixel_format: u32, dead: &mut Vec<Dead>) -> bool {
 /// A window is allowed to run ahead of its memory only while a resize is being
 /// dragged. Everywhere else the two must match, and if the machine will not
 /// give the memory then it is the window that gives way.
-fn settle(win: &mut Win, pixel_format: u32, dead: &mut Vec<Dead>) {
-    if !rebuffer(win, pixel_format, dead) {
+fn settle(win: &mut Win, pixel_format: u32, scale: window::Scale, dead: &mut Vec<Dead>) {
+    if !rebuffer(win, pixel_format, scale, dead) {
         win.content = win.backed();
     }
 }

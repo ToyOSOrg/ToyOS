@@ -87,7 +87,13 @@ impl Display {
         }
     }
 
+    /// Whether it has a cursor plane.
     pub fn hw_cursor(&self) -> bool {
+        matches!(self, Self::Virtio(_))
+    }
+
+    /// Whether it takes a mode other than the one it started in.
+    pub fn sets_modes(&self) -> bool {
         matches!(self, Self::Virtio(_))
     }
 
@@ -111,10 +117,11 @@ impl Display {
         }
     }
 
-    /// Show `image`, 64x64 RGBA, as the hardware cursor at `at`.
-    pub fn set_cursor(&mut self, image: &[u32; (CURSOR_SIDE * CURSOR_SIDE) as usize], at: (u32, u32)) {
+    /// Show `image`, 64x64 RGBA, as the hardware cursor with its pixel `hot`
+    /// at `at`.
+    pub fn set_cursor(&mut self, image: &[u32; (CURSOR_SIDE * CURSOR_SIDE) as usize], hot: (u32, u32), at: (u32, u32)) {
         if let Self::Virtio(v) = self {
-            v.gpu.cursor(image, (0, 0), at).unwrap_or_else(|why| v.fault(why));
+            v.gpu.cursor(image, hot, at).unwrap_or_else(|why| v.fault(why));
         }
     }
 

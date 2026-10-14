@@ -4,6 +4,10 @@
 # `Profile::HeadlessVirtioGpu`, the one virtio machine with a display for the
 # compositor to drive.
 #
+# Its compositor starts at `scale=2`, which neither 1280x800 nor the 1024x768
+# the host's resize asks for holds: the desktop is drawn and relaid on the
+# flip at the step each mode does hold.
+#
 # test-runner makes the boot announce itself.
 
 assets = ["assets"]
@@ -18,8 +22,9 @@ syscap = ["logread"]
 
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt", "clipboard", "input"]
+serves = ["compositor", "prompt", "clipboard", "input", "display"]
 devices = ["pci:03:80:00/1af4:1050", "keyboard", "mouse"]
+args = ["scale=2"]
 
 # One process per virtio-serial function the kernel does not drive: the
 # clipboard's channel, beside the kernel's console.

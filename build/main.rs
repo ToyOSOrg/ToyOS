@@ -213,6 +213,10 @@ fn main() {
             assert!(!other, "--boot-config {config} cannot be combined with {}", flag.name);
         }
         assert!(build_only, "--boot-config {config} builds an image; pass --build-only");
+        assert!(
+            !CARGO_RUN.present(&args, &flags::SCALE),
+            "--boot-config {config} cannot be combined with --scale: a case's own compositor row names its scale"
+        );
         let params: Vec<String> =
             CARGO_RUN.values(&args, &flags::KERNEL_PARAM).into_iter().map(String::from).collect();
         toyos_build::build::flashable_params(&root, &params)

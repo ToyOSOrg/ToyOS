@@ -21,7 +21,7 @@ use toyos::shm::SharedMemory;
 use toyos::{ipc, AsHandle, Connection, OwnedHandle};
 use toyos_abi::syscall::SyscallError;
 use toyos_abi::RawHandle;
-use toyos_desktop::{Port, Window};
+use toyos_desktop::{Buffers, Port, Window};
 
 /// Connections accepted but not yet identified by a first frame.
 ///
@@ -57,12 +57,21 @@ pub type ClientRx = ipc::FrameRx<MAX_KEPT_PAYLOAD>;
 /// never look at any of it.
 pub struct Client {
     pub conn: Connection,
-    pub shm: SharedMemory,
+    pub buffers: Buffers<Buffer>,
     pub rx: ClientRx,
     /// `MSG_PRESENT`s received, and `MSG_FRAME`s sent back, over the window's
     /// life: what paces a client is the second answering the first.
     pub presents: u64,
     pub frames: u64,
+}
+
+/// A window's buffer, the compositor's own handle to it, its size in pixels
+/// and the scale its client draws into it at.
+pub struct Buffer {
+    pub shm: SharedMemory,
+    pub width: i32,
+    pub height: i32,
+    pub scale: window::Scale,
 }
 
 /// A window, with the connection behind it.

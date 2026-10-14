@@ -1,7 +1,6 @@
 //! The x86-64 IOMMU: VT-d where firmware publishes a DMAR, AMD-Vi where it
-//! publishes an IVRS, chosen once at [`init`] and asked through [`domain`]
-//! and [`fault`]. Only VT-d remaps an interrupt
-//! (`issues/an-amd-vi-machine-isolates-no-device.md`, stage 6).
+//! publishes an IVRS, chosen once at [`init`] and asked through [`domain`],
+//! [`fault`] and [`interrupt`].
 
 use core::sync::atomic::{AtomicU8, Ordering};
 
@@ -9,8 +8,6 @@ use crate::drivers::pci::PciDevice;
 use crate::log;
 use crate::mm::policy::MmioPolicy;
 use crate::mm::Mmio;
-
-pub use super::vtd::interrupt;
 
 /// Which backend [`init`] found: none until it has, and then fixed.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -60,6 +57,14 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
         "iommu: no DMAR or IVRS table — this platform has no IOMMU, or it is disabled in firmware setup \
          (look for \"VT-d\", \"AMD-Vi\" or \"IOMMU\")"
     );
+}
+
+/// Every function the kernel drives is out of firmware's hands: AMD-Vi turns
+/// its SMI filters on.
+pub fn drivers_settled() {
+    if backend() == Backend::AmdVi {
+        super::amdvi::settle();
+    }
 }
 
 /// Ceiling on units inventoried; a machine past it is told, not silently truncated.
@@ -148,6 +153,16 @@ pub mod domain {
         }
     }
 
+    /// Why no claim may have `stream`, if none may: [`untranslated`]'s
+    /// reasons and the requester ids AMD-Vi's platform speaks as. VT-d
+    /// answers `None`.
+    pub fn unclaimable(stream: StreamId) -> Option<&'static str> {
+        match backend() {
+            Backend::AmdVi => amdvi::domain::unclaimable(stream),
+            Backend::Vtd | Backend::None => None,
+        }
+    }
+
     /// The backend that minted a `DomainId`; there is one, or none was minted.
     fn minted() -> Backend {
         let found = backend();
@@ -201,6 +216,147 @@ pub mod fault {
             Backend::Vtd => vtd::fault::service(),
             Backend::AmdVi => amdvi::fault::service(),
             Backend::None => panic!("iommu: a fault interrupt on a machine where no unit is armed"),
+        }
+    }
+}
+
+/// Interrupt remapping, on whichever backend remaps: what a message is armed
+/// with, and the claim's vector it delivers.
+pub mod interrupt {
+    use super::{backend, Backend};
+    use crate::arch::x86_64::idt::{user_dev, ClaimVector, DriverIrq};
+    use crate::arch::x86_64::{amdvi, vtd};
+    use crate::iommu::StreamId;
+
+    pub struct Msi {
+        pub address: u32,
+        pub data: u32,
+    }
+
+    /// The words an I/O APIC redirection entry carries for a remapped pin.
+    pub struct Pin {
+        pub low: u32,
+        pub high: u32,
+    }
+
+    /// Why a source could not be given an entry. Carried rather than
+    /// collapsed: one message for all of them sends whoever reads it looking
+    /// in the wrong place.
+    #[derive(Clone, Copy)]
+    pub enum Refused {
+        /// Wider than the destination an entry holds without extended
+        /// interrupt mode.
+        DestinationTooWide(u32),
+        /// Every entry in the table is already spoken for.
+        TableFull,
+        /// Every vector a claim's message may carry is held by another claim.
+        NoVector,
+        /// Firmware named no requester id for this interrupt controller.
+        ControllerUnnamed(u8),
+    }
+
+    impl Refused {
+        /// Whether this machine has run out of something a claim spends,
+        /// rather than this source being one no entry can be written for.
+        pub fn exhausted(self) -> bool {
+            matches!(self, Self::TableFull | Self::NoVector)
+        }
+    }
+
+    impl core::fmt::Display for Refused {
+        fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            match self {
+                Self::DestinationTooWide(id) => {
+                    write!(f, "apic id {id:#x} does not fit a remapping entry's destination")
+                }
+                Self::TableFull => write!(f, "the interrupt remapping table is full"),
+                Self::NoVector => write!(f, "every vector a claimed function's message may carry is held"),
+                Self::ControllerUnnamed(id) => {
+                    write!(f, "firmware named no requester id for interrupt controller {id}")
+                }
+            }
+        }
+    }
+
+    /// A claim's message and the vector it delivers, held until [`release`].
+    pub struct Claimed {
+        pub msi: Msi,
+        vector: ClaimVector,
+        /// VT-d's entry index; AMD-Vi's entry is the vector's own.
+        entry: Option<usize>,
+    }
+
+    impl Claimed {
+        /// What the message raises, for the record.
+        pub fn interrupt(&self) -> impl core::fmt::Display {
+            self.vector
+        }
+    }
+
+    /// Whether a claimed function's every message reaches only its own
+    /// interrupt: VT-d's source-id verification and its block on
+    /// compatibility format where it remaps; AMD-Vi's requester table where
+    /// it remaps and every unit filters SMIs, since a holder's write to the
+    /// interrupt range with an SMI's type is no remapped message (48882
+    /// §2.1.4.2, Table 10, Table 19).
+    pub fn fences_claims() -> Result<(), crate::iommu::NotRemapped> {
+        use crate::iommu::NotRemapped;
+        match backend() {
+            _ if !is_armed() => Err(NotRemapped::Unremapped),
+            Backend::AmdVi if !amdvi::interrupt::smi_filtered_everywhere() => Err(NotRemapped::SmiUnfiltered),
+            _ => Ok(()),
+        }
+    }
+
+    pub fn is_armed() -> bool {
+        match backend() {
+            Backend::Vtd => vtd::interrupt::is_armed(),
+            Backend::AmdVi => amdvi::interrupt::is_armed(),
+            Backend::None => false,
+        }
+    }
+
+    /// The message a kernel driver's `source` raises `irq` with.
+    pub fn msi(source: StreamId, irq: DriverIrq) -> Result<Msi, Refused> {
+        match backend() {
+            Backend::AmdVi => amdvi::interrupt::msi(source, irq.vector()),
+            Backend::Vtd | Backend::None => vtd::interrupt::msi(source, irq),
+        }
+    }
+
+    /// A vector for `pcidev` function `function` and an entry delivering it,
+    /// written for `source` and published to every unit before this returns.
+    pub fn claim(function: usize, source: StreamId) -> Result<Claimed, Refused> {
+        let vector = user_dev::take(function).ok_or(Refused::NoVector)?;
+        let made = match backend() {
+            Backend::AmdVi => amdvi::interrupt::claim(vector.vector(), source).map(|msi| (msi, None)),
+            Backend::Vtd => vtd::interrupt::claim(vector.vector(), source)
+                .map(|entry| (vtd::interrupt::message(entry), Some(entry))),
+            Backend::None => unreachable!("iommu: a claim's message made where nothing remaps"),
+        };
+        match made {
+            Ok((msi, entry)) => Ok(Claimed { msi, vector, entry }),
+            Err(why) => {
+                user_dev::give_back(vector);
+                Err(why)
+            }
+        }
+    }
+
+    /// A claim's entry gone from every unit, and then its vector free.
+    pub fn release(claimed: &Claimed, source: StreamId) {
+        match claimed.entry {
+            Some(entry) => vtd::interrupt::release(entry, source),
+            None => amdvi::interrupt::release(claimed.vector.vector(), source),
+        }
+        user_dev::give_back(claimed.vector);
+    }
+
+    /// An I/O APIC pin's redirection words, its entry written first.
+    pub fn pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Result<Pin, Refused> {
+        match backend() {
+            Backend::AmdVi => amdvi::interrupt::pin(apic_id, vector, dest),
+            Backend::Vtd | Backend::None => vtd::interrupt::pin(apic_id, vector, dest, level),
         }
     }
 }
