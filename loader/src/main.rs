@@ -414,17 +414,29 @@ fn query_gop(system_table: &SystemTable) -> Option<GopInfo> {
 /// another output, so it is not asked; two that are and both carry one cannot
 /// be told apart, and neither is taken.
 fn scanout_edid(bs: &efi::BootServices, shown: (u64, GopModeKey)) -> Option<[u8; EDID_BLOCK]> {
-    let handles = bs.handles::<Gop>().ok()?;
+    let at = "EDID:";
+    let handles = match bs.handles::<Gop>() {
+        Ok(handles) => handles,
+        Err(status) => {
+            println!("{at} the GOP handles could not be listed ({status}): none handed over");
+            return None;
+        }
+    };
+    let of = handles.len();
     let mut carrying = handles.iter().enumerate().filter_map(|(index, handle)| {
-        let gop = bs.get::<Gop>(*handle).ok()?;
+        let gop = match bs.get::<Gop>(*handle) {
+            Ok(gop) => gop,
+            Err(status) => {
+                println!("{at} GOP handle {index} of {of} would not open its GOP ({status}), so it is not asked");
+                return None;
+            }
+        };
         if (gop.frame_buffer().0, GopModeKey::of(gop.current_mode_info())) != shown {
             return None;
         }
         Some((index, bs.get::<EdidActive>(*handle).ok()?))
     });
     let (first, second) = (carrying.next(), carrying.next());
-    let at = loaderlog::EDID_AT;
-    let of = handles.len();
     match (first, second) {
         (None, _) => {
             println!("{at} no GOP handle showing the scanout publishes EDID Active: none handed over");

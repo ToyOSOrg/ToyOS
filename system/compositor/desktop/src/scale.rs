@@ -11,7 +11,7 @@ use core::fmt;
 
 use crate::layout::Chrome;
 
-/// A scale as 120ths, the representation the wire carries.
+/// A scale in 120ths: a quarter step from 1 to 4.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Scale(u16);
 
@@ -31,7 +31,7 @@ const CELL: (i32, i32) = (8, 16);
 
 /// The least logical screen: an 80x24 terminal of 8x16 cells in a window
 /// frame, above the taskbar.
-pub const LEAST: (u32, u32) = {
+const LEAST: (u32, u32) = {
     let c = Chrome::DEFAULT;
     let w = TERMINAL.0 * CELL.0 + c.chrome_w();
     let h = TERMINAL.1 * CELL.1 + c.chrome_h() + c.taskbar;
@@ -41,11 +41,6 @@ pub const LEAST: (u32, u32) = {
 impl Scale {
     pub const ONE: Self = Self(120);
 
-    /// The 120ths, as the wire carries them.
-    pub const fn n(self) -> u16 {
-        self.0
-    }
-
     fn quarters(q: u32) -> Self {
         Self(q as u16 * PER_QUARTER)
     }
@@ -53,7 +48,7 @@ impl Scale {
     /// The scale for a `mode` in pixels on a panel of `mm`: the quarter step
     /// from 1 to 4 nearest its density over [`TARGET_DPI`], a tie going to the
     /// smaller, then the largest step at or below it that leaves the logical
-    /// screen at least [`LEAST`]. A mode below [`LEAST`] at 1 gets 1.
+    /// screen at least 642x446. A mode below that at 1 gets 1.
     pub fn auto(mode: (u32, u32), mm: (u32, u32)) -> Self {
         // density / target = (px_diag / mm_diag) * (254/10) / (2688/24), compared
         // squared so no root is taken: ideal^2 = A / B.
@@ -74,7 +69,7 @@ impl Scale {
     }
 
     /// Whether `mode` at this scale is at least [`LEAST`] in logical pixels.
-    pub fn holds_least(self, mode: (u32, u32)) -> bool {
+    fn holds_least(self, mode: (u32, u32)) -> bool {
         let n = u64::from(self.0);
         u64::from(mode.0) * 120 >= u64::from(LEAST.0) * n
             && u64::from(mode.1) * 120 >= u64::from(LEAST.1) * n

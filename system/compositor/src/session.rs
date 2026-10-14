@@ -117,7 +117,10 @@ impl Wallpaper {
 fn panel_scale(info: &toyos_abi::FramebufferInfo) -> Scale {
     let mode = (info.width, info.height);
     let said = format!("compositor: display {}x{}", mode.0, mode.1);
-    let edid = &info.edid[..(info.edid_len as usize).min(info.edid.len())];
+    let edid = info
+        .edid
+        .get(..info.edid_len as usize)
+        .expect("the kernel hands over an EDID length of 0 or one block");
     if edid.is_empty() {
         println!("{said}, no panel size, scale 1");
         return Scale::ONE;

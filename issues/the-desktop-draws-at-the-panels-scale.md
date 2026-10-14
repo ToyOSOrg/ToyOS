@@ -22,19 +22,11 @@ chooses the scale, and the compositor logs it and answers it in
 
 What is left:
 
-1. **The rest of the scale.** The `display` port, served by the compositor and
-   received by `toybox` alone (`build/build.rs`'s `HELD_ALONE`), carrying
-   `screen scale <step>|auto`, kept in `/state/compositor`. The window
-   protocol's `WindowInfo` and `ResizeInfo` carry the scale as `n/120`, a
-   create request says whether its size is logical or physical, and
-   `toyos_window::Window` answers `scale_factor()`. The compositor draws its
-   chrome, glyphs (from the TTF, in `toyos-font`), icons and cursor (one
-   rasterizer, `sdk/icon`, replacing `sprite` and `files`' copy) at the scale,
-   relays windows out on a change, and holds two buffers per window across a
-   resize, both counted by `budget::window_bytes`. terminal, filepicker and
-   `files` render at the scale; `editor` and `paint` stay at 1 until they read
-   it in their own repositories. One commit on the winit fork's
-   `toyos-0.30.13` answers `scale_factor()` and sends `ScaleFactorChanged`.
+1. **The rest of the scale**, as the accepted design says it: the `display`
+   port and `screen scale`, the window protocol's scale, the compositor
+   drawing its chrome, text, icons and cursor at it and relaying windows out
+   on a change, terminal, filepicker and `files` at the scale, and the winit
+   fork's `scale_factor()`.
 2. **virtio-gpu leaves the kernel** (stage 1 of
    `issues/every-driver-is-still-in-the-kernel.md`): the compositor drives it
    through a `pci:1af4:1050` claim and follows the host window's display
