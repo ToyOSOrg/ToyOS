@@ -916,7 +916,10 @@ mod tests {
         );
     }
 
-    fn with_rows(rows: &[(&str, &[&str], &[&str])]) -> Manifest {
+    /// A row's name, its `devices` and its `drives`.
+    type Row<'a> = (&'a str, &'a [&'a str], &'a [&'a str]);
+
+    fn with_rows(rows: &[Row<'_>]) -> Manifest {
         Manifest {
             programs: rows
                 .iter()
@@ -944,7 +947,7 @@ mod tests {
     /// and a `drives` matcher alike, and a fixed name written twice.
     #[test]
     fn two_entries_one_device_can_answer_are_refused_by_name() {
-        let cases: [(&[(&str, &[&str], &[&str])], _, _); 7] = [
+        let cases: [(&[Row<'_>], _, _); 7] = [
             (&[("a", &["framebuffer"], &[]), ("b", &["framebuffer"], &[])], ("a", "framebuffer"), ("b", "framebuffer")),
             (&[("a", &["isa:0060,0064:1,12"], &[]), ("b", &["isa:0060,0064:1,12"], &[])], ("a", "isa:0060,0064:1,12"), ("b", "isa:0060,0064:1,12")),
             (
