@@ -7,7 +7,6 @@ use crate::rect::Rect;
 /// a machine this runs on produces, and `used_mb` is bounded by `total_mb`.
 /// Four more so a bigger machine truncates rather than overflows its box.
 pub const MAX_STATUS_CHARS: usize = 34;
-pub const STATUS_MARGIN: i32 = 12;
 
 /// The taskbar's geometry at one screen size and window count.
 ///
@@ -72,7 +71,7 @@ impl Taskbar {
     /// would leave the tail of a longer one behind.
     pub fn status(&self) -> Rect {
         let strip = self.strip();
-        let w = MAX_STATUS_CHARS as i32 * self.desk.font_w + STATUS_MARGIN * 2;
+        let w = MAX_STATUS_CHARS as i32 * self.desk.font_w + self.desk.chrome.status_margin * 2;
         Rect::corners((strip.x1 - w).max(strip.x0), strip.y0, strip.x1, strip.y1)
     }
 
@@ -104,10 +103,10 @@ impl Taskbar {
 mod tests {
     use super::*;
     use crate::layout::Chrome;
+    use crate::scale::Scale;
 
     fn bar(windows: usize) -> Taskbar {
-        Desk { chrome: Chrome::DEFAULT, screen: Rect::new(0, 0, 1920, 1080), font_w: 8, apps: 2 }
-            .taskbar(windows)
+        Desk::new(Rect::new(0, 0, 1920, 1080), Scale::ONE, 2).taskbar(windows)
     }
 
     #[test]
@@ -156,12 +155,7 @@ mod tests {
 
     #[test]
     fn a_narrow_screen_keeps_the_status_box_on_it() {
-        let desk = Desk {
-            chrome: Chrome::DEFAULT,
-            screen: Rect::new(0, 0, 200, 400),
-            font_w: 8,
-            apps: 2,
-        };
+        let desk = Desk::new(Rect::new(0, 0, 200, 400), Scale::ONE, 2);
         let b = desk.taskbar(0);
         assert!(b.strip().contains(b.status()));
     }

@@ -10,10 +10,13 @@ const SEL_BG: Color = Color { r: 58, g: 110, b: 165 };
 /// Public because a caller that pre-fills the scrollback has to bound what it
 /// writes, and the honest bound is this number rather than one of its own.
 pub const SCROLLBACK_ROWS: usize = 1000;
-const SCROLLBAR_WIDTH: usize = 6;
+/// The scrollbar's width and its thumb's least height, in the pixels of an
+/// 8-pixel-wide cell: each scales with the cell.
+const SCROLLBAR_WIDTH: i32 = 6;
+const SCROLLBAR_THUMB_MIN: i32 = 20;
+const SCROLLBAR_CELL: u32 = 8;
 const SCROLLBAR_TRACK: Color = Color { r: 0x20, g: 0x20, b: 0x20 };
 const SCROLLBAR_THUMB: Color = Color { r: 0x60, g: 0x60, b: 0x60 };
-const SCROLLBAR_THUMB_MIN: usize = 20;
 
 fn ansi_color(index: usize) -> Color {
     match index {
@@ -158,13 +161,17 @@ pub struct Console {
     /// 2048 is, which is why every screen test was blind to this — and no cell
     /// covers what is left over.
     margin_painted: bool,
+    /// [`bar_metrics`] of the font.
+    bar_w: usize,
+    thumb_min: usize,
 }
 
 impl Console {
     pub fn new(screen: Screen, font: Font) -> Self {
         let cols = screen.width() / font.width();
         let rows = screen.height() / font.height();
-        let strip = vec![0u8; strip_bytes(screen.width(), screen.height(), font.height())];
+        let (bar_w, thumb_min) = bar_metrics(&font);
+        let strip = vec![0u8; strip_bytes(screen.width(), screen.height(), font.height(), bar_w)];
 
         let mut console = Self {
             screen,
@@ -196,6 +203,8 @@ impl Console {
             view_offset: 0,
             strip,
             margin_painted: false,
+            bar_w,
+            thumb_min,
         };
 
         console.flush();
@@ -235,13 +244,13 @@ impl Console {
         if bar != self.painted_scrollbar {
             // The columns the bar sits over change hands in either direction:
             // to it, or back to the cells it was covering.
-            let first = (self.screen.width() - SCROLLBAR_WIDTH) / fw;
+            let first = (self.screen.width() - self.bar_w) / fw;
             for row in 0..self.rows {
                 self.painted[row * self.cols + first..(row + 1) * self.cols].fill(None);
             }
         }
         let paint_width = match bar {
-            Some(_) => self.screen.width() - SCROLLBAR_WIDTH,
+            Some(_) => self.screen.width() - self.bar_w,
             None => self.screen.width(),
         };
 
@@ -278,16 +287,16 @@ impl Console {
                 let height = self.rows * fh;
                 let surface = Framebuffer::new(
                     strip.as_mut_ptr(),
-                    SCROLLBAR_WIDTH,
+                    self.bar_w,
                     height,
-                    SCROLLBAR_WIDTH,
+                    self.bar_w,
                     self.screen.pixel_format_raw(),
                 );
-                surface.fill_rect(0, 0, SCROLLBAR_WIDTH, height, SCROLLBAR_TRACK);
-                surface.fill_rect(0, thumb_top, SCROLLBAR_WIDTH, thumb_height, SCROLLBAR_THUMB);
-                let x = self.screen.width() - SCROLLBAR_WIDTH;
+                surface.fill_rect(0, 0, self.bar_w, height, SCROLLBAR_TRACK);
+                surface.fill_rect(0, thumb_top, self.bar_w, thumb_height, SCROLLBAR_THUMB);
+                let x = self.screen.width() - self.bar_w;
                 self.screen
-                    .blit(x, 0, SCROLLBAR_WIDTH, height, SCROLLBAR_WIDTH, &strip);
+                    .blit(x, 0, self.bar_w, height, self.bar_w, &strip);
             }
             self.painted_scrollbar = bar;
         }
@@ -336,7 +345,7 @@ impl Console {
         let fh = self.font.height();
         let viewport = self.rows * fh;
         let total = (self.scrollback.len() + self.rows) * fh;
-        let thumb = (viewport * viewport / total).max(SCROLLBAR_THUMB_MIN).min(viewport);
+        let thumb = (viewport * viewport / total).max(self.thumb_min).min(viewport);
         let track = viewport - thumb;
         Some((track - self.view_offset * track / self.scrollback.len(), thumb))
     }
@@ -653,7 +662,13 @@ impl Console {
         }
     }
 
-    pub fn resize(&mut self, screen: Screen) {
+    /// Lay the text out again on `screen`: a window's new size, and drawn in
+    /// `font` where its scale changed too.
+    pub fn resize(&mut self, screen: Screen, font: Option<Font>) {
+        if let Some(font) = font {
+            self.font = font;
+            (self.bar_w, self.thumb_min) = bar_metrics(&self.font);
+        }
         let new_cols = screen.width() / self.font.width();
         let new_rows = screen.height() / self.font.height();
 
@@ -723,7 +738,7 @@ impl Console {
             dest_row += 1;
         }
 
-        self.strip = vec![0u8; strip_bytes(screen.width(), screen.height(), self.font.height())];
+        self.strip = vec![0u8; strip_bytes(screen.width(), screen.height(), self.font.height(), self.bar_w)];
         self.screen = screen;
         self.cols = new_cols;
         self.rows = new_rows;
@@ -874,6 +889,12 @@ impl Console {
 }
 
 /// Room for a full-width text row, or for the scrollbar's full-height column.
-fn strip_bytes(width: usize, height: usize, font_height: usize) -> usize {
-    (width * font_height).max(SCROLLBAR_WIDTH * height) * 4
+fn strip_bytes(width: usize, height: usize, font_height: usize, bar_w: usize) -> usize {
+    (width * font_height).max(bar_w * height) * 4
+}
+
+/// The scrollbar's width and its thumb's least height for `font`'s cell.
+fn bar_metrics(font: &Font) -> (usize, usize) {
+    let at = |l: i32| window::scale::round_ratio(l, font.width() as u32, SCROLLBAR_CELL) as usize;
+    (at(SCROLLBAR_WIDTH), at(SCROLLBAR_THUMB_MIN))
 }

@@ -11,6 +11,7 @@
 //! `toyos_desktop`'s and host-tested there. What is left here is the drawing.
 
 use toyos_desktop::{content_blit, plan, Desk, Layer, Level, Rect, Stack, PROMPT_FRAME};
+use toyos_icon::Mask;
 use window::{Color, Framebuffer};
 
 use crate::client::Client;
@@ -37,13 +38,31 @@ pub const PROMPT_TITLE_TEXT: Color = Color { r: 0x1e, g: 0x1e, b: 0x2e };
 /// What a prompt's title bar says, whatever its client asked for.
 const PROMPT_TITLE: &str = "ToyOS is asking";
 
-/// Glyph cell height of the prebuilt font, which every vertical centring uses.
-const GLYPH_H: i32 = 16;
-
+/// The title-bar buttons' icons at the desk's scale, drawn white.
 pub struct TitleBarIcons {
-    pub minimize: sprite::Sprite,
-    pub maximize: sprite::Sprite,
-    pub close: sprite::Sprite,
+    pub minimize: Mask,
+    pub maximize: Mask,
+    pub close: Mask,
+}
+
+const ICON_COLOR: [u8; 3] = [255, 255, 255];
+
+/// A surface a [`Mask`] is blended onto.
+struct Canvas<'a>(&'a Framebuffer);
+
+impl toyos_icon::Canvas for Canvas<'_> {
+    fn size(&self) -> (usize, usize) {
+        (self.0.width(), self.0.height())
+    }
+
+    fn get(&self, x: usize, y: usize) -> [u8; 3] {
+        let c = self.0.get_pixel(x, y);
+        [c.r, c.g, c.b]
+    }
+
+    fn put(&self, x: usize, y: usize, [r, g, b]: [u8; 3]) {
+        self.0.put_pixel(x, y, Color { r, g, b });
+    }
 }
 
 /// The desktop as it will look, one screen of system RAM.
@@ -163,8 +182,8 @@ fn draw_window(
         };
         assets.font.draw_string(
             surface,
-            (bar.x0 + 8) as usize,
-            (bar.y0 + (chrome.title_bar - GLYPH_H) / 2) as usize,
+            (bar.x0 + chrome.text_inset) as usize,
+            (bar.y0 + (chrome.title_bar - assets.font.height() as i32) / 2) as usize,
             title,
             text_color,
             title_color,
@@ -194,7 +213,7 @@ fn draw_window(
     }
 
     if let Some(b) = content_blit(win, clip) {
-        let buffer = win.client.shm.as_slice();
+        let buffer = win.client.buffers.shown().shm.as_slice();
         let offset = (b.src_y as usize * win.buf_w as usize + b.src_x as usize) * 4;
         surface.blit(
             b.dst.x0 as usize,
@@ -207,18 +226,10 @@ fn draw_window(
     }
 }
 
-fn draw_icon_centered(surface: &Framebuffer, icon: &sprite::Sprite, area: Rect) {
-    let ix = area.x0 as usize + (area.w() as usize).saturating_sub(icon.width()) / 2;
-    let iy = area.y0 as usize + (area.h() as usize).saturating_sub(icon.height()) / 2;
-    icon.draw(
-        surface.ptr(),
-        surface.stride(),
-        surface.width(),
-        surface.height(),
-        surface.pixel_format_raw(),
-        ix,
-        iy,
-    );
+fn draw_icon_centered(surface: &Framebuffer, icon: &Mask, area: Rect) {
+    let ix = area.x0 as usize + (area.w() as usize).saturating_sub(icon.edge()) / 2;
+    let iy = area.y0 as usize + (area.h() as usize).saturating_sub(icon.edge()) / 2;
+    icon.draw(&Canvas(surface), ix as i64, iy as i64, ICON_COLOR);
 }
 
 /// Paint the parts of the taskbar `clip` reaches.
@@ -235,7 +246,9 @@ fn draw_taskbar(
     clip: Rect,
 ) {
     let bar = desk.taskbar(stack.len());
-    let text_y = (bar.strip().y0 + (desk.chrome.taskbar - GLYPH_H) / 2) as usize;
+    let glyph_h = assets.font.height() as i32;
+    let text_y = (bar.strip().y0 + (desk.chrome.taskbar - glyph_h) / 2) as usize;
+    let inset = desk.chrome.text_inset;
 
     let gap = bar.gap();
     if clip.overlaps(gap) {
@@ -256,17 +269,17 @@ fn draw_taskbar(
         };
         fill(back, tab, TASKBAR_COLOR);
         fill(back, bar.tab_face(i), bg);
-        let max_chars = (desk.chrome.taskbar_item as usize - 16) / assets.font.width();
+        let max_chars = (desk.chrome.taskbar_item - 2 * inset).max(0) as usize / assets.font.width();
         let title = if win.title.is_empty() { "Window" } else { &win.title };
         let display: String = title.chars().take(max_chars).collect();
-        assets.font.draw_string(back, tab.x0 as usize + 8, text_y, &display, fg, bg);
+        assets.font.draw_string(back, (tab.x0 + inset) as usize, text_y, &display, fg, bg);
     }
 
     let plus = bar.new_button();
     if clip.overlaps(plus) {
         fill(back, plus, TASKBAR_COLOR);
         fill(back, bar.new_button_face(), TASKBAR_NEW_COLOR);
-        let plus_x = plus.x0 as usize + (desk.chrome.taskbar as usize - 8) / 2;
+        let plus_x = (plus.x0 + (desk.chrome.taskbar - desk.font_w) / 2) as usize;
         assets.font.draw_char(back, plus_x, text_y, '+', TASKBAR_NEW_TEXT, TASKBAR_NEW_COLOR);
     }
 
@@ -285,8 +298,7 @@ fn draw_taskbar(
                 .collect();
         fill(back, status, TASKBAR_COLOR);
         let text_w = text.chars().count() * assets.font.width();
-        let x = (status.x1 as usize)
-            .saturating_sub(toyos_desktop::STATUS_MARGIN as usize + text_w);
+        let x = (status.x1 as usize).saturating_sub(desk.chrome.status_margin as usize + text_w);
         assets.font.draw_string(back, x, text_y, &text, TASKBAR_ACTIVE_TEXT, TASKBAR_COLOR);
     }
 }
@@ -304,8 +316,8 @@ fn draw_launcher(
         let row = bar.launcher_item(i);
         assets.font.draw_string(
             surface,
-            row.x0 as usize + 12,
-            (row.y0 + (row.h() - GLYPH_H) / 2) as usize,
+            (row.x0 + desk.chrome.launcher_inset) as usize,
+            (row.y0 + (row.h() - assets.font.height() as i32) / 2) as usize,
             name,
             LAUNCHER_TEXT,
             LAUNCHER_BG,
@@ -319,7 +331,7 @@ pub fn draw_overlay(surface: &Framebuffer, font: &font::Font, rect: Rect, text: 
     fill(surface, rect, LAUNCHER_BG);
     let text_w = (text.chars().count() * font.width()) as i32;
     let x = rect.x0 + (rect.w() - text_w).max(0) / 2;
-    let y = rect.y0 + (rect.h() - GLYPH_H) / 2;
+    let y = rect.y0 + (rect.h() - font.height() as i32) / 2;
     font.draw_string(surface, x as usize, y as usize, text, LAUNCHER_TEXT, LAUNCHER_BG);
 }
 
@@ -353,71 +365,39 @@ pub fn scale_wallpaper(
     dst
 }
 
-/// Render the cursor sprite (RGBA) into a 64x64 BGRA hardware cursor buffer.
+/// A cursor's mask in `color`, into the 64x64 hardware cursor buffer, whose
+/// pixels' bytes are blue, green, red and alpha; and the cursor shown with
+/// its hot spot at `hot`.
 pub fn upload_cursor(
     fb: &toyos::FramebufferDev,
     cursor_buf: &mut [u8],
-    sprite: &sprite::Sprite,
-    hw_cursor: bool,
+    mask: &Mask,
+    color: [u8; 3],
+    hot: toyos_desktop::Point,
 ) {
-    let data = sprite.data();
-    let w = sprite.width();
-    let h = sprite.height();
-    cursor_buf[..64 * 64 * 4].fill(0);
-    for y in 0..h.min(64) {
-        for x in 0..w.min(64) {
-            let si = (y * w + x) * 4;
-            let di = (y * 64 + x) * 4;
-            cursor_buf[di] = data[si + 2];
-            cursor_buf[di + 1] = data[si + 1];
-            cursor_buf[di + 2] = data[si];
-            cursor_buf[di + 3] = data[si + 3];
-        }
+    const EDGE: usize = toyos_desktop::cursor::HARDWARE_EDGE as usize;
+    let edge = mask.edge();
+    assert!(edge <= EDGE, "a {edge}-pixel cursor is drawn in software");
+    cursor_buf[..EDGE * EDGE * 4].fill(0);
+    for (i, &alpha) in mask.alpha().iter().enumerate() {
+        let at = ((i / edge) * EDGE + i % edge) * 4;
+        cursor_buf[at..at + 4].copy_from_slice(&[color[2], color[1], color[0], alpha]);
     }
-    if hw_cursor {
-        fb.set_cursor(0, 0).expect("compositor holds the framebuffer claim");
-    }
+    fb.set_cursor(hot.x as u32, hot.y as u32).expect("compositor holds the framebuffer claim");
 }
 
-/// Draw the cursor sprite into the composed frame (software cursor fallback).
-///
-/// It blends, so it reads the pixel under every partly transparent one — which
-/// is why it draws into the back buffer and not the panel.
-pub fn draw_software_cursor(surface: &Framebuffer, sprite: &sprite::Sprite, at: toyos_desktop::Point) {
-    let data = sprite.data();
-    let sw = sprite.width();
-    let sh = sprite.height();
-    let width = surface.width();
-    let height = surface.height();
+/// The hardware cursor emptied, for a scale whose cursor is drawn in software.
+pub fn empty_cursor(fb: &toyos::FramebufferDev, cursor_buf: &mut [u8]) {
+    const EDGE: usize = toyos_desktop::cursor::HARDWARE_EDGE as usize;
+    cursor_buf[..EDGE * EDGE * 4].fill(0);
+    fb.set_cursor(0, 0).expect("compositor holds the framebuffer claim");
+}
 
-    for sy in 0..sh {
-        let py = at.y as usize + sy;
-        if py >= height {
-            break;
-        }
-        for sx in 0..sw {
-            let px = at.x as usize + sx;
-            if px >= width {
-                break;
-            }
-            let si = (sy * sw + sx) * 4;
-            let alpha = data[si + 3] as u32;
-            if alpha == 0 {
-                continue;
-            }
-            let sr = data[si] as u32;
-            let sg = data[si + 1] as u32;
-            let sb = data[si + 2] as u32;
-            if alpha == 255 {
-                surface.put_pixel(px, py, Color { r: sr as u8, g: sg as u8, b: sb as u8 });
-            } else {
-                let bg = surface.get_pixel(px, py);
-                let inv = 255 - alpha;
-                let r = ((sr * alpha + bg.r as u32 * inv) / 255) as u8;
-                let g = ((sg * alpha + bg.g as u32 * inv) / 255) as u8;
-                let b = ((sb * alpha + bg.b as u32 * inv) / 255) as u8;
-                surface.put_pixel(px, py, Color { r, g, b });
-            }
-        }
-    }
+/// Draw a cursor's mask into the composed frame, its top-left corner at
+/// `at`, when the display's cursor plane does not carry it.
+///
+/// It blends, so it reads the pixel under every partly covered one — which
+/// is why it draws into the back buffer and not the panel.
+pub fn draw_software_cursor(surface: &Framebuffer, mask: &Mask, color: [u8; 3], at: toyos_desktop::Point) {
+    mask.draw(&Canvas(surface), at.x.into(), at.y.into(), color);
 }

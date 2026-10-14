@@ -1,0 +1,35 @@
+# The boot `a_window_is_drawn_at_the_scale_and_relaid_at_the_next` reads: the
+# compositor started at scale 2 on `Profile::Metal`'s 1920x1080 GOP panel,
+# whose firmware publishes no EDID; a test binary's window on it; and `toybox`,
+# the one row that holds the display port, launched by that binary to set
+# scale 1. ps2server is the i8042's, so the harness's Enter reaches the window.
+#
+# test-runner makes the boot announce itself and runs the binary.
+
+assets = ["assets"]
+
+[boot]
+start = ["logkeeper", "compositor", "ps2server", "test-runner"]
+
+# `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.compositor]
+service = true
+serves = ["compositor", "prompt", "clipboard", "input", "display"]
+devices = ["framebuffer", "keyboard", "mouse"]
+args = ["scale=2"]
+
+[programs.ps2server]
+restart = true
+receives = ["input"]
+devices = ["isa:0060,0064:1,12"]
+
+[programs.test-runner]
+receives = ["compositor"]
+starts = ["toybox"]
+
+[programs.toybox]
+receives = ["display"]

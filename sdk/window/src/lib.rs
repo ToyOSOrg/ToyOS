@@ -1,9 +1,12 @@
 mod arch;
+pub mod display;
 pub mod framebuffer;
+pub mod scale;
 pub mod wait;
 pub mod watcher;
 
 pub use framebuffer::{Color, Framebuffer, Screen};
+pub use scale::Scale;
 pub use wait::{Waiter, Waker, Woke};
 /// What [`Window::handle`] answers with, and what a [`Waiter`] waits on.
 pub use toyos_abi::RawHandle;
@@ -23,6 +26,9 @@ pub use toyos_keymap::{Emit, Mods, Translator};
 
 // Window flags
 pub const WINDOW_FLAG_TOPMOST: u8 = 1;
+/// [`CreateWindowRequest`]'s size is in logical pixels, which the compositor
+/// converts at the output's scale; without it the size is physical.
+pub const WINDOW_FLAG_LOGICAL_SIZE: u8 = 2;
 
 /// The compositor's port every window but a prompt is asked for on.
 const COMPOSITOR: &str = "compositor";
@@ -40,8 +46,6 @@ pub const MSG_PRESENT: u32 = 2;
 pub const MSG_CLIPBOARD_SET: u32 = 3;
 pub const MSG_DESTROY_WINDOW: u32 = 4;
 pub const MSG_SET_CURSOR: u32 = 5;
-pub const MSG_SET_RESOLUTION: u32 = 6;
-pub const MSG_GET_RESOLUTION: u32 = 7;
 
 /// Cursor styles. A style the compositor does not implement — 0 among them —
 /// is the default cursor rather than an index into anything
@@ -58,7 +62,6 @@ pub const MSG_WINDOW_CLOSE: u32 = 4;
 pub const MSG_MOUSE_INPUT: u32 = 5;
 pub const MSG_CLIPBOARD_PASTE: u32 = 6;
 pub const MSG_FRAME: u32 = 7;
-pub const MSG_RESOLUTION_CHANGED: u32 = 8;
 /// The compositor will not create the window that was asked for. Payload is a
 /// [`WindowRefused`]. The only server→client message that answers
 /// `MSG_CREATE_WINDOW` other than [`MSG_WINDOW_CREATED`], and the reason
@@ -240,16 +243,6 @@ toyos::ipc_payload! {
         pub len: u32,
     }
 
-    pub struct ResolutionRequest {
-        pub width: u32,
-        pub height: u32,
-    }
-
-    pub struct ResolutionInfo {
-        pub width: u32,
-        pub height: u32,
-    }
-
     pub struct CreateWindowRequest {
         pub width: u32,
         pub height: u32,
@@ -284,26 +277,68 @@ toyos::ipc_payload! {
         pub scroll: i8,
     }
 
-    /// The shape of the window's buffer. **The buffer is one transferred
-    /// handle**, sent ahead of the frame that carries this.
+    /// The shape of the window's buffer, in physical pixels, and the scale
+    /// to draw into it at, as [`Scale::wire`]. **The buffer is one
+    /// transferred handle**, sent ahead of the frame that carries this.
     pub struct WindowInfo {
         pub width: u32,
         pub height: u32,
         pub stride: u32,
         pub pixel_format: u32,
+        pub scale: u32,
     }
 
-    /// The shape of the window's new buffer, which arrives as a handle the same
-    /// way [`WindowInfo`]'s does.
-    ///
-    /// It used to name the *old* buffer too, so the client could tell which
-    /// token was being replaced. A client holds the old buffer as a handle now
-    /// and needs nobody to name it.
+    /// The shape of the window's new buffer and its scale, which arrive as a
+    /// handle the same way [`WindowInfo`]'s do: the size or the scale
+    /// changed.
     pub struct ResizeInfo {
         pub width: u32,
         pub height: u32,
         pub stride: u32,
         pub pixel_format: u32,
+        pub scale: u32,
+    }
+}
+
+/// What size a window is asked for in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Size {
+    /// Whatever the compositor gives it.
+    Any,
+    /// Logical pixels, which the compositor converts at the output's scale.
+    Logical { width: u32, height: u32 },
+    /// Physical pixels, as they are.
+    Physical { width: u32, height: u32 },
+}
+
+impl Size {
+    /// The request's size and its flag.
+    fn wire(self) -> (u32, u32, u8) {
+        match self {
+            Self::Any => (0, 0, 0),
+            Self::Logical { width, height } => (width, height, WINDOW_FLAG_LOGICAL_SIZE),
+            Self::Physical { width, height } => (width, height, 0),
+        }
+    }
+
+    /// What a request asked for: a size of zero on either axis is
+    /// [`Size::Any`].
+    pub fn of(request: &CreateWindowRequest) -> Self {
+        let (width, height) = (request.width, request.height);
+        match (width == 0 || height == 0, request.flags & WINDOW_FLAG_LOGICAL_SIZE != 0) {
+            (true, _) => Self::Any,
+            (false, true) => Self::Logical { width, height },
+            (false, false) => Self::Physical { width, height },
+        }
+    }
+
+    /// In physical pixels at `scale`; `None` for [`Size::Any`].
+    pub fn physical(self, scale: Scale) -> Option<(u32, u32)> {
+        match self {
+            Self::Any => None,
+            Self::Logical { width, height } => Some((scale.px_u32(width), scale.px_u32(height))),
+            Self::Physical { width, height } => Some((width, height)),
+        }
     }
 }
 
@@ -390,6 +425,7 @@ pub enum Event {
     KeyInput(KeyEvent),
     MouseInput(MouseEvent),
     ClipboardPaste(Vec<u8>),
+    /// The window's size or its scale changed, or both: it has a new buffer.
     Resized,
     Close,
     /// The keyboard layout config changed; this window's translator has
@@ -488,6 +524,7 @@ pub struct Window {
     width: u32,
     height: u32,
     pixel_format: u32,
+    scale: Scale,
     /// This window's own layout state. One per client process, which is what
     /// keeps a dead key typed into one window from composing with a letter
     /// typed into another.
@@ -497,43 +534,38 @@ pub struct Window {
 }
 
 impl Window {
-    /// Ask the compositor for a window. `0, 0` asks it to pick a size.
+    /// Ask the compositor for a window.
     ///
     /// Fails rather than panics: the compositor is entitled to say no — it
     /// bounds what it will hold — and "you may not have a window" is an
     /// ordinary answer to an ordinary request, not a bug in the caller.
-    pub fn create(width: u32, height: u32) -> Result<Self, CreateError> {
-        Self::create_with_title(width, height, "")
+    pub fn create(size: Size) -> Result<Self, CreateError> {
+        Self::create_with_title(size, "")
     }
 
-    pub fn create_with_title(width: u32, height: u32, title: &str) -> Result<Self, CreateError> {
-        Self::create_with_flags(COMPOSITOR, width, height, title, 0)
+    pub fn create_with_title(size: Size, title: &str) -> Result<Self, CreateError> {
+        Self::create_with_flags(COMPOSITOR, size, title, 0)
     }
 
-    pub fn create_topmost(width: u32, height: u32, title: &str) -> Result<Self, CreateError> {
-        Self::create_with_flags(COMPOSITOR, width, height, title, WINDOW_FLAG_TOPMOST)
+    pub fn create_topmost(size: Size, title: &str) -> Result<Self, CreateError> {
+        Self::create_with_flags(COMPOSITOR, size, title, WINDOW_FLAG_TOPMOST)
     }
 
     /// A window asked for on the compositor's port named `port` in this
     /// program's namespace rather than on `compositor`: which port a window
     /// came in on is what the compositor places it by.
-    pub fn create_on(port: &str, width: u32, height: u32, title: &str) -> Result<Self, CreateError> {
-        Self::create_with_flags(port, width, height, title, 0)
+    pub fn create_on(port: &str, size: Size, title: &str) -> Result<Self, CreateError> {
+        Self::create_with_flags(port, size, title, 0)
     }
 
-    fn create_with_flags(
-        port: &str,
-        width: u32,
-        height: u32,
-        title: &str,
-        flags: u8,
-    ) -> Result<Self, CreateError> {
+    fn create_with_flags(port: &str, size: Size, title: &str, flags: u8) -> Result<Self, CreateError> {
         let conn = endow::service(port)?;
 
+        let (width, height, unit) = size.wire();
         let mut req = CreateWindowRequest {
             width,
             height,
-            flags,
+            flags: flags | unit,
             title_len: 0,
             title: [0; 30],
         };
@@ -556,6 +588,7 @@ impl Window {
             other => return Err(CreateError::Protocol(other)),
         }
         let info: WindowInfo = conn.recv_payload(&header)?;
+        let scale = Scale::from_wire(info.scale).ok_or(CreateError::Protocol(MSG_WINDOW_CREATED))?;
 
         let buf_size = info.stride as usize * info.height as usize * 4;
         // The buffer crossed ahead of the frame. A compositor that announced a
@@ -572,6 +605,7 @@ impl Window {
             width: info.width,
             height: info.height,
             pixel_format: info.pixel_format,
+            scale,
             translator: configured_translator(),
             closed: false,
         })
@@ -658,10 +692,15 @@ impl Window {
                 let Ok(info) = self.conn.recv_payload::<ResizeInfo>(header) else {
                     return Event::Close;
                 };
+                // A scale outside the protocol is a compositor this client
+                // cannot draw for.
+                let Some(scale) = Scale::from_wire(info.scale) else {
+                    return Event::Close;
+                };
                 let buf_size = info.stride as usize * info.height as usize * 4;
-                // The old buffer is already gone on the compositor's side, so
-                // a window that cannot map the new one has nothing to draw
-                // into and its session is over.
+                // The compositor shows the old buffer only until this
+                // window's next present, which it reads from the new one, so a
+                // window that cannot map the new one has nothing to present.
                 let Some([buffer]) = self.conn.recv_handles_exact::<1>() else {
                     return Event::Close;
                 };
@@ -672,6 +711,7 @@ impl Window {
                 self.width = info.width;
                 self.height = info.height;
                 self.pixel_format = info.pixel_format;
+                self.scale = scale;
                 Event::Resized
             }
             MSG_CLIPBOARD_PASTE => {
@@ -734,6 +774,18 @@ impl Window {
         self.height
     }
 
+    /// The scale the compositor shows this window at: its buffer is
+    /// [`width`](Self::width) by [`height`](Self::height) physical pixels,
+    /// drawn at this many per logical one.
+    pub fn scale(&self) -> Scale {
+        self.scale
+    }
+
+    /// [`scale`](Self::scale) as a factor.
+    pub fn scale_factor(&self) -> f64 {
+        self.scale.factor()
+    }
+
     pub fn framebuffer(&self) -> Framebuffer {
         Framebuffer::new(
             self.shm.as_ptr(),
@@ -762,6 +814,7 @@ impl std::fmt::Debug for Window {
         f.debug_struct("Window")
             .field("width", &self.width)
             .field("height", &self.height)
+            .field("scale", &self.scale)
             .finish_non_exhaustive()
     }
 }
@@ -769,5 +822,37 @@ impl std::fmt::Debug for Window {
 impl Drop for Window {
     fn drop(&mut self) {
         let _ = self.conn.signal(MSG_DESTROY_WINDOW);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(size: Size) -> CreateWindowRequest {
+        let (width, height, unit) = size.wire();
+        CreateWindowRequest { width, height, flags: WINDOW_FLAG_TOPMOST | unit, title_len: 0, title: [0; 30] }
+    }
+
+    #[test]
+    fn a_requested_size_says_which_pixels_it_is_in() {
+        for size in [
+            Size::Any,
+            Size::Logical { width: 200, height: 100 },
+            Size::Physical { width: 200, height: 100 },
+        ] {
+            assert_eq!(Size::of(&request(size)), size);
+        }
+        let two: Scale = "2".parse().unwrap();
+        assert_eq!(Size::Logical { width: 200, height: 100 }.physical(two), Some((400, 200)));
+        assert_eq!(Size::Physical { width: 200, height: 100 }.physical(two), Some((200, 100)));
+        assert_eq!(Size::Any.physical(two), None);
+    }
+
+    /// A zero on either axis asks the compositor to choose, as it always has.
+    #[test]
+    fn a_zero_extent_is_any_size() {
+        let half = CreateWindowRequest { width: 300, height: 0, flags: 0, title_len: 0, title: [0; 30] };
+        assert_eq!(Size::of(&half), Size::Any);
     }
 }

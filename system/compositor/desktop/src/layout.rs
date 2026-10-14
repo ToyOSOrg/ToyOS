@@ -1,7 +1,11 @@
 use crate::rect::Rect;
+use crate::scale::Scale;
 use crate::stack::Stack;
 use crate::taskbar::Taskbar;
 use crate::window::WindowMode;
+
+/// The desktop's text cell, in logical pixels ([`font::CELL`]).
+pub const TEXT_CELL: (i32, i32) = (font::CELL.0 as i32, font::CELL.1 as i32);
 
 /// Put the window at `idx` into `mode`, and say what content rect it now needs.
 ///
@@ -24,6 +28,29 @@ pub fn set_mode<C>(desk: &Desk, stack: &mut Stack<C>, idx: usize, mode: WindowMo
     content
 }
 
+/// Every window of `stack`, laid out on `to` from `from`: a new mode, a new
+/// scale or both.
+///
+/// A normal window keeps its place and its size in logical pixels — its
+/// rectangle scales by its corners from one scale to the other — and is
+/// brought back onto the work area; a maximized or snapped window takes its
+/// mode's frame on the new one, and where it goes back to scales with it. A
+/// window's buffer stays the shell's to give it, as [`set_mode`] says.
+pub fn relayout<C>(from: &Desk, to: &Desk, stack: &mut Stack<C>) {
+    let (a, b) = (from.scale.wire(), to.scale.wire());
+    let scaled = |r: Rect| Rect::corners(a.rescale(r.x0, b), a.rescale(r.y0, b), a.rescale(r.x1, b), a.rescale(r.y1, b));
+    for idx in 0..stack.len() {
+        let win = &mut stack[idx];
+        win.saved = scaled(win.saved);
+        match win.mode {
+            WindowMode::Normal => win.content = to.chrome.reflow(scaled(win.content), to.screen),
+            mode => {
+                set_mode(to, stack, idx, mode);
+            }
+        }
+    }
+}
+
 /// The screen the desktop is drawn on, and the furniture standing on it.
 ///
 /// One value carrying everything the geometry is a function of, so that a
@@ -31,6 +58,8 @@ pub fn set_mode<C>(desk: &Desk, stack: &mut Stack<C>, idx: usize, mode: WindowMo
 /// halves of one frame's decisions.
 #[derive(Clone, Copy, Debug)]
 pub struct Desk {
+    pub scale: Scale,
+    /// [`Chrome::DEFAULT`] at [`scale`](Self::scale).
     pub chrome: Chrome,
     pub screen: Rect,
     /// Character cell width of the font the taskbar is measured in.
@@ -40,6 +69,16 @@ pub struct Desk {
 }
 
 impl Desk {
+    /// The desktop on `screen`, in physical pixels, drawn at `scale`.
+    pub const fn new(screen: Rect, scale: Scale, apps: usize) -> Self {
+        Self { scale, chrome: Chrome::DEFAULT.scaled(scale), screen, font_w: scale.px(TEXT_CELL.0), apps }
+    }
+
+    /// The text cell at this desk's scale.
+    pub const fn cell(&self) -> (usize, usize) {
+        self.scale.wire().cell()
+    }
+
     /// The bar as it stands with `windows` tabs on it.
     pub fn taskbar(&self, windows: usize) -> Taskbar {
         Taskbar { desk: *self, windows }
@@ -58,7 +97,7 @@ impl Desk {
 /// at one pixel proves only that one arithmetic expression matches another
 /// with the same literals in it. [`Chrome::DEFAULT`] is what the compositor
 /// runs on.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Chrome {
     pub border: i32,
     pub title_bar: i32,
@@ -77,6 +116,12 @@ pub struct Chrome {
     pub cascade: i32,
     pub launcher_width: i32,
     pub launcher_item: i32,
+    /// From a title bar's or a tab's edge to its text.
+    pub text_inset: i32,
+    /// From the launcher's edge to an entry's text.
+    pub launcher_inset: i32,
+    /// From the screen's right edge to the status readout.
+    pub status_margin: i32,
 }
 
 impl Chrome {
@@ -94,7 +139,32 @@ impl Chrome {
         cascade: 30,
         launcher_width: 160,
         launcher_item: 28,
+        text_inset: 8,
+        launcher_inset: 12,
+        status_margin: 12,
     };
+
+    /// Every metric at `scale`, each converted alone.
+    pub const fn scaled(&self, scale: Scale) -> Self {
+        Self {
+            border: scale.px(self.border),
+            title_bar: scale.px(self.title_bar),
+            button: scale.px(self.button),
+            resize_handle: scale.px(self.resize_handle),
+            taskbar: scale.px(self.taskbar),
+            taskbar_item: scale.px(self.taskbar_item),
+            taskbar_padding: scale.px(self.taskbar_padding),
+            min_content_w: scale.px(self.min_content_w),
+            min_content_h: scale.px(self.min_content_h),
+            initial_margin: scale.px(self.initial_margin),
+            cascade: scale.px(self.cascade),
+            launcher_width: scale.px(self.launcher_width),
+            launcher_item: scale.px(self.launcher_item),
+            text_inset: scale.px(self.text_inset),
+            launcher_inset: scale.px(self.launcher_inset),
+            status_margin: scale.px(self.status_margin),
+        }
+    }
 
     /// What a window's frame adds to its content, left and right.
     pub const fn chrome_w(&self) -> i32 {
@@ -398,6 +468,80 @@ mod tests {
         let content = C.restore_under_pointer(restored, 1900, 1920, Point { x: 3, y: 1 });
         assert!(C.frame(content).x0 >= 0);
         assert!(C.frame(content).y0 >= 0);
+    }
+
+    fn at(text: &str) -> Scale {
+        Scale::step(text.parse().unwrap()).unwrap()
+    }
+
+    fn window(content: Rect) -> crate::Window<()> {
+        crate::Window::new((), content, alloc::string::String::new(), crate::Level::Ordinary, crate::CursorStyle::Default)
+    }
+
+    /// The text cell and the frame at the scales the benches and QEMU run at.
+    #[test]
+    fn the_desk_at_a_scale_converts_each_metric() {
+        assert_eq!(C.scaled(Scale::ONE), C);
+        for (scale, cell, border, title_bar, taskbar) in
+            [("1", (8, 16), 1, 28, 32), ("1.5", (12, 24), 2, 42, 48), ("2", (16, 32), 2, 56, 64)]
+        {
+            let desk = Desk::new(SCREEN, at(scale), 0);
+            assert_eq!(desk.cell(), cell, "{scale}");
+            assert_eq!(desk.font_w as usize, cell.0, "{scale}");
+            let c = desk.chrome;
+            assert_eq!((c.border, c.title_bar, c.taskbar), (border, title_bar, taskbar), "{scale}");
+        }
+        assert_eq!(Desk::new(SCREEN, at("1.25"), 0).chrome.border, 1);
+    }
+
+    /// From 1 to 2 a normal window keeps its logical place and size: its
+    /// rectangle doubles by its corners. Back to 1 it is where it was.
+    #[test]
+    fn a_normal_window_keeps_its_logical_rectangle_across_a_scale() {
+        let one = Desk::new(SCREEN, Scale::ONE, 0);
+        let two = Desk::new(SCREEN, at("2"), 0);
+        let mut stack = Stack::default();
+        stack.insert(window(Rect::new(100, 120, 200, 100)));
+        relayout(&one, &two, &mut stack);
+        assert_eq!(stack[0].content, Rect::new(200, 240, 400, 200));
+        relayout(&two, &one, &mut stack);
+        assert_eq!(stack[0].content, Rect::new(100, 120, 200, 100));
+    }
+
+    /// 1.5 and back: a corner on a half pixel rounds away and back, and
+    /// moves the window by one pixel at most.
+    #[test]
+    fn a_normal_window_drifts_a_pixel_at_most_through_a_fractional_scale() {
+        let one = Desk::new(SCREEN, Scale::ONE, 0);
+        let half = Desk::new(SCREEN, at("1.5"), 0);
+        let mut stack = Stack::default();
+        let start = Rect::new(101, 33, 301, 97);
+        stack.insert(window(start));
+        relayout(&one, &half, &mut stack);
+        relayout(&half, &one, &mut stack);
+        let back = stack[0].content;
+        for (a, b) in [(back.x0, start.x0), (back.y0, start.y0), (back.x1, start.x1), (back.y1, start.y1)] {
+            assert!((a - b).abs() <= 1, "{back:?} from {start:?}");
+        }
+    }
+
+    /// A window that fits at 1 and is too far right at 2 comes back onto the
+    /// work area whole; a maximized one fills the new work area, and goes back
+    /// to its own rectangle at the new scale.
+    #[test]
+    fn a_relaid_window_stays_on_the_work_area() {
+        let one = Desk::new(SCREEN, Scale::ONE, 0);
+        let two = Desk::new(SCREEN, at("2"), 0);
+        let mut stack = Stack::default();
+        stack.insert(window(Rect::new(1500, 800, 300, 150)));
+        stack.insert(window(Rect::new(10, 40, 300, 200)));
+        set_mode(&one, &mut stack, 1, WindowMode::Maximized);
+        relayout(&one, &two, &mut stack);
+        let work = two.work_area();
+        assert_eq!((stack[0].content.w(), stack[0].content.h()), (600, 300));
+        assert!(work.contains(two.chrome.frame(stack[0].content)), "{:?}", stack[0].content);
+        assert_eq!(two.chrome.frame(stack[1].content), work);
+        assert_eq!(stack[1].saved, Rect::new(20, 80, 600, 400));
     }
 
     /// The geometry is derived, not four expressions that happen to share the

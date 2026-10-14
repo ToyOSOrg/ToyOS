@@ -15,23 +15,17 @@ are on pull request #895: the design as accepted
 (https://github.com/ToyOSOrg/ToyOS/pull/895#issuecomment-6158220132), the
 reviews (#issuecomment-6131030591, #issuecomment-6154531219,
 #issuecomment-6154671069) and the acceptance (#issuecomment-6154686668). #895
-landed the first part: the loader hands the panel's EDID over from the GOP
-handle that shows the scanout, `lib/edid` decodes it, `toyos_desktop::Scale::auto`
-chooses the scale, and the compositor logs it and answers it in
-`inspect display`. Nothing draws at it.
+landed the panel's EDID and the scale chosen from it; the desktop, its own
+clients and winit's `scale_factor()` draw at that scale, which `screen scale`
+sets live.
 
 What is left:
 
-1. **The rest of the scale**, as the accepted design says it: the `display`
-   port and `screen scale`, the window protocol's scale, the compositor
-   drawing its chrome, text, icons and cursor at it and relaying windows out
-   on a change, terminal, filepicker and `files` at the scale, and the winit
-   fork's `scale_factor()`.
-2. **virtio-gpu leaves the kernel** (stage 1 of
-   `issues/every-driver-is-still-in-the-kernel.md`): the compositor drives it
-   through a `pci:1af4:1050` claim and follows the host window's display
-   events. Blocked on `issues/a-cargo-run-boot-claims-every-pcidev-slot.md`:
-   the Virtio profile's fifth claim is refused until a slot is free.
+- **virtio-gpu leaves the kernel** (stage 1 of
+  `issues/every-driver-is-still-in-the-kernel.md`): the compositor drives it
+  through a `pci:1af4:1050` claim and follows the host window's display
+  events. Blocked on `issues/a-cargo-run-boot-claims-every-pcidev-slot.md`:
+  the Virtio profile's fifth claim is refused until a slot is free.
 
 Constraints already paid for:
 
@@ -39,7 +33,8 @@ Constraints already paid for:
   `ExitBootServices`. On the T14 the protocol is on the first of two GOP
   handles, on the AMD bench on the second; the panels are 309x173 mm and
   309x174 mm at 1920x1080, and the rule gives both 1.5 (`lib/edid/fixtures/`).
-- **QEMU's OVMF publishes no EDID protocol**, so every GOP guest runs at 1.
+- **QEMU's OVMF publishes no EDID protocol**, so a GOP guest runs at 1 unless
+  its image's compositor row names a scale (`cargo run --scale`).
 - **QEMU writes no cursor-queue answer** (used `len` 0) and its `GET_EDID`
   `size` field is the buffer's 1024, measured on #895's evidence branch
   `pr-895` at `7d47ad2b`.

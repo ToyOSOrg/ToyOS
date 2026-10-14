@@ -1,0 +1,20 @@
+[package]
+name = "toyos-icon"
+description = "The desktop's icons: the SVG subset they are written in, their coverage at any size, and its blend onto a canvas."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[lib]
+doctest = false
+
+[dependencies]
+# The arcs' and strokes' transcendental functions, the same on every host and
+# guest, so an icon is the same pixels wherever it is drawn.
+libm = "0.2.16"
+
+[dev-dependencies]
+toyos-sha2-hw = { path = "../../lib/sha2-hw" }
+
+[lints.rust]
+warnings = "deny"

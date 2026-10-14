@@ -10,19 +10,23 @@ use toyos_abi::syscall::SHM_PAGE;
 /// eighths for the kernel, the other daemons, and the clients' own heaps.
 pub const WINDOW_BUDGET_SHARE: u64 = 8;
 
-/// Most physical memory one window can cost at this screen size.
+/// Most physical memory one window can cost at this screen size: two
+/// screen-sized buffers.
 ///
 /// A screen-sized content buffer is the largest the compositor ever hands out:
 /// `MSG_CREATE_WINDOW` refuses a request bigger than the screen, and every
 /// path that grows a window afterwards — maximize, snap, drag-resize — is
-/// bounded by the screen too. A buffer costs whole [`SHM_PAGE`]s, so a
-/// one-pixel window still costs one.
+/// bounded by the screen too. **A window holds two from a resize until its
+/// client presents into the new one** ([`crate::Buffers`]) — every window at
+/// once on a change of scale, and for as long as a client that never presents
+/// again lives. A buffer costs whole [`SHM_PAGE`]s, so a one-pixel window
+/// still costs two.
 ///
 /// Deliberately a function of the screen — a bigger screen means bigger
 /// windows means fewer of them — which no bare constant expresses.
 pub fn window_bytes(screen: Rect) -> u64 {
     let page = SHM_PAGE as u64;
-    (screen.area() * 4).div_ceil(page).max(1) * page
+    2 * (screen.area() * 4).div_ceil(page).max(1) * page
 }
 
 /// How many windows the compositor will hold at this screen size.
@@ -87,13 +91,15 @@ pub enum Port {
     Prompt,
     /// `clipboard`, its watcher's.
     Clipboard,
+    /// `display`, its settings' holder's.
+    Display,
 }
 
 /// Whether a connection just accepted off `port` may wait for its first frame,
-/// beside the ones already `waiting`: **one off `prompt` and one off
-/// `clipboard` each have a slot of their own**, and the clients' share `max`,
-/// so no client filling the table keeps the prompt from being made or the
-/// clipboard from being watched.
+/// beside the ones already `waiting`: **one off each port but `compositor`
+/// has a slot of its own**, and the clients' share `max`, so no client filling
+/// the table keeps the prompt from being made, the clipboard from being
+/// watched or the display from being set.
 pub fn pending_admits(port: Port, waiting: impl IntoIterator<Item = Port>, max: usize) -> bool {
     let mut waiting = waiting.into_iter();
     match port {
@@ -108,13 +114,14 @@ mod tests {
 
     const HD: Rect = Rect::new(0, 0, 1920, 1080);
 
+    /// Two buffers, each of whole pages.
     #[test]
-    fn a_window_costs_whole_pages() {
+    fn a_window_costs_two_buffers_of_whole_pages() {
         let page = SHM_PAGE as u64;
-        assert_eq!(window_bytes(Rect::new(0, 0, 1, 1)), page);
+        assert_eq!(window_bytes(Rect::new(0, 0, 1, 1)), 2 * page);
         // 1920*1080*4 = 8_294_400, which is three pages and most of a fourth.
-        assert_eq!(window_bytes(HD), 4 * page);
-        assert_eq!(window_bytes(Rect::new(0, 0, 2048, 2048)), 8 * page);
+        assert_eq!(window_bytes(HD), 2 * 4 * page);
+        assert_eq!(window_bytes(Rect::new(0, 0, 2048, 2048)), 2 * 8 * page);
     }
 
     #[test]
@@ -169,6 +176,14 @@ mod tests {
         assert!(pending_admits(Port::Prompt, full, 32));
         assert!(!pending_admits(Port::Prompt, full.iter().copied().chain([Port::Prompt]), 32));
         assert!(pending_admits(Port::Compositor, [Port::Prompt].into_iter().chain([Port::Compositor; 31]), 32));
+    }
+
+    /// The display's holder waits in a slot of its own, as the prompt does.
+    #[test]
+    fn a_display_request_is_admitted_past_every_client_ceiling() {
+        let full = [Port::Compositor; 32];
+        assert!(pending_admits(Port::Display, full.iter().copied().chain([Port::Clipboard]), 32));
+        assert!(!pending_admits(Port::Display, full.iter().copied().chain([Port::Display]), 32));
     }
 
     /// The clipboard's watcher waits in a slot of its own, as the prompt does.

@@ -461,17 +461,11 @@ impl PromptGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::Chrome;
     use crate::window::{Level, Window};
     use alloc::string::ToString;
     use toyos_abi::input::{MOD_ALT, MOD_CTRL, MOD_GUI, MOD_RELEASED};
 
-    const DESK: Desk = Desk {
-        chrome: Chrome::DEFAULT,
-        screen: Rect::new(0, 0, 1920, 1080),
-        font_w: 8,
-        apps: 2,
-    };
+    const DESK: Desk = Desk::new(Rect::new(0, 0, 1920, 1080), crate::Scale::ONE, 2);
 
     fn key(keycode: u8, modifiers: u8) -> RawKeyEvent {
         RawKeyEvent { keycode, modifiers }

@@ -3,7 +3,7 @@ name = "toyos-font"
 version = "0.2.0" # never bumped; crates.io's is assigned on publish (build/sdkversion.rs)
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Pre-rasterized glyph bitmaps drawn into a pixel buffer, for ToyOS programs."
+description = "A monospace font's glyphs rasterized into one cell size, and drawn into a pixel buffer, for ToyOS programs."
 repository = "https://github.com/ToyOSOrg/ToyOS"
 
 # `font` is taken on crates.io, so the package is `toyos-font`; the lib target
@@ -12,3 +12,8 @@ repository = "https://github.com/ToyOSOrg/ToyOS"
 [lib]
 name = "font"
 doctest = false
+
+[dependencies]
+fontdue = "0.9"
+# The codepoints a shipped layout can type, which every raster carries.
+toyos-keymap = { path = "../keymap" }

@@ -550,12 +550,12 @@ dependencies = [
 name = "compositor"
 version = "0.1.0"
 dependencies = [
- "sprite",
  "toyos",
  "toyos-abi",
  "toyos-desktop",
  "toyos-edid",
  "toyos-font",
+ "toyos-icon",
  "toyos-input",
  "toyos-inspect",
  "toyos-manifest",
@@ -1002,7 +1002,7 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 [[package]]
 name = "dpi"
 version = "0.1.1"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#f58e1f3bca784d97056fe47475c2dca8c6386816"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#48c7022a44c7416107648d4cf8be4fdd042d0722"
 
 [[package]]
 name = "ecdsa"
@@ -1188,6 +1188,7 @@ name = "files"
 version = "0.1.0"
 dependencies = [
  "toyos-font",
+ "toyos-icon",
  "toyos-window",
 ]
 
@@ -3712,10 +3713,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sprite"
-version = "0.1.0"
-
-[[package]]
 name = "ssh-cipher"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4024,6 +4021,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-keymap",
+ "toyos-manifest",
  "toyos-window",
 ]
 
@@ -4111,7 +4109,6 @@ dependencies = [
  "bcachefs",
  "fatfs",
  "flate2",
- "fontdue",
  "getrandom 0.3.4",
  "gpt",
  "iced-x86",
@@ -4128,7 +4125,9 @@ dependencies = [
  "toyos-elf",
  "toyos-fat32",
  "toyos-fat32-check",
+ "toyos-font",
  "toyos-gpt",
+ "toyos-icon",
  "toyos-input",
  "toyos-keymap",
  "toyos-logstream",
@@ -4157,7 +4156,9 @@ name = "toyos-desktop"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
+ "toyos-font",
  "toyos-input",
+ "toyos-window",
 ]
 
 [[package]]
@@ -4217,6 +4218,10 @@ version = "0.1.0"
 [[package]]
 name = "toyos-font"
 version = "0.2.0"
+dependencies = [
+ "fontdue",
+ "toyos-keymap",
+]
 
 [[package]]
 name = "toyos-gicv3"
@@ -4242,6 +4247,14 @@ version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
  "toyos-pci",
+]
+
+[[package]]
+name = "toyos-icon"
+version = "0.1.0"
+dependencies = [
+ "libm",
+ "toyos-sha2-hw",
 ]
 
 [[package]]
@@ -5406,7 +5419,7 @@ checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
 [[package]]
 name = "winit"
 version = "0.30.13"
-source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#f58e1f3bca784d97056fe47475c2dca8c6386816"
+source = "git+https://github.com/ToyOSOrg/winit?branch=toyos-0.30.13#48c7022a44c7416107648d4cf8be4fdd042d0722"
 dependencies = [
  "ahash",
  "android-activity",

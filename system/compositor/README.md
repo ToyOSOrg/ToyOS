@@ -2,4 +2,4 @@
 
 Desktop window manager and display server.
 
-Depends on the window, font, and sprite libraries.
+Depends on the window, font and icon libraries.

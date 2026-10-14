@@ -218,12 +218,7 @@ mod tests {
 
     #[test]
     fn the_overlay_sits_above_the_taskbar_centred() {
-        let desk = crate::layout::Desk {
-            screen: Rect::new(0, 0, 1920, 1080),
-            chrome: crate::layout::Chrome::DEFAULT,
-            font_w: 8,
-            apps: 0,
-        };
+        let desk = crate::layout::Desk::new(Rect::new(0, 0, 1920, 1080), crate::Scale::ONE, 0);
         let r = overlay_rect(&desk);
         let strip = desk.taskbar(0).strip();
         assert!(r.y1 <= strip.y0);

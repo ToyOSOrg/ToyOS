@@ -142,10 +142,72 @@ impl<C> Window<C> {
     }
 }
 
+/// A window's buffers: the one it is shown from, and one given its client
+/// since, which the client draws into and which is shown from its first
+/// present on.
+///
+/// **Nothing flashes**: until that present the window is drawn from the
+/// buffer it last presented, clipped to its new rectangle. A second buffer
+/// given before the client presented replaces the first, which it never
+/// drew into. So a window holds at most two.
+pub struct Buffers<B> {
+    shown: B,
+    given: Option<B>,
+}
+
+impl<B> Buffers<B> {
+    pub fn new(shown: B) -> Self {
+        Self { shown, given: None }
+    }
+
+    pub fn shown(&self) -> &B {
+        &self.shown
+    }
+
+    /// The buffer the client draws into: the given one, if there is one.
+    pub fn drawn(&self) -> &B {
+        self.given.as_ref().unwrap_or(&self.shown)
+    }
+
+    /// Give the client `buffer`, and answer the given one it never presented.
+    pub fn give(&mut self, buffer: B) -> Option<B> {
+        self.given.replace(buffer)
+    }
+
+    /// The client presented: the given buffer, if any, is shown from now on,
+    /// and the one it replaces is answered to drop.
+    pub fn presented(&mut self) -> Option<B> {
+        let given = self.given.take()?;
+        Some(core::mem::replace(&mut self.shown, given))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::string::ToString;
+
+    #[test]
+    fn a_window_is_shown_from_its_old_buffer_until_it_presents_into_the_new() {
+        let mut b = Buffers::new("old");
+        assert_eq!(b.give("new"), None);
+        assert_eq!((*b.shown(), *b.drawn()), ("old", "new"));
+        assert_eq!(b.presented(), Some("old"));
+        assert_eq!((*b.shown(), *b.drawn()), ("new", "new"));
+        assert_eq!(b.presented(), None);
+    }
+
+    /// Two resizes before a present: the first new buffer was never drawn
+    /// into, so it goes, and the window holds two and not three.
+    #[test]
+    fn a_buffer_never_presented_is_dropped_by_the_next() {
+        let mut b = Buffers::new("old");
+        assert_eq!(b.give("first"), None);
+        assert_eq!(b.give("second"), Some("first"));
+        assert_eq!(*b.shown(), "old");
+        assert_eq!(b.presented(), Some("old"));
+        assert_eq!(*b.shown(), "second");
+    }
 
     fn win(content: Rect) -> Window<()> {
         Window::new((), content, "t".to_string(), Level::Ordinary, CursorStyle::Default)

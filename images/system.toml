@@ -74,12 +74,13 @@ receives = ["power"]
 # reaches: serving it makes the sessions its launches open the screen's, whose
 # packages may ask the person at it for a folder. `clipboard` is sent every copy
 # made in the session, and `vdagent` alone receives it. `input` is where a source
-# of keys and pointer reports reaches the owner of input, which it is. `volume`
-# is soundserver's master level and mute, which the volume keys set and no
-# other row receives.
+# of keys and pointer reports reaches the owner of input, which it is.
+# `display` sets the mode and the scale, and `toybox` alone receives it, for
+# `screen`. `volume` is soundserver's master level and mute, which the volume
+# keys set and no other row receives.
 [programs.compositor]
 service = true
-serves = ["compositor", "prompt", "clipboard", "input"]
+serves = ["compositor", "prompt", "clipboard", "input", "display"]
 receives = ["soundserver", "filepicker", "volume"]
 devices = ["framebuffer", "keyboard", "mouse"]
 starts = ["terminal", "files", "/apps"]
@@ -214,7 +215,8 @@ receives = ["compositor", "filepicker"]
 # `power` is `/system/bin/shutdown`'s and `/system/bin/reboot`'s: the
 # connector to the supervisor's port, which has `logkeeper` make the log whole and then stops
 # the machine with a `SysCap` no program in the image holds. `roster` is
-# `/system/bin/ps`'s. Each of those is this binary under another name: the supervisor
+# `/system/bin/ps`'s. `display` is `/system/bin/screen`'s: the mode and the
+# scale, which no other row may set. Each of those is this binary under another name: the supervisor
 # resolves the symlink to this row, so the applets are endowed both and nothing
 # else in the image is. The row's granularity is the binary, so every other
 # applet is endowed both too — the same shape as `soundserver` reaching `ls`.
@@ -222,7 +224,7 @@ receives = ["compositor", "filepicker"]
 # `free` is the same syscall as `ps` and is named by neither: the machine header
 # is ambient and the process roster is not.
 [programs.toybox]
-receives = ["compositor", "soundserver", "surface", "power"]
+receives = ["compositor", "soundserver", "surface", "power", "display"]
 syscap = ["roster"]
 starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "paint", "files", "host", "inspect", "pkg", "sshserver", "swap", "toyfetch", "update", "/apps"]
 

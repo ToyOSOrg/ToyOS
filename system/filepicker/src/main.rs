@@ -41,6 +41,36 @@ const KEY_TAB: u8 = 0x2B;
 const KEY_ESCAPE: u8 = 0x29;
 const KEY_SPACE: u8 = 0x2C;
 
+/// The desktop's monospace font, which the picker and the prompt draw at
+/// their window's scale.
+const FONT: &str = "/system/share/fonts/JetBrainsMono-Regular.ttf";
+
+/// A window's text and spacing at its scale.
+pub(crate) struct Ui {
+    pub font: Font,
+    scale: window::Scale,
+}
+
+impl Ui {
+    pub fn at(ttf: &[u8], scale: window::Scale) -> Self {
+        let (w, h) = scale.cell();
+        let font = Font::from_ttf(ttf, w, h).unwrap_or_else(|e| panic!("filepicker: {FONT}: {e}"));
+        Self { font, scale }
+    }
+
+    /// `window`'s scale's, if it is not this one's.
+    pub fn follow(&mut self, ttf: &[u8], window: &Window) {
+        if window.scale() != self.scale {
+            *self = Self::at(ttf, window.scale());
+        }
+    }
+
+    /// `l` logical pixels in the window's.
+    pub fn px(&self, l: usize) -> usize {
+        self.scale.px_u32(l as u32) as usize
+    }
+}
+
 // --- Directory entry ---
 
 struct Entry {
@@ -80,12 +110,13 @@ struct Picker {
     filename: String,
     filename_cursor: usize,
     focus_filename: bool, // true = filename input focused, false = file list focused
-    font_w: usize,
     font_h: usize,
+    /// A bar's padding around its text.
+    pad: usize,
 }
 
 impl Picker {
-    fn new(mode: PickerMode, start_dir: &str, font_w: usize, font_h: usize) -> Self {
+    fn new(mode: PickerMode, start_dir: &str, ui: &Ui) -> Self {
         let current_dir = PathBuf::from(if start_dir.is_empty() { "/" } else { start_dir });
         let entries = list_dir(&current_dir);
         Self {
@@ -97,9 +128,15 @@ impl Picker {
             filename: String::new(),
             filename_cursor: 0,
             focus_filename: mode == PickerMode::Save,
-            font_w,
-            font_h,
+            font_h: ui.font.height(),
+            pad: ui.px(8),
         }
+    }
+
+    /// Measured again for `ui`, a window's new scale's.
+    fn measure(&mut self, ui: &Ui) {
+        self.font_h = ui.font.height();
+        self.pad = ui.px(8);
     }
 
     fn refresh(&mut self) {
@@ -119,12 +156,17 @@ impl Picker {
         self.refresh();
     }
 
+    /// A bar's height: a row of text and its padding.
+    fn bar_h(&self) -> usize {
+        self.font_h + self.pad
+    }
+
     fn visible_rows(&self, win_h: usize) -> usize {
-        let top = self.font_h + 8; // path bar
+        let top = self.bar_h(); // path bar
         let bottom = if self.mode == PickerMode::Save {
-            (self.font_h + 8) * 2 // filename input + action bar
+            self.bar_h() * 2 // filename input + action bar
         } else {
-            self.font_h + 8 // action bar only
+            self.bar_h() // action bar only
         };
         (win_h.saturating_sub(top + bottom)) / self.font_h
     }
@@ -179,19 +221,22 @@ enum PickerAction {
 
 // --- Rendering ---
 
-fn render(fb: &Framebuffer, font: &Font, picker: &Picker) {
+fn render(fb: &Framebuffer, ui: &Ui, picker: &Picker) {
     let w = fb.width();
     let h = fb.height();
-    let fw = picker.font_w;
+    let font = &ui.font;
+    let fw = font.width();
     let fh = picker.font_h;
+    let bar_h = picker.bar_h();
+    let (pad, half, quarter) = (ui.px(8), ui.px(4), ui.px(2));
 
     fb.clear(BG);
 
     let path_str = picker.current_dir.to_string_lossy();
-    fb.fill_rect(0, 0, w, fh + 8, PATH_BG);
-    font.draw_string(fb, 8, 4, &path_str, TEXT_FG, PATH_BG);
+    fb.fill_rect(0, 0, w, bar_h, PATH_BG);
+    font.draw_string(fb, pad, half, &path_str, TEXT_FG, PATH_BG);
 
-    let list_y = fh + 8;
+    let list_y = bar_h;
     let vis = picker.visible_rows(h);
 
     for i in 0..vis {
@@ -219,15 +264,15 @@ fn render(fb: &Framebuffer, font: &Font, picker: &Picker) {
         } else {
             format!("  {}", entry.name)
         };
-        font.draw_string(fb, 8, y, &display, fg, bg);
+        font.draw_string(fb, pad, y, &display, fg, bg);
     }
 
     let mut bottom_y = h;
 
     // Action bar (always at very bottom)
-    bottom_y -= fh + 8;
+    bottom_y -= bar_h;
     let action_y = bottom_y;
-    fb.fill_rect(0, action_y, w, fh + 8, PATH_BG);
+    fb.fill_rect(0, action_y, w, bar_h, PATH_BG);
 
     let cancel_label = " Cancel ";
     let action_label = if picker.mode == PickerMode::Save {
@@ -238,32 +283,32 @@ fn render(fb: &Framebuffer, font: &Font, picker: &Picker) {
 
     let action_w = action_label.len() * fw;
     let cancel_w = cancel_label.len() * fw;
-    let action_x = w - action_w - 8;
-    let cancel_x = action_x - cancel_w - 8;
+    let action_x = w.saturating_sub(action_w + pad);
+    let cancel_x = action_x.saturating_sub(cancel_w + pad);
 
-    fb.fill_rect(cancel_x, action_y + 2, cancel_w, fh + 4, BUTTON_BG);
-    font.draw_string(fb, cancel_x, action_y + 4, cancel_label, BUTTON_FG, BUTTON_BG);
+    fb.fill_rect(cancel_x, action_y + quarter, cancel_w, fh + half, BUTTON_BG);
+    font.draw_string(fb, cancel_x, action_y + half, cancel_label, BUTTON_FG, BUTTON_BG);
 
-    fb.fill_rect(action_x, action_y + 2, action_w, fh + 4, ACCENT_BG);
-    font.draw_string(fb, action_x, action_y + 4, action_label, ACCENT_FG, ACCENT_BG);
+    fb.fill_rect(action_x, action_y + quarter, action_w, fh + half, ACCENT_BG);
+    font.draw_string(fb, action_x, action_y + half, action_label, ACCENT_FG, ACCENT_BG);
 
     // Filename input (Save mode only)
     if picker.mode == PickerMode::Save {
-        bottom_y -= fh + 8;
+        bottom_y -= bar_h;
         let input_y = bottom_y;
-        fb.fill_rect(0, input_y, w, fh + 8, PATH_BG);
+        fb.fill_rect(0, input_y, w, bar_h, PATH_BG);
 
         let label = "Filename: ";
-        font.draw_string(fb, 8, input_y + 4, label, DIM_FG, PATH_BG);
+        font.draw_string(fb, pad, input_y + half, label, DIM_FG, PATH_BG);
 
-        let input_x = 8 + label.len() * fw;
-        let input_w = w - input_x - 8;
-        fb.fill_rect(input_x, input_y + 2, input_w, fh + 4, INPUT_BG);
-        font.draw_string(fb, input_x + 4, input_y + 4, &picker.filename, TEXT_FG, INPUT_BG);
+        let input_x = pad + label.len() * fw;
+        let input_w = w.saturating_sub(input_x + pad);
+        fb.fill_rect(input_x, input_y + quarter, input_w, fh + half, INPUT_BG);
+        font.draw_string(fb, input_x + half, input_y + half, &picker.filename, TEXT_FG, INPUT_BG);
 
         if picker.focus_filename {
-            let cx = input_x + 4 + picker.filename_cursor * fw;
-            fb.fill_rect(cx, input_y + 4, 2, fh, CURSOR_COLOR);
+            let cx = input_x + half + picker.filename_cursor * fw;
+            fb.fill_rect(cx, input_y + half, quarter, fh, CURSOR_COLOR);
         }
     }
 }
@@ -358,7 +403,7 @@ fn handle_mouse(picker: &mut Picker, mouse: &MouseEvent, win_h: usize) -> Picker
 
     match mouse.event_type {
         window::MOUSE_PRESS if mouse.changed == 1 => {
-            let list_y = fh + 8;
+            let list_y = picker.bar_h();
             let vis = picker.visible_rows(win_h);
             let list_end = list_y + vis * fh;
 
@@ -372,8 +417,8 @@ fn handle_mouse(picker: &mut Picker, mouse: &MouseEvent, win_h: usize) -> Picker
 
             // Check filename input area click (Save mode)
             if picker.mode == PickerMode::Save {
-                let input_y = win_h - (fh + 8) * 2;
-                if py >= input_y && py < input_y + fh + 8 {
+                let input_y = win_h.saturating_sub(picker.bar_h() * 2);
+                if py >= input_y && py < input_y + picker.bar_h() {
                     picker.focus_filename = true;
                 }
             }
@@ -396,7 +441,7 @@ fn handle_mouse(picker: &mut Picker, mouse: &MouseEvent, win_h: usize) -> Picker
 
 // --- Run a single file picker session ---
 
-fn run_picker(mode: PickerMode, start_dir: &str, client: &Connection) {
+fn run_picker(mode: PickerMode, start_dir: &str, client: &Connection, ttf: &[u8]) {
     let title = if mode == PickerMode::Save {
         "Save As"
     } else {
@@ -407,7 +452,7 @@ fn run_picker(mode: PickerMode, start_dir: &str, client: &Connection) {
     // arrive after whatever was holding the compositor's windows has exited.
     // The client is answered as if the user cancelled, because from its side
     // that is exactly what happened — no file was picked.
-    let mut window = match Window::create_topmost(500, 400, title) {
+    let mut window = match Window::create_topmost(window::Size::Logical { width: 500, height: 400 }, title) {
         Ok(window) => window,
         Err(e) => {
             eprintln!("filepicker: {e}");
@@ -416,13 +461,10 @@ fn run_picker(mode: PickerMode, start_dir: &str, client: &Connection) {
         }
     };
     let mut fb = window.framebuffer();
+    let mut ui = Ui::at(ttf, window.scale());
+    let mut picker = Picker::new(mode, start_dir, &ui);
 
-    let font_data = fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font").expect("Failed to load font");
-    let font = Font::from_prebuilt(&font_data);
-
-    let mut picker = Picker::new(mode, start_dir, font.width(), font.height());
-
-    render(&fb, &font, &picker);
+    render(&fb, &ui, &picker);
     window.present();
 
     loop {
@@ -434,6 +476,8 @@ fn run_picker(mode: PickerMode, start_dir: &str, client: &Connection) {
 
             Event::Resized => {
                 fb = window.framebuffer();
+                ui.follow(ttf, &window);
+                picker.measure(&ui);
                 PickerResult::Continue
             }
 
@@ -460,7 +504,7 @@ fn run_picker(mode: PickerMode, start_dir: &str, client: &Connection) {
         }
 
         if needs_redraw {
-            render(&fb, &font, &picker);
+            render(&fb, &ui, &picker);
             window.present();
         }
     }
@@ -511,8 +555,7 @@ fn main() {
         .expect("the manifest declares this program serves `filepicker`");
     let questions = endow::acceptor(toyos_manifest::consent::PORT)
         .expect("the manifest declares this program serves `consent`");
-    let font_data = fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font").expect("Failed to load font");
-    let font = Font::from_prebuilt(&font_data);
+    let ttf = fs::read(FONT).unwrap_or_else(|e| panic!("filepicker: {FONT}: {e}"));
 
     let poller = Poller::new(2 + MAX_PENDING_REQUESTS as u32);
     let mut pending: Vec<Pending> = Vec::new();
@@ -592,7 +635,7 @@ fn main() {
                     let p = pending.remove(i);
                     if p.consent {
                         match consent::question(p.rx.payload(payload_len), msg_type) {
-                            Ok(ask) => consent::ask(ask, &p.conn, &font),
+                            Ok(ask) => consent::ask(ask, &p.conn, &ttf),
                             Err(why) => eprintln!("filepicker: dropping the supervisor's question — {why}"),
                         }
                     } else if msg_type == MSG_FILEPICKER_REQUEST {
@@ -607,7 +650,7 @@ fn main() {
                             .and_then(|d| core::str::from_utf8(d).ok())
                             .filter(|s| !s.is_empty())
                             .unwrap_or("/");
-                        run_picker(mode, start_dir, &p.conn);
+                        run_picker(mode, start_dir, &p.conn, &ttf);
                     }
                     // The session held the loop, so deadlines are re-read.
                     break;
