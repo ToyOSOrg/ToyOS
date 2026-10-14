@@ -39,6 +39,5 @@ pub mod msix;
 pub mod placement;
 pub mod pm;
 pub mod probe;
-pub mod slot;
 
 pub use choose::{claimed, console, Unclaimable};

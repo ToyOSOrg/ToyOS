@@ -189,7 +189,7 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be
     // given an address space for.
-    log.must_not_say("handed over on slot")?;
+    log.must_not_say("] handed over, ")?;
     Ok(())
 }
 

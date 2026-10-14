@@ -93,10 +93,10 @@ pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
         }
     }
     let count = |what: &str| {
-        let needle = format!("[{I219}] {what} slot ");
+        let needle = format!("[{I219}] {what}");
         window.iter().filter(|m| m.starts_with("pcidev: PCI ") && m.contains(&needle)).count()
     };
-    let (handed, released) = (count("handed over on"), count("released from"));
+    let (handed, released) = (count("handed over"), count("released"));
     if (handed, released) != (2, 2) {
         return Err(format!(
             "{I219} was handed over {handed} time(s) and released {released}, want 2 and 2:\n{}",

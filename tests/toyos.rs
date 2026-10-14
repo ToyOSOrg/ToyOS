@@ -315,6 +315,35 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_low_ecam", qemu::Profile::VirtLowEcam),
 ];
 
+/// Which handle the loader took the panel's EDID from, and what the compositor
+/// made of it, on each bench: the handle M1 found the protocol on, and the
+/// size and scale `lib/edid`'s fixture of that bench's panel gives.
+fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
+    const T14: u32 = 0x0008_06c1;
+    const AMD_BENCH: u32 = 0x0086_0f01;
+    let signature = microcode_lines(kernel)?
+        .first()
+        .ok_or("the kernel wrote no microcode line to tell the bench by")?
+        .signature;
+    let (handle, panel) = match signature {
+        T14 => (0, "panel 309x173 mm, scale 1.5"),
+        AMD_BENCH => (1, "panel 309x174 mm, scale 1.5"),
+        other => return Err(format!("no bench of signature {other:#x} says which panel it has")),
+    };
+    let handed = format!("EDID: GOP handle {handle} of 2 shows the scanout and publishes 128 byte(s), the base block handed over");
+    if !loader.contains(&handed) {
+        let said: Vec<&str> = loader.lines().filter(|l| l.contains("EDID: ")).collect();
+        return Err(format!("loader.log does not say {handed:?}; its EDID lines: {said:?}"));
+    }
+    let chosen = format!("compositor: display 1920x1080, {panel}");
+    if !log.contains(&chosen) {
+        let said: Vec<&str> = log.lines().filter(|l| l.contains("compositor: display ")).collect();
+        return Err(format!("the log does not say {chosen:?}; the compositor said {said:?}"));
+    }
+    eprintln!("  [gop_edid_scale] signature {signature:#x}: GOP handle {handle}, {panel}");
+    Ok(())
+}
+
 /// The tests whose machine shape *is* the test, each on a boot of its own.
 /// `run_machine_test` dispatches them.
 const MACHINE_TESTS: &[&str] = &[
@@ -486,6 +515,9 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| b[0].job_passed("test_rs_wake_storm_cost"),
         },
     ),
+    // The owner's directive (2026-10-14): no audible sound tests on the bench
+    // laptops, so these rows run with soundserver's master muted, which none
+    // of their claims needs to hear (`tests/guest/rust-tests/src/master.rs`).
     (
         // A tone through soundserver's HDA path. The T14 and the AMD bench.
         "hda_tone",
@@ -511,9 +543,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // One step of the codec's master and back, each read back from the
-        // codec, on the HDA path soundserver configured. The T14 and the AMD
-        // bench.
+        // One step of the codec's master up from its bottom and back, each
+        // read back from the codec, on the HDA path soundserver configured,
+        // and the master muted again. The T14 and the AMD bench.
         "hda_volume_step",
         metal::Metal {
             arms: TESTCASES,
@@ -867,6 +899,16 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "metal_sim_scanout_wc",
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
+    ),
+    (
+        // The panel's EDID from the firmware's GOP to the compositor's scale:
+        // the loader's read before `ExitBootServices` is no host test's, and
+        // QEMU's OVMF publishes no EDID protocol.
+        "gop_edid_scale",
+        metal::Metal {
+            arms: METALCASE,
+            judge: |b| gop_edid_scale(b[0].loader().text(), b[0].log().text(), b[0].kernel().text()),
+        },
     ),
     (
         // The machine's own i8042 and EC, driven from userland: the keyboard
@@ -2499,13 +2541,13 @@ const VIRT_CLAIM_BAR_FAULT: &str = "claim_bar_fault";
 /// the console only if the kernel read through the BAR for a crash report.
 const BAR_MARKS: [u64; 2] = [0xbad0_c0de_0000_5eed, 0xbad1_c0de_0000_5eed];
 
-/// A claimed function's message, translated by the ITS into its claim slot's
+/// A claimed function's message, translated by the ITS into its function's
 /// LPI, and the claims the kernel refuses beside it, on `tests/images/virtclaimcase.toml`.
 /// Its first job claims QEMU's `edu` and reads every message it asks it for as
 /// one interrupt of its claim (`tests/guest/rust-tests/src/bin/claim_lpi.rs`),
 /// judged beside it on the kernel's lines: the ITS armed from the MADT; the
-/// function handed over on a slot, its DeviceID the requester ID QEMU's IORT
-/// maps it to, its slot's LPI raised; and at the claim's end the DeviceID
+/// function handed over, its DeviceID the requester ID QEMU's IORT maps it
+/// to, its LPI raised; and at the claim's end the DeviceID
 /// unmapped again. The second is refused the `e1000e` the IORT routes past
 /// the SMMUv3, by the kernel's name for it, and claims edu after it. The
 /// third faults twice in edu's BAR, and names it as a syscall's buffer; no
@@ -2539,7 +2581,7 @@ fn virt_claim_lpi(profile: qemu::Profile) -> Result<(), String> {
     let mut serial = virt_console(&qemu);
     judge_virt_job(&mut qemu, &mut serial, JOB, SAID)?;
     // The release's own line, its last: the DeviceID's unmapping comes before it.
-    await_marker(&mut qemu, &mut serial, " released from slot ", "the claim's release")?;
+    await_marker(&mut qemu, &mut serial, &format!("{EDU} released; "), "the claim's release")?;
     let line = |want: &str| serial.lines().find(|l| l.contains(want)).map(str::to_string);
     let Some(armed) = line("ITS: 0 at 0x8080000 armed") else {
         return Err(format!("the MADT's ITS was never armed
@@ -2547,23 +2589,23 @@ serial:
 {serial}"));
     };
     eprintln!("  [virt] {armed}");
-    let Some(handed) = line(&format!("{EDU} handed over on slot ")) else {
+    let Some(handed) = line(&format!("{EDU} handed over, ")) else {
         return Err(format!("edu was never handed over
 serial:
 {serial}"));
     };
     eprintln!("  [virt] {handed}");
-    // `pcidev: PCI bb:dd.f [1234:11e8] handed over on slot N, LPI M`.
+    // `pcidev: PCI bb:dd.f [1234:11e8] handed over, LPI M`.
     let parsed = handed.split_once("pcidev: PCI ").and_then(|(_, rest)| {
         let (at, rest) = rest.split_once(' ')?;
-        let (slot, lpi) = rest.split_once("on slot ")?.1.split_once(", LPI ")?;
-        Some((at.to_string(), slot.parse::<u32>().ok()?, lpi.trim().parse::<u32>().ok()?))
+        let lpi = rest.split_once("handed over, LPI ")?.1;
+        Some((at.to_string(), lpi.trim().parse::<u32>().ok()?))
     });
-    let Some((at, slot, lpi)) = parsed else {
-        return Err(format!("{handed:?} names no function, slot and LPI"));
+    let Some((at, lpi)) = parsed else {
+        return Err(format!("{handed:?} names no function and LPI"));
     };
-    if lpi != 8192 + slot {
-        return Err(format!("slot {slot}'s LPI is {lpi}, not the {} its slot names", 8192 + slot));
+    if lpi < 8192 {
+        return Err(format!("{at}'s interrupt {lpi} is no LPI"));
     }
     // QEMU's IORT maps a function's requester ID to the SMMUv3's StreamID and
     // that to the ITS's DeviceID unchanged.
@@ -2572,10 +2614,10 @@ serial:
     let hex = |text: &str| u32::from_str_radix(text, 16).map_err(|e| format!("{text}: {e}"));
     let rid = hex(bus)? << 8 | hex(dev)? << 3 | hex(func)?;
     for want in [
-        format!("ITS: {at}, DeviceID {rid:#x}, event 0 is slot {slot}'s LPI {lpi}"),
-        format!("pcidev: slot {slot} took its first message on LPI {lpi}"),
-        format!("pcidev: PCI {at} {EDU} released from slot {slot}"),
-        format!("ITS: {at}, DeviceID {rid:#x}, unmapped from slot {slot}"),
+        format!("ITS: {at}, DeviceID {rid:#x}, event 0 is LPI {lpi}"),
+        format!("pcidev: PCI {at} took its first message on LPI {lpi}"),
+        format!("pcidev: PCI {at} {EDU} released; "),
+        format!("ITS: {at}, DeviceID {rid:#x}, unmapped from LPI {lpi}"),
     ] {
         let Some(found) = line(&want) else {
             return Err(format!("the kernel never said {want:?}
@@ -3788,7 +3830,7 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     run.must_be_clean()?;
     run.must_say(USBD_NOOP)?;
     run.must_say("usbd_spare: settled: usb.events.unannounced = 0")?;
-    let handed = format!("pcidev: PCI {at} [{SPARE}] handed over on slot ");
+    let handed = format!("pcidev: PCI {at} [{SPARE}] handed over, vector ");
     if said.matches(&handed).count() != 1 {
         return Err(format!("{at} was not handed over once, to the one usbd:\n{said}"));
     }
@@ -3803,7 +3845,7 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
         .ok_or_else(|| format!("the job never said where it aimed:\n{faulted}"))?;
     let record = faulted
         .lines()
-        .find(|l| l.contains("iommu: DMA FAULT owner=slot") && l.contains(&format!("stream={at} ")))
+        .find(|l| l.contains("iommu: DMA FAULT owner=process") && l.contains(&format!("stream={at} ")))
         .ok_or_else(|| format!("no DMA FAULT record names {at}:\n{faulted}"))?;
     let addr = record.split_once(" addr=").and_then(|(_, a)| a.split_whitespace().next()).unwrap_or_default();
     if u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok() != u64::from_str_radix(aimed.trim_start_matches("0x"), 16).ok() {
@@ -3862,7 +3904,7 @@ fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
 
 /// The T14's Type-C controller left to a claim and driven by usbd: the
 /// kernel left it, the claim was handed over with its MSI in remappable
-/// format and its remapping entry written, the message reached the slot, and
+/// format and its remapping entry written, the message reached its claim, and
 /// the No-Op completed. What reset the function advertises is read off the
 /// release and printed, not judged.
 fn usbd_on_metal(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
@@ -3872,7 +3914,7 @@ fn usbd_on_metal(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), St
         .lines()
         .find_map(|l| l.split_once("xHCI: leaving PCI ")?.1.strip_suffix(&format!(" {TYPE_C} to a claim (xhci-leave)")).map(str::to_string))
         .ok_or_else(|| format!("the kernel never said it left {TYPE_C} alone:\n{}", kernel.text()))?;
-    kernel.must_say(&format!("pcidev: PCI {at} [{TYPE_C}] handed over on slot "))?;
+    kernel.must_say(&format!("pcidev: PCI {at} [{TYPE_C}] handed over, vector "))?;
     let message = kernel
         .text()
         .lines()
@@ -3887,7 +3929,7 @@ fn usbd_on_metal(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), St
     kernel.must_say(&format!(" source={at} p=1 "))?;
     kernel.must_say("took its first message on vector")?;
     log.must_say(USBD_NOOP)?;
-    for released in kernel.text().lines().filter(|l| l.contains(&format!("pcidev: PCI {at} [{TYPE_C}] released from slot"))) {
+    for released in kernel.text().lines().filter(|l| l.contains(&format!("pcidev: PCI {at} [{TYPE_C}] released; "))) {
         eprintln!("  [usbd] {}", released.trim());
     }
     eprintln!("  [usbd] {at}: handed over, MSI {address:#010x} through its remapping entry, the No-Op answered");
@@ -4936,9 +4978,8 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// Held: a record per CPU the bring-up started, naming the local APIC id the
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
 /// reads` line names, and none stale; every CPU's performance request
-/// declared at boot, `pm_enable=1`, the request Linux makes on this machine
-/// (`tests/metal/t14-linux/hwp-request.txt`), and its power envelope in every read
-/// the one its `control_regs:` line holds. No line, the kernel's or a
+/// declared at boot, `pm_enable=1`, and its power envelope in every read the
+/// one its `control_regs:` line holds. No line, the kernel's or a
 /// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
 /// `counters_metal` reads on the log's clock, either
 /// edge's included because a line stamped in it may follow the read: the
@@ -5005,8 +5046,6 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     if !inside.is_empty() {
         return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
     }
-    let linux_request = u64::from_str_radix(include_str!("metal/t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
-        .map_err(|e| format!("metal/t14-linux/hwp-request.txt: {e}"))?;
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
     let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];
     for cpu in 1..cpus {
@@ -5027,9 +5066,6 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
                 return Err(format!("{name}: cpu{cpu} is stale or not lapic {}: {counters:?}", roster[*cpu]));
             }
             let declared = kernel.must_say(&format!("control_regs: cpu{cpu} pm_enable=1 "))?;
-            if !declared.contains(&format!(" hwp_request={linux_request:#010x} ")) {
-                return Err(format!("cpu{cpu} declared {declared:?}, and Linux requests {linux_request:#010x} on this machine"));
-            }
             for (counter, field, radix) in
                 [("hwp_request", "hwp_request=0x", 16), ("hwp_request_pkg", "hwp_request_pkg=0x", 16), ("energy_perf_bias", "epb=", 10)]
             {

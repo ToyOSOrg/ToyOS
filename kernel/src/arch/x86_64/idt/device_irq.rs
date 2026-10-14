@@ -6,8 +6,18 @@
 //! `kernel_exit_to_user_check`'s IF=0-on-entry contract without an explicit cli.
 
 /// Defines a naked device-interrupt entry point running `$handler` then the deferred-preempt epilogue.
+///
+/// The `numbered` form is jumped to by a stub that pushed one word above the
+/// CPU's frame, which `$handler` takes as its argument and the exit drops.
 macro_rules! device_irq_entry {
     ($(#[$meta:meta])* $vis:vis fn $name:ident => $handler:path) => {
+        device_irq_entry!(@entry $(#[$meta])* $vis fn $name => $handler; 88; []; []);
+    };
+    ($(#[$meta:meta])* $vis:vis fn $name:ident => $handler:path, numbered) => {
+        device_irq_entry!(@entry $(#[$meta])* $vis fn $name => $handler; 96; ["mov rdi, [rbp + 80]"]; ["add rsp, 8"]);
+    };
+    // `$cs` is the CS word's offset from `rbp`: 10 GPRs and RIP, and the stub's word if there is one.
+    (@entry $(#[$meta:meta])* $vis:vis fn $name:ident => $handler:path; $cs:literal; [$($argument:literal)?]; [$($drop:literal)?]) => {
         $(#[$meta])*
         #[unsafe(naked)]
         $vis extern "sysv64" fn $name() {
@@ -29,13 +39,14 @@ macro_rules! device_irq_entry {
                 "and rsp, -16",
                 #[cfg(feature = "mask-windows")]
                 "call {windows_entered}",
+                $($argument,)?
                 "call {handler}",
                 #[cfg(feature = "mask-windows")]
-                "mov rdi, [rbp + 88]",
+                "mov rdi, [rbp + {cs}]",
                 #[cfg(feature = "mask-windows")]
                 "call {windows_leaving}",
                 "sub dword ptr gs:[{preempt_count}], 1",
-                "test dword ptr [rbp + 88], 3", // CS = 10 GPRs + RIP above
+                "test dword ptr [rbp + {cs}], 3",
                 "jz 1f",
                 "call {exit_to_user}",
                 "1:",
@@ -50,8 +61,10 @@ macro_rules! device_irq_entry {
                 "pop rdx",
                 "pop rcx",
                 "pop rax",
+                $($drop,)?
                 "iretq",
                 handler = sym $handler,
+                cs = const $cs,
                 exit_to_user = sym crate::arch::idt::kernel_exit_to_user_check,
                 preempt_count = const $crate::arch::percpu::OFF_PREEMPT_COUNT,
                 #[cfg(feature = "mask-windows")]
