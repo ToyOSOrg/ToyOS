@@ -5,7 +5,7 @@ mod common;
 
 use common::{address_space, qword_descriptor, resource_list as list, Machine, BUS, IO, MEMORY};
 use toyos_abi::acpi::RootBridgeWindow;
-use toyos_acpi::{io_ports, memory_windows, ResourceError, MAX_LIST_BYTES};
+use toyos_acpi::{io_ports, root_bridge, ResourceError, RootResources, MAX_LIST_BYTES};
 
 /// Where a firmware pool allocation sits in the crafted machines below.
 const AT: u64 = 0x7f00_1234;
@@ -22,7 +22,7 @@ fn qword(kind: u8, min: u64, length: u64, translation: u64) -> Vec<u8> {
 fn windows(bytes: &[u8], room: usize) -> Result<Vec<RootBridgeWindow>, ResourceError> {
     let regions: &[(u64, &[u8])] = &[(AT, bytes)];
     let mut out = vec![RootBridgeWindow::default(); room];
-    let count = memory_windows(Machine { regions }, AT, &mut out)?;
+    let count = root_bridge(Machine { regions }, AT, &mut out)?.windows;
     out.truncate(count);
     Ok(out)
 }
@@ -153,6 +153,24 @@ fn every_width_of_address_space_descriptor_is_read() {
         extended.extend_from_slice(&field.to_le_bytes());
     }
     assert_eq!(windows(&list(&[extended]), 8), Ok(vec![RootBridgeWindow { base: 0xc000_0000, length: 0x1000_0000 }]));
+}
+
+/// The root's buses are its one bus number range, in a descriptor of any
+/// width; a second range, and one past bus 0xff, are refused by name, and a
+/// list with none names none.
+#[test]
+fn a_roots_buses_are_its_one_bus_range() {
+    let read = |bytes: &[u8]| {
+        let regions: &[(u64, &[u8])] = &[(AT, bytes)];
+        root_bridge(Machine { regions }, AT, &mut [RootBridgeWindow::default(); 8])
+    };
+    let bus = |min, length| address_space(0x88, 2, BUS, [0, min, min + length - 1, 0, length]);
+    let memory = qword(MEMORY, 0x8000_0000, 0x1000_0000, 0);
+    assert_eq!(read(&list(&[bus(0, 0x100), memory.clone()])), Ok(RootResources { buses: Some((0, 0xff)), windows: 1 }));
+    assert_eq!(read(&list(&[qword(BUS, 0x80, 0x40, 0)])), Ok(RootResources { buses: Some((0x80, 0xbf)), windows: 0 }));
+    assert_eq!(read(&list(&[memory])), Ok(RootResources { buses: None, windows: 1 }));
+    assert_eq!(read(&list(&[bus(0, 0x10), bus(0x20, 0x10)])), Err(ResourceError::Buses { min: 0x20, max: 0x2f }));
+    assert_eq!(read(&list(&[bus(0xf0, 0x20)])), Err(ResourceError::Buses { min: 0xf0, max: 0x10f }));
 }
 
 /// q35's `_CRS` carries the configuration ports beside its ranges as a small

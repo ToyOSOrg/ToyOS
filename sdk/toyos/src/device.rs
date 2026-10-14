@@ -234,7 +234,7 @@ impl AcpiDev {
         syscall::acpi_s5(self.as_handle(), slp_typ_a)
     }
 
-    /// Declare the memory the PCI root bridges decode
+    /// Declare the PCI root bridges
     /// ([`syscall::acpi_declare`]).
     pub fn declare(&self, declared: &toyos_abi::acpi::Apertures) -> Result<(), SyscallError> {
         syscall::acpi_declare(self.as_handle(), declared)

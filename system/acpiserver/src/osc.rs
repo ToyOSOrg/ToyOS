@@ -1,7 +1,9 @@
 //! `_OSC` negotiated (ACPI 6.5 §6.2.11; Intel 302223-007 §2.2): `\_SB._OSC`
 //! under the platform-wide UUID (§6.2.11.2), then, on an Intel processor,
 //! each processor's `_OSC` under Intel's, each a query with the Query flag
-//! and then a commit of what the query granted (§6.2.11.1.1, §6.2.11.1.3).
+//! and then a commit of what the query granted (§6.2.11.1.1, §6.2.11.1.3);
+//! and each PCI root bridge's under the PCI host bridge UUID ([`negotiate_root`],
+//! PCI Firmware Specification 3.3 §4.5), by `crate::apertures`.
 //!
 //! **What ToyOS claims is one declaration a UUID** ([`PLATFORM`],
 //! [`PROCESSOR`]), each bit set only where ToyOS does what the bit promises,
@@ -113,16 +115,15 @@ impl Answered {
     }
 }
 
-/// One evaluation of `path` with the two DWORDs, its answer's two DWORDs.
-fn evaluate<K: Kernel>(aml: &mut Aml<'_, K>, path: &str, uuid: &[u8; 16], first: u32, second: u32) -> Result<[u32; 2], String> {
-    let capabilities = [first.to_le_bytes(), second.to_le_bytes()].concat();
-    let args = [Value::Buffer(uuid.to_vec()), Value::Integer(REVISION), Value::Integer(2), Value::Buffer(capabilities)];
+/// One evaluation of `path` with `N` DWORDs, its answer's `N` DWORDs.
+fn evaluate<K: Kernel, const N: usize>(aml: &mut Aml<'_, K>, path: &str, uuid: &[u8; 16], dwords: [u32; N]) -> Result<[u32; N], String> {
+    let capabilities: Vec<u8> = dwords.iter().flat_map(|dword| dword.to_le_bytes()).collect();
+    let args = [Value::Buffer(uuid.to_vec()), Value::Integer(REVISION), Value::Integer(N as u64), Value::Buffer(capabilities)];
     match aml.interpreter.evaluate(&mut aml.host, path, &args) {
-        Ok(Value::Buffer(answer)) if answer.len() == 8 => {
-            let dword = |at: usize| u32::from_le_bytes(answer[at..at + 4].try_into().expect("four bytes"));
-            Ok([dword(0), dword(4)])
+        Ok(Value::Buffer(answer)) if answer.len() == 4 * N => {
+            Ok(core::array::from_fn(|i| u32::from_le_bytes(answer[4 * i..4 * i + 4].try_into().expect("four bytes"))))
         }
-        Ok(Value::Buffer(answer)) => Err(format!("its answer is {} bytes, where 8 were passed (§6.2.11)", answer.len())),
+        Ok(Value::Buffer(answer)) => Err(format!("its answer is {} bytes, where {} were passed (§6.2.11)", answer.len(), 4 * N)),
         Ok(_) => Err("its answer is no Buffer (§6.2.11)".into()),
         Err(why) => {
             println!("{OWN}{path} was refused {why:x?}");
@@ -134,13 +135,46 @@ fn evaluate<K: Kernel>(aml: &mut Aml<'_, K>, path: &str, uuid: &[u8; 16], first:
 /// `path`'s `_OSC` negotiated under `claim`: the query, and the commit of
 /// what it granted that `claim` asked for.
 pub fn negotiate<K: Kernel>(aml: &mut Aml<'_, K>, path: &str, claim: &Claim) -> Result<Answered, String> {
-    let [query, offered] = evaluate(aml, path, &claim.uuid, QUERY, claim.capabilities)?;
+    let [query, offered] = evaluate(aml, path, &claim.uuid, [QUERY, claim.capabilities])?;
     let offered = offered & claim.capabilities;
     if query & (FAILURE | UNRECOGNIZED_UUID) != 0 {
         return Ok(Answered { query, offered, commit: None });
     }
-    let [commit, granted] = evaluate(aml, path, &claim.uuid, 0, offered)?;
+    let [commit, granted] = evaluate(aml, path, &claim.uuid, [0, offered])?;
     Ok(Answered { query, offered, commit: Some((commit, granted & offered)) })
+}
+
+/// The PCI host bridge UUID (PCI Firmware Specification 3.3 §4.5.1).
+const HOST_BRIDGE: [u8; 16] = uuid(b"33DB4D5B-1FF7-401C-9657-7441C03DD766");
+
+/// The Support field ToyOS states for a root (§4.5.1, Table 4-4): extended
+/// configuration space, which the kernel reaches through ECAM (bit 0), and
+/// MSI, which every claim is armed with (bit 4). Nothing else it does.
+const ROOT_SUPPORT: u32 = 1 << 0 | 1 << 4;
+
+/// The Control field ToyOS asks of a root (Table 4-5): native PCI Express
+/// hot-plug, and the PCI Express capability structure it needs with it.
+pub const ROOT_CONTROL: u32 = toyos_abi::acpi::NATIVE_HOT_PLUG | toyos_abi::acpi::CAPABILITY_STRUCTURE;
+
+/// A root's `_OSC` at `path` negotiated (§4.5.1): the query, and the commit
+/// of the Control bits it offered of [`ROOT_CONTROL`]; what is granted is
+/// what the commit answered of those, and nothing where either answered
+/// failure or an unrecognised UUID. An answer that is no buffer of the three
+/// DWORDs passed refuses the negotiation by name.
+pub fn negotiate_root<K: Kernel>(aml: &mut Aml<'_, K>, path: &str) -> Result<u32, String> {
+    const REFUSED: u32 = FAILURE | UNRECOGNIZED_UUID | UNRECOGNIZED_REVISION;
+    let [query, _, offered] = evaluate(aml, path, &HOST_BRIDGE, [QUERY, ROOT_SUPPORT, ROOT_CONTROL])?;
+    let offered = offered & ROOT_CONTROL;
+    if query & REFUSED != 0 {
+        println!("{OWN}{path}'s query answered {}", status(query));
+        return Ok(0);
+    }
+    let [commit, _, granted] = evaluate(aml, path, &HOST_BRIDGE, [0, ROOT_SUPPORT, offered])?;
+    if commit & REFUSED != 0 {
+        println!("{OWN}{path}'s commit answered {}", status(commit));
+        return Ok(0);
+    }
+    Ok(granted & offered)
 }
 
 /// What the negotiation answered, for the line the server says.

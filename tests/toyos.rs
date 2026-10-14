@@ -2624,6 +2624,11 @@ serial:
 {serial}"));
     };
     eprintln!("  [virt] {armed}");
+    // The root bridge the ACPI server declared, with what its `_OSC` granted.
+    let Some(root) = line("pci: root 0000:00 _OSC: native hot-plug granted") else {
+        return Err(format!("virt's root was not declared with native hot-plug granted\nserial:\n{serial}"));
+    };
+    eprintln!("  [virt] {root}");
     let Some(handed) = line(&format!("{EDU} handed over, ")) else {
         return Err(format!("edu was never handed over
 serial:
@@ -4023,6 +4028,9 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
         .map_err(|e| format!("{e}\n{console}"))?;
     let said = serial::Serial::named("the drives boot", console.clone());
     said.must_be_clean()?;
+    // The root bridge the ACPI server declared, with what q35's `_OSC`
+    // granted: not native hot-plug, which its firmware keeps.
+    eprintln!("  [drives] {}", said.must_say("pci: root 0000:00 _OSC: not granted")?.trim());
     let mut handed: Vec<&str> =
         console.lines().filter_map(|l| l.split_once("pcidev: PCI ")?.1.split_once(HANDED).map(|(at, _)| at)).collect();
     let mut holding: Vec<&str> =

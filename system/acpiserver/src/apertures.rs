@@ -1,29 +1,33 @@
-//! The memory the PCI root bridges decode, declared to the kernel once
-//! ([`Kernel::declare`]): every PCI claim on the machine waits for it, so it
+//! The PCI root bridges, declared to the kernel once ([`Kernel::declare`]):
+//! each one's segment, buses and memory windows, and what its `_OSC`
+//! granted. Every PCI claim on the machine waits for the declaration, so it
 //! is read as soon as the namespace is initialised (ACPI 6.5 §6.5.1).
 //!
 //! **A root is a PCI host bridge by its `_HID` or a `_CID`** (PNP0A03 or
 //! PNP0A08, §6.1.5, §6.1.2) **below no other one**; a root whose `_STA` says
-//! it is not present decodes nothing and is not read. Its windows are what
-//! `toyos_acpi::memory_windows` reads of its `_CRS` (§6.2.2).
+//! it is not present decodes nothing and is not read. Its segment is its
+//! `_SEG` (§6.5.6), 0 without one; its buses and windows are what
+//! `toyos_acpi::root_bridge` reads of its `_CRS` (§6.2.2); its `_OSC` is
+//! negotiated once, query then commit (`crate::osc::negotiate_root`).
 //!
-//! **The declaration is every root's windows together, or none at all**: a
-//! root whose `_STA` or `_CRS` is refused, a list the decoder refuses, more
-//! windows than one declaration carries, and a namespace with no root are
-//! each said by name and declared as no window, which the kernel refuses —
-//! and with it every PCI claim, rather than one placed by a list with a hole
-//! in it. A machine with no namespace declares the same.
+//! **The declaration is every root together, or none at all**: a root whose
+//! `_STA`, `_SEG` or `_CRS` is refused, a list the decoder refuses or that
+//! names no bus range, more roots or windows than a declaration carries, and
+//! a namespace with no root are each said by name and declared as no root,
+//! which the kernel refuses — and with it every PCI claim, rather than one
+//! placed by a list with a hole in it. A machine with no namespace declares
+//! the same. An `_OSC` refused is that root's grant refused, and nothing
+//! else's.
 
-use toyos_abi::acpi::{RootBridgeWindow, MAX_WINDOWS};
+use toyos_abi::acpi::{HostBridge, Osc, RootBridgeWindow, MAX_BRIDGES, MAX_BRIDGE_WINDOWS};
 use toyos_aml::{Kind, Value};
 
 use crate::aml::{kind, Aml};
 use crate::host::{Declared, Kernel, Stopping, OWN};
 use crate::init::{evaluate, host_bridge, Census, Names, PRESENT};
 
-/// Every root bridge's windows, in walk order, or why there is no
-/// declaration.
-pub fn read<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, census: &mut Census) -> Result<Vec<RootBridgeWindow>, String> {
+/// Every root bridge, in walk order, or why there is no declaration.
+pub fn read<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, census: &mut Census) -> Result<Vec<HostBridge>, String> {
     let devices = names.objects.iter().filter(|named| named.kind == Kind::Device).map(|named| named.path.as_str());
     let mut bridges: Vec<&str> = Vec::new();
     for device in devices {
@@ -34,42 +38,77 @@ pub fn read<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, census: &mut Census)
     if bridges.is_empty() {
         return Err("the namespace names no PCI host bridge".into());
     }
-    let mut windows = Vec::new();
+    let mut roots = Vec::new();
     for root in bridges {
         if !present(aml, names, root, census)? {
             println!("{OWN}{root} is not present, so it decodes nothing");
             continue;
         }
+        if roots.len() == MAX_BRIDGES {
+            return Err(format!("the namespace names more than the {MAX_BRIDGES} root bridges a declaration carries"));
+        }
+        let segment = segment(aml, names, root)?;
         let path = format!("{root}._CRS");
         let crs = match aml.interpreter.evaluate(&mut aml.host, &path, &[]) {
             Ok(Value::Buffer(crs)) => crs,
             Ok(_) => return Err(said(&path, "a root bridge's _CRS is no buffer")),
             Err(why) => return Err(said(&path, &format!("a root bridge's _CRS was refused: {}", kind(&why)))),
         };
-        let mut out = [RootBridgeWindow::default(); MAX_WINDOWS];
-        let room = MAX_WINDOWS - windows.len();
-        match toyos_acpi::memory_windows(&crs[..], 0, &mut out[..room]) {
-            Ok(count) => windows.extend_from_slice(&out[..count]),
+        let mut windows = [RootBridgeWindow::default(); MAX_BRIDGE_WINDOWS];
+        let found = match toyos_acpi::root_bridge(&crs[..], 0, &mut windows) {
+            Ok(found) => found,
             Err(why) => return Err(said(&path, &format!("a root bridge's _CRS is no list of windows: {why}"))),
-        }
+        };
+        let buses = found.buses.ok_or_else(|| said(&path, "a root bridge's _CRS names no bus range"))?;
+        let osc = osc(aml, names, root);
+        roots.push(HostBridge::new(segment, buses, &windows[..found.windows], osc).expect("the decoder bounded both"));
     }
-    Ok(windows)
+    Ok(roots)
 }
 
-/// Declare what [`read`] answers, or no window where it refused, saying
-/// which and what the kernel did with it.
-pub fn declare<K: Kernel>(kernel: &K, read: Result<Vec<RootBridgeWindow>, String>) -> Result<(), Stopping> {
-    let windows = match read {
-        Ok(windows) => windows,
+/// What `root`'s `_OSC` granted, said under [`OWN`] where it was refused.
+fn osc<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, root: &str) -> Osc {
+    let path = format!("{root}._OSC");
+    if !names.paths.contains(&path) {
+        return Osc::Absent;
+    }
+    match crate::osc::negotiate_root(aml, &path) {
+        Ok(granted) => Osc::Granted(granted),
         Err(why) => {
-            println!("acpiserver: no window declared, so every PCI claim is refused: {why}");
+            println!("{OWN}{path} was refused: {why}");
+            Osc::Refused
+        }
+    }
+}
+
+/// `root`'s segment: its `_SEG`, 0 where it has none (ACPI 6.5 §6.5.6).
+fn segment<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, root: &str) -> Result<u16, String> {
+    let path = format!("{root}._SEG");
+    if !names.paths.contains(&path) {
+        return Ok(0);
+    }
+    match aml.interpreter.evaluate(&mut aml.host, &path, &[]) {
+        Ok(Value::Integer(segment)) => u16::try_from(segment).map_err(|_| said(&path, "a root bridge's _SEG is past 0xffff")),
+        Ok(_) => Err(said(&path, "a root bridge's _SEG is no integer")),
+        Err(why) => Err(said(&path, &format!("a root bridge's _SEG was refused: {}", kind(&why)))),
+    }
+}
+
+/// Declare what [`read`] answers, or no root where it refused, saying which
+/// and what the kernel did with it.
+pub fn declare<K: Kernel>(kernel: &K, read: Result<Vec<HostBridge>, String>) -> Result<(), Stopping> {
+    let roots = match read {
+        Ok(roots) => roots,
+        Err(why) => {
+            println!("acpiserver: no root bridge declared, so every PCI claim is refused: {why}");
             Vec::new()
         }
     };
-    let listed: Vec<String> = windows.iter().map(|w| format!("mem {:#x}..{:#x}", w.base, w.end())).collect();
-    match kernel.declare(&windows)? {
+    let listed: Vec<String> =
+        roots.iter().flat_map(|root| root.windows().expect("made by `HostBridge::new`")).map(|w| format!("mem {:#x}..{:#x}", w.base, w.end())).collect();
+    match kernel.declare(&roots)? {
         Declared::Held => println!("acpiserver: the root bridges' memory declared: {}", listed.join(", ")),
-        Declared::Refused if windows.is_empty() => {}
+        Declared::Refused if roots.is_empty() => {}
         Declared::Refused => println!("acpiserver: the kernel refused the root bridges' memory as declared ({}); its log says why", listed.join(", ")),
         Declared::Late => println!("acpiserver: the kernel already holds an answer for the root bridges' memory, so nothing is declared"),
     }
@@ -104,59 +143,80 @@ fn said(path: &str, why: &str) -> String {
 mod tests {
     use super::*;
     use crate::aml::load;
+    use crate::aml::tests::{sealed, CRAFTED_RSDP};
+    use crate::common::{buffer, cat, def_name, device, int, method, ret, string};
     use crate::host::tests::Scripted;
+    use crate::osc::ROOT_CONTROL;
 
     const Q35_DSDT: &[u8] = include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1/dsdt.bin");
     const VIRT_DSDT: &[u8] = include_bytes!("../../../lib/acpi/fixtures/qemu-11.1.1-virt/dsdt.bin");
 
-    /// The windows a DSDT's roots declare, read as the server reads them.
-    fn declared(dsdt: &[u8]) -> Result<Vec<RootBridgeWindow>, String> {
+    /// The roots a DSDT declares, read as the server reads them.
+    fn declared(dsdt: &[u8]) -> Result<Vec<HostBridge>, String> {
         let kernel = crate::aml::tests::crafted(dsdt, &[]);
-        let (_, kept) = load(&kernel, crate::aml::tests::CRAFTED_RSDP);
+        let (_, kept) = load(&kernel, CRAFTED_RSDP);
         let mut aml = kept.expect("the DSDT loads");
         let names = Names::read(&aml.interpreter).expect("its namespace walks");
         read(&mut aml, &names, &mut Census::default())
     }
 
-    /// QEMU's `virt` (the measured case): its one root, `\_SB.PCI0`
-    /// (PNP0A08), declares its 32-bit and 64-bit memory windows and nothing
-    /// of its bus numbers, its I/O window translated to 0x3eff0000, ECAM or
-    /// flash.
-    #[test]
-    fn virts_root_declares_its_two_memory_windows() {
-        assert_eq!(
-            declared(VIRT_DSDT),
-            Ok(vec![
-                RootBridgeWindow { base: 0x1000_0000, length: 0x2eff_0000 },
-                RootBridgeWindow { base: 0x80_0000_0000, length: 0x80_0000_0000 },
-            ])
-        );
+    fn windows(root: &HostBridge) -> Vec<RootBridgeWindow> {
+        root.windows().expect("a record `HostBridge::new` made").to_vec()
     }
 
-    /// q35: one root whose `_CRS` names the VGA window, two 32-bit windows
-    /// and the 64-bit window above memory, and steps over its configuration
-    /// ports and I/O ranges.
+    /// QEMU's `virt` (the measured case): its one root, `\_SB.PCI0`
+    /// (PNP0A08) on segment 0, declares buses 0 to 0xff and its 32-bit and
+    /// 64-bit memory windows, and nothing of its I/O window translated to
+    /// 0x3eff0000, ECAM or flash; its `_OSC` grants what was asked.
     #[test]
-    fn q35s_root_declares_its_memory_windows() {
+    fn virts_root_declares_its_buses_windows_and_grant() {
+        let roots = declared(VIRT_DSDT).expect("virt's root");
+        let [root] = roots.as_slice() else { panic!("{roots:x?}") };
+        assert_eq!((root.segment, root.first_bus, root.last_bus), (0, 0, 0xff));
         assert_eq!(
-            declared(Q35_DSDT),
-            Ok(vec![
+            windows(root),
+            [
+                RootBridgeWindow { base: 0x1000_0000, length: 0x2eff_0000 },
+                RootBridgeWindow { base: 0x80_0000_0000, length: 0x80_0000_0000 },
+            ]
+        );
+        assert_eq!(root.osc(), Some(Osc::Granted(VIRT_GRANTED)));
+    }
+
+    /// q35: one root on buses 0 to 0xff whose `_CRS` names the VGA window,
+    /// two 32-bit windows and the 64-bit window above memory, and steps over
+    /// its configuration ports and I/O ranges.
+    #[test]
+    fn q35s_root_declares_its_buses_windows_and_grant() {
+        let roots = declared(Q35_DSDT).expect("q35's root");
+        let [root] = roots.as_slice() else { panic!("{roots:x?}") };
+        assert_eq!((root.segment, root.first_bus, root.last_bus), (0, 0, 0xff));
+        assert_eq!(
+            windows(root),
+            [
                 RootBridgeWindow { base: 0xa_0000, length: 0x2_0000 },
                 RootBridgeWindow { base: 0x8000_0000, length: 0x6000_0000 },
                 RootBridgeWindow { base: 0xf000_0000, length: 0xec0_0000 },
                 RootBridgeWindow { base: 0xc0_0000_0000, length: 0x8_0000_0000 },
-            ])
+            ]
         );
+        assert_eq!(root.osc(), Some(Osc::Granted(Q35_GRANTED)));
     }
+
+    /// What each QEMU's root `_OSC` grants of [`ROOT_CONTROL`]: `virt` both,
+    /// q35 the capability structure and not native hot-plug, which its
+    /// firmware keeps for its own ACPI hot-plug.
+    const VIRT_GRANTED: u32 = ROOT_CONTROL;
+    const Q35_GRANTED: u32 = toyos_abi::acpi::CAPABILITY_STRUCTURE;
 
     /// No byte of either `_CRS` as evaluated panics the decoder or runs it
     /// away: each takes each of its 255 other values in turn, and both arms,
-    /// windows and refusal, are reached.
+    /// a root and a refusal, are reached.
     #[test]
     fn no_single_byte_mutation_of_a_roots_crs_panics_or_runs_away() {
         for dsdt in [Q35_DSDT, VIRT_DSDT] {
             let kernel = crate::aml::tests::crafted(dsdt, &[]);
-            let (_, kept) = load(&kernel, crate::aml::tests::CRAFTED_RSDP);
+            let (_, kept) = load(&kernel, CRAFTED_RSDP);
             let mut aml = kept.expect("the DSDT loads");
             let Ok(Value::Buffer(crs)) = aml.interpreter.evaluate(&mut aml.host, "\\_SB_.PCI0._CRS", &[]) else {
                 panic!("PCI0._CRS is a buffer");
@@ -166,9 +226,9 @@ mod tests {
                 for value in (0..=255u8).filter(|&v| v != crs[offset]) {
                     let mut mutated = crs.clone();
                     mutated[offset] = value;
-                    let mut out = [RootBridgeWindow::default(); MAX_WINDOWS];
-                    match toyos_acpi::memory_windows(&mutated[..], 0, &mut out) {
-                        Ok(count) => assert!(out[..count].iter().all(|w| w.length != 0), "byte {offset} as {value:#04x}"),
+                    let mut out = [RootBridgeWindow::default(); MAX_BRIDGE_WINDOWS];
+                    match toyos_acpi::root_bridge(&mutated[..], 0, &mut out) {
+                        Ok(found) => assert!(out[..found.windows].iter().all(|w| w.length != 0), "byte {offset} as {value:#04x}"),
                         Err(_) => refused += 1,
                     }
                     mutations += 1;
@@ -178,26 +238,65 @@ mod tests {
         }
     }
 
-    /// A root that is not a list of windows, one whose `_CRS` is refused, and
-    /// a namespace with none: no declaration, each said by name; and what the
-    /// server declares then is no window at all.
+    /// A root's `_CRS`: buses 0 to 0xff and one window at 0x80000000.
+    fn crs() -> Vec<u8> {
+        let bus = [0x88, 0x0D, 0x00, 0x02, 0x0C, 0x00, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0x00, 0x01];
+        let mut memory = vec![0x87, 0x17, 0x00, 0x00, 0x0C, 0x03];
+        for field in [0u32, 0x8000_0000, 0x8fff_ffff, 0, 0x1000_0000] {
+            memory.extend_from_slice(&field.to_le_bytes());
+        }
+        let list = cat(&[&bus, &memory, &[0x79, 0x00]]);
+        buffer(&int(list.len() as u64), &list)
+    }
+
+    /// `\_SB.PCI0`, a PNP0A08 whose `_CRS` is `crs` and which carries `rest`.
+    fn root(crs: &[u8], rest: &[u8]) -> Vec<u8> {
+        let body = cat(&[&def_name("_HID", &string("PNP0A08")), &def_name("_CRS", crs), rest]);
+        sealed(b"DSDT", &crate::common::scope("\\_SB", &device("PCI0", &body)))
+    }
+
+    /// A root's `_OSC` returning the answer `answer` to both the query and
+    /// the commit.
+    fn osc(answer: &[u8]) -> Vec<u8> {
+        method("_OSC", 4, &ret(answer))
+    }
+
+    /// The three DWORDs as a Buffer.
+    fn dwords(words: [u32; 3]) -> Vec<u8> {
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        buffer(&int(12), &bytes)
+    }
+
+    /// What a root's `_OSC` grants, read off a namespace of that one root:
+    /// a firmware that echoes the request grants it; one that answers
+    /// failure, or masks every Control bit, grants nothing; a root with no
+    /// `_OSC` says so; and an answer that is no buffer of three DWORDs is
+    /// refused by name, its root still declared.
+    #[test]
+    fn a_roots_osc_is_negotiated_once_and_its_grant_read() {
+        let granted = |rest: &[u8]| declared(&root(&crs(), rest)).map(|roots| roots[0].osc());
+        // Return (Arg3): the query's DWORDs back, then the commit's.
+        assert_eq!(granted(&osc(&[0x6B])), Ok(Some(Osc::Granted(ROOT_CONTROL))));
+        assert_eq!(granted(&osc(&dwords([1 << 1, 0, ROOT_CONTROL]))), Ok(Some(Osc::Granted(0))));
+        assert_eq!(granted(&osc(&dwords([0, 0, 0]))), Ok(Some(Osc::Granted(0))));
+        // Control bits granted that were never asked for are dropped.
+        assert_eq!(granted(&osc(&dwords([0, 0, u32::MAX]))), Ok(Some(Osc::Granted(ROOT_CONTROL))));
+        assert_eq!(granted(&[]), Ok(Some(Osc::Absent)));
+        assert_eq!(granted(&osc(&buffer(&int(4), &[0; 4]))), Ok(Some(Osc::Refused)));
+        assert_eq!(granted(&osc(&int(5))), Ok(Some(Osc::Refused)));
+    }
+
+    /// A root that is not a list of windows, one whose `_CRS` is refused or
+    /// names no bus range, and a namespace with none: no declaration, each
+    /// said by name; and what the server declares then is no root at all.
     #[test]
     fn a_root_that_declares_nothing_usable_refuses_the_whole_declaration() {
-        use crate::aml::tests::{cat, sealed};
-        // Device (PCI0) { Name (_HID, "PNP0A08") Name (_CRS, Buffer { IRQ }) }
-        let device = |crs: &[u8]| {
-            let body = cat(&[&[0x08], b"_HID", &[0x0D], b"PNP0A08", &[0x00], &[0x08], b"_CRS", crs]);
-            let mut d = vec![0x5B, 0x82, (body.len() + 5) as u8];
-            d.extend_from_slice(b"PCI0");
-            d.extend_from_slice(&body);
-            d
-        };
-        let irq = [0x11, 0x08, 0x0A, 0x05, 0x22, 0x01, 0x00, 0x79, 0x00];
-        let refused = declared(&sealed(b"DSDT", &device(&irq)));
-        assert_eq!(refused, Err("a root bridge's _CRS is no list of windows: descriptor tag 0x22 is not decoded here".into()));
-        let integer = declared(&sealed(b"DSDT", &device(&[0x0A, 0x05])));
-        assert_eq!(integer, Err("a root bridge's _CRS is no buffer".into()));
-        assert_eq!(declared(&sealed(b"DSDT", &[0x08, b'A', b'A', b'A', b'A', 0x00])), Err("the namespace names no PCI host bridge".into()));
+        let irq = buffer(&int(5), &[0x22, 0x01, 0x00, 0x79, 0x00]);
+        assert_eq!(declared(&root(&irq, &[])), Err("a root bridge's _CRS is no list of windows: descriptor tag 0x22 is not decoded here".into()));
+        assert_eq!(declared(&root(&int(5), &[])), Err("a root bridge's _CRS is no buffer".into()));
+        let no_bus = buffer(&int(2), &[0x79, 0x00]);
+        assert_eq!(declared(&root(&no_bus, &[])), Err("a root bridge's _CRS names no bus range".into()));
+        assert_eq!(declared(&sealed(b"DSDT", &def_name("AAAA", &int(0)))), Err("the namespace names no PCI host bridge".into()));
 
         let kernel = Scripted::default();
         declare(&kernel, Err("the namespace names no PCI host bridge".into())).expect("not stopping");

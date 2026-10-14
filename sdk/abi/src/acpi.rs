@@ -30,11 +30,12 @@
 //! until a holder has supplied it [`crate::syscall::SYS_SHUTDOWN`] is refused
 //! [`crate::syscall::SyscallError::NotSupported`].
 //!
-//! **The memory the PCI root bridges decode is the holder's to declare, once**
-//! ([`op::DECLARE`], [`Apertures`]): each root's `_CRS` is AML. Until a
-//! declaration is held the kernel hands over no PCI function, and a claim
-//! made meanwhile waits for it; a declaration the kernel refuses, or a claim
-//! that ends without one, leaves every PCI claim refused for the boot.
+//! **The PCI root bridges are the holder's to declare, once** ([`op::DECLARE`],
+//! [`Apertures`]): each root's memory windows from its `_CRS`, and what its
+//! `_OSC` granted, are AML. Until a declaration is held the kernel hands over
+//! no PCI function, and a claim made meanwhile waits for it; a declaration
+//! the kernel refuses, or a claim that ends without one, leaves every PCI
+//! claim refused for the boot.
 //!
 //! **A hardware-reduced machine** ([`HARDWARE_REDUCED`]; ACPI 6.5 §4.1) has
 //! no fixed hardware: its claim names no block and raises no SCI, and its
@@ -103,7 +104,7 @@ pub mod op {
     /// control to power the machine off. Once under a claim, and kept until
     /// the next claim's holder supplies its own.
     pub const S5: u64 = 3;
-    /// Declare the memory the PCI root bridges decode: an
+    /// Declare the PCI root bridges, their memory and their `_OSC`: an
     /// [`Apertures`](super::Apertures), in through the caller's struct. Once
     /// a boot, from the claim's holder.
     pub const DECLARE: u64 = 4;
@@ -351,30 +352,108 @@ impl RootBridgeWindow {
     }
 }
 
-/// The most windows one declaration carries.
-pub const MAX_WINDOWS: usize = 32;
+/// The most root bridges one declaration carries.
+pub const MAX_BRIDGES: usize = 16;
+/// The most memory windows one root bridge's record carries.
+pub const MAX_BRIDGE_WINDOWS: usize = 8;
+
+/// The PCI host bridge `_OSC` Control field's bits ToyOS asks for (PCI
+/// Firmware Specification 3.3, §4.5.1, Table 4-5): native PCI Express
+/// hot-plug, and the PCI Express capability structure.
+pub const NATIVE_HOT_PLUG: u32 = 1 << 0;
+pub const CAPABILITY_STRUCTURE: u32 = 1 << 4;
+
+/// What a root bridge's `_OSC` said.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Osc {
+    /// The root has no `_OSC`.
+    Absent,
+    /// Its evaluation, or its answer, was refused: nothing is granted.
+    Refused,
+    /// It was negotiated, and granted these Control bits.
+    Granted(u32),
+}
+
+/// [`HostBridge::osc`]'s words.
+const OSC_ABSENT: u32 = 0;
+const OSC_REFUSED: u32 = 1;
+const OSC_ANSWERED: u32 = 2;
 
 crate::user_safe! {
-    /// What [`op::DECLARE`] carries: the first `count` of `windows`, every
-    /// root bridge's together.
+    /// One PCI root bridge: its segment, the buses below it, the memory
+    /// windows its `_CRS` produces, and what its `_OSC` granted.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct HostBridge {
+        pub segment: u16,
+        pub first_bus: u8,
+        pub last_bus: u8,
+        pub osc: u32,
+        pub granted: u32,
+        pub window_count: u32,
+        pub windows: [RootBridgeWindow; MAX_BRIDGE_WINDOWS],
+    }
+}
+
+impl HostBridge {
+    /// One root's record, or `None` past [`MAX_BRIDGE_WINDOWS`] or over a bus
+    /// range that ends before it starts.
+    pub fn new(segment: u16, buses: (u8, u8), windows: &[RootBridgeWindow], osc: Osc) -> Option<Self> {
+        let (osc, granted) = match osc {
+            Osc::Absent => (OSC_ABSENT, 0),
+            Osc::Refused => (OSC_REFUSED, 0),
+            Osc::Granted(granted) => (OSC_ANSWERED, granted),
+        };
+        let mut bridge = Self {
+            segment,
+            first_bus: buses.0,
+            last_bus: buses.1,
+            osc,
+            granted,
+            window_count: u32::try_from(windows.len()).ok()?,
+            windows: [RootBridgeWindow::default(); MAX_BRIDGE_WINDOWS],
+        };
+        bridge.windows.get_mut(..windows.len())?.copy_from_slice(windows);
+        (buses.0 <= buses.1).then_some(bridge)
+    }
+
+    /// Its windows, or `None` for a count past the array.
+    pub fn windows(&self) -> Option<&[RootBridgeWindow]> {
+        self.windows.get(..usize::try_from(self.window_count).ok()?)
+    }
+
+    /// What its `_OSC` said, or `None` for a word no [`Osc`] is, or a grant
+    /// beside no answer.
+    pub fn osc(&self) -> Option<Osc> {
+        match (self.osc, self.granted) {
+            (OSC_ABSENT, 0) => Some(Osc::Absent),
+            (OSC_REFUSED, 0) => Some(Osc::Refused),
+            (OSC_ANSWERED, granted) => Some(Osc::Granted(granted)),
+            _ => None,
+        }
+    }
+}
+
+crate::user_safe! {
+    /// What [`op::DECLARE`] carries: the first `count` of `bridges`.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct Apertures {
         pub count: u64,
-        pub windows: [RootBridgeWindow; MAX_WINDOWS],
+        pub bridges: [HostBridge; MAX_BRIDGES],
     }
 }
 
 impl Apertures {
-    /// `windows` as a declaration, or `None` past [`MAX_WINDOWS`].
-    pub fn new(windows: &[RootBridgeWindow]) -> Option<Self> {
-        let mut declared = Self { count: windows.len() as u64, windows: [RootBridgeWindow::default(); MAX_WINDOWS] };
-        declared.windows.get_mut(..windows.len())?.copy_from_slice(windows);
+    /// `bridges` as a declaration, or `None` past [`MAX_BRIDGES`].
+    pub fn new(bridges: &[HostBridge]) -> Option<Self> {
+        let empty = HostBridge::new(0, (0, 0), &[], Osc::Absent).expect("an empty record");
+        let mut declared = Self { count: bridges.len() as u64, bridges: [empty; MAX_BRIDGES] };
+        declared.bridges.get_mut(..bridges.len())?.copy_from_slice(bridges);
         Some(declared)
     }
 
-    /// The windows declared, or `None` for a count past the array.
-    pub fn windows(&self) -> Option<&[RootBridgeWindow]> {
-        self.windows.get(..usize::try_from(self.count).ok()?)
+    /// The bridges declared, or `None` for a count past the array.
+    pub fn bridges(&self) -> Option<&[HostBridge]> {
+        self.bridges.get(..usize::try_from(self.count).ok()?)
     }
 }
 
@@ -403,14 +482,24 @@ mod tests {
         assert!(!whole.holds(2, u64::MAX));
     }
 
-    /// A list that fits is carried whole and read back as itself; one past the
-    /// array is no declaration, and a count past it reads back as none.
+    /// A record that fits is carried whole and read back as itself; one past
+    /// its array is none, and a count or an `_OSC` word past what the ABI
+    /// names reads back as none.
     #[test]
-    fn a_declaration_carries_its_windows_and_no_count_past_them() {
+    fn a_declaration_carries_its_bridges_and_nothing_past_them() {
         let w = RootBridgeWindow { base: 0x1000_0000, length: 0x2eff_0000 };
-        let declared = Apertures::new(&[w]).expect("one window fits");
-        assert_eq!(declared.windows(), Some(&[w][..]));
-        assert_eq!(Apertures::new(&[w; MAX_WINDOWS + 1]), None);
-        assert_eq!(Apertures { count: MAX_WINDOWS as u64 + 1, ..declared }.windows(), None);
+        let root = HostBridge::new(0, (0, 0xff), &[w], Osc::Granted(NATIVE_HOT_PLUG)).expect("one window fits");
+        assert_eq!(root.windows(), Some(&[w][..]));
+        assert_eq!(root.osc(), Some(Osc::Granted(NATIVE_HOT_PLUG)));
+        assert_eq!(HostBridge::new(0, (0, 0xff), &[w; MAX_BRIDGE_WINDOWS + 1], Osc::Absent), None);
+        assert_eq!(HostBridge::new(0, (2, 1), &[w], Osc::Absent), None);
+        assert_eq!(HostBridge { window_count: MAX_BRIDGE_WINDOWS as u32 + 1, ..root }.windows(), None);
+        assert_eq!(HostBridge { osc: 3, ..root }.osc(), None);
+        assert_eq!(HostBridge { osc: OSC_ABSENT, granted: 1, ..root }.osc(), None);
+
+        let declared = Apertures::new(&[root]).expect("one bridge fits");
+        assert_eq!(declared.bridges(), Some(&[root][..]));
+        assert_eq!(Apertures::new(&[root; MAX_BRIDGES + 1]), None);
+        assert_eq!(Apertures { count: MAX_BRIDGES as u64 + 1, ..declared }.bridges(), None);
     }
 }

@@ -2111,7 +2111,7 @@ pub fn acpi_s5(claim: RawHandle, slp_typ_a: u64) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::S5, slp_typ_a, 0))
 }
 
-/// Declare the memory the PCI root bridges decode ([`crate::acpi::op::DECLARE`]).
+/// Declare the PCI root bridges ([`crate::acpi::op::DECLARE`]).
 /// `Ok` is the declaration held; [`SyscallError::InvalidArgument`] one the
 /// kernel refused, said in its log by name and leaving every PCI claim refused;
 /// [`SyscallError::AlreadyExists`] a declaration made after the first, or after

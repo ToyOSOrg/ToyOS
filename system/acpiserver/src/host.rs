@@ -92,7 +92,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use toyos_abi::acpi::{pci_address, Access, Refused, RootBridgeWindow, Space, Width, UNLISTED};
+use toyos_abi::acpi::{pci_address, Access, HostBridge, Refused, Space, Width, UNLISTED};
 use toyos_aml::{Address, Denied, Host, RuntimeLoad, Transfer};
 
 use crate::devices::Ec;
@@ -150,9 +150,8 @@ pub trait Kernel {
     /// The machine is hardware-reduced (`toyos_abi::acpi::HARDWARE_REDUCED`):
     /// no fixed hardware, and a power-off that writes no sleep type.
     fn hardware_reduced(&self) -> bool;
-    /// Declare the memory the PCI root bridges decode, once
-    /// ([`crate::apertures`]).
-    fn declare(&self, windows: &[RootBridgeWindow]) -> Result<Declared, Stopping>;
+    /// Declare the PCI root bridges, once ([`crate::apertures`]).
+    fn declare(&self, roots: &[HostBridge]) -> Result<Declared, Stopping>;
     /// Waits until `until`, serving the SCI as `sci::await_sleep` does for
     /// the fixed power button where the claim serves it and the controller's
     /// GPE `ec_gpe`: what latched and was taken.
@@ -783,8 +782,8 @@ pub mod tests {
         pub handed: Cell<Option<u64>>,
         /// The machine is hardware-reduced.
         pub reduced: bool,
-        /// The windows it was declared, once.
-        pub declared: RefCell<Option<Vec<RootBridgeWindow>>>,
+        /// The roots it was declared, once.
+        pub declared: RefCell<Option<Vec<HostBridge>>>,
         /// What each Sleep's wait takes, in turn; nothing once it runs out.
         /// Each served set a Sleep was asked to serve.
         pub sleeps: RefCell<VecDeque<Latched>>,
@@ -915,14 +914,14 @@ pub mod tests {
             self.reduced
         }
 
-        fn declare(&self, windows: &[RootBridgeWindow]) -> Result<Declared, Stopping> {
+        fn declare(&self, roots: &[HostBridge]) -> Result<Declared, Stopping> {
             self.stopping()?;
             let mut declared = self.declared.borrow_mut();
             if declared.is_some() {
                 return Ok(Declared::Late);
             }
-            *declared = Some(windows.to_vec());
-            Ok(if windows.is_empty() { Declared::Refused } else { Declared::Held })
+            *declared = Some(roots.to_vec());
+            Ok(if roots.is_empty() { Declared::Refused } else { Declared::Held })
         }
 
         fn latched(&self) -> Option<u32> {

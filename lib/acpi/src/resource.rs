@@ -1,5 +1,5 @@
-//! ACPI resource descriptors (ACPI 6.5 §6.4), decoded into the memory
-//! windows a PCI root bridge's `_CRS` says it forwards ([`memory_windows`]),
+//! ACPI resource descriptors (ACPI 6.5 §6.4), decoded into the bus range and
+//! memory windows a PCI root bridge's `_CRS` says it forwards ([`root_bridge`]),
 //! and into the I/O ports a device names its registers by ([`io_ports`]).
 //!
 //! Input is firmware-supplied and untrusted: no path panics, the walk
@@ -96,6 +96,9 @@ pub enum ResourceError {
     /// stepped over: a root bridge's `_CRS` that names one says something
     /// about its memory this decoder does not read.
     Consumed { min: u64 },
+    /// A bus number range past bus 0xff, or a second one: a root's buses
+    /// are one run of one segment's.
+    Buses { min: u64, max: u64 },
     /// More memory windows, or I/O runs, than the caller has room for.
     TooMany { room: usize },
     /// An I/O Port Descriptor naming a range of bases the OS chooses among,
@@ -129,6 +132,7 @@ impl core::fmt::Display for ResourceError {
             Self::TooMany { room } => {
                 write!(f, "more memory windows or I/O runs than the {room} there is room for")
             }
+            Self::Buses { min, max } => write!(f, "the bus range {min:#x}..={max:#x} is not the root's one run of buses"),
             Self::Relocatable { min, max } => write!(f, "the I/O run is relocatable between {min:#x} and {max:#x}"),
             Self::NoPorts { port } => write!(f, "the I/O run at {port:#x} is no ports long"),
         }
@@ -177,13 +181,22 @@ fn field<P: Phys>(phys: P, at: u64, offset: usize, width: usize) -> u64 {
     (0..width).fold(0u64, |v, i| v | u64::from(phys.byte(at + (offset + i) as u64)) << (8 * i))
 }
 
-/// Every memory window the root bridge's `_CRS` list at `at` says it
-/// forwards, written into `out`, and how many.
+/// What a root bridge's `_CRS` produces: its bus range, where it names one,
+/// and how many memory windows [`root_bridge`] wrote.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct RootResources {
+    pub buses: Option<(u8, u8)>,
+    pub windows: usize,
+}
+
+/// The bus range and every memory window the root bridge's `_CRS` list at
+/// `at` says it forwards, the windows written into `out`.
 ///
 /// **A window is a memory range an Address Space Descriptor produces**
-/// (ACPI 6.5 §6.4.3.5). Its bus numbers and I/O ranges, in those descriptors
-/// and in the small I/O Port and Fixed I/O Port descriptors (§6.4.2.5,
-/// §6.4.2.6), are stepped over; every other descriptor is refused by name,
+/// (ACPI 6.5 §6.4.3.5); its buses are the one bus number range one produces,
+/// inside bus 0xff. Its I/O ranges, in those descriptors and in the small I/O
+/// Port and Fixed I/O Port descriptors (§6.4.2.5, §6.4.2.6), are stepped
+/// over; every other descriptor is refused by name,
 /// as is a memory range whose two accounts of its extent disagree, that the
 /// bridge consumes, or that a non-zero `_TRA` translates. A range of no
 /// length is none.
@@ -191,9 +204,10 @@ fn field<P: Phys>(phys: P, at: u64, offset: usize, width: usize) -> u64 {
 /// **A refusal carries no windows at all**: a caller handed the ones decoded
 /// before the refusal would be holding an aperture with a hole in it, and would
 /// place a BAR in the hole.
-pub fn memory_windows<P: Phys>(phys: P, at: u64, out: &mut [RootBridgeWindow]) -> Result<usize, ResourceError> {
+pub fn root_bridge<P: Phys>(phys: P, at: u64, out: &mut [RootBridgeWindow]) -> Result<RootResources, ResourceError> {
     let mut offset = 0usize;
     let mut found = 0usize;
+    let mut buses = None;
     loop {
         if offset >= MAX_LIST_BYTES {
             return Err(ResourceError::Unterminated);
@@ -202,7 +216,7 @@ pub fn memory_windows<P: Phys>(phys: P, at: u64, out: &mut [RootBridgeWindow]) -
         let head = at + offset as u64;
         offset += item.len;
         let layout = match item.tag {
-            END_TAG => return Ok(found),
+            END_TAG => return Ok(RootResources { buses, windows: found }),
             IO_PORT | FIXED_IO_PORT => continue,
             tag => Layout::of(tag).ok_or(ResourceError::UnknownTag { tag })?,
         };
@@ -210,18 +224,23 @@ pub fn memory_windows<P: Phys>(phys: P, at: u64, out: &mut [RootBridgeWindow]) -
             return Err(ResourceError::Short { tag: item.tag, whole: item.len, needed: layout.bytes() });
         }
         let kind = phys.byte(head + RESOURCE_TYPE as u64);
-        match kind {
-            TYPE_MEMORY => {}
-            TYPE_IO | TYPE_BUS => continue,
-            kind => return Err(ResourceError::UnknownResourceType { kind }),
+        if !matches!(kind, TYPE_MEMORY | TYPE_IO | TYPE_BUS) {
+            return Err(ResourceError::UnknownResourceType { kind });
         }
         let read = |n| field(phys, head, layout.field(n), layout.width);
         let (min, max, translation, length) = (read(1), read(2), read(3), read(4));
-        if length == 0 {
+        if kind == TYPE_IO || length == 0 {
             continue;
         }
         if min.checked_add(length - 1) != Some(max) {
             return Err(ResourceError::Inconsistent { min, max, length });
+        }
+        if kind == TYPE_BUS {
+            buses = match (buses, u8::try_from(min), u8::try_from(max)) {
+                (None, Ok(first), Ok(last)) => Some((first, last)),
+                _ => return Err(ResourceError::Buses { min, max }),
+            };
+            continue;
         }
         if translation != 0 {
             return Err(ResourceError::Translated { min, offset: translation });
