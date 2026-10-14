@@ -49,12 +49,12 @@
 //! that BAR rather than nothing at all, and a function this kernel could settle
 //! no BAR of ends at [`Refusal::NoMappableBar`].
 //!
-//! **The BAR holding the MSI-X table or PBA is never mapped**: a holder that
-//! could rewrite the table could point the device's message at any address the
-//! LAPIC decodes. **So a function is armed on MSI only where a walk that
-//! reached its capability list's terminator found no MSI-X**: its message is
-//! then a word of config space, which has no write path from userland, and it
-//! has no table in a BAR for [`msix_bar`] to keep back.
+//! **The BAR holding the MSI-X table or PBA is handed over like any other**,
+//! because a claim exists only on a machine that remaps: whatever message its
+//! holder writes into the table, the unit delivers only the claim's own
+//! interrupt and refuses and records anything else. **A function is armed on
+//! MSI only where a walk that reached its capability list's terminator found
+//! no MSI-X.**
 //!
 //! **A function with no address space of its own is not handed over**, because
 //! every grant would answer with a physical address and a descriptor holding
@@ -128,13 +128,13 @@ use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
 use toyos_pci::bridge::Window;
-use toyos_pci::{af, aperture, bar, express, msix, placement, pm, probe};
+use toyos_pci::{af, aperture, bar, express, placement, pm, probe};
 
 use crate::device::{Claim, ClaimError};
-use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, NoCapability, NoEntry, PciDevice};
+use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, mask_claimed_msix, NoCapability, NoEntry, PciDevice};
 use crate::iommu::{IommuError, OwnSpace, Refused, Remapped};
 use crate::mm::policy::{CachePolicy, MmioPolicy};
-use crate::mm::{align_2m, DirectMap, Mmio, PAGE_2M};
+use crate::mm::{align_2m, DirectMap, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
 use crate::sync::Lock;
 use crate::inbox::PollEntry;
@@ -266,15 +266,15 @@ struct Aimed {
 /// Both deliver the function's own interrupt into the same [`Interrupt`] and
 /// the claim answers the same handle either way.
 enum Armed {
-    /// This function's one MSI-X table entry, mapped for the kernel alone.
-    Msix(Mmio, Remapped),
+    /// This function's one MSI-X table entry.
+    Msix(Remapped),
     Msi(Remapped),
 }
 
 impl Armed {
     fn message(&self) -> &Remapped {
         match self {
-            Self::Msix(_, message) | Self::Msi(message) => message,
+            Self::Msix(message) | Self::Msi(message) => message,
         }
     }
 }
@@ -878,9 +878,6 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
     // leave the machine changed by a hand-over that did not happen.
     let Space { space, lend } = function_space(number).map_err(Refusal::Untranslated)?;
 
-    // The table's own BAR, so it can be left where it is and kept out of what
-    // the holder maps.
-    let table_bar = msix_bar(&pci);
     // Decode must be on for a BAR to answer, and off across each move.
     pci.enable_memory_space();
 
@@ -890,7 +887,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
     // translation and its interrupt back.
     let message = crate::iommu::claim_msi(remapping, number, &pci).map_err(Refusal::NoMessage)?;
     let armed = match arm_claimed_msix(&message) {
-        Ok(entry) => Armed::Msix(entry, message),
+        Ok(()) => Armed::Msix(message),
         Err(NoEntry::Unusable) => return Err(Refusal::MsixUnusable),
         Err(NoEntry::NoTable(NoCapability::Truncated)) => return Err(Refusal::CapsTruncated),
         Err(NoEntry::NoTable(NoCapability::Absent)) if arm_claimed_msi(&message) => {
@@ -901,7 +898,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
 
     // From here a refusal has to undo: a vector is armed, and the arms below
     // move the function's BARs.
-    match place_bars(&pci, id, table_bar) {
+    match place_bars(&pci, id, remapping) {
         Ok((bar_at, bar_bytes)) => {
             space.attach(pci.bus, pci.dev, pci.func);
             Ok(Bound {
@@ -920,7 +917,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
         Err(why) => {
             // The entry goes not present once the function stops speaking.
             let message = match armed {
-                Armed::Msix(_, message) => {
+                Armed::Msix(message) => {
                     pci.disable_msix();
                     message
                 }
@@ -945,7 +942,10 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
 fn place_bars(
     pci: &PciDevice,
     id: PciId,
-    table_bar: Option<u8>,
+    // A BAR holding the MSI-X table is handed over too: on a machine that
+    // remaps, a message its holder writes there reaches only the claim's own
+    // interrupt, and anything else is refused and recorded by the unit.
+    _: crate::iommu::Remapping,
 ) -> Result<([u64; BARS], [u64; BARS]), Refusal> {
     let mut bar_at = [0u64; BARS];
     let mut bar_bytes = [0u64; BARS];
@@ -959,7 +959,7 @@ fn place_bars(
         // whatever its register holds now: one a reset returned to zero reads
         // as unassigned, and it is the window that moved, not a BAR that is
         // not there.
-        if Some(index) == table_bar || (pci.memory_bar(index).is_err() && !was_cut(pci, index)) {
+        if pci.memory_bar(index).is_err() && !was_cut(pci, index) {
             index += step;
             continue;
         }
@@ -1264,18 +1264,6 @@ fn take_residue(number: usize) -> Vec<Aimed> {
     residue
 }
 
-/// Which BAR holds this function's MSI-X table or PBA, if any.
-///
-/// Both, because both are the unit's structures and neither is the holder's:
-/// the two live in one BAR on every device in reach, and a device that split
-/// them costs the second BAR too rather than publishing one of them.
-fn msix_bar(pci: &PciDevice) -> Option<u8> {
-    let cap = pci.capability(msix::CAP_ID).ok()?;
-    let control = cap.read_u16(msix::MESSAGE_CONTROL);
-    let table = msix::Msix::decode(control, cap.read_u32(msix::TABLE)).ok()?;
-    Some(table.bir())
-}
-
 /// What this machine answers at `at + offset`.
 ///
 /// **One dword and no more.** This is a read of a register file this kernel
@@ -1517,8 +1505,9 @@ fn release(number: usize) {
 fn tear_down(function: &Function, mut bound: Bound) {
     bound.pci.disable_bus_master();
     let message = match bound.armed {
-        Armed::Msix(entry, message) => {
-            entry.write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED);
+        Armed::Msix(message) => {
+            // Armed through this table, so it is still there to mask.
+            assert!(mask_claimed_msix(&bound.pci).is_ok(), "pcidev: the MSI-X table a claim was armed through is gone");
             message
         }
         Armed::Msi(message) => {

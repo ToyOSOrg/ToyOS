@@ -21,7 +21,11 @@ const SELF_PATH: &str = "/system/bin/test_rs_end_returns_claims";
 
 /// The controllers a boot of this job leaves to a claim: QEMU's `qemu-xhci`
 /// and the T14's Type-C controller, as `usbd_spare`'s.
-const SPARES: [PciId; 2] = [PciId { vendor: 0x1b36, device: 0x000d }, PciId { vendor: 0x8086, device: 0x9a13 }];
+const SPARES: [PciId; 3] = [
+    PciId { vendor: 0x1b36, device: 0x000d },
+    PciId { vendor: 0x8086, device: 0x9a13 },
+    PciId { vendor: 0x1022, device: 0x1639 },
+];
 
 const ROUNDS: u32 = 100;
 

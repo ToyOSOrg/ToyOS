@@ -491,10 +491,21 @@ impl PciDevice {
 /// Point a claimed function's [`MSIX_ENTRY`] at its slot's own message and
 /// enable it. Takes the message and nothing else: the function is
 /// the one the entry was written for, and no other message reaches here.
-pub fn arm_claimed_msix(message: &crate::iommu::Remapped) -> Result<Mmio, NoEntry> {
+pub fn arm_claimed_msix(message: &crate::iommu::Remapped) -> Result<(), NoEntry> {
     let pci = message.function();
     let entry = pci.msix_entry()?;
-    Ok(pci.write_msix(entry, message.address(), message.data()))
+    pci.write_msix(entry, message.address(), message.data());
+    Ok(())
+}
+
+/// Mask a claimed function's [`MSIX_ENTRY`] where its table is now: the BAR
+/// holding it may have moved since it was armed.
+pub fn mask_claimed_msix(pci: &PciDevice) -> Result<(), NoEntry> {
+    let entry = pci.msix_entry()?;
+    let at = entry.address + MSIX_ENTRY as u64 * msix::ENTRY_BYTES;
+    crate::mm::paging::map_mmio(at, 0x1000, MmioPolicy::Uncacheable)
+        .write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED);
+    Ok(())
 }
 
 /// [`arm_claimed_msix`] for a function with MSI and no MSI-X; `false` where it

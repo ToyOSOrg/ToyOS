@@ -712,8 +712,11 @@ pub enum Profile {
     /// can be made and read.
     MetalAmdViTestdev,
     /// [`Profile::HeadlessUsbSpare`] behind QEMU's AMD unit remapping
-    /// interrupts: a claim's message through its own requester's table.
+    /// interrupts, its spare armed on MSI-X with the table in the register
+    /// BAR: a claim's message through its own requester's table.
     HeadlessUsbSpareAmdVi,
+    /// [`Profile::HeadlessUsbSpareAmdVi`] with the unit remapping nothing.
+    HeadlessUsbSpareAmdViNoRemap,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
     /// stick on an xHCI, the PL011, a virtio-rng for firmware's
     /// `EFI_RNG_PROTOCOL`, and nothing else — no NIC, NVMe or IOMMU. The
@@ -777,7 +780,8 @@ impl Profile {
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
-            | Self::HeadlessUsbSpareAmdVi => Arch::X86_64,
+            | Self::HeadlessUsbSpareAmdVi
+            | Self::HeadlessUsbSpareAmdViNoRemap => Arch::X86_64,
         }
     }
 
@@ -860,7 +864,12 @@ const XHCI_DEFAULT: &str = "nec-usb-xhci,id=xhci";
 /// question this machine asks. `msi=on` stated, because with MSI-X off and
 /// MSI left `auto` this QEMU's `qemu-xhci` offers neither, and the kernel
 /// refuses the claim for it.
-const XHCI_SPARE: &str = "qemu-xhci,id=spare,msix=off,msi=on";
+const XHCI_SPARE: &str = "qemu-xhci,id=spare,addr=0x10,msix=off,msi=on";
+/// [`XHCI_SPARE`] armed on MSI-X, whose table QEMU puts in the controller's
+/// register BAR, as the AMD bench's controllers have theirs.
+const XHCI_SPARE_MSIX: &str = "qemu-xhci,id=spare,addr=0x10";
+/// Where both put the spare, which `xhci-leave=` names.
+pub const SPARE_AT: &str = "00:10.0";
 const SPARE_STICK: &str = "driver=null-co,node-name=spare-stick,size=67108864,read-zeroes=on";
 
 /// Whether a machine has the virtio console and sound block. Which NIC it has
@@ -1051,8 +1060,13 @@ impl Profile {
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
-            Self::HeadlessUsbSpareAmdVi => {
-                Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
+            Self::HeadlessUsbSpareAmdVi => Shape {
+                iommu: Some(Unit::AmdVi { intremap: true }),
+                xhci: &[XHCI_DEFAULT, XHCI_SPARE_MSIX],
+                ..Self::HeadlessUsbSpare.shape()
+            },
+            Self::HeadlessUsbSpareAmdViNoRemap => {
+                Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::HeadlessUsbSpareAmdVi.shape() }
             }
             Self::MetalAmdViTestdev => Shape { probes: Probes::Testdevs, ..Self::MetalAmdVi.shape() },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },

@@ -1,31 +1,28 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-09-26
 ---
 
 # A controller whose MSI-X table is in BAR 0 cannot be driven from userland
 
-`pcidev` never maps the BAR holding a function's MSI-X table or PBA
-(`kernel/src/pcidev/mod.rs`, `msix_bar`): a holder that could write the table
-could aim the device's message at any address the LAPIC decodes. A window is a
-whole 2 MiB page, so the refusal takes the whole BAR. NVMe keeps its registers
-and doorbells in BAR 0, and a controller that puts its MSI-X table there too
-has no BAR left to hand over: the claim is refused.
+Held by PR #921 (AMD-Vi stage 6), under the orchestrator's ruling there:
+on a machine where every unit remaps, `pcidev` hands over the BAR holding a
+function's MSI-X table, because the unit's per-requester table is the guard
+(a message the holder writes reaches only its own claim's interrupt, and
+anything else is refused and recorded); where a unit does not remap, the
+claim is refused anyway (`Refusal::NotRemapped`).
 
-Measured on QEMU 11.1's NVMe, whose default puts the table in BAR 0: blockd's
-claim answers `NotSupported` and the kernel says `pcidev: PCI 00:03.0 NOT
-HANDED OVER — it publishes no memory BAR this claim may map, so its holder
-would have no registers to drive it through`. The blockd tests boot the
-controller with `msix-exclusive-bar=on`, which moves the table to a BAR of its
-own (`tests/common/qemu.rs`, `BootOptions::userland_nvme`). Where the T14's
-NVMe keeps its table is not measured; it matters from the small-kernel track's
-step 9 (`issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`),
-when blockd is the only NVMe driver.
+A claim exists only on a machine that remaps, so `kernel/src/pcidev/mod.rs`
+no longer keeps the table's BAR back. QEMU's `qemu-xhci` with its table in
+its register BAR is claimed and driven behind the AMD unit
+(`usbd_drives_the_spare_amdvi`), and its holder's rewrite of its own entry
+to a vector not its own reaches nobody; with the BAR withheld as before, the
+claim is refused `NoMappableBar`.
 
-**Exit condition.** A claim hands over the pages of a BAR that hold neither
-the table nor the PBA, at the granularity those structures need (4 KiB, which
-the user mappings do not have yet:
-`issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`),
-and a test drives QEMU's NVMe with its table in BAR 0 through blockd while a
-write to the table's page is refused.
+**Exit:** on the AMD bench, `03:00.4` (MSI-X table in BAR 0, its only BAR)
+is claimed and driven by usbd through its own remapping entry, and its
+holder's rewrite of its entry to a vector not its own is refused and
+recorded against the claim (`amdvi_usbd_drives_its_own_entry`); and a
+machine that does not remap still refuses the claim
+(`amdvi_claim_refused_without_remapping`).

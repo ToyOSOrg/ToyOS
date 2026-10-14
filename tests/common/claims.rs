@@ -137,12 +137,20 @@ pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
 pub fn refused_unremapped(log: &Serial) -> Result<(), String> {
     log.must_say(INTR_REMAP_CLEAR)?;
     let at = function(log)?;
-    log.must_say(&format!("pcidev: PCI {at} NOT HANDED OVER — {NOT_REMAPPED}"))?;
     log.must_not_say(&format!("[{I219}] handed over"))?;
+    refused_unremapped_at(log, &at)?;
+    log.must_say(bootlog::COMPLETE)?;
+    Ok(())
+}
+
+/// The claim of the function at `at` refused because nothing remaps its
+/// messages, before anything on it changed: no message armed, no entry
+/// written, no BAR moved.
+pub fn refused_unremapped_at(log: &Serial, at: &str) -> Result<(), String> {
+    log.must_say(&format!("pcidev: PCI {at} NOT HANDED OVER — {NOT_REMAPPED}"))?;
     log.must_not_say(&format!("PCI {at}: msi address="))?;
     log.must_not_say(&format!("PCI {at}: msix address="))?;
     log.must_not_say(&format!(" source={at} "))?;
     log.must_not_say(&format!("pcidev: PCI {at} BAR"))?;
-    log.must_say(bootlog::COMPLETE)?;
     Ok(())
 }

@@ -211,7 +211,7 @@ actuators! {
     /// latch: a fatal path meeting a painter that will never let go.
     panel_painter_stalls = "panel-painter-stalls";
 
-    /// Leave the xHCI controller `xhci-leave=<vendor>:<device>` names to a
+    /// Leave the xHCI controller at `xhci-leave=<bus>:<device>.<function>` to a
     /// claim: `drivers::xhci` never touches it. Read through [`xhci_left`];
     /// judged by `usbd_drives_the_spare`.
     xhci_leave = "xhci-leave=";
@@ -271,31 +271,40 @@ pub fn init(cmdline: &str) {
 fn take_value(name: &str, value: &str) {
     match name {
         "xhci-leave=" => {
-            let id = toyos_abi::syscall::PciId::parse(value).unwrap_or_else(|| {
-                panic!("boot parameter {name}{value}: not <vendor>:<device> in hex")
+            let at = function_address(value).unwrap_or_else(|| {
+                panic!("boot parameter {name}{value}: not <bus>:<device>.<function> in hex")
             });
-            XHCI_LEFT.store(id.wire(), Ordering::Relaxed);
+            XHCI_LEFT.store(u64::from(at), Ordering::Relaxed);
         }
         _ => panic!("boot parameter {name}{value}: this kernel declares no such valued actuator"),
     }
 }
 
-/// [`PciId::wire`](toyos_abi::syscall::PciId::wire) of the controller
-/// `xhci-leave=` names, read only once that actuator is armed.
+/// `bb:dd.f` in hex as a requester id, bus over device over function: a
+/// machine with two controllers of one id names one by where it is.
+#[cfg(feature = "boot-actuators")]
+fn function_address(value: &str) -> Option<u16> {
+    let (bus, rest) = value.split_once(':')?;
+    let (dev, func) = rest.split_once('.')?;
+    let (bus, dev, func) =
+        (u8::from_str_radix(bus, 16).ok()?, u8::from_str_radix(dev, 16).ok()?, u8::from_str_radix(func, 16).ok()?);
+    (dev < 32 && func < 8).then_some(u16::from(bus) << 8 | u16::from(dev) << 3 | u16::from(func))
+}
+
+/// The requester id of the controller `xhci-leave=` names, read only once
+/// that actuator is armed.
 #[cfg(feature = "boot-actuators")]
 static XHCI_LEFT: AtomicU64 = AtomicU64::new(0);
 
-/// The xHCI controller `xhci-leave=` leaves to a claim, if it is armed.
+/// The requester id of the xHCI controller `xhci-leave=` leaves to a claim,
+/// if it is armed.
 #[cfg(feature = "boot-actuators")]
-pub fn xhci_left() -> Option<toyos_abi::syscall::PciId> {
-    xhci_leave().then(|| {
-        toyos_abi::syscall::PciId::from_wire(XHCI_LEFT.load(Ordering::Relaxed))
-            .expect("stored from an id's own word")
-    })
+pub fn xhci_left() -> Option<u16> {
+    xhci_leave().then(|| XHCI_LEFT.load(Ordering::Relaxed) as u16)
 }
 
 #[cfg(not(feature = "boot-actuators"))]
-pub const fn xhci_left() -> Option<toyos_abi::syscall::PciId> {
+pub const fn xhci_left() -> Option<u16> {
     None
 }
 

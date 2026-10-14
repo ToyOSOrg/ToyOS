@@ -279,7 +279,12 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
         &super::ioapic::ids(),
     );
     #[cfg(feature = "boot-actuators")]
-    let remap = if crate::actuator::iommu_no_remap() { None } else { remap };
+    let remap = if crate::actuator::iommu_no_remap() {
+        log!("iommu: iommu-no-remap stands in for a unit that cannot remap, so no message is remapped");
+        None
+    } else {
+        remap
+    };
     let identity = build(devices, &settings, remap.is_some());
     let reserved = windows.iter().map(|w| (w.base, w.end())).chain(ivmds.iter().map(|m| (m.start, m.start + m.length)));
     domain::start(reserved.collect(), settings, ivmds.iter().map(|m| m.requesters).collect(), translated);
