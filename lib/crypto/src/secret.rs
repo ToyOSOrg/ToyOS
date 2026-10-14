@@ -1,4 +1,4 @@
-//! Owned byte secrets. Volatile stores erase this allocation, not prior moves.
+//! Owned secrets. Volatile stores erase this allocation, not prior moves.
 
 use core::sync::atomic::{Ordering, compiler_fence};
 
@@ -10,6 +10,7 @@ pub(crate) fn wipe(bytes: &mut [u8]) {
     compiler_fence(Ordering::SeqCst);
 }
 
+#[cfg(feature = "wpa2")]
 pub(crate) fn wipe32(words: &mut [u32]) {
     for word in words {
         // The address is a live, exclusively borrowed word.
@@ -26,18 +27,19 @@ pub(crate) fn wipe64(words: &mut [u64]) {
     compiler_fence(Ordering::SeqCst);
 }
 
-pub(crate) struct Secret<const N: usize>(pub(crate) [u8; N]);
-
-impl<const N: usize> Drop for Secret<N> {
-    fn drop(&mut self) {
-        wipe(&mut self.0);
-    }
+/// Erases a whole array with one volatile store, which the compiler lowers to
+/// as few wide stores as the array's size allows.
+pub(crate) fn erase<T: Copy + Default, const N: usize>(array: &mut [T; N]) {
+    // The array is live and exclusively borrowed.
+    unsafe { core::ptr::write_volatile(array, [T::default(); N]) };
+    compiler_fence(Ordering::SeqCst);
 }
 
-/// Owned word workspace; passing a borrow avoids an unwiped Copy argument.
-pub(crate) struct SecretWords32<const N: usize>(pub(crate) [u32; N]);
-impl<const N: usize> Drop for SecretWords32<N> {
+/// An owned array of `N` words, erased on drop.
+pub(crate) struct Secret<const N: usize, T: Copy + Default = u8>(pub(crate) [T; N]);
+
+impl<const N: usize, T: Copy + Default> Drop for Secret<N, T> {
     fn drop(&mut self) {
-        wipe32(&mut self.0);
+        erase(&mut self.0);
     }
 }

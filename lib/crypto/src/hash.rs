@@ -3,9 +3,9 @@
 //! Buffering and padding depend on the public message length. Hash states and
 //! compression scratch are erased because HMAC and signing hash secret inputs.
 
-use crate::secret::{wipe, wipe32, wipe64};
+use crate::secret::erase;
 
-const K256: [u32; 64] = [
+pub(crate) const K256: [u32; 64] = [
     0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
     0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
     0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
@@ -98,68 +98,105 @@ const K512: [u64; 80] = [
     0x6c44198c4a475817,
 ];
 
-fn compress256(h: &mut [u32; 8], block: &[u8; 64]) {
-    let mut w = [0u32; 64];
-    for (word, bytes) in w[..16].iter_mut().zip(block.as_chunks::<4>().0) {
-        *word = u32::from_be_bytes(*bytes);
-    }
-    for i in 16..64 {
-        let a = w[i - 15];
-        let b = w[i - 2];
-        w[i] = w[i - 16]
-            .wrapping_add(a.rotate_right(7) ^ a.rotate_right(18) ^ (a >> 3))
-            .wrapping_add(w[i - 7])
-            .wrapping_add(b.rotate_right(17) ^ b.rotate_right(19) ^ (b >> 10));
-    }
-    let mut v = *h;
-    for i in 0..64 {
-        let [a, b, c, d, e, f, g, z] = v;
-        let t = z
-            .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
-            .wrapping_add((e & f) ^ (!e & g))
-            .wrapping_add(K256[i])
-            .wrapping_add(w[i]);
-        let u = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
-            .wrapping_add((a & b) ^ (a & c) ^ (b & c));
-        v = [t.wrapping_add(u), a, b, c, d.wrapping_add(t), e, f, g];
-    }
-    for i in 0..8 {
-        h[i] = h[i].wrapping_add(v[i]);
-    }
-    wipe32(&mut w);
-    wipe32(&mut v);
+/// One SHA-2 round, the working variables renamed rather than moved: round
+/// t computes into `$h` and `$d`, and round t+1 names them one place on.
+macro_rules! round {
+    ($w:ident, $k:ident, $base:expr, $i:literal, $later:expr,
+     [$a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident],
+     $big0:expr, $big1:expr, $small0:expr, $small1:expr) => {
+        if $later {
+            // W[t] = σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16], in a window of 16.
+            $w[$i] = $w[$i]
+                .wrapping_add($small0($w[($i + 1) & 15]))
+                .wrapping_add($w[($i + 9) & 15])
+                .wrapping_add($small1($w[($i + 14) & 15]));
+        }
+        let t1 = $h
+            .wrapping_add($big1($e))
+            .wrapping_add($g ^ ($e & ($f ^ $g)))
+            .wrapping_add($k[$base + $i])
+            .wrapping_add($w[$i]);
+        let t2 = $big0($a).wrapping_add(($a & $b) | ($c & ($a | $b)));
+        $d = $d.wrapping_add(t1);
+        $h = t1.wrapping_add(t2);
+    };
 }
 
-fn compress512(h: &mut [u64; 8], block: &[u8; 128]) {
-    let mut w = [0u64; 80];
-    for (word, bytes) in w[..16].iter_mut().zip(block.as_chunks::<8>().0) {
-        *word = u64::from_be_bytes(*bytes);
+/// FIPS 180-4 §6.2.2 and §6.4.2 over whole blocks: sixteen rounds unrolled
+/// per pass over the schedule's window, which is erased once at the end.
+macro_rules! rounds {
+    ($name:ident, $word:ty, $bytes:literal, $block:literal, $k:ident,
+     $big0:expr, $big1:expr, $small0:expr, $small1:expr) => {
+        #[inline(always)]
+        pub(crate) fn $name(state: &mut [$word; 8], blocks: &[[u8; $block]]) {
+            let mut w = [0 as $word; 16];
+            for block in blocks {
+                for (word, bytes) in w.iter_mut().zip(block.as_chunks::<$bytes>().0) {
+                    *word = <$word>::from_be_bytes(*bytes);
+                }
+                let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+                for pass in 0..$k.len() / 16 {
+                    let base = 16 * pass;
+                    let later = pass != 0;
+                    round!(w, $k, base, 0, later, [a, b, c, d, e, f, g, h], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 1, later, [h, a, b, c, d, e, f, g], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 2, later, [g, h, a, b, c, d, e, f], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 3, later, [f, g, h, a, b, c, d, e], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 4, later, [e, f, g, h, a, b, c, d], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 5, later, [d, e, f, g, h, a, b, c], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 6, later, [c, d, e, f, g, h, a, b], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 7, later, [b, c, d, e, f, g, h, a], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 8, later, [a, b, c, d, e, f, g, h], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 9, later, [h, a, b, c, d, e, f, g], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 10, later, [g, h, a, b, c, d, e, f], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 11, later, [f, g, h, a, b, c, d, e], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 12, later, [e, f, g, h, a, b, c, d], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 13, later, [d, e, f, g, h, a, b, c], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 14, later, [c, d, e, f, g, h, a, b], $big0, $big1, $small0, $small1);
+                    round!(w, $k, base, 15, later, [b, c, d, e, f, g, h, a], $big0, $big1, $small0, $small1);
+                }
+                for (s, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+                    *s = s.wrapping_add(v);
+                }
+            }
+            crate::secret::erase(&mut w);
+        }
+    };
+}
+
+rounds!(
+    sha256_rounds,
+    u32,
+    4,
+    64,
+    K256,
+    |x: u32| x.rotate_right(2) ^ x.rotate_right(13) ^ x.rotate_right(22),
+    |x: u32| x.rotate_right(6) ^ x.rotate_right(11) ^ x.rotate_right(25),
+    |x: u32| x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3),
+    |x: u32| x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10)
+);
+rounds!(
+    sha512_rounds,
+    u64,
+    8,
+    128,
+    K512,
+    |x: u64| x.rotate_right(28) ^ x.rotate_right(34) ^ x.rotate_right(39),
+    |x: u64| x.rotate_right(14) ^ x.rotate_right(18) ^ x.rotate_right(41),
+    |x: u64| x.rotate_right(1) ^ x.rotate_right(8) ^ (x >> 7),
+    |x: u64| x.rotate_right(19) ^ x.rotate_right(61) ^ (x >> 6)
+);
+
+fn compress256(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+    if !crate::arch::sha256_blocks(state, blocks) {
+        sha256_rounds(state, blocks);
     }
-    for i in 16..80 {
-        let a = w[i - 15];
-        let b = w[i - 2];
-        w[i] = w[i - 16]
-            .wrapping_add(a.rotate_right(1) ^ a.rotate_right(8) ^ (a >> 7))
-            .wrapping_add(w[i - 7])
-            .wrapping_add(b.rotate_right(19) ^ b.rotate_right(61) ^ (b >> 6));
+}
+
+fn compress512(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+    if !crate::arch::sha512_blocks(state, blocks) {
+        sha512_rounds(state, blocks);
     }
-    let mut v = *h;
-    for i in 0..80 {
-        let [a, b, c, d, e, f, g, z] = v;
-        let t = z
-            .wrapping_add(e.rotate_right(14) ^ e.rotate_right(18) ^ e.rotate_right(41))
-            .wrapping_add((e & f) ^ (!e & g))
-            .wrapping_add(K512[i])
-            .wrapping_add(w[i]);
-        let u = (a.rotate_right(28) ^ a.rotate_right(34) ^ a.rotate_right(39))
-            .wrapping_add((a & b) ^ (a & c) ^ (b & c));
-        v = [t.wrapping_add(u), a, b, c, d.wrapping_add(t), e, f, g];
-    }
-    for i in 0..8 {
-        h[i] = h[i].wrapping_add(v[i]);
-    }
-    wipe64(&mut w);
-    wipe64(&mut v);
 }
 
 pub(crate) mod sealed {
@@ -211,14 +248,15 @@ macro_rules! hash {
                     self.filled += n;
                     message = &message[n..];
                     if self.filled == $block {
-                        $compress(&mut self.state, &self.block);
+                        $compress(&mut self.state, core::slice::from_ref(&self.block));
                         self.filled = 0;
                     }
                 }
-                while message.len() >= $block {
-                    $compress(&mut self.state, message[..$block].try_into().unwrap());
-                    message = &message[$block..];
+                let (blocks, rest) = message.as_chunks::<$block>();
+                if !blocks.is_empty() {
+                    $compress(&mut self.state, blocks);
                 }
+                message = rest;
                 if !message.is_empty() {
                     self.block[self.filled..self.filled + message.len()].copy_from_slice(message);
                     self.filled += message.len();
@@ -230,12 +268,12 @@ macro_rules! hash {
                 self.filled += 1;
                 self.block[self.filled..].fill(0);
                 if self.filled > $block - $length {
-                    $compress(&mut self.state, &self.block);
+                    $compress(&mut self.state, core::slice::from_ref(&self.block));
                     self.block.fill(0);
                 }
                 let bits = (self.bytes * 8).to_be_bytes();
                 self.block[$block - $length..].copy_from_slice(&bits[16 - $length..]);
-                $compress(&mut self.state, &self.block);
+                $compress(&mut self.state, core::slice::from_ref(&self.block));
                 let mut result = [0; $out];
                 for (chunk, word) in result
                     .chunks_exact_mut(core::mem::size_of::<$word>())
@@ -282,18 +320,14 @@ macro_rules! hash {
                 }
                 let mut digest = self.finalize();
                 output.copy_from_slice(&digest);
-                crate::secret::wipe(&mut digest);
+                erase(&mut digest);
                 Ok(())
             }
         }
         impl Drop for $name {
             fn drop(&mut self) {
-                wipe(&mut self.block);
-                for word in &mut self.state {
-                    // Each word is live and exclusively borrowed.
-                    unsafe { core::ptr::write_volatile(word, 0) };
-                }
-                core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst);
+                erase(&mut self.block);
+                erase(&mut self.state);
             }
         }
     };

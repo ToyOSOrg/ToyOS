@@ -1,44 +1,129 @@
-//! Intel SDM AES/CLMUL fallback uses legacy SSE, gated by CPUID.
-//! Hosted GCM additionally admits eight-block VAES/VPCLMUL batches.
-//! Hosted ChaCha additionally admits AVX2 through CPUID and OS-enabled XCR0 state.
-//! UEFI preserves every used register inside each assembly block. Ordinary
-//! hosts use Rust intrinsics and the ABI. Unaligned loads admit byte-aligned keys.
+//! x86-64 instruction paths, admitted by CPUID and, for AVX state, XCR0.
+//! UEFI preserves every used register inside each assembly block and takes
+//! only AES and CLMUL. Ordinary hosts use Rust intrinsics and the ABI.
+//! Unaligned loads admit byte-aligned keys and buffers.
 
 #[cfg(target_os = "uefi")]
 use core::arch::asm;
 use core::arch::x86_64::*;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(not(target_os = "uefi"))]
-mod avx2;
+mod aesni;
+#[cfg(not(target_os = "uefi"))]
+mod chacha;
+#[cfg(not(target_os = "uefi"))]
+mod sha;
 #[cfg(not(target_os = "uefi"))]
 mod vaes;
 
-pub(super) fn chacha_xor(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) -> usize {
-    #[cfg(not(target_os = "uefi"))]
-    {
-        avx2::xor(key, counter, nonce, data)
+/// What CPUID and XCR0 admit, read once per process. The module contract
+/// makes features uniform across the CPUs a process runs on.
+#[derive(Clone, Copy)]
+pub(super) struct Features(u32);
+
+impl Features {
+    const READ: u32 = 1 << 31;
+    const AES: u32 = 1 << 0;
+    const CLMUL: u32 = 1 << 1;
+    const SSSE3: u32 = 1 << 2;
+    const SSE41: u32 = 1 << 3;
+    const AVX2: u32 = 1 << 4;
+    const BMI2: u32 = 1 << 5;
+    const SHA: u32 = 1 << 6;
+    const VAES: u32 = 1 << 7;
+    const VPCLMUL: u32 = 1 << 8;
+
+    fn has(self, bits: u32) -> bool {
+        self.0 & bits == bits
     }
-    #[cfg(target_os = "uefi")]
-    {
-        let _ = (key, counter, nonce, data);
-        0
+    /// AES-NI and PCLMULQDQ, with SSSE3's byte shuffle.
+    #[cfg(not(target_os = "uefi"))]
+    pub(super) fn aes_clmul(self) -> bool {
+        self.has(Self::AES | Self::CLMUL | Self::SSSE3)
+    }
+    pub(super) fn aes(self) -> bool {
+        self.has(Self::AES)
+    }
+    #[cfg(any(test, target_os = "uefi"))]
+    pub(super) fn clmul(self) -> bool {
+        self.has(Self::CLMUL)
+    }
+    #[cfg(not(target_os = "uefi"))]
+    pub(super) fn avx2(self) -> bool {
+        self.has(Self::AVX2)
+    }
+    #[cfg(not(target_os = "uefi"))]
+    pub(super) fn bmi2(self) -> bool {
+        self.has(Self::BMI2)
+    }
+    /// SHA-NI with the SSSE3 and SSE4.1 shuffles its message schedule takes.
+    #[cfg(not(target_os = "uefi"))]
+    pub(super) fn sha(self) -> bool {
+        self.has(Self::SHA | Self::SSSE3 | Self::SSE41)
+    }
+    /// 256-bit VAES and VPCLMULQDQ under OS-enabled YMM state.
+    #[cfg(not(target_os = "uefi"))]
+    pub(super) fn vaes_clmul(self) -> bool {
+        self.has(Self::AES | Self::CLMUL | Self::SSSE3 | Self::AVX2 | Self::VAES | Self::VPCLMUL)
+    }
+
+    /// Intel SDM Vol. 2A, CPUID: leaf 1 ECX bits 1 (PCLMULQDQ), 9 (SSSE3),
+    /// 19 (SSE4.1), 25 (AES), 27 (OSXSAVE) and 28 (AVX); leaf 7 sub-leaf 0
+    /// EBX bits 5 (AVX2), 8 (BMI2) and 29 (SHA), ECX bits 9 (VAES) and 10
+    /// (VPCLMULQDQ). Vol. 1 §13.3: AVX needs XCR0's SSE and AVX state (bits 1
+    /// and 2) enabled by the OS.
+    #[allow(unused_unsafe, reason = "CPUID is unsafe on the supported Rust 1.89")]
+    fn read() -> Self {
+        // Leaf 0 and leaf 1 exist on every x86-64 CPU; leaf 7 where leaf 0
+        // says so; XGETBV where OSXSAVE says so.
+        let (leaf1, max) = unsafe { (__cpuid(1).ecx, __cpuid(0).eax) };
+        let (leaf7b, leaf7c) = if max >= 7 {
+            let leaf7 = unsafe { __cpuid_count(7, 0) };
+            (leaf7.ebx, leaf7.ecx)
+        } else {
+            (0, 0)
+        };
+        let ymm = leaf1 & (3 << 27) == 3 << 27 && unsafe { _xgetbv(0) } & 6 == 6;
+        Self::decode(leaf1, leaf7b, leaf7c, ymm)
+    }
+
+    fn decode(leaf1: u32, leaf7b: u32, leaf7c: u32, ymm: bool) -> Self {
+        let bit = |word: u32, n: u32, feature: u32| if word >> n & 1 == 1 { feature } else { 0 };
+        let mut bits = Self::READ
+            | bit(leaf1, 25, Self::AES)
+            | bit(leaf1, 1, Self::CLMUL)
+            | bit(leaf1, 9, Self::SSSE3)
+            | bit(leaf1, 19, Self::SSE41)
+            | bit(leaf7b, 8, Self::BMI2)
+            | bit(leaf7b, 29, Self::SHA);
+        if ymm {
+            bits |= bit(leaf7b, 5, Self::AVX2) | bit(leaf7c, 9, Self::VAES) | bit(leaf7c, 10, Self::VPCLMUL);
+        }
+        Self(bits)
     }
 }
 
-#[allow(unused_unsafe, reason = "CPUID is unsafe on the supported Rust 1.89")]
-fn capabilities() -> u32 {
-    // CPUID leaf 1 exists on every x86-64 CPU.
-    unsafe { __cpuid(1).ecx }
-}
-pub(super) fn aes_available() -> bool {
-    !cfg!(feature = "portable") && capabilities() & (1 << 25) != 0
-}
-pub(super) fn clmul_available() -> bool {
-    !cfg!(feature = "portable") && capabilities() & (1 << 1) != 0
+pub(super) fn features() -> Features {
+    if cfg!(feature = "portable") {
+        return Features(Features::READ);
+    }
+    // The cache publishes only this public word, not any other memory.
+    static FEATURES: AtomicU32 = AtomicU32::new(0);
+    let cached = FEATURES.load(Ordering::Relaxed);
+    if cached & Features::READ != 0 {
+        return Features(cached);
+    }
+    let read = Features::read();
+    FEATURES.store(read.0, Ordering::Relaxed);
+    read
 }
 
 #[cfg(target_os = "uefi")]
-pub(super) fn ghash(a: u128, b: u128) -> u128 {
+pub(super) fn ghash_multiply(a: u128, b: u128) -> Option<u128> {
+    if !features().clmul() {
+        return None;
+    }
     let a = crate::secret::Secret(a.reverse_bits().to_le_bytes());
     let b = crate::secret::Secret(b.reverse_bits().to_le_bytes());
     let mut products = crate::secret::Secret([0; 48]);
@@ -63,19 +148,24 @@ pub(super) fn ghash(a: u128, b: u128) -> u128 {
     let low = low ^ (middle << 64);
     let high = high ^ (middle >> 64);
     let carry = (high >> 127) ^ (high >> 126) ^ (high >> 121);
-    (low ^ high
-        ^ (high << 1)
-        ^ (high << 2)
-        ^ (high << 7)
-        ^ carry
-        ^ (carry << 1)
-        ^ (carry << 2)
-        ^ (carry << 7))
-        .reverse_bits()
+    Some(
+        (low ^ high
+            ^ (high << 1)
+            ^ (high << 2)
+            ^ (high << 7)
+            ^ carry
+            ^ (carry << 1)
+            ^ (carry << 2)
+            ^ (carry << 7))
+            .reverse_bits(),
+    )
 }
 
 #[cfg(target_os = "uefi")]
-pub(super) fn aes_encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 16]) {
+pub(super) fn aes_encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 16]) -> bool {
+    if !features().aes() {
+        return false;
+    }
     let mut saved = crate::secret::Secret([0u8; 32]);
     // CPUID admitted AES. The schedule contains every round, `block` and
     // `saved` are exclusive, and both XMM registers are restored before return.
@@ -91,292 +181,194 @@ pub(super) fn aes_encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 16])
             keys=inout(reg) keys.as_ptr()=>_,left=inout(reg) rounds-1=>_,options(nostack),
         );
     }
+    true
 }
 
 #[cfg(not(target_os = "uefi"))]
-#[target_feature(enable = "aes,sse2")]
-unsafe fn encrypt_native(keys: &[u8; 240], rounds: usize, block: &mut [u8; 16]) {
-    // Every unaligned access stays within a schedule or block array.
-    unsafe {
-        let mut v = _mm_xor_si128(
-            _mm_loadu_si128(block.as_ptr().cast()),
-            _mm_loadu_si128(keys.as_ptr().cast()),
+pub(super) use hosted::*;
+
+#[cfg(not(target_os = "uefi"))]
+mod hosted {
+    //! Each function checks its own admission and reports whether it ran.
+    use super::{aesni, chacha, features, sha, vaes};
+
+    pub(in crate::arch) fn aes_expand(key: &[u8], keys: &mut [u8; 240]) -> bool {
+        if !features().aes() {
+            return false;
+        }
+        // AES is admitted; the key is 16 or 32 bytes.
+        unsafe { aesni::expand(key, keys) }
+        true
+    }
+
+    pub(in crate::arch) fn aes_encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 16]) -> bool {
+        if !features().aes() {
+            return false;
+        }
+        // AES is admitted and the schedule holds `rounds + 1` keys.
+        unsafe { aesni::encrypt(keys, rounds, block) }
+        true
+    }
+
+    pub(in crate::arch) fn ghash_powers(h: &[u8; 16], powers: &mut [u128; 8]) -> bool {
+        if !features().aes_clmul() {
+            return false;
+        }
+        // CLMUL and SSSE3 are admitted.
+        unsafe { aesni::powers(h, powers) }
+        true
+    }
+
+    /// `powers` came from [`ghash_powers`].
+    pub(in crate::arch) fn ghash_blocks(powers: &[u128; 8], state: &mut [u8; 16], blocks: &[[u8; 16]]) -> bool {
+        let features = features();
+        if blocks.len() >= 8 && features.vaes_clmul() {
+            // VPCLMULQDQ under YMM state is admitted.
+            unsafe { vaes::hash(powers, state, blocks) }
+        } else if features.aes_clmul() {
+            // CLMUL and SSSE3 are admitted.
+            unsafe { aesni::hash(powers, state, blocks) }
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// CTR from the 32-bit `counter` on. GCM bounded the block count so that
+    /// no counter wraps.
+    pub(in crate::arch) fn gcm_ctr(
+        keys: &[u8; 240],
+        rounds: usize,
+        nonce: &[u8; 12],
+        counter: u32,
+        data: &mut [u8],
+    ) -> bool {
+        let features = features();
+        if data.len() >= 128 && features.vaes_clmul() {
+            // VAES under YMM state is admitted.
+            unsafe { vaes::ctr(keys, rounds, nonce, counter, data) }
+        } else if features.aes_clmul() {
+            // AES and SSSE3 are admitted.
+            unsafe { aesni::ctr(keys, rounds, nonce, counter, data) }
+        } else {
+            return false;
+        }
+        true
+    }
+
+    /// Encrypts and hashes whole 128-byte batches from counter 2 on, and
+    /// returns the bytes it did; `powers` came from [`ghash_powers`].
+    pub(in crate::arch) fn gcm_seal(
+        keys: &[u8; 240],
+        rounds: usize,
+        powers: &[u128; 8],
+        nonce: &[u8; 12],
+        state: &mut [u8; 16],
+        data: &mut [u8],
+    ) -> usize {
+        let features = features();
+        if features.vaes_clmul() {
+            // VAES and VPCLMULQDQ under YMM state are admitted.
+            unsafe { vaes::seal(keys, rounds, powers, nonce, state, data) }
+        } else if features.aes_clmul() {
+            // AES, CLMUL and SSSE3 are admitted.
+            unsafe { aesni::seal(keys, rounds, powers, nonce, state, data) }
+        } else {
+            0
+        }
+    }
+
+    /// Returns the bytes it did, whole blocks only; the caller bounded the counter.
+    pub(in crate::arch) fn chacha_xor(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) -> usize {
+        if !features().avx2() {
+            return 0;
+        }
+        // AVX2 under YMM state is admitted.
+        unsafe { chacha::xor(key, counter, nonce, data) }
+    }
+
+    pub(in crate::arch) fn chacha_seal(
+        key: &[u8; 32],
+        counter: u64,
+        nonce: &[u8; 8],
+        data: &mut [u8],
+        mac: &mut crate::poly1305::Poly1305,
+    ) -> usize {
+        if !features().avx2() {
+            return 0;
+        }
+        // AVX2 under YMM state is admitted.
+        unsafe { chacha::seal(key, counter, nonce, data, mac) }
+    }
+
+    pub(in crate::arch) fn sha256_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) -> bool {
+        if !features().sha() {
+            return false;
+        }
+        // SHA, SSSE3 and SSE4.1 are admitted.
+        unsafe { sha::sha256(state, blocks) }
+        true
+    }
+
+    pub(in crate::arch) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool {
+        if !features().bmi2() {
+            return false;
+        }
+        // BMI2 is admitted.
+        unsafe { sha::sha512(state, blocks) }
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decoding_names_each_cpuid_bit() {
+        let all = Features::decode(!0, !0, !0, true);
+        assert!(all.aes_clmul() && all.sha() && all.bmi2() && all.avx2() && all.vaes_clmul());
+        assert!(!Features::decode(!0, !0, !0, false).avx2(), "YMM state is the OS's to enable");
+        assert!(!Features::decode(!0, !0, !0, false).vaes_clmul());
+        for (bit, feature) in [(1, Features::CLMUL), (9, Features::SSSE3), (19, Features::SSE41), (25, Features::AES)] {
+            assert_eq!(Features::decode(!(1 << bit), !0, !0, true).0 & feature, 0, "leaf 1 bit {bit}");
+        }
+        for (bit, feature) in [(5, Features::AVX2), (8, Features::BMI2), (29, Features::SHA)] {
+            assert_eq!(Features::decode(!0, !(1 << bit), !0, true).0 & feature, 0, "leaf 7 EBX bit {bit}");
+        }
+        for (bit, feature) in [(9, Features::VAES), (10, Features::VPCLMUL)] {
+            assert_eq!(Features::decode(!0, !0, !(1 << bit), true).0 & feature, 0, "leaf 7 ECX bit {bit}");
+        }
+    }
+
+    #[test]
+    fn features_match_host_detection_and_portable_override() {
+        let f = features();
+        let on = !cfg!(feature = "portable");
+        assert_eq!(f.aes(), on && std::is_x86_feature_detected!("aes"));
+        assert_eq!(f.clmul(), on && std::is_x86_feature_detected!("pclmulqdq"));
+        assert_eq!(f.avx2(), on && std::is_x86_feature_detected!("avx2"));
+        assert_eq!(f.bmi2(), on && std::is_x86_feature_detected!("bmi2"));
+        assert_eq!(
+            f.sha(),
+            on && std::is_x86_feature_detected!("sha")
+                && std::is_x86_feature_detected!("ssse3")
+                && std::is_x86_feature_detected!("sse4.1")
         );
-        for i in 1..rounds {
-            v = _mm_aesenc_si128(v, _mm_loadu_si128(keys.as_ptr().add(i * 16).cast()))
-        }
-        v = _mm_aesenclast_si128(v, _mm_loadu_si128(keys.as_ptr().add(rounds * 16).cast()));
-        _mm_storeu_si128(block.as_mut_ptr().cast(), v)
-    }
-}
-#[cfg(not(target_os = "uefi"))]
-pub(super) fn aes_encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 16]) {
-    // CPUID admitted AES; the ordinary ABI owns SIMD register preservation.
-    unsafe { encrypt_native(keys, rounds, block) }
-}
-#[cfg(not(target_os = "uefi"))]
-#[target_feature(enable = "pclmulqdq,sse2")]
-unsafe fn product_native(a: u128, b: u128) -> (u128, u128) {
-    let a = _mm_set_epi64x((a >> 64) as i64, a as i64);
-    let b = _mm_set_epi64x((b >> 64) as i64, b as i64);
-    let lo = _mm_clmulepi64_si128::<0>(a, b);
-    let hi = _mm_clmulepi64_si128::<0x11>(a, b);
-    let ax = _mm_xor_si128(a, _mm_shuffle_epi32::<0x4e>(a));
-    let bx = _mm_xor_si128(b, _mm_shuffle_epi32::<0x4e>(b));
-    let middle = _mm_xor_si128(_mm_xor_si128(_mm_clmulepi64_si128::<0>(ax, bx), lo), hi);
-    let lo = u128::from(_mm_cvtsi128_si64(lo) as u64)
-        | (u128::from(_mm_cvtsi128_si64(_mm_unpackhi_epi64(lo, lo)) as u64) << 64);
-    let hi = u128::from(_mm_cvtsi128_si64(hi) as u64)
-        | (u128::from(_mm_cvtsi128_si64(_mm_unpackhi_epi64(hi, hi)) as u64) << 64);
-    let mid = u128::from(_mm_cvtsi128_si64(middle) as u64)
-        | (u128::from(_mm_cvtsi128_si64(_mm_unpackhi_epi64(middle, middle)) as u64) << 64);
-    (lo ^ (mid << 64), hi ^ (mid >> 64))
-}
-#[cfg(not(target_os = "uefi"))]
-pub(super) fn ghash(a: u128, b: u128) -> u128 {
-    // CPUID admitted CLMUL; reflection maps GCM's bit order to polynomial order.
-    let (low, high) = unsafe { product_native(a.reverse_bits(), b.reverse_bits()) };
-    let carry = (high >> 127) ^ (high >> 126) ^ (high >> 121);
-    (low ^ high
-        ^ (high << 1)
-        ^ (high << 2)
-        ^ (high << 7)
-        ^ carry
-        ^ (carry << 1)
-        ^ (carry << 2)
-        ^ (carry << 7))
-        .reverse_bits()
-}
-
-#[cfg(not(target_os = "uefi"))]
-#[target_feature(enable = "aes,sse2")]
-#[inline(never)]
-unsafe fn subword(word: &mut [u8; 4]) {
-    // Identical columns make ShiftRows the identity; the zero key isolates SubBytes.
-    let columns = _mm_set1_epi32(u32::from_le_bytes(*word) as i32);
-    let out = _mm_aesenclast_si128(columns, _mm_setzero_si128());
-    *word = (_mm_cvtsi128_si32(out) as u32).to_le_bytes();
-}
-pub(super) fn aes_subword(word: &mut [u8; 4]) -> bool {
-    #[cfg(not(target_os = "uefi"))]
-    {
-        // Dispatch admitted AES and the ordinary ABI owns SIMD state.
-        unsafe { subword(word) }
-        true
-    }
-    #[cfg(target_os = "uefi")]
-    {
-        let _ = word;
-        false
-    }
-}
-
-#[cfg(not(target_os = "uefi"))]
-#[target_feature(enable = "aes,sse2")]
-#[inline(never)]
-unsafe fn ctr(keys: &[u8; 240], rounds: usize, nonce: &[u8; 12], data: &mut [u8]) {
-    // GCM checked len <= 2^36-32; four counters per batch cannot exceed u32::MAX.
-    unsafe {
-        let mut iv = [0; 16];
-        iv[..12].copy_from_slice(nonce);
-        let base = _mm_loadu_si128(iv.as_ptr().cast());
-        let first = _mm_loadu_si128(keys.as_ptr().cast());
-        let (batches, tail) = data.as_chunks_mut::<64>();
-        for (i, batch) in batches.iter_mut().enumerate() {
-            let counter = i as u32 * 4 + 2;
-            let mut a = _mm_xor_si128(base, _mm_set_epi32(counter.to_be() as i32, 0, 0, 0));
-            let mut b = _mm_xor_si128(base, _mm_set_epi32((counter + 1).to_be() as i32, 0, 0, 0));
-            let mut c = _mm_xor_si128(base, _mm_set_epi32((counter + 2).to_be() as i32, 0, 0, 0));
-            let mut d = _mm_xor_si128(base, _mm_set_epi32((counter + 3).to_be() as i32, 0, 0, 0));
-            a = _mm_xor_si128(a, first);
-            b = _mm_xor_si128(b, first);
-            c = _mm_xor_si128(c, first);
-            d = _mm_xor_si128(d, first);
-            for round in 1..rounds {
-                let key = _mm_loadu_si128(keys.as_ptr().add(16 * round).cast());
-                a = _mm_aesenc_si128(a, key);
-                b = _mm_aesenc_si128(b, key);
-                c = _mm_aesenc_si128(c, key);
-                d = _mm_aesenc_si128(d, key);
-            }
-            let last = _mm_loadu_si128(keys.as_ptr().add(16 * rounds).cast());
-            a = _mm_aesenclast_si128(a, last);
-            b = _mm_aesenclast_si128(b, last);
-            c = _mm_aesenclast_si128(c, last);
-            d = _mm_aesenclast_si128(d, last);
-            // All four unaligned load/stores are contained in this complete batch.
-            let out = batch.as_mut_ptr();
-            _mm_storeu_si128(out.cast(), _mm_xor_si128(a, _mm_loadu_si128(out.cast())));
-            _mm_storeu_si128(
-                out.add(16).cast(),
-                _mm_xor_si128(b, _mm_loadu_si128(out.add(16).cast())),
-            );
-            _mm_storeu_si128(
-                out.add(32).cast(),
-                _mm_xor_si128(c, _mm_loadu_si128(out.add(32).cast())),
-            );
-            _mm_storeu_si128(
-                out.add(48).cast(),
-                _mm_xor_si128(d, _mm_loadu_si128(out.add(48).cast())),
-            );
-        }
-        let mut stream = crate::secret::Secret([0; 16]);
-        for (i, chunk) in tail.chunks_mut(16).enumerate() {
-            stream.0[..12].copy_from_slice(nonce);
-            stream.0[12..].copy_from_slice(&((4 * batches.len() + i) as u32 + 2).to_be_bytes());
-            encrypt_native(keys, rounds, &mut stream.0);
-            for (byte, &mask) in chunk.iter_mut().zip(&stream.0) {
-                *byte ^= mask;
-            }
-        }
-    }
-}
-pub(super) fn aes_ctr(keys: &[u8; 240], rounds: usize, nonce: &[u8; 12], data: &mut [u8]) -> bool {
-    #[cfg(not(target_os = "uefi"))]
-    {
-        // Extended-state admission is additional to the caller's AES/counter checks.
-        if data.len() >= 128 && vaes::available() {
-            unsafe { vaes::ctr(keys, rounds, nonce, data) }
-            return true;
-        }
-        // Dispatch admitted AES; GCM validated the counter bound before mutation.
-        unsafe { ctr(keys, rounds, nonce, data) }
-        true
-    }
-    #[cfg(target_os = "uefi")]
-    {
-        let _ = (keys, rounds, nonce, data);
-        false
-    }
-}
-
-#[cfg(not(target_os = "uefi"))]
-#[target_feature(enable = "sse2")]
-fn reflect_bytes(x: __m128i) -> __m128i {
-    // Reflect within each byte: masks discard inter-byte carries of 16-bit shifts.
-    let m1 = _mm_set1_epi8(0x55);
-    let m2 = _mm_set1_epi8(0x33);
-    let m4 = _mm_set1_epi8(0x0f);
-    let x = _mm_or_si128(
-        _mm_and_si128(_mm_srli_epi16::<1>(x), m1),
-        _mm_slli_epi16::<1>(_mm_and_si128(x, m1)),
-    );
-    let x = _mm_or_si128(
-        _mm_and_si128(_mm_srli_epi16::<2>(x), m2),
-        _mm_slli_epi16::<2>(_mm_and_si128(x, m2)),
-    );
-    _mm_or_si128(
-        _mm_and_si128(_mm_srli_epi16::<4>(x), m4),
-        _mm_slli_epi16::<4>(_mm_and_si128(x, m4)),
-    )
-}
-#[cfg(not(target_os = "uefi"))]
-#[target_feature(enable = "pclmulqdq,sse2")]
-fn product_vectors(a: __m128i, b: __m128i) -> (__m128i, __m128i) {
-    let low = _mm_clmulepi64_si128::<0>(a, b);
-    let high = _mm_clmulepi64_si128::<0x11>(a, b);
-    let ax = _mm_xor_si128(a, _mm_shuffle_epi32::<0x4e>(a));
-    let bx = _mm_xor_si128(b, _mm_shuffle_epi32::<0x4e>(b));
-    let middle = _mm_xor_si128(_mm_xor_si128(_mm_clmulepi64_si128::<0>(ax, bx), low), high);
-    (
-        _mm_xor_si128(low, _mm_slli_si128::<8>(middle)),
-        _mm_xor_si128(high, _mm_srli_si128::<8>(middle)),
-    )
-}
-#[cfg(not(target_os = "uefi"))]
-#[target_feature(enable = "sse2")]
-fn reduce_vectors(low: __m128i, high: __m128i) -> __m128i {
-    let shifted1 = _mm_xor_si128(
-        _mm_slli_epi64::<1>(high),
-        _mm_slli_si128::<8>(_mm_srli_epi64::<63>(high)),
-    );
-    let shifted2 = _mm_xor_si128(
-        _mm_slli_epi64::<2>(high),
-        _mm_slli_si128::<8>(_mm_srli_epi64::<62>(high)),
-    );
-    let shifted7 = _mm_xor_si128(
-        _mm_slli_epi64::<7>(high),
-        _mm_slli_si128::<8>(_mm_srli_epi64::<57>(high)),
-    );
-    let carry = _mm_srli_si128::<8>(_mm_xor_si128(
-        _mm_xor_si128(_mm_srli_epi64::<63>(high), _mm_srli_epi64::<62>(high)),
-        _mm_srli_epi64::<57>(high),
-    ));
-    // x^128 = x^7+x^2+x+1; first-fold overflow occupies at most seven low bits.
-    let folded = _mm_xor_si128(
-        _mm_xor_si128(low, high),
-        _mm_xor_si128(shifted1, _mm_xor_si128(shifted2, shifted7)),
-    );
-    _mm_xor_si128(
-        folded,
-        _mm_xor_si128(
-            carry,
-            _mm_xor_si128(
-                _mm_slli_epi64::<1>(carry),
-                _mm_xor_si128(_mm_slli_epi64::<2>(carry), _mm_slli_epi64::<7>(carry)),
-            ),
-        ),
-    )
-}
-#[cfg(not(target_os = "uefi"))]
-#[target_feature(enable = "pclmulqdq,sse2")]
-fn multiply_vectors(a: __m128i, b: __m128i) -> __m128i {
-    let (low, high) = product_vectors(a, b);
-    reduce_vectors(low, high)
-}
-#[cfg(not(target_os = "uefi"))]
-#[target_feature(enable = "pclmulqdq,sse2")]
-#[inline(never)]
-unsafe fn hash_blocks(h: &[u8; 16], state: &mut [u8; 16], blocks: &[[u8; 16]]) {
-    // CLMUL is admitted; each unaligned access stays within its fixed array.
-    unsafe {
-        let h = reflect_bytes(_mm_loadu_si128(h.as_ptr().cast()));
-        let mut y = reflect_bytes(_mm_loadu_si128(state.as_ptr().cast()));
-        let (batches, tail) = blocks.as_chunks::<4>();
-        if !batches.is_empty() {
-            let h2 = multiply_vectors(h, h);
-            let h3 = multiply_vectors(h2, h);
-            let h4 = multiply_vectors(h2, h2);
-            for batch in batches {
-                let x0 = reflect_bytes(_mm_loadu_si128(batch[0].as_ptr().cast()));
-                let x1 = reflect_bytes(_mm_loadu_si128(batch[1].as_ptr().cast()));
-                let x2 = reflect_bytes(_mm_loadu_si128(batch[2].as_ptr().cast()));
-                let x3 = reflect_bytes(_mm_loadu_si128(batch[3].as_ptr().cast()));
-                // Four steps expand to (y+x0)H^4+x1H^3+x2H^2+x3H.
-                let (l0, u0) = product_vectors(_mm_xor_si128(y, x0), h4);
-                let (l1, u1) = product_vectors(x1, h3);
-                let (l2, u2) = product_vectors(x2, h2);
-                let (l3, u3) = product_vectors(x3, h);
-                y = reduce_vectors(
-                    _mm_xor_si128(_mm_xor_si128(l0, l1), _mm_xor_si128(l2, l3)),
-                    _mm_xor_si128(_mm_xor_si128(u0, u1), _mm_xor_si128(u2, u3)),
-                );
-            }
-        }
-        for block in tail {
-            let x = reflect_bytes(_mm_loadu_si128(block.as_ptr().cast()));
-            y = multiply_vectors(_mm_xor_si128(y, x), h);
-        }
-        _mm_storeu_si128(state.as_mut_ptr().cast(), reflect_bytes(y));
-    }
-}
-pub(super) fn ghash_blocks(h: &[u8; 16], state: &mut [u8; 16], blocks: &[[u8; 16]]) {
-    #[cfg(not(target_os = "uefi"))]
-    {
-        if blocks.len() >= 8 && vaes::available() {
-            // VAES admission also establishes VPCLMUL and OS-owned YMM state.
-            unsafe { vaes::hash_blocks(h, state, blocks) }
-            return;
-        }
-        // Dispatch admitted CLMUL and the ordinary ABI preserves SIMD state.
-        unsafe { hash_blocks(h, state, blocks) }
-    }
-    #[cfg(target_os = "uefi")]
-    for block in blocks {
-        *state = ghash(
-            u128::from_be_bytes(*state) ^ u128::from_be_bytes(*block),
-            u128::from_be_bytes(*h),
-        )
-        .to_be_bytes();
+        assert_eq!(
+            f.vaes_clmul(),
+            f.aes_clmul()
+                && f.avx2()
+                && std::is_x86_feature_detected!("vaes")
+                && std::is_x86_feature_detected!("vpclmulqdq")
+        );
+        std::println!(
+            "admitted: aes+clmul {} avx2 {} bmi2 {} sha {} vaes+vpclmul {}",
+            f.aes_clmul(),
+            f.avx2(),
+            f.bmi2(),
+            f.sha(),
+            f.vaes_clmul()
+        );
     }
 }

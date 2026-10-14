@@ -162,15 +162,18 @@ fn check_chacha_length(length: usize) -> Result<(), Error> {
         Ok(())
     }
 }
-fn chacha_tag(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8], ciphertext: &[u8]) -> Secret<16> {
+/// Poly1305 keyed by block 0, with the padded AAD absorbed.
+fn chacha_mac(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8]) -> Poly1305 {
     let first = chacha::block(key, nonce, 0);
     let mut mac = Poly1305::new(first.0[..32].try_into().unwrap());
     mac.update(aad);
     mac.pad16();
-    mac.update(ciphertext);
+    mac
+}
+fn chacha_finish(mut mac: Poly1305, aad: usize, ciphertext: usize) -> Secret<16> {
     mac.pad16();
-    mac.update(&(aad.len() as u64).to_le_bytes());
-    mac.update(&(ciphertext.len() as u64).to_le_bytes());
+    mac.update(&(aad as u64).to_le_bytes());
+    mac.update(&(ciphertext as u64).to_le_bytes());
     Secret(mac.finish())
 }
 fn chacha_seal(
@@ -180,8 +183,9 @@ fn chacha_seal(
     data: &mut [u8],
 ) -> Result<[u8; 16], Error> {
     check_chacha_length(data.len())?;
-    chacha::xor(key, nonce, 1, data)?;
-    Ok(chacha_tag(key, nonce, aad, data).0)
+    let mut mac = chacha_mac(key, nonce, aad);
+    chacha::seal(key, nonce, 1, data, &mut mac)?;
+    Ok(chacha_finish(mac, aad.len(), data.len()).0)
 }
 fn chacha_open(
     key: &[u8; 32],
@@ -191,7 +195,9 @@ fn chacha_open(
     tag: &[u8],
 ) -> Result<(), Error> {
     check_chacha_length(data.len())?;
-    let expected = chacha_tag(key, nonce, aad, data);
+    let mut mac = chacha_mac(key, nonce, aad);
+    mac.update(data);
+    let expected = chacha_finish(mac, aad.len(), data.len());
     if !crate::ct::equal(&expected.0, tag) {
         return Err(Error::Authentication);
     }

@@ -19,7 +19,9 @@ fn multiply(a: u128, mut b: u128) -> u128 {
 pub(crate) struct Gcm {
     aes: Aes,
     h: Secret<16>,
-    hardware: bool,
+    /// H's powers for the aggregated instruction path, when it is admitted.
+    powers: Secret<8, u128>,
+    aggregated: bool,
 }
 impl Gcm {
     /// Zero storage for provider construction; initialize before any operation.
@@ -28,7 +30,8 @@ impl Gcm {
         Self {
             aes: Aes::storage(key_len),
             h: Secret([0; 16]),
-            hardware: crate::arch::clmul_available(),
+            powers: Secret([0; 8]),
+            aggregated: false,
         }
     }
     #[cfg(feature = "rustls-provider")]
@@ -36,6 +39,7 @@ impl Gcm {
         self.aes.initialize(key);
         self.h.0.fill(0);
         self.aes.encrypt(&mut self.h.0);
+        self.aggregated = crate::arch::ghash_powers(&self.h.0, &mut self.powers.0);
     }
     pub(crate) fn aes128(key: &[u8; 16]) -> Self {
         Self::new(Aes::aes128(key))
@@ -46,18 +50,9 @@ impl Gcm {
     fn new(aes: Aes) -> Self {
         let mut h = Secret([0; 16]);
         aes.encrypt(&mut h.0);
-        Self {
-            aes,
-            h,
-            hardware: crate::arch::clmul_available(),
-        }
-    }
-    fn multiply(&self, a: u128, b: u128) -> u128 {
-        if self.hardware {
-            crate::arch::ghash(a, b)
-        } else {
-            multiply(a, b)
-        }
+        let mut powers = Secret([0; 8]);
+        let aggregated = crate::arch::ghash_powers(&h.0, &mut powers.0);
+        Self { aes, h, powers, aggregated }
     }
     fn check(aad: usize, data: usize) -> Result<(), Error> {
         if data as u128 > (1u128 << 36) - 32 || aad as u128 > u64::MAX as u128 / 8 {
@@ -66,32 +61,33 @@ impl Gcm {
             Ok(())
         }
     }
-    fn tag(&self, nonce: &[u8; 12], aad: &[u8], data: &[u8]) -> Secret<16> {
-        let mut state = Secret([0u8; 16]);
-        for input in [aad, data] {
-            let (blocks, tail) = input.as_chunks::<16>();
-            let remaining = if self.hardware {
-                crate::arch::ghash_blocks(&self.h.0, &mut state.0, blocks);
-                tail
-            } else {
-                input
-            };
-            for chunk in remaining.chunks(16) {
-                for (s, &b) in state.0.iter_mut().zip(chunk) {
-                    *s ^= b;
-                }
-                state.0 = self
-                    .multiply(u128::from_be_bytes(state.0), u128::from_be_bytes(self.h.0))
-                    .to_be_bytes();
-            }
+    /// Folds whole blocks into `state`.
+    fn hash_blocks(&self, state: &mut [u8; 16], blocks: &[[u8; 16]]) {
+        if blocks.is_empty() {
+            return;
         }
-        let lengths = ((aad.len() as u128 * 8) << 64) | (data.len() as u128 * 8);
-        state.0 = self
-            .multiply(
-                u128::from_be_bytes(state.0) ^ lengths,
-                u128::from_be_bytes(self.h.0),
-            )
-            .to_be_bytes();
+        if self.aggregated && crate::arch::ghash_blocks(&self.powers.0, state, blocks) {
+            return;
+        }
+        let h = u128::from_be_bytes(self.h.0);
+        for block in blocks {
+            let x = u128::from_be_bytes(*state) ^ u128::from_be_bytes(*block);
+            *state = crate::arch::ghash_multiply(x, h).unwrap_or_else(|| multiply(x, h)).to_be_bytes();
+        }
+    }
+    /// Folds `input` into `state`, its last partial block padded with zeros.
+    fn hash(&self, state: &mut [u8; 16], input: &[u8]) {
+        let (blocks, tail) = input.as_chunks::<16>();
+        self.hash_blocks(state, blocks);
+        if !tail.is_empty() {
+            let mut last = Secret([0u8; 16]);
+            last.0[..tail.len()].copy_from_slice(tail);
+            self.hash_blocks(state, core::slice::from_ref(&last.0));
+        }
+    }
+    fn tag(&self, nonce: &[u8; 12], mut state: Secret<16>, aad: usize, data: usize) -> Secret<16> {
+        let lengths = ((aad as u128 * 8) << 64) | (data as u128 * 8);
+        self.hash_blocks(&mut state.0, &[lengths.to_be_bytes()]);
         let mut j = Secret([0u8; 16]);
         j.0[..12].copy_from_slice(nonce);
         j.0[15] = 1;
@@ -101,15 +97,15 @@ impl Gcm {
         }
         state
     }
-    fn xor(&self, nonce: &[u8; 12], data: &mut [u8]) {
-        if self.aes.xor_ctr(nonce, data) {
+    /// CTR from counter `first`, as GCM's 32-bit counter.
+    fn xor(&self, nonce: &[u8; 12], first: u32, data: &mut [u8]) {
+        if data.is_empty() || crate::arch::gcm_ctr(&self.aes.keys.0, self.aes.rounds, nonce, first, data) {
             return;
         }
         let mut stream = Secret([0; 16]);
-        stream.0[..12].copy_from_slice(nonce);
         for (i, chunk) in data.chunks_mut(16).enumerate() {
             stream.0[..12].copy_from_slice(nonce);
-            stream.0[12..].copy_from_slice(&(i as u32 + 2).to_be_bytes());
+            stream.0[12..].copy_from_slice(&first.wrapping_add(i as u32).to_be_bytes());
             self.aes.encrypt(&mut stream.0);
             for (b, &s) in chunk.iter_mut().zip(&stream.0) {
                 *b ^= s;
@@ -123,8 +119,18 @@ impl Gcm {
         data: &mut [u8],
     ) -> Result<[u8; 16], Error> {
         Self::check(aad.len(), data.len())?;
-        self.xor(nonce, data);
-        Ok(self.tag(nonce, aad, data).0)
+        let mut state = Secret([0u8; 16]);
+        self.hash(&mut state.0, aad);
+        let done = if self.aggregated {
+            crate::arch::gcm_seal(&self.aes.keys.0, self.aes.rounds, &self.powers.0, nonce, &mut state.0, data)
+        } else {
+            0
+        };
+        let rest = &mut data[done..];
+        // GCM bounded the length, so the block count fits the counter.
+        self.xor(nonce, (done / 16) as u32 + 2, rest);
+        self.hash(&mut state.0, rest);
+        Ok(self.tag(nonce, state, aad.len(), data.len()).0)
     }
     pub(crate) fn open(
         &self,
@@ -134,11 +140,14 @@ impl Gcm {
         tag: &[u8],
     ) -> Result<(), Error> {
         Self::check(aad.len(), data.len())?;
-        let expected = self.tag(nonce, aad, data);
+        let mut state = Secret([0u8; 16]);
+        self.hash(&mut state.0, aad);
+        self.hash(&mut state.0, data);
+        let expected = self.tag(nonce, state, aad.len(), data.len());
         if !crate::ct::equal(&expected.0, tag) {
             return Err(Error::Authentication);
         }
-        self.xor(nonce, data);
+        self.xor(nonce, 2, data);
         Ok(())
     }
 }
@@ -146,48 +155,91 @@ impl Gcm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn portable(h: u128, state: u128, blocks: &[[u8; 16]]) -> u128 {
+        blocks.iter().fold(state, |y, x| multiply(y ^ u128::from_be_bytes(*x), h))
+    }
+
     #[test]
-    fn clmul_matches_portable_field_and_reports_dispatch() {
-        let admitted = crate::arch::clmul_available();
-        std::println!("GHASH acceleration admitted: {admitted}");
-        if admitted {
-            for i in 0..256 {
-                let a = (i as u128).wrapping_mul(0x9e3779b97f4a7c15fedcba9876543210);
-                let b = !a.rotate_left(i % 128);
-                assert_eq!(crate::arch::ghash(a, b), multiply(a, b));
+    fn dispatched_ghash_matches_the_bitwise_multiply() {
+        let gcm = Gcm::aes128(&[7; 16]);
+        std::println!("GHASH aggregated: {}", gcm.aggregated);
+        let h = u128::from_be_bytes(gcm.h.0);
+        // Every basis product, through the one-block path.
+        for i in 0..128 {
+            let mut state = (1u128 << i).to_be_bytes();
+            gcm.hash_blocks(&mut state, &[[0; 16]]);
+            assert_eq!(u128::from_be_bytes(state), multiply(1 << i, h), "x^{i}");
+        }
+        // Every count across the aggregated, batched and tail paths.
+        let blocks: [[u8; 16]; 41] = core::array::from_fn(|i| {
+            (!h.wrapping_mul(i as u128 + 1)).rotate_left(i as u32).to_be_bytes()
+        });
+        for n in 0..=blocks.len() {
+            let start = h.rotate_left(n as u32);
+            let mut state = start.to_be_bytes();
+            gcm.hash_blocks(&mut state, &blocks[..n]);
+            assert_eq!(u128::from_be_bytes(state), portable(h, start, &blocks[..n]), "{n} blocks");
+        }
+        // Every bit of every block in a batch meets its own power.
+        for lane in 0..8 {
+            for bit in 0..128 {
+                let mut basis = [[0; 16]; 8];
+                basis[lane][bit / 8] = 1 << (bit % 8);
+                let mut state = [0; 16];
+                gcm.hash_blocks(&mut state, &basis);
+                assert_eq!(u128::from_be_bytes(state), portable(h, 0, &basis), "lane {lane} bit {bit}");
             }
         }
         assert_eq!(Gcm::check(0, usize::MAX), Err(Error::Length));
     }
 
     #[test]
-    fn accelerated_ghash_preserves_polynomial_basis_and_stream_recurrence() {
-        if !crate::arch::clmul_available() {
-            return;
-        }
-        for i in 0..128 {
-            for j in 0..128 {
-                let a = 1u128 << i;
-                let b = 1u128 << j;
-                let mut state = a.to_be_bytes();
-                crate::arch::ghash_blocks(&b.to_be_bytes(), &mut state, &[[0; 16]]);
-                assert_eq!(u128::from_be_bytes(state), multiply(a, b));
+    fn counters_continue_across_the_stitched_and_tail_paths() {
+        for key in [&[3u8; 16][..], &[5u8; 32][..]] {
+            let gcm = if key.len() == 16 {
+                Gcm::aes128(key.try_into().unwrap())
+            } else {
+                Gcm::aes256(key.try_into().unwrap())
+            };
+            let nonce = [0xfe; 12];
+            for n in [0usize, 1, 15, 16, 17, 127, 128, 129, 255, 256, 257, 383, 384, 511, 512, 513, 1024, 1040] {
+                let input: std::vec::Vec<u8> = (0..n).map(|i| (i * 31 + 7) as u8).collect();
+                let mut sealed = input.clone();
+                let tag = gcm.seal(&nonce, b"aad", &mut sealed).unwrap();
+                let mut stream = input.clone();
+                for (i, chunk) in stream.chunks_mut(16).enumerate() {
+                    let mut block = [0u8; 16];
+                    block[..12].copy_from_slice(&nonce);
+                    block[12..].copy_from_slice(&(i as u32 + 2).to_be_bytes());
+                    gcm.aes.encrypt_portable(&mut block);
+                    for (b, s) in chunk.iter_mut().zip(block) {
+                        *b ^= s;
+                    }
+                }
+                assert_eq!(sealed, stream, "{n} bytes, {}-byte key", key.len());
+                let mut state = [0u8; 16];
+                let h = u128::from_be_bytes(gcm.h.0);
+                let mut padded = b"aad".to_vec();
+                padded.resize(16, 0);
+                let mut data = sealed.clone();
+                data.resize(n.div_ceil(16) * 16, 0);
+                let blocks: std::vec::Vec<[u8; 16]> =
+                    padded.chunks(16).chain(data.chunks(16)).map(|c| c.try_into().unwrap()).collect();
+                let lengths = ((3u128 * 8) << 64) | (n as u128 * 8);
+                let y = multiply(portable(h, 0, &blocks) ^ lengths, h);
+                state.copy_from_slice(&y.to_be_bytes());
+                let mut j = [0u8; 16];
+                j[..12].copy_from_slice(&nonce);
+                j[15] = 1;
+                gcm.aes.encrypt_portable(&mut j);
+                for (s, m) in state.iter_mut().zip(j) {
+                    *s ^= m;
+                }
+                assert_eq!(tag, state, "tag over {n} bytes");
+                gcm.open(&nonce, b"aad", &mut sealed, &tag).unwrap();
+                assert_eq!(sealed, input);
             }
-        }
-        let h = 0x0123456789abcdef123456789abcdef0u128;
-        let blocks: [[u8; 16]; 19] = core::array::from_fn(|i| {
-            (!h.wrapping_mul(i as u128 + 1))
-                .rotate_left(i as u32)
-                .to_be_bytes()
-        });
-        for n in 0..=blocks.len() {
-            let mut state = h.to_be_bytes();
-            crate::arch::ghash_blocks(&h.to_be_bytes(), &mut state, &blocks[..n]);
-            let expected = blocks[..n]
-                .iter()
-                .fold(h, |y, x| multiply(y ^ u128::from_be_bytes(*x), h));
-            assert_eq!(u128::from_be_bytes(state), expected);
         }
     }
 }
-
