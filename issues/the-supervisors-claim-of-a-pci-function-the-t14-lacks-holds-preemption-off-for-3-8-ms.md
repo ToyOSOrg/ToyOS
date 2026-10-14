@@ -12,9 +12,14 @@ every 2 ms (#681, comment 5968784527) read init's `SYS_DEVICE_CLAIM` for
 blockd's `pci:1b36:0010`, which this machine does not have, holding cpu0's
 interrupts off for 3,817,265 ns at 1.162 s, from the syscall's entry to its
 return, with `MSR_SMI_COUNT` unmoved. Its one sample, 1.7 µs before it closed,
-is in `PciDevice::is_id` under `pcidev::claim`. By reading, the claim reads the
+is in `PciDevice::is_id` under `pcidev::claim`. By reading, the claim then read the
 vendor ID of each of the 24 functions the kernel enumerated
-(`kernel/src/pcidev/mod.rs`); nothing has said what it spends 3.8 ms on.
+(`kernel/src/pcidev/mod.rs`); nothing has said what it spent 3.8 ms on.
+
+**That path no longer exists in that form** (#926, not re-measured): the
+supervisor matches a `devices` entry against the inventory and asks the kernel
+for no function the machine lacks, and `pcidev::claim` takes an arrival and
+reads no function's vendor ID. The figures here stay as measured.
 
 A syscall's body now runs with interrupts open and preemption off
 (`issues/syscall-preemption-is-incidental.md`). #716's interleaved
