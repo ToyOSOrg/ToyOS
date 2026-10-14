@@ -446,8 +446,8 @@ recorded for its own over-reads. Nothing in this repository fetches
 them, and no test reads tcpdump's dissection of them.
 
 
-kernel/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
-----------------------------------------------------------------------------
+build/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
+---------------------------------------------------------------------------
 
     06-8c-01  112,640 bytes, update revision 0xbe for processor signature
               0x806c1, processor flags 0x80 (Tiger Lake B0/B1, the T14's
@@ -463,17 +463,18 @@ kernel/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
     sha256 03efb1491c7e899feb2665fa299363e64035e5444c1b8bc1f6ebed30de964e12)
     SPDX-License-Identifier: LicenseRef-Intel-Microcode
 
-The kernel embeds 06-8c-01 and loads it on the CPU it names; 06-cc-02 is
-`toyos-microcode`'s test input. The licence permits redistribution in binary
-form, unmodified, on three conditions: the copyright notice and the
-disclaimer are reproduced with the distribution, which every x86-64 image does
-as /system/share/licenses/Intel-microcode-license.txt; Intel's name endorses
-nothing derived from it; and no reverse engineering, decompilation or
-disassembly.
+The build splits each file into its updates, unmodified, and an image carries
+on ROOT the ones `images/microcode.toml` lists for it, each a whole update as
+Intel published it, under /system/share/microcode/intel/. The licence permits
+redistribution in binary form, unmodified, on three conditions: the copyright
+notice and the disclaimer are reproduced with the distribution, which every
+x86-64 image does as /system/share/licenses/Intel-microcode-license.txt;
+Intel's name endorses nothing derived from it; and no reverse engineering,
+decompilation or disassembly.
 
 
-kernel/microcode/amd-ucode/* — AMD microcode, redistributable unmodified
-------------------------------------------------------------------------
+build/microcode/amd-ucode/* — AMD microcode, redistributable unmodified
+-----------------------------------------------------------------------
 
     microcode_amd_fam17h.bin  22,596 bytes, AMD's Family 17h container; its
               patch for CPUID 0x00860f01 (equivalence ID 0x8601, the AMD
@@ -487,13 +488,15 @@ kernel/microcode/amd-ucode/* — AMD microcode, redistributable unmodified
     sha256 27907ae1d74b94fd6f1159971158ed3199e472f129ea1ff748ea13aded2a59d5)
     SPDX-License-Identifier: LicenseRef-AMD-Microcode
 
-Nothing reads it yet: it is the container the AMD loader that
-`issues/the-kernel-loads-no-amd-microcode.md` stages will embed. The licence
-permits redistribution in binary form on conditions like Intel's: the
-copyright notice and the licence are reproduced with it, which every x86-64
-image does as /system/share/licenses/AMD-microcode-license.txt; AMD's name
-endorses nothing derived from it; no reverse engineering, decompilation or
-disassembly; and export law is observed.
+The build splits the container into its patches, unmodified, and an image
+carries on ROOT the ones `images/microcode.toml` lists for it, each a
+Microcode Patch Block as AMD's container carries it, under
+/system/share/microcode/amd/. The licence permits redistribution in binary
+form on conditions like Intel's: the copyright notice and the licence are
+reproduced with it, which every x86-64 image does as
+/system/share/licenses/AMD-microcode-license.txt; AMD's name endorses nothing
+derived from it; no reverse engineering, decompilation or disassembly; and
+export law is observed.
 
 
 tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS

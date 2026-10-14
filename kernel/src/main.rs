@@ -387,6 +387,9 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         // Firmware's memory map as the loader copied it, which `mm` keeps
         // (`mm::firmware_map`): `LoaderData` too.
         mm::Region { start: kernel_args.memory_map_addr, end: kernel_args.memory_map_addr + kernel_args.memory_map_size },
+        // The microcode patch every AP loads after `mm::init`, `LoaderData`
+        // like the others. Empty where the loader handed none.
+        mm::Region { start: kernel_args.microcode_addr, end: kernel_args.microcode_addr + kernel_args.microcode_len },
     ];
     // A region the loader did not allocate withholds memory nothing uses, so one the firmware map does not hold as `LoaderData` is refused.
     // Block 1: the ELF region (`kernel_elf_addr`+`kernel_elf_size`) is not page-aligned.
@@ -409,8 +412,8 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // name, rather than indexing it, means a region added to `loader` fails
     // to compile here instead of compiling and being silently dropped from
     // what `mm::init` withholds.
-    let [image, elf, black_box, root, map] = loader;
-    let reserved = [image, elf, black_box, root, map, arch::boot::reserved()];
+    let [image, elf, black_box, root, map, microcode] = loader;
+    let reserved = [image, elf, black_box, root, map, microcode, arch::boot::reserved()];
 
     // Before the first hash container, `mm::init`'s address space.
     hasher::seed();
