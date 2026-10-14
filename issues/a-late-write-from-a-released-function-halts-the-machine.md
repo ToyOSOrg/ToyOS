@@ -6,9 +6,9 @@ opened: 2026-10-10
 
 # A late write from a released function halts the machine
 
-`kernel/src/pcidev/mod.rs`'s `tear_down` clears the function's ownership
-(`crate::iommu::note_user_owned(…, None)`) before its reset has quiesced what
-it already issued: Bus Master Enable is cleared first, so it starts nothing
+`kernel/src/pcidev/mod.rs`'s `release` clears the function's ownership
+(`Function::held`, which `pcidev::note_fault` reads) at its end, before its
+reset has quiesced what it already issued: Bus Master Enable is cleared first, so it starts nothing
 new, and its grants stay mapped until it is quiet, so nothing it issued lands
 in a page handed on. A transaction already in flight that faults after the
 ownership is cleared — at an address a grant never covered, or one an
