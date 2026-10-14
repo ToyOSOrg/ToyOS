@@ -357,8 +357,8 @@ struct Machine {
 /// where nothing is known to be routed.
 enum Apertures {
     Unknown,
-    /// Held whole ([`aperture::check`]); never replaced.
-    Declared(Vec<RootBridgeWindow>),
+    /// Never replaced.
+    Declared(aperture::Declaration<Vec<RootBridgeWindow>>),
     Refused(aperture::Refused),
 }
 
@@ -556,10 +556,10 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
             taken.push(forwarded);
         }
     }
-    let apertures = match aperture::check(firmware) {
-        Ok(()) => {
-            account_for(firmware, &decoded);
-            Apertures::Declared(firmware.to_vec())
+    let apertures = match aperture::check(firmware.to_vec()) {
+        Ok(declaration) => {
+            account_for(declaration.windows(), &decoded);
+            Apertures::Declared(declaration)
         }
         Err(why) => {
             log!("pcidev: the root bridges' memory is refused as declared: {why}, so no function is handed over");
@@ -596,9 +596,9 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
 }
 
 /// The root bridges' memory, where a declaration of it is held.
-pub fn declared() -> Option<Vec<RootBridgeWindow>> {
+pub fn declared() -> Option<aperture::Declaration<Vec<RootBridgeWindow>>> {
     match &MACHINE.lock().apertures {
-        Apertures::Declared(windows) => Some(windows.clone()),
+        Apertures::Declared(declaration) => Some(declaration.clone()),
         Apertures::Unknown | Apertures::Refused(_) => None,
     }
 }
@@ -804,12 +804,12 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
     // Before anything is reserved or touched: with no declaration held, no
     // read this claim would make is known to reach the bus.
     let declared = match &MACHINE.lock().apertures {
-        Apertures::Declared(windows) => Ok(windows.clone()),
+        Apertures::Declared(declaration) => Ok(declaration.clone()),
         Apertures::Unknown => Err(Refusal::Undeclared),
         Apertures::Refused(why) => Err(Refusal::AperturesRefused(*why)),
     };
-    let windows = match declared {
-        Ok(windows) => windows,
+    let declaration = match declared {
+        Ok(declaration) => declaration,
         Err(why) => {
             log!("pcidev: PCI {:02x}:{:02x}.{} NOT HANDED OVER — {why}", pci.bus, pci.dev, pci.func);
             return Err(ClaimError::Unusable);
@@ -823,7 +823,7 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
     // Dropped by every refusal below, which is what gives the slot back.
     let binding = Binding { slot, who };
 
-    match bring_up(pci, id, slot, &windows) {
+    match bring_up(pci, id, slot, declaration.windows()) {
         Ok(mut bound) => {
             bound.residue = take_residue(slot);
             let info = PciFunctionInfo {

@@ -2412,23 +2412,12 @@ enum Served<'m, 'a> {
     Move(&'m mut BTreeMap<&'a str, Acceptor>),
     /// A boot service's own, which the supervisor keeps and endows a duplicate of.
     Keep(&'m [(String, Acceptor)]),
-    /// The same, for a service the supervisor has just stopped: the claims that process
-    /// held may still be on their way back, and `owed` names them. A start
-    /// that cannot mint one of them is refused, never a service running on
-    /// without a device the process before it held.
+    /// The same, for a service whose process has ended, which gave back every
+    /// claim it held: `owed` names them. A start that cannot mint one of them
+    /// is refused, never a service running on without a device the process
+    /// before it held.
     Restart { acceptors: &'m [(String, Acceptor)], owed: &'m [String] },
 }
-
-/// How long a restart waits for the claims of the process it stopped to come
-/// back before it mints the new process's.
-///
-/// **A compromise over a kernel defect, recorded as one**: the kernel publishes
-/// a process's end before every deferred release its handles queued has run
-/// (`issues/deferred-release-outlives-its-syscall.md`), so a claim asked
-/// for the instant `wait` returns is refused as still held. Its release is one
-/// pass of the zero-handle drain; this bound is a liveness guard, and it goes
-/// when that issue closes.
-const CLAIM_RETURN: Duration = Duration::from_secs(2);
 
 /// Build one program's authority and spawn it holding exactly that.
 ///
@@ -2520,9 +2509,9 @@ fn start<'a>(
     }
 
     let mut given_back = None;
-    let (restart, owed): (bool, &[String]) = match &served {
-        Served::Restart { owed, .. } => (true, owed),
-        Served::Move(_) | Served::Keep(_) => (false, &[]),
+    let owed: &[String] = match &served {
+        Served::Restart { owed, .. } => owed,
+        Served::Move(_) | Served::Keep(_) => &[],
     };
     match served {
         Served::Move(acceptors) => {
@@ -2573,35 +2562,12 @@ fn start<'a>(
         //
         // The label is the manifest's own spelling, which is exactly what the
         // claimant looks the claim up by: one string, written once.
-        let mint = || match request {
+        let minted = match request {
             DeviceRequest::Class(class) => syscap.claim::<toyos::Device>(class),
             DeviceRequest::Pci(id) => syscap.claim_pci::<toyos::Device>(id),
             DeviceRequest::Partition(name) => syscap.claim_partition::<toyos::Device>(name),
             DeviceRequest::Isa(set) => syscap.claim_isa::<toyos::Device>(set),
         };
-        let asked = Instant::now();
-        let mut held_still = 0u32;
-        let minted = loop {
-            match mint() {
-                Err(SyscallError::AlreadyExists)
-                    if restart && asked.elapsed() < CLAIM_RETURN =>
-                {
-                    held_still += 1;
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                minted => break minted,
-            }
-        };
-        // Said, so what the kernel's deferred release costs a restart is
-        // counted wherever it is paid.
-        if held_still > 0 && minted.is_ok() {
-            say!(
-                "supervisor: {}: {name} came back from the process it replaces after {} ms and \
-                 {held_still} refusal(s)",
-                program.name,
-                asked.elapsed().as_millis()
-            );
-        }
         match minted {
             Ok(claim) => {
                 let raw = claim.into_raw();

@@ -26,7 +26,7 @@ use crate::mm::Mmio;
 use crate::sync::Lock;
 use crate::time::{Duration, Tripwire};
 
-use super::iommu_unit::yn;
+use super::iommu_unit::{yn, MAX_UNITS};
 use dmar::{Dmar, Malformed, Scope, Scopes, Structure};
 use queue::Queue;
 use table::{Table, Tables};
@@ -78,8 +78,6 @@ const COMMAND_TIMEOUT: Tripwire = Tripwire::absurd(
     "a unit half-way through being enabled is a unit whose reach nothing can state",
 );
 
-/// Ceiling on units inventoried; a machine past it is told, not silently truncated.
-pub(super) const MAX_UNITS: usize = 16;
 
 /// Remapping tables outlive `init`: the unit keeps reading them while it is on.
 static TABLES: Lock<Tables> = Lock::new(Tables::new());
@@ -106,8 +104,8 @@ impl Live {
 
     /// Moves `stream` onto `domain` in this unit's tables, and out of
     /// whatever this unit still holds for it under its old one.
-    pub(super) fn attach(&mut self, stream: StreamId, domain: &table::Domain) {
-        let displaced = table::bind(self.root, stream, domain);
+    pub(super) fn attach(&mut self, stream: StreamId, id: u16, space: table::Space) {
+        let displaced = table::bind(self.root, stream, id, space);
         self.queue.invalidate_context(self.regs, displaced);
     }
 }

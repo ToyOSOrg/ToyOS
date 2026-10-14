@@ -47,23 +47,35 @@ impl core::fmt::Display for Refused {
     }
 }
 
-/// Whether `windows` can be held as the root bridges' memory: at least one
-/// window, each an extent that ends inside the address space, no two sharing
-/// an address. Refused whole, because a declaration with one window dropped
-/// is one with a hole a BAR would be placed in.
-pub fn check(windows: &[RootBridgeWindow]) -> Result<(), Refused> {
-    if windows.is_empty() {
+/// The root bridges' memory, held whole: at least one window, each an extent
+/// that ends inside the address space, no two sharing an address. Only
+/// [`check`] makes one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Declaration<W>(W);
+
+impl<W: AsRef<[RootBridgeWindow]>> Declaration<W> {
+    pub fn windows(&self) -> &[RootBridgeWindow] {
+        self.0.as_ref()
+    }
+}
+
+/// `windows` as a [`Declaration`], or why it cannot be one. Refused whole,
+/// because a declaration with one window dropped is one with a hole a BAR
+/// would be placed in.
+pub fn check<W: AsRef<[RootBridgeWindow]>>(windows: W) -> Result<Declaration<W>, Refused> {
+    let list = windows.as_ref();
+    if list.is_empty() {
         return Err(Refused::Empty);
     }
-    for (at, window) in windows.iter().enumerate() {
+    for (at, window) in list.iter().enumerate() {
         if window.length == 0 || window.base.checked_add(window.length).is_none() {
             return Err(Refused::Malformed(*window));
         }
-        if let Some(other) = windows[..at].iter().find(|o| o.base < window.end() && window.base < o.end()) {
+        if let Some(other) = list[..at].iter().find(|o| o.base < window.end() && window.base < o.end()) {
             return Err(Refused::Overlap(*other, *window));
         }
     }
-    Ok(())
+    Ok(Declaration(windows))
 }
 
 /// Where `base .. end` stands against `windows`.
@@ -118,7 +130,7 @@ mod tests {
             w(0xffd3_a070, 0x2c_5f90),
             w(0x60_3dc0_0000, 0x1f_c240_0000),
         ];
-        assert_eq!(check(&recorded), Ok(()));
+        assert_eq!(check(&recorded).map(|d| d.windows().len()), Ok(7));
         assert_eq!(check(&[]), Err(Refused::Empty));
         assert_eq!(check(&[w(0x1000, 0)]), Err(Refused::Malformed(w(0x1000, 0))));
         assert_eq!(check(&[w(u64::MAX, 2)]), Err(Refused::Malformed(w(u64::MAX, 2))));

@@ -109,6 +109,11 @@ impl Msix {
             .ok_or(Unusable::OutOfRange { base: bar_base, offset: self.offset })
     }
 
+    /// Whether Message Control has the function's MSI-X messages on.
+    pub fn is_enabled(message_control: u16) -> bool {
+        message_control & ENABLE != 0
+    }
+
     /// Message Control with the function's messages enabled and the
     /// function-wide mask cleared.
     pub fn enabled(message_control: u16) -> u16 {

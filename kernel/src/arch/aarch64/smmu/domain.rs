@@ -1,7 +1,7 @@
 //! A device's address space: one context descriptor, tagged with an ASID of
 //! its own, over stage 1 tables that map 2 MiB blocks
 //! (`toyos_smmu::table`), and the device addresses it hands out, over the
-//! unit's 48-bit input (`crate::iommu::window`).
+//! unit's 48-bit input (`crate::iommu::domains`).
 //!
 //! **And the ITS's doorbell, the one 4 KiB page at its own address**: the unit
 //! translates a function's message as it does any write it makes, so a domain
@@ -20,10 +20,10 @@ use toyos_smmu::table::{entry, next, plan, Access, Entry, Leaf, INPUT_BITS};
 use toyos_smmu::Asid;
 
 use super::{window, Live, UNIT};
-use crate::iommu::window::Window;
+use crate::iommu::domains;
 use crate::iommu::{DomainId, IommuError, Iova, StreamId};
 use crate::log;
-use crate::mm::{PAGE_2M, PAGE_SIZE};
+use crate::mm::PAGE_SIZE;
 
 /// One 2 MiB block of memory at `phys`, which a device reads and writes.
 fn block(phys: u64) -> Leaf {
@@ -31,20 +31,16 @@ fn block(phys: u64) -> Leaf {
 }
 
 /// Domain ids start at 1: `DomainId` is never 0.
-const FIRST: u16 = 1;
+pub(super) const FIRST: u16 = 1;
 
-pub(super) struct Domain {
+#[derive(Clone, Copy)]
+pub(super) struct Space {
     asid: Asid,
     root: Phys<12>,
     context: Phys<6>,
-    addresses: Window,
 }
 
 impl Live {
-    fn domain(&mut self, id: DomainId) -> &mut Domain {
-        &mut self.domains[usize::from(id.raw() - FIRST)]
-    }
-
     /// `leaf` at `at`, its tables grown on the way.
     fn put(&mut self, root: Phys<12>, at: u64, leaf: Leaf) {
         let path = plan(at, leaf, &self.unit).expect("SMMU: a handed-out address");
@@ -90,16 +86,21 @@ impl Live {
     }
 }
 
+/// Why `function` keeps the machine's own addresses rather than a domain of
+/// its own: never, since nothing this kernel reads of the IORT says so.
+pub fn untranslated(_function: StreamId) -> Option<&'static str> {
+    None
+}
+
 /// A new domain, with `room` bytes of it handed out first: refused, with no id
 /// spent, where it would have less than that.
 pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     let doorbell = super::super::irqchip::its::doorbell_page();
     let mut held = UNIT.lock();
     let live = held.as_mut().ok_or(IommuError::NoUnit)?;
-    let domains = if live.unit.asid(0x100).is_some() { 1 << 16 } else { 1 << 8 };
-    let id = u16::try_from(usize::from(FIRST) + live.domains.len()).map_err(|_| IommuError::DomainsExhausted(domains))?;
-    let asid = live.unit.asid(id).ok_or(IommuError::DomainsExhausted(domains))?;
-    let (addresses, first) = Window::new(INPUT_BITS as u8, live.reserved.as_deref(), room)?;
+    let ceiling = if live.unit.asid(0x100).is_some() { 1 << 16 } else { 1 << 8 };
+    let next = live.domains.prepare(INPUT_BITS as u8, ceiling, room)?;
+    let asid = live.unit.asid(next.id).expect("SMMU: an id below the unit's ASIDs");
     let root = Phys::new(live.memory.alloc(PAGE_SIZE)).expect("SMMU: a table below the unit's output size");
     let context = Phys::new(live.memory.alloc(64)).expect("SMMU: a descriptor below the unit's output size");
     let words = Cd::new(root, asid, &live.unit).expect("SMMU: a table below the unit's output size").words();
@@ -110,39 +111,29 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     }
     descriptor.write_u64(0, words[0]);
     if let Some(page) = doorbell {
-        assert!(page < addresses.floor(), "SMMU: the doorbell at {page:#x} is inside the addresses a domain hands out");
+        assert!(page < next.addresses.floor(), "SMMU: the doorbell at {page:#x} is inside the addresses a domain hands out");
         live.put(root, page, Leaf::Doorbell(Phys::new(page).expect("SMMU: a 4 KiB page below 2^48")));
     }
-    let domain = Domain { asid, root, context, addresses };
-    log!(
-        "iommu: domain{id} root={:#x} context={:#x} asid={} addresses from {:#x} to {:#x}, the doorbell {}",
+    let what = alloc::format!(
+        "root={:#x} context={:#x} asid={} the doorbell {}",
         root.get(),
         context.get(),
         asid.get(),
-        addresses.floor(),
-        addresses.ceiling(),
         match doorbell {
-            Some(page) => alloc::format!("page at {page:#x}"),
-            None => "page nowhere: no ITS is armed".into(),
+            Some(page) => alloc::format!("page at {page:#x},"),
+            None => "page nowhere: no ITS is armed,".into(),
         },
     );
-    live.domains.push(domain);
-    Ok((DomainId::new(id), first))
+    Ok(live.domains.add(next, Space { asid, root, context }, what))
 }
 
 pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
-    if !phys.is_multiple_of(PAGE_2M) {
-        return Err(IommuError::Unaligned(phys));
-    }
     let mut held = UNIT.lock();
     let live = held.as_mut().expect("a domain exists only on an armed unit");
-    let domain = live.domain(id);
-    let at = domain.addresses.reserve(bytes).ok_or(IommuError::AddressesExhausted(domain.addresses.ceiling()))?;
-    let root = domain.root;
-    for offset in (0..bytes).step_by(PAGE_2M as usize) {
-        live.put(root, at.raw() + offset, block(phys + offset));
+    let (space, at) = live.domains.map(id, phys, bytes)?;
+    for (at, phys) in domains::leaves(at, phys, bytes) {
+        live.put(space.root, at, block(phys));
     }
-    log!("iommu: domain{} maps {phys:#x}..{:#x} at {:#x}", id.raw(), phys + bytes.next_multiple_of(PAGE_2M), at.raw());
     Ok(at)
 }
 
@@ -150,43 +141,31 @@ pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
 /// and whose mapping was taken back.
 pub fn map_at(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
     place(id, at, phys, bytes)?;
-    log!("iommu: domain{} maps {phys:#x}..{:#x} at {:#x} again", id.raw(), phys + bytes.next_multiple_of(PAGE_2M), at.raw());
+    domains::placed_again(id, at, phys, bytes);
     Ok(())
 }
 
 /// [`map_at`] without its record line, for a mapping a holder makes and takes
-/// back as often as it likes. Room never handed out is a kernel bug: [`map`]
-/// may yet hand it out.
-pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<u16, IommuError> {
-    if !phys.is_multiple_of(PAGE_2M) {
-        return Err(IommuError::Unaligned(phys));
-    }
+/// back as often as it likes.
+pub fn place(id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<(), IommuError> {
     let mut held = UNIT.lock();
     let live = held.as_mut().expect("a domain exists only on an armed unit");
-    let domain = live.domain(id);
-    assert!(domain.addresses.handed_out(at, bytes), "iommu: domain{} never handed out {:#x}+{bytes:#x}", id.raw(), at.raw());
-    let root = domain.root;
-    for offset in (0..bytes).step_by(PAGE_2M as usize) {
-        live.put(root, at.raw() + offset, block(phys + offset));
+    let space = live.domains.place(id, at, phys, bytes)?;
+    for (at, phys) in domains::leaves(at, phys, bytes) {
+        live.put(space.root, at, block(phys));
     }
-    Ok(id.raw())
+    Ok(())
 }
 
 /// Take `bytes` at `at` back: no device reaches them once this returns.
 pub fn unmap(id: DomainId, at: Iova, bytes: u64) -> Result<(), IommuError> {
     let mut held = UNIT.lock();
     let live = held.as_mut().expect("a domain exists only on an armed unit");
-    let (root, asid) = (live.domain(id).root, live.domain(id).asid);
-    let mut result = Ok(());
-    for offset in (0..bytes).step_by(PAGE_2M as usize) {
-        let here = at.raw() + offset;
-        if !live.take(root, here) {
-            result = Err(IommuError::NotMapped(Iova::translated(here)));
-            break;
-        }
-    }
+    let space = live.domains.space(id);
+    let result = domains::leaves(at, 0, bytes)
+        .try_for_each(|(here, _)| if live.take(space.root, here) { Ok(()) } else { Err(IommuError::NotMapped(Iova::translated(here))) });
     // Whatever was cleared before a refusal is gone from the unit too.
-    live.issue(&[Command::InvalidateAsid(asid)]);
+    live.issue(&[Command::InvalidateAsid(space.asid)]);
     result
 }
 
@@ -196,8 +175,7 @@ pub fn attach(function: StreamId, id: DomainId) {
     let mut held = UNIT.lock();
     let live = held.as_mut().expect("a domain exists only on an armed unit");
     let stream = live.stream(function);
-    let context = live.domain(id).context;
-    let ste = Ste::stage1(context, &live.unit).expect("SMMU: a descriptor below the unit's output size");
+    let ste = Ste::stage1(live.domains.space(id).context, &live.unit).expect("SMMU: a descriptor below the unit's output size");
     live.write_entry(stream, ste);
     crate::iommu::fault::attached(function, id.raw());
     log!("iommu: {function} moves to domain{}", id.raw());

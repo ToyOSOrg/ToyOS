@@ -8,7 +8,7 @@
 //! translates past every address the CPU issues, they lie there, above all
 //! memory and every window the CPU can reach, and nothing needs declaring.
 //! Where it does not — a VT-d unit's `MGAW` (VT-d §11.4.2) no wider than the
-//! CPU's physical addresses, as on the T14 — they start a quarter of the way
+//! CPU's physical addresses — they start a quarter of the way
 //! up and end under the first declared window or firmware-reserved region
 //! over that start (VT-d §3.16), and with no declaration accepted there is no
 //! domain. An address is handed out once, unmapped or not: a device holding

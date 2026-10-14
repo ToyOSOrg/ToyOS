@@ -123,10 +123,7 @@ struct Live {
     /// StreamID, and the DeviceID the unit's own node maps that stream on to
     /// at an ITS.
     routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
-    domains: Vec<domain::Domain>,
-    /// What no domain's addresses may reach, as `(start, end)`; `None` where
-    /// no declaration is held.
-    reserved: Option<Vec<(u64, u64)>>,
+    domains: crate::iommu::domains::Domains<domain::Space>,
 }
 
 impl Live {
@@ -402,9 +399,9 @@ fn program(
         streams,
         memory,
         routes,
-        domains: Vec::new(),
-        reserved,
+        domains: crate::iommu::domains::Domains::new(domain::FIRST),
     };
+    live.domains.avoid(reserved);
     live.issue(&[Command::ForgetAll, Command::InvalidateAll]);
 
     regs.write64(reg::EVENTQ_BASE, events_base);

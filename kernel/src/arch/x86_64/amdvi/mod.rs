@@ -1,61 +1,140 @@
-//! AMD-Vi, the AMD I/O Virtualization Technology (IOMMU Specification 48882).
-//! Every register layout and every AMD name of the unit is at or below this
-//! module.
+//! AMD-Vi, the AMD I/O Virtualization Technology (AMD 48882 rev 3.11). Every
+//! register access and every AMD name of the unit is at or below this module;
+//! the words the unit and this driver exchange are `toyos_amdvi`'s.
 //!
 //! Finds every unit the IVRS describes, logs what each was handed over with,
-//! and switches off whatever firmware left on, each field confirmed before
-//! the next, so DMA reaches memory untranslated. No unit is programmed: no
-//! domain is given and no interrupt is remapped on an AMD-Vi machine
-//! (`issues/an-amd-vi-machine-isolates-no-device.md`).
+//! switches off whatever firmware left on, and programs each it can use over
+//! one device table every unit reads (§2.2.1): an entry per requester id,
+//! blocked unless it names a domain, every enumerated function on the
+//! identity domain until a driver moves it to one of its own ([`domain`]),
+//! and the event log feeding `iommu::fault` ([`fault`]). A unit it cannot use
+//! is logged by register value and left off. No interrupt is remapped:
+//! every entry's interrupt half is invalid, so the unit forwards messages
+//! as written (Table 9).
+
+pub mod domain;
+pub mod fault;
+#[cfg(feature = "boot-actuators")]
+pub(super) mod selftest;
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::drivers::pci::PciDevice;
 use crate::iommu::StreamId;
 use crate::log;
-use crate::mm::Mmio;
+use crate::mm::pmm::{self, PhysPage};
+use crate::mm::{DirectMap, Mmio, PAGE_2M, PAGE_SIZE};
+use crate::sync::Lock;
 use crate::time::{Duration, Tripwire};
+use toyos_abi::boot::RootBridgeWindow;
+use toyos_amdvi::dte::{Dte, Setting, DEVICE_IDS, ENTRY_BYTES};
+use toyos_amdvi::queue::{Command, ENTRIES};
+use toyos_amdvi::reg::{self, control, status, Features};
+use toyos_phys::Phys as Address;
 
-use super::iommu_unit::{register_window, yn};
-use toyos_acpi::{DeviceEntry, Features, Ivrs, IvrsBlock, IvrsRefused, Phys, Requesters, TableError, Uid, Unit};
+use super::iommu_unit::{register_window, yn, MAX_UNITS};
+use toyos_acpi::{
+    DeviceEntry, Features as Image, Ivmd, Ivrs, IvrsBlock, IvrsRefused, Phys, Requesters, TableError, Uid, Unit,
+};
 
 /// A unit's register window: everything below the performance counters,
 /// which nothing here reads.
 const REGISTER_WINDOW: u64 = 0x4000;
 
-const EXTENDED_FEATURES: u64 = 0x0030;
-const CONTROL: u64 = 0x0018;
-const STATUS: u64 = 0x2020;
-
-const IOMMU_EN: u64 = 1 << 0;
-const EVENT_LOG_EN: u64 = 1 << 2;
-const CMD_BUF_EN: u64 = 1 << 12;
-
-/// `CONTROL` fields firmware may leave on, in Linux's `iommu_disable` order,
-/// each with the `STATUS` bit that says it stopped, or `None` where `CONTROL`
-/// reading back is the answer: the logs and their interrupts before the unit,
-/// which logs nothing once off.
+/// `CONTROL` fields firmware may leave on, each with the `STATUS` bit that
+/// says it stopped, or `None` where `CONTROL` reading back is the answer: each
+/// log stopped before its interrupt and the unit last, since a log's
+/// registers move only once its run bit is clear (§2.4, §2.5.1) and a unit
+/// switched off logs nothing.
 const FIRMWARE_LEFT: [(u64, Option<u32>, &str); 8] = [
-    (CMD_BUF_EN, Some(1 << 4), "CmdBufEn"),
-    (1 << 3, None, "EventIntEn"),
-    (EVENT_LOG_EN, Some(1 << 3), "EventLogEn"),
-    (1 << 28, Some(1 << 8), "GALogEn"),
-    (1 << 29, None, "GAIntEn"),
-    (1 << 13, Some(1 << 7), "PPRLogEn"),
-    (1 << 14, None, "PPRIntEn"),
-    (IOMMU_EN, None, "IommuEn"),
+    (control::CMD_BUF_EN, Some(status::CMD_BUF_RUN), "CmdBufEn"),
+    (control::EVENT_INT_EN, None, "EventIntEn"),
+    (control::EVENT_LOG_EN, Some(status::EVENT_LOG_RUN), "EventLogEn"),
+    (control::GA_LOG_EN, Some(status::GA_LOG_RUN), "GALogEn"),
+    (control::GA_INT_EN, None, "GAIntEn"),
+    (control::PPR_LOG_EN, Some(status::PPR_LOG_RUN), "PPRLogEn"),
+    (control::PPR_INT_EN, None, "PPRIntEn"),
+    (control::IOMMU_EN, None, "IommuEn"),
 ];
 
-/// How long a `CONTROL` write is given to show before the kernel panics: a
-/// unit that will not stop is one whose reach nothing can state.
+/// IVMD flags (Table 113).
+const IVMD_UNITY: u8 = 1 << 0;
+const IVMD_EXCLUSION: u8 = 1 << 3;
+
+/// How long the unit is given to show a `CONTROL` write or finish a command
+/// before the kernel panics: a unit half-way through either is one whose
+/// reach nothing can state.
 const COMMAND_TIMEOUT: Tripwire = Tripwire::absurd(
     Duration::from_secs(1),
-    "a unit that does not stop within a second of being told to is one whose reach nothing can state",
+    "a unit that does not act on a register write or a command within a second is one whose reach nothing can state",
 );
 
-/// Every unit the IVRS describes, switched off; `false` where firmware
-/// published no IVRS.
-pub fn init(rsdp_addr: u64) -> bool {
+/// The 4 KiB tables every unit reads, carved out of 2 MiB pages and never
+/// freed: a unit may still be walking any of them.
+struct Tables {
+    /// The device table's own page.
+    device_table: Option<PhysPage>,
+    pages: Vec<PhysPage>,
+    /// Bytes taken from the newest page; starts full so the first call allocates one.
+    used: u64,
+}
+
+impl Tables {
+    const fn new() -> Self {
+        Self { device_table: None, pages: Vec::new(), used: PAGE_2M }
+    }
+
+    /// One zeroed 4 KiB table.
+    fn alloc(&mut self) -> Address<12> {
+        if self.used == PAGE_2M {
+            self.pages.push(pmm::alloc_page().expect("amdvi: no physical memory for a table"));
+            self.used = 0;
+        }
+        let at = self.pages.last().expect("amdvi: the page just pushed").direct_map().phys() + self.used;
+        self.used += PAGE_SIZE;
+        Address::new(at).expect("amdvi: a table below 2^48")
+    }
+}
+
+static TABLES: Lock<Tables> = Lock::new(Tables::new());
+
+/// Every translating unit, and the single owner of each one's command buffer:
+/// a buffer has one tail, so a second holder would write behind its back.
+static UNITS: Lock<Vec<Live>> = Lock::new(Vec::new());
+
+/// `bytes` at `phys`, through the direct map.
+fn memory(phys: u64, bytes: u64) -> Mmio {
+    // SAFETY: every caller names a table, ring or page this module took from
+    // `pmm` and never frees, which the direct map covers for the machine's life.
+    unsafe { Mmio::over_phys(DirectMap::from_phys(phys), bytes) }
+}
+
+/// The physical address of the device table every unit reads, one 2 MiB
+/// page of 65,536 entries kept in [`TABLES`]; 0 until [`init`] made it.
+static DEVICE_TABLE: AtomicU64 = AtomicU64::new(0);
+
+/// The entry for requester `id`, its translation half.
+fn entry(id: u16) -> Mmio {
+    let table = DEVICE_TABLE.load(Ordering::Acquire);
+    assert!(table != 0, "amdvi: an entry written before the device table was made");
+    memory(table + u64::from(id) * ENTRY_BYTES as u64, 16)
+}
+
+/// A unit described, switched off and found usable, not yet programmed.
+struct Ready {
+    index: usize,
+    base: u64,
+    regs: Mmio,
+    function: PciDevice,
+}
+
+/// Every unit the IVRS describes, switched off, and each this kernel can use
+/// programmed; `false` where firmware published no IVRS. `windows` and every
+/// IVMD range are what no domain's addresses reach.
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeWindow]>) -> bool {
     let ivrs = match toyos_acpi::ivrs(crate::drivers::acpi::direct_phys(), rsdp_addr) {
         Ok(ivrs) => ivrs,
         Err(IvrsRefused::Table(TableError::Absent)) => return false,
@@ -74,15 +153,38 @@ pub fn init(rsdp_addr: u64) -> bool {
         info.physical_bits,
         info.virtual_bits,
     );
-    let (mut units, mut off) = (0usize, 0usize);
+    let enumerated = |id: u16| devices.iter().any(|d| StreamId::pci(d.bus, d.dev, d.func).requester() == id);
+    // What firmware declares each requester needs, combined where entries
+    // overlap: a special entry names in its byte what the range around it
+    // does not.
+    let mut settings = alloc::vec![Setting(0); DEVICE_IDS];
+    let mut ready: Vec<Ready> = Vec::new();
+    let mut ivmds: Vec<Ivmd> = Vec::new();
+    // The ids a unit that will be programmed serves: a function outside them
+    // is behind a unit left off, and no domain of its own would translate.
+    let mut translated: Vec<(u16, u16)> = Vec::new();
+    let mut units = 0usize;
     for block in ivrs.blocks() {
         match block {
             IvrsBlock::Unit(unit) => {
+                if units == MAX_UNITS {
+                    log!("iommu: more than {MAX_UNITS} AMD-Vi units described; the rest are not inventoried");
+                    break;
+                }
                 describe(units, &unit);
+                let function = describe_function(units, &unit, devices);
+                let mut usable = Ok(());
+                let mut serves: Vec<(u16, u16)> = Vec::new();
                 for entry in ivrs.devices(&unit) {
                     match entry {
-                        Ok(entry) => log!("iommu: amdvi unit{units} serves {}", served(&ivrs, &entry)),
-                        Err(e) => log!("iommu: amdvi unit{units} device entries refused: {e:?}"),
+                        Ok(entry) => {
+                            log!("iommu: amdvi unit{units} serves {}", served(&ivrs, &entry));
+                            match declare(&entry, &mut settings, enumerated) {
+                                Ok(ids) => serves.extend(ids),
+                                Err(why) => usable = Err(why),
+                            }
+                        }
+                        Err(e) => usable = Err(format!("its device entries are refused: {e:?}")),
                     }
                 }
                 if let Some(regs) = present(units, &unit) {
@@ -91,7 +193,13 @@ pub fn init(rsdp_addr: u64) -> bool {
                         leave_on(regs);
                     }
                     switch_off(units, &unit, regs);
-                    off += 1;
+                    match usable.and_then(|()| usable_unit(&unit, regs, function)) {
+                        Ok(function) => {
+                            translated.extend(serves);
+                            ready.push(Ready { index: units, base: unit.base, regs, function });
+                        }
+                        Err(why) => log!("iommu: amdvi unit{units} is left off: {why}"),
+                    }
                 }
                 units += 1;
             }
@@ -102,32 +210,265 @@ pub fn init(rsdp_addr: u64) -> bool {
                 requester(unit.device)
             ),
             IvrsBlock::Memory(m) => {
-                let requesters = match m.requesters {
-                    Requesters::All => String::from("every requester"),
-                    Requesters::One(id) => format!("{}", requester(id)),
-                    Requesters::Range { first, last } => format!("{}..={}", requester(first), requester(last)),
-                };
                 log!(
-                    "iommu: IVRS IVMD seg={} {requesters} {:#018x}+{:#x} unity={} r={} w={} exclusion={}",
+                    "iommu: IVRS IVMD seg={} {} {:#018x}+{:#x} unity={} r={} w={} exclusion={}",
                     m.segment,
+                    requesters(m.requesters),
                     m.start,
                     m.length,
-                    yn(m.flags & 1 != 0),
+                    yn(m.flags & IVMD_UNITY != 0),
                     yn(m.flags & 2 != 0),
                     yn(m.flags & 4 != 0),
-                    yn(m.flags & 8 != 0),
+                    yn(m.flags & IVMD_EXCLUSION != 0),
                 );
+                ivmds.push(m);
             }
             IvrsBlock::Other { kind, at, len } => {
                 log!("iommu: IVRS block type {kind:#04x} at +{at}, {len} bytes — not used by this kernel")
             }
         }
     }
-    log!(
-        "iommu: AMD-Vi isolates no device this boot: {units} unit(s) described, {off} switched off, so DMA \
-         behind those reaches memory untranslated"
-    );
+    if let Some(m) = ivmds.iter().find(|m| m.flags & IVMD_EXCLUSION != 0 || m.flags & IVMD_UNITY == 0) {
+        log!(
+            "iommu: AMD-Vi isolates no device this boot: firmware's IVMD at {:#x}+{:#x} is {}, which this kernel \
+             does not honour, so every unit is left off",
+            m.start,
+            m.length,
+            // Table 113: `ExclusionRange` overrides the rest; `Unity` clear
+            // lets the range sit at any device address.
+            if m.flags & IVMD_EXCLUSION != 0 { "an exclusion range" } else { "a range without Unity" },
+        );
+        return true;
+    }
+    if ready.is_empty() {
+        log!("iommu: AMD-Vi isolates no device this boot: {units} unit(s) described, none usable");
+        return true;
+    }
+
+    // Before any unit is armed: the handler reaches a faulting function's
+    // config space through this and cannot take a lock to find it.
+    crate::iommu::fault::describe(devices);
+    let top = pmm::top();
+    for m in &ivmds {
+        let end = m.start + m.length;
+        log!(
+            "iommu: IVMD {} {:#018x}..{end:#018x} {} the identity domain 0x0..{top:#x}",
+            requesters(m.requesters),
+            m.start,
+            if end <= top { "inside" } else { "OUTSIDE" }
+        );
+    }
+    let identity = build(devices, &settings);
+    // Nothing where no declaration is held, as `vtd` treats its RMRRs.
+    let reserved = windows.map(|w| {
+        w.iter().map(|w| (w.base, w.end())).chain(ivmds.iter().map(|m| (m.start, m.start + m.length))).collect()
+    });
+    domain::start(reserved, settings, ivmds.iter().map(|m| m.requesters).collect(), translated);
+    log!("iommu: amdvi identity domain covers 0x0..{top:#x}, root={:#x}", identity.get());
+    for unit in ready {
+        program(unit, devices);
+    }
     true
+}
+
+/// The ids `entry` declares a DTE setting for, combined into `settings`, and
+/// the ids whose requests reach the unit under them, which it serves;
+/// refused where it makes an enumerated function issue its requests under
+/// another's id, which would share that id's domain.
+fn declare(
+    entry: &DeviceEntry,
+    settings: &mut [Setting],
+    enumerated: impl Fn(u16) -> bool,
+) -> Result<Option<(u16, u16)>, String> {
+    let mut set = |first: u16, last: u16, data: u8| {
+        for id in first..=last {
+            settings[usize::from(id)].0 |= data;
+        }
+    };
+    let (first, last, data) = match *entry {
+        DeviceEntry::All { data } => (0, u16::MAX, data),
+        DeviceEntry::Select { id, data } | DeviceEntry::Extended { id, data, .. } | DeviceEntry::Hid { id, data, .. } => {
+            (id, id, data)
+        }
+        DeviceEntry::Range { first, last, data } | DeviceEntry::ExtendedRange { first, last, data, .. } => {
+            (first, last, data)
+        }
+        DeviceEntry::Special { used, data, .. } => (used, used, data),
+        DeviceEntry::Alias { id: first, used, data } | DeviceEntry::AliasRange { first, used, data, .. } => {
+            let last = match *entry {
+                DeviceEntry::AliasRange { last, .. } => last,
+                _ => first,
+            };
+            if let Some(id) = (first..=last).find(|&id| id != used && enumerated(id)) {
+                return Err(format!("the IVRS has {} issue its requests as {}", requester(id), requester(used)));
+            }
+            (used, used, data)
+        }
+        DeviceEntry::Other(_) => return Ok(None),
+    };
+    set(first, last, data);
+    Ok(Some((first, last)))
+}
+
+/// The unit's function, where this driver can program the unit: segment 0,
+/// `INVALIDATE_IOMMU_ALL`, a host table depth it can name, and a function
+/// with an MSI capability to report faults on.
+fn usable_unit(unit: &Unit, regs: Mmio, function: Option<PciDevice>) -> Result<PciDevice, String> {
+    let features = Features(regs.read_u64(reg::EXTENDED_FEATURES));
+    if unit.segment != 0 {
+        return Err(format!("it serves segment {}, and a requester id here names segment 0", unit.segment));
+    }
+    if !features.invalidate_all() {
+        return Err(format!("EFR {:#018x} has IASup clear", features.0));
+    }
+    if features.host_levels().is_none() {
+        return Err(format!("EFR {:#018x} has HATS 11b, a reserved depth", features.0));
+    }
+    let function = function.ok_or_else(|| String::from("its own function is not among the enumerated ones"))?;
+    function
+        .capability(toyos_pci::msi::CAP_ID)
+        .map_err(|_| String::from("its function has no MSI capability to report a fault on"))?;
+    Ok(function)
+}
+
+/// The device table, every entry blocked but each enumerated function's,
+/// which names the identity domain; answers the identity domain's root.
+fn build(devices: &[PciDevice], settings: &[Setting]) -> Address<12> {
+    let mut tables = TABLES.lock();
+    let page = pmm::alloc_page().expect("amdvi: no physical memory for the device table");
+    let at = page.direct_map().phys();
+    // Kept, never freed: every unit reads it for the machine's life.
+    tables.device_table = Some(page);
+    DEVICE_TABLE.store(at, Ordering::Release);
+    for (id, setting) in (0..=u16::MAX).zip(settings) {
+        let words = Dte::blocked(domain::BLOCKED, *setting).words();
+        let slot = entry(id);
+        slot.write_u64(8, words[1]);
+        slot.write_u64(0, words[0]);
+    }
+    let root = tables.alloc();
+    let mut phys = 0;
+    while phys < pmm::top() {
+        domain::put(&mut tables, root, phys, phys);
+        phys += PAGE_2M;
+    }
+    for device in devices {
+        let id = StreamId::pci(device.bus, device.dev, device.func).requester();
+        let words = Dte::translated(root, domain::IDENTITY, settings[usize::from(id)]).words();
+        let slot = entry(id);
+        slot.write_u64(8, words[1]);
+        slot.write_u64(0, words[0]);
+    }
+    root
+}
+
+/// A unit past [`program`]: its window, its command buffer, and the word its
+/// completion waits store.
+struct Live {
+    index: usize,
+    regs: Mmio,
+    commands: Mmio,
+    tail: usize,
+    done: Address<12>,
+    waited: u64,
+}
+
+impl Live {
+    /// `commands`, then a `COMPLETION_WAIT`, finished: every one has taken
+    /// effect when this returns (§2.4.1).
+    fn submit(&mut self, commands: &[Command]) {
+        for chunk in commands.chunks(ENTRIES - 2) {
+            for command in chunk {
+                self.push(*command);
+            }
+            self.waited += 1;
+            let (index, regs, waited) = (self.index, self.regs, self.waited);
+            self.push(Command::CompletionWait { store: Address::new(self.done.get()).expect("aligned"), data: waited });
+            regs.write_u64(reg::COMMAND_TAIL, reg::offset(self.tail));
+            let done = memory(self.done.get(), 8);
+            spin_until(
+                || done.read_u64(0) == waited,
+                || {
+                    format!(
+                        "iommu: amdvi unit{index} never finished a completion wait: STATUS={:#010x} head={:#x} tail={:#x}",
+                        regs.read_u32(reg::STATUS),
+                        regs.read_u64(reg::COMMAND_HEAD),
+                        regs.read_u64(reg::COMMAND_TAIL)
+                    )
+                },
+            );
+        }
+    }
+
+    fn push(&mut self, command: Command) {
+        let [low, high] = command.words();
+        let at = reg::offset(self.tail);
+        self.commands.write_u64(at + 8, high);
+        self.commands.write_u64(at, low);
+        self.tail = (self.tail + 1) % ENTRIES;
+    }
+}
+
+/// `commands` on every translating unit, finished on each before this returns.
+fn submit(commands: &[Command]) {
+    for unit in UNITS.lock().iter_mut() {
+        unit.submit(commands);
+    }
+}
+
+/// Programs the unit in the order §2.3.1 gives — the device table, the
+/// command buffer and the event log, then `CONTROL` — with the event
+/// interrupt armed and the exclusion range cleared before the unit is on;
+/// then empties every cache it holds and names each enumerated
+/// function's entry.
+fn program(unit: Ready, devices: &[PciDevice]) {
+    let Ready { index, base, regs, function } = unit;
+    let (commands, events, done) = {
+        let mut tables = TABLES.lock();
+        (tables.alloc(), tables.alloc(), tables.alloc())
+    };
+    let table = Address::new(DEVICE_TABLE.load(Ordering::Acquire)).expect("amdvi: a device table below 2^48");
+    regs.write_u64(reg::DEVICE_TABLE, reg::device_table(table));
+    // Writing a base resets the ring's head and tail (§2.4, §2.5).
+    regs.write_u64(reg::COMMAND_BASE, reg::ring(commands));
+    regs.write_u64(reg::EVENT_BASE, reg::ring(events));
+    // `ExEn` and `Allow` clear: no address is passed untranslated (MMIO 0020h).
+    regs.write_u64(reg::EXCLUSION_BASE, 0);
+    regs.write_u64(reg::EXCLUSION_LIMIT, 0);
+    fault::arm(index, regs, events.get());
+    function.enable_bus_master();
+    let (address, data) = super::apic::msi_message(crate::arch::idt::DMA_FAULT_VECTOR);
+    assert!(function.arm_unit_msi(address, data), "amdvi: unit{index}'s function lost its MSI capability");
+    // `Coherent`, its reset value and the one Table 97 recommends, has the
+    // unit snoop its device table fetches: nothing here flushes a table.
+    // Written whole: a field firmware left, `DevTblSegEn` among them, would
+    // otherwise change how the unit reads this table. `switch_off` logged
+    // what it was handed over with.
+    let on = control::COHERENT | control::EVENT_LOG_EN | control::EVENT_INT_EN | control::CMD_BUF_EN | control::IOMMU_EN;
+    regs.write_u64(reg::CONTROL, on);
+    let running = status::CMD_BUF_RUN | status::EVENT_LOG_RUN;
+    spin_until(
+        || regs.read_u32(reg::STATUS) & running == running,
+        || format!("iommu: amdvi unit{index} never ran its command buffer and event log: STATUS={:#010x}", regs.read_u32(reg::STATUS)),
+    );
+    let mut live = Live { index, regs, commands: memory(commands.get(), PAGE_SIZE), tail: 0, done, waited: 0 };
+    // §2.4.8 needs `INVALIDATE_IOMMU_ALL` alone. QEMU 11.1.1 moves a function
+    // off pass-through only on an `INVALIDATE_DEVTAB_ENTRY` that names it
+    // (`issues/qemus-invalidate-iommu-all-leaves-every-function-untranslated.md`),
+    // so each enumerated function is named too, at one command each.
+    let reread = devices.iter().map(|d| Command::InvalidateDevice(StreamId::pci(d.bus, d.dev, d.func).requester()));
+    live.submit(&[Command::InvalidateAll].into_iter().chain(reread).collect::<Vec<_>>());
+    log!(
+        "iommu: amdvi unit{index} @{base:#x} translating control={:#018x} status={:#010x} table={:#x} \
+         commands={:#x} events={:#x} msi={address:#010x}/{data:#06x} streams={}",
+        regs.read_u64(reg::CONTROL),
+        regs.read_u32(reg::STATUS),
+        table.get(),
+        commands.get(),
+        events.get(),
+        devices.len(),
+    );
+    UNITS.lock().push(live);
 }
 
 /// A requester id, printed as `pci::enumerate` prints a function.
@@ -136,10 +477,18 @@ fn requester(id: u16) -> StreamId {
     StreamId::pci(bus, devfn >> 3, devfn & 7)
 }
 
+fn requesters(named: Requesters) -> String {
+    match named {
+        Requesters::All => String::from("every requester"),
+        Requesters::One(id) => format!("{}", requester(id)),
+        Requesters::Range { first, last } => format!("{}..={}", requester(first), requester(last)),
+    }
+}
+
 fn describe(index: usize, unit: &Unit) {
     let image = match unit.features {
-        Features::Reported(word) => format!("features={word:#010x}"),
-        Features::Image { attributes, efr, efr2 } => {
+        Image::Reported(word) => format!("features={word:#010x}"),
+        Image::Image { attributes, efr, efr2 } => {
             format!("attributes={attributes:#010x} efr_image={efr:#018x} efr2_image={efr2:#018x}")
         }
     };
@@ -153,6 +502,28 @@ fn describe(index: usize, unit: &Unit) {
         unit.capability,
         unit.info,
     );
+}
+
+/// The unit's own PCI function, said: its capability ids, which say whether
+/// its event interrupt is an MSI or an MSI-X one (§3.1), and its
+/// Miscellaneous Information Register 0 (Capability Offset 10h, §3.2): the
+/// address widths and the message number that interrupt is raised with.
+fn describe_function(index: usize, unit: &Unit, devices: &[PciDevice]) -> Option<PciDevice> {
+    let at = requester(unit.device);
+    let Some(function) = devices.iter().find(|d| StreamId::pci(d.bus, d.dev, d.func) == at) else {
+        log!("iommu: amdvi unit{index} function {at} is not among the enumerated functions");
+        return None;
+    };
+    let ids: String = function.capabilities().map(|cap| format!(" {:#04x}", cap.id())).collect();
+    let misc = function.read_config_u32(u64::from(unit.capability) + 0x10);
+    log!(
+        "iommu: amdvi unit{index} function {at} caps=[{}] misc0={misc:#010x} va={} pa={} msinum={}",
+        ids.trim_start(),
+        (misc >> 15) & 0x7F,
+        (misc >> 8) & 0x7F,
+        misc & 0x1F,
+    );
+    Some(*function)
 }
 
 /// What one device entry names, and its DTE setting byte.
@@ -201,7 +572,7 @@ fn present(index: usize, unit: &Unit) -> Option<Mmio> {
         return None;
     };
     // A described unit whose window does not decode: firmware bug, or the unit is powered down.
-    if regs.read_u32(STATUS) == u32::MAX {
+    if regs.read_u32(reg::STATUS) == u32::MAX {
         log!(
             "iommu: amdvi unit{index} @{:#x}: STATUS reads all ones, the unit is described but not present, \
              and whatever firmware left on stays on",
@@ -226,115 +597,91 @@ fn spin_until(mut done: impl FnMut() -> bool, stuck: impl Fn() -> String) {
 /// the next.
 fn switch_off(index: usize, unit: &Unit, regs: Mmio) {
     log!(
-        "iommu: amdvi unit{index} handed over control={:#018x} status={:#010x} efr={:#018x}",
-        regs.read_u64(CONTROL),
-        regs.read_u32(STATUS),
-        regs.read_u64(EXTENDED_FEATURES),
+        "iommu: amdvi unit{index} handed over control={:#018x} status={:#010x} efr={:#018x} \
+         exclusion={:#018x}..{:#018x}",
+        regs.read_u64(reg::CONTROL),
+        regs.read_u32(reg::STATUS),
+        regs.read_u64(reg::EXTENDED_FEATURES),
+        regs.read_u64(reg::EXCLUSION_BASE),
+        regs.read_u64(reg::EXCLUSION_LIMIT),
     );
     for (bit, run, what) in FIRMWARE_LEFT {
-        if regs.read_u64(CONTROL) & bit == 0 {
+        if regs.read_u64(reg::CONTROL) & bit == 0 {
             continue;
         }
         log!("iommu: amdvi unit{index} was handed over with {what} on; it goes off");
-        regs.write_u64(CONTROL, regs.read_u64(CONTROL) & !bit);
+        regs.write_u64(reg::CONTROL, regs.read_u64(reg::CONTROL) & !bit);
         let stopped = || match run {
-            Some(run) => regs.read_u32(STATUS) & run == 0,
-            None => regs.read_u64(CONTROL) & bit == 0,
+            Some(run) => regs.read_u32(reg::STATUS) & run == 0,
+            None => regs.read_u64(reg::CONTROL) & bit == 0,
         };
         spin_until(stopped, || {
             format!(
                 "iommu: amdvi unit{index} never stopped {what}: CONTROL={:#018x} STATUS={:#010x}",
-                regs.read_u64(CONTROL),
-                regs.read_u32(STATUS)
+                regs.read_u64(reg::CONTROL),
+                regs.read_u32(reg::STATUS)
             )
         });
     }
     log!(
         "iommu: amdvi unit{index} @{:#x} switched off control={:#018x} status={:#010x}",
         unit.base,
-        regs.read_u64(CONTROL),
-        regs.read_u32(STATUS)
+        regs.read_u64(reg::CONTROL),
+        regs.read_u32(reg::STATUS)
     );
 }
 
 /// [`crate::actuator::iommu_firmware_left`]: the unit left on as firmware
 /// protecting memory before the operating system runs may leave it — every
-/// requester's device table entry translating through a table that maps
-/// nothing, so every DMA is blocked, with its command buffer and event log
-/// running. One `INVALIDATE_IOMMU_ALL` empties every cache the unit holds,
-/// so it reads every entry as written, and a completion wait says it did.
+/// requester's entry translating through a table that maps nothing, so every
+/// DMA is blocked, with its command buffer and event log running. One
+/// `INVALIDATE_IOMMU_ALL` empties every cache the unit holds, so it reads
+/// every entry as written, and a completion wait says it did.
 ///
 /// The tables are leaked, as firmware's are its own: the unit reads them
 /// until it is switched off, and freed they could read back as an entry that
 /// passes DMA untranslated.
 #[cfg(feature = "boot-actuators")]
 fn leave_on(regs: Mmio) {
-    use crate::mm::{pmm, DirectMap};
-
-    const DEVICE_TABLE: u64 = 0x0000;
-    const COMMAND_BASE: u64 = 0x0008;
-    const EVENT_BASE: u64 = 0x0010;
-    const COMMAND_HEAD: u64 = 0x2000;
-    const COMMAND_TAIL: u64 = 0x2008;
-    const EVENT_HEAD: u64 = 0x2010;
-    const EVENT_TAIL: u64 = 0x2018;
-    /// 2^8 entries of 16 bytes, 4 KiB, in bits 59:56 of either base.
-    const LOG_LEN: u64 = 8 << 56;
-    const DEVICE_IDS: u64 = 1 << 16;
-    const ENTRY: u64 = 32;
-    /// `V`, `TV`, and a four-level table: `Mode` 100b at 11:9; `IR` and `IW`
-    /// clear.
-    const BLOCKED: u64 = 1 | (1 << 1) | (4 << 9);
-    /// `IASup`, set where the unit takes `INVALIDATE_IOMMU_ALL`.
-    const IA_SUP: u64 = 1 << 6;
-    /// The opcode alone: every other bit of the command is reserved.
-    const INVALIDATE_IOMMU_ALL: u64 = 8 << 60;
-    /// The opcode, and `S`: store the second word at the address.
-    const COMPLETION_WAIT: u64 = (1 << 60) | 1;
-    const DONE: u64 = 0x600d_f00d;
-
-    let efr = regs.read_u64(EXTENDED_FEATURES);
+    let features = Features(regs.read_u64(reg::EXTENDED_FEATURES));
     assert!(
-        efr & IA_SUP != 0,
-        "amdvi: the unit's EFR {efr:#018x} has IASup clear, so it takes no INVALIDATE_IOMMU_ALL and the actuator \
-         cannot make it read the entries it leaves"
+        features.invalidate_all(),
+        "amdvi: the unit's EFR {:#018x} has IASup clear, so it takes no INVALIDATE_IOMMU_ALL and the actuator \
+         cannot make it read the entries it leaves",
+        features.0
     );
-
-    let window = |phys: u64, bytes: u64| {
-        // SAFETY: `phys` is inside a page `pmm::alloc_page` handed out and
-        // this function leaks, which the direct map covers for the machine's life.
-        unsafe { Mmio::over_phys(DirectMap::from_phys(phys), bytes) }
-    };
     let table = pmm::alloc_page().expect("amdvi: no memory for the device table the actuator leaves on");
     let rest = pmm::alloc_page().expect("amdvi: no memory for the logs the actuator leaves on");
-    let table_at = table.direct_map().phys();
-    let at = rest.direct_map().phys();
-    let (commands_at, events_at, root_at, done_at) = (at, at + 0x1000, at + 0x2000, at + 0x3000);
+    let (table_at, at) = (table.direct_map().phys(), rest.direct_map().phys());
     #[expect(clippy::disallowed_methods, reason = "the unit reads them until it is switched off, as firmware's own tables")]
     core::mem::forget((table, rest));
+    let address = |at: u64| Address::<12>::new(at).expect("amdvi: a page below 2^48");
+    let (commands, events, root, done) = (address(at), address(at + 0x1000), address(at + 0x2000), address(at + 0x3000));
 
-    let entries = window(table_at, DEVICE_IDS * ENTRY);
-    for id in 0..DEVICE_IDS {
-        entries.write_u64(id * ENTRY, BLOCKED | root_at);
-        entries.write_u64(id * ENTRY + 8, 1);
+    let entries = memory(table_at, (DEVICE_IDS * ENTRY_BYTES) as u64);
+    let blocking = Dte::translated(root, 0, Setting(0)).words();
+    for id in 0..DEVICE_IDS as u64 {
+        entries.write_u64(id * ENTRY_BYTES as u64 + 8, blocking[1]);
+        entries.write_u64(id * ENTRY_BYTES as u64, blocking[0]);
     }
-    regs.write_u64(DEVICE_TABLE, table_at | (DEVICE_IDS * ENTRY / 0x1000 - 1));
-    regs.write_u64(COMMAND_BASE, commands_at | LOG_LEN);
-    regs.write_u64(EVENT_BASE, events_at | LOG_LEN);
-    for at in [COMMAND_HEAD, COMMAND_TAIL, EVENT_HEAD, EVENT_TAIL] {
-        regs.write_u64(at, 0);
-    }
-    regs.write_u64(CONTROL, regs.read_u64(CONTROL) | CMD_BUF_EN | EVENT_LOG_EN | IOMMU_EN);
+    regs.write_u64(reg::DEVICE_TABLE, reg::device_table(address(table_at)));
+    regs.write_u64(reg::COMMAND_BASE, reg::ring(commands));
+    regs.write_u64(reg::EVENT_BASE, reg::ring(events));
+    let on = control::CMD_BUF_EN | control::EVENT_LOG_EN | control::IOMMU_EN;
+    regs.write_u64(reg::CONTROL, regs.read_u64(reg::CONTROL) | on);
 
-    let commands = [INVALIDATE_IOMMU_ALL, 0, COMPLETION_WAIT | done_at, DONE];
-    let ring = window(commands_at, commands.len() as u64 * 8);
-    for (word, value) in (0..).zip(commands) {
-        ring.write_u64(word * 8, value);
+    const DONE: u64 = 0x600d_f00d;
+    let wait = Command::CompletionWait { store: Address::new(done.get()).expect("aligned"), data: DONE };
+    let ring = memory(commands.get(), PAGE_SIZE);
+    for (slot, command) in [Command::InvalidateAll, wait].into_iter().enumerate() {
+        let [low, high] = command.words();
+        ring.write_u64(reg::offset(slot) + 8, high);
+        ring.write_u64(reg::offset(slot), low);
     }
-    regs.write_u64(COMMAND_TAIL, commands.len() as u64 * 8);
-    let done = window(done_at, 8);
+    regs.write_u64(reg::COMMAND_TAIL, reg::offset(2));
+    let stored = memory(done.get(), 8);
     spin_until(
-        || done.read_u64(0) == DONE,
-        || format!("amdvi: the actuator's completion wait never landed: STATUS={:#010x}", regs.read_u32(STATUS)),
+        || stored.read_u64(0) == DONE,
+        || format!("amdvi: the actuator's completion wait never landed: STATUS={:#010x}", regs.read_u32(reg::STATUS)),
     );
 }

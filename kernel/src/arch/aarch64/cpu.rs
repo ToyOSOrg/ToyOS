@@ -3,8 +3,8 @@
 use core::arch::asm;
 
 /// How many bits wide a physical address this CPU issues is:
-/// `ID_AA64MMFR0_EL1.PARange` (Arm ARM DDI 0487), whose encodings past
-/// 0b0110 are reserved.
+/// `ID_AA64MMFR0_EL1.PARange` (Arm ARM DDI 0487): 0b0111, 56 bits, is
+/// FEAT_D128's, and the encodings past it are reserved.
 pub fn physical_address_bits() -> u8 {
     let mmfr0: u64;
     // SAFETY: reads an EL1 ID register, which EL1 may always read.
@@ -17,6 +17,7 @@ pub fn physical_address_bits() -> u8 {
         4 => 44,
         5 => 48,
         6 => 52,
+        7 => 56,
         reserved => panic!("ID_AA64MMFR0_EL1.PARange holds the reserved value {reserved:#x}"),
     }
 }

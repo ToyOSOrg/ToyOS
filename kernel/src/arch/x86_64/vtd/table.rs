@@ -7,8 +7,8 @@
 
 use alloc::vec::Vec;
 
-use crate::iommu::window::{self, Window};
-use crate::iommu::{AddressWidth, IommuError, Iova, StreamId};
+use crate::iommu::window;
+use crate::iommu::{AddressWidth, Iova, StreamId};
 use crate::mm::pmm::{self, PhysPage};
 use crate::mm::{DirectMap, Mmio, PAGE_2M};
 
@@ -123,38 +123,7 @@ impl Table {
     /// the one or the other, never a half of each (§6.2.2.1).
     fn replace_pair(self, index: usize, old: (u64, u64), new: (u64, u64)) {
         let entry = self.window().subregion(index as u64 * 16, 16);
-        let (found_lo, found_hi): (u64, u64);
-        // SAFETY: `entry` is 16 bytes of a table `Tables::alloc` never frees,
-        // 16-byte aligned since a table is 4 KiB-aligned; `rbx`, which LLVM
-        // reserves, holds `new`'s low half only between the two moves.
-        // Every operand names its register: LLVM may give `rbx` to a `reg`
-        // operand, and the `xchg` would then swap the address out of it.
-        unsafe {
-            core::arch::asm!(
-                "xchg r8, rbx",
-                "lock cmpxchg16b xmmword ptr [rsi]",
-                "mov rbx, r8",
-                in("rsi") entry.addr(),
-                inout("r8") new.0 => _,
-                in("rcx") new.1,
-                inout("rax") old.0 => found_lo,
-                inout("rdx") old.1 => found_hi,
-                options(nostack),
-            );
-        }
-        let found = (found_lo, found_hi);
-        // `found` is `old` exactly when the swap happened; nothing else
-        // writes an entry under `UNITS`, so anything else is a kernel bug.
-        assert!(
-            found == old,
-            "iommu: entry {index} of table {:#x} held {:#x}:{:#x}, not the {:#x}:{:#x} read before \
-             it was replaced",
-            self.phys,
-            found.1,
-            found.0,
-            old.1,
-            old.0
-        );
+        super::super::iommu_unit::exchange16(entry, [old.0, old.1], [new.0, new.1]);
         flush(entry.addr() as usize);
     }
 
@@ -219,59 +188,25 @@ pub fn identity_domain(tables: &mut Tables, width: AddressWidth, top: u64) -> (T
     (root, frames)
 }
 
-/// One domain's second-level tables, its id, and its addresses.
+/// One domain's second-level tables, at the depth they were built for.
 #[derive(Clone, Copy)]
-pub struct Domain {
-    root: Table,
-    id: u16,
-    width: AddressWidth,
-    window: Window,
+pub struct Space {
+    pub root: Table,
+    pub width: AddressWidth,
 }
 
-impl Domain {
-    /// The bits of device address a unit will translate: the lesser of the page
-    /// tables' depth and what the hardware accepts at all.
-    ///
-    /// **`SAGAW` and `MGAW` are two different limits and the smaller binds.**
-    /// VT-d Rev. 4.0 D51397-015, 11.4.2 Capability Register: `SAGAW` 12:8 is the
-    /// set of page-table depths a unit supports, `MGAW` 21:16 (encoded one less
-    /// than it is) is the maximum DMA virtual addressability it has. A unit
-    /// reporting a 48-bit `SAGAW` and a 39-bit `MGAW` walks four levels and
-    /// still faults `address-beyond-mgaw` on anything from `1 << 39` up, so a
-    /// window placed by table depth alone is unreachable on it.
-    const fn translatable_bits(width: AddressWidth, mgaw: u8) -> u8 {
-        if mgaw < width.bits() { mgaw } else { width.bits() }
-    }
-
-    /// A domain with `room` bytes of its [`Window`] handed out at the address
-    /// answered, or the reason it has not.
-    pub fn new(
-        tables: &mut Tables,
-        id: u16,
-        width: AddressWidth,
-        mgaw: u8,
-        reserved: Option<&[(u64, u64)]>,
-        room: u64,
-    ) -> Result<(Self, Iova), IommuError> {
-        let (window, first) = Window::new(Self::translatable_bits(width, mgaw), reserved, room)?;
-        Ok((Self { root: tables.alloc(), id, width, window }, first))
-    }
-
-    pub fn root(&self) -> Table {
-        self.root
-    }
-
-    pub fn id(&self) -> u16 {
-        self.id
-    }
-
-    pub const fn window(&self) -> &Window {
-        &self.window
-    }
-
-    pub fn window_mut(&mut self) -> &mut Window {
-        &mut self.window
-    }
+/// The bits of device address a unit will translate: the lesser of the page
+/// tables' depth and what the hardware accepts at all.
+///
+/// **`SAGAW` and `MGAW` are two different limits and the smaller binds.**
+/// VT-d Rev. 4.0 D51397-015, 11.4.2 Capability Register: `SAGAW` 12:8 is the
+/// set of page-table depths a unit supports, `MGAW` 21:16 (encoded one less
+/// than it is) is the maximum DMA virtual addressability it has. A unit
+/// reporting a 48-bit `SAGAW` and a 39-bit `MGAW` walks four levels and
+/// still faults `address-beyond-mgaw` on anything from `1 << 39` up, so a
+/// window placed by table depth alone is unreachable on it.
+pub const fn translatable_bits(width: AddressWidth, mgaw: u8) -> u8 {
+    if mgaw < width.bits() { mgaw } else { width.bits() }
 }
 
 /// A unit whose `MGAW` is narrower than its `SAGAW` gets its window under the
@@ -281,49 +216,32 @@ impl Domain {
 /// `intel-iommu` derives both fields from one `aw-bits` property, so its model
 /// cannot report a `SAGAW` wider than its `MGAW` at all.
 const _: () = {
-    assert!(Domain::translatable_bits(AddressWidth::Bits48, 39) == 39);
+    assert!(translatable_bits(AddressWidth::Bits48, 39) == 39);
     assert!(window::first_address(39) < 1 << 39);
     // What a window placed by the table depth alone would be, against the
     // ceiling such a unit reports.
     assert!(window::first_address(48) >= 1 << 39);
     // A unit whose two limits agree is unchanged by any of this.
-    assert!(Domain::translatable_bits(AddressWidth::Bits48, 48) == 48);
-    assert!(Domain::translatable_bits(AddressWidth::Bits39, 39) == 39);
+    assert!(translatable_bits(AddressWidth::Bits48, 48) == 48);
+    assert!(translatable_bits(AddressWidth::Bits39, 39) == 39);
     // And tables shallower than `MGAW` bind it the other way round.
-    assert!(Domain::translatable_bits(AddressWidth::Bits39, 48) == 39);
+    assert!(translatable_bits(AddressWidth::Bits39, 48) == 39);
 };
 
-pub fn map(tables: &mut Tables, domain: &Domain, at: Iova, phys: u64, bytes: u64) {
-    let levels = levels(domain.width);
-    let mut offset = 0u64;
-    while offset < bytes {
-        map_2m(
-            tables,
-            domain.root,
-            levels,
-            Iova::translated(at.raw() + offset),
-            phys + offset,
-            LEAF_PERM,
-        );
-        offset += PAGE_2M;
-    }
+/// The 2 MiB leaf at `at` in `space` reads and writes `phys`.
+pub fn put(tables: &mut Tables, space: Space, at: u64, phys: u64) {
+    map_2m(tables, space.root, levels(space.width), Iova::translated(at), phys, LEAF_PERM);
 }
 
-/// Clears the leaves covering `bytes` at `at`; the caller invalidates before the pages behind them are reused.
-pub fn unmap(domain: &Domain, at: Iova, bytes: u64) -> Result<(), IommuError> {
-    let levels = levels(domain.width);
-    let mut offset = 0u64;
-    while offset < bytes {
-        let here = Iova::translated(at.raw() + offset);
-        let (table, index) =
-            leaf_of(domain.root, levels, here).ok_or(IommuError::NotMapped(here))?;
-        if table.read(index) & (SL_READ | SL_WRITE) == 0 {
-            return Err(IommuError::NotMapped(here));
-        }
-        table.write(index, 0);
-        offset += PAGE_2M;
+/// Clears the leaf at `at`; `false` where none is mapped. The caller
+/// invalidates before the page behind it is reused.
+pub fn take(space: Space, at: u64) -> bool {
+    let Some((table, index)) = leaf_of(space.root, levels(space.width), Iova::translated(at)) else { return false };
+    if table.read(index) & (SL_READ | SL_WRITE) == 0 {
+        return false;
     }
-    Ok(())
+    table.write(index, 0);
+    true
 }
 
 /// Walks to the page-directory holding `at`'s leaf, growing the tables on the way.
@@ -430,7 +348,7 @@ pub fn bind_identity(
 
 /// Moves `stream`'s present context entry in one unit's root table onto a
 /// domain of its own, and answers what that unit may still hold for the old one.
-pub fn bind(root: Table, stream: StreamId, domain: &Domain) -> Displaced {
+pub fn bind(root: Table, stream: StreamId, id: u16, space: Space) -> Displaced {
     let entry = root.read(stream.bus() as usize * 2);
     let context = Table { phys: entry & ADDR_MASK };
     let index = stream.devfn() as usize;
@@ -441,7 +359,7 @@ pub fn bind(root: Table, stream: StreamId, domain: &Domain) -> Displaced {
         "iommu: {stream} has no context entry to move — it was not enumerated when its unit \
          was programmed"
     );
-    let (new, displaced) = rebind(old, stream.requester(), domain.root, domain.id, domain.width);
+    let (new, displaced) = rebind(old, stream.requester(), space.root, id, space.width);
     context.replace_pair(index, old, new);
     displaced
 }
