@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-10-12
 ---
@@ -48,6 +48,18 @@ this one:
   Under this issue no candidate lies inside a port's window, so none ever
   answers there.
 
+**Interim, #928.** A function on a bus a bridge leads to now takes its
+candidates from the windows of the bridge whose secondary bus it is, of a
+kind the BAR may use (a non-prefetchable BAR only in the memory window; a
+64-bit BAR also below 4 GiB, where the AMD bench's bus-3 window is), inside
+the declaration, and only where every bridge on its path forwards
+(`placement::behind_bridges`, host-tested; `bar_map_behind_a_bridge` claims a
+q35 NIC behind a `pcie-root-port`). Where none of that is free, as on the AMD
+bench's packed bus 3, the BAR stays where firmware put it and is handed to
+nobody, by name (`NoRoutedRun`). The move itself stays until P1: a 2 MiB page
+is still the only one a process is given, so a BAR that cannot have one of
+its own is not handed over, and the two radios' claims rest on P1 still.
+
 Owner: P1 of `issues/there-is-no-wifi.md`.
 
 **Exit**:
@@ -55,7 +67,7 @@ Owner: P1 of `issues/there-is-no-wifi.md`.
   4 KiB pages;
 - a BAR that shares a 4 KiB page with another function's is moved within
   those windows, never out of them, or is refused by name;
-- a host test places a BAR behind a bridge;
+- a host test places a BAR behind a bridge (#928's `behind` tests, met);
 - the T14's AX210 is claimed with its BAR in place;
 - each of the two placement issues above closed, or its exit rewritten to the
   placement P1 lands.
