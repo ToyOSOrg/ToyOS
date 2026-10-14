@@ -508,7 +508,7 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
     }
     conn.send(MSG_COPY_BEGIN, &ClipboardShmMsg { len: bytes.len() as u32 })?;
     let header = conn.recv_header()?;
-    if header.msg_type != MSG_COPY_REGION || header.len() != 0 {
+    if header.msg_type != MSG_COPY_REGION || !header.is_empty() {
         return Err(CreateError::Protocol(header.msg_type));
     }
     let [region] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;

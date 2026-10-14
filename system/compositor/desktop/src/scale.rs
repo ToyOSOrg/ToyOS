@@ -73,7 +73,7 @@ impl Scale {
 
     /// `scale` if it is a quarter step.
     pub fn step(scale: window::Scale) -> Option<Self> {
-        (scale.wire() % PER_QUARTER == 0).then_some(Self(scale))
+        scale.wire().is_multiple_of(PER_QUARTER).then_some(Self(scale))
     }
 
     /// `scale` as what `mode` is drawn at, or why not.

@@ -39,6 +39,12 @@ pub struct Waiter {
     waker: Arc<Waker>,
 }
 
+impl Default for Waiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Waiter {
     /// A waiter with room for a few windows; it grows when asked to wait on
     /// more.

@@ -128,7 +128,7 @@ impl FromStr for Scale {
         let whole: u32 = whole.parse().map_err(|_| ParseError::NotADecimal)?;
         let frac: u32 = if frac.is_empty() { 0 } else { frac.parse().map_err(|_| ParseError::NotADecimal)? };
         let scaled = (whole * ten_k + frac) * DENOMINATOR;
-        if scaled % ten_k != 0 {
+        if !scaled.is_multiple_of(ten_k) {
             return Err(ParseError::NotIn120ths);
         }
         Self::from_wire(scaled / ten_k).ok_or(ParseError::OutOfRange)
