@@ -25,10 +25,38 @@ pub const SMI_FILTER: u64 = 0x0060;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SmiFilter(pub u64);
 
+/// `registers` as the filter is to pass SMIs from the ids firmware left
+/// valid and from each of `platform`, every register locked (§2.1.5.3 steps
+/// 3–6): an unlocked register firmware left invalid takes an id it left out,
+/// and the rest are locked invalid. Refused with the first platform id no
+/// such register is left for: a filter without it would refuse that
+/// source's SMIs.
+pub fn smi_filter(registers: &mut [SmiFilter], platform: &[u16]) -> Result<(), u16> {
+    for &id in platform {
+        if registers.iter().any(|register| register.passes() == Some(id)) {
+            continue;
+        }
+        let free = registers.iter_mut().find(|register| !register.locked() && register.passes().is_none()).ok_or(id)?;
+        *free = SmiFilter::passing(id);
+    }
+    for register in registers.iter_mut().filter(|register| !register.locked()) {
+        register.0 = register.passes().map_or(SmiFilter::LOCK, |id| SmiFilter::passing(id).0);
+    }
+    Ok(())
+}
+
 impl SmiFilter {
+    const VALID: u64 = 1 << 16;
+    const LOCK: u64 = 1 << 17;
+
+    /// Passes SMIs from `id`, locked.
+    pub const fn passing(id: u16) -> Self {
+        Self(id as u64 | Self::VALID | Self::LOCK)
+    }
+
     /// The requester id an SMI passes from, where the register is valid.
     pub const fn passes(self) -> Option<u16> {
-        if self.0 & 1 << 16 != 0 {
+        if self.0 & Self::VALID != 0 {
             Some(self.0 as u16)
         } else {
             None
@@ -36,7 +64,7 @@ impl SmiFilter {
     }
 
     pub const fn locked(self) -> bool {
-        self.0 & 1 << 17 != 0
+        self.0 & Self::LOCK != 0
     }
 }
 

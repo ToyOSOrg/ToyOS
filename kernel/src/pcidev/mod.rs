@@ -49,14 +49,11 @@
 //! that BAR rather than nothing at all, and a function this kernel could settle
 //! no BAR of ends at [`Refusal::NoMappableBar`].
 //!
-//! **The BAR holding the MSI-X table is handed over only where the machine
-//! fences a written message** ([`crate::iommu::Remapping::fences_tables`]):
-//! there, whatever message its holder writes into the table reaches only the
-//! claim's own interrupt, and anything else is refused and recorded. On
-//! AMD-Vi that needs every unit's SMI filter on, since an SMI is no remapped
-//! message; where it is not, the BAR is kept back, said by name. **A function
-//! is armed on MSI only where a walk that reached its capability list's
-//! terminator found no MSI-X.**
+//! **The BAR holding the MSI-X table is handed over like any other**: a claim
+//! exists only where every message its function sends, whatever its holder
+//! writes there or aims a DMA at, reaches only its own interrupt
+//! ([`crate::iommu::remapping`]). **A function is armed on MSI only where a
+//! walk that reached its capability list's terminator found no MSI-X.**
 //!
 //! **A function with no address space of its own is not handed over**, because
 //! every grant would answer with a physical address and a descriptor holding
@@ -647,7 +644,7 @@ fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
 /// place.
 #[derive(Clone, Copy)]
 enum Refusal {
-    NotRemapped,
+    NotRemapped(crate::iommu::NotRemapped),
     /// This machine remaps and translates, and not for this function.
     NotIsolated(&'static str),
     /// The machine translates messages, and none could be made for this function.
@@ -684,10 +681,15 @@ enum Refusal {
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::NotRemapped => write!(
+            Self::NotRemapped(crate::iommu::NotRemapped::Unremapped) => write!(
                 f,
                 "its interrupts would not be remapped on this machine, and a message that is not \
                  remapped can raise any vector on any CPU"
+            ),
+            Self::NotRemapped(crate::iommu::NotRemapped::SmiUnfiltered) => write!(
+                f,
+                "an IOMMU unit on this machine filters no SMI, so a write its holder aimed at the \
+                 interrupt range could send one to every CPU"
             ),
             Self::NotIsolated(why) => {
                 write!(f, "no address space or message of its own can be made for it: {why}")
@@ -861,7 +863,7 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
 /// bus before its domain existed would be reaching physical memory with
 /// whatever addresses its registers still held.
 fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> {
-    let remapping = crate::iommu::remapping().map_err(|_| Refusal::NotRemapped)?;
+    let remapping = crate::iommu::remapping().map_err(Refusal::NotRemapped)?;
     crate::iommu::isolates(&pci).map_err(Refusal::NotIsolated)?;
 
     // What the function's previous holder left mapped goes before anything
@@ -899,23 +901,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
 
     // From here a refusal has to undo: a vector is armed, and the arms below
     // move the function's BARs.
-    // The table's BAR is the holder's only where a message written into it
-    // reaches nothing but this claim's interrupt.
-    let withheld = match &armed {
-        Armed::Msix(at, _) if !remapping.fences_tables() => {
-            log!(
-                "pcidev: PCI {:02x}:{:02x}.{} keeps BAR {}, which holds its MSI-X table, back: a message written \
-                 there would not be fenced on this machine",
-                pci.bus,
-                pci.dev,
-                pci.func,
-                at.bar
-            );
-            Some(at.bar)
-        }
-        _ => None,
-    };
-    match place_bars(&pci, id, withheld) {
+    match place_bars(&pci, id) {
         Ok((bar_at, bar_bytes)) => {
             space.attach(pci.bus, pci.dev, pci.func);
             Ok(Bound {
@@ -959,7 +945,6 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
 fn place_bars(
     pci: &PciDevice,
     id: PciId,
-    withheld: Option<u8>,
 ) -> Result<([u64; BARS], [u64; BARS]), Refusal> {
     let mut bar_at = [0u64; BARS];
     let mut bar_bytes = [0u64; BARS];
@@ -973,7 +958,7 @@ fn place_bars(
         // whatever its register holds now: one a reset returned to zero reads
         // as unassigned, and it is the window that moved, not a BAR that is
         // not there.
-        if Some(index) == withheld || (pci.memory_bar(index).is_err() && !was_cut(pci, index)) {
+        if pci.memory_bar(index).is_err() && !was_cut(pci, index) {
             index += step;
             continue;
         }
@@ -1841,16 +1826,23 @@ pub fn isr(number: usize) {
 /// answers refuses from here on, its interrupt read included, and the post
 /// wakes whoever waits on the claim to read that refusal, as a message's does.
 pub fn note_fault(who: u16) -> bool {
-    let Some(function) = functions().iter().find(|function| function.who == who) else {
+    let Some(function) = held(who) else {
         return false;
     };
-    if !function.held.load(Ordering::Acquire) {
-        return false;
-    }
     function.irq.fault();
     function.watch.post_in_place();
     crate::preempt::set_need_resched();
     true
+}
+
+/// Requester `who`'s function, where a claim holds it; takes no lock.
+fn held(who: u16) -> Option<&'static Function> {
+    functions().iter().find(|function| function.who == who && function.held.load(Ordering::Acquire))
+}
+
+/// Whether a claim holds requester `who`; takes no lock.
+pub fn is_held(who: u16) -> bool {
+    held(who).is_some()
 }
 
 /// Register a poll on the watch of the function a claim holds.

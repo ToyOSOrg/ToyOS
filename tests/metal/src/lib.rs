@@ -813,15 +813,18 @@ pub const FLASHABLE: &[&str] = &[
     // claim, and `usbd` drives it through the unit: the handoff, a reset and
     // its own rings, as this kernel's driver does every boot. Firmware owns
     // neither of the T14's two (each reads `USBLEGSUP 0x01002201`, every SMI
-    // enable clear), and firmware takes the controller back at the next
-    // power-on. Only this address: the other controller carries the boot
-    // stick.
+    // enable clear). Whatever state a boot leaves it in, the reset that ends
+    // every boot resets the function and runs POST again, which takes it
+    // back. Only this address: the other controller carries the boot stick.
     "xhci-leave=00:0d.0",
     // The AMD bench's `03:00.4`, the xHCI the Bluetooth module is on, left to
-    // a claim the same way: firmware owns it until the handoff `usbd`
-    // performs as this kernel's driver does every boot (`USBLEGSUP
-    // 0x00010401`), and takes it back at the next power-on. Only this
-    // address: `03:00.3`, which shares its id, carries the boot stick.
+    // a claim the same way. Firmware owns it (`USBLEGSUP 0x00010401`) until
+    // `usbd` takes it; a boot may leave it halted with bus mastering off
+    // after the fault arm, or, where the claim is refused, still firmware's
+    // with its SMI on an ownership change armed. Either way the reset that
+    // ends every boot resets the function and runs POST again, which takes
+    // the controller back. Only this address: `03:00.3`, which shares its id,
+    // carries the boot stick.
     "xhci-leave=03:00.4",
 ];
 

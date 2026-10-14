@@ -19,7 +19,10 @@ pub const MSI: &str = "test_rs_i219_msi";
 const MSI_SAYS: &str = "i219_msi: ";
 
 /// The kernel's reason on a claim's refusal line where the units do not remap.
-const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
+pub const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
+
+/// The kernel's reason where the units remap and one filters no SMI.
+pub const SMI_UNFILTERED: &str = "an IOMMU unit on this machine filters no SMI";
 
 /// The kernel's line where firmware's DMAR flags leave interrupt remapping off,
 /// which `iommu-no-remap` stands in for: the premise of the refusal.
@@ -166,16 +169,15 @@ pub fn refused_unremapped(log: &Serial) -> Result<(), String> {
     log.must_say(INTR_REMAP_CLEAR)?;
     let at = function(log)?;
     log.must_not_say(&format!("[{I219}] handed over"))?;
-    refused_unremapped_at(log, &at)?;
+    refused_at(log, &at, NOT_REMAPPED)?;
     log.must_say(bootlog::COMPLETE)?;
     Ok(())
 }
 
-/// The claim of the function at `at` refused because nothing remaps its
-/// messages, before anything on it changed: no message armed, no entry
-/// written, no BAR moved.
-pub fn refused_unremapped_at(log: &Serial, at: &str) -> Result<(), String> {
-    log.must_say(&format!("pcidev: PCI {at} NOT HANDED OVER — {NOT_REMAPPED}"))?;
+/// The claim of the function at `at` refused for `why`, before anything on
+/// it changed: no message armed, no entry written, no BAR moved.
+pub fn refused_at(log: &Serial, at: &str, why: &str) -> Result<(), String> {
+    log.must_say(&format!("pcidev: PCI {at} NOT HANDED OVER — {why}"))?;
     log.must_not_say(&format!("PCI {at}: msi address="))?;
     log.must_not_say(&format!("PCI {at}: msix address="))?;
     log.must_not_say(&format!(" source={at} "))?;

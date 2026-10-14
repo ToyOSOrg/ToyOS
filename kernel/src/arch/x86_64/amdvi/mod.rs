@@ -62,11 +62,9 @@ const FIRMWARE_LEFT: [(u64, Option<u32>, &str); 8] = [
     (control::IOMMU_EN, None, "IommuEn"),
 ];
 
-/// Why a requester an IVHD special entry names takes no claim: an I/O APIC's
-/// or an HPET's messages are the platform's (Table 109).
-const PLATFORM: [&str; 2] = ["the IVRS names it as an I/O APIC", "the IVRS names it as an HPET"];
-/// Why a requester the SMI filter passes takes no claim.
-const SMI_SOURCE: &str = "the unit's SMI filter, as firmware left it, passes its SMIs";
+/// Why a requester the SMI filter passes, which no special entry names,
+/// takes no claim.
+const SMI_SOURCE: &str = "firmware's SMI filter passes its SMIs";
 
 /// IVMD flags (Table 113).
 const IVMD_UNITY: u8 = 1 << 0;
@@ -138,8 +136,9 @@ struct Ready {
     regs: Mmio,
     function: PciDevice,
     features: Features,
-    /// The unit has an SMI filter, which [`program`] turns on.
-    filters_smi: bool,
+    /// What [`settle`] writes to the unit's SMI filter registers before it
+    /// turns the filter on; `None` where the unit filters no SMI.
+    smi: Option<Vec<SmiFilter>>,
 }
 
 /// Every unit the IVRS describes, switched off, and each this kernel can use
@@ -218,12 +217,24 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
                         Ok(function) => {
                             translated.extend(serves);
                             apics.extend(specials.iter().filter(|(variety, ..)| *variety == 1).map(|&(_, handle, used)| (handle, used)));
-                            platform.extend(specials.iter().map(|&(variety, _, used)| (used, PLATFORM[usize::from(variety == 2)])));
+                            // An I/O APIC's or an HPET's messages are the platform's (Table 109).
+                            platform.extend(specials.iter().map(|&(variety, _, used)| {
+                                let what = match variety {
+                                    1 => "the IVRS names it as an I/O APIC",
+                                    2 => "the IVRS names it as an HPET",
+                                    _ => "the IVRS names it as a platform source",
+                                };
+                                (used, what)
+                            }));
                             let features = Features(regs.read_u64(reg::EXTENDED_FEATURES));
-                            let passes = smi_filter(units, regs, features);
-                            let filters_smi = passes.is_some();
-                            platform.extend(passes.into_iter().flatten().map(|id| (id, SMI_SOURCE)));
-                            ready.push(Ready { index: units, base: unit.base, regs, function, features, filters_smi });
+                            let chipset: Vec<u16> = specials.iter().map(|&(.., used)| used).collect();
+                            let smi = smi_filter(units, regs, features, &chipset);
+                            for id in smi.iter().flatten().filter_map(|register| register.passes()) {
+                                if !chipset.contains(&id) {
+                                    platform.push((id, SMI_SOURCE));
+                                }
+                            }
+                            ready.push(Ready { index: units, base: unit.base, regs, function, features, smi });
                         }
                         Err(why) => log!("iommu: amdvi unit{units} is left off: {why}"),
                     }
@@ -302,17 +313,14 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     };
     let identity = build(devices, &settings, remap.is_some());
     let reserved = windows.iter().map(|w| (w.base, w.end())).chain(ivmds.iter().map(|m| (m.start, m.start + m.length)));
-    let filters_smi = ready.iter().all(|unit| unit.filters_smi);
     domain::start(reserved.collect(), settings, ivmds.iter().map(|m| m.requesters).collect(), translated, platform);
-    interrupt::smi_filtered(filters_smi);
     log!("iommu: amdvi identity domain covers 0x0..{top:#x}, root={:#x}", identity.get());
     if let Some(extended) = remap {
         log!(
             "iommu: amdvi remaps every message through its requester's table: 128-bit entries, x2apic \
-             destinations={}, {} I/O APIC(s) named, SMIs filtered={}",
+             destinations={}, {} I/O APIC(s) named",
             yn(extended),
             apics.len(),
-            yn(filters_smi)
         );
         interrupt::start(extended, apics);
     }
@@ -361,19 +369,21 @@ fn declare(
     Ok(Some((first, last)))
 }
 
-/// The requester ids the unit's SMI filter passes, as firmware left it, each
-/// register said; `None`, said, where the unit has no filter, so every SMI
-/// passes (§2.1.5).
-fn smi_filter(index: usize, regs: Mmio, features: Features) -> Option<Vec<u16>> {
+/// The unit's SMI filter registers as [`settle`] is to write them: passing
+/// what firmware left valid and every requester id the IVRS names the
+/// chipset's own interrupt sources by, `chipset`, which are taken to raise
+/// the platform's SMIs too, since §2.1.5.3 leaves naming those to firmware;
+/// `None`, said, where the unit has no filter or too few registers left.
+fn smi_filter(index: usize, regs: Mmio, features: Features, chipset: &[u16]) -> Option<Vec<SmiFilter>> {
     let Some(count) = features.smi_filters() else {
         log!("iommu: amdvi unit{index} has no SMI filter (EFR {:#018x}), so every SMI a device sends passes", features.0);
         return None;
     };
-    let registers: Vec<SmiFilter> =
+    let mut registers: Vec<SmiFilter> =
         (0..count as u64).map(|i| SmiFilter(regs.read_u64(reg::SMI_FILTER + 8 * i))).collect();
     for (i, register) in registers.iter().enumerate() {
         log!(
-            "iommu: amdvi unit{index} SMI filter {i} = {:#010x}: passes {}, {}",
+            "iommu: amdvi unit{index} SMI filter {i} = {:#010x} as firmware left it: passes {}, {}",
             register.0,
             match register.passes() {
                 Some(id) => format!("{}", requester(id)),
@@ -382,7 +392,17 @@ fn smi_filter(index: usize, regs: Mmio, features: Features) -> Option<Vec<u16>> 
             if register.locked() { "locked" } else { "unlocked" }
         );
     }
-    Some(registers.iter().filter_map(|register| register.passes()).collect())
+    match reg::smi_filter(&mut registers, chipset) {
+        Ok(()) => Some(registers),
+        Err(id) => {
+            log!(
+                "iommu: amdvi unit{index} SMI filter has no register left to pass {}, a chipset source, so it \
+                 stays off and every SMI a device sends passes",
+                requester(id)
+            );
+            None
+        }
+    }
 }
 
 /// The unit's function, where this driver can program the unit: segment 0,
@@ -451,6 +471,8 @@ struct Live {
     tail: usize,
     done: Address<12>,
     waited: u64,
+    /// [`Ready::smi`], until [`settle`] writes it.
+    smi: Option<Vec<SmiFilter>>,
 }
 
 impl Live {
@@ -502,7 +524,7 @@ fn submit(commands: &[Command]) {
 /// then empties every cache it holds and names each enumerated
 /// function's entry.
 fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
-    let Ready { index, base, regs, function, filters_smi, .. } = unit;
+    let Ready { index, base, regs, function, smi, .. } = unit;
     let (commands, events, done) = {
         let mut tables = TABLES.lock();
         (tables.alloc(), tables.alloc(), tables.alloc())
@@ -529,23 +551,19 @@ fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
         Some(false) => control::GA_EN,
         Some(true) => control::GA_EN | control::XT_EN,
     };
-    // An SMI is no remapped message (Table 10, Table 19): only the filter
-    // keeps one a holder writes into its own MSI-X table from every CPU.
-    let smi = if filters_smi { control::SMIF_EN | control::SMIF_LOG_EN } else { 0 };
     let on = control::COHERENT
         | control::EVENT_LOG_EN
         | control::EVENT_INT_EN
         | control::CMD_BUF_EN
         | control::IOMMU_EN
-        | remapping
-        | smi;
+        | remapping;
     regs.write_u64(reg::CONTROL, on);
     let running = status::CMD_BUF_RUN | status::EVENT_LOG_RUN;
     spin_until(
         || regs.read_u32(reg::STATUS) & running == running,
         || format!("iommu: amdvi unit{index} never ran its command buffer and event log: STATUS={:#010x}", regs.read_u32(reg::STATUS)),
     );
-    let mut live = Live { index, regs, commands: memory(commands.get(), PAGE_SIZE), tail: 0, done, waited: 0 };
+    let mut live = Live { index, regs, commands: memory(commands.get(), PAGE_SIZE), tail: 0, done, waited: 0, smi };
     // §2.4.8 needs `INVALIDATE_IOMMU_ALL` alone. QEMU 11.1.1 moves a function
     // off pass-through only on an `INVALIDATE_DEVTAB_ENTRY` that names it
     // (`issues/qemus-invalidate-iommu-all-leaves-every-function-untranslated.md`),
@@ -563,6 +581,38 @@ fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
         devices.len(),
     );
     UNITS.lock().push(live);
+}
+
+/// Every unit's SMI filter on, once every function this kernel drives is out
+/// of firmware's hands: until then, a controller firmware still owns may
+/// raise SMIs to be handed over (xHCI §4.22.1). A refused SMI is logged as an
+/// `IO_PAGE_FAULT` (§2.1.5.1) for [`fault`].
+pub fn settle() {
+    let mut units = UNITS.lock();
+    let mut everywhere = !units.is_empty();
+    for unit in units.iter_mut() {
+        let Some(filter) = unit.smi.take() else {
+            everywhere = false;
+            continue;
+        };
+        for (i, register) in (0u64..).zip(&filter) {
+            if !SmiFilter(unit.regs.read_u64(reg::SMI_FILTER + 8 * i)).locked() {
+                unit.regs.write_u64(reg::SMI_FILTER + 8 * i, register.0);
+            }
+        }
+        unit.regs.write_u64(reg::CONTROL, unit.regs.read_u64(reg::CONTROL) | control::SMIF_EN | control::SMIF_LOG_EN);
+        let passes: Vec<String> = (0..filter.len() as u64)
+            .filter_map(|i| SmiFilter(unit.regs.read_u64(reg::SMI_FILTER + 8 * i)).passes())
+            .map(|id| format!("{}", requester(id)))
+            .collect();
+        log!(
+            "iommu: amdvi unit{} SMI filter on control={:#018x}, passing {}",
+            unit.index,
+            unit.regs.read_u64(reg::CONTROL),
+            passes.join(" ")
+        );
+    }
+    interrupt::smi_filtered(everywhere);
 }
 
 /// A requester id, printed as `pci::enumerate` prints a function.

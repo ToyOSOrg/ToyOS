@@ -60,6 +60,14 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     );
 }
 
+/// Every function the kernel drives is out of firmware's hands: AMD-Vi turns
+/// its SMI filters on.
+pub fn drivers_settled() {
+    if backend() == Backend::AmdVi {
+        super::amdvi::settle();
+    }
+}
+
 /// Ceiling on units inventoried; a machine past it is told, not silently truncated.
 pub(super) const MAX_UNITS: usize = 16;
 
@@ -285,15 +293,18 @@ pub mod interrupt {
         }
     }
 
-    /// Whether a message a holder writes into its function's MSI-X table
-    /// reaches nothing but its claim's interrupt: VT-d's source-id
-    /// verification and compatibility-format block say so; AMD-Vi's table
-    /// does only where every unit filters SMIs, which no table remaps.
-    pub fn fences_tables() -> bool {
+    /// Whether a claimed function's every message reaches only its own
+    /// interrupt: VT-d's source-id verification and its block on
+    /// compatibility format where it remaps; AMD-Vi's requester table where
+    /// it remaps and every unit filters SMIs, since a holder's write to the
+    /// interrupt range with an SMI's type is no remapped message (48882
+    /// §2.1.4.2, Table 10, Table 19).
+    pub fn fences_claims() -> Result<(), crate::iommu::NotRemapped> {
+        use crate::iommu::NotRemapped;
         match backend() {
-            Backend::Vtd => true,
-            Backend::AmdVi => amdvi::interrupt::smi_filtered_everywhere(),
-            Backend::None => false,
+            _ if !is_armed() => Err(NotRemapped::Unremapped),
+            Backend::AmdVi if !amdvi::interrupt::smi_filtered_everywhere() => Err(NotRemapped::SmiUnfiltered),
+            _ => Ok(()),
         }
     }
 

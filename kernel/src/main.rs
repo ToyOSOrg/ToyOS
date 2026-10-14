@@ -557,6 +557,10 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
 
     boot_phase!("devices ready", t_devices);
 
+    // After every kernel driver took its functions from firmware, before
+    // userland runs and asks for a claim.
+    iommu::drivers_settled();
+
     report_log_destination();
     let complete = cpu::counter();
     boot_phase!("complete", 0);

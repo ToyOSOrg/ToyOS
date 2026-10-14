@@ -44,9 +44,7 @@ struct Remap {
 
 static REMAP: Lock<Remap> = Lock::new(Remap { extended: None, tables: BTreeMap::new(), apics: Vec::new() });
 
-/// Every programmed unit filters SMIs (§2.1.5): an SMI is no remapped message
-/// (Table 10), so without the filter a holder's own MSI-X table could send
-/// one to every CPU.
+/// Every programmed unit filters SMIs, from [`super::settle`] on.
 static SMI_FILTERED: AtomicBool = AtomicBool::new(false);
 
 pub(super) fn smi_filtered(everywhere: bool) {
@@ -151,9 +149,10 @@ pub(in crate::arch::x86_64) fn msi(source: StreamId, vector: u8) -> Result<Msi, 
 /// A claim's entry at `vector` for `source`, whose entry from now on passes
 /// nothing firmware declared for it and gives it no `SysMgt`.
 pub(in crate::arch::x86_64) fn claim(vector: u8, source: StreamId) -> Result<Msi, Refused> {
-    // A requester the platform or a kernel driver speaks as is refused
-    // before here (`iommu::isolates`); one that already has a table is one
-    // of those, and its entries keep firmware's pass bits.
+    // A requester the platform speaks as is refused before here
+    // (`iommu::isolates`), and one a kernel driver holds by `pcidev::claim`;
+    // one that already has a table is one of those, and its entries keep
+    // firmware's pass bits.
     assert!(
         !REMAP.lock().tables.contains_key(&source.requester()) || domain::setting(source.requester()) == toyos_amdvi::dte::Setting::CLAIMED,
         "amdvi: a claim on {source}, whose remapping table another source already wrote"

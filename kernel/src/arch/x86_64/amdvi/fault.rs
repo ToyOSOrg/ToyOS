@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::iommu::fault::{self as policy, Access, Fault, Who};
 use crate::log;
 use crate::mm::{DirectMap, Mmio, PAGE_SIZE};
-use toyos_amdvi::queue::{event, name, smi, Event, ENTRIES};
+use toyos_amdvi::queue::{event, name, Event, ENTRIES};
 use toyos_amdvi::reg::{self, control, status};
 
 use super::{requester, spin_until, REGISTER_WINDOW};
@@ -76,11 +76,16 @@ fn drain(index: usize, regs: Mmio, log: Mmio) -> usize {
     while head != tail {
         let at = reg::offset(head);
         let words = [log.read_u64(at), log.read_u64(at + 8)];
-        let fault = match event(words) {
-            // An SMI the filter refused (§2.1.5.1): a claimed function's is
-            // its holder's fault; any other's is said and the machine goes
-            // on, since no DMA of this kernel's went wrong.
-            Event::Requester { device, address, .. } if smi(address) && !crate::pcidev::note_fault(device) => {
+        let event = event(words);
+        let held = match event {
+            Event::RefusedSmi { device, .. } => crate::pcidev::is_held(device),
+            _ => false,
+        };
+        let fault = match event {
+            // The filter kept it from every CPU (§2.1.5.1): a claimed
+            // function's is its holder's fault; any other's is said and the
+            // machine goes on, since nothing of this kernel's went wrong.
+            Event::RefusedSmi { device, address } if !held => {
                 let refused = UNITS[index].smis.fetch_add(1, Ordering::Relaxed) + 1;
                 if refused.is_power_of_two() {
                     log!(
@@ -91,6 +96,13 @@ fn drain(index: usize, regs: Mmio, log: Mmio) -> usize {
                 head = (head + 1) % ENTRIES;
                 continue;
             }
+            Event::RefusedSmi { device, address } => Fault {
+                who: Who::Function(requester(device)),
+                address,
+                access: Access::Write,
+                reason: 0b0010,
+                name: "an SMI the filter refused",
+            },
             Event::Requester { code, device, address, write } => Fault {
                 who: Who::Function(requester(device)),
                 address,
@@ -130,6 +142,19 @@ fn restart(index: usize, regs: Mmio) {
     );
     regs.write_u32(reg::STATUS, status::EVENT_OVERFLOW);
     regs.write_u64(reg::CONTROL, regs.read_u64(reg::CONTROL) | control::EVENT_LOG_EN);
+}
+
+/// Every unit's SMI filter off, so the platform's SMIs pass whatever it
+/// named: before the reset register is written, which on some machines is
+/// `SMI_CMD` and resets in firmware's SMI handler. Takes no lock.
+pub fn pass_every_smi() {
+    for unit in &UNITS {
+        let regs = unit.regs.load(Ordering::Acquire);
+        if regs != 0 {
+            let regs = window(regs, REGISTER_WINDOW);
+            regs.write_u64(reg::CONTROL, regs.read_u64(reg::CONTROL) & !control::SMIF_EN);
+        }
+    }
 }
 
 /// Records every unit has reported, for the selftest to wait on.

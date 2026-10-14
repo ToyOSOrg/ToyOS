@@ -5,8 +5,8 @@
 
 use toyos_amdvi::dte::{interrupts_blocked, interrupts_remapped, Dte, Setting, DEVICE_IDS, ENTRY_BYTES, INTERRUPT_ENTRIES};
 use toyos_amdvi::irte::{self, Destination};
-use toyos_amdvi::queue::{event, name, smi, Command, Event, ENTRIES};
-use toyos_amdvi::reg::{control, device_table, offset, ring, slot, Features, SmiFilter, SMI_FILTER};
+use toyos_amdvi::queue::{event, name, Command, Event, ENTRIES};
+use toyos_amdvi::reg::{control, device_table, offset, ring, slot, smi_filter, Features, SmiFilter, SMI_FILTER};
 use toyos_amdvi::table::{directory, entry, index, leaf, Entry, LEAF_LEVEL, ROOT_LEVEL};
 use toyos_phys::Phys;
 
@@ -280,18 +280,46 @@ fn the_smi_filter_sits_where_48882_puts_it() {
     assert_eq!((unset.passes(), unset.locked()), (None, false));
 }
 
-/// Figure 3 / Table 4: an SMI's address is `FDF8h` at [39:24], `MT[2:0]`
-/// 010b at [4:2], `MT[3]` [7] and `DM` [6] zero, [1:0] zero, [47:40] zero;
-/// the vector [23:16], destination [15:8] and `TM` [5] are ignored.
+/// Figure 3 / Table 4, as the SMI filter records a refused SMI (§2.1.5.1):
+/// an `IO_PAGE_FAULT` whose address is `FDF8h` at [39:24], `MT[2:0]` 010b at
+/// [4:2], `MT[3]` [7] and `DM` [6] zero, [1:0] and [47:40] zero; the vector
+/// [23:16], destination [15:8], `TM` [5] and [63:48] are not read.
 #[test]
-fn an_smi_address_is_told_from_a_dma_address() {
+fn an_smi_the_filter_refused_is_told_from_a_dma_fault() {
+    let fault = |address: u64| event([word(&[(15, 0, 0x00A3), (63, 60, 2)]), address]);
     let smi_at = word(&[(39, 24, 0xFDF8), (4, 2, 0b010)]);
-    assert!(smi(smi_at));
-    assert!(smi(smi_at | word(&[(23, 16, 0xFF), (15, 8, 0xFF), (5, 5, 1)])));
-    assert!(!smi(word(&[(39, 24, 0xFDF8), (4, 2, 0b000)])));
-    assert!(!smi(smi_at | word(&[(7, 7, 1)])));
-    assert!(!smi(smi_at | word(&[(6, 6, 1)])));
-    assert!(!smi(smi_at | word(&[(40, 40, 1)])));
-    assert!(!smi(0x4000_0000_0000));
-    assert!(!smi(0xFEE0_0008));
+    assert_eq!(fault(smi_at), Event::RefusedSmi { device: 0x00A3, address: smi_at });
+    let ignored = smi_at | word(&[(23, 16, 0xFF), (15, 8, 0xFF), (5, 5, 1), (63, 48, 0xFFFF)]);
+    assert_eq!(fault(ignored), Event::RefusedSmi { device: 0x00A3, address: ignored });
+    for not_smi in [
+        word(&[(39, 24, 0xFDF8), (4, 2, 0b000)]),
+        smi_at | word(&[(7, 7, 1)]),
+        smi_at | word(&[(6, 6, 1)]),
+        smi_at | word(&[(40, 40, 1)]),
+        0x4000_0000_0000,
+        0xFEE0_0008,
+    ] {
+        assert!(matches!(fault(not_smi), Event::Requester { .. }), "{not_smi:#x}");
+    }
+}
+
+/// §2.1.5.3: the filter keeps every id firmware left valid, takes each
+/// platform id it left out in an unlocked invalid register, and locks every
+/// register; with too few such registers it is not one to turn on.
+#[test]
+fn the_smi_filter_passes_firmwares_and_the_platforms_sources_locked() {
+    let free = SmiFilter(0);
+    let held = SmiFilter(word(&[(15, 0, 0x00A3), (16, 16, 1)]));
+    let barred = SmiFilter(word(&[(15, 0, 0x0011), (17, 17, 1)]));
+    let passing = |id: u64| SmiFilter(word(&[(15, 0, id), (16, 16, 1), (17, 17, 1)]));
+    let locked_invalid = SmiFilter(word(&[(17, 17, 1)]));
+    let plan = |mut registers: Vec<SmiFilter>, platform: &[u16]| smi_filter(&mut registers, platform).map(|()| registers);
+    assert_eq!(plan(vec![free, free], &[0x00A0, 0x0001, 0x00A0]), Ok(vec![passing(0x00A0), passing(0x0001)]));
+    assert_eq!(
+        plan(vec![held, free, barred, free], &[0x00A3, 0x00A0]),
+        Ok(vec![passing(0x00A3), passing(0x00A0), barred, locked_invalid])
+    );
+    assert_eq!(plan(vec![free, barred], &[0x00A0, 0x0001]), Err(0x0001));
+    assert_eq!(plan(vec![barred], &[0x0011]), Err(0x0011));
+    assert_eq!(plan(vec![], &[]), Ok(vec![]));
 }

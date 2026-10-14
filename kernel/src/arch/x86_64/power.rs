@@ -154,10 +154,13 @@ pub fn pm1a_control() -> Option<Declared> {
 /// the FADT named. A machine with no reset register halts. Where the register
 /// is `SMI_CMD` this `out` is no write of `smi_cmd`'s: Table 5.9 asks the boot
 /// processor of a command to `SMI_CMD` and nothing of the reset, which is
-/// made from whichever CPU ends the machine.
+/// made from whichever CPU ends the machine. Every IOMMU's SMI filter is off
+/// first: firmware may reset in its SMI handler, from an SMI its chipset
+/// raises through the filter.
 // No fallback: 0xCF9, the keyboard controller and anything else are written only where a table named them.
 pub fn reset() -> ! {
     if let Some(reset) = RESET.get() {
+        super::amdvi::fault::pass_every_smi();
         // SAFETY: the port `init_reset` decoded as an 8-bit System I/O register and declared, and the value is that register's.
         unsafe { cpu::outb(reset.port(0), RESET_VALUE.load(Ordering::Relaxed)) };
     }
@@ -211,6 +214,8 @@ pub fn off(Settled(taken): Settled) -> ! {
     }
     let typed = slp_typ.in_control(held & !SLP_EN);
     let smis_before = super::counters::read().smi;
+    // As for `reset`: firmware may enter S5 in its SMI handler.
+    super::amdvi::fault::pass_every_smi();
     // SAFETY: the block `init_control` declared, and a `SLP_TYPa` the field holds: what it does is the firmware's, as its `\_S5` names it.
     unsafe {
         cpu::outw(control, typed);

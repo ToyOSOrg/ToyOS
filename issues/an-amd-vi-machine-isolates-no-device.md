@@ -17,9 +17,18 @@ fixed and arbitrated messages go through a table of its own indexed by
 vector, a claim's entry passing nothing firmware declared.
 
 What remains is the AMD bench's reading of a claim (PR #921 stages it): a
-claimed `03:00.4` driven through its own entry, its MSI-X table's BAR handed
-over because every unit filters SMIs, its holder's foreign vector refused
-and recorded, and a machine that remaps nothing refusing the claim.
+claimed `03:00.4` driven through its own entry with every unit filtering
+SMIs, its holder's foreign vector refused and recorded, and a machine that
+remaps nothing refusing the claim.
+
+The filter goes on once the kernel's drivers hold their functions, since a
+controller firmware still owns raises SMIs to be handed over; it passes
+what firmware left valid and the ids the IVRS names the chipset's I/O APIC
+and HPET by, on the inference that the chipset raises the platform's SMIs
+under the same ids, which §2.1.5.3 leaves to firmware to name. Every unit's
+filter is off before the reset register or `SLP_EN` is written, since this
+bench resets through `SMI_CMD`. The bench's boot reads which SMIs the
+filter refused, by requester.
 
 Constraints a reader would otherwise pay to re-derive:
 

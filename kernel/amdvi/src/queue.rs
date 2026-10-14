@@ -48,6 +48,9 @@ pub enum Event {
     /// `RX` clear (Figure 64). `write` is the access where the record states
     /// one; `address` is the record's, whatever it names.
     Requester { code: u8, device: u16, address: u64, write: Option<bool> },
+    /// An `IO_PAGE_FAULT` at an SMI's address: an SMI from `device` the
+    /// filter refused (§2.1.5.1), no access of memory.
+    RefusedSmi { device: u16, address: u64 },
     /// Every other record: an entry or command of this driver's the unit
     /// refused, or the unit's own hardware failing.
     Unit { code: u8 },
@@ -58,6 +61,7 @@ pub const fn event(words: [u64; 2]) -> Event {
     let code = (words[0] >> CODE_SHIFT) as u8;
     let write = match code {
         // `I` [51]: an interrupt carries no read or write; else `RW` [53].
+        0b0010 if smi(words[1]) => return Event::RefusedSmi { device, address: words[1] },
         0b0010 if words[0] & 1 << 51 != 0 => None,
         0b0010 => Some(words[0] & 1 << 53 != 0),
         // `RX` [48] set is a `COMPLETE_PPR_REQUEST` of this driver's failing.
@@ -72,10 +76,11 @@ pub const fn event(words: [u64; 2]) -> Event {
 
 /// Whether a record's address is an SMI's (§2.1.5.2, Figure 3 and Table 4):
 /// bits 47:40 zero, `FDF8h` at 39:24, `MT` 0010b at 7 and 4:2, `DM` and
-/// bits 1:0 zero. The SMI filter records a refused SMI as an
-/// `IO_PAGE_FAULT` at that address (§2.1.5.1).
-pub const fn smi(address: u64) -> bool {
-    address & 0xFFFF_FFFF_FF00_00C3 == 0x0000_00FD_F800_0000 && (address >> 2) & 0b111 == 0b010
+/// bits 1:0 zero; bits 63:48 are not the figure's and are not read. The SMI
+/// filter records a refused SMI as an `IO_PAGE_FAULT` at that address
+/// (§2.1.5.1).
+const fn smi(address: u64) -> bool {
+    address & 0x0000_FFFF_FF00_00C3 == 0x0000_00FD_F800_0000 && (address >> 2) & 0b111 == 0b010
 }
 
 /// The name 48882 gives an event code, for a record's line.
