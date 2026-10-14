@@ -21,13 +21,23 @@ busy 0.007) before the job's window cut its first run, which had no later runs
 to compare. The readings are on `ToyOSOrg/evidence` branch `pr-905`,
 `round2/metal/` and `round3/metal/`. Nothing on the host or in QEMU has shown it.
 
-Candidates, none measured: the I219 driven in MSI mode since #917, which came
-into main between the first boot that downloaded fast (the scout's, all six
-runs whole) and these; the client's wake to read; or a connection's warm-up in
-netstack ([tcp]'s receive window grows by what is read per round trip, and a
-lent ring's growth is shown by `a_lent_receive_ring_grows_the_window_as_a_read_does`).
+Measured (PR #933's instrument boot, evidence
+`ToyOSOrg/evidence@8e7a724c625d6a2eb3302becbafbfd6c3e93726a`, `instrument/`):
+every run's headers were a Fastly HIT, and run 1 (2.803 s, 486 Mb/s against
+808 to 867) ran at line rate for 1.25 s and then paused twice, about 400 ms
+each. In the first pause the I219 saw 9 frames on the wire and missed none,
+netstack offered a window of at least 4.13 MB with nothing unread, and no hole,
+retransmission or SACK followed: the sender stopped. Interrupt delivery, the
+window and the client's reads are not the cause. That a HIT node pauses
+mid-body on a boot's first fetch and not after is an inference about the CDN,
+not measured. Unexplained: Ubuntu on the same T14 ran its first fetch at 827
+to 857 Mb/s in six sessions on 2026-10-12.
 
-**Exit condition**: on the T14, `internet_download`'s first run falls within
-the band of the boot's other runs.
+The row is not on main; its job on the measurement tree
+`wt/toyos-first-run-instrument` (f260b64de) fetches the file once, untimed and
+instrumented, before its timed runs.
 
-**Owner**: netstack.
+**Exit condition**: on the T14, `internet_download`'s first timed run after the
+warm-up falls within the band of the boot's other timed runs.
+
+**Owner**: netstack's track, as the row's home.
