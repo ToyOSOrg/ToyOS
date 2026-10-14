@@ -595,6 +595,37 @@ impl Gop {
     }
 }
 
+/// UEFI 2.10's `EFI_EDID_ACTIVE_PROTOCOL`, on the child handle of the video
+/// output it describes.
+#[repr(C)]
+pub struct EdidActive {
+    size_of_edid: u32,
+    edid: *const u8,
+}
+
+const _: () = {
+    assert!(size_of::<EdidActive>() == 16);
+    assert!(offset_of!(EdidActive, edid) == 8);
+};
+
+// SAFETY: the specification's layout, under its GUID.
+unsafe impl Protocol for EdidActive {
+    const GUID: Guid = Guid::new(0xbd8c1056, 0x9f36, 0x44ec, [0x92, 0xa8, 0xa6, 0x33, 0x7f, 0x81, 0x79, 0x86]);
+}
+
+impl EdidActive {
+    /// The EDID's bytes, empty where the output gave none: `SizeOfEdid` is 0
+    /// and `Edid` null then.
+    pub fn bytes(&self) -> &[u8] {
+        if self.edid.is_null() {
+            return &[];
+        }
+        // SAFETY: firmware's read-only buffer of `SizeOfEdid` bytes, live while
+        // the protocol is open.
+        unsafe { core::slice::from_raw_parts(self.edid, self.size_of_edid as usize) }
+    }
+}
+
 /// `EFI_RNG_PROTOCOL` (UEFI 2.10 §37.5.1).
 #[repr(C)]
 pub struct Rng {

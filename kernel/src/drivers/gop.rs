@@ -34,6 +34,7 @@ pub fn init(
     height: u32,
     stride: u32,
     pixel_format: u32,
+    edid: ([u8; toyos_abi::boot::EDID_BLOCK], u32),
 ) -> Option<(Box<dyn Gpu>, GpuInfo)> {
     if let Err(why) = crate::mm::paging::scanout_whole_pages(addr, size) {
         log!("GOP: the scanout at {addr:#x}+{size:#x} is refused: {why}");
@@ -97,6 +98,8 @@ pub fn init(
         stride,
         pixel_format,
         flags: 0,
+        edid: edid.0,
+        edid_len: edid.1,
     };
 
     Some((Box::new(GopGpu), info))

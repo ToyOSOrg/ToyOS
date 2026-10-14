@@ -227,6 +227,8 @@ pub(crate) fn mint_rollback_selftest() {
             stride: 0,
             pixel_format: 0,
             flags: 0,
+            edid: [0; toyos_abi::boot::EDID_BLOCK],
+            edid_len: 0,
         },
         buffers,
     );
