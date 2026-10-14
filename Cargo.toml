@@ -43,6 +43,7 @@ members = [
     "lib/blockring",
     "lib/blockring/transport",
     "lib/bootmap",
+    "lib/crypto",
     "lib/device-memory",
     "lib/disk",
     "lib/elf",

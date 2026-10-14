@@ -2680,17 +2680,21 @@ mod tests {
     /// Features of a host workspace member that choose a build's world rather
     /// than revert a decision: loom's atomics, a crate's `std` and its default
     /// set, the toolchain's `core` and `rustc-dep-of-std`, libc's `std-runtime`,
-    /// the signer's `sign`, and `flaws`, which compiles what a simulator's
-    /// negative gates select at run time.
+    /// the signer's `sign`, `flaws`, which compiles what a simulator's
+    /// negative gates select at run time, and `toyos-crypto`'s `portable`,
+    /// `wpa2` and `rustls-provider`, which `--ci host` tests as forms of its own.
     const NOT_A_CONTROL: &[&str] = &[
         "core",
         "default",
         "flaws",
         "loom",
+        "portable",
         "rustc-dep-of-std",
+        "rustls-provider",
         "sign",
         "std",
         "std-runtime",
+        "wpa2",
     ];
 
     /// The features a kernel build may still carry, and the whole list.

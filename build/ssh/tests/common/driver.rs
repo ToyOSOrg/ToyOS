@@ -5,7 +5,7 @@
 
 use std::fmt::Write as _;
 
-use toyos_ssh::{Authorizer, Event, HostKey, Server};
+use toyos_ssh::{Authorizer, Event, HostKey, Random, Server};
 
 /// The user every recording logs in as.
 pub const USER: &str = "toyos";
@@ -60,9 +60,20 @@ impl Authorizer for Keys {
     }
 }
 
+/// Randomness that is one byte over and over: a recording's server is seeded
+/// with it, so a replay makes the same ephemeral key, cookies and padding.
+pub struct Fixed(pub u8);
+
+impl Random for Fixed {
+    fn fill(&mut self, destination: &mut [u8]) -> Result<(), toyos_crypto::Error> {
+        destination.fill(self.0);
+        Ok(())
+    }
+}
+
 /// Answer every event: an `exec` is greeted with a line naming its command,
 /// stdin is echoed back, and EOF ends the program with [`STATUS`].
-pub fn drive<R: ring::rand::SecureRandom>(server: &mut Server<Keys, R>) -> Vec<Event> {
+pub fn drive<R: Random>(server: &mut Server<Keys, R>) -> Vec<Event> {
     let mut seen = Vec::new();
     while let Some(event) = server.poll() {
         match &event {
