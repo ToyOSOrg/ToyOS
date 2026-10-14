@@ -11,14 +11,14 @@ performance controls through CPPC, not HWP. On both the kernel declares no
 performance request, firmware's values stand, and `SYS_COUNTERS` carries no
 power envelope.
 
-The refusals are `toyos_cpuvuln::hwp`'s (`kernel/cpuvuln/src/hwp.rs`):
-- `HwpRefusal::Hybrid`, for CPUID.(7,0):EDX[15]: the declared minimum is a
-  ratio (`MSR_PLATFORM_INFO[47:40]`), and a hybrid CPU's HWP scale is not its
-  ratio scale.
-- `HwpRefusal::NoHwp`, for CPUID.6:EAX[7] clear, which is where an AMD CPU
+The refusals are `kernel::cpu::hwp`'s (`kernel/pure/cpu.rs`):
+- `HwpRefusal::Hybrid`, for CPUID.(07H,0):EDX[15]. No bench ToyOS has is
+  hybrid, so the declaration cannot be measured on one, and the owner ruled
+  no design for a machine that cannot be measured (#915, ruling B).
+- `HwpRefusal::NoHwp`, for CPUID.06H:EAX[7] clear, which is where an AMD CPU
   with CPPC is refused; its controls are not read.
-- `HwpRefusal::NotIntel`, for HWP on any vendor but Intel, because the
-  minimum comes from `MSR_PLATFORM_INFO`, which is Intel's.
+- `HwpRefusal::NotIntel`, for HWP's bits on any vendor but Intel, where SDM
+  Vol. 1 §21.1.1 gives them no meaning.
 
 `control_regs::hwp_declared` logs the refusal once and declares nothing on
 any CPU.

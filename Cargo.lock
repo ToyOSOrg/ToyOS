@@ -1826,7 +1826,6 @@ dependencies = [
  "toyos-blackbox",
  "toyos-blockhold",
  "toyos-bootmap",
- "toyos-cpuvuln",
  "toyos-dma",
  "toyos-elf",
  "toyos-fat32",
@@ -4144,10 +4143,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toyos-cpuvuln"
-version = "0.1.0"
-
-[[package]]
 name = "toyos-desktop"
 version = "0.1.0"
 dependencies = [
@@ -4305,9 +4300,6 @@ dependencies = [
 [[package]]
 name = "toyos-microcode"
 version = "0.1.0"
-dependencies = [
- "toyos-cpuvuln",
-]
 
 [[package]]
 name = "toyos-mixer"

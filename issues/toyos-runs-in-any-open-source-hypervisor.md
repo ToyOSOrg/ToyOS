@@ -68,10 +68,10 @@ the harness's alone.
 Adaptations that degrade nothing: the TCO table's q35 row (`lib/tco`, armed
 only by the `watchdog` parameter and refused by name elsewhere), netstack's
 82574L row for QEMU's `e1000e`, the hard-lockup bound's path for a machine
-with no PMU, `toyos-cpuvuln`'s reading of `CPUID.1:ECX[31]`, which Intel
+with no PMU, `kernel::cpu`'s reading of `CPUID.1:ECX[31]`, which Intel
 defines as "Not Used: Intel processors always return 0. Allocated for use by
-software emulation" (Intel SDM Vol. 1, 253665-093US, Table 21-9; AMD's APM
-unread), and the loader's read of PI's DXE services (`loader/src/gcd.rs`),
+software emulation" (Intel SDM Vol. 1, 253665-093US, Table 21-9) and AMD as
+the hypervisor's (APM Vol. 3 §E.3.2), and the loader's read of PI's DXE services (`loader/src/gcd.rs`),
 which hands over the root bridges' windows alone where firmware has none.
 
 ## Each hypervisor, x86-64
