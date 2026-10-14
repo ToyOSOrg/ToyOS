@@ -230,41 +230,11 @@ Depends on: nothing; W6 waits on it.
   `build/ssh/tests/fuzz.rs`; and a third-party capture corpus from outside the
   references, beside the crate, with provenance, terms and `NOTICE` rows,
   pinned by hash.
-- **Checked against the text.** W1's readings were checked against IEEE
-  Std 802.11-2024, which incorporates 802.11ax-2021, and the WFA WMM
-  Specification v1.2.0 (#924, issuecomment-6173453493, which has the table
-  with page numbers). W1b fixed what the texts contradict, and the crate now
-  cites them:
-  - **Confirmed:** the protocol version; the four-address layout; Fragment
-    Number and More Fragments; `GroupTransmitter`; the QoS Control
-    subfields; the BAR and BA Type positions and TID_INFO; the
-    bandwidth-signaling TA; the beacon interval and AID; the elements'
-    lengths, the selectors, TIM, Country's string, triplets and operating
-    triplet from 201; RSNE, RSNXE, HT, VHT and HE fields and reserved
-    values; WMM; A-MSDU and its padding; CCMP's Ext IV; the §10.25.6.6
-    window and HE's buffer of 256.
-  - **Fixed:** the HE BlockAck bitmap is 64 or 256 bits (Table 9-38), and
-    B2–B1 of 1 or 3 or B3 set is `Malformed`. A management frame with To DS
-    alone is a QoS management frame, `Unsupported`, while From DS set stays
-    `Malformed` (Table 9-4). +HTC in a non-QoS data frame is `Malformed`
-    (§9.2.4.1.10). The subtypes Table 9-1 reserves are `ReservedSubtype`:
-    data 2, 3, 5 to 7 and 13, control 0, 1 and 15, and extension 2 to 15. A
-    BlockAckReq's nonzero Fragment Number and a reserved BAR or BA Type are
-    `Malformed`. Country channel numbers, a zero first channel or count
-    included, are no longer checked: §10.22.3 has a station ignore the rest
-    of the element at an invalid one. Regulatory Info is bits 3 to 6.
-  - **Leniencies:** octets past the RSNE's last field are refused, because
-    Table 9-130 does not mark it extensible. A Country element of odd length
-    is refused, whether its pad is missing or not needed. Octets past the
-    RSNXE and HT, VHT and HE elements stay ignored, as §10.28.8 requires.
-  - **Outside these texts:** a Length/Type value below 0x0600 is not a type
-    (IEEE Std 802.3-2022 §3.2.6). The RFC 1042 header is checked against
-    RFC 1042. The bridge-tunnel OUI and its two EtherTypes, 0x80F3 and
-    0x8137, are not in RFC 1042. They come from the selective translation
-    table of ISO/IEC TR 11802-5:1997 (formerly IEEE Std 802.1H), which
-    §5.1.4 names and which we do not have.
-  - **Owed:** those two entries checked against ISO/IEC TR 11802-5:1997.
-    Owner: the orchestrator.
+- **Landed** in #924 and #930; the exit is met, the readings checked
+  against the text (#924, issuecomment-6173453493).
+- **Owed:** the bridge-tunnel OUI 00-00-F8 and its EtherTypes 0x80F3 and
+  0x8137 checked against ISO/IEC TR 11802-5:1997. Owner: the orchestrator.
+  Exit: checked, and fixed in `lib/ieee80211/src/data.rs` if contradicted.
 
 **W2, the handshakes, in `wlan`**, sans-IO: the 4-way and group-key
 handshakes, SAE by hash-to-element, PMF's keys, and the Transition Disable
@@ -317,7 +287,8 @@ W2.
 networks, an access point at the T14's bench serving a WPA2-Personal network
 and a WPA3-Personal one by hash-to-element, with PMF and HE, an instrument
 the orchestrator owns. Exit: a T14 row reads the firmware up, its MAC
-address, and the test network seen. The network's name arrives per run
+address, and the test network seen, its beacon's Country element read: a
+missing pad (`CountryPad`) refuses the whole beacon. The network's name arrives per run
 through a test job holding `wifi`, so no shipping path reads the ESP.
 
 **W6, the first version: a full-rate join.** Depends on: W5 and its test
@@ -328,6 +299,8 @@ networks, P4, P5, P6, P8.
   - each channel's limit as the tighter of the platform's table and the
     AP's country element;
   - a country element that would raise a limit;
+  - under operating classes, a country element with an invalid first
+    channel or a reserved class read up to it, as §10.22.3 has;
   - a platform with no table, refused by name.
 - **Exit, T14 rows:**
   - WPA2 and WPA3 joins, each with a lease, DNS and TCP;
