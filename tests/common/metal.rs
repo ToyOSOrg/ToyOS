@@ -804,7 +804,8 @@ fn build(
     let deadline = format!("{}{}", toyos_tco::DEADLINE_PARAM, batch.deadline_ms());
     let mut params: Vec<&str> = batch.params.clone();
     params.push(&deadline);
-    let plan = toyos_build::build::Plan::new(toyos_build::arch::Arch::X86_64, &config, features, &params);
+    let mut plan = toyos_build::build::Plan::new(toyos_build::arch::Arch::X86_64, &config, features, &params);
+    plan.machines = toyos_build::microcode::Machines::Benches;
     let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
     let image = home.join("image.img");
     std::fs::write(&image, &bytes).map_err(|e| format!("{}: {e}", image.display()))?;

@@ -805,8 +805,8 @@ pub const TRUST_ROOTS_LICENCE: (&str, &[u8]) = (
     include_bytes!("../licenses/CDLA-Permissive-2.0-webpki-root-certs.txt"),
 );
 
-/// Where on ROOT the licences of the vendor microcode an x86-64 kernel embeds
-/// are, and their texts: each licence asks that a redistribution carry it.
+/// Where on ROOT the licences of the vendor microcode an x86-64 image may
+/// carry are, and their texts: each licence asks that a redistribution carry it.
 pub const MICROCODE_LICENCES: [(&str, &[u8]); 2] = [
     ("share/licenses/AMD-microcode-license.txt", include_bytes!("../licenses/AMD-microcode-license.txt")),
     ("share/licenses/Intel-microcode-license.txt", include_bytes!("../licenses/Intel-microcode-license.txt")),
@@ -827,6 +827,7 @@ fn build_and_assemble(
     extra_files: &[(String, Vec<u8>)],
     quiet: bool,
     arch: Arch,
+    machines: crate::microcode::Machines,
 ) -> Vec<u8> {
     // Before anything is built, so a file edited during the build is not
     // credited to the state it was read in.
@@ -848,7 +849,8 @@ fn build_and_assemble(
     root_files.push((TRUST_ROOTS_LICENCE.0.to_string(), TRUST_ROOTS_LICENCE.1.to_vec()));
     match arch {
         Arch::X86_64 => {
-            root_files.extend(MICROCODE_LICENCES.iter().map(|(path, text)| (path.to_string(), text.to_vec())))
+            root_files.extend(MICROCODE_LICENCES.iter().map(|(path, text)| (path.to_string(), text.to_vec())));
+            root_files.extend(crate::microcode::root_files(root, machines));
         }
         Arch::Aarch64 => {}
     }
@@ -990,6 +992,8 @@ pub struct Plan {
     pub params: Vec<String>,
     /// The version the image's signed header names.
     pub version: u64,
+    /// Which machines' microcode ROOT carries.
+    pub machines: crate::microcode::Machines,
 }
 
 impl Plan {
@@ -1000,6 +1004,7 @@ impl Plan {
             features: features.iter().map(|f| (*f).to_string()).collect(),
             params: params.iter().map(|p| (*p).to_string()).collect(),
             version: image::version_now(),
+            machines: crate::microcode::Machines::Qemu,
         }
     }
 }
@@ -1028,6 +1033,14 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
         features: features.split(',').filter(|f| !f.is_empty()).map(Into::into).collect(),
         params: param,
         version: image::version_now(),
+        // An image built and not booted here leaves this host for a machine.
+        machines: if flags::CARGO_RUN.present(args, &flags::BUILD_ONLY)
+            || flags::CARGO_RUN.present(args, &flags::UPDATE_IMAGE)
+        {
+            crate::microcode::Machines::Release
+        } else {
+            crate::microcode::Machines::Qemu
+        },
     }
 }
 
@@ -1833,7 +1846,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
         )
     };
 
-    let root_bytes = build_and_assemble(root, &config, &env, &[], false, arch);
+    let root_bytes = build_and_assemble(root, &config, &env, &[], false, arch, plan.machines);
 
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
     (kernel_bytes, bl_bytes, root_bytes)
@@ -1935,6 +1948,7 @@ fn root_image_key(plan: &Plan, image_key: &str, extra_files: &[(String, Vec<u8>)
     let mut h = std::collections::hash_map::DefaultHasher::new();
     plan.config.hash(&mut h);
     plan.arch.hash(&mut h);
+    plan.machines.hash(&mut h);
     image_key.hash(&mut h);
     for (name, data) in extra_files {
         name.hash(&mut h);
@@ -2052,7 +2066,7 @@ pub fn build_test_parts(
     };
 
     let root_bytes = ROOT_IMAGE.get_or_build(root_image_key, || {
-        build_and_assemble(root, &config, &env, extra_files, quiet, arch)
+        build_and_assemble(root, &config, &env, extra_files, quiet, arch, plan.machines)
     });
 
     drop(building);
@@ -3400,6 +3414,8 @@ mod tests {
                 found.push(format!("{dir}/{}", entry.unwrap().file_name().to_string_lossy()));
             }
         }
+        // Beside the configs, and none: the patches each kind of image carries.
+        found.retain(|file| file != crate::microcode::LISTS);
         found.sort();
         let mut expected: Vec<String> = ALL_CONFIGS.iter().map(|s| s.to_string()).collect();
         expected.sort();

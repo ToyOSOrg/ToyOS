@@ -1,6 +1,5 @@
-//! Intel's updates as Intel publishes them, updates built here to the SDM's
-//! layout for every refusal and every arm the real files do not reach, and
-//! whether a CPU loads at all.
+//! Intel's files as Intel publishes them, and updates built here to the SDM's
+//! layout for every refusal and every arm the real files do not reach.
 
 #![allow(
     clippy::indexing_slicing,
@@ -11,10 +10,7 @@
     reason = "a test fails by panicking"
 )]
 
-extern crate std;
-
-use std::vec;
-use std::vec::Vec;
+use toyos_microcode::{Cpu, PlatformId};
 
 use super::*;
 
@@ -22,16 +18,15 @@ use super::*;
 const T14_FILE: &[u8] = include_bytes!("../intel-ucode/06-8c-01");
 
 /// `intel-ucode/06-cc-02`, pinned by its digest in `NOTICE`: one update,
-/// revision 0x11c, Data Size 0x2878c, flags 0x94, and an extended signature
-/// table whose last entry is 0xe0652 with flags 0x94.
+/// revision 0x11c, for 0xc06c1 with flags 0x94, and four extended
+/// signatures with those flags, the first 0xc06c1 again and the last
+/// 0xe0652.
 const CC02_FILE: &[u8] = include_bytes!("../intel-ucode/06-cc-02");
 
-/// The T14's i5-1135G7 at the revision its firmware loads.
-const T14: Cpu = Cpu {
-    signature: Signature(0x0008_06c1),
-    platform: PlatformId(7),
-    revision: Revision(0xbe),
-};
+/// The T14's i5-1135G7: platform 7 as all eight of its CPUs read
+/// `IA32_PLATFORM_ID`.
+const T14_SIGNATURE: u32 = 0x0008_06c1;
+const T14_PLATFORM: PlatformId = PlatformId::from_msr(0x001c_0000_0000_0000);
 
 fn get(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
@@ -80,47 +75,42 @@ fn build(signature: u32, flags: u32, revision: u32, extended: &[(u32, u32)]) -> 
 }
 
 fn refusal(file: &[u8]) -> Refused {
-    select(file, &T14).expect_err("a malformed file selects nothing")
+    updates(file).expect_err("a malformed file is refused")
+}
+
+/// Every CPU `file`'s updates name, as `(signature, platform flag, revision)`.
+fn named(file: &[u8]) -> Vec<(u32, u32, u32)> {
+    let updates = updates(file).unwrap_or_else(|refused| panic!("{refused:?}"));
+    updates
+        .iter()
+        .flat_map(|update| update.patches())
+        .map(|(cpu, patch)| match cpu {
+            Cpu::Intel { signature, platform } => (signature, platform.flag(), patch.revision),
+            Cpu::Amd { .. } => panic!("an Intel update names an AMD CPU"),
+        })
+        .collect()
 }
 
 #[test]
-fn the_t14_runs_intels_newest_update_for_its_cpu() {
-    assert_eq!(select(T14_FILE, &T14), Ok(Choice::Current(Revision(0xbe))));
+fn the_t14s_file_is_one_update_for_the_t14_alone_and_whole() {
+    let [update] = updates(T14_FILE).unwrap()[..] else { panic!("06-8c-01 holds one update") };
+    let patches: Vec<_> = update.patches().collect();
+    let cpu = Cpu::Intel { signature: T14_SIGNATURE, platform: T14_PLATFORM };
+    assert_eq!(patches, [(cpu, Patch { revision: 0xbe, bytes: T14_FILE })]);
 }
 
 #[test]
-fn a_t14_below_it_loads_its_data_which_follows_the_header() {
-    let older = Cpu { revision: Revision(0xbd), ..T14 };
-    let Ok(Choice::Load(update)) = select(T14_FILE, &older) else { panic!("0xbe is newer than 0xbd") };
-    assert_eq!(update.revision(), Revision(0xbe));
-    assert_eq!(update.data(), &T14_FILE[HEADER..]);
-}
-
-#[test]
-fn another_platform_or_stepping_is_not_named() {
-    for platform in 0..7 {
-        assert_eq!(select(T14_FILE, &Cpu { platform: PlatformId(platform), ..T14 }), Ok(Choice::NoMatch));
+fn an_extended_signature_in_intels_file_names_its_cpus() {
+    let named = named(CC02_FILE);
+    // The header's signature and the four extended ones, each on the three
+    // platforms of flags 0x94.
+    assert_eq!(named.len(), 15, "{named:x?}");
+    for flag in [0x04, 0x10, 0x80] {
+        assert!(named.contains(&(0x000e_0652, flag, 0x11c)), "0xe0652 on platform flag {flag:#x}");
     }
-    let stepping_2 = Cpu { signature: Signature(0x0008_06c2), ..T14 };
-    assert_eq!(select(T14_FILE, &stepping_2), Ok(Choice::NoMatch));
-}
-
-#[test]
-fn an_extended_signature_in_intels_file_names_its_cpu() {
-    let below = Cpu { signature: Signature(0x000e_0652), platform: PlatformId(7), revision: Revision(0x11b) };
-    let Ok(Choice::Load(update)) = select(CC02_FILE, &below) else { panic!("0x11c is newer than 0x11b") };
-    assert_eq!(update.revision(), Revision(0x11c));
-    assert!(update.data() == &CC02_FILE[HEADER..HEADER + 0x2878c], "the data is not the file's");
-    let current = Cpu { revision: Revision(0x11c), ..below };
-    assert_eq!(select(CC02_FILE, &current), Ok(Choice::Current(Revision(0x11c))));
-    assert_eq!(select(CC02_FILE, &Cpu { platform: PlatformId(0), ..below }), Ok(Choice::NoMatch));
-}
-
-#[test]
-fn the_msrs_are_read_where_the_sdm_puts_them() {
-    // `IA32_PLATFORM_ID` as all eight of the T14's CPUs read it.
-    assert_eq!(PlatformId::from_msr(0x001c_0000_0000_0000), PlatformId(7));
-    assert_eq!(PlatformId::from_msr(!(7 << 50)), PlatformId(0));
+    assert!(!named.iter().any(|&(_, flag, _)| flag & 0x94 == 0));
+    let [update] = updates(CC02_FILE).unwrap()[..] else { panic!("06-cc-02 holds one update") };
+    assert!(update.patches().all(|(_, patch)| patch.bytes == CC02_FILE), "a patch is not the whole update");
 }
 
 #[test]
@@ -128,7 +118,7 @@ fn a_flipped_bit_anywhere_in_header_or_data_is_refused() {
     let mut file = T14_FILE.to_vec();
     for at in (0..HEADER).chain((HEADER..file.len()).step_by(4093)) {
         file[at] ^= 1;
-        assert!(select(&file, &T14).is_err(), "a flip at byte {at} was accepted");
+        assert!(updates(&file).is_err(), "a flip at byte {at} was accepted");
         file[at] ^= 1;
     }
     file[4096] ^= 1;
@@ -163,7 +153,7 @@ fn a_malformed_update_after_a_good_one_refuses_the_file() {
 #[test]
 fn a_header_or_loader_version_other_than_1_is_refused() {
     for (at, why) in [(0, Refusal::HeaderVersion(2)), (20, Refusal::LoaderRevision(2))] {
-        let mut update = build(T14.signature.0, 0x80, 0xc0, &[]);
+        let mut update = build(T14_SIGNATURE, 0x80, 0xc0, &[]);
         put(&mut update, at, 2);
         reseal(&mut update, 2000);
         assert_eq!(refusal(&update).why, why);
@@ -180,7 +170,7 @@ fn a_size_zero_off_its_granule_or_inside_out_is_refused() {
         (3024, 2048, Refusal::TotalBelowData { total: 2048, data: 3024 }),
     ];
     for (data, total, why) in cases {
-        let mut update = build(T14.signature.0, 0x80, 0xc0, &[]);
+        let mut update = build(T14_SIGNATURE, 0x80, 0xc0, &[]);
         put(&mut update, 28, data);
         put(&mut update, 32, total);
         assert_eq!(refusal(&update).why, why);
@@ -189,31 +179,32 @@ fn a_size_zero_off_its_granule_or_inside_out_is_refused() {
 
 #[test]
 fn any_multiple_of_1024_is_a_total_size() {
-    let mut update = build(T14.signature.0, 0x80, 0xc0, &[]);
+    let mut update = build(T14_SIGNATURE, 0x80, 0xc0, &[]);
     update.resize(3072, 0);
     put(&mut update, 28, 3072 - HEADER as u32);
     put(&mut update, 32, 3072);
     reseal(&mut update, 3072 - HEADER);
-    assert!(matches!(select(&update, &T14), Ok(Choice::Load(_))));
+    assert_eq!(named(&update), [(T14_SIGNATURE, 0x80, 0xc0)]);
 }
 
 #[test]
 fn an_extended_signature_names_a_cpu_the_header_does_not() {
     let other = (0x0008_06c2, 0x01);
-    let t14 = (T14.signature.0, 0x80);
+    let t14 = (T14_SIGNATURE, 0x80);
     for extended in [[other, t14], [t14, other]] {
         let update = build(0x0009_06a3, 0x80, 0xc0, &extended);
-        let Ok(Choice::Load(loaded)) = select(&update, &T14) else { panic!("an entry names the T14") };
-        assert_eq!(loaded.data().len(), 2048 - HEADER - EXT_HEADER - 2 * EXT_SIGNATURE);
+        let named = named(&update);
+        assert!(named.contains(&(T14_SIGNATURE, 0x80, 0xc0)), "{named:x?}");
+        assert!(named.contains(&(0x0008_06c2, 0x01, 0xc0)), "{named:x?}");
     }
-    let wrong_platform = build(0x0009_06a3, 0x80, 0xc0, &[(T14.signature.0, 0x01)]);
-    assert_eq!(select(&wrong_platform, &T14), Ok(Choice::NoMatch));
+    let wrong_platform = build(0x0009_06a3, 0x80, 0xc0, &[(T14_SIGNATURE, 0x01)]);
+    assert!(!named(&wrong_platform).contains(&(T14_SIGNATURE, 0x80, 0xc0)));
 }
 
 #[test]
 fn a_damaged_extended_table_is_refused() {
     let at = 2048 - EXT_HEADER - 2 * EXT_SIGNATURE;
-    let good = build(0x0009_06a3, 0x80, 0xc0, &[(0x0008_06c2, 0x01), (T14.signature.0, 0x80)]);
+    let good = build(0x0009_06a3, 0x80, 0xc0, &[(0x0008_06c2, 0x01), (T14_SIGNATURE, 0x80)]);
 
     let mut entry = good.clone();
     let signature = at + EXT_HEADER + EXT_SIGNATURE;
@@ -233,7 +224,7 @@ fn a_damaged_extended_table_is_refused() {
         assert_eq!(refusal(&wrong).why, Refusal::ExtendedTableSize { len }, "count {count}");
     }
 
-    let mut short = build(T14.signature.0, 0x80, 0xc0, &[]);
+    let mut short = build(T14_SIGNATURE, 0x80, 0xc0, &[]);
     put(&mut short, 28, 1984);
     short[2032..].fill(0);
     reseal(&mut short, 1984);
@@ -241,33 +232,10 @@ fn a_damaged_extended_table_is_refused() {
 }
 
 #[test]
-fn the_newest_update_naming_the_cpu_is_chosen_wherever_it_sits() {
-    let newer = build(T14.signature.0, 0x80, 0xc0, &[]);
-    let other = build(T14.signature.0, 0x01, 0xd0, &[]);
-    for file in [[T14_FILE, &newer[..], &other[..]].concat(), [&other[..], &newer[..], T14_FILE].concat()] {
-        let Ok(Choice::Load(update)) = select(&file, &T14) else { panic!("0xc0 is newer than 0xbe") };
-        assert_eq!(update.revision(), Revision(0xc0));
-    }
-}
-
-#[test]
-fn a_guest_loads_nothing_whatever_revision_it_reports() {
-    for found in [Revision(0xbe), Revision::DISABLED] {
-        assert_eq!(may_load(1 << 31, found), Err(Unloaded::Hypervisor));
-    }
-}
-
-#[test]
-fn revision_0xffffffff_loads_nothing() {
-    assert_eq!(may_load(0, Revision::DISABLED), Err(Unloaded::Disabled));
-    assert_eq!(may_load(0, Revision(0xffff_fffe)), Ok(()));
-}
-
-/// The T14's i5-1135G7 below the update its firmware already runs.
-#[test]
-fn the_embedded_intel_file_hands_the_t14_its_update_16_byte_aligned() {
-    let below = Cpu { revision: Revision(0xbd), ..T14 };
-    let Ok(Choice::Load(update)) = select(&INTEL.0, &below) else { panic!("0xbe is newer than 0xbd") };
-    assert_eq!(update.revision(), Revision(0xbe));
-    assert_eq!(update.data().as_ptr().align_offset(16), 0, "SDM §12.11.6 takes the data 16-byte aligned");
+fn every_update_of_a_file_is_read_and_each_is_whole() {
+    let newer = build(T14_SIGNATURE, 0x80, 0xc0, &[]);
+    let file = [T14_FILE, &newer[..]].concat();
+    let updates = updates(&file).unwrap();
+    assert_eq!(updates.len(), 2);
+    assert!(updates[0].bytes == T14_FILE && updates[1].bytes == &newer[..], "an update is not its own bytes");
 }
