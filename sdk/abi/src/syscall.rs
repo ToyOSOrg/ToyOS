@@ -1363,8 +1363,9 @@ pub struct PciId {
 }
 
 impl PciId {
-    /// `"<vendor>:<device>"`, four lowercase hex digits each; one spelling per
-    /// function, so that comparing the strings compares the functions.
+    /// `"<vendor>:<device>"`, four lowercase hex digits each: the kernel's
+    /// `xhci-leave=` boot parameter. A manifest matcher's card is spelled by
+    /// `toyos-manifest`'s own rule.
     pub fn parse(text: &str) -> Option<Self> {
         let (vendor, device) = text.split_once(':')?;
         Some(Self { vendor: hex16(vendor)?, device: hex16(device)? })
@@ -1535,10 +1536,8 @@ fn decimal_line(text: &str) -> Option<u8> {
 /// ports and lines.
 ///
 /// Every request but a PCI function's is also a `devices` entry, spelled once
-/// here, because four places read that spelling — the build system's gate,
-/// `/system/bin/supervisor`'s mint, the kernel's claim and the claimant's own
-/// lookup — and a second would be a name a config can write and a program
-/// cannot find.
+/// here ([`Self::parse`], [`Self::write_name`]): the manifest that names it and
+/// the claimant that looks its claim up by that name read one spelling.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DeviceRequest {
     Class(DeviceType),
@@ -2744,17 +2743,11 @@ mod tests {
         modules(&answer).for_each(drop);
     }
 
-    /// Four lowercase hex digits each and nothing else, because two spellings
-    /// would be two names for one card: `1af4:41` beside `1af4:0041`, and
-    /// `1AF4:1041` beside `1af4:1041`.
+    /// `xhci-leave=`'s id, four lowercase hex digits each.
     #[test]
-    fn a_pci_id_is_four_lowercase_hex_digits_each_and_nothing_else() {
-        let want = PciId { vendor: 0x1af4, device: 0x1041 };
-        assert_eq!(PciId::parse("1af4:1041"), Some(want));
-        for bad in [
-            "1AF4:1041", "1Af4:1041", "1af4:41", "1af4", "1af4:1041:", "", ":", "zzzz:1041",
-            "1af4:104g",
-        ] {
+    fn the_xhci_leave_parameter_is_an_id_in_four_lowercase_hex_digits_each() {
+        assert_eq!(PciId::parse("8086:9a13"), Some(PciId { vendor: 0x8086, device: 0x9a13 }));
+        for bad in ["8086:9A13", "8086:9a1", "8086", "8086:9a13:"] {
             assert_eq!(PciId::parse(bad), None, "{bad:?} parsed");
         }
     }

@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use toyos_abi::syscall::SyscallError;
 use toyos_manifest::Program;
 
 /// The most starts a service, or one function's processes, spends inside
@@ -28,6 +29,17 @@ impl Budget {
         }
         self.spent.push_back(now);
         true
+    }
+}
+
+/// A wait without parking on a process of the supervisor's own, as an exit
+/// code once it has ended. `WouldBlock` is the one answer that means it runs:
+/// any other refusal of a handle the supervisor holds is its own bug.
+pub fn exited(answer: Result<i32, SyscallError>) -> Option<i32> {
+    match answer {
+        Ok(exit) => Some(exit),
+        Err(SyscallError::WouldBlock) => None,
+        Err(e) => panic!("supervisor: its own process handle refused a wait: {e:?}"),
     }
 }
 
@@ -90,6 +102,20 @@ mod tests {
         assert_eq!(after_end(&row(true), 1, &mut budget, now + WINDOW), AfterEnd::GiveUp);
         let later = now + WINDOW + Duration::from_millis(1);
         assert_eq!(after_end(&row(true), 1, &mut budget, later), AfterEnd::Restart);
+    }
+
+    #[test]
+    fn a_process_runs_only_while_its_wait_would_block() {
+        assert_eq!(exited(Ok(3)), Some(3));
+        assert_eq!(exited(Err(SyscallError::WouldBlock)), None);
+    }
+
+    /// Read as "still running", a refused wait would wake the loop on every
+    /// pass and act on nothing.
+    #[test]
+    #[should_panic(expected = "refused a wait")]
+    fn any_other_answer_to_a_wait_is_the_supervisors_own_bug() {
+        exited(Err(SyscallError::PermissionDenied));
     }
 
     /// An end owed nothing spends nothing.

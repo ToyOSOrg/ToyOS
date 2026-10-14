@@ -3910,11 +3910,15 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
         .map_err(|e| format!("{e}\n{console}"))?;
     let said = serial::Serial::named("the drives boot", console.clone());
     said.must_be_clean()?;
-    let handed: BTreeSet<&str> =
+    let mut handed: Vec<&str> =
         console.lines().filter_map(|l| l.split_once("pcidev: PCI ")?.1.split_once(HANDED).map(|(at, _)| at)).collect();
-    let holding: BTreeSet<&str> =
+    let mut holding: Vec<&str> =
         console.lines().filter_map(|l| l.split_once(HOLDING)?.1.split_whitespace().next()).collect();
-    if handed.len() != 2 || holding != handed {
+    handed.sort_unstable();
+    holding.sort_unstable();
+    // Each function handed over once, to one holder: a list, so a second
+    // hand-over or a second holder of one function is red.
+    if handed.len() != 2 || handed[0] == handed[1] || holding != handed {
         return Err(format!("the kernel handed over {handed:?} and the holders say they hold {holding:?}:\n{console}"));
     }
     let judged = job_window(&mut qemu, "test_rs_drives_judged")?;

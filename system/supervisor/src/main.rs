@@ -2450,9 +2450,9 @@ fn pci_at(at: PciAddr) -> String {
     format!("{:02x}:{:02x}.{}", at.bus, at.dev, at.func)
 }
 
-/// The exit code of `child` once it has ended.
+/// The exit code of `child` once it has ended ([`restart::exited`]).
 fn exit_of(child: &Child) -> Option<i32> {
-    toyos_abi::syscall::process_wait_nonblock(toyos::RawHandle(child.as_raw_handle())).ok()
+    restart::exited(toyos_abi::syscall::process_wait_nonblock(toyos::RawHandle(child.as_raw_handle())))
 }
 
 /// Where the acceptors of the names a started program serves come from.

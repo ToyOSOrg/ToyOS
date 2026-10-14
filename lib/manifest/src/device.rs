@@ -59,7 +59,10 @@ impl PciMatch {
     pub fn parse(text: &str) -> Option<Self> {
         let rest = text.strip_prefix(Self::PREFIX)?;
         let (code, card) = match rest.split_once('/') {
-            Some((code, card)) => (code, Some(PciId::parse(card)?)),
+            Some((code, card)) => {
+                let (vendor, device) = card.split_once(':')?;
+                (code, Some(PciId { vendor: hex16(vendor)?, device: hex16(device)? }))
+            }
             None => (rest, None),
         };
         let mut class = [0u8; 3];
@@ -93,11 +96,20 @@ impl fmt::Display for PciMatch {
 /// Exactly two lowercase hex digits: one spelling per value, because the
 /// label a claim is endowed under is the entry's text.
 fn hex8(text: &str) -> Option<u8> {
+    lower_hex(text, 2).and_then(|v| u8::try_from(v).ok())
+}
+
+/// Exactly four lowercase hex digits, for [`hex8`]'s reason.
+fn hex16(text: &str) -> Option<u16> {
+    lower_hex(text, 4).and_then(|v| u16::try_from(v).ok())
+}
+
+fn lower_hex(text: &str, digits: usize) -> Option<u32> {
     let lowercase = text.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-    if text.len() != 2 || !lowercase {
+    if text.len() != digits || !lowercase {
         return None;
     }
-    u8::from_str_radix(text, 16).ok()
+    u32::from_str_radix(text, 16).ok()
 }
 
 #[cfg(test)]
@@ -140,6 +152,10 @@ mod tests {
             "pci:01:08", "pci:01:08:02:00", "pci:1:08:02", "pci:01:08:0A", "pci:01:08:02/",
             "pci:01:08:02/1B36:0010", "pci:01:08:02/1b36", "pci:01:08:02/1b36:0010/x", "pci:+1:08:02",
             "pci:", "pci",
+            // The card is four lowercase hex digits each and nothing else: two
+            // spellings would be two labels for one claim.
+            "pci:02:00:00/1Af4:1041", "pci:02:00:00/1af4:41", "pci:02:00:00/1af4", "pci:02:00:00/1af4:1041:",
+            "pci:02:00:00/:", "pci:02:00:00/zzzz:1041", "pci:02:00:00/1af4:104g", "pci:02:00:00/+af4:1041",
         ] {
             assert_eq!(PciMatch::parse(bad), None, "{bad} parsed");
             assert_eq!(Entry::parse(bad), None, "{bad} parsed as an entry");

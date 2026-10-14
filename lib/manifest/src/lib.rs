@@ -404,7 +404,9 @@ pub enum RenderError {
     /// would be refused at boot, or two rows would race for one function.
     Overlap { first: (String, String), second: (String, String) },
     /// A `drives` row that also has what one process per function cannot
-    /// carry: `serves`, `roles` or `devices`, or a place in `[boot] start`.
+    /// carry: `serves`, `roles` or `devices`, or a place in `[boot] start` or
+    /// another row's `starts`, either of which would start it holding no
+    /// function.
     Drives { program: String, also: &'static str },
 }
 
@@ -499,6 +501,7 @@ fn claims_apart(manifest: &Manifest) -> Result<(), RenderError> {
                 (!program.roles.is_empty(), "roles"),
                 (!program.devices.is_empty(), "devices"),
                 (manifest.start.contains(&program.name), "[boot] start"),
+                (manifest.programs.iter().any(|row| row.starts.contains(&program.name)), "starts"),
             ];
             if let Some((_, also)) = also.into_iter().find(|(has, _)| *has) {
                 return Err(RenderError::Drives { program: program.name.clone(), also });
@@ -999,6 +1002,7 @@ mod tests {
         assert_eq!(drives(|m| m.programs[0].roles = vec!["data".into()]), refused("roles"));
         assert_eq!(drives(|m| m.programs[0].devices = vec!["keyboard".into()]), refused("devices"));
         assert_eq!(drives(|m| m.start = vec!["a".into()]), refused("[boot] start"));
+        assert_eq!(drives(|m| m.programs[0].starts = vec!["a".into()]), refused("starts"));
     }
 
     #[test]
