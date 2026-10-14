@@ -298,9 +298,8 @@ pub fn init(
     unit::init(rsdp_addr, devices, windows.map(|declared| declared.windows()));
 }
 
-/// Every function the kernel drives has been taken from firmware, and no
-/// claim has been granted yet: what the units guard against a holder may
-/// now be guarded against firmware's handover too.
+/// Once, after every kernel driver has taken its functions from firmware and
+/// before userland runs: AMD-Vi turns its SMI filters on.
 pub fn drivers_settled() {
     unit::drivers_settled();
 }

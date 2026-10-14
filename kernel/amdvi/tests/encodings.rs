@@ -140,7 +140,7 @@ fn a_page_fault_is_its_requesters_with_its_access() {
     let write = [read[0] | word(&[(53, 53, 1)]), read[1]];
     assert!(matches!(event(write), Event::Requester { write: Some(true), .. }));
     let message = [word(&[(15, 0, 0x0303), (51, 51, 1), (53, 53, 1), (63, 60, 2)]), 0xFEE0_0000];
-    assert!(matches!(event(message), Event::Requester { device: 0x0303, write: None, .. }));
+    assert_eq!(event(message), Event::Interrupt { device: 0x0303, address: 0xFEE0_0000 });
 }
 
 /// Every record a requester can cause is its, never the unit's: Figure 62
@@ -296,6 +296,9 @@ fn a_refused_message_is_told_from_a_dma_fault() {
         assert!(matches!(fault(access), Event::Requester { .. }), "{access:#x}");
     }
     assert_eq!(message_type(smi_at | word(&[(7, 7, 1)])), 0b1010);
+    // `I` [51] set: an interrupt request, whatever address it names.
+    let flagged = event([word(&[(15, 0, 0x00A3), (51, 51, 1), (63, 60, 2)]), 0x4000_0000_0000]);
+    assert_eq!(flagged, Event::Interrupt { device: 0x00A3, address: 0x4000_0000_0000 });
 }
 
 /// The ruling on #921: an interrupt-range record from an id the IVRS gives

@@ -151,10 +151,6 @@ page included.** Owner: the orchestrator.
   - `issues/a-bar-behind-a-bridge-with-no-free-2-mib-of-its-windows-is-not-handed-over.md`
     closed, and each of the two placement issues it names closed or its exit
     rewritten to the placement P1 lands;
-  - the exit of
-    `issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`
-    rewritten, from a refused write to the table's page to the NVMe driven
-    through a table in BAR 0;
   - on the AMD bench, `03:00.4` (`xhci-leave=03:00.4`, its MSI-X table in
     BAR 0, its only BAR) claimed with that BAR in place and driven by usbd
     through its own remapping entry, every unit filtering SMIs: the

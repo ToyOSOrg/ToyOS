@@ -48,9 +48,10 @@ pub enum Event {
     /// `RX` clear (Figure 64). `write` is the access where the record states
     /// one; `address` is the record's, whatever it names.
     Requester { code: u8, device: u16, address: u64, write: Option<bool> },
-    /// An `IO_PAGE_FAULT` at an address in the interrupt range: a message
-    /// from `device` the unit refused, an SMI the filter refused among them
-    /// (§2.1.5.1), no access of memory. [`disposition`] says whose it is.
+    /// An `IO_PAGE_FAULT` with `I` set (Table 57) or at an address in the
+    /// interrupt range: a message from `device` the unit refused, an SMI the
+    /// filter refused among them (§2.1.5.1), no access of memory.
+    /// [`disposition`] says whose it is.
     Interrupt { device: u16, address: u64 },
     /// Every other record: an entry or command of this driver's the unit
     /// refused, or the unit's own hardware failing.
@@ -61,9 +62,10 @@ pub const fn event(words: [u64; 2]) -> Event {
     let device = words[0] as u16;
     let code = (words[0] >> CODE_SHIFT) as u8;
     let write = match code {
-        // `I` [51]: an interrupt carries no read or write; else `RW` [53].
-        0b0010 if interrupt_range(words[1]) => return Event::Interrupt { device, address: words[1] },
-        0b0010 if words[0] & 1 << 51 != 0 => None,
+        // `I` [51]: an interrupt, which carries no read or write; else `RW` [53].
+        0b0010 if words[0] & 1 << 51 != 0 || interrupt_range(words[1]) => {
+            return Event::Interrupt { device, address: words[1] }
+        }
         0b0010 => Some(words[0] & 1 << 53 != 0),
         // `RX` [48] set is a `COMPLETE_PPR_REQUEST` of this driver's failing.
         0b1001 if words[0] & 1 << 48 != 0 => return Event::Unit { code },

@@ -225,12 +225,10 @@ Beside that order, each waiting on something outside it:
        over `inspect`; no class is bound, and no shipped image runs it.
        **Left**, first P1 (order item 4), then the whole xHCI, one usbd per
        controller (the orchestrator's stage-0 ruling). pcidev today arms MSI
-       only on a function with no MSI-X, and maps no BAR that holds the
-       table (`kernel/src/pcidev/mod.rs`). QEMU's xHCI keeps its MSI-X table
-       in the BAR that holds the registers, which refuses usbd's claim as it
-       refuses diskserver's
-       (`issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`,
-       whose exit P1 rewrites), so QEMU's spare today is
+       only on a function with no MSI-X, and hands the BAR holding the
+       table over like any other where the machine remaps
+       (`kernel/src/pcidev/mod.rs`). QEMU's xHCI keeps its MSI-X table in
+       the BAR that holds the registers; QEMU's spare today is
        `qemu-xhci,msix=off,msi=on` (`XHCI_SPARE` in `tests/common/qemu.rs`).
        P1 serves usbd when that spare is `qemu-xhci` with its MSI-X left on
        and `usbd_drives_the_spare` passes on it. The T14's xHCI has no MSI-X
