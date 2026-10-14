@@ -6,9 +6,9 @@ opened: 2026-10-04
 
 # A claimed function can storm its CPU
 
-A function a process drives raises its claim slot's interrupt on cpu0 for
-every message it sends — on x86-64 the slot's vector
-(`kernel/src/arch/x86_64/idt/user_dev.rs`), on AArch64 the slot's LPI through
+A function a process drives raises its claim's interrupt on cpu0 for
+every message it sends — on x86-64 the claim's vector
+(`kernel/src/arch/x86_64/idt/user_dev.rs`), on AArch64 the function's LPI through
 the ITS (`kernel/src/arch/aarch64/irqchip/its.rs`) — and `pcidev::isr`
 (`kernel/src/pcidev/mod.rs`) takes each one; nothing bounds how often. Its
 holder programs the device through the BARs it maps, so a hostile or broken

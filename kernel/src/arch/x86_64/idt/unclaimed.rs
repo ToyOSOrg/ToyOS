@@ -1,5 +1,6 @@
 //! Every vector no `idt_vectors!` row claims — one gate that counts and names
 //! it, since a `P = 0` slot escalates to `#DF` and halts the machine namelessly.
+//! A claim vector no claim holds is counted here too ([`count`]).
 //!
 //! The EOI is conditional, as the spurious handler's is (SDM Vol. 3A §11.9): a
 //! genuinely spurious delivery sets no ISR bit, so the handler asks before it
@@ -61,13 +62,13 @@ extern "sysv64" fn took() {
         crate::windows::irqs_masked();
         crate::windows::handler_entered();
     }
-    crate::arch::percpu::irq_took!(Unclaimed);
     match apic::in_service_highest() {
         Some(vector) => {
-            TAKEN[(vector >> 6) as usize].fetch_or(1 << (vector & 63), Ordering::Relaxed);
+            count(vector);
             apic::eoi();
         }
         None => {
+            crate::arch::percpu::irq_took!(Unclaimed);
             NO_ISR.fetch_add(1, Ordering::Relaxed);
         }
     }
@@ -76,6 +77,13 @@ extern "sysv64" fn took() {
         crate::windows::handler_leaving();
         crate::windows::irqs_unmasking();
     }
+}
+
+/// A delivery on `vector` that nothing here handles, counted and remembered;
+/// the caller acknowledges it.
+pub(super) fn count(vector: u8) {
+    crate::arch::percpu::irq_took!(Unclaimed);
+    TAKEN[(vector >> 6) as usize].fetch_or(1 << (vector & 63), Ordering::Relaxed);
 }
 
 /// Whether `vector` has been taken through this gate.

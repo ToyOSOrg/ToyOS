@@ -367,7 +367,7 @@ Each stage names its exit; "measured" means a number from a run.
    before its body) get a test here that reds with `put` written back as one
    `self.buf.write(off, trb)`; x86's TSO hides all three from every guest
    test until then.
-   A claimed function's message is its claim slot's LPI through the GICv3
+   A claimed function's message is its function's LPI through the GICv3
    ITS (`kernel/src/arch/aarch64/irqchip/its.rs`), which `Arch::irqchip`
    gives `cargo run`'s machine and `Profile::VirtIts`, on QEMU's own GIC
    under HVF, whose in-kernel vGIC refuses an ITS. QEMU's SMMUv3
