@@ -438,10 +438,10 @@ mod tests {
         assert_eq!(reserve(&mut runs, &T14_WINDOWS, 2 * MIB), Some(second));
     }
 
-    /// The AMD bench's bus 3 behind its root port, as its boot enumerated it:
-    /// the port forwards `0xd0000000..0xd0700000` and, prefetchable,
+    /// The AMD bench's bus 3 behind its port `00:08.1`, as its boot read it:
+    /// the port forwards `0xd0000000..0xd0500000` and, prefetchable,
     /// `0xfc90000000..0xfca0200000`, and firmware packed every bus-3 BAR into
-    /// them. The loader's declaration for that root is the bench's own.
+    /// them. The declaration is the bench's own loader list.
     mod behind {
         use super::*;
 
@@ -449,7 +449,7 @@ mod tests {
         const PORT: Bridge = Bridge {
             secondary: 3,
             subordinate: 3,
-            memory: Some(Window { start: 0xd000_0000, end: 0xd070_0000 }),
+            memory: Some(Window { start: 0xd000_0000, end: 0xd050_0000 }),
             prefetchable: Some(Window { start: 0xfc_9000_0000, end: 0xfc_a020_0000 }),
         };
         const DECLARED: [RootBridgeWindow; 3] = [
@@ -463,11 +463,13 @@ mod tests {
             std::vec![
                 bar(0xd000_0000, MIB),
                 bar(0xd010_0000, MIB),
+                bar(0xd020_0000, MIB),
                 bar(0xd030_0000, MIB),
                 bar(0xd040_0000, 512 * 1024),
                 bar(0xd048_0000, 256 * 1024),
                 bar(0xd04c_0000, 32 * 1024),
                 bar(0xd04c_8000, 16 * 1024),
+                bar(0xd04c_c000, 8 * 1024),
                 bar(0xd04c_e000, 8 * 1024),
                 bar(0xfc_9000_0000, 256 * MIB),
                 bar(0xfc_a000_0000, 2 * MIB),
@@ -484,8 +486,8 @@ mod tests {
             assert_eq!(behind_bridges(&[PORT], 3, true, true, &mut bus_3(), &DECLARED, 2 * MIB), None);
         }
 
-        /// The same port with 2 MiB of its memory window free: that address,
-        /// and nothing outside the window.
+        /// The same port forwarding 2 MiB more: that address, and nothing
+        /// outside the window.
         #[test]
         fn a_free_run_inside_the_path_is_offered() {
             let port = Bridge { memory: Some(Window { start: 0xd000_0000, end: 0xd080_0000 }), ..PORT };
