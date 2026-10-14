@@ -14,7 +14,7 @@ use crate::fdreq::CloseOnExec;
 use crate::pthread::Lock;
 use crate::time::Timespec;
 
-// Constants (matching POSIX / Linux values)
+// The values `<fcntl.h>` declares.
 
 const O_RDONLY: i32 = 0;
 const O_WRONLY: i32 = 1;
@@ -554,7 +554,7 @@ pub unsafe extern "C" fn posix_madvise(_addr: *mut u8, _len: usize, advice: i32)
     if crate::memreq::is_advice(advice) { 0 } else { EINVAL }
 }
 
-/// Linux's `madvise` (`memreq::madvise_refusal`).
+/// `madvise`, which POSIX does not define (`memreq::madvise_refusal`).
 #[no_mangle]
 pub unsafe extern "C" fn madvise(addr: *mut u8, _len: usize, advice: i32) -> i32 {
     use crate::memreq::AdviceRefusal;

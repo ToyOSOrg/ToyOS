@@ -131,8 +131,9 @@ const HWP_INTERRUPT: u64 = 0;
 /// declared so that firmware does not decide it either.
 const HWP_REQUEST_PKG: u64 = 0x01 | 0xff << 8 | toyos_cpuvuln::HWP_EPP << 24;
 
-/// `IA32_ENERGY_PERF_BIAS` on every CPU: Linux's `ENERGY_PERF_BIAS_NORMAL`
-/// (`arch/x86/include/asm/msr-index.h:858`).
+/// `IA32_ENERGY_PERF_BIAS` on every CPU, on SDM Vol. 3B §17.3.4's scale of 0
+/// (performance) to 15 (energy), where 7 roughly balances the two. No document
+/// names 6: `issues/values-no-document-states-stand-where-another-os-was-their-source.md`.
 const ENERGY_PERF_BIAS: u64 = 6;
 
 /// `CR0` on every CPU: `TS` stays clear because lazy FP switching would leak

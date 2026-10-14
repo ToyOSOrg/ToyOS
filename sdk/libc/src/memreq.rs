@@ -60,8 +60,8 @@ pub(crate) fn is_advice(advice: i32) -> bool {
     (0..=4).contains(&advice)
 }
 
-/// `MADV_DONTNEED`, which Linux's `madvise` answers by discarding the range,
-/// so that it reads back as the file or as zeros.
+/// `MADV_DONTNEED`, which `madvise` answers by discarding the range, so that
+/// it reads back as the file or as zeros.
 const MADV_DONTNEED: i32 = 4;
 
 /// Why `madvise` refuses `advice` at `addr`.
@@ -74,8 +74,8 @@ pub(crate) enum AdviceRefusal {
     Discard,
 }
 
-/// Why Linux's `madvise` of `advice` at `addr` is refused, if it is. Its four
-/// hints are taken, as its manual lets a kernel ignore each.
+/// Why `madvise` of `advice` at `addr` is refused, if it is. Its four hints
+/// are taken, as its manual lets a kernel ignore each.
 pub(crate) fn madvise_refusal(addr: usize, advice: i32) -> Option<AdviceRefusal> {
     if !addr.is_multiple_of(PAGE) || !is_advice(advice) {
         return Some(AdviceRefusal::Invalid);

@@ -20,7 +20,9 @@
 
 use crate::volume::join;
 
-/// The most symlinks one resolution expands, as Linux's `MAXSYMLINKS`.
+/// The most symlinks one resolution expands: POSIX's `{SYMLOOP_MAX}`, which
+/// may be no less than `{_POSIX_SYMLOOP_MAX}`, 8. No document names 40:
+/// `issues/values-no-document-states-stand-where-another-os-was-their-source.md`.
 pub const MAX_LINKS: u32 = 40;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

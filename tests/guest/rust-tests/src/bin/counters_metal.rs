@@ -22,9 +22,10 @@
 //! to the stick, and a second begun then measures that write.
 //!
 //! **Then `loaded`: how late the round's kick reaches each CPU** while a thread
-//! per CPU spawns a program that exits at once, which is the load Linux's
-//! timer reading of this machine was taken under. A round's reader kicks every
-//! other CPU and then stamps its own block, and each CPU stamps its block in
+//! per CPU spawns a program that exits at once, the load
+//! `issues/toyos-beats-linuxs-latency-on-the-t14.md` sets its bar under. A
+//! round's reader kicks every other CPU and then stamps its own block, and each
+//! CPU stamps its block in
 //! its kick handler, so a CPU's stamp less the round's earliest is how late
 //! its kick handler ran, short by however long the earliest came after the
 //! kicks. A round across which a CPU's SMI count moved is dropped, since an

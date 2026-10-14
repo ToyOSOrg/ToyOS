@@ -1,7 +1,7 @@
 //! What libc's memory calls refuse before the kernel or the allocator is
 //! asked: `mmap` a file, executable memory, no bytes, a fixed place off a
 //! page, or no one disposition; `posix_madvise` anything but its five; `madvise` the same, an
-//! address off a page, and Linux's discard.
+//! address off a page, and `MADV_DONTNEED`'s discard.
 
 use crate::memreq::{self, MapRefusal, MAP_ANONYMOUS, MAP_FIXED, MAP_PRIVATE, MAP_SHARED, PROT_EXEC, PROT_READ, PROT_WRITE};
 
@@ -64,7 +64,7 @@ fn posix_madvise_takes_its_five_and_only_them() {
 }
 
 #[test]
-fn madvise_takes_linuxs_hints_and_refuses_its_discard() {
+fn madvise_takes_its_hints_and_refuses_its_discard() {
     use memreq::AdviceRefusal::{Discard, Invalid};
     let page = 0x4000_0000;
     for (addr, advice, want) in [

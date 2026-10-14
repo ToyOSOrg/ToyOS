@@ -31,10 +31,10 @@ const IOMMU_EN: u64 = 1 << 0;
 const EVENT_LOG_EN: u64 = 1 << 2;
 const CMD_BUF_EN: u64 = 1 << 12;
 
-/// `CONTROL` fields firmware may leave on, in Linux's `iommu_disable` order,
-/// each with the `STATUS` bit that says it stopped, or `None` where `CONTROL`
-/// reading back is the answer: the logs and their interrupts before the unit,
-/// which logs nothing once off.
+/// `CONTROL` fields firmware may leave on (48882 §3.4.1, MMIO Offset 0018h),
+/// each with the `STATUS` bit that says it stopped (MMIO Offset 2020h's
+/// `*Run`), or `None` where `CONTROL` reading back is the answer: the logs and
+/// their interrupts before the unit, which logs nothing once off.
 const FIRMWARE_LEFT: [(u64, Option<u32>, &str); 8] = [
     (CMD_BUF_EN, Some(1 << 4), "CmdBufEn"),
     (1 << 3, None, "EventIntEn"),

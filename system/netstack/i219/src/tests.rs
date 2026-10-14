@@ -3100,20 +3100,17 @@ fn the_driver_and_the_macs_statistics_count_the_same_frames() {
 
 /// Each part's table, and the one bit asking for a group sets in it. The
 /// 82574's is §10.2.5.21 with `RCTL.MO` = `00b`, bits 47:36 into 128 dwords;
-/// the PCH MAC's is 612523 §9.5.9.2.23, bits 47:38 into 32. The differential
-/// oracle is Linux's `e1000_hash_mc_addr_generic` (drivers/net/ethernet/intel/
-/// e1000e/mac.c): its own worked example, an address ending
-/// `0x34, 0x56` hashing to `0x563` over a 4096-bit table, and the same
-/// function over `ich8lan.c`'s `mta_reg_count = 32`, a 1024-bit table, where
-/// its shift of two gives `0x158`. `01:00:5e:00:00:fb` — multicast DNS's
-/// group — is `0xFB0` (dword 125, bit 16) on the 82574 and `0x3EC` (dword 31,
-/// bit 12) on the PCH.
+/// the PCH MAC's is 612523 §9.5.9.2.23, bits 47:38 into 32. Intel's worked
+/// example of the 47:36 rule, `12:34:56:78:9A:BC`, is `0xBC9` (8254x Software
+/// Developer's Manual, 317453 rev 4.0, §13.5.1); its bits 47:38 are `0x2F2`.
+/// `01:00:5e:00:00:fb` — multicast DNS's group — is `0xFB0` (dword 125, bit 16)
+/// on the 82574 and `0x3EC` (dword 31, bit 12) on the PCH.
 #[test]
 fn a_multicast_group_sets_the_one_table_bit_its_address_hashes_to() {
     const MDNS: [u8; 6] = [0x01, 0x00, 0x5e, 0x00, 0x00, 0xfb];
-    let linux = [0x12, 0x34, 0x56, 0x78, 0x34, 0x56];
-    assert_eq!(regs::mta_bit_82574(linux), (0x563 >> 5, 0x563 & 0x1F));
-    assert_eq!(regs::mta_bit_pch(linux), (0x158 >> 5, 0x158 & 0x1F));
+    let intel = [0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc];
+    assert_eq!(regs::mta_bit_82574(intel), (0xBC9 >> 5, 0xBC9 & 0x1F));
+    assert_eq!(regs::mta_bit_pch(intel), (0x2F2 >> 5, 0x2F2 & 0x1F));
     assert_eq!(regs::mta_bit_82574(MDNS), (125, 16));
     assert_eq!(regs::mta_bit_pch(MDNS), (31, 12));
     assert_eq!(regs::mta_bit_82574([0x33, 0x33, 0x00, 0x00, 0xf0, 0xff]), (127, 31));
