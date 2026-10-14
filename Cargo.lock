@@ -2033,10 +2033,9 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.2.0"
-source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#d1edcaaddb7d4b651fb996e034d1b5e5ec9aef25"
+source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#836d14f1cca5d3597135216430d296aaa712300e"
 dependencies = [
  "libc",
- "toyos",
  "toyos-abi",
  "wasi",
  "windows-sys 0.61.2",
@@ -2117,6 +2116,7 @@ dependencies = [
  "toyos-net-wire",
  "toyos-pci-claim",
  "toyos-tco",
+ "toyos-transport",
  "toyos-virtio",
 ]
 
@@ -3653,11 +3653,9 @@ dependencies = [
 [[package]]
 name = "socket2"
 version = "0.6.3"
-source = "git+https://github.com/ToyOSOrg/socket2?branch=toyos#1d9025096919dbc95ab647f65b99e2b8dff4664d"
+source = "git+https://github.com/ToyOSOrg/socket2?branch=toyos#12abd8f732277436da2718073cec90f9d2d67f66"
 dependencies = [
  "libc",
- "toyos",
- "toyos-abi",
  "windows-sys 0.61.2",
 ]
 
@@ -4060,6 +4058,7 @@ version = "0.18.0"
 dependencies = [
  "rustc-std-workspace-core",
  "toyos-abi",
+ "toyos-transport",
 ]
 
 [[package]]
@@ -4256,6 +4255,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-ieee80211"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-input"
 version = "0.1.0"
 dependencies = [
@@ -4345,6 +4348,7 @@ dependencies = [
  "etherparse",
  "mio",
  "socket2",
+ "toyos",
  "toyos-dhcp",
  "toyos-dns",
  "toyos-mdns",
@@ -4353,6 +4357,7 @@ dependencies = [
  "toyos-net-tcp",
  "toyos-net-udp",
  "toyos-net-wire",
+ "toyos-transport",
 ]
 
 [[package]]
@@ -4535,6 +4540,7 @@ name = "toyos-transport"
 version = "0.1.0"
 dependencies = [
  "loom",
+ "rustc-std-workspace-core",
  "toyos-untrusted",
 ]
 
@@ -4545,6 +4551,9 @@ version = "0.1.0"
 [[package]]
 name = "toyos-untrusted"
 version = "0.1.0"
+dependencies = [
+ "rustc-std-workspace-core",
+]
 
 [[package]]
 name = "toyos-update"

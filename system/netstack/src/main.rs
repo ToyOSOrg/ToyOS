@@ -1,19 +1,20 @@
 //! The network server: one Ethernet card claimed from the kernel, ToyOS's own
-//! stack over it (`toyos-net-node`), served to programs over the pipe ABI
-//! (`toyos::net`).
+//! stack over it (`toyos-net-node`), served to programs over `toyos::net`'s
+//! protocol.
 //!
 //! **This program holds no protocol and reads no frame.** Every byte off the
 //! wire goes to the node as the card handed it over, and every decision about
 //! an address, a socket or a segment is the node's. What is here is what the
 //! node cannot do and stay pure: the card (`card`), the clock, the kernel's
-//! random source, the kernel's pipes (`pipes`), the clients' connections
-//! (`client`) and their requests (`serve`).
+//! random source, the regions clients lend (`lent`), the kernel's pipes
+//! (`pipes`), the clients' connections (`client`) and their requests
+//! (`serve`).
 //!
 //! **One pass**: the card's link and its received frames, as one batch, go to the node, then
 //! every deadline that is due, then the node is offered the card's transmit
 //! room until it has no frame left or the card no room; what the node has to
 //! say is written to the log and to the clients that waited for it; and the
-//! loop sleeps on the kernel until the card, a client, a watched pipe or the
+//! loop sleeps on the kernel until the card, a client, a watched handle or the
 //! node's next deadline wakes it. A request is carried out in the pass that
 //! read it and its frames leave in the next, which follows at once.
 //!
@@ -46,6 +47,7 @@ use toyos_net_wire::Instant;
 mod card;
 mod client;
 mod i219;
+mod lent;
 mod pipes;
 mod serve;
 mod virtio_net;
@@ -87,24 +89,24 @@ pub const HOSTNAME: &str = "toyos-t14";
 /// boot and a lease that lands later is applied like any other.
 const LEASE_BOUND: Duration = Duration::from_millis(toyos_tco::LEASE_BOUND_MS);
 
-/// The most payload each direction of a connection buffers in the stack, and
-/// so the most a window offers: gigabit for a round trip up to 33 ms, at
-/// window scale 7. Storage is taken as text is held, and the receive side
-/// grows to this only as its reader keeps up (`toyos-net-tcp`'s `rx`).
-const TCP_BUFFER: u32 = 4 << 20;
+/// The most a connection's receive buffer grows to, and so the most a window
+/// offers: gigabit for a round trip up to 33 ms, at window scale 7. It is the
+/// region's receive ring, and the receive side grows to it only as its reader
+/// keeps up (`toyos-net-tcp`'s `rx`); a send buffer is the region's send ring.
+const TCP_BUFFER: u32 = toyos::net::stream::RECEIVE_BYTES;
 
 /// A kernel pipe is one 2 MiB page (`kernel/src/pipe.rs`). The client
 /// allocates it, and netstack holding its far end is what keeps it alive.
 const PIPE_BYTES: u64 = 2 * 1024 * 1024;
 
 /// What one place can make this machine hold, at the largest of the three
-/// things a place is (`toyos-net-node`'s `places`): a stream, its two pipes
-/// and two buffers; a listener, whose peers fill its queue of `LISTEN_READY`
-/// finished connections with an initial receive buffer of text each, nobody
-/// reading them to grow one, and its wake pipe; a datagram socket, its two
-/// pipes and two queues.
+/// things a place is (`toyos-net-node`'s `places`): a stream, its region and
+/// the pipes of its connection and its bell; a listener, whose peers fill its
+/// queue of `LISTEN_READY` finished connections with an initial receive buffer
+/// of text each, nobody reading them to grow one, and its wake pipe; a
+/// datagram socket, its two pipes and two queues.
 const PLACE_BYTES: u64 = {
-    let stream = 2 * PIPE_BYTES + 2 * TCP_BUFFER as u64;
+    let stream = toyos::net::stream::REGION_BYTES as u64 + 3 * PIPE_BYTES;
     let listener = toyos_net_tcp::limits::LISTEN_READY as u64 * toyos_net_tcp::limits::RECEIVE_BUFFER_INITIAL as u64 + PIPE_BYTES;
     let datagram = 2 * PIPE_BYTES + (toyos_net_udp::limits::RX_BYTES + toyos_net_udp::limits::TX_BYTES) as u64;
     assert!(stream >= listener && stream >= datagram);
@@ -123,11 +125,11 @@ const PLACE_BUDGET_SHARE: u64 = 8;
 /// Watches that are no place's: the service's acceptor and the card's claim.
 const FIXED_WATCHES: u32 = 2;
 
-/// The most places one poller can watch: every place's pipes are asked about
-/// in the same batch as the fixed watches, the connections that have not said
-/// what they want and the lookups' clients.
-const MAX_PLACES: u32 =
-    (Poller::MAX_HANDLES - FIXED_WATCHES - MAX_PENDING_CONNS - serve::LOOKUP_WATCHES) / serve::WATCHES_PER_PLACE;
+/// The most places one poller can watch: each place is one watched handle, a
+/// stream's connection, a listener's wake pipe or a datagram socket's receive
+/// pipe, asked about in the same batch as the fixed watches, the connections
+/// that have not said what they want and the lookups' clients.
+const MAX_PLACES: u32 = Poller::MAX_HANDLES - FIXED_WATCHES - MAX_PENDING_CONNS - serve::LOOKUP_WATCHES;
 
 /// How many places the node is given, of `total_mem` bytes of physical
 /// memory: its share by what a place costs, at least one, at most what the
@@ -332,7 +334,7 @@ fn main() {
     let config = Config {
         mac: IndividualMac::new(MacAddr(mac)).unwrap_or_else(|| panic!("netstack: the card's address is a group's")),
         receive_buffer: TCP_BUFFER,
-        send_buffer: TCP_BUFFER,
+        send_buffer: toyos::net::stream::SEND_BYTES,
         secrets: secrets(),
     };
     let host = HostName::new(HOSTNAME).unwrap_or_else(|| panic!("netstack: {HOSTNAME:?} is no host name"));
@@ -364,7 +366,7 @@ fn main() {
     }
 
     let mut poller = watches::Watches::new(
-        FIXED_WATCHES + serve::WATCHES_PER_PLACE * MAX_PLACES + MAX_PENDING_CONNS + serve::LOOKUP_WATCHES,
+        FIXED_WATCHES + MAX_PLACES + MAX_PENDING_CONNS + serve::LOOKUP_WATCHES,
     );
     const TOKEN_ACCEPTOR: u64 = 0;
     const TOKEN_NIC: u64 = 1;
@@ -417,7 +419,7 @@ fn main() {
 
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPTOR);
         poller.watch(card.claim(), READABLE, TOKEN_NIC);
-        sockets.watch(&node, &mut poller);
+        sockets.watch(&mut poller);
         for p in pending.iter() {
             poller.watch(&p.conn, READABLE, TOKEN_PENDING_BASE + p.conn.as_handle().0 as u64);
         }

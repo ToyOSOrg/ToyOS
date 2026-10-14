@@ -6,6 +6,10 @@
 //! - **A hostile peer** leaves the honest end with entries, nothing, or a
 //!   named violation, and never more entries than the ring holds. `no-clamp`
 //!   believes the peer.
+//! - **A session's three waits**, each over `session`'s own sequences: a
+//!   reader and a writer asleep at once, a poll beside a blocking call of one
+//!   direction, and a source registered while its direction is ready. Each
+//!   case names the controls that red it.
 //!
 //!   cargo test -p toyos-transport --features <control> --test loom
 
@@ -273,4 +277,483 @@ fn a_producer_that_looked_again_is_rung_for_room_it_missed() {
         send(&s, &mut tx, 0xA5);
         assert_eq!(consumer.join().expect("the consumer thread"), 0x5A);
     });
+}
+
+// ---- a session: the client's sequences and the server's rings ----
+//
+// The models below drive `session`'s own code: the client's `read`, `write`,
+// `watch`, `unwatch` and `register` and the server's `publish`, `release`,
+// `finish`, `fail` and `rung`. A doorbell is a kernel pipe as the client waits
+// on it: a ring writes a byte and posts its watch, a blocking wait and a drain
+// take every byte there, and a watch is answered at once if the pipe holds a
+// byte when it is registered, and otherwise by whether it holds one when its
+// submitter looks after a post, armed again if it does not
+// (`kernel/src/inbox/polls.rs`, `deliver`). loom fails a run that ends with a
+// thread waiting. Shared by `Rc`, as the stream models above are.
+
+use loom::sync::atomic::AtomicBool;
+use loom::sync::{Condvar, Mutex};
+use toyos_transport::session::{
+    self, Bells, Doorbell, Layout, Lock, Mode, Polled, Receiving, Refused, Rings, Sending, Server, Took, Waited, Way,
+};
+
+/// Every session model explores its interleavings with at most this many
+/// preemptions unless `LOOM_MAX_PREEMPTIONS` names another bound, as the
+/// kernel's own models bound theirs.
+const PREEMPTIONS: usize = 5;
+
+fn bounded(model: impl Fn() + Sync + Send + 'static) {
+    let mut builder = loom::model::Builder::new();
+    if builder.preemption_bound.is_none() {
+        builder.preemption_bound = Some(PREEMPTIONS);
+    }
+    builder.check(model);
+}
+
+const BYTES: u32 = 2;
+const SESSION_WORDS: usize = 10;
+const SESSION: Layout<BYTES, BYTES, SESSION_WORDS> = Layout::new::<8, 9>(
+    stream::Place::new::<0, 1, 2, 3, 0>(),
+    stream::Place::new::<4, 5, 6, 7, { BYTES as usize }>(),
+);
+/// A failure the server stores in the receive ring's `end`.
+const RESET: u32 = 2;
+
+type Rx = Receiving<BYTES, SESSION_WORDS>;
+type Tx = Sending<BYTES, SESSION_WORDS>;
+
+/// A one-byte doorbell pipe.
+struct Pipe {
+    level: Mutex<Level>,
+    posted: Condvar,
+}
+
+struct Level {
+    bytes: u32,
+    posts: u32,
+}
+
+impl Pipe {
+    fn new() -> Self {
+        Self { level: Mutex::new(Level { bytes: 0, posts: 0 }), posted: Condvar::new() }
+    }
+
+    /// `SYS_WRITE` of one byte: the watch's post wakes every waiter.
+    fn ring(&self) {
+        let mut level = self.level.lock().unwrap();
+        level.bytes += 1;
+        level.posts += 1;
+        self.posted.notify_all();
+    }
+
+    /// A nonblocking `SYS_READ` of every byte there: whether there was one.
+    fn drain(&self) -> bool {
+        let mut level = self.level.lock().unwrap();
+        std::mem::replace(&mut level.bytes, 0) != 0
+    }
+
+    /// A blocking `SYS_READ` and the drain after it.
+    fn wait(&self) {
+        let mut level = self.level.lock().unwrap();
+        while level.bytes == 0 {
+            level = self.posted.wait(level).unwrap();
+        }
+        level.bytes = 0;
+    }
+
+    /// `OP_WATCH` for reading, registered and waited on.
+    fn watch(&self) {
+        let mut seen = {
+            let level = self.level.lock().unwrap();
+            if level.bytes != 0 {
+                return;
+            }
+            level.posts
+        };
+        loop {
+            {
+                let mut level = self.level.lock().unwrap();
+                while level.posts == seen {
+                    level = self.posted.wait(level).unwrap();
+                }
+            }
+            let level = self.level.lock().unwrap();
+            if level.bytes != 0 {
+                return;
+            }
+            seen = level.posts;
+        }
+    }
+}
+
+/// A half behind loom's mutex.
+struct Held<T>(Mutex<T>);
+
+impl<T> Lock<T> for Held<T> {
+    fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
+        f(&mut self.0.lock().unwrap())
+    }
+}
+
+/// One session: its words and bytes, the client's two halves, the client's two
+/// doorbells and the server's one.
+struct Session {
+    page: [Shared; SESSION_WORDS],
+    bytes: [Cell<u32>; 2 * BYTES as usize],
+    rx: Held<Rx>,
+    tx: Held<Tx>,
+    connection: Pipe,
+    bell: Pipe,
+    server: Pipe,
+    /// The client is done: the server's loop ends at its next ring.
+    quit: AtomicBool,
+}
+
+/// The client's doorbells, which never hang up and take no deadline.
+impl Bells for Session {
+    type Until = ();
+
+    fn drain(&self, bell: Doorbell) -> Took {
+        if self.pipe(bell).drain() { Took::Rung } else { Took::Nothing }
+    }
+
+    fn wait(&self, bell: Doorbell, _: Option<()>) -> Waited {
+        self.pipe(bell).wait();
+        Waited::Rung
+    }
+
+    fn ring(&self) {
+        self.server.ring();
+    }
+}
+
+impl Session {
+    fn new() -> (Rc<Self>, Server<BYTES, BYTES, SESSION_WORDS>) {
+        let page: [Shared; SESSION_WORDS] = core::array::from_fn(|_| Shared(AtomicU32::new(0)));
+        let (rx, tx) = session::client(&page, SESSION);
+        let server = Server::new(&page, SESSION);
+        let s = Session {
+            page,
+            bytes: core::array::from_fn(|_| Cell::new(0)),
+            rx: Held(Mutex::new(rx)),
+            tx: Held(Mutex::new(tx)),
+            connection: Pipe::new(),
+            bell: Pipe::new(),
+            server: Pipe::new(),
+            quit: AtomicBool::new(false),
+        };
+        (Rc::new(s), server)
+    }
+
+    fn pipe(&self, bell: Doorbell) -> &Pipe {
+        match bell {
+            Doorbell::Connection => &self.connection,
+            Doorbell::Bell => &self.bell,
+        }
+    }
+
+    /// The server's rings.
+    fn rings(&self, rings: Rings) {
+        if rings.connection {
+            self.connection.ring();
+        }
+        if rings.bell {
+            self.bell.ring();
+        }
+    }
+
+    /// The client reads one byte, waiting or not.
+    fn read(&self, mode: Mode<()>) -> Result<u32, Refused> {
+        session::read(&self.page, &self.rx, self, mode, 1, |span, _| {
+            for at in span.offset..span.offset + span.len {
+                self.bytes[at].get();
+            }
+        })
+    }
+
+    /// The client writes one byte, waiting or not.
+    fn write(&self, mode: Mode<()>) -> Result<u32, Refused> {
+        session::write(&self.page, &self.tx, self, mode, 1, |span, _| {
+            for at in span.offset..span.offset + span.len {
+                self.bytes[at].set(0x5A);
+            }
+        })
+    }
+
+    /// The client fills its send ring, before the server's thread runs.
+    fn fill(&self) {
+        for _ in 0..BYTES {
+            assert_eq!(self.write(Mode::Nonblocking), Ok(1));
+        }
+    }
+
+    /// The server publishes `n` bytes into an empty receive ring, which it
+    /// copies into first.
+    fn publish(&self, server: &mut Server<BYTES, BYTES, SESSION_WORDS>, n: u32) {
+        for at in 0..n as usize {
+            self.bytes[at].set(0xA5);
+        }
+        self.rings(server.publish(&self.page, n).expect("the client keeps the protocol"));
+    }
+
+    /// The server takes back `n` bytes of the send ring.
+    fn release(&self, server: &mut Server<BYTES, BYTES, SESSION_WORDS>, n: u32) {
+        assert_eq!(server.sent(&self.page), Ok(BYTES), "the client filled its send ring");
+        self.rings(server.release(&self.page, n).expect("the client keeps the protocol"));
+    }
+
+    /// The server's loop: each ring of the client's answered by
+    /// [`Server::rung`], until the client is done.
+    fn serve(&self, mut server: Server<BYTES, BYTES, SESSION_WORDS>) {
+        loop {
+            self.server.wait();
+            self.rings(server.rung(&self.page).expect("the client keeps the protocol"));
+            if self.quit.load(Ordering::Acquire) {
+                return;
+            }
+        }
+    }
+
+    /// The client is done, and says so to the server's loop.
+    fn done(&self) {
+        self.quit.store(true, Ordering::Release);
+        self.server.ring();
+    }
+}
+
+/// Which the server's thread does first.
+#[derive(Clone, Copy)]
+enum First {
+    Room,
+    Data,
+}
+
+/// A reader asleep over an empty receive ring and a writer asleep over a full
+/// send ring, while the server releases room and publishes data in either
+/// order: each wakes, as each waits on a doorbell of its own.
+/// `one-doorbell` lets the reader take the writer's wake, or the writer the
+/// reader's.
+fn two_sleepers(first: First) {
+    bounded(move || {
+        let (s, mut server) = Session::new();
+        s.fill();
+        let net = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || match first {
+                First::Room => {
+                    s.release(&mut server, 1);
+                    s.publish(&mut server, 1);
+                }
+                First::Data => {
+                    s.publish(&mut server, 1);
+                    s.release(&mut server, 1);
+                }
+            })
+        };
+        let reader = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || assert_eq!(s.read(Mode::Blocking(None)), Ok(1)))
+        };
+        assert_eq!(s.write(Mode::Blocking(None)), Ok(1));
+        reader.join().unwrap();
+        net.join().unwrap();
+    });
+}
+
+#[test]
+fn two_sleepers_each_wake_when_room_is_released_first() {
+    two_sleepers(First::Room);
+}
+
+#[test]
+fn two_sleepers_each_wake_when_data_is_published_first() {
+    two_sleepers(First::Data);
+}
+
+/// What the server's thread leaves ready, once, for a blocking call to take
+/// part of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Left {
+    /// Two bytes published; a blocking read takes one.
+    Bytes,
+    /// The receive ring's orderly end; a blocking read answers it.
+    End,
+    /// Two bytes of a full send ring released; a blocking write fills one.
+    Room,
+}
+
+/// A blocking call and a `poll` of one direction, the server making the
+/// direction ready once and then answering each ring: the poll is answered
+/// with the direction ready, whichever of them took the doorbell.
+/// `no-pass-on` lets the blocking call take the wake the poll sleeps over.
+fn same_direction(left: Left) {
+    bounded(move || {
+        let (s, mut server) = Session::new();
+        if left == Left::Room {
+            s.fill();
+        }
+        let net = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || {
+                match left {
+                    Left::Bytes => s.publish(&mut server, 2),
+                    Left::End => s.rings(server.finish(&s.page)),
+                    Left::Room => s.release(&mut server, 2),
+                }
+                s.serve(server);
+            })
+        };
+        let blocking = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || {
+                let answer = if left == Left::Room { s.write(Mode::Blocking(None)) } else { s.read(Mode::Blocking(None)) };
+                let owed = if left == Left::End { 0 } else { 1 };
+                assert_eq!(answer, Ok(owed));
+            })
+        };
+        loop {
+            let polled = if left == Left::Room {
+                session::watch::<_, _, _, Tx, SESSION_WORDS>(&s.page, &s.tx, &*s)
+            } else {
+                session::watch::<_, _, _, Rx, SESSION_WORDS>(&s.page, &s.rx, &*s)
+            };
+            let Polled::Watching(watching) = polled.expect("the server keeps the protocol") else { break };
+            let way = if left == Left::Room { Way::Send } else { Way::Receive };
+            s.pipe(session::doorbell(way)).watch();
+            let ready = if left == Left::Room {
+                session::unwatch::<_, _, _, Tx, SESSION_WORDS>(&s.page, &s.tx, &*s, watching)
+            } else {
+                session::unwatch::<_, _, _, Rx, SESSION_WORDS>(&s.page, &s.rx, &*s, watching)
+            };
+            if ready.expect("the server keeps the protocol") {
+                break;
+            }
+        }
+        blocking.join().unwrap();
+        s.done();
+        net.join().unwrap();
+    });
+}
+
+#[test]
+fn a_poll_beside_a_blocking_read_is_answered_for_the_bytes_it_left() {
+    same_direction(Left::Bytes);
+}
+
+#[test]
+fn a_poll_beside_a_blocking_read_is_answered_for_the_end_it_left() {
+    same_direction(Left::End);
+}
+
+#[test]
+fn a_poll_beside_a_blocking_write_is_answered_for_the_room_it_left() {
+    same_direction(Left::Room);
+}
+
+/// What makes the registered direction ready.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ready {
+    /// A byte in the receive ring.
+    Bytes,
+    /// The receive ring's orderly end.
+    End,
+    /// Room in the send ring: empty at the start where it is ready before the
+    /// registration, released from full where it races it.
+    Room,
+    /// A reset stored while the send ring is full.
+    Reset,
+}
+
+/// A source registered while its direction is ready, or racing the server
+/// making it so, gets its first event: its doorbell is watched, as mio's
+/// select watches it, and each event leads to the nonblocking operation,
+/// until that finds the direction ready. `register-no-arm`,
+/// `register-no-ring` and `register-neither` take the registration's arm or
+/// ring or both away; `want-relaxed` lets a racing server's clear go unseen;
+/// `head-only` makes the reset no readiness to the arm's look or the ring
+/// back.
+fn registered(ready: Ready, racing: bool) {
+    bounded(move || {
+        let (s, mut server) = Session::new();
+        if ready == Ready::Reset || (ready == Ready::Room && racing) {
+            s.fill();
+        }
+        let make_ready = move |s: &Session, server: &mut Server<BYTES, BYTES, SESSION_WORDS>| match ready {
+            Ready::Bytes => s.publish(server, 1),
+            Ready::End => s.rings(server.finish(&s.page)),
+            Ready::Room => s.release(server, 1),
+            Ready::Reset => s.rings(server.fail(&s.page, RESET)),
+        };
+        if !racing && ready != Ready::Room {
+            make_ready(&s, &mut server);
+        }
+        let net = {
+            let s = Rc::clone(&s);
+            loom::thread::spawn(move || {
+                if racing {
+                    make_ready(&s, &mut server);
+                }
+                s.serve(server);
+            })
+        };
+        let send = matches!(ready, Ready::Room | Ready::Reset);
+        let registered = if send {
+            session::register(&s.page, None::<&Held<Rx>>, Some(&s.tx), &*s)
+        } else {
+            session::register(&s.page, Some(&s.rx), None::<&Held<Tx>>, &*s)
+        };
+        registered.expect("the server keeps the protocol");
+        let way = if send { Way::Send } else { Way::Receive };
+        loop {
+            s.pipe(session::doorbell(way)).watch();
+            let answer = if send { s.write(Mode::Nonblocking) } else { s.read(Mode::Nonblocking) };
+            match answer {
+                Err(Refused::WouldBlock) => {}
+                Ok(_) | Err(Refused::Failed(RESET)) => break,
+                Err(other) => panic!("the operation answered {other:?}"),
+            }
+        }
+        s.done();
+        net.join().unwrap();
+    });
+}
+
+#[test]
+fn a_source_registered_after_bytes_arrived_gets_its_first_event() {
+    registered(Ready::Bytes, false);
+}
+
+#[test]
+fn a_source_registered_as_bytes_arrive_gets_its_first_event() {
+    registered(Ready::Bytes, true);
+}
+
+#[test]
+fn a_source_registered_after_the_end_gets_its_first_event() {
+    registered(Ready::End, false);
+}
+
+#[test]
+fn a_source_registered_as_the_end_arrives_gets_its_first_event() {
+    registered(Ready::End, true);
+}
+
+#[test]
+fn a_source_registered_with_room_gets_its_first_event() {
+    registered(Ready::Room, false);
+}
+
+#[test]
+fn a_source_registered_as_room_is_released_gets_its_first_event() {
+    registered(Ready::Room, true);
+}
+
+#[test]
+fn a_source_registered_over_a_full_ring_after_a_reset_gets_its_first_event() {
+    registered(Ready::Reset, false);
+}
+
+#[test]
+fn a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event() {
+    registered(Ready::Reset, true);
 }

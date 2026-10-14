@@ -110,6 +110,10 @@ impl IpcHeader {
         self.len
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
     fn to_wire(self) -> [u8; Self::WIRE_SIZE] {
         let mut bytes = [0u8; Self::WIRE_SIZE];
         bytes[..4].copy_from_slice(&self.msg_type.to_ne_bytes());
