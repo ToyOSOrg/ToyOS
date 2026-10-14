@@ -48,7 +48,7 @@ use alloc::vec::Vec;
 use core::net::Ipv4Addr;
 
 use toyos_net_ip::{Advice, Delivery, ErrorKind, IfIndex, Ip, Limiter, NextHop, Nud, Resolution, Sent, Source, Transport, TransportError, FRAME};
-use toyos_net_tcp::{ConnId, Endpoint, Hop, IcmpError, IcmpKind, ListenerId, Outgoing, Received, Seq, Served, Status, Tcp, Tuple};
+use toyos_net_tcp::{ConnId, Endpoint, Hop, IcmpError, IcmpKind, Lent, ListenerId, Outgoing, Received, Seq, Served, Status, Tcp, Tuple};
 use toyos_net_udp::{Offer, Sender, SocketId, Udp, Verdict};
 use toyos_net_udp::Served as UdpServed;
 use toyos_net_wire::ethernet::{FrameBuilder, IndividualMac, MacAddr};
@@ -542,9 +542,21 @@ impl Shard {
         done
     }
 
-    /// [`Tcp::recv_with`]: `take` is shown the oldest bytes held and answers how many it took.
-    pub fn recv_with(&mut self, now: Instant, id: ConnId, take: impl FnOnce(&[u8]) -> usize) -> Result<Received, toyos_net_tcp::Error> {
-        let done = self.tcp.recv_with(now, id, take);
+    /// [`Tcp::lend`].
+    pub fn lend(&mut self, id: ConnId, rx: Box<dyn Lent>, tx: Box<dyn Lent>) -> Result<(), toyos_net_tcp::Error> {
+        self.tcp.lend(id, rx, tx)
+    }
+
+    /// [`Tcp::consume`].
+    pub fn consume(&mut self, now: Instant, id: ConnId, n: usize) -> Result<usize, toyos_net_tcp::Error> {
+        let done = self.tcp.consume(now, id, n);
+        self.settle(now);
+        done
+    }
+
+    /// [`Tcp::queue`].
+    pub fn queue(&mut self, now: Instant, id: ConnId, n: usize) -> Result<usize, toyos_net_tcp::Error> {
+        let done = self.tcp.queue(now, id, n);
         self.settle(now);
         done
     }

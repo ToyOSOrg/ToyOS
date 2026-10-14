@@ -76,6 +76,33 @@ pub struct App {
     pub reading: bool,
     /// Write at most this many bytes per pass; `None` writes all the stack takes.
     pub write_limit: Option<usize>,
+    /// The receive buffer lent ([`Net::lend`]): read out of it and given back with `consume`.
+    pub lent: Option<Lending>,
+}
+
+/// A lent buffer the test holds beside [tcp]: a ring of bytes [tcp] copies into.
+#[derive(Clone, Debug)]
+pub struct Shared(pub std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+impl toyos_net_tcp::Lent for Shared {
+    fn len(&self) -> usize {
+        self.0.borrow().len()
+    }
+
+    fn put(&mut self, at: usize, data: &[u8]) {
+        self.0.borrow_mut()[at..at + data.len()].copy_from_slice(data);
+    }
+
+    fn take(&self, at: usize, out: &mut [u8]) {
+        out.copy_from_slice(&self.0.borrow()[at..at + out.len()]);
+    }
+}
+
+/// An application's lent receive ring and where its next unread byte lies.
+#[derive(Debug)]
+pub struct Lending {
+    rx: Shared,
+    at: usize,
 }
 
 /// What the link does with one datagram.
@@ -240,6 +267,7 @@ impl Net {
             read_limit: None,
             reading: true,
             write_limit: None,
+            lent: None,
         });
     }
 
@@ -291,6 +319,24 @@ impl Net {
                 app.shut = true;
             }
             let mut budget = app.read_limit.unwrap_or(usize::MAX);
+            if let Some(lending) = app.lent.as_mut().filter(|_| app.reading && app.end.is_none()) {
+                let readable = node.tcp.status(app.id).map_or(0, |s| s.readable).min(budget);
+                let ring = lending.rx.0.borrow();
+                let bytes: Vec<u8> = (0..readable).map(|i| ring[(lending.at + i) % ring.len()]).collect();
+                lending.at = (lending.at + readable) % ring.len();
+                drop(ring);
+                app.received.feed(&bytes);
+                assert_eq!(node.tcp.consume(now, app.id, readable), Ok(readable));
+                if readable == 0 {
+                    match node.tcp.recv(now, app.id, &mut []) {
+                        Ok(Received::End) => app.end = Some(End::Fin),
+                        Ok(Received::Data(_)) | Err(Error::WouldBlock) => {}
+                        Err(Error::Failed(f)) => app.end = Some(End::Failed(f)),
+                        Err(e) => panic!("recv: {e:?}"),
+                    }
+                }
+                budget = 0;
+            }
             while app.reading && app.end.is_none() && budget > 0 {
                 let mut buf = vec![0u8; budget.min(65_536)];
                 match node.tcp.recv(now, app.id, &mut buf) {
@@ -444,6 +490,16 @@ impl Net {
             self.pass();
         }
         true
+    }
+
+    /// App `app`'s connection lent two buffers of `len` bytes; it reads the receive ring itself
+    /// from here on.
+    pub fn lend(&mut self, app: usize, len: usize) {
+        let ring = || Shared(std::rc::Rc::new(std::cell::RefCell::new(vec![0; len])));
+        let (rx, tx) = (ring(), ring());
+        let App { node, id, .. } = self.apps[app];
+        assert_eq!(self.nodes[node].tcp.lend(id, Box::new(rx.clone()), Box::new(tx)), Ok(()));
+        self.apps[app].lent = Some(Lending { rx, at: 0 });
     }
 
     /// Every application finished: both FINs in, or a failure.

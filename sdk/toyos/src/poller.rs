@@ -219,7 +219,7 @@ impl Poller {
     /// loss reachable while looking like a success.
     pub fn new(capacity: u32) -> Self {
         assert!(
-            capacity >= 1 && capacity <= Self::MAX_HANDLES,
+            (1..=Self::MAX_HANDLES).contains(&capacity),
             "Poller::new: {capacity} handles is outside 1..={}; \
              bound the watched set below the kernel's deepest ring",
             Self::MAX_HANDLES,

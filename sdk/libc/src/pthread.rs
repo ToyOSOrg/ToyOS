@@ -18,7 +18,7 @@ use alloc::alloc::{alloc as heap_alloc, dealloc as heap_dealloc};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::alloc::Layout;
-use core::cell::{Cell, UnsafeCell};
+use core::cell::Cell;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
 
@@ -71,64 +71,7 @@ static MASK: Cell<u64> = Cell::new(0);
 /// Blocks of detached threads that have ended, for the next creator to reap.
 static REAPED: Lock<Vec<usize>> = Lock::new(Vec::new());
 
-/// A futex lock around library state: 0 free, 1 held, 2 held with waiters.
-pub(crate) struct Lock<T> {
-    state: AtomicU32,
-    value: UnsafeCell<T>,
-}
-
-unsafe impl<T: Send> Sync for Lock<T> {}
-
-pub(crate) struct Held<'a, T>(&'a Lock<T>);
-
-impl<T> Lock<T> {
-    pub(crate) const fn new(value: T) -> Self {
-        Self { state: AtomicU32::new(0), value: UnsafeCell::new(value) }
-    }
-
-    pub(crate) fn lock(&self) -> Held<'_, T> {
-        futex_lock(&self.state);
-        Held(self)
-    }
-}
-
-impl<T> core::ops::Deref for Held<'_, T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        // SAFETY: the lock is held.
-        unsafe { &*self.0.value.get() }
-    }
-}
-
-impl<T> core::ops::DerefMut for Held<'_, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        // SAFETY: the lock is held.
-        unsafe { &mut *self.0.value.get() }
-    }
-}
-
-impl<T> Drop for Held<'_, T> {
-    fn drop(&mut self) {
-        futex_unlock(&self.0.state);
-    }
-}
-
-fn futex_lock(state: &AtomicU32) {
-    if state.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
-        return;
-    }
-    while state.swap(2, Ordering::Acquire) != 0 {
-        // SAFETY: `state` is a live, aligned u32.
-        unsafe { syscall::futex_wait(state.as_ptr(), 2, None) };
-    }
-}
-
-fn futex_unlock(state: &AtomicU32) {
-    if state.swap(0, Ordering::Release) == 2 {
-        // SAFETY: `state` is a live, aligned u32.
-        unsafe { syscall::futex_wake(state.as_ptr(), 1) };
-    }
-}
+pub(crate) use toyos::sync::Lock;
 
 fn stack_layout(size: usize) -> Layout {
     Layout::from_size_align(size, STACK_ALIGN).expect("a thread stack's size is a multiple of its alignment")
@@ -344,7 +287,7 @@ pub unsafe extern "C" fn pthread_mutex_lock(mutex: *mut PthreadMutexT) -> i32 {
         m.count.fetch_add(1, Ordering::Relaxed);
         return 0;
     }
-    futex_lock(&m.state);
+    toyos::sync::lock_word(&m.state);
     m.owner.store(me, Ordering::Relaxed);
     m.count.store(1, Ordering::Relaxed);
     0
@@ -378,7 +321,7 @@ pub unsafe extern "C" fn pthread_mutex_unlock(mutex: *mut PthreadMutexT) -> i32 
         }
     }
     m.owner.store(0, Ordering::Relaxed);
-    futex_unlock(&m.state);
+    toyos::sync::unlock_word(&m.state);
     0
 }
 

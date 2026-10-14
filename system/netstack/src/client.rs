@@ -97,9 +97,9 @@ pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 ///
 /// `MsgType::DnsLookup` is the only request carrying bytes rather than a struct,
 /// and `toyos::net::dns_lookup` frames a hostname into a 256-byte buffer; every
-/// typed request is far smaller, `TcpConnectPipedRequest` at 32 bytes being the
-/// widest. A client may declare anything up to `ipc::MAX_FRAME_LEN` — the excess
-/// is counted down and discarded, never waited for.
+/// typed request is far smaller. A client may declare anything up to
+/// `ipc::MAX_FRAME_LEN` — the excess is counted down and discarded, never waited
+/// for.
 pub const MAX_KEPT_REQUEST: usize = 256;
 
 /// One client's inbound framing.

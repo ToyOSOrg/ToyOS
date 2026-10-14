@@ -63,7 +63,7 @@ impl Window {
             self.len
         );
         assert!(
-            (self.base as usize + offset) % align_of::<T>() == 0,
+            (self.base as usize + offset).is_multiple_of(align_of::<T>()),
             "window: a {}-byte access at {offset:#x} is not aligned for it",
             size_of::<T>()
         );
@@ -91,12 +91,12 @@ impl Window {
     /// window's base is word aligned.
     pub fn copy_out(self, offset: usize, out: &mut [u8]) {
         let from = self.words(offset, out.len());
-        for (i, chunk) in out.chunks_exact_mut(8).enumerate() {
+        for (i, chunk) in out.as_chunks_mut::<8>().0.iter_mut().enumerate() {
             // SAFETY: `words` bounded `from .. from + out.len()` inside the
             // window and aligned it; volatile because the other side may write
             // the same bytes concurrently.
             let word = unsafe { from.add(i).read_volatile() };
-            chunk.copy_from_slice(&word.to_ne_bytes());
+            *chunk = word.to_ne_bytes();
         }
     }
 
@@ -104,8 +104,8 @@ impl Window {
     /// [`Self::copy_out`].
     pub fn copy_in(self, offset: usize, data: &[u8]) {
         let to = self.words(offset, data.len());
-        for (i, chunk) in data.chunks_exact(8).enumerate() {
-            let word = u64::from_ne_bytes(chunk.try_into().expect("chunks of eight"));
+        for (i, chunk) in data.as_chunks::<8>().0.iter().enumerate() {
+            let word = u64::from_ne_bytes(*chunk);
             // SAFETY: as in `copy_out`.
             unsafe { to.add(i).write_volatile(word) };
         }
@@ -113,9 +113,9 @@ impl Window {
 
     /// `len` bytes from `offset` as words, bounded and aligned once.
     fn words(self, offset: usize, len: usize) -> *mut u64 {
-        assert!(offset % 8 == 0 && len % 8 == 0, "window: a copy of part of a word");
+        assert!(offset.is_multiple_of(8) && len.is_multiple_of(8), "window: a copy of part of a word");
         let whole = self.sub(offset, len);
-        assert!(whole.base as usize % align_of::<u64>() == 0, "window: a copy from an unaligned window");
+        assert!((whole.base as usize).is_multiple_of(align_of::<u64>()), "window: a copy from an unaligned window");
         whole.base as *mut u64
     }
 
