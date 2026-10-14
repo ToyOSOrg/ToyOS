@@ -27,9 +27,10 @@ fn windows(bytes: &[u8], room: usize) -> Result<Vec<RootBridgeWindow>, ResourceE
     Ok(out)
 }
 
-/// The shape the T14's firmware answers in, as Linux's own journal reports it:
-/// two memory windows and the I/O and bus ranges beside them, of which only the
-/// memory ones are windows a BAR could be placed in.
+/// A root bridge's list carries bus number, I/O and memory ranges, which a
+/// descriptor's Resource Type tells apart (ACPI 6.5 §6.4.3.5.1, byte 3: 0
+/// memory, 1 I/O, 2 bus number); only the memory ranges are windows a BAR
+/// could be placed in.
 #[test]
 fn only_the_memory_ranges_of_a_root_bridge_become_windows() {
     let bytes = list(&[

@@ -1,5 +1,8 @@
-//! The Country element (§9.4.2.8): a country string, then triplets, then a pad octet of 0 where
-//! one makes the length even.
+//! The Country element (§9.4.2.7): a country string, then triplets, then a pad octet of 0 exactly
+//! where one makes the length even.
+//!
+//! Channel numbers are not checked: their meaning depends on the operating class (Annex E), and
+//! §10.22.3 has a station ignore the rest of the element at an invalid one, not refuse the frame.
 
 use crate::Refused;
 
@@ -20,7 +23,6 @@ pub enum Triplet {
 
 /// A first octet of at least this opens an Operating triplet.
 const OPERATING_EXTENSION: u8 = 201;
-const LAST_CHANNEL: u16 = 200;
 
 impl<'a> Country<'a> {
     pub(super) fn parse(body: &'a [u8]) -> Result<Self, Refused> {
@@ -41,11 +43,8 @@ impl<'a> Country<'a> {
         if triplets.is_empty() {
             return Err(Refused::ElementLength);
         }
-        for &[first, channels, _] in triplets.as_chunks::<3>().0 {
-            let past_last = u16::from(first).saturating_add(u16::from(channels)) > LAST_CHANNEL + 1;
-            if first < OPERATING_EXTENSION && (first == 0 || channels == 0 || past_last) {
-                return Err(Refused::CountryChannels);
-            }
+        if !body.len().is_multiple_of(2) {
+            return Err(Refused::CountryPad);
         }
         Ok(Self { string: [a, b, environment], triplets })
     }

@@ -1,6 +1,5 @@
-//! The T14's fixed hardware and SCI, decoded from an
-//! extract of its FACP and APIC and held against what Linux read on the
-//! same machine (`fixtures/thinkpad-t14/SOURCE`).
+//! The T14's fixed hardware and SCI, decoded from an extract of its FACP and
+//! APIC and held to what ACPI 6.5 says the machine's bytes mean.
 //!
 //! **An extract, never the tables**: each table here is laid out from the
 //! fields `fixed_hardware`, `pm1a_control` and `sci_line` read, at their offsets and
@@ -65,14 +64,13 @@ fn open(bytes: Vec<u8>, signature: &[u8; 4], needed: usize) -> Table<Machine<'st
     Table::open(Machine { regions }, AT, signature, needed).expect("a sealed extract")
 }
 
-/// Linux: `ACPI: PM-Timer IO Port: 0x1808` beside the blocks this names, and
-/// the firmware issue's reading of `SMI_CMD=0xb2`, `ACPI_ENABLE=0xf0` and
-/// `PM1a_CNT` at port 0x1804; `Enabled 9 GPEs in block 00 to 7F`, a GPE0 block
-/// of 128 GPEs, sixteen bytes of status then sixteen of enable; and `Power
-/// Button [PWRF]`, the fixed-feature button, beside `Sleep Button [SLPB]`, a
-/// control method device.
+/// ACPI 6.5 Table 5.9 at the machine's offsets: `SCI_INT` 9; `SMI_CMD` 0xb2,
+/// `ACPI_ENABLE` 0xf0, `ACPI_DISABLE` 0xf1; `PM1a_EVT_BLK` 0x1800 of
+/// `PM1_EVT_LEN` 4, `PM1a_CNT_BLK` 0x1804 of `PM1_CNT_LEN` 2, `GPE0_BLK` 0x1860
+/// of `GPE0_BLK_LEN` 32; and Table 5.10's `PWR_BUTTON` clear, the
+/// fixed-feature power button.
 #[test]
-fn the_t14s_fadt_names_the_blocks_linux_served_its_sci_through() {
+fn the_t14s_fadt_names_its_fixed_hardware_and_sci() {
     let bytes = laid_out(b"FACP", FACP_REVISION, FACP_LEN, FACP_FIELDS);
     let fadt = open(bytes, b"FACP", FADT_FOR_FIXED_HARDWARE);
     assert_eq!(
@@ -88,7 +86,9 @@ fn the_t14s_fadt_names_the_blocks_linux_served_its_sci_through() {
     assert_eq!(pm1a_control(&fadt), Ok(Block { port: 0x1804, len: 2 }));
 }
 
-/// Linux: `ACPI: INT_SRC_OVR (bus 0 bus_irq 9 global_irq 9 high level)`.
+/// ACPI 6.5 Tables 5.25 and 5.26 over the second override: bus 0, source 9,
+/// global system interrupt 9, flags 0x000d, polarity 01 active high and
+/// trigger mode 11 level-triggered.
 #[test]
 fn the_t14s_madt_names_its_sci_level_and_active_high() {
     let list: Vec<u8> = APIC_OVERRIDES.iter().flat_map(|o| entry(o[0], o[1], &o[2..])).collect();

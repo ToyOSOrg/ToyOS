@@ -18,10 +18,13 @@ the ask is the flag of
 
 **Exit**: a gate over `kernel.elf`, on the decoder of
 `issues/no-gate-decodes-kernel-elfs-instructions.md`, matches it against
-both of Linux's sequences; on
+the branch history clearing and return stack filling sequences Intel's and
+AMD's published guidance prescribes; on
 every proving machine probes count what
 `issues/a-pure-function-decides-a-cpus-speculation-mitigations-from-its-vendors-guidance.md`
 selects for it: a clear per syscall where it selects the loop, a fill per
 switch where it selects filling, and two IBPBs over B, C, idle, B, A, idle, A,
 B. **Mutation**: either sequence edited, the clear's condition inverted, no
-fill, the IBPB decided by the previous root. **Oracle**: Linux's sequences.
+fill, the IBPB decided by the previous root. **Oracle**: the vendors'
+published sequences. Linux's sequences are a goal compared in evidence, never
+the gate's expected text.

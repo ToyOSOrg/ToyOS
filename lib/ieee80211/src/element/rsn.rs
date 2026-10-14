@@ -1,13 +1,14 @@
-//! The RSN element (§9.4.2.24) and the RSN Extension element (§9.4.2.241).
+//! The RSN element (§9.4.2.23) and the RSN Extension element (§9.4.2.240).
 //!
 //! An RSNE's fields after its version are each optional, but only from the end: one present
-//! needs every one before it. What follows the last field is ignored, as §10.28.9 has a receiver
-//! do with an extensible element.
+//! needs every one before it. Table 9-130 does not mark the RSNE extensible, so an octet past its
+//! last field is refused. The RSNXE is extensible: octets past its field are ignored, as §10.28.8
+//! requires.
 
 use crate::read::Reader;
 use crate::Refused;
 
-/// A cipher or AKM suite selector: an OUI or CID and a type (§9.4.2.24.2, §9.4.2.24.3).
+/// A cipher or AKM suite selector: an OUI or CID and a type (§9.4.2.23.2, §9.4.2.23.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Suite(pub [u8; 4]);
 
@@ -16,7 +17,7 @@ impl Suite {
         Self([0x00, 0x0F, 0xAC, kind])
     }
 
-    // Cipher suites, Table 9-149.
+    // Cipher suites, Table 9-188.
     pub const TKIP: Self = Self::ieee(2);
     pub const CCMP_128: Self = Self::ieee(4);
     pub const BIP_CMAC_128: Self = Self::ieee(6);
@@ -28,7 +29,7 @@ impl Suite {
     pub const BIP_GMAC_256: Self = Self::ieee(12);
     pub const BIP_CMAC_256: Self = Self::ieee(13);
 
-    // AKM suites, Table 9-151.
+    // AKM suites, Table 9-190.
     pub const AKM_8021X: Self = Self::ieee(1);
     pub const AKM_PSK: Self = Self::ieee(2);
     pub const AKM_FT_PSK: Self = Self::ieee(4);
@@ -111,6 +112,9 @@ impl<'a> Rsn<'a> {
             return Ok(rsn);
         }
         rsn.group_management = Some(Suite(r.array()?));
+        if !r.is_empty() {
+            return Err(Refused::ElementLength);
+        }
         Ok(rsn)
     }
 
@@ -147,7 +151,7 @@ impl<'a> Rsnx<'a> {
         self.0.get(n / 8).is_some_and(|octet| octet >> (n % 8) & 1 != 0)
     }
 
-    /// SAE Hash-to-Element, bit 5 (Table 9-321).
+    /// SAE Hash-to-Element, bit 5 (Table 9-373).
     pub fn sae_h2e(&self) -> bool {
         self.bit(5)
     }

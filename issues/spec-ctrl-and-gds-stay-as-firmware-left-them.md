@@ -15,7 +15,8 @@ unmitigated if firmware left `GDS_MITG_DIS` set. Linux at
 
 **Exit**: on every proving machine each CPU's 0x48 holds what
 `issues/a-pure-function-decides-a-cpus-speculation-mitigations-from-its-vendors-guidance.md`
-selects for it, on the T14 Linux's read less SSBD; on the T14, the one proving
-machine with GDS, a probe sets `GDS_MITG_DIS` and reads it clear after the
-kernel's write. **Mutation**: the clear deleted. **Oracle**: Linux's reads on
-each machine.
+selects for it; on the T14, the one proving machine with GDS, a probe sets
+`GDS_MITG_DIS` and reads it clear after the kernel's write. **Mutation**: the
+clear deleted. **Oracle**: the vendor's guidance through that function, and
+ToyOS's own reads on each machine. Linux's reads of 0x48 and 0x123 on each
+machine are a goal compared in evidence, never a test's expected value.
