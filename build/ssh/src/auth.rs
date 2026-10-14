@@ -4,7 +4,7 @@
 //!
 //! **The only way out of here is a verified signature.** [`Verified`] is what
 //! the connection layer is built from, and its one constructor is the arm below
-//! that has just had `ring` verify the client's signature over this session's
+//! that has just verified the client's signature over this session's
 //! identifier with a key the authorizer named. [`PreAuth`] holds no channel
 //! table and cannot name a channel.
 //!
@@ -18,7 +18,7 @@
 //! answered `PK_OK` is no failure, so a session that only offers is bounded by
 //! the driver's login deadline, not here.
 
-use ring::signature::{UnparsedPublicKey, ED25519};
+use toyos_crypto::ed25519::PublicKey;
 
 use crate::hostkey;
 use crate::wire::{put_bool, put_string, Reader, Refusal};
@@ -123,7 +123,7 @@ impl PreAuth {
                         let mut data = Vec::new();
                         put_string(&mut data, session_id);
                         data.extend_from_slice(payload.get(..unsigned_len).unwrap_or_default());
-                        if UnparsedPublicKey::new(&ED25519, key).verify(&data, &signature).is_ok() {
+                        if PublicKey::from_bytes(key).and_then(|key| key.verify(&data, &signature)).is_ok() {
                             out.push(vec![msg::USERAUTH_SUCCESS]);
                             return Ok(Some(Verified { user: user.to_string() }));
                         }
