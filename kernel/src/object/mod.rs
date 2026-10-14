@@ -4,7 +4,7 @@
 //!
 //! An object ends with its last handle and is never handed out again: a holder that answers more than once keeps what an object is made over (`device::Screen`, a claim's BAR windows) and makes a fresh object for each answer.
 //!
-//! `handle_count`, not the Arc strong count, is what userland-visible lifecycle rides: a syscall's `Arc` can be stranded on a killed thread's kernel stack, so release is deferred through [`ZERO_QUEUE`] — see `issues/deferred-release-outlives-its-syscall.md`.
+//! `handle_count`, not the Arc strong count, is what userland-visible lifecycle rides: a syscall's `Arc` can be stranded on a killed thread's kernel stack, so release is deferred: through a dying process's own [`Releases`], run before its end is published, or else through [`ZERO_QUEUE`] — see `issues/deferred-release-outlives-its-syscall.md`.
 
 // `warn` here gates via CI's `-D warnings`; the rest of the kernel is not yet swept.
 #![warn(clippy::undocumented_unsafe_blocks)]
@@ -25,11 +25,13 @@ pub mod ops;
 pub mod pipe;
 pub mod port;
 pub mod process;
+mod releases;
 pub mod service;
 pub mod shm;
 pub mod syscap;
 
 pub use handle::{HandleEntry, HandleError, HandleTable, Refusal};
+pub(crate) use releases::{Released, Releases};
 
 /// A resource given back on the object's **last handle**, not the last `Arc` — an `Arc` can be stranded on a killed thread's kernel stack.
 pub(crate) struct Held<T>(Lock<Option<T>>);
@@ -125,8 +127,9 @@ impl Drop for ObjectCore {
 /// What an object does when its last handle goes; a `deferred` row must
 /// implement it, `immediate` gets an empty impl from the macro.
 pub trait ZeroHandles {
-    /// Runs exactly once, from the deferred queue with no lock held — never
-    /// inline at drop, and never taking a sleep lock: no drain site can park.
+    /// Runs exactly once with no lock held, from the deferred queue or a dying
+    /// process's [`Releases`] — never inline at drop, and never taking a sleep
+    /// lock: neither can park.
     fn on_zero_handles(&self);
 }
 
@@ -267,7 +270,10 @@ static ZERO_QUEUE: Lock<Vec<KObjectRef>> = Lock::new(Vec::new());
 /// says empty over a queued object.
 static ZERO_PENDING: AtomicBool = AtomicBool::new(false);
 
+/// A deferred object whose last handle has gone: owed to the running thread's
+/// open [`Releases`], or else to [`ZERO_QUEUE`].
 pub(crate) fn enqueue_zero_handles(object: KObjectRef) {
+    let Some(object) = releases::collect(object) else { return };
     let mut queue = ZERO_QUEUE.lock();
     queue.push(object);
     ZERO_PENDING.store(true, Ordering::Release);
