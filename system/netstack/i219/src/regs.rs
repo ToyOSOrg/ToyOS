@@ -31,6 +31,9 @@ pub const MDIC: usize = 0x00020;
 pub const ICR: usize = 0x000C0;
 /// Interrupt Throttling (§10.2.4.2, `0x000C4`).
 pub const ITR: usize = 0x000C4;
+/// Interrupt Cause Set (§10.2.4.4, `0x000C8`), write-only: a 1b sets the
+/// cause in `ICR`, and raises a message where it is unmasked.
+pub const ICS: usize = 0x000C8;
 /// Interrupt Mask Set/Read (§10.2.4.5, `0x000D0`).
 pub const IMS: usize = 0x000D0;
 /// Interrupt Mask Clear (§10.2.4.6, `0x000D8`), write-only.
@@ -38,8 +41,15 @@ pub const IMC: usize = 0x000D8;
 /// Interrupt Auto Clear (§10.2.4.7, `0x000DC`). §10.2.4.7: "If any bits are set
 /// in EIAC, the ICR register should not be read", and this driver reads it.
 pub const EIAC: usize = 0x000DC;
+/// Interrupt Acknowledge Auto-Mask (§10.2.4.8, `0x000E0`): with
+/// `CTRL_EXT.IAME` set and `ICR.INT_ASSERTED` set, "an ICR read or write has
+/// the side effect of writing the contents of this register to the IMC
+/// register".
+pub const IAM: usize = 0x000E0;
 /// Interrupt Vector Allocation (§10.2.4.9, `0x000E4`), which "is only valid in
-/// MSI-X mode".
+/// MSI-X mode". **The 82574's register and no PCH part's**: the PCH's MAC
+/// has no MSI-X capability (631120 §8.1), and at this offset it holds a
+/// read/write power and clock control that an allocation word would overwrite.
 pub const IVAR: usize = 0x000E4;
 /// Receive Control (§10.2.5.1, `0x00100`).
 pub const RCTL: usize = 0x00100;
@@ -126,6 +136,11 @@ pub const LANPHYPC_TIMING: usize = 0x0003C;
 /// wake-up enable.
 pub const WAKE_UP: usize = 0x05800;
 
+/// The PCH's MAC's packet-buffer ECC status at `0x0100C`, which neither
+/// document publishes: bit 16 turns the buffer's error correction on, bits 7:0
+/// count the errors it corrected and bits 15:8 the ones it could not.
+pub const PBECCSTS: usize = 0x0100C;
+
 /// The PCH's MAC's PCIe control at `0x05B00`, which neither document publishes
 /// for this part: bits 5:0 ask for PCIe's no-snoop attribute on the part's own
 /// DMA, one bit for each of receive data, receive descriptor write-back,
@@ -159,6 +174,7 @@ const _: () = {
     assert!(FWSM + 4 <= REGISTER_BYTES);
     assert!(LANPHYPC_TIMING < REGISTER_BYTES);
     assert!(PCIE_CONTROL < REGISTER_BYTES);
+    assert!(PBECCSTS < REGISTER_BYTES);
     assert!(TPR < REGISTER_BYTES);
 };
 
@@ -188,6 +204,10 @@ pub mod ctrl {
     /// pin takes the PHY's power away and restores it.
     pub const LANPHYPC_HOST_DRIVEN: u32 = 1 << 16;
     pub const LANPHYPC_LEVEL: u32 = 1 << 17;
+    /// Bit 19, which §8.2.1 calls reserved: on the PCH's MAC, the memory error
+    /// handling that reports an error [`super::PBECCSTS`] could not correct
+    /// as [`super::cause::ECCER`].
+    pub const MEMORY_ERROR_HANDLING: u32 = 1 << 19;
     /// PHY Power Down (bit 24). §8.2.1: "When cleared (0b), the PHY power down
     /// setting is controlled by the internal logic of PCH." The document
     /// describes the cleared case only, so that is the state this driver puts
@@ -227,6 +247,9 @@ pub mod ctrl_ext {
     /// PHY to enter a low-power state when the LAN controller is at the DMOff/
     /// D3 or with no WOL."
     pub const PHY_POWER_DOWN_ENABLE: u32 = 1 << 20;
+    /// Interrupt Acknowledge Auto-Mask Enable (bit 27, §10.2.2.3): set, a read
+    /// or write of `ICR` with an interrupt asserted writes `IAM` into `IMC`.
+    pub const IAME: u32 = 1 << 27;
     /// Bit 28, which §8.2.2 calls reserved: the host's word to the part's
     /// firmware that a driver holds the function.
     pub const DRIVER_HOLDS_THE_FUNCTION: u32 = 1 << 28;
@@ -237,6 +260,14 @@ pub mod wake_up {
     /// Bit 0. §8.2.8: "Advanced Power Management Enable (APME): 1 = APM
     /// Wakeup is enabled 0 = APM Wakeup is disabled".
     pub const APM_WAKE: u32 = 1 << 0;
+}
+
+/// Packet-buffer ECC status bits.
+pub mod pbeccsts {
+    /// Bit 16: the packet buffer's error correction on.
+    pub const ECC_ENABLE: u32 = 1 << 16;
+    /// Bits 15:0: the corrected (7:0) and uncorrected (15:8) error counts.
+    pub const COUNTS: u32 = 0xFFFF;
 }
 
 /// PCIe control bits.
@@ -371,13 +402,18 @@ pub mod cause {
     /// Receiver Timer Interrupt (bit 7): with `RDTR` zero, one per packet.
     pub const RXT0: u32 = 1 << 7;
     /// The five causes §10.2.4.9's `IVAR` allocates a vector to, and therefore
-    /// the only ones that reach one. Second names and not separate events:
-    /// §10.2.4.1 gives each of them as a restatement of causes above.
+    /// the only ones that reach one in MSI-X mode. Second names and not
+    /// separate events: §10.2.4.1 gives each of them as a restatement of
+    /// causes above.
     pub const RXQ0: u32 = 1 << 20;
     pub const RXQ1: u32 = 1 << 21;
     pub const TXQ0: u32 = 1 << 22;
     pub const TXQ1: u32 = 1 << 23;
     pub const OTHER: u32 = 1 << 24;
+    /// Bit 22 on the PCH's MAC, stated as a property of that part: not
+    /// `TXQ0` but an error in its packet buffer that the buffer's ECC could
+    /// not correct.
+    pub const ECCER: u32 = 1 << 22;
     /// Interrupt Asserted (bit 31). §10.2.4.1: not writable, and it clears only
     /// when every cause has.
     pub const INT_ASSERTED: u32 = 1 << 31;

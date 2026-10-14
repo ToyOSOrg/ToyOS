@@ -12,6 +12,12 @@ const I219: &str = "8086:15fc";
 /// The job that claims the T14's I219, gives it back and claims it again.
 pub const RECLAIM: &str = "test_rs_pci_reclaim";
 
+/// The job that measures the I219's interrupts on its own claim.
+pub const MSI: &str = "test_rs_i219_msi";
+
+/// What that job prints each reading under.
+const MSI_SAYS: &str = "i219_msi: ";
+
 /// The kernel's reason on a claim's refusal line where the units do not remap.
 const NOT_REMAPPED: &str = "its interrupts would not be remapped on this machine";
 
@@ -21,6 +27,27 @@ const INTR_REMAP_CLEAR: &str = "leave INTR_REMAP clear, so firmware says this pl
 
 fn records(log: &Serial) -> impl Iterator<Item = &str> {
     log.text().lines().filter_map(bootlog::message)
+}
+
+/// The kernel's records from `job`'s spawn to its exit: what it did, apart
+/// from every other job on a shared boot. Both ends are the kernel's own
+/// records, so nothing another channel carries can reorder them.
+fn job_records<'a>(log: &'a Serial, job: &str) -> Result<Vec<&'a str>, String> {
+    let spawned = format!("/{job} pid=");
+    let mut all = records(log);
+    let pid = all
+        .by_ref()
+        .find_map(|m| m.strip_prefix("spawn: ")?.split_once(&spawned)?.1.split_whitespace().next())
+        .ok_or_else(|| format!("no spawn record names {job}:\n{}", log.text()))?;
+    let exited = format!("{}{} pid={pid} ", bootlog::EXIT, bootlog::recorded_name(job));
+    let mut window = Vec::new();
+    for record in all {
+        if record.starts_with(&exited) {
+            return Ok(window);
+        }
+        window.push(record);
+    }
+    Err(format!("{job} pid={pid} never exited:\n{}", log.text()))
 }
 
 /// One `key=value` word of a record.
@@ -47,9 +74,10 @@ fn function(log: &Serial) -> Result<String, String> {
 /// that entry not present.
 pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
     let at = function(log)?;
+    let window = job_records(log, RECLAIM)?;
     let mut written = Vec::new();
     let mut cleared = Vec::new();
-    for record in records(log) {
+    for &record in &window {
         let Some(rest) = record.strip_prefix("iommu: irte") else { continue };
         if field(record, "source") != Some(at.as_str()) {
             continue;
@@ -66,7 +94,7 @@ pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
     }
     let count = |what: &str| {
         let needle = format!("[{I219}] {what} slot ");
-        records(log).filter(|m| m.starts_with("pcidev: PCI ") && m.contains(&needle)).count()
+        window.iter().filter(|m| m.starts_with("pcidev: PCI ") && m.contains(&needle)).count()
     };
     let (handed, released) = (count("handed over on"), count("released from"));
     if (handed, released) != (2, 2) {
@@ -144,5 +172,24 @@ pub fn refused_unremapped(log: &Serial) -> Result<(), String> {
     log.must_not_say(&format!(" source={at} "))?;
     log.must_not_say(&format!("pcidev: PCI {at} BAR"))?;
     log.must_say(bootlog::COMPLETE)?;
+    Ok(())
+}
+
+/// The job's claim of the I219 armed on MSI and not MSI-X, and the job's
+/// readings — each judged by the job's own exit — read out.
+pub fn messages_on_its_msi_vector(kernel: &Serial, log: &Serial) -> Result<(), String> {
+    let at = function(kernel)?;
+    let window = job_records(kernel, MSI)?;
+    let says = |needle: &str| window.iter().any(|m| m.contains(needle));
+    if !says(&format!("PCI {at}: msi address=")) || says(&format!("PCI {at}: msix address=")) {
+        return Err(format!("{MSI}'s claim of {at} was not armed on MSI alone:\n{}", window.join("\n")));
+    }
+    let said: Vec<&str> = log.text().lines().filter_map(|l| Some(l.split_once(MSI_SAYS)?.1)).collect();
+    if said.last() != Some(&"done") {
+        return Err(format!("i219_msi never said it was done:\n{}", said.join("\n")));
+    }
+    for line in said {
+        eprintln!("  [i219] {line}");
+    }
     Ok(())
 }

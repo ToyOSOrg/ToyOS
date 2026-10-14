@@ -1,4 +1,4 @@
-//! The PCH's MAC before its rings: three registers written, each bit for a
+//! The PCH's MAC before its rings: five registers written, each bit for a
 //! property of the part this driver rests on, and nothing that stands on
 //! neither a document nor such a property.
 //!
@@ -19,13 +19,17 @@
 //!   that register carried: the descriptors and buffers live in memory the
 //!   processor caches, and a DMA without the snoop attribute is not coherent
 //!   with it.
+//! - The packet buffer's ECC and `CTRL`'s memory error handling on, so an
+//!   error the ECC cannot correct is `ICR.ECCER` and refuses the pass
+//!   ([`crate::PassRefused::PacketBufferEcc`]) instead of passing a corrupt
+//!   frame on.
 //!
-//! **The order is free.** The three registers are independent of one another;
+//! **The order is free.** The registers are independent of one another;
 //! what the hardware fixes is that all of them come after the reset, which
 //! returns each to its default, and before the rings, whose first fetch is a
 //! DMA the ordering and snoop settings govern.
 
-use crate::regs::{self, ctrl_ext, pcie_control, wake_up};
+use crate::regs::{self, ctrl, ctrl_ext, pbeccsts, pcie_control, wake_up};
 use crate::Registers;
 
 /// One read-modify-write: `set` raised and `clear` lowered, every other bit as
@@ -45,6 +49,8 @@ pub(crate) fn prepare<R: Registers>(regs: &R) {
     );
     modify(regs, regs::WAKE_UP, 0, wake_up::APM_WAKE);
     modify(regs, regs::PCIE_CONTROL, 0, pcie_control::NO_SNOOP);
+    modify(regs, regs::PBECCSTS, pbeccsts::ECC_ENABLE, 0);
+    modify(regs, regs::CTRL, ctrl::MEMORY_ERROR_HANDLING, 0);
 }
 
 /// What [`prepare`] told the firmware, taken back: bit 28 cleared and every
