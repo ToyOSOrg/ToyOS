@@ -21,11 +21,11 @@ sets live.
 
 What is left:
 
-- **virtio-gpu leaves the kernel** (stage 1 of
-  `issues/every-driver-is-still-in-the-kernel.md`): the compositor drives it
-  through a `pci:1af4:1050` claim and follows the host window's display
-  events. Blocked on `issues/a-cargo-run-boot-claims-every-pcidev-slot.md`:
-  the Virtio profile's fifth claim is refused until a slot is free.
+- **The benches' reading** of `gop_edid_scale`, which now also holds the
+  desktop drawn at 1.5 and a client's window given its buffer at it. Nothing
+  else: the compositor drives QEMU's virtio-gpu and follows a host window's
+  resize (`the_compositor_drives_the_virtio_gpu`), and no `SYS_GPU_*` number
+  is left.
 
 Constraints already paid for:
 

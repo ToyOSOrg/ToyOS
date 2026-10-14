@@ -132,15 +132,15 @@ impl Log {
         });
     }
 
-    /// Draw what is held; whether there was any.
+    /// Draw what is held.
     ///
     /// **Above the shell's unfinished line, never inside it**: where the shell
     /// is part of the way through one — its prompt, and what is being typed at
     /// it — that row is cleared, the lines drawn, and the shell's line drawn
     /// again under them. `partial` is that line as the shell wrote it.
-    fn draw(&mut self, partial: &[u8], console: &mut Console) -> bool {
+    fn draw(&mut self, partial: &[u8], console: &mut Console) {
         if self.held.is_empty() {
-            return false;
+            return;
         }
         if !partial.is_empty() {
             console.write_bytes(b"\r\x1b[K");
@@ -148,7 +148,6 @@ impl Log {
         console.write_bytes(&self.held);
         console.write_bytes(partial);
         self.held.clear();
-        true
     }
 }
 
@@ -175,7 +174,7 @@ fn main() {
         return;
     };
     let info = fb_dev.info().expect("console: framebuffer info");
-    let shm = SharedMemory::adopt(info.scanout[0], info.stride as usize * info.height as usize * 4)
+    let shm = SharedMemory::adopt(info.scanout, info.stride as usize * info.height as usize * 4)
         .expect("console: the scanout buffer the framebuffer claim just handed over");
     let screen = Screen::new(
         shm.as_ptr(),
@@ -202,7 +201,6 @@ fn main() {
             0
         }
     };
-    present(&fb_dev, info.width, info.height);
 
     let kb: Keyboard = endow::device(DeviceType::Keyboard)
         .expect("the manifest gives this program the keyboard");
@@ -264,8 +262,6 @@ fn main() {
             }
         });
 
-        let mut painted = false;
-
         if ready[TOKEN_STDOUT as usize] {
             let mut buf = [0u8; 4096];
             match shell.stdout.read(&mut buf).unwrap_or(0) {
@@ -277,12 +273,10 @@ fn main() {
                     shell.restart(&connector);
                     console.write_bytes(b"\n[console] the shell exited; a new one is running\n");
                     partial.clear();
-                    painted = true;
                 }
                 n => {
                     console.write_bytes(&buf[..n]);
                     unfinished(&mut partial, &buf[..n]);
-                    painted = true;
                 }
             }
         }
@@ -293,7 +287,6 @@ fn main() {
             if n > 0 {
                 console.write_bytes(&buf[..n]);
                 unfinished(&mut partial, &buf[..n]);
-                painted = true;
             }
         }
 
@@ -312,7 +305,7 @@ fn main() {
             }
         }
         if let Ok(reader) = &mut log {
-            painted |= reader.draw(&partial, &mut console);
+            reader.draw(&partial, &mut console);
         }
 
         if ready[TOKEN_LISTEN as usize] {
@@ -418,11 +411,9 @@ fn main() {
                 // does not reach for with a laptop in his hands.
                 KEY_PAGE_UP => {
                     console.scroll_view_up(page_rows);
-                    painted = true;
                 }
                 KEY_PAGE_DOWN => {
                     console.scroll_view_down(page_rows);
-                    painted = true;
                 }
                 usage => {
                     let text = translator.press(usage, window::KeyEvent::from(event).mods());
@@ -431,10 +422,6 @@ fn main() {
                     }
                 }
             }
-        }
-
-        if painted {
-            present(&fb_dev, info.width, info.height);
         }
     }
 }
@@ -497,14 +484,6 @@ fn seed_tail(log: &[u8]) -> &[u8] {
         }
     }
     window
-}
-
-/// One present per drained batch, never per byte. Free on a GOP framebuffer —
-/// `gop.rs`'s `present_rect` is empty, because the scanout *is* the memory just
-/// written — and one transfer per batch on virtio-gpu, the only backend where
-/// it costs anything.
-fn present(fb: &FramebufferDev, width: u32, height: u32) {
-    fb.present(0, 0, width, height).expect("console holds the framebuffer claim");
 }
 
 struct Shell {

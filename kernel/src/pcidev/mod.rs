@@ -14,7 +14,7 @@
 //! claim.
 //!
 //! **What a holder lends is placed in a window of its function's domain
-//! reserved for lending, [`MAX_GRANT_TOTAL`] long, and nowhere else**, so
+//! reserved for lending, [`LEND_WINDOW`] long, and nowhere else**, so
 //! lending and taking back as often as a holder likes spends no address and no
 //! remapping table past that window's, and a window with no room left is a
 //! refusal ([`SyscallError::ResourceExhausted`]). An address in it is lent
@@ -125,7 +125,7 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use record::Interrupt;
 use toyos_abi::boot::{MemoryMapEntry, RootBridgeWindow};
 use toyos_abi::inventory::Arrival;
-use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
+use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS, LEND_WINDOW};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
 use toyos_pci::bridge::Window;
@@ -147,8 +147,8 @@ use crate::watch::IrqWatch;
 /// memory.
 const MAX_GRANT_BYTES: u64 = 8 * 1024 * 1024;
 
-/// And the most one claim may hold across every grant, and the length of the
-/// window its lent regions are placed in ([`Space::lend`]).
+/// And the most one claim may hold across every grant. What it lends is
+/// bounded apart, by the window it is placed in ([`Space::lend`]).
 const MAX_GRANT_TOTAL: u64 = 32 * 1024 * 1024;
 
 /// The unit every run in this module's records is said in.
@@ -230,7 +230,7 @@ fn function(number: usize) -> &'static Function {
 #[derive(Clone, Copy)]
 struct Space {
     space: OwnSpace,
-    /// [`MAX_GRANT_TOTAL`] of addresses handed out with the domain and never
+    /// [`LEND_WINDOW`] of addresses handed out with the domain and never
     /// mapped by anything but [`dma_map`].
     lend: u64,
 }
@@ -319,9 +319,9 @@ impl Bound {
             let residue = self.residue.iter().map(|aimed| (aimed.at, aimed.bytes));
             grants.chain(residue).any(|(from, bytes)| from < end && at < from + bytes)
         };
-        (0..MAX_GRANT_TOTAL / PAGE_2M)
+        (0..LEND_WINDOW / PAGE_2M)
             .map(|leaf| self.lend + leaf * PAGE_2M)
-            .take_while(|at| at + span <= self.lend + MAX_GRANT_TOTAL)
+            .take_while(|at| at + span <= self.lend + LEND_WINDOW)
             .find(|at| !taken(*at))
     }
 
@@ -1031,7 +1031,7 @@ fn function_space(number: usize) -> Result<Space, IommuError> {
     match *held {
         Some(space) => Ok(space),
         None => {
-            let (space, lend) = OwnSpace::create(MAX_GRANT_TOTAL)?;
+            let (space, lend) = OwnSpace::create(LEND_WINDOW)?;
             *held = Some(Space { space, lend });
             Ok(Space { space, lend })
         }
@@ -1660,7 +1660,12 @@ pub fn dma_alloc(
         if bytes == 0 || bytes > MAX_GRANT_BYTES {
             return Err(SyscallError::InvalidArgument);
         }
-        let held: u64 = bound.grants.iter().map(|grant| grant.bytes).sum();
+        let held: u64 = bound
+            .grants
+            .iter()
+            .filter(|grant| grant.origin != Origin::Mapped)
+            .map(|grant| grant.bytes)
+            .sum();
         let span = align_2m(bytes as usize) as u64;
         if held + span > MAX_GRANT_TOTAL {
             return Err(SyscallError::ResourceExhausted);
@@ -1734,9 +1739,8 @@ pub fn dma_undo(binding: &Binding, memory: &Arc<SharedMemObject>) {
 /// would be one device aimed at another's registers, and firmware's
 /// framebuffer is not the kernel's to lend.
 ///
-/// Counted against [`MAX_GRANT_TOTAL`] with the claim's own grants, so a holder
-/// mapping every region its clients send is bounded by the same number; and a
-/// window with no run of the region's length left free is the same refusal.
+/// Bounded by [`LEND_WINDOW`] alone: a window with no run of the region's
+/// length left free is a refusal.
 pub fn dma_map(binding: &Binding, region: &Arc<SharedMemObject>) -> Result<(u64, u64), SyscallError> {
     let function = binding.function();
     with_bound(binding, |bound| {
@@ -1746,10 +1750,6 @@ pub fn dma_map(binding: &Binding, region: &Arc<SharedMemObject>) -> Result<(u64,
         // function aimed at what the other still says is lent.
         if bound.grants.iter().any(|grant| Arc::ptr_eq(&grant.memory, region)) {
             return Err(SyscallError::InvalidArgument);
-        }
-        let held: u64 = bound.grants.iter().map(|grant| grant.bytes).sum();
-        if held + span > MAX_GRANT_TOTAL {
-            return Err(SyscallError::ResourceExhausted);
         }
         let at = bound.lend_room(span).ok_or(SyscallError::ResourceExhausted)?;
         // Inside room the domain handed out with the function, and the pages are

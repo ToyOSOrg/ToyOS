@@ -95,6 +95,7 @@ members = [
     "system/acpiserver/aml",
     "system/compositor",
     "system/compositor/desktop",
+    "system/compositor/virtio-gpu",
     "system/console",
     "system/diskserver",
     "system/filepicker",

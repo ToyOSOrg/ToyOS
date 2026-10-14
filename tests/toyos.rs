@@ -469,6 +469,15 @@ const MACHINE_TESTS: &[&str] = &[
     // end of the handshake and of the request is QEMU's vdagent chardev and
     // virtio-serial device, which no host test runs.
     "the_opening_exchange_with_qemus_agent_completes",
+    // The compositor driving QEMU's virtio-gpu through its claim, and a host
+    // display resize reaching the guest's mode: no metal machine has a
+    // virtio-gpu, and the host tests drive `toyos-virtio-gpu` against a model
+    // written from this design's own reading of §5.7, so only QEMU's device
+    // says it was read right. x86-64 q35 alone, `Profile::HeadlessVirtioGpu`:
+    // an AArch64 `virt` boot hands over no PCI claim yet. A boot of its own:
+    // its `-vnc` display changes the display configuration the clipboard
+    // test's premise, `-display none`, rests on.
+    "the_compositor_drives_the_virtio_gpu",
     // A client's window, asked for in logical pixels at scale 2, is drawn at
     // twice that on the panel, and the display port's `screen scale 1` relays
     // it to its logical size with the chrome around it: what reaches the
@@ -1014,10 +1023,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: SELFTESTS, judge: |b| read_fault_probes(b[0].kernel().text()) },
     ),
     (
-        "leak_rollback_selftest",
-        metal::Metal { arms: SELFTESTS, judge: |b| leak_rollback(b[0].kernel().text()) },
-    ),
-    (
         "lapic_spurious_vector",
         metal::Metal { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
     ),
@@ -1305,7 +1310,6 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
 const SELFTEST_PARAMS: &[&str] = &[
     "pci-cap-selftest",
     "revoked-backing-selftest",
-    "leak-rollback-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
     "xhci-xecp-selftest",
@@ -3750,7 +3754,7 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
-        "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
+        "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(),
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
@@ -3773,6 +3777,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
+        "the_compositor_drives_the_virtio_gpu" => the_compositor_drives_the_virtio_gpu(),
         "a_window_is_drawn_at_the_scale_and_relaid_at_the_next" => a_window_is_drawn_at_the_scale_and_relaid_at_the_next(),
         other => Err(format!("unknown machine test {other}")),
     }
@@ -3885,6 +3890,55 @@ fn the_opening_exchange_with_qemus_agent_completes() -> Result<(), String> {
         (Some(open), Some(answered)) if open < answered => Ok(()),
         _ => Err(format!("the agent did not say {OPEN:?} before {ANSWERED:?}:\n{text}")),
     }
+}
+
+/// The compositor drives QEMU's virtio-gpu through its `pci:03:80:00/1af4:1050`
+/// claim: it starts at the size the device prefers, QEMU's default
+/// 1280x800, and its first frame reaches the scanout; then a VNC client
+/// resizes the host's display to 1024x768, the device raises its display
+/// event, and the compositor flips to that mode and draws it.
+///
+/// "Drawn" is a screendump of the scanout at the mode's size holding the
+/// wallpaper's many colours: a scanout no frame reached is one colour, or
+/// QEMU's two-colour notice that the guest set none.
+fn the_compositor_drives_the_virtio_gpu() -> Result<(), String> {
+    const FIRST: &str = "compositor: display 1280x800";
+    const FRAME: &str = "compositor: the first frame is on the panel";
+    const FOLLOWED: &str = "compositor: mode 1024x768";
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/clipboardcase.toml"),
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::HeadlessVirtioGpu, qmp: true, vnc: true, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "the compositor's first frame", |t| t.contains(FRAME))
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let drawn = |dump: &screen::Ppm, (width, height)| -> Result<(), String> {
+        let colours: BTreeSet<[u8; 3]> = dump.pixels.iter().copied().collect();
+        if (dump.width, dump.height) != (width, height) || colours.len() < 64 {
+            return Err(format!(
+                "the scanout is {}x{} in {} colour(s), where the desktop at {width}x{height} was drawn",
+                dump.width,
+                dump.height,
+                colours.len()
+            ));
+        }
+        Ok(())
+    };
+    drawn(&qemu.screendump(), (1280, 800)).map_err(|e| format!("{e}\n{console}"))?;
+
+    let _client = common::vnc::resize(qemu.vnc_socket(), 1024, 768)?;
+    await_guest(&mut qemu, &mut console, "the compositor following the host's display", |t| t.contains(FOLLOWED))
+        .map_err(|e| format!("{e}\n{console}"))?;
+    // The flip's frame is drawn into the new scanout before it is shown.
+    drawn(&qemu.screendump(), (1024, 768)).map_err(|e| format!("{e}\n{console}"))?;
+
+    let said = serial::Serial::named("the virtio-gpu boot", console);
+    said.must_be_clean()?;
+    said.must_say(FIRST)?;
+    eprintln!("  [virtio-gpu] 1280x800 drawn, then 1024x768 followed and drawn");
+    Ok(())
 }
 
 /// A machine with one NVMe disk and no USB controller boots the image off
@@ -4449,19 +4503,6 @@ fn read_fault_probes(log: &str) -> Result<(), String> {
             return Err(format!("{}\n{log}", verdict.trim()));
         }
         eprintln!("  [read-fault] {}", verdict.trim());
-        Ok(())
-}
-
-/// An "acquire before a fallible step" control: the count returned to its baseline after a refused call.
-fn leak_rollback(log: &str) -> Result<(), String> {
-        let probe = "leak-selftest: device-mint";
-        let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-            return Err(format!("{probe} never ran:\n{log}"));
-        };
-        if !verdict.contains("PASS") {
-            return Err(format!("{}\n{log}", verdict.trim()));
-        }
-        eprintln!("  [leak] {}", verdict.trim());
         Ok(())
 }
 

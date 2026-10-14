@@ -77,12 +77,14 @@ receives = ["power"]
 # of keys and pointer reports reaches the owner of input, which it is.
 # `display` sets the mode and the scale, and `toybox` alone receives it, for
 # `screen`. `volume` is soundserver's master level and mute, which the volume
-# keys set and no other row receives.
+# keys set and no other row receives. The display is a virtio-gpu function the
+# compositor drives, where the machine has one, and the firmware's framebuffer
+# otherwise.
 [programs.compositor]
 service = true
 serves = ["compositor", "prompt", "clipboard", "input", "display"]
 receives = ["soundserver", "filepicker", "volume"]
-devices = ["framebuffer", "keyboard", "mouse"]
+devices = ["pci:03:80:00/1af4:1050", "framebuffer", "keyboard", "mouse"]
 starts = ["terminal", "files", "/apps"]
 login = true
 

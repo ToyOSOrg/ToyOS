@@ -365,32 +365,20 @@ pub fn scale_wallpaper(
     dst
 }
 
-/// A cursor's mask in `color`, into the 64x64 hardware cursor buffer, whose
-/// pixels' bytes are blue, green, red and alpha; and the cursor shown with
-/// its hot spot at `hot`.
-pub fn upload_cursor(
-    fb: &toyos::FramebufferDev,
-    cursor_buf: &mut [u8],
-    mask: &Mask,
-    color: [u8; 3],
-    hot: toyos_desktop::Point,
-) {
+/// The pixels of a hardware cursor's image, 64 by 64.
+pub const CURSOR_PIXELS: usize = (toyos_desktop::cursor::HARDWARE_EDGE * toyos_desktop::cursor::HARDWARE_EDGE) as usize;
+
+/// A cursor's mask in `color` as a hardware cursor's image, whose pixels'
+/// bytes are blue, green, red and alpha.
+pub fn cursor_image(mask: &Mask, color: [u8; 3]) -> [u32; CURSOR_PIXELS] {
     const EDGE: usize = toyos_desktop::cursor::HARDWARE_EDGE as usize;
     let edge = mask.edge();
     assert!(edge <= EDGE, "a {edge}-pixel cursor is drawn in software");
-    cursor_buf[..EDGE * EDGE * 4].fill(0);
+    let mut image = [0u32; CURSOR_PIXELS];
     for (i, &alpha) in mask.alpha().iter().enumerate() {
-        let at = ((i / edge) * EDGE + i % edge) * 4;
-        cursor_buf[at..at + 4].copy_from_slice(&[color[2], color[1], color[0], alpha]);
+        image[(i / edge) * EDGE + i % edge] = u32::from_le_bytes([color[2], color[1], color[0], alpha]);
     }
-    fb.set_cursor(hot.x as u32, hot.y as u32).expect("compositor holds the framebuffer claim");
-}
-
-/// The hardware cursor emptied, for a scale whose cursor is drawn in software.
-pub fn empty_cursor(fb: &toyos::FramebufferDev, cursor_buf: &mut [u8]) {
-    const EDGE: usize = toyos_desktop::cursor::HARDWARE_EDGE as usize;
-    cursor_buf[..EDGE * EDGE * 4].fill(0);
-    fb.set_cursor(0, 0).expect("compositor holds the framebuffer claim");
+    image
 }
 
 /// Draw a cursor's mask into the composed frame, its top-left corner at

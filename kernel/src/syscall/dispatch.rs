@@ -11,7 +11,7 @@
 use crate::object::{ops, KObjectRef};
 use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
-use crate::{device, process};
+use crate::process;
 
 use toyos_abi::handle::{RawHandle, Rights};
 #[cfg(feature = "test-actuators")]
@@ -23,9 +23,9 @@ use super::HANDLE_LEN;
 #[cfg(feature = "test-actuators")]
 use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
-    holds_claim, sys_acpi, sys_hda_bind, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
+    sys_acpi, sys_hda_bind, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
     sys_device_dma_unmap,
-    sys_device_reg, sys_gpu_reset_scanout, sys_partition_transfer, Transfer,
+    sys_device_reg, sys_partition_transfer, Transfer,
 };
 use super::fs::{
     spawn_cwd, sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink,
@@ -252,21 +252,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
 
         // No right: the one caller marks both ends of a pair, so requiring one would refuse the other.
         SYS_MARK_TTY => with_object(RawHandle(a1 as u32), Rights::NONE, ops::mark_tty),
-        // Gated for display integrity, not memory access: contents are already behind shared_memory grants.
-        // Ungated, any process could scan over the compositor's frames or move its cursor.
-        SYS_GPU_PRESENT | SYS_GPU_SET_CURSOR | SYS_GPU_MOVE_CURSOR => {
-            if let Err(e) = holds_claim(RawHandle(a1 as u32), device::DeviceType::Framebuffer) {
-                return e.refuse();
-            }
-            let (hi2, lo2) = unpair(a2);
-            let (hi3, lo3) = unpair(a3);
-            match num {
-                SYS_GPU_PRESENT => crate::gpu::present_rect(hi2, lo2, hi3, lo3),
-                SYS_GPU_SET_CURSOR => crate::gpu::set_cursor(a2 as u32, a3 as u32),
-                _ => crate::gpu::move_cursor(a2 as u32, a3 as u32),
-            }
-            0
-        }
         SYS_THREAD_SPAWN => sys_thread_spawn(a1, a2, a3, a4),
         SYS_THREAD_JOIN => sys_thread_join(a1),
         // Both answer from the boot-time anchor, never the CMOS: NotSupported beats a
@@ -418,24 +403,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a3), a4) else { return bad_addr };
             sys_readlink(&path, &mut buf)
-        }
-        SYS_GPU_SET_RESOLUTION => {
-            // Checked before the driver, so an unclaimed caller never turns two
-            // arbitrary u32s into a physical allocation.
-            let claim_h = RawHandle(a1 as u32);
-            if let Err(e) = holds_claim(claim_h, device::DeviceType::Framebuffer) {
-                return e.refuse();
-            }
-            // Checked before the allocation, same reason as the claim: a bad address
-            // must not leave a resolution the caller was never told about.
-            let Some(info_out) = UserAddr::checked(a3) else { return bad_addr };
-            let (width, height) = unpair(a2);
-            match crate::gpu::set_resolution(width, height) {
-                // ctx lets sys_gpu_reset_scanout mint the buffers before it knows the
-                // write-back length.
-                Ok(gpu_info) => sys_gpu_reset_scanout(&ctx, claim_h, gpu_info, info_out),
-                Err(e) => e.to_u64(),
-            }
         }
         SYS_ENDOWMENTS => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a1), a2) else { return bad_addr };
@@ -700,9 +667,4 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
     });
 
     result
-}
-
-/// The two `u32`s a device call packs into one argument word, taken apart here.
-fn unpair(word: u64) -> (u32, u32) {
-    ((word >> 32) as u32, word as u32)
 }

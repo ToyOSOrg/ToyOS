@@ -1,0 +1,24 @@
+# A member of the host workspace (root `Cargo.toml`), like
+# `toyos-virtio-sound`: pure, and its tests run on the host against a model of
+# the device, with §5.7's structures as the oracle.
+
+[package]
+name = "toyos-virtio-gpu"
+description = "The compositor's virtio-gpu driver: the GPU device's 2D commands (VirtIO 1.2 §5.7) over its two queues, the scanout's page flip and the cursor, pure."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+doctest = false
+
+[dependencies]
+# The split virtqueue every word the device writes back is bounded by, and the
+# transport's refusals.
+toyos-virtio = { path = "../../../lib/virtio" }
+# `DmaBuffers`, the grant both queues, their buffers and the cursor are in.
+toyos-device-memory = { path = "../../../lib/device-memory" }
+
+[lints.rust]
+warnings = "deny"
