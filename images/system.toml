@@ -19,7 +19,7 @@ assets = ["assets"]
 # while the compositor had no way to ask for a program's *declared* authority —
 # the launcher gives it one, and starting a service from `[boot] start` is not
 # the thing that needed fixing.
-start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "vdagent", "ps2server"]
+start = ["logkeeper", "diskserver", "fileserver", "compositor", "soundserver", "netstack", "filepicker", "acpiserver", "ps2server"]
 
 # What every program launched out of `/apps` holds, whatever its own directory
 # says. A package is unpacked by `/system/bin/pkg` into a writable directory, so
@@ -98,25 +98,25 @@ devices = ["isa:0060,0064:1,12"]
 [programs.soundserver]
 service = true
 serves = ["soundserver", "volume"]
-devices = ["hda-audio", "pci:1af4:1059"]
+devices = ["hda-audio", "pci:04:01:00/1af4:1059"]
 syscap = ["rt"]
 
 # netstack holds the NIC's PCI function and drives it: the virtqueues, the register
 # window and the interrupt are its own, and the kernel keeps only the claim.
-# Named by vendor and device rather than by slot, so one row finds the card
+# Named by class, vendor and device rather than by slot, so one row finds the card
 # wherever firmware put it.
 [programs.netstack]
 service = true
 serves = ["netstack"]
-devices = ["pci:1af4:1041"]
+devices = ["pci:02:00:00/1af4:1041"]
 
-# The shared clipboard with QEMU's host: the virtio-serial function its
-# vdagent chardev is on, claimed by vendor and device among the functions the
-# kernel does not drive (the kernel's console is `1af4:1043` too), and the
-# compositor's clipboard port. A machine with no such function, the T14 among
-# them, leaves it to say so and exit.
+# The shared clipboard with QEMU's host: one process per virtio-serial
+# function the kernel does not drive (the kernel's console is `1af4:1043` too),
+# holding the function its vdagent chardev is on, and the compositor's
+# clipboard port. A machine with no such function, the T14 among them, starts
+# none.
 [programs.vdagent]
-devices = ["pci:1af4:1043"]
+drives = ["pci:07:80:00/1af4:1043"]
 receives = ["clipboard"]
 
 # Every launch it makes is in a login session, the one `update` and `swap`
@@ -255,7 +255,7 @@ starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "pai
 service = true
 restart = true
 serves = ["block"]
-devices = ["pci:1b36:0010"]
+devices = ["pci:01:08:02/1b36:0010"]
 
 # The file servers: DATA, the log and the running slot's volume, one process
 # each, serving every program the directories of its role. Started again when

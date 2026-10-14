@@ -35,7 +35,7 @@ syscap = ["rt", "dup", "counters"]
 service = true
 restart = true
 serves = ["block"]
-devices = ["pci:1b36:0010"]
+devices = ["pci:01:08:02/1b36:0010"]
 
 # The file servers: DATA, the log and the running slot's volume, one process
 # each, serving every program the directories of its role. Started again when

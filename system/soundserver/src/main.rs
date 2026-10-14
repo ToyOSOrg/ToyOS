@@ -87,7 +87,7 @@ fn main() {
     //
     // The order is virtio first, and it is not a preference between two cards:
     // no machine in this project has both. The T14 has only the second.
-    if let Some(dev) = endow::pci_function::<PciDev>(virtio::PCI_ID) {
+    if let Some(dev) = endow::claim::<PciDev>(&virtio::FUNCTION.to_string()) {
         match virtio::Virtio::claim(dev) {
             Ok((virtio, rate, channels)) => return run_virtio(ports, virtio, rate, channels),
             Err(why) => {

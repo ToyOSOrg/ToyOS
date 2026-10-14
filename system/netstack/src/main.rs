@@ -33,6 +33,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::say;
 use toyos::AsHandle;
 use toyos_abi::syscall::PciId;
+use toyos_manifest::device::PciMatch;
 use toyos_dhcp::{HostName, Lease};
 use toyos_i219::Part;
 use toyos_inspect::Snapshot;
@@ -53,23 +54,28 @@ mod watches;
 use card::Card;
 use client::{Client, ClientRx, HANDSHAKE_TIMEOUT, MAX_KEPT_REQUEST, MAX_PENDING_CONNS, PendingConn, Request};
 
-/// The cards this program can drive, named by what identifies one rather than
-/// by the slot firmware put it in, and each with the driver that opens it. The
-/// manifest row spells the same pair and the claim arrives under a label
-/// composed from it, so which of these exists is `/system/bin/supervisor`'s answer
-/// and not this program's — at most one is ever endowed, and a machine with
-/// none is a machine netstack leaves.
+/// The cards this program can drive, matched by their class and what
+/// identifies the card rather than by the slot firmware put it in, and each
+/// with the driver that opens it. The manifest row spells the same matcher and
+/// the claim arrives under its text, so which of these exists is
+/// `/system/bin/supervisor`'s answer and not this program's — at most one is
+/// ever endowed, and a machine with none is a machine netstack leaves.
 ///
 /// `1af4:1041` is virtio's transitional device id `1000 + 1` for a network
 /// device (virtio 1.2 §5.1.1). `8086:15fc` is the ThinkPad T14's onboard I219
 /// at `00:1f.6`; `8086:10d3` is the 82574L, which QEMU's `e1000e` models. One
 /// driver takes both, and each row names which part it is because below the
 /// register file they are not one.
-const CARDS: [(PciId, fn(toyos::PciDev) -> Card); 3] = [
-    (PciId { vendor: 0x8086, device: 0x15fc }, |c| Card::intel(c, Part::I219)),
-    (PciId { vendor: 0x8086, device: 0x10d3 }, |c| Card::intel(c, Part::E82574)),
-    (PciId { vendor: 0x1af4, device: 0x1041 }, Card::virtio),
+const CARDS: [(PciMatch, fn(toyos::PciDev) -> Card); 3] = [
+    (ethernet(0x8086, 0x15fc), |c| Card::intel(c, Part::I219)),
+    (ethernet(0x8086, 0x10d3), |c| Card::intel(c, Part::E82574)),
+    (ethernet(0x1af4, 0x1041), Card::virtio),
 ];
+
+/// An Ethernet controller, class `02:00:00`.
+const fn ethernet(vendor: u16, device: u16) -> PciMatch {
+    PciMatch::new([0x02, 0x00, 0x00], Some(PciId { vendor, device }))
+}
 
 /// The name this machine asks its network to record for it, and answers to on
 /// it as `<name>.local` once no other host does. One name, because there is
@@ -307,7 +313,7 @@ fn main() {
     // than silence.
     let Some((open, claim)) = CARDS
         .iter()
-        .find_map(|(id, open)| endow::pci_function::<toyos::PciDev>(*id).map(|c| (*open, c)))
+        .find_map(|(card, open)| endow::claim::<toyos::PciDev>(&card.to_string()).map(|c| (*open, c)))
     else {
         say!("netstack: no NIC on this machine, exiting");
         return;

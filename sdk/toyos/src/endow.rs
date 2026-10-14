@@ -228,31 +228,27 @@ pub fn device<T: FromHandle>(class: DeviceType) -> Option<T> {
     with_prefixed(DEV_PREFIX, class.class_name(), |label| Endowments::get().take::<T>(label))
 }
 
-/// The claim for one PCI function the manifest says this program gets.
-///
-/// The label is the `devices` entry's own spelling, written by the one
-/// [`DeviceRequest`] that also parsed it: a program looking up `pci:1af4:1041`
-/// and a config declaring it cannot disagree about what the name is.
-pub fn pci_function<T: FromHandle>(id: toyos_abi::syscall::PciId) -> Option<T> {
-    let mut buf = [0u8; DeviceRequest::MAX_NAME];
-    let name = DeviceRequest::Pci(id).write_name(&mut buf);
+/// The claim the manifest's entry `name` says this program gets, under the
+/// label the supervisor endows it by: the entry's own spelling. A PCI
+/// function's is `toyos-manifest`'s matcher, which a driver spells with the
+/// same type the manifest is parsed with.
+pub fn claim<T: FromHandle>(name: &str) -> Option<T> {
     with_prefixed(DEV_PREFIX, name, |label| Endowments::get().take::<T>(label))
 }
 
 /// The claim for one partition the manifest says this program gets, looked up
-/// by the entry's own spelling exactly as [`pci_function`] is.
+/// by the entry's own spelling, written by the one [`DeviceRequest`] that also
+/// parsed it.
 pub fn partition<T: FromHandle>(guid: toyos_abi::part::PartGuid) -> Option<T> {
     let mut buf = [0u8; DeviceRequest::MAX_NAME];
-    let name = DeviceRequest::Partition(guid).write_name(&mut buf);
-    with_prefixed(DEV_PREFIX, name, |label| Endowments::get().take::<T>(label))
+    claim(DeviceRequest::Partition(guid).write_name(&mut buf)?)
 }
 
 /// The claim for one legacy ISA function the manifest says this program gets,
-/// looked up by the entry's own spelling exactly as [`pci_function`] is.
+/// looked up by the entry's own spelling exactly as [`partition`] is.
 pub fn isa<T: FromHandle>(set: toyos_abi::syscall::IsaId) -> Option<T> {
     let mut buf = [0u8; DeviceRequest::MAX_NAME];
-    let name = DeviceRequest::Isa(set).write_name(&mut buf);
-    with_prefixed(DEV_PREFIX, name, |label| Endowments::get().take::<T>(label))
+    claim(DeviceRequest::Isa(set).write_name(&mut buf)?)
 }
 
 /// Compose `<prefix><name>` on the stack. Nothing in the SDK allocates, and a

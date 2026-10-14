@@ -11,6 +11,9 @@
 //! harness reds on either marker anywhere on the console, which is where a
 //! report that read through the BAR would put it.
 
+#[path = "../function.rs"]
+mod function;
+
 #[path = "../arch/stack.rs"]
 mod stack;
 
@@ -65,7 +68,7 @@ fn endowed() -> SysCap {
 }
 
 fn claim(cap: &SysCap) -> PciDev {
-    cap.claim_pci(EDU).unwrap_or_else(|why| panic!("claim_bar_fault: the claim on edu was refused: {why:?}"))
+    function::claim(&cap, EDU).unwrap_or_else(|why| panic!("claim_bar_fault: the claim on edu was refused: {why:?}"))
 }
 
 /// BAR 0 mapped, and its registers.

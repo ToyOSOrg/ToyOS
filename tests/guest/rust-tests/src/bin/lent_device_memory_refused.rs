@@ -5,6 +5,9 @@
 //! The device is QEMU's virtio NIC, which no program of
 //! `tests/images/testcases.toml` holds.
 
+#[path = "../function.rs"]
+mod function;
+
 use toyos::endow::Endowments;
 use toyos::fs::WINDOW_BYTES;
 use toyos::shm::{Lent, SharedMemory};
@@ -16,7 +19,7 @@ const NIC: PciId = PciId { vendor: 0x1af4, device: 0x1041 };
 
 fn main() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("lent_device_memory_refused: a device-minting capability");
-    let nic: PciDev = cap.claim_pci(NIC).expect("lent_device_memory_refused: the virtio NIC's claim");
+    let nic: PciDev = function::claim(&cap, NIC).expect("lent_device_memory_refused: the virtio NIC's claim");
     let info = nic.describe().expect("lent_device_memory_refused: the claim's description");
     let bar = info.bar_bytes.iter().position(|&bytes| bytes != 0).expect("lent_device_memory_refused: a memory BAR");
     let bar = syscall::device_bar_map(nic.as_handle(), bar as u32).expect("lent_device_memory_refused: the BAR's region");

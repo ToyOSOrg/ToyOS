@@ -26,23 +26,24 @@ impl SysCap {
         self.mint(DeviceRequest::Class(class))
     }
 
-    /// Mint the claim for one PCI function, named by what identifies the card.
+    /// Mint the claim for one PCI function, by the arrival its inventory
+    /// record carries.
     ///
     /// Apart from [`Self::claim`] rather than one call taking a
     /// [`DeviceRequest`], so there is no way to ask for
     /// [`DeviceType::PciFunction`] with no function named: a class is the whole
-    /// of what the call above asks for, and this one cannot be asked without an
-    /// id.
-    pub fn claim_pci<T: FromHandle>(
+    /// of what the call above asks for, and this one cannot be asked without
+    /// an arrival.
+    pub fn claim_function<T: FromHandle>(
         &self,
-        id: toyos_abi::syscall::PciId,
+        arrival: toyos_abi::inventory::Arrival,
     ) -> Result<T, SyscallError> {
-        self.mint(DeviceRequest::Pci(id))
+        self.mint(DeviceRequest::Function(arrival))
     }
 
     /// Mint the claim for one GPT partition, by its unique GUID. Apart from
-    /// [`Self::claim`] for the reason [`Self::claim_pci`] is: this one cannot be
-    /// asked without naming which.
+    /// [`Self::claim`] for the reason [`Self::claim_function`] is: this one
+    /// cannot be asked without naming which.
     ///
     /// `PermissionDenied` is a partition the kernel has mounted, and
     /// `AlreadyExists` one another process holds: a partition has one holder.
@@ -54,7 +55,7 @@ impl SysCap {
     }
 
     /// Mint the claim for one legacy ISA function, by exactly its ports and
-    /// lines. Apart from [`Self::claim`] for the reason [`Self::claim_pci`] is.
+    /// lines. Apart from [`Self::claim`] for the reason [`Self::claim_function`] is.
     ///
     /// `NotFound` is a set that is not one function this machine can hand out
     /// whole, and `PermissionDenied` one the kernel drives itself.

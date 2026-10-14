@@ -6,6 +6,8 @@ license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
+# The matcher its claim is endowed under, spelled as the manifest spells it.
+toyos-manifest = { path = "../../lib/manifest" }
 toyos = { path = "../../sdk/toyos" }
 toyos-device-memory = { path = "../../lib/device-memory" }
 toyos-i219 = { path = "i219" }
