@@ -17,10 +17,12 @@ sides each read their x2APIC ID from CPUID.0BH:EDX before and after the timed
 window, and a pure function over the four readings refuses the figure when the
 two sides' IDs match or either side's changed across the window.
 
-**Exit**: the outputs committed as fixtures, and that function host-tested.
-**Mutation**, each red: a pair on one CPU passes; only the readings before the
-window compared, so a sibling that moved onto the initiator's CPU inside it
-passes. **Oracle**: Linux.
+**Exit**: both runs' outputs published in evidence, and that function
+host-tested on crafted readings. **Mutation**, each red: a pair on one CPU
+passes; only the readings before the window compared, so a sibling that moved
+onto the initiator's CPU inside it passes. **Oracle**: the function's rule over
+the x2APIC IDs it is handed. Linux's outputs are a goal ToyOS's are compared
+against in evidence, never a fixture a test reads.
 
 What stands nearest is `counters_metal`'s `loaded` phase
 (`tests/guest/rust-tests/src/bin/counters_metal.rs`), the one lateness reading
