@@ -2,8 +2,8 @@
 //! by, each checked against its definition and allowed once.
 //!
 //! A vendor-specific element other than WMM's, and any other element this module does not type, is
-//! skipped, as §10.28.9 has a receiver ignore what it does not know; one it types that breaks its
-//! definition refuses the whole list.
+//! skipped, as §10.28.6 and §10.28.7 have a receiver ignore what it does not know; one it types
+//! that breaks its definition refuses the whole list.
 
 mod country;
 mod he;
@@ -101,11 +101,10 @@ pub struct Rate {
 }
 
 impl Rate {
-    /// BSS membership selectors (Table 9-78).
+    /// BSS membership selectors (Table 9-131).
     pub const HT_PHY: u8 = 127;
     pub const VHT_PHY: u8 = 126;
     pub const SAE_H2E_ONLY: u8 = 123;
-    /// 802.11ax-2021 Table 9-78.
     pub const HE_PHY: u8 = 122;
 }
 
@@ -142,7 +141,7 @@ pub struct Elements<'a> {
     pub wmm: Option<Wmm>,
 }
 
-/// The Extended Capabilities element: bit n of its field, absent past its length, is 0 (§9.4.2.26).
+/// The Extended Capabilities element: bit n of its field, absent past its length, is 0 (§9.4.2.25).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExtendedCapabilities<'a>(pub &'a [u8]);
 

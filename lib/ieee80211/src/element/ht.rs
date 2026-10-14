@@ -1,7 +1,7 @@
-//! HT Capabilities (§9.4.2.55), HT Operation (§9.4.2.56), VHT Capabilities (§9.4.2.157) and VHT
-//! Operation (§9.4.2.158): fixed-length elements, refused when shorter or where a field holds a
-//! value the standard reserves. Octets past the fixed fields are ignored, so a field a later
-//! amendment appends costs no beacon.
+//! HT Capabilities (§9.4.2.54), HT Operation (§9.4.2.55), VHT Capabilities (§9.4.2.156) and VHT
+//! Operation (§9.4.2.157): fixed-length elements, refused when shorter or where a field holds a
+//! value the standard reserves. Octets past the fixed fields are ignored, as §10.28.8 requires of
+//! an extensible element.
 
 use crate::read::Reader;
 use crate::Refused;
@@ -36,7 +36,7 @@ impl HtCapabilities {
     }
 }
 
-/// Secondary Channel Offset (§9.4.2.56).
+/// Secondary Channel Offset (§9.4.2.55).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecondaryChannel {
     None,
@@ -98,7 +98,7 @@ impl VhtCapabilities {
     }
 }
 
-/// The VHT Operation Information's Channel Width (Table 9-274).
+/// The VHT Operation Information's Channel Width (Table 9-316).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VhtChannelWidth {
     TwentyOrForty,
