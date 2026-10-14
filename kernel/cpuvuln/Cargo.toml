@@ -1,9 +1,0 @@
-# A member of the host workspace (root `Cargo.toml`):
-# `no_std` so the kernel can depend on it by path, and its tests run on the host.
-
-[package]
-name = "toyos-cpuvuln"
-description = "Verdicts from a CPU's CPUID and MSR facts, pure: Linux's on each speculative-execution vulnerability and its mitigation choice, which model-specific counters the CPU has and the HWP request intel_pstate asks of it; AMD's revision guides' on whether erratum 1386 forbids the CPU XSAVES."
-version = "0.1.0"
-edition = "2021"
-license = "MIT OR Apache-2.0"

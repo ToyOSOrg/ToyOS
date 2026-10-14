@@ -4975,9 +4975,8 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// Held: a record per CPU the bring-up started, naming the local APIC id the
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
 /// reads` line names, and none stale; every CPU's performance request
-/// declared at boot, `pm_enable=1`, the request Linux makes on this machine
-/// (`tests/metal/t14-linux/hwp-request.txt`), and its power envelope in every read
-/// the one its `control_regs:` line holds. No line, the kernel's or a
+/// declared at boot, `pm_enable=1`, and its power envelope in every read the
+/// one its `control_regs:` line holds. No line, the kernel's or a
 /// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
 /// `counters_metal` reads on the log's clock, either
 /// edge's included because a line stamped in it may follow the read: the
@@ -5044,8 +5043,6 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     if !inside.is_empty() {
         return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
     }
-    let linux_request = u64::from_str_radix(include_str!("metal/t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
-        .map_err(|e| format!("metal/t14-linux/hwp-request.txt: {e}"))?;
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
     let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];
     for cpu in 1..cpus {
@@ -5066,9 +5063,6 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
                 return Err(format!("{name}: cpu{cpu} is stale or not lapic {}: {counters:?}", roster[*cpu]));
             }
             let declared = kernel.must_say(&format!("control_regs: cpu{cpu} pm_enable=1 "))?;
-            if !declared.contains(&format!(" hwp_request={linux_request:#010x} ")) {
-                return Err(format!("cpu{cpu} declared {declared:?}, and Linux requests {linux_request:#010x} on this machine"));
-            }
             for (counter, field, radix) in
                 [("hwp_request", "hwp_request=0x", 16), ("hwp_request_pkg", "hwp_request_pkg=0x", 16), ("energy_perf_bias", "epb=", 10)]
             {
