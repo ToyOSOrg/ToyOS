@@ -19,7 +19,11 @@ vendor ID of each of the 24 functions the kernel enumerated
 **That path no longer exists in that form** (#926, not re-measured): the
 supervisor matches a `devices` entry against the inventory and asks the kernel
 for no function the machine lacks, and `pcidev::claim` takes an arrival and
-reads no function's vendor ID. The figures here stay as measured.
+reads no function's vendor ID. The figures here stay as measured. What
+replaced the claim at boot is one `SYS_DEVICE_INVENTORY` read per start of a
+row with a PCI matcher, and nobody has measured it; the exit below reads a
+claim no boot now makes, so a T14 reading of that read is what decides
+whether this closes.
 
 A syscall's body now runs with interrupts open and preemption off
 (`issues/syscall-preemption-is-incidental.md`). #716's interleaved
