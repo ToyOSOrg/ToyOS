@@ -1,6 +1,6 @@
-//! IEEE Std 802.11-2020 frames as a station meets them, with 802.11ax-2021's HE elements and
-//! BlockAck bitmaps and the Wi-Fi Alliance's WMM element: parsed in place from bytes a radio or a
-//! peer wrote, and refused by the first rule they break, by name.
+//! IEEE Std 802.11-2024 frames as a station meets them, with the Wi-Fi Alliance's WMM element
+//! (WMM Specification v1.2.0): parsed in place from bytes a radio or a peer wrote, and refused by
+//! the first rule they break, by name.
 //!
 //! [`frame::Frame::parse`] takes one MPDU without its FCS and yields a typed management, control
 //! or data frame whose body still borrows the input. Elements are read by [`element`], A-MSDU
@@ -70,16 +70,17 @@ macro_rules! refusals {
 }
 
 refusals! {
-    // The MAC header, 9.2.
+    // The MAC header, §9.2.
     Truncated = Malformed, "the bytes end inside a field";
     ProtocolVersion = Unsupported, "the protocol version is not 0 (§9.2.4.1.2)";
-    ExtensionFrame = Unsupported, "a frame of type Extension (DMG and S1G only)";
-    ReservedSubtype = Malformed, "a subtype the standard reserves";
-    ManagementWithDs = Malformed, "a management frame with To DS or From DS set";
+    ExtensionFrame = Unsupported, "a DMG or S1G Beacon, the frames of type Extension";
+    ReservedSubtype = Malformed, "a type and subtype Table 9-1 reserves";
+    QosManagement = Unsupported, "a QoS management frame: To DS set, From DS clear (Table 9-4)";
+    ManagementFromDs = Malformed, "a management frame with From DS set, which Table 9-4 reserves";
     UnhandledManagement = Unsupported, "a management subtype a station does not handle";
     UnhandledControl = Unsupported, "a control frame other than BlockAckReq or BlockAck";
-    ContentionFreeData = Unsupported, "a data subtype of the point coordination function";
-    StrictlyOrdered = Unsupported, "a non-QoS data frame with the Order bit set";
+    UnhandledData = Unsupported, "an EBCS Data frame, or a QoS data subtype with +CF-Ack or +CF-Poll";
+    HtcInNonQosData = Malformed, "+HTC set in a data frame other than QoS Data or QoS Null (§9.2.4.1.10)";
     Fragmented = Unsupported, "a fragment of an MSDU or MMPDU";
     GroupTransmitter = Malformed, "a transmitter address with the group bit set";
     // Management bodies, §9.3.3.
@@ -95,9 +96,8 @@ refusals! {
     DtimPeriod = Malformed, "a TIM element with a DTIM period of 0";
     TimBitmap = Malformed, "a TIM partial virtual bitmap past AID 2007";
     CountryString = Malformed, "a country string whose first two octets are not upper-case letters";
-    CountryPad = Malformed, "a Country element whose pad octet is not 0";
+    CountryPad = Malformed, "a Country element of odd length, or whose pad octet is not 0";
     CountryTriplet = Malformed, "a Country element whose triplets do not tile it";
-    CountryChannels = Malformed, "a subband triplet of 0 channels, or running past channel 200";
     RsnVersion = Unsupported, "an RSN element of a version other than 1";
     RsnCount = Malformed, "an RSN suite count running past the element";
     MfpRequiredNotCapable = Malformed, "management frame protection required but not capable";
@@ -109,19 +109,21 @@ refusals! {
     WmmAifsn = Malformed, "a WMM AC Parameter Record with an AIFSN below 2";
     WmmAccessCategory = Malformed, "a WMM Parameter element that does not give each access category once";
     // Control frames, §9.3.1.
+    ReservedBlockAckType = Malformed, "a BAR or BA Type Table 9-36 or Table 9-37 reserves";
     BlockAckVariant = Unsupported, "a block-ack variant other than Compressed";
-    BitmapSize = Unsupported, "a block-ack Fragment Number this station does not handle: a fragment level, or a bitmap other than 32, 64, 128 or 256 bits";
+    BlockAckFragmentNumber = Malformed, "a BlockAckReq Fragment Number other than 0, or a BlockAck one Table 9-38 reserves";
+    FragmentLevel = Unsupported, "a BlockAck acknowledging fragments: Fragment Number B0 set";
     ControlLength = Malformed, "a block-ack frame whose length its variant does not give";
-    // Data, §9.3.2 and §12.5.3.
+    // Data, §9.3.2 and §12.5.2.
     SubframeLength = Malformed, "an A-MSDU subframe whose length runs past the MPDU";
     SubframePadding = Malformed, "an A-MSDU subframe whose padding runs past the MPDU";
     SnapHeaderAsAddress = Malformed, "an A-MSDU whose first destination is an LLC/SNAP header";
     NotSnap = Unsupported, "an MSDU that is not LLC/SNAP";
     UnknownOui = Unsupported, "an LLC/SNAP header with an OUI other than RFC 1042's or bridge-tunnel's";
-    TranslatedType = Unsupported, "an RFC 1042 header carrying a type 802.1H sends by bridge-tunnel";
-    LengthField = Unsupported, "an EtherType below 0x0600, which is an IEEE 802.3 length";
+    TranslatedType = Unsupported, "an RFC 1042 header carrying a type the selective translation table sends by bridge-tunnel";
+    LengthField = Unsupported, "a Length/Type value below 0x0600, which IEEE Std 802.3-2022 §3.2.6 does not read as a type";
     ExtendedIvClear = Malformed, "a CCMP header without its Ext IV bit";
-    // The reordering buffer, §10.25.6.
+    // The reordering buffer, §10.25.6.6.
     WindowSize = Malformed, "a reordering buffer of 0 or more than 256 MPDUs";
 }
 
@@ -145,7 +147,7 @@ impl Address {
     }
 }
 
-/// A 12-bit sequence number, compared modulo 4096 (§9.2.4.4.2, §10.3.2.14).
+/// A 12-bit sequence number, compared modulo 4096 (§9.2.4.4.3, §10.3.2.14).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Seq(u16);
 

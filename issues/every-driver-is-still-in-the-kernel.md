@@ -9,9 +9,11 @@ opened: 2026-08-02
 The owner's target is that `virtio` does not appear anywhere in the kernel. The
 strongest check on it is not the driver files but the ABI: no syscall name may
 carry a NIC, GPU or audio device operation. `rg '^pub const SYS_(NIC|GPU|AUDIO)_'
-sdk/abi/src/syscall.rs` is the check — the three `SYS_NIC_*` names went with
-the virtio NIC driver, which is `userland/netd/src/virtio_net.rs` now, and the
-`SYS_GPU_*` names are what is left.
+sdk/abi/src/syscall.rs` is the check, and it finds none: the three `SYS_NIC_*`
+names went with the virtio NIC driver, which is `system/netstack/src/virtio_net.rs`
+now, and the four `SYS_GPU_*` names with virtio-gpu's, which is the
+compositor's (`system/compositor/virtio-gpu`). The kernel's virtio code left is
+its console's.
 
 **Ordering ruling, and it is not negotiable: the IOMMU lands first and
 completely, interrupt remapping included, and no driver leaves the kernel before
@@ -29,32 +31,31 @@ is not built.
 
 What is left of the staged work:
 
-1. **HDA and virtio-gpu, re-scoped.** `drivers/hda.rs` brings its device up
-   and gates soundserver's register access; `drivers/virtio_gpu.rs` is the only
-   `Gpu` whose `SYS_GPU_*` calls do anything, since GOP's are all no-ops. Each
-   leaves when its userland holder claims the function as `pci`, as netstack
-   and soundserver's virtio-sound driver do, retiring the `hda-audio` class,
-   its arms of `SYS_DEVICE_REG_READ`/`WRITE`, and `SYS_GPU_*`, which is an ABI
-   change. GOP stays: it is memory the loader hands over, and the panic console
-   paints it. HDA leaving feeds soundserver's DLL from a claim's record on
-   every machine, so that diff lands
+1. **HDA, re-scoped.** `drivers/hda.rs` brings its device up and gates
+   soundserver's register access. It leaves when soundserver claims the
+   function as `pci`, as it does its virtio-sound function, retiring the
+   `hda-audio` class and its arms of `SYS_DEVICE_REG_READ`/`WRITE`. HDA
+   leaving feeds soundserver's DLL from a claim's record on every machine, so
+   that diff lands
    `issues/soundservers-virtio-clock-can-take-a-period-one-notification-early.md`'s
-   exit.
+   exit. GOP stays: it is memory the loader hands over, and the panic console
+   paints it.
    A virtio holder stands on `toyos-virtio`, which walks the capability list
    too. Before a client ends its device on `UsedRefusal::Written` for a chain
    the device only reads, whose bound is 0, what QEMU's device reports as
    `len` on such a queue is measured: the NIC's transmit queue is the only
    one read so far.
-   `iommu_virtio_platform`'s decline control, `declining_is_not_free`
-   (`tests/common/iommu.rs`), declines through the kernel's
-   `virtio-no-access-platform` actuator, which reaches only a virtio function
-   the kernel drives; with the NIC and virtio-sound in processes that is the
-   virtio-gpu `Profile::HeadlessVirtioGpu` adds for it, and virtio-gpu leaving
-   leaves the control nothing to decline. Exit for the control, in the diff
-   that moves virtio-gpu out: the decline is made where the features are
-   negotiated, `toyos-virtio`'s `Offer::accept`, for a function a process
-   drives, and the control reds when that function keeps `FEATURES_OK`;
-   `Profile::HeadlessVirtioGpu` goes in the same diff.
+   Done for virtio-gpu: the compositor drives it through a `pci:03:80:00/1af4:1050`
+   claim. Its cursor queue's `len` is measured: QEMU writes 0 for a chain
+   with a writable answer and for one without (PR #895's evidence, `pr-895`
+   at `7d47ad2b`). The decline control `declining_is_not_free` and the
+   `virtio-no-access-platform` actuator went with it, by the orchestrator's
+   ruling on PR #895, rather than the decline moving into `Offer::accept`:
+   with the kernel driving only its console the actuator reached nothing,
+   and what ToyOS relies on is `toyos-virtio`'s, host-tested — the bit
+   accepted wherever offered, and a device that drops `FEATURES_OK`
+   refused. `Profile::HeadlessVirtioGpu` stays, the suite's one machine whose
+   display a process drives.
 2. Done: **BAR sizing and re-assignment onto 2 MiB boundaries** is
    `pcidev::place_bar`, with the overlap refusal kept as the assertion that it
    worked rather than as the mechanism.

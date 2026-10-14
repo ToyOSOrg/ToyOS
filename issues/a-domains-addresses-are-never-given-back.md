@@ -9,11 +9,13 @@ opened: 2026-09-03
 `Domain::reserve` (`kernel/src/arch/x86_64/vtd/table.rs:213-224`) is a monotonic
 bump: an address is never handed out twice, unmapped or not, and `unmap`
 returns no range. A driver that maps and unmaps repeatedly therefore consumes
-its domain's device address space for good. The display is the first such
-driver — every `set_resolution` maps a new scanout and unmaps the old one, and
-one boot with three mode changes walked `device=0x400000200000`,
-`0x400000800000`, `0x400000a00000`, `0x400000e00000` with nothing between them
-reusable. From `first_address = 1 << (bits - 2)` and the `1 << bits` ceiling, a
+its domain's device address space for good. The kernel's virtio-gpu driver
+was the first such driver — every mode change mapped a new scanout and
+unmapped the old one, and one boot with three mode changes walked
+`device=0x400000200000`, `0x400000800000`, `0x400000a00000`,
+`0x400000e00000` with nothing between them reusable; the compositor lends its
+scanouts now, in a window whose addresses are lent again
+(`kernel/src/pcidev/mod.rs`). From `first_address = 1 << (bits - 2)` and the `1 << bits` ceiling, a
 39-bit unit (the harness's `narrow` shape) has 196,608 leaves to give before a
 mode change is refused with `ResourceExhausted`; the refusal is the right
 answer to exhaustion and the wrong thing to reach by changing modes.

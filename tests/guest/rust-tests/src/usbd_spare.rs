@@ -32,7 +32,8 @@ use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
 use toyos::volatile::Window;
 use toyos::PciDev;
-use toyos_abi::syscall::{DeviceRequest, PciId, SyscallError};
+use toyos_abi::inventory::{Driven, RawRecord, Record};
+use toyos_abi::syscall::{PciId, SyscallError};
 use toyos_inspect::{Value, MSG_INSPECT, MSG_SNAPSHOT, USB};
 
 const USBD: &str = "/system/bin/usbd";
@@ -64,25 +65,29 @@ const PARKED_SPAN: Duration = Duration::from_millis(500);
 /// grant, which nothing in the claim's domain maps.
 const PAST_THE_GRANT: u64 = 1 << 30;
 
-
-/// The one spare this machine has, claimed, or every claim's refusal.
+/// The claim on the spare this machine has: the one function of a spare's
+/// card the kernel does not drive, or, on a kernel that drives every one,
+/// the only one there is.
 fn claim(cap: &SysCap) -> (PciId, Result<PciDev, SyscallError>) {
-    let mut found = None;
-    for id in SPARES {
-        match cap.claim_pci::<PciDev>(id) {
-            Err(SyscallError::NotFound) => {}
-            answered => {
-                assert!(found.is_none(), "usbd_spare: two spares on one machine");
-                found = Some((id, answered));
-            }
-        }
-    }
-    found.expect("usbd_spare: neither spare controller is on this machine")
+    let records: Vec<Record> =
+        cap.records(|n| vec![RawRecord::EMPTY; n]).unwrap_or_else(|why| panic!("usbd_spare: no inventory: {why:?}"));
+    let spares: Vec<_> = records
+        .into_iter()
+        .filter_map(|record| match record {
+            Record::Pci(pci) if SPARES.contains(&PciId { vendor: pci.vendor, device: pci.device }) => Some(pci),
+            _ => None,
+        })
+        .collect();
+    let left: Vec<_> = spares.iter().filter(|pci| pci.driven != Driven::Kernel).collect();
+    let pci = match (left.as_slice(), spares.as_slice()) {
+        ([one], _) | ([], [one]) => *one,
+        _ => panic!("usbd_spare: no one spare controller on this machine: {spares:?}"),
+    };
+    (PciId { vendor: pci.vendor, device: pci.device }, cap.claim_function(pci.arrival))
 }
 
 fn spelled(id: PciId) -> String {
-    let mut buf = [0u8; DeviceRequest::MAX_NAME];
-    DeviceRequest::Pci(id).write_name(&mut buf).to_string()
+    format!("pci:{:04x}:{:04x}", id.vendor, id.device)
 }
 
 /// usbd, started on `dev` and serving its port to this job, and the lines it

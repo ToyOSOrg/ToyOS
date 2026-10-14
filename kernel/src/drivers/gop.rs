@@ -1,28 +1,11 @@
-use alloc::boxed::Box;
+//! The firmware's framebuffer, as the loader handed it over: what a
+//! `framebuffer` claim maps.
 
-use toyos_abi::syscall::SyscallError;
-
+use crate::device::Screen;
 use crate::mm::policy::{CachePolicy, MmioPolicy};
-use crate::mm::{PAGE_2M, align_2m_checked, DirectMap};
-use crate::gpu::{Gpu, GpuInfo};
+use crate::mm::{align_2m_checked, DirectMap};
 use crate::log;
 use crate::object::shm::Region;
-
-struct GopGpu;
-
-impl Gpu for GopGpu {
-    fn present_rect(&mut self, _x: u32, _y: u32, _w: u32, _h: u32) {
-        // GOP framebuffer is memory-mapped — writes are immediately visible.
-    }
-
-    fn set_cursor(&mut self, _hot_x: u32, _hot_y: u32) {}
-    fn move_cursor(&mut self, _x: u32, _y: u32) {}
-
-    fn set_resolution(&mut self, _width: u32, _height: u32) -> Result<GpuInfo, SyscallError> {
-        // GOP cannot change resolution after UEFI boot services exit.
-        Err(SyscallError::NotSupported)
-    }
-}
 
 /// `addr` is the physical address of the framebuffer supplied by firmware.
 /// `None` is a scanout no process can be given: one is handed over in 2 MiB
@@ -35,7 +18,7 @@ pub fn init(
     stride: u32,
     pixel_format: u32,
     edid: ([u8; toyos_abi::boot::EDID_BLOCK], u32),
-) -> Option<(Box<dyn Gpu>, GpuInfo)> {
+) -> Option<Screen> {
     if let Err(why) = crate::mm::paging::scanout_whole_pages(addr, size) {
         log!("GOP: the scanout at {addr:#x}+{size:#x} is refused: {why}");
         return None;
@@ -55,14 +38,12 @@ pub fn init(
     // must match the cache policy used for the client mapping below.
     crate::mm::paging::map_mmio(addr, aligned_size, MmioPolicy::WriteCombining);
 
-    let fb = DirectMap::from_phys(addr);
-    // GOP has no second buffer; front and back scanout regions alias the same memory.
-    let scanout = core::array::from_fn(|_| Region {
-        phys: fb,
+    let scanout = Region {
+        phys: DirectMap::from_phys(addr),
         size: aligned_size,
         cache: CachePolicy::WriteCombining,
         pages: None,
-    });
+    };
     log!("GOP: {}x{} stride={} format={} at {:#x}",
         width, height, stride, pixel_format, addr);
 
@@ -78,29 +59,18 @@ pub fn init(
     );
     log!("GOP: scanout memory type {memory_type}");
 
-    let cursor_pages = crate::mm::pmm::alloc_contiguous(1).expect("GOP: cursor alloc failed");
-    let cursor_phys = cursor_pages[0].direct_map().phys();
-    // Cursor buffer is plain system RAM, not scanout, so it keeps the default write-back type.
-    let cursor = Region {
-        phys: DirectMap::from_phys(cursor_phys),
-        size: PAGE_2M,
-        cache: CachePolicy::Normal,
-        pages: None,
-    };
-    #[expect(clippy::disallowed_methods, reason = "the GPU is never torn down, so its cursor pages outlive every process")]
-    core::mem::forget(cursor_pages);
-
-    let info = GpuInfo {
+    Some(Screen {
+        info: toyos_abi::FramebufferInfo {
+            // Minted per claim by `try_claim`: the process reading it does not
+            // exist yet.
+            scanout: toyos_abi::HANDLE_INVALID,
+            width,
+            height,
+            stride,
+            pixel_format,
+            edid: edid.0,
+            edid_len: edid.1,
+        },
         scanout,
-        cursor,
-        width,
-        height,
-        stride,
-        pixel_format,
-        flags: 0,
-        edid: edid.0,
-        edid_len: edid.1,
-    };
-
-    Some((Box::new(GopGpu), info))
+    })
 }

@@ -9,7 +9,8 @@
 //!
 //! **The handshake is virtio 1.2 §5.3.6.2's**: `DEVICE_READY`, the device's
 //! `DEVICE_ADD` of [`PORT_ID`] answered with `PORT_READY`, and the agent's
-//! port opened once the host's `PORT_OPEN(1)` has come. The host's
+//! port opened once the host's `PORT_OPEN(1)` has come. One process runs per
+//! virtio-serial function the kernel does not drive, holding its claim. The host's
 //! `PORT_OPEN(0)` is answered with the agent's `PORT_OPEN(0)`, and its
 //! `PORT_OPEN(1)` with `PORT_OPEN(1)`: QEMU 11.1.1 then starts a new session
 //! with its capabilities, measured. Any other port the device adds, a console
@@ -30,6 +31,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::say;
 use toyos::PciDev;
 use toyos_abi::syscall::PciId;
+use toyos_manifest::device::PciMatch;
 use toyos_vdagent::control::{Control, Event};
 use toyos_vdagent::stream::{Decoder, Message};
 use toyos_vdagent::PORT_ID;
@@ -45,8 +47,10 @@ use channel::Channel;
 /// compositor alike.
 const _: () = assert!(toyos_vdagent::MAX_TEXT == window::MAX_CLIPBOARD_BYTES);
 
-/// Virtio 1.2 §5.3.1: the console device is `0x1040 + 3`.
-const VIRTIO_SERIAL: PciId = PciId { vendor: 0x1af4, device: 0x1043 };
+/// A communication controller of class `07:80:00`, which virtio 1.2 §5.3.1
+/// numbers `0x1040 + 3`: the matcher its row drives, and the label its claim
+/// is endowed under.
+const VIRTIO_SERIAL: PciMatch = PciMatch::new([0x07, 0x80, 0x00], Some(PciId { vendor: 0x1af4, device: 0x1043 }));
 
 /// How long a transmit may stay with the device. Policy, far past any time
 /// QEMU 11.1.1 took, measured: it took every element at once.
@@ -157,10 +161,8 @@ impl Agent {
 }
 
 fn main() {
-    let Some(claim) = endow::pci_function::<PciDev>(VIRTIO_SERIAL) else {
-        say!("vdagent: no virtio-serial function was handed to this program, exiting");
-        return;
-    };
+    let claim: PciDev = endow::claim(&VIRTIO_SERIAL.to_string())
+        .expect("vdagent: its row drives a function, and it is started holding the function's claim");
     let watcher = Watcher::connect(toyos_manifest::clipboard::PORT)
         .unwrap_or_else(|why| panic!("vdagent: the compositor's clipboard: {why}"));
     let mut channel = Channel::open(claim).unwrap_or_else(|why| panic!("vdagent: the function is not driven: {why}"));

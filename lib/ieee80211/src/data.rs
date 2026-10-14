@@ -1,6 +1,7 @@
-//! Data frame bodies: the CCMP header (§12.5.3.2), A-MSDU (§9.3.2.2), and translation between an
-//! MSDU and an Ethernet II frame by IEEE 802.1H: an RFC 1042 LLC/SNAP header, or the bridge-tunnel
-//! one for the two EtherTypes 802.1H sends that way.
+//! Data frame bodies: the CCMP header (§12.5.2.2), A-MSDU (§9.3.2.2), and translation between an
+//! MSDU and an Ethernet II frame as §5.1.4 recommends, by ISO/IEC TR 11802-5:1997 (formerly IEEE
+//! Std 802.1H): an RFC 1042 LLC/SNAP header, or the bridge-tunnel one for the two EtherTypes its
+//! selective translation table sends that way.
 
 use crate::frame::Data;
 use crate::read::Reader;
@@ -50,7 +51,8 @@ pub fn msdus<'a>(frame: &Data<'_>, body: &'a [u8]) -> Result<Msdus<'a>, Refused>
     }
     // The A-MSDU Present bit is outside CCMP's protection unless both peers negotiated SPP
     // A-MSDU, so a first subframe whose destination is an LLC/SNAP header is a frame an attacker
-    // flipped the bit on (Vanhoef, "Fragment and Forge", USENIX Security 2021, §3.2).
+    // flipped the bit on, which §10.11 forbids (Vanhoef, "Fragment and Forge", USENIX Security
+    // 2021, §3.2).
     if body.starts_with(&SNAP) {
         return Err(Refused::SnapHeaderAsAddress);
     }
@@ -108,9 +110,11 @@ pub struct Ethernet<'a> {
 
 const SNAP: [u8; 6] = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0x00];
 const BRIDGE_TUNNEL: [u8; 6] = [0xAA, 0xAA, 0x03, 0x00, 0x00, 0xF8];
-/// The EtherTypes 802.1H carries under the bridge-tunnel OUI: AppleTalk AARP and IPX.
+/// The EtherTypes the selective translation table carries under the bridge-tunnel OUI: AppleTalk
+/// AARP and IPX.
 const TUNNELED: [u16; 2] = [0x80F3, 0x8137];
-/// The least EtherType: below it the field is an IEEE 802.3 length (IEEE 802.3 §3.2.6).
+/// The least type: IEEE Std 802.3-2022 §3.2.6 reads a Length/Type value of at most 1500 as a
+/// length and one of at least 1536 (0x0600) as a type.
 const MIN_ETHERTYPE: u16 = 0x0600;
 
 pub const LLC_SNAP_LEN: usize = 8;
@@ -148,7 +152,7 @@ pub fn llc_snap(ethertype: u16) -> Result<[u8; LLC_SNAP_LEN], Refused> {
 }
 
 /// The header of a QoS Data frame a station sends its access point: To DS, Address 1 the BSSID,
-/// Address 2 the source and Address 3 the destination (Table 9-30).
+/// Address 2 the source and Address 3 the destination (Table 9-60).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ToDs {
     pub bssid: Address,

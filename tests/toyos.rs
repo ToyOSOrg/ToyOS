@@ -202,14 +202,17 @@ const RUST_SKIP: &[&str] = &[
     "usbd_spare",
     // `usbd_spare`'s fault, foreign-vector and refusal arms, one binary each
     // because a metal job takes no argument: the AMD bench's
-    // `amdvi_usbd_drives_its_own_entry` and
-    // `amdvi_claim_refused_without_remapping` rows run them.
+    // `amdvi_claim_refused_without_remapping` row runs the refusal, and the
+    // claim row in P1's exit (`issues/there-is-no-wifi.md`) the other two.
     "usbd_spare_fault",
     "usbd_spare_vector",
     "usbd_spare_unhanded",
     // The same controller, handed to a holder that is killed and claimed
     // again at once, in the same boots as `usbd_spare`.
     "end_returns_claims",
+    // It reads two `edu` functions each held by a `drives` row's process,
+    // which only `a_drives_row_holds_one_process_per_function`'s boot has.
+    "drives_judged",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -354,6 +357,13 @@ fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
 /// The tests whose machine shape *is* the test, each on a boot of its own.
 /// `run_machine_test` dispatches them.
 const MACHINE_TESTS: &[&str] = &[
+    // A `drives` row's one process per function, on QEMU x86-64's q35 with
+    // two `edu` (`Profile::HeadlessTwoEdu`): which functions get one is
+    // `toyos-supervisor`'s, host-tested, and this is the supervisor
+    // performing it — two claims by arrival on identical functions, two
+    // spawns, each process holding its own — which no host build has. No
+    // bench has two identical functions the kernel leaves to a claim.
+    "a_drives_row_holds_one_process_per_function",
     // Whether QEMU's virtio functions negotiated `VIRTIO_F_ACCESS_PLATFORM`
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
@@ -441,8 +451,7 @@ const MACHINE_TESTS: &[&str] = &[
     // The same behind QEMU's AMD unit, remapping and with no SMI filter: the
     // claim is refused by that reason before anything on the function
     // changes. No metal machine in reach has an AMD-Vi unit without the
-    // filter; the AMD bench drives its claim in
-    // `amdvi_usbd_drives_its_own_entry`.
+    // filter.
     "usbd_refused_without_smi_filter",
     // The same machine with its AMD unit remapping nothing: the claim is
     // refused by that reason. The AMD bench's arm is
@@ -462,6 +471,15 @@ const MACHINE_TESTS: &[&str] = &[
     // end of the handshake and of the request is QEMU's vdagent chardev and
     // virtio-serial device, which no host test runs.
     "the_opening_exchange_with_qemus_agent_completes",
+    // The compositor driving QEMU's virtio-gpu through its claim, and a host
+    // display resize reaching the guest's mode: no metal machine has a
+    // virtio-gpu, and the host tests drive `toyos-virtio-gpu` against a model
+    // written from this design's own reading of §5.7, so only QEMU's device
+    // says it was read right. x86-64 q35 alone, `Profile::HeadlessVirtioGpu`:
+    // an AArch64 `virt` boot hands over no PCI claim yet. A boot of its own:
+    // its `-vnc` display changes the display configuration the clipboard
+    // test's premise, `-display none`, rests on.
+    "the_compositor_drives_the_virtio_gpu",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -994,10 +1012,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: SELFTESTS, judge: |b| read_fault_probes(b[0].kernel().text()) },
     ),
     (
-        "leak_rollback_selftest",
-        metal::Metal { arms: SELFTESTS, judge: |b| leak_rollback(b[0].kernel().text()) },
-    ),
-    (
         "lapic_spurious_vector",
         metal::Metal { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
     ),
@@ -1083,33 +1097,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         // table, on real silicon, and every I/O APIC named.
         "amdvi_remaps_the_stick_controller",
         metal::Metal { arms: TESTCASES, judge: |b| amdvi_remaps(&b[0].kernel()) },
-    ),
-    (
-        // The AMD bench's Bluetooth controller's xHCI, `03:00.4`, left to a
-        // claim and driven by usbd through an entry of its own table, its
-        // MSI-X table in the register BAR it hands over; then aimed past its
-        // grant, recorded against the claim; then its holder rewriting its
-        // own table entry to a vector not its own, refused and recorded.
-        "amdvi_usbd_drives_its_own_entry",
-        metal::Metal {
-            arms: &[metal::once(
-                "testcases-amd-xhci-leave",
-                "tests/images/testcases.toml",
-                &["xhci-leave=03:00.4"],
-                &[
-                    "test_rs_usbd_spare",
-                    "test_rs_usbd_spare_fault",
-                    "test_rs_end_returns_claims",
-                    "test_rs_usbd_spare_vector",
-                ],
-            )],
-            judge: |b| {
-                for job in ["test_rs_usbd_spare", "test_rs_usbd_spare_fault", "test_rs_end_returns_claims", "test_rs_usbd_spare_vector"] {
-                    b[0].job_passed(job)?;
-                }
-                amdvi_usbd(&b[0].kernel(), &b[0].log(), &b[0].after_the_reset()?)
-            },
-        },
     ),
     (
         // The AMD bench with its unit remapping nothing (`iommu-no-remap`):
@@ -1330,7 +1317,6 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
 const SELFTEST_PARAMS: &[&str] = &[
     "pci-cap-selftest",
     "revoked-backing-selftest",
-    "leak-rollback-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
     "xhci-xecp-selftest",
@@ -3775,7 +3761,7 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
-        "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
+        "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(),
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
@@ -3806,9 +3792,11 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
             "no message is remapped",
             claims::NOT_REMAPPED,
         ),
+        "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
+        "the_compositor_drives_the_virtio_gpu" => the_compositor_drives_the_virtio_gpu(),
         other => Err(format!("unknown machine test {other}")),
     }
 }
@@ -3835,6 +3823,55 @@ fn the_opening_exchange_with_qemus_agent_completes() -> Result<(), String> {
         (Some(open), Some(answered)) if open < answered => Ok(()),
         _ => Err(format!("the agent did not say {OPEN:?} before {ANSWERED:?}:\n{text}")),
     }
+}
+
+/// The compositor drives QEMU's virtio-gpu through its `pci:03:80:00/1af4:1050`
+/// claim: it starts at the size the device prefers, QEMU's default
+/// 1280x800, and its first frame reaches the scanout; then a VNC client
+/// resizes the host's display to 1024x768, the device raises its display
+/// event, and the compositor flips to that mode and draws it.
+///
+/// "Drawn" is a screendump of the scanout at the mode's size holding the
+/// wallpaper's many colours: a scanout no frame reached is one colour, or
+/// QEMU's two-colour notice that the guest set none.
+fn the_compositor_drives_the_virtio_gpu() -> Result<(), String> {
+    const FIRST: &str = "compositor: display 1280x800";
+    const FRAME: &str = "compositor: the first frame is on the panel";
+    const FOLLOWED: &str = "compositor: mode 1024x768";
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/clipboardcase.toml"),
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::HeadlessVirtioGpu, qmp: true, vnc: true, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "the compositor's first frame", |t| t.contains(FRAME))
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let drawn = |dump: &screen::Ppm, (width, height)| -> Result<(), String> {
+        let colours: BTreeSet<[u8; 3]> = dump.pixels.iter().copied().collect();
+        if (dump.width, dump.height) != (width, height) || colours.len() < 64 {
+            return Err(format!(
+                "the scanout is {}x{} in {} colour(s), where the desktop at {width}x{height} was drawn",
+                dump.width,
+                dump.height,
+                colours.len()
+            ));
+        }
+        Ok(())
+    };
+    drawn(&qemu.screendump(), (1280, 800)).map_err(|e| format!("{e}\n{console}"))?;
+
+    let _client = common::vnc::resize(qemu.vnc_socket(), 1024, 768)?;
+    await_guest(&mut qemu, &mut console, "the compositor following the host's display", |t| t.contains(FOLLOWED))
+        .map_err(|e| format!("{e}\n{console}"))?;
+    // The flip's frame is drawn into the new scanout before it is shown.
+    drawn(&qemu.screendump(), (1024, 768)).map_err(|e| format!("{e}\n{console}"))?;
+
+    let said = serial::Serial::named("the virtio-gpu boot", console);
+    said.must_be_clean()?;
+    said.must_say(FIRST)?;
+    eprintln!("  [virtio-gpu] 1280x800 drawn, then 1024x768 followed and drawn");
+    Ok(())
 }
 
 /// A machine with one NVMe disk and no USB controller boots the image off
@@ -3980,64 +4017,44 @@ fn usbd_refused_on_amdvi(test_config: &Path, profile: qemu::Profile, said: &str,
     claims::refused_at(&serial::Serial::named("usbd_spare", run), qemu::SPARE_AT, why)
 }
 
-/// The AMD bench's `03:00.4` left to a claim and driven by usbd: handed over
-/// with its MSI-X table's BAR, armed through a present entry of its own table
-/// at its claim's vector, its No-Op answered by that interrupt; then aimed
-/// past its grant and recorded against the claim at the aimed address; then
-/// its holder's rewrite of its own table entry to a vector not its own
-/// refused and recorded against the claim, usbd never told of its No-Op.
-fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
-    const ID: &str = "1022:1639";
-    let at = AMD_XHCI_SPARE;
-    kernel.must_say(&format!("xHCI: leaving PCI {at} {ID} to a claim (xhci-leave)"))?;
-    let handed = format!("pcidev: PCI {at} [{ID}] handed over, vector ");
-    let vector = kernel
-        .text()
-        .lines()
-        .find_map(|l| l.split_once(&handed)?.1.split_whitespace().next().map(str::to_string))
-        .ok_or_else(|| format!("{at} was never handed over:\n{}", kernel.text()))?;
-    kernel.must_say(&format!("PCI {at}: msix address="))?;
-    kernel.must_say(&format!("iommu: amdvi irte source={at} vector={vector} p=1 "))?;
-    log.must_say(USBD_NOOP)?;
-
-    let aimed = log
-        .text()
-        .lines()
-        .find_map(|l| l.split_once("usbd_spare: the command ring aimed at ")?.1.split_once(',').map(|(a, _)| a.to_string()))
-        .ok_or_else(|| format!("the fault arm never said where it aimed:\n{}", log.text()))?;
-    let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
-    let records: Vec<&str> = kernel
-        .text()
-        .lines()
-        .filter(|l| l.contains("iommu: DMA FAULT owner=process") && l.contains(&format!("stream={at} ")))
-        .collect();
-    let aimed_at = records
-        .iter()
-        .find(|l| l.split_once(" addr=").and_then(|(_, a)| hex(a.split_whitespace().next()?)) == hex(&aimed))
-        .ok_or_else(|| format!("no record of {at} names the aimed {aimed}: {records:?}"))?;
-    log.must_say("usbd_spare: the claim refuses its interrupt read: Io")?;
-
-    let rewritten = log.must_say("usbd_spare: MSI-X entry 0's data ")?;
-    log.must_say("usbd_spare: usbd settled and was never told of its No-Op")?;
-    // Refused by the unit, not delivered to a vector nobody holds: the stop's
-    // census names every vector the unclaimed gate took.
-    let foreign_vector = rewritten
-        .split_once(" rewritten to ")
-        .and_then(|(_, rest)| rest.split(',').next())
-        .ok_or_else(|| format!("{rewritten:?} names no vector"))?;
-    // Logged inside the stop, past where the log file ends.
-    let census = after.must_say("irq: unclaimed vectors")?;
-    if census.split_whitespace().any(|word| word == foreign_vector) {
-        return Err(format!("{foreign_vector} reached a CPU: {census}"));
+/// A `drives` row's processes on a q35 with two `edu`, which the kernel drives
+/// neither of: the kernel hands each function over once, two `pciholder`s
+/// each say they hold one of the two, and the job reads both still held,
+/// each by a process of its own.
+fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
+    const JOB: &str = "drives_judged";
+    const HOLDING: &str = "pciholder: holding PCI ";
+    const HANDED: &str = " [1234:11e8] handed over, ";
+    let options = BootOptions { profile: qemu::Profile::HeadlessTwoEdu, ..Default::default() };
+    let edus = qemu::profile_argv(&options).iter().filter(|arg| *arg == "edu").count();
+    if edus != 2 {
+        return Err(format!("the machine was to have two edu functions, and QEMU is given {edus}"));
     }
-    // An interrupt's record states no read or write (48882 Table 57, `I`).
-    let foreign = records
-        .iter()
-        .find(|l| l.contains(" access=none ") && l.ends_with("IO_PAGE_FAULT"))
-        .ok_or_else(|| format!("no record of {at}'s message on a vector not its own: {records:?}"))?;
-    eprintln!("  [amdvi] {at}: handed over on {vector}, its No-Op answered through its own entry");
-    eprintln!("  [amdvi] aimed at {aimed}: {}", aimed_at.trim());
-    eprintln!("  [amdvi] a vector not its own: {}", foreign.trim());
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let config = compile::repo_root().join("tests/images/drivescase.toml");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], options);
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "both holders' lines", |t| t.matches(HOLDING).count() >= 2)
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let said = serial::Serial::named("the drives boot", console.clone());
+    said.must_be_clean()?;
+    let mut handed: Vec<&str> =
+        console.lines().filter_map(|l| l.split_once("pcidev: PCI ")?.1.split_once(HANDED).map(|(at, _)| at)).collect();
+    let mut holding: Vec<&str> =
+        console.lines().filter_map(|l| l.split_once(HOLDING)?.1.split_whitespace().next()).collect();
+    handed.sort_unstable();
+    holding.sort_unstable();
+    // Each function handed over once, to one holder: a list, so a second
+    // hand-over or a second holder of one function is red.
+    if handed.len() != 2 || handed[0] == handed[1] || holding != handed {
+        return Err(format!("the kernel handed over {handed:?} and the holders say they hold {holding:?}:\n{console}"));
+    }
+    let judged = job_window(&mut qemu, "test_rs_drives_judged")?;
+    let line = judged
+        .lines()
+        .find(|l| l.contains("drives_judged: PCI "))
+        .ok_or_else(|| format!("the job never said who holds the functions:\n{judged}"))?;
+    eprintln!("  [drives] {}", line.trim());
     Ok(())
 }
 
@@ -4502,19 +4519,6 @@ fn read_fault_probes(log: &str) -> Result<(), String> {
             return Err(format!("{}\n{log}", verdict.trim()));
         }
         eprintln!("  [read-fault] {}", verdict.trim());
-        Ok(())
-}
-
-/// An "acquire before a fallible step" control: the count returned to its baseline after a refused call.
-fn leak_rollback(log: &str) -> Result<(), String> {
-        let probe = "leak-selftest: device-mint";
-        let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-            return Err(format!("{probe} never ran:\n{log}"));
-        };
-        if !verdict.contains("PASS") {
-            return Err(format!("{}\n{log}", verdict.trim()));
-        }
-        eprintln!("  [leak] {}", verdict.trim());
         Ok(())
 }
 

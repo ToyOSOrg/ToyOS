@@ -1,5 +1,5 @@
-//! The WMM Information and Parameter elements (Wi-Fi Alliance, WMM Specification v1.2, §2.2.1 and
-//! §2.2.2): vendor-specific elements under OUI 00-50-F2, OUI type 2, version 1.
+//! The WMM Information and Parameter elements (Wi-Fi Alliance, WMM Specification v1.2.0, §2.2.1
+//! and §2.2.2): vendor-specific elements under OUI 00-50-F2, OUI type 2, version 1.
 
 use crate::read::Reader;
 use crate::Refused;

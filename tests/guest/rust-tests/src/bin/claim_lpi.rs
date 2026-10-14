@@ -5,6 +5,9 @@
 //! The function masters the bus only once it has a grant, and QEMU sends an
 //! MSI as a write the function makes, so one grant comes first.
 
+#[path = "../function.rs"]
+mod function;
+
 use std::time::Duration;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
@@ -34,7 +37,7 @@ const BOUND: Duration = Duration::from_secs(10);
 
 fn main() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
-    let dev: PciDev = cap.claim_pci(EDU).unwrap_or_else(|why| panic!("claim_lpi: the claim on edu was refused: {why:?}"));
+    let dev: PciDev = function::claim(&cap, EDU).unwrap_or_else(|why| panic!("claim_lpi: the claim on edu was refused: {why:?}"));
     let info = dev.describe().expect("claim_lpi: the claim's description");
     let bar = dev.map_bar(0, info.bar_bytes[0]).expect("claim_lpi: BAR 0");
     // SAFETY: the mapping is the BAR's length and lives as long as `bar`.

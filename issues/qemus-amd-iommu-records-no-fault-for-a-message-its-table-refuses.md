@@ -16,11 +16,11 @@ logs). Whether QEMU dropped the message or delivered it unremapped to 0x43,
 which no claim held, was not measured.
 
 QEMU's unit has no SMI filter (`SmiFSup` 0), so under the ruling on #921 it
-hands no table's BAR over and the arm no longer runs there; the AMD bench's
-`amdvi_usbd_drives_its_own_entry` holds the record and the census.
+grants no claim behind it and the arm no longer runs there; the AMD bench's
+claim of `03:00.4`, in P1's exit (`issues/there-is-no-wifi.md`), holds the
+record and the census.
 
-Owner: the orchestrator's AMD laptop track
-(`issues/an-amd-vi-machine-isolates-no-device.md`).
+Owner: the orchestrator's AMD laptop track.
 
 **Exit:** under the QEMU `build/ci/qemu-version` names, a message on an
 absent remapping entry is recorded against its requester, and a guest test

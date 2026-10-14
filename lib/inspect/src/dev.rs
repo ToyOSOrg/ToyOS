@@ -208,7 +208,7 @@ mod tests {
     use crate::path::check_path;
     use crate::Selector;
     use alloc::vec::Vec;
-    use toyos_abi::inventory::{Block, Claim, Partition, Pci, Usb, NAME_BYTES};
+    use toyos_abi::inventory::{Arrival, Block, Claim, Partition, Pci, Usb, NAME_BYTES};
     use toyos_abi::syscall::DeviceType;
 
     fn holder(pid: u32, s: &str) -> Holder {
@@ -222,7 +222,7 @@ mod tests {
     const XHCI: PciAddr = PciAddr { segment: 0, bus: 0, dev: 4, func: 0 };
 
     fn pci(at: PciAddr, driven: Driven) -> Record {
-        Record::Pci(Pci { at, vendor: 0x8086, device: 0x15fc, class: 2, subclass: 0, prog_if: 0, driven })
+        Record::Pci(Pci { arrival: Arrival(1), at, vendor: 0x8086, device: 0x15fc, class: 2, subclass: 0, prog_if: 0, driven })
     }
 
     fn part(device: u32, index: u32, unique: u8, state: PartState) -> Record {

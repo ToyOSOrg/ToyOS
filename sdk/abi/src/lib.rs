@@ -75,22 +75,18 @@ impl core::ops::Add for Tid {
 }
 
 crate::user_safe! {
-    /// GPU framebuffer info passed between kernel and userland.
-    /// Shared definition so both sides agree on the layout.
+    /// The firmware's framebuffer, as its claim describes it.
     ///
-    /// **The three handles are installed by the read that answers this.** A
-    /// description is a set of buffers, and the process being told about them is
-    /// the one that must be able to map them — which is never the process that
-    /// minted the claim, because the supervisor mints every claim and holds none.
+    /// **The scanout handle is installed by the read that answers this**, in
+    /// the process that reads it: the supervisor mints every claim and holds
+    /// none.
     #[derive(Clone, Copy)]
     pub struct FramebufferInfo {
-        pub scanout: [RawHandle; 2],
-        pub cursor: RawHandle,
+        pub scanout: RawHandle,
         pub width: u32,
         pub height: u32,
         pub stride: u32,
         pub pixel_format: u32,
-        pub flags: u32,
         /// The panel's EDID base block as the loader handed it over, unparsed,
         /// and how many of these bytes it is: [`boot::EDID_BLOCK`] or zero.
         pub edid: [u8; boot::EDID_BLOCK],

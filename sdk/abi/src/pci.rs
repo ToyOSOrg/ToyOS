@@ -110,3 +110,8 @@ impl DeviceIrqRecord {
 }
 
 const _: () = assert!(DeviceIrqRecord::SIZE == 4 + 4 + 8 + 8);
+
+/// How many bytes of regions one claim may have lent its function at once
+/// ([`crate::syscall::device_dma_map`]), apart from its own grants: a window
+/// of the function's address space, so a lend costs addresses and no memory.
+pub const LEND_WINDOW: u64 = 256 * 1024 * 1024;

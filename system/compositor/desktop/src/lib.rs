@@ -28,6 +28,7 @@ pub mod damage;
 pub mod hit;
 pub mod input;
 pub mod layout;
+pub mod mode;
 pub mod plan;
 pub mod rect;
 pub mod scale;
@@ -44,6 +45,7 @@ pub use input::{
     Held, KeyAction, MouseSample, PromptGate, Released, TabAction, DRAG_THRESHOLD,
 };
 pub use layout::{set_mode, Chrome, Desk};
+pub use mode::Mode;
 pub use plan::{compose, content_blit, Blit, Layer};
 pub use rect::{Point, Rect};
 pub use scale::Scale;

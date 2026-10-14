@@ -58,6 +58,9 @@ pub enum Event {
     Common { field: usize, value: u32 },
     /// A read of the device-specific structure.
     DeviceConfig { at: usize },
+    /// A write of the device-specific structure, whose fields are the device
+    /// type's to make writable.
+    DeviceConfigWrite { at: usize, value: u32 },
     /// A store into the grant.
     Store { at: usize, bytes: usize, value: u64 },
     /// A load from the grant.
@@ -364,9 +367,13 @@ impl State {
             let value = write.expect("stub: a read of the notification structure");
             self.notify(at - NOTIFY_AT as usize, bytes, value);
         } else if device.contains(&at) {
-            assert!(write.is_none(), "stub: the device structure is read and never written");
             let at = at - DEVICE_AT as usize;
-            assert!(at + bytes <= self.device_config.len(), "stub: a read past the device structure");
+            assert!(at + bytes <= self.device_config.len(), "stub: an access past the device structure");
+            if let Some(value) = write {
+                self.trace.push(Event::DeviceConfigWrite { at, value });
+                self.device_config[at..at + bytes].copy_from_slice(&value.to_le_bytes()[..bytes]);
+                return 0;
+            }
             self.trace.push(Event::DeviceConfig { at });
             let mut word = [0u8; 4];
             word[..bytes].copy_from_slice(&self.device_config[at..at + bytes]);

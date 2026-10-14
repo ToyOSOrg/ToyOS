@@ -1,6 +1,6 @@
 use alloc::sync::Arc;
 
-use crate::object::device::{DeviceClaim, DeviceInfo, FramebufferBuffers};
+use crate::object::device::{DeviceClaim, DeviceInfo};
 use crate::object::shm::Region;
 use crate::{keyboard, mouse};
 use toyos_abi::FramebufferInfo;
@@ -12,16 +12,15 @@ static TAKEN: [Lock<bool>; DeviceType::ALL.len()] =
     [const { Lock::new(false) }; DeviceType::ALL.len()];
 static FB_INFO: Lock<Option<Screen>> = Lock::new(None);
 
-/// What the display driver published, as a claim needs it.
+/// The firmware's framebuffer, as a claim needs it.
 ///
-/// Screen stores `Region`s rather than `SharedMemObject`s because each claim
-/// mints its own object, and a `SharedMemObject` is retired once its handle
-/// count reaches zero while the screen itself outlives any single claim.
+/// A `Region` rather than a `SharedMemObject` because each claim mints its own
+/// object, and a `SharedMemObject` is retired once its handle count reaches
+/// zero while the screen outlives any single claim.
 #[derive(Clone)]
 pub struct Screen {
     pub info: FramebufferInfo,
-    pub scanout: [Region; 2],
-    pub cursor: Region,
+    pub scanout: Region,
 }
 
 fn taken(class: DeviceType) -> &'static Lock<bool> {
@@ -151,13 +150,11 @@ pub enum ClaimError {
     Owned,
     /// This machine has no such device — no driver ever registered one.
     Absent,
-    /// The name matches more than one function this kernel does not drive.
-    /// Refused rather than resolved to the first: a config asking for one of
-    /// two identical cards cannot say which, and picking would be the kernel
-    /// deciding.
+    /// The partition GUID is carried twice. Refused rather than resolved to
+    /// the first: picking would be the kernel deciding.
     Ambiguous,
-    /// A driver in this kernel already binds every function the name matches;
-    /// two drivers on one device is not something a claim may create.
+    /// A driver in this kernel already binds the device; two drivers on one
+    /// device is not something a claim may create.
     KernelDriven,
     /// This machine has no interrupt left to give the function: every vector,
     /// remapping entry or LPI a claim spends is held.
@@ -174,8 +171,8 @@ pub enum ClaimError {
 /// failure after `acquire` cannot leave a device held by nobody.
 ///
 /// `selector` says *which* device where the class alone does not — a PCI
-/// function's vendor and device id in its first word, a partition's GUID in
-/// both — and the syscall has refused a word the class does not read.
+/// function's arrival in its first word, a partition's GUID in both — and the
+/// syscall has refused a word the class does not read.
 pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClaim>, ClaimError> {
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
@@ -197,12 +194,12 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             Ok(DeviceClaim::new(class, framebuffer_info(screen), claim))
         }
         DeviceType::PciFunction => {
-            let id = toyos_abi::syscall::PciId::from_wire(selector[0])
-                .ok_or(ClaimError::Absent)?;
+            // A number past a `u32` is an arrival no function had.
+            let arrival = u32::try_from(selector[0]).map_err(|_| ClaimError::Absent)?;
             // The function's own guard, taken inside: a PCI claim's exclusivity is
             // per function rather than per class, so there is no flag here to
             // acquire first.
-            let (info, claim) = crate::pcidev::claim(id)?;
+            let (info, claim) = crate::pcidev::claim(toyos_abi::inventory::Arrival(arrival))?;
             Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info), claim))
         }
         DeviceType::Partition => {
@@ -288,11 +285,8 @@ fn shm(region: Region) -> Arc<crate::object::shm::SharedMemObject> {
     crate::object::shm::SharedMemObject::over(region)
 }
 
-/// The description a framebuffer claim answers with, over freshly minted buffer objects.
-pub fn framebuffer_info(screen: Screen) -> DeviceInfo {
-    let Screen { info, scanout: [front, back], cursor } = screen;
-    DeviceInfo::Framebuffer(
-        info,
-        FramebufferBuffers { scanout: [shm(front), shm(back)], cursor: shm(cursor) },
-    )
+/// The description a framebuffer claim answers with, over a freshly minted
+/// scanout object.
+fn framebuffer_info(screen: Screen) -> DeviceInfo {
+    DeviceInfo::Framebuffer(screen.info, shm(screen.scanout))
 }

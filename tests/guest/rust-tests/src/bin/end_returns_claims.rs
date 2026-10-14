@@ -7,6 +7,9 @@
 //! - no argument: the rounds.
 //! - `hold`: the child, which holds the claim it was endowed until it is killed.
 
+#[path = "../function.rs"]
+mod function;
+
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -15,7 +18,7 @@ use std::time::{Duration, Instant};
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
 use toyos::PciDev;
-use toyos_abi::syscall::{DeviceRequest, PciId, SyscallError};
+use toyos_abi::syscall::{PciId, SyscallError};
 
 const SELF_PATH: &str = "/system/bin/test_rs_end_returns_claims";
 
@@ -44,15 +47,14 @@ fn main() {
 }
 
 fn spelled(id: PciId) -> String {
-    let mut buf = [0u8; DeviceRequest::MAX_NAME];
-    DeviceRequest::Pci(id).write_name(&mut buf).to_string()
+    format!("pci:{:04x}:{:04x}", id.vendor, id.device)
 }
 
 /// The one spare this machine has, claimed.
 fn claim(cap: &SysCap) -> (PciId, PciDev) {
     let mut found = None;
     for id in SPARES {
-        match cap.claim_pci::<PciDev>(id) {
+        match function::claim::<PciDev>(&cap, id) {
             Err(SyscallError::NotFound) => {}
             Ok(dev) => {
                 assert!(found.is_none(), "end_returns_claims: two spares on one machine");
@@ -88,7 +90,7 @@ fn rounds() {
         let status = child.wait().expect("end_returns_claims: wait for the holder");
         assert!(!status.success(), "end_returns_claims: a killed holder ended {status:?}");
         let waited = Instant::now();
-        dev = cap.claim_pci::<PciDev>(id).unwrap_or_else(|why| {
+        dev = function::claim::<PciDev>(&cap, id).unwrap_or_else(|why| {
             panic!("end_returns_claims: round {round}: the claim after its holder's end was refused: {why:?}")
         });
         ended += waited - killed;

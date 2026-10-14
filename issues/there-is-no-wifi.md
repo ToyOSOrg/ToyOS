@@ -154,12 +154,25 @@ page included.** Owner: the orchestrator.
   - the exit of
     `issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`
     rewritten, from a refused write to the table's page to the NVMe driven
-    through a table in BAR 0.
+    through a table in BAR 0;
+  - on the AMD bench, `03:00.4` (`xhci-leave=03:00.4`, its MSI-X table in
+    BAR 0, its only BAR) claimed with that BAR in place and driven by usbd
+    through its own remapping entry, every unit filtering SMIs: the
+    `usbd_spare`, `usbd_spare_fault`, `end_returns_claims` and
+    `usbd_spare_vector` jobs pass, the aimed fault is recorded against the
+    claim at its address, and the holder's rewrite of its entry to a vector
+    not its own is refused, recorded, and absent from the stop's census of
+    unclaimed vectors. The row, `amdvi_usbd_drives_its_own_entry`, left the
+    registered AMD rows with PR #921 (its judge, `amdvi_usbd` in
+    `tests/toyos.rs` at `c648c1439`, comes back with it):
+    the bench's port `00:08.1` forwards only `0xd0000000..0xd0500000`, which
+    bus 3's BARs fill, so the BAR has nowhere routed to move to and stays
+    where firmware put it, which only 4 KiB pages can hand over.
 
-**P2 and P3, AMD-Vi translation and interrupt remapping.** Owner:
-`issues/an-amd-vi-machine-isolates-no-device.md`, held by the orchestrator's
-AMD track. Depends on: that track.
-- **Exit:** that track's exit, and three readings on the AMD bench:
+**P2 and P3, AMD-Vi translation and interrupt remapping.** Owner: the
+orchestrator's AMD track. Translation (PR #909) and remapping with the SMI
+filter (PR #921) have landed. Depends on: P1, for the claim.
+- **Exit:** three readings on the AMD bench:
   - the stick's xHCI and the NVMe working in their domains under
     translation;
   - the AX200's claim handed over with its own remapping table;
@@ -230,48 +243,11 @@ Depends on: nothing; W6 waits on it.
   `build/ssh/tests/fuzz.rs`; and a third-party capture corpus from outside the
   references, beside the crate, with provenance, terms and `NOTICE` rows,
   pinned by hash.
-- **Owed: `lib/ieee80211`'s readings checked against the text.** W1 was
-  written without IEEE 802.11-2020, 802.11ax-2021 or the WFA WMM
-  Specification v1.2 at hand; each reading below rests on the writer's
-  knowledge, and on the captures where `lib/ieee80211/tests/corpus.rs` reads
-  them. Owner: the orchestrator.
-  - **Exit:** every reading below checked against the text; each one the text
-    contradicts fixed, and each leniency the text rules out turned into a
-    refusal by name.
-  - **Frame structure:** the protocol version, type 3 as Extension, the
-    reserved and contention-free subtypes; non-QoS Order as strictly
-    ordered; the four-address layout; Fragment Number and More Fragments;
-    `ManagementWithDs`; `GroupTransmitter` for a management SA and a data TA.
-  - **Control:** the BAR and BA Type values and TID_INFO; a BlockAckReq's
-    Fragment Number being 0; the HE bitmap sizes by Fragment Number bits 2
-    and 1, bit 0 a fragment level, bit 3 refused; the bandwidth-signaling TA.
-  - **Management bodies:** a beacon interval of 0 refused; the AID's two high
-    bits and its range of 1 to 2007.
-  - **Elements:** the Element ID Extension octet; each typed element allowed
-    once, WMM's included; the SSID's 32 octets; 1 to 8 Supported Rates and
-    Extended Supported Rates of length 0 refused; the selectors 127, 126, 123
-    and 122; the TIM's offset as N1/2, its bound of 251 octets and its minimum
-    of one bitmap octet; Country's string, triplets, operating triplet from
-    201 and channel bound of 200; MFPR as bit 6, MFPC as bit 7 and MFPR
-    without MFPC refused; the RSNXE's Field Length and SAE-H2E as bit 5; the
-    HT and VHT field splits and reserved values; Extended Capabilities' bit
-    numbering; HE Capabilities' 6, 11 and 4 octet fields, the 160 and 80+80
-    MCS sets under PHY Capabilities B3 and B4, PPE Thresholds Present as
-    B55, and the PPE length of 7 + 6 × (NSTS + 1) × RU count bits; HE
-    Operation's bits 14, 15 and 17 and its five-octet 6 GHz field; WMM's
-    layouts, version 1, AIFSN of at least 2 and each ACI once, and its exact
-    length.
-  - **Data and the window:** the A-MSDU subframe header and its padding; the
-    bridge-tunnel types 0x80F3 and 0x8137; CCMP's Ext IV bit; the §10.25.6
-    rules with the half-space boundary of 2048; the HE buffer of 256.
-  - **Each refusal's class**, `Malformed` or `Unsupported`.
-  - **The leniencies**, each to become a refusal if the text rules it out:
-    octets past the RSNE's and the RSNXE's last field ignored; octets past
-    the fields of HT and VHT Capabilities and Operation and of HE
-    Capabilities and Operation ignored (fewer refused); a Country element
-    accepted without its pad octet, and with one where none is needed. The
-    strict side, padding after an A-MSDU's last subframe refused, is checked
-    too.
+- **Landed** in #924 and #930; the exit is met, the readings checked
+  against the text (#924, issuecomment-6173453493).
+- **Owed:** the bridge-tunnel OUI 00-00-F8 and its EtherTypes 0x80F3 and
+  0x8137 checked against ISO/IEC TR 11802-5:1997. Owner: the orchestrator.
+  Exit: checked, and fixed in `lib/ieee80211/src/data.rs` if contradicted.
 
 **W2, the handshakes, in `wlan`**, sans-IO: the 4-way and group-key
 handshakes, SAE by hash-to-element, PMF's keys, and the Transition Disable
@@ -324,7 +300,8 @@ W2.
 networks, an access point at the T14's bench serving a WPA2-Personal network
 and a WPA3-Personal one by hash-to-element, with PMF and HE, an instrument
 the orchestrator owns. Exit: a T14 row reads the firmware up, its MAC
-address, and the test network seen. The network's name arrives per run
+address, and the test network seen, its beacon's Country element read: a
+missing pad (`CountryPad`) refuses the whole beacon. The network's name arrives per run
 through a test job holding `wifi`, so no shipping path reads the ESP.
 
 **W6, the first version: a full-rate join.** Depends on: W5 and its test
@@ -335,6 +312,8 @@ networks, P4, P5, P6, P8.
   - each channel's limit as the tighter of the platform's table and the
     AP's country element;
   - a country element that would raise a limit;
+  - under operating classes, a country element with an invalid first
+    channel or a reserved class read up to it, as §10.22.3 has;
   - a platform with no table, refused by name.
 - **Exit, T14 rows:**
   - WPA2 and WPA3 joins, each with a lease, DNS and TCP;

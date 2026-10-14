@@ -24,9 +24,8 @@ switch-off runs: its negative control reds only on the register half, and the
 DMA half is held by the AMD bench's `iommu_firmware_left` row alone, in
 whatever run the orchestrator stages.
 
-Owner: the orchestrator's AMD laptop track
-(`issues/an-amd-vi-machine-isolates-no-device.md`), whose translation stage
-is the next code to rest on what QEMU does on this command.
+Owner: the orchestrator's AMD laptop track, whose translation code
+(`kernel/src/arch/x86_64/amdvi/`) rests on what QEMU does on this command.
 
 **Exit:** under the QEMU `build/ci/qemu-version` names, `amdvi_firmware_left`
 with `switch_off` skipping every field reds on `usb-storage: 1 device(s)`,

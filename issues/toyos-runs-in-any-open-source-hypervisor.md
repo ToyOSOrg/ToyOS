@@ -53,9 +53,10 @@ and, filed before this track:
 - `issues/pci-is-enumerated-on-segment-group-0-alone.md` — Cloud
   Hypervisor's `num_pci_segments`.
 
-`issues/an-amd-vi-machine-isolates-no-device.md` is met only where a target is
-asked for AMD-Vi, VirtualBox's `--iommu amd` and QEMU's `amd-iommu`, and no
-target's default asks.
+AMD-Vi isolation (`kernel/src/arch/x86_64/amdvi/`) applies only where a
+target is asked for AMD-Vi, VirtualBox's `--iommu amd` and QEMU's
+`amd-iommu`, and no target's default asks; QEMU's unit has no SMI filter, so
+a claim is refused there.
 
 Three of the launcher's QEMU options keep three of these off every guest
 test: the `-non-transitional` virtio devices the transitional id,

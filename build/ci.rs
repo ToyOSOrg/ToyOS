@@ -435,6 +435,19 @@ const KERNEL_SIM: &str = "kernel-sim";
 const BLOCKRING: &str = "toyos-blockring";
 const TRANSPORT: &str = "toyos-transport";
 
+/// `toyos-crypto`, tested and linted in each of [`CRYPTO_FORMS`] rather than
+/// with the features the workspace's other members unify onto it.
+pub(crate) const CRYPTO: &str = "toyos-crypto";
+/// Every feature but `portable`: the instruction paths, dispatched at run time.
+pub(crate) const CRYPTO_DISPATCHED: &str = "std,sign,wpa2,rustls-provider";
+/// The dispatched paths, the scalar ones under `portable`, and the `no_std`
+/// core with no feature at all.
+const CRYPTO_FORMS: [(&str, &[&str]); 3] = [
+    ("dispatched", &["--features", CRYPTO_DISPATCHED]),
+    ("portable", &["--all-features"]),
+    ("default features", &[]),
+];
+
 const fn red(
     krate: &'static str,
     feature: &'static str,
@@ -755,9 +768,9 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 }
 
 /// Every test that runs on the host and boots no guest. The build system's own
-/// tests, every host member of the workspace ([`crate::hostws`]), the kernel's
-/// library, clippy with warnings denied, the concurrency models' negative
-/// controls, every userland crate with a host test ([`crate::userlandhost`],
+/// tests, every host member of the workspace ([`crate::hostws`]), [`CRYPTO`] in
+/// each of [`CRYPTO_FORMS`], the kernel's library, clippy with warnings denied,
+/// the concurrency models' negative controls, every userland crate with a host test ([`crate::userlandhost`],
 /// which also reds on a userland test none of them runs), every app the images
 /// ship for each host ([`apps_for`]), and the libraries built for a guest
 /// ([`crate::hostws::guest_libraries`]).
@@ -797,10 +810,17 @@ fn host(root: &Path) -> Vec<Step> {
         step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
         step("the workspace's host members", || {
             let guests = crate::hostws::guest_packages(root);
-            let mut args = vec!["test", "--workspace", "--exclude", "toyos-build"];
+            let mut args = vec!["test", "--workspace", "--exclude", "toyos-build", "--exclude", CRYPTO];
             args.extend(guests.iter().flat_map(|guest| ["--exclude", guest.as_str()]));
             cargo(root, &args)
         }),
+    ]);
+    for (form, features) in CRYPTO_FORMS {
+        steps.push(step(&format!("{CRYPTO}, {form}"), || {
+            cargo(root, &[&["test", "-p", CRYPTO][..], features].concat())
+        }));
+    }
+    steps.extend([
         step("the kernel's library", || {
             cargo(root, &["test", "-p", KERNEL, "--lib", "--features", "sched-check"])
         }),
