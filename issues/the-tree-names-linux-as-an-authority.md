@@ -31,6 +31,13 @@ the sweep's: `kernel/src/arch/aarch64/irqchip.rs`,
 Owner: the orchestrator, which has briefed the source sweep
 (`wt/toyos-linux-sweep`) to clear it.
 
-**Exit**: `git grep -n -i linux -- kernel sdk/libc/src lib/acpi lib/hda lib/xhci lib/bcachefs
-system/fileserver system/logkeeper system/netstack/i219 system/netstack/shard
-system/netstack/node/tests tests/metal tests/toyos.rs tests/guest` prints nothing.
+**Exit**: this prints nothing:
+
+```
+git grep -n -i -P "linux(?!'s \`madvise\`|s?-)" -- kernel sdk/libc/src lib/acpi lib/hda lib/xhci \
+  lib/bcachefs system/fileserver system/logkeeper system/netstack/i219 system/netstack/shard \
+  system/netstack/node/tests tests/metal tests/toyos.rs tests/guest
+```
+
+It passes an interface defined outside ToyOS that names Linux, which in these paths is only Linux's
+`madvise`, and an issue slug, such as `issues/toyos-beats-linuxs-latency-on-the-t14.md`.
