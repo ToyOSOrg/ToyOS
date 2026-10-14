@@ -125,6 +125,7 @@ members = [
     "system/soundserver/virtio-sound",
     "system/sshserver",
     "system/supervisor",
+    "system/supervisor/lifecycle",
     "system/swap",
     "system/symbolize",
     "system/terminal",
@@ -138,6 +139,7 @@ members = [
     "system/vdagent/bridge",
     "tests/guest/kernelprobe",
     "tests/guest/metalprobe",
+    "tests/guest/pciholder",
     "tests/guest/test-runner",
     "tests/metal",
 ]

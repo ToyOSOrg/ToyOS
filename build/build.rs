@@ -170,8 +170,12 @@ struct ProgramConfig {
     provides: Vec<String>,
     /// Names in this program's namespace, each a *connector*.
     receives: Vec<String>,
-    /// Device classes the supervisor mints a claim for and endows.
+    /// Claims the supervisor mints for this row's one process and endows
+    /// (`toyos_manifest::Program::devices`).
     devices: Vec<String>,
+    /// PCI matchers: one process of this row per function one names
+    /// (`toyos_manifest::Program::drives`).
+    drives: Vec<String>,
     /// Rights on the `SysCap` duplicate the supervisor endows this program, by the names
     /// `toyos_manifest::syscap_rights` takes. A handful of rows in the whole
     /// tree declare one.
@@ -738,6 +742,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     provides: cfg.provides.clone(),
                     receives: cfg.receives.clone(),
                     devices: cfg.devices.clone(),
+                    drives: cfg.drives.clone(),
                     syscap: cfg.syscap.clone(),
                     slots: cfg.slots,
                     service: cfg.service,
@@ -3048,6 +3053,7 @@ mod tests {
         "images/console.toml",
         "tests/images/acpicase.toml",
         "tests/images/clipboardcase.toml",
+        "tests/images/drivescase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
@@ -3246,52 +3252,14 @@ mod tests {
         assert!(provides_disjoint_from_serves(&bad).is_err());
     }
 
-    /// The supervisor mints one claim per device, so a config naming one twice starts a
-    /// program with a hole where its claim should be.
-    fn one_claimant_per_device(cfg: &SystemConfig) -> Result<(), String> {
-        let mut seen: BTreeMap<&str, &str> = BTreeMap::new();
-        for (name, prog) in &cfg.programs {
-            for d in &prog.devices {
-                if let Some(prev) = seen.insert(d, name) {
-                    return Err(format!(
-                        "device `{d}` is claimed by both `{prev}` and `{name}`; the second \
-                         claim is refused at boot"
-                    ));
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Not the capability boundary — `kernel/src/pcidev`'s slot reservation is,
-    /// and this compares `system.toml` strings.
-    #[test]
-    fn every_device_class_has_at_most_one_claimant() {
-        for cfg in ALL_CONFIGS {
-            one_claimant_per_device(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
-        }
-        let bad: SystemConfig = toml::from_str(
-            "[programs.a]\ndevices = [\"framebuffer\"]\n\
-             [programs.b]\ndevices = [\"framebuffer\"]\n",
-        )
-        .unwrap();
-        assert!(one_claimant_per_device(&bad).is_err());
-    }
-
-    /// A device name the ABI does not know renders fine and leaves the supervisor with a
-    /// `devices` entry it cannot mint — a dead machine for a typo, where this is
-    /// a red in milliseconds. Same for a `syscap` right.
-    ///
-    /// The ABI's own parser, not a copy of it: a `pci:<vendor>:<device>` entry
-    /// names a function and a class name names a class, and this is the same
-    /// `DeviceRequest::parse` the supervisor and the kernel read the entry with.
+    /// A `syscap` right the ABI does not know renders fine and leaves the
+    /// supervisor with a row it cannot endow — a dead machine for a typo,
+    /// where this is a red in milliseconds. A device entry that names nothing,
+    /// and two one device answers, are the manifest's own render refusals
+    /// (`toyos_manifest::render`), which `every_config_renders_its_manifest`
+    /// holds every config to.
     fn names_only_real_capabilities(cfg: &SystemConfig) -> Result<(), String> {
         for (name, prog) in &cfg.programs {
-            for device in &prog.devices {
-                if toyos_manifest::DeviceRequest::parse(device).is_none() {
-                    return Err(format!("`{name}` names device `{device}`, which is not one"));
-                }
-            }
             toyos_manifest::syscap_rights(&prog.syscap)
                 .map_err(|e| format!("`{name}`: {e}"))?;
         }
@@ -3303,23 +3271,29 @@ mod tests {
         for cfg in ALL_CONFIGS {
             names_only_real_capabilities(&load(cfg)).unwrap_or_else(|e| panic!("{cfg}: {e}"));
         }
-        let bad_class: SystemConfig =
-            toml::from_str("[programs.a]\ndevices = [\"gpu\"]\n").unwrap();
-        assert!(names_only_real_capabilities(&bad_class).is_err());
-        // A PCI entry that names no function is the same defect one level down,
-        // and the one a hand-written config is most likely to make.
-        let bad_function: SystemConfig =
-            toml::from_str("[programs.a]\ndevices = [\"pci:1af4\"]\n").unwrap();
-        assert!(names_only_real_capabilities(&bad_function).is_err());
         let bad_right: SystemConfig =
             toml::from_str("[programs.a]\nsyscap = [\"root\"]\n").unwrap();
         assert!(names_only_real_capabilities(&bad_right).is_err());
     }
 
+    /// Two rows naming one function are refused where the image is built, by
+    /// both rows' names: the manifest's refusal reaches the build.
+    #[test]
+    fn two_rows_on_one_function_are_a_build_refusal_by_name() {
+        let config: SystemConfig = toml::from_str(
+            "[programs.netstack]\ndevices = [\"pci:02:00:00/1af4:1041\"]\n\
+             [programs.nic]\ndrives = [\"pci:02:00:00\"]\n",
+        )
+        .unwrap();
+        let refused = std::panic::catch_unwind(|| render_manifest(&config)).expect_err("rendered");
+        let said = refused.downcast_ref::<String>().expect("a formatted panic");
+        assert!(said.contains("netstack") && said.contains("nic") && said.contains("Overlap"), "{said}");
+    }
+
     fn claims_no_device(cfg: &SystemConfig) -> Result<(), String> {
         for (name, prog) in &cfg.programs {
-            if !prog.devices.is_empty() {
-                return Err(format!("program `{name}` claims {:?}", prog.devices));
+            if !prog.devices.is_empty() || !prog.drives.is_empty() {
+                return Err(format!("program `{name}` claims {:?} and drives {:?}", prog.devices, prog.drives));
             }
         }
         Ok(())
@@ -3336,6 +3310,8 @@ mod tests {
         let bad: SystemConfig =
             toml::from_str("[programs.x]\ndevices = [\"framebuffer\"]\n").unwrap();
         assert!(claims_no_device(&bad).is_err());
+        let driving: SystemConfig = toml::from_str("[programs.x]\ndrives = [\"pci:03:00:00\"]\n").unwrap();
+        assert!(claims_no_device(&driving).is_err());
     }
 
     /// `[boot] start` names program keys, so a typo is a build error rather than

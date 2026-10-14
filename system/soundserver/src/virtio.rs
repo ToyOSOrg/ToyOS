@@ -30,9 +30,13 @@ use toyos_virtio_sound::{Queues, Sound, PERIOD_BYTES, STREAM_ID};
 
 use crate::backend::Completion;
 
-/// virtio's vendor id and the sound device's (§4.1.2.1: `0x1040` + 25), as
-/// the manifest row spells the claim.
-pub const PCI_ID: toyos_abi::syscall::PciId = toyos_abi::syscall::PciId { vendor: 0x1af4, device: 0x1059 };
+/// A multimedia audio controller, class `04:01:00`, of virtio's vendor id and
+/// the sound device's (§4.1.2.1: `0x1040` + 25), as the manifest row spells
+/// the claim.
+pub const FUNCTION: toyos_manifest::device::PciMatch = toyos_manifest::device::PciMatch::new(
+    [0x04, 0x01, 0x00],
+    Some(toyos_abi::syscall::PciId { vendor: 0x1af4, device: 0x1059 }),
+);
 
 /// The one MSI-X table entry the kernel programs.
 const MSIX_ENTRY: u16 = 0;

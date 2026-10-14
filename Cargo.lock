@@ -2225,6 +2225,7 @@ dependencies = [
  "toyos-dns",
  "toyos-i219",
  "toyos-inspect",
+ "toyos-manifest",
  "toyos-mdns",
  "toyos-net-ip",
  "toyos-net-node",
@@ -2858,6 +2859,13 @@ dependencies = [
  "byteorder_slice",
  "derive-into-owned",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "pciholder"
+version = "0.1.0"
+dependencies = [
+ "toyos",
 ]
 
 [[package]]
@@ -3912,6 +3920,7 @@ dependencies = [
  "toyos-abi",
  "toyos-hda",
  "toyos-inspect",
+ "toyos-manifest",
  "toyos-mixer",
  "toyos-pci-claim",
  "toyos-resample",
@@ -4007,6 +4016,7 @@ dependencies = [
  "toyos-manifest",
  "toyos-osrelease",
  "toyos-quiesce",
+ "toyos-supervisor",
  "toyos-swap",
  "toyos-update",
  "toyos-wallclock",
@@ -4756,6 +4766,14 @@ dependencies = [
 [[package]]
 name = "toyos-std-copies"
 version = "0.1.0"
+
+[[package]]
+name = "toyos-supervisor"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+ "toyos-manifest",
+]
 
 [[package]]
 name = "toyos-swap"

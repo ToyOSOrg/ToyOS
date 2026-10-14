@@ -9,6 +9,9 @@ license = "MIT OR Apache-2.0"
 toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
 toyos-manifest = { path = "../../lib/manifest" }
+# Its lifecycle decisions: what an end owes, which claims a start mints, and
+# which functions a `drives` row has a process on.
+toyos-supervisor = { path = "lifecycle" }
 toyos-osrelease = { path = "../../sdk/osrelease" }
 toyos-wallclock = { path = "../../lib/wallclock" }
 toyos-logstream = { path = "../../lib/logstream" }
