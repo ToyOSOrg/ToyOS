@@ -28,22 +28,57 @@ pub const HEADER_TYPE_BRIDGE: u8 = 1;
 pub const SECONDARY_BUS: u64 = 0x19;
 pub const SUBORDINATE_BUS: u64 = 0x1A;
 
-/// One bridge, as the path to a function behind it reads it.
+/// One bridge, as the path to a function behind it reads it: the bus it is
+/// on, and its bus numbers and windows as its registers answer, which a
+/// bridge firmware never configured (both bus numbers reset to 0) or a
+/// hostile switch may answer with anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bridge {
+    pub bus: u8,
     pub secondary: u8,
     pub subordinate: u8,
     pub memory: Option<Window>,
     pub prefetchable: Option<Window>,
 }
 
-impl Bridge {
-    /// Whether `bus` is below this bridge, so every request for a function
-    /// on it passes through this bridge's windows.
-    pub fn leads_to(&self, bus: u8) -> bool {
-        self.secondary <= bus && bus <= self.subordinate
-    }
+/// Why a function's path to its root bus cannot be named.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathRefused {
+    /// Two bridges each name this bus as their secondary one, and requests
+    /// for it reach the function through at most one of them.
+    Ambiguous { bus: u8 },
+}
 
+/// The bridges from a function's bus up to its root bus, nearest first; empty
+/// for a function on a root bus.
+///
+/// **A step is a bridge whose secondary bus is the one reached, which sits on
+/// a lower bus and whose subordinate range holds the function's** (§3.2.5.3,
+/// §3.2.5.4): anything else is not a bridge requests for that bus pass, and
+/// is passed over, so an unconfigured or lying bridge moves no function off
+/// its root bus. Each step lowers the bus, so the walk ends; two bridges that
+/// could each be the step refuse the walk.
+pub fn path(bridges: &[Bridge], bus: u8) -> impl Iterator<Item = Result<&Bridge, PathRefused>> {
+    let mut at = Some(bus);
+    core::iter::from_fn(move || {
+        let reached = at?;
+        let mut parents = bridges.iter().filter(|b| {
+            b.secondary == reached && b.bus < b.secondary && b.secondary <= bus && bus <= b.subordinate
+        });
+        let step = match (parents.next(), parents.next()) {
+            (None, _) => None,
+            (Some(parent), None) => Some(Ok(parent)),
+            (Some(_), Some(_)) => Some(Err(PathRefused::Ambiguous { bus: reached })),
+        };
+        at = match step {
+            Some(Ok(parent)) => Some(parent.bus),
+            _ => None,
+        };
+        step
+    })
+}
+
+impl Bridge {
     /// Whether this bridge forwards all of `at..end` to its secondary side
     /// through a window a BAR of this kind may sit in (§3.2.5.6 to
     /// §3.2.5.8). The prefetchable window may be read ahead and its writes
@@ -193,5 +228,64 @@ mod tests {
             Some(Window { start: 0xbc20_0000, end: 0xbc40_0000 })
         );
         assert_eq!(prefetch(0x0000_0010, 0, 0), None);
+    }
+
+    fn port(bus: u8, secondary: u8, subordinate: u8) -> Bridge {
+        Bridge { bus, secondary, subordinate, memory: None, prefetchable: None }
+    }
+
+    fn walked(bridges: &[Bridge], bus: u8) -> std::vec::Vec<Result<Bridge, PathRefused>> {
+        path(bridges, bus).map(|step| step.copied()).collect()
+    }
+
+    /// The T14's shape: every claimed function on bus 0, and root ports with
+    /// buses below them. A port firmware never configured reads both bus
+    /// numbers 0, and a hostile one may claim every bus; neither moves a
+    /// bus-0 function off its root bus.
+    #[test]
+    fn a_function_on_the_root_bus_has_no_path_whatever_a_bridge_says() {
+        let real = port(0, 9, 9);
+        assert_eq!(walked(&[real], 0), []);
+        assert_eq!(walked(&[real, port(0, 0, 0)], 0), []);
+        assert_eq!(walked(&[real, port(0, 0, 0xff)], 0), []);
+        assert_eq!(walked(&[real, port(0, 0, 0xff)], 9), [Ok(real)]);
+    }
+
+    /// A walk climbs one bus per step to the root bus, each step a bridge on
+    /// a lower bus whose subordinate range holds the function's bus; a bridge
+    /// that claims a bus from above it or a range not holding the function is
+    /// no step.
+    #[test]
+    fn a_path_climbs_from_the_functions_bus_to_the_root() {
+        let upstream = port(0, 2, 4);
+        let downstream = port(2, 3, 3);
+        assert_eq!(walked(&[upstream, downstream], 3), [Ok(downstream), Ok(upstream)]);
+        assert_eq!(walked(&[upstream, port(5, 3, 3)], 3), []);
+        assert_eq!(walked(&[upstream, port(2, 3, 2)], 3), []);
+    }
+
+    /// Two bridges naming one secondary bus refuse the walk for a function on
+    /// it, and for no function elsewhere.
+    #[test]
+    fn a_bus_two_bridges_claim_refuses_its_functions_alone() {
+        let one = port(0, 3, 3);
+        let other = port(1, 3, 3);
+        let elsewhere = port(0, 5, 5);
+        assert_eq!(walked(&[one, other, elsewhere], 3), [Err(PathRefused::Ambiguous { bus: 3 })]);
+        assert_eq!(walked(&[one, other, elsewhere], 5), [Ok(elsewhere)]);
+    }
+
+    /// The memory window forwards either kind of BAR; the prefetchable window
+    /// forwards a prefetchable BAR alone, and only an extent wholly inside.
+    #[test]
+    fn forwarding_holds_the_bars_kind_and_its_whole_extent() {
+        let memory = Window { start: 0xd000_0000, end: 0xd040_0000 };
+        let prefetch = Window { start: 0xe000_0000, end: 0xe040_0000 };
+        let b = Bridge { memory: Some(memory), prefetchable: Some(prefetch), ..port(0, 1, 1) };
+        assert!(b.forwards(0xd000_0000, 0xd020_0000, false));
+        assert!(b.forwards(0xd000_0000, 0xd020_0000, true));
+        assert!(b.forwards(0xe000_0000, 0xe020_0000, true));
+        assert!(!b.forwards(0xe000_0000, 0xe020_0000, false));
+        assert!(!b.forwards(0xd030_0000, 0xd050_0000, true));
     }
 }

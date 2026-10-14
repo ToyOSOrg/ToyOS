@@ -15,13 +15,15 @@ opened: 2026-10-09
   decodes the file into.
 
 A later read of freed heap or stack, by a bug in this process or by anything
-that can read its memory, finds the session's keys. What `ring` keeps of these
-inside `SealingKey`, `OpeningKey`, `EphemeralPrivateKey` and `Ed25519KeyPair`,
-and whether it wipes it, has not been read.
+that can read its memory, finds the session's keys. `toyos-crypto`'s
+`ssh::SealingKey` and `ssh::OpeningKey`, `x25519::SecretKey` and
+`SharedSecret`, and `ed25519::SigningKey` overwrite what each owns when it
+drops (`lib/crypto/src/secret.rs`). The keys and the seed `toyos-ssh` hands
+them by value, and any copy the compiler makes, are not overwritten.
 
 **Owner**: `toyos-ssh`.
 
 **Exit**:
 - Every buffer `toyos-ssh` fills with `K`, a derived key or the host key's
   seed is overwritten before it is freed.
-- What `ring` keeps of them has been read, and is stated at the site.
+- What `toyos-crypto` keeps of them is stated at the site.

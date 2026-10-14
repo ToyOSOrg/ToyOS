@@ -127,10 +127,11 @@ use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use record::Interrupt;
 use toyos_abi::boot::{MemoryMapEntry, RootBridgeWindow};
+use toyos_abi::inventory::Arrival;
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
-use toyos_pci::bridge::{Bridge, Window};
+use toyos_pci::bridge::{self, Bridge, Window};
 use toyos_pci::{af, aperture, bar, express, msix, placement, pm, probe};
 
 use crate::device::{Claim, ClaimError};
@@ -177,9 +178,8 @@ struct Function {
     ///
     /// **This is where a function's exclusivity is decided.**
     /// `Claim::acquire`'s per-class flag does not answer for a class that
-    /// names several devices, `build/build.rs`'s `one_claimant_per_device`
-    /// compares `system.toml` strings, and a host-side gate is not the
-    /// capability boundary.
+    /// names several devices, and the manifest's refusal of two matchers on
+    /// one function is a host-side gate, not the capability boundary.
     held: AtomicBool,
     irq: Interrupt,
     /// What its holder's poll waits on: two processes each driving a function
@@ -204,7 +204,8 @@ impl core::fmt::Display for Function {
 
 /// Exactly the functions [`publish`] took, in [`Machine::functions`]' order,
 /// leaked once: null until then and never written again, so a handler reaches
-/// a function's record with no lock.
+/// a function's record with no lock. A function's place here is its
+/// [`Arrival`]'s ([`arrival_of`]), which is therefore never another's.
 static FUNCTIONS: AtomicPtr<&'static [Function]> = AtomicPtr::new(core::ptr::null_mut());
 
 fn functions() -> &'static [Function] {
@@ -215,6 +216,12 @@ fn functions() -> &'static [Function] {
     // SAFETY: non-null only as `publish` stored it: a leaked box, never freed
     // or written again, published with Release once it was whole.
     unsafe { *published }
+}
+
+/// The arrival of function `number`, counted from 1 so a zeroed record names
+/// none.
+fn arrival_of(number: usize) -> Arrival {
+    Arrival(u32::try_from(number + 1).expect("pcidev: fewer functions than a u32 counts"))
 }
 
 /// Function `number`, which a claim or an interrupt named.
@@ -369,9 +376,11 @@ struct Machine {
     /// Every bridge on the bus, read in [`publish`]: what a function behind
     /// one may be placed inside ([`placement::behind_bridges`]).
     bridges: Vec<Bridge>,
-    /// Addresses behind a bridge a claim has tried and not cut: no other claim
-    /// is offered one while it is probed, and one the function did not answer
-    /// at stays spent, as a refused run address does.
+    /// The firmware memory map's extents, which no candidate behind a bridge
+    /// may reach any more than a run may.
+    map: Vec<Window>,
+    /// Addresses behind a bridge a claim is probing, kept from every other
+    /// claim until the probe settles.
     trying: Vec<Window>,
     /// What this kernel holds of the memory the root bridges decode: the
     /// necessary condition for any read this module issues.
@@ -414,6 +423,7 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
     low: Vec::new(),
     high: Vec::new(),
     bridges: Vec::new(),
+    map: Vec::new(),
     trying: Vec::new(),
     apertures: Apertures::Unknown,
     windows: Vec::new(),
@@ -545,8 +555,8 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], firmware: &[RootBridgeWindow]) {
     let mut decoded = Vec::new();
     let bridges: Vec<Bridge> = devices.iter().filter_map(PciDevice::bridge).collect();
-    let mut taken: Vec<Window> =
-        maps.iter().map(|entry| Window { start: entry.start, end: entry.end }).collect();
+    let map: Vec<Window> = maps.iter().map(|entry| Window { start: entry.start, end: entry.end }).collect();
+    let mut taken = map.clone();
     for device in devices {
         // Bounded by the header's own declaration: a bridge has two BAR slots
         // and four registers past them that are not BARs, and `bar_size` below
@@ -632,12 +642,16 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
     assert!(first.is_ok(), "pcidev: the functions were published twice");
     let mut machine = MACHINE.lock();
     machine.functions = devices.to_vec();
-    machine.identities =
-        devices.iter().map(|d| d.identity(addr_of(segment, requester(d)))).collect();
+    machine.identities = devices
+        .iter()
+        .enumerate()
+        .map(|(number, d)| d.identity(arrival_of(number), addr_of(segment, requester(d))))
+        .collect();
     machine.segment = segment;
     machine.decoded = decoded;
     machine.apertures = apertures;
     machine.bridges = bridges;
+    machine.map = map;
     machine.low = low;
     machine.high = high;
 }
@@ -696,7 +710,10 @@ enum Refusal {
     NoRun { wide: bool },
     /// The function is behind a bridge, and no 2 MiB the bridges on its path
     /// forward to it is free, so the BAR stays where firmware put it.
-    NoRoutedRun(u8),
+    NoRoutedRun,
+    /// Two bridges each name this bus as their secondary one, so no path to
+    /// the function can be named.
+    PathAmbiguous { bus: u8 },
     /// Every address this machine offered was tried and the function answered
     /// at none of them.
     NoPlacement { wide: bool, asked: usize },
@@ -769,11 +786,11 @@ impl core::fmt::Display for Refusal {
                  this bus's assigned BARs and its bridges' forwarded ranges and inside a window \
                  firmware declared"
             ),
-            Self::NoRoutedRun(i) => write!(
+            Self::NoRoutedRun => write!(f, "no 2 MiB the bridges above it forward is free"),
+            Self::PathAmbiguous { bus } => write!(
                 f,
-                "no 2 MiB the bridges above it forward is free for BAR {i}, so it stays where \
-                 firmware put it, and there it shares a 2 MiB page a process would be given \
-                 with whatever else decodes there"
+                "two bridges each name bus {bus:#04x} as their secondary one, so nothing says \
+                 which forwards to it"
             ),
             Self::NoPlacement { wide, asked } => write!(
                 f,
@@ -817,45 +834,20 @@ impl core::fmt::Display for Refusal {
     }
 }
 
-/// Claim `id`, bring the function up to the point a driver takes over, and
-/// answer what that driver needs to know.
-pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
-    // Among the functions this kernel does not drive (`toyos_pci::claimed`):
-    // the console's virtio-serial and a process's carry one ID.
-    let (matches, resolved) = {
+/// Claim the function that arrived as `arrival`, bring it up to the point a
+/// driver takes over, and answer what that driver needs to know.
+pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
+    let (number, pci, id, driven) = {
         let machine = MACHINE.lock();
-        let matches: Vec<(usize, PciDevice)> =
-            machine.functions.iter().copied().enumerate().filter(|(_, d)| d.is_id(id.vendor, id.device)).collect();
-        let resolved =
-            toyos_pci::claimed(matches.iter().map(|(_, d)| machine.kernel_driven.contains(&requester(d))));
-        (matches, resolved)
+        let number = machine.identities.iter().position(|pci| pci.arrival == arrival).ok_or(ClaimError::Absent)?;
+        let (pci, identity) = (machine.functions[number], &machine.identities[number]);
+        let driven = machine.kernel_driven.contains(&requester(&pci));
+        (number, pci, PciId { vendor: identity.vendor, device: identity.device }, driven)
     };
-    let (number, pci) = match resolved {
-        Ok(at) => matches[at],
-        Err(toyos_pci::Unclaimable::Absent) => return Err(ClaimError::Absent),
-        Err(toyos_pci::Unclaimable::Ambiguous) => {
-            // Refused by name rather than resolved to the first match: a
-            // config that names a card this machine has two of is asking
-            // for one of them and cannot say which.
-            log!(
-                "pcidev: {:04x}:{:04x} names more than one function this kernel does not drive",
-                id.vendor,
-                id.device
-            );
-            return Err(ClaimError::Ambiguous);
-        }
-        Err(toyos_pci::Unclaimable::KernelDriven) => {
-            for (_, pci) in &matches {
-                log!(
-                    "pcidev: PCI {:02x}:{:02x}.{} is driven by this kernel and cannot be claimed",
-                    pci.bus,
-                    pci.dev,
-                    pci.func
-                );
-            }
-            return Err(ClaimError::KernelDriven);
-        }
-    };
+    if driven {
+        log!("pcidev: PCI {:02x}:{:02x}.{} is driven by this kernel and cannot be claimed", pci.bus, pci.dev, pci.func);
+        return Err(ClaimError::KernelDriven);
+    }
 
     // Before anything is taken or touched: with no declaration held, no
     // read this claim would make is known to reach the bus.
@@ -1038,7 +1030,8 @@ fn place_bars(
             Err(why @ (Refusal::BarUnassigned(_)
             | Refusal::BarUnrouted(_)
             | Refusal::BarReferenceEmpty(_)
-            | Refusal::NoRoutedRun(_))) => {
+            | Refusal::NoRoutedRun
+            | Refusal::PathAmbiguous { .. })) => {
                 log!(
                     "pcidev: PCI {:02x}:{:02x}.{} keeps BAR {index} where firmware put it and \
                      hands it to nobody — {why}",
@@ -1369,8 +1362,8 @@ fn probe_dword(at: u64, span: u64, offset: u64) -> u32 {
 /// Memory decode is off across every write, so nothing can read through a BAR
 /// that is half-programmed, and the address is read back off the register
 /// rather than assumed. A candidate the machine refuses leaves the register
-/// holding what firmware left in it, and a walk that ends in a refusal gives
-/// every address it took back to the run it came out of.
+/// holding what firmware left in it, and a walk gives back every address it
+/// took and did not keep.
 fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64, windows: &[RootBridgeWindow]) -> Result<u64, Refusal> {
     let offset = bar::BASE + index as u64 * 4;
     let low = pci.read_config_u32(offset);
@@ -1418,7 +1411,7 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64, windows: &[RootBr
     }
 
     let who = alloc::format!("PCI {:02x}:{:02x}.{}", pci.bus, pci.dev, pci.func);
-    let source = Source::of(pci.bus, wide, firmware.prefetchable());
+    let source = Source::of(pci.bus, wide, firmware.prefetchable()).map_err(|bridge::PathRefused::Ambiguous { bus }| Refusal::PathAmbiguous { bus })?;
     let mut refused = [None; MAX_CANDIDATES];
     let mut asked = 0usize;
     while asked < MAX_CANDIDATES {
@@ -1449,6 +1442,7 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64, windows: &[RootBr
         if after == signature {
             alone_in_its_page(pci, index, at, span);
             cut(pci, index, at, span);
+            give_back(&refused, span);
             log!(
                 "pcidev: {who} BAR {index} ({size:#x} bytes) placed at {at:#x} — inside \
                  firmware's mem {:#x}; its +{reference:#x} dword answers {after:#010x} there, \
@@ -1468,20 +1462,19 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64, windows: &[RootBr
         asked += 1;
     }
     give_back(&refused, span);
-    Err(match (asked, source) {
-        (0, Source::Behind { .. }) => Refusal::NoRoutedRun(index),
+    Err(match (asked, &source) {
+        (0, Source::Behind { .. }) => Refusal::NoRoutedRun,
         (0, Source::Runs { .. }) => Refusal::NoRun { wide },
         _ => Refusal::NoPlacement { wide, asked },
     })
 }
 
 /// Where a BAR's candidate addresses come from: this machine's free runs for a
-/// function on a root bus, and the windows of the bridges on its path for one
-/// behind a bridge, which no root-level run lies in.
-#[derive(Clone, Copy)]
+/// function on a root bus, and the windows of the bridges on its path, nearest
+/// first, for one behind a bridge, which no root-level run lies in.
 enum Source {
     Runs { wide: bool },
-    Behind { bus: u8, wide: bool, prefetchable: bool },
+    Behind { path: Vec<Bridge>, wide: bool, prefetchable: bool },
 }
 
 /// One address [`Source::take`] handed out, and where it goes back to.
@@ -1509,37 +1502,34 @@ impl Candidate {
 }
 
 impl Source {
-    fn of(bus: u8, wide: bool, prefetchable: bool) -> Self {
-        if MACHINE.lock().bridges.iter().any(|bridge| bridge.leads_to(bus)) {
-            Self::Behind { bus, wide, prefetchable }
-        } else {
-            Self::Runs { wide }
-        }
+    fn of(bus: u8, wide: bool, prefetchable: bool) -> Result<Self, bridge::PathRefused> {
+        let path = bridge::path(&MACHINE.lock().bridges, bus).map(|step| step.copied()).collect::<Result<Vec<_>, _>>()?;
+        Ok(if path.is_empty() { Self::Runs { wide } } else { Self::Behind { path, wide, prefetchable } })
     }
 
     /// The next address to try, already out of reach of every other claim.
-    fn take(self, windows: &[RootBridgeWindow], span: u64) -> Option<Candidate> {
+    fn take(&self, windows: &[RootBridgeWindow], span: u64) -> Option<Candidate> {
         match self {
-            Self::Runs { wide } => with_runs(wide, |runs| placement::reserve(runs, windows, span))
+            &Self::Runs { wide } => with_runs(wide, |runs| placement::reserve(runs, windows, span))
                 .map(|reservation| Candidate::Run { wide, reservation }),
-            Self::Behind { bus, wide, prefetchable } => {
+            Self::Behind { path, wide, prefetchable } => {
                 let mut machine = MACHINE.lock();
                 let mut taken: Vec<Window> = machine
-                    .decoded
+                    .map
                     .iter()
-                    .map(|&(_, start, end)| Window { start, end })
+                    .copied()
+                    .chain(machine.decoded.iter().map(|&(_, start, end)| Window { start, end }))
                     .chain(machine.windows.iter().map(|&(_, _, at, span)| Window { start: at, end: at + span }))
                     .chain(machine.trying.iter().copied())
                     .chain(
                         machine
                             .bridges
                             .iter()
-                            .filter(|bridge| !bridge.leads_to(bus))
+                            .filter(|bridge| !path.contains(bridge))
                             .flat_map(|bridge| bridge.memory.into_iter().chain(bridge.prefetchable)),
                     )
                     .collect();
-                let (at, window) =
-                    placement::behind_bridges(&machine.bridges, bus, prefetchable, wide, &mut taken, windows, span)?;
+                let (at, window) = placement::behind_bridges(path, *prefetchable, *wide, &mut taken, windows, span)?;
                 machine.trying.push(Window { start: at, end: at + span });
                 Some(Candidate::Behind { at, window })
             }
@@ -1600,11 +1590,8 @@ fn was_cut(pci: &PciDevice, index: u8) -> bool {
     MACHINE.lock().windows.iter().any(|(w, i, _, _)| *w == who && *i == index)
 }
 
-/// Record `at .. at + span` as this BAR's for the life of the boot.
-///
-/// The address is already out of the runs: [`placement::reserve`] took it there
-/// under [`with_runs`], which is what keeps a second claim from being offered
-/// it.
+/// Record `at .. at + span` as this BAR's for the life of the boot, where no
+/// later claim is offered it.
 fn cut(pci: &PciDevice, index: u8, at: u64, span: u64) {
     let mut machine = MACHINE.lock();
     machine.trying.retain(|tried| tried.start != at);

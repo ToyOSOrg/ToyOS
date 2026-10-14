@@ -453,6 +453,7 @@ impl PciDevice {
             return None;
         }
         Some(bridge::Bridge {
+            bus: self.bus,
             secondary: self.read_config_u8(bridge::SECONDARY_BUS),
             subordinate: self.read_config_u8(bridge::SUBORDINATE_BUS),
             memory: bridge::window(self.read_config_u32(bridge::MEMORY_BASE)),
@@ -471,8 +472,13 @@ impl PciDevice {
 
     /// What this function at `at` says it is, for the inventory; driven by
     /// nobody until [`crate::pcidev::inventory`] says otherwise.
-    pub fn identity(&self, at: toyos_abi::inventory::PciAddr) -> toyos_abi::inventory::Pci {
+    pub fn identity(
+        &self,
+        arrival: toyos_abi::inventory::Arrival,
+        at: toyos_abi::inventory::PciAddr,
+    ) -> toyos_abi::inventory::Pci {
         toyos_abi::inventory::Pci {
+            arrival,
             at,
             vendor: self.vendor_id(),
             device: self.device_id(),

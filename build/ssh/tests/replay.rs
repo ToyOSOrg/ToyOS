@@ -16,9 +16,10 @@
 
 mod common;
 
-use common::client::{derive, exchange_hash, open_packet, plain_packet, Fields};
-use common::driver::{drive, host_key, public_key, Keys, Side, Transcript, USER};
-use ring::aead::chacha20_poly1305_openssh::{OpeningKey, TAG_LEN};
+use common::client::{derive, exchange_hash, open_packet, plain_packet, Fields, TAG_LEN};
+use common::driver::{drive, host_key, public_key, Fixed, Keys, Side, Transcript, USER};
+use toyos_crypto::ssh::OpeningKey;
+use toyos_crypto::{ed25519, x25519};
 use toyos_ssh::{Declined, Event, Refusal, Server};
 
 const EXEC: &str = include_str!("fixtures/exec.transcript");
@@ -28,16 +29,11 @@ const STRANGER: &str = include_str!("fixtures/stranger.transcript");
 const RSA: &str = include_str!("fixtures/rsa.transcript");
 const FORWARD: &str = include_str!("fixtures/forward.transcript");
 
-#[allow(deprecated)]
-fn seeded(seed: u8) -> ring::test::rand::FixedByteRandom {
-    ring::test::rand::FixedByteRandom { byte: seed }
-}
-
 /// Feed `chunks` to a server seeded with `seed`, each in `piece`-byte inputs
 /// and the driver run after each whole chunk, as the recorder ran it: the
 /// server's output, its events and how the last input ended.
 fn run_split(seed: u8, chunks: &[&[u8]], piece: usize) -> (Vec<u8>, Vec<Event>, Result<(), Refusal>) {
-    let mut server = Server::new(host_key(), Keys::recorded(), seeded(seed));
+    let mut server = Server::new(host_key(), Keys::recorded(), Fixed(seed));
     let mut out = server.output();
     let mut events = Vec::new();
     for chunk in chunks {
@@ -192,27 +188,23 @@ impl Recorded {
         let (k_s, q_s, signature) = (reply.string().to_vec(), reply.string().to_vec(), reply.string().to_vec());
         // The server's ephemeral key is the seed's: generated here as the
         // server generates it, it is the Q_S the recording carries.
-        let private = ring::agreement::EphemeralPrivateKey::generate(&ring::agreement::X25519, &seeded(t.seed)).unwrap();
-        assert_eq!(private.compute_public_key().unwrap().as_ref(), &q_s[..]);
-        let k = ring::agreement::agree_ephemeral(
-            private,
-            &ring::agreement::UnparsedPublicKey::new(&ring::agreement::X25519, &q_c),
-            |k| k.to_vec(),
-        )
-        .unwrap();
+        let private = x25519::SecretKey::generate(&mut Fixed(t.seed)).unwrap();
+        assert_eq!(private.public_key().0, q_s[..]);
+        let k = private.agree(&x25519::PublicKey(q_c[..].try_into().unwrap())).unwrap().as_bytes().to_vec();
         let h = exchange_hash(v_c, v_s, &c[0], &s[0], &k_s, &q_c, &q_s, &k);
-        let (host, sig) = (Fields(&k_s).string_pair().1.to_vec(), Fields(&signature).string_pair().1.to_vec());
-        ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, host).verify(&h, &sig).expect("the recorded signature covers H");
+        let (host, sig) = (Fields(&k_s).string_pair().1, Fields(&signature).string_pair().1);
+        let host = ed25519::PublicKey::from_bytes(host.try_into().unwrap()).unwrap();
+        host.verify(&h, sig).expect("the recorded signature covers H");
         Self { client_sealed: at.0, server_sealed: at.1, client, server, client_packets, k, h }
     }
 
     fn key(&self, letter: u8) -> OpeningKey {
-        OpeningKey::new(&derive(&self.k, &self.h, letter, &self.h))
+        OpeningKey::new(derive(&self.k, &self.h, letter, &self.h))
     }
 
     /// The length of the sealed packet at `at`, under `key` at `seq`.
     fn sealed_len(bytes: &[u8], key: &OpeningKey, seq: u32) -> usize {
-        4 + u32::from_be_bytes(key.decrypt_packet_length(seq, bytes[..4].try_into().unwrap())) as usize + TAG_LEN
+        4 + key.packet_length(seq, bytes[..4].try_into().unwrap()) as usize + TAG_LEN
     }
 }
 
@@ -237,7 +229,8 @@ fn the_keys_derived_from_a_recorded_exchange_open_what_openssh_sealed() {
     // strict key exchange would have used, it does not open.
     let mut packet = r.client[r.client_sealed..r.client_sealed + used].to_vec();
     let (sealed, tag) = packet.split_at_mut(used - TAG_LEN);
-    assert!(c.open_in_place(3, sealed, (&*tag).try_into().unwrap()).is_err());
+    let (header, body) = sealed.split_first_chunk_mut::<4>().unwrap();
+    assert!(c.open(3, header, body, tag).is_err());
 }
 
 /// **A prefix-truncation attack** (Terrapin, CVE-2023-48795): an `IGNORE`

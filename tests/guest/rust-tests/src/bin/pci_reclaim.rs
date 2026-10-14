@@ -2,6 +2,9 @@
 //! is whether both claims were handed over. What each claim spent at the unit
 //! is the kernel's to say, and the metal rows read it there.
 
+#[path = "../function.rs"]
+mod function;
+
 use toyos::endow::Endowments;
 use toyos::syscap::SysCap;
 use toyos::PciDev;
@@ -14,7 +17,7 @@ fn main() {
         .take(SYSCAP_LABEL)
         .expect("the test estate is endowed a device-minting capability");
     for claim in 1..=2 {
-        match cap.claim_pci::<PciDev>(I219) {
+        match function::claim::<PciDev>(&cap, I219) {
             // Dropped at once: the release is what the second claim follows.
             Ok(function) => drop(function),
             Err(why) => {

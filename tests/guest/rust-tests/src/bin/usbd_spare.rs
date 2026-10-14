@@ -12,6 +12,9 @@
 //!   and the claim refusing its interrupt read from then on is this job's.
 //! - `refused`: the claim, on a kernel that drives the function, refused.
 
+#[path = "../function.rs"]
+mod function;
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::CommandExt;
@@ -25,7 +28,7 @@ use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
 use toyos::volatile::Window;
 use toyos::PciDev;
-use toyos_abi::syscall::{DeviceRequest, PciId, SyscallError};
+use toyos_abi::syscall::{PciId, SyscallError};
 use toyos_inspect::{Value, MSG_INSPECT, MSG_SNAPSHOT, USB};
 
 const USBD: &str = "/system/bin/usbd";
@@ -61,7 +64,7 @@ fn main() {
 fn claim(cap: &SysCap) -> (PciId, Result<PciDev, SyscallError>) {
     let mut found = None;
     for id in SPARES {
-        match cap.claim_pci::<PciDev>(id) {
+        match function::claim::<PciDev>(&cap, id) {
             Err(SyscallError::NotFound) => {}
             answered => {
                 assert!(found.is_none(), "usbd_spare: two spares on one machine");
@@ -73,8 +76,7 @@ fn claim(cap: &SysCap) -> (PciId, Result<PciDev, SyscallError>) {
 }
 
 fn spelled(id: PciId) -> String {
-    let mut buf = [0u8; DeviceRequest::MAX_NAME];
-    DeviceRequest::Pci(id).write_name(&mut buf).to_string()
+    format!("pci:{:04x}:{:04x}", id.vendor, id.device)
 }
 
 /// usbd, started on `dev` and serving its port to this job, and the lines it

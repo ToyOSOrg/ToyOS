@@ -695,6 +695,10 @@ pub enum Profile {
     /// a function a claim may take whose BAR has to land inside the port's
     /// windows, as every function behind a bridge on a laptop does.
     HeadlessNicBehindPort,
+    /// [`Profile::Headless`] with two of QEMU's `edu`, which the kernel drives
+    /// neither of: two identical functions, each a `drives` row's to start a
+    /// process on.
+    HeadlessTwoEdu,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
     /// machine shape that gets flashed, so it is the one the input tests run
@@ -775,6 +779,7 @@ impl Profile {
             | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
             | Self::HeadlessNicBehindPort
+            | Self::HeadlessTwoEdu
             | Self::Metal
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
@@ -949,6 +954,9 @@ enum Probes {
     /// Two of QEMU's `iommu-testdev`, the only DMA a guest of this suite can
     /// aim at an address of its choosing, behind the machine's unit.
     Testdevs,
+    /// Two of QEMU's `edu`, behind the machine's unit: identical functions a
+    /// claim tells apart only by their arrivals.
+    Edus,
     /// On `virt`, its SMMUv3 with the ITS behind it
     /// ([`Arch::irqchip`]), one `edu`, whose message is the only one a guest
     /// of this suite can raise on demand, and an `e1000e` behind a root port
@@ -1057,6 +1065,7 @@ impl Profile {
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
+            Self::HeadlessTwoEdu => Shape { probes: Probes::Edus, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
                 xhci: &[XHCI_DEFAULT, XHCI_SPARE],
                 usb: &[
@@ -2155,8 +2164,8 @@ fn qemu_command(
     machine.extend(arch.irqchip(accel, remapped));
     match arch {
         Arch::X86_64 => assert!(
-            shape.probes == Probes::Absent || (shape.probes == Probes::Testdevs && shape.iommu.is_some()),
-            "a q35 has no SMMUv3, and an iommu-testdev on one writes through no unit"
+            shape.probes == Probes::Absent || (matches!(shape.probes, Probes::Testdevs | Probes::Edus) && shape.iommu.is_some()),
+            "a q35 has no SMMUv3, and an iommu-testdev or edu on one is behind no unit"
         ),
         Arch::Aarch64 => {
             // A unit a profile declares is VT-d or AMD-Vi, which `virt` has none of.
@@ -2311,6 +2320,10 @@ fn qemu_command(
         // AMD-Vi's moves the first to a domain and leaves the second.
         qemu.arg("-device").arg("iommu-testdev");
         qemu.arg("-device").arg("iommu-testdev");
+    }
+    if shape.probes == Probes::Edus {
+        qemu.arg("-device").arg("edu");
+        qemu.arg("-device").arg("edu");
     }
     if shape.probes == Probes::Its {
         qemu.arg("-device").arg("edu");

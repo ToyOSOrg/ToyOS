@@ -1,0 +1,21 @@
+# The boot `a_drives_row_holds_one_process_per_function` reads, on
+# `Profile::HeadlessTwoEdu`: one `pciholder` per `edu` function, each holding
+# its own until the job that judges them has run.
+
+[boot]
+start = ["logkeeper", "test-runner"]
+
+# `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+# Started on each function the kernel does not drive, never by `[boot] start`.
+[programs.pciholder]
+drives = ["pci:00:ff:00/1234:11e8"]
+
+# `inventory` because the job reads who holds each function, and `dup`
+# because test-runner hands a job its capability as a duplicate and hands
+# none without it.
+[programs.test-runner]
+syscap = ["inventory", "dup"]

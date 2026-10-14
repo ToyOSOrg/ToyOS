@@ -10,8 +10,8 @@ opened: 2026-10-09
 `[patch.crates-io]` carries `russh`, `russh-cryptovec` and `tokio` for it, and
 `Cargo.lock` carries the closure they bring: `rsa` (RUSTSEC-2023-0071, the
 Marvin attack), `pageant` and `internal-russh-num-bigint` among it. This track
-puts the server on `toyos-ssh`, ToyOS's own sans-IO server core on `ring`,
-under a `std` driver, and deletes the russh closure in the landing that
+puts the server on `toyos-ssh`, ToyOS's own sans-IO server core on
+`toyos-crypto` (`lib/crypto`), under a `std` driver, and deletes the russh closure in the landing that
 switches.
 
 **Owner**: `toyos-ssh` and `system/sshserver`.
@@ -29,9 +29,8 @@ The owner's rulings:
   the guest suite runs no host `ssh` or `sftp`.
 
 Compromises of `toyos-ssh` recorded on their own:
-`issues/toyos-ssh-offers-only-a-classical-key-exchange.md`,
-`issues/toyos-ssh-leaves-its-secrets-in-freed-memory.md` and
-`issues/toyos-ssh-replays-rest-on-rings-deprecated-test-randomness.md`.
+`issues/toyos-ssh-offers-only-a-classical-key-exchange.md` and
+`issues/toyos-ssh-leaves-its-secrets-in-freed-memory.md`.
 
 ## Stages
 
@@ -51,8 +50,8 @@ Compromises of `toyos-ssh` recorded on their own:
    offer answered `PK_OK` counts as no failure. This stage closes
    `issues/sshserver-holds-one-channel-and-does-not-say-so.md` and
    `issues/sshserver-still-speaks-rsa.md`. It waits for stage 3, and for
-   `ring` to link for both ToyOS targets
-   (`issues/the-internet-clients-work-unchanged.md`, stage 3).
+   stage 4 of `issues/toyos-crypto-is-in-the-tree-on-par-with-ring-and-secure.md`
+   on SSH's primitives.
    **Exit**:
    - `system/sshserver/Cargo.toml` names `toyos-ssh`, and names neither
      `russh` nor `tokio`.
@@ -62,9 +61,9 @@ Compromises of `toyos-ssh` recorded on their own:
      `internal-russh-num-bigint` package.
    - A recorded `sftp` session and a recorded shell session replay byte for
      byte under `cargo run -- --ci host`.
-3. **ML-KEM.** Our own `mlkem768x25519-sha256`: the server's encapsulation
-   side, as one more `kex::METHODS` entry. `ring` 0.17.14 has no ML-KEM.
-   Lands before stage 2.
+3. **ML-KEM.** Our own `mlkem768x25519-sha256`, on `toyos-crypto`'s
+   ML-KEM-768 and its hybrid: the server's encapsulation side, as one more
+   `kex::METHODS` entry. Lands before stage 2.
    **Exit**:
    - NIST's ML-KEM-768 encapsulation known answers pass.
    - An OpenSSH recording that negotiated `mlkem768x25519-sha256` replays
