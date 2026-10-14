@@ -26,7 +26,6 @@ members = [
     "build/ssh",
     "kernel",
     "kernel/amdvi",
-    "kernel/cpuvuln",
     "kernel/dma",
     "kernel/gicv3",
     "kernel/its",

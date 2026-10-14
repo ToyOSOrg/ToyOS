@@ -55,8 +55,8 @@ const UNPUBLISHED: u64 = u64::MAX;
 pub fn load(cpu_id: u32) {
     let vendor = cpu::vendor();
     let (eax, _, ecx, _) = cpu::cpuid(1, 0);
-    if let Err(why) = toyos_microcode::loader(vendor) {
-        log!("microcode: cpu{cpu_id} {vendor:?} signature {eax:#x} loads nothing: {why}");
+    if vendor != kernel::cpu::Vendor::Intel {
+        log!("microcode: cpu{cpu_id} {vendor:?} signature {eax:#x} loads nothing: ToyOS has no {vendor:?} microcode loader");
         return;
     }
     let found = revision();

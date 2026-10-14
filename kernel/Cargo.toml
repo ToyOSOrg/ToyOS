@@ -484,7 +484,6 @@ toyos-dma = { path = "dma" }
 toyos-blackbox = { path = "../lib/blackbox" }
 toyos-blockhold = { path = "../lib/blockhold" }
 toyos-bootmap = { path = "../lib/bootmap" }
-toyos-cpuvuln = { path = "cpuvuln" }
 toyos-fat32 = { path = "../lib/fat32" }
 toyos-elf = { path = "../lib/elf" }
 toyos-gicv3 = { path = "gicv3" }

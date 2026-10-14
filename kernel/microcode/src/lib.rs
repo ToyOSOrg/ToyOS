@@ -14,8 +14,8 @@
 //! the CPU "may or may not reload" an equal one, and loading an update on one
 //! logical processor loads it on every other in its core.
 //!
-//! Before any file is read, [`loader`] says whether ToyOS has a loader for a
-//! CPU's vendor and [`may_load`] whether the CPU loads at all.
+//! Before any file is read, [`may_load`] says whether an Intel CPU loads at
+//! all; ToyOS has no loader for another vendor's, and its caller reads none.
 //!
 //! [`INTEL`] is the file the kernel embeds, as Intel publishes it and pinned
 //! by its digest in `NOTICE`.
@@ -39,8 +39,6 @@
 )]
 
 use core::fmt;
-
-use toyos_cpuvuln::Vendor;
 
 #[cfg(test)]
 mod tests;
@@ -94,21 +92,9 @@ pub enum Choice<'a> {
     NoMatch,
 }
 
-/// Whether ToyOS has a loader for a CPU of `vendor`: Intel's alone.
-pub fn loader(vendor: Vendor) -> Result<(), Unloaded> {
-    match vendor {
-        Vendor::Intel => Ok(()),
-        Vendor::Amd | Vendor::Hygon | Vendor::Centaur | Vendor::Zhaoxin | Vendor::Unknown => {
-            Err(Unloaded::Vendor(vendor))
-        }
-    }
-}
-
 /// Why a CPU loads nothing, said before any file is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unloaded {
-    /// ToyOS has no loader for this vendor, so nothing of its CPU is read.
-    Vendor(Vendor),
     /// CPUID.01H:ECX[31], which a hypervisor sets for its guest (AMD's APM
     /// Vol. 3, 24594 rev 3.36, §E.3.2): the guest's microcode is the
     /// hypervisor's.
@@ -120,14 +106,13 @@ pub enum Unloaded {
 impl fmt::Display for Unloaded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Vendor(vendor) => write!(f, "ToyOS has no {vendor:?} microcode loader"),
             Self::Hypervisor => f.write_str("a hypervisor owns this CPU's microcode"),
             Self::Disabled => f.write_str("revision 0xffffffff, which no update loads over"),
         }
     }
 }
 
-/// Whether a CPU [`loader`] admits may load, from its
+/// Whether an Intel CPU may load, from its
 /// CPUID.01H:ECX and the revision it reports. A guest loads nothing whatever
 /// it reports.
 pub fn may_load(cpuid_1_ecx: u32, found: Revision) -> Result<(), Unloaded> {

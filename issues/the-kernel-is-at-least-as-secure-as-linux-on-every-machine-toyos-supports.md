@@ -6,7 +6,10 @@ opened: 2026-09-29
 
 # The kernel is at least as secure as Linux on every machine ToyOS supports
 
-Parity with Linux at `Ubuntu-6.8.0-142.142`, pinned by the first issue below,
+Parity with Linux at tag `Ubuntu-6.8.0-142.142`
+(53e5d07aac028a1523ab0b115f079d6d1bc831ef) of
+`https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux/+git/noble`,
+config sha256 3b8533dd9d235ca634ac58f82c5ce1ee35f12ef620693e17033184d2c9ca5890,
 is the floor on every CPU ToyOS supports, and the kernel also takes every
 security feature such a CPU offers. The proving machines are the T14 and
 AMD EPYC KVM guests; the PR gate's TCG model proves wiring only. A
@@ -16,10 +19,11 @@ One line of Linux's is declined, and ToyOS stays below it there: the
 firmware's memory-overwrite request, by the owner's "Keep crash records"
 (`issues/the-loader-never-sets-the-firmwares-memory-overwrite-request.md`).
 
-**Exit**: every issue below is closed, in the order listed.
+**Exit**: every issue below is closed, in the order listed. The T14's Linux
+readings issue is not among them: since #915 it owes no reading this track's
+work needs.
 
-- `issues/linuxs-readings-of-the-t14-and-the-tcg-model-lack-reads-owed-before-the-t14s-wipe.md`
-- `issues/a-pure-function-decides-a-cpus-speculation-mitigations-as-linux-does.md`
+- `issues/a-pure-function-decides-a-cpus-speculation-mitigations-from-its-vendors-guidance.md`
 - `issues/spec-ctrl-and-gds-stay-as-firmware-left-them.md`
 - `issues/no-program-runs-with-speculative-store-bypass-disabled.md`
 - `issues/no-gate-decodes-kernel-elfs-instructions.md`
