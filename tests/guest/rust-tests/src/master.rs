@@ -1,23 +1,33 @@
 //! soundserver's master on its `volume` port, each answer the codec's own
 //! readback.
 
-use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_STEP};
+use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_STEP};
 
 pub fn connect() -> toyos::Connection {
     toyos::endow::service("volume").expect("this job holds soundserver's volume port")
 }
 
-pub fn step(volume: &toyos::Connection, delta: i32) -> Volume {
-    volume.send(MSG_VOLUME_STEP, &VolumeStep { delta }).expect("the step is sent");
-    let header = volume.recv_header().expect("soundserver answers the step");
-    assert_eq!(header.msg_type, MSG_VOLUME, "soundserver answered the step with message {}", header.msg_type);
-    volume.recv_payload(&header).expect("the answer is a volume")
+fn answer(volume: &toyos::Connection) -> Volume {
+    let header = volume.recv_header().expect("soundserver answers the request");
+    assert_eq!(header.msg_type, MSG_VOLUME, "soundserver answered with message {}", header.msg_type);
+    let read: Volume = volume.recv_payload(&header).expect("the answer is a volume");
+    println!("master: position {} of {}, muted {}", read.position, read.bottom, read.muted);
+    read
 }
 
-/// Step the master to its bottom, the lowest position that is not muted.
-pub fn to_bottom(volume: &toyos::Connection) -> Volume {
+/// Move the master by `delta` positions; a step unmutes it.
+pub fn step(volume: &toyos::Connection, delta: i32) -> Volume {
+    volume.send(MSG_VOLUME_STEP, &VolumeStep { delta }).expect("the step is sent");
+    answer(volume)
+}
+
+/// Mute the master at its bottom, whatever it was: the step there unmutes,
+/// so the toggle after it mutes.
+pub fn silence(volume: &toyos::Connection) -> Volume {
     let bottom = step(volume, i32::MAX);
-    println!("master at the bottom: position {} of {}, muted {}", bottom.position, bottom.bottom, bottom.muted);
     assert_eq!((bottom.position, bottom.muted), (bottom.bottom, 0), "the master reads back at its bottom, unmuted");
-    bottom
+    volume.send_bytes(MSG_VOLUME_MUTE, &[]).expect("the mute is sent");
+    let muted = answer(volume);
+    assert_eq!((muted.position, muted.muted), (bottom.bottom, 1), "the master reads back muted at its bottom");
+    muted
 }

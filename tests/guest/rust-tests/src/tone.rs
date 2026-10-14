@@ -1,4 +1,4 @@
-//! Shared tone playback: a deterministic sine, almost inaudible.
+//! Shared tone playback: a deterministic sine, into a muted master.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -10,18 +10,18 @@ mod master;
 
 const FREQ_HZ: f64 = 440.0;
 const DURATION_SECS: f64 = 3.0;
-/// -42 dBFS: the rows judge soundserver's counters, not the sound, so the
-/// tone only has to be a real signal.
+/// -42 dBFS, so a mute that failed silently would still be almost inaudible.
 const AMPLITUDE: f64 = 256.0;
 
-/// Play a deterministic 440Hz sine on `device` at `config`, with the master at
-/// its bottom, and block until it has drained.
+/// Play a deterministic 440Hz sine on `device` at `config` with the master
+/// muted, and block until it has drained. The rows judge soundserver's
+/// stream and counters, which the mute leaves intact.
 ///
 /// The sample value is derived from the absolute sample index, not from
 /// per-callback state, so the generated signal is identical regardless of
 /// how the callback invocations are sized or timed.
 pub fn play(device: &cpal::Device, config: cpal::StreamConfig) {
-    master::to_bottom(&master::connect());
+    master::silence(&master::connect());
     let sample_rate = config.sample_rate as f64;
     let channels = config.channels as usize;
     let total_samples = (sample_rate * DURATION_SECS) as u64;
