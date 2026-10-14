@@ -163,7 +163,9 @@ Not consumers:
        through a clean room, as root's research rule says.
      - Faster code is accepted only with stage 4's evidence for it.
    - **First measurement on the benches**, #932 at 85cda28d3, shipped
-     build. Each row was built only after ours matched ring on its inputs.
+     build. Each row was built only after ours matched ring on its inputs,
+     except the three ECDH rows: their check, an agreement of ours and ring
+     on one secret, came after this run.
      A family's ratio is ours over ring's mean, and its median is the lower
      middle of the family's rows. Each build recorded its ISA:
      - the T14: `aes,pclmulqdq,sha,movbe,bmi2,adx,avx,avx2,vaes,vpclmulqdq,avx512f,avx512vl`;

@@ -394,6 +394,37 @@ fn agreement_rows(rows: &mut Vec<Box<dyn Row>>) {
             })
         }
     }
+    // Ours and ring agree on one secret: ours with ring's public key, ring
+    // with ours's.
+    fn agrees_with_ring(
+        name: &str,
+        alg: &'static agreement::Algorithm,
+        ours: Vec<u8>,
+        agree: impl FnOnce(&[u8]) -> Vec<u8>,
+    ) {
+        let key = agreement::EphemeralPrivateKey::generate(alg, &rand::SystemRandom::new()).expect("a key");
+        let ring_public = key.compute_public_key().expect("its public key");
+        let ours_secret = agree(ring_public.as_ref());
+        let peer = agreement::UnparsedPublicKey::new(alg, &ours);
+        let ring_secret = agreement::agree_ephemeral(key, &peer, <[u8]>::to_vec).expect("ring agrees with ours");
+        assert_eq!(ours_secret, ring_secret, "{name}: ours and ring agree on one secret");
+    }
+    let key = x25519::SecretKey::generate(&mut System).expect("a key");
+    agrees_with_ring("x25519", &agreement::X25519, key.public_key().0.to_vec(), |peer| {
+        let peer = x25519::PublicKey(peer.try_into().unwrap());
+        key.agree(&peer).expect("ours agrees with ring").as_bytes().to_vec()
+    });
+    let key = ecc::p256::SecretKey::generate(&mut System).expect("a key");
+    agrees_with_ring("p-256", &agreement::ECDH_P256, key.public_key().as_sec1().to_vec(), |peer| {
+        let peer = ecc::p256::PublicKey::from_sec1(peer).expect("ring's public key");
+        key.agree(&peer).expect("ours agrees with ring").as_bytes().to_vec()
+    });
+    let key = ecc::p384::SecretKey::generate(&mut System).expect("a key");
+    agrees_with_ring("p-384", &agreement::ECDH_P384, key.public_key().as_sec1().to_vec(), |peer| {
+        let peer = ecc::p384::PublicKey::from_sec1(peer).expect("ring's public key");
+        key.agree(&peer).expect("ours agrees with ring").as_bytes().to_vec()
+    });
+
     let x = peer(&agreement::X25519);
     let public = x25519::PublicKey(x.as_slice().try_into().unwrap());
     rows.push(trio(
