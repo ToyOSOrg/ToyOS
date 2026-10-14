@@ -28,7 +28,11 @@ pub mod control {
     pub const CMD_BUF_EN: u64 = 1 << 12;
     pub const PPR_LOG_EN: u64 = 1 << 13;
     pub const PPR_INT_EN: u64 = 1 << 14;
+    /// The 128-bit remapping entry (Table 21), with `GAMEn` 000b.
+    pub const GA_EN: u64 = 1 << 17;
     pub const GA_LOG_EN: u64 = 1 << 28;
+    /// A remapping entry's 32-bit destination (§2.2.5.3); needs `GA_EN`.
+    pub const XT_EN: u64 = 1 << 50;
     pub const GA_INT_EN: u64 = 1 << 29;
 }
 
@@ -52,6 +56,16 @@ impl Features {
     /// `IASup`: the unit takes `INVALIDATE_IOMMU_ALL`.
     pub const fn invalidate_all(self) -> bool {
         self.0 & 1 << 6 != 0
+    }
+
+    /// `XTSup`: a remapping entry can name an x2APIC destination.
+    pub const fn x2apic(self) -> bool {
+        self.0 & 1 << 2 != 0
+    }
+
+    /// `GASup`: the 128-bit remapping entry can be selected.
+    pub const fn guest_apic(self) -> bool {
+        self.0 & 1 << 7 != 0
     }
 
     /// `HATS`, the host table levels the unit walks: 4, 5 or 6, or `None`

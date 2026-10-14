@@ -20,6 +20,9 @@ pub enum Command {
     /// `INVALIDATE_IOMMU_PAGES` (Figure 46) over every address of one domain,
     /// directories with them: `S` and `PDE` set, address 7_FFFF_FFFF_FFFFh.
     InvalidateDomain(u16),
+    /// `INVALIDATE_INTERRUPT_TABLE` (Figure 48): everything the unit cached
+    /// of this id's remapping table.
+    InvalidateInterrupts(u16),
     /// `INVALIDATE_IOMMU_ALL` (Figure 51): every cache the unit holds.
     InvalidateAll,
 }
@@ -30,6 +33,7 @@ impl Command {
             Self::CompletionWait { store, data } => [1 << CODE_SHIFT | store.get() | 1, data],
             Self::InvalidateDevice(id) => [2 << CODE_SHIFT | id as u64, 0],
             Self::InvalidateDomain(domain) => [3 << CODE_SHIFT | (domain as u64) << 32, 0x7_FFFF_FFFF_FFFF << 12 | 0b11],
+            Self::InvalidateInterrupts(id) => [5 << CODE_SHIFT | id as u64, 0],
             Self::InvalidateAll => [8 << CODE_SHIFT, 0],
         }
     }

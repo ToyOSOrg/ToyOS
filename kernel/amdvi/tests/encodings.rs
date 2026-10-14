@@ -3,9 +3,10 @@
 //! specification's figures and tables give them, and compared whole, so a
 //! field in the wrong place and a stray bit are both a difference.
 
-use toyos_amdvi::dte::{Dte, Setting, DEVICE_IDS, ENTRY_BYTES};
+use toyos_amdvi::dte::{interrupts_blocked, interrupts_remapped, Dte, Setting, DEVICE_IDS, ENTRY_BYTES, INTERRUPT_ENTRIES};
+use toyos_amdvi::irte::{self, Destination};
 use toyos_amdvi::queue::{event, name, Command, Event, ENTRIES};
-use toyos_amdvi::reg::{device_table, offset, ring, slot, Features};
+use toyos_amdvi::reg::{control, device_table, offset, ring, slot, Features};
 use toyos_amdvi::table::{directory, entry, index, leaf, Entry, LEAF_LEVEL, ROOT_LEVEL};
 use toyos_phys::Phys;
 
@@ -180,4 +181,82 @@ fn the_feature_register_says_invalidate_all_and_host_levels() {
     assert!(!Features(word(&[(5, 0, 0x3F), (7, 7, 1)])).invalidate_all());
     assert_eq!(Features(0).host_levels(), Some(4));
     assert_eq!(Features(word(&[(11, 10, 0b11)])).host_levels(), None);
+}
+
+/// Table 7, the interrupt half as bits 191:128 numbered from 128: `IV` [128],
+/// `IntCtl` [189:188] 00b, and Table 106's pass bits where Table 7 puts them
+/// (`INITPass` 184, `EIntPass` 185, `NMIPass` 186, `Lint0Pass` 190,
+/// `Lint1Pass` 191). `SysMgt` and `ATCPermit` reach no interrupt half.
+#[test]
+fn a_blocked_interrupt_half_aborts_and_carries_firmwares_passes() {
+    let half = |fields: &[(u32, u32, u64)]| word(&fields.iter().map(|&(m, l, v)| (m - 128, l - 128, v)).collect::<Vec<_>>());
+    assert_eq!(interrupts_blocked(Setting(0)), half(&[(128, 128, 1)]));
+    let ioapic = Setting(0xD7);
+    assert_eq!(
+        interrupts_blocked(ioapic),
+        half(&[(128, 128, 1), (184, 184, 1), (185, 185, 1), (186, 186, 1), (190, 190, 1), (191, 191, 1)])
+    );
+}
+
+/// Table 7: the table root at [179:134], 128-byte aligned, `IntTabLen`
+/// [132:129] 1000b for 256 entries, `IntCtl` 10b; a claim's setting clears
+/// every pass bit and `SysMgt` (Table 10, Table 7 bits 105:104).
+#[test]
+fn a_remapped_interrupt_half_names_its_table_and_a_claim_passes_nothing() {
+    const TABLE: u64 = 0x7_6543_2000;
+    let half = |fields: &[(u32, u32, u64)]| word(&fields.iter().map(|&(m, l, v)| (m - 128, l - 128, v)).collect::<Vec<_>>());
+    let table = Phys::new(TABLE).expect("aligned");
+    assert_eq!(INTERRUPT_ENTRIES * 16, 4096);
+    assert_eq!(
+        interrupts_remapped(table, Setting::CLAIMED),
+        half(&[(128, 128, 1), (132, 129, 0b1000), (179, 134, TABLE >> 6), (189, 188, 0b10)])
+    );
+    assert_eq!(
+        interrupts_remapped(table, Setting(0xFF)),
+        half(&[
+            (128, 128, 1),
+            (132, 129, 0b1000),
+            (179, 134, TABLE >> 6),
+            (184, 184, 1),
+            (185, 185, 1),
+            (186, 186, 1),
+            (189, 188, 0b10),
+            (190, 190, 1),
+            (191, 191, 1)
+        ])
+    );
+    let translated = Dte::translated(Phys::new(ROOT).expect("aligned"), 9, Setting::CLAIMED).words();
+    assert_eq!(translated[1], word(&[(15, 0, 9)]));
+}
+
+/// Figure 17 / Table 22 and Figure 19, `GuestMode` 0: `RemapEn` [0], `IntType`
+/// [4:2] 000b, `DM` [6] 0, the vector at [71:64]; the destination at [15:8]
+/// alone without `XTEn`, and at [31:8] and [127:120] with it.
+#[test]
+fn a_remapping_entry_delivers_its_vector_to_its_destination() {
+    let narrow = layout::<2>(&[(0, 0, 1), (15, 8, 0x07), (71, 64, 0x41)]);
+    assert_eq!(irte::entry(0x41, Destination::Narrow(7)), narrow);
+    let wide = layout::<2>(&[(0, 0, 1), (31, 8, 0x34_5678), (71, 64, 0xFB), (127, 120, 0x12)]);
+    let words = irte::entry(0xFB, Destination::Extended(0x1234_5678));
+    assert_eq!(words, wide);
+    assert!(irte::present(words));
+    assert_eq!((irte::vector(words), irte::destination(words)), (0xFB, 0x1234_5678));
+    assert!(!irte::present(irte::ABSENT));
+}
+
+/// Figure 48: `INVALIDATE_INTERRUPT_TABLE`, code 05h, the id at [15:0].
+#[test]
+fn invalidating_an_interrupt_table_names_its_requester() {
+    assert_eq!(Command::InvalidateInterrupts(0x00A2).words(), [word(&[(15, 0, 0x00A2), (63, 60, 5)]), 0]);
+}
+
+/// MMIO 0018h `GAEn` [17] and `XTEn` [50]; MMIO 0030h `XTSup` [2], `GASup`
+/// [7]. The AMD bench's unit reads 0x206d73ef22254ade.
+#[test]
+fn the_remapping_fields_sit_where_48882_puts_them() {
+    assert_eq!((control::GA_EN, control::XT_EN), (word(&[(17, 17, 1)]), word(&[(50, 50, 1)])));
+    let bench = Features(0x206d_73ef_2225_4ade);
+    assert!(bench.guest_apic() && bench.x2apic());
+    assert!(!Features(!word(&[(7, 7, 1)])).guest_apic());
+    assert!(!Features(!word(&[(2, 2, 1)])).x2apic());
 }
