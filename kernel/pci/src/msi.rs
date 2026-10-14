@@ -72,6 +72,11 @@ impl Msi {
         self.per_vector_mask.then_some(if self.wide { 0x10 } else { 0x0C })
     }
 
+    /// Whether Message Control has the function's MSI messages on.
+    pub fn is_enabled(message_control: u16) -> bool {
+        message_control & ENABLE != 0
+    }
+
     /// Message Control with the function enabled and Multiple Message Enable
     /// back to zero — one vector, the one just written. A function left at the
     /// count it advertises as *capable* raises consecutive vectors this kernel
