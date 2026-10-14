@@ -30,7 +30,6 @@ members = [
     "kernel/gicv3",
     "kernel/its",
     "kernel/loom",
-    "kernel/microcode",
     "kernel/pci",
     "kernel/phys",
     "kernel/sim",
@@ -53,11 +52,13 @@ members = [
     "lib/fat32/check",
     "lib/gpt",
     "lib/hda",
+    "lib/ieee80211",
     "lib/input",
     "lib/inspect",
     "lib/logkeeper-api",
     "lib/logstream",
     "lib/manifest",
+    "lib/microcode",
     "lib/pci-claim",
     "lib/quiesce",
     "lib/random",
@@ -210,6 +211,9 @@ toyos-symbols = { path = "lib/symbols" }
 # `llvm-objdump`, is a C++ tool where a Rust one does the job.
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info"] }
 toyos-fat32 = { path = "lib/fat32" }
+# The names the loader looks a CPU's microcode up by, which `microcode` writes
+# each patch it splits out of a vendor's file under.
+toyos-microcode = { path = "lib/microcode" }
 # The two readers `image::certify` judges every published image with. They are
 # dependencies of the build rather than of its tests because a flash target is
 # not published until they have both passed on it.

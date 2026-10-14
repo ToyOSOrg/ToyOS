@@ -69,7 +69,7 @@ const PF_INSTRUCTION_FETCH: u64 = 1 << 4;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct IdtEntry {
+pub(crate) struct IdtEntry {
     offset_low: u16,
     selector: u16,
     ist: u8,
@@ -80,7 +80,7 @@ struct IdtEntry {
 }
 
 impl IdtEntry {
-    const EMPTY: Self = Self {
+    pub(crate) const EMPTY: Self = Self {
         offset_low: 0,
         selector: 0,
         ist: 0,
@@ -97,9 +97,14 @@ impl IdtEntry {
 
     /// An interrupt gate onto the code at `handler`.
     fn at_address(handler: u64) -> Self {
+        Self::gate(handler, 0x08) // kernel CS
+    }
+
+    /// An interrupt gate onto `handler` through code segment `selector`.
+    pub(crate) fn gate(handler: u64, selector: u16) -> Self {
         Self {
             offset_low: handler as u16,
-            selector: 0x08, // kernel CS
+            selector,
             ist: 0,
             type_attr: 0x8E, // interrupt gate, DPL=0, present
             offset_mid: (handler >> 16) as u16,
@@ -124,9 +129,9 @@ static IDT: Lock<Idt> = Lock::new(Idt {
 });
 
 #[repr(C, packed)]
-struct IdtPointer {
-    limit: u16,
-    base: u64,
+pub(crate) struct IdtPointer {
+    pub(crate) limit: u16,
+    pub(crate) base: u64,
 }
 
 /// Field order mirrors `common_entry`'s push order (reversed) and the CPU's own frame; both must change together.

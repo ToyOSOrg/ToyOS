@@ -348,6 +348,7 @@ dependencies = [
  "toyos-bootmap",
  "toyos-elf",
  "toyos-gpt",
+ "toyos-microcode",
  "toyos-random",
  "toyos-rootimage",
  "toyos-tco",
@@ -4134,6 +4135,7 @@ dependencies = [
  "toyos-logstream",
  "toyos-manifest",
  "toyos-metal",
+ "toyos-microcode",
  "toyos-osrelease",
  "toyos-quiesce",
  "toyos-sha2-hw",
@@ -4242,6 +4244,10 @@ dependencies = [
  "toyos-device-memory",
  "toyos-pci",
 ]
+
+[[package]]
+name = "toyos-ieee80211"
+version = "0.1.0"
 
 [[package]]
 name = "toyos-input"

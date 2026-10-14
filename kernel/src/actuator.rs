@@ -146,12 +146,19 @@ actuators! {
     /// Leave every AP holding the CR0/CR4 that INIT left it.
     no_ap_control_regs = "no-ap-control-regs";
 
-    /// Hand the BSP the T14's Intel update with its header's revision raised
-    /// by one and its checksum sealed again: the read-back's negative control
-    /// on real Intel, whose payload still says the revision it did.
-    // An Intel file's alone, so AArch64 builds an accessor it never reads.
+    /// Hand every CPU the loader's Intel update with its header's revision
+    /// raised by one and its checksum sealed again: the read-back's negative
+    /// control on real Intel, whose payload still says the revision it did.
+    // An x86 patch's alone, so AArch64 builds an accessor it never reads.
     #[allow(dead_code)]
     microcode_reseal = "microcode-reseal";
+
+    /// Hand every CPU the loader's AMD patch with the first byte of its data
+    /// flipped: the negative control on the guarded write, whose `#GP` each
+    /// CPU must report as a refusal and boot on.
+    // An x86 patch's alone, so AArch64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    microcode_amd_flip = "microcode-amd-flip";
 
     /// Skip the startup for the AP that would be cpu2, so a non-last AP never starts.
     smp_skip_ap = "smp-skip-ap";

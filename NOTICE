@@ -411,8 +411,43 @@ a work of theirs. Two things the tools wrote are not:
   of them are input a reader has to skip.
 
 
-kernel/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
-----------------------------------------------------------------------------
+lib/ieee80211/tests/fixtures/tcpdump/ — 802.11 captures from tcpdump's tests
+-----------------------------------------------------------------------------
+
+    ieee802.11_exthdr.pcap                 4,499 bytes
+      sha256 5d1179c7045f3fe6a4a6621b758ee25c7a8ec1eece9d3d7be707969aa96a5236
+    ieee802.11_htc.pcap                      466 bytes
+      sha256 a762951573320132a595a91833a1bc6c39c2bfd7f526c43f1402c307438fbb13
+    ieee802.11_meshhdr-oobr.pcap             126 bytes
+      sha256 cf4cff158b93f4e983abdf4d2fd97a6996bbfe36d82795b610fb128674794038
+    ieee802.11_meshid.pcap                   823 bytes
+      sha256 9c64693b3f9d72365c198574ec0f4443c91c3d6dfa7f7a7d7ec420b14eb0cdbf
+    ieee802.11_parse_elements_oobr.pcap      295 bytes
+      sha256 5b89c6377bc6ada50619abce34ec0cbb3031790a79fffccaf44da610b9e91748
+    ieee802.11_rates_oobr.pcap               111 bytes
+      sha256 dff15ca82eb9814a34ea0d875ea5f63c0f1a5d178bf390ddc919bec7b3421c85
+    ieee802.11_rx-stbc.pcap                  541 bytes
+      sha256 04322b0ee0cf314941e7e30c41378fbe96618a2b3952458dd04b9e8fbd581d75
+    ieee802.11_tim_ie_oobr.pcap              335 bytes
+      sha256 fbb8b20efb233ec789214ecf96d5365cc8a34c275dae2685061ac72486a20bda
+    Copyright: The Tcpdump Group and the captures' contributors
+    Licence text: licenses/BSD-3-Clause-tcpdump.txt (tcpdump's `LICENSE`,
+    sha256 8a54594d257e14a5260ac770f1633516cb51e3fc28c40136ce2697014eda7afd)
+    SPDX-License-Identifier: BSD-3-Clause
+
+`toyos-ieee80211`'s host tests read these frames: bytes 802.11 radios and
+other implementations wrote, from outside the Wi-Fi track's references. Each
+is the file of that name under `tests/` in tcpdump's repository at commit
+57768afc4cffbaa17faad7808f106bc325ada417
+(https://github.com/the-tcpdump-group/tcpdump), unmodified. Four hold traffic: a
+station scanning and joining, a mesh point's beacon and probes, and data frames,
+protected and with HT Control. The four named `oobr` are hostile inputs tcpdump
+recorded for its own over-reads. Nothing in this repository fetches
+them, and no test reads tcpdump's dissection of them.
+
+
+build/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
+---------------------------------------------------------------------------
 
     06-8c-01  112,640 bytes, update revision 0xbe for processor signature
               0x806c1, processor flags 0x80 (Tiger Lake B0/B1, the T14's
@@ -428,17 +463,18 @@ kernel/microcode/intel-ucode/* — Intel microcode, redistributable unmodified
     sha256 03efb1491c7e899feb2665fa299363e64035e5444c1b8bc1f6ebed30de964e12)
     SPDX-License-Identifier: LicenseRef-Intel-Microcode
 
-The kernel embeds 06-8c-01 and loads it on the CPU it names; 06-cc-02 is
-`toyos-microcode`'s test input. The licence permits redistribution in binary
-form, unmodified, on three conditions: the copyright notice and the
-disclaimer are reproduced with the distribution, which every x86-64 image does
-as /system/share/licenses/Intel-microcode-license.txt; Intel's name endorses
-nothing derived from it; and no reverse engineering, decompilation or
-disassembly.
+The build splits each file into its updates, unmodified, and an image carries
+on ROOT the ones `images/microcode.toml` lists for it, each a whole update as
+Intel published it, under /system/share/microcode/intel/. The licence permits
+redistribution in binary form, unmodified, on three conditions: the copyright
+notice and the disclaimer are reproduced with the distribution, which every
+x86-64 image does as /system/share/licenses/Intel-microcode-license.txt;
+Intel's name endorses nothing derived from it; and no reverse engineering,
+decompilation or disassembly.
 
 
-kernel/microcode/amd-ucode/* — AMD microcode, redistributable unmodified
-------------------------------------------------------------------------
+build/microcode/amd-ucode/* — AMD microcode, redistributable unmodified
+-----------------------------------------------------------------------
 
     microcode_amd_fam17h.bin  22,596 bytes, AMD's Family 17h container; its
               patch for CPUID 0x00860f01 (equivalence ID 0x8601, the AMD
@@ -452,13 +488,15 @@ kernel/microcode/amd-ucode/* — AMD microcode, redistributable unmodified
     sha256 27907ae1d74b94fd6f1159971158ed3199e472f129ea1ff748ea13aded2a59d5)
     SPDX-License-Identifier: LicenseRef-AMD-Microcode
 
-Nothing reads it yet: it is the container the AMD loader that
-`issues/the-kernel-loads-no-amd-microcode.md` stages will embed. The licence
-permits redistribution in binary form on conditions like Intel's: the
-copyright notice and the licence are reproduced with it, which every x86-64
-image does as /system/share/licenses/AMD-microcode-license.txt; AMD's name
-endorses nothing derived from it; no reverse engineering, decompilation or
-disassembly; and export law is observed.
+The build splits the container into its patches, unmodified, and an image
+carries on ROOT the ones `images/microcode.toml` lists for it, each a
+Microcode Patch Block as AMD's container carries it, under
+/system/share/microcode/amd/. The licence permits redistribution in binary
+form on conditions like Intel's: the copyright notice and the licence are
+reproduced with it, which every x86-64 image does as
+/system/share/licenses/AMD-microcode-license.txt; AMD's name endorses nothing
+derived from it; no reverse engineering, decompilation or disassembly; and
+export law is observed.
 
 
 tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS

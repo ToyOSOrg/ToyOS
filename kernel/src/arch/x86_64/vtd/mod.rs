@@ -119,7 +119,7 @@ pub(super) fn invalidate_interrupt_entries() {
 
 /// `windows` and every region firmware reserved are what no domain's addresses
 /// reach. `false` where firmware published no DMAR.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow]) -> bool {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeWindow]>) -> bool {
     let dmar = match Dmar::open(rsdp_addr) {
         Ok(dmar) => dmar,
         Err(TableError::Absent) => return false,
@@ -151,8 +151,9 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     // Described and planned before any unit is armed: whether sources may move
     // to the remappable format is one decision, taken before the first `IRE`.
     let mut ready: Vec<(Unit, Plan)> = Vec::new();
-    // What no domain's addresses may reach, RMRRs added below as the walk meets them.
-    let mut reserved: Vec<(u64, u64)> = windows.iter().map(|w| (w.base, w.end())).collect();
+    // What no domain's addresses may reach, RMRRs added below as the walk
+    // meets them; nothing where no declaration is held.
+    let mut reserved: Option<Vec<(u64, u64)>> = windows.map(|w| w.iter().map(|w| (w.base, w.end())).collect());
     for structure in dmar.structures() {
         match structure {
             Ok(Structure::Drhd(drhd)) => {
@@ -199,7 +200,9 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
                          identity domain 0x0..{identity_top:#x}"
                     );
                 }
-                reserved.push((base, limit.saturating_add(1)));
+                if let Some(reserved) = reserved.as_mut() {
+                    reserved.push((base, limit.saturating_add(1)));
+                }
                 describe_scopes("rmrr", regions, rmrr.scopes());
                 regions += 1;
                 held_regions += usize::from(held);

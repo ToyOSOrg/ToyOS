@@ -144,7 +144,7 @@ struct Ready {
 /// Every unit the IVRS describes, switched off, and each this kernel can use
 /// programmed; `false` where firmware published no IVRS. `windows` and every
 /// IVMD range are what no domain's addresses reach.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow]) -> bool {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeWindow]>) -> bool {
     let ivrs = match toyos_acpi::ivrs(crate::drivers::acpi::direct_phys(), rsdp_addr) {
         Ok(ivrs) => ivrs,
         Err(IvrsRefused::Table(TableError::Absent)) => return false,
@@ -312,8 +312,11 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
         remap
     };
     let identity = build(devices, &settings, remap.is_some());
-    let reserved = windows.iter().map(|w| (w.base, w.end())).chain(ivmds.iter().map(|m| (m.start, m.start + m.length)));
-    domain::start(reserved.collect(), settings, ivmds.iter().map(|m| m.requesters).collect(), translated, platform);
+    // Nothing where no declaration is held, as `vtd` treats its RMRRs.
+    let reserved = windows.map(|w| {
+        w.iter().map(|w| (w.base, w.end())).chain(ivmds.iter().map(|m| (m.start, m.start + m.length))).collect()
+    });
+    domain::start(reserved, settings, ivmds.iter().map(|m| m.requesters).collect(), translated, platform);
     log!("iommu: amdvi identity domain covers 0x0..{top:#x}, root={:#x}", identity.get());
     if let Some(extended) = remap {
         log!(

@@ -15,6 +15,11 @@ pub fn typing(write_back: &[(u64, u64)]) -> Typing<'_> {
     Typing::ByMap(write_back)
 }
 
+/// No CPU microcode is loaded on this architecture: nothing to look up.
+pub fn microcode_cpu() -> Option<Result<toyos_microcode::Cpu, &'static str>> {
+    None
+}
+
 /// The exception level the loader runs at, from `CurrentEL`.
 fn current_el() -> u64 {
     let current: u64;

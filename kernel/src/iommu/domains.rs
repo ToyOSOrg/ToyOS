@@ -16,9 +16,10 @@ pub struct Domains<S> {
     /// By id minus `first`; never shrinks, since a released id would name a
     /// domain some unit may still have cached.
     live: Vec<(S, Window)>,
-    /// What no domain's addresses may reach: the root bridges' windows and
-    /// the regions firmware reserved, as `(start, end)`.
-    reserved: Vec<(u64, u64)>,
+    /// What no domain's addresses may reach: the root bridges' declared
+    /// windows and the regions firmware reserved, as `(start, end)`; `None`
+    /// where no declaration is held ([`Window::new`]).
+    reserved: Option<Vec<(u64, u64)>>,
 }
 
 /// A domain [`Domains::prepare`] admitted, not yet made.
@@ -30,11 +31,11 @@ pub struct Next {
 
 impl<S: Copy> Domains<S> {
     pub const fn new(first: u16) -> Self {
-        Self { first, live: Vec::new(), reserved: Vec::new() }
+        Self { first, live: Vec::new(), reserved: None }
     }
 
     /// Before any domain is made: every one is built clear of these.
-    pub fn avoid(&mut self, reserved: Vec<(u64, u64)>) {
+    pub fn avoid(&mut self, reserved: Option<Vec<(u64, u64)>>) {
         self.reserved = reserved;
     }
 
@@ -46,7 +47,7 @@ impl<S: Copy> Domains<S> {
             .ok()
             .filter(|id| u32::from(*id) < ceiling)
             .ok_or(IommuError::DomainsExhausted(ceiling))?;
-        let (addresses, first) = Window::new(translatable, &self.reserved, room)?;
+        let (addresses, first) = Window::new(translatable, self.reserved.as_deref(), room)?;
         Ok(Next { id, addresses, first })
     }
 

@@ -30,9 +30,10 @@
 //! **Nothing here reads an address this kernel cannot name as routed**, because
 //! a load no bridge forwards does not answer all-ones on real hardware: it does
 //! not complete, and the CPU cannot be interrupted out of it. The name is a
-//! window [`toyos_abi::boot::KernelArgs::root_bridge_windows`] carries: the
-//! address firmware put in the BAR is held against those windows here, and no
-//! other address is ever offered ([`placement::reserve`]).
+//! window of the declaration [`Apertures`] holds: the address firmware put in
+//! the BAR is held against those windows here, no other address is ever
+//! offered ([`placement::reserve`]), and with no declaration held no function
+//! is handed over.
 //!
 //! **Inside one, the function itself is the proof.** [`place_bar`] reads one
 //! dword through the BAR where firmware put it, moves the BAR onto the
@@ -361,12 +362,9 @@ struct Machine {
     /// which is not the same claim as reaching the bus.
     low: Vec<Window>,
     high: Vec<Window>,
-    /// The memory the root bridges decode, as firmware declared it.
-    ///
-    /// **The necessary condition for any read this module issues**, so an
-    /// address inside none of them is never touched; a machine whose firmware
-    /// declared nothing is one where nothing may be.
-    firmware: Vec<RootBridgeWindow>,
+    /// What this kernel holds of the memory the root bridges decode: the
+    /// necessary condition for any read this module issues.
+    apertures: Apertures,
     /// Windows this module has cut, as `(requester, BAR index, at, span)`.
     ///
     /// **A window belongs to the BAR it was cut for, not to the claim that
@@ -383,6 +381,19 @@ struct Machine {
     resetting: Vec<(u16, Resetting, Kept)>,
 }
 
+/// The memory the root bridges decode, as far as this kernel has been told.
+///
+/// **Only a declaration is ever read from**, so an address inside none of its
+/// windows is never touched, and a function is handed over on no other state:
+/// a machine that has not declared, or whose declaration was refused, is one
+/// where nothing is known to be routed.
+enum Apertures {
+    Unknown,
+    /// Never replaced.
+    Declared(aperture::Declaration<Vec<RootBridgeWindow>>),
+    Refused(aperture::Refused),
+}
+
 static MACHINE: Lock<Machine> = Lock::new(Machine {
     functions: Vec::new(),
     identities: Vec::new(),
@@ -391,7 +402,7 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
     kernel_driven: Vec::new(),
     low: Vec::new(),
     high: Vec::new(),
-    firmware: Vec::new(),
+    apertures: Apertures::Unknown,
     windows: Vec::new(),
     resetting: Vec::new(),
 });
@@ -556,7 +567,16 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
             taken.push(forwarded);
         }
     }
-    account_for(firmware, &decoded);
+    let apertures = match aperture::check(firmware.to_vec()) {
+        Ok(declaration) => {
+            account_for(declaration.windows(), &decoded);
+            Apertures::Declared(declaration)
+        }
+        Err(why) => {
+            log!("pcidev: the root bridges' memory is refused as declared: {why}, so no function is handed over");
+            Apertures::Refused(why)
+        }
+    };
     let mut runs = |wide| -> Vec<Window> {
         placement::free_runs(&mut taken, wide)
             .filter(|run| run.end - run.start >= PAGE_2M)
@@ -602,9 +622,17 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
         devices.iter().map(|d| d.identity(addr_of(segment, requester(d)))).collect();
     machine.segment = segment;
     machine.decoded = decoded;
-    machine.firmware = firmware.to_vec();
+    machine.apertures = apertures;
     machine.low = low;
     machine.high = high;
+}
+
+/// The root bridges' memory, where a declaration of it is held.
+pub fn declared() -> Option<aperture::Declaration<Vec<RootBridgeWindow>>> {
+    match &MACHINE.lock().apertures {
+        Apertures::Declared(declaration) => Some(declaration.clone()),
+        Apertures::Unknown | Apertures::Refused(_) => None,
+    }
 }
 
 /// Say what memory firmware declared the root bridges decode, and which
@@ -613,13 +641,6 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
 /// **What this answers about is the necessary condition every read below is
 /// checked against**, so it says the answer once and counts nothing from it.
 fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
-    if firmware.is_empty() {
-        log!(
-            "pcidev: firmware declared no root bridge memory, so no address on this machine may \
-             be read"
-        );
-        return;
-    }
     let mut said = String::new();
     for window in firmware {
         if !said.is_empty() {
@@ -644,6 +665,10 @@ fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
 /// place.
 #[derive(Clone, Copy)]
 enum Refusal {
+    /// Nothing has declared the memory the root bridges decode yet.
+    Undeclared,
+    /// The declaration of the memory the root bridges decode was refused.
+    AperturesRefused(aperture::Refused),
     NotRemapped(crate::iommu::NotRemapped),
     /// This machine remaps and translates, and not for this function.
     NotIsolated(&'static str),
@@ -659,8 +684,7 @@ enum Refusal {
     /// Every address this machine offered was tried and the function answered
     /// at none of them.
     NoPlacement { wide: bool, asked: usize },
-    /// The function publishes nothing this claim may map — no memory BAR, or
-    /// only the one holding its own MSI-X table.
+    /// The function publishes no memory BAR.
     NoMappableBar,
     BarUnsizable(u8),
     BarUnplaceable(u8),
@@ -681,6 +705,16 @@ enum Refusal {
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Undeclared => write!(
+                f,
+                "nothing has declared the memory the root bridges decode, so no address on this \
+                 machine is known to be routed"
+            ),
+            Self::AperturesRefused(why) => write!(
+                f,
+                "the declaration of the memory the root bridges decode was refused ({why}), so no \
+                 address on this machine is known to be routed"
+            ),
             Self::NotRemapped(crate::iommu::NotRemapped::Unremapped) => write!(
                 f,
                 "its interrupts would not be remapped on this machine, and a message that is not \
@@ -808,6 +842,21 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
         }
     };
 
+    // Before anything is taken or touched: with no declaration held, no
+    // read this claim would make is known to reach the bus.
+    let declared = match &MACHINE.lock().apertures {
+        Apertures::Declared(declaration) => Ok(declaration.clone()),
+        Apertures::Unknown => Err(Refusal::Undeclared),
+        Apertures::Refused(why) => Err(Refusal::AperturesRefused(*why)),
+    };
+    let declaration = match declared {
+        Ok(declaration) => declaration,
+        Err(why) => {
+            log!("pcidev: PCI {:02x}:{:02x}.{} NOT HANDED OVER — {why}", pci.bus, pci.dev, pci.func);
+            return Err(ClaimError::Unusable);
+        }
+    };
+
     // The test and the take are one exchange: two claims arriving together
     // must not both find the function unheld.
     let held = &function(number).held;
@@ -817,7 +866,7 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
     // Dropped by every refusal below, which is what gives the function back.
     let binding = Binding { number };
 
-    match bring_up(pci, id, number) {
+    match bring_up(pci, id, number, declaration.windows()) {
         Ok(mut bound) => {
             bound.residue = take_residue(number);
             let info = PciFunctionInfo {
@@ -862,7 +911,7 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
 /// The order is the whole security argument: a function that could master the
 /// bus before its domain existed would be reaching physical memory with
 /// whatever addresses its registers still held.
-fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> {
+fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindow]) -> Result<Bound, Refusal> {
     let remapping = crate::iommu::remapping().map_err(Refusal::NotRemapped)?;
     crate::iommu::isolates(&pci).map_err(Refusal::NotIsolated)?;
 
@@ -901,7 +950,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
 
     // From here a refusal has to undo: a vector is armed, and the arms below
     // move the function's BARs.
-    match place_bars(&pci, id) {
+    match place_bars(&pci, id, windows) {
         Ok((bar_at, bar_bytes)) => {
             space.attach(pci.bus, pci.dev, pci.func);
             Ok(Bound {
@@ -945,6 +994,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
 fn place_bars(
     pci: &PciDevice,
     id: PciId,
+    windows: &[RootBridgeWindow],
 ) -> Result<([u64; BARS], [u64; BARS]), Refusal> {
     let mut bar_at = [0u64; BARS];
     let mut bar_bytes = [0u64; BARS];
@@ -963,7 +1013,7 @@ fn place_bars(
             continue;
         }
         let size = pci.bar_size(index).map_err(|_| Refusal::BarUnsizable(index))?;
-        let at = match place_bar(pci, id, index, size) {
+        let at = match place_bar(pci, id, index, size, windows) {
             Ok(at) => at,
             // Each of these says only that nothing could settle this BAR, which
             // is that window's loss and not the function's.
@@ -1019,9 +1069,9 @@ fn function_space(number: usize) -> Result<Space, IommuError> {
 /// on a claim's first cut — the BARs it moves. So this keeps:
 ///
 /// - **every BAR**: the ones this module moved, which [`cut_already`] answers
-///   with an address the function would otherwise no longer decode; and the
-///   ones it left where firmware put them, the MSI-X table's among them, which
-///   [`PciDevice::enable_msix`] reads its table's address out of.
+///   with an address the function would otherwise no longer decode, and the
+///   ones it left where firmware put them; [`PciDevice::enable_msix`] reads
+///   the table's address out of whichever holds it.
 /// - **Device Control, and Device Control 2 where the structure has one**:
 ///   Max_Payload_Size has to agree with the link partner's (§7.5.3.4), and the
 ///   rest is what firmware configured the hierarchy with (§7.5.3.16).
@@ -1289,7 +1339,7 @@ fn probe_dword(at: u64, span: u64, offset: u64) -> u32 {
 /// rather than assumed. A candidate the machine refuses leaves the register
 /// holding what firmware left in it, and a walk that ends in a refusal gives
 /// every address it took back to the run it came out of.
-fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64) -> Result<u64, Refusal> {
+fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64, windows: &[RootBridgeWindow]) -> Result<u64, Refusal> {
     let offset = bar::BASE + index as u64 * 4;
     let low = pci.read_config_u32(offset);
     let wide = matches!(bar::decode(index, low), Ok(bar::Width::Wide(_)));
@@ -1312,7 +1362,6 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64) -> Result<u64, Re
         pci.set_memory_decode(true);
     };
 
-    let windows = MACHINE.lock().firmware.clone();
     // **What this function answers, read where firmware put it.** It is the
     // reference every candidate is settled against, and it has to be taken
     // here: from the first write below the BAR is somewhere this kernel chose
@@ -1325,7 +1374,7 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64) -> Result<u64, Re
     if was == 0 {
         return Err(Refusal::BarUnassigned(index));
     }
-    let inside = aperture::decode(&windows, was, was.saturating_add(size));
+    let inside = aperture::decode(windows, was, was.saturating_add(size));
     if !matches!(inside, aperture::Decode::Inside(_)) {
         return Err(Refusal::BarUnrouted(index));
     }
@@ -1339,7 +1388,7 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64) -> Result<u64, Re
     let mut refused = [None; MAX_CANDIDATES];
     let mut asked = 0usize;
     while asked < MAX_CANDIDATES {
-        let Some(candidate) = with_runs(wide, |runs| placement::reserve(runs, &windows, span))
+        let Some(candidate) = with_runs(wide, |runs| placement::reserve(runs, windows, span))
         else {
             break;
         };

@@ -35,6 +35,8 @@ toyos-tsc = { path = "../lib/tsc" }
 # The signed image, the slot table and the anti-rollback floor: every decision
 # this loader makes about which slot to boot, host-tested there.
 toyos-update = { path = "../lib/update" }
+# Where on ROOT the patch for this CPU is, as the build names it.
+toyos-microcode = { path = "../lib/microcode" }
 # Not hashed with here: `force-soft`, unified into the `sha2` that
 # `ed25519-dalek` takes its SHA-512 from inside a verification. This target is
 # soft-float, and the x86 backend reaches for SSE and SHA-NI registers a UEFI
