@@ -105,8 +105,7 @@ until the Rust target is upstream.
    screenshots. Clipboard reads and screenshots are privileges granted under
    the package track's request ∩ grant ∩ ceiling rule
    (`issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`).
-5. **Fractional scaling.** The T14 panel is 14" at 1080p, which wants about
-   1.25×.
+5. **Fractional scaling**: `issues/the-desktop-draws-at-the-panels-scale.md`.
 6. **Accessibility**: accesskit, keyboard-only navigation, high contrast.
 7. **Input**: the T14 touchpad
    (`issues/the-t14-touchpad-is-i2c-hid-and-unbuilt.md`), scrolling
