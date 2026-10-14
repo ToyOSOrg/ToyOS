@@ -49,7 +49,10 @@ nothing.
      `struct Init`, `SpawnInit`, `TimerInit`, `InitPort` and "asks init" all
      hit). A match goes where it names the program and stays otherwise;
      third-party text (`tests/corpus/tinycc/`, the C ports) stays.
-2. **Decisions in a pure crate.** The supervisor's decisions live in
+2. **Decisions in a pure crate.** **Partly done** (#926): the crate exists
+   (`system/supervisor/lifecycle`) and holds restart policy, the claims a
+   restart is owed, the function a `devices` matcher names and which
+   functions a `drives` row has a process on. The supervisor's decisions live in
    `toyos-supervisor`, with host tests; `system/supervisor` keeps only
    handles, spawns and the loop. The decisions: namespace and claim selection
    from a manifest row; the claims a restart is owed; `SysCap` narrowing;

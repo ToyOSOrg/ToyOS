@@ -29,7 +29,7 @@ What is left:
    fork's `scale_factor()`.
 2. Done: **virtio-gpu left the kernel** (stage 1 of
    `issues/every-driver-is-still-in-the-kernel.md`): the compositor drives it
-   through a `pci:1af4:1050` claim, takes the mode the device prefers and
+   through a `pci:03:80:00/1af4:1050` claim, takes the mode the device prefers and
    flips to the one each display event asks for, and
    `the_compositor_drives_the_virtio_gpu` resizes QEMU's display over VNC and
    reads the guest's new mode. The scale is chosen per event and drawn at by

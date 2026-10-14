@@ -26,7 +26,7 @@ receives = ["power"]
 [programs.soundserver]
 service = true
 serves = ["soundserver", "volume"]
-devices = ["hda-audio", "pci:1af4:1059"]
+devices = ["hda-audio", "pci:04:01:00/1af4:1059"]
 syscap = ["rt"]
 
 # The test estate's authority.
@@ -52,9 +52,11 @@ syscap = ["rt"]
 # steps it.
 # `log` because `counters_metal` measures its idle second only once the log
 # holds its own line, read back off logkeeper.
+# `inventory` because a claim names a PCI function by its arrival, which the
+# jobs that claim one read off the inventory.
 [programs.test-runner]
 receives = ["soundserver", "volume", "power", "log"]
-syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace"]
+syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace", "inventory"]
 
 [programs.toybox]
 receives = ["soundserver"]
@@ -91,7 +93,7 @@ receives = ["soundserver"]
 service = true
 restart = true
 serves = ["block"]
-devices = ["pci:1b36:0010"]
+devices = ["pci:01:08:02/1b36:0010"]
 
 # The file servers: DATA, the log and the running slot's volume, one process
 # each, serving every program the directories of its role. Started again when

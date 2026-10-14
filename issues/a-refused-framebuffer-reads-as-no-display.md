@@ -34,7 +34,7 @@ the kernel, so nothing reaches `/log`, the panel, or a crash report.
 takes the same arm for both: both print `GPU: the firmware handed over no
 framebuffer`, measured for the Blt-only shape on `Profile::HeadlessVirtioGpu`
 (`the_compositor_drives_the_virtio_gpu`'s boot log). There the compositor's
-`pci:1af4:1050` claim draws the desktop, but nothing in the kernel's record
+`pci:03:80:00/1af4:1050` claim draws the desktop, but nothing in the kernel's record
 tells the two shapes apart, and on a machine whose Blt-only display no
 process drives — the T14, until an Intel display engine driver exists — the
 record is all there is.

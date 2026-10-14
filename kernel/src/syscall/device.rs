@@ -184,7 +184,7 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
 /// Mints a device claim, gated on a `SysCap` carrying [`Rights::DEVICE`].
 ///
 /// `selector` says which device where the class alone does not — a PCI
-/// function's vendor and device id, a partition's GUID — and a word the class
+/// function's arrival, a partition's GUID — and a word the class
 /// does not read is refused, never dropped: whoever set it meant a device this
 /// claim would not name.
 pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]) -> u64 {

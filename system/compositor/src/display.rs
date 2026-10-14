@@ -28,9 +28,13 @@ use toyos_virtio_gpu::wire::{self, CURSOR_SIDE};
 use toyos_virtio_gpu::{Claim, Declined, Gpu, Next, Queues};
 use window::Screen;
 
-/// virtio's vendor id and the GPU device's (§4.1.2.1: `0x1040` + 16), as the
-/// manifest row spells the claim.
-const PCI_ID: PciId = PciId { vendor: 0x1af4, device: 0x1050 };
+/// A display controller of another kind, class `03:80:00`, of virtio's vendor
+/// id and the GPU device's (§4.1.2.1: `0x1040` + 16), as the manifest row
+/// spells the claim.
+const FUNCTION: toyos_manifest::device::PciMatch = toyos_manifest::device::PciMatch::new(
+    [0x03, 0x80, 0x00],
+    Some(PciId { vendor: 0x1af4, device: 0x1050 }),
+);
 
 /// The one MSI-X table entry the kernel programs: both queues and the
 /// configuration's changes raise it.
@@ -55,7 +59,7 @@ impl Display {
     /// none, since a desktop with no panel has nothing to draw on, and where
     /// the virtio-gpu function it was given cannot be brought up.
     pub fn claim() -> (Self, Scale) {
-        if let Some(dev) = endow::pci_function::<PciDev>(PCI_ID) {
+        if let Some(dev) = endow::claim::<PciDev>(&FUNCTION.to_string()) {
             let virtio = Virtio::open(dev)
                 .unwrap_or_else(|why| panic!("compositor: the virtio-gpu function cannot show the desktop: {why}"));
             let scale = virtio.scale;

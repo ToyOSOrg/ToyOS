@@ -1275,9 +1275,10 @@ device_classes! {
     /// driver to it, keeps config space, puts it in an address space of its own
     /// before it lets it master the bus, and programs its interrupt vector.
     ///
-    /// The one class whose name is not the whole of what a config writes —
-    /// `pci:<vendor>:<device>` names which function, and [`DeviceRequest`] is
-    /// the one parser of that spelling.
+    /// A claim names which function by its
+    /// [`Arrival`](crate::inventory::Arrival), and no name is spelled for it
+    /// here: which functions a manifest row asks for is `toyos-manifest`'s
+    /// grammar, resolved against the inventory.
     PciFunction = 7 => "pci",
     /// One GPT partition, named by its unique partition GUID: the holder reads
     /// and writes its blocks and no other's ([`crate::part`]).
@@ -1299,11 +1300,10 @@ device_classes! {
     Acpi = 10 => "acpi",
 }
 
-/// A PCI function named by what identifies the *card*, not the slot firmware
-/// put it in: the same card is `00:03.0` on one machine and `00:1f.6` on
-/// another, so a name that was a position would hand a program whatever was
-/// there. A machine holding two of one card has an ambiguous name, which
-/// [`device_claim`] refuses rather than resolving.
+/// What identifies a PCI *card*, not the slot firmware put it in: the same
+/// card is `00:03.0` on one machine and `00:1f.6` on another. Two of one card
+/// carry one id, so it names no single function, and a claim names one by its
+/// [`Arrival`](crate::inventory::Arrival).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PciId {
     pub vendor: u16,
@@ -1311,19 +1311,20 @@ pub struct PciId {
 }
 
 impl PciId {
-    /// `"<vendor>:<device>"`, four lowercase hex digits each; one spelling per
-    /// function, so that comparing the strings compares the functions.
+    /// `"<vendor>:<device>"`, four lowercase hex digits each: the kernel's
+    /// `xhci-leave=` boot parameter. A manifest matcher's card is spelled by
+    /// `toyos-manifest`'s own rule.
     pub fn parse(text: &str) -> Option<Self> {
         let (vendor, device) = text.split_once(':')?;
         Some(Self { vendor: hex16(vendor)?, device: hex16(device)? })
     }
 
-    /// The selector word [`device_claim`] carries.
+    /// The id as one word.
     pub const fn wire(self) -> u64 {
         ((self.vendor as u64) << 16) | self.device as u64
     }
 
-    /// The selector word decoded; `None` for anything with bits above 32.
+    /// [`Self::wire`] decoded; `None` for anything with bits above 32.
     pub const fn from_wire(raw: u64) -> Option<Self> {
         if raw > u32::MAX as u64 {
             return None;
@@ -1334,9 +1335,9 @@ impl PciId {
 
 /// Exactly four lowercase hex digits and nothing else.
 ///
-/// One spelling per function, because every reader of a `devices` entry
-/// compares the string: `1af4:41` and `1af4:0041`, or `1af4:1041` and
-/// `1AF4:1041`, would otherwise be two names for one card.
+/// One spelling per value, because every reader of a name compares the
+/// string: `1af4:41` and `1af4:0041`, or `1af4:1041` and `1AF4:1041`, would
+/// otherwise be two names for one card.
 fn hex16(text: &str) -> Option<u16> {
     if text.len() != 4 {
         return None;
@@ -1478,26 +1479,22 @@ fn decimal_line(text: &str) -> Option<u8> {
     (value < IsaId::LINES).then_some(value)
 }
 
-/// What one `devices` entry asks for: a class, and for
-/// [`DeviceType::PciFunction`] which function, for a partition which
-/// partition, and for an ISA function which ports and lines.
+/// What a claim asks for: a class, and for [`DeviceType::PciFunction`] which
+/// function, for a partition which partition, and for an ISA function which
+/// ports and lines.
 ///
-/// One parser, because four places read the same spelling — the build system's
-/// gate, `/system/bin/supervisor`'s mint, the kernel's claim and the claimant's own
-/// lookup — and a second would be a name a config can write and a program
-/// cannot find.
+/// Every request but a PCI function's is also a `devices` entry, spelled once
+/// here ([`Self::parse`], [`Self::write_name`]): the manifest that names it and
+/// the claimant that looks its claim up by that name read one spelling.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DeviceRequest {
     Class(DeviceType),
-    Pci(PciId),
+    Function(crate::inventory::Arrival),
     Partition(crate::part::PartGuid),
     Isa(IsaId),
 }
 
 impl DeviceRequest {
-    /// The spelling that carries a function id after the class name.
-    pub const PCI_PREFIX: &'static str = "pci:";
-
     /// The spelling that carries a unique partition GUID.
     pub const PART_PREFIX: &'static str = "part:";
 
@@ -1508,10 +1505,9 @@ impl DeviceRequest {
     /// `part:` and a GUID, rounded up to a multiple of eight.
     pub const MAX_NAME: usize = 48;
 
+    /// The request a `devices` entry spells, or `None`; never a
+    /// [`Self::Function`], which has no spelling.
     pub fn parse(name: &str) -> Option<Self> {
-        if let Some(id) = name.strip_prefix(Self::PCI_PREFIX) {
-            return PciId::parse(id).map(Self::Pci);
-        }
         if let Some(guid) = name.strip_prefix(Self::PART_PREFIX) {
             return crate::part::PartGuid::parse(guid).map(Self::Partition);
         }
@@ -1530,7 +1526,7 @@ impl DeviceRequest {
     pub const fn class(self) -> DeviceType {
         match self {
             Self::Class(class) => class,
-            Self::Pci(_) => DeviceType::PciFunction,
+            Self::Function(_) => DeviceType::PciFunction,
             Self::Partition(_) => DeviceType::Partition,
             Self::Isa(_) => DeviceType::Isa,
         }
@@ -1541,22 +1537,24 @@ impl DeviceRequest {
     pub fn selector(self) -> [u64; 2] {
         match self {
             Self::Class(_) => [0, 0],
-            Self::Pci(id) => [id.wire(), 0],
+            Self::Function(arrival) => [arrival.0 as u64, 0],
             Self::Partition(guid) => guid.wire(),
             Self::Isa(set) => set.wire(),
         }
     }
 
     /// This request's `devices` spelling written into `buf`, which
-    /// [`Self::MAX_NAME`] bounds. The name is also the tail of the `dev:` label
-    /// the claim arrives under, and it is composed here so the two cannot drift.
-    pub fn write_name(self, buf: &mut [u8; Self::MAX_NAME]) -> &str {
+    /// [`Self::MAX_NAME`] bounds, or `None` for a [`Self::Function`], which has
+    /// none. The name is also the tail of the `dev:` label the claim arrives
+    /// under, and it is composed here so the two cannot drift.
+    pub fn write_name(self, buf: &mut [u8; Self::MAX_NAME]) -> Option<&str> {
         use crate::part::GUID_TEXT_LEN;
-        let id = match self {
+        Some(match self {
+            Self::Function(_) => return None,
             Self::Class(class) => {
                 let name = class.class_name();
                 buf[..name.len()].copy_from_slice(name.as_bytes());
-                return core::str::from_utf8(&buf[..name.len()]).expect("a class name is ASCII");
+                core::str::from_utf8(&buf[..name.len()]).expect("a class name is ASCII")
             }
             Self::Partition(guid) => {
                 let at = Self::PART_PREFIX.len();
@@ -1564,8 +1562,7 @@ impl DeviceRequest {
                 let mut text = [0u8; GUID_TEXT_LEN];
                 guid.write_text(&mut text);
                 buf[at..at + GUID_TEXT_LEN].copy_from_slice(&text);
-                return core::str::from_utf8(&buf[..at + GUID_TEXT_LEN])
-                    .expect("a prefix and a GUID's text are ASCII");
+                core::str::from_utf8(&buf[..at + GUID_TEXT_LEN]).expect("a prefix and a GUID's text are ASCII")
             }
             Self::Isa(set) => {
                 let mut at = Self::ISA_PREFIX.len();
@@ -1594,24 +1591,9 @@ impl DeviceRequest {
                     buf[at] = b'0' + line % 10;
                     at += 1;
                 }
-                return core::str::from_utf8(&buf[..at]).expect("hex, digits and separators are ASCII");
+                core::str::from_utf8(&buf[..at]).expect("hex, digits and separators are ASCII")
             }
-            Self::Pci(id) => id,
-        };
-        let prefix = Self::PCI_PREFIX.as_bytes();
-        buf[..prefix.len()].copy_from_slice(prefix);
-        let mut at = prefix.len();
-        for value in [id.vendor, id.device] {
-            if at != prefix.len() {
-                buf[at] = b':';
-                at += 1;
-            }
-            for shift in [12, 8, 4, 0] {
-                buf[at] = HEX[((value >> shift) & 0xF) as usize];
-                at += 1;
-            }
-        }
-        core::str::from_utf8(&buf[..at]).expect("hex digits and colons are ASCII")
+        })
     }
 }
 
@@ -1619,10 +1601,10 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 
 /// Mint a device claim for `request`, presenting a `SysCap` handle that carries
 /// [`Rights::DEVICE`]. `NotFound` for a class no driver registered, or a PCI
-/// function or partition this machine does not have — the supervisor endows what exists
+/// arrival or partition this machine does not have — the supervisor endows what exists
 /// and logs what it did not. `AlreadyExists` names one already claimed, and
 /// `PermissionDenied` one the kernel drives itself — for a partition, one it
-/// has mounted. A request matching more than one function or partition answers
+/// has mounted. A partition GUID two partitions carry answers
 /// `InvalidArgument`, because an ambiguous name is refused rather than resolved
 /// to the first match; so does a nonzero selector word the class does not read.
 ///
@@ -2708,29 +2690,24 @@ mod tests {
         modules(&answer).for_each(drop);
     }
 
-    /// Four lowercase hex digits each and nothing else, because two spellings
-    /// are two claims on one function: `1af4:41` beside `1af4:0041`, and
-    /// `1AF4:1041` beside `1af4:1041`.
+    /// `xhci-leave=`'s id, four lowercase hex digits each.
     #[test]
-    fn a_pci_id_is_four_lowercase_hex_digits_each_and_nothing_else() {
-        let want = PciId { vendor: 0x1af4, device: 0x1041 };
-        assert_eq!(PciId::parse("1af4:1041"), Some(want));
-        for bad in [
-            "1AF4:1041", "1Af4:1041", "1af4:41", "1af4", "1af4:1041:", "", ":", "zzzz:1041",
-            "1af4:104g",
-        ] {
+    fn the_xhci_leave_parameter_is_an_id_in_four_lowercase_hex_digits_each() {
+        assert_eq!(PciId::parse("8086:9a13"), Some(PciId { vendor: 0x8086, device: 0x9a13 }));
+        for bad in ["8086:9A13", "8086:9a1", "8086", "8086:9a13:"] {
             assert_eq!(PciId::parse(bad), None, "{bad:?} parsed");
         }
     }
 
     /// The four readers of a `devices` entry share this parser, so what it
-    /// accepts is what a config may say.
+    /// accepts is what a config may say; a PCI function is named by its
+    /// arrival, which no entry spells.
     #[test]
-    fn a_devices_entry_is_a_class_or_one_named_function() {
-        let want = DeviceRequest::Pci(PciId { vendor: 0x1af4, device: 0x1041 });
-        assert_eq!(DeviceRequest::parse("pci:1af4:1041"), Some(want));
-        assert_eq!(want.class(), DeviceType::PciFunction);
-        assert_eq!(want.selector(), [0x1af4_1041, 0]);
+    fn a_devices_entry_is_a_class_or_one_named_device() {
+        let function = DeviceRequest::Function(crate::inventory::Arrival(7));
+        assert_eq!(function.class(), DeviceType::PciFunction);
+        assert_eq!(function.selector(), [7, 0]);
+        assert_eq!(function.write_name(&mut [0; DeviceRequest::MAX_NAME]), None);
         assert_eq!(
             DeviceRequest::parse("framebuffer"),
             Some(DeviceRequest::Class(DeviceType::Framebuffer))
@@ -2739,9 +2716,8 @@ mod tests {
         // Every one of these is a name a config could plausibly write and the
         // kernel must not resolve to a function.
         for bad in [
-            "pci",  // the bare class name names no function at all
-            "pci:", // nor does the prefix on its own
-            "pci:1af4",
+            "pci", // the bare class name names no function at all
+            "pci:1af4:1041", // and a function's matcher is the manifest's
             "gpu",  // a class name this table has never had
             "part", // a bare partition class names no partition
             "part:",
@@ -2775,9 +2751,6 @@ mod tests {
     #[test]
     fn a_request_writes_back_the_name_it_parsed() {
         for name in [
-            "pci:1af4:1041",
-            "pci:8086:15fc",
-            "pci:0000:0000",
             "hda-audio",
             "mouse",
             // The longest entry there is, which is what `MAX_NAME` is for.
@@ -2789,7 +2762,7 @@ mod tests {
         ] {
             let request = DeviceRequest::parse(name).expect("a name this table has");
             let mut buf = [0u8; DeviceRequest::MAX_NAME];
-            assert_eq!(request.write_name(&mut buf), name);
+            assert_eq!(request.write_name(&mut buf), Some(name));
         }
     }
 
@@ -2830,10 +2803,10 @@ mod tests {
         }
     }
 
-    /// The selector is one word on the wire and the kernel decodes it back;
-    /// a vendor lost to a shift would claim a different card.
+    /// The id is one word and decodes back; a vendor lost to a shift would
+    /// name a different card.
     #[test]
-    fn the_selector_survives_the_wire() {
+    fn a_pci_id_survives_its_word() {
         for id in [
             PciId { vendor: 0x1af4, device: 0x1041 },
             PciId { vendor: 0x8086, device: 0x15fc },

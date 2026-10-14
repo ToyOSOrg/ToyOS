@@ -182,9 +182,9 @@ fn not_handed_over(at: &str, why: &str) -> String {
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[NVME_AT, SOUND_AT])?;
     log.must_say(&not_handed_over(SOUND_AT, NOT_REMAPPED))?;
-    log.must_say("supervisor: soundserver: pci:1af4:1059 is on this machine and could not be handed over")?;
+    log.must_say("supervisor: soundserver: pci:04:01:00/1af4:1059 is on this machine and could not be handed over")?;
     log.must_say(&not_handed_over(NVME_AT, NOT_REMAPPED))?;
-    log.must_say("supervisor: diskserver: pci:1b36:0010 is on this machine and could not be handed over")?;
+    log.must_say("supervisor: diskserver: pci:01:08:02/1b36:0010 is on this machine and could not be handed over")?;
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be
     // given an address space for.
@@ -273,7 +273,7 @@ fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Resu
     // config's own spelling, and **with this refusal's own word**: the machine
     // has the function, so "no such device on this machine" would be false.
     log.must_say(&format!(
-        "supervisor: netstack: pci:{claims} is on this machine and could not be handed over"
+        "supervisor: netstack: pci:02:00:00/{claims} is on this machine and could not be handed over"
     ))?;
     Ok(())
 }

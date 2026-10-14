@@ -10,9 +10,11 @@ start = ["logkeeper", "test-runner"]
 service = true
 syscap = ["logread"]
 
-# `device` because the job mints the claim, `dup` because test-runner hands a
-# job its capability as a duplicate and hands none without it.
+# `device` because the job mints the claim, `inventory` because it names the
+# function by the arrival the inventory gives it, and `dup` because
+# test-runner hands a job its capability as a duplicate and hands none
+# without it.
 [programs.test-runner]
 receives = ["power"]
 args = ["--bound-ms=240000", "test_rs_claim_lpi", "test_rs_claim_unrouted", "test_rs_claim_bar_fault"]
-syscap = ["device", "dup"]
+syscap = ["device", "inventory", "dup"]

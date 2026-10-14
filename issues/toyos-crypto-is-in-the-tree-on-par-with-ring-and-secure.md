@@ -53,8 +53,8 @@ review has been done, and passing vectors does not show it is safer than ring.
 
 | Consumer | Today | Needs from the crate |
 |---|---|---|
-| `toyos-ssh`'s SSH protocol (`build/ssh`: `kex`, the server, the client). Host-only until `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md` stage 2 | `ring` | X25519, ML-KEM-768 and its hybrid, Ed25519 sign/verify, `chacha20-poly1305@openssh.com`, SHA-256/512, and a caller-supplied `Random` for replays |
-| `toyos-ssh`'s `hostkey` on the signing path. `build/signing.rs` reads the owner's image-signing key through `openssh_seed` and writes a minted one through `openssh_private`; both derive the public key from the seed | `ring` | nothing: this derivation is the root of trust's, and moves to `toyos_update::sig::public_of` in stage 1; the verifier itself switches in stage 6 |
+| `toyos-ssh`'s SSH protocol (`build/ssh`: `kex`, the server, the client). Host-only until `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md` stage 2 | the crate, since stage 1 | X25519, ML-KEM-768 and its hybrid, Ed25519 sign/verify, `chacha20-poly1305@openssh.com`, SHA-256/512, and a caller-supplied `Random` for replays |
+| `toyos-ssh`'s `hostkey` on the signing path. `build/signing.rs` reads the owner's image-signing key through `openssh_seed` and writes a minted one through `openssh_private`; both derive the public key from the seed | `toyos_update::sig::public_of`, since stage 1 | nothing: this derivation is the root of trust's; the verifier itself switches in stage 6 |
 | `system/sshserver` | russh with the RustCrypto stack, including `rsa` (RUSTSEC-2023-0071) | none directly; it reaches the crate through `toyos-ssh` |
 | Image and package signing: `lib/update` (the loader, `/system/bin/update`, `build/signing.rs`, `build/root`, #892's repository keys) | `ed25519-dalek` `verify_strict`; `toyos-sha2` SHA-512; the loader's `sha2` with `force-soft` | strict Ed25519 verification in the soft-float UEFI loader, and signing behind `sign` on the host. The track's last stage, stage 6 (owner, 2026-10-13) |
 | Every SHA-256: the build, `pkg`, `lib/swap`, `system/update` | `toyos-sha2` / `toyos-sha2-hw` (SHA-NI on x86-64, scalar on AArch64) | one SHA-2 implementation, no slower than `toyos-sha2-hw` |
@@ -99,9 +99,8 @@ Not consumers:
    - `build/ssh/Cargo.toml` names no `ring`.
    - `hostkey`'s derivation calls no `lib/crypto` code. `build/signing.rs`
      derives public keys only through `toyos_update::sig::public_of`.
-   - `toyos-ssh`'s OpenSSH recordings replay byte for byte, and
-     `issues/toyos-ssh-replays-rest-on-rings-deprecated-test-randomness.md` is
-     closed.
+   - `toyos-ssh`'s OpenSSH recordings replay byte for byte, and the issue
+     that its replays rest on ring's deprecated test randomness is closed.
    - These issues no longer name ring as a dependency:
      - `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md` (stage 2's
        wait for ring to link on both ToyOS targets);
@@ -121,6 +120,9 @@ Not consumers:
    - Nothing runs under Linux.
    - ML-KEM rows are excluded from the verdict by name, because ring has no
      ML-KEM. They are reported beside RustCrypto's `ml-kem`.
+   - `ring::test` stays in `tests/guest/rust-tests/src/bin/ring_kat.rs`, as
+     ring's own known-answer row: it is the one way to give ring a known
+     X25519 key.
    **Exit**: both benches' tables are on `ToyOSOrg/evidence`, with the
    columns stage 3 defines.
 3. **Parity.**
@@ -149,6 +151,10 @@ Not consumers:
      - Parity work reads ring's, BoringSSL's and OpenSSL's perlasm or C only
        through a clean room, as root's research rule says.
      - Faster code is accepted only with stage 4's evidence for it.
+   - **First measurement, not a verdict.** `toyos-ssh`'s fuzz
+     (`build/ssh/tests/fuzz.rs`), on the crate since stage 1: 33.92 s and
+     15.46 s in two runs on the development Mac (an M4 Pro). On ring it took
+     1.27 s in main's nightly host job, on GitHub's runner.
 4. **Secure.** **Exit**, for each primitive a consumer uses:
    - **Typed domains.** The private `V<N>` is replaced by distinct types:
      integers, Montgomery residues per modulus, field elements and scalars per
@@ -217,6 +223,9 @@ Not consumers:
      its primitives. Parity for those primitives is a later stage, not a
      gate.
    - Each consumer's old dependency is deleted in the same landing.
+   - The NIST ML-KEM vectors in `lib/crypto/tests/data` are under
+     `NIST-Software`, which the licence allowlist (`build/licence.rs`) does
+     not name. It decides that licence before `lib/crypto` enters an image.
 
    The consumers:
    - `toyos-ssh`'s protocol offers `mlkem768x25519-sha256` first, at any time

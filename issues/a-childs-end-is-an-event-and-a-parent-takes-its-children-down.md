@@ -37,9 +37,10 @@ directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
 
 ## Stages
 
-1. **init's waiter threads go**. A child's end is readiness on its handle,
-   and init still parks one thread per service on `SYS_PROCESS_WAIT`
-   (`close_when_it_ends`, `userland/init/src/main.rs`). *Exit*: init starts no
+1. **Done** (#926, stage 1.2 of
+   `issues/a-device-function-is-driven-from-its-arrival-to-its-end.md`):
+   **init's waiter threads go**; the supervisor watches each child's end on
+   its own loop's poller. *Exit*: init starts no
    thread to wait for a service's end, and `close_when_it_ends` is gone with
    all it does kept: a `restart` row that ends is started again on the ports
    it kept; a row without one has its acceptors closed, so a client's next

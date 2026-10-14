@@ -45,7 +45,7 @@ What is left of the staged work:
    the device only reads, whose bound is 0, what QEMU's device reports as
    `len` on such a queue is measured: the NIC's transmit queue is the only
    one read so far.
-   Done for virtio-gpu: the compositor drives it through a `pci:1af4:1050`
+   Done for virtio-gpu: the compositor drives it through a `pci:03:80:00/1af4:1050`
    claim. Its cursor queue's `len` is measured: QEMU writes 0 for a chain
    with a writable answer and for one without (PR #895's evidence, `pr-895`
    at `7d47ad2b`). The decline control `declining_is_not_free` and the

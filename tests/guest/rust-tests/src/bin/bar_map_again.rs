@@ -9,6 +9,9 @@
 //! The function is QEMU's virtio NIC, which no program of `tests/images/testcases.toml`
 //! holds.
 
+#[path = "../function.rs"]
+mod function;
+
 use toyos::endow::Endowments;
 use toyos::shm::SharedMemory;
 use toyos::syscap::SysCap;
@@ -46,7 +49,7 @@ fn main() {
     let cap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("the test estate is endowed a device-minting capability");
-    let nic: PciDev = cap.claim_pci(NIC).expect("bar_map_again: the virtio NIC's claim");
+    let nic: PciDev = function::claim(&cap, NIC).expect("bar_map_again: the virtio NIC's claim");
     let info = nic.describe().expect("bar_map_again: the claim's description");
     let bar = info
         .bar_bytes

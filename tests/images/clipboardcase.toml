@@ -9,7 +9,7 @@
 assets = ["assets"]
 
 [boot]
-start = ["logkeeper", "compositor", "vdagent", "test-runner"]
+start = ["logkeeper", "compositor", "test-runner"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
 [programs.logkeeper]
@@ -19,10 +19,12 @@ syscap = ["logread"]
 [programs.compositor]
 service = true
 serves = ["compositor", "prompt", "clipboard", "input"]
-devices = ["pci:1af4:1050", "keyboard", "mouse"]
+devices = ["pci:03:80:00/1af4:1050", "keyboard", "mouse"]
 
+# One process per virtio-serial function the kernel does not drive: the
+# clipboard's channel, beside the kernel's console.
 [programs.vdagent]
-devices = ["pci:1af4:1043"]
+drives = ["pci:07:80:00/1af4:1043"]
 receives = ["clipboard"]
 
 [programs.test-runner]

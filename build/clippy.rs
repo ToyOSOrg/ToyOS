@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::arch::Arch;
-use crate::ci::KERNEL;
+use crate::ci::{CRYPTO, CRYPTO_DISPATCHED, KERNEL};
 
 /// The pedantic/nursery lints adopted one at a time, each on a measured finding
 /// (`issues/clippy-stage-two-is-lints-one-at-a-time.md`).
@@ -64,7 +64,9 @@ fn control_features() -> Vec<String> {
 /// kernel does. `toyos-pci-claim` has one because `$GUESTS` excludes it and
 /// only netstack's host tests build its `host-grant`. `kernel-loom` has one
 /// because `victim-retires-mid-probe`'s test arm excludes `no-preempt-guard`,
-/// which `$CONTROLS` turns on beside it.
+/// which `$CONTROLS` turns on beside it. `toyos-crypto` has three because the
+/// workspace run builds it only with the features its consumers unify onto it,
+/// and each of its forms compiles arms the others do not.
 /// The kernel's library is linted on the host apart from them: its tests as
 /// `--ci host` runs them, and again with `$KERNEL_CONTROLS`.
 const SHAPES: &[Shape] = &[
@@ -150,6 +152,18 @@ const SHAPES: &[Shape] = &[
     },
     Shape {
         before: &["-p", "toyos-xhci", "--all-targets"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        before: &["-p", CRYPTO, "--all-targets", "--features", CRYPTO_DISPATCHED],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        before: &["-p", CRYPTO, "--all-targets", "--all-features"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        before: &["-p", CRYPTO, "--all-targets"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     // `--no-deps` because its dependency `toyos` is a guest crate no shape

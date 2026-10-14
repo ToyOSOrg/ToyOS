@@ -40,4 +40,4 @@ pub mod placement;
 pub mod pm;
 pub mod probe;
 
-pub use choose::{claimed, console, Unclaimable};
+pub use choose::console;

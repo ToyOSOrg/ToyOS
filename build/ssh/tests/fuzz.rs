@@ -20,9 +20,8 @@ mod common;
 use std::collections::BTreeMap;
 
 use common::client::{ed25519_blob, open_packet, pair, publickey_request, signed_request, string, Client};
-use common::driver::{host_key, public_blob, Keys, Side, Transcript, USER};
-use ring::rand::SystemRandom;
-use toyos_ssh::{Event, Refusal, Server};
+use common::driver::{host_key, public_blob, Fixed, Keys, Side, Transcript, USER};
+use toyos_ssh::{Event, Random, Refusal, Server};
 
 const FUZZ_ITERATIONS: usize = 4_000;
 
@@ -56,7 +55,7 @@ impl Rng {
 fn message(rng: &mut Rng, session_id: &[u8; 32]) -> (Vec<u8>, bool) {
     let (good, good_public) = pair(1);
     let (stranger, stranger_public) = pair(2);
-    let good_blob = ed25519_blob(&good_public);
+    let good_blob = ed25519_blob(good_public);
     let channel = || -> [u8; 4] { [0, 0, 0, 0] };
     let mut out = Vec::new();
     let mut valid = false;
@@ -85,7 +84,7 @@ fn message(rng: &mut Rng, session_id: &[u8; 32]) -> (Vec<u8>, bool) {
         4..=6 => {
             let (algorithm, blob): (&str, Vec<u8>) = match rng.below(3) {
                 0 => ("ssh-ed25519", good_blob),
-                1 => ("ssh-ed25519", ed25519_blob(&stranger_public)),
+                1 => ("ssh-ed25519", ed25519_blob(stranger_public)),
                 _ => (["rsa-sha2-512", "ssh-rsa"][rng.below(2)], public_blob(include_str!("fixtures/user_rsa.pub"))),
             };
             out.push(50);
@@ -102,20 +101,20 @@ fn message(rng: &mut Rng, session_id: &[u8; 32]) -> (Vec<u8>, bool) {
             out = match rng.below(6) {
                 0 | 1 => {
                     valid = user == USER;
-                    signed_request(&request, &good, &signed)
+                    signed_request(&request, good, &signed)
                 }
                 2 => {
                     let mut other = *session_id;
                     other[rng.below(32)] ^= 1 << rng.below(8);
-                    signed_request(&request, &good, &publickey_request(&other, user, "ssh-ed25519", &good_blob).1)
+                    signed_request(&request, good, &publickey_request(&other, user, "ssh-ed25519", &good_blob).1)
                 }
-                3 => signed_request(&request, &stranger, &signed),
+                3 => signed_request(&request, stranger, &signed),
                 4 => {
-                    let (request, signed) = publickey_request(session_id, user, "ssh-ed25519", &ed25519_blob(&stranger_public));
-                    signed_request(&request, &stranger, &signed)
+                    let (request, signed) = publickey_request(session_id, user, "ssh-ed25519", &ed25519_blob(stranger_public));
+                    signed_request(&request, stranger, &signed)
                 }
                 _ => {
-                    let mut bent = signed_request(&request, &good, &signed);
+                    let mut bent = signed_request(&request, good, &signed);
                     let at = bent.len() - 1 - rng.below(64);
                     bent[at] ^= 1 << rng.below(8);
                     bent
@@ -185,8 +184,8 @@ fn message_of(kind: usize, session_id: &[u8; 32]) -> Vec<u8> {
         }
         7 => {
             let (good, public) = pair(1);
-            let (request, signed) = publickey_request(session_id, USER, "ssh-ed25519", &ed25519_blob(&public));
-            out = signed_request(&request, &good, &signed);
+            let (request, signed) = publickey_request(session_id, USER, "ssh-ed25519", &ed25519_blob(public));
+            out = signed_request(&request, good, &signed);
         }
         13 => {
             out.push(90);
@@ -241,7 +240,7 @@ fn every_session_is_total_and_none_logs_in_without_a_right_signature() {
     let mut authenticated = 0;
     for iteration in 0..FUZZ_ITERATIONS {
         let mut rng = Rng(iteration as u64);
-        let server = Server::new(host_key(), Keys::new(vec![pair(1).1]), SystemRandom::new());
+        let server = Server::new(host_key(), Keys::new(vec![pair(1).1]), Fixed(iteration as u8));
         let mut c = Client::handshake(server).expect("the exchange");
         let id = c.session_id();
         let mut service = false;
@@ -341,7 +340,7 @@ impl Recording {
         let t = Transcript::read(text);
         let client = t.side(Side::Client);
         let chunks: Vec<Vec<u8>> = t.chunks.iter().filter(|(s, _)| *s == Side::Client).map(|(_, b)| b.clone()).collect();
-        let mut server = Server::new(host_key(), Keys::recorded(), seeded(t.seed));
+        let mut server = Server::new(host_key(), Keys::recorded(), Fixed(t.seed));
         let signed_end = (0..client.len())
             .find(|&at| {
                 server.input(&client[at..at + 1]).unwrap();
@@ -359,11 +358,6 @@ impl Recording {
         }
         Self { seed: t.seed, chunks, client, signed_end, padding }
     }
-}
-
-#[allow(deprecated)]
-fn seeded(seed: u8) -> ring::test::rand::FixedByteRandom {
-    ring::test::rand::FixedByteRandom { byte: seed }
 }
 
 #[test]
@@ -406,7 +400,7 @@ fn every_bent_recording_is_total_and_a_bend_before_the_login_prevents_it() {
                 true
             }
         };
-        let mut server = Server::new(host_key(), Keys::recorded(), seeded(r.seed));
+        let mut server = Server::new(host_key(), Keys::recorded(), Fixed(r.seed));
         let mut result = Ok(());
         let mut logged_in = false;
         let mut rest = &bytes[..];
@@ -436,7 +430,7 @@ fn every_bent_recording_is_total_and_a_bend_before_the_login_prevents_it() {
 /// The scripted driver's answers, each taken whatever the server says to it
 /// (a bent session can end between an event and its answer); whether the
 /// session authenticated.
-fn answer<R: ring::rand::SecureRandom>(server: &mut Server<Keys, R>) -> bool {
+fn answer<R: Random>(server: &mut Server<Keys, R>) -> bool {
     let mut authenticated = false;
     while let Some(event) = server.poll() {
         match event {
