@@ -227,10 +227,10 @@ fn irq(frame: &Frame, from_el0: bool) -> bool {
             crate::iommu::fault_interrupt();
             false
         }
-        _ => match irqchip::its::slot_of(intid) {
-            Some(slot) => {
+        _ => match irqchip::its::function_of(intid) {
+            Some(function) => {
                 percpu::irq_took(Source::UserDev);
-                crate::pcidev::isr(slot);
+                crate::pcidev::isr(function);
                 true
             }
             None => {

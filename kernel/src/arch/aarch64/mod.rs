@@ -39,7 +39,6 @@ pub mod trap;
 pub mod watchdog;
 
 pub use irqchip::its as message_unit;
-pub(crate) use irqchip::its::slot_interrupt;
 pub use smmu as iommu_unit;
 pub use trap::DriverIrq;
 

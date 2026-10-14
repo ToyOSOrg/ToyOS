@@ -2396,7 +2396,7 @@ fn refused(name: &str, why: SyscallError) -> String {
         SyscallError::PermissionDenied => {
             format!("{name} is driven by the kernel and cannot be claimed")
         }
-        SyscallError::ResourceExhausted => format!("no claim slot is free for {name}"),
+        SyscallError::ResourceExhausted => format!("this machine has no interrupt left for {name}"),
         SyscallError::NotSupported => {
             format!("{name} is on this machine and could not be handed over; the kernel's \
                      `pcidev:`, `partclaim:`, `isa:`, `acpi:` or `hda:` line says why")

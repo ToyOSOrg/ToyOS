@@ -50,7 +50,6 @@ pub use iommu_unit::interrupt as message_unit;
 
 pub use apic::MSI_DOORBELL;
 pub use idt::DriverIrq;
-pub(crate) use idt::slot_interrupt;
 
 /// The machine every program image this kernel loads must be built for.
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::X86_64;
