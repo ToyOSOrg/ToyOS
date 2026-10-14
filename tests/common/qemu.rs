@@ -691,6 +691,10 @@ pub enum Profile {
     /// the T14's two are, because a claim never maps the BAR that holds an
     /// MSI-X table and QEMU puts this one's in its registers' BAR.
     HeadlessUsbSpare,
+    /// [`Profile::Headless`] with its virtio NIC behind a `pcie-root-port`:
+    /// a function a claim may take whose BAR has to land inside the port's
+    /// windows, as every function behind a bridge on a laptop does.
+    HeadlessNicBehindPort,
     /// M1 metal-sim: GOP, NVMe, xHCI with the boot stick on it, i8042 from
     /// q35, and nothing else -- no virtio device and no USB HID. This is the
     /// machine shape that gets flashed, so it is the one the input tests run
@@ -770,6 +774,7 @@ impl Profile {
             | Self::HeadlessNoUsb
             | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
+            | Self::HeadlessNicBehindPort
             | Self::Metal
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
@@ -883,6 +888,8 @@ impl Virtio {
 enum Nic {
     Absent,
     Virtio,
+    /// The virtio NIC on the secondary bus of a root port of its own.
+    BehindPort,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -1049,6 +1056,7 @@ impl Profile {
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
+            Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
                 xhci: &[XHCI_DEFAULT, XHCI_SPARE],
                 usb: &[
@@ -2320,6 +2328,12 @@ fn qemu_command(
         Nic::Virtio => {
             qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0{platform}"
+            ));
+        }
+        Nic::BehindPort => {
+            qemu.arg("-device").arg("pcie-root-port,id=nicport,chassis=9");
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
+                "virtio-net-pci-non-transitional,netdev=net0,bus=nicport{platform}"
             ));
         }
     }

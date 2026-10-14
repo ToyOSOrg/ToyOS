@@ -442,17 +442,26 @@ impl PciDevice {
     /// may hand out, and reading them costs the machine nothing — unlike
     /// `bar_size`, which takes memory decode off for the length of its probe.
     pub fn forwarded(&self) -> Vec<bridge::Window> {
+        self.bridge().map_or_else(Vec::new, |b| b.memory.into_iter().chain(b.prefetchable).collect())
+    }
+
+    /// This function as a bridge: the buses below it and the windows it
+    /// forwards to them, read and never probed; `None` for a function that is
+    /// not a bridge.
+    pub fn bridge(&self) -> Option<bridge::Bridge> {
         if self.read_config_u8(HEADER_TYPE) & !MULTI_FUNCTION != bridge::HEADER_TYPE_BRIDGE {
-            return Vec::new();
+            return None;
         }
-        let mut out = Vec::new();
-        out.extend(bridge::window(self.read_config_u32(bridge::MEMORY_BASE)));
-        out.extend(bridge::prefetch(
-            self.read_config_u32(bridge::PREFETCH_BASE),
-            self.read_config_u32(bridge::PREFETCH_BASE_UPPER),
-            self.read_config_u32(bridge::PREFETCH_LIMIT_UPPER),
-        ));
-        out
+        Some(bridge::Bridge {
+            secondary: self.read_config_u8(bridge::SECONDARY_BUS),
+            subordinate: self.read_config_u8(bridge::SUBORDINATE_BUS),
+            memory: bridge::window(self.read_config_u32(bridge::MEMORY_BASE)),
+            prefetchable: bridge::prefetch(
+                self.read_config_u32(bridge::PREFETCH_BASE),
+                self.read_config_u32(bridge::PREFETCH_BASE_UPPER),
+                self.read_config_u32(bridge::PREFETCH_LIMIT_UPPER),
+            ),
+        })
     }
 
     pub fn capabilities(&self) -> CapabilityIter<'_> {

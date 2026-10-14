@@ -33,7 +33,10 @@
 //! window of the declaration [`Apertures`] holds: the address firmware put in
 //! the BAR is held against those windows here, no other address is ever
 //! offered ([`placement::reserve`]), and with no declaration held no function
-//! is handed over.
+//! is handed over. Behind a bridge an address is offered only where every
+//! bridge on the path forwards it ([`placement::behind_bridges`]); where none
+//! of that is free the BAR stays where firmware put it and is mapped to
+//! nobody, since its page there is not its own.
 //!
 //! **Inside one, the function itself is the proof.** [`place_bar`] reads one
 //! dword through the BAR where firmware put it, moves the BAR onto the
@@ -127,7 +130,7 @@ use toyos_abi::boot::{MemoryMapEntry, RootBridgeWindow};
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
 use toyos_dma::Register;
-use toyos_pci::bridge::Window;
+use toyos_pci::bridge::{Bridge, Window};
 use toyos_pci::{af, aperture, bar, express, msix, placement, pm, probe};
 
 use crate::device::{Claim, ClaimError};
@@ -363,6 +366,13 @@ struct Machine {
     /// which is not the same claim as reaching the bus.
     low: Vec<Window>,
     high: Vec<Window>,
+    /// Every bridge on the bus, read in [`publish`]: what a function behind
+    /// one may be placed inside ([`placement::behind_bridges`]).
+    bridges: Vec<Bridge>,
+    /// Addresses behind a bridge a claim has tried and not cut: no other claim
+    /// is offered one while it is probed, and one the function did not answer
+    /// at stays spent, as a refused run address does.
+    trying: Vec<Window>,
     /// What this kernel holds of the memory the root bridges decode: the
     /// necessary condition for any read this module issues.
     apertures: Apertures,
@@ -403,6 +413,8 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
     kernel_driven: Vec::new(),
     low: Vec::new(),
     high: Vec::new(),
+    bridges: Vec::new(),
+    trying: Vec::new(),
     apertures: Apertures::Unknown,
     windows: Vec::new(),
     resetting: Vec::new(),
@@ -532,6 +544,7 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 /// driver mid-transfer must not meet that.
 pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], firmware: &[RootBridgeWindow]) {
     let mut decoded = Vec::new();
+    let bridges: Vec<Bridge> = devices.iter().filter_map(PciDevice::bridge).collect();
     let mut taken: Vec<Window> =
         maps.iter().map(|entry| Window { start: entry.start, end: entry.end }).collect();
     for device in devices {
@@ -624,6 +637,7 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
     machine.segment = segment;
     machine.decoded = decoded;
     machine.apertures = apertures;
+    machine.bridges = bridges;
     machine.low = low;
     machine.high = high;
 }
@@ -680,6 +694,9 @@ enum Refusal {
     /// This machine offered the BAR no address of that width at all: no free
     /// run holds a span-aligned one inside a window firmware declared.
     NoRun { wide: bool },
+    /// The function is behind a bridge, and no 2 MiB the bridges on its path
+    /// forward to it is free, so the BAR stays where firmware put it.
+    NoRoutedRun(u8),
     /// Every address this machine offered was tried and the function answered
     /// at none of them.
     NoPlacement { wide: bool, asked: usize },
@@ -751,6 +768,12 @@ impl core::fmt::Display for Refusal {
                 "its BAR is 32-bit and nothing below 4 GiB is both free of the firmware map, \
                  this bus's assigned BARs and its bridges' forwarded ranges and inside a window \
                  firmware declared"
+            ),
+            Self::NoRoutedRun(i) => write!(
+                f,
+                "no 2 MiB the bridges above it forward is free for BAR {i}, so it stays where \
+                 firmware put it, and there it shares a 2 MiB page a process would be given \
+                 with whatever else decodes there"
             ),
             Self::NoPlacement { wide, asked } => write!(
                 f,
@@ -1014,7 +1037,8 @@ fn place_bars(
             // is that window's loss and not the function's.
             Err(why @ (Refusal::BarUnassigned(_)
             | Refusal::BarUnrouted(_)
-            | Refusal::BarReferenceEmpty(_))) => {
+            | Refusal::BarReferenceEmpty(_)
+            | Refusal::NoRoutedRun(_))) => {
                 log!(
                     "pcidev: PCI {:02x}:{:02x}.{} keeps BAR {index} where firmware put it and \
                      hands it to nobody — {why}",
@@ -1334,8 +1358,9 @@ fn probe_dword(at: u64, span: u64, offset: u64) -> u32 {
     crate::mm::paging::map_mmio(at, span, MmioPolicy::Uncacheable).read_u32(offset)
 }
 
-/// Move BAR `index` onto a 2 MiB boundary inside a window firmware declared,
-/// and answer where.
+/// Move BAR `index` onto a 2 MiB boundary inside a window firmware declared
+/// and, behind a bridge, inside what every bridge on its path forwards, and
+/// answer where.
 ///
 /// **Only an address inside a window firmware declared is ever read**, because
 /// a load no bridge forwards does not come back on real hardware — the address
@@ -1377,7 +1402,8 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64, windows: &[RootBr
     // A BAR firmware assigned no address has no such reference, and reading one
     // at zero would take low RAM for the function's answer — so it is refused
     // by name rather than settled against a number that is nothing's.
-    let was = pci.memory_bar(index).map_err(|_| Refusal::BarUnplaceable(index))?.address();
+    let firmware = pci.memory_bar(index).map_err(|_| Refusal::BarUnplaceable(index))?;
+    let was = firmware.address();
     if was == 0 {
         return Err(Refusal::BarUnassigned(index));
     }
@@ -1392,17 +1418,17 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64, windows: &[RootBr
     }
 
     let who = alloc::format!("PCI {:02x}:{:02x}.{}", pci.bus, pci.dev, pci.func);
+    let source = Source::of(pci.bus, wide, firmware.prefetchable());
     let mut refused = [None; MAX_CANDIDATES];
     let mut asked = 0usize;
     while asked < MAX_CANDIDATES {
-        let Some(candidate) = with_runs(wide, |runs| placement::reserve(runs, windows, span))
-        else {
+        let Some(candidate) = source.take(windows, span) else {
             break;
         };
-        let at = candidate.at;
+        let at = candidate.at();
         let Ok(placed) = bar::placement(index, low, at, size) else {
             refused[asked] = Some(candidate);
-            give_back(wide, &refused, span);
+            give_back(&refused, span);
             return Err(Refusal::BarUnplaceable(index));
         };
         pci.set_memory_decode(false);
@@ -1416,7 +1442,7 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64, windows: &[RootBr
         if !matches!(pci.memory_bar(index), Ok(memory) if memory.address() == at) {
             restore();
             refused[asked] = Some(candidate);
-            give_back(wide, &refused, span);
+            give_back(&refused, span);
             return Err(Refusal::BarUnplaceable(index));
         }
         let after = probe_dword(at, span, reference);
@@ -1427,7 +1453,7 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64, windows: &[RootBr
                 "pcidev: {who} BAR {index} ({size:#x} bytes) placed at {at:#x} — inside \
                  firmware's mem {:#x}; its +{reference:#x} dword answers {after:#010x} there, \
                  and answered {signature:#010x} from {was:#x}, where firmware put it",
-                candidate.window
+                candidate.window()
             );
             return Ok(at);
         }
@@ -1441,8 +1467,84 @@ fn place_bar(pci: &PciDevice, id: PciId, index: u8, size: u64, windows: &[RootBr
         refused[asked] = Some(candidate);
         asked += 1;
     }
-    give_back(wide, &refused, span);
-    Err(if asked == 0 { Refusal::NoRun { wide } } else { Refusal::NoPlacement { wide, asked } })
+    give_back(&refused, span);
+    Err(match (asked, source) {
+        (0, Source::Behind { .. }) => Refusal::NoRoutedRun(index),
+        (0, Source::Runs { .. }) => Refusal::NoRun { wide },
+        _ => Refusal::NoPlacement { wide, asked },
+    })
+}
+
+/// Where a BAR's candidate addresses come from: this machine's free runs for a
+/// function on a root bus, and the windows of the bridges on its path for one
+/// behind a bridge, which no root-level run lies in.
+#[derive(Clone, Copy)]
+enum Source {
+    Runs { wide: bool },
+    Behind { bus: u8, wide: bool, prefetchable: bool },
+}
+
+/// One address [`Source::take`] handed out, and where it goes back to.
+#[derive(Clone, Copy)]
+enum Candidate {
+    Run { wide: bool, reservation: placement::Reservation },
+    Behind { at: u64, window: u64 },
+}
+
+impl Candidate {
+    fn at(self) -> u64 {
+        match self {
+            Self::Run { reservation, .. } => reservation.at,
+            Self::Behind { at, .. } => at,
+        }
+    }
+
+    /// The base of the declared root window the address is inside.
+    fn window(self) -> u64 {
+        match self {
+            Self::Run { reservation, .. } => reservation.window,
+            Self::Behind { window, .. } => window,
+        }
+    }
+}
+
+impl Source {
+    fn of(bus: u8, wide: bool, prefetchable: bool) -> Self {
+        if MACHINE.lock().bridges.iter().any(|bridge| bridge.leads_to(bus)) {
+            Self::Behind { bus, wide, prefetchable }
+        } else {
+            Self::Runs { wide }
+        }
+    }
+
+    /// The next address to try, already out of reach of every other claim.
+    fn take(self, windows: &[RootBridgeWindow], span: u64) -> Option<Candidate> {
+        match self {
+            Self::Runs { wide } => with_runs(wide, |runs| placement::reserve(runs, windows, span))
+                .map(|reservation| Candidate::Run { wide, reservation }),
+            Self::Behind { bus, wide, prefetchable } => {
+                let mut machine = MACHINE.lock();
+                let mut taken: Vec<Window> = machine
+                    .decoded
+                    .iter()
+                    .map(|&(_, start, end)| Window { start, end })
+                    .chain(machine.windows.iter().map(|&(_, _, at, span)| Window { start: at, end: at + span }))
+                    .chain(machine.trying.iter().copied())
+                    .chain(
+                        machine
+                            .bridges
+                            .iter()
+                            .filter(|bridge| !bridge.leads_to(bus))
+                            .flat_map(|bridge| bridge.memory.into_iter().chain(bridge.prefetchable)),
+                    )
+                    .collect();
+                let (at, window) =
+                    placement::behind_bridges(&machine.bridges, bus, prefetchable, wide, &mut taken, windows, span)?;
+                machine.trying.push(Window { start: at, end: at + span });
+                Some(Candidate::Behind { at, window })
+            }
+        }
+    }
 }
 
 /// This machine's free runs of one width, under the lock that hands them out.
@@ -1457,14 +1559,18 @@ fn with_runs<T>(wide: bool, f: impl FnOnce(&mut Vec<Window>) -> T) -> T {
     f(if wide { &mut machine.high } else { &mut machine.low })
 }
 
-/// Put back every address a refused walk took, newest first: a run gives back
-/// only the address it handed out last.
-fn give_back(wide: bool, refused: &[Option<placement::Reservation>], span: u64) {
-    with_runs(wide, |runs| {
-        for candidate in refused.iter().rev().flatten() {
-            placement::release(runs, *candidate, span);
+/// Put back every address a walk took and did not keep, newest first: a run
+/// gives back only the address it handed out last.
+fn give_back(refused: &[Option<Candidate>], span: u64) {
+    let mut machine = MACHINE.lock();
+    for candidate in refused.iter().rev().flatten() {
+        match *candidate {
+            Candidate::Run { wide, reservation } => {
+                placement::release(if wide { &mut machine.high } else { &mut machine.low }, reservation, span)
+            }
+            Candidate::Behind { at, .. } => machine.trying.retain(|tried| tried.start != at),
         }
-    });
+    }
 }
 
 /// Where this BAR was already put, if a claim before this one put it there.
@@ -1500,7 +1606,9 @@ fn was_cut(pci: &PciDevice, index: u8) -> bool {
 /// under [`with_runs`], which is what keeps a second claim from being offered
 /// it.
 fn cut(pci: &PciDevice, index: u8, at: u64, span: u64) {
-    MACHINE.lock().windows.push((requester(pci), index, at, span));
+    let mut machine = MACHINE.lock();
+    machine.trying.retain(|tried| tried.start != at);
+    machine.windows.push((requester(pci), index, at, span));
 }
 
 /// Nothing else on this machine decodes inside the page that is about to be

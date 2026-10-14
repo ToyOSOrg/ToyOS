@@ -22,6 +22,39 @@ pub const PREFETCH_BASE: u64 = 0x24;
 /// removed.
 pub const HEADER_TYPE_BRIDGE: u8 = 1;
 
+/// Byte offsets of a Type 1 header's Secondary and Subordinate Bus Number
+/// registers (§3.2.5.3, §3.2.5.4): the bus directly below the bridge, and
+/// the highest bus number anywhere below it.
+pub const SECONDARY_BUS: u64 = 0x19;
+pub const SUBORDINATE_BUS: u64 = 0x1A;
+
+/// One bridge, as the path to a function behind it reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bridge {
+    pub secondary: u8,
+    pub subordinate: u8,
+    pub memory: Option<Window>,
+    pub prefetchable: Option<Window>,
+}
+
+impl Bridge {
+    /// Whether `bus` is below this bridge, so every request for a function
+    /// on it passes through this bridge's windows.
+    pub fn leads_to(&self, bus: u8) -> bool {
+        self.secondary <= bus && bus <= self.subordinate
+    }
+
+    /// Whether this bridge forwards all of `at..end` to its secondary side
+    /// through a window a BAR of this kind may sit in (§3.2.5.6 to
+    /// §3.2.5.8). The prefetchable window may be read ahead and its writes
+    /// merged, so only a prefetchable BAR belongs there; the memory window
+    /// takes either kind.
+    pub fn forwards(&self, at: u64, end: u64, prefetchable: bool) -> bool {
+        let holds = |window: Option<Window>| window.is_some_and(|w| w.start <= at && end <= w.end);
+        holds(self.memory) || (prefetchable && holds(self.prefetchable))
+    }
+}
+
 /// The granularity both windows are expressed in: bits 31:20.
 const GRANULE: u64 = 1 << 20;
 

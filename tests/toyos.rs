@@ -403,6 +403,12 @@ const MACHINE_TESTS: &[&str] = &[
     // function is its I219, and a kernel that dies on this takes the bench's
     // machine down with it.
     "bar_map_again",
+    // The same claim with the NIC behind a root port: the BAR has to land
+    // inside the windows the port forwards, which a host test of the rule
+    // cannot say the kernel reads off a real bridge. The T14's claimed
+    // functions are all on bus 0; the AMD bench's xHCI that is not has its
+    // MSI-X table in its one BAR.
+    "bar_map_behind_a_bridge",
     // A region that is not memory the kernel allocated, lent as a window: the
     // kernel describes the BAR of a function no program of the boot holds,
     // which on the T14 is its I219, as `bar_map_again` says.
@@ -3719,6 +3725,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
         "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
+        "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
         "desktop_without_x2apic" => desktop_without_x2apic(),
@@ -4020,6 +4027,52 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
         };
         eprintln!("  [claims] {}", line.trim());
     }
+    Ok(())
+}
+
+/// The virtio NIC behind a root port is claimed and its BAR mapped, and the
+/// kernel put the BAR inside a window the port forwards.
+fn bar_map_behind_a_bridge(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "bar_map_again";
+    const FORWARDS: &str = "pcidev: PCI 00:";
+    const PLACED: &str = "pcidev: PCI 01:00.0 BAR ";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let options = BootOptions { profile: qemu::Profile::HeadlessNicBehindPort, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    let range = |line: &str| -> Option<(u64, u64)> {
+        let (from, to) = line.split_once("..")?;
+        let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
+        Some((hex(from.rsplit(' ').next()?)?, hex(to.split(' ').next()?)?))
+    };
+    let forwarded: Vec<(u64, u64)> = boot
+        .text()
+        .lines()
+        .filter(|l| l.contains(FORWARDS) && l.contains(" forwards "))
+        .filter_map(|l| range(l.split_once(" forwards ")?.1))
+        .collect();
+    if forwarded.is_empty() {
+        return Err(format!("no root port said what it forwards:\n{}", boot.text()));
+    }
+    let result = qemu.run_test("test_rs_bar_map_again", Duration::from_secs(60));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(placed) = result.serial.lines().find(|l| l.contains(PLACED) && l.contains(" placed at ")) else {
+        return Err(format!("the NIC's BAR was never placed:\n{}", result.serial));
+    };
+    let at = placed
+        .split_once(" placed at ")
+        .and_then(|(_, rest)| u64::from_str_radix(rest.split_whitespace().next()?.strip_prefix("0x")?, 16).ok())
+        .ok_or_else(|| format!("an unreadable placement: {placed:?}"))?;
+    if !forwarded.iter().any(|(start, end)| *start <= at && at < *end) {
+        return Err(format!("{placed:?} is inside none of what the port forwards, {forwarded:x?}"));
+    }
+    eprintln!("  [claims] {}", placed.trim());
     Ok(())
 }
 
