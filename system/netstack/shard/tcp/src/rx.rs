@@ -13,7 +13,10 @@
 //! than the initial capacity, and a connection whose round trip is unknown keeps it.
 //!
 //! **The round trip is the receiver's own**: a downloader sends no data, so the sender's SRTT
-//! keeps the handshake's sample while queueing lengthens the path. With timestamps, a full-sized
+//! keeps the handshake's sample while queueing lengthens the path. The handshake's sample is
+//! where the estimate starts, so no sample is ever unbounded: the first segment of a reply can
+//! echo a request the peer sat on, and an estimate taken from it whole would hold the growth back
+//! by the peer's delay. With timestamps, a full-sized
 //! segment carrying a TSecr not yet seen samples the age of that echo, at least one tick and at
 //! most twice the estimate, averaged with RFC 6298 §2.3's gain of 1/8: an echo aged by the
 //! peer's own silence moves the estimate by an eighth at most. Full-sized is the largest segment
@@ -110,8 +113,8 @@ impl Rx {
     /// `max`, or to the most a window field at `shift` offers if that is less: an edge past it
     /// would be one the peer was never told of. `(mss, options)`: the MSS our SYN offered and the
     /// timestamp option's length on every segment, 0 without timestamps, which picks how the
-    /// round trip is sampled.
-    pub fn new(next: Seq, max: usize, shift: u8, window: u32, now: Instant, (mss, options): (u32, u32)) -> Self {
+    /// round trip is sampled. `rtt` is the handshake's sample, where it took one.
+    pub fn new(next: Seq, max: usize, shift: u8, window: u32, now: Instant, (mss, options): (u32, u32), rtt: Option<Duration>) -> Self {
         let initial = usize::try_from(crate::limits::RECEIVE_BUFFER_INITIAL).unwrap_or(usize::MAX);
         let offerable = usize::from(u16::MAX).checked_shl(u32::from(shift)).unwrap_or(usize::MAX);
         let max = max.min(offerable);
@@ -136,7 +139,7 @@ impl Rx {
             last_ack_sent: next,
             max,
             round: (now, 0),
-            rtt: None,
+            rtt,
             sampler: if options > 0 { Sampler::Echo(None) } else { Sampler::Fill(None) },
             rcv_mss: floor,
             short: 0,
@@ -511,7 +514,7 @@ mod tests {
 
     /// A timestamped connection's receive side at t = 0: our SYN offered an MSS of 1,460.
     fn stamped() -> Rx {
-        Rx::new(Seq::new(1), 4 << 20, 7, 65_535, Instant::from_nanos(0), (1460, 12))
+        Rx::new(Seq::new(1), 4 << 20, 7, 65_535, Instant::from_nanos(0), (1460, 12), None)
     }
 
     fn echo(rx: &mut Rx, len: u32, tsecr: u32, age: Duration) {
@@ -547,11 +550,36 @@ mod tests {
         assert_eq!(rx.rtt, Some(Duration::from_micros(15_875)));
     }
 
+    /// A server that sits 2 s on the request before its reply: the reply's first segment echoes
+    /// the request's TSval aged 2.016 s, and a reader takes 40 KB a millisecond after it. Started
+    /// from the handshake's 16 ms, the estimate moves an eighth of twice that, to 18 ms, and the
+    /// window grows once the reader has read for that long. Taken whole, the estimate would be
+    /// 2.016 s, and twenty milliseconds of samples later still 140 ms, the window not yet grown.
+    #[test]
+    fn a_reply_the_peer_sat_on_does_not_set_the_round_trip() {
+        const CHUNK: usize = 40_000;
+        let mut rx = Rx::new(Seq::new(1), 4 << 20, 7, 65_535, Instant::from_nanos(0), (1460, 12), Some(ms(16)));
+        let at = |t: u64| Instant::from_nanos(t * 1_000_000);
+        let initial = rx.capacity();
+        for (tsecr, t) in (2_016..2_040u64).enumerate() {
+            let next = rx.next;
+            assert_eq!(rx.place(next, &[0; CHUNK]), Placed::InOrder);
+            let age = if tsecr == 0 { ms(2_016) } else { ms(16) };
+            rx.sample_rtt(1448, Some((u32::try_from(tsecr).unwrap(), Some(age))), at(t));
+            if tsecr == 0 {
+                assert_eq!(rx.rtt, Some(ms(18)));
+            }
+            rx.read(&mut [0; CHUNK]);
+            rx.after_read(CHUNK, at(t), 1448);
+        }
+        assert!(rx.capacity() > initial, "the window never grew: {} at an estimate of {:?}", rx.capacity(), rx.rtt);
+    }
+
     /// Without timestamps the time to fill a window offered is at least a round trip, so the
     /// least is kept: the window offered at 0 ms fills at 80 ms, the next at 200 ms.
     #[test]
     fn without_timestamps_the_least_fill_time_is_kept() {
-        let mut rx = Rx::new(Seq::new(1), 65_535, 0, 65_535, Instant::from_nanos(0), (1460, 0));
+        let mut rx = Rx::new(Seq::new(1), 65_535, 0, 65_535, Instant::from_nanos(0), (1460, 0), None);
         let arrive = |rx: &mut Rx, len: usize, at_ms: u64| {
             let next = rx.next;
             assert_eq!(rx.place(next, &vec![0; len]), Placed::InOrder);
