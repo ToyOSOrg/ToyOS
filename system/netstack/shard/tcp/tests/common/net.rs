@@ -492,7 +492,6 @@ impl Net {
         true
     }
 
-    /// Every application finished: both FINs in, or a failure.
     /// App `app`'s connection lent two buffers of `len` bytes; it reads the receive ring itself
     /// from here on.
     pub fn lend(&mut self, app: usize, len: usize) {
@@ -503,6 +502,7 @@ impl Net {
         self.apps[app].lent = Some(Lending { rx, at: 0 });
     }
 
+    /// Every application finished: both FINs in, or a failure.
     pub fn finished(&self) -> bool {
         self.apps.iter().all(|a| a.end.is_some() && (a.shut || matches!(a.end, Some(End::Failed(_))))) && !self.apps.is_empty()
     }
