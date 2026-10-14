@@ -208,6 +208,9 @@ mod tests {
             (176_400, 0x5800),
             (192_000, 0x1800),
             (24_000, 0x0100),
+            (144_000, 0x1000),
+            (9_600, 0x0400),
+            (6_000, 0x0700),
         ] {
             // S16 stereo, which is the width and channel fields' own bits.
             assert_eq!(stream_format(rate, 16, 2), Some(bits | 0x11), "{rate} Hz");

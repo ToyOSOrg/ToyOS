@@ -30,8 +30,8 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
 }
 
 /// Every earlier load and store done before what follows, a `wrmsr` among it:
-/// the `MFENCE;LFENCE` SDM Vol. 3A §13.12.3 puts before a non-serializing
-/// `WRMSR`. No `nomem`, so the compiler moves no access across it either.
+/// the `MFENCE;LFENCE` SDM Vol. 3A §13.12.3 puts before an x2APIC `WRMSR`.
+/// No `nomem`, so the compiler moves no access across it either.
 #[inline]
 pub fn wrmsr_fence() {
     // SAFETY: two fences; no register, flag or memory changes.

@@ -554,7 +554,7 @@ pub unsafe extern "C" fn posix_madvise(_addr: *mut u8, _len: usize, advice: i32)
     if crate::memreq::is_advice(advice) { 0 } else { EINVAL }
 }
 
-/// `madvise`, which POSIX does not define (`memreq::madvise_refusal`).
+/// Linux's `madvise`, which POSIX does not define (`memreq::madvise_refusal`).
 #[no_mangle]
 pub unsafe extern "C" fn madvise(addr: *mut u8, _len: usize, advice: i32) -> i32 {
     use crate::memreq::AdviceRefusal;
