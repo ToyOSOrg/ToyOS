@@ -32,18 +32,22 @@ pub fn set_mode<C>(desk: &Desk, stack: &mut Stack<C>, idx: usize, mode: WindowMo
 /// scale or both.
 ///
 /// A normal window keeps its place and its size in logical pixels — its
-/// rectangle scales by its corners from one scale to the other — and is
-/// brought back onto the work area; a maximized or snapped window takes its
-/// mode's frame on the new one, and where it goes back to scales with it. A
-/// window's buffer stays the shell's to give it, as [`set_mode`] says.
+/// rectangle scales by its corners from one scale to the other — as far as
+/// its frame fits the work area, and is brought back onto it; a maximized or
+/// snapped window takes its mode's frame on the new one, and where it goes
+/// back to scales and fits the same way. A window's buffer stays the shell's
+/// to give it, as [`set_mode`] says.
 pub fn relayout<C>(from: &Desk, to: &Desk, stack: &mut Stack<C>) {
     let (a, b) = (from.scale.wire(), to.scale.wire());
     let scaled = |r: Rect| Rect::corners(a.rescale(r.x0, b), a.rescale(r.y0, b), a.rescale(r.x1, b), a.rescale(r.y1, b));
+    let placed = |r: Rect| to.chrome.reflow(to.chrome.fit(scaled(r), to.screen), to.screen);
     for idx in 0..stack.len() {
         let win = &mut stack[idx];
-        win.saved = scaled(win.saved);
+        if !win.saved.is_empty() {
+            win.saved = placed(win.saved);
+        }
         match win.mode {
-            WindowMode::Normal => win.content = to.chrome.reflow(scaled(win.content), to.screen),
+            WindowMode::Normal => win.content = placed(win.content),
             mode => {
                 set_mode(to, stack, idx, mode);
             }
@@ -299,6 +303,19 @@ impl Chrome {
         )
     }
 
+    /// The largest content whose frame fits the work area.
+    pub fn largest_content(&self, screen: Rect) -> (i32, i32) {
+        let work = self.work_area(screen);
+        ((work.w() - self.chrome_w()).max(0), (work.h() - self.chrome_h()).max(0))
+    }
+
+    /// `content` shrunk, its origin kept, as far as its frame must to fit the
+    /// work area.
+    pub fn fit(&self, content: Rect, screen: Rect) -> Rect {
+        let (w, h) = self.largest_content(screen);
+        Rect::new(content.x0, content.y0, content.w().min(w), content.h().min(h))
+    }
+
     /// Where a window's content goes after the screen changed size.
     ///
     /// Only [`WindowMode::Normal`] reaches here — a maximized or snapped
@@ -522,6 +539,25 @@ mod tests {
         let back = stack[0].content;
         for (a, b) in [(back.x0, start.x0), (back.y0, start.y0), (back.x1, start.x1), (back.y1, start.y1)] {
             assert!((a - b).abs() <= 1, "{back:?} from {start:?}");
+        }
+    }
+
+    /// A window that fills the work area at 1, as a terminal asking for no
+    /// size opens, is twice too big at 2: it is fitted, and its frame stays
+    /// inside the work area, its buttons reachable.
+    #[test]
+    fn a_full_size_window_relaid_at_a_larger_scale_fits_the_work_area() {
+        let one = Desk::new(SCREEN, Scale::ONE, 0);
+        for to in ["1.5", "2", "4"] {
+            let to = Desk::new(SCREEN, at(to), 0);
+            let mut stack = Stack::default();
+            stack.insert(window(one.chrome.initial_content(None, 0, SCREEN)));
+            stack.insert(window(one.chrome.initial_content(None, 0, SCREEN)));
+            set_mode(&one, &mut stack, 1, WindowMode::Maximized);
+            relayout(&one, &to, &mut stack);
+            let work = to.work_area();
+            assert!(work.contains(to.chrome.frame(stack[0].content)), "{:?} at {}", stack[0].content, to.scale);
+            assert!(work.contains(to.chrome.frame(stack[1].saved)), "{:?} at {}", stack[1].saved, to.scale);
         }
     }
 

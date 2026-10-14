@@ -65,12 +65,13 @@ pub struct Client {
     pub frames: u64,
 }
 
-/// A window's buffer, the compositor's own handle to it, and its size in
-/// pixels.
+/// A window's buffer, the compositor's own handle to it, its size in pixels
+/// and the scale its client draws into it at.
 pub struct Buffer {
     pub shm: SharedMemory,
     pub width: i32,
     pub height: i32,
+    pub scale: window::Scale,
 }
 
 /// A window, with the connection behind it.

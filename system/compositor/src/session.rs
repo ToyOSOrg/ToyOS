@@ -29,7 +29,7 @@ use toyos_desktop::volume::{overlay_rect, Overlay, Request, Requests, Shown};
 use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_STEP, MSG_VOLUME_UNAVAILABLE};
 use toyos_desktop::{
     cursor, cursor_from_abs, cursor_style, fold_mouse, hit_test, key_action, relayout, set_mode, tab_action,
-    Buffers, CursorStyle, Damage, Desk, Scale, Grab, Held, Hit, KeyAction, Level, Mode, Point, Port, PromptGate,
+    Buffers, CursorStyle, Presented, Requested, Damage, Desk, Scale, Grab, Held, Hit, KeyAction, Level, Mode, Point, Port, PromptGate,
     Rect, Released, Stack, TabAction, Verdict, Window, WindowId, WindowMode,
 };
 use toyos_icon::{Icon, Mask};
@@ -196,7 +196,15 @@ fn kept_path() -> std::path::PathBuf {
 /// The person's own scale, as `screen scale` last kept it; a file that does
 /// not hold one is refused by name.
 fn kept_scale() -> Option<Scale> {
-    let text = std::fs::read_to_string(kept_path()).ok()?;
+    let path = kept_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(e) => {
+            eprintln!("compositor: the kept scale in {} is not read, and is not drawn at: {e}", path.display());
+            return None;
+        }
+    };
     match text.trim().parse::<window::Scale>().ok().and_then(Scale::step) {
         Some(scale) => Some(scale),
         None => {
@@ -1212,20 +1220,37 @@ impl Session {
                 window::MSG_CREATE_WINDOW => self.create_window(frame),
                 window::MSG_COPY_BEGIN => self.copy_begin(frame),
                 window::MSG_PRESENT => {
-                    let Ok(rect) = ipc::decode_payload::<window::Rect>(frame.payload()) else {
+                    let Ok(rect) = ipc::decode_payload::<window::PresentRect>(frame.payload()) else {
                         mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
                         continue;
                     };
                     if let Some(i) = self.stack.find(|w| w.client.conn.as_handle() == handle) {
+                        let pf = self.pixel_format();
                         let win = &mut self.stack[i];
                         win.presented = true;
                         win.client.presents += 1;
-                        // The first present after a resize is drawn in the
-                        // buffer the resize gave: shown whole from here.
-                        if win.client.buffers.presented().is_some() {
-                            let shown = win.client.buffers.shown();
-                            (win.buf_w, win.buf_h) = (shown.width, shown.height);
-                            self.damage.add(win.frame(&self.desk.chrome));
+                        match win.client.buffers.presented(rect.generation) {
+                            Presented::Shown => {}
+                            // Drawn into the buffer a resize gave: shown whole
+                            // from here, and the buffer the window was owed
+                            // meanwhile given now.
+                            Presented::Swapped { owed, .. } => {
+                                let shown = win.client.buffers.shown();
+                                (win.buf_w, win.buf_h) = (shown.width, shown.height);
+                                self.damage.add(win.frame(&self.desk.chrome));
+                                let wanted = (win.content.w(), win.content.h(), self.desk.scale.wire());
+                                if owed && wanted != (shown.width, shown.height, shown.scale) {
+                                    settle(win, pf, self.desk.scale.wire(), &mut self.dead);
+                                }
+                            }
+                            Presented::Unknown => {
+                                eprintln!(
+                                    "compositor: client {} presented generation {}, a buffer it was never given",
+                                    handle.0, rect.generation
+                                );
+                                mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
+                                continue;
+                            }
                         }
                         let claim = Rect::from_wire(rect.x, rect.y, rect.w, rect.h);
                         self.damage.add(self.stack[i].present_damage(claim));
@@ -1306,8 +1331,18 @@ impl Session {
             return;
         }
 
-        // A size in logical pixels is the output's scale's to convert.
-        let size = window::Size::of(&req).physical(self.desk.scale.wire()).unwrap_or((0, 0));
+        // A size in logical pixels is the output's scale's to convert, and a
+        // toolkit's preference to fit to the work area.
+        let size = match toyos_desktop::requested(window::Size::of(&req), &self.desk) {
+            Requested::Fitted { asked, given } => {
+                println!(
+                    "compositor: client {} asked for {}x{} logical, {}x{} at scale {}; given {}x{}, what the work area holds",
+                    handle.0, req.width, req.height, asked.0, asked.1, self.desk.scale, given.0, given.1
+                );
+                given
+            }
+            requested => requested.size(),
+        };
 
         // Every refusal below is an answer to untrusted input, so none of them
         // is a panic and none is a silent shrink of what was asked for.
@@ -1386,7 +1421,7 @@ impl Session {
         } else {
             String::new()
         };
-        let buffer = Buffer { shm, width: content.w(), height: content.h() };
+        let buffer = Buffer { shm, width: content.w(), height: content.h(), scale: self.desk.scale.wire() };
         let at = self.stack.insert(Window::new(
             Client { conn, buffers: Buffers::new(buffer), rx: ClientRx::new(), presents: 0, frames: 0 },
             content,
@@ -1419,6 +1454,7 @@ impl Session {
                 stride: content.w() as u32,
                 pixel_format,
                 scale: self.desk.scale.wire().wire(),
+                generation: 0,
             },
         );
         self.damage_all();
@@ -2263,8 +2299,10 @@ fn mouse_event(
 }
 
 /// Give `win` a buffer the size of its content rect, to draw at `scale`, and
-/// say whether it got one. The buffer it was shown from stays until its first
-/// present into the new one ([`Buffers`]).
+/// say whether it got one or is owed one. The buffer it was shown from stays
+/// until its first present into the new one, and a window with a buffer
+/// given and not yet presented is owed this one, given once it presents
+/// ([`Buffers`]).
 ///
 /// **Neither refusal is fatal.** The memory is the compositor's own rather than
 /// the client's doing, so a refusal keeps the window at a size it can afford —
@@ -2274,6 +2312,9 @@ fn mouse_event(
 /// `InvalidArgument` that a maximize could reach, and it took every other
 /// window with it.
 fn rebuffer(win: &mut Win, pixel_format: u32, scale: window::Scale, dead: &mut Vec<Dead>) -> bool {
+    if win.client.buffers.owe() {
+        return true;
+    }
     let (w, h) = (win.content.w(), win.content.h());
     let new_shm = match SharedMemory::create(w as usize * h as usize * 4) {
         Ok(shm) => shm,
@@ -2296,7 +2337,7 @@ fn rebuffer(win: &mut Win, pixel_format: u32, scale: window::Scale, dead: &mut V
         );
         return false;
     };
-    win.client.buffers.give(Buffer { shm: new_shm, width: w, height: h });
+    let generation = win.client.buffers.give(Buffer { shm: new_shm, width: w, height: h, scale });
     // The one message a window cannot afford to miss — its next present is
     // read from the new buffer — so a client that will not take it is dropped
     // rather than left drawing into memory that is no longer shown.
@@ -2311,6 +2352,7 @@ fn rebuffer(win: &mut Win, pixel_format: u32, scale: window::Scale, dead: &mut V
             stride: w as u32,
             pixel_format,
             scale: scale.wire(),
+            generation,
         },
     );
     true

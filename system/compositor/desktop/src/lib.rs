@@ -38,7 +38,7 @@ pub mod taskbar;
 pub mod volume;
 pub mod window;
 
-pub use budget::{create_verdict, max_windows, pending_admits, window_bytes, Port, Verdict};
+pub use budget::{create_verdict, requested, Requested, max_windows, pending_admits, window_bytes, Port, Verdict};
 pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use hit::{hit_test, Hit};
 pub use input::{
@@ -52,7 +52,7 @@ pub use rect::{Point, Rect};
 pub use scale::Scale;
 pub use stack::Stack;
 pub use taskbar::{Taskbar, MAX_STATUS_CHARS};
-pub use window::{Buffers, Level, Window, WindowId, WindowMode};
+pub use window::{Buffers, Level, Presented, Window, WindowId, WindowMode};
 
 /// The colour of the frame the compositor draws around a prompt and around
 /// nothing else it draws: a cue to the person at the screen, and what a

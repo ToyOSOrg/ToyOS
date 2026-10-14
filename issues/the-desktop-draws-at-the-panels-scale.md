@@ -19,13 +19,22 @@ landed the panel's EDID and the scale chosen from it; the desktop, its own
 clients and winit's `scale_factor()` draw at that scale, which `screen scale`
 sets live.
 
-What is left:
+What is left, the orchestrator's:
 
-- **The benches' reading** of `gop_edid_scale`, which now also holds the
-  desktop drawn at 1.5 and a client's window given its buffer at it. Nothing
-  else: the compositor drives QEMU's virtio-gpu and follows a host window's
-  resize (`the_compositor_drives_the_virtio_gpu`), and no `SYS_GPU_*` number
-  is left.
+- **virtio-gpu at a scale is read by log alone.**
+  `the_compositor_drives_the_virtio_gpu` boots at `scale=2` and holds the
+  steps 1280x800 and 1024x768 hold, 1.75 and 1.5, but no screendump measures
+  a window there, nor the hardware cursor's scaled hot spot, nor `screen WxH`
+  over the display port; the scale row
+  (`a_window_is_drawn_at_the_scale_and_relaid_at_the_next`) reads GOP's
+  panel. Exit: a guest row measuring a client's window on virtio-gpu at a
+  scale and across a `screen WxH` flip.
+- **editor and paint draw at 1** at any scale, by #895's ruling, until they
+  read it in their own repositories (#892). Exit: each draws at its
+  window's `scale()`.
+- **calc and snake draw at 1**: each asks winit for a `PhysicalSize` and
+  draws build-rasterized fonts, ignoring `scale_factor()`, on every host.
+  Exit: each asks for a logical size and draws at `scale_factor()`.
 
 Constraints already paid for:
 

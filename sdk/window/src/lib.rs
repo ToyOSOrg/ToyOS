@@ -223,18 +223,29 @@ impl CreateError {
 }
 
 toyos::ipc_payload! {
-    /// A rectangle of a surface, in that surface's own pixels.
-    ///
-    /// The payload of [`MSG_PRESENT`], where it is the client's claim about
-    /// which of its pixels changed. A compositor that has to assume the whole
-    /// window changed repaints the whole window for one typed character —
-    /// which is what this exists to stop — so the claim is load-bearing and
-    /// the compositor clamps it to the window rather than trusting it.
+    /// A rectangle of a surface, in that surface's own pixels: what a
+    /// client claims it changed ([`PresentRect`]).
     pub struct Rect {
         pub x: u32,
         pub y: u32,
         pub w: u32,
         pub h: u32,
+    }
+
+    /// The payload of [`MSG_PRESENT`]: the client's claim about which of its
+    /// pixels changed, and the generation of the buffer it drew them into,
+    /// as [`WindowInfo`] or [`ResizeInfo`] gave it. A compositor that has to
+    /// assume the whole window changed repaints the whole window for one
+    /// typed character — which is what this exists to stop — so the claim is
+    /// load-bearing and the compositor clamps it to the window rather than
+    /// trusting it. The generation is what tells the compositor a present
+    /// was drawn into a buffer it gave since, which it then shows.
+    pub struct PresentRect {
+        pub x: u32,
+        pub y: u32,
+        pub w: u32,
+        pub h: u32,
+        pub generation: u32,
     }
 
     /// How many bytes of clipboard text a copy region holds. Where a region
@@ -277,15 +288,17 @@ toyos::ipc_payload! {
         pub scroll: i8,
     }
 
-    /// The shape of the window's buffer, in physical pixels, and the scale
-    /// to draw into it at, as [`Scale::wire`]. **The buffer is one
-    /// transferred handle**, sent ahead of the frame that carries this.
+    /// The shape of the window's buffer, in physical pixels, the scale to
+    /// draw into it at, as [`Scale::wire`], and its generation, which every
+    /// present drawn into it carries. **The buffer is one transferred
+    /// handle**, sent ahead of the frame that carries this.
     pub struct WindowInfo {
         pub width: u32,
         pub height: u32,
         pub stride: u32,
         pub pixel_format: u32,
         pub scale: u32,
+        pub generation: u32,
     }
 
     /// The shape of the window's new buffer and its scale, which arrive as a
@@ -297,6 +310,7 @@ toyos::ipc_payload! {
         pub stride: u32,
         pub pixel_format: u32,
         pub scale: u32,
+        pub generation: u32,
     }
 }
 
@@ -525,6 +539,8 @@ pub struct Window {
     height: u32,
     pixel_format: u32,
     scale: Scale,
+    /// The buffer's generation, which every present carries.
+    generation: u32,
     /// This window's own layout state. One per client process, which is what
     /// keeps a dead key typed into one window from composing with a letter
     /// typed into another.
@@ -606,6 +622,7 @@ impl Window {
             height: info.height,
             pixel_format: info.pixel_format,
             scale,
+            generation: info.generation,
             translator: configured_translator(),
             closed: false,
         })
@@ -712,6 +729,7 @@ impl Window {
                 self.height = info.height;
                 self.pixel_format = info.pixel_format;
                 self.scale = scale;
+                self.generation = info.generation;
                 Event::Resized
             }
             MSG_CLIPBOARD_PASTE => {
@@ -759,7 +777,8 @@ impl Window {
     /// screen — [`Screen::take_damage`] is where the rect comes from for a
     /// client that composes through one.
     pub fn present_damage(&self, damage: Rect) {
-        let _ = self.conn.send(MSG_PRESENT, &damage);
+        let Rect { x, y, w, h } = damage;
+        let _ = self.conn.send(MSG_PRESENT, &PresentRect { x, y, w, h, generation: self.generation });
     }
 
     pub fn handle(&self) -> toyos_abi::RawHandle {

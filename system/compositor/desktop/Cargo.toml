@@ -10,7 +10,7 @@ doctest = false
 
 [dependencies]
 toyos-abi = { path = "../../../sdk/abi" }
-toyos-font = { path = "../../../sdk/font" }
+toyos-font = { path = "../../../sdk/font", default-features = false }
 toyos-input = { path = "../../../lib/input" }
 toyos-window = { path = "../../../sdk/window" }
 

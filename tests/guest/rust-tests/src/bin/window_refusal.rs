@@ -123,12 +123,12 @@ fn serve_one(acceptor: &Acceptor, reply: Reply) {
         Reply::Close => {}
         Reply::NoBuffer => {
             let scale = window::Scale::ONE.wire();
-            let info = window::WindowInfo { width: 100, height: 100, stride: 100, pixel_format: 0, scale };
+            let info = window::WindowInfo { width: 100, height: 100, stride: 100, pixel_format: 0, scale, generation: 0 };
             ipc::send(handle, window::MSG_WINDOW_CREATED, &info)
                 .expect("send a window with no buffer");
         }
         Reply::AbsurdScale(scale) => {
-            let info = window::WindowInfo { width: 100, height: 100, stride: 100, pixel_format: 0, scale };
+            let info = window::WindowInfo { width: 100, height: 100, stride: 100, pixel_format: 0, scale, generation: 0 };
             ipc::send(handle, window::MSG_WINDOW_CREATED, &info)
                 .expect("send a window at an absurd scale");
         }

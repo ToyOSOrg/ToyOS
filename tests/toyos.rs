@@ -350,6 +350,12 @@ fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
         let said: Vec<&str> = log.lines().filter(|l| l.contains("compositor: display ")).collect();
         return Err(format!("the log does not say {chosen:?}; the compositor said {said:?}"));
     }
+    if let Some(kept) = log.lines().find(|l| l.contains("compositor: drawing at scale ") && l.contains(", kept ")) {
+        return Err(format!(
+            "the bench keeps a scale of its own in /state/compositor/scale, so the panel's is not what it draws at: \
+             {kept:?}; `screen scale auto` on it gives the panel's back"
+        ));
+    }
     for drawn in ["compositor: drawing at scale 1.5", "scale_window: logical 200x100 drawn 300x150 at scale 1.5"] {
         if !log.contains(drawn) {
             let said: Vec<&str> =
@@ -3903,7 +3909,9 @@ fn the_opening_exchange_with_qemus_agent_completes() -> Result<(), String> {
 /// claim: it starts at the size the device prefers, QEMU's default
 /// 1280x800, and its first frame reaches the scanout; then a VNC client
 /// resizes the host's display to 1024x768, the device raises its display
-/// event, and the compositor flips to that mode and draws it.
+/// event, and the compositor flips to that mode and draws it. The image's
+/// `scale=2` is held down to 1.75 and then 1.5, the steps those modes hold,
+/// so the flip relays the desktop at a new scale.
 ///
 /// "Drawn" is a screendump of the scanout at the mode's size holding the
 /// wallpaper's many colours: a scanout no frame reached is one colour, or
@@ -3944,7 +3952,11 @@ fn the_compositor_drives_the_virtio_gpu() -> Result<(), String> {
     let said = serial::Serial::named("the virtio-gpu boot", console);
     said.must_be_clean()?;
     said.must_say(FIRST)?;
-    eprintln!("  [virtio-gpu] 1280x800 drawn, then 1024x768 followed and drawn");
+    // The image's 2, held down to the step each mode holds, on the start and
+    // on the flip's relay.
+    said.must_say("compositor: drawing at scale 1.75, the image's")?;
+    said.must_say("compositor: scale 2 leaves 1024x768 less than the least screen; drawing at 1.5")?;
+    eprintln!("  [virtio-gpu] 1280x800 drawn at 1.75, then 1024x768 followed and drawn at 1.5");
     Ok(())
 }
 
