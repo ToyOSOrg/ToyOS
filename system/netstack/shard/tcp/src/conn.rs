@@ -555,6 +555,19 @@ impl Sync {
         }
         if !text.is_empty() {
             let placed = self.rx.place(seq, text);
+            crate::probe::add(&crate::probe::SEGS, 1);
+            crate::probe::add(&crate::probe::BYTES, u64::from(us32(text.len())));
+            crate::probe::add(
+                match placed {
+                    Placed::InOrder => &crate::probe::IN_ORDER,
+                    Placed::Filled => &crate::probe::FILLED,
+                    Placed::OutOfOrder => &crate::probe::OOO,
+                    Placed::Nothing => &crate::probe::NOTHING,
+                    Placed::RangeLimit => &crate::probe::RANGE_LIMIT,
+                },
+                1,
+            );
+            crate::probe::max(&crate::probe::MAX_UNREAD, self.rx.unread());
             if placed == Placed::RangeLimit {
                 ctx.log.count(Counter::OooRangeLimit);
             }
@@ -590,6 +603,9 @@ impl Sync {
         let next = self.rx.next;
         let keepalive = seg.seq == next.sub(1) && seg.text() <= 1;
         let probe = self.rx.window() == 0 && seg.seq == next;
+        if old && seg.text() > 0 {
+            crate::probe::add(&crate::probe::OLD, 1);
+        }
         if old && seg.text() > 0 && self.sack_ok {
             self.rx.duplicate(seg.seq.add(u32::from(seg.syn())), seg.text());
         } else if old || keepalive || probe {
@@ -1181,6 +1197,12 @@ impl Sync {
     /// Every segment sent carries the window and the acknowledgment it was built with.
     fn acknowledged(&mut self) {
         self.rx.advertise(self.smss());
+        crate::probe::add(&crate::probe::ACKS, 1);
+        if self.rx.owes_sack() {
+            crate::probe::add(&crate::probe::SACKS, 1);
+        }
+        crate::probe::set(&crate::probe::WINDOW, usize::try_from(self.rx.last_window).unwrap_or(usize::MAX));
+        crate::probe::min(&crate::probe::MIN_WINDOW, usize::try_from(self.rx.last_window).unwrap_or(usize::MAX));
         self.rx.sent_ack();
     }
 

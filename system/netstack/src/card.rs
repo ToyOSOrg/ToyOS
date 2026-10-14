@@ -74,6 +74,16 @@ impl Card {
         answered.unwrap_or_else(|why| panic!("netstack: this NIC cannot be driven on — {why}"))
     }
 
+    /// MEASUREMENT ONLY: the MAC's and the driver's counts, as the probe line's words.
+    pub fn probe_words(&self) -> String {
+        let Self::Intel(nic) = self else { return String::new() };
+        let (c, w) = nic.counts();
+        format!(
+            "rx={} overruns={} starved={} wire_rx={} wire_seen={} missed={} crc={} tx_full={}",
+            c.received, c.overruns, c.starved, w.received, w.seen, w.missed, w.crc_errors, c.tx_full
+        )
+    }
+
     /// What `inspect` reads about the card: which driver, its address, its
     /// link, and on the Intel parts what the driver and the MAC counted.
     ///
@@ -138,7 +148,13 @@ impl Card {
             Self::Virtio(_) => crate::virtio_net::RX_BUF_COUNT,
             Self::Intel(_) => toyos_i219::RX_RING - 1,
         };
-        let took = batch(budget, &mut |sink| self.rx(sink));
+        let mut frames = 0u64;
+        let took = batch(budget, &mut |sink| {
+            let got = self.rx(sink);
+            frames += u64::from(got);
+            got
+        });
+        crate::probe::took(frames);
         if let Self::Intel(nic) = self {
             nic.rx_flush();
         }

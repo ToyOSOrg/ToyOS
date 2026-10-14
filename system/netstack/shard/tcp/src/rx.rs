@@ -483,6 +483,9 @@ impl Rx {
     /// is owed when the window offered was below the threshold and the edge would now move by at
     /// least it (RFC 9293 §3.8.6.2.2).
     pub fn after_read(&mut self, n: usize, now: Instant, mss: u32) {
+        crate::probe::add(&crate::probe::READS, 1);
+        crate::probe::add(&crate::probe::READ_BYTES, u64::try_from(n).unwrap_or(u64::MAX));
+        crate::probe::set(&crate::probe::RTT_US, self.rtt.map_or(0, |rtt| usize::try_from(rtt.as_micros()).unwrap_or(usize::MAX)));
         let (began, read) = self.round;
         let read = read.saturating_add(n);
         self.round = (began, read);
@@ -490,7 +493,12 @@ impl Rx {
             let read = u128::try_from(read).unwrap_or(u128::MAX);
             let per_rtt = read.saturating_mul(rtt.as_nanos()).checked_div(now.since(began).as_nanos()).unwrap_or(0);
             let want = usize::try_from(per_rtt.saturating_mul(2)).unwrap_or(usize::MAX);
+            let was = self.buf.capacity();
             self.buf.grow(want.min(self.max));
+            if self.buf.capacity() > was {
+                crate::probe::add(&crate::probe::GROWS, 1);
+            }
+            crate::probe::set(&crate::probe::CAPACITY, self.buf.capacity());
             self.round = (now, 0);
         }
         if let Some(candidate) = self.candidate(mss) {

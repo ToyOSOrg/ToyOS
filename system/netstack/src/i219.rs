@@ -247,6 +247,7 @@ impl Nic {
     /// answer the link where this pass found it changed.
     pub fn begin_pass(&self) -> Result<Option<toyos_i219::Link>, toyos_i219::PassRefused<SyscallError>> {
         let pass = self.driver.borrow_mut().begin_pass()?;
+        crate::probe::began(pass.messages);
         Ok(pass.link_changed.then(|| self.link()))
     }
 

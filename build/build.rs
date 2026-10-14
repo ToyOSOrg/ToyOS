@@ -3073,6 +3073,7 @@ mod tests {
         "images/console.toml",
         "tests/images/acpicase.toml",
         "tests/images/clipboardcase.toml",
+        "tests/images/downloadcase.toml",
         "tests/images/drivescase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/jobcase.toml",

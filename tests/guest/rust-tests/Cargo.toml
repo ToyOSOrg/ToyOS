@@ -28,8 +28,11 @@ toyos-pci = { path = "../../../kernel/pci" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
 memmap2 = "0.9"
-# `ring`'s primitives, for `ring_kat`'s known answers.
+# MEASUREMENT ONLY: `https_download`'s client, `ureq` on `rustls`, and `ring`'s
+# primitives, for `ring_kat`'s known answers.
 ring = "0.17"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+rustls = { version = "0.23", default-features = false }
 
 # Outside the workspace, so it needs its own redirects: the forks
 # above depend on ToyOS crates by version, and only a patch maps those to the

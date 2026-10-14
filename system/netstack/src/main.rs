@@ -49,6 +49,7 @@ mod client;
 mod i219;
 mod lent;
 mod pipes;
+mod probe;
 mod serve;
 mod virtio_net;
 mod watches;
@@ -378,6 +379,8 @@ fn main() {
     let mut pending: Vec<PendingConn> = Vec::new();
     // Accepts the kernel refused since the last it did not.
     let mut accept_refused: u64 = 0;
+    // MEASUREMENT ONLY: when the probe line was last said, and what had moved by then.
+    let mut probed = (Wall::now(), (0u64, 0u64));
 
     loop {
         // First, because it is what makes the interrupt taken.
@@ -405,6 +408,17 @@ fn main() {
             }
         }
         card.report();
+        let moved = (probe::TOTALS.get().frames, toyos_net_tcp::probe::BYTES.load(std::sync::atomic::Ordering::Relaxed));
+        if probed.0.elapsed() >= probe::EVERY && moved != probed.1 {
+            say!(
+                "netstack: probe t_ms={} {} {} {}",
+                toyos_abi::clock::nanos_since_boot() / 1_000_000,
+                probe::words(),
+                card.probe_words(),
+                toyos_net_tcp::probe::words()
+            );
+            probed = (Wall::now(), moved);
+        }
 
         sockets.settle(&mut node, now);
         // Before anything is served: the lease is what gives this machine an

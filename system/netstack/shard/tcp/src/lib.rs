@@ -38,6 +38,8 @@ mod cc;
 mod conn;
 mod counters;
 mod open;
+/// MEASUREMENT ONLY, never lands.
+pub mod probe;
 #[cfg(test)]
 mod props;
 mod ring;
