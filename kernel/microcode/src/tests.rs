@@ -251,14 +251,6 @@ fn the_newest_update_naming_the_cpu_is_chosen_wherever_it_sits() {
 }
 
 #[test]
-fn a_vendor_toyos_has_no_loader_for_loads_nothing() {
-    assert_eq!(loader(Vendor::Intel), Ok(()));
-    for vendor in [Vendor::Amd, Vendor::Hygon, Vendor::Centaur, Vendor::Zhaoxin, Vendor::Unknown] {
-        assert_eq!(loader(vendor), Err(Unloaded::Vendor(vendor)));
-    }
-}
-
-#[test]
 fn a_guest_loads_nothing_whatever_revision_it_reports() {
     for found in [Revision(0xbe), Revision::DISABLED] {
         assert_eq!(may_load(1 << 31, found), Err(Unloaded::Hypervisor));

@@ -127,7 +127,17 @@ pub struct KernelArgs {
     /// failed or answered one that does not, which is a machine and not an
     /// error: the loader's line says which, and the kernel has no wall clock.
     pub wall_clock_known: u64,
+    /// The base block of the panel's EDID, unparsed, as firmware published it
+    /// through `EFI_EDID_ACTIVE_PROTOCOL` on the one GOP handle that shows
+    /// [`Self::gop_framebuffer`] in its mode, and how many of these bytes it
+    /// is: [`EDID_BLOCK`], or zero where no such handle carries one. The bytes
+    /// are firmware's, decoded by whoever reads them.
+    pub gop_edid: [u8; EDID_BLOCK],
+    pub gop_edid_len: u64,
 }
+
+/// The bytes of [`KernelArgs::gop_edid`]: one EDID base block.
+pub const EDID_BLOCK: usize = 128;
 
 /// The bytes of [`KernelArgs::loader_seed`].
 pub const SEED_LEN: usize = 32;
@@ -252,7 +262,9 @@ const _: () = {
     assert!(offset_of!(KernelArgs, wall_clock_secs) == 1312);
     assert!(offset_of!(KernelArgs, wall_clock_counter) == 1320);
     assert!(offset_of!(KernelArgs, wall_clock_known) == 1328);
-    assert!(size_of::<KernelArgs>() == 1336);
+    assert!(offset_of!(KernelArgs, gop_edid) == 1336);
+    assert!(offset_of!(KernelArgs, gop_edid_len) == 1464);
+    assert!(size_of::<KernelArgs>() == 1472);
     assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
@@ -352,6 +364,8 @@ mod tests {
         wall_clock_secs: 0,
         wall_clock_counter: 0,
         wall_clock_known: 0,
+        gop_edid: [0; EDID_BLOCK],
+        gop_edid_len: 0,
     };
 
     #[test]

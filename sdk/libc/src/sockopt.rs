@@ -1,7 +1,7 @@
 //! The socket options libc keeps a value for, and how an option's value
-//! crosses `setsockopt` and `getsockopt`: each an `int`, refused and truncated
-//! as Linux does, whose option numbers these are. It reads nothing but what it
-//! is handed, so the host tests it (`toyos-libc-copies`) against the host's
+//! crosses `setsockopt` and `getsockopt`: each an `int`, under the numbers
+//! `<sys/socket.h>` and `<netinet/tcp.h>` declare. It reads nothing but what
+//! it is handed, so the host tests it (`toyos-libc-copies`) against the host's
 //! own two calls.
 
 use core::mem::size_of;
@@ -19,9 +19,11 @@ pub(crate) enum Kept {
 }
 
 /// The kept option `optname` names at `level`, asked of a datagram socket or a
-/// stream. A datagram socket has no option at TCP's level, which Linux says
-/// before it reads a value or a length, and in two words: to a setter
-/// [`Refusal::NoSuchOption`], to a getter [`Refusal::NotSupported`].
+/// stream. A datagram socket has no option at TCP's level, which is said
+/// before a value or a length is read: to a setter [`Refusal::NoSuchOption`],
+/// POSIX's `ENOPROTOOPT`, and to a getter [`Refusal::NotSupported`], where
+/// POSIX requires `ENOPROTOOPT` too
+/// (`issues/getsockopt-answers-eopnotsupp-where-posix-requires-enoprotoopt.md`).
 pub(crate) fn kept(level: i32, optname: i32, datagram: bool, setter: bool) -> Result<Option<Kept>, Refusal> {
     match (level, optname) {
         (IPPROTO_TCP, _) if datagram => Err(if setter { Refusal::NoSuchOption } else { Refusal::NotSupported }),

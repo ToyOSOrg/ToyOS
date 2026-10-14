@@ -14,10 +14,9 @@ opened: 2026-10-11
 **Candidates** (scan of the restructured tree, 2026-10-11), best first:
 1. `toyos-fat32-check`: FAT32 checker written from Microsoft's fatgen103. No ToyOS dependencies, `no_std`.
 2. `toyos-fat32`: FAT32 read/write hardened against hostile volumes. It needs `toyos-wallclock` folded in, and its tests made self-contained.
-3. `toyos-cpuvuln`: Linux's CPU vulnerability verdicts from CPUID/MSR facts. Its parity is pinned to one Linux tag.
-4. The bcachefs `upstream` reader, split out of `lib/bcachefs`.
-5. `toyos-microcode` and `toyos-usbhid`.
-6. Later: the TCP stack (once `wire`'s grab-bag is factored out), the SSH server (once its track and defect issues close), and the AML interpreter (once it is decoupled from `toyos-acpi`).
+3. The bcachefs `upstream` reader, split out of `lib/bcachefs`.
+4. `toyos-microcode` and `toyos-usbhid`.
+5. Later: the TCP stack (once `wire`'s grab-bag is factored out), the SSH server (once its track and defect issues close), and the AML interpreter (once it is decoupled from `toyos-acpi`).
 
 **Not candidates:** sha2/sha2-hw, random, crc, wallclock and tmpdir. Widely used crates already do their jobs.
 

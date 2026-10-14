@@ -1,8 +1,8 @@
 //! A `sigset_t` as `sigemptyset`, `sigfillset` and `sigaddset` make one, and a
 //! thread's signal mask as `pthread_sigmask` and `sigprocmask` change it:
-//! signal `n` is bit `n - 1` of a `sigset_t`, Linux's layout. It reads and
-//! sets nothing but what it is handed, so the host tests it
-//! (`toyos-libc-copies`).
+//! signal `n` is bit `n - 1` of the `unsigned long` `<signal.h>` declares a
+//! `sigset_t`. It reads and sets nothing but what it is handed, so the host
+//! tests it (`toyos-libc-copies`).
 
 pub(crate) const SIG_BLOCK: i32 = 0;
 pub(crate) const SIG_UNBLOCK: i32 = 1;

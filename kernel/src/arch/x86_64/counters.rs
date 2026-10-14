@@ -1,10 +1,10 @@
 //! Which of this CPU's model-specific counters it reads: decided on the CPU
-//! itself at bring-up, by `toyos_cpuvuln::counters` over its own CPUID, and
+//! itself at bring-up, by `kernel::cpu::counters` over its own CPUID, and
 //! the power envelope where `control_regs` declared it.
 
 use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
-use toyos_cpuvuln::CounterFacts;
+use kernel::cpu::CounterFacts;
 
 use super::{cpu, percpu};
 use crate::counters::{Firmware, Hardware};
@@ -23,7 +23,7 @@ static ADMITTED: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
 pub fn bring_up() {
     let (signature, _, cpuid_1_ecx, _) = cpu::cpuid(1, 0);
     let (_, cpuid_6_ecx) = cpu::leaf_6();
-    let verdict = toyos_cpuvuln::counters(&CounterFacts {
+    let verdict = kernel::cpu::counters(&CounterFacts {
         vendor: cpu::vendor(),
         signature,
         cpuid_1_ecx,

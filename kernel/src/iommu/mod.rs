@@ -2,7 +2,7 @@
 //!
 //! Inventories the machine's IOMMU units, turns translation on, and hands a driver an address space of its own to put its DMA in; an unusable unit is logged and left off rather than halting boot. Names above the backend stay backend-neutral, and what every backend decides alike is declared here once: a domain's addresses ([`window`]) and what a fault record ends ([`fault`]).
 //!
-//! The refusal is deliberately not yet built for a driver in this kernel: landing it before any userspace driver exists would cost every machine and protect nothing. A function a *process* drives is the other case and is refused ([`OwnSpace`], [`remapping`]), because a descriptor it writes a physical address into is an arbitrary read and write over all of memory, and a message nothing translates for it alone raises any claim's interrupt; its message is its claim slot's own, translated for it alone ([`Remapped`]).
+//! The refusal is deliberately not yet built for a driver in this kernel: landing it before any userspace driver exists would cost every machine and protect nothing. A function a *process* drives is the other case and is refused ([`OwnSpace`], [`remapping`]), because a descriptor it writes a physical address into is an arbitrary read and write over all of memory, and a message nothing translates for it alone raises any claim's interrupt; its message raises its own interrupt, translated for it alone ([`Remapped`]).
 //!
 //! `trait Iommu` is deliberately not added: with one backend it would have a single implementor.
 
@@ -294,8 +294,8 @@ pub struct MsiMessage {
     pub data: u32,
 }
 
-/// Every claimed function's message is translated to its claim slot's own
-/// interrupt, and no other's. Only [`remapping`] makes one.
+/// Every claimed function's message is translated to its own interrupt, and
+/// no other's. Only [`remapping`] makes one.
 #[derive(Clone, Copy)]
 pub struct Remapping(());
 
@@ -313,18 +313,16 @@ pub fn remapping() -> Result<Remapping, NotRemapped> {
     }
 }
 
-/// A claimed function's message: claim slot `slot`'s own, translated for
-/// [`Self::function`] alone.
+/// A claimed function's message, raising an interrupt of its own and
+/// translated for [`Self::function`] alone.
 ///
 /// The only message a function a process drives is armed with, since
 /// [`claim_msi`] is the only thing that makes one; and dropping it takes the
-/// translation back, so no refusal after it is written leaves the function a
-/// message that reaches anything.
+/// translation and the interrupt back, so no refusal after it is written
+/// leaves the function a message that reaches anything.
 pub struct Remapped {
-    slot: usize,
+    claimed: messages::Claimed,
     function: crate::drivers::pci::PciDevice,
-    address: u32,
-    data: u32,
 }
 
 impl Remapped {
@@ -333,11 +331,16 @@ impl Remapped {
     }
 
     pub fn address(&self) -> u32 {
-        self.address
+        self.claimed.msi.address
     }
 
     pub fn data(&self) -> u32 {
-        self.data
+        self.claimed.msi.data
+    }
+
+    /// What the message raises, for the record.
+    pub fn interrupt(&self) -> impl core::fmt::Display + '_ {
+        self.claimed.interrupt()
     }
 
     fn stream(&self) -> StreamId {
@@ -347,19 +350,20 @@ impl Remapped {
 
 impl Drop for Remapped {
     fn drop(&mut self) {
-        messages::release(self.slot, self.stream());
+        messages::release(&self.claimed, self.stream());
     }
 }
 
-/// Claim slot `slot`'s message, translated for `function` alone.
+/// A message for `pcidev` function `number`, raising an interrupt taken for
+/// it and translated for `function` alone.
 pub fn claim_msi(
     _: Remapping,
-    slot: usize,
+    number: usize,
     function: &crate::drivers::pci::PciDevice,
 ) -> Result<Remapped, Refused> {
     let stream = StreamId::pci(function.bus, function.dev, function.func);
-    let msi = messages::claim(slot, stream)?;
-    Ok(Remapped { slot, function: *function, address: msi.address, data: msi.data })
+    let claimed = messages::claim(number, stream)?;
+    Ok(Remapped { claimed, function: *function })
 }
 
 /// The message a kernel driver's `bus:device.function` raises `irq` with.
@@ -373,18 +377,6 @@ pub fn driver_msi(
 ) -> Result<MsiMessage, Refused> {
     messages::msi(StreamId::pci(bus, device, function), irq)
         .map(|msi| MsiMessage { address: msi.address, data: msi.data })
-}
-
-/// Record that `bus:device.function` is driven by a process on `slot`, or is no
-/// longer driven by one.
-///
-/// What the fault handler needs it for is its *terminal* action. A stream every
-/// driver of which is in this kernel has nothing to hand a fault to, so the
-/// response is a halt; a stream a process drives has an owner to refuse, and
-/// the machine keeps running. Takes the triple rather than a [`StreamId`], like
-/// [`driver_msi`]: what a requester id is stays in this module.
-pub fn note_user_owned(bus: u8, device: u8, function: u8, slot: Option<usize>) {
-    fault::user_owned(StreamId::pci(bus, device, function), slot);
 }
 
 /// Reached from the IDT gate the unit's own `FEDATA` names.

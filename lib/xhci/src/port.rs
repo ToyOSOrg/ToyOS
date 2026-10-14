@@ -17,8 +17,8 @@ pub type Nanos = u64;
 /// How long a connect state must hold still before the driver acts on it.
 ///
 /// USB 2.0 §7.1.7.3 requires 100 ms between an attach being detected and the
-/// port reset that follows it — TATTDB, which Linux's `hub_port_debounce`
-/// calls `HUB_DEBOUNCE_STABLE`.
+/// port reset that follows it: TATTDB, which the Connect Timing ECN renames
+/// TCON_RST.
 pub const DEBOUNCE_NS: Nanos = 100_000_000;
 
 /// How long a scan on which *nothing at all* has connected keeps looking, from
