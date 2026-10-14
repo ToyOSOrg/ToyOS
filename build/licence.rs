@@ -243,13 +243,14 @@ pub const EXCEPTIONS: &[Exception] = &[
 /// that carries the attribution, or says why it is ours. The fourth is the
 /// licence [`judge`] holds the file to wherever an image ships it.
 ///
-/// `build/sourcegate.rs` holds the rows to the tree. **Two populations, and each
-/// is a spelling too.** Everything `git` tracks
+/// `build/sourcegate.rs` holds the rows to the tree. **Two populations must
+/// have a row, and each is a spelling too.** Everything `git` tracks
 /// that carries a NUL in its first 8000 bytes, which is git's own heuristic for
 /// a file nobody can read in review; and everything under `assets/`, text or
-/// not, because that directory is where third-party material arrives. A
-/// third-party *text* file anywhere else — a ninth Phosphor SVG one directory
-/// over — is reached by neither, and the corpus by count alone and no digest;
+/// not, because that directory is where third-party material arrives. A text
+/// file anywhere else is held to its row when it has one. A third-party *text*
+/// file without one — a ninth Phosphor SVG one directory over — is reached by
+/// neither, and the corpus by count alone and no digest;
 /// `issues/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
 /// what is left of that gap.
 pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
@@ -591,6 +592,102 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "6a08f75ee01bdbd1e77c9b3affd6185e981d86995da432c90ed107676f08eb83",
         "ours: a ToyOS binary this build produced (lib/symbols/tests/real.rs)",
         Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/aes_gcm_test.json",
+        "985e5ecc172e181eaf49e89508b9470dcf478002eb7e8559c707eb42dc97dfe7",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/chacha20_poly1305_test.json",
+        "fe61d25f90e1bde4461d00eafe61049e5f29bd999f36b766df9cda90906ad53d",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/ecdsa_secp256r1_sha256_test.json",
+        "182db4f3e230f6f9fa9f800d2a614dede30284b8e8438bbfe1171905402e9332",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/ecdsa_secp384r1_sha384_test.json",
+        "8a5b3ae1760975143414811f13588c24d951d9d8c904195087ba327591dfe9cc",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/ed25519_test.json",
+        "752d2ea7d7c6cf4736381b6cbacb61f8182b126ab7cd9b058f00c50084975536",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/hkdf_sha256_test.json",
+        "bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/hkdf_sha384_test.json",
+        "69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/hkdf_sha512_test.json",
+        "bb9a21f4e86041caf5d7792b030349f8ff289087f195b2fbc0fc0afc39deca6f",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/hmac_sha256_test.json",
+        "2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/hmac_sha384_test.json",
+        "28b9776e979dd755d852ca471043ea6cedce8b15f7a28abdf6ea9efd982b43c0",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/hmac_sha512_test.json",
+        "b6c90477bdb4a6fc8ee3d1f7b2c0b69a8dfffab34718abaa6cabd71cc2ba1207",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_pss_2048_sha256_mgf1_32_test.json",
+        "7f6efafc160f4816b96cbf1c12188a31051d7e3f001e27505d9edb5f2a0e325c",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/rsa_signature_2048_sha256_test.json",
+        "94a917b01ff50fb874cfc05bf29b4af44868d944a6558201cf18380da93fb393",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/x25519_test.json",
+        "35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/data/nist-mlkem-encapdecap.json",
+        "5e88fbd351dc2915b2ab399f5dffd269e1cdbdd0186103ab0e90b374cf592187",
+        "NOTICE",
+        Terms::Spdx("NIST-Software"),
+    ),
+    (
+        "lib/crypto/tests/data/nist-mlkem-keygen.json",
+        "d7a62a2c3476957f56dd8d24f9004ea6776ccfe995ffe71a65bb9506dc9c7b1b",
+        "NOTICE",
+        Terms::Spdx("NIST-Software"),
     ),
     (
         "lib/crypto/tests/keys/rsa-2048.pk8",

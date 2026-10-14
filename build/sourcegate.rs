@@ -759,7 +759,8 @@ mod tests {
         let mut found: Vec<(String, String)> = Vec::new();
         for name in &listing {
             let Ok(bytes) = std::fs::read(root.join(name)) else { continue };
-            if !is_binary(&bytes) && !name.starts_with("assets/") {
+            let declared = COMMITTED_FILES.iter().any(|(f, ..)| f == name);
+            if !is_binary(&bytes) && !name.starts_with("assets/") && !declared {
                 continue;
             }
             found.push((name.to_string(), digest(&bytes)));
