@@ -71,7 +71,7 @@ macro_rules! refusals {
 refusals! {
     // The MAC header, 9.2.
     Truncated = Malformed, "the bytes end inside a field";
-    ProtocolVersion = Unsupported, "the protocol version is not 0 (9.2.4.1.2)";
+    ProtocolVersion = Unsupported, "the protocol version is not 0 (§9.2.4.1.2)";
     ExtensionFrame = Unsupported, "a frame of type Extension (DMG and S1G only)";
     ReservedSubtype = Malformed, "a subtype the standard reserves";
     ManagementWithDs = Malformed, "a management frame with To DS or From DS set";
@@ -81,10 +81,10 @@ refusals! {
     StrictlyOrdered = Unsupported, "a non-QoS data frame with the Order bit set";
     Fragmented = Unsupported, "a fragment of an MSDU or MMPDU";
     GroupTransmitter = Malformed, "a transmitter address with the group bit set";
-    // Management bodies, 9.3.3.
+    // Management bodies, §9.3.3.
     ZeroBeaconInterval = Malformed, "a beacon interval of 0 time units";
     AssociationId = Malformed, "an association ID outside 1 to 2007 in a successful response";
-    // Elements, 9.4.2.
+    // Elements, §9.4.2.
     ElementPastBody = Malformed, "an element's length runs past the frame body";
     ExtensionWithoutId = Malformed, "an Element ID Extension element of length 0";
     DuplicateElement = Malformed, "an element that may appear once appears twice";
@@ -103,11 +103,11 @@ refusals! {
     ExtendedRsnLength = Malformed, "an RSNXE whose field length runs past the element";
     SecondaryChannelOffset = Malformed, "an HT Operation secondary channel offset of 2";
     VhtReserved = Malformed, "a VHT capability or operation field of a reserved value";
-    // Control frames, 9.3.1.
+    // Control frames, §9.3.1.
     BlockAckVariant = Unsupported, "a block-ack variant other than Compressed";
     BitmapSize = Unsupported, "a compressed bitmap other than 64 bits";
     ControlLength = Malformed, "a block-ack frame whose length its variant does not give";
-    // Data, 9.3.2 and 12.5.3.
+    // Data, §9.3.2 and §12.5.3.
     SubframeLength = Malformed, "an A-MSDU subframe whose length runs past the MPDU";
     SubframePadding = Malformed, "an A-MSDU subframe whose padding runs past the MPDU";
     SnapHeaderAsAddress = Malformed, "an A-MSDU whose first destination is an LLC/SNAP header";
@@ -116,7 +116,7 @@ refusals! {
     TranslatedType = Malformed, "an RFC 1042 header carrying a type 802.1H sends by bridge-tunnel";
     LengthField = Unsupported, "an EtherType below 0x0600, which is an IEEE 802.3 length";
     ExtendedIvClear = Malformed, "a CCMP header without its Ext IV bit";
-    // The reordering buffer, 10.25.6.
+    // The reordering buffer, §10.25.6.
     WindowSize = Malformed, "a reordering buffer of 0 or more than 64 MPDUs";
     OldSequence = Malformed, "a sequence number before the window";
     DuplicateSequence = Malformed, "a sequence number already held in the window";
@@ -142,7 +142,7 @@ impl Address {
     }
 }
 
-/// A 12-bit sequence number, compared modulo 4096 (9.2.4.4.2, 10.3.2.14).
+/// A 12-bit sequence number, compared modulo 4096 (§9.2.4.4.2, §10.3.2.14).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Seq(u16);
 

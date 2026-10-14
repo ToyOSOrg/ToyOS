@@ -1,7 +1,7 @@
-//! Elements (9.4.2): the TLV walk of a body's element list, and the elements a station decides
+//! Elements (§9.4.2): the TLV walk of a body's element list, and the elements a station decides
 //! by, each checked against its definition and allowed once.
 //!
-//! An element this module does not type is skipped, as 10.28.9 has a receiver ignore what it
+//! An element this module does not type is skipped, as §10.28.9 has a receiver ignore what it
 //! does not know; one it types that breaks its definition refuses the whole list.
 
 mod country;
@@ -17,7 +17,7 @@ pub use tim::Tim;
 use crate::read::Reader;
 use crate::Refused;
 
-/// An element's identifier: an Element ID, or 255 and its Element ID Extension (9.4.2.1).
+/// An element's identifier: an Element ID, or 255 and its Element ID Extension (§9.4.2.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Id {
     Base(u8),
@@ -84,7 +84,7 @@ impl<'a> Iter<'a> {
     }
 }
 
-/// A rate in units of 500 kb/s, or a BSS membership selector (9.4.2.3).
+/// A rate in units of 500 kb/s, or a BSS membership selector (§9.4.2.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rate {
     /// In the BSSBasicRateSet, or for a selector, required of a member.
@@ -129,7 +129,7 @@ pub struct Elements<'a> {
     pub extended_capabilities: Option<ExtendedCapabilities<'a>>,
 }
 
-/// The Extended Capabilities element: bit n of its field, absent past its length, is 0 (9.4.2.26).
+/// The Extended Capabilities element: bit n of its field, absent past its length, is 0 (§9.4.2.26).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExtendedCapabilities<'a>(pub &'a [u8]);
 

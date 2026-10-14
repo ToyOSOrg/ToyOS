@@ -1,4 +1,4 @@
-//! The receive reordering buffer against 10.25.6's rules, one rule per test.
+//! The receive reordering buffer against §10.25.6's rules, one rule per test.
 
 use toyos_ieee80211::reorder::Window;
 use toyos_ieee80211::{Refused, Seq};

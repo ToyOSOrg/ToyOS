@@ -1,13 +1,13 @@
-//! The RSN element (9.4.2.24) and the RSN Extension element (9.4.2.241).
+//! The RSN element (§9.4.2.24) and the RSN Extension element (§9.4.2.241).
 //!
 //! An RSNE's fields after its version are each optional, but only from the end: one present
-//! needs every one before it. What follows the last field is ignored, as 10.28.9 has a receiver
+//! needs every one before it. What follows the last field is ignored, as §10.28.9 has a receiver
 //! do with an extensible element.
 
 use crate::read::Reader;
 use crate::Refused;
 
-/// A cipher or AKM suite selector: an OUI or CID and a type (9.4.2.24.2, 9.4.2.24.3).
+/// A cipher or AKM suite selector: an OUI or CID and a type (§9.4.2.24.2, §9.4.2.24.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Suite(pub [u8; 4]);
 

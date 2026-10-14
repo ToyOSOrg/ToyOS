@@ -1,4 +1,4 @@
-//! Management frame bodies (9.3.3): the fixed fields of each subtype, and its elements still as
+//! Management frame bodies (§9.3.3): the fixed fields of each subtype, and its elements still as
 //! bytes for [`crate::element::Elements::parse`].
 //!
 //! An Authentication frame's fields past its status, an SAE exchange's among them, and an Action
@@ -24,7 +24,7 @@ pub enum Body<'a> {
     ActionNoAck { category: u8, rest: &'a [u8] },
 }
 
-/// A Beacon or Probe Response (9.3.3.2, 9.3.3.10).
+/// A Beacon or Probe Response (§9.3.3.2, §9.3.3.10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Beacon<'a> {
     pub timestamp: u64,
@@ -116,7 +116,7 @@ impl<'a> AssociationResponse<'a> {
     fn read(r: &mut Reader<'a>) -> Result<Self, Refused> {
         let capability = r.u16()?;
         let status = r.u16()?;
-        // The two most significant bits of the AID field are set (9.4.1.8).
+        // The two most significant bits of the AID field are set (§9.4.1.8).
         let aid = r.u16()? & 0x3FFF;
         let aid = match status {
             STATUS_SUCCESS if (1..=2007).contains(&aid) => Some(aid),

@@ -1,4 +1,4 @@
-//! The MAC header (9.2.3, 9.2.4) of the frames a station handles: every management subtype it
+//! The MAC header (§9.2.3, §9.2.4) of the frames a station handles: every management subtype it
 //! takes part in, BlockAckReq and BlockAck, and Data, Null, QoS Data and QoS Null.
 //!
 //! The input is one MPDU without its FCS. A body is handed back undecoded, because a protected
@@ -17,7 +17,7 @@ pub enum Frame<'a> {
     Data(Data<'a>),
 }
 
-/// The Frame Control flags a receiver acts on (9.2.4.1).
+/// The Frame Control flags a receiver acts on (§9.2.4.1).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Flags {
     pub retry: bool,
@@ -68,7 +68,7 @@ pub enum Ds {
     Both(Address),
 }
 
-/// The QoS Control field (9.2.4.5).
+/// The QoS Control field (§9.2.4.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QosControl(pub u16);
 

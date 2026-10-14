@@ -1,4 +1,4 @@
-//! The Country element (9.4.2.8): a country string, then triplets, then a pad octet of 0 where
+//! The Country element (§9.4.2.8): a country string, then triplets, then a pad octet of 0 where
 //! one makes the length even.
 
 use crate::Refused;

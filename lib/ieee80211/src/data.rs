@@ -1,4 +1,4 @@
-//! Data frame bodies: the CCMP header (12.5.3.2), A-MSDU (9.3.2.2), and translation between an
+//! Data frame bodies: the CCMP header (§12.5.3.2), A-MSDU (§9.3.2.2), and translation between an
 //! MSDU and an Ethernet II frame by IEEE 802.1H: an RFC 1042 LLC/SNAP header, or the bridge-tunnel
 //! one for the two EtherTypes 802.1H sends that way.
 

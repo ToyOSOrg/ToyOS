@@ -1,4 +1,4 @@
-//! The TIM element (9.4.2.5).
+//! The TIM element (§9.4.2.5).
 
 use crate::read::Reader;
 use crate::Refused;

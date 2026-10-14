@@ -1,4 +1,4 @@
-//! BlockAckReq (9.3.1.7) and BlockAck (9.3.1.8) of the Compressed variant, the only one an HT or
+//! BlockAckReq (§9.3.1.7) and BlockAck (§9.3.1.8) of the Compressed variant, the only one an HT or
 //! VHT station's immediate block-ack agreement uses; their bodies follow Frame Control and
 //! Duration.
 
@@ -38,7 +38,7 @@ impl BlockAck {
 /// The receiver and transmitter, the control field's TID, and the Starting Sequence Control.
 fn compressed(r: &mut Reader<'_>) -> Result<(Address, Address, u8, Seq), Refused> {
     let ra = r.address()?;
-    // A VHT transmitter may set the TA's group bit as a bandwidth signaling TA (9.3.1.1).
+    // A VHT transmitter may set the TA's group bit as a bandwidth signaling TA (§9.3.1.1).
     let Address([first, rest @ ..]) = r.address()?;
     let [b1, b2, b3, b4, b5] = rest;
     let ta = Address([first & !1, b1, b2, b3, b4, b5]);

@@ -137,7 +137,7 @@ pub fn mpdu(record: &Record) -> Vec<u8> {
     }
 }
 
-/// CRC-32 of IEEE 802.3 §3.2.9, which 802.11's FCS is (9.2.4.8).
+/// CRC-32 of IEEE 802.3 §3.2.9, which 802.11's FCS is (§9.2.4.8).
 pub fn crc32(bytes: &[u8]) -> u32 {
     let mut crc = !0u32;
     for &b in bytes {

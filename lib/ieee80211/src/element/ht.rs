@@ -1,5 +1,5 @@
-//! HT Capabilities (9.4.2.55), HT Operation (9.4.2.56), VHT Capabilities (9.4.2.157) and VHT
-//! Operation (9.4.2.158): fixed-length elements, refused at any other length or where a field
+//! HT Capabilities (§9.4.2.55), HT Operation (§9.4.2.56), VHT Capabilities (§9.4.2.157) and VHT
+//! Operation (§9.4.2.158): fixed-length elements, refused at any other length or where a field
 //! holds a value the standard reserves.
 
 use crate::read::Reader;
@@ -35,7 +35,7 @@ impl HtCapabilities {
     }
 }
 
-/// Secondary Channel Offset (9.4.2.56).
+/// Secondary Channel Offset (§9.4.2.56).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SecondaryChannel {
     None,
