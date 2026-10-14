@@ -1,22 +1,18 @@
 //! One step of the master level on soundserver's `volume` port and back,
-//! each answer the codec's own readback: the step reads back one position
-//! down and unmuted, and the step back leaves the level at the top.
+//! within the quiet range: from the bottom one position up and down again,
+//! each answer the codec's own readback.
 
-use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_STEP};
-
-fn step(volume: &toyos::Connection, delta: i32) -> Volume {
-    volume.send(MSG_VOLUME_STEP, &VolumeStep { delta }).expect("the step is sent");
-    let header = volume.recv_header().expect("soundserver answers the step");
-    assert_eq!(header.msg_type, MSG_VOLUME, "soundserver answered the step with message {}", header.msg_type);
-    volume.recv_payload(&header).expect("the answer is a volume")
-}
+#[path = "../master.rs"]
+mod master;
 
 fn main() {
-    let volume = toyos::endow::service("volume").expect("this job holds soundserver's volume port");
-    let down = step(&volume, 1);
+    let volume = master::connect();
+    let bottom = master::to_bottom(&volume).bottom;
+    assert!(bottom > 0, "a master with one position has no step to take");
+    let up = master::step(&volume, -1);
+    println!("step up: position {} of {}, muted {}", up.position, up.bottom, up.muted);
+    assert_eq!((up.position, up.muted), (bottom - 1, 0), "one step up reads back one position above the bottom");
+    let down = master::step(&volume, 1);
     println!("step down: position {} of {}, muted {}", down.position, down.bottom, down.muted);
-    assert_eq!((down.position, down.muted), (1, 0), "one step down reads back one position below the top");
-    let top = step(&volume, -1);
-    println!("step up: position {} of {}, muted {}", top.position, top.bottom, top.muted);
-    assert_eq!((top.position, top.muted), (0, 0), "the step back reads back the top");
+    assert_eq!((down.position, down.muted), (bottom, 0), "the step back reads back the bottom");
 }

@@ -486,6 +486,9 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| b[0].job_passed("test_rs_wake_storm_cost"),
         },
     ),
+    // The owner's directive (2026-10-14): no audible sound on the bench
+    // laptops, so these three rows keep the master within one step of its
+    // bottom and play the tone at -42 dBFS (`tests/guest/rust-tests/src/tone.rs`).
     (
         // A tone through soundserver's HDA path. The T14 and the AMD bench.
         "hda_tone",
@@ -511,9 +514,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // One step of the codec's master and back, each read back from the
-        // codec, on the HDA path soundserver configured. The T14 and the AMD
-        // bench.
+        // One step of the codec's master up from its bottom and back, each
+        // read back from the codec, on the HDA path soundserver configured.
+        // The T14 and the AMD bench.
         "hda_volume_step",
         metal::Metal {
             arms: TESTCASES,
