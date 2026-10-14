@@ -78,7 +78,7 @@ fn claim(cap: &SysCap) -> (PciId, Result<PciDev, SyscallError>) {
             _ => None,
         })
         .collect();
-    let left: Vec<_> = spares.iter().filter(|pci| pci.driven != Driven::Kernel).collect();
+    let left: Vec<_> = spares.iter().copied().filter(|pci| pci.driven != Driven::Kernel).collect();
     let pci = match (left.as_slice(), spares.as_slice()) {
         ([one], _) | ([], [one]) => *one,
         _ => panic!("usbd_spare: no one spare controller on this machine: {spares:?}"),
