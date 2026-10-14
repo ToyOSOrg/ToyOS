@@ -49,8 +49,9 @@ pub enum Served {
     Done,
 }
 
-/// A segment at the moment it leaves: headers from the state of now, payload borrowed from the
-/// send buffer.
+/// A segment at the moment it leaves: headers from the state of now, and its payload, borrowed
+/// from the send buffer where it lies in one piece of [tcp]'s own storage and otherwise copied out
+/// of it first, as a lent buffer's always is.
 #[derive(Clone, Copy, Debug)]
 pub struct Outgoing<'a> {
     pub source: Ipv4Addr,

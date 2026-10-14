@@ -187,10 +187,13 @@ impl Table {
         self.free_unused(slot)
     }
 
+    /// The end, where nothing reaches it any more. Its slot stays reserved
+    /// until [`free`] has cleared its halves, so no new stream takes the slot
+    /// and has its halves cleared under it.
     fn free_unused(&mut self, slot: usize) -> Option<End> {
         let end = *self.end(slot);
         (end.handles == 0 && end.calls == 0).then(|| {
-            self.slots[slot] = Slot::Free;
+            self.slots[slot] = Slot::Making;
             end
         })
     }
@@ -221,6 +224,7 @@ fn free(slot: usize, end: End) {
     *HALVES[slot].tx.lock() = None;
     syscall::close(end.bell);
     syscall::close(end.region);
+    TABLE.lock().unreserve(slot);
 }
 
 /// Why a stream call refused, in the protocol's words.
@@ -750,6 +754,8 @@ mod tests {
         assert_eq!(table.forget(h(11)), Some(None), "a call is left");
         assert_eq!(table.find(h(11)), None, "the handle reaches nothing");
         assert_eq!(table.returned(called), Some(End { handles: 0, calls: 0, ..end() }), "the last call frees it");
+        assert_eq!(table.reserve(), Some(slot + 1), "a freed slot is not taken before its halves are cleared");
+        table.unreserve(slot);
         assert_eq!(table.slots[slot], Slot::Free);
     }
 

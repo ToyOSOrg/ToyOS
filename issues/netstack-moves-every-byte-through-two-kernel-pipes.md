@@ -144,7 +144,11 @@ The design and its roast are PR #863's body.
   MB posted beside the scout's rows. No tree that lands has that row or that
   counter: the boot carries the scout's instrument, `git diff 777c96b2b
   2f9e090b8` (`wt/toyos-netring-scout` over its base), onto stage 3's head,
-  less the netstack stamps on the pipe writes stage 3 deletes.
+  less the netstack stamps on the pipe writes stage 3 deletes. As built, a
+  sent byte is copied twice by netstack, out of the lent send ring into a
+  scratch buffer and from it into the frame, since the frame builder takes
+  one slice; a builder that copies each span of the ring into the frame
+  itself would remove the first.
 - Stage 4: a listener's connection carries its wakes in place of its pipe, a
   datagram socket is a region as a stream is, and the pipe ABI's messages and
   `toyos::net`'s pipe handles go. netstack copies each datagram record's
