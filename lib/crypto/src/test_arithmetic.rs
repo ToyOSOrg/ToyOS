@@ -4,7 +4,7 @@ use crate::{
     montgomery::{Mod, V},
     scalar25519::S,
 };
-use rsa::BigUint;
+use num_bigint::BigUint;
 use std::vec::Vec;
 
 fn fixtures(modulus: &BigUint, size: usize) -> Vec<BigUint> {

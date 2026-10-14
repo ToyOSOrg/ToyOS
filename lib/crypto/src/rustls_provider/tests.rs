@@ -379,32 +379,11 @@ fn transcript_forks_keep_their_own_prefix_and_key_schedule_matches_ring() {
 
 #[test]
 fn rsa_authenticated_tls12_and_tls13_interoperate_with_ring() {
-    use rsa::pkcs8::EncodePrivateKey;
-    struct Rng;
-    impl rsa::rand_core::RngCore for Rng {
-        fn next_u32(&mut self) -> u32 {
-            let mut b = [0; 4];
-            self.fill_bytes(&mut b);
-            u32::from_le_bytes(b)
-        }
-        fn next_u64(&mut self) -> u64 {
-            let mut b = [0; 8];
-            self.fill_bytes(&mut b);
-            u64::from_le_bytes(b)
-        }
-        fn fill_bytes(&mut self, out: &mut [u8]) {
-            Entropy.fill(out).unwrap();
-        }
-        fn try_fill_bytes(&mut self, out: &mut [u8]) -> Result<(), rsa::rand_core::Error> {
-            self.fill_bytes(out);
-            Ok(())
-        }
-    }
-    impl rsa::rand_core::CryptoRng for Rng {}
-    let private = rsa::RsaPrivateKey::new(&mut Rng, 2048).unwrap();
-    let der = private.to_pkcs8_der().unwrap();
     let key = rcgen::KeyPair::from_der_and_sign_algo(
-        &rustls::pki_types::PrivatePkcs8KeyDer::from(der.as_bytes()).into(),
+        &rustls::pki_types::PrivatePkcs8KeyDer::from(
+            &include_bytes!("../../tests/keys/rsa-2048.pk8")[..],
+        )
+        .into(),
         &rcgen::PKCS_RSA_SHA256,
     )
     .unwrap();

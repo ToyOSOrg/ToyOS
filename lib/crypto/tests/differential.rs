@@ -323,66 +323,36 @@ fn wpa2_pmk_and_rfc3394_unwrap() {
     assert_eq!(out, [0; 16]);
 }
 
-struct TestRandom(u64);
-impl TestRandom {
-    fn byte(&mut self) -> u8 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0 as u8
-    }
-}
-impl rsa::rand_core::RngCore for TestRandom {
-    fn next_u32(&mut self) -> u32 {
-        let mut b = [0; 4];
-        self.fill_bytes(&mut b);
-        u32::from_le_bytes(b)
-    }
-    fn next_u64(&mut self) -> u64 {
-        let mut b = [0; 8];
-        self.fill_bytes(&mut b);
-        u64::from_le_bytes(b)
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        for b in dest {
-            *b = self.byte()
-        }
-    }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rsa::rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-}
-// This marker is required by the test oracle, never used by production code.
-impl rsa::rand_core::CryptoRng for TestRandom {}
+/// PKCS #1 v1.5 and PSS signatures ring makes with the committed test keys,
+/// over each hash, verified; and refused for another message or a short PSS
+/// signature. PSS's salt is ring's system randomness, which a verdict does
+/// not depend on.
 #[test]
 fn rsa_reference_pkcs1_and_pss() {
-    use rsa::{Pkcs1v15Sign, Pss, traits::PublicKeyParts};
-    use sha2::Digest;
-    let mut random = TestRandom(0x0123456789abcdef);
-    for bits in [2048, 4096] {
-        let private = rsa::RsaPrivateKey::new(&mut random, bits).unwrap();
-        let public = private.to_public_key();
-        let ours = toyos_crypto::rsa::PublicKey::from_components(
-            &public.n().to_bytes_be(),
-            &public.e().to_bytes_be(),
-        )
-        .unwrap();
+    use ring::signature::{self, RsaKeyPair, RsaPublicKeyComponents};
+    let random = ring::rand::SystemRandom::new();
+    for der in [
+        &include_bytes!("keys/rsa-2048.pk8")[..],
+        include_bytes!("keys/rsa-4096.pk8"),
+    ] {
+        let private = RsaKeyPair::from_pkcs8(der).unwrap();
+        let public: RsaPublicKeyComponents<Vec<u8>> = private.public().into();
+        let ours = toyos_crypto::rsa::PublicKey::from_components(&public.n, &public.e).unwrap();
+        let sign = |scheme: &'static dyn signature::RsaEncoding| {
+            let mut signature = vec![0; private.public().modulus_len()];
+            private.sign(scheme, &random, b"ToyOS", &mut signature).unwrap();
+            signature
+        };
         macro_rules! check {
-            ($hash:ident) => {
-                let digest = sha2::$hash::digest(b"ToyOS");
-                let signature = private
-                    .sign(Pkcs1v15Sign::new::<sha2::$hash>(), &digest)
-                    .unwrap();
+            ($hash:ident, $pkcs1:ident, $pss:ident) => {
+                let signature = sign(&signature::$pkcs1);
                 ours.verify_pkcs1_v1_5(toyos_crypto::rsa::Hash::$hash, b"ToyOS", &signature)
                     .unwrap();
                 assert!(
                     ours.verify_pkcs1_v1_5(toyos_crypto::rsa::Hash::$hash, b"changed", &signature)
                         .is_err()
                 );
-                let signature = private
-                    .sign_with_rng(&mut random, Pss::new::<sha2::$hash>(), &digest)
-                    .unwrap();
+                let signature = sign(&signature::$pss);
                 ours.verify_pss(toyos_crypto::rsa::Hash::$hash, b"ToyOS", &signature)
                     .unwrap();
                 assert!(
@@ -399,9 +369,9 @@ fn rsa_reference_pkcs1_and_pss() {
                 );
             };
         }
-        check!(Sha256);
-        check!(Sha384);
-        check!(Sha512);
+        check!(Sha256, RSA_PKCS1_SHA256, RSA_PSS_SHA256);
+        check!(Sha384, RSA_PKCS1_SHA384, RSA_PSS_SHA384);
+        check!(Sha512, RSA_PKCS1_SHA512, RSA_PSS_SHA512);
     }
 }
 

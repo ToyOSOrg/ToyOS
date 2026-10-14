@@ -1795,7 +1795,7 @@ dependencies = [
  "p384 0.14.0-rc.8",
  "p521",
  "rand_core 0.10.0",
- "rsa 0.10.0-rc.17",
+ "rsa",
  "sec1 0.8.1",
  "sha1 0.11.0-rc.5",
  "sha2 0.11.0-rc.5",
@@ -2269,6 +2269,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "num-bigint"
+version = "0.4.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
 name = "num-bigint-dig"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2282,7 +2292,6 @@ dependencies = [
  "rand 0.8.5",
  "serde",
  "smallvec",
- "zeroize",
 ]
 
 [[package]]
@@ -2329,7 +2338,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
- "libm",
 ]
 
 [[package]]
@@ -2914,17 +2922,6 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pkcs1"
-version = "0.7.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8ffb9f10fa047879315e6625af03c164b16962a5368d724ed16323b68ace47f"
-dependencies = [
- "der 0.7.10",
- "pkcs8 0.10.2",
- "spki 0.7.3",
-]
-
-[[package]]
-name = "pkcs1"
 version = "0.8.0-rc.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "986d2e952779af96ea048f160fd9194e1751b4faea78bcf3ceb456efe008088e"
@@ -3329,27 +3326,6 @@ dependencies = [
 
 [[package]]
 name = "rsa"
-version = "0.9.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8573f03f5883dcaebdfcf4725caa1ecb9c15b2ef50c43a07b816e06799bb12d"
-dependencies = [
- "const-oid 0.9.6",
- "digest 0.10.7",
- "num-bigint-dig",
- "num-integer",
- "num-traits",
- "pkcs1 0.7.5",
- "pkcs8 0.10.2",
- "rand_core 0.6.4",
- "sha2 0.10.9",
- "signature 2.2.0",
- "spki 0.7.3",
- "subtle",
- "zeroize",
-]
-
-[[package]]
-name = "rsa"
 version = "0.10.0-rc.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "87ed3e93fc7e473e464b9726f4759659e72bc8665e4b8ea227547024f416d905"
@@ -3358,7 +3334,7 @@ dependencies = [
  "crypto-bigint 0.7.3",
  "crypto-primes",
  "digest 0.11.1",
- "pkcs1 0.8.0-rc.4",
+ "pkcs1",
  "pkcs8 0.11.0-rc.11",
  "rand_core 0.10.0",
  "sha2 0.11.0-rc.5",
@@ -3420,14 +3396,14 @@ dependencies = [
  "p521",
  "pageant",
  "pbkdf2 0.12.2",
- "pkcs1 0.8.0-rc.4",
+ "pkcs1",
  "pkcs5",
  "pkcs8 0.11.0-rc.11",
  "poly1305",
  "polyval 0.7.1",
  "rand 0.10.0",
  "rand_core 0.10.0",
- "rsa 0.10.0-rc.17",
+ "rsa",
  "russh-cryptovec",
  "russh-util",
  "sec1 0.8.1",
@@ -4439,12 +4415,12 @@ dependencies = [
  "chacha20poly1305",
  "ed25519-dalek 2.2.0",
  "ml-kem",
+ "num-bigint",
  "p256 0.13.2",
  "p384 0.13.1",
  "poly1305",
  "rcgen",
  "ring",
- "rsa 0.9.10",
  "rustls",
  "serde_json",
  "sha2 0.10.9",

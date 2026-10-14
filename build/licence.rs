@@ -593,6 +593,20 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
+        "lib/crypto/tests/keys/rsa-2048.pk8",
+        "b454616441e5205a2bf9cd788e832f9c5fa36daa21e2f13ae89818a580fd478f",
+        "ours: a throwaway RSA-2048 key ring signs `toyos-crypto`'s RSA oracle with, minted by OpenSSL 3.0.15's \
+         `genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048` and `pkcs8 -topk8 -nocrypt`",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/crypto/tests/keys/rsa-4096.pk8",
+        "6e8d5e8e3c0a8011cf5381e60efa2b86fa88abd7793cd4529fe612dcf5a6a213",
+        "ours: a throwaway RSA-4096 key ring signs `toyos-crypto`'s RSA oracle with, minted by OpenSSL 3.0.15's \
+         `genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096` and `pkcs8 -topk8 -nocrypt`",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
         "sdk/toyos/tests/relocate/aarch64-applied.elf",
         "a2d2c6bf84693da880f1389d9d3c59ceba5dee8cc4cb6dba94aa6fcc1c7eff77",
         "ours: rust-lld's link of sdk/toyos/tests/relocate/fixture.rs (sdk/toyos/src/relocate/tests.rs)",
