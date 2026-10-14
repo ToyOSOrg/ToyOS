@@ -102,6 +102,7 @@ const BUS_MASTER_SITES: &[(&str, usize)] = &[
     ("kernel/src/drivers/virtio.rs", 1),
     ("kernel/src/drivers/hda.rs", 1),
     ("kernel/src/drivers/xhci/wait/boot.rs", 1),
+    ("kernel/src/arch/x86_64/amdvi/mod.rs", 1),
 ];
 
 /// The one place in `kernel/` a `!!!` may still appear, and how many times.
