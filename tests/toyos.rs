@@ -315,6 +315,35 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_low_ecam", qemu::Profile::VirtLowEcam),
 ];
 
+/// Which handle the loader took the panel's EDID from, and what the compositor
+/// made of it, on each bench: the handle M1 found the protocol on, and the
+/// size and scale `lib/edid`'s fixture of that bench's panel gives.
+fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
+    const T14: u32 = 0x0008_06c1;
+    const AMD_BENCH: u32 = 0x0086_0f01;
+    let signature = microcode_lines(kernel)?
+        .first()
+        .ok_or("the kernel wrote no microcode line to tell the bench by")?
+        .signature;
+    let (handle, panel) = match signature {
+        T14 => (0, "panel 309x173 mm, scale 1.5"),
+        AMD_BENCH => (1, "panel 309x174 mm, scale 1.5"),
+        other => return Err(format!("no bench of signature {other:#x} says which panel it has")),
+    };
+    let handed = format!("EDID: GOP handle {handle} of 2 shows the scanout and publishes 128 byte(s), the base block handed over");
+    if !loader.contains(&handed) {
+        let said: Vec<&str> = loader.lines().filter(|l| l.contains("EDID: ")).collect();
+        return Err(format!("loader.log does not say {handed:?}; its EDID lines: {said:?}"));
+    }
+    let chosen = format!("compositor: display 1920x1080, {panel}");
+    if !log.contains(&chosen) {
+        let said: Vec<&str> = log.lines().filter(|l| l.contains("compositor: display ")).collect();
+        return Err(format!("the log does not say {chosen:?}; the compositor said {said:?}"));
+    }
+    eprintln!("  [gop_edid_scale] signature {signature:#x}: GOP handle {handle}, {panel}");
+    Ok(())
+}
+
 /// The tests whose machine shape *is* the test, each on a boot of its own.
 /// `run_machine_test` dispatches them.
 const MACHINE_TESTS: &[&str] = &[
@@ -867,6 +896,16 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "metal_sim_scanout_wc",
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
+    ),
+    (
+        // The panel's EDID from the firmware's GOP to the compositor's scale:
+        // the loader's read before `ExitBootServices` is no host test's, and
+        // QEMU's OVMF publishes no EDID protocol.
+        "gop_edid_scale",
+        metal::Metal {
+            arms: METALCASE,
+            judge: |b| gop_edid_scale(b[0].loader().text(), b[0].log().text(), b[0].kernel().text()),
+        },
     ),
     (
         // The machine's own i8042 and EC, driven from userland: the keyboard

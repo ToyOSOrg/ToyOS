@@ -407,7 +407,7 @@ pub(super) fn sys_gpu_reset_scanout(
     gpu_info: crate::gpu::GpuInfo,
     info_out: UserAddr,
 ) -> u64 {
-    let crate::gpu::GpuInfo { scanout, cursor, width, height, stride, pixel_format, flags } =
+    let crate::gpu::GpuInfo { scanout, cursor, width, height, stride, pixel_format, flags, edid, edid_len } =
         gpu_info;
     let screen = device::Screen {
         info: toyos_abi::FramebufferInfo {
@@ -418,6 +418,8 @@ pub(super) fn sys_gpu_reset_scanout(
             stride,
             pixel_format,
             flags,
+            edid,
+            edid_len,
         },
         scanout,
         cursor,
