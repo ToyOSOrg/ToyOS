@@ -90,7 +90,7 @@ const DATA_ONLY: &[&str] = &["CDLA-Permissive-2.0"];
 /// Allowed for a [`Terms::Firmware`] row, and nowhere else: the owner's
 /// ruling that vendor firmware a device or CPU verifies by its maker's
 /// signature may ship, pinned and unmodified (root `CLAUDE.md`).
-const FIRMWARE_ONLY: &[&str] = &["LicenseRef-Intel-Microcode"];
+const FIRMWARE_ONLY: &[&str] = &["LicenseRef-AMD-Microcode", "LicenseRef-Intel-Microcode"];
 
 /// What a licence is judged as: [`FONTS_ONLY`] passes only for a font,
 /// [`DATA_ONLY`] only for the trust roots and [`FIRMWARE_ONLY`] only for
@@ -627,6 +627,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "61ddae0382bafa0c4f76c23ac9608e7a53281d57a8439fe05d4f43390d2eee46",
         "ours: rust-lld's link of sdk/toyos/tests/relocate/fixture.rs (sdk/toyos/src/relocate/tests.rs)",
         Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "kernel/microcode/amd-ucode/microcode_amd_fam17h.bin",
+        "966e4b796ec689c618868d08f8a37f347b0e7bfce4ae9df793e08471d363b7d0",
+        "NOTICE",
+        Terms::Firmware("LicenseRef-AMD-Microcode"),
     ),
     (
         "kernel/microcode/intel-ucode/06-8c-01",

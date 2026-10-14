@@ -25,6 +25,11 @@ from it a specification of facts citing no implementation, and another
 builds from that specification alone. #886's loader was not built that way
 and was taken out.
 
+The AMD bench's answers to the specification's open questions (M0–M6, M9,
+M10) were measured by the scout at #914's `ca217141d` (`f7a07b1db`), its
+reading at ToyOSOrg/evidence `32c335ece`, `metal/amd-bench/`; the scout was
+taken out before #914 landed.
+
 Owner: the orchestrator.
 
 **Exit**: the kernel loads, early on every AMD CPU, the newest patch the

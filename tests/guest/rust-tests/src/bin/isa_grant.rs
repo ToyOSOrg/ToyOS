@@ -22,8 +22,6 @@ use toyos::Device;
 use toyos_abi::pci::DeviceIrqRecord;
 use toyos_abi::syscall::{IsaId, SyscallError, SYSCAP_LABEL};
 
-#[path = "../isa_row.rs"]
-mod isa_row;
 use toyos::ioport;
 
 const SELF_PATH: &str = "/system/bin/test_rs_isa_grant";
@@ -126,13 +124,13 @@ fn grant(cap: &SysCap) {
         ("wide", "wide: in of two bytes from 0x60"),
         ("out", "out: out to 0x61"),
     ] {
-        let held = isa_row::claim_after(cap, set(I8042), holder);
+        let held = claim(cap, I8042).unwrap_or_else(|e| panic!("isa: the row after {holder} ended answered {e:?}"));
         killed_after(role, child(role, Some(held)), marker);
         holder = role;
     }
     killed_after("unclaimed", child("unclaimed", None), "unclaimed: in from 0x60");
 
-    let held = isa_row::claim_after(cap, set(I8042), holder);
+    let held = claim(cap, I8042).unwrap_or_else(|e| panic!("isa: the row after {holder} ended answered {e:?}"));
     bind(&held);
     let status = ioport::in8(STATUS);
     println!("isa: bound here, status reads {status:#04x}");

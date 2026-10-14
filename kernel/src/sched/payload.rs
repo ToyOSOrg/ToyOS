@@ -3,6 +3,7 @@
 //! released exactly once, by `Hw::release`.
 
 use alloc::sync::Arc;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use kernel::sched::fair::{FairShare, ShareState};
@@ -113,6 +114,8 @@ pub struct TaskHandle {
     cancels: AtomicU32,
     /// The operation this thread is inside, if any; kept here so it survives a mid-operation migration. `scheduler::Operation` owns the rules.
     operation: OperationSlot,
+    /// The releases this thread owns while its process is torn down (`object::Releases`); kept here, as `operation` is, so they follow the thread across a migration.
+    releases: Lock<Option<Vec<crate::object::KObjectRef>>>,
 }
 
 impl TaskHandle {
@@ -123,6 +126,7 @@ impl TaskHandle {
             watch: Watch::new(),
             cancels: AtomicU32::new(0),
             operation: OperationSlot::new(),
+            releases: Lock::new(None),
         }
     }
 
@@ -141,6 +145,11 @@ impl TaskHandle {
     /// Where this thread's establishment lives; `scheduler::Operation` owns every rule about it.
     pub fn operation(&self) -> &OperationSlot {
         &self.operation
+    }
+
+    /// Where `object::Releases` collects this thread's releases; `None` while it holds none open.
+    pub(crate) fn releases(&self) -> &Lock<Option<Vec<crate::object::KObjectRef>>> {
+        &self.releases
     }
 
     /// What this thread's own transitions are posted to.

@@ -262,9 +262,22 @@ was sequenced before is planned by nothing. Today `OpenFileState::drop` calls
 `file_cache::release` and takes "the file cache's lock and no other", so
 `File` needs no release site that parks.
 
-Open with the owner: he declined shape 3 because it would "redesign the
-zero-handle drain", and whether that decline reaches "give the batch an owner"
-for the `deferred` rows is not ruled.
+## A process's own releases run before its end, ruled 2026-10-13
+
+The owner delegated "give the batch an owner" to the orchestrator, who ruled
+it go ahead for a dying process (#910): the 2026-08-23 decline was about a
+`Drop` that parks and about redesigning the drain sites, and this shape does
+neither. A process's last thread opens `object::Releases` before its handles
+close; every deferred object whose last handle that thread drops, a hook's
+included, is collected on the thread and run there once no lock is held, and
+the process's `Exit` is built only from what that run answers. So its end is
+published after every release it owed, of every kind. `File` stays
+immediate, and no drain site changed.
+
+What this issue still holds is every drop that is not a process's end: a
+live process's `close` of its last handle, and `SYS_PROCESS_KILL` returning
+before its victim's teardown (`kill_while_blocked`'s writes), both still
+released on `ZERO_QUEUE`.
 
 ## A fourth witness: a device claim, and init waiting it out
 
@@ -286,29 +299,13 @@ the release ran on the other CPU. The replacement netd started with no NIC and
 exited, which init's probation caught and answered by restarting the old
 binary five seconds later, when the claim was long back.
 
-**The compromise, recorded here as the rule asks:** `userland/init`'s
-`CLAIM_RETURN` retries a claim refused as `AlreadyExists` for a service init
-has just stopped, for at most two seconds, one millisecond apart. Owner: the
-swap's author. Exit condition: this issue closes — the kernel publishes a
-process's end only once its deferred releases have run — and `CLAIM_RETURN`
-is deleted with it.
-
-**A second loop waits the same release out.**
-`tests/guest/rust-tests/src/isa_row.rs`'s `claim_after` asks for the `isa` row
-again while the claim is refused as `AlreadyExists`, for at most five seconds,
-wherever `isa_grant` or `isa_lines` claims the row after a holder has exited.
-No run was red without it: it rests on the `Device` release measured in this
-section. Owner: the `isa` claim's author. Exit condition: the same, and
-`claim_after` is deleted with `CLAIM_RETURN` — once the release is no longer
-deferred, a claim refused after its holder's exit is a defect that loop would
-hide for five seconds.
-
-**A third loop waits the same release out.**
-`tests/guest/rust-tests/src/bin/usbd_spare.rs` asks for the xHCI controller's
-claim again after killing usbd while it is refused as `AlreadyExists`, for at
-most `CLAIM_RETURN`, one millisecond apart, `system/supervisor`'s copied. Owner:
-usbd's author. Exit condition: the same, and that loop is deleted with
-`CLAIM_RETURN`.
+The supervisor's `CLAIM_RETURN`, `isa_row.rs`'s `claim_after` and
+`acpi_mediated.rs`'s retry waited this release out after a holder's end, and
+went with the ruling above (#910); `usbd_spare.rs`'s copy had gone with
+`ff1a11dbd`. A claim refused after its holder's end is now a defect.
+`end_returns_claims`, in `usbd_drives_the_spare`'s boots and the
+`usbd_drives_the_type_c_controller` metal row, asks for the claim the instant
+each of its holders ends.
 
 **Its tests are deleted**: `38a5064b6` took `handle_basic`, `handle_transfer`
 and `kill_while_blocked` out, and `009db6db3` retired `SYS_DEBUG` actions 17 and
