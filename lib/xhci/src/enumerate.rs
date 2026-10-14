@@ -20,9 +20,9 @@
 /// speed may report nothing else. **Full Speed does not.** `bMaxPacketSize0` is
 /// 8, 16, 32 or 64 there, and it is not known until the first eight bytes of
 /// the device descriptor have been read, which is itself a transfer over EP0.
-/// 8 is the size every full-speed device can answer at, so it is what Address
-/// Device carries and what Evaluate Context replaces once the device has said
-/// (xHCI 1.2 §4.3.4; Linux does the same in `xhci_setup_addressable_virt_dev`).
+/// Every device answers the descriptor's first eight bytes in one packet (USB
+/// 2.0 §5.5.3), so 8 is what Address Device carries and what Evaluate Context
+/// replaces once the device has said (xHCI 1.2 §4.3, step 7).
 ///
 /// The old table answered 64 for Full Speed and **8 for everything it did not
 /// recognise**, so a SuperSpeedPlus port — speed 5, 6 or 7, which is every

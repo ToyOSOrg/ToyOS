@@ -44,7 +44,7 @@ const FSTS_QUEUE_ERRORS: u32 = (1 << 4) | (1 << 5) | (1 << 6);
 
 const ACK_TIMEOUT: Tripwire = Tripwire::absurd(
     Duration::from_secs(1),
-    "Linux waits one second for the same acknowledgement, and what a device can reach is unknown past it",
+    "a unit that has not acknowledged an invalidation within a second is one whose reach nothing can state",
 );
 
 pub struct Queue {

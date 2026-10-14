@@ -9,10 +9,10 @@ pub(crate) mod spurious;
 mod timer;
 mod tlb;
 pub(crate) mod unclaimed;
-mod user_dev;
+pub(crate) mod user_dev;
 mod xhci;
 
-pub(crate) use user_dev::{claim_vector, slot_interrupt};
+pub(crate) use user_dev::ClaimVector;
 
 use core::arch::naked_asm;
 
@@ -92,7 +92,12 @@ impl IdtEntry {
 
     /// An interrupt gate onto `entry`.
     fn at(entry: unsafe extern "sysv64" fn()) -> Self {
-        Self::gate(entry as *const () as u64, 0x08) // kernel CS
+        Self::at_address(entry as *const () as u64)
+    }
+
+    /// An interrupt gate onto the code at `handler`.
+    fn at_address(handler: u64) -> Self {
+        Self::gate(handler, 0x08) // kernel CS
     }
 
     /// An interrupt gate onto `handler` through code segment `selector`.
@@ -257,12 +262,6 @@ idt_vectors! {
         Xhci         = 0x21, xhci::xhci_entry;
         DmaFault     = 0x25, dma_fault::dma_fault_entry;
         Hda          = 0x26, hda::hda_entry;
-        // One per `pcidev` claim slot: the vector is how the kernel knows
-        // which claim a message belongs to.
-        UserDev0     = 0x28, user_dev::user_dev0_entry;
-        UserDev1     = 0x29, user_dev::user_dev1_entry;
-        UserDev2     = 0x2A, user_dev::user_dev2_entry;
-        UserDev3     = 0x2B, user_dev::user_dev3_entry;
         Isa0         = 0x2C, isa::isa0_entry;
         Isa1         = 0x2D, isa::isa1_entry;
         Kick         = 0xFC, kick::kick_entry;
@@ -454,6 +453,7 @@ pub fn init() {
     disable_pic();
 
     install_gates(&mut IDT.lock());
+    user_dev::install(&mut IDT.lock());
     // Every slot no row filled: delivery through a P = 0 gate is a
     // contributory fault, and the machine would halt as #DF with no name.
     let mut unclaimed = 0u32;

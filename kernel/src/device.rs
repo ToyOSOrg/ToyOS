@@ -159,7 +159,8 @@ pub enum ClaimError {
     /// A driver in this kernel already binds every function the name matches;
     /// two drivers on one device is not something a claim may create.
     KernelDriven,
-    /// Every slot that can carry a driven function is taken.
+    /// This machine has no interrupt left to give the function: every vector,
+    /// remapping entry or LPI a claim spends is held.
     Exhausted,
     /// The function is there and could not be handed over — no MSI-X, no
     /// window to move a BAR into, an address it did not take. The kernel names
@@ -198,7 +199,7 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
         DeviceType::PciFunction => {
             let id = toyos_abi::syscall::PciId::from_wire(selector[0])
                 .ok_or(ClaimError::Absent)?;
-            // The slot's own guard, taken inside: a PCI claim's exclusivity is
+            // The function's own guard, taken inside: a PCI claim's exclusivity is
             // per function rather than per class, so there is no flag here to
             // acquire first.
             let (info, claim) = crate::pcidev::claim(id)?;
@@ -216,7 +217,7 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
         }
         DeviceType::Isa => {
             let set = toyos_abi::syscall::IsaId::from_wire(selector).ok_or(ClaimError::Absent)?;
-            // The row's own guard, taken inside as a PCI slot's is.
+            // The row's own guard, taken inside as a PCI function's is.
             let row = crate::isa::claim(set)?;
             let claim = Claim { what: Claimed::Isa(row) };
             Ok(DeviceClaim::new(class, DeviceInfo::Isa(set), claim))

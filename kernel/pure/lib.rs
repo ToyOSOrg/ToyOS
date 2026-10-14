@@ -15,6 +15,7 @@ pub mod cpu;
 pub mod dirnodes;
 pub mod microcode;
 pub mod mtrr;
+pub mod owners;
 pub mod pcid;
 pub mod pipe;
 pub mod pointers;

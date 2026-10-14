@@ -18,15 +18,13 @@
 //! are down than the slots can name; byte 0 is a variable field and not an
 //! array, and Appendix C has it reported as it stands. So such a report's
 //! modifiers are believed and its slots are not, and the other keys held
-//! before stay held: [`Read::RollOver`]. Linux's `hid_input_array_field`
-//! skips the array field alone the same way. POSTFail and ErrorUndefined are
-//! the keyboard reporting a fault, and the whole report is refused.
+//! before stay held: [`Read::RollOver`]. POSTFail and ErrorUndefined are the
+//! keyboard reporting a fault, and the whole report is refused.
 //!
-//! Every other slot usage is a key, past Appendix B.1's Logical Maximum of
-//! 101 and into the reserved 0xE8..=0xFF too: boot keyboards send the
-//! international usages above 0x65, and Linux's boot keyboard driver
-//! `usbkbd` reads every slot byte above 3 through a 256-entry table. What a
-//! usage means is the translator's to say.
+//! Every other slot usage is a key, past 0x65 and into the reserved
+//! 0xE8..=0xFF too: Appendix B.1 declares the slots an array of Logical
+//! Maximum 255 over Usage Minimum 0 to Usage Maximum 255, so every byte a slot
+//! can hold names a usage. What a usage means is the translator's to say.
 
 pub use toyos_input::keys::{Transition, Transitions};
 use toyos_input::keys::{Keys, Usages};

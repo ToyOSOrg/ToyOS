@@ -181,8 +181,8 @@ int main(void) {
     said("sysconf 12345", sysconf(12345));
 
     /* posix_madvise takes every advice and answers an error number; madvise
-       takes Linux's hints and refuses its discard, which would have zeroed
-       the page. */
+       takes its hints and refuses MADV_DONTNEED's discard, which would have
+       zeroed the page. */
     page[0] = 'x';
     printf("posix_madvise WILLNEED: %d\n", posix_madvise(page, 4096, POSIX_MADV_WILLNEED));
     printf("posix_madvise 99: %s\n", errno_name(posix_madvise(page, 4096, 99)));

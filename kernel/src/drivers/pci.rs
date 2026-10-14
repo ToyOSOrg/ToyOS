@@ -336,7 +336,7 @@ impl PciDevice {
 
     /// Put MSI-X back off, for a hand-over that armed a vector and was then
     /// refused: a function left enabled at a vector nobody holds delivers into
-    /// a slot with no reader.
+    /// a claim with no reader.
     pub fn disable_msix(&self) {
         let Ok(cap) = self.capability(msix::CAP_ID) else { return };
         let control = cap.read_u16(msix::MESSAGE_CONTROL);
@@ -488,7 +488,8 @@ impl PciDevice {
     }
 }
 
-/// Point a claimed function's [`MSIX_ENTRY`] at its slot's own message and
+/// Point a claimed function's [`MSIX_ENTRY`] at the message `claim_msi` made
+/// for it and
 /// enable it. Takes the message and nothing else: the function is
 /// the one the entry was written for, and no other message reaches here.
 pub fn arm_claimed_msix(message: &crate::iommu::Remapped) -> Result<Mmio, NoEntry> {

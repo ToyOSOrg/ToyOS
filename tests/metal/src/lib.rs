@@ -933,8 +933,9 @@ fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
     Ok(Flashable { path: path.to_path_buf(), bytes, esp, log })
 }
 
-/// The one partition of type `guid`, numbered as Linux numbers it: the entry
-/// index plus one.
+/// The one partition of type `guid`, numbered as the flashing host's
+/// partition nodes are (`toyos_build::disk`'s `part_name`): the entry index
+/// plus one.
 fn one_partition(
     file: &mut std::fs::File,
     guid: toyos_gpt::Guid,

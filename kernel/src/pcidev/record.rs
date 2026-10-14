@@ -7,7 +7,8 @@
 //!
 //! **Two parties race**: the ISR, on whichever CPU the unit routed the message
 //! to, and the holder reading its record through a syscall on any CPU. One
-//! handler at a time: a slot has one vector, delivered to one CPU.
+//! handler at a time: a function's claim has one vector or LPI, delivered to
+//! cpu0.
 //!
 //! **The invariant is that every message is counted exactly once.** The count
 //! is a read-modify-write on both sides and never a load followed by a store:
@@ -94,7 +95,7 @@ pub struct Interrupt {
     /// refuses from here on: its bus mastering is gone, so a driver that kept
     /// going would be driving nothing.
     faulted: AtomicBool,
-    /// True until this slot's first message has been announced.
+    /// True until this claim's first message has been announced.
     ///
     /// **A count of zero at the end of a boot is two facts**: a device that was
     /// never made to speak, and a message that never reached a CPU. Only the
@@ -104,7 +105,7 @@ pub struct Interrupt {
 }
 
 impl Interrupt {
-    /// Must stay `const`: the slots are a `static` array.
+    /// Must stay `const`: `isa`'s rows are a `static` array.
     #[cfg(not(feature = "loom"))]
     pub const fn new() -> Self {
         Self {
@@ -180,7 +181,7 @@ impl Interrupt {
         self.word.load(ORDER) & COUNT != 0
     }
 
-    /// Whether this is the first message this slot has taken. Answers `true`
+    /// Whether this is the first message this claim has taken. Answers `true`
     /// once per claim and `false` ever after, so a caller may log on it.
     ///
     /// `swap` for [`Self::take`]'s reason: two reads that both loaded `true`
@@ -199,7 +200,7 @@ impl Interrupt {
         self.faulted.load(ORDER)
     }
 
-    /// Back to the state a fresh slot is in, for a claim being minted or given
+    /// Back to the state a fresh record is in, for a claim being minted or given
     /// up. The holder is not running at either point.
     pub fn clear(&self) {
         self.word.store(0, ORDER);
