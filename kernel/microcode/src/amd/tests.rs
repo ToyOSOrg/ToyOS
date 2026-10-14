@@ -199,7 +199,7 @@ fn a_patch_whose_id_no_entry_names_matches_nothing() {
 
 #[test]
 fn a_file_cut_anywhere_but_a_section_boundary_is_refused() {
-    let boundary = |len: usize| len >= CONTAINER + 8 * ENTRY && (len - CONTAINER - 8 * ENTRY) % (SECTION + LEN) == 0;
+    let boundary = |len: usize| len >= CONTAINER + 8 * ENTRY && (len - CONTAINER - 8 * ENTRY).is_multiple_of(SECTION + LEN);
     for len in (0..FILE.len()).filter(|&len| !boundary(len)) {
         assert!(matches!(refusal(&FILE[..len]).why, Refusal::Truncated { .. }), "a cut at {len} was not refused");
     }
@@ -243,7 +243,7 @@ fn a_table_of_no_entries_or_part_of_one_is_refused() {
         assert_eq!(refusal(&file), Refused { at: 0, why: Refusal::TableSize(len as usize) }, "length {len}");
     }
     let mut file = bench_container(1);
-    put(&mut file, 8, u32::MAX & !15);
+    put(&mut file, 8, !15);
     assert!(matches!(refusal(&file).why, Refusal::Truncated { .. }));
 }
 

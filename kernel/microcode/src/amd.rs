@@ -12,9 +12,10 @@
 //! to an equivalence ID, and the MPB header's processor ID is the equivalence
 //! ID it is for. [`select`] answers with the patch of the highest level
 //! naming the CPU, never an older one, or why it loads none. The header's
-//! level only chooses: the CPU checks it against nothing and reports the
-//! level its patch data carries, so only MSR0000_008B read after a load says
-//! what the CPU runs.
+//! level only chooses: undocumented, the AMD bench loaded a patch whose
+//! header level was altered and reported the level its patch data carries
+//! (ToyOSOrg/evidence `32c335ece`, `metal/amd-bench/`), so only MSR0000_008B
+//! read after a load says what the CPU runs.
 //!
 //! The whole file is read, and anything it holds that this module does not
 //! understand refuses it by name: a bound, a second container, an ambiguous

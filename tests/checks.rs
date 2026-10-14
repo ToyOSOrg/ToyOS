@@ -434,7 +434,7 @@ mod checks {
         // A core's second thread, which reads the level its first loaded.
         const AMD_SIBLING: &str = "Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d";
         let t14 = |cpu: u32| (cpu, T14);
-        let amd = |cpu: u32| (cpu, if cpu % 2 == 0 { AMD } else { AMD_SIBLING });
+        let amd = |cpu: u32| (cpu, if cpu.is_multiple_of(2) { AMD } else { AMD_SIBLING });
 
         let refused = |what: &str, lines: &[(u32, &str)], cpus: u32, says: &str| match microcode_on_metal(&log(lines), cpus) {
             Ok(()) => Err(format!("{what} was accepted")),
