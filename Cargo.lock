@@ -4243,6 +4243,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-ieee80211"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-input"
 version = "0.1.0"
 dependencies = [
