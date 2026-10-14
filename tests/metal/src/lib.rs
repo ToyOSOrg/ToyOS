@@ -778,6 +778,12 @@ pub const FLASHABLE: &[&str] = &[
     // ran, and the boot goes on to userland and ends the way an unarmed one
     // does. Nothing it writes outlives a hard reset (SDM Vol. 3A §12.11.6.1).
     "microcode-reseal",
+    // Every CPU is handed AMD's container with one byte of the AMD bench's
+    // patch data flipped. The bench's CPUs refuse it with `#GP` and keep the
+    // level their firmware loaded, and the boot goes on to userland and ends
+    // the way an unarmed one does. Nothing it writes outlives a reset: the
+    // patch level resets at warm and cold reset (55922 §1.4.4.11).
+    "microcode-amd-flip",
     // It seals this boot's own record under an identity one bit from this
     // stick's, so the pass that finds it clears it and boots a kernel. The page
     // is memory the loader allocated and the machine is what it was after.

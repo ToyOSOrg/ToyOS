@@ -1,5 +1,6 @@
-//! CPU microcode as Intel publishes it, matched to one CPU, and the file the
-//! kernel loads it from, pure.
+//! CPU microcode as Intel and AMD publish it, matched to one CPU, and the
+//! files the kernel loads it from, pure. Intel's is at the crate root, AMD's
+//! in [`amd`].
 //!
 //! A file Intel publishes for one processor signature is updates laid end to
 //! end, and so is any number of such files laid end to end. [`select`]
@@ -17,8 +18,8 @@
 //! Before any file is read, [`loader`] says whether ToyOS has a loader for a
 //! CPU's vendor and [`may_load`] whether the CPU loads at all.
 //!
-//! [`INTEL`] is the file the kernel embeds, as Intel publishes it and pinned
-//! by its digest in `NOTICE`.
+//! [`INTEL`] and [`AMD`] are the files the kernel embeds, as their makers
+//! publish them and pinned by their digests in `NOTICE`.
 //!
 //! Pure: no I/O, no allocation, no `unsafe`. The caller reads the CPU.
 //!
@@ -42,13 +43,17 @@ use core::fmt;
 
 use toyos_cpuvuln::Vendor;
 
+pub mod amd;
+
 #[cfg(test)]
 mod tests;
 
-/// A file the kernel loads from, starting 16-byte aligned: Intel's trigger
+/// A file the kernel loads from, starting 16-byte aligned. Intel's trigger
 /// takes an update's data only at such an address (SDM §12.11.6), and every
 /// update behind the first starts a multiple of 1024 bytes in, its data 48
-/// bytes after that.
+/// bytes after that. AMD documents no alignment; a patch then sits at the
+/// alignment its offset in the file gives it, which is where it was measured
+/// to load ([`amd`]).
 #[repr(C, align(16))]
 pub struct Aligned<Bytes: ?Sized>(pub Bytes);
 
@@ -56,23 +61,33 @@ pub struct Aligned<Bytes: ?Sized>(pub Bytes);
 /// `intel-ucode/06-8c-01`, the T14's i5-1135G7.
 pub static INTEL: &Aligned<[u8]> = &Aligned(*include_bytes!("../intel-ucode/06-8c-01"));
 
+/// AMD's Family 17h container, `amd-ucode/microcode_amd_fam17h.bin`, which
+/// holds the AMD bench's Ryzen 7 4800U's patch.
+pub static AMD: &Aligned<[u8]> = &Aligned(*include_bytes!("../amd-ucode/microcode_amd_fam17h.bin"));
+
 /// CPUID.01H:EAX, which Intel's updates name their CPU by.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Signature(pub u32);
 
-/// An Intel update revision, the dword MSR 8BH reports it in, compared
-/// unsigned.
+/// An Intel update revision or an AMD patch level, the dword MSR 8BH reports
+/// it in, compared unsigned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Revision(pub u32);
 
 impl Revision {
-    /// The highest revision, which no update loads over.
+    /// The highest Intel revision, which no update loads over.
     pub const DISABLED: Self = Self(u32::MAX);
 
-    /// MSR 8BH read after writing it 0 and executing CPUID.01H, whose upper
-    /// dword the revision is (SDM §12.11.7.1).
+    /// Intel's MSR 8BH read after writing it 0 and executing CPUID.01H, whose
+    /// upper dword the revision is (SDM §12.11.7.1).
     pub const fn from_sign_id(msr: u64) -> Self {
         Self((msr >> 32) as u32)
+    }
+
+    /// AMD's MSR0000_008B, whose bits 31:0 are the patch level and 63:32
+    /// reserved (55922 §2.1.14.1).
+    pub const fn from_patch_level(msr: u64) -> Self {
+        Self(msr as u32)
     }
 }
 
@@ -82,25 +97,32 @@ impl fmt::LowerHex for Revision {
     }
 }
 
-/// What a valid file holds for one CPU.
+/// What a valid file holds for one CPU: an Intel [`Update`] or an AMD
+/// [`amd::Patch`] to load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Choice<'a> {
-    /// The newest update naming the CPU, newer than the revision it runs.
-    Load(Update<'a>),
-    /// The newest update naming the CPU is this revision, and the CPU already
-    /// runs it or a newer one.
+pub enum Choice<Load> {
+    /// The newest update naming the CPU, which it is to be handed.
+    Load(Load),
+    /// The newest update naming the CPU is this revision, and the CPU is not
+    /// handed it: Intel's runs it or a newer one, AMD's a newer one.
     Current(Revision),
     /// No update in the file names the CPU.
     NoMatch,
 }
 
-/// Whether ToyOS has a loader for a CPU of `vendor`: Intel's alone.
-pub fn loader(vendor: Vendor) -> Result<(), Unloaded> {
+/// A vendor ToyOS loads microcode for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Loader {
+    Intel,
+    Amd,
+}
+
+/// Whether ToyOS has a loader for a CPU of `vendor`: Intel's and AMD's.
+pub fn loader(vendor: Vendor) -> Result<Loader, Unloaded> {
     match vendor {
-        Vendor::Intel => Ok(()),
-        Vendor::Amd | Vendor::Hygon | Vendor::Centaur | Vendor::Zhaoxin | Vendor::Unknown => {
-            Err(Unloaded::Vendor(vendor))
-        }
+        Vendor::Intel => Ok(Loader::Intel),
+        Vendor::Amd => Ok(Loader::Amd),
+        Vendor::Hygon | Vendor::Centaur | Vendor::Zhaoxin | Vendor::Unknown => Err(Unloaded::Vendor(vendor)),
     }
 }
 
@@ -113,7 +135,7 @@ pub enum Unloaded {
     /// Vol. 3, 24594 rev 3.36, §E.3.2): the guest's microcode is the
     /// hypervisor's.
     Hypervisor,
-    /// The CPU reports [`Revision::DISABLED`].
+    /// An Intel CPU reports [`Revision::DISABLED`].
     Disabled,
 }
 
@@ -130,11 +152,11 @@ impl fmt::Display for Unloaded {
 /// Whether a CPU [`loader`] admits may load, from its
 /// CPUID.01H:ECX and the revision it reports. A guest loads nothing whatever
 /// it reports.
-pub fn may_load(cpuid_1_ecx: u32, found: Revision) -> Result<(), Unloaded> {
+pub fn may_load(loader: Loader, cpuid_1_ecx: u32, found: Revision) -> Result<(), Unloaded> {
     if cpuid_1_ecx & 1 << 31 != 0 {
         return Err(Unloaded::Hypervisor);
     }
-    if found == Revision::DISABLED {
+    if loader == Loader::Intel && found == Revision::DISABLED {
         return Err(Unloaded::Disabled);
     }
     Ok(())
@@ -254,7 +276,7 @@ pub enum Refusal {
 
 /// The update in `file` to load on `cpu`, or why there is none. A file holds
 /// at least one update.
-pub fn select<'a>(file: &'a [u8], cpu: &Cpu) -> Result<Choice<'a>, Refused> {
+pub fn select<'a>(file: &'a [u8], cpu: &Cpu) -> Result<Choice<Update<'a>>, Refused> {
     let mut newest: Option<Update<'a>> = None;
     let mut rest = file;
     loop {

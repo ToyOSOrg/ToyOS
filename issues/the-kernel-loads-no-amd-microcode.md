@@ -1,5 +1,5 @@
 ---
-status: open
+status: assigned
 kind: defect
 opened: 2026-09-29
 ---
@@ -9,8 +9,13 @@ opened: 2026-09-29
 The kernel is to load CPU microcode signed by the CPU's maker, pinned by
 version and hash the way vendor device firmware is (owner, 2026-09-30).
 It loads Intel's (`toyos-microcode`, `kernel/src/arch/x86_64/microcode.rs`)
-and no AMD CPU's: on one, every CPU's line says ToyOS has no AMD microcode
-loader, and the `microcode` metal row holds the AMD bench to that line.
+and, on `main`, no AMD CPU's: on one, every CPU's line says ToyOS has no AMD
+microcode loader.
+
+Assigned to branch `toyos-amd-ucode`, which builds the AMD loader from the
+clean-room specification and holds the AMD bench's `microcode` row to every
+CPU `loaded` 0x860010d; it closes this issue once both benches' runs meet
+the exit.
 
 **Met** by #886: on the T14 every CPU runs Intel's 0xbe for 0x806c1
 platform 7, `current` or `loaded`; the T14 armed with `microcode-reseal`
@@ -49,5 +54,8 @@ and runs what it reads back:
   named undocumented in the module header with the measurement behind it,
   or is not in the loader;
 - the `microcode` row is green on the AMD bench with every CPU running the
-  container's patch, and the bench with its trigger write removed completes
-  its boot and reds the row on a `refused` line.
+  container's patch, and the bench armed with `microcode-amd-flip`, whose
+  patch data has one byte flipped, completes its boot and reds the row on a
+  `refused` line: a refusal the CPU raises as `#GP` is the one the guarded
+  write has to survive, and a write that does not raise the level is judged
+  by the same read-back.

@@ -430,9 +430,11 @@ mod checks {
             lines.iter().map(|(cpu, said)| format!("[ 0.050 cpu{cpu} kernel] microcode: cpu{cpu} {said}\n")).collect()
         }
         const T14: &str = "Intel signature 0x806c1 platform 7 found 0xbe current 0xbe running 0xbe";
-        const AMD: &str = "Amd signature 0x860f01 loads nothing: ToyOS has no Amd microcode loader";
+        const AMD: &str = "Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d";
+        // A core's second thread, which reads the level its first loaded.
+        const AMD_SIBLING: &str = "Amd signature 0x860f01 found 0x860010d loaded 0x860010d running 0x860010d";
         let t14 = |cpu: u32| (cpu, T14);
-        let amd = |cpu: u32| (cpu, AMD);
+        let amd = |cpu: u32| (cpu, if cpu % 2 == 0 { AMD } else { AMD_SIBLING });
 
         let refused = |what: &str, lines: &[(u32, &str)], cpus: u32, says: &str| match microcode_on_metal(&log(lines), cpus) {
             Ok(()) => Err(format!("{what} was accepted")),
@@ -443,7 +445,7 @@ mod checks {
         microcode_on_metal(&log(&(0..8).map(t14).collect::<Vec<_>>()), 8)
             .map_err(|e| format!("the T14 at Intel's 0xbe was refused: {e}"))?;
         microcode_on_metal(&log(&(0..8).map(amd).collect::<Vec<_>>()), 8)
-            .map_err(|e| format!("the AMD bench with no loader was refused: {e}"))?;
+            .map_err(|e| format!("the AMD bench at AMD's 0x860010d was refused: {e}"))?;
 
         refused("seven lines for eight CPUs", &(0..7).map(t14).collect::<Vec<_>>(), 8, "one microcode line")?;
         let mut twice: Vec<_> = (0..8).map(t14).collect();
@@ -458,9 +460,16 @@ mod checks {
         let mut guest: Vec<_> = (0..8).map(t14).collect();
         guest[1] = (1, "Intel signature 0x806c1 found 0xbe loads nothing: a hypervisor owns this CPU's microcode running 0xbe");
         refused("a T14 CPU that loads nothing", &guest, 8, "runs 0xbe")?;
-        let mut loaded: Vec<_> = (0..8).map(amd).collect();
-        loaded[5] = (5, "Amd signature 0x860f01 found 0x8600106 loaded 0x860010d running 0x860010d");
-        refused("an AMD CPU that read and loaded", &loaded, 8, "has no Amd microcode loader")?;
+        let flipped: Vec<_> = (0..8)
+            .map(|cpu| (cpu, "Amd signature 0x860f01 found 0x8600106 refused 0x860010d with #GP(0x0) running 0x8600106"))
+            .collect();
+        refused("an AMD bench whose CPUs refused a flipped patch", &flipped, 8, "cpu0 refused")?;
+        let mut unread: Vec<_> = (0..8).map(amd).collect();
+        unread[5] = (5, "Amd signature 0x860f01 loads nothing: ToyOS has no Amd microcode loader");
+        refused("an AMD CPU with no loader", &unread, 8, "loaded 0x860010d")?;
+        let mut unwritten: Vec<_> = (0..8).map(amd).collect();
+        unwritten[3] = (3, "Amd signature 0x860f01 found 0x860010d current 0x860010d running 0x860010d");
+        refused("an AMD CPU that did not write its patch", &unwritten, 8, "loaded 0x860010d")?;
         let mut other: Vec<_> = (0..8).map(t14).collect();
         other[2] = (2, "Intel signature 0x806c2 platform 7 found 0xbe current 0xbe running 0xbe");
         refused("two signatures in one machine", &other, 8, "is not")?;
@@ -470,7 +479,7 @@ mod checks {
             2,
             "no bench",
         )?;
-        eprintln!("  [microcode] the verdict refuses 8 machines and accepts both benches");
+        eprintln!("  [microcode] the verdict refuses 10 machines and accepts both benches");
         Ok(())
     }
 

@@ -4577,8 +4577,10 @@ fn ioapic_topology(log: &str) -> Result<(), String> {
 ///
 /// - **The T14**, 0x806c1: every CPU runs 0xbe, the update Intel's
 ///   `06-8c-01` holds for it, whether it found it `current` or `loaded` it.
-/// - **The AMD bench**, 0x860f01: ToyOS has no AMD loader, and every CPU says
-///   so and reads nothing.
+/// - **The AMD bench**, 0x860f01: every CPU runs 0x860010d, the patch AMD's
+///   Family 17h container holds for it, and `loaded` it: its firmware loads
+///   0x8600106, and a core's second thread writes the patch too, over the
+///   level its first loaded.
 fn microcode_on_metal(log: &str, cpus: u32) -> Result<(), String> {
     const T14: u32 = 0x0008_06c1;
     const AMD_BENCH: u32 = 0x0086_0f01;
@@ -4598,8 +4600,8 @@ fn microcode_on_metal(log: &str, cpus: u32) -> Result<(), String> {
             "every CPU runs 0xbe, which Intel's 06-8c-01 holds for it",
         ),
         AMD_BENCH => (
-            |said| matches!(said, MicrocodeSaid::Unread(why) if why == "ToyOS has no Amd microcode loader"),
-            "every CPU says ToyOS has no Amd microcode loader",
+            |said| matches!(said, MicrocodeSaid::Read { outcome, running: 0x0860_010d } if outcome == "loaded"),
+            "every CPU loaded 0x860010d, which AMD's Family 17h container holds for it",
         ),
         _ => return Err(format!("no bench of signature {signature:#x} says what its CPUs are held to")),
     };
@@ -4623,8 +4625,8 @@ enum MicrocodeSaid {
     /// It read its revision: `loaded`, `current`, `refused`, or `loads` for
     /// one that loads nothing, and the revision it runs.
     Read { outcome: String, running: u32 },
-    /// It read nothing, for this reason.
-    Unread(String),
+    /// It read nothing: its vendor has no loader.
+    Unread,
 }
 
 /// Every `microcode:` line in `log`, or the first CPU that refused the update
@@ -4642,7 +4644,8 @@ fn microcode_lines(log: &str) -> Result<Vec<MicrocodeLine>, String> {
                 outcome: words.get(found + 2).ok_or_else(unreadable)?.to_string(),
                 running: hex("running").ok_or_else(unreadable)?,
             },
-            None => MicrocodeSaid::Unread(rest.split_once("loads nothing: ").ok_or_else(unreadable)?.1.to_string()),
+            None if rest.contains(" loads nothing: ") => MicrocodeSaid::Unread,
+            None => return Err(unreadable()),
         };
         out.push(MicrocodeLine {
             cpu: words.first().and_then(|id| id.parse().ok()).ok_or_else(unreadable)?,

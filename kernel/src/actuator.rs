@@ -144,6 +144,13 @@ actuators! {
     #[allow(dead_code)]
     microcode_reseal = "microcode-reseal";
 
+    /// Hand every CPU AMD's container with the first byte of the AMD bench's
+    /// patch data flipped: the negative control on the guarded write, whose
+    /// `#GP` each CPU must report as a refusal and boot on.
+    // An AMD file's alone, so AArch64 builds an accessor it never reads.
+    #[allow(dead_code)]
+    microcode_amd_flip = "microcode-amd-flip";
+
     /// Skip the startup for the AP that would be cpu2, so a non-last AP never starts.
     smp_skip_ap = "smp-skip-ap";
 
