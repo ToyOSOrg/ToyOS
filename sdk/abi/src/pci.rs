@@ -31,8 +31,7 @@ crate::user_safe! {
     #[derive(Clone, Copy)]
     pub struct PciFunctionInfo {
         /// Byte size of each memory BAR; 0 where the function has none in that
-        /// slot, or where it is one the kernel will not map — the BAR holding this
-        /// function's MSI-X table or PBA reads 0 here.
+        /// slot, or where it is one the kernel will not map.
         pub bar_bytes: [u64; BARS],
         /// Where firmware put it. Identity for a log line, never a name a claim is
         /// looked up by: nothing in this ABI takes a bus/device/function.

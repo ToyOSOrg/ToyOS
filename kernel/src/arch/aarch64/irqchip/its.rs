@@ -372,6 +372,16 @@ pub(in crate::arch::aarch64) fn doorbell_page() -> Option<u64> {
     ITS.lock().as_ref().map(|live| u64::from(live.doorbell) & !(crate::mm::PAGE_SIZE - 1))
 }
 
+/// Whether a claimed function's every message reaches only its own LPI: where
+/// an ITS is armed, which translates by the device id the bridge stamps.
+pub fn fences_claims() -> Result<(), crate::iommu::NotRemapped> {
+    if is_armed() {
+        Ok(())
+    } else {
+        Err(crate::iommu::NotRemapped::Unremapped)
+    }
+}
+
 /// Whether an ITS is armed to give a claimed function its own LPI.
 pub fn is_armed() -> bool {
     ITS.lock().is_some()

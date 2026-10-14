@@ -38,7 +38,7 @@ use alloc::vec::Vec;
 use kernel::owners::Owners;
 
 use super::super::apic::{narrow_destination, MSG_DEST};
-use super::super::idt::{self, ClaimVector, DriverIrq};
+use super::super::idt::DriverIrq;
 use crate::iommu::StreamId;
 use crate::sync::Lock;
 
@@ -70,52 +70,7 @@ const MESSAGE_REMAPPABLE: u32 = 1 << 4;
 const MESSAGE_SUBHANDLE_VALID: u32 = 1 << 3;
 const PIN_REMAPPABLE: u32 = 1 << 16;
 
-pub struct Msi {
-    pub address: u32,
-    pub data: u32,
-}
-
-/// Why a source could not be given an entry. Carried rather than collapsed:
-/// one message for all three sends whoever reads it looking in the wrong place.
-#[derive(Clone, Copy)]
-pub enum Refused {
-    /// Wider than the destination an entry holds without extended interrupt mode.
-    DestinationTooWide(u32),
-    /// Every entry in the table is already spoken for.
-    TableFull,
-    /// Every vector a claim's message may carry is held by another claim.
-    NoVector,
-    /// Firmware's device scopes named no requester id for this interrupt controller.
-    ControllerUnnamed(u8),
-}
-
-impl Refused {
-    /// Whether this machine has run out of something a claim spends, rather
-    /// than this source being one no entry can be written for.
-    pub fn exhausted(self) -> bool {
-        matches!(self, Self::TableFull | Self::NoVector)
-    }
-}
-
-impl core::fmt::Display for Refused {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self {
-            Self::DestinationTooWide(id) => {
-                write!(f, "apic id {id:#x} does not fit a remapping entry's destination")
-            }
-            Self::TableFull => write!(f, "the interrupt remapping table is full"),
-            Self::NoVector => write!(f, "every vector a claimed function's message may carry is held"),
-            Self::ControllerUnnamed(id) => {
-                write!(f, "firmware named no requester id for interrupt controller {id}")
-            }
-        }
-    }
-}
-
-pub struct Pin {
-    pub low: u32,
-    pub high: u32,
-}
+use super::super::iommu_unit::interrupt::{Msi, Pin, Refused};
 
 struct Remap {
     /// `None` until a unit is armed, which is what "no source may use the remappable format" means.
@@ -246,7 +201,7 @@ impl Remap {
 }
 
 /// The message that indexes entry `index` by its handle alone (Section 5.1.3).
-fn message(index: usize) -> Msi {
+pub(in crate::arch::x86_64) fn message(index: usize) -> Msi {
     let index = index as u32;
     Msi {
         address: crate::arch::MSI_DOORBELL
@@ -269,49 +224,26 @@ pub fn msi(source: StreamId, irq: DriverIrq) -> Result<Msi, Refused> {
     Ok(message(allocate(source, irq.vector(), MSG_DEST, false)?))
 }
 
-/// A claimed function's entry and the vector it delivers, held until
-/// [`release`].
-pub struct Claimed {
-    pub msi: Msi,
-    entry: usize,
-    vector: ClaimVector,
-}
-
-impl Claimed {
-    /// What the message raises, for the record.
-    pub fn interrupt(&self) -> impl core::fmt::Display {
-        self.vector
-    }
-}
-
-/// A vector for `pcidev` function `function` and an entry delivering it, written
-/// for `source` and published to every unit before this returns.
-pub fn claim(function: usize, source: StreamId) -> Result<Claimed, Refused> {
-    let vector = idt::user_dev::take(function).ok_or(Refused::NoVector)?;
-    match allocate(source, vector.vector(), MSG_DEST, false) {
-        Ok(entry) => Ok(Claimed { msi: message(entry), entry, vector }),
-        Err(why) => {
-            idt::user_dev::give_back(vector);
-            Err(why)
-        }
-    }
+/// An entry delivering a claim's `vector`, written for `source` and published
+/// to every unit before this returns; its index, held until [`release`].
+pub(in crate::arch::x86_64) fn claim(vector: u8, source: StreamId) -> Result<usize, Refused> {
+    allocate(source, vector, MSG_DEST, false)
 }
 
 /// A claim's entry not present again and gone from every unit's cache, and
-/// then its entry and vector free.
-pub fn release(claimed: &Claimed, source: StreamId) {
+/// then free.
+pub(in crate::arch::x86_64) fn release(entry: usize, source: StreamId) {
     let lo = {
         let remap = REMAP.lock();
         let Some(table) = remap.table else {
-            panic!("iommu: irte{} released with no table armed", claimed.entry);
+            panic!("iommu: irte{entry} released with no table armed");
         };
-        table.clear_pair(claimed.entry);
+        table.clear_pair(entry);
         super::invalidate_interrupt_entries();
-        remap.held.give_back(claimed.entry);
-        table.read_pair(claimed.entry).0
+        remap.held.give_back(entry);
+        table.read_pair(entry).0
     };
-    idt::user_dev::give_back(claimed.vector);
-    log!("iommu: irte{} source={source} p={} released", claimed.entry, lo & PRESENT);
+    log!("iommu: irte{entry} source={source} p={} released", lo & PRESENT);
 }
 
 pub fn pin(apic_id: u8, vector: u8, dest: u32, level: bool) -> Result<Pin, Refused> {

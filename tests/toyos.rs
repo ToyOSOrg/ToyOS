@@ -205,6 +205,13 @@ const RUST_SKIP: &[&str] = &[
     // boot's kernel does: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.
     "usbd_spare",
+    // `usbd_spare`'s fault, foreign-vector and refusal arms, one binary each
+    // because a metal job takes no argument: the AMD bench's
+    // `amdvi_claim_refused_without_remapping` row runs the refusal, and the
+    // claim row in P1's exit (`issues/there-is-no-wifi.md`) the other two.
+    "usbd_spare_fault",
+    "usbd_spare_vector",
+    "usbd_spare_unhanded",
     // The same controller, handed to a holder that is killed and claimed
     // again at once, in the same boots as `usbd_spare`.
     "end_returns_claims",
@@ -467,6 +474,15 @@ const MACHINE_TESTS: &[&str] = &[
     // to fault. What usbd names on the bus is `toyos-xhci`'s and its
     // simulator's to hold.
     "usbd_drives_the_spare",
+    // The same behind QEMU's AMD unit, remapping and with no SMI filter: the
+    // claim is refused by that reason before anything on the function
+    // changes. No metal machine in reach has an AMD-Vi unit without the
+    // filter.
+    "usbd_refused_without_smi_filter",
+    // The same machine with its AMD unit remapping nothing: the claim is
+    // refused by that reason. The AMD bench's arm is
+    // `amdvi_claim_refused_without_remapping`.
+    "usbd_refused_without_amdvi_remapping",
     // A boot keyboard reporting more keys than its six slots name: the
     // kernel's driver reading a report a device delivered over xHCI has no host
     // build, and the T14 binds no USB keyboard.
@@ -1115,6 +1131,31 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| amdvi_translates(&b[0].kernel()) },
     ),
     (
+        // An AMD-Vi unit remapping every message: the boot stick's
+        // controller's interrupt delivered through an entry of its own
+        // table, on real silicon, and every I/O APIC named.
+        "amdvi_remaps_the_stick_controller",
+        metal::Metal { arms: TESTCASES, judge: |b| amdvi_remaps(&b[0].kernel()) },
+    ),
+    (
+        // The AMD bench with its unit remapping nothing (`iommu-no-remap`):
+        // the claim on `03:00.4` is refused before anything on it changes.
+        "amdvi_claim_refused_without_remapping",
+        metal::Metal {
+            arms: &[metal::once(
+                "testcases-amd-no-remap",
+                "tests/images/testcases.toml",
+                &["iommu-no-remap", "xhci-leave=03:00.4"],
+                &["test_rs_usbd_spare_unhanded"],
+            )],
+            judge: |b| {
+                let kernel = b[0].kernel();
+                kernel.must_say("no message is remapped")?;
+                claims::refused_at(&kernel, AMD_XHCI_SPARE, claims::NOT_REMAPPED)
+            },
+        },
+    ),
+    (
         // A machine whose units do not remap: the claim is refused before
         // anything on the function changes, and the boot goes on.
         "claim_refused_without_remapping",
@@ -1139,7 +1180,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: &[metal::once(
                 "testcases-xhci-leave",
                 "tests/images/testcases.toml",
-                &["xhci-leave=8086:9a13"],
+                &["xhci-leave=00:0d.0"],
                 &["test_rs_usbd_spare", "test_rs_end_returns_claims"],
             )],
             judge: |b| {
@@ -3786,6 +3827,18 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nvme_disk_boots" => nvme_disk_boots(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
+        "usbd_refused_without_smi_filter" => usbd_refused_on_amdvi(
+            test_config,
+            qemu::Profile::HeadlessUsbSpareAmdVi,
+            "has no SMI filter",
+            claims::SMI_UNFILTERED,
+        ),
+        "usbd_refused_without_amdvi_remapping" => usbd_refused_on_amdvi(
+            test_config,
+            qemu::Profile::HeadlessUsbSpareAmdViNoRemap,
+            "no message is remapped",
+            claims::NOT_REMAPPED,
+        ),
         "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
@@ -3983,6 +4036,13 @@ fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> 
     Ok(result.serial)
 }
 
+/// The AMD bench's Bluetooth controller's xHCI, the one `xhci-leave=` leaves
+/// to a claim there: the stick is on the other, `03:00.3`.
+const AMD_XHCI_SPARE: &str = "03:00.4";
+
+/// QEMU's spare controller left to a claim, by the address the profile pins.
+const XHCI_LEAVE_SPARE: &str = "xhci-leave=00:10.0";
+
 /// The job that kills a holder of the `xhci-leave=` controller and claims it
 /// again at once, in `usbd_spare`'s boots.
 const END_RETURNS_CLAIMS: &str = "end_returns_claims";
@@ -4015,9 +4075,10 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     let tests = compile::repo_root().join("tests/guest/rust-tests");
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
     let ends = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, END_RETURNS_CLAIMS);
+    let profile = qemu::Profile::HeadlessUsbSpare;
     let options = BootOptions {
-        profile: qemu::Profile::HeadlessUsbSpare,
-        kernel_params: &["xhci-leave=1b36:000d"],
+        profile,
+        kernel_params: &[XHCI_LEAVE_SPARE],
         ..Default::default()
     };
     let mut qemu = QemuInstance::boot_with_options(
@@ -4058,7 +4119,8 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
         .find(|l| l.contains("iommu: DMA FAULT owner=process") && l.contains(&format!("stream={at} ")))
         .ok_or_else(|| format!("no DMA FAULT record names {at}:\n{faulted}"))?;
     let addr = record.split_once(" addr=").and_then(|(_, a)| a.split_whitespace().next()).unwrap_or_default();
-    if u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok() != u64::from_str_radix(aimed.trim_start_matches("0x"), 16).ok() {
+    let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
+    if hex(addr) != hex(&aimed) {
         return Err(format!("the record faults {addr}, and the job aimed at {aimed}: {record}"));
     }
     eprintln!("  [usbd] {at}: handed over, its No-Op answered; aimed at {aimed}: {}", record.trim());
@@ -4072,7 +4134,7 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
         test_config,
         &[],
         &[(JOB.to_string(), bin)],
-        BootOptions { profile: qemu::Profile::HeadlessUsbSpare, ..Default::default() },
+        BootOptions { profile, ..Default::default() },
     );
     serial::Serial::boot(&qemu).must_not_say("(xhci-leave)")?;
     let said = job_window(&mut qemu, "test_rs_usbd_spare refused")?;
@@ -4080,6 +4142,18 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     refused.must_say(&format!("usbd_spare: the claim on pci:{SPARE} was refused: PermissionDenied"))?;
     refused.must_say(&format!("pcidev: PCI {at} is driven by this kernel and cannot be claimed"))?;
     Ok(())
+}
+
+/// A machine behind QEMU's AMD unit, which `said` describes, refuses the
+/// spare's claim for `why`, before a vector is armed or a BAR moved.
+fn usbd_refused_on_amdvi(test_config: &Path, profile: qemu::Profile, said: &str, why: &str) -> Result<(), String> {
+    const JOB: &str = "usbd_spare";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let options = BootOptions { profile, kernel_params: &[XHCI_LEAVE_SPARE], ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], options);
+    serial::Serial::boot(&qemu).must_say(said)?;
+    let run = job_window(&mut qemu, "test_rs_usbd_spare unhanded")?;
+    claims::refused_at(&serial::Serial::named("usbd_spare", run), qemu::SPARE_AT, why)
 }
 
 /// A `drives` row's processes on a q35 with two `edu`, which the kernel drives
@@ -4150,6 +4224,68 @@ fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
         eprintln!("  [amdvi] {}", unit.trim());
     }
     eprintln!("  [amdvi] {} controller(s) on domains of their own, the stick bound", controllers.len());
+    Ok(())
+}
+
+/// Every AMD-Vi unit remapping (`GAEn`, MMIO 0018h bit 17) and, once the
+/// kernel's drivers are settled, filtering SMIs and logging each it refuses
+/// (`SmiFEn` bit 22, `SmiFLogEn` bit 24); every I/O APIC the MADT has named
+/// by the IVRS; and each xHCI controller the kernel drives armed through a
+/// present entry of its own table at the vector its message carries, the
+/// stick bound by those interrupts.
+fn amdvi_remaps(kernel: &serial::Serial) -> Result<(), String> {
+    let text = kernel.text();
+    let remaps = kernel.must_say("iommu: amdvi remaps every message through its requester's table")?;
+    let control = |line: &str| {
+        line.split_once(" control=")
+            .and_then(|(_, rest)| u64::from_str_radix(rest.split([' ', ',']).next()?.trim_start_matches("0x"), 16).ok())
+            .ok_or_else(|| format!("{line:?} names no control"))
+    };
+    let units: Vec<&str> =
+        text.lines().filter(|l| l.contains("iommu: amdvi unit") && l.contains(" translating control=")).collect();
+    if units.is_empty() {
+        return Err(format!("no AMD-Vi unit is translating:\n{text}"));
+    }
+    for unit in &units {
+        if control(unit)? & 1 << 17 == 0 {
+            return Err(format!("{unit:?} leaves GAEn clear"));
+        }
+    }
+    let filters: Vec<&str> = text.lines().filter(|l| l.contains(" SMI filter on control=")).collect();
+    if filters.len() != units.len() {
+        return Err(format!("{} unit(s) translate and {} filter SMIs: {filters:?}", units.len(), filters.len()));
+    }
+    for filter in &filters {
+        if control(filter)? & (1 << 22 | 1 << 24) != 1 << 22 | 1 << 24 {
+            return Err(format!("{filter:?} leaves SmiFEn or SmiFLogEn clear"));
+        }
+    }
+    let apics = text.lines().filter(|l| l.contains("ioapic: id=") && l.contains(" at 0x")).count();
+    if !remaps.contains(&format!(" {apics} I/O APIC(s) named")) {
+        return Err(format!("{remaps:?} does not name the {apics} I/O APIC(s) the MADT has"));
+    }
+    kernel.must_not_say("iommu: DMA FAULT")?;
+    let controllers: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.split_once("xHCI: found at PCI ")?.1.split_whitespace().next())
+        .collect();
+    for at in &controllers {
+        let data = text
+            .lines()
+            .find_map(|l| l.split_once(&format!("PCI {at}: msix address="))?.1.split_once(" data=").map(|(_, d)| d.trim()))
+            .ok_or_else(|| format!("{at} was not armed on MSI-X:\n{text}"))?;
+        let vector = u32::from_str_radix(data.trim_start_matches("0x"), 16).map_err(|e| format!("{data}: {e}"))? & 0xFF;
+        kernel.must_say(&format!("iommu: amdvi irte source={at} vector={vector:#04x} p=1 "))?;
+    }
+    kernel.must_say("usb-storage: 1 device(s)")?;
+    eprintln!("  [amdvi] {}", remaps.trim());
+    for filter in filters {
+        eprintln!("  [amdvi] {}", filter.trim());
+    }
+    for refused in text.lines().filter(|l| l.contains("iommu: amdvi unit") && l.contains(" said so far")) {
+        eprintln!("  [amdvi] {}", refused.trim());
+    }
+    eprintln!("  [amdvi] {} controller(s) armed through their own entries, the stick bound", controllers.len());
     Ok(())
 }
 

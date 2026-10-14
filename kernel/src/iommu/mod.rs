@@ -298,6 +298,12 @@ pub fn init(
     unit::init(rsdp_addr, devices, windows.map(|declared| declared.windows()));
 }
 
+/// Once, after every kernel driver has taken its functions from firmware and
+/// before userland runs: AMD-Vi turns its SMI filters on.
+pub fn drivers_settled() {
+    unit::drivers_settled();
+}
+
 /// Why a source could not be given a message: the architecture's own reasons.
 pub use messages::Refused;
 
@@ -311,17 +317,32 @@ pub struct MsiMessage {
 #[derive(Clone, Copy)]
 pub struct Remapping(());
 
-/// Nothing on this machine translates a claimed function's message to its
-/// claim's own interrupt, so the message it would carry names any.
-pub struct NotRemapped;
+/// Why no claimed function's message would reach only its claim's interrupt.
+#[derive(Clone, Copy)]
+pub enum NotRemapped {
+    /// Nothing translates its message, so the message names any interrupt.
+    Unremapped,
+    /// Remapped, and a write its holder aims at the interrupt range could
+    /// still be an SMI no unit filters.
+    SmiUnfiltered,
+}
 
-/// Whether a claimed function's message can be remapped: a fact of the
-/// machine, fixed before the first driver arms anything.
+/// Whether every message a claimed function sends, whatever its holder
+/// writes into its MSI-X table or aims a DMA at, reaches only its claim's
+/// interrupt: a fact of the machine, fixed before the first claim. Where it
+/// is, the table's BAR is the holder's like any other.
 pub fn remapping() -> Result<Remapping, NotRemapped> {
-    if messages::is_armed() {
-        Ok(Remapping(()))
-    } else {
-        Err(NotRemapped)
+    messages::fences_claims().map(|()| Remapping(()))
+}
+
+/// Whether `function` can be given a domain of its own and a remapping entry
+/// no other requester reaches, or why not: a function no programmed unit
+/// serves, one firmware reserves memory for, or one whose requester id the
+/// platform speaks as.
+pub fn isolates(function: &crate::drivers::pci::PciDevice) -> Result<(), &'static str> {
+    match unit::domain::unclaimable(StreamId::pci(function.bus, function.dev, function.func)) {
+        None => Ok(()),
+        Some(why) => Err(why),
     }
 }
 

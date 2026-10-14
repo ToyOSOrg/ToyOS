@@ -92,6 +92,11 @@ pub fn untranslated(_function: StreamId) -> Option<&'static str> {
     None
 }
 
+/// Why no claim may have `function`: never, as [`untranslated`].
+pub fn unclaimable(_function: StreamId) -> Option<&'static str> {
+    None
+}
+
 /// A new domain, with `room` bytes of it handed out first: refused, with no id
 /// spent, where it would have less than that.
 pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {

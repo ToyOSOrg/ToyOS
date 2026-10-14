@@ -10,11 +10,10 @@ A process is handed a PCI function only once the function has an address
 space of its own at a unit and, on x86-64, interrupt remapping
 (`kernel/src/pcidev/mod.rs`'s header; `Refusal::NotRemapped`,
 `Refusal::Untranslated`). The units this kernel programs are VT-d (`DMAR`,
-`kernel/src/arch/x86_64/vtd/`) and SMMUv3 (`IORT`,
-`kernel/src/arch/aarch64/smmu/`). It finds AMD-Vi units (`IVRS`) and programs
-none (`kernel/src/arch/x86_64/iommu_unit.rs`), so a machine whose unit is AMD-Vi,
-VirtualBox's `--iommu amd` and QEMU's `amd-iommu` among them, refuses every
-claim until `issues/an-amd-vi-machine-isolates-no-device.md` lands.
+`kernel/src/arch/x86_64/vtd/`), AMD-Vi (`IVRS`, `kernel/src/arch/x86_64/amdvi/`)
+and SMMUv3 (`IORT`, `kernel/src/arch/aarch64/smmu/`). An AMD-Vi machine grants
+a claim only where every unit also filters SMIs, which QEMU's `amd-iommu` does
+not, so a QEMU guest behind it refuses every claim.
 
 QEMU emulates VT-d, AMD-Vi and SMMUv3, and VirtualBox VT-d or AMD-Vi under
 `--iommu` on its ICH9 chipset, off by default (`VBoxManage modifyvm`). Cloud

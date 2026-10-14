@@ -151,15 +151,24 @@ page included.** Owner: the orchestrator.
   - `issues/a-bar-behind-a-bridge-with-no-free-2-mib-of-its-windows-is-not-handed-over.md`
     closed, and each of the two placement issues it names closed or its exit
     rewritten to the placement P1 lands;
-  - the exit of
-    `issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`
-    rewritten, from a refused write to the table's page to the NVMe driven
-    through a table in BAR 0.
+  - on the AMD bench, `03:00.4` (`xhci-leave=03:00.4`, its MSI-X table in
+    BAR 0, its only BAR) claimed with that BAR in place and driven by usbd
+    through its own remapping entry, every unit filtering SMIs: the
+    `usbd_spare`, `usbd_spare_fault`, `end_returns_claims` and
+    `usbd_spare_vector` jobs pass, the aimed fault is recorded against the
+    claim at its address, and the holder's rewrite of its entry to a vector
+    not its own is refused, recorded, and absent from the stop's census of
+    unclaimed vectors. The row, `amdvi_usbd_drives_its_own_entry`, left the
+    registered AMD rows with PR #921 (its judge, `amdvi_usbd` in
+    `tests/toyos.rs` at `c648c1439`, comes back with it):
+    the bench's port `00:08.1` forwards only `0xd0000000..0xd0500000`, which
+    bus 3's BARs fill, so the BAR has nowhere routed to move to and stays
+    where firmware put it, which only 4 KiB pages can hand over.
 
-**P2 and P3, AMD-Vi translation and interrupt remapping.** Owner:
-`issues/an-amd-vi-machine-isolates-no-device.md`, held by the orchestrator's
-AMD track. Depends on: that track.
-- **Exit:** that track's exit, and three readings on the AMD bench:
+**P2 and P3, AMD-Vi translation and interrupt remapping.** Owner: the
+orchestrator's AMD track. Translation (PR #909) and remapping with the SMI
+filter (PR #921) have landed. Depends on: P1, for the claim.
+- **Exit:** three readings on the AMD bench:
   - the stick's xHCI and the NVMe working in their domains under
     translation;
   - the AX200's claim handed over with its own remapping table;
