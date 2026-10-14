@@ -1119,8 +1119,7 @@ fn a_reset_ends_both_pipes_and_the_stream() {
 }
 
 // Text and the reset after it in one batch: the client reads the text before the failure, as it
-// would had they come in passes of their own (Linux and the BSDs read what arrived before the
-// reset ahead of ECONNRESET).
+// would had they come in passes of their own.
 #[test]
 fn a_reset_in_the_batch_of_the_text_before_it_ends_the_pipes_after_the_text() {
     let (mut net, _, client) = established();

@@ -5,14 +5,13 @@
 //! after every store this CPU made to memory before it, as a device's DMA reads
 //! observe them — the descriptor before the doorbell — and a `read_*` is
 //! ordered before every load this CPU makes after it — the status before the
-//! entry it reports. It is Linux's `writel`/`readl` and not their `_relaxed`
-//! forms: `arch::barrier::before_mmio_write` and `after_mmio_read` supply it,
-//! which is a compiler barrier on x86-64's TSO and a `dmb` on AArch64, where a
-//! plain `fence` is inner-shareable and orders nothing a device sees.
-//! A `write_*` orders prior *stores* only, as `writel` does: a doorbell that
-//! hands entries back to the device after this CPU *read* them (an NVMe
-//! completion queue head, xHCI's ERDP) is ordered after those loads only by
-//! its value depending on them.
+//! entry it reports. `arch::barrier::before_mmio_write` and `after_mmio_read`
+//! supply it, which is a compiler barrier on x86-64's TSO and a `dmb` on
+//! AArch64, where a plain `fence` is inner-shareable and orders nothing a
+//! device sees. A `write_*` orders prior *stores* only: a doorbell that hands
+//! entries back to the device after this CPU *read* them (an NVMe completion
+//! queue head, xHCI's ERDP) is ordered after those loads only by its value
+//! depending on them.
 //!
 //! A store to device memory is not a store to plain memory, and `volatile`
 //! alone promises nothing about the two against each other: without the

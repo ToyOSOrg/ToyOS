@@ -189,17 +189,12 @@ pub fn decode(mask: u32, periods: usize) -> Option<Completed> {
 mod tests {
     use super::*;
 
-    /// The rate half of the field, against a second implementation of the same
-    /// specification rather than against this one restated.
-    ///
-    /// Linux carries the whole rate field as a literal table
-    /// (`sound/hda/hdac_device.c`, `rate_bits[]`), so these are twelve numbers
-    /// nothing here derived. That is the point: the encoding this crate builds
-    /// arithmetically had the base bit one place low, which every
-    /// self-consistent assertion agreed with — and it is a stream a codec and a
-    /// controller both accept and play at the wrong speed.
+    /// The rate half of the field for every rate HDA 1.0a Table 53 names
+    /// beside a BASE, MULT and DIV, each word written out from that table's
+    /// fields rather than from this crate's arithmetic: an encoding with the
+    /// base bit one place low agrees with itself, and plays at the wrong speed.
     #[test]
-    fn every_rate_linux_tabulates_encodes_to_the_number_linux_tabulates() {
+    fn every_rate_the_specification_names_encodes_to_its_fields() {
         for (rate, bits) in [
             (8_000u32, 0x0500u16),
             (11_025, 0x4300),
@@ -213,6 +208,9 @@ mod tests {
             (176_400, 0x5800),
             (192_000, 0x1800),
             (24_000, 0x0100),
+            (144_000, 0x1000),
+            (9_600, 0x0400),
+            (6_000, 0x0700),
         ] {
             // S16 stereo, which is the width and channel fields' own bits.
             assert_eq!(stream_format(rate, 16, 2), Some(bits | 0x11), "{rate} Hz");
