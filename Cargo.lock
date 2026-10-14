@@ -4399,6 +4399,7 @@ dependencies = [
  "toyos-metal",
  "toyos-microcode",
  "toyos-osrelease",
+ "toyos-parity",
  "toyos-quiesce",
  "toyos-sha2-hw",
  "toyos-ssh",
@@ -4677,6 +4678,10 @@ version = "0.1.0"
 
 [[package]]
 name = "toyos-osrelease"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-parity"
 version = "0.1.0"
 
 [[package]]

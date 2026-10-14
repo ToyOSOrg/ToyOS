@@ -1316,6 +1316,12 @@ pub fn build_toyos_bin(arch: Arch, crate_path: &Path, name: &str) -> Vec<u8> {
     toyos_build::build::build_toyos_bin(&compile::repo_root(), arch, crate_path, name, quiet)
 }
 
+/// The same, in `profile`, which the crate declares.
+pub fn build_toyos_bin_as(arch: Arch, crate_path: &Path, name: &str, profile: &str) -> Vec<u8> {
+    let quiet = !VERBOSE.load(Ordering::Relaxed);
+    toyos_build::build::build_toyos_bin_as(&compile::repo_root(), arch, crate_path, name, profile, quiet)
+}
+
 /// A kernel record's line, whichever writer spelled its head: `klogd`'s console
 /// and a `/log` file's alike. Nothing else writes one — a program's line
 /// reaches both only through `logkeeper`, under the program's own head.

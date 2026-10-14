@@ -60,6 +60,7 @@ members = [
     "lib/logstream",
     "lib/manifest",
     "lib/microcode",
+    "lib/parity",
     "lib/pci-claim",
     "lib/quiesce",
     "lib/random",
@@ -299,6 +300,8 @@ toyos-metal = { path = "tests/metal" }
 # The shutdown's stop record: the kernel renders it and the harness reads it
 # back off a log, so one declaration is what both sides spell it with.
 toyos-quiesce = { path = "lib/quiesce" }
+# The parity table `crypto_parity` prints and the judge reads, under one rule.
+toyos-parity = { path = "lib/parity" }
 
 [patch.crates-io]
 loom = { git = "https://github.com/ToyOSOrg/loom", branch = "toyos" }

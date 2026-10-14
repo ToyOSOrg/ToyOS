@@ -1,0 +1,536 @@
+//! `toyos-crypto` beside ring, on every hot-path operation a consumer calls,
+//! sampled and judged by `toyos-parity`'s rule
+//! (`issues/toyos-crypto-is-in-the-tree-on-par-with-ring-and-secure.md`, stages
+//! 2 and 3). ML-KEM, which ring lacks, is measured beside RustCrypto's `ml-kem`
+//! and decides nothing.
+//!
+//! Every backend of a row does the same work from the same inputs, A and B
+//! each on keys and buffers of their own. An open restores its ciphertext
+//! before each operation, and the copy is in every backend's time. A key
+//! agreement draws its ephemeral key from the system, as ring can only; ours
+//! draws the same bytes from the same source.
+//!
+//! The binary is built twice: in `[profile.toyos]`, as it ships, and as
+//! `crypto_parity_unasserted` with debug assertions off, whose column decides
+//! nothing.
+
+use std::hint::black_box;
+use std::time::Instant;
+
+use ring::{aead, agreement, digest, hkdf, hmac, rand, signature};
+use toyos_crypto::hash::{Sha256, Sha384, Sha512};
+use toyos_crypto::kdf::{Hkdf, Hmac};
+use toyos_parity::{Backend, Build, EndLine, Row, RowLine, SamplesLine, Summary};
+
+const KEY: [u8; 64] = [0x42; 64];
+const IV: [u8; 12] = [0x24; 12];
+/// A TLS 1.3 record header.
+const AAD: [u8; 5] = [0x17, 0x03, 0x03, 0x40, 0x11];
+const SIZES: [usize; 4] = [0, 64, 1024, 16384];
+/// The payload of the packet every SSH implementation must handle (RFC 4253,
+/// section 6.1).
+const SSH_PACKET: usize = 32768;
+const MESSAGE: [u8; 64] = [0x6d; 64];
+const SEED: [u8; 32] = [0x5e; 32];
+
+/// One row: ours, A and B, each running `ops` operations of its own.
+struct Trio {
+    name: String,
+    run: [Box<dyn FnMut(u64)>; 3],
+}
+
+impl Row for Trio {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn run(&mut self, backend: Backend, ops: u64) {
+        (self.run[backend as usize])(ops)
+    }
+}
+
+/// Hold `value` past the optimiser, which would otherwise drop the work that
+/// made it.
+fn keep<T>(value: T) {
+    drop(black_box(value));
+}
+
+fn looped(mut op: impl FnMut() + 'static) -> Box<dyn FnMut(u64)> {
+    Box::new(move |ops| (0..ops).for_each(|_| op()))
+}
+
+/// A row of `ours` beside two instances `reference` makes.
+fn trio<R: FnMut() + 'static>(name: String, ours: impl FnMut() + 'static, reference: impl Fn() -> R) -> Box<dyn Row> {
+    Box::new(Trio { name, run: [looped(ours), looped(reference()), looped(reference())] })
+}
+
+/// The system's random bytes, from where ring's `SystemRandom` takes them.
+struct System;
+
+impl toyos_crypto::Random for System {
+    fn fill(&mut self, destination: &mut [u8]) -> Result<(), toyos_crypto::Error> {
+        getrandom::getrandom(destination).map_err(|_| toyos_crypto::Error::Entropy)
+    }
+}
+
+/// The same bytes on every fill, for ML-KEM's deterministic forms.
+struct Fixed(&'static [u8]);
+
+impl toyos_crypto::Random for Fixed {
+    fn fill(&mut self, destination: &mut [u8]) -> Result<(), toyos_crypto::Error> {
+        destination.copy_from_slice(&self.0[..destination.len()]);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Tls {
+    Aes128,
+    Aes256,
+    ChaCha,
+}
+
+impl Tls {
+    fn name(self) -> &'static str {
+        match self {
+            Tls::Aes128 => "aes-128-gcm",
+            Tls::Aes256 => "aes-256-gcm",
+            Tls::ChaCha => "chacha20-poly1305",
+        }
+    }
+
+    fn ring(self) -> aead::LessSafeKey {
+        let (algorithm, key): (_, &[u8]) = match self {
+            Tls::Aes128 => (&aead::AES_128_GCM, &KEY[..16]),
+            Tls::Aes256 => (&aead::AES_256_GCM, &KEY[..32]),
+            Tls::ChaCha => (&aead::CHACHA20_POLY1305, &KEY[..32]),
+        };
+        aead::LessSafeKey::new(aead::UnboundKey::new(algorithm, key).expect("an AEAD key"))
+    }
+
+    fn sealing(self) -> toyos_crypto::aead::SealingKey {
+        use toyos_crypto::aead::SealingKey;
+        match self {
+            Tls::Aes128 => SealingKey::aes128_gcm(KEY[..16].try_into().unwrap(), IV),
+            Tls::Aes256 => SealingKey::aes256_gcm(KEY[..32].try_into().unwrap(), IV),
+            Tls::ChaCha => SealingKey::chacha20_poly1305(KEY[..32].try_into().unwrap(), IV),
+        }
+    }
+
+    fn opening(self) -> toyos_crypto::aead::OpeningKey {
+        use toyos_crypto::aead::OpeningKey;
+        match self {
+            Tls::Aes128 => OpeningKey::aes128_gcm(KEY[..16].try_into().unwrap()),
+            Tls::Aes256 => OpeningKey::aes256_gcm(KEY[..32].try_into().unwrap()),
+            Tls::ChaCha => OpeningKey::chacha20_poly1305(KEY[..32].try_into().unwrap()),
+        }
+    }
+}
+
+/// The nonce of record `sequence`, as TLS 1.3 forms it and ours does inside
+/// its sealing key.
+fn nonce(sequence: u64) -> aead::Nonce {
+    let mut nonce = IV;
+    for (n, s) in nonce[4..].iter_mut().zip(sequence.to_be_bytes()) {
+        *n ^= s;
+    }
+    aead::Nonce::assume_unique_for_key(nonce)
+}
+
+/// Ours sealed at sequence 0, and its tag, `forged` with one bit flipped.
+fn ours_sealed(alg: Tls, len: usize, forged: bool) -> (Vec<u8>, [u8; 12], [u8; 16]) {
+    let mut sealed = vec![0x70; len];
+    let (nonce, mut tag) = alg.sealing().seal(&AAD, &mut sealed).expect("seal");
+    tag[0] ^= u8::from(forged);
+    (sealed, nonce, tag)
+}
+
+/// Ring's the same.
+fn ring_sealed(key: &aead::LessSafeKey, len: usize, forged: bool) -> (Vec<u8>, aead::Tag) {
+    let mut sealed = vec![0x70; len];
+    let tag = key.seal_in_place_separate_tag(nonce(0), aead::Aad::from(AAD), &mut sealed).expect("seal");
+    let mut tag: [u8; 16] = tag.as_ref().try_into().unwrap();
+    tag[0] ^= u8::from(forged);
+    (sealed, tag.into())
+}
+
+fn tls_rows(alg: Tls, rows: &mut Vec<Box<dyn Row>>) {
+    let name = alg.name();
+    rows.push(trio(format!("{name}/key"), move || keep(alg.sealing()), move || {
+        move || keep(alg.ring())
+    }));
+    for len in SIZES {
+        let mut key = alg.sealing();
+        let mut buf = vec![0x70; len];
+        rows.push(trio(
+            format!("{name}/seal/{len}"),
+            move || keep(key.seal(&AAD, &mut buf).expect("seal")),
+            move || {
+                let (key, mut buf, mut sequence) = (alg.ring(), vec![0x70; len], 0);
+                move || {
+                    let tag = key.seal_in_place_separate_tag(nonce(sequence), aead::Aad::from(AAD), &mut buf);
+                    keep(tag.expect("seal"));
+                    sequence += 1;
+                }
+            },
+        ));
+        for forged in [false, true] {
+            let op = if forged { "reject" } else { "open" };
+            let key = alg.opening();
+            let (sealed, sealed_nonce, tag) = ours_sealed(alg, len, forged);
+            let mut work = sealed.clone();
+            rows.push(trio(
+                format!("{name}/{op}/{len}"),
+                move || {
+                    if !forged {
+                        work.copy_from_slice(&sealed);
+                    }
+                    assert_eq!(key.open(&sealed_nonce, &AAD, &mut work, &tag).is_err(), forged);
+                },
+                move || {
+                    let key = alg.ring();
+                    let (sealed, tag) = ring_sealed(&key, len, forged);
+                    let mut work = sealed.clone();
+                    move || {
+                        if !forged {
+                            work.copy_from_slice(&sealed);
+                        }
+                        let opened = key.open_in_place_separate_tag(nonce(0), aead::Aad::from(AAD), tag, &mut work, 0..);
+                        assert_eq!(opened.is_err(), forged);
+                    }
+                },
+            ));
+        }
+    }
+}
+
+/// `chacha20-poly1305@openssh.com`: the packet's length field, then its
+/// payload.
+fn ssh_rows(rows: &mut Vec<Box<dyn Row>>) {
+    use ring::aead::chacha20_poly1305_openssh as ring_ssh;
+    use toyos_crypto::ssh;
+    const NAME: &str = "chacha20-poly1305-openssh";
+    rows.push(trio(format!("{NAME}/key"), || keep(ssh::SealingKey::new(KEY, 0)), || {
+        || keep(ring_ssh::SealingKey::new(&KEY))
+    }));
+    for len in SIZES.into_iter().chain([SSH_PACKET]) {
+        let length = u32::try_from(len).unwrap().to_be_bytes();
+        let mut key = ssh::SealingKey::new(KEY, 0);
+        let (mut header, mut payload) = (length, vec![0x70; len]);
+        rows.push(trio(
+            format!("{NAME}/seal/{len}"),
+            move || keep(key.seal(&mut header, &mut payload).expect("seal")),
+            move || {
+                let key = ring_ssh::SealingKey::new(&KEY);
+                let (mut packet, mut tag, mut sequence) = (vec![0x70; 4 + len], [0; 16], 0u32);
+                packet[..4].copy_from_slice(&length);
+                move || {
+                    key.seal_in_place(sequence, &mut packet, &mut tag);
+                    keep(&tag);
+                    sequence = sequence.wrapping_add(1);
+                }
+            },
+        ));
+        for forged in [false, true] {
+            let op = if forged { "reject" } else { "open" };
+            let (mut sealed_header, mut sealed) = (length, vec![0x70; len]);
+            let (sequence, mut tag) = ssh::SealingKey::new(KEY, 0).seal(&mut sealed_header, &mut sealed).expect("seal");
+            tag[0] ^= u8::from(forged);
+            let key = ssh::OpeningKey::new(KEY);
+            let (mut header, mut work) = (sealed_header, sealed.clone());
+            rows.push(trio(
+                format!("{NAME}/{op}/{len}"),
+                move || {
+                    if !forged {
+                        header = sealed_header;
+                        work.copy_from_slice(&sealed);
+                    }
+                    keep(key.packet_length(sequence, header));
+                    assert_eq!(key.open(sequence, &mut header, &mut work, &tag).is_err(), forged);
+                },
+                move || {
+                    let mut sealed = vec![0x70; 4 + len];
+                    sealed[..4].copy_from_slice(&length);
+                    let mut tag = [0; 16];
+                    ring_ssh::SealingKey::new(&KEY).seal_in_place(0, &mut sealed, &mut tag);
+                    tag[0] ^= u8::from(forged);
+                    let key = ring_ssh::OpeningKey::new(&KEY);
+                    let mut work = sealed.clone();
+                    move || {
+                        if !forged {
+                            work.copy_from_slice(&sealed);
+                        }
+                        keep(key.decrypt_packet_length(0, work[..4].try_into().unwrap()));
+                        assert_eq!(key.open_in_place(0, &mut work, &tag).is_err(), forged);
+                    }
+                },
+            ));
+        }
+    }
+}
+
+fn hash_rows(rows: &mut Vec<Box<dyn Row>>) {
+    for len in [64, 16384] {
+        let message = vec![0x6d; len];
+        rows.push(trio(format!("sha-256/{len}"), move || keep(Sha256::digest(&message).unwrap()), move || {
+            let message = vec![0x6d; len];
+            move || keep(digest::digest(&digest::SHA256, &message))
+        }));
+        let message = vec![0x6d; len];
+        rows.push(trio(format!("sha-512/{len}"), move || keep(Sha512::digest(&message).unwrap()), move || {
+            let message = vec![0x6d; len];
+            move || keep(digest::digest(&digest::SHA512, &message))
+        }));
+    }
+    // A key schedule's HMAC: a fresh key over one short message.
+    rows.push(trio(
+        "hmac-sha-256/64".into(),
+        || {
+            let mut tag = [0; 32];
+            Hmac::<Sha256>::authenticate(&KEY[..32], &MESSAGE, &mut tag).unwrap();
+            keep(tag);
+        },
+        || || keep(hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, &KEY[..32]), &MESSAGE)),
+    ));
+    rows.push(trio(
+        "hmac-sha-384/64".into(),
+        || {
+            let mut tag = [0; 48];
+            Hmac::<Sha384>::authenticate(&KEY[..48], &MESSAGE, &mut tag).unwrap();
+            keep(tag);
+        },
+        || || keep(hmac::sign(&hmac::Key::new(hmac::HMAC_SHA384, &KEY[..48]), &MESSAGE)),
+    ));
+    // Extract, then expand one secret of the hash's length.
+    rows.push(trio(
+        "hkdf-sha-256/32".into(),
+        || {
+            let mut out = [0; 32];
+            Hkdf::<Sha256>::extract(&IV, &KEY[..32]).unwrap().expand(&[&MESSAGE[..16]], &mut out).unwrap();
+            keep(out);
+        },
+        || {
+            || {
+                let mut out = [0; 32];
+                let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &IV).extract(&KEY[..32]);
+                prk.expand(&[&MESSAGE[..16]], hkdf::HKDF_SHA256).unwrap().fill(&mut out).unwrap();
+                keep(out);
+            }
+        },
+    ));
+    rows.push(trio(
+        "hkdf-sha-384/48".into(),
+        || {
+            let mut out = [0; 48];
+            Hkdf::<Sha384>::extract(&IV, &KEY[..48]).unwrap().expand(&[&MESSAGE[..16]], &mut out).unwrap();
+            keep(out);
+        },
+        || {
+            || {
+                let mut out = [0; 48];
+                let prk = hkdf::Salt::new(hkdf::HKDF_SHA384, &IV).extract(&KEY[..48]);
+                prk.expand(&[&MESSAGE[..16]], hkdf::HKDF_SHA384).unwrap().fill(&mut out).unwrap();
+                keep(out);
+            }
+        },
+    ));
+}
+
+/// A key agreement as TLS and SSH make one: an ephemeral key drawn from the
+/// system, its public key, and the secret it shares with the peer's.
+fn agreement_rows(rows: &mut Vec<Box<dyn Row>>) {
+    use toyos_crypto::{ecc, x25519};
+    let peer = |alg| {
+        let key = agreement::EphemeralPrivateKey::generate(alg, &rand::SystemRandom::new()).expect("a peer");
+        key.compute_public_key().expect("its public key").as_ref().to_vec()
+    };
+    fn ring(alg: &'static agreement::Algorithm, peer: Vec<u8>) -> impl Fn() -> Box<dyn FnMut()> {
+        move || {
+            let (rng, peer) = (rand::SystemRandom::new(), peer.clone());
+            Box::new(move || {
+                let key = agreement::EphemeralPrivateKey::generate(alg, &rng).expect("a key");
+                keep(key.compute_public_key().expect("its public key"));
+                let peer = agreement::UnparsedPublicKey::new(alg, &peer);
+                agreement::agree_ephemeral(key, &peer, |secret| black_box(secret[0])).expect("the agreement");
+            })
+        }
+    }
+    let x = peer(&agreement::X25519);
+    let public = x25519::PublicKey(x.as_slice().try_into().unwrap());
+    rows.push(trio(
+        "x25519/ecdh".into(),
+        move || {
+            let key = x25519::SecretKey::generate(&mut System).expect("a key");
+            keep(key.public_key());
+            keep(key.agree(&public).expect("the agreement").as_bytes()[0]);
+        },
+        ring(&agreement::X25519, x),
+    ));
+    let p256 = peer(&agreement::ECDH_P256);
+    let encoded = p256.clone();
+    rows.push(trio(
+        "p-256/ecdh".into(),
+        move || {
+            let key = ecc::p256::SecretKey::generate(&mut System).expect("a key");
+            keep(key.public_key());
+            let peer = ecc::p256::PublicKey::from_sec1(&encoded).expect("the peer");
+            keep(key.agree(&peer).expect("the agreement").as_bytes()[0]);
+        },
+        ring(&agreement::ECDH_P256, p256),
+    ));
+    let p384 = peer(&agreement::ECDH_P384);
+    let encoded = p384.clone();
+    rows.push(trio(
+        "p-384/ecdh".into(),
+        move || {
+            let key = ecc::p384::SecretKey::generate(&mut System).expect("a key");
+            keep(key.public_key());
+            let peer = ecc::p384::PublicKey::from_sec1(&encoded).expect("the peer");
+            keep(key.agree(&peer).expect("the agreement").as_bytes()[0]);
+        },
+        ring(&agreement::ECDH_P384, p384),
+    ));
+}
+
+/// Signatures over [`MESSAGE`]; a verification parses its public key, as a
+/// peer's arrives.
+fn signature_rows(rows: &mut Vec<Box<dyn Row>>) {
+    use signature::KeyPair;
+    use toyos_crypto::{ecc, ed25519, rsa};
+    let rng = rand::SystemRandom::new();
+
+    let key = ed25519::SigningKey::from_seed(SEED);
+    rows.push(trio("ed25519/sign/64".into(), move || keep(key.sign(&MESSAGE).expect("sign")), || {
+        let pair = signature::Ed25519KeyPair::from_seed_unchecked(&SEED).expect("the seed");
+        move || keep(pair.sign(&MESSAGE))
+    }));
+    let pair = signature::Ed25519KeyPair::from_seed_unchecked(&SEED).expect("the seed");
+    let (public, sig) = (pair.public_key().as_ref().to_vec(), pair.sign(&MESSAGE).as_ref().to_vec());
+    let ring_verify = |alg: &'static dyn signature::VerificationAlgorithm, public: Vec<u8>, sig: Vec<u8>| {
+        move || {
+            let (public, sig) = (public.clone(), sig.clone());
+            move || signature::UnparsedPublicKey::new(alg, &public).verify(&MESSAGE, &sig).expect("verify")
+        }
+    };
+    let (encoded, signed) = (public.clone().try_into().unwrap(), sig.clone());
+    rows.push(trio(
+        "ed25519/verify/64".into(),
+        move || ed25519::PublicKey::from_bytes(encoded).expect("the key").verify(&MESSAGE, &signed).expect("verify"),
+        ring_verify(&signature::ED25519, public, sig),
+    ));
+
+    let ecdsa = |alg| {
+        let pkcs8 = signature::EcdsaKeyPair::generate_pkcs8(alg, &rng).expect("a key");
+        let pair = signature::EcdsaKeyPair::from_pkcs8(alg, pkcs8.as_ref(), &rng).expect("the key");
+        (pair.public_key().as_ref().to_vec(), pair.sign(&rng, &MESSAGE).expect("sign").as_ref().to_vec())
+    };
+    let (public, sig) = ecdsa(&signature::ECDSA_P256_SHA256_ASN1_SIGNING);
+    let (encoded, signed) = (public.clone(), sig.clone());
+    rows.push(trio(
+        "ecdsa-p-256-sha-256/verify/64".into(),
+        move || ecc::p256::PublicKey::from_sec1(&encoded).expect("the key").verify(&MESSAGE, &signed).expect("verify"),
+        ring_verify(&signature::ECDSA_P256_SHA256_ASN1, public, sig),
+    ));
+    let (public, sig) = ecdsa(&signature::ECDSA_P384_SHA384_ASN1_SIGNING);
+    let (encoded, signed) = (public.clone(), sig.clone());
+    rows.push(trio(
+        "ecdsa-p-384-sha-384/verify/64".into(),
+        move || ecc::p384::PublicKey::from_sec1(&encoded).expect("the key").verify(&MESSAGE, &signed).expect("verify"),
+        ring_verify(&signature::ECDSA_P384_SHA384_ASN1, public, sig),
+    ));
+
+    // `toyos-crypto`'s own committed test keys, which its RSA differential
+    // signs with.
+    let keys: [(usize, &[u8]); 2] = [
+        (2048, include_bytes!("../../../../../lib/crypto/tests/keys/rsa-2048.pk8")),
+        (4096, include_bytes!("../../../../../lib/crypto/tests/keys/rsa-4096.pk8")),
+    ];
+    for (bits, pkcs8) in keys {
+        let pair = signature::RsaKeyPair::from_pkcs8(pkcs8).expect("the key");
+        let public: signature::RsaPublicKeyComponents<Vec<u8>> = pair.public().into();
+        let schemes: [(&str, &'static dyn signature::RsaEncoding, &'static signature::RsaParameters, bool); 2] = [
+            ("pkcs1", &signature::RSA_PKCS1_SHA256, &signature::RSA_PKCS1_2048_8192_SHA256, false),
+            ("pss", &signature::RSA_PSS_SHA256, &signature::RSA_PSS_2048_8192_SHA256, true),
+        ];
+        for (scheme, padding, verification, pss) in schemes {
+            let mut sig = vec![0; pair.public().modulus_len()];
+            pair.sign(padding, &rng, &MESSAGE, &mut sig).expect("sign");
+            let (n, e, signed) = (public.n.clone(), public.e.clone(), sig.clone());
+            let public = (public.n.clone(), public.e.clone());
+            rows.push(trio(
+                format!("rsa-{bits}-{scheme}-sha-256/verify/64"),
+                move || {
+                    let key = rsa::PublicKey::from_components(&n, &e).expect("the key");
+                    let verified = if pss {
+                        key.verify_pss(rsa::Hash::Sha256, &MESSAGE, &signed)
+                    } else {
+                        key.verify_pkcs1_v1_5(rsa::Hash::Sha256, &MESSAGE, &signed)
+                    };
+                    verified.expect("verify");
+                },
+                move || {
+                    let ((n, e), sig) = (public.clone(), sig.clone());
+                    move || {
+                        let key = signature::RsaPublicKeyComponents { n: &n, e: &e };
+                        key.verify(verification, &MESSAGE, &sig).expect("verify");
+                    }
+                },
+            ));
+        }
+    }
+}
+
+/// ML-KEM-768 beside RustCrypto's `ml-kem`, on fixed seeds. Ours consumes its
+/// decapsulation key, so a decapsulation includes the key's generation on
+/// both sides.
+fn ml_kem_rows(rows: &mut Vec<Box<dyn Row>>) {
+    use ml_kem::{Decapsulate, MlKem768};
+    use toyos_crypto::mlkem;
+    const SEEDS: [u8; 64] = [0x3d; 64];
+    const M: [u8; 32] = [0x4e; 32];
+    let theirs = || ml_kem::DecapsulationKey::<MlKem768>::from_seed(SEEDS.into());
+    rows.push(trio(
+        "ml-kem-768/keygen".into(),
+        || keep(mlkem::DecapsulationKey::generate(&mut Fixed(&SEEDS)).expect("a key")),
+        move || move || keep(theirs()),
+    ));
+    let key = mlkem::DecapsulationKey::generate(&mut Fixed(&SEEDS)).expect("a key");
+    let public = mlkem::EncapsulationKey::from_bytes(key.public_key().as_bytes()).expect("its public key");
+    let (ciphertext, _) = public.encapsulate(&mut Fixed(&M)).expect("encapsulate");
+    rows.push(trio(
+        "ml-kem-768/encapsulate".into(),
+        move || keep(public.encapsulate(&mut Fixed(&M)).expect("encapsulate")),
+        move || {
+            let public = theirs().encapsulation_key().clone();
+            move || keep(public.encapsulate_deterministic(&M.into()))
+        },
+    ));
+    rows.push(trio(
+        "ml-kem-768/keygen+decapsulate".into(),
+        move || {
+            let key = mlkem::DecapsulationKey::generate(&mut Fixed(&SEEDS)).expect("a key");
+            keep(key.decapsulate(&ciphertext).expect("decapsulate").as_bytes()[0]);
+        },
+        move || move || keep(theirs().decapsulate(&ciphertext.into())),
+    ));
+}
+
+fn main() {
+    let build = if cfg!(debug_assertions) { Build::Asserted } else { Build::Unasserted };
+    let mut rows = Vec::new();
+    for alg in [Tls::Aes128, Tls::Aes256, Tls::ChaCha] {
+        tls_rows(alg, &mut rows);
+    }
+    ssh_rows(&mut rows);
+    hash_rows(&mut rows);
+    agreement_rows(&mut rows);
+    signature_rows(&mut rows);
+    ml_kem_rows(&mut rows);
+
+    let start = Instant::now();
+    let times = toyos_parity::measure(&mut rows, &mut || start.elapsed().as_nanos() as u64);
+    for (row, times) in rows.iter().zip(&times) {
+        println!("{}", SamplesLine(build, row.name(), times));
+        println!("{}", RowLine(build, &Summary::of(row.name(), times)));
+    }
+    println!("{}", EndLine(build, rows.len()));
+}

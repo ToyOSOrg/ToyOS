@@ -1,0 +1,11 @@
+# A member of the host workspace (root `Cargo.toml`), like toyos-tco: the
+# guest instrument `crypto_parity` measures with it and the metal judge reads
+# its lines with it, so one declaration of the rule serves both and its tests
+# run on the host.
+
+[package]
+name = "toyos-parity"
+description = "The parity rule toyos-crypto is held to beside ring: rotated sampling of ours and two reference instances, the A/B spread, the verdict, and the table lines a guest prints and the judge reads."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
