@@ -1299,20 +1299,21 @@ fn a_cause_after_the_read_is_a_message_at_the_unmask() {
                 ..Permits::default()
             };
             let nic = Nic::with(78, part, permits);
+            let arm = |what: &str| nic.because(&format!("{what}, with keeps={keeps} one_per={one_per}"));
             let mut driver = open(&nic);
             link_up(&nic, &mut driver);
 
             nic.deliver(&frame(0x78, 200));
             nic.run();
-            assert!(nic.pending() > 0);
+            assert!(nic.pending() > 0, "{}", arm("the frame raised no message"));
             nic.cause_after_next_icr_read(cause::LSC);
             let pass = one_pass(&mut driver);
             assert_eq!(pass.causes & cause::LSC, 0);
             assert_eq!(drain(&nic, &mut driver).len(), 1);
-            assert!(nic.pending() > 0, "{}", nic.because("the cause after the read raised no message"));
+            assert!(nic.pending() > 0, "{}", arm("the cause after the read raised no message"));
             let next = one_pass(&mut driver);
-            assert_ne!(next.causes & cause::LSC, 0, "{}", nic.because("the next pass did not see it"));
-            assert_eq!(nic.peek(regs::IMS) & cause::ENABLED, cause::ENABLED, "{}", nic.because("a pass left a cause masked"));
+            assert_ne!(next.causes & cause::LSC, 0, "{}", arm("the next pass did not see it"));
+            assert_eq!(nic.peek(regs::IMS) & cause::ENABLED, cause::ENABLED, "{}", arm("a pass left a cause masked"));
         }
     }
 }

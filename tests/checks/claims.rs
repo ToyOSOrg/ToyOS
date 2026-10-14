@@ -36,9 +36,12 @@ fn in_the_job(records: &str, after: &str) -> String {
     format!("{}{exit}{after}", records.replacen(FIRST_CLAIM, &format!("{spawn}{FIRST_CLAIM}"), 1))
 }
 
-/// A third claim of the same function, by the job after the re-claim.
+/// A third claim of the same function, and its release, by the job after the
+/// re-claim: what the shared boot's MSI job does.
 const ANOTHER_JOBS_CLAIM: &str = "[2026-09-29 12:10:56 23.000 cpu0 kernel] iommu: irte0 source=00:1f.6 p=1 sid=0x00fe svt=1 sq=0 vector=0x28 apic=0x0 dst=0x0 trigger=edge
 [2026-09-29 12:10:56 23.001 cpu0 kernel] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
+[2026-09-29 12:11:06 33.000 cpu0 kernel] iommu: irte0 source=00:1f.6 p=0 released
+[2026-09-29 12:11:06 33.000 cpu0 kernel] pcidev: PCI 00:1f.6 [8086:15fc] released from slot 0; reset by nothing
 ";
 
 /// One entry for both claims, not present after each release, whatever
@@ -54,8 +57,8 @@ pub fn one_entry_per_slot() {
     );
     assert_eq!(claims::reuses_its_entry(&log(&green)), Ok(()));
 
-    let unscoped = green.replace("pid=7 code=0", "pid=8 code=0");
-    let why = claims::reuses_its_entry(&log(&unscoped)).expect_err("a job that never exited");
+    let no_exit = green.replace("pid=7 code=0", "pid=8 code=0");
+    let why = claims::reuses_its_entry(&log(&no_exit)).expect_err("a job that never exited");
     assert!(why.contains("never exited"), "{why}");
 
     let recorded = in_the_job(&format!("{RECORDED}{RELEASED}"), "");

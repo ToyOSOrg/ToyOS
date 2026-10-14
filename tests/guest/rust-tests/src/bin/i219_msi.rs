@@ -115,8 +115,9 @@ fn capabilities(dev: &PciDev) -> Vec<(u8, u8, u8, u16)> {
     found
 }
 
-/// Force `forced` with `unmask` in `IMS`, and answer the messages that came and
-/// `ICR` after them; everything is masked and `ICR` cleared again after.
+/// Force `forced` with `unmask` in `IMS`, and answer every message that came
+/// in the whole window, when the first did, and `ICR` after them; everything
+/// is masked and `ICR` cleared again after.
 fn force<R: Registers>(regs: &R, claim: &Claim, forced: u32, unmask: u32) -> (u32, u64, u32) {
     regs.write32(regs::IMC, u32::MAX);
     let _ = regs.read32(regs::ICR);
@@ -124,8 +125,13 @@ fn force<R: Registers>(regs: &R, claim: &Claim, forced: u32, unmask: u32) -> (u3
     regs.write32(regs::IMS, unmask);
     let at = Monotonic.nanos();
     regs.write32(regs::ICS, forced);
-    let count = messages(claim, WINDOW_NANOS);
+    let mut count = messages(claim, WINDOW_NANOS);
     let after = Monotonic.nanos() - at;
+    // The window is waited out, so a second message for the one cause is
+    // counted and not left behind the first.
+    while let Some(left) = WINDOW_NANOS.checked_sub(Monotonic.nanos() - at).filter(|left| *left > 0) {
+        count += messages(claim, left);
+    }
     regs.write32(regs::IMC, u32::MAX);
     let icr = regs.read32(regs::ICR);
     (count, after, icr)
@@ -372,6 +378,9 @@ fn main() {
     }
     if counters.sent as u64 != wire.sent || counters.stranded != 0 {
         fail("the descriptors written back are not the frames the MAC sent");
+    }
+    if ecc & regs::pbeccsts::ECC_ENABLE == 0 {
+        fail("the packet buffer's ECC is off, so no ECC error could have been reported");
     }
     if tally.eccer != 0 || ecc & regs::pbeccsts::COUNTS != 0 {
         fail("the packet buffer reported an ECC error");
