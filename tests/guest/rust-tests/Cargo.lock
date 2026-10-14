@@ -731,8 +731,20 @@ name = "toyos-abi"
 version = "0.16.0"
 
 [[package]]
+name = "toyos-device-memory"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-font"
 version = "0.2.0"
+
+[[package]]
+name = "toyos-i219"
+version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+ "toyos-pci",
+]
 
 [[package]]
 name = "toyos-inspect"
@@ -753,6 +765,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-pci"
+version = "0.1.0"
+dependencies = [
+ "toyos-abi",
+]
+
+[[package]]
+name = "toyos-pci-claim"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-device-memory",
+ "toyos-virtio",
+]
+
+[[package]]
 name = "toyos-rust-tests"
 version = "0.1.0"
 dependencies = [
@@ -764,8 +793,12 @@ dependencies = [
  "ring",
  "toyos",
  "toyos-abi",
+ "toyos-device-memory",
+ "toyos-i219",
  "toyos-inspect",
  "toyos-logstream",
+ "toyos-pci",
+ "toyos-pci-claim",
  "toyos-tco",
  "toyos-trace",
  "toyos-window",
@@ -780,6 +813,18 @@ name = "toyos-trace"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
+]
+
+[[package]]
+name = "toyos-untrusted"
+version = "0.1.0"
+
+[[package]]
+name = "toyos-virtio"
+version = "0.1.0"
+dependencies = [
+ "toyos-device-memory",
+ "toyos-untrusted",
 ]
 
 [[package]]

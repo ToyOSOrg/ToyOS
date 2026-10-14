@@ -253,6 +253,50 @@ pub const EXCEPTIONS: &[Exception] = &[
 /// `issues/the-third-party-corpus-is-in-no-machine-read-ledger.md` is
 /// what is left of that gap.
 pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
+    // EDID base blocks: device and firmware output, not third-party source.
+    // `lib/edid/fixtures/SOURCE` says how each was read.
+    (
+        "lib/edid/fixtures/amd-bench-b140han06.8.bin",
+        "dad4ed7740aab2a5f11f10bf807e300128d8bf7acfee25f8f57e5845d781b2d6",
+        "ours: the AMD bench panel's EDID base block, as its firmware publishes it, read by PR #895's M1 boot",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/edid/fixtures/qemu-default.bin",
+        "edfffbb5aa7dbf17fa43c73e5ad1df719411a5c948576f397c2528767d0e402a",
+        "ours: QEMU's own EDID generator, `qemu-edid` with no option",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/edid/fixtures/qemu-dpi157-1920x1080.bin",
+        "a43c85fc61efc09595a67407c865e53de94b6ddb657ab9da843c2bd8b7b6eecc",
+        "ours: QEMU's own EDID generator, `qemu-edid -x 1920 -y 1080 -d 157`",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/edid/fixtures/qemu-dpi254-2560x1600.bin",
+        "d4436bf2d72005aa03f09e0c4660decf85f4e5738c223269cd1a1a3b397fd1ed",
+        "ours: QEMU's own EDID generator, `qemu-edid -x 2560 -y 1600 -d 254`",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/edid/fixtures/qemu-dpi254-3456x2234.bin",
+        "c2eb70f0f0877e745d10856b676ddfbff7015f7ae9231c1b6262f73cb9771cb8",
+        "ours: QEMU's own EDID generator's base block, `qemu-edid -x 3456 -y 2234 -d 254`",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/edid/fixtures/t14-n140hca-eae.bin",
+        "057bdacb8b19658fb43dcc583ab265bda8c9d7636846ef7bbcf97d009073894b",
+        "ours: the T14 panel's EDID base block, as its firmware publishes it, read by PR #895's M1 boot",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
+        "lib/edid/fixtures/virtio-gpu-get-edid-1024x768.bin",
+        "9e4773b40dba7143b625474ebe83588562f7ec95cb02941df249ba50063b32f9",
+        "ours: QEMU's virtio-gpu answering GET_EDID at 1024x768",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
     // The ACPI tables QEMU 11.1.1 published to a `Profile::Headless` guest,
     // read out of guest physical memory over the monitor. Firmware output, not
     // third-party source: `lib/acpi/tests/fixtures.rs` decodes them against

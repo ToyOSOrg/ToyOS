@@ -119,7 +119,7 @@ Cargo.toml Cargo.lock clippy.toml .cargo/config.toml             rule step 1: on
                                                                  one [target.<triple>] table per guest triple
 .github/ .claude/ .gitignore .gitmodules                         rule step 1
 loader/   the UEFI loader, package bootloader
-kernel/   CLAUDE.md; src/ pure/ loom/ sim/ pci/ gicv3/ ps2/ dma/ cpuvuln/ microcode/ (+ intel-ucode, licence)
+kernel/   CLAUDE.md; src/ pure/ loom/ sim/ pci/ gicv3/ ps2/ dma/ microcode/ (+ intel-ucode, licence)
 system/   CLAUDE.md (the server doctrine); one directory per /system/bin name:
           supervisor compositor (desktop/ sprite/)
           netstack (mdns/ dns/ and the net family) soundserver (mixer/) console diskserver
@@ -222,7 +222,7 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
    **Exit:** `PUBLISHED` is derived from `sdk/` and names `sdk/filepicker`;
    `SYSROOT_SOURCES` is derived from `sdk/` and the `lib/` crates libc links;
    a release dry run green.
-6. **`lib/`, and what one thing uses into that thing:** `kernel/cpuvuln`,
+6. **`lib/`, and what one thing uses into that thing:** `kernel/cpuvuln` (deleted by #915),
    `kernel/microcode`, the net family and `toyos-dns` into
    `system/netstack/`. Landed with stage 4, in one pull request. **Exit:** no
    `toyos-*` or `bcachefs` directory is left at the root; `git diff -M`

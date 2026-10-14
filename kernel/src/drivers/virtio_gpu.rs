@@ -452,6 +452,8 @@ impl GpuController {
             stride: self.width,
             pixel_format: 1, // BGR (B8G8R8X8_UNORM)
             flags: FLAG_HARDWARE_CURSOR,
+            edid: [0; toyos_abi::boot::EDID_BLOCK],
+            edid_len: 0,
         }
     }
 }

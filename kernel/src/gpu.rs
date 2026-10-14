@@ -14,6 +14,10 @@ pub struct GpuInfo {
     pub stride: u32,
     pub pixel_format: u32,
     pub flags: u32,
+    /// The panel's EDID base block the loader handed over, and its length:
+    /// [`toyos_abi::boot::EDID_BLOCK`] or zero.
+    pub edid: [u8; toyos_abi::boot::EDID_BLOCK],
+    pub edid_len: u32,
 }
 
 /// Hardware-agnostic GPU interface; register an implementation with `gpu::register()`.
@@ -40,6 +44,8 @@ pub fn screen(info: &GpuInfo) -> crate::device::Screen {
             stride: info.stride,
             pixel_format: info.pixel_format,
             flags: info.flags,
+            edid: info.edid,
+            edid_len: info.edid_len,
         },
         scanout: info.scanout.clone(),
         cursor: info.cursor.clone(),
@@ -95,6 +101,8 @@ pub fn set_resolution(width: u32, height: u32) -> Result<GpuInfo, SyscallError> 
         stride: new_info.stride,
         pixel_format: new_info.pixel_format,
         flags: new_info.flags,
+        edid: new_info.edid,
+        edid_len: new_info.edid_len,
     });
     Ok(new_info)
 }

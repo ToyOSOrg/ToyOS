@@ -121,6 +121,9 @@ const RUST_SKIP: &[&str] = &[
     // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
     // metal rows run it.
     "pci_reclaim",
+    // It measures the T14's I219, which no guest has: the
+    // `i219_messages_on_its_msi_vector` metal row runs it.
+    "i219_msi",
     // Its product is the T14's counters across an idle span and a spin on
     // every CPU, which the `counters` metal row judges; on a guest it would be
     // seconds of four CPUs spinning, read by nothing.
@@ -318,6 +321,35 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("virt_wall_clock_utc", qemu::Profile::Virt),
     ("virt_low_ecam", qemu::Profile::VirtLowEcam),
 ];
+
+/// Which handle the loader took the panel's EDID from, and what the compositor
+/// made of it, on each bench: the handle M1 found the protocol on, and the
+/// size and scale `lib/edid`'s fixture of that bench's panel gives.
+fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
+    const T14: u32 = 0x0008_06c1;
+    const AMD_BENCH: u32 = 0x0086_0f01;
+    let signature = microcode_lines(kernel)?
+        .first()
+        .ok_or("the kernel wrote no microcode line to tell the bench by")?
+        .signature;
+    let (handle, panel) = match signature {
+        T14 => (0, "panel 309x173 mm, scale 1.5"),
+        AMD_BENCH => (1, "panel 309x174 mm, scale 1.5"),
+        other => return Err(format!("no bench of signature {other:#x} says which panel it has")),
+    };
+    let handed = format!("EDID: GOP handle {handle} of 2 shows the scanout and publishes 128 byte(s), the base block handed over");
+    if !loader.contains(&handed) {
+        let said: Vec<&str> = loader.lines().filter(|l| l.contains("EDID: ")).collect();
+        return Err(format!("loader.log does not say {handed:?}; its EDID lines: {said:?}"));
+    }
+    let chosen = format!("compositor: display 1920x1080, {panel}");
+    if !log.contains(&chosen) {
+        let said: Vec<&str> = log.lines().filter(|l| l.contains("compositor: display ")).collect();
+        return Err(format!("the log does not say {chosen:?}; the compositor said {said:?}"));
+    }
+    eprintln!("  [gop_edid_scale] signature {signature:#x}: GOP handle {handle}, {panel}");
+    Ok(())
+}
 
 /// The tests whose machine shape *is* the test, each on a boot of its own.
 /// `run_machine_test` dispatches them.
@@ -882,6 +914,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
     ),
     (
+        // The panel's EDID from the firmware's GOP to the compositor's scale:
+        // the loader's read before `ExitBootServices` is no host test's, and
+        // QEMU's OVMF publishes no EDID protocol.
+        "gop_edid_scale",
+        metal::Metal {
+            arms: METALCASE,
+            judge: |b| gop_edid_scale(b[0].loader().text(), b[0].log().text(), b[0].kernel().text()),
+        },
+    ),
+    (
         // The machine's own i8042 and EC, driven from userland: the keyboard
         // reset and armed set 2 translated, its `0xAA`'s time named, the aux
         // device armed or found absent by name, and no i8042 source in the
@@ -993,6 +1035,22 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| {
                 b[0].job_passed(claims::RECLAIM)?;
                 claims::reuses_its_entry(&b[0].kernel())
+            },
+        },
+    ),
+    (
+        // The I219's interrupts on the function itself, which QEMU's e1000e
+        // is not: no MSI-X capability, causes forced through `ICS` counted on
+        // the claim's MSI vector unmasked and masked, `ICR`'s asserted read
+        // under auto-mask, and the driver under traffic on the bench's wire.
+        // It shares the boot with `claim_reuses_its_remapping_entry`, whose
+        // judge reads only its own job's records.
+        "i219_messages_on_its_msi_vector",
+        metal::Metal {
+            arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &[claims::MSI])],
+            judge: |b| {
+                b[0].job_passed(claims::MSI)?;
+                claims::messages_on_its_msi_vector(&b[0].kernel(), &b[0].log())
             },
         },
     ),
@@ -5149,9 +5207,8 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// Held: a record per CPU the bring-up started, naming the local APIC id the
 /// bring-up gave that CPU and carrying the counters its `counters: cpuN
 /// reads` line names, and none stale; every CPU's performance request
-/// declared at boot, `pm_enable=1`, the request Linux makes on this machine
-/// (`tests/metal/t14-linux/hwp-request.txt`), and its power envelope in every read
-/// the one its `control_regs:` line holds. No line, the kernel's or a
+/// declared at boot, `pm_enable=1`, and its power envelope in every read the
+/// one its `control_regs:` line holds. No line, the kernel's or a
 /// program's, is stamped in a millisecond from `idle0`'s to `idle1`'s, which
 /// `counters_metal` reads on the log's clock, either
 /// edge's included because a line stamped in it may follow the read: the
@@ -5218,8 +5275,6 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     if !inside.is_empty() {
         return Err(format!("the idle second {at0}..{at1} ns holds lines: {inside:?}"));
     }
-    let linux_request = u64::from_str_radix(include_str!("metal/t14-linux/hwp-request.txt").trim().trim_start_matches("0x"), 16)
-        .map_err(|e| format!("metal/t14-linux/hwp-request.txt: {e}"))?;
     let bsp = kernel.must_say("percpu: BSP cpu_id=0 lapic_id=")?;
     let mut roster = vec![bsp.rsplit("lapic_id=").next().unwrap_or_default().trim().to_string()];
     for cpu in 1..cpus {
@@ -5240,9 +5295,6 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
                 return Err(format!("{name}: cpu{cpu} is stale or not lapic {}: {counters:?}", roster[*cpu]));
             }
             let declared = kernel.must_say(&format!("control_regs: cpu{cpu} pm_enable=1 "))?;
-            if !declared.contains(&format!(" hwp_request={linux_request:#010x} ")) {
-                return Err(format!("cpu{cpu} declared {declared:?}, and Linux requests {linux_request:#010x} on this machine"));
-            }
             for (counter, field, radix) in
                 [("hwp_request", "hwp_request=0x", 16), ("hwp_request_pkg", "hwp_request_pkg=0x", 16), ("energy_perf_bias", "epb=", 10)]
             {

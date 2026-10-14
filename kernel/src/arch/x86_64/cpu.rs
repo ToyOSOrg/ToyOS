@@ -30,8 +30,9 @@ pub unsafe fn wrmsr(msr: u32, value: u64) {
 }
 
 /// Every earlier load and store done before what follows, a `wrmsr` among it:
-/// Linux's `weak_wrmsr_fence`. No `nomem`, so the compiler moves no access
-/// across it either.
+/// "the sequence MFENCE;LFENCE before the WRMSR" that SDM Vol. 3A §13.12.3
+/// names for a write to an x2APIC register. No `nomem`, so the compiler moves
+/// no access across it either.
 #[inline]
 pub fn wrmsr_fence() {
     // SAFETY: two fences; no register, flag or memory changes.
@@ -128,17 +129,16 @@ pub fn df_witness(site: &str) {
     );
 }
 
-/// CPUID.0's vendor string, as `toyos_cpuvuln` names it.
-pub fn vendor() -> toyos_cpuvuln::Vendor {
+/// CPUID.0's vendor string.
+pub fn vendor() -> kernel::cpu::Vendor {
     let (_, ebx, ecx, edx) = cpuid(0, 0);
-    toyos_cpuvuln::Vendor::from_id(&core::array::from_fn(|i| [ebx, edx, ecx][i / 4].to_le_bytes()[i % 4]))
+    kernel::cpu::Vendor::from_id(&core::array::from_fn(|i| [ebx, edx, ecx][i / 4].to_le_bytes()[i % 4]))
 }
 
 /// CPUID.6's EAX and ECX, the thermal and power leaf; zero where CPUID.0
-/// does not reach it, as `init_scattered_cpuid_features` reads it: a level
-/// past the range's own is no level.
+/// does not reach it, for [`leaf_7`]'s reason.
 pub fn leaf_6() -> (u32, u32) {
-    if (6..=0xFFFF).contains(&cpuid(0, 0).0) {
+    if cpuid(0, 0).0 >= 6 {
         let (eax, _, ecx, _) = cpuid(6, 0);
         (eax, ecx)
     } else {

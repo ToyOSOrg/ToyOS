@@ -14,15 +14,15 @@
 //! claim.
 //!
 //! **What a holder lends is placed in a window of its function's domain
-//! reserved for lending, [`MAX_GRANT_TOTAL`] long, and nowhere else**, so lending and
-//! taking back as often as a holder likes spends no address and no remapping
-//! table past that window's, and a window with no room left is a refusal
-//! ([`SyscallError::ResourceExhausted`]). An address in it is lent again once
-//! it is taken back. Within a claim, what the function still had in flight
-//! there lands in memory the same holder lent, which is authority it already
-//! had over both regions; across claims, only once the function was reset and
-//! is quiet ([`Retired`]), and never while the address is the function's
-//! [`Function::residue`].
+//! reserved for lending, [`MAX_GRANT_TOTAL`] long, and nowhere else**, so
+//! lending and taking back as often as a holder likes spends no address and no
+//! remapping table past that window's, and a window with no room left is a
+//! refusal ([`SyscallError::ResourceExhausted`]). An address in it is lent
+//! again once it is taken back. Within a claim, what the function still had in
+//! flight there lands in memory the same holder lent, which is authority it
+//! already had over both regions; across claims, only once the function was
+//! reset and is quiet ([`Retired`]), and never while the address is the
+//! function's [`Function::residue`].
 //!
 //! **A window is 2 MiB because that is the only page this kernel maps**, so a
 //! BAR a process may see is re-assigned onto a 2 MiB boundary of its own.
@@ -71,22 +71,21 @@
 //! granted.** Nothing but that function's own driver can stop its queues, and
 //! no register write retracts a transfer it had taken in before its holder
 //! died: the first grant that starts it mastering again lets that transfer out.
-//! So [`release`] takes those grants back like any other — mastering is off,
-//! so the function reaches nothing until its next claim's first grant — and
-//! keeps only their device addresses, as the function's
-//! [`Function::residue`], for the rest of the boot if it is never claimed
-//! again. A residue address is never lent
-//! ([`Bound::lend_room`]) and never a fresh grant's, so the next claim's grant
-//! of a range's size is fresh pages placed at that range; a range it places
-//! nothing at stays unmapped, so a transfer aimed there faults, and stays
-//! residue across its release until a release resets the function. No page is
-//! ever two holders'.
+//! So [`release`] takes those grants back like any other — mastering is off, so
+//! the function reaches nothing until its next claim's first grant — and keeps
+//! only their device addresses, as the function's [`Function::residue`], for
+//! the rest of the boot if it is never claimed again. A residue address is
+//! never lent ([`Bound::lend_room`]) and never a fresh grant's, so the next
+//! claim's grant of a range's size is fresh pages placed at that range; a range
+//! it places nothing at stays unmapped, so a transfer aimed there faults, and
+//! stays residue across its release until a release resets the function. No
+//! page is ever two holders'.
 //!
-//! **That rests on the next holder laying its grants out as the last one
-//! did.** The stale transfer — data and descriptor write-back — lands in
-//! whatever the new holder keeps at that address, after it has set up its own
-//! rings or not: harmless for a netstack succeeding a netstack, a silent write into its
-//! own memory for a holder with another layout.
+//! **That rests on the next holder laying its grants out as the last one did.**
+//! The stale transfer — data and descriptor write-back — lands in whatever the
+//! new holder keeps at that address, after it has set up its own rings or not:
+//! harmless for a netstack succeeding a netstack, a silent write into its own
+//! memory for a holder with another layout.
 //!
 //! **A reset returns a function's configuration to its defaults, BARs
 //! included, and the next claim puts back what it needs.** [`release`] resets
@@ -97,12 +96,12 @@
 //!
 //! **A call names its function by its claim's [`Binding`] and never by the
 //! function's number.** A function is the next claim's once its holder's
-//! release is over, so a number carried from a claim to a call would be
-//! another holder's claim by the time it was used. The binding is lent by the claim under the lock
-//! its release takes it with (`object::Held`): a call runs wholly before the
-//! release or finds no binding. Outside a claim's own mint and release, only
-//! the two handlers name a function, by the interrupt and the requester the
-//! hardware gave them.
+//! release is over, so a number carried from a claim to a call would be another
+//! holder's claim by the time it was used. The binding is lent by the claim
+//! under the lock its release takes it with (`object::Held`): a call runs
+//! wholly before the release or finds no binding. Outside a claim's own mint
+//! and release, only the two handlers name a function, by the interrupt and the
+//! requester the hardware gave them.
 //!
 //! **A poll is on a function's watch only while its claim holds it.** It is
 //! registered with the binding ([`add_poll`]), so before the release, whose

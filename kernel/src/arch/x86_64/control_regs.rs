@@ -12,8 +12,8 @@
 //! ([`Prot`](crate::mm::policy::Prot)).
 //!
 //! The performance request is HWP's: `IA32_HWP_INTERRUPT` where it exists,
-//! `IA32_PM_ENABLE`, `IA32_HWP_REQUEST` as `toyos_cpuvuln::hwp_request` derives
-//! it from this CPU's own registers, `IA32_HWP_REQUEST_PKG` and
+//! `IA32_PM_ENABLE`, `IA32_HWP_REQUEST` as `kernel::cpu::hwp_request` derives
+//! it from this CPU's own capabilities, `IA32_HWP_REQUEST_PKG` and
 //! `IA32_ENERGY_PERF_BIAS`, on a machine whose CPUs have every one of them,
 //! and none on one that does not: refused by name once, firmware's values
 //! standing. `IA32_MISC_ENABLE`'s turbo bit is not declared: that register's
@@ -22,7 +22,7 @@
 
 use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use toyos_cpuvuln::HwpFacts;
+use kernel::cpu::HwpFacts;
 
 use super::cpu;
 use crate::log;
@@ -110,7 +110,6 @@ static DECLARED_APIC: AtomicU8 = AtomicU8::new(0);
 
 /// The performance request's registers, SDM Vol. 4.
 mod hwp {
-    pub const PLATFORM_INFO: u32 = 0xCE;
     pub const ENERGY_PERF_BIAS: u32 = 0x1B0;
     pub const PM_ENABLE: u32 = 0x770;
     pub const HWP_CAPABILITIES: u32 = 0x771;
@@ -129,11 +128,13 @@ const HWP_INTERRUPT: u64 = 0;
 /// `IA32_HWP_REQUEST_PKG` on every CPU: the widest range at the request's own
 /// preference. Inert, since no CPU's request sets package control, and
 /// declared so that firmware does not decide it either.
-const HWP_REQUEST_PKG: u64 = 0x01 | 0xff << 8 | toyos_cpuvuln::HWP_EPP << 24;
+const HWP_REQUEST_PKG: u64 = 0x01 | 0xff << 8 | kernel::cpu::HWP_EPP << 24;
 
-/// `IA32_ENERGY_PERF_BIAS` on every CPU: Linux's `ENERGY_PERF_BIAS_NORMAL`
-/// (`arch/x86/include/asm/msr-index.h:858`).
-const ENERGY_PERF_BIAS: u64 = 6;
+/// `IA32_ENERGY_PERF_BIAS` on every CPU: 7, which SDM Vol. 3B §17.3.4 says
+/// "roughly translates into a hint to balance performance with energy
+/// consumption". ToyOS's rule until it has a power policy: each hint at its
+/// scale's documented balance point, as [`kernel::cpu::HWP_EPP`] is.
+const ENERGY_PERF_BIAS: u64 = 7;
 
 /// `CR0` on every CPU: `TS` stays clear because lazy FP switching would leak
 /// a register file across `#NM`; `AM` stays clear because Ring 3 has no `#AC` path.
@@ -208,11 +209,10 @@ const HWP_REFUSED: u8 = 2;
 /// Whether this CPU gets a performance request, from CPUID alone, and whether
 /// it has `IA32_HWP_INTERRUPT`: the machine's answer, a CPU that disagrees
 /// named.
-fn hwp_declared(cpu_id: u32) -> Option<toyos_cpuvuln::Hwp> {
+fn hwp_declared(cpu_id: u32) -> Option<kernel::cpu::Hwp> {
     let (cpuid_6_eax, cpuid_6_ecx) = cpu::leaf_6();
-    let verdict = toyos_cpuvuln::hwp(&HwpFacts {
+    let verdict = kernel::cpu::hwp(&HwpFacts {
         vendor: cpu::vendor(),
-        signature: cpu::cpuid(1, 0).0,
         cpuid_6_eax,
         cpuid_6_ecx,
         cpuid_7_0_edx: cpu::leaf_7().3,
@@ -281,8 +281,7 @@ pub fn init(cpu_id: u32) {
 /// The interrupt is cleared and HWP enabled before any other HWP register is
 /// touched, the request's input included: SDM Vol. 3B §17.4.2 (253669-093US),
 /// "Additional MSRs associated with HWP may only be accessed after HWP is
-/// enabled, with the exception of IA32_HWP_INTERRUPT and MSR_PPERF", and
-/// `intel_pstate_hwp_enable`'s order.
+/// enabled, with the exception of IA32_HWP_INTERRUPT and MSR_PPERF".
 pub fn init_performance(cpu_id: u32) {
     let Some(hwp) = hwp_declared(cpu_id) else { return };
     // SAFETY: `hwp_declared` admitted this CPU only where CPUID enumerates HWP,
@@ -294,7 +293,7 @@ pub fn init_performance(cpu_id: u32) {
         }
         cpu::wrmsr(hwp::PM_ENABLE, PM_ENABLE);
     }
-    let request = toyos_cpuvuln::hwp_request(cpu::rdmsr(hwp::HWP_CAPABILITIES), cpu::rdmsr(hwp::PLATFORM_INFO));
+    let request = kernel::cpu::hwp_request(cpu::rdmsr(hwp::HWP_CAPABILITIES));
     // SAFETY: HWP is enabled, so its registers are live; CPUID enumerated EPP,
     // the package request and EPB, and every value holds only defined bits.
     unsafe {
@@ -476,7 +475,7 @@ fn xsave_declaration(cpu_id: u32) -> (u64, kernel::xsave::Form) {
         panic!("control_regs: cpu{cpu_id} cannot run user state: {} ({refusal:?})", refusal.reason())
     };
     let declared = kernel::xsave::xcr0(&facts).unwrap_or_else(|r| refused(r));
-    let form = kernel::xsave::form(&facts, toyos_cpuvuln::erratum_1386(cpu::vendor(), eax1))
+    let form = kernel::xsave::form(&facts, &kernel::cpu::Ident::new(cpu::vendor(), eax1))
         .unwrap_or_else(|r| refused(r));
     match DECLARED_XCR0.compare_exchange(0, declared, Ordering::Release, Ordering::Acquire) {
         Ok(_) => (declared, form),
@@ -599,7 +598,7 @@ fn self_check(cpu_id: u32, declared_cr4: u64, declared_xcr0: u64, form: kernel::
 }
 
 /// [`self_check`] for the performance request, logged first for the same
-/// reason; the line carries the request's two inputs, so a reader can
+/// reason; the line carries the request's input, so a reader can
 /// recompute it.
 fn hwp_check(cpu_id: u32, request: u64, notify: bool) {
     let pm_enable = cpu::rdmsr(hwp::PM_ENABLE);
@@ -609,7 +608,7 @@ fn hwp_check(cpu_id: u32, request: u64, notify: bool) {
     let interrupt = notify.then(|| cpu::rdmsr(hwp::HWP_INTERRUPT));
     log!(
         "control_regs: cpu{} pm_enable={} hwp_request={:#010x} hwp_request_pkg={:#010x} epb={} \
-         hwp_interrupt={:x?} hwp_capabilities={:#010x} platform_info={:#018x}",
+         hwp_interrupt={:x?} hwp_capabilities={:#010x}",
         cpu_id,
         pm_enable,
         live,
@@ -617,7 +616,6 @@ fn hwp_check(cpu_id: u32, request: u64, notify: bool) {
         epb,
         interrupt,
         cpu::rdmsr(hwp::HWP_CAPABILITIES),
-        cpu::rdmsr(hwp::PLATFORM_INFO),
     );
     for (name, holds, declared) in [
         ("pm_enable", Some(pm_enable), PM_ENABLE),

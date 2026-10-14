@@ -20,7 +20,7 @@ the ask is the flag of
 `issues/no-gate-decodes-kernel-elfs-instructions.md`, matches it against
 both of Linux's sequences; on
 every proving machine probes count what
-`issues/a-pure-function-decides-a-cpus-speculation-mitigations-as-linux-does.md`
+`issues/a-pure-function-decides-a-cpus-speculation-mitigations-from-its-vendors-guidance.md`
 selects for it: a clear per syscall where it selects the loop, a fill per
 switch where it selects filling, and two IBPBs over B, C, idle, B, A, idle, A,
 B. **Mutation**: either sequence edited, the clear's condition inverted, no
