@@ -62,12 +62,13 @@ and an agent that "fixes" one has decided something that was his to decide. But
 a file blocked on an *instrument* — a gate, a machine, a measurement — is not a
 question. Nobody has to decide it; somebody has to run it.
 
-**`kind: track` is what a plan used to be**, and it is written to the length a
-defect is. A `track` says what is to be built, what it is blocked on, and any
-constraint a reader would otherwise pay to re-derive — a hardware bound, a
-number somebody measured, a design line the owner already drew. It does not
-carry a design, a stage table, a rationale or a review history: a design that is
-right is written as code, and one that is not yet written is not yet known.
+**`kind: track` is what a plan used to be.** A `track` says what is to be
+built, what it is blocked on, and any constraint a reader would otherwise pay to
+re-derive — a hardware bound, a number somebody measured, a design line the
+owner already drew. Work that lands in stages lists them in order, each with
+what it builds, the design decisions its brief settled and its exit. A track
+carries no rationale and no review history: those stay in the pull requests and
+commits that settled it.
 
 ## Slugs
 

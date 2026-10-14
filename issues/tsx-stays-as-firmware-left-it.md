@@ -19,8 +19,8 @@ T14's `CONFIG_X86_INTEL_TSX_MODE_OFF=y`, runs `tsx_init`
 
 **Exit**:
 `issues/a-pure-function-decides-a-cpus-speculation-mitigations-from-its-vendors-guidance.md`
-carries `tsx_init`'s decision and every CPU applies it; on the T14, ToyOS's
-reads of 0x122, 0x10F and 0x123 equal the Linux reads of
-`issues/linuxs-readings-of-the-t14-and-the-tcg-model-lack-reads-owed-before-the-t14s-wipe.md`
-where each exists, and dropping the write leaves 0x122 or 0x10F at firmware's
-value and reds it.
+carries the TSX decision of the vendor's guidance and every CPU applies it; on
+the T14, ToyOS's own reads of 0x122, 0x10F and 0x123 hold what that decision
+selects where each exists, and dropping the write leaves 0x122 or 0x10F at
+firmware's value and reds it. Linux's reads of the same registers on the T14
+are a goal compared in evidence, never a test's expected value.

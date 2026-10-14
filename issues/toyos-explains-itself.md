@@ -79,5 +79,8 @@ thermal counters, the log's steps, accounting, `inspect` and `size`.
 manifest row names; a program without the counters right is refused a
 counter read, and one that holds it but not `trace` is refused the power and
 per-device interrupt counters; and a T14 row holds each counter ToyOS reads
-there against Linux's reading of it
-(`issues/linuxs-readings-of-the-t14-and-the-tcg-model-lack-reads-owed-before-the-t14s-wipe.md`).
+there to the bound Intel's SDM gives it where it gives one, as `counters_on_metal` holds the busy
+clock to the rate MPERF counts at. Linux's reading of each counter is a goal compared in
+evidence
+(`issues/linuxs-readings-of-the-t14-and-the-tcg-model-lack-reads-owed-before-the-t14s-wipe.md`),
+never a row's expected value.

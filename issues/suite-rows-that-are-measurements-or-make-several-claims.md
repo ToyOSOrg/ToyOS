@@ -20,7 +20,7 @@ Measurements as `METAL` rows in `tests/toyos.rs`:
 
 - `counters` (`counters_on_metal`): records fresh and named by APIC id, SMI counts moved only by
   the kernel's commands, MPERF against the stamp, an idle second with no log line, the HWP request
-  and a turbostat frequency floor. The HWP request's oracle is
+  and a floor at the rate MPERF counts at. The HWP request's oracle is
   `issues/t14-rows-hold-toyos-to-linuxs-choice-or-copy.md`'s.
 - `acpi_tables_loaded` (`acpi_tables_on_metal`): the definition-block count, the MTRRs compared
   across CPUs, nothing refused, and the AML reads. The count's oracle is the same issue's.
