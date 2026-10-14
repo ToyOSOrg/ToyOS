@@ -30,6 +30,7 @@ pub mod input;
 pub mod layout;
 pub mod plan;
 pub mod rect;
+pub mod scale;
 pub mod stack;
 pub mod taskbar;
 pub mod volume;
@@ -45,6 +46,7 @@ pub use input::{
 pub use layout::{set_mode, Chrome, Desk};
 pub use plan::{compose, content_blit, Blit, Layer};
 pub use rect::{Point, Rect};
+pub use scale::Scale;
 pub use stack::Stack;
 pub use taskbar::{Taskbar, MAX_STATUS_CHARS, STATUS_MARGIN};
 pub use window::{Level, Window, WindowId, WindowMode};

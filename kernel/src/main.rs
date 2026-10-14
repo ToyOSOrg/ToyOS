@@ -169,6 +169,16 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     panic::halt_all_cpus();
 }
 
+/// The EDID block the loader handed over and its length, which the loader
+/// writes as a whole block or nothing; the bytes are not read here.
+fn gop_edid(args: &KernelArgs) -> ([u8; toyos_abi::boot::EDID_BLOCK], u32) {
+    match args.gop_edid_len {
+        0 => ([0; toyos_abi::boot::EDID_BLOCK], 0),
+        len if len == toyos_abi::boot::EDID_BLOCK as u64 => (args.gop_edid, len as u32),
+        other => panic!("the loader wrote {other} as gop_edid_len, which is 0 or {}", toyos_abi::boot::EDID_BLOCK),
+    }
+}
+
 fn register_gpu(driver: Box<dyn gpu::Gpu>, info: gpu::GpuInfo) {
     gpu::register(driver, info);
 }
@@ -536,6 +546,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
             kernel_args.gop_height,
             kernel_args.gop_stride,
             kernel_args.gop_pixel_format,
+            gop_edid(kernel_args),
         ) {
             Some((gpu_driver, gpu_info)) => register_gpu(gpu_driver, gpu_info),
             None => log!("GPU: none this boot, running headless"),

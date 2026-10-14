@@ -10,10 +10,10 @@ use alloc::alloc::Layout;
 use toyos_elf::section::SectionTable;
 use toyos_elf::{rela, ImageOffset, Op, RelaTable, SymTab};
 use efi::{
-    cstr16, CStr16, DevicePath, Gop, Handle, HardDrive, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
+    cstr16, CStr16, DevicePath, EdidActive, Gop, Handle, HardDrive, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
     SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE,
 };
-use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, MAX_ROOT_BRIDGE_WINDOWS};
+use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, EDID_BLOCK, MAX_ROOT_BRIDGE_WINDOWS};
 use toyos_bootmap::{Plan, Table, BOOT_MAP_BYTES, MAX_PAGES};
 use toyos_update::policy;
 use toyos_update::record::{self, Booted, Ended, Record};
@@ -353,6 +353,7 @@ struct GopInfo {
     height: u32,
     stride: u32,
     pixel_format: u32,
+    edid: Option<[u8; EDID_BLOCK]>,
 }
 
 /// The mode is the firmware's: `Mode->Info` is the mode it already set for the
@@ -383,6 +384,11 @@ fn query_gop(system_table: &SystemTable) -> Option<GopInfo> {
     };
 
     let (framebuffer, framebuffer_size) = gop.frame_buffer();
+    let shown = (framebuffer, GopModeKey::of(mode));
+    // Closed before the handles are asked again: a second GET_PROTOCOL open by
+    // this image shares the first's entry, so two closes would be one too many.
+    drop(gop);
+    let edid = scanout_edid(bs, shown);
 
     println!("{} {}x{} stride={} format={} fb={:#x} size={}",
         loaderlog::GOP_AT, width, height, stride, pixel_format, framebuffer, framebuffer_size);
@@ -394,7 +400,83 @@ fn query_gop(system_table: &SystemTable) -> Option<GopInfo> {
         height,
         stride,
         pixel_format,
+        edid,
     })
+}
+
+/// The panel's EDID base block, from the one GOP handle that shows the
+/// scanout `shown` describes and carries `EFI_EDID_ACTIVE_PROTOCOL`.
+///
+/// A machine's firmware puts the protocol on the child handle of the output
+/// showing it, and the GOP this loader takes can be another handle over the
+/// same output: on the T14 the first handle carries it, on the AMD bench the
+/// second. A handle whose frame buffer and mode are not the scanout's shows
+/// another output, so it is not asked; two that are and both carry one cannot
+/// be told apart, and neither is taken.
+fn scanout_edid(bs: &efi::BootServices, shown: (u64, GopModeKey)) -> Option<[u8; EDID_BLOCK]> {
+    let at = "EDID:";
+    let handles = match bs.handles::<Gop>() {
+        Ok(handles) => handles,
+        Err(status) => {
+            println!("{at} the GOP handles could not be listed ({status}): none handed over");
+            return None;
+        }
+    };
+    let of = handles.len();
+    let mut carrying = handles.iter().enumerate().filter_map(|(index, handle)| {
+        let gop = match bs.get::<Gop>(*handle) {
+            Ok(gop) => gop,
+            Err(status) => {
+                println!("{at} GOP handle {index} of {of} would not open its GOP ({status}), so it is not asked");
+                return None;
+            }
+        };
+        if (gop.frame_buffer().0, GopModeKey::of(gop.current_mode_info())) != shown {
+            return None;
+        }
+        Some((index, bs.get::<EdidActive>(*handle).ok()?))
+    });
+    let (first, second) = (carrying.next(), carrying.next());
+    match (first, second) {
+        (None, _) => {
+            println!("{at} no GOP handle showing the scanout publishes EDID Active: none handed over");
+            None
+        }
+        (Some(_), Some(_)) => {
+            println!("{at} more than one GOP handle showing the scanout publishes EDID Active: none handed over");
+            None
+        }
+        (Some((index, edid)), None) => {
+            let len = edid.bytes().len();
+            let Some(base) = edid.bytes().first_chunk::<EDID_BLOCK>() else {
+                println!("{at} GOP handle {index} of {of} shows the scanout and publishes {len} byte(s), less than a block: none handed over");
+                return None;
+            };
+            println!("{at} GOP handle {index} of {of} shows the scanout and publishes {len} byte(s), the base block handed over");
+            Some(*base)
+        }
+    }
+}
+
+/// What makes two GOP handles show one scanout: the mode's size, format and
+/// stride, beside the frame buffer's base.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct GopModeKey {
+    width: u32,
+    height: u32,
+    format: PixelFormat,
+    stride: u32,
+}
+
+impl GopModeKey {
+    fn of(mode: &efi::GopModeInfo) -> Self {
+        Self {
+            width: mode.horizontal_resolution,
+            height: mode.vertical_resolution,
+            format: mode.pixel_format,
+            stride: mode.pixels_per_scan_line,
+        }
+    }
 }
 
 /// Every range firmware's map says is write-back memory, `(base, length)`:
@@ -571,7 +653,13 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         wall_clock_secs: 0,
         wall_clock_counter: 0,
         wall_clock_known: 0,
+        gop_edid: [0; EDID_BLOCK],
+        gop_edid_len: 0,
     };
+    if let Some(edid) = gop.as_ref().and_then(|g| g.edid) {
+        kernel_args.gop_edid = edid;
+        kernel_args.gop_edid_len = edid.len() as u64;
+    }
     kernel_args.loader_seed_len = seed::read(&system_table, &mut kernel_args.loader_seed);
     if let Some((civil, counter)) = wall_clock {
         kernel_args.wall_clock_secs = civil.to_unix_secs();

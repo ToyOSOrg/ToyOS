@@ -10,6 +10,7 @@ sprite = { path = "sprite" }
 toyos = { path = "../../sdk/toyos" }
 toyos-abi = { path = "../../sdk/abi" }
 toyos-desktop = { path = "desktop" }
+toyos-edid = { path = "../../lib/edid" }
 toyos-input = { path = "../../lib/input" }
 toyos-inspect = { path = "../../lib/inspect" }
 toyos-font = { path = "../../sdk/font" }

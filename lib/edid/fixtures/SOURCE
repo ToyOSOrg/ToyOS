@@ -1,0 +1,15 @@
+Each file is one 128-byte EDID base block.
+
+t14-n140hca-eae.bin, amd-bench-b140han06.8.bin: each laptop's panel, as its
+firmware publishes it through EFI_EDID_ACTIVE_PROTOCOL, read by the loader on a
+metalcase boot (PR #895's M1 reading; EDID Discovered gave the same bytes).
+Both had their ID serial (bytes 0x0C-0x0F) zero already and carry no 0xFF
+serial descriptor, so nothing was zeroed and each checksum is the panel's own.
+Their first descriptors give 309x173 mm (T14) and 309x174 mm (AMD bench).
+
+qemu-*.bin: the base block QEMU 11.1.1's generator writes, by `qemu-edid -o`
+with no option (default), and with `-x 2560 -y 1600 -d 254`,
+`-x 3456 -y 2234 -d 254` and `-x 1920 -y 1080 -d 157`.
+
+virtio-gpu-get-edid-1024x768.bin: QEMU 11.1.1's virtio-gpu-pci, xres=1024,
+yres=768, answering VIRTIO_GPU_CMD_GET_EDID for scanout 0.

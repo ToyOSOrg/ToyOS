@@ -91,11 +91,15 @@ crate::user_safe! {
         pub stride: u32,
         pub pixel_format: u32,
         pub flags: u32,
+        /// The panel's EDID base block as the loader handed it over, unparsed,
+        /// and how many of these bytes it is: [`boot::EDID_BLOCK`] or zero.
+        pub edid: [u8; boot::EDID_BLOCK],
+        pub edid_len: u32,
     }
 }
 
-// SAFETY: FramebufferInfo is #[repr(C)] and every field is a u32 or a
-// `repr(transparent)` wrapper over one — no padding, no pointers.
+// SAFETY: FramebufferInfo is #[repr(C)] and every field is a u32, bytes, or a
+// `repr(transparent)` wrapper over a u32 — no padding, no pointers.
 unsafe impl Sync for FramebufferInfo {}
 // SAFETY: see the `Sync` impl immediately above — the same reasoning (no
 // pointers, no interior mutability) covers `Send`.
