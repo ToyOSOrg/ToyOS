@@ -1,0 +1,48 @@
+# A member of the host workspace (root `Cargo.toml`). Its source is
+# `toyos-crypto` at 2b3f92c0dc6a7b77aaeff57d1291cab8dba78494, whose history
+# `ToyOSOrg/evidence` keeps on branch `toyos-crypto-2b3f92c`
+# (`issues/toyos-crypto-is-in-the-tree-on-par-with-ring-and-secure.md`).
+
+[package]
+name = "toyos-crypto"
+description = "Bounded cryptographic primitives for ToyOS, with caller-owned entropy and portable host tests."
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[features]
+default = []
+std = ["rustls?/std"]
+sign = []
+wpa2 = []
+# AES and CLMUL dispatch off, so a host tests the scalar paths.
+portable = []
+rustls-provider = ["dep:rustls"]
+
+[dependencies]
+rustls = { version = "0.23.45", optional = true, default-features = false, features = ["custom-provider", "tls12"] }
+
+# The oracles every primitive is held against, on the host alone.
+[dev-dependencies]
+ring = "0.17.14"
+rustls = { version = "0.23.45", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = { version = "0.13.2", default-features = false, features = ["crypto", "ring"] }
+sha2 = "0.10.9"
+aes-gcm = "0.10.3"
+chacha20poly1305 = "0.10.1"
+x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
+ed25519-dalek = "2.2.0"
+p256 = { version = "0.13.2", features = ["ecdh"] }
+p384 = { version = "0.13.1", features = ["ecdh"] }
+rsa = { version = "0.9.8", features = ["sha2"] }
+# 0.3, because the lock's one `kem` 0.3 (russh's) is one `ml-kem` 0.2 does
+# not build against.
+ml-kem = "0.3.0-rc.2"
+chacha20 = "0.9.1"
+poly1305 = "0.8.0"
+serde_json = "1.0.149"
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
