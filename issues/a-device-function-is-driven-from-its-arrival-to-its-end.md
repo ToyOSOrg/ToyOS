@@ -6,13 +6,13 @@ opened: 2026-10-13
 
 # A device function is driven from its arrival to its end
 
-Held by the orchestrator. #910 is stage 1a.
+Held by the orchestrator. #910 is stage 1.1 and #926 stage 1.2.
 
-Today the kernel enumerates PCI once (`pcidev::publish`), and the supervisor
-mints each claim only when it spawns a `[boot] start` row. A row names a PCI
-function by vendor and device, and the kernel refuses the claim `Ambiguous` on
-a machine with two. One thread per serving service parks in
-`SYS_PROCESS_WAIT`. Nothing reaches userland when a device arrives or leaves.
+Today the kernel enumerates PCI once (`pcidev::publish`) and numbers each
+function by its arrival. The supervisor mints a `[boot] start` row's claims
+when it spawns it, and starts a `drives` row's process on each function it
+reads free in the inventory, at boot and after each end of a process it
+started. Nothing reaches userland when a device arrives or leaves.
 
 **Ruled** (owner, 2026-10-13):
 
@@ -83,30 +83,18 @@ a machine with two. One thread per serving service parks in
       its handles owed, of every kind, has run on its last thread
       (`object::Releases`), so `CLAIM_RETURN` and the guest tests' claim
       retries went.
-   2. **Instances per function**, one pull request, which also updates the
-      three tracks folded here:
-      - `toyos_abi::inventory::Pci` gains an `arrival` number, never reused,
-        and a claim names its function by it; `DeviceRequest::Pci`,
-        `toyos_pci::claimed` and `ClaimError::Ambiguous` go.
-      - `lib/manifest` owns the matcher grammar (`pci:CC:SS:PP`, and
-        `pci:CC:SS:PP/VVVV:DDDD`). A `drives` row starts one instance per
-        matching function the kernel does not drive, is never in
-        `[boot] start`, may not `serves`, and reaches its consumer through
-        `receives`. A single-instance `devices` entry matching two functions
-        refuses that row's start, naming both.
-      - Two matchers that can match one function are a build refusal naming
-        both rows, which replaces `one_claimant_per_device` and keeps its
-        refusal of duplicate class, `isa` and `part:` names.
-      - The supervisor's lifecycle decisions move into
-        `system/supervisor/lifecycle`, host-tested. A refused start marks its
-        function refused until the inventory record changes and counts
-        against the arrival's restart budget.
-      - The supervisor watches each child's `Process` handle, and the waiter
-        threads go. vdagent becomes a `drives` row, and its "no such
-        function" path goes with it.
-      - Its guest arm, a q35 profile with two `edu` functions after the
-        claim-slot pull request, holds two instances up until judged, each
-        reporting its own function. `test-runner` gains `inventory`.
+   2. **Done** (#926): a claim names a PCI function by its inventory
+      record's `Arrival`, and `toyos_pci::claimed` and `DeviceRequest::Pci`
+      went; `ClaimError::Ambiguous` stays only for a partition GUID carried
+      twice. `lib/manifest` owns the matcher grammar, and two entries one
+      device can answer are a render refusal naming both rows, which replaced
+      `one_claimant_per_device`. A `drives` row has one process per function
+      the kernel does not drive and holds no `serves`, `roles` or `devices`.
+      The decisions are `toyos-supervisor` (`system/supervisor/lifecycle`),
+      the refusal law among its host tests; the supervisor watches each
+      child's `Process` handle and its waiter threads went; vdagent is a
+      `drives` row. `a_drives_row_holds_one_process_per_function` is the
+      guest arm, on `Profile::HeadlessTwoEdu`.
 2. **Functions arrive and leave.**
    - Readers get a device-set object, minted from `DEVICE`.
    - The kernel provides native PCIe hot-plug on a port whose host bridge
@@ -124,9 +112,9 @@ a machine with two. One thread per serving service parks in
 ## Folded here
 
 - Stage 1 of `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
-  (the waiter threads) is this track's stage 1.2.
+  (the waiter threads) was this track's stage 1.2 (#926).
 - Stage 2 of `issues/the-supervisor-is-host-tested-and-owns-the-stop.md`
-  extends the crate stage 1.2 makes. Restart policy and the claims a restart
-  is owed move with stage 1.2.
+  extends `toyos-supervisor`, the crate stage 1.2 made, which holds restart
+  policy and the claims a restart is owed.
 - Step 10 of `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`
   is stage 4.

@@ -151,13 +151,11 @@ pub enum ClaimError {
     Owned,
     /// This machine has no such device — no driver ever registered one.
     Absent,
-    /// The name matches more than one function this kernel does not drive.
-    /// Refused rather than resolved to the first: a config asking for one of
-    /// two identical cards cannot say which, and picking would be the kernel
-    /// deciding.
+    /// The partition GUID is carried twice. Refused rather than resolved to
+    /// the first: picking would be the kernel deciding.
     Ambiguous,
-    /// A driver in this kernel already binds every function the name matches;
-    /// two drivers on one device is not something a claim may create.
+    /// A driver in this kernel already binds the device; two drivers on one
+    /// device is not something a claim may create.
     KernelDriven,
     /// This machine has no interrupt left to give the function: every vector,
     /// remapping entry or LPI a claim spends is held.
@@ -174,8 +172,8 @@ pub enum ClaimError {
 /// failure after `acquire` cannot leave a device held by nobody.
 ///
 /// `selector` says *which* device where the class alone does not — a PCI
-/// function's vendor and device id in its first word, a partition's GUID in
-/// both — and the syscall has refused a word the class does not read.
+/// function's arrival in its first word, a partition's GUID in both — and the
+/// syscall has refused a word the class does not read.
 pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClaim>, ClaimError> {
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
@@ -197,12 +195,12 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             Ok(DeviceClaim::new(class, framebuffer_info(screen), claim))
         }
         DeviceType::PciFunction => {
-            let id = toyos_abi::syscall::PciId::from_wire(selector[0])
-                .ok_or(ClaimError::Absent)?;
+            // A number past a `u32` is an arrival no function had.
+            let arrival = u32::try_from(selector[0]).map_err(|_| ClaimError::Absent)?;
             // The function's own guard, taken inside: a PCI claim's exclusivity is
             // per function rather than per class, so there is no flag here to
             // acquire first.
-            let (info, claim) = crate::pcidev::claim(id)?;
+            let (info, claim) = crate::pcidev::claim(toyos_abi::inventory::Arrival(arrival))?;
             Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info), claim))
         }
         DeviceType::Partition => {

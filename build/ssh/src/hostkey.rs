@@ -2,7 +2,8 @@
 //! (`PROTOCOL.key`), read and written: the server's host key, and the one
 //! parser the build's image-signing key is read with too.
 
-use ring::signature::{Ed25519KeyPair, KeyPair};
+use toyos_crypto::ed25519::SigningKey;
+use toyos_update::sig::public_of;
 
 use crate::base64;
 use crate::wire::put_string;
@@ -16,12 +17,12 @@ pub(crate) const ALGORITHM: &str = "ssh-ed25519";
 
 /// The key the server proves itself with.
 pub struct HostKey {
-    pair: Ed25519KeyPair,
+    key: SigningKey,
 }
 
 impl HostKey {
     pub fn from_seed(seed: &[u8; 32]) -> Self {
-        Self { pair: Ed25519KeyPair::from_seed_unchecked(seed).expect("any 32 bytes are an Ed25519 seed") }
+        Self { key: SigningKey::from_seed(*seed) }
     }
 
     /// The key an `openssh-key-v1` file holds, refused by name where it is
@@ -31,7 +32,7 @@ impl HostKey {
     }
 
     pub fn public(&self) -> [u8; 32] {
-        self.pair.public_key().as_ref().try_into().expect("an Ed25519 public key is 32 bytes")
+        *self.key.public_key().as_bytes()
     }
 
     /// `K_S`, the public key blob the exchange hash covers.
@@ -43,7 +44,7 @@ impl HostKey {
     pub(crate) fn sign(&self, data: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
         put_string(&mut out, ALGORITHM.as_bytes());
-        put_string(&mut out, self.pair.sign(data).as_ref());
+        put_string(&mut out, &self.key.sign(data).expect("a message under SHA-512's bound"));
         out
     }
 }
@@ -104,15 +105,16 @@ pub fn openssh_seed(text: &str) -> Result<[u8; 32], &'static str> {
     if pair.len() != 64 {
         return Err("a private key that is not 64 bytes");
     }
-    Ed25519KeyPair::from_seed_and_public_key(&seed, &public)
-        .map_err(|_| "the seed does not make the public key the file names")?;
+    if public_of(&seed) != public {
+        return Err("the seed does not make the public key the file names");
+    }
     Ok(seed)
 }
 
 /// An unencrypted `openssh-key-v1` file for `seed`, which OpenSSH reads.
 /// `check` is the file's random check word.
 pub fn openssh_private(seed: &[u8; 32], check: [u8; 4], comment: &str) -> String {
-    let public = HostKey::from_seed(seed).public();
+    let public = public_of(seed);
     let mut blob = MAGIC.to_vec();
     put_string(&mut blob, b"none");
     put_string(&mut blob, b"none");

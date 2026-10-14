@@ -61,6 +61,11 @@ pub struct PciAddr {
     pub func: u8,
 }
 
+/// A PCI function's number for this boot, never given to another: what a
+/// claim names it by ([`crate::syscall::DeviceRequest::Function`]).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct Arrival(pub u32);
+
 /// Who drives a PCI function.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Driven {
@@ -76,6 +81,7 @@ pub enum Driven {
 /// One PCI function.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Pci {
+    pub arrival: Arrival,
     pub at: PciAddr,
     pub vendor: u16,
     pub device: u16,
@@ -344,6 +350,7 @@ impl Record {
                         Driven::Claimed => 2,
                     },
                 );
+                o.u32(16, p.arrival.0);
             }
             Self::Usb(u) => {
                 o.u8(0, KIND_USB);
@@ -422,6 +429,7 @@ impl Record {
         let r = In(&raw.0);
         Ok(match r.u8(0) {
             KIND_PCI => Self::Pci(Pci {
+                arrival: Arrival(r.u32(16)),
                 at: r.addr(1),
                 vendor: r.u16(6),
                 device: r.u16(8),
@@ -506,6 +514,7 @@ mod tests {
         let holder = Holder { pid: 7, name: name("netstack") };
         [
             Record::Pci(Pci {
+                arrival: Arrival(0x0102_0304),
                 at,
                 vendor: 0x8086,
                 device: 0x15fc,

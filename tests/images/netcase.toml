@@ -20,17 +20,17 @@ syscap = ["logread"]
 
 # netstack holds the NIC's PCI function and drives it: the virtqueues, the register
 # window and the interrupt are its own, and the kernel keeps only the claim.
-# Named by vendor and device rather than by slot, so one row finds the card
+# Named by class, vendor and device rather than by slot, so one row finds the card
 # wherever firmware put it.
 [programs.netstack]
 service = true
 serves = ["netstack"]
-devices = ["pci:1af4:1041"]
+devices = ["pci:02:00:00/1af4:1041"]
 
 [programs.soundserver]
 service = true
 serves = ["soundserver", "volume"]
-devices = ["pci:1af4:1059"]
+devices = ["pci:04:01:00/1af4:1059"]
 syscap = ["rt"]
 
 [programs.test-runner]
@@ -42,7 +42,7 @@ syscap = ["rt"]
 service = true
 restart = true
 serves = ["block"]
-devices = ["pci:1b36:0010"]
+devices = ["pci:01:08:02/1b36:0010"]
 
 # The file servers: DATA, the log and the running slot's volume, one process
 # each, serving every program the directories of its role. Started again when

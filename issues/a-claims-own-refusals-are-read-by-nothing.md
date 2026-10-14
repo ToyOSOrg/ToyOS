@@ -11,7 +11,8 @@ Refusals of `kernel/src/pcidev/mod.rs` that no test reaches:
 - `ClaimError::Owned`, `Refusal::NoInterrupt`, `Refusal::CapsTruncated` and
   the domain's fault, whose guest readers the guest suite's cut moved to stage J
   of `issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`;
-- `ClaimError::Ambiguous`, a config naming a device this machine has two of;
+- `ClaimError::Ambiguous`, a partition GUID two partitions carry (a PCI
+  claim names one function by its arrival since #926);
 - `ClaimError::KernelDriven`, a claim on a function one of this kernel's own
   drivers bound;
 - `ClaimError::Exhausted`, a claim past the vectors, remapping entries or
