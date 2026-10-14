@@ -17,7 +17,7 @@ use toyos_ieee80211::data::{llc_snap, msdus, CcmpHeader, Ethernet};
 use toyos_ieee80211::element::Elements;
 use toyos_ieee80211::frame::Frame;
 use toyos_ieee80211::mgmt::Body;
-use toyos_ieee80211::reorder::Window;
+use toyos_ieee80211::reorder::{Received, Window};
 use toyos_ieee80211::{Address, Refused, Seq};
 
 const FUZZ_ITERATIONS: u64 = 20_000;
@@ -71,12 +71,13 @@ fn draw_element(rng: &mut Rng) -> Vec<u8> {
         11 => element(192, &[rng.below(5) as u8, 42, 0, 0xFC, 0xFF]),
         12 => element(127, &rng.bytes(10)),
         13 => {
-            let width_set = [0, 0x08, 0x18, 0x10][rng.below(4)];
+            let phy0 = [0, 0x08, 0x18, 0x10][rng.below(4)];
             let ppe = rng.chance(40);
             let mut body = vec![35];
             body.extend((0..6).map(|_| rng.next() as u8));
-            body.extend([width_set, 0, if ppe { 0x80 } else { 0 }, 0, 0, 0, 0, 0, 0, 0, 0]);
-            body.extend(vec![0xFA; 4 + 4 * (width_set.count_ones() as usize)]);
+            // PHY Capabilities: B3 and B4 in octet 0, PPE Thresholds Present (B55) in octet 6.
+            body.extend([phy0, 0, rng.next() as u8, 0, 0, 0, if ppe { 0x80 } else { 0 }, 0, 0, 0, 0]);
+            body.extend(vec![0xFA; 4 + 4 * (phy0.count_ones() as usize)]);
             if ppe {
                 let first = rng.next() as u8 & 0x7F;
                 let bits = 7 + 6 * ((first & 7) as usize + 1) * (first >> 3).count_ones() as usize;
@@ -277,10 +278,8 @@ fn the_reorder_window_passes_every_accepted_frame_up_once_and_in_order() {
                 continue;
             }
             let position = (base + rng.below(size as usize * 2) as u32).saturating_sub(rng.below(size as usize) as u32);
-            match w.receive(Seq::new(position as u16), position, &mut out) {
-                Ok(()) => accepted += 1,
-                Err(Refused::OldSequence | Refused::DuplicateSequence) => {}
-                Err(other) => panic!("iteration {iteration}: {other:?}"),
+            if w.receive(Seq::new(position as u16), position, &mut out) == Received::Taken {
+                accepted += 1;
             }
             base = base.max(position.saturating_sub(size as u32 - 1));
         }

@@ -31,7 +31,7 @@ fn country(body: &[u8]) -> Refused {
     elements(&element(7, body))
 }
 
-/// A header of `fc` and 22 octets of zeros: two addresses' worth past Duration and the third.
+/// Frame Control `fc`, then 22 zero octets: Duration, three addresses, Sequence Control.
 fn header(fc: [u8; 2]) -> Vec<u8> {
     let mut f = fc.to_vec();
     f.resize(24, 0);
@@ -60,22 +60,18 @@ fn block_ack(subtype: u8, rest: &[u8]) -> Refused {
     frame(&f)
 }
 
-/// An HE Capabilities element whose PHY capabilities' first octet is `width_set`, with PPE
-/// Thresholds present or not, and then `rest`.
-fn he_capabilities(width_set: u8, ppe: bool, rest: &[u8]) -> Vec<u8> {
+/// An HE Capabilities element whose PHY Capabilities octet 0 is `phy0`, with PPE Thresholds
+/// Present (B55) or not, and then `rest`.
+fn he_capabilities(phy0: u8, ppe: bool, rest: &[u8]) -> Vec<u8> {
     let mut phy = [0u8; 11];
-    phy[0] = width_set;
-    phy[2] = if ppe { 0x80 } else { 0 };
+    phy[0] = phy0;
+    phy[6] = if ppe { 0x80 } else { 0 };
     element(255, &[&[35][..], &[0; 6], &phy, &[0xFA, 0xFF, 0xFA, 0xFF], rest].concat())
 }
 
 /// A vendor-specific element under WMM's OUI and type.
 fn wmm(after_type: &[u8]) -> Vec<u8> {
     element(221, &[&[0x00, 0x50, 0xF2, 0x02][..], after_type].concat())
-}
-
-fn window() -> Window<u16> {
-    Window::new(Seq::new(100), 64).unwrap()
 }
 
 /// One hostile input per refusal.
@@ -138,12 +134,6 @@ fn cases() -> Vec<(Refused, Refused)> {
         (LengthField, ethernet(&[0xAA, 0xAA, 0x03, 0, 0, 0, 0x05, 0xFF])),
         (ExtendedIvClear, refusal(CcmpHeader::split(&[1, 0, 0, 0, 0, 0, 0, 0]))),
         (WindowSize, refusal(Window::<u16>::new(Seq::new(0), 257))),
-        (OldSequence, refusal(window().receive(Seq::new(100 + 2048), 0, &mut Vec::new()))),
-        (DuplicateSequence, {
-            let mut w = window();
-            w.receive(Seq::new(105), 0, &mut Vec::new()).unwrap();
-            refusal(w.receive(Seq::new(105), 1, &mut Vec::new()))
-        }),
     ]
 }
 
@@ -159,19 +149,30 @@ fn every_refusal_has_a_hostile_input_that_produces_it() {
 }
 
 #[test]
-fn an_he_capabilities_element_is_as_long_as_its_widths_and_ppe_thresholds_say() {
+fn an_he_capabilities_element_is_at_least_as_long_as_its_widths_and_ppe_thresholds_say() {
     let parse = |list: Vec<u8>| Elements::parse(&list).map(|e| e.he_capabilities.map(|h| (h.mcs_160.is_some(), h.mcs_80p80.is_some(), h.ppe_thresholds.map(<[u8]>::len))));
     assert_eq!(parse(he_capabilities(0, false, &[])), Ok(Some((false, false, None))));
     assert_eq!(parse(he_capabilities(0x18, false, &[0; 8])), Ok(Some((true, true, None))));
-    assert_eq!(parse(he_capabilities(0x08, false, &[0; 8])), Err(Refused::ElementLength));
+    assert_eq!(parse(he_capabilities(0x08, false, &[0; 3])), Err(Refused::ElementLength));
     assert_eq!(parse(he_capabilities(0x18, false, &[0; 7])), Err(Refused::ElementLength));
-    // Two streams and two RU sizes: 7 + 2 × 2 × 6 = 31 bits, four octets.
+    // Two streams and two RU sizes: 7 + 2 × 2 × 6 = 31 bits, four octets; the fifth is ignored.
     assert_eq!(parse(he_capabilities(0, true, &[0b0001_1001, 0, 0, 0])), Ok(Some((false, false, Some(4)))));
-    assert_eq!(parse(he_capabilities(0, true, &[0b0001_1001, 0, 0, 0, 0])), Err(Refused::ElementLength));
+    assert_eq!(parse(he_capabilities(0, true, &[0b0001_1001, 0, 0, 0, 0])), Ok(Some((false, false, Some(4)))));
+    assert_eq!(parse(he_capabilities(0x08, false, &[0; 8])), Ok(Some((true, false, None))));
 }
 
 #[test]
-fn an_he_operation_element_is_as_long_as_its_present_bits_say() {
+fn ppe_thresholds_are_present_under_phy_capabilities_b55_and_not_b23() {
+    // Four octets that would read as PPE Thresholds, after the MCS set.
+    let mut b23 = he_capabilities(0, false, &[0xFF; 4]);
+    // Element ID, length, extension ID and 6 MAC octets: PHY octet 2 is at 11.
+    b23[11] = 0x80;
+    assert_eq!(Elements::parse(&b23).unwrap().he_capabilities.unwrap().ppe_thresholds, None);
+    assert_eq!(elements(&he_capabilities(0, true, &[])), Refused::PpeThresholds);
+}
+
+#[test]
+fn an_he_operation_element_is_at_least_as_long_as_its_present_bits_say() {
     let op = |parameters: u32, rest: &[u8]| {
         let p = parameters.to_le_bytes();
         element(255, &[&[36, p[0], p[1], p[2], 0x05, 0xFC, 0xFF][..], rest].concat())
@@ -183,7 +184,18 @@ fn an_he_operation_element_is_as_long_as_its_present_bits_say() {
     let list = op(1 << 14 | 1 << 15 | 1 << 17, &[1, 42, 0, 3, 37, 2, 39, 0, 6]);
     assert_eq!(Elements::parse(&list).unwrap().he_operation.unwrap().vht, Some([1, 42, 0]));
     assert_eq!(elements(&op(1 << 14, &[1, 42])), Refused::ElementLength);
-    assert_eq!(elements(&op(0, &[0])), Refused::ElementLength);
+    assert_eq!(Elements::parse(&op(0, &[0])).map(|e| e.he_operation.map(|o| o.vht)), Ok(Some(None)));
+    assert_eq!(elements(&element(255, &[36, 0, 0, 0, 0x05, 0xFC])), Refused::ElementLength);
+}
+
+#[test]
+fn ht_and_vht_elements_ignore_octets_past_their_fields_and_refuse_fewer() {
+    let ht_operation = |len: usize| element(61, &vec![0; len]);
+    assert!(Elements::parse(&ht_operation(23)).unwrap().ht_operation.is_some());
+    assert_eq!(elements(&ht_operation(21)), Refused::ElementLength);
+    let vht_operation = |len: usize| element(192, &[&[1, 42, 0, 0xFC, 0xFF][..], &[0; 2]].concat()[..len]);
+    assert!(Elements::parse(&vht_operation(7)).unwrap().vht_operation.is_some());
+    assert_eq!(elements(&vht_operation(4)), Refused::ElementLength);
 }
 
 #[test]

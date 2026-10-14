@@ -1,12 +1,13 @@
 //! HT Capabilities (§9.4.2.55), HT Operation (§9.4.2.56), VHT Capabilities (§9.4.2.157) and VHT
-//! Operation (§9.4.2.158): fixed-length elements, refused at any other length or where a field
-//! holds a value the standard reserves.
+//! Operation (§9.4.2.158): fixed-length elements, refused when shorter or where a field holds a
+//! value the standard reserves. Octets past the fixed fields are ignored, so a field a later
+//! amendment appends costs no beacon.
 
 use crate::read::Reader;
 use crate::Refused;
 
-fn exact<const N: usize>(body: &[u8]) -> Result<[u8; N], Refused> {
-    body.try_into().map_err(|_| Refused::ElementLength)
+fn fields<const N: usize>(body: &[u8]) -> Result<[u8; N], Refused> {
+    body.first_chunk().copied().ok_or(Refused::ElementLength)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,7 +23,7 @@ pub struct HtCapabilities {
 
 impl HtCapabilities {
     pub(super) fn parse(body: &[u8]) -> Result<Self, Refused> {
-        let bytes: [u8; 26] = exact(body)?;
+        let bytes: [u8; 26] = fields(body)?;
         let mut r = Reader::new(&bytes);
         Ok(Self {
             info: r.u16()?,
@@ -55,7 +56,7 @@ pub struct HtOperation {
 
 impl HtOperation {
     pub(super) fn parse(body: &[u8]) -> Result<Self, Refused> {
-        let bytes: [u8; 22] = exact(body)?;
+        let bytes: [u8; 22] = fields(body)?;
         let mut r = Reader::new(&bytes);
         let primary_channel = r.u8()?;
         let info: [u8; 5] = r.array()?;
@@ -81,7 +82,7 @@ pub struct VhtCapabilities {
 
 impl VhtCapabilities {
     pub(super) fn parse(body: &[u8]) -> Result<Self, Refused> {
-        let bytes: [u8; 12] = exact(body)?;
+        let bytes: [u8; 12] = fields(body)?;
         let mut r = Reader::new(&bytes);
         let caps = Self {
             info: r.u32()?,
@@ -119,7 +120,7 @@ pub struct VhtOperation {
 
 impl VhtOperation {
     pub(super) fn parse(body: &[u8]) -> Result<Self, Refused> {
-        let [width, center_segment0, center_segment1, m0, m1] = exact(body)?;
+        let [width, center_segment0, center_segment1, m0, m1] = fields(body)?;
         let width = match width {
             0 => VhtChannelWidth::TwentyOrForty,
             1 => VhtChannelWidth::Eighty,

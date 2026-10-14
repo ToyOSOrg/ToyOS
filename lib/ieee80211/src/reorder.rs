@@ -3,7 +3,8 @@
 //!
 //! A frame in the window is held, and the run from the window's start passes up. A frame past
 //! the window's end, within half the sequence space, moves the window to end at it, passing up
-//! everything held before the new start. One further back than that is old and refused. A
+//! everything held before the new start. One further back than that is old, and one already held
+//! is a duplicate: both are dropped, the ordinary fate of a retransmission. A
 //! BlockAckReq's Starting Sequence Number moves the start forward as a frame would, and so does
 //! a device's release or a timeout, through [`Window::release_to`].
 
@@ -15,6 +16,18 @@ use crate::{Refused, Seq};
 /// The largest buffer an HE agreement negotiates (802.11ax-2021 §9.4.1.14); HT and VHT stop at 64.
 pub const MAX_SIZE: u16 = 256;
 const HALF: u16 = Seq::MODULUS / 2;
+
+/// What became of a received frame.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Received {
+    /// Held, or passed up with the run it completed.
+    Taken,
+    /// Dropped: before the window.
+    Old,
+    /// Dropped: its sequence number is already held.
+    Duplicate,
+}
 
 pub struct Window<T> {
     start: Seq,
@@ -41,10 +54,10 @@ impl<T> Window<T> {
 
     /// Take `item`, received with sequence number `seq`, and pass up into `out` every item it
     /// puts in order.
-    pub fn receive(&mut self, seq: Seq, item: T, out: &mut Vec<T>) -> Result<(), Refused> {
+    pub fn receive(&mut self, seq: Seq, item: T, out: &mut Vec<T>) -> Received {
         let ahead = seq.since(self.start);
         if ahead >= HALF {
-            return Err(Refused::OldSequence);
+            return Received::Old;
         }
         // A frame past the window's end becomes its end: the start moves to `size - 1` before it.
         if let Some(past) = ahead.checked_sub(self.size.get().saturating_sub(1)).filter(|&p| p > 0) {
@@ -53,11 +66,11 @@ impl<T> Window<T> {
         let offset = usize::from(seq.since(self.start));
         let slot = self.slot(offset);
         if slot.is_some() {
-            return Err(Refused::DuplicateSequence);
+            return Received::Duplicate;
         }
         *slot = Some(item);
         self.pass_run(out);
-        Ok(())
+        Received::Taken
     }
 
     /// Move the window's start forward to `ssn`, passing up every held item before it, then the

@@ -45,7 +45,7 @@ pub enum Class {
 
 macro_rules! refusals {
     ($($variant:ident = $class:ident, $why:literal;)*) => {
-        /// Why a frame, element or sequence number was not accepted.
+        /// Why a frame or element was not accepted, or a reordering buffer not made.
         #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub enum Refused {
             $(#[doc = $why] $variant,)*
@@ -110,7 +110,7 @@ refusals! {
     WmmAccessCategory = Malformed, "a WMM Parameter element that does not give each access category once";
     // Control frames, §9.3.1.
     BlockAckVariant = Unsupported, "a block-ack variant other than Compressed";
-    BitmapSize = Unsupported, "a Fragment Number giving a fragment level or a bitmap other than 32, 64, 128 or 256 bits";
+    BitmapSize = Unsupported, "a block-ack Fragment Number this station does not handle: a fragment level, or a bitmap other than 32, 64, 128 or 256 bits";
     ControlLength = Malformed, "a block-ack frame whose length its variant does not give";
     // Data, §9.3.2 and §12.5.3.
     SubframeLength = Malformed, "an A-MSDU subframe whose length runs past the MPDU";
@@ -118,13 +118,11 @@ refusals! {
     SnapHeaderAsAddress = Malformed, "an A-MSDU whose first destination is an LLC/SNAP header";
     NotSnap = Unsupported, "an MSDU that is not LLC/SNAP";
     UnknownOui = Unsupported, "an LLC/SNAP header with an OUI other than RFC 1042's or bridge-tunnel's";
-    TranslatedType = Malformed, "an RFC 1042 header carrying a type 802.1H sends by bridge-tunnel";
+    TranslatedType = Unsupported, "an RFC 1042 header carrying a type 802.1H sends by bridge-tunnel";
     LengthField = Unsupported, "an EtherType below 0x0600, which is an IEEE 802.3 length";
     ExtendedIvClear = Malformed, "a CCMP header without its Ext IV bit";
     // The reordering buffer, §10.25.6.
     WindowSize = Malformed, "a reordering buffer of 0 or more than 256 MPDUs";
-    OldSequence = Malformed, "a sequence number before the window";
-    DuplicateSequence = Malformed, "a sequence number already held in the window";
 }
 
 impl core::fmt::Display for Refused {

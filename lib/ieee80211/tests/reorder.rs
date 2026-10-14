@@ -1,6 +1,6 @@
 //! The receive reordering buffer against §10.25.6's rules, one rule per test.
 
-use toyos_ieee80211::reorder::Window;
+use toyos_ieee80211::reorder::{Received, Window};
 use toyos_ieee80211::{Refused, Seq};
 
 fn window(start: u16, size: u16) -> Window<u16> {
@@ -9,7 +9,7 @@ fn window(start: u16, size: u16) -> Window<u16> {
 
 fn receive(w: &mut Window<u16>, seq: u16) -> Vec<u16> {
     let mut out = Vec::new();
-    w.receive(Seq::new(seq), seq, &mut out).unwrap();
+    assert_eq!(w.receive(Seq::new(seq), seq, &mut out), Received::Taken);
     out
 }
 
@@ -59,12 +59,22 @@ fn a_frame_a_whole_window_past_passes_up_everything_held() {
 }
 
 #[test]
-fn a_frame_half_the_sequence_space_behind_is_old() {
+fn a_frame_half_the_sequence_space_behind_is_dropped_as_old() {
     let mut w = window(10, 8);
     let mut out = Vec::new();
-    assert_eq!(w.receive(Seq::new(9), 9, &mut out), Err(Refused::OldSequence));
-    assert_eq!(w.receive(Seq::new(10 + 2048), 0, &mut out), Err(Refused::OldSequence));
+    assert_eq!(w.receive(Seq::new(9), 9, &mut out), Received::Old);
+    assert_eq!(w.receive(Seq::new(10 + 2048), 0, &mut out), Received::Old);
     assert_eq!(receive(&mut w, 10 + 2047), []);
+}
+
+#[test]
+fn a_frame_already_held_is_dropped_as_a_duplicate() {
+    let mut w = window(10, 8);
+    receive(&mut w, 12);
+    let mut out = Vec::new();
+    assert_eq!(w.receive(Seq::new(12), 99, &mut out), Received::Duplicate);
+    assert_eq!(receive(&mut w, 10), [10]);
+    assert_eq!(receive(&mut w, 11), [11, 12]);
 }
 
 #[test]

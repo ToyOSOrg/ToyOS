@@ -20,8 +20,10 @@ reassembly buffer that does not exist cannot mix them.
 **The cost is real.** Every MSDU that an access point or a peer fragments is
 lost. 802.11 lets a transmitter fragment any unicast MSDU or MMPDU above its
 fragmentation threshold (IEEE 802.11-2020). An AP configured with a
-threshold below its MTU drops part of the station's traffic, retry by retry,
-with nothing upstream told why.
+threshold below its MTU loses every MSDU above it silently: the radio
+acknowledges each fragment before the parser sees it, so the sender never
+retransmits, and every higher-layer retransmission of that MSDU is lost the
+same way.
 
 - **Owner:** the orchestrator, for the Wi-Fi track (`issues/there-is-no-wifi.md`).
 - **Evidence:** the refusal and its test, `every_refusal_has_a_hostile_input_that_produces_it` in `lib/ieee80211/tests/refusals.rs`.

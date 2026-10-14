@@ -1,5 +1,6 @@
 //! HE Capabilities (802.11ax-2021 §9.4.2.248) and HE Operation (§9.4.2.249), Element ID Extension
-//! 35 and 36. Their lengths follow from bits inside them, and any other length is refused.
+//! 35 and 36. Their lengths follow from bits inside them; a shorter element is refused, and octets
+//! past those fields are ignored, so a field a later amendment appends costs no beacon.
 
 use crate::read::Reader;
 use crate::Refused;
@@ -10,11 +11,11 @@ pub struct HeCapabilities<'a> {
     pub phy: [u8; 11],
     /// Rx and Tx HE-MCS maps for 80 MHz and narrower.
     pub mcs_80: [u8; 4],
-    /// For 160 MHz, present when the Channel Width Set's bit 3 is.
+    /// For 160 MHz, present when PHY Capabilities B3 (Channel Width Set B2) is set.
     pub mcs_160: Option<[u8; 4]>,
-    /// For 80+80 MHz, present when the Channel Width Set's bit 4 is.
+    /// For 80+80 MHz, present when PHY Capabilities B4 (Channel Width Set B3) is set.
     pub mcs_80p80: Option<[u8; 4]>,
-    /// Present when the PHY capabilities' bit 23 is.
+    /// Present when PHY Capabilities B55, PPE Thresholds Present, is set.
     pub ppe_thresholds: Option<&'a [u8]>,
 }
 
@@ -24,14 +25,11 @@ impl<'a> HeCapabilities<'a> {
         let length = |_| Refused::ElementLength;
         let mac = r.array().map_err(length)?;
         let phy: [u8; 11] = r.array().map_err(length)?;
-        let [width_set, _, ppe_octet, ..] = phy;
+        let [phy0, _, _, _, _, _, phy6, ..] = phy;
         let mcs_80 = r.array().map_err(length)?;
-        let mcs_160 = if width_set & 1 << 3 != 0 { Some(r.array().map_err(length)?) } else { None };
-        let mcs_80p80 = if width_set & 1 << 4 != 0 { Some(r.array().map_err(length)?) } else { None };
-        let ppe_thresholds = if ppe_octet & 1 << 7 != 0 { Some(ppe(&mut r)?) } else { None };
-        if !r.is_empty() {
-            return Err(Refused::ElementLength);
-        }
+        let mcs_160 = if phy0 & 1 << 3 != 0 { Some(r.array().map_err(length)?) } else { None };
+        let mcs_80p80 = if phy0 & 1 << 4 != 0 { Some(r.array().map_err(length)?) } else { None };
+        let ppe_thresholds = if phy6 & 1 << 7 != 0 { Some(ppe(&mut r)?) } else { None };
         Ok(Self { mac, phy, mcs_80, mcs_160, mcs_80p80, ppe_thresholds })
     }
 }
@@ -91,9 +89,6 @@ impl HeOperation {
         } else {
             None
         };
-        if !r.is_empty() {
-            return Err(Refused::ElementLength);
-        }
         Ok(Self { parameters, bss_color, basic_mcs, vht, max_cohosted_bssid, six_ghz })
     }
 }
