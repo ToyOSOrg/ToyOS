@@ -4,11 +4,13 @@
 //! 2 and 3). ML-KEM, which ring lacks, is measured beside RustCrypto's `ml-kem`
 //! and decides nothing.
 //!
-//! Every backend of a row does the same work from the same inputs, A and B
-//! each on keys and buffers of their own. An open restores its ciphertext
-//! before each operation, and the copy is in every backend's time. A key
-//! agreement draws its ephemeral key from the system, as ring can only; ours
-//! draws the same bytes from the same source.
+//! Ring is the oracle: each row is built only once ours has computed what ring
+//! computes from the same inputs, and every open or rejection opens ring's
+//! ciphertext. Every backend of a row does the same work from the same
+//! inputs, A and B each on keys and buffers of their own. An open restores its
+//! ciphertext before each operation, and the copy is in every backend's time.
+//! A key agreement draws its ephemeral key from the system, as ring can only;
+//! ours draws from the same source.
 //!
 //! The binary is built twice: in `[profile.toyos]`, as it ships, and as
 //! `crypto_parity_unasserted` with debug assertions off, whose column decides
@@ -20,7 +22,10 @@ use std::time::Instant;
 use ring::{aead, agreement, digest, hkdf, hmac, rand, signature};
 use toyos_crypto::hash::{Sha256, Sha384, Sha512};
 use toyos_crypto::kdf::{Hkdf, Hmac};
-use toyos_parity::{Backend, Build, EndLine, Row, RowLine, SamplesLine, Summary};
+use toyos_parity::{Backend, Build, EndLine, IsaLine, Row, RowLine, SamplesLine, Summary};
+
+#[path = "../arch/features.rs"]
+mod features;
 
 const KEY: [u8; 64] = [0x42; 64];
 const IV: [u8; 12] = [0x24; 12];
@@ -136,21 +141,21 @@ fn nonce(sequence: u64) -> aead::Nonce {
     aead::Nonce::assume_unique_for_key(nonce)
 }
 
-/// Ours sealed at sequence 0, and its tag, `forged` with one bit flipped.
-fn ours_sealed(alg: Tls, len: usize, forged: bool) -> (Vec<u8>, [u8; 12], [u8; 16]) {
-    let mut sealed = vec![0x70; len];
-    let (nonce, mut tag) = alg.sealing().seal(&AAD, &mut sealed).expect("seal");
-    tag[0] ^= u8::from(forged);
-    (sealed, nonce, tag)
-}
-
-/// Ring's the same.
-fn ring_sealed(key: &aead::LessSafeKey, len: usize, forged: bool) -> (Vec<u8>, aead::Tag) {
+/// Ring's record at sequence 0 and its tag, `forged` with one bit flipped.
+fn ring_sealed(key: &aead::LessSafeKey, len: usize, forged: bool) -> (Vec<u8>, [u8; 16]) {
     let mut sealed = vec![0x70; len];
     let tag = key.seal_in_place_separate_tag(nonce(0), aead::Aad::from(AAD), &mut sealed).expect("seal");
     let mut tag: [u8; 16] = tag.as_ref().try_into().unwrap();
     tag[0] ^= u8::from(forged);
-    (sealed, tag.into())
+    (sealed, tag)
+}
+
+/// Ours seals at sequence 0 what ring does.
+fn seals_as_ring(alg: Tls, len: usize) {
+    let mut sealed = vec![0x70; len];
+    let (nonce, tag) = alg.sealing().seal(&AAD, &mut sealed).expect("seal");
+    assert_eq!(nonce, IV, "{} sequence 0's nonce", alg.name());
+    assert_eq!((sealed, tag), ring_sealed(&alg.ring(), len, false), "{} seals {len} B as ring", alg.name());
 }
 
 fn tls_rows(alg: Tls, rows: &mut Vec<Box<dyn Row>>) {
@@ -159,6 +164,7 @@ fn tls_rows(alg: Tls, rows: &mut Vec<Box<dyn Row>>) {
         move || keep(alg.ring())
     }));
     for len in SIZES {
+        seals_as_ring(alg, len);
         let mut key = alg.sealing();
         let mut buf = vec![0x70; len];
         rows.push(trio(
@@ -176,7 +182,7 @@ fn tls_rows(alg: Tls, rows: &mut Vec<Box<dyn Row>>) {
         for forged in [false, true] {
             let op = if forged { "reject" } else { "open" };
             let key = alg.opening();
-            let (sealed, sealed_nonce, tag) = ours_sealed(alg, len, forged);
+            let (sealed, tag) = ring_sealed(&alg.ring(), len, forged);
             let mut work = sealed.clone();
             rows.push(trio(
                 format!("{name}/{op}/{len}"),
@@ -184,7 +190,7 @@ fn tls_rows(alg: Tls, rows: &mut Vec<Box<dyn Row>>) {
                     if !forged {
                         work.copy_from_slice(&sealed);
                     }
-                    assert_eq!(key.open(&sealed_nonce, &AAD, &mut work, &tag).is_err(), forged);
+                    assert_eq!(key.open(&IV, &AAD, &mut work, &tag).is_err(), forged);
                 },
                 move || {
                     let key = alg.ring();
@@ -194,7 +200,8 @@ fn tls_rows(alg: Tls, rows: &mut Vec<Box<dyn Row>>) {
                         if !forged {
                             work.copy_from_slice(&sealed);
                         }
-                        let opened = key.open_in_place_separate_tag(nonce(0), aead::Aad::from(AAD), tag, &mut work, 0..);
+                        let opened =
+                            key.open_in_place_separate_tag(nonce(0), aead::Aad::from(AAD), tag.into(), &mut work, 0..);
                         assert_eq!(opened.is_err(), forged);
                     }
                 },
@@ -212,8 +219,22 @@ fn ssh_rows(rows: &mut Vec<Box<dyn Row>>) {
     rows.push(trio(format!("{NAME}/key"), || keep(ssh::SealingKey::new(KEY, 0)), || {
         || keep(ring_ssh::SealingKey::new(&KEY))
     }));
+    // Ring's packet at sequence 0, its length field first, and its tag,
+    // `forged` with one bit flipped.
+    let ring_sealed = |len: usize, forged: bool| {
+        let mut packet = vec![0x70; 4 + len];
+        packet[..4].copy_from_slice(&u32::try_from(len).unwrap().to_be_bytes());
+        let mut tag = [0; 16];
+        ring_ssh::SealingKey::new(&KEY).seal_in_place(0, &mut packet, &mut tag);
+        tag[0] ^= u8::from(forged);
+        (packet, tag)
+    };
     for len in SIZES.into_iter().chain([SSH_PACKET]) {
         let length = u32::try_from(len).unwrap().to_be_bytes();
+        let (mut header, mut payload) = (length, vec![0x70; len]);
+        let (sequence, tag) = ssh::SealingKey::new(KEY, 0).seal(&mut header, &mut payload).expect("seal");
+        assert_eq!(([&header[..], &payload].concat(), tag), ring_sealed(len, false), "{NAME} seals {len} B as ring");
+        assert_eq!(sequence, 0);
         let mut key = ssh::SealingKey::new(KEY, 0);
         let (mut header, mut payload) = (length, vec![0x70; len]);
         rows.push(trio(
@@ -232,9 +253,8 @@ fn ssh_rows(rows: &mut Vec<Box<dyn Row>>) {
         ));
         for forged in [false, true] {
             let op = if forged { "reject" } else { "open" };
-            let (mut sealed_header, mut sealed) = (length, vec![0x70; len]);
-            let (sequence, mut tag) = ssh::SealingKey::new(KEY, 0).seal(&mut sealed_header, &mut sealed).expect("seal");
-            tag[0] ^= u8::from(forged);
+            let (packet, tag) = ring_sealed(len, forged);
+            let (sealed_header, sealed): ([u8; 4], Vec<u8>) = (packet[..4].try_into().unwrap(), packet[4..].to_vec());
             let key = ssh::OpeningKey::new(KEY);
             let (mut header, mut work) = (sealed_header, sealed.clone());
             rows.push(trio(
@@ -244,15 +264,11 @@ fn ssh_rows(rows: &mut Vec<Box<dyn Row>>) {
                         header = sealed_header;
                         work.copy_from_slice(&sealed);
                     }
-                    keep(key.packet_length(sequence, header));
-                    assert_eq!(key.open(sequence, &mut header, &mut work, &tag).is_err(), forged);
+                    keep(key.packet_length(0, header));
+                    assert_eq!(key.open(0, &mut header, &mut work, &tag).is_err(), forged);
                 },
                 move || {
-                    let mut sealed = vec![0x70; 4 + len];
-                    sealed[..4].copy_from_slice(&length);
-                    let mut tag = [0; 16];
-                    ring_ssh::SealingKey::new(&KEY).seal_in_place(0, &mut sealed, &mut tag);
-                    tag[0] ^= u8::from(forged);
+                    let (sealed, tag) = ring_sealed(len, forged);
                     let key = ring_ssh::OpeningKey::new(&KEY);
                     let mut work = sealed.clone();
                     move || {
@@ -268,7 +284,31 @@ fn ssh_rows(rows: &mut Vec<Box<dyn Row>>) {
     }
 }
 
+/// Ours digests, authenticates and derives what ring does from each row's
+/// inputs.
+fn hashes_as_ring() {
+    for len in [64, 16384] {
+        let message = vec![0x6d; len];
+        assert_eq!(Sha256::digest(&message).unwrap().as_slice(), digest::digest(&digest::SHA256, &message).as_ref());
+        assert_eq!(Sha512::digest(&message).unwrap().as_slice(), digest::digest(&digest::SHA512, &message).as_ref());
+    }
+    let (mut tag256, mut tag384) = ([0; 32], [0; 48]);
+    Hmac::<Sha256>::authenticate(&KEY[..32], &MESSAGE, &mut tag256).unwrap();
+    Hmac::<Sha384>::authenticate(&KEY[..48], &MESSAGE, &mut tag384).unwrap();
+    assert_eq!(&tag256[..], hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, &KEY[..32]), &MESSAGE).as_ref());
+    assert_eq!(&tag384[..], hmac::sign(&hmac::Key::new(hmac::HMAC_SHA384, &KEY[..48]), &MESSAGE).as_ref());
+    let (mut ours256, mut ours384, mut ring256, mut ring384) = ([0; 32], [0; 48], [0; 32], [0; 48]);
+    Hkdf::<Sha256>::extract(&IV, &KEY[..32]).unwrap().expand(&[&MESSAGE[..16]], &mut ours256).unwrap();
+    Hkdf::<Sha384>::extract(&IV, &KEY[..48]).unwrap().expand(&[&MESSAGE[..16]], &mut ours384).unwrap();
+    let prk = hkdf::Salt::new(hkdf::HKDF_SHA256, &IV).extract(&KEY[..32]);
+    prk.expand(&[&MESSAGE[..16]], hkdf::HKDF_SHA256).unwrap().fill(&mut ring256).unwrap();
+    let prk = hkdf::Salt::new(hkdf::HKDF_SHA384, &IV).extract(&KEY[..48]);
+    prk.expand(&[&MESSAGE[..16]], hkdf::HKDF_SHA384).unwrap().fill(&mut ring384).unwrap();
+    assert_eq!((ours256, ours384), (ring256, ring384), "hkdf");
+}
+
 fn hash_rows(rows: &mut Vec<Box<dyn Row>>) {
+    hashes_as_ring();
     for len in [64, 16384] {
         let message = vec![0x6d; len];
         rows.push(trio(format!("sha-256/{len}"), move || keep(Sha256::digest(&message).unwrap()), move || {
@@ -399,6 +439,9 @@ fn signature_rows(rows: &mut Vec<Box<dyn Row>>) {
     let rng = rand::SystemRandom::new();
 
     let key = ed25519::SigningKey::from_seed(SEED);
+    let pair = signature::Ed25519KeyPair::from_seed_unchecked(&SEED).expect("the seed");
+    assert_eq!(key.public_key().as_bytes(), pair.public_key().as_ref(), "ed25519's public key");
+    assert_eq!(&key.sign(&MESSAGE).expect("sign")[..], pair.sign(&MESSAGE).as_ref(), "ed25519 signs as ring");
     rows.push(trio("ed25519/sign/64".into(), move || keep(key.sign(&MESSAGE).expect("sign")), || {
         let pair = signature::Ed25519KeyPair::from_seed_unchecked(&SEED).expect("the seed");
         move || keep(pair.sign(&MESSAGE))
@@ -495,7 +538,18 @@ fn ml_kem_rows(rows: &mut Vec<Box<dyn Row>>) {
     ));
     let key = mlkem::DecapsulationKey::generate(&mut Fixed(&SEEDS)).expect("a key");
     let public = mlkem::EncapsulationKey::from_bytes(key.public_key().as_bytes()).expect("its public key");
-    let (ciphertext, _) = public.encapsulate(&mut Fixed(&M)).expect("encapsulate");
+    let (ciphertext, shared) = public.encapsulate(&mut Fixed(&M)).expect("encapsulate");
+    // Ours against `ml-kem` on the same seeds, as the crate's differential
+    // test holds it.
+    {
+        use ml_kem::KeyExport;
+        let reference = theirs();
+        assert_eq!(public.as_bytes().as_slice(), reference.encapsulation_key().to_bytes().as_slice(), "ml-kem's public key");
+        let (reference_ciphertext, reference_shared) = reference.encapsulation_key().encapsulate_deterministic(&M.into());
+        assert_eq!(ciphertext.as_slice(), reference_ciphertext.as_slice(), "ml-kem's ciphertext");
+        assert_eq!(shared.as_bytes().as_slice(), reference_shared.as_slice(), "ml-kem's shared secret");
+        assert_eq!(key.decapsulate(&ciphertext).expect("decapsulate").as_bytes(), shared.as_bytes());
+    }
     rows.push(trio(
         "ml-kem-768/encapsulate".into(),
         move || keep(public.encapsulate(&mut Fixed(&M)).expect("encapsulate")),
@@ -516,6 +570,7 @@ fn ml_kem_rows(rows: &mut Vec<Box<dyn Row>>) {
 
 fn main() {
     let build = if cfg!(debug_assertions) { Build::Asserted } else { Build::Unasserted };
+    println!("{}", IsaLine(build, &features::detected()));
     let mut rows = Vec::new();
     for alg in [Tls::Aes128, Tls::Aes256, Tls::ChaCha] {
         tls_rows(alg, &mut rows);

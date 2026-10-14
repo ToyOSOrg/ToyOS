@@ -238,7 +238,7 @@ fn stale(crate_dir: &Path, identity: &Identity) -> Option<Stale> {
 }
 
 /// Remove what `stale` names of `crate_dir`'s target directory and stamp it
-/// with `identity`. [`Stale::All`] is the guest profile's host half and every
+/// with `identity`. [`Stale::All`] is the guest profiles' host halves and every
 /// guest target's directory: the root's `target/` is also the build system's
 /// own, which no sysroot made.
 fn clean(crate_dir: &Path, stale: &Stale, identity: &Identity) {

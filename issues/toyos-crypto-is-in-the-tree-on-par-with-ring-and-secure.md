@@ -150,16 +150,14 @@ Not consumers:
      ours_i / ((A_i + B_i) / 2) is at most 1 + spread.
    - **A recorded bias.** An open row restores its ciphertext before each
      open, and every backend pays for that copy, which pulls the ratio
-     toward 1. The verdict accounts for it. On the development Mac
-     (exploratory), the copy is 3–6.5% of ring's AES-GCM open and 1–1.7% of
-     its ChaCha20-Poly1305 open. No bench has measured it.
+     toward 1. A pass on an open row is read with that bias in mind. On the
+     development Mac (exploratory), the copy is 3–6.5% of ring's AES-GCM open
+     and 1–1.7% of its ChaCha20-Poly1305 open. No bench has measured it.
    - **Exit:**
-     - On both benches, every row a consumer uses passes on the ISA both
-       crates run in that boot. In #932's boots both crates could take AVX.
-     - The rows pass again in the boot after
-       `issues/user-programs-use-avx-under-xsave.md` lands, with both crates
-       admitting AVX. A consumer that passed on SSE and fails with AVX is a
-       filed defect.
+     - On both benches, every row a consumer uses passes on the ISA each
+       build records. That ISA is now AVX-capable state on both benches.
+       `issues/user-programs-use-avx-under-xsave.md`'s remaining exit,
+       userland threads' state, is not a gate here.
      - Parity work reads ring's, BoringSSL's and OpenSSL's perlasm or C only
        through a clean room, as root's research rule says.
      - Faster code is accepted only with stage 4's evidence for it.

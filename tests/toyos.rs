@@ -255,8 +255,8 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // architecture's job case, and compares two boots' draws.
     "random_draws",
     // Its shared run is ring's known answers in a guest; the crypto boot runs it
-    // first on each bench, where ring has never run otherwise, and
-    // `crypto_instrument_prints_its_table` before the instrument under QEMU.
+    // first on each bench, and `crypto_instrument_prints_its_table` before the
+    // instrument under QEMU.
     "ring_kat",
     // Its shared run asserts what holds of the clock syscalls on x86-64;
     // `virt_wall_clock_utc` builds it for AArch64 and judges what it read
@@ -1176,8 +1176,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // `toyos-crypto` beside ring on the bench's own CPU, both builds'
         // tables printed: that ring runs at all, and that every row measured.
-        // Stage 3's verdict, `toyos_parity::Table::verdict`, is registered by
-        // that stage. The T14 and the AMD bench.
+        // The T14 and the AMD bench.
         "crypto_instrument",
         metal::Metal {
             arms: CRYPTOCASE,

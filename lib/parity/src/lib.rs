@@ -253,14 +253,15 @@ impl fmt::Display for RowLine<'_> {
     }
 }
 
-/// `build`'s raw samples of one row, for whoever recomputes a row from the
-/// log. The judge does not read them.
+/// `build`'s raw samples of one row, each at the shortest precision that reads
+/// back as the same `f64`, so that a row recomputes from the log exactly. The
+/// judge does not read them.
 pub struct SamplesLine<'a>(pub Build, pub &'a str, pub &'a Times);
 
 impl fmt::Display for SamplesLine<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let SamplesLine(build, name, times) = self;
-        let list = |v: &[f64]| v.iter().map(|ns| format!("{ns:.1}")).collect::<Vec<_>>().join(",");
+        let list = |v: &[f64]| v.iter().map(|ns| format!("{ns}")).collect::<Vec<_>>().join(",");
         write!(
             f,
             "{MARK}{} samples {name} ours={} a={} b={}",
@@ -269,6 +270,18 @@ impl fmt::Display for SamplesLine<'_> {
             list(&times.a),
             list(&times.b)
         )
+    }
+}
+
+/// The extensions `build`'s own feature detection admits, printed before its
+/// rows: the ISA its table was measured on.
+pub struct IsaLine<'a>(pub Build, pub &'a [&'a str]);
+
+impl fmt::Display for IsaLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let IsaLine(build, features) = self;
+        let features = if features.is_empty() { "none".to_string() } else { features.join(",") };
+        write!(f, "{MARK}{} isa {features}", build.word())
     }
 }
 
@@ -281,19 +294,24 @@ impl fmt::Display for EndLine {
     }
 }
 
-/// Both builds' rows out of one log, in the order each printed them.
+/// Both builds' rows out of one log, in the order each printed them, and the
+/// ISA each recorded.
 #[derive(Debug, PartialEq)]
 pub struct Table {
     pub asserted: Vec<Summary>,
     pub unasserted: Vec<Summary>,
+    pub asserted_isa: String,
+    pub unasserted_isa: String,
 }
 
 /// The table in a program's `lines`, as it wrote them: refused unless each
-/// build printed its end line once, after exactly that many rows of distinct
-/// names, and both builds printed the same rows in the same order.
+/// build printed its ISA once before its rows and its end line once after
+/// exactly that many rows of distinct names, and both builds printed the same
+/// rows in the same order.
 pub fn read<'a>(lines: impl IntoIterator<Item = &'a str>) -> Result<Table, String> {
     let mut rows: [Vec<Summary>; 2] = [Vec::new(), Vec::new()];
     let mut ends: [Option<usize>; 2] = [None, None];
+    let mut isas: [Option<String>; 2] = [None, None];
     for line in lines {
         let Some(said) = line.strip_prefix(MARK) else { continue };
         let mut words = said.split(' ');
@@ -303,8 +321,18 @@ pub fn read<'a>(lines: impl IntoIterator<Item = &'a str>) -> Result<Table, Strin
         let build = Build::from_word(build).ok_or_else(|| format!("no build {build:?}: {line:?}"))?;
         let at = build as usize;
         match kind {
+            "isa" => {
+                let features = words.next().filter(|f| !f.is_empty());
+                if isas[at].is_some() || !rows[at].is_empty() || features.is_none() || words.next().is_some() {
+                    return Err(format!("an unreadable, late or second ISA line: {line:?}"));
+                }
+                isas[at] = features.map(str::to_string);
+            }
             "samples" => {}
             "row" => {
+                if isas[at].is_none() {
+                    return Err(format!("a {} row before its ISA line: {line:?}", build.word()));
+                }
                 if ends[at].is_some() {
                     return Err(format!("a {} row after its end line: {line:?}", build.word()));
                 }
@@ -342,7 +370,10 @@ pub fn read<'a>(lines: impl IntoIterator<Item = &'a str>) -> Result<Table, Strin
             names(&unasserted)
         ));
     }
-    Ok(Table { asserted, unasserted })
+    let [Some(asserted_isa), Some(unasserted_isa)] = isas else {
+        return Err("a build printed no ISA line".to_string());
+    };
+    Ok(Table { asserted, unasserted, asserted_isa, unasserted_isa })
 }
 
 fn summary<'a>(mut words: impl Iterator<Item = &'a str>) -> Option<Summary> {
@@ -358,13 +389,16 @@ impl Table {
     /// The table as evidence: per row both builds' columns, the second build's
     /// deciding nothing.
     pub fn render(&self) -> Vec<String> {
-        let mut out = vec![format!(
-            "{:<34} {:>12} {:>12} {:>12} {:>7} {:>7} {:>8} | {:>12} {:>7}",
-            "row", "ours ns", "A ns", "B ns", "spread", "ratio", "verdict", "ours ns off", "ratio off"
-        )];
+        let mut out = vec![
+            format!("ISA {} (assertions off: {})", self.asserted_isa, self.unasserted_isa),
+            format!(
+                "{:<34} {:>12} {:>12} {:>12} {:>7} {:>7} {:>9} | {:>12} {:>7}",
+                "row", "ours ns", "A ns", "B ns", "spread", "ratio", "verdict", "ours ns off", "ratio off"
+            ),
+        ];
         for (on, off) in self.asserted.iter().zip(&self.unasserted) {
             out.push(format!(
-                "{:<34} {:>12.1} {:>12.1} {:>12.1} {:>6.2}% {:>7.3} {:>8} | {:>12.1} {:>7.3}",
+                "{:<34} {:>12.1} {:>12.1} {:>12.1} {:>6.2}% {:>7.3} {:>9} | {:>12.1} {:>7.3}",
                 on.name,
                 on.ours,
                 on.a,
@@ -587,9 +621,11 @@ mod tests {
         };
         let asserted = vec![row("aes-128-gcm/seal/16384", 1.25), row("ml-kem-768/keygen", 0.5)];
         let unasserted = vec![row("aes-128-gcm/seal/16384", 1.0), row("ml-kem-768/keygen", 0.5)];
-        let times = Times { ours: vec![1.0], a: vec![2.0], b: vec![3.0] };
+        // A value whose shortest spelling needs all of an f64's digits.
+        let times = Times { ours: vec![0.1 + 0.2], a: vec![2.0], b: vec![1.0 / 3.0] };
         let mut log = String::new();
         for (build, rows) in [(Build::Asserted, &asserted), (Build::Unasserted, &unasserted)] {
+            log.push_str(&format!("{}\n", IsaLine(build, &["aes", "avx2"])));
             for r in rows {
                 log.push_str(&format!("{}\n", SamplesLine(build, &r.name, &times)));
                 log.push_str(&format!("{}\n", RowLine(build, r)));
@@ -597,8 +633,13 @@ mod tests {
             log.push_str(&format!("{}\n", EndLine(build, rows.len())));
         }
         let table = read(log.lines()).unwrap();
-        assert_eq!(table, Table { asserted: asserted.clone(), unasserted });
-        assert_eq!(table.render().len(), 3);
+        let isa = "aes,avx2".to_string();
+        assert_eq!(table, Table { asserted: asserted.clone(), unasserted, asserted_isa: isa.clone(), unasserted_isa: isa });
+        assert_eq!(table.render().len(), 4);
+        // The samples read back exactly.
+        let samples = log.lines().find(|l| l.contains(" samples ")).unwrap();
+        let ours: f64 = samples.split("ours=").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+        assert_eq!(ours, 0.1 + 0.2);
         let refused = table.verdict().unwrap_err();
         assert!(refused.starts_with("1 row(s)") && refused.contains("aes-128-gcm/seal/16384 fail"), "{refused}");
 
@@ -613,6 +654,9 @@ mod tests {
             log.replace("verdict=fail", "verdict=maybe"),
             log.replace("asserted rows 2", "asserted rows 3"),
             log.replace("ratio=", "ratio=x"),
+            without(&|l| l.contains("unasserted isa")),
+            log.replacen("asserted isa aes,avx2\n", "", 1),
+            format!("{log}{}\n", IsaLine(Build::Asserted, &[])),
         ];
         for bad in refusals {
             assert!(read(bad.lines()).is_err(), "read:\n{bad}");
