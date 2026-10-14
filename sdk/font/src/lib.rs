@@ -5,6 +5,7 @@
 //! program draws text at a display's scale; the build runs the same producer
 //! for the 8x16 rasters it ships, which [`Font::from_prebuilt`] reads.
 
+#[cfg(feature = "ttf")]
 use std::collections::BTreeSet;
 
 /// The desktop's text cell at scale 1, in pixels: every glyph of its
@@ -34,6 +35,7 @@ pub struct Font {
 impl Font {
     /// `ttf`'s glyphs for [`codepoints`], each in a cell of `width` by
     /// `height` pixels.
+    #[cfg(feature = "ttf")]
     pub fn from_ttf(ttf: &[u8], width: usize, height: usize) -> Result<Self, &'static str> {
         let font = fontdue::Font::from_bytes(ttf, fontdue::FontSettings::default())?;
         let codepoints: Vec<u32> = codepoints(&font).into_iter().collect();
@@ -148,6 +150,7 @@ impl Font {
     }
 }
 
+#[cfg(feature = "ttf")]
 /// Every codepoint a raster carries: Latin-1, box drawing and block elements,
 /// and what each shipped layout types at every level or composes with a dead
 /// key, where the font has a glyph for it.
@@ -184,6 +187,7 @@ fn codepoints(font: &fontdue::Font) -> BTreeSet<u32> {
     out
 }
 
+#[cfg(feature = "ttf")]
 /// Rasterize `codepoints` into `cell_width * cell_height` 8-bit coverage
 /// cells, laid out one cell after another. The pixel size is the largest at
 /// which every printable ASCII glyph fits its cell, so a fixed grid can be
@@ -238,7 +242,7 @@ fn rasterize_cells(font: &fontdue::Font, codepoints: &[u32], cell_width: usize, 
     data
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "ttf"))]
 mod tests {
     use super::*;
 

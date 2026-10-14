@@ -13,7 +13,14 @@ repository = "https://github.com/ToyOSOrg/ToyOS"
 name = "font"
 doctest = false
 
+[features]
+# Rasterizing a TTF at any cell (`Font::from_ttf`). A crate that only draws a
+# prebuilt raster, as `toyos-window` does, goes without it, and so does every
+# program that reaches the font through `toyos-window` alone.
+default = ["ttf"]
+ttf = ["dep:fontdue", "dep:toyos-keymap"]
+
 [dependencies]
-fontdue = "0.9"
+fontdue = { version = "0.9", optional = true }
 # The codepoints a shipped layout can type, which every raster carries.
-toyos-keymap = { path = "../keymap" }
+toyos-keymap = { path = "../keymap", optional = true }
