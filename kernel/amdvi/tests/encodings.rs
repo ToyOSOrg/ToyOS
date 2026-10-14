@@ -5,7 +5,7 @@
 
 use toyos_amdvi::dte::{interrupts_blocked, interrupts_remapped, Dte, Setting, DEVICE_IDS, ENTRY_BYTES, INTERRUPT_ENTRIES};
 use toyos_amdvi::irte::{self, Destination};
-use toyos_amdvi::queue::{event, name, Command, Event, ENTRIES};
+use toyos_amdvi::queue::{disposition, event, message_type, name, Command, Disposition, Event, ENTRIES};
 use toyos_amdvi::reg::{control, device_table, offset, ring, slot, smi_filter, Features, SmiFilter, SMI_FILTER};
 use toyos_amdvi::table::{directory, entry, index, leaf, Entry, LEAF_LEVEL, ROOT_LEVEL};
 use toyos_phys::Phys;
@@ -280,30 +280,42 @@ fn the_smi_filter_sits_where_48882_puts_it() {
     assert_eq!((unset.passes(), unset.locked()), (None, false));
 }
 
-/// Figure 3 / Table 4, as the SMI filter records a refused SMI (§2.1.5.1):
-/// an `IO_PAGE_FAULT` whose address is `FDF8h` at [39:24], `MT[2:0]` 010b at
-/// [4:2], `MT[3]` [7] and `DM` [6] zero, [1:0] zero, and [63:40] all zero
-/// or, as the unit writes the interrupt range (§2.2.5), all ones; the
-/// vector [23:16], destination [15:8] and `TM` [5] are not read.
+/// Table 3: an `IO_PAGE_FAULT` at an address in the interrupt range,
+/// `FDF8h` at [39:24] with [63:40] all zero (Table 4) or all ones (§2.2.5's
+/// base), is a refused message, whatever its type; anything else is a
+/// requester's access.
 #[test]
-fn an_smi_the_filter_refused_is_told_from_a_dma_fault() {
+fn a_refused_message_is_told_from_a_dma_fault() {
     let fault = |address: u64| event([word(&[(15, 0, 0x00A3), (63, 60, 2)]), address]);
     let smi_at = word(&[(39, 24, 0xFDF8), (4, 2, 0b010)]);
-    assert_eq!(fault(smi_at), Event::RefusedSmi { device: 0x00A3, address: smi_at });
-    let ignored = smi_at | word(&[(23, 16, 0xFF), (15, 8, 0xFF), (5, 5, 1)]);
-    assert_eq!(fault(ignored), Event::RefusedSmi { device: 0x00A3, address: ignored });
-    let extended = smi_at | word(&[(63, 40, 0xFF_FFFF)]);
-    assert_eq!(fault(extended), Event::RefusedSmi { device: 0x00A3, address: extended });
-    for not_smi in [
-        word(&[(39, 24, 0xFDF8), (4, 2, 0b000)]),
-        smi_at | word(&[(7, 7, 1)]),
-        smi_at | word(&[(6, 6, 1)]),
-        smi_at | word(&[(40, 40, 1)]),
-        smi_at | word(&[(63, 48, 0xFFFF)]),
-        0x4000_0000_0000,
-        0xFEE0_0008,
-    ] {
-        assert!(matches!(fault(not_smi), Event::Requester { .. }), "{not_smi:#x}");
+    let fixed = word(&[(63, 40, 0xFF_FFFF), (39, 24, 0xFDF8), (5, 5, 1)]);
+    for message in [smi_at, smi_at | word(&[(23, 16, 0xFF), (15, 8, 0xFF), (5, 5, 1)]), smi_at | word(&[(63, 40, 0xFF_FFFF)]), fixed] {
+        assert_eq!(fault(message), Event::Interrupt { device: 0x00A3, address: message }, "{message:#x}");
+    }
+    for access in [smi_at | word(&[(40, 40, 1)]), smi_at | word(&[(63, 48, 0xFFFF)]), word(&[(39, 24, 0xFDF9)]), 0x4000_0000_0000, 0xFEE0_0008] {
+        assert!(matches!(fault(access), Event::Requester { .. }), "{access:#x}");
+    }
+    assert_eq!(message_type(smi_at | word(&[(7, 7, 1)])), 0b1010);
+}
+
+/// The ruling on #921: an interrupt-range record from an id the IVRS gives
+/// the platform is the platform's, whatever its type; the round-3 panic's
+/// record (`00:14.0`, `0xfffffffdf8000020`, `MT` 000b) among them. From
+/// anyone else, a claim's is its holder's, an SMI (Table 4: `MT` 0010b, `DM`
+/// and [1:0] zero) is said, and any other is a fault.
+#[test]
+fn a_platform_message_is_the_platforms_whatever_its_type() {
+    let round3 = 0xFFFF_FFFD_F800_0020;
+    assert_eq!(message_type(round3), 0b0000);
+    assert_eq!(disposition(round3, true, false), Disposition::Platform);
+    assert_eq!(disposition(round3, false, false), Disposition::Fault);
+    assert_eq!(disposition(round3, false, true), Disposition::Holder);
+    let smi = word(&[(39, 24, 0xFDF8), (4, 2, 0b010)]);
+    assert_eq!(disposition(smi, true, true), Disposition::Platform);
+    assert_eq!(disposition(smi, false, true), Disposition::Holder);
+    assert_eq!(disposition(smi, false, false), Disposition::RefusedSmi);
+    for not_smi in [smi | word(&[(7, 7, 1)]), smi | word(&[(6, 6, 1)]), smi | 1] {
+        assert_eq!(disposition(not_smi, false, false), Disposition::Fault, "{not_smi:#x}");
     }
 }
 

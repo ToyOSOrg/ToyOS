@@ -316,6 +316,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
     let reserved = windows.map(|w| {
         w.iter().map(|w| (w.base, w.end())).chain(ivmds.iter().map(|m| (m.start, m.start + m.length))).collect()
     });
+    fault::platform(platform.iter().map(|&(id, _)| id));
     domain::start(reserved, settings, ivmds.iter().map(|m| m.requesters).collect(), translated, platform);
     log!("iommu: amdvi identity domain covers 0x0..{top:#x}, root={:#x}", identity.get());
     if let Some(extended) = remap {

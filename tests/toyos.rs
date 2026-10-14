@@ -4150,7 +4150,7 @@ fn amdvi_remaps(kernel: &serial::Serial) -> Result<(), String> {
     for filter in filters {
         eprintln!("  [amdvi] {}", filter.trim());
     }
-    for refused in text.lines().filter(|l| l.contains(" SMI filter refused an SMI from ")) {
+    for refused in text.lines().filter(|l| l.contains("iommu: amdvi unit") && l.contains(" said so far")) {
         eprintln!("  [amdvi] {}", refused.trim());
     }
     eprintln!("  [amdvi] {} controller(s) armed through their own entries, the stick bound", controllers.len());

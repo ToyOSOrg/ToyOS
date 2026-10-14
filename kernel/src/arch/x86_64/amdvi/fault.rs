@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::iommu::fault::{self as policy, Access, Fault, Who};
 use crate::log;
 use crate::mm::{DirectMap, Mmio, PAGE_SIZE};
-use toyos_amdvi::queue::{event, name, Event, ENTRIES};
+use toyos_amdvi::queue::{disposition, event, message_type, name, Disposition, Event, ENTRIES};
 use toyos_amdvi::reg::{self, control, status};
 
 use super::{requester, spin_until, REGISTER_WINDOW};
@@ -27,12 +27,38 @@ struct FaultUnit {
     log: AtomicU64,
     /// Faults this unit has reported for the life of the boot.
     faults: AtomicU32,
-    /// SMIs its filter refused from a requester no claim holds.
-    smis: AtomicU32,
+    /// Messages it refused that were said rather than faulted: the
+    /// platform's, and SMIs from a requester no claim holds.
+    said: AtomicU32,
 }
 
 static UNITS: [FaultUnit; MAX_UNITS] =
-    [const { FaultUnit { regs: AtomicU64::new(0), log: AtomicU64::new(0), faults: AtomicU32::new(0), smis: AtomicU32::new(0) } }; MAX_UNITS];
+    [const { FaultUnit { regs: AtomicU64::new(0), log: AtomicU64::new(0), faults: AtomicU32::new(0), said: AtomicU32::new(0) } }; MAX_UNITS];
+
+/// The requester ids the platform speaks as, each `id | PRESENT`, for the
+/// handler to read without a lock.
+static PLATFORM: [AtomicU32; PLATFORM_IDS] = [const { AtomicU32::new(0) }; PLATFORM_IDS];
+const PLATFORM_IDS: usize = 32;
+const PRESENT: u32 = 1 << 16;
+
+/// Publish the requester ids the platform speaks as, before any unit is
+/// armed; past [`PLATFORM_IDS`] the rest are said and read as anyone's.
+pub(super) fn platform(ids: impl Iterator<Item = u16>) {
+    let mut ids = ids.peekable();
+    for slot in &PLATFORM {
+        match ids.next() {
+            Some(id) => slot.store(u32::from(id) | PRESENT, Ordering::Relaxed),
+            None => return,
+        }
+    }
+    if ids.peek().is_some() {
+        log!("iommu: amdvi has more than {PLATFORM_IDS} platform requester ids; a message from the rest is read as anyone's");
+    }
+}
+
+fn is_platform(id: u16) -> bool {
+    PLATFORM.iter().any(|slot| slot.load(Ordering::Relaxed) == u32::from(id) | PRESENT)
+}
 
 /// Publish unit `index`'s registers and event log to the handler, before its
 /// interrupt is armed.
@@ -76,33 +102,41 @@ fn drain(index: usize, regs: Mmio, log: Mmio) -> usize {
     while head != tail {
         let at = reg::offset(head);
         let words = [log.read_u64(at), log.read_u64(at + 8)];
-        let event = event(words);
-        let held = match event {
-            Event::RefusedSmi { device, .. } => crate::pcidev::is_held(device),
-            _ => false,
-        };
-        let fault = match event {
-            // The filter kept it from every CPU (§2.1.5.1): a claimed
-            // function's is its holder's fault; any other's is said and the
-            // machine goes on, since nothing of this kernel's went wrong.
-            Event::RefusedSmi { device, address } if !held => {
-                let refused = UNITS[index].smis.fetch_add(1, Ordering::Relaxed) + 1;
-                if refused.is_power_of_two() {
-                    log!(
-                        "iommu: amdvi unit{index} SMI filter refused an SMI from {} at {address:#018x}, {refused} so far",
-                        requester(device)
-                    );
+        let fault = match event(words) {
+            Event::Interrupt { device, address } => {
+                let who = requester(device);
+                let said = |what: &str| {
+                    let n = UNITS[index].said.fetch_add(1, Ordering::Relaxed) + 1;
+                    if n.is_power_of_two() {
+                        log!(
+                            "iommu: amdvi unit{index} refused {what} from {who}, type {:#06b} at {address:#018x}, {n} said so far",
+                            message_type(address)
+                        );
+                    }
+                };
+                match disposition(address, is_platform(device), crate::pcidev::is_held(device)) {
+                    // No kernel driver drives a platform id and no claim
+                    // may take one (`domain::unclaimable`), so nothing of
+                    // this kernel's went wrong.
+                    Disposition::Platform => {
+                        said("a platform message");
+                        head = (head + 1) % ENTRIES;
+                        continue;
+                    }
+                    Disposition::RefusedSmi => {
+                        said("an SMI");
+                        head = (head + 1) % ENTRIES;
+                        continue;
+                    }
+                    Disposition::Holder | Disposition::Fault => Fault {
+                        who: Who::Function(who),
+                        address,
+                        access: Access::Unrecorded,
+                        reason: 0b0010,
+                        name: name(0b0010),
+                    },
                 }
-                head = (head + 1) % ENTRIES;
-                continue;
             }
-            Event::RefusedSmi { device, address } => Fault {
-                who: Who::Function(requester(device)),
-                address,
-                access: Access::Write,
-                reason: 0b0010,
-                name: "an SMI the filter refused",
-            },
             Event::Requester { code, device, address, write } => Fault {
                 who: Who::Function(requester(device)),
                 address,
