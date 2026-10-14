@@ -355,6 +355,16 @@ impl<R: Registers> Wires<R> {
         self.set_status(status::FAILED);
         why
     }
+
+    /// Where in the BAR the 32-bit device-specific field `at` is, read or
+    /// written 32 bits wide as §4.1.3.1 has one.
+    fn device32(&mut self, at: usize) -> Result<usize, Refusal> {
+        let Region { at: base, bytes } = self.device;
+        if at.checked_add(4).is_none_or(|end| end > bytes) || !at.is_multiple_of(4) {
+            return Err(self.refuse(Refusal::PastDeviceConfig { at, bytes }));
+        }
+        Ok(base + at)
+    }
 }
 
 /// A device reset and acknowledged, and the features it offers.
@@ -519,31 +529,42 @@ impl<R: Registers> Setup<R> {
         Ok((self, byte))
     }
 
-    /// The 32-bit field `at` bytes into the device-specific structure, read
-    /// 32 bits wide as §4.1.3.1 has a 32-bit field read.
+    /// The 32-bit field `at` bytes into the device-specific structure.
     pub fn device_read32(mut self, at: usize) -> Result<(Self, u32), Refusal> {
-        let Region { at: base, bytes } = self.wires.device;
-        if at.checked_add(4).is_none_or(|end| end > bytes) || !at.is_multiple_of(4) {
-            return Err(self.wires.refuse(Refusal::PastDeviceConfig { at, bytes }));
-        }
-        let word = self.wires.regs.read32(base + at);
+        let at = self.wires.device32(at)?;
+        let word = self.wires.regs.read32(at);
         Ok((self, word))
     }
 
     /// §3.1.1 step 8: the device is live.
     pub fn driver_ok(mut self) -> Live<R> {
         self.wires.set_status(status::DRIVER_OK);
-        Live { regs: self.wires.regs, doorbells: self.doorbells }
+        Live { wires: self.wires, doorbells: self.doorbells }
     }
 }
 
-/// A live device: what is left of the transport is its notify addresses.
+/// A live device: what is left of the transport is its notify addresses and
+/// its device-specific structure.
 pub struct Live<R: Registers> {
-    regs: R,
+    wires: Wires<R>,
     doorbells: Vec<(u16, usize)>,
 }
 
 impl<R: Registers> Live<R> {
+    /// The 32-bit field `at` bytes into the device-specific structure. A
+    /// refusal sets `FAILED`, as one before `DRIVER_OK` does.
+    pub fn device_read32(&mut self, at: usize) -> Result<u32, Refusal> {
+        let at = self.wires.device32(at)?;
+        Ok(self.wires.regs.read32(at))
+    }
+
+    /// Write the 32-bit field `at` bytes into the device-specific structure.
+    pub fn device_write32(&mut self, at: usize, value: u32) -> Result<(), Refusal> {
+        let at = self.wires.device32(at)?;
+        self.wires.regs.write32(at, value);
+        Ok(())
+    }
+
     /// Tell the device of the chain `published` made available: the queue's
     /// index, sixteen bits, at its notify address (§4.1.5.2).
     ///
@@ -557,6 +578,6 @@ impl<R: Registers> Live<R> {
             .iter()
             .find(|(index, _)| *index == queue)
             .unwrap_or_else(|| panic!("virtio: queue {queue} was published to and never enabled"));
-        self.regs.write16(*at, queue);
+        self.wires.regs.write16(*at, queue);
     }
 }

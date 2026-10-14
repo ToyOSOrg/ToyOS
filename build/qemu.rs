@@ -130,10 +130,10 @@ pub fn launch(opts: &Options) {
     let arch = opts.arch;
     // Before anything launches: every virtio machine carries the clipboard's
     // channel, and every host's display is the one with its clipboard.
-    let display = display();
+    let display = display(shape.virtio_gpu);
     let wanted = [
         shape.virtio.then(|| toyos_build::vdagent::available(arch)),
-        (display != "cocoa").then(|| toyos_build::vdagent::gtk(arch)),
+        (!display.starts_with("cocoa")).then(|| toyos_build::vdagent::gtk(arch)),
     ];
     if let Some(refused) = wanted.into_iter().flatten().find_map(Result::err) {
         eprintln!("Error: {refused}");
@@ -358,11 +358,15 @@ fn iommu_device(arch: Arch) -> Option<&'static str> {
 
 /// The display, with the host's clipboard: QEMU's own on macOS, and GTK's,
 /// whose clipboard QEMU leaves off unless asked, everywhere else.
-fn display() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "cocoa"
-    } else {
-        "gtk,clipboard=on"
+///
+/// On macOS a virtio-gpu guest follows the window (`zoom-to-fit`), so a
+/// resize reaches its mode; a firmware framebuffer cannot follow, and its
+/// window stays 1:1 with it. GTK has virtio-gpu follow the window already.
+fn display(follows: bool) -> &'static str {
+    match (cfg!(target_os = "macos"), follows) {
+        (true, true) => "cocoa,zoom-to-fit=on",
+        (true, false) => "cocoa",
+        (false, _) => "gtk,clipboard=on",
     }
 }
 

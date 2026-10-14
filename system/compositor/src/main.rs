@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 
 mod client;
+mod display;
 mod render;
 mod session;
 mod stats;
@@ -38,11 +39,9 @@ pub const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667); // ~60fps
 /// the clause that makes it "or one frame's worth, whichever is sooner".
 pub const DRAIN_BUDGET: Duration = FRAME_INTERVAL;
 
-pub const FLAG_HARDWARE_CURSOR: u32 = 1 << 0;
-
-/// Handles the compositor watches that are not windows: keyboard, mouse, and
-/// the two listeners, `compositor` and `prompt`.
-pub const FIXED_POLL_HANDLES: u32 = 4;
+/// Handles the compositor watches that are not windows: keyboard, mouse, the
+/// two listeners, `compositor` and `prompt`, and the display's claim.
+pub const FIXED_POLL_HANDLES: u32 = 5;
 
 /// The `input` port's listener and each of its sources.
 pub const INPUT_POLL_HANDLES: u32 = 1 + toyos_input::wire::CONNECTIONS as u32;
@@ -52,9 +51,9 @@ pub const INPUT_POLL_HANDLES: u32 = 1 + toyos_input::wire::CONNECTIONS as u32;
 /// Every window's handle is registered in the same batch as every other
 /// handle the compositor watches, counted below, and [`Poller::MAX_HANDLES`]
 /// is the widest set one poller can carry. Unlike the memory budget this does not move when the
-/// resolution does, which is why the poller is sized from it:
-/// `MSG_SET_RESOLUTION` can make windows cheaper mid-run, and a poller sized
-/// for the old screen would then be too small. At any resolution this machine
+/// mode does, which is why the poller is sized from it: a mode change can make
+/// windows cheaper mid-run, and a poller sized for the old screen would then
+/// be too small. At any resolution this machine
 /// can actually scan out, the memory budget is far below this and is what
 /// binds.
 pub const MAX_WINDOW_SLOTS: u32 = Poller::MAX_HANDLES

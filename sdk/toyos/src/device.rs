@@ -32,9 +32,7 @@ device_info!(
 /// **They are installed once.** The kernel remembers what it minted for a
 /// claim and answers a later read with the same numbers, so the description is
 /// read once per claim and the handles in it are owned from then on — reading
-/// twice and adopting both answers closes one buffer twice. A mode set is the
-/// exception and says so: [`FramebufferDev::set_resolution`] remints, and its
-/// answer is the fresh set.
+/// twice and adopting both answers closes one buffer twice.
 ///
 /// Bounded by [`IpcPayload`] and not by `Copy`: the answer's bytes are
 /// *reinterpreted* as a `T`, so what the bound has to promise is that every bit

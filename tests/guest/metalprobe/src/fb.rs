@@ -61,7 +61,7 @@ impl Scanout {
             return Err(Refusal::NoScanout);
         }
         let bytes = info.stride as usize * info.height as usize * 4;
-        let shm = SharedMemory::adopt(info.scanout[0], bytes).map_err(|_| Refusal::NoScanout)?;
+        let shm = SharedMemory::adopt(info.scanout, bytes).map_err(|_| Refusal::NoScanout)?;
         Ok(Self {
             _dev: dev,
             shm,

@@ -353,30 +353,18 @@ pub fn scale_wallpaper(
     dst
 }
 
-/// Render the cursor sprite (RGBA) into a 64x64 BGRA hardware cursor buffer.
-pub fn upload_cursor(
-    fb: &toyos::FramebufferDev,
-    cursor_buf: &mut [u8],
-    sprite: &sprite::Sprite,
-    hw_cursor: bool,
-) {
-    let data = sprite.data();
-    let w = sprite.width();
-    let h = sprite.height();
-    cursor_buf[..64 * 64 * 4].fill(0);
+/// The cursor sprite, RGBA, as a 64x64 hardware cursor whose pixels' bytes
+/// are blue, green, red and alpha.
+pub fn cursor_image(sprite: &sprite::Sprite) -> [u32; 64 * 64] {
+    let (data, w, h) = (sprite.data(), sprite.width(), sprite.height());
+    let mut image = [0u32; 64 * 64];
     for y in 0..h.min(64) {
         for x in 0..w.min(64) {
-            let si = (y * w + x) * 4;
-            let di = (y * 64 + x) * 4;
-            cursor_buf[di] = data[si + 2];
-            cursor_buf[di + 1] = data[si + 1];
-            cursor_buf[di + 2] = data[si];
-            cursor_buf[di + 3] = data[si + 3];
+            let rgba = &data[(y * w + x) * 4..][..4];
+            image[y * 64 + x] = u32::from_le_bytes([rgba[2], rgba[1], rgba[0], rgba[3]]);
         }
     }
-    if hw_cursor {
-        fb.set_cursor(0, 0).expect("compositor holds the framebuffer claim");
-    }
+    image
 }
 
 /// Draw the cursor sprite into the composed frame (software cursor fallback).

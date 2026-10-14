@@ -285,9 +285,8 @@ pub(super) fn sys_device_dma_alloc(
         Ok(claim) => claim,
         Err(e) => return e.refuse(),
     };
-    // The output window is taken before the allocation, the same order
-    // `sys_gpu_reset_scanout` takes it in: a bad address must not leave a
-    // mapped grant the caller was never told the address of.
+    // The output window is taken before the allocation: a bad address must
+    // not leave a mapped grant the caller was never told the address of.
     let len = core::mem::size_of::<toyos_abi::pci::DmaGrant>() as u64;
     let Some(mut window) = ctx.user_bytes_mut(out, len) else {
         return SyscallError::BadAddress.to_u64();
@@ -398,53 +397,6 @@ fn grant_bytes(grant: &toyos_abi::pci::DmaGrant) -> &[u8] {
             core::mem::size_of::<toyos_abi::pci::DmaGrant>(),
         )
     }
-}
-
-/// Publishes a new mode with fresh buffer handles; the claim's old handles keep working.
-pub(super) fn sys_gpu_reset_scanout(
-    ctx: &SyscallContext,
-    claim_h: RawHandle,
-    gpu_info: crate::gpu::GpuInfo,
-    info_out: UserAddr,
-) -> u64 {
-    let crate::gpu::GpuInfo { scanout, cursor, width, height, stride, pixel_format, flags, edid, edid_len } =
-        gpu_info;
-    let screen = device::Screen {
-        info: toyos_abi::FramebufferInfo {
-            scanout: [toyos_abi::HANDLE_INVALID; 2],
-            cursor: toyos_abi::HANDLE_INVALID,
-            width,
-            height,
-            stride,
-            pixel_format,
-            flags,
-            edid,
-            edid_len,
-        },
-        scanout,
-        cursor,
-    };
-    device::set_framebuffer_info(screen.clone());
-    // The output window is taken before the mint: a bad address must not leave a
-    // resolution, or fresh buffer handles, the caller was never handed. Length is `FramebufferInfo`'s.
-    let len = core::mem::size_of::<toyos_abi::FramebufferInfo>() as u64;
-    let Some(mut out) = ctx.user_bytes_mut(info_out, len) else {
-        return SyscallError::BadAddress.to_u64();
-    };
-    let minted = process::with_process_data(|data| {
-        let claim = data
-            .handles
-            .get::<crate::object::device::DeviceClaim>(claim_h, Rights::WRITE)?;
-        Ok::<_, crate::object::Refusal>(
-            claim.remint(&mut data.handles, device::framebuffer_info(screen))?,
-        )
-    });
-    let minted = match minted {
-        Ok(bytes) => bytes,
-        Err(e) => return e.refuse(),
-    };
-    out.write_at(0, &minted);
-    0
 }
 
 /// Which way one partition transfer moves bytes, with the caller's window.
