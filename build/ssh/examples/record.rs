@@ -12,7 +12,7 @@ mod driver;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
-use driver::{Keys, Side, Transcript};
+use driver::{Fixed, Keys, Side, Transcript};
 use toyos_ssh::Server;
 
 fn main() {
@@ -23,9 +23,7 @@ fn main() {
     let seed = u8::from_str_radix(seed, 16).expect("a hex seed byte");
     let listener = TcpListener::bind(("127.0.0.1", port.parse::<u16>().expect("a port"))).expect("bind");
     let (mut socket, _) = listener.accept().expect("accept");
-    #[allow(deprecated)]
-    let rng = ring::test::rand::FixedByteRandom { byte: seed };
-    let mut server = Server::new(driver::host_key(), Keys::recorded(), rng);
+    let mut server = Server::new(driver::host_key(), Keys::recorded(), Fixed(seed));
     let mut transcript = Transcript { seed, chunks: Vec::new() };
     let mut buf = vec![0; 64 * 1024];
     loop {

@@ -1,0 +1,9 @@
+[package]
+name = "pciholder"
+description = "Test-only: a drives row's process, which says which PCI function its claim holds and keeps holding it until the boot ends."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos = { path = "../../../sdk/toyos" }

@@ -19,9 +19,8 @@
 //! payload the session layer sends between the server's KEXINIT and its
 //! NEWKEYS is held, and sent under the new keys (RFC 4253 §7.1).
 
-use ring::aead::chacha20_poly1305_openssh::{OpeningKey, SealingKey, KEY_LEN, TAG_LEN};
-use ring::agreement;
-use ring::rand::SecureRandom;
+use toyos_crypto::ssh::{OpeningKey, SealingKey};
+use toyos_crypto::{x25519, Random};
 
 use crate::hostkey::HostKey;
 use crate::kex::{self, Exchange, Method, Negotiated};
@@ -45,6 +44,8 @@ pub(crate) const PACKET_CAP: usize = 256 * 1024;
 /// The cipher's block, which every packet's length is a multiple of.
 const BLOCK: usize = 8;
 const MIN_PADDING: usize = 4;
+/// The Poly1305 tag after every sealed packet.
+const TAG_LEN: usize = 16;
 
 /// What [`Transport::next`] hands up.
 pub(crate) enum Incoming {
@@ -92,7 +93,7 @@ pub(crate) struct Transport<R> {
     packet_cap: usize,
 }
 
-impl<R: SecureRandom> Transport<R> {
+impl<R: Random> Transport<R> {
     pub(crate) fn new(host: HostKey, rng: R) -> Self {
         let mut transport = Self {
             rng,
@@ -247,11 +248,10 @@ impl<R: SecureRandom> Transport<R> {
     fn read_packet(&mut self) -> Result<Option<Vec<u8>>, Refusal> {
         let unread = &self.inbound[self.read..];
         let Some(&head) = unread.first_chunk::<4>() else { return Ok(None) };
-        let length = match &self.opening {
-            None => head,
-            Some(key) => key.decrypt_packet_length(self.recv_seq, head),
-        };
-        let len = u32::from_be_bytes(length) as usize;
+        let len = match &self.opening {
+            Some(key) => key.packet_length(self.recv_seq, head),
+            None => u32::from_be_bytes(head),
+        } as usize;
         let cap = self.packet_cap;
         let (aligned, tag) = match self.opening {
             None => ((4 + len) % BLOCK, 0),
@@ -272,8 +272,9 @@ impl<R: SecureRandom> Transport<R> {
             None => packet.get(4..).unwrap_or_default(),
             Some(key) => {
                 let (sealed, tag) = packet.split_at_mut(4 + len);
-                let tag: &[u8; TAG_LEN] = (&*tag).try_into().map_err(|_| Refusal::Integrity)?;
-                key.open_in_place(self.recv_seq, sealed, tag).map_err(|_| Refusal::Integrity)?
+                let (header, body) = sealed.split_first_chunk_mut::<4>().expect("a sealed packet holds its length");
+                key.open(self.recv_seq, header, body, tag).map_err(|_| Refusal::Integrity)?;
+                body
             }
         };
         let (&padding, rest) = body.split_first().ok_or(Refusal::Truncated("padding_length"))?;
@@ -299,10 +300,11 @@ impl<R: SecureRandom> Transport<R> {
         packet.extend_from_slice(payload);
         let start = packet.len();
         packet.resize(start + padding, 0);
-        self.rng.fill(&mut packet[start..]).expect("the system's randomness");
-        if let Some(key) = &self.sealing {
-            let mut tag = [0; TAG_LEN];
-            key.seal_in_place(self.send_seq, &mut packet, &mut tag);
+        self.rng.fill(&mut packet[start..]).expect("the caller's randomness");
+        if let Some(key) = &mut self.sealing {
+            let (header, body) = packet.split_first_chunk_mut::<4>().expect("a packet holds its length");
+            let (seq, tag) = key.seal(header, body).map_err(|_| Refusal::SequenceExhausted)?;
+            debug_assert_eq!(seq, self.send_seq, "the key counts the packets the transport does");
             packet.extend_from_slice(&tag);
         }
         self.out.extend_from_slice(&packet);
@@ -312,7 +314,7 @@ impl<R: SecureRandom> Transport<R> {
 
     fn send_kexinit(&mut self) -> Result<(), Refusal> {
         let mut cookie = [0; 16];
-        self.rng.fill(&mut cookie).expect("the system's randomness");
+        self.rng.fill(&mut cookie).expect("the caller's randomness");
         self.server_kexinit = kex::kexinit(cookie);
         let payload = self.server_kexinit.clone();
         self.seal(&payload)
@@ -335,11 +337,11 @@ impl<R: SecureRandom> Transport<R> {
         }
         let client_public: [u8; 32] = r.fixed("Q_C")?;
         r.end("KEX_ECDH_INIT")?;
-        let private = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &self.rng).expect("the system's randomness");
-        let server_public = private.compute_public_key().expect("an X25519 public key");
-        let peer = agreement::UnparsedPublicKey::new(&agreement::X25519, client_public);
+        let private = x25519::SecretKey::generate(&mut self.rng).expect("the caller's randomness");
+        let server_public = private.public_key().0;
+        let shared = private.agree(&x25519::PublicKey(client_public)).map_err(|_| Refusal::KeyAgreement)?;
         let mut secret = Vec::new();
-        agreement::agree_ephemeral(private, &peer, |k| put_mpint(&mut secret, k)).map_err(|_| Refusal::KeyAgreement)?;
+        put_mpint(&mut secret, shared.as_bytes());
         let host_key = self.host.blob();
         let hash = Exchange {
             client_version: self.client_version.as_deref().unwrap_or_default(),
@@ -348,19 +350,19 @@ impl<R: SecureRandom> Transport<R> {
             server_kexinit: &self.server_kexinit,
             host_key: &host_key,
             client_public: &client_public,
-            server_public: server_public.as_ref(),
+            server_public: &server_public,
             secret: &secret,
         }
         .hash();
         let session_id = *self.session_id.get_or_insert(hash);
         let mut reply = vec![msg::KEX_ECDH_REPLY];
         put_string(&mut reply, &host_key);
-        put_string(&mut reply, server_public.as_ref());
+        put_string(&mut reply, &server_public);
         put_string(&mut reply, &self.host.sign(&hash));
         self.seal(&reply)?;
         self.seal(&[msg::NEWKEYS])?;
-        let key = |letter| -> [u8; KEY_LEN] { kex::derive(&secret, &hash, letter, &session_id) };
-        self.sealing = Some(Box::new(SealingKey::new(&key(b'D'))));
+        let key = |letter| kex::derive(&secret, &hash, letter, &session_id);
+        self.sealing = Some(Box::new(SealingKey::new(key(b'D'), 0)));
         self.send_seq = 0;
         if negotiated.ext_info {
             let mut info = vec![msg::EXT_INFO];
@@ -372,7 +374,7 @@ impl<R: SecureRandom> Transport<R> {
         for held in std::mem::take(&mut self.held) {
             self.seal(&held)?;
         }
-        self.kex = Kex::NewKeys { opening: Box::new(OpeningKey::new(&key(b'C'))) };
+        self.kex = Kex::NewKeys { opening: Box::new(OpeningKey::new(key(b'C'))) };
         Ok(())
     }
 }

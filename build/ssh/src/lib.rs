@@ -1,6 +1,6 @@
 //! An SSH server, sans-IO: the client's bytes in, bytes for the client and
 //! [`Event`]s for the driver out. No socket, no thread and no clock; the
-//! randomness is the caller's.
+//! randomness is the caller's [`Random`].
 //!
 //! **One algorithm set, and nothing else offered**: `curve25519-sha256` with
 //! strict key exchange, an `ssh-ed25519` host key,
@@ -28,10 +28,9 @@ mod kex;
 mod transport;
 mod wire;
 
-use ring::rand::SecureRandom;
-
 pub use connection::ChannelId;
 pub use hostkey::HostKey;
+pub use toyos_crypto::Random;
 pub use wire::Refusal;
 
 use auth::PreAuth;
@@ -147,7 +146,7 @@ pub struct Server<A, R> {
     events: std::collections::VecDeque<Event>,
 }
 
-impl<A: Authorizer, R: SecureRandom> Server<A, R> {
+impl<A: Authorizer, R: Random> Server<A, R> {
     /// A session whose identification line and KEXINIT are already in
     /// [`Server::output`].
     pub fn new(host_key: HostKey, authorizer: A, rng: R) -> Self {

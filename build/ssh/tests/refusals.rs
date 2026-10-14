@@ -5,15 +5,16 @@
 mod common;
 
 use common::client::{ed25519_blob, pair, plain_packet, publickey_request, signed_request, string, Client, Fields, STRICT};
-use common::driver::{host_key, public_blob, Keys, USER};
-use ring::rand::SystemRandom;
-use ring::signature::KeyPair;
+use common::driver::{host_key, public_blob, Fixed, Keys, USER};
 use toyos_ssh::{Declined, Event, Gone, Refusal, Server};
 
-type C = Client<SystemRandom>;
+type C = Client<Fixed>;
 
-fn server() -> Server<Keys, SystemRandom> {
-    Server::new(host_key(), Keys::new(vec![pair(1).1]), SystemRandom::new())
+/// The server's randomness in every session here.
+const SEED: u8 = 0x5a;
+
+fn server() -> Server<Keys, Fixed> {
+    Server::new(host_key(), Keys::new(vec![pair(1).1]), Fixed(SEED))
 }
 
 fn handshake() -> C {
@@ -80,7 +81,7 @@ fn disconnect(payloads: &[Vec<u8>]) -> (u32, String) {
 #[test]
 fn a_listed_key_is_asked_to_sign_and_its_signature_logs_in() {
     let mut c = with_service();
-    let blob = ed25519_blob(pair(1).0.public_key().as_ref());
+    let blob = ed25519_blob(pair(1).0.public_key().as_bytes());
     c.send(&probe("ssh-ed25519", &blob)).unwrap();
     let mut ok = vec![60];
     string(&mut ok, b"ssh-ed25519");
@@ -127,11 +128,11 @@ fn every_other_method_is_refused_by_name() {
 fn an_unlisted_key_is_refused_at_the_offer_and_signed() {
     let (stranger, public) = pair(2);
     let mut c = with_service();
-    c.send(&probe("ssh-ed25519", &ed25519_blob(&public))).unwrap();
+    c.send(&probe("ssh-ed25519", &ed25519_blob(public))).unwrap();
     assert_eq!(c.recv(), [failure()]);
-    c.sign_in(USER, &stranger).unwrap();
+    c.sign_in(USER, stranger).unwrap();
     assert_eq!(c.recv(), [failure()]);
-    let declined = Event::Declined(Declined::Key { user: USER.into(), fingerprint: toyos_update::repo::fingerprint(&public) });
+    let declined = Event::Declined(Declined::Key { user: USER.into(), fingerprint: toyos_update::repo::fingerprint(public) });
     assert_eq!(c.events, [declined.clone(), declined]);
     // The authorizer is asked for the user too: another user's key is not
     // this one's.
@@ -146,7 +147,7 @@ fn an_unlisted_key_is_refused_at_the_offer_and_signed() {
 #[test]
 fn a_signature_over_anything_else_is_refused() {
     let (key, public) = pair(1);
-    let blob = ed25519_blob(&public);
+    let blob = ed25519_blob(public);
     let mut c = with_service();
     let id = c.session_id();
     let (req, signed) = publickey_request(&id, USER, "ssh-ed25519", &blob);
@@ -154,11 +155,11 @@ fn a_signature_over_anything_else_is_refused() {
     other_session[0] ^= 1;
     let (_, signed_elsewhere) = publickey_request(&other_session, USER, "ssh-ed25519", &blob);
     let (_, signed_for_root) = publickey_request(&id, "root", "ssh-ed25519", &blob);
-    let mut bent = signed_request(&req, &key, &signed);
+    let mut bent = signed_request(&req, key, &signed);
     *bent.last_mut().unwrap() ^= 1;
     let attempts = [
-        signed_request(&req, &key, &signed_elsewhere),
-        signed_request(&req, &key, &signed_for_root),
+        signed_request(&req, key, &signed_elsewhere),
+        signed_request(&req, key, &signed_for_root),
         signed_request(&req, &pair(2).0, &signed),
         bent,
     ];
@@ -540,15 +541,15 @@ fn a_re_exchange_holds_output_until_its_newkeys() {
 #[test]
 fn the_authorizer_is_asked_again_with_the_signature() {
     let (key, public) = pair(1);
-    let keys = Keys { answers: 1, ..Keys::new(vec![public]) };
-    let mut c = C::handshake(Server::new(host_key(), keys, SystemRandom::new())).unwrap();
+    let keys = Keys { answers: 1, ..Keys::new(vec![*public]) };
+    let mut c = C::handshake(Server::new(host_key(), keys, Fixed(SEED))).unwrap();
     c.recv();
     c.service().unwrap();
     c.recv();
-    let blob = ed25519_blob(&public);
+    let blob = ed25519_blob(public);
     c.send(&probe("ssh-ed25519", &blob)).unwrap();
     assert_eq!(c.recv()[0][0], 60, "PK_OK while the key is named");
-    c.sign_in(USER, &key).unwrap();
+    c.sign_in(USER, key).unwrap();
     assert_eq!(c.recv(), [failure()]);
     assert!(matches!(&c.events[..], [Event::Declined(Declined::Key { .. })]));
     assert!(!authenticated(&c));

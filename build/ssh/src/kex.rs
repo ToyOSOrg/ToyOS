@@ -7,7 +7,7 @@
 //! exchange methods are [`METHODS`], chosen in the client's order, so a second
 //! method is one more entry and one more arm of [`Method`].
 
-use ring::digest;
+use toyos_crypto::hash::Sha256;
 
 use crate::hostkey;
 use crate::wire::{put_bool, put_string, put_u32, NameList, Reader, Refusal};
@@ -156,9 +156,9 @@ pub(crate) fn derive(secret: &[u8], hash: &[u8; 32], letter: u8, session_id: &[u
 }
 
 fn sha256(parts: &[&[u8]]) -> [u8; 32] {
-    let mut context = digest::Context::new(&digest::SHA256);
+    let mut context = Sha256::new();
     for part in parts {
-        context.update(part);
+        context.update(part).expect("an exchange's input is under SHA-256's bound");
     }
-    context.finish().as_ref().try_into().expect("SHA-256 is 32 bytes")
+    context.finalize()
 }

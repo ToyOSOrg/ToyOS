@@ -1,18 +1,23 @@
-//! A client written beside the server, from the RFCs and on `ring` directly:
-//! its own exchange hash, key derivation and packet layer, so a test can say
-//! anything to the server, in plaintext or sealed, in any order.
+//! A client written beside the server, from the RFCs and on `toyos-crypto`'s
+//! primitives directly: its own exchange hash, key derivation and packet
+//! layer, so a test can say anything to the server, in plaintext or sealed, in
+//! any order.
 
-use ring::aead::chacha20_poly1305_openssh::{OpeningKey, SealingKey, TAG_LEN};
-use ring::agreement;
-use ring::digest;
-use ring::rand::{SecureRandom, SystemRandom};
-use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
+use std::sync::OnceLock;
 
-use toyos_ssh::{Event, Refusal, Server};
+use toyos_crypto::ed25519::{self, SigningKey};
+use toyos_crypto::hash::Sha256;
+use toyos_crypto::ssh::{OpeningKey, SealingKey};
+use toyos_crypto::x25519;
+
+use toyos_ssh::{Event, Random, Refusal, Server};
 
 use super::driver::Keys;
 
 pub const STRICT: &str = "kex-strict-c-v00@openssh.com";
+
+/// The Poly1305 tag after every sealed packet.
+pub const TAG_LEN: usize = 16;
 
 pub fn string(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
@@ -32,11 +37,11 @@ pub fn mpint(magnitude: &[u8]) -> Vec<u8> {
 }
 
 pub fn sha256(parts: &[&[u8]]) -> [u8; 32] {
-    let mut c = digest::Context::new(&digest::SHA256);
+    let mut c = Sha256::new();
     for p in parts {
-        c.update(p);
+        c.update(p).unwrap();
     }
-    c.finish().as_ref().try_into().unwrap()
+    c.finalize()
 }
 
 /// RFC 8731 §3's `H`.
@@ -93,8 +98,9 @@ pub fn plain_packet(payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// A sealed packet around `payload` (`PROTOCOL.chacha20poly1305`).
-pub fn sealed_packet(key: &SealingKey, seq: u32, payload: &[u8]) -> Vec<u8> {
+/// A sealed packet around `payload` (`PROTOCOL.chacha20poly1305`), at the
+/// key's next sequence number.
+pub fn sealed_packet(key: &mut SealingKey, payload: &[u8]) -> Vec<u8> {
     let mut padding = 8 - (1 + payload.len()) % 8;
     if padding < 4 {
         padding += 8;
@@ -103,8 +109,8 @@ pub fn sealed_packet(key: &SealingKey, seq: u32, payload: &[u8]) -> Vec<u8> {
     out.push(padding as u8);
     out.extend_from_slice(payload);
     out.extend(std::iter::repeat_n(0, padding));
-    let mut tag = [0; TAG_LEN];
-    key.seal_in_place(seq, &mut out, &mut tag);
+    let (header, body) = out.split_first_chunk_mut::<4>().unwrap();
+    let (_, tag) = key.seal(header, body).unwrap();
     out.extend_from_slice(&tag);
     out
 }
@@ -112,20 +118,18 @@ pub fn sealed_packet(key: &SealingKey, seq: u32, payload: &[u8]) -> Vec<u8> {
 /// The next packet's payload in `bytes`, and how many bytes it took.
 pub fn open_packet(key: Option<&OpeningKey>, seq: u32, bytes: &[u8]) -> Option<(Vec<u8>, usize)> {
     let head: [u8; 4] = bytes.get(..4)?.try_into().unwrap();
-    let len = u32::from_be_bytes(match key {
-        Some(key) => key.decrypt_packet_length(seq, head),
-        None => head,
-    }) as usize;
+    let len = match key {
+        Some(key) => key.packet_length(seq, head),
+        None => u32::from_be_bytes(head),
+    } as usize;
     let total = 4 + len + if key.is_some() { TAG_LEN } else { 0 };
     let packet = bytes.get(..total)?;
-    let mut body = packet[..4 + len].to_vec();
-    let plain = match key {
-        Some(key) => {
-            let tag: [u8; TAG_LEN] = packet[4 + len..].try_into().unwrap();
-            key.open_in_place(seq, &mut body, &tag).expect("the server's packet opens").to_vec()
-        }
-        None => body[4..].to_vec(),
-    };
+    let mut sealed = packet[..4 + len].to_vec();
+    let (header, body) = sealed.split_first_chunk_mut::<4>().unwrap();
+    if let Some(key) = key {
+        key.open(seq, header, body, &packet[4 + len..]).expect("the server's packet opens");
+    }
+    let plain = body.to_vec();
     let padding = plain[0] as usize;
     Some((plain[1..plain.len() - padding].to_vec(), total))
 }
@@ -150,7 +154,6 @@ pub struct Client<R> {
     pub events: Vec<Event>,
     sealing: Option<SealingKey>,
     opening: Option<OpeningKey>,
-    out_seq: u32,
     in_seq: u32,
     pending: Vec<u8>,
     server_version: Vec<u8>,
@@ -160,10 +163,13 @@ pub struct Client<R> {
 /// A key exchange the client has started.
 pub struct Exchange {
     i_c: Vec<u8>,
-    private: agreement::EphemeralPrivateKey,
+    private: x25519::SecretKey,
 }
 
-impl<R: SecureRandom> Client<R> {
+/// The client's ephemeral X25519 key, the same in every exchange.
+const EPHEMERAL: [u8; 32] = [0x3c; 32];
+
+impl<R: Random> Client<R> {
     /// A client that has sent its identification line and read the server's.
     pub fn new(server: Server<Keys, R>) -> Result<Self, Refusal> {
         let mut c = Self {
@@ -171,7 +177,6 @@ impl<R: SecureRandom> Client<R> {
             events: Vec::new(),
             sealing: None,
             opening: None,
-            out_seq: 0,
             in_seq: 0,
             pending: Vec::new(),
             server_version: Vec::new(),
@@ -201,12 +206,10 @@ impl<R: SecureRandom> Client<R> {
 
     /// The packet `send` would send, its sequence number spent.
     pub fn packet(&mut self, payload: &[u8]) -> Vec<u8> {
-        let packet = match &self.sealing {
-            Some(key) => sealed_packet(key, self.out_seq, payload),
+        match &mut self.sealing {
+            Some(key) => sealed_packet(key, payload),
             None => plain_packet(payload),
-        };
-        self.out_seq = self.out_seq.wrapping_add(1);
-        packet
+        }
     }
 
     /// The server's next payload, if all of it has come.
@@ -227,16 +230,15 @@ impl<R: SecureRandom> Client<R> {
     pub fn start_exchange(&mut self, kex: &str) -> Result<Exchange, Refusal> {
         let i_c = kexinit(kex);
         self.send(&i_c)?;
-        let private = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &SystemRandom::new()).unwrap();
-        Ok(Exchange { i_c, private })
+        Ok(Exchange { i_c, private: x25519::SecretKey::from_bytes(EPHEMERAL) })
     }
 
     /// The rest of the exchange as OpenSSH runs it: the server's KEXINIT is
     /// the next packet, and its signature over `H` is verified here.
     pub fn finish_exchange(&mut self, exchange: Exchange) -> Result<(), Refusal> {
-        let q_c = exchange.private.compute_public_key().unwrap();
+        let q_c = exchange.private.public_key().0;
         let mut init = vec![30];
-        string(&mut init, q_c.as_ref());
+        string(&mut init, &q_c);
         self.send(&init)?;
         let i_s = self.next().expect("the server's KEXINIT");
         assert_eq!(i_s[0], 20);
@@ -245,19 +247,19 @@ impl<R: SecureRandom> Client<R> {
         assert_eq!(f.byte(), 31);
         let (k_s, q_s, signature) = (f.string().to_vec(), f.string().to_vec(), f.string().to_vec());
         assert_eq!(self.next().expect("NEWKEYS"), [21]);
-        let k = agreement::agree_ephemeral(exchange.private, &agreement::UnparsedPublicKey::new(&agreement::X25519, &q_s), |k| k.to_vec())
-            .unwrap();
-        let h = exchange_hash(VERSION, &self.server_version, &exchange.i_c, &i_s, &k_s, q_c.as_ref(), &q_s, &k);
+        let k = exchange.private.agree(&x25519::PublicKey(q_s[..].try_into().unwrap())).unwrap();
+        let k = k.as_bytes();
+        let h = exchange_hash(VERSION, &self.server_version, &exchange.i_c, &i_s, &k_s, &q_c, &q_s, k);
         let host = Fields(&k_s).string_pair();
         let sig = Fields(&signature).string_pair();
         assert_eq!((host.0, sig.0), (&b"ssh-ed25519"[..], &b"ssh-ed25519"[..]));
-        UnparsedPublicKey::new(&ED25519, host.1).verify(&h, sig.1).expect("the server signed H");
+        let host = ed25519::PublicKey::from_bytes(host.1.try_into().unwrap()).unwrap();
+        host.verify(&h, sig.1).expect("the server signed H");
         let id = *self.session_id.get_or_insert(h);
-        self.opening = Some(OpeningKey::new(&derive(&k, &h, b'D', &id)));
+        self.opening = Some(OpeningKey::new(derive(k, &h, b'D', &id)));
         self.in_seq = 0;
         self.send(&[21])?;
-        self.sealing = Some(SealingKey::new(&derive(&k, &h, b'C', &id)));
-        self.out_seq = 0;
+        self.sealing = Some(SealingKey::new(derive(k, &h, b'C', &id), 0));
         Ok(())
     }
 
@@ -285,8 +287,8 @@ impl<R: SecureRandom> Client<R> {
     }
 
     /// A `publickey` request signed by `pair`, as OpenSSH sends it.
-    pub fn sign_in(&mut self, user: &str, pair: &Ed25519KeyPair) -> Result<(), Refusal> {
-        let (request, signed) = publickey_request(&self.session_id(), user, "ssh-ed25519", &ed25519_blob(pair.public_key().as_ref()));
+    pub fn sign_in(&mut self, user: &str, pair: &SigningKey) -> Result<(), Refusal> {
+        let (request, signed) = publickey_request(&self.session_id(), user, "ssh-ed25519", &ed25519_blob(pair.public_key().as_bytes()));
         self.send(&signed_request(&request, pair, &signed))
     }
 }
@@ -322,18 +324,22 @@ pub fn publickey_request(session_id: &[u8; 32], user: &str, algorithm: &str, blo
 }
 
 /// A signed `publickey` request by `pair`, whose signature covers `signed`.
-pub fn signed_request(request: &[u8], pair: &Ed25519KeyPair, signed: &[u8]) -> Vec<u8> {
+pub fn signed_request(request: &[u8], pair: &SigningKey, signed: &[u8]) -> Vec<u8> {
     let mut sig = Vec::new();
     string(&mut sig, b"ssh-ed25519");
-    string(&mut sig, pair.sign(signed).as_ref());
+    string(&mut sig, &pair.sign(signed).unwrap());
     let mut out = request.to_vec();
     string(&mut out, &sig);
     out
 }
 
-/// A key pair from a seed, and its public half.
-pub fn pair(seed: u8) -> (Ed25519KeyPair, [u8; 32]) {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap();
-    let public = pair.public_key().as_ref().try_into().unwrap();
-    (pair, public)
+/// A key pair from a seed, and its public half, made once per seed: the fuzz
+/// asks for the same two at every message.
+pub fn pair(seed: u8) -> &'static (SigningKey, [u8; 32]) {
+    static PAIRS: [OnceLock<(SigningKey, [u8; 32])>; 256] = [const { OnceLock::new() }; 256];
+    PAIRS[usize::from(seed)].get_or_init(|| {
+        let pair = SigningKey::from_seed([seed; 32]);
+        let public = *pair.public_key().as_bytes();
+        (pair, public)
+    })
 }

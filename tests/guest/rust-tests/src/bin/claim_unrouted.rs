@@ -3,6 +3,9 @@
 //! and the kernel that refused it goes on: the next claim, of `edu`, is
 //! handed over.
 
+#[path = "../function.rs"]
+mod function;
+
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
 use toyos::PciDev;
@@ -15,8 +18,8 @@ const EDU: PciId = PciId { vendor: 0x1234, device: 0x11e8 };
 
 fn main() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
-    let refused = cap.claim_pci::<PciDev>(E1000E).map(|_| ());
+    let refused = function::claim::<PciDev>(&cap, E1000E).map(|_| ());
     assert_eq!(refused, Err(SyscallError::NotSupported), "claim_unrouted: the claim on e1000e was not refused as unusable");
-    let _edu: PciDev = cap.claim_pci(EDU).unwrap_or_else(|why| panic!("claim_unrouted: edu, claimed after, was refused: {why:?}"));
+    let _edu: PciDev = function::claim(&cap, EDU).unwrap_or_else(|why| panic!("claim_unrouted: edu, claimed after, was refused: {why:?}"));
     println!("claim_unrouted: e1000e, routed past the SMMUv3, was refused, and edu was claimed after");
 }
