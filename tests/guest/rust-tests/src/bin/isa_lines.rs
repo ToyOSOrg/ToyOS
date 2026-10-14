@@ -25,8 +25,6 @@ use toyos::{AsHandle, Device};
 use toyos_abi::pci::DeviceIrqRecord;
 use toyos_abi::syscall::{self, IsaId, SyscallError, SYSCAP_LABEL};
 
-#[path = "../isa_row.rs"]
-mod isa_row;
 use toyos::ioport;
 
 const SELF_PATH: &str = "/system/bin/test_rs_isa_lines";
@@ -84,6 +82,11 @@ fn set() -> IsaId {
     IsaId::parse(I8042).expect("the i8042's set")
 }
 
+/// The row, which `holder` gave back by ending.
+fn claimed(cap: &SysCap, holder: &str) -> Device {
+    cap.claim_isa(set()).unwrap_or_else(|e| panic!("isa: the row after {holder} answered {e:?}"))
+}
+
 /// Run `role` holding `claim`; it must end cleanly.
 fn role(role: &str, claim: Device) {
     let status = Command::new(SELF_PATH)
@@ -95,12 +98,12 @@ fn role(role: &str, claim: Device) {
 }
 
 fn lines(cap: &SysCap) {
-    role("device", isa_row::claim_after(cap, set(), "the job before this one"));
+    role("device", claimed(cap, "the job before this one"));
     // The row comes back with `device`, whose keyboard acknowledged once more
     // after its claim was gone.
-    role("dies", isa_row::claim_after(cap, set(), "device"));
+    role("dies", claimed(cap, "device"));
     // And with `dies`, which ended holding a record it never read.
-    role("after", isa_row::claim_after(cap, set(), "dies"));
+    role("after", claimed(cap, "dies"));
     println!(
         "isa lines: the holder's interrupt reached it, the one after its claim reached nobody, and a \
          dead holder's record went with it"

@@ -612,7 +612,8 @@ pub fn init(devices: &[PciDevice]) {
         return;
     }
 
-    let space = crate::iommu::DeviceSpace::create();
+    let candidates: Vec<crate::drivers::pci::PciDevice> = list.iter().map(|listed| listed.pci).collect();
+    let space = crate::iommu::DeviceSpace::create(&candidates);
     let bdl = super::DmaPool::alloc_in(PERIODS * 16, space).leak();
     let pcm = super::DmaPool::alloc_in(PERIODS * PERIOD_BYTES, space).leak();
     // Unaligned: the descriptor layout is the HDA specification's (§3.6.2), not a Rust one.

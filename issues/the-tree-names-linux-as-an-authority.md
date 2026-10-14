@@ -24,7 +24,7 @@ Evidence: every mention outside `issues/` at `07b5879ee`,
 
 `kernel/cpuvuln` and its fixtures went in #915. The other kernel lines are
 the sweep's: `kernel/src/arch/aarch64/irqchip.rs`,
-`kernel/src/arch/x86_64/amdvi/mod.rs`, `kernel/src/arch/x86_64/vtd/fault.rs`,
+`kernel/src/arch/x86_64/vtd/fault.rs`,
 `kernel/src/arch/x86_64/vtd/queue.rs`, `kernel/src/mm/mmio.rs` and
 `kernel/usbhid`.
 

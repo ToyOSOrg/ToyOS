@@ -50,7 +50,6 @@
 
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::ioport::{in16, out16, out8};
@@ -79,9 +78,6 @@ const PRESS: &str = "/system/share/acpi_mediated_press";
 const USABLE: [u8; 5] = [1, 2, 3, 4, 7];
 const ACPI_RECLAIM: u8 = 9;
 const ACPI_NVS: u8 = 10;
-
-/// The liveness ceiling on a dead holder's claim coming back, as `isa_row`'s.
-const RELEASED: Duration = Duration::from_secs(5);
 
 struct Holder(Device);
 
@@ -131,16 +127,7 @@ fn main() {
 }
 
 fn claim(cap: &SysCap) -> Device {
-    let by = Instant::now() + RELEASED;
-    loop {
-        match cap.claim(DeviceType::Acpi) {
-            Ok(claim) => return claim,
-            Err(SyscallError::AlreadyExists) => {}
-            Err(other) => panic!("acpi: the fixed hardware's claim answered {other:?}"),
-        }
-        assert!(Instant::now() < by, "acpi: the claim never came back in {RELEASED:?}");
-        std::thread::yield_now();
-    }
+    cap.claim(DeviceType::Acpi).unwrap_or_else(|other| panic!("acpi: the fixed hardware's claim answered {other:?}"))
 }
 
 /// Read the claim's description, which binds it to this process.
