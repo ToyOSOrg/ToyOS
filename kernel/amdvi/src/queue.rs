@@ -70,6 +70,14 @@ pub const fn event(words: [u64; 2]) -> Event {
     Event::Requester { code, device, address: words[1], write }
 }
 
+/// Whether a record's address is an SMI's (§2.1.5.2, Figure 3 and Table 4):
+/// bits 47:40 zero, `FDF8h` at 39:24, `MT` 0010b at 7 and 4:2, `DM` and
+/// bits 1:0 zero. The SMI filter records a refused SMI as an
+/// `IO_PAGE_FAULT` at that address (§2.1.5.1).
+pub const fn smi(address: u64) -> bool {
+    address & 0xFFFF_FFFF_FF00_00C3 == 0x0000_00FD_F800_0000 && (address >> 2) & 0b111 == 0b010
+}
+
 /// The name 48882 gives an event code, for a record's line.
 pub const fn name(code: u8) -> &'static str {
     match code {

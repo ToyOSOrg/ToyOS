@@ -49,6 +49,8 @@ pub(in crate::drivers) struct MsixEntry<'a> {
     cap: Capability<'a>,
     control: u16,
     address: u64,
+    bir: u8,
+    base: u64,
 }
 
 pub struct Capability<'a> {
@@ -307,7 +309,7 @@ impl PciDevice {
             }
         };
         match table.table_address(base) {
-            Ok(address) => Ok(MsixEntry { cap, control, address }),
+            Ok(address) => Ok(MsixEntry { cap, control, address, bir: table.bir(), base }),
             Err(why) => {
                 log!("PCI {:02x}:{:02x}.{}: MSI-X not armed, {}",
                     self.bus, self.dev, self.func, why);
@@ -492,21 +494,29 @@ impl PciDevice {
 /// for it and
 /// enable it. Takes the message and nothing else: the function is
 /// the one the entry was written for, and no other message reaches here.
-pub fn arm_claimed_msix(message: &crate::iommu::Remapped) -> Result<(), NoEntry> {
+pub fn arm_claimed_msix(message: &crate::iommu::Remapped) -> Result<MsixAt, NoEntry> {
     let pci = message.function();
     let entry = pci.msix_entry()?;
+    let at = MsixAt { bar: entry.bir, offset: entry.address - entry.base, base: entry.base };
     pci.write_msix(entry, message.address(), message.data());
-    Ok(())
+    Ok(at)
 }
 
-/// Mask a claimed function's [`MSIX_ENTRY`] where its table is now: the BAR
-/// holding it may have moved since it was armed.
-pub fn mask_claimed_msix(pci: &PciDevice) -> Result<(), NoEntry> {
-    let entry = pci.msix_entry()?;
-    let at = entry.address + MSIX_ENTRY as u64 * msix::ENTRY_BYTES;
-    crate::mm::paging::map_mmio(at, 0x1000, MmioPolicy::Uncacheable)
+/// Where a claimed function's armed [`MSIX_ENTRY`] is, read once at arming:
+/// its table's BAR, the table's offset in it, and where that BAR was then.
+#[derive(Clone, Copy)]
+pub struct MsixAt {
+    pub bar: u8,
+    pub offset: u64,
+    pub base: u64,
+}
+
+/// Mask the armed [`MSIX_ENTRY`] of a table at `table`, an address the
+/// kernel placed or read at arming and never a device's later answer: a
+/// device gone or answering ones takes the write as nothing.
+pub fn mask_claimed_msix(table: u64) {
+    crate::mm::paging::map_mmio(table + MSIX_ENTRY as u64 * msix::ENTRY_BYTES, 0x1000, MmioPolicy::Uncacheable)
         .write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED);
-    Ok(())
 }
 
 /// [`arm_claimed_msix`] for a function with MSI and no MSI-X; `false` where it

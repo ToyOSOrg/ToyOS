@@ -1,4 +1,4 @@
-//! `usbd_spare`'s `refused_unremapped` arm as a binary of its own, for a metal job, which
+//! `usbd_spare`'s `unhanded` arm as a binary of its own, for a metal job, which
 //! takes no argument: see `src/usbd_spare.rs`.
 
 #[path = "../usbd_spare.rs"]
@@ -6,5 +6,5 @@
 mod usbd_spare;
 
 fn main() {
-    usbd_spare::refused_unremapped(&usbd_spare::cap());
+    usbd_spare::unhanded(&usbd_spare::cap());
 }

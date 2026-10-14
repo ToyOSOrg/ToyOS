@@ -17,6 +17,28 @@ pub const COMMAND_TAIL: u64 = 0x2008;
 pub const EVENT_HEAD: u64 = 0x2010;
 pub const EVENT_TAIL: u64 = 0x2018;
 pub const STATUS: u64 = 0x2020;
+/// The first SMI filter register (MMIO 0060h–00D8h, Table 80), 8 bytes each.
+pub const SMI_FILTER: u64 = 0x0060;
+
+/// One SMI filter register (MMIO 00[60–D8]h): `SmiDID` 15:0, `SmiDV` 16,
+/// `SmiFLock` 17.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SmiFilter(pub u64);
+
+impl SmiFilter {
+    /// The requester id an SMI passes from, where the register is valid.
+    pub const fn passes(self) -> Option<u16> {
+        if self.0 & 1 << 16 != 0 {
+            Some(self.0 as u16)
+        } else {
+            None
+        }
+    }
+
+    pub const fn locked(self) -> bool {
+        self.0 & 1 << 17 != 0
+    }
+}
 
 /// `CONTROL` (MMIO 0018h).
 pub mod control {
@@ -28,6 +50,12 @@ pub mod control {
     pub const CMD_BUF_EN: u64 = 1 << 12;
     pub const PPR_LOG_EN: u64 = 1 << 13;
     pub const PPR_INT_EN: u64 = 1 << 14;
+    /// Upstream SMIs pass only from the ids the SMI filter registers name
+    /// (§2.1.5.1).
+    pub const SMIF_EN: u64 = 1 << 22;
+    /// An SMI the filter refuses is written to the event log as an
+    /// `IO_PAGE_FAULT` at its SMI address.
+    pub const SMIF_LOG_EN: u64 = 1 << 24;
     /// The 128-bit remapping entry (Table 21), with `GAMEn` 000b.
     pub const GA_EN: u64 = 1 << 17;
     pub const GA_LOG_EN: u64 = 1 << 28;
@@ -66,6 +94,19 @@ impl Features {
     /// `GASup`: the 128-bit remapping entry can be selected.
     pub const fn guest_apic(self) -> bool {
         self.0 & 1 << 7 != 0
+    }
+
+    /// `SmiFSup` 01b: the SMI filter exists, with this many registers
+    /// (`SmiFRC`: 1, 2, 4, 8 or 16); `None` where SMIs always pass, or for a
+    /// reserved encoding of either field.
+    pub const fn smi_filters(self) -> Option<usize> {
+        if (self.0 >> 16) & 0b11 != 0b01 {
+            return None;
+        }
+        match (self.0 >> 18) & 0b111 {
+            count @ 0..=4 => Some(1 << count),
+            _ => None,
+        }
     }
 
     /// `HATS`, the host table levels the unit walks: 4, 5 or 6, or `None`

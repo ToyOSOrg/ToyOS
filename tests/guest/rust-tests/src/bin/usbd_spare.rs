@@ -13,7 +13,7 @@ fn main() {
         Some("fault") => usbd_spare::fault(&cap),
         Some("refused") => usbd_spare::refused(&cap),
         Some("vector") => usbd_spare::vector(&cap),
-        Some("refused_unremapped") => usbd_spare::refused_unremapped(&cap),
+        Some("unhanded") => usbd_spare::unhanded(&cap),
         Some(other) => panic!("usbd_spare: no arm {other:?}"),
     }
 }

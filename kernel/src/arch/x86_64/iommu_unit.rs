@@ -145,6 +145,16 @@ pub mod domain {
         }
     }
 
+    /// Why no claim may have `stream`, if none may: [`untranslated`]'s
+    /// reasons and the requester ids AMD-Vi's platform speaks as. VT-d
+    /// answers `None`.
+    pub fn unclaimable(stream: StreamId) -> Option<&'static str> {
+        match backend() {
+            Backend::AmdVi => amdvi::domain::unclaimable(stream),
+            Backend::Vtd | Backend::None => None,
+        }
+    }
+
     /// The backend that minted a `DomainId`; there is one, or none was minted.
     fn minted() -> Backend {
         let found = backend();
@@ -272,6 +282,18 @@ pub mod interrupt {
         /// What the message raises, for the record.
         pub fn interrupt(&self) -> impl core::fmt::Display {
             self.vector
+        }
+    }
+
+    /// Whether a message a holder writes into its function's MSI-X table
+    /// reaches nothing but its claim's interrupt: VT-d's source-id
+    /// verification and compatibility-format block say so; AMD-Vi's table
+    /// does only where every unit filters SMIs, which no table remaps.
+    pub fn fences_tables() -> bool {
+        match backend() {
+            Backend::Vtd => true,
+            Backend::AmdVi => amdvi::interrupt::smi_filtered_everywhere(),
+            Backend::None => false,
         }
     }
 

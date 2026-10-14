@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::iommu::fault::{self as policy, Access, Fault, Who};
 use crate::log;
 use crate::mm::{DirectMap, Mmio, PAGE_SIZE};
-use toyos_amdvi::queue::{event, name, Event, ENTRIES};
+use toyos_amdvi::queue::{event, name, smi, Event, ENTRIES};
 use toyos_amdvi::reg::{self, control, status};
 
 use super::{requester, spin_until, REGISTER_WINDOW};
@@ -27,10 +27,12 @@ struct FaultUnit {
     log: AtomicU64,
     /// Faults this unit has reported for the life of the boot.
     faults: AtomicU32,
+    /// SMIs its filter refused from a requester no claim holds.
+    smis: AtomicU32,
 }
 
 static UNITS: [FaultUnit; MAX_UNITS] =
-    [const { FaultUnit { regs: AtomicU64::new(0), log: AtomicU64::new(0), faults: AtomicU32::new(0) } }; MAX_UNITS];
+    [const { FaultUnit { regs: AtomicU64::new(0), log: AtomicU64::new(0), faults: AtomicU32::new(0), smis: AtomicU32::new(0) } }; MAX_UNITS];
 
 /// Publish unit `index`'s registers and event log to the handler, before its
 /// interrupt is armed.
@@ -75,6 +77,20 @@ fn drain(index: usize, regs: Mmio, log: Mmio) -> usize {
         let at = reg::offset(head);
         let words = [log.read_u64(at), log.read_u64(at + 8)];
         let fault = match event(words) {
+            // An SMI the filter refused (§2.1.5.1): a claimed function's is
+            // its holder's fault; any other's is said and the machine goes
+            // on, since no DMA of this kernel's went wrong.
+            Event::Requester { device, address, .. } if smi(address) && !crate::pcidev::note_fault(device) => {
+                let refused = UNITS[index].smis.fetch_add(1, Ordering::Relaxed) + 1;
+                if refused.is_power_of_two() {
+                    log!(
+                        "iommu: amdvi unit{index} SMI filter refused an SMI from {} at {address:#018x}, {refused} so far",
+                        requester(device)
+                    );
+                }
+                head = (head + 1) % ENTRIES;
+                continue;
+            }
             Event::Requester { code, device, address, write } => Fault {
                 who: Who::Function(requester(device)),
                 address,

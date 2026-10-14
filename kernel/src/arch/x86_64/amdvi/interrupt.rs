@@ -30,7 +30,7 @@ use super::{domain, memory, submit, DEVICE_TABLE, TABLES};
 use crate::iommu::StreamId;
 use crate::log;
 use crate::sync::Lock;
-use core::sync::atomic::Ordering;
+use core::sync::atomic::{AtomicBool, Ordering};
 
 struct Remap {
     /// Whether every unit remaps, decided once at boot: `None` leaves every
@@ -43,6 +43,19 @@ struct Remap {
 }
 
 static REMAP: Lock<Remap> = Lock::new(Remap { extended: None, tables: BTreeMap::new(), apics: Vec::new() });
+
+/// Every programmed unit filters SMIs (§2.1.5): an SMI is no remapped message
+/// (Table 10), so without the filter a holder's own MSI-X table could send
+/// one to every CPU.
+static SMI_FILTERED: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn smi_filtered(everywhere: bool) {
+    SMI_FILTERED.store(everywhere, Ordering::Release);
+}
+
+pub fn smi_filtered_everywhere() -> bool {
+    SMI_FILTERED.load(Ordering::Acquire)
+}
 
 /// Every unit remaps, with an entry's destination 32 bits wide where
 /// `extended`; the I/O APICs speak as `apics`.
@@ -57,7 +70,7 @@ pub fn is_armed() -> bool {
 }
 
 /// The interrupt half of requester `id`'s entry, bits 191:128.
-fn interrupt_half(id: u16) -> crate::mm::Mmio {
+pub(super) fn interrupt_half(id: u16) -> crate::mm::Mmio {
     let table = DEVICE_TABLE.load(Ordering::Acquire);
     memory(table + u64::from(id) * ENTRY_BYTES as u64 + 16, 8)
 }
@@ -113,7 +126,7 @@ fn report(source: StreamId, vector: u8, read: [u64; 2]) {
 }
 
 /// `source`'s entry at `vector`, delivering it to this kernel's CPU.
-fn arm(source: StreamId, vector: u8) -> Result<(), Refused> {
+fn arm(source: StreamId, vector: u8) {
     let mut remap = REMAP.lock();
     let destination = match remap.extended {
         Some(true) => Destination::Extended(MSG_DEST),
@@ -122,7 +135,6 @@ fn arm(source: StreamId, vector: u8) -> Result<(), Refused> {
     let read = remap.write(source.requester(), vector, irte::entry(vector, destination));
     drop(remap);
     report(source, vector, read);
-    Ok(())
 }
 
 /// The message a kernel driver's `source` raises `vector` with: its own
@@ -130,7 +142,7 @@ fn arm(source: StreamId, vector: u8) -> Result<(), Refused> {
 /// remaps.
 pub(in crate::arch::x86_64) fn msi(source: StreamId, vector: u8) -> Result<Msi, Refused> {
     if is_armed() {
-        arm(source, vector)?;
+        arm(source, vector);
     }
     let (address, data) = msi_message(vector);
     Ok(Msi { address, data })
@@ -139,6 +151,13 @@ pub(in crate::arch::x86_64) fn msi(source: StreamId, vector: u8) -> Result<Msi, 
 /// A claim's entry at `vector` for `source`, whose entry from now on passes
 /// nothing firmware declared for it and gives it no `SysMgt`.
 pub(in crate::arch::x86_64) fn claim(vector: u8, source: StreamId) -> Result<Msi, Refused> {
+    // A requester the platform or a kernel driver speaks as is refused
+    // before here (`iommu::isolates`); one that already has a table is one
+    // of those, and its entries keep firmware's pass bits.
+    assert!(
+        !REMAP.lock().tables.contains_key(&source.requester()) || domain::setting(source.requester()) == toyos_amdvi::dte::Setting::CLAIMED,
+        "amdvi: a claim on {source}, whose remapping table another source already wrote"
+    );
     domain::claimed(source.requester());
     msi(source, vector)
 }

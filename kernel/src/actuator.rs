@@ -137,8 +137,10 @@ actuators! {
     /// `amdvi_selftest`.
     amdvi_selftest = "amdvi-selftest";
 
-    /// Read the DMAR's flags with `INTR_REMAP` clear, as on a platform whose
-    /// firmware says it does not remap. Judged by `claim_refused_without_remapping`.
+    /// Remap no message, as on a platform that cannot: VT-d reads the DMAR's
+    /// flags with `INTR_REMAP` clear, and AMD-Vi leaves every interrupt half
+    /// invalid. Judged by `claim_refused_without_remapping` and
+    /// `amdvi_claim_refused_without_remapping`.
     iommu_no_remap = "iommu-no-remap";
 
     /// Leave every AP holding the CR0/CR4 that INIT left it.

@@ -2426,9 +2426,8 @@ pub fn pipe_map(handle: RawHandle) -> Result<*mut u8, SyscallError> {
 /// maps read/write and uncacheable.
 ///
 /// `InvalidArgument` for an index that names no memory BAR, and for the BAR
-/// holding this function's MSI-X table or PBA: the vector in that table is the
-/// kernel's, and a process that could write it could aim the device's interrupt
-/// at any address the LAPIC decodes.
+/// holding this function's MSI-X table where the machine would not fence a
+/// message written there.
 ///
 /// Every call answers an object of its own over the same window, so a BAR
 /// whose handle was closed can be asked for again.

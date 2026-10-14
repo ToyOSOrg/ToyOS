@@ -49,12 +49,14 @@
 //! that BAR rather than nothing at all, and a function this kernel could settle
 //! no BAR of ends at [`Refusal::NoMappableBar`].
 //!
-//! **The BAR holding the MSI-X table or PBA is handed over like any other**,
-//! because a claim exists only on a machine that remaps: whatever message its
-//! holder writes into the table, the unit delivers only the claim's own
-//! interrupt and refuses and records anything else. **A function is armed on
-//! MSI only where a walk that reached its capability list's terminator found
-//! no MSI-X.**
+//! **The BAR holding the MSI-X table is handed over only where the machine
+//! fences a written message** ([`crate::iommu::Remapping::fences_tables`]):
+//! there, whatever message its holder writes into the table reaches only the
+//! claim's own interrupt, and anything else is refused and recorded. On
+//! AMD-Vi that needs every unit's SMI filter on, since an SMI is no remapped
+//! message; where it is not, the BAR is kept back, said by name. **A function
+//! is armed on MSI only where a walk that reached its capability list's
+//! terminator found no MSI-X.**
 //!
 //! **A function with no address space of its own is not handed over**, because
 //! every grant would answer with a physical address and a descriptor holding
@@ -130,7 +132,7 @@ use toyos_pci::bridge::Window;
 use toyos_pci::{af, aperture, bar, express, placement, pm, probe};
 
 use crate::device::{Claim, ClaimError};
-use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, mask_claimed_msix, NoCapability, NoEntry, PciDevice};
+use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, mask_claimed_msix, MsixAt, NoCapability, NoEntry, PciDevice};
 use crate::iommu::{IommuError, OwnSpace, Refused, Remapped};
 use crate::mm::policy::{CachePolicy, MmioPolicy};
 use crate::mm::{align_2m, DirectMap, PAGE_2M};
@@ -265,15 +267,15 @@ struct Aimed {
 /// Both deliver the function's own interrupt into the same [`Interrupt`] and
 /// the claim answers the same handle either way.
 enum Armed {
-    /// This function's one MSI-X table entry.
-    Msix(Remapped),
+    /// This function's one MSI-X table entry, where it was found at arming.
+    Msix(MsixAt, Remapped),
     Msi(Remapped),
 }
 
 impl Armed {
     fn message(&self) -> &Remapped {
         match self {
-            Self::Msix(message) | Self::Msi(message) => message,
+            Self::Msix(_, message) | Self::Msi(message) => message,
         }
     }
 }
@@ -886,7 +888,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
     // translation and its interrupt back.
     let message = crate::iommu::claim_msi(remapping, number, &pci).map_err(Refusal::NoMessage)?;
     let armed = match arm_claimed_msix(&message) {
-        Ok(()) => Armed::Msix(message),
+        Ok(at) => Armed::Msix(at, message),
         Err(NoEntry::Unusable) => return Err(Refusal::MsixUnusable),
         Err(NoEntry::NoTable(NoCapability::Truncated)) => return Err(Refusal::CapsTruncated),
         Err(NoEntry::NoTable(NoCapability::Absent)) if arm_claimed_msi(&message) => {
@@ -897,7 +899,23 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
 
     // From here a refusal has to undo: a vector is armed, and the arms below
     // move the function's BARs.
-    match place_bars(&pci, id, remapping) {
+    // The table's BAR is the holder's only where a message written into it
+    // reaches nothing but this claim's interrupt.
+    let withheld = match &armed {
+        Armed::Msix(at, _) if !remapping.fences_tables() => {
+            log!(
+                "pcidev: PCI {:02x}:{:02x}.{} keeps BAR {}, which holds its MSI-X table, back: a message written \
+                 there would not be fenced on this machine",
+                pci.bus,
+                pci.dev,
+                pci.func,
+                at.bar
+            );
+            Some(at.bar)
+        }
+        _ => None,
+    };
+    match place_bars(&pci, id, withheld) {
         Ok((bar_at, bar_bytes)) => {
             space.attach(pci.bus, pci.dev, pci.func);
             Ok(Bound {
@@ -916,7 +934,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
         Err(why) => {
             // The entry goes not present once the function stops speaking.
             let message = match armed {
-                Armed::Msix(message) => {
+                Armed::Msix(_, message) => {
                     pci.disable_msix();
                     message
                 }
@@ -941,10 +959,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> 
 fn place_bars(
     pci: &PciDevice,
     id: PciId,
-    // A BAR holding the MSI-X table is handed over too: on a machine that
-    // remaps, a message its holder writes there reaches only the claim's own
-    // interrupt, and anything else is refused and recorded by the unit.
-    _: crate::iommu::Remapping,
+    withheld: Option<u8>,
 ) -> Result<([u64; BARS], [u64; BARS]), Refusal> {
     let mut bar_at = [0u64; BARS];
     let mut bar_bytes = [0u64; BARS];
@@ -958,7 +973,7 @@ fn place_bars(
         // whatever its register holds now: one a reset returned to zero reads
         // as unassigned, and it is the window that moved, not a BAR that is
         // not there.
-        if pci.memory_bar(index).is_err() && !was_cut(pci, index) {
+        if Some(index) == withheld || (pci.memory_bar(index).is_err() && !was_cut(pci, index)) {
             index += step;
             continue;
         }
@@ -1504,9 +1519,14 @@ fn release(number: usize) {
 fn tear_down(function: &Function, mut bound: Bound) {
     bound.pci.disable_bus_master();
     let message = match bound.armed {
-        Armed::Msix(message) => {
-            // Armed through this table, so it is still there to mask.
-            assert!(mask_claimed_msix(&bound.pci).is_ok(), "pcidev: the MSI-X table a claim was armed through is gone");
+        Armed::Msix(at, message) => {
+            // Where this kernel put the table's BAR, or where it was at
+            // arming if it stayed: never what the device answers now.
+            let base = match bound.bar_at[usize::from(at.bar)] {
+                0 => at.base,
+                placed => placed,
+            };
+            mask_claimed_msix(base + at.offset);
             message
         }
         Armed::Msi(message) => {

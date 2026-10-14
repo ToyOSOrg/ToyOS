@@ -34,7 +34,7 @@ use crate::time::{Duration, Tripwire};
 use toyos_abi::boot::RootBridgeWindow;
 use toyos_amdvi::dte::{interrupts_blocked, Dte, Setting, DEVICE_IDS, ENTRY_BYTES};
 use toyos_amdvi::queue::{Command, ENTRIES};
-use toyos_amdvi::reg::{self, control, status, Features};
+use toyos_amdvi::reg::{self, control, status, Features, SmiFilter};
 use toyos_phys::Phys as Address;
 
 use super::iommu_unit::{register_window, yn, MAX_UNITS};
@@ -61,6 +61,12 @@ const FIRMWARE_LEFT: [(u64, Option<u32>, &str); 8] = [
     (control::PPR_INT_EN, None, "PPRIntEn"),
     (control::IOMMU_EN, None, "IommuEn"),
 ];
+
+/// Why a requester an IVHD special entry names takes no claim: an I/O APIC's
+/// or an HPET's messages are the platform's (Table 109).
+const PLATFORM: [&str; 2] = ["the IVRS names it as an I/O APIC", "the IVRS names it as an HPET"];
+/// Why a requester the SMI filter passes takes no claim.
+const SMI_SOURCE: &str = "the unit's SMI filter, as firmware left it, passes its SMIs";
 
 /// IVMD flags (Table 113).
 const IVMD_UNITY: u8 = 1 << 0;
@@ -132,6 +138,8 @@ struct Ready {
     regs: Mmio,
     function: PciDevice,
     features: Features,
+    /// The unit has an SMI filter, which [`program`] turns on.
+    filters_smi: bool,
 }
 
 /// Every unit the IVRS describes, switched off, and each this kernel can use
@@ -168,6 +176,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     let mut translated: Vec<(u16, u16)> = Vec::new();
     // The I/O APICs a unit that will be programmed names, by MADT id.
     let mut apics: Vec<(u8, u16)> = Vec::new();
+    // Requester ids no claim may have: the platform speaks as them.
+    let mut platform: Vec<(u16, &'static str)> = Vec::new();
     let mut units = 0usize;
     for block in ivrs.blocks() {
         match block {
@@ -180,14 +190,15 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
                 let function = describe_function(units, &unit, devices);
                 let mut usable = Ok(());
                 let mut serves: Vec<(u16, u16)> = Vec::new();
-                let mut specials: Vec<(u8, u16)> = Vec::new();
+                let mut specials: Vec<(u8, u8, u16)> = Vec::new();
                 for entry in ivrs.devices(&unit) {
                     match entry {
                         Ok(entry) => {
                             log!("iommu: amdvi unit{units} serves {}", served(&ivrs, &entry));
-                            // Variety 01h: the handle is an I/O APIC's MADT id (Table 109).
-                            if let DeviceEntry::Special { handle, used, variety: 1, .. } = entry {
-                                specials.push((handle, used));
+                            // Variety 01h: the handle is an I/O APIC's MADT id;
+                            // 02h, an HPET's number (Table 109).
+                            if let DeviceEntry::Special { handle, used, variety, .. } = entry {
+                                specials.push((variety, handle, used));
                             }
                             match declare(&entry, &mut settings, enumerated) {
                                 Ok(ids) => serves.extend(ids),
@@ -206,9 +217,13 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
                     match usable.and_then(|()| usable_unit(&unit, regs, function)) {
                         Ok(function) => {
                             translated.extend(serves);
-                            apics.extend(specials);
+                            apics.extend(specials.iter().filter(|(variety, ..)| *variety == 1).map(|&(_, handle, used)| (handle, used)));
+                            platform.extend(specials.iter().map(|&(variety, _, used)| (used, PLATFORM[usize::from(variety == 2)])));
                             let features = Features(regs.read_u64(reg::EXTENDED_FEATURES));
-                            ready.push(Ready { index: units, base: unit.base, regs, function, features });
+                            let passes = smi_filter(units, regs, features);
+                            let filters_smi = passes.is_some();
+                            platform.extend(passes.into_iter().flatten().map(|id| (id, SMI_SOURCE)));
+                            ready.push(Ready { index: units, base: unit.base, regs, function, features, filters_smi });
                         }
                         Err(why) => log!("iommu: amdvi unit{units} is left off: {why}"),
                     }
@@ -287,14 +302,17 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     };
     let identity = build(devices, &settings, remap.is_some());
     let reserved = windows.iter().map(|w| (w.base, w.end())).chain(ivmds.iter().map(|m| (m.start, m.start + m.length)));
-    domain::start(reserved.collect(), settings, ivmds.iter().map(|m| m.requesters).collect(), translated);
+    let filters_smi = ready.iter().all(|unit| unit.filters_smi);
+    domain::start(reserved.collect(), settings, ivmds.iter().map(|m| m.requesters).collect(), translated, platform);
+    interrupt::smi_filtered(filters_smi);
     log!("iommu: amdvi identity domain covers 0x0..{top:#x}, root={:#x}", identity.get());
     if let Some(extended) = remap {
         log!(
             "iommu: amdvi remaps every message through its requester's table: 128-bit entries, x2apic \
-             destinations={}, {} I/O APIC(s) named",
+             destinations={}, {} I/O APIC(s) named, SMIs filtered={}",
             yn(extended),
-            apics.len()
+            apics.len(),
+            yn(filters_smi)
         );
         interrupt::start(extended, apics);
     }
@@ -343,6 +361,30 @@ fn declare(
     Ok(Some((first, last)))
 }
 
+/// The requester ids the unit's SMI filter passes, as firmware left it, each
+/// register said; `None`, said, where the unit has no filter, so every SMI
+/// passes (§2.1.5).
+fn smi_filter(index: usize, regs: Mmio, features: Features) -> Option<Vec<u16>> {
+    let Some(count) = features.smi_filters() else {
+        log!("iommu: amdvi unit{index} has no SMI filter (EFR {:#018x}), so every SMI a device sends passes", features.0);
+        return None;
+    };
+    let registers: Vec<SmiFilter> =
+        (0..count as u64).map(|i| SmiFilter(regs.read_u64(reg::SMI_FILTER + 8 * i))).collect();
+    for (i, register) in registers.iter().enumerate() {
+        log!(
+            "iommu: amdvi unit{index} SMI filter {i} = {:#010x}: passes {}, {}",
+            register.0,
+            match register.passes() {
+                Some(id) => format!("{}", requester(id)),
+                None => String::from("nothing"),
+            },
+            if register.locked() { "locked" } else { "unlocked" }
+        );
+    }
+    Some(registers.iter().filter_map(|register| register.passes()).collect())
+}
+
 /// The unit's function, where this driver can program the unit: segment 0,
 /// `INVALIDATE_IOMMU_ALL`, a host table depth it can name, and a function
 /// with an MSI capability to report faults on.
@@ -381,8 +423,7 @@ fn build(devices: &[PciDevice], settings: &[Setting], remap: bool) -> Address<12
         // Where every unit remaps, every requester's fixed and arbitrated
         // messages are aborted until an entry of its own is written.
         if remap {
-            memory(DEVICE_TABLE.load(Ordering::Acquire) + u64::from(id) * ENTRY_BYTES as u64 + 16, 8)
-                .write_u64(0, interrupts_blocked(*setting));
+            interrupt::interrupt_half(id).write_u64(0, interrupts_blocked(*setting));
         }
     }
     let root = tables.alloc();
@@ -461,7 +502,7 @@ fn submit(commands: &[Command]) {
 /// then empties every cache it holds and names each enumerated
 /// function's entry.
 fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
-    let Ready { index, base, regs, function, .. } = unit;
+    let Ready { index, base, regs, function, filters_smi, .. } = unit;
     let (commands, events, done) = {
         let mut tables = TABLES.lock();
         (tables.alloc(), tables.alloc(), tables.alloc())
@@ -488,12 +529,16 @@ fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
         Some(false) => control::GA_EN,
         Some(true) => control::GA_EN | control::XT_EN,
     };
+    // An SMI is no remapped message (Table 10, Table 19): only the filter
+    // keeps one a holder writes into its own MSI-X table from every CPU.
+    let smi = if filters_smi { control::SMIF_EN | control::SMIF_LOG_EN } else { 0 };
     let on = control::COHERENT
         | control::EVENT_LOG_EN
         | control::EVENT_INT_EN
         | control::CMD_BUF_EN
         | control::IOMMU_EN
-        | remapping;
+        | remapping
+        | smi;
     regs.write_u64(reg::CONTROL, on);
     let running = status::CMD_BUF_RUN | status::EVENT_LOG_RUN;
     spin_until(

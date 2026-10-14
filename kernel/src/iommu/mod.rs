@@ -299,12 +299,27 @@ pub struct MsiMessage {
 #[derive(Clone, Copy)]
 pub struct Remapping(());
 
+impl Remapping {
+    /// Whether a message a holder writes into its function's MSI-X table can
+    /// reach nothing but that claim's own interrupt, so the BAR holding the
+    /// table may be handed over: on VT-d by source-id verification, on the
+    /// ITS by the device id the bridge stamps, and on AMD-Vi by the
+    /// requester's table where every unit also filters SMIs, which no table
+    /// remaps.
+    pub fn fences_tables(self) -> bool {
+        messages::fences_tables()
+    }
+}
+
 /// Nothing on this machine translates a claimed function's message to its
 /// claim's own interrupt, so the message it would carry names any.
 pub struct NotRemapped;
 
 /// Whether a claimed function's message can be remapped: a fact of the
 /// machine, fixed before the first driver arms anything.
+///
+/// Where it is, [`Remapping::fences_tables`] says whether whatever message a
+/// holder writes into its function's own MSI-X table is fenced too.
 pub fn remapping() -> Result<Remapping, NotRemapped> {
     if messages::is_armed() {
         Ok(Remapping(()))
@@ -315,9 +330,10 @@ pub fn remapping() -> Result<Remapping, NotRemapped> {
 
 /// Whether `function` can be given a domain of its own and a remapping entry
 /// no other requester reaches, or why not: a function no programmed unit
-/// serves, or one firmware reserves memory for, keeps the machine's own.
+/// serves, one firmware reserves memory for, or one whose requester id the
+/// platform speaks as.
 pub fn isolates(function: &crate::drivers::pci::PciDevice) -> Result<(), &'static str> {
-    match unit::domain::untranslated(StreamId::pci(function.bus, function.dev, function.func)) {
+    match unit::domain::unclaimable(StreamId::pci(function.bus, function.dev, function.func)) {
         None => Ok(()),
         Some(why) => Err(why),
     }

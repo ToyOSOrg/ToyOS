@@ -373,6 +373,13 @@ pub(in crate::arch::aarch64) fn doorbell_page() -> Option<u64> {
 }
 
 /// Whether an ITS is armed to give a claimed function its own LPI.
+/// Whether a message a holder writes into its function's MSI-X table reaches
+/// nothing but its claim's interrupt: always, since the ITS translates by the
+/// device id the bridge stamps, through that device's own table.
+pub fn fences_tables() -> bool {
+    true
+}
+
 pub fn is_armed() -> bool {
     ITS.lock().is_some()
 }

@@ -16,10 +16,10 @@ unless it names a domain, and where every programmed unit has `GASup` (and
 fixed and arbitrated messages go through a table of its own indexed by
 vector, a claim's entry passing nothing firmware declared.
 
-What remains is a claim on the AMD bench: both its xHCI controllers keep
-their MSI-X table in BAR 0, their only BAR, so `pcidev` refuses to hand one
-over (`issues/a-controller-whose-msix-table-is-in-bar-0-cannot-be-driven-from-userland.md`),
-and `xhci-leave=` names a controller by an id the two share.
+What remains is the AMD bench's reading of a claim (PR #921 stages it): a
+claimed `03:00.4` driven through its own entry, its MSI-X table's BAR handed
+over because every unit filters SMIs, its holder's foreign vector refused
+and recorded, and a machine that remaps nothing refusing the claim.
 
 Constraints a reader would otherwise pay to re-derive:
 
@@ -35,7 +35,10 @@ Constraints a reader would otherwise pay to re-derive:
   suite's guests run in x2APIC, so a remapping guest needs both.
 - The AMD bench is in the metal suite; the orchestrator runs every boot.
 
-**Exit:** a guest boot on `Profile::MetalAmdVi` and a run on the AMD bench
-in which a kernel driver's DMA goes through a domain of its own, a DMA
-outside it is recorded as a fault, and a claimed function's message is
-delivered through its own remapping entry.
+**Exit:** on the AMD bench, `amdvi_usbd_drives_its_own_entry` and
+`amdvi_claim_refused_without_remapping` pass beside
+`amdvi_translates_the_stick_controller` and
+`amdvi_remaps_the_stick_controller`: a kernel driver's DMA through a domain
+of its own, a DMA outside a claim's domain recorded, a claimed function's
+message delivered through its own remapping entry and a foreign one refused
+and recorded.

@@ -206,7 +206,7 @@ const RUST_SKIP: &[&str] = &[
     // `amdvi_claim_refused_without_remapping` rows run them.
     "usbd_spare_fault",
     "usbd_spare_vector",
-    "usbd_spare_refused_unremapped",
+    "usbd_spare_unhanded",
     // The same controller, handed to a holder that is killed and claimed
     // again at once, in the same boots as `usbd_spare`.
     "end_returns_claims",
@@ -440,13 +440,19 @@ const MACHINE_TESTS: &[&str] = &[
     "usbd_drives_the_spare",
     // The same behind QEMU's AMD unit remapping interrupts: the claim's
     // message through an entry of its function's own table, which no host
-    // build has and which the AMD bench's controllers, their MSI-X tables in
-    // their register BARs, cannot yet be claimed to show.
+    // build has. The AMD bench's `amdvi_usbd_drives_its_own_entry` holds the
+    // same on silicon, with a foreign vector, which QEMU's unit cannot hand
+    // a table over for.
     "usbd_drives_the_spare_amdvi",
     // The same machine with its AMD unit remapping nothing: the claim is
     // refused before anything on the function changes. The AMD bench's arm is
-    // `claim_refused_without_remapping`'s.
+    // `amdvi_claim_refused_without_remapping`.
     "usbd_refused_without_amdvi_remapping",
+    // QEMU's AMD unit, which has no SMI filter, remapping a spare whose MSI-X
+    // table is in its register BAR: that BAR is kept back, said by name, and
+    // the claim is refused for want of another. No metal machine in reach has
+    // an AMD-Vi unit without the filter.
+    "usbd_table_kept_without_smi_filter",
     // A boot keyboard reporting more keys than its six slots name: the
     // kernel's driver reading a report a device delivered over xHCI has no host
     // build, and the T14 binds no USB keyboard.
@@ -1100,7 +1106,7 @@ const METAL: &[(&str, metal::Metal)] = &[
                 for job in ["test_rs_usbd_spare", "test_rs_usbd_spare_fault", "test_rs_end_returns_claims", "test_rs_usbd_spare_vector"] {
                     b[0].job_passed(job)?;
                 }
-                amdvi_usbd(&b[0].kernel(), &b[0].log())
+                amdvi_usbd(&b[0].kernel(), &b[0].log(), &b[0].after_the_reset()?)
             },
         },
     ),
@@ -1113,7 +1119,7 @@ const METAL: &[(&str, metal::Metal)] = &[
                 "testcases-amd-no-remap",
                 "tests/images/testcases.toml",
                 &["iommu-no-remap", "xhci-leave=03:00.4"],
-                &["test_rs_usbd_spare_refused_unremapped"],
+                &["test_rs_usbd_spare_unhanded"],
             )],
             judge: |b| {
                 let kernel = b[0].kernel();
@@ -3789,6 +3795,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config, qemu::Profile::HeadlessUsbSpare),
         "usbd_drives_the_spare_amdvi" => usbd_drives_the_spare(test_config, qemu::Profile::HeadlessUsbSpareAmdVi),
         "usbd_refused_without_amdvi_remapping" => usbd_refused_without_remapping(test_config),
+        "usbd_table_kept_without_smi_filter" => usbd_table_kept_without_smi_filter(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
@@ -3911,9 +3918,8 @@ fn usbd_drives_the_spare(test_config: &Path, profile: qemu::Profile) -> Result<(
     if said.matches(&handed).count() != 1 {
         return Err(format!("{at} was not handed over once, to the one usbd:\n{said}"));
     }
-    // MSI on the VT-d machine's spare, MSI-X on the AMD one's.
-    run.must_say(&format!("PCI {at}: msi"))?;
     let amdvi = matches!(profile.iommu(), Some(qemu::Unit::AmdVi { .. }));
+    run.must_say(&format!("PCI {at}: msi address="))?;
     if amdvi {
         // The claim's entry in its own table, present at the vector the
         // hand-over names, and absent again at the release.
@@ -3946,9 +3952,6 @@ fn usbd_drives_the_spare(test_config: &Path, profile: qemu::Profile) -> Result<(
     let ended = job_window(&mut qemu, "test_rs_end_returns_claims")?;
     let line = ends_returned_claims(&ended)?;
     eprintln!("  [usbd] {line}");
-    if amdvi {
-        foreign_vector(&mut qemu, &at)?;
-    }
     drop(qemu);
 
     // The control: the same machine and no switch, so the kernel drives it.
@@ -3966,6 +3969,30 @@ fn usbd_drives_the_spare(test_config: &Path, profile: qemu::Profile) -> Result<(
     Ok(())
 }
 
+/// Where an AMD-Vi unit has no SMI filter, the BAR holding a claim's MSI-X
+/// table is kept back, said by name: an SMI is no remapped message, so a
+/// holder's own table could send one to every CPU (48882 Table 10).
+fn usbd_table_kept_without_smi_filter(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "usbd_spare";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let options = BootOptions {
+        profile: qemu::Profile::HeadlessUsbSpareAmdViMsix,
+        kernel_params: &[XHCI_LEAVE_SPARE],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_say("iommu: amdvi unit0 has no SMI filter")?;
+    boot.must_say("SMIs filtered=n")?;
+    let at = qemu::SPARE_AT;
+    let said = job_window(&mut qemu, "test_rs_usbd_spare unhanded")?;
+    let run = serial::Serial::named("usbd_spare", said);
+    let kept = run.must_say(&format!("pcidev: PCI {at} keeps BAR 0, which holds its MSI-X table, back"))?;
+    run.must_say(&format!("pcidev: PCI {at} NOT HANDED OVER — it publishes no memory BAR this claim may map"))?;
+    eprintln!("  [usbd] {}", kept.trim());
+    Ok(())
+}
+
 /// A machine whose AMD unit remaps nothing refuses the spare's claim by that
 /// reason, before a vector is armed or a BAR moved.
 fn usbd_refused_without_remapping(test_config: &Path) -> Result<(), String> {
@@ -3979,7 +4006,7 @@ fn usbd_refused_without_remapping(test_config: &Path) -> Result<(), String> {
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], options);
     let boot = serial::Serial::boot(&qemu);
     boot.must_say("no message is remapped")?;
-    let said = job_window(&mut qemu, "test_rs_usbd_spare refused_unremapped")?;
+    let said = job_window(&mut qemu, "test_rs_usbd_spare unhanded")?;
     claims::refused_unremapped_at(&serial::Serial::named("usbd_spare", said), qemu::SPARE_AT)
 }
 
@@ -3989,7 +4016,7 @@ fn usbd_refused_without_remapping(test_config: &Path) -> Result<(), String> {
 /// past its grant and recorded against the claim at the aimed address; then
 /// its holder's rewrite of its own table entry to a vector not its own
 /// refused and recorded against the claim, usbd never told of its No-Op.
-fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
+fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
     const ID: &str = "1022:1639";
     let at = AMD_XHCI_SPARE;
     kernel.must_say(&format!("xHCI: leaving PCI {at} {ID} to a claim (xhci-leave)"))?;
@@ -4028,7 +4055,8 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), Strin
         .split_once(" rewritten to ")
         .and_then(|(_, rest)| rest.split(',').next())
         .ok_or_else(|| format!("{rewritten:?} names no vector"))?;
-    let census = kernel.must_say("irq: unclaimed vectors")?;
+    // Logged inside the stop, past where the log file ends.
+    let census = after.must_say("irq: unclaimed vectors")?;
     if census.split_whitespace().any(|word| word == foreign_vector) {
         return Err(format!("{foreign_vector} reached a CPU: {census}"));
     }
@@ -4043,22 +4071,6 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), Strin
     Ok(())
 }
 
-/// The claim's own MSI-X table entry rewritten by its holder to a vector not
-/// the claim's: the unit refuses that message and records it against the
-/// claim, and usbd is never told of its No-Op. The table is reachable only
-/// because a machine that remaps hands over the BAR holding it.
-fn foreign_vector(qemu: &mut QemuInstance, at: &str) -> Result<(), String> {
-    let said = job_window(qemu, "test_rs_usbd_spare vector")?;
-    let run = serial::Serial::named("usbd_spare vector", said);
-    let rewritten = run.must_say("usbd_spare: MSI-X entry 0's data ")?;
-    run.must_say("usbd_spare: usbd settled and was never told of its No-Op")?;
-    // QEMU 11.1.1's AMD unit drops the message and records nothing
-    // (`issues/qemus-amd-iommu-records-no-fault-for-a-message-its-table-refuses.md`);
-    // the AMD bench's row holds the record.
-    run.must_not_say(&format!("DMA FAULT owner=process unit0 stream={at} "))?;
-    eprintln!("  [usbd] {}; usbd never told of its No-Op", rewritten.trim());
-    Ok(())
-}
 
 /// Every AMD-Vi unit translating, every xHCI controller the kernel drives
 /// moved to a domain of its own, the boot stick bound through one, and no

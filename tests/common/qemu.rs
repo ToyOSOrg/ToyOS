@@ -712,9 +712,12 @@ pub enum Profile {
     /// can be made and read.
     MetalAmdViTestdev,
     /// [`Profile::HeadlessUsbSpare`] behind QEMU's AMD unit remapping
-    /// interrupts, its spare armed on MSI-X with the table in the register
-    /// BAR: a claim's message through its own requester's table.
+    /// interrupts: a claim's message through its own requester's table.
     HeadlessUsbSpareAmdVi,
+    /// [`Profile::HeadlessUsbSpareAmdVi`] with its spare armed on MSI-X, the
+    /// table in its register BAR, as the AMD bench's controllers have theirs;
+    /// QEMU's unit has no SMI filter, so that BAR is kept back.
+    HeadlessUsbSpareAmdViMsix,
     /// [`Profile::HeadlessUsbSpareAmdVi`] with the unit remapping nothing.
     HeadlessUsbSpareAmdViNoRemap,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
@@ -781,7 +784,8 @@ impl Profile {
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
             | Self::HeadlessUsbSpareAmdVi
-            | Self::HeadlessUsbSpareAmdViNoRemap => Arch::X86_64,
+            | Self::HeadlessUsbSpareAmdViNoRemap
+            | Self::HeadlessUsbSpareAmdViMsix => Arch::X86_64,
         }
     }
 
@@ -1060,13 +1064,14 @@ impl Profile {
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
-            Self::HeadlessUsbSpareAmdVi => Shape {
-                iommu: Some(Unit::AmdVi { intremap: true }),
-                xhci: &[XHCI_DEFAULT, XHCI_SPARE_MSIX],
-                ..Self::HeadlessUsbSpare.shape()
-            },
+            Self::HeadlessUsbSpareAmdVi => {
+                Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
+            }
             Self::HeadlessUsbSpareAmdViNoRemap => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::HeadlessUsbSpareAmdVi.shape() }
+            }
+            Self::HeadlessUsbSpareAmdViMsix => {
+                Shape { xhci: &[XHCI_DEFAULT, XHCI_SPARE_MSIX], ..Self::HeadlessUsbSpareAmdVi.shape() }
             }
             Self::MetalAmdViTestdev => Shape { probes: Probes::Testdevs, ..Self::MetalAmdVi.shape() },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },

@@ -12,7 +12,7 @@
 //!   every grant: the kernel's `DMA FAULT` record is the harness's to read,
 //!   and the claim refusing its interrupt read from then on is this job's.
 //! - `refused`: the claim, on a kernel that drives the function, refused.
-//! - `refused_unremapped`: the claim, on a machine that remaps nothing,
+//! - `unhanded`: the claim, on a machine that will not hand it over,
 //!   refused; the kernel's line says why.
 //! - `vector`: the claim's MSI-X table entry rewritten, by this job through
 //!   the BAR that holds it, to a vector that is not the claim's, and usbd
@@ -27,11 +27,6 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use toyos::endow::{Endowments, DEV_PREFIX, SERVE_PREFIX, SYSCAP_LABEL};
-
-/// The device-minting capability the test runner endows every job with.
-pub fn cap() -> SysCap {
-    Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability")
-}
 use toyos::ipc::Connection;
 use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
@@ -42,9 +37,15 @@ use toyos_inspect::{Value, MSG_INSPECT, MSG_SNAPSHOT, USB};
 
 const USBD: &str = "/system/bin/usbd";
 
+/// The device-minting capability the test runner endows every job with.
+pub fn cap() -> SysCap {
+    Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability")
+}
+
 /// The controllers a boot of this job leaves to a claim: QEMU's `qemu-xhci`
-/// on the guest profile, and the T14's Type-C controller. A machine has one
-/// of them; the other is absent.
+/// on the guest profiles, the T14's Type-C controller, and the AMD bench's
+/// xHCI, whose id its other controller shares (`claim` takes the one the
+/// kernel left). A machine has one of them.
 const SPARES: [PciId; 3] = [
     PciId { vendor: 0x1b36, device: 0x000d },
     PciId { vendor: 0x8086, device: 0x9a13 },
@@ -277,10 +278,10 @@ pub fn vector(cap: &SysCap) {
     println!("usbd_spare: usbd settled and was never told of its No-Op (noop = {noop:?})");
 }
 
-pub fn refused_unremapped(cap: &SysCap) {
+pub fn unhanded(cap: &SysCap) {
     let (id, claimed) = claim(cap);
     match claimed {
         Err(why) => println!("usbd_spare: the claim on {} was refused: {why:?}", spelled(id)),
-        Ok(_) => panic!("usbd_spare: the claim on {} was granted, on a machine that remaps nothing", spelled(id)),
+        Ok(_) => panic!("usbd_spare: the claim on {} was granted, on a machine that would not hand it over", spelled(id)),
     }
 }
