@@ -52,6 +52,7 @@ members = [
     "lib/fat32/check",
     "lib/gpt",
     "lib/hda",
+    "lib/ieee80211",
     "lib/input",
     "lib/inspect",
     "lib/logkeeper-api",
