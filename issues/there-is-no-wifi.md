@@ -230,48 +230,41 @@ Depends on: nothing; W6 waits on it.
   `build/ssh/tests/fuzz.rs`; and a third-party capture corpus from outside the
   references, beside the crate, with provenance, terms and `NOTICE` rows,
   pinned by hash.
-- **Owed: `lib/ieee80211`'s readings checked against the text.** W1 was
-  written without IEEE 802.11-2020, 802.11ax-2021 or the WFA WMM
-  Specification v1.2 at hand; each reading below rests on the writer's
-  knowledge, and on the captures where `lib/ieee80211/tests/corpus.rs` reads
-  them. Owner: the orchestrator.
-  - **Exit:** every reading below checked against the text; each one the text
-    contradicts fixed, and each leniency the text rules out turned into a
-    refusal by name.
-  - **Frame structure:** the protocol version, type 3 as Extension, the
-    reserved and contention-free subtypes; non-QoS Order as strictly
-    ordered; the four-address layout; Fragment Number and More Fragments;
-    `ManagementWithDs`; `GroupTransmitter` for a management SA and a data TA.
-  - **Control:** the BAR and BA Type values and TID_INFO; a BlockAckReq's
-    Fragment Number being 0; the HE bitmap sizes by Fragment Number bits 2
-    and 1, bit 0 a fragment level, bit 3 refused; the bandwidth-signaling TA.
-  - **Management bodies:** a beacon interval of 0 refused; the AID's two high
-    bits and its range of 1 to 2007.
-  - **Elements:** the Element ID Extension octet; each typed element allowed
-    once, WMM's included; the SSID's 32 octets; 1 to 8 Supported Rates and
-    Extended Supported Rates of length 0 refused; the selectors 127, 126, 123
-    and 122; the TIM's offset as N1/2, its bound of 251 octets and its minimum
-    of one bitmap octet; Country's string, triplets, operating triplet from
-    201 and channel bound of 200; MFPR as bit 6, MFPC as bit 7 and MFPR
-    without MFPC refused; the RSNXE's Field Length and SAE-H2E as bit 5; the
-    HT and VHT field splits and reserved values; Extended Capabilities' bit
-    numbering; HE Capabilities' 6, 11 and 4 octet fields, the 160 and 80+80
-    MCS sets under PHY Capabilities B3 and B4, PPE Thresholds Present as
-    B55, and the PPE length of 7 + 6 × (NSTS + 1) × RU count bits; HE
-    Operation's bits 14, 15 and 17 and its five-octet 6 GHz field; WMM's
-    layouts, version 1, AIFSN of at least 2 and each ACI once, and its exact
-    length.
-  - **Data and the window:** the A-MSDU subframe header and its padding; the
-    bridge-tunnel types 0x80F3 and 0x8137; CCMP's Ext IV bit; the §10.25.6
-    rules with the half-space boundary of 2048; the HE buffer of 256.
-  - **Each refusal's class**, `Malformed` or `Unsupported`.
-  - **The leniencies**, each to become a refusal if the text rules it out:
-    octets past the RSNE's and the RSNXE's last field ignored; octets past
-    the fields of HT and VHT Capabilities and Operation and of HE
-    Capabilities and Operation ignored (fewer refused); a Country element
-    accepted without its pad octet, and with one where none is needed. The
-    strict side, padding after an A-MSDU's last subframe refused, is checked
-    too.
+- **Checked against the text.** W1's readings were checked against IEEE
+  Std 802.11-2024, which incorporates 802.11ax-2021, and the WFA WMM
+  Specification v1.2.0 (#924, issuecomment-6173453493, which has the table
+  with page numbers). W1b fixed what the texts contradict, and the crate now
+  cites them:
+  - **Confirmed:** the protocol version; the four-address layout; Fragment
+    Number and More Fragments; `GroupTransmitter`; the QoS Control
+    subfields; the BAR and BA Type positions and TID_INFO; the
+    bandwidth-signaling TA; the beacon interval and AID; the elements'
+    lengths, the selectors, TIM, Country's string, triplets and operating
+    triplet from 201; RSNE, RSNXE, HT, VHT and HE fields and reserved
+    values; WMM; A-MSDU and its padding; CCMP's Ext IV; the §10.25.6.6
+    window and HE's buffer of 256.
+  - **Fixed:** the HE BlockAck bitmap is 64 or 256 bits (Table 9-38), and
+    B2–B1 of 1 or 3 or B3 set is `Malformed`. A management frame with To DS
+    alone is a QoS management frame, `Unsupported`, while From DS set stays
+    `Malformed` (Table 9-4). +HTC in a non-QoS data frame is `Malformed`
+    (§9.2.4.1.10). The subtypes Table 9-1 reserves are `ReservedSubtype`:
+    data 2, 3, 5 to 7 and 13, control 0, 1 and 15, and extension 2 to 15. A
+    BlockAckReq's nonzero Fragment Number and a reserved BAR or BA Type are
+    `Malformed`. Country channel numbers, a zero first channel or count
+    included, are no longer checked: §10.22.3 has a station ignore the rest
+    of the element at an invalid one. Regulatory Info is bits 3 to 6.
+  - **Leniencies:** octets past the RSNE's last field are refused, because
+    Table 9-130 does not mark it extensible. A Country element of odd length
+    is refused, whether its pad is missing or not needed. Octets past the
+    RSNXE and HT, VHT and HE elements stay ignored, as §10.28.8 requires.
+  - **Outside these texts:** a Length/Type value below 0x0600 is not a type
+    (IEEE Std 802.3-2022 §3.2.6). The RFC 1042 header is checked against
+    RFC 1042. The bridge-tunnel OUI and its two EtherTypes, 0x80F3 and
+    0x8137, are not in RFC 1042. They come from the selective translation
+    table of ISO/IEC TR 11802-5:1997 (formerly IEEE Std 802.1H), which
+    §5.1.4 names and which we do not have.
+  - **Owed:** those two entries checked against ISO/IEC TR 11802-5:1997.
+    Owner: the orchestrator.
 
 **W2, the handshakes, in `wlan`**, sans-IO: the 4-way and group-key
 handshakes, SAE by hash-to-element, PMF's keys, and the Transition Disable

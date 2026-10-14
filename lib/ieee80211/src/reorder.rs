@@ -1,4 +1,4 @@
-//! The receive reordering buffer of one block-ack agreement (§10.25.6): MPDUs held by sequence
+//! The receive reordering buffer of one block-ack agreement (§10.25.6.6): MPDUs held by sequence
 //! number and passed up in order.
 //!
 //! A frame in the window is held, and the run from the window's start passes up. A frame past
@@ -13,7 +13,7 @@ use core::num::{NonZeroU16, NonZeroUsize};
 
 use crate::{Refused, Seq};
 
-/// The largest buffer an HE agreement negotiates (802.11ax-2021 §9.4.1.14); HT and VHT stop at 64.
+/// The largest buffer an HE agreement negotiates (§10.25.2); HT and VHT stop at 64.
 pub const MAX_SIZE: u16 = 256;
 const HALF: u16 = Seq::MODULUS / 2;
 

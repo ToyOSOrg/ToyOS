@@ -60,7 +60,7 @@ pub struct AssociationResponse<'a> {
     pub elements: &'a [u8],
 }
 
-/// The Authentication Algorithm Number of SAE (Table 9-43).
+/// The Authentication Algorithm Number of SAE (§9.4.1.1).
 pub const ALGORITHM_SAE: u16 = 3;
 pub const ALGORITHM_OPEN: u16 = 0;
 pub const STATUS_SUCCESS: u16 = 0;

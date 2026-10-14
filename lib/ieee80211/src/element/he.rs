@@ -1,6 +1,6 @@
-//! HE Capabilities (802.11ax-2021 §9.4.2.248) and HE Operation (§9.4.2.249), Element ID Extension
-//! 35 and 36. Their lengths follow from bits inside them; a shorter element is refused, and octets
-//! past those fields are ignored, so a field a later amendment appends costs no beacon.
+//! HE Capabilities (§9.4.2.247) and HE Operation (§9.4.2.248), Element ID Extension 35 and 36.
+//! Their lengths follow from bits inside them; a shorter element is refused, and octets past those
+//! fields are ignored, as §10.28.8 requires of an extensible element.
 
 use crate::read::Reader;
 use crate::Refused;
@@ -35,7 +35,7 @@ impl<'a> HeCapabilities<'a> {
 }
 
 /// The PPE Thresholds field: NSTS and an RU index bitmask, then a pair of 3-bit thresholds per
-/// stream and RU size, padded to whole octets (§9.4.2.248.5).
+/// stream and RU size, padded to whole octets (§9.4.2.247.5).
 fn ppe<'a>(r: &mut Reader<'a>) -> Result<&'a [u8], Refused> {
     let &first = r.rest().first().ok_or(Refused::PpeThresholds)?;
     let streams = u32::from(first & 0b111).saturating_add(1);
@@ -62,7 +62,7 @@ pub struct HeOperation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SixGhz {
     pub primary_channel: u8,
-    /// Channel Width in bits 0 and 1, Duplicate Beacon bit 2, Regulatory Info bits 3 to 5.
+    /// Channel Width in bits 0 and 1, Duplicate Beacon bit 2, Regulatory Info bits 3 to 6.
     pub control: u8,
     pub center_segment0: u8,
     pub center_segment1: u8,

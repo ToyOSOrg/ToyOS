@@ -55,7 +55,7 @@ pub struct Management<'a> {
     pub body: &'a [u8],
 }
 
-/// To DS and From DS (Table 9-4).
+/// A data frame's To DS and From DS (Table 9-3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ds {
     /// Station to station within one BSS.
@@ -78,7 +78,7 @@ impl QosControl {
         low & 0x0F
     }
 
-    /// The Ack Policy subfield, bits 5 and 6 (Table 9-11).
+    /// The Ack Policy subfield, bits 5 and 6 (Table 9-10, Table 9-13).
     pub const fn ack_policy(self) -> u8 {
         let [low, _] = self.0.to_le_bytes();
         (low >> 5) & 0b11
@@ -117,7 +117,7 @@ impl Data<'_> {
         self.addr2
     }
 
-    /// The MSDU's destination (Table 9-30).
+    /// The MSDU's destination (Table 9-60).
     pub const fn da(&self) -> Address {
         match self.ds {
             Ds::Neither | Ds::FromDs => self.addr1,
@@ -125,7 +125,7 @@ impl Data<'_> {
         }
     }
 
-    /// The MSDU's source (Table 9-30).
+    /// The MSDU's source (Table 9-60).
     pub const fn sa(&self) -> Address {
         match self.ds {
             Ds::Neither | Ds::ToDs => self.addr2,
@@ -156,8 +156,10 @@ impl<'a> Frame<'a> {
         match (fc0 >> 2) & 0b11 {
             0 => {
                 let subtype = management_subtype(subtype)?;
-                if ds_bits != 0 {
-                    return Err(Refused::ManagementWithDs);
+                match ds_bits {
+                    0 => {}
+                    1 => return Err(Refused::QosManagement),
+                    _ => return Err(Refused::ManagementFromDs),
                 }
                 let da = r.address()?;
                 let sa = r.address()?;
@@ -182,6 +184,7 @@ impl<'a> Frame<'a> {
             1 => match subtype {
                 8 => BlockAckReq::parse(r.rest()).map(Self::BlockAckReq),
                 9 => BlockAck::parse(r.rest()).map(Self::BlockAck),
+                0 | 1 | 15 => Err(Refused::ReservedSubtype),
                 _ => Err(Refused::UnhandledControl),
             },
             2 => {
@@ -190,11 +193,11 @@ impl<'a> Frame<'a> {
                     4 => (false, true),
                     8 => (true, false),
                     12 => (true, true),
-                    13 => return Err(Refused::ReservedSubtype),
-                    _ => return Err(Refused::ContentionFreeData),
+                    2 | 3 | 5..=7 | 13 => return Err(Refused::ReservedSubtype),
+                    _ => return Err(Refused::UnhandledData),
                 };
                 if order && !qos {
-                    return Err(Refused::StrictlyOrdered);
+                    return Err(Refused::HtcInNonQosData);
                 }
                 let addr1 = r.address()?;
                 let addr2 = r.address()?;
@@ -225,7 +228,8 @@ impl<'a> Frame<'a> {
                     body: r.rest(),
                 }))
             }
-            _ => Err(Refused::ExtensionFrame),
+            _ if subtype <= 1 => Err(Refused::ExtensionFrame),
+            _ => Err(Refused::ReservedSubtype),
         }
     }
 }
