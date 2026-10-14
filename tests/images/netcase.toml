@@ -9,7 +9,7 @@
 # announce itself.
 
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "netstack", "soundserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "netstack", "soundserver", "test-runner"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it: the
 # kernel keeps the record ring and writes no file, so such a boot's `/log` is
@@ -51,3 +51,10 @@ devices = ["pci:01:08:02/1b36:0010"]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]

@@ -413,10 +413,10 @@ struct Machine {
 /// Posted once, when [`Machine::apertures`] leaves `Unknown`.
 static DECLARATION: Watch = Watch::new();
 
-/// How long a claim made before the declaration waits for it. A ceiling and no
-/// expectation: the server that declares is started before every claimant, and
-/// its tables' load and `_CRS` took 73 ms on the ThinkPad T14 and some 2 s on
-/// q35 under TCG.
+/// How long a claim made before the declaration waits for it: a failure
+/// ceiling, not an expectation, since the server that declares is started
+/// before every claimant. A claim that waits it out answers every claim of
+/// the boot, so no later one waits again.
 const DECLARATION_DEADLINE: crate::time::Duration = crate::time::Duration::from_secs(30);
 
 static MACHINE: Lock<Machine> = Lock::new(Machine {
@@ -670,7 +670,9 @@ pub fn declare(windows: &[RootBridgeWindow]) -> Result<(), aperture::Declined> {
         (Ok(()), _) => unreachable!("a declaration taken is the answer"),
     }
     drop(machine);
-    DECLARATION.post();
+    if declared != Err(aperture::Declined::Late) {
+        DECLARATION.post();
+    }
     declared
 }
 
@@ -967,7 +969,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
     // descriptors. It is asked for here rather than after the BARs because a
     // refusal that had already armed a vector and moved a function's BARs would
     // leave the machine changed by a hand-over that did not happen.
-    let Space { space, lend } = function_space(number).map_err(Refusal::Untranslated)?;
+    let Space { space, lend } = function_space(number, windows).map_err(Refusal::Untranslated)?;
 
     // The table's own BAR, so it can be left where it is and kept out of what
     // the holder maps.
@@ -1090,13 +1092,14 @@ fn place_bars(
     Ok((bar_at, bar_bytes))
 }
 
-/// Function `number`'s address space, made on its first claim.
-fn function_space(number: usize) -> Result<Space, IommuError> {
+/// Function `number`'s address space, made on its first claim clear of the
+/// declared `windows`.
+fn function_space(number: usize, windows: &[RootBridgeWindow]) -> Result<Space, IommuError> {
     let mut held = function(number).space.lock();
     match *held {
         Some(space) => Ok(space),
         None => {
-            let (space, lend) = OwnSpace::create(LEND_WINDOW)?;
+            let (space, lend) = OwnSpace::create(LEND_WINDOW, windows)?;
             *held = Some(Space { space, lend });
             Ok(Space { space, lend })
         }

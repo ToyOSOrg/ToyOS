@@ -147,6 +147,9 @@ pub trait Kernel {
     /// Hand the kernel `\_S5`'s `SLP_TYPa` for its power-off, which it takes
     /// once under a claim.
     fn s5(&self, slp_typ_a: u64) -> Result<Handed, Stopping>;
+    /// The machine is hardware-reduced (`toyos_abi::acpi::HARDWARE_REDUCED`):
+    /// no fixed hardware, and a power-off that writes no sleep type.
+    fn hardware_reduced(&self) -> bool;
     /// Declare the memory the PCI root bridges decode, once
     /// ([`crate::apertures`]).
     fn declare(&self, windows: &[RootBridgeWindow]) -> Result<Declared, Stopping>;
@@ -170,8 +173,6 @@ pub enum Handed {
     Kept,
     /// Wider than the register's field: the kernel kept nothing.
     TooWide,
-    /// A hardware-reduced machine's power-off writes no sleep type.
-    Unused,
 }
 
 /// What the kernel did with a declaration of the root bridges' memory.
@@ -780,6 +781,8 @@ pub mod tests {
         pub stops_after: Cell<Option<usize>>,
         /// The `SLP_TYPa` it was handed and kept.
         pub handed: Cell<Option<u64>>,
+        /// The machine is hardware-reduced.
+        pub reduced: bool,
         /// The windows it was declared, once.
         pub declared: RefCell<Option<Vec<RootBridgeWindow>>>,
         /// What each Sleep's wait takes, in turn; nothing once it runs out.
@@ -906,6 +909,10 @@ pub mod tests {
             }
             assert_eq!(self.handed.replace(Some(slp_typ_a)), None, "a second sleep type under one claim, which the kernel refuses");
             Ok(Handed::Kept)
+        }
+
+        fn hardware_reduced(&self) -> bool {
+            self.reduced
         }
 
         fn declare(&self, windows: &[RootBridgeWindow]) -> Result<Declared, Stopping> {

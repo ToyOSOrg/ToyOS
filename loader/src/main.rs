@@ -13,7 +13,7 @@ use efi::{
     cstr16, CStr16, DevicePath, EdidActive, Gop, Handle, HardDrive, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
     SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE,
 };
-use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, EDID_BLOCK, MAX_ROOT_BRIDGE_WINDOWS};
+use toyos_abi::boot::{KernelArgs, MemoryMapEntry, EDID_BLOCK};
 use toyos_bootmap::{Plan, Table, BOOT_MAP_BYTES, MAX_PAGES};
 use toyos_update::policy;
 use toyos_update::record::{self, Booted, Ended, Record};
@@ -33,10 +33,8 @@ mod blackbox;
 mod bootnext;
 mod efi;
 mod floor;
-mod gcd;
 mod loaderlog;
 mod microcode;
-mod rootbridge;
 mod rootimage;
 mod seed;
 mod slot;
@@ -527,16 +525,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         }
     }
 
-    // The last of the firmware questions, and asked here for the same reason
-    // the GOP's was asked before this: the protocol dies with boot services.
-    //
-    // Both readers answer memory the root bridges decode, which is what this
-    // array carries and the only thing the kernel asks of it.
-    let mut root_bridge_windows = [RootBridgeWindow::default(); MAX_ROOT_BRIDGE_WINDOWS];
-    let named = rootbridge::windows(&system_table, &mut root_bridge_windows);
-    let free = gcd::free_mmio(&system_table, &mut root_bridge_windows[named..]);
-    let root_bridge_window_count = (named + free) as u64;
-
     // Allocated before exiting boot services, which takes the allocator away.
     let pt_layout = Layout::new::<[Table; MAX_PAGES]>();
     // SAFETY: `pt_layout` has non-zero size.
@@ -646,8 +634,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         layout: toyos_abi::boot::LAYOUT,
         cmdline_addr: cmdline.as_ptr() as u64,
         cmdline_len: cmdline.len() as u64,
-        root_bridge_window_count,
-        root_bridge_windows,
         root_image_addr,
         root_image_len,
         root_partition_guid,

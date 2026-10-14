@@ -357,6 +357,13 @@ const MACHINE_TESTS: &[&str] = &[
     // spawns, each process holding its own — which no host build has. No
     // bench has two identical functions the kernel leaves to a claim.
     "a_drives_row_holds_one_process_per_function",
+    // A PCI claim on a boot whose `acpi` claim holder never declares the root
+    // bridges' memory: the kernel's wait for it and its deadline, on QEMU
+    // x86-64's q35 with two `edu` (`Profile::HeadlessTwoEdu`). The state
+    // machine is `toyos-pci`'s, host-tested; the wait on its watch and the
+    // refusal at its end are a claimant's thread in a booted kernel. No bench
+    // boots without its ACPI server.
+    "a_claim_waits_out_an_undeclared_machine",
     // Whether QEMU's virtio functions negotiated `VIRTIO_F_ACCESS_PLATFORM`
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
@@ -465,8 +472,7 @@ const MACHINE_TESTS: &[&str] = &[
     // display resize reaching the guest's mode: no metal machine has a
     // virtio-gpu, and the host tests drive `toyos-virtio-gpu` against a model
     // written from this design's own reading of §5.7, so only QEMU's device
-    // says it was read right. x86-64 q35 alone, `Profile::HeadlessVirtioGpu`:
-    // an AArch64 `virt` boot hands over no PCI claim yet. A boot of its own:
+    // says it was read right. x86-64 q35, `Profile::HeadlessVirtioGpu`. A boot of its own:
     // its `-vnc` display changes the display configuration the clipboard
     // test's premise, `-display none`, rests on.
     "the_compositor_drives_the_virtio_gpu",
@@ -1978,7 +1984,7 @@ const ACPI_MEDIATED_SAID: [&str; 10] = [
     "acpi: the FACS read through as type 10, its write was refused FacsWrite, and the memory after it was written and put back",
     "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; the i8042's row ClaimedPort; PM1a_CNT read and refused its write ReadOnlyPort; the POST port was written",
     "acpi: ACPI_ENABLE and ACPI_DISABLE were refused SMI_CMD as KernelCommand and SCI_EN stayed set, a write wider than a byte was refused CommandSpan, every firmware call made was read back from the port and counted on the boot processor, and a storm of them was refused CommandRate",
-    "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the NVMe controller diskserver holds HeldFunction, and the host bridge's 0x44 was written",
+    "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the xHCI controller this kernel drives HeldFunction, and the host bridge's 0x44 was written",
     "acpi: the lock a dead holder left taken read free; it was taken and given back, given back with GBL_RLS where the firmware had asked, and found pending while the firmware owned it",
     "acpi: a sleep type wider than three bits was refused InvalidArgument, the next holder's replaced a dead one's, and a second under one claim was refused AlreadyExists",
 ];
@@ -2034,6 +2040,9 @@ fn acpi_mediated_access(cpus: u32) -> Result<(), String> {
     said.must_be_clean()?;
     said.must_say("acpi: the Global Lock is the FACS's at ")?;
     said.must_say("acpi: the Global Lock given back for a holder that left it taken (its claim is gone)")?;
+    // The keeper's claim went without declaring the root bridges' memory, so
+    // none will be held this boot.
+    said.must_say("pcidev: no declaration of the root bridges' memory will be held: the acpi claim ended without declaring")?;
     // Whose range registers passed the unlisted read, and how this
     // hypervisor's second CPU holds its own beside them.
     let mtrr = ["mtrr: the boot processor's range registers: ", "mtrr: cpu1's range registers are "];
@@ -3747,6 +3756,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
+        "a_claim_waits_out_an_undeclared_machine" => a_claim_waits_out_an_undeclared_machine(),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
@@ -3950,6 +3960,42 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// A boot with no ACPI server: nothing declares the root bridges' memory, so
+/// the first claim of an `edu` waits on the declaration's watch until its
+/// deadline, and that claim and the second are each refused by that name,
+/// before either function is touched; nothing is handed over.
+fn a_claim_waits_out_an_undeclared_machine() -> Result<(), String> {
+    const WAITED: &str = "pcidev: a claim waited ";
+    const REFUSED: &str = "NOT HANDED OVER — no declaration of the memory the root bridges decode is held (nothing was declared before a claim's deadline)";
+    const DEADLINE: Duration = Duration::from_secs(30);
+    let options = BootOptions { profile: qemu::Profile::HeadlessTwoEdu, ..Default::default() };
+    let config = compile::repo_root().join("tests/images/undeclaredcase.toml");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    // The guest is quiet for the whole of the wait, which the deadline bounds:
+    // a ceiling past it, not a quiet guest's verdict.
+    let waited = qemu.drain_until(DEADLINE * 3, |l| l.contains(REFUSED));
+    let mut console = format!("{}\n{waited}", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "both claims refused", |t| t.matches(REFUSED).count() >= 2)
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let said = serial::Serial::named("the undeclared boot", console.clone());
+    said.must_not_say(" [1234:11e8] handed over")?;
+    said.must_not_say("pcidev: the acpi claim declared")?;
+    let waited = said.must_say(WAITED)?;
+    let took = waited.split_once(WAITED).and_then(|(_, rest)| rest.split(" for ").next()).unwrap_or_default().to_string();
+    let millis: u64 = took.strip_suffix("ms").and_then(|ms| ms.parse().ok()).ok_or_else(|| format!("{waited:?} names no duration in ms"))?;
+    if u128::from(millis) < DEADLINE.as_millis() {
+        return Err(format!("the claim waited {took}, short of its {DEADLINE:?} deadline:\n{console}"));
+    }
+    if said.text().matches(WAITED).count() != 1 {
+        return Err(format!("a claim after the deadline waited too:\n{console}"));
+    }
+    eprintln!("  [undeclared] {}", waited.trim());
+    for line in said.text().lines().filter(|l| l.contains(REFUSED)) {
+        eprintln!("  [undeclared] {}", line.trim());
+    }
+    Ok(())
+}
+
 /// A `drives` row's processes on a q35 with two `edu`, which the kernel drives
 /// neither of: the kernel hands each function over once, two `pciholder`s
 /// each say they hold one of the two, and the job reads both still held,
@@ -3992,8 +4038,9 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
 }
 
 /// Every AMD-Vi unit translating, every xHCI controller the kernel drives
-/// moved to a domain of its own, the boot stick bound through one, and no
-/// DMA refused.
+/// moved to a domain of its own that maps exactly its one pool, at the pool's
+/// own physical address, and nothing else; the boot stick bound through one,
+/// and no DMA refused.
 fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
     let text = kernel.text();
     let units: Vec<&str> =
@@ -4011,7 +4058,18 @@ fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
         return Err(format!("the kernel drove no xHCI controller:\n{text}"));
     }
     for at in &controllers {
-        kernel.must_say(&format!("iommu: {at} moves to domain"))?;
+        let moved = format!("iommu: {at} moves to domain");
+        let id = text
+            .lines()
+            .find_map(|l| l.split_once(moved.as_str())?.1.split_whitespace().next())
+            .ok_or_else(|| format!("{at} was moved to no domain:\n{text}"))?;
+        if !claims::at_identity(kernel, id) {
+            return Err(format!("{at}'s domain{id} is no kernel driver's, mapping at identity:\n{text}"));
+        }
+        match claims::mappings(kernel, id)?.as_slice() {
+            [(start, end, at_)] if at_ == start => eprintln!("  [amdvi] {at}: domain{id} maps its pool {start:#x}..{end:#x} at identity, and nothing else"),
+            other => return Err(format!("{at}'s domain{id} maps {other:x?}, not its one pool at identity")),
+        }
     }
     kernel.must_say("usb-storage: 1 device(s)")?;
     for unit in units {
@@ -5508,6 +5566,14 @@ fn acpi_tables_on_metal(back: &metal::Readback) -> Result<(), String> {
         return Err(format!("the kernel keeps {kept:?}, where this bench's \\_S5 is {:?}", bench.s5));
     }
     eprintln!("  [acpi] {}; {}", handed.trim(), kept.trim());
+    // The root bridges' memory declared out of the loaded namespace, and what
+    // that cost: the load's time, and each claim's wait for the declaration.
+    eprintln!("  [acpi] {}", log.must_say("acpiserver: the root bridges' memory declared: ")?.trim());
+    eprintln!("  [acpi] {}", log.must_say(" tables loaded in ")?.trim());
+    eprintln!("  [acpi] {}", kernel.must_say(claims::DECLARED)?.trim());
+    for waited in kernel.text().lines().filter(|l| l.contains("pcidev: a claim waited ")) {
+        eprintln!("  [acpi] {}", waited.trim());
+    }
     let others = number_between(kernel.text(), "SMP: ", " of ")? - 1;
     let compared: Vec<&str> = kernel.text().lines().filter(|l| l.contains("mtrr: cpu") && l.contains("'s range registers are ")).collect();
     if compared.len() as u64 != others || compared.iter().any(|l| l.contains("are on and not the boot processor's")) {

@@ -59,7 +59,9 @@ pub(super) fn run(devices: &[PciDevice]) {
         verdict(aborted, REFUSED)
     );
 
-    let (space, at) = OwnSpace::create(PAGE_2M).expect("smmu-selftest: a domain on the armed unit");
+    // At boot, before any declaration: on its guest the unit translates past
+    // the CPU's addresses, where no window bounds a claimed function's domain.
+    let (space, at) = OwnSpace::create(PAGE_2M, &[]).expect("smmu-selftest: a domain on the armed unit");
     space.place(at, phys, PAGE_2M).expect("smmu-selftest: the domain's own first leaf");
     space.attach(device.bus, device.dev, device.func);
     let landed = write(regs, at + 0x40, phys + 0x40);

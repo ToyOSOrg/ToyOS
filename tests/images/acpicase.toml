@@ -1,8 +1,10 @@
 # The ACPI server's death, judged on the T14 by `acpi_server_death`: the server
 # is built into the image and started by nothing but the one job, which holds
 # the claim it hands it. A boot that ends itself, as `tests/images/jobcase.toml` does.
+# Nothing here claims a PCI function: the claim's holders declare none of the
+# root bridges' memory, so every PCI claim on this boot is refused.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["logkeeper", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -29,19 +31,9 @@ args = ["test_rs_acpi_mediated", "reboot"]
 [symlinks]
 "bin/reboot" = "/system/bin/toybox"
 
-# The block service: the NVMe controller this machine's DATA is on, driven
-# from userland through its claim. Started again when it ends; the claim goes
-# back with the process and is minted again for the next.
-[programs.diskserver]
-service = true
-restart = true
-serves = ["block"]
-devices = ["pci:01:08:02/1b36:0010"]
-
-# The file servers: DATA, the log and the running slot's volume, one process
-# each, serving every program the directories of its role. Started again when
-# one ends, on the same ports.
+# The file servers: the log and the running slot's volume on the disk the
+# kernel drives, one process each. No block service: its NVMe claim would wait
+# on a declaration no holder here makes.
 [programs.fileserver]
 restart = true
 roles = ["data", "log", "boot"]
-receives = ["block"]

@@ -199,8 +199,9 @@ fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Fi
         host.notifies
     );
 
-    let mut unused = false;
-    if loaded.blocks.first().is_some_and(|dsdt| dsdt.is_ok()) {
+    if kernel.hardware_reduced() {
+        println!("acpiserver: \\_S5 not evaluated: this machine is hardware-reduced, and its power-off writes no sleep type");
+    } else if loaded.blocks.first().is_some_and(|dsdt| dsdt.is_ok()) {
         match s5(interpreter, host) {
             Ok((a, b)) => {
                 println!("acpiserver: \\_S5 evaluated: SLP_TYPa={a} SLP_TYPb={b}");
@@ -211,10 +212,6 @@ fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Fi
                         loaded.handed = true;
                     }
                     Ok(Handed::TooWide) => println!("acpiserver: \\_S5 refused: the kernel keeps no SLP_TYPa wider than the register's three bits"),
-                    Ok(Handed::Unused) => {
-                        println!("acpiserver: \\_S5 not handed: this machine is hardware-reduced, and its power-off writes no sleep type");
-                        unused = true;
-                    }
                     Err(Stopping) => {
                         println!("{STOPPING}");
                         return loaded;
@@ -228,7 +225,7 @@ fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Fi
             Err(kind) => println!("acpiserver: \\_S5 refused: {kind}"),
         }
     }
-    if !loaded.handed && !unused {
+    if !loaded.handed && !kernel.hardware_reduced() {
         toyos::error!("{NO_S5_HANDED}");
     }
     if !host.refused.is_empty() {
@@ -531,6 +528,16 @@ pub mod tests {
         }
         let kernel = machine(QEMU);
         assert!(!load_only(&kernel, 0x1000).handed);
+        assert_eq!(kernel.handed.get(), None);
+    }
+
+    /// A hardware-reduced machine powers off by no sleep type: `\_S5` is
+    /// not evaluated, and nothing is handed over or owed.
+    #[test]
+    fn a_hardware_reduced_machine_hands_over_no_sleep_type() {
+        let mut kernel = crafted(&sealed(b"DSDT", &s5_package(5, 0)), &[]);
+        kernel.reduced = true;
+        assert_eq!(load_only(&kernel, CRAFTED_RSDP), Loaded { blocks: vec![Ok(())], s5: None, handed: false });
         assert_eq!(kernel.handed.get(), None);
     }
 

@@ -122,41 +122,87 @@ pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// Every domain's addresses lie outside every root-bridge window firmware
-/// declared: a bridge may route a request in one of those before the unit
-/// sees it.
-pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
-    const DECLARED: &str = "pcidev: firmware declared root bridge memory: ";
+/// What the `acpi` claim's holder declared the root bridges decode.
+pub const DECLARED: &str = "pcidev: the acpi claim declared root bridge memory: ";
+
+/// `a..b` in hex, as the kernel's records write a span.
+fn span(text: &str) -> Option<(u64, u64)> {
+    let (from, to) = text.split_once("..")?;
+    let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
+    Some((hex(from)?, hex(to)?))
+}
+
+/// The declared windows, as `(start, end)`.
+fn declared(log: &Serial) -> Result<Vec<(u64, u64)>, String> {
     let declared = records(log)
         .find_map(|m| m.strip_prefix(DECLARED))
         .ok_or_else(|| format!("no `{DECLARED}` record:\n{}", log.text()))?;
-    let range = |text: &str| -> Option<(u64, u64)> {
-        let (from, to) = text.split_once("..")?;
-        let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
-        Some((hex(from)?, hex(to)?))
-    };
-    let windows = declared
+    declared
         .split(", ")
-        .map(|w| w.strip_prefix("mem ").and_then(range).ok_or_else(|| format!("{w:?} in {declared:?}")))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut domains = 0;
+        .map(|w| w.strip_prefix("mem ").and_then(span).ok_or_else(|| format!("{w:?} in {declared:?}")))
+        .collect()
+}
+
+/// Each mapping domain `id`'s records say it made, as `(physical start,
+/// physical end, device address)`.
+pub fn mappings(log: &Serial, id: &str) -> Result<Vec<(u64, u64, u64)>, String> {
+    let head = format!("iommu: domain{id} maps ");
+    records(log)
+        .filter_map(|m| m.strip_prefix(head.as_str()))
+        .map(|rest| {
+            let (phys, at) = rest.split_once(" at ").ok_or_else(|| format!("{rest:?}"))?;
+            let (start, end) = span(phys).ok_or_else(|| format!("{rest:?}"))?;
+            let at = u64::from_str_radix(at.split_whitespace().next().and_then(|a| a.strip_prefix("0x")).ok_or_else(|| format!("{rest:?}"))?, 16)
+                .map_err(|e| format!("{rest:?}: {e}"))?;
+            Ok((start, end, at))
+        })
+        .collect()
+}
+
+/// Whether domain `id`'s record says it maps each pool at identity: a kernel
+/// driver's.
+pub fn at_identity(log: &Serial, id: &str) -> bool {
+    let head = format!("iommu: domain{id} ");
+    records(log).any(|m| m.starts_with(head.as_str()) && m.contains(" maps each pool at identity"))
+}
+
+/// No domain reaches a root-bridge window the `acpi` claim's holder declared:
+/// a bridge may route a request in one before the unit sees it. A claimed
+/// function's domain hands out addresses outside every window; a kernel
+/// driver's maps each pool at its own physical address, which lies outside
+/// every window too.
+pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
+    let windows = declared(log)?;
+    let inside = |(floor, ceiling): (u64, u64)| windows.iter().copied().find(|(base, end)| *end > floor && *base < ceiling);
+    let (mut claimed, mut identity) = (0, 0);
     for record in records(log).filter(|m| m.starts_with("iommu: domain")) {
-        let Some((_, span)) = record.split_once(" addresses from ") else { continue };
-        let (floor, ceiling) = span
-            .split_once(" to ")
-            .and_then(|(from, to)| range(&format!("{from}..{to}")))
-            .ok_or_else(|| format!("an unreadable domain record: {record:?}"))?;
-        if let Some((base, end)) = windows.iter().find(|(base, end)| *end > floor && *base < ceiling) {
-            return Err(format!(
-                "{record:?} hands out addresses inside the root-bridge window {base:#x}..{end:#x}"
-            ));
+        let id = record["iommu: domain".len()..].split_whitespace().next().unwrap_or_default();
+        if record.contains(" maps each pool at identity") {
+            for (start, end, at) in mappings(log, id)? {
+                if at != start {
+                    return Err(format!("domain{id} is a kernel driver's and maps {start:#x}..{end:#x} at {at:#x}"));
+                }
+                if let Some((base, end)) = inside((start, end)) {
+                    return Err(format!("domain{id} maps a pool inside the root-bridge window {base:#x}..{end:#x}"));
+                }
+            }
+            identity += 1;
+            continue;
         }
-        domains += 1;
+        let Some((_, addresses)) = record.split_once(" addresses from ") else { continue };
+        let (floor, ceiling) = addresses
+            .split_once(" to ")
+            .and_then(|(from, to)| span(&format!("{from}..{to}")))
+            .ok_or_else(|| format!("an unreadable domain record: {record:?}"))?;
+        if let Some((base, end)) = inside((floor, ceiling)) {
+            return Err(format!("{record:?} hands out addresses inside the root-bridge window {base:#x}..{end:#x}"));
+        }
+        claimed += 1;
     }
-    if domains == 0 {
+    if claimed + identity == 0 {
         return Err(format!("no domain was made on this boot:\n{}", log.text()));
     }
-    eprintln!("  [claims] {domains} domain(s), none reaching a root-bridge window");
+    eprintln!("  [claims] {claimed} claimed domain(s) and {identity} kernel driver's, none reaching a root-bridge window");
     Ok(())
 }
 

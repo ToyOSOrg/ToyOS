@@ -29,7 +29,6 @@ use crate::mm::pmm::{self, PhysPage};
 use crate::mm::{DirectMap, Mmio, PAGE_2M, PAGE_SIZE};
 use crate::sync::Lock;
 use crate::time::{Duration, Tripwire};
-use toyos_abi::boot::RootBridgeWindow;
 use toyos_amdvi::dte::{Dte, Setting, DEVICE_IDS, ENTRY_BYTES};
 use toyos_amdvi::queue::{Command, ENTRIES};
 use toyos_amdvi::reg::{self, control, status, Features};
@@ -132,9 +131,9 @@ struct Ready {
 }
 
 /// Every unit the IVRS describes, switched off, and each this kernel can use
-/// programmed; `false` where firmware published no IVRS. `windows` and every
-/// IVMD range are what no domain's addresses reach.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeWindow]>) -> bool {
+/// programmed; `false` where firmware published no IVRS. Every IVMD range is
+/// what no claimed function's addresses reach.
+pub fn init(rsdp_addr: u64, devices: &[PciDevice]) -> bool {
     let ivrs = match toyos_acpi::ivrs(crate::drivers::acpi::direct_phys(), rsdp_addr) {
         Ok(ivrs) => ivrs,
         Err(IvrsRefused::Table(TableError::Absent)) => return false,
@@ -259,10 +258,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
         );
     }
     let identity = build(devices, &settings);
-    // Nothing where no declaration is held, as `vtd` treats its RMRRs.
-    let reserved = windows.map(|w| {
-        w.iter().map(|w| (w.base, w.end())).chain(ivmds.iter().map(|m| (m.start, m.start + m.length))).collect()
-    });
+    let reserved = ivmds.iter().map(|m| (m.start, m.start + m.length)).collect();
     domain::start(reserved, settings, ivmds.iter().map(|m| m.requesters).collect(), translated);
     log!("iommu: amdvi identity domain covers 0x0..{top:#x}, root={:#x}", identity.get());
     for unit in ready {

@@ -4,9 +4,9 @@
 //! [`bridge::Window`], the same pair of addresses that crate already declares.
 //! That the caller found nothing there is a statement about what it could
 //! *read*, and none of its sources says whether an address reaches the bus at
-//! all; what says that is
-//! [`toyos_abi::boot::KernelArgs::root_bridge_windows`], and an address inside
-//! none of those windows is never offered.
+//! all; what says that is the declaration of the root bridges' windows
+//! ([`crate::aperture`]), and an address inside none of them is never
+//! offered.
 
 use toyos_abi::acpi::RootBridgeWindow;
 

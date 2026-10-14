@@ -41,7 +41,9 @@ pub fn run(devices: &[PciDevice]) {
     let (on_own, on_identity) =
         (StreamId::pci(moved.bus, moved.dev, moved.func), StreamId::pci(kept.bus, kept.dev, kept.func));
 
-    let (space, at) = OwnSpace::create(PAGE_2M).expect("amdvi-selftest: a domain on the programmed unit");
+    // At boot, before any declaration: on its guest the unit translates past
+    // the CPU's addresses, where no window bounds a claimed function's domain.
+    let (space, at) = OwnSpace::create(PAGE_2M, &[]).expect("amdvi-selftest: a domain on the programmed unit");
     space.place(at, phys, PAGE_2M).expect("amdvi-selftest: the domain's own first leaf");
     space.attach(moved.bus, moved.dev, moved.func);
     let landed = write(moved_regs, at + 0x40, phys + 0x40);

@@ -267,9 +267,12 @@ impl Kernel for Claim<'_> {
     fn s5(&self, slp_typ_a: u64) -> Result<Handed, Stopping> {
         match self.dev.s5(slp_typ_a) {
             Err(SyscallError::InvalidArgument) => Ok(Handed::TooWide),
-            Err(SyscallError::NotSupported) if self.info.flags & HARDWARE_REDUCED != 0 => Ok(Handed::Unused),
             answer => Self::answered("the power-off's sleep type", answer).map(|()| Handed::Kept),
         }
+    }
+
+    fn hardware_reduced(&self) -> bool {
+        self.info.flags & HARDWARE_REDUCED != 0
     }
 
     fn declare(&self, windows: &[RootBridgeWindow]) -> Result<Declared, Stopping> {
