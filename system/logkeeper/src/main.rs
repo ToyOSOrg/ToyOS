@@ -540,8 +540,7 @@ impl Log {
 
     /// One rendered program line for the console, held whole until it takes it.
     ///
-    /// **Past the bound the oldest lines go, never the newest**, as a console
-    /// behind Linux's printk ring skips what the ring overwrote: the newest
+    /// **Past the bound the oldest lines go, never the newest**: the newest
     /// line is the one a watcher waits on — a test runner's end marker after
     /// a flood — and every line gone is in `/log`. They go down to half the
     /// bound at once, so a flood moves the held bytes once per half and not

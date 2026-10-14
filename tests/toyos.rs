@@ -625,7 +625,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // The T14's battery and AC adapter as the server read them through
         // its AML and its embedded controller: `battery_on_metal` says what
-        // is held, and prints the readings for Linux's on the same machine.
+        // is held, and prints the readings.
         // The same boot as `acpi_server_events`, held to the server's power
         // sources, which follow the first reading.
         "battery_read",
@@ -5684,8 +5684,7 @@ const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-metho
 /// evaluation gives back the lock it still holds as it ends
 /// (`finish`, `system/acpiserver/aml/src/exec.rs`), and the real lock
 /// word's exchange is `acpi_tables_on_metal`'s to hold. The lines are printed
-/// whole: their numbers are what Linux's `/sys/class/power_supply` reads on
-/// the same machine are compared against, by whoever holds both.
+/// whole.
 fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_hold")?;
     let log = back.log();

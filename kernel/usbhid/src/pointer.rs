@@ -14,8 +14,7 @@
 //!
 //! Appendix B.2 lays out bytes 0 to 2 and leaves the rest to the device.
 //! Byte 3 is read as the wheel because QEMU's `usb-mouse` report descriptor
-//! puts it there and Linux's boot mouse driver `usbmouse` reads it so; a
-//! mouse that puts something else there scrolls.
+//! puts it there; a mouse that puts something else there scrolls.
 
 use toyos_input::wire::BUTTONS;
 
