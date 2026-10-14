@@ -647,6 +647,8 @@ fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
 #[derive(Clone, Copy)]
 enum Refusal {
     NotRemapped,
+    /// This machine remaps and translates, and not for this function.
+    NotIsolated(&'static str),
     /// The machine translates messages, and none could be made for this function.
     NoMessage(Refused),
     NoInterrupt,
@@ -686,6 +688,9 @@ impl core::fmt::Display for Refusal {
                 "its interrupts would not be remapped on this machine, and a message that is not \
                  remapped can raise any vector on any CPU"
             ),
+            Self::NotIsolated(why) => {
+                write!(f, "no address space or message of its own can be made for it: {why}")
+            }
             Self::NoMessage(why) => write!(f, "no message of its own could be made for it — {why}"),
             Self::NoInterrupt => write!(
                 f,
@@ -856,6 +861,7 @@ pub fn claim(id: PciId) -> Result<(PciFunctionInfo, Claim), ClaimError> {
 /// whatever addresses its registers still held.
 fn bring_up(pci: PciDevice, id: PciId, number: usize) -> Result<Bound, Refusal> {
     let remapping = crate::iommu::remapping().map_err(|_| Refusal::NotRemapped)?;
+    crate::iommu::isolates(&pci).map_err(Refusal::NotIsolated)?;
 
     // What the function's previous holder left mapped goes before anything
     // attaches to its domain, and whatever is left of a reset [`release`] started on this

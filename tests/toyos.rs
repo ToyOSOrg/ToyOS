@@ -399,6 +399,11 @@ const MACHINE_TESTS: &[&str] = &[
     // to fault. What usbd names on the bus is `toyos-xhci`'s and its
     // simulator's to hold.
     "usbd_drives_the_spare",
+    // The same behind QEMU's AMD unit remapping interrupts: the claim's
+    // message through an entry of its function's own table, which no host
+    // build has and which the AMD bench's controllers, their MSI-X tables in
+    // their register BARs, cannot yet be claimed to show.
+    "usbd_drives_the_spare_amdvi",
     // A boot keyboard reporting more keys than its six slots name: the
     // kernel's driver reading a report a device delivered over xHCI has no host
     // build, and the T14 binds no USB keyboard.
@@ -992,6 +997,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         // table and the host tables on real silicon. The AMD bench's row.
         "amdvi_translates_the_stick_controller",
         metal::Metal { arms: TESTCASES, judge: |b| amdvi_translates(&b[0].kernel()) },
+    ),
+    (
+        // An AMD-Vi unit remapping every message: the boot stick's
+        // controller's interrupt delivered through an entry of its own
+        // table, on real silicon, and every I/O APIC named.
+        "amdvi_remaps_the_stick_controller",
+        metal::Metal { arms: TESTCASES, judge: |b| amdvi_remaps(&b[0].kernel()) },
     ),
     (
         // A machine whose units do not remap: the claim is refused before
@@ -3657,7 +3669,8 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_boots" => nvme_disk_boots(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
-        "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
+        "usbd_drives_the_spare" => usbd_drives_the_spare(test_config, qemu::Profile::HeadlessUsbSpare),
+        "usbd_drives_the_spare_amdvi" => usbd_drives_the_spare(test_config, qemu::Profile::HeadlessUsbSpareAmdVi),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
@@ -3738,14 +3751,14 @@ const USBD_NOOP: &str = "usbd: a No-Op command completed, announced by an interr
 /// claim is refused because the kernel drives the function. Between them, a
 /// holder of the function is killed and the claim asked for again at once,
 /// each round, which only a release finished before the end grants.
-fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
+fn usbd_drives_the_spare(test_config: &Path, profile: qemu::Profile) -> Result<(), String> {
     const JOB: &str = "usbd_spare";
     const SPARE: &str = "1b36:000d";
     let tests = compile::repo_root().join("tests/guest/rust-tests");
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
     let ends = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, END_RETURNS_CLAIMS);
     let options = BootOptions {
-        profile: qemu::Profile::HeadlessUsbSpare,
+        profile,
         kernel_params: &["xhci-leave=1b36:000d"],
         ..Default::default()
     };
@@ -3774,6 +3787,16 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
         return Err(format!("{at} was not handed over once, to the one usbd:\n{said}"));
     }
     run.must_say(&format!("PCI {at}: msi address="))?;
+    let amdvi = matches!(profile.iommu(), Some(qemu::Unit::AmdVi { .. }));
+    if amdvi {
+        // The claim's entry in its own table, present at the vector the
+        // hand-over names, and absent again at the release.
+        let vector = said
+            .split_once(&handed)
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .ok_or_else(|| format!("the hand-over names no vector:\n{said}"))?;
+        run.must_say(&format!("iommu: amdvi irte source={at} vector={vector} p=1 "))?;
+    }
 
     let faulted = job_window(&mut qemu, "test_rs_usbd_spare fault")?;
     let fault = serial::Serial::named("usbd_spare fault", faulted.clone());
@@ -3787,7 +3810,10 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
         .find(|l| l.contains("iommu: DMA FAULT owner=process") && l.contains(&format!("stream={at} ")))
         .ok_or_else(|| format!("no DMA FAULT record names {at}:\n{faulted}"))?;
     let addr = record.split_once(" addr=").and_then(|(_, a)| a.split_whitespace().next()).unwrap_or_default();
-    if u64::from_str_radix(addr.trim_start_matches("0x"), 16).ok() != u64::from_str_radix(aimed.trim_start_matches("0x"), 16).ok() {
+    // QEMU 11.1.1's AMD unit records no address
+    // (`issues/qemus-amd-iommu-page-fault-record-carries-no-address.md`).
+    let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
+    if !amdvi && hex(addr) != hex(&aimed) {
         return Err(format!("the record faults {addr}, and the job aimed at {aimed}: {record}"));
     }
     eprintln!("  [usbd] {at}: handed over, its No-Op answered; aimed at {aimed}: {}", record.trim());
@@ -3801,7 +3827,7 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
         test_config,
         &[],
         &[(JOB.to_string(), bin)],
-        BootOptions { profile: qemu::Profile::HeadlessUsbSpare, ..Default::default() },
+        BootOptions { profile, ..Default::default() },
     );
     serial::Serial::boot(&qemu).must_not_say("(xhci-leave)")?;
     let said = job_window(&mut qemu, "test_rs_usbd_spare refused")?;
@@ -3838,6 +3864,50 @@ fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
         eprintln!("  [amdvi] {}", unit.trim());
     }
     eprintln!("  [amdvi] {} controller(s) on domains of their own, the stick bound", controllers.len());
+    Ok(())
+}
+
+/// Every AMD-Vi unit remapping (`GAEn`, MMIO 0018h bit 17), every I/O APIC
+/// the MADT has named by the IVRS, and each xHCI controller the kernel drives
+/// armed through a present entry of its own table at the vector its message
+/// carries, the stick bound by those interrupts.
+fn amdvi_remaps(kernel: &serial::Serial) -> Result<(), String> {
+    let text = kernel.text();
+    let remaps = kernel.must_say("iommu: amdvi remaps every message through its requester's table")?;
+    let units: Vec<&str> =
+        text.lines().filter(|l| l.contains("iommu: amdvi unit") && l.contains(" translating control=")).collect();
+    for unit in &units {
+        let control = unit
+            .split_once(" control=")
+            .and_then(|(_, rest)| u64::from_str_radix(rest.split_whitespace().next()?.trim_start_matches("0x"), 16).ok())
+            .ok_or_else(|| format!("{unit:?} names no control"))?;
+        if control & 1 << 17 == 0 {
+            return Err(format!("{unit:?} leaves GAEn clear"));
+        }
+    }
+    if units.is_empty() {
+        return Err(format!("no AMD-Vi unit is translating:\n{text}"));
+    }
+    let apics = text.lines().filter(|l| l.contains("ioapic: id=") && l.contains(" at 0x")).count();
+    if !remaps.contains(&format!(" {apics} I/O APIC(s) named")) {
+        return Err(format!("{remaps:?} does not name the {apics} I/O APIC(s) the MADT has"));
+    }
+    kernel.must_not_say("iommu: DMA FAULT")?;
+    let controllers: Vec<&str> = text
+        .lines()
+        .filter_map(|l| l.split_once("xHCI: found at PCI ")?.1.split_whitespace().next())
+        .collect();
+    for at in &controllers {
+        let data = text
+            .lines()
+            .find_map(|l| l.split_once(&format!("PCI {at}: msix address="))?.1.split_once(" data=").map(|(_, d)| d.trim()))
+            .ok_or_else(|| format!("{at} was not armed on MSI-X:\n{text}"))?;
+        let vector = u32::from_str_radix(data.trim_start_matches("0x"), 16).map_err(|e| format!("{data}: {e}"))? & 0xFF;
+        kernel.must_say(&format!("iommu: amdvi irte source={at} vector={vector:#04x} p=1 "))?;
+    }
+    kernel.must_say("usb-storage: 1 device(s)")?;
+    eprintln!("  [amdvi] {}", remaps.trim());
+    eprintln!("  [amdvi] {} controller(s) armed through their own entries, the stick bound", controllers.len());
     Ok(())
 }
 

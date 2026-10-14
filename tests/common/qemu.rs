@@ -711,6 +711,9 @@ pub enum Profile {
     /// unit: the only machine on which a translating AMD-Vi unit's refusal
     /// can be made and read.
     MetalAmdViTestdev,
+    /// [`Profile::HeadlessUsbSpare`] behind QEMU's AMD unit remapping
+    /// interrupts: a claim's message through its own requester's table.
+    HeadlessUsbSpareAmdVi,
     /// QEMU `virt` on AArch64 (GICv3, AAVMF): a GOP from `ramfb`, the boot
     /// stick on an xHCI, the PL011, a virtio-rng for firmware's
     /// `EFI_RNG_PROTOCOL`, and nothing else — no NIC, NVMe or IOMMU. The
@@ -773,7 +776,8 @@ impl Profile {
             | Self::Metal
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
-            | Self::MetalAmdViTestdev => Arch::X86_64,
+            | Self::MetalAmdViTestdev
+            | Self::HeadlessUsbSpareAmdVi => Arch::X86_64,
         }
     }
 
@@ -835,11 +839,13 @@ pub const IOMMU_DEFAULT: Iommu = Iommu { aw_bits: 48, intremap: true, eim: false
 pub enum Unit {
     /// `intel-iommu`, with the capabilities it is staged with.
     Vtd(Iommu),
-    /// `amd-iommu`, interrupt remapping off, which needs no split irqchip,
-    /// and `dma-remap` on: without it QEMU 11.1.1 passes every function's DMA
-    /// untranslated whatever the unit is told (`hw/i386/amd_iommu.c:1165`
-    /// and `:1310` at v11.1.1), and a unit left blocking would block nothing.
-    AmdVi,
+    /// `amd-iommu` with `dma-remap` on: without it QEMU 11.1.1 passes every
+    /// function's DMA untranslated whatever the unit is told
+    /// (`hw/i386/amd_iommu.c:1165` and `:1310` at v11.1.1), and a unit left
+    /// blocking would block nothing. With interrupt remapping, which needs
+    /// the split irqchip, `xtsup` too: this suite's guests run in x2APIC,
+    /// and a unit without it remaps nothing for them.
+    AmdVi { intremap: bool },
 }
 
 /// The controller every profile but [`Profile::MetalUsb`] gets. `nec-usb-xhci`
@@ -1044,7 +1050,10 @@ impl Profile {
                 virtio_gpu: false,
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
-            Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi), ..Self::Metal.shape() },
+            Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
+            Self::HeadlessUsbSpareAmdVi => {
+                Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
+            }
             Self::MetalAmdViTestdev => Shape { probes: Probes::Testdevs, ..Self::MetalAmdVi.shape() },
             Self::HeadlessNoIommu => Shape { iommu: None, ..Self::Headless.shape() },
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
@@ -2136,10 +2145,10 @@ fn qemu_command(
     // is the option that does it, and it leaves i8042/ps2-kbd/ps2-mouse alone.
     qemu.arg("-nodefaults");
 
-    // AMD-Vi is staged with no interrupt remapping, and `virt_smmu`'s unit
-    // needs no message of a function's.
+    // `virt_smmu`'s unit needs no message of a function's.
     let remapped = match (&shape.iommu, shape.probes) {
         (Some(Unit::Vtd(unit)), _) => unit.intremap,
+        (Some(Unit::AmdVi { intremap }), _) => *intremap,
         (_, Probes::Its) => true,
         _ => false,
     };
@@ -2205,8 +2214,11 @@ fn qemu_command(
                 if unit.eim { "on" } else { "off" }
             ));
         }
-        Some(Unit::AmdVi) => {
+        Some(Unit::AmdVi { intremap: false }) => {
             qemu.arg("-device").arg("amd-iommu,intremap=off,dma-remap=on");
+        }
+        Some(Unit::AmdVi { intremap: true }) => {
+            qemu.arg("-device").arg("amd-iommu,intremap=on,xtsup=on,dma-remap=on");
         }
         None => {}
     }

@@ -313,6 +313,16 @@ pub fn remapping() -> Result<Remapping, NotRemapped> {
     }
 }
 
+/// Whether `function` can be given a domain of its own and a remapping entry
+/// no other requester reaches, or why not: a function no programmed unit
+/// serves, or one firmware reserves memory for, keeps the machine's own.
+pub fn isolates(function: &crate::drivers::pci::PciDevice) -> Result<(), &'static str> {
+    match unit::domain::untranslated(StreamId::pci(function.bus, function.dev, function.func)) {
+        None => Ok(()),
+        Some(why) => Err(why),
+    }
+}
+
 /// A claimed function's message, raising an interrupt of its own and
 /// translated for [`Self::function`] alone.
 ///

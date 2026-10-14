@@ -8,12 +8,14 @@
 //! blocked unless it names a domain, every enumerated function on the
 //! identity domain until a driver moves it to one of its own ([`domain`]),
 //! and the event log feeding `iommu::fault` ([`fault`]). A unit it cannot use
-//! is logged by register value and left off. No interrupt is remapped:
-//! every entry's interrupt half is invalid, so the unit forwards messages
-//! as written (Table 9).
+//! is logged by register value and left off. Where every unit programmed
+//! can remap, every message is remapped through its requester's own table
+//! ([`interrupt`]); where one cannot, every entry's interrupt half stays
+//! invalid and messages pass as written (Table 9).
 
 pub mod domain;
 pub mod fault;
+pub mod interrupt;
 #[cfg(feature = "boot-actuators")]
 pub(super) mod selftest;
 
@@ -30,7 +32,7 @@ use crate::mm::{DirectMap, Mmio, PAGE_2M, PAGE_SIZE};
 use crate::sync::Lock;
 use crate::time::{Duration, Tripwire};
 use toyos_abi::boot::RootBridgeWindow;
-use toyos_amdvi::dte::{Dte, Setting, DEVICE_IDS, ENTRY_BYTES};
+use toyos_amdvi::dte::{interrupts_blocked, Dte, Setting, DEVICE_IDS, ENTRY_BYTES};
 use toyos_amdvi::queue::{Command, ENTRIES};
 use toyos_amdvi::reg::{self, control, status, Features};
 use toyos_phys::Phys as Address;
@@ -129,6 +131,7 @@ struct Ready {
     base: u64,
     regs: Mmio,
     function: PciDevice,
+    features: Features,
 }
 
 /// Every unit the IVRS describes, switched off, and each this kernel can use
@@ -163,6 +166,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
     // The ids a unit that will be programmed serves: a function outside them
     // is behind a unit left off, and no domain of its own would translate.
     let mut translated: Vec<(u16, u16)> = Vec::new();
+    // The I/O APICs a unit that will be programmed names, by MADT id.
+    let mut apics: Vec<(u8, u16)> = Vec::new();
     let mut units = 0usize;
     for block in ivrs.blocks() {
         match block {
@@ -175,10 +180,15 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
                 let function = describe_function(units, &unit, devices);
                 let mut usable = Ok(());
                 let mut serves: Vec<(u16, u16)> = Vec::new();
+                let mut specials: Vec<(u8, u16)> = Vec::new();
                 for entry in ivrs.devices(&unit) {
                     match entry {
                         Ok(entry) => {
                             log!("iommu: amdvi unit{units} serves {}", served(&ivrs, &entry));
+                            // Variety 01h: the handle is an I/O APIC's MADT id (Table 109).
+                            if let DeviceEntry::Special { handle, used, variety: 1, .. } = entry {
+                                specials.push((handle, used));
+                            }
                             match declare(&entry, &mut settings, enumerated) {
                                 Ok(ids) => serves.extend(ids),
                                 Err(why) => usable = Err(why),
@@ -196,7 +206,9 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
                     match usable.and_then(|()| usable_unit(&unit, regs, function)) {
                         Ok(function) => {
                             translated.extend(serves);
-                            ready.push(Ready { index: units, base: unit.base, regs, function });
+                            apics.extend(specials);
+                            let features = Features(regs.read_u64(reg::EXTENDED_FEATURES));
+                            ready.push(Ready { index: units, base: unit.base, regs, function, features });
                         }
                         Err(why) => log!("iommu: amdvi unit{units} is left off: {why}"),
                     }
@@ -258,12 +270,31 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: &[RootBridgeWindow])
             if end <= top { "inside" } else { "OUTSIDE" }
         );
     }
-    let identity = build(devices, &settings);
+    let x2apic = super::control_regs::apic_mode() == super::control_regs::ApicMode::X2apic;
+    let remap = interrupt::remappable(
+        ready.iter().all(|unit| unit.features.guest_apic()),
+        ready.iter().all(|unit| unit.features.x2apic()),
+        x2apic,
+        &apics,
+        &super::ioapic::ids(),
+    );
+    #[cfg(feature = "boot-actuators")]
+    let remap = if crate::actuator::iommu_no_remap() { None } else { remap };
+    let identity = build(devices, &settings, remap.is_some());
     let reserved = windows.iter().map(|w| (w.base, w.end())).chain(ivmds.iter().map(|m| (m.start, m.start + m.length)));
     domain::start(reserved.collect(), settings, ivmds.iter().map(|m| m.requesters).collect(), translated);
     log!("iommu: amdvi identity domain covers 0x0..{top:#x}, root={:#x}", identity.get());
+    if let Some(extended) = remap {
+        log!(
+            "iommu: amdvi remaps every message through its requester's table: 128-bit entries, x2apic \
+             destinations={}, {} I/O APIC(s) named",
+            yn(extended),
+            apics.len()
+        );
+        interrupt::start(extended, apics);
+    }
     for unit in ready {
-        program(unit, devices);
+        program(unit, devices, remap);
     }
     true
 }
@@ -330,7 +361,7 @@ fn usable_unit(unit: &Unit, regs: Mmio, function: Option<PciDevice>) -> Result<P
 
 /// The device table, every entry blocked but each enumerated function's,
 /// which names the identity domain; answers the identity domain's root.
-fn build(devices: &[PciDevice], settings: &[Setting]) -> Address<12> {
+fn build(devices: &[PciDevice], settings: &[Setting], remap: bool) -> Address<12> {
     let mut tables = TABLES.lock();
     let page = pmm::alloc_page().expect("amdvi: no physical memory for the device table");
     let at = page.direct_map().phys();
@@ -342,6 +373,12 @@ fn build(devices: &[PciDevice], settings: &[Setting]) -> Address<12> {
         let slot = entry(id);
         slot.write_u64(8, words[1]);
         slot.write_u64(0, words[0]);
+        // Where every unit remaps, every requester's fixed and arbitrated
+        // messages are aborted until an entry of its own is written.
+        if remap {
+            memory(DEVICE_TABLE.load(Ordering::Acquire) + u64::from(id) * ENTRY_BYTES as u64 + 16, 8)
+                .write_u64(0, interrupts_blocked(*setting));
+        }
     }
     let root = tables.alloc();
     let mut phys = 0;
@@ -418,8 +455,8 @@ fn submit(commands: &[Command]) {
 /// interrupt armed and the exclusion range cleared before the unit is on;
 /// then empties every cache it holds and names each enumerated
 /// function's entry.
-fn program(unit: Ready, devices: &[PciDevice]) {
-    let Ready { index, base, regs, function } = unit;
+fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
+    let Ready { index, base, regs, function, .. } = unit;
     let (commands, events, done) = {
         let mut tables = TABLES.lock();
         (tables.alloc(), tables.alloc(), tables.alloc())
@@ -441,7 +478,17 @@ fn program(unit: Ready, devices: &[PciDevice]) {
     // Written whole: a field firmware left, `DevTblSegEn` among them, would
     // otherwise change how the unit reads this table. `switch_off` logged
     // what it was handed over with.
-    let on = control::COHERENT | control::EVENT_LOG_EN | control::EVENT_INT_EN | control::CMD_BUF_EN | control::IOMMU_EN;
+    let remapping = match remap {
+        None => 0,
+        Some(false) => control::GA_EN,
+        Some(true) => control::GA_EN | control::XT_EN,
+    };
+    let on = control::COHERENT
+        | control::EVENT_LOG_EN
+        | control::EVENT_INT_EN
+        | control::CMD_BUF_EN
+        | control::IOMMU_EN
+        | remapping;
     regs.write_u64(reg::CONTROL, on);
     let running = status::CMD_BUF_RUN | status::EVENT_LOG_RUN;
     spin_until(
