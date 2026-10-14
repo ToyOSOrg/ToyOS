@@ -59,7 +59,9 @@ pub(crate) fn give_back(vector: ClaimVector) {
 pub(super) fn install(idt: &mut Idt) {
     let first = (stubs as *const () as usize).next_multiple_of(STRIDE);
     for number in 0..COUNT {
-        idt.entries[usize::from(FIRST) + number] = IdtEntry::at_address((first + number * STRIDE) as u64);
+        let entry = &mut idt.entries[usize::from(FIRST) + number];
+        assert!(entry.type_attr == 0, "idt: vector {:#04x} is declared and a claim vector", usize::from(FIRST) + number);
+        *entry = IdtEntry::at_address((first + number * STRIDE) as u64);
     }
 }
 

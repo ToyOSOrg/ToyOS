@@ -428,7 +428,11 @@ impl core::fmt::Display for Refused {
                 "the IORT gives it DeviceID {id:#x}, which another claimed function's messages \
                  are already translated by"
             ),
-            Self::NoLpi(function) => write!(f, "LPI {} of its function {function} is past the LPIs the redistributor has", lpi::FIRST as usize + function),
+            Self::NoLpi(function) => write!(
+                f,
+                "function {function}'s LPI {} is past the redistributor's LPIs",
+                lpi::FIRST as usize + function
+            ),
             Self::NoMemory => write!(f, "there is no memory for its translation table"),
         }
     }

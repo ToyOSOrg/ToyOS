@@ -18,7 +18,7 @@ them, and each one is an interrupt cpu0 takes before anything else it runs.
 that does to a CPU for a kernel driver's source; a claim is the same source
 with its holder outside the kernel.
 
-The lever is the slot's own translation: on x86-64 its remapping entry, which
+The lever is the claim's own translation: on x86-64 its remapping entry, which
 made not present stops the function's messages at the unit; on AArch64 its
 LPI's configuration byte, which cleared and followed by an `INV` disables
 the LPI at the redistributor. Masking through the device would need the
