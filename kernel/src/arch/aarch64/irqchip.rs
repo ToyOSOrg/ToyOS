@@ -349,9 +349,10 @@ pub(super) fn iommu_events() -> u32 {
 }
 
 /// Write `ICC_SGI1R_EL1` whole: the SGI it names is raised, after every store
-/// before it. Only a `DSB` orders a system register write after stores to
-/// Normal memory, so without it a target could take the SGI before the store
-/// it announces (Linux's `gic_ipi_send_mask`, `dsb(ishst)`).
+/// before it. Only a `DSB` orders a System register write after stores to
+/// Normal memory: no later instruction alters state until it completes (Arm
+/// ARM DDI 0487 M.d, B2.6.9), and a `DMB` orders memory accesses alone. Without
+/// it a target could take the SGI before the store it announces.
 fn raise(value: u64) {
     // SAFETY: a barrier and a write of `ICC_SGI1R_EL1`, which raises an SGI;
     // the `ISB` sends it before whatever follows. No `nomem`: the barrier

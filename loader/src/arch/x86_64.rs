@@ -33,6 +33,36 @@ pub fn counter_hz() -> Option<u64> {
     toyos_tsc::stated_hz((max >= 0x15).then(|| leaf(0x15)), (max >= 0x16).then(|| leaf(0x16)))
 }
 
+/// This CPU as its vendor's microcode names it, or why it loads none.
+pub fn microcode_cpu() -> Option<Result<toyos_microcode::Cpu, &'static str>> {
+    use core::arch::x86_64::__cpuid;
+    let id = __cpuid(0);
+    let leaf_1 = __cpuid(1);
+    // CPUID.01H:ECX[31], which a hypervisor sets for its guest (APM Vol. 3,
+    // 24594 rev 3.36, §E.3.2).
+    if leaf_1.ecx & 1 << 31 != 0 {
+        return Some(Err("a hypervisor owns this CPU's microcode"));
+    }
+    let signature = leaf_1.eax;
+    let vendor: [u8; 12] = core::array::from_fn(|i| [id.ebx, id.edx, id.ecx][i / 4].to_le_bytes()[i % 4]);
+    Some(match &vendor {
+        b"GenuineIntel" => {
+            const IA32_PLATFORM_ID: u32 = 0x17;
+            let (low, high): (u32, u32);
+            // SAFETY: RDMSR of `IA32_PLATFORM_ID`, which every Intel part
+            // the loader runs on has (SDM Vol. 4 Table 2-2), reads it and
+            // nothing else.
+            unsafe {
+                core::arch::asm!("rdmsr", in("ecx") IA32_PLATFORM_ID, out("eax") low, out("edx") high, options(nomem, nostack, preserves_flags));
+            }
+            let platform = toyos_microcode::PlatformId::from_msr(u64::from(high) << 32 | u64::from(low));
+            Ok(toyos_microcode::Cpu::Intel { signature, platform })
+        }
+        b"AuthenticAMD" => Ok(toyos_microcode::Cpu::Amd { signature }),
+        _ => Err("ToyOS loads no microcode of this CPU's vendor"),
+    })
+}
+
 /// `CLFLUSH`'s line on every x86-64 part.
 const LINE: u64 = 64;
 

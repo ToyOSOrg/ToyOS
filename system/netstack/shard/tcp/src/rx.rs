@@ -12,14 +12,13 @@
 //! doubles. Text nobody reads grows nothing, so a peer alone cannot make a connection hold more
 //! than the initial capacity, and a connection whose round trip is unknown keeps it.
 //!
-//! **The round trip is the receiver's own** (Linux's `tcp_rcv_rtt_measure_ts` and
-//! `tcp_rcv_rtt_measure`): a downloader sends no data, so the sender's SRTT keeps the handshake's
-//! sample while queueing lengthens the path. With timestamps, a full-sized segment carrying a
-//! TSecr not yet seen samples the age of that echo, at least one tick and at most twice the
-//! estimate, averaged with gain 1/8: an echo aged by the peer's own silence moves the estimate
-//! by an eighth at most. Full-sized is the largest segment the peer sends, learned from what
-//! arrives (Linux's `tcp_measure_rcv_mss`), never this end's send MSS: a peer whose segments are
-//! shorter would never be sampled. Without timestamps, the time the peer took to fill the window
+//! **The round trip is the receiver's own**: a downloader sends no data, so the sender's SRTT
+//! keeps the handshake's sample while queueing lengthens the path. With timestamps, a full-sized
+//! segment carrying a TSecr not yet seen samples the age of that echo, at least one tick and at
+//! most twice the estimate, averaged with RFC 6298 §2.3's gain of 1/8: an echo aged by the
+//! peer's own silence moves the estimate by an eighth at most. Full-sized is the largest segment
+//! the peer sends, learned from what arrives, never this end's send MSS: a peer whose segments
+//! are shorter would never be sampled. Without timestamps, the time the peer took to fill the window
 //! offered is at least one round trip, and the least such time is kept.
 
 use alloc::vec::Vec;
@@ -175,8 +174,9 @@ impl Rx {
         }
     }
 
-    /// Linux's `tcp_measure_rcv_mss`: a segment as long as the largest so far raises it, up to what
-    /// our SYN offered; two in a row of one shorter length, not under the floor, lower it to that.
+    /// The peer's segment size as it arrives: a segment as long as the largest so far raises it,
+    /// up to what our SYN offered; two in a row of one shorter length, not under the floor, lower
+    /// it to that.
     fn measure_mss(&mut self, len: u32) {
         let (floor, offered) = self.mss_bounds;
         let short = core::mem::replace(&mut self.short, 0);
@@ -352,7 +352,7 @@ impl Rx {
     pub fn offer(&self, mss: u32) -> (Seq, u16) {
         let edge = self.candidate(mss).unwrap_or(self.edge);
         // A window the shift would round to zero is offered as one unit where the buffer has the
-        // room, as Linux does: else a sender owing the text of a hole waits on a window not shut.
+        // room: else a sender owing the text of a hole waits on a window not shut.
         let unit = 1u32.checked_shl(u32::from(self.shift)).unwrap_or(u32::MAX);
         let window = edge.since(self.next);
         let edge = if window > 0 && window < unit && unit <= self.free() { self.next.add(unit) } else { edge };

@@ -609,7 +609,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // The T14's battery and AC adapter as the server read them through
         // its AML and its embedded controller: `battery_on_metal` says what
-        // is held, and prints the readings for Linux's on the same machine.
+        // is held, and prints the readings.
         // The same boot as `acpi_server_events`, held to the server's power
         // sources, which follow the first reading.
         "battery_read",
@@ -919,10 +919,16 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: METALCASE, judge: |b| ps2server::armed(&b[0].log(), &b[0].kernel()) },
     ),
     (
-        // Every CPU's microcode line, held to what its bench is held to:
-        // `microcode_on_metal` says which machine is held to what.
+        // The patch the loader found on ROOT, and every CPU's microcode line,
+        // held to what its bench is held to: `microcode_on_metal` says which
+        // machine is held to what. Metal alone: no host model has either
+        // vendor's patch loader, and a QEMU guest's microcode is the
+        // hypervisor's. The T14 and the AMD bench.
         "microcode",
-        metal::Metal { arms: METALCASE, judge: |b| microcode_on_metal(b[0].kernel().text(), b[0].cpus()?) },
+        metal::Metal {
+            arms: METALCASE,
+            judge: |b| microcode_on_metal(b[0].loader().text(), b[0].kernel().text(), b[0].cpus()?),
+        },
     ),
     (
         // Two boots the suite already flashes: the device boot writes and
@@ -4711,15 +4717,19 @@ fn ioapic_topology(log: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// What each CPU's `microcode:` line says: one line from each CPU this
-/// machine brought up, all of one signature, none refused, and each saying
-/// what a bench of that signature is held to.
+/// What the loader handed and what each CPU's `microcode:` line says: the
+/// loader found its bench's patch where `images/microcode.toml`'s `benches`
+/// put it, and one line from each CPU this machine brought up, all of one
+/// signature, none refused, and each saying what a bench of that signature
+/// is held to.
 ///
-/// - **The T14**, 0x806c1: every CPU runs 0xbe, the update Intel's
+/// - **The T14**, 0x806c1 platform 7: every CPU runs 0xbe, the update Intel's
 ///   `06-8c-01` holds for it, whether it found it `current` or `loaded` it.
-/// - **The AMD bench**, 0x860f01: ToyOS has no AMD loader, and every CPU says
-///   so and reads nothing.
-fn microcode_on_metal(log: &str, cpus: u32) -> Result<(), String> {
+/// - **The AMD bench**, 0x860f01: every CPU runs 0x860010d, the patch AMD's
+///   Family 17h container holds for it, and `loaded` it: its firmware loads
+///   0x8600106, and a core's second thread writes the patch too, over the
+///   level its first loaded.
+fn microcode_on_metal(loader: &str, log: &str, cpus: u32) -> Result<(), String> {
     const T14: u32 = 0x0008_06c1;
     const AMD_BENCH: u32 = 0x0086_0f01;
     let lines = microcode_lines(log)?;
@@ -4732,17 +4742,23 @@ fn microcode_on_metal(log: &str, cpus: u32) -> Result<(), String> {
     if let Some(other) = lines.iter().find(|line| line.signature != signature) {
         return Err(format!("cpu0 is signature {signature:#x} and {other:?} is not"));
     }
-    let (holds, held_to): (fn(&MicrocodeSaid) -> bool, &str) = match signature {
+    let (handed, holds, held_to): (&str, fn(&MicrocodeSaid) -> bool, &str) = match signature {
         T14 => (
+            "Microcode: /system/share/microcode/intel/06-8c-01/80, 112640 bytes at ",
             |said| matches!(said, MicrocodeSaid::Read { outcome, running: 0xbe } if ["current", "loaded"].contains(&outcome.as_str())),
             "every CPU runs 0xbe, which Intel's 06-8c-01 holds for it",
         ),
         AMD_BENCH => (
-            |said| matches!(said, MicrocodeSaid::Unread(why) if why == "ToyOS has no Amd microcode loader"),
-            "every CPU says ToyOS has no Amd microcode loader",
+            "Microcode: /system/share/microcode/amd/17-60-01, 3200 bytes at ",
+            |said| matches!(said, MicrocodeSaid::Read { outcome, running: 0x0860_010d } if outcome == "loaded"),
+            "every CPU loaded 0x860010d, which AMD's Family 17h container holds for it",
         ),
         _ => return Err(format!("no bench of signature {signature:#x} says what its CPUs are held to")),
     };
+    if !loader.contains(handed) {
+        let said: Vec<&str> = loader.lines().filter(|l| l.contains("Microcode: ")).collect();
+        return Err(format!("loader.log does not say {handed:?}; its microcode lines: {said:?}"));
+    }
     if let Some(line) = lines.iter().find(|line| !holds(&line.said)) {
         return Err(format!("{line:?}: on signature {signature:#x} {held_to}"));
     }
@@ -4763,8 +4779,8 @@ enum MicrocodeSaid {
     /// It read its revision: `loaded`, `current`, `refused`, or `loads` for
     /// one that loads nothing, and the revision it runs.
     Read { outcome: String, running: u32 },
-    /// It read nothing, for this reason.
-    Unread(String),
+    /// It read nothing: its vendor has no loader.
+    Unread,
 }
 
 /// Every `microcode:` line in `log`, or the first CPU that refused the update
@@ -4782,7 +4798,8 @@ fn microcode_lines(log: &str) -> Result<Vec<MicrocodeLine>, String> {
                 outcome: words.get(found + 2).ok_or_else(unreadable)?.to_string(),
                 running: hex("running").ok_or_else(unreadable)?,
             },
-            None => MicrocodeSaid::Unread(rest.split_once("loads nothing: ").ok_or_else(unreadable)?.1.to_string()),
+            None if rest.contains(" loads nothing: ") => MicrocodeSaid::Unread,
+            None => return Err(unreadable()),
         };
         out.push(MicrocodeLine {
             cpu: words.first().and_then(|id| id.parse().ok()).ok_or_else(unreadable)?,
@@ -5452,8 +5469,7 @@ const T14_POWER_SOURCES: &str = "acpiserver: power sources: 1 of 1 control-metho
 /// evaluation gives back the lock it still holds as it ends
 /// (`finish`, `system/acpiserver/aml/src/exec.rs`), and the real lock
 /// word's exchange is `acpi_tables_on_metal`'s to hold. The lines are printed
-/// whole: their numbers are what Linux's `/sys/class/power_supply` reads on
-/// the same machine are compared against, by whoever holds both.
+/// whole.
 fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_hold")?;
     let log = back.log();

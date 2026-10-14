@@ -772,12 +772,18 @@ pub const FLASHABLE: &[&str] = &[
     // without interrupt remapping. It writes no register a reset does not
     // return to firmware.
     "iommu-no-remap",
-    // The BSP is handed the T14's Intel update with its header's revision
+    // Every CPU is handed the loader's Intel update with its header's revision
     // raised by one and its checksum sealed again. Its payload is Intel's own,
     // the revision the CPU already runs, so the CPU refuses it or runs what it
     // ran, and the boot goes on to userland and ends the way an unarmed one
     // does. Nothing it writes outlives a hard reset (SDM Vol. 3A §12.11.6.1).
     "microcode-reseal",
+    // Every CPU is handed the loader's AMD patch with one byte of its data
+    // flipped. The AMD bench's CPUs refuse it with `#GP` and keep the level
+    // their firmware loaded, and the boot goes on to userland and ends the
+    // way an unarmed one does. Nothing it writes outlives a reset: the patch
+    // level resets at warm and cold reset (55922 §1.4.4.11).
+    "microcode-amd-flip",
     // It seals this boot's own record under an identity one bit from this
     // stick's, so the pass that finds it clears it and boots a kernel. The page
     // is memory the loader allocated and the machine is what it was after.
@@ -927,8 +933,9 @@ fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
     Ok(Flashable { path: path.to_path_buf(), bytes, esp, log })
 }
 
-/// The one partition of type `guid`, numbered as Linux numbers it: the entry
-/// index plus one.
+/// The one partition of type `guid`, numbered as the flashing host's
+/// partition nodes are (`toyos_build::disk`'s `part_name`): the entry index
+/// plus one.
 fn one_partition(
     file: &mut std::fs::File,
     guid: toyos_gpt::Guid,

@@ -35,6 +35,7 @@ mod efi;
 mod floor;
 mod gcd;
 mod loaderlog;
+mod microcode;
 mod rootbridge;
 mod rootimage;
 mod seed;
@@ -515,7 +516,7 @@ fn report_reach(what: &str, at: u64, len: u64) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, microcode: Option<&'static [u8]>, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -610,6 +611,12 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
 
     let (root_image_addr, root_image_len, root_partition_guid, root_read_ticks) = root_image.handoff();
 
+    // The BSP loads it before `mm::init`, through the boot map.
+    let (microcode_addr, microcode_len) = microcode.map_or((0, 0), |patch| (patch.as_ptr() as u64, patch.len() as u64));
+    if microcode_len != 0 {
+        report_reach("Microcode patch", microcode_addr, microcode_len);
+    }
+
     // Built before the exit so the address the kernel is handed is one this
     // loader can still print and refuse on.
     let mut kernel_args = KernelArgs {
@@ -655,6 +662,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         wall_clock_known: 0,
         gop_edid: [0; EDID_BLOCK],
         gop_edid_len: 0,
+        microcode_addr,
+        microcode_len,
     };
     if let Some(edid) = gop.as_ref().and_then(|g| g.edid) {
         kernel_args.gop_edid = edid;
@@ -956,6 +965,8 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     println!("Loading kernel elf...");
     let loaded_kernel = load_kernel_elf(&kernel_bytes);
 
+    let microcode = microcode::find(system_table.boot_services(), &chosen.root);
+
     // Query UEFI GOP before exiting boot services
     let gop = query_gop(&system_table);
 
@@ -983,5 +994,5 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, entry_counter, wall_clock, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, microcode, entry_counter, wall_clock, system_table);
 }

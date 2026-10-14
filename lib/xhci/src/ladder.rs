@@ -225,8 +225,9 @@ pub const PORT_RESET: [PortStep; 7] = [
     PortStep::AddEndpoints,
 ];
 
-/// USB 2.0 §7.1.7.5 has a device answer 10 ms after a reset (TRSTRCY); this is
-/// the 50 ms Linux's hub driver waits, for the firmware that needs it.
+/// USB 2.0 §7.1.7.5 has a device answer 10 ms after a reset (TRSTRCY). No
+/// document names the 50 ms this waits:
+/// `issues/values-no-document-states-stand-where-another-os-was-their-source.md`.
 pub const RESET_RECOVERY_NS: u64 = 50_000_000;
 
 /// Whether a failed `step` ends [`Rung::PortReset`].

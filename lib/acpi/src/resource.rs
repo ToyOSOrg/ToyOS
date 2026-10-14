@@ -3,8 +3,8 @@
 //! ([`io_ports`]).
 //!
 //! The bytes are the ones ACPI 6.5 §6.4.3.5 defines and firmware emits in two
-//! places for the same bridge: `_CRS` in the DSDT, which is what Linux reads,
-//! and `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL::Configuration` (UEFI 2.10 §14.2),
+//! places for the same bridge: `_CRS` in the DSDT, and
+//! `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL::Configuration` (UEFI 2.10 §14.2),
 //! which is what the bootloader reads and this decodes. What a window is, and
 //! what an address outside every one of them is, is
 //! [`toyos_abi::boot::KernelArgs::root_bridge_windows`].

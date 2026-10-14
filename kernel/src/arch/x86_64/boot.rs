@@ -47,7 +47,7 @@ pub fn before_panel() {
 }
 
 /// Once the console and the boot parameter exist.
-pub fn after_console(_args: &KernelArgs, _maps: &[MemoryMapEntry]) {
+pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     // The IDT loads inside `interrupts`, much later: a fault here would reach
     // firmware's handlers, so the actuator is refused by name instead.
     if crate::actuator::test_early_fault() {
@@ -61,6 +61,7 @@ pub fn after_console(_args: &KernelArgs, _maps: &[MemoryMapEntry]) {
     // The first point with every channel a refusal reaches, and before
     // anything reads what an update changes: `random::key`'s RDRAND and
     // RDSEED, and `control_regs::init`'s CPUID.
+    microcode::init(args);
     microcode::load(0);
 
     // The read-back `pat::init` owes, on a boot that now has three channels to

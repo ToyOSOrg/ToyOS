@@ -116,6 +116,8 @@ const _: () = {
 /// `EFI_ALLOCATE_TYPE` (§7.2.1), as this loader asks.
 pub enum AllocateType {
     AnyPages,
+    /// Pages whose last byte is at or below this address.
+    MaxAddress(u64),
     Address(u64),
 }
 
@@ -272,6 +274,7 @@ impl BootServices {
     pub fn allocate_pages(&self, kind: AllocateType, pages: usize) -> Result<u64, Status> {
         let (kind, mut at) = match kind {
             AllocateType::AnyPages => (0, 0),
+            AllocateType::MaxAddress(last) => (1, last),
             AllocateType::Address(at) => (2, at),
         };
         // SAFETY: the out parameter is a live `u64`.

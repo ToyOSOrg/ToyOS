@@ -481,9 +481,7 @@ fn rfc_8985_7_4_a_dsack_of_another_segment_still_infers_the_loss() {
 
 /// RFC 8985 §7.4.2 and §7.1 on one ACK: it passes the resent probe's end and SACKs three
 /// segments above a hole, so it both infers the probe's loss and enters SACK recovery, and cwnd is
-/// cut twice: the probe's cut, then recovery's from the flight after the ACK. Linux v6.12 does the
-/// same: `tcp_process_tlp_ack` reduces and leaves CWR through `tcp_try_keep_open`, so
-/// `tcp_enter_recovery` finds no reduction in progress and reduces again.
+/// cut twice: the probe's cut, then recovery's from the flight after the ACK.
 #[test]
 fn rfc_8985_7_4_an_ack_that_infers_the_probes_loss_and_enters_recovery_cuts_twice() {
     let mut h = fixture_ef();

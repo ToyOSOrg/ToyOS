@@ -629,19 +629,19 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
-        "kernel/microcode/amd-ucode/microcode_amd_fam17h.bin",
+        "build/microcode/amd-ucode/microcode_amd_fam17h.bin",
         "966e4b796ec689c618868d08f8a37f347b0e7bfce4ae9df793e08471d363b7d0",
         "NOTICE",
         Terms::Firmware("LicenseRef-AMD-Microcode"),
     ),
     (
-        "kernel/microcode/intel-ucode/06-8c-01",
+        "build/microcode/intel-ucode/06-8c-01",
         "efe83e312b90f7fe4b8f75260087edf03e048d2f4f80caef2ef631c842714bb3",
         "NOTICE",
         Terms::Firmware("LicenseRef-Intel-Microcode"),
     ),
     (
-        "kernel/microcode/intel-ucode/06-cc-02",
+        "build/microcode/intel-ucode/06-cc-02",
         "4e43bb4d23c3638f8c16967d61e8f6456ae0da2ddd1da82ab579a50715147bb1",
         "NOTICE",
         Terms::Firmware("LicenseRef-Intel-Microcode"),

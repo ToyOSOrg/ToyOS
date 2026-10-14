@@ -165,8 +165,10 @@ fn clear_record(regs: Mmio, record: u64) {
     regs.write_u32(record + 12, RECORD_FAULT);
 }
 
-// Only reasons where Linux's dma_remap_fault_reasons and QEMU's VTD_FR_*
-// agree get a name; 0x0c and 0x0d disagree and are left unnamed.
+// Fault reasons by the condition VT-d 5.20's Table 30 (legacy mode) and
+// Table 15 (interrupt remapping) give each.
+// `issues/a-vt-d-fault-is-named-unlike-the-specification-or-not-at-all.md`:
+// 07h's name, and the reasons left unnamed.
 fn reason_name(reason: u8) -> &'static str {
     match reason {
         0x01 => "root-entry-not-present",
