@@ -119,17 +119,17 @@ fn panel_scale(info: &toyos_abi::FramebufferInfo) -> Scale {
     let said = format!("compositor: display {}x{}", mode.0, mode.1);
     let edid = &info.edid[..(info.edid_len as usize).min(info.edid.len())];
     if edid.is_empty() {
-        eprintln!("{said}, no panel size, scale 1");
+        println!("{said}, no panel size, scale 1");
         return Scale::ONE;
     }
     match toyos_edid::BaseBlock::parse(edid).map(|block| block.image_size()) {
         Ok(toyos_edid::ImageSize::Millimetres { width, height }) => {
             let scale = Scale::auto(mode, (width, height));
-            eprintln!("{said}, panel {width}x{height} mm, scale {scale}");
+            println!("{said}, panel {width}x{height} mm, scale {scale}");
             scale
         }
         Ok(size) => {
-            eprintln!("{said}, the panel's EDID gives no size ({size:?}), scale 1");
+            println!("{said}, the panel's EDID gives no size ({size:?}), scale 1");
             Scale::ONE
         }
         Err(why) => {
