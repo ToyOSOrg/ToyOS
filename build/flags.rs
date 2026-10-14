@@ -61,6 +61,12 @@ declare_flags!(pub CARGO_RUN = {
     pub DUMP_AUDIO = "--dump-audio", None;
     pub SMP = "--smp", Next;
     pub GOP = "--gop", None;
+    /// The scale the desktop starts at where the panel gives none, as
+    /// `--scale 2` or `--scale 1.5`: a quarter step from 1 to 4, which the
+    /// compositor refuses by name otherwise. QEMU's firmware gives no panel's
+    /// size, so the desktop is drawn at 1 without it, and a HiDPI host shows
+    /// QEMU's window at one panel pixel per guest pixel.
+    pub SCALE = "--scale", Next;
     pub METAL_SIM = "--metal-sim", None;
     pub MUTE = "--mute", None;
     pub KERNEL_PARAM = "--kernel-param", Each;

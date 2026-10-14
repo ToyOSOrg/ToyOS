@@ -1,16 +1,20 @@
-//! BlockAckReq (802.11-2020 §9.3.1.7) and BlockAck (§9.3.1.8) of the Compressed variant, the one an
-//! HT, VHT or HE station's immediate block-ack agreement uses; their bodies follow Frame Control
-//! and Duration.
+//! BlockAckReq (§9.3.1.7) and BlockAck (§9.3.1.8) of the Compressed variant, the one an HT, VHT
+//! or HE station's immediate block-ack agreement uses; their bodies follow Frame Control and
+//! Duration.
 //!
-//! An HE BlockAck's bitmap is 32, 64, 128 or 256 bits long, as its Fragment Number subfield says
-//! (802.11ax-2021 §9.3.1.8.2). Acknowledging fragments, the subfield's bit 0, is refused, because a
-//! fragment is (`Refused::Fragmented`).
+//! A BlockAck's bitmap is 64 or 256 bits long, as its Fragment Number subfield says (Table 9-38).
+//! Acknowledging fragments, the subfield's B0, is refused, because a fragment is
+//! (`Refused::Fragmented`).
 
 use crate::read::Reader;
 use crate::{Address, Refused, Seq};
 
-/// The BAR and BA Type value of the Compressed variant (Table 9-24, Table 9-28).
+/// The BAR and BA Type value of the Compressed variant.
 const COMPRESSED: u16 = 2;
+/// The BAR Type values Table 9-36 defines.
+const BAR_TYPES: [u16; 5] = [1, COMPRESSED, 3, 6, 10];
+/// The BA Type values Table 9-37 defines.
+const BA_TYPES: [u16; 7] = [1, COMPRESSED, 6, 7, 8, 10, 11];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockAckReq {
@@ -45,15 +49,23 @@ impl BlockAck {
 }
 
 /// The receiver and transmitter, the control field's TID, and the Starting Sequence Control's
-/// Fragment Number and sequence number.
-fn compressed(r: &mut Reader<'_>) -> Result<(Address, Address, u8, u8, Seq), Refused> {
+/// Fragment Number and sequence number, of a frame whose defined Type values are `types`.
+fn compressed(
+    r: &mut Reader<'_>,
+    types: &[u16],
+) -> Result<(Address, Address, u8, u8, Seq), Refused> {
     let ra = r.address()?;
-    // A VHT transmitter may set the TA's group bit as a bandwidth signaling TA (§9.3.1.1).
+    // A VHT or HE transmitter may set the TA's group bit as a bandwidth signaling TA (§9.3.1.7.1,
+    // §10.6.12).
     let Address([first, rest @ ..]) = r.address()?;
     let [b1, b2, b3, b4, b5] = rest;
     let ta = Address([first & !1, b1, b2, b3, b4, b5]);
     let control = r.u16()?;
-    if (control >> 1) & 0x0F != COMPRESSED {
+    let kind = (control >> 1) & 0x0F;
+    if !types.contains(&kind) {
+        return Err(Refused::ReservedBlockAckType);
+    }
+    if kind != COMPRESSED {
         return Err(Refused::BlockAckVariant);
     }
     let [_, high] = control.to_le_bytes();
@@ -65,9 +77,9 @@ fn compressed(r: &mut Reader<'_>) -> Result<(Address, Address, u8, u8, Seq), Ref
 impl BlockAckReq {
     pub(crate) fn parse(after_duration: &[u8]) -> Result<Self, Refused> {
         let mut r = Reader::new(after_duration);
-        let (ra, ta, tid, fragment, ssn) = compressed(&mut r)?;
+        let (ra, ta, tid, fragment, ssn) = compressed(&mut r, &BAR_TYPES)?;
         if fragment != 0 {
-            return Err(Refused::BitmapSize);
+            return Err(Refused::BlockAckFragmentNumber);
         }
         if !r.is_empty() {
             return Err(Refused::ControlLength);
@@ -79,15 +91,16 @@ impl BlockAckReq {
 impl BlockAck {
     pub(crate) fn parse(after_duration: &[u8]) -> Result<Self, Refused> {
         let mut r = Reader::new(after_duration);
-        let (ra, ta, tid, fragment, ssn) = compressed(&mut r)?;
-        // Bits 2 and 1 of the Fragment Number give the bitmap's length, bit 0 a fragment level.
-        let bits: u16 = match fragment {
+        let (ra, ta, tid, fragment, ssn) = compressed(&mut r, &BA_TYPES)?;
+        // B2–B1 of 0 is a 64-bit bitmap and 2 a 256-bit one; 1, 3 and B3 set are reserved.
+        let bits: u16 = match fragment & 0b1110 {
             0b0000 => 64,
-            0b0010 => 256,
-            0b0100 => 128,
-            0b0110 => 32,
-            _ => return Err(Refused::BitmapSize),
+            0b0100 => 256,
+            _ => return Err(Refused::BlockAckFragmentNumber),
         };
+        if fragment & 1 != 0 {
+            return Err(Refused::FragmentLevel);
+        }
         let mut bitmap = [0u64; 4];
         let mut octets = r.take(usize::from(bits / 8))?.iter();
         for word in &mut bitmap {

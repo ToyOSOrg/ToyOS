@@ -20,12 +20,9 @@ pub const SYS_PIPE: u64 = 24;
 /// `Process` handle — see [`spawn`].
 pub const SYS_SPAWN: u64 = 25;
 pub const SYS_MARK_TTY: u64 = 28;
-pub const SYS_GPU_PRESENT: u64 = 35;
 pub const SYS_THREAD_SPAWN: u64 = 40;
 pub const SYS_THREAD_JOIN: u64 = 41;
 pub const SYS_CLOCK_REALTIME: u64 = 42;
-pub const SYS_GPU_SET_CURSOR: u64 = 43;
-pub const SYS_GPU_MOVE_CURSOR: u64 = 44;
 /// A header describing the machine, optionally followed by the roster of every
 /// live thread in it. See [`sysinfo`].
 ///
@@ -111,7 +108,6 @@ pub const SYS_CLOCK_EPOCH: u64 = 75;
 pub const SYS_PIPE_MAP: u64 = 77;
 pub const SYS_SYMLINK: u64 = 81;
 pub const SYS_READLINK: u64 = 82;
-pub const SYS_GPU_SET_RESOLUTION: u64 = 83;
 /// Accept a queued connection from an [`Acceptor`] handle.
 ///
 /// [`Acceptor`]: crate::handle::RawHandle
@@ -1201,54 +1197,6 @@ pub fn clock_realtime() -> Option<RealTime> {
 /// monotonic clock, so this is a syscall and not a device access.
 pub fn clock_epoch() -> Option<u64> {
     check(syscall(SYS_CLOCK_EPOCH, 0, 0, 0, 0)).ok()
-}
-
-/// Two `u32`s in one argument word.
-///
-/// The four device calls below take the claim handle that authorizes them, and
-/// `SYS_GPU_PRESENT`'s rectangle then does not fit in what is left. A pair is a
-/// wire encoding decoded at the kernel boundary and carried no further.
-const fn pair(hi: u32, lo: u32) -> u64 {
-    ((hi as u64) << 32) | lo as u64
-}
-
-/// Transfer a region of the framebuffer to the GPU and flush it, presenting the
-/// framebuffer claim. Pass (0, 0, 0, 0) to flush the full screen.
-///
-/// Fallible: the kernel refuses a handle that is not a live framebuffer claim.
-pub fn gpu_present(claim: RawHandle, x: u32, y: u32, w: u32, h: u32) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_GPU_PRESENT, claim.0 as u64, pair(x, y), pair(w, h), 0))
-}
-
-/// Upload the cursor image from backing and enable hardware cursor.
-pub fn gpu_set_cursor(claim: RawHandle, hot_x: u32, hot_y: u32) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_GPU_SET_CURSOR, claim.0 as u64, hot_x as u64, hot_y as u64, 0))
-}
-
-/// Move the hardware cursor to screen position (x, y).
-pub fn gpu_move_cursor(claim: RawHandle, x: u32, y: u32) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_GPU_MOVE_CURSOR, claim.0 as u64, x as u64, y as u64, 0))
-}
-
-/// Request a GPU resolution change. On success, writes the new
-/// [`FramebufferInfo`](crate::FramebufferInfo) to `info_out`.
-///
-/// # Safety
-/// `info_out` must point to a writable buffer of at least
-/// `size_of::<FramebufferInfo>()` bytes.
-pub unsafe fn gpu_set_resolution(
-    claim: RawHandle,
-    width: u32,
-    height: u32,
-    info_out: *mut u8,
-) -> Result<(), SyscallError> {
-    check_unit(syscall(
-        SYS_GPU_SET_RESOLUTION,
-        claim.0 as u64,
-        pair(width, height),
-        info_out as u64,
-        0,
-    ))
 }
 
 /// Power the machine off, presenting a `SysCap` that carries
@@ -2446,10 +2394,9 @@ pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, Syscal
 ///
 /// `InvalidArgument` for a region that is not ordinary memory this kernel
 /// allocated — a BAR window, firmware's framebuffer — and for one already
-/// mapped for this claim; `ResourceExhausted` past the claim's grant bound,
-/// which this shares with [`device_dma_alloc`], or with no room of the
-/// region's length left where the claim's lent regions go. Like a grant, the
-/// first mapping is what starts the function mastering the bus.
+/// mapped for this claim; `ResourceExhausted` with no run of the region's
+/// length left in the claim's [`LEND_WINDOW`](crate::pci::LEND_WINDOW). Like a
+/// grant, the first mapping is what starts the function mastering the bus.
 pub fn device_dma_map(claim: RawHandle, shm: RawHandle) -> Result<DmaMapping, SyscallError> {
     let mut mapping = DmaMapping { device_addr: 0, bytes: 0 };
     check_unit(syscall(

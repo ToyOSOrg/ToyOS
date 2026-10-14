@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use common::qemu::{
-    self, await_guest, await_marker, BootOptions, QemuInstance,
+    self, await_guest, await_marker, await_marker_new, BootOptions, QemuInstance,
     STALLED, TIMED_OUT,
 };
 use common::{audio, claims, compile, devices, faults, isa, metal, power, ps2server, screen, serial, usb};
@@ -67,6 +67,11 @@ const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // It opens a window, which needs a compositor the shared boot does not
+    // run: `a_window_is_drawn_at_the_scale_and_relaid_at_the_next` runs it on
+    // tests/images/scalecase.toml, and the `gop_edid_scale` metal row on
+    // tests/images/metalcase.toml.
+    "scale_window",
     // **Its exit code is a measurement, not a verdict**, and the shared block
     // judges every member on `exit=0` alone — so it would red on every boot
     // that measured anything. It also needs the real-time band, which only
@@ -328,7 +333,9 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
 
 /// Which handle the loader took the panel's EDID from, and what the compositor
 /// made of it, on each bench: the handle M1 found the protocol on, and the
-/// size and scale `lib/edid`'s fixture of that bench's panel gives.
+/// size and scale `lib/edid`'s fixture of that bench's panel gives; the
+/// desktop drawn at that scale, and `scale_window`'s 200x100 logical window
+/// given its buffer at it.
 fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
     const T14: u32 = 0x0008_06c1;
     const AMD_BENCH: u32 = 0x0086_0f01;
@@ -351,7 +358,20 @@ fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
         let said: Vec<&str> = log.lines().filter(|l| l.contains("compositor: display ")).collect();
         return Err(format!("the log does not say {chosen:?}; the compositor said {said:?}"));
     }
-    eprintln!("  [gop_edid_scale] signature {signature:#x}: GOP handle {handle}, {panel}");
+    if let Some(kept) = log.lines().find(|l| l.contains("compositor: drawing at scale ") && l.contains(", kept ")) {
+        return Err(format!(
+            "the bench keeps a scale of its own in /state/compositor/scale, so the panel's is not what it draws at: \
+             {kept:?}; `screen scale auto` on it gives the panel's back"
+        ));
+    }
+    for drawn in ["compositor: drawing at scale 1.5", "scale_window: logical 200x100 drawn 300x150 at scale 1.5"] {
+        if !log.contains(drawn) {
+            let said: Vec<&str> =
+                log.lines().filter(|l| l.contains("compositor: ") || l.contains("scale_window: ")).collect();
+            return Err(format!("the log does not say {drawn:?}; the compositor and the window said {said:?}"));
+        }
+    }
+    eprintln!("  [gop_edid_scale] signature {signature:#x}: GOP handle {handle}, {panel}, a 200x100 window drawn 300x150");
     Ok(())
 }
 
@@ -421,6 +441,12 @@ const MACHINE_TESTS: &[&str] = &[
     // function is its I219, and a kernel that dies on this takes the bench's
     // machine down with it.
     "bar_map_again",
+    // The same claim with the NIC behind a root port: the BAR has to land
+    // inside the windows the port forwards, which a host test of the rule
+    // cannot say the kernel reads off a real bridge. The T14's claimed
+    // functions are all on bus 0; the AMD bench's xHCI that is not has its
+    // MSI-X table in its one BAR.
+    "bar_map_behind_a_bridge",
     // A region that is not memory the kernel allocated, lent as a window: the
     // kernel describes the BAR of a function no program of the boot holds,
     // which on the T14 is its I219, as `bar_map_again` says.
@@ -468,6 +494,24 @@ const MACHINE_TESTS: &[&str] = &[
     // end of the handshake and of the request is QEMU's vdagent chardev and
     // virtio-serial device, which no host test runs.
     "the_opening_exchange_with_qemus_agent_completes",
+    // The compositor driving QEMU's virtio-gpu through its claim, and a host
+    // display resize reaching the guest's mode: no metal machine has a
+    // virtio-gpu, and the host tests drive `toyos-virtio-gpu` against a model
+    // written from this design's own reading of §5.7, so only QEMU's device
+    // says it was read right. x86-64 q35 alone, `Profile::HeadlessVirtioGpu`:
+    // an AArch64 `virt` boot hands over no PCI claim yet. A boot of its own:
+    // its `-vnc` display changes the display configuration the clipboard
+    // test's premise, `-display none`, rests on.
+    "the_compositor_drives_the_virtio_gpu",
+    // A client's window, asked for in logical pixels at scale 2, is drawn at
+    // twice that on the panel, and the display port's `screen scale 1` relays
+    // it to its logical size with the chrome around it: what reaches the
+    // panel is the compositor's buffer swap, its chrome and the window
+    // protocol's scale meeting on a running desktop, which no host test
+    // composes. On `Profile::Metal`'s q35, whose 1920x1080 GOP panel holds 2
+    // and whose firmware publishes no EDID, so the image's `scale=2` sets it;
+    // no metal machine's glass can be read.
+    "a_window_is_drawn_at_the_scale_and_relaid_at_the_next",
 ];
 
 /// **The metal profile**: which registrations run on the ThinkPad T14, what
@@ -601,7 +645,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // Every CPU's counters as the shipped syscall reads them, across an
         // idle second and a spin on every CPU: `counters_on_metal` says what
-        // is held and what is read beside Linux's.
+        // is held and what is only read.
         "counters",
         metal::Metal {
             arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &["test_rs_counters_metal"])],
@@ -924,13 +968,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: METALCASE, judge: |b| scanout_wc(b[0].kernel().text()) },
     ),
     (
-        // The panel's EDID from the firmware's GOP to the compositor's scale:
-        // the loader's read before `ExitBootServices` is no host test's, and
-        // QEMU's OVMF publishes no EDID protocol.
+        // The panel's EDID from the firmware's GOP to the compositor's scale,
+        // and the desktop and a client drawn at it: the loader's read before
+        // `ExitBootServices` is no host test's, and QEMU's OVMF publishes no
+        // EDID protocol.
         "gop_edid_scale",
         metal::Metal {
-            arms: METALCASE,
-            judge: |b| gop_edid_scale(b[0].loader().text(), b[0].log().text(), b[0].kernel().text()),
+            arms: METALCASE_SCALE,
+            judge: |b| {
+                b[0].job_passed("test_rs_scale_window")?;
+                gop_edid_scale(b[0].loader().text(), b[0].log().text(), b[0].kernel().text())
+            },
         },
     ),
     (
@@ -998,10 +1046,6 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "read_fault_selftests",
         metal::Metal { arms: SELFTESTS, judge: |b| read_fault_probes(b[0].kernel().text()) },
-    ),
-    (
-        "leak_rollback_selftest",
-        metal::Metal { arms: SELFTESTS, judge: |b| leak_rollback(b[0].kernel().text()) },
     ),
     (
         "lapic_spurious_vector",
@@ -1296,6 +1340,13 @@ const METALCASE: &[metal::Arm] = &[metal::Arm {
     ..metal::once("metalcase", "tests/images/metalcase.toml", &[], &[])
 }];
 
+/// [`METALCASE`] with `scale_window`'s logical window, which the compositor
+/// gives a buffer at the panel's scale.
+const METALCASE_SCALE: &[metal::Arm] = &[metal::Arm {
+    last: Some("test_rs_ps2server_hold"),
+    ..metal::once("metalcase", "tests/images/metalcase.toml", &[], &["test_rs_scale_window"])
+}];
+
 /// A launcher and a declared `cat` and shell, which `process_tree`'s subtree
 /// launches, a `toybox` row holding `roster`, which `launch_toctou` races, and
 /// the `/apps` `app_view` launches its package from.
@@ -1317,7 +1368,6 @@ const PROCTREECASE: &[metal::Arm] = &[metal::once(
 const SELFTEST_PARAMS: &[&str] = &[
     "pci-cap-selftest",
     "revoked-backing-selftest",
-    "leak-rollback-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
     "xhci-xecp-selftest",
@@ -3762,7 +3812,7 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 /// test.
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
-        "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(test_config),
+        "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(),
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
@@ -3775,6 +3825,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "machine_shutdown_wire_kept" => power::machine_shutdown_wire_held(test_config, true),
         "machine_shutdown_wire_at_the_seal" => power::machine_shutdown_wire_at_the_seal(test_config),
         "bar_map_again" => bar_map_again(test_config),
+        "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
         "desktop_without_x2apic" => desktop_without_x2apic(),
@@ -3786,8 +3837,95 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
         "crypto_instrument_prints_its_table" => crypto_instrument_prints_its_table(test_config),
+        "the_compositor_drives_the_virtio_gpu" => the_compositor_drives_the_virtio_gpu(),
+        "a_window_is_drawn_at_the_scale_and_relaid_at_the_next" => a_window_is_drawn_at_the_scale_and_relaid_at_the_next(),
         other => Err(format!("unknown machine test {other}")),
     }
+}
+
+/// `tests/guest/rust-tests`' `scale_window`'s fills, before and after the
+/// relay.
+const SCALE_BEFORE: [u8; 3] = [0x00, 0xff, 0x7f];
+const SCALE_AFTER: [u8; 3] = [0xff, 0x00, 0x7f];
+/// The compositor's focused title bar (`system/compositor/src/render.rs`).
+const FOCUSED_TITLE: [u8; 3] = [0x3a, 0x3a, 0x4e];
+
+/// Boot tests/images/scalecase.toml, whose compositor starts at scale 2, and
+/// run `scale_window relay`: its 200x100 logical window is filled and on the
+/// panel 400x200 under a title bar 56 rows tall; `screen scale 1` relays it,
+/// and its new fill is on the panel 200x100 under one 28 rows tall. Enter,
+/// pressed once each panel is read, is what lets the job go on.
+fn a_window_is_drawn_at_the_scale_and_relaid_at_the_next() -> Result<(), String> {
+    const JOB: &str = "scale_window";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/scalecase.toml"),
+        &[],
+        &[(JOB.to_string(), bin)],
+        BootOptions { profile: qemu::Profile::Metal, qmp: true, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, "compositor: drawing at scale 2, the image's", "the compositor at scale 2")?;
+    await_marker(&mut qemu, &mut console, ps2server::ARMED_BOTH, "ps2server to arm the i8042")?;
+    writeln!(qemu.stdin_mut(), "run test_rs_{JOB} relay").map_err(|e| e.to_string())?;
+    qemu.flush_stdin();
+    let enter = |qemu: &QemuInstance| {
+        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+        input.keys(&[("ret", true)]);
+        input.keys(&[("ret", false)]);
+    };
+
+    let from = console.len();
+    await_marker_new(&mut qemu, &mut console, "scale_window: logical 200x100 drawn 400x200 at scale 2", from, "the window at 2")?;
+    let at_two = window_drawn(&qemu.screendump(), SCALE_BEFORE)?;
+    enter(&qemu);
+    let from = console.len();
+    await_marker_new(&mut qemu, &mut console, "scale_window: logical 200x100 drawn 200x100 at scale 1", from, "the window relaid at 1")?;
+    let at_one = window_drawn(&qemu.screendump(), SCALE_AFTER)?;
+    enter(&qemu);
+    await_marker_new(&mut qemu, &mut console, &format!("===TEST_END test_rs_{JOB} exit=0==="), from, "the job's end")?;
+
+    if at_two != ((400, 200), 56) || at_one != ((200, 100), 28) {
+        return Err(format!(
+            "at 2 the window is {:?} under a {}-row title bar and at 1 {:?} under {}: 400x200 under 56 \
+             and 200x100 under 28 were asked\n{console}",
+            at_two.0, at_two.1, at_one.0, at_one.1
+        ));
+    }
+    let said = serial::Serial::named("the scale boot", console);
+    said.must_say("compositor: scale 1, kept 1")?;
+    said.must_be_clean()?;
+    eprintln!("  [scale] 400x200 under 56 rows at 2, relaid 200x100 under 28 at 1");
+    Ok(())
+}
+
+/// The extent of the pixels of `fill` on `dump`, and how many rows of the
+/// focused title bar's colour stand above its middle column: the window's
+/// content and its title bar, which a border row separates from the top of
+/// the frame. Every pixel of the extent is `fill` but those a cursor drawn in
+/// software covers.
+fn window_drawn(dump: &screen::Ppm, fill: [u8; 3]) -> Result<((usize, usize), usize), String> {
+    let at = |x: usize, y: usize| dump.pixels[y * dump.width + x];
+    let (mut x0, mut y0, mut x1, mut y1, mut n) = (usize::MAX, usize::MAX, 0, 0, 0usize);
+    for y in 0..dump.height {
+        for x in 0..dump.width {
+            if at(x, y) == fill {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+                n += 1;
+            }
+        }
+    }
+    if n == 0 {
+        return Err(format!("no pixel of {fill:02x?} on a {}x{} panel", dump.width, dump.height));
+    }
+    let (w, h) = (x1 - x0, y1 - y0);
+    // A software cursor 40 pixels square at the most, over the window.
+    if n + 40 * 40 < w * h {
+        return Err(format!("{fill:02x?}'s {w}x{h} extent at ({x0}, {y0}) holds only {n} of its pixels"));
+    }
+    let middle = x0 + w / 2;
+    let title = (0..y0).rev().take_while(|&y| at(middle, y) == FOCUSED_TITLE).count();
+    Ok(((w, h), title))
 }
 
 /// The clipboard agent opens its port and QEMU's vdagent answers its opening
@@ -3812,6 +3950,61 @@ fn the_opening_exchange_with_qemus_agent_completes() -> Result<(), String> {
         (Some(open), Some(answered)) if open < answered => Ok(()),
         _ => Err(format!("the agent did not say {OPEN:?} before {ANSWERED:?}:\n{text}")),
     }
+}
+
+/// The compositor drives QEMU's virtio-gpu through its `pci:03:80:00/1af4:1050`
+/// claim: it starts at the size the device prefers, QEMU's default
+/// 1280x800, and its first frame reaches the scanout; then a VNC client
+/// resizes the host's display to 1024x768, the device raises its display
+/// event, and the compositor flips to that mode and draws it. The image's
+/// `scale=2` is held down to 1.75 and then 1.5, the steps those modes hold,
+/// so the flip relays the desktop at a new scale.
+///
+/// "Drawn" is a screendump of the scanout at the mode's size holding the
+/// wallpaper's many colours: a scanout no frame reached is one colour, or
+/// QEMU's two-colour notice that the guest set none.
+fn the_compositor_drives_the_virtio_gpu() -> Result<(), String> {
+    const FIRST: &str = "compositor: display 1280x800";
+    const FRAME: &str = "compositor: the first frame is on the panel";
+    const FOLLOWED: &str = "compositor: mode 1024x768";
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("tests/images/clipboardcase.toml"),
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::HeadlessVirtioGpu, qmp: true, vnc: true, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "the compositor's first frame", |t| t.contains(FRAME))
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let drawn = |dump: &screen::Ppm, (width, height)| -> Result<(), String> {
+        let colours: BTreeSet<[u8; 3]> = dump.pixels.iter().copied().collect();
+        if (dump.width, dump.height) != (width, height) || colours.len() < 64 {
+            return Err(format!(
+                "the scanout is {}x{} in {} colour(s), where the desktop at {width}x{height} was drawn",
+                dump.width,
+                dump.height,
+                colours.len()
+            ));
+        }
+        Ok(())
+    };
+    drawn(&qemu.screendump(), (1280, 800)).map_err(|e| format!("{e}\n{console}"))?;
+
+    let _client = common::vnc::resize(qemu.vnc_socket(), 1024, 768)?;
+    await_guest(&mut qemu, &mut console, "the compositor following the host's display", |t| t.contains(FOLLOWED))
+        .map_err(|e| format!("{e}\n{console}"))?;
+    // The flip's frame is drawn into the new scanout before it is shown.
+    drawn(&qemu.screendump(), (1024, 768)).map_err(|e| format!("{e}\n{console}"))?;
+
+    let said = serial::Serial::named("the virtio-gpu boot", console);
+    said.must_be_clean()?;
+    said.must_say(FIRST)?;
+    // The image's 2, held down to the step each mode holds, on the start and
+    // on the flip's relay.
+    said.must_say("compositor: drawing at scale 1.75, the image's")?;
+    said.must_say("compositor: scale 2 leaves 1024x768 less than the least screen; drawing at 1.5")?;
+    eprintln!("  [virtio-gpu] 1280x800 drawn at 1.75, then 1024x768 followed and drawn at 1.5");
+    Ok(())
 }
 
 /// A machine with one NVMe disk and no USB controller boots the image off
@@ -4153,6 +4346,52 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The virtio NIC behind a root port is claimed and its BAR mapped, and the
+/// kernel put the BAR inside a window the port forwards.
+fn bar_map_behind_a_bridge(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "bar_map_again";
+    const FORWARDS: &str = "pcidev: PCI 00:";
+    const PLACED: &str = "pcidev: PCI 01:00.0 BAR ";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let options = BootOptions { profile: qemu::Profile::HeadlessNicBehindPort, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    let range = |line: &str| -> Option<(u64, u64)> {
+        let (from, to) = line.split_once("..")?;
+        let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
+        Some((hex(from.rsplit(' ').next()?)?, hex(to.split(' ').next()?)?))
+    };
+    let forwarded: Vec<(u64, u64)> = boot
+        .text()
+        .lines()
+        .filter(|l| l.contains(FORWARDS) && l.contains(" forwards "))
+        .filter_map(|l| range(l.split_once(" forwards ")?.1))
+        .collect();
+    if forwarded.is_empty() {
+        return Err(format!("no root port said what it forwards:\n{}", boot.text()));
+    }
+    let result = qemu.run_test("test_rs_bar_map_again", Duration::from_secs(60));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let Some(placed) = result.serial.lines().find(|l| l.contains(PLACED) && l.contains(" placed at ")) else {
+        return Err(format!("the NIC's BAR was never placed:\n{}", result.serial));
+    };
+    let at = placed
+        .split_once(" placed at ")
+        .and_then(|(_, rest)| u64::from_str_radix(rest.split_whitespace().next()?.strip_prefix("0x")?, 16).ok())
+        .ok_or_else(|| format!("an unreadable placement: {placed:?}"))?;
+    if !forwarded.iter().any(|(start, end)| *start <= at && at < *end) {
+        return Err(format!("{placed:?} is inside none of what the port forwards, {forwarded:x?}"));
+    }
+    eprintln!("  [claims] {}", placed.trim());
+    Ok(())
+}
+
 /// The kernel answers a lent window that is the virtio NIC's BAR as no memory
 /// it allocated, by `fstat`, so no reader maps it as a region.
 fn lent_device_memory_refused(test_config: &Path) -> Result<(), String> {
@@ -4407,19 +4646,6 @@ fn read_fault_probes(log: &str) -> Result<(), String> {
             return Err(format!("{}\n{log}", verdict.trim()));
         }
         eprintln!("  [read-fault] {}", verdict.trim());
-        Ok(())
-}
-
-/// An "acquire before a fallible step" control: the count returned to its baseline after a refused call.
-fn leak_rollback(log: &str) -> Result<(), String> {
-        let probe = "leak-selftest: device-mint";
-        let Some(verdict) = log.lines().find(|l| l.contains(probe)) else {
-            return Err(format!("{probe} never ran:\n{log}"));
-        };
-        if !verdict.contains("PASS") {
-            return Err(format!("{}\n{log}", verdict.trim()));
-        }
-        eprintln!("  [leak] {}", verdict.trim());
         Ok(())
 }
 
@@ -5138,16 +5364,18 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// moves by the commands the kernel wrote to `SMI_CMD` in that span and by
 /// nothing else: every firmware interrupt is one ToyOS asked for. Across the spin every
 /// CPU's MPERF ran nine tenths of its stamp or more [e], a CPU in C0 the whole
-/// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
-/// Coordination Feedback"); and every CPU's busy frequency reached the lowest
-/// Linux's turbostat read under one `yes` per CPU on the same machine over the
-/// same span of load (`tests/metal/t14-linux/turbostat-loaded.txt`).
+/// span: MPERF counts at a fixed rate, the TSC's, and APERF at the actual
+/// clock (SDM Vol. 3B §22.7.2, 325462-093); and every CPU's APERF ran at
+/// least as fast as its MPERF across the spin, its busy clock at or above the
+/// rate MPERF counts at (2419.2 MHz on the T14). A spin under a request whose
+/// maximum is `Highest_Performance` falls below it only when a power limit or
+/// firmware holds the CPU there.
 ///
-/// Read and not held, beside Linux's turbostat: each CPU's idle busy
-/// fraction, which an SMI in the idle second raises on every CPU alike by the
-/// time it held them, and what one round cost its reader; and beside Linux's loaded
-/// timer reading (`issues/toyos-beats-linuxs-latency-on-the-t14.md`),
-/// how late each CPU's kick handler ran under the `loaded` phase.
+/// Read and not held: each CPU's idle busy fraction, which an SMI in the idle
+/// second raises on every CPU alike by the time it held them, its spinning
+/// clock, what one round cost its reader, and how late each CPU's kick handler
+/// ran under the `loaded` phase, which
+/// `issues/toyos-beats-linuxs-latency-on-the-t14.md` sets its bar for.
 fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     type Read<'a> = BTreeMap<usize, BTreeMap<&'a str, u64>>;
     back.job_passed("test_rs_counters_metal")?;
@@ -5278,60 +5506,36 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     if busy.iter().any(|&b| b < 0.9) {
         return Err(format!("MPERF ran {busy:?} of each stamp across the spin, some cpu under 0.9"));
     }
-    // Each interval's machine-wide row, in order.
-    let linux = |file: &str, column: &str| -> Result<Vec<f64>, String> {
-        let mut rows = file.lines().map(|l| l.split('\t').collect::<Vec<_>>());
-        let header = rows.next().ok_or("an empty turbostat reading")?;
-        let at = header.iter().position(|c| *c == column).ok_or_else(|| format!("turbostat read no {column}"))?;
-        Ok(rows.filter(|r| r[0] == "-").filter_map(|r| r.get(at)?.parse().ok()).collect())
-    };
     log.must_say("counters_metal loaded: ")?;
     for said in log.text().lines().filter(|l| l.contains("counters_metal loaded: ")) {
         eprintln!("  [counters] {}", said.split("counters_metal ").nth(1).unwrap_or(said).trim());
     }
-    let range = |values: &[f64]| values.iter().fold((f64::MAX, f64::MIN), |(lo, hi), &v| (lo.min(v), hi.max(v)));
-    let idle = range(&linux(include_str!("metal/t14-linux/turbostat-idle.txt"), "Busy%")?);
-    let loaded_rows = linux(include_str!("metal/t14-linux/turbostat-loaded.txt"), "Bzy_MHz")?;
-    let loaded = range(&loaded_rows);
-    // The floor is Linux's clock over the spin's own span of load, not after
-    // the package settles: the intervals that open within it, the first 2 s
-    // into Linux's load and each 10 s long (`tests/metal/t14-linux/SOURCE`).
-    let spin_ns = at2 - at1;
-    let opened = loaded_rows.iter().enumerate().take_while(|&(k, _)| 2_000_000_000 + k as u64 * 10_000_000_000 < spin_ns);
-    let floor = opened.map(|(_, &mhz)| mhz).fold(f64::MAX, f64::min);
-    if floor == f64::MAX {
-        return Err(format!("the spin lasted {spin_ns} ns, and no Linux interval opens within it"));
-    }
-    let spinning: Vec<f64> = (0..cpus).map(|cpu| tsc_mhz * ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
+    let aperf_per_mperf: Vec<f64> = (0..cpus).map(|cpu| ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
     eprintln!(
         "  [counters] {cpus} cpus, the SMI count on each moved by {asked} over {} ms, the commands the kernel wrote to SMI_CMD in it; TSC {tsc_mhz:.0} MHz",
         (at2 - at0) / 1_000_000
     );
     for (cpu, busy) in busy.iter().enumerate() {
         eprintln!(
-            "  [counters] cpu{cpu}: idle busy {:.2}% (Linux {:.2}-{:.2}%), spinning {:.0} MHz (Linux {floor:.0} over \
-             this span, {:.0}-{:.0} loaded), busy {busy:.3}",
+            "  [counters] cpu{cpu}: idle busy {:.2}%, spinning {:.0} MHz, busy {busy:.3}",
             ratio(idle0, idle1, cpu, "mperf", "stamp") * 100.0,
-            idle.0,
-            idle.1,
-            spinning[cpu],
-            loaded.0,
-            loaded.1,
+            tsc_mhz * aperf_per_mperf[cpu],
         );
     }
     eprintln!("  [counters] the spin's read, a whole round, took its reader {} ns", clock["spin"].1);
-    if spinning.iter().any(|&mhz| mhz < floor) {
-        return Err(format!("spinning {spin_ns} ns at {spinning:.0?} MHz, some cpu below the {floor:.0} Linux held over that span"));
+    if aperf_per_mperf.iter().any(|&r| r < 1.0) {
+        return Err(format!("APERF ran {aperf_per_mperf:.3?} of MPERF across the spin, some cpu's busy clock below the rate MPERF counts at"));
     }
     Ok(())
 }
 
 /// The T14's ACPI row as the kernel filled it from the machine's FACP and
-/// APIC (Linux on the same machine: `INT_SRC_OVR (bus 0 bus_irq 9 global_irq
-/// 9 high level)`), the server armed on it, the embedded controller it found
-/// in the DSDT the one Linux used (`EC_CMD/EC_SC=0x66, EC_DATA=0x62`,
-/// `GPE=0x6e`), at least one of its queries taken and a count of them
-/// logged, and no guard of the server's fired.
+/// APIC, each value the field ACPI 6.5 Tables 5.9, 5.10, 5.25 and 5.26 give
+/// the machine's bytes (`lib/acpi/tests/thinkpad_t14.rs`); the server armed on
+/// it; the embedded controller at the ports and GPE the T14's ECDT names (ACPI
+/// 6.5 §5.2.15), as ToyOS's own boots there read it; at least one of its
+/// queries taken and a count of them logged, and no guard of the server's
+/// fired.
 fn acpi_events_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_counted")?;
     back.job_passed("test_rs_acpi_hold")?;
@@ -5637,15 +5841,19 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
 /// enable was asked from another CPU: the job claims from a thread it found
 /// off the boot processor, so that write is the one that crossed. And the
 /// Global Lock this machine's firmware keeps: the kernel read the FACS its
-/// FADT names through the direct map and found the lock word in ACPI NVS
-/// memory (type 10) by the firmware's own map, which is where Linux's print
-/// of the same map puts it.
+/// FADT names through the direct map and found the lock word in memory the
+/// firmware's own map does not report as `AddressRangeMemory`, which ACPI 6.5
+/// §5.2.10 forbids the FACS.
 fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
     back.job_passed("test_rs_acpi_release")?;
     let kernel = back.kernel();
     let lock = kernel.must_say("acpi: the Global Lock is the FACS's at ")?.trim();
-    if !lock.ends_with(", in memory the firmware's map types 10") {
-        return Err(format!("the Global Lock's word is not in ACPI NVS memory: {lock}"));
+    let uefi_type = lock
+        .rsplit_once(", in memory the firmware's map types ")
+        .and_then(|(_, ty)| ty.parse::<u8>().ok())
+        .ok_or_else(|| format!("the Global Lock's line names no memory type: {lock}"))?;
+    if ADDRESS_RANGE_MEMORY.contains(&uefi_type) {
+        return Err(format!("the Global Lock's word is in AddressRangeMemory: {lock}"));
     }
     eprintln!("  [acpi] {lock}");
     let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ")?;
@@ -5660,6 +5868,9 @@ fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// The UEFI memory types ACPI 6.5 Table 15.6 maps to `AddressRangeMemory`.
+const ADDRESS_RANGE_MEMORY: [u8; 5] = [1, 2, 3, 4, 7];
 
 /// The CPU a kernel line says wrote `SMI_CMD`, read on that CPU beside the
 /// `out`: the boot processor, cpu0, or the line is refused (ACPI 6.5 Table

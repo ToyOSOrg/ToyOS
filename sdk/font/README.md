@@ -1,3 +1,4 @@
 # toyos-font
 
-Font rendering library that draws pre-rasterized glyph bitmaps to a pixel buffer.
+A monospace font's glyphs, rasterized from its TTF into one cell size or read
+prebuilt, drawn into a pixel buffer.

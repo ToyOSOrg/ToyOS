@@ -30,9 +30,8 @@ fn netcase() -> std::path::PathBuf {
 /// the NIC's and the sound function's drivers are processes', whose
 /// negotiation is `toyos-virtio`'s and host-tested there. On [`Profile::HeadlessNoIommu`]
 /// the guest reports `n` because QEMU never *offers* the bit
-/// (`hw/virtio/virtio-bus.c:87-94`), not because the driver declined — it offers
-/// blindly; the independence comes from [`declining_is_not_free`].
-pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
+/// (`hw/virtio/virtio-bus.c:87-94`), not because the driver declined.
+pub fn iommu_virtio_platform() -> Result<(), String> {
     for profile in [Profile::Headless, Profile::HeadlessNoIommu] {
         let name = if profile.iommu().is_some() { "headless" } else { "headless-no-iommu" };
         let behind_unit = profile.iommu().is_some();
@@ -149,7 +148,7 @@ pub fn iommu_virtio_platform(test_config: &Path) -> Result<(), String> {
             if behind_unit { "the NIC's claim handed over" } else { "every claim refused for want of a unit" }
         );
     }
-    declining_is_not_free(test_config)
+    Ok(())
 }
 
 /// The slot QEMU's `-device` order puts `tests/images/netcase.toml`'s NVMe controller on,
@@ -190,49 +189,6 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     // own refusal says: with no unit there is no function any process could be
     // given an address space for.
     log.must_not_say("] handed over, ")?;
-    Ok(())
-}
-
-/// The control that makes the two arms above mean something: a guest that
-/// declines the feature its host offered gets no device, not a bypassing one.
-/// `virtio_validate_features` returns `-EFAULT` and `virtio_set_status` returns
-/// before it stores the status (`hw/virtio/virtio.c:2270-2276` and `:2292-2299`
-/// at v11.1.1), so `FEATURES_OK` never sticks. The actuator withholds the bit
-/// from every virtio device the kernel drives but the console — on this
-/// machine the virtio-gpu it adds for that, since every other function is a
-/// process's claim — and each of them is refused for it.
-fn declining_is_not_free(test_config: &Path) -> Result<(), String> {
-    let qemu = QemuInstance::boot_with_options(
-        test_config,
-        &[],
-        &[],
-        BootOptions {
-            profile: Profile::HeadlessVirtioGpu,
-            kernel_params: &["virtio-no-access-platform"],
-            ..Default::default()
-        },
-    );
-    let log = Serial::boot(&qemu);
-    log.must_be_clean()?;
-    log.must_say("Boot: complete")?;
-
-    let refused: Vec<&str> = log
-        .text()
-        .lines()
-        .filter(|l| l.contains("refused the feature set"))
-        .collect();
-    if refused.is_empty() {
-        return Err(format!(
-            "the actuator withheld VIRTIO_F_ACCESS_PLATFORM from every virtio device but the \
-             console and none was refused for it. A device the host offered it on and the guest \
-             declined has to lose FEATURES_OK, and this machine went on as though the \
-             negotiation were free\n{}",
-            log.text()
-        ));
-    }
-    // The console kept the bit, so this is not simply a machine with no virtio.
-    log.must_say("access_platform=y")?;
-    refused.iter().for_each(|line| eprintln!("  [iommu] declined: {line}"));
     Ok(())
 }
 

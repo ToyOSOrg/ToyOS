@@ -747,7 +747,6 @@ pub const FLASHABLE: &[&str] = &[
     // an armed image leaves behind is a longer log.
     "pci-cap-selftest",
     "revoked-backing-selftest",
-    "leak-rollback-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
     "xhci-xecp-selftest",

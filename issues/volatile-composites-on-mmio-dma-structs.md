@@ -9,12 +9,12 @@ opened: 2026-08-20
 `clippy::volatile_composites` (nursery) measured **10**, kernel-only, all in
 driver code that hands a composite type straight to `write_volatile` or
 `read_volatile` instead of touching each primitive field on its own. Two were
-the NVMe driver's queue entries, which left the kernel with it; the rest:
+the NVMe driver's queue entries and one virtio-gpu's EDID answer, which left
+the kernel with their drivers; the rest:
 
 - `drivers/xhci/wait/boot.rs:446` — `ErstEntry`.
 - `drivers/xhci/mod.rs:560,593,1093` — `Trb`, three sites.
 - `drivers/virtio.rs:414,487` — the virtio descriptor.
-- `drivers/virtio_gpu.rs:276` — `RespEdid`.
 
 The lint's own docs put the reason plainly: volatile ops are well-defined for
 a primitive because the compiler must emit exactly the load/store the source

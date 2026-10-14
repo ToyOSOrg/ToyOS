@@ -43,8 +43,9 @@ fn draw_element(rng: &mut Rng) -> Vec<u8> {
             for _ in 0..rng.below(5) {
                 body.extend([[1, 13, 20], [36, 4, 23], [190, 12, 30], [201, 81, 0], [0, 1, 1]][rng.below(5)]);
             }
-            if rng.chance(30) {
-                body.push(rng.below(2) as u8);
+            // The pad an odd length needs, sometimes left out or added where none is needed.
+            if (body.len() % 2 == 1) != rng.chance(10) {
+                body.push(0);
             }
             element(7, &body)
         }
@@ -135,7 +136,7 @@ fn draw_block_ack(rng: &mut Rng) -> Vec<u8> {
     f.extend(STA.0);
     f.extend(AP.0);
     f.extend([if rng.chance(80) { 0x04 } else { rng.next() as u8 }, (rng.below(16) << 4) as u8]);
-    let (fragment, octets) = if bar { (0, 0) } else { [(0, 8), (2, 32), (4, 16), (6, 4)][rng.below(4)] };
+    let (fragment, octets) = if bar { (0, 0) } else { [(0, 8), (4, 32)][rng.below(2)] };
     f.extend(((rng.below(4096) << 4) as u16 | fragment).to_le_bytes());
     f.extend((0..octets).map(|_| rng.next() as u8));
     f

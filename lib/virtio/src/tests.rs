@@ -458,6 +458,30 @@ fn a_32_bit_field_is_read_32_bits_wide_and_only_inside_the_structure() {
     }
 }
 
+/// A live device's own fields: read and written 32 bits wide inside the
+/// structure, and refused, with `FAILED`, outside it.
+#[test]
+fn a_live_device_reads_and_writes_its_own_fields_inside_the_structure() {
+    let machine = Machine::new();
+    let (mut device, _queue) = live(&machine);
+    machine.forget_trace();
+    assert_eq!(device.device_read32(0), Ok(0x1200_5452));
+    assert_eq!(device.device_write32(0, 0xA5A5_0001), Ok(()));
+    assert_eq!(
+        machine.trace(),
+        [Event::DeviceConfig { at: 0 }, Event::DeviceConfigWrite { at: 0, value: 0xA5A5_0001 }]
+    );
+    for at in [8, 4, 2, usize::MAX - 1] {
+        let machine = Machine::new();
+        let (mut device, _queue) = live(&machine);
+        machine.forget_trace();
+        assert_eq!(device.device_read32(at), Err(Refusal::PastDeviceConfig { at, bytes: 6 }));
+        assert_eq!(device.device_write32(at, 1), Err(Refusal::PastDeviceConfig { at, bytes: 6 }));
+        let failed = status::ACKNOWLEDGE | status::DRIVER | status::FEATURES_OK | status::DRIVER_OK | status::FAILED;
+        assert_eq!(machine.trace(), [Event::Status(failed), Event::Status(failed)]);
+    }
+}
+
 // --- PCI 3.0 §6.7: the capability list ---
 
 /// A function's configuration space: 256 bytes, and the offsets a claim

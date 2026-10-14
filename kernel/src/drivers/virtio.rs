@@ -118,7 +118,8 @@ impl core::fmt::Display for MissingCap {
     }
 }
 
-/// Why [`VirtioDevice::init`] refused the device; either way it keeps no DMA.
+/// Why [`VirtioDevice::offer`] or [`Offered::accept`] refused the device;
+/// either way it keeps no DMA.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InitRefusal {
     /// Its chain never produced a window for a required capability.
@@ -158,18 +159,6 @@ const RESET: crate::time::Budget = crate::time::Budget::of(
     crate::time::Duration::from_secs(2),
     "the device is refused, never waited on",
 );
-
-/// Every driver's accepted set carries [`VIRTIO_F_ACCESS_PLATFORM`]; the actuator
-/// withholds it to stage a function no unit sees, sparing the console.
-fn platform_addressing(pci_dev: &PciDevice) -> u64 {
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::virtio_no_access_platform() && pci_dev.device_id() != 0x1043 {
-        return 0;
-    }
-    #[cfg(not(feature = "boot-actuators"))]
-    let _ = pci_dev;
-    VIRTIO_F_ACCESS_PLATFORM
-}
 
 /// The config sub-window a virtio PCI capability names, or why it names none:
 /// the device's index, offset and length checked before a subregion is taken.
@@ -693,9 +682,9 @@ pub fn cap_selftest() {
     }
 
     // A refused device keeps no bus mastering: COMMAND arrives armed (bit 2, Bus
-    // Master Enable, PCI 3.0 §6.2.2) and `init`'s refusal must clear it.
+    // Master Enable, PCI 3.0 §6.2.2) and `offer`'s refusal must clear it.
     cfg.write_u16(0x04, 0x0006);
-    let refused = VirtioDevice::init(&device, 0);
+    let refused = VirtioDevice::offer(&device);
     let command = cfg.read_u16(0x04);
     match refused {
         Err(InitRefusal::Cap(MissingCap::Common)) if command & 0x4 == 0 => passed += 1,
@@ -739,7 +728,7 @@ impl Offered {
         pci_dev.enable_bus_master();
         let common = config.common;
 
-        let features = device_features & (accepted_features | platform_addressing(pci_dev));
+        let features = device_features & (accepted_features | VIRTIO_F_ACCESS_PLATFORM);
         log!(
             "VirtIO: PCI {:02x}:{:02x}.{} features device={device_features:#x} \
              negotiated={features:#x} access_platform={}",
@@ -802,11 +791,6 @@ impl VirtioDevice {
         let device_features_hi = common.read_u32(COMMON_DEVICE_FEATURE);
         let features = (device_features_hi as u64) << 32 | device_features_lo as u64;
         Ok(Offered { config, features })
-    }
-
-    /// Initialize a VirtIO PCI device: reset, negotiate features, prepare for queue setup.
-    pub fn init(pci_dev: &PciDevice, accepted_features: u64) -> Result<Self, InitRefusal> {
-        Self::offer(pci_dev)?.accept(pci_dev, accepted_features)
     }
 
     /// Configure a virtqueue's addresses and size; does not enable it — call `enable_queue()` after MSI-X vectors are set.

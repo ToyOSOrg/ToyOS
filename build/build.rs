@@ -619,14 +619,16 @@ const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::
 /// port, whose holder replaces any service's binary, the grants port, whose
 /// holder writes which folder of the home a package sees, the prompt port,
 /// whose holder draws above every window and has every key while it does, the
-/// input port, whose holder types into the focused window, and the clipboard
-/// port, whose holder is sent every copy made in the session.
+/// input port, whose holder types into the focused window, the clipboard
+/// port, whose holder is sent every copy made in the session, and the display
+/// port, whose holder sets the mode and the scale every window is drawn at.
 const HELD_ALONE: &[(&str, &str)] = &[
     (toyos_swap::PORT, toyos_swap::HOLDER),
     (toyos_manifest::grants::PORT, toyos_manifest::grants::HOLDER),
     (toyos_manifest::consent::PROMPT, toyos_manifest::consent::SERVER),
     (toyos_input::wire::PORT, toyos_input::wire::HOLDER),
     (toyos_manifest::clipboard::PORT, toyos_manifest::clipboard::HOLDER),
+    (toyos_manifest::display::PORT, toyos_manifest::display::HOLDER),
 ];
 
 /// Who may hold the authorities that change what the machine runs or what a
@@ -1016,6 +1018,8 @@ pub struct Plan {
     pub version: u64,
     /// Which machines' microcode ROOT carries.
     pub machines: crate::microcode::Machines,
+    /// The scale `cargo run --scale` starts the desktop at.
+    pub scale: Option<String>,
 }
 
 impl Plan {
@@ -1027,6 +1031,7 @@ impl Plan {
             params: params.iter().map(|p| (*p).to_string()).collect(),
             version: image::version_now(),
             machines: crate::microcode::Machines::Qemu,
+            scale: None,
         }
     }
 }
@@ -1063,7 +1068,22 @@ pub fn plan_for(root: &Path, boot: &Boot, debug: bool, args: &[String]) -> Plan 
         } else {
             crate::microcode::Machines::Qemu
         },
+        scale: flags::CARGO_RUN.value(args, &flags::SCALE).map(String::from),
     }
+}
+
+/// `config` with its compositor started at `scale`, where `cargo run --scale`
+/// names one; an image without a compositor has no scale to start at, and is
+/// refused by name.
+fn at_scale(mut config: SystemConfig, scale: Option<&str>) -> SystemConfig {
+    if let Some(scale) = scale {
+        let compositor = config
+            .programs
+            .get_mut("compositor")
+            .unwrap_or_else(|| panic!("--scale {scale}: this image runs no compositor"));
+        compositor.args.push(format!("{}{scale}", toyos_manifest::display::SCALE_ARG));
+    }
+    config
 }
 
 /// The architecture a `cargo run` command line names with `--arch`: x86-64
@@ -1848,7 +1868,7 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
     // Held until the last staged artifact has been read back, so no clean of
     // this worktree's crate targets can land inside this build.
     let mut lock = buildlock::shared(root, "build");
-    let config = parse_config(&boot.config);
+    let config = at_scale(parse_config(&boot.config), plan.scale.as_deref());
     let env = GuestEnv::new(toolchain::ensure(root, &mut lock), arch);
 
     invalidate_stale(&mut lock, &env.sysroot.identity, &[root.to_path_buf()]);
@@ -3084,6 +3104,7 @@ mod tests {
         "tests/images/netcase.toml",
         "tests/images/panelcase.toml",
         "tests/images/proctreecase.toml",
+        "tests/images/scalecase.toml",
         "tests/images/testcases.toml",
         "tests/images/virtclaimcase.toml",
         "tests/images/virtjobcase.toml",

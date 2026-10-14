@@ -142,10 +142,133 @@ impl<C> Window<C> {
     }
 }
 
+/// A window's buffers: the one it is shown from, and at most one given its
+/// client since, each named by the generation the client presents it with.
+///
+/// **Nothing flashes**: until the client presents with the given buffer's
+/// generation the window is drawn from the buffer it last presented, clipped
+/// to its new rectangle. **A window holds at most two**: while one is given
+/// and not presented no other is given; a window wanting another meanwhile
+/// is owed it, and given it once it presents the outstanding one.
+pub struct Buffers<B> {
+    shown: (u32, B),
+    given: Option<(u32, B)>,
+    next: u32,
+    owed: bool,
+}
+
+/// What a client's present with a generation did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Presented<B> {
+    /// It drew into the buffer already shown.
+    Shown,
+    /// It drew into the given buffer, shown from now on; `old` is the one it
+    /// replaces, to drop, and `owed` whether the window wants another.
+    Swapped { old: B, owed: bool },
+    /// No buffer the window holds has this generation: not this protocol.
+    Unknown,
+}
+
+impl<B> Buffers<B> {
+    /// `shown` at generation 0.
+    pub fn new(shown: B) -> Self {
+        Self { shown: (0, shown), given: None, next: 1, owed: false }
+    }
+
+    pub fn shown(&self) -> &B {
+        &self.shown.1
+    }
+
+    /// The buffer the client draws into: the given one, if there is one.
+    pub fn drawn(&self) -> &B {
+        self.given.as_ref().map_or(&self.shown.1, |(_, b)| b)
+    }
+
+    /// Whether a buffer is given and not yet presented, in which case the
+    /// window is owed the one it wanted and nothing is given now.
+    pub fn owe(&mut self) -> bool {
+        self.owed |= self.given.is_some();
+        self.given.is_some()
+    }
+
+    /// Give the client `buffer`, and answer its generation. One given and
+    /// not presented is the caller's to have asked [`owe`](Self::owe) about.
+    pub fn give(&mut self, buffer: B) -> u32 {
+        assert!(self.given.is_none(), "a window holds at most two buffers");
+        let generation = self.next;
+        self.next = self.next.wrapping_add(1);
+        self.given = Some((generation, buffer));
+        generation
+    }
+
+    /// The client presented, drawn into the buffer of `generation`.
+    pub fn presented(&mut self, generation: u32) -> Presented<B> {
+        if generation == self.shown.0 {
+            return Presented::Shown;
+        }
+        match self.given.take() {
+            Some(given) if given.0 == generation => {
+                let old = core::mem::replace(&mut self.shown, given).1;
+                Presented::Swapped { old, owed: core::mem::take(&mut self.owed) }
+            }
+            given => {
+                self.given = given;
+                Presented::Unknown
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use alloc::string::ToString;
+
+    #[test]
+    fn a_window_is_shown_from_its_old_buffer_until_it_presents_into_the_new() {
+        let mut b = Buffers::new("old");
+        let new = b.give("new");
+        assert_eq!((*b.shown(), *b.drawn()), ("old", "new"));
+        assert_eq!(b.presented(new), Presented::Swapped { old: "old", owed: false });
+        assert_eq!((*b.shown(), *b.drawn()), ("new", "new"));
+        assert_eq!(b.presented(new), Presented::Shown);
+    }
+
+    /// A present drawn into the old buffer after the new one was given, as a
+    /// client mid-frame sends, shows the old buffer still: the new one was
+    /// never drawn into.
+    #[test]
+    fn a_present_into_the_old_buffer_does_not_swap() {
+        let mut b = Buffers::new("old");
+        let new = b.give("new");
+        assert_eq!(b.presented(0), Presented::Shown);
+        assert_eq!(*b.shown(), "old");
+        assert_eq!(b.presented(new), Presented::Swapped { old: "old", owed: false });
+    }
+
+    #[test]
+    fn a_generation_the_window_never_held_is_unknown() {
+        let mut b = Buffers::new("old");
+        let new = b.give("new");
+        assert_eq!(b.presented(new + 1), Presented::Unknown);
+        assert_eq!(*b.drawn(), "new");
+    }
+
+    /// Two resizes before a present: the second is owed and not given, so a
+    /// window holds two buffers and not three, and is given the one it wants
+    /// once it presents the first.
+    #[test]
+    fn a_second_buffer_is_owed_while_one_is_outstanding() {
+        let mut b = Buffers::new("old");
+        assert!(!b.owe());
+        let first = b.give("first");
+        assert!(b.owe());
+        assert_eq!(*b.drawn(), "first");
+        assert_eq!(b.presented(first), Presented::Swapped { old: "old", owed: true });
+        assert!(!b.owe());
+        let second = b.give("second");
+        assert_eq!(b.presented(second), Presented::Swapped { old: "first", owed: false });
+    }
 
     fn win(content: Rect) -> Window<()> {
         Window::new((), content, "t".to_string(), Level::Ordinary, CursorStyle::Default)

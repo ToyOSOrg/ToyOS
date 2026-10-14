@@ -138,7 +138,7 @@ build/    CLAUDE.md; the root package's library and binaries (bin/ toyos-flash i
           ssh/ (package toyos-ssh)
 tests/    CLAUDE.md; toyos.rs checks.rs common/ checks/ (the root package's test targets)
           guest/ (proctest kernelprobe metalprobe test-runner rust-tests/) images/ (one .toml per boot case)
-          metal/ (package toyos-metal: the loop, and t14-linux/, the Linux readings)
+          metal/ (package toyos-metal: the loop)
           corpus/tinycc/ cavp/
 ports/    <name>/recipe.toml and patches/, empty until the first
 issues/   <slug>.md
@@ -235,9 +235,8 @@ tree's top level: `.cargo`, `.claude`, `.github`, `.gitignore`,
    package depends on a path outside `sdk/`; `--build-only` and the guest
    suite green.
 8. **Tests and images:** `images/`, `tests/images/`, `tests/metal/` (the
-   metal loop as package `toyos-metal`, with the Linux readings in
-   `t14-linux/`; a machine's records are in the host's store, so there is no
-   descriptor), `tests/guest/rust-tests/`, `tests/guest/c/` and
+   metal loop as package `toyos-metal`; a machine's records are in the
+   host's store, so there is no descriptor), `tests/guest/rust-tests/`, `tests/guest/c/` and
    `tests/corpus/tinycc/`. Image names stay `bootable-<stem>.img`.
    `whole_disk` and `Node`, which `toyos-flash` and the loop both read, are
    in `build/disk.rs`. Landed with stage 4, in one pull request. **Exit:** no

@@ -85,6 +85,7 @@ members = [
     "sdk/abi",
     "sdk/filepicker",
     "sdk/font",
+    "sdk/icon",
     "sdk/keymap",
     "sdk/libc/arch",
     "sdk/std/copies",
@@ -95,7 +96,7 @@ members = [
     "system/acpiserver/aml",
     "system/compositor",
     "system/compositor/desktop",
-    "system/compositor/sprite",
+    "system/compositor/virtio-gpu",
     "system/console",
     "system/diskserver",
     "system/filepicker",
@@ -196,7 +197,11 @@ name = "imgstat"
 path = "build/bin/imgstat.rs"
 
 [dependencies]
-fontdue = "0.9"
+# The rasterizer the build draws the 8x16 font with, which a guest drawing at
+# a scale runs too.
+toyos-font = { path = "sdk/font" }
+# The SVG subset every shipped icon is held to, read as the guest reads it.
+toyos-icon = { path = "sdk/icon" }
 libc = "0.2"
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
