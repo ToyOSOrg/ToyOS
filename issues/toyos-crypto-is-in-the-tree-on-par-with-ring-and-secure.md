@@ -42,8 +42,9 @@ review has been done, and passing vectors does not show it is safer than ring.
   - No metal bench has measured these.
 - **Inside ToyOS `CR4.OSXSAVE` is set** since f7b497231. The kernel's cpu0
   records in #932's bench boots show XCR0 0xe7 on the T14 (AVX-512 state)
-  and 0x7 on the AMD bench (AVX). Both the crate and ring admit AVX only after
-  OSXSAVE and XGETBV, so their vector paths are open there.
+  and 0x7 on the AMD bench (AVX). The parity instrument records what
+  feature detection admits there, AVX2 and AES-NI on both benches and
+  VAES/AVX-512 on the T14, so both crates' vector paths are open.
 - **AArch64 is scalar.** No ARM bench exists to measure an ARM path, so the
   crate's AArch64 AES and PMULL paths are not imported. They stay in the
   archive until an ARM bench measures them. `toyos-sha2-hw` follows the same
@@ -161,26 +162,31 @@ Not consumers:
      - Parity work reads ring's, BoringSSL's and OpenSSL's perlasm or C only
        through a clean room, as root's research rule says.
      - Faster code is accepted only with stage 4's evidence for it.
-   - **First measurement on the benches**, #932 at 9a318695e, shipped
-     build. A family's ratio is ours over ring's mean, and its median is the
-     lower middle of the family's rows.
+   - **First measurement on the benches**, #932 at 85cda28d3, shipped
+     build. Each row was built only after ours matched ring on its inputs.
+     A family's ratio is ours over ring's mean, and its median is the lower
+     middle of the family's rows. Each build recorded its ISA:
+     - the T14: `aes,pclmulqdq,sha,movbe,bmi2,adx,avx,avx2,vaes,vpclmulqdq,avx512f,avx512vl`;
+     - the AMD bench: `aes,pclmulqdq,sha,movbe,bmi2,adx,avx,avx2`.
 
      | family | T14 median | T14 worst | AMD median | AMD worst |
      |---|---|---|---|---|
-     | AES-GCM (26 rows) | 1.37 | 3.60 key setup | 1.63 | 2.39 seal 16 KiB |
-     | ChaCha20-Poly1305 (13) | 4.75 | 6.97 seal 16 KiB | 4.68 | 8.75 seal 16 KiB |
-     | chacha20-poly1305@openssh (16) | 2.84 | 12.8 key setup | 2.91 | 19.0 key setup |
-     | SHA-2 (4) | 1.96 | 7.26 SHA-256 16 KiB | 1.73 | 7.85 SHA-256 16 KiB |
-     | HMAC/HKDF (4) | 1.93 | 3.35 HMAC-SHA-256 | 1.77 | 3.98 HMAC-SHA-256 |
-     | ECDH (3) | 13.3 | 21.2 P-256 | 10.6 | 22.1 P-256 |
-     | Ed25519 sign, verify | 71.1, 34.5 | | 60.0, 25.1 | |
-     | ECDSA verify P-256, P-384 | 22.1, 4.93 | | 23.2, 5.41 | |
-     | RSA verify (4) | 30.4 | 38.1 2048 PKCS#1 | 27.5 | 34.5 2048 PKCS#1 |
-     | ML-KEM-768 beside `ml-kem`, excluded | 1.01 | 1.08 | 1.05 | 1.12 |
+     | AES-GCM (26 rows) | 1.43 | 3.63 key setup | 1.68 | 2.36 seal 16 KiB |
+     | ChaCha20-Poly1305 (13) | 4.74 | 6.98 seal 16 KiB | 4.68 | 8.74 seal 16 KiB |
+     | chacha20-poly1305@openssh (16) | 2.82 | 13.5 key setup | 2.94 | 19.0 key setup |
+     | SHA-2 (4) | 1.96 | 7.25 SHA-256 16 KiB | 1.73 | 7.85 SHA-256 16 KiB |
+     | HMAC/HKDF (4) | 1.94 | 3.39 HMAC-SHA-256 | 1.80 | 3.98 HMAC-SHA-256 |
+     | ECDH (3) | 13.3 | 21.2 P-256 | 10.6 | 22.2 P-256 |
+     | Ed25519 sign, verify | 70.8, 34.3 | | 59.7, 25.3 | |
+     | ECDSA verify P-256, P-384 | 22.1, 4.92 | | 23.3, 5.39 | |
+     | RSA verify (4) | 30.6 | 38.2 2048 PKCS#1 | 27.6 | 34.6 2048 PKCS#1 |
+     | ML-KEM-768 beside `ml-kem`, excluded | 1.01 | 1.08 | 1.05 | 1.11 |
 
-     The T14 has 68 fails, 3 remeasures and 3 passes. The AMD bench has 73
-     fails and 1 pass. Tables:
-     https://github.com/ToyOSOrg/evidence/tree/5eeda10118442ad37c76595da1a280ada9dc5185/pr-932.
+     The T14 has 70 fails, 1 remeasure and 3 passes. The AMD bench has 73
+     fails and 1 pass. The first run, at 9a318695e, recorded no ISA and
+     printed samples rounded to 0.1 ns. Its figures agree with these within
+     about 5%. Tables:
+     https://github.com/ToyOSOrg/evidence/tree/4dfa4dc8c647bee3424a13be28191bdb2213bcbd/pr-932/r2.
    - **First measurement, not a verdict.** `toyos-ssh`'s fuzz
      (`build/ssh/tests/fuzz.rs`), on the crate since stage 1: 33.92 s and
      15.46 s in two runs on the development Mac (an M4 Pro). On ring it took
