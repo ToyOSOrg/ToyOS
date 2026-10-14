@@ -12,8 +12,8 @@ use core::num::{NonZeroU16, NonZeroUsize};
 
 use crate::{Refused, Seq};
 
-/// The largest buffer an 802.11-2020 HT or VHT agreement negotiates (§9.4.1.14).
-pub const MAX_SIZE: u16 = 64;
+/// The largest buffer an HE agreement negotiates (802.11ax-2021 §9.4.1.14); HT and VHT stop at 64.
+pub const MAX_SIZE: u16 = 256;
 const HALF: u16 = Seq::MODULUS / 2;
 
 pub struct Window<T> {

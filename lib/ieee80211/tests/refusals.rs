@@ -60,6 +60,20 @@ fn block_ack(subtype: u8, rest: &[u8]) -> Refused {
     frame(&f)
 }
 
+/// An HE Capabilities element whose PHY capabilities' first octet is `width_set`, with PPE
+/// Thresholds present or not, and then `rest`.
+fn he_capabilities(width_set: u8, ppe: bool, rest: &[u8]) -> Vec<u8> {
+    let mut phy = [0u8; 11];
+    phy[0] = width_set;
+    phy[2] = if ppe { 0x80 } else { 0 };
+    element(255, &[&[35][..], &[0; 6], &phy, &[0xFA, 0xFF, 0xFA, 0xFF], rest].concat())
+}
+
+/// A vendor-specific element under WMM's OUI and type.
+fn wmm(after_type: &[u8]) -> Vec<u8> {
+    element(221, &[&[0x00, 0x50, 0xF2, 0x02][..], after_type].concat())
+}
+
 fn window() -> Window<u16> {
     Window::new(Seq::new(100), 64).unwrap()
 }
@@ -108,6 +122,10 @@ fn cases() -> Vec<(Refused, Refused)> {
         (ExtendedRsnLength, elements(&element(244, &[0x02, 0x20]))),
         (SecondaryChannelOffset, elements(&ht_operation(2))),
         (VhtReserved, elements(&element(192, &[4, 42, 0, 0xFF, 0xFF]))),
+        (PpeThresholds, elements(&he_capabilities(0, true, &[0b0001_1001, 0, 0]))),
+        (WmmVersion, elements(&wmm(&[0, 2, 0]))),
+        (WmmAifsn, elements(&wmm(&[[1, 1, 0, 0].as_slice(), &[0x01, 0xA4, 0, 0], &[0x27, 0xA4, 0, 0], &[0x42, 0x43, 94, 0], &[0x62, 0x32, 47, 0]].concat()))),
+        (WmmAccessCategory, elements(&wmm(&[[1, 1, 0, 0].as_slice(), &[0x03, 0xA4, 0, 0], &[0x27, 0xA4, 0, 0], &[0x42, 0x43, 94, 0], &[0x42, 0x32, 47, 0]].concat()))),
         (BlockAckVariant, block_ack(8, &[0x00, 0x00, 0x00, 0x00])),
         (BitmapSize, block_ack(9, &[[0x04, 0x00, 0x01, 0x00].as_slice(), &[0xFF; 8]].concat())),
         (ControlLength, block_ack(8, &[0x04, 0x00, 0x00, 0x00, 0x00])),
@@ -119,7 +137,7 @@ fn cases() -> Vec<(Refused, Refused)> {
         (TranslatedType, ethernet(&[0xAA, 0xAA, 0x03, 0, 0, 0, 0x81, 0x37])),
         (LengthField, ethernet(&[0xAA, 0xAA, 0x03, 0, 0, 0, 0x05, 0xFF])),
         (ExtendedIvClear, refusal(CcmpHeader::split(&[1, 0, 0, 0, 0, 0, 0, 0]))),
-        (WindowSize, refusal(Window::<u16>::new(Seq::new(0), 65))),
+        (WindowSize, refusal(Window::<u16>::new(Seq::new(0), 257))),
         (OldSequence, refusal(window().receive(Seq::new(100 + 2048), 0, &mut Vec::new()))),
         (DuplicateSequence, {
             let mut w = window();
@@ -138,6 +156,69 @@ fn every_refusal_has_a_hostile_input_that_produces_it() {
     let named: BTreeSet<Refused> = cases.iter().map(|(wanted, _)| *wanted).collect();
     let all: BTreeSet<Refused> = Refused::ALL.iter().copied().collect();
     assert_eq!(all.difference(&named).collect::<Vec<_>>(), Vec::<&Refused>::new());
+}
+
+#[test]
+fn an_he_capabilities_element_is_as_long_as_its_widths_and_ppe_thresholds_say() {
+    let parse = |list: Vec<u8>| Elements::parse(&list).map(|e| e.he_capabilities.map(|h| (h.mcs_160.is_some(), h.mcs_80p80.is_some(), h.ppe_thresholds.map(<[u8]>::len))));
+    assert_eq!(parse(he_capabilities(0, false, &[])), Ok(Some((false, false, None))));
+    assert_eq!(parse(he_capabilities(0x18, false, &[0; 8])), Ok(Some((true, true, None))));
+    assert_eq!(parse(he_capabilities(0x08, false, &[0; 8])), Err(Refused::ElementLength));
+    assert_eq!(parse(he_capabilities(0x18, false, &[0; 7])), Err(Refused::ElementLength));
+    // Two streams and two RU sizes: 7 + 2 × 2 × 6 = 31 bits, four octets.
+    assert_eq!(parse(he_capabilities(0, true, &[0b0001_1001, 0, 0, 0])), Ok(Some((false, false, Some(4)))));
+    assert_eq!(parse(he_capabilities(0, true, &[0b0001_1001, 0, 0, 0, 0])), Err(Refused::ElementLength));
+}
+
+#[test]
+fn an_he_operation_element_is_as_long_as_its_present_bits_say() {
+    let op = |parameters: u32, rest: &[u8]| {
+        let p = parameters.to_le_bytes();
+        element(255, &[&[36, p[0], p[1], p[2], 0x05, 0xFC, 0xFF][..], rest].concat())
+    };
+    let list = op(1 << 17, &[37, 0x02, 39, 0, 6]);
+    let six = Elements::parse(&list).unwrap().he_operation.unwrap();
+    assert_eq!(six.six_ghz.map(|s| (s.primary_channel, s.center_segment0)), Some((37, 39)));
+    assert_eq!(six.bss_color & 0x3F, 5);
+    let list = op(1 << 14 | 1 << 15 | 1 << 17, &[1, 42, 0, 3, 37, 2, 39, 0, 6]);
+    assert_eq!(Elements::parse(&list).unwrap().he_operation.unwrap().vht, Some([1, 42, 0]));
+    assert_eq!(elements(&op(1 << 14, &[1, 42])), Refused::ElementLength);
+    assert_eq!(elements(&op(0, &[0])), Refused::ElementLength);
+}
+
+#[test]
+fn a_wmm_information_element_and_another_wmm_subtype_are_read_and_skipped() {
+    use toyos_ieee80211::element::Wmm;
+    let wmm_of = |list: Vec<u8>| Elements::parse(&list).unwrap().wmm;
+    assert_eq!(wmm_of(wmm(&[0, 1, 0x80])), Some(Wmm::Information { qos_info: 0x80 }));
+    assert_eq!(wmm_of(wmm(&[2, 1, 0xFF])), None);
+    assert_eq!(elements(&wmm(&[0, 1])), Refused::ElementLength);
+    assert_eq!(elements(&[wmm(&[0, 1, 0]), wmm(&[0, 1, 0])].concat()), Refused::DuplicateElement);
+}
+
+#[test]
+fn an_he_block_ack_bitmap_is_as_long_as_its_fragment_number_says() {
+    let ba = |fragment: u8, bitmap: &[u8]| {
+        let mut f = vec![0x94, 0, 0, 0];
+        f.extend(STA.0);
+        f.extend(AP.0);
+        f.extend([0x04, 0x00, fragment | 0x10, 0x00]);
+        f.extend(bitmap);
+        match Frame::parse(&f)? {
+            Frame::BlockAck(b) => Ok(b),
+            other => panic!("not a BlockAck: {other:?}"),
+        }
+    };
+    for (fragment, octets) in [(0b0000, 8), (0b0010, 32), (0b0100, 16), (0b0110, 4)] {
+        let mut bitmap = vec![0; octets];
+        bitmap[octets - 1] = 0x80;
+        let b = ba(fragment, &bitmap).unwrap();
+        let last = Seq::new(1).add(u16::try_from(octets * 8 - 1).unwrap());
+        assert!(b.acked(last) && !b.acked(last.add(1)) && !b.acked(Seq::new(1)), "{octets} octets");
+        assert_eq!(ba(fragment, &bitmap[1..]).err(), Some(Refused::Truncated));
+    }
+    assert_eq!(ba(0b1000, &[0; 8]).err(), Some(Refused::BitmapSize));
+    assert_eq!(ba(0b0001, &[0; 8]).err(), Some(Refused::BitmapSize));
 }
 
 #[test]

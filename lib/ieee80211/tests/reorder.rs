@@ -100,8 +100,21 @@ fn the_window_runs_across_the_end_of_the_sequence_space() {
 }
 
 #[test]
-fn a_window_of_one_to_sixty_four_is_made_and_no_other() {
+fn a_window_of_one_to_two_hundred_fifty_six_is_made_and_no_other() {
     assert!(Window::<u16>::new(Seq::new(0), 1).is_ok());
-    assert!(Window::<u16>::new(Seq::new(0), 64).is_ok());
+    assert!(Window::<u16>::new(Seq::new(0), 256).is_ok());
     assert_eq!(Window::<u16>::new(Seq::new(0), 0).err(), Some(Refused::WindowSize));
+}
+
+#[test]
+fn an_he_window_holds_two_hundred_fifty_six_frames_behind_a_hole() {
+    let mut w = window(4000, 256);
+    for seq in 4001..4096 {
+        assert_eq!(receive(&mut w, seq), []);
+    }
+    for seq in 0..160 {
+        assert_eq!(receive(&mut w, seq), []);
+    }
+    let all: Vec<u16> = (4000..4096).chain(0..160).collect();
+    assert_eq!(receive(&mut w, 4000), all);
 }

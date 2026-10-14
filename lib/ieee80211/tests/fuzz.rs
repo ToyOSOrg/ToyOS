@@ -28,7 +28,7 @@ type Sent = Vec<(Address, Address, u16, Vec<u8>)>;
 /// One element: often typed and well formed, sometimes bent, sometimes unknown.
 fn draw_element(rng: &mut Rng) -> Vec<u8> {
     let suite = |rng: &mut Rng| [0x00, 0x0F, 0xAC, rng.below(14) as u8];
-    match rng.below(14) {
+    match rng.below(18) {
         0 => element(0, &rng.bytes(34)),
         1 => element(1, &rng.bytes(9)),
         2 => element(50, &rng.bytes(12)),
@@ -70,6 +70,43 @@ fn draw_element(rng: &mut Rng) -> Vec<u8> {
         10 => element(191, &rng.bytes(13)),
         11 => element(192, &[rng.below(5) as u8, 42, 0, 0xFC, 0xFF]),
         12 => element(127, &rng.bytes(10)),
+        13 => {
+            let width_set = [0, 0x08, 0x18, 0x10][rng.below(4)];
+            let ppe = rng.chance(40);
+            let mut body = vec![35];
+            body.extend((0..6).map(|_| rng.next() as u8));
+            body.extend([width_set, 0, if ppe { 0x80 } else { 0 }, 0, 0, 0, 0, 0, 0, 0, 0]);
+            body.extend(vec![0xFA; 4 + 4 * (width_set.count_ones() as usize)]);
+            if ppe {
+                let first = rng.next() as u8 & 0x7F;
+                let bits = 7 + 6 * ((first & 7) as usize + 1) * (first >> 3).count_ones() as usize;
+                body.push(first);
+                body.extend(vec![0; bits.div_ceil(8) - 1]);
+            }
+            element(255, &body)
+        }
+        14 => {
+            let present = [0u32, 1 << 14, 1 << 15, 1 << 17, 1 << 14 | 1 << 15 | 1 << 17][rng.below(5)];
+            let p = present.to_le_bytes();
+            let mut body = vec![36, p[0], p[1], p[2], rng.next() as u8, 0xFC, 0xFF];
+            let extra = 3 * usize::from(present & 1 << 14 != 0) + usize::from(present & 1 << 15 != 0) + 5 * usize::from(present & 1 << 17 != 0);
+            body.extend((0..extra).map(|_| rng.next() as u8));
+            element(255, &body)
+        }
+        15 | 16 => {
+            let mut body = vec![0x00, 0x50, 0xF2, 0x02, rng.below(3) as u8, 1, rng.next() as u8];
+            if body[4] == 1 {
+                body.push(0);
+                let mut acis = [0u8, 1, 2, 3];
+                if rng.chance(10) {
+                    acis[3] = acis[rng.below(3)];
+                }
+                for aci in acis {
+                    body.extend([aci << 5 | (2 + rng.below(14)) as u8, rng.next() as u8, rng.next() as u8, 0]);
+                }
+            }
+            element(221, &body)
+        }
         _ => {
             let id = rng.next() as u8;
             if id == 255 { element(255, &rng.bytes(4)) } else { element(id, &rng.bytes(20)) }
@@ -97,10 +134,9 @@ fn draw_block_ack(rng: &mut Rng) -> Vec<u8> {
     f.extend(STA.0);
     f.extend(AP.0);
     f.extend([if rng.chance(80) { 0x04 } else { rng.next() as u8 }, (rng.below(16) << 4) as u8]);
-    f.extend(((rng.below(4096) << 4) as u16).to_le_bytes());
-    if !bar {
-        f.extend(rng.next().to_le_bytes());
-    }
+    let (fragment, octets) = if bar { (0, 0) } else { [(0, 8), (2, 32), (4, 16), (6, 4)][rng.below(4)] };
+    f.extend(((rng.below(4096) << 4) as u16 | fragment).to_le_bytes());
+    f.extend((0..octets).map(|_| rng.next() as u8));
     f
 }
 
@@ -221,14 +257,14 @@ fn every_drawn_frame_is_read_or_refused_by_name_and_an_unbent_one_reads_back() {
     }
     println!("{FUZZ_ITERATIONS} frames, {read_back} read back: {outcomes:#?}");
     assert!(read_back > FUZZ_ITERATIONS as usize / 5, "the fuzz reads data frames back");
-    assert!(outcomes.len() > 30, "the fuzz reaches most refusals: {}", outcomes.len());
+    assert!(outcomes.len() > 32, "the fuzz reaches most refusals: {}", outcomes.len());
 }
 
 #[test]
 fn the_reorder_window_passes_every_accepted_frame_up_once_and_in_order() {
     for iteration in 0..FUZZ_ITERATIONS / 10 {
         let mut rng = Rng(1 << 40 | iteration);
-        let size = 1 + rng.below(64) as u16;
+        let size = 1 + rng.below(256) as u16;
         let first = rng.below(4096) as u32;
         let mut w = Window::new(Seq::new(first as u16), size).unwrap();
         let mut base = first;

@@ -1,4 +1,5 @@
-//! IEEE Std 802.11-2020 frames as a station meets them: parsed in place from bytes a radio or a
+//! IEEE Std 802.11-2020 frames as a station meets them, with 802.11ax-2021's HE elements and
+//! BlockAck bitmaps and the Wi-Fi Alliance's WMM element: parsed in place from bytes a radio or a
 //! peer wrote, and refused by the first rule they break, by name.
 //!
 //! [`frame::Frame::parse`] takes one MPDU without its FCS and yields a typed management, control
@@ -103,9 +104,13 @@ refusals! {
     ExtendedRsnLength = Malformed, "an RSNXE whose field length runs past the element";
     SecondaryChannelOffset = Malformed, "an HT Operation secondary channel offset of 2";
     VhtReserved = Malformed, "a VHT capability or operation field of a reserved value";
+    PpeThresholds = Malformed, "HE PPE Thresholds whose length its own NSTS and RU mask do not give";
+    WmmVersion = Unsupported, "a WMM element of a version other than 1";
+    WmmAifsn = Malformed, "a WMM AC Parameter Record with an AIFSN below 2";
+    WmmAccessCategory = Malformed, "a WMM Parameter element that does not give each access category once";
     // Control frames, §9.3.1.
     BlockAckVariant = Unsupported, "a block-ack variant other than Compressed";
-    BitmapSize = Unsupported, "a compressed bitmap other than 64 bits";
+    BitmapSize = Unsupported, "a Fragment Number giving a fragment level or a bitmap other than 32, 64, 128 or 256 bits";
     ControlLength = Malformed, "a block-ack frame whose length its variant does not give";
     // Data, §9.3.2 and §12.5.3.
     SubframeLength = Malformed, "an A-MSDU subframe whose length runs past the MPDU";
@@ -117,7 +122,7 @@ refusals! {
     LengthField = Unsupported, "an EtherType below 0x0600, which is an IEEE 802.3 length";
     ExtendedIvClear = Malformed, "a CCMP header without its Ext IV bit";
     // The reordering buffer, §10.25.6.
-    WindowSize = Malformed, "a reordering buffer of 0 or more than 64 MPDUs";
+    WindowSize = Malformed, "a reordering buffer of 0 or more than 256 MPDUs";
     OldSequence = Malformed, "a sequence number before the window";
     DuplicateSequence = Malformed, "a sequence number already held in the window";
 }

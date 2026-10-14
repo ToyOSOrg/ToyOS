@@ -73,8 +73,8 @@ and owns each one this list gives no other owner.
 
 - **Writers.** Every W stage's owner is the orchestrator, who briefs a
   writer for it: an implementer told never to read the references or the
-  demo. The stage's design round is that writer's. The first W stage's pull
-  request, briefed to, adds that sentence to `.claude/agents/implementer.md`.
+  demo. The stage's design round is that writer's. Root `CLAUDE.md`'s
+  clean-room rule is that sentence; no prompt carries another.
 - **Reviews.** The orchestrator's brief for each W stage's review and design
   acceptance says that they quote no reference. A defect found through a
   reference reaches the writer only as a reader's revision of the

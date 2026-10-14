@@ -103,6 +103,21 @@ fn a_captured_sae_beacon_reads_its_rsn_ht_and_vht_operation() {
 }
 
 #[test]
+fn a_captured_association_response_carries_the_wmm_default_parameters() {
+    use toyos_ieee80211::element::{AcParameters, Wmm};
+    let response = &frames("ieee802.11_exthdr")[23];
+    let Ok(Frame::Management(m)) = Frame::parse(response) else { panic!("not management") };
+    let Ok(Body::AssociationResponse(r)) = Body::parse(m.subtype, m.body) else { panic!("not a response") };
+    assert_eq!(r.aid, Some(1));
+    let Some(Wmm::Parameter { access_categories: [be, bk, vi, vo], .. }) = Elements::parse(r.elements).unwrap().wmm else {
+        panic!("no WMM Parameter element")
+    };
+    let ac = |aifsn, ecw_min, ecw_max, txop_limit| AcParameters { aifsn, admission_control: false, ecw_min, ecw_max, txop_limit };
+    // AC_VI's TXOP is 3.008 ms and AC_VO's 1.504 ms: 94 and 47 units of 32 µs.
+    assert_eq!([be, bk, vi, vo], [ac(3, 4, 10, 0), ac(7, 4, 10, 0), ac(2, 3, 4, 94), ac(2, 2, 3, 47)]);
+}
+
+#[test]
 fn a_captured_ccmp_frame_keeps_its_header_and_carries_an_ipv4_msdu() {
     let frame = &frames("ieee802.11_rx-stbc")[0];
     let d = data(frame);

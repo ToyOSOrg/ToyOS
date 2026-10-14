@@ -1,18 +1,23 @@
 //! Elements (§9.4.2): the TLV walk of a body's element list, and the elements a station decides
 //! by, each checked against its definition and allowed once.
 //!
-//! An element this module does not type is skipped, as §10.28.9 has a receiver ignore what it
-//! does not know; one it types that breaks its definition refuses the whole list.
+//! A vendor-specific element other than WMM's, and any other element this module does not type, is
+//! skipped, as §10.28.9 has a receiver ignore what it does not know; one it types that breaks its
+//! definition refuses the whole list.
 
 mod country;
+mod he;
 mod ht;
 mod rsn;
 mod tim;
+mod wmm;
 
 pub use country::{Country, Triplet, Triplets};
+pub use he::{HeCapabilities, HeOperation, SixGhz};
 pub use ht::{HtCapabilities, HtOperation, SecondaryChannel, VhtCapabilities, VhtChannelWidth, VhtOperation};
 pub use rsn::{Rsn, Rsnx, Suite, Suites};
 pub use tim::Tim;
+pub use wmm::{AcParameters, Wmm};
 
 use crate::read::Reader;
 use crate::Refused;
@@ -37,7 +42,10 @@ impl Id {
     pub const EXTENDED_CAPABILITIES: Self = Self::Base(127);
     pub const VHT_CAPABILITIES: Self = Self::Base(191);
     pub const VHT_OPERATION: Self = Self::Base(192);
+    pub const VENDOR_SPECIFIC: Self = Self::Base(221);
     pub const RSNX: Self = Self::Base(244);
+    pub const HE_CAPABILITIES: Self = Self::Extension(35);
+    pub const HE_OPERATION: Self = Self::Extension(36);
     const EXTENSION: u8 = 255;
 }
 
@@ -97,6 +105,8 @@ impl Rate {
     pub const HT_PHY: u8 = 127;
     pub const VHT_PHY: u8 = 126;
     pub const SAE_H2E_ONLY: u8 = 123;
+    /// 802.11ax-2021 Table 9-78.
+    pub const HE_PHY: u8 = 122;
 }
 
 /// The Supported Rates and BSS Membership Selectors element and its Extended continuation.
@@ -127,6 +137,9 @@ pub struct Elements<'a> {
     pub vht_capabilities: Option<VhtCapabilities>,
     pub vht_operation: Option<VhtOperation>,
     pub extended_capabilities: Option<ExtendedCapabilities<'a>>,
+    pub he_capabilities: Option<HeCapabilities<'a>>,
+    pub he_operation: Option<HeOperation>,
+    pub wmm: Option<Wmm>,
 }
 
 /// The Extended Capabilities element: bit n of its field, absent past its length, is 0 (§9.4.2.26).
@@ -174,6 +187,15 @@ impl<'a> Elements<'a> {
                 Id::VHT_CAPABILITIES => once(&mut e.vht_capabilities, VhtCapabilities::parse(body)?)?,
                 Id::VHT_OPERATION => once(&mut e.vht_operation, VhtOperation::parse(body)?)?,
                 Id::EXTENDED_CAPABILITIES => once(&mut e.extended_capabilities, ExtendedCapabilities(body))?,
+                Id::HE_CAPABILITIES => once(&mut e.he_capabilities, HeCapabilities::parse(body)?)?,
+                Id::HE_OPERATION => once(&mut e.he_operation, HeOperation::parse(body)?)?,
+                Id::VENDOR_SPECIFIC => {
+                    if let Some(rest) = body.strip_prefix(&wmm::HEADER)
+                        && let Some(w) = Wmm::parse(rest)?
+                    {
+                        once(&mut e.wmm, w)?;
+                    }
+                }
                 Id::Base(_) | Id::Extension(_) => {}
             }
         }
