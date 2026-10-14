@@ -4,33 +4,19 @@ kind: defect
 opened: 2026-10-09
 ---
 
-# A stream's failure reaches its client as a reset, whatever it was
+# A stream's failure is told its client by name, and only a reset is tested
 
-The pipe ABI tells a stream's client how the stream ended by the order its two
-pipes end in (`system/netstack/node/src/streams.rs`'s header), which carries
-one bit: the peer's FIN, or a failure. The node knows which failure
-(`toyos_net_tcp::Failure`: a reset, R2's timeout, an ICMP error), and std
-answers every one `ConnectionReset`, where Linux answers a connection [tcp]
-gave up on `ETIMEDOUT` and one an ICMP error ended `EHOSTUNREACH` or
-`ENETUNREACH`. libc answers every one `ECONNRESET`
-(`sdk/libc/src/streamend.rs`).
+The receive ring's `end` word carries which failure ended a stream:
+`RESET`, `TIMED_OUT` or `UNREACHABLE` (`sdk/toyos/src/net/stream.rs`), which
+the node stores from [tcp]'s `Failure` (`system/netstack/node/src/streams.rs`),
+std answers `ConnectionReset`, `TimedOut` or `HostUnreachable`
+(`sdk/std/sys/net/connection.rs`) and libc `ECONNRESET`, `ETIMEDOUT` or
+`EHOSTUNREACH` (`sdk/libc/src/socket.rs`). The node's host tests read a
+peer's reset as `RESET`; nothing reads the other two words, and no guest test
+reads any of them through std or libc.
 
-A pipe's end carries no word, and every other carrier costs what this one does
-not: a third pipe or a kept request connection is a 2 MiB page each
-(`kernel/src/pipe.rs`, `PIPE_SIZE`), and a reason the node keeps for a client to
-ask about after both pipes are gone is kept for ever for a client that died,
-since nothing then tells the node it left. The clean carrier is a word the
-writer of a pipe sets as it lets its end go and the reader reads at the end,
-which is the kernel's to add.
-
-The same word set would answer a connect that an ICMP error ended, which the
-move's netstack answers `ERR_OTHER` for want of a word.
-
-Read from the code, not measured.
-
-**Exit condition**: a pipe's end carries its reason, the node writes
-`Failure`'s through it, and std and libc answer each as Linux does; a node
-host test reads each failure's word, and a guest test whose peer is
-unreachable reads it as unreachable.
+**Exit condition**: a node host test reads a connection [tcp] gave up on as
+`TIMED_OUT` and one an ICMP error ended as `UNREACHABLE`, and a guest test
+whose peer is unreachable reads it as unreachable through std.
 
 **Owner**: whoever holds `issues/toyos-has-its-own-network-stack.md`.

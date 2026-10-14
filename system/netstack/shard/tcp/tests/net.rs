@@ -498,6 +498,24 @@ fn a_peer_sending_segments_shorter_than_our_send_mss_still_grows_the_window() {
     assert_eq!(peaks[0].window, BUFFER, "{:?}", peaks[0]);
 }
 
+/// The same download into a lent receive ring, as a stream's region is: the reader takes text out
+/// of the ring itself and gives it back with `consume`, which grows the window as a read does, so
+/// the window passes 65,535 and reaches the whole buffer.
+#[test]
+fn a_lent_receive_ring_grows_the_window_as_a_read_does() {
+    let mut net = Net::buffered(15, BUFFER);
+    net.nodes[1].credit_per_ms = Some(125_000);
+    net.connections(1, 443, [0, 32 * MIB]);
+    assert!(net.run(100, |n| n.apps.len() == 2));
+    let reader = net.apps.iter().position(|a| a.node == 0).unwrap();
+    net.lend(reader, BUFFER as usize);
+    let peaks = watch(&mut net, 600_000);
+    assert!(net.finished(), "the transfer did not finish:\n{}", net.dump());
+    net.assert_exact();
+    assert!(peaks[0].window > 65_535, "{:?}", peaks[0]);
+    assert_eq!(peaks[0].window, BUFFER, "{:?}", peaks[0]);
+}
+
 /// RFC 8985 §7.3: no probe leaves unless an RTT sample came since the last. Without timestamps a
 /// retransmission voids the round's timing, so once the path's round trip passes twice the SRTT
 /// a probe every round would leave before every ACK and SRTT would never move again. Here, after

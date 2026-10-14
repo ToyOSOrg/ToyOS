@@ -2,6 +2,26 @@
 
 use core::arch::asm;
 
+/// How many bits wide a physical address this CPU issues is:
+/// `ID_AA64MMFR0_EL1.PARange` (Arm ARM DDI 0487): 0b0111, 56 bits, is
+/// FEAT_D128's, and the encodings past it are reserved.
+pub fn physical_address_bits() -> u8 {
+    let mmfr0: u64;
+    // SAFETY: reads an EL1 ID register, which EL1 may always read.
+    unsafe { asm!("mrs {}, id_aa64mmfr0_el1", out(reg) mmfr0, options(nomem, nostack, preserves_flags)) };
+    match mmfr0 & 0xF {
+        0 => 32,
+        1 => 36,
+        2 => 40,
+        3 => 42,
+        4 => 44,
+        5 => 48,
+        6 => 52,
+        7 => 56,
+        reserved => panic!("ID_AA64MMFR0_EL1.PARange holds the reserved value {reserved:#x}"),
+    }
+}
+
 /// The CPU's free-running counter: the generic timer's virtual count,
 /// `CNTVCT_EL0`. The `ISB` keeps the read from being taken early, ahead of
 /// the code it times (Arm ARM K.a, D12.2.2).

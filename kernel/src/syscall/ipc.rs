@@ -84,21 +84,6 @@ pub(super) fn sys_pipe_map(h: RawHandle) -> u64 {
     }
 }
 
-/// Join a pipe read end and a pipe write end into one duplex connection; the caller keeps both handles and gains no more than it already held.
-pub(super) fn sys_connection_join(rx_h: RawHandle, tx_h: RawHandle) -> u64 {
-    let ends = process::with_process_data(|data| {
-        let rx = data.handles.get::<crate::object::pipe::PipeReadEnd>(rx_h, Rights::READ)?;
-        let tx = data.handles.get::<crate::object::pipe::PipeWriteEnd>(tx_h, Rights::WRITE)?;
-        Ok::<_, crate::object::HandleError>((rx.reference(), tx.reference()))
-    });
-    let (rx, tx) = match ends {
-        Ok(ends) => ends,
-        Err(e) => return e.refuse(),
-    };
-    let object = KObjectRef::Connection(crate::object::service::ConnectionEnd::joined(rx, tx));
-    process::with_process_data(|data| handle_result(ops::install(&mut data.handles, object)))
-}
-
 /// Make a port and install both ends; needs no right and grants none, since a port with no clients is not authority.
 pub(super) fn sys_port_create() -> u64 {
     let (acceptor, connector) = port::create();
@@ -327,7 +312,7 @@ pub(super) fn sys_port_mint(h: RawHandle, badge: &[u8]) -> u64 {
 
 /// The badge a connection accepted from `acceptor_h`'s port was stamped with, written to `out`; answers its length.
 ///
-/// **The port check is the whole boundary**: any process can make a port and mint any bytes on it, so a stamp is answered only to the acceptor of the port it was made on. A connection with no stamp (a client's end, a joined one) is `InvalidArgument`, one from another port `PermissionDenied`, and one made through an unbadged connector `NotFound`, never an empty badge.
+/// **The port check is the whole boundary**: any process can make a port and mint any bytes on it, so a stamp is answered only to the acceptor of the port it was made on. A connection with no stamp (a client's end) is `InvalidArgument`, one from another port `PermissionDenied`, and one made through an unbadged connector `NotFound`, never an empty badge.
 pub(super) fn sys_port_badge(
     acceptor_h: RawHandle,
     conn_h: RawHandle,

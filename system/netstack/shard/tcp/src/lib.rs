@@ -54,6 +54,7 @@ use toyos_net_wire::siphash;
 use toyos_net_wire::Port;
 
 pub use counters::{Counter, Counters, Refusal, RefusalLog};
+pub use ring::Lent;
 pub use seq::Seq;
 pub use stack::{ConnId, Info, ListenerId, Outgoing, Served, Tcp};
 pub use toyos_net_wire::siphash::Key;
@@ -245,6 +246,11 @@ pub struct Status {
     pub state: State,
     pub readable: usize,
     pub writable: usize,
+    /// The user's bytes held from SND.UNA on: in flight, or not yet sent.
+    pub queued: usize,
+    /// The window last offered is below the update threshold, so a read owes the peer the
+    /// segment that opens it (RFC 9293 §3.8.6.2.2).
+    pub starved: bool,
     pub failure: Option<Failure>,
     pub soft_error: Option<SoftError>,
     /// R1 reached: three expiries without progress (RFC 9293 SHLD-9).
@@ -283,7 +289,7 @@ pub enum Hop<T> {
 /// committed. A next hop not ready leaves everything owed as it was.
 pub(crate) trait Exit<T> {
     fn ask(&mut self) -> Result<T, NotReady>;
-    fn send(&mut self, via: T, segment: &conn::Out, payload: (&[u8], &[u8]));
+    fn send(&mut self, via: T, segment: &conn::Out, payload: conn::Payload<'_>);
 }
 
 /// Why a due segment did not leave.

@@ -159,6 +159,15 @@ pub fn leaf_d(subleaf: u32) -> (u32, u32, u32, u32) {
     if cpuid(0, 0).0 >= 0xD { cpuid(0xD, subleaf) } else { (0, 0, 0, 0) }
 }
 
+/// How many bits wide a physical address this CPU issues is: CPUID
+/// 8000_0008H `EAX[7:0]` (Intel SDM Vol. 2A, CPUID; AMD APM Vol. 3,
+/// Fn8000_0008_EAX `PhysAddrSize`), a leaf every x86-64 CPU of this
+/// project's range implements.
+pub fn physical_address_bits() -> u8 {
+    assert!(cpuid(0x8000_0000, 0).0 >= 0x8000_0008, "CPUID does not reach leaf 8000_0008H");
+    cpuid(0x8000_0008, 0).0 as u8
+}
+
 /// CPUID with both index registers, as `(eax, ebx, ecx, edx)`.
 ///
 /// `core`'s intrinsic and not an `asm!` of our own: `rbx` is CPUID's output

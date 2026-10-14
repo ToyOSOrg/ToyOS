@@ -2,6 +2,7 @@
 //! ([`screen`]), then ESTABLISHED through LAST-ACK in RFC 9293 §3.10.7.4's order, and the segment
 //! each transmit opportunity builds.
 
+use alloc::boxed::Box;
 use core::num::NonZeroU16;
 use core::time::Duration;
 
@@ -9,7 +10,7 @@ use toyos_net_wire::tcp::{SackBlock, SynOptions, TcpFlags, TcpOptions, TcpSegmen
 
 use crate::cc::Cc;
 use crate::counters::{Counter, Log};
-use crate::ring::Ring;
+use crate::ring::{Lent, Ring};
 use crate::rtt::{Rtt, RTO_AFTER_HANDSHAKE_LOSS, RTO_MAX};
 use crate::rx::{Placed, Rx};
 use crate::seq::{Seq, Stamp};
@@ -202,8 +203,16 @@ pub struct Out {
     pub sack: Blocks,
 }
 
+/// A segment's text: `len` bytes from `offset` of a send ring.
+#[derive(Clone, Copy, Debug)]
+pub struct Payload<'a> {
+    pub ring: Option<&'a Ring>,
+    pub offset: usize,
+    pub len: usize,
+}
+
 /// The payload of a segment that carries none.
-pub const NO_PAYLOAD: (&[u8], &[u8]) = (&[], &[]);
+pub const NO_PAYLOAD: Payload<'static> = Payload { ring: None, offset: 0, len: 0 };
 
 impl Out {
     pub const fn rst(rst: &Rst) -> Self {
@@ -927,16 +936,39 @@ impl Sync {
         }
     }
 
-    /// [`Self::recv`] for a reader that may take less than it is shown.
-    pub fn recv_with(&mut self, take: impl FnOnce(&[u8]) -> usize, now: Instant) -> Result<Received, Error> {
-        if self.rx.unread() == 0 {
-            return if self.rx.closed { Ok(Received::End) } else { Err(Error::WouldBlock) };
-        }
-        let n = self.rx.read_with(take);
+    /// The user read the `n` oldest bytes held out of the lent receive ring itself.
+    pub fn consume(&mut self, n: usize, now: Instant) -> usize {
+        let n = self.rx.consume(n);
         if n > 0 {
             self.rx.after_read(n, now, self.smss());
         }
-        Ok(Received::Data(n))
+        n
+    }
+
+    /// The user placed `n` more bytes behind those queued, in the lent send ring itself: they
+    /// are queued as [`Self::send`] queues its copy. Answers how many the buffer had room for.
+    pub fn queue(&mut self, n: usize, now: Instant) -> Result<usize, Error> {
+        if self.tx.fin.is_some() {
+            return Err(Error::Closing);
+        }
+        let n = self.tx.buf.commit(n);
+        self.refresh(now);
+        self.update_persist(now);
+        Ok(n)
+    }
+
+    /// Both buffers are the user's from here on: what each holds moves there at its offset, and
+    /// the send buffer is the whole of its ring, so whatever the user places in the ring fits.
+    /// `false`, and nothing lent, where either is lent already or shorter than what it stores.
+    pub fn lend(&mut self, rx: Box<dyn Lent>, tx: Box<dyn Lent>) -> bool {
+        if !(self.rx.lendable(rx.len()) && self.tx.buf.lendable(tx.len())) {
+            return false;
+        }
+        let ring = tx.len();
+        self.rx.lend(rx);
+        self.tx.buf.lend(tx);
+        self.tx.buf.grow(ring);
+        true
     }
 
     pub fn shutdown_write(&mut self, now: Instant) {
@@ -1128,7 +1160,7 @@ impl Sync {
         let ts = self.ts.map(|ts| ts.option(now));
         let out = Out { seq, kind: Kind::Ack { ack: self.rx.next, push, fin }, window, ts, sack };
         let offset = self.tx.offset(seq).min(self.tx.buf.len());
-        exit.send(via, &out, self.tx.buf.slices(offset, usize::try_from(len).unwrap_or(0)));
+        exit.send(via, &out, Payload { ring: Some(&self.tx.buf), offset, len: usize::try_from(len).unwrap_or(0) });
         Ok(())
     }
 

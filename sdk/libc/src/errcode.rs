@@ -33,10 +33,12 @@ pub(crate) const ENOPROTOOPT: i32 = 92;
 pub(crate) const EOPNOTSUPP: i32 = 95;
 pub(crate) const EAFNOSUPPORT: i32 = 97;
 pub(crate) const EADDRINUSE: i32 = 98;
+pub(crate) const ECONNABORTED: i32 = 103;
 pub(crate) const ECONNRESET: i32 = 104;
 pub(crate) const ENOTCONN: i32 = 107;
 pub(crate) const ETIMEDOUT: i32 = 110;
 pub(crate) const ECONNREFUSED: i32 = 111;
+pub(crate) const EHOSTUNREACH: i32 = 113;
 
 /// The errno a kernel refusal is answered with.
 pub(crate) fn of(e: SyscallError) -> i32 {

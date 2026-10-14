@@ -457,6 +457,19 @@ const fn red(
     Control { krate, feature, test, must_red: true, verdicts }
 }
 
+/// Every case of the session model a registration reds without its arm, its
+/// ring, or both.
+const REGISTERED: &[Verdict] = &[
+    Fails("a_source_registered_after_bytes_arrived_gets_its_first_event"),
+    Fails("a_source_registered_as_bytes_arrive_gets_its_first_event"),
+    Fails("a_source_registered_after_the_end_gets_its_first_event"),
+    Fails("a_source_registered_as_the_end_arrives_gets_its_first_event"),
+    Fails("a_source_registered_with_room_gets_its_first_event"),
+    Fails("a_source_registered_as_room_is_released_gets_its_first_event"),
+    Fails("a_source_registered_over_a_full_ring_after_a_reset_gets_its_first_event"),
+    Fails("a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event"),
+];
+
 /// Every negative control a model crate declares; `build/build.rs`'s
 /// `every_model_control_is_run` holds this against the manifests.
 pub(crate) const CONTROLS: &[Control] = &[
@@ -678,6 +691,34 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(TRANSPORT, "want-relaxed", Some("loom"), &[
         Fails("a_consumer_that_looked_again_is_rung_for_bytes_it_missed"),
         Fails("a_producer_that_looked_again_is_rung_for_room_it_missed"),
+        Fails("two_sleepers_each_wake_when_room_is_released_first"),
+        Fails("two_sleepers_each_wake_when_data_is_published_first"),
+        Fails("a_poll_beside_a_blocking_read_is_answered_for_the_bytes_it_left"),
+        Fails("a_poll_beside_a_blocking_read_is_answered_for_the_end_it_left"),
+        Fails("a_poll_beside_a_blocking_write_is_answered_for_the_room_it_left"),
+        Fails("a_source_registered_as_bytes_arrive_gets_its_first_event"),
+        Fails("a_source_registered_as_the_end_arrives_gets_its_first_event"),
+        Fails("a_source_registered_as_room_is_released_gets_its_first_event"),
+        Fails("a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event"),
+    ]),
+    // A session's lost wakes: a reader and a writer on one doorbell, a take
+    // not passed on, a registration that neither arms nor rings, and a reset
+    // a look that arms does not see.
+    red(TRANSPORT, "one-doorbell", Some("loom"), &[
+        Fails("two_sleepers_each_wake_when_room_is_released_first"),
+        Fails("two_sleepers_each_wake_when_data_is_published_first"),
+    ]),
+    red(TRANSPORT, "no-pass-on", Some("loom"), &[
+        Fails("a_poll_beside_a_blocking_read_is_answered_for_the_bytes_it_left"),
+        Fails("a_poll_beside_a_blocking_read_is_answered_for_the_end_it_left"),
+        Fails("a_poll_beside_a_blocking_write_is_answered_for_the_room_it_left"),
+    ]),
+    red(TRANSPORT, "register-no-arm", Some("loom"), REGISTERED),
+    red(TRANSPORT, "register-no-ring", Some("loom"), REGISTERED),
+    red(TRANSPORT, "register-neither", Some("loom"), REGISTERED),
+    red(TRANSPORT, "head-only", Some("loom"), &[
+        Fails("a_source_registered_over_a_full_ring_after_a_reset_gets_its_first_event"),
+        Fails("a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event"),
     ]),
     red(TRANSPORT, "end-keeps-inflight", None, &[Fails(
         "inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
