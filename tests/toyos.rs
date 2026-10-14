@@ -207,8 +207,8 @@ const RUST_SKIP: &[&str] = &[
     // which only `a_drives_row_holds_one_process_per_function`'s boot has.
     "drives_judged",
     // Its product is a table of timings beside ring, which a guest's host
-    // sets: the `crypto_instrument` and `crypto_parity` metal rows run it on
-    // the T14 and the AMD bench.
+    // sets: the `crypto_instrument` metal row runs it on the T14 and the AMD
+    // bench.
     "crypto_parity",
 ];
 
@@ -1176,7 +1176,8 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         // `toyos-crypto` beside ring on the bench's own CPU, both builds'
         // tables printed: that ring runs at all, and that every row measured.
-        // The T14 and the AMD bench.
+        // Stage 3's verdict, `toyos_parity::Table::verdict`, is registered by
+        // that stage. The T14 and the AMD bench.
         "crypto_instrument",
         metal::Metal {
             arms: CRYPTOCASE,
@@ -1187,11 +1188,6 @@ const METAL: &[(&str, metal::Metal)] = &[
                 Ok(())
             },
         },
-    ),
-    (
-        // The same table held to the parity rule, on the build that ships.
-        "crypto_parity",
-        metal::Metal { arms: CRYPTOCASE, judge: |b| crypto_table(b[0])?.verdict() },
     ),
 ];
 
