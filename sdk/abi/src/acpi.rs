@@ -29,6 +29,17 @@
 //! ([`op::S5`]): what `\_S5` evaluates to is in the firmware's AML, and
 //! until a holder has supplied it [`crate::syscall::SYS_SHUTDOWN`] is refused
 //! [`crate::syscall::SyscallError::NotSupported`].
+//!
+//! **The memory the PCI root bridges decode is the holder's to declare, once**
+//! ([`op::DECLARE`], [`Apertures`]): each root's `_CRS` is AML. Until a
+//! declaration is held the kernel hands over no PCI function, and a claim
+//! made meanwhile waits for it; a declaration the kernel refuses, or a claim
+//! that ends without one, leaves every PCI claim refused for the boot.
+//!
+//! **A hardware-reduced machine** ([`HARDWARE_REDUCED`]; ACPI 6.5 §4.1) has
+//! no fixed hardware: its claim names no block and raises no SCI, and its
+//! holder reaches the tables, firmware's memory and configuration space
+//! through [`Access`] alone.
 
 crate::user_safe! {
     /// A run of ports a register block occupies; `len` 0 is no block.
@@ -52,6 +63,10 @@ impl Block {
 /// The FADT's power button is the fixed-hardware one, `PWRBTN_STS` and
 /// `PWRBTN_EN` in the PM1 event block.
 pub const FIXED_POWER_BUTTON: u16 = 1 << 0;
+
+/// The FADT's `HW_REDUCED_ACPI` (ACPI 6.5 Table 5.10): the claim's two
+/// blocks are [`Block::NONE`], and no SCI is raised on it.
+pub const HARDWARE_REDUCED: u16 = 1 << 1;
 
 crate::user_safe! {
     /// The claim's description.
@@ -88,6 +103,10 @@ pub mod op {
     /// control to power the machine off. Once under a claim, and kept until
     /// the next claim's holder supplies its own.
     pub const S5: u64 = 3;
+    /// Declare the memory the PCI root bridges decode: an
+    /// [`Apertures`](super::Apertures), in through the caller's struct. Once
+    /// a boot, from the claim's holder.
+    pub const DECLARE: u64 = 4;
 
     pub const TAKEN: u64 = 0;
     pub const PENDING: u64 = 1;
@@ -224,6 +243,12 @@ pub enum Refused {
     /// package's power limit, or what places the IOMMU or redirects
     /// interrupts.
     KernelRegister = 23,
+    /// A register's access on a machine whose kernel maps no register for
+    /// AML: an AArch64 kernel's direct map holds memory alone, and no range
+    /// register types an address a register there.
+    NoRegisters = 24,
+    /// A port access on a machine with no port space.
+    NoPorts = 25,
 }
 
 impl Refused {
@@ -251,6 +276,8 @@ impl Refused {
             21 => Self::HeldFunction,
             22 => Self::AddressMap,
             23 => Self::KernelRegister,
+            24 => Self::NoRegisters,
+            25 => Self::NoPorts,
             _ => return None,
         })
     }
@@ -289,5 +316,101 @@ impl Access {
 
     pub const fn write(space: Space, address: u64, width: Width, value: u64) -> Self {
         Self { address, value, space: space as u8, width: width as u8, write: 1, refused: 0, memory_type: UNLISTED, reserved: [0; 3] }
+    }
+}
+
+crate::user_safe! {
+    /// One memory window a PCI root bridge decodes, in the addresses a CPU
+    /// issues.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct RootBridgeWindow {
+        pub base: u64,
+        pub length: u64,
+    }
+}
+
+impl RootBridgeWindow {
+    /// The first address past the window, saturating: a firmware-named length
+    /// is untrusted input and an extent that would wrap is one this cannot
+    /// contain anything past.
+    pub fn end(&self) -> u64 {
+        self.base.saturating_add(self.length)
+    }
+
+    /// Whether every address of the `length` bytes at `base` is one this window
+    /// decodes.
+    ///
+    /// The whole extent and not its first address: a BAR that starts inside a
+    /// window and runs past it decodes addresses the bridge does not. An extent
+    /// of no length carries no address for a window to decode and is inside
+    /// none of them.
+    pub fn holds(&self, base: u64, length: u64) -> bool {
+        length != 0
+            && base >= self.base
+            && base.checked_add(length).is_some_and(|end| end <= self.end())
+    }
+}
+
+/// The most windows one declaration carries.
+pub const MAX_WINDOWS: usize = 32;
+
+crate::user_safe! {
+    /// What [`op::DECLARE`] carries: the first `count` of `windows`, every
+    /// root bridge's together.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    pub struct Apertures {
+        pub count: u64,
+        pub windows: [RootBridgeWindow; MAX_WINDOWS],
+    }
+}
+
+impl Apertures {
+    /// `windows` as a declaration, or `None` past [`MAX_WINDOWS`].
+    pub fn new(windows: &[RootBridgeWindow]) -> Option<Self> {
+        let mut declared = Self { count: windows.len() as u64, windows: [RootBridgeWindow::default(); MAX_WINDOWS] };
+        declared.windows.get_mut(..windows.len())?.copy_from_slice(windows);
+        Some(declared)
+    }
+
+    /// The windows declared, or `None` for a count past the array.
+    pub fn windows(&self) -> Option<&[RootBridgeWindow]> {
+        self.windows.get(..usize::try_from(self.count).ok()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_holds_an_extent_and_not_merely_its_first_address() {
+        let window = RootBridgeWindow { base: 0xa080_0000, length: 0x1f80_0000 };
+        assert_eq!(window.end(), 0xc000_0000);
+
+        assert!(window.holds(0xbcf0_0000, 0x2_0000));
+        assert!(window.holds(0xa080_0000, 0x2_0000));
+        assert!(window.holds(0xa080_0000, 0x1f80_0000));
+        assert!(window.holds(0xbfff_f000, 0x1000));
+        assert!(!window.holds(0xa07f_f000, 0x2_0000));
+        assert!(!window.holds(0x9920_0000, 0x1000));
+        assert!(!window.holds(0xbfff_f000, 0x1001));
+        assert!(!window.holds(0xbfff_0000, 0x1001_0000));
+        assert!(!window.holds(0xc000_0000, 0));
+        assert!(!window.holds(0xa080_0000, 0));
+
+        let whole = RootBridgeWindow { base: 1, length: u64::MAX };
+        assert_eq!(whole.end(), u64::MAX);
+        assert!(!whole.holds(2, u64::MAX));
+    }
+
+    /// A list that fits is carried whole and read back as itself; one past the
+    /// array is no declaration, and a count past it reads back as none.
+    #[test]
+    fn a_declaration_carries_its_windows_and_no_count_past_them() {
+        let w = RootBridgeWindow { base: 0x1000_0000, length: 0x2eff_0000 };
+        let declared = Apertures::new(&[w]).expect("one window fits");
+        assert_eq!(declared.windows(), Some(&[w][..]));
+        assert_eq!(Apertures::new(&[w; MAX_WINDOWS + 1]), None);
+        assert_eq!(Apertures { count: MAX_WINDOWS as u64 + 1, ..declared }.windows(), None);
     }
 }

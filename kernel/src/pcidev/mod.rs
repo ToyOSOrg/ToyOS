@@ -30,10 +30,14 @@
 //! **Nothing here reads an address this kernel cannot name as routed**, because
 //! a load no bridge forwards does not answer all-ones on real hardware: it does
 //! not complete, and the CPU cannot be interrupted out of it. The name is a
-//! window of the declaration [`Apertures`] holds: the address firmware put in
-//! the BAR is held against those windows here, no other address is ever
-//! offered ([`placement::reserve`]), and with no declaration held no function
-//! is handed over.
+//! window of the declaration the holder of the `acpi` claim makes, once, out
+//! of each root's `_CRS` ([`declare`]): the address firmware put in the BAR is
+//! held against those windows here, no other address is ever offered
+//! ([`placement::reserve`]), and with no declaration held no function is
+//! handed over. **A claim made before one waits for it**, on [`DECLARATION`],
+//! for at most [`DECLARATION_DEADLINE`]; a claim that waits it out, the
+//! holder's claim ending without one, and a declaration refused each leave
+//! every claim of the boot refused by name.
 //!
 //! **Inside one, the function itself is the proof.** [`place_bar`] reads one
 //! dword through the BAR where firmware put it, moves the BAR onto the
@@ -123,7 +127,8 @@ use core::fmt::Write;
 use core::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 
 use record::Interrupt;
-use toyos_abi::boot::{MemoryMapEntry, RootBridgeWindow};
+use toyos_abi::acpi::RootBridgeWindow;
+use toyos_abi::boot::MemoryMapEntry;
 use toyos_abi::inventory::Arrival;
 use toyos_abi::pci::{DeviceIrqRecord, PciFunctionInfo, BARS, LEND_WINDOW};
 use toyos_abi::syscall::{PciId, RegWidth, SyscallError};
@@ -139,7 +144,7 @@ use crate::mm::{align_2m, DirectMap, Mmio, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
 use crate::sync::Lock;
 use crate::inbox::PollEntry;
-use crate::watch::IrqWatch;
+use crate::watch::{IrqWatch, Watch};
 
 /// The most one grant may be. A driver's rings and buffers are kilobytes to a
 /// megabyte; this is room for a queue depth nothing in reach uses, and a bound
@@ -371,8 +376,11 @@ struct Machine {
     low: Vec<Window>,
     high: Vec<Window>,
     /// What this kernel holds of the memory the root bridges decode: the
-    /// necessary condition for any read this module issues.
-    apertures: Apertures,
+    /// necessary condition for any read this module issues. **Only a
+    /// declaration is ever read from**, so an address inside none of its
+    /// windows is never touched, and a function is handed over on no other
+    /// state.
+    apertures: aperture::Held<Vec<RootBridgeWindow>>,
     /// Windows this module has cut, as `(requester, BAR index, at, span)`.
     ///
     /// **A window belongs to the BAR it was cut for, not to the claim that
@@ -389,18 +397,14 @@ struct Machine {
     resetting: Vec<(u16, Resetting, Kept)>,
 }
 
-/// The memory the root bridges decode, as far as this kernel has been told.
-///
-/// **Only a declaration is ever read from**, so an address inside none of its
-/// windows is never touched, and a function is handed over on no other state:
-/// a machine that has not declared, or whose declaration was refused, is one
-/// where nothing is known to be routed.
-enum Apertures {
-    Unknown,
-    /// Never replaced.
-    Declared(aperture::Declaration<Vec<RootBridgeWindow>>),
-    Refused(aperture::Refused),
-}
+/// Posted once, when [`Machine::apertures`] leaves `Unknown`.
+static DECLARATION: Watch = Watch::new();
+
+/// How long a claim made before the declaration waits for it. A ceiling and no
+/// expectation: the server that declares is started before every claimant, and
+/// its tables' load and `_CRS` took 73 ms on the ThinkPad T14 and some 2 s on
+/// q35 under TCG.
+const DECLARATION_DEADLINE: crate::time::Duration = crate::time::Duration::from_secs(30);
 
 static MACHINE: Lock<Machine> = Lock::new(Machine {
     functions: Vec::new(),
@@ -410,7 +414,7 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
     kernel_driven: Vec::new(),
     low: Vec::new(),
     high: Vec::new(),
-    apertures: Apertures::Unknown,
+    apertures: aperture::Held::Unknown,
     windows: Vec::new(),
     resetting: Vec::new(),
 });
@@ -537,7 +541,7 @@ pub fn note_kernel_driver(pci: &PciDevice) {
 /// **Before any driver `init`**, because the sizing probe below takes memory
 /// decode off the function it is probing for the length of the probe, and a
 /// driver mid-transfer must not meet that.
-pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], firmware: &[RootBridgeWindow]) {
+pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry]) {
     let mut decoded = Vec::new();
     let mut taken: Vec<Window> =
         maps.iter().map(|entry| Window { start: entry.start, end: entry.end }).collect();
@@ -575,16 +579,6 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
             taken.push(forwarded);
         }
     }
-    let apertures = match aperture::check(firmware.to_vec()) {
-        Ok(declaration) => {
-            account_for(declaration.windows(), &decoded);
-            Apertures::Declared(declaration)
-        }
-        Err(why) => {
-            log!("pcidev: the root bridges' memory is refused as declared: {why}, so no function is handed over");
-            Apertures::Refused(why)
-        }
-    };
     let mut runs = |wide| -> Vec<Window> {
         placement::free_runs(&mut taken, wide)
             .filter(|run| run.end - run.start >= PAGE_2M)
@@ -633,20 +627,70 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry], fir
         .collect();
     machine.segment = segment;
     machine.decoded = decoded;
-    machine.apertures = apertures;
     machine.low = low;
     machine.high = high;
 }
 
-/// The root bridges' memory, where a declaration of it is held.
-pub fn declared() -> Option<aperture::Declaration<Vec<RootBridgeWindow>>> {
-    match &MACHINE.lock().apertures {
-        Apertures::Declared(declaration) => Some(declaration.clone()),
-        Apertures::Unknown | Apertures::Refused(_) => None,
+/// Hold `windows` as the root bridges' memory: the `acpi` claim holder's
+/// declaration, from `Unknown` alone. A window over memory firmware's map
+/// gives the kernel is refused with the rest ([`aperture::check`]).
+pub fn declare(windows: &[RootBridgeWindow]) -> Result<(), aperture::Declined> {
+    let memory: Vec<(u64, u64)> = crate::mm::firmware_map()
+        .iter()
+        .filter(|entry| toyos_bootmap::is_read_as_memory(entry.uefi_type))
+        .map(|entry| (entry.start, entry.end))
+        .collect();
+    let mut machine = MACHINE.lock();
+    let declared = machine.apertures.declare(windows.to_vec(), &memory);
+    match (&declared, machine.apertures.answer()) {
+        (Ok(()), Some(Ok(declaration))) => account_for(declaration.windows(), &machine.decoded),
+        (Err(aperture::Declined::Refused(why)), _) => {
+            log!("pcidev: the root bridges' memory is refused as declared: {why}, so no function is handed over")
+        }
+        (Err(aperture::Declined::Late), _) => log!("pcidev: a declaration of the root bridges' memory after the first answer is refused"),
+        (Ok(()), _) => unreachable!("a declaration taken is the answer"),
+    }
+    drop(machine);
+    DECLARATION.post();
+    declared
+}
+
+/// The `acpi` claim went: where it declared nothing, nothing will be.
+pub fn declarer_gone() {
+    withhold(aperture::Withheld::Ended);
+}
+
+fn withhold(why: aperture::Withheld) {
+    if MACHINE.lock().apertures.withhold(why) {
+        log!("pcidev: no declaration of the root bridges' memory will be held: {why}, so no function is handed over");
+        DECLARATION.post();
     }
 }
 
-/// Say what memory firmware declared the root bridges decode, and which
+/// The root bridges' memory, or why none is held; waited for, up to
+/// [`DECLARATION_DEADLINE`], where nothing is held yet. `None` is a
+/// claimant killed while it waited.
+fn answered() -> Option<Result<aperture::Declaration<Vec<RootBridgeWindow>>, aperture::Withheld>> {
+    let answer = || MACHINE.lock().apertures.answer().map(|answer| answer.cloned());
+    if let Some(answer) = answer() {
+        return Some(answer);
+    }
+    let began = crate::clock::now();
+    let deadline = crate::time::Deadline::at(began + DECLARATION_DEADLINE);
+    let parkable = crate::scheduler::Parkable::at_entry();
+    let waited = crate::watch::wait_until(&parkable, &DECLARATION, 0, kernel::sched::task::WaitClass::Other, deadline, || {
+        MACHINE.lock().apertures.answer().is_some()
+    });
+    waited.ok()?;
+    if answer().is_none() {
+        withhold(aperture::Withheld::Unanswered);
+    }
+    let answer = answer().expect("pcidev: the declaration is answered or withheld");
+    log!("pcidev: a claim waited {} for the root bridges' memory", crate::clock::now() - began);
+    Some(answer)
+}
+
+/// Say what memory the root bridges were declared to decode, and which
 /// assigned BAR lies inside none of it.
 ///
 /// **What this answers about is the necessary condition every read below is
@@ -659,7 +703,7 @@ fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
         }
         let _ = write!(said, "mem {:#x}..{:#x}", window.base, window.end());
     }
-    log!("pcidev: firmware declared root bridge memory: {said}");
+    log!("pcidev: the acpi claim declared root bridge memory: {said}");
 
     for (who, base, end) in decoded {
         if aperture::decode(firmware, *base, *end) == aperture::Decode::Unrouted {
@@ -676,10 +720,8 @@ fn account_for(firmware: &[RootBridgeWindow], decoded: &[(u16, u64, u64)]) {
 /// place.
 #[derive(Clone, Copy)]
 enum Refusal {
-    /// Nothing has declared the memory the root bridges decode yet.
-    Undeclared,
-    /// The declaration of the memory the root bridges decode was refused.
-    AperturesRefused(aperture::Refused),
+    /// No declaration of the memory the root bridges decode is held.
+    Withheld(aperture::Withheld),
     NotRemapped,
     /// The machine translates messages, and none could be made for this function.
     NoMessage(Refused),
@@ -715,14 +757,9 @@ enum Refusal {
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Undeclared => write!(
+            Self::Withheld(why) => write!(
                 f,
-                "nothing has declared the memory the root bridges decode, so no address on this \
-                 machine is known to be routed"
-            ),
-            Self::AperturesRefused(why) => write!(
-                f,
-                "the declaration of the memory the root bridges decode was refused ({why}), so no \
+                "no declaration of the memory the root bridges decode is held ({why}), so no \
                  address on this machine is known to be routed"
             ),
             Self::NotRemapped => write!(
@@ -821,15 +858,10 @@ pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
 
     // Before anything is taken or touched: with no declaration held, no
     // read this claim would make is known to reach the bus.
-    let declared = match &MACHINE.lock().apertures {
-        Apertures::Declared(declaration) => Ok(declaration.clone()),
-        Apertures::Unknown => Err(Refusal::Undeclared),
-        Apertures::Refused(why) => Err(Refusal::AperturesRefused(*why)),
-    };
-    let declaration = match declared {
+    let declaration = match answered().ok_or(ClaimError::Unusable)? {
         Ok(declaration) => declaration,
         Err(why) => {
-            log!("pcidev: PCI {:02x}:{:02x}.{} NOT HANDED OVER — {why}", pci.bus, pci.dev, pci.func);
+            log!("pcidev: PCI {:02x}:{:02x}.{} NOT HANDED OVER — {}", pci.bus, pci.dev, pci.func, Refusal::Withheld(why));
             return Err(ClaimError::Unusable);
         }
     };

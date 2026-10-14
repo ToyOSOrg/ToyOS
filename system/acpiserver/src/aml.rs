@@ -40,7 +40,7 @@ use std::time::Instant;
 use toyos_acpi::TableError;
 use toyos_aml::{Error, Host, Interpreter, Value};
 
-use crate::host::{Firmware, Kernel, Refusal, Stopping, Unmade, OWN};
+use crate::host::{Firmware, Handed, Kernel, Refusal, Stopping, Unmade, OWN};
 use crate::tables::Tables;
 
 /// A machine's namespace, and the host every evaluation in it is answered by.
@@ -199,17 +199,22 @@ fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Fi
         host.notifies
     );
 
+    let mut unused = false;
     if loaded.blocks.first().is_some_and(|dsdt| dsdt.is_ok()) {
         match s5(interpreter, host) {
             Ok((a, b)) => {
                 println!("acpiserver: \\_S5 evaluated: SLP_TYPa={a} SLP_TYPb={b}");
                 loaded.s5 = Some((a, b));
                 match kernel.s5(a) {
-                    Ok(true) => {
+                    Ok(Handed::Kept) => {
                         println!("acpiserver: \\_S5 handed to the kernel: SLP_TYPa={a}");
                         loaded.handed = true;
                     }
-                    Ok(false) => println!("acpiserver: \\_S5 refused: the kernel keeps no SLP_TYPa wider than the register's three bits"),
+                    Ok(Handed::TooWide) => println!("acpiserver: \\_S5 refused: the kernel keeps no SLP_TYPa wider than the register's three bits"),
+                    Ok(Handed::Unused) => {
+                        println!("acpiserver: \\_S5 not handed: this machine is hardware-reduced, and its power-off writes no sleep type");
+                        unused = true;
+                    }
                     Err(Stopping) => {
                         println!("{STOPPING}");
                         return loaded;
@@ -223,7 +228,7 @@ fn load_into<K: Kernel>(kernel: &K, interpreter: &mut Interpreter, host: &mut Fi
             Err(kind) => println!("acpiserver: \\_S5 refused: {kind}"),
         }
     }
-    if !loaded.handed {
+    if !loaded.handed && !unused {
         toyos::error!("{NO_S5_HANDED}");
     }
     if !host.refused.is_empty() {

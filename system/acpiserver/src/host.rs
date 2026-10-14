@@ -92,7 +92,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use toyos_abi::acpi::{pci_address, Access, Refused, Space, Width, UNLISTED};
+use toyos_abi::acpi::{pci_address, Access, Refused, RootBridgeWindow, Space, Width, UNLISTED};
 use toyos_aml::{Address, Denied, Host, RuntimeLoad, Transfer};
 
 use crate::devices::Ec;
@@ -145,9 +145,11 @@ pub trait Kernel {
     /// `false` is the deadline.
     fn released(&self, until: Instant) -> bool;
     /// Hand the kernel `\_S5`'s `SLP_TYPa` for its power-off, which it takes
-    /// once under a claim: `false` where it is wider than the register's
-    /// field, and the kernel kept nothing.
-    fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping>;
+    /// once under a claim.
+    fn s5(&self, slp_typ_a: u64) -> Result<Handed, Stopping>;
+    /// Declare the memory the PCI root bridges decode, once
+    /// ([`crate::apertures`]).
+    fn declare(&self, windows: &[RootBridgeWindow]) -> Result<Declared, Stopping>;
     /// Waits until `until`, serving the SCI as `sci::await_sleep` does for
     /// the fixed power button where the claim serves it and the controller's
     /// GPE `ec_gpe`: what latched and was taken.
@@ -160,6 +162,26 @@ pub trait Kernel {
     /// Ask `/system/bin/supervisor` to power the machine off
     /// (`toyos::power::stop`), which answers only where it did not.
     fn power_off(&self) -> toyos::power::Refused;
+}
+
+/// What the kernel did with `\_S5`'s `SLP_TYPa`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Handed {
+    Kept,
+    /// Wider than the register's field: the kernel kept nothing.
+    TooWide,
+    /// A hardware-reduced machine's power-off writes no sleep type.
+    Unused,
+}
+
+/// What the kernel did with a declaration of the root bridges' memory.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Declared {
+    Held,
+    /// Refused whole, said in the kernel's log by name.
+    Refused,
+    /// The kernel already holds an answer: a declaration, or its refusal.
+    Late,
 }
 
 /// Why an access to one of the controller's ports was not made.
@@ -758,6 +780,8 @@ pub mod tests {
         pub stops_after: Cell<Option<usize>>,
         /// The `SLP_TYPa` it was handed and kept.
         pub handed: Cell<Option<u64>>,
+        /// The windows it was declared, once.
+        pub declared: RefCell<Option<Vec<RootBridgeWindow>>>,
         /// What each Sleep's wait takes, in turn; nothing once it runs out.
         /// Each served set a Sleep was asked to serve.
         pub sleeps: RefCell<VecDeque<Latched>>,
@@ -873,15 +897,25 @@ pub mod tests {
             self.sleeps.borrow_mut().pop_front().unwrap_or_default()
         }
 
-        fn s5(&self, slp_typ_a: u64) -> Result<bool, Stopping> {
+        fn s5(&self, slp_typ_a: u64) -> Result<Handed, Stopping> {
             self.stopping()?;
             assert!(!self.held.get(), "the sleep type was handed over under the Global Lock");
             // ACPI 6.5 Table 4.16: `SLP_TYPx` is three bits.
             if slp_typ_a > 7 {
-                return Ok(false);
+                return Ok(Handed::TooWide);
             }
             assert_eq!(self.handed.replace(Some(slp_typ_a)), None, "a second sleep type under one claim, which the kernel refuses");
-            Ok(true)
+            Ok(Handed::Kept)
+        }
+
+        fn declare(&self, windows: &[RootBridgeWindow]) -> Result<Declared, Stopping> {
+            self.stopping()?;
+            let mut declared = self.declared.borrow_mut();
+            if declared.is_some() {
+                return Ok(Declared::Late);
+            }
+            *declared = Some(windows.to_vec());
+            Ok(if windows.is_empty() { Declared::Refused } else { Declared::Held })
         }
 
         fn latched(&self) -> Option<u32> {

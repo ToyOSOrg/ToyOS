@@ -8,7 +8,7 @@
 //! [`toyos_abi::boot::KernelArgs::root_bridge_windows`], and an address inside
 //! none of those windows is never offered.
 
-use toyos_abi::boot::RootBridgeWindow;
+use toyos_abi::acpi::RootBridgeWindow;
 
 use crate::bridge::Window;
 
