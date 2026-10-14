@@ -115,8 +115,8 @@ mod tests {
         assert_eq!(decode(&T14, 0xfe01_0000, 0xfe01_1000), Decode::Unrouted);
     }
 
-    /// The T14's recorded declaration, seven windows that meet end to end, is
-    /// held; an empty list, a window of no length or past the address space,
+    /// The T14's and the AMD bench's recorded declarations, seven windows
+    /// each that meet end to end, are held; an empty list, a window of no length or past the address space,
     /// and two windows sharing an address are each refused by name.
     #[test]
     fn a_declaration_is_held_only_whole_and_disjoint() {
@@ -131,6 +131,16 @@ mod tests {
             w(0x60_3dc0_0000, 0x1f_c240_0000),
         ];
         assert_eq!(check(&recorded).map(|d| d.windows().len()), Ok(7));
+        let amd_bench = [
+            w(0xd000_0000, 0x70_0000),
+            w(0xfc_9000_0000, 0x1020_0000),
+            w(0xd070_0000, 0x2790_0000),
+            w(0xfc00_0000, 0x1c0_0000),
+            w(0xff00_0000, 0xea_b000),
+            w(0x4_5020_0000, 0xf8_3fe0_0000),
+            w(0xfc_a020_0000, 0xfe0_0000),
+        ];
+        assert_eq!(check(&amd_bench).map(|d| d.windows().len()), Ok(7));
         assert_eq!(check(&[]), Err(Refused::Empty));
         assert_eq!(check(&[w(0x1000, 0)]), Err(Refused::Malformed(w(0x1000, 0))));
         assert_eq!(check(&[w(u64::MAX, 2)]), Err(Refused::Malformed(w(u64::MAX, 2))));

@@ -294,6 +294,7 @@ pub fn init(
     devices: &[crate::drivers::pci::PciDevice],
     windows: Option<&toyos_pci::aperture::Declaration<alloc::vec::Vec<toyos_abi::boot::RootBridgeWindow>>>,
 ) {
+    log!("iommu: the CPUs issue {}-bit physical addresses", crate::arch::cpu::physical_address_bits());
     unit::init(rsdp_addr, devices, windows.map(|declared| declared.windows()));
 }
 

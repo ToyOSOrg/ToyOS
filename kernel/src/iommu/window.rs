@@ -173,8 +173,8 @@ const _: () = {
 };
 
 /// [`bounds`] on each kind of machine: a unit wider than the CPU's addresses
-/// places above them, declared or not; the T14's 39-bit unit on its 39-bit
-/// CPU places under its first window, and with nothing declared nowhere.
+/// places above them, declared or not; a unit no wider places under its
+/// first declared window, and with nothing declared nowhere.
 const _: () = {
     const T14: [(u64, u64); 1] = [(0x40_0000_0000, 0x60_3DC0_0000)];
     assert!(matches!(bounds(48, 40, None), Ok((0x100_0000_0000, 0x1_0000_0000_0000))));
@@ -182,4 +182,7 @@ const _: () = {
     assert!(matches!(bounds(39, 39, Some(&T14)), Ok((0x20_0000_0000, 0x40_0000_0000))));
     assert!(matches!(bounds(39, 39, None), Err(IommuError::Undeclared { translatable: 39, cpu: 39 })));
     assert!(matches!(bounds(39, 46, None), Err(IommuError::Undeclared { .. })));
+    // The AMD bench: 48-bit host tables on a CPU of 48, all its windows below
+    // the quarter floor, so the whole of the upper quarter.
+    assert!(matches!(bounds(48, 48, Some(&[(0x4_5020_0000, 0xfc_9000_0000)])), Ok((0x4000_0000_0000, 0x1_0000_0000_0000))));
 };
