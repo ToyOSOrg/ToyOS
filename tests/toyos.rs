@@ -5060,12 +5060,12 @@ const SMI_SPAN_NS: u64 = 4_444_000_000;
 /// moves by the commands the kernel wrote to `SMI_CMD` in that span and by
 /// nothing else: every firmware interrupt is one ToyOS asked for. Across the spin every
 /// CPU's MPERF ran nine tenths of its stamp or more [e], a CPU in C0 the whole
-/// span: MPERF counts at the TSC's rate there (SDM Vol. 3B, "Hardware
-/// Coordination Feedback"); and every CPU's APERF ran at least as fast as its
-/// MPERF across the spin, its busy clock at or above its base frequency: MPERF
-/// counts at close to the maximum non-turbo frequency and APERF at the actual
-/// one (SDM Vol. 3B §22.7.2), so a spinning CPU below it is held there by its
-/// request, a power limit or firmware.
+/// span: MPERF counts at a fixed rate, the TSC's, and APERF at the actual
+/// clock (SDM Vol. 3B §22.7.2, 325462-093); and every CPU's APERF ran at
+/// least as fast as its MPERF across the spin, its busy clock at or above the
+/// rate MPERF counts at (2419.2 MHz on the T14). A spin under a request whose
+/// maximum is `Highest_Performance` falls below it only when a power limit or
+/// firmware holds the CPU there.
 ///
 /// Read and not held: each CPU's idle busy fraction, which an SMI in the idle
 /// second raises on every CPU alike by the time it held them, its spinning
@@ -5206,7 +5206,7 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
     for said in log.text().lines().filter(|l| l.contains("counters_metal loaded: ")) {
         eprintln!("  [counters] {}", said.split("counters_metal ").nth(1).unwrap_or(said).trim());
     }
-    let above_base: Vec<f64> = (0..cpus).map(|cpu| ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
+    let aperf_per_mperf: Vec<f64> = (0..cpus).map(|cpu| ratio(idle1, spin, cpu, "aperf", "mperf")).collect();
     eprintln!(
         "  [counters] {cpus} cpus, the SMI count on each moved by {asked} over {} ms, the commands the kernel wrote to SMI_CMD in it; TSC {tsc_mhz:.0} MHz",
         (at2 - at0) / 1_000_000
@@ -5215,12 +5215,12 @@ fn counters_on_metal(back: &metal::Readback) -> Result<(), String> {
         eprintln!(
             "  [counters] cpu{cpu}: idle busy {:.2}%, spinning {:.0} MHz, busy {busy:.3}",
             ratio(idle0, idle1, cpu, "mperf", "stamp") * 100.0,
-            tsc_mhz * above_base[cpu],
+            tsc_mhz * aperf_per_mperf[cpu],
         );
     }
     eprintln!("  [counters] the spin's read, a whole round, took its reader {} ns", clock["spin"].1);
-    if above_base.iter().any(|&r| r < 1.0) {
-        return Err(format!("APERF ran {above_base:.3?} of MPERF across the spin, some cpu below its base frequency"));
+    if aperf_per_mperf.iter().any(|&r| r < 1.0) {
+        return Err(format!("APERF ran {aperf_per_mperf:.3?} of MPERF across the spin, some cpu's busy clock below the rate MPERF counts at"));
     }
     Ok(())
 }

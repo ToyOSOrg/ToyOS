@@ -13,8 +13,11 @@ Ubuntu leaves the T14 only after this issue and
 `issues/no-program-measures-toyos-against-linux-on-one-machine.md`
 close.
 
-**Exit**: every reading another issue owes of Linux on the T14 before its
-wipe is taken and published in evidence.
+**Exit**: the Linux readings on the T14 that
+`issues/toyos-explains-itself.md` (each counter ToyOS reads there) and
+`issues/no-program-measures-toyos-against-linux-on-one-machine.md` (that
+program's outputs under Ubuntu) compare against are taken before the wipe and
+published in evidence.
 
 ## Linux's counter readings, read 2026-10-03
 
