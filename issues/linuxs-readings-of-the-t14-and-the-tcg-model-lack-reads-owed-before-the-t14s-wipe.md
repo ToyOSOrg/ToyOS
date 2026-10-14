@@ -14,9 +14,7 @@ Ubuntu leaves the T14 only after this issue and
 close.
 
 **Exit**: every reading another issue owes of Linux on the T14 before its
-wipe is taken and published in evidence; today that is
-`issues/toyos-explains-itself.md`'s Linux reading of each counter ToyOS reads
-there.
+wipe is taken and published in evidence.
 
 ## Linux's counter readings, read 2026-10-03
 
