@@ -116,8 +116,9 @@ mod tests {
     }
 
     /// The T14's and the AMD bench's recorded declarations, seven windows
-    /// each that meet end to end, are held; an empty list, a window of no length or past the address space,
-    /// and two windows sharing an address are each refused by name.
+    /// each, some meeting end to end, are held; an empty list, a window of no
+    /// length or past the address space, and two windows sharing an address
+    /// are each refused by name.
     #[test]
     fn a_declaration_is_held_only_whole_and_disjoint() {
         let w = |base, length| RootBridgeWindow { base, length };
