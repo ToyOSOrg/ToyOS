@@ -130,6 +130,13 @@ actuators! {
     /// `iommu_firmware_left` and `amdvi_firmware_left`.
     iommu_firmware_left = "iommu-firmware-left";
 
+    /// QEMU's two `iommu-testdev` asked three things of the AMD-Vi unit:
+    /// one on a domain of its own writes where it maps, the other on the
+    /// identity domain writes to memory, then where that domain maps
+    /// nothing, and the machine halts on the record. Judged by
+    /// `amdvi_selftest`.
+    amdvi_selftest = "amdvi-selftest";
+
     /// Read the DMAR's flags with `INTR_REMAP` clear, as on a platform whose
     /// firmware says it does not remap. Judged by `claim_refused_without_remapping`.
     iommu_no_remap = "iommu-no-remap";

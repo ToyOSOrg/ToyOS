@@ -12,7 +12,10 @@
 use crate::arch::iommu_unit as unit;
 use crate::arch::message_unit as messages;
 
+pub(crate) mod domains;
 pub(crate) mod fault;
+#[cfg(feature = "boot-actuators")]
+pub(crate) mod testdev;
 pub(crate) mod window;
 
 /// The address width a device's translations cover.
@@ -166,9 +169,18 @@ pub enum DeviceSpace {
 }
 
 impl DeviceSpace {
-    /// One of a device's own, or the machine's own with the reason. For a
-    /// driver **in this kernel**, whose addresses are the kernel's either way.
-    pub fn create() -> Self {
+    /// One for whichever of `functions` is attached to it, or the machine's
+    /// own with the reason: the machine's own where any of them keeps it, so
+    /// the one attached reaches what its device addresses name. For a driver
+    /// **in this kernel**, whose addresses are the kernel's either way.
+    pub fn create(functions: &[crate::drivers::pci::PciDevice]) -> Self {
+        for function in functions {
+            let stream = StreamId::pci(function.bus, function.dev, function.func);
+            if let Some(why) = unit::domain::untranslated(stream) {
+                log!("iommu: {stream} keeps the machine's addresses: {why}");
+                return Self::Untranslated;
+            }
+        }
         match unit::domain::create(0) {
             Ok((id, _)) => Self::Own(id),
             Err(why) => {
@@ -238,7 +250,7 @@ impl OwnSpace {
     /// and write no record of it: for a mapping its holder makes and takes back
     /// as often as it likes.
     pub fn place(self, at: u64, phys: u64, bytes: u64) -> Result<(), IommuError> {
-        unit::domain::place(self.0, Iova::translated(at), phys, bytes).map(|_| ())
+        unit::domain::place(self.0, Iova::translated(at), phys, bytes)
     }
 
     /// [`DeviceSpace::unmap`].
