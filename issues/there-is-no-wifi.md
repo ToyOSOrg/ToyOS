@@ -148,7 +148,7 @@ page included.** Owner: the orchestrator.
   - `msix-exclusive-bar=on` gone from `tests/common/qemu.rs` and
     `build/qemu.rs`, so the NVMe guests drive QEMU's default controller
     through its table in BAR 0;
-  - `issues/pcidev-moves-a-bar-behind-a-bridge-out-of-the-range-the-bridge-forwards.md`
+  - `issues/a-bar-behind-a-bridge-with-no-free-2-mib-of-its-windows-is-not-handed-over.md`
     closed, and each of the two placement issues it names closed or its exit
     rewritten to the placement P1 lands;
   - the exit of

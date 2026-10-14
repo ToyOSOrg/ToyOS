@@ -10,7 +10,7 @@
 
 use toyos_abi::acpi::RootBridgeWindow;
 
-use crate::bridge::Window;
+use crate::bridge::{Bridge, Window};
 
 /// Where the fixed platform devices start on a PC: the I/O APIC, the HPET and
 /// the LAPIC window are at and above this, so a 32-bit run may not reach it.
@@ -32,6 +32,11 @@ pub const WIDE_FLOOR: u64 = 1 << 32;
 pub fn free_runs(taken: &mut [Window], wide: bool) -> impl Iterator<Item = Window> + '_ {
     let (floor, ceiling) = if wide { (WIDE_FLOOR, u64::MAX) } else { (0, PLATFORM_MMIO) };
     taken.sort_unstable_by_key(|extent| extent.start);
+    gaps(taken, floor, ceiling)
+}
+
+/// What sorted `taken` leaves free of `floor..ceiling`, lowest first.
+fn gaps(taken: &[Window], floor: u64, ceiling: u64) -> impl Iterator<Item = Window> + '_ {
     let mut at = floor;
     let mut rest = taken.iter();
     core::iter::from_fn(move || {
@@ -100,6 +105,50 @@ pub fn reserve(
         let Some((at, window)) = offered(run, windows, span) else { continue };
         run.start = at + span;
         return Some(Reservation { at, window, run: index });
+    }
+    None
+}
+
+/// A `span`-aligned address for a BAR behind the bridges of `path` (nearest
+/// first, from [`crate::bridge::path`]), inside one of `windows` and free of
+/// `taken`, and that window's base; `None` where there is none.
+///
+/// **Only what every bridge on the path forwards is offered** (PCI-to-PCI
+/// Bridge Architecture §3.2.5.6 to §3.2.5.8): an address outside a window of
+/// one of them is never forwarded to the function, and a read of it does not
+/// come back on real hardware. Candidates come from the nearest bridge's
+/// windows of the BAR's kind, below 4 GiB for a 32-bit BAR, and a
+/// prefetchable BAR tries the prefetchable window first, so it leaves the
+/// memory window to BARs that may use nothing else. A run whose first such
+/// address an ancestor does not also forward is passed over unread: firmware
+/// nests a bridge's windows inside its parent's, and a machine that did not
+/// is offered nothing there. `taken` is every extent something else decodes
+/// in there: the firmware memory map, every BAR, every window cut or being
+/// tried, and the windows of every bridge off the path.
+pub fn behind_bridges(
+    path: &[Bridge],
+    prefetchable: bool,
+    wide: bool,
+    taken: &mut [Window],
+    windows: &[RootBridgeWindow],
+    span: u64,
+) -> Option<(u64, u64)> {
+    let parent = path.first()?;
+    let reach = if wide { u64::MAX } else { WIDE_FLOOR };
+    taken.sort_unstable_by_key(|extent| extent.start);
+    let kinds = if prefetchable { [parent.prefetchable, parent.memory] } else { [parent.memory, None] };
+    for window in kinds.into_iter().flatten() {
+        let mut first: Option<(u64, u64)> = None;
+        for run in gaps(taken, window.start, window.end.min(reach)) {
+            let Some((at, base)) = offered(&run, windows, span) else { continue };
+            let routed = path.iter().all(|bridge| bridge.forwards(at, at + span, prefetchable));
+            if routed && first.is_none_or(|(held, _)| at < held) {
+                first = Some((at, base));
+            }
+        }
+        if first.is_some() {
+            return first;
+        }
     }
     None
 }
@@ -389,4 +438,108 @@ mod tests {
         release(&mut runs, second, 2 * MIB);
         assert_eq!(reserve(&mut runs, &T14_WINDOWS, 2 * MIB), Some(second));
     }
+
+    /// The AMD bench's bus 3 behind its port `00:08.1`, as its boot read it:
+    /// the port forwards `0xd0000000..0xd0500000` and, prefetchable,
+    /// `0xfc90000000..0xfca0200000`, and firmware packed every bus-3 BAR into
+    /// them. The declaration is the bench's own loader list.
+    mod behind {
+        use super::*;
+
+        const MIB: u64 = 1024 * 1024;
+        const PORT: Bridge = Bridge {
+            bus: 0,
+            secondary: 3,
+            subordinate: 3,
+            memory: Some(Window { start: 0xd000_0000, end: 0xd050_0000 }),
+            prefetchable: Some(Window { start: 0xfc_9000_0000, end: 0xfc_a020_0000 }),
+        };
+        const DECLARED: [RootBridgeWindow; 3] = [
+            RootBridgeWindow { base: 0xd000_0000, length: 0x70_0000 },
+            RootBridgeWindow { base: 0xfc_9000_0000, length: 0x1020_0000 },
+            RootBridgeWindow { base: 0x4_5020_0000, length: 0xf8_3fe0_0000 },
+        ];
+
+        fn bus_3() -> std::vec::Vec<Window> {
+            let bar = |start, bytes| Window { start, end: start + bytes };
+            std::vec![
+                bar(0xd000_0000, MIB),
+                bar(0xd010_0000, MIB),
+                bar(0xd020_0000, MIB),
+                bar(0xd030_0000, MIB),
+                bar(0xd040_0000, 512 * 1024),
+                bar(0xd048_0000, 256 * 1024),
+                bar(0xd04c_0000, 32 * 1024),
+                bar(0xd04c_8000, 16 * 1024),
+                bar(0xd04c_c000, 8 * 1024),
+                bar(0xd04c_e000, 8 * 1024),
+                bar(0xfc_9000_0000, 256 * MIB),
+                bar(0xfc_a000_0000, 2 * MIB),
+            ]
+        }
+
+        /// The bench's xHCI at `03:00.4`, a 64-bit non-prefetchable BAR: no
+        /// 2 MiB of the port's memory window is free, so nothing is offered,
+        /// and in particular not `0x450200000`, which the declaration names
+        /// and the port does not forward.
+        #[test]
+        fn a_packed_bridge_window_offers_nothing_and_never_the_roots_space() {
+            assert_eq!(behind_bridges(&[PORT], false, true, &mut bus_3(), &DECLARED, 2 * MIB), None);
+            assert_eq!(behind_bridges(&[PORT], true, true, &mut bus_3(), &DECLARED, 2 * MIB), None);
+        }
+
+        /// The same port forwarding 2 MiB more: that address, and nothing
+        /// outside the window.
+        #[test]
+        fn a_free_run_inside_the_path_is_offered() {
+            let port = Bridge { memory: Some(Window { start: 0xd000_0000, end: 0xd080_0000 }), ..PORT };
+            let declared = [RootBridgeWindow { base: 0xd000_0000, length: 0x80_0000 }];
+            assert_eq!(
+                behind_bridges(&[port], false, true, &mut bus_3(), &declared, 2 * MIB),
+                Some((0xd060_0000, 0xd000_0000))
+            );
+        }
+
+        /// A prefetchable BAR takes the prefetchable window first, and the
+        /// memory window where that one is full; a non-prefetchable BAR never
+        /// takes the prefetchable window, and a 32-bit one never above 4 GiB.
+        #[test]
+        fn the_bars_kind_picks_the_window() {
+            let both = Bridge { memory: Some(Window { start: 0xd000_0000, end: 0xd080_0000 }), ..PORT };
+            let declared = [DECLARED[1], RootBridgeWindow { base: 0xd000_0000, length: 0x80_0000 }];
+            let mut taken = [Window { start: 0xfc_9000_0000, end: 0xfc_a000_0000 }];
+            assert_eq!(
+                behind_bridges(&[both], true, true, &mut taken, &declared, 2 * MIB),
+                Some((0xfc_a000_0000, 0xfc_9000_0000))
+            );
+            let mut full = [Window { start: 0xfc_9000_0000, end: 0xfc_a020_0000 }];
+            assert_eq!(
+                behind_bridges(&[both], true, true, &mut full, &declared, 2 * MIB),
+                Some((0xd000_0000, 0xd000_0000))
+            );
+            let prefetchable_only = Bridge { memory: None, ..PORT };
+            assert_eq!(behind_bridges(&[prefetchable_only], false, true, &mut taken, &DECLARED, 2 * MIB), None);
+            assert_eq!(behind_bridges(&[prefetchable_only], true, false, &mut taken, &DECLARED, 2 * MIB), None);
+        }
+
+        /// Every bridge on the path has to forward the address: a port whose
+        /// window lies outside its parent's is offered nothing.
+        #[test]
+        fn an_address_one_bridge_on_the_path_does_not_forward_is_never_offered() {
+            let free = Window { start: 0xd000_0000, end: 0xd040_0000 };
+            let declared = [RootBridgeWindow { base: 0xd000_0000, length: 0x40_0000 }];
+            let parent = Bridge {
+                bus: 0,
+                secondary: 2,
+                subordinate: 3,
+                memory: Some(Window { start: 0xe000_0000, end: 0xe040_0000 }),
+                prefetchable: None,
+            };
+            let child = Bridge { bus: 2, secondary: 3, subordinate: 3, memory: Some(free), prefetchable: None };
+            assert_eq!(behind_bridges(&[child], false, false, &mut [], &declared, 2 * MIB), Some((0xd000_0000, 0xd000_0000)));
+            assert_eq!(behind_bridges(&[child, parent], false, false, &mut [], &declared, 2 * MIB), None);
+            assert_eq!(behind_bridges(&[], false, false, &mut [], &declared, 2 * MIB), None);
+        }
+    }
+
 }
