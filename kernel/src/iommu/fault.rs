@@ -198,10 +198,12 @@ pub fn report(unit: usize, count: &AtomicU32, fault: Fault) -> bool {
     // Before the line, so `owner=` in it is what was actually told: a
     // function a claim holds has its holder to refuse, and one only this
     // kernel drives has nobody.
-    let owner = match function {
-        None => Owner::Nobody,
-        Some(function) if crate::pcidev::note_fault(function.who.requester()) => Owner::Process,
-        Some(_) => Owner::Kernel,
+    let owner = match (function, fault.who) {
+        (Some(function), _) if crate::pcidev::note_fault(function.who.requester()) => Owner::Process,
+        (Some(_), _) => Owner::Kernel,
+        // A function that arrived after this table was published.
+        (None, Who::Function(stream)) if crate::pcidev::note_fault(stream.requester()) => Owner::Process,
+        (None, _) => Owner::Nobody,
     };
     let count = count.fetch_add(1, Ordering::Relaxed) + 1;
     // A stray's line is bounded by its count, never by the device: the next

@@ -450,6 +450,12 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // After ACPI is readable and PCI is enumerable, before any driver `init`: each enumerated device needs a context entry before it can DMA.
     // Refuses nothing — a machine with no usable IOMMU boots exactly as one without it.
     iommu::init(kernel_args.rsdp_addr, &pci_devices, pcidev::declared().as_ref());
+    // After the unit, which remaps a slot's message. The loader's root bridge
+    // windows carry no `_OSC`, so no bridge is declared and no slot armed,
+    // and each port says so: a slot is armed below a bridge whose declared
+    // `_OSC` granted native hot-plug.
+    let declared: &[pcidev::HostBridge] = &[];
+    pcidev::arm_hot_plug(declared);
     // Before storage and everything under it: what it covers is the rest of this
     // boot, and a wedge down there is the reason to have one.
     arch::watchdog::init(&pci_devices);

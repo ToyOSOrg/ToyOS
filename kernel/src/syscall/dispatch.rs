@@ -41,7 +41,7 @@ use super::ipc::{
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map,
 };
 use super::machine::{
-    sys_counters, sys_device_inventory, sys_log_read, sys_reboot, sys_sched_info, sys_shutdown, sys_sysinfo,
+    sys_counters, sys_device_inventory, sys_device_set, sys_device_set_read, sys_log_read, sys_reboot, sys_sched_info, sys_shutdown, sys_sysinfo,
     sys_trace_read,
     MAX_INVENTORY_RECORDS,
 };
@@ -652,6 +652,16 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_DEVICE_REG_READ => sys_device_reg(RawHandle(a1 as u32), a2, a3, None),
         SYS_DEVICE_REG_WRITE => sys_device_reg(RawHandle(a1 as u32), a2, a3, Some(a4)),
         SYS_HDA_BIND => sys_hda_bind(RawHandle(a1 as u32), a2),
+        SYS_DEVICE_SET => sys_device_set(RawHandle(a1 as u32)),
+        // Bounded like the inventory before it becomes a window.
+        SYS_DEVICE_SET_READ => {
+            let Ok(count) = Untrusted::new(a3).at_most(MAX_INVENTORY_RECORDS) else {
+                return SyscallError::InvalidArgument.to_u64();
+            };
+            let len = count * toyos_abi::inventory::RECORD_BYTES as u64;
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
+            sys_device_set_read(RawHandle(a1 as u32), &mut buf)
+        }
         _ => SyscallError::InvalidArgument.to_u64(),
     } })();
 

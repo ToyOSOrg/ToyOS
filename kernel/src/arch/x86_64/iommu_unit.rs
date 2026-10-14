@@ -148,6 +148,18 @@ pub mod domain {
         }
     }
 
+    /// Whether a function attached to a domain of its own is translated
+    /// there: every function under VT-d, whose tables take one that arrived
+    /// after the unit was programmed; under AMD-Vi, one [`untranslated`] has no
+    /// reason for.
+    pub fn translates(stream: StreamId) -> bool {
+        match backend() {
+            Backend::Vtd => true,
+            Backend::AmdVi => amdvi::domain::untranslated(stream).is_none(),
+            Backend::None => false,
+        }
+    }
+
     /// The backend that minted a `DomainId`; there is one, or none was minted.
     fn minted() -> Backend {
         let found = backend();

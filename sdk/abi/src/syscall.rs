@@ -289,19 +289,29 @@ pub const SYS_ACPI: u64 = 128;
 /// [`hda_bind`].
 pub const SYS_HDA_BIND: u64 = 129;
 
+/// Mint a handle to the device set ([`crate::devset`]), which carries `READ`
+/// and `WAIT` and neither `DUP` nor `TRANSFER`. Gated by
+/// [`Rights::DEVICE`] on a `SysCap`. See [`device_set`].
+///
+/// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
+pub const SYS_DEVICE_SET: u64 = 130;
+
+/// The device set's snapshot, read whole. See [`device_set_read`].
+pub const SYS_DEVICE_SET_READ: u64 = 131;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 131;
+pub const SYSCALL_PROFILE_BINS: usize = 133;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_HDA_BIND < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_DEVICE_SET_READ < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -2026,6 +2036,21 @@ pub fn device_inventory(
         0,
     ))
     .map(|n| n as usize)
+}
+
+/// A handle to the device set ([`crate::devset`]); `syscap` must carry
+/// [`crate::handle::Rights::DEVICE`]: a capability without it is refused with
+/// a word, and a handle the caller does not hold ends it.
+pub fn device_set(syscap: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_DEVICE_SET, syscap.0 as u64, 0, 0, 0)).map(|h| RawHandle(h as u32))
+}
+
+/// The device set's snapshot into `buf`, header first; answers how many
+/// records were written. An empty `buf` asks how many there are; one too short
+/// for all of them is refused whole with [`SyscallError::ResourceExhausted`].
+/// A read marks the handle's watch as having seen this generation.
+pub fn device_set_read(set: RawHandle, buf: &mut [crate::inventory::RawRecord]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_DEVICE_SET_READ, set.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
 
 /// One [`crate::counters`] record per online CPU, into `buf`; answers how many

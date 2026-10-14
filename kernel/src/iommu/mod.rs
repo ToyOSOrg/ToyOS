@@ -237,6 +237,12 @@ impl DeviceSpace {
 #[derive(Clone, Copy)]
 pub struct OwnSpace(DomainId);
 
+/// Whether `function`, attached to an [`OwnSpace`], would be translated there
+/// rather than refused by the unit's own tables.
+pub fn translates(function: &crate::drivers::pci::PciDevice) -> bool {
+    unit::domain::translates(StreamId::pci(function.bus, function.dev, function.func))
+}
+
 impl OwnSpace {
     /// One with `room` bytes of it handed out at the address answered, or the
     /// reason there is none: a machine with no unit and a machine out of

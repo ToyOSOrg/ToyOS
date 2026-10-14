@@ -92,6 +92,13 @@ pub fn untranslated(_function: StreamId) -> Option<&'static str> {
     None
 }
 
+/// Whether `function` can be attached to a domain: the IORT routes it through
+/// this unit. Its routes are read for the functions enumerated when the unit
+/// was programmed, so one that arrived later is not.
+pub fn translates(function: StreamId) -> bool {
+    UNIT.lock().as_ref().is_some_and(|live| live.routes.iter().any(|(rid, ..)| *rid == function))
+}
+
 /// A new domain, with `room` bytes of it handed out first: refused, with no id
 /// spent, where it would have less than that.
 pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {

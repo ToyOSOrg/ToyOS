@@ -59,6 +59,8 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Namespace(_) => Rights::DUP.union(Rights::TRANSFER).union(Rights::READ),
         // A spawner gets everything a child handle offers: exit code, kill, and accounting.
         KObjectRef::Process(_) => BASE.union(Rights::READ).union(Rights::MANAGE),
+        // Neither `DUP` nor `TRANSFER`: the set is its minter's alone.
+        KObjectRef::DeviceSet(_) => Rights::READ.union(Rights::WAIT),
     }
 }
 
@@ -223,7 +225,7 @@ pub fn pipe_read(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -236,7 +238,7 @@ pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -281,6 +283,7 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::Connection(c) => pipe::read_watch(c.rx()).map(WatchRef::Shared),
         KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
         KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
+        KObjectRef::DeviceSet(_) => Some(WatchRef::Irq(&crate::pcidev::SET_WATCH)),
         KObjectRef::Console(_) => Some(WatchRef::Static(&keyboard::WATCH)),
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => Some(WatchRef::Static(&keyboard::WATCH)),
@@ -311,7 +314,7 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -324,7 +327,7 @@ pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
-        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) => None,
+        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -337,7 +340,7 @@ pub fn other_end_gone(object: &KObjectRef) -> bool {
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
-        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) => false,
+        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
 
@@ -354,6 +357,8 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
         KObjectRef::SysCap(_) => false,
         KObjectRef::Console(_) => false,
         KObjectRef::Process(_) => false,
+        // The set's watch is every handle's: one handle's close ends none.
+        KObjectRef::DeviceSet(_) => false,
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard
             | device_registry::DeviceType::PciFunction
@@ -551,7 +556,7 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
         KObjectRef::PipeWrite(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => Some(SyscallError::PermissionDenied.to_u64()),
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => Some(SyscallError::PermissionDenied.to_u64()),
     }
 }
 
@@ -611,7 +616,7 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
         KObjectRef::PipeRead(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) => {
+        | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => {
             Some(SyscallError::PermissionDenied.to_u64())
         }
     }
@@ -679,7 +684,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         },
         KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) => plain(FileType::Unknown),
+        | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => plain(FileType::Unknown),
         KObjectRef::Device(d) => plain(match d.class() {
             device_registry::DeviceType::Keyboard => FileType::Keyboard,
             device_registry::DeviceType::Mouse => FileType::Mouse,
@@ -825,6 +830,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
         KObjectRef::Process(p) => p.finished(),
+        KObjectRef::DeviceSet(set) => set.changed(),
         KObjectRef::File(_) => true,
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard => keyboard::has_data(),
@@ -860,7 +866,7 @@ pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => false,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
 
@@ -873,7 +879,7 @@ pub fn has_space(object: &KObjectRef) -> bool {
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) => false,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
 
@@ -892,7 +898,7 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_) | KObjectRef::SharedMem(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) => SyscallError::InvalidArgument.to_u64(),
+        | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => SyscallError::InvalidArgument.to_u64(),
     }
 }
 
