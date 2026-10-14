@@ -797,7 +797,7 @@ mod tests {
         }
         assert!(
             complaints.is_empty(),
-            "a committed binary is a file somebody had to judge, and NOTICE is where the \
+            "a committed file somebody had to judge is declared, and NOTICE is where the \
              judgement is:\n{}",
             complaints.join("\n"),
         );

@@ -120,6 +120,9 @@ Not consumers:
    - Nothing runs under Linux.
    - ML-KEM rows are excluded from the verdict by name, because ring has no
      ML-KEM. They are reported beside RustCrypto's `ml-kem`.
+   - `ring::test` stays in `tests/guest/rust-tests/src/bin/ring_kat.rs`, as
+     ring's own known-answer row: it is the one way to give ring a known
+     X25519 key.
    **Exit**: both benches' tables are on `ToyOSOrg/evidence`, with the
    columns stage 3 defines.
 3. **Parity.**
@@ -148,6 +151,10 @@ Not consumers:
      - Parity work reads ring's, BoringSSL's and OpenSSL's perlasm or C only
        through a clean room, as root's research rule says.
      - Faster code is accepted only with stage 4's evidence for it.
+   - **First measurement, not a verdict.** `toyos-ssh`'s fuzz
+     (`build/ssh/tests/fuzz.rs`), on the crate since stage 1: 33.92 s and
+     15.46 s in two runs on the development Mac (an M4 Pro). On ring it took
+     1.27 s in main's nightly host job, on GitHub's runner.
 4. **Secure.** **Exit**, for each primitive a consumer uses:
    - **Typed domains.** The private `V<N>` is replaced by distinct types:
      integers, Montgomery residues per modulus, field elements and scalars per
@@ -216,6 +223,9 @@ Not consumers:
      its primitives. Parity for those primitives is a later stage, not a
      gate.
    - Each consumer's old dependency is deleted in the same landing.
+   - The NIST ML-KEM vectors in `lib/crypto/tests/data` are under
+     `NIST-Software`, which the licence allowlist (`build/licence.rs`) does
+     not name. It decides that licence before `lib/crypto` enters an image.
 
    The consumers:
    - `toyos-ssh`'s protocol offers `mlkem768x25519-sha256` first, at any time

@@ -769,8 +769,8 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 
 /// Every test that runs on the host and boots no guest. The build system's own
 /// tests, every host member of the workspace ([`crate::hostws`]), [`CRYPTO`] in
-/// each of [`CRYPTO_FORMS`], the kernel's library, clippy with warnings denied, the concurrency models' negative
-/// controls, every userland crate with a host test ([`crate::userlandhost`],
+/// each of [`CRYPTO_FORMS`], the kernel's library, clippy with warnings denied,
+/// the concurrency models' negative controls, every userland crate with a host test ([`crate::userlandhost`],
 /// which also reds on a userland test none of them runs), every app the images
 /// ship for each host ([`apps_for`]), and the libraries built for a guest
 /// ([`crate::hostws::guest_libraries`]).
