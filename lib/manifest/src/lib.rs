@@ -37,12 +37,13 @@
 //! other half: what an installed package says about itself,
 //! which is which of its own binaries a launch starts and never what it holds.
 //! [`launch`] is who may start what, [`grants`] which folder of the home a
-//! package is granted, [`consent`] how the person at the screen is asked, and
-//! [`clipboard`] who watches the clipboard.
+//! package is granted, [`consent`] how the person at the screen is asked,
+//! [`clipboard`] who watches the clipboard and [`display`] who sets the display.
 
 pub mod clipboard;
 pub mod consent;
 pub mod device;
+pub mod display;
 pub mod grants;
 pub mod launch;
 pub mod package;

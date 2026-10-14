@@ -6,7 +6,7 @@ use core::fmt;
 use toyos_abi::pci::LEND_WINDOW;
 use toyos_abi::syscall::SHM_PAGE;
 
-use crate::layout::Chrome;
+use crate::layout::{Chrome, TEXT_CELL};
 
 /// A display mode, in pixels.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,16 +37,15 @@ impl fmt::Display for Mode {
     }
 }
 
-/// A terminal's grid and its cell, which the least mode must hold.
+/// A terminal's grid, which the least mode must hold.
 const TERMINAL: (i32, i32) = (80, 24);
-const CELL: (i32, i32) = (8, 16);
 
-/// The least mode: an 80x24 terminal of 8x16 cells in a window frame, above
-/// the taskbar, at scale 1.
+/// The least mode: an 80x24 terminal of [`TEXT_CELL`]s in a window frame,
+/// above the taskbar, at scale 1.
 pub const LEAST: Mode = {
     let c = Chrome::DEFAULT;
-    let w = TERMINAL.0 * CELL.0 + c.chrome_w();
-    let h = TERMINAL.1 * CELL.1 + c.chrome_h() + c.taskbar;
+    let w = TERMINAL.0 * TEXT_CELL.0 + c.chrome_w();
+    let h = TERMINAL.1 * TEXT_CELL.1 + c.chrome_h() + c.taskbar;
     Mode::new(w as u32, h as u32)
 };
 

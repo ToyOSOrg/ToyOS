@@ -24,6 +24,7 @@ extern crate alloc;
 
 pub mod budget;
 pub mod clipboard;
+pub mod cursor;
 pub mod damage;
 pub mod hit;
 pub mod input;
@@ -37,21 +38,21 @@ pub mod taskbar;
 pub mod volume;
 pub mod window;
 
-pub use budget::{create_verdict, max_windows, pending_admits, window_bytes, Port, Verdict};
+pub use budget::{create_verdict, requested, Requested, max_windows, pending_admits, window_bytes, Port, Verdict};
 pub use damage::{Damage, MAX_DAMAGE_RECTS};
 pub use hit::{hit_test, Hit};
 pub use input::{
     cursor_from_abs, cursor_style, edge_snap, fold_mouse, key_action, tab_action, CursorStyle, Grab,
     Held, KeyAction, MouseSample, PromptGate, Released, TabAction, DRAG_THRESHOLD,
 };
-pub use layout::{set_mode, Chrome, Desk};
+pub use layout::{relayout, set_mode, Chrome, Desk, TEXT_CELL};
 pub use mode::Mode;
 pub use plan::{compose, content_blit, Blit, Layer};
 pub use rect::{Point, Rect};
 pub use scale::Scale;
 pub use stack::Stack;
-pub use taskbar::{Taskbar, MAX_STATUS_CHARS, STATUS_MARGIN};
-pub use window::{Level, Window, WindowId, WindowMode};
+pub use taskbar::{Taskbar, MAX_STATUS_CHARS};
+pub use window::{Buffers, Level, Presented, Window, WindowId, WindowMode};
 
 /// The colour of the frame the compositor draws around a prompt and around
 /// nothing else it draws: a cue to the person at the screen, and what a

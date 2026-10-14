@@ -85,17 +85,15 @@ pub(crate) fn rel(root: &Path, path: &Path) -> String {
 
 /// The library members built for a guest: the SDK, its window, font and
 /// file-picker clients and the two shared crates that link the SDK, whose
-/// `toyos` is not clippy-clean on a host; and `sprite`, whose blit no clippy
-/// shape passes (`issues/sprite-dereferences-a-raw-pointer-behind-a-safe-fn.md`).
-/// Their tests run in a step of their own ([`guest_libraries`]).
-const GUEST_LIBRARIES: [&str; 7] = [
+/// `toyos` is not clippy-clean on a host. Their tests run in a step of their
+/// own ([`guest_libraries`]).
+const GUEST_LIBRARIES: [&str; 6] = [
     crate::ci::SDK_DIR,
     "sdk/window",
     "sdk/font",
     "sdk/filepicker",
     "lib/logkeeper-api",
     "lib/pci-claim",
-    "system/compositor/sprite",
 ];
 
 /// Whether the member at `member` is built for a guest: the kernel, whose

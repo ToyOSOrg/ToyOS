@@ -34,6 +34,8 @@ use window::{CreateError, Window};
 
 const SELF_PATH: &str = "/system/bin/test_rs_window_refusal";
 
+const SIZE: window::Size = window::Size::Physical { width: 100, height: 100 };
+
 /// What the stand-in compositor does with one `MSG_CREATE_WINDOW`.
 #[derive(Clone, Copy, Debug)]
 enum Reply {
@@ -44,6 +46,8 @@ enum Reply {
     Close,
     /// `MSG_WINDOW_CREATED` with no buffer sent ahead of it.
     NoBuffer,
+    /// `MSG_WINDOW_CREATED` at a scale the protocol does not carry.
+    AbsurdScale(u32),
 }
 
 /// The reply, and the `CreateError` the client must turn it into.
@@ -57,6 +61,10 @@ const CASES: &[(Reply, CreateError)] = &[
     (Reply::Unrelated, CreateError::Protocol(window::MSG_FRAME)),
     (Reply::Close, CreateError::BrokenOff),
     (Reply::NoBuffer, CreateError::NoHandle),
+    // Read before the buffer is: a window this client cannot draw at the
+    // scale of is no window.
+    (Reply::AbsurdScale(0), CreateError::Protocol(window::MSG_WINDOW_CREATED)),
+    (Reply::AbsurdScale(481), CreateError::Protocol(window::MSG_WINDOW_CREATED)),
 ];
 
 fn main() {
@@ -114,9 +122,15 @@ fn serve_one(acceptor: &Acceptor, reply: Reply) {
         }
         Reply::Close => {}
         Reply::NoBuffer => {
-            let info = window::WindowInfo { width: 100, height: 100, stride: 100, pixel_format: 0 };
+            let scale = window::Scale::ONE.wire();
+            let info = window::WindowInfo { width: 100, height: 100, stride: 100, pixel_format: 0, scale, generation: 0 };
             ipc::send(handle, window::MSG_WINDOW_CREATED, &info)
                 .expect("send a window with no buffer");
+        }
+        Reply::AbsurdScale(scale) => {
+            let info = window::WindowInfo { width: 100, height: 100, stride: 100, pixel_format: 0, scale, generation: 0 };
+            ipc::send(handle, window::MSG_WINDOW_CREATED, &info)
+                .expect("send a window at an absurd scale");
         }
     }
 }
@@ -127,7 +141,7 @@ fn client() {
     let mut outcomes = Vec::new();
     for (reply, _) in CASES {
         println!("window refusal: [{reply:?}] waiting for the answer");
-        outcomes.push(Window::create(100, 100));
+        outcomes.push(Window::create(SIZE));
     }
     for ((reply, expected), outcome) in CASES.iter().zip(outcomes) {
         let got = match outcome {
@@ -150,6 +164,6 @@ fn client() {
             Err(other) => panic!("filling the queue ended in {other:?}"),
         }
     };
-    let got = Window::create(100, 100).err();
+    let got = Window::create(SIZE).err();
     assert_eq!(got, Some(CreateError::Kernel(refused)), "a full queue decoded wrongly");
 }

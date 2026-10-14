@@ -23,7 +23,6 @@ pub mod gptwrite;
 pub mod hostedclang;
 pub mod flags;
 pub mod hostws;
-pub mod icons;
 pub mod identity;
 pub mod image;
 pub mod kernelconsole;

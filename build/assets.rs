@@ -2,151 +2,45 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Rasterize `codepoints` into `cell_width * cell_height` 8-bit alpha cells,
-/// laid out one cell after another. The pixel size is the largest at which
-/// every printable ASCII glyph fits its cell, so a fixed grid can be blitted
-/// without per-glyph metrics.
-fn rasterize_cells(
-    ttf_bytes: &[u8],
-    codepoints: &[u32],
-    cell_width: usize,
-    cell_height: usize,
-) -> Vec<u8> {
-    let font = fontdue::Font::from_bytes(ttf_bytes, fontdue::FontSettings::default())
-        .expect("failed to parse TTF");
+/// Where on ROOT the desktop font's licence is, and its text: the OFL asks
+/// that every copy of the Font Software carry it.
+pub const DESKTOP_FONT_LICENCE: (&str, &[u8]) =
+    ("share/licenses/OFL-1.1-JetBrainsMono.txt", include_bytes!("../licenses/OFL-1.1-JetBrainsMono.txt"));
 
-    let mut px_size = cell_height as f32;
-    loop {
-        let lm = font.horizontal_line_metrics(px_size).unwrap();
-        let asc = lm.ascent.ceil() as i32;
-        let fits = (0x20u32..=0x7E).all(|ch| {
-            let (m, _) = font.rasterize(char::from_u32(ch).unwrap(), px_size);
-            let glyph_top = asc - m.height as i32 - m.ymin;
-            glyph_top >= 0
-                && (glyph_top as usize) + m.height <= cell_height
-                && m.width <= cell_width
-        });
-        if fits {
-            break;
-        }
-        px_size -= 0.25;
-        assert!(px_size > 2.0, "could not find a font size that fits {cell_width}x{cell_height}");
+/// Where on ROOT the icons' licence is, and its text: MIT asks that every
+/// copy carry it.
+pub const ICON_LICENCE: (&str, &[u8]) =
+    ("share/licenses/MIT-PhosphorIcons.txt", include_bytes!("../licenses/MIT-PhosphorIcons.txt"));
+
+/// An icon ships as its SVG, which the program drawing it reads at its own
+/// scale: the build reads it as that program will, so one past the subset
+/// `toyos-icon` draws stops the build, by name, rather than the program.
+fn refuse_past_the_subset(path: &Path, svg: &[u8]) {
+    let text = std::str::from_utf8(svg).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    if std::panic::catch_unwind(|| toyos_icon::Icon::parse(text)).is_err() {
+        panic!("{} is past the SVG subset `toyos-icon` draws, as said above", path.display());
     }
-
-    let ascent = font.horizontal_line_metrics(px_size).unwrap().ascent.ceil() as i32;
-    let mut data = vec![0u8; codepoints.len() * cell_width * cell_height];
-
-    for (idx, &cp) in codepoints.iter().enumerate() {
-        let Some(c) = char::from_u32(cp) else { continue };
-        let (metrics, bitmap) = font.rasterize(c, px_size);
-        if metrics.width == 0 || metrics.height == 0 {
-            continue;
-        }
-
-        let x_offset = ((cell_width as i32 - metrics.width as i32) / 2).max(0) as usize;
-        let glyph_top = ascent - metrics.height as i32 - metrics.ymin;
-        let y_offset = glyph_top.max(0) as usize;
-        let glyph_base = idx * cell_width * cell_height;
-
-        for gy in 0..metrics.height {
-            let cell_y = y_offset + gy;
-            if cell_y >= cell_height {
-                break;
-            }
-            for gx in 0..metrics.width {
-                let cell_x = x_offset + gx;
-                if cell_x >= cell_width {
-                    break;
-                }
-                data[glyph_base + cell_y * cell_width + cell_x] =
-                    bitmap[gy * metrics.width + gx];
-            }
-        }
-    }
-
-    data
 }
 
-/// Every codepoint a shipped layout can put on the panel: what each key
-/// types at every level of every layout, plus whatever a dead key composes
-/// to — so the console font covers a layout's whole reach rather than only
-/// Latin-1.
-fn keymap_codepoints() -> BTreeSet<u32> {
-    use toyos_keymap::{Key, LAYOUTS, LEVELS};
-
-    let mut out = BTreeSet::new();
-    let mut add_entry = |entry: &toyos_keymap::KeyEntry| {
-        for level in 0..LEVELS {
-            if let Key::Chars(s) = entry.level(level) {
-                out.extend(s.chars().map(|c| c as u32));
-            }
-        }
-    };
-    for layout in LAYOUTS {
-        for usage in toyos_keymap::FIRST_USAGE..=toyos_keymap::LAST_USAGE {
-            if let Some(entry) = layout.entry(usage) {
-                add_entry(entry);
-            }
-        }
-        add_entry(&layout.iso_key);
-    }
-    out.extend(toyos_keymap::composed_chars().map(|c| c as u32));
-    out
-}
-
-/// Pre-rasterize a TTF font into a flat bitmap format.
-///
-/// Binary format:
-///   [2] width: u16 LE
-///   [2] height: u16 LE
-///   [4] glyph_count: u32 LE
-///   [glyph_count * 4] codepoints: [u32 LE]
-///   [glyph_count * width * height] alpha bitmaps
-fn rasterize_font(ttf_bytes: &[u8], cell_width: usize, cell_height: usize) -> Vec<u8> {
-    let mut codepoints: BTreeSet<u32> = (0u32..=255).collect();
-    codepoints.extend(0x2500u32..=0x257F); // Box Drawing
-    codepoints.extend(0x2580u32..=0x259F); // Block Elements
-
-    // A layout can ask for a character JetBrainsMono has no glyph for — a
-    // handful of rare dead-key compositions and symbols do. Left out rather
-    // than rasterized blank, so it keeps falling back to `?` exactly as an
-    // uncovered codepoint always has, instead of silently drawing nothing.
-    let font = fontdue::Font::from_bytes(ttf_bytes, fontdue::FontSettings::default())
-        .expect("rasterize_font: failed to parse TTF");
-    codepoints.extend(
-        keymap_codepoints()
-            .into_iter()
-            .filter(|&cp| char::from_u32(cp).is_some_and(|c| font.has_glyph(c))),
-    );
-
-    let codepoints: Vec<u32> = codepoints.into_iter().collect();
-    let data = rasterize_cells(ttf_bytes, &codepoints, cell_width, cell_height);
-    let glyph_count = codepoints.len();
-
-    // Serialize to binary format
-    let mut out = Vec::new();
-    out.extend((cell_width as u16).to_le_bytes());
-    out.extend((cell_height as u16).to_le_bytes());
-    out.extend((glyph_count as u32).to_le_bytes());
-    for &cp in &codepoints {
-        out.extend(cp.to_le_bytes());
-    }
-    out.extend(data);
-    out
+/// A TTF's glyphs in 8x16 cells, in the prebuilt format.
+fn raster_8x16(ttf: &[u8]) -> Vec<u8> {
+    font::Font::from_ttf(ttf, 8, 16).unwrap_or_else(|e| panic!("a TTF the build rasterizes: {e}")).prebuilt()
 }
 
 /// The pre-rasterized 8x16 font ROOT carries as
-/// `/system/share/fonts/JetBrainsMono-Regular-8x16.font`, which `/system/bin/console` and
-/// `/system/bin/terminal` blit.
+/// `/system/share/fonts/JetBrainsMono-Regular-8x16.font`, which `/system/bin/console`
+/// blits.
 ///
-/// Produced by the same `rasterize_font` [`collect`] calls, so the screendump
-/// decoder in `tests/common/screen.rs` reads the exact table the guest drew
-/// with — the property the checked-in `font8x16.bin` gives the panic console,
-/// obtained here from one producer instead of one file.
+/// Produced by the same `toyos-font` producer [`collect`] calls, and that a
+/// program drawing at a scale runs on the TTF ROOT carries beside it, so the
+/// screendump decoder in `tests/common/screen.rs` reads the exact table the
+/// guest drew with at scale 1 — the property the checked-in `font8x16.bin`
+/// gives the panic console, obtained here from one producer instead of one
+/// file.
 pub fn console_font(root: &Path) -> Vec<u8> {
     let ttf = fs::read(root.join("assets/JetBrainsMono-Regular.ttf"))
         .expect("console_font: JetBrainsMono-Regular.ttf not found");
-    rasterize_font(&ttf, 8, 16)
+    raster_8x16(&ttf)
 }
 
 /// Where the kernel's panic-console font lives, relative to the repo root.
@@ -166,9 +60,9 @@ const PANIC_FONT_THRESHOLD: u8 = 96;
 
 /// Regenerate `kernel/src/drivers/panic_console/font8x16.bin`.
 ///
-/// Provenance: `assets/JetBrainsMono-Regular.ttf`, rasterized by fontdue at
-/// the largest pixel size whose printable-ASCII glyphs all fit an 8x16 cell,
-/// then thresholded to 1 bit at alpha >= 96. Layout is 95 glyphs of 16 bytes,
+/// Provenance: `assets/JetBrainsMono-Regular.ttf`, rasterized by `toyos-font`
+/// at the largest pixel size whose printable-ASCII glyphs all fit an 8x16
+/// cell, then thresholded to 1 bit at alpha >= 96. Layout is 95 glyphs of 16 bytes,
 /// codepoint `0x20 + index`, one byte per row, bit 7 leftmost.
 ///
 /// The artifact is checked in so the kernel can `include_bytes!` it with no
@@ -178,16 +72,16 @@ const PANIC_FONT_THRESHOLD: u8 = 96;
 pub fn regen_panic_font(root: &Path) {
     let ttf = fs::read(root.join("assets/JetBrainsMono-Regular.ttf"))
         .expect("regen-font: JetBrainsMono-Regular.ttf not found");
-    let codepoints: Vec<u32> =
-        (PANIC_FONT_FIRST as u32..PANIC_FONT_FIRST as u32 + PANIC_FONT_GLYPHS as u32).collect();
-    let alpha = rasterize_cells(&ttf, &codepoints, 8, 16);
+    let font = font::Font::from_ttf(&ttf, 8, 16).expect("regen-font: the TTF");
 
     let mut out = vec![0u8; PANIC_FONT_BYTES];
     for glyph in 0..PANIC_FONT_GLYPHS {
+        let ch = char::from(PANIC_FONT_FIRST + glyph as u8);
+        let alpha = font.coverage(ch).expect("every printable ASCII glyph is rasterized");
         for row in 0..16 {
             let mut bits = 0u8;
             for col in 0..8 {
-                if alpha[glyph * 128 + row * 8 + col] >= PANIC_FONT_THRESHOLD {
+                if alpha[row * 8 + col] >= PANIC_FONT_THRESHOLD {
                     bits |= 0x80 >> col;
                 }
             }
@@ -291,21 +185,25 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
             wanted(&path.file_name().unwrap_or_default().to_string_lossy().to_lowercase(), programs)
         };
 
-        // Pre-rasterize TTF fonts
+        // A TTF at the top is the desktop's monospace font: it ships as its
+        // 8x16 raster, which the console and a scale-1 screen test read, and
+        // as itself, which a program drawing at a scale rasterizes.
         for entry in fs::read_dir(dir).unwrap_or_else(|e| panic!("Failed to read {}: {e}", dir.display())) {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|e| e == "ttf") && ships(&path) {
                 let ttf = fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
                 let stem = path.file_stem().unwrap().to_str().unwrap();
-                let font_data = rasterize_font(&ttf, 8, 16);
-                files.push((format!("share/fonts/{stem}-8x16.font"), font_data));
+                files.push((format!("share/fonts/{stem}-8x16.font"), raster_8x16(&ttf)));
+                files.push((format!("share/fonts/{stem}.ttf"), ttf));
+                let (licence, text) = DESKTOP_FONT_LICENCE;
+                files.push((licence.to_string(), text.to_vec()));
             }
         }
 
         // Include all other files recursively (skipping pre-processed types).
-        // A TTF at the top is the console font's raster source and ships only
-        // as the raster above; one under `fonts/` is a system font and ships
-        // as it is, to `/system/share/fonts/`, where the toolkits look.
+        // A TTF at the top is taken above; one under `fonts/` is a system font
+        // and ships as it is, to `/system/share/fonts/`, where the toolkits
+        // look.
         fn add_dir(
             dir: &Path,
             prefix: &str,
@@ -320,15 +218,15 @@ pub fn collect(dirs: &[String], programs: &BTreeSet<&str>) -> Vec<(String, Vec<u
                     add_dir(&path, &format!("{prefix}{subdir}/"), ships, files);
                 } else if !system_font && path.extension().is_some_and(|e| e == "ttf") {
                     continue;
-                } else if path.extension().is_some_and(|e| e == "svg") {
-                    if ships(&path) {
-                        let stem = path.file_stem().unwrap().to_str().unwrap();
-                        let svg = fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
-                        files.push((format!("{prefix}{stem}.alpha"), crate::icons::rasterize(stem, &svg)));
-                    }
                 } else if ships(&path) {
                     let name = path.file_name().unwrap().to_str().unwrap().to_lowercase();
                     let data = fs::read(&path).unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
+                    if path.extension().is_some_and(|e| e == "svg") {
+                        refuse_past_the_subset(&path, &data);
+                        if !files.iter().any(|(name, _)| *name == ICON_LICENCE.0) {
+                            files.push((ICON_LICENCE.0.to_string(), ICON_LICENCE.1.to_vec()));
+                        }
+                    }
                     files.push((format!("{prefix}{name}"), data));
                 }
             }
@@ -411,7 +309,8 @@ mod tests {
             shipped,
             BTreeSet::from([
                 "share/kept.wad".to_string(),
-                "share/icons/x-bold.alpha".to_string(),
+                "share/icons/x-bold.svg".to_string(),
+                ICON_LICENCE.0.to_string(),
                 "share/music.sf2".to_string(),
             ]),
             "ROOT's asset list is not what the repository says it is"
@@ -432,7 +331,8 @@ mod tests {
             without,
             BTreeSet::from([
                 "share/kept.wad".to_string(),
-                "share/icons/x-bold.alpha".to_string(),
+                "share/icons/x-bold.svg".to_string(),
+                ICON_LICENCE.0.to_string(),
             ]),
             "a committed asset that is not there took something else with it"
         );
@@ -490,11 +390,11 @@ mod tests {
     /// A TTF under `fonts/` ships byte for byte where the toolkits look for
     /// system fonts; the one at the top ships only as the console's raster.
     #[test]
-    fn a_system_font_ships_as_it_is_and_the_console_font_as_its_raster() {
+    fn a_system_font_ships_as_it_is_and_the_desktop_font_as_its_raster_and_itself() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let dir = toyos_tmpdir::TempDir::new("fonts");
         fs::create_dir_all(dir.join("fonts")).expect("make the asset tree");
-        let console = fs::read(root.join("assets/JetBrainsMono-Regular.ttf")).expect("the console font");
+        let console = fs::read(root.join("assets/JetBrainsMono-Regular.ttf")).expect("the desktop's font");
         let system = fs::read(root.join("assets/fonts/OpenSans-Regular.ttf")).expect("a system font");
         fs::write(dir.join("Console.ttf"), &console).unwrap();
         fs::write(dir.join("fonts/System-Regular.ttf"), &system).unwrap();
@@ -514,9 +414,15 @@ mod tests {
 
         assert_eq!(
             shipped.keys().collect::<Vec<_>>(),
-            ["share/fonts/Console-8x16.font", "share/fonts/system-regular.ttf"],
-            "the fonts did not land where the toolkits and the console look"
+            [
+                "share/fonts/Console-8x16.font",
+                "share/fonts/Console.ttf",
+                "share/fonts/system-regular.ttf",
+                DESKTOP_FONT_LICENCE.0
+            ],
+            "the fonts did not land where the toolkits, the console and the desktop look"
         );
+        assert_eq!(shipped["share/fonts/Console.ttf"], console, "the desktop's font was changed on its way in");
         assert_eq!(
             shipped["share/fonts/system-regular.ttf"], system,
             "a system font was changed on its way into the image"

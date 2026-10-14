@@ -7,7 +7,7 @@ description = "Client library for ToyOS windows: create one, draw into it, read 
 repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [dependencies]
-toyos-font = { path = "../font" }
+toyos-font = { path = "../font", default-features = false }
 toyos-abi = { path = "../abi" }
 toyos-keymap = { path = "../keymap" }
 toyos = { path = "../toyos" }

@@ -194,6 +194,20 @@ const SHAPES: &[Shape] = &[
         ],
         after: &["$ADOPTED", "-D", "warnings"],
     },
+    // `toyos-font` as `toyos-window` and every app through it build it: its
+    // `ttf` feature off, which no workspace shape reaches. Its own target
+    // directory for the reason `toyos-abi`'s below has one.
+    Shape {
+        before: &[
+            "-p",
+            "toyos-font",
+            "--no-default-features",
+            "--all-targets",
+            "--target-dir",
+            "target/clippy-font",
+        ],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
     // Its own target directory: cargo keeps one check of a unit, so a unit
     // linted under two sets of lints is checked again by each, every run, and
     // so is every crate depending on it.

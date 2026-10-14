@@ -25,6 +25,16 @@ const TOKEN_WINDOW: u64 = 2;
 const TOKEN_LISTEN: u64 = 3;
 const TOKEN_CLIENT: u64 = 4;
 
+/// The desktop's monospace font, which the terminal draws at its window's
+/// scale.
+const FONT: &str = "/system/share/fonts/JetBrainsMono-Regular.ttf";
+
+/// The font at `scale`'s text cell.
+fn font_at(ttf: &[u8], scale: window::Scale) -> font::Font {
+    let (w, h) = scale.cell();
+    font::Font::from_ttf(ttf, w, h).unwrap_or_else(|e| panic!("terminal: {FONT}: {e}"))
+}
+
 /// Give the compositor the cells the emulator just repainted, and nothing when
 /// it repainted none.
 ///
@@ -58,13 +68,13 @@ fn main() {
     // Spawn shell first so it initializes while we load the font
     let mut child = shell(&connector);
 
-    let mut window = Window::create_with_title(0, 0, "Terminal").unwrap_or_else(|e| {
+    let mut window = Window::create_with_title(window::Size::Any, "Terminal").unwrap_or_else(|e| {
         eprintln!("terminal: {e}");
         std::process::exit(1);
     });
-    let font_data = std::fs::read("/system/share/fonts/JetBrainsMono-Regular-8x16.font").expect("failed to read font");
-    let font = font::Font::from_prebuilt(&font_data);
-    let mut console = Console::new(window.screen(), font);
+    let ttf = std::fs::read(FONT).unwrap_or_else(|e| panic!("terminal: {FONT}: {e}"));
+    let mut scale = window.scale();
+    let mut console = Console::new(window.screen(), font_at(&ttf, scale));
 
     let mut shell_stdin = child.stdin.take().unwrap();
     let mut shell_stdout = child.stdout.take().unwrap();
@@ -191,7 +201,9 @@ fn main() {
                 }
                 window::Event::Close => break,
                 window::Event::Resized => {
-                    console.resize(window.screen());
+                    let font = (window.scale() != scale).then(|| font_at(&ttf, window.scale()));
+                    scale = window.scale();
+                    console.resize(window.screen(), font);
                     present(&console, &window);
                 }
                 window::Event::Frame => {}
