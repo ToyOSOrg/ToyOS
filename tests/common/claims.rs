@@ -125,6 +125,9 @@ pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
+/// The kernel's record of a declaration it refused.
+pub const REFUSED_DECLARATION: &str = "pcidev: the root bridges' memory is refused as declared";
+
 /// What the `acpi` claim's holder declared the root bridges decode.
 pub const DECLARED: &str = "pcidev: the acpi claim declared root bridge memory: ";
 

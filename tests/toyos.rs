@@ -4292,6 +4292,8 @@ fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
         }
     }
     kernel.must_say("usb-storage: 1 device(s)")?;
+    // The bench's root bridges declared and held, which a claim on it needs.
+    eprintln!("  [amdvi] {}", kernel.must_say(claims::DECLARED)?.trim());
     for unit in units {
         eprintln!("  [amdvi] {}", unit.trim());
     }

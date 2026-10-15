@@ -95,7 +95,7 @@ use toyos::ioport::{in16, in8, out16, out8};
 use toyos::poller::{Poller, READABLE};
 use toyos::power::{self, Stop};
 use toyos::AcpiDev;
-use toyos_abi::acpi::{Access, AcpiInfo, Apertures, Block, HostBridge, FIXED_POWER_BUTTON, HARDWARE_REDUCED};
+use toyos_abi::acpi::{Access, AcpiInfo, Apertures, Block, FIXED_POWER_BUTTON, HARDWARE_REDUCED};
 use toyos_abi::syscall::{DeviceType, SyscallError};
 
 use acpiserver_api::{CONTROLLER_NONE, CONTROLLER_SERVED};
@@ -275,8 +275,11 @@ impl Kernel for Claim<'_> {
         self.info.flags & HARDWARE_REDUCED != 0
     }
 
-    fn declare(&self, roots: &[HostBridge]) -> Result<Declared, Stopping> {
-        let declared = Apertures::new(roots).expect("acpiserver: the roots were read into a declaration's room");
+    fn declare(&self, roots: &[apertures::Root]) -> Result<Declared, Stopping> {
+        let mut declared = Apertures::default();
+        for root in roots {
+            declared.push(root.segment, root.buses, &root.windows, root.osc).expect("acpiserver: the roots were read into a declaration's room");
+        }
         match self.dev.declare(&declared) {
             Err(SyscallError::InvalidArgument) => Ok(Declared::Refused),
             Err(SyscallError::AlreadyExists) => Ok(Declared::Late),

@@ -92,7 +92,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use toyos_abi::acpi::{pci_address, Access, HostBridge, Refused, Space, Width, UNLISTED};
+use toyos_abi::acpi::{pci_address, Access, Refused, Space, Width, UNLISTED};
 use toyos_aml::{Address, Denied, Host, RuntimeLoad, Transfer};
 
 use crate::devices::Ec;
@@ -151,7 +151,7 @@ pub trait Kernel {
     /// no fixed hardware, and a power-off that writes no sleep type.
     fn hardware_reduced(&self) -> bool;
     /// Declare the PCI root bridges, once ([`crate::apertures`]).
-    fn declare(&self, roots: &[HostBridge]) -> Result<Declared, Stopping>;
+    fn declare(&self, roots: &[crate::apertures::Root]) -> Result<Declared, Stopping>;
     /// Waits until `until`, serving the SCI as `sci::await_sleep` does for
     /// the fixed power button where the claim serves it and the controller's
     /// GPE `ec_gpe`: what latched and was taken.
@@ -783,7 +783,7 @@ pub mod tests {
         /// The machine is hardware-reduced.
         pub reduced: bool,
         /// The roots it was declared, once.
-        pub declared: RefCell<Option<Vec<HostBridge>>>,
+        pub declared: RefCell<Option<Vec<crate::apertures::Root>>>,
         /// What each Sleep's wait takes, in turn; nothing once it runs out.
         /// Each served set a Sleep was asked to serve.
         pub sleeps: RefCell<VecDeque<Latched>>,
@@ -914,7 +914,7 @@ pub mod tests {
             self.reduced
         }
 
-        fn declare(&self, roots: &[HostBridge]) -> Result<Declared, Stopping> {
+        fn declare(&self, roots: &[crate::apertures::Root]) -> Result<Declared, Stopping> {
             self.stopping()?;
             let mut declared = self.declared.borrow_mut();
             if declared.is_some() {

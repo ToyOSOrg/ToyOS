@@ -80,8 +80,8 @@ const UNRECOGNIZED_UUID: u32 = 1 << 2;
 const UNRECOGNIZED_REVISION: u32 = 1 << 3;
 const MASKED: u32 = 1 << 4;
 
-/// The revision of both UUIDs' capabilities buffer (§6.2.11.2; 302223-007
-/// §2.2).
+/// The revision of every UUID's capabilities buffer here (§6.2.11.2;
+/// 302223-007 §2.2; PCI Firmware Specification 3.3 §4.5.1).
 const REVISION: u64 = 1;
 
 /// A status DWORD's bits by name.

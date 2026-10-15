@@ -421,14 +421,15 @@ pub struct RootBridge {
 
 impl RootBridge {
     /// Every bridge `declared` carries, or `None` where a record is none the
-    /// ABI names: a count past its array, or an `_OSC` word it does not.
+    /// ABI names: a count or a run of windows past its array, or an `_OSC`
+    /// word it does not.
     pub fn decode(declared: &toyos_abi::acpi::Apertures) -> Option<Vec<Self>> {
         declared
             .bridges()?
             .iter()
             .map(|bridge| {
                 (bridge.first_bus <= bridge.last_bus).then_some(())?;
-                let windows = bridge.windows()?.to_vec();
+                let windows = declared.windows_of(bridge)?.to_vec();
                 Some(Self { segment: bridge.segment, first_bus: bridge.first_bus, windows, osc: bridge.osc()? })
             })
             .collect()

@@ -354,8 +354,11 @@ impl RootBridgeWindow {
 
 /// The most root bridges one declaration carries.
 pub const MAX_BRIDGES: usize = 16;
-/// The most memory windows one root bridge's record carries.
-pub const MAX_BRIDGE_WINDOWS: usize = 8;
+/// The most memory windows one declaration carries, every root's together.
+/// Measured: QEMU's `virt` declares 2, q35 4, the ThinkPad T14 3; the AMD
+/// bench's one root more than 8, the per-root bound that refused it. Four
+/// times what any machine in reach needs is a bound no firmware should meet.
+pub const MAX_WINDOWS: usize = 64;
 
 /// The PCI host bridge `_OSC` Control field's bits ToyOS asks for (PCI
 /// Firmware Specification 3.3, §4.5.1, Table 4-5): native PCI Express
@@ -380,8 +383,8 @@ const OSC_REFUSED: u32 = 1;
 const OSC_ANSWERED: u32 = 2;
 
 crate::user_safe! {
-    /// One PCI root bridge: its segment, the buses below it, the memory
-    /// windows its `_CRS` produces, and what its `_OSC` granted.
+    /// One PCI root bridge: its segment, the buses below it, what its `_OSC`
+    /// granted, and the run of [`Apertures::windows`] its `_CRS` produces.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct HostBridge {
         pub segment: u16,
@@ -389,38 +392,12 @@ crate::user_safe! {
         pub last_bus: u8,
         pub osc: u32,
         pub granted: u32,
+        pub first_window: u32,
         pub window_count: u32,
-        pub windows: [RootBridgeWindow; MAX_BRIDGE_WINDOWS],
     }
 }
 
 impl HostBridge {
-    /// One root's record, or `None` past [`MAX_BRIDGE_WINDOWS`] or over a bus
-    /// range that ends before it starts.
-    pub fn new(segment: u16, buses: (u8, u8), windows: &[RootBridgeWindow], osc: Osc) -> Option<Self> {
-        let (osc, granted) = match osc {
-            Osc::Absent => (OSC_ABSENT, 0),
-            Osc::Refused => (OSC_REFUSED, 0),
-            Osc::Granted(granted) => (OSC_ANSWERED, granted),
-        };
-        let mut bridge = Self {
-            segment,
-            first_bus: buses.0,
-            last_bus: buses.1,
-            osc,
-            granted,
-            window_count: u32::try_from(windows.len()).ok()?,
-            windows: [RootBridgeWindow::default(); MAX_BRIDGE_WINDOWS],
-        };
-        bridge.windows.get_mut(..windows.len())?.copy_from_slice(windows);
-        (buses.0 <= buses.1).then_some(bridge)
-    }
-
-    /// Its windows, or `None` for a count past the array.
-    pub fn windows(&self) -> Option<&[RootBridgeWindow]> {
-        self.windows.get(..usize::try_from(self.window_count).ok()?)
-    }
-
     /// What its `_OSC` said, or `None` for a word no [`Osc`] is, or a grant
     /// beside no answer.
     pub fn osc(&self) -> Option<Osc> {
@@ -434,26 +411,62 @@ impl HostBridge {
 }
 
 crate::user_safe! {
-    /// What [`op::DECLARE`] carries: the first `count` of `bridges`.
+    /// What [`op::DECLARE`] carries: the first `bridge_count` of `bridges`,
+    /// each naming its run of the first `window_count` of `windows`.
     #[derive(Clone, Copy, PartialEq, Eq, Debug)]
     pub struct Apertures {
-        pub count: u64,
+        pub bridge_count: u32,
+        pub window_count: u32,
         pub bridges: [HostBridge; MAX_BRIDGES],
+        pub windows: [RootBridgeWindow; MAX_WINDOWS],
+    }
+}
+
+impl Default for Apertures {
+    fn default() -> Self {
+        let none = HostBridge { segment: 0, first_bus: 0, last_bus: 0, osc: OSC_ABSENT, granted: 0, first_window: 0, window_count: 0 };
+        Self { bridge_count: 0, window_count: 0, bridges: [none; MAX_BRIDGES], windows: [RootBridgeWindow::default(); MAX_WINDOWS] }
     }
 }
 
 impl Apertures {
-    /// `bridges` as a declaration, or `None` past [`MAX_BRIDGES`].
-    pub fn new(bridges: &[HostBridge]) -> Option<Self> {
-        let empty = HostBridge::new(0, (0, 0), &[], Osc::Absent).expect("an empty record");
-        let mut declared = Self { count: bridges.len() as u64, bridges: [empty; MAX_BRIDGES] };
-        declared.bridges.get_mut(..bridges.len())?.copy_from_slice(bridges);
-        Some(declared)
+    /// Add one root, or `None` where it does not fit: past [`MAX_BRIDGES`]
+    /// or [`MAX_WINDOWS`], or over a bus range that ends before it starts.
+    pub fn push(&mut self, segment: u16, buses: (u8, u8), windows: &[RootBridgeWindow], osc: Osc) -> Option<()> {
+        let (osc, granted) = match osc {
+            Osc::Absent => (OSC_ABSENT, 0),
+            Osc::Refused => (OSC_REFUSED, 0),
+            Osc::Granted(granted) => (OSC_ANSWERED, granted),
+        };
+        (buses.0 <= buses.1).then_some(())?;
+        let first = self.window_count as usize;
+        let end = first.checked_add(windows.len())?;
+        let slot = self.bridges.get_mut(self.bridge_count as usize)?;
+        self.windows.get_mut(first..end)?.copy_from_slice(windows);
+        *slot = HostBridge {
+            segment,
+            first_bus: buses.0,
+            last_bus: buses.1,
+            osc,
+            granted,
+            first_window: first as u32,
+            window_count: windows.len() as u32,
+        };
+        self.bridge_count += 1;
+        self.window_count = end as u32;
+        Some(())
     }
 
     /// The bridges declared, or `None` for a count past the array.
     pub fn bridges(&self) -> Option<&[HostBridge]> {
-        self.bridges.get(..usize::try_from(self.count).ok()?)
+        self.bridges.get(..self.bridge_count as usize)
+    }
+
+    /// `bridge`'s windows, or `None` for a run past the windows declared.
+    pub fn windows_of(&self, bridge: &HostBridge) -> Option<&[RootBridgeWindow]> {
+        let first = bridge.first_window as usize;
+        let end = first.checked_add(bridge.window_count as usize)?;
+        self.windows.get(..self.window_count as usize)?.get(first..end)
     }
 }
 
@@ -482,24 +495,38 @@ mod tests {
         assert!(!whole.holds(2, u64::MAX));
     }
 
-    /// A record that fits is carried whole and read back as itself; one past
-    /// its array is none, and a count or an `_OSC` word past what the ABI
-    /// names reads back as none.
+    /// Roots that fit are carried whole, each with its own run of the shared
+    /// windows; one past either array is none; a count, a run or an `_OSC`
+    /// word past what the ABI names reads back as none.
     #[test]
     fn a_declaration_carries_its_bridges_and_nothing_past_them() {
-        let w = RootBridgeWindow { base: 0x1000_0000, length: 0x2eff_0000 };
-        let root = HostBridge::new(0, (0, 0xff), &[w], Osc::Granted(NATIVE_HOT_PLUG)).expect("one window fits");
-        assert_eq!(root.windows(), Some(&[w][..]));
-        assert_eq!(root.osc(), Some(Osc::Granted(NATIVE_HOT_PLUG)));
-        assert_eq!(HostBridge::new(0, (0, 0xff), &[w; MAX_BRIDGE_WINDOWS + 1], Osc::Absent), None);
-        assert_eq!(HostBridge::new(0, (2, 1), &[w], Osc::Absent), None);
-        assert_eq!(HostBridge { window_count: MAX_BRIDGE_WINDOWS as u32 + 1, ..root }.windows(), None);
-        assert_eq!(HostBridge { osc: 3, ..root }.osc(), None);
-        assert_eq!(HostBridge { osc: OSC_ABSENT, granted: 1, ..root }.osc(), None);
+        let w = |base| RootBridgeWindow { base, length: 0x1000 };
+        let mut declared = Apertures::default();
+        declared.push(0, (0, 0x7f), &[w(0x1000), w(0x3000)], Osc::Granted(NATIVE_HOT_PLUG)).expect("fits");
+        declared.push(0, (0x80, 0xff), &[w(0x5000)], Osc::Absent).expect("fits");
+        let bridges = declared.bridges().expect("two bridges").to_vec();
+        assert_eq!(bridges.len(), 2);
+        assert_eq!(declared.windows_of(&bridges[0]), Some(&[w(0x1000), w(0x3000)][..]));
+        assert_eq!(declared.windows_of(&bridges[1]), Some(&[w(0x5000)][..]));
+        assert_eq!(bridges[0].osc(), Some(Osc::Granted(NATIVE_HOT_PLUG)));
+        assert_eq!(bridges[1].osc(), Some(Osc::Absent));
+        assert_eq!(declared.push(0, (2, 1), &[], Osc::Absent), None);
 
-        let declared = Apertures::new(&[root]).expect("one bridge fits");
-        assert_eq!(declared.bridges(), Some(&[root][..]));
-        assert_eq!(Apertures::new(&[root; MAX_BRIDGES + 1]), None);
-        assert_eq!(Apertures { count: MAX_BRIDGES as u64 + 1, ..declared }.bridges(), None);
+        // One root may carry every window: the bound is the declaration's.
+        let mut wide = Apertures::default();
+        assert_eq!(wide.push(0, (0, 0xff), &[w(0); MAX_WINDOWS], Osc::Absent), Some(()));
+        assert_eq!(wide.push(0, (0, 0xff), &[w(0)], Osc::Absent), None);
+        let mut many = Apertures::default();
+        for _ in 0..MAX_BRIDGES {
+            many.push(0, (0, 0), &[], Osc::Absent).expect("fits");
+        }
+        assert_eq!(many.push(0, (0, 0), &[], Osc::Absent), None);
+
+        let first = bridges[0];
+        assert_eq!(declared.windows_of(&HostBridge { window_count: 3, ..first }), Some(&[w(0x1000), w(0x3000), w(0x5000)][..]));
+        assert_eq!(declared.windows_of(&HostBridge { window_count: 4, ..first }), None);
+        assert_eq!(HostBridge { osc: 3, ..first }.osc(), None);
+        assert_eq!(HostBridge { osc: OSC_ABSENT, granted: 1, ..first }.osc(), None);
+        assert_eq!(Apertures { bridge_count: MAX_BRIDGES as u32 + 1, ..declared }.bridges(), None);
     }
 }
