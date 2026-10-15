@@ -319,6 +319,7 @@ impl NetstackConn {
     }
 
     pub fn request<Req: IpcPayload>(self, msg_type: MsgType, payload: &Req) -> Result<PendingResponse, NetError> {
+        const { assert!(core::mem::size_of::<Req>() <= MAX_REQUEST) };
         self.0.send(msg_type as u32, payload).map_err(hangup)?;
         Ok(PendingResponse(self))
     }
@@ -331,6 +332,7 @@ impl NetstackConn {
         msg_type: MsgType,
         payload: &Req,
     ) -> Result<PendingResponse, NetError> {
+        const { assert!(core::mem::size_of::<Req>() <= MAX_REQUEST) };
         self.0.send_handles(handles).map_err(|e| hangup(IpcError::Syscall(e)))?;
         self.0.send(msg_type as u32, payload).map_err(hangup)?;
         Ok(PendingResponse(self))

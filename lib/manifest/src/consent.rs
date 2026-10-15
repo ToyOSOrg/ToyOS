@@ -33,9 +33,7 @@ pub const MSG_REPLY: u32 = 2;
 /// The longest [`Ask`]: the longer access, a NUL and the longest name.
 pub const MAX_ASK: usize = LONGER_ACCESS + 1 + crate::MAX_PROGRAM_NAME;
 /// The longest [`Reply`] whose folder [`crate::grants::folder`] admits: its
-/// kind, the longer access, a NUL, and the longest folder, `/` and all. A
-/// receiver keeps a byte more, so a longer one is refused rather than read as
-/// the prefix kept.
+/// kind, the longer access, a NUL, and the longest folder, `/` and all.
 pub const MAX_REPLY: usize = 1 + LONGER_ACCESS + 1 + 1 + crate::grants::MAX_ROOT;
 const LONGER_ACCESS: usize = "read-write".len();
 
@@ -142,7 +140,7 @@ impl Reply {
 #[derive(Clone, Copy, Debug)]
 pub enum Heard<'a> {
     Nothing,
-    /// A whole frame: its type, and its payload as the receiver kept it.
+    /// A whole frame: its type, and its payload.
     Frame(u32, &'a [u8]),
     /// It hung up, or sent what no frame is: why, in words.
     Ended(&'static str),
