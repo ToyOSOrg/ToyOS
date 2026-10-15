@@ -401,7 +401,7 @@ impl Sync {
         let mut sync = Self {
             phase,
             tx,
-            rx: Rx::new(p.rcv_next, p.receive_buffer, n.rcv_shift, p.offered, now, (path_mss, ts_bytes)),
+            rx: Rx::new(p.rcv_next, p.receive_buffer, n.rcv_shift, p.offered, now, (path_mss, ts_bytes), rtt.srtt()),
             rtt,
             cc: Cc::new(smss, p.handshake_timeouts),
             peer_mss: u32::from(n.peer_mss),
