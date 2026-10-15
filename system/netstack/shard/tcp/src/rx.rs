@@ -553,7 +553,8 @@ mod tests {
     }
 
     /// The reader takes 40 KB a millisecond for `ms` milliseconds from `from`, each burst a
-    /// full-sized segment echoing a new TSecr aged `age(i)`.
+    /// full-sized segment echoing TSecr `i` aged `age(i)`, `i` counted from 0 on every call: a
+    /// burst echoing the TSecr the previous burst echoed is not sampled again.
     fn read_bursts(rx: &mut Rx, from: u64, ms: u64, age: impl Fn(u64) -> Duration) {
         const CHUNK: usize = 40_000;
         for i in 0..ms {
