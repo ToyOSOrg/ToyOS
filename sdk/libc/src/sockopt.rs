@@ -20,13 +20,10 @@ pub(crate) enum Kept {
 
 /// The kept option `optname` names at `level`, asked of a datagram socket or a
 /// stream. A datagram socket has no option at TCP's level, which is said
-/// before a value or a length is read: to a setter [`Refusal::NoSuchOption`],
-/// POSIX's `ENOPROTOOPT`, and to a getter [`Refusal::NotSupported`], where
-/// POSIX requires `ENOPROTOOPT` too
-/// (`issues/getsockopt-answers-eopnotsupp-where-posix-requires-enoprotoopt.md`).
-pub(crate) fn kept(level: i32, optname: i32, datagram: bool, setter: bool) -> Result<Option<Kept>, Refusal> {
+/// before a value or a length is read.
+pub(crate) fn kept(level: i32, optname: i32, datagram: bool) -> Result<Option<Kept>, Refusal> {
     match (level, optname) {
-        (IPPROTO_TCP, _) if datagram => Err(if setter { Refusal::NoSuchOption } else { Refusal::NotSupported }),
+        (IPPROTO_TCP, _) if datagram => Err(Refusal::NoSuchOption),
         (IPPROTO_TCP, TCP_NODELAY) => Ok(Some(Kept::NoDelay)),
         (SOL_SOCKET, SO_BROADCAST) => Ok(Some(Kept::Broadcast)),
         _ => Ok(None),
@@ -39,10 +36,8 @@ pub(crate) enum Refusal {
     Short,
     /// A null pointer where bytes are read or written: `EFAULT`.
     Fault,
-    /// A setter's level the socket's protocol has no option at: `ENOPROTOOPT`.
+    /// A level the socket's protocol has no option at: `ENOPROTOOPT`.
     NoSuchOption,
-    /// A getter's: `EOPNOTSUPP`.
-    NotSupported,
 }
 
 /// What a setter is told: whether the `int` at `optval` is non-zero. The

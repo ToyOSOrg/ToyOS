@@ -561,10 +561,10 @@ impl AddressSpace {
         true
     }
 
-    /// Runs on every present entry, including shared pages this space does
-    /// not own: unmapping ends any futex wait on the frame (its token is a
-    /// physical address) before the frame can reach the PMM and be reused
-    /// under a waiter's nose — a spurious wake is safe, a use-after-free isn't.
+    /// Runs on every present entry, shared or not: unmapping ends any futex
+    /// wait on the frame (its token is a physical address) before the frame
+    /// can reach the PMM and be reused under a waiter's nose — a spurious
+    /// wake is safe, a use-after-free isn't.
     ///
     /// **A table of 4 KiB leaves is freed only once no CPU can walk it**: a
     /// sibling's paging-structure cache may still name it through the PDE
