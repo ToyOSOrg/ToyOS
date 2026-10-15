@@ -98,6 +98,11 @@ impl Msix {
         self.bir
     }
 
+    /// How far into its BAR the table starts.
+    pub fn offset(&self) -> u64 {
+        u64::from(self.offset)
+    }
+
     /// Where the table starts, given the base address the named BAR holds.
     /// Which entry inside it a caller programs is the caller's.
     pub fn table_address(&self, bar_base: u64) -> Result<u64, Unusable> {

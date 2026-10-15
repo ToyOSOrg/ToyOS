@@ -49,6 +49,25 @@ pub const fn align_2m(size: usize) -> usize {
     (size + PAGE_2M as usize - 1) & !(PAGE_2M as usize - 1)
 }
 
+/// End every futex wait on the 4 KiB frames a table of user leaves mapped, in
+/// address order, one call per physically contiguous run of them.
+pub fn revoke_frames(frames: impl IntoIterator<Item = u64>) {
+    let mut run: Option<(u64, u64)> = None;
+    for frame in frames {
+        run = match run {
+            Some((start, len)) if start + len == frame => Some((start, len + PAGE_SIZE)),
+            Some((start, len)) => {
+                crate::sched::futex::revoke_range(start, len);
+                Some((frame, PAGE_SIZE))
+            }
+            None => Some((frame, PAGE_SIZE)),
+        };
+    }
+    if let Some((start, len)) = run {
+        crate::sched::futex::revoke_range(start, len);
+    }
+}
+
 /// The largest single allocation the kernel heap can serve; untrusted-sized requests must check it themselves, since `KernelAllocator::alloc` only asserts it.
 pub const MAX_HEAP_ALLOC: usize = PAGE_2M as usize - 4096;
 

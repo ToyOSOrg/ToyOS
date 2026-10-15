@@ -54,10 +54,10 @@ target is asked for AMD-Vi, VirtualBox's `--iommu amd` and QEMU's
 `amd-iommu`, and no target's default asks; QEMU's unit has no SMI filter, so
 a claim is refused there.
 
-Three of the launcher's QEMU options keep three of these off every guest
-test: the `-non-transitional` virtio devices the transitional id,
-`iommu_platform=on` the missing `ACCESS_PLATFORM`, and `msix-exclusive-bar=on`
-the MSI-X table (`build/qemu.rs`, `tests/common/qemu.rs`). The rest of what is
+Two of the launcher's QEMU options keep two of these off every guest test:
+the `-non-transitional` virtio devices the transitional id, and
+`iommu_platform=on` the missing `ACCESS_PLATFORM` (`build/qemu.rs`,
+`tests/common/qemu.rs`). The rest of what is
 QEMU's there — the xHCI models, the boot stick, `-vga std`, `ramfb` under
 AArch64's edk2, `caching-mode=on`, `kernel-irqchip`, `iommu-testdev`, QMP — is
 the harness's alone.

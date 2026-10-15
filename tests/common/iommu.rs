@@ -68,7 +68,7 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
         // supervisor started before it.
         let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
         let said: Vec<String> = if behind_unit {
-            vec![bar_moved(), msix_armed()]
+            vec![bar_handed(), msix_armed()]
         } else {
             vec![
                 not_handed_over(CLAIMED_AT, NOT_REMAPPED),
@@ -98,7 +98,7 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
             // same machine the arm below requires to be unspent. Without this
             // pair those `must_not_say`s would pass against a kernel that had
             // stopped writing either line.
-            log.must_say(&bar_moved())?;
+            log.must_say(&bar_handed())?;
             log.must_say(&msix_armed())?;
         } else {
             no_unit_is_no_claim(&log)?;
@@ -205,7 +205,7 @@ const CLAIMED_AT: &str = "00:03.0";
 /// The two lines a hand-over of that function spends. One arm requires them and
 /// [`refused_claim`] requires their absence, and both read them here: a kernel
 /// that stopped writing either line would otherwise satisfy both.
-fn bar_moved() -> String {
+fn bar_handed() -> String {
     format!("pcidev: PCI {CLAIMED_AT} BAR")
 }
 
@@ -244,12 +244,10 @@ fn functions_named<'a>(log: &'a Serial, marker: &str) -> Result<Vec<&'a str>, St
 }
 
 /// **The claim on [`CLAIMED_AT`] was refused for `why`, and the refusal spent
-/// nothing**: no BAR of that function moved, neither of its two message
+/// nothing**: no BAR of that function was handed over, neither of its two message
 /// mechanisms is armed, `claims` reached no holder, and the supervisor said so in the
 /// boot config's own spelling. `beside` is every other function this machine
 /// refuses, each judged by its own caller.
-///
-/// `slot_space` put back below `place_bars` reds on the two unspent lines.
 fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Result<(), String> {
     let refused = functions_named(log, "NOT HANDED OVER")?;
     let others: BTreeSet<&str> = refused.iter().copied().filter(|at| *at != CLAIMED_AT).collect();
@@ -267,7 +265,7 @@ fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Resu
     log.must_not_say(&format!("[{claims}] handed over"))?;
     log.must_not_say(&msix_armed())?;
     log.must_not_say(&msi_armed())?;
-    log.must_not_say(&bar_moved())?;
+    log.must_not_say(&bar_handed())?;
     // All the way out to userland, rather than a kernel that logged a refusal
     // and handed netstack a NIC anyway. The supervisor names what it could not mint in the
     // config's own spelling, and **with this refusal's own word**: the machine

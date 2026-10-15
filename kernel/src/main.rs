@@ -442,7 +442,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // Before any driver `init`: this sizes every BAR on the machine, and the
     // spec's probe takes memory decode off the function it is sizing for the
     // length of it. Nothing has bound yet, so nothing is mid-transfer.
-    pcidev::publish(&pci_devices, toyos_acpi::SEGMENT_GROUP, maps, kernel_args.root_bridge_windows());
+    pcidev::publish(&pci_devices, toyos_acpi::SEGMENT_GROUP, kernel_args.root_bridge_windows());
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {
         drivers::virtio::cap_selftest();

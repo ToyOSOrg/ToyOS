@@ -9,10 +9,12 @@
 //! side did the frame come from? **Before an `in` or `out`**: which ports does
 //! this CPU open to the process running on it, and which may no grant reach?
 //! **Before an access the kernel makes for the `acpi` claim's holder**: is the
-//! address the firmware's to have touched?
+//! address the firmware's to have touched? **Before a mapping**: which leaves
+//! map a run of pages?
 //!
 //! [`span`] answers the first, [`segment`] the second, [`place`] the third,
-//! [`fault`] the fourth, [`port`] the fifth and [`firmware`] the sixth.
+//! [`fault`] the fourth, [`port`] the fifth, [`firmware`] the sixth and
+//! [`leaves`] the seventh.
 //!
 //! Pure. No I/O, no allocation, no `unsafe`, nothing read from a device. The
 //! kernel is the only caller —
@@ -31,12 +33,14 @@
 
 pub mod fault;
 pub mod firmware;
+pub mod leaves;
 pub mod place;
 pub mod port;
 pub mod segment;
 pub mod span;
 
 pub use fault::Ring;
+pub use leaves::{leaves, Leaf};
 pub use place::{PageSpan, Window};
 pub use port::{port_access, IoBitmap, KeptCommands, Mediated, PortAccess, Ports, Reserved, Undeclared, IO_PORTS};
 pub use segment::{pieces, segments, Pinned, Pins, Segment};

@@ -7,9 +7,6 @@
 //! - no argument: the rounds.
 //! - `hold`: the child, which holds the claim it was endowed until it is killed.
 
-#[path = "../function.rs"]
-mod function;
-
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -18,7 +15,8 @@ use std::time::{Duration, Instant};
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
 use toyos::PciDev;
-use toyos_abi::syscall::{PciId, SyscallError};
+use toyos_abi::inventory::{Arrival, Driven, RawRecord, Record};
+use toyos_abi::syscall::PciId;
 
 const SELF_PATH: &str = "/system/bin/test_rs_end_returns_claims";
 
@@ -50,25 +48,37 @@ fn spelled(id: PciId) -> String {
     format!("pci:{:04x}:{:04x}", id.vendor, id.device)
 }
 
-/// The one spare this machine has, claimed.
-fn claim(cap: &SysCap) -> (PciId, PciDev) {
-    let mut found = None;
-    for id in SPARES {
-        match function::claim::<PciDev>(&cap, id) {
-            Err(SyscallError::NotFound) => {}
-            Ok(dev) => {
-                assert!(found.is_none(), "end_returns_claims: two spares on one machine");
-                found = Some((id, dev));
-            }
-            Err(why) => panic!("end_returns_claims: the claim on {} was refused: {why:?}", spelled(id)),
-        }
-    }
-    found.expect("end_returns_claims: neither spare controller is on this machine")
+/// The spare this machine has, as `usbd_spare` chooses it: the one function
+/// of a spare's card the kernel does not drive, or, on a kernel that drives
+/// every one, the only one there is. Named by its arrival, so every round
+/// claims that function and no other of its card.
+fn spare(cap: &SysCap) -> (PciId, Arrival) {
+    let records: Vec<Record> =
+        cap.records(|n| vec![RawRecord::EMPTY; n]).unwrap_or_else(|why| panic!("end_returns_claims: no inventory: {why:?}"));
+    let spares: Vec<_> = records
+        .into_iter()
+        .filter_map(|record| match record {
+            Record::Pci(pci) if SPARES.contains(&PciId { vendor: pci.vendor, device: pci.device }) => Some(pci),
+            _ => None,
+        })
+        .collect();
+    let left: Vec<_> = spares.iter().copied().filter(|pci| pci.driven != Driven::Kernel).collect();
+    let pci = match (left.as_slice(), spares.as_slice()) {
+        ([one], _) | ([], [one]) => *one,
+        _ => panic!("end_returns_claims: no one spare controller on this machine: {spares:?}"),
+    };
+    (PciId { vendor: pci.vendor, device: pci.device }, pci.arrival)
+}
+
+fn claim(cap: &SysCap, id: PciId, arrival: Arrival) -> PciDev {
+    cap.claim_function(arrival)
+        .unwrap_or_else(|why| panic!("end_returns_claims: the claim on {} was refused: {why:?}", spelled(id)))
 }
 
 fn rounds() {
     let cap: SysCap = Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability");
-    let (id, mut dev) = claim(&cap);
+    let (id, arrival) = spare(&cap);
+    let mut dev = claim(&cap, id, arrival);
     let (mut ended, mut answered) = (Duration::ZERO, Duration::ZERO);
     for round in 0..ROUNDS {
         let mut child = Command::new(SELF_PATH)
@@ -90,7 +100,7 @@ fn rounds() {
         let status = child.wait().expect("end_returns_claims: wait for the holder");
         assert!(!status.success(), "end_returns_claims: a killed holder ended {status:?}");
         let waited = Instant::now();
-        dev = function::claim::<PciDev>(&cap, id).unwrap_or_else(|why| {
+        dev = cap.claim_function(arrival).unwrap_or_else(|why| {
             panic!("end_returns_claims: round {round}: the claim after its holder's end was refused: {why:?}")
         });
         ended += waited - killed;

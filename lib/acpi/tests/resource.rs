@@ -102,8 +102,8 @@ fn a_translated_window_is_refused_rather_than_taken_at_its_minimum() {
     );
 }
 
-/// A range the bridge consumes is not one anything behind it decodes, and a BAR
-/// moved into one would be moved onto the bridge's own registers.
+/// A range the bridge consumes is not one anything behind it decodes, and a
+/// read inside one reaches the bridge's own registers.
 ///
 /// The other three bits of the same byte say how the range is decoded and
 /// whether its ends are fixed, and none of them changes what the range is.
