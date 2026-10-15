@@ -217,7 +217,7 @@ fn data_partitions() -> Result<Vec<[u8; 16]>, String> {
             Ok(listed.into_iter().filter(|l| l.kind == toyos_gpt::Guid::TOYOS_DATA.0).map(|l| l.unique).collect())
         }
         // No block service in this image: the namespace has no `block`.
-        Err(diskserver::Error::Kernel(SyscallError::NotFound)) => Ok(Vec::new()),
+        Err(diskserver::Error::NotHeld) => Ok(Vec::new()),
         Err(why) => Err(format!("the block service would not list its partitions ({why:?})")),
     }
 }
@@ -328,7 +328,7 @@ enum Answer {
     /// The client broke the protocol and is let go.
     Drop(&'static str),
     /// The client is answered this refusal and let go, for this reason.
-    Refuse(SyscallError, String),
+    Refuse(Error, String),
 }
 
 fn stat_reply(meta: Meta, identity: u64) -> Reply {
@@ -415,7 +415,7 @@ impl Server {
     /// Take the next connection and read its grant. Only the supervisor mints
     /// on this port, so a connection without one this server reads is let go
     /// by name; one whose share already holds its part of the handshakes is
-    /// answered `ResourceExhausted` and let go.
+    /// answered `TooManyConnections` and let go.
     fn accept(&mut self) {
         let conn = match self.acceptor.accept() {
             Ok(conn) => conn,
@@ -432,7 +432,7 @@ impl Server {
         let mine = self.clients.values().filter(|c| c.share == grant.share && c.window.is_none()).count();
         if let Err(why) = bounds::handshake(grant.share, mine) {
             // Let go whether or not the refusal went: either way it is said.
-            let _ = conn.try_send(REPLY, &Reply::refused(SyscallError::ResourceExhausted));
+            let _ = conn.try_send(REPLY, &Reply::refused(Error::TooManyConnections));
             return println!("fileserver: letting a connection go: {why}");
         }
         let id = self.next_client;
@@ -509,8 +509,8 @@ impl Server {
     }
 
     /// A path from the window: `len` bytes at `at`, UTF-8.
-    fn path(&self, id: u64, at: u64, len: u64) -> Result<String, SyscallError> {
-        let window = self.clients[&id].window.as_ref().ok_or(SyscallError::InvalidArgument)?;
+    fn path(&self, id: u64, at: u64, len: u64) -> Result<String, Error> {
+        let window = self.clients[&id].window.as_ref().expect("a request comes after the window");
         let (at, len) = bounds::path_span(at, len)?;
         let mut bytes = vec![0u8; len];
         window_take(window_of(window), at, &mut bytes);
@@ -518,20 +518,20 @@ impl Server {
     }
 
     /// `rel`, from the client's directory, as a volume path.
-    fn resolve(&mut self, id: u64, rel: &str, follow_last: bool) -> Result<Resolved, SyscallError> {
+    fn resolve(&mut self, id: u64, rel: &str, follow_last: bool) -> Result<Resolved, Error> {
         bounds::relative(rel)?;
         let root = self.clients[&id].root.clone();
         let volume = &mut self.volume;
         let mut lookup = |p: &str| match volume.lstat(p) {
             Ok(meta) if meta.kind == Kind::Symlink => volume.read_link(p).map(Found::Link).map_err(drop),
-            Ok(_) | Err(SyscallError::NotFound) => Ok(Found::Other),
+            Ok(_) | Err(Error::NotFound) => Ok(Found::Other),
             Err(_) => Err(()),
         };
         resolve::resolve(&root, rel, follow_last, &mut lookup).map_err(|e| match e {
-            Escape::Escape => SyscallError::PermissionDenied,
-            Escape::Loop => SyscallError::InvalidArgument,
-            Escape::NotFound => SyscallError::NotFound,
-            Escape::Io => SyscallError::Io,
+            Escape::Escape => Error::Escapes,
+            Escape::Loop => Error::Loop,
+            Escape::NotFound => Error::NotFound,
+            Escape::Io => Error::Io,
         })
     }
 
@@ -553,7 +553,7 @@ impl Server {
             let lent = || client.conn.recv_handles_exact::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
             match bounds::hello(all, mine, lent) {
                 Hello::Served(window) => client.window = Some(window),
-                Hello::Refused(why) => return Answer::Refuse(SyscallError::ResourceExhausted, why),
+                Hello::Refused(why) => return Answer::Refuse(Error::TooManyConnections, why),
                 Hello::Dropped(why) => return Answer::Drop(why),
             }
             let granted = if client.writes { RIGHT_WRITE } else { 0 };
@@ -571,8 +571,8 @@ impl Server {
         }
     }
 
-    fn fid(&self, id: u64, fid: u64) -> Result<&Fid, SyscallError> {
-        self.clients[&id].fids.get(&fid).ok_or(SyscallError::InvalidArgument)
+    fn fid(&self, id: u64, fid: u64) -> Result<&Fid, Error> {
+        self.clients[&id].fids.get(&fid).ok_or(Error::UnknownFile)
     }
 
     /// Mark the volume written: the write-back sync is due from here.
@@ -582,23 +582,23 @@ impl Server {
 
     /// `rel` resolved without following its last component, for an operation
     /// on the name itself; an absolute link on the way is the client's.
-    fn name(&mut self, id: u64, rel: &str) -> Result<Result<String, Answer>, SyscallError> {
+    fn name(&mut self, id: u64, rel: &str) -> Result<Result<String, Answer>, Error> {
         Ok(match self.resolve(id, rel, false)? {
             Resolved::Path(p) => Ok(p),
             Resolved::Absolute(p) => Err(self.link(id, &p)),
         })
     }
 
-    fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, SyscallError> {
+    fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, Error> {
         match rights::changes(op, r.flags) {
             None => return Ok(Answer::Drop(NO_SUCH_OPERATION)),
-            Some(true) if !self.clients[&id].writes => return Err(SyscallError::PermissionDenied),
+            Some(true) if !self.clients[&id].writes => return Err(Error::ReadOnly),
             Some(_) => {}
         }
         match op {
             OPEN => {
                 if r.flags & !O_KNOWN != 0 {
-                    return Err(SyscallError::InvalidArgument);
+                    return Err(Error::InvalidRequest);
                 }
                 let rel = self.path(id, 0, r.len)?;
                 let path = match self.resolve(id, &rel, true)? {
@@ -606,7 +606,7 @@ impl Server {
                     Resolved::Path(p) => p,
                 };
                 if self.clients[&id].fids.len() >= MAX_FIDS {
-                    return Err(SyscallError::ResourceExhausted);
+                    return Err(Error::TooManyOpen);
                 }
                 let how = OpenHow {
                     create: r.flags & O_CREATE != 0,
@@ -637,7 +637,7 @@ impl Server {
             }
             CLOSE => {
                 let client = self.clients.get_mut(&id).expect("pumped");
-                let fid = client.fids.remove(&r.fid).ok_or(SyscallError::InvalidArgument)?;
+                let fid = client.fids.remove(&r.fid).ok_or(Error::UnknownFile)?;
                 self.volume.close(fid.node)?;
                 Ok(Answer::Reply(Reply::ok()))
             }
@@ -654,11 +654,11 @@ impl Server {
                     (f.node, f.write, f.append)
                 };
                 if !write {
-                    return Err(SyscallError::PermissionDenied);
+                    return Err(Error::NotOpenForWriting);
                 }
                 let len = r.len as usize;
                 if len > WINDOW_BYTES {
-                    return Err(SyscallError::InvalidArgument);
+                    return Err(Error::InvalidRequest);
                 }
                 if self.scratch.len() < len {
                     self.scratch.resize(len, 0);
@@ -679,7 +679,7 @@ impl Server {
             TRUNCATE => {
                 let f = self.fid(id, r.fid)?;
                 if !f.write {
-                    return Err(SyscallError::PermissionDenied);
+                    return Err(Error::NotOpenForWriting);
                 }
                 let node = f.node;
                 bounds::in_a_file(r.offset, 0)?;
@@ -695,13 +695,13 @@ impl Server {
             STREAM => {
                 let f = self.fid(id, r.fid)?;
                 if !f.write {
-                    return Err(SyscallError::PermissionDenied);
+                    return Err(Error::NotOpenForWriting);
                 }
                 let node = f.node;
                 let share = self.clients[&id].share;
                 let mine = self.streams.values().filter(|s| s.share == share).count();
                 bounds::stream(r.offset, self.streams.len(), mine)?;
-                let (read, write) = toyos::pipe_pair()?;
+                let (read, write) = toyos::pipe_pair().map_err(|e| Error::kernel("a stream's pipe", e))?;
                 self.volume.hold(node);
                 let sid = self.next_stream;
                 self.next_stream += 1;
@@ -728,14 +728,14 @@ impl Server {
                 let mut out = Vec::new();
                 let mut entry = vec![0u8; 11 + MAX_PATH];
                 for (name, meta) in &entries {
-                    let n = encode_entry(&mut entry, meta.kind.wire(), meta.size, name)
-                        .ok_or(SyscallError::InvalidArgument)?;
+                    let n =
+                        encode_entry(&mut entry, meta.kind.wire(), meta.size, name).ok_or(Error::NameTooLong)?;
                     out.extend_from_slice(&entry[..n]);
                 }
                 // Refused rather than cut short: a listing that stops early is a
                 // confidently wrong answer to a caller deleting a tree.
                 if out.len() > WINDOW_BYTES {
-                    return Err(SyscallError::ResourceExhausted);
+                    return Err(Error::LimitExceeded);
                 }
                 self.put(id, &out);
                 Ok(Answer::Reply(Reply { value: out.len() as u64, ..Reply::ok() }))
@@ -753,7 +753,7 @@ impl Server {
             MKDIR | RMDIR | UNLINK => {
                 let rel = self.path(id, 0, r.len)?;
                 if rel.is_empty() {
-                    return Err(if op == MKDIR { SyscallError::AlreadyExists } else { SyscallError::PermissionDenied });
+                    return Err(if op == MKDIR { Error::AlreadyExists } else { Error::Root });
                 }
                 let path = match self.name(id, &rel)? {
                     Ok(p) => p,
@@ -771,14 +771,14 @@ impl Server {
                 let from_rel = self.path(id, 0, r.len)?;
                 let to_rel = self.path(id, r.len, r.len2)?;
                 if from_rel.is_empty() || to_rel.is_empty() {
-                    return Err(SyscallError::PermissionDenied);
+                    return Err(Error::Root);
                 }
                 let (Resolved::Path(from), Resolved::Path(to)) =
                     (self.resolve(id, &from_rel, false)?, self.resolve(id, &to_rel, false)?)
                 else {
                     // A rename through a link that leaves this directory is a
                     // rename across two, which no one directory can do.
-                    return Err(SyscallError::NotSupported);
+                    return Err(Error::CrossesDirectories);
                 };
                 self.volume.rename(&from, &to)?;
                 self.dirtied();
@@ -787,11 +787,14 @@ impl Server {
             SYMLINK => {
                 let link_rel = self.path(id, 0, r.len)?;
                 let target = self.path(id, r.len, r.len2)?;
-                if target.is_empty() || link_rel.is_empty() {
-                    return Err(SyscallError::InvalidArgument);
+                if target.is_empty() {
+                    return Err(Error::InvalidRequest);
+                }
+                if link_rel.is_empty() {
+                    return Err(Error::AlreadyExists);
                 }
                 let Resolved::Path(link) = self.resolve(id, &link_rel, false)? else {
-                    return Err(SyscallError::NotSupported);
+                    return Err(Error::CrossesDirectories);
                 };
                 self.volume.symlink(&link, &target)?;
                 self.dirtied();
@@ -804,7 +807,7 @@ impl Server {
     /// The volume synced, answered as `node`'s file fared, or with none as
     /// every file did. A file whose entry was refused keeps the write-back
     /// due, so the next one tries it again.
-    fn sync(&mut self, node: Option<Node>) -> Result<Answer, SyscallError> {
+    fn sync(&mut self, node: Option<Node>) -> Result<Answer, Error> {
         let unwritten = self.volume.sync()?;
         self.writeback.synced(!unwritten.is_empty(), Instant::now());
         match unwritten.into_iter().find(|&(n, _)| node.is_none_or(|node| n == node)) {
@@ -815,7 +818,7 @@ impl Server {
 
     fn link(&self, id: u64, path: &str) -> Answer {
         if path.len() > MAX_PATH {
-            return Answer::Reply(Reply::refused(SyscallError::InvalidArgument));
+            return Answer::Reply(Reply::refused(Error::NameTooLong));
         }
         self.put(id, path.as_bytes());
         Answer::Link(path.len())

@@ -17,10 +17,16 @@ use std::sync::atomic::{fence, Ordering};
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::{DmaRegion, PciDev};
+use toyos_abi::pci::PciFunctionInfo;
 use toyos_abi::syscall::SyscallError;
 use toyos_device_memory::{DmaBuffers, Registers};
 
 pub mod virtio;
+
+/// The claim's description, read once per claim (`PciDev::describe`).
+pub fn describe(dev: &PciDev) -> Result<PciFunctionInfo, KernelRefused> {
+    dev.describe().map_err(KernelRefused::on("the claim's description"))
+}
 
 /// A mapped BAR, as a driver reaches its device's registers.
 #[derive(Clone, Copy)]
@@ -150,22 +156,75 @@ impl DmaBuffers for Grant {
     }
 }
 
-/// The kernel refused a call a bring-up cannot go on without, and the word is
-/// the kernel's own.
+/// The kernel refused a call a bring-up cannot go on without.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct KernelRefused {
     pub call: &'static str,
-    pub why: SyscallError,
+    pub why: Why,
+}
+
+/// What the kernel refused a claim's call for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Why {
+    /// The claim ended under the call: another thread closed its last handle.
+    Gone,
+    /// No room: memory, a handle, the function's grant quota or its domain's
+    /// device addresses.
+    Exhausted,
+    /// The function has no such thing to give: a BAR it lacks or the kernel
+    /// keeps, a grant of no bytes or past the largest, a register past its
+    /// configuration space.
+    NotOffered,
+}
+
+impl Why {
+    /// The kernel's refusal of `call` on a claim this process holds as the
+    /// supervisor minted it. The calls here answer nothing else, so any other
+    /// word is a broken invariant.
+    fn of(call: &str, e: SyscallError) -> Self {
+        match e {
+            SyscallError::Gone => Self::Gone,
+            SyscallError::ResourceExhausted => Self::Exhausted,
+            SyscallError::InvalidArgument => Self::NotOffered,
+            other => panic!("toyos-pci-claim: the kernel refused {call} {other:?}, which it never answers it"),
+        }
+    }
 }
 
 impl KernelRefused {
-    pub fn on(call: &'static str) -> impl Fn(SyscallError) -> Self {
-        move |why| Self { call, why }
+    fn on(call: &'static str) -> impl Fn(SyscallError) -> Self {
+        move |e| Self { call, why: Why::of(call, e) }
     }
 }
 
 impl std::fmt::Display for KernelRefused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "the kernel refused {}: {:?}", self.call, self.why)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each word the claim's calls can be answered is one named reason; the
+    /// rest are words they never get, and fail loudly.
+    #[test]
+    fn every_kernel_refusal_a_claim_call_can_see_is_one_named_reason() {
+        assert_eq!(Why::of("a call", SyscallError::Gone), Why::Gone);
+        assert_eq!(Why::of("a call", SyscallError::ResourceExhausted), Why::Exhausted);
+        assert_eq!(Why::of("a call", SyscallError::InvalidArgument), Why::NotOffered);
+        for never in [
+            SyscallError::Unknown,
+            SyscallError::NotFound,
+            SyscallError::PermissionDenied,
+            SyscallError::AlreadyExists,
+            SyscallError::BadAddress,
+            SyscallError::WouldBlock,
+            SyscallError::NotSupported,
+            SyscallError::Io,
+        ] {
+            assert!(std::panic::catch_unwind(|| Why::of("a call", never)).is_err(), "{never:?}");
+        }
     }
 }
