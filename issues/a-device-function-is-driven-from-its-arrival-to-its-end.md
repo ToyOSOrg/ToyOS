@@ -75,6 +75,17 @@ started. Nothing reaches userland when a device arrives or leaves.
     `DEVICE_DELETED` follows a `device_del` within 6 s.
   - With `ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off`, the delete
     completes at once.
+- **QEMU's `pcie-root-port` slot** (QEMU 11.1.1 q35, OVMF, read from the UEFI
+  shell; evidence
+  https://github.com/ToyOSOrg/evidence/tree/f66e82195fdd3e318663530e3d665db1465dc97d/lifecycle-2/slot-qemu):
+  - One MSI-X entry and no MSI, its hot-plug message entry 0; Slot
+    Capabilities `0x001a007b`: button, power controller, both indicators,
+    surprise, hot-plug capable, command completion. Link Changed Enable
+    does not stick.
+  - OVMF leaves the empty slot powered off, and a plugged function's
+    configuration space reads all ones until the slot is powered.
+  - With the slot powered and its power indicator on, `device_del` presses
+    the button, and the device stays until the guest powers the slot off.
 
 ## Stages
 
