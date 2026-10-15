@@ -40,10 +40,11 @@ review has been done, and passing vectors does not show it is safer than ring.
   - Evidence: `ToyOSOrg/evidence` `pr-913`,
     https://github.com/ToyOSOrg/evidence/tree/b7cde8091500ac0f7773c56fd0d70c8bbe9429aa/pr-913/exploratory-mac-asym.
   - No metal bench has measured these.
-- **Inside ToyOS today `CR4.OSXSAVE` is clear**
-  (`issues/user-programs-use-avx-under-xsave.md`). Both the crate and ring
-  therefore run their SSE paths there, and the crate's ChaCha, whose only
-  vector path is AVX2, is scalar.
+- **Inside ToyOS `CR4.OSXSAVE` is set** since f7b497231. The kernel's cpu0
+  records in #932's bench boots show XCR0 0xe7 on the T14 (AVX-512 state)
+  and 0x7 on the AMD bench (AVX). The parity instrument records what
+  feature detection admits there, AVX2 and AES-NI on both benches and
+  VAES/AVX-512 on the T14, so both crates' vector paths are open.
 - **AArch64 is scalar.** No ARM bench exists to measure an ARM path, so the
   crate's AArch64 AES and PMULL paths are not imported. They stay in the
   archive until an ARM bench measures them. `toyos-sha2-hw` follows the same
@@ -123,9 +124,16 @@ Not consumers:
    - `ring::test` stays in `tests/guest/rust-tests/src/bin/ring_kat.rs`, as
      ring's own known-answer row: it is the one way to give ring a known
      X25519 key.
+   - The program is `crypto_parity`, built a second time with debug
+     assertions off as `crypto_parity_unasserted`. `lib/parity` holds the
+     rule. The metal row `crypto_instrument` prints both builds' table in the
+     boot `cryptocase`.
    **Exit**: both benches' tables are on `ToyOSOrg/evidence`, with the
    columns stage 3 defines.
 3. **Parity.**
+   - **The verdict's row is this stage's.** `toyos_parity::Table::verdict`
+     is the rule. Its metal row, judged on `cryptocase` beside
+     `crypto_instrument`, is registered when this stage's rows pass.
    - **Profile.** The verdict is taken in `[profile.toyos]`, as every guest
      binary ships: `opt-level = 2`, with debug assertions and overflow checks
      on. The crate's assertions are part of what ships, and their cost
@@ -141,16 +149,46 @@ Not consumers:
      5% gets no verdict and is measured again.
    - **Verdict.** A row passes when the median over i of
      ours_i / ((A_i + B_i) / 2) is at most 1 + spread.
+   - **A recorded bias.** An open row restores its ciphertext before each
+     open, and every backend pays for that copy, which pulls the ratio
+     toward 1. A pass on an open row is read with that bias in mind. On the
+     development Mac (exploratory), the copy is 3–6.5% of ring's AES-GCM open
+     and 1–1.7% of its ChaCha20-Poly1305 open. No bench has measured it.
    - **Exit:**
-     - On both benches, every row a consumer uses passes on the ISA both
-       crates run in that boot. Today that ISA is SSE.
-     - The rows pass again in the boot after
-       `issues/user-programs-use-avx-under-xsave.md` lands, with both crates
-       admitting AVX. A consumer that passed on SSE and fails with AVX is a
-       filed defect.
+     - On both benches, every row a consumer uses passes on the ISA each
+       build records. That ISA is now AVX-capable state on both benches.
+       `issues/user-programs-use-avx-under-xsave.md`'s remaining exit,
+       userland threads' state, is not a gate here.
      - Parity work reads ring's, BoringSSL's and OpenSSL's perlasm or C only
        through a clean room, as root's research rule says.
      - Faster code is accepted only with stage 4's evidence for it.
+   - **First measurement on the benches**, #932 at 85cda28d3, shipped
+     build. Each row was built only after ours matched ring on its inputs,
+     except the three ECDH rows: their check, an agreement of ours and ring
+     on one secret, came after this run.
+     A family's ratio is ours over ring's mean, and its median is the lower
+     middle of the family's rows. Each build recorded its ISA:
+     - the T14: `aes,pclmulqdq,sha,movbe,bmi2,adx,avx,avx2,vaes,vpclmulqdq,avx512f,avx512vl`;
+     - the AMD bench: `aes,pclmulqdq,sha,movbe,bmi2,adx,avx,avx2`.
+
+     | family | T14 median | T14 worst | AMD median | AMD worst |
+     |---|---|---|---|---|
+     | AES-GCM (26 rows) | 1.43 | 3.63 key setup | 1.68 | 2.36 seal 16 KiB |
+     | ChaCha20-Poly1305 (13) | 4.74 | 6.98 seal 16 KiB | 4.68 | 8.74 seal 16 KiB |
+     | chacha20-poly1305@openssh (16) | 2.82 | 13.5 key setup | 2.94 | 19.0 key setup |
+     | SHA-2 (4) | 1.96 | 7.25 SHA-256 16 KiB | 1.73 | 7.85 SHA-256 16 KiB |
+     | HMAC/HKDF (4) | 1.94 | 3.39 HMAC-SHA-256 | 1.80 | 3.98 HMAC-SHA-256 |
+     | ECDH (3) | 13.3 | 21.2 P-256 | 10.6 | 22.2 P-256 |
+     | Ed25519 sign, verify | 70.8, 34.3 | | 59.7, 25.3 | |
+     | ECDSA verify P-256, P-384 | 22.1, 4.92 | | 23.3, 5.39 | |
+     | RSA verify (4) | 30.6 | 38.2 2048 PKCS#1 | 27.6 | 34.6 2048 PKCS#1 |
+     | ML-KEM-768 beside `ml-kem`, excluded | 1.01 | 1.08 | 1.05 | 1.11 |
+
+     The T14 has 70 fails, 1 remeasure and 3 passes. The AMD bench has 73
+     fails and 1 pass. The first run, at 9a318695e, recorded no ISA and
+     printed samples rounded to 0.1 ns. Its figures agree with these within
+     about 5%. Tables:
+     https://github.com/ToyOSOrg/evidence/tree/4dfa4dc8c647bee3424a13be28191bdb2213bcbd/pr-932/r2.
    - **First measurement, not a verdict.** `toyos-ssh`'s fuzz
      (`build/ssh/tests/fuzz.rs`), on the crate since stage 1: 33.92 s and
      15.46 s in two runs on the development Mac (an M4 Pro). On ring it took

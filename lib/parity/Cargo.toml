@@ -1,0 +1,6 @@
+[package]
+name = "toyos-parity"
+description = "The parity rule toyos-crypto is held to beside ring: rotated sampling of ours and two reference instances, the A/B spread, the verdict, and the table lines a guest prints and the judge reads."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
