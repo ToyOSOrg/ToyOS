@@ -32,6 +32,7 @@ use kernel::pcid::{Alloc, Pcid, PcidPool};
 use super::tlb;
 use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
 use crate::mm::{DirectMap, UserAddr, PAGE_2M, PHYS_OFFSET};
+use toyos_userbound::Leaf;
 use crate::sync::{Lock, LockGuard};
 use crate::vma::{self, Occupancy, Region, RegionKind};
 use crate::MemoryMapEntry;
@@ -379,21 +380,31 @@ impl AddressSpace {
         published();
     }
 
-    /// Empty level-2 entries (aligned, asserted) mean nothing can be stale.
+    /// Map `size` bytes of `phys` at `vaddr` in the leaves
+    /// [`toyos_userbound::leaves`] chooses, each table filled before it is
+    /// linked. Empty level-2 entries (asserted) mean nothing can be stale.
     pub fn map_range(&mut self, vaddr: UserAddr, phys: u64, size: u64, prot: Prot, cache: CachePolicy) {
-        assert!(vaddr.raw() & (PAGE_2M - 1) == 0, "map_range: vaddr not 2MB-aligned");
-        assert!(phys & (PAGE_2M - 1) == 0, "map_range: phys {phys:#x} not 2MB-aligned");
         if prot == Prot::ReadExec {
             super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, size as usize);
         }
-        let mut offset = 0u64;
-        while offset < size {
-            let va = vaddr.raw() + offset;
+        for leaf in toyos_userbound::leaves(vaddr.raw(), phys, size) {
+            let (va, entry) = match leaf {
+                Leaf::Block { va, pa } => (va, pa | user_leaf(prot, cache)),
+                Leaf::Pages { va, pa, count } => {
+                    let mut pages = Table::new();
+                    for (j, page) in pages.0.iter_mut().take(count as usize).enumerate() {
+                        *page = (pa + j as u64 * PAGE_4K) | user_leaf(prot, cache) | TABLE;
+                    }
+                    let table = self.tables.adopt(pages);
+                    // Filled before any walker can reach it through the link.
+                    published();
+                    (va, table | TABLE | VALID)
+                }
+            };
             let directory = self.tables.directory(va);
             let i = index(va, 2);
             assert!(directory.0[i] & VALID == 0, "map_range: an install at {va:#x} found the present entry {:#x}", directory.0[i]);
-            directory.set(i, (phys + offset) | user_leaf(prot, cache));
-            offset += PAGE_2M;
+            directory.set(i, entry);
         }
         published();
     }
@@ -451,6 +462,8 @@ impl AddressSpace {
 
     /// Ends any futex wait on the frame (its token is a physical address)
     /// before the frame can reach the PMM and be reissued under a waiter.
+    /// A table of 4 KiB pages goes once its ASID's translations are dropped on
+    /// every CPU, which `tlb::asid` waits for, so no walker can still reach it.
     pub fn unmap(&mut self, vaddr: UserAddr) {
         let va = vaddr.raw();
         assert!(va & (PAGE_2M - 1) == 0, "unmap: vaddr {va:#x} not 2MB-aligned");
@@ -461,18 +474,19 @@ impl AddressSpace {
         if entry & VALID == 0 {
             return;
         }
-        // A split window's entries all address one 2 MiB frame, so its first names it.
-        let phys = match directory.child(i) {
-            Some(pages) => pages.0[0] & ADDR_2M,
-            None => entry & ADDR_2M,
-        };
         self.tables.directory(va).set(i, 0);
-        if entry & TABLE != 0 {
-            tlb::asid(asid);
-        } else {
+        if entry & TABLE == 0 {
             tlb::page(asid, va);
+            crate::sched::futex::revoke_range(entry & ADDR_2M, PAGE_2M);
+            return;
         }
-        crate::sched::futex::revoke_range(phys, PAGE_2M);
+        tlb::asid(asid);
+        let table = entry & ADDR;
+        // SAFETY: valid and a table, so one this space linked; still owned by
+        // `children`, and linked nowhere now.
+        let pages = unsafe { Table::at(table) };
+        crate::mm::revoke_frames(pages.0.iter().filter(|leaf| *leaf & VALID != 0).map(|leaf| leaf & ADDR));
+        self.tables.children.retain(|child| child.phys() != table);
     }
 
     /// Checked here, not at the callers: only a user address names user
@@ -513,9 +527,8 @@ impl AddressSpace {
     }
 
     pub fn alloc_and_map(&mut self, phys: u64, size: u64, prot: Prot, cache: CachePolicy) -> Option<(UserAddr, u64)> {
-        assert!(phys & (PAGE_2M - 1) == 0, "alloc_and_map: phys {phys:#x} not 2MB-aligned");
         let (addr, aligned) = self.regions.alloc_mapped(size)?;
-        self.map_range(addr, phys, aligned, prot, cache);
+        self.map_range(addr, phys, size.next_multiple_of(PAGE_4K), prot, cache);
         Some((addr, aligned))
     }
 

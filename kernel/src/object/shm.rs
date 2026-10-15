@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 use toyos_abi::syscall::SyscallError;
 
 use crate::mm::policy::{CachePolicy, Prot};
-use crate::mm::{align_2m_checked, pmm, Unmapped, PAGE_2M};
+use crate::mm::{align_2m_checked, pmm, Unmapped, PAGE_2M, PAGE_SIZE};
 use crate::process::{PageTables, Pid};
 use crate::{DirectMap, UserAddr};
 
@@ -49,12 +49,13 @@ pub struct SharedMemObject {
 }
 
 impl SharedMemObject {
-    /// A region over memory somebody else owns: unmapped when the last
-    /// handle goes, never freed here.
+    /// A region over memory somebody else owns, whole 4 KiB pages: unmapped
+    /// when the last handle goes, never freed here.
     pub fn over(region: Region) -> Arc<Self> {
         assert!(
-            region.phys.phys() & (PAGE_2M - 1) == 0,
-            "shm: {:#x} is not 2 MiB aligned",
+            (region.phys.phys() | region.size) & (PAGE_SIZE - 1) == 0,
+            "shm: {:#x} bytes at {:#x} are not whole 4 KiB pages",
+            region.size,
             region.phys.phys(),
         );
         Arc::new(Self {

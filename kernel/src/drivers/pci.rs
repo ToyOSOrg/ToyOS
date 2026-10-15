@@ -1,7 +1,7 @@
 use alloc::vec::Vec;
 
 use toyos_acpi::EcamWindow;
-use toyos_pci::{bar, bridge, caps, msi, msix};
+use toyos_pci::{bar, caps, msi, msix};
 
 use crate::mm::Mmio;
 use crate::mm::policy::MmioPolicy;
@@ -49,8 +49,6 @@ pub(in crate::drivers) struct MsixEntry<'a> {
     cap: Capability<'a>,
     control: u16,
     address: u64,
-    bir: u8,
-    base: u64,
 }
 
 pub struct Capability<'a> {
@@ -309,7 +307,7 @@ impl PciDevice {
             }
         };
         match table.table_address(base) {
-            Ok(address) => Ok(MsixEntry { cap, control, address, bir: table.bir(), base }),
+            Ok(address) => Ok(MsixEntry { cap, control, address }),
             Err(why) => {
                 log!("PCI {:02x}:{:02x}.{}: MSI-X not armed, {}",
                     self.bus, self.dev, self.func, why);
@@ -437,36 +435,6 @@ impl PciDevice {
         }
     }
 
-    /// Every memory range this function forwards to its secondary bus. Empty on
-    /// a function that is not a bridge.
-    ///
-    /// **Read, never probed**: these are the ranges nothing above this bridge
-    /// may hand out, and reading them costs the machine nothing — unlike
-    /// `bar_size`, which takes memory decode off for the length of its probe.
-    pub fn forwarded(&self) -> Vec<bridge::Window> {
-        self.bridge().map_or_else(Vec::new, |b| b.memory.into_iter().chain(b.prefetchable).collect())
-    }
-
-    /// This function as a bridge: the buses below it and the windows it
-    /// forwards to them, read and never probed; `None` for a function that is
-    /// not a bridge.
-    pub fn bridge(&self) -> Option<bridge::Bridge> {
-        if self.read_config_u8(HEADER_TYPE) & !MULTI_FUNCTION != bridge::HEADER_TYPE_BRIDGE {
-            return None;
-        }
-        Some(bridge::Bridge {
-            bus: self.bus,
-            secondary: self.read_config_u8(bridge::SECONDARY_BUS),
-            subordinate: self.read_config_u8(bridge::SUBORDINATE_BUS),
-            memory: bridge::window(self.read_config_u32(bridge::MEMORY_BASE)),
-            prefetchable: bridge::prefetch(
-                self.read_config_u32(bridge::PREFETCH_BASE),
-                self.read_config_u32(bridge::PREFETCH_BASE_UPPER),
-                self.read_config_u32(bridge::PREFETCH_LIMIT_UPPER),
-            ),
-        })
-    }
-
     pub fn capabilities(&self) -> CapabilityIter<'_> {
         let first = self.mmio.read_u8(CAPABILITIES_PTR);
         CapabilityIter { device: self, walk: caps::CapWalk::new(), next: first }
@@ -506,29 +474,20 @@ impl PciDevice {
 }
 
 /// Point a claimed function's [`MSIX_ENTRY`] at the message `claim_msi` made
-/// for it and
-/// enable it. Takes the message and nothing else: the function is
-/// the one the entry was written for, and no other message reaches here.
-pub fn arm_claimed_msix(message: &crate::iommu::Remapped) -> Result<MsixAt, NoEntry> {
+/// for it and enable it, and answer where its table is. Takes the message and
+/// nothing else: the function is the one the entry was written for, and no
+/// other message reaches here.
+pub fn arm_claimed_msix(message: &crate::iommu::Remapped) -> Result<u64, NoEntry> {
     let pci = message.function();
     let entry = pci.msix_entry()?;
-    let at = MsixAt { bar: entry.bir, offset: entry.address - entry.base, base: entry.base };
+    let table = entry.address;
     pci.write_msix(entry, message.address(), message.data());
-    Ok(at)
+    Ok(table)
 }
 
-/// Where a claimed function's armed [`MSIX_ENTRY`] is, read once at arming:
-/// its table's BAR, the table's offset in it, and where that BAR was then.
-#[derive(Clone, Copy)]
-pub struct MsixAt {
-    pub bar: u8,
-    pub offset: u64,
-    pub base: u64,
-}
-
-/// Mask the armed [`MSIX_ENTRY`] of a table at `table`, an address the
-/// kernel placed or read at arming and never a device's later answer: a
-/// device gone or answering ones takes the write as nothing.
+/// Mask the armed [`MSIX_ENTRY`] of the table at `table`, the address
+/// [`arm_claimed_msix`] answered and never a device's later answer: a device
+/// gone or answering ones takes the write as nothing.
 pub fn mask_claimed_msix(table: u64) {
     crate::mm::paging::map_mmio(table + MSIX_ENTRY as u64 * msix::ENTRY_BYTES, 0x1000, MmioPolicy::Uncacheable)
         .write_u32(msix::ENTRY_VECTOR_CONTROL, msix::ENTRY_MASKED);

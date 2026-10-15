@@ -10,11 +10,13 @@
 use crate::log;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use crate::hasher::HashMap;
 
 use kernel::pcid::{Alloc, Pcid, PcidPool};
 
 use crate::mm::{UserAddr, PAGE_2M};
+use toyos_userbound::Leaf;
+
+const PAGE_4K: u64 = crate::mm::PAGE_SIZE;
 use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
 use crate::arch::control_regs::PcidActive;
 use crate::arch::cpu::Invpcid;
@@ -37,6 +39,8 @@ const PAGE_SIZE_BIT: u64 = 1 << 7;
 const PAGE_GLOBAL: u64 = 1 << 8;
 /// In a 4 KiB PTE this bit is bit 7 instead, so flags can't cross a split unmoved.
 const PAGE_PAT_2M: u64 = 1 << 12;
+/// The PAT bit of a 4 KiB PTE, where a PDE has its size bit.
+const PAGE_PAT_4K: u64 = 1 << 7;
 /// Not-executable only because `arch::control_regs` asserts `EFER.NXE` on every CPU.
 const PAGE_NX: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
@@ -70,16 +74,32 @@ fn kernel_leaf(cache: CachePolicy) -> u64 {
 /// `WriteCombining` is [`pat::WC_ENTRY`](crate::arch::pat::WC_ENTRY).
 impl CachePolicy {
     fn pde_bits(self) -> u64 {
+        self.bits(PAGE_PAT_2M)
+    }
+
+    fn pte_bits(self) -> u64 {
+        self.bits(PAGE_PAT_4K)
+    }
+
+    fn bits(self, pat: u64) -> u64 {
         match self {
             Self::Normal => 0,
             Self::Uncacheable => PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
-            Self::WriteCombining => PAGE_PAT_2M,
+            Self::WriteCombining => pat,
         }
     }
 
-    /// Any other combination is an entry this code never wrote.
     fn from_pde(pde: u64) -> Self {
-        match (pde & PAGE_PAT_2M != 0, pde & (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH)) {
+        Self::from_bits(pde, PAGE_PAT_2M)
+    }
+
+    fn from_pte(pte: u64) -> Self {
+        Self::from_bits(pte, PAGE_PAT_4K)
+    }
+
+    /// Any other combination is an entry this code never wrote.
+    fn from_bits(pde: u64, pat: u64) -> Self {
+        match (pde & pat != 0, pde & (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH)) {
             (false, 0) => Self::Normal,
             (true, 0) => Self::WriteCombining,
             (false, low) if low == PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH => Self::Uncacheable,
@@ -392,8 +412,6 @@ fn alloc_pcid() -> Option<PcidGuard> {
 pub struct AddressSpace {
     root: Box<PageTablePage>,
     children: Vec<Box<PageTablePage>>,
-    /// Physical data pages mapped into user space, keyed by physical address. Freed on drop.
-    pages: HashMap<u64, crate::mm::pmm::PhysPage>,
     /// All virtual memory regions, keyed by start address.
     regions: vma::Regions,
     /// Owned for this space's life: dropping the space returns a user tag, so two
@@ -422,7 +440,6 @@ impl AddressSpace {
         Some(Self {
             root: pml4,
             children: Vec::new(),
-            pages: HashMap::default(),
             regions: vma::Regions::default(),
             pcid: PcidHandle::User(pcid),
         })
@@ -432,7 +449,9 @@ impl AddressSpace {
         Cr3(self.root.phys() | self.pcid.value() as u64)
     }
 
-    /// Empty PDE slots (aligned, asserted) mean nothing can be stale.
+    /// Map `size` bytes of `phys` at `vaddr` in the leaves
+    /// [`toyos_userbound::leaves`] chooses, each table filled before it is
+    /// linked. Empty PDE slots (asserted) mean nothing can be stale.
     pub fn map_range(
         &mut self,
         vaddr: UserAddr,
@@ -441,24 +460,24 @@ impl AddressSpace {
         prot: Prot,
         cache: CachePolicy,
     ) {
-        assert!(
-            vaddr.raw() & (PAGE_2M - 1) == 0,
-            "map_range: vaddr not 2MB-aligned"
-        );
-        assert!(
-            phys & (PAGE_2M - 1) == 0,
-            "map_range: phys {phys:#x} not 2MB-aligned"
-        );
-        let mut offset = 0u64;
-        while offset < size {
-            let va = vaddr.raw() + offset;
-            let pa = phys + offset;
-            let flags = prot.leaf_bits() | cache.pde_bits();
+        for leaf in toyos_userbound::leaves(vaddr.raw(), phys, size) {
+            let (va, entry) = match leaf {
+                Leaf::Block { va, pa } => (va, pa | prot.leaf_bits() | cache.pde_bits() | PAGE_SIZE_BIT),
+                Leaf::Pages { va, pa, count } => {
+                    let mut table = Box::new(PageTablePage([0; 512]));
+                    for i in 0..count as usize {
+                        table.init_entry(i, (pa + i as u64 * PAGE_4K) | prot.leaf_bits() | cache.pte_bits());
+                    }
+                    let table_phys = table.phys();
+                    self.children.push(table);
+                    // No `Prot` here: `NX` would make the whole window
+                    // non-executable whatever the leaves say.
+                    (va, table_phys | TABLE_FLAGS)
+                }
+            };
             let pd_idx = indices(va).2;
             let pd = self.ensure_table(va, TABLE_FLAGS);
-            pd.write_pde(pd_idx, va, pa | flags | PAGE_SIZE_BIT)
-                .expect_install("map_range");
-            offset += PAGE_2M;
+            pd.write_pde(pd_idx, va, entry).expect_install("map_range");
         }
     }
 
@@ -546,6 +565,10 @@ impl AddressSpace {
     /// not own: unmapping ends any futex wait on the frame (its token is a
     /// physical address) before the frame can reach the PMM and be reused
     /// under a waiter's nose — a spurious wake is safe, a use-after-free isn't.
+    ///
+    /// **A table of 4 KiB leaves is freed only once no CPU can walk it**: a
+    /// sibling's paging-structure cache may still name it through the PDE
+    /// just cleared (SDM Vol. 3A §4.10.3), so it is shot down first.
     pub fn unmap(&mut self, vaddr: UserAddr) {
         let va = vaddr.raw();
         assert!(
@@ -555,29 +578,26 @@ impl AddressSpace {
 
         let (pml4_idx, pdpt_idx, pd_idx) = indices(va);
         let target = self.root();
-
-        if let Some(pdpt) = self.root.child_mut(pml4_idx) {
-            if let Some(pd) = pdpt.child_mut(pdpt_idx) {
-                let pde = pd[pd_idx];
-                if pde & PAGE_PRESENT != 0 {
-                    // A split window's PDE names a table; every entry in it
-                    // addresses the same 2 MiB frame, so entry 0 names it.
-                    let phys = if pde & PAGE_SIZE_BIT != 0 {
-                        pde & ADDR_MASK_2M
-                    } else {
-                        // SAFETY: PRESENT and not-2-MiB, so this names a
-                        // `map_window`-built table, dropped before `write_pde` touches the slot.
-                        let table = unsafe { PageTablePage::from_phys(pde & ADDR_MASK) };
-                        table[0] & ADDR_MASK_2M
-                    };
-                    // `write_pde`: a PDE naming a page table owes the context.
-                    pd.write_pde(pd_idx, va, 0).discharge(target);
-                    // Before the frame is freed, so waiters stay findable.
-                    crate::sched::futex::revoke_range(phys, PAGE_2M);
-                    self.pages.remove(&phys);
-                }
-            }
+        let Some(pd) = self.root.child_mut(pml4_idx).and_then(|pdpt| pdpt.child_mut(pdpt_idx)) else {
+            return;
+        };
+        let pde = pd[pd_idx];
+        if pde & PAGE_PRESENT == 0 {
+            return;
         }
+        // `write_pde`: a PDE naming a page table owes the context.
+        pd.write_pde(pd_idx, va, 0).discharge(target);
+        if pde & PAGE_SIZE_BIT != 0 {
+            crate::sched::futex::revoke_range(pde & ADDR_MASK_2M, PAGE_2M);
+            return;
+        }
+        let table_phys = pde & ADDR_MASK;
+        // SAFETY: PRESENT and not 2 MiB, so a table `map_range` or
+        // `map_window` built, still owned by `children` and linked nowhere now.
+        let table = unsafe { PageTablePage::from_phys(table_phys) };
+        crate::mm::revoke_frames(table.0.iter().filter(|leaf| *leaf & PAGE_PRESENT != 0).map(|leaf| leaf & ADDR_MASK));
+        crate::arch::tlb::shootdown(crate::invalidation::Origin::Unmap, crate::invalidation::Half::User);
+        self.children.retain(|child| child.phys() != table_phys);
     }
 
     /// Checked here, not at the callers: a user space shallow-copies the
@@ -620,7 +640,7 @@ impl AddressSpace {
         }
         let rights = pml4e & pdpte & pde;
         if pde & PAGE_SIZE_BIT == 0 {
-            // A window `map_window` split, so the leaf is one level down.
+            // A table of 4 KiB leaves, so the leaf is one level down.
             let pt = pd.child(pd_idx)?;
             let pte = pt[((va >> 12) & 0x1FF) as usize];
             if pte & PAGE_PRESENT == 0 {
@@ -647,12 +667,8 @@ impl AddressSpace {
         prot: Prot,
         cache: CachePolicy,
     ) -> Option<(UserAddr, u64)> {
-        assert!(
-            phys & (PAGE_2M - 1) == 0,
-            "alloc_and_map: phys {phys:#x} not 2MB-aligned"
-        );
         let (addr, aligned) = self.regions.alloc_mapped(size)?;
-        self.map_range(addr, phys, aligned, prot, cache);
+        self.map_range(addr, phys, size.next_multiple_of(PAGE_4K), prot, cache);
         Some((addr, aligned))
     }
 
@@ -710,16 +726,9 @@ impl AddressSpace {
             return None;
         }
         if pde & PAGE_SIZE_BIT == 0 {
-            // A split table: leaves have cache bits clear (`Normal`),
-            // asserted since the two granularities put the PAT bit at different offsets.
             let pte = self.root.child(pml4_idx)?.child(pdpt_idx)?.child(pd_idx)?
                 [((virt >> 12) & 0x1FF) as usize];
-            assert!(
-                pte & (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH | PAGE_SIZE_BIT) == 0,
-                "policy_at: the 4 KiB entry {pte:#x} at {virt:#x} selects a PAT entry \
-                 outside 0",
-            );
-            return Some(CachePolicy::Normal);
+            return (pte & PAGE_PRESENT != 0).then(|| CachePolicy::from_pte(pte));
         }
         Some(CachePolicy::from_pde(pde))
     }
@@ -893,8 +902,7 @@ pub fn load_kernel_flush() {
 /// (`arch::acpi_mode`), who is refused every page one lies in. Its only writer
 /// is the only maker of such a window. One entry a distinct window and none
 /// removed: a boot's drivers map theirs once, and past boot only `pcidev`
-/// maps, a BAR where firmware put it and at each address it tries it at, and
-/// one it has placed it does not try again.
+/// maps, a claimed function's MSI-X entry where firmware put its table.
 static DRIVEN: Lock<Vec<(u64, u64)>> = Lock::new(Vec::new());
 
 /// Run `f` over every window this kernel mapped to drive a device.
@@ -1031,7 +1039,6 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry], _scanout: Option<(u64, u64)>) 
     let mut kernel = AddressSpace {
         root: Box::new(PageTablePage([0; 512])),
         children: Vec::new(),
-        pages: HashMap::default(),
         regions: vma::Regions::default(),
         pcid: PcidHandle::Kernel,
     };
@@ -1264,7 +1271,7 @@ pub fn debug_page_walk(addr: u64) {
     }
 
     // SAFETY: PRESENT checked and the 2 MiB branch already returned, so
-    // this is a table `map_window`/`guard_4k` built; same reasoning as above.
+    // this is a table of 4 KiB leaves this file built; same reasoning as above.
     let pt = unsafe { PageTablePage::from_phys(pde & ADDR_MASK) };
     let pte = pt[pt_idx];
     log!(
