@@ -56,6 +56,9 @@ pub struct Arm {
     /// kernel, and that is what most of the suite wants: it is the artifact the
     /// owner flashes.
     pub features: &'static [&'static str],
+    /// MEASUREMENT ONLY, never lands: what this arm adds to its boot's list
+    /// bound, in milliseconds.
+    pub adds_ms: u64,
     /// The job this boot's rows end on: [`batches`] puts it after every job any
     /// arm on the boot names, so no row's can land behind it, and refuses two
     /// arms that name different ones. The members riding the boot run behind
@@ -74,7 +77,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], last: None }
+    Arm { boot, config, params, jobs, features: &[], adds_ms: 0, last: None }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -626,6 +629,7 @@ pub fn batches(
         for arm in *arms {
             let batch = ride(&mut out, name, arm.boot, arm.config, arm.params, arm.features)?;
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
+            batch.members_ms += arm.adds_ms;
             match (batch.last, arm.last) {
                 (Some(was), Some(now)) if was != now => {
                     return Err(format!(

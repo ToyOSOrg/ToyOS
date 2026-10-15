@@ -1215,7 +1215,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         // of its own, so the transfer has the machine alone.
         "internet_download",
         metal::Metal {
-            arms: &[metal::once("download", "tests/images/downloadcase.toml", &[], &["test_rs_https_download"])],
+            // MEASUREMENT ONLY: the list's bound holds the job's six timed runs
+            // and its untimed warm-up, which took 34 s on a cold CDN object
+            // (ToyOSOrg/evidence@cc703a7f5, `pair/warmup/`): 40 s more.
+            arms: &[metal::Arm {
+                adds_ms: 40_000,
+                ..metal::once("download", "tests/images/downloadcase.toml", &[], &["test_rs_https_download"])
+            }],
             judge: |b| https_download_on_metal(b[0]),
         },
     ),
