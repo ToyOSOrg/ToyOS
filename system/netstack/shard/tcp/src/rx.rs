@@ -14,15 +14,15 @@
 //!
 //! **The round trip is the receiver's own**: a downloader sends no data, so the sender's SRTT
 //! keeps the handshake's sample while queueing lengthens the path. With timestamps, the
-//! handshake's sample is where the estimate starts, so no echo is taken whole: the first segment
-//! of a reply can echo a request the peer sat on, and an estimate taken from it would hold the
-//! growth back by the peer's delay. A full-sized
-//! segment carrying a TSecr not yet seen samples the age of that echo, at least one tick and at
-//! most twice the estimate, averaged with RFC 6298 §2.3's gain of 1/8: an echo aged by the
-//! peer's own silence moves the estimate by an eighth at most. Full-sized is the largest segment
-//! the peer sends, learned from what arrives, never this end's send MSS: a peer whose segments
-//! are shorter would never be sampled. Without timestamps, the time the peer took to fill the window
-//! offered is at least one round trip, and the least such time is kept.
+//! handshake's sample, where it took one, is where the estimate starts, at least one tick: the
+//! first segment of a reply can echo a request the peer sat on, and an estimate taken from it
+//! whole would hold the growth back by the peer's delay. A full-sized segment carrying a TSecr
+//! not yet seen samples the age of that echo, at least one tick and at most twice the estimate,
+//! averaged with RFC 6298 §2.3's gain of 1/8: an echo aged by the peer's own silence moves the
+//! estimate by an eighth at most. Full-sized is the largest segment the peer sends, learned from
+//! what arrives, never this end's send MSS: a peer whose segments are shorter would never be
+//! sampled. Without timestamps, the time the peer took to fill the window offered is at least one
+//! round trip, and the least such time is kept.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -114,8 +114,8 @@ impl Rx {
     /// would be one the peer was never told of. `(mss, options)`: the MSS our SYN offered and the
     /// timestamp option's length on every segment, 0 without timestamps, which picks how the
     /// round trip is sampled. `rtt` is the handshake's sample, where it took one: the start of a
-    /// timestamped estimate, and nothing without timestamps, whose least fill time would never
-    /// rise above it.
+    /// timestamped estimate, at least a tick, since every later sample is bounded by twice it; and
+    /// nothing without timestamps, whose least fill time would never rise above it.
     pub fn new(next: Seq, max: usize, shift: u8, window: u32, now: Instant, (mss, options): (u32, u32), rtt: Option<Duration>) -> Self {
         let initial = usize::try_from(crate::limits::RECEIVE_BUFFER_INITIAL).unwrap_or(usize::MAX);
         let offerable = usize::from(u16::MAX).checked_shl(u32::from(shift)).unwrap_or(usize::MAX);
@@ -141,7 +141,7 @@ impl Rx {
             last_ack_sent: next,
             max,
             round: (now, 0),
-            rtt: rtt.filter(|_| options > 0),
+            rtt: rtt.filter(|_| options > 0).map(|rtt| rtt.max(TICK)),
             sampler: if options > 0 { Sampler::Echo(None) } else { Sampler::Fill(None) },
             rcv_mss: floor,
             short: 0,
@@ -552,29 +552,43 @@ mod tests {
         assert_eq!(rx.rtt, Some(Duration::from_micros(15_875)));
     }
 
-    /// A server that sits 2 s on the request before its reply: the reply's first segment echoes
-    /// the request's TSval aged 2.016 s, and a reader takes 40 KB a millisecond after it. Started
-    /// from the handshake's 16 ms, the estimate moves an eighth of twice that, to 18 ms, and the
-    /// window grows once the reader has read for that long. Taken whole, the estimate would be
-    /// 2.016 s, and twenty milliseconds of samples later still 140 ms, the window not yet grown.
-    #[test]
-    fn a_reply_the_peer_sat_on_does_not_set_the_round_trip() {
+    /// The reader takes 40 KB a millisecond for `ms` milliseconds from `from`, each burst a
+    /// full-sized segment echoing a new TSecr aged `age(i)`.
+    fn read_bursts(rx: &mut Rx, from: u64, ms: u64, age: impl Fn(u64) -> Duration) {
         const CHUNK: usize = 40_000;
-        let mut rx = Rx::new(Seq::new(1), 4 << 20, 7, 65_535, Instant::from_nanos(0), (1460, 12), Some(ms(16)));
-        let at = |t: u64| Instant::from_nanos(t * 1_000_000);
-        let initial = rx.capacity();
-        for (tsecr, t) in (2_016..2_040u64).enumerate() {
+        for i in 0..ms {
+            let at = Instant::from_nanos((from + i) * 1_000_000);
             let next = rx.next;
             assert_eq!(rx.place(next, &[0; CHUNK]), Placed::InOrder);
-            let age = if tsecr == 0 { ms(2_016) } else { ms(16) };
-            rx.sample_rtt(1448, Some((u32::try_from(tsecr).unwrap(), Some(age))), at(t));
-            if tsecr == 0 {
-                assert_eq!(rx.rtt, Some(ms(18)));
-            }
+            rx.sample_rtt(1448, Some((u32::try_from(i).unwrap(), Some(age(i)))), at);
             rx.read(&mut [0; CHUNK]);
-            rx.after_read(CHUNK, at(t), 1448);
+            rx.after_read(CHUNK, at, 1448);
         }
-        assert!(rx.capacity() > initial, "the window never grew: {} at an estimate of {:?}", rx.capacity(), rx.rtt);
+    }
+
+    /// A server that sits 2 s on the request: the reply's first segment echoes the request's TSval
+    /// aged 2.016 s. Started from the handshake's 16 ms, the estimate moves an eighth of twice
+    /// that, to 18 ms, and a reader taking 40 KB a millisecond is offered over a megabyte within
+    /// 24 ms. Taken whole, the estimate is 2.016 s and still over 90 ms by then.
+    #[test]
+    fn a_reply_the_peer_sat_on_does_not_set_the_round_trip() {
+        let mut rx = Rx::new(Seq::new(1), 4 << 20, 7, 65_535, Instant::from_nanos(0), (1460, 12), Some(ms(16)));
+        read_bursts(&mut rx, 2_016, 1, |_| ms(2_016));
+        assert_eq!(rx.rtt, Some(ms(18)));
+        read_bursts(&mut rx, 2_017, 23, |_| ms(16));
+        assert!(rx.capacity() > 1 << 20, "{} at an estimate of {:?}", rx.capacity(), rx.rtt);
+    }
+
+    /// A handshake answered inside one tick samples 0 ms, as on a LAN or loopback. The estimate
+    /// starts at one tick, rises toward the path's 16 ms, and the window grows past a megabyte.
+    /// Started at zero, every sample would be bounded by twice zero and the window held at 64 KiB.
+    #[test]
+    fn a_handshake_inside_one_tick_starts_the_estimate_at_a_tick() {
+        let mut rx = Rx::new(Seq::new(1), 4 << 20, 7, 65_535, Instant::from_nanos(0), (1460, 12), Some(Duration::ZERO));
+        assert_eq!(rx.rtt, Some(TICK));
+        read_bursts(&mut rx, 1, 200, |_| ms(16));
+        assert!(rx.rtt > Some(ms(10)), "{:?}", rx.rtt);
+        assert!(rx.capacity() > 1 << 20, "{} at an estimate of {:?}", rx.capacity(), rx.rtt);
     }
 
     /// Without timestamps the time to fill a window offered is at least a round trip, so the
