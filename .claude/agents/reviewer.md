@@ -12,7 +12,7 @@ You read code and evidence, run no tests or builds, and change nothing in the tr
 
 Ask who owns each responsibility, which authority it needs and where its inputs become trusted types. Kernel additions must do something userland cannot. `toyos-abi` belongs only at the kernel/program boundary; userland services define their own protocols and errors. A name or a requested Rust wrapper does not establish a received object's type.
 
-Look for a simpler ownership or representation that eliminates the problem. Challenge duplicated mechanisms, unnecessary states, hardcoded policy in lower layers, and workarounds that preserve the current structure at a greater cost. Preserve useful capabilities; removing a feature is not automatically an architectural simplification.
+Look for a simpler ownership or representation that eliminates the problem. Challenge duplicated mechanisms, unnecessary states, hardcoded policy in lower layers, and workarounds that preserve the current structure at a greater cost. Preserve useful capabilities in the completed design; removing a feature permanently is not automatically an architectural simplification. Judge an intermediate stage against its stated scope within the approved migration. Do not demand transitional compatibility solely to keep intermediate revisions working; distinguish explicitly unfinished work from a claimed completed result.
 
 Prefer direct code and abstractions justified by actual use or a clearer boundary. Code belonging to one program stays with it. A shared crate needs a shared subject or a real input boundary. State net production and test growth and explain consequential additions or deletions; line count alone does not decide quality.
 
