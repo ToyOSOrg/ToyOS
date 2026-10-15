@@ -87,8 +87,8 @@ pub fn stand_down() {
 ///
 /// **What the idle path asks before it re-arms a one-shot.** Both bounds rest on
 /// some CPU taking a timer interrupt, and a CPU woken by an IPI and held in Ring
-/// 0 takes none; on a boot that named no bound that re-arm is a local APIC read and
-/// two writes per wake that buy nothing.
+/// 0 takes none; on a boot that named no bound that re-arm is timer
+/// register traffic on every wake that buys nothing.
 pub fn armed() -> bool {
     AT_COUNTER.load(Relaxed) != 0
 }
@@ -165,7 +165,7 @@ pub fn claim(cmdline: &str) {
 
 /// Turn the bound into a deadline, once the counter's period is known.
 ///
-/// Called after `clock::init` and the LAPIC timer's arm, which are the two
+/// Called after `clock::init` and the timer's arm, which are the two
 /// things [`poll`] needs: a period to convert with, and something that fires.
 pub fn start() {
     let ms = BOUND_MS.load(Relaxed);

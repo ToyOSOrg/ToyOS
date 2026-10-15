@@ -90,9 +90,9 @@ pub trait Machine: Kicker + 'static {
     /// core never reads the clock mid-flight.
     fn now(&self) -> Nanos;
 
-    /// Program the one-shot timer for an **absolute** deadline. The x86 kernel's
-    /// LAPIC one-shot is relative, so it converts; TSC-deadline mode is
-    /// absolute and will not.
+    /// Program the one-shot timer for an **absolute** deadline. The kernel's
+    /// one-shot takes a span (`irqchip::arm_one_shot`), so
+    /// `KernelHw::set_timer` converts.
     fn set_timer(&self, deadline: Nanos);
 
     fn stop_timer(&self);

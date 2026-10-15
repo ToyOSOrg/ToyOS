@@ -150,7 +150,7 @@ pub fn nanos_of_ticks(ticks: u64) -> u64 {
 
 /// Polls `ready` until it holds or `nanos` pass; `false` is the deadline.
 /// Reads the counter, not [`nanos_since_boot`], because that clock's out-of-line divide
-/// would land an NMI sample's `rip` in `compiler_builtins` rather than in the wait.
+/// would land an NMI sample's PC in `compiler_builtins` rather than in the wait.
 ///
 /// **Before [`init`] there is no period to measure a span with, so this asks
 /// `ready` once and answers it.** A wait nothing can bound is the one thing an
