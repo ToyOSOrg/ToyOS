@@ -44,11 +44,6 @@ pub struct Declared {
 /// Every hashed container in `kernel/src`, with the origin of its keys.
 pub const DECLARED: &[Declared] = &[
     Declared {
-        file: "kernel/src/arch/x86_64/paging.rs",
-        ty: "HashMap<u64, crate::mm::pmm::PhysPage>",
-        keys: "a physical address the page allocator returned",
-    },
-    Declared {
         file: "kernel/src/scheduler.rs",
         ty: "HashMap<Pid, Arc<KShare>>",
         keys: "`process::Pid`, minted by the process table",
