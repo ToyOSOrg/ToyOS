@@ -270,7 +270,7 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // first on each bench, and `crypto_instrument_prints_its_table` before the
     // instrument under QEMU.
     "ring_kat",
-    // Its shared run asserts what holds of the clock syscalls on x86-64;
+    // Its shared run asserts what holds of `SYS_CLOCK_EPOCH` on x86-64;
     // `virt_wall_clock_utc` builds it for AArch64 and judges what it read
     // against the instant the job case stages in the RTC.
     "wall_clock_now",
