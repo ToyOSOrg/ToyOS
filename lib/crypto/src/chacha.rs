@@ -120,7 +120,7 @@ pub(crate) fn xor(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8
     Ok(())
 }
 
-/// [`xor`], with `mac` absorbing the ciphertext.
+/// [`xor`], with `mac` absorbing the ciphertext zero-padded to a block.
 pub(crate) fn seal(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8], mac: &mut Poly1305) -> Result<(), Error> {
     check_ietf(data.len(), counter)?;
     let (counter, nonce) = ietf(nonce, counter);
@@ -130,7 +130,7 @@ pub(crate) fn seal(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u
     };
     let rest = &mut data[done..];
     stream(key, counter.wrapping_add((done / 64) as u64), &nonce, rest);
-    mac.update(rest);
+    mac.update_padded(rest);
     Ok(())
 }
 

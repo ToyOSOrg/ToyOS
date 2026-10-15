@@ -103,6 +103,20 @@ impl Poly1305 {
         }
     }
 
+    /// `data` and zeros to the next whole block.
+    pub(crate) fn update_padded(&mut self, data: &[u8]) {
+        if self.filled != 0 {
+            self.update(data);
+            self.pad16();
+            return;
+        }
+        let (blocks, tail) = data.as_chunks::<16>();
+        self.blocks(blocks, true);
+        if !tail.is_empty() {
+            self.blocks(&[padded(tail)], true);
+        }
+    }
+
     pub(crate) fn pad16(&mut self) {
         if self.filled != 0 {
             let block = terminated(&self.buffer, self.filled, 0);

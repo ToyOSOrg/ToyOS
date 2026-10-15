@@ -34,6 +34,9 @@ macro_rules! hosted {
     }};
 }
 
+/// GHASH key powers, (H^(i+1))' at index i in the instruction paths' form.
+pub(crate) type Powers = [u128; 16];
+
 /// FIPS 197 key expansion of a 16- or 32-byte key.
 pub(crate) fn aes_expand(key: &[u8], keys: &mut [u8; 240]) -> bool {
     hosted!(x86_64::aes_expand(key, keys), {
@@ -65,7 +68,7 @@ pub(crate) fn ghash_multiply(a: u128, b: u128) -> Option<u128> {
 }
 
 /// The hash key's powers in the form [`ghash_blocks`] and [`gcm_seal`] take.
-pub(crate) fn ghash_powers(h: &[u8; 16], powers: &mut [u128; 8]) -> bool {
+pub(crate) fn ghash_powers(h: &[u8; 16], powers: &mut Powers) -> bool {
     hosted!(x86_64::ghash_powers(h, powers), {
         let _ = (h, powers);
         false
@@ -73,7 +76,7 @@ pub(crate) fn ghash_powers(h: &[u8; 16], powers: &mut [u128; 8]) -> bool {
 }
 
 /// GHASH over whole blocks; `powers` came from [`ghash_powers`].
-pub(crate) fn ghash_blocks(powers: &[u128; 8], state: &mut [u8; 16], blocks: &[[u8; 16]]) -> bool {
+pub(crate) fn ghash_blocks(powers: &Powers, state: &mut [u8; 16], blocks: &[[u8; 16]]) -> bool {
     hosted!(x86_64::ghash_blocks(powers, state, blocks), {
         let _ = (powers, state, blocks);
         false
@@ -94,7 +97,7 @@ pub(crate) fn gcm_ctr(keys: &[u8; 240], rounds: usize, nonce: &[u8; 12], counter
 pub(crate) fn gcm_seal(
     keys: &[u8; 240],
     rounds: usize,
-    powers: &[u128; 8],
+    powers: &Powers,
     nonce: &[u8; 12],
     state: &mut [u8; 16],
     data: &mut [u8],
@@ -113,7 +116,7 @@ pub(crate) fn gcm_seal(
 pub(crate) fn gcm_short(
     keys: &[u8; 240],
     rounds: usize,
-    powers: &[u128; 8],
+    powers: &Powers,
     nonce: &[u8; 12],
     aad: &[u8],
     data: &mut [u8],

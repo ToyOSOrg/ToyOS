@@ -29,6 +29,7 @@
 use core::arch::x86_64::*;
 
 use super::{load, store};
+use crate::arch::Powers;
 use crate::block::padded;
 
 /// x^63 + x^62 + x^57: g* - x^128 - 1, divided by x^64.
@@ -141,23 +142,29 @@ fn counter(base: __m128i, counter: u32) -> __m128i {
     _mm_xor_si128(base, _mm_set_epi32(counter.to_be() as i32, 0, 0, 0))
 }
 
-/// Eight counter blocks through every round.
+/// `N` counter blocks from `first` through every round.
 #[inline]
 #[target_feature(enable = "aes,sse2")]
-fn encrypt8<const R: usize>(k: &[__m128i; 15], base: __m128i, first: u32) -> [__m128i; 8] {
-    let mut s = [_mm_setzero_si128(); 8];
-    for j in 0..8 {
+fn encrypt_n<const R: usize, const N: usize>(k: &[__m128i; 15], base: __m128i, first: u32) -> [__m128i; N] {
+    let mut s = [_mm_setzero_si128(); N];
+    for j in 0..N {
         s[j] = counter(base, first.wrapping_add(j as u32));
     }
     for r in 1..R {
-        for j in 0..8 {
+        for j in 0..N {
             s[j] = _mm_aesenc_si128(s[j], k[r]);
         }
     }
-    for j in 0..8 {
+    for j in 0..N {
         s[j] = _mm_aesenclast_si128(s[j], k[R]);
     }
     s
+}
+
+#[inline]
+#[target_feature(enable = "aes,sse2")]
+fn encrypt8<const R: usize>(k: &[__m128i; 15], base: __m128i, first: u32) -> [__m128i; 8] {
+    encrypt_n::<R, 8>(k, base, first)
 }
 
 #[inline]
@@ -285,21 +292,19 @@ pub(super) fn power(p: u128) -> __m128i {
 /// # Safety
 /// CLMUL and SSSE3 are admitted.
 #[target_feature(enable = "pclmulqdq,sse2,ssse3")]
-pub(super) unsafe fn powers(h: &[u8; 16], powers: &mut [u128; 8]) {
+pub(super) unsafe fn powers(h: &[u8; 16], powers: &mut Powers) {
     let h = u128::from_be_bytes(*h);
     // H*·x: a shift, reduced by x^128 where the top bit carries out.
-    let p1 = power((h << 1) ^ (0u128.wrapping_sub(h >> 127) & X128));
-    let p2 = multiply(p1, p1);
-    let p3 = multiply(p2, p1);
-    let p4 = multiply(p2, p2);
-    let p5 = multiply(p4, p1);
-    let p6 = multiply(p3, p3);
-    let p7 = multiply(p6, p1);
-    let p8 = multiply(p4, p4);
-    let all = [p1, p2, p3, p4, p5, p6, p7, p8];
-    for i in 0..8 {
+    let mut p = [_mm_setzero_si128(); 16];
+    p[0] = power((h << 1) ^ (0u128.wrapping_sub(h >> 127) & X128));
+    // H^(i+1) from the largest powers already known: a tree of depth five.
+    for i in 1..16usize {
+        let half = i.div_ceil(2);
+        p[i] = multiply(p[half - 1], p[i - half]);
+    }
+    for i in 0..16 {
         // Both are 16 plain bytes.
-        powers[i] = unsafe { core::mem::transmute::<__m128i, u128>(all[i]) };
+        powers[i] = unsafe { core::mem::transmute::<__m128i, u128>(p[i]) };
     }
 }
 
@@ -307,7 +312,7 @@ pub(super) unsafe fn powers(h: &[u8; 16], powers: &mut [u128; 8]) {
 /// n meets H^(n-j).
 #[inline]
 #[target_feature(enable = "pclmulqdq,sse2,ssse3")]
-fn absorb(y: __m128i, powers: &[u128; 8], blocks: &[[u8; 16]]) -> __m128i {
+fn absorb(y: __m128i, powers: &Powers, blocks: &[[u8; 16]]) -> __m128i {
     let n = blocks.len();
     if n == 0 {
         return y;
@@ -322,7 +327,7 @@ fn absorb(y: __m128i, powers: &[u128; 8], blocks: &[[u8; 16]]) -> __m128i {
 /// # Safety
 /// CLMUL and SSSE3 are admitted, and `powers` came from [`powers`].
 #[target_feature(enable = "pclmulqdq,sse2,ssse3")]
-pub(super) unsafe fn hash(powers: &[u128; 8], state: &mut [u8; 16], blocks: &[[u8; 16]]) {
+pub(super) unsafe fn hash(powers: &Powers, state: &mut [u8; 16], blocks: &[[u8; 16]]) {
     let mut y = reverse(load(state));
     for batch in blocks.chunks(8) {
         y = absorb(y, powers, batch);
@@ -333,7 +338,7 @@ pub(super) unsafe fn hash(powers: &[u128; 8], state: &mut [u8; 16], blocks: &[[u
 #[target_feature(enable = "aes,pclmulqdq,sse2,ssse3")]
 fn seal_rounds<const R: usize>(
     keys: &[u8; 240],
-    powers: &[u128; 8],
+    powers: &Powers,
     nonce: &[u8; 12],
     state: &mut [u8; 16],
     data: &mut [u8],
@@ -407,7 +412,7 @@ fn seal_rounds<const R: usize>(
 pub(super) unsafe fn seal(
     keys: &[u8; 240],
     rounds: usize,
-    powers: &[u128; 8],
+    powers: &Powers,
     nonce: &[u8; 12],
     state: &mut [u8; 16],
     data: &mut [u8],
@@ -431,7 +436,7 @@ fn xor_bytes(data: &mut [u8], stream: __m128i) {
 #[target_feature(enable = "aes,pclmulqdq,sse2,ssse3")]
 fn short_rounds<const R: usize>(
     keys: &[u8; 240],
-    powers: &[u128; 8],
+    powers: &Powers,
     nonce: &[u8; 12],
     aad: &[u8],
     data: &mut [u8],
@@ -440,13 +445,19 @@ fn short_rounds<const R: usize>(
 ) -> [u8; 16] {
     let k = round_keys(keys);
     let base = counter_base(nonce, k[0]);
-    let s = encrypt8::<R>(&k, base, 1);
+    // E(J0) and the data's keystream, in as small a batch as covers them.
+    let mut s = [_mm_setzero_si128(); 8];
+    match data.len() {
+        0..=48 => s[..4].copy_from_slice(&encrypt_n::<R, 4>(&k, base, 1)),
+        49..=64 => s[..5].copy_from_slice(&encrypt_n::<R, 5>(&k, base, 1)),
+        _ => s = encrypt8::<R>(&k, base, 1),
+    }
     if seal {
         for (i, chunk) in data.chunks_mut(16).enumerate() {
             xor_bytes(chunk, s[1 + i]);
         }
     } else {
-        for i in 0..7 {
+        for i in 0..data.len().div_ceil(16) {
             store(&mut stream[i], s[1 + i]);
         }
     }
@@ -486,7 +497,7 @@ fn short_rounds<const R: usize>(
 pub(super) unsafe fn short(
     keys: &[u8; 240],
     rounds: usize,
-    powers: &[u128; 8],
+    powers: &Powers,
     nonce: &[u8; 12],
     aad: &[u8],
     data: &mut [u8],

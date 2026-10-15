@@ -9,6 +9,9 @@ use core::arch::x86_64::*;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 #[cfg(not(target_os = "uefi"))]
+use super::Powers;
+
+#[cfg(not(target_os = "uefi"))]
 mod aesni;
 #[cfg(not(target_os = "uefi"))]
 mod chacha;
@@ -18,6 +21,8 @@ mod poly1305;
 mod sha;
 #[cfg(not(target_os = "uefi"))]
 mod vaes;
+#[cfg(not(target_os = "uefi"))]
+mod vaes512;
 
 /// What CPUID and XCR0 admit, read once per process. The module contract
 /// makes features uniform across the CPUs a process runs on.
@@ -36,6 +41,7 @@ impl Features {
     const VAES: u32 = 1 << 7;
     const VPCLMUL: u32 = 1 << 8;
     const AVX512VL: u32 = 1 << 9;
+    const AVX512BW: u32 = 1 << 10;
 
     fn has(self, bits: u32) -> bool {
         self.0 & bits == bits
@@ -76,6 +82,12 @@ impl Features {
     pub(super) fn avx512vl(self) -> bool {
         self.has(Self::AVX2 | Self::AVX512VL)
     }
+    /// 512-bit VAES and VPCLMULQDQ, with AVX-512F, BW and VL under
+    /// OS-enabled ZMM state.
+    #[cfg(not(target_os = "uefi"))]
+    pub(super) fn vaes512(self) -> bool {
+        self.vaes_avx512() && self.has(Self::AVX512BW)
+    }
     /// 256-bit VAES and VPCLMULQDQ under OS-enabled YMM state.
     #[cfg(not(target_os = "uefi"))]
     pub(super) fn vaes_clmul(self) -> bool {
@@ -85,7 +97,7 @@ impl Features {
     /// Intel SDM Vol. 2A, CPUID: leaf 1 ECX bits 1 (PCLMULQDQ), 9 (SSSE3),
     /// 19 (SSE4.1), 25 (AES), 27 (OSXSAVE) and 28 (AVX); leaf 7 sub-leaf 0
     /// EBX bits 5 (AVX2), 8 (BMI2) and 29 (SHA), ECX bits 9 (VAES) and 10
-    /// (VPCLMULQDQ), EBX bits 16 (AVX512F) and 31 (AVX512VL). Vol. 1 §13.3:
+    /// (VPCLMULQDQ), EBX bits 16 (AVX512F), 30 (AVX512BW) and 31 (AVX512VL). Vol. 1 §13.3:
     /// AVX needs XCR0's SSE and AVX state (bits 1 and 2) enabled by the OS,
     /// AVX-512 its opmask, ZMM_Hi256 and Hi16_ZMM state (bits 5 to 7) too.
     #[allow(unused_unsafe, reason = "CPUID is unsafe on the supported Rust 1.89")]
@@ -118,7 +130,7 @@ impl Features {
             bits |= bit(leaf7b, 5, Self::AVX2) | bit(leaf7c, 9, Self::VAES) | bit(leaf7c, 10, Self::VPCLMUL);
         }
         if zmm && leaf7b >> 16 & 1 == 1 {
-            bits |= bit(leaf7b, 31, Self::AVX512VL);
+            bits |= bit(leaf7b, 31, Self::AVX512VL) | bit(leaf7b, 30, Self::AVX512BW);
         }
         Self(bits)
     }
@@ -246,7 +258,7 @@ pub(super) use hosted::*;
 #[cfg(not(target_os = "uefi"))]
 mod hosted {
     //! Each function checks its own admission and reports whether it ran.
-    use super::{aesni, chacha, features, poly1305, sha, vaes};
+    use super::{Powers, aesni, chacha, features, poly1305, sha, vaes, vaes512};
 
     pub(in crate::arch) fn aes_expand(key: &[u8], keys: &mut [u8; 240]) -> bool {
         if !features().aes() {
@@ -266,7 +278,7 @@ mod hosted {
         true
     }
 
-    pub(in crate::arch) fn ghash_powers(h: &[u8; 16], powers: &mut [u128; 8]) -> bool {
+    pub(in crate::arch) fn ghash_powers(h: &[u8; 16], powers: &mut Powers) -> bool {
         if !features().aes_clmul() {
             return false;
         }
@@ -276,9 +288,12 @@ mod hosted {
     }
 
     /// `powers` came from [`ghash_powers`].
-    pub(in crate::arch) fn ghash_blocks(powers: &[u128; 8], state: &mut [u8; 16], blocks: &[[u8; 16]]) -> bool {
+    pub(in crate::arch) fn ghash_blocks(powers: &Powers, state: &mut [u8; 16], blocks: &[[u8; 16]]) -> bool {
         let features = features();
-        if blocks.len() >= 8 && features.vaes_avx512() {
+        if blocks.len() >= 16 && features.vaes512() {
+            // 512-bit VPCLMULQDQ under ZMM state is admitted.
+            unsafe { vaes512::hash(powers, state, blocks) }
+        } else if blocks.len() >= 8 && features.vaes_avx512() {
             // AVX-512VL and VPCLMULQDQ under ZMM state are admitted.
             unsafe { vaes::avx512::hash(powers, state, blocks) }
         } else if blocks.len() >= 8 && features.vaes_clmul() {
@@ -303,7 +318,10 @@ mod hosted {
         data: &mut [u8],
     ) -> bool {
         let features = features();
-        if data.len() >= 256 && features.vaes_avx512() {
+        if data.len() >= 512 && features.vaes512() {
+            // 512-bit VAES under ZMM state is admitted.
+            unsafe { vaes512::ctr(keys, rounds, nonce, counter, data) }
+        } else if data.len() >= 256 && features.vaes_avx512() {
             // AVX-512VL and VAES under ZMM state are admitted.
             unsafe { vaes::avx512::ctr(keys, rounds, nonce, counter, data) }
         } else if data.len() >= 256 && features.vaes_clmul() {
@@ -323,13 +341,16 @@ mod hosted {
     pub(in crate::arch) fn gcm_seal(
         keys: &[u8; 240],
         rounds: usize,
-        powers: &[u128; 8],
+        powers: &Powers,
         nonce: &[u8; 12],
         state: &mut [u8; 16],
         data: &mut [u8],
     ) -> usize {
         let features = features();
-        if features.vaes_avx512() {
+        if features.vaes512() {
+            // 512-bit VAES and VPCLMULQDQ under ZMM state are admitted.
+            unsafe { vaes512::seal(keys, rounds, powers, nonce, state, data) }
+        } else if features.vaes_avx512() {
             // AVX-512VL, VAES and VPCLMULQDQ under ZMM state are admitted.
             unsafe { vaes::avx512::seal(keys, rounds, powers, nonce, state, data) }
         } else if features.vaes_clmul() {
@@ -348,7 +369,7 @@ mod hosted {
     pub(in crate::arch) fn gcm_short(
         keys: &[u8; 240],
         rounds: usize,
-        powers: &[u128; 8],
+        powers: &Powers,
         nonce: &[u8; 12],
         aad: &[u8],
         data: &mut [u8],
@@ -373,12 +394,13 @@ mod hosted {
         if !features().avx2() {
             return 0;
         }
+        // With AVX-512VL's rounds the caller's vector Poly1305 after them is
+        // faster than the stitch, as the T14 measures it.
         if features().avx512vl() {
-            // AVX-512VL under ZMM state is admitted; the caller bounded the counter.
-            return unsafe { chacha::avx512::seal(key, counter, nonce, data, r, h) };
+            return 0;
         }
         // AVX2 under YMM state is admitted; the caller bounded the counter.
-        unsafe { chacha::avx2::seal(key, counter, nonce, data, r, h) }
+        unsafe { chacha::seal(key, counter, nonce, data, r, h) }
     }
 
     pub(in crate::arch) fn chacha_blocks(states: &[[u32; 16]; 4], out: &mut [u8; 256]) -> bool {
@@ -453,6 +475,7 @@ mod tests {
         assert!(!Features::decode(!0, !0, !0, 0x7).vaes_avx512(), "ZMM state is the OS's to enable");
         assert!(!Features::decode(!0, !(1 << 16), !0, 0xe7).vaes_avx512(), "VL needs F");
         assert!(!Features::decode(!0, !(1 << 31), !0, 0xe7).vaes_avx512());
+        assert!(all.vaes512() && !Features::decode(!0, !(1 << 30), !0, 0xe7).vaes512());
         assert!(all.aes_clmul() && all.sha() && all.bmi2() && all.avx2() && all.vaes_clmul());
         assert!(!Features::decode(!0, !0, !0, 0x3).avx2(), "YMM state is the OS's to enable");
         assert!(!Features::decode(!0, !0, !0, 0x3).vaes_clmul());
@@ -492,6 +515,7 @@ mod tests {
             f.vaes_avx512(),
             f.vaes_clmul() && std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl")
         );
+        assert_eq!(f.vaes512(), f.vaes_avx512() && std::is_x86_feature_detected!("avx512bw"));
         std::println!(
             "admitted: aes+clmul {} avx2 {} bmi2 {} sha {} vaes+vpclmul {} avx512vl {}",
             f.aes_clmul(),

@@ -82,15 +82,15 @@ macro_rules! gcm256 {
         }
 
         /// H^8..H^1 in lane pairs, block 2j against H^(8-2j), and their folds.
-        struct Powers {
+        struct PowerPairs {
             h: [__m256i; 4],
             folds: [__m256i; 4],
         }
 
-        impl Powers {
+        impl PowerPairs {
             #[inline]
             #[target_feature(enable = $features)]
-            fn new(powers: &[u128; 8]) -> Self {
+            fn new(powers: &[u128; 16]) -> Self {
                 let mut h = [_mm256_setzero_si256(); 4];
                 let mut folds = [_mm256_setzero_si256(); 4];
                 for j in 0..4 {
@@ -126,8 +126,8 @@ macro_rules! gcm256 {
 
         #[inline]
         #[target_feature(enable = $features)]
-        fn hash_body(powers: &[u128; 8], state: &mut [u8; 16], blocks: &[[u8; 16]]) {
-            let p = Powers::new(powers);
+        fn hash_body(powers: &[u128; 16], state: &mut [u8; 16], blocks: &[[u8; 16]]) {
+            let p = PowerPairs::new(powers);
             let mut y = reverse(load(state));
             let (batches, rest) = blocks.as_chunks::<8>();
             for i in 0..batches.len() {
@@ -199,7 +199,7 @@ macro_rules! gcm256 {
         #[target_feature(enable = $features)]
         fn seal_body<const R: usize>(
             keys: &[u8; 240],
-            powers: &[u128; 8],
+            powers: &[u128; 16],
             nonce: &[u8; 12],
             state: &mut [u8; 16],
             data: &mut [u8],
@@ -210,7 +210,7 @@ macro_rules! gcm256 {
                 return 0;
             }
             let k = round_keys(keys);
-            let h = Powers::new(powers);
+            let h = PowerPairs::new(powers);
             let base = _mm256_broadcastsi128_si256(counter_base(nonce, load(&keys.as_chunks::<16>().0[0])));
             let mut y = reverse(load(state));
             xor_into(&mut batches[0], encrypt16::<R>(&k, base, 2));
@@ -255,7 +255,7 @@ macro_rules! gcm256 {
         /// # Safety
         /// The features are admitted and `powers` came from `aesni::powers`.
         #[target_feature(enable = $features)]
-        pub(in crate::arch) unsafe fn hash(powers: &[u128; 8], state: &mut [u8; 16], blocks: &[[u8; 16]]) {
+        pub(in crate::arch) unsafe fn hash(powers: &[u128; 16], state: &mut [u8; 16], blocks: &[[u8; 16]]) {
             hash_body(powers, state, blocks)
         }
 
@@ -281,7 +281,7 @@ macro_rules! gcm256 {
         pub(in crate::arch) unsafe fn seal(
             keys: &[u8; 240],
             rounds: usize,
-            powers: &[u128; 8],
+            powers: &[u128; 16],
             nonce: &[u8; 12],
             state: &mut [u8; 16],
             data: &mut [u8],

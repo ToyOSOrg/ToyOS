@@ -20,7 +20,7 @@ pub(crate) struct Gcm {
     aes: Aes,
     h: Secret<16>,
     /// H's powers for the aggregated instruction path, when it is admitted.
-    powers: Secret<8, u128>,
+    powers: Secret<16, u128>,
     aggregated: bool,
 }
 impl Gcm {
@@ -30,7 +30,7 @@ impl Gcm {
         Self {
             aes: Aes::storage(key_len),
             h: Secret([0; 16]),
-            powers: Secret([0; 8]),
+            powers: Secret([0; 16]),
             aggregated: false,
         }
     }
@@ -50,7 +50,7 @@ impl Gcm {
     fn new(aes: Aes) -> Self {
         let mut h = Secret([0; 16]);
         aes.encrypt(&mut h.0);
-        let mut powers = Secret([0; 8]);
+        let mut powers = Secret([0; 16]);
         let aggregated = crate::arch::ghash_powers(&h.0, &mut powers.0);
         Self { aes, h, powers, aggregated }
     }

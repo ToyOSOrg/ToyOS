@@ -11,6 +11,8 @@
 
 use core::arch::x86_64::*;
 
+use crate::poly1305::absorb;
+
 const SIGMA: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
 
 #[inline]
@@ -86,7 +88,6 @@ macro_rules! chacha256 {
 
         use super::super::{load_data, store_data};
         use super::{$r16, $r12, $r8, $r7};
-        use crate::poly1305::absorb;
 
         #[inline]
         #[target_feature(enable = $features)]
@@ -111,7 +112,7 @@ macro_rules! chacha256 {
         /// each of the first eight double rounds.
         #[inline]
         #[target_feature(enable = $features)]
-        fn eight(initial: &[u32; 16], counter: u64, out: &mut [u8; 512], mut beside: impl FnMut(usize)) {
+        pub(super) fn eight(initial: &[u32; 16], counter: u64, out: &mut [u8; 512], mut beside: impl FnMut(usize)) {
             let mut lanes = [[0u32; 8]; 2];
             for j in 0..8 {
                 let c = counter.wrapping_add(j as u64);
@@ -293,49 +294,6 @@ macro_rules! chacha256 {
             }
             512 * eights.len() + 256 * fours.len()
         }
-
-        /// [`xor`] over whole 512-byte batches, absorbing each batch's ciphertext
-        /// into the Poly1305 accumulator `h` under `r` in the next batch's double
-        /// rounds: scalar multiplication on the integer units beside the vector
-        /// rounds (Gopal et al., "Fast Cryptographic Computation on Intel
-        /// Architecture Processors Via Function Stitching", Intel, 2010). Returns the
-        /// bytes done.
-        ///
-        /// # Safety
-        /// As [`xor`].
-        #[target_feature(enable = $features)]
-        pub(in crate::arch) unsafe fn seal(
-            key: &[u8; 32],
-            counter: u64,
-            nonce: &[u8; 8],
-            data: &mut [u8],
-            r: &[u64; 3],
-            h: &mut [u64; 3],
-        ) -> usize {
-            let initial = super::initial(key, nonce);
-            let (batches, _) = data.as_chunks_mut::<512>();
-            let n = batches.len();
-            if n == 0 {
-                return 0;
-            }
-            let mut acc = *h;
-            eight(&initial.0, counter, &mut batches[0], |_| {});
-            for i in 1..n {
-                let (done, next) = batches.split_at_mut(i);
-                let (blocks, _) = done[i - 1].as_chunks::<16>();
-                eight(&initial.0, counter.wrapping_add(8 * i as u64), &mut next[0], |round| {
-                    for j in 4 * round..4 * round + 4 {
-                        acc = absorb(acc, &blocks[j], *r, true);
-                    }
-                });
-            }
-            let (blocks, _) = batches[n - 1].as_chunks::<16>();
-            for j in 0..32 {
-                acc = absorb(acc, &blocks[j], *r, true);
-            }
-            *h = acc;
-            512 * n
-        }
     };
 }
 
@@ -345,6 +303,53 @@ pub(super) mod avx2 {
 
 pub(super) mod avx512 {
     chacha256!("avx2,avx512f,avx512vl", rol16, rol12, rol8, rol7);
+}
+
+/// The AVX2 `xor` over whole 512-byte batches, absorbing each batch's ciphertext
+/// into the Poly1305 accumulator `h` under `r` in the next batch's double
+/// rounds: scalar multiplication on the integer units beside the vector
+/// rounds (Gopal et al., "Fast Cryptographic Computation on Intel
+/// Architecture Processors Via Function Stitching", Intel, 2010). Returns the
+/// bytes done.
+///
+/// Where AVX-512VL admits its own rounds, the vector Poly1305 after them
+/// is faster than this.
+///
+/// # Safety
+/// AVX2 under YMM state is admitted, and the caller bounded `counter` plus
+/// the block count.
+#[target_feature(enable = "avx2")]
+pub(super) unsafe fn seal(
+    key: &[u8; 32],
+    counter: u64,
+    nonce: &[u8; 8],
+    data: &mut [u8],
+    r: &[u64; 3],
+    h: &mut [u64; 3],
+) -> usize {
+    let initial = initial(key, nonce);
+    let (batches, _) = data.as_chunks_mut::<512>();
+    let n = batches.len();
+    if n == 0 {
+        return 0;
+    }
+    let mut acc = *h;
+    avx2::eight(&initial.0, counter, &mut batches[0], |_| {});
+    for i in 1..n {
+        let (done, next) = batches.split_at_mut(i);
+        let (blocks, _) = done[i - 1].as_chunks::<16>();
+        avx2::eight(&initial.0, counter.wrapping_add(8 * i as u64), &mut next[0], |round| {
+            for j in 4 * round..4 * round + 4 {
+                acc = absorb(acc, &blocks[j], *r, true);
+            }
+        });
+    }
+    let (blocks, _) = batches[n - 1].as_chunks::<16>();
+    for j in 0..32 {
+        acc = absorb(acc, &blocks[j], *r, true);
+    }
+    *h = acc;
+    512 * n
 }
 
 fn initial(key: &[u8; 32], nonce: &[u8; 8]) -> crate::secret::Secret<16, u32> {
