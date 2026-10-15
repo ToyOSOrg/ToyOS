@@ -28,11 +28,11 @@ reads, never arrived inside the row's wait. The run took 99.8 s at a 2.96x
 liveness width (fastest boot 3908 ms against a 1320 ms reference).
 
 **The one mechanism proposed for this is measured and does not reproduce it.**
-A run that held the panic path's console wire across the same reset (`wire-held-red.patch`,
-`core::mem::forget(serial::try_wire())` before `acpi::reboot`) got EXIT=0 at
-`8e525da4` in 27 s, against 7–8 s for the fixed path at the same head — the held
-wire costs about 19–20 s, not the ~95 s this red ran before giving up, and it
-still reset inside budget. A held console wire is therefore not what happened
+A run that held the panic path's console wire across the same reset
+(`wire-held-red.patch`, `core::mem::forget(serial::try_wire())` before
+`acpi::reboot`) got EXIT=0 at `8e525da4` in 27 s, against 7–8 s for the
+fixed path at the same head — the held wire costs about 19–20 s, not the
+~95 s this red ran before giving up, and it still reset inside budget. A held console wire is therefore not what happened
 here, and nothing else measured explains it.
 
 The panic path no longer waits on that wire at all (`reboot_now` now resets
