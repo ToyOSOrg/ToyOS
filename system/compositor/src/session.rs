@@ -1464,10 +1464,8 @@ impl Session {
     /// and hold the connection for its commit.
     fn copy_begin(&mut self, frame: ClientFrame) {
         let handle = frame.handle;
-        // Exactly one `ClipboardShmMsg`: bytes past it are not this protocol.
-        let exact = frame.payload().len() == std::mem::size_of::<window::ClipboardShmMsg>();
         let info = ipc::decode_payload::<window::ClipboardShmMsg>(frame.payload());
-        let (Ok(info), Some(conn), true) = (info, frame.conn, exact) else {
+        let (Ok(info), Some(conn)) = (info, frame.conn) else {
             mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
             return;
         };
@@ -1611,8 +1609,7 @@ impl Session {
     /// `MSG_COPY_BEGIN` from the watcher: the region its set goes into, held
     /// until its commit.
     fn watcher_begins(&mut self, from: RawHandle, payload: &[u8]) {
-        let exact = payload.len() == std::mem::size_of::<window::ClipboardShmMsg>();
-        let (Ok(info), true) = (ipc::decode_payload::<window::ClipboardShmMsg>(payload), exact) else {
+        let Ok(info) = ipc::decode_payload::<window::ClipboardShmMsg>(payload) else {
             return mark_dead(&mut self.dead, from, DropReason::OutOfProtocol);
         };
         let len = info.len as usize;

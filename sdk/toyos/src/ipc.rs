@@ -364,18 +364,19 @@ pub fn recv_header(handle: RawHandle) -> Result<IpcHeader, IpcError> {
     )
 }
 
+/// The frame's payload as one `T`. A payload of any other length is read
+/// past, so the connection stays framed, and refused [`IpcError::Malformed`].
 pub fn recv_payload<T: IpcPayload>(handle: RawHandle, header: &IpcHeader) -> Result<T, IpcError> {
-    let size = core::mem::size_of::<T>();
-    if (header.len as usize) < size {
-        return Err(IpcError::Malformed);
+    if let Err(e) = exactly::<T>(header.len as usize) {
+        skip(handle, header.len as usize)?;
+        return Err(e);
     }
     let mut val = core::mem::MaybeUninit::<T>::uninit();
     // SAFETY: the slice covers exactly the `T` being filled, and `IpcPayload`
     // promises every bit pattern `read_exact` can write is a valid `T`.
     read_exact(handle, unsafe {
-        core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, size)
+        core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
     })?;
-    skip(handle, header.len as usize - size)?;
     Ok(unsafe { val.assume_init() })
 }
 
@@ -401,20 +402,24 @@ pub fn recv_bytes(handle: RawHandle, header: &IpcHeader, buf: &mut [u8]) -> Resu
 ///
 /// Buffering a whole frame before acting on it is what lets a server stay
 /// non-blocking against a peer that stops mid-message, and a buffered payload
-/// has no handle left to read it from.
+/// has no handle left to read it from. What a [`FrameRx`] discarded never
+/// reaches this, so its `KEEP` exceeds the widest payload it decodes.
 pub fn decode_payload<T: IpcPayload>(bytes: &[u8]) -> Result<T, IpcError> {
-    let size = core::mem::size_of::<T>();
-    if bytes.len() < size {
-        return Err(IpcError::Malformed);
-    }
+    exactly::<T>(bytes.len())?;
     let mut val = core::mem::MaybeUninit::<T>::uninit();
-    // SAFETY: the copy fills exactly the `T` being built from a source at
-    // least that long, and `IpcPayload` promises every bit pattern is a valid
-    // `T` — the same contract `recv_payload` reads on.
+    // SAFETY: the copy fills exactly the `T` being built from a source that
+    // long, and `IpcPayload` promises every bit pattern is a valid `T` — the
+    // same contract `recv_payload` reads on.
     unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), val.as_mut_ptr() as *mut u8, size);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), val.as_mut_ptr() as *mut u8, bytes.len());
         Ok(val.assume_init())
     }
+}
+
+/// A typed payload is exactly one `T`: a shorter one is not a `T`, and the
+/// bytes past a longer one are no protocol's.
+fn exactly<T: IpcPayload>(len: usize) -> Result<(), IpcError> {
+    if len == core::mem::size_of::<T>() { Ok(()) } else { Err(IpcError::Malformed) }
 }
 
 /// What one [`FrameRx::pump`] found.
@@ -636,6 +641,18 @@ mod tests {
 
     fn probes(count: u32, closed: &Rc<RefCell<Vec<u32>>>) -> Vec<Probe> {
         (1..=count).map(|n| Probe { raw: RawHandle(n), closed: Rc::clone(closed) }).collect()
+    }
+
+    /// A payload is one `T` only at exactly its width: one byte short or one
+    /// byte over is refused.
+    #[test]
+    fn a_payload_decodes_only_at_exactly_its_width() {
+        let wire = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let words: [u32; 2] = decode_payload(&wire[..8]).unwrap();
+        assert_eq!(words, [u32::from_ne_bytes([1, 2, 3, 4]), u32::from_ne_bytes([5, 6, 7, 8])]);
+        assert!(matches!(decode_payload::<[u32; 2]>(&wire[..7]), Err(IpcError::Malformed)));
+        assert!(matches!(decode_payload::<[u32; 2]>(&wire), Err(IpcError::Malformed)));
+        assert!(matches!(decode_payload::<[u32; 2]>(&[]), Err(IpcError::Malformed)));
     }
 
     /// The kernel's refusal leaves every handle at its own number, and the
