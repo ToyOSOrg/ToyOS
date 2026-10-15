@@ -177,10 +177,8 @@ pub fn settle(caller: Heard<'_>, server: Heard<'_>, ceiling: Option<Access>) -> 
 
 /// The server's frame on a question's connection, as the supervisor honours
 /// it: a [`Reply`] whose folder [`crate::grants::admit`] gives under the
-/// image's `ceiling`, or why it is none. `payload` is what the receiver kept,
-/// a byte past [`MAX_REPLY`] at most, so a longer frame is refused rather than
-/// read as the prefix kept. **The server is a program like any**: nothing it
-/// says is trusted past this.
+/// image's `ceiling`, or why it is none. **The server is a program like
+/// any**: nothing it says is trusted past this.
 pub fn judge(msg_type: u32, payload: &[u8], ceiling: Option<Access>) -> Result<Reply, String> {
     if msg_type != MSG_REPLY {
         return Err(format!("it sent message {msg_type}, which is no answer"));
@@ -288,8 +286,8 @@ mod tests {
                 other => panic!("{reply:?} under {ceiling:?}: {other:?}, not {said:?}"),
             }
         }
-        // A frame past the longest answer, the receiver keeping a byte more:
-        // refused for its length, and not read as the answer it begins with.
+        // A payload past the longest answer is refused for its length, and not
+        // read as the answer it begins with.
         let mut long = Reply::Deny.encode();
         long.resize(MAX_REPLY + 1, 0);
         assert_eq!(judge(MSG_REPLY, &long, rw), Err(format!("its answer is longer than the {MAX_REPLY} bytes any answer is")));

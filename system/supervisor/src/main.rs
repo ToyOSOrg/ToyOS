@@ -2200,16 +2200,14 @@ struct Parked {
     binary: String,
     /// The question's connection, which the supervisor alone holds.
     consent: Connection,
-    /// One byte past the longest answer, so a longer one is refused and never
-    /// read as the prefix kept.
-    rx: ipc::FrameRx<{ consent::MAX_REPLY + 1 }>,
+    rx: ipc::FrameRx<{ consent::MAX_REPLY }>,
     /// The caller's connection after its frame: anything on it is its hang-up.
     hangup: ipc::FrameRx<8>,
 }
 
 /// What `rx`'s `step` heard, in [`consent::settle`]'s words: `ended` where
 /// its peer hung up.
-fn heard<'a, const KEEP: usize>(step: RxStep, rx: &'a ipc::FrameRx<KEEP>, ended: &'static str) -> consent::Heard<'a> {
+fn heard<'a, const MAX: usize>(step: RxStep, rx: &'a ipc::FrameRx<MAX>, ended: &'static str) -> consent::Heard<'a> {
     match step {
         RxStep::Idle => consent::Heard::Nothing,
         RxStep::Frame { msg_type, payload_len } => consent::Heard::Frame(msg_type, rx.payload(payload_len)),

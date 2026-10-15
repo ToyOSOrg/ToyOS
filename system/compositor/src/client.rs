@@ -38,18 +38,10 @@ pub const MAX_PENDING_CONNS: u32 = 32;
 /// statement after `connect`. What this bounds is the one that never sends it.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The largest client payload the compositor keeps.
-///
-/// One byte past [`window::MAX_INLINE_PAYLOAD`], which is the whole of what a
-/// client inlines — `MSG_CLIPBOARD_SET` is the widest, every typed payload
-/// smaller (`CreateWindowRequest`, 40). The extra byte is what makes a longer
-/// payload refusable rather than silently truncated: a frame kept at exactly
-/// this length declared more than any sender may inline. Past it a client may
-/// declare up to `ipc::MAX_FRAME_LEN` and the excess is discarded unread.
-pub const MAX_KEPT_PAYLOAD: usize = window::MAX_INLINE_PAYLOAD + 1;
-
-/// One client's inbound framing.
-pub type ClientRx = ipc::FrameRx<MAX_KEPT_PAYLOAD>;
+/// One client's inbound framing: [`window::MAX_INLINE_PAYLOAD`] is the whole
+/// of what a client inlines — `MSG_CLIPBOARD_SET` is the widest, every typed
+/// payload smaller.
+pub type ClientRx = ipc::FrameRx<{ window::MAX_INLINE_PAYLOAD }>;
 
 /// What the compositor needs to reach one window's client.
 ///
@@ -86,7 +78,7 @@ pub type Win = Window<Client>;
 pub struct ClientFrame {
     pub handle: RawHandle,
     pub msg_type: u32,
-    payload: [u8; MAX_KEPT_PAYLOAD],
+    payload: [u8; window::MAX_INLINE_PAYLOAD],
     payload_len: usize,
     pub conn: Option<Connection>,
     /// The connection's [`PendingConn::copy`].
@@ -100,7 +92,7 @@ impl ClientFrame {
         Self {
             handle,
             msg_type,
-            payload: [0; MAX_KEPT_PAYLOAD],
+            payload: [0; window::MAX_INLINE_PAYLOAD],
             payload_len: 0,
             conn: None,
             copy: None,

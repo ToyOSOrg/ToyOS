@@ -121,7 +121,7 @@ struct Fid {
 
 struct Client {
     conn: Connection,
-    rx: ipc::FrameRx<{ core::mem::size_of::<Request>() + 1 }>,
+    rx: ipc::FrameRx<{ core::mem::size_of::<Request>() }>,
     /// Its grant's root, beneath which every path it names is resolved.
     root: String,
     /// Its grant's share, which it spends.

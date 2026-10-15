@@ -94,6 +94,10 @@ pub const OPT_NODELAY: u32 = 1;
 /// A datagram socket may send to a broadcast address: [`udp_set_option`].
 pub const OPT_BROADCAST: u32 = 2;
 
+/// The widest request payload netstack reads: a [`dns_lookup`]'s hostname,
+/// since every typed request is far smaller.
+pub const MAX_REQUEST: usize = 256;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetError {
     NetstackNotFound,
@@ -526,6 +530,9 @@ pub fn udp_set_option(socket_id: UdpSocketId, option: u32, value: u32) -> Result
 }
 
 pub fn dns_lookup(hostname: &str, results: &mut [[u8; 4]]) -> Result<usize, NetError> {
+    if hostname.len() > MAX_REQUEST {
+        return Err(NetError::InvalidInput);
+    }
     let mut buf = [0u8; 256];
     let n = NetstackConn::connect()?
         .request_bytes(MsgType::DnsLookup, hostname.as_bytes())?
