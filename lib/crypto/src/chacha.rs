@@ -148,7 +148,7 @@ mod tests {
     fn dispatched_streams_preserve_counter_carries_and_batch_tails() {
         let key = core::array::from_fn(|i| (i * 7 + 3) as u8);
         let nonce = [0xff; 12];
-        for len in [0usize, 1, 63, 64, 65, 255, 256, 257, 511, 512, 513, 1025, 1792, 2111] {
+        for len in [0usize, 1, 63, 64, 65, 255, 256, 257, 383, 384, 385, 511, 512, 513, 640, 767, 768, 1025, 1152, 1792, 2111] {
             let blocks = len.div_ceil(64).max(1);
             let counter = u32::MAX - blocks as u32 + 1;
             let mut actual = [0xa5; 2111];

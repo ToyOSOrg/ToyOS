@@ -145,9 +145,8 @@ impl Gcm {
     ) -> Result<[u8; 16], Error> {
         Self::check(aad.len(), data.len())?;
         if self.aggregated {
-            let mut unused = Secret([[0u8; 16]; 7]);
             let keys = &self.aes.keys.0;
-            if let Some(tag) = crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, true, &mut unused.0) {
+            if let Some(tag) = crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, None) {
                 return Ok(tag);
             }
         }
@@ -177,16 +176,12 @@ impl Gcm {
             let mut stream = Secret([[0u8; 16]; 7]);
             let keys = &self.aes.keys.0;
             if let Some(expected) =
-                crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, false, &mut stream.0)
+                crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, Some(&mut stream.0))
             {
                 if !crate::ct::equal(&Secret(expected).0, tag) {
                     return Err(Error::Authentication);
                 }
-                for (i, chunk) in data.chunks_mut(16).enumerate() {
-                    for (j, d) in chunk.iter_mut().enumerate() {
-                        *d ^= stream.0[i][j];
-                    }
-                }
+                crate::block::xor(data, stream.0.as_flattened());
                 return Ok(());
             }
         }

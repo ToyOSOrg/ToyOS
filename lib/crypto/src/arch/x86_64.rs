@@ -365,7 +365,6 @@ mod hosted {
     }
 
     /// `aesni::short` where its bounds hold: AAD up to 16 bytes, data up to 96.
-    #[allow(clippy::too_many_arguments, reason = "the key schedule, its powers and the message, one call")]
     pub(in crate::arch) fn gcm_short(
         keys: &[u8; 240],
         rounds: usize,
@@ -373,14 +372,13 @@ mod hosted {
         nonce: &[u8; 12],
         aad: &[u8],
         data: &mut [u8],
-        seal: bool,
-        stream: &mut [[u8; 16]; 7],
+        stream: Option<&mut [[u8; 16]; 7]>,
     ) -> Option<[u8; 16]> {
         if aad.len() > 16 || data.len() > 96 || !features().aes_clmul() {
             return None;
         }
         // AES, CLMUL and SSSE3 are admitted.
-        Some(unsafe { aesni::short(keys, rounds, powers, nonce, aad, data, seal, stream) })
+        Some(unsafe { aesni::short(keys, rounds, powers, nonce, aad, data, stream) })
     }
 
     pub(in crate::arch) fn chacha_seal(

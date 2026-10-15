@@ -189,11 +189,6 @@ fn chacha_short(key: &[u8; 32], nonce: &[u8; 12], length: usize, stream: &mut [u
     }
     chacha::blocks(&states.0, 1 + length.div_ceil(64), stream);
 }
-fn xor_stream(data: &mut [u8], stream: &[u8]) {
-    for (i, byte) in data.iter_mut().enumerate() {
-        *byte ^= stream[i];
-    }
-}
 fn chacha_seal(
     key: &[u8; 32],
     nonce: &[u8; 12],
@@ -204,7 +199,7 @@ fn chacha_seal(
     if short(data.len()) {
         let mut stream = Secret([0u8; 256]);
         chacha_short(key, nonce, data.len(), &mut stream.0);
-        xor_stream(data, &stream.0[64..]);
+        crate::block::xor(data, &stream.0[64..]);
         let mut mac = chacha_mac(stream.0[..32].try_into().unwrap(), aad);
         mac.update_padded(data);
         return Ok(chacha_finish(mac, aad.len(), data.len()).0);
@@ -231,7 +226,7 @@ fn chacha_open(
         let mut stream = Secret([0u8; 256]);
         chacha_short(key, nonce, data.len(), &mut stream.0);
         verify(&stream.0[..32], data)?;
-        xor_stream(data, &stream.0[64..]);
+        crate::block::xor(data, &stream.0[64..]);
         return Ok(());
     }
     verify(&chacha::block(key, nonce, 0).0[..32], data)?;

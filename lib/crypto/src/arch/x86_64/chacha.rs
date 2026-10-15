@@ -1,9 +1,8 @@
-//! RFC 8439 ChaCha20 on AVX2. Eight blocks run with each register holding one
-//! state word of all eight (Goll and Gueron, "Vectorization on ChaCha Stream
-//! Cipher", ITNG 2014); four run with each 128-bit lane holding one block's
-//! row. Each is built twice: for AVX2, and for AVX-512VL, whose VPROLD
-//! rotates in one instruction and whose 32 registers hold the eight-block
-//! state. Rounds, shuffles and addresses depend only on public lengths and
+//! RFC 8439 ChaCha20 on AVX2. With AVX-512VL's 32 registers and VPROLD,
+//! eight blocks run with each register holding one state word of all eight
+//! (Goll and Gueron, "Vectorization on ChaCha Stream Cipher", ITNG 2014). On
+//! AVX2 alone, and for shorter runs, blocks run in pairs with each 128-bit
+//! lane holding one block's row. Rounds, shuffles and addresses depend only on public lengths and
 //! counters. Only hosted targets with OS-enabled YMM state enter here. Hot
 //! loops index fixed-size arrays, as `aesni`'s header says why.
 
@@ -83,7 +82,7 @@ fn rotate7(x: __m256i) -> __m256i {
 /// The vector rounds and their callers, every function compiled for
 /// `$features` with the rotations given.
 macro_rules! chacha256 {
-    ($features:literal, $r16:ident, $r12:ident, $r8:ident, $r7:ident) => {
+    ($features:literal, $six:literal, $r16:ident, $r12:ident, $r8:ident, $r7:ident) => {
         use core::arch::x86_64::*;
 
         use super::super::{load_data, store_data};
@@ -176,46 +175,49 @@ macro_rules! chacha256 {
             }
         }
 
-        /// Four blocks, two per register: pair p holds blocks 2p and 2p + 1, each
-        /// register one row of both. Returns each pair's rows after the rounds and
-        /// the feed-forward.
+        /// `2P` blocks, two per register: pair p holds blocks 2p and 2p + 1, each
+        /// register one row of both, with `beside` run once in each of the first
+        /// eight double rounds. Returns each pair's rows after the rounds and the
+        /// feed-forward.
         #[inline]
         #[target_feature(enable = $features)]
-        fn four(start: [[__m256i; 4]; 2]) -> [[__m256i; 4]; 2] {
-            let [[mut a0, mut b0, mut c0, mut e0], [mut a1, mut b1, mut c1, mut e1]] = start;
-            for _ in 0..10 {
-                quarter(&mut a0, &mut b0, &mut c0, &mut e0);
-                quarter(&mut a1, &mut b1, &mut c1, &mut e1);
-                b0 = _mm256_shuffle_epi32::<0x39>(b0);
-                b1 = _mm256_shuffle_epi32::<0x39>(b1);
-                c0 = _mm256_shuffle_epi32::<0x4e>(c0);
-                c1 = _mm256_shuffle_epi32::<0x4e>(c1);
-                e0 = _mm256_shuffle_epi32::<0x93>(e0);
-                e1 = _mm256_shuffle_epi32::<0x93>(e1);
-                quarter(&mut a0, &mut b0, &mut c0, &mut e0);
-                quarter(&mut a1, &mut b1, &mut c1, &mut e1);
-                b0 = _mm256_shuffle_epi32::<0x93>(b0);
-                b1 = _mm256_shuffle_epi32::<0x93>(b1);
-                c0 = _mm256_shuffle_epi32::<0x4e>(c0);
-                c1 = _mm256_shuffle_epi32::<0x4e>(c1);
-                e0 = _mm256_shuffle_epi32::<0x39>(e0);
-                e1 = _mm256_shuffle_epi32::<0x39>(e1);
-            }
-            let mut out = [[a0, b0, c0, e0], [a1, b1, c1, e1]];
-            for p in 0..2 {
-                for i in 0..4 {
-                    out[p][i] = _mm256_add_epi32(out[p][i], start[p][i]);
+        fn pairs<const P: usize>(start: [[__m256i; 4]; P], mut beside: impl FnMut(usize)) -> [[__m256i; 4]; P] {
+            let mut v = start;
+            for round in 0..10 {
+                if round < 8 {
+                    beside(round);
+                }
+                for p in 0..P {
+                    let [mut a, mut b, mut c, mut d] = v[p];
+                    quarter(&mut a, &mut b, &mut c, &mut d);
+                    b = _mm256_shuffle_epi32::<0x39>(b);
+                    c = _mm256_shuffle_epi32::<0x4e>(c);
+                    d = _mm256_shuffle_epi32::<0x93>(d);
+                    v[p] = [a, b, c, d];
+                }
+                for p in 0..P {
+                    let [mut a, mut b, mut c, mut d] = v[p];
+                    quarter(&mut a, &mut b, &mut c, &mut d);
+                    b = _mm256_shuffle_epi32::<0x93>(b);
+                    c = _mm256_shuffle_epi32::<0x4e>(c);
+                    d = _mm256_shuffle_epi32::<0x39>(d);
+                    v[p] = [a, b, c, d];
                 }
             }
-            out
+            for p in 0..P {
+                for i in 0..4 {
+                    v[p][i] = _mm256_add_epi32(v[p][i], start[p][i]);
+                }
+            }
+            v
         }
 
-        /// Pair rows as 256 bytes of keystream, XORed into `out` or written over it.
+        /// Pair rows as `128P` bytes of keystream in `halves`' first `4P`,
+        /// XORed in or written over them.
         #[inline]
         #[target_feature(enable = $features)]
-        fn emit(rows: [[__m256i; 4]; 2], out: &mut [u8; 256], xor: bool) {
-            let (halves, _) = out.as_chunks_mut::<32>();
-            for p in 0..2 {
+        fn emit<const P: usize>(rows: [[__m256i; 4]; P], halves: &mut [[u8; 32]], xor: bool) {
+            for p in 0..P {
                 let rows = rows[p];
                 let blocks = [
                     _mm256_permute2x128_si256::<0x20>(rows[0], rows[1]),
@@ -231,6 +233,32 @@ macro_rules! chacha256 {
                     }
                 }
             }
+        }
+
+        /// The rows of blocks `counter` to `counter + 2P - 1` of one key.
+        #[inline]
+        #[target_feature(enable = $features)]
+        fn counter_rows<const P: usize>(initial: &[u32; 16], counter: u64) -> [[__m256i; 4]; P] {
+            let (r, _) = initial.as_chunks::<4>();
+            // Four plain words make 16 plain bytes.
+            let row = |i: usize| _mm256_broadcastsi128_si256(unsafe { core::mem::transmute::<[u32; 4], __m128i>(r[i]) });
+            let (a, b, c) = (row(0), row(1), row(2));
+            let nonce = (initial[15] as u64) << 32 | initial[14] as u64;
+            let mut rows = [[a, b, c, a]; P];
+            for p in 0..P {
+                let first = counter.wrapping_add(2 * p as u64);
+                rows[p][3] = _mm256_set_epi64x(nonce as i64, first.wrapping_add(1) as i64, nonce as i64, first as i64);
+            }
+            rows
+        }
+
+        /// `2P` blocks of one key from `counter` on, XORed into `out`'s first
+        /// `128P` bytes, with `beside` as [`pairs`] runs it.
+        #[inline]
+        #[target_feature(enable = $features)]
+        pub(super) fn pairs_of<const P: usize>(initial: &[u32; 16], counter: u64, out: &mut [u8], beside: impl FnMut(usize)) {
+            let (halves, _) = out.as_chunks_mut::<32>();
+            emit(pairs::<P>(counter_rows::<P>(initial, counter), beside), halves, true);
         }
 
         /// The rows of states `2p` and `2p + 1`, one per register.
@@ -252,25 +280,13 @@ macro_rules! chacha256 {
             rows
         }
 
-        /// Four blocks of one key from `counter` on, XORed into `out`.
-        #[inline]
-        #[target_feature(enable = $features)]
-        fn four_of(initial: &[u32; 16], counter: u64, out: &mut [u8; 256]) {
-            let mut states = [*initial; 4];
-            for j in 0..4 {
-                let c = counter.wrapping_add(j as u64);
-                (states[j][12], states[j][13]) = (c as u32, (c >> 32) as u32);
-            }
-            emit(four(rows(&states)), out, true);
-        }
-
         /// The keystream of four independent states.
         ///
         /// # Safety
         /// AVX2 under YMM state is admitted.
         #[target_feature(enable = $features)]
         pub(in crate::arch) unsafe fn blocks(states: &[[u32; 16]; 4], out: &mut [u8; 256]) {
-            emit(four(rows(states)), out, false);
+            emit(pairs::<2>(rows(states), |_| {}), out.as_chunks_mut::<32>().0, false);
         }
 
         /// XORs the longest prefix of whole 256-byte batches and returns its length.
@@ -281,34 +297,46 @@ macro_rules! chacha256 {
         #[target_feature(enable = $features)]
         pub(in crate::arch) unsafe fn xor(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) -> usize {
             let initial = super::initial(key, nonce);
-            let (eights, rest) = data.as_chunks_mut::<512>();
             let mut counter = counter;
-            for i in 0..eights.len() {
-                eight(&initial.0, counter, &mut eights[i], |_| {});
-                counter = counter.wrapping_add(8);
-            }
-            let (fours, _) = rest.as_chunks_mut::<256>();
+            let done = if $six {
+                let (sixes, _) = data.as_chunks_mut::<384>();
+                for i in 0..sixes.len() {
+                    pairs_of::<3>(&initial.0, counter, &mut sixes[i], |_| {});
+                    counter = counter.wrapping_add(6);
+                }
+                384 * sixes.len()
+            } else {
+                let (eights, _) = data.as_chunks_mut::<512>();
+                for i in 0..eights.len() {
+                    eight(&initial.0, counter, &mut eights[i], |_| {});
+                    counter = counter.wrapping_add(8);
+                }
+                512 * eights.len()
+            };
+            let (fours, _) = data[done..].as_chunks_mut::<256>();
             for i in 0..fours.len() {
-                four_of(&initial.0, counter, &mut fours[i]);
+                pairs_of::<2>(&initial.0, counter, &mut fours[i], |_| {});
                 counter = counter.wrapping_add(4);
             }
-            512 * eights.len() + 256 * fours.len()
+            done + 256 * fours.len()
         }
     };
 }
 
 pub(super) mod avx2 {
-    chacha256!("avx2", rotate16, rotate12, rotate8, rotate7);
+    // Sixteen YMM registers hold three pairs' rows and the rotation masks;
+    // the word-per-register layout's eight blocks spill.
+    chacha256!("avx2", true, rotate16, rotate12, rotate8, rotate7);
 }
 
 pub(super) mod avx512 {
-    chacha256!("avx2,avx512f,avx512vl", rol16, rol12, rol8, rol7);
+    chacha256!("avx2,avx512f,avx512vl", false, rol16, rol12, rol8, rol7);
 }
 
-/// The AVX2 `xor` over whole 512-byte batches, absorbing each batch's ciphertext
-/// into the Poly1305 accumulator `h` under `r` in the next batch's double
-/// rounds: scalar multiplication on the integer units beside the vector
-/// rounds (Gopal et al., "Fast Cryptographic Computation on Intel
+/// The AVX2 `xor` over whole 384-byte batches, absorbing each batch's
+/// ciphertext into the Poly1305 accumulator `h` under `r` in the next
+/// batch's double rounds: scalar multiplication on the integer units beside
+/// the vector rounds (Gopal et al., "Fast Cryptographic Computation on Intel
 /// Architecture Processors Via Function Stitching", Intel, 2010). Returns the
 /// bytes done.
 ///
@@ -328,28 +356,28 @@ pub(super) unsafe fn seal(
     h: &mut [u64; 3],
 ) -> usize {
     let initial = initial(key, nonce);
-    let (batches, _) = data.as_chunks_mut::<512>();
+    let (batches, _) = data.as_chunks_mut::<384>();
     let n = batches.len();
     if n == 0 {
         return 0;
     }
     let mut acc = *h;
-    avx2::eight(&initial.0, counter, &mut batches[0], |_| {});
+    avx2::pairs_of::<3>(&initial.0, counter, &mut batches[0], |_| {});
     for i in 1..n {
         let (done, next) = batches.split_at_mut(i);
         let (blocks, _) = done[i - 1].as_chunks::<16>();
-        avx2::eight(&initial.0, counter.wrapping_add(8 * i as u64), &mut next[0], |round| {
-            for j in 4 * round..4 * round + 4 {
+        avx2::pairs_of::<3>(&initial.0, counter.wrapping_add(6 * i as u64), &mut next[0], |round| {
+            for j in 3 * round..3 * round + 3 {
                 acc = absorb(acc, &blocks[j], *r, true);
             }
         });
     }
     let (blocks, _) = batches[n - 1].as_chunks::<16>();
-    for j in 0..32 {
+    for j in 0..24 {
         acc = absorb(acc, &blocks[j], *r, true);
     }
     *h = acc;
-    512 * n
+    384 * n
 }
 
 fn initial(key: &[u8; 32], nonce: &[u8; 8]) -> crate::secret::Secret<16, u32> {

@@ -109,10 +109,9 @@ pub(crate) fn gcm_seal(
 }
 
 /// A short message's GCM in one batch, where the instruction path admits it:
-/// sealing encrypts `data` and returns the tag; opening returns the expected
-/// tag and writes the keystream to `stream`. `powers` came from
-/// [`ghash_powers`].
-#[allow(clippy::too_many_arguments, reason = "the key schedule, its powers and the message, one call")]
+/// without `stream` it encrypts `data` and returns the tag; with it, it
+/// returns the expected tag and writes the keystream to `stream`. `powers`
+/// came from [`ghash_powers`].
 pub(crate) fn gcm_short(
     keys: &[u8; 240],
     rounds: usize,
@@ -120,11 +119,10 @@ pub(crate) fn gcm_short(
     nonce: &[u8; 12],
     aad: &[u8],
     data: &mut [u8],
-    seal: bool,
-    stream: &mut [[u8; 16]; 7],
+    stream: Option<&mut [[u8; 16]; 7]>,
 ) -> Option<[u8; 16]> {
-    hosted!(x86_64::gcm_short(keys, rounds, powers, nonce, aad, data, seal, stream), {
-        let _ = (keys, rounds, powers, nonce, aad, data, seal, stream);
+    hosted!(x86_64::gcm_short(keys, rounds, powers, nonce, aad, data, stream), {
+        let _ = (keys, rounds, powers, nonce, aad, data, stream);
         None
     })
 }

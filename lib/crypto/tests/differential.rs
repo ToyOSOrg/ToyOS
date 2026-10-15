@@ -39,8 +39,8 @@ fn sha2_streaming_boundaries() {
 #[test]
 fn aead_all_algorithms_and_partial_blocks() {
     for n in [
-        0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 127, 128, 129, 255, 256, 257, 1024,
-        4096, 16384,
+        0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 127, 128, 129, 191, 192, 193, 255,
+        256, 257, 383, 384, 385, 767, 768, 769, 1024, 1151, 1152, 1153, 4096, 16384,
     ] {
         for a in [0, 1, 15, 16, 17, 31, 32, 33] {
             let k = bytes::<32>(n + a);
@@ -269,7 +269,8 @@ fn openssh_construction_matches_independent_primitives() {
     use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
     use poly1305::universal_hash::KeyInit;
     for n in [
-        0, 1, 15, 16, 17, 63, 64, 65, 128, 255, 256, 257, 511, 512, 513, 1024, 4096,
+        0, 1, 15, 16, 17, 63, 64, 65, 128, 129, 255, 256, 257, 383, 384, 385, 511, 512, 513, 767,
+        768, 769, 1024, 4096,
     ] {
         let key = bytes::<64>(n);
         let mut ours = bytes::<4096>(n)[..n].to_vec();

@@ -1,4 +1,5 @@
-//! Partial 16-byte blocks assembled byte by byte over a fixed 16 indices.
+//! Partial 16-byte blocks assembled byte by byte over a fixed 16 indices, and
+//! whole ones XORed 16 bytes at a time.
 //! A variable-length copy or fill would call the C library's `memcpy` or
 //! `memset`, a `rep movsb` or `rep stosb` on ToyOS, whose start-up costs
 //! more than a short block's whole computation. Lengths are public.
@@ -38,6 +39,36 @@ pub(crate) fn copy(dst: &mut [u8], src: &[u8]) {
     for (i, byte) in rest.iter().enumerate() {
         if let Some(d) = tail.get_mut(i) {
             *d = *byte;
+        }
+    }
+}
+
+/// `data` XORed with the first `data.len()` bytes of `stream`, 16 bytes at a
+/// time and the tail byte by byte.
+#[inline]
+pub(crate) fn xor(data: &mut [u8], stream: &[u8]) {
+    let (blocks, tail) = data.as_chunks_mut::<16>();
+    let (masks, rest) = stream[..16 * blocks.len()].as_chunks::<16>();
+    debug_assert!(rest.is_empty());
+    for i in 0..blocks.len() {
+        blocks[i] = (u128::from_ne_bytes(blocks[i]) ^ u128::from_ne_bytes(masks[i])).to_ne_bytes();
+    }
+    let rest = &stream[16 * blocks.len()..][..tail.len()];
+    for i in 0..tail.len() {
+        tail[i] ^= rest[i];
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn xor_takes_the_stream_from_its_start_for_every_length() {
+        let stream: [u8; 256] = core::array::from_fn(|i| (i * 7 + 1) as u8);
+        for len in 0..=200 {
+            let mut data: std::vec::Vec<u8> = (0..len).map(|i| (i * 13) as u8).collect();
+            let expected: std::vec::Vec<u8> = data.iter().zip(stream).map(|(d, s)| d ^ s).collect();
+            super::xor(&mut data, &stream);
+            assert_eq!(data, expected, "{len} bytes");
         }
     }
 }

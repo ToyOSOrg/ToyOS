@@ -54,9 +54,7 @@ fn crypt_short(stream: &[u8; 256], header: &mut [u8; 4], payload: &mut [u8]) {
     for (i, byte) in header.iter_mut().enumerate() {
         *byte ^= stream[i];
     }
-    for (i, byte) in payload.iter_mut().enumerate() {
-        *byte ^= stream[128 + i];
-    }
+    crate::block::xor(payload, &stream[128..]);
 }
 pub struct SealingKey {
     keys: Keys,
