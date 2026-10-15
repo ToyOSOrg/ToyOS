@@ -22,9 +22,8 @@
 
 use toyos::endow;
 use toyos::port::Acceptor;
-use toyos::shm::SharedMemory;
-use toyos::{HdaDev, PciDev};
-use toyos_abi::syscall::{self, DeviceType};
+use toyos::PciDev;
+use toyos_abi::syscall;
 use toyos_mixer::{period_frames, ramp_frames, DEVICE_RATES};
 
 use std::sync::Arc;
@@ -76,7 +75,7 @@ fn main() {
     let ports = Ports { acceptor, volume };
 
     // **"Which sound card does this machine have?" is already answered.** The supervisor
-    // mints a claim per class the manifest names and endows what the machine
+    // mints a claim per device entry the manifest names and endows what the machine
     // actually had, so an absent card is a label missing from this process's
     // own table rather than two probing syscalls — and a card another process
     // holds is not a state that can arise, because only the supervisor mints.
@@ -96,7 +95,7 @@ fn main() {
             }
         }
     }
-    let Some(dev) = endow::device::<HdaDev>(DeviceType::HdaAudio) else {
+    let Some(dev) = endow::claim::<PciDev>(&hda::FUNCTION.to_string()) else {
         return run_null_sink(ports);
     };
     match hda::Hda::claim(dev) {
@@ -129,25 +128,15 @@ fn run_virtio(ports: Ports, virtio: virtio::Virtio, rate: u32, channels: u8) {
 
 fn run_hda(ports: Ports, claimed: hda::Claimed) {
     let hda::Claimed { hda, rate, channels, master } = claimed;
-    let info = hda.info();
-    let num_buffers = info.periods as usize;
-    let period_bytes = info.period_bytes as usize;
-    let ring = SharedMemory::adopt(info.pcm, 2 * 1024 * 1024)
-        .expect("the PCM buffer the HDA claim just handed over");
-    // One region, `periods` buffers end to end: the buffer descriptor list the
-    // kernel built points at exactly these offsets.
-    let base = ring.as_ptr();
-    let buffers = (0..num_buffers).map(|i| unsafe { base.add(i * period_bytes) }).collect();
-
     run_with_device(
         ports,
         master,
         "hda",
-        &mut HdaBackend { hda, buffers, period_bytes },
-        num_buffers,
+        &mut HdaBackend { hda },
+        toyos_hda::controller::PERIODS,
         rate,
         channels as u16,
-        period_bytes,
+        toyos_hda::controller::PERIOD_BYTES,
     );
 }
 

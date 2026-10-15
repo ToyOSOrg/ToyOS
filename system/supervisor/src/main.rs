@@ -2424,7 +2424,7 @@ fn refused(name: &str, why: SyscallError) -> String {
         SyscallError::ResourceExhausted => format!("this machine has no interrupt left for {name}"),
         SyscallError::NotSupported => {
             format!("{name} is on this machine and could not be handed over; the kernel's \
-                     `pcidev:`, `partclaim:`, `isa:`, `acpi:` or `hda:` line says why")
+                     `pcidev:`, `partclaim:`, `isa:` or `acpi:` line says why")
         }
         other => format!("{name} was refused with {other:?}"),
     }

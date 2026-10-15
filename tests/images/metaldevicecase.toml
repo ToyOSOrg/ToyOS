@@ -21,7 +21,7 @@ syscap = ["logread"]
 [programs.soundserver]
 service = true
 serves = ["soundserver", "volume"]
-devices = ["hda-audio"]
+devices = ["pci:04:03:00"]
 syscap = ["rt"]
 
 # `device` because every framebuffer job mints its own claim and no manifest row

@@ -1,31 +1,6 @@
-//! What a completion is, and the shared memory protocol soundserver serves clients.
+//! The shared memory protocol soundserver serves clients.
 
 use core::sync::atomic::AtomicU32;
-
-/// One batch of DMA buffer completions, recorded at interrupt time.
-///
-/// Reads on the HDA claim's handle (after the initial info read) return an
-/// array of these: the kernel writes as many pending records as fit in the caller's
-/// buffer and returns the byte count. `mask` bit N set means period N finished
-/// playing, and `timestamp_nanos` is `nanos_since_boot` captured in the
-/// interrupt handler — the clock source for soundserver's DLL, and the reason the
-/// mask is derived there rather than by the driver at wake time. Records are
-/// returned oldest-first.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct AudioCompletionRecord {
-    pub mask: u32,
-    pub _pad: u32,
-    pub timestamp_nanos: u64,
-}
-
-impl AudioCompletionRecord {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
-/// Every byte belongs to a field. This crosses the boundary, and `_pad` is why
-/// there is no gap for whatever the kernel stack held to travel in.
-const _: () = assert!(AudioCompletionRecord::SIZE == 4 + 4 + 8);
 
 /// Shared memory header for the client↔soundserver slot-ring protocol.
 ///

@@ -21,8 +21,6 @@ cannot:
 - `xhci/wait/boot.rs:211` enables after the same BAR 0 check and before the
   extended-capability walk in BAR space; its `arm_interrupt` refusal returns
   `None` with the bit still set.
-- `hda.rs:445` enables after its refusals but its `arm_interrupt` failure on
-  the next line returns with the bit still set.
 
 So a device those drivers decline to bind keeps bus mastering — the end
 state the virtio close removed, still reachable one device class over — and
@@ -51,7 +49,6 @@ leaked-thus-live memory, not reissued.
 **Exit path, per the #343 landing that declined this fix (`2bceaadb`,
 "NOT LANDED"):** the mandated per-device negative control needs three
 distinct instruments this tree does not yet have — xHCI already has a ready
-refusal boot (`MetalXhciNoIrq`), but hda needs an arm-interrupt-fail actuator
-and nvme an identify-fail actuator, plus a COMMAND-register / QMP `info pci`
+refusal boot (`MetalXhciNoIrq`), but nvme needs an identify-fail actuator, plus a COMMAND-register / QMP `info pci`
 oracle to observe the bit. A boot-critical three-driver change was not worth
 landing without them.

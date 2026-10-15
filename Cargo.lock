@@ -1957,7 +1957,6 @@ dependencies = [
  "toyos-fat32",
  "toyos-gicv3",
  "toyos-gpt",
- "toyos-hda",
  "toyos-its",
  "toyos-microcode",
  "toyos-pci",
@@ -4526,6 +4525,7 @@ dependencies = [
 name = "toyos-hda"
 version = "0.1.0"
 dependencies = [
+ "toyos-device-memory",
  "toyos-mixer",
 ]
 

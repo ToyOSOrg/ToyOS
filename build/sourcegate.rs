@@ -100,7 +100,6 @@ const NMI_SILENT: &[&str] =
 const BUS_MASTER_SITES: &[(&str, usize)] = &[
     ("kernel/src/drivers/pci.rs", 1),
     ("kernel/src/drivers/virtio.rs", 1),
-    ("kernel/src/drivers/hda.rs", 1),
     ("kernel/src/drivers/xhci/wait/boot.rs", 1),
     ("kernel/src/arch/x86_64/amdvi/mod.rs", 1),
 ];
@@ -138,7 +137,6 @@ const SENTINEL_ALLOWED: &[(&str, usize)] = &[
 /// compiling with nobody asked. Per file *and* per count, so an added impl
 /// reds beside a permitted one and a deleted one reds its own stale row.
 const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
-    ("kernel/src/drivers/hda.rs", 1),
     ("kernel/src/drivers/panic_console/mod.rs", 3),
     ("kernel/src/drivers/virtio_console.rs", 1),
     ("kernel/src/arch/x86_64/hw.rs", 1),

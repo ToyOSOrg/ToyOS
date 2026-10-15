@@ -6,8 +6,7 @@
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use core::ptr::{copy_nonoverlapping, read_unaligned, read_volatile, write_bytes,
-                write_unaligned, write_volatile};
+use core::ptr::{copy_nonoverlapping, read_unaligned, read_volatile, write_bytes, write_volatile};
 
 use crate::iommu::DeviceSpace;
 
@@ -72,7 +71,10 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         self.device
     }
 
-    /// Where the first byte is: what a page table maps, not what a descriptor carries.
+    /// Where the first byte is: what a page table maps, not what a descriptor
+    /// carries. The virtio parse selftest's alone, which lays a config space
+    /// over a pool.
+    #[cfg(feature = "boot-actuators")]
     #[inline]
     pub fn host_phys(self) -> u64 {
         DirectMap::phys_of(self.base)
@@ -190,14 +192,6 @@ impl Dma<'_, Unaligned> {
         self.check(offset, core::mem::size_of::<T>());
         // SAFETY: `check` refused anything but `size_of::<T>()` bytes; not volatile, since this discipline is for a structure the device has finished writing.
         unsafe { read_unaligned(self.base.add(offset) as *const T) }
-    }
-
-    /// Write `value` to the `T` at `offset`, whatever it is aligned to.
-    #[inline]
-    pub fn write<T: Copy>(self, offset: usize, value: T) {
-        self.check(offset, core::mem::size_of::<T>());
-        // SAFETY: `check` refused anything but `size_of::<T>()` bytes; not volatile, since this discipline is for a structure written before the device is told where it is.
-        unsafe { write_unaligned(self.base.add(offset) as *mut T, value) }
     }
 }
 
