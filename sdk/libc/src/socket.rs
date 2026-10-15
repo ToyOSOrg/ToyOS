@@ -12,7 +12,7 @@ use toyos::net::{NetError, TcpOptions, TcpSocketId, UdpSocketId, OPT_BROADCAST};
 
 use crate::errcode::{
     EACCES, EADDRINUSE, EAFNOSUPPORT, EAGAIN, EBADF, ECONNABORTED, ECONNREFUSED, ECONNRESET, EFAULT, EHOSTUNREACH, EINVAL, EIO,
-    ENOMEM, ENOPROTOOPT, ENOSPC, ENOTCONN, EOPNOTSUPP, EPIPE, ETIMEDOUT,
+    ENOMEM, ENOPROTOOPT, ENOSPC, ENOTCONN, EPIPE, ETIMEDOUT,
 };
 use crate::inaddr::{self, SockaddrIn, AF_INET};
 use crate::dgramreq;
@@ -600,7 +600,6 @@ fn option_errno(refusal: sockopt::Refusal) -> i32 {
         sockopt::Refusal::Short => EINVAL,
         sockopt::Refusal::Fault => EFAULT,
         sockopt::Refusal::NoSuchOption => ENOPROTOOPT,
-        sockopt::Refusal::NotSupported => EOPNOTSUPP,
     }
 }
 
@@ -622,7 +621,7 @@ pub unsafe extern "C" fn setsockopt(
     };
 
     // All other options silently succeed (SO_REUSEADDR, SO_KEEPALIVE, etc.)
-    let option = match sockopt::kept(level, optname, matches!(entry.kind, SocketKind::Udp), true) {
+    let option = match sockopt::kept(level, optname, matches!(entry.kind, SocketKind::Udp)) {
         Ok(Some(option)) => option,
         Ok(None) => return 0,
         Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
@@ -680,7 +679,7 @@ pub unsafe extern "C" fn getsockopt(
         None => { set_errno(EBADF); return -1; }
     };
 
-    let option = match sockopt::kept(level, optname, matches!(entry.kind, SocketKind::Udp), false) {
+    let option = match sockopt::kept(level, optname, matches!(entry.kind, SocketKind::Udp)) {
         Ok(option) => option,
         Err(refusal) => { set_errno(option_errno(refusal)); return -1; }
     };
