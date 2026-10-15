@@ -248,9 +248,6 @@ fn functions_named<'a>(log: &'a Serial, marker: &str) -> Result<Vec<&'a str>, St
 /// mechanisms is armed, `claims` reached no holder, and the supervisor said so in the
 /// boot config's own spelling. `beside` is every other function this machine
 /// refuses, each judged by its own caller.
-///
-/// `function_space` put back below the arming reds on the unspent
-/// `msix address=` line.
 fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Result<(), String> {
     let refused = functions_named(log, "NOT HANDED OVER")?;
     let others: BTreeSet<&str> = refused.iter().copied().filter(|at| *at != CLAIMED_AT).collect();

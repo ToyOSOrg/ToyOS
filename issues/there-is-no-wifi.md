@@ -145,8 +145,9 @@ controller through its table in BAR 0.
     NVMe's armed MSI-X entries back through their holders' mappings at
     BAR 0 + 0x2000, and `claim_reuses_its_remapping_entry` and
     `claim_refused_without_remapping` unchanged;
-  - the T14's NVMe driven through that table, which no row does: the disk is
-    another system's;
+  - the T14's NVMe driven through that table: an Identify Controller admin
+    command whose completion arrives through the in-place MSI-X entry, which
+    touches none of the other system's data; no row does it yet;
   - on the AMD bench, `amdvi_usbd_drives_its_own_entry`: `03:00.4`
     (`xhci-leave=03:00.4`, its MSI-X table in BAR 0, its only BAR, behind
     `00:08.1`, whose `0xd0000000..0xd0500000` bus 3 fills) claimed in place
@@ -156,6 +157,10 @@ controller through its table in BAR 0.
     claim at its address, and the holder's rewrite of its entry to a vector
     not its own is refused, recorded, and absent from the stop's census of
     unclaimed vectors.
+- **Its rows need no metal-row naming first:** `msix_table_read_in_place`
+  reads whichever of its named functions the machine has and reds only on a
+  machine with none, and `amdvi_usbd_drives_its_own_entry` is run on the AMD
+  bench alone, by row filter.
 
 **P2 and P3, AMD-Vi translation and interrupt remapping.** Owner: the
 orchestrator's AMD track. Translation (PR #909) and remapping with the SMI

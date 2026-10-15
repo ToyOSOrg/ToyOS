@@ -100,7 +100,12 @@ started. Nothing reaches userland when a device arrives or leaves.
    - The kernel provides native PCIe hot-plug on a port whose host bridge
      `_OSC` granted it.
    - A removed function's claim answers `Gone`.
-   - An arrived endpoint's BARs are placed inside its port's window.
+   - An arrived endpoint's BARs are placed inside its port's window. No
+     BAR-moving path is left to build on (P1 of `issues/there-is-no-wifi.md`):
+     `place_unassigned` on `wt/toyos-lifecycle-2` is rewritten as one
+     assignment inside the port's window with no probe, and an arrived
+     function's BARs enter `Machine::decoded`, which `pages::of_bar`'s
+     sharing check reads.
 3. **Drivers leave the shared services.** netstack, soundserver and diskserver
    each become a driver per function plus the service its clients use. The
    client port carries a per-device source and `gone`.

@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 use toyos_abi::syscall::SyscallError;
 
 use crate::mm::policy::{CachePolicy, Prot};
+use crate::mm::paging::Detached;
 use crate::mm::{align_2m_checked, pmm, Unmapped, PAGE_2M, PAGE_SIZE};
 use crate::process::{PageTables, Pid};
 use crate::{DirectMap, UserAddr};
@@ -156,12 +157,12 @@ impl SharedMemObject {
     /// Take this process's mapping away, if it has one; the caller owes a
     /// shootdown before the freed address can be reissued.
     #[must_use = "the caller owes a shootdown before the address can be reissued"]
-    pub fn unmap_from(&self, pid: Pid) -> Option<Unmapped<()>> {
+    pub fn unmap_from(&self, pid: Pid) -> Option<Unmapped<Option<Detached>>> {
         self.mapped_in.with_mut(|mapped| {
             let pos = mapped.iter().position(|(p, _, _)| *p == pid)?;
             let (_, pt, vaddr) = mapped.swap_remove(pos);
-            pt.lock().free_and_unmap(vaddr);
-            Some(Unmapped::new(()))
+            let detached = pt.lock().free_and_unmap(vaddr);
+            Some(Unmapped::new(detached))
         })?
     }
 }
@@ -175,10 +176,8 @@ impl ZeroHandles for SharedMemObject {
         if mapped.is_empty() {
             return;
         }
-        for (_, pt, vaddr) in &mapped {
-            pt.lock().free_and_unmap(*vaddr);
-        }
-        drop(Unmapped::new(mapped));
+        let detached: Vec<_> = mapped.iter().filter_map(|(_, pt, vaddr)| pt.lock().free_and_unmap(*vaddr)).collect();
+        drop(Unmapped::new((mapped, detached)));
     }
 }
 

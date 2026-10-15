@@ -167,7 +167,8 @@ fn published() {
     unsafe { core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags)) };
 }
 
-/// A root and every table under it, owned together and freed together.
+/// A root and every table under it, freed with the space, or by an unmap
+/// once no walker can reach one ([`Detached`]).
 struct Tables {
     root: Box<Table>,
     children: Vec<Box<Table>>,
@@ -409,12 +410,14 @@ impl AddressSpace {
         published();
     }
 
-    fn unmap_range(&mut self, vaddr: UserAddr, size: u64) {
+    fn unmap_range(&mut self, vaddr: UserAddr, size: u64) -> Detached {
+        let mut detached = Detached(Vec::new());
         let mut offset = 0u64;
         while offset < size {
-            self.unmap(UserAddr::new(vaddr.raw() + offset));
+            detached.0.extend(self.unmap(UserAddr::new(vaddr.raw() + offset)));
             offset += PAGE_2M;
         }
+        detached
     }
 
     /// Replaces whatever maps `vaddr`, in this space only.
@@ -462,23 +465,24 @@ impl AddressSpace {
 
     /// Ends any futex wait on the frame (its token is a physical address)
     /// before the frame can reach the PMM and be reissued under a waiter.
-    /// A table of 4 KiB pages goes once its ASID's translations are dropped on
-    /// every CPU, which `tlb::asid` waits for, so no walker can still reach it.
-    pub fn unmap(&mut self, vaddr: UserAddr) {
+    /// A table of 4 KiB pages it unlinks is answered, with no walker left to
+    /// reach it: `tlb::asid` drops the ASID's translations on every CPU before
+    /// it returns.
+    fn unmap(&mut self, vaddr: UserAddr) -> Option<Box<Table>> {
         let va = vaddr.raw();
         assert!(va & (PAGE_2M - 1) == 0, "unmap: vaddr {va:#x} not 2MB-aligned");
         let asid = self.asid.value();
-        let Some(directory) = self.tables.find_directory(va) else { return };
+        let directory = self.tables.find_directory(va)?;
         let i = index(va, 2);
         let entry = directory.0[i];
         if entry & VALID == 0 {
-            return;
+            return None;
         }
         self.tables.directory(va).set(i, 0);
         if entry & TABLE == 0 {
             tlb::page(asid, va);
             crate::sched::futex::revoke_range(entry & ADDR_2M, PAGE_2M);
-            return;
+            return None;
         }
         tlb::asid(asid);
         let table = entry & ADDR;
@@ -486,7 +490,8 @@ impl AddressSpace {
         // `children`, and linked nowhere now.
         let pages = unsafe { Table::at(table) };
         crate::mm::revoke_frames(pages.0.iter().filter(|leaf| *leaf & VALID != 0).map(|leaf| leaf & ADDR));
-        self.tables.children.retain(|child| child.phys() != table);
+        let at = self.tables.children.iter().position(|child| child.phys() == table).expect("unmap: a linked table this space owns");
+        Some(self.tables.children.swap_remove(at))
     }
 
     /// Checked here, not at the callers: only a user address names user
@@ -532,10 +537,10 @@ impl AddressSpace {
         Some((addr, aligned))
     }
 
-    pub fn free_and_unmap(&mut self, addr: UserAddr) -> Option<u64> {
+    /// Free a region and unmap it, answering the tables its unmapping unlinked.
+    pub fn free_and_unmap(&mut self, addr: UserAddr) -> Option<Detached> {
         let size = self.regions.remove(addr)?;
-        self.unmap_range(addr, size);
-        Some(size)
+        Some(self.unmap_range(addr, size))
     }
 
     pub fn insert_region(&mut self, addr: UserAddr, region: Region) {
@@ -600,6 +605,12 @@ impl AddressSpace {
         tlb::kernel_page(va);
     }
 }
+
+/// Tables of 4 KiB pages an unmap unlinked, answered as x86-64's are, where
+/// a sibling's walk cache outlives the unlink; here `tlb::asid` already
+/// reached every CPU, so dropping them is safe anywhere.
+#[must_use = "the unmapped tables, dropped with the caller's `mm::Unmapped`"]
+pub struct Detached(Vec<Box<Table>>);
 
 /// The kernel's own tables, `TTBR1_EL1`'s.
 static HIGH: Lock<Option<Tables>> = Lock::new(None);

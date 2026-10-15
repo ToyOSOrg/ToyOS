@@ -580,10 +580,7 @@ pub fn declared() -> Option<aperture::Declaration<Vec<RootBridgeWindow>>> {
 
 /// Say what memory firmware declared the root bridges decode, and every
 /// memory BAR no claim could be given: one inside none of it, and one whose
-/// pages another function decodes in.
-///
-/// **What this answers about is what every claim is checked against**, so it
-/// says the answer once and counts nothing from it.
+/// pages another function decodes in, with how many of those there are.
 fn survey(firmware: &[RootBridgeWindow], decoded: &[Decoded]) {
     let mut said = String::new();
     for window in firmware {
@@ -599,8 +596,8 @@ fn survey(firmware: &[RootBridgeWindow], decoded: &[Decoded]) {
         let (who, base, end) = bar.extent();
         if aperture::decode(firmware, base, end) == aperture::Decode::Unrouted {
             log!(
-                "pcidev: requester {who:#06x}'s {base:#x}..{end:#x} is inside none of it, so this \
-                 kernel has no declaration to read it by"
+                "pcidev: requester {who:#06x}'s {base:#x}..{end:#x} is inside none of it, so no \
+                 claim is handed it"
             );
         }
         if let Err(why) = pages::of_bar(base, end - base, others(decoded, who)) {
