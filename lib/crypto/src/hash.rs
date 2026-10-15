@@ -230,7 +230,9 @@ pub trait Digest: sealed::Sealed + Sized {
     fn new() -> Self;
     const MAX_BYTES: u128;
     fn update(&mut self, message: &[u8]) -> Result<(), crate::Error>;
-    fn finish_into(self, output: &mut [u8]) -> Result<(), crate::Error>;
+    /// The digest into `output`, which must be `OUTPUT_LEN` bytes, then the
+    /// hasher reset to its initial state.
+    fn finish_into(&mut self, output: &mut [u8]) -> Result<(), crate::Error>;
     #[cfg(feature = "rustls-provider")]
     fn fork(&self) -> Self;
 }
@@ -286,21 +288,34 @@ macro_rules! hash {
             }
             #[inline(always)]
             pub fn finalize(mut self) -> [u8; $out] {
-                self.block[self.filled] = 0x80;
-                self.filled += 1;
-                self.block[self.filled..].fill(0);
-                if self.filled > $block - $length {
+                let mut result = [0; $out];
+                self.finish(&mut result);
+                result
+            }
+            /// The digest into `out`, then the hasher as [`Self::new`] made it.
+            #[inline(always)]
+            fn finish(&mut self, out: &mut [u8; $out]) {
+                // The padding over fixed 16-byte chunks: a fill of the
+                // variable remainder would be a library `memset` call.
+                let filled = self.filled;
+                let (chunks, _) = self.block.as_chunks_mut::<16>();
+                for j in 0..$block / 16 {
+                    if 16 * j + 16 > filled {
+                        let at = filled.saturating_sub(16 * j);
+                        chunks[j] = crate::block::terminated(&chunks[j], at, if at < 16 && 16 * j <= filled { 0x80 } else { 0 });
+                    }
+                }
+                if filled + 1 > $block - $length {
                     $compress(&mut self.state, core::slice::from_ref(&self.block));
-                    self.block.fill(0);
+                    self.block = [0; $block];
                 }
                 let bits = (self.bytes * 8).to_be_bytes();
                 self.block[$block - $length..].copy_from_slice(&bits[16 - $length..]);
                 $compress(&mut self.state, core::slice::from_ref(&self.block));
-                let mut result = [0; $out];
-                for (i, chunk) in result.as_chunks_mut::<{ core::mem::size_of::<$word>() }>().0.iter_mut().enumerate() {
+                for (i, chunk) in out.as_chunks_mut::<{ core::mem::size_of::<$word>() }>().0.iter_mut().enumerate() {
                     *chunk = self.state[i].to_be_bytes();
                 }
-                result
+                (self.state, self.filled, self.bytes) = ($initial, 0, 0);
             }
             #[inline(always)]
             pub fn digest(message: &[u8]) -> Result<[u8; $out], crate::Error> {
@@ -337,9 +352,9 @@ macro_rules! hash {
                 self.update(message)
             }
             #[inline(always)]
-            fn finish_into(self, output: &mut [u8]) -> Result<(), crate::Error> {
+            fn finish_into(&mut self, output: &mut [u8]) -> Result<(), crate::Error> {
                 let output: &mut [u8; $out] = output.try_into().map_err(|_| crate::Error::Length)?;
-                *output = self.finalize();
+                self.finish(output);
                 Ok(())
             }
         }

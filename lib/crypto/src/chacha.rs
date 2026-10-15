@@ -104,6 +104,9 @@ fn check_legacy(length: usize, counter: u64) -> Result<(), Error> {
 
 /// The keystream from block `counter` on, XORed into `data`.
 fn stream(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) {
+    if data.is_empty() {
+        return;
+    }
     let done = crate::arch::chacha_xor(key, counter, nonce, data);
     for (i, chunk) in data[done..].chunks_mut(64).enumerate() {
         let stream = legacy_block(key, nonce, counter.wrapping_add((done / 64 + i) as u64));
@@ -123,6 +126,9 @@ pub(crate) fn xor(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8
 /// [`xor`], with `mac` absorbing the ciphertext zero-padded to a block.
 pub(crate) fn seal(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8], mac: &mut Poly1305) -> Result<(), Error> {
     check_ietf(data.len(), counter)?;
+    if data.is_empty() {
+        return Ok(());
+    }
     let (counter, nonce) = ietf(nonce, counter);
     let done = match mac.parts() {
         Some((r, h)) => crate::arch::chacha_seal(key, counter, &nonce, data, r, h),

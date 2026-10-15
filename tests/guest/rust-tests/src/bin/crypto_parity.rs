@@ -219,6 +219,19 @@ fn ssh_rows(rows: &mut Vec<Box<dyn Row>>) {
     rows.push(trio(format!("{NAME}/key"), || keep(ssh::SealingKey::new(KEY, 0)), || {
         || keep(ring_ssh::SealingKey::new(&KEY))
     }));
+    // The packet length a reader decrypts before each packet: one ChaCha20
+    // block of the header key.
+    let encrypted = [0x12, 0x34, 0x56, 0x78];
+    assert_eq!(
+        ssh::OpeningKey::new(KEY).packet_length(7, encrypted).to_be_bytes(),
+        ring_ssh::OpeningKey::new(&KEY).decrypt_packet_length(7, encrypted),
+        "{NAME} decrypts a packet length as ring"
+    );
+    let key = ssh::OpeningKey::new(KEY);
+    rows.push(trio(format!("{NAME}/length"), move || keep(key.packet_length(7, black_box(encrypted))), || {
+        let key = ring_ssh::OpeningKey::new(&KEY);
+        move || keep(key.decrypt_packet_length(7, black_box(encrypted)))
+    }));
     // Ring's packet at sequence 0, its length field first, and its tag,
     // `forged` with one bit flipped.
     let ring_sealed = |len: usize, forged: bool| {
