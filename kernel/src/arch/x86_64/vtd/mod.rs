@@ -105,7 +105,7 @@ impl Live {
     /// Moves `stream` onto `domain` in this unit's tables, and out of
     /// whatever this unit still holds for it under its old one.
     pub(super) fn attach(&mut self, stream: StreamId, id: u16, space: table::Space) {
-        let displaced = table::bind(self.root, stream, id, space);
+        let displaced = table::bind(&mut TABLES.lock(), self.root, stream, id, space);
         self.queue.invalidate_context(self.regs, displaced);
     }
 }

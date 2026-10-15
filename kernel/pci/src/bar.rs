@@ -131,14 +131,14 @@ pub fn placement(index: u8, low: u32, address: u64, size: u64) -> Result<Placeme
         return Err(Unusable::Misaligned { address, size });
     }
     let flags = low & !MEMORY_ADDRESS;
-    match decode(index, low)? {
-        Width::Narrow(_) => {
+    match kind(index, low)?.wide {
+        false => {
             if address > u32::MAX as u64 {
                 return Err(Unusable::AddressTooWide(address));
             }
             Ok(Placement { low: (address as u32 & MEMORY_ADDRESS) | flags, high: None })
         }
-        Width::Wide(_) => Ok(Placement {
+        true => Ok(Placement {
             low: (address as u32 & MEMORY_ADDRESS) | flags,
             high: Some((address >> 32) as u32),
         }),
@@ -205,14 +205,22 @@ pub enum Width {
     Wide(Wide),
 }
 
-/// Decode BAR `index`'s low dword.
+/// What kind of Memory Space BAR a low dword describes, whatever address it
+/// holds: an unassigned register is still one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Kind {
+    pub wide: bool,
+    pub prefetchable: bool,
+}
+
+/// BAR `index`'s kind, from its low dword.
 ///
 /// Bit 0 first, which is the whole point: a register that does not describe
 /// memory has no Type field to read, and the bits where one would be are part
 /// of a port number. The index is part of the decode because a 64-bit claim
 /// is a claim about the *next* register too, and slot [`MAX_INDEX`] has none
-/// — [`Width::Wide`] is unreachable there, so no caller can be led to 0x28.
-pub fn decode(index: u8, low: u32) -> Result<Width, Unusable> {
+/// — a wide kind is refused there, so no caller can be led to 0x28.
+pub fn kind(index: u8, low: u32) -> Result<Kind, Unusable> {
     // A bad index is a caller bug, not a device's claim, so this fails fast.
     assert!(index <= MAX_INDEX, "BAR {index} — a Type 0 header has six");
     if low & IO_SPACE != 0 {
@@ -220,10 +228,20 @@ pub fn decode(index: u8, low: u32) -> Result<Width, Unusable> {
     }
     let prefetchable = low & PREFETCHABLE != 0;
     match low & TYPE {
-        TYPE_32 => Memory::new((low & MEMORY_ADDRESS) as u64, prefetchable).map(Width::Narrow),
+        TYPE_32 => Ok(Kind { wide: false, prefetchable }),
         TYPE_64 if index == MAX_INDEX => Err(Unusable::WideAtLastIndex),
-        TYPE_64 => Ok(Width::Wide(Wide { low, prefetchable })),
+        TYPE_64 => Ok(Kind { wide: true, prefetchable }),
         _ => Err(Unusable::ReservedType(((low & TYPE) >> 1) as u8)),
+    }
+}
+
+/// Decode BAR `index`'s low dword: its [`kind`], and for a 32-bit one the
+/// address firmware assigned it.
+pub fn decode(index: u8, low: u32) -> Result<Width, Unusable> {
+    let Kind { wide, prefetchable } = kind(index, low)?;
+    match wide {
+        false => Memory::new((low & MEMORY_ADDRESS) as u64, prefetchable).map(Width::Narrow),
+        true => Ok(Width::Wide(Wide { low, prefetchable })),
     }
 }
 
@@ -435,6 +453,11 @@ mod tests {
         assert_eq!(placed.low, 0x0020_000C, "the low four bits are the device's");
         assert_eq!(placed.high, Some(8));
         // A 32-bit BAR keeps its own flags too, and has no second register.
+        // A register firmware assigned nothing is placed like any other: its
+        // flags are the device's whatever its address.
+        assert_eq!(placement(0, 0x0000_0000, 0xC020_0000, 0x10_0000), Ok(Placement { low: 0xC020_0000, high: None }));
+        assert_eq!(kind(0, 0x0000_0008), Ok(Kind { wide: false, prefetchable: true }));
+        assert_eq!(kind(2, 0x0000_000C), Ok(Kind { wide: true, prefetchable: true }));
         let placed = placement(1, 0xC004_3000, 0xC020_0000, 0x1000).unwrap();
         assert_eq!(placed.low, 0xC020_0000);
         assert_eq!(placed.high, None);

@@ -392,6 +392,14 @@ const MACHINE_TESTS: &[&str] = &[
     // spawns, each process holding its own — which no host build has. No
     // bench has two identical functions the kernel leaves to a claim.
     "a_drives_row_holds_one_process_per_function",
+    // PCIe native hot-plug, on QEMU x86-64's q35 with an empty
+    // `pcie-root-port` whose `_OSC` grants it (`Profile::HeadlessHotplugPort`):
+    // a function plugged in and pulled out over QMP, which no host build has
+    // and no bench can be made to do — neither has a hot-plug port the owner
+    // lets a driver claim behind, so physical arrival is QEMU's alone. Its
+    // decisions are host-tested: the slot's in `toyos_pci::hotplug`, the
+    // supervisor's in `toyos-supervisor`.
+    "a_function_arrives_and_leaves",
     // Whether QEMU's virtio functions negotiated `VIRTIO_F_ACCESS_PLATFORM`
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
@@ -3886,6 +3894,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
             claims::NOT_REMAPPED,
         ),
         "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
+        "a_function_arrives_and_leaves" => a_function_arrives_and_leaves(),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
@@ -4241,6 +4250,51 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
         .find(|l| l.contains("drives_judged: PCI "))
         .ok_or_else(|| format!("the job never said who holds the functions:\n{judged}"))?;
     eprintln!("  [drives] {}", line.trim());
+    Ok(())
+}
+
+/// An `edu` plugged into an empty `pcie-root-port` and pulled out of it, and
+/// plugged in again: each plug is an arrival with a number of its own and a
+/// `pciholder` of its own; the pull — the slot's attention button, which is
+/// what `device_del` presses — answers `Gone` to every call the holder's
+/// claim makes, the holder ends, the supervisor's set no longer lists the
+/// function, and the slot is powered off, which is what QEMU waits for to say
+/// the device is deleted.
+fn a_function_arrives_and_leaves() -> Result<(), String> {
+    const HOLDING: &str = "pciholder: holding PCI ";
+    const JOINED: &str = " joined the device set as arrival ";
+    let options = BootOptions { profile: qemu::Profile::HeadlessHotplugPort, qmp: true, ..Default::default() };
+    let config = compile::repo_root().join("tests/images/hotplugcase.toml");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_guest(&mut qemu, &mut console, "the slot armed", |t| t.contains("hot-plug slot is armed"))
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let arrival = |text: &str, nth: usize| -> Option<u32> {
+        text.lines().filter_map(|l| l.split_once(JOINED)?.1.trim().parse().ok()).nth(nth)
+    };
+
+    qemu.device_add("edu", "plugged");
+    await_guest(&mut qemu, &mut console, "a holder on the plugged function", |t| t.contains(HOLDING) && arrival(t, 0).is_some())
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let first = arrival(&console, 0).expect("awaited");
+    let at = console.lines().find_map(|l| l.split_once(HOLDING)).map(|(_, at)| at.trim().to_string()).expect("awaited");
+
+    qemu.device_del("plugged", Duration::from_secs(30)).map_err(|e| format!("{e}\n{console}"))?;
+    let gone = format!("pciholder: gone PCI {at}: irq=Gone config=Some(Gone) bar=Some(Gone) dma=Some(Gone)");
+    let left = format!("supervisor: PCI {at} (arrival {first}) left the device set");
+    let ended = format!("pciholder on PCI {at} ended with 0");
+    await_guest(&mut qemu, &mut console, "the holder's end", |t| t.contains(&gone) && t.contains(&left) && t.contains(&ended))
+        .map_err(|e| format!("{e}\n{console}"))?;
+
+    qemu.device_add("edu", "again");
+    await_guest(&mut qemu, &mut console, "a holder on the function plugged again", |t| t.matches(HOLDING).count() >= 2 && arrival(t, 1).is_some())
+        .map_err(|e| format!("{e}\n{console}"))?;
+    let second = arrival(&console, 1).expect("awaited");
+    if second <= first {
+        return Err(format!("the function plugged again arrived as {second}, not after {first}:\n{console}"));
+    }
+    serial::Serial::named("the hot-plug boot", console.clone()).must_be_clean()?;
+    eprintln!("  [hotplug] {at}: arrival {first} held, pulled and answered Gone; plugged again as arrival {second}");
     Ok(())
 }
 

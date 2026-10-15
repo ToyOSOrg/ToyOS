@@ -17,6 +17,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::sync::Lock;
 
 pub mod device;
+pub mod devset;
 pub mod file;
 pub mod handle;
 pub mod inbox;
@@ -252,6 +253,8 @@ kobject! {
     immediate SysCap => syscap::SysCap,
     // The last handle's loss is the loss of the *ability to wait*, not proof the process should stop.
     immediate Process => process::ProcessObject,
+    // A view of the kernel's set: losing it changes nothing in the set.
+    immediate DeviceSet => devset::DeviceSet,
 }
 
 /// Objects whose last handle has gone, waiting for release with nothing held;

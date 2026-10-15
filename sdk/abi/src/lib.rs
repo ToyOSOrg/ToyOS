@@ -20,6 +20,7 @@ pub mod audio;
 pub mod boot;
 pub mod clock;
 pub mod counters;
+pub mod devset;
 pub mod handle;
 pub mod hda;
 pub mod inbox;

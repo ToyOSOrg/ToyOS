@@ -464,6 +464,13 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     vfs::init();
     process::init();
     scheduler::init();
+    // After the unit, which remaps a slot's message, and the scheduler, which
+    // its handler's post wakes. The loader's root bridge windows carry no
+    // `_OSC`, so no bridge is declared and no slot armed, and each port says
+    // so: a slot is armed below a bridge whose declared `_OSC` granted native
+    // hot-plug.
+    let declared: &[pcidev::HostBridge] = &[];
+    pcidev::arm_hot_plug(declared);
     // Task-less half of the operation-nesting gate: this boot phase has no current task, so it establishes into the per-CPU slot.
     #[cfg(feature = "boot-actuators")]
     if actuator::sched_operation_nesting() {

@@ -237,6 +237,7 @@ impl DeviceSpace {
 #[derive(Clone, Copy)]
 pub struct OwnSpace(DomainId);
 
+
 impl OwnSpace {
     /// One with `room` bytes of it handed out at the address answered, or the
     /// reason there is none: a machine with no unit and a machine out of

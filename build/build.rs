@@ -3097,6 +3097,7 @@ mod tests {
         "tests/images/clipboardcase.toml",
         "tests/images/drivescase.toml",
         "tests/images/hostedclangcase.toml",
+        "tests/images/hotplugcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
         "tests/images/metalcase.toml",
