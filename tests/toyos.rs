@@ -4240,7 +4240,7 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
 }
 
 /// A machine behind QEMU's AMD unit, which `said` describes, refuses the
-/// spare's claim for `why`, before a vector is armed or a BAR moved.
+/// spare's claim for `why`, before a vector is armed.
 fn usbd_refused_on_amdvi(test_config: &Path, profile: qemu::Profile, said: &str, why: &str) -> Result<(), String> {
     const JOB: &str = "usbd_spare";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
@@ -4659,28 +4659,33 @@ fn bar_map_behind_a_bridge(test_config: &Path) -> Result<(), String> {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
     }
     let handed = format!("pcidev: {NIC} BAR ");
-    let line = result
+    let lines: Vec<&str> = result
         .serial
         .lines()
-        .find(|l| l.contains(&handed) && l.contains(" is handed over where firmware put it, "))
-        .ok_or_else(|| format!("{NIC}'s BAR was never handed over:\n{}", result.serial))?;
-    let (index, at) = line
-        .split_once(&handed)
-        .and_then(|(_, rest)| {
-            let index = rest.split_whitespace().next()?;
-            let at = rest.split_once(" put it, ")?.1.split("..").next()?;
-            Some((index.to_string(), at.to_string()))
-        })
-        .ok_or_else(|| format!("an unreadable hand-over: {line:?}"))?;
-    let hex = |text: &str| u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok();
-    let firmware = enumerated
-        .split([' ', ']'])
-        .find_map(|bar| bar.strip_prefix(&format!("bar{index}=")))
-        .ok_or_else(|| format!("{NIC} was enumerated with no BAR {index}: bars=[{enumerated}"))?;
-    if hex(&at).is_none() || hex(&at) != hex(firmware) {
-        return Err(format!("{line:?} hands over {at}, and firmware put BAR {index} at {firmware}"));
+        .filter(|l| l.contains(&handed) && l.contains(" is handed over where firmware put it, "))
+        .collect();
+    if lines.is_empty() {
+        return Err(format!("{NIC}'s BARs were never handed over:\n{}", result.serial));
     }
-    eprintln!("  [claims] {}", line.trim());
+    let hex = |text: &str| u64::from_str_radix(text.trim().trim_start_matches("0x"), 16).ok();
+    for line in lines {
+        let (index, at) = line
+            .split_once(&handed)
+            .and_then(|(_, rest)| {
+                let index = rest.split_whitespace().next()?;
+                let at = rest.split_once(" put it, ")?.1.split("..").next()?;
+                Some((index.to_string(), at.to_string()))
+            })
+            .ok_or_else(|| format!("an unreadable hand-over: {line:?}"))?;
+        let firmware = enumerated
+            .split([' ', ']'])
+            .find_map(|bar| bar.strip_prefix(&format!("bar{index}=")))
+            .ok_or_else(|| format!("{NIC} was enumerated with no BAR {index}: bars=[{enumerated}"))?;
+        if hex(&at).is_none() || hex(&at) != hex(firmware) {
+            return Err(format!("{line:?} hands over {at}, and firmware put BAR {index} at {firmware}"));
+        }
+        eprintln!("  [claims] {}", line.trim());
+    }
     Ok(())
 }
 
