@@ -20,15 +20,39 @@ impl Keys {
     }
     fn tag(&self, seq: u32, header: &[u8; 4], payload: &[u8]) -> Secret<16> {
         let block = chacha::legacy_block(self.payload(), &u64::from(seq).to_be_bytes(), 0);
-        let mut mac = Poly1305::new(block.0[..32].try_into().unwrap());
-        mac.update(header);
-        mac.update(payload);
-        Secret(mac.finish())
+        mac(block.0[..32].try_into().unwrap(), header, payload)
+    }
+    /// For a payload of at most 128 bytes: the header key's block 0, then
+    /// the payload key's blocks 0 to 2, computed together.
+    fn short(&self, seq: u32, length: usize) -> Option<Secret<256>> {
+        if length > 128 {
+            return None;
+        }
+        let nonce = u64::from(seq).to_be_bytes();
+        let states = Secret([
+            chacha::legacy_state(self.header(), &nonce, 0).0,
+            chacha::legacy_state(self.payload(), &nonce, 0).0,
+            chacha::legacy_state(self.payload(), &nonce, 1).0,
+            chacha::legacy_state(self.payload(), &nonce, 2).0,
+        ]);
+        Some(chacha::blocks(&states.0, 2 + length.div_ceil(64)))
     }
     fn crypt(&self, seq: u32, header: &mut [u8; 4], payload: &mut [u8]) -> Result<(), Error> {
         let nonce = u64::from(seq).to_be_bytes();
         chacha::legacy_xor(self.header(), &nonce, 0, header)?;
         chacha::legacy_xor(self.payload(), &nonce, 1, payload)
+    }
+}
+fn mac(key: &[u8; 32], header: &[u8; 4], payload: &[u8]) -> Secret<16> {
+    let mut mac = Poly1305::new(key);
+    mac.update(header);
+    mac.update(payload);
+    Secret(mac.finish())
+}
+/// Header and payload XORed with `short`'s keystream.
+fn crypt_short(stream: &Secret<256>, header: &mut [u8; 4], payload: &mut [u8]) {
+    for (byte, mask) in header.iter_mut().chain(payload.iter_mut()).zip(stream.0[..4].iter().chain(&stream.0[128..])) {
+        *byte ^= mask;
     }
 }
 pub struct SealingKey {
@@ -55,8 +79,16 @@ impl SealingKey {
             return Err(Error::Length);
         }
         let seq = self.next.ok_or(Error::CounterExhausted)?;
-        self.keys.crypt(seq, header, payload)?;
-        let tag = self.keys.tag(seq, header, payload);
+        let tag = match self.keys.short(seq, payload.len()) {
+            Some(stream) => {
+                crypt_short(&stream, header, payload);
+                mac(stream.0[64..96].try_into().unwrap(), header, payload)
+            }
+            None => {
+                self.keys.crypt(seq, header, payload)?;
+                self.keys.tag(seq, header, payload)
+            }
+        };
         self.next = seq.checked_add(1);
         Ok((seq, tag.0))
     }
@@ -90,10 +122,20 @@ impl OpeningKey {
         if tag.len() != 16 || payload.len() > u32::MAX as usize {
             return Err(Error::Length);
         }
-        let expected = self.keys.tag(seq, header, payload);
+        let short = self.keys.short(seq, payload.len());
+        let expected = match &short {
+            Some(stream) => mac(stream.0[64..96].try_into().unwrap(), header, payload),
+            None => self.keys.tag(seq, header, payload),
+        };
         if !ct::equal(&expected.0, tag) {
             return Err(Error::Authentication);
         }
-        self.keys.crypt(seq, header, payload)
+        match short {
+            Some(stream) => {
+                crypt_short(&stream, header, payload);
+                Ok(())
+            }
+            None => self.keys.crypt(seq, header, payload),
+        }
     }
 }

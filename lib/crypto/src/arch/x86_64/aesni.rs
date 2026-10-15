@@ -22,6 +22,7 @@
 use core::arch::x86_64::*;
 
 use super::{load, store};
+use crate::block::padded;
 
 /// x^63 + x^62 + x^57: g* - x^128 - 1, divided by x^64.
 const REDUCE: i64 = 0xc200_0000_0000_0000_u64 as i64;
@@ -387,5 +388,86 @@ pub(super) unsafe fn seal(
         seal_rounds::<10>(keys, powers, nonce, state, data)
     } else {
         seal_rounds::<14>(keys, powers, nonce, state, data)
+    }
+}
+
+#[inline]
+fn xor_bytes(data: &mut [u8], stream: __m128i) {
+    let mut bytes = [0u8; 16];
+    store(&mut bytes, stream);
+    for (d, s) in data.iter_mut().zip(bytes) {
+        *d ^= s;
+    }
+}
+
+#[target_feature(enable = "aes,pclmulqdq,sse2,ssse3")]
+fn short_rounds<const R: usize>(
+    keys: &[u8; 240],
+    powers: &[u128; 8],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    data: &mut [u8],
+    seal: bool,
+    stream: &mut [[u8; 16]; 7],
+) -> [u8; 16] {
+    let k = round_keys(keys);
+    let base = counter_base(nonce, k[0]);
+    let s = encrypt8::<R>(&k, base, 1);
+    if seal {
+        for (chunk, stream) in data.chunks_mut(16).zip(&s[1..]) {
+            xor_bytes(chunk, *stream);
+        }
+    } else {
+        for (out, stream) in stream.iter_mut().zip(&s[1..]) {
+            store(out, *stream);
+        }
+    }
+    // The padded AAD, the padded ciphertext and the lengths: at most eight.
+    let mut x = [_mm_setzero_si128(); 8];
+    let mut n = 0;
+    if !aad.is_empty() {
+        x[n] = reverse(load(&padded(aad)));
+        n += 1;
+    }
+    for chunk in data.chunks(16) {
+        x[n] = reverse(load(&padded(chunk)));
+        n += 1;
+    }
+    let lengths = ((aad.len() as u128 * 8) << 64) | (data.len() as u128 * 8);
+    x[n] = power(lengths);
+    n += 1;
+    let mut sum = Product::new(x[0], power(powers[n - 1]));
+    for (x, p) in x[1..n].iter().zip(powers[..n - 1].iter().rev()) {
+        sum = sum.add(*x, power(*p));
+    }
+    let mut tag = [0u8; 16];
+    store(&mut tag, _mm_xor_si128(reverse(sum.reduce()), s[0]));
+    tag
+}
+
+/// GCM over at most 16 bytes of AAD and 96 of data in one batch: counters 1
+/// to 8 give E(J0) and the keystream, and one reduction folds the padded AAD,
+/// the padded ciphertext and the lengths. Sealing encrypts `data` first;
+/// opening leaves it and writes the keystream to `stream`. Returns the tag.
+///
+/// # Safety
+/// AES, CLMUL and SSSE3 are admitted, `rounds` is 10 or 14, and `powers`
+/// came from [`powers`].
+#[allow(clippy::too_many_arguments, reason = "the key schedule, its powers and the message, one call")]
+#[target_feature(enable = "aes,pclmulqdq,sse2,ssse3")]
+pub(super) unsafe fn short(
+    keys: &[u8; 240],
+    rounds: usize,
+    powers: &[u128; 8],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    data: &mut [u8],
+    seal: bool,
+    stream: &mut [[u8; 16]; 7],
+) -> [u8; 16] {
+    if rounds == 10 {
+        short_rounds::<10>(keys, powers, nonce, aad, data, seal, stream)
+    } else {
+        short_rounds::<14>(keys, powers, nonce, aad, data, seal, stream)
     }
 }

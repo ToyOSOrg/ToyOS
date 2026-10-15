@@ -71,6 +71,11 @@ impl Features {
     pub(super) fn vaes_avx512(self) -> bool {
         self.vaes_clmul() && self.has(Self::AVX512VL)
     }
+    /// AVX2 and AVX-512F and VL under OS-enabled ZMM state.
+    #[cfg(not(target_os = "uefi"))]
+    pub(super) fn avx512vl(self) -> bool {
+        self.has(Self::AVX2 | Self::AVX512VL)
+    }
     /// 256-bit VAES and VPCLMULQDQ under OS-enabled YMM state.
     #[cfg(not(target_os = "uefi"))]
     pub(super) fn vaes_clmul(self) -> bool {
@@ -150,20 +155,24 @@ fn store(bytes: &mut [u8; 16], v: __m128i) {
     *bytes = unsafe { core::mem::transmute::<__m128i, [u8; 16]>(v) };
 }
 
+/// 32 bytes of caller data as two 16-byte halves. The allocator aligns
+/// buffers to 16 bytes, not 32, and a 32-byte access to a 16-aligned address
+/// can straddle a cache line, where two 16-byte accesses never do.
 #[cfg(not(target_os = "uefi"))]
 #[inline]
-#[target_feature(enable = "avx")]
-fn load2(bytes: &[u8; 32]) -> __m256i {
-    // Both are 32 plain bytes, every pattern valid.
-    unsafe { core::mem::transmute(*bytes) }
+#[target_feature(enable = "avx2")]
+fn load_data(bytes: &[u8; 32]) -> __m256i {
+    let (halves, _) = bytes.as_chunks::<16>();
+    _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(load(&halves[0])), load(&halves[1]))
 }
 
 #[cfg(not(target_os = "uefi"))]
 #[inline]
-#[target_feature(enable = "avx")]
-fn store2(bytes: &mut [u8; 32], v: __m256i) {
-    // Both are 32 plain bytes, every pattern valid.
-    *bytes = unsafe { core::mem::transmute::<__m256i, [u8; 32]>(v) };
+#[target_feature(enable = "avx2")]
+fn store_data(bytes: &mut [u8; 32], v: __m256i) {
+    let (halves, _) = bytes.as_chunks_mut::<16>();
+    store(&mut halves[0], _mm256_castsi256_si128(v));
+    store(&mut halves[1], _mm256_extracti128_si256::<1>(v));
 }
 
 #[cfg(target_os = "uefi")]
@@ -334,13 +343,69 @@ mod hosted {
         }
     }
 
+    /// `aesni::short` where its bounds hold: AAD up to 16 bytes, data up to 96.
+    #[allow(clippy::too_many_arguments, reason = "the key schedule, its powers and the message, one call")]
+    pub(in crate::arch) fn gcm_short(
+        keys: &[u8; 240],
+        rounds: usize,
+        powers: &[u128; 8],
+        nonce: &[u8; 12],
+        aad: &[u8],
+        data: &mut [u8],
+        seal: bool,
+        stream: &mut [[u8; 16]; 7],
+    ) -> Option<[u8; 16]> {
+        if aad.len() > 16 || data.len() > 96 || !features().aes_clmul() {
+            return None;
+        }
+        // AES, CLMUL and SSSE3 are admitted.
+        Some(unsafe { aesni::short(keys, rounds, powers, nonce, aad, data, seal, stream) })
+    }
+
+    pub(in crate::arch) fn chacha_seal(
+        key: &[u8; 32],
+        counter: u64,
+        nonce: &[u8; 8],
+        data: &mut [u8],
+        r: &[u64; 3],
+        h: &mut [u64; 3],
+    ) -> usize {
+        if !features().avx2() {
+            return 0;
+        }
+        if features().avx512vl() {
+            // AVX-512VL under ZMM state is admitted; the caller bounded the counter.
+            return unsafe { chacha::avx512::seal(key, counter, nonce, data, r, h) };
+        }
+        // AVX2 under YMM state is admitted; the caller bounded the counter.
+        unsafe { chacha::avx2::seal(key, counter, nonce, data, r, h) }
+    }
+
+    pub(in crate::arch) fn chacha_blocks(states: &[[u32; 16]; 4], out: &mut [u8; 256]) -> bool {
+        if !features().avx2() {
+            return false;
+        }
+        if features().avx512vl() {
+            // AVX-512VL under ZMM state is admitted.
+            unsafe { chacha::avx512::blocks(states, out) }
+        } else {
+            // AVX2 under YMM state is admitted.
+            unsafe { chacha::avx2::blocks(states, out) }
+        }
+        true
+    }
+
     /// Returns the bytes it did, whole blocks only; the caller bounded the counter.
     pub(in crate::arch) fn chacha_xor(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) -> usize {
         if !features().avx2() {
             return 0;
         }
+        if features().avx512vl() {
+            // AVX-512VL under ZMM state is admitted.
+            return unsafe { chacha::avx512::xor(key, counter, nonce, data) };
+        }
         // AVX2 under YMM state is admitted.
-        unsafe { chacha::xor(key, counter, nonce, data) }
+        unsafe { chacha::avx2::xor(key, counter, nonce, data) }
     }
 
     /// Whole four-block groups of at least sixteen blocks; returns the

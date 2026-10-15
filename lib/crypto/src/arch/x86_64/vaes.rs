@@ -11,7 +11,7 @@ macro_rules! gcm256 {
         use core::arch::x86_64::*;
 
         use super::super::aesni::{Product, counter_base, power, reverse};
-        use super::super::{load, load2, store, store2};
+        use super::super::{load, load_data, store, store_data};
 
         #[inline]
         #[target_feature(enable = $features)]
@@ -111,7 +111,7 @@ macro_rules! gcm256 {
         #[target_feature(enable = $features)]
         fn load8(batch: &[u8; 128]) -> [__m256i; 4] {
             let (pairs, _) = batch.as_chunks::<32>();
-            core::array::from_fn(|j| reverse_lanes(load2(&pairs[j])))
+            core::array::from_fn(|j| reverse_lanes(load_data(&pairs[j])))
         }
 
         #[inline]
@@ -155,7 +155,7 @@ macro_rules! gcm256 {
         fn xor_into(batch: &mut [u8; 256], s: [__m256i; 8]) {
             let (pairs, _) = batch.as_chunks_mut::<32>();
             for (pair, stream) in pairs.iter_mut().zip(s) {
-                store2(pair, _mm256_xor_si256(stream, load2(pair)));
+                store_data(pair, _mm256_xor_si256(stream, load_data(pair)));
             }
         }
 

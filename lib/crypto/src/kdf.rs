@@ -17,6 +17,7 @@ impl<H: Digest> Hmac<H> {
             outer: self.outer.fork(),
         }
     }
+    #[inline(always)]
     pub fn new(key: &[u8]) -> Result<Self, Error> {
         let mut block = Secret([0u8; 128]);
         if key.len() > H::BLOCK_LEN {
@@ -38,9 +39,11 @@ impl<H: Digest> Hmac<H> {
         outer.update(&block.0[..H::BLOCK_LEN])?;
         Ok(Self { inner, outer })
     }
+    #[inline]
     pub fn update(&mut self, message: &[u8]) -> Result<(), Error> {
         self.inner.update(message)
     }
+    #[inline(always)]
     pub fn finalize(self, output: &mut [u8]) -> Result<(), Error> {
         if output.len() != H::OUTPUT_LEN {
             return Err(Error::Length);
@@ -51,11 +54,13 @@ impl<H: Digest> Hmac<H> {
         outer.update(&digest.0[..H::OUTPUT_LEN])?;
         outer.finish_into(output)
     }
+    #[inline(always)]
     pub fn authenticate(key: &[u8], message: &[u8], output: &mut [u8]) -> Result<(), Error> {
         let mut mac = Self::new(key)?;
         mac.update(message)?;
         mac.finalize(output)
     }
+    #[inline(always)]
     pub fn verify(self, tag: &[u8]) -> Result<(), Error> {
         if tag.len() != H::OUTPUT_LEN {
             return Err(Error::Length);
@@ -77,6 +82,7 @@ pub struct Hkdf<H: Digest> {
 }
 
 impl<H: Digest> Hkdf<H> {
+    #[inline]
     pub fn extract(salt: &[u8], input_key_material: &[u8]) -> Result<Self, Error> {
         let mut prk = Secret([0u8; 64]);
         Hmac::<H>::authenticate(salt, input_key_material, &mut prk.0[..H::OUTPUT_LEN])?;
@@ -97,6 +103,7 @@ impl<H: Digest> Hkdf<H> {
             hash: core::marker::PhantomData,
         })
     }
+    #[inline]
     pub fn expand(&self, info: &[&[u8]], output: &mut [u8]) -> Result<(), Error> {
         if output.len() > 255 * H::OUTPUT_LEN {
             return Err(Error::Length);

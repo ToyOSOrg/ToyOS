@@ -80,8 +80,7 @@ impl Gcm {
         let (blocks, tail) = input.as_chunks::<16>();
         self.hash_blocks(state, blocks);
         if !tail.is_empty() {
-            let mut last = Secret([0u8; 16]);
-            last.0[..tail.len()].copy_from_slice(tail);
+            let last = Secret(crate::block::padded(tail));
             self.hash_blocks(state, core::slice::from_ref(&last.0));
         }
     }
@@ -105,7 +104,7 @@ impl Gcm {
         let mut n = 0;
         for part in [aad_tail, blocks.as_flattened(), tail] {
             for chunk in part.chunks(16) {
-                run.0[n][..chunk.len()].copy_from_slice(chunk);
+                run.0[n] = crate::block::padded(chunk);
                 n += 1;
             }
         }
@@ -145,6 +144,13 @@ impl Gcm {
         data: &mut [u8],
     ) -> Result<[u8; 16], Error> {
         Self::check(aad.len(), data.len())?;
+        if self.aggregated {
+            let mut unused = Secret([[0u8; 16]; 7]);
+            let keys = &self.aes.keys.0;
+            if let Some(tag) = crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, true, &mut unused.0) {
+                return Ok(tag);
+            }
+        }
         if !self.aggregated || data.len() < 128 {
             self.xor(nonce, 2, data);
             return Ok(self.tag(nonce, self.digest(aad, data)).0);
@@ -167,6 +173,23 @@ impl Gcm {
         tag: &[u8],
     ) -> Result<(), Error> {
         Self::check(aad.len(), data.len())?;
+        if self.aggregated {
+            let mut stream = Secret([[0u8; 16]; 7]);
+            let keys = &self.aes.keys.0;
+            if let Some(expected) =
+                crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, false, &mut stream.0)
+            {
+                if !crate::ct::equal(&Secret(expected).0, tag) {
+                    return Err(Error::Authentication);
+                }
+                for (chunk, stream) in data.chunks_mut(16).zip(&stream.0) {
+                    for (d, s) in chunk.iter_mut().zip(stream) {
+                        *d ^= s;
+                    }
+                }
+                return Ok(());
+            }
+        }
         let expected = self.tag(nonce, self.digest(aad, data));
         if !crate::ct::equal(&expected.0, tag) {
             return Err(Error::Authentication);

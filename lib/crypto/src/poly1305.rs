@@ -5,6 +5,7 @@
 //! every product sum below fits in 128 bits without reduction. No key-indexed
 //! table or content-dependent branch.
 
+use crate::block::{padded, place, terminated};
 use crate::secret::{Secret, erase};
 
 pub(crate) struct Poly1305 {
@@ -44,6 +45,18 @@ pub(crate) fn multiply([h0, h1, h2]: [u64; 3], [r0, r1, s1]: [u64; 3]) -> [u64; 
     [h0, low(sum), (t2 & 3).wrapping_add((sum >> 64) as u64)]
 }
 
+/// (h + block + 2^128 where `full`)·r: h2 stays below 8 between blocks.
+#[inline(always)]
+pub(crate) fn absorb(h: [u64; 3], block: &[u8; 16], r: [u64; 3], full: bool) -> [u64; 3] {
+    let m = u128::from_le_bytes(*block);
+    let sum = u128::from(h[0]).wrapping_add(u128::from(low(m)));
+    let h0 = low(sum);
+    let sum = u128::from(h[1]).wrapping_add(m >> 64).wrapping_add(sum >> 64);
+    let h1 = low(sum);
+    let h2 = h[2].wrapping_add((sum >> 64) as u64).wrapping_add(u64::from(full));
+    multiply([h0, h1, h2], r)
+}
+
 impl Poly1305 {
     pub(crate) fn new(key: &[u8; 32]) -> Self {
         let r = u128::from_le_bytes(key[..16].try_into().unwrap()) & 0x0fff_fffc_0fff_fffc_0fff_fffc_0fff_ffff;
@@ -59,24 +72,23 @@ impl Poly1305 {
         let done = if full { crate::arch::poly1305_blocks(&self.r, &mut self.h, blocks) } else { 0 };
         let mut h = self.h;
         for block in &blocks[done..] {
-            // h < 2^131 after the addition, so h2 stays below 2^3.
-            let m = u128::from_le_bytes(*block);
-            let sum = u128::from(h[0]).wrapping_add(u128::from(low(m)));
-            let h0 = low(sum);
-            let sum = u128::from(h[1]).wrapping_add(m >> 64).wrapping_add(sum >> 64);
-            let h1 = low(sum);
-            let h2 = h[2].wrapping_add((sum >> 64) as u64).wrapping_add(u64::from(full));
-            h = multiply([h0, h1, h2], self.r);
+            h = absorb(h, block, self.r, full);
         }
         self.h = h;
     }
 
+    /// The key and the accumulator, for absorbing whole blocks elsewhere;
+    /// `None` while a partial block is buffered.
+    pub(crate) fn parts(&mut self) -> Option<(&[u64; 3], &mut [u64; 3])> {
+        (self.filled == 0).then_some((&self.r, &mut self.h))
+    }
+
     pub(crate) fn update(&mut self, mut data: &[u8]) {
         if self.filled != 0 {
-            let n = data.len().min(16 - self.filled);
-            self.buffer[self.filled..self.filled + n].copy_from_slice(&data[..n]);
-            self.filled += n;
-            data = &data[n..];
+            let (head, rest) = data.split_at(data.len().min(16 - self.filled));
+            self.buffer = place(&self.buffer, self.filled, head);
+            self.filled += head.len();
+            data = rest;
             if self.filled == 16 {
                 let block = self.buffer;
                 self.blocks(&[block], true);
@@ -86,15 +98,14 @@ impl Poly1305 {
         let (blocks, rest) = data.as_chunks::<16>();
         self.blocks(blocks, true);
         if !rest.is_empty() {
-            self.buffer[..rest.len()].copy_from_slice(rest);
+            self.buffer = padded(rest);
             self.filled = rest.len();
         }
     }
 
     pub(crate) fn pad16(&mut self) {
         if self.filled != 0 {
-            self.buffer[self.filled..].fill(0);
-            let block = self.buffer;
+            let block = terminated(&self.buffer, self.filled, 0);
             self.blocks(&[block], true);
             self.filled = 0;
         }
@@ -102,9 +113,7 @@ impl Poly1305 {
 
     pub(crate) fn finish(mut self) -> [u8; 16] {
         if self.filled != 0 {
-            self.buffer[self.filled] = 1;
-            self.buffer[self.filled + 1..].fill(0);
-            let block = self.buffer;
+            let block = terminated(&self.buffer, self.filled, 1);
             self.blocks(&[block], false);
         }
         let [h0, h1, h2] = self.h;

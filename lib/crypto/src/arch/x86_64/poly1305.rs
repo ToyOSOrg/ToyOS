@@ -1,15 +1,15 @@
 //! Poly1305 on AVX2, four blocks at a time (Goll and Gueron, "Vectorization
 //! of Poly1305 Message Authentication Code", ITNG 2015). Each 64-bit lane
-//! holds one 26-bit limb of one of four interleaved accumulators: lane l
-//! takes every fourth block and multiplies by r^4, and the last four blocks
-//! meet r^4, r^3, r^2 and r, so the lanes' sum is the sequential result.
-//! Limbs stay below 2^27 and every product sum below 2^60, so carries are
-//! taken once per multiplication. No address or branch depends on the data
+//! holds one 26-bit limb of one of n interleaved accumulators: lane l takes
+//! every nth block and multiplies by r^n, and the last n blocks meet r^n down
+//! to r, so the lanes' sum is the sequential result. Limbs stay below 2^27
+//! and every product sum below 2^60, so carries are taken once per
+//! multiplication. No address or branch depends on the data
 //! or the key.
 
 use core::arch::x86_64::*;
 
-use super::load2;
+use super::load_data;
 use crate::poly1305::{low, multiply};
 
 const LIMB: u64 = (1 << 26) - 1;
@@ -81,7 +81,7 @@ fn carry([mut d0, mut d1, mut d2, mut d3, mut d4]: [__m256i; 5]) -> [__m256i; 5]
 #[target_feature(enable = "avx2")]
 fn message(quad: &[[u8; 16]; 4]) -> [__m256i; 5] {
     let (pairs, _) = quad.as_flattened().as_chunks::<32>();
-    let (a, b) = (load2(&pairs[0]), load2(&pairs[1]));
+    let (a, b) = (load_data(&pairs[0]), load_data(&pairs[1]));
     let low = _mm256_unpacklo_epi64(a, b);
     let high = _mm256_unpackhi_epi64(a, b);
     let mask = _mm256_set1_epi64x(LIMB as i64);
@@ -95,38 +95,70 @@ fn message(quad: &[[u8; 16]; 4]) -> [__m256i; 5] {
 }
 
 /// Absorbs the longest prefix of whole four-block groups, each block with
-/// 2^128 added, into `h` and returns its length in blocks.
+/// 2^128 added, into `h` and returns its length in blocks. From 16 blocks
+/// on, two sets of four lanes run as independent chains over eight-block
+/// groups with r^8, the last group meeting r^8 to r.
 ///
 /// # Safety
 /// AVX2 under YMM state is admitted.
 #[target_feature(enable = "avx2")]
 pub(super) unsafe fn blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]]) -> usize {
-    let (quads, _) = blocks.as_chunks::<4>();
-    let Some((last, quads)) = quads.split_last() else { return 0 };
     let r1 = [r[0], r[1], 0];
     let r2 = multiply(r1, *r);
     let r3 = multiply(r2, *r);
     let r4 = multiply(r3, *r);
-    let every = Multiplier::new([limbs(r4); 4]);
-    // Lanes b0, b2, b1, b3 meet r^4, r^2, r^3 and r.
-    let closing = Multiplier::new([limbs(r4), limbs(r2), limbs(r3), limbs(r1)]);
     let start = limbs(*h);
-    let mut acc: [__m256i; 5] = core::array::from_fn(|k| _mm256_set_epi64x(0, 0, 0, start[k] as i64));
+    let first: [__m256i; 5] = core::array::from_fn(|k| _mm256_set_epi64x(0, 0, 0, start[k] as i64));
     let add = |acc: [__m256i; 5], m: [__m256i; 5]| -> [__m256i; 5] {
         core::array::from_fn(|k| _mm256_add_epi64(acc[k], m[k]))
     };
-    for quad in quads {
-        acc = every.multiply(add(acc, message(quad)));
-    }
-    acc = closing.multiply(add(acc, message(last)));
-    // Limb sums over the four lanes, each below 2^29.
+    let (octs, _) = blocks.as_chunks::<8>();
+    let sums = if octs.len() >= 2 {
+        let r5 = multiply(r4, *r);
+        let r6 = multiply(r5, *r);
+        let r7 = multiply(r6, *r);
+        let r8 = multiply(r7, *r);
+        let every = Multiplier::new([limbs(r8); 4]);
+        // Lanes b0, b2, b1, b3 of each half meet r^(8-position).
+        let close_a = Multiplier::new([limbs(r8), limbs(r6), limbs(r7), limbs(r5)]);
+        let close_b = Multiplier::new([limbs(r4), limbs(r2), limbs(r3), limbs(r1)]);
+        let (last, octs) = octs.split_last().unwrap();
+        let halves = |oct: &[[u8; 16]; 8]| {
+            let (quads, _) = oct.as_chunks::<4>();
+            (message(&quads[0]), message(&quads[1]))
+        };
+        let (mut a, mut b) = (first, [_mm256_setzero_si256(); 5]);
+        for oct in octs {
+            let (m, n) = halves(oct);
+            a = every.multiply(add(a, m));
+            b = every.multiply(add(b, n));
+        }
+        let (m, n) = halves(last);
+        a = close_a.multiply(add(a, m));
+        b = close_b.multiply(add(b, n));
+        let both = add(a, b);
+        (both, 8 * (octs.len() + 1))
+    } else {
+        let (quads, _) = blocks.as_chunks::<4>();
+        let Some((last, quads)) = quads.split_last() else { return 0 };
+        let every = Multiplier::new([limbs(r4); 4]);
+        // Lanes b0, b2, b1, b3 meet r^4, r^2, r^3 and r.
+        let closing = Multiplier::new([limbs(r4), limbs(r2), limbs(r3), limbs(r1)]);
+        let mut acc = first;
+        for quad in quads {
+            acc = every.multiply(add(acc, message(quad)));
+        }
+        (closing.multiply(add(acc, message(last))), 4 * (quads.len() + 1))
+    };
+    let (acc, done) = sums;
+    // Limb sums over the lanes, each below 2^30.
     let sums: [u64; 5] = acc.map(|limb| {
         // Four plain words make 32 plain bytes.
         let lanes = unsafe { core::mem::transmute::<__m256i, [u64; 4]>(limb) };
         lanes.into_iter().fold(0, u64::wrapping_add)
     });
     *h = radix64(sums);
-    4 * (quads.len() + 1)
+    done
 }
 
 /// Σ limb_k·2^26k in radix 2^64 with h2 below 8, folding bits from 2^130 up

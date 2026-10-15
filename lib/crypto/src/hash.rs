@@ -101,7 +101,7 @@ const K512: [u64; 80] = [
 /// One SHA-2 round, the working variables renamed rather than moved: round
 /// t computes into `$h` and `$d`, and round t+1 names them one place on.
 macro_rules! round {
-    ($w:ident, $k:ident, $base:expr, $i:literal, $later:expr,
+    ($w:ident, $k:ident, $bc:ident, $i:literal, $later:expr,
      [$a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident],
      $big0:expr, $big1:expr, $small0:expr, $small1:expr) => {
         if $later {
@@ -114,9 +114,13 @@ macro_rules! round {
         let t1 = $h
             .wrapping_add($big1($e))
             .wrapping_add($g ^ ($e & ($f ^ $g)))
-            .wrapping_add($k[$base + $i])
+            .wrapping_add($k[$i])
             .wrapping_add($w[$i]);
-        let t2 = $big0($a).wrapping_add(($a & $b) | ($c & ($a | $b)));
+        // Maj(a, b, c) = ((a ^ b) & (b ^ c)) ^ b, and this round's a ^ b is
+        // the next round's b ^ c.
+        let ab = $a ^ $b;
+        let t2 = $big0($a).wrapping_add((ab & $bc) ^ $b);
+        $bc = ab;
         $d = $d.wrapping_add(t1);
         $h = t1.wrapping_add(t2);
     };
@@ -135,25 +139,25 @@ macro_rules! rounds {
                     *word = <$word>::from_be_bytes(*bytes);
                 }
                 let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-                for pass in 0..$k.len() / 16 {
-                    let base = 16 * pass;
+                let mut bc = b ^ c;
+                for (pass, k) in $k.as_chunks::<16>().0.iter().enumerate() {
                     let later = pass != 0;
-                    round!(w, $k, base, 0, later, [a, b, c, d, e, f, g, h], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 1, later, [h, a, b, c, d, e, f, g], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 2, later, [g, h, a, b, c, d, e, f], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 3, later, [f, g, h, a, b, c, d, e], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 4, later, [e, f, g, h, a, b, c, d], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 5, later, [d, e, f, g, h, a, b, c], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 6, later, [c, d, e, f, g, h, a, b], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 7, later, [b, c, d, e, f, g, h, a], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 8, later, [a, b, c, d, e, f, g, h], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 9, later, [h, a, b, c, d, e, f, g], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 10, later, [g, h, a, b, c, d, e, f], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 11, later, [f, g, h, a, b, c, d, e], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 12, later, [e, f, g, h, a, b, c, d], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 13, later, [d, e, f, g, h, a, b, c], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 14, later, [c, d, e, f, g, h, a, b], $big0, $big1, $small0, $small1);
-                    round!(w, $k, base, 15, later, [b, c, d, e, f, g, h, a], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 0, later, [a, b, c, d, e, f, g, h], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 1, later, [h, a, b, c, d, e, f, g], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 2, later, [g, h, a, b, c, d, e, f], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 3, later, [f, g, h, a, b, c, d, e], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 4, later, [e, f, g, h, a, b, c, d], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 5, later, [d, e, f, g, h, a, b, c], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 6, later, [c, d, e, f, g, h, a, b], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 7, later, [b, c, d, e, f, g, h, a], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 8, later, [a, b, c, d, e, f, g, h], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 9, later, [h, a, b, c, d, e, f, g], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 10, later, [g, h, a, b, c, d, e, f], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 11, later, [f, g, h, a, b, c, d, e], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 12, later, [e, f, g, h, a, b, c, d], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 13, later, [d, e, f, g, h, a, b, c], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 14, later, [c, d, e, f, g, h, a, b], $big0, $big1, $small0, $small1);
+                    round!(w, k, bc, 15, later, [b, c, d, e, f, g, h, a], $big0, $big1, $small0, $small1);
                 }
                 for (s, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
                     *s = s.wrapping_add(v);
@@ -224,6 +228,7 @@ macro_rules! hash {
             bytes: u128,
         }
         impl $name {
+            #[inline]
             pub const fn new() -> Self {
                 Self {
                     state: $initial,
@@ -263,6 +268,7 @@ macro_rules! hash {
                 }
                 Ok(())
             }
+            #[inline(always)]
             pub fn finalize(mut self) -> [u8; $out] {
                 self.block[self.filled] = 0x80;
                 self.filled += 1;
@@ -283,6 +289,7 @@ macro_rules! hash {
                 }
                 result
             }
+            #[inline(always)]
             pub fn digest(message: &[u8]) -> Result<[u8; $out], crate::Error> {
                 let mut h = Self::new();
                 h.update(message)?;
@@ -308,19 +315,18 @@ macro_rules! hash {
             const BLOCK_LEN: usize = $block;
             const OUTPUT_LEN: usize = $out;
             const MAX_BYTES: u128 = (1u128 << ($length * 8 - 3)) - 1;
+            #[inline]
             fn new() -> Self {
                 Self::new()
             }
+            #[inline]
             fn update(&mut self, message: &[u8]) -> Result<(), crate::Error> {
                 self.update(message)
             }
+            #[inline(always)]
             fn finish_into(self, output: &mut [u8]) -> Result<(), crate::Error> {
-                if output.len() != $out {
-                    return Err(crate::Error::Length);
-                }
-                let mut digest = self.finalize();
-                output.copy_from_slice(&digest);
-                erase(&mut digest);
+                let output: &mut [u8; $out] = output.try_into().map_err(|_| crate::Error::Length)?;
+                *output = self.finalize();
                 Ok(())
             }
         }

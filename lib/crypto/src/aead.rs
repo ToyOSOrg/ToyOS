@@ -162,10 +162,9 @@ fn check_chacha_length(length: usize) -> Result<(), Error> {
         Ok(())
     }
 }
-/// Poly1305 keyed by block 0, with the padded AAD absorbed.
-fn chacha_mac(key: &[u8; 32], nonce: &[u8; 12], aad: &[u8]) -> Poly1305 {
-    let first = chacha::block(key, nonce, 0);
-    let mut mac = Poly1305::new(first.0[..32].try_into().unwrap());
+/// Poly1305 under `key`, with the padded AAD absorbed.
+fn chacha_mac(key: &[u8; 32], aad: &[u8]) -> Poly1305 {
+    let mut mac = Poly1305::new(key);
     mac.update(aad);
     mac.pad16();
     mac
@@ -176,6 +175,21 @@ fn chacha_finish(mut mac: Poly1305, aad: usize, ciphertext: usize) -> Secret<16>
     mac.update(&(ciphertext as u64).to_le_bytes());
     Secret(mac.finish())
 }
+/// Blocks 0 to 3 for 1 to 192 bytes of data: the Poly1305 key, then the
+/// data's keystream, computed together. An empty message takes block 0
+/// alone, whose latency is lower.
+fn chacha_short(key: &[u8; 32], nonce: &[u8; 12], length: usize) -> Option<Secret<256>> {
+    if length == 0 || length > 192 {
+        return None;
+    }
+    let states = Secret(core::array::from_fn(|i| chacha::state(key, nonce, i as u32).0));
+    Some(chacha::blocks(&states.0, 1 + length.div_ceil(64)))
+}
+fn xor_stream(data: &mut [u8], stream: &[u8]) {
+    for (byte, mask) in data.iter_mut().zip(stream) {
+        *byte ^= mask;
+    }
+}
 fn chacha_seal(
     key: &[u8; 32],
     nonce: &[u8; 12],
@@ -183,8 +197,17 @@ fn chacha_seal(
     data: &mut [u8],
 ) -> Result<[u8; 16], Error> {
     check_chacha_length(data.len())?;
-    chacha::xor(key, nonce, 1, data)?;
-    let mut mac = chacha_mac(key, nonce, aad);
+    let mut mac = match chacha_short(key, nonce, data.len()) {
+        Some(stream) => {
+            xor_stream(data, &stream.0[64..]);
+            chacha_mac(stream.0[..32].try_into().unwrap(), aad)
+        }
+        None => {
+            let mut mac = chacha_mac(chacha::block(key, nonce, 0).0[..32].try_into().unwrap(), aad);
+            chacha::seal(key, nonce, 1, data, &mut mac)?;
+            return Ok(chacha_finish(mac, aad.len(), data.len()).0);
+        }
+    };
     mac.update(data);
     Ok(chacha_finish(mac, aad.len(), data.len()).0)
 }
@@ -196,13 +219,24 @@ fn chacha_open(
     tag: &[u8],
 ) -> Result<(), Error> {
     check_chacha_length(data.len())?;
-    let mut mac = chacha_mac(key, nonce, aad);
+    let short = chacha_short(key, nonce, data.len());
+    let mac_key = match &short {
+        Some(stream) => Secret(stream.0[..32].try_into().unwrap()),
+        None => Secret(chacha::block(key, nonce, 0).0[..32].try_into().unwrap()),
+    };
+    let mut mac = chacha_mac(&mac_key.0, aad);
     mac.update(data);
     let expected = chacha_finish(mac, aad.len(), data.len());
     if !crate::ct::equal(&expected.0, tag) {
         return Err(Error::Authentication);
     }
-    chacha::xor(key, nonce, 1, data)
+    match short {
+        Some(stream) => {
+            xor_stream(data, &stream.0[64..]);
+            Ok(())
+        }
+        None => chacha::xor(key, nonce, 1, data),
+    }
 }
 
 #[cfg(test)]

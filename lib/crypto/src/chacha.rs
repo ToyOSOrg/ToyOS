@@ -1,7 +1,7 @@
 //! RFC 8439 ChaCha20; the original 64-bit nonce construction serves SSH.
 //! Rounds and memory addresses are independent of key and message contents.
 
-use crate::{Error, secret::Secret};
+use crate::{Error, poly1305::Poly1305, secret::Secret};
 
 #[inline(always)]
 fn quarter(x: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
@@ -52,13 +52,38 @@ pub(crate) fn block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> Secret<64
 }
 
 pub(crate) fn legacy_block(key: &[u8; 32], nonce: &[u8; 8], counter: u64) -> Secret<64> {
+    rounds(&legacy_state(key, nonce, counter).0)
+}
+
+/// The original construction's state: a 64-bit counter and an 8-byte nonce.
+pub(crate) fn legacy_state(key: &[u8; 32], nonce: &[u8; 8], counter: u64) -> Secret<16, u32> {
     let mut state = Secret([0; 16]);
     words(key, &mut state.0);
     state.0[12] = counter as u32;
     state.0[13] = (counter >> 32) as u32;
     state.0[14] = u32::from_le_bytes(nonce[..4].try_into().unwrap());
     state.0[15] = u32::from_le_bytes(nonce[4..].try_into().unwrap());
-    rounds(&state.0)
+    state
+}
+
+/// RFC 8439's state for block `counter`.
+pub(crate) fn state(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> Secret<16, u32> {
+    let (counter, nonce) = ietf(nonce, counter);
+    legacy_state(key, &nonce, counter)
+}
+
+/// The keystream of the first `n` of four independent states, at most four:
+/// two or more run together where SIMD admits them, in about one block's
+/// latency.
+pub(crate) fn blocks(states: &[[u32; 16]; 4], n: usize) -> Secret<256> {
+    let mut out = Secret([0u8; 256]);
+    if n >= 2 && crate::arch::chacha_blocks(states, &mut out.0) {
+        return out;
+    }
+    for (chunk, state) in out.0.as_chunks_mut::<64>().0.iter_mut().zip(states).take(n) {
+        chunk.copy_from_slice(&rounds(state).0);
+    }
+    out
 }
 
 /// IETF's 32-bit counter and first nonce word as the original 64-bit
@@ -97,6 +122,20 @@ pub(crate) fn xor(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8
     check_ietf(data.len(), counter)?;
     let (counter, nonce) = ietf(nonce, counter);
     stream(key, counter, &nonce, data);
+    Ok(())
+}
+
+/// [`xor`], with `mac` absorbing the ciphertext.
+pub(crate) fn seal(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8], mac: &mut Poly1305) -> Result<(), Error> {
+    check_ietf(data.len(), counter)?;
+    let (counter, nonce) = ietf(nonce, counter);
+    let done = match mac.parts() {
+        Some((r, h)) => crate::arch::chacha_seal(key, counter, &nonce, data, r, h),
+        None => 0,
+    };
+    let rest = &mut data[done..];
+    stream(key, counter.wrapping_add((done / 64) as u64), &nonce, rest);
+    mac.update(rest);
     Ok(())
 }
 
@@ -140,6 +179,26 @@ mod tests {
                 }
                 legacy_xor(&key, nonce, counter, &mut actual[..len]).unwrap();
                 assert_eq!(actual, expected, "legacy length {len}, counter {counter}");
+            }
+        }
+    }
+
+    #[test]
+    fn independent_blocks_match_one_at_a_time() {
+        // Four states of two keys and scattered counters, as SSH's packets take them.
+        let states: [[u32; 16]; 4] = [
+            legacy_state(&[1; 32], &[2; 8], 0).0,
+            legacy_state(&[3; 32], &[4; 8], u64::from(u32::MAX)).0,
+            legacy_state(&[3; 32], &[4; 8], u64::MAX).0,
+            state(&[5; 32], &[6; 12], 7).0,
+        ];
+        for n in 1..=4 {
+            let together = blocks(&states, n);
+            for (i, state) in states.iter().enumerate() {
+                let expected = if i < n { rounds(state).0 } else { [0; 64] };
+                if i < n || !crate::arch::chacha_blocks(&states, &mut [0; 256]) {
+                    assert_eq!(together.0[64 * i..64 * i + 64], expected, "block {i} of {n}");
+                }
             }
         }
     }

@@ -105,6 +105,27 @@ pub(crate) fn gcm_seal(
     })
 }
 
+/// A short message's GCM in one batch, where the instruction path admits it:
+/// sealing encrypts `data` and returns the tag; opening returns the expected
+/// tag and writes the keystream to `stream`. `powers` came from
+/// [`ghash_powers`].
+#[allow(clippy::too_many_arguments, reason = "the key schedule, its powers and the message, one call")]
+pub(crate) fn gcm_short(
+    keys: &[u8; 240],
+    rounds: usize,
+    powers: &[u128; 8],
+    nonce: &[u8; 12],
+    aad: &[u8],
+    data: &mut [u8],
+    seal: bool,
+    stream: &mut [[u8; 16]; 7],
+) -> Option<[u8; 16]> {
+    hosted!(x86_64::gcm_short(keys, rounds, powers, nonce, aad, data, seal, stream), {
+        let _ = (keys, rounds, powers, nonce, aad, data, seal, stream);
+        None
+    })
+}
+
 /// XORs a prefix of whole 64-byte blocks with ChaCha20 and returns its
 /// length. The caller has checked counter bounds. IETF nonce word zero
 /// occupies counter bits 32..63; bounded input cannot carry into it. The
@@ -136,6 +157,30 @@ pub(crate) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool 
 pub(crate) fn poly1305_blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]]) -> usize {
     hosted!(x86_64::poly1305_blocks(r, h, blocks), {
         let _ = (r, h, blocks);
+        0
+    })
+}
+
+/// The keystream of four independent ChaCha20 states, each 16 words.
+pub(crate) fn chacha_blocks(states: &[[u32; 16]; 4], out: &mut [u8; 256]) -> bool {
+    hosted!(x86_64::chacha_blocks(states, out), {
+        let _ = (states, out);
+        false
+    })
+}
+
+/// [`chacha_xor`] over a prefix of whole batches, absorbing the ciphertext
+/// into the Poly1305 accumulator `h` under `r` as it goes; returns its length.
+pub(crate) fn chacha_seal(
+    key: &[u8; 32],
+    counter: u64,
+    nonce: &[u8; 8],
+    data: &mut [u8],
+    r: &[u64; 3],
+    h: &mut [u64; 3],
+) -> usize {
+    hosted!(x86_64::chacha_seal(key, counter, nonce, data, r, h), {
+        let _ = (key, counter, nonce, data, r, h);
         0
     })
 }
