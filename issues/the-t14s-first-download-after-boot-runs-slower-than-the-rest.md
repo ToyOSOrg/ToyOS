@@ -37,6 +37,20 @@ The row is not on main; its job on the measurement tree
 `wt/toyos-first-run-instrument` (f260b64de) fetches the file once, untimed and
 instrumented, before its timed runs.
 
+The pair that followed (evidence
+`ToyOSOrg/evidence@cc703a7f576122875393ddda88f41ab1ad17939a`, `pair/`) puts the
+pause on the CDN's state. In the warm-up boot, the warm-up met an object the CDN
+had fetched a second earlier (`age=1`). It paused about every 2 s, with 34.2 s
+of read waits. The timed run after it ran at 765.9 Mb/s with no wait over 20 ms.
+The baseline image booted right after, with the CDN still warm (`age=170`), ran
+run 1 at 866.2 Mb/s and runs 2 to 6 at 814.7 to 867.5 Mb/s.
+
+The exit below is not yet met. The warm-up spent the job's window, so the
+warm-up boot cut its second timed run and had no band of its own. The cold
+warm-up alone took longer than the window leaves for six runs. 765.9 Mb/s sits
+6% under the next boot's band and inside the 722 to 878 Mb/s of later runs
+across the earlier T14 boots.
+
 **Exit condition**: on the T14, `internet_download`'s first timed run after the
 warm-up falls within the band of the boot's other timed runs.
 
