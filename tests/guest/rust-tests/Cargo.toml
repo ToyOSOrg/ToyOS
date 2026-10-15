@@ -28,8 +28,15 @@ toyos-pci = { path = "../../../kernel/pci" }
 libloading = { git = "https://github.com/ToyOSOrg/rust_libloading", branch = "toyos-sdk-0.12" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }
 memmap2 = "0.9"
-# `ring`'s primitives, for `ring_kat`'s known answers.
+# `ring`'s primitives, for `ring_kat`'s known answers and as `crypto_parity`'s
+# reference.
 ring = "0.17"
+# What `crypto_parity` measures beside ring, the rule it is judged by, its
+# ML-KEM reference, and the system's random bytes, where ring takes them.
+toyos-crypto = { path = "../../../lib/crypto", features = ["sign"] }
+toyos-parity = { path = "../../../lib/parity" }
+ml-kem = { version = "0.3", features = ["hazmat"] }
+getrandom = "0.2"
 
 # Outside the workspace, so it needs its own redirects: the forks
 # above depend on ToyOS crates by version, and only a patch maps those to the
@@ -55,3 +62,9 @@ debug = true
 strip = "debuginfo"
 debug-assertions = true
 overflow-checks = true
+
+# `crypto_parity`'s second column: the same build with debug assertions off,
+# which decides nothing. The build stages it as `crypto_parity_unasserted`.
+[profile.toyos-unasserted]
+inherits = "toyos"
+debug-assertions = false

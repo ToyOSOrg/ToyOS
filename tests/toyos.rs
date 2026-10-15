@@ -218,6 +218,10 @@ const RUST_SKIP: &[&str] = &[
     // It reads two `edu` functions each held by a `drives` row's process,
     // which only `a_drives_row_holds_one_process_per_function`'s boot has.
     "drives_judged",
+    // Its product is a table of timings beside ring, which a guest's host
+    // sets: the `crypto_instrument` metal row runs it on the T14 and the AMD
+    // bench.
+    "crypto_parity",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -262,6 +266,10 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // `virt_random_differs` builds it for AArch64, runs it on that
     // architecture's job case, and compares two boots' draws.
     "random_draws",
+    // Its shared run is ring's known answers in a guest; the crypto boot runs it
+    // first on each bench, and `crypto_instrument_prints_its_table` before the
+    // instrument under QEMU.
+    "ring_kat",
     // Its shared run asserts what holds of the clock syscalls on x86-64;
     // `virt_wall_clock_utc` builds it for AArch64 and judges what it read
     // against the instant the job case stages in the RTC.
@@ -500,6 +508,11 @@ const MACHINE_TESTS: &[&str] = &[
     // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
     // the SDM, and the KVM runner's CPU.
     "vector_state_survives_a_switch",
+    // The parity instrument's two builds in one boot, behind ring's known
+    // answers: that every row runs and both builds print the same whole table.
+    // Its timings decide nothing here; the `crypto_instrument` metal row takes
+    // them on the benches.
+    "crypto_instrument_prints_its_table",
     // The clipboard agent's opening exchange with QEMU's own vdagent: the
     // device exists only under QEMU, so no metal row reaches it, and the other
     // end of the handshake and of the request is QEMU's vdagent chardev and
@@ -1252,7 +1265,40 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    // ---- one image: tests/images/testcases.toml, ring and the parity instrument alone ----
+    (
+        // `toyos-crypto` beside ring on the bench's own CPU, both builds'
+        // tables printed: that ring runs at all, and that every row measured.
+        // The T14 and the AMD bench.
+        "crypto_instrument",
+        metal::Metal {
+            arms: CRYPTOCASE,
+            judge: |b| {
+                for line in crypto_table(b[0])?.render() {
+                    eprintln!("  [crypto] {line}");
+                }
+                Ok(())
+            },
+        },
+    ),
 ];
+
+/// The jobs of the crypto boot, in order: ring's known answers, then the
+/// instrument as it ships and with debug assertions off.
+const CRYPTO_JOBS: [&str; 3] = ["test_rs_ring_kat", "test_rs_crypto_parity", "test_rs_crypto_parity_unasserted"];
+
+/// Ring and the parity instrument with no other job in their boot, which
+/// would compete with what it times.
+const CRYPTOCASE: &[metal::Arm] = &[metal::once("cryptocase", "tests/images/testcases.toml", &[], &CRYPTO_JOBS)];
+
+/// Both builds' parity table, once every job of the crypto boot has passed.
+fn crypto_table(boot: &metal::Readback) -> Result<toyos_parity::Table, String> {
+    for job in CRYPTO_JOBS {
+        boot.job_passed(job)?;
+    }
+    let log = boot.log();
+    toyos_parity::read(log.text().lines().filter_map(toyos_logstream::program_line).map(|said| said.text))
+}
 
 /// The plain `tests/images/testcases.toml` boot, which starts no ps2server, so
 /// the one grantable row is free: the ports' job first, since its last holder
@@ -3852,6 +3898,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
+        "crypto_instrument_prints_its_table" => crypto_instrument_prints_its_table(test_config),
         "the_compositor_drives_the_virtio_gpu" => the_compositor_drives_the_virtio_gpu(),
         "a_window_is_drawn_at_the_scale_and_relaid_at_the_next" => a_window_is_drawn_at_the_scale_and_relaid_at_the_next(),
         other => Err(format!("unknown machine test {other}")),
@@ -4426,6 +4473,37 @@ fn vector_state_survives_a_switch(test_config: &Path) -> Result<(), String> {
     eprintln!("  [claims] {}", line.trim());
     Ok(())
 }
+
+/// Ring's known answers, then both builds of the parity instrument, in one
+/// boot: each ends cleanly and their lines read back as one whole table.
+fn crypto_instrument_prints_its_table(test_config: &Path) -> Result<(), String> {
+    let dir = compile::repo_root().join("tests/guest/rust-tests");
+    let bins = vec![
+        ("ring_kat".to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &dir, "ring_kat")),
+        ("crypto_parity".to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &dir, "crypto_parity")),
+        crypto_parity_unasserted(),
+    ];
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &bins, BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let mut said = String::new();
+    for job in CRYPTO_JOBS {
+        let result = qemu.run_test(job, Duration::from_secs(CRYPTO_JOB_CEILING_SECS));
+        if let Some(why) = &result.error {
+            return Err(format!("{job}: {why}\nthe job said:\n{}", result.stdout));
+        }
+        if result.exit_code != Some(0) {
+            return Err(format!("{job} ended {:?}:\n{}", result.exit_code, result.stdout));
+        }
+        said.push_str(&result.stdout);
+    }
+    let table = toyos_parity::read(said.lines())?;
+    eprintln!("  [crypto] {} rows in each build; their timings are not judged under QEMU", table.asserted.len());
+    Ok(())
+}
+
+/// A hang ceiling for one crypto job under QEMU, whose clock decides nothing
+/// else.
+const CRYPTO_JOB_CEILING_SECS: u64 = 300;
 
 /// A claim's memory BAR asked for again — while an earlier answer is held, and
 /// once its handle is gone, closed or never installed for want of room: each
@@ -6407,7 +6485,8 @@ type Binaries = Vec<(String, Vec<u8>)>;
 /// their stages.
 fn build_shared_bins() -> (Binaries, Binaries) {
     let rust_tests_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/guest/rust-tests");
-    let rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
+    let mut rust_bins = qemu::build_toyos_bins(&rust_tests_dir);
+    rust_bins.push(crypto_parity_unasserted());
     let c_names = discover_c_tests();
     eprintln!(
         "[toyos] Compiling {} C tests, and attempting {} declared ones...",
@@ -6416,6 +6495,13 @@ fn build_shared_bins() -> (Binaries, Binaries) {
     );
     check_not_run();
     (compile_c_tests(&c_names), rust_bins)
+}
+
+/// `crypto_parity` with debug assertions off, by the name its job runs.
+fn crypto_parity_unasserted() -> (String, Vec<u8>) {
+    let dir = compile::repo_root().join("tests/guest/rust-tests");
+    let bin = qemu::build_toyos_bin_as(qemu::SUITE_ARCH, &dir, "crypto_parity", toyos_build::build::UNASSERTED);
+    ("crypto_parity_unasserted".to_string(), bin)
 }
 
 /// What one worker takes off the queue: one test, and every boot it owns.

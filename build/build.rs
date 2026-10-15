@@ -238,12 +238,12 @@ fn stale(crate_dir: &Path, identity: &Identity) -> Option<Stale> {
 }
 
 /// Remove what `stale` names of `crate_dir`'s target directory and stamp it
-/// with `identity`. [`Stale::All`] is the guest profile's host half and every
+/// with `identity`. [`Stale::All`] is the guest profiles' host halves and every
 /// guest target's directory: the root's `target/` is also the build system's
 /// own, which no sysroot made.
 fn clean(crate_dir: &Path, stale: &Stale, identity: &Identity) {
     let target = crate_dir.join("target");
-    let all: Vec<&str> = std::iter::once(PROFILE).chain(toolchain::GUEST_TARGETS.map(|t| t.triple())).collect();
+    let all: Vec<&str> = [PROFILE, UNASSERTED].into_iter().chain(toolchain::GUEST_TARGETS.map(|t| t.triple())).collect();
     let moved = match stale {
         Stale::All => &all,
         Stale::Targets(moved) => moved,
@@ -368,6 +368,10 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
 /// root the image is made of.
 pub const PROFILE: &str = "toyos";
 
+/// [`PROFILE`] with debug assertions off, which `tests/guest/rust-tests`
+/// declares for a measurement's column that shows what they cost.
+pub const UNASSERTED: &str = "toyos-unasserted";
+
 /// What every guest `cargo` and `rustc` here runs with: the toolchain directory
 /// of the sysroot this checkout's sources name, as `RUSTUP_TOOLCHAIN`, which
 /// carries the linker too.
@@ -408,7 +412,20 @@ fn cargo_build(
     extra_env: &[(&str, &str)],
     quiet: bool,
 ) {
-    let mut args = vec!["build", "--target", target, "--profile", PROFILE];
+    cargo_build_as(PROFILE, crate_dir, target, extra_args, env, extra_env, quiet)
+}
+
+/// [`cargo_build`] in `profile`.
+fn cargo_build_as(
+    profile: &str,
+    crate_dir: &Path,
+    target: &str,
+    extra_args: &[&str],
+    env: &GuestEnv,
+    extra_env: &[(&str, &str)],
+    quiet: bool,
+) {
+    let mut args = vec!["build", "--target", target, "--profile", profile];
     if quiet {
         args.push("--quiet");
     }
@@ -2224,11 +2241,16 @@ impl TestBuild {
 /// The one binary `name` of the crate at `crate_path`, built for `arch`: for an
 /// architecture the crate's other binaries do not all build for.
 pub fn build_toyos_bin(root: &Path, arch: Arch, crate_path: &Path, name: &str, quiet: bool) -> Vec<u8> {
-    let _building = Building::start(format!("{} {name} of {}", arch.name(), hostws::rel(root, crate_path)));
+    build_toyos_bin_as(root, arch, crate_path, name, PROFILE, quiet)
+}
+
+/// [`build_toyos_bin`] in `profile`, which the crate declares.
+pub fn build_toyos_bin_as(root: &Path, arch: Arch, crate_path: &Path, name: &str, profile: &str, quiet: bool) -> Vec<u8> {
+    let _building = Building::start(format!("{} {name} ({profile}) of {}", arch.name(), hostws::rel(root, crate_path)));
     let build = TestBuild::begin(root, arch, "a test binary", &[crate_path.to_path_buf()]);
     let (target, env) = (build.target, &build.env);
-    cargo_build(crate_path, target, &["--bin", name], env, &[], quiet);
-    let binary = crate_path.join(format!("target/{target}/{PROFILE}/{name}"));
+    cargo_build_as(profile, crate_path, target, &["--bin", name], env, &[], quiet);
+    let binary = crate_path.join(format!("target/{target}/{profile}/{name}"));
     fs::read(&binary).unwrap_or_else(|e| panic!("read the test binary {}: {e}", binary.display()))
 }
 
