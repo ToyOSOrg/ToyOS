@@ -95,12 +95,50 @@ started. Nothing reaches userland when a device arrives or leaves.
       child's `Process` handle and its waiter threads went; vdagent is a
       `drives` row. `a_drives_row_holds_one_process_per_function` is the
       guest arm, on `Profile::HeadlessTwoEdu`.
-2. **Functions arrive and leave.**
-   - Readers get a device-set object, minted from `DEVICE`.
-   - The kernel provides native PCIe hot-plug on a port whose host bridge
-     `_OSC` granted it.
-   - A removed function's claim answers `Gone`.
-   - An arrived endpoint's BARs are placed inside its port's window.
+2. **Functions arrive and leave.** Built on `wt/toyos-lifecycle-2`, landing
+   after the apertures track's stage B, whose per-bridge declaration carries
+   each host bridge's `_OSC` grant to `pcidev::arm_hot_plug`.
+   - The device set (`toyos_abi::devset`): a level-triggered snapshot of
+     every PCI function the kernel hands out, minted from `DEVICE`, carrying
+     `READ` and `WAIT` and neither `DUP` nor `TRANSFER`, so the supervisor
+     alone holds it. Its header names the time by which a slot may change
+     with no interrupt; the supervisor waits to it and reads again.
+   - Native PCIe hot-plug on a port below a host bridge whose `_OSC` granted
+     native hot-plug and capability structure control. The port is the
+     kernel's, its MSI-X entry on the claim path's remapped message; its
+     handler reads and clears Slot Status, takes a lost or button-removed
+     slot's functions out of the set, makes at most one Slot Control write
+     and posts the set's watch. Powering a slot, §6.6.1's 100 ms and reading
+     the functions below it run on the set's reader.
+   - One record per requester, carrying its live arrival: a device that
+     returns is a new arrival on the same record and domain. A claim of an
+     older arrival answers `Gone` on every call, and its release asks the
+     device nothing. The last release behind a removed slot powers it off.
+   - A BAR firmware assigned no address, behind a bridge, is placed where
+     every bridge on its path forwards, and the register taking the address
+     is the proof.
+   - The supervisor diffs the set (`toyos-supervisor`): a departed arrival
+     is never started again, and the restart budget is the address's.
+   - `a_function_arrives_and_leaves` is the guest arm, on
+     `Profile::HeadlessHotplugPort` (q35, `acpi-pci-hotplug-with-bridge-support=off`).
+
+   Gaps it records:
+   - **Physical arrival is QEMU's alone**: no bench has a hot-plug port the
+     owner lets a driver claim behind, so a metal row reads only the boot set
+     and each bridge's grant. That comes through
+     `issues/toyos-supports-thunderbolt-and-usb4.md`.
+   - QEMU's `device_del` presses the slot's button, so a surprise removal
+     (presence lost) is reached by `toyos_pci::hotplug`'s host tests and no
+     guest.
+   - A machine whose `_OSC` keeps hot-plug for ACPI, q35's default, has no
+     slot armed, and says so by port.
+   - §6.7.1.5's five seconds in which a second press cancels a removal are
+     not offered: a press removes at once.
+   - A bridge below a slot (a switch) is not read: the kernel assigns no bus
+     numbers.
+   - On AArch64's SMMUv3 a function that arrived after the unit was
+     programmed is refused a claim by name: its routes are read for the
+     functions enumerated at boot.
 3. **Drivers leave the shared services.** netstack, soundserver and diskserver
    each become a driver per function plus the service its clients use. The
    client port carries a per-device source and `gone`.
