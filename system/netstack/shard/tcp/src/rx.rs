@@ -13,10 +13,10 @@
 //! than the initial capacity, and a connection whose round trip is unknown keeps it.
 //!
 //! **The round trip is the receiver's own**: a downloader sends no data, so the sender's SRTT
-//! keeps the handshake's sample while queueing lengthens the path. The handshake's sample is
-//! where the estimate starts, so no sample is ever unbounded: the first segment of a reply can
-//! echo a request the peer sat on, and an estimate taken from it whole would hold the growth back
-//! by the peer's delay. With timestamps, a full-sized
+//! keeps the handshake's sample while queueing lengthens the path. With timestamps, the
+//! handshake's sample is where the estimate starts, so no echo is taken whole: the first segment
+//! of a reply can echo a request the peer sat on, and an estimate taken from it would hold the
+//! growth back by the peer's delay. A full-sized
 //! segment carrying a TSecr not yet seen samples the age of that echo, at least one tick and at
 //! most twice the estimate, averaged with RFC 6298 §2.3's gain of 1/8: an echo aged by the
 //! peer's own silence moves the estimate by an eighth at most. Full-sized is the largest segment
@@ -113,7 +113,9 @@ impl Rx {
     /// `max`, or to the most a window field at `shift` offers if that is less: an edge past it
     /// would be one the peer was never told of. `(mss, options)`: the MSS our SYN offered and the
     /// timestamp option's length on every segment, 0 without timestamps, which picks how the
-    /// round trip is sampled. `rtt` is the handshake's sample, where it took one.
+    /// round trip is sampled. `rtt` is the handshake's sample, where it took one: the start of a
+    /// timestamped estimate, and nothing without timestamps, whose least fill time would never
+    /// rise above it.
     pub fn new(next: Seq, max: usize, shift: u8, window: u32, now: Instant, (mss, options): (u32, u32), rtt: Option<Duration>) -> Self {
         let initial = usize::try_from(crate::limits::RECEIVE_BUFFER_INITIAL).unwrap_or(usize::MAX);
         let offerable = usize::from(u16::MAX).checked_shl(u32::from(shift)).unwrap_or(usize::MAX);
@@ -139,7 +141,7 @@ impl Rx {
             last_ack_sent: next,
             max,
             round: (now, 0),
-            rtt,
+            rtt: rtt.filter(|_| options > 0),
             sampler: if options > 0 { Sampler::Echo(None) } else { Sampler::Fill(None) },
             rcv_mss: floor,
             short: 0,
