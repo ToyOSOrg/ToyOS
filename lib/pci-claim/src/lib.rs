@@ -175,6 +175,9 @@ pub enum Why {
     /// keeps, a grant of no bytes or past the largest, a register past its
     /// configuration space.
     NotOffered,
+    /// The IOMMU refused the function an access, and the claim answers nothing
+    /// more.
+    Faulted,
 }
 
 impl Why {
@@ -186,6 +189,7 @@ impl Why {
             SyscallError::Gone => Self::Gone,
             SyscallError::ResourceExhausted => Self::Exhausted,
             SyscallError::InvalidArgument => Self::NotOffered,
+            SyscallError::Io => Self::Faulted,
             other => panic!("toyos-pci-claim: the kernel refused {call} {other:?}, which it never answers it"),
         }
     }
@@ -214,6 +218,7 @@ mod tests {
         assert_eq!(Why::of("a call", SyscallError::Gone), Why::Gone);
         assert_eq!(Why::of("a call", SyscallError::ResourceExhausted), Why::Exhausted);
         assert_eq!(Why::of("a call", SyscallError::InvalidArgument), Why::NotOffered);
+        assert_eq!(Why::of("a call", SyscallError::Io), Why::Faulted);
         for never in [
             SyscallError::Unknown,
             SyscallError::NotFound,
@@ -222,7 +227,6 @@ mod tests {
             SyscallError::BadAddress,
             SyscallError::WouldBlock,
             SyscallError::NotSupported,
-            SyscallError::Io,
         ] {
             assert!(std::panic::catch_unwind(|| Why::of("a call", never)).is_err(), "{never:?}");
         }

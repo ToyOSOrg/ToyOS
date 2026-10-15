@@ -105,112 +105,133 @@ pub const RIGHT_WRITE: u64 = 1;
 /// (`toyos_abi::syscall::Stat::volume`).
 pub const SERVED_VOLUME: u64 = 1 << 63;
 
-/// Declares [`Error`] with each variant's wire code, and the table of all of
-/// them that a reply's status is read against.
+/// Declares [`Error`]: the refusals a server sends, each with its wire code,
+/// and the client end's own words, which have none.
 macro_rules! errors {
-    ($($(#[$doc:meta])* $name:ident = $code:literal,)*) => {
+    (
+        wire { $($(#[$doc:meta])* $name:ident = $code:literal,)* }
+        local { $($(#[$ldoc:meta])* $lname:ident = $lcode:literal,)* }
+    ) => {
         /// Why a request was not answered with its result: the server's word
         /// on the wire, or the client end's own.
         ///
         /// A kernel refusal of a call either end makes for the protocol is
         /// translated once, by [`Error::kernel`]; this protocol carries no
         /// kernel word.
+        // The discriminants are the wire codes, and past them, the client's
+        // words', so the compiler holds every one to its own.
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         #[repr(u8)]
         pub enum Error {
             $($(#[$doc])* $name = $code,)*
+            $($(#[$ldoc])* $lname = $lcode,)*
         }
 
         impl Error {
-            const ALL: &[Error] = &[$(Error::$name,)*];
+            /// The word a reply's `status` carries: `None` for one of the
+            /// client end's own, which no server sends.
+            pub const fn code(self) -> Option<u64> {
+                match self {
+                    $(Self::$name => Some($code),)*
+                    $(Self::$lname => None,)*
+                }
+            }
+
+            /// The refusal a server's `code` names: `None` for a word no
+            /// server sends.
+            pub const fn from_code(code: u64) -> Option<Self> {
+                match code {
+                    $($code => Some(Self::$name),)*
+                    _ => None,
+                }
+            }
+
+            #[cfg(test)]
+            const WIRE: &[Error] = &[$(Error::$name,)*];
+            #[cfg(test)]
+            const LOCAL: &[Error] = &[$(Error::$lname,)*];
         }
     };
 }
 
 errors! {
-    NotFound = 1,
-    AlreadyExists = 2,
-    /// A directory was asked for and this is a file or a link.
-    NotADirectory = 3,
-    /// A file was asked for and this is a directory.
-    IsADirectory = 4,
-    /// A directory with anything in it is not removed.
-    NotEmpty = 5,
-    /// A link's target was asked of something that is not one.
-    NotALink = 6,
-    /// A name, a path or a link's target longer than the volume or the wire
-    /// holds.
-    NameTooLong = 7,
-    /// A name the volume's format cannot store.
-    InvalidName = 8,
-    /// The directory's grant, or its volume, lets nothing in it change.
-    ReadOnly = 9,
-    /// A write, a truncate or a stream on a file not opened to write.
-    NotOpenForWriting = 10,
-    /// A directory the server serves as a root is not removed or renamed.
-    Root = 11,
-    /// A link's target climbs out of the directory the connection was given.
-    Escapes = 12,
-    /// A rename or a link made through an absolute link would span two
-    /// directories, which one connection does not.
-    CrossesDirectories = 13,
-    /// More links on the way than are followed, or a cycle of them.
-    Loop = 14,
-    /// A directory renamed beneath itself.
-    IntoItself = 15,
-    /// The volume has no room for it.
-    NoSpace = 16,
-    /// Past [`MAX_FILE_BYTES`], or past the largest file the volume's format
-    /// holds.
-    FileTooLarge = 17,
-    /// A bound the server or its volume keeps, refused rather than answered
-    /// short: a listing larger than the window, a directory with more entries
-    /// than it reads, a file in more pieces than its entry records.
-    LimitExceeded = 18,
-    /// The connection holds as many files open as the server keeps for one.
-    TooManyOpen = 19,
-    /// The server, or the share the grant names, serves as many connections
-    /// as it takes.
-    TooManyConnections = 20,
-    /// The server, or the share the grant names, serves as many streams as it
-    /// takes.
-    TooManyStreams = 21,
-    /// The device did not do it, or the volume's own structures do not decode.
-    Io = 22,
-    /// The file was removed or renamed over while it was open, or was opened
-    /// on an earlier connection to a server that has since restarted.
-    Stale = 23,
-    /// A file id the connection does not hold.
-    UnknownFile = 24,
-    /// A path that is not UTF-8, not [`canonical`], or not inside the window.
-    InvalidPath = 25,
-    /// A request whose words the protocol gives no meaning: an open flag it
-    /// does not have, a length past the window, an empty name or target.
-    InvalidRequest = 26,
-    /// The volume's format has no such thing, as FAT32 has no symlink.
-    Unsupported = 27,
-    /// The kernel had no room for what the request needs: a handle, memory,
-    /// a place in a queue.
-    OutOfResources = 28,
-    /// The server ended, and the connection with it.
-    Gone = 29,
-    /// This process holds no directory capability by that name.
-    NotHeld = 30,
-    /// The server answered something this protocol does not say.
-    Malformed = 31,
+    wire {
+        NotFound = 1,
+        AlreadyExists = 2,
+        /// A directory was asked for and this is a file or a link.
+        NotADirectory = 3,
+        /// A file was asked for and this is a directory.
+        IsADirectory = 4,
+        /// A directory with anything in it is not removed.
+        NotEmpty = 5,
+        /// A link's target was asked of something that is not one.
+        NotALink = 6,
+        /// A name, a path or a link's target longer than the volume or the wire
+        /// holds.
+        NameTooLong = 7,
+        /// A name the volume's format cannot store.
+        InvalidName = 8,
+        /// The directory's grant, or its volume, lets nothing in it change.
+        ReadOnly = 9,
+        /// A write, a truncate or a stream on a file not opened to write.
+        NotOpenForWriting = 10,
+        /// A directory the server serves as a root is not removed or renamed.
+        Root = 11,
+        /// A link's target climbs out of the directory the connection was given.
+        Escapes = 12,
+        /// A rename or a link made through an absolute link would span two
+        /// directories, which one connection does not.
+        CrossesDirectories = 13,
+        /// More links on the way than are followed, or a cycle of them.
+        Loop = 14,
+        /// A directory renamed beneath itself.
+        IntoItself = 15,
+        /// The volume has no room for it.
+        NoSpace = 16,
+        /// Past [`MAX_FILE_BYTES`], or past the largest file the volume's format
+        /// holds.
+        FileTooLarge = 17,
+        /// A bound the server or its volume keeps, refused rather than answered
+        /// short: a listing larger than the window, a directory with more entries
+        /// than it reads, a file in more pieces than its entry records.
+        LimitExceeded = 18,
+        /// The connection holds as many files open as the server keeps for one.
+        TooManyOpen = 19,
+        /// The server, or the share the grant names, serves as many connections
+        /// as it takes.
+        TooManyConnections = 20,
+        /// The server, or the share the grant names, serves as many streams as it
+        /// takes.
+        TooManyStreams = 21,
+        /// The device did not do it, or the volume's own structures do not decode.
+        Io = 22,
+        /// The file was removed or renamed over while it was open, or was opened
+        /// on an earlier connection to a server that has since restarted.
+        Stale = 23,
+        /// A file id the connection does not hold.
+        UnknownFile = 24,
+        /// A path that is not UTF-8, not [`canonical`], or not inside the window.
+        InvalidPath = 25,
+        /// A request whose words the protocol gives no meaning: an open flag it
+        /// does not have, a length past the window, an empty name or target.
+        InvalidRequest = 26,
+        /// The volume's format has no such thing, as FAT32 has no symlink.
+        Unsupported = 27,
+        /// The kernel had no room for what the request needs: a handle, memory,
+        /// a place in a queue.
+        OutOfResources = 28,
+    }
+    local {
+        /// The server ended, and the connection with it.
+        Gone = 0x80,
+        /// This process holds no directory capability by that name.
+        NotHeld = 0x81,
+        /// The server answered something this protocol does not say.
+        Malformed = 0x82,
+    }
 }
 
 impl Error {
-    /// The word a reply's `status` carries.
-    pub const fn code(self) -> u64 {
-        self as u64
-    }
-
-    /// The refusal `code` names: `None` for a word this protocol does not have.
-    pub fn from_code(code: u64) -> Option<Self> {
-        Self::ALL.iter().copied().find(|e| e.code() == code)
-    }
-
     /// A kernel refusal of `call`, a call made for this protocol, as the
     /// protocol names it. The kernel answers these calls nothing else for a
     /// handle this end holds as it made it, so any other word is a broken
@@ -265,8 +286,10 @@ impl Reply {
         Self { status: 0, kind: 0, value: 0, value2: 0, mtime: 0, node: 0 }
     }
 
-    pub const fn refused(e: Error) -> Self {
-        Self { status: e.code(), kind: 0, value: 0, value2: 0, mtime: 0, node: 0 }
+    /// A server's refusal; one of the client end's own words is never one.
+    pub fn refused(e: Error) -> Self {
+        let status = e.code().unwrap_or_else(|| panic!("toyos::fs: a server refused with {e:?}, which is the client's"));
+        Self { status, kind: 0, value: 0, value2: 0, mtime: 0, node: 0 }
     }
 
     /// The reply, or the refusal its status names; a status this protocol
@@ -606,8 +629,23 @@ impl Dir {
     pub fn stream(&mut self, fid: u64, generation: u64, offset: u64) -> Result<Pipe, Error> {
         self.fid_call(STREAM, generation, &Request { fid, offset, ..Request::new() })?;
         let conn = self.conn.as_ref().expect("a call answered on it");
-        let [end] = conn.recv_handles_exact::<1>().ok_or(Error::Malformed)?;
-        Ok(Pipe(crate::OwnedHandle(end)))
+        let mut batch = [toyos_abi::HANDLE_INVALID; toyos_abi::syscall::MAX_TRANSFER_HANDLES];
+        match conn.recv_handles(&mut batch) {
+            Ok(1) => Ok(Pipe(crate::OwnedHandle(batch[0]))),
+            Ok(n) => {
+                for &h in &batch[..n] {
+                    toyos_abi::syscall::close(h);
+                }
+                self.conn = None;
+                Err(Error::Malformed)
+            }
+            // A table with no room leaves the pipe queued, where the next
+            // stream's answer would find it: the connection goes with it.
+            Err(e) => {
+                self.conn = None;
+                Err(Error::kernel("a stream's pipe", e))
+            }
+        }
     }
 
     pub fn stat(&mut self, path: &str, follow: bool) -> Result<Stat, Refused> {
@@ -871,25 +909,37 @@ mod tests {
         assert_eq!(encode_entry(&mut buf[..10], KIND_FILE, 0, "x"), None);
     }
 
-    /// Every refusal has one code of its own, which reads back as it, and 0 —
-    /// a reply's success — is none of them.
+    /// Every refusal a server sends reads back as itself, and 0 — a reply's
+    /// success — is none of them.
     #[test]
-    fn every_refusal_round_trips_through_its_own_code() {
-        for (i, &e) in Error::ALL.iter().enumerate() {
-            assert_ne!(e.code(), 0, "{e:?}");
-            assert_eq!(Error::from_code(e.code()), Some(e));
-            assert!(Error::ALL[..i].iter().all(|&earlier| earlier.code() != e.code()), "{e:?}'s code is taken");
+    fn every_server_refusal_round_trips_through_its_code() {
+        for &e in Error::WIRE {
+            let code = e.code().expect("a server's refusal has a code");
+            assert_ne!(code, 0, "{e:?}");
+            assert_eq!(Error::from_code(code), Some(e));
             assert_eq!(Reply::refused(e).result().err(), Some(e));
         }
         assert!(Reply::ok().result().is_ok());
+    }
+
+    /// The client end's own words have no code, so no server's status reads
+    /// as one, and a server that tried to send one is a bug that fails loudly.
+    #[test]
+    fn the_client_s_own_words_never_cross_the_wire() {
+        for &e in Error::LOCAL {
+            assert_eq!(e.code(), None, "{e:?}");
+            assert!(std::panic::catch_unwind(|| Reply::refused(e)).is_err(), "{e:?}");
+        }
     }
 
     /// A status, a frame type or a count no server of this protocol sends is
     /// refused by name, never read as another answer.
     #[test]
     fn a_reply_outside_the_protocol_is_malformed() {
-        let codes = Error::ALL.len() as u64;
-        for status in [codes + 1, 0x80, u64::MAX, SyscallError::NotFound.to_u64()] {
+        let past = Error::WIRE.len() as u64 + 1;
+        // 29 to 31 are what the client's own words once were, and 0x80 on what
+        // their discriminants are.
+        for status in [past, 29, 30, 31, 0x80, 0x81, 0x82, u64::MAX, SyscallError::NotFound.to_u64()] {
             assert_eq!(Error::from_code(status), None, "{status:#x}");
             assert_eq!(Reply { status, ..Reply::ok() }.result().err(), Some(Error::Malformed), "{status:#x}");
         }

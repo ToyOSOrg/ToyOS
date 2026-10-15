@@ -687,10 +687,11 @@ impl File {
                     SeekFrom::Current(d) => (p.offset, d),
                     SeekFrom::End(d) => (dir.fstat(p.fid, p.generation)?.size, d),
                 };
-                let at = base.checked_add_signed(delta).ok_or(toyos::fs::Error::InvalidRequest)?;
-                if at > toyos::fs::MAX_FILE_BYTES {
-                    return Err(toyos::fs::Error::FileTooLarge);
-                }
+                // Past either end is the request's fault, as the kernel's route says.
+                let at = base
+                    .checked_add_signed(delta)
+                    .filter(|&at| at <= toyos::fs::MAX_FILE_BYTES)
+                    .ok_or(toyos::fs::Error::InvalidRequest)?;
                 p.offset = at;
                 Ok(at)
             }),
