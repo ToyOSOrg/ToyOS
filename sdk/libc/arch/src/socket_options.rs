@@ -7,8 +7,8 @@
 //! buffer were written, and whether what they hold is non-zero: a host reads a
 //! set option back as any non-zero `int`, Darwin as the option's flag bit.
 //!
-//! libc's numbers and answers are Linux's, so on Linux every row agrees. Darwin
-//! answers the rows [`darwin`] names differently, and is held to those.
+//! libc's numbers are Linux's and its answers POSIX's. A host answers the rows
+//! [`linux`] or [`darwin`] names differently, and is held to those.
 
 use std::ffi::c_int;
 use std::net::{TcpListener, UdpSocket};
@@ -77,7 +77,6 @@ fn refused(refusal: Refusal) -> Answer {
         Refusal::Short => EINVAL,
         Refusal::Fault => EFAULT,
         Refusal::NoSuchOption => ENOPROTOOPT,
-        Refusal::NotSupported => EOPNOTSUPP,
     })
 }
 
@@ -106,10 +105,10 @@ impl Pair {
         self.datagram && self.option == Kept::NoDelay
     }
 
-    /// The option by libc's rule, asked of this socket by a setter or a getter.
-    fn named(&self, setter: bool) -> Result<(), Answer> {
+    /// The option by libc's rule, asked of this socket.
+    fn named(&self) -> Result<(), Answer> {
         let (level, name) = libc_numbers(self.option);
-        let named = sockopt::kept(level, name, self.datagram, setter).map_err(refused)?;
+        let named = sockopt::kept(level, name, self.datagram).map_err(refused)?;
         assert_eq!(named, Some(self.option));
         Ok(())
     }
@@ -117,7 +116,7 @@ impl Pair {
     /// A setter handed `len` bytes at `value`, by libc's rule and by the host.
     fn set(&mut self, value: *const u8, len: u32) -> (Answer, Answer) {
         // SAFETY: `value` is null or eight readable bytes, and `len` at most 8.
-        let ours = match self.named(true).map(|()| unsafe { sockopt::switch(value, len) }) {
+        let ours = match self.named().map(|()| unsafe { sockopt::switch(value, len) }) {
             Ok(Ok(on)) => {
                 self.kept = on;
                 Answer::Set
@@ -137,7 +136,7 @@ impl Pair {
     /// A getter handed `value` and `len`, by libc's rule and by the host.
     fn answered(&self, value: *mut u8, len: *mut u32) -> (Option<Answer>, Option<Answer>) {
         // SAFETY: the caller's.
-        let ours = self.named(false).and_then(|()| unsafe { sockopt::answer(self.kept as i32, value, len) }.map_err(refused));
+        let ours = self.named().and_then(|()| unsafe { sockopt::answer(self.kept as i32, value, len) }.map_err(refused));
         let (level, name) = host_numbers(self.option);
         // SAFETY: the caller's.
         let host = (unsafe { getsockopt(self.fd, level, name, value, len) } != 0).then(|| Answer::Refused(host_errno()));
@@ -158,7 +157,14 @@ impl Pair {
     }
 }
 
-/// What Darwin answers where it is not what Linux and libc do. A TCP option
+/// Where Linux departs from POSIX.1-2024, whose `getsockopt` shall fail with
+/// `ENOPROTOOPT` for an option the protocol does not support: a getter of a TCP
+/// option asked of a datagram socket it refuses with `EOPNOTSUPP`.
+fn linux(foreign: bool, setter: bool) -> Option<Answer> {
+    (foreign && !setter).then_some(Answer::Refused(EOPNOTSUPP))
+}
+
+/// What Darwin answers where it is not what libc does. A TCP option
 /// asked of a datagram socket it calls invalid, once it has read a setter's
 /// value. Of an option the socket has, it judges a setter's pointer before its
 /// length unless the length is 0, and a getter's null buffer holds no byte,
@@ -173,12 +179,17 @@ fn darwin(foreign: bool, setter: bool, null: bool, len: u32) -> Option<Answer> {
     }
 }
 
-fn hold((ours, host): (Answer, Answer), theirs: Option<Answer>, row: &str) {
-    let expected = match theirs {
-        Some(theirs) if cfg!(target_os = "macos") => theirs,
-        _ => ours,
-    };
-    assert_eq!(host, expected, "{row}: libc answers {ours:?}");
+/// The host's departure for the row, if it departs.
+fn departure(foreign: bool, setter: bool, null: bool, len: u32) -> Option<Answer> {
+    if cfg!(target_os = "macos") {
+        darwin(foreign, setter, null, len)
+    } else {
+        linux(foreign, setter)
+    }
+}
+
+fn hold((ours, host): (Answer, Answer), departure: Option<Answer>, row: &str) {
+    assert_eq!(host, departure.unwrap_or(ours), "{row}: libc answers {ours:?}");
 }
 
 #[test]
@@ -201,12 +212,12 @@ fn an_options_value_crosses_as_the_hosts_does() {
                     let row = format!("{option:?} of {of} {on}, {len} bytes, null {null}");
                     let at = if null { ptr::null() } else { value.as_ptr() };
                     let set = pair.set(at, len);
-                    hold(set, darwin(foreign, true, null, len), &format!("set {row}"));
+                    hold(set, departure(foreign, true, null, len), &format!("set {row}"));
                     let got = pair.get(null, len);
-                    hold(got, darwin(foreign, false, null, len), &format!("get {row}"));
+                    hold(got, departure(foreign, false, null, len), &format!("get {row}"));
                     if foreign {
                         assert_eq!(set.0, refused(Refusal::NoSuchOption), "set {row}");
-                        assert_eq!(got.0, refused(Refusal::NotSupported), "get {row}");
+                        assert_eq!(got.0, refused(Refusal::NoSuchOption), "get {row}");
                     }
                 }
             }
@@ -222,10 +233,10 @@ fn an_options_value_crosses_as_the_hosts_does() {
         let mut buf = [UNWRITTEN; 8];
         // SAFETY: a null length is the refusal asked for; the buffer is eight bytes.
         let (ours, host) = pair.answered(buf.as_mut_ptr(), ptr::null_mut());
-        let want = if foreign { Refusal::NotSupported } else { Refusal::Fault };
+        let want = if foreign { Refusal::NoSuchOption } else { Refusal::Fault };
         assert_eq!((ours, buf), (Some(refused(want)), [UNWRITTEN; 8]), "{option:?} of {of}: a null length");
         // Darwin reads the length first, whichever option is asked.
-        let theirs = foreign.then_some(Answer::Refused(EFAULT));
+        let theirs = if cfg!(target_os = "macos") { foreign.then_some(Answer::Refused(EFAULT)) } else { linux(foreign, false) };
         hold((refused(want), host.expect("the host refuses a null length")), theirs, &format!("{option:?} of {of}: a null length"));
     }
 }
