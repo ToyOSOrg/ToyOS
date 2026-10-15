@@ -429,7 +429,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     arch::boot::clock(kernel_args);
     trace::enable();
     arch::boot::timer();
-    // After both halves of what it needs: a TSC period to convert its bound
+    // After both halves of what it needs: a counter period to convert its bound
     // with, and a timer whose every tick polls it.
     deadline::start();
 

@@ -17,7 +17,7 @@ const DATA_OFFSET: usize = 0xF00;
 /// The `rdtsc` the AP being started read on its first instruction in Rust.
 ///
 /// **The whole of the TSC-trail measurement.** `clock::nanos_since_boot`
-/// subtracts one BSP-sampled `TSC_BOOT` whatever CPU asks, so a CPU whose TSC
+/// subtracts one BSP-sampled `COUNTER_AT_BOOT` whatever CPU asks, so a CPU whose TSC
 /// reads below the BSP's has no honest answer to give; the reading is bracketed
 /// by two BSP samples taken either side of this AP's whole bring-up, which is
 /// serialised, so a synchronised TSC lands inside the bracket by construction

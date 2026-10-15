@@ -10,14 +10,14 @@
 //!
 //! So this one is armed off the parameter line and polled from the timer
 //! interrupt entry, on every CPU, in both rings. Its whole requirement is that
-//! some CPU still takes an interrupt: [`poll`] reads two atomics and the TSC,
-//! takes no lock, allocates nothing and calls nothing that can, so whatever a
+//! some CPU still takes an interrupt: [`poll`] reads two atomics and the CPU's
+//! counter, takes no lock, allocates nothing and calls nothing that can, so whatever a
 //! wedged path is holding is not on this path.
 //!
 //! # What it does not cover, stated rather than implied
 //!
 //! - **The span before `clock::init`,** which no bound in this file or in
-//!   [`crate::hardlockup`] reaches: no TSC period to convert a bound with, and
+//!   [`crate::hardlockup`] reaches: no counter period to convert a bound with, and
 //!   no counter armed. A kernel that dies there still needs a hand.
 //! - **A machine on which no CPU takes an interrupt at all.** Nothing polled
 //!   from a running CPU can cover that; **that half is [`crate::hardlockup`]**,
@@ -54,12 +54,12 @@ pub const PHASES: &[&str] = &[
 /// named none. Written on the BSP before any AP exists.
 static BOUND_MS: AtomicU64 = AtomicU64::new(0);
 
-/// The `rdtsc` reading the machine is reset at, or 0 while unarmed.
+/// The `cpu::counter` reading the machine is reset at, or 0 while unarmed.
 ///
-/// **A TSC value and not a nanosecond one**, because `clock::nanos_since_boot`'s
+/// **A counter reading and not a nanosecond one**, because `clock::nanos_since_boot`'s
 /// multiply-and-divide is out of line and this is read on every timer tick of
 /// every CPU.
-static AT_TSC: AtomicU64 = AtomicU64::new(0);
+static AT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Whether a CPU has taken the expiry. One machine, one seal, one reset.
 static FIRED: AtomicBool = AtomicBool::new(false);
@@ -79,7 +79,7 @@ pub fn claim_the_reset() -> bool {
 /// expiry would seal a `WEDGED` record over it. Disarms rather than latching a
 /// second flag, so [`poll`] stays one relaxed load.
 pub fn stand_down() {
-    AT_TSC.store(0, Relaxed);
+    AT_COUNTER.store(0, Relaxed);
 }
 
 /// Whether this boot runs under a bound at all — this one or
@@ -90,7 +90,7 @@ pub fn stand_down() {
 /// 0 takes none; on a boot that named no bound that re-arm is a local APIC read and
 /// two writes per wake that buy nothing.
 pub fn armed() -> bool {
-    AT_TSC.load(Relaxed) != 0
+    AT_COUNTER.load(Relaxed) != 0
 }
 
 /// The last phase [`reached`] was told about, as an index into [`PHASES`].
@@ -163,7 +163,7 @@ pub fn claim(cmdline: &str) {
     }
 }
 
-/// Turn the bound into a deadline, once the TSC period is known.
+/// Turn the bound into a deadline, once the counter's period is known.
 ///
 /// Called after `clock::init` and the LAPIC timer's arm, which are the two
 /// things [`poll`] needs: a period to convert with, and something that fires.
@@ -172,7 +172,7 @@ pub fn start() {
     if ms == 0 {
         return;
     }
-    AT_TSC.store(crate::clock::tsc_deadline(ms.saturating_mul(1_000_000)), Relaxed);
+    AT_COUNTER.store(crate::clock::counter_deadline(ms.saturating_mul(1_000_000)), Relaxed);
     log!(
         "boot deadline: {ms} ms, after which this kernel seals a WEDGED record and writes the \
          reset register itself"
@@ -185,7 +185,7 @@ pub fn start() {
 }
 
 pub fn poll() {
-    past(AT_TSC.load(Relaxed))
+    past(AT_COUNTER.load(Relaxed))
 }
 
 fn past(at: u64) {
@@ -205,7 +205,7 @@ static KERNEL_PC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS
 /// `extern "C"` because the Ring 0 half of the x86 timer entry calls it from
 /// naked assembly, where the ABI is written out rather than inferred.
 pub extern "C" fn poll_in_kernel(pc: u64) {
-    let at = AT_TSC.load(Relaxed);
+    let at = AT_COUNTER.load(Relaxed);
     if at != 0 {
         KERNEL_PC[crate::arch::percpu::cpu_id() as usize].store(pc, Relaxed);
     }
