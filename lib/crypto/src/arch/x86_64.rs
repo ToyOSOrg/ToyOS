@@ -182,8 +182,8 @@ pub(super) fn ghash_multiply(a: u128, b: u128) -> Option<u128> {
     }
     let a = crate::secret::Secret(a.reverse_bits().to_le_bytes());
     let b = crate::secret::Secret(b.reverse_bits().to_le_bytes());
-    let mut products = crate::secret::Secret([0; 48]);
-    let mut saved = crate::secret::Secret([0; 80]);
+    let mut products = crate::secret::Secret([0u8; 48]);
+    let mut saved = crate::secret::Secret([0u8; 80]);
     // CPUID admitted CLMUL. All five used registers are restored; each memory
     // operand refers to a distinct live array of the required size.
     unsafe {
@@ -408,7 +408,7 @@ mod hosted {
         unsafe { chacha::avx2::xor(key, counter, nonce, data) }
     }
 
-    /// Whole four-block groups of at least sixteen blocks; returns the
+    /// Whole eight-block groups of at least sixteen blocks; returns the
     /// blocks it absorbed.
     pub(in crate::arch) fn poly1305_blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]]) -> usize {
         if blocks.len() < 16 || !features().avx2() {
@@ -428,11 +428,17 @@ mod hosted {
     }
 
     pub(in crate::arch) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool {
-        if !features().bmi2() {
+        let features = features();
+        if !(features.avx2() && features.bmi2()) {
             return false;
         }
-        // BMI2 is admitted.
-        unsafe { sha::sha512(state, blocks) }
+        if features.avx512vl() {
+            // AVX2, BMI2 and AVX-512VL under ZMM state are admitted.
+            unsafe { sha::sha512_avx512(state, blocks) }
+        } else {
+            // AVX2 and BMI2 under YMM state are admitted.
+            unsafe { sha::sha512_avx2(state, blocks) }
+        }
         true
     }
 }

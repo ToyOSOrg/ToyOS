@@ -167,10 +167,7 @@ fn ctr_rounds<const R: usize>(keys: &[u8; 240], nonce: &[u8; 12], first: u32, da
         next = next.wrapping_add(1);
     }
     if !tail.is_empty() {
-        let mut last = crate::secret::Secret([0u8; 16]);
-        last.0[..tail.len()].copy_from_slice(tail);
-        xor_into(&mut last.0, rounds::<R>(&k, counter(base, next)));
-        tail.copy_from_slice(&last.0[..tail.len()]);
+        xor_bytes(tail, rounds::<R>(&k, counter(base, next)));
     }
 }
 
@@ -393,9 +390,9 @@ pub(super) unsafe fn seal(
 
 #[inline]
 fn xor_bytes(data: &mut [u8], stream: __m128i) {
-    let mut bytes = [0u8; 16];
-    store(&mut bytes, stream);
-    for (d, s) in data.iter_mut().zip(bytes) {
+    let mut bytes = crate::secret::Secret([0u8; 16]);
+    store(&mut bytes.0, stream);
+    for (d, s) in data.iter_mut().zip(bytes.0) {
         *d ^= s;
     }
 }

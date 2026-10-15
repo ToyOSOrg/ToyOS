@@ -24,3 +24,20 @@ pub(crate) fn terminated(block: &[u8; 16], len: usize, next: u8) -> [u8; 16] {
         core::cmp::Ordering::Greater => 0,
     })
 }
+
+/// `src` into `dst` of the same length: whole 16-byte chunks, then a tail of
+/// up to 15 bytes over a fixed 16 conditional stores.
+#[inline]
+pub(crate) fn copy(dst: &mut [u8], src: &[u8]) {
+    let (chunks, tail) = dst.as_chunks_mut::<16>();
+    let (from, rest) = src.as_chunks::<16>();
+    for (d, s) in chunks.iter_mut().zip(from) {
+        *d = *s;
+    }
+    let rest = padded(rest);
+    for (i, byte) in rest.iter().enumerate() {
+        if let Some(d) = tail.get_mut(i) {
+            *d = *byte;
+        }
+    }
+}

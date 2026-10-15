@@ -94,10 +94,9 @@ fn message(quad: &[[u8; 16]; 4]) -> [__m256i; 5] {
     ]
 }
 
-/// Absorbs the longest prefix of whole four-block groups, each block with
-/// 2^128 added, into `h` and returns its length in blocks. From 16 blocks
-/// on, two sets of four lanes run as independent chains over eight-block
-/// groups with r^8, the last group meeting r^8 to r.
+/// Absorbs the longest prefix of whole eight-block groups, each block with
+/// 2^128 added, into `h` and returns its length in blocks. Two sets of four
+/// lanes run as independent chains with r^8, the last group meeting r^8 to r.
 ///
 /// # Safety
 /// AVX2 under YMM state is admitted.
@@ -113,44 +112,29 @@ pub(super) unsafe fn blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]])
         core::array::from_fn(|k| _mm256_add_epi64(acc[k], m[k]))
     };
     let (octs, _) = blocks.as_chunks::<8>();
-    let sums = if octs.len() >= 2 {
-        let r5 = multiply(r4, *r);
-        let r6 = multiply(r5, *r);
-        let r7 = multiply(r6, *r);
-        let r8 = multiply(r7, *r);
-        let every = Multiplier::new([limbs(r8); 4]);
-        // Lanes b0, b2, b1, b3 of each half meet r^(8-position).
-        let close_a = Multiplier::new([limbs(r8), limbs(r6), limbs(r7), limbs(r5)]);
-        let close_b = Multiplier::new([limbs(r4), limbs(r2), limbs(r3), limbs(r1)]);
-        let (last, octs) = octs.split_last().unwrap();
-        let halves = |oct: &[[u8; 16]; 8]| {
-            let (quads, _) = oct.as_chunks::<4>();
-            (message(&quads[0]), message(&quads[1]))
-        };
-        let (mut a, mut b) = (first, [_mm256_setzero_si256(); 5]);
-        for oct in octs {
-            let (m, n) = halves(oct);
-            a = every.multiply(add(a, m));
-            b = every.multiply(add(b, n));
-        }
-        let (m, n) = halves(last);
-        a = close_a.multiply(add(a, m));
-        b = close_b.multiply(add(b, n));
-        let both = add(a, b);
-        (both, 8 * (octs.len() + 1))
-    } else {
-        let (quads, _) = blocks.as_chunks::<4>();
-        let Some((last, quads)) = quads.split_last() else { return 0 };
-        let every = Multiplier::new([limbs(r4); 4]);
-        // Lanes b0, b2, b1, b3 meet r^4, r^2, r^3 and r.
-        let closing = Multiplier::new([limbs(r4), limbs(r2), limbs(r3), limbs(r1)]);
-        let mut acc = first;
-        for quad in quads {
-            acc = every.multiply(add(acc, message(quad)));
-        }
-        (closing.multiply(add(acc, message(last))), 4 * (quads.len() + 1))
+    let Some((last, octs)) = octs.split_last() else { return 0 };
+    let r5 = multiply(r4, *r);
+    let r6 = multiply(r5, *r);
+    let r7 = multiply(r6, *r);
+    let r8 = multiply(r7, *r);
+    let every = Multiplier::new([limbs(r8); 4]);
+    // Lanes b0, b2, b1, b3 of each half meet r^(8-position).
+    let close_a = Multiplier::new([limbs(r8), limbs(r6), limbs(r7), limbs(r5)]);
+    let close_b = Multiplier::new([limbs(r4), limbs(r2), limbs(r3), limbs(r1)]);
+    let halves = |oct: &[[u8; 16]; 8]| {
+        let (quads, _) = oct.as_chunks::<4>();
+        (message(&quads[0]), message(&quads[1]))
     };
-    let (acc, done) = sums;
+    let (mut a, mut b) = (first, [_mm256_setzero_si256(); 5]);
+    for oct in octs {
+        let (m, n) = halves(oct);
+        a = every.multiply(add(a, m));
+        b = every.multiply(add(b, n));
+    }
+    let (m, n) = halves(last);
+    a = close_a.multiply(add(a, m));
+    b = close_b.multiply(add(b, n));
+    let (acc, done) = (add(a, b), 8 * (octs.len() + 1));
     // Limb sums over the lanes, each below 2^30.
     let sums: [u64; 5] = acc.map(|limb| {
         // Four plain words make 32 plain bytes.

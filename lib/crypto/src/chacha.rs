@@ -43,47 +43,41 @@ fn rounds(state: &[u32; 16]) -> Secret<64> {
 
 pub(crate) fn block(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> Secret<64> {
     let mut state = Secret([0; 16]);
-    words(key, &mut state.0);
-    state.0[12] = counter;
-    for i in 0..3 {
-        state.0[13 + i] = u32::from_le_bytes(nonce[4 * i..4 * i + 4].try_into().unwrap());
-    }
+    fill_state(&mut state.0, key, nonce, counter);
     rounds(&state.0)
 }
 
 pub(crate) fn legacy_block(key: &[u8; 32], nonce: &[u8; 8], counter: u64) -> Secret<64> {
-    rounds(&legacy_state(key, nonce, counter).0)
+    let mut state = Secret([0; 16]);
+    fill_legacy_state(&mut state.0, key, nonce, counter);
+    rounds(&state.0)
 }
 
 /// The original construction's state: a 64-bit counter and an 8-byte nonce.
-pub(crate) fn legacy_state(key: &[u8; 32], nonce: &[u8; 8], counter: u64) -> Secret<16, u32> {
-    let mut state = Secret([0; 16]);
-    words(key, &mut state.0);
-    state.0[12] = counter as u32;
-    state.0[13] = (counter >> 32) as u32;
-    state.0[14] = u32::from_le_bytes(nonce[..4].try_into().unwrap());
-    state.0[15] = u32::from_le_bytes(nonce[4..].try_into().unwrap());
-    state
+pub(crate) fn fill_legacy_state(state: &mut [u32; 16], key: &[u8; 32], nonce: &[u8; 8], counter: u64) {
+    words(key, state);
+    state[12] = counter as u32;
+    state[13] = (counter >> 32) as u32;
+    state[14] = u32::from_le_bytes(nonce[..4].try_into().unwrap());
+    state[15] = u32::from_le_bytes(nonce[4..].try_into().unwrap());
 }
 
 /// RFC 8439's state for block `counter`.
-pub(crate) fn state(key: &[u8; 32], nonce: &[u8; 12], counter: u32) -> Secret<16, u32> {
+pub(crate) fn fill_state(state: &mut [u32; 16], key: &[u8; 32], nonce: &[u8; 12], counter: u32) {
     let (counter, nonce) = ietf(nonce, counter);
-    legacy_state(key, &nonce, counter)
+    fill_legacy_state(state, key, &nonce, counter);
 }
 
 /// The keystream of the first `n` of four independent states, at most four:
 /// two or more run together where SIMD admits them, in about one block's
 /// latency.
-pub(crate) fn blocks(states: &[[u32; 16]; 4], n: usize) -> Secret<256> {
-    let mut out = Secret([0u8; 256]);
-    if n >= 2 && crate::arch::chacha_blocks(states, &mut out.0) {
-        return out;
+pub(crate) fn blocks(states: &[[u32; 16]; 4], n: usize, out: &mut [u8; 256]) {
+    if n >= 2 && crate::arch::chacha_blocks(states, out) {
+        return;
     }
-    for (chunk, state) in out.0.as_chunks_mut::<64>().0.iter_mut().zip(states).take(n) {
-        chunk.copy_from_slice(&rounds(state).0);
+    for (chunk, state) in out.as_chunks_mut::<64>().0.iter_mut().zip(states).take(n) {
+        *chunk = rounds(state).0;
     }
-    out
 }
 
 /// IETF's 32-bit counter and first nonce word as the original 64-bit
@@ -186,14 +180,14 @@ mod tests {
     #[test]
     fn independent_blocks_match_one_at_a_time() {
         // Four states of two keys and scattered counters, as SSH's packets take them.
-        let states: [[u32; 16]; 4] = [
-            legacy_state(&[1; 32], &[2; 8], 0).0,
-            legacy_state(&[3; 32], &[4; 8], u64::from(u32::MAX)).0,
-            legacy_state(&[3; 32], &[4; 8], u64::MAX).0,
-            state(&[5; 32], &[6; 12], 7).0,
-        ];
+        let mut states = [[0u32; 16]; 4];
+        fill_legacy_state(&mut states[0], &[1; 32], &[2; 8], 0);
+        fill_legacy_state(&mut states[1], &[3; 32], &[4; 8], u64::from(u32::MAX));
+        fill_legacy_state(&mut states[2], &[3; 32], &[4; 8], u64::MAX);
+        fill_state(&mut states[3], &[5; 32], &[6; 12], 7);
         for n in 1..=4 {
-            let together = blocks(&states, n);
+            let mut together = Secret([0u8; 256]);
+            blocks(&states, n, &mut together.0);
             for (i, state) in states.iter().enumerate() {
                 let expected = if i < n { rounds(state).0 } else { [0; 64] };
                 if i < n || !crate::arch::chacha_blocks(&states, &mut [0; 256]) {

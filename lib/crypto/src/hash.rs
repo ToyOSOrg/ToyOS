@@ -15,7 +15,7 @@ pub(crate) const K256: [u32; 64] = [
     0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
     0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
-const K512: [u64; 80] = [
+pub(crate) const K512: [u64; 80] = [
     0x428a2f98d728ae22,
     0x7137449123ef65cd,
     0xb5c0fbcfec4d3b2f,
@@ -126,6 +126,18 @@ macro_rules! round {
     };
 }
 
+#[cfg(all(target_arch = "x86_64", not(target_os = "uefi")))]
+pub(crate) use round;
+
+/// SHA-512's Σ0 and Σ1, which the x86-64 schedule's rounds share.
+pub(crate) const fn big0(x: u64) -> u64 {
+    x.rotate_right(28) ^ x.rotate_right(34) ^ x.rotate_right(39)
+}
+
+pub(crate) const fn big1(x: u64) -> u64 {
+    x.rotate_right(14) ^ x.rotate_right(18) ^ x.rotate_right(41)
+}
+
 /// FIPS 180-4 §6.2.2 and §6.4.2 over whole blocks: sixteen rounds unrolled
 /// per pass over the schedule's window, which is erased once at the end.
 macro_rules! rounds {
@@ -185,8 +197,8 @@ rounds!(
     8,
     128,
     K512,
-    |x: u64| x.rotate_right(28) ^ x.rotate_right(34) ^ x.rotate_right(39),
-    |x: u64| x.rotate_right(14) ^ x.rotate_right(18) ^ x.rotate_right(41),
+    big0,
+    big1,
     |x: u64| x.rotate_right(1) ^ x.rotate_right(8) ^ (x >> 7),
     |x: u64| x.rotate_right(19) ^ x.rotate_right(61) ^ (x >> 6)
 );
@@ -249,7 +261,7 @@ macro_rules! hash {
                 self.bytes = bytes;
                 if self.filled != 0 {
                     let n = message.len().min($block - self.filled);
-                    self.block[self.filled..self.filled + n].copy_from_slice(&message[..n]);
+                    crate::block::copy(&mut self.block[self.filled..self.filled + n], &message[..n]);
                     self.filled += n;
                     message = &message[n..];
                     if self.filled == $block {
@@ -263,7 +275,7 @@ macro_rules! hash {
                 }
                 message = rest;
                 if !message.is_empty() {
-                    self.block[self.filled..self.filled + message.len()].copy_from_slice(message);
+                    crate::block::copy(&mut self.block[self.filled..self.filled + message.len()], message);
                     self.filled += message.len();
                 }
                 Ok(())
@@ -390,6 +402,24 @@ hash!(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dispatched_compression_matches_the_portable_rounds() {
+        let bytes: std::vec::Vec<u8> = (0..128 * 9).map(|i: usize| (i * 151 + i / 7) as u8).collect();
+        for n in 0..=9 {
+            let (blocks, _) = bytes[..128 * n].as_chunks::<128>();
+            let (start, mut portable) = ([0x0123_4567_89ab_cdefu64; 8], [0x0123_4567_89ab_cdefu64; 8]);
+            let mut dispatched = start;
+            compress512(&mut dispatched, blocks);
+            sha512_rounds(&mut portable, blocks);
+            assert_eq!(dispatched, portable, "SHA-512, {n} blocks");
+            let (blocks, _) = bytes[..64 * n].as_chunks::<64>();
+            let (mut dispatched, mut portable) = ([0x89ab_cdefu32; 8], [0x89ab_cdefu32; 8]);
+            compress256(&mut dispatched, blocks);
+            sha256_rounds(&mut portable, blocks);
+            assert_eq!(dispatched, portable, "SHA-256, {n} blocks");
+        }
+    }
     #[test]
     fn length_refusals_leave_state_unchanged() {
         let mut h = Sha256::new();
