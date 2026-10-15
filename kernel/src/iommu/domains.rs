@@ -5,6 +5,8 @@
 
 use alloc::vec::Vec;
 
+use toyos_abi::acpi::RootBridgeWindow;
+
 use crate::iommu::window::Window;
 use crate::iommu::{DomainId, IommuError, Iova};
 use crate::mm::PAGE_2M;
@@ -16,10 +18,10 @@ pub struct Domains<S> {
     /// By id minus `first`; never shrinks, since a released id would name a
     /// domain some unit may still have cached.
     live: Vec<(S, Window)>,
-    /// What no domain's addresses may reach: the root bridges' declared
-    /// windows and the regions firmware reserved, as `(start, end)`; `None`
-    /// where no declaration is held ([`Window::new`]).
-    reserved: Option<Vec<(u64, u64)>>,
+    /// The regions firmware reserved for a device, as `(start, end)`, which
+    /// no domain's addresses reach beside the declared windows
+    /// ([`Window::new`]).
+    reserved: Vec<(u64, u64)>,
 }
 
 /// A domain [`Domains::prepare`] admitted, not yet made.
@@ -31,23 +33,26 @@ pub struct Next {
 
 impl<S: Copy> Domains<S> {
     pub const fn new(first: u16) -> Self {
-        Self { first, live: Vec::new(), reserved: None }
+        Self { first, live: Vec::new(), reserved: Vec::new() }
     }
 
     /// Before any domain is made: every one is built clear of these.
-    pub fn avoid(&mut self, reserved: Option<Vec<(u64, u64)>>) {
+    pub fn avoid(&mut self, reserved: Vec<(u64, u64)>) {
         self.reserved = reserved;
     }
 
     /// The next domain's id and its window over `translatable` bits, with
-    /// `room` bytes handed out first; refused, with no id spent, where ids
-    /// reach `ceiling` or the window would hold less.
-    pub fn prepare(&self, translatable: u8, ceiling: u32, room: u64) -> Result<Next, IommuError> {
+    /// `room` bytes handed out first, clear of the root bridges' declared
+    /// `windows`, `None` where no declaration is held; refused, with no id
+    /// spent, where ids reach `ceiling` or the window would hold less.
+    pub fn prepare(&self, translatable: u8, ceiling: u32, room: u64, windows: Option<&[RootBridgeWindow]>) -> Result<Next, IommuError> {
         let id = u16::try_from(usize::from(self.first) + self.live.len())
             .ok()
             .filter(|id| u32::from(*id) < ceiling)
             .ok_or(IommuError::DomainsExhausted(ceiling))?;
-        let (addresses, first) = Window::new(translatable, self.reserved.as_deref(), room)?;
+        let reserved: Option<Vec<(u64, u64)>> =
+            windows.map(|windows| windows.iter().map(|w| (w.base, w.end())).chain(self.reserved.iter().copied()).collect());
+        let (addresses, first) = Window::new(translatable, reserved.as_deref(), room)?;
         Ok(Next { id, addresses, first })
     }
 

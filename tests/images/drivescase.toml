@@ -3,7 +3,7 @@
 # its own until the job that judges them has run.
 
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["acpiserver", "logkeeper", "test-runner"]
 
 # `every_boot_config_runs_logkeeper` is what refuses a boot config without it.
 [programs.logkeeper]
@@ -19,3 +19,10 @@ drives = ["pci:00:ff:00/1234:11e8"]
 # none without it.
 [programs.test-runner]
 syscap = ["inventory", "dup"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]

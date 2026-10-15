@@ -8,7 +8,6 @@ use crate::drivers::pci::PciDevice;
 use crate::log;
 use crate::mm::policy::MmioPolicy;
 use crate::mm::Mmio;
-use toyos_abi::boot::RootBridgeWindow;
 
 /// Which backend [`init`] found: none until it has, and then fixed.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -35,10 +34,10 @@ fn backend() -> Backend {
 const MAX_PHYS: u64 = 1 << 52;
 
 /// The units of whichever table firmware published.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeWindow]>) {
-    let found = if super::vtd::init(rsdp_addr, devices, windows) {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
+    let found = if super::vtd::init(rsdp_addr, devices) {
         Backend::Vtd
-    } else if super::amdvi::init(rsdp_addr, devices, windows) {
+    } else if super::amdvi::init(rsdp_addr, devices) {
         Backend::AmdVi
     } else {
         Backend::None
@@ -134,10 +133,10 @@ pub mod domain {
     use crate::arch::x86_64::{amdvi, vtd};
     use crate::iommu::{DomainId, IommuError, Iova, StreamId};
 
-    pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
+    pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(DomainId, Iova), IommuError> {
         match backend() {
-            Backend::Vtd => vtd::domain::create(room),
-            Backend::AmdVi => amdvi::domain::create(room),
+            Backend::Vtd => vtd::domain::create(room, windows),
+            Backend::AmdVi => amdvi::domain::create(room, windows),
             Backend::None => Err(IommuError::NoUnit),
         }
     }

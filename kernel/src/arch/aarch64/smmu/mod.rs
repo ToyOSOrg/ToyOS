@@ -210,7 +210,7 @@ pub fn drivers_settled() {}
 
 /// The SMMUv3, armed; a refusal leaves every unit the IORT names aborting
 /// what it is given, or says why one could not be told to.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[toyos_abi::boot::RootBridgeWindow]>) {
+pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     let iort = match toyos_acpi::iort(direct_phys(), rsdp_addr) {
         Ok(iort) => iort,
         Err(IortRefused::Table(TableError::Absent)) => {
@@ -271,8 +271,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[toyos_abi::
             Err(why) => log!("IOMMU: {function}'s IORT route is refused: {why:?}"),
         }
     }
-    let reserved = windows.map(|w| w.iter().map(|w| (w.base, w.end())).collect());
-    let Some(live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, reserved) else {
+    let Some(live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes) else {
         return;
     };
     *UNIT.lock() = Some(live);
@@ -329,7 +328,6 @@ fn program(
     coherent_override: bool,
     event: Option<core::num::NonZeroU32>,
     routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
-    reserved: Option<Vec<(u64, u64)>>,
 ) -> Option<Live> {
     let refused = |why: core::fmt::Arguments<'_>| log!("IOMMU: the SMMUv3 at {base:#x} is left aborting: {why}");
     let (idr0, idr1, idr5) = (regs.read(reg::IDR0), regs.read(reg::IDR1), regs.read(reg::IDR5));
@@ -404,7 +402,6 @@ fn program(
         routes,
         domains: crate::iommu::domains::Domains::new(domain::FIRST),
     };
-    live.domains.avoid(reserved);
     live.issue(&[Command::ForgetAll, Command::InvalidateAll]);
 
     regs.write64(reg::EVENTQ_BASE, events_base);

@@ -125,9 +125,17 @@ pub const BUS: u8 = 2;
 /// One QWORD Address Space Descriptor (ACPI 6.5 §6.4.3.5.1), field by field,
 /// its General and Type Specific Flags clear.
 pub fn qword_descriptor(kind: u8, granularity: u64, min: u64, max: u64, translation: u64, length: u64) -> Vec<u8> {
-    let mut d = vec![0x8A, 0x2B, 0x00, kind, 0x00, 0x00];
-    for field in [granularity, min, max, translation, length] {
-        d.extend_from_slice(&field.to_le_bytes());
+    address_space(0x8A, 8, kind, [granularity, min, max, translation, length])
+}
+
+/// One Address Space Descriptor of `tag` whose five fields are `width` bytes
+/// each (ACPI 6.5 §6.4.3.5): `0x88` Word, `0x87` DWord, `0x8A` QWord, its
+/// General and Type Specific Flags clear.
+pub fn address_space(tag: u8, width: usize, kind: u8, fields: [u64; 5]) -> Vec<u8> {
+    let body = 3 + 5 * width;
+    let mut d = vec![tag, body as u8, 0x00, kind, 0x00, 0x00];
+    for field in fields {
+        d.extend_from_slice(&field.to_le_bytes()[..width]);
     }
     d
 }
@@ -137,20 +145,4 @@ pub fn resource_list(descriptors: &[Vec<u8>]) -> Vec<u8> {
     let mut bytes = descriptors.concat();
     bytes.extend_from_slice(&[0x79, 0x00]);
     bytes
-}
-
-/// What OVMF's firmware answered for its root bridge 0 through
-/// `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL::Configuration`, as captured.
-pub const OVMF_ROOT_BRIDGE: &[u8] = include_bytes!("../../fixtures/ovmf-pure-efi/root-bridge-0.bin");
-
-/// What the ThinkPad T14's firmware answers for its root bridge 0 through
-/// `EFI_PCI_ROOT_BRIDGE_IO_PROTOCOL::Configuration`, decoded: its I/O range,
-/// two memory windows and its bus range.
-pub fn t14_root_bridge() -> Vec<u8> {
-    resource_list(&[
-        qword_descriptor(IO, 0, 0x3000, 0x3fff, 0, 0x1000),
-        qword_descriptor(MEMORY, 0x20, 0xa200_0000, 0xbcff_ffff, 0, 0x1b00_0000),
-        qword_descriptor(MEMORY, 0x40, 0x40_0000_0000, 0x60_3dbf_ffff, 0, 0x20_3dc0_0000),
-        qword_descriptor(BUS, 0, 0, 0x79, 0, 0x7a),
-    ])
 }

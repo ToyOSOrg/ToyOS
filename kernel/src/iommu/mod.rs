@@ -181,7 +181,9 @@ pub enum DeviceSpace {
 impl DeviceSpace {
     /// One for whichever of `functions` is attached to it, or the machine's
     /// own with the reason: the machine's own where any of them keeps it, so
-    /// the one attached reaches what its device addresses name. For a driver
+    /// the one attached reaches what its device addresses name, and where the
+    /// unit has no room above the CPU's addresses, since a driver in this
+    /// kernel comes up before the root bridges are declared. For a driver
     /// **in this kernel**, whose addresses are the kernel's either way.
     pub fn create(functions: &[crate::drivers::pci::PciDevice]) -> Self {
         for function in functions {
@@ -191,7 +193,7 @@ impl DeviceSpace {
                 return Self::Untranslated;
             }
         }
-        match unit::domain::create(0) {
+        match unit::domain::create(0, None) {
             Ok((id, _)) => Self::Own(id),
             Err(why) => {
                 log!("iommu: no domain of its own for a device: {why}");
@@ -238,11 +240,12 @@ impl DeviceSpace {
 pub struct OwnSpace(DomainId);
 
 impl OwnSpace {
-    /// One with `room` bytes of it handed out at the address answered, or the
-    /// reason there is none: a machine with no unit and a machine out of
-    /// domains are both refusals.
-    pub fn create(room: u64) -> Result<(Self, u64), IommuError> {
-        unit::domain::create(room).map(|(id, at)| (Self(id), at.raw()))
+    /// One with `room` bytes of it handed out at the address answered, clear
+    /// of the root bridges' declared `windows`, `None` where none are held,
+    /// or the reason there is none: a machine with no unit and a machine out
+    /// of domains are both refusals.
+    pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(Self, u64), IommuError> {
+        unit::domain::create(room, windows).map(|(id, at)| (Self(id), at.raw()))
     }
 
     /// [`DeviceSpace::map`].
@@ -287,15 +290,9 @@ impl core::fmt::Display for StreamId {
 ///
 /// The device list must be the complete enumeration: enabling translation with an unenumerated device left off it can brick the machine's own boot disk.
 ///
-/// No domain's addresses reach into one of `windows`, the root bridges'
-/// declared memory, or `None` where no declaration is held ([`window`]).
-pub fn init(
-    rsdp_addr: u64,
-    devices: &[crate::drivers::pci::PciDevice],
-    windows: Option<&toyos_pci::aperture::Declaration<alloc::vec::Vec<toyos_abi::boot::RootBridgeWindow>>>,
-) {
+pub fn init(rsdp_addr: u64, devices: &[crate::drivers::pci::PciDevice]) {
     log!("iommu: the CPUs issue {}-bit physical addresses", crate::arch::cpu::physical_address_bits());
-    unit::init(rsdp_addr, devices, windows.map(|declared| declared.windows()));
+    unit::init(rsdp_addr, devices);
 }
 
 /// Once, after every kernel driver has taken its functions from firmware and

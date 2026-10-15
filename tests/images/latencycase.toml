@@ -11,7 +11,7 @@
 # `power` because the job list is what ends the boot: there is no host on the
 # other end of the console on the machine this config exists for.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -44,3 +44,10 @@ devices = ["pci:01:08:02/1b36:0010"]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]

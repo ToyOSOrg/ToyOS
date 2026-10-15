@@ -125,34 +125,44 @@ pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// Every domain's addresses lie outside every root-bridge window firmware
-/// declared: a bridge may route a request in one of those before the unit
-/// sees it.
-pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
-    const DECLARED: &str = "pcidev: firmware declared root bridge memory: ";
+/// The kernel's record of a declaration it refused.
+pub const REFUSED_DECLARATION: &str = "pcidev: the root bridges' memory is refused as declared";
+
+/// What the `acpi` claim's holder declared the root bridges decode.
+pub const DECLARED: &str = "pcidev: the acpi claim declared root bridge memory: ";
+
+/// `a..b` in hex, as the kernel's records write a span.
+fn span(text: &str) -> Option<(u64, u64)> {
+    let (from, to) = text.split_once("..")?;
+    let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
+    Some((hex(from)?, hex(to)?))
+}
+
+/// The declared windows, as `(start, end)`.
+fn declared(log: &Serial) -> Result<Vec<(u64, u64)>, String> {
     let declared = records(log)
         .find_map(|m| m.strip_prefix(DECLARED))
         .ok_or_else(|| format!("no `{DECLARED}` record:\n{}", log.text()))?;
-    let range = |text: &str| -> Option<(u64, u64)> {
-        let (from, to) = text.split_once("..")?;
-        let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
-        Some((hex(from)?, hex(to)?))
-    };
-    let windows = declared
+    declared
         .split(", ")
-        .map(|w| w.strip_prefix("mem ").and_then(range).ok_or_else(|| format!("{w:?} in {declared:?}")))
-        .collect::<Result<Vec<_>, _>>()?;
+        .map(|w| w.strip_prefix("mem ").and_then(span).ok_or_else(|| format!("{w:?} in {declared:?}")))
+        .collect()
+}
+
+/// Every domain's addresses lie outside every root-bridge window the `acpi`
+/// claim's holder declared: a bridge may route a request in one before the
+/// unit sees it.
+pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
+    let windows = declared(log)?;
     let mut domains = 0;
     for record in records(log).filter(|m| m.starts_with("iommu: domain")) {
-        let Some((_, span)) = record.split_once(" addresses from ") else { continue };
-        let (floor, ceiling) = span
+        let Some((_, addresses)) = record.split_once(" addresses from ") else { continue };
+        let (floor, ceiling) = addresses
             .split_once(" to ")
-            .and_then(|(from, to)| range(&format!("{from}..{to}")))
+            .and_then(|(from, to)| span(&format!("{from}..{to}")))
             .ok_or_else(|| format!("an unreadable domain record: {record:?}"))?;
         if let Some((base, end)) = windows.iter().find(|(base, end)| *end > floor && *base < ceiling) {
-            return Err(format!(
-                "{record:?} hands out addresses inside the root-bridge window {base:#x}..{end:#x}"
-            ));
+            return Err(format!("{record:?} hands out addresses inside the root-bridge window {base:#x}..{end:#x}"));
         }
         domains += 1;
     }

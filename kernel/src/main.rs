@@ -442,14 +442,14 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // Before any driver `init`: this sizes every BAR on the machine, and the
     // spec's probe takes memory decode off the function it is sizing for the
     // length of it. Nothing has bound yet, so nothing is mid-transfer.
-    pcidev::publish(&pci_devices, toyos_acpi::SEGMENT_GROUP, maps, kernel_args.root_bridge_windows());
+    pcidev::publish(&pci_devices, toyos_acpi::SEGMENT_GROUP, maps);
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {
         drivers::virtio::cap_selftest();
     }
     // After ACPI is readable and PCI is enumerable, before any driver `init`: each enumerated device needs a context entry before it can DMA.
     // Refuses nothing — a machine with no usable IOMMU boots exactly as one without it.
-    iommu::init(kernel_args.rsdp_addr, &pci_devices, pcidev::declared().as_ref());
+    iommu::init(kernel_args.rsdp_addr, &pci_devices);
     // Before storage and everything under it: what it covers is the rest of this
     // boot, and a wedge down there is the reason to have one.
     arch::watchdog::init(&pci_devices);
