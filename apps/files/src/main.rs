@@ -396,7 +396,7 @@ impl FileBrowser {
                         self.window.present();
                     }
                 }
-                window::Event::KeyInput(ev) => {
+                window::Event::KeyInput(ev) if ev.pressed() => {
                     let cols = self.cols() as isize;
                     match ev.keycode {
                         0x51 => self.move_selection(cols),         // Down arrow
@@ -423,6 +423,7 @@ impl FileBrowser {
                         _ => {}
                     }
                 }
+                window::Event::KeyInput(_) => {}
                 window::Event::Resized => {
                     self.fb = self.window.framebuffer();
                     if self.window.scale() != self.drawn.scale {
