@@ -131,13 +131,12 @@ pub(super) fn yn(v: bool) -> char {
 pub mod domain {
     use super::{backend, Backend};
     use crate::arch::x86_64::{amdvi, vtd};
-    use crate::iommu::domains::Placement;
     use crate::iommu::{DomainId, IommuError, Iova, StreamId};
 
-    pub fn create(placement: Placement) -> Result<(DomainId, Option<Iova>), IommuError> {
+    pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(DomainId, Iova), IommuError> {
         match backend() {
-            Backend::Vtd => vtd::domain::create(placement),
-            Backend::AmdVi => amdvi::domain::create(placement),
+            Backend::Vtd => vtd::domain::create(room, windows),
+            Backend::AmdVi => amdvi::domain::create(room, windows),
             Backend::None => Err(IommuError::NoUnit),
         }
     }

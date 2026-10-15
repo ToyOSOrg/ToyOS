@@ -121,9 +121,10 @@ pub enum IommuError {
     /// What this machine's units translate does not reach above its memory, so
     /// a device window has nowhere to sit that a stale descriptor would miss.
     WindowBelowMemory { translatable: u8, floor: u64, top: u64 },
-    /// Memory reaches `top`, past what the units translate, so a kernel
-    /// driver's pool may have no device address equal to its own.
-    MemoryPastTranslation { translatable: u8, top: u64 },
+    /// The units translate no further than the CPU's physical addresses, so a
+    /// domain has to end under the root bridges' windows, and no declaration
+    /// of them is held.
+    Undeclared { translatable: u8, cpu: u8 },
     /// From the floor to the first root-bridge window or reserved region above
     /// it is less than a new domain was asked to hand out.
     NoRoom { floor: u64, ceiling: u64, room: u64 },
@@ -150,10 +151,11 @@ impl core::fmt::Display for IommuError {
                 "this machine's units translate {translatable} bits, whose device window would \
                  start at {floor:#x}, at or below the {top:#x} its memory reaches"
             ),
-            Self::MemoryPastTranslation { translatable, top } => write!(
+            Self::Undeclared { translatable, cpu } => write!(
                 f,
-                "this machine's units translate {translatable} bits and its memory reaches {top:#x}, \
-                 so a pool may have no device address equal to its own"
+                "this machine's units translate {translatable} bits and its CPUs issue {cpu}, so a \
+                 domain has to end under the root bridges' windows, and no declaration of them \
+                 is held"
             ),
             Self::NoRoom { floor, ceiling, room } => write!(
                 f,
@@ -177,12 +179,12 @@ pub enum DeviceSpace {
 }
 
 impl DeviceSpace {
-    /// One for whichever of `functions` is attached to it, mapping each pool
-    /// at its own physical address ([`window::Addresses::Identity`]), or the
-    /// machine's own with the reason: the machine's own where any of them
-    /// keeps it, so the one attached reaches what its device addresses name.
-    /// For a driver **in this kernel**, whose addresses are the kernel's
-    /// either way and which no claim ever takes over.
+    /// One for whichever of `functions` is attached to it, or the machine's
+    /// own with the reason: the machine's own where any of them keeps it, so
+    /// the one attached reaches what its device addresses name, and where the
+    /// unit has no room above the CPU's addresses, since a driver in this
+    /// kernel comes up before the root bridges are declared. For a driver
+    /// **in this kernel**, whose addresses are the kernel's either way.
     pub fn create(functions: &[crate::drivers::pci::PciDevice]) -> Self {
         for function in functions {
             let stream = StreamId::pci(function.bus, function.dev, function.func);
@@ -191,7 +193,7 @@ impl DeviceSpace {
                 return Self::Untranslated;
             }
         }
-        match unit::domain::create(domains::Placement::Identity) {
+        match unit::domain::create(0, None) {
             Ok((id, _)) => Self::Own(id),
             Err(why) => {
                 log!("iommu: no domain of its own for a device: {why}");
@@ -239,11 +241,11 @@ pub struct OwnSpace(DomainId);
 
 impl OwnSpace {
     /// One with `room` bytes of it handed out at the address answered, clear
-    /// of the root bridges' declared `windows`, or the reason there is none: a
-    /// machine with no unit and a machine out of domains are both refusals.
-    pub fn create(room: u64, windows: &[toyos_abi::acpi::RootBridgeWindow]) -> Result<(Self, u64), IommuError> {
-        let (id, at) = unit::domain::create(domains::Placement::Claimed { room, windows })?;
-        Ok((Self(id), at.expect("iommu: a claimed placement hands out its room").raw()))
+    /// of the root bridges' declared `windows`, `None` where none are held,
+    /// or the reason there is none: a machine with no unit and a machine out
+    /// of domains are both refusals.
+    pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(Self, u64), IommuError> {
+        unit::domain::create(room, windows).map(|(id, at)| (Self(id), at.raw()))
     }
 
     /// [`DeviceSpace::map`].

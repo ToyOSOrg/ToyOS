@@ -1141,7 +1141,7 @@ fn function_space(number: usize, windows: &[RootBridgeWindow]) -> Result<Space, 
     match *held {
         Some(space) => Ok(space),
         None => {
-            let (space, lend) = OwnSpace::create(LEND_WINDOW, windows)?;
+            let (space, lend) = OwnSpace::create(LEND_WINDOW, Some(windows))?;
             *held = Some(Space { space, lend });
             Ok(Space { space, lend })
         }

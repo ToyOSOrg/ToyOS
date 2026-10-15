@@ -149,66 +149,27 @@ fn declared(log: &Serial) -> Result<Vec<(u64, u64)>, String> {
         .collect()
 }
 
-/// Each mapping domain `id`'s records say it made, as `(physical start,
-/// physical end, device address)`.
-pub fn mappings(log: &Serial, id: &str) -> Result<Vec<(u64, u64, u64)>, String> {
-    let head = format!("iommu: domain{id} maps ");
-    records(log)
-        .filter_map(|m| m.strip_prefix(head.as_str()))
-        .map(|rest| {
-            let (phys, at) = rest.split_once(" at ").ok_or_else(|| format!("{rest:?}"))?;
-            let (start, end) = span(phys).ok_or_else(|| format!("{rest:?}"))?;
-            let at = u64::from_str_radix(at.split_whitespace().next().and_then(|a| a.strip_prefix("0x")).ok_or_else(|| format!("{rest:?}"))?, 16)
-                .map_err(|e| format!("{rest:?}: {e}"))?;
-            Ok((start, end, at))
-        })
-        .collect()
-}
-
-/// Whether domain `id`'s record says it maps each pool at identity: a kernel
-/// driver's.
-pub fn at_identity(log: &Serial, id: &str) -> bool {
-    let head = format!("iommu: domain{id} ");
-    records(log).any(|m| m.starts_with(head.as_str()) && m.contains(" maps each pool at identity"))
-}
-
-/// No domain reaches a root-bridge window the `acpi` claim's holder declared:
-/// a bridge may route a request in one before the unit sees it. A claimed
-/// function's domain hands out addresses outside every window; a kernel
-/// driver's maps each pool at its own physical address, which lies outside
-/// every window too.
+/// Every domain's addresses lie outside every root-bridge window the `acpi`
+/// claim's holder declared: a bridge may route a request in one before the
+/// unit sees it.
 pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
     let windows = declared(log)?;
-    let inside = |(floor, ceiling): (u64, u64)| windows.iter().copied().find(|(base, end)| *end > floor && *base < ceiling);
-    let (mut claimed, mut identity) = (0, 0);
+    let mut domains = 0;
     for record in records(log).filter(|m| m.starts_with("iommu: domain")) {
-        let id = record["iommu: domain".len()..].split_whitespace().next().unwrap_or_default();
-        if record.contains(" maps each pool at identity") {
-            for (start, end, at) in mappings(log, id)? {
-                if at != start {
-                    return Err(format!("domain{id} is a kernel driver's and maps {start:#x}..{end:#x} at {at:#x}"));
-                }
-                if let Some((base, end)) = inside((start, end)) {
-                    return Err(format!("domain{id} maps a pool inside the root-bridge window {base:#x}..{end:#x}"));
-                }
-            }
-            identity += 1;
-            continue;
-        }
         let Some((_, addresses)) = record.split_once(" addresses from ") else { continue };
         let (floor, ceiling) = addresses
             .split_once(" to ")
             .and_then(|(from, to)| span(&format!("{from}..{to}")))
             .ok_or_else(|| format!("an unreadable domain record: {record:?}"))?;
-        if let Some((base, end)) = inside((floor, ceiling)) {
+        if let Some((base, end)) = windows.iter().find(|(base, end)| *end > floor && *base < ceiling) {
             return Err(format!("{record:?} hands out addresses inside the root-bridge window {base:#x}..{end:#x}"));
         }
-        claimed += 1;
+        domains += 1;
     }
-    if claimed + identity == 0 {
+    if domains == 0 {
         return Err(format!("no domain was made on this boot:\n{}", log.text()));
     }
-    eprintln!("  [claims] {claimed} claimed domain(s) and {identity} kernel driver's, none reaching a root-bridge window");
+    eprintln!("  [claims] {domains} domain(s), none reaching a root-bridge window");
     Ok(())
 }
 

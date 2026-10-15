@@ -1,23 +1,18 @@
 //! A domain's device addresses — where they start, where they end and which
 //! of them are handed out — for every backend.
 //!
-//! **A kernel driver's domain maps each pool at its own physical address**
-//! ([`Addresses::Identity`]): a root bridge's window is MMIO and never RAM
-//! (`toyos_pci::aperture::check` refuses a declaration saying otherwise), so a
-//! device address equal to a RAM address is never routed peer-to-peer before
-//! the unit sees it (PCIe Base §2.4), and no declaration is needed. The
-//! function is never released to a claim, so no later holder inherits an
-//! address it was aimed at.
-//!
-//! **A claimed function's domain hands its addresses out above all memory**
-//! ([`Window`]), so a descriptor a holder left behind names nothing the next
-//! holder's domain maps, and clear of every declared root-bridge window. Where
-//! the unit translates past every address the CPU issues, they lie above every
-//! such address. Where it translates no more bits than the CPU's physical
-//! addresses, whatever the backend, they start a quarter of the way up and end
-//! under the first declared window or region firmware reserved for a device
-//! (an RMRR or IVMD) over that start. An address is handed out once, unmapped
-//! or not: a device holding a stale one would reach whatever took its place.
+//! They lie above all memory, so a descriptor still carrying one names
+//! nothing a domain maps and faults rather than landing on a page, and clear
+//! of every root-bridge window: a bridge may route a window peer-to-peer
+//! before the unit sees the request (PCIe Base §2.4). Where the unit
+//! translates past every address the CPU issues, they lie above every such
+//! address, and nothing needs declaring. Where it translates no more bits
+//! than the CPU's physical addresses, whatever the backend, they start a
+//! quarter of the way up and end under the first declared window or region
+//! firmware reserved for a device (an RMRR or IVMD) over that start, and with
+//! no declaration accepted there is no domain. An address is handed out once,
+//! unmapped or not: a device holding a stale one would reach whatever took
+//! its place.
 
 use crate::iommu::{IommuError, Iova};
 use crate::mm::PAGE_2M;
@@ -54,46 +49,15 @@ const fn ceiling(translatable: u8, floor: u64, reserved: &[(u64, u64)]) -> u64 {
 
 /// Where a domain over `translatable` bits begins and ends on a CPU issuing
 /// `cpu`-bit physical addresses, `reserved` the declared root-bridge windows
-/// and firmware's reserved regions.
-const fn bounds(translatable: u8, cpu: u8, reserved: &[(u64, u64)]) -> (u64, u64) {
+/// and firmware's reserved regions, or `None` where no declaration is held.
+const fn bounds(translatable: u8, cpu: u8, reserved: Option<&[(u64, u64)]>) -> Result<(u64, u64), IommuError> {
     if translatable > cpu {
-        return (1 << cpu, 1 << translatable);
+        return Ok((1 << cpu, 1 << translatable));
     }
     let floor = first_address(translatable);
-    (floor, ceiling(translatable, floor, reserved))
-}
-
-/// Where one domain's device addresses come from.
-#[derive(Clone, Copy)]
-pub enum Addresses {
-    /// A kernel driver's: each mapping at its own physical address, below
-    /// `1 << translatable`.
-    Identity { translatable: u8 },
-    /// A claimed function's.
-    Window(Window),
-}
-
-impl Addresses {
-    /// A kernel driver's, refused where memory reaches past what the unit
-    /// translates: a pool there would have no address equal to its own.
-    pub fn identity(translatable: u8) -> Result<Self, IommuError> {
-        let top = crate::mm::pmm::top();
-        if top > 1 << translatable {
-            return Err(IommuError::MemoryPastTranslation { translatable, top });
-        }
-        Ok(Self::Identity { translatable })
-    }
-
-    /// Where `bytes` at `phys` goes in this domain: `phys` itself in a kernel
-    /// driver's, and in a claimed function's room never handed out before.
-    pub fn map(&mut self, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
-        match self {
-            Self::Identity { translatable } => match phys.checked_add(bytes.next_multiple_of(PAGE_2M)) {
-                Some(end) if end <= 1 << *translatable => Ok(Iova::translated(phys)),
-                _ => Err(IommuError::MemoryPastTranslation { translatable: *translatable, top: phys.saturating_add(bytes) }),
-            },
-            Self::Window(window) => window.reserve(bytes).ok_or(IommuError::AddressesExhausted(window.ceiling())),
-        }
+    match reserved {
+        Some(reserved) => Ok((floor, ceiling(translatable, floor, reserved))),
+        None => Err(IommuError::Undeclared { translatable, cpu }),
     }
 }
 
@@ -101,8 +65,8 @@ impl Window {
     /// A new domain's window over `translatable` bits ([`bounds`]), with
     /// `room` bytes of it handed out first; refused where it would start at or
     /// below memory or hold less than that, and at least one leaf.
-    pub fn new(translatable: u8, reserved: &[(u64, u64)], room: u64) -> Result<(Self, Iova), IommuError> {
-        let (floor, ceiling) = bounds(translatable, crate::arch::cpu::physical_address_bits(), reserved);
+    pub fn new(translatable: u8, reserved: Option<&[(u64, u64)]>, room: u64) -> Result<(Self, Iova), IommuError> {
+        let (floor, ceiling) = bounds(translatable, crate::arch::cpu::physical_address_bits(), reserved)?;
         let top = crate::mm::pmm::top();
         if floor <= top {
             return Err(IommuError::WindowBelowMemory { translatable, floor, top });
@@ -209,14 +173,16 @@ const _: () = {
 };
 
 /// [`bounds`] on each kind of machine: a unit wider than the CPU's addresses
-/// places above them, whatever is declared; a unit no wider places under its
-/// first declared window.
+/// places above them, declared or not; a unit no wider places under its
+/// first declared window, and with nothing declared nowhere.
 const _: () = {
     const T14: [(u64, u64); 1] = [(0x40_0000_0000, 0x60_3DC0_0000)];
-    assert!(matches!(bounds(48, 40, &[]), (0x100_0000_0000, 0x1_0000_0000_0000)));
-    assert!(matches!(bounds(48, 40, &T14), (0x100_0000_0000, 0x1_0000_0000_0000)));
-    assert!(matches!(bounds(39, 39, &T14), (0x20_0000_0000, 0x40_0000_0000)));
+    assert!(matches!(bounds(48, 40, None), Ok((0x100_0000_0000, 0x1_0000_0000_0000))));
+    assert!(matches!(bounds(48, 40, Some(&T14)), Ok((0x100_0000_0000, 0x1_0000_0000_0000))));
+    assert!(matches!(bounds(39, 39, Some(&T14)), Ok((0x20_0000_0000, 0x40_0000_0000))));
+    assert!(matches!(bounds(39, 39, None), Err(IommuError::Undeclared { translatable: 39, cpu: 39 })));
+    assert!(matches!(bounds(39, 46, None), Err(IommuError::Undeclared { .. })));
     // The AMD bench: 48-bit host tables on a CPU of 48, all its windows below
     // the quarter floor, so the whole of the upper quarter.
-    assert!(matches!(bounds(48, 48, &[(0x4_5020_0000, 0xfc_9000_0000)]), (0x4000_0000_0000, 0x1_0000_0000_0000)));
+    assert!(matches!(bounds(48, 48, Some(&[(0x4_5020_0000, 0xfc_9000_0000)])), Ok((0x4000_0000_0000, 0x1_0000_0000_0000))));
 };

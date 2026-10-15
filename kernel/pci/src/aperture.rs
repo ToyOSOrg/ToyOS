@@ -28,9 +28,8 @@ pub enum Refused {
     /// Two windows name one address: whichever is wrong, the declaration does
     /// not say what the bridges decode.
     Overlap(RootBridgeWindow, RootBridgeWindow),
-    /// A window over memory: a root bridge's window is MMIO and never RAM, which
-    /// is what lets a device address equal to a RAM address go unrouted
-    /// peer-to-peer, so a declaration saying otherwise is wrong about one.
+    /// A window over memory: a root bridge's window is MMIO and never RAM, so a
+    /// declaration saying otherwise is wrong about one.
     Memory(RootBridgeWindow),
     /// A root's record is none the ABI names: a count or a run of windows
     /// past its array, an `_OSC` word it does not name, or a bus range that

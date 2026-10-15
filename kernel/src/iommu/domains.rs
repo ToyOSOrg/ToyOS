@@ -7,7 +7,7 @@ use alloc::vec::Vec;
 
 use toyos_abi::acpi::RootBridgeWindow;
 
-use crate::iommu::window::{Addresses, Window};
+use crate::iommu::window::Window;
 use crate::iommu::{DomainId, IommuError, Iova};
 use crate::mm::PAGE_2M;
 
@@ -17,27 +17,18 @@ pub struct Domains<S> {
     first: u16,
     /// By id minus `first`; never shrinks, since a released id would name a
     /// domain some unit may still have cached.
-    live: Vec<(S, Addresses)>,
-    /// The regions firmware reserved for a device, as `(start, end)`, which no
-    /// claimed function's addresses reach ([`Window::new`]).
+    live: Vec<(S, Window)>,
+    /// The regions firmware reserved for a device, as `(start, end)`, which
+    /// no domain's addresses reach beside the declared windows
+    /// ([`Window::new`]).
     reserved: Vec<(u64, u64)>,
-}
-
-/// Where a new domain's addresses come from ([`Addresses`]).
-#[derive(Clone, Copy)]
-pub enum Placement<'a> {
-    /// A kernel driver's: at identity.
-    Identity,
-    /// A claimed function's: `room` bytes handed out first, clear of the
-    /// declared `windows`.
-    Claimed { room: u64, windows: &'a [RootBridgeWindow] },
 }
 
 /// A domain [`Domains::prepare`] admitted, not yet made.
 pub struct Next {
     pub id: u16,
-    pub addresses: Addresses,
-    first: Option<Iova>,
+    pub addresses: Window,
+    first: Iova,
 }
 
 impl<S: Copy> Domains<S> {
@@ -45,45 +36,34 @@ impl<S: Copy> Domains<S> {
         Self { first, live: Vec::new(), reserved: Vec::new() }
     }
 
-    /// Before any domain is made: every claimed function's is built clear of these.
+    /// Before any domain is made: every one is built clear of these.
     pub fn avoid(&mut self, reserved: Vec<(u64, u64)>) {
         self.reserved = reserved;
     }
 
-    /// The next domain's id and its addresses over `translatable` bits, placed
-    /// as `placement` says; refused, with no id spent, where ids reach
-    /// `ceiling` or the addresses would not hold what was asked.
-    pub fn prepare(&self, translatable: u8, ceiling: u32, placement: Placement) -> Result<Next, IommuError> {
+    /// The next domain's id and its window over `translatable` bits, with
+    /// `room` bytes handed out first, clear of the root bridges' declared
+    /// `windows`, `None` where no declaration is held; refused, with no id
+    /// spent, where ids reach `ceiling` or the window would hold less.
+    pub fn prepare(&self, translatable: u8, ceiling: u32, room: u64, windows: Option<&[RootBridgeWindow]>) -> Result<Next, IommuError> {
         let id = u16::try_from(usize::from(self.first) + self.live.len())
             .ok()
             .filter(|id| u32::from(*id) < ceiling)
             .ok_or(IommuError::DomainsExhausted(ceiling))?;
-        let (addresses, first) = match placement {
-            Placement::Identity => (Addresses::identity(translatable)?, None),
-            Placement::Claimed { room, windows } => {
-                let reserved: Vec<(u64, u64)> =
-                    windows.iter().map(|w| (w.base, w.end())).chain(self.reserved.iter().copied()).collect();
-                let (window, first) = Window::new(translatable, &reserved, room)?;
-                (Addresses::Window(window), Some(first))
-            }
-        };
+        let reserved: Option<Vec<(u64, u64)>> =
+            windows.map(|windows| windows.iter().map(|w| (w.base, w.end())).chain(self.reserved.iter().copied()).collect());
+        let (addresses, first) = Window::new(translatable, reserved.as_deref(), room)?;
         Ok(Next { id, addresses, first })
     }
 
-    /// `next`, made over `space`, which `what` describes in its record; and
-    /// the room a claimed placement asked for.
-    pub fn add(&mut self, next: Next, space: S, what: impl core::fmt::Display) -> (DomainId, Option<Iova>) {
-        match &next.addresses {
-            Addresses::Identity { translatable } => {
-                log!("iommu: domain{} {what} maps each pool at identity, below {:#x}", next.id, 1u64 << translatable)
-            }
-            Addresses::Window(window) => log!(
-                "iommu: domain{} {what} addresses from {:#x} to {:#x}",
-                next.id,
-                window.floor(),
-                window.ceiling()
-            ),
-        }
+    /// `next`, made over `space`, which `what` describes in its record.
+    pub fn add(&mut self, next: Next, space: S, what: impl core::fmt::Display) -> (DomainId, Iova) {
+        log!(
+            "iommu: domain{} {what} addresses from {:#x} to {:#x}",
+            next.id,
+            next.addresses.floor(),
+            next.addresses.ceiling()
+        );
         self.live.push((space, next.addresses));
         (DomainId::new(next.id), next.first)
     }
@@ -97,8 +77,8 @@ impl<S: Copy> Domains<S> {
     pub fn map(&mut self, id: DomainId, phys: u64, bytes: u64) -> Result<(S, Iova), IommuError> {
         aligned(phys)?;
         // A `DomainId` only `add` mints, so the index is always in range.
-        let (space, addresses) = &mut self.live[usize::from(id.raw() - self.first)];
-        let at = addresses.map(phys, bytes)?;
+        let (space, window) = &mut self.live[usize::from(id.raw() - self.first)];
+        let at = window.reserve(bytes).ok_or(IommuError::AddressesExhausted(window.ceiling()))?;
         log!("iommu: domain{} maps {phys:#x}..{:#x} at {:#x}", id.raw(), phys + bytes.next_multiple_of(PAGE_2M), at.raw());
         Ok((*space, at))
     }
@@ -108,9 +88,8 @@ impl<S: Copy> Domains<S> {
     /// since [`Self::map`] may yet hand it out.
     pub fn place(&self, id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<S, IommuError> {
         aligned(phys)?;
-        let (space, addresses) = &self.live[usize::from(id.raw() - self.first)];
-        let handed_out = matches!(addresses, Addresses::Window(window) if window.handed_out(at, bytes));
-        assert!(handed_out, "iommu: domain{} never handed out {:#x}+{bytes:#x}", id.raw(), at.raw());
+        let (space, window) = &self.live[usize::from(id.raw() - self.first)];
+        assert!(window.handed_out(at, bytes), "iommu: domain{} never handed out {:#x}+{bytes:#x}", id.raw(), at.raw());
         Ok(*space)
     }
 }

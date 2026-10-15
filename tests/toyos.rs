@@ -4258,9 +4258,8 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
 }
 
 /// Every AMD-Vi unit translating, every xHCI controller the kernel drives
-/// moved to a domain of its own that maps exactly its one pool, at the pool's
-/// own physical address, and nothing else; the boot stick bound through one,
-/// and no DMA refused.
+/// moved to a domain of its own, the boot stick bound through one, the root
+/// bridges declared, and no DMA refused.
 fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
     let text = kernel.text();
     let units: Vec<&str> =
@@ -4278,18 +4277,7 @@ fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
         return Err(format!("the kernel drove no xHCI controller:\n{text}"));
     }
     for at in &controllers {
-        let moved = format!("iommu: {at} moves to domain");
-        let id = text
-            .lines()
-            .find_map(|l| l.split_once(moved.as_str())?.1.split_whitespace().next())
-            .ok_or_else(|| format!("{at} was moved to no domain:\n{text}"))?;
-        if !claims::at_identity(kernel, id) {
-            return Err(format!("{at}'s domain{id} is no kernel driver's, mapping at identity:\n{text}"));
-        }
-        match claims::mappings(kernel, id)?.as_slice() {
-            [(start, end, at_)] if at_ == start => eprintln!("  [amdvi] {at}: domain{id} maps its pool {start:#x}..{end:#x} at identity, and nothing else"),
-            other => return Err(format!("{at}'s domain{id} maps {other:x?}, not its one pool at identity")),
-        }
+        kernel.must_say(&format!("iommu: {at} moves to domain"))?;
     }
     kernel.must_say("usb-storage: 1 device(s)")?;
     // The bench's root bridges declared and held, which a claim on it needs.

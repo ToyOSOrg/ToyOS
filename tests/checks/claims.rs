@@ -72,23 +72,9 @@ pub fn one_entry_per_slot() {
 }
 
 /// The recorded domain reaches into `0x4000000000..`; capped there, it passes.
-/// A kernel driver's domain passes where each pool is at its own address
-/// outside every window, and reds where one is not.
 pub fn domains_end_below_the_windows() {
     let why = claims::clear_of_host_bridges(&log(RECORDED)).expect_err("the recorded domain");
     assert!(why.contains("inside the root-bridge window 0x4000000000..0x603dc00000"), "{why}");
     let capped = RECORDED.replace("to 0x8000000000", "to 0x4000000000");
     assert_eq!(claims::clear_of_host_bridges(&log(&capped)), Ok(()));
-
-    let identity = |maps: &str| {
-        format!(
-            "{capped}[2026-09-29 11:54:39  0.260 cpu0 kernel] iommu: domain3 root=0xa32000 aw=48 mgaw=39 maps each pool at identity, below 0x8000000000\n\
-             [2026-09-29 11:54:39  0.261 cpu0 kernel] iommu: domain3 maps {maps}\n"
-        )
-    };
-    assert_eq!(claims::clear_of_host_bridges(&log(&identity("0x4c00000..0x4e00000 at 0x4c00000"))), Ok(()));
-    let moved = claims::clear_of_host_bridges(&log(&identity("0x4c00000..0x4e00000 at 0x2000000000"))).expect_err("a pool off identity");
-    assert!(moved.contains("maps 0x4c00000..0x4e00000 at 0x2000000000"), "{moved}");
-    let inside = claims::clear_of_host_bridges(&log(&identity("0xa2000000..0xa2200000 at 0xa2000000"))).expect_err("a pool in a window");
-    assert!(inside.contains("inside the root-bridge window 0xa2000000..0xbd000000"), "{inside}");
 }

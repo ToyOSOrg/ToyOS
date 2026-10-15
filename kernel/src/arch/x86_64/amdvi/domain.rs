@@ -15,7 +15,7 @@
 
 use alloc::vec::Vec;
 
-use crate::iommu::domains::{self, Domains, Placement};
+use crate::iommu::domains::{self, Domains};
 use crate::iommu::{DomainId, IommuError, Iova, StreamId};
 use crate::log;
 use crate::sync::Lock;
@@ -110,13 +110,14 @@ pub fn untranslated(stream: StreamId) -> Option<&'static str> {
     }
 }
 
-/// A new domain placed as `placement` says: refused, with no id spent, where
-/// it would not hold what was asked.
-pub fn create(placement: Placement) -> Result<(DomainId, Option<Iova>), IommuError> {
+/// A new domain, with `room` bytes of it handed out first, clear of the root
+/// bridges' declared `windows`, `None` where none are held: refused, with no
+/// id spent, where it would have less than that.
+pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(DomainId, Iova), IommuError> {
     let mut held = DOMAINS.lock();
     let amd = held.as_mut().ok_or(IommuError::NoUnit)?;
     // Mode-4 host tables translate 48 bits of device address (48882 §2.2.3).
-    let next = amd.domains.prepare(9 * ROOT_LEVEL + 12, 1 << 16, placement)?;
+    let next = amd.domains.prepare(9 * ROOT_LEVEL + 12, 1 << 16, room, windows)?;
     let space = Space { root: TABLES.lock().alloc() };
     Ok(amd.domains.add(next, space, alloc::format!("root={:#x} mode={ROOT_LEVEL}", space.root.get())))
 }

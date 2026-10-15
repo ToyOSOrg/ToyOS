@@ -18,7 +18,7 @@
 use crate::log;
 use alloc::vec::Vec;
 
-use crate::iommu::domains::{self, Domains, Placement};
+use crate::iommu::domains::{self, Domains};
 use crate::iommu::{AddressWidth, DomainId, IommuError, Iova, StreamId};
 use crate::sync::Lock;
 
@@ -59,16 +59,17 @@ pub fn unit_agrees(width: AddressWidth, ceiling: u32, mgaw: u8) {
     };
 }
 
-/// A new domain placed as `placement` says: refused, with no id spent, where
-/// it would not hold what was asked.
-pub fn create(placement: Placement) -> Result<(DomainId, Option<Iova>), IommuError> {
+/// A new domain, with `room` bytes of it handed out first, clear of the root
+/// bridges' declared `windows`, `None` where none are held: refused, with no
+/// id spent, where it would have less than that.
+pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(DomainId, Iova), IommuError> {
     let mut held = DOMAINS.lock();
     let (width, ceiling, mgaw) = match held.agreement {
         Agreement::None => return Err(IommuError::NoUnit),
         Agreement::Split => return Err(IommuError::WidthsDisagree),
         Agreement::One(width, ceiling, mgaw) => (width, ceiling, mgaw),
     };
-    let next = held.domains.prepare(table::translatable_bits(width, mgaw), ceiling, placement)?;
+    let next = held.domains.prepare(table::translatable_bits(width, mgaw), ceiling, room, windows)?;
     let space = Space { root: TABLES.lock().alloc(), width };
     let what = alloc::format!("root={:#x} aw={} mgaw={mgaw}", space.root.phys(), width.bits());
     Ok(held.domains.add(next, space, what))
