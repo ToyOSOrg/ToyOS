@@ -8,19 +8,19 @@
 
 use core::arch::x86_64::*;
 
-use super::aesni::avx::{Product, counter_base, power, reverse};
+use super::aesni::{Product, counter_base, power, reverse};
 use super::{load, store};
 use crate::arch::Powers;
 
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f")]
 fn load4(bytes: &[u8; 64]) -> __m512i {
     // Both are 64 plain bytes, every pattern valid.
     unsafe { core::mem::transmute(*bytes) }
 }
 
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f")]
 fn store4(bytes: &mut [u8; 64], v: __m512i) {
     // Both are 64 plain bytes, every pattern valid.
     *bytes = unsafe { core::mem::transmute::<__m512i, [u8; 64]>(v) };
@@ -28,7 +28,7 @@ fn store4(bytes: &mut [u8; 64], v: __m512i) {
 
 /// Each 128-bit lane's bytes reversed.
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f,avx512bw")]
 fn reverse_lanes(x: __m512i) -> __m512i {
     let lane: [u8; 16] = [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0];
     _mm512_shuffle_epi8(x, _mm512_broadcast_i32x4(load(&lane)))
@@ -36,7 +36,7 @@ fn reverse_lanes(x: __m512i) -> __m512i {
 
 /// Four lanes from four 128-bit values, the first lowest.
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f")]
 fn quad(a: __m128i, b: __m128i, c: __m128i, d: __m128i) -> __m512i {
     let low = _mm512_inserti32x4::<1>(_mm512_castsi128_si512(a), b);
     let high = _mm512_inserti32x4::<2>(low, c);
@@ -45,7 +45,7 @@ fn quad(a: __m128i, b: __m128i, c: __m128i, d: __m128i) -> __m512i {
 
 /// The four lanes XORed into one.
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f,avx512vl")]
 fn fold(x: __m512i) -> __m128i {
     let half = _mm256_xor_si256(_mm512_castsi512_si256(x), _mm512_extracti64x4_epi64::<1>(x));
     _mm_xor_si128(_mm256_castsi256_si128(half), _mm256_extracti128_si256::<1>(half))
@@ -60,7 +60,7 @@ struct Product4 {
 
 impl Product4 {
     #[inline]
-    #[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+    #[target_feature(enable = "avx512f,vpclmulqdq")]
     fn new(x: __m512i, h: __m512i, folded: __m512i) -> Self {
         Self {
             low: _mm512_clmulepi64_epi128::<0x00>(x, h),
@@ -70,7 +70,7 @@ impl Product4 {
     }
 
     #[inline]
-    #[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+    #[target_feature(enable = "avx512f,vpclmulqdq")]
     fn add(self, x: __m512i, h: __m512i, folded: __m512i) -> Self {
         let p = Self::new(x, h, folded);
         Self {
@@ -82,7 +82,7 @@ impl Product4 {
 
     /// All lanes' sums, reduced once.
     #[inline]
-    #[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+    #[target_feature(enable = "avx512f,avx512vl,pclmulqdq")]
     fn reduce(self) -> __m128i {
         Product { low: fold(self.low), high: fold(self.high), middle: fold(self.middle) }.reduce()
     }
@@ -96,7 +96,7 @@ struct Quads {
 
 impl Quads {
     #[inline]
-    #[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+    #[target_feature(enable = "avx512f")]
     fn new(powers: &Powers) -> Self {
         let mut h = [_mm512_setzero_si512(); 4];
         let mut folds = [_mm512_setzero_si512(); 4];
@@ -110,7 +110,7 @@ impl Quads {
 
     /// Sixteen byte-reversed blocks after `y`.
     #[inline]
-    #[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+    #[target_feature(enable = "avx512f,avx512vl,vpclmulqdq,pclmulqdq")]
     fn absorb(&self, y: __m128i, x: [__m512i; 4]) -> __m128i {
         let first = _mm512_xor_si512(x[0], _mm512_zextsi128_si512(y));
         let mut sum = Product4::new(first, self.h[0], self.folds[0]);
@@ -122,7 +122,7 @@ impl Quads {
 }
 
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f,avx512bw")]
 fn load16(batch: &[u8; 256]) -> [__m512i; 4] {
     let (quads, _) = batch.as_chunks::<64>();
     let mut x = [_mm512_setzero_si512(); 4];
@@ -133,7 +133,7 @@ fn load16(batch: &[u8; 256]) -> [__m512i; 4] {
 }
 
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f")]
 fn round_keys(keys: &[u8; 240]) -> [__m512i; 15] {
     let (slots, _) = keys.as_chunks::<16>();
     let mut k = [_mm512_setzero_si512(); 15];
@@ -146,7 +146,7 @@ fn round_keys(keys: &[u8; 240]) -> [__m512i; 15] {
 /// Counters `first` to `first + 3`, big-endian in each lane's last word,
 /// round key 0 folded into `base`.
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f")]
 fn counters(base: __m512i, first: u32) -> __m512i {
     let mut words = [0u32; 16];
     for l in 0..4 {
@@ -158,7 +158,7 @@ fn counters(base: __m512i, first: u32) -> __m512i {
 
 /// `4n` counter blocks from `first` through every round.
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f,vaes")]
 fn encrypt<const R: usize, const N: usize>(k: &[__m512i; 15], base: __m512i, first: u32) -> [__m512i; N] {
     let mut s = [_mm512_setzero_si512(); N];
     for j in 0..N {
@@ -176,7 +176,7 @@ fn encrypt<const R: usize, const N: usize>(k: &[__m512i; 15], base: __m512i, fir
 }
 
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f")]
 fn xor_into<const N: usize>(bytes: &mut [[u8; 64]], s: &[__m512i; N]) {
     for j in 0..N {
         let stream = _mm512_xor_si512(s[j], load4(&bytes[j]));
@@ -185,12 +185,12 @@ fn xor_into<const N: usize>(bytes: &mut [[u8; 64]], s: &[__m512i; N]) {
 }
 
 #[inline]
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f")]
 fn base(keys: &[u8; 240], nonce: &[u8; 12]) -> __m512i {
     _mm512_broadcast_i32x4(counter_base(nonce, load(&keys.as_chunks::<16>().0[0])))
 }
 
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3")]
 fn hash_body(powers: &Powers, state: &mut [u8; 16], blocks: &[[u8; 16]]) {
     let q = Quads::new(powers);
     let mut y = reverse(load(state));
@@ -201,11 +201,11 @@ fn hash_body(powers: &Powers, state: &mut [u8; 16], blocks: &[[u8; 16]]) {
     store(state, reverse(y));
     if !rest.is_empty() {
         // CLMUL and SSSE3 are admitted with VPCLMULQDQ.
-        unsafe { super::aesni::avx::hash(powers, state, rest) }
+        unsafe { super::aesni::hash(powers, state, rest) }
     }
 }
 
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3")]
 fn ctr_body<const R: usize>(keys: &[u8; 240], nonce: &[u8; 12], first: u32, data: &mut [u8]) {
     let k = round_keys(keys);
     let base = base(keys, nonce);
@@ -217,10 +217,10 @@ fn ctr_body<const R: usize>(keys: &[u8; 240], nonce: &[u8; 12], first: u32, data
         next = next.wrapping_add(32);
     }
     // AES is admitted with VAES; the caller's bound covers the rest.
-    unsafe { super::aesni::avx::ctr(keys, R, nonce, next, rest) }
+    unsafe { super::aesni::ctr(keys, R, nonce, next, rest) }
 }
 
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3")]
 fn seal_body<const R: usize>(
     keys: &[u8; 240],
     powers: &Powers,
@@ -271,7 +271,7 @@ fn seal_body<const R: usize>(
 
 /// # Safety
 /// The features are admitted and `powers` came from `aesni::powers`.
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3")]
 pub(super) unsafe fn hash(powers: &Powers, state: &mut [u8; 16], blocks: &[[u8; 16]]) {
     hash_body(powers, state, blocks)
 }
@@ -279,7 +279,7 @@ pub(super) unsafe fn hash(powers: &Powers, state: &mut [u8; 16], blocks: &[[u8; 
 /// # Safety
 /// The features are admitted, `rounds` is 10 or 14, and no counter from
 /// `first` on over `data` wraps.
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3")]
 pub(super) unsafe fn ctr(keys: &[u8; 240], rounds: usize, nonce: &[u8; 12], first: u32, data: &mut [u8]) {
     if rounds == 10 {
         ctr_body::<10>(keys, nonce, first, data)
@@ -294,7 +294,7 @@ pub(super) unsafe fn ctr(keys: &[u8; 240], rounds: usize, nonce: &[u8; 12], firs
 /// # Safety
 /// The features are admitted, `rounds` is 10 or 14, `powers` came from
 /// `aesni::powers`, and GCM bounded `data`'s length.
-#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx")]
+#[target_feature(enable = "avx512f,avx512bw,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3")]
 pub(super) unsafe fn seal(
     keys: &[u8; 240],
     rounds: usize,
