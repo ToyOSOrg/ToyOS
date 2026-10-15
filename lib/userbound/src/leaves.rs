@@ -49,7 +49,10 @@ mod tests {
 
     #[test]
     fn a_device_window_is_its_own_pages_and_no_more() {
-        // The AX210's 16 KiB at 0xbc300000, a 2 MiB boundary itself.
+        // The T14 NVMe's 16 KiB at 0xbce00000, on a 2 MiB boundary: never the
+        // 2 MiB leaf there, which would hand over whatever decodes past it.
+        assert_eq!(of(0xbce0_0000, 0x4000), [Leaf::Pages { va: VA, pa: 0xbce0_0000, count: 4 }]);
+        // The AX210's 16 KiB at 0xbc300000, 1 MiB off one.
         assert_eq!(of(0xbc30_0000, 0x4000), [Leaf::Pages { va: VA, pa: 0xbc30_0000, count: 4 }]);
         // A page-sized BAR off any 2 MiB boundary.
         assert_eq!(of(0xd04c_c000, PAGE_4K), [Leaf::Pages { va: VA, pa: 0xd04c_c000, count: 1 }]);

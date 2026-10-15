@@ -89,7 +89,7 @@ mod tests {
     #[test]
     fn a_bar_smaller_than_a_page_is_given_the_page_it_starts() {
         // The T14's SMBus controller's 256 bytes, at the start of a page.
-        assert_eq!(of_bar(0x603d_bd00_00, 0x100, []), Ok(Pages { at: 0x603d_bd00_00, bytes: PAGE }));
+        assert_eq!(of_bar(0x0060_3dbd_0000, 0x100, []), Ok(Pages { at: 0x0060_3dbd_0000, bytes: PAGE }));
     }
 
     #[test]
