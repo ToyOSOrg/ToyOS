@@ -411,11 +411,13 @@ struct Machine {
     resetting: Vec<(u16, Resetting, Kept)>,
 }
 
-/// One PCI root bridge as the `acpi` claim's holder declared it.
+/// One PCI root bridge as the `acpi` claim's holder declared it: what its
+/// `_OSC` query offered, and what a commit was granted where one was made.
 struct RootBridge {
     segment: u16,
     buses: (u8, u8),
     osc: toyos_abi::acpi::Osc,
+    committed: Option<u32>,
 }
 
 /// Posted once, when [`Machine::apertures`] leaves `Unknown`.
@@ -682,7 +684,12 @@ pub fn declare(declared: &toyos_abi::acpi::Apertures) -> Result<(), aperture::De
             if answer != Err(aperture::Declined::Late) {
                 machine.roots = bridges
                     .iter()
-                    .map(|b| RootBridge { segment: b.segment, buses: (b.first_bus, b.last_bus), osc: b.osc().expect("`records` read every word") })
+                    .map(|b| RootBridge {
+                        segment: b.segment,
+                        buses: (b.first_bus, b.last_bus),
+                        osc: b.osc().expect("`records` read every word"),
+                        committed: b.commit().expect("`records` read every word"),
+                    })
                     .collect();
                 for root in &machine.roots {
                     let offered = match root.osc {
@@ -690,7 +697,17 @@ pub fn declare(declared: &toyos_abi::acpi::Apertures) -> Result<(), aperture::De
                         toyos_abi::acpi::Osc::Offered(offered) if offered & toyos_abi::acpi::NATIVE_HOT_PLUG != 0 => "native hot-plug offered",
                         toyos_abi::acpi::Osc::Offered(_) | toyos_abi::acpi::Osc::Refused => "not offered",
                     };
-                    log!("pci: root {:04x}:{:02x} _OSC: {offered}, buses {:#04x}..={:#04x}", root.segment, root.buses.0, root.buses.0, root.buses.1);
+                    let committed = match root.committed {
+                        None => alloc::string::String::from("no commit"),
+                        Some(committed) => alloc::format!("committed {committed:#x}"),
+                    };
+                    log!(
+                        "pci: root {:04x}:{:02x} _OSC: {offered}, buses {:#04x}..={:#04x}, {committed}",
+                        root.segment,
+                        root.buses.0,
+                        root.buses.0,
+                        root.buses.1
+                    );
                 }
             }
             answer

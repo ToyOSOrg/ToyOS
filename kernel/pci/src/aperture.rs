@@ -32,8 +32,9 @@ pub enum Refused {
     /// declaration saying otherwise is wrong about one.
     Memory(RootBridgeWindow),
     /// A root's record is none the ABI names: a count or a run of windows
-    /// past its array, an `_OSC` word it does not name, or a bus range that
-    /// ends before it starts.
+    /// past its array, an `_OSC` word it does not name, a commit beside no
+    /// offer or of more than it offered, or a bus range that ends before it
+    /// starts.
     Record,
     /// Two roots of one segment name one bus.
     Buses { segment: u16, first: u8, last: u8 },
@@ -189,7 +190,7 @@ impl<W: AsRef<[RootBridgeWindow]>> Held<W> {
 pub fn records(declared: &Apertures) -> Result<(), Refused> {
     let bridges = declared.bridges().ok_or(Refused::Record)?;
     for (at, bridge) in bridges.iter().enumerate() {
-        let named = bridge.first_bus <= bridge.last_bus && bridge.osc().is_some() && declared.windows_of(bridge).is_some();
+        let named = bridge.first_bus <= bridge.last_bus && bridge.commit().is_some() && declared.windows_of(bridge).is_some();
         if !named {
             return Err(Refused::Record);
         }
@@ -343,7 +344,7 @@ mod tests {
         use toyos_abi::acpi::{HostBridge, Osc};
         let w = RootBridgeWindow { base: 0x8000_0000, length: 0x1000_0000 };
         let mut good = Apertures::default();
-        good.push(0, (0, 0x7f), &[w], Osc::Absent).expect("fits");
+        good.push(0, (0, 0x7f), &[w], Osc::Absent, None).expect("fits");
         assert_eq!(records(&good), Ok(()));
         let first = good.bridges[0];
         let with = |bridge: HostBridge| Apertures { bridges: [bridge; toyos_abi::acpi::MAX_BRIDGES], ..good };
@@ -351,12 +352,19 @@ mod tests {
         assert_eq!(records(&with(HostBridge { window_count: 2, ..first })), Err(Refused::Record));
         assert_eq!(records(&with(HostBridge { osc: 7, ..first })), Err(Refused::Record));
         assert_eq!(records(&with(HostBridge { first_bus: 0x80, last_bus: 0x7f, ..first })), Err(Refused::Record));
+        // A commit with no offer beside it.
+        let mut uncommitted = Apertures::default();
+        uncommitted.push(0, (0, 0x7f), &[w], Osc::Absent, Some(toyos_abi::acpi::NATIVE_HOT_PLUG)).expect("fits");
+        assert_eq!(records(&uncommitted), Err(Refused::Record));
+        let mut offered = Apertures::default();
+        offered.push(0, (0, 0x7f), &[w], Osc::Offered(toyos_abi::acpi::NATIVE_HOT_PLUG), None).expect("fits");
+        assert_eq!(records(&offered), Ok(()));
 
         let mut shared = good;
-        shared.push(0, (0x40, 0xff), &[], Osc::Absent).expect("fits");
+        shared.push(0, (0x40, 0xff), &[], Osc::Absent, None).expect("fits");
         assert_eq!(records(&shared), Err(Refused::Buses { segment: 0, first: 0x40, last: 0xff }));
         let mut apart = good;
-        apart.push(1, (0, 0x7f), &[], Osc::Absent).expect("fits");
+        apart.push(1, (0, 0x7f), &[], Osc::Absent, None).expect("fits");
         assert_eq!(records(&apart), Ok(()));
 
         let mut held = Held::<[RootBridgeWindow; 1]>::Unknown;

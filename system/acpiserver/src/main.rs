@@ -278,7 +278,7 @@ impl Kernel for Claim<'_> {
     fn declare(&self, roots: &[apertures::Root]) -> Result<Declared, Stopping> {
         let mut declared = Apertures::default();
         for root in roots {
-            declared.push(root.segment, root.buses, &root.windows, root.osc).expect("acpiserver: the roots were read into a declaration's room");
+            declared.push(root.segment, root.buses, &root.windows, root.osc, None).expect("acpiserver: the roots were read into a declaration's room");
         }
         match self.dev.declare(&declared) {
             Err(SyscallError::InvalidArgument) => Ok(Declared::Refused),
