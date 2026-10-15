@@ -1266,7 +1266,7 @@ fn home_of(state: TaskState) -> Option<CpuId> {
 /// response is to find out which pass grew and why — not to raise it.
 ///
 /// **Why no panic stands over it.** The only clock either world can read across
-/// a pass is wall clock — `rdtsc` in the kernel — and a guest's wall clock
+/// a pass is wall clock — the CPU counter in the kernel — and a guest's wall clock
 /// advances while its vCPU is descheduled by the host. `elapsed` is therefore
 /// the pass plus any interval the hypervisor took the CPU away, and the second
 /// term is set by the host's scheduler, which this CPU neither observes nor
@@ -2241,7 +2241,7 @@ pub struct CpuHandle<M> {
     /// core owns, which is checkable in either world. Cost is not: the
     /// simulator's clock does not advance inside a step, so on the sim side the
     /// recorder is fed a modelled pass cost (`scenarios::overlong_pass`) and on
-    /// the kernel side the real TSC.
+    /// the kernel side the real CPU counter.
     ///
     /// It lives on the handle rather than in the `CpuSched` because the
     /// measurement lands *after* the pass has consumed every borrow of that,

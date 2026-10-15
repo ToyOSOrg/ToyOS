@@ -614,7 +614,7 @@ impl Live {
 /// Stop every controller this kernel drives, and say what that did.
 ///
 /// The one entry, taken by the orderly shutdown and by a panic alike. Takes no
-/// lock, allocates nothing, and every wait in it is bounded against the TSC.
+/// lock, allocates nothing, and every wait in it is bounded against the CPU's counter.
 fn stop_all(said: &mut dyn fmt::Write) {
     let mut tally = Stopped::NOTHING;
     tally.disks = DISKS.load(Ordering::Relaxed);
