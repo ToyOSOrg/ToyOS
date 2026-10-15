@@ -582,6 +582,7 @@ dependencies = [
  "toyos-pci-claim",
  "toyos-virtio",
  "toyos-virtio-gpu",
+ "toyos-wallclock",
  "toyos-window",
 ]
 

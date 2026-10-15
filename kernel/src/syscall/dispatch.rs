@@ -254,15 +254,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_MARK_TTY => with_object(RawHandle(a1 as u32), Rights::NONE, ops::mark_tty),
         SYS_THREAD_SPAWN => sys_thread_spawn(a1, a2, a3, a4),
         SYS_THREAD_JOIN => sys_thread_join(a1),
-        // Both answer from the boot-time anchor, never the CMOS: NotSupported beats a
+        // Answers from the boot-time anchor, never the CMOS: NotSupported beats a
         // 1970-epoch number a caller cannot tell from real time.
-        SYS_CLOCK_REALTIME => crate::clock::utc_secs().map_or(
-            SyscallError::NotSupported.to_u64(),
-            |secs| {
-                let now = toyos_wallclock::Civil::from_unix_secs(secs);
-                (now.hour << 16) | (now.min << 8) | now.sec
-            },
-        ),
         SYS_CLOCK_EPOCH => {
             crate::clock::utc_secs().unwrap_or(SyscallError::NotSupported.to_u64())
         }
