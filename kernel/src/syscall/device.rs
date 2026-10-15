@@ -179,8 +179,8 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
             (ops::LOCK_RELEASE, _) => crate::arch::acpi_mode::lock_release(row).map(|()| 0),
             (ops::S5, _) => crate::arch::acpi_mode::s5(row, at).map(|()| 0),
             (ops::DECLARE, _) => {
-                let bridges = declared.as_ref().and_then(crate::pcidev::RootBridge::decode).ok_or(SyscallError::InvalidArgument)?;
-                match crate::pcidev::declare(bridges) {
+                let declared = declared.as_ref().ok_or(SyscallError::InvalidArgument)?;
+                match crate::pcidev::declare(declared) {
                     Ok(()) => Ok(0),
                     Err(toyos_pci::aperture::Declined::Refused(_)) => Err(SyscallError::InvalidArgument),
                     Err(toyos_pci::aperture::Declined::Late) => Err(SyscallError::AlreadyExists),

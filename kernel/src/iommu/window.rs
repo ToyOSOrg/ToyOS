@@ -84,7 +84,8 @@ impl Addresses {
         Ok(Self::Identity { translatable })
     }
 
-    /// Where `bytes` at `phys` goes in this domain, never handed out before.
+    /// Where `bytes` at `phys` goes in this domain: `phys` itself in a kernel
+    /// driver's, and in a claimed function's room never handed out before.
     pub fn map(&mut self, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
         match self {
             Self::Identity { translatable } => match phys.checked_add(bytes.next_multiple_of(PAGE_2M)) {

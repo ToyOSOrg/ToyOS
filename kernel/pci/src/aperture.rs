@@ -5,7 +5,7 @@
 //! where one extent stands against them, for the BARs firmware assigned and
 //! for the address space this kernel would put one in.
 
-use toyos_abi::acpi::RootBridgeWindow;
+use toyos_abi::acpi::{Apertures, RootBridgeWindow};
 
 /// Where an extent stands against the memory windows the root bridges decode.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -32,6 +32,12 @@ pub enum Refused {
     /// is what lets a device address equal to a RAM address go unrouted
     /// peer-to-peer, so a declaration saying otherwise is wrong about one.
     Memory(RootBridgeWindow),
+    /// A root's record is none the ABI names: a count or a run of windows
+    /// past its array, an `_OSC` word it does not name, or a bus range that
+    /// ends before it starts.
+    Record,
+    /// Two roots of one segment name one bus.
+    Buses { segment: u16, first: u8, last: u8 },
 }
 
 impl core::fmt::Display for Refused {
@@ -48,6 +54,10 @@ impl core::fmt::Display for Refused {
                 b.end()
             ),
             Self::Memory(w) => write!(f, "its window {:#x}..{:#x} lies over memory", w.base, w.end()),
+            Self::Record => write!(f, "a root's record is none the ABI names"),
+            Self::Buses { segment, first, last } => {
+                write!(f, "two of its roots on segment {segment:#06x} share buses {first:#04x}..={last:#04x}")
+            }
         }
     }
 }
@@ -144,6 +154,16 @@ impl<W: AsRef<[RootBridgeWindow]>> Held<W> {
         answer
     }
 
+    /// Refuse a declaration whose records are none ([`records`]), from
+    /// [`Self::Unknown`] alone; the refusal is the answer, as `declare`'s is.
+    pub fn refuse(&mut self, why: Refused) -> Result<(), Declined> {
+        if !matches!(self, Self::Unknown) {
+            return Err(Declined::Late);
+        }
+        *self = Self::Withheld(Withheld::Refused(why));
+        Err(Declined::Refused(why))
+    }
+
     /// Nothing will be declared, for `why`: an answer where there was none,
     /// and nothing changed where there was one. Whether it was the answer.
     pub fn withhold(&mut self, why: Withheld) -> bool {
@@ -162,6 +182,26 @@ impl<W: AsRef<[RootBridgeWindow]>> Held<W> {
             Self::Withheld(why) => Some(Err(*why)),
         }
     }
+}
+
+/// Whether every root `declared` carries is one the ABI names, and no two
+/// roots of one segment share a bus: what a declaration's windows are read
+/// out of only once this holds.
+pub fn records(declared: &Apertures) -> Result<(), Refused> {
+    let bridges = declared.bridges().ok_or(Refused::Record)?;
+    for (at, bridge) in bridges.iter().enumerate() {
+        let named = bridge.first_bus <= bridge.last_bus && bridge.osc().is_some() && declared.windows_of(bridge).is_some();
+        if !named {
+            return Err(Refused::Record);
+        }
+        let shares = |other: &&toyos_abi::acpi::HostBridge| {
+            other.segment == bridge.segment && other.first_bus <= bridge.last_bus && bridge.first_bus <= other.last_bus
+        };
+        if bridges[..at].iter().any(|other| shares(&other)) {
+            return Err(Refused::Buses { segment: bridge.segment, first: bridge.first_bus, last: bridge.last_bus });
+        }
+    }
+    Ok(())
 }
 
 /// Where `base .. end` stands against `windows`.
@@ -292,5 +332,38 @@ mod tests {
             assert_eq!(ended.declare(virt, &[]), Err(Declined::Late));
             assert_eq!(ended.answer().map(|a| a.err()), Some(Some(why)));
         }
+    }
+
+    /// Each malformed record is refused by name before a window is read: a
+    /// count past the array, a run of windows past those declared, an
+    /// `_OSC` word the ABI does not name, a reversed bus range, and two roots
+    /// of one segment sharing a bus; roots on two segments may share bus
+    /// numbers. A refused record is the answer, and later declarations late.
+    #[test]
+    fn a_malformed_record_is_refused_by_name_and_is_the_answer() {
+        use toyos_abi::acpi::{HostBridge, Osc};
+        let w = RootBridgeWindow { base: 0x8000_0000, length: 0x1000_0000 };
+        let mut good = Apertures::default();
+        good.push(0, (0, 0x7f), &[w], Osc::Absent).expect("fits");
+        assert_eq!(records(&good), Ok(()));
+        let first = good.bridges[0];
+        let with = |bridge: HostBridge| Apertures { bridges: [bridge; toyos_abi::acpi::MAX_BRIDGES], ..good };
+        assert_eq!(records(&Apertures { bridge_count: u32::MAX, ..good }), Err(Refused::Record));
+        assert_eq!(records(&with(HostBridge { window_count: 2, ..first })), Err(Refused::Record));
+        assert_eq!(records(&with(HostBridge { osc: 7, ..first })), Err(Refused::Record));
+        assert_eq!(records(&with(HostBridge { first_bus: 0x80, last_bus: 0x7f, ..first })), Err(Refused::Record));
+
+        let mut shared = good;
+        shared.push(0, (0x40, 0xff), &[], Osc::Absent).expect("fits");
+        assert_eq!(records(&shared), Err(Refused::Buses { segment: 0, first: 0x40, last: 0xff }));
+        let mut apart = good;
+        apart.push(1, (0, 0x7f), &[], Osc::Absent).expect("fits");
+        assert_eq!(records(&apart), Ok(()));
+
+        let mut held = Held::<[RootBridgeWindow; 1]>::Unknown;
+        assert_eq!(held.refuse(Refused::Record), Err(Declined::Refused(Refused::Record)));
+        assert_eq!(held.answer().map(|a| a.err()), Some(Some(Withheld::Refused(Refused::Record))));
+        assert_eq!(held.declare([w], &[]), Err(Declined::Late));
+        assert_eq!(held.refuse(Refused::Record), Err(Declined::Late));
     }
 }

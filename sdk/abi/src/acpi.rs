@@ -373,8 +373,10 @@ pub enum Osc {
     Absent,
     /// Its evaluation, or its answer, was refused: nothing is granted.
     Refused,
-    /// It was negotiated, and granted these Control bits.
-    Granted(u32),
+    /// Its query offered these Control bits: what a commit would be
+    /// granted. Stage B makes no commit; the hot-plug service that acts on
+    /// the control makes it.
+    Offered(u32),
 }
 
 /// [`HostBridge::osc`]'s words.
@@ -404,7 +406,7 @@ impl HostBridge {
         match (self.osc, self.granted) {
             (OSC_ABSENT, 0) => Some(Osc::Absent),
             (OSC_REFUSED, 0) => Some(Osc::Refused),
-            (OSC_ANSWERED, granted) => Some(Osc::Granted(granted)),
+            (OSC_ANSWERED, granted) => Some(Osc::Offered(granted)),
             _ => None,
         }
     }
@@ -436,7 +438,7 @@ impl Apertures {
         let (osc, granted) = match osc {
             Osc::Absent => (OSC_ABSENT, 0),
             Osc::Refused => (OSC_REFUSED, 0),
-            Osc::Granted(granted) => (OSC_ANSWERED, granted),
+            Osc::Offered(granted) => (OSC_ANSWERED, granted),
         };
         (buses.0 <= buses.1).then_some(())?;
         let first = self.window_count as usize;
@@ -502,13 +504,13 @@ mod tests {
     fn a_declaration_carries_its_bridges_and_nothing_past_them() {
         let w = |base| RootBridgeWindow { base, length: 0x1000 };
         let mut declared = Apertures::default();
-        declared.push(0, (0, 0x7f), &[w(0x1000), w(0x3000)], Osc::Granted(NATIVE_HOT_PLUG)).expect("fits");
+        declared.push(0, (0, 0x7f), &[w(0x1000), w(0x3000)], Osc::Offered(NATIVE_HOT_PLUG)).expect("fits");
         declared.push(0, (0x80, 0xff), &[w(0x5000)], Osc::Absent).expect("fits");
         let bridges = declared.bridges().expect("two bridges").to_vec();
         assert_eq!(bridges.len(), 2);
         assert_eq!(declared.windows_of(&bridges[0]), Some(&[w(0x1000), w(0x3000)][..]));
         assert_eq!(declared.windows_of(&bridges[1]), Some(&[w(0x5000)][..]));
-        assert_eq!(bridges[0].osc(), Some(Osc::Granted(NATIVE_HOT_PLUG)));
+        assert_eq!(bridges[0].osc(), Some(Osc::Offered(NATIVE_HOT_PLUG)));
         assert_eq!(bridges[1].osc(), Some(Osc::Absent));
         assert_eq!(declared.push(0, (2, 1), &[], Osc::Absent), None);
 

@@ -1,6 +1,6 @@
 //! The PCI root bridges, declared to the kernel once ([`Kernel::declare`]):
 //! each one's segment, buses and memory windows, and what its `_OSC`
-//! granted. Every PCI claim on the machine waits for the declaration, so it
+//! offers. Every PCI claim on the machine waits for the declaration, so it
 //! is read as soon as the namespace is initialised (ACPI 6.5 §6.5.1).
 //!
 //! **A root is a PCI host bridge by its `_HID` or a `_CID`** (PNP0A03 or
@@ -8,7 +8,7 @@
 //! it is not present decodes nothing and is not read. Its segment is its
 //! `_SEG` (§6.5.6), 0 without one; its buses and windows are what
 //! `toyos_acpi::root_bridge` reads of its `_CRS` (§6.2.2); its `_OSC` is
-//! negotiated once, query then commit (`crate::osc::negotiate_root`).
+//! queried, and what it offers recorded, with no commit (`crate::osc::query_root`).
 //!
 //! **The declaration is every root together, or none at all**: a root whose
 //! `_STA`, `_SEG` or `_CRS` is refused, a list the decoder refuses or that
@@ -16,7 +16,7 @@
 //! a namespace with no root are each said by name and declared as no root,
 //! which the kernel refuses — and with it every PCI claim, rather than one
 //! placed by a list with a hole in it. A machine with no namespace declares
-//! the same. An `_OSC` refused is that root's grant refused, and nothing
+//! the same. An `_OSC` refused is that root's offer refused, and nothing
 //! else's.
 
 use toyos_abi::acpi::{Osc, RootBridgeWindow, MAX_BRIDGES, MAX_WINDOWS};
@@ -81,14 +81,14 @@ pub fn read<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, census: &mut Census)
     Ok(roots)
 }
 
-/// What `root`'s `_OSC` granted, said under [`OWN`] where it was refused.
+/// What `root`'s `_OSC` offers, said under [`OWN`] where it was refused.
 fn osc<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, root: &str) -> Osc {
     let path = format!("{root}._OSC");
     if !names.paths.contains(&path) {
         return Osc::Absent;
     }
-    match crate::osc::negotiate_root(aml, &path) {
-        Ok(granted) => Osc::Granted(granted),
+    match crate::osc::query_root(aml, &path) {
+        Ok(granted) => Osc::Offered(granted),
         Err(why) => {
             println!("{OWN}{path} was refused: {why}");
             Osc::Refused
@@ -195,7 +195,7 @@ mod tests {
                 RootBridgeWindow { base: 0x80_0000_0000, length: 0x80_0000_0000 },
             ]
         );
-        assert_eq!(root.osc, Osc::Granted(VIRT_GRANTED));
+        assert_eq!(root.osc, Osc::Offered(VIRT_OFFERED));
     }
 
     /// q35: one root on buses 0 to 0xff whose `_CRS` names the VGA window,
@@ -215,14 +215,14 @@ mod tests {
                 RootBridgeWindow { base: 0xc0_0000_0000, length: 0x8_0000_0000 },
             ]
         );
-        assert_eq!(root.osc, Osc::Granted(Q35_GRANTED));
+        assert_eq!(root.osc, Osc::Offered(Q35_OFFERED));
     }
 
-    /// What each QEMU's root `_OSC` grants of [`ROOT_CONTROL`]: `virt` both,
-    /// q35 the capability structure and not native hot-plug, which its
+    /// What each QEMU's root `_OSC` query offers of [`ROOT_CONTROL`]: `virt`
+    /// both, q35 the capability structure and not native hot-plug, which its
     /// firmware keeps for its own ACPI hot-plug.
-    const VIRT_GRANTED: u32 = ROOT_CONTROL;
-    const Q35_GRANTED: u32 = toyos_abi::acpi::CAPABILITY_STRUCTURE;
+    const VIRT_OFFERED: u32 = ROOT_CONTROL;
+    const Q35_OFFERED: u32 = toyos_abi::acpi::CAPABILITY_STRUCTURE;
 
     /// No byte of either `_CRS` as evaluated panics the decoder or runs it
     /// away: each takes each of its 255 other values in turn, and both arms,
@@ -297,8 +297,7 @@ mod tests {
         sealed(b"DSDT", &crate::common::scope("\\_SB", &device("PCI0", &body)))
     }
 
-    /// A root's `_OSC` returning the answer `answer` to both the query and
-    /// the commit.
+    /// A root's `_OSC` returning `answer`.
     fn osc(answer: &[u8]) -> Vec<u8> {
         method("_OSC", 4, &ret(answer))
     }
@@ -309,33 +308,59 @@ mod tests {
         buffer(&int(12), &bytes)
     }
 
-    /// What a root's `_OSC` grants, read off a namespace of that one root:
-    /// a firmware that echoes the request grants it; one that answers
-    /// failure, or masks every Control bit, grants nothing; a root with no
-    /// `_OSC` says so; and an answer that is no buffer of three DWORDs is
-    /// refused by name, its root still declared.
+    /// What a root's `_OSC` offers, read off a namespace of that one root: a
+    /// firmware that echoes the request offers it; one that answers failure,
+    /// or masks every Control bit, offers nothing; Control bits offered that
+    /// were never asked for are dropped; a root with no `_OSC` says so; and
+    /// an answer that is no buffer of three DWORDs is refused by name, its
+    /// root still declared.
     #[test]
-    fn a_roots_osc_is_negotiated_once_and_its_grant_read() {
-        let granted = |rest: &[u8]| declared(&root(&crs(), rest)).map(|roots| Some(roots[0].osc));
-        // Return (Arg3): the query's DWORDs back, then the commit's.
-        assert_eq!(granted(&osc(&[0x6B])), Ok(Some(Osc::Granted(ROOT_CONTROL))));
-        assert_eq!(granted(&osc(&dwords([1 << 1, 0, ROOT_CONTROL]))), Ok(Some(Osc::Granted(0))));
-        assert_eq!(granted(&osc(&dwords([0, 0, 0]))), Ok(Some(Osc::Granted(0))));
-        // Control bits granted that were never asked for are dropped.
-        assert_eq!(granted(&osc(&dwords([0, 0, u32::MAX]))), Ok(Some(Osc::Granted(ROOT_CONTROL))));
+    fn a_roots_osc_is_queried_and_its_offer_read() {
+        let offered = |rest: &[u8]| declared(&root(&crs(), rest)).map(|roots| roots[0].osc);
+        // Return (Arg3): the query's DWORDs back.
+        assert_eq!(offered(&osc(&[0x6B])), Ok(Osc::Offered(ROOT_CONTROL)));
+        assert_eq!(offered(&osc(&dwords([1 << 1, 0, ROOT_CONTROL]))), Ok(Osc::Offered(0)));
+        assert_eq!(offered(&osc(&dwords([1 << 3, 0, ROOT_CONTROL]))), Ok(Osc::Offered(0)));
+        assert_eq!(offered(&osc(&dwords([0, 0, 0]))), Ok(Osc::Offered(0)));
+        assert_eq!(offered(&osc(&dwords([0, 0, u32::MAX]))), Ok(Osc::Offered(ROOT_CONTROL)));
         // QEMU q35's own shape: the Control DWORD masked by the firmware,
         // 0x1F with `acpi-pci-hotplug-with-bridge-support=off`, 0x1E with
-        // its default, which keeps native hot-plug. The grant is what the
-        // commit answered.
+        // its default, which keeps native hot-plug.
         let masked = |mask: u8| {
             let ctrl = cat(&[&[0x8A, 0x6B, 0x0A, 0x08], b"CTRL", &[0x7B], b"CTRL", &[0x0A, mask], b"CTRL"]);
             method("_OSC", 4, &cat(&[&ctrl, &ret(&[0x6B])]))
         };
-        assert_eq!(granted(&masked(0x1F)), Ok(Some(Osc::Granted(ROOT_CONTROL))));
-        assert_eq!(granted(&masked(0x1E)), Ok(Some(Osc::Granted(toyos_abi::acpi::CAPABILITY_STRUCTURE))));
-        assert_eq!(granted(&[]), Ok(Some(Osc::Absent)));
-        assert_eq!(granted(&osc(&buffer(&int(4), &[0; 4]))), Ok(Some(Osc::Refused)));
-        assert_eq!(granted(&osc(&int(5))), Ok(Some(Osc::Refused)));
+        assert_eq!(offered(&masked(0x1F)), Ok(Osc::Offered(ROOT_CONTROL)));
+        assert_eq!(offered(&masked(0x1E)), Ok(Osc::Offered(toyos_abi::acpi::CAPABILITY_STRUCTURE)));
+        assert_eq!(offered(&[]), Ok(Osc::Absent));
+        assert_eq!(offered(&osc(&buffer(&int(4), &[0; 4]))), Ok(Osc::Refused));
+        assert_eq!(offered(&osc(&int(5))), Ok(Osc::Refused));
+    }
+
+    /// The `_OSC` is evaluated once, with the Query flag set: nothing is
+    /// committed, so the firmware keeps what it offered. The firmware here
+    /// counts its calls and keeps the first DWORD it was passed.
+    #[test]
+    fn a_roots_osc_is_never_committed() {
+        let body = cat(&[
+            &[0x75],
+            b"CNT_",
+            &[0x8A, 0x6B, 0x00],
+            b"STS0",
+            &[0x70],
+            b"STS0",
+            b"QFLG",
+            &ret(&[0x6B]),
+        ]);
+        let rest = cat(&[&def_name("CNT_", &int(0)), &def_name("QFLG", &int(0xFF)), &method("_OSC", 4, &body)]);
+        let kernel = crate::aml::tests::crafted(&root(&crs(), &rest), &[]);
+        let (_, kept) = load(&kernel, CRAFTED_RSDP);
+        let mut aml = kept.expect("the DSDT loads");
+        let names = Names::read(&aml.interpreter).expect("its namespace walks");
+        assert_eq!(read(&mut aml, &names, &mut Census::default()).map(|roots| roots[0].osc), Ok(Osc::Offered(ROOT_CONTROL)));
+        let integer = |aml: &mut Aml<'_, Scripted>, path| aml.interpreter.evaluate(&mut aml.host, path, &[]);
+        assert!(matches!(integer(&mut aml, "\\_SB_.PCI0.CNT_"), Ok(Value::Integer(1))));
+        assert!(matches!(integer(&mut aml, "\\_SB_.PCI0.QFLG"), Ok(Value::Integer(1))));
     }
 
     /// A root that is not a list of windows, one whose `_CRS` is refused or

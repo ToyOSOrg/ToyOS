@@ -412,28 +412,10 @@ struct Machine {
 }
 
 /// One PCI root bridge as the `acpi` claim's holder declared it.
-pub struct RootBridge {
+struct RootBridge {
     segment: u16,
-    first_bus: u8,
-    windows: Vec<RootBridgeWindow>,
+    buses: (u8, u8),
     osc: toyos_abi::acpi::Osc,
-}
-
-impl RootBridge {
-    /// Every bridge `declared` carries, or `None` where a record is none the
-    /// ABI names: a count or a run of windows past its array, or an `_OSC`
-    /// word it does not.
-    pub fn decode(declared: &toyos_abi::acpi::Apertures) -> Option<Vec<Self>> {
-        declared
-            .bridges()?
-            .iter()
-            .map(|bridge| {
-                (bridge.first_bus <= bridge.last_bus).then_some(())?;
-                let windows = declared.windows_of(bridge)?.to_vec();
-                Some(Self { segment: bridge.segment, first_bus: bridge.first_bus, windows, osc: bridge.osc()? })
-            })
-            .collect()
-    }
 }
 
 /// Posted once, when [`Machine::apertures`] leaves `Unknown`.
@@ -677,30 +659,44 @@ pub fn publish(devices: &[PciDevice], segment: u16, maps: &[MemoryMapEntry]) {
     machine.high = high;
 }
 
-/// Hold `roots` and their windows, together, as the root bridges' memory:
-/// the `acpi` claim holder's declaration, from `Unknown` alone. A window over
-/// memory firmware's map gives the kernel, in any root, is refused with the
-/// rest ([`aperture::check`]). Each root's `_OSC` grant is said.
-pub fn declare(roots: Vec<RootBridge>) -> Result<(), aperture::Declined> {
+/// Hold the roots `declared` carries and their windows, together, as the
+/// root bridges' memory: the `acpi` claim holder's declaration, from
+/// `Unknown` alone. A record the ABI does not name ([`aperture::records`]),
+/// and a window over memory firmware's map gives the kernel in any root
+/// ([`aperture::check`]), refuse the whole of it, and the refusal is the
+/// answer. Each root's `_OSC` offer is said.
+pub fn declare(declared: &toyos_abi::acpi::Apertures) -> Result<(), aperture::Declined> {
     let memory: Vec<(u64, u64)> = crate::mm::firmware_map()
         .iter()
         .filter(|entry| toyos_bootmap::is_read_as_memory(entry.uefi_type))
         .map(|entry| (entry.start, entry.end))
         .collect();
-    let windows: Vec<RootBridgeWindow> = roots.iter().flat_map(|root| root.windows.iter().copied()).collect();
     let mut machine = MACHINE.lock();
-    let declared = machine.apertures.declare(windows, &memory);
-    if declared != Err(aperture::Declined::Late) {
-        machine.roots = roots;
-        for root in &machine.roots {
-            let granted = match root.osc {
-                toyos_abi::acpi::Osc::Absent => "no _OSC",
-                toyos_abi::acpi::Osc::Granted(granted) if granted & toyos_abi::acpi::NATIVE_HOT_PLUG != 0 => "native hot-plug granted",
-                toyos_abi::acpi::Osc::Granted(_) | toyos_abi::acpi::Osc::Refused => "not granted",
-            };
-            log!("pci: root {:04x}:{:02x} _OSC: {granted}", root.segment, root.first_bus);
+    let answer = match aperture::records(declared) {
+        Err(why) => machine.apertures.refuse(why),
+        Ok(()) => {
+            let bridges = declared.bridges().expect("`records` read every bridge");
+            let windows: Vec<RootBridgeWindow> =
+                bridges.iter().flat_map(|bridge| declared.windows_of(bridge).expect("`records` read every run")).copied().collect();
+            let answer = machine.apertures.declare(windows, &memory);
+            if answer != Err(aperture::Declined::Late) {
+                machine.roots = bridges
+                    .iter()
+                    .map(|b| RootBridge { segment: b.segment, buses: (b.first_bus, b.last_bus), osc: b.osc().expect("`records` read every word") })
+                    .collect();
+                for root in &machine.roots {
+                    let offered = match root.osc {
+                        toyos_abi::acpi::Osc::Absent => "no _OSC",
+                        toyos_abi::acpi::Osc::Offered(offered) if offered & toyos_abi::acpi::NATIVE_HOT_PLUG != 0 => "native hot-plug offered",
+                        toyos_abi::acpi::Osc::Offered(_) | toyos_abi::acpi::Osc::Refused => "not offered",
+                    };
+                    log!("pci: root {:04x}:{:02x} _OSC: {offered}, buses {:#04x}..={:#04x}", root.segment, root.buses.0, root.buses.0, root.buses.1);
+                }
+            }
+            answer
         }
-    }
+    };
+    let declared = answer;
     match (&declared, machine.apertures.answer()) {
         (Ok(()), Some(Ok(declaration))) => account_for(declaration.windows(), &machine.decoded),
         (Err(aperture::Declined::Refused(why)), _) => {

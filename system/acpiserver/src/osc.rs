@@ -2,7 +2,8 @@
 //! under the platform-wide UUID (§6.2.11.2), then, on an Intel processor,
 //! each processor's `_OSC` under Intel's, each a query with the Query flag
 //! and then a commit of what the query granted (§6.2.11.1.1, §6.2.11.1.3);
-//! and each PCI root bridge's under the PCI host bridge UUID ([`negotiate_root`],
+//! and each PCI root bridge's under the PCI host bridge UUID, a query alone,
+//! since nothing yet does what its Control bits promise ([`query_root`],
 //! PCI Firmware Specification 3.3 §4.5), by `crate::apertures`.
 //!
 //! **What ToyOS claims is one declaration a UUID** ([`PLATFORM`],
@@ -156,25 +157,20 @@ const ROOT_SUPPORT: u32 = 1 << 0 | 1 << 4;
 /// hot-plug, and the PCI Express capability structure it needs with it.
 pub const ROOT_CONTROL: u32 = toyos_abi::acpi::NATIVE_HOT_PLUG | toyos_abi::acpi::CAPABILITY_STRUCTURE;
 
-/// A root's `_OSC` at `path` negotiated (§4.5.1): the query, and the commit
-/// of the Control bits it offered of [`ROOT_CONTROL`]; what is granted is
-/// what the commit answered of those, and nothing where either answered
-/// failure or an unrecognised UUID. An answer that is no buffer of the three
-/// DWORDs passed refuses the negotiation by name.
-pub fn negotiate_root<K: Kernel>(aml: &mut Aml<'_, K>, path: &str) -> Result<u32, String> {
+/// What a root's `_OSC` at `path` offers of [`ROOT_CONTROL`] (§4.5.1): its
+/// query alone, and nothing where it answered failure, an unrecognised UUID
+/// or revision. **No commit is made**: committing native hot-plug control
+/// hands the firmware's hot-plug to ToyOS, and the service that acts on it
+/// commits. An answer that is no buffer of the three DWORDs passed refuses
+/// the query by name.
+pub fn query_root<K: Kernel>(aml: &mut Aml<'_, K>, path: &str) -> Result<u32, String> {
     const REFUSED: u32 = FAILURE | UNRECOGNIZED_UUID | UNRECOGNIZED_REVISION;
     let [query, _, offered] = evaluate(aml, path, &HOST_BRIDGE, [QUERY, ROOT_SUPPORT, ROOT_CONTROL])?;
-    let offered = offered & ROOT_CONTROL;
     if query & REFUSED != 0 {
         println!("{OWN}{path}'s query answered {}", status(query));
         return Ok(0);
     }
-    let [commit, _, granted] = evaluate(aml, path, &HOST_BRIDGE, [0, ROOT_SUPPORT, offered])?;
-    if commit & REFUSED != 0 {
-        println!("{OWN}{path}'s commit answered {}", status(commit));
-        return Ok(0);
-    }
-    Ok(granted & offered)
+    Ok(offered & ROOT_CONTROL)
 }
 
 /// What the negotiation answered, for the line the server says.
