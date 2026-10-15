@@ -21,7 +21,6 @@ pub mod boot;
 pub mod clock;
 pub mod counters;
 pub mod handle;
-pub mod hda;
 pub mod inbox;
 pub mod input;
 pub mod inventory;

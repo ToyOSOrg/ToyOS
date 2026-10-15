@@ -634,7 +634,7 @@ mod tests {
                     name: "soundserver".into(),
                     path: "/system/bin/soundserver".into(),
                     serves: vec!["soundserver".into()],
-                    devices: vec!["hda-audio".into(), "pci:04:01:00/1af4:1059".into()],
+                    devices: vec!["pci:04:03:00".into(), "pci:04:01:00/1af4:1059".into()],
                     syscap: vec!["rt".into()],
                     service: true,
                     ..Program::default()
@@ -1008,8 +1008,8 @@ mod tests {
 
     #[test]
     fn a_device_class_name_is_the_abi_s() {
-        assert_eq!(DeviceType::from_class_name("hda-audio"), Some(DeviceType::HdaAudio));
-        assert_eq!(DeviceType::HdaAudio.class_name(), "hda-audio");
-        assert_eq!(DeviceType::from_class_name("hda_audio"), None);
+        assert_eq!(DeviceType::from_class_name("framebuffer"), Some(DeviceType::Framebuffer));
+        assert_eq!(DeviceType::Framebuffer.class_name(), "framebuffer");
+        assert_eq!(DeviceType::from_class_name("frame_buffer"), None);
     }
 }

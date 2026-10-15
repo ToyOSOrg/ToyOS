@@ -162,13 +162,12 @@ const RUST_SKIP: &[&str] = &[
     "readdir_bound",
     // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
     "mkdir_cap",
-    // No guest's sound device plays audio: the `hda_tone` and
-    // `hda_tone_resampled` metal rows run these on the T14 and the AMD bench.
+    // They need an HDA controller, which the shared boot's machine has not:
+    // the `hda_tone`, `hda_tone_resampled` and `hda_volume_step` metal rows
+    // run them on the T14 and the AMD bench, and
+    // `hda_drives_its_codec_through_its_claim` runs `volume_step` on QEMU's.
     "audio_tone",
     "audio_tone_resampled",
-    // It steps the codec's master and reads it back, which no guest's sound
-    // device has: the `hda_volume_step` metal row runs it on the T14 and the
-    // AMD bench.
     "volume_step",
     // It hands the ACPI claim to a server of its own and kills it, which needs
     // a boot that starts none: the `acpi_server_death` metal row runs it on
@@ -392,6 +391,12 @@ const MACHINE_TESTS: &[&str] = &[
     // spawns, each process holding its own — which no host build has. No
     // bench has two identical functions the kernel leaves to a claim.
     "a_drives_row_holds_one_process_per_function",
+    // soundserver driving an Intel HDA function through its claim behind
+    // VT-d — reset, CORB/RIRB, the codec walk, the path and the master read
+    // back — with the master job the benches' rows judge. The tone rows'
+    // stream is the benches' alone. q35 only: `virt` has no unit to put the
+    // function behind.
+    "hda_drives_its_codec_through_its_claim",
     // Whether QEMU's virtio functions negotiated `VIRTIO_F_ACCESS_PLATFORM`
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
@@ -3886,6 +3891,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
             claims::NOT_REMAPPED,
         ),
         "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
+        "hda_drives_its_codec_through_its_claim" => hda_drives_its_codec_through_its_claim(test_config),
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
@@ -4241,6 +4247,39 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
         .find(|l| l.contains("drives_judged: PCI "))
         .ok_or_else(|| format!("the job never said who holds the functions:\n{judged}"))?;
     eprintln!("  [drives] {}", line.trim());
+    Ok(())
+}
+
+/// The benches' master job, in one boot of `tests/images/testcases.toml` on
+/// [`qemu::Profile::MetalHda`]: it exits 0 on the HDA path soundserver
+/// configured, which a refused codec answer or a stalled ring would stop.
+///
+/// Not the tone jobs: cpal holds a stream's close to a fade and a ring of
+/// periods at the device's rate, and QEMU's controller completes periods in
+/// bursts of up to a ring paced by the host, so that bound is a time only the
+/// benches judge.
+fn hda_drives_its_codec_through_its_claim(test_config: &Path) -> Result<(), String> {
+    const JOBS: [&str; 1] = ["volume_step"];
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bins: Vec<(String, Vec<u8>)> =
+        JOBS.iter().map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, job))).collect();
+    let options = BootOptions { profile: qemu::Profile::MetalHda, ..Default::default() };
+    if !qemu::profile_argv(&options).iter().any(|arg| arg.starts_with("ich9-intel-hda")) {
+        return Err("the machine was to have an Intel HDA controller, and QEMU is given none".into());
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &bins, options);
+    let boot = serial::Serial::boot(&qemu);
+    boot.must_be_clean()?;
+    // soundserver's walk may end after the ready marker, so the capture is
+    // the boot's and every job's.
+    let mut said = boot.text().to_string();
+    for job in JOBS {
+        said += &job_window(&mut qemu, &format!("test_rs_{job}"))?;
+    }
+    let said = serial::Serial::named("the HDA boot", said);
+    said.must_say("soundserver: hda path configured in")?;
+    said.must_not_say(audio::NULL_SINK)?;
+    said.must_not_say("iommu: DMA FAULT")?;
     Ok(())
 }
 

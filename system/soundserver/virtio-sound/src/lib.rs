@@ -235,6 +235,16 @@ impl<M: DmaBuffers + Clone> Queues<M> {
     }
 }
 
+/// The periods one record answers for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Played {
+    /// The periods the device gave back, one bit each.
+    pub mask: u32,
+    /// How many of them, in the order they came back, the record's newest
+    /// notification is the time of; the rest are a later record's.
+    pub clocked: u32,
+}
+
 /// What the device said stream 0 is, and what this driver chose of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Stream {
@@ -250,6 +260,8 @@ pub struct Sound<M: DmaBuffers, D: Doorbell> {
     bell: D,
     queues: Queues<M>,
     running: bool,
+    /// Periods a read counted before their notification landed.
+    unnotified: u32,
 }
 
 impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
@@ -260,7 +272,7 @@ impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
         if streams == 0 {
             return Err(Refusal::NoStream);
         }
-        let mut sound = Self { mem, bell, queues, running: false };
+        let mut sound = Self { mem, bell, queues, running: false, unnotified: 0 };
         for buffer in 0..EVENT_BUFS {
             sound.post_event(buffer);
         }
@@ -321,20 +333,30 @@ impl<M: DmaBuffers, D: Doorbell> Sound<M, D> {
         Ok(())
     }
 
-    /// The periods the device has given back that `taken` answers for, as a
-    /// mask beside it; nothing without a record.
+    /// The periods the device has given back since a record of `notified`
+    /// notifications was taken; nothing without a record.
     ///
-    /// `taken` is the claim's interrupt record, taken before this call. The
-    /// device writes a used element before the notification that says so, and
-    /// with `avail.flags` zero and no `VIRTIO_F_EVENT_IDX` it owes one for
-    /// every element (§2.7.7), so a ring read after a record was taken holds
-    /// every period that record counts. With no record the ring is not read: a
-    /// period already in it has a notification still to land, which makes the
-    /// record readable again, and it is read then.
-    pub fn played<R>(&mut self, taken: Option<R>) -> Result<Option<(u32, R)>, Refusal> {
-        let Some(record) = taken else { return Ok(None) };
+    /// The device writes a used element before the notification that says
+    /// so, and with `avail.flags` zero and no `VIRTIO_F_EVENT_IDX` it owes one
+    /// for every element (§2.7.7), so a ring read after a record was taken
+    /// holds every period that record counts. With no record the ring is not
+    /// read: a period already in it has a notification still to land, which
+    /// makes the record readable again, and it is read then.
+    ///
+    /// **A period read before its notification landed is not clocked by this
+    /// record**: notifications answer periods in the order they came back, the
+    /// ones an earlier read counted first, and [`Played::clocked`] counts the
+    /// periods of this mask the record's notifications reach.
+    pub fn played(&mut self, notified: Option<u32>) -> Result<Option<Played>, Refusal> {
+        let Some(notified) = notified else { return Ok(None) };
         let mask = self.completed()?;
-        Ok((mask != 0).then_some((mask, record)))
+        let periods = mask.count_ones();
+        let fresh = notified.saturating_sub(self.unnotified);
+        let clocked = fresh.min(periods);
+        // No more can be owed than the ring holds periods.
+        self.unnotified =
+            (self.unnotified.saturating_sub(notified) + periods - clocked).min(PERIODS as u32);
+        Ok((mask != 0).then_some(Played { mask, clocked }))
     }
 
     /// Every period the device has given back since the last call, as a mask.

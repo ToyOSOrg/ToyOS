@@ -101,7 +101,7 @@ devices = ["isa:0060,0064:1,12"]
 [programs.soundserver]
 service = true
 serves = ["soundserver", "volume"]
-devices = ["hda-audio", "pci:04:01:00/1af4:1059"]
+devices = ["pci:04:03:00", "pci:04:01:00/1af4:1059"]
 syscap = ["rt"]
 
 # netstack holds the NIC's PCI function and drives it: the virtqueues, the register

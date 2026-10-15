@@ -1,11 +1,12 @@
-//! Intel HDA codec decoding and output-path selection, as pure functions.
+//! soundserver's Intel HDA driver, pure: the controller and its codec link
+//! ([`controller`]) over `toyos-device-memory`'s boundary, and everything
+//! decided from what a codec said about itself — which converter and pins
+//! carry sound to a speaker, and the verbs that configure them.
 //!
-//! Everything a driver has to *decide* before it touches a register: what a
-//! codec said about itself, and which converter and pins carry sound to a
-//! speaker. No I/O, no register writes, no allocation of device memory — the
-//! effects are soundserver's. It is a crate because the graph traversal is what QEMU
-//! certifies least: pure, it is host-tested against the committed codec dumps of
-//! the machines that have to work, and against states no machine in reach
+//! No instruction that reaches a device is here: soundserver implements the
+//! boundary over its claim. Pure, the controller is host-tested against a
+//! model of one, and the graph traversal against the committed codec dumps of
+//! the machines that have to work and against states no machine in reach
 //! constructs.
 //!
 //! Every value a codec supplies is untrusted. Counts are bounded, node ids are
@@ -19,6 +20,7 @@ extern crate alloc;
 
 pub mod caps;
 pub mod config;
+pub mod controller;
 pub mod graph;
 pub mod path;
 pub mod probe;

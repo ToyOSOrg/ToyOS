@@ -523,8 +523,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
 
     virtio_console::init(&pci_devices);
 
-    drivers::hda::init(&pci_devices);
-
     if kernel_args.gop_framebuffer != 0 {
         log!("GPU: using UEFI GOP");
         match gop::init(
