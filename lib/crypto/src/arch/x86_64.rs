@@ -265,7 +265,7 @@ mod hosted {
             return false;
         }
         // AES is admitted; the key is 16 or 32 bytes.
-        unsafe { aesni::expand(key, keys) }
+        unsafe { if features().avx2() { aesni::avx::expand(key, keys) } else { aesni::sse::expand(key, keys) } }
         true
     }
 
@@ -274,7 +274,7 @@ mod hosted {
             return false;
         }
         // AES is admitted and the schedule holds `rounds + 1` keys.
-        unsafe { aesni::encrypt(keys, rounds, block) }
+        unsafe { if features().avx2() { aesni::avx::encrypt(keys, rounds, block) } else { aesni::sse::encrypt(keys, rounds, block) } }
         true
     }
 
@@ -283,7 +283,7 @@ mod hosted {
             return false;
         }
         // CLMUL and SSSE3 are admitted.
-        unsafe { aesni::powers(h, powers) }
+        unsafe { if features().avx2() { aesni::avx::powers(h, powers) } else { aesni::sse::powers(h, powers) } }
         true
     }
 
@@ -301,7 +301,7 @@ mod hosted {
             unsafe { vaes::avx2::hash(powers, state, blocks) }
         } else if features.aes_clmul() {
             // CLMUL and SSSE3 are admitted.
-            unsafe { aesni::hash(powers, state, blocks) }
+            unsafe { if features.avx2() { aesni::avx::hash(powers, state, blocks) } else { aesni::sse::hash(powers, state, blocks) } }
         } else {
             return false;
         }
@@ -329,7 +329,7 @@ mod hosted {
             unsafe { vaes::avx2::ctr(keys, rounds, nonce, counter, data) }
         } else if features.aes_clmul() {
             // AES and SSSE3 are admitted.
-            unsafe { aesni::ctr(keys, rounds, nonce, counter, data) }
+            unsafe { if features.avx2() { aesni::avx::ctr(keys, rounds, nonce, counter, data) } else { aesni::sse::ctr(keys, rounds, nonce, counter, data) } }
         } else {
             return false;
         }
@@ -358,7 +358,7 @@ mod hosted {
             unsafe { vaes::avx2::seal(keys, rounds, powers, nonce, state, data) }
         } else if features.aes_clmul() {
             // AES, CLMUL and SSSE3 are admitted.
-            unsafe { aesni::seal(keys, rounds, powers, nonce, state, data) }
+            unsafe { if features.avx2() { aesni::avx::seal(keys, rounds, powers, nonce, state, data) } else { aesni::sse::seal(keys, rounds, powers, nonce, state, data) } }
         } else {
             0
         }
@@ -378,7 +378,7 @@ mod hosted {
             return None;
         }
         // AES, CLMUL and SSSE3 are admitted.
-        Some(unsafe { aesni::short(keys, rounds, powers, nonce, aad, data, stream) })
+        Some(unsafe { if features().avx2() { aesni::avx::short(keys, rounds, powers, nonce, aad, data, stream) } else { aesni::sse::short(keys, rounds, powers, nonce, aad, data, stream) } })
     }
 
     pub(in crate::arch) fn chacha_seal(
@@ -449,14 +449,15 @@ mod hosted {
 
     pub(in crate::arch) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool {
         let features = features();
-        if features.avx512vl() && features.bmi2() {
+        if !(features.avx2() && features.bmi2()) {
+            return false;
+        }
+        if features.avx512vl() {
             // AVX2, BMI2 and AVX-512VL under ZMM state are admitted.
             unsafe { sha::sha512_avx512(state, blocks) }
-        } else if features.bmi2() {
-            // BMI2 is admitted.
-            unsafe { sha::sha512_bmi2(state, blocks) }
         } else {
-            return false;
+            // AVX2 and BMI2 under YMM state are admitted.
+            unsafe { sha::sha512_avx2(state, blocks) }
         }
         true
     }

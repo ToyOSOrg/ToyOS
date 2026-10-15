@@ -126,8 +126,6 @@ macro_rules! round {
     };
 }
 
-#[cfg(all(target_arch = "x86_64", not(target_os = "uefi")))]
-pub(crate) use round;
 
 /// SHA-512's Σ0 and Σ1, which the x86-64 schedule's rounds share.
 pub(crate) const fn big0(x: u64) -> u64 {

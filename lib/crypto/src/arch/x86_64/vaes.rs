@@ -12,7 +12,7 @@ macro_rules! gcm256 {
     ($features:literal) => {
         use core::arch::x86_64::*;
 
-        use super::super::aesni::{Product, counter_base, power, reverse};
+        use super::super::aesni::avx::{Product, counter_base, power, reverse};
         use super::super::{load, load_data, store, store_data};
 
         #[inline]
@@ -136,7 +136,7 @@ macro_rules! gcm256 {
             store(state, reverse(y));
             if !rest.is_empty() {
                 // CLMUL and SSSE3 are admitted with VPCLMULQDQ.
-                unsafe { super::super::aesni::hash(powers, state, rest) }
+                unsafe { super::super::aesni::avx::hash(powers, state, rest) }
             }
         }
 
@@ -192,7 +192,7 @@ macro_rules! gcm256 {
                 next = next.wrapping_add(16);
             }
             // AES is admitted with VAES; the caller's bound covers the rest.
-            unsafe { super::super::aesni::ctr(keys, R, nonce, next, rest) }
+            unsafe { super::super::aesni::avx::ctr(keys, R, nonce, next, rest) }
         }
 
         #[inline]
@@ -296,9 +296,9 @@ macro_rules! gcm256 {
 }
 
 pub(super) mod avx2 {
-    gcm256!("avx2,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3");
+    gcm256!("avx2,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx");
 }
 
 pub(super) mod avx512 {
-    gcm256!("avx2,avx512f,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3");
+    gcm256!("avx2,avx512f,avx512vl,vaes,aes,vpclmulqdq,pclmulqdq,sse2,ssse3,avx");
 }

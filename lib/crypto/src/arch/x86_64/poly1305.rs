@@ -42,10 +42,10 @@ impl Multiplier {
         Self { r, s }
     }
 
-    /// h·r per lane, carried once.
+    /// h·r per lane, its five limb sums uncarried.
     #[inline]
     #[target_feature(enable = "avx2")]
-    fn multiply(&self, h: [__m256i; 5]) -> [__m256i; 5] {
+    fn product(&self, h: [__m256i; 5]) -> [__m256i; 5] {
         let [r0, r1, r2, r3, r4] = self.r;
         let [s1, s2, s3, s4] = self.s;
         let m = |a, b| _mm256_mul_epu32(a, b);
@@ -56,7 +56,7 @@ impl Multiplier {
         let d2 = sum([m(h0, r2), m(h1, r1), m(h2, r0), m(h3, s4), m(h4, s3)]);
         let d3 = sum([m(h0, r3), m(h1, r2), m(h2, r1), m(h3, r0), m(h4, s4)]);
         let d4 = sum([m(h0, r4), m(h1, r3), m(h2, r2), m(h3, r1), m(h4, r0)]);
-        carry([d0, d1, d2, d3, d4])
+        [d0, d1, d2, d3, d4]
     }
 }
 
@@ -137,16 +137,20 @@ pub(super) unsafe fn blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]])
         let (quads, _) = oct.as_chunks::<4>();
         (message(&quads[0]), message(&quads[1]))
     };
+    // The loop carries each chain's uncarried product and carries it at the
+    // top of the next step, so that every multiplication's inputs are masked
+    // in the same step: instruction selection, which sees one step at a
+    // time, then knows them below 2^32 and multiplies 32 by 32 bits.
     let (mut a, mut b) = (first, [_mm256_setzero_si256(); 5]);
     for i in 0..octs.len() {
         let (m, n) = halves(&octs[i]);
-        a = every.multiply(add(a, m));
-        b = every.multiply(add(b, n));
+        a = every.product(add(carry(a), m));
+        b = every.product(add(carry(b), n));
     }
     let (m, n) = halves(last);
-    a = close_a.multiply(add(a, m));
-    b = close_b.multiply(add(b, n));
-    let (acc, done) = (add(a, b), 8 * (octs.len() + 1));
+    a = close_a.product(add(carry(a), m));
+    b = close_b.product(add(carry(b), n));
+    let (acc, done) = (add(carry(a), carry(b)), 8 * (octs.len() + 1));
     // Limb sums over the lanes, each below 2^30.
     let mut sums = [0u64; 5];
     for k in 0..5 {
