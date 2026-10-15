@@ -130,16 +130,12 @@ pub(crate) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool 
     })
 }
 
-/// [`chacha_xor`], with `mac` absorbing the ciphertext of the prefix it did.
-pub(crate) fn chacha_seal(
-    key: &[u8; 32],
-    counter: u64,
-    nonce: &[u8; 8],
-    data: &mut [u8],
-    mac: &mut crate::poly1305::Poly1305,
-) -> usize {
-    hosted!(x86_64::chacha_seal(key, counter, nonce, data, mac), {
-        let _ = (key, counter, nonce, data, mac);
+
+/// Poly1305 over a prefix of whole blocks, each with 2^128 added; returns its
+/// length in blocks. `r` is r0, r1 and 5·r1/4; `h` is in radix 2^64.
+pub(crate) fn poly1305_blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]]) -> usize {
+    hosted!(x86_64::poly1305_blocks(r, h, blocks), {
+        let _ = (r, h, blocks);
         0
     })
 }

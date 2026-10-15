@@ -6,6 +6,8 @@
 
 use core::arch::x86_64::*;
 
+use super::{load2, store2};
+
 const SIGMA: [u32; 4] = [0x61707865, 0x3320646e, 0x79622d32, 0x6b206574];
 
 #[inline]
@@ -49,32 +51,23 @@ fn quarter(a: &mut __m256i, b: &mut __m256i, c: &mut __m256i, d: &mut __m256i) {
     *b = rotate::<7, 25>(_mm256_xor_si256(*b, *c));
 }
 
-/// XORs 32 keystream bytes into `p`.
-///
-/// # Safety
-/// `p` addresses 32 exclusive bytes.
 #[inline]
 #[target_feature(enable = "avx2")]
-unsafe fn xor_store(p: *mut u8, stream: __m256i) {
-    // The caller provides the bytes.
-    unsafe { _mm256_storeu_si256(p.cast(), _mm256_xor_si256(stream, _mm256_loadu_si256(p.cast()))) }
+fn xor_into(bytes: &mut [u8; 32], stream: __m256i) {
+    store2(bytes, _mm256_xor_si256(stream, load2(bytes)));
 }
 
-/// Eight blocks from `counter` on into 512 bytes at `out`, calling `beside`
-/// once in each of the first eight double rounds.
-///
-/// # Safety
-/// `out` addresses 512 exclusive bytes.
+/// Eight blocks from `counter` on, XORed into `out`.
 #[inline]
 #[target_feature(enable = "avx2")]
-unsafe fn eight(initial: &[u32; 16], counter: u64, out: *mut u8, mut beside: impl FnMut(usize)) {
+fn eight(initial: &[u32; 16], counter: u64, out: &mut [u8; 512]) {
     let lanes: [[u32; 8]; 2] = [
         core::array::from_fn(|j| counter.wrapping_add(j as u64) as u32),
         core::array::from_fn(|j| (counter.wrapping_add(j as u64) >> 32) as u32),
     ];
     let start: [__m256i; 16] = core::array::from_fn(|i| match i {
-        // `lanes` rows are eight words each.
-        12 | 13 => unsafe { _mm256_loadu_si256(lanes[i - 12].as_ptr().cast()) },
+        // Eight plain words make 32 plain bytes.
+        12 | 13 => unsafe { core::mem::transmute::<[u32; 8], __m256i>(lanes[i - 12]) },
         _ => _mm256_set1_epi32(initial[i] as i32),
     });
     let mut v = start;
@@ -85,10 +78,7 @@ unsafe fn eight(initial: &[u32; 16], counter: u64, out: *mut u8, mut beside: imp
             (v[$a], v[$b], v[$c], v[$d]) = (a, b, c, d);
         }};
     }
-    for round in 0..10 {
-        if round < 8 {
-            beside(round);
-        }
+    for _ in 0..10 {
         q!(0, 4, 8, 12);
         q!(1, 5, 9, 13);
         q!(2, 6, 10, 14);
@@ -116,29 +106,24 @@ unsafe fn eight(initial: &[u32; 16], counter: u64, out: *mut u8, mut beside: imp
             _mm256_unpackhi_epi64(ab_high, cd_high),
         ]
     });
-    let blocks: [[__m256i; 4]; 4] = core::array::from_fn(|q| core::array::from_fn(|g| t[g][q]));
-    for (q, [w0, w1, w2, w3]) in blocks.into_iter().enumerate() {
-        // Block q is bytes 64q..64q+64 and block q + 4 the 64 after 256 more.
-        unsafe {
-            let low = out.add(64 * q);
-            let high = out.add(64 * (q + 4));
-            xor_store(low, _mm256_permute2x128_si256::<0x20>(w0, w1));
-            xor_store(low.add(32), _mm256_permute2x128_si256::<0x20>(w2, w3));
-            xor_store(high, _mm256_permute2x128_si256::<0x31>(w0, w1));
-            xor_store(high.add(32), _mm256_permute2x128_si256::<0x31>(w2, w3));
-        }
+    // Block q is halves 2q and 2q + 1, block q + 4 halves 2q + 8 and 2q + 9.
+    let (halves, _) = out.as_chunks_mut::<32>();
+    for q in 0..4 {
+        let [w0, w1, w2, w3] = [t[0][q], t[1][q], t[2][q], t[3][q]];
+        xor_into(&mut halves[2 * q], _mm256_permute2x128_si256::<0x20>(w0, w1));
+        xor_into(&mut halves[2 * q + 1], _mm256_permute2x128_si256::<0x20>(w2, w3));
+        xor_into(&mut halves[2 * q + 8], _mm256_permute2x128_si256::<0x31>(w0, w1));
+        xor_into(&mut halves[2 * q + 9], _mm256_permute2x128_si256::<0x31>(w2, w3));
     }
 }
 
-/// Four blocks from `counter` on into 256 bytes at `out`, two per register.
-///
-/// # Safety
-/// `out` addresses 256 exclusive bytes.
+/// Four blocks from `counter` on, XORed into `out`, two per register.
 #[inline]
 #[target_feature(enable = "avx2")]
-unsafe fn four(initial: &[u32; 16], counter: u64, out: *mut u8) {
-    // `initial` rows are four words each.
-    let row = |i: usize| unsafe { _mm256_broadcastsi128_si256(_mm_loadu_si128(initial.as_ptr().add(4 * i).cast())) };
+fn four(initial: &[u32; 16], counter: u64, out: &mut [u8; 256]) {
+    let (rows, _) = initial.as_chunks::<4>();
+    // Four plain words make 16 plain bytes.
+    let row = |i: usize| _mm256_broadcastsi128_si256(unsafe { core::mem::transmute::<[u32; 4], __m128i>(rows[i]) });
     let (a, b, c) = (row(0), row(1), row(2));
     let nonce = (initial[15] as u64) << 32 | initial[14] as u64;
     let counters = |c: u64| _mm256_set_epi64x(nonce as i64, c.wrapping_add(1) as i64, nonce as i64, c as i64);
@@ -167,15 +152,13 @@ unsafe fn four(initial: &[u32; 16], counter: u64, out: *mut u8) {
         [_mm256_add_epi32(a0, a), _mm256_add_epi32(b0, b), _mm256_add_epi32(c0, c), _mm256_add_epi32(e0, d0)],
         [_mm256_add_epi32(a1, a), _mm256_add_epi32(b1, b), _mm256_add_epi32(c1, c), _mm256_add_epi32(e1, d1)],
     ];
-    for (pair, rows) in rows.into_iter().enumerate() {
-        // Pair p is blocks 2p and 2p + 1: 128 bytes from 128p.
-        unsafe {
-            let p = out.add(128 * pair);
-            xor_store(p, _mm256_permute2x128_si256::<0x20>(rows[0], rows[1]));
-            xor_store(p.add(32), _mm256_permute2x128_si256::<0x20>(rows[2], rows[3]));
-            xor_store(p.add(64), _mm256_permute2x128_si256::<0x31>(rows[0], rows[1]));
-            xor_store(p.add(96), _mm256_permute2x128_si256::<0x31>(rows[2], rows[3]));
-        }
+    // Pair p is blocks 2p and 2p + 1, halves 4p to 4p + 3.
+    let (halves, _) = out.as_chunks_mut::<32>();
+    for (quarter, rows) in halves.as_chunks_mut::<4>().0.iter_mut().zip(rows) {
+        xor_into(&mut quarter[0], _mm256_permute2x128_si256::<0x20>(rows[0], rows[1]));
+        xor_into(&mut quarter[1], _mm256_permute2x128_si256::<0x20>(rows[2], rows[3]));
+        xor_into(&mut quarter[2], _mm256_permute2x128_si256::<0x31>(rows[0], rows[1]));
+        xor_into(&mut quarter[3], _mm256_permute2x128_si256::<0x31>(rows[2], rows[3]));
     }
 }
 
@@ -190,61 +173,15 @@ pub(super) unsafe fn xor(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &m
     let (eights, rest) = data.as_chunks_mut::<512>();
     let mut counter = counter;
     for batch in eights.iter_mut() {
-        // The batch is 512 bytes.
-        unsafe { eight(&initial.0, counter, batch.as_mut_ptr(), |_| {}) };
+        eight(&initial.0, counter, batch);
         counter = counter.wrapping_add(8);
     }
-    // The caller's admission and bound carry over.
-    512 * eights.len() + unsafe { xor_fours(&initial.0, counter, rest) }
-}
-
-/// Whole 256-byte batches of `data`, returning their length.
-#[target_feature(enable = "avx2")]
-unsafe fn xor_fours(initial: &[u32; 16], mut counter: u64, data: &mut [u8]) -> usize {
-    let (fours, _) = data.as_chunks_mut::<256>();
+    let (fours, _) = rest.as_chunks_mut::<256>();
     for batch in fours.iter_mut() {
-        // The batch is 256 bytes.
-        unsafe { four(initial, counter, batch.as_mut_ptr()) };
+        four(&initial.0, counter, batch);
         counter = counter.wrapping_add(4);
     }
-    256 * fours.len()
-}
-
-/// [`xor`], with `mac` absorbing each 512-byte batch of ciphertext during the
-/// next batch's rounds; returns the bytes both took.
-///
-/// # Safety
-/// As [`xor`].
-#[target_feature(enable = "avx2")]
-pub(super) unsafe fn seal(
-    key: &[u8; 32],
-    counter: u64,
-    nonce: &[u8; 8],
-    data: &mut [u8],
-    mac: &mut crate::poly1305::Poly1305,
-) -> usize {
-    let initial = initial(key, nonce);
-    let n = data.len() / 512;
-    if n == 0 {
-        // The caller's admission and bound carry over.
-        let done = unsafe { xor_fours(&initial.0, counter, data) };
-        mac.update(&data[..done]);
-        return done;
-    }
-    let p = data.as_mut_ptr();
-    // Batch i is bytes 512i..512i+512 of `data`, i < n, written once before
-    // `mac` reads it; the slices `mac` reads end before the batch being written.
-    unsafe {
-        eight(&initial.0, counter, p, |_| {});
-        for i in 1..n {
-            let previous = core::slice::from_raw_parts(p.add(512 * (i - 1)), 512);
-            eight(&initial.0, counter.wrapping_add(8 * i as u64), p.add(512 * i), |round| {
-                mac.update(&previous[64 * round..64 * round + 64])
-            });
-        }
-        mac.update(core::slice::from_raw_parts(p.add(512 * (n - 1)), 512));
-    }
-    512 * n
+    512 * eights.len() + 256 * fours.len()
 }
 
 fn initial(key: &[u8; 32], nonce: &[u8; 8]) -> crate::secret::Secret<16, u32> {

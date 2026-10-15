@@ -85,9 +85,35 @@ impl Gcm {
             self.hash_blocks(state, core::slice::from_ref(&last.0));
         }
     }
-    fn tag(&self, nonce: &[u8; 12], mut state: Secret<16>, aad: usize, data: usize) -> Secret<16> {
-        let lengths = ((aad as u128 * 8) << 64) | (data as u128 * 8);
-        self.hash_blocks(&mut state.0, &[lengths.to_be_bytes()]);
+    fn lengths(aad: usize, data: usize) -> [u8; 16] {
+        (((aad as u128 * 8) << 64) | (data as u128 * 8)).to_be_bytes()
+    }
+    /// GHASH over the padded AAD, the padded data and the lengths. A short
+    /// message's blocks after the AAD's whole ones share one batch.
+    fn digest(&self, aad: &[u8], data: &[u8]) -> Secret<16> {
+        let mut state = Secret([0u8; 16]);
+        let (aad_blocks, aad_tail) = aad.as_chunks::<16>();
+        let (blocks, tail) = data.as_chunks::<16>();
+        if blocks.len() > 5 {
+            self.hash(&mut state.0, aad);
+            self.hash(&mut state.0, data);
+            self.hash_blocks(&mut state.0, &[Self::lengths(aad.len(), data.len())]);
+            return state;
+        }
+        self.hash_blocks(&mut state.0, aad_blocks);
+        let mut run = Secret([[0u8; 16]; 8]);
+        let mut n = 0;
+        for part in [aad_tail, blocks.as_flattened(), tail] {
+            for chunk in part.chunks(16) {
+                run.0[n][..chunk.len()].copy_from_slice(chunk);
+                n += 1;
+            }
+        }
+        run.0[n] = Self::lengths(aad.len(), data.len());
+        self.hash_blocks(&mut state.0, &run.0[..n + 1]);
+        state
+    }
+    fn tag(&self, nonce: &[u8; 12], mut state: Secret<16>) -> Secret<16> {
         let mut j = Secret([0u8; 16]);
         j.0[..12].copy_from_slice(nonce);
         j.0[15] = 1;
@@ -119,18 +145,19 @@ impl Gcm {
         data: &mut [u8],
     ) -> Result<[u8; 16], Error> {
         Self::check(aad.len(), data.len())?;
+        if !self.aggregated || data.len() < 128 {
+            self.xor(nonce, 2, data);
+            return Ok(self.tag(nonce, self.digest(aad, data)).0);
+        }
         let mut state = Secret([0u8; 16]);
         self.hash(&mut state.0, aad);
-        let done = if self.aggregated {
-            crate::arch::gcm_seal(&self.aes.keys.0, self.aes.rounds, &self.powers.0, nonce, &mut state.0, data)
-        } else {
-            0
-        };
+        let done = crate::arch::gcm_seal(&self.aes.keys.0, self.aes.rounds, &self.powers.0, nonce, &mut state.0, data);
         let rest = &mut data[done..];
         // GCM bounded the length, so the block count fits the counter.
         self.xor(nonce, (done / 16) as u32 + 2, rest);
         self.hash(&mut state.0, rest);
-        Ok(self.tag(nonce, state, aad.len(), data.len()).0)
+        self.hash_blocks(&mut state.0, &[Self::lengths(aad.len(), data.len())]);
+        Ok(self.tag(nonce, state).0)
     }
     pub(crate) fn open(
         &self,
@@ -140,10 +167,7 @@ impl Gcm {
         tag: &[u8],
     ) -> Result<(), Error> {
         Self::check(aad.len(), data.len())?;
-        let mut state = Secret([0u8; 16]);
-        self.hash(&mut state.0, aad);
-        self.hash(&mut state.0, data);
-        let expected = self.tag(nonce, state, aad.len(), data.len());
+        let expected = self.tag(nonce, self.digest(aad, data));
         if !crate::ct::equal(&expected.0, tag) {
             return Err(Error::Authentication);
         }

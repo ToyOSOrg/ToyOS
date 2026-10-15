@@ -18,15 +18,10 @@ impl Keys {
     fn header(&self) -> &[u8; 32] {
         self.0.0[32..].try_into().unwrap()
     }
-    /// Poly1305 keyed by the payload key's block 0, with `header` absorbed.
-    fn mac(&self, seq: u32, header: &[u8; 4]) -> Poly1305 {
+    fn tag(&self, seq: u32, header: &[u8; 4], payload: &[u8]) -> Secret<16> {
         let block = chacha::legacy_block(self.payload(), &u64::from(seq).to_be_bytes(), 0);
         let mut mac = Poly1305::new(block.0[..32].try_into().unwrap());
         mac.update(header);
-        mac
-    }
-    fn tag(&self, seq: u32, header: &[u8; 4], payload: &[u8]) -> Secret<16> {
-        let mut mac = self.mac(seq, header);
         mac.update(payload);
         Secret(mac.finish())
     }
@@ -34,14 +29,6 @@ impl Keys {
         let nonce = u64::from(seq).to_be_bytes();
         chacha::legacy_xor(self.header(), &nonce, 0, header)?;
         chacha::legacy_xor(self.payload(), &nonce, 1, payload)
-    }
-    /// Encrypts and authenticates in one pass over the payload.
-    fn seal(&self, seq: u32, header: &mut [u8; 4], payload: &mut [u8]) -> Result<Secret<16>, Error> {
-        let nonce = u64::from(seq).to_be_bytes();
-        chacha::legacy_xor(self.header(), &nonce, 0, header)?;
-        let mut mac = self.mac(seq, header);
-        chacha::legacy_seal(self.payload(), &nonce, 1, payload, &mut mac)?;
-        Ok(Secret(mac.finish()))
     }
 }
 pub struct SealingKey {
@@ -68,7 +55,8 @@ impl SealingKey {
             return Err(Error::Length);
         }
         let seq = self.next.ok_or(Error::CounterExhausted)?;
-        let tag = self.keys.seal(seq, header, payload)?;
+        self.keys.crypt(seq, header, payload)?;
+        let tag = self.keys.tag(seq, header, payload);
         self.next = seq.checked_add(1);
         Ok((seq, tag.0))
     }

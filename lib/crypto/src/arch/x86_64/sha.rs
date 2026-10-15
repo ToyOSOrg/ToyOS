@@ -11,6 +11,8 @@ use core::arch::x86_64::*;
 
 use crate::hash::K256;
 
+use super::load;
+
 #[inline]
 #[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
 fn schedule(w0: __m128i, w1: __m128i, w2: __m128i, w3: __m128i) -> __m128i {
@@ -19,47 +21,66 @@ fn schedule(w0: __m128i, w1: __m128i, w2: __m128i, w3: __m128i) -> __m128i {
     _mm_sha256msg2_epu32(partial, w3)
 }
 
+#[inline]
+#[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+fn k(i: usize) -> __m128i {
+    // Four plain words make 16 plain bytes.
+    unsafe { core::mem::transmute::<[u32; 4], __m128i>(K256.as_chunks::<4>().0[i]) }
+}
+
 /// # Safety
 /// SHA, SSSE3 and SSE4.1 are admitted.
 #[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
 pub(super) unsafe fn sha256(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
-    // Every access is inside `state`, a block or `K256`.
-    unsafe {
-        let flip = _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
-        let abcd = _mm_loadu_si128(state.as_ptr().cast());
-        let efgh = _mm_loadu_si128(state.as_ptr().add(4).cast());
-        let badc = _mm_shuffle_epi32::<0xb1>(abcd);
-        let hgfe = _mm_shuffle_epi32::<0x1b>(efgh);
-        let mut abef = _mm_alignr_epi8::<8>(badc, hgfe);
-        let mut cdgh = _mm_blend_epi16::<0xf0>(hgfe, badc);
-        let k = |i: usize| _mm_loadu_si128(K256.as_ptr().add(4 * i).cast());
-        for block in blocks {
-            let (saved_abef, saved_cdgh) = (abef, cdgh);
-            let p = block.as_ptr();
-            let mut w = [0; 4].map(|_| _mm_setzero_si128());
-            for i in 0..16 {
-                let group = if i < 4 {
-                    _mm_shuffle_epi8(_mm_loadu_si128(p.add(16 * i).cast()), flip)
-                } else {
-                    schedule(w[i & 3], w[(i + 1) & 3], w[(i + 2) & 3], w[(i + 3) & 3])
-                };
-                w[i & 3] = group;
-                let sum = _mm_add_epi32(group, k(i));
+    let flip = _mm_set_epi8(12, 13, 14, 15, 8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3);
+    // Eight plain words make two vectors of 16 plain bytes.
+    let [abcd, efgh] = unsafe { core::mem::transmute::<[u32; 8], [__m128i; 2]>(*state) };
+    let badc = _mm_shuffle_epi32::<0xb1>(abcd);
+    let hgfe = _mm_shuffle_epi32::<0x1b>(efgh);
+    let mut abef = _mm_alignr_epi8::<8>(badc, hgfe);
+    let mut cdgh = _mm_blend_epi16::<0xf0>(hgfe, badc);
+    for block in blocks {
+        let (saved_abef, saved_cdgh) = (abef, cdgh);
+        let (groups, _) = block.as_chunks::<16>();
+        // Four rounds with message group `w`: two SHA256RNDS2, each of which
+        // turns ABEF into the next and leaves the old as CDGH.
+        macro_rules! rounds4 {
+            ($w:expr, $i:expr) => {
+                let sum = _mm_add_epi32($w, k($i));
                 let previous = abef;
                 abef = _mm_sha256rnds2_epu32(cdgh, abef, sum);
                 cdgh = previous;
                 let previous = abef;
                 abef = _mm_sha256rnds2_epu32(cdgh, abef, _mm_shuffle_epi32::<0x0e>(sum));
                 cdgh = previous;
-            }
-            abef = _mm_add_epi32(abef, saved_abef);
-            cdgh = _mm_add_epi32(cdgh, saved_cdgh);
+            };
         }
-        let abef = _mm_shuffle_epi32::<0x1b>(abef);
-        let ghcd = _mm_shuffle_epi32::<0xb1>(cdgh);
-        _mm_storeu_si128(state.as_mut_ptr().cast(), _mm_blend_epi16::<0xf0>(abef, ghcd));
-        _mm_storeu_si128(state.as_mut_ptr().add(4).cast(), _mm_alignr_epi8::<8>(ghcd, abef));
+        let mut w0 = _mm_shuffle_epi8(load(&groups[0]), flip);
+        let mut w1 = _mm_shuffle_epi8(load(&groups[1]), flip);
+        let mut w2 = _mm_shuffle_epi8(load(&groups[2]), flip);
+        let mut w3 = _mm_shuffle_epi8(load(&groups[3]), flip);
+        rounds4!(w0, 0);
+        rounds4!(w1, 1);
+        rounds4!(w2, 2);
+        rounds4!(w3, 3);
+        for i in 1..4 {
+            w0 = schedule(w0, w1, w2, w3);
+            rounds4!(w0, 4 * i);
+            w1 = schedule(w1, w2, w3, w0);
+            rounds4!(w1, 4 * i + 1);
+            w2 = schedule(w2, w3, w0, w1);
+            rounds4!(w2, 4 * i + 2);
+            w3 = schedule(w3, w0, w1, w2);
+            rounds4!(w3, 4 * i + 3);
+        }
+        abef = _mm_add_epi32(abef, saved_abef);
+        cdgh = _mm_add_epi32(cdgh, saved_cdgh);
     }
+    let abef = _mm_shuffle_epi32::<0x1b>(abef);
+    let ghcd = _mm_shuffle_epi32::<0xb1>(cdgh);
+    let halves = [_mm_blend_epi16::<0xf0>(abef, ghcd), _mm_alignr_epi8::<8>(ghcd, abef)];
+    // Two vectors of 16 plain bytes make eight plain words.
+    *state = unsafe { core::mem::transmute::<[__m128i; 2], [u32; 8]>(halves) };
 }
 
 /// # Safety

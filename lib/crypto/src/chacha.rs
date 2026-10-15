@@ -1,7 +1,7 @@
 //! RFC 8439 ChaCha20; the original 64-bit nonce construction serves SSH.
 //! Rounds and memory addresses are independent of key and message contents.
 
-use crate::{Error, poly1305::Poly1305, secret::Secret};
+use crate::{Error, secret::Secret};
 
 #[inline(always)]
 fn quarter(x: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
@@ -93,14 +93,6 @@ fn stream(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) {
     }
 }
 
-/// [`stream`], with `mac` absorbing the ciphertext.
-fn stream_then_mac(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8], mac: &mut Poly1305) {
-    let done = crate::arch::chacha_seal(key, counter, nonce, data, mac);
-    let rest = &mut data[done..];
-    stream(key, counter.wrapping_add((done / 64) as u64), nonce, rest);
-    mac.update(rest);
-}
-
 pub(crate) fn xor(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8]) -> Result<(), Error> {
     check_ietf(data.len(), counter)?;
     let (counter, nonce) = ietf(nonce, counter);
@@ -108,36 +100,9 @@ pub(crate) fn xor(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8
     Ok(())
 }
 
-/// [`xor`], with `mac` absorbing the ciphertext.
-pub(crate) fn seal(
-    key: &[u8; 32],
-    nonce: &[u8; 12],
-    counter: u32,
-    data: &mut [u8],
-    mac: &mut Poly1305,
-) -> Result<(), Error> {
-    check_ietf(data.len(), counter)?;
-    let (counter, nonce) = ietf(nonce, counter);
-    stream_then_mac(key, counter, &nonce, data, mac);
-    Ok(())
-}
-
 pub(crate) fn legacy_xor(key: &[u8; 32], nonce: &[u8; 8], counter: u64, data: &mut [u8]) -> Result<(), Error> {
     check_legacy(data.len(), counter)?;
     stream(key, counter, nonce, data);
-    Ok(())
-}
-
-/// [`legacy_xor`], with `mac` absorbing the ciphertext.
-pub(crate) fn legacy_seal(
-    key: &[u8; 32],
-    nonce: &[u8; 8],
-    counter: u64,
-    data: &mut [u8],
-    mac: &mut Poly1305,
-) -> Result<(), Error> {
-    check_legacy(data.len(), counter)?;
-    stream_then_mac(key, counter, nonce, data, mac);
     Ok(())
 }
 
@@ -175,38 +140,6 @@ mod tests {
                 }
                 legacy_xor(&key, nonce, counter, &mut actual[..len]).unwrap();
                 assert_eq!(actual, expected, "legacy length {len}, counter {counter}");
-            }
-        }
-    }
-
-    #[test]
-    fn sealing_macs_exactly_the_ciphertext_it_writes() {
-        let key = core::array::from_fn(|i| (i * 11 + 5) as u8);
-        let mac_key = core::array::from_fn(|i| (i * 13 + 1) as u8);
-        for len in [0usize, 1, 63, 255, 256, 511, 512, 513, 1023, 1024, 1536, 1600, 2048, 2111] {
-            // A four-byte header first leaves the MAC's blocks unaligned to the stream's.
-            for header in [&[][..], &[9u8; 4][..]] {
-                let plain: std::vec::Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
-                let mut sealed = plain.clone();
-                let mut mac = Poly1305::new(&mac_key);
-                mac.update(header);
-                seal(&key, &[7; 12], 1, &mut sealed, &mut mac).unwrap();
-                let mut expected = plain.clone();
-                xor(&key, &[7; 12], 1, &mut expected).unwrap();
-                let mut reference = Poly1305::new(&mac_key);
-                reference.update(header);
-                reference.update(&expected);
-                assert_eq!(sealed, expected, "{len} bytes");
-                assert_eq!(mac.finish(), reference.finish(), "{len} bytes after {} of header", header.len());
-                let mut legacy = plain.clone();
-                let mut mac = Poly1305::new(&mac_key);
-                legacy_seal(&key, &[7; 8], u64::from(u32::MAX), &mut legacy, &mut mac).unwrap();
-                let mut expected = plain;
-                legacy_xor(&key, &[7; 8], u64::from(u32::MAX), &mut expected).unwrap();
-                let mut reference = Poly1305::new(&mac_key);
-                reference.update(&expected);
-                assert_eq!(legacy, expected, "legacy {len} bytes");
-                assert_eq!(mac.finish(), reference.finish(), "legacy {len} bytes");
             }
         }
     }

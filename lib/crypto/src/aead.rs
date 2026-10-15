@@ -183,8 +183,9 @@ fn chacha_seal(
     data: &mut [u8],
 ) -> Result<[u8; 16], Error> {
     check_chacha_length(data.len())?;
+    chacha::xor(key, nonce, 1, data)?;
     let mut mac = chacha_mac(key, nonce, aad);
-    chacha::seal(key, nonce, 1, data, &mut mac)?;
+    mac.update(data);
     Ok(chacha_finish(mac, aad.len(), data.len()).0)
 }
 fn chacha_open(

@@ -17,12 +17,31 @@ pub(crate) struct Poly1305 {
     filled: usize,
 }
 
-const fn low(x: u128) -> u64 {
+pub(crate) const fn low(x: u128) -> u64 {
     x as u64
 }
 
 const fn product(a: u64, b: u64) -> u128 {
     a as u128 * b as u128
+}
+
+/// h·r with h2 below 8, partially reduced: h2 of the result is at most 4.
+#[inline(always)]
+pub(crate) fn multiply([h0, h1, h2]: [u64; 3], [r0, r1, s1]: [u64; 3]) -> [u64; 3] {
+    // 2^128·r1 ≡ s1 and 2^192·r1 ≡ 2^64·s1; every term is below 2^125 and
+    // each sum below 2^127.
+    let t0 = product(h0, r0).wrapping_add(product(h1, s1));
+    let t1 = product(h0, r1)
+        .wrapping_add(product(h1, r0))
+        .wrapping_add(product(h2, s1))
+        .wrapping_add(t0 >> 64);
+    let t2 = h2.wrapping_mul(r0).wrapping_add((t1 >> 64) as u64);
+    // t2·2^128 = (t2 >> 2)·2^130 + (t2 & 3)·2^128, and 2^130 ≡ 5.
+    let carry = (t2 >> 2).wrapping_mul(5);
+    let sum = u128::from(low(t0)).wrapping_add(u128::from(carry));
+    let h0 = low(sum);
+    let sum = u128::from(low(t1)).wrapping_add(sum >> 64);
+    [h0, low(sum), (t2 & 3).wrapping_add((sum >> 64) as u64)]
 }
 
 impl Poly1305 {
@@ -37,33 +56,19 @@ impl Poly1305 {
     /// Absorbs whole blocks, each with 2^128 added when `full`.
     #[inline(always)]
     fn blocks(&mut self, blocks: &[[u8; 16]], full: bool) {
-        let [r0, r1, s1] = self.r;
-        let [mut h0, mut h1, mut h2] = self.h;
-        for block in blocks {
+        let done = if full { crate::arch::poly1305_blocks(&self.r, &mut self.h, blocks) } else { 0 };
+        let mut h = self.h;
+        for block in &blocks[done..] {
             // h < 2^131 after the addition, so h2 stays below 2^3.
             let m = u128::from_le_bytes(*block);
-            let sum = u128::from(h0).wrapping_add(u128::from(low(m)));
-            h0 = low(sum);
-            let sum = u128::from(h1).wrapping_add(m >> 64).wrapping_add(sum >> 64);
-            h1 = low(sum);
-            h2 = h2.wrapping_add((sum >> 64) as u64).wrapping_add(u64::from(full));
-            // h·r with 2^128·r1 ≡ s1 and 2^192·r1 ≡ 2^64·s1; every term is
-            // below 2^125 and each sum below 2^127.
-            let t0 = product(h0, r0).wrapping_add(product(h1, s1));
-            let t1 = product(h0, r1)
-                .wrapping_add(product(h1, r0))
-                .wrapping_add(product(h2, s1))
-                .wrapping_add(t0 >> 64);
-            let t2 = h2.wrapping_mul(r0).wrapping_add((t1 >> 64) as u64);
-            // t2·2^128 = (t2 >> 2)·2^130 + (t2 & 3)·2^128, and 2^130 ≡ 5.
-            let carry = (t2 >> 2).wrapping_mul(5);
-            let sum = u128::from(low(t0)).wrapping_add(u128::from(carry));
-            h0 = low(sum);
-            let sum = u128::from(low(t1)).wrapping_add(sum >> 64);
-            h1 = low(sum);
-            h2 = (t2 & 3).wrapping_add((sum >> 64) as u64);
+            let sum = u128::from(h[0]).wrapping_add(u128::from(low(m)));
+            let h0 = low(sum);
+            let sum = u128::from(h[1]).wrapping_add(m >> 64).wrapping_add(sum >> 64);
+            let h1 = low(sum);
+            let h2 = h[2].wrapping_add((sum >> 64) as u64).wrapping_add(u64::from(full));
+            h = multiply([h0, h1, h2], self.r);
         }
-        self.h = [h0, h1, h2];
+        self.h = h;
     }
 
     pub(crate) fn update(&mut self, mut data: &[u8]) {
