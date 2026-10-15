@@ -114,7 +114,7 @@ fn hold_and_sample(victim: usize) -> ! {
     );
     loop {
         irqchip::send_nmi(victim as u32);
-        let until = crate::clock::tsc_deadline(SEND_EVERY_NS);
+        let until = crate::clock::counter_deadline(SEND_EVERY_NS);
         while cpu::counter() < until {
             core::hint::spin_loop();
         }
@@ -133,7 +133,7 @@ fn go_deaf(me: usize, bound_ms: u64) -> ! {
         deaf_ns / 1_000_000,
     );
     // Read before `IF` goes, because the record above has to be out first.
-    let until = crate::clock::tsc_deadline(deaf_ns);
+    let until = crate::clock::counter_deadline(deaf_ns);
     STAGE.store(DEAF, Ordering::Release);
     // Not an `IrqGuard`: nothing here re-enables them, which is the point.
     cpu::disable_interrupts();
