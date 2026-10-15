@@ -18,6 +18,13 @@
 //! Intel Architecture Processors Via Function Stitching", Intel, 2010).
 //!
 //! Every branch and address depends only on lengths and round counts.
+//!
+//! Hot loops index fixed-size arrays rather than iterate: in the shipped
+//! profile, `map`, `zip` and slice iterators carry debug preconditions that
+//! keep them out of line, and a call from vector code spills every live
+//! register around it.
+
+#![allow(clippy::needless_range_loop, reason = "see the module header")]
 
 use core::arch::x86_64::*;
 
@@ -89,17 +96,22 @@ pub(super) unsafe fn expand(key: &[u8], keys: &mut [u8; 240]) {
 }
 
 #[inline]
+#[target_feature(enable = "sse2")]
 fn round_keys(keys: &[u8; 240]) -> [__m128i; 15] {
     let (slots, _) = keys.as_chunks::<16>();
-    core::array::from_fn(|i| load(&slots[i]))
+    let mut k = [_mm_setzero_si128(); 15];
+    for i in 0..15 {
+        k[i] = load(&slots[i]);
+    }
+    k
 }
 
 #[inline]
 #[target_feature(enable = "aes,sse2")]
 fn rounds<const R: usize>(k: &[__m128i; 15], block: __m128i) -> __m128i {
     let mut v = block;
-    for key in &k[1..R] {
-        v = _mm_aesenc_si128(v, *key);
+    for r in 1..R {
+        v = _mm_aesenc_si128(v, k[r]);
     }
     _mm_aesenclast_si128(v, k[R])
 }
@@ -133,13 +145,19 @@ fn counter(base: __m128i, counter: u32) -> __m128i {
 #[inline]
 #[target_feature(enable = "aes,sse2")]
 fn encrypt8<const R: usize>(k: &[__m128i; 15], base: __m128i, first: u32) -> [__m128i; 8] {
-    let mut s: [__m128i; 8] = core::array::from_fn(|j| counter(base, first.wrapping_add(j as u32)));
-    for key in &k[1..R] {
-        for block in &mut s {
-            *block = _mm_aesenc_si128(*block, *key);
+    let mut s = [_mm_setzero_si128(); 8];
+    for j in 0..8 {
+        s[j] = counter(base, first.wrapping_add(j as u32));
+    }
+    for r in 1..R {
+        for j in 0..8 {
+            s[j] = _mm_aesenc_si128(s[j], k[r]);
         }
     }
-    s.map(|block| _mm_aesenclast_si128(block, k[R]))
+    for j in 0..8 {
+        s[j] = _mm_aesenclast_si128(s[j], k[R]);
+    }
+    s
 }
 
 #[inline]
@@ -154,16 +172,17 @@ fn ctr_rounds<const R: usize>(keys: &[u8; 240], nonce: &[u8; 12], first: u32, da
     let base = counter_base(nonce, k[0]);
     let mut next = first;
     let (batches, rest) = data.as_chunks_mut::<128>();
-    for batch in batches {
-        let (blocks, _) = batch.as_chunks_mut::<16>();
-        for (block, stream) in blocks.iter_mut().zip(encrypt8::<R>(&k, base, next)) {
-            xor_into(block, stream);
+    for i in 0..batches.len() {
+        let (blocks, _) = batches[i].as_chunks_mut::<16>();
+        let s = encrypt8::<R>(&k, base, next);
+        for j in 0..8 {
+            xor_into(&mut blocks[j], s[j]);
         }
         next = next.wrapping_add(8);
     }
     let (blocks, tail) = rest.as_chunks_mut::<16>();
-    for block in blocks {
-        xor_into(block, rounds::<R>(&k, counter(base, next)));
+    for i in 0..blocks.len() {
+        xor_into(&mut blocks[i], rounds::<R>(&k, counter(base, next)));
         next = next.wrapping_add(1);
     }
     if !tail.is_empty() {
@@ -277,9 +296,10 @@ pub(super) unsafe fn powers(h: &[u8; 16], powers: &mut [u128; 8]) {
     let p6 = multiply(p3, p3);
     let p7 = multiply(p6, p1);
     let p8 = multiply(p4, p4);
-    for (out, p) in powers.iter_mut().zip([p1, p2, p3, p4, p5, p6, p7, p8]) {
+    let all = [p1, p2, p3, p4, p5, p6, p7, p8];
+    for i in 0..8 {
         // Both are 16 plain bytes.
-        *out = unsafe { core::mem::transmute::<__m128i, u128>(p) };
+        powers[i] = unsafe { core::mem::transmute::<__m128i, u128>(all[i]) };
     }
 }
 
@@ -288,11 +308,13 @@ pub(super) unsafe fn powers(h: &[u8; 16], powers: &mut [u128; 8]) {
 #[inline]
 #[target_feature(enable = "pclmulqdq,sse2,ssse3")]
 fn absorb(y: __m128i, powers: &[u128; 8], blocks: &[[u8; 16]]) -> __m128i {
-    let Some((first, rest)) = blocks.split_first() else { return y };
     let n = blocks.len();
-    let mut sum = Product::new(_mm_xor_si128(reverse(load(first)), y), power(powers[n - 1]));
-    for (block, p) in rest.iter().zip(powers[..n - 1].iter().rev()) {
-        sum = sum.add(reverse(load(block)), power(*p));
+    if n == 0 {
+        return y;
+    }
+    let mut sum = Product::new(_mm_xor_si128(reverse(load(&blocks[0])), y), power(powers[n - 1]));
+    for j in 1..n {
+        sum = sum.add(reverse(load(&blocks[j])), power(powers[n - 1 - j]));
     }
     sum.reduce()
 }
@@ -322,30 +344,39 @@ fn seal_rounds<const R: usize>(
         return 0;
     }
     let k = round_keys(keys);
-    let h: [__m128i; 8] = powers.map(power);
-    let folds = h.map(|h| folded(h));
+    let mut h = [_mm_setzero_si128(); 8];
+    let mut folds = [_mm_setzero_si128(); 8];
+    for j in 0..8 {
+        h[j] = power(powers[j]);
+        folds[j] = folded(h[j]);
+    }
     let base = counter_base(nonce, k[0]);
     let mut y = reverse(load(state));
     let (blocks, _) = batches[0].as_chunks_mut::<16>();
-    for (block, stream) in blocks.iter_mut().zip(encrypt8::<R>(&k, base, 2)) {
-        xor_into(block, stream);
+    let s = encrypt8::<R>(&k, base, 2);
+    for j in 0..8 {
+        xor_into(&mut blocks[j], s[j]);
     }
     for i in 1..n {
         let (done, next) = batches.split_at_mut(i);
         let (previous, _) = done[i - 1].as_chunks::<16>();
-        let x: [__m128i; 8] = core::array::from_fn(|j| reverse(load(&previous[j])));
         let first = (i as u32).wrapping_mul(8).wrapping_add(2);
-        let mut s: [__m128i; 8] = core::array::from_fn(|j| counter(base, first.wrapping_add(j as u32)));
+        let mut x = [_mm_setzero_si128(); 8];
+        let mut s = [_mm_setzero_si128(); 8];
+        for j in 0..8 {
+            x[j] = reverse(load(&previous[j]));
+            s[j] = counter(base, first.wrapping_add(j as u32));
+        }
         let x0 = _mm_xor_si128(x[0], y);
         let mut sum = Product {
             low: _mm_clmulepi64_si128::<0x00>(x0, h[7]),
             high: _mm_clmulepi64_si128::<0x11>(x0, h[7]),
             middle: _mm_clmulepi64_si128::<0x00>(folded(x0), folds[7]),
         };
-        // Round r also multiplies block r of the previous batch.
-        for (r, key) in k[1..R].iter().enumerate() {
-            for block in &mut s {
-                *block = _mm_aesenc_si128(*block, *key);
+        // Round r + 1 also multiplies block r of the previous batch.
+        for r in 0..R - 1 {
+            for j in 0..8 {
+                s[j] = _mm_aesenc_si128(s[j], k[r + 1]);
             }
             if (1..8).contains(&r) {
                 sum = Product {
@@ -357,8 +388,8 @@ fn seal_rounds<const R: usize>(
         }
         y = sum.reduce();
         let (blocks, _) = next[0].as_chunks_mut::<16>();
-        for (block, s) in blocks.iter_mut().zip(s) {
-            xor_into(block, _mm_aesenclast_si128(s, k[R]));
+        for j in 0..8 {
+            xor_into(&mut blocks[j], _mm_aesenclast_si128(s[j], k[R]));
         }
     }
     y = absorb(y, powers, batches[n - 1].as_chunks::<16>().0);
@@ -392,8 +423,8 @@ pub(super) unsafe fn seal(
 fn xor_bytes(data: &mut [u8], stream: __m128i) {
     let mut bytes = crate::secret::Secret([0u8; 16]);
     store(&mut bytes.0, stream);
-    for (d, s) in data.iter_mut().zip(bytes.0) {
-        *d ^= s;
+    for i in 0..data.len() {
+        data[i] ^= bytes.0[i];
     }
 }
 
@@ -411,12 +442,12 @@ fn short_rounds<const R: usize>(
     let base = counter_base(nonce, k[0]);
     let s = encrypt8::<R>(&k, base, 1);
     if seal {
-        for (chunk, stream) in data.chunks_mut(16).zip(&s[1..]) {
-            xor_bytes(chunk, *stream);
+        for (i, chunk) in data.chunks_mut(16).enumerate() {
+            xor_bytes(chunk, s[1 + i]);
         }
     } else {
-        for (out, stream) in stream.iter_mut().zip(&s[1..]) {
-            store(out, *stream);
+        for i in 0..7 {
+            store(&mut stream[i], s[1 + i]);
         }
     }
     // The padded AAD, the padded ciphertext and the lengths: at most eight.
@@ -434,8 +465,8 @@ fn short_rounds<const R: usize>(
     x[n] = power(lengths);
     n += 1;
     let mut sum = Product::new(x[0], power(powers[n - 1]));
-    for (x, p) in x[1..n].iter().zip(powers[..n - 1].iter().rev()) {
-        sum = sum.add(*x, power(*p));
+    for j in 1..n {
+        sum = sum.add(x[j], power(powers[n - 1 - j]));
     }
     let mut tag = [0u8; 16];
     store(&mut tag, _mm_xor_si128(reverse(sum.reduce()), s[0]));

@@ -5,7 +5,9 @@
 //! to r, so the lanes' sum is the sequential result. Limbs stay below 2^27
 //! and every product sum below 2^60, so carries are taken once per
 //! multiplication. No address or branch depends on the data
-//! or the key.
+//! or the key. Loops index fixed-size arrays, as `aesni`'s header says why.
+
+#![allow(clippy::needless_range_loop, reason = "see `aesni`'s header")]
 
 use core::arch::x86_64::*;
 
@@ -29,10 +31,14 @@ impl Multiplier {
     #[inline]
     #[target_feature(enable = "avx2")]
     fn new(lanes: [[u64; 5]; 4]) -> Self {
-        let r: [__m256i; 5] = core::array::from_fn(|k| {
-            _mm256_set_epi64x(lanes[3][k] as i64, lanes[2][k] as i64, lanes[1][k] as i64, lanes[0][k] as i64)
-        });
-        let s = core::array::from_fn(|k| _mm256_add_epi64(r[k + 1], _mm256_slli_epi64::<2>(r[k + 1])));
+        let mut r = [_mm256_setzero_si256(); 5];
+        for k in 0..5 {
+            r[k] = _mm256_set_epi64x(lanes[3][k] as i64, lanes[2][k] as i64, lanes[1][k] as i64, lanes[0][k] as i64);
+        }
+        let mut s = [_mm256_setzero_si256(); 4];
+        for k in 0..4 {
+            s[k] = _mm256_add_epi64(r[k + 1], _mm256_slli_epi64::<2>(r[k + 1]));
+        }
         Self { r, s }
     }
 
@@ -107,9 +113,15 @@ pub(super) unsafe fn blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]])
     let r3 = multiply(r2, *r);
     let r4 = multiply(r3, *r);
     let start = limbs(*h);
-    let first: [__m256i; 5] = core::array::from_fn(|k| _mm256_set_epi64x(0, 0, 0, start[k] as i64));
-    let add = |acc: [__m256i; 5], m: [__m256i; 5]| -> [__m256i; 5] {
-        core::array::from_fn(|k| _mm256_add_epi64(acc[k], m[k]))
+    let mut first = [_mm256_setzero_si256(); 5];
+    for k in 0..5 {
+        first[k] = _mm256_set_epi64x(0, 0, 0, start[k] as i64);
+    }
+    let add = |mut acc: [__m256i; 5], m: [__m256i; 5]| -> [__m256i; 5] {
+        for k in 0..5 {
+            acc[k] = _mm256_add_epi64(acc[k], m[k]);
+        }
+        acc
     };
     let (octs, _) = blocks.as_chunks::<8>();
     let Some((last, octs)) = octs.split_last() else { return 0 };
@@ -126,8 +138,8 @@ pub(super) unsafe fn blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]])
         (message(&quads[0]), message(&quads[1]))
     };
     let (mut a, mut b) = (first, [_mm256_setzero_si256(); 5]);
-    for oct in octs {
-        let (m, n) = halves(oct);
+    for i in 0..octs.len() {
+        let (m, n) = halves(&octs[i]);
         a = every.multiply(add(a, m));
         b = every.multiply(add(b, n));
     }
@@ -136,11 +148,12 @@ pub(super) unsafe fn blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]])
     b = close_b.multiply(add(b, n));
     let (acc, done) = (add(a, b), 8 * (octs.len() + 1));
     // Limb sums over the lanes, each below 2^30.
-    let sums: [u64; 5] = acc.map(|limb| {
+    let mut sums = [0u64; 5];
+    for k in 0..5 {
         // Four plain words make 32 plain bytes.
-        let lanes = unsafe { core::mem::transmute::<__m256i, [u64; 4]>(limb) };
-        lanes.into_iter().fold(0, u64::wrapping_add)
-    });
+        let lanes = unsafe { core::mem::transmute::<__m256i, [u64; 4]>(acc[k]) };
+        sums[k] = lanes[0].wrapping_add(lanes[1]).wrapping_add(lanes[2]).wrapping_add(lanes[3]);
+    }
     *h = radix64(sums);
     done
 }

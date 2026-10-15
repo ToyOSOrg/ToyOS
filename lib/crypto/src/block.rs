@@ -31,8 +31,8 @@ pub(crate) fn terminated(block: &[u8; 16], len: usize, next: u8) -> [u8; 16] {
 pub(crate) fn copy(dst: &mut [u8], src: &[u8]) {
     let (chunks, tail) = dst.as_chunks_mut::<16>();
     let (from, rest) = src.as_chunks::<16>();
-    for (d, s) in chunks.iter_mut().zip(from) {
-        *d = *s;
+    for (i, d) in chunks.iter_mut().enumerate() {
+        *d = from[i];
     }
     let rest = padded(rest);
     for (i, byte) in rest.iter().enumerate() {

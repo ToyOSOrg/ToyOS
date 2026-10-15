@@ -117,8 +117,8 @@ impl Gcm {
         j.0[..12].copy_from_slice(nonce);
         j.0[15] = 1;
         self.aes.encrypt(&mut j.0);
-        for (s, mask) in state.0.iter_mut().zip(&j.0) {
-            *s ^= mask;
+        for (i, s) in state.0.iter_mut().enumerate() {
+            *s ^= j.0[i];
         }
         state
     }
@@ -182,9 +182,9 @@ impl Gcm {
                 if !crate::ct::equal(&Secret(expected).0, tag) {
                     return Err(Error::Authentication);
                 }
-                for (chunk, stream) in data.chunks_mut(16).zip(&stream.0) {
-                    for (d, s) in chunk.iter_mut().zip(stream) {
-                        *d ^= s;
+                for (i, chunk) in data.chunks_mut(16).enumerate() {
+                    for (j, d) in chunk.iter_mut().enumerate() {
+                        *d ^= stream.0[i][j];
                     }
                 }
                 return Ok(());

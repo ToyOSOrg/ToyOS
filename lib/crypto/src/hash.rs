@@ -147,12 +147,15 @@ macro_rules! rounds {
         pub(crate) fn $name(state: &mut [$word; 8], blocks: &[[u8; $block]]) {
             let mut w = [0 as $word; 16];
             for block in blocks {
-                for (word, bytes) in w.iter_mut().zip(block.as_chunks::<$bytes>().0) {
-                    *word = <$word>::from_be_bytes(*bytes);
+                let (words, _) = block.as_chunks::<$bytes>();
+                for i in 0..16 {
+                    w[i] = <$word>::from_be_bytes(words[i]);
                 }
                 let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
                 let mut bc = b ^ c;
-                for (pass, k) in $k.as_chunks::<16>().0.iter().enumerate() {
+                let (passes, _) = $k.as_chunks::<16>();
+                for pass in 0..passes.len() {
+                    let k = &passes[pass];
                     let later = pass != 0;
                     round!(w, k, bc, 0, later, [a, b, c, d, e, f, g, h], $big0, $big1, $small0, $small1);
                     round!(w, k, bc, 1, later, [h, a, b, c, d, e, f, g], $big0, $big1, $small0, $small1);
@@ -171,8 +174,9 @@ macro_rules! rounds {
                     round!(w, k, bc, 14, later, [c, d, e, f, g, h, a, b], $big0, $big1, $small0, $small1);
                     round!(w, k, bc, 15, later, [b, c, d, e, f, g, h, a], $big0, $big1, $small0, $small1);
                 }
-                for (s, v) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
-                    *s = s.wrapping_add(v);
+                let v = [a, b, c, d, e, f, g, h];
+                for i in 0..8 {
+                    state[i] = state[i].wrapping_add(v[i]);
                 }
             }
             crate::secret::erase(&mut w);
@@ -293,11 +297,8 @@ macro_rules! hash {
                 self.block[$block - $length..].copy_from_slice(&bits[16 - $length..]);
                 $compress(&mut self.state, core::slice::from_ref(&self.block));
                 let mut result = [0; $out];
-                for (chunk, word) in result
-                    .chunks_exact_mut(core::mem::size_of::<$word>())
-                    .zip(self.state.iter())
-                {
-                    chunk.copy_from_slice(&word.to_be_bytes());
+                for (i, chunk) in result.as_chunks_mut::<{ core::mem::size_of::<$word>() }>().0.iter_mut().enumerate() {
+                    *chunk = self.state[i].to_be_bytes();
                 }
                 result
             }

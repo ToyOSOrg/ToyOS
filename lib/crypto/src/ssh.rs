@@ -51,8 +51,11 @@ fn mac(key: &[u8; 32], header: &[u8; 4], payload: &[u8]) -> Secret<16> {
 }
 /// Header and payload XORed with `short`'s keystream.
 fn crypt_short(stream: &[u8; 256], header: &mut [u8; 4], payload: &mut [u8]) {
-    for (byte, mask) in header.iter_mut().chain(payload.iter_mut()).zip(stream[..4].iter().chain(&stream[128..])) {
-        *byte ^= mask;
+    for (i, byte) in header.iter_mut().enumerate() {
+        *byte ^= stream[i];
+    }
+    for (i, byte) in payload.iter_mut().enumerate() {
+        *byte ^= stream[128 + i];
     }
 }
 pub struct SealingKey {

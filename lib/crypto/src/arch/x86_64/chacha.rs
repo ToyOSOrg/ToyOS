@@ -4,7 +4,10 @@
 //! row. Each is built twice: for AVX2, and for AVX-512VL, whose VPROLD
 //! rotates in one instruction and whose 32 registers hold the eight-block
 //! state. Rounds, shuffles and addresses depend only on public lengths and
-//! counters. Only hosted targets with OS-enabled YMM state enter here.
+//! counters. Only hosted targets with OS-enabled YMM state enter here. Hot
+//! loops index fixed-size arrays, as `aesni`'s header says why.
+
+#![allow(clippy::needless_range_loop, reason = "see `aesni`'s header")]
 
 use core::arch::x86_64::*;
 
@@ -109,15 +112,18 @@ macro_rules! chacha256 {
         #[inline]
         #[target_feature(enable = $features)]
         fn eight(initial: &[u32; 16], counter: u64, out: &mut [u8; 512], mut beside: impl FnMut(usize)) {
-            let lanes: [[u32; 8]; 2] = [
-                core::array::from_fn(|j| counter.wrapping_add(j as u64) as u32),
-                core::array::from_fn(|j| (counter.wrapping_add(j as u64) >> 32) as u32),
-            ];
-            let start: [__m256i; 16] = core::array::from_fn(|i| match i {
-                // Eight plain words make 32 plain bytes.
-                12 | 13 => unsafe { core::mem::transmute::<[u32; 8], __m256i>(lanes[i - 12]) },
-                _ => _mm256_set1_epi32(initial[i] as i32),
-            });
+            let mut lanes = [[0u32; 8]; 2];
+            for j in 0..8 {
+                let c = counter.wrapping_add(j as u64);
+                (lanes[0][j], lanes[1][j]) = (c as u32, (c >> 32) as u32);
+            }
+            let mut start = [_mm256_setzero_si256(); 16];
+            for i in 0..16 {
+                start[i] = _mm256_set1_epi32(initial[i] as i32);
+            }
+            // Eight plain words make 32 plain bytes.
+            start[12] = unsafe { core::mem::transmute::<[u32; 8], __m256i>(lanes[0]) };
+            start[13] = unsafe { core::mem::transmute::<[u32; 8], __m256i>(lanes[1]) };
             let mut v = start;
             macro_rules! q {
                 ($a:literal, $b:literal, $c:literal, $d:literal) => {{
@@ -139,24 +145,25 @@ macro_rules! chacha256 {
                 q!(2, 7, 8, 13);
                 q!(3, 4, 9, 14);
             }
-            for (word, initial) in v.iter_mut().zip(start) {
-                *word = _mm256_add_epi32(*word, initial);
+            for i in 0..16 {
+                v[i] = _mm256_add_epi32(v[i], start[i]);
             }
             // Transpose each group of four words: lane 0 of `t[g][q]` is words
             // 4g..4g+4 of block q, lane 1 of block q + 4.
-            let t: [[__m256i; 4]; 4] = core::array::from_fn(|g| {
+            let mut t = [[_mm256_setzero_si256(); 4]; 4];
+            for g in 0..4 {
                 let (a, b, c, d) = (v[4 * g], v[4 * g + 1], v[4 * g + 2], v[4 * g + 3]);
                 let ab_low = _mm256_unpacklo_epi32(a, b);
                 let ab_high = _mm256_unpackhi_epi32(a, b);
                 let cd_low = _mm256_unpacklo_epi32(c, d);
                 let cd_high = _mm256_unpackhi_epi32(c, d);
-                [
+                t[g] = [
                     _mm256_unpacklo_epi64(ab_low, cd_low),
                     _mm256_unpackhi_epi64(ab_low, cd_low),
                     _mm256_unpacklo_epi64(ab_high, cd_high),
                     _mm256_unpackhi_epi64(ab_high, cd_high),
-                ]
-            });
+                ];
+            }
             // Block q is halves 2q and 2q + 1, block q + 4 halves 2q + 8 and 2q + 9.
             let (halves, _) = out.as_chunks_mut::<32>();
             for q in 0..4 {
@@ -193,8 +200,13 @@ macro_rules! chacha256 {
                 e0 = _mm256_shuffle_epi32::<0x39>(e0);
                 e1 = _mm256_shuffle_epi32::<0x39>(e1);
             }
-            let add = |x: [__m256i; 4], s: [__m256i; 4]| core::array::from_fn(|i| _mm256_add_epi32(x[i], s[i]));
-            [add([a0, b0, c0, e0], start[0]), add([a1, b1, c1, e1], start[1])]
+            let mut out = [[a0, b0, c0, e0], [a1, b1, c1, e1]];
+            for p in 0..2 {
+                for i in 0..4 {
+                    out[p][i] = _mm256_add_epi32(out[p][i], start[p][i]);
+                }
+            }
+            out
         }
 
         /// Pair rows as 256 bytes of keystream, XORed into `out` or written over it.
@@ -202,18 +214,19 @@ macro_rules! chacha256 {
         #[target_feature(enable = $features)]
         fn emit(rows: [[__m256i; 4]; 2], out: &mut [u8; 256], xor: bool) {
             let (halves, _) = out.as_chunks_mut::<32>();
-            for (quarter, rows) in halves.as_chunks_mut::<4>().0.iter_mut().zip(rows) {
+            for p in 0..2 {
+                let rows = rows[p];
                 let blocks = [
                     _mm256_permute2x128_si256::<0x20>(rows[0], rows[1]),
                     _mm256_permute2x128_si256::<0x20>(rows[2], rows[3]),
                     _mm256_permute2x128_si256::<0x31>(rows[0], rows[1]),
                     _mm256_permute2x128_si256::<0x31>(rows[2], rows[3]),
                 ];
-                for (half, stream) in quarter.iter_mut().zip(blocks) {
+                for i in 0..4 {
                     if xor {
-                        xor_into(half, stream);
+                        xor_into(&mut halves[4 * p + i], blocks[i]);
                     } else {
-                        store_data(half, stream);
+                        store_data(&mut halves[4 * p + i], blocks[i]);
                     }
                 }
             }
@@ -223,25 +236,30 @@ macro_rules! chacha256 {
         #[inline]
         #[target_feature(enable = $features)]
         fn rows(states: &[[u32; 16]; 4]) -> [[__m256i; 4]; 2] {
-            core::array::from_fn(|p| {
+            let mut rows = [[_mm256_setzero_si256(); 4]; 2];
+            for p in 0..2 {
                 let (low, _) = states[2 * p].as_chunks::<4>();
                 let (high, _) = states[2 * p + 1].as_chunks::<4>();
-                // Four plain words make 16 plain bytes.
-                let row = |r: &[u32; 4]| unsafe { core::mem::transmute::<[u32; 4], __m128i>(*r) };
-                core::array::from_fn(|i| _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(row(&low[i])), row(&high[i])))
-            })
+                for i in 0..4 {
+                    // Four plain words make 16 plain bytes.
+                    let (l, h) = unsafe {
+                        (core::mem::transmute::<[u32; 4], __m128i>(low[i]), core::mem::transmute::<[u32; 4], __m128i>(high[i]))
+                    };
+                    rows[p][i] = _mm256_inserti128_si256::<1>(_mm256_castsi128_si256(l), h);
+                }
+            }
+            rows
         }
 
         /// Four blocks of one key from `counter` on, XORed into `out`.
         #[inline]
         #[target_feature(enable = $features)]
         fn four_of(initial: &[u32; 16], counter: u64, out: &mut [u8; 256]) {
-            let states: [[u32; 16]; 4] = core::array::from_fn(|j| {
-                let mut s = *initial;
+            let mut states = [*initial; 4];
+            for j in 0..4 {
                 let c = counter.wrapping_add(j as u64);
-                (s[12], s[13]) = (c as u32, (c >> 32) as u32);
-                s
-            });
+                (states[j][12], states[j][13]) = (c as u32, (c >> 32) as u32);
+            }
             emit(four(rows(&states)), out, true);
         }
 
@@ -264,13 +282,13 @@ macro_rules! chacha256 {
             let initial = super::initial(key, nonce);
             let (eights, rest) = data.as_chunks_mut::<512>();
             let mut counter = counter;
-            for batch in eights.iter_mut() {
-                eight(&initial.0, counter, batch, |_| {});
+            for i in 0..eights.len() {
+                eight(&initial.0, counter, &mut eights[i], |_| {});
                 counter = counter.wrapping_add(8);
             }
             let (fours, _) = rest.as_chunks_mut::<256>();
-            for batch in fours.iter_mut() {
-                four_of(&initial.0, counter, batch);
+            for i in 0..fours.len() {
+                four_of(&initial.0, counter, &mut fours[i]);
                 counter = counter.wrapping_add(4);
             }
             512 * eights.len() + 256 * fours.len()
@@ -306,13 +324,14 @@ macro_rules! chacha256 {
                 let (done, next) = batches.split_at_mut(i);
                 let (blocks, _) = done[i - 1].as_chunks::<16>();
                 eight(&initial.0, counter.wrapping_add(8 * i as u64), &mut next[0], |round| {
-                    for block in &blocks[4 * round..4 * round + 4] {
-                        acc = absorb(acc, block, *r, true);
+                    for j in 4 * round..4 * round + 4 {
+                        acc = absorb(acc, &blocks[j], *r, true);
                     }
                 });
             }
-            for block in batches[n - 1].as_chunks::<16>().0 {
-                acc = absorb(acc, block, *r, true);
+            let (blocks, _) = batches[n - 1].as_chunks::<16>();
+            for j in 0..32 {
+                acc = absorb(acc, &blocks[j], *r, true);
             }
             *h = acc;
             512 * n

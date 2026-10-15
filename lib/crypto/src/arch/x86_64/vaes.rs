@@ -1,9 +1,11 @@
 //! GCM on 256-bit VAES and VPCLMULQDQ (Intel SDM Vol. 2B): each 128-bit lane
 //! is one AES block or one carry-less product, in `aesni`'s GHASH form. Only
-//! hosted targets with OS-enabled YMM state enter these functions. Each
+//! hosted targets with OS-enabled YMM state enter these functions. Hot loops
+//! index fixed-size arrays, as `aesni`'s header says why. Each
 //! operation is built twice: for AVX2, and for AVX-512VL, whose 32 vector
 //! registers hold a batch's state without spilling it.
 
+#![allow(clippy::needless_range_loop, reason = "see `aesni`'s header")]
 
 /// The operations, every function compiled for `$features`.
 macro_rules! gcm256 {
@@ -89,9 +91,13 @@ macro_rules! gcm256 {
             #[inline]
             #[target_feature(enable = $features)]
             fn new(powers: &[u128; 8]) -> Self {
-                let p = powers.map(power);
-                let h = [pair(p[7], p[6]), pair(p[5], p[4]), pair(p[3], p[2]), pair(p[1], p[0])];
-                Self { h, folds: h.map(|h| _mm256_xor_si256(h, _mm256_shuffle_epi32::<0x4e>(h))) }
+                let mut h = [_mm256_setzero_si256(); 4];
+                let mut folds = [_mm256_setzero_si256(); 4];
+                for j in 0..4 {
+                    h[j] = pair(power(powers[7 - 2 * j]), power(powers[6 - 2 * j]));
+                    folds[j] = _mm256_xor_si256(h[j], _mm256_shuffle_epi32::<0x4e>(h[j]));
+                }
+                Self { h, folds }
             }
 
             /// Eight byte-reversed blocks after `y`.
@@ -100,8 +106,8 @@ macro_rules! gcm256 {
             fn absorb(&self, y: __m128i, x: [__m256i; 4]) -> __m128i {
                 let first = _mm256_xor_si256(x[0], _mm256_zextsi128_si256(y));
                 let mut sum = Product2::new(first, self.h[0], self.folds[0]);
-                for ((x, h), folded) in x[1..].iter().zip(&self.h[1..]).zip(&self.folds[1..]) {
-                    sum = sum.add(*x, *h, *folded);
+                for j in 1..4 {
+                    sum = sum.add(x[j], self.h[j], self.folds[j]);
                 }
                 sum.reduce()
             }
@@ -111,7 +117,11 @@ macro_rules! gcm256 {
         #[target_feature(enable = $features)]
         fn load8(batch: &[u8; 128]) -> [__m256i; 4] {
             let (pairs, _) = batch.as_chunks::<32>();
-            core::array::from_fn(|j| reverse_lanes(load_data(&pairs[j])))
+            let mut x = [_mm256_setzero_si256(); 4];
+            for j in 0..4 {
+                x[j] = reverse_lanes(load_data(&pairs[j]));
+            }
+            x
         }
 
         #[inline]
@@ -120,8 +130,8 @@ macro_rules! gcm256 {
             let p = Powers::new(powers);
             let mut y = reverse(load(state));
             let (batches, rest) = blocks.as_chunks::<8>();
-            for batch in batches {
-                y = p.absorb(y, load8(batch.as_flattened().try_into().unwrap()));
+            for i in 0..batches.len() {
+                y = p.absorb(y, load8(batches[i].as_flattened().try_into().unwrap()));
             }
             store(state, reverse(y));
             if !rest.is_empty() {
@@ -134,28 +144,39 @@ macro_rules! gcm256 {
         #[target_feature(enable = $features)]
         fn round_keys(keys: &[u8; 240]) -> [__m256i; 15] {
             let (slots, _) = keys.as_chunks::<16>();
-            core::array::from_fn(|i| _mm256_broadcastsi128_si256(load(&slots[i])))
+            let mut k = [_mm256_setzero_si256(); 15];
+            for i in 0..15 {
+                k[i] = _mm256_broadcastsi128_si256(load(&slots[i]));
+            }
+            k
         }
 
         /// Sixteen counter blocks from `first` through every round.
         #[inline]
         #[target_feature(enable = $features)]
         fn encrypt16<const R: usize>(k: &[__m256i; 15], base: __m256i, first: u32) -> [__m256i; 8] {
-            let mut s: [__m256i; 8] = core::array::from_fn(|j| counters(base, first.wrapping_add(2 * j as u32)));
-            for key in &k[1..R] {
-                for block in &mut s {
-                    *block = _mm256_aesenc_epi128(*block, *key);
+            let mut s = [_mm256_setzero_si256(); 8];
+            for j in 0..8 {
+                s[j] = counters(base, first.wrapping_add(2 * j as u32));
+            }
+            for r in 1..R {
+                for j in 0..8 {
+                    s[j] = _mm256_aesenc_epi128(s[j], k[r]);
                 }
             }
-            s.map(|block| _mm256_aesenclast_epi128(block, k[R]))
+            for j in 0..8 {
+                s[j] = _mm256_aesenclast_epi128(s[j], k[R]);
+            }
+            s
         }
 
         #[inline]
         #[target_feature(enable = $features)]
         fn xor_into(batch: &mut [u8; 256], s: [__m256i; 8]) {
             let (pairs, _) = batch.as_chunks_mut::<32>();
-            for (pair, stream) in pairs.iter_mut().zip(s) {
-                store_data(pair, _mm256_xor_si256(stream, load_data(pair)));
+            for j in 0..8 {
+                let stream = _mm256_xor_si256(s[j], load_data(&pairs[j]));
+                store_data(&mut pairs[j], stream);
             }
         }
 
@@ -166,8 +187,8 @@ macro_rules! gcm256 {
             let base = _mm256_broadcastsi128_si256(counter_base(nonce, load(&keys.as_chunks::<16>().0[0])));
             let (batches, rest) = data.as_chunks_mut::<256>();
             let mut next = first;
-            for batch in batches.iter_mut() {
-                xor_into(batch, encrypt16::<R>(&k, base, next));
+            for i in 0..batches.len() {
+                xor_into(&mut batches[i], encrypt16::<R>(&k, base, next));
                 next = next.wrapping_add(16);
             }
             // AES is admitted with VAES; the caller's bound covers the rest.
@@ -198,12 +219,15 @@ macro_rules! gcm256 {
                 let (halves, _) = done[i - 1].as_chunks::<128>();
                 let (low, high) = (load8(&halves[0]), load8(&halves[1]));
                 let first = (i as u32).wrapping_mul(16).wrapping_add(2);
-                let mut s: [__m256i; 8] = core::array::from_fn(|j| counters(base, first.wrapping_add(2 * j as u32)));
+                let mut s = [_mm256_setzero_si256(); 8];
+                for j in 0..8 {
+                    s[j] = counters(base, first.wrapping_add(2 * j as u32));
+                }
                 // The previous batch's two halves ride along rounds 1-4 and 5-8.
                 let mut sum = Product2::new(_mm256_xor_si256(low[0], _mm256_zextsi128_si256(y)), h.h[0], h.folds[0]);
-                for (r, key) in k[1..R].iter().enumerate() {
-                    for block in &mut s {
-                        *block = _mm256_aesenc_epi128(*block, *key);
+                for r in 0..R - 1 {
+                    for j in 0..8 {
+                        s[j] = _mm256_aesenc_epi128(s[j], k[r + 1]);
                     }
                     match r {
                         1..=3 => sum = sum.add(low[r], h.h[r], h.folds[r]),
@@ -216,7 +240,10 @@ macro_rules! gcm256 {
                     }
                 }
                 y = sum.reduce();
-                xor_into(&mut next[0], s.map(|block| _mm256_aesenclast_epi128(block, k[R])));
+                for j in 0..8 {
+                    s[j] = _mm256_aesenclast_epi128(s[j], k[R]);
+                }
+                xor_into(&mut next[0], s);
             }
             let (halves, _) = batches[n - 1].as_chunks::<128>();
             y = h.absorb(y, load8(&halves[0]));

@@ -190,8 +190,8 @@ fn chacha_short(key: &[u8; 32], nonce: &[u8; 12], length: usize, stream: &mut [u
     true
 }
 fn xor_stream(data: &mut [u8], stream: &[u8]) {
-    for (byte, mask) in data.iter_mut().zip(stream) {
-        *byte ^= mask;
+    for (i, byte) in data.iter_mut().enumerate() {
+        *byte ^= stream[i];
     }
 }
 fn chacha_seal(

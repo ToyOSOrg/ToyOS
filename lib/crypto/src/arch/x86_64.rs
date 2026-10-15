@@ -429,15 +429,14 @@ mod hosted {
 
     pub(in crate::arch) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool {
         let features = features();
-        if !(features.avx2() && features.bmi2()) {
-            return false;
-        }
-        if features.avx512vl() {
+        if features.avx512vl() && features.bmi2() {
             // AVX2, BMI2 and AVX-512VL under ZMM state are admitted.
             unsafe { sha::sha512_avx512(state, blocks) }
+        } else if features.bmi2() {
+            // BMI2 is admitted.
+            unsafe { sha::sha512_bmi2(state, blocks) }
         } else {
-            // AVX2 and BMI2 under YMM state are admitted.
-            unsafe { sha::sha512_avx2(state, blocks) }
+            return false;
         }
         true
     }

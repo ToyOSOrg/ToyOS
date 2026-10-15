@@ -30,8 +30,8 @@ pub(crate) fn equal(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     let mut difference = 0u64;
-    for (&a, &b) in a.iter().zip(b) {
-        difference |= u64::from(a ^ b);
+    for (i, &a) in a.iter().enumerate() {
+        difference |= u64::from(a ^ b[i]);
     }
     opaque(nonzero(difference)) == 0
 }

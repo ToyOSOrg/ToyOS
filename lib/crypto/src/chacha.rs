@@ -17,8 +17,9 @@ fn quarter(x: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
 
 fn words(key: &[u8; 32], s: &mut [u32; 16]) {
     s[..4].copy_from_slice(&[0x61707865, 0x3320646e, 0x79622d32, 0x6b206574]);
-    for (word, bytes) in s[4..12].iter_mut().zip(key.as_chunks::<4>().0) {
-        *word = u32::from_le_bytes(*bytes);
+    let (words, _) = key.as_chunks::<4>();
+    for (i, word) in s[4..12].iter_mut().enumerate() {
+        *word = u32::from_le_bytes(words[i]);
     }
 }
 
@@ -35,8 +36,8 @@ fn rounds(state: &[u32; 16]) -> Secret<64> {
         quarter(&mut x.0, 3, 4, 9, 14);
     }
     let mut out = Secret([0; 64]);
-    for ((out, &word), &initial) in out.0.as_chunks_mut::<4>().0.iter_mut().zip(&x.0).zip(state) {
-        *out = word.wrapping_add(initial).to_le_bytes();
+    for (i, out) in out.0.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+        *out = x.0[i].wrapping_add(state[i]).to_le_bytes();
     }
     out
 }
@@ -75,8 +76,8 @@ pub(crate) fn blocks(states: &[[u32; 16]; 4], n: usize, out: &mut [u8; 256]) {
     if n >= 2 && crate::arch::chacha_blocks(states, out) {
         return;
     }
-    for (chunk, state) in out.as_chunks_mut::<64>().0.iter_mut().zip(states).take(n) {
-        *chunk = rounds(state).0;
+    for (i, chunk) in out.as_chunks_mut::<64>().0.iter_mut().take(n).enumerate() {
+        *chunk = rounds(&states[i]).0;
     }
 }
 
@@ -106,8 +107,8 @@ fn stream(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) {
     let done = crate::arch::chacha_xor(key, counter, nonce, data);
     for (i, chunk) in data[done..].chunks_mut(64).enumerate() {
         let stream = legacy_block(key, nonce, counter.wrapping_add((done / 64 + i) as u64));
-        for (byte, &mask) in chunk.iter_mut().zip(&stream.0) {
-            *byte ^= mask;
+        for (i, byte) in chunk.iter_mut().enumerate() {
+            *byte ^= stream.0[i];
         }
     }
 }
