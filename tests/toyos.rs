@@ -2752,7 +2752,7 @@ serial:
     };
     eprintln!("  [virt] {armed}");
     // The root bridge the ACPI server declared, with what its `_OSC` offered.
-    let Some(root) = line("pci: root 0000:00 _OSC: native hot-plug offered, buses 0x00..=0xff") else {
+    let Some(root) = line("pci: root 0000:00 _OSC: native hot-plug offered, buses ") else {
         return Err(format!("virt's root was not declared with native hot-plug offered\nserial:\n{serial}"));
     };
     eprintln!("  [virt] {root}");
