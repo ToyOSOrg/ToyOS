@@ -7,6 +7,7 @@ extern crate alloc;
 mod alarm;
 mod alarmreq;
 mod arch;
+mod conversion;
 mod ctype;
 mod dgramreq;
 mod elfsym;

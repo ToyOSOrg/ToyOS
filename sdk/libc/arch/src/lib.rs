@@ -9,8 +9,8 @@
 //! `long double` widening against compiler-builtins', the errno codes against
 //! `include/errno.h`, IPv4 addresses and their texts against the host C
 //! library's, the socket option rule against the host's `setsockopt` and
-//! `getsockopt`, a datagram send's bind, and `realpath`'s resolution over a
-//! tree laid out here.
+//! `getsockopt`, a datagram send's bind, printf's numeric conversions against
+//! the C standard's text, and `realpath`'s resolution over a tree laid out here.
 
 #[cfg(test)]
 extern crate alloc;
@@ -21,6 +21,9 @@ mod alarmreq;
 #[cfg(test)]
 #[path = "../../src/arch/mod.rs"]
 mod arch;
+#[cfg(test)]
+#[path = "../../src/conversion.rs"]
+mod conversion;
 #[cfg(test)]
 #[path = "../../src/errcode.rs"]
 // Every code libc answers with, of which the modules here use a few.
@@ -102,6 +105,8 @@ mod memory_refusals;
 mod path_resolution;
 #[cfg(test)]
 mod poll_requests;
+#[cfg(test)]
+mod printf_conversions;
 #[cfg(test)]
 mod prototypes;
 #[cfg(test)]
