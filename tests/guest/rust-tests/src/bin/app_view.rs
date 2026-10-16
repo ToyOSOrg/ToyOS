@@ -12,8 +12,8 @@
 //!   and a file it writes there lands in that folder of `/home`;
 //! - its own package reads, and every request that would change it — an open
 //!   to write, append, truncate, create or create anew, a `mkdir`, `rmdir`,
-//!   `unlink`, `rename` and `symlink` — is refused `PermissionDenied` by the
-//!   server, past std, and std's own write is too;
+//!   `unlink`, `rename` and `symlink` — is refused `ReadOnly` by the server,
+//!   past std, and std's own write `PermissionDenied`;
 //! - it holds no other directory: not `/apps`, another package, `/home`, the
 //!   session's home, another app's folder, `/config`, `/state`, `/log` or
 //!   `/boot`, and none of their files is there by path.
@@ -35,8 +35,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::process::Command;
 
-use toyos::fs::{Dir, Refused, O_APPEND, O_CREATE, O_CREATE_NEW, O_READ, O_TRUNCATE, O_WRITE};
-use toyos_abi::syscall::SyscallError;
+use toyos::fs::{Dir, Error, Refused, O_APPEND, O_CREATE, O_CREATE_NEW, O_READ, O_TRUNCATE, O_WRITE};
 
 const SELF: &str = "/system/bin/test_rs_app_view";
 const PACKAGE: &str = "/apps/appview";
@@ -178,7 +177,7 @@ fn app() {
                 Ok(opened) => dir.close(opened.fid, opened.generation),
                 Err(e) => red.push(format!("an open to read its manifest was refused: {e:?}")),
             }
-            let denied = Refused::Error(SyscallError::PermissionDenied);
+            let denied = Refused::Error(Error::ReadOnly);
             let mut each = |what: &str, answer: Result<(), Refused>| match answer {
                 Err(e) if e == denied => println!("  {what}: refused"),
                 other => red.push(format!("{what} in its own package was answered {other:?}")),
@@ -199,7 +198,7 @@ fn app() {
             each("rmdir", dir.rmdir("sub"));
             each("unlink", dir.unlink("manifest.toml"));
             each("rename", dir.rename("manifest.toml", "moved"));
-            each("symlink", dir.symlink("manifest.toml", "link"));
+            each("symlink", dir.symlink("manifest.toml", "link").map_err(Refused::Error));
         }
     }
     match Dir::connect(names, &format!("fs:{HOME}")) {

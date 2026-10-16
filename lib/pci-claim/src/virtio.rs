@@ -7,10 +7,10 @@
 
 use toyos::shm::SharedMemory;
 use toyos::PciDev;
-use toyos_abi::syscall::{RegWidth, SyscallError};
+use toyos_abi::syscall::RegWidth;
 use toyos_virtio::pci::{vendor_caps, ConfigSpace, Layout, Offer, Setup, WalkRefusal, VIRTIO_F_ACCESS_PLATFORM};
 
-use crate::{Bar, KernelRefused};
+use crate::{Bar, KernelRefused, Why};
 
 /// Why the function was not brought up. Each keeps its own word: a machine
 /// whose kernel refused a call and a device that refused a feature set ask
@@ -19,7 +19,7 @@ use crate::{Bar, KernelRefused};
 pub enum Refusal {
     Kernel(KernelRefused),
     /// The capability list, as the walk refused it.
-    Walk(WalkRefusal<SyscallError>),
+    Walk(WalkRefusal<Why>),
     /// What the device published or answered, as the transport refused it.
     Device(toyos_virtio::pci::Refusal),
 }
@@ -47,18 +47,18 @@ impl std::fmt::Display for Refusal {
 }
 
 /// The claim's configuration space, as the capability walk reads it: each
-/// read one `config_read` of its width, and its refusal the kernel's word.
+/// read one `config_read` of its width, refused for a [`Why`].
 struct ClaimConfig<'a>(&'a PciDev);
 
 impl ConfigSpace for ClaimConfig<'_> {
-    type Refused = SyscallError;
+    type Refused = Why;
 
-    fn read8(&self, at: u16) -> Result<u8, SyscallError> {
-        self.0.config_read(at as u32, RegWidth::U8).map(|byte| byte as u8)
+    fn read8(&self, at: u16) -> Result<u8, Why> {
+        self.0.config_read(at as u32, RegWidth::U8).map(|byte| byte as u8).map_err(|e| Why::of("a config read", e))
     }
 
-    fn read32(&self, at: u16) -> Result<u32, SyscallError> {
-        self.0.config_read(at as u32, RegWidth::U32)
+    fn read32(&self, at: u16) -> Result<u32, Why> {
+        self.0.config_read(at as u32, RegWidth::U32).map_err(|e| Why::of("a config read", e))
     }
 }
 
@@ -99,7 +99,7 @@ impl std::fmt::Display for Features {
 ///
 /// Takes the claim's one description (`PciDev::describe`).
 pub fn negotiate(dev: &PciDev, wanted: u64) -> Result<Negotiated, Refusal> {
-    let info = dev.describe().map_err(KernelRefused::on("the claim's description"))?;
+    let info = crate::describe(dev)?;
     let layout = Layout::of(&vendor_caps(&ClaimConfig(dev)).map_err(Refusal::Walk)?)?;
     // The kernel reports 0 bytes for a BAR it keeps back.
     let bar = layout.bar();

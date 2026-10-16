@@ -12,7 +12,7 @@
 //! again.
 
 use toyos_abi::RawHandle;
-use toyos_abi::syscall::{self, OpenFlags, SyscallError};
+use toyos_abi::syscall::{self, OpenFlags};
 
 use crate::collections::BTreeMap;
 use crate::ffi::OsString;
@@ -336,13 +336,51 @@ enum Route {
 /// Every capability this process has looked for, found or not.
 static CAPABILITIES: Mutex<BTreeMap<String, Option<Arc<Capability>>>> = Mutex::new(BTreeMap::new());
 
-fn served_error(e: SyscallError) -> io::Error {
+/// A file server's refusal, or the client end's own, as std says it.
+fn served_error(e: toyos::fs::Error) -> io::Error {
+    use io::ErrorKind as Kind;
+    use toyos::fs::Error;
     match e {
-        SyscallError::Gone => io::const_error!(
-            io::ErrorKind::StaleNetworkFileHandle,
-            "the file server is gone, or restarted since this file was opened",
+        Error::NotFound => io::const_error!(Kind::NotFound, "no such file or directory"),
+        Error::AlreadyExists => io::const_error!(Kind::AlreadyExists, "it already exists"),
+        Error::NotADirectory => io::const_error!(Kind::NotADirectory, "not a directory"),
+        Error::IsADirectory => io::const_error!(Kind::IsADirectory, "is a directory"),
+        Error::NotEmpty => io::const_error!(Kind::DirectoryNotEmpty, "the directory is not empty"),
+        Error::NotALink => io::const_error!(Kind::InvalidInput, "not a symbolic link"),
+        Error::NameTooLong => io::const_error!(Kind::InvalidFilename, "the name or path is too long"),
+        Error::InvalidName => io::const_error!(Kind::InvalidFilename, "the volume cannot store that name"),
+        Error::ReadOnly => io::const_error!(Kind::PermissionDenied, "the directory is read-only to this process"),
+        Error::NotOpenForWriting => io::const_error!(Kind::PermissionDenied, "the file is not open for writing"),
+        Error::Root => io::const_error!(Kind::ResourceBusy, "a directory the file server serves stays where it is"),
+        Error::Escapes => io::const_error!(Kind::PermissionDenied, "a link leads out of the directory"),
+        Error::CrossesDirectories => {
+            io::const_error!(Kind::CrossesDevices, "a link leads to another directory capability")
+        }
+        Error::Loop => io::const_error!(Kind::FilesystemLoop, "too many symbolic links"),
+        Error::IntoItself => io::const_error!(Kind::InvalidInput, "a directory cannot move beneath itself"),
+        Error::NoSpace => io::const_error!(Kind::StorageFull, "the volume is full"),
+        Error::FileTooLarge => io::const_error!(Kind::FileTooLarge, "the file would be too large"),
+        Error::LimitExceeded => io::const_error!(Kind::QuotaExceeded, "past a bound the file server keeps"),
+        Error::TooManyOpen => io::const_error!(Kind::QuotaExceeded, "too many files open on the file server"),
+        Error::TooManyConnections => {
+            io::const_error!(Kind::QuotaExceeded, "the file server serves as many connections as it takes")
+        }
+        Error::TooManyStreams => {
+            io::const_error!(Kind::QuotaExceeded, "the file server serves as many streams as it takes")
+        }
+        Error::Io => io::const_error!(Kind::Other, "the volume's device failed, or its structures do not decode"),
+        Error::Stale => io::const_error!(
+            Kind::StaleNetworkFileHandle,
+            "the file was removed, or its file server restarted, since it was opened",
         ),
-        e => to_io_error(e),
+        Error::UnknownFile => io::const_error!(Kind::InvalidInput, "the file server holds no such open file"),
+        Error::InvalidPath => io::const_error!(Kind::InvalidInput, "the path is not one the file server takes"),
+        Error::InvalidRequest => io::const_error!(Kind::InvalidInput, "the file server takes no such request"),
+        Error::Unsupported => io::const_error!(Kind::Unsupported, "the volume's format has no such thing"),
+        Error::OutOfResources => io::const_error!(Kind::OutOfMemory, "the kernel had no room for the request"),
+        Error::Gone => io::const_error!(Kind::StaleNetworkFileHandle, "the file server is gone"),
+        Error::NotHeld => io::const_error!(Kind::NotFound, "this process holds no such directory"),
+        Error::Malformed => io::const_error!(Kind::InvalidData, "the file server answered outside its protocol"),
     }
 }
 
@@ -386,7 +424,7 @@ fn capability(prefix: &str) -> io::Result<Option<Arc<Capability>>> {
     let name = format!("{}{prefix}", toyos::fs::CAPABILITY_PREFIX);
     let found = match toyos::fs::Dir::connect(names, &name) {
         Ok(dir) => Some(Arc::new(Capability::new(prefix, dir))),
-        Err(SyscallError::NotFound) | Err(SyscallError::InvalidArgument) => None,
+        Err(toyos::fs::Error::NotHeld) => None,
         Err(e) => return Err(served_error(e)),
     };
     Ok(CAPABILITIES.lock().unwrap().entry(String::from(prefix)).or_insert(found).clone())
@@ -442,7 +480,7 @@ pub fn is_served(path: &Path) -> bool {
 impl Served {
     fn with<T>(
         &self,
-        op: impl FnOnce(&mut toyos::fs::Dir, &mut Position) -> Result<T, SyscallError>,
+        op: impl FnOnce(&mut toyos::fs::Dir, &mut Position) -> Result<T, toyos::fs::Error>,
     ) -> io::Result<T> {
         let mut dir = self.dir.lock();
         let mut pos = self.state.lock().unwrap();
@@ -649,10 +687,10 @@ impl File {
                     SeekFrom::Current(d) => (p.offset, d),
                     SeekFrom::End(d) => (dir.fstat(p.fid, p.generation)?.size, d),
                 };
-                let at = base
-                    .checked_add_signed(delta)
-                    .filter(|&at| at <= toyos::fs::MAX_FILE_BYTES)
-                    .ok_or(SyscallError::InvalidArgument)?;
+                let at = base.checked_add_signed(delta).ok_or(toyos::fs::Error::InvalidRequest)?;
+                if at > toyos::fs::MAX_FILE_BYTES {
+                    return Err(toyos::fs::Error::FileTooLarge);
+                }
                 p.offset = at;
                 Ok(at)
             }),
@@ -745,13 +783,7 @@ pub fn readdir(p: &Path) -> io::Result<ReadDir> {
                 buf.clear();
                 buf.resize(n, 0);
             }
-            if !fits {
-                return Err(io::const_error!(
-                    io::ErrorKind::Interrupted,
-                    "directory kept growing while it was being listed",
-                ));
-            }
-            Ok(kernel_entries(&dir_path, &buf[..n]))
+            Ok(fits.then(|| kernel_entries(&dir_path, &buf[..n])))
         },
         |_, dir, rel| {
             let mut buf = vec![0u8; 65536];
@@ -766,13 +798,14 @@ pub fn readdir(p: &Path) -> io::Result<ReadDir> {
                             file_type: FileType::of_kind(kind),
                         })
                     })?;
-                    return Ok(entries);
+                    return Ok(Some(entries));
                 }
                 buf.resize(n, 0);
             }
-            Err(toyos::fs::Refused::Error(SyscallError::ResourceExhausted))
+            Ok(None)
         },
-    )?;
+    )?
+    .ok_or(io::const_error!(io::ErrorKind::Interrupted, "directory kept growing while it was being listed"))?;
     Ok(ReadDir { entries, index: 0 })
 }
 
@@ -869,7 +902,7 @@ pub fn readlink(p: &Path) -> io::Result<PathBuf> {
         |_, dir, rel| {
             let mut buf = [0u8; toyos::fs::MAX_PATH];
             let n = dir.read_link(rel, &mut buf)?;
-            let text = crate::str::from_utf8(&buf[..n]).map_err(|_| SyscallError::Io)?;
+            let text = crate::str::from_utf8(&buf[..n]).map_err(|_| toyos::fs::Error::Malformed)?;
             Ok(PathBuf::from(text))
         },
     )
@@ -882,7 +915,7 @@ pub fn symlink(original: &Path, link: &Path) -> io::Result<()> {
     on_path(
         link,
         |abs| syscall::symlink(target.as_bytes(), abs.as_bytes()).map_err(to_io_error),
-        |_, dir, rel| dir.symlink(target, rel),
+        |_, dir, rel| dir.symlink(target, rel).map_err(toyos::fs::Refused::Error),
     )
 }
 

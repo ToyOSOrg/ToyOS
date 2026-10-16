@@ -1580,13 +1580,7 @@ impl<'a> Supervisor<'a> {
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             let (asked, names) = (name.clone(), self.files);
             let spawned = std::thread::Builder::new().name(format!("sync-{role}")).spawn(move || {
-                let answer = toyos::fs::Dir::connect(names, &asked)
-                    .and_then(|mut dir| {
-                        dir.sync().map_err(|e| match e {
-                            toyos::fs::Refused::Error(e) => e,
-                            toyos::fs::Refused::Link(_) => SyscallError::Unknown,
-                        })
-                    });
+                let answer = toyos::fs::Dir::connect(names, &asked).and_then(|mut dir| dir.sync());
                 let _ = done_tx.send(answer);
             });
             match spawned {
