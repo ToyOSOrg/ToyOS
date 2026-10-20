@@ -45,6 +45,8 @@ pub enum Refusal {
     Hash(&'static str),
     /// A section could not be read.
     Unreadable(&'static str),
+    /// The partition the slot table names for a section is not of its type.
+    Type(&'static str),
 }
 
 impl Refusal {
@@ -60,6 +62,7 @@ impl Refusal {
             Self::BelowFloor { .. } | Self::Older { .. } => "version",
             Self::Hash(_) => "hash",
             Self::Unreadable(_) => "unreadable",
+            Self::Type(_) => "type",
         }
     }
 }
@@ -78,6 +81,7 @@ impl core::fmt::Display for Refusal {
             Self::Older { version, than } => write!(f, "its version {version} is older than {than}"),
             Self::Hash(section) => write!(f, "its {section} is not the bytes its signed header names"),
             Self::Unreadable(what) => write!(f, "its {what} could not be read"),
+            Self::Type(what) => write!(f, "its {what} partition is not typed as one"),
         }
     }
 }
@@ -86,6 +90,17 @@ impl core::fmt::Display for Refusal {
 pub fn admits(floor: u64, version: u64) -> Result<(), Refusal> {
     if version < floor {
         return Err(Refusal::BelowFloor { version, floor });
+    }
+    Ok(())
+}
+
+/// Whether the partition the slot table names for `section` is typed `kind`.
+/// The table names it by unique GUID alone, and a block grant reaches
+/// partitions by type: a ROOT of another type is reachable through a grant
+/// for that type.
+pub fn typed(section: &'static str, stated: [u8; 16], kind: [u8; 16]) -> Result<(), Refusal> {
+    if stated != kind {
+        return Err(Refusal::Type(section));
     }
     Ok(())
 }
@@ -143,6 +158,14 @@ mod tests {
     }
 
     #[test]
+    fn a_partition_is_taken_only_of_its_sections_type() {
+        let (root, data) = ([0x40; 16], [0x30; 16]);
+        assert_eq!(typed("root", root, root), Ok(()));
+        assert_eq!(typed("root", data, root), Err(Refusal::Type("root")));
+        assert_eq!(typed("root", [0; 16], root), Err(Refusal::Type("root")));
+    }
+
+    #[test]
     fn a_boot_tries_the_marked_slot_first_and_the_other_only_if_there_is_one() {
         let slot = Some(Slot { boot: [1; 16], root: [2; 16], version: 1 });
         let both = Table { sequence: 1, marked: Which::B, slots: [slot, slot] };
@@ -163,6 +186,7 @@ mod tests {
             Refusal::BelowFloor { version: 1, floor: 2 },
             Refusal::Hash("kernel"),
             Refusal::Unreadable("root"),
+            Refusal::Type("root"),
         ] {
             assert!(!r.word().is_empty() && !r.word().contains([',', ' ', ':', '=']), "{r:?}");
         }

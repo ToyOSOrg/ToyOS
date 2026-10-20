@@ -26,7 +26,10 @@ signature at the next boot and refuses the slot by name. It is a denial —
 the running slot is refused next boot and the machine falls back to an older
 image, or to nothing on a one-slot image.
 
-**Exit**: the loader hands the kernel the booted slot's volume by its unique
-GUID beside ROOT's, and the kernel holds it as it holds ROOT's, so a claim on
-it is refused as `PermissionDenied` like every partition the kernel holds; a
-guest test asserts the refusal.
+**Exit**: the kernel's USB storage path is deleted with its xHCI driver
+(`issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`, step 10).
+The kernel then serves no partition claim, `hold_source` goes with it, and
+the running slot's volume and ROOT are reached only through the block
+service's grants, as every partition on diskserver's disk already is
+(`issues/the-block-service-does-not-refuse-the-running-root.md`). No kernel
+hold of the volume is added in the meantime.
