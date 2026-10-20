@@ -24,13 +24,12 @@ const MISREAD: u32 = 5;
 /// Bounded for loom (an unbounded spin never finishes); each turn a scheduling point.
 const POLLS: usize = 4;
 
-/// Guards against a bounded exploration passing without reaching the state.
-static SAW: AtomicBool = AtomicBool::new(false);
-
 /// A reader that sees a committed count sees the slot it covers.
 #[test]
 fn a_committed_count_never_outruns_its_slot() {
-    SAW.store(false, SeqCst);
+    /// This test's own guard against a bounded exploration passing without
+    /// reaching the state: the tests run in parallel in one binary.
+    static SAW: AtomicBool = AtomicBool::new(false);
     loom::model(|| {
         let r = Arc::new(Roster::new());
         let attempt = r.begin_attempt().expect("a slot is free");
@@ -66,7 +65,9 @@ fn a_committed_count_never_outruns_its_slot() {
 /// A CPU that sees the machine released also sees it answering.
 #[test]
 fn a_released_machine_is_answering() {
-    SAW.store(false, SeqCst);
+    /// This test's own guard against a bounded exploration passing without
+    /// reaching the state: the tests run in parallel in one binary.
+    static SAW: AtomicBool = AtomicBool::new(false);
     loom::model(|| {
         let r = Arc::new(Roster::new());
 
