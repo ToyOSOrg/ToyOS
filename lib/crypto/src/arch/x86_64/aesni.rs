@@ -475,7 +475,9 @@ fn short_rounds<const R: usize>(
     // E(J0) and the data's keystream, in as small a batch as covers them.
     let mut s = [_mm_setzero_si128(); 15];
     match data.len() {
-        0..=48 => s[..4].copy_from_slice(&encrypt_n::<R, 4>(&k, base, 1)),
+        0 => s[..1].copy_from_slice(&encrypt_n::<R, 1>(&k, base, 1)),
+        1..=16 => s[..2].copy_from_slice(&encrypt_n::<R, 2>(&k, base, 1)),
+        17..=48 => s[..4].copy_from_slice(&encrypt_n::<R, 4>(&k, base, 1)),
         49..=64 => s[..5].copy_from_slice(&encrypt_n::<R, 5>(&k, base, 1)),
         65..=112 => s[..8].copy_from_slice(&encrypt8::<R>(&k, base, 1)),
         _ => s = encrypt_n::<R, 15>(&k, base, 1),
