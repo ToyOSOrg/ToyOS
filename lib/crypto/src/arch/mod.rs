@@ -119,7 +119,7 @@ pub(crate) fn gcm_short(
     nonce: &[u8; 12],
     aad: &[u8],
     data: &mut [u8],
-    stream: Option<&mut [[u8; 16]; 7]>,
+    stream: Option<&mut [[u8; 16]; 14]>,
 ) -> Option<[u8; 16]> {
     hosted!(x86_64::gcm_short(keys, rounds, powers, nonce, aad, data, stream), {
         let _ = (keys, rounds, powers, nonce, aad, data, stream);
@@ -127,8 +127,8 @@ pub(crate) fn gcm_short(
     })
 }
 
-/// XORs a prefix of whole 64-byte blocks with ChaCha20 and returns its
-/// length. The caller has checked counter bounds. IETF nonce word zero
+/// XORs a prefix of `data` with ChaCha20 and returns its length: all of it
+/// where an instruction path runs. The caller has checked counter bounds. IETF nonce word zero
 /// occupies counter bits 32..63; bounded input cannot carry into it. The
 /// remaining nonce words have the same layout as original ChaCha.
 pub(crate) fn chacha_xor(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) -> usize {
@@ -162,10 +162,11 @@ pub(crate) fn poly1305_blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]
     })
 }
 
-/// The keystream of four independent ChaCha20 states, each 16 words.
-pub(crate) fn chacha_blocks(states: &[[u32; 16]; 4], out: &mut [u8; 256]) -> bool {
-    hosted!(x86_64::chacha_blocks(states, out), {
-        let _ = (states, out);
+/// The keystream of the first `n` of four independent ChaCha20 states, `n`
+/// 2 to 4, each 16 words.
+pub(crate) fn chacha_blocks(states: &[[u32; 16]; 4], n: usize, out: &mut [u8; 256]) -> bool {
+    hosted!(x86_64::chacha_blocks(states, n, out), {
+        let _ = (states, n, out);
         false
     })
 }

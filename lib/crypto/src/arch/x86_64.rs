@@ -364,7 +364,7 @@ mod hosted {
         }
     }
 
-    /// `aesni::short` where its bounds hold: AAD up to 16 bytes, data up to 96.
+    /// `aesni::short` where its bounds hold: AAD up to 16 bytes, data up to 224.
     pub(in crate::arch) fn gcm_short(
         keys: &[u8; 240],
         rounds: usize,
@@ -372,9 +372,9 @@ mod hosted {
         nonce: &[u8; 12],
         aad: &[u8],
         data: &mut [u8],
-        stream: Option<&mut [[u8; 16]; 7]>,
+        stream: Option<&mut [[u8; 16]; 14]>,
     ) -> Option<[u8; 16]> {
-        if aad.len() > 16 || data.len() > 96 || !features().aes_clmul() {
+        if aad.len() > 16 || data.len() > 224 || !features().aes_clmul() {
             return None;
         }
         // AES, CLMUL and SSSE3 are admitted.
@@ -401,16 +401,16 @@ mod hosted {
         unsafe { chacha::seal(key, counter, nonce, data, r, h) }
     }
 
-    pub(in crate::arch) fn chacha_blocks(states: &[[u32; 16]; 4], out: &mut [u8; 256]) -> bool {
+    pub(in crate::arch) fn chacha_blocks(states: &[[u32; 16]; 4], n: usize, out: &mut [u8; 256]) -> bool {
         if !features().avx2() {
             return false;
         }
         if features().avx512vl() {
             // AVX-512VL under ZMM state is admitted.
-            unsafe { chacha::avx512::blocks(states, out) }
+            unsafe { chacha::avx512::blocks(states, n, out) }
         } else {
             // AVX2 under YMM state is admitted.
-            unsafe { chacha::avx2::blocks(states, out) }
+            unsafe { chacha::avx2::blocks(states, n, out) }
         }
         true
     }

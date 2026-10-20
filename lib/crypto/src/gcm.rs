@@ -173,7 +173,7 @@ impl Gcm {
     ) -> Result<(), Error> {
         Self::check(aad.len(), data.len())?;
         if self.aggregated {
-            let mut stream = Secret([[0u8; 16]; 7]);
+            let mut stream = Secret([[0u8; 16]; 14]);
             let keys = &self.aes.keys.0;
             if let Some(expected) =
                 crate::arch::gcm_short(keys, self.aes.rounds, &self.powers.0, nonce, aad, data, Some(&mut stream.0))
@@ -245,7 +245,7 @@ mod tests {
                 Gcm::aes256(key.try_into().unwrap())
             };
             let nonce = [0xfe; 12];
-            for n in [0usize, 1, 15, 16, 17, 127, 128, 129, 255, 256, 257, 383, 384, 511, 512, 513, 1024, 1040] {
+            for n in [0usize, 1, 15, 16, 17, 48, 49, 64, 65, 96, 97, 112, 113, 127, 128, 129, 192, 223, 224, 225, 255, 256, 257, 383, 384, 511, 512, 513, 1024, 1040] {
                 let input: std::vec::Vec<u8> = (0..n).map(|i| (i * 31 + 7) as u8).collect();
                 let mut sealed = input.clone();
                 let tag = gcm.seal(&nonce, b"aad", &mut sealed).unwrap();

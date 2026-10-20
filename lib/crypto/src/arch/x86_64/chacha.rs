@@ -264,9 +264,9 @@ macro_rules! chacha256 {
         /// The rows of states `2p` and `2p + 1`, one per register.
         #[inline]
         #[target_feature(enable = $features)]
-        fn rows(states: &[[u32; 16]; 4]) -> [[__m256i; 4]; 2] {
-            let mut rows = [[_mm256_setzero_si256(); 4]; 2];
-            for p in 0..2 {
+        fn rows<const P: usize>(states: &[[u32; 16]]) -> [[__m256i; 4]; P] {
+            let mut rows = [[_mm256_setzero_si256(); 4]; P];
+            for p in 0..P {
                 let (low, _) = states[2 * p].as_chunks::<4>();
                 let (high, _) = states[2 * p + 1].as_chunks::<4>();
                 for i in 0..4 {
@@ -280,16 +280,23 @@ macro_rules! chacha256 {
             rows
         }
 
-        /// The keystream of four independent states.
+        /// The keystream of the first `n` of four independent states, `n`
+        /// 2 to 4, into `out`'s first `64n` bytes: one pair where two blocks
+        /// suffice.
         ///
         /// # Safety
         /// AVX2 under YMM state is admitted.
         #[target_feature(enable = $features)]
-        pub(in crate::arch) unsafe fn blocks(states: &[[u32; 16]; 4], out: &mut [u8; 256]) {
-            emit(pairs::<2>(rows(states), |_| {}), out.as_chunks_mut::<32>().0, false);
+        pub(in crate::arch) unsafe fn blocks(states: &[[u32; 16]; 4], n: usize, out: &mut [u8; 256]) {
+            let (halves, _) = out.as_chunks_mut::<32>();
+            if n <= 2 {
+                emit(pairs::<1>(rows::<1>(states), |_| {}), halves, false);
+            } else {
+                emit(pairs::<2>(rows::<2>(states), |_| {}), halves, false);
+            }
         }
 
-        /// XORs the longest prefix of whole 256-byte batches and returns its length.
+        /// XORs all of `data` and returns its length.
         ///
         /// # Safety
         /// AVX2 under YMM state is admitted, and the caller bounded `counter` plus
@@ -313,12 +320,22 @@ macro_rules! chacha256 {
                 }
                 512 * eights.len()
             };
-            let (fours, _) = data[done..].as_chunks_mut::<256>();
+            let (fours, rest) = data[done..].as_chunks_mut::<256>();
             for i in 0..fours.len() {
                 pairs_of::<2>(&initial.0, counter, &mut fours[i], |_| {});
                 counter = counter.wrapping_add(4);
             }
-            done + 256 * fours.len()
+            // The last blocks, up to 255 bytes, from one keystream batch.
+            if !rest.is_empty() {
+                let mut stream = crate::secret::Secret([0u8; 256]);
+                if rest.len() <= 128 {
+                    pairs_of::<1>(&initial.0, counter, &mut stream.0, |_| {});
+                } else {
+                    pairs_of::<2>(&initial.0, counter, &mut stream.0, |_| {});
+                }
+                crate::block::xor(rest, &stream.0);
+            }
+            data.len()
         }
     };
 }

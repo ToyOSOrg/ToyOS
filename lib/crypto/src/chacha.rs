@@ -73,7 +73,7 @@ pub(crate) fn fill_state(state: &mut [u32; 16], key: &[u8; 32], nonce: &[u8; 12]
 /// two or more run together where SIMD admits them, in about one block's
 /// latency.
 pub(crate) fn blocks(states: &[[u32; 16]; 4], n: usize, out: &mut [u8; 256]) {
-    if n >= 2 && crate::arch::chacha_blocks(states, out) {
+    if n >= 2 && crate::arch::chacha_blocks(states, n, out) {
         return;
     }
     for (i, chunk) in out.as_chunks_mut::<64>().0.iter_mut().take(n).enumerate() {
@@ -195,11 +195,8 @@ mod tests {
         for n in 1..=4 {
             let mut together = Secret([0u8; 256]);
             blocks(&states, n, &mut together.0);
-            for (i, state) in states.iter().enumerate() {
-                let expected = if i < n { rounds(state).0 } else { [0; 64] };
-                if i < n || !crate::arch::chacha_blocks(&states, &mut [0; 256]) {
-                    assert_eq!(together.0[64 * i..64 * i + 64], expected, "block {i} of {n}");
-                }
+            for (i, state) in states.iter().enumerate().take(n) {
+                assert_eq!(together.0[64 * i..64 * i + 64], rounds(state).0, "block {i} of {n}");
             }
         }
     }

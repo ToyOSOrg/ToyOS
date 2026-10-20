@@ -468,16 +468,17 @@ fn short_rounds<const R: usize>(
     nonce: &[u8; 12],
     aad: &[u8],
     data: &mut [u8],
-    stream: Option<&mut [[u8; 16]; 7]>,
+    stream: Option<&mut [[u8; 16]; 14]>,
 ) -> [u8; 16] {
     let k = round_keys(keys);
     let base = counter_base(nonce, k[0]);
     // E(J0) and the data's keystream, in as small a batch as covers them.
-    let mut s = [_mm_setzero_si128(); 8];
+    let mut s = [_mm_setzero_si128(); 15];
     match data.len() {
         0..=48 => s[..4].copy_from_slice(&encrypt_n::<R, 4>(&k, base, 1)),
         49..=64 => s[..5].copy_from_slice(&encrypt_n::<R, 5>(&k, base, 1)),
-        _ => s = encrypt8::<R>(&k, base, 1),
+        65..=112 => s[..8].copy_from_slice(&encrypt8::<R>(&k, base, 1)),
+        _ => s = encrypt_n::<R, 15>(&k, base, 1),
     }
     let (blocks, tail) = data.as_chunks_mut::<16>();
     let whole = blocks.len();
@@ -496,8 +497,9 @@ fn short_rounds<const R: usize>(
             }
         }
     }
-    // The padded AAD, the padded ciphertext and the lengths: at most eight.
-    let mut x = [_mm_setzero_si128(); 8];
+    // The padded AAD, the padded ciphertext and the lengths: at most sixteen,
+    // one per key power.
+    let mut x = [_mm_setzero_si128(); 16];
     let mut n = 0;
     if !aad.is_empty() {
         x[n] = reverse(match aad.as_chunks::<16>() {
@@ -526,8 +528,8 @@ fn short_rounds<const R: usize>(
     tag
 }
 
-/// GCM over at most 16 bytes of AAD and 96 of data in one batch: counters 1
-/// to 8 give E(J0) and the keystream, and one reduction folds the padded AAD,
+/// GCM over at most 16 bytes of AAD and 224 of data in one batch: counters 1
+/// to 15 give E(J0) and the keystream, and one reduction folds the padded AAD,
 /// the padded ciphertext and the lengths. Without `stream` it seals,
 /// encrypting `data` first; with it, it opens, leaving `data` and writing the
 /// keystream to `stream`. Returns the tag.
@@ -543,7 +545,7 @@ pub(super) unsafe fn short(
     nonce: &[u8; 12],
     aad: &[u8],
     data: &mut [u8],
-    stream: Option<&mut [[u8; 16]; 7]>,
+    stream: Option<&mut [[u8; 16]; 14]>,
 ) -> [u8; 16] {
     if rounds == 10 {
         short_rounds::<10>(keys, powers, nonce, aad, data, stream)
