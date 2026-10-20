@@ -34,8 +34,10 @@ pub fn qemu() -> Vec<Codec> {
 /// answer. Replaying them through [`probe::enumerate`] builds the graphs
 /// soundserver built on that boot.
 pub fn amd_bench() -> Vec<Vec<Codec>> {
-    recorded(include_str!("../fixtures/amd-bench.txt"))
+    recorded(AMD_BENCH)
 }
+
+pub const AMD_BENCH: &str = include_str!("../fixtures/amd-bench.txt");
 
 /// Every controller a recorded walk lists, walked again against its answers,
 /// in list order.
@@ -58,9 +60,9 @@ fn recorded(text: &'static str) -> Vec<Vec<Codec>> {
 
 /// A codec that answers what the recorded one answered, and refuses to make up
 /// an answer to a verb the recorded walk never sent.
-struct Recorded {
-    text: &'static str,
-    controller: usize,
+pub struct Recorded {
+    pub text: &'static str,
+    pub controller: usize,
 }
 
 impl probe::Verbs for Recorded {

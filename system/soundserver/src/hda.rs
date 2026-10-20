@@ -1,133 +1,72 @@
-//! soundserver as the driver of an Intel HDA controller.
+//! soundserver as the driver of an Intel HDA controller it holds as a PCI
+//! claim.
 //!
-//! The kernel lists every controller it can bind, owns the buffer descriptor
-//! list and the interrupt, and answers five register writes, two reads and a
-//! bind. Everything that is a *decision* is here and in `toyos-hda` — which
-//! controller, which codecs answered, which pin, which converter, the rate, the
-//! amplifiers, EAPD, the format and the master — and every one of those
-//! decisions is a pure function this file calls.
+//! What the kernel keeps is the claim: config space, the message it armed,
+//! and the address space the function translates through. **The controller —
+//! its reset, CORB and RIRB, the stream and its descriptor list — is
+//! `toyos-hda`'s `controller`, and every decision about the codec is
+//! `toyos-hda`'s too**: which pin, which converter, the rate, the amplifiers,
+//! EAPD, the format and the master. This file is what is left: the claim's
+//! two mappings, when its periods came back, and what becomes of a refusal.
 //!
-//! What this file itself owns is the I/O: one verb over the immediate-command
-//! registers, the bind, and the stream's run bit. After the claim, the control
-//! thread owns the codec's verbs ([`MasterControl`]) and the mix thread the run bit
-//! ([`Hda`]).
+//! After the claim the control thread owns the codec link
+//! ([`MasterControl`]) and the mix thread the stream ([`Hda`]); the two touch
+//! disjoint registers.
+//!
+//! **A refusal after bring-up ends soundserver** by its own name: no
+//! conforming controller writes one.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use toyos::HdaDev;
-use toyos_abi::hda::{HdaController, HdaInfo, Reg};
-use toyos_abi::syscall::{RegWidth, SyscallError};
+use toyos::shm::SharedMemory;
+use toyos::volatile::Window;
+use toyos::{DmaRegion, PciDev};
+use toyos_abi::syscall::SyscallError;
 use toyos_hda::caps::PcmCaps;
 use toyos_hda::config::{self, Master, NoMaster, Setting};
+use toyos_hda::controller::{self, Link, LinkFault, Stream, CODEC_DETECT_MICROS, GRANT_BYTES, PERIOD_BYTES};
 use toyos_hda::graph::Codec;
 use toyos_hda::path::{PathError, Unchosen};
-use toyos_hda::verb::{Address, Node, Response, Verb};
 use toyos_hda::probe;
+use toyos_pci_claim::{Bar, Grant, KernelRefused};
 
-/// The controller's immediate-command registers, as byte offsets into the
-/// register window. The kernel's allow-list carries the same three numbers and
-/// refuses everything else.
-const IMMEDIATE_COMMAND: u32 = 0x60;
-const IMMEDIATE_RESPONSE: u32 = 0x64;
-const IMMEDIATE_STATUS: u32 = 0x68;
+use crate::backend::Completion;
 
-const IMMEDIATE_BUSY: u32 = 1 << 0;
-const IMMEDIATE_RESULT_VALID: u32 = 1 << 1;
+/// A multimedia audio device, class `04:03:00` (PCI Code and ID Assignment:
+/// HD Audio, Intel HDA 1.0 compatible), whoever made it, as the manifest row
+/// spells the claim.
+pub const FUNCTION: toyos_manifest::device::PciMatch =
+    toyos_manifest::device::PciMatch::new([0x04, 0x03, 0x00], None);
 
-/// Stream descriptor fields, relative to the descriptor the kernel reported.
-const SD_CTL: u32 = 0x00;
-const SD_CTL_TAG: u32 = 0x02;
-const SD_FMT: u32 = 0x12;
+/// The register window: §3.3's registers are memory BAR 0.
+const REGISTERS: u32 = 0;
 
-const SD_CTL_RUN: u32 = 1 << 1;
-const SD_CTL_IOCE: u32 = 1 << 2;
-const SD_CTL_FEIE: u32 = 1 << 3;
-const SD_CTL_DEIE: u32 = 1 << 4;
-
-/// How many times a verb's completion is polled before the controller is called
-/// silent.
-///
-/// Policy: the specification completes an immediate command in one codec frame,
-/// about 21 µs at 48 kHz, and each poll here is a syscall. A driver that spun
-/// forever on a controller with no verb interface would take the machine's
-/// audio down with a hang instead of a refusal.
-const VERB_POLLS: u32 = 4096;
-
-/// The bound controller's index once the bind has run: the claim lists it alone.
-const BOUND: u8 = 0;
-
-/// One controller's verb interface: the claim, and the controller's index in
-/// the claim's current list.
-struct Link {
-    dev: Arc<HdaDev>,
-    controller: u8,
-}
-
-impl Link {
-    fn reg(&self, offset: u32) -> Reg {
-        Reg { controller: self.controller, offset }
-    }
-
-    /// One verb over the immediate-command registers: two writes, a bounded
-    /// poll, and a read.
-    ///
-    /// CORB/RIRB would batch several verbs behind one ring-pointer write, and
-    /// there is nothing here to batch for: verbs are sent at claim time and on
-    /// a press of a volume key, never in the audio path.
-    fn send(&self, verb: Verb) -> Option<Response> {
-        let dev = &self.dev;
-        if !self.settles(|status| status & IMMEDIATE_BUSY == 0) {
-            return None;
-        }
-        dev.reg_write(self.reg(IMMEDIATE_STATUS), RegWidth::U16, IMMEDIATE_RESULT_VALID).ok()?;
-        dev.reg_write(self.reg(IMMEDIATE_COMMAND), RegWidth::U32, verb.raw()).ok()?;
-        dev.reg_write(self.reg(IMMEDIATE_STATUS), RegWidth::U16, IMMEDIATE_BUSY).ok()?;
-        if !self.settles(|status| {
-            status & IMMEDIATE_BUSY == 0 && status & IMMEDIATE_RESULT_VALID != 0
-        }) {
-            return None;
-        }
-        let response = dev.reg_read(self.reg(IMMEDIATE_RESPONSE), RegWidth::U32).ok()?;
-        dev.reg_write(self.reg(IMMEDIATE_STATUS), RegWidth::U16, IMMEDIATE_RESULT_VALID).ok()?;
-        Response::new(response)
-    }
-
-    fn settles(&self, ready: impl Fn(u32) -> bool) -> bool {
-        for _ in 0..VERB_POLLS {
-            match self.dev.reg_read(self.reg(IMMEDIATE_STATUS), RegWidth::U16) {
-                Ok(status) if ready(status) => return true,
-                Ok(_) => {}
-                Err(_) => return false,
-            }
-        }
-        false
-    }
-}
-
-impl probe::Verbs for Link {
-    fn get(&mut self, codec: Address, node: Node, verb: u16, payload: u8) -> Option<Response> {
-        self.send(Verb::short(codec, node, verb, payload))
-    }
+/// The two mappings the controller's windows point into, held by both
+/// halves for as long as either drives it.
+struct Mappings {
+    _bar: SharedMemory,
+    _region: DmaRegion,
 }
 
 /// The stream: the mix thread's, which starts and stops it.
 pub struct Hda {
-    dev: Arc<HdaDev>,
-    info: HdaInfo,
-    stream_offset: u32,
-    /// Set once the engine has been told to run, so a stop and a resume are one
-    /// register write each and not one per period.
-    running: bool,
+    dev: PciDev,
+    stream: Stream<Bar>,
+    pcm: Window,
+    underruns: u32,
+    _held: Arc<Mappings>,
 }
 
 /// The codec's master: the control thread's, which sets and reads it back.
 pub struct MasterControl {
-    link: Link,
+    link: Link<Bar, Grant>,
     master: Master,
     setting: Setting,
+    _held: Arc<Mappings>,
 }
 
-/// What a claim of the HDA controllers came to.
+/// What a claim of the HDA function came to.
 pub struct Claimed {
     pub hda: Hda,
     pub rate: u32,
@@ -137,28 +76,31 @@ pub struct Claimed {
     pub master: Option<MasterControl>,
 }
 
-/// Why this machine's HDA controllers cannot carry audio. Each is a line
-/// soundserver prints before falling back to the null sink — "no sound" without
-/// which of these it was is a report nobody can act on.
+/// Why this machine's HDA function cannot carry audio. Each is a line
+/// soundserver prints before falling back to the null sink.
 pub enum Refusal {
-    /// The kernel's answers stopped making sense, which is a bug here or there
-    /// and never a property of the machine.
-    Kernel(SyscallError),
-    /// None of the listed controllers reaches an output, or several do.
-    Choice(Vec<HdaController>, Unchosen),
-    /// The kernel refused the bind; its `hda:` line says why.
-    Bind(HdaController, SyscallError),
+    Kernel(KernelRefused),
+    /// The description gives BAR 0 no window.
+    NoRegisters,
+    Controller(controller::Refusal),
+    /// The codec link refused an answer during the walk or the configuration.
+    Link(LinkFault),
+    /// The codecs reach no output.
+    Choice(Unchosen),
     /// The converter behind the chosen pin offers none of the device rates, at
     /// 16 bits; what it does offer, where it has a PCM word at all.
     Rate(Option<PcmCaps>),
 }
 
-/// `bb:dd.f`, as the kernel's `hda:` lines name a controller.
-struct Pci<'a>(&'a HdaController);
+impl From<KernelRefused> for Refusal {
+    fn from(why: KernelRefused) -> Self {
+        Self::Kernel(why)
+    }
+}
 
-impl core::fmt::Display for Pci<'_> {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:02x}:{:02x}.{}", self.0.bus, self.0.dev, self.0.func)
+impl From<controller::Refusal> for Refusal {
+    fn from(why: controller::Refusal) -> Self {
+        Self::Controller(why)
     }
 }
 
@@ -189,25 +131,17 @@ fn path_error(f: &mut core::fmt::Formatter<'_>, why: &PathError) -> core::fmt::R
 impl core::fmt::Display for Refusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Kernel(e) => write!(f, "the kernel refused a call this driver has to make ({e})"),
-            Self::Choice(controllers, Unchosen(found)) => {
-                let reaching = found.iter().filter(|walk| walk.is_ok()).count();
-                if reaching == 0 {
-                    write!(f, "no controller reaches an output")?;
-                } else {
-                    write!(f, "{reaching} controllers reach an output, and choosing between them is a policy nothing keeps")?;
-                }
-                for (controller, walk) in controllers.iter().zip(found) {
-                    write!(f, "; {}: ", Pci(controller))?;
-                    match walk {
-                        Ok(path) => write!(f, "pin {:#04x} ({})", path.output.node.0, path.device.name())?,
-                        Err(why) => path_error(f, why)?,
-                    }
+            Self::Kernel(why) => write!(f, "{why}"),
+            Self::NoRegisters => write!(f, "the claim gives its register BAR no window"),
+            Self::Controller(why) => write!(f, "the controller refused: {why}"),
+            Self::Link(why) => write!(f, "the codec link refused: {why}"),
+            Self::Choice(Unchosen(found)) => {
+                write!(f, "its codecs reach no output")?;
+                for walk in found.iter().filter_map(|walk| walk.as_ref().err()) {
+                    write!(f, ": ")?;
+                    path_error(f, walk)?;
                 }
                 Ok(())
-            }
-            Self::Bind(controller, e) => {
-                write!(f, "the kernel refused to bind {} ({e}); its `hda:` line says why", Pci(controller))
             }
             Self::Rate(None) => write!(f, "the converter has no PCM word"),
             Self::Rate(Some(pcm)) => {
@@ -221,6 +155,8 @@ impl core::fmt::Display for Refusal {
     }
 }
 
+struct NoMasterLine(NoMaster);
+
 impl core::fmt::Display for NoMasterLine {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self.0 {
@@ -230,68 +166,64 @@ impl core::fmt::Display for NoMasterLine {
     }
 }
 
-struct NoMasterLine(NoMaster);
-
-/// Every listed controller's codecs, walked over its own verb interface, in
-/// list order.
-fn walk(dev: &Arc<HdaDev>, listed: &[HdaController]) -> Vec<Vec<Codec>> {
-    let mut walks = Vec::new();
-    for (index, controller) in listed.iter().enumerate() {
-        let mut link = Link { dev: dev.clone(), controller: index as u8 };
-        let mut codecs = Vec::new();
-        for entry in probe::enumerate(&mut link, controller.statests) {
-            match entry {
-                Ok(codec) => {
-                    say!(
-                        "soundserver: hda {} codec{} vendor={:04x} device={:04x}, {} function group(s)",
-                        Pci(controller),
-                        codec.address,
-                        codec.vendor,
-                        codec.device,
-                        codec.groups.len()
-                    );
-                    codecs.push(codec);
-                }
-                Err((address, fault)) => say!(
-                    "soundserver: hda {} codec{address} answered nothing usable ({fault:?})",
-                    Pci(controller)
-                ),
+/// Every codec `statests` names, walked over the link.
+fn walk(link: &mut Link<Bar, Grant>, statests: u16) -> Vec<Codec> {
+    let mut codecs = Vec::new();
+    for entry in probe::enumerate(link, statests) {
+        match entry {
+            Ok(codec) => {
+                say!(
+                    "soundserver: hda codec{} vendor={:04x} device={:04x}, {} function group(s)",
+                    codec.address,
+                    codec.vendor,
+                    codec.device,
+                    codec.groups.len()
+                );
+                codecs.push(codec);
+            }
+            Err((address, fault)) => {
+                say!("soundserver: hda codec{address} answered nothing usable ({fault:?})")
             }
         }
-        walks.push(codecs);
     }
-    walks
+    codecs
 }
 
 impl Hda {
-    /// Walk every listed controller's codecs, choose the one controller whose
-    /// graph reaches an output, bind it, and configure its path at the first
-    /// device rate its converter offers.
+    /// Bring the controller up, walk its codecs, choose the path that reaches
+    /// an output, and configure it at the first device rate its converter
+    /// offers, in §4.5.3's order: the descriptor, then the codec.
     ///
-    /// The claim is the argument: `/system/bin/supervisor` minted it and endowed it, so
-    /// "does this machine have an HDA?" was already answered before soundserver's
-    /// first instruction. Everything here runs before soundserver starts a thread.
-    pub fn claim(dev: HdaDev) -> Result<Claimed, Refusal> {
-        let info = dev.info().map_err(Refusal::Kernel)?;
-        let listed = info.listed().to_vec();
-        let dev = Arc::new(dev);
-
-        let mut walks = walk(&dev, &listed);
-        let (chosen, path) = toyos_hda::choose(&walks).map_err(|u| Refusal::Choice(listed.clone(), u))?;
-        let controller = listed[chosen];
-        dev.bind(chosen as u8).map_err(|e| Refusal::Bind(controller, e))?;
-        for (index, other) in listed.iter().enumerate().filter(|&(i, _)| i != chosen) {
-            say!("soundserver: hda bound {}, not {} (controller {index})", Pci(&controller), Pci(other));
+    /// Everything here runs before soundserver starts a thread.
+    pub fn claim(dev: PciDev) -> Result<Claimed, Refusal> {
+        let info = dev.describe().map_err(KernelRefused::on("the description"))?;
+        let bytes = info.bar_bytes[REGISTERS as usize];
+        if bytes == 0 {
+            return Err(Refusal::NoRegisters);
         }
-        let codecs = walks.swap_remove(chosen);
+        say!("soundserver: hda {:02x}:{:02x}.{}", info.bus, info.dev, info.func);
+        let (bar, bar_mapping) = Bar::map(&dev, REGISTERS, bytes)?;
+        let reset = controller::reset(&bar, || std::thread::sleep(Duration::from_micros(CODEC_DETECT_MICROS)))?;
+        say!("soundserver: hda gcap={:#06x} statests={:#06x}", reset.gcap.0, reset.statests);
+
+        let (grant, region) = Grant::alloc(&dev, GRANT_BYTES as u64)?;
+        grant.window().zero();
+        let held = Arc::new(Mappings { _bar: bar_mapping, _region: region });
+
+        let mut link = Link::open(bar, grant, &reset)?;
+        let mut walks = vec![walk(&mut link, reset.statests)];
+        if let Some(fault) = link.refused() {
+            return Err(Refusal::Link(fault));
+        }
+        let (_, path) = toyos_hda::choose(&walks).map_err(Refusal::Choice)?;
+        let codecs = walks.swap_remove(0);
 
         let rate = config::rate(&codecs, &path, &toyos_mixer::DEVICE_RATES).map_err(Refusal::Rate)?;
         let (format, channels) =
             config::format(&codecs, &path, rate).expect("a rate the converter offers has a format");
         say!(
-            "soundserver: hda {} codec{} group {:#04x} converter {:#04x} -> pin {:#04x} ({}), \
+            "soundserver: hda codec{} group {:#04x} converter {:#04x} -> pin {:#04x} ({}), \
              headphone {}, format {:#06x} ({} Hz {} ch {}-bit)",
-            Pci(&controller),
             path.codec,
             path.group.0,
             path.converter.0,
@@ -307,68 +239,77 @@ impl Hda {
             config::WIDTH,
         );
 
-        let link = Link { dev: dev.clone(), controller: BOUND };
-        let verbs = config::verbs(&codecs, &path, format, info.stream_tag)
+        let stream = Stream::open(bar, &grant, &reset, format)?;
+        let verbs = config::verbs(&codecs, &path, format, controller::STREAM_TAG)
             .expect("the path names a codec this walk produced");
         let sent = verbs.len();
         for verb in verbs {
-            link.send(verb);
+            link.send(verb).map_err(Refusal::Link)?;
         }
-
-        let hda = Hda { dev: dev.clone(), info, stream_offset: controller.stream_offset, running: false };
-        // The tag before the format, and both before the engine is ever told to
-        // run: a descriptor that starts with neither plays whatever the last
-        // owner of the stream left in it.
-        hda.write(SD_CTL_TAG, RegWidth::U8, (info.stream_tag as u32) << 4).map_err(Refusal::Kernel)?;
-        hda.write(SD_FMT, RegWidth::U16, format as u32).map_err(Refusal::Kernel)?;
-        say!("soundserver: hda path configured in {sent} verbs, stream tag {}", info.stream_tag);
+        say!("soundserver: hda path configured in {sent} verbs, stream tag {}", controller::STREAM_TAG);
 
         let master = match config::master(&path) {
-            Ok(master) => Some(MasterControl { link, master, setting: Setting::TOP }),
+            Ok(master) => Some(MasterControl { link, master, setting: Setting::TOP, _held: held.clone() }),
             Err(why) => {
                 say!("soundserver: hda path has no master ({}); volume answers unavailable", NoMasterLine(why));
                 None
             }
         };
+        let hda = Hda { dev, stream, pcm: grant.window(), underruns: 0, _held: held };
         Ok(Claimed { hda, rate, channels, master })
     }
 
-    pub fn info(&self) -> HdaInfo {
-        self.info
-    }
-
-    pub fn dev(&self) -> &HdaDev {
+    pub fn dev(&self) -> &PciDev {
         &self.dev
     }
 
-    /// Start the engine, which is one register write and only on the edge.
+    /// Where period `idx`'s samples go.
+    pub fn buffer(&self, idx: usize) -> Window {
+        self.pcm.sub(Stream::<Bar>::period(idx), PERIOD_BYTES)
+    }
+
+    /// The periods played since the last call, on the claim's record.
     ///
-    /// There is no per-period submit: `SDnLVI` and the descriptor list are the
-    /// kernel's and the engine cycles them unaided, so a period costs this
-    /// driver a read of the completion record and no register access at all.
+    /// The stream raises one message per status it clears, for the first
+    /// period to complete after the clear, so the record's newest is never
+    /// earlier in play order than the first period of this mask: that one is
+    /// clocked by it, never early, and the rest wait for the next record's.
+    pub fn completion(&mut self) -> Option<Completion> {
+        let record = match self.dev.irq() {
+            Ok(record) => record,
+            Err(SyscallError::WouldBlock) => return None,
+            Err(why) => panic!("soundserver: the HDA claim's interrupt record: {why:?}"),
+        };
+        let played = self
+            .stream
+            .played()
+            .unwrap_or_else(|why| panic!("soundserver: hda cannot be driven on — {why}"));
+        if played.underran {
+            self.underruns += 1;
+            if self.underruns == 1 {
+                say!("soundserver: hda stream underran (FIFOE); counted from here and not said again");
+            }
+        }
+        (played.mask != 0).then_some(Completion {
+            mask: played.mask,
+            first_nanos: record.first_nanos,
+            last_nanos: record.last_nanos,
+            clocked: 1,
+        })
+    }
+
+    /// Start the engine, on the edge only: the descriptor list is cyclic, so
+    /// a period costs this driver a record and no register write.
     pub fn start(&mut self) {
-        if self.running {
-            return;
-        }
-        if let Err(e) = self.write(SD_CTL, RegWidth::U8, SD_CTL_RUN | SD_CTL_IOCE | SD_CTL_FEIE | SD_CTL_DEIE) {
-            panic!("soundserver: hda could not start its stream: {e:?}");
-        }
-        self.running = true;
+        self.stream
+            .start()
+            .unwrap_or_else(|why| panic!("soundserver: hda could not start its stream: {why}"));
     }
 
     pub fn stop(&mut self) {
-        if !self.running {
-            return;
-        }
-        if let Err(e) = self.write(SD_CTL, RegWidth::U8, SD_CTL_IOCE | SD_CTL_FEIE | SD_CTL_DEIE) {
-            panic!("soundserver: hda could not stop its stream: {e:?}");
-        }
-        self.running = false;
-    }
-
-    fn write(&self, field: u32, width: RegWidth, value: u32) -> Result<(), SyscallError> {
-        let reg = Reg { controller: BOUND, offset: self.stream_offset + field };
-        self.dev.reg_write(reg, width, value)
+        self.stream
+            .stop()
+            .unwrap_or_else(|why| panic!("soundserver: hda could not stop its stream: {why}"));
     }
 }
 
@@ -391,22 +332,28 @@ impl MasterControl {
         self.apply(Setting { muted: !self.setting.muted, ..self.setting })
     }
 
-    /// Set `setting` and read it back. `None`, named, where a verb went
-    /// unanswered or the answers name no setting.
+    /// Set `setting` and read it back. `None`, named, where the link refused
+    /// or the answers name no setting.
     fn apply(&mut self, setting: Setting) -> Option<Answer> {
         for verb in self.master.set(setting) {
-            if self.link.send(verb).is_none() {
-                say!("soundserver: hda master set went unanswered ({:#010x})", verb.raw());
+            if let Err(why) = self.link.send(verb) {
+                say!("soundserver: hda master set refused ({:#010x}): {why}", verb.raw());
                 return None;
             }
         }
         let mut answers = Vec::new();
         for verb in self.master.read() {
-            let Some(answer) = self.link.send(verb) else {
-                say!("soundserver: hda master readback went unanswered");
-                return None;
-            };
-            answers.push(answer);
+            match self.link.send(verb).map(toyos_hda::verb::Response::new) {
+                Ok(Some(answer)) => answers.push(answer),
+                Ok(None) => {
+                    say!("soundserver: hda master readback answered all ones");
+                    return None;
+                }
+                Err(why) => {
+                    say!("soundserver: hda master readback refused: {why}");
+                    return None;
+                }
+            }
         }
         let Some(read) = self.master.decode(&answers) else {
             say!("soundserver: hda master read back as no setting ({answers:?})");

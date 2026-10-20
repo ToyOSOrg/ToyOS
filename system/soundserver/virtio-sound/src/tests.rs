@@ -13,6 +13,7 @@ use toyos_virtio::queue::{Published, UsedRefusal};
 
 use crate::wire::{self, Event, Failed, PcmInfo, Request};
 use crate::{
+    Played,
     Doorbell, Queues, Refusal, Sound, Stream, CONTROL_PARTS, EVENTS, EVENT_PARTS, PERIODS, PERIOD_BYTES,
     TX_PARTS,
 };
@@ -568,24 +569,26 @@ fn an_event_is_handed_up_and_its_buffer_posted_again() {
     assert!(said.is_empty());
 }
 
-/// The claim's interrupt record, as [`Sound::played`] is handed it: when the
-/// oldest and newest notification since the last take landed.
+/// The claim's interrupt record: how many notifications landed since the
+/// last take, and when the newest did.
 #[derive(Default)]
-struct Claim(Option<(u64, u64)>);
+struct Claim(Option<(u32, u64)>);
 
 impl Claim {
     fn land(&mut self, at: u64) {
-        let first = self.0.map_or(at, |(first, _)| first);
-        self.0 = Some((first, at));
+        let count = self.0.map_or(0, |(count, _)| count);
+        self.0 = Some((count + 1, at));
     }
 
-    fn take(&mut self) -> Option<(u64, u64)> {
+    fn take(&mut self) -> Option<(u32, u64)> {
         self.0.take()
     }
 }
 
 /// No period is stranded: every one comes back exactly once, and none while
-/// the claim is left unreadable.
+/// the claim is left unreadable. **And none is stamped earlier than its own
+/// notification**: a period a record clocks is one whose notification that
+/// record, or an earlier one, carried.
 ///
 /// Two periods, each a used element and then its notification (§2.7.7),
 /// against two wakes of a driver that takes the record and then reads the
@@ -619,8 +622,12 @@ fn no_period_is_stranded_between_its_used_element_and_its_notification() {
         sound.submit(1).expect("a period goes out");
         let mut claim = Claim::default();
         let (mut device, mut driver, mut landed) = (DEVICE.iter(), DRIVER.iter(), 0);
-        let mut taken = None;
-        let mut back = Vec::new();
+        let mut taken: Option<(u32, u64)> = None;
+        let mut back: Vec<(Played, u64)> = Vec::new();
+        let read = |sound: &mut Sound<_, _>, record: Option<(u32, u64)>, back: &mut Vec<(Played, u64)>| {
+            let played = sound.played(record.map(|(count, _)| count)).expect("a whole period");
+            back.extend(played.zip(record.map(|(_, at)| at)));
+        };
         for n in 0..8 {
             let step = if pick & 1 << n != 0 { device.next() } else { driver.next() };
             match step.copied().expect("four steps each") {
@@ -630,13 +637,24 @@ fn no_period_is_stranded_between_its_used_element_and_its_notification() {
                     claim.land(landed);
                 }
                 Step::Take => taken = claim.take(),
-                Step::Read => back.extend(sound.played(taken.take()).expect("a whole period")),
+                Step::Read => read(&mut sound, taken.take(), &mut back),
             }
         }
         while let Some(record) = claim.take() {
-            back.extend(sound.played(Some(record)).expect("a whole period"));
+            read(&mut sound, Some(record), &mut back);
         }
-        let masks: Vec<u32> = back.iter().map(|(mask, _)| *mask).collect();
+        // Period `p`'s notification landed at `p + 1`, and the periods come
+        // back in order, so the first `clocked` of a mask are its lowest.
+        for (played, at) in &back {
+            let mut periods = (0..2u64).filter(|p| played.mask & 1 << p != 0);
+            for period in periods.by_ref().take(played.clocked as usize) {
+                assert!(
+                    period < *at,
+                    "order {pick:#010b}: period {period} stamped {at}, before its notification"
+                );
+            }
+        }
+        let masks: Vec<u32> = back.iter().map(|(played, _)| played.mask).collect();
         let mut seen = 0;
         for mask in &masks {
             assert_eq!(seen & mask, 0, "order {pick:#010b}: a period came back twice in {masks:?}");

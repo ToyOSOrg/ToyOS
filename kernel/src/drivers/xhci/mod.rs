@@ -292,7 +292,7 @@ const MAX_HID_FAILURES: u8 = 8;
 
 /// How long the driver waits on any one command or transfer.
 ///
-/// Not proof of a dead device: under TCG the TSC tracks host wall-clock, so a live device on an oversubscribed host can breach this once; only three breaches in one command are treated as a device fact.
+/// Not proof of a dead device: under TCG the CPU's counter tracks host wall-clock, so a live device on an oversubscribed host can breach this once; only three breaches in one command are treated as a device fact.
 ///
 /// USB_TIMEOUT_NS and `block::OPERATION` are the same 2 s; the two must stay equal or the budget math (`Scsi::Budget` → `BlockError::BudgetExpired`) is wrong.
 const USB_TIMEOUT_NS: u64 = 2_000_000_000;
@@ -1581,7 +1581,7 @@ fn lock_settles() -> bool {
 /// machine nobody can turn off. Not fair — a competitor taking a ticket wins —
 /// which is why both callers say what they do without it.
 fn take_within(bound: u64) -> Option<OwedGuard<'static, Vec<XhciController>>> {
-    let until = crate::clock::tsc_deadline(bound);
+    let until = crate::clock::counter_deadline(bound);
     loop {
         if let Some(guard) = XHCI.try_lock() {
             return Some(guard);

@@ -2,7 +2,7 @@ use std::time::{Duration, Instant};
 
 use toyos::AsHandle;
 use toyos::ipc::{self, Connection, IpcPayload};
-use toyos::net::{ErrorResponse, RespType};
+use toyos::net::{ErrorResponse, MAX_REQUEST, RespType};
 use toyos::say;
 
 const RESP_RESULT: u32 = RespType::Result as u32;
@@ -93,22 +93,13 @@ pub const MAX_PENDING_CONNS: u32 = 32;
 /// bounds is the one that never sends it.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The largest request payload netstack keeps.
-///
-/// `MsgType::DnsLookup` is the only request carrying bytes rather than a struct,
-/// and `toyos::net::dns_lookup` frames a hostname into a 256-byte buffer; every
-/// typed request is far smaller. A client may declare anything up to
-/// `ipc::MAX_FRAME_LEN` — the excess is counted down and discarded, never waited
-/// for.
-pub const MAX_KEPT_REQUEST: usize = 256;
-
 /// One client's inbound framing.
 ///
 /// **netstack never reads a client with a blocking read.** That is the whole point
 /// of [`ipc::FrameRx`]: `ipc::recv_header` and `ipc::recv_payload` park the
 /// caller until the peer sends the bytes it promised. Here a peer that stops halfway
 /// through a frame costs a buffer and a deadline instead of the event loop.
-pub type ClientRx = ipc::FrameRx<MAX_KEPT_REQUEST>;
+pub type ClientRx = ipc::FrameRx<MAX_REQUEST>;
 
 /// A connection that has been accepted and has not yet said what it wants.
 ///
@@ -128,7 +119,7 @@ pub struct PendingConn {
 pub struct Request {
     pub client: Client,
     pub msg_type: u32,
-    pub payload: [u8; MAX_KEPT_REQUEST],
+    pub payload: [u8; MAX_REQUEST],
     pub payload_len: usize,
 }
 

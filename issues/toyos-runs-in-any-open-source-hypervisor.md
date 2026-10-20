@@ -96,7 +96,7 @@ its NVMe, GOP, i8042, xHCI and HDA are driven here, and its virtio-net once its
 transitional id is.
 
 Unsupported, and not owed: bhyve's HDA, which raises INTx alone. ToyOS arms
-MSI-X or MSI only (`kernel/src/drivers/hda.rs`'s `arm_interrupt`, `pcidev`)
+MSI-X or MSI only (`pcidev`'s `bring_up`)
 and takes up no line-based interrupt (the orchestrator's ruling, #896,
 issuecomment-6131213771, ruling 3), so bhyve has no sound.
 

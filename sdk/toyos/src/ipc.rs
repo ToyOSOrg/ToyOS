@@ -143,7 +143,7 @@ pub const MAX_TYPED_PAYLOAD: usize = 64;
 pub enum IpcError {
     Disconnected,
     /// The peer's frame does not describe a message this endpoint can read:
-    /// a length past [`MAX_FRAME_LEN`], or one shorter than the payload the
+    /// a length past [`MAX_FRAME_LEN`], or one other than the payload the
     /// caller asked for.
     Malformed,
     /// This endpoint will not frame a payload that large. Distinct from
@@ -364,18 +364,19 @@ pub fn recv_header(handle: RawHandle) -> Result<IpcHeader, IpcError> {
     )
 }
 
+/// The frame's payload as one `T`. A payload of any other length is read
+/// past, so the connection stays framed, and refused [`IpcError::Malformed`].
 pub fn recv_payload<T: IpcPayload>(handle: RawHandle, header: &IpcHeader) -> Result<T, IpcError> {
-    let size = core::mem::size_of::<T>();
-    if (header.len as usize) < size {
-        return Err(IpcError::Malformed);
+    if let Err(e) = exactly::<T>(header.len as usize) {
+        skip(handle, header.len as usize)?;
+        return Err(e);
     }
     let mut val = core::mem::MaybeUninit::<T>::uninit();
     // SAFETY: the slice covers exactly the `T` being filled, and `IpcPayload`
     // promises every bit pattern `read_exact` can write is a valid `T`.
     read_exact(handle, unsafe {
-        core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, size)
+        core::slice::from_raw_parts_mut(val.as_mut_ptr() as *mut u8, core::mem::size_of::<T>())
     })?;
-    skip(handle, header.len as usize - size)?;
     Ok(unsafe { val.assume_init() })
 }
 
@@ -403,18 +404,21 @@ pub fn recv_bytes(handle: RawHandle, header: &IpcHeader, buf: &mut [u8]) -> Resu
 /// non-blocking against a peer that stops mid-message, and a buffered payload
 /// has no handle left to read it from.
 pub fn decode_payload<T: IpcPayload>(bytes: &[u8]) -> Result<T, IpcError> {
-    let size = core::mem::size_of::<T>();
-    if bytes.len() < size {
-        return Err(IpcError::Malformed);
-    }
+    exactly::<T>(bytes.len())?;
     let mut val = core::mem::MaybeUninit::<T>::uninit();
-    // SAFETY: the copy fills exactly the `T` being built from a source at
-    // least that long, and `IpcPayload` promises every bit pattern is a valid
-    // `T` — the same contract `recv_payload` reads on.
+    // SAFETY: the copy fills exactly the `T` being built from a source that
+    // long, and `IpcPayload` promises every bit pattern is a valid `T` — the
+    // same contract `recv_payload` reads on.
     unsafe {
-        core::ptr::copy_nonoverlapping(bytes.as_ptr(), val.as_mut_ptr() as *mut u8, size);
+        core::ptr::copy_nonoverlapping(bytes.as_ptr(), val.as_mut_ptr() as *mut u8, bytes.len());
         Ok(val.assume_init())
     }
+}
+
+/// A typed payload is exactly one `T`: a shorter one is not a `T`, and the
+/// bytes past a longer one are no protocol's.
+fn exactly<T: IpcPayload>(len: usize) -> Result<(), IpcError> {
+    if len == core::mem::size_of::<T>() { Ok(()) } else { Err(IpcError::Malformed) }
 }
 
 /// What one [`FrameRx::pump`] found.
@@ -426,8 +430,9 @@ pub enum RxStep {
     Frame { msg_type: u32, payload_len: usize },
     /// The peer hung up, or its handle is gone.
     Eof,
-    /// A frame no protocol here can produce. Nothing after it can be located,
-    /// so there is nothing to resynchronise to.
+    /// A frame no protocol here can produce: a length past [`MAX_FRAME_LEN`]
+    /// or past the receiver's `MAX`. Nothing after it can be located, so
+    /// there is nothing to resynchronise to.
     Malformed,
 }
 
@@ -439,33 +444,33 @@ pub enum RxStep {
 /// decision of when the server runs again. Here a peer that stops halfway
 /// through a frame costs a buffer instead of the event loop.
 ///
-/// `KEEP` is how much of a payload the caller wants kept; anything past it is
-/// read and discarded, so a peer cannot make the server hold what it will not
-/// look at. A protocol whose messages are all bare headers takes `KEEP = 0`.
-pub struct FrameRx<const KEEP: usize> {
+/// `MAX` is the widest payload the caller's protocol carries. A frame
+/// declaring more is [`RxStep::Malformed`] at its header, so a peer cannot
+/// make the server hold what it will not look at, and no frame arrives cut
+/// short. A protocol whose messages are all bare headers takes `MAX = 0`.
+pub struct FrameRx<const MAX: usize> {
     header: [u8; IpcHeader::WIRE_SIZE],
-    buf: [u8; KEEP],
+    buf: [u8; MAX],
     len: usize,
     state: RxState,
 }
 
 enum RxState {
     Header,
-    Payload { msg_type: u32, keep: usize, skip: u32 },
-    Skip { msg_type: u32, kept: usize, remaining: u32 },
+    Payload { msg_type: u32, len: usize },
 }
 
-impl<const KEEP: usize> Default for FrameRx<KEEP> {
+impl<const MAX: usize> Default for FrameRx<MAX> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<const KEEP: usize> FrameRx<KEEP> {
+impl<const MAX: usize> FrameRx<MAX> {
     pub const fn new() -> Self {
         Self {
             header: [0; IpcHeader::WIRE_SIZE],
-            buf: [0; KEEP],
+            buf: [0; MAX],
             len: 0,
             state: RxState::Header,
         }
@@ -490,54 +495,33 @@ impl<const KEEP: usize> FrameRx<KEEP> {
                         Fill::Eof => return RxStep::Eof,
                         Fill::Filled => {}
                     }
-                    let msg_type = u32::from_ne_bytes(self.header[0..4].try_into().unwrap());
-                    let wire_len = u32::from_ne_bytes(self.header[4..8].try_into().unwrap());
-                    // The bound belongs to `IpcHeader`, so it is asked rather
-                    // than restated: a length past `MAX_FRAME_LEN` is a frame
-                    // this endpoint refuses to describe, not a long one.
-                    let Ok(header) = IpcHeader::from_wire(msg_type, wire_len) else {
+                    let Some((msg_type, len)) = Self::announced(&self.header) else {
                         return RxStep::Malformed;
                     };
                     self.len = 0;
-                    let keep = (header.len() as usize).min(KEEP);
-                    let skip = header.len() - keep as u32;
-                    self.state = RxState::Payload { msg_type, keep, skip };
+                    self.state = RxState::Payload { msg_type, len };
                 }
-                RxState::Payload { msg_type, keep, skip } => {
-                    if keep > 0 {
-                        match fill(conn, &mut self.buf[..keep], &mut self.len) {
-                            Fill::Idle => return RxStep::Idle,
-                            Fill::Eof => return RxStep::Eof,
-                            Fill::Filled => {}
-                        }
+                RxState::Payload { msg_type, len } => {
+                    match fill(conn, &mut self.buf[..len], &mut self.len) {
+                        Fill::Idle => return RxStep::Idle,
+                        Fill::Eof => return RxStep::Eof,
+                        Fill::Filled => {}
                     }
                     self.len = 0;
-                    self.state = RxState::Skip { msg_type, kept: keep, remaining: skip };
-                }
-                RxState::Skip { msg_type, kept, remaining } => {
-                    if remaining > 0 {
-                        let mut sink = [0u8; 128];
-                        let want = (remaining as usize).min(sink.len());
-                        let mut got = 0;
-                        match fill(conn, &mut sink[..want], &mut got) {
-                            Fill::Idle => {
-                                self.state =
-                                    RxState::Skip { msg_type, kept, remaining: remaining - got as u32 };
-                                return RxStep::Idle;
-                            }
-                            Fill::Eof => return RxStep::Eof,
-                            Fill::Filled => {
-                                self.state =
-                                    RxState::Skip { msg_type, kept, remaining: remaining - want as u32 };
-                                continue;
-                            }
-                        }
-                    }
                     self.state = RxState::Header;
-                    return RxStep::Frame { msg_type, payload_len: kept };
+                    return RxStep::Frame { msg_type, payload_len: len };
                 }
             }
         }
+    }
+
+    /// The message type and payload length `header` announces, or `None` for
+    /// a frame this receiver cannot hold whole.
+    fn announced(header: &[u8; IpcHeader::WIRE_SIZE]) -> Option<(u32, usize)> {
+        let msg_type = u32::from_ne_bytes(header[0..4].try_into().unwrap());
+        let wire_len = u32::from_ne_bytes(header[4..8].try_into().unwrap());
+        let len = IpcHeader::from_wire(msg_type, wire_len).ok()?.len() as usize;
+        (len <= MAX).then_some((msg_type, len))
     }
 }
 
@@ -636,6 +620,36 @@ mod tests {
 
     fn probes(count: u32, closed: &Rc<RefCell<Vec<u32>>>) -> Vec<Probe> {
         (1..=count).map(|n| Probe { raw: RawHandle(n), closed: Rc::clone(closed) }).collect()
+    }
+
+    /// A payload is one `T` only at exactly its width: one byte short or one
+    /// byte over is refused.
+    #[test]
+    fn a_payload_decodes_only_at_exactly_its_width() {
+        let wire = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+        let words: [u32; 2] = decode_payload(&wire[..8]).unwrap();
+        assert_eq!(words, [u32::from_ne_bytes([1, 2, 3, 4]), u32::from_ne_bytes([5, 6, 7, 8])]);
+        assert!(matches!(decode_payload::<[u32; 2]>(&wire[..7]), Err(IpcError::Malformed)));
+        assert!(matches!(decode_payload::<[u32; 2]>(&wire), Err(IpcError::Malformed)));
+        assert!(matches!(decode_payload::<[u32; 2]>(&[]), Err(IpcError::Malformed)));
+    }
+
+    fn header(len: u32) -> [u8; IpcHeader::WIRE_SIZE] {
+        let mut bytes = [0u8; IpcHeader::WIRE_SIZE];
+        bytes[..4].copy_from_slice(&7u32.to_ne_bytes());
+        bytes[4..].copy_from_slice(&len.to_ne_bytes());
+        bytes
+    }
+
+    /// A frame is held whole up to the receiver's `MAX` and refused at its
+    /// header past it, never cut down to what fits.
+    #[test]
+    fn a_frame_past_the_receivers_max_is_refused_at_its_header() {
+        assert_eq!(FrameRx::<8>::announced(&header(0)), Some((7, 0)));
+        assert_eq!(FrameRx::<8>::announced(&header(8)), Some((7, 8)));
+        assert_eq!(FrameRx::<8>::announced(&header(9)), None);
+        assert_eq!(FrameRx::<0>::announced(&header(1)), None);
+        assert_eq!(FrameRx::<{ MAX_FRAME_LEN as usize + 1 }>::announced(&header(MAX_FRAME_LEN + 1)), None);
     }
 
     /// The kernel's refusal leaves every handle at its own number, and the

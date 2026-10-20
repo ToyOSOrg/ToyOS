@@ -384,7 +384,7 @@ pub(crate) fn mix_thread(
                     backend.released(idx);
                 }
             }
-            dll.update(rec.last_nanos as f64, n);
+            dll.update(rec.last_nanos as f64, n, rec.clocked);
             // Measured against the prediction this wait was *armed* on, not
             // against whatever the DLL holds when the wait returns. They differ
             // on a window's first wake, armed while soundserver was still idle and
@@ -823,7 +823,7 @@ mod tests {
     #[test]
     fn with_no_client_the_mix_loop_arms_no_timer_and_fills_nothing() {
         let mut locked = Dll::new(1e6);
-        locked.update(5e6, 1);
+        locked.update(5e6, 1, 1);
         for dll in [Dll::new(1e6), locked] {
             assert_eq!(armed(false, &dll, 1_000_000, 4e6), (u64::MAX, None));
         }

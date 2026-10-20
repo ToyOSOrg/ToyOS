@@ -21,7 +21,6 @@ macro_rules! device_info {
 device_info!(
     toyos_abi::FramebufferInfo,
     toyos_abi::pci::PciFunctionInfo,
-    toyos_abi::hda::HdaInfo,
     toyos_abi::part::PartitionInfo,
     toyos_abi::acpi::AcpiInfo,
 );
@@ -271,73 +270,5 @@ impl PartitionDev {
 }
 
 impl AsHandle for PartitionDev {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
-}
-
-/// The Intel HDA controllers the kernel brought up and drives no policy on.
-///
-/// What the claimant gets is a PCM ring it may write, an interrupt it may wait
-/// on, two register calls checked against the kernel's allow-list, and the
-/// choice of which listed controller the stream is bound to. It gets no
-/// register window and no physical address, so there is nothing here that can
-/// point a device at memory.
-pub struct HdaDev(pub(crate) Device);
-
-impl HdaDev {
-    pub fn info(&self) -> Result<toyos_abi::hda::HdaInfo, SyscallError> {
-        read_info(&self.0)
-    }
-
-    /// The periods that have played since the last read, or `Err(WouldBlock)`.
-    ///
-    /// One record and not a queue: the kernel accumulates, so a reader that
-    /// slept through several interrupts is told about all of them at once and
-    /// there is no ring for it to overflow.
-    pub fn completions(&self) -> Result<toyos_abi::audio::AudioCompletionRecord, SyscallError> {
-        let mut record = toyos_abi::audio::AudioCompletionRecord {
-            mask: 0,
-            _pad: 0,
-            timestamp_nanos: 0,
-        };
-        let buf = unsafe {
-            core::slice::from_raw_parts_mut(
-                &mut record as *mut _ as *mut u8,
-                toyos_abi::audio::AudioCompletionRecord::SIZE,
-            )
-        };
-        let n = syscall::read_nonblock(self.0.0.0, buf)?;
-        assert_eq!(
-            n,
-            toyos_abi::audio::AudioCompletionRecord::SIZE,
-            "partial HDA completion record ({n} bytes)"
-        );
-        Ok(record)
-    }
-
-    pub fn reg_read(
-        &self,
-        reg: toyos_abi::hda::Reg,
-        width: toyos_abi::syscall::RegWidth,
-    ) -> Result<u32, SyscallError> {
-        syscall::device_reg_read(self.0.as_handle(), reg.wire(), width)
-    }
-
-    pub fn reg_write(
-        &self,
-        reg: toyos_abi::hda::Reg,
-        width: toyos_abi::syscall::RegWidth,
-        value: u32,
-    ) -> Result<(), SyscallError> {
-        syscall::device_reg_write(self.0.as_handle(), reg.wire(), width, value)
-    }
-
-    /// Bind the stream to the listed controller at `controller`; see
-    /// [`syscall::hda_bind`]. From then on that controller is index 0.
-    pub fn bind(&self, controller: u8) -> Result<(), SyscallError> {
-        syscall::hda_bind(self.0.as_handle(), controller)
-    }
-}
-
-impl AsHandle for HdaDev {
     fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
