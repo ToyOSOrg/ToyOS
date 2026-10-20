@@ -18,6 +18,8 @@ use crate::probe;
 const LAPTOP_GCAP: u16 = 0x9701;
 const WINDOW: usize = 0x4000;
 const GRANT_AT: u64 = 0x2000_0000;
+/// Where the device reaches the ring soundserver lent.
+const RING_AT: u64 = 0x4000_0000;
 
 /// What the model's codecs answer one verb with: each a response and its
 /// `Resp_Ex` word, written to the RIRB in order.
@@ -554,7 +556,7 @@ const SD: usize = SD_BASE + 7 * SD_STRIDE;
 
 fn streaming(model: &Model) -> Stream<ModelRegs> {
     let reset = brought_up(model);
-    Stream::open(model.regs(), &model.mem(), &reset, 0x4011).expect("the model's stream opens")
+    Stream::open(model.regs(), &model.mem(), RING_AT, &reset, 0x4011).expect("the model's stream opens")
 }
 
 #[test]
@@ -565,7 +567,7 @@ fn the_stream_is_reset_and_pointed_at_the_grants_periods_before_it_runs() {
     assert!(model.0.borrow().srst_seen);
     for i in 0..PERIODS {
         let slot = BDL + i * 16;
-        assert_eq!(model.mem64(slot), GRANT_AT + (PCM + i * PERIOD_BYTES) as u64);
+        assert_eq!(model.mem64(slot), RING_AT + (i * PERIOD_BYTES) as u64);
         assert_eq!(model.mem32(slot + 8), PERIOD_BYTES as u32);
         assert_eq!(model.mem32(slot + 12), 1, "IOC on every period");
     }
@@ -586,14 +588,30 @@ fn a_controller_without_an_output_stream_or_whose_stream_stays_in_reset_is_refus
     let model = Model::new(0x0701, 0b1);
     let reset = brought_up(&model);
     assert!(matches!(
-        Stream::open(model.regs(), &model.mem(), &reset, 0x4011),
+        Stream::open(model.regs(), &model.mem(), RING_AT, &reset, 0x4011),
         Err(Refusal::NoOutputStream { .. })
     ));
     let model = Model::laptop().with(|s| s.srst_stuck = true);
     let reset = brought_up(&model);
     assert!(matches!(
-        Stream::open(model.regs(), &model.mem(), &reset, 0x4011),
+        Stream::open(model.regs(), &model.mem(), RING_AT, &reset, 0x4011),
         Err(Refusal::StreamReset { entered: true })
+    ));
+}
+
+#[test]
+fn a_ring_the_engine_cannot_be_pointed_at_is_refused() {
+    let model = Model::laptop();
+    let reset = brought_up(&model);
+    assert!(matches!(
+        Stream::open(model.regs(), &model.mem(), RING_AT + 64, &reset, 0x4011),
+        Err(Refusal::RingUnaligned { device_addr }) if device_addr == RING_AT + 64
+    ));
+    let narrow = Model::new(LAPTOP_GCAP & !1, 0b1);
+    let reset = brought_up(&narrow);
+    assert!(matches!(
+        Stream::open(narrow.regs(), &narrow.mem(), 0xFFFF_FF80, &reset, 0x4011),
+        Err(Refusal::Beyond32Bits { .. })
     ));
 }
 

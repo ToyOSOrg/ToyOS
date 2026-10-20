@@ -3,7 +3,8 @@
 //! A class, a partition or an ISA set is the ABI's own spelling
 //! ([`DeviceRequest::parse`]). A PCI function is matched here, by its class
 //! code and optionally its card: `pci:CC:SS:PP` or `pci:CC:SS:PP/VVVV:DDDD`,
-//! lowercase hex. **Every matcher carries its class**, so whether two entries
+//! lowercase hex, where `PP` may be `*` for every programming interface of the
+//! subclass. **Every matcher carries its class**, so whether two entries
 //! can name one function is decided from their text alone ([`Entry::overlaps`]),
 //! and a claim names the function a matcher found by its arrival.
 
@@ -33,27 +34,45 @@ impl Entry {
     pub fn overlaps(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Fixed(a), Self::Fixed(b)) => a == b,
-            (Self::Pci(a), Self::Pci(b)) => a.class == b.class && (a.id.is_none() || b.id.is_none() || a.id == b.id),
+            (Self::Pci(a), Self::Pci(b)) => {
+                a.class == b.class && either(a.prog_if, b.prog_if) && either(a.id, b.id)
+            }
             _ => false,
         }
     }
+}
+
+/// Whether two optional fields can hold one value: either is unset, or both
+/// are the same.
+fn either<T: PartialEq>(x: Option<T>, y: Option<T>) -> bool {
+    x.is_none() || y.is_none() || x == y
 }
 
 /// Which PCI functions an entry names: every function of a class code, or of
 /// one card within it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PciMatch {
-    /// Base class, subclass and programming interface.
-    pub class: [u8; 3],
+    /// Base class and subclass.
+    pub class: [u8; 2],
+    /// The programming interface, or `None` for every one: a subclass whose
+    /// interfaces are one register model told apart by vendor extensions (HD
+    /// Audio's 00 and 80) is driven alike whichever a function reports.
+    pub prog_if: Option<u8>,
     pub id: Option<PciId>,
 }
 
 impl PciMatch {
     pub const PREFIX: &'static str = "pci:";
 
-    /// Every function of class `class`, of card `id` where it names one.
+    /// Every function of class code `class`, of card `id` where it names one.
     pub const fn new(class: [u8; 3], id: Option<PciId>) -> Self {
-        Self { class, id }
+        Self { class: [class[0], class[1]], prog_if: Some(class[2]), id }
+    }
+
+    /// Every function of `class`'s base class and subclass, whatever its
+    /// programming interface.
+    pub const fn any_interface(class: [u8; 2], id: Option<PciId>) -> Self {
+        Self { class, prog_if: None, id }
     }
 
     pub fn parse(text: &str) -> Option<Self> {
@@ -65,27 +84,33 @@ impl PciMatch {
             }
             None => (rest, None),
         };
-        let mut class = [0u8; 3];
         let mut fields = code.split(':');
-        for byte in &mut class {
-            *byte = hex8(fields.next()?)?;
-        }
+        let class = [hex8(fields.next()?)?, hex8(fields.next()?)?];
+        let prog_if = match fields.next()? {
+            "*" => None,
+            byte => Some(hex8(byte)?),
+        };
         if fields.next().is_some() {
             return None;
         }
-        Some(Self { class, id: card })
+        Some(Self { class, prog_if, id: card })
     }
 
     pub fn matches(&self, pci: &Pci) -> bool {
-        [pci.class, pci.subclass, pci.prog_if] == self.class
+        [pci.class, pci.subclass] == self.class
+            && self.prog_if.is_none_or(|prog_if| prog_if == pci.prog_if)
             && self.id.is_none_or(|id| id.vendor == pci.vendor && id.device == pci.device)
     }
 }
 
 impl fmt::Display for PciMatch {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let [class, subclass, prog_if] = self.class;
-        write!(f, "{}{class:02x}:{subclass:02x}:{prog_if:02x}", Self::PREFIX)?;
+        let [class, subclass] = self.class;
+        write!(f, "{}{class:02x}:{subclass:02x}:", Self::PREFIX)?;
+        match self.prog_if {
+            Some(prog_if) => write!(f, "{prog_if:02x}")?,
+            None => f.write_str("*")?,
+        }
         match self.id {
             Some(id) => write!(f, "/{:04x}:{:04x}", id.vendor, id.device),
             None => Ok(()),
@@ -135,7 +160,9 @@ mod tests {
 
     #[test]
     fn a_matcher_writes_back_the_text_it_parsed() {
-        for text in ["pci:01:08:02/1b36:0010", "pci:0c:03:30", "pci:ff:00:00/1234:11e8", "pci:00:00:00"] {
+        for text in
+            ["pci:01:08:02/1b36:0010", "pci:0c:03:30", "pci:ff:00:00/1234:11e8", "pci:00:00:00", "pci:04:03:*", "pci:04:03:*/8086:a0c8"]
+        {
             let parsed = PciMatch::parse(text).unwrap_or_else(|| panic!("{text} did not parse"));
             assert_eq!(parsed.to_string(), text);
             assert_eq!(Entry::parse(text), Some(Entry::Pci(parsed)));
@@ -151,7 +178,7 @@ mod tests {
             "pci:1b36:0010", // a card without its class
             "pci:01:08", "pci:01:08:02:00", "pci:1:08:02", "pci:01:08:0A", "pci:01:08:02/",
             "pci:01:08:02/1B36:0010", "pci:01:08:02/1b36", "pci:01:08:02/1b36:0010/x", "pci:+1:08:02",
-            "pci:", "pci",
+            "pci:", "pci", "pci:04:03:**", "pci:04:*:*", "pci:04:03:*:00", "pci:04:03:",
             // The card is four lowercase hex digits each and nothing else: two
             // spellings would be two labels for one claim.
             "pci:02:00:00/1Af4:1041", "pci:02:00:00/1af4:41", "pci:02:00:00/1af4", "pci:02:00:00/1af4:1041:",
@@ -178,6 +205,17 @@ mod tests {
         assert!(any_nvme.matches(&function([0x01, 0x08, 0x02], 0x144d, 0xa808)));
     }
 
+    /// The T14's HD Audio controller reports programming interface 0x80 and
+    /// QEMU's 0x00: one matcher names both, and nothing outside the subclass.
+    #[test]
+    fn a_wildcard_interface_matches_every_interface_of_its_subclass() {
+        let hda = PciMatch::parse("pci:04:03:*").unwrap();
+        assert!(hda.matches(&function([0x04, 0x03, 0x80], 0x8086, 0xa0c8)));
+        assert!(hda.matches(&function([0x04, 0x03, 0x00], 0x8086, 0x293e)));
+        assert!(!hda.matches(&function([0x04, 0x01, 0x00], 0x1af4, 0x1059)));
+        assert!(!PciMatch::parse("pci:04:03:00").unwrap().matches(&function([0x04, 0x03, 0x80], 0x8086, 0xa0c8)));
+    }
+
     /// Whether two entries can name one device, decided from their text: the
     /// build refuses a manifest where they can.
     #[test]
@@ -188,6 +226,8 @@ mod tests {
             ("pci:01:08:02", "pci:01:08:02/1b36:0010"),
             ("pci:01:08:02/1b36:0010", "pci:01:08:02"),
             ("pci:0c:03:30", "pci:0c:03:30"),
+            ("pci:04:03:*", "pci:04:03:80"),
+            ("pci:04:03:00/8086:293e", "pci:04:03:*"),
             ("framebuffer", "framebuffer"),
             ("isa:0060,0064:1,12", "isa:0060,0064:1,12"),
             ("part:0FC63DAF-8483-4772-8E79-3D69D8477DE4", "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4"),
@@ -198,6 +238,7 @@ mod tests {
         let apart = [
             ("pci:01:08:02/1b36:0010", "pci:01:08:02/144d:a808"),
             ("pci:01:08:02", "pci:01:08:01"),
+            ("pci:04:03:*", "pci:04:01:00"),
             ("pci:01:08:02/1b36:0010", "pci:01:08:01/1b36:0010"),
             ("framebuffer", "keyboard"),
             ("pci:0c:03:30", "keyboard"),

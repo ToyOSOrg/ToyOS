@@ -330,7 +330,7 @@ mod tests {
     use super::*;
     use crate::fixture;
     use crate::path::find_output_path;
-    use toyos_mixer::DEVICE_RATES;
+    use toyos_sound_output::RATES as DEVICE_RATES;
 
     /// The bit this sequence never sets.
     const AMP_MUTE: u16 = AMP_SET_MUTE;
@@ -464,9 +464,9 @@ mod tests {
 
     /// The AMD bench's analog controller's codecs and the path chosen on them.
     fn amd_bench() -> (Vec<Codec>, OutputPath) {
-        let mut bench = fixture::amd_bench();
-        let (index, path) = crate::path::choose(&bench).unwrap();
-        (bench.swap_remove(index), path)
+        let codecs = fixture::amd_bench().swap_remove(1);
+        let path = crate::path::find_output_path(&codecs).unwrap();
+        (codecs, path)
     }
 
     #[test]
