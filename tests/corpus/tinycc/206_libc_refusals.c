@@ -1,6 +1,6 @@
 /* What libc refuses: each call answers failure in its own POSIX form, errno
    says why, and nothing is done: ENOSYS where ToyOS lacks the function, ECHILD
-   for a wait on the child libc cannot start, and the errno POSIX names for a
+   for a wait with no child to wait for, and the errno POSIX names for a
    lock, a limit or a mapping it cannot take, or memory it cannot give. */
 #include <errno.h>
 #include <fcntl.h>
@@ -174,8 +174,9 @@ int main(void) {
     said("realloc SIZE_MAX", got == NULL ? -1 : 0);
     free(block);
 
-    /* sysconf: -1 with errno untouched for a limit on what ToyOS lacks, and
-       EINVAL for a name it does not know. */
+    /* sysconf: what a spawn takes of argv and the environment, -1 with errno
+       untouched for a limit on what ToyOS lacks, and EINVAL for a name it
+       does not know. */
     said("sysconf _SC_ARG_MAX", sysconf(_SC_ARG_MAX));
     said("sysconf _SC_GETPW_R_SIZE_MAX", sysconf(_SC_GETPW_R_SIZE_MAX));
     said("sysconf 12345", sysconf(12345));
