@@ -13,12 +13,7 @@ pub mod usb_storage;
 pub mod virtio;
 pub mod virtio_console;
 pub mod gop;
-pub mod hda;
 pub mod panic_console;
 
 /// The pool every driver here allocates its DMA out of.
 pub use crate::mm::DmaPool;
-
-/// What an audio read and an audio poll wait on: one for both backends, since
-/// at most one binds and the claim's reader cannot know which.
-pub static AUDIO_WATCH: crate::watch::IrqWatch = crate::watch::IrqWatch::new();

@@ -125,31 +125,6 @@ pub fn find_output_path(codecs: &[Codec]) -> Result<OutputPath, PathError> {
     }))
 }
 
-/// Which of a machine's controllers carries its audio: the one whose codecs
-/// reach an output ([`find_output_path`]), with that output.
-///
-/// None, or several, is [`Unchosen`], carrying what each controller's walk
-/// found: choosing between two audible outputs is a default-device policy, and
-/// nothing here keeps one.
-pub fn choose(controllers: &[Vec<Codec>]) -> Result<(usize, OutputPath), Unchosen> {
-    let found: Vec<Result<OutputPath, PathError>> =
-        controllers.iter().map(|codecs| find_output_path(codecs)).collect();
-    if found.iter().filter(|walk| walk.is_ok()).count() != 1 {
-        return Err(Unchosen(found));
-    }
-    let (index, path) = found
-        .into_iter()
-        .enumerate()
-        .find_map(|(i, walk)| walk.ok().map(|path| (i, path)))
-        .expect("counted one");
-    Ok((index, path))
-}
-
-/// Every controller's walk, in the order [`choose`] was given them, where none
-/// or several reach an output.
-#[derive(Clone, PartialEq, Eq, Debug)]
-pub struct Unchosen(pub Vec<Result<OutputPath, PathError>>);
-
 /// `Err(None)` is a group with no wired output pin to try, which is not a
 /// fault — display audio is exactly that, and it is the ordinary case on a
 /// machine with two codecs.
@@ -296,51 +271,30 @@ mod tests {
         (codecs, display)
     }
 
+    /// Each of the AMD bench's controllers walked by a driver of its own: the
+    /// GPU's display audio reaches no output and the analog codec's speaker
+    /// does, so only the second driver offers soundserver an output. As the
+    /// recorded boot read it: `converter 0x02 -> pin 0x14 (speaker), headphone
+    /// 0x21`.
     #[test]
-    fn the_one_controller_of_the_laptop_is_chosen() {
-        let (index, path) = choose(&[fixture::laptop()]).unwrap();
-        assert_eq!(index, 0);
-        assert_eq!(path, find_output_path(&fixture::laptop()).unwrap());
-    }
-
-    #[test]
-    fn the_amd_bench_binds_its_analog_controller_over_the_gpu_s_display_audio() {
-        // As soundserver read it on the recorded boot: `hda bound 03:00.6, not
-        // 03:00.1`, `converter 0x02 -> pin 0x14 (speaker), headphone 0x21`.
-        let mut bench = fixture::amd_bench();
-        let (index, path) = choose(&bench).unwrap();
-        assert_eq!(index, 1);
+    fn of_the_amd_bench_s_two_controllers_only_the_analog_one_reaches_an_output() {
+        let bench = fixture::amd_bench();
+        assert!(matches!(find_output_path(&bench[0]), Err(PathError::NoOutputPin { .. })));
+        let path = find_output_path(&bench[1]).expect("the analog codec reaches its speaker");
         assert_eq!(path.converter, Node(0x02));
         assert_eq!(path.output.node, Node(0x14));
         assert_eq!(path.device, DefaultDevice::Speaker);
         assert_eq!(path.headphone.expect("the jack").node, Node(0x21));
-        assert!(matches!(find_output_path(&bench[0]), Err(PathError::NoOutputPin { .. })));
-
-        bench.reverse();
-        assert_eq!(choose(&bench).unwrap().0, 0);
     }
 
+    /// The laptop's display audio, alone on a controller as the GPU's is on
+    /// the AMD bench, names the codec that reached nothing.
     #[test]
-    fn two_controllers_that_each_reach_an_output_are_refused_naming_both() {
-        let Err(Unchosen(found)) = choose(&[fixture::laptop(), fixture::qemu()]) else {
-            panic!("two audible outputs were chosen between");
-        };
-        assert_eq!(found.len(), 2);
-        assert!(found.iter().all(Result::is_ok));
-    }
-
-    #[test]
-    fn controllers_none_of_which_reaches_an_output_are_refused_naming_both() {
+    fn display_audio_alone_reaches_no_output_and_names_its_codec() {
         let (_, display) = analog_and_display();
-        let Err(Unchosen(found)) = choose(&[display, fixture::synthetic_dead_end()]) else {
-            panic!("a controller with no output was chosen");
-        };
         assert_eq!(
-            found,
-            [
-                Err(PathError::NoOutputPin { codecs: alloc::vec![Address::new(2).unwrap()] }),
-                Err(PathError::NoConverter { pin: Node(0x20) }),
-            ]
+            find_output_path(&display),
+            Err(PathError::NoOutputPin { codecs: alloc::vec![Address::new(2).unwrap()] })
         );
     }
 

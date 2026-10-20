@@ -1,7 +1,6 @@
 pub(crate) mod exceptions;
 mod device_irq;
 mod dma_fault;
-mod hda;
 mod isa;
 mod kick;
 mod nmi;
@@ -57,9 +56,6 @@ impl core::fmt::Display for DriverIrq {
 
 /// The vector the xHCI controller's message-signalled interrupt carries.
 pub const XHCI_VECTOR: DriverIrq = DriverIrq(Vector::Xhci);
-
-/// The vector the HDA controller's message-signalled interrupt carries.
-pub const HDA_VECTOR: DriverIrq = DriverIrq(Vector::Hda);
 
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;
@@ -261,7 +257,6 @@ idt_vectors! {
         Timer        = 0x20, timer::timer_entry;
         Xhci         = 0x21, xhci::xhci_entry;
         DmaFault     = 0x25, dma_fault::dma_fault_entry;
-        Hda          = 0x26, hda::hda_entry;
         Isa0         = 0x2C, isa::isa0_entry;
         Isa1         = 0x2D, isa::isa1_entry;
         Kick         = 0xFC, kick::kick_entry;

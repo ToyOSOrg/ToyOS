@@ -9,12 +9,14 @@
 //! registers alone, as a [`PanicUart`], and bypasses them once they stay held.
 //! Nothing that holds a kernel lock formats here.
 
+use core::cell::Cell;
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::IrqGuard;
 use crate::log;
 use super::serial_lock::{BackendLock, Held, Seized};
 use crate::scheduler::Parkable;
 use crate::sleeplock::{Holder, SleepGuard, SleepLock};
+use crate::time::{Budget, Duration};
 
 use crate::arch::console_uart as uart;
 
@@ -127,8 +129,13 @@ pub fn try_read_byte() -> Option<u8> {
     g.try_read_byte()
 }
 
-/// ~1s of spin, long enough for a live guard holder to release and short enough not to hang panic.
-const PANIC_LOCK_SPIN_LIMIT: u64 = 100_000_000;
+/// How long, on the clock, a fatal path waits for another holder to let the
+/// console registers go: far past a burst's hold, and short of holding up a
+/// report behind a holder that will never let go.
+const PANIC_LOCK_WAIT: Budget = Budget::of(
+    Duration::from_secs(1),
+    "the fatal path says so and writes over the holder",
+);
 
 /// The console UART's registers for a fatal path, from [`panic_registers`].
 /// A `log!` under one before `klogd` runs may drain inline on this CPU, as a
@@ -163,10 +170,18 @@ const DRAINED_RAW: &[u8] =
 /// let them go, and had at once where this CPU's fatal path holds them.
 pub fn panic_registers() -> PanicUart {
     let irq = IrqGuard::close();
-    PanicUart(match BACKEND.seize(PANIC_LOCK_SPIN_LIMIT) {
-        Seized::Taken(held) => Hold::Held(BackendGuard { _held: held, _irq: irq, registers: Registers(()) }),
-        Seized::Reentered => Hold::Reentered(Over { registers: Registers(()), _irq: irq }),
-        Seized::Expired => {
+    let seized = Cell::new(None);
+    // Uncalibrated, this asks once: only the boot CPU runs, so a holder is beneath this frame and never lets go.
+    crate::clock::settles(PANIC_LOCK_WAIT.nanos(), || {
+        let answer = BACKEND.try_seize();
+        let answered = answer.is_some();
+        seized.set(answer);
+        answered
+    });
+    PanicUart(match seized.into_inner() {
+        Some(Seized::Taken(held)) => Hold::Held(BackendGuard { _held: held, _irq: irq, registers: Registers(()) }),
+        Some(Seized::Reentered) => Hold::Reentered(Over { registers: Registers(()), _irq: irq }),
+        None => {
             let mut over = Over { registers: Registers(()), _irq: irq };
             uart_write_bytes(&mut over.registers, WRITTEN_OVER);
             Hold::Expired(over)

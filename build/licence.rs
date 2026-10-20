@@ -600,12 +600,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT"),
     ),
     (
-        "assets/hello.rs",
-        "f30395cdbe2fff2c6ff6fe6dd270ded78a6b236ecfb598b9476cb71dc6cea214",
-        "ours: the smallest guest binary's source, built by tests/common/compile.rs",
-        Terms::Spdx("MIT OR Apache-2.0"),
-    ),
-    (
         "assets/soundfont.sf2",
         "89a13a5c907b5cc83c15679e07e6dcb06fd72102937e092dc4a582f1aa5905c3",
         "NOTICE",

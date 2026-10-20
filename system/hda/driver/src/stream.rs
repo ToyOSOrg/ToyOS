@@ -109,15 +109,16 @@ pub fn last_valid_index(periods: usize) -> Option<u8> {
     (MIN_PERIODS..=MAX_PERIODS).contains(&periods).then(|| (periods - 1) as u8)
 }
 
-/// Which periods have played since `last`, and where the engine is now.
+/// Which periods have played since `last`, and where the engine is now: one
+/// contiguous run of the ring, as `toyos-sound-output`'s `run` reads it.
 ///
 /// Derived from a position read and never from counting interrupts: one
 /// interrupt can cover several periods, and soundserver's mix loop already asserts
 /// that a completion never repeats a buffer it still holds.
 ///
 /// `position` is the device's own byte offset and is checked against the
-/// buffer rather than trusted: a read past the end is a device answer this
-/// cannot turn into an index, not a period to mark played.
+/// buffer rather than trusted ([`period_at`]): a read past the end is a device
+/// answer this cannot turn into an index, not a period to mark played.
 ///
 /// A caller that sleeps through the whole ring sees the position where it left
 /// it and is told nothing completed. That aliasing is why the buffer is zeroed
@@ -129,14 +130,10 @@ pub fn completed(
     period_bytes: u32,
     periods: usize,
 ) -> Option<(u32, usize)> {
-    if !(MIN_PERIODS..=MAX_PERIODS).contains(&periods) || period_bytes == 0 || last >= periods {
+    if last >= periods {
         return None;
     }
-    let total = period_bytes as u64 * periods as u64;
-    if position as u64 >= total {
-        return None;
-    }
-    let current = (position / period_bytes) as usize;
+    let current = period_at(position, period_bytes, periods)?;
     let mut mask = 0u32;
     let mut index = last;
     while index != current {
@@ -146,48 +143,28 @@ pub fn completed(
     Some((mask, current))
 }
 
-/// What a driver's accumulated completion mask says about the engine.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Completed {
-    /// The engine handed back `count` periods starting at `first`, and is in
-    /// `first + count` now.
-    Run { first: usize, count: usize },
-    /// Every period in the ring. The engine has been round at least once since
-    /// the driver last looked, so nothing in the mask says where it is — the
-    /// aliasing [`completed`] documents, arriving one level up, where it means
-    /// the whole pipeline has played out.
-    Lapped,
-}
-
-/// Read an accumulated completion mask.
+/// The period a link position is in, or `None` for one outside the buffer.
 ///
-/// A mask is a set and the engine is a sequence, so the set alone has to say
-/// which period the engine returns to *first* — and that is the mask's
-/// lowest-numbered bit only while the run does not wrap the ring. `{6, 7, 0,
-/// 1}` is played 6, 7, 0, 1, and a driver filling it lowest-index-first writes
-/// the later audio into the buffer the engine reaches soonest.
-///
-/// It is always one contiguous run, because a driver reading late sees the OR
-/// of consecutive [`completed`] calls and those abut. `None` for anything else:
-/// no sequence of them can produce it, so it is a bug on the side that built it
-/// rather than a position to act on.
-pub fn decode(mask: u32, periods: usize) -> Option<Completed> {
-    if !(MIN_PERIODS..=MAX_PERIODS).contains(&periods) || mask >> periods != 0 {
+/// §3.3.37 has `SDnLPIB` count up to the cyclic length *inclusive*, so the
+/// length itself is the wrap: the engine has played the last period and is at
+/// the first.
+pub fn period_at(position: u32, period_bytes: u32, periods: usize) -> Option<usize> {
+    if !(MIN_PERIODS..=MAX_PERIODS).contains(&periods) || period_bytes == 0 {
         return None;
     }
-    let count = mask.count_ones() as usize;
-    if count == periods {
-        return Some(Completed::Lapped);
+    let total = period_bytes as u64 * periods as u64;
+    match position as u64 {
+        at if at < total => Some((at / period_bytes as u64) as usize),
+        at if at == total => Some(0),
+        _ => None,
     }
-    let first = (0..periods)
-        .find(|&i| mask & 1 << i != 0 && mask & 1 << ((i + periods - 1) % periods) == 0)?;
-    ((0..count).fold(0u32, |run, i| run | 1 << ((first + i) % periods)) == mask)
-        .then_some(Completed::Run { first, count })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The reader's half: what soundserver makes of the masks this file builds.
+    use toyos_sound_output::{run, Run};
 
     /// The rate half of the field for every rate HDA 1.0a Table 53 names
     /// beside a BASE, MULT and DIV, each word written out from that table's
@@ -334,19 +311,22 @@ mod tests {
     fn a_position_past_the_buffer_is_not_an_index() {
         // The device's own number, and one that cannot be turned into a
         // period: masking it to fit would mark a buffer played that was not.
-        assert_eq!(completed(0, 4096, 512, 8), None);
+        assert_eq!(completed(0, 4097, 512, 8), None);
         assert_eq!(completed(0, u32::MAX, 512, 8), None);
+    }
+
+    #[test]
+    fn a_position_at_the_cyclic_length_is_the_wrap() {
+        // §3.3.37: LPIB counts to CBL inclusive. Was at 6, now at 4096: 6 and
+        // 7 have played and the engine is at 0.
+        assert_eq!(completed(6, 4096, 512, 8), Some((0b1100_0000, 0)));
+        assert_eq!(period_at(4096, 512, 8), Some(0));
+        assert_eq!(period_at(4095, 512, 8), Some(7));
     }
 
     #[test]
     fn a_last_index_outside_the_ring_is_refused() {
         assert_eq!(completed(8, 0, 512, 8), None);
-    }
-
-    #[test]
-    fn a_mask_names_the_period_the_engine_returns_to_first() {
-        assert_eq!(decode(0b0011_1000, 8), Some(Completed::Run { first: 3, count: 3 }));
-        assert_eq!(decode(0b0000_0001, 8), Some(Completed::Run { first: 0, count: 1 }));
     }
 
     #[test]
@@ -357,18 +337,18 @@ mod tests {
         // buffers the engine reaches soonest, which is a splice with no silence
         // in it for a gap detector to see.
         let (mask, _) = completed(6, 2 * 512, 512, 8).unwrap();
-        assert_eq!(decode(mask, 8), Some(Completed::Run { first: 6, count: 4 }));
+        assert_eq!(run(mask, 8), Some(Run::Of { first: 6, count: 4 }));
         assert_ne!(mask.trailing_zeros(), 6);
     }
 
     #[test]
     fn every_position_completed_can_report_reads_back_as_the_run_it_walked() {
         for last in 0..8usize {
-            for position in 0..8 * 512u32 {
+            for position in 0..=8 * 512u32 {
                 let (mask, _) = completed(last, position, 512, 8).unwrap();
                 let count = mask.count_ones() as usize;
-                let want = (count > 0).then_some(Completed::Run { first: last, count });
-                assert_eq!(decode(mask, 8), want.or(decode(0, 8)), "last={last} pos={position}");
+                let want = (count > 0).then_some(Run::Of { first: last, count });
+                assert_eq!(run(mask, 8), want, "last={last} pos={position}");
             }
         }
     }
@@ -382,16 +362,6 @@ mod tests {
             mask |= completed(last, ((last as u32 + 1) % 8) * 512, 512, 8).unwrap().0;
         }
         assert_eq!(mask, 0xFF);
-        assert_eq!(decode(mask, 8), Some(Completed::Lapped));
-    }
-
-    #[test]
-    fn a_mask_that_is_not_one_run_is_refused_rather_than_placed() {
-        // Two disjoint runs: no walk of the ring produces it, so it is a bug on
-        // the side that built the mask and not a position to fill from.
-        assert_eq!(decode(0b0010_0101, 8), None);
-        // A bit outside the ring.
-        assert_eq!(decode(1 << 8, 8), None);
-        assert_eq!(decode(1, 1), None);
+        assert_eq!(run(mask, 8), Some(Run::Lapped));
     }
 }

@@ -1,16 +1,17 @@
-//! The device half of the mix loop, and the two devices behind it.
+//! The device half of the mix loop, and the two devices behind it: the
+//! virtio-sound function soundserver drives itself, and an output driver's
+//! ring (`crate::output`).
 //!
-//! Everything that differs between virtio-sound and HDA is a method below. The
+//! Everything that differs between them is a method below. The
 //! mixer, the ramps, the DLL, the underrun accounting and the suspend/resume
 //! structure are one body of code either way — and [`Pipeline`] exists to keep
 //! that honest, because the two differ in *who owns a period soundserver has not
 //! refilled* and nothing else in the loop can be written without knowing which.
 
 use toyos::AsHandle;
-use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
-use crate::{hda, virtio};
+use crate::virtio;
 
 /// Who owns a period soundserver has been given back and has not refilled.
 ///
@@ -27,7 +28,7 @@ pub(crate) enum Pipeline {
     /// does not have. Holding one costs nothing, indefinitely, and the play
     /// order is the submit order.
     Queue,
-    /// HDA: the engine owns every period for as long as it runs. It returns to
+    /// An output driver's (HDA's) ring: the engine owns every period for as long as it runs. It returns to
     /// buffer `i` exactly `num_buffers` periods after completing it and plays
     /// whatever is there, so a period soundserver holds back is played as the
     /// silence `released` left in it *and* completed a second time — a
@@ -43,17 +44,19 @@ pub(crate) struct Completion {
     /// When the device's first word about these periods landed: where a
     /// wake's lateness is split between the device and soundserver.
     pub(crate) first_nanos: u64,
-    /// When its newest landed, which the DLL takes as the last period's.
+    /// When its newest landed: the time of the last of the first `clocked`
+    /// periods, in play order.
     pub(crate) last_nanos: u64,
+    /// How many of these periods `last_nanos` answers for. The rest completed
+    /// after the message it is the time of, and a later record clocks them.
+    pub(crate) clocked: u32,
 }
 
 /// The device half of the mix loop.
 ///
-/// Two implementations and no more: a framework before there are three is an
-/// abstraction with no evidence behind it. Both are drivers in this process
-/// now, and what differs between the two devices is exactly the methods below;
-/// the mixer, the ramps, the DLL, the underrun accounting and the
-/// suspend/resume structure are one body of code either way.
+/// Two implementations and no more: what differs between the two devices is
+/// exactly the methods below; the mixer, the ramps, the DLL, the underrun
+/// accounting and the suspend/resume structure are one body of code either way.
 pub(crate) trait Backend {
     /// Who owns a freed period soundserver does not refill.
     fn pipeline(&self) -> Pipeline;
@@ -86,6 +89,13 @@ pub(crate) trait Backend {
 
     /// Stop the stream. Idempotent, and cheap when it is already stopped.
     fn stop(&mut self);
+
+    /// Why the device is no longer played to, once it is not: an output
+    /// driver that hung up or broke its protocol, which ends the device loop
+    /// and never soundserver.
+    fn ended(&self) -> Option<&str> {
+        None
+    }
 }
 
 pub(crate) struct VirtioBackend {
@@ -117,51 +127,5 @@ impl Backend for VirtioBackend {
 
     fn stop(&mut self) {
         self.virtio.stop();
-    }
-}
-
-pub(crate) struct HdaBackend {
-    pub(crate) hda: hda::Hda,
-    pub(crate) buffers: Vec<*mut u8>,
-    pub(crate) period_bytes: usize,
-}
-
-impl Backend for HdaBackend {
-    fn pipeline(&self) -> Pipeline {
-        Pipeline::Ring
-    }
-
-    fn handle(&self) -> RawHandle {
-        self.hda.dev().as_handle()
-    }
-
-    fn buffer(&self, idx: usize) -> *mut u8 {
-        self.buffers[idx]
-    }
-
-    /// The kernel's record has one time, the newest interrupt's, and it is
-    /// both of the completion's.
-    fn completion(&mut self) -> Option<Completion> {
-        match self.hda.dev().completions() {
-            Ok(record) => Some(Completion {
-                mask: record.mask,
-                first_nanos: record.timestamp_nanos,
-                last_nanos: record.timestamp_nanos,
-            }),
-            Err(syscall::SyscallError::WouldBlock) => None,
-            Err(e) => panic!("soundserver: hda completions failed: {e:?}"),
-        }
-    }
-
-    fn released(&mut self, idx: usize) {
-        unsafe { core::ptr::write_bytes(self.buffers[idx], 0, self.period_bytes) };
-    }
-
-    fn submit(&mut self, _idx: usize, _bytes: usize) {
-        self.hda.start();
-    }
-
-    fn stop(&mut self) {
-        self.hda.stop();
     }
 }

@@ -260,14 +260,13 @@ pub enum Request {
 
 impl Request {
     pub fn decode(msg_type: u32, payload: &[u8]) -> Option<Self> {
-        let exactly = |len: usize| payload.len() == len;
         match msg_type {
             MSG_GET if payload.is_empty() => Some(Self::Get),
-            MSG_SET_MODE if exactly(size_of::<ModeRequest>()) => {
+            MSG_SET_MODE => {
                 let req: ModeRequest = ipc::decode_payload(payload).ok()?;
                 Some(Self::SetMode { width: req.width, height: req.height })
             }
-            MSG_SET_SCALE if exactly(size_of::<ScaleRequest>()) => {
+            MSG_SET_SCALE => {
                 let req: ScaleRequest = ipc::decode_payload(payload).ok()?;
                 Setting::from_wire(req.scale).map(Self::SetScale)
             }
