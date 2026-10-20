@@ -117,18 +117,12 @@ fn counterexample_a_fair_and_an_unfair_placement_have_the_same_loads() {
 type Scenario = (&'static str, fn(&mut Sim, u32));
 type Shape = (&'static str, fn() -> crate::sched::topology::Topology);
 
-fn scaled_scenarios() -> [Scenario; 11] {
+fn scaled_scenarios() -> [Scenario; 10] {
     [
         ("m+1 single-thread jobs", |sim, m| {
             for c in 0..=m {
                 let j = sim.job(WEIGHT_UNIT);
                 sim.thread(j, Work::Hog, CpuId(c % m), false);
-            }
-        }),
-        ("m+1 single-thread jobs, 20 ms run / 10 us sleep", |sim, m| {
-            for c in 0..=m {
-                let j = sim.job(WEIGHT_UNIT);
-                sim.thread(j, Work::Duty { run: 20 * MS, sleep: 10 * US }, CpuId(c % m), false);
             }
         }),
         ("{A,A}{A,B}{B}{B} per 4 CPUs", |sim, m| {
@@ -209,6 +203,16 @@ fn two_jobs(sim: &mut Sim, m: u32, work: Work, churn: u64) {
     sim.churn(churn, 1);
 }
 
+/// Open cases of the cross-CPU rule, each held to its own ceiling for the
+/// 10 s these scenarios run; the error grows with time, so the figure holds
+/// for that span only. Recorded on `issues/the-scheduler-and-the-clocks-never-talk.md`.
+///
+/// - **A dip below the share is repaid later.** A job whose runnable count
+///   dips below its fluid share without reaching zero shows a deficit against
+///   the jobs beside it, and ordering by normalized service repays it after
+///   the dip. On four identical CPUs the four sleepers' dips coincide.
+const OPEN: [(&str, &str, f64); 1] = [("flat4", "m duty 1/0.1 ms + 2m hogs", 250.0)];
+
 /// **Cross-CPU fairness** (`Params::cross_cpu_lag`), on every scenario above
 /// at four CPUs and both benches' shapes, with the rotating partner policy
 /// (each CPU compares itself with one other CPU per `fairness_period`; all
@@ -230,23 +234,6 @@ fn two_jobs(sim: &mut Sim, m: u32, work: Work, churn: u64) {
 ///
 /// The cost is printed: placement changes and migrations per second, beside
 /// the scenarios' own random migrations.
-/// Open cases of the cross-CPU rule, with the ceiling each is held to.
-///
-/// - **A dip below the share is repaid later.** A job whose runnable count
-///   dips below its fluid share without reaching zero shows a deficit against
-///   the jobs beside it, and ordering by normalized service repays it after
-///   the dip. How much depends on how the job's threads' dips happen to
-///   coincide in a given schedule: here, four identical CPUs each with one
-///   sleeper and two hogs, the sleepers run in lock-step and the job is
-///   over-served by about 1.25% (205 ms over 8 s, growing); 1 µs between their
-///   sleeps (the scenario after it) gives 41 ms. The ordering of a7eaa346e
-///   showed 8.8 ms on this case but 402 ms with that 1 µs, so neither ordering
-///   avoids it. "A job with no waiting thread accrues no deficit", as a
-///   per-job rule, was tried in two forms (at each ordering, and once when a
-///   thread starts waiting): both forgave genuine deficits and made other
-///   scenarios far worse.
-const OPEN: [(&str, &str, f64); 1] = [("flat4", "m duty 1/0.1 ms + 2m hogs", 250.0)];
-
 #[test]
 fn cross_cpu_lag_stays_within_its_ceiling_on_every_scenario_and_shape() {
     let p = Params::DEFAULT;

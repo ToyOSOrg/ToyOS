@@ -79,11 +79,11 @@ pub struct Params {
     /// CPU time from the first to the second.
     pub move_lead: u64,
     /// The most normalized service a job may trail another on the same CPU
-    /// by: the cross-CPU counterpart of `lag_bound`. It is also a latency
-    /// cost: a job that far behind holds the CPU ahead of the jobs beside it
-    /// until it catches up — up to 64 ms per unit of their weight, about four
-    /// 60 Hz frames for an interactive thread, where EEVDF alone allows one
-    /// request.
+    /// by: the cross-CPU counterpart of `lag_bound`. Ordering by service bounds
+    /// each job's share, not each thread's wait: a thread of a job served
+    /// elsewhere, beside a job behind it, waits until that gap closes, and the
+    /// gap need not close while its job keeps being served on other CPUs. Only
+    /// placement then bounds the thread's wait — a latency request included.
     pub lead_cap: u64,
 }
 

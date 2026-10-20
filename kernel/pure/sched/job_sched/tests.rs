@@ -594,3 +594,34 @@ fn a_new_job_is_floored_when_it_first_meets_another() {
     s.schedule(cpu(0), now);
     assert!(s.served(hog).wrapping_sub(s.served(late)) as i64 <= P.lag_bound as i64);
 }
+
+/// Ordering by service is job-fair, not thread-fair: a thread of a job that
+/// is served elsewhere waits beside a job behind it until placement moves it.
+/// B has one thread on CPU 0; H has h0 beside it and h1 alone on CPU 1. The
+/// fluid share gives B all of CPU 0, and with no migration h0 gets almost
+/// nothing for a second — no slice and no `lead_cap` bounds its wait.
+#[test]
+fn a_thread_of_a_job_served_elsewhere_waits_until_placement_moves_it() {
+    let mut s = machine(2);
+    let b = s.create_job(WEIGHT_UNIT);
+    let h = s.create_job(WEIGHT_UNIT);
+    let tb = s.spawn(b);
+    let (h0, h1) = (s.spawn(h), s.spawn(h));
+    s.wake(tb, cpu(0), Nanos::ZERO);
+    s.wake(h0, cpu(0), Nanos::ZERO);
+    s.wake(h1, cpu(1), Nanos::ZERO);
+    let mut now = Nanos::ZERO;
+    while now < Nanos(1000 * MS) {
+        for c in 0..2 {
+            s.schedule(cpu(c), now);
+        }
+        let next = (0..2).filter_map(|c| s.next_decision(cpu(c))).min().unwrap().min(Nanos(1000 * MS));
+        now = next;
+        for c in 0..2 {
+            s.charge(cpu(c), now);
+        }
+    }
+    let (got, _) = s.service(h0);
+    assert!(got <= 2 * P.lag_bound, "h0 ran {} ms of the second", got / MS);
+    assert!(s.service(tb).0 >= 1000 * MS - 2 * P.lag_bound);
+}
