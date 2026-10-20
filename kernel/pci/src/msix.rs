@@ -98,6 +98,11 @@ impl Msix {
         self.bir
     }
 
+    /// How far into its BAR the table starts.
+    pub fn offset(&self) -> u64 {
+        u64::from(self.offset)
+    }
+
     /// Where the table starts, given the base address the named BAR holds.
     /// Which entry inside it a caller programs is the caller's.
     pub fn table_address(&self, bar_base: u64) -> Result<u64, Unusable> {
@@ -118,12 +123,6 @@ impl Msix {
     /// function-wide mask cleared.
     pub fn enabled(message_control: u16) -> u16 {
         (message_control | ENABLE) & !FUNCTION_MASK
-    }
-
-    /// The same register with the function's messages off and the function-wide
-    /// mask set, for a hand-over that armed a vector and was then refused.
-    pub fn disabled(message_control: u16) -> u16 {
-        (message_control | FUNCTION_MASK) & !ENABLE
     }
 }
 
@@ -192,15 +191,6 @@ mod tests {
         let ctrl = FUNCTION_MASK | 0x0003;
         assert_eq!(Msix::enabled(ctrl), ENABLE | 0x0003);
         assert_eq!(Msix::enabled(0x0003), ENABLE | 0x0003);
-    }
-
-    /// A refused hand-over puts the register back further than it found it:
-    /// masked as well as disabled, so a function whose messages were already on
-    /// when this kernel met it cannot deliver one at a vector nothing owns.
-    #[test]
-    fn disabling_masks_as_well_and_keeps_the_size() {
-        assert_eq!(Msix::disabled(Msix::enabled(0x0003)), FUNCTION_MASK | 0x0003);
-        assert_eq!(Msix::disabled(0x0003), FUNCTION_MASK | 0x0003);
     }
 
     #[test]

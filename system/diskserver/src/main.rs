@@ -28,10 +28,6 @@
 //! (`--claim-refused <name>`), and a listing and every open are refused
 //! `ClaimRefused`, so a file server says so rather than finding no disk.
 //!
-//! **The partition the machine runs from is refused to every session**: its
-//! starter names it (`--running <guid>`, the ROOT the loader read), because a
-//! writer there changes the image under the kernel that booted from it.
-//!
 //! **A connection reaches what its grant says** ([`wire::Grant`]): the badge
 //! the supervisor minted its connector with on this service's port, which the
 //! kernel stamps on it and answers this acceptor alone. A listing names the
@@ -80,10 +76,6 @@ const MAX_SESSIONS: usize = 8;
 /// Connections accepted and not yet opened, and how long one may stay so.
 const MAX_PENDING: usize = 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Argv, followed by a unique GUID: the partition the machine runs from, which
-/// no session opens.
-const RUNNING: &str = "--running";
 
 /// Argv, followed by a device name of this service's row: on this machine, and
 /// its claim refused.
@@ -195,14 +187,8 @@ fn listed(parts: Result<&[Part], Refusal>, grant: Option<Grant>) -> Result<Vec<u
 /// Where an open of `guid` through `grant` is served, before anything is
 /// held for it; or its refusal. **The grant is asked first**, so a
 /// connection learns nothing of a partition it does not reach, not even
-/// whether the table carries it; then the drive, then the table, then the
-/// partition the machine runs from.
-fn admitted(
-    parts: Result<&[Part], Refusal>,
-    running: Option<[u8; 16]>,
-    guid: [u8; 16],
-    grant: Option<Grant>,
-) -> Result<(u64, u64), Refusal> {
+/// whether the table carries it; then the drive, then the table.
+fn admitted(parts: Result<&[Part], Refusal>, guid: [u8; 16], grant: Option<Grant>) -> Result<(u64, u64), Refusal> {
     let grant = grant.ok_or(Refusal::NotGranted)?;
     let part = parts?.iter().find(|p| p.unique == guid && guid != [0; 16]);
     // A partition the table does not carry has no type: only a unique grant
@@ -210,15 +196,11 @@ fn admitted(
     if !grant.admits(guid, part.map_or([0; 16], |p| p.kind)) {
         return Err(Refusal::NotGranted);
     }
-    let span = match part.map(|p| &p.span) {
-        None => return Err(Refusal::NotFound),
-        Some(Err(_)) => return Err(Refusal::Unusable),
-        Some(Ok(span)) => *span,
-    };
-    if running == Some(guid) {
-        return Err(Refusal::Held);
+    match part.map(|p| &p.span) {
+        None => Err(Refusal::NotFound),
+        Some(Err(_)) => Err(Refusal::Unusable),
+        Some(Ok(span)) => Ok(*span),
     }
-    Ok(span)
 }
 
 /// A connection that has not opened a session yet.
@@ -299,10 +281,6 @@ struct Service {
     losses: u64,
     sessions: BTreeMap<u64, Served>,
     next_id: u64,
-    /// The partition the machine is running from, as the loader named it:
-    /// refused to every session, since a writer there changes the image
-    /// under the kernel that booted from it.
-    running: Option<[u8; 16]>,
 }
 
 /// A session decided on and not yet told to its client.
@@ -315,8 +293,8 @@ struct Opening {
 }
 
 impl Service {
-    fn new(ctrl: Drive, running: Option<[u8; 16]>) -> Self {
-        Self { ctrl, holds: Holds::new(), losses: 0, sessions: BTreeMap::new(), next_id: 0, running }
+    fn new(ctrl: Drive) -> Self {
+        Self { ctrl, holds: Holds::new(), losses: 0, sessions: BTreeMap::new(), next_id: 0 }
     }
 
     /// What a listing through `grant` answers: every partition of the table
@@ -334,7 +312,7 @@ impl Service {
     /// a holder that is gone — only for one whose commands are still on the
     /// device.
     fn place(&mut self, guid: [u8; 16], grant: Option<Grant>) -> Result<(u64, u64), Refusal> {
-        let (first, blocks) = admitted(self.ctrl.parts(), self.running, guid, grant)?;
+        let (first, blocks) = admitted(self.ctrl.parts(), guid, grant)?;
         let ids: Vec<u64> = self.sessions.keys().copied().collect();
         for id in ids {
             self.hear(id);
@@ -582,12 +560,6 @@ fn claim() -> Option<toyos::PciDev> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let running = args.iter().position(|a| a == RUNNING).map(|at| {
-        args.get(at + 1)
-            .and_then(|text| PartGuid::parse(text))
-            .map(|guid| guid.0)
-            .unwrap_or_else(|| panic!("diskserver: {RUNNING} takes the running ROOT's unique GUID"))
-    });
     let refused = args.iter().position(|a| a == CLAIM_REFUSED).map(|at| {
         args.get(at + 1).unwrap_or_else(|| panic!("diskserver: {CLAIM_REFUSED} takes the device its claim was refused on"))
     });
@@ -597,17 +569,17 @@ fn main() {
             "diskserver: NOT SERVING — {name} is on this machine and the kernel refused this service its \
              claim; every partition on it is refused"
         );
-        serve(&mut Service::new(Drive::ClaimRefused, running), &acceptor);
+        serve(&mut Service::new(Drive::ClaimRefused), &acceptor);
     }
     let Some(dev) = claim() else {
         println!("diskserver: no NVMe controller this row names is on this machine; serving no partition");
-        serve(&mut Service::new(Drive::Absent, running), &acceptor);
+        serve(&mut Service::new(Drive::Absent), &acceptor);
     };
     let mut ctrl = match Controller::open(dev) {
         Ok(ctrl) => ctrl,
         Err(why) => {
             println!("diskserver: NOT SERVING — {why}; serving no partition");
-            serve(&mut Service::new(Drive::Unusable, running), &acceptor);
+            serve(&mut Service::new(Drive::Unusable), &acceptor);
         }
     };
     println!(
@@ -622,17 +594,13 @@ fn main() {
     let parts = read_table(&mut ctrl);
     for part in &parts {
         match &part.span {
-            Ok(_) if running == Some(part.unique) => println!(
-                "diskserver: partition {} is the ROOT this machine runs from; refusing every session to it",
-                guid_text(part.unique)
-            ),
             Ok((first, blocks)) => {
                 println!("diskserver: partition {} at block {first}, {blocks} blocks", guid_text(part.unique))
             }
             Err(why) => println!("diskserver: partition {} is not served: {why}", guid_text(part.unique)),
         }
     }
-    serve(&mut Service::new(Drive::Up(ctrl, parts), running), &acceptor);
+    serve(&mut Service::new(Drive::Up(ctrl, parts)), &acceptor);
 }
 
 fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
@@ -795,13 +763,13 @@ mod tests {
     fn an_unusable_or_unclaimed_controller_is_refused_and_an_absent_one_lists_nothing() {
         let guid = [7; 16];
         let grant = Some(Grant { scope: Scope::Unique(guid), writes: true });
-        let mut unusable = Service::new(Drive::Unusable, None);
+        let mut unusable = Service::new(Drive::Unusable);
         assert_eq!(unusable.listing(grant), Err(Refusal::Unusable));
         assert_eq!(unusable.place(guid, grant), Err(Refusal::Unusable));
-        let mut unclaimed = Service::new(Drive::ClaimRefused, None);
+        let mut unclaimed = Service::new(Drive::ClaimRefused);
         assert_eq!(unclaimed.listing(grant), Err(Refusal::ClaimRefused));
         assert_eq!(unclaimed.place(guid, grant), Err(Refusal::ClaimRefused));
-        let mut absent = Service::new(Drive::Absent, None);
+        let mut absent = Service::new(Drive::Absent);
         assert_eq!(absent.listing(grant), Ok(Vec::new()));
         assert_eq!(absent.place(guid, grant), Err(Refusal::NotFound));
         for mut service in [unusable, unclaimed, absent] {
@@ -833,24 +801,21 @@ mod tests {
 
     /// A unique grant opens its one partition and is refused every other of
     /// the same table by name, as is a connection with no grant; a kind grant
-    /// opens every partition of its type and no other; and the partition the
-    /// machine runs from is held whatever reaches it.
+    /// opens every partition of its type and no other.
     #[test]
     fn an_open_reaches_only_what_its_grant_admits() {
         let parts = table();
-        assert_eq!(admitted(Ok(&parts), None, LOG, unique(LOG)), Ok((0, 100)));
+        assert_eq!(admitted(Ok(&parts), LOG, unique(LOG)), Ok((0, 100)));
         for other in [BOOT, DATA, ROOT] {
-            assert_eq!(admitted(Ok(&parts), None, other, unique(LOG)), Err(Refusal::NotGranted));
-            assert_eq!(admitted(Ok(&parts), None, other, None), Err(Refusal::NotGranted));
+            assert_eq!(admitted(Ok(&parts), other, unique(LOG)), Err(Refusal::NotGranted));
+            assert_eq!(admitted(Ok(&parts), other, None), Err(Refusal::NotGranted));
         }
         let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: true });
-        assert_eq!(admitted(Ok(&parts), None, DATA, data), Ok((200, 100)));
-        assert_eq!(admitted(Ok(&parts), None, LOG, data), Err(Refusal::NotGranted));
+        assert_eq!(admitted(Ok(&parts), DATA, data), Ok((200, 100)));
+        assert_eq!(admitted(Ok(&parts), LOG, data), Err(Refusal::NotGranted));
         // Nothing of a GUID the table does not carry, but to the grant that names it.
-        assert_eq!(admitted(Ok(&parts), None, [9; 16], data), Err(Refusal::NotGranted));
-        assert_eq!(admitted(Ok(&parts), None, [9; 16], unique([9; 16])), Err(Refusal::NotFound));
-        assert_eq!(admitted(Ok(&parts), Some(ROOT), ROOT, unique(ROOT)), Err(Refusal::Held));
-        assert_eq!(admitted(Ok(&parts), Some(ROOT), ROOT, unique(LOG)), Err(Refusal::NotGranted));
+        assert_eq!(admitted(Ok(&parts), [9; 16], data), Err(Refusal::NotGranted));
+        assert_eq!(admitted(Ok(&parts), [9; 16], unique([9; 16])), Err(Refusal::NotFound));
     }
 
     /// A listing names exactly what its grant admits, and nothing to a

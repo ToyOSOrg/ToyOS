@@ -141,6 +141,10 @@ pub struct KernelArgs {
     /// holds none for the CPU, or the CPU's architecture loads none.
     pub microcode_addr: u64,
     pub microcode_len: u64,
+    /// The unique GUID of the booted slot's volume, the partition the loader
+    /// read the kernel and its parameter from, raw as in the GPT entry like
+    /// [`Self::root_partition_guid`]; zero with no image.
+    pub slot_volume_guid: [u8; 16],
 }
 
 /// The bytes of [`KernelArgs::gop_edid`]: one EDID base block.
@@ -273,7 +277,8 @@ const _: () = {
     assert!(offset_of!(KernelArgs, gop_edid_len) == 1464);
     assert!(offset_of!(KernelArgs, microcode_addr) == 1472);
     assert!(offset_of!(KernelArgs, microcode_len) == 1480);
-    assert!(size_of::<KernelArgs>() == 1488);
+    assert!(offset_of!(KernelArgs, slot_volume_guid) == 1488);
+    assert!(size_of::<KernelArgs>() == 1504);
     assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
@@ -377,6 +382,7 @@ mod tests {
         gop_edid_len: 0,
         microcode_addr: 0,
         microcode_len: 0,
+        slot_volume_guid: [0; 16],
     };
 
     #[test]

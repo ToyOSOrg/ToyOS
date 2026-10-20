@@ -17,8 +17,9 @@ Refusals of `kernel/src/pcidev/mod.rs` that no test reaches:
   drivers bound;
 - `ClaimError::Exhausted`, a claim past the vectors, remapping entries or
   LPIs a machine has;
-- every window refusal — `Refusal::NoWindow`, `BarUnsizable`, `BarUnplaceable`,
-  `BarResized` and `Dead`;
+- every BAR refusal — `Refusal::BarUnsizable`, `BarMoved`, `NoMappableBar`
+  and the withholding `BarPages`, whose rule `toyos_pci::pages` tests on the
+  host;
 - every bound `SYS_DEVICE_BAR_MAP` and `SYS_DEVICE_DMA_ALLOC` check, which is
   `bar_object`'s index and zero-length bounds and `dma_alloc`'s
   `MAX_GRANT_BYTES` and `MAX_GRANT_TOTAL`;

@@ -6,8 +6,8 @@ opened: 2026-09-27
 
 # libc reads a `long double` argument as a `double`
 
-`sdk/libc/src/printf.rs` takes `%Lf`'s `L` and then reads a `double`
-(`let _ = long_double; // our long double == double`). On x86-64 a C `long
+`sdk/libc/src/conversion.rs` steps over `%Lf`'s `L`, and `sdk/libc/src/printf.rs`
+then reads a `double`. On x86-64 a C `long
 double` is the 80-bit x87 type, 16 bytes, passed in memory; a `double` is read
 out of the SSE registers. So `printf("%Lf", x)` prints whatever the registers
 hold — 0.000000 where the call's `double`s filled them.

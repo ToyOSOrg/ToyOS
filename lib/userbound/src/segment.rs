@@ -346,7 +346,9 @@ mod tests {
         assert_eq!(segs, [Segment { phys: PBASE + start, len }]);
     }
 
-    /// A 2 MiB leaf, or a split window over one frame, is every page in order.
+    /// A 2 MiB leaf, a split window over one frame, or a BAR's 4 KiB leaves is
+    /// every page in order: a typed value straddling two of its pages is one
+    /// run, which is all `object_run`'s one-segment store holds.
     #[test]
     fn frames_in_order_are_one_segment() {
         for grain in GRAINS {
