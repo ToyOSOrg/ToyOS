@@ -443,3 +443,36 @@ fn the_fallback_gives_a_spinner_its_jobs_share_of_the_remainder() {
     assert!(sim.ordinary_floor(20) + 2 * p.slice >= ordinary_part);
     assert_eq!(sim.ordinary_floor(1), 0, "the finding this test records no longer holds");
 }
+
+/// **Counterexample for the owner-level abuse rule.** The runaway record
+/// counts realtime execution per thread since it last blocked, so a spinner
+/// that blocks for 1 µs every 40 ms, or a client whose worker is replaced by
+/// a fresh granted thread every 40 ms (a stream reopened on a new thread), is
+/// never a runaway: each takes the whole allowance of its CPU indefinitely.
+/// The per-CPU ceiling still bounds it; the owner-level contract does not.
+#[test]
+fn counterexample_runaway_detection_misses_brief_blocks_and_replaced_threads() {
+    let p = Params::DEFAULT;
+    for replace in [false, true] {
+        let mut sim = Sim::new(flat(1), p);
+        let o = sim.job(WEIGHT_UNIT);
+        sim.thread(o, Work::Hog, CpuId(0), true);
+        let m = sim.job(WEIGHT_UNIT);
+        let work = if replace { Work::Hog } else { Work::Duty { run: 40 * MS, sleep: US } };
+        let mut w = sim.thread(m, work, CpuId(0), true);
+        sim.grant(w);
+        for step in 1..=50u64 {
+            sim.run_until(Nanos(step * 40 * MS));
+            if replace {
+                sim.finish(w);
+                w = sim.thread(m, Work::Hog, CpuId(0), true);
+                sim.grant(w);
+            }
+        }
+        let rt = sim.rt_on[0] as f64 / sim.now.0 as f64;
+        let what = if replace { "worker replaced every 40 ms" } else { "1 µs block every 40 ms of work" };
+        println!("{what}: realtime share {rt:.3}, strikes {}, revoked {}", sim.s.rt_owner(m).strikes, sim.s.rt_owner(m).revoked);
+        assert!(!sim.s.rt_owner(m).revoked && sim.s.rt_owner(m).strikes == 0, "{what}: now caught");
+        assert!(rt > 0.6, "{what}: realtime share {rt:.3}");
+    }
+}
