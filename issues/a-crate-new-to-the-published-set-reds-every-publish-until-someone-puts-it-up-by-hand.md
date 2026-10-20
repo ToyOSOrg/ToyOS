@@ -10,9 +10,10 @@ opened: 2026-10-20
 publishing token cannot create a crate. #905 (2c3f61a3e) put `toyos-untrusted`
 and `toyos-transport` into `PUBLISHED` (`build/sdkversion.rs`), std's
 dependencies through `library/Cargo.lock`, and neither exists on crates.io. So
-each of main's 27 `publish` runs since is red: 25, from 38558545002 (2c3f61a3e,
-2026-10-14) to 39497368165 (9b11608ab, 2026-10-20), at the first new crate,
-and two before it, at a git fetch and at a moved tip. The 25 answer
+main's 27 `publish` runs from 38558545002 (2c3f61a3e, 2026-10-14) to
+39497368165 (9b11608ab, 2026-10-20) are red: 25 at the first new crate, and two
+stopped earlier, 38719407453 at a git clone and 38727675385 at a moved tip.
+The 25 answer
 
 > failed to publish toyos-untrusted ... (status 403 Forbidden): Trusted
 > Publishing tokens do not support creating new crates. Publish the crate
@@ -26,7 +27,7 @@ main's tip, and refuses (`release::sdk_at_tip`): "crates.io holds no
 toyos-untrusted of this tree, main's tip, so no sdk alias can name it". Runs
 38701484274, 38868708235, 39013160165, 39108067326, 39221595037 and
 39390441510 are red so, and the newest toolchain release and `sdk-` alias are
-of 2026-10-14 06:30Z. The refusal is right here and names the symptom, not the
+nightly 38533374419's, `toolchain-linux-x86_64-sdk-0.71.0` (2026-10-14 08:16Z). The refusal is right here and names the symptom, not the
 failed publish (`issues/a-release-that-decides-before-its-tips-crates-are-up-reds-the-nightly.md`).
 
 The publish runs' and the releases' log lines, and crates.io's answers:

@@ -25,9 +25,13 @@ what `SYS_FSTAT` does not answer as a region before it maps one
 (`system/diskserver/src/region.rs`). A region's kind is one `SYS_FSTAT` settles,
 so this is not `issues/a-received-handle-has-no-knowable-type.md`'s case.
 
+The kernel owns the fix rather than each lender: what a holder lends is a
+peer's by `lend`'s contract, and the kernel already answers a peer's handle of
+the wrong kind `InvalidArgument` at `SYS_SPAWN` and `SYS_NAMESPACE_BUILD`; a
+check before every lend would repeat that in each driver.
+
 Owner: the kernel's device calls (`kernel/src/syscall/device.rs`).
 
-**Exit**: `SYS_DEVICE_DMA_MAP` takes its region through `get_sent`,
+**Exit**: `SYS_DEVICE_DMA_MAP` takes its region through `get_sent`, and
 `HandleError::WrongType`'s comment names it beside `SYS_SPAWN` and
-`SYS_NAMESPACE_BUILD`, and a guest test that lends its claim a handle of
-another kind sees `InvalidArgument` and lives.
+`SYS_NAMESPACE_BUILD`.

@@ -55,7 +55,7 @@ that run is red and saves nothing. Until an entry is sealed again, a pull
 request restores the last sealed one, or runs cold once the runner image has
 moved; either way its verdict is its steps'.
 
-That is main's state since 2026-10-15, the second time after 2026-10-05's
+That is main's state since 2026-10-15, the second time, after 2026-10-05's
 (`issues/a-red-nightly-on-main-is-reported-to-nobody.md`). Every scheduled
 `host` since is red at its seal and only there, every earlier step green: run
 38701484274 (979d4c539) counted 8,034,022,781 B in 17,193 files, and runs
