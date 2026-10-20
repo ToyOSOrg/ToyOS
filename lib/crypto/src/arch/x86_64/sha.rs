@@ -5,7 +5,9 @@
 //! and CDGH (A in the high dword); SHA256MSG1 and SHA256MSG2 extend the
 //! message schedule four words at a time (Intel SDM Vol. 2B; Gulley et al.,
 //! "Intel SHA Extensions", Intel, 2013). No address or branch depends on the
-//! message.
+//! message. Hot loops index fixed-size arrays, as `aesni`'s header explains.
+
+#![allow(clippy::needless_range_loop, reason = "see `aesni`'s header")]
 
 use core::arch::x86_64::*;
 
