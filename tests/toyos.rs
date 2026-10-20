@@ -4308,7 +4308,8 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
 /// at its claim's vector, its No-Op answered by that interrupt; then aimed
 /// past its grant and recorded against the claim at the aimed address; then
 /// its holder's rewrite of its own table entry to a vector not its own
-/// refused and recorded against the claim, usbd never told of its No-Op.
+/// refused and recorded against the claim, which usbd ends on, never told of
+/// its No-Op.
 fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
     const ID: &str = "1022:1639";
     let at = AMD_XHCI_SPARE;
@@ -4341,7 +4342,7 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Ser
     log.must_say("usbd_spare: the claim refuses its interrupt read: Io")?;
 
     let rewritten = log.must_say("usbd_spare: MSI-X entry 0's data ")?;
-    log.must_say("usbd_spare: usbd settled and was never told of its No-Op")?;
+    log.must_say("usbd_spare: usbd ended on the claim's refusal")?;
     // Refused by the unit, not delivered to a vector nobody holds: the stop's
     // census names every vector the unclaimed gate took.
     let foreign_vector = rewritten
