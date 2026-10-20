@@ -1,18 +1,13 @@
 //! System information and control.
 
-pub use toyos_abi::syscall::RealTime;
 use toyos_abi::syscall;
 
 /// The ABI's, re-exported rather than restated: two spellings of one layout are
 /// a reader that walks off by a field the day one of them moves.
 pub use toyos_abi::syscall::{SYSINFO_ENTRY_SIZE, SYSINFO_HEADER_SIZE};
 
-/// The time of day, or `None` on a machine whose clock never answered.
-pub fn clock_realtime() -> Option<RealTime> {
-    syscall::clock_realtime()
-}
-
-/// Seconds since the Unix epoch, which is UTC, or `None` for the same machine.
+/// Seconds since the Unix epoch, which is UTC, or `None` on a machine whose
+/// clock never answered.
 ///
 /// Cheap: the kernel serves it from an anchor it took at boot plus the
 /// monotonic clock, so calling it in a loop costs a syscall each and no device

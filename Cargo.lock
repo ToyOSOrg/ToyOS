@@ -582,6 +582,7 @@ dependencies = [
  "toyos-pci-claim",
  "toyos-virtio",
  "toyos-virtio-gpu",
+ "toyos-wallclock",
  "toyos-window",
 ]
 
@@ -1608,6 +1609,18 @@ name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
+
+[[package]]
+name = "hda"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-hda",
+ "toyos-manifest",
+ "toyos-pci-claim",
+ "toyos-sound-output",
+]
 
 [[package]]
 name = "heck"
@@ -3921,12 +3934,12 @@ dependencies = [
  "rubato",
  "toyos",
  "toyos-abi",
- "toyos-hda",
  "toyos-inspect",
  "toyos-manifest",
  "toyos-mixer",
  "toyos-pci-claim",
  "toyos-resample",
+ "toyos-sound-output",
  "toyos-virtio",
  "toyos-virtio-sound",
 ]
@@ -4526,7 +4539,7 @@ name = "toyos-hda"
 version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
- "toyos-mixer",
+ "toyos-sound-output",
 ]
 
 [[package]]
@@ -4774,6 +4787,13 @@ version = "0.1.0"
 dependencies = [
  "toyos-bootmap",
  "toyos-phys",
+]
+
+[[package]]
+name = "toyos-sound-output"
+version = "0.1.0"
+dependencies = [
+ "toyos-mixer",
 ]
 
 [[package]]

@@ -4,9 +4,10 @@
 //! **One share cannot take the server.** Beneath each machine-wide bound —
 //! connections waiting on their hello, connections served, streams — each
 //! share a grant names has a quarter of its own, so one holding all it may
-//! leaves the rest of each bound to three more. Past a bound a hello or a
-//! stream is answered `ResourceExhausted`, and a connection taken past its
-//! share's part of the handshakes is answered so and let go.
+//! leaves the rest of each bound to three more. Past a bound a hello is
+//! answered `TooManyConnections` and a stream `TooManyStreams`, and a
+//! connection taken past its share's part of the handshakes is answered
+//! `TooManyConnections` and let go.
 //!
 //! **Every client number is bounded where it is kept**: an offset a request
 //! names, and an offset a stream grows by what it drains, stay at or below the
@@ -18,9 +19,8 @@
 //! link's target is stored as it was written, never resolved here, so it is
 //! held to UTF-8 alone.
 
-use toyos::fs::{canonical, MAX_FILE_BYTES, MAX_PATH, WINDOW_BYTES};
+use toyos::fs::{canonical, Error, MAX_FILE_BYTES, MAX_PATH, WINDOW_BYTES};
 use toyos::shm::Lent;
-use toyos_abi::syscall::SyscallError;
 
 /// Clients served at once, machine-wide: one connection per directory per
 /// process.
@@ -43,14 +43,14 @@ pub const STREAM_SHARE: usize = MAX_STREAMS / 4;
 pub enum Hello<W> {
     /// Served, through the window it lent.
     Served(W),
-    /// Answered `ResourceExhausted` and let go, for this reason.
+    /// Answered `TooManyConnections` and let go, for this reason.
     Refused(String),
     /// Let go unanswered, for this reason.
     Dropped(&'static str),
 }
 
 /// A connection just taken, while `waiting` of its share's are not yet
-/// answered at their hello: `Err` is why it is answered `ResourceExhausted`
+/// answered at their hello: `Err` is why it is answered `TooManyConnections`
 /// and let go.
 pub fn handshake(share: u64, waiting: usize) -> Result<(), String> {
     match waiting >= HANDSHAKE_SHARE {
@@ -79,47 +79,52 @@ pub fn hello<W>(served: usize, of_share: usize, window: impl FnOnce() -> Option<
 }
 
 /// The end of `len` bytes from `at` in a file, at or below the largest offset
-/// a file has, or `InvalidArgument`.
-pub fn in_a_file(at: u64, len: u64) -> Result<u64, SyscallError> {
-    at.checked_add(len).filter(|&end| end <= MAX_FILE_BYTES).ok_or(SyscallError::InvalidArgument)
+/// a file has, or `FileTooLarge`.
+pub fn in_a_file(at: u64, len: u64) -> Result<u64, Error> {
+    at.checked_add(len).filter(|&end| end <= MAX_FILE_BYTES).ok_or(Error::FileTooLarge)
 }
 
 /// A stream asked to start at `at`, while `streams` are served and `of_share`
 /// of them are its share's.
-pub fn stream(at: u64, streams: usize, of_share: usize) -> Result<(), SyscallError> {
+pub fn stream(at: u64, streams: usize, of_share: usize) -> Result<(), Error> {
     in_a_file(at, 0)?;
     match streams >= MAX_STREAMS || of_share >= STREAM_SHARE {
-        true => Err(SyscallError::ResourceExhausted),
+        true => Err(Error::TooManyStreams),
         false => Ok(()),
     }
 }
 
-/// Where in the window a path of `len` bytes at `at` is, or `InvalidArgument`
-/// for one longer than a path or past the window.
-pub fn path_span(at: u64, len: u64) -> Result<(usize, usize), SyscallError> {
-    let (at, len) = (usize::try_from(at), usize::try_from(len));
-    match (at, len) {
-        (Ok(at), Ok(len)) if len <= MAX_PATH && at.checked_add(len).is_some_and(|end| end <= WINDOW_BYTES) => Ok((at, len)),
-        _ => Err(SyscallError::InvalidArgument),
+/// Where in the window a path of `len` bytes at `at` is: `NameTooLong` for
+/// one longer than a path, `InvalidPath` for one past the window.
+pub fn path_span(at: u64, len: u64) -> Result<(usize, usize), Error> {
+    if len > MAX_PATH as u64 {
+        return Err(Error::NameTooLong);
+    }
+    let len = len as usize;
+    match usize::try_from(at) {
+        Ok(at) if at.checked_add(len).is_some_and(|end| end <= WINDOW_BYTES) => Ok((at, len)),
+        _ => Err(Error::InvalidPath),
     }
 }
 
-/// The path a request's bytes spell: UTF-8, or `InvalidArgument`.
-pub fn path(bytes: Vec<u8>) -> Result<String, SyscallError> {
-    String::from_utf8(bytes).map_err(|_| SyscallError::InvalidArgument)
+/// The path a request's bytes spell: UTF-8, or `InvalidPath`.
+pub fn path(bytes: Vec<u8>) -> Result<String, Error> {
+    String::from_utf8(bytes).map_err(|_| Error::InvalidPath)
 }
 
 /// `rel`, a path the server resolves from a client's directory: canonical, or
-/// `InvalidArgument`.
-pub fn relative(rel: &str) -> Result<(), SyscallError> {
+/// `InvalidPath`.
+pub fn relative(rel: &str) -> Result<(), Error> {
     match canonical(rel) {
         true => Ok(()),
-        false => Err(SyscallError::InvalidArgument),
+        false => Err(Error::InvalidPath),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use toyos_abi::syscall::SyscallError;
+
     use super::*;
 
     /// A hello whose window nothing asks for: the bounds alone answer it.
@@ -162,18 +167,18 @@ mod tests {
     #[test]
     fn an_offset_past_the_largest_a_file_has_is_refused() {
         for at in [MAX_FILE_BYTES + 1, u64::MAX - 1] {
-            assert_eq!(stream(at, 0, 0), Err(SyscallError::InvalidArgument), "a stream at {at:#x}");
+            assert_eq!(stream(at, 0, 0), Err(Error::FileTooLarge), "a stream at {at:#x}");
         }
         assert_eq!(stream(MAX_FILE_BYTES, 0, 0), Ok(()));
-        assert_eq!(in_a_file(MAX_FILE_BYTES - 2, 4), Err(SyscallError::InvalidArgument), "a write straddling the ceiling");
-        assert_eq!(in_a_file(u64::MAX, 1), Err(SyscallError::InvalidArgument), "a write whose end overflows");
+        assert_eq!(in_a_file(MAX_FILE_BYTES - 2, 4), Err(Error::FileTooLarge), "a write straddling the ceiling");
+        assert_eq!(in_a_file(u64::MAX, 1), Err(Error::FileTooLarge), "a write whose end overflows");
         assert_eq!(in_a_file(MAX_FILE_BYTES - 4, 4), Ok(MAX_FILE_BYTES));
     }
 
     #[test]
     fn a_stream_past_the_server_s_bound_or_its_share_s_part_is_refused() {
-        assert_eq!(stream(0, MAX_STREAMS, 0), Err(SyscallError::ResourceExhausted));
-        assert_eq!(stream(0, STREAM_SHARE, STREAM_SHARE), Err(SyscallError::ResourceExhausted));
+        assert_eq!(stream(0, MAX_STREAMS, 0), Err(Error::TooManyStreams));
+        assert_eq!(stream(0, STREAM_SHARE, STREAM_SHARE), Err(Error::TooManyStreams));
         assert_eq!(stream(0, MAX_STREAMS - 1, STREAM_SHARE - 1), Ok(()));
     }
 
@@ -183,7 +188,7 @@ mod tests {
     #[test]
     fn a_path_on_the_wire_that_climbs_or_is_absolute_is_refused() {
         for bad in ["../state/secret", "a/../../state/secret", "/state", "./a", "a//b"] {
-            assert_eq!(relative(bad), Err(SyscallError::InvalidArgument), "{bad:?}");
+            assert_eq!(relative(bad), Err(Error::InvalidPath), "{bad:?}");
         }
         assert_eq!(relative("a/b.txt"), Ok(()));
         assert_eq!(relative(""), Ok(()), "the directory itself");
@@ -196,14 +201,15 @@ mod tests {
     fn a_link_s_target_is_taken_absolute_or_climbing() {
         assert_eq!(path(b"/home/x".to_vec()), Ok("/home/x".to_string()));
         assert_eq!(path(b"../x".to_vec()), Ok("../x".to_string()));
-        assert_eq!(path(b"\xff".to_vec()), Err(SyscallError::InvalidArgument));
+        assert_eq!(path(b"\xff".to_vec()), Err(Error::InvalidPath));
     }
 
     #[test]
     fn a_path_longer_than_a_path_or_past_the_window_is_refused() {
         assert_eq!(path_span(0, MAX_PATH as u64), Ok((0, MAX_PATH)));
-        assert_eq!(path_span(0, MAX_PATH as u64 + 1), Err(SyscallError::InvalidArgument));
-        assert_eq!(path_span((WINDOW_BYTES - 1) as u64, 2), Err(SyscallError::InvalidArgument));
-        assert_eq!(path_span(u64::MAX, 1), Err(SyscallError::InvalidArgument));
+        assert_eq!(path_span(0, MAX_PATH as u64 + 1), Err(Error::NameTooLong));
+        assert_eq!(path_span(0, u64::MAX), Err(Error::NameTooLong));
+        assert_eq!(path_span((WINDOW_BYTES - 1) as u64, 2), Err(Error::InvalidPath));
+        assert_eq!(path_span(u64::MAX, 1), Err(Error::InvalidPath));
     }
 }

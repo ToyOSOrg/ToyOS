@@ -8,7 +8,8 @@
 //! sibling's `munmap` cannot reissue the backing between the translation and
 //! the copy, nor under a copy across a park.
 //! A window is the physical runs its pages sit in, and a buffer's copy is cut at
-//! their seams; a typed value lies inside one 2 MiB page, so in one run.
+//! their seams; a typed value lies inside one 2 MiB window, which maps one
+//! frame or one BAR's pages in order, so in one run.
 //! Every single-word user read is `read_volatile`, including the futex word
 //! and the crash dump's walk, both outside this module.
 
@@ -50,7 +51,7 @@ pub(crate) fn translate_user(addr: UserAddr, access: Access) -> Option<crate::mm
 }
 
 /// A `T` at `ptr` as a pinned window; `is_user_object` keeps it aligned and
-/// inside one 2 MiB page.
+/// inside one 2 MiB window.
 fn object<T: UserSafe>(ptr: UserAddr, access: Access) -> Result<(*mut T, FramePins<[Segment; 1]>), SyscallError> {
     let (kptr, pins) = object_run(ptr, core::mem::size_of::<T>(), core::mem::align_of::<T>(), access)?;
     Ok((kptr.cast(), pins))
@@ -67,7 +68,8 @@ fn object_run(ptr: UserAddr, size: usize, align: usize, access: Access) -> Resul
     Ok((crate::mm::DirectMap::from_phys(phys).as_mut_ptr(), pins))
 }
 
-/// A 2 MiB window is one frame in order, so it holds at most one run.
+/// A 2 MiB window maps one frame, or one BAR's pages, in order, so it holds
+/// at most one run.
 #[cold]
 #[inline(never)]
 fn window_split(ptr: UserAddr, len: usize) -> ! {

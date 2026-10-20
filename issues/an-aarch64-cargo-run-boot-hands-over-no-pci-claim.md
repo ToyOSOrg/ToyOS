@@ -31,7 +31,7 @@ on the next one, and the agent itself exits on "no virtio-serial function
 was handed to this program". Its handshake on aarch64 rests on the code
 that passes on q35.
 
-The windows placement offers come from the loader's list, which takes every
+The windows a claim's BAR is checked against come from the loader's list, which takes every
 memory range firmware's map types MMIO and nobody owns, ECAM and flash among
 them; the root's own `_CRS` on this machine declares `0x10000000..0x3eff0000`
 and `0x8000000000..0x10000000000` and neither. Taken up by #916: its stage A

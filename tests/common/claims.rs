@@ -175,7 +175,7 @@ pub fn refused_unremapped(log: &Serial) -> Result<(), String> {
 }
 
 /// The claim of the function at `at` refused for `why`, before anything on
-/// it changed: no message armed, no entry written, no BAR moved.
+/// it changed: no message armed and no entry written.
 pub fn refused_at(log: &Serial, at: &str, why: &str) -> Result<(), String> {
     log.must_say(&format!("pcidev: PCI {at} NOT HANDED OVER — {why}"))?;
     log.must_not_say(&format!("PCI {at}: msi address="))?;

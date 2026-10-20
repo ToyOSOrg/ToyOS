@@ -109,10 +109,7 @@ pub struct Nic {
 
 /// The claim's register window, and the mapping it points into.
 fn registers(dev: &PciDev) -> Result<(Bar, SharedMemory), Opening> {
-    let info = dev
-        .describe()
-        .map_err(KernelRefused::on("the claim's description"))
-        .map_err(Opening::Kernel)?;
+    let info = toyos_pci_claim::describe(dev).map_err(Opening::Kernel)?;
     // The lowest BAR wide enough, rather than BAR 0 by name: the kernel
     // reports 0 bytes for a BAR it keeps back, and the MSI-X table's is one
     // it keeps.
