@@ -161,6 +161,28 @@ fn encrypt_n<const R: usize, const N: usize>(k: &[__m128i; 15], base: __m128i, f
     s
 }
 
+/// `N` counter blocks from `first` through every round, into `s[..N]`,
+/// each round key read from the schedule where it is used: a local copy of
+/// the AES-256 schedule does not fit the registers beside fifteen blocks,
+/// and its spill is a 240-byte library copy.
+#[inline]
+#[target_feature(enable = "aes,sse2")]
+fn encrypt_into<const R: usize, const N: usize>(keys: &[[u8; 16]; 15], base: __m128i, first: u32, s: &mut [__m128i; 15]) {
+    for j in 0..N {
+        s[j] = counter(base, first.wrapping_add(j as u32));
+    }
+    for r in 1..R {
+        let key = load(&keys[r]);
+        for j in 0..N {
+            s[j] = _mm_aesenc_si128(s[j], key);
+        }
+    }
+    let last = load(&keys[R]);
+    for j in 0..N {
+        s[j] = _mm_aesenclast_si128(s[j], last);
+    }
+}
+
 #[inline]
 #[target_feature(enable = "aes,sse2")]
 fn encrypt8<const R: usize>(k: &[__m128i; 15], base: __m128i, first: u32) -> [__m128i; 8] {
@@ -376,17 +398,19 @@ fn seal_rounds<const R: usize>(
     if n == 0 {
         return 0;
     }
-    let k = round_keys(keys);
+    let (slots, _) = keys.as_chunks::<16>();
+    let k: &[[u8; 16]; 15] = slots.try_into().unwrap();
     let mut h = [_mm_setzero_si128(); 8];
     let mut folds = [_mm_setzero_si128(); 8];
     for j in 0..8 {
         h[j] = power(powers[j]);
         folds[j] = folded(h[j]);
     }
-    let base = counter_base(nonce, k[0]);
+    let base = counter_base(nonce, load(&k[0]));
     let mut y = reverse(load(state));
     let (blocks, _) = batches[0].as_chunks_mut::<16>();
-    let s = encrypt8::<R>(&k, base, 2);
+    let mut s = [_mm_setzero_si128(); 15];
+    encrypt_into::<R, 8>(k, base, 2, &mut s);
     for j in 0..8 {
         xor_into(&mut blocks[j], s[j]);
     }
@@ -408,8 +432,9 @@ fn seal_rounds<const R: usize>(
         };
         // Round r + 1 also multiplies block r of the previous batch.
         for r in 0..R - 1 {
+            let key = load(&k[r + 1]);
             for j in 0..8 {
-                s[j] = _mm_aesenc_si128(s[j], k[r + 1]);
+                s[j] = _mm_aesenc_si128(s[j], key);
             }
             if (1..8).contains(&r) {
                 sum = Product {
@@ -421,8 +446,9 @@ fn seal_rounds<const R: usize>(
         }
         y = sum.reduce();
         let (blocks, _) = next[0].as_chunks_mut::<16>();
+        let last = load(&k[R]);
         for j in 0..8 {
-            xor_into(&mut blocks[j], _mm_aesenclast_si128(s[j], k[R]));
+            xor_into(&mut blocks[j], _mm_aesenclast_si128(s[j], last));
         }
     }
     y = absorb(y, powers, batches[n - 1].as_chunks::<16>().0);
@@ -470,17 +496,20 @@ fn short_rounds<const R: usize>(
     data: &mut [u8],
     stream: Option<&mut [[u8; 16]; 14]>,
 ) -> [u8; 16] {
-    let k = round_keys(keys);
-    let base = counter_base(nonce, k[0]);
+    let (slots, _) = keys.as_chunks::<16>();
+    let k: &[[u8; 16]; 15] = slots.try_into().unwrap();
+    let base = counter_base(nonce, load(&k[0]));
     // E(J0) and the data's keystream, in as small a batch as covers them.
     let mut s = [_mm_setzero_si128(); 15];
+    // Each arm encrypts in place: moving a returned array into `s` is a
+    // library copy.
     match data.len() {
-        0 => s[..1].copy_from_slice(&encrypt_n::<R, 1>(&k, base, 1)),
-        1..=16 => s[..2].copy_from_slice(&encrypt_n::<R, 2>(&k, base, 1)),
-        17..=48 => s[..4].copy_from_slice(&encrypt_n::<R, 4>(&k, base, 1)),
-        49..=64 => s[..5].copy_from_slice(&encrypt_n::<R, 5>(&k, base, 1)),
-        65..=112 => s[..8].copy_from_slice(&encrypt8::<R>(&k, base, 1)),
-        _ => s = encrypt_n::<R, 15>(&k, base, 1),
+        0 => encrypt_into::<R, 1>(k, base, 1, &mut s),
+        1..=16 => encrypt_into::<R, 2>(k, base, 1, &mut s),
+        17..=48 => encrypt_into::<R, 4>(k, base, 1, &mut s),
+        49..=64 => encrypt_into::<R, 5>(k, base, 1, &mut s),
+        65..=112 => encrypt_into::<R, 8>(k, base, 1, &mut s),
+        _ => encrypt_into::<R, 15>(k, base, 1, &mut s),
     }
     let (blocks, tail) = data.as_chunks_mut::<16>();
     let whole = blocks.len();
