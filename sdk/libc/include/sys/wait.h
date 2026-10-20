@@ -9,6 +9,7 @@ extern "C" {
 
 #define WNOHANG   1
 #define WUNTRACED 2
+#define WCONTINUED 8
 
 #define WEXITSTATUS(s) (((s) >> 8) & 0xff)
 #define WTERMSIG(s)    ((s) & 0x7f)

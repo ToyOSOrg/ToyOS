@@ -1,12 +1,11 @@
-//! clang and `ld.lld` built for ToyOS compile and link a C program here, the
-//! program runs, and what each wrote is the host's clang's and LLD's bytes.
+//! clang built for ToyOS compiles a C program here, and its driver links one,
+//! starting `ld.lld` as a child; the program runs, and what each wrote is the
+//! host's clang's bytes.
 //!
 //! Its one argument is the directory the harness staged on ROOT: `bin/clang`
 //! and `bin/ld.lld` with clang's resource headers at `lib/clang`, the C
 //! sysroot at `sysroot`, the program at `src/hello.c`, and what the host's
-//! clang and LLD made of it at `host/hello.o` and `host/hello`. LLD is run
-//! directly, on the line the ToyOS driver gives it, because a driver that links
-//! starts LLD as a child and libc starts none.
+//! clang made of it at `host/hello.o` and `host/a.out`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -19,26 +18,24 @@ fn main() {
     let sysroot = staged.join("sysroot");
     let out = Path::new(OUT);
     std::fs::create_dir_all(out).unwrap_or_else(|e| panic!("create {OUT}: {e}"));
-    let (object, linked) = (out.join("hello.o"), out.join("hello"));
+    let (object, linked) = (out.join("hello.o"), out.join("a.out"));
 
     // The arguments are the host's, so the two products can be compared.
-    let mut compile = Command::new(staged.join("bin/clang"));
-    compile
-        .arg("--target=x86_64-unknown-toyos")
-        .arg(format!("--sysroot={}", sysroot.display()))
-        .args(["-c", "hello.c", "-o"])
-        .arg(&object)
-        .current_dir(staged.join("src"));
-    run(compile, "clang -c");
-
-    let mut link = Command::new(staged.join("bin/ld.lld"));
-    link.arg(format!("--sysroot={}", sysroot.display()))
-        .args(["-pie", "--eh-frame-hdr", "-o"])
-        .arg(&linked)
-        .arg(format!("-L{}", sysroot.join("lib").display()))
-        .arg(&object)
-        .arg("-ltoyos_c");
-    run(link, "ld.lld");
+    let clang = |args: &[&str], to: &Path| {
+        let mut command = Command::new(staged.join("bin/clang"));
+        command
+            .arg("--target=x86_64-unknown-toyos")
+            .arg(format!("--sysroot={}", sysroot.display()))
+            .args(args)
+            .arg("hello.c")
+            .arg("-o")
+            .arg(to)
+            .current_dir(staged.join("src"));
+        command
+    };
+    run(clang(&["-c"], &object), "clang -c");
+    // `clang hello.c`: the driver compiles, and links by starting `ld.lld`.
+    run(clang(&[], &linked), "clang");
 
     let ran = Command::new(&linked).output().unwrap_or_else(|e| panic!("run {}: {e}", linked.display()));
     assert!(ran.status.success(), "{} ended {:?}: {}", linked.display(), ran.status, String::from_utf8_lossy(&ran.stderr));
@@ -47,7 +44,7 @@ fn main() {
     }
 
     let mut differ = false;
-    for (made, by) in [(&object, "clang"), (&linked, "ld.lld")] {
+    for (made, by) in [(&object, "clang -c"), (&linked, "clang")] {
         let name = made.file_name().expect("a file name");
         differ |= !same(made, &staged.join("host").join(name), by);
     }

@@ -207,7 +207,7 @@ pub fn build_child_handles(
     }
     let data_arc = process_data();
     let data = data_arc.lock();
-    let mut handles = HandleTable::new();
+    let mut handles = HandleTable::for_child();
     // Dropped after the lock releases, not inside it: `install_at` leaves *where* to the caller.
     let mut displaced = Vec::new();
     // Parent console objects already minted a replacement for, keyed by address.

@@ -65,8 +65,19 @@ pub fn c_str_to_bytes(s: *const u8) -> &'static [u8] {
 // File descriptor operations
 
 #[no_mangle]
-pub unsafe extern "C" fn open(path: *const u8, flags: i32, _mode: u32) -> i32 {
-    let path_bytes = c_str_to_bytes(path);
+pub unsafe extern "C" fn open(path: *const u8, flags: i32, mode: u32) -> i32 {
+    match open_handle(c_str_to_bytes(path), flags, mode) {
+        Ok(f) => {
+            CLOEXEC.lock().opened(f.0 as i32, flags);
+            f.0 as i32
+        }
+        Err(e) => set_errno(e),
+    }
+}
+
+/// `open`'s file, as a handle of this process's: what a spawn's `addopen`
+/// opens too.
+pub(crate) fn open_handle(path: &[u8], flags: i32, _mode: u32) -> Result<RawHandle, syscall::SyscallError> {
     let mut oflags = OpenFlags(0);
 
     let access = flags & 3;
@@ -75,14 +86,7 @@ pub unsafe extern "C" fn open(path: *const u8, flags: i32, _mode: u32) -> i32 {
     if flags & O_CREAT != 0 { oflags |= OpenFlags::CREATE; }
     if flags & O_TRUNC != 0 { oflags |= OpenFlags::TRUNCATE; }
     if flags & O_APPEND != 0 { oflags |= OpenFlags::APPEND; }
-
-    match syscall::open(path_bytes, oflags) {
-        Ok(f) => {
-            CLOEXEC.lock().opened(f.0 as i32, flags);
-            f.0 as i32
-        }
-        Err(e) => set_errno(e),
-    }
+    syscall::open(path, oflags)
 }
 
 #[no_mangle]
@@ -93,6 +97,7 @@ pub unsafe extern "C" fn creat(path: *const u8, mode: u32) -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
     CLOEXEC.lock().set(raw_fd, false);
+    STDIO.lock().closed(raw_fd as u32);
     syscall::close(fd(raw_fd));
     0
 }
@@ -234,6 +239,7 @@ pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
         Ok(f) => {
             // POSIX: the descriptor `dup2` answers is not closed on `exec`.
             CLOEXEC.lock().set(f.0 as i32, false);
+            STDIO.lock().placed(f);
             // The slot holds something else now, so the stream is asked again.
             match slot {
                 1 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Out),
@@ -401,6 +407,19 @@ pub unsafe extern "C" fn umask(mask: u32) -> u32 {
 }
 
 static CLOEXEC: Lock<CloseOnExec> = Lock::new(CloseOnExec::new());
+static STDIO: Lock<crate::fdreq::Stdio> = Lock::new(crate::fdreq::Stdio::new());
+
+/// What this process holds in slots 0–2, each with whether it is marked
+/// close-on-exec, as `spawnreq::plan` takes them.
+pub(crate) fn stdio_for_spawn() -> [Option<(u32, bool)>; 3] {
+    let cloexec = CLOEXEC.lock();
+    STDIO.lock().held().map(|held| held.map(|h| (h, cloexec.flags(h as i32) != 0)))
+}
+
+/// Whether `path` names a file, and not a directory.
+pub(crate) fn is_file(path: &[u8]) -> bool {
+    syscall::stat(path, true).is_ok_and(|st| st.file_type == syscall::FileType::File)
+}
 
 /// `arg` is the register C's variadic third argument arrives in (`fdreq`).
 #[no_mangle]

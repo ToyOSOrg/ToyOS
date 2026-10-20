@@ -10,6 +10,7 @@ mod arch;
 mod ctype;
 mod dgramreq;
 mod elfsym;
+mod env;
 mod errcode;
 mod errno;
 mod fdreq;
@@ -32,6 +33,8 @@ mod resolve;
 mod sigmask;
 mod socket;
 mod sockopt;
+mod spawn;
+mod spawnreq;
 mod stdio;
 mod string;
 mod strtonum;
@@ -62,6 +65,8 @@ mod runtime {
                 hook();
             }
         }
+        // Before `main`, which may read `environ` before any call that would.
+        crate::env::init();
         let code = unsafe { main(argc, argv) };
         unsafe { crate::misc::exit(code) }
     }

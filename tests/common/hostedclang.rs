@@ -4,10 +4,10 @@
 //! The binaries, clang's resource headers and the C sysroot's headers and
 //! `libtoyos_c.a` go on the ROOT of `tests/images/hostedclangcase.toml`, as fixtures
 //! beside the image's own files: ROOT is memory the loader filled, so the
-//! guest reads them with no disk and no server behind it. The job compiles and
-//! links `hello.c` there, runs it, and compares each product with what the
-//! host's clang and LLD, of the same LLVM commit, made of the same input on the
-//! same command line.
+//! guest reads them with no disk and no server behind it. The job compiles
+//! `hello.c` there and has the driver link it, which starts LLD as a child,
+//! runs it, and compares each product with what the host's clang and LLD, of
+//! the same LLVM commit, made of the same input on the same command line.
 
 use std::fs;
 use std::path::Path;
@@ -36,20 +36,12 @@ pub fn hosted_clang_hello() -> Result<(), String> {
 
     let scratch = super::lane::dir().join(JOB);
     fs::create_dir_all(&scratch).map_err(|e| format!("create {}: {e}", scratch.display()))?;
-    let (object, linked) = (scratch.join("hello.o"), scratch.join("hello"));
-    let mut cc = Command::new(&c.clang);
-    cc.args(c.args()).args(["-c", "hello.c", "-o"]).arg(&object).current_dir(&sources);
-    host_run(cc)?;
-    // The line the ToyOS driver hands LLD (`clang -###`), as the guest runs it.
-    let lld = c.clang.with_file_name("ld.lld");
-    let mut ld = Command::new(&lld);
-    ld.arg(format!("--sysroot={}", c.dir.display()))
-        .args(["-pie", "--eh-frame-hdr", "-o"])
-        .arg(&linked)
-        .arg(format!("-L{}", c.dir.join("lib").display()))
-        .arg(&object)
-        .arg("-ltoyos_c");
-    host_run(ld)?;
+    let (object, linked) = (scratch.join("hello.o"), scratch.join("a.out"));
+    for (args, to) in [(&["-c"][..], &object), (&[][..], &linked)] {
+        let mut cc = Command::new(&c.clang);
+        cc.args(c.args()).args(args).arg("hello.c").arg("-o").arg(to).current_dir(&sources);
+        host_run(cc)?;
+    }
 
     let mut staged: Vec<(String, Vec<u8>)> = Vec::new();
     let mut stage = |rel: &str, from: &Path| {
@@ -60,7 +52,7 @@ pub fn hosted_clang_hello() -> Result<(), String> {
     stage("bin/ld.lld", &hosted.dir.join("bin/ld.lld"));
     stage("sysroot/lib/libtoyos_c.a", &c.dir.join("lib/libtoyos_c.a"));
     stage("src/hello.c", &sources.join("hello.c"));
-    for (name, product) in [("hello.o", &object), ("hello", &linked)] {
+    for (name, product) in [("hello.o", &object), ("a.out", &linked)] {
         let bytes = fs::read(product).map_err(|e| format!("read {}: {e}", product.display()))?;
         let sha256: String = toyos_sha2_hw::sha256_digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
         eprintln!("  [{JOB}] the host's {name}: {} bytes, sha256 {sha256}", bytes.len());

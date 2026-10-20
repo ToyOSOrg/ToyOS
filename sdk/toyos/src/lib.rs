@@ -29,6 +29,7 @@ pub mod process;
 pub mod relocate;
 pub mod surface;
 pub mod shm;
+pub mod spawn;
 pub mod syscap;
 pub mod sync;
 pub mod system;

@@ -8,6 +8,7 @@ pub(crate) const EPERM: i32 = 1;
 pub(crate) const ENOENT: i32 = 2;
 pub(crate) const ESRCH: i32 = 3;
 pub(crate) const EIO: i32 = 5;
+pub(crate) const E2BIG: i32 = 7;
 pub(crate) const EBADF: i32 = 9;
 pub(crate) const ECHILD: i32 = 10;
 pub(crate) const EAGAIN: i32 = 11;

@@ -142,3 +142,23 @@ fn each_descriptor_keeps_its_own_close_on_exec_mark() {
     marks.opened(5, read_write);
     assert_eq!(marks.flags(5), 0, "open over a mark");
 }
+
+/// A process holds slots 0–2 as it started; `close` empties one only for the
+/// handle the slot holds, and `dup2` puts the handle it answered there, at the
+/// slot's next generation.
+#[test]
+fn stdio_is_what_each_slot_holds_now() {
+    use toyos_abi::RawHandle;
+    let mut stdio = fdreq::Stdio::new();
+    assert_eq!(stdio.held(), [Some(0), Some(1), Some(2)]);
+    stdio.closed(RawHandle::new(1, 1).0);
+    assert_eq!(stdio.held(), [Some(0), Some(1), Some(2)], "a handle the slot no longer holds");
+    stdio.closed(1);
+    assert_eq!(stdio.held(), [Some(0), None, Some(2)]);
+    let again = RawHandle::new(1, 1);
+    stdio.placed(again);
+    assert_eq!(stdio.held(), [Some(0), Some(again.0), Some(2)]);
+    stdio.placed(RawHandle::new(7, 0));
+    stdio.closed(7);
+    assert_eq!(stdio.held(), [Some(0), Some(again.0), Some(2)], "a slot past stderr");
+}

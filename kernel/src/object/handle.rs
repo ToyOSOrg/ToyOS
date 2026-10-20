@@ -172,6 +172,15 @@ impl HandleTable {
         Self { slots: Vec::new(), free: Vec::new() }
     }
 
+    /// A spawned child's table, whose slots 0–2 are its stdin, stdout and
+    /// stderr: what its spawn's slot map names, and nothing else, ever goes
+    /// there unless the child puts it there by number. An endowment installed
+    /// into a gap among them would read as the child's stdio.
+    pub fn for_child() -> Self {
+        let empty = || Slot::Serving { generation: 0, entry: None };
+        Self { slots: alloc::vec![empty(), empty(), empty()], free: Vec::new() }
+    }
+
     /// Whether `n` more `install`s can all succeed.
     // A retired slot counts in neither term, so it permanently costs one slot of room.
     pub fn has_room(&self, n: usize) -> bool {

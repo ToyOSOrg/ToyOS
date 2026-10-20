@@ -9,9 +9,6 @@ use crate::sys::fs::File;
 use crate::sys::pipe::Pipe;
 use crate::{fmt, io};
 
-#[path = "launch_route.rs"]
-mod launch_route;
-
 ////////////////////////////////////////////////////////////////////////////////
 // Command
 ////////////////////////////////////////////////////////////////////////////////
@@ -28,7 +25,7 @@ pub struct Command {
     extra_slots: Vec<[u32; 2]>,
     endowments: Vec<(String, u32)>,
     provided: Vec<(String, u32)>,
-    parent: Parent,
+    parent: toyos::spawn::Parent,
     /// The program the child runs, when it is not the one `argv[0]` names.
     image_path: Option<OsString>,
     prepared: Option<Prepared>,
@@ -38,29 +35,10 @@ pub struct Command {
     image: Option<(OsString, toyos::process::Image)>,
 }
 
-/// Whom a child is placed under, whose end takes it down.
-#[derive(Clone, Copy)]
-enum Parent {
-    /// This process.
-    Caller,
-    /// The process a handle carrying `WRITE` names.
-    Place(u32),
-    /// The supervisor, asked through the launcher.
-    Supervisor,
-}
-
 /// The file reads a spawn needs, made ahead of it ([`Command::prepare`]).
 struct Prepared {
     program: OsString,
     cwd: String,
-}
-
-/// Where a spawn goes once the launcher has been asked, or could not be.
-enum Routed {
-    /// The supervisor started it.
-    Started(Process),
-    /// This process spawns it, with the `HOME` the supervisor answered for it if it did.
-    Direct { home: Option<OsString> },
 }
 
 /// `KEY=VALUE\0` for each variable: the blob `SYS_SPAWN` and a launch both take.
@@ -100,7 +78,7 @@ impl Command {
             extra_slots: Vec::new(),
             endowments: Vec::new(),
             provided: Vec::new(),
-            parent: Parent::Caller,
+            parent: toyos::spawn::Parent::Caller,
             image_path: None,
             prepared: None,
             image: None,
@@ -134,7 +112,7 @@ impl Command {
     pub fn prepare(&mut self) -> io::Result<()> {
         let program = self.resolve_program()?;
         let cwd = self.child_cwd()?;
-        let source = launch_route::image_and_name(program.as_os_str(), self.image_path.as_deref()).0.to_owned();
+        let source = self.image_path.clone().unwrap_or_else(|| program.clone());
         let kept = self.image.as_ref().is_some_and(|(read, _)| *read == source);
         if !kept {
             self.image = None;
@@ -218,27 +196,12 @@ impl Command {
     /// Place the child under the process `place` names rather than under this
     /// one.
     pub fn under(&mut self, place: u32) {
-        self.parent = Parent::Place(place);
+        self.parent = toyos::spawn::Parent::Place(toyos_abi::RawHandle(place));
     }
 
     /// Ask the supervisor to be the child's parent, through the launcher or not at all.
     pub fn under_supervisor(&mut self) {
-        self.parent = Parent::Supervisor;
-    }
-
-    /// A duplicate of this process's own namespace handle, for the child to be
-    /// endowed under `svc`.
-    ///
-    /// `None` when the caller endowed one itself — it has decided what its
-    /// child may reach — and when this process has no namespace, which is a
-    /// program the manifest gives no `receives` and whose children therefore
-    /// have nothing to inherit.
-    fn inherited_namespace(&self) -> Option<toyos_abi::RawHandle> {
-        if self.endowments.iter().any(|(label, _)| label == toyos_abi::syscall::SVC_LABEL) {
-            return None;
-        }
-        let namespace = toyos::endow::namespace()?;
-        toyos_abi::syscall::dup(toyos::AsHandle::as_handle(namespace)).ok()
+        self.parent = toyos::spawn::Parent::Supervisor;
     }
 
     fn resolve_program(&self) -> io::Result<OsString> {
@@ -284,26 +247,17 @@ impl Command {
         default: Stdio,
         _needs_stdin: bool,
     ) -> io::Result<(Process, StdioPipes)> {
-        self.refuse_streams(&default)?;
-        let route = launch_route::route(launch_route::Asked {
-            supervisor: matches!(self.parent, Parent::Supervisor),
-            endowed: !self.endowments.is_empty(),
-            extra_slots: !self.extra_slots.is_empty(),
-            image_named: self.image_path.is_some(),
-            provided: !self.provided.is_empty(),
-        });
-        if let launch_route::Route::Refused(why) = route {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, why));
-        }
         let prepared = self.prepared.take();
         let image = self.image.take().map(|(_, image)| image);
         let (resolved, cwd, prepared_image) = match prepared {
             Some(Prepared { program, cwd }) => (program, cwd, image),
             None => (self.resolve_program()?, self.child_cwd()?, None),
         };
-        let (source, name) = launch_route::image_and_name(resolved.as_os_str(), self.image_path.as_deref());
+        let program = utf8(&resolved, "program path")?;
+        let image_path = self.image_path.as_deref().map(|p| utf8(p, "image path")).transpose()?;
+        // `argv[0]` is the program, never a named image's path.
         let mut argv_buf = Vec::new();
-        argv_buf.extend_from_slice(name.as_encoded_bytes());
+        argv_buf.extend_from_slice(resolved.as_encoded_bytes());
         for arg in &self.args[1..] {
             argv_buf.push(0);
             argv_buf.extend_from_slice(arg.as_encoded_bytes());
@@ -321,307 +275,59 @@ impl Command {
         let mut stdin_pipe: Option<Pipe> = None;
         let mut stdout_pipe: Option<Pipe> = None;
         let mut stderr_pipe: Option<Pipe> = None;
-
-        // Resolve each stdio to a slot_map entry: [child_slot, parent_handle]
         Self::setup_slot(&mut slot_map, &mut child_pipes, &mut streams, &mut stdin_pipe, stdin, 0, true)?;
         Self::setup_slot(&mut slot_map, &mut child_pipes, &mut streams, &mut stdout_pipe, stdout, 1, false)?;
         Self::setup_slot(&mut slot_map, &mut child_pipes, &mut streams, &mut stderr_pipe, stderr, 2, false)?;
-
-        // Add extra handle mappings (e.g., for jobserver pipes)
+        let stdio = slot_map.len();
         slot_map.extend_from_slice(&self.extra_slots);
 
         let capture = self.env.capture();
         let env_buf = env_blob(&capture);
-
-        // A caller with no `launcher` connector gets plain inheritance, which is
-        // what a program endowed nothing should get — of everything but `HOME`
-        // (`direct_env`).
-        let mut home_from_supervisor = None;
-        if route == launch_route::Route::Launch {
-            match self.launch(&resolved, &argv_buf, &env_buf, &cwd, &slot_map)? {
-                Routed::Started(process) => {
-                    drop(child_pipes);
-                    return Ok((
-                        process,
-                        StdioPipes { stdin: stdin_pipe, stdout: stdout_pipe, stderr: stderr_pipe },
-                    ));
-                }
-                Routed::Direct { home } => home_from_supervisor = home,
-            }
-        }
-        // The label blob and the entries that index it, made after the routing:
-        // a launch carries neither, and a namespace copy made for one would be a
-        // handle nothing closes. Built here because the kernel reads both out of
-        // one call and keeps the blob for the child's life.
-        let mut labels = Vec::new();
-        let mut endow = Vec::with_capacity(self.endowments.len() + 1);
-        let mut push = |label: &str, handle: u32, labels: &mut Vec<u8>| {
-            endow.push(toyos_abi::syscall::EndowEntry {
-                label_off: labels.len() as u32,
-                label_len: label.len() as u32,
-                handle: toyos_abi::RawHandle(handle),
-                _pad: 0,
-            });
-            labels.extend_from_slice(label.as_bytes());
+        let endow: Vec<(&str, toyos_abi::RawHandle)> =
+            self.endowments.iter().map(|(label, h)| (label.as_str(), toyos_abi::RawHandle(*h))).collect();
+        let provided: Vec<(&str, toyos_abi::RawHandle)> =
+            self.provided.iter().map(|(name, h)| (name.as_str(), toyos_abi::RawHandle(*h))).collect();
+        let request = toyos::spawn::Spawn {
+            program,
+            image: image_path,
+            argv: &argv_buf,
+            env: &env_buf,
+            cwd: &cwd,
+            slots: &slot_map,
+            stdio,
+            endow: &endow,
+            provided: &provided,
+            parent: self.parent,
         };
-        for (label, handle) in &self.endowments {
-            push(label, *handle, &mut labels);
-        }
-        // The child inherits this process's namespace unless the caller decided
-        // otherwise. A duplicate rather than the handle itself: an endowment is
-        // a move, and a parent that gave its namespace away could not spawn a
-        // second child. A caller that endows `svc` has decided what its child
-        // may reach and is not overruled here.
-        let inherited = self.inherited_namespace();
-        if let Some(handle) = inherited {
-            push(toyos_abi::syscall::SVC_LABEL, handle.0, &mut labels);
-        }
-        let env_buf = env_blob(&self.direct_env(capture, home_from_supervisor));
+        let pipes = |stdin, stdout, stderr| StdioPipes { stdin, stdout, stderr };
+        let mut answer = crate::vec![0u8; toyos::ipc::MAX_FRAME_LEN as usize];
+        let home = match request.launch(&mut answer).map_err(refused)? {
+            toyos::spawn::Launched::Started(handle) => {
+                return Ok((Process { handle }, pipes(stdin_pipe, stdout_pipe, stderr_pipe)));
+            }
+            toyos::spawn::Launched::Direct { home } => home,
+        };
+        // A caller that named `HOME`, or removed it, decided it.
+        let named = self.env.iter().any(|(key, _)| key == OsStr::new("HOME"));
+        let mut direct_env = Vec::new();
+        toyos::spawn::direct_env(&env_buf, named, home, &mut direct_env);
         // A program on a file server is read here, into a memory object of
         // this process's own that the kernel pages the child from: the kernel
         // opens only what it serves itself.
+        let source = Path::new(image_path.unwrap_or(program));
         let image = match prepared_image {
             Some(image) => Some(image),
-            None if crate::sys::fs::is_served(Path::new(source)) => {
-                Some(crate::sys::fs::read_image(Path::new(source)).map_err(|e| {
-                    if let Some(handle) = inherited {
-                        toyos_abi::syscall::close(handle);
-                    }
-                    e
-                })?)
-            }
+            None if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source)?),
             None => None,
         };
-
-        let spawn_args = toyos_abi::syscall::SpawnArgs {
-            path_ptr: source.as_encoded_bytes().as_ptr().expose_provenance() as u64,
-            path_len: source.len() as u64,
-            argv_ptr: argv_buf.as_ptr().expose_provenance() as u64,
-            argv_len: argv_buf.len() as u64,
-            slot_map_ptr: slot_map.as_ptr().expose_provenance() as u64,
-            slot_map_count: slot_map.len() as u64,
-            env_ptr: env_buf.as_ptr().expose_provenance() as u64,
-            env_len: env_buf.len() as u64,
-            endow_ptr: endow.as_ptr().expose_provenance() as u64,
-            endow_count: endow.len() as u64,
-            labels_ptr: labels.as_ptr().expose_provenance() as u64,
-            labels_len: labels.len() as u64,
-            cwd_ptr: cwd.as_ptr().expose_provenance() as u64,
-            cwd_len: cwd.len() as u64,
-            image: image.as_ref().map_or(0, |image| image.spawn_words().0),
-            image_len: image.as_ref().map_or(0, |image| image.spawn_words().1),
-            place: match self.parent {
-                Parent::Caller => u64::from(toyos_abi::HANDLE_INVALID.0),
-                Parent::Place(place) => u64::from(place),
-                Parent::Supervisor => {
-                    unreachable!("a child asked of the supervisor is launched or refused")
-                }
-            },
-        };
-        // SAFETY: spawn_args contains valid pointers to stack-local buffers that outlive the call.
-        let spawned = unsafe { toyos_abi::syscall::spawn(&spawn_args) };
+        let spawned = request.direct(&direct_env, image.as_ref());
         // The child keeps the object alive; this process's handle, and with it
         // its own mapping, goes.
         drop(image);
-
-        // Close child-side pipe ends in the parent
         drop(child_pipes);
         drop(streams);
-
-        let handle = spawned.map_err(|e| {
-            // An endowment moves only on a spawn that happened, so the
-            // duplicate this call made is still ours and is ours to close.
-            if let Some(handle) = inherited {
-                toyos_abi::syscall::close(handle);
-            }
-            crate::sys::to_io_error(e)
-        })?;
-
-        Ok((
-            // SAFETY: the kernel installed this handle in our table for this
-            // call and no other.
-            Process { handle: unsafe { toyos::process::Process::from_raw(handle) } },
-            StdioPipes { stdin: stdin_pipe, stdout: stdout_pipe, stderr: stderr_pipe },
-        ))
-    }
-
-    /// Refuses, before anything moves, a spawn that would put a stream's handle
-    /// in another process: in a child's slot, by `Stdio::inherit()`, a `File`
-    /// or `inherit_handle`, or endowed or provided. A stream belongs to the
-    /// process that connected or accepted it, and `toyos::net` answers for its
-    /// handles.
-    fn refuse_streams(&self, default: &Stdio) -> io::Result<()> {
-        let stdio = [&self.stdin, &self.stdout, &self.stderr];
-        let slots = stdio.into_iter().zip(0u32..).filter_map(|(stdio, slot)| match stdio.as_ref().unwrap_or(default) {
-            Stdio::Inherit => Some(slot),
-            Stdio::ParentStdout => Some(1),
-            Stdio::ParentStderr => Some(2),
-            Stdio::InheritFile(file) => Some(file.raw_fd() as u32),
-            Stdio::Null | Stdio::MakePipe | Stdio::MakeTtyPipe | Stdio::InheritPipe(_) => None,
-        });
-        let moved = self.extra_slots.iter().map(|&[_, parent]| parent);
-        let given = self.endowments.iter().chain(&self.provided).map(|&(_, handle)| handle);
-        for handle in slots.chain(moved).chain(given).map(toyos_abi::RawHandle) {
-            if toyos::net::stream::is_stream(handle) {
-                return Err(io::Error::new(io::ErrorKind::InvalidInput, toyos::net::stream::Misuse::Moved(handle).to_string()));
-            }
-        }
-        Ok(())
-    }
-
-    /// The environment a direct spawn carries: the caller's, except `HOME`.
-    ///
-    /// **A direct child's `HOME` is one its caller named or one the supervisor answered
-    /// for it, never the one this process was started with.** The supervisor decides
-    /// every program's `HOME` from its row, and a service's is its own
-    /// `/state/<name>`: a child the supervisor never saw would otherwise carry a location
-    /// decided for its parent alone.
-    fn direct_env(
-        &self,
-        mut env: BTreeMap<EnvKey, OsString>,
-        from_supervisor: Option<OsString>,
-    ) -> BTreeMap<EnvKey, OsString> {
-        let home = OsStr::new("HOME");
-        let named = self.env.iter().find(|(key, _)| *key == home).map(|(_, value)| value);
-        env.remove(home);
-        match named {
-            Some(Some(value)) => {
-                env.insert(home.to_owned(), value.to_owned());
-            }
-            Some(None) => {}
-            None => {
-                if let Some(value) = from_supervisor {
-                    env.insert(home.to_owned(), value);
-                }
-            }
-        }
-        env
-    }
-
-    /// Ask the supervisor to start this program, or answer [`Routed::Direct`] for
-    /// a caller that cannot or a program the manifest does not declare — but a
-    /// child asked of the supervisor is launched or refused `PermissionDenied`, never
-    /// spawned here.
-    ///
-    /// The stdio handles and the place are **duplicated** before they go: a
-    /// launch moves what it carries, and `Stdio::Inherit` names the parent's
-    /// own slot 1.
-    fn launch(
-        &self,
-        resolved: &OsStr,
-        argv: &[u8],
-        env: &[u8],
-        cwd: &str,
-        slot_map: &[[u32; 2]],
-    ) -> io::Result<Routed> {
-        use toyos::launch::{self, Launch, LaunchError, MAX_LAUNCH_EXTRAS, Outcome};
-
-        let for_supervisor = matches!(self.parent, Parent::Supervisor);
-        // Where a launch that is not made goes: the direct spawn, which places
-        // the child where this one would have, or a refusal.
-        let unmade = |why, home: Option<OsString>| match launch_route::unmade(why, for_supervisor) {
-            launch_route::Unlaunched::Direct => Ok(Routed::Direct { home }),
-            launch_route::Unlaunched::Refused(why) => Err(io::Error::new(io::ErrorKind::PermissionDenied, why)),
-            launch_route::Unlaunched::Failed(e) => Err(crate::sys::to_io_error(e)),
-        };
-
-        // A `provide` is a statement that the child's authority comes from its
-        // own manifest row plus this connector, and only the launcher can build
-        // that. Without one there is no weaker thing to fall back to that would
-        // still be what the caller asked for.
-        let Some(conn) =
-            toyos::endow::launcher().and_then(|held| held.open(toyos::launch::LAUNCHER).ok())
-        else {
-            return unmade(launch_route::Unmade::NoLauncher { provided: !self.provided.is_empty() }, None);
-        };
-
-        // The whole path, not a key: `/bin/ls` is a symlink to `/bin/toybox`
-        // and the row that says what an applet holds is `toybox`'s. Resolving
-        // that is the supervisor's — it holds the manifest and this process must not
-        // become a second reader of it.
-        let program = resolved.to_str().unwrap_or("");
-
-        // A place is one of the batch's extras. Refused rather than spawned
-        // directly: that child would hold this process's namespace, not its row.
-        if self.provided.len() + usize::from(!for_supervisor) > MAX_LAUNCH_EXTRAS {
-            return Err(io::const_error!(
-                io::ErrorKind::InvalidInput,
-                "more connectors provided than a launch carries beside its place",
-            ));
-        }
-
-        let place = match self.parent {
-            Parent::Supervisor => None,
-            Parent::Place(place) => Some(toyos_abi::RawHandle(place)),
-            Parent::Caller => Some(toyos::AsHandle::as_handle(toyos::endow::this_process())),
-        };
-        let parent = match place {
-            None => launch::Parent::Supervisor,
-            Some(place) => match toyos_abi::syscall::dup(place) {
-                Ok(copy) => launch::Parent::Place(copy),
-                Err(e) => return unmade(launch_route::Unmade::PlaceNotCopied(e), None),
-            },
-        };
-        let release = |slots: &[(u32, toyos_abi::RawHandle)]| {
-            for (_, h) in slots {
-                toyos_abi::syscall::close(*h);
-            }
-            if let launch::Parent::Place(copy) = parent {
-                toyos_abi::syscall::close(copy);
-            }
-        };
-
-        let mut slots: Vec<(u32, toyos_abi::RawHandle)> = Vec::with_capacity(slot_map.len());
-        for &[child_slot, parent] in slot_map {
-            match toyos_abi::syscall::dup(toyos_abi::RawHandle(parent)) {
-                Ok(copy) => slots.push((child_slot, copy)),
-                Err(e) => {
-                    release(&slots);
-                    return Err(crate::sys::to_io_error(e));
-                }
-            }
-        }
-        let extras: Vec<(&str, toyos_abi::RawHandle)> = self
-            .provided
-            .iter()
-            .map(|(name, handle)| (name.as_str(), toyos_abi::RawHandle(*handle)))
-            .collect();
-        let request = Launch { program, argv, env, cwd, extras: &extras, slots: &slots, parent };
-        let mut home = crate::vec![0u8; toyos::ipc::MAX_FRAME_LEN as usize];
-        let answer = launch::launch(&conn, &request, &mut home);
-
-        // **The send moved them.** Every arm below but `NotSent` is past the
-        // point where these duplicates left this table, so closing them here
-        // would be this process naming a handle it does not hold — which the
-        // kernel answers by ending it. The launcher releases what it took.
-        match answer {
-            Ok(Outcome::Started(handle)) => {
-                // SAFETY: the supervisor moved this handle into our table and holds none.
-                Ok(Routed::Started(Process {
-                    handle: unsafe { toyos::process::Process::from_raw(handle) },
-                }))
-            }
-            // The direct path, which is what §4.5 clause 2 says an undeclared
-            // program gets. A caller that transferred connectors loses nothing
-            // by it: the supervisor merges a launched program's extras into the namespace
-            // it builds, so a caller that was itself launched already carries
-            // them, and the child inherits that. What the direct path cannot do
-            // is merge a name into an *inherited* namespace — no caller in the
-            // tree needs it, and
-            // `issues/isolation/a-provided-name-cannot-reach-an-undeclared-child.md`
-            // is where that is written down.
-            // It carries the `HOME` the supervisor decided for the program, which the
-            // direct spawn hands on in place of this process's own.
-            Ok(Outcome::NotDeclared { home }) => unmade(launch_route::Unmade::NotDeclared, Some(home.into())),
-            Ok(Outcome::Refused) | Err(LaunchError::Sent(_)) => {
-                Err(io::Error::from(io::ErrorKind::Other))
-            }
-            Ok(Outcome::Gone) => Err(crate::sys::to_io_error(toyos_abi::syscall::SyscallError::Gone)),
-            Err(LaunchError::NotSent(_)) => {
-                release(&slots);
-                unmade(launch_route::Unmade::NotSent, None)
-            }
-        }
+        let handle = spawned.map_err(refused)?;
+        Ok((Process { handle }, pipes(stdin_pipe, stdout_pipe, stderr_pipe)))
     }
 
     fn setup_slot(
@@ -662,6 +368,24 @@ impl Command {
             Stdio::Null => {}
         }
         Ok(())
+    }
+}
+
+/// A path the kernel and the launcher take, which is UTF-8.
+fn utf8<'a>(path: &'a OsStr, what: &'static str) -> io::Result<&'a str> {
+    path.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, what))
+}
+
+fn refused(refused: toyos::spawn::Refused) -> io::Error {
+    use toyos::spawn::Refused;
+    match refused {
+        Refused::Permission(why) => io::Error::new(io::ErrorKind::PermissionDenied, why),
+        Refused::Invalid(why) => io::Error::new(io::ErrorKind::InvalidInput, why),
+        Refused::Stream(handle) => {
+            io::Error::new(io::ErrorKind::InvalidInput, toyos::net::stream::Misuse::Moved(handle).to_string())
+        }
+        Refused::NotStarted => io::Error::from(io::ErrorKind::Other),
+        Refused::Syscall(e) => crate::sys::to_io_error(e),
     }
 }
 

@@ -77,9 +77,8 @@ pub(crate) fn dup_at_least<E>(
     }
 }
 
-/// The descriptors marked close-on-exec, by number: kept for stage 3 of
-/// `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`,
-/// whose spawn reads them. A number is a slot at one generation, so a handle
+/// The descriptors marked close-on-exec, by number, which a spawn reads
+/// (`posix_io::stdio_for_spawn`). A number is a slot at one generation, so a handle
 /// made later in the slot is never taken for one marked here.
 pub(crate) struct CloseOnExec(BTreeSet<i32>);
 
@@ -104,5 +103,36 @@ impl CloseOnExec {
     /// `F_GETFD`'s answer.
     pub(crate) fn flags(&self, fd: i32) -> i32 {
         if self.0.contains(&fd) { FD_CLOEXEC } else { 0 }
+    }
+}
+
+/// What this process holds in slots 0–2, its stdin, stdout and stderr, by
+/// the handle in each: the three a child is spawned with. A process starts
+/// holding all three, as the spawn that started it gave them, and a slot holds
+/// a later handle at its next generation, so `close` and `dup2` say which.
+pub(crate) struct Stdio([Option<u32>; 3]);
+
+impl Stdio {
+    pub(crate) const fn new() -> Stdio {
+        Stdio([Some(0), Some(1), Some(2)])
+    }
+
+    /// `handle` closed: its slot holds nothing, if it was the slot's.
+    pub(crate) fn closed(&mut self, handle: u32) {
+        let slot = RawHandle(handle).slot() as usize;
+        if let Some(held) = self.0.get_mut(slot).filter(|held| **held == Some(handle)) {
+            *held = None;
+        }
+    }
+
+    /// `handle` is what its slot holds now, as `dup2` answered it.
+    pub(crate) fn placed(&mut self, handle: RawHandle) {
+        if let Some(held) = self.0.get_mut(handle.slot() as usize) {
+            *held = Some(handle.0);
+        }
+    }
+
+    pub(crate) fn held(&self) -> [Option<u32>; 3] {
+        self.0
     }
 }

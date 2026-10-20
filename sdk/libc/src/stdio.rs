@@ -664,9 +664,6 @@ pub unsafe extern "C" fn perror(s: *const u8) {
 // Remaining stdio-adjacent functions
 
 #[no_mangle]
-pub unsafe extern "C" fn system(_command: *const u8) -> i32 { -1 }
-
-#[no_mangle]
 pub unsafe extern "C" fn atof(s: *const u8) -> f64 {
     super::misc::strtod(s, ptr::null_mut())
 }
