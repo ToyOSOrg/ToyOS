@@ -1,4 +1,4 @@
-//! printf's numeric conversions against what C17 7.21.6.1 says each prints:
+//! printf's numeric conversions against what C17 §7.21.6.1 says each prints:
 //! the alternate form of every conversion that has one, and the flags, width
 //! and precision it meets.
 

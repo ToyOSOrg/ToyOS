@@ -1,4 +1,4 @@
-//! printf's conversion specifications (C17 7.21.6.1): reading one, and writing
+//! printf's conversion specifications (C17 §7.21.6.1): reading one, and writing
 //! an integer or a floating-point value under its flags, width and precision.
 //! It reads and sets nothing but what it is handed, so the host tests it
 //! (`toyos-libc-copies`).
