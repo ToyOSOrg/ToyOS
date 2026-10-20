@@ -16,8 +16,8 @@ use std::sync::atomic::{fence, Ordering};
 
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
-use toyos::{DmaRegion, PciDev};
-use toyos_abi::pci::PciFunctionInfo;
+use toyos::{DmaRegion, PciDev, RawHandle};
+use toyos_abi::pci::{DmaMapping, PciFunctionInfo};
 use toyos_abi::syscall::SyscallError;
 use toyos_device_memory::{DmaBuffers, Registers};
 
@@ -26,6 +26,13 @@ pub mod virtio;
 /// The claim's description, read once per claim (`PciDev::describe`).
 pub fn describe(dev: &PciDev) -> Result<PciFunctionInfo, KernelRefused> {
     dev.describe().map_err(KernelRefused::on("the claim's description"))
+}
+
+/// `region`, which a peer lent, put into the claim's function's domain
+/// (`PciDev::dma_map`).
+pub fn lend(dev: &PciDev, region: RawHandle) -> Result<DmaMapping, KernelRefused> {
+    let call = "the lent region's mapping";
+    dev.dma_map(region).map_err(|e| KernelRefused { call, why: Why::of_lent(call, e) })
 }
 
 /// A mapped BAR, as a driver reaches its device's registers.
@@ -178,6 +185,10 @@ pub enum Why {
     /// The IOMMU refused the function an access, and the claim answers nothing
     /// more.
     Faulted,
+    /// The region a peer lent cannot be lent on to the function: it is not
+    /// ordinary memory, the function reaches it already, or it came without
+    /// the right to map it.
+    Unlendable,
 }
 
 impl Why {
@@ -191,6 +202,15 @@ impl Why {
             SyscallError::InvalidArgument => Self::NotOffered,
             SyscallError::Io => Self::Faulted,
             other => panic!("toyos-pci-claim: the kernel refused {call} {other:?}, which it never answers it"),
+        }
+    }
+
+    /// [`Self::of`] for a region a peer lent, whose words about the region are
+    /// the peer's and not this claim's.
+    fn of_lent(call: &str, e: SyscallError) -> Self {
+        match e {
+            SyscallError::InvalidArgument | SyscallError::PermissionDenied => Self::Unlendable,
+            other => Self::of(call, other),
         }
     }
 }
@@ -230,5 +250,16 @@ mod tests {
         ] {
             assert!(std::panic::catch_unwind(|| Why::of("a call", never)).is_err(), "{never:?}");
         }
+    }
+
+    /// A lent region's own refusals are the peer's; the claim's are as above.
+    #[test]
+    fn a_lent_region_the_function_cannot_reach_is_unlendable() {
+        assert_eq!(Why::of_lent("a lend", SyscallError::InvalidArgument), Why::Unlendable);
+        assert_eq!(Why::of_lent("a lend", SyscallError::PermissionDenied), Why::Unlendable);
+        assert_eq!(Why::of_lent("a lend", SyscallError::Gone), Why::Gone);
+        assert_eq!(Why::of_lent("a lend", SyscallError::ResourceExhausted), Why::Exhausted);
+        assert_eq!(Why::of_lent("a lend", SyscallError::Io), Why::Faulted);
+        assert!(std::panic::catch_unwind(|| Why::of_lent("a lend", SyscallError::NotFound)).is_err());
     }
 }

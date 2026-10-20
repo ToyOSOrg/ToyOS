@@ -7,9 +7,9 @@
 # `exit: <name> pid=N code=N cpu=Nms` record is what carries it off the stick.
 #
 # No compositor: the framebuffer jobs claim the display themselves, and a claim
-# is minted for one holder. soundserver *is* here, and claims the HDA controller
-# without a client: on this machine the controller is real, and its codec walk
-# and output-path choice are the only exercise of `toyos-hda` that hardware can
+# is minted for one holder. soundserver and the hda driver *are* here, with no
+# client: on this machine the controller is real, and its codec walk and
+# output-path choice are the only exercise of `toyos-hda` that hardware can
 # give.
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "soundserver", "test-runner"]
@@ -20,8 +20,16 @@ syscap = ["logread"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver", "volume"]
-devices = ["pci:04:03:00"]
+serves = ["soundserver", "volume", "sound-output"]
+syscap = ["rt"]
+
+# The Intel HD Audio driver: one process per HDA function the kernel does not
+# drive, each walking its own controller's codecs and offering soundserver the
+# output it reaches. A machine with display audio beside an analog codec runs
+# two, and soundserver plays to the one that offers.
+[programs.hda]
+drives = ["pci:04:03:*"]
+receives = ["sound-output"]
 syscap = ["rt"]
 
 # `device` because every framebuffer job mints its own claim and no manifest row

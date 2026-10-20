@@ -634,7 +634,7 @@ mod tests {
                     name: "soundserver".into(),
                     path: "/system/bin/soundserver".into(),
                     serves: vec!["soundserver".into()],
-                    devices: vec!["pci:04:03:00".into(), "pci:04:01:00/1af4:1059".into()],
+                    devices: vec!["pci:04:01:00/1af4:1059".into()],
                     syscap: vec!["rt".into()],
                     service: true,
                     ..Program::default()

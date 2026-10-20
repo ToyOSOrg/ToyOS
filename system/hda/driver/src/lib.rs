@@ -1,9 +1,9 @@
-//! soundserver's Intel HDA driver, pure: the controller and its codec link
-//! ([`controller`]) over `toyos-device-memory`'s boundary, and everything
+//! The `hda` program's Intel HDA driver, pure: the controller and its codec
+//! link ([`controller`]) over `toyos-device-memory`'s boundary, and everything
 //! decided from what a codec said about itself — which converter and pins
 //! carry sound to a speaker, and the verbs that configure them.
 //!
-//! No instruction that reaches a device is here: soundserver implements the
+//! No instruction that reaches a device is here: the program implements the
 //! boundary over its claim. Pure, the controller is host-tested against a
 //! model of one, and the graph traversal against the committed codec dumps of
 //! the machines that have to work and against states no machine in reach
@@ -32,6 +32,6 @@ mod fixture;
 
 pub use caps::{AmpCaps, ConfigDefault, GainRange, PinCaps, WidgetCaps, WidgetKind};
 pub use graph::{Codec, FunctionGroup, Widget};
-pub use path::{choose, find_output_path, Hop, OutputPath, PathError, PinSetup, Unchosen};
+pub use path::{find_output_path, Hop, OutputPath, PathError, PinSetup};
 pub use probe::{enumerate, CodecFault, Verbs};
 pub use verb::{Address, Node, Response, Verb};
