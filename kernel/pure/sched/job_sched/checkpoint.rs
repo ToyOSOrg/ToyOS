@@ -235,14 +235,16 @@ fn two_jobs(sim: &mut Sim, m: u32, work: Work, churn: u64) {
 /// - **A dip below the share is repaid later.** A job whose runnable count
 ///   dips below its fluid share without reaching zero shows a deficit against
 ///   the jobs beside it, and ordering by normalized service repays it after
-///   the dip. On four identical CPUs, each with one sleeper and two hogs,
-///   exact ordering runs the four sleepers in lock-step, so their dips
-///   coincide and the job is over-served by about 1.25% (205 ms over 8 s,
-///   growing). Desynchronized by 1 µs per thread (the scenario after it) the
-///   same job stays within 41 ms. "A job with no waiting thread accrues no
-///   deficit", as a per-job rule, was tried in two forms (at each ordering,
-///   and once when a thread starts waiting): both forgave genuine deficits and
-///   made other scenarios far worse.
+///   the dip. How much depends on how the job's threads' dips happen to
+///   coincide in a given schedule: here, four identical CPUs each with one
+///   sleeper and two hogs, the sleepers run in lock-step and the job is
+///   over-served by about 1.25% (205 ms over 8 s, growing); 1 µs between their
+///   sleeps (the scenario after it) gives 41 ms. The ordering of a7eaa346e
+///   showed 8.8 ms on this case but 402 ms with that 1 µs, so neither ordering
+///   avoids it. "A job with no waiting thread accrues no deficit", as a
+///   per-job rule, was tried in two forms (at each ordering, and once when a
+///   thread starts waiting): both forgave genuine deficits and made other
+///   scenarios far worse.
 const OPEN: [(&str, &str, f64); 1] = [("flat4", "m duty 1/0.1 ms + 2m hogs", 250.0)];
 
 #[test]
