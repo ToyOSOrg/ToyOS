@@ -175,6 +175,7 @@ pub fn render(machine: &Machine, records: &[Record]) -> Result<BTreeMap<String, 
                     Role::Root => "root",
                     Role::Boot => "boot",
                     Role::Log => "log",
+                    Role::Slot => "slot",
                 };
                 out.put(format!("loaded.{role}"), guid(l.unique_guid).into())?;
             }
