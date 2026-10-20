@@ -32,18 +32,34 @@ and bhyve each set. `issues/the-lan-is-not-yet-production-grade.md` plans the
 same for NICs ("init binds drivers to hardware from a declared match table by
 vendor, device and class").
 
-A constraint a class row meets that an id row does not: a machine whose NVMe
-holds another operating system, as the T14's holds Ubuntu, has it driven and
-offered to the block service, which then serves only the partitions its grants
-name (`system/diskserver/src/main.rs`). A machine with two NVMe controllers
-gets a driver on each.
+**A compromise #962 keeps**, accepted by the orchestrator there: the `nvme`
+row names QEMU's id in every image, shipped and test alike, so that no metal
+boot drives a bench's own NVMe disk — the T14's holds the Ubuntu the metal
+loop reboots through after every boot (`tests/metal/src/lib.rs`). That is a
+machine with an NVMe disk and no ToyOS driver for it.
 
-**Owner**: whoever holds `issues/toyos-runs-in-any-open-source-hypervisor.md`.
+**What a shipped image should drive**: every NVMe controller, by class code,
+whatever machine it boots on — QEMU, another hypervisor, metal.
 
-**Exit**: both shipped configs' `nvme` row names NVMe by class code, which
-`toyos_manifest::device::PciMatch::parse` takes (#926); and a guest boot whose
+**What keeps another system's disk unwritten under a class row**, by reading
+and not measured: the driver reads its table and resets and enables the
+controller, and writes nothing outside a session. A session opens only what a
+grant admits (`system/diskserver/src/main.rs`), and the supervisor mints
+grants for the loader's LOG and BOOT GUIDs, for the `TOYOS-DATA` type, and for
+`update` on the slots of the running ROOT's disk (`storage_endowment`,
+`Supervisor::slot_grant`, `system/supervisor/src/main.rs`), none of which an
+Ubuntu partition carries. Whether Ubuntu boots off a controller ToyOS drove
+and reset is not measured.
+
+**Owner**: the orchestrator, which dispatches it; the hypervisor track
+(`issues/toyos-runs-in-any-open-source-hypervisor.md`) waits on it.
+
+**Exit**: every image's `nvme` row names NVMe by class code, which
+`toyos_manifest::device::PciMatch::parse` takes (#926); a guest boot whose
 controller is QEMU's `nvme` with `use-intel-id=on` serves DATA through the block
-service, which a row naming `1b36:0010` instead reds. The configs the T14 boots
-keep their id row, outside this exit, until the T14's NVMe holds no Ubuntu: a
-class row there would drive the disk the metal workflow reboots through (the
-orchestrator's ruling, #896, issuecomment-6131213771, ruling 4).
+service, which a row naming `1b36:0010` instead reds; a supervisor host test
+holds that every block grant it mints names a loader-named GUID, a ToyOS
+partition type, or the running ROOT disk's slots, red on a grant by any other
+type; and a T14 row whose readback shows the nvme driver offering the T14's
+disk with no session opened on any of its partitions, read after the metal
+loop's own reboot into Ubuntu off that disk.
