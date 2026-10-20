@@ -30,22 +30,22 @@ pub fn judges_verdict() -> Result<(), String> {
     };
     let next = spawn("test_rs_next");
 
-    let configured = "[ 0.500 soundserver] soundserver: hda path configured in 3 ms\n";
+    let configured = "[ 0.500 soundserver] soundserver: playing to the output offered, 44100Hz 2ch, 128 frames/period\n";
     let tone = |ended: String| {
         format!("{configured}{}{}", spawn("test_rs_audio_tone"), session(stats(0, 1), ended))
     };
     judged("the tone", tone_on_metal, &format!("{}{next}", tone(stats(0, 0))), true)?;
     judged("a tone short of periods", tone_on_metal, &format!("{}{next}", tone(stats(2, 0))), false)?;
     judged(
-        "a tone off no hda path",
+        "a tone with no output played to",
         tone_on_metal,
         &format!("{}{next}", tone(stats(0, 0))).replace(configured, ""),
         false,
     )?;
     judged(
-        "a tone on the null sink",
+        "a tone that played before soundserver played to the output",
         tone_on_metal,
-        &format!("{}[ 0.600 soundserver] {NULL_SINK}\n{next}", tone(stats(0, 0))),
+        &format!("{}{configured}{next}", tone(stats(0, 0)).replace(configured, "")),
         false,
     )?;
     // The next job's stream connected before soundserver let the tone's go, so the
