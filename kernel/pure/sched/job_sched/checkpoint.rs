@@ -6,8 +6,9 @@
 //! sched-check -- checkpoint --nocapture`). "Bounded" means no persistent
 //! drift: a job's error over the longest window is within its error over a
 //! short one plus the EEVDF lag bound of the requests involved, so it does not
-//! grow with the window. The `counterexample_` tests assert the opposite where
-//! the design cannot meet the policy.
+//! grow with the window. The tests before the cross-CPU one run the plain
+//! candidate (`Params::CANDIDATE`, per-CPU lag only); its `counterexample_`
+//! tests assert the drift that makes cross-CPU fairness necessary.
 
 use super::sim::*;
 use super::*;
@@ -38,7 +39,7 @@ fn share(sim: &Sim, job: JobId) -> f64 {
 fn a_single_thread_job_keeps_one_cpu_beside_a_build_going_1_16_1() {
     for (name, topo) in [("flat4", flat(4)), ("t14", t14()), ("amd", amd()), ("flat16", flat(16))] {
         let m = topo.cpus() as u32;
-        let mut sim = Sim::new(topo, Params::DEFAULT);
+        let mut sim = Sim::new(topo, Params::CANDIDATE);
         let single = sim.job(WEIGHT_UNIT);
         let build = sim.job(WEIGHT_UNIT);
         sim.thread(single, Work::Hog, CpuId(0), false);
@@ -60,7 +61,7 @@ fn a_single_thread_job_keeps_one_cpu_beside_a_build_going_1_16_1() {
 
 #[test]
 fn weighted_builds_split_by_weight() {
-    let mut sim = Sim::new(flat(4), Params::DEFAULT);
+    let mut sim = Sim::new(flat(4), Params::CANDIDATE);
     let a = sim.job(2 * WEIGHT_UNIT);
     let b = sim.job(WEIGHT_UNIT);
     for i in 0..8 {
@@ -73,11 +74,15 @@ fn weighted_builds_split_by_weight() {
     assert_bounded(&sim, 1, "weighted");
 }
 
-/// Threads that sleep 0.1 ms after every 1 ms of CPU keep their job's share:
-/// lag carried across each sleep, not lost and not banked.
+/// Threads that sleep 0.1 ms after every 1 ms of CPU. While one sleeps its
+/// CPU's time goes to the other job there, where the fluid share gives it to
+/// the sleeper's siblings elsewhere; raising their groups' weights recovers
+/// only part of it, and the job trails by about 1% for as long as it runs.
+/// Measured, not asserted: the per-CPU candidate drifts here, and
+/// `cross_cpu_lag_bounds_every_scenario_on_every_shape` bounds the same case.
 #[test]
-fn short_sleeps_keep_their_share() {
-    let mut sim = Sim::new(flat(4), Params::DEFAULT);
+fn short_sleeps_are_measured() {
+    let mut sim = Sim::new(flat(4), Params::CANDIDATE);
     let s = sim.job(WEIGHT_UNIT);
     let h = sim.job(WEIGHT_UNIT);
     for i in 0..4 {
@@ -88,8 +93,6 @@ fn short_sleeps_keep_their_share() {
     }
     sim.run_until(SPAN);
     println!("{}", sim.report("S4 duty 1 ms / 0.1 ms beside H8 hogs on 4", Nanos::ZERO, &WINDOWS));
-    assert_bounded(&sim, 0, "sleepers");
-    assert_bounded(&sim, 1, "sleepers");
 }
 
 /// Placement noise beyond what balancing asks for: a waiting thread moved to
@@ -98,7 +101,7 @@ fn short_sleeps_keep_their_share() {
 #[test]
 fn migration_churn_is_measured() {
     for duty in [false, true] {
-        let mut sim = Sim::new(flat(4), Params::DEFAULT);
+        let mut sim = Sim::new(flat(4), Params::CANDIDATE);
         let a = sim.job(WEIGHT_UNIT);
         let b = sim.job(WEIGHT_UNIT);
         for i in 0..8 {
@@ -121,7 +124,7 @@ fn migration_churn_is_measured() {
 /// counterexamples below.
 #[test]
 fn uneven_placement_is_measured() {
-    let mut sim = Sim::new(flat(4), Params::DEFAULT);
+    let mut sim = Sim::new(flat(4), Params::CANDIDATE);
     let jobs = [(sim.job(WEIGHT_UNIT), 8), (sim.job(WEIGHT_UNIT), 2), (sim.job(WEIGHT_UNIT), 1)];
     for (j, n) in jobs {
         for _ in 0..n {
@@ -138,7 +141,7 @@ fn uneven_placement_is_measured() {
 /// placement has loads 2 and 1. The error grows by 1/3 CPU-second per second.
 #[test]
 fn counterexample_three_single_thread_jobs_on_two_cpus() {
-    let mut sim = Sim::new(flat(2), Params::DEFAULT);
+    let mut sim = Sim::new(flat(2), Params::CANDIDATE);
     for c in [0, 0, 1] {
         let j = sim.job(WEIGHT_UNIT);
         sim.thread(j, Work::Hog, CpuId(c), false);
@@ -155,7 +158,7 @@ fn counterexample_three_single_thread_jobs_on_two_cpus() {
 /// it: A receives 1.5 CPUs and B 2.5 where each is entitled to 2.
 #[test]
 fn counterexample_a_fair_and_an_unfair_placement_have_the_same_loads() {
-    let mut sim = Sim::new(flat(4), Params::DEFAULT);
+    let mut sim = Sim::new(flat(4), Params::CANDIDATE);
     let a = sim.job(WEIGHT_UNIT);
     let b = sim.job(WEIGHT_UNIT);
     let threads: Vec<_> =
@@ -168,6 +171,140 @@ fn counterexample_a_fair_and_an_unfair_placement_have_the_same_loads() {
     sim.run_until(SPAN);
     println!("{}", sim.report("A3 B3 on 4 CPUs from {A,A} {A,B} {B} {B}", Nanos::ZERO, &WINDOWS));
     assert!(share(&sim, a) < 1.6 && share(&sim, b) > 2.4, "balancing found the fair placement");
+}
+
+/// The counterexamples' scenarios and the others above, scaled to `m` CPUs.
+type Scenario = (&'static str, fn(&mut Sim, u32));
+type Shape = (&'static str, fn() -> crate::sched::topology::Topology);
+
+fn scaled_scenarios() -> [Scenario; 9] {
+    [
+        ("m+1 single-thread jobs", |sim, m| {
+            for c in 0..=m {
+                let j = sim.job(WEIGHT_UNIT);
+                sim.thread(j, Work::Hog, CpuId(c % m), false);
+            }
+        }),
+        ("{A,A}{A,B}{B}{B} per 4 CPUs", |sim, m| {
+            let (a, b) = (sim.job(WEIGHT_UNIT), sim.job(WEIGHT_UNIT));
+            let mut placed = Vec::new();
+            for q in 0..m / 4 {
+                for (j, c) in [(a, 0), (a, 0), (a, 1), (b, 1), (b, 2), (b, 3)] {
+                    placed.push(sim.thread(j, Work::Hog, CpuId(4 * q + c), true));
+                }
+            }
+            sim.run_until(Nanos(20 * MS));
+            for t in placed {
+                sim.unpin(t);
+            }
+        }),
+        ("2m, m/2 and 1 threads from CPU 0", |sim, m| {
+            for n in [2 * m, m / 2, 1] {
+                let j = sim.job(WEIGHT_UNIT);
+                for _ in 0..n {
+                    sim.thread(j, Work::Hog, CpuId(0), false);
+                }
+            }
+        }),
+        ("single + build 1-16-1", |sim, m| {
+            let (single, build) = (sim.job(WEIGHT_UNIT), sim.job(WEIGHT_UNIT));
+            sim.thread(single, Work::Hog, CpuId(0), false);
+            sim.thread(build, Work::Hog, CpuId(1), false);
+            for phase in 0..9u64 {
+                sim.run_until(Nanos(phase * 1000 * MS + 500 * MS));
+                let helpers: Vec<_> = (0..15).map(|i| sim.thread(build, Work::Hog, CpuId(i % m), false)).collect();
+                sim.run_until(Nanos((phase + 1) * 1000 * MS));
+                for h in helpers {
+                    sim.finish(h);
+                }
+            }
+        }),
+        ("2m + m hogs, churn every 10 ms", |sim, m| two_jobs(sim, m, Work::Hog, 10 * MS)),
+        ("2m hogs + m duty 2/0.3 ms, churn every 10 ms", |sim, m| two_jobs(sim, m, DUTY, 10 * MS)),
+        ("2m hogs + m duty 2/0.3 ms, churn every 1 ms", |sim, m| two_jobs(sim, m, DUTY, MS)),
+        ("m duty 1/0.1 ms + 2m hogs", |sim, m| {
+            let (s, h) = (sim.job(WEIGHT_UNIT), sim.job(WEIGHT_UNIT));
+            for i in 0..m {
+                sim.thread(s, Work::Duty { run: MS, sleep: 100 * US }, CpuId(i), false);
+            }
+            for i in 0..2 * m {
+                sim.thread(h, Work::Hog, CpuId(i % m), false);
+            }
+        }),
+        ("2m (weight 2) + 2m (weight 1)", |sim, m| {
+            let (a, b) = (sim.job(2 * WEIGHT_UNIT), sim.job(WEIGHT_UNIT));
+            for i in 0..2 * m {
+                sim.thread(a, Work::Hog, CpuId(i % m), false);
+                sim.thread(b, Work::Hog, CpuId(i % m), false);
+            }
+        }),
+    ]
+}
+
+const DUTY: Work = Work::Duty { run: 2 * MS, sleep: 300 * US };
+
+fn two_jobs(sim: &mut Sim, m: u32, work: Work, churn: u64) {
+    let (a, b) = (sim.job(WEIGHT_UNIT), sim.job(WEIGHT_UNIT));
+    for i in 0..2 * m {
+        sim.thread(a, Work::Hog, CpuId(i % m), false);
+    }
+    for i in 0..m {
+        sim.thread(b, work, CpuId(i % m), false);
+    }
+    sim.churn(churn, 1);
+}
+
+/// **Cross-CPU fairness** (`Params::cross_cpu_lag`), on every scenario above
+/// at four CPUs and both benches' shapes. A job's normalized service departs
+/// from the fluid share by at most `D = move_lead + fairness_period +
+/// 2·lag_bound` (60 ms per unit of weight), so its error over any window, the
+/// difference of two such departures, is at most `2D`, whatever the window:
+///
+/// - the fluid share lies between the least- and most-served uncapped jobs, so
+///   a job departs from it by no more than the largest lead between two jobs;
+/// - jobs that share a CPU are ordered there by normalized service, so their
+///   lead is held to the clamped group lag;
+/// - jobs that share none are evened by moves, which start once one leads by
+///   `move_lead`, at most one per CPU per `fairness_period`, during which the
+///   lead grows by at most a CPU's worth.
+///
+/// The cost is printed: placement changes and migrations per second.
+#[test]
+fn cross_cpu_lag_bounds_every_scenario_on_every_shape() {
+    let p = Params::DEFAULT;
+    let bound = 2.0 * (p.move_lead + p.fairness_period + 2 * p.lag_bound) as f64 / MS as f64;
+    let shapes: [Shape; 3] = [("flat4", || flat(4)), ("t14", t14), ("amd", amd)];
+    let mut worst: f64 = 0.0;
+    for (shape, topo) in shapes {
+        for (name, setup) in scaled_scenarios() {
+            let mut sim = Sim::new(topo(), p);
+            let m = sim.topo.cpus() as u32;
+            setup(&mut sim, m);
+            sim.run_until(SPAN);
+            let jobs = sim.samples[0].1.len();
+            let mut line = format!("{shape:<6} {name:<46}");
+            for w in [100 * MS, 1000 * MS, 8000 * MS] {
+                let e = (0..jobs).map(|j| sim.window_error(j, w, Nanos::ZERO)).fold(0.0, f64::max);
+                line.push_str(&format!(" err@{}ms {e:>6.1}", w / MS));
+            }
+            let secs = SPAN.0 as f64 / 1e9;
+            line.push_str(&format!(
+                "  changes/s {:>6.1} migrations/s {:>7.1}",
+                sim.fairness_moves as f64 / secs,
+                sim.migrations as f64 / secs
+            ));
+            println!("{line}");
+            for (j, job) in sim.jobs().iter().enumerate() {
+                let scale = (sim.weight(*job) as f64 / WEIGHT_UNIT as f64).max(1.0);
+                for w in [100 * MS, 1000 * MS, 4000 * MS, 8000 * MS] {
+                    let e = sim.window_error(j, w, Nanos::ZERO);
+                    worst = worst.max(e / scale);
+                    assert!(e <= bound * scale, "{shape} {name}: job {j} {e:.1} ms over {} ms", w / MS);
+                }
+            }
+        }
+    }
+    println!("worst error per unit of weight {worst:.1} ms against a bound of {bound:.0} ms");
 }
 
 fn rt_machine(

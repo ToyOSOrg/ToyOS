@@ -98,7 +98,7 @@ fn a_threads_lag_follows_it_across_migration() {
 }
 
 #[test]
-fn a_dissolved_groups_lag_goes_to_the_jobs_next_group() {
+fn a_dissolved_groups_lag_goes_with_its_last_thread() {
     let mut s = machine(2);
     let j = s.create_job(WEIGHT_UNIT);
     let rival = s.create_job(WEIGHT_UNIT);
@@ -146,8 +146,10 @@ fn credit_kept_across_a_sleep_is_bounded() {
             assert!(kept.0.abs() <= bound, "{t:?} kept {kept:?}");
         }
     }
-    assert!(s.job(j).carried.0.abs() <= bound);
-    assert!(s.job(j).carried != Lag::ZERO || first == r);
+    for t in [a, b] {
+        assert!(s.thread(t).group_lag.0.abs() <= bound);
+    }
+    let _ = first;
 }
 
 #[test]
@@ -406,4 +408,106 @@ fn every_runnable_thread_is_in_exactly_one_queue() {
         }
         s.check();
     }
+}
+
+#[test]
+fn a_lone_job_ahead_is_made_to_share_once_it_leads_by_move_lead() {
+    let mut s = machine(2);
+    let jobs: Vec<JobId> = (0..3).map(|_| s.create_job(WEIGHT_UNIT)).collect();
+    let t: Vec<ThreadId> = jobs.iter().map(|&j| s.spawn(j)).collect();
+    s.wake(t[0], cpu(1), Nanos::ZERO);
+    s.wake(t[1], cpu(0), Nanos::ZERO);
+    s.wake(t[2], cpu(0), Nanos::ZERO);
+    let mut now = Nanos::ZERO;
+    let mut change = None;
+    // The lead grows at half a CPU: past `move_lead` well within 100 ms.
+    for _ in 0..100 {
+        if change.is_some() {
+            break;
+        }
+        for c in 0..2 {
+            s.schedule(cpu(c), now);
+        }
+        now = now.after(MS);
+        for c in 0..2 {
+            s.charge(cpu(c), now);
+        }
+        change = s.fairness_move(cpu(0), &[cpu(1)]);
+    }
+    assert!(change.is_some(), "no change offered after 100 ms");
+    let lead = s.served(jobs[0]) - s.served(jobs[1]).min(s.served(jobs[2]));
+    assert!(lead > P.move_lead as u128 && lead <= P.move_lead as u128 + MS as u128);
+    s.apply(change.unwrap(), now);
+    // The job ahead no longer has a CPU to itself.
+    let State::Queued { cpu: home, .. } = s.state(t[0]) else { panic!("blocked") };
+    assert_eq!(s.queued(home).count(), 2);
+    s.check();
+}
+
+#[test]
+fn nothing_is_taken_from_a_job_whose_threads_all_run() {
+    let mut s = machine(2);
+    let single = s.create_job(WEIGHT_UNIT);
+    let build = s.create_job(WEIGHT_UNIT);
+    let lone = s.spawn(single);
+    s.wake(lone, cpu(0), Nanos::ZERO);
+    for _ in 0..6 {
+        let t = s.spawn(build);
+        s.wake(t, cpu(1), Nanos::ZERO);
+    }
+    let mut now = Nanos::ZERO;
+    for _ in 0..200 {
+        for c in 0..2 {
+            s.schedule(cpu(c), now);
+        }
+        now = now.after(MS);
+        for c in 0..2 {
+            s.charge(cpu(c), now);
+        }
+        // The single job trails in normalized service, yet gains nothing from
+        // company: no change is ever offered at its expense.
+        assert_eq!(s.fairness_move(cpu(0), &[cpu(1)]), None);
+    }
+}
+
+#[test]
+fn a_cpu_orders_its_jobs_by_their_service_everywhere() {
+    let mut s = machine(2);
+    let behind = s.create_job(WEIGHT_UNIT);
+    let ahead = s.create_job(WEIGHT_UNIT);
+    let (b, a, a2) = (s.spawn(behind), s.spawn(ahead), s.spawn(ahead));
+    s.wake(a2, cpu(1), Nanos::ZERO);
+    let mut now = Nanos::ZERO;
+    // `ahead` runs alone on CPU 1 for 100 ms.
+    s.schedule(cpu(1), now);
+    now = now.after(100 * MS);
+    s.charge(cpu(1), now);
+    s.wake(b, cpu(0), now);
+    s.wake(a, cpu(0), now);
+    // On CPU 0 both join at zero lag, but `behind` trails by 100 ms of
+    // normalized service: it is owed the clamped lag and runs first, for longer.
+    let mut got = [0u64; 2];
+    for _ in 0..100 {
+        let t = s.schedule(cpu(0), now).unwrap();
+        let next = s.next_decision(cpu(0)).unwrap();
+        got[usize::from(t == a)] += next.since(now);
+        now = next;
+        s.charge(cpu(0), now);
+    }
+    assert!(got[0] > got[1], "behind {} ahead {}", got[0], got[1]);
+    assert!(s.cpus[0].groups.lag(behind).0.abs() <= Lag::from_ns(P.lag_bound as i64).0);
+}
+
+#[test]
+fn a_job_back_from_idle_trails_by_at_most_lead_cap() {
+    let mut s = machine(1);
+    let sleeper = s.create_job(WEIGHT_UNIT);
+    let hog = s.create_job(WEIGHT_UNIT);
+    let h = s.spawn(hog);
+    let z = s.spawn(sleeper);
+    s.wake(h, cpu(0), Nanos::ZERO);
+    let mut now = Nanos::ZERO;
+    run(&mut s, cpu(0), &mut now, 1000 * MS);
+    s.wake(z, cpu(0), now);
+    assert_eq!(s.served(hog) - s.served(sleeper), P.lead_cap as u128);
 }

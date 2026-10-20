@@ -13,7 +13,10 @@
 //! idle, else the nearest idle CPU, else its last CPU; an idle CPU takes a
 //! waiting thread from the CPU with the most; and every `balance_period` each
 //! CPU takes from the most loaded CPU the waiting thread whose move most
-//! reduces their difference in summed group weight, if any strictly does.
+//! reduces their difference in summed group weight, if any strictly does. With
+//! `cross_cpu_lag`, every
+//! `fairness_period` each CPU also makes the [`JobSched::fairness_move`] it is
+//! offered against all others.
 
 use super::*;
 use crate::sched::topology::{CpuKeys, Topology};
@@ -56,6 +59,7 @@ enum Ev {
     Wake(ThreadId),
     Release(ThreadId),
     Balance(CpuId),
+    Fairness(CpuId),
     Churn,
 }
 
@@ -64,6 +68,8 @@ pub struct Sim {
     pub topo: Topology,
     pub now: Nanos,
     pub balance_period: u64,
+    /// Changes made by [`JobSched::fairness_move`].
+    pub fairness_moves: u64,
     /// Delay before a CPU running realtime work takes a decision: a
     /// non-preemptible section or late timer, for overrun accounting.
     pub rt_overrun: u64,
@@ -151,6 +157,7 @@ impl Sim {
             topo,
             now: Nanos::ZERO,
             balance_period: 4 * MS,
+            fairness_moves: 0,
             rt_overrun: 0,
             churn: None,
             loads: BTreeMap::new(),
@@ -177,6 +184,10 @@ impl Sim {
         for c in 0..m {
             let at = Nanos(sim.balance_period * c as u64 / m as u64 + 1);
             sim.push(at, Ev::Balance(CpuId(c as u32)));
+            if params.cross_cpu_lag {
+                let at = Nanos(params.fairness_period * c as u64 / m as u64 + 2);
+                sim.push(at, Ev::Fairness(CpuId(c as u32)));
+            }
         }
         sim
     }
@@ -234,6 +245,14 @@ impl Sim {
     pub fn churn(&mut self, period: u64, seed: u64) {
         self.churn = Some((period, seed));
         self.push(self.now.after(period), Ev::Churn);
+    }
+
+    pub fn jobs(&self) -> &[JobId] {
+        &self.jobs
+    }
+
+    pub fn weight(&self, job: JobId) -> u64 {
+        self.weights[&job]
     }
 
     /// The thread exits the next time it runs.
@@ -333,6 +352,21 @@ impl Sim {
         self.s.migrate(t, c, self.now);
         self.migrations += 1;
         true
+    }
+
+    fn fairness_step(&mut self, c: CpuId) {
+        let partners: Vec<CpuId> = (0..self.topo.cpus() as u32).map(CpuId).collect();
+        let Some(change) = self.s.fairness_move(c, &partners) else { return };
+        if change.threads.iter().flatten().any(|(t, _, _)| self.loads[t].pinned) {
+            return;
+        }
+        self.s.apply(change, self.now);
+        self.fairness_moves += 1;
+        for &(_, from, to) in change.threads.iter().flatten() {
+            self.migrations += 1;
+            self.resched(from);
+            self.resched(to);
+        }
     }
 
     fn balance_step(&mut self, c: CpuId) {
@@ -545,6 +579,11 @@ impl Sim {
                 }
                 let at = self.now.after(period);
                 self.push(at, Ev::Churn);
+            }
+            Ev::Fairness(c) => {
+                self.fairness_step(c);
+                let at = self.now.after(self.s.params().fairness_period);
+                self.push(at, Ev::Fairness(c));
             }
             Ev::Balance(c) => {
                 self.balance_step(c);
