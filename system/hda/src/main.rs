@@ -162,7 +162,13 @@ struct Driver {
 fn main() {
     let dev = endow::claim::<PciDev>(&FUNCTION.to_string())
         .expect("hda: the drives row endows this process its function's claim");
-    let info = dev.describe().expect("hda: the claim's description");
+    let info = match toyos_pci_claim::describe(&dev) {
+        Ok(info) => info,
+        Err(why) => {
+            say!("hda: plays nothing: {why}");
+            return;
+        }
+    };
     let at = format!("hda {:02x}:{:02x}.{}", info.bus, info.dev, info.func);
     let bar_bytes = info.bar_bytes[REGISTERS as usize];
     match Driver::up(dev, bar_bytes, &at) {
@@ -251,7 +257,7 @@ impl Driver {
         let control = endow::service(output::PORT)
             .map_err(|why| Refusal::Soundserver(format!("no `{}` port ({why:?})", output::PORT)))?;
         let ring = offered(&control, &offer)?;
-        let lent = dev.dma_map(ring.as_handle()).map_err(KernelRefused::on("the lent ring's mapping"))?;
+        let lent = toyos_pci_claim::lend(&dev, ring.as_handle())?;
         if lent.bytes < offer.ring_bytes() as u64 {
             return Err(Refusal::Soundserver(format!(
                 "it lent a ring of {} bytes for {}",
