@@ -193,11 +193,18 @@ Not consumers:
      Stage 3 is not complete. Of 64 symmetric rows, the T14 passes 53 and
      the AMD bench 44.
      Evidence: `ToyOSOrg/evidence` `pr-958`.
-     - **Each bench's ISA path:**
+     - **Each bench's ISA path.** The kernel's cpu0 records in these boots
+       show CR4.OSXSAVE set, XCR0 0xe7 on the T14 and 0x7 on the AMD bench,
+       saved by XSAVES and XSAVEC. Each build's ISA line and the crate's own
+       CPUID and XGETBV admission agree with them:
        - the T14 runs 512-bit VAES GCM, AVX-512VL ChaCha20 and SHA-512, and
          SHA-NI;
        - the AMD bench runs AES-NI GCM, AVX2 ChaCha20 and Poly1305, BMI2
          SHA-512, and SHA-NI.
+     - **Remeasure after the XSAVE track.** These figures predate
+       `issues/user-programs-use-avx-under-xsave.md`'s remaining work. When
+       it lands, both benches' tables are taken again, and any row that
+       moves is reread against this record.
      - **What remains, by measured cause.** Each item's exit is that its
        rows pass on both benches.
        - **ChaCha20 on AVX2, the AMD bench**, is a recorded exception
