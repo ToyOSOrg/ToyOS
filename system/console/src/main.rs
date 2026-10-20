@@ -39,7 +39,7 @@ use toyos::surface::{self, Delivery, Host, Notice};
 use toyos::{FramebufferDev, Keyboard, Pipe};
 use toyos_abi::input::RawKeyEvent;
 use toyos_abi::syscall::{DeviceType, SyscallError};
-use toyos_input::wire::{self, Record, CONNECTIONS, KEY_LEN, MAX_PAYLOAD};
+use toyos_input::wire::{self, Record, CONNECTIONS, DEVICES, MAX_PAYLOAD, STREAM_KEY_LEN};
 use toyos_input::{Merge, Slot};
 use toyos_logstream::{Lines, Showing, Source};
 use window::Screen;
@@ -367,9 +367,15 @@ fn main() {
                     RxStep::Frame { msg_type, payload_len } => wire::decode(msg_type, rx.payload(payload_len)),
                 };
                 match record {
-                    Ok(Record::Key(key)) => keys.extend(merge.key(slot, key)),
+                    Ok(Record::Key { source, key }) => match merge.key(slot, source, key) {
+                        Ok(delivered) => keys.extend(delivered),
+                        Err(full) => {
+                            ended = Some(format!("{full:?}: more than {DEVICES} of its devices hold something"));
+                            break;
+                        }
+                    },
                     Ok(Record::Pointer(_)) => {}
-                    Ok(Record::Lost) => keys.extend(merge.end(slot)),
+                    Ok(Record::Gone { source }) => keys.extend(merge.gone(slot, source)),
                     Err(why) => {
                         ended = Some(format!("a record refused: {why:?}"));
                         break;
@@ -383,14 +389,17 @@ fn main() {
             }
         }
         if ready[TOKEN_KEYBOARD as usize] {
-            let mut buf = [0u8; 16 * KEY_LEN];
+            let mut buf = [0u8; 16 * STREAM_KEY_LEN];
             // Non-blocking for the reason `Keyboard::read_nonblock` documents:
             // an event loop that can park on an empty queue is a frozen screen.
             let n = kb.read_nonblock(&mut buf).unwrap_or(0);
-            for raw in buf[..n].as_chunks::<KEY_LEN>().0 {
-                match wire::key(raw) {
-                    Ok(key) => keys.extend(merge.key(Slot::KERNEL, key)),
-                    Err(why) => eprintln!("console: the kernel's keyboard stream carried {raw:02x?}, refused: {why:?}"),
+            for raw in buf[..n].as_chunks::<STREAM_KEY_LEN>().0 {
+                match wire::key(raw).map(|key| merge.key(Slot::KERNEL, 0, key)) {
+                    Ok(Ok(delivered)) => keys.extend(delivered),
+                    refused => eprintln!(
+                        "console: the kernel's keyboard stream carried {raw:02x?}, refused: {:?}",
+                        refused.map(|r| r.map(drop))
+                    ),
                 }
             }
         }

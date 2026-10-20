@@ -526,7 +526,7 @@ fn configuration(holder: &Holder, info: &AcpiInfo) {
     assert_eq!(holder.write(Space::PciConfig, host_bridge(0x44), Width::Byte, held), Ok(()), "acpi: 0x44 by address");
     assert_eq!(holder.write(Space::SystemMemory, ecam + 0x44, Width::Byte, held), Ok(()), "acpi: 0x44 through ECAM");
     assert_eq!(holder.read(Space::PciConfig, host_bridge(0x44), Width::Byte), Ok(held));
-    // The NVMe controller diskserver holds is its driver's whole. Each write
+    // The NVMe controller its driver holds is that driver's whole. Each write
     // below is of the value the register holds, so one a broken fence let
     // through would be red here and nowhere else.
     const NVME: u64 = 0x0010_1b36;
@@ -547,7 +547,7 @@ fn configuration(holder: &Holder, info: &AcpiInfo) {
 }
 
 /// What [`configuration`] says after the host bridge's identity.
-const CONFIGURATION_SAID: &str = "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the NVMe controller diskserver holds HeldFunction, and the host bridge's 0x44 was written";
+const CONFIGURATION_SAID: &str = "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the NVMe controller its driver holds HeldFunction, and the host bridge's 0x44 was written";
 
 fn lock(holder: &Holder, info: &AcpiInfo) {
     let fadt = holder.table(info.rsdp, b"FACP");

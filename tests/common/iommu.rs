@@ -152,7 +152,7 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
 }
 
 /// The slot QEMU's `-device` order puts `tests/images/netcase.toml`'s NVMe controller on,
-/// the one its diskserver row claims.
+/// the one its nvme row drives.
 const NVME_AT: &str = "00:02.0";
 
 /// The slot QEMU's `-device` order puts the virtio-sound function on, the one
@@ -184,7 +184,9 @@ fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
     log.must_say(&not_handed_over(SOUND_AT, NOT_REMAPPED))?;
     log.must_say("supervisor: soundserver: pci:04:01:00/1af4:1059 is on this machine and could not be handed over")?;
     log.must_say(&not_handed_over(NVME_AT, NOT_REMAPPED))?;
-    log.must_say("supervisor: diskserver: pci:01:08:02/1b36:0010 is on this machine and could not be handed over")?;
+    log.must_say(&format!(
+        "supervisor: nvme was not started on PCI {NVME_AT}: pci:01:08:02/1b36:0010 is on this machine and could not be handed over"
+    ))?;
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be
     // given an address space for.

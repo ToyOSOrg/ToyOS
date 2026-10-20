@@ -477,10 +477,11 @@ const MACHINE_TESTS: &[&str] = &[
     // which no host build has and the T14, whose CPUs offer x2APIC, never
     // reaches; the AMD laptop that needs it is not on the bench.
     "desktop_without_x2apic",
-    // A machine whose one NVMe disk is all it has boots the image off it: the
-    // firmware that reads it and the loader and kernel it hands the image to
-    // have no host build, and the T14 boots from a stick beside an NVMe disk
-    // that is another system's.
+    // A machine whose one NVMe disk is all it has boots the image off it and
+    // serves every role off it: the firmware that reads it, the loader and
+    // kernel it hands the image to, and the claim the nvme driver serves the
+    // block service's sessions through have no host build, and the T14 boots
+    // from a stick beside an NVMe disk that is another system's.
     "nvme_disk_boots",
     // clang and LLD built for ToyOS, compiling and linking inside it: the
     // claim is that they run on ToyOS, which no host test can make, and the
@@ -2161,7 +2162,7 @@ const ACPI_MEDIATED_SAID: [&str; 10] = [
     "acpi: the FACS read through as type 10, its write was refused FacsWrite, and the memory after it was written and put back",
     "acpi: COM1, the CMOS index, the 8259 and the configuration mechanism were refused KernelPort; the i8042's row ClaimedPort; PM1a_CNT read and refused its write ReadOnlyPort; the POST port was written",
     "acpi: ACPI_ENABLE and ACPI_DISABLE were refused SMI_CMD as KernelCommand and SCI_EN stayed set, a write wider than a byte was refused CommandSpan, every firmware call made was read back from the port and counted on the boot processor, and a storm of them was refused CommandRate",
-    "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the NVMe controller diskserver holds HeldFunction, and the host bridge's 0x44 was written",
+    "by its address and through ECAM; every header and the LPC bridge's PMBASE were refused AddressMap, the NVMe controller its driver holds HeldFunction, and the host bridge's 0x44 was written",
     "acpi: the lock a dead holder left taken read free; it was taken and given back, given back with GBL_RLS where the firmware had asked, and found pending while the firmware owned it",
     "acpi: a sleep type wider than three bits was refused InvalidArgument, the next holder's replaced a dead one's, and a second under one claim was refused AlreadyExists",
 ];
@@ -4127,8 +4128,22 @@ fn nvme_disk_boots(test_config: &Path) -> Result<(), String> {
         return Err(format!("this machine was to have no USB controller, and QEMU is given {usb}"));
     }
     let qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-    serial::Serial::boot(&qemu).must_be_clean()
+    let log = serial::Serial::boot(&qemu);
+    log.must_be_clean()?;
+    // Every role is on this disk, so each is served off the nvme driver's
+    // sessions through the block service, or the boot left it absent.
+    for role in NVME_ROLES {
+        log.must_say(&format!("fileserver: {role}"))?;
+    }
+    Ok(())
 }
+
+/// How each file server says its role is served off `nvme_disk_boots`'s disk.
+const NVME_ROLES: [&str; 3] = [
+    "Log serving /log — FAT32, ",
+    "Boot serving /boot — FAT32 read-only, ",
+    "Data serving /apps, /config, /home, /state — bcachefs, ",
+];
 /// Run `command` as a job of the boot, to exit 0: everything said in its
 /// window, the kernel's records with the program lines.
 fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> {

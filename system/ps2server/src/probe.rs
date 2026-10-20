@@ -371,7 +371,7 @@ mod tests {
     }
 
     fn typed_a(records: &[Record]) -> bool {
-        records.iter().any(|r| matches!(r, Record::Key(k) if k.keycode == 0x04 && k.pressed()))
+        records.iter().any(|r| matches!(r, Record::Key { key, .. } if key.keycode == 0x04 && key.pressed()))
     }
 
     fn line<'a>(said: &'a [String], start: &str) -> &'a str {

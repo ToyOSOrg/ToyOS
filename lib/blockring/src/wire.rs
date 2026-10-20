@@ -97,24 +97,27 @@ impl Opened {
     }
 }
 
-/// One partition of the table a service drives, as [`MSG_LISTED`] carries
-/// it: its unique and type GUIDs as the table stores them. Every entry the
-/// grant admits is listed, one the service will not open among them, so a
-/// client that finds its partition by type learns why from the open's refusal
-/// rather than taking the partition for missing.
+/// One partition a service serves, as [`MSG_LISTED`] carries it: the
+/// service's number for the disk it is on, and its unique and type GUIDs as
+/// the disk's table stores them. Every entry the grant admits is listed, one
+/// the service will not open among them, so a client that finds its
+/// partition by type learns why from the open's refusal rather than taking
+/// the partition for missing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Listed {
+    pub disk: u32,
     pub unique: [u8; GUID_BYTES],
     pub kind: [u8; GUID_BYTES],
 }
 
 impl Listed {
-    pub const BYTES: usize = 2 * GUID_BYTES;
+    pub const BYTES: usize = 4 + 2 * GUID_BYTES;
 
     pub fn encode(&self) -> [u8; Self::BYTES] {
         let mut out = [0u8; Self::BYTES];
-        out[..GUID_BYTES].copy_from_slice(&self.unique);
-        out[GUID_BYTES..].copy_from_slice(&self.kind);
+        out[..4].copy_from_slice(&self.disk.to_le_bytes());
+        out[4..4 + GUID_BYTES].copy_from_slice(&self.unique);
+        out[4 + GUID_BYTES..].copy_from_slice(&self.kind);
         out
     }
 
@@ -125,8 +128,9 @@ impl Listed {
         }
         let (chunks, _) = bytes.as_chunks::<{ Self::BYTES }>();
         Some(chunks.iter().map(|c| Self {
-            unique: c[..GUID_BYTES].try_into().expect("sixteen bytes"),
-            kind: c[GUID_BYTES..].try_into().expect("sixteen bytes"),
+            disk: u32::from_le_bytes(c[..4].try_into().expect("four bytes")),
+            unique: c[4..4 + GUID_BYTES].try_into().expect("sixteen bytes"),
+            kind: c[4 + GUID_BYTES..].try_into().expect("sixteen bytes"),
         }))
     }
 }
@@ -201,16 +205,17 @@ pub enum Refusal {
     /// A session holds it already.
     Held,
     /// The partition is there and cannot be served: its range is not whole
-    /// blocks, its GUID is on two entries, its table did not read, or its
-    /// controller would not open — the answer to a listing then too.
+    /// blocks, its GUID is on two entries, or its controller would not open,
+    /// and a listing with a disk driver that never settled is refused the
+    /// same.
     Unusable,
     /// The frame, its handles or its region are not what this protocol sends.
     Malformed,
     /// The service is holding as many sessions as it serves.
     Exhausted,
-    /// The controller is on this machine and the kernel would not hand the
-    /// service its claim: nothing on it is served, and a listing is refused
-    /// the same.
+    /// A disk controller is on this machine and no driver of it started — the
+    /// kernel would not hand over its claim, or the driver would not spawn:
+    /// nothing on it is served, and a listing is refused the same.
     ClaimRefused,
     /// The connection's grant does not reach that partition, whether or not
     /// the service has it. A connection with no grant, or with bytes no
@@ -266,8 +271,8 @@ mod tests {
     #[test]
     fn opened_and_refusal_survive_their_bytes_and_nothing_else_decodes() {
         let listed = [
-            Listed { unique: [1; GUID_BYTES], kind: [2; GUID_BYTES] },
-            Listed { unique: [4; GUID_BYTES], kind: [5; GUID_BYTES] },
+            Listed { disk: 0, unique: [1; GUID_BYTES], kind: [2; GUID_BYTES] },
+            Listed { disk: u32::MAX, unique: [4; GUID_BYTES], kind: [5; GUID_BYTES] },
         ];
         let bytes: Vec<u8> = listed.iter().flat_map(|l| l.encode()).collect();
         assert_eq!(Listed::decode_all(&bytes).map(|all| all.collect::<Vec<_>>()), Some(listed.to_vec()));

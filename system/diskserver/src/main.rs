@@ -1,694 +1,512 @@
-//! diskserver: one NVMe controller, driven from userland, serving its partitions
-//! as `toyos-blockring` sessions.
+//! diskserver: the block service — every disk a driver offers, listed and
+//! opened for the clients its grants admit, and each opened session handed to
+//! the driver whose disk it is on.
 //!
-//! **It holds a claim on one PCI function and nothing else of the machine.**
-//! The claim arrives under the `dev:pci:` label its starter minted it under —
-//! the supervisor for a manifest row, or a test's supervisor — and the port it serves
-//! under `serve:block`; the kernel keeps config space, the interrupt vector
-//! and the function's address space, and diskserver never names an address the
-//! kernel did not hand it ([`nvme`]).
-//!
-//! **A session is a partition held**, from the client's open to its hang-up:
-//! one holder per partition (`toyos-blockhold`), every request bounded to the
-//! partition and the arena before the device sees it
-//! (`toyos_blockring::server`), the data moved by the device straight into and
-//! out of the client's own region, which the kernel maps into this
-//! controller's domain for the length of the session (`SYS_DEVICE_DMA_MAP`)
-//! and takes back at its end — after the last command naming it has been
-//! answered, never before.
-//!
-//! **The partition table is read once, at start.** Every partition lies
-//! outside every other and the table outside all of them, so no session can
-//! change it; the table this process read is the one it serves for its life.
-//! A partition whose range is not whole 4 KiB blocks, or whose GUID the table
-//! carries twice, is listed and refused by name.
-//!
-//! **A controller its row names that is on the machine and whose claim the
-//! kernel refused is not an absent one**: its starter names it
-//! (`--claim-refused <name>`), and a listing and every open are refused
-//! `ClaimRefused`, so a file server says so rather than finding no disk.
+//! **It drives no device.** It serves `block` to clients and `disk` to disk
+//! drivers (`toyos_blockring::disk`), one per controller, each of which reads
+//! its own partition table and offers its disks. An open the grant admits is
+//! handed whole to the offering driver — the client's connection and the
+//! region it sent — and the driver answers it and serves the session, so a
+//! block never passes through here.
 //!
 //! **A connection reaches what its grant says** ([`wire::Grant`]): the badge
-//! the supervisor minted its connector with on this service's port, which the
-//! kernel stamps on it and answers this acceptor alone. A listing names the
-//! partitions the grant admits, an open of any other is refused `NotGranted`
-//! whether or not the table carries it, a connection with no grant reaches
-//! nothing, and a session whose grant does not write answers every write
-//! `ReadOnly` before the device sees it.
+//! the supervisor minted its connector with, which the kernel stamps on it and
+//! answers this acceptor alone. A listing names the partitions the grant
+//! admits, an open of any other is refused `NotGranted` whether or not a disk
+//! carries it, a connection with no grant reaches nothing, and a session whose
+//! grant does not write is handed over as one, whose driver answers every
+//! write `ReadOnly`.
 //!
-//! **A client may ask what is served** ([`wire::MSG_LIST`]) before it opens
-//! anything, which is how a file server finds its role's partition by type.
+//! **"Not yet" is never answered as "absent".** The supervisor starts the disk
+//! drivers before this service and says how many (`--drivers`), and names
+//! each disk controller it started no driver on (`--undriven`). An open of a
+//! partition no driver offers, and a listing, wait until every driver started
+//! at boot has settled and every driver that ended has settled again, or for
+//! [`DRIVER_BOUND`]; then a listing names what is offered, and what is not
+//! offered is refused by what is known: `Unusable` while a driver cannot use
+//! its controller or has not settled, `ClaimRefused` while a controller has
+//! no driver, and `NotFound` otherwise.
 //!
-//! **A server never blocks on a client.** Accept and the open frame are two
-//! events, the open is buffered until whole, every answer is one `try_send`,
-//! and a doorbell is one non-blocking write whose refusal is a full pipe —
-//! a doorbell already rung.
-
-
+//! **A server never blocks on a client or a driver.** Accept and the first
+//! frame are two events, a frame is buffered until whole, and every answer is
+//! one `try_send`.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
-use diskserver::region::Region;
-use diskserver::nvme::{Controller, Done, Owner};
-use toyos::endow::{self, Endowments};
+use toyos::endow;
 use toyos::ipc::{self, Connection, RxStep};
 use toyos::poller::{Poller, READABLE};
-use toyos::AsHandle;
-use toyos_abi::part::{PartGuid, GUID_TEXT_LEN};
-use toyos_abi::syscall::{DEV_PREFIX, MAX_BADGE, SyscallError};
-use toyos_blockhold::Holds;
-use toyos_blockring::entry::{Completion, Op};
-use toyos_blockring::layout::{ServerRings, DEPTH};
-use toyos_blockring::server::{ServerSession, Taken};
-use toyos_blockring::wire::{self, Grant, Opened, Refusal};
-use toyos_blockring::{BLOCK_BYTES, PORT};
+use toyos::{AsHandle, OwnedHandle};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE};
+use toyos_blockring::disk::{self, Offer, Part, Settled};
+use toyos_blockring::wire::{self, Grant, Listed, Refusal};
+use toyos_blockring::PORT;
+use toyos_blockserve::guid_text;
 
-/// How long a command may go unanswered before the controller is reset to
-/// take it back. Policy: NVMe defines no per-command bound, and a flush of a
-/// large cache is the slowest thing a healthy drive does.
-const COMMAND_SILENCE: Duration = Duration::from_secs(10);
+/// How long a disk driver may take from its start to say how its bring-up
+/// ended, and so how long a listing or an open waits for it. Policy: a stick's
+/// bring-up is a port's reset and enumeration and a Bulk-Only disk's first
+/// commands, each bounded far below this.
+const DRIVER_BOUND: Duration = Duration::from_secs(30);
 
-/// Sessions held at once. Each costs its region's mapping in this process and
-/// in the controller's domain, which the kernel bounds per claim.
-const MAX_SESSIONS: usize = 8;
-
-/// Connections accepted and not yet opened, and how long one may stay so.
+/// Connections accepted and not yet asked, and how long one may stay so.
 const MAX_PENDING: usize = 16;
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Requests that wait for a driver at once.
+const MAX_WAITING: usize = 16;
+/// Disk drivers connected at once.
+const MAX_DRIVERS: usize = 16;
 
-/// Argv, followed by a device name of this service's row: on this machine, and
-/// its claim refused.
-const CLAIM_REFUSED: &str = "--claim-refused";
+/// Argv: the disk drivers the supervisor started before this service, and
+/// each disk controller it started none on.
+const DRIVERS: &str = "--drivers";
+const UNDRIVEN: &str = "--undriven";
 
-const TOKEN_IRQ: u64 = 0;
-const TOKEN_ACCEPT: u64 = 1;
+const TOKEN_ACCEPT: u64 = 0;
+const TOKEN_DRIVERS: u64 = 1;
 const TOKEN_PENDING: u64 = 0x1_0000;
-const TOKEN_SESSION: u64 = 0x2_0000;
+const TOKEN_DRIVER: u64 = 0x2_0000;
 
-/// One partition of the table, in 4 KiB blocks of the device.
-struct Part {
-    unique: [u8; 16],
-    kind: [u8; 16],
-    /// Where it starts and how long it is, or why it cannot be served.
-    span: Result<(u64, u64), String>,
+/// One partition a driver offered, on the disk the service numbered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Offered {
+    disk: u32,
+    part: Part,
 }
 
-fn guid_text(bytes: [u8; 16]) -> String {
-    let mut buf = [0u8; GUID_TEXT_LEN];
-    PartGuid(bytes).write_text(&mut buf).to_string()
+/// How a driver, by its name, last said its bring-up ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Fate {
+    Offered,
+    Unusable,
+    /// Its connection ended, and no driver of its name has settled since.
+    Ended,
 }
 
-/// The controller as `toyos_gpt` reads it: its own sectors, served a 4 KiB
-/// block at a time, and floored to whole blocks.
-struct Sectors<'a> {
-    ctrl: &'a mut Controller,
-    block: Vec<u8>,
+/// Everything the drivers said, and what the supervisor said of them.
+#[derive(Default)]
+struct Known {
+    /// How many disk drivers were started before this service.
+    expected: usize,
+    undriven: Vec<String>,
+    fates: BTreeMap<String, Fate>,
+    offered: Vec<Offered>,
 }
 
-impl toyos_gpt::Sectors for Sectors<'_> {
-    fn lba_bytes(&self) -> u32 {
-        self.ctrl.lba_bytes
+impl Known {
+    /// Whether nothing a driver will say could change an answer: every driver
+    /// started at boot has settled, and no driver is between an end and its
+    /// next settling.
+    fn settled(&self) -> bool {
+        self.fates.len() >= self.expected && !self.fates.values().any(|f| *f == Fate::Ended)
     }
-    fn lba_count(&self) -> u64 {
-        let per = BLOCK_BYTES as u64 / self.ctrl.lba_bytes as u64;
-        self.ctrl.sectors / per * per
+
+    /// The drivers whose controllers' partitions cannot be said absent.
+    fn unsettled(&self) -> Vec<&str> {
+        self.fates.iter().filter(|(_, f)| **f != Fate::Offered).map(|(l, _)| l.as_str()).collect()
     }
-    fn lba_count_granularity(&self) -> core::num::NonZeroU64 {
-        core::num::NonZeroU64::new(BLOCK_BYTES as u64 / self.ctrl.lba_bytes as u64).expect("at least one")
-    }
-    fn read_lba(&mut self, lba: u64, buf: &mut [u8]) -> bool {
-        let lba_bytes = self.ctrl.lba_bytes as u64;
-        let at = lba * lba_bytes;
-        if !self.ctrl.read_block(at / BLOCK_BYTES as u64, &mut self.block) {
-            return false;
+
+    /// Why a partition no disk offers is not served, once nothing is awaited.
+    fn absent(&self) -> Refusal {
+        let missing = self.fates.len() < self.expected;
+        if missing || !self.unsettled().is_empty() {
+            Refusal::Unusable
+        } else if !self.undriven.is_empty() {
+            Refusal::ClaimRefused
+        } else {
+            Refusal::NotFound
         }
-        let off = (at % BLOCK_BYTES as u64) as usize;
-        buf.copy_from_slice(&self.block[off..off + lba_bytes as usize]);
-        true
+    }
+
+    /// What a listing through `grant` answers, or `None` while it waits:
+    /// every partition offered that it admits. **The grant is asked first**,
+    /// so a connection with none learns nothing.
+    fn listing(&self, grant: Option<Grant>, expired: bool) -> Option<Result<Vec<Listed>, Refusal>> {
+        let Some(grant) = grant else { return Some(Err(Refusal::NotGranted)) };
+        if !self.settled() && !expired {
+            return None;
+        }
+        let listed: Vec<Listed> = self
+            .offered
+            .iter()
+            .filter(|o| grant.admits(o.part.unique, o.part.kind))
+            .map(|o| Listed { disk: o.disk, unique: o.part.unique, kind: o.part.kind })
+            .collect();
+        Some(match self.absent() {
+            Refusal::NotFound => Ok(listed),
+            _ if !listed.is_empty() => Ok(listed),
+            why => Err(why),
+        })
+    }
+
+    /// Where an open of `guid` through `grant` is served, or its refusal,
+    /// or `None` while it waits. **The grant is asked first**, so a
+    /// connection learns nothing of a partition it does not reach.
+    fn open(&self, guid: [u8; 16], grant: Option<Grant>, expired: bool) -> Option<Result<Offered, Refusal>> {
+        let Some(grant) = grant else { return Some(Err(Refusal::NotGranted)) };
+        let carrying: Vec<&Offered> = self.offered.iter().filter(|o| o.part.unique == guid && guid != [0; 16]).collect();
+        // A partition no disk offers has no type: only a unique grant naming
+        // it reaches it, to wait for it or be told why it is not there.
+        let kind = carrying.first().map_or([0; 16], |o| o.part.kind);
+        if !grant.admits(guid, kind) {
+            return Some(Err(Refusal::NotGranted));
+        }
+        Some(match carrying[..] {
+            [] if !self.settled() && !expired => return None,
+            [] => Err(self.absent()),
+            [one] if one.part.blocks.is_some() => Ok(*one),
+            [_] => Err(Refusal::Unusable),
+            _ => Err(Refusal::Unusable),
+        })
     }
 }
 
-/// Every partition the table names, each checked the way the kernel checks a
-/// claim's: past `toyos_gpt::locate`'s range and overlap checks, and whole
-/// 4 KiB blocks.
-fn read_table(ctrl: &mut Controller) -> Vec<Part> {
-    let per = BLOCK_BYTES as u64 / ctrl.lba_bytes as u64;
-    let mut sectors = Sectors { ctrl, block: vec![0u8; BLOCK_BYTES] };
-    let mut found = [None; 128];
-    if let Err(why) = toyos_gpt::list(&mut sectors, &mut found) {
-        println!("diskserver: the disk carries no partition table this driver reads: {why:?}");
-        return Vec::new();
-    }
-    let mut parts = Vec::new();
-    for entry in found.iter().flatten() {
-        let listed = match entry {
-            Ok(listed) => listed,
-            Err(unplaced) => {
-                let span = Err(format!("its blocks are no partition on this disk: {unplaced:?}"));
-                parts.push(Part { unique: unplaced.unique_guid.0, kind: unplaced.type_guid.0, span });
-                continue;
-            }
-        };
-        let unique = listed.unique_guid().0;
-        let kind = listed.type_guid().0;
-        let span = match toyos_gpt::locate(&mut sectors, listed.unique_guid()) {
-            Err(why) => Err(format!("its own table refuses it: {why:?}")),
-            Ok(located) => {
-                let p = located.partition();
-                let (first, count) = (p.first_lba(), p.lba_count().get());
-                if first % per != 0 || count % per != 0 {
-                    Err(format!(
-                        "LBA {first}+{count} is not whole 4 KiB blocks of {}-byte sectors",
-                        sectors.ctrl.lba_bytes
-                    ))
-                } else {
-                    Ok((first / per, count / per))
-                }
-            }
-        };
-        parts.push(Part { unique, kind, span });
-    }
-    parts
-}
-
-/// The partitions a listing through `grant` names: every one it admits, of
-/// `parts`, the table of a drive or why it has none. **The grant is asked
-/// first**, so a connection with none learns nothing of the drive.
-fn listed(parts: Result<&[Part], Refusal>, grant: Option<Grant>) -> Result<Vec<u8>, Refusal> {
-    let grant = grant.ok_or(Refusal::NotGranted)?;
-    Ok(parts?
-        .iter()
-        .filter(|p| grant.admits(p.unique, p.kind))
-        .flat_map(|p| wire::Listed { unique: p.unique, kind: p.kind }.encode())
-        .collect())
-}
-
-/// Where an open of `guid` through `grant` is served, before anything is
-/// held for it; or its refusal. **The grant is asked first**, so a
-/// connection learns nothing of a partition it does not reach, not even
-/// whether the table carries it; then the drive, then the table.
-fn admitted(parts: Result<&[Part], Refusal>, guid: [u8; 16], grant: Option<Grant>) -> Result<(u64, u64), Refusal> {
-    let grant = grant.ok_or(Refusal::NotGranted)?;
-    let part = parts?.iter().find(|p| p.unique == guid && guid != [0; 16]);
-    // A partition the table does not carry has no type: only a unique grant
-    // naming it reaches it, to be told `NotFound`.
-    if !grant.admits(guid, part.map_or([0; 16], |p| p.kind)) {
-        return Err(Refusal::NotGranted);
-    }
-    match part.map(|p| &p.span) {
-        None => Err(Refusal::NotFound),
-        Some(Err(_)) => Err(Refusal::Unusable),
-        Some(Ok(span)) => Ok(*span),
-    }
-}
-
-/// A connection that has not opened a session yet.
+/// A connection that has not asked anything yet.
 struct Pending {
     conn: Connection,
     rx: ipc::FrameRx<{ wire::GUID_BYTES }>,
     since: Instant,
 }
 
-/// A partition held, over a client's region.
-struct Served {
+/// What a waiting client asked.
+enum Ask {
+    List,
+    Open { guid: [u8; 16], region: OwnedHandle },
+}
+
+/// A client whose question waits for the drivers.
+struct Waiting {
     conn: Connection,
-    region: Region,
-    device_addr: u64,
-    rings: ServerRings,
-    state: ServerSession,
-    unique: [u8; 16],
-    /// The client hung up, or broke the protocol: nothing more is taken, and
-    /// the session ends once nothing of it is on the device.
-    closing: bool,
-    requests: u64,
-    posted: bool,
+    grant: Option<Grant>,
+    ask: Ask,
+    since: Instant,
 }
 
-/// The controller this service drives and the partitions its table names, or
-/// why it drives none. Without one no partition is listed and no session
-/// opened, and a connection says one frame and is answered, or is let go.
-enum Drive {
-    Up(Controller, Vec<Part>),
-    /// No controller this row names is on this machine: a listing is empty
-    /// and an open `NotFound`.
-    Absent,
-    /// A controller this service cannot use: a listing and an open are
-    /// refused `Unusable`, so a file server says the disk failed rather than
-    /// that there is none.
-    Unusable,
-    /// A controller this row names is on this machine and its claim was
-    /// refused: a listing and an open are refused `ClaimRefused`.
-    ClaimRefused,
-}
-
-impl Drive {
-    /// The controller a session is on: a service without one has no partition
-    /// to open.
-    fn up(&mut self) -> &mut Controller {
-        match self {
-            Drive::Up(ctrl, _) => ctrl,
-            Drive::Absent | Drive::Unusable | Drive::ClaimRefused => {
-                unreachable!("diskserver: a session with no controller")
-            }
-        }
-    }
-
-    /// The table a listing and an open are judged against: none on a drive
-    /// that is absent, and a drive this service cannot use, or was refused,
-    /// refused by that word.
-    fn parts(&self) -> Result<&[Part], Refusal> {
-        match self {
-            Drive::Up(_, parts) => Ok(parts),
-            Drive::Absent => Ok(&[]),
-            Drive::Unusable => Err(Refusal::Unusable),
-            Drive::ClaimRefused => Err(Refusal::ClaimRefused),
-        }
-    }
-
-    fn oldest(&self) -> Option<Instant> {
-        match self {
-            Drive::Up(ctrl, _) => ctrl.oldest(),
-            Drive::Absent | Drive::Unusable | Drive::ClaimRefused => None,
-        }
-    }
+/// One disk driver's connection.
+struct Driver {
+    conn: Connection,
+    rx: ipc::FrameRx<{ 4 + disk::MAX_PARTS * Part::BYTES }>,
+    label: Option<String>,
+    settled: bool,
+    /// The driver's number for each disk it offers, and the service's.
+    disks: BTreeMap<u32, u32>,
+    since: Instant,
 }
 
 struct Service {
-    ctrl: Drive,
-    holds: Holds<u64>,
-    /// The device's loss count: every reset may have dropped its cache.
-    losses: u64,
-    sessions: BTreeMap<u64, Served>,
-    next_id: u64,
-}
-
-/// A session decided on and not yet told to its client.
-struct Opening {
-    region: Region,
-    blocks: u64,
-    device_addr: u64,
-    first: u64,
-    writes: bool,
-}
-
-impl Service {
-    fn new(ctrl: Drive) -> Self {
-        Self { ctrl, holds: Holds::new(), losses: 0, sessions: BTreeMap::new(), next_id: 0 }
-    }
-
-    /// What a listing through `grant` answers: every partition of the table
-    /// it admits.
-    fn listing(&self, grant: Option<Grant>) -> Result<Vec<u8>, Refusal> {
-        listed(self.ctrl.parts(), grant)
-    }
-
-    /// The span an open of `guid` through `grant` is served on, held for it;
-    /// or its refusal.
-    ///
-    /// **A client that hung up holds nothing**: every session's end its client
-    /// has already made is read before the open is judged, so an open made
-    /// after another holder closed its connection is never refused `Held` for
-    /// a holder that is gone — only for one whose commands are still on the
-    /// device.
-    fn place(&mut self, guid: [u8; 16], grant: Option<Grant>) -> Result<(u64, u64), Refusal> {
-        let (first, blocks) = admitted(self.ctrl.parts(), guid, grant)?;
-        let ids: Vec<u64> = self.sessions.keys().copied().collect();
-        for id in ids {
-            self.hear(id);
-        }
-        self.retire();
-        if self.sessions.len() >= MAX_SESSIONS {
-            return Err(Refusal::Exhausted);
-        }
-        if self.holds.hold(first, first + blocks, self.next_id).is_err() {
-            return Err(Refusal::Held);
-        }
-        Ok((first, blocks))
-    }
-
-    /// What an open answers: a session to admit, or its refusal. `region` is
-    /// the client's and is consumed either way.
-    fn open(&mut self, guid: [u8; 16], region: toyos::RawHandle, grant: Option<Grant>) -> Result<Opening, Refusal> {
-        // A region the kernel did not allocate, or longer than a session, which would spend the claim's bound on the kernel's side for every other client, is refused whole.
-        let region = Region::lent(region).map_err(|_| Refusal::Malformed)?;
-        let (first, blocks) = self.place(guid, grant)?;
-        let writes = grant.expect("placed through a grant").writes;
-        match self.ctrl.up().claim().dma_map(region.handle()) {
-            Ok(mapping) => Ok(Opening { region, blocks, device_addr: mapping.device_addr, first, writes }),
-            Err(why) => {
-                self.holds.release(first);
-                Err(match why {
-                    SyscallError::ResourceExhausted => Refusal::Exhausted,
-                    _ => Refusal::Malformed,
-                })
-            }
-        }
-    }
-
-    /// The client heard its session is open, over the ends `Opened::over`
-    /// made: from here it is served.
-    fn admit(&mut self, opening: Opening, rings: ServerRings, opened: Opened, conn: Connection) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
-        self.sessions.insert(
-            id,
-            Served {
-                conn,
-                region: opening.region,
-                device_addr: opening.device_addr,
-                rings,
-                state: ServerSession::new(opening.first, opened.blocks(), opening.writes),
-                unique: opened.unique(),
-                closing: false,
-                requests: 0,
-                posted: false,
-            },
-        );
-        id
-    }
-
-    /// The client went before it heard: nothing of the session reached the
-    /// device, and what was taken for it goes back.
-    fn abandon(&mut self, opening: Opening) {
-        if let Err(why) = self.ctrl.up().claim().dma_unmap(opening.device_addr) {
-            panic!("diskserver: the kernel would not take an abandoned session's region back: {why:?}");
-        }
-        self.holds.release(opening.first);
-    }
-
-    /// Put `c` on its session's completion ring. [`Self::pull`] leaves room for
-    /// every answer, so a ring without it is a client whose head went back or
-    /// past what was posted: the session ends.
-    fn post(session: &mut Served, c: Completion) {
-        match session.rings.1.push(session.region.words(), c.encode()) {
-            Ok(true) => session.posted = true,
-            Ok(false) | Err(_) => session.closing = true,
-        }
-    }
-
-    /// Hand one device answer to the session it is for.
-    fn deliver(&mut self, done: Done) {
-        let Owner::Session { session, tag, .. } = done.owner else {
-            panic!("diskserver: the device answered a command of this driver's own while serving");
-        };
-        let s = self.sessions.get_mut(&session).expect("diskserver: an answer for a session that ended");
-        if let Some(c) = s.state.complete(tag, done.ok, &mut self.holds, self.losses) {
-            if !done.ok {
-                println!("diskserver: session {session}: request {tag} failed with status {:#x}", done.status);
-            }
-            if c.status == toyos_blockring::Status::Lost {
-                println!(
-                    "diskserver: session {session}: a flush found writes of its own the device lost \
-                     since it acknowledged them; the client is told Lost"
-                );
-            }
-            Self::post(s, c);
-        }
-    }
-
-    /// Take what `id`'s client has published, while the device and the
-    /// session's completion ring have room for it.
-    fn pull(&mut self, id: u64) {
-        let s = self.sessions.get_mut(&id).expect("a live session");
-        loop {
-            if s.closing {
-                break;
-            }
-            let page = s.region.words();
-            // Room for every answer: what is on the device, and what is posted
-            // and not yet read, never exceeds the completion ring.
-            let Ok(space) = s.rings.1.space(page) else {
-                s.closing = true;
-                break;
-            };
-            let unread = (DEPTH - space) as usize;
-            if s.state.inflight().len() + unread >= DEPTH as usize || !self.ctrl.up().has_room() {
-                break;
-            }
-            let words = match s.rings.0.pop(page) {
-                Ok(Some(words)) => words,
-                Ok(None) => break,
-                Err(_) => {
-                    s.closing = true;
-                    break;
-                }
-            };
-            s.requests += 1;
-            match s.state.take(words) {
-                Taken::Answer(c) => Self::post(s, c),
-                Taken::Issue(req) => {
-                    let write = matches!(req.op, Op::Write { .. });
-                    let owner = Owner::Session { session: id, tag: req.tag, write };
-                    match req.op {
-                        Op::Read { run, lba } | Op::Write { run, lba } => {
-                            let at = s.device_addr + run.span().offset as u64;
-                            let block = s.state.first() + lba;
-                            self.ctrl.up().submit_io(write, block, run.count(), at, owner);
-                        }
-                        Op::Flush if self.ctrl.up().vwc => self.ctrl.up().submit_flush(owner),
-                        // No volatile cache: every write answered is on the
-                        // medium already.
-                        Op::Flush => {
-                            let c = s.state.complete(req.tag, true, &mut self.holds, self.losses);
-                            Self::post(s, c.expect("just taken"));
-                        }
-                    }
-                }
-            }
-        }
-        s.rings.0.release(s.region.words());
-    }
-
-    /// Publish what each session was answered, and ring its doorbell.
-    fn publish(&mut self) {
-        for s in self.sessions.values_mut() {
-            if !s.posted {
-                continue;
-            }
-            s.posted = false;
-            if s.rings.1.publish(s.region.words()) {
-                match s.conn.write_nonblock(&[1]) {
-                    Ok(_) | Err(SyscallError::WouldBlock) => {}
-                    Err(_) => s.closing = true,
-                }
-            }
-        }
-    }
-
-    /// Consume session `id`'s doorbell bytes; once its client has hung up,
-    /// the session is closing.
-    fn hear(&mut self, id: u64) {
-        let s = self.sessions.get_mut(&id).expect("a session");
-        let mut sink = [0u8; 64];
-        while !s.closing {
-            match s.conn.read_nonblock(&mut sink) {
-                Ok(0) => s.closing = true,
-                Ok(_) => {}
-                Err(SyscallError::WouldBlock) => return,
-                Err(_) => s.closing = true,
-            }
-        }
-    }
-
-    /// End every session that is closing and has nothing on the device: its
-    /// region leaves the controller's domain, and its partition is free.
-    fn retire(&mut self) {
-        let done: Vec<u64> = self
-            .sessions
-            .iter()
-            .filter(|(_, s)| s.closing && s.state.inflight().len() == 0)
-            .map(|(id, _)| *id)
-            .collect();
-        for id in done {
-            let s = self.sessions.remove(&id).expect("just listed");
-            let ctrl = self.ctrl.up();
-            if let Err(why) = ctrl.claim().dma_unmap(s.device_addr) {
-                panic!("diskserver: the kernel would not take session {id}'s region back: {why:?}");
-            }
-            self.holds.release(s.state.first());
-            println!(
-                "diskserver: session {id} on {} closed after {} requests; the device has held at most {} \
-                 commands at once, issued per queue {}",
-                guid_text(s.unique),
-                s.requests,
-                ctrl.peak,
-                ctrl.spread()
-            );
-        }
-    }
-
-    /// Reset the controller under every command it holds.
-    fn reset(&mut self) {
-        println!(
-            "diskserver: a command went unanswered for {COMMAND_SILENCE:?}; resetting the controller"
-        );
-        let mut done = Vec::new();
-        let aborted = self
-            .ctrl
-            .up()
-            .reset(&mut done)
-            .unwrap_or_else(|why| panic!("diskserver: the controller did not come back from its reset: {why}"));
-        for d in done {
-            self.deliver(d);
-        }
-        self.losses += 1;
-        let mut answered = 0;
-        for s in self.sessions.values_mut() {
-            for c in s.state.abort_all() {
-                answered += 1;
-                Self::post(s, c);
-            }
-        }
-        println!(
-            "diskserver: controller reset; {} commands it held were answered not done ({answered} of \
-             them sessions'), and the loss count is {}",
-            aborted.len(),
-            self.losses
-        );
-    }
-}
-
-/// The PCI function this process was endowed.
-fn claim() -> Option<toyos::PciDev> {
-    let label = Endowments::get()
-        .labels()
-        .find(|l| l.starts_with(DEV_PREFIX) && l[DEV_PREFIX.len()..].starts_with("pci:"))
-        .map(str::to_string)?;
-    Some(Endowments::get().take(&label).expect("diskserver: the claim its label names"))
+    known: Known,
+    drivers: BTreeMap<u64, Driver>,
+    next_driver: u64,
+    next_disk: u32,
+    waiting: Vec<Waiting>,
 }
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let refused = args.iter().position(|a| a == CLAIM_REFUSED).map(|at| {
-        args.get(at + 1).unwrap_or_else(|| panic!("diskserver: {CLAIM_REFUSED} takes the device its claim was refused on"))
-    });
-    let acceptor = endow::acceptor(PORT).unwrap_or_else(|| panic!("diskserver: started serving no `{PORT}` port"));
-    if let Some(name) = refused {
-        println!(
-            "diskserver: NOT SERVING — {name} is on this machine and the kernel refused this service its \
-             claim; every partition on it is refused"
-        );
-        serve(&mut Service::new(Drive::ClaimRefused), &acceptor);
-    }
-    let Some(dev) = claim() else {
-        println!("diskserver: no NVMe controller this row names is on this machine; serving no partition");
-        serve(&mut Service::new(Drive::Absent), &acceptor);
-    };
-    let mut ctrl = match Controller::open(dev) {
-        Ok(ctrl) => ctrl,
-        Err(why) => {
-            println!("diskserver: NOT SERVING — {why}; serving no partition");
-            serve(&mut Service::new(Drive::Unusable), &acceptor);
-        }
-    };
-    println!(
-        "diskserver: NVMe up: {} I/O queues of {} commands, volatile write cache {}, {}-byte sectors, \
-         {} sectors",
-        ctrl.queues(),
-        diskserver::nvme::COMMANDS_PER_QUEUE,
-        if ctrl.vwc { "present, so a flush issues Flush" } else { "absent, so a flush issues nothing" },
-        ctrl.lba_bytes,
-        ctrl.sectors
-    );
-    let parts = read_table(&mut ctrl);
-    for part in &parts {
-        match &part.span {
-            Ok((first, blocks)) => {
-                println!("diskserver: partition {} at block {first}, {blocks} blocks", guid_text(part.unique))
+    let mut known = Known::default();
+    let mut at = 1;
+    while at < args.len() {
+        let value = args.get(at + 1).unwrap_or_else(|| panic!("diskserver: {} takes a value", args[at]));
+        match args[at].as_str() {
+            DRIVERS => known.expected = value.parse().unwrap_or_else(|_| panic!("diskserver: {DRIVERS} {value}")),
+            UNDRIVEN => {
+                println!("diskserver: {value} is on this machine and no driver of it started; what it carries is refused");
+                known.undriven.push(value.clone());
             }
-            Err(why) => println!("diskserver: partition {} is not served: {why}", guid_text(part.unique)),
+            other => panic!("diskserver: {other} is no argument of this service"),
         }
+        at += 2;
     }
-    serve(&mut Service::new(Drive::Up(ctrl, parts)), &acceptor);
+    let clients = endow::acceptor(PORT).unwrap_or_else(|| panic!("diskserver: started serving no `{PORT}` port"));
+    let drivers = endow::acceptor(disk::PORT).unwrap_or_else(|| panic!("diskserver: started serving no `{}` port", disk::PORT));
+    println!("diskserver: serving the disks of {} driver(s) started before it", known.expected);
+    let mut service = Service { known, drivers: BTreeMap::new(), next_driver: 0, next_disk: 0, waiting: Vec::new() };
+    service.serve(&clients, &drivers)
 }
 
-fn serve(service: &mut Service, acceptor: &toyos::port::Acceptor) -> ! {
-    let poller = Poller::new(2 + MAX_PENDING as u32 + MAX_SESSIONS as u32);
-    let mut pending: Vec<Pending> = Vec::new();
-    let mut ready: Vec<u64> = Vec::new();
-    let mut done: Vec<Done> = Vec::new();
-    loop {
-        if let Drive::Up(ctrl, _) = &service.ctrl {
-            poller.watch(ctrl.claim(), READABLE, TOKEN_IRQ);
-        }
-        if pending.len() < MAX_PENDING {
-            poller.watch(acceptor, READABLE, TOKEN_ACCEPT);
-        }
-        for p in &pending {
-            poller.watch(&p.conn, READABLE, TOKEN_PENDING + p.conn.as_handle().0 as u64);
-        }
-        for (id, s) in &service.sessions {
-            if !s.closing {
-                poller.watch(&s.conn, READABLE, TOKEN_SESSION + id);
+impl Service {
+    fn serve(&mut self, clients: &toyos::port::Acceptor, drivers: &toyos::port::Acceptor) -> ! {
+        let poller = Poller::new(2 + MAX_PENDING as u32 + MAX_DRIVERS as u32);
+        let mut pending: Vec<Pending> = Vec::new();
+        let mut ready: Vec<u64> = Vec::new();
+        let mut was_settled = false;
+        loop {
+            if pending.len() < MAX_PENDING && self.waiting.len() < MAX_WAITING {
+                poller.watch(clients, READABLE, TOKEN_ACCEPT);
             }
-        }
-        let now = Instant::now();
-        let timeout = pending
-            .iter()
-            .map(|p| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(p.since)))
-            .chain(service.ctrl.oldest().map(|at| COMMAND_SILENCE.saturating_sub(now.duration_since(at))))
-            .min()
-            .map_or(u64::MAX, |left| left.as_nanos() as u64);
-        ready.clear();
-        poller.wait(1, timeout, |token| ready.push(token));
+            if self.drivers.len() < MAX_DRIVERS {
+                poller.watch(drivers, READABLE, TOKEN_DRIVERS);
+            }
+            for p in &pending {
+                poller.watch(&p.conn, READABLE, TOKEN_PENDING + u64::from(p.conn.as_handle().0));
+            }
+            for (id, d) in &self.drivers {
+                poller.watch(&d.conn, READABLE, TOKEN_DRIVER + id);
+            }
+            let now = Instant::now();
+            let deadlines = pending.iter().map(|p| p.since + HANDSHAKE_TIMEOUT);
+            let deadlines = deadlines.chain(self.waiting.iter().map(|w| w.since + DRIVER_BOUND));
+            let deadlines = deadlines.chain(self.drivers.values().filter(|d| d.label.is_none()).map(|d| d.since + HANDSHAKE_TIMEOUT));
+            let timeout = deadlines.min().map_or(u64::MAX, |at| at.saturating_duration_since(now).as_nanos() as u64);
+            ready.clear();
+            poller.wait(1, timeout, |token| ready.push(token));
 
-        if let Drive::Up(ctrl, _) = &mut service.ctrl {
-            if let Err(why) = ctrl.take_interrupt() {
-                panic!(
-                    "diskserver: the claim refused its interrupt read ({why:?}): the unit refused this \
-                     controller an access, and the claim answers nothing now"
-                );
+            let now = Instant::now();
+            if ready.contains(&TOKEN_DRIVERS) {
+                match drivers.accept() {
+                    Ok(conn) => {
+                        let id = self.next_driver;
+                        self.next_driver += 1;
+                        let d = Driver { conn, rx: ipc::FrameRx::new(), label: None, settled: false, disks: BTreeMap::new(), since: now };
+                        self.drivers.insert(id, d);
+                    }
+                    Err(why) => println!("diskserver: the kernel refused a driver's connection: {why:?}"),
+                }
             }
-            ctrl.reap(&mut done);
-        }
-        for d in done.drain(..) {
-            service.deliver(d);
-        }
-        if service.ctrl.oldest().is_some_and(|at| at.elapsed() >= COMMAND_SILENCE) {
-            service.reset();
-        }
+            let ids: Vec<u64> = self.drivers.keys().copied().collect();
+            for id in ids {
+                let unnamed = self.drivers[&id].label.is_none() && now >= self.drivers[&id].since + HANDSHAKE_TIMEOUT;
+                if unnamed {
+                    self.drop_driver(id, "it never said its name");
+                } else if ready.contains(&(TOKEN_DRIVER + id)) {
+                    self.hear_driver(id);
+                }
+            }
 
-        let now = Instant::now();
-        pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
-        if ready.contains(&TOKEN_ACCEPT) {
-            match acceptor.accept() {
-                Ok(conn) => pending.push(Pending { conn, rx: ipc::FrameRx::new(), since: now }),
-                Err(why) => panic!("diskserver: its own acceptor refused an accept: {why:?}"),
+            pending.retain(|p| now < p.since + HANDSHAKE_TIMEOUT);
+            if ready.contains(&TOKEN_ACCEPT) {
+                match clients.accept() {
+                    Ok(conn) => pending.push(Pending { conn, rx: ipc::FrameRx::new(), since: now }),
+                    Err(why) => panic!("diskserver: its own acceptor refused an accept: {why:?}"),
+                }
             }
+            let mut i = 0;
+            while i < pending.len() {
+                let token = TOKEN_PENDING + u64::from(pending[i].conn.as_handle().0);
+                if !ready.contains(&token) {
+                    i += 1;
+                    continue;
+                }
+                let step = {
+                    let p = &mut pending[i];
+                    p.rx.pump(&p.conn)
+                };
+                match step {
+                    RxStep::Idle => i += 1,
+                    RxStep::Eof | RxStep::Malformed => {
+                        pending.remove(i);
+                    }
+                    RxStep::Frame { msg_type, payload_len } => {
+                        let p = pending.remove(i);
+                        self.asked(clients, p, msg_type, payload_len, now);
+                    }
+                }
+            }
+
+            if self.known.settled() && !was_settled {
+                println!("diskserver: every disk driver has settled, {} partition(s) offered", self.known.offered.len());
+            }
+            was_settled = self.known.settled();
+            self.answer_waiting(now);
         }
-        let mut i = 0;
-        while i < pending.len() {
-            let token = TOKEN_PENDING + pending[i].conn.as_handle().0 as u64;
-            if !ready.contains(&token) {
-                i += 1;
-                continue;
-            }
-            let step = {
-                let p = &mut pending[i];
-                p.rx.pump(&p.conn)
+    }
+
+    /// Everything driver `id` sent; a frame this protocol does not make
+    /// ends it.
+    fn hear_driver(&mut self, id: u64) {
+        loop {
+            let d = self.drivers.get_mut(&id).expect("a live driver");
+            let (msg_type, payload) = match d.rx.pump(&d.conn) {
+                RxStep::Idle => return,
+                RxStep::Eof => return self.drop_driver(id, "its connection ended"),
+                RxStep::Malformed => return self.drop_driver(id, "a frame this protocol does not make"),
+                RxStep::Frame { msg_type, payload_len } => (msg_type, d.rx.payload(payload_len).to_vec()),
             };
-            match step {
-                RxStep::Idle => i += 1,
-                RxStep::Eof | RxStep::Malformed => {
-                    pending.remove(i);
-                }
-                RxStep::Frame { msg_type, payload_len } => {
-                    let p = pending.remove(i);
-                    handshake(service, acceptor, p, msg_type, payload_len);
-                }
+            if let Err(why) = self.heard(id, msg_type, &payload) {
+                return self.drop_driver(id, why);
             }
         }
+    }
 
-        let ids: Vec<u64> = service.sessions.keys().copied().collect();
-        for id in ids {
-            if ready.contains(&(TOKEN_SESSION + id)) {
-                service.hear(id);
+    /// One frame of driver `id`'s, or why it ends the driver.
+    fn heard(&mut self, id: u64, msg_type: u32, payload: &[u8]) -> Result<(), &'static str> {
+        let d = self.drivers.get_mut(&id).expect("a live driver");
+        let Some(label) = d.label.clone() else {
+            if msg_type != disk::MSG_DRIVER {
+                return Err("a frame before its name");
             }
-            service.pull(id);
+            let label = disk::label(payload).ok_or("a name that is not one")?;
+            println!("diskserver: disk driver {label} connected");
+            d.label = Some(label);
+            return Ok(());
+        };
+        match msg_type {
+            disk::MSG_OFFER => {
+                let offer = Offer::decode(payload).ok_or("an offer that is not one")?;
+                if d.disks.contains_key(&offer.disk) {
+                    return Err("a disk it already offered");
+                }
+                self.offer(id, offer);
+            }
+            disk::MSG_SETTLED => {
+                let settled = Settled::decode(payload).ok_or("a settling that is not one")?;
+                if std::mem::replace(&mut d.settled, true) {
+                    return Err("a second settling");
+                }
+                let fate = match settled {
+                    Settled::Offered => Fate::Offered,
+                    Settled::Unusable => {
+                        println!("diskserver: disk driver {label} cannot use its controller; nothing it would carry is served");
+                        Fate::Unusable
+                    }
+                };
+                println!("diskserver: disk driver {label} settled with {} disk(s)", d.disks.len());
+                self.known.fates.insert(label, fate);
+            }
+            disk::MSG_GONE => {
+                let ours = disk::disk(payload).and_then(|theirs| d.disks.remove(&theirs));
+                let ours = ours.ok_or("the end of a disk it never offered")?;
+                self.known.offered.retain(|o| o.disk != ours);
+                println!("diskserver: disk {ours} left");
+            }
+            disk::MSG_DRIVER => return Err("its name a second time"),
+            _ => return Err("a frame this protocol does not make"),
         }
-        service.publish();
-        service.retire();
+        Ok(())
+    }
+
+    fn offer(&mut self, id: u64, offer: Offer) {
+        let ours = self.next_disk;
+        self.next_disk += 1;
+        let d = self.drivers.get_mut(&id).expect("a live driver");
+        d.disks.insert(offer.disk, ours);
+        println!(
+            "diskserver: disk {ours}, {}'s disk {}, offers {} partition(s)",
+            d.label.as_deref().unwrap_or("?"),
+            offer.disk,
+            offer.parts.len()
+        );
+        for part in &offer.parts {
+            if self.known.offered.iter().any(|o| o.part.unique == part.unique) {
+                println!("diskserver: partition {} is on two disks; neither is served", guid_text(part.unique));
+            }
+        }
+        self.known.offered.extend(offer.parts.into_iter().map(|part| Offered { disk: ours, part }));
+    }
+
+    /// Driver `id` is gone, and every disk it offered with it; a driver whose
+    /// connection ended is awaited until a driver of its name settles again.
+    fn drop_driver(&mut self, id: u64, why: &str) {
+        let d = self.drivers.remove(&id).expect("a live driver");
+        let label = d.label.unwrap_or_else(|| "an unnamed driver".into());
+        println!("diskserver: dropping disk driver {label} — {why}; its {} disk(s) leave", d.disks.len());
+        let gone: Vec<u32> = d.disks.values().copied().collect();
+        self.known.offered.retain(|o| !gone.contains(&o.disk));
+        if self.known.fates.contains_key(&label) {
+            self.known.fates.insert(label, Fate::Ended);
+        }
+    }
+
+    /// One client's first frame: a listing, or an open.
+    fn asked(&mut self, clients: &toyos::port::Acceptor, p: Pending, msg_type: u32, payload_len: usize, now: Instant) {
+        let grant = grant(clients, &p.conn);
+        if msg_type == wire::MSG_LIST && payload_len == 0 {
+            return self.waiting.push(Waiting { conn: p.conn, grant, ask: Ask::List, since: now });
+        }
+        let guid = wire::guid(p.rx.payload(payload_len));
+        let handles = p.conn.recv_handles_exact::<1>();
+        let (Some(guid), Some([region]), wire::MSG_OPEN) = (guid, handles, msg_type) else {
+            if let Some([region]) = handles {
+                toyos_abi::syscall::close(region);
+            }
+            return refuse(&p.conn, Refusal::Malformed);
+        };
+        // SAFETY: the handle arrived with this frame and nothing else in this
+        // process names it.
+        let region = unsafe { OwnedHandle::from_raw(region) };
+        self.waiting.push(Waiting { conn: p.conn, grant, ask: Ask::Open { guid, region }, since: now });
+    }
+
+    /// Answer every waiting question the drivers have now answered, or whose
+    /// wait is over.
+    fn answer_waiting(&mut self, now: Instant) {
+        let waiting = std::mem::take(&mut self.waiting);
+        for w in waiting {
+            let expired = now >= w.since + DRIVER_BOUND;
+            match w.ask {
+                Ask::List => match self.known.listing(w.grant, expired) {
+                    None => self.waiting.push(w),
+                    Some(answer) => {
+                        self.waited(expired, "a listing");
+                        list(&w.conn, answer);
+                    }
+                },
+                Ask::Open { guid, region } => match self.known.open(guid, w.grant, expired) {
+                    None => self.waiting.push(Waiting { ask: Ask::Open { guid, region }, ..w }),
+                    Some(Err(why)) => {
+                        self.waited(expired, "an open");
+                        println!("diskserver: an open of {} refused: {why:?}", guid_text(guid));
+                        refuse(&w.conn, why);
+                    }
+                    Some(Ok(offered)) => {
+                        let writes = w.grant.expect("admitted through a grant").writes;
+                        self.hand_over(offered, guid, writes, w.conn, region);
+                    }
+                },
+            }
+        }
+    }
+
+    /// Say which drivers a question answered at its bound waited for.
+    fn waited(&self, expired: bool, what: &str) {
+        if !expired || self.known.settled() {
+            return;
+        }
+        let started = self.known.expected.saturating_sub(self.known.fates.len());
+        println!(
+            "diskserver: {what} waited {DRIVER_BOUND:?} and is answered with what is known; not settled: {:?}, and \
+             {started} driver(s) started before this service never said who they are",
+            self.known.unsettled()
+        );
+    }
+
+    /// The session goes to the driver whose disk `offered` is: the client's
+    /// connection and region, then the frame naming them.
+    fn hand_over(&mut self, offered: Offered, guid: [u8; 16], writes: bool, conn: Connection, region: OwnedHandle) {
+        let Some((&id, d)) = self.drivers.iter().find(|(_, d)| d.disks.values().any(|&ours| ours == offered.disk)) else {
+            unreachable!("diskserver: disk {} is offered and no driver has it", offered.disk)
+        };
+        let theirs = *d.disks.iter().find(|(_, ours)| **ours == offered.disk).expect("just found").0;
+        let session = disk::Session { disk: theirs, unique: guid, writes };
+        // The client hears nothing from here: its open is the driver's to
+        // answer, and a refused move closes the client's connection.
+        if let Err(why) = d.conn.send_handles([conn.into_owned(), region]) {
+            return println!("diskserver: the kernel would not move a session to {:?}: {why:?}", d.label);
+        }
+        // Its handles are in the driver's queue ahead of any later frame's,
+        // so a frame the driver will not take ends the driver.
+        if d.conn.try_send_bytes(disk::MSG_SESSION, &session.encode()).is_err() {
+            return self.drop_driver(id, "it would not take a session");
+        }
+    }
+}
+
+fn refuse(conn: &Connection, why: Refusal) {
+    let _ = conn.try_send_bytes(wire::MSG_REFUSED, &why.encode());
+}
+
+/// One frame, and the connection is done with: a listing larger than a frame
+/// is one this service lists no part of rather than half of.
+fn list(conn: &Connection, answer: Result<Vec<Listed>, Refusal>) {
+    match answer {
+        Err(why) => refuse(conn, why),
+        Ok(listed) => {
+            let bytes: Vec<u8> = listed.iter().flat_map(Listed::encode).collect();
+            if conn.try_send_bytes(wire::MSG_LISTED, &bytes).is_err() {
+                refuse(conn, Refusal::Exhausted);
+            }
+        }
     }
 }
 
@@ -703,80 +521,10 @@ fn grant(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<Grant> {
     }
 }
 
-/// Answer one connection's first frame: a listing, or an open.
-fn handshake(service: &mut Service, acceptor: &toyos::port::Acceptor, p: Pending, msg_type: u32, payload_len: usize) {
-    let refuse = |conn: &Connection, why: Refusal| {
-        let _ = conn.try_send_bytes(wire::MSG_REFUSED, &why.encode());
-    };
-    let grant = grant(acceptor, &p.conn);
-    if msg_type == wire::MSG_LIST && payload_len == 0 {
-        match service.listing(grant) {
-            Err(why) => refuse(&p.conn, why),
-            // One frame, and the connection is done with: a table larger than
-            // a frame is one this service lists no part of rather than half of.
-            Ok(listing) => {
-                if p.conn.try_send_bytes(wire::MSG_LISTED, &listing).is_err() {
-                    refuse(&p.conn, Refusal::Exhausted);
-                }
-            }
-        }
-        return;
-    }
-    let guid = wire::guid(p.rx.payload(payload_len));
-    let handles = p.conn.recv_handles_exact::<1>();
-    let (Some(guid), Some([region]), wire::MSG_OPEN) = (guid, handles, msg_type) else {
-        if let Some([region]) = handles {
-            toyos_abi::syscall::close(region);
-        }
-        refuse(&p.conn, Refusal::Malformed);
-        return;
-    };
-    match service.open(guid, region, grant) {
-        Err(why) => {
-            println!("diskserver: an open of {} refused: {why:?}", guid_text(guid));
-            refuse(&p.conn, why);
-        }
-        Ok(opening) => {
-            let (rings, opened) = Opened::over(opening.region.words(), opening.blocks, guid);
-            if p.conn.try_send_bytes(wire::MSG_OPENED, &opened.encode()).is_err() {
-                service.abandon(opening);
-                return;
-            }
-            let writes = opening.writes;
-            let id = service.admit(opening, rings, opened, p.conn);
-            let access = if writes { "" } else { ", read-only" };
-            println!("diskserver: session {id} opened {} ({} blocks{access})", guid_text(guid), opened.blocks());
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use toyos_blockring::wire::Scope;
-
-    /// A controller this service cannot use, or one whose claim was refused,
-    /// is a disk there and never a machine without one: its listing and its
-    /// open are refused by that word, where an absent controller's listing is
-    /// empty and its open `NotFound`.
-    #[test]
-    fn an_unusable_or_unclaimed_controller_is_refused_and_an_absent_one_lists_nothing() {
-        let guid = [7; 16];
-        let grant = Some(Grant { scope: Scope::Unique(guid), writes: true });
-        let mut unusable = Service::new(Drive::Unusable);
-        assert_eq!(unusable.listing(grant), Err(Refusal::Unusable));
-        assert_eq!(unusable.place(guid, grant), Err(Refusal::Unusable));
-        let mut unclaimed = Service::new(Drive::ClaimRefused);
-        assert_eq!(unclaimed.listing(grant), Err(Refusal::ClaimRefused));
-        assert_eq!(unclaimed.place(guid, grant), Err(Refusal::ClaimRefused));
-        let mut absent = Service::new(Drive::Absent);
-        assert_eq!(absent.listing(grant), Ok(Vec::new()));
-        assert_eq!(absent.place(guid, grant), Err(Refusal::NotFound));
-        for mut service in [unusable, unclaimed, absent] {
-            assert_eq!(service.listing(None), Err(Refusal::NotGranted));
-            assert_eq!(service.place(guid, None), Err(Refusal::NotGranted));
-        }
-    }
 
     const LOG: [u8; 16] = [1; 16];
     const BOOT: [u8; 16] = [2; 16];
@@ -787,49 +535,121 @@ mod tests {
     const DATA_KIND: [u8; 16] = [0x30; 16];
     const ROOT_KIND: [u8; 16] = [0x40; 16];
 
-    fn table() -> Vec<Part> {
-        [(LOG, LOG_KIND), (BOOT, BOOT_KIND), (DATA, DATA_KIND), (ROOT, ROOT_KIND)]
-            .into_iter()
-            .enumerate()
-            .map(|(i, (unique, kind))| Part { unique, kind, span: Ok((i as u64 * 100, 100)) })
-            .collect()
-    }
-
     fn unique(guid: [u8; 16]) -> Option<Grant> {
         Some(Grant { scope: Scope::Unique(guid), writes: true })
     }
 
-    /// A unique grant opens its one partition and is refused every other of
-    /// the same table by name, as is a connection with no grant; a kind grant
-    /// opens every partition of its type and no other.
-    #[test]
-    fn an_open_reaches_only_what_its_grant_admits() {
-        let parts = table();
-        assert_eq!(admitted(Ok(&parts), LOG, unique(LOG)), Ok((0, 100)));
-        for other in [BOOT, DATA, ROOT] {
-            assert_eq!(admitted(Ok(&parts), other, unique(LOG)), Err(Refusal::NotGranted));
-            assert_eq!(admitted(Ok(&parts), other, None), Err(Refusal::NotGranted));
-        }
-        let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: true });
-        assert_eq!(admitted(Ok(&parts), DATA, data), Ok((200, 100)));
-        assert_eq!(admitted(Ok(&parts), LOG, data), Err(Refusal::NotGranted));
-        // Nothing of a GUID the table does not carry, but to the grant that names it.
-        assert_eq!(admitted(Ok(&parts), [9; 16], data), Err(Refusal::NotGranted));
-        assert_eq!(admitted(Ok(&parts), [9; 16], unique([9; 16])), Err(Refusal::NotFound));
+    fn part(unique: [u8; 16], kind: [u8; 16]) -> Part {
+        Part { unique, kind, blocks: Some(100) }
     }
 
-    /// A listing names exactly what its grant admits, and nothing to a
-    /// connection with none.
+    /// One settled driver offering LOG, BOOT and ROOT on disk 0, and another
+    /// offering DATA on disk 1.
+    fn two_disks() -> Known {
+        let mut known = Known { expected: 2, ..Known::default() };
+        known.fates.insert("stick".into(), Fate::Offered);
+        known.fates.insert("nvme".into(), Fate::Offered);
+        for p in [part(LOG, LOG_KIND), part(BOOT, BOOT_KIND), part(ROOT, ROOT_KIND)] {
+            known.offered.push(Offered { disk: 0, part: p });
+        }
+        known.offered.push(Offered { disk: 1, part: part(DATA, DATA_KIND) });
+        known
+    }
+
+    /// A unique grant opens its one partition on whichever disk carries it,
+    /// and is refused every other by name, as is a connection with no grant;
+    /// a kind grant opens every partition of its type and no other.
+    #[test]
+    fn an_open_reaches_only_what_its_grant_admits() {
+        let known = two_disks();
+        assert_eq!(known.open(LOG, unique(LOG), false), Some(Ok(Offered { disk: 0, part: part(LOG, LOG_KIND) })));
+        for other in [BOOT, DATA, ROOT] {
+            assert_eq!(known.open(other, unique(LOG), false), Some(Err(Refusal::NotGranted)));
+            assert_eq!(known.open(other, None, false), Some(Err(Refusal::NotGranted)));
+        }
+        let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: true });
+        assert_eq!(known.open(DATA, data, false), Some(Ok(Offered { disk: 1, part: part(DATA, DATA_KIND) })));
+        assert_eq!(known.open(LOG, data, false), Some(Err(Refusal::NotGranted)));
+        assert_eq!(known.open([9; 16], data, false), Some(Err(Refusal::NotGranted)), "nothing of a GUID no disk offers");
+        assert_eq!(known.open([9; 16], unique([9; 16]), false), Some(Err(Refusal::NotFound)));
+    }
+
+    /// A listing names exactly what its grant admits across every disk, and
+    /// nothing to a connection with none.
     #[test]
     fn a_listing_names_only_what_its_grant_admits() {
-        let parts = table();
-        let decoded = |bytes: Vec<u8>| -> Vec<[u8; 16]> {
-            wire::Listed::decode_all(&bytes).expect("whole entries").map(|l| l.unique).collect()
+        let known = two_disks();
+        let uniques = |answer: Option<Result<Vec<Listed>, Refusal>>| {
+            answer.expect("answered").map(|all| all.iter().map(|l| (l.disk, l.unique)).collect::<Vec<_>>())
         };
-        assert_eq!(listed(Ok(&parts), unique(BOOT)).map(decoded), Ok(vec![BOOT]));
-        let roots = Some(Grant { scope: Scope::Kind(ROOT_KIND), writes: false });
-        assert_eq!(listed(Ok(&parts), roots).map(decoded), Ok(vec![ROOT]));
-        assert_eq!(listed(Ok(&parts), unique([9; 16])).map(decoded), Ok(vec![]));
-        assert_eq!(listed(Ok(&parts), None), Err(Refusal::NotGranted));
+        assert_eq!(uniques(known.listing(unique(BOOT), false)), Ok(vec![(0, BOOT)]));
+        let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: false });
+        assert_eq!(uniques(known.listing(data, false)), Ok(vec![(1, DATA)]));
+        assert_eq!(uniques(known.listing(unique([9; 16]), false)), Ok(vec![]));
+        assert_eq!(known.listing(None, false), Some(Err(Refusal::NotGranted)));
+    }
+
+    /// Until every driver started at boot has settled, a listing and an open
+    /// of what no disk offers wait; an open of what is offered is answered at
+    /// once. At the bound each is answered with what is known, and a missing
+    /// driver is never taken for a machine without the partition.
+    #[test]
+    fn what_no_disk_offers_waits_for_every_driver_started_at_boot() {
+        let mut known = Known { expected: 2, ..Known::default() };
+        known.fates.insert("nvme".into(), Fate::Offered);
+        known.offered.push(Offered { disk: 0, part: part(DATA, DATA_KIND) });
+        let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: true });
+        assert_eq!(known.listing(data, false), None, "the stick's driver has not settled");
+        assert_eq!(known.open(LOG, unique(LOG), false), None);
+        assert!(known.open(DATA, data, false).is_some_and(|r| r.is_ok()), "offered: answered at once");
+        assert_eq!(known.open(LOG, unique(LOG), true), Some(Err(Refusal::Unusable)), "the bound passed, a driver missing");
+        assert!(known.listing(data, true).is_some_and(|r| r.is_ok_and(|l| l.len() == 1)));
+        let log = Some(Grant { scope: Scope::Kind(LOG_KIND), writes: true });
+        assert_eq!(known.listing(log, true), Some(Err(Refusal::Unusable)), "nothing listed, a driver missing");
+
+        known.fates.insert("stick".into(), Fate::Offered);
+        assert_eq!(known.open(LOG, unique(LOG), false), Some(Err(Refusal::NotFound)), "every driver said");
+        assert_eq!(known.listing(log, false), Some(Ok(vec![])));
+    }
+
+    /// A driver that ended is awaited until one of its name settles again,
+    /// as a file server reopening after a driver's restart needs.
+    #[test]
+    fn a_driver_that_ended_is_awaited_until_it_settles_again() {
+        let mut known = two_disks();
+        known.fates.insert("stick".into(), Fate::Ended);
+        known.offered.retain(|o| o.disk != 0);
+        assert_eq!(known.open(LOG, unique(LOG), false), None);
+        known.fates.insert("stick".into(), Fate::Offered);
+        known.offered.push(Offered { disk: 2, part: part(LOG, LOG_KIND) });
+        assert_eq!(known.open(LOG, unique(LOG), false), Some(Ok(Offered { disk: 2, part: part(LOG, LOG_KIND) })));
+    }
+
+    /// A controller its driver cannot use, or whose claim was refused, is a
+    /// disk there and never a machine without one.
+    #[test]
+    fn an_unusable_or_unclaimed_controller_is_refused_and_an_absent_one_lists_nothing() {
+        let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: true });
+        let mut unusable = Known { expected: 1, ..Known::default() };
+        unusable.fates.insert("nvme".into(), Fate::Unusable);
+        assert_eq!(unusable.listing(data, false), Some(Err(Refusal::Unusable)));
+        assert_eq!(unusable.open(DATA, unique(DATA), false), Some(Err(Refusal::Unusable)));
+        let unclaimed = Known { undriven: vec!["pci:01:08:02".into()], ..Known::default() };
+        assert_eq!(unclaimed.listing(data, false), Some(Err(Refusal::ClaimRefused)));
+        assert_eq!(unclaimed.open(DATA, unique(DATA), false), Some(Err(Refusal::ClaimRefused)));
+        let absent = Known::default();
+        assert_eq!(absent.listing(data, false), Some(Ok(vec![])));
+        assert_eq!(absent.open(DATA, unique(DATA), false), Some(Err(Refusal::NotFound)));
+    }
+
+    /// A partition two disks offer, or one its driver will not serve, is
+    /// listed and refused `Unusable`.
+    #[test]
+    fn a_partition_on_two_disks_or_unserved_is_unusable() {
+        let mut known = two_disks();
+        known.offered.push(Offered { disk: 1, part: part(LOG, LOG_KIND) });
+        known.offered.push(Offered { disk: 1, part: Part { unique: [7; 16], kind: LOG_KIND, blocks: None } });
+        assert_eq!(known.open(LOG, unique(LOG), false), Some(Err(Refusal::Unusable)));
+        assert_eq!(known.open([7; 16], unique([7; 16]), false), Some(Err(Refusal::Unusable)));
     }
 }

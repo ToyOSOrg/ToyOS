@@ -1,4 +1,4 @@
-//! The NVMe controller diskserver drives, NVMe Base Specification 2.0 throughout:
+//! One NVMe controller, NVMe Base Specification 2.0 throughout:
 //! §3.1.4 for the registers, §3.3 for the queues, §3.5.1 for bring-up, §5 for
 //! the admin commands, and the NVM Command Set 1.0 for read, write and flush.
 //!
@@ -89,8 +89,7 @@ const _: () = assert!(IO_DEPTH as usize * SQE_BYTES <= PAGE);
 pub enum Owner {
     /// This driver's own, waited for in place.
     Driver,
-    /// A session's request `tag`, and whether it writes.
-    Session { session: u64, tag: u32, write: bool },
+    Session(toyos_blockserve::Owner),
 }
 
 /// One command's answer.
@@ -215,14 +214,14 @@ pub struct Controller {
 impl Controller {
     /// Bring the controller up (§3.5.1): disable, program the admin queue,
     /// enable, identify, and make the I/O queue pairs.
-    pub fn open(dev: PciDev) -> Result<Self, Refusal> {
+    /// `info` is the claim's one description.
+    pub fn open(dev: PciDev, info: &toyos_abi::pci::PciFunctionInfo) -> Result<Self, Refusal> {
         let class = dev
             .config_read(0x08, toyos_abi::syscall::RegWidth::U32)
             .map_err(|e| Refusal::Kernel("the class code", e))?;
         if class >> 8 != 0x01_08_02 {
             return Err(Refusal::NotNvme(class >> 8));
         }
-        let info = dev.describe().map_err(|e| Refusal::Kernel("the claim's description", e))?;
         let bar_bytes = info.bar_bytes[0];
         if bar_bytes <= DOORBELLS as u64 {
             return Err(Refusal::NoRegisters);
@@ -439,7 +438,7 @@ impl Controller {
             Some(i) => &mut self.io[i],
             None => &mut self.admin,
         };
-        let cid = q.free.pop().expect("diskserver: a submission with no free slot");
+        let cid = q.free.pop().expect("nvme: a submission with no free slot");
         q.slots[cid as usize] = Some(Slot { owner, since: Instant::now() });
         let mut cmd = cmd;
         // Written into this slot's own list page before the entry that names
@@ -484,7 +483,7 @@ impl Controller {
                 if !*stray {
                     *stray = true;
                     println!(
-                        "diskserver: queue {} answered identifier {cid}, which names no command \
+                        "nvme: queue {} answered identifier {cid}, which names no command \
                          waiting; dropped, and said once",
                         q.qid
                     );
@@ -520,7 +519,7 @@ impl Controller {
         self.poller.watch(&self.dev, READABLE, 0);
         self.poller.wait(1, bound.as_nanos() as u64, |_| {});
         if let Err(why) = self.take_interrupt() {
-            panic!("diskserver: the claim refused its interrupt read ({why:?}): the unit refused this controller an access");
+            panic!("nvme: the claim refused its interrupt read ({why:?}): the unit refused this controller an access");
         }
     }
 
@@ -555,7 +554,7 @@ impl Controller {
     /// # Panics
     /// With no room: the caller asks [`Self::has_room`] first.
     pub fn submit_io(&mut self, write: bool, block: u64, blocks: u32, at: u64, owner: Owner) {
-        let queue = self.roomiest().expect("diskserver: an I/O submission with no queue room");
+        let queue = self.roomiest().expect("nvme: an I/O submission with no queue room");
         let per = (toyos_blockring::BLOCK_BYTES as u32 / self.lba_bytes) as u64;
         let sectors = blocks as u64 * per;
         let pages = blocks as usize;
@@ -588,7 +587,7 @@ impl Controller {
 
     /// Issue a Flush for `owner` (§7.1 of the NVM Command Set).
     pub fn submit_flush(&mut self, owner: Owner) {
-        let queue = self.roomiest().expect("diskserver: a flush with no queue room");
+        let queue = self.roomiest().expect("nvme: a flush with no queue room");
         self.submit(Some(queue), Command { opcode: IO_FLUSH, nsid: 1, ..Command::default() }, owner, |_| 0);
         self.issued[queue] += 1;
         self.peak = self.peak.max(self.busy());
@@ -598,7 +597,7 @@ impl Controller {
     /// own scratch page: before any session exists, for the partition table.
     pub fn read_block(&mut self, block: u64, out: &mut [u8]) -> bool {
         assert_eq!(out.len(), toyos_blockring::BLOCK_BYTES);
-        assert_eq!(self.busy(), 0, "diskserver: a waited read beside other commands");
+        assert_eq!(self.busy(), 0, "nvme: a waited read beside other commands");
         self.submit_io(false, block, 1, self.dma_addr + OFF_SCRATCH as u64, Owner::Driver);
         let start = Instant::now();
         let mut done = Vec::new();
@@ -607,7 +606,7 @@ impl Controller {
             if let Some(d) = done.pop() {
                 break d.ok;
             }
-            assert!(start.elapsed() < self.ready_bound * 4, "diskserver: a waited read was not answered");
+            assert!(start.elapsed() < self.ready_bound * 4, "nvme: a waited read was not answered");
             self.wait_interrupt(self.ready_bound);
         };
         if ok {

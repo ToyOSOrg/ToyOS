@@ -18,3 +18,7 @@ std = []
 # selects one. The kernel does not enable it, so no production path can reach a
 # flawed decision — the field does not exist there.
 flaws = []
+
+[dependencies]
+# The command a Bulk-Only wrapper carries.
+toyos-scsi = { path = "../scsi" }

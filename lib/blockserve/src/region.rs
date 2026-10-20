@@ -33,7 +33,7 @@ impl Region {
     /// The ring words, as the rings take them.
     pub fn words(&self) -> &[AtomicU32; RING_WORDS] {
         let base = self.memory.as_ptr();
-        assert!(base as usize % align_of::<AtomicU32>() == 0);
+        assert!((base as usize).is_multiple_of(align_of::<AtomicU32>()));
         // SAFETY: the mapping is `SESSION_BYTES` long and lives as long as
         // `self.memory`, which the returned borrow cannot outlive; the first
         // `RING_WORDS` words of it are inside it (`layout`'s own assertion);

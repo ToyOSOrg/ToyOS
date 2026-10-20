@@ -24,15 +24,21 @@
 //! `0xA7` alone (C 12), so its line never rises again, and its buttons are
 //! released by a report holding none.
 //!
-//! **A loss is the device's that lost something.** The keyboard's overrun
-//! code sends `LOST`, which releases keys alone; a pointer byte dropped sends
-//! nothing, since every packet states the buttons whole.
+//! **The pointer is `source` [`POINTER`] of the connection and the keyboard
+//! [`KEYBOARD`]. A loss is the device's that lost something**: the keyboard's
+//! overrun code sends the keyboard's `gone`, which releases its keys alone; a
+//! pointer byte dropped sends nothing, since every packet states the buttons
+//! whole.
 
 use toyos_abi::input::{RawKeyEvent, MOD_RELEASED};
 use toyos_input::wire::{Motion, Record, Report};
 use toyos_ps2::{KeyDecoder, KeyOutcome, MouseDecoder, MouseOutcome};
 
 use crate::bus::*;
+
+/// The two devices' numbers on the connection.
+pub const POINTER: u16 = 0;
+pub const KEYBOARD: u16 = 1;
 
 /// The most bytes one wake reads before it calls the controller wedged.
 pub const BURST: usize = 32;
@@ -204,12 +210,12 @@ impl Stream {
             KeyOutcome::Key { usage, pressed } => {
                 self.counts.keys += 1;
                 let modifiers = if pressed { 0 } else { MOD_RELEASED };
-                out.push(Record::Key(RawKeyEvent { keycode: usage, modifiers }));
+                out.push(Record::Key { source: KEYBOARD, key: RawKeyEvent { keycode: usage, modifiers } });
             }
             // The keyboard's overrun code: what it lost may be a release.
             KeyOutcome::Lost => {
                 self.counts.overruns += 1;
-                out.push(Record::Lost);
+                out.push(Record::Gone { source: KEYBOARD });
             }
             KeyOutcome::None => {
                 let run = self.kbd_run.blame(byte, false);
@@ -314,9 +320,8 @@ impl Stream {
     }
 }
 
-/// The one pointer's report: it is source 0 of this connection.
 fn pointer(buttons: u8, dx: i16, dy: i16) -> Record {
-    Record::Pointer(Report { source: 0, buttons, scroll: 0, motion: Motion::Relative { dx, dy } })
+    Record::Pointer(Report { source: POINTER, buttons, scroll: 0, motion: Motion::Relative { dx, dy } })
 }
 
 #[cfg(test)]
@@ -360,17 +365,17 @@ mod tests {
         let (records, _) = run(&mut fake, &mut stream, at + 10 * MS);
         let made = toyos_abi::input::RawKeyEvent { keycode: 0x04, modifiers: 0 };
         let broke = toyos_abi::input::RawKeyEvent { keycode: 0x04, modifiers: MOD_RELEASED };
-        assert_eq!(records, [Record::Key(made), Record::Key(broke)]);
+        assert_eq!(records, [Record::Key { source: KEYBOARD, key: made }, Record::Key { source: KEYBOARD, key: broke }]);
     }
 
     #[test]
-    fn an_overrun_code_sends_lost() {
+    fn an_overrun_code_sends_the_keyboards_gone() {
         let mut fake = Fake::qemu();
         let mut stream = armed(&mut fake);
         let at = fake.now + MS;
         fake.kbd_sends(at, &[0x00]);
         let (records, _) = run(&mut fake, &mut stream, at + 10 * MS);
-        assert_eq!(records, [Record::Lost]);
+        assert_eq!(records, [Record::Gone { source: KEYBOARD }]);
     }
 
     /// `E0 2A` is the fake Shift around PrtScn, which maps to nothing: the run
@@ -409,7 +414,7 @@ mod tests {
         fake.aux_sends(at, &[0xAA, 0x00]);
         fake.kbd_sends(at + MS, &[0x1C, 0x1C]);
         let (records, said) = run(&mut fake, &mut stream, at + 30 * MS);
-        let keys = records.iter().filter(|r| matches!(r, Record::Key(k) if k.keycode == 0x04)).count();
+        let keys = records.iter().filter(|r| matches!(r, Record::Key { key, .. } if key.keycode == 0x04)).count();
         assert_eq!(keys, 2, "{records:?}");
         assert!(said.iter().any(|l| l == "ps2server: aux reset itself, reporting enabled again"), "{said:#?}");
     }
@@ -425,7 +430,7 @@ mod tests {
         fake.aux_sends(at + 5 * MS, &[0x00]);
         let (records, _) = run(&mut fake, &mut stream, at + 20 * MS);
         let shift = toyos_abi::input::RawKeyEvent { keycode: 0xE1, modifiers: 0 };
-        assert_eq!(records, [Record::Key(shift)]);
+        assert_eq!(records, [Record::Key { source: KEYBOARD, key: shift }]);
         assert_eq!(stream.counts.discarded, 1, "the byte reached the framer, which dropped it");
     }
 
@@ -456,6 +461,6 @@ mod tests {
         fake.aux_sends(at, &[0x09, 0x05, 0x03]);
         let (records, _) = run(&mut fake, &mut stream, at + 100 * MS);
         let motion = Motion::Relative { dx: 5, dy: -3 };
-        assert_eq!(records, [Record::Pointer(Report { source: 0, buttons: 1, scroll: 0, motion })]);
+        assert_eq!(records, [Record::Pointer(Report { source: POINTER, buttons: 1, scroll: 0, motion })]);
     }
 }

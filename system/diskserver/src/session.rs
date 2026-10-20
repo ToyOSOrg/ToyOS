@@ -27,7 +27,7 @@ use toyos_blockring::layout::{self, ClientRings, ARENA, MAX_REQUEST_BLOCKS};
 use toyos_blockring::wire::{self, Opened, Refusal};
 use toyos_blockring::{Run, BLOCK_BYTES};
 
-use crate::region::Region;
+use toyos_blockserve::region::Region;
 
 /// Why a session could not be opened or go on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
