@@ -612,9 +612,80 @@ fn ml_kem_rows(rows: &mut Vec<Box<dyn Row>>) {
     ));
 }
 
+/// Ours computes what ring computes at every length up to 1153 B, so that
+/// every batch, threshold and tail of every instruction path the bench
+/// admits runs against ring: AEAD seal, open and rejection with AAD of 0, 5,
+/// 16, 17 and 33 B; the OpenSSH packet construction; SHA-2 and HMAC, the
+/// latter with a key longer than a block too. A mismatch ends the job, and
+/// with it the boot's rows.
+fn agrees_with_ring_at_every_length() {
+    use ring::aead::chacha20_poly1305_openssh as ring_ssh;
+    use toyos_crypto::ssh;
+    const MAX: usize = 1153;
+    let source: Vec<u8> = (0..MAX + 64).map(|i| (i * 167 + 13) as u8).collect();
+    let message = |len: usize| source[len % 61..][..len].to_vec();
+    for alg in [Tls::Aes128, Tls::Aes256, Tls::ChaCha] {
+        let ring_key = alg.ring();
+        let opener = alg.opening();
+        for aad_len in [0usize, 5, 16, 17, 33] {
+            let aad = &source[7..7 + aad_len];
+            for len in 0..=MAX {
+                let plain = message(len);
+                let mut ours = plain.clone();
+                let (_, tag) = alg.sealing().seal(aad, &mut ours).expect("seal");
+                let mut theirs = plain.clone();
+                let ring_tag = ring_key
+                    .seal_in_place_separate_tag(nonce(0), aead::Aad::from(aad), &mut theirs)
+                    .expect("ring seals");
+                assert_eq!((&ours, &tag[..]), (&theirs, ring_tag.as_ref()), "{} seals {len} B, AAD {aad_len} B, as ring", alg.name());
+                let mut opened = theirs.clone();
+                opener.open(&IV, aad, &mut opened, ring_tag.as_ref()).expect("ours opens ring's record");
+                assert_eq!(opened, plain, "{} opens {len} B, AAD {aad_len} B", alg.name());
+                let mut forged = ring_tag.as_ref().to_vec();
+                forged[len % 16] ^= 1;
+                let mut refused = theirs.clone();
+                assert!(opener.open(&IV, aad, &mut refused, &forged).is_err(), "{} refuses a forged tag at {len} B", alg.name());
+                assert_eq!(refused, theirs, "{} leaves a refused record as it was", alg.name());
+            }
+        }
+    }
+    let opener = ssh::OpeningKey::new(KEY);
+    for len in 0..=MAX {
+        let sequence = len as u32 * 7919;
+        let plain = message(len);
+        let length = u32::try_from(len).unwrap().to_be_bytes();
+        let (mut header, mut ours) = (length, plain.clone());
+        let (_, tag) = ssh::SealingKey::new(KEY, sequence).seal(&mut header, &mut ours).expect("seal");
+        let mut packet = [&length[..], &plain].concat();
+        let mut ring_tag = [0; 16];
+        ring_ssh::SealingKey::new(&KEY).seal_in_place(sequence, &mut packet, &mut ring_tag);
+        assert_eq!(([&header[..], &ours].concat(), tag), (packet.clone(), ring_tag), "OpenSSH seals {len} B as ring");
+        let mut header: [u8; 4] = packet[..4].try_into().unwrap();
+        let mut opened = packet[4..].to_vec();
+        assert_eq!(opener.packet_length(sequence, header), len as u32);
+        opener.open(sequence, &mut header, &mut opened, &ring_tag).expect("ours opens ring's packet");
+        assert_eq!(opened, plain, "OpenSSH opens {len} B");
+    }
+    let (short, long) = (&source[..32], &source[..200]);
+    for len in 0..=MAX {
+        let data = message(len);
+        assert_eq!(&Sha256::digest(&data).unwrap()[..], digest::digest(&digest::SHA256, &data).as_ref(), "SHA-256 of {len} B");
+        assert_eq!(&Sha384::digest(&data).unwrap()[..], digest::digest(&digest::SHA384, &data).as_ref(), "SHA-384 of {len} B");
+        assert_eq!(&Sha512::digest(&data).unwrap()[..], digest::digest(&digest::SHA512, &data).as_ref(), "SHA-512 of {len} B");
+        for key in [short, long] {
+            let (mut tag256, mut tag384) = ([0; 32], [0; 48]);
+            Hmac::<Sha256>::authenticate(key, &data, &mut tag256).unwrap();
+            Hmac::<Sha384>::authenticate(key, &data, &mut tag384).unwrap();
+            assert_eq!(&tag256[..], hmac::sign(&hmac::Key::new(hmac::HMAC_SHA256, key), &data).as_ref(), "HMAC-SHA-256 of {len} B");
+            assert_eq!(&tag384[..], hmac::sign(&hmac::Key::new(hmac::HMAC_SHA384, key), &data).as_ref(), "HMAC-SHA-384 of {len} B");
+        }
+    }
+}
+
 fn main() {
     let build = if cfg!(debug_assertions) { Build::Asserted } else { Build::Unasserted };
     println!("{}", IsaLine(build, &features::detected()));
+    agrees_with_ring_at_every_length();
     let mut rows = Vec::new();
     for alg in [Tls::Aes128, Tls::Aes256, Tls::ChaCha] {
         tls_rows(alg, &mut rows);
