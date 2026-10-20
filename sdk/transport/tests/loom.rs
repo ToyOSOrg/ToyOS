@@ -19,7 +19,7 @@ use std::rc::Rc;
 use loom::cell::Cell;
 use loom::sync::atomic::AtomicU32;
 use loom::sync::{Arc, Notify};
-use toyos_transport::{stream, Consumer, Place, Producer, Untrusted, Violation, Word};
+use toyos_transport::{stream, Consumer, Place, Producer, Violation, Word};
 
 /// A loom atomic as a region word: the trait is this crate's and the type is
 /// loom's, so the two meet through a wrapper.
@@ -54,10 +54,6 @@ fn entry(n: u32) -> [u32; E] {
     [100 + n, 7 * n + 3]
 }
 
-fn plain(words: [Untrusted<u32>; E]) -> [u32; E] {
-    words.map(|w| w.at_most(u32::MAX.into()).unwrap() as u32)
-}
-
 /// Two entries published one at a time, read by the other end as they
 /// arrive: each is whole, in order, and exactly what was written.
 #[test]
@@ -70,7 +66,7 @@ fn a_published_entry_is_read_whole() {
             let mut read = Vec::new();
             while read.len() < 2 {
                 match rx.pop(&consumer_page).expect("the producer keeps the protocol") {
-                    Some(words) => read.push(plain(words)),
+                    Some(words) => read.push(words),
                     None => loom::thread::yield_now(),
                 }
             }

@@ -17,7 +17,6 @@ use toyos_abi::handle::{RawHandle, Rights};
 #[cfg(feature = "test-actuators")]
 use toyos_abi::syscall::debug_action as DA;
 use toyos_abi::syscall::*;
-use toyos_untrusted::Untrusted;
 
 use super::HANDLE_LEN;
 #[cfg(feature = "test-actuators")]
@@ -268,9 +267,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // A census of the hardware and of who drives it, so it costs
         // Rights::INVENTORY. The count is bounded before it becomes a window.
         SYS_DEVICE_INVENTORY => {
-            let Ok(count) = Untrusted::new(a3).at_most(MAX_INVENTORY_RECORDS) else {
+            let count = a3;
+            if count > MAX_INVENTORY_RECORDS {
                 return SyscallError::InvalidArgument.to_u64();
-            };
+            }
             let len = count * toyos_abi::inventory::RECORD_BYTES as u64;
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
             sys_device_inventory(RawHandle(a1 as u32), &mut buf)
@@ -278,9 +278,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // What every CPU counts, so it costs Rights::COUNTERS; a CPU per record,
         // so the count is bounded by the most CPUs there can be.
         SYS_COUNTERS => {
-            let Ok(count) = Untrusted::new(a3).at_most(crate::scheduler::MAX_CPUS as u64) else {
+            let count = a3;
+            if count > crate::scheduler::MAX_CPUS as u64 {
                 return SyscallError::InvalidArgument.to_u64();
-            };
+            }
             let len = count * toyos_abi::counters::RECORD_BYTES as u64;
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
             sys_counters(RawHandle(a1 as u32), &mut buf)
@@ -405,11 +406,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // The count is bounded before it becomes a window, and a transfer of
         // nothing is refused rather than sent to a device as a zero-length command.
         SYS_PARTITION_READ | SYS_PARTITION_WRITE => {
-            let Ok(count) = Untrusted::new(a4).at_most(toyos_abi::part::MAX_BLOCKS_PER_CALL as u64)
-            else {
-                return SyscallError::InvalidArgument.to_u64();
-            };
-            if count == 0 {
+            let count = a4;
+            if count == 0 || count > toyos_abi::part::MAX_BLOCKS_PER_CALL as u64 {
                 return SyscallError::InvalidArgument.to_u64();
             }
             let len = count * toyos_abi::part::BLOCK_BYTES as u64;
@@ -477,10 +475,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_PORT_CREATE => sys_port_create(),
         SYS_PORT_MINT => {
             // Copied in before any handle is looked up: the kernel holds the badge, never the caller's page.
-            let Ok(len) = Untrusted::new(a3).at_most(MAX_BADGE as u64) else {
-                return SyscallError::InvalidArgument.to_u64();
-            };
-            if len == 0 {
+            let len = a3;
+            if len == 0 || len > MAX_BADGE as u64 {
                 return SyscallError::InvalidArgument.to_u64();
             }
             let Some(bytes) = ctx.user_bytes(UserAddr::new(a2), len) else { return bad_addr };
@@ -602,10 +598,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // bound and its stale answer are the shipped paths.
             DA::COUNTERS_DEAF => crate::counters::deaf::stage(a2),
             DA::COUNTERS_HEAR => crate::counters::deaf::end(),
-            DA::TRACE_FLOOD => match Untrusted::new(a2).at_most(DA::TRACE_FLOOD_MOST) {
-                Ok(count) => crate::trace::flood(count),
-                Err(_) => SyscallError::InvalidArgument.to_u64(),
-            },
+            DA::TRACE_FLOOD if a2 <= DA::TRACE_FLOOD_MOST => crate::trace::flood(a2),
             // An interrupt inside a syscall's body, which nothing a guest does puts there on demand.
             DA::RING0_TIMER_IN_SYSCALL => ring0_timer_in_syscall(),
             DA::ACPI_FIRMWARE_LOCK => crate::arch::acpi_mode::debug_firmware_lock(a2),
@@ -627,11 +620,11 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_SET_THREAD_NAME => {
             // Refused by name, not clamped: a length past the bound is the caller's
             // bad argument, not a shorter name to silently write.
-            let Ok(len) = Untrusted::new(a2).at_most(process::THREAD_NAME_LEN as u64) else {
+            if a2 > process::THREAD_NAME_LEN as u64 {
                 return SyscallError::InvalidArgument.to_u64();
-            };
-            let len = len as usize;
-            let Some(bytes) = ctx.user_bytes(UserAddr::new(a1), len as u64) else {
+            }
+            let len = a2 as usize;
+            let Some(bytes) = ctx.user_bytes(UserAddr::new(a1), a2) else {
                 return bad_addr;
             };
             let mut name = [0u8; process::THREAD_NAME_LEN];

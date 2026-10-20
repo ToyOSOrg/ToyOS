@@ -18,8 +18,6 @@
 
 use alloc::vec::Vec;
 
-use toyos_untrusted::Untrusted;
-
 use crate::wire;
 
 /// `VD_AGENT_MAX_DATA_SIZE`: the most one chunk carries.
@@ -151,9 +149,7 @@ impl Decoder {
                 self.chunk_filled = 0;
                 let port = word(&self.chunk, 0);
                 let size = word(&self.chunk, 4);
-                self.chunk_left = Untrusted::new(size)
-                    .at_most(MAX_CHUNK as u64)
-                    .map_err(|_| Unframed { size })? as usize;
+                self.chunk_left = usize::try_from(size).ok().filter(|&n| n <= MAX_CHUNK).ok_or(Unframed { size })?;
                 self.ours = port == wire::CLIENT_PORT;
                 if !self.ours {
                     each(Err(Refusal::OtherPort { port }));
@@ -242,10 +238,9 @@ fn admit(protocol: u32, kind: u32, size: u32) -> Result<Kind, Refusal> {
     if protocol != wire::PROTOCOL {
         return Err(Refusal::Protocol { protocol });
     }
-    if Untrusted::new(size).at_most(MAX_DATA as u64).is_err() {
+    let Some(len) = usize::try_from(size).ok().filter(|&n| n <= MAX_DATA) else {
         return Err(Refusal::TooLarge { kind, size });
-    }
-    let len = size as usize;
+    };
     let (admitted, fits) = match kind {
         wire::ANNOUNCE_CAPABILITIES => (Kind::Capabilities, len >= 8),
         wire::GRAB => (Kind::Grab, len >= 4 && len.is_multiple_of(4) && (len - 4) / 4 <= MAX_GRAB_TYPES),

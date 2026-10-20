@@ -12,7 +12,7 @@
 //! [`Span`], once: no reference to the peer's bytes is formed.
 //!
 //! **What the peer writes is untrusted until decoded.** An entry comes out as
-//! [`Untrusted`] words; a peer's cursor is bounded against the ring before it
+//! the peer's words, for the protocol's decoder to bound; a peer's cursor is bounded against the ring before it
 //! is believed, and the variant of [`Violation`] names what it claimed; a run
 //! is bounded against the [`Geometry`], and a tag against the [`Inflight`]
 //! table. An end keeps its own cursor locally and only stores the shared one,
@@ -38,7 +38,6 @@ use core::sync::atomic::{AtomicU32, Ordering};
 pub use arena::{Geometry, Run, Span};
 pub use inflight::Inflight;
 pub use queue::{Consumer, Place, Producer};
-pub use toyos_untrusted::Untrusted;
 
 /// One shared 32-bit word of a region: an atomic over the mapping, or a
 /// model's.
@@ -75,9 +74,9 @@ fn word<W, const N: usize>(page: &[W; N], at: usize) -> &W {
 }
 
 /// A distance the peer's cursor claims, believed only up to `cap`.
-fn clamp(claimed: Untrusted<u32>, cap: u32, broken: Violation) -> Result<u32, Violation> {
+fn clamp(claimed: u32, cap: u32, broken: Violation) -> Result<u32, Violation> {
     let cap = if cfg!(feature = "no-clamp") { u32::MAX } else { cap };
-    claimed.at_most(u64::from(cap)).ok().and_then(|n| u32::try_from(n).ok()).ok_or(broken)
+    if claimed > cap { Err(broken) } else { Ok(claimed) }
 }
 
 /// The peer wrote what no peer of the protocol writes. The session is over;

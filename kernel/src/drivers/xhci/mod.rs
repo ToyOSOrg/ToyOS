@@ -21,7 +21,6 @@ use crate::mm::Dma;
 use crate::log;
 use super::pci::PciDevice;
 use crate::sync::{OwedGuard, OwedLock};
-use toyos_untrusted::Untrusted;
 use toyos_xhci::job::{Await, Outcome, Outstanding, Stages, CC_SHORT_PACKET, CC_SUCCESS};
 use toyos_xhci::port::{self as portmachine, GaveUp, Gone, PortState, Reset, Step};
 use toyos_xhci::call::AfterBreak;
@@ -530,10 +529,11 @@ impl Layout {
     }
 
     /// The block for a 1-based slot id, or `None` when the pool has no room; `slot_id` is untrusted, from the controller's own answer.
-    ///
-    /// `wrapping_sub` is sound only because `index` bounds the result: slot 0 wraps to `u8::MAX`, never `< dev_blocks`.
     fn device(&self, slot_id: u8) -> Option<usize> {
-        let index = Untrusted::new(slot_id).map(|v| v.wrapping_sub(1)).index(self.dev_blocks).ok()?;
+        let index = usize::from(slot_id.checked_sub(1)?);
+        if index >= self.dev_blocks {
+            return None;
+        }
         Some(self.dev_base + index * DEV_STRIDE)
     }
 
