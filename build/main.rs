@@ -52,13 +52,14 @@ fn executable_on_path(name: &str) -> bool {
     })
 }
 
-fn check_prerequisites(root: &Path, arch: Arch) {
+/// What every build needs, and the QEMU that boots `arch` where the run `boots`.
+fn check_prerequisites(root: &Path, arch: Arch, boots: bool) {
     let mut missing: Vec<String> = REQUIRED
         .iter()
         .filter(|t| !t.any.iter().any(|n| executable_on_path(n)))
         .map(|t| format!("{} ({})", t.any.join(" or "), t.why))
         .collect();
-    if !executable_on_path(arch.qemu()) {
+    if boots && !executable_on_path(arch.qemu()) {
         missing.push(format!("{} (every {} boot — install QEMU)", arch.qemu(), arch.name()));
     }
     if !missing.is_empty() {
@@ -72,7 +73,7 @@ fn check_prerequisites(root: &Path, arch: Arch) {
     // The one prerequisite whose *version* decides verdicts rather than whether
     // anything runs at all, so a scan of `PATH` cannot ask it.
     // `toyos_build::ci` carries why this is a note here and a red in CI.
-    if let Some(note) = toyos_build::ci::qemu_version_note(root, arch) {
+    if let Some(note) = boots.then(|| toyos_build::ci::qemu_version_note(root, arch)).flatten() {
         eprintln!("{note}");
     }
 }
@@ -183,7 +184,7 @@ fn main() {
     }
 
     let arch = toyos_build::build::arch_for(&args);
-    check_prerequisites(&root, arch);
+    check_prerequisites(&root, arch, !asked(&flags::BUILD_ONLY) && update_image.is_none());
     env::set_current_dir(&root).expect("Failed to cd to project root");
 
     let debug = asked(&flags::DEBUG);

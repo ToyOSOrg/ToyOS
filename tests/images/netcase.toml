@@ -29,7 +29,7 @@ devices = ["pci:02:00:00/1af4:1041"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver", "volume"]
+serves = ["soundserver", "volume", "sound-output"]
 devices = ["pci:04:01:00/1af4:1059"]
 syscap = ["rt"]
 
@@ -44,7 +44,7 @@ restart = true
 serves = ["block"]
 devices = ["pci:01:08:02/1b36:0010"]
 
-# The file servers: DATA, the log and the running slot's volume, one process
+# The file servers: DATA, the log and the boot volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
 [programs.fileserver]

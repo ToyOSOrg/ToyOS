@@ -165,7 +165,8 @@ const RUST_SKIP: &[&str] = &[
     // They need an HDA controller, which the shared boot's machine has not:
     // the `hda_tone`, `hda_tone_resampled` and `hda_volume_step` metal rows
     // run them on the T14 and the AMD bench, and
-    // `hda_drives_its_codec_through_its_claim` runs `volume_step` on QEMU's.
+    // `hda_plays_to_the_controller_that_reaches_an_output` runs `volume_step`
+    // on QEMU's.
     "audio_tone",
     "audio_tone_resampled",
     "volume_step",
@@ -197,6 +198,10 @@ const RUST_SKIP: &[&str] = &[
     // It claims the virtio NIC and asks how its BAR is lent, and the T14 has
     // no virtio NIC: `lent_device_memory_refused` runs it.
     "lent_device_memory_refused",
+    // It claims the radios and the disk no program holds, which a shared boot
+    // must not take from its members: `bar_map_again` and the
+    // `msix_table_read_in_place` metal row run it.
+    "msix_in_place",
     // It needs ToyOS's own clang and LLD on ROOT, which only its boot stages:
     // `hosted_clang_hello` runs it on tests/images/hostedclangcase.toml.
     "hosted_clang_hello",
@@ -206,8 +211,8 @@ const RUST_SKIP: &[&str] = &[
     "usbd_spare",
     // `usbd_spare`'s fault, foreign-vector and refusal arms, one binary each
     // because a metal job takes no argument: the AMD bench's
-    // `amdvi_claim_refused_without_remapping` row runs the refusal, and the
-    // claim row in P1's exit (`issues/there-is-no-wifi.md`) the other two.
+    // `amdvi_usbd_drives_its_own_entry` and
+    // `amdvi_claim_refused_without_remapping` rows run them.
     "usbd_spare_fault",
     "usbd_spare_vector",
     "usbd_spare_unhanded",
@@ -269,7 +274,7 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // first on each bench, and `crypto_instrument_prints_its_table` before the
     // instrument under QEMU.
     "ring_kat",
-    // Its shared run asserts what holds of the clock syscalls on x86-64;
+    // Its shared run asserts what holds of `SYS_CLOCK_EPOCH` on x86-64;
     // `virt_wall_clock_utc` builds it for AArch64 and judges what it read
     // against the instant the job case stages in the RTC.
     "wall_clock_now",
@@ -391,12 +396,14 @@ const MACHINE_TESTS: &[&str] = &[
     // spawns, each process holding its own — which no host build has. No
     // bench has two identical functions the kernel leaves to a claim.
     "a_drives_row_holds_one_process_per_function",
-    // soundserver driving an Intel HDA function through its claim behind
-    // VT-d — reset, CORB/RIRB, the codec walk, the path and the master read
-    // back — with the master job the benches' rows judge. The tone rows'
-    // stream is the benches' alone. q35 only: `virt` has no unit to put the
-    // function behind.
-    "hda_drives_its_codec_through_its_claim",
+    // Two HDA controllers, each with an `hda` driver behind VT-d: the one
+    // with no codec plays nothing, soundserver plays to the other, and the
+    // master job the benches' rows judge steps that output's codec. Which
+    // driver offers and which soundserver plays to are three processes and
+    // two claims, which no host build has. The tone rows' stream is the
+    // benches' alone. q35 only: `virt` has no unit to put the functions
+    // behind.
+    "hda_plays_to_the_controller_that_reaches_an_output",
     // Whether QEMU's virtio functions negotiated `VIRTIO_F_ACCESS_PLATFORM`
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
@@ -404,7 +411,7 @@ const MACHINE_TESTS: &[&str] = &[
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot stick is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
-    // hand rather than by the merge queue.
+    // hand rather than by CI.
     "amdvi_firmware_left",
     // A translating AMD-Vi unit's refusal, recorded and read: a kernel-owned
     // record halts the machine, so no metal row reaches it, and only QEMU's
@@ -453,11 +460,10 @@ const MACHINE_TESTS: &[&str] = &[
     // function is its I219, and a kernel that dies on this takes the bench's
     // machine down with it.
     "bar_map_again",
-    // The same claim with the NIC behind a root port: the BAR has to land
-    // inside the windows the port forwards, which a host test of the rule
-    // cannot say the kernel reads off a real bridge. The T14's claimed
-    // functions are all on bus 0; the AMD bench's xHCI that is not has its
-    // MSI-X table in its one BAR.
+    // The same claim with the NIC behind a root port: the BAR is handed over
+    // where firmware put it inside the port's window, which no host test
+    // reads off firmware's enumeration. Behind a bridge on metal it is the
+    // AMD bench's `amdvi_usbd_drives_its_own_entry`.
     "bar_map_behind_a_bridge",
     // A region that is not memory the kernel allocated, lent as a window: the
     // kernel describes the BAR of a function no program of the boot holds,
@@ -639,7 +645,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES,
             judge: |b| {
                 b[0].job_passed("test_rs_volume_step")?;
-                b[0].log().must_say("soundserver: hda path configured in").map(|_| ())
+                b[0].log().must_say(audio::PLAYING).map(|_| ())
             },
         },
     ),
@@ -1156,6 +1162,33 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| amdvi_remaps(&b[0].kernel()) },
     ),
     (
+        // The AMD bench's Bluetooth controller's xHCI, `03:00.4`, left to a
+        // claim and driven by usbd through an entry of its own table, its
+        // MSI-X table in the register BAR it hands over; then aimed past its
+        // grant, recorded against the claim; then its holder rewriting its
+        // own table entry to a vector not its own, refused and recorded.
+        "amdvi_usbd_drives_its_own_entry",
+        metal::Metal {
+            arms: &[metal::once(
+                "testcases-amd-xhci-leave",
+                "tests/images/testcases.toml",
+                &["xhci-leave=03:00.4"],
+                &[
+                    "test_rs_usbd_spare",
+                    "test_rs_usbd_spare_fault",
+                    "test_rs_end_returns_claims",
+                    "test_rs_usbd_spare_vector",
+                ],
+            )],
+            judge: |b| {
+                for job in ["test_rs_usbd_spare", "test_rs_usbd_spare_fault", "test_rs_end_returns_claims", "test_rs_usbd_spare_vector"] {
+                    b[0].job_passed(job)?;
+                }
+                amdvi_usbd(&b[0].kernel(), &b[0].log(), &b[0].after_the_reset()?)
+            },
+        },
+    ),
+    (
         // The AMD bench with its unit remapping nothing (`iommu-no-remap`):
         // the claim on `03:00.4` is refused before anything on it changes.
         "amdvi_claim_refused_without_remapping",
@@ -1185,6 +1218,24 @@ const METAL: &[(&str, metal::Metal)] = &[
                 &[claims::RECLAIM],
             )],
             judge: |b| claims::refused_unremapped(&b[0].kernel()),
+        },
+    ),
+    (
+        // Each radio and disk P1 names (`issues/there-is-no-wifi.md`) that the
+        // machine has, claimed with its BARs where firmware put them, and the
+        // MSI-X entry the kernel armed read back through its holder's mapping
+        // of the table's page: the T14's AX210 and NVMe, the AMD bench's
+        // AX200 behind its bridge. It rides the `testcases` boot.
+        "msix_table_read_in_place",
+        metal::Metal {
+            arms: &[metal::once("testcases", "tests/images/testcases.toml", &[], &["test_rs_msix_in_place"])],
+            judge: |b| {
+                b[0].job_passed("test_rs_msix_in_place")?;
+                for line in msix_read_in_place(b[0].kernel().text(), b[0].log().text())? {
+                    eprintln!("  [claims] {line}");
+                }
+                Ok(())
+            },
         },
     ),
     (
@@ -3891,7 +3942,9 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
             claims::NOT_REMAPPED,
         ),
         "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
-        "hda_drives_its_codec_through_its_claim" => hda_drives_its_codec_through_its_claim(test_config),
+        "hda_plays_to_the_controller_that_reaches_an_output" => {
+            hda_plays_to_the_controller_that_reaches_an_output(test_config)
+        }
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
@@ -4198,7 +4251,7 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
 }
 
 /// A machine behind QEMU's AMD unit, which `said` describes, refuses the
-/// spare's claim for `why`, before a vector is armed or a BAR moved.
+/// spare's claim for `why`, before a vector is armed.
 fn usbd_refused_on_amdvi(test_config: &Path, profile: qemu::Profile, said: &str, why: &str) -> Result<(), String> {
     const JOB: &str = "usbd_spare";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
@@ -4250,36 +4303,113 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
     Ok(())
 }
 
-/// The benches' master job, in one boot of `tests/images/testcases.toml` on
-/// [`qemu::Profile::MetalHda`]: it exits 0 on the HDA path soundserver
-/// configured, which a refused codec answer or a stalled ring would stop.
+/// The AMD bench's `03:00.4` left to a claim and driven by usbd: handed over
+/// with its MSI-X table's BAR, armed through a present entry of its own table
+/// at its claim's vector, its No-Op answered by that interrupt; then aimed
+/// past its grant and recorded against the claim at the aimed address; then
+/// its holder's rewrite of its own table entry to a vector not its own
+/// refused and recorded against the claim, which usbd ends on, never told of
+/// its No-Op.
+fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
+    const ID: &str = "1022:1639";
+    let at = AMD_XHCI_SPARE;
+    kernel.must_say(&format!("xHCI: leaving PCI {at} {ID} to a claim (xhci-leave)"))?;
+    let handed = format!("pcidev: PCI {at} [{ID}] handed over, vector ");
+    let vector = kernel
+        .text()
+        .lines()
+        .find_map(|l| l.split_once(&handed)?.1.split_whitespace().next().map(str::to_string))
+        .ok_or_else(|| format!("{at} was never handed over:\n{}", kernel.text()))?;
+    kernel.must_say(&format!("PCI {at}: msix address="))?;
+    kernel.must_say(&format!("iommu: amdvi irte source={at} vector={vector} p=1 "))?;
+    log.must_say(USBD_NOOP)?;
+
+    let aimed = log
+        .text()
+        .lines()
+        .find_map(|l| l.split_once("usbd_spare: the command ring aimed at ")?.1.split_once(',').map(|(a, _)| a.to_string()))
+        .ok_or_else(|| format!("the fault arm never said where it aimed:\n{}", log.text()))?;
+    let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
+    let records: Vec<&str> = kernel
+        .text()
+        .lines()
+        .filter(|l| l.contains("iommu: DMA FAULT owner=process") && l.contains(&format!("stream={at} ")))
+        .collect();
+    let aimed_at = records
+        .iter()
+        .find(|l| l.split_once(" addr=").and_then(|(_, a)| hex(a.split_whitespace().next()?)) == hex(&aimed))
+        .ok_or_else(|| format!("no record of {at} names the aimed {aimed}: {records:?}"))?;
+    log.must_say("usbd_spare: the claim refuses its interrupt read: Io")?;
+
+    let rewritten = log.must_say("usbd_spare: MSI-X entry 0's data ")?;
+    log.must_say("usbd: the claim refused its interrupt record (Io)")?;
+    log.must_say("usbd_spare: usbd ended on the claim's refusal")?;
+    // Refused by the unit, not delivered to a vector nobody holds: the stop's
+    // census names every vector the unclaimed gate took.
+    let foreign_vector = rewritten
+        .split_once(" rewritten to ")
+        .and_then(|(_, rest)| rest.split(',').next())
+        .ok_or_else(|| format!("{rewritten:?} names no vector"))?;
+    // Logged inside the stop, past where the log file ends.
+    let census = after.must_say("irq: unclaimed vectors")?;
+    if census.split_whitespace().any(|word| word == foreign_vector) {
+        return Err(format!("{foreign_vector} reached a CPU: {census}"));
+    }
+    // An interrupt's record states no read or write (48882 Table 57, `I`).
+    let foreign = records
+        .iter()
+        .find(|l| l.contains(" access=none ") && l.ends_with("IO_PAGE_FAULT"))
+        .ok_or_else(|| format!("no record of {at}'s message on a vector not its own: {records:?}"))?;
+    eprintln!("  [amdvi] {at}: handed over on {vector}, its No-Op answered through its own entry");
+    eprintln!("  [amdvi] aimed at {aimed}: {}", aimed_at.trim());
+    eprintln!("  [amdvi] a vector not its own: {}", foreign.trim());
+    Ok(())
+}
+
+/// Two HDA controllers, the first with no codec and the second with an
+/// output one ([`qemu::Profile::MetalTwoHda`]), each with an `hda` driver of
+/// its own: the first plays nothing and says why, the second offers its
+/// output, and soundserver plays to it. Then the benches' master job on that
+/// output: reset, CORB/RIRB, the walk, the path and the master's readback,
+/// each behind VT-d and through the claim.
 ///
 /// Not the tone jobs: cpal holds a stream's close to a fade and a ring of
 /// periods at the device's rate, and QEMU's controller completes periods in
 /// bursts of up to a ring paced by the host, so that bound is a time only the
 /// benches judge.
-fn hda_drives_its_codec_through_its_claim(test_config: &Path) -> Result<(), String> {
-    const JOBS: [&str; 1] = ["volume_step"];
+fn hda_plays_to_the_controller_that_reaches_an_output(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "volume_step";
+    const OFFERED: &str = ": path configured in ";
     let tests = compile::repo_root().join("tests/guest/rust-tests");
-    let bins: Vec<(String, Vec<u8>)> =
-        JOBS.iter().map(|job| (job.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, job))).collect();
-    let options = BootOptions { profile: qemu::Profile::MetalHda, ..Default::default() };
-    if !qemu::profile_argv(&options).iter().any(|arg| arg.starts_with("ich9-intel-hda")) {
-        return Err("the machine was to have an Intel HDA controller, and QEMU is given none".into());
+    let bins = [(JOB.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB))];
+    let options = BootOptions { profile: qemu::Profile::MetalTwoHda, ..Default::default() };
+    let controllers = qemu::profile_argv(&options).iter().filter(|arg| arg.starts_with("ich9-intel-hda")).count();
+    if controllers != 2 {
+        return Err(format!("the machine was to have two Intel HDA controllers, and QEMU is given {controllers}"));
     }
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &bins, options);
-    let boot = serial::Serial::boot(&qemu);
-    boot.must_be_clean()?;
-    // soundserver's walk may end after the ready marker, so the capture is
-    // the boot's and every job's.
-    let mut said = boot.text().to_string();
-    for job in JOBS {
-        said += &job_window(&mut qemu, &format!("test_rs_{job}"))?;
-    }
-    let said = serial::Serial::named("the HDA boot", said);
-    said.must_say("soundserver: hda path configured in")?;
-    said.must_not_say(audio::NULL_SINK)?;
+    let mut console = format!("{}\n", qemu.boot_log());
+    // Both drivers' verdicts and soundserver's: each comes when its walk does,
+    // which can be after the ready marker.
+    let decided = |t: &str| t.contains(audio::PLAYING) && t.contains("plays nothing: ");
+    await_guest(&mut qemu, &mut console, "both drivers' verdicts and soundserver's", decided)
+        .map_err(|e| format!("{e}\n{console}"))?;
+    console += &job_window(&mut qemu, &format!("test_rs_{JOB}"))?;
+    let said = serial::Serial::named("the two-controller boot", console.clone());
+    said.must_be_clean()?;
     said.must_not_say("iommu: DMA FAULT")?;
+    let driver = |line: &str, what: &str| line.split_once("] hda ")?.1.split_once(what).map(|(at, _)| at.to_string());
+    let silent: Vec<String> = console.lines().filter_map(|l| driver(l, ": plays nothing: ")).collect();
+    let offered: Vec<String> = console.lines().filter_map(|l| driver(l, OFFERED)).collect();
+    let [silent] = silent.as_slice() else { return Err(format!("not one driver played nothing: {silent:?}\n{console}")) };
+    let [offered] = offered.as_slice() else { return Err(format!("not one driver offered: {offered:?}\n{console}")) };
+    said.must_say(&format!("hda {silent}: plays nothing: the controller refused: no codec is on its link"))?;
+    if silent > offered {
+        return Err(format!("the codec-less controller {silent} was to enumerate before {offered}:\n{console}"));
+    }
+    if console.matches(audio::PLAYING).count() != 1 {
+        return Err(format!("soundserver did not play to one output:\n{console}"));
+    }
     Ok(())
 }
 
@@ -4497,9 +4627,15 @@ const CRYPTO_JOB_CEILING_SECS: u64 = 300;
 /// own.
 fn bar_map_again(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "bar_map_again";
-    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
-    let mut qemu =
-        QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
+    let msix = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, MSIX_IN_PLACE);
+    let mut qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[(JOB.to_string(), bin), (MSIX_IN_PLACE.to_string(), msix)],
+        BootOptions::default(),
+    );
     serial::Serial::boot(&qemu).must_be_clean()?;
     let result = qemu.run_test("test_rs_bar_map_again", Duration::from_secs(60));
     if let Some(why) = &result.error {
@@ -4518,34 +4654,55 @@ fn bar_map_again(test_config: &Path) -> Result<(), String> {
         };
         eprintln!("  [claims] {}", line.trim());
     }
+    let read = job_window(&mut qemu, &format!("test_rs_{MSIX_IN_PLACE}"))?;
+    for line in msix_read_in_place(&read, &read)? {
+        eprintln!("  [claims] {line}");
+    }
     Ok(())
 }
 
-/// The virtio NIC behind a root port is claimed and its BAR mapped, and the
-/// kernel put the BAR inside a window the port forwards.
+/// The job that reads each claimed function's armed MSI-X entry back through
+/// its holder's mapping.
+const MSIX_IN_PLACE: &str = "msix_in_place";
+
+/// Every entry `msix_in_place` read through its holder's mapping is the one
+/// the kernel logged writing, and its BAR was handed over where firmware put
+/// it; at least one was read.
+fn msix_read_in_place(kernel: &str, log: &str) -> Result<Vec<String>, String> {
+    const READS: &str = ": entry 0 at BAR ";
+    let mut judged = Vec::new();
+    for line in log.lines().filter(|l| l.contains("msix_in_place: ") && l.contains(READS)) {
+        let field = |key: &str| line.split_once(key).and_then(|(_, rest)| rest.split_whitespace().next());
+        let (Some(at), Some(bar), Some(address), Some(data)) =
+            (field(" at PCI "), field(READS), field(" reads address="), field(" data="))
+        else {
+            return Err(format!("an unreadable read: {line:?}"));
+        };
+        let at = at.trim_end_matches(':');
+        let armed = format!("PCI {at}: msix address={address} data={data}");
+        if !kernel.contains(&armed) {
+            return Err(format!("{line:?} is not what the kernel armed: no `{armed}` in\n{kernel}"));
+        }
+        let handed = format!("pcidev: PCI {at} BAR {bar} (");
+        if !kernel.lines().any(|l| l.contains(&handed) && l.contains(" is handed over where firmware put it, ")) {
+            return Err(format!("{at}'s BAR {bar} was never handed over where firmware put it:\n{kernel}"));
+        }
+        judged.push(line.split_once("msix_in_place: ").map_or(line, |(_, rest)| rest).to_string());
+    }
+    if judged.is_empty() {
+        return Err(format!("msix_in_place read no entry:\n{log}"));
+    }
+    Ok(judged)
+}
+
+/// The virtio NIC behind a root port is claimed and its registers read
+/// through its BAR where firmware put it, inside the port's window.
 fn bar_map_behind_a_bridge(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "bar_map_again";
-    const FORWARDS: &str = "pcidev: PCI 00:";
-    const PLACED: &str = "pcidev: PCI 01:00.0 BAR ";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let options = BootOptions { profile: qemu::Profile::HeadlessNicBehindPort, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], options);
-    let boot = serial::Serial::boot(&qemu);
-    boot.must_be_clean()?;
-    let range = |line: &str| -> Option<(u64, u64)> {
-        let (from, to) = line.split_once("..")?;
-        let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
-        Some((hex(from.rsplit(' ').next()?)?, hex(to.split(' ').next()?)?))
-    };
-    let forwarded: Vec<(u64, u64)> = boot
-        .text()
-        .lines()
-        .filter(|l| l.contains(FORWARDS) && l.contains(" forwards "))
-        .filter_map(|l| range(l.split_once(" forwards ")?.1))
-        .collect();
-    if forwarded.is_empty() {
-        return Err(format!("no root port said what it forwards:\n{}", boot.text()));
-    }
+    serial::Serial::boot(&qemu).must_be_clean()?;
     let result = qemu.run_test("test_rs_bar_map_again", Duration::from_secs(60));
     if let Some(why) = &result.error {
         return Err(format!("{why}\nthe job said:\n{}", result.stdout));
@@ -4553,17 +4710,11 @@ fn bar_map_behind_a_bridge(test_config: &Path) -> Result<(), String> {
     if result.exit_code != Some(0) {
         return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
     }
-    let Some(placed) = result.serial.lines().find(|l| l.contains(PLACED) && l.contains(" placed at ")) else {
-        return Err(format!("the NIC's BAR was never placed:\n{}", result.serial));
+    let handed = "pcidev: PCI 01:00.0 BAR ";
+    let Some(line) = result.serial.lines().find(|l| l.contains(handed) && l.contains(" is handed over where firmware put it, ")) else {
+        return Err(format!("the NIC behind the port was never handed over a BAR:\n{}", result.serial));
     };
-    let at = placed
-        .split_once(" placed at ")
-        .and_then(|(_, rest)| u64::from_str_radix(rest.split_whitespace().next()?.strip_prefix("0x")?, 16).ok())
-        .ok_or_else(|| format!("an unreadable placement: {placed:?}"))?;
-    if !forwarded.iter().any(|(start, end)| *start <= at && at < *end) {
-        return Err(format!("{placed:?} is inside none of what the port forwards, {forwarded:x?}"));
-    }
-    eprintln!("  [claims] {}", placed.trim());
+    eprintln!("  [claims] {}", line.trim());
     Ok(())
 }
 

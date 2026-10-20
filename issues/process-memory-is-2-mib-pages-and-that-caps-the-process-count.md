@@ -33,11 +33,12 @@ kernel's idle report (the owner's ruling of 2026-10-04: "Delete the periodic
 report and its counters"); stage 3's floor is read from the used memory
 `SYS_SYSINFO` reports.
 
-**What this removes as a side effect:** a device window mapped at 4 KiB no
-longer shares a 2 MiB page with a neighbour's registers, so the relocation
-that `kernel/src/pcidev/` does before a hand-over is no longer needed for a
-window firmware placed apart from its neighbours. Placing a window inside the
-host bridge's firmware-reported apertures stays correct under either page size.
+**Device windows are already 4 KiB leaves**: a claimed function's BAR is
+mapped in place in the pages it covers (P1 of `issues/there-is-no-wifi.md`).
+`map_range` maps any run of 4 KiB-aligned pages, a 2 MiB leaf wherever a whole
+aligned frame lands on a 2 MiB boundary and a table of 4 KiB leaves for the
+rest (`toyos_userbound::leaves`), and unmapping a slot of 4 KiB leaves frees
+its table once no CPU can walk it.
 
 ## Stages
 
@@ -72,8 +73,10 @@ live split of a user leaf.
    `abuse_page_straddle`'s refusals become delivery verdicts. A 2 MiB window
    of 4 KiB leaves from arbitrary frames is up to 512 runs, so the one-run
    bound `user_ptr::window_split` panics on becomes reachable from userland
-   and goes with the stage. Exit: a
-   process's floor on the T14 against the 10 to 14 MB above.
+   and goes with the stage. Device windows needed none of this: their leaves
+   own no frame, and a BAR's pages are in order, so a typed value straddling
+   two of them is still one run. Exit: a process's floor on the T14 against
+   the 10 to 14 MB above.
 4. **Demand-zero anonymous `mmap`.** A fault installs a 2 MiB leaf only for a
    whole aligned 2 MiB span of the mapping; unmapping a range no thread touched
    sends no IPI. `munmap` refuses a size that is not the whole mapping, by the

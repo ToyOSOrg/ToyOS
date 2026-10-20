@@ -290,19 +290,26 @@ pub struct Kinds {
 }
 
 /// The idle slot a grant may claim, given the ROOT this boot runs
-/// (`running`) and every partition the machine lists.
+/// (`running`), the volume it was booted from (`volume`), both as the loader
+/// named them, and every partition the machine lists.
 ///
 /// **The table is the grantee's to write**, so nothing it names is taken on
 /// its word: each of the idle slot's two partitions must be on the running
-/// ROOT's disk, of its kind's type, and neither of the running slot's — else
-/// the holder of one grant could name its next one anywhere.
-pub fn grant(table: &Table, running: &Listed, listed: &[Listed], kinds: Kinds) -> Result<(Which, Slot), NoIdle> {
+/// ROOT's disk, of its kind's type, and neither of the running slot's as the
+/// loader named it — else the holder of one grant could name its next one
+/// anywhere.
+pub fn grant(
+    table: &Table,
+    running: &Listed,
+    volume: [u8; 16],
+    listed: &[Listed],
+    kinds: Kinds,
+) -> Result<(Which, Slot), NoIdle> {
     let (idle, slot) = idle(table, &running.unique_guid)?;
-    let runs = table.slot(idle.other()).expect("`idle` found the running slot in the table");
     for (part, guid, kind) in [("volume", slot.boot, kinds.boot), ("ROOT", slot.root, kinds.root)] {
         let mut named = listed.iter().filter(|p| p.unique_guid == guid);
         let why = match (named.next(), named.next()) {
-            _ if guid == runs.boot || guid == runs.root => Some(Stray::Running),
+            _ if guid == volume || guid == running.unique_guid => Some(Stray::Running),
             (None, _) => Some(Stray::Unlisted),
             (Some(p), None) if p.device != running.device => Some(Stray::OtherDisk),
             (Some(p), None) if p.type_guid != kind => Some(Stray::Type),
@@ -423,12 +430,13 @@ mod tests {
             at(0, [0xEF; 16], ESP),
             at(1, KINDS.boot, [5; 16]),
         ];
+        let volume = [1; 16];
         let t = table(Which::A, 1);
-        assert_eq!(grant(&t, &running, &listed, KINDS).map(|(w, _)| w), Ok(Which::B));
+        assert_eq!(grant(&t, &running, volume, &listed, KINDS).map(|(w, _)| w), Ok(Which::B));
         let bent = |boot: [u8; 16], root: [u8; 16]| {
             let mut t = t;
             t.slots[1] = Some(Slot { boot, root, version: 0 });
-            grant(&t, &running, &listed, KINDS)
+            grant(&t, &running, volume, &listed, KINDS)
         };
         let stray = |part, why| Err(NoIdle::Stray { part, why });
         assert_eq!(bent([1; 16], [4; 16]), stray("volume", Stray::Running), "the running slot's volume");
@@ -439,6 +447,29 @@ mod tests {
         assert_eq!(bent([9; 16], [4; 16]), stray("volume", Stray::Unlisted));
         let mut twice = listed.to_vec();
         twice.push(at(1, KINDS.boot, [3; 16]));
-        assert_eq!(grant(&t, &running, &twice, KINDS), stray("volume", Stray::Duplicate), "a GUID two disks carry");
+        assert_eq!(grant(&t, &running, volume, &twice, KINDS), stray("volume", Stray::Duplicate), "a GUID two disks carry");
+    }
+
+    /// **The running slot is the loader's word, not the table's**: a table
+    /// pairing a decoy volume with the running ROOT, and the booted volume
+    /// with the idle ROOT, is refused the booted volume.
+    #[test]
+    fn a_table_cannot_name_the_booted_volume_idle() {
+        const KINDS: Kinds = Kinds { boot: [0xB0; 16], root: [0xA0; 16] };
+        let at = |type_guid, unique_guid| Listed { device: 0, type_guid, unique_guid };
+        let (booted, decoy, running, idle_root) = ([1; 16], [3; 16], [2; 16], [4; 16]);
+        let listed = [at(KINDS.boot, booted), at(KINDS.boot, decoy), at(KINDS.root, running), at(KINDS.root, idle_root)];
+        let decoyed = Table {
+            sequence: 2,
+            marked: Which::A,
+            slots: [
+                Some(Slot { boot: decoy, root: running, version: 1 }),
+                Some(Slot { boot: booted, root: idle_root, version: 0 }),
+            ],
+        };
+        assert_eq!(
+            grant(&decoyed, &at(KINDS.root, running), booted, &listed, KINDS),
+            Err(NoIdle::Stray { part: "volume", why: Stray::Running })
+        );
     }
 }

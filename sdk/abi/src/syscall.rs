@@ -22,7 +22,6 @@ pub const SYS_SPAWN: u64 = 25;
 pub const SYS_MARK_TTY: u64 = 28;
 pub const SYS_THREAD_SPAWN: u64 = 40;
 pub const SYS_THREAD_JOIN: u64 = 41;
-pub const SYS_CLOCK_REALTIME: u64 = 42;
 /// A header describing the machine, optionally followed by the roster of every
 /// live thread in it. See [`sysinfo`].
 ///
@@ -661,14 +660,6 @@ pub struct PipeEnds {
     pub write: RawHandle,
 }
 
-/// Wall-clock time from RTC.
-#[derive(Debug, Clone, Copy)]
-pub struct RealTime {
-    pub hours: u8,
-    pub minutes: u8,
-    pub seconds: u8,
-}
-
 /// File metadata returned by [`fstat`] and [`stat`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -1177,22 +1168,12 @@ pub fn random(buf: &mut [u8]) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0))
 }
 
+/// Seconds since the Unix epoch (1970-01-01 00:00:00 UTC).
+///
 /// `None` is a machine that never said what time it is — an RTC that is absent,
 /// wedged, or answering with something that is not a date. It is `None` for the
 /// whole of such a boot rather than intermittently, because the kernel reads
 /// the clock once.
-pub fn clock_realtime() -> Option<RealTime> {
-    let raw = check(syscall(SYS_CLOCK_REALTIME, 0, 0, 0, 0)).ok()?;
-    Some(RealTime {
-        hours: ((raw >> 16) & 0xFF) as u8,
-        minutes: ((raw >> 8) & 0xFF) as u8,
-        seconds: (raw & 0xFF) as u8,
-    })
-}
-
-/// Seconds since the Unix epoch (1970-01-01 00:00:00 UTC).
-///
-/// `None` on the same machine and for the same reason as [`clock_realtime`].
 /// Cheap: the kernel serves it from an anchor it took at boot plus the
 /// monotonic clock, so this is a syscall and not a device access.
 pub fn clock_epoch() -> Option<u64> {

@@ -138,9 +138,8 @@ impl PciDev {
 
     /// Map memory BAR `bar`, bounded to the `bar_bytes` the description gave.
     ///
-    /// The kernel's window is whole 2 MiB pages and so is wider than the BAR;
-    /// the length here is the BAR's, because the bytes past it belong to no
-    /// device and answer every read with ones.
+    /// The kernel's window is whole 4 KiB pages, so a BAR smaller than one is
+    /// mapped with the rest of its page; the length here is the BAR's.
     pub fn map_bar(&self, bar: u32, bytes: u64) -> Result<crate::shm::SharedMemory, SyscallError> {
         let handle = syscall::device_bar_map(self.0.as_handle(), bar)?;
         crate::shm::SharedMemory::adopt(handle, bytes as usize)

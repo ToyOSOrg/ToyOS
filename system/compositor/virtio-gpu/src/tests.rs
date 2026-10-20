@@ -749,6 +749,39 @@ fn the_cursor_is_filled_and_fenced_before_it_is_shown() {
     assert_eq!(model.mem.words_at(image_at, 4), [0x8011_2233]);
 }
 
+/// A move carries the cursor's resource and its image's hot spot, through a
+/// rescale's new image and hot spot: QEMU hides a cursor moved with resource
+/// 0. The new image is transferred into the same resource before its
+/// `UPDATE_CURSOR`.
+#[test]
+fn a_moved_cursor_stays_the_image_on_the_plane() {
+    let model = Model::new();
+    let mut gpu = showing(&model, (800, 600));
+    gpu.move_cursor((1, 1)).expect("the model answers");
+    gpu.cursor(&[0; 4096], (3, 3), (100, 200)).expect("the model answers");
+    gpu.move_cursor((110, 210)).expect("the model answers");
+    gpu.cursor(&[0; 4096], (5, 5), (110, 210)).expect("the model answers");
+    gpu.move_cursor((120, 220)).expect("the model answers");
+    let sent = model.sent();
+    let codes: Vec<u32> = sent.iter().map(|s| s.code).collect();
+    assert_eq!(
+        codes,
+        [MOVE_CURSOR, CREATE, ATTACH, TRANSFER, UPDATE_CURSOR, MOVE_CURSOR, TRANSFER, UPDATE_CURSOR, MOVE_CURSOR]
+    );
+    assert!(sent.iter().filter(|s| s.code == TRANSFER).all(|s| s.resource() == 1));
+    let cursor: Vec<&[u32]> = sent.iter().filter(|s| s.queue == wire::CURSOR_QUEUE).map(|s| &s.payload[..]).collect();
+    assert_eq!(
+        cursor,
+        [
+            [0, 1, 1, 0, 0, 0, 0, 0],
+            [0, 100, 200, 0, 1, 3, 3, 0],
+            [0, 110, 210, 0, 1, 3, 3, 0],
+            [0, 110, 210, 0, 1, 5, 5, 0],
+            [0, 120, 220, 0, 1, 5, 5, 0],
+        ]
+    );
+}
+
 #[test]
 fn a_cursor_answer_is_read_only_at_a_headers_length() {
     for (answer, want) in [

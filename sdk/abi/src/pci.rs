@@ -24,8 +24,7 @@ crate::user_safe! {
     /// mapped anything.
     ///
     /// No addresses: a BAR's *size* is what a driver bounds its own accesses with,
-    /// and where the window sits is [`syscall::device_bar_map`]'s answer, so the
-    /// kernel stays free to move a BAR to a boundary it can map.
+    /// and where the window sits is [`syscall::device_bar_map`]'s answer.
     ///
     /// [`syscall::device_bar_map`]: crate::syscall::device_bar_map
     #[derive(Clone, Copy)]

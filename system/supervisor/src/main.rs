@@ -706,7 +706,7 @@ impl<'a> Service<'a> {
                 std::io::Error::other(format!("{path} no longer holds what was installed: {why}"))
             })?;
         }
-        let storage = storage_endowment(self.program, self.role, syscap, grants)?;
+        let storage = storage_endowment(self.role, syscap, grants)?;
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
         let (child, devices) = start(
@@ -1088,16 +1088,18 @@ impl<'a> Supervisor<'a> {
     }
 
     /// **Which slot is idle is the loader's word, not the table's**: the
-    /// running ROOT is the one the loader read, the table is the one on that
-    /// ROOT's disk, and the idle slot is the one whose ROOT is not it — and
-    /// its two partitions are reached only as `toyos_update::slots::grant`
-    /// admits them: claimed on a disk the kernel drives, and on one the block
-    /// service serves, through connectors minted for each.
+    /// running ROOT and volume are the ones the loader read, the table is the
+    /// one on that ROOT's disk, and the idle slot is the one whose ROOT is not
+    /// it — and its two partitions are reached only as
+    /// `toyos_update::slots::grant` admits them: claimed on a disk the kernel
+    /// drives, and on one the block service serves, through connectors minted
+    /// for each.
     fn slot_grant(&mut self) -> Result<Extra, String> {
         use toyos_abi::inventory::Role;
         use toyos_update::slots::{BOOT_LABEL, ROOT_LABEL, TABLE_LABEL};
         let records = inventory(self.syscap)?;
         let running = loaded(&records, Role::Root).ok_or("the loader named no ROOT")?;
+        let volume = loaded(&records, Role::Slot).ok_or("the loader named no slot volume")?;
         let parts: Vec<_> = records
             .iter()
             .filter_map(|r| match r {
@@ -1106,7 +1108,7 @@ impl<'a> Supervisor<'a> {
             })
             .collect();
         if let Some(root) = parts.iter().find(|p| p.unique_guid == running) {
-            return claimed_slots(self.syscap, &parts, *root);
+            return claimed_slots(self.syscap, &parts, *root, volume);
         }
         let mint = |grants: &Grants<'_>, grant: BlockGrant| {
             grants
@@ -1121,7 +1123,7 @@ impl<'a> Supervisor<'a> {
         let Some(runs) = listed.iter().find(|p| p.unique_guid == running && p.type_guid == SLOT_KINDS.root) else {
             return Err("the ROOT this boot runs is on no disk the kernel or the block service serves".into());
         };
-        let (idle, slot) = toyos_update::slots::grant(&table, runs, &listed, SLOT_KINDS).map_err(|why| why.to_string())?;
+        let (idle, slot) = toyos_update::slots::grant(&table, runs, volume, &listed, SLOT_KINDS).map_err(|why| why.to_string())?;
         let mut ports = Vec::new();
         for (label, guid) in [(TABLE_LABEL, table_guid), (BOOT_LABEL, slot.boot), (ROOT_LABEL, slot.root)] {
             ports.push((label.to_string(), mint(&self.grants, BlockGrant { scope: Scope::Unique(guid), writes: true })?));
@@ -1580,13 +1582,7 @@ impl<'a> Supervisor<'a> {
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             let (asked, names) = (name.clone(), self.files);
             let spawned = std::thread::Builder::new().name(format!("sync-{role}")).spawn(move || {
-                let answer = toyos::fs::Dir::connect(names, &asked)
-                    .and_then(|mut dir| {
-                        dir.sync().map_err(|e| match e {
-                            toyos::fs::Refused::Error(e) => e,
-                            toyos::fs::Refused::Link(_) => SyscallError::Unknown,
-                        })
-                    });
+                let answer = toyos::fs::Dir::connect(names, &asked).and_then(|mut dir| dir.sync());
                 let _ = done_tx.send(answer);
             });
             match spawned {
@@ -2315,11 +2311,13 @@ fn resolve<'a, V>(system: &'a Manifest, path: &str, judge: impl FnOnce(Target<'_
 
 /// The slot table's partition and the idle slot's two, claimed on a disk the
 /// kernel drives: the grant a `slots` row is endowed (`toyos_update::slots`),
-/// where the ROOT this boot runs, `running`, is one of `parts`.
+/// where the ROOT this boot runs, `running`, is one of `parts`, and `volume`
+/// is the slot volume it was booted from.
 fn claimed_slots(
     syscap: &SysCap,
     parts: &[toyos_abi::inventory::Partition],
     running: toyos_abi::inventory::Partition,
+    volume: [u8; 16],
 ) -> Result<Extra, String> {
     use toyos_abi::inventory::Partition;
     let tables: Vec<&Partition> = parts
@@ -2344,7 +2342,7 @@ fn claimed_slots(
         unique_guid: p.unique_guid,
     };
     let all: Vec<_> = parts.iter().map(listed).collect();
-    let (idle, slot) = toyos_update::slots::grant(&table, &listed(&running), &all, SLOT_KINDS).map_err(|why| why.to_string())?;
+    let (idle, slot) = toyos_update::slots::grant(&table, &listed(&running), volume, &all, SLOT_KINDS).map_err(|why| why.to_string())?;
     let boot = claim(slot.boot, "idle slot's volume")?;
     let root = claim(slot.root, "idle slot's ROOT")?;
     say!("supervisor: the idle slot is {}, granted with the slot table", idle.letter());
@@ -3037,37 +3035,24 @@ fn guid_text(guid: [u8; 16]) -> String {
     toyos_abi::part::PartGuid(guid).write_text(&mut buf).to_string()
 }
 
-/// A storage row's arguments, claims and block connector for one start.
+/// A file server's arguments, claims and block connector for one start.
 ///
-/// A block service is told the ROOT the machine runs from, which it serves no
-/// session on. A file server is told its role, and gets a claim on every
-/// partition of its role a disk the kernel drives carries — the stick, until
-/// usbd serves it — and otherwise the partition's GUID and `block` minted for
+/// A file server is told its role, and gets a claim on every partition of its
+/// role a disk the kernel drives carries — the stick, until usbd serves it —
+/// and otherwise the partition's GUID and `block` minted for
 /// that partition alone, writing for the log and reading for the boot volume;
 /// DATA it finds by type, through `block` minted for every DATA partition,
 /// and counts with its claims. A log or boot role the loader named no
 /// partition for, a claim the kernel refuses, and a block port closed for
 /// good each refuse the start: the role is then absent, never served from
 /// memory.
-fn storage_endowment(
-    program: &Program,
-    role: Option<&str>,
-    syscap: &SysCap,
-    grants: &Grants<'_>,
-) -> Result<Extra, StartError> {
+fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>) -> Result<Extra, StartError> {
     use toyos_abi::inventory::{Record, Role};
     let mut storage = Extra::default();
-    if !is_block(program) && role.is_none() {
+    let Some(role) = role else {
         return Ok(storage);
-    }
+    };
     let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
-    if is_block(program) {
-        if let Some(root) = loaded(&records, Role::Root) {
-            storage.args.extend(["--running".to_string(), guid_text(root)]);
-        }
-        return Ok(storage);
-    }
-    let role = role.expect("checked above");
     storage.args.push(role.to_string());
     let on_kernel_disk = |pick: &dyn Fn(&toyos_abi::inventory::Partition) -> bool| -> Vec<[u8; 16]> {
         records

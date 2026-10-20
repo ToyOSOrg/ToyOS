@@ -516,7 +516,7 @@ fn report_reach(what: &str, at: u64, len: u64) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, microcode: Option<&'static [u8]>, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, slot_volume_guid: [u8; 16], microcode: Option<&'static [u8]>, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -664,6 +664,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         gop_edid_len: 0,
         microcode_addr,
         microcode_len,
+        slot_volume_guid,
     };
     if let Some(edid) = gop.as_ref().and_then(|g| g.edid) {
         kernel_args.gop_edid = edid;
@@ -994,5 +995,5 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, microcode, entry_counter, wall_clock, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, chosen.volume, microcode, entry_counter, wall_clock, system_table);
 }
