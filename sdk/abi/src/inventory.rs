@@ -216,10 +216,12 @@ pub struct Claim {
 pub enum Role {
     /// The ROOT this boot runs, read whole by the loader.
     Root,
-    /// The running slot's volume: the kernel and its parameter.
+    /// The partition firmware loaded the loader from.
     Boot,
     /// The log partition.
     Log,
+    /// The booted slot's volume: the kernel and its parameter.
+    Slot,
 }
 
 /// A partition the loader named, by its unique GUID: what a file server for
@@ -417,6 +419,7 @@ impl Record {
                         Role::Root => 0,
                         Role::Boot => 1,
                         Role::Log => 2,
+                        Role::Slot => 3,
                     },
                 );
                 o.bytes(8, &l.unique_guid);
@@ -490,6 +493,7 @@ impl Record {
                     0 => Some(Role::Root),
                     1 => Some(Role::Boot),
                     2 => Some(Role::Log),
+                    3 => Some(Role::Slot),
                     _ => None,
                 })?,
                 unique_guid: r.array(8),

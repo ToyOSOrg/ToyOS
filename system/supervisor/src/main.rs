@@ -1088,8 +1088,9 @@ impl<'a> Supervisor<'a> {
     }
 
     /// **Which slot is idle is the loader's word, not the table's**: the
-    /// running ROOT is the one the loader read, the table is the one on that
-    /// ROOT's disk, and the idle slot is the one whose ROOT is not it — and
+    /// running ROOT and volume are the ones the loader read, the table is the
+    /// one on that ROOT's disk, and the idle slot is the one whose ROOT is not
+    /// it — and
     /// its two partitions are reached only as `toyos_update::slots::grant`
     /// admits them: claimed on a disk the kernel drives, and on one the block
     /// service serves, through connectors minted for each.
@@ -1098,6 +1099,7 @@ impl<'a> Supervisor<'a> {
         use toyos_update::slots::{BOOT_LABEL, ROOT_LABEL, TABLE_LABEL};
         let records = inventory(self.syscap)?;
         let running = loaded(&records, Role::Root).ok_or("the loader named no ROOT")?;
+        let volume = loaded(&records, Role::Slot).ok_or("the loader named no slot volume")?;
         let parts: Vec<_> = records
             .iter()
             .filter_map(|r| match r {
@@ -1106,7 +1108,7 @@ impl<'a> Supervisor<'a> {
             })
             .collect();
         if let Some(root) = parts.iter().find(|p| p.unique_guid == running) {
-            return claimed_slots(self.syscap, &parts, *root);
+            return claimed_slots(self.syscap, &parts, *root, volume);
         }
         let mint = |grants: &Grants<'_>, grant: BlockGrant| {
             grants
@@ -1121,7 +1123,7 @@ impl<'a> Supervisor<'a> {
         let Some(runs) = listed.iter().find(|p| p.unique_guid == running && p.type_guid == SLOT_KINDS.root) else {
             return Err("the ROOT this boot runs is on no disk the kernel or the block service serves".into());
         };
-        let (idle, slot) = toyos_update::slots::grant(&table, runs, &listed, SLOT_KINDS).map_err(|why| why.to_string())?;
+        let (idle, slot) = toyos_update::slots::grant(&table, runs, volume, &listed, SLOT_KINDS).map_err(|why| why.to_string())?;
         let mut ports = Vec::new();
         for (label, guid) in [(TABLE_LABEL, table_guid), (BOOT_LABEL, slot.boot), (ROOT_LABEL, slot.root)] {
             ports.push((label.to_string(), mint(&self.grants, BlockGrant { scope: Scope::Unique(guid), writes: true })?));
@@ -2315,11 +2317,13 @@ fn resolve<'a, V>(system: &'a Manifest, path: &str, judge: impl FnOnce(Target<'_
 
 /// The slot table's partition and the idle slot's two, claimed on a disk the
 /// kernel drives: the grant a `slots` row is endowed (`toyos_update::slots`),
-/// where the ROOT this boot runs, `running`, is one of `parts`.
+/// where the ROOT this boot runs, `running`, is one of `parts`, and `volume`
+/// is the slot volume it was booted from.
 fn claimed_slots(
     syscap: &SysCap,
     parts: &[toyos_abi::inventory::Partition],
     running: toyos_abi::inventory::Partition,
+    volume: [u8; 16],
 ) -> Result<Extra, String> {
     use toyos_abi::inventory::Partition;
     let tables: Vec<&Partition> = parts
@@ -2344,7 +2348,7 @@ fn claimed_slots(
         unique_guid: p.unique_guid,
     };
     let all: Vec<_> = parts.iter().map(listed).collect();
-    let (idle, slot) = toyos_update::slots::grant(&table, &listed(&running), &all, SLOT_KINDS).map_err(|why| why.to_string())?;
+    let (idle, slot) = toyos_update::slots::grant(&table, &listed(&running), volume, &all, SLOT_KINDS).map_err(|why| why.to_string())?;
     let boot = claim(slot.boot, "idle slot's volume")?;
     let root = claim(slot.root, "idle slot's ROOT")?;
     say!("supervisor: the idle slot is {}, granted with the slot table", idle.letter());

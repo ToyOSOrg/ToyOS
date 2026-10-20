@@ -94,17 +94,6 @@ pub fn admits(floor: u64, version: u64) -> Result<(), Refusal> {
     Ok(())
 }
 
-/// Whether the partition the slot table names for `section` is typed `kind`.
-/// The table names it by unique GUID alone, and a block grant reaches
-/// partitions by type: a ROOT of another type is reachable through a grant
-/// for that type.
-pub fn typed(section: &'static str, stated: [u8; 16], kind: [u8; 16]) -> Result<(), Refusal> {
-    if stated != kind {
-        return Err(Refusal::Type(section));
-    }
-    Ok(())
-}
-
 /// The slots a boot tries, in order: the marked one, then the other where the
 /// table carries it.
 pub fn order(table: &Table) -> [Option<Which>; 2] {
@@ -155,14 +144,6 @@ mod tests {
         assert_eq!(installable(9, 10, None), Err(Refusal::Older { version: 9, than: 10 }));
         assert_eq!(installable(11, 10, Some(12)), Err(Refusal::Older { version: 11, than: 12 }));
         assert_eq!(installable(12, 10, Some(12)), Ok(()));
-    }
-
-    #[test]
-    fn a_partition_is_taken_only_of_its_sections_type() {
-        let (root, data) = ([0x40; 16], [0x30; 16]);
-        assert_eq!(typed("root", root, root), Ok(()));
-        assert_eq!(typed("root", data, root), Err(Refusal::Type("root")));
-        assert_eq!(typed("root", [0; 16], root), Err(Refusal::Type("root")));
     }
 
     #[test]

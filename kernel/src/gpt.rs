@@ -165,6 +165,9 @@ pub fn init(args: &KernelArgs) {
     if args.root_partition_guid != [0; 16] {
         loaded.push((Role::Root, Guid(args.root_partition_guid)));
     }
+    if args.slot_volume_guid != [0; 16] {
+        loaded.push((Role::Slot, Guid(args.slot_volume_guid)));
+    }
     if args.log_partition_guid != [0; 16] {
         let log_guid = Guid(args.log_partition_guid);
         log!("gpt: the boot volume names {log_guid} as the log partition");

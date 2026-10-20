@@ -9,17 +9,14 @@ opened: 2026-09-26
 The kernel holds the partition its ROOT image came from for the machine's life
 (`kernel/src/rootfs.rs`, `hold_source`), so no claim can write the ROOT a boot
 runs. It holds nothing of the same slot's FAT volume — the kernel, its boot
-parameter and the signed header the loader read — so any process whose
-`SysCap` carries `device` can claim that partition by its unique GUID and write
-it. The test estate's `test-runner` holds `device`, and so would any row
-a config gives it to.
+parameter and the signed header the loader read — so on a disk the kernel
+drives, any process whose `SysCap` carries `device` can claim that partition
+by its unique GUID and write it. The test estate's `test-runner` holds
+`device`, and so would any row a config gives it to.
 
-`/system/bin/update` reaches it too. `slots::grant` (`lib/update/src/slots.rs`)
-knows which volume is the running slot's only from the slot table, and
-`update` writes that table: one naming a decoy volume beside the running ROOT
-as slot A, and the running volume beside the idle ROOT as slot B, is granted
-the running volume on the next boot. Nothing the kernel holds names the booted
-volume, so init has nothing to check the table's word against.
+`/system/bin/update` does not: the loader names the booted volume in the
+inventory (`Role::Slot`), and `slots::grant` refuses an idle slot naming it,
+whatever the table the updater wrote says.
 
 A write there is not a silent compromise: the loader holds every byte to the
 signature at the next boot and refuses the slot by name. It is a denial —
@@ -30,6 +27,5 @@ image, or to nothing on a one-slot image.
 (`issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`, step 10).
 The kernel then serves no partition claim, `hold_source` goes with it, and
 the running slot's volume and ROOT are reached only through the block
-service's grants, as every partition on diskserver's disk already is
-(`issues/the-block-service-does-not-refuse-the-running-root.md`). No kernel
-hold of the volume is added in the meantime.
+service's grants (`issues/the-block-service-does-not-refuse-the-running-root.md`).
+No kernel hold of the volume is added in the meantime.
