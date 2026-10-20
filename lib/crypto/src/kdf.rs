@@ -17,8 +17,8 @@ impl<H: Digest> Hmac<H> {
             outer: self.outer.fork(),
         }
     }
-    /// Hashers as `H::new` makes them, to be keyed in place: a returned
-    /// `Self` is a copy of both hashers' state.
+    /// Hashers as `H::new` makes them. Keying happens in place, in the
+    /// caller's frame, because moving the keyed pair is a library copy.
     #[inline(always)]
     fn unkeyed() -> Self {
         Self { inner: H::new(), outer: H::new() }

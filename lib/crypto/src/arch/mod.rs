@@ -128,9 +128,10 @@ pub(crate) fn gcm_short(
 }
 
 /// XORs a prefix of `data` with ChaCha20 and returns its length: all of it
-/// where an instruction path runs. The caller has checked counter bounds. IETF nonce word zero
-/// occupies counter bits 32..63; bounded input cannot carry into it. The
-/// remaining nonce words have the same layout as original ChaCha.
+/// where an instruction path runs. The caller has checked counter bounds.
+/// IETF nonce word zero occupies counter bits 32..63; bounded input cannot
+/// carry into it. The remaining nonce words have the same layout as original
+/// ChaCha.
 pub(crate) fn chacha_xor(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &mut [u8]) -> usize {
     hosted!(x86_64::chacha_xor(key, counter, nonce, data), {
         let _ = (key, counter, nonce, data);
@@ -151,7 +152,6 @@ pub(crate) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool 
         false
     })
 }
-
 
 /// Poly1305 over a prefix of whole blocks, each with 2^128 added; returns its
 /// length in blocks. `r` is r0, r1 and 5·r1/4; `h` is in radix 2^64.

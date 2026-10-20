@@ -1,7 +1,9 @@
 //! SHA-256, SHA-384 and SHA-512, FIPS 180-4, for TLS, SSH and image digests.
 //! Compression has fixed rounds and addresses independent of message contents.
 //! Buffering and padding depend on the public message length. Hash states and
-//! compression scratch are erased because HMAC and signing hash secret inputs.
+//! the portable rounds' message schedule are erased because HMAC and signing
+//! hash secret inputs; the instruction paths' register and stack temporaries
+//! are not.
 
 use crate::secret::erase;
 
@@ -126,7 +128,7 @@ macro_rules! round {
     };
 }
 
-#[cfg(all(target_arch = "x86_64", not(target_os = "uefi")))]
+#[allow(unused_imports, reason = "the instruction paths' rounds share it; portable builds have none")]
 pub(crate) use round;
 
 /// SHA-512's Σ0 and Σ1, which the x86-64 schedule's rounds share.

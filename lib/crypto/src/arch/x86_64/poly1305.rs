@@ -5,7 +5,7 @@
 //! to r, so the lanes' sum is the sequential result. Limbs stay below 2^27
 //! and every product sum below 2^60, so carries are taken once per
 //! multiplication. No address or branch depends on the data
-//! or the key. Loops index fixed-size arrays, as `aesni`'s header says why.
+//! or the key. Loops index fixed-size arrays, as `aesni`'s header explains.
 
 #![allow(clippy::needless_range_loop, reason = "see `aesni`'s header")]
 

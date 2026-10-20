@@ -2,9 +2,10 @@
 //! eight blocks run with each register holding one state word of all eight
 //! (Goll and Gueron, "Vectorization on ChaCha Stream Cipher", ITNG 2014). On
 //! AVX2 alone, and for shorter runs, blocks run in pairs with each 128-bit
-//! lane holding one block's row. Rounds, shuffles and addresses depend only on public lengths and
-//! counters. Only hosted targets with OS-enabled YMM state enter here. Hot
-//! loops index fixed-size arrays, as `aesni`'s header says why.
+//! lane holding one block's row. Rounds, shuffles and addresses depend only
+//! on public lengths and counters. Only hosted targets with OS-enabled YMM
+//! state enter here. Hot loops index fixed-size arrays, as `aesni`'s header
+//! explains.
 
 #![allow(clippy::needless_range_loop, reason = "see `aesni`'s header")]
 
@@ -41,7 +42,6 @@ fn rotate8(x: __m256i) -> __m256i {
 fn rotate<const L: i32, const R: i32>(x: __m256i) -> __m256i {
     _mm256_or_si256(_mm256_slli_epi32::<L>(x), _mm256_srli_epi32::<R>(x))
 }
-
 
 #[inline]
 #[target_feature(enable = "avx512f,avx512vl")]
@@ -107,11 +107,10 @@ macro_rules! chacha256 {
             store_data(bytes, _mm256_xor_si256(stream, load_data(bytes)));
         }
 
-        /// Eight blocks from `counter` on, XORed into `out`, with `beside` run once in
-        /// each of the first eight double rounds.
+        /// Eight blocks from `counter` on, XORed into `out`.
         #[inline]
         #[target_feature(enable = $features)]
-        pub(super) fn eight(initial: &[u32; 16], counter: u64, out: &mut [u8; 512], mut beside: impl FnMut(usize)) {
+        fn eight(initial: &[u32; 16], counter: u64, out: &mut [u8; 512]) {
             let mut lanes = [[0u32; 8]; 2];
             for j in 0..8 {
                 let c = counter.wrapping_add(j as u64);
@@ -132,10 +131,7 @@ macro_rules! chacha256 {
                     (v[$a], v[$b], v[$c], v[$d]) = (a, b, c, d);
                 }};
             }
-            for round in 0..10 {
-                if round < 8 {
-                    beside(round);
-                }
+            for _ in 0..10 {
                 q!(0, 4, 8, 12);
                 q!(1, 5, 9, 13);
                 q!(2, 6, 10, 14);
@@ -315,7 +311,7 @@ macro_rules! chacha256 {
             } else {
                 let (eights, _) = data.as_chunks_mut::<512>();
                 for i in 0..eights.len() {
-                    eight(&initial.0, counter, &mut eights[i], |_| {});
+                    eight(&initial.0, counter, &mut eights[i]);
                     counter = counter.wrapping_add(8);
                 }
                 512 * eights.len()

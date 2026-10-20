@@ -100,76 +100,74 @@ fn small1_avx512(x: __m128i) -> __m128i {
 /// (σ1 reads W[t-2], so a pair is the widest independent step), sixteen
 /// words ahead of the scalar rounds, which take W[t] + K[t] whole (Guilford
 /// et al., "Fast SHA512 Implementations on Intel Architecture Processors",
-/// Intel, 2012). Built for AVX-512VL, whose rotates make the schedule cheap.
-macro_rules! sha512 {
-    ($name:ident, $features:literal, $small0:ident, $small1:ident) => {
-        /// # Safety
-        /// The features are admitted.
-        #[target_feature(enable = $features)]
-        pub(super) unsafe fn $name(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
-            use crate::hash::{K512, big0, big1, round};
-            let flip = _mm_set_epi8(8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7);
-            let (k, _) = K512.as_chunks::<2>();
-            // Two plain words make 16 plain bytes, and back.
-            let pair = |x: [u64; 2]| unsafe { core::mem::transmute::<[u64; 2], __m128i>(x) };
-            let words = |x: __m128i| unsafe { core::mem::transmute::<__m128i, [u64; 2]>(x) };
-            const ZERO: [u64; 16] = [0; 16];
-            let mut wk = crate::secret::Secret([[0u64; 2]; 8]);
-            for b in 0..blocks.len() {
-                let (groups, _) = blocks[b].as_chunks::<16>();
-                let mut w = [_mm_setzero_si128(); 8];
+/// Intel, 2012). AVX-512VL's rotates make the schedule cheap; without them it
+/// costs more than it saves.
+///
+/// # Safety
+/// AVX2, BMI2, SSSE3, AVX-512F and AVX-512VL are admitted.
+#[target_feature(enable = "avx2,bmi2,ssse3,avx512f,avx512vl")]
+pub(super) unsafe fn sha512_avx512(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
+    use crate::hash::{K512, big0, big1, round};
+    let flip = _mm_set_epi8(8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7);
+    let (k, _) = K512.as_chunks::<2>();
+    // Two plain words make 16 plain bytes, and back.
+    let pair = |x: [u64; 2]| unsafe { core::mem::transmute::<[u64; 2], __m128i>(x) };
+    let words = |x: __m128i| unsafe { core::mem::transmute::<__m128i, [u64; 2]>(x) };
+    const ZERO: [u64; 16] = [0; 16];
+    let mut wk = crate::secret::Secret([[0u64; 2]; 8]);
+    for b in 0..blocks.len() {
+        let (groups, _) = blocks[b].as_chunks::<16>();
+        let mut w = [_mm_setzero_si128(); 8];
+        for j in 0..8 {
+            w[j] = _mm_shuffle_epi8(load(&groups[j]), flip);
+            wk.0[j] = words(_mm_add_epi64(w[j], pair(k[j])));
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+        let mut bc = b ^ c;
+        for pass in 0..5 {
+            // Eight pairs of plain words are sixteen words.
+            let mut current = unsafe { core::mem::transmute::<[[u64; 2]; 8], [u64; 16]>(wk.0) };
+            if pass < 4 {
+                // W[t] = σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16]
+                // for the next sixteen t, in place over a window of
+                // eight pairs.
                 for j in 0..8 {
-                    w[j] = _mm_shuffle_epi8(load(&groups[j]), flip);
-                    wk.0[j] = words(_mm_add_epi64(w[j], pair(k[j])));
-                }
-                let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
-                let mut bc = b ^ c;
-                for pass in 0..5 {
-                    // Eight pairs of plain words are sixteen words.
-                    let mut current = unsafe { core::mem::transmute::<[[u64; 2]; 8], [u64; 16]>(wk.0) };
-                    if pass < 4 {
-                        // W[t] = σ1(W[t-2]) + W[t-7] + σ0(W[t-15]) + W[t-16]
-                        // for the next sixteen t, in place over a window of
-                        // eight pairs.
-                        for j in 0..8 {
-                            let w15 = _mm_alignr_epi8::<8>(w[(j + 1) & 7], w[j]);
-                            let w7 = _mm_alignr_epi8::<8>(w[(j + 5) & 7], w[(j + 4) & 7]);
-                            let next = _mm_add_epi64(
-                                _mm_add_epi64(w[j], $small0(w15)),
-                                _mm_add_epi64(w7, $small1(w[(j + 7) & 7])),
-                            );
-                            w[j] = next;
-                            wk.0[j] = words(_mm_add_epi64(next, pair(k[8 * (pass + 1) + j])));
-                        }
-                    }
-                    let sum = |x: u64| x;
-                    round!(current, ZERO, bc, 0, false, [a, b, c, d, e, f, g, h], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 1, false, [h, a, b, c, d, e, f, g], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 2, false, [g, h, a, b, c, d, e, f], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 3, false, [f, g, h, a, b, c, d, e], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 4, false, [e, f, g, h, a, b, c, d], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 5, false, [d, e, f, g, h, a, b, c], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 6, false, [c, d, e, f, g, h, a, b], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 7, false, [b, c, d, e, f, g, h, a], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 8, false, [a, b, c, d, e, f, g, h], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 9, false, [h, a, b, c, d, e, f, g], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 10, false, [g, h, a, b, c, d, e, f], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 11, false, [f, g, h, a, b, c, d, e], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 12, false, [e, f, g, h, a, b, c, d], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 13, false, [d, e, f, g, h, a, b, c], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 14, false, [c, d, e, f, g, h, a, b], big0, big1, sum, sum);
-                    round!(current, ZERO, bc, 15, false, [b, c, d, e, f, g, h, a], big0, big1, sum, sum);
-                }
-                let v = [a, b, c, d, e, f, g, h];
-                for i in 0..8 {
-                    state[i] = state[i].wrapping_add(v[i]);
+                    let w15 = _mm_alignr_epi8::<8>(w[(j + 1) & 7], w[j]);
+                    let w7 = _mm_alignr_epi8::<8>(w[(j + 5) & 7], w[(j + 4) & 7]);
+                    let next = _mm_add_epi64(
+                        _mm_add_epi64(w[j], small0_avx512(w15)),
+                        _mm_add_epi64(w7, small1_avx512(w[(j + 7) & 7])),
+                    );
+                    w[j] = next;
+                    wk.0[j] = words(_mm_add_epi64(next, pair(k[8 * (pass + 1) + j])));
                 }
             }
+            // The schedule is the vectors' above: the rounds' own
+            // message expansion is off and its σ0 and σ1 unused.
+            let unused = |x: u64| x;
+            round!(current, ZERO, bc, 0, false, [a, b, c, d, e, f, g, h], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 1, false, [h, a, b, c, d, e, f, g], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 2, false, [g, h, a, b, c, d, e, f], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 3, false, [f, g, h, a, b, c, d, e], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 4, false, [e, f, g, h, a, b, c, d], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 5, false, [d, e, f, g, h, a, b, c], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 6, false, [c, d, e, f, g, h, a, b], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 7, false, [b, c, d, e, f, g, h, a], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 8, false, [a, b, c, d, e, f, g, h], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 9, false, [h, a, b, c, d, e, f, g], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 10, false, [g, h, a, b, c, d, e, f], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 11, false, [f, g, h, a, b, c, d, e], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 12, false, [e, f, g, h, a, b, c, d], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 13, false, [d, e, f, g, h, a, b, c], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 14, false, [c, d, e, f, g, h, a, b], big0, big1, unused, unused);
+            round!(current, ZERO, bc, 15, false, [b, c, d, e, f, g, h, a], big0, big1, unused, unused);
         }
-    };
+        let v = [a, b, c, d, e, f, g, h];
+        for i in 0..8 {
+            state[i] = state[i].wrapping_add(v[i]);
+        }
+    }
 }
-
-sha512!(sha512_avx512, "avx2,bmi2,ssse3,avx512f,avx512vl", small0_avx512, small1_avx512);
 
 /// SHA-512's portable rounds compiled for BMI2's RORX: without AVX-512's
 /// rotates the vector schedule costs more than it saves.

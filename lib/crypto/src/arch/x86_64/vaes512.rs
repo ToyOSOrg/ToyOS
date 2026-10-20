@@ -2,7 +2,7 @@
 //! each register holds four blocks or four carry-less products, in `aesni`'s
 //! GHASH form, and sixteen blocks share one reduction with H^16..H^1. Only
 //! hosted targets with OS-enabled ZMM state enter these functions. Hot loops
-//! index fixed-size arrays, as `aesni`'s header says why.
+//! index fixed-size arrays, as `aesni`'s header explains.
 
 #![allow(clippy::needless_range_loop, reason = "see `aesni`'s header")]
 
