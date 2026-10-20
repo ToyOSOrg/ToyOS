@@ -90,6 +90,21 @@ pub struct Sim {
     /// fluid reference's ordinary share.
     pub got: BTreeMap<JobId, (u64, u64)>,
     pub ideal: BTreeMap<JobId, f64>,
+    /// Per job: the service the per-CPU rule predicts — each CPU running
+    /// ordinary work gives each job its group weight over the CPU's load.
+    pub per_cpu_rule: BTreeMap<JobId, f64>,
+    /// The longest a runnable ordinary thread waited queued without running,
+    /// and the most runnable ordinary threads any CPU held.
+    pub longest_wait: u64,
+    pub most_threads: usize,
+    /// The largest ratio of a thread's wait to its budget, `(slice +
+    /// lag_bound) / share + 2·slice` — a request, plus the most debt it can
+    /// bring, at its rate — where `share` is its rate on its CPU — its group weight over
+    /// the CPU's load, divided among its siblings there — at its lowest
+    /// during the wait.
+    pub wait_over_budget: f64,
+    /// Per thread: its current wait and the largest budget seen during it.
+    waited: BTreeMap<ThreadId, (u64, f64)>,
     /// Ordinary service per CPU, for the realtime ceiling's protection.
     pub fair_on: Vec<u64>,
     pub rt_on: Vec<u64>,
@@ -181,6 +196,11 @@ impl Sim {
             weights: BTreeMap::new(),
             got: BTreeMap::new(),
             ideal: BTreeMap::new(),
+            per_cpu_rule: BTreeMap::new(),
+            longest_wait: 0,
+            most_threads: 0,
+            wait_over_budget: 0.0,
+            waited: BTreeMap::new(),
             fair_on: vec![0; m],
             rt_on: vec![0; m],
             spare_on: vec![0; m],
@@ -222,6 +242,7 @@ impl Sim {
         self.weights.insert(j, weight);
         self.got.insert(j, (0, 0));
         self.ideal.insert(j, 0.0);
+        self.per_cpu_rule.insert(j, 0.0);
         j
     }
 
@@ -464,6 +485,49 @@ impl Sim {
             let rates = waterfill(&pairs, (self.topo.cpus() - rt_now) as f64);
             for (j, r) in self.jobs.iter().zip(rates) {
                 *self.ideal.get_mut(j).unwrap() += r * dt as f64;
+            }
+            // The per-CPU rule: on each CPU running ordinary work, a job gets
+            // its group weight over the CPU's summed group weight.
+            for c in 0..self.topo.cpus() {
+                let cpu = CpuId(c as u32);
+                if !matches!(self.s.current(cpu), Some((_, Band::Fair))) {
+                    continue;
+                }
+                let load = self.s.load(cpu) as f64;
+                for j in &self.jobs {
+                    if let Some(w) = self.s.group_weight_on(cpu, *j) {
+                        *self.per_cpu_rule.get_mut(j).unwrap() += w as f64 / load * dt as f64;
+                    }
+                }
+            }
+            // Per-thread waits: runnable ordinary threads not running.
+            for c in 0..self.topo.cpus() {
+                let cpu = CpuId(c as u32);
+                let running = self.s.current(cpu).map(|r| r.0);
+                let fair: Vec<ThreadId> = self
+                    .s
+                    .queued(cpu)
+                    .filter(|&t| self.s.state(t) == (State::Queued { cpu, band: Band::Fair }))
+                    .collect();
+                self.most_threads = self.most_threads.max(fair.len());
+                let load = self.s.load(cpu) as f64;
+                let slice = self.s.params().slice as f64;
+                let debt = self.s.params().lag_bound as f64;
+                for &t in &fair {
+                    let job = self.s.job_of(t);
+                    let siblings = fair.iter().filter(|&&o| self.s.job_of(o) == job).count() as f64;
+                    let share = self.s.group_weight_on(cpu, job).unwrap_or(1) as f64 / load / siblings;
+                    let budget = (slice + debt) / share + 2.0 * slice;
+                    let (w, most) = self.waited.entry(t).or_insert((0, 0.0));
+                    if Some(t) == running {
+                        (*w, *most) = (0, 0.0);
+                    } else {
+                        *w += dt;
+                        *most = f64::max(*most, budget);
+                        self.longest_wait = self.longest_wait.max(*w);
+                        self.wait_over_budget = self.wait_over_budget.max(*w as f64 / *most);
+                    }
+                }
             }
             for c in 0..self.topo.cpus() {
                 let cpu = CpuId(c as u32);

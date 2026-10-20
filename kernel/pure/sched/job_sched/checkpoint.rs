@@ -369,10 +369,16 @@ fn the_ceiling_bounds_realtime_on_every_cpu() {
 /// any overrun; and realtime never runs continuously longer than two budgets
 /// (one interval's end and the next one's start) plus the overrun. Holds for
 /// never-revoked spinners in place, moved every 0.5 ms, overrunning by 200 µs,
-/// and for legitimate overload.
+/// and for legitimate overload, under both the cross-CPU layer and the
+/// simpler design.
 #[test]
 fn ordinary_work_gets_every_intervals_remainder() {
-    let p = Params { strikes_to_revoke: u32::MAX, ..Params::DEFAULT };
+    for base in [Params::DEFAULT, Params::CANDIDATE] {
+        ordinary_work_gets_every_intervals_remainder_under(Params { strikes_to_revoke: u32::MAX, ..base });
+    }
+}
+
+fn ordinary_work_gets_every_intervals_remainder_under(p: Params) {
     let periodic = Work::Periodic { period: 5_333 * US, work: 1_200 * US };
     for (title, per_cpu, work, hop, overrun) in [
         ("spinners", 1, Work::Hog, false, 0),
@@ -465,4 +471,72 @@ fn counterexample_runaway_detection_misses_brief_blocks_and_replaced_threads() {
         assert!(!sim.s.rt_owner(m).revoked && sim.s.rt_owner(m).strikes == 0, "{what}: now caught");
         assert!(rt > 0.6, "{what}: realtime share {rt:.3}");
     }
+}
+
+/// **The simpler direction** (owner, 2026-10-21): per-CPU EEVDF over job
+/// groups, group weight from the job's weight and its share of its runnable
+/// threads on that CPU, ordinary load balancing and idle steal, no cross-CPU
+/// service accounting — `Params::CANDIDATE`, run beside the cross-CPU layer
+/// (`Params::DEFAULT`) on every scenario and shape.
+///
+/// What the simpler design gives, asserted:
+/// - **The per-CPU rule.** A job receives, on each CPU running ordinary work,
+///   its group weight over that CPU's summed group weight. Where threads
+///   neither sleep nor are moved by churn, its service stays within two
+///   requests per CPU of that rule over the run; its share differs from the
+///   fluid share as far as placement leaves loads unequal. Sleeps and churn
+///   change weights faster than they settle, and the rule is then printed,
+///   not asserted.
+/// - **A bounded wait.** A runnable thread waits at most `(slice + lag_bound)
+///   / share + 2·slice` — one request plus the most debt it can carry in, at
+///   its rate on its CPU (group weight over load, divided among its siblings
+///   there) at its lowest during the wait.
+///
+/// The table prints, per design: the largest difference between a job's
+/// share and its fluid share (in CPUs, over the run), the longest any
+/// runnable thread waited, and migrations per second.
+#[test]
+fn the_simpler_design_follows_its_per_cpu_rule_and_bounds_every_wait() {
+    let shapes: [Shape; 3] = [("flat4", || flat(4)), ("t14", t14), ("amd", amd)];
+    let mut over = Vec::new();
+    for (shape, topo) in shapes {
+        for (name, setup) in scaled_scenarios() {
+            let mut line = format!("{shape:<6} {name:<46}");
+            for (design, p) in [("simple", Params::CANDIDATE), ("cross", Params::DEFAULT)] {
+                let mut sim = Sim::new(topo(), p);
+                let m = sim.topo.cpus() as u32;
+                setup(&mut sim, m);
+                sim.run_until(SPAN);
+                let span = SPAN.0 as f64;
+                let fluid_gap = sim
+                    .jobs()
+                    .iter()
+                    .map(|j| ((sim.got[j].0 + sim.got[j].1) as f64 - sim.ideal[j]).abs() / span)
+                    .fold(0.0, f64::max);
+                let rule_gap = sim
+                    .jobs()
+                    .iter()
+                    .map(|j| ((sim.got[j].0 + sim.got[j].1) as f64 - sim.per_cpu_rule[j]).abs())
+                    .fold(0.0, f64::max);
+                line.push_str(&format!(
+                    " | {design}: share gap {fluid_gap:.3} CPUs, wait {:>5.1} ms, migr/s {:>6.1}",
+                    sim.longest_wait as f64 / MS as f64,
+                    sim.migrations as f64 / (span / 1e9)
+                ));
+                line.push_str(&format!(", rule gap {:>6.1} ms, wait/budget {:.2}", rule_gap / MS as f64, sim.wait_over_budget));
+                if design == "simple" {
+                    let steady = !name.contains("duty") && !name.contains("churn");
+                    let rule_bound = (2 * p.slice * u64::from(m)) as f64;
+                    if steady && rule_gap > rule_bound {
+                        over.push(format!("{shape} {name}: {:.1} ms from the per-CPU rule", rule_gap / MS as f64));
+                    }
+                    if sim.wait_over_budget > 1.0 {
+                        over.push(format!("{shape} {name}: a wait reached {:.2} of its budget", sim.wait_over_budget));
+                    }
+                }
+            }
+            println!("{line}");
+        }
+    }
+    assert!(over.is_empty(), "{}", over.join("\n"));
 }
