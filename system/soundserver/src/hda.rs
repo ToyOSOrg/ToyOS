@@ -196,7 +196,7 @@ impl Hda {
     ///
     /// Everything here runs before soundserver starts a thread.
     pub fn claim(dev: PciDev) -> Result<Claimed, Refusal> {
-        let info = dev.describe().map_err(KernelRefused::on("the description"))?;
+        let info = toyos_pci_claim::describe(&dev)?;
         let bytes = info.bar_bytes[REGISTERS as usize];
         if bytes == 0 {
             return Err(Refusal::NoRegisters);
