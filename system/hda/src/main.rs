@@ -147,6 +147,8 @@ struct Driver {
     master: Option<(Master, Setting)>,
     control: Connection,
     to_engine: Connection,
+    /// The run soundserver's last start named, which every report carries.
+    run: u32,
     underruns: u32,
     /// Held for their mappings' lives: the register window points into the
     /// first, and the link and descriptor list into the second. The lent ring
@@ -279,6 +281,7 @@ impl Driver {
             master,
             control,
             to_engine,
+            run: 0,
             underruns: 0,
             _bar: bar_mapping,
             _region: region,
@@ -302,7 +305,10 @@ impl Driver {
             self.interrupts();
             while let Some((msg_type, payload)) = frame(&mut stream_rx, &self.to_engine, &self.at, "stream") {
                 match Engine::decode(msg_type, &payload) {
-                    Some(Engine::Start) => self.stream.start(),
+                    Some(Engine::Start(run)) => {
+                        self.run = run;
+                        self.stream.start()
+                    }
                     Some(Engine::Stop) => self.stream.stop(),
                     None => panic!("{}: soundserver sent stream frame {msg_type}, which this protocol has not", self.at),
                 }
@@ -347,7 +353,13 @@ impl Driver {
         if played.mask == 0 {
             return;
         }
-        let report = Played { mask: played.mask, clocked: 1, first_nanos: record.first_nanos, last_nanos: record.last_nanos };
+        let report = Played {
+            mask: played.mask,
+            clocked: 1,
+            first_nanos: record.first_nanos,
+            last_nanos: record.last_nanos,
+            run: self.run,
+        };
         if let Err(why) = self.to_engine.send_bytes(MSG_PLAYED, &report.encode()) {
             soundserver_gone(&self.at, why);
         }
@@ -402,10 +414,22 @@ impl Driver {
     }
 }
 
+/// How long soundserver has to answer the offer: a hang ceiling, since it
+/// answers in the control-thread pass that reads it. Past it the controller is
+/// given back rather than held by a driver waiting on nothing.
+const OFFER_ANSWER: Duration = Duration::from_secs(30);
+
 /// Offer `offer` on `control` and take soundserver's answer: the ring it lends.
 fn offered(control: &Connection, offer: &Offer) -> Result<OwnedHandle, Refusal> {
     let refused = |why: String| Refusal::Soundserver(why);
     control.send_bytes(MSG_OFFER, &offer.encode()).map_err(|why| refused(format!("the offer was refused ({why:?})")))?;
+    let poller = Poller::new(1);
+    poller.watch(control, READABLE, TOKEN_CONTROL);
+    let mut answered = false;
+    poller.wait(1, OFFER_ANSWER.as_nanos() as u64, |_| answered = true);
+    if !answered {
+        return Err(refused(format!("it did not answer the offer within {OFFER_ANSWER:?}")));
+    }
     let header = control.recv_header().map_err(|why| refused(format!("no answer to the offer ({why:?})")))?;
     let mut payload = [0u8; MAX_REQUEST];
     let n = control

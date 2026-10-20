@@ -216,6 +216,7 @@ impl Outputs {
                     periods: offer.periods as usize,
                     period_bytes: offer.period_bytes as usize,
                     running: false,
+                    run: 0,
                     ended: None,
                 };
                 let attached = Box::new(Attached { backend, offer, period_frames, generation: 0 });
@@ -353,12 +354,14 @@ pub(crate) struct DriverBackend {
     periods: usize,
     period_bytes: usize,
     running: bool,
+    /// The engine run the last start began, which a report has to carry.
+    run: u32,
     ended: Option<String>,
 }
 
 impl DriverBackend {
-    fn engine(&mut self, msg_type: u32) {
-        if let Err(why) = self.stream.try_send_bytes(msg_type, &[]) {
+    fn engine(&mut self, msg_type: u32, payload: &[u8]) {
+        if let Err(why) = self.stream.try_send_bytes(msg_type, payload) {
             let what = if msg_type == MSG_START { "start" } else { "stop" };
             self.end(format!("the output driver took no {what} ({why:?})"));
         }
@@ -386,9 +389,9 @@ impl Backend for DriverBackend {
         unsafe { self.ring.as_ptr().add(idx * self.period_bytes) }
     }
 
-    /// Every report the driver has sent, as one ([`combine`]). One read while
-    /// the engine is stopped is a period the stop overtook, and is dropped:
-    /// a stopped ring is soundserver's whole.
+    /// Every report the driver has sent, as one ([`combine`]). One of another
+    /// run than the engine's now, or read while it is stopped, is a period a
+    /// stop overtook, and is dropped: a stopped ring is soundserver's whole.
     fn completion(&mut self) -> Option<Completion> {
         let mut out: Option<Completion> = None;
         while self.ended.is_none() {
@@ -410,7 +413,9 @@ impl Backend for DriverBackend {
             };
             let played = toyos_sound_output::played(MSG_PLAYED, self.rx.payload(len));
             match played.filter(|played| run(played.mask, self.periods).is_some()) {
-                Some(played) if self.running => out = Some(combine(out, played, self.periods)),
+                Some(played) if self.running && played.run == self.run => {
+                    out = Some(combine(out, played, self.periods));
+                }
                 Some(_) => {}
                 None => self.end(format!("the output driver reported no run of its {}-period ring", self.periods)),
             }
@@ -427,14 +432,15 @@ impl Backend for DriverBackend {
 
     fn submit(&mut self, _idx: usize, _bytes: usize) {
         if !self.running {
-            self.engine(MSG_START);
+            self.run = self.run.wrapping_add(1);
+            self.engine(MSG_START, &self.run.to_le_bytes());
             self.running = true;
         }
     }
 
     fn stop(&mut self) {
         if self.running {
-            self.engine(MSG_STOP);
+            self.engine(MSG_STOP, &[]);
             self.running = false;
         }
     }
@@ -449,7 +455,7 @@ mod tests {
     use super::*;
 
     fn report(mask: u32, at: u64) -> Played {
-        Played { mask, clocked: 1, first_nanos: at, last_nanos: at }
+        Played { mask, clocked: 1, first_nanos: at, last_nanos: at, run: 1 }
     }
 
     /// Two reports read at one wake: the newer's time clocks the older's

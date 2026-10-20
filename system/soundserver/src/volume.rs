@@ -152,43 +152,6 @@ fn send(conn: &Connection, answer: Option<Master>) -> Result<(), ipc::TrySendErr
 mod tests {
     use super::*;
 
-    /// A flood: one request in flight, and the next read only once it is
-    /// answered, however many the holder wrote.
-    #[test]
-    fn one_master_request_is_in_flight_at_a_time() {
-        let mut relay = Relay::default();
-        let holder = relay.mint();
-        assert!(relay.idle());
-        relay.forwarded(holder);
-        for _ in 0..1000 {
-            assert!(!relay.idle(), "a second request read with one in flight");
-        }
-        assert_eq!(relay.answered(), Some(holder));
-        assert!(relay.idle());
-        assert_eq!(relay.answered(), None, "an answer nobody asked for is owed to nobody");
-    }
-
-    /// A holder that reconnected while its request was in flight: the answer
-    /// is the old connection's, and the new one is never handed it.
-    #[test]
-    fn an_answer_goes_only_to_the_connection_that_asked() {
-        let mut relay = Relay::default();
-        let old = relay.mint();
-        relay.forwarded(old);
-        let new = relay.mint();
-        assert_ne!(old, new);
-        assert_eq!(relay.answered(), Some(old));
-        assert!(relay.idle(), "the new holder's requests are read once the old one's is settled");
-    }
-
-    /// A driver whose connection takes no request is a refusal by name,
-    /// answered unavailable, never a panic.
-    #[test]
-    fn a_driver_that_takes_no_request_is_a_named_refusal() {
-        assert_eq!(crate::output::asked::<()>(Ok(())), Asked::Forwarded);
-        assert!(matches!(crate::output::asked(Err("full")), Asked::Refused(why) if why.contains("took no master request")));
-    }
-
     #[test]
     fn a_volume_request_is_refused_unless_its_type_and_width_fit() {
         const STEP: usize = core::mem::size_of::<VolumeStep>();

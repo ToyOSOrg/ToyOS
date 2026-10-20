@@ -134,6 +134,10 @@ impl Master {
 /// Periods the device played, and when its interrupts said so.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Played {
+    /// The [`Engine::Start`] this report's engine run began with: one sent
+    /// before a stop is read and landing after the next start is that run's
+    /// only by its number.
+    pub run: u32,
     /// One bit per period, one contiguous run of the ring ([`run`]).
     pub mask: u32,
     /// How many of these periods, in play order, end by [`Self::last_nanos`];
@@ -145,7 +149,7 @@ pub struct Played {
 }
 
 impl Played {
-    pub const BYTES: usize = 24;
+    pub const BYTES: usize = 28;
 
     pub fn encode(&self) -> [u8; Self::BYTES] {
         let mut out = [0u8; Self::BYTES];
@@ -153,6 +157,7 @@ impl Played {
         out[4..8].copy_from_slice(&self.clocked.to_le_bytes());
         out[8..16].copy_from_slice(&self.first_nanos.to_le_bytes());
         out[16..24].copy_from_slice(&self.last_nanos.to_le_bytes());
+        out[24..28].copy_from_slice(&self.run.to_le_bytes());
         out
     }
 
@@ -163,6 +168,7 @@ impl Played {
             clocked: u32::from_le_bytes(bytes[4..8].try_into().ok()?),
             first_nanos: u64::from_le_bytes(bytes[8..16].try_into().ok()?),
             last_nanos: u64::from_le_bytes(bytes[16..24].try_into().ok()?),
+            run: u32::from_le_bytes(bytes[24..28].try_into().ok()?),
         };
         let whole = played.mask != 0
             && played.clocked <= played.mask.count_ones()
@@ -223,14 +229,15 @@ impl ToDriver {
 /// What soundserver says on a stream connection.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Engine {
-    Start,
+    /// Run the engine; every report of this run carries the number.
+    Start(u32),
     Stop,
 }
 
 impl Engine {
     pub fn decode(msg_type: u32, payload: &[u8]) -> Option<Self> {
         match (msg_type, payload.len()) {
-            (MSG_START, 0) => Some(Self::Start),
+            (MSG_START, 4) => Some(Self::Start(u32::from_le_bytes(payload.try_into().ok()?))),
             (MSG_STOP, 0) => Some(Self::Stop),
             _ => None,
         }
@@ -295,11 +302,11 @@ mod tests {
         assert_eq!(FromDriver::decode(MSG_MASTER, &master.encode()), Some(FromDriver::Master(master)));
         assert_eq!(FromDriver::decode(MSG_STREAM, &[]), Some(FromDriver::Stream));
         assert_eq!(FromDriver::decode(MSG_MASTER_UNAVAILABLE, &[]), Some(FromDriver::MasterUnavailable));
-        let played = Played { mask: 0b1100_0001, clocked: 1, first_nanos: 5, last_nanos: 9 };
+        let played = Played { mask: 0b1100_0001, clocked: 1, first_nanos: 5, last_nanos: 9, run: 3 };
         assert_eq!(super::played(MSG_PLAYED, &played.encode()), Some(played));
         assert_eq!(ToDriver::decode(MSG_MASTER_STEP, &(-3i32).to_le_bytes()), Some(ToDriver::MasterStep(-3)));
         assert_eq!(ToDriver::decode(MSG_ACCEPTED, &[]), Some(ToDriver::Accepted));
-        assert_eq!(Engine::decode(MSG_START, &[]), Some(Engine::Start));
+        assert_eq!(Engine::decode(MSG_START, &7u32.to_le_bytes()), Some(Engine::Start(7)));
         assert_eq!(Engine::decode(MSG_STOP, &[]), Some(Engine::Stop));
     }
 
@@ -333,7 +340,7 @@ mod tests {
     fn a_master_or_a_report_no_device_produces_is_refused() {
         assert_eq!(FromDriver::decode(MSG_MASTER, &[9, 8, 0]), None, "past the bottom");
         assert_eq!(FromDriver::decode(MSG_MASTER, &[0, 8, 2]), None, "muted is no bool");
-        let played = Played { mask: 0b11, clocked: 1, first_nanos: 5, last_nanos: 9 };
+        let played = Played { mask: 0b11, clocked: 1, first_nanos: 5, last_nanos: 9, run: 3 };
         let refused = |p: Played| assert_eq!(super::played(MSG_PLAYED, &p.encode()), None, "{p:?}");
         refused(Played { mask: 0, clocked: 0, ..played });
         refused(Played { clocked: 3, ..played });
@@ -354,6 +361,7 @@ mod tests {
         }
         assert_eq!(ToDriver::decode(MSG_MASTER_STEP, &[1, 2, 3]), None);
         assert_eq!(Engine::decode(MSG_START, &[0]), None);
+        assert_eq!(Engine::decode(MSG_START, &[]), None, "a start names its run");
     }
 
     #[test]
