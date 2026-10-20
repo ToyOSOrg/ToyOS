@@ -13,17 +13,21 @@
 #![deny(unsafe_code)]
 
 pub mod cpu;
+pub mod eevdf;
 pub mod fair;
 pub mod hw;
+pub mod job_sched;
 pub mod invariants;
 pub mod mailbox;
 pub mod msg;
 pub mod park;
 pub mod queue;
 pub mod retire;
+pub mod rt;
 pub mod sync;
 pub mod task;
 pub mod timer;
+pub mod topology;
 pub mod watch;
 #[cfg(test)]
 mod watch_list;

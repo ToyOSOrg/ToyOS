@@ -15,7 +15,7 @@ use kernel::sched::fair::QUANTUM_NS;
 use kernel_sim::choice::ChoiceStream;
 use kernel_sim::explore::{run, Outcome};
 use kernel_sim::scenarios;
-use kernel_sim::topology::{self, Keys, LevelCounts, Shape};
+use kernel_sim::topology::{self, CpuKeys, LevelCounts, Shape};
 use kernel_sim::workload::{Scenario, SurplusShape};
 
 const MS: u64 = 1_000_000;
@@ -56,7 +56,7 @@ fn quads(line: &str, label: &str) -> Vec<[u32; 4]> {
 /// cache (the deterministic cache leaf, 4 on Intel and 0x8000001D on AMD, EAX
 /// bits 25:14 plus one). Those three are identical on every CPU that ran, or
 /// the shape would not be one tree.
-fn scouted(log: &str) -> Vec<Keys> {
+fn scouted(log: &str) -> Vec<CpuKeys> {
     let madt: Vec<u32> = log
         .lines()
         .find_map(|line| line.split("MADT cpus=[").nth(1))
@@ -99,7 +99,7 @@ fn scouted(log: &str) -> Vec<Keys> {
     };
     let llc = shared.next_power_of_two().trailing_zeros();
     madt.iter()
-        .map(|&id| Keys { core: id >> smt, llc: id >> llc, package: id >> package })
+        .map(|&id| CpuKeys { core: id >> smt, llc: id >> llc, package: id >> package })
         .collect()
 }
 

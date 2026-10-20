@@ -1,0 +1,290 @@
+//! The stage-1 checkpoint: does job-group EEVDF on per-CPU queues give
+//! feasible weighted sharing on a multicore machine, and does the realtime
+//! ceiling protect ordinary progress?
+//!
+//! Each scenario prints its table (`cargo test -p kernel --lib --features
+//! sched-check -- checkpoint --nocapture`). "Bounded" means no persistent
+//! drift: a job's error over the longest window is within its error over a
+//! short one plus the EEVDF lag bound of the requests involved, so it does not
+//! grow with the window. The `counterexample_` tests assert the opposite where
+//! the design cannot meet the policy.
+
+use super::sim::*;
+use super::*;
+use alloc::format;
+use std::println;
+
+const WINDOWS: [u64; 5] = [10 * MS, 100 * MS, 1000 * MS, 4000 * MS, 8000 * MS];
+const SPAN: Nanos = Nanos(10_000 * MS);
+
+/// Error over the longest window no larger than over 100 ms plus two
+/// requests' lag (`−r < lag < r` at each end of a window).
+fn assert_bounded(sim: &Sim, job: usize, what: &str) {
+    let short = sim.window_error(job, 100 * MS, Nanos::ZERO);
+    let long = sim.window_error(job, 8000 * MS, Nanos::ZERO);
+    let allowance = 2.0 * Params::DEFAULT.slice as f64 / MS as f64;
+    assert!(long <= short + allowance, "{what}: job {job} drifts: {short:.2} ms over 100 ms, {long:.2} ms over 8 s");
+}
+
+fn share(sim: &Sim, job: JobId) -> f64 {
+    let (f, r) = sim.got[&job];
+    (f + r) as f64 / sim.now.0 as f64
+}
+
+/// The plan's own reference case at three widths and both benches' shapes:
+/// a build going 1 → 16 → 1 threads every half second beside a single-thread
+/// job. The single job's fluid share is always one CPU; the build gets the rest.
+#[test]
+fn a_single_thread_job_keeps_one_cpu_beside_a_build_going_1_16_1() {
+    for (name, topo) in [("flat4", flat(4)), ("t14", t14()), ("amd", amd()), ("flat16", flat(16))] {
+        let m = topo.cpus() as u32;
+        let mut sim = Sim::new(topo, Params::DEFAULT);
+        let single = sim.job(WEIGHT_UNIT);
+        let build = sim.job(WEIGHT_UNIT);
+        sim.thread(single, Work::Hog, CpuId(0), false);
+        sim.thread(build, Work::Hog, CpuId(1 % m), false);
+        for phase in 0..10u64 {
+            sim.run_until(Nanos(phase * 1000 * MS + 500 * MS));
+            let helpers: Vec<_> = (0..15).map(|i| sim.thread(build, Work::Hog, CpuId(i % m), false)).collect();
+            sim.run_until(Nanos((phase + 1) * 1000 * MS));
+            for h in helpers {
+                sim.finish(h);
+            }
+        }
+        println!("{}", sim.report(&format!("single + build 1-16-1, {name}"), Nanos::ZERO, &WINDOWS));
+        assert!(share(&sim, single) > 0.99, "{name}: the single-thread job lost its CPU");
+        assert_bounded(&sim, 0, name);
+        assert_bounded(&sim, 1, name);
+    }
+}
+
+#[test]
+fn weighted_builds_split_by_weight() {
+    let mut sim = Sim::new(flat(4), Params::DEFAULT);
+    let a = sim.job(2 * WEIGHT_UNIT);
+    let b = sim.job(WEIGHT_UNIT);
+    for i in 0..8 {
+        sim.thread(a, Work::Hog, CpuId(i % 4), false);
+        sim.thread(b, Work::Hog, CpuId(i % 4), false);
+    }
+    sim.run_until(SPAN);
+    println!("{}", sim.report("A8 (weight 2) beside B8 (weight 1) on 4", Nanos::ZERO, &WINDOWS));
+    assert_bounded(&sim, 0, "weighted");
+    assert_bounded(&sim, 1, "weighted");
+}
+
+/// Threads that sleep 0.1 ms after every 1 ms of CPU keep their job's share:
+/// lag carried across each sleep, not lost and not banked.
+#[test]
+fn short_sleeps_keep_their_share() {
+    let mut sim = Sim::new(flat(4), Params::DEFAULT);
+    let s = sim.job(WEIGHT_UNIT);
+    let h = sim.job(WEIGHT_UNIT);
+    for i in 0..4 {
+        sim.thread(s, Work::Duty { run: MS, sleep: 100 * US }, CpuId(i), false);
+    }
+    for i in 0..8 {
+        sim.thread(h, Work::Hog, CpuId(i % 4), false);
+    }
+    sim.run_until(SPAN);
+    println!("{}", sim.report("S4 duty 1 ms / 0.1 ms beside H8 hogs on 4", Nanos::ZERO, &WINDOWS));
+    assert_bounded(&sim, 0, "sleepers");
+    assert_bounded(&sim, 1, "sleepers");
+}
+
+/// Placement noise beyond what balancing asks for: a waiting thread moved to
+/// a random CPU every millisecond. Measured, not asserted — the error is the
+/// load imbalance the moves create, which per-CPU arithmetic cannot correct.
+#[test]
+fn migration_churn_is_measured() {
+    for duty in [false, true] {
+        let mut sim = Sim::new(flat(4), Params::DEFAULT);
+        let a = sim.job(WEIGHT_UNIT);
+        let b = sim.job(WEIGHT_UNIT);
+        for i in 0..8 {
+            sim.thread(a, Work::Hog, CpuId(i % 4), false);
+        }
+        let work = if duty { Work::Duty { run: 2 * MS, sleep: 300 * US } } else { Work::Hog };
+        for i in 0..4 {
+            sim.thread(b, work, CpuId(i % 4), false);
+        }
+        sim.churn(MS, 1);
+        sim.run_until(SPAN);
+        println!("{}", sim.report(&format!("A8 hogs, B4 {work:?}, churn every 1 ms"), Nanos::ZERO, &WINDOWS));
+    }
+}
+
+/// **Counterexample.** Three single-thread jobs of equal weight on two CPUs.
+/// Each is entitled to 2/3 of a CPU; per-CPU queues give one of them a CPU of
+/// its own for as long as no CPU idles, and no load-driven move can help: any
+/// placement has loads 2 and 1. The error grows by 1/3 CPU-second per second.
+#[test]
+fn counterexample_three_single_thread_jobs_on_two_cpus() {
+    let mut sim = Sim::new(flat(2), Params::DEFAULT);
+    for c in [0, 0, 1] {
+        let j = sim.job(WEIGHT_UNIT);
+        sim.thread(j, Work::Hog, CpuId(c), false);
+    }
+    sim.run_until(SPAN);
+    println!("{}", sim.report("3 single-thread jobs on 2 CPUs", Nanos::ZERO, &WINDOWS));
+    let drift = sim.window_error(0, 8000 * MS, Nanos::ZERO).max(sim.window_error(1, 8000 * MS, Nanos::ZERO));
+    assert!(drift >= 0.9 * 8000.0 / 3.0, "the error no longer grows with the window: {drift:.1} ms");
+}
+
+/// **Counterexample.** Two jobs of three threads on four CPUs. Placement
+/// {A,A} {A,B} {B} {B} has the same per-CPU loads (2/3, 2/3, 1/3, 1/3 of a
+/// job weight) as the fair {A,B} {A,B} {A} {B}, so balancing by load leaves
+/// it: A receives 1.5 CPUs and B 2.5 where each is entitled to 2.
+#[test]
+fn counterexample_a_fair_and_an_unfair_placement_have_the_same_loads() {
+    let mut sim = Sim::new(flat(4), Params::DEFAULT);
+    let a = sim.job(WEIGHT_UNIT);
+    let b = sim.job(WEIGHT_UNIT);
+    let threads: Vec<_> =
+        [(a, 0), (a, 0), (a, 1), (b, 1), (b, 2), (b, 3)].iter().map(|&(j, c)| sim.thread(j, Work::Hog, CpuId(c), true)).collect();
+    // Placed by hand, then free once every CPU's weights have settled.
+    sim.run_until(Nanos(20 * MS));
+    for t in threads {
+        sim.unpin(t);
+    }
+    sim.run_until(SPAN);
+    println!("{}", sim.report("A3 B3 on 4 CPUs from {A,A} {A,B} {B} {B}", Nanos::ZERO, &WINDOWS));
+    assert!(share(&sim, a) < 1.6 && share(&sim, b) > 2.4, "balancing found the fair placement");
+}
+
+fn rt_machine(
+    params: Params,
+    workers_per_cpu: usize,
+    work: Work,
+    hop: bool,
+    overrun: u64,
+) -> (Sim, [JobId; 2], Vec<JobId>, Vec<ThreadId>) {
+    let mut sim = Sim::new(flat(4), params);
+    sim.rt_overrun = overrun;
+    let o = sim.job(WEIGHT_UNIT);
+    let p = sim.job(WEIGHT_UNIT);
+    let mut owners = Vec::new();
+    let mut workers = Vec::new();
+    for c in 0..4 {
+        for _ in 0..workers_per_cpu {
+            let m = sim.job(WEIGHT_UNIT);
+            let t = sim.thread(m, work, CpuId(c), !hop);
+            sim.grant(t);
+            owners.push(m);
+            workers.push(t);
+        }
+    }
+    for i in 0..8 {
+        sim.thread(o, Work::Hog, CpuId(i % 4), false);
+    }
+    for i in 0..4 {
+        sim.thread(p, Work::Hog, CpuId(i % 4), false);
+    }
+    if hop {
+        sim.churn(500 * US, 3);
+    }
+    sim.run_until(Nanos(2000 * MS));
+    (sim, [o, p], owners, workers)
+}
+
+fn rt_report(title: &str, sim: &Sim, ordinary: [JobId; 2], owners: &[JobId]) {
+    let k = [1, 2, 4, 20];
+    let floors: Vec<_> = k.iter().map(|&k| sim.ordinary_floor(k) / US).collect();
+    let peaks: Vec<_> = k.iter().map(|&k| sim.rt_peak(k) / US).collect();
+    let fallback: f64 = owners.iter().map(|m| sim.got[m].0 as f64).sum::<f64>() / sim.now.0 as f64;
+    println!("{title}");
+    println!("  over 1/2/4/20 intervals: ordinary floor {floors:?} us, realtime peak {peaks:?} us");
+    println!(
+        "  CPUs: ordinary jobs {:.3} {:.3}, workers realtime {:.3}, workers ordinary {fallback:.3}; owners revoked {}/{}",
+        sim.got[&ordinary[0]].0 as f64 / sim.now.0 as f64,
+        sim.got[&ordinary[1]].0 as f64 / sim.now.0 as f64,
+        sim.rt_on.iter().sum::<u64>() as f64 / sim.now.0 as f64,
+        owners.iter().filter(|&&m| sim.s.rt_owner(m).revoked).count(),
+        owners.len(),
+    );
+}
+
+/// No CPU runs more realtime than its allowance in any run of intervals,
+/// however the workers behave: spinning in place, moved to a fresh CPU every
+/// 0.5 ms, or overrunning every exhaustion by 200 µs (a non-preemptible
+/// section), whose excess is repaid in the next interval.
+#[test]
+fn the_ceiling_bounds_realtime_on_every_cpu() {
+    let p = Params { strikes_to_revoke: u32::MAX, ..Params::DEFAULT };
+    for (title, hop, overrun) in [("spinners", false, 0), ("hopping spinners", true, 0), ("200 us overruns", false, 200 * US)] {
+        let (sim, ordinary, owners, _) = rt_machine(p, 1, Work::Hog, hop, overrun);
+        rt_report(&format!("one never-revoked realtime spinner per CPU: {title}"), &sim, ordinary, &owners);
+        for k in [1, 2, 4, 20] {
+            assert!(sim.rt_peak(k) <= k as u64 * p.rt_budget + overrun, "{title}: {k} intervals");
+        }
+        let intervals = sim.now.0 / p.rt_interval;
+        for (c, &rt) in sim.rt_on.iter().enumerate() {
+            assert!(rt <= intervals * p.rt_budget + overrun, "{title}: cpu{c} ran {rt} ns realtime");
+        }
+    }
+}
+
+/// Legitimate audio below the ceiling: two callbacks per CPU, each 1.2 ms in
+/// every 5.333 ms period (256 frames at 48 kHz). Every period is met, ordinary
+/// work gets every interval's remainder, and nobody is called a runaway.
+#[test]
+fn audio_below_the_ceiling_meets_every_period() {
+    let periodic = Work::Periodic { period: 5_333 * US, work: 1_200 * US };
+    let (sim, ordinary, owners, workers) = rt_machine(Params::DEFAULT, 2, periodic, false, 0);
+    rt_report("two 1.2 ms / 5.333 ms callbacks per CPU", &sim, ordinary, &owners);
+    for &w in &workers {
+        let (missed, worst) = sim.missed(w);
+        assert_eq!(missed, 0);
+        // Behind at most the other callback on its CPU.
+        assert!(worst <= 2 * 1_200 * US, "response {worst}");
+    }
+    assert!(owners.iter().all(|&m| !sim.s.rt_owner(m).revoked));
+    // In any interval two releases can land: at most 2 × 2 × 1.2 ms realtime.
+    assert!(sim.ordinary_floor(1) >= Params::DEFAULT.rt_interval - 4 * 1_200 * US);
+}
+
+/// Aggregate overload is not abuse: four such callbacks per CPU want 90% of
+/// it; the ceiling holds, callbacks miss periods, and no owner is revoked.
+#[test]
+fn aggregate_overload_drops_audio_and_revokes_nobody() {
+    let periodic = Work::Periodic { period: 5_333 * US, work: 1_200 * US };
+    let (sim, ordinary, owners, workers) = rt_machine(Params::DEFAULT, 4, periodic, false, 0);
+    rt_report("four 1.2 ms / 5.333 ms callbacks per CPU", &sim, ordinary, &owners);
+    assert!(owners.iter().all(|&m| !sim.s.rt_owner(m).revoked));
+    assert!(workers.iter().any(|&w| sim.missed(w).0 > 0));
+    assert!(sim.rt_peak(1) <= Params::DEFAULT.rt_budget);
+}
+
+/// A spinning worker is a runaway once per 50 ms of realtime without
+/// blocking; its owner is revoked at the third, after 150 ms of realtime —
+/// about 215 ms at the 70% ceiling — and its job then shares as any other.
+#[test]
+fn a_runaway_owner_is_revoked() {
+    let (sim, ordinary, owners, _) = rt_machine(Params::DEFAULT, 1, Work::Hog, false, 0);
+    rt_report("one realtime spinner per CPU, revocable", &sim, ordinary, &owners);
+    assert!(owners.iter().all(|&m| sim.s.rt_owner(m).revoked));
+    let p = Params::DEFAULT;
+    for (c, &rt) in sim.rt_on.iter().enumerate() {
+        let strikes = p.strikes_to_revoke as u64 * p.runaway;
+        assert!(rt <= strikes + p.rt_budget, "cpu{c}: {rt} ns realtime before revocation");
+    }
+}
+
+/// The plan's fallback: an exhausted worker competes under its job's ordinary
+/// share for the rest of the interval. Measured with spinners never revoked:
+/// each spinner's job holds its whole weight on its CPU, while the ordinary
+/// jobs' weights are split across four, so the spinners take most of each
+/// interval's remainder and an interval may pass with no ordinary work at all.
+/// The ordinary jobs still get their weighted part of the remainder over 20
+/// intervals, less two requests of lag.
+#[test]
+fn the_fallback_gives_a_spinner_its_jobs_share_of_the_remainder() {
+    let p = Params { strikes_to_revoke: u32::MAX, ..Params::DEFAULT };
+    let (sim, ordinary, owners, _) = rt_machine(p, 1, Work::Hog, false, 0);
+    rt_report("fallback under never-revoked spinners", &sim, ordinary, &owners);
+    // Per CPU: spinner's job at full weight, two ordinary jobs at a quarter.
+    let remainder = 20 * (p.rt_interval - p.rt_budget);
+    let ordinary_part = remainder / 3;
+    assert!(sim.ordinary_floor(20) + 2 * p.slice >= ordinary_part);
+    assert_eq!(sim.ordinary_floor(1), 0, "the finding this test records no longer holds");
+}
