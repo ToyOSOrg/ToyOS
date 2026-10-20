@@ -411,7 +411,7 @@ const MACHINE_TESTS: &[&str] = &[
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot stick is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
-    // hand rather than by the merge queue.
+    // hand rather than by CI.
     "amdvi_firmware_left",
     // A translating AMD-Vi unit's refusal, recorded and read: a kernel-owned
     // record halts the machine, so no metal row reaches it, and only QEMU's

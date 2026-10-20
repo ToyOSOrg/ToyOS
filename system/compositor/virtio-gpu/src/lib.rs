@@ -268,7 +268,9 @@ pub struct Gpu<M: DmaBuffers, C: Claim> {
     edid: bool,
     display_changed: bool,
     scanout: Option<Scanout<C::Backing>>,
-    cursor_made: bool,
+    /// The hot spot of the image last written to the cursor's resource, once
+    /// that resource is made.
+    cursor_hot: Option<(u32, u32)>,
 }
 
 impl<M: DmaBuffers, C: Claim> Gpu<M, C> {
@@ -286,7 +288,7 @@ impl<M: DmaBuffers, C: Claim> Gpu<M, C> {
             edid,
             display_changed: false,
             scanout: None,
-            cursor_made: false,
+            cursor_hot: None,
         }
     }
 
@@ -440,14 +442,14 @@ impl<M: DmaBuffers, C: Claim> Gpu<M, C> {
     /// `UPDATE_CURSOR`. `image` is 64x64 pixels whose bytes are blue, green,
     /// red and alpha.
     pub fn cursor(&mut self, image: &[u32; (CURSOR_SIDE * CURSOR_SIDE) as usize], hot: (u32, u32), at: (u32, u32)) -> Result<(), Refusal> {
-        if !self.cursor_made {
+        if self.cursor_hot.is_none() {
             let create = [CURSOR_RESOURCE, wire::FORMAT_B8G8R8A8_UNORM, CURSOR_SIDE, CURSOR_SIDE];
             self.required(Command::ResourceCreate2d, &create)?;
             let addr = self.mem.device_addr(CURSOR_IMAGE);
             let attach = [CURSOR_RESOURCE, 1, addr as u32, (addr >> 32) as u32, CURSOR_IMAGE_BYTES, 0];
             self.required(Command::ResourceAttachBacking, &attach)?;
-            self.cursor_made = true;
         }
+        self.cursor_hot = Some(hot);
         for (nth, pixel) in image.iter().enumerate() {
             self.mem.write32(CURSOR_IMAGE + 4 * nth, *pixel);
         }
@@ -456,9 +458,14 @@ impl<M: DmaBuffers, C: Claim> Gpu<M, C> {
         self.cursor_send(Command::UpdateCursor, at, CURSOR_RESOURCE, hot)
     }
 
-    /// Move the cursor to `at` (§5.7.6.10).
+    /// Move the cursor to `at` (§5.7.6.10). The request carries the cursor's
+    /// resource and hot spot, which §5.7.6.10 has the device ignore: QEMU 11.1
+    /// hides the cursor on a `MOVE_CURSOR` whose resource is 0.
     pub fn move_cursor(&mut self, at: (u32, u32)) -> Result<(), Refusal> {
-        self.cursor_send(Command::MoveCursor, at, 0, (0, 0))
+        match self.cursor_hot {
+            Some(hot) => self.cursor_send(Command::MoveCursor, at, CURSOR_RESOURCE, hot),
+            None => self.cursor_send(Command::MoveCursor, at, 0, (0, 0)),
+        }
     }
 
     fn answer_at(slot: usize) -> usize {

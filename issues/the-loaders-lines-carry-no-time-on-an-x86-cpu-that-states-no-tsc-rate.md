@@ -23,7 +23,7 @@ largest standard leaf, as `00000010` on Zen 2 (`0870F10_K17_Matisse_CPUID`),
 Zen 3+ (`0A40F41_K19_Rembrandt_01_CPUID`), Zen 4 (`0A60F12_K19_Raphael_01_CPUID`)
 and Zen 5 (`0B00F21_K20_Turin_01_CPUID`, `0B20F40_K20_StrixPoint_06_CPUID`,
 `0B40F40_K20_GraniteRidge_02_CPUID`): neither leaf exists there. QEMU's
-`qemu64` states neither either, and under the `guest / suite` check's
+`qemu64` states neither either, and under nightly's `kvm / suite`'s
 `-cpu host` whether a line is timed is the runner's CPU's to decide.
 
 A second rate source is the fix, and the choice of one is open: the

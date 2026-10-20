@@ -340,7 +340,7 @@ pub(crate) fn amdvi_left_on(unit: &str) -> [String; 3] {
 /// **A unit an AMD machine's firmware left on is switched off and programmed,
 /// and the boot stick's DMA reaches memory through its controller's own
 /// domain.** QEMU's `amd-iommu` is the only AMD-Vi unit
-/// the merge queue runs: the T14 is an Intel machine, and the hand-over's
+/// the nightly guest suite runs: the T14 is an Intel machine, and the hand-over's
 /// register sequence and the DMA it frees are neither of them a host test's.
 /// Two boots: the shipped kernel finds a unit nothing left on and switches
 /// nothing off; the test kernel's `iommu-firmware-left` leaves the unit blocking
