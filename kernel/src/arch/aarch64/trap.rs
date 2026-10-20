@@ -354,8 +354,7 @@ fn user_fatal(frame: &Frame) -> ! {
 
 /// The `<signal.h>` class an EL0 exception nothing serves ends its process as,
 /// by `ESR_EL1`'s class (Arm ARM K.a, D24.2.40) and, for a data abort, its
-/// `DFSC`; a class this kernel does not name is an instruction it would not
-/// run.
+/// `DFSC`; every other class is an instruction it would not run.
 fn fault_of(esr: u64) -> Fault {
     const DFSC_ALIGNMENT: u64 = 0b10_0001;
     match esr >> 26 {

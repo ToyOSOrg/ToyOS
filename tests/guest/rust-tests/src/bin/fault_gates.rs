@@ -20,7 +20,7 @@ use toyos_abi::end::{End, Fault};
 enum Expect {
     /// Measured wide and alone: the CPU raises this from Ring 3 every time, so
     /// the child must end as this fault.
-    Killed(Fault),
+    Ends(Fault),
     /// It does not, and `fault_gate_child` prints the register readback that
     /// says why. The exit code is deliberately not asserted: what these arms
     /// contribute is the machine still being here for the next one, and that is
@@ -29,28 +29,28 @@ enum Expect {
 }
 
 const ARMS: &[(&str, Expect)] = &[
-    ("de", Expect::Killed(Fault::Arithmetic)),
-    ("de_overflow", Expect::Killed(Fault::Arithmetic)),
-    ("ud", Expect::Killed(Fault::Instruction)),
+    ("de", Expect::Ends(Fault::Arithmetic)),
+    ("de_overflow", Expect::Ends(Fault::Arithmetic)),
+    ("ud", Expect::Ends(Fault::Instruction)),
     // Both #SS routes arrive as #GP under TCG; see the child.
-    ("ss", Expect::Killed(Fault::Memory)),
-    ("ss_rsp", Expect::Killed(Fault::Memory)),
+    ("ss", Expect::Ends(Fault::Memory)),
+    ("ss_rsp", Expect::Ends(Fault::Memory)),
     // Trappable at all only because `CR0.NE` is in the declaration every CPU
     // is held to (`arch/x86_64/control_regs.rs`): with it clear the exception is
     // signalled on FERR#, which nothing in a modern machine listens to.
-    ("mf", Expect::Killed(Fault::Arithmetic)),
+    ("mf", Expect::Ends(Fault::Arithmetic)),
     // TCG raises no #XM whatever MXCSR says. `CR4.OSXMMEXCPT` is declared set,
-    // so this arm is `Killed` on metal and cannot be here.
+    // so this arm is `Ends(Fault::Arithmetic)` on metal and cannot be here.
     ("xm", Expect::MachineLives),
     // `CR0.AM` is declared clear, so `RFLAGS.AC` buys a Ring 3 process nothing
     // on any machine this kernel runs on — emulated or not.
     ("ac", Expect::MachineLives),
-    ("pf", Expect::Killed(Fault::Memory)),
+    ("pf", Expect::Ends(Fault::Memory)),
     // Each dies with the kernel's direct map in a register or an operand its
     // crash report would follow; `crash_report_reads_no_kernel_memory` reads
-    // what the report said.
-    ("kernel_stack", Expect::Killed(Fault::Memory)),
-    ("kernel_page", Expect::Killed(Fault::Memory)),
+    // what the report said. `kernel_stack` is `#UD` with its stack there.
+    ("kernel_stack", Expect::Ends(Fault::Instruction)),
+    ("kernel_page", Expect::Ends(Fault::Memory)),
 ];
 
 fn main() {
@@ -60,7 +60,7 @@ fn main() {
             .status()
             .unwrap_or_else(|e| panic!("failed to spawn fault_gate_child {kind}: {e}"));
         match expect {
-            Expect::Killed(fault) => assert_eq!(
+            Expect::Ends(fault) => assert_eq!(
                 End::from_word(status.into_raw()),
                 Some(End::Fault(*fault)),
                 "{kind} did not end as a {} fault: the CPU did not raise it, the kernel resumed \

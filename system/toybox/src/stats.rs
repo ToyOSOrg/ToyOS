@@ -30,9 +30,8 @@ pub fn main(args: Vec<String>) {
         std::process::exit(1);
     }
 
-    let code = status.code().unwrap_or(-1);
     println!();
-    println!("── process stats (pid {}, exit {code}) ──────────", s.pid);
+    println!("── process stats (pid {}, {status}) ──────────", s.pid);
     println!("  wall      {}", fmt_ns(s.wall_ns));
     println!("  cpu       {}", fmt_ns(s.cpu_ns));
     println!();

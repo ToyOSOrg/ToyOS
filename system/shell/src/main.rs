@@ -2,7 +2,7 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::os::toyos::process::CommandExt;
+use std::os::toyos::process::{CommandExt, ExitStatusExt};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 
@@ -804,8 +804,11 @@ fn apply_redirect(command: &mut Command, cmd: &SimpleCommand) {
     }
 }
 
+/// `$?`: the exit code, or 128 plus the signal for a command ended by one
+/// (POSIX XCU 2.8.2).
 fn set_status(status: &ExitStatus) {
-    unsafe { LAST_STATUS = status.code().unwrap_or(1); }
+    let code = status.code().or_else(|| status.signal().map(|signal| 128 + signal)).unwrap_or(1);
+    unsafe { LAST_STATUS = code; }
 }
 
 fn set_status_code(code: i32) {

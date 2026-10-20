@@ -496,6 +496,11 @@ impl ExitStatus {
     pub fn into_raw(self) -> u64 {
         self.0.to_word()
     }
+
+    /// See `os::toyos::process::ExitStatusExt::signal`.
+    pub fn signal(&self) -> Option<i32> {
+        toyos::process::signal(self.0)
+    }
 }
 
 impl fmt::Display for ExitStatus {
@@ -582,7 +587,7 @@ impl Process {
 
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         match self.handle.try_wait() {
-            Ok(code) => Ok(Some(ExitStatus(code))),
+            Ok(end) => Ok(Some(ExitStatus(end))),
             Err(toyos_abi::syscall::SyscallError::WouldBlock) => Ok(None),
             Err(_) => Err(io::Error::from(io::ErrorKind::Other)),
         }
