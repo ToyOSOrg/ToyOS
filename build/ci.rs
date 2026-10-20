@@ -800,15 +800,16 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// In a job that carries the cache ([`cicache::carried`]) the restored entry is
 /// read before any step. A developer's tree keeps the dates its edits gave it.
 ///
-/// A change of [`Scope::Documentation`] runs only the steps that read
-/// documentation: the build system's tests, whose gates read every tracked file
-/// and the issues the manifests and licence exceptions cite, and the licences,
-/// whose ledger reads the tracked tree.
+/// A change of [`Scope::Documentation`] runs only the build system's tests and
+/// the licences. **Every host check that reads Markdown is in those two**: the
+/// tracked-file gates, the issues the manifests (`userlandhost::programs`, also
+/// read by the apps step) and the licence exceptions cite, and the ledger's
+/// tracked tree. A check that comes to read Markdown elsewhere belongs there too.
 fn host(root: &Path, scope: Result<(Scope, String), String>) -> Vec<Step> {
-    let mut documentation = false;
+    let mut docs_only = false;
     let mut steps = vec![step("the change's scope", || {
         let (scope, said) = scope?;
-        documentation = scope == Scope::Documentation;
+        docs_only = scope == Scope::Documentation;
         Ok(said)
     })];
     if steps[0].verdict.is_err() {
@@ -834,7 +835,7 @@ fn host(root: &Path, scope: Result<(Scope, String), String>) -> Vec<Step> {
     }
     let build_system = || step("the build system", || cargo(root, &["test", "--lib"]));
     let licences = || step("the licences of what ships", || crate::licence::judge(root));
-    if documentation {
+    if docs_only {
         steps.extend([build_system(), licences()]);
         steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
         return steps;
@@ -1086,8 +1087,7 @@ enum Scope {
 }
 
 /// Whether `path` is documentation: Markdown, by its name and never by its
-/// directory. Nothing compiles it, and only [`host`]'s documentation steps read
-/// it; a source that embeds one is refused (`no_source_embeds_documentation`).
+/// directory.
 fn documentation(path: &str) -> bool {
     path.ends_with(".md")
 }
@@ -1095,8 +1095,9 @@ fn documentation(path: &str) -> bool {
 /// The scope of the change this job judges, and what it found: a merge group's
 /// change against its base, and everything anywhere else.
 ///
-/// The change is the merge group's whole tree against main, entries ahead of
-/// this one included, and a rename is both its paths.
+/// The base is the merge group's parent: main, or the group of the entry ahead
+/// of this one. That is sound only because the ruleset's merge queue groups
+/// `ALLGREEN`, so every entry passes its own group; a rename is both its paths.
 fn scope(root: &Path) -> Result<(Scope, String), String> {
     if std::env::var("GITHUB_EVENT_NAME").ok().as_deref() != Some("merge_group") {
         return Ok((Scope::Everything, "not a merge group, so everything".into()));
@@ -1705,8 +1706,10 @@ mod tests {
         assert!(merge_group("not json").is_err());
     }
 
-    /// **No source embeds a Markdown file**: one that did would make it
-    /// something a build reads, which a change of documentation alone skips.
+    /// **No Rust line that `include_str!`s or `include_bytes!`s names a Markdown
+    /// file**: a crate that embedded one, as `#![doc = include_str!(...)]` does,
+    /// would compile and doc-test it, which a change of documentation alone
+    /// skips. Line-local: a split invocation or a build script's read passes.
     #[test]
     fn no_source_embeds_documentation() {
         let root = repo_root();

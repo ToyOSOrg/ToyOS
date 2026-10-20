@@ -3,8 +3,9 @@ name: ci
 # CI runs once per pull request, in the merge queue: the host checks and every
 # architecture's shipped image. The guest suite is nightly's. On `pull_request`
 # every job is skipped, which a required check reads as green. A merge group
-# that changes documentation alone (`build/ci.rs`'s `scope`) runs the host
-# checks that read it and skips `toolchain` and `image`.
+# that changes documentation alone against its parent (`build/ci.rs`'s `scope`;
+# sound only under the ruleset's `ALLGREEN` grouping) runs the host checks that
+# read it and skips `toolchain` and `image`.
 on:
   pull_request:
     branches: [main]
