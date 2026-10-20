@@ -713,8 +713,7 @@ impl Capabilities {
     }
 
     /// `ECAP.SC`: a second-level entry can force DMA to snoop the cache,
-    /// overriding a device's own no-snoop setting — the HDA driver relies on
-    /// this to override vendor no-snoop with no config-write syscall.
+    /// overriding a device's own no-snoop setting; read for the log line only.
     fn snoop_control(&self) -> bool {
         self.ecap & (1 << 7) != 0
     }

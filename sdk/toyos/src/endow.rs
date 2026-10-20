@@ -76,7 +76,6 @@ from_handle! {
     crate::PciDev => |h| crate::PciDev(Device(h)),
     crate::AcpiDev => |h| crate::AcpiDev(Device(h)),
     crate::PartitionDev => |h| crate::PartitionDev(Device(h)),
-    crate::HdaDev => |h| crate::HdaDev(Device(h)),
 }
 
 /// This process's endowment table, parsed once.

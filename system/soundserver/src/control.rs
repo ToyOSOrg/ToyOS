@@ -37,22 +37,12 @@ use crate::volume::{self, VolumeClient};
 /// pipe ends per client).
 pub(crate) const MAX_CONTROL_CLIENTS: usize = 63;
 
-/// The widest control payload soundserver decodes, **plus one**.
-///
-/// `StreamOpenRequest` is the only payload wider than a bare signal. The `+ 1`
-/// is what keeps an over-long frame a refusal rather than a truncation, and it
-/// is the one behaviour the hand-written buffer this replaced had that the
-/// SDK's does not: `FrameRx` keeps `min(declared, N)` bytes, so with `N` equal
-/// to the struct, a client declaring a hundred bytes of `MSG_STREAM_OPEN` would
-/// report exactly the struct's width and open a stream from its first eight.
-/// One byte of slack makes that client report one more than the struct instead,
-/// which [`classify`]'s exact-width guard refuses by name. Nothing legitimate
-/// reaches it — the SDK sends the struct — so the byte costs a byte of stack
-/// and buys back a refusal.
-const MAX_KEPT_PAYLOAD: usize = core::mem::size_of::<StreamOpenRequest>() + 1;
+/// The widest control payload soundserver decodes: `StreamOpenRequest` is
+/// the only payload wider than a bare signal.
+const MAX_PAYLOAD: usize = core::mem::size_of::<StreamOpenRequest>();
 
 const _: () = assert!(
-    core::mem::size_of::<StreamSetVolume>() < MAX_KEPT_PAYLOAD,
+    core::mem::size_of::<StreamSetVolume>() <= MAX_PAYLOAD,
     "a control payload wider than the frame buffer would be refused as malformed",
 );
 
@@ -64,15 +54,7 @@ const _: () = assert!(
 /// again: one client parking a partial header would wedge accept and
 /// volume/close/disconnect handling for every other client (the mix thread is
 /// unaffected either way). The doctrine is `system/CLAUDE.md`'s.
-///
-/// A client may declare anything up to `ipc::MAX_FRAME_LEN`; the excess past
-/// [`MAX_KEPT_PAYLOAD`] is counted down and discarded rather than waited for, so
-/// the connection stays framed whatever a peer declares — the SDK's rule, which
-/// the compositor states too (`compositor::client::MAX_KEPT_PAYLOAD`). What such
-/// a frame is *worth* is [`classify`]'s answer rather than this type's: it
-/// arrives reporting exactly `MAX_KEPT_PAYLOAD` bytes, one more than any payload
-/// here is wide, and is refused there.
-type ControlRx = ipc::FrameRx<MAX_KEPT_PAYLOAD>;
+type ControlRx = ipc::FrameRx<MAX_PAYLOAD>;
 
 /// What one framed control message asks for, decided before anything is done.
 ///
@@ -98,14 +80,6 @@ enum Control {
 }
 
 fn classify(msg_type: u32, payload_len: usize, stream_idx: Option<usize>) -> Control {
-    // **A frame wider than anything this server decodes is a violation whatever
-    // its type**, and this is where the buffer this replaced refused it — at the
-    // header, before the type was looked at. `FrameRx` reports an over-long
-    // frame as `MAX_KEPT_PAYLOAD` exactly (see that constant's `+ 1`), so one
-    // comparison is the whole of that refusal.
-    if payload_len >= MAX_KEPT_PAYLOAD {
-        return Control::Violation;
-    }
     match (msg_type, stream_idx) {
         (MSG_STREAM_OPEN, None) if payload_len == core::mem::size_of::<StreamOpenRequest>() => {
             Control::Open
@@ -281,7 +255,7 @@ pub(crate) fn control_thread(
                 // The payload travels with the frame instead of being read off
                 // the connection during dispatch: the read side is finished before
                 // anything below acts on the message.
-                let mut payload = [0u8; MAX_KEPT_PAYLOAD];
+                let mut payload = [0u8; MAX_PAYLOAD];
                 payload[..payload_len].copy_from_slice(clients[i].rx.payload(payload_len));
                 match classify(msg_type, payload_len, clients[i].stream_idx) {
                     Control::Open => {
@@ -435,25 +409,10 @@ mod tests {
         }
 
         // Close is a bare signal: it needs a stream and it ignores whatever a
-        // client chose to attach to it, up to the width the frame buffer keeps.
+        // client chose to attach to it, up to the widest payload a frame holds.
         assert_eq!(classify(MSG_STREAM_CLOSE, 0, Some(3)), Control::Close { idx: 3 });
         assert_eq!(classify(MSG_STREAM_CLOSE, OPEN, Some(3)), Control::Close { idx: 3 });
         assert_eq!(classify(MSG_STREAM_CLOSE, 0, None), Control::Violation);
-
-        // **The over-long frame, which is the one refusal the SDK's reader does
-        // not make for us.** A peer that declares more than any payload here is
-        // wide is refused whatever type it names, because `FrameRx` reports the
-        // excess as exactly `MAX_KEPT_PAYLOAD` — this is the header check the
-        // hand-written buffer used to do, kept.
-        for kind in [MSG_STREAM_OPEN, MSG_STREAM_SET_VOLUME, MSG_STREAM_CLOSE] {
-            for stream_idx in [None, Some(3)] {
-                assert_eq!(
-                    classify(kind, MAX_KEPT_PAYLOAD, stream_idx),
-                    Control::Violation,
-                    "an over-long {kind} frame must be refused, not truncated into a message",
-                );
-            }
-        }
 
         // `inspect` is a bare header, and only on a connection that carries no
         // stream: a stream's control connection is the stream's.

@@ -8,12 +8,13 @@ opened: 2026-08-02
 
 The owner's target is that `virtio` does not appear anywhere in the kernel. The
 strongest check on it is not the driver files but the ABI: no syscall name may
-carry a NIC, GPU or audio device operation. `rg '^pub const SYS_(NIC|GPU|AUDIO)_'
+carry a NIC, GPU or audio device operation. `rg '^pub const SYS_(NIC|GPU|AUDIO|HDA)_'
 sdk/abi/src/syscall.rs` is the check, and it finds none: the three `SYS_NIC_*`
 names went with the virtio NIC driver, which is `system/netstack/src/virtio_net.rs`
-now, and the four `SYS_GPU_*` names with virtio-gpu's, which is the
-compositor's (`system/compositor/virtio-gpu`). The kernel's virtio code left is
-its console's.
+now, the four `SYS_GPU_*` names with virtio-gpu's, which is the
+compositor's (`system/compositor/virtio-gpu`), and `SYS_HDA_BIND` with the
+kernel's HDA stub. The kernel's virtio code left is its console's, and it
+drives no audio hardware.
 
 **Ordering ruling, and it is not negotiable: the IOMMU lands first and
 completely, interrupt remapping included, and no driver leaves the kernel before
@@ -31,15 +32,16 @@ is not built.
 
 What is left of the staged work:
 
-1. **HDA, re-scoped.** `drivers/hda.rs` brings its device up and gates
-   soundserver's register access. It leaves when soundserver claims the
-   function as `pci`, as it does its virtio-sound function, retiring the
-   `hda-audio` class and its arms of `SYS_DEVICE_REG_READ`/`WRITE`. HDA
-   leaving feeds soundserver's DLL from a claim's record on every machine, so
-   that diff lands
-   `issues/soundservers-virtio-clock-can-take-a-period-one-notification-early.md`'s
-   exit. GOP stays: it is memory the loader hands over, and the panic console
-   paints it.
+1. Done for HDA: soundserver claims the function as `pci:04:03:00` and
+   drives it whole (`system/soundserver/hda/src/controller.rs`) — controller
+   reset, CORB/RIRB, the stream and its descriptor list in the claim's grant,
+   its interrupt as the claim's record. The `hda-audio` class,
+   `SYS_HDA_BIND`, `SYS_DEVICE_REG_WRITE` and the kernel's HDA vector are
+   gone; `SYS_DEVICE_REG_READ` reads a PCI claim's config space alone. Every
+   machine's DLL is clocked by a claim's record, and a period read before its
+   record's message landed waits for the next record's time (`Dll::update`'s
+   `clocked`). GOP stays: it is memory the loader hands over, and the panic
+   console paints it.
    A virtio holder stands on `toyos-virtio`, which walks the capability list
    too. Before a client ends its device on `UsedRefusal::Written` for a chain
    the device only reads, whose bound is 0, what QEMU's device reports as

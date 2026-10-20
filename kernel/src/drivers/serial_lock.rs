@@ -1,7 +1,7 @@
 //! The console backend's one lock: a word that only the [`Held`] a won
 //! exchange returns ever clears, by its drop. A lost `try_lock` builds no
 //! [`Held`], so it can never release the lock another CPU holds.
-//! A fatal path's hold names its CPU ([`BackendLock::seize`]): a fatal path
+//! A fatal path's hold names its CPU ([`BackendLock::try_seize`]): a fatal path
 //! that CPU enters on top of it finds the lock its own, where waiting would
 //! wait for a frame that never runs again, and a burst it enters is refused.
 //! Of the kernel it names only `crate::arch::cpu::hardware_id`, which
@@ -33,14 +33,11 @@ pub struct Held<'a> {
     lock: &'a BackendLock,
 }
 
-/// What a fatal path's [`BackendLock::seize`] came back with.
+/// What a fatal path's [`BackendLock::try_seize`] came back with.
 pub enum Seized<'a> {
-    /// Free, or let go of inside the bound.
     Taken(Held<'a>),
     /// This CPU's own fatal path holds it, underneath the one asking.
     Reentered,
-    /// Another holder kept it through every try.
-    Expired,
 }
 
 impl BackendLock {
@@ -91,30 +88,17 @@ impl BackendLock {
         }
     }
 
-    /// The lock for the fatal path running on this CPU, asked for at most
-    /// `tries` times: nothing on that path may wait for ever.
-    pub fn seize(&self, tries: u64) -> Seized<'_> {
+    /// The lock for the fatal path running on this CPU, asked for once:
+    /// `None` while another holder has it.
+    pub fn try_seize(&self) -> Option<Seized<'_>> {
         let mine = fatal_here();
-        within(tries, || match self.word.compare_exchange(FREE, mine, Ordering::Acquire, Ordering::Relaxed) {
+        match self.word.compare_exchange(FREE, mine, Ordering::Acquire, Ordering::Relaxed) {
             Ok(_) => Some(Seized::Taken(Held { lock: self })),
             // Only this CPU stores `mine`, so seeing it needs no edge.
             Err(word) if word == mine => Some(Seized::Reentered),
             Err(_) => None,
-        })
-        .unwrap_or(Seized::Expired)
-    }
-}
-
-/// `attempt` until it answers, or `tries` times: the one bounded wait for a
-/// console lock.
-pub fn within<T>(tries: u64, mut attempt: impl FnMut() -> Option<T>) -> Option<T> {
-    for _ in 0..tries {
-        if let Some(answer) = attempt() {
-            return Some(answer);
         }
-        spin_loop();
     }
-    None
 }
 
 impl Drop for Held<'_> {

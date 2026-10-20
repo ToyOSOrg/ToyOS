@@ -150,11 +150,17 @@ impl Virtio {
                 None => say!("virtio-sound: device event {:#x} data={}", event.code, event.data),
             })
             .unwrap_or_else(|why| panic!("soundserver: virtio-sound cannot be driven on — {why}"));
-        let (mask, record) = self
+        let record = record?;
+        let played = self
             .sound
-            .played(record)
+            .played(Some(record.count))
             .unwrap_or_else(|why| panic!("soundserver: virtio-sound cannot be driven on — {why}"))?;
-        Some(Completion { mask, first_nanos: record.first_nanos, last_nanos: record.last_nanos })
+        Some(Completion {
+            mask: played.mask,
+            first_nanos: record.first_nanos,
+            last_nanos: record.last_nanos,
+            clocked: played.clocked,
+        })
     }
 
     /// Put period `idx` on the wire: its PCM descriptor is a whole period.

@@ -2,13 +2,13 @@
 //! panel: it holds the panel for [`toyos_tco::PANIC_BOUND_MS`] and then returns
 //! the machine to firmware.
 //!
-//! **The bound is carried in counter ticks, not nanoseconds** (`cpu::counter`:
-//! the TSC, the generic timer's count). A panic may land before `clock::init`,
-//! where the calibrated clock reads zero for every interval; the tick count
-//! comes from the frequency the CPU states instead (CPUID, `CNTFRQ_EL0`), and
-//! both phases then compare the same counter against the same unit. A machine
-//! that states no frequency and has no calibrated clock cannot time anything,
-//! and the arm line says so instead of resetting on a guess.
+//! **The bound is carried in `cpu::counter` ticks, not nanoseconds.** A panic
+//! may land before `clock::init`, where the calibrated clock reads zero for
+//! every interval; the tick count comes from the frequency the CPU states
+//! instead (`cpu::stated_counter_hz`), and both phases then compare the same
+//! counter against the same unit. A machine that states no frequency and has no
+//! calibrated clock cannot time anything, and the arm line says so instead of
+//! resetting on a guess.
 
 use crate::arch::cpu;
 use crate::drivers::serial;
@@ -78,7 +78,7 @@ const HELD: &str = "panic: holding this panel";
 /// The bound in counter ticks from now, and which clock said so.
 fn deadline(bound: Budget) -> Option<(u64, Source)> {
     if crate::clock::calibrated() {
-        return Some((crate::clock::tsc_deadline(bound.nanos()), Source::Calibrated));
+        return Some((crate::clock::counter_deadline(bound.nanos()), Source::Calibrated));
     }
     let hz = crate::arch::cpu::stated_counter_hz()?;
     // Nanoseconds first, so a bound under a second is not rounded to nothing.

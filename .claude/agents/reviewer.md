@@ -30,17 +30,11 @@ Review comments strictly, including length. Require deletion of false, stale, re
 
 ## Tests and evidence
 
-Apply root's testing policy without adding another test hierarchy here. Ask what each test establishes and whether types or a host unit/module test already establish it. A malformed input from another program is still tested directly at the receiver's boundary. Do not demand a two-process survival test for that behavior. Userland application scenarios do not become good tests merely by running nightly.
+Apply root's testing policy. For each material behavioral claim, ask whether the evidence establishes it and whether types, inspection or a cheaper test suffice. If evidence is missing, name the precise gap and the cheapest sufficient check. Inspect the command, exit code, log, tested revision and target; assess whether intervening edits could invalidate reused evidence. Distinguish measured results, inferences and proposals. Markdown-only instruction changes need a consistency review, not an OS build.
 
-Hardware or kernel integration tests must explain why host tests cannot establish the behavior and declare their metal machines or QEMU configurations. Relevant integration checks precede the code PR; the broad matrix is nightly. Do not require a full guest suite or a metal boot for every PR revision. Grouping compatible tests into shared boots is desirable.
+Check that tests are hermetic, deterministic and focused on one claim, and that integration tests explain why they need their environment and declare supported targets. Judge tests and negative controls by the defect they can expose, not their presence on a checklist. When removing a test, account for the behavior it checked and whether a cheaper test holds it or the test itself was invalid or unnecessary. Assess an unrelated failure's claimed independence before accepting it as non-blocking.
 
-Inspect the command, exit code, log, tested revision and target for every material behavioral claim. Evidence may come from an earlier revision when the intervening changes cannot invalidate it and the PR explains why. Comment or naming edits do not alone warrant another integration run. Markdown-only instruction changes need a consistency review, not an OS build.
-
-Request a negative control only where a defect would otherwise land unseen, and an independent oracle where one exists. Name the precise missing evidence and the cheapest way to obtain it. Do not demand a runtime test for a property the type system enforces. Distinguish a measured result, an inference and a proposed design.
-
-An unrelated failure can be recorded without blocking the branch once its independence is established. Do not accept rerunning until green or deleting a valid failing test to hide a regression. When removing a test, account for the behavior it checked and whether a cheaper test holds it or the test itself was invalid or unnecessary.
-
-A test is hermetic, deterministic and focused on one claim. QEMU timing is only a hang ceiling; hardware timing and audio belong on metal. Exploratory benchmarks are evidence, not automatic suite rows. Hardware oracles come from vendor specifications or independent evidence checked against them. Linux may be a host platform or a black-box measurement source; readings captured under it stay in evidence, not committed test oracles. Host differential tests against published interfaces are allowed; the specification settles disagreement.
+Hardware oracles come from vendor specifications or independent evidence checked against them. Linux may be a host platform or a black-box measurement source; readings captured under it stay in evidence, not committed test oracles. Host differential tests against published interfaces are allowed; the specification settles disagreement.
 
 ## Repository and operational checks
 
@@ -50,9 +44,8 @@ A test is hermetic, deterministic and focused on one claim. QEMU timing is only 
 - Host tools beyond Rust and QEMU are declared in `issues/the-build-runs-host-tools-outside-rust-and-qemu.md`. No host-only binaries or ToyOS-maintained Python, Perl or shell. Fork changes and every consumed pin land together under `implementer.md`'s fork rules.
 - A package has a meaningful `description` and is accounted for by the workspace. Member-level `[profile]` and `[patch]` sections are invalid. Changed features and configuration arms must be covered by `build/clippy.rs`. Issue edits obey `issues/README.md`.
 - Preserve CI security: actions are pinned by full commit hash or valid local path; runners are GitHub-hosted. No privileged triggers that execute untrusted code as main. Only main publishes caches other refs restore; nightly release alone receives `contents: write`. Do not bypass required checks, hide failures with `continue-on-error`, or introduce a write-capable cache on a PR.
-- Preserve the current host-cache contract unless the task changes it explicitly: nightly host writes, CI host reads, using `build/cicache.rs` paths and driver on the same runner with matching debug settings. No combined `actions/cache`, extra commands around the designated CI driver, or environment overrides that invalidate cache provenance. Scheduling policy changes require explicit workflow work, not silently skipped required checks.
+- For workflow, build or harness changes, read `build/CLAUDE.md` and `tests/CLAUDE.md` for their operational contracts, including CI cache provenance and corpus membership.
 - An actuator-controlled kernel static is accessed only under its guard or in actuator-only code. A `cfg(not(feature = ...))` arm ships and is not an exemption.
-- `tests/corpus/` contains only the pinned TinyCC corpus and its licence; changed membership updates the licence count, and `46_grep.c` stays excluded. `NOTICE` accounts for committed third-party files.
 - Changed or removed commands, flags, steps and documents have their instruction references updated in the same change. For deleted documents search both name and path outside `issues/`. Replace contradictory instruction rules rather than appending exceptions.
 
 ## Findings and verdict
