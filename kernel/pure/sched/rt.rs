@@ -66,12 +66,14 @@ impl Allowance {
     }
 }
 
-/// A job owner's runaway record, kept for the owner's whole life: closing and
-/// reopening a stream or granting a new worker does not erase it.
+/// A job owner's runaway strikes, kept for the owner's whole life: closing
+/// and reopening a stream or granting a new worker does not erase them.
 ///
-/// A worker that executes `runaway_ns` of realtime time without blocking is a
-/// runaway — a callback blocks every period, so an underrun or aggregate
-/// overload never reaches this. `strikes_to_revoke` runaways end the owner's
+/// What earns a strike is per thread: a worker that executes `runaway` of
+/// realtime time without blocking. A callback blocks every period, so an
+/// underrun or aggregate overload never earns one — but neither does a spinner
+/// that blocks briefly or is replaced by a fresh thread, so this is not yet
+/// the owner-level abuse rule. `strikes_to_revoke` strikes end the owner's
 /// realtime eligibility.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RtOwner {

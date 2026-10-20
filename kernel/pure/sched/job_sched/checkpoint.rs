@@ -2,13 +2,14 @@
 //! feasible weighted sharing on a multicore machine, and does the realtime
 //! ceiling protect ordinary progress?
 //!
-//! Each scenario prints its table (`cargo test -p kernel --lib --features
-//! sched-check -- checkpoint --nocapture`). "Bounded" means no persistent
-//! drift: a job's error over the longest window is within its error over a
-//! short one plus the EEVDF lag bound of the requests involved, so it does not
-//! grow with the window. The tests before the cross-CPU one run the plain
-//! candidate (`Params::CANDIDATE`, per-CPU lag only); its `counterexample_`
-//! tests assert the drift that makes cross-CPU fairness necessary.
+//! Each test asserts and prints its table (`cargo test -p kernel --lib
+//! --features sched-check -- checkpoint --nocapture`). "Bounded" means no
+//! persistent drift: a job's error over the longest window is within its error
+//! over a short one plus the EEVDF lag bound of the requests involved. The
+//! tests before the cross-CPU ones run the plain candidate
+//! (`Params::CANDIDATE`, per-CPU lag only); its `counterexample_` tests assert
+//! the drift that makes cross-CPU fairness necessary. Every figure is the
+//! model's, for the scenario that ran: not a hardware guarantee.
 
 use super::sim::*;
 use super::*;
@@ -74,67 +75,6 @@ fn weighted_builds_split_by_weight() {
     assert_bounded(&sim, 1, "weighted");
 }
 
-/// Threads that sleep 0.1 ms after every 1 ms of CPU. While one sleeps its
-/// CPU's time goes to the other job there, where the fluid share gives it to
-/// the sleeper's siblings elsewhere; raising their groups' weights recovers
-/// only part of it, and the job trails by about 1% for as long as it runs.
-/// Measured, not asserted: the per-CPU candidate drifts here, and
-/// `cross_cpu_lag_bounds_every_scenario_on_every_shape` bounds the same case.
-#[test]
-fn short_sleeps_are_measured() {
-    let mut sim = Sim::new(flat(4), Params::CANDIDATE);
-    let s = sim.job(WEIGHT_UNIT);
-    let h = sim.job(WEIGHT_UNIT);
-    for i in 0..4 {
-        sim.thread(s, Work::Duty { run: MS, sleep: 100 * US }, CpuId(i), false);
-    }
-    for i in 0..8 {
-        sim.thread(h, Work::Hog, CpuId(i % 4), false);
-    }
-    sim.run_until(SPAN);
-    println!("{}", sim.report("S4 duty 1 ms / 0.1 ms beside H8 hogs on 4", Nanos::ZERO, &WINDOWS));
-}
-
-/// Placement noise beyond what balancing asks for: a waiting thread moved to
-/// a random CPU every millisecond. Measured, not asserted — the error is the
-/// load imbalance the moves create, which per-CPU arithmetic cannot correct.
-#[test]
-fn migration_churn_is_measured() {
-    for duty in [false, true] {
-        let mut sim = Sim::new(flat(4), Params::CANDIDATE);
-        let a = sim.job(WEIGHT_UNIT);
-        let b = sim.job(WEIGHT_UNIT);
-        for i in 0..8 {
-            sim.thread(a, Work::Hog, CpuId(i % 4), false);
-        }
-        let work = if duty { Work::Duty { run: 2 * MS, sleep: 300 * US } } else { Work::Hog };
-        for i in 0..4 {
-            sim.thread(b, work, CpuId(i % 4), false);
-        }
-        sim.churn(MS, 1);
-        sim.run_until(SPAN);
-        println!("{}", sim.report(&format!("A8 hogs, B4 {work:?}, churn every 1 ms"), Nanos::ZERO, &WINDOWS));
-    }
-}
-
-/// Every thread of three jobs starts on CPU 0. Balancing spreads them, but
-/// thread weights of 1/8, 1/2 and 1 of a job weight cannot make the three
-/// shared CPUs' loads equal, and the job on the lighter CPUs keeps the
-/// difference. Measured, not asserted: another instance of the
-/// counterexamples below.
-#[test]
-fn uneven_placement_is_measured() {
-    let mut sim = Sim::new(flat(4), Params::CANDIDATE);
-    let jobs = [(sim.job(WEIGHT_UNIT), 8), (sim.job(WEIGHT_UNIT), 2), (sim.job(WEIGHT_UNIT), 1)];
-    for (j, n) in jobs {
-        for _ in 0..n {
-            sim.thread(j, Work::Hog, CpuId(0), false);
-        }
-    }
-    sim.run_until(SPAN);
-    println!("{}", sim.report("A8 B2 C1, all from CPU 0", Nanos::ZERO, &WINDOWS));
-}
-
 /// **Counterexample.** Three single-thread jobs of equal weight on two CPUs.
 /// Each is entitled to 2/3 of a CPU; per-CPU queues give one of them a CPU of
 /// its own for as long as no CPU idles, and no load-driven move can help: any
@@ -177,7 +117,7 @@ fn counterexample_a_fair_and_an_unfair_placement_have_the_same_loads() {
 type Scenario = (&'static str, fn(&mut Sim, u32));
 type Shape = (&'static str, fn() -> crate::sched::topology::Topology);
 
-fn scaled_scenarios() -> [Scenario; 9] {
+fn scaled_scenarios() -> [Scenario; 8] {
     [
         ("m+1 single-thread jobs", |sim, m| {
             for c in 0..=m {
@@ -222,15 +162,6 @@ fn scaled_scenarios() -> [Scenario; 9] {
         ("2m + m hogs, churn every 10 ms", |sim, m| two_jobs(sim, m, Work::Hog, 10 * MS)),
         ("2m hogs + m duty 2/0.3 ms, churn every 10 ms", |sim, m| two_jobs(sim, m, DUTY, 10 * MS)),
         ("2m hogs + m duty 2/0.3 ms, churn every 1 ms", |sim, m| two_jobs(sim, m, DUTY, MS)),
-        ("m duty 1/0.1 ms + 2m hogs", |sim, m| {
-            let (s, h) = (sim.job(WEIGHT_UNIT), sim.job(WEIGHT_UNIT));
-            for i in 0..m {
-                sim.thread(s, Work::Duty { run: MS, sleep: 100 * US }, CpuId(i), false);
-            }
-            for i in 0..2 * m {
-                sim.thread(h, Work::Hog, CpuId(i % m), false);
-            }
-        }),
         ("2m (weight 2) + 2m (weight 1)", |sim, m| {
             let (a, b) = (sim.job(2 * WEIGHT_UNIT), sim.job(WEIGHT_UNIT));
             for i in 0..2 * m {
@@ -255,56 +186,96 @@ fn two_jobs(sim: &mut Sim, m: u32, work: Work, churn: u64) {
 }
 
 /// **Cross-CPU fairness** (`Params::cross_cpu_lag`), on every scenario above
-/// at four CPUs and both benches' shapes. A job's normalized service departs
-/// from the fluid share by at most `D = move_lead + fairness_period +
-/// 2·lag_bound` (60 ms per unit of weight), so its error over any window, the
-/// difference of two such departures, is at most `2D`, whatever the window:
+/// at four CPUs and both benches' shapes, with the rotating partner policy
+/// (each CPU compares itself with one other CPU per `fairness_period`; all
+/// partners are run beside it for comparison).
 ///
-/// - the fluid share lies between the least- and most-served uncapped jobs, so
-///   a job departs from it by no more than the largest lead between two jobs;
-/// - jobs that share a CPU are ordered there by normalized service, so their
-///   lead is held to the clamped group lag;
-/// - jobs that share none are evened by moves, which start once one leads by
-///   `move_lead`, at most one per CPU per `fairness_period`, during which the
-///   lead grows by at most a CPU's worth.
+/// **The ceiling is empirical.** 120 ms per unit of weight, at every window
+/// from 100 ms to 8 s, for these scenarios. It is not a derived bound, and it
+/// depends on what they share:
+/// - widths of 4, 8 and 16 CPUs;
+/// - weights within 2:1;
+/// - the partner policy;
+/// - the simulator's stand-in balancer, which keeps loads roughly even;
+/// - leads that grow by a few ms per ms at most. Two jobs of many threads on
+///   disjoint CPUs can grow theirs faster, and a job spread over `k` CPUs can
+///   hold `k·lag_bound`.
 ///
-/// The cost is printed: placement changes and migrations per second.
+/// The cost is printed: placement changes and migrations per second, beside
+/// the scenarios' own random migrations.
 #[test]
-fn cross_cpu_lag_bounds_every_scenario_on_every_shape() {
+fn cross_cpu_lag_stays_within_its_ceiling_on_every_scenario_and_shape() {
     let p = Params::DEFAULT;
-    let bound = 2.0 * (p.move_lead + p.fairness_period + 2 * p.lag_bound) as f64 / MS as f64;
+    let ceiling = 120.0;
     let shapes: [Shape; 3] = [("flat4", || flat(4)), ("t14", t14), ("amd", amd)];
     let mut worst: f64 = 0.0;
-    for (shape, topo) in shapes {
-        for (name, setup) in scaled_scenarios() {
-            let mut sim = Sim::new(topo(), p);
-            let m = sim.topo.cpus() as u32;
-            setup(&mut sim, m);
-            sim.run_until(SPAN);
-            let jobs = sim.samples[0].1.len();
-            let mut line = format!("{shape:<6} {name:<46}");
-            for w in [100 * MS, 1000 * MS, 8000 * MS] {
-                let e = (0..jobs).map(|j| sim.window_error(j, w, Nanos::ZERO)).fold(0.0, f64::max);
-                line.push_str(&format!(" err@{}ms {e:>6.1}", w / MS));
-            }
-            let secs = SPAN.0 as f64 / 1e9;
-            line.push_str(&format!(
-                "  changes/s {:>6.1} migrations/s {:>7.1}",
-                sim.fairness_moves as f64 / secs,
-                sim.migrations as f64 / secs
-            ));
-            println!("{line}");
-            for (j, job) in sim.jobs().iter().enumerate() {
-                let scale = (sim.weight(*job) as f64 / WEIGHT_UNIT as f64).max(1.0);
-                for w in [100 * MS, 1000 * MS, 4000 * MS, 8000 * MS] {
-                    let e = sim.window_error(j, w, Nanos::ZERO);
-                    worst = worst.max(e / scale);
-                    assert!(e <= bound * scale, "{shape} {name}: job {j} {e:.1} ms over {} ms", w / MS);
+    let mut over = Vec::new();
+    for partners in [Partners::Rotating, Partners::All] {
+        for (shape, topo) in shapes {
+            for (name, setup) in scaled_scenarios() {
+                let mut sim = Sim::new(topo(), p);
+                sim.partners = partners;
+                let m = sim.topo.cpus() as u32;
+                setup(&mut sim, m);
+                sim.run_until(SPAN);
+                let jobs = sim.samples[0].1.len();
+                let mut line = format!("{partners:?} {shape:<6} {name:<46}");
+                for w in [100 * MS, 1000 * MS, 8000 * MS] {
+                    let e = (0..jobs).map(|j| sim.window_error(j, w, Nanos::ZERO)).fold(0.0, f64::max);
+                    line.push_str(&format!(" err@{}ms {e:>6.1}", w / MS));
+                }
+                let secs = SPAN.0 as f64 / 1e9;
+                line.push_str(&format!(
+                    "  changes/s {:>6.1} migrations/s {:>7.1}",
+                    sim.fairness_moves as f64 / secs,
+                    sim.migrations as f64 / secs
+                ));
+                println!("{line}");
+                if partners != Partners::Rotating {
+                    continue;
+                }
+                for (j, job) in sim.jobs().iter().enumerate() {
+                    let scale = (sim.weight(*job) as f64 / WEIGHT_UNIT as f64).max(1.0);
+                    for w in [100 * MS, 1000 * MS, 4000 * MS, 8000 * MS] {
+                        let e = sim.window_error(j, w, Nanos::ZERO);
+                        worst = worst.max(e / scale);
+                        if e > ceiling * scale {
+                            over.push(format!("{shape} {name}: job {j} {e:.1} ms over {} ms", w / MS));
+                        }
+                    }
                 }
             }
         }
     }
-    println!("worst error per unit of weight {worst:.1} ms against a bound of {bound:.0} ms");
+    println!("rotating: worst error per unit of weight {worst:.1} ms against a ceiling of {ceiling:.0} ms");
+    assert!(over.is_empty(), "{}", over.join("\n"));
+}
+
+/// **Counterexample for cross-CPU fairness.** Four threads that run 1 ms and
+/// sleep 0.1 ms, beside eight hogs, on four CPUs. The sleepers fall into step,
+/// so the job's runnable count often dips below the two CPUs it is entitled to
+/// without reaching zero. The fluid share gives the hogs the difference; the
+/// per-job counter cannot tell a demand dip from a placement deficit, so it
+/// repays the dip afterwards, and the job is over-served by about 1.25% for as
+/// long as it runs. Telling the two apart needs the job's entitlement, which
+/// depends on every job's demand: a global quantity. A job whose whole demand
+/// stops (every thread asleep) is placed at its standing on return and is
+/// not repaid.
+#[test]
+fn counterexample_a_dip_below_the_share_is_repaid_later() {
+    let mut sim = Sim::new(flat(4), Params::DEFAULT);
+    let s = sim.job(WEIGHT_UNIT);
+    let h = sim.job(WEIGHT_UNIT);
+    for i in 0..4 {
+        sim.thread(s, Work::Duty { run: MS, sleep: 100 * US }, CpuId(i), false);
+    }
+    for i in 0..8 {
+        sim.thread(h, Work::Hog, CpuId(i % 4), false);
+    }
+    sim.run_until(SPAN);
+    println!("{}", sim.report("S4 duty 1 ms / 0.1 ms beside H8 hogs on 4, cross-CPU", Nanos::ZERO, &WINDOWS));
+    let over_served = share(&sim, s) - sim.ideal[&s] / sim.now.0 as f64;
+    assert!(over_served > 0.01, "the dip is no longer repaid: {over_served:.4} CPUs");
 }
 
 fn rt_machine(
@@ -347,10 +318,12 @@ fn rt_report(title: &str, sim: &Sim, ordinary: [JobId; 2], owners: &[JobId]) {
     let floors: Vec<_> = k.iter().map(|&k| sim.ordinary_floor(k) / US).collect();
     let peaks: Vec<_> = k.iter().map(|&k| sim.rt_peak(k) / US).collect();
     let fallback: f64 = owners.iter().map(|m| sim.got[m].0 as f64).sum::<f64>() / sim.now.0 as f64;
+    let spare = sim.spare_on.iter().sum::<u64>() as f64 / sim.now.0 as f64;
+    let streak = sim.rt_streak_max.iter().max().copied().unwrap_or(0) / US;
     println!("{title}");
-    println!("  over 1/2/4/20 intervals: ordinary floor {floors:?} us, realtime peak {peaks:?} us");
+    println!("  over 1/2/4/20 intervals: ordinary floor {floors:?} us, realtime peak {peaks:?} us; longest realtime run {streak} us");
     println!(
-        "  CPUs: ordinary jobs {:.3} {:.3}, workers realtime {:.3}, workers ordinary {fallback:.3}; owners revoked {}/{}",
+        "  CPUs: ordinary jobs {:.3} {:.3}, workers realtime {:.3}, ordinary {fallback:.3}, spare {spare:.3}; owners revoked {}/{}",
         sim.got[&ordinary[0]].0 as f64 / sim.now.0 as f64,
         sim.got[&ordinary[1]].0 as f64 / sim.now.0 as f64,
         sim.rt_on.iter().sum::<u64>() as f64 / sim.now.0 as f64,
@@ -360,9 +333,10 @@ fn rt_report(title: &str, sim: &Sim, ordinary: [JobId; 2], owners: &[JobId]) {
 }
 
 /// No CPU runs more realtime than its allowance in any run of intervals,
-/// however the workers behave: spinning in place, moved to a fresh CPU every
-/// 0.5 ms, or overrunning every exhaustion by 200 µs (a non-preemptible
-/// section), whose excess is repaid in the next interval.
+/// however the workers behave: spinning in place, moved every 0.5 ms to
+/// another CPU (any queued thread, of any band), or overrunning every
+/// exhaustion by 200 µs (a non-preemptible section), whose excess is repaid in
+/// the next interval.
 #[test]
 fn the_ceiling_bounds_realtime_on_every_cpu() {
     let p = Params { strikes_to_revoke: u32::MAX, ..Params::DEFAULT };
@@ -376,6 +350,31 @@ fn the_ceiling_bounds_realtime_on_every_cpu() {
         for (c, &rt) in sim.rt_on.iter().enumerate() {
             assert!(rt <= intervals * p.rt_budget + overrun, "{title}: cpu{c} ran {rt} ns realtime");
         }
+    }
+}
+
+/// Owner decision J2: once a CPU's allowance is exhausted its workers run
+/// only on spare capacity, so in every interval with ordinary work runnable
+/// throughout, that work gets all of the interval the allowance leaves, less
+/// any overrun; and realtime never runs continuously longer than two budgets
+/// (one interval's end and the next one's start) plus the overrun. Holds for
+/// never-revoked spinners in place, moved every 0.5 ms, overrunning by 200 µs,
+/// and for legitimate overload.
+#[test]
+fn ordinary_work_gets_every_intervals_remainder() {
+    let p = Params { strikes_to_revoke: u32::MAX, ..Params::DEFAULT };
+    let periodic = Work::Periodic { period: 5_333 * US, work: 1_200 * US };
+    for (title, per_cpu, work, hop, overrun) in [
+        ("spinners", 1, Work::Hog, false, 0),
+        ("moved spinners", 1, Work::Hog, true, 0),
+        ("spinners overrunning 200 us", 1, Work::Hog, false, 200 * US),
+        ("four 1.2 ms / 5.333 ms callbacks per CPU", 4, periodic, false, 0),
+    ] {
+        let (sim, ordinary, owners, _) = rt_machine(p, per_cpu, work, hop, overrun);
+        rt_report(&format!("J2: {title}"), &sim, ordinary, &owners);
+        assert!(sim.ordinary_floor(1) >= p.rt_interval - p.rt_budget - overrun, "{title}: interval floor");
+        let streak = sim.rt_streak_max.iter().max().copied().unwrap_or(0);
+        assert!(streak <= 2 * p.rt_budget + overrun, "{title}: realtime ran {streak} ns without a break");
     }
 }
 
@@ -423,25 +422,6 @@ fn a_runaway_owner_is_revoked() {
         let strikes = p.strikes_to_revoke as u64 * p.runaway;
         assert!(rt <= strikes + p.rt_budget, "cpu{c}: {rt} ns realtime before revocation");
     }
-}
-
-/// The plan's fallback: an exhausted worker competes under its job's ordinary
-/// share for the rest of the interval. Measured with spinners never revoked:
-/// each spinner's job holds its whole weight on its CPU, while the ordinary
-/// jobs' weights are split across four, so the spinners take most of each
-/// interval's remainder and an interval may pass with no ordinary work at all.
-/// The ordinary jobs still get their weighted part of the remainder over 20
-/// intervals, less two requests of lag.
-#[test]
-fn the_fallback_gives_a_spinner_its_jobs_share_of_the_remainder() {
-    let p = Params { strikes_to_revoke: u32::MAX, ..Params::DEFAULT };
-    let (sim, ordinary, owners, _) = rt_machine(p, 1, Work::Hog, false, 0);
-    rt_report("fallback under never-revoked spinners", &sim, ordinary, &owners);
-    // Per CPU: spinner's job at full weight, two ordinary jobs at a quarter.
-    let remainder = 20 * (p.rt_interval - p.rt_budget);
-    let ordinary_part = remainder / 3;
-    assert!(sim.ordinary_floor(20) + 2 * p.slice >= ordinary_part);
-    assert_eq!(sim.ordinary_floor(1), 0, "the finding this test records no longer holds");
 }
 
 /// **Counterexample for the owner-level abuse rule.** The runaway record

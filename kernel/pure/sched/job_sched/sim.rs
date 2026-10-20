@@ -37,6 +37,13 @@ pub enum Work {
     Periodic { period: u64, work: u64 },
 }
 
+/// Which partner CPUs each fairness step examines.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Partners {
+    Rotating,
+    All,
+}
+
 struct Load {
     job: JobId,
     work: Work,
@@ -86,6 +93,13 @@ pub struct Sim {
     /// Ordinary service per CPU, for the realtime ceiling's protection.
     pub fair_on: Vec<u64>,
     pub rt_on: Vec<u64>,
+    /// Spare-band time per CPU.
+    pub spare_on: Vec<u64>,
+    /// Per CPU, the longest stretch realtime ran without a break.
+    pub rt_streak_max: Vec<u64>,
+    rt_streak: Vec<u64>,
+    rounds: Vec<u32>,
+    pub partners: Partners,
     pub samples: Vec<(Nanos, Vec<(f64, f64)>)>,
     sample_every: u64,
     next_sample: Nanos,
@@ -169,6 +183,11 @@ impl Sim {
             ideal: BTreeMap::new(),
             fair_on: vec![0; m],
             rt_on: vec![0; m],
+            spare_on: vec![0; m],
+            rt_streak_max: vec![0; m],
+            rt_streak: vec![0; m],
+            rounds: vec![0; m],
+            partners: Partners::Rotating,
             samples: Vec::new(),
             sample_every: MS,
             next_sample: Nanos::ZERO,
@@ -240,8 +259,9 @@ impl Sim {
         self.loads.get_mut(&t).unwrap().pinned = false;
     }
 
-    /// Every `period`, move one waiting ordinary thread chosen by `seed` to
-    /// another CPU chosen by it: migration beyond what balancing asks for.
+    /// Every `period`, move one queued, not running, thread of any band chosen
+    /// by `seed` to another CPU chosen by it: migration beyond what balancing
+    /// asks for.
     pub fn churn(&mut self, period: u64, seed: u64) {
         self.churn = Some((period, seed));
         self.push(self.now.after(period), Ev::Churn);
@@ -290,7 +310,7 @@ impl Sim {
     }
 
     fn idle(&self, c: CpuId) -> bool {
-        self.s.current(c).is_none()
+        self.s.idle_for_placement(c)
     }
 
     /// The thread's home if it is idle, else the nearest idle CPU, else home.
@@ -318,7 +338,9 @@ impl Sim {
     fn resched(&mut self, c: CpuId) {
         let before = self.s.current(c).map(|r| r.0);
         let mut next = self.s.schedule(c, self.now);
-        if next.is_none() && self.steal(c) {
+        // Spare work yields to ordinary work from anywhere.
+        let spare = matches!(self.s.current(c), Some((_, Band::Spare)));
+        if (next.is_none() || spare) && self.steal(c) {
             next = self.s.schedule(c, self.now);
         }
         if next != before {
@@ -354,8 +376,22 @@ impl Sim {
         true
     }
 
+    /// Under [`Partners::Rotating`], one partner per step, rotating through
+    /// every other CPU: each CPU examines one pair per `fairness_period`, the
+    /// machine `m`. [`Partners::All`] examines `m − 1` per CPU, `m(m−1)` in all.
     fn fairness_step(&mut self, c: CpuId) {
-        let partners: Vec<CpuId> = (0..self.topo.cpus() as u32).map(CpuId).collect();
+        let m = self.topo.cpus() as u32;
+        if m < 2 {
+            return;
+        }
+        let partners: Vec<CpuId> = match self.partners {
+            Partners::All => (0..m).map(CpuId).collect(),
+            Partners::Rotating => {
+                let r = &mut self.rounds[c.0 as usize];
+                *r = *r % (m - 1) + 1;
+                vec![CpuId((c.0 + *r) % m)]
+            }
+        };
         let Some(change) = self.s.fairness_move(c, &partners) else { return };
         if change.threads.iter().flatten().any(|(t, _, _)| self.loads[t].pinned) {
             return;
@@ -432,6 +468,13 @@ impl Sim {
             for c in 0..self.topo.cpus() {
                 let cpu = CpuId(c as u32);
                 let ordinary_runnable = self.s.queued(cpu).any(|t| !self.loads[&t].rt);
+                let band_now = self.s.current(cpu).map(|r| r.1);
+                if band_now == Some(Band::Rt) {
+                    self.rt_streak[c] += dt;
+                    self.rt_streak_max[c] = self.rt_streak_max[c].max(self.rt_streak[c]);
+                } else {
+                    self.rt_streak[c] = 0;
+                }
                 if let Some((tid, band)) = self.s.current(cpu) {
                     let l = self.loads.get_mut(&tid).unwrap();
                     if l.work != Work::Hog {
@@ -451,6 +494,7 @@ impl Sim {
                             self.rt_on[c] += dt;
                             self.window_rt[c] += dt;
                         }
+                        Band::Spare => self.spare_on[c] += dt,
                     }
                 }
                 self.window_waiting[c] &= ordinary_runnable;
@@ -568,7 +612,9 @@ impl Sim {
                 let m = self.topo.cpus() as u64;
                 let from = CpuId(((seed >> 33) % m) as u32);
                 let to = CpuId(((seed >> 13) % m) as u32);
-                let waiting = self.waiting(from);
+                let running = self.s.current(from).map(|r| r.0);
+                let waiting: Vec<ThreadId> =
+                    self.s.queued(from).filter(|&t| Some(t) != running && !self.loads[&t].pinned).collect();
                 if from != to && !waiting.is_empty() {
                     let t = waiting[((seed >> 40) as usize) % waiting.len()];
                     self.s.migrate(t, to, self.now);
