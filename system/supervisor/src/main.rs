@@ -706,7 +706,7 @@ impl<'a> Service<'a> {
                 std::io::Error::other(format!("{path} no longer holds what was installed: {why}"))
             })?;
         }
-        let storage = storage_endowment(self.program, self.role, syscap, grants)?;
+        let storage = storage_endowment(self.role, syscap, grants)?;
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
         let (child, devices) = start(
@@ -3037,37 +3037,24 @@ fn guid_text(guid: [u8; 16]) -> String {
     toyos_abi::part::PartGuid(guid).write_text(&mut buf).to_string()
 }
 
-/// A storage row's arguments, claims and block connector for one start.
+/// A file server's arguments, claims and block connector for one start.
 ///
-/// A block service is told the ROOT the machine runs from, which it serves no
-/// session on. A file server is told its role, and gets a claim on every
-/// partition of its role a disk the kernel drives carries — the stick, until
-/// usbd serves it — and otherwise the partition's GUID and `block` minted for
+/// A file server is told its role, and gets a claim on every partition of its
+/// role a disk the kernel drives carries — the stick, until usbd serves it —
+/// and otherwise the partition's GUID and `block` minted for
 /// that partition alone, writing for the log and reading for the boot volume;
 /// DATA it finds by type, through `block` minted for every DATA partition,
 /// and counts with its claims. A log or boot role the loader named no
 /// partition for, a claim the kernel refuses, and a block port closed for
 /// good each refuse the start: the role is then absent, never served from
 /// memory.
-fn storage_endowment(
-    program: &Program,
-    role: Option<&str>,
-    syscap: &SysCap,
-    grants: &Grants<'_>,
-) -> Result<Extra, StartError> {
+fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>) -> Result<Extra, StartError> {
     use toyos_abi::inventory::{Record, Role};
     let mut storage = Extra::default();
-    if !is_block(program) && role.is_none() {
+    let Some(role) = role else {
         return Ok(storage);
-    }
+    };
     let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
-    if is_block(program) {
-        if let Some(root) = loaded(&records, Role::Root) {
-            storage.args.extend(["--running".to_string(), guid_text(root)]);
-        }
-        return Ok(storage);
-    }
-    let role = role.expect("checked above");
     storage.args.push(role.to_string());
     let on_kernel_disk = |pick: &dyn Fn(&toyos_abi::inventory::Partition) -> bool| -> Vec<[u8; 16]> {
         records
