@@ -157,8 +157,6 @@ Not consumers:
    - **Exit:**
      - On both benches, every row a consumer uses passes on the ISA each
        build records. That ISA is now AVX-capable state on both benches.
-       `issues/user-programs-use-avx-under-xsave.md`'s remaining exit,
-       userland threads' state, is not a gate here.
      - Parity work reads ring's, BoringSSL's and OpenSSL's perlasm or C only
        through a clean room, as root's research rule says.
      - Faster code is accepted only with stage 4's evidence for it.
