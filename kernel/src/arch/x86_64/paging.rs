@@ -857,8 +857,7 @@ impl AddressSpace {
 }
 
 /// Tables of 4 KiB leaves an unmap unlinked, which a CPU's paging-structure
-/// cache may still walk: dropped only inside `mm::Unmapped`, after its
-/// shootdown.
+/// cache may still walk: dropped only after a user-half shootdown.
 #[must_use = "freed before the shootdown, a sibling CPU may still walk these tables"]
 pub struct Detached(Vec<Box<PageTablePage>>);
 

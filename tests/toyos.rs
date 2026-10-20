@@ -4342,6 +4342,7 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Ser
     log.must_say("usbd_spare: the claim refuses its interrupt read: Io")?;
 
     let rewritten = log.must_say("usbd_spare: MSI-X entry 0's data ")?;
+    log.must_say("usbd: the claim refused its interrupt record (Io)")?;
     log.must_say("usbd_spare: usbd ended on the claim's refusal")?;
     // Refused by the unit, not delivered to a vector nobody holds: the stop's
     // census names every vector the unclaimed gate took.

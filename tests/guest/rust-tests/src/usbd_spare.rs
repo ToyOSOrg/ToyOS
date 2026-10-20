@@ -19,6 +19,9 @@
 //!   started: its No-Op's message is the unit's to refuse and record, which
 //!   puts the claim in refusal, so usbd ends on it never told of its No-Op.
 
+#[path = "spare.rs"]
+mod spare;
+
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::CommandExt;
@@ -32,7 +35,6 @@ use toyos::poller::{Poller, READABLE};
 use toyos::syscap::SysCap;
 use toyos::volatile::Window;
 use toyos::PciDev;
-use toyos_abi::inventory::{Driven, RawRecord, Record};
 use toyos_abi::syscall::{PciId, SyscallError};
 use toyos_inspect::{Value, MSG_INSPECT, MSG_SNAPSHOT, USB};
 
@@ -69,20 +71,7 @@ const PAST_THE_GRANT: u64 = 1 << 30;
 /// card the kernel does not drive, or, on a kernel that drives every one,
 /// the only one there is.
 fn claim(cap: &SysCap) -> (PciId, Result<PciDev, SyscallError>) {
-    let records: Vec<Record> =
-        cap.records(|n| vec![RawRecord::EMPTY; n]).unwrap_or_else(|why| panic!("usbd_spare: no inventory: {why:?}"));
-    let spares: Vec<_> = records
-        .into_iter()
-        .filter_map(|record| match record {
-            Record::Pci(pci) if SPARES.contains(&PciId { vendor: pci.vendor, device: pci.device }) => Some(pci),
-            _ => None,
-        })
-        .collect();
-    let left: Vec<_> = spares.iter().copied().filter(|pci| pci.driven != Driven::Kernel).collect();
-    let pci = match (left.as_slice(), spares.as_slice()) {
-        ([one], _) | ([], [one]) => *one,
-        _ => panic!("usbd_spare: no one spare controller on this machine: {spares:?}"),
-    };
+    let pci = spare::of(cap, &SPARES).expect("usbd_spare: no one spare controller on this machine");
     (PciId { vendor: pci.vendor, device: pci.device }, cap.claim_function(pci.arrival))
 }
 
@@ -137,7 +126,7 @@ impl Usbd {
     }
 
     /// Every line usbd says until it ends, bounded.
-    fn until_ended(&mut self) -> Vec<String> {
+    fn until_ended(&self) -> Vec<String> {
         let deadline = Instant::now() + SETTLE_BOUND;
         let mut said = Vec::new();
         loop {
@@ -294,7 +283,7 @@ pub fn vector(cap: &SysCap) {
     );
     let status = usbd.child.wait().expect("usbd_spare: wait for usbd");
     assert!(!status.success(), "usbd_spare: usbd ended {status:?} on a claim the unit refused");
-    println!("usbd_spare: usbd ended on the claim's refusal ({status:?}) and was never told of its No-Op");
+    println!("usbd_spare: usbd ended on the claim's refusal: it exited {status:?} and never said its No-Op completed");
 }
 
 pub fn unhanded(cap: &SysCap) {

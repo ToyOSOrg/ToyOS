@@ -7,6 +7,9 @@
 //! - no argument: the rounds.
 //! - `hold`: the child, which holds the claim it was endowed until it is killed.
 
+#[path = "../spare.rs"]
+mod spare;
+
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -15,7 +18,7 @@ use std::time::{Duration, Instant};
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
 use toyos::PciDev;
-use toyos_abi::inventory::{Arrival, Driven, RawRecord, Record};
+use toyos_abi::inventory::Arrival;
 use toyos_abi::syscall::PciId;
 
 const SELF_PATH: &str = "/system/bin/test_rs_end_returns_claims";
@@ -48,25 +51,10 @@ fn spelled(id: PciId) -> String {
     format!("pci:{:04x}:{:04x}", id.vendor, id.device)
 }
 
-/// The spare this machine has, as `usbd_spare` chooses it: the one function
-/// of a spare's card the kernel does not drive, or, on a kernel that drives
-/// every one, the only one there is. Named by its arrival, so every round
-/// claims that function and no other of its card.
+/// The spare this machine has, as `usbd_spare` chooses it, named by its
+/// arrival, so every round claims that function and no other of its card.
 fn spare(cap: &SysCap) -> (PciId, Arrival) {
-    let records: Vec<Record> =
-        cap.records(|n| vec![RawRecord::EMPTY; n]).unwrap_or_else(|why| panic!("end_returns_claims: no inventory: {why:?}"));
-    let spares: Vec<_> = records
-        .into_iter()
-        .filter_map(|record| match record {
-            Record::Pci(pci) if SPARES.contains(&PciId { vendor: pci.vendor, device: pci.device }) => Some(pci),
-            _ => None,
-        })
-        .collect();
-    let left: Vec<_> = spares.iter().copied().filter(|pci| pci.driven != Driven::Kernel).collect();
-    let pci = match (left.as_slice(), spares.as_slice()) {
-        ([one], _) | ([], [one]) => *one,
-        _ => panic!("end_returns_claims: no one spare controller on this machine: {spares:?}"),
-    };
+    let pci = spare::of(cap, &SPARES).expect("end_returns_claims: no one spare controller on this machine");
     (PciId { vendor: pci.vendor, device: pci.device }, pci.arrival)
 }
 

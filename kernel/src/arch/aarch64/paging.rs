@@ -609,7 +609,7 @@ impl AddressSpace {
 /// Tables of 4 KiB pages an unmap unlinked, answered as x86-64's are, where
 /// a sibling's walk cache outlives the unlink; here `tlb::asid` already
 /// reached every CPU, so dropping them is safe anywhere.
-#[must_use = "the unmapped tables, dropped with the caller's `mm::Unmapped`"]
+#[must_use = "the unmapped tables"]
 pub struct Detached(Vec<Box<Table>>);
 
 /// The kernel's own tables, `TTBR1_EL1`'s.
