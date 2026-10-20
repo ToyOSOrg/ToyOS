@@ -42,6 +42,8 @@ pub enum Error {
     Kernel(SyscallError),
     /// The service said something this protocol does not.
     Protocol,
+    /// No answer came within [`wire::ANSWER_BOUND_NS`].
+    Unanswered,
 }
 
 /// One ticket's answer, and a read's data.
@@ -352,8 +354,9 @@ impl Session {
     /// Open the same partition over the same region through the same name,
     /// after the service ended; writes the client holds go out again first.
     ///
-    /// Blocks until the service answers: a name whose server is being
-    /// restarted queues the connection until the new one accepts it.
+    /// Blocks until the service answers, within [`wire::ANSWER_BOUND_NS`]: a
+    /// name whose server is being restarted queues the connection until the
+    /// new one accepts it.
     pub fn reconnect(&mut self) -> Result<(), Error> {
         assert!(self.conn.is_none(), "diskserver: reconnect while a session is open");
         // Before the region goes to the new server: it must find this end's
@@ -438,6 +441,19 @@ fn connect(names: &Namespace, service: &str) -> Result<Connection, Error> {
     })
 }
 
+/// The header of the service's answer on `conn`, once it is there, within
+/// [`wire::ANSWER_BOUND_NS`].
+fn answer(conn: &Connection) -> Result<toyos::ipc::IpcHeader, Error> {
+    let poller = Poller::new(1);
+    poller.watch(conn, READABLE, 0);
+    let mut ready = false;
+    poller.wait(1, wire::ANSWER_BOUND_NS, |_| ready = true);
+    if !ready {
+        return Err(Error::Unanswered);
+    }
+    conn.recv_header().map_err(|_| Error::Ended)
+}
+
 /// Connect, send the region with an open, and wait for the answer.
 fn handshake(
     names: &Namespace,
@@ -448,7 +464,7 @@ fn handshake(
     let conn = connect(names, service)?;
     conn.send_handles([region.share().map_err(Error::Kernel)?]).map_err(|_| Error::Ended)?;
     conn.send_bytes(wire::MSG_OPEN, &guid).map_err(|_| Error::Ended)?;
-    let header = conn.recv_header().map_err(|_| Error::Ended)?;
+    let header = answer(&conn)?;
     let mut payload = [0u8; Opened::BYTES];
     let len = conn.recv_bytes(&header, &mut payload).map_err(|_| Error::Ended)?;
     match header.msg_type {
@@ -463,7 +479,7 @@ fn handshake(
 pub fn list(names: &Namespace, service: &str) -> Result<Vec<wire::Listed>, Error> {
     let conn = connect(names, service)?;
     conn.signal(wire::MSG_LIST).map_err(|_| Error::Ended)?;
-    let header = conn.recv_header().map_err(|_| Error::Ended)?;
+    let header = answer(&conn)?;
     let mut payload = vec![0u8; header.len() as usize];
     let len = conn.recv_bytes(&header, &mut payload).map_err(|_| Error::Ended)?;
     match header.msg_type {

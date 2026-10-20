@@ -17,15 +17,19 @@
 //! grant does not write is handed over as one, whose driver answers every
 //! write `ReadOnly`.
 //!
-//! **"Not yet" is never answered as "absent".** The supervisor starts the disk
-//! drivers before this service and says how many (`--drivers`), and names
-//! each disk controller it started no driver on (`--undriven`). An open of a
-//! partition no driver offers, and a listing, wait until every driver started
-//! at boot has settled and every driver that ended has settled again, or for
-//! [`DRIVER_BOUND`]; then a listing names what is offered, and what is not
-//! offered is refused by what is known: `Unusable` while a driver cannot use
-//! its controller or has not settled, `ClaimRefused` while a controller has
-//! no driver, and `NotFound` otherwise.
+//! **A driver is who the supervisor says it is**: the badge it minted the
+//! driver's `disk` connector with. It starts the disk drivers before this
+//! service and names each by that badge (`--driver`), and names each disk
+//! controller it started no driver on (`--undriven`).
+//!
+//! **Nothing is answered while a driver may still change the answer.** A
+//! listing and an open wait until every driver started before this service
+//! has settled and every driver that ended has settled again, or until
+//! [`DRIVER_BOUND`] has passed since this service started or a settled driver
+//! last ended; then a listing names what is offered, a GUID two disks offer is
+//! refused on both, and what is not offered is refused by what is known:
+//! `Unusable` while a driver cannot use its controller or has not settled,
+//! `ClaimRefused` while a controller has no driver, and `NotFound` otherwise.
 //!
 //! **A server never blocks on a client or a driver.** Accept and the first
 //! frame are two events, a frame is buffered until whole, and every answer is
@@ -44,11 +48,11 @@ use toyos_blockring::wire::{self, Grant, Listed, Refusal};
 use toyos_blockring::PORT;
 use toyos_blockserve::guid_text;
 
-/// How long a disk driver may take from its start to say how its bring-up
-/// ended, and so how long a listing or an open waits for it. Policy: a stick's
-/// bring-up is a port's reset and enumeration and a Bulk-Only disk's first
-/// commands, each bounded far below this.
-const DRIVER_BOUND: Duration = Duration::from_secs(30);
+/// How long, from this service's start or a settled driver's end, every
+/// driver is waited for before a question is answered with what is known;
+/// past it every answer is immediate. Below the client's own bound on an
+/// answer, which it is taken from.
+const DRIVER_BOUND: Duration = Duration::from_nanos(wire::DRIVER_BOUND_NS);
 
 /// Connections accepted and not yet asked, and how long one may stay so.
 const MAX_PENDING: usize = 16;
@@ -58,9 +62,10 @@ const MAX_WAITING: usize = 16;
 /// Disk drivers connected at once.
 const MAX_DRIVERS: usize = 16;
 
-/// Argv: the disk drivers the supervisor started before this service, and
-/// each disk controller it started none on.
-const DRIVERS: &str = "--drivers";
+/// Argv: each disk driver the supervisor started before this service, by the
+/// badge of its `disk` connector, and each disk controller it started none
+/// on.
+const DRIVER: &str = "--driver";
 const UNDRIVEN: &str = "--undriven";
 
 const TOKEN_ACCEPT: u64 = 0;
@@ -75,42 +80,48 @@ struct Offered {
     part: Part,
 }
 
-/// How a driver, by its name, last said its bring-up ended.
+/// How a driver last said its bring-up ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Fate {
     Offered,
     Unusable,
-    /// Its connection ended, and no driver of its name has settled since.
+    /// Its connection ended, and it has not settled since.
     Ended,
 }
+
+/// A disk driver as the supervisor named it: the badge it minted the
+/// driver's `disk` connector with, which the kernel stamps on the connection
+/// and the driver cannot choose. What a driver calls itself is for the lines.
+type Badge = u32;
 
 /// Everything the drivers said, and what the supervisor said of them.
 #[derive(Default)]
 struct Known {
-    /// How many disk drivers were started before this service.
-    expected: usize,
+    /// The disk drivers the supervisor started before this service.
+    expected: Vec<Badge>,
     undriven: Vec<String>,
-    fates: BTreeMap<String, Fate>,
+    fates: BTreeMap<Badge, Fate>,
     offered: Vec<Offered>,
 }
 
 impl Known {
     /// Whether nothing a driver will say could change an answer: every driver
-    /// started at boot has settled, and no driver is between an end and its
-    /// next settling.
+    /// started before this service has settled, and no driver is between an
+    /// end and its next settling.
     fn settled(&self) -> bool {
-        self.fates.len() >= self.expected && !self.fates.values().any(|f| *f == Fate::Ended)
+        self.expected.iter().all(|d| self.fates.contains_key(d)) && !self.fates.values().any(|f| *f == Fate::Ended)
     }
 
-    /// The drivers whose controllers' partitions cannot be said absent.
-    fn unsettled(&self) -> Vec<&str> {
-        self.fates.iter().filter(|(_, f)| **f != Fate::Offered).map(|(l, _)| l.as_str()).collect()
+    /// The drivers whose controllers' partitions cannot be said absent: those
+    /// expected and never heard, and those unusable or ended.
+    fn unsettled(&self) -> Vec<Badge> {
+        let silent = self.expected.iter().filter(|d| !self.fates.contains_key(d)).copied();
+        silent.chain(self.fates.iter().filter(|(_, f)| **f != Fate::Offered).map(|(d, _)| *d)).collect()
     }
 
     /// Why a partition no disk offers is not served, once nothing is awaited.
     fn absent(&self) -> Refusal {
-        let missing = self.fates.len() < self.expected;
-        if missing || !self.unsettled().is_empty() {
+        if !self.unsettled().is_empty() {
             Refusal::Unusable
         } else if !self.undriven.is_empty() {
             Refusal::ClaimRefused
@@ -141,22 +152,28 @@ impl Known {
     }
 
     /// Where an open of `guid` through `grant` is served, or its refusal,
-    /// or `None` while it waits. **The grant is asked first**, so a
-    /// connection learns nothing of a partition it does not reach.
+    /// or `None` while it waits.
+    ///
+    /// **Nothing is routed until every driver has settled**: a disk that has
+    /// not offered yet may carry the same GUID, which refuses it on both, and
+    /// one that left may be offering again — a partition a type grant reaches
+    /// among them. So a connection with no grant is refused at once, and
+    /// every other waits and is judged against every offer.
     fn open(&self, guid: [u8; 16], grant: Option<Grant>, expired: bool) -> Option<Result<Offered, Refusal>> {
         let Some(grant) = grant else { return Some(Err(Refusal::NotGranted)) };
+        if !self.settled() && !expired {
+            return None;
+        }
         let carrying: Vec<&Offered> = self.offered.iter().filter(|o| o.part.unique == guid && guid != [0; 16]).collect();
         // A partition no disk offers has no type: only a unique grant naming
-        // it reaches it, to wait for it or be told why it is not there.
+        // it reaches it, to be told why it is not there.
         let kind = carrying.first().map_or([0; 16], |o| o.part.kind);
         if !grant.admits(guid, kind) {
             return Some(Err(Refusal::NotGranted));
         }
         Some(match carrying[..] {
-            [] if !self.settled() && !expired => return None,
             [] => Err(self.absent()),
             [one] if one.part.blocks.is_some() => Ok(*one),
-            [_] => Err(Refusal::Unusable),
             _ => Err(Refusal::Unusable),
         })
     }
@@ -180,11 +197,11 @@ struct Waiting {
     conn: Connection,
     grant: Option<Grant>,
     ask: Ask,
-    since: Instant,
 }
 
 /// One disk driver's connection.
 struct Driver {
+    badge: Badge,
     conn: Connection,
     rx: ipc::FrameRx<{ 4 + disk::MAX_PARTS * Part::BYTES }>,
     label: Option<String>,
@@ -196,6 +213,9 @@ struct Driver {
 
 struct Service {
     known: Known,
+    /// What [`DRIVER_BOUND`] is counted from: this service's start, or the
+    /// last end of a driver that had settled.
+    awaited_since: Instant,
     drivers: BTreeMap<u64, Driver>,
     next_driver: u64,
     next_disk: u32,
@@ -209,7 +229,7 @@ fn main() {
     while at < args.len() {
         let value = args.get(at + 1).unwrap_or_else(|| panic!("diskserver: {} takes a value", args[at]));
         match args[at].as_str() {
-            DRIVERS => known.expected = value.parse().unwrap_or_else(|_| panic!("diskserver: {DRIVERS} {value}")),
+            DRIVER => known.expected.push(value.parse().unwrap_or_else(|_| panic!("diskserver: {DRIVER} {value}"))),
             UNDRIVEN => {
                 println!("diskserver: {value} is on this machine and no driver of it started; what it carries is refused");
                 known.undriven.push(value.clone());
@@ -220,8 +240,15 @@ fn main() {
     }
     let clients = endow::acceptor(PORT).unwrap_or_else(|| panic!("diskserver: started serving no `{PORT}` port"));
     let drivers = endow::acceptor(disk::PORT).unwrap_or_else(|| panic!("diskserver: started serving no `{}` port", disk::PORT));
-    println!("diskserver: serving the disks of {} driver(s) started before it", known.expected);
-    let mut service = Service { known, drivers: BTreeMap::new(), next_driver: 0, next_disk: 0, waiting: Vec::new() };
+    println!("diskserver: serving the disks of the driver(s) started before it, {:?}", known.expected);
+    let mut service = Service {
+        known,
+        awaited_since: Instant::now(),
+        drivers: BTreeMap::new(),
+        next_driver: 0,
+        next_disk: 0,
+        waiting: Vec::new(),
+    };
     service.serve(&clients, &drivers)
 }
 
@@ -246,7 +273,7 @@ impl Service {
             }
             let now = Instant::now();
             let deadlines = pending.iter().map(|p| p.since + HANDSHAKE_TIMEOUT);
-            let deadlines = deadlines.chain(self.waiting.iter().map(|w| w.since + DRIVER_BOUND));
+            let deadlines = deadlines.chain((!self.waiting.is_empty()).then_some(self.awaited_since + DRIVER_BOUND));
             let deadlines = deadlines.chain(self.drivers.values().filter(|d| d.label.is_none()).map(|d| d.since + HANDSHAKE_TIMEOUT));
             let timeout = deadlines.min().map_or(u64::MAX, |at| at.saturating_duration_since(now).as_nanos() as u64);
             ready.clear();
@@ -255,12 +282,19 @@ impl Service {
             let now = Instant::now();
             if ready.contains(&TOKEN_DRIVERS) {
                 match drivers.accept() {
-                    Ok(conn) => {
-                        let id = self.next_driver;
-                        self.next_driver += 1;
-                        let d = Driver { conn, rx: ipc::FrameRx::new(), label: None, settled: false, disks: BTreeMap::new(), since: now };
-                        self.drivers.insert(id, d);
-                    }
+                    Ok(conn) => match driver_badge(drivers, &conn) {
+                        None => println!("diskserver: a `disk` connection with no badge the supervisor mints is let go"),
+                        Some(badge) if self.drivers.values().any(|d| d.badge == badge) => {
+                            println!("diskserver: a second connection of disk driver {badge} is let go")
+                        }
+                        Some(badge) => {
+                            let id = self.next_driver;
+                            self.next_driver += 1;
+                            let rx = ipc::FrameRx::new();
+                            let d = Driver { badge, conn, rx, label: None, settled: false, disks: BTreeMap::new(), since: now };
+                            self.drivers.insert(id, d);
+                        }
+                    },
                     Err(why) => println!("diskserver: the kernel refused a driver's connection: {why:?}"),
                 }
             }
@@ -299,7 +333,7 @@ impl Service {
                     }
                     RxStep::Frame { msg_type, payload_len } => {
                         let p = pending.remove(i);
-                        self.asked(clients, p, msg_type, payload_len, now);
+                        self.asked(clients, p, msg_type, payload_len);
                     }
                 }
             }
@@ -337,7 +371,7 @@ impl Service {
                 return Err("a frame before its name");
             }
             let label = disk::label(payload).ok_or("a name that is not one")?;
-            println!("diskserver: disk driver {label} connected");
+            println!("diskserver: disk driver {} ({label}) connected", d.badge);
             d.label = Some(label);
             return Ok(());
         };
@@ -361,8 +395,8 @@ impl Service {
                         Fate::Unusable
                     }
                 };
-                println!("diskserver: disk driver {label} settled with {} disk(s)", d.disks.len());
-                self.known.fates.insert(label, fate);
+                println!("diskserver: disk driver {} ({label}) settled with {} disk(s)", d.badge, d.disks.len());
+                self.known.fates.insert(d.badge, fate);
             }
             disk::MSG_GONE => {
                 let ours = disk::disk(payload).and_then(|theirs| d.disks.remove(&theirs));
@@ -399,20 +433,22 @@ impl Service {
     /// connection ended is awaited until a driver of its name settles again.
     fn drop_driver(&mut self, id: u64, why: &str) {
         let d = self.drivers.remove(&id).expect("a live driver");
-        let label = d.label.unwrap_or_else(|| "an unnamed driver".into());
-        println!("diskserver: dropping disk driver {label} — {why}; its {} disk(s) leave", d.disks.len());
+        let label = d.label.unwrap_or_else(|| "unnamed".into());
+        println!("diskserver: dropping disk driver {} ({label}) — {why}; its {} disk(s) leave", d.badge, d.disks.len());
         let gone: Vec<u32> = d.disks.values().copied().collect();
         self.known.offered.retain(|o| !gone.contains(&o.disk));
-        if self.known.fates.contains_key(&label) {
-            self.known.fates.insert(label, Fate::Ended);
+        if self.known.fates.insert(d.badge, Fate::Ended).is_some() {
+            self.awaited_since = Instant::now();
+        } else {
+            self.known.fates.remove(&d.badge);
         }
     }
 
     /// One client's first frame: a listing, or an open.
-    fn asked(&mut self, clients: &toyos::port::Acceptor, p: Pending, msg_type: u32, payload_len: usize, now: Instant) {
+    fn asked(&mut self, clients: &toyos::port::Acceptor, p: Pending, msg_type: u32, payload_len: usize) {
         let grant = grant(clients, &p.conn);
         if msg_type == wire::MSG_LIST && payload_len == 0 {
-            return self.waiting.push(Waiting { conn: p.conn, grant, ask: Ask::List, since: now });
+            return self.waiting.push(Waiting { conn: p.conn, grant, ask: Ask::List });
         }
         let guid = wire::guid(p.rx.payload(payload_len));
         let handles = p.conn.recv_handles_exact::<1>();
@@ -425,7 +461,7 @@ impl Service {
         // SAFETY: the handle arrived with this frame and nothing else in this
         // process names it.
         let region = unsafe { OwnedHandle::from_raw(region) };
-        self.waiting.push(Waiting { conn: p.conn, grant, ask: Ask::Open { guid, region }, since: now });
+        self.waiting.push(Waiting { conn: p.conn, grant, ask: Ask::Open { guid, region } });
     }
 
     /// Answer every waiting question the drivers have now answered, or whose
@@ -433,7 +469,7 @@ impl Service {
     fn answer_waiting(&mut self, now: Instant) {
         let waiting = std::mem::take(&mut self.waiting);
         for w in waiting {
-            let expired = now >= w.since + DRIVER_BOUND;
+            let expired = now >= self.awaited_since + DRIVER_BOUND;
             match w.ask {
                 Ask::List => match self.known.listing(w.grant, expired) {
                     None => self.waiting.push(w),
@@ -463,10 +499,8 @@ impl Service {
         if !expired || self.known.settled() {
             return;
         }
-        let started = self.known.expected.saturating_sub(self.known.fates.len());
         println!(
-            "diskserver: {what} waited {DRIVER_BOUND:?} and is answered with what is known; not settled: {:?}, and \
-             {started} driver(s) started before this service never said who they are",
+            "diskserver: {what} is answered with what is known, {DRIVER_BOUND:?} on; not settled: disk driver(s) {:?}",
             self.known.unsettled()
         );
     }
@@ -482,7 +516,7 @@ impl Service {
         // The client hears nothing from here: its open is the driver's to
         // answer, and a refused move closes the client's connection.
         if let Err(why) = d.conn.send_handles([conn.into_owned(), region]) {
-            return println!("diskserver: the kernel would not move a session to {:?}: {why:?}", d.label);
+            return println!("diskserver: the kernel would not move a session to disk driver {}: {why:?}", d.badge);
         }
         // Its handles are in the driver's queue ahead of any later frame's,
         // so a frame the driver will not take ends the driver.
@@ -510,6 +544,17 @@ fn list(conn: &Connection, answer: Result<Vec<Listed>, Refusal>) {
     }
 }
 
+/// Who the driver on `conn`, accepted from `acceptor`, is: the badge the
+/// supervisor minted its connector with.
+fn driver_badge(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<Badge> {
+    let mut badge = [0u8; MAX_BADGE];
+    match acceptor.badge(conn, &mut badge) {
+        Ok(bytes) => disk::identity(bytes),
+        Err(SyscallError::NotFound) => None,
+        Err(why) => panic!("diskserver: its own acceptor would not say a connection's badge: {why:?}"),
+    }
+}
+
 /// The grant `conn`, accepted from `acceptor`, was minted with; `None` for a
 /// connection through an unbadged connector or with bytes no minter stamps.
 fn grant(acceptor: &toyos::port::Acceptor, conn: &Connection) -> Option<Grant> {
@@ -534,21 +579,32 @@ mod tests {
     const BOOT_KIND: [u8; 16] = [0x20; 16];
     const DATA_KIND: [u8; 16] = [0x30; 16];
     const ROOT_KIND: [u8; 16] = [0x40; 16];
+    /// Two drivers, by the badges the supervisor minted them.
+    const STICK: Badge = 7;
+    const NVME: Badge = 9;
 
     fn unique(guid: [u8; 16]) -> Option<Grant> {
         Some(Grant { scope: Scope::Unique(guid), writes: true })
+    }
+
+    fn data() -> Option<Grant> {
+        Some(Grant { scope: Scope::Kind(DATA_KIND), writes: true })
     }
 
     fn part(unique: [u8; 16], kind: [u8; 16]) -> Part {
         Part { unique, kind, blocks: Some(100) }
     }
 
-    /// One settled driver offering LOG, BOOT and ROOT on disk 0, and another
-    /// offering DATA on disk 1.
+    fn known(expected: &[Badge]) -> Known {
+        Known { expected: expected.to_vec(), ..Known::default() }
+    }
+
+    /// Both drivers settled: the stick offering LOG, BOOT and ROOT on disk 0,
+    /// and the NVMe disk offering DATA on disk 1.
     fn two_disks() -> Known {
-        let mut known = Known { expected: 2, ..Known::default() };
-        known.fates.insert("stick".into(), Fate::Offered);
-        known.fates.insert("nvme".into(), Fate::Offered);
+        let mut known = known(&[STICK, NVME]);
+        known.fates.insert(STICK, Fate::Offered);
+        known.fates.insert(NVME, Fate::Offered);
         for p in [part(LOG, LOG_KIND), part(BOOT, BOOT_KIND), part(ROOT, ROOT_KIND)] {
             known.offered.push(Offered { disk: 0, part: p });
         }
@@ -567,10 +623,9 @@ mod tests {
             assert_eq!(known.open(other, unique(LOG), false), Some(Err(Refusal::NotGranted)));
             assert_eq!(known.open(other, None, false), Some(Err(Refusal::NotGranted)));
         }
-        let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: true });
-        assert_eq!(known.open(DATA, data, false), Some(Ok(Offered { disk: 1, part: part(DATA, DATA_KIND) })));
-        assert_eq!(known.open(LOG, data, false), Some(Err(Refusal::NotGranted)));
-        assert_eq!(known.open([9; 16], data, false), Some(Err(Refusal::NotGranted)), "nothing of a GUID no disk offers");
+        assert_eq!(known.open(DATA, data(), false), Some(Ok(Offered { disk: 1, part: part(DATA, DATA_KIND) })));
+        assert_eq!(known.open(LOG, data(), false), Some(Err(Refusal::NotGranted)));
+        assert_eq!(known.open([9; 16], data(), false), Some(Err(Refusal::NotGranted)), "nothing of a GUID no disk offers");
         assert_eq!(known.open([9; 16], unique([9; 16]), false), Some(Err(Refusal::NotFound)));
     }
 
@@ -583,62 +638,95 @@ mod tests {
             answer.expect("answered").map(|all| all.iter().map(|l| (l.disk, l.unique)).collect::<Vec<_>>())
         };
         assert_eq!(uniques(known.listing(unique(BOOT), false)), Ok(vec![(0, BOOT)]));
-        let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: false });
-        assert_eq!(uniques(known.listing(data, false)), Ok(vec![(1, DATA)]));
+        assert_eq!(uniques(known.listing(data(), false)), Ok(vec![(1, DATA)]));
         assert_eq!(uniques(known.listing(unique([9; 16]), false)), Ok(vec![]));
         assert_eq!(known.listing(None, false), Some(Err(Refusal::NotGranted)));
     }
 
-    /// Until every driver started at boot has settled, a listing and an open
-    /// of what no disk offers wait; an open of what is offered is answered at
-    /// once. At the bound each is answered with what is known, and a missing
+    /// Until every driver started before the service has settled, a listing
+    /// and every open wait — one the grant admits on a disk already offered
+    /// too. At the bound each is answered with what is known, and a missing
     /// driver is never taken for a machine without the partition.
     #[test]
-    fn what_no_disk_offers_waits_for_every_driver_started_at_boot() {
-        let mut known = Known { expected: 2, ..Known::default() };
-        known.fates.insert("nvme".into(), Fate::Offered);
+    fn nothing_is_answered_until_every_driver_started_before_the_service_has_settled() {
+        let mut known = known(&[STICK, NVME]);
+        known.fates.insert(NVME, Fate::Offered);
         known.offered.push(Offered { disk: 0, part: part(DATA, DATA_KIND) });
-        let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: true });
-        assert_eq!(known.listing(data, false), None, "the stick's driver has not settled");
+        assert_eq!(known.listing(data(), false), None, "the stick's driver has not settled");
         assert_eq!(known.open(LOG, unique(LOG), false), None);
-        assert!(known.open(DATA, data, false).is_some_and(|r| r.is_ok()), "offered: answered at once");
-        assert_eq!(known.open(LOG, unique(LOG), true), Some(Err(Refusal::Unusable)), "the bound passed, a driver missing");
-        assert!(known.listing(data, true).is_some_and(|r| r.is_ok_and(|l| l.len() == 1)));
+        assert_eq!(known.open(DATA, data(), false), None, "offered, and another disk may carry it too");
+        assert_eq!(known.open(DATA, None, false), Some(Err(Refusal::NotGranted)), "no grant waits for nothing");
+        assert_eq!(known.open(LOG, unique(LOG), true), Some(Err(Refusal::Unusable)), "the bound passed, a driver silent");
+        assert!(known.open(DATA, data(), true).is_some_and(|r| r.is_ok()));
+        assert!(known.listing(data(), true).is_some_and(|r| r.is_ok_and(|l| l.len() == 1)));
         let log = Some(Grant { scope: Scope::Kind(LOG_KIND), writes: true });
-        assert_eq!(known.listing(log, true), Some(Err(Refusal::Unusable)), "nothing listed, a driver missing");
+        assert_eq!(known.listing(log, true), Some(Err(Refusal::Unusable)), "nothing listed, a driver silent");
 
-        known.fates.insert("stick".into(), Fate::Offered);
+        known.fates.insert(STICK, Fate::Offered);
         assert_eq!(known.open(LOG, unique(LOG), false), Some(Err(Refusal::NotFound)), "every driver said");
         assert_eq!(known.listing(log, false), Some(Ok(vec![])));
     }
 
-    /// A driver that ended is awaited until one of its name settles again,
-    /// as a file server reopening after a driver's restart needs.
+    /// A GUID the first driver offers is not routed while another may offer
+    /// it too: once the second settles carrying it, it is refused on both,
+    /// and no session ever reached either.
     #[test]
-    fn a_driver_that_ended_is_awaited_until_it_settles_again() {
-        let mut known = two_disks();
-        known.fates.insert("stick".into(), Fate::Ended);
-        known.offered.retain(|o| o.disk != 0);
+    fn a_guid_a_late_disk_also_carries_is_never_routed_to_the_first() {
+        let mut known = known(&[STICK, NVME]);
+        known.fates.insert(NVME, Fate::Offered);
+        known.offered.push(Offered { disk: 0, part: part(LOG, LOG_KIND) });
         assert_eq!(known.open(LOG, unique(LOG), false), None);
-        known.fates.insert("stick".into(), Fate::Offered);
-        known.offered.push(Offered { disk: 2, part: part(LOG, LOG_KIND) });
-        assert_eq!(known.open(LOG, unique(LOG), false), Some(Ok(Offered { disk: 2, part: part(LOG, LOG_KIND) })));
+        known.fates.insert(STICK, Fate::Offered);
+        known.offered.push(Offered { disk: 1, part: part(LOG, LOG_KIND) });
+        assert_eq!(known.open(LOG, unique(LOG), false), Some(Err(Refusal::Unusable)));
     }
 
-    /// A controller its driver cannot use, or whose claim was refused, is a
-    /// disk there and never a machine without one.
+    /// A driver that ended is awaited until it settles again, whatever the
+    /// grant: a file server reopening its type-granted DATA after a driver's
+    /// restart waits for the offer rather than being refused for a type no
+    /// offer carries any more.
     #[test]
-    fn an_unusable_or_unclaimed_controller_is_refused_and_an_absent_one_lists_nothing() {
-        let data = Some(Grant { scope: Scope::Kind(DATA_KIND), writes: true });
-        let mut unusable = Known { expected: 1, ..Known::default() };
-        unusable.fates.insert("nvme".into(), Fate::Unusable);
-        assert_eq!(unusable.listing(data, false), Some(Err(Refusal::Unusable)));
+    fn a_driver_that_ended_is_awaited_until_it_settles_again_under_either_grant() {
+        let mut known = two_disks();
+        known.fates.insert(NVME, Fate::Ended);
+        known.offered.retain(|o| o.disk != 1);
+        assert_eq!(known.open(DATA, data(), false), None, "a type grant waits for the offer");
+        assert_eq!(known.open(DATA, unique(DATA), false), None);
+        assert_eq!(known.listing(data(), false), None);
+        known.fates.insert(NVME, Fate::Offered);
+        known.offered.push(Offered { disk: 2, part: part(DATA, DATA_KIND) });
+        assert_eq!(known.open(DATA, data(), false), Some(Ok(Offered { disk: 2, part: part(DATA, DATA_KIND) })));
+    }
+
+    /// A driver is its badge: one the service did not expect, settling, says
+    /// nothing of one it expects that never spoke, so the wait goes on; and
+    /// two drivers are two whatever they call themselves, since a name never
+    /// reaches what is known.
+    #[test]
+    fn a_late_driver_never_stands_in_for_one_started_before_the_service() {
+        let mut known = known(&[STICK, NVME]);
+        known.fates.insert(NVME, Fate::Offered);
+        known.fates.insert(11, Fate::Offered);
+        assert!(!known.settled(), "a late driver counted for the stick's");
+        assert_eq!(known.unsettled(), vec![STICK]);
+        assert_eq!(known.open(LOG, unique(LOG), false), None);
+        known.fates.insert(STICK, Fate::Offered);
+        assert!(known.settled());
+    }
+
+    /// A controller its driver cannot use, or one with no driver, is a disk
+    /// there and never a machine without one.
+    #[test]
+    fn an_unusable_or_undriven_controller_is_refused_and_an_absent_one_lists_nothing() {
+        let mut unusable = known(&[NVME]);
+        unusable.fates.insert(NVME, Fate::Unusable);
+        assert_eq!(unusable.listing(data(), false), Some(Err(Refusal::Unusable)));
         assert_eq!(unusable.open(DATA, unique(DATA), false), Some(Err(Refusal::Unusable)));
-        let unclaimed = Known { undriven: vec!["pci:01:08:02".into()], ..Known::default() };
-        assert_eq!(unclaimed.listing(data, false), Some(Err(Refusal::ClaimRefused)));
-        assert_eq!(unclaimed.open(DATA, unique(DATA), false), Some(Err(Refusal::ClaimRefused)));
+        let undriven = Known { undriven: vec!["pci:01:08:02 at PCI 00:02.0".into()], ..Known::default() };
+        assert_eq!(undriven.listing(data(), false), Some(Err(Refusal::ClaimRefused)));
+        assert_eq!(undriven.open(DATA, unique(DATA), false), Some(Err(Refusal::ClaimRefused)));
         let absent = Known::default();
-        assert_eq!(absent.listing(data, false), Some(Ok(vec![])));
+        assert_eq!(absent.listing(data(), false), Some(Ok(vec![])));
         assert_eq!(absent.open(DATA, unique(DATA), false), Some(Err(Refusal::NotFound)));
     }
 

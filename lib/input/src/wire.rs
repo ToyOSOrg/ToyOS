@@ -1,8 +1,9 @@
 //! The `input` port's frames, and the records the kernel's streams carry,
 //! decoded by one reader whichever source sent them.
 //!
-//! A sender numbers its devices `source`s and never reuses one for the life
-//! of its connection, so a late record never reaches a later device.
+//! A sender numbers its devices `source`s: a source names one device for the
+//! life of its connection, so a late record never reaches a later device. A
+//! device's `gone` releases what it holds, and the same source may go on.
 //!
 //! Every byte here is one a source chose, and a source is outside the owner's
 //! trust: a record that does not decode is refused by name and changes

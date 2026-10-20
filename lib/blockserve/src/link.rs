@@ -25,6 +25,10 @@ pub struct Handed {
     pub region: toyos::RawHandle,
 }
 
+/// Fresh connections in a row that may refuse what the driver says before it
+/// gives up: a frame refused on an empty connection is not backpressure.
+const CONNECTS: u32 = 3;
+
 pub struct Link {
     label: String,
     /// `None` once the service's port has closed for good.
@@ -42,28 +46,38 @@ impl Link {
         link
     }
 
+    /// Connect, and say everything again; a fresh connection that will not
+    /// take it is let go and another made. A service that will not take one
+    /// connection's frames on any of them is a refusal that does not change,
+    /// and the driver ends by name.
     fn connect(&mut self) {
-        self.rx = FrameRx::new();
-        self.conn = match endow::service(disk::PORT) {
-            Ok(conn) => Some(conn),
-            Err(EndowError::ServerGone) => {
-                println!("{}: the block service's port is closed for good; nothing new is served", self.label);
+        for _ in 0..CONNECTS {
+            self.rx = FrameRx::new();
+            self.conn = match endow::service(disk::PORT) {
+                Ok(conn) => Some(conn),
+                Err(EndowError::ServerGone) => {
+                    println!("{}: the block service's port is closed for good; nothing new is served", self.label);
+                    return;
+                }
+                Err(why) => panic!("{}: the manifest gives this driver `{}`, and it answered {why:?}", self.label, disk::PORT),
+            };
+            if self.tell_everything() {
                 return;
             }
-            Err(why) => panic!("{}: the manifest gives this driver `{}`, and it answered {why:?}", self.label, disk::PORT),
-        };
+            println!("{}: the block service's connection would not take what this driver offers; connecting again", self.label);
+        }
+        panic!("{}: {CONNECTS} connections to the block service in a row would not take what this driver offers", self.label);
+    }
+
+    fn tell_everything(&self) -> bool {
         let mut told = self.send(disk::MSG_DRIVER, self.label.as_bytes().to_vec());
-        let offers: Vec<Vec<u8>> =
-            self.offers.iter().map(|(&disk, parts)| Offer { disk, parts: parts.clone() }.encode()).collect();
-        for offer in offers {
-            told &= self.send(disk::MSG_OFFER, offer);
+        for (&disk, parts) in &self.offers {
+            told &= self.send(disk::MSG_OFFER, Offer { disk, parts: parts.clone() }.encode());
         }
         if let Some(settled) = self.settled {
             told &= self.send(disk::MSG_SETTLED, settled.encode().to_vec());
         }
-        if !told {
-            self.ended("it would not take what this driver offers");
-        }
+        told
     }
 
     fn send(&self, msg_type: u32, payload: Vec<u8>) -> bool {

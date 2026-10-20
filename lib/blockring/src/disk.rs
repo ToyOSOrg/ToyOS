@@ -19,8 +19,22 @@ use alloc::vec::Vec;
 
 use crate::wire::GUID_BYTES;
 
-/// The port the block service serves to disk drivers.
+/// The port the block service serves to disk drivers. Each driver's
+/// connector is minted with the badge [`badge`] makes of who the supervisor
+/// started it as, which is the driver's identity to the service.
 pub const PORT: &str = "disk";
+
+/// The badge a disk driver's connector is minted with: the supervisor's
+/// number for the driver, which is its function's arrival.
+pub fn badge(identity: u32) -> [u8; 4] {
+    identity.to_le_bytes()
+}
+
+/// The identity a driver connection's badge names, `None` for bytes
+/// [`badge`] does not make.
+pub fn identity(badge: &[u8]) -> Option<u32> {
+    Some(u32::from_le_bytes(badge.try_into().ok()?))
+}
 
 /// Driver to service, first: the driver's name for the service's lines,
 /// UTF-8, at most [`MAX_LABEL`] bytes.
@@ -170,11 +184,13 @@ impl Session {
     }
 }
 
-/// A [`MSG_DRIVER`] or [`MSG_GONE`] payload.
+/// A [`MSG_DRIVER`] payload: the driver's name for the service's lines, which
+/// never says who the driver is.
 pub fn label(bytes: &[u8]) -> Option<String> {
     (1..=MAX_LABEL).contains(&bytes.len()).then(|| core::str::from_utf8(bytes).ok().map(String::from))?
 }
 
+/// A [`MSG_GONE`] payload: the disk's number.
 pub fn disk(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_le_bytes(bytes.try_into().ok()?))
 }
@@ -228,5 +244,8 @@ mod tests {
         assert_eq!(label(&[0xFF]), None);
         assert_eq!(disk(&5u32.to_le_bytes()), Some(5));
         assert_eq!(disk(&[0; 3]), None);
+        assert_eq!(identity(&badge(0x0102_0304)), Some(0x0102_0304));
+        assert_eq!(identity(&[1, 2, 3]), None);
+        assert_eq!(identity(&[1, 2, 3, 4, 5]), None);
     }
 }

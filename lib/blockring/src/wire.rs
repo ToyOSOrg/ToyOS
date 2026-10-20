@@ -39,6 +39,18 @@ pub const MSG_LISTED: u32 = 5;
 /// The bytes of a GUID payload.
 pub const GUID_BYTES: usize = 16;
 
+/// How long the service waits for its disk drivers to settle, from its start
+/// or a settled driver's end, before it answers a listing or an open with
+/// what it knows. Policy: a stick's bring-up is a port's reset and
+/// enumeration and a Bulk-Only disk's first commands, each bounded far below
+/// this.
+pub const DRIVER_BOUND_NS: u64 = 30_000_000_000;
+
+/// How long a client waits for a listing's or an open's answer before it
+/// takes the service for wedged: the service's wait for its drivers, and as
+/// long again for the driver's answer to an open it hands over.
+pub const ANSWER_BOUND_NS: u64 = 2 * DRIVER_BOUND_NS;
+
 /// What an open was answered with: the partition's length in blocks, and its
 /// unique GUID as the table stores it.
 ///
@@ -205,9 +217,9 @@ pub enum Refusal {
     /// A session holds it already.
     Held,
     /// The partition is there and cannot be served: its range is not whole
-    /// blocks, its GUID is on two entries, or its controller would not open,
-    /// and a listing with a disk driver that never settled is refused the
-    /// same.
+    /// blocks, its GUID is on two disks, or its controller would not open. A
+    /// listing that finds nothing it admits is refused the same while a disk
+    /// driver cannot use its controller or never settled.
     Unusable,
     /// The frame, its handles or its region are not what this protocol sends.
     Malformed,
@@ -215,7 +227,8 @@ pub enum Refusal {
     Exhausted,
     /// A disk controller is on this machine and no driver of it started — the
     /// kernel would not hand over its claim, or the driver would not spawn:
-    /// nothing on it is served, and a listing is refused the same.
+    /// nothing on it is served, and a listing that finds nothing it admits is
+    /// refused the same.
     ClaimRefused,
     /// The connection's grant does not reach that partition, whether or not
     /// the service has it. A connection with no grant, or with bytes no

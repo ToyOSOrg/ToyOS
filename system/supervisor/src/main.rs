@@ -123,7 +123,7 @@ use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
     Registration, Tag, ALIVE, CONSOLE, FLUSH, FLUSHED, LOGKEEPER, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
 };
-use toyos_abi::inventory::{Pci, PciAddr, Record};
+use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
 use toyos_abi::syscall::{
     DeviceRequest, FileType, SyscallError, DEV_PREFIX, MAX_BADGE, PROVIDE_PREFIX, SERVE_PREFIX,
     SVC_LABEL, SYSCAP_LABEL,
@@ -954,12 +954,14 @@ impl<'a> Supervisor<'a> {
         refused
     }
 
-    /// What the block service is started with: how many disk drivers run,
-    /// which it waits for, and every disk driver's function the boot started
-    /// none on.
+    /// What the block service is started with: each disk driver running, by
+    /// its badge, which it waits for, and every disk driver's function the
+    /// boot started none on.
     fn block_args(&self) -> Vec<String> {
-        let running = self.instances.iter().filter(|i| is_disk_driver(i.row)).count();
-        let mut args = vec!["--drivers".to_string(), running.to_string()];
+        let mut args = Vec::new();
+        for instance in self.instances.iter().filter(|i| is_disk_driver(i.row)) {
+            args.extend(["--driver".to_string(), instance.function.arrival.0.to_string()]);
+        }
         for undriven in &self.undriven {
             args.extend(["--undriven".to_string(), undriven.clone()]);
         }
@@ -975,7 +977,12 @@ impl<'a> Supervisor<'a> {
         let name = entry.to_string();
         let claim = self.syscap.claim_function::<toyos::Device>(function.arrival).map_err(|e| refused(&name, e))?;
         self.make_home(row);
-        let extra = Extra { claims: vec![(format!("{DEV_PREFIX}{name}"), claim)], ..Extra::default() };
+        let mut extra = Extra { claims: vec![(format!("{DEV_PREFIX}{name}"), claim)], ..Extra::default() };
+        // A disk driver is who this start says it is: its `disk` connector
+        // carries the function's arrival, which the block service keys it by.
+        if is_disk_driver(row) {
+            extra.ports.push((toyos_blockring::disk::PORT.to_string(), self.grants.disk(function.arrival)?));
+        }
         let launcher = (&self.minted, self.sessions.machine());
         let served = Served::Keep { acceptors: &[], owed: &[] };
         let output = Output::Boot(&mut self.log);
@@ -2837,12 +2844,15 @@ fn build_namespace(
     // Never the swap port nor the grants port: [`swap_namespace`] and
     // [`grants_namespace`] say why. Never the block port's own connector,
     // which reaches nothing: a holder of `block` holds one minted for what it
-    // reaches, in `view`; nor netstack's, which nothing holds: a holder of
-    // `netstack` holds one minted for its row and session, in `view` too.
+    // reaches, in `view`, and a disk driver one of `disk` minted for who it
+    // is; nor netstack's, which nothing holds: a holder of `netstack` holds
+    // one minted for its row and session, in `view` too.
     let receives: Vec<&String> = program
         .receives
         .iter()
-        .filter(|name| *name != toyos_swap::PORT && *name != grants::PORT && *name != toyos_blockring::PORT && *name != NETSTACK)
+        .filter(|name| {
+            ![toyos_swap::PORT, grants::PORT, toyos_blockring::PORT, toyos_blockring::disk::PORT, NETSTACK].contains(&name.as_str())
+        })
         .collect();
     if receives.is_empty() && extras.is_empty() && view.is_empty() {
         return Ok(None);
@@ -2912,6 +2922,18 @@ impl Grants<'_> {
         acceptor
             .mint(&grant.encode())
             .map(Some)
+            .map_err(|e| format!("no connector to the block service could be minted: {e:?}"))
+    }
+
+    /// The block service's `disk` port minted for the disk driver of the
+    /// function that arrived as `arrival`.
+    fn disk(&self, arrival: Arrival) -> Result<Connector, String> {
+        let ports = self.block.as_ref().ok_or("no block service runs to offer a disk to")?.borrow();
+        let Some((_, acceptor)) = ports.iter().find(|(name, _)| name == toyos_blockring::disk::PORT) else {
+            return Err("the block service's port has closed for good".into());
+        };
+        acceptor
+            .mint(&toyos_blockring::disk::badge(arrival.0))
             .map_err(|e| format!("no connector to the block service could be minted: {e:?}"))
     }
 

@@ -177,11 +177,6 @@ impl Sessions {
         self.sessions.keys().copied().collect()
     }
 
-    /// Whether any session has a request on the device.
-    pub fn busy(&self) -> bool {
-        self.sessions.values().any(|s| s.state.inflight().len() > 0)
-    }
-
     /// Put `c` on its session's completion ring. [`Self::pull`] leaves room for
     /// every answer, so a ring without it is a client whose head went back or
     /// past what was posted: the session ends.
