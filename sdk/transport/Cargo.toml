@@ -61,7 +61,7 @@ head-only = []
 
 [dependencies]
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
-toyos-untrusted = { path = "../../untrusted" }
+toyos-untrusted = { path = "../../lib/untrusted" }
 
 [dev-dependencies]
 loom = "0.7"
