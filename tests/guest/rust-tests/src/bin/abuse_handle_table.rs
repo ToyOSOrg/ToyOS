@@ -33,6 +33,7 @@ use toyos_abi::syscall::{
     self, EndowEntry, MmapFlags, MmapProt, SpawnArgs, SyscallError, MAX_ENDOWMENTS, MAX_SLOT_MAP, SELF_LABEL,
 };
 use toyos_abi::RawHandle;
+use toyos_abi::end::End;
 
 const SELF: &str = "/system/bin/test_rs_abuse_handle_table";
 /// The role a spawned copy of this binary takes: it exits at once.
@@ -282,7 +283,7 @@ fn a_spawn_carries_one_entry_fewer_than_a_table() {
     let used = entries[fewer].label_off as usize;
     let child = spawn_endowed(&entries[..fewer], &labels[..used])
         .unwrap_or_else(|e| panic!("a spawn carrying {fewer} entries was refused: {e:?}"));
-    assert_eq!(syscall::process_wait(child), Ok(0), "the child carrying {fewer} entries");
+    assert_eq!(syscall::process_wait(child), Ok(End::Exited(0)), "the child carrying {fewer} entries");
     syscall::close(child);
     syscall::close(handles[fewer]);
     println!("an endowment labelled self and {MAX_ENDOWMENTS} entries are refused, and {fewer} start");

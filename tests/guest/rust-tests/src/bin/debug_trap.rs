@@ -22,7 +22,10 @@
 //! in the capture at all.
 
 use std::io::Write;
+use std::os::toyos::process::ExitStatusExt;
 use std::process::{Command, Stdio};
+
+use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_debug_trap";
 
@@ -67,12 +70,13 @@ fn dies(role: &str, what: &str) {
         format!("armed {role}"),
         "{role} ({what}) never reached its trap, or the kernel resumed it",
     );
-    assert!(
-        !out.status.success(),
-        "{role} ({what}) did not end the process (exit {:?})",
-        out.status.code(),
+    assert_eq!(
+        End::from_word(out.status.into_raw()),
+        Some(End::Fault(Fault::Trap)),
+        "{role} ({what}) did not end the process as a trap ({})",
+        out.status,
     );
-    println!("  {role}: killed at the trap, exit {:?}", out.status.code());
+    println!("  {role}: ended at the trap, {}", out.status);
 }
 
 /// The other half of both refusals: the kernel is unharmed by a trap it

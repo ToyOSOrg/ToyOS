@@ -26,7 +26,7 @@ OwnedFd` (1237-1241) hands `OwnedFd::from_raw_fd` that key, taken by
   `kernel/src/syscall/handles.rs`; `HandleTable::remove`,
   `kernel/src/object/handle.rs`). A slot past the table, empty, or at another
   generation is `BadHandle` or `Stale`, and `process::handle_fault` ends the
-  process with exit code 139. A process holding a live handle at that slot and
+  process with a handle fault. A process holding a live handle at that slot and
   generation loses it silently, whatever object it names, and the next use of
   that handle by its holder is `Stale` and ends the process there.
 

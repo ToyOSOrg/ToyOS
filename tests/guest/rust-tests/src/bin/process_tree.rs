@@ -37,6 +37,8 @@ use toyos::{namespace, port, AsHandle, OwnedHandle};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_process_tree";
 /// `/system/bin/toybox` under the name of an applet that reads its input until
@@ -53,10 +55,9 @@ const MSG_GROWN: u32 = 1;
 /// A to B: fault.
 const MSG_FAULT: u32 = 2;
 
-/// `process::KILLED_EXIT_CODE`.
-const KILLED: i32 = 137;
-/// What `syscall::kill_process(-1)` publishes for a Ring 3 CPU fault.
-const CPU_FAULT: i32 = -1;
+const KILLED: End = End::Killed;
+/// How a write to address 0 ends a process.
+const CPU_FAULT: End = End::Fault(Fault::Memory);
 
 /// `kernel::proclife::MAX_DEPTH`, which the kernel refuses a process past.
 const MAX_DEPTH: u32 = 64;
@@ -70,7 +71,7 @@ const LINK_BOUND: u32 = MAX_DEPTH + 1;
 const ZOMBIE: u8 = 3;
 
 #[derive(Clone, Copy, Debug)]
-enum End {
+enum Ending {
     /// B waits on A; A kills it.
     Killed,
     CpuFault,
@@ -88,7 +89,7 @@ fn main() {
 }
 
 fn test() {
-    for end in [End::Killed, End::CpuFault] {
+    for end in [Ending::Killed, Ending::CpuFault] {
         an_end_takes_its_subtree(end);
     }
     a_manage_only_handle_is_no_place();
@@ -146,27 +147,27 @@ fn grow() -> Grown {
     Grown { b, conn, c, d, b_self, e, _held: held }
 }
 
-fn an_end_takes_its_subtree(end: End) {
+fn an_end_takes_its_subtree(end: Ending) {
     let mut grown = grow();
     assert_eq!(grown.c.try_wait(), Err(SyscallError::WouldBlock), "C ended before B did");
     assert_eq!(grown.d.try_wait(), Err(SyscallError::WouldBlock), "D ended before B did");
 
     let b_code = match end {
-        End::Killed => {
+        Ending::Killed => {
             grown.b.kill().expect("kill B");
             // Claimed, so admission under it is closed, whether or not its
             // teardown is done.
             under_b_is_gone(&grown);
             KILLED
         }
-        End::CpuFault => {
+        Ending::CpuFault => {
             grown.conn.send_bytes(MSG_FAULT, &[]).expect("tell B to fault");
             CPU_FAULT
         }
     };
 
     let status = grown.b.wait().expect("wait for B");
-    assert_eq!(status.code(), Some(b_code), "B ended {end:?} and read {:?}", status.code());
+    assert_eq!(End::from_word(status.into_raw()), Some(b_code), "B ended {end:?} and read {status}");
     assert_eq!(grown.c.try_wait(), Ok(KILLED), "C was not ended, as killed, once B's end was published ({end:?})");
     assert_eq!(grown.d.try_wait(), Ok(KILLED), "D, which the supervisor launched under B, was not ended with B ({end:?})");
     assert_eq!(grown.e.try_wait(), Err(SyscallError::WouldBlock), "E, started under the supervisor, ended with B ({end:?})");
@@ -260,7 +261,7 @@ fn a_manage_only_handle_is_no_place() {
     }
     syscall::close(manage);
     child.kill().expect("kill the C");
-    assert_eq!(child.wait().expect("wait the C").code(), Some(KILLED));
+    assert_eq!(End::from_word(child.wait().expect("wait the C").into_raw()), Some(KILLED));
     println!("  a MANAGE-only handle is no place: PermissionDenied");
 }
 
@@ -317,7 +318,7 @@ fn a_chain_stops_at_max_depth_and_dies_whole() {
     assert!(started >= 2, "the chain stopped at link {started}: {stop}");
 
     first.kill().expect("kill the first link");
-    assert_eq!(first.wait().expect("wait the first link").code(), Some(KILLED));
+    assert_eq!(End::from_word(first.wait().expect("wait the first link").into_raw()), Some(KILLED));
     let live = live_named(&["test_rs_process_tree"]);
     let me = syscall::getpid().raw();
     let others: Vec<_> = live.iter().filter(|(pid, _)| *pid != me).collect();

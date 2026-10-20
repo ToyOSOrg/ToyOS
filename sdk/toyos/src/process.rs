@@ -6,6 +6,7 @@
 //! wait for a process, kill it or read its accounting is exactly what was given
 //! a handle to it.
 
+pub use toyos_abi::end::{End, Fault};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, ProcessStats, SyscallError};
 
@@ -16,17 +17,17 @@ use crate::{AsHandle, OwnedHandle, RawHandle};
 pub struct Process(pub(crate) OwnedHandle);
 
 impl Process {
-    /// Block until it exits, and take the code.
+    /// Block until it ends, and take how.
     ///
-    /// **Repeatable and never missed.** The code is on the object, so waiting a
+    /// **Repeatable and never missed.** The end is on the object, so waiting a
     /// second time answers the same thing and waiting long after the process is
     /// gone still answers.
-    pub fn wait(&self) -> Result<i32, SyscallError> {
+    pub fn wait(&self) -> Result<End, SyscallError> {
         syscall::process_wait(self.0.raw())
     }
 
-    /// The exit code if it has already exited, `Err(WouldBlock)` if not.
-    pub fn try_wait(&self) -> Result<i32, SyscallError> {
+    /// How it ended if it has, `Err(WouldBlock)` if not.
+    pub fn try_wait(&self) -> Result<End, SyscallError> {
         syscall::process_wait_nonblock(self.0.raw())
     }
 

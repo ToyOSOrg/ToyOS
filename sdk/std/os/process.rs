@@ -137,6 +137,23 @@ impl CommandExt for crate::process::Command {
     }
 }
 
+/// ToyOS-specific extensions to [`process::ExitStatus`].
+#[stable(feature = "toyos_ext", since = "1.0.0")]
+pub trait ExitStatusExt {
+    /// The word `SYS_PROCESS_WAIT` answered for this end: an exit, a kill or a
+    /// fault, which `toyos_abi::end::End::from_word` reads. std names no type of
+    /// that crate.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn into_raw(self) -> u64;
+}
+
+#[stable(feature = "toyos_ext", since = "1.0.0")]
+impl ExitStatusExt for crate::process::ExitStatus {
+    fn into_raw(self) -> u64 {
+        self.as_inner().into_raw()
+    }
+}
+
 /// ToyOS-specific extensions to [`process::Child`].
 #[stable(feature = "toyos_ext", since = "1.0.0")]
 pub trait ChildExt {

@@ -749,33 +749,44 @@ impl fmt::Debug for Command {
     }
 }
 
+/// How a child ended: a kill or a fault has no code and is never a success.
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
-pub struct ExitStatus(i32);
+pub struct ExitStatus(toyos::process::End);
 
 impl Default for ExitStatus {
     fn default() -> Self {
-        ExitStatus(0)
+        ExitStatus(toyos::process::End::Exited(0))
     }
 }
 
 impl ExitStatus {
     pub fn exit_ok(&self) -> Result<(), ExitStatusError> {
-        if self.0 == 0 { Ok(()) } else { Err(ExitStatusError(self.0)) }
+        if self.0.success() { Ok(()) } else { Err(ExitStatusError(self.0)) }
     }
 
     pub fn code(&self) -> Option<i32> {
-        Some(self.0)
+        self.0.code()
+    }
+
+    /// See `os::toyos::process::ExitStatusExt::into_raw`.
+    pub fn into_raw(self) -> u64 {
+        self.0.to_word()
     }
 }
 
 impl fmt::Display for ExitStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "exit status: {}", self.0)
+        use toyos::process::End;
+        match self.0 {
+            End::Exited(code) => write!(f, "exit status: {code}"),
+            End::Killed => f.write_str("killed"),
+            End::Fault(fault) => write!(f, "ended by a {} fault", fault.name()),
+        }
     }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct ExitStatusError(i32);
+pub struct ExitStatusError(toyos::process::End);
 
 impl Into<ExitStatus> for ExitStatusError {
     fn into(self) -> ExitStatus {
@@ -785,7 +796,7 @@ impl Into<ExitStatus> for ExitStatusError {
 
 impl ExitStatusError {
     pub fn code(self) -> Option<NonZero<i32>> {
-        NonZero::new(self.0)
+        self.0.code().and_then(NonZero::new)
     }
 }
 
