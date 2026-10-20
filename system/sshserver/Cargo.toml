@@ -12,3 +12,7 @@ tokio = { version = "1", features = ["rt", "net", "macros", "io-util", "sync", "
 [dev-dependencies]
 # Test scratch that is gone on every way out; `--ci host` reds on any left behind.
 toyos-tmpdir = { path = "../../lib/tmpdir" }
+
+[lints.rust]
+# The guest's target, whose `ExitStatusExt` names the signal that ended a child.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("toyos"))'] }

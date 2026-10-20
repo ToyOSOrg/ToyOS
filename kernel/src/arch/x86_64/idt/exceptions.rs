@@ -142,7 +142,6 @@ fn vector_name(vector: Vector) -> &'static str {
 }
 
 /// The `<signal.h>` class a Ring 3 fault on `vector` ends its process as.
-/// `INT3` from Ring 3 is `#GP`, not `#BP`: every gate is DPL 0.
 fn fault_of(vector: Vector) -> Fault {
     match vector {
         Vector::DivideError | Vector::Overflow | Vector::X87FloatingPoint | Vector::SimdFloatingPoint => {
@@ -205,7 +204,11 @@ fn crash_report_exception(ctx: &ExceptionContext) {
                 log!("SIGFPE tid={}: {}", tid, name)
             }
             Vector::GeneralProtection | Vector::StackSegment | Vector::AlignmentCheck => {
-                log!("SIGBUS tid={}: {} (error_code={:#x})", tid, name, ctx.frame.error_code);
+                let label = match fault_of(ctx.vector()) {
+                    Fault::Alignment => "SIGBUS",
+                    _ => "SEGFAULT",
+                };
+                log!("{label} tid={}: {} (error_code={:#x})", tid, name, ctx.frame.error_code);
                 // At CPL 3 an `in` or `out` faults only on a port the bitmap refuses.
                 if let Some(access) = (ctx.vector() == Vector::GeneralProtection)
                     .then(|| port_access_at(ctx.frame.rip, ctx.frame.rdx))

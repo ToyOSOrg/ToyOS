@@ -1,25 +1,12 @@
-//! `#DB` raised from Ring 3, which is a userland bug and not a debugger session.
+//! A debug trap raised from Ring 3, which is a userland bug and not a debugger
+//! session, ends its process as a trap, and the machine stays up.
 //!
-//! **A Ring 3 process can raise `#DB` whenever it likes, and it needs no
-//! privilege to do it.** `RFLAGS.TF` is not a privileged bit — a `popfq` sets
-//! it, and the instruction after that traps — and `INT1` (opcode `0xF1`) raises
-//! the vector directly, without the DPL check `INT n` performs against the gate.
-//! So both arms below are ordinary userland instruction sequences, and both are
-//! things a program can do by accident.
-//!
-//! Neither may reach a kernel report path. `#DB`'s handler used to be a
-//! debugger-session aid — a marker straight out the UART, a `DR7`/`DR6` disarm,
-//! `DR0` read back, a symbol resolved and a backtrace walked — and it *returned
-//! to resume*, so a Ring 3 trap made the kernel walk kernel state on a user
-//! fault and then carry on. With `TF` still set the resumed instruction traps
-//! again, which is a report per instruction for as long as the process runs.
-//!
-//! This is the gate on the answer: `#DB` from Ring 3 is the process's fault and
-//! ends it, exactly as `#BP` and `#UD` from Ring 3 do. The parent asserts the
-//! child reached its trap and never spoke again; `check_debug_trap` in
-//! `tests/toyos.rs` asserts the *kernel's* half out of the serial capture — that
-//! it named the vector in a Ring 3 report, and that the watchpoint report is not
-//! in the capture at all.
+//! **A Ring 3 process needs no privilege to raise one.** `RFLAGS.TF` is not a
+//! privileged bit — a `popfq` sets it, and the instruction after it traps —
+//! `INT1` (opcode `0xF1`) raises `#DB` without the DPL check `INT n` makes, and
+//! `INT3` reaches `#BP` through its DPL 3 gate. Each arm is an ordinary userland
+//! instruction sequence a program can run by accident. The parent asserts the
+//! child reached its trap and never spoke again, and ended as `Fault::Trap`.
 
 use std::io::Write;
 use std::os::toyos::process::ExitStatusExt;
@@ -32,6 +19,7 @@ const SELF_PATH: &str = "/system/bin/test_rs_debug_trap";
 /// The two ways Ring 3 reaches vector 1, and what each is.
 const ARMS: &[(&str, &str)] = &[
     ("int1", "the INT1 instruction, which raises #DB with no DPL check on the gate"),
+    ("int3", "the INT3 instruction, which reaches #BP through its DPL 3 gate"),
     ("single-step", "RFLAGS.TF, set by an ordinary Ring 3 popfq"),
     ("tf-syscall", "RFLAGS.TF across a syscall, where IA32_FMASK decides who takes the trap"),
 ];
@@ -48,7 +36,7 @@ fn test() {
         dies(role, what);
     }
     still_alive();
-    println!("both Ring 3 routes to #DB end the process, and the machine is still here");
+    println!("every Ring 3 route to #DB and #BP ends the process as a trap, and the machine is still here");
 }
 
 /// Spawn one arm and require the kernel to have ended it at the trap.
@@ -108,6 +96,12 @@ fn raise(role: &str) -> ! {
         // toolchain's LLVM rejects `int1` and `icebp` alike — measured, both
         // `invalid instruction mnemonic` — and `.byte 0xf1` is the encoding
         // itself, which is the one form that cannot be the wrong instruction.
+        "int3" => {
+            // SAFETY: one instruction that raises vector 3 and touches no
+            // memory; where the kernel is correct nothing after it runs.
+            unsafe { core::arch::asm!("int3") };
+            println!("SURVIVED int3");
+        }
         "int1" => {
             // SAFETY: one instruction that raises vector 1 and touches no
             // memory. The whole point is that it traps; where the kernel is

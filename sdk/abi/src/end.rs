@@ -36,8 +36,19 @@ pub enum Fault {
 
 const EXITED: u64 = 0;
 const KILLED: u64 = 1;
-const FAULTS: [Fault; 6] =
-    [Fault::Memory, Fault::Alignment, Fault::Instruction, Fault::Arithmetic, Fault::Trap, Fault::Handle];
+
+/// A fault's kind word. Exhaustive, so a new kind is given its word here;
+/// [`End::from_word`] reads each back.
+const fn fault_kind(fault: Fault) -> u64 {
+    match fault {
+        Fault::Memory => 2,
+        Fault::Alignment => 3,
+        Fault::Instruction => 4,
+        Fault::Arithmetic => 5,
+        Fault::Trap => 6,
+        Fault::Handle => 7,
+    }
+}
 
 impl End {
     /// The word `SYS_PROCESS_WAIT` answers: the kind above the low 32 bits and
@@ -46,19 +57,26 @@ impl End {
         match self {
             End::Exited(code) => (EXITED << 32) | code as u32 as u64,
             End::Killed => KILLED << 32,
-            End::Fault(fault) => (KILLED + 1 + fault as u64) << 32,
+            End::Fault(fault) => fault_kind(fault) << 32,
         }
     }
 
     /// The end a word names, or `None` for a word [`Self::to_word`] never makes.
     pub fn from_word(word: u64) -> Option<Self> {
         let (kind, low) = (word >> 32, word as u32);
-        match kind {
-            EXITED => Some(End::Exited(low as i32)),
-            KILLED if low == 0 => Some(End::Killed),
-            _ if low == 0 => kind.checked_sub(KILLED + 1).and_then(|i| FAULTS.get(i as usize)).map(|f| End::Fault(*f)),
-            _ => None,
-        }
+        let fault = match (kind, low) {
+            (EXITED, _) => return Some(End::Exited(low as i32)),
+            (KILLED, 0) => return Some(End::Killed),
+            (_, 1..) => return None,
+            (2, 0) => Fault::Memory,
+            (3, 0) => Fault::Alignment,
+            (4, 0) => Fault::Instruction,
+            (5, 0) => Fault::Arithmetic,
+            (6, 0) => Fault::Trap,
+            (7, 0) => Fault::Handle,
+            _ => return None,
+        };
+        (fault_kind(fault) == kind).then_some(End::Fault(fault))
     }
 
     /// The code an exit chose; `None` for a kill or a fault, which chose none.
@@ -105,6 +123,9 @@ mod tests {
     use super::*;
     use crate::syscall::SyscallError;
 
+    const FAULTS: [Fault; 6] =
+        [Fault::Memory, Fault::Alignment, Fault::Instruction, Fault::Arithmetic, Fault::Trap, Fault::Handle];
+
     fn every_end() -> impl Iterator<Item = End> {
         let exits = [0, 1, 137, 139, -1, i32::MIN, i32::MAX].map(End::Exited);
         exits.into_iter().chain([End::Killed]).chain(FAULTS.map(End::Fault))
@@ -137,7 +158,7 @@ mod tests {
     /// or fault carrying a code.
     #[test]
     fn a_word_no_end_makes_names_none() {
-        let past = (KILLED + 1 + FAULTS.len() as u64) << 32;
+        let past = 8 << 32;
         for word in [past, (KILLED << 32) | 1, End::Fault(Fault::Trap).to_word() | 7] {
             assert_eq!(End::from_word(word), None, "{word:#x}");
         }

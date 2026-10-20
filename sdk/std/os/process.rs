@@ -145,12 +145,21 @@ pub trait ExitStatusExt {
     /// that crate.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn into_raw(self) -> u64;
+
+    /// The `<signal.h>` number a kill or a fault ends a process as, as Unix's
+    /// `ExitStatusExt::signal` answers: `None` for an exit.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn signal(&self) -> Option<i32>;
 }
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
 impl ExitStatusExt for crate::process::ExitStatus {
     fn into_raw(self) -> u64 {
         self.as_inner().into_raw()
+    }
+
+    fn signal(&self) -> Option<i32> {
+        self.as_inner().signal()
     }
 }
 

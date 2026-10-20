@@ -22,7 +22,7 @@ use russh::keys::ssh_key::authorized_keys::AuthorizedKeys;
 use russh::keys::ssh_key::LineEnding;
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PublicKey};
 use russh::server::{Auth, Msg, Server, Session};
-use russh::{Channel, ChannelId, MethodKind, MethodSet};
+use russh::{Channel, ChannelId, MethodKind, MethodSet, Sig};
 use tokio::sync::{mpsc, watch};
 
 /// Where this machine keeps its SSH identity and the keys it trusts: this
@@ -200,14 +200,15 @@ impl SshSession {
 
     /// Run `argv` on this channel: its stdin is channel data, its stdout is
     /// channel data back, its stderr is the channel's extended data, and its
-    /// exit status is the channel's `exit-status`.
+    /// end is the channel's `exit-status` or `exit-signal`.
     ///
     /// `translate_newlines` is the terminal's business, not the protocol's:
     /// there is no PTY layer on this system to turn a program's `\n` into the
     /// `\r\n` a terminal needs, so the one path that has a terminal on the far
     /// end does it here. Every other path is byte-exact.
-    fn run(&mut self, argv: Vec<String>, translate_newlines: bool) {
+    fn run(&mut self, argv: Vec<String>, translate_newlines: bool, session: &Session) {
         let Some(channel) = self.take_channel("program request") else { return };
+        let (id, handle) = (channel.id(), session.handle());
         let (_, out) = channel.split();
 
         let mut child = match Command::new(&argv[0])
@@ -280,12 +281,17 @@ impl SshSession {
                     break;
                 }
             }
-            let status = if abandoned {
-                end(&mut child, &name, &peer)
+            let ended = if abandoned {
+                Ended::Status(end(&mut child, &name, &peer))
             } else {
                 reap(&mut child, &name, &peer, &mut gone).await
             };
-            out.exit_status(status).await.ok();
+            match ended {
+                Ended::Status(status) => out.exit_status(status).await.ok(),
+                Ended::Signal(signal) => {
+                    handle.exit_signal_request(id, signal, false, String::new(), String::new()).await.ok()
+                }
+            };
             out.eof().await.ok();
             out.close().await.ok();
         });
@@ -428,34 +434,77 @@ fn crlf(data: &[u8]) -> Vec<u8> {
 /// question. What it exists for is the child that closed them and kept
 /// running: nothing further can arrive on the channel, and the client is still
 /// there to be answered whenever it does end.
-async fn reap(child: &mut Child, name: &str, peer: &str, gone: &mut watch::Receiver<()>) -> u32 {
+async fn reap(child: &mut Child, name: &str, peer: &str, gone: &mut watch::Receiver<()>) -> Ended {
     let mut backoff = Duration::from_millis(1);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                return match status.code() {
-                    Some(code @ 0..=255) => code as u32,
-                    other => {
+                return match (status.code(), signal_of(&status)) {
+                    (Some(code @ 0..=255), _) => Ended::Status(code as u32),
+                    (_, Some(signal)) => ended_by(signal),
+                    (code, None) => {
                         println!(
-                            "sshserver: {peer}: {name} ended as {other:?}, which is not an exit \
+                            "sshserver: {peer}: {name} ended as {code:?}, which is not an exit \
                              status this protocol carries"
                         );
-                        EXIT_LOST
+                        Ended::Status(EXIT_LOST)
                     }
                 };
             }
             Ok(None) => {}
             Err(e) => {
                 println!("sshserver: {peer}: cannot wait for {name}: {e}");
-                return EXIT_LOST;
+                return Ended::Status(EXIT_LOST);
             }
         }
         tokio::select! {
             _ = tokio::time::sleep(backoff) => {}
-            _ = gone.changed() => return end(child, name, peer),
+            _ = gone.changed() => return Ended::Status(end(child, name, peer)),
         }
         backoff = (backoff * 2).min(Duration::from_millis(25));
     }
+}
+
+/// How a program ended, as the channel carries it.
+#[derive(Debug)]
+enum Ended {
+    /// `exit-status`.
+    Status(u32),
+    /// `exit-signal`.
+    Signal(Sig),
+}
+
+/// The signal that ended a process, as its platform numbers it.
+fn signal_of(status: &std::process::ExitStatus) -> Option<i32> {
+    #[cfg(unix)]
+    use std::os::unix::process::ExitStatusExt;
+    #[cfg(target_os = "toyos")]
+    use std::os::toyos::process::ExitStatusExt;
+    #[cfg(any(unix, target_os = "toyos"))]
+    return status.signal();
+    #[cfg(not(any(unix, target_os = "toyos")))]
+    return None;
+}
+
+/// A program ended by `signal`: `exit-signal` with the name RFC 4254 §6.10
+/// gives it, by the numbers ToyOS, Linux and macOS share, and for any other
+/// `exit-status` 128 plus its number, as a shell reports it.
+fn ended_by(signal: i32) -> Ended {
+    let sig = match signal {
+        1 => Sig::HUP,
+        2 => Sig::INT,
+        3 => Sig::QUIT,
+        4 => Sig::ILL,
+        6 => Sig::ABRT,
+        8 => Sig::FPE,
+        9 => Sig::KILL,
+        11 => Sig::SEGV,
+        13 => Sig::PIPE,
+        14 => Sig::ALRM,
+        15 => Sig::TERM,
+        other => return Ended::Status(128 + other as u32),
+    };
+    Ended::Signal(sig)
 }
 
 /// End a program whose connection is gone. Nothing it writes can reach anyone
@@ -572,7 +621,7 @@ impl russh::server::Handler for SshSession {
     ) -> Result<(), Self::Error> {
         session.channel_success(channel_id)?;
         let translate = self.is_pty;
-        self.run(vec!["/system/bin/shell".to_string()], translate);
+        self.run(vec!["/system/bin/shell".to_string()], translate, session);
         Ok(())
     }
 
@@ -609,7 +658,7 @@ impl russh::server::Handler for SshSession {
             }
         };
         let argv = std::iter::once(program).chain(argv.into_iter().skip(1)).collect();
-        self.run(argv, false);
+        self.run(argv, false, session);
         Ok(())
     }
 
@@ -768,6 +817,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A kill and a memory fault go out as RFC 4254's `KILL` and `SEGV`; a
+    /// signal that list does not name, as a shell's 128 plus its number.
+    #[test]
+    fn a_signal_goes_out_by_its_rfc_name_or_as_a_shell_status() {
+        assert!(matches!(ended_by(9), Ended::Signal(Sig::KILL)));
+        assert!(matches!(ended_by(11), Ended::Signal(Sig::SEGV)));
+        assert!(matches!(ended_by(5), Ended::Status(133)), "SIGTRAP");
+        assert!(matches!(ended_by(7), Ended::Status(135)), "SIGBUS");
+    }
 
     fn key() -> PrivateKey {
         PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap()

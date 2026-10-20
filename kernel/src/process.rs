@@ -8,8 +8,8 @@
 //! `kernel::proclife` decides lifecycle transitions; this file only performs them.
 //!
 //! **What a process writes into the log is two records**: one where its spawn
-//! lands (`crate::loader`) and one where it ends, `exit: <name> pid=N <end>
-//! cpu=Nms …` with the end as `End`'s `Display` writes it, the verdict first and then what that process itself consumed.
+//! lands (`crate::loader`) and one where it ends, `exit: <name> pid=N
+//! code=N|killed|fault=<kind> cpu=Nms …`, the verdict first and then what that process itself consumed.
 //! Each is written every time and charged to the process it names: nothing
 //! here is rate-limited, and a thread's end writes nothing. A reading of the
 //! whole machine is `crate::census`'s, taken once, where the machine ends, by
