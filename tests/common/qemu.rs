@@ -2328,10 +2328,9 @@ fn qemu_command(
     // with no NVMe is a shape, and the argv is the only place it is visible:
     // no console line and no screendump can see a device that is absent.
     //
-    // Its MSI-X table in a BAR of its own, because diskserver drives it and a claim
-    // never maps the BAR holding the table. One controller and one namespace
-    // whichever disk it is: diskserver reads namespace 1 of the one controller
-    // its row names.
+    // Its MSI-X table in BAR 0, QEMU's default, which diskserver's claim maps
+    // with the registers. One controller and one namespace whichever disk it
+    // is: diskserver reads namespace 1 of the one controller its row names.
     let namespace = match shape.storage {
         Storage::Stick { nvme_bytes: 0 } => None,
         Storage::Stick { .. } => {
@@ -2342,7 +2341,7 @@ fn qemu_command(
     };
     if let Some(namespace) = namespace {
         qemu.arg("-device")
-            .arg("nvme,serial=deadbeef,id=nvme0ctl,msix-exclusive-bar=on")
+            .arg("nvme,serial=deadbeef,id=nvme0ctl")
             .arg("-device")
             .arg(format!("nvme-ns,{namespace},bus=nvme0ctl,logical_block_size=512,physical_block_size=512"));
     }

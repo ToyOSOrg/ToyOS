@@ -212,9 +212,9 @@ impl MappedPages {
     fn unmap_from(
         self,
         addr_space: &mut crate::mm::paging::AddressSpace,
-    ) -> crate::mm::Unmapped<PageAlloc> {
-        addr_space.free_and_unmap(self.vaddr);
-        crate::mm::Unmapped::new(self.pages)
+    ) -> crate::mm::Unmapped<(PageAlloc, Option<crate::mm::paging::Detached>)> {
+        let detached = addr_space.free_and_unmap(self.vaddr);
+        crate::mm::Unmapped::new((self.pages, detached))
     }
 
     pub fn release(self, pt: &PageTables) {
@@ -231,7 +231,7 @@ fn release_thread_mappings(
     tls: Option<MappedPages>,
     pt: &PageTables,
     tid: Tid,
-) -> Vec<crate::mm::Unmapped<PageAlloc>> {
+) -> Vec<crate::mm::Unmapped<(PageAlloc, Option<crate::mm::paging::Detached>)>> {
     let keys: Vec<(Tid, u64)> = data.elf.dynamic_tls_blocks.keys()
         .filter(|&&(t, _)| t == tid)
         .copied()
@@ -650,18 +650,20 @@ pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::Pi
     if !maps.iter().any(|m| m.pipe == pipe) {
         return;
     }
+    let mut detached = Vec::new();
     {
         let mut addr_space = pt.lock();
         maps.retain(|m| {
             if m.pipe != pipe {
                 return true;
             }
-            addr_space.free_and_unmap(m.addr);
+            detached.extend(addr_space.free_and_unmap(m.addr));
             false
         });
     }
     // Outside the block: it waits, and a sibling can be spinning on this lock.
     crate::arch::tlb::shootdown(crate::invalidation::Origin::Pipe, crate::invalidation::Half::User);
+    drop(detached);
 }
 
 /// One live `mmap` and its physical pages; the range's registration in the address space's `regions` is separate (placement search, `munmap`).

@@ -32,6 +32,7 @@ use kernel::pcid::{Alloc, Pcid, PcidPool};
 use super::tlb;
 use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
 use crate::mm::{DirectMap, UserAddr, PAGE_2M, PHYS_OFFSET};
+use toyos_userbound::Leaf;
 use crate::sync::{Lock, LockGuard};
 use crate::vma::{self, Occupancy, Region, RegionKind};
 use crate::MemoryMapEntry;
@@ -166,7 +167,8 @@ fn published() {
     unsafe { core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags)) };
 }
 
-/// A root and every table under it, owned together and freed together.
+/// A root and every table under it, freed with the space, or by an unmap
+/// once no walker can reach one ([`Detached`]).
 struct Tables {
     root: Box<Table>,
     children: Vec<Box<Table>>,
@@ -379,31 +381,43 @@ impl AddressSpace {
         published();
     }
 
-    /// Empty level-2 entries (aligned, asserted) mean nothing can be stale.
+    /// Map `size` bytes of `phys` at `vaddr` in the leaves
+    /// [`toyos_userbound::leaves`] chooses, each table filled before it is
+    /// linked. Empty level-2 entries (asserted) mean nothing can be stale.
     pub fn map_range(&mut self, vaddr: UserAddr, phys: u64, size: u64, prot: Prot, cache: CachePolicy) {
-        assert!(vaddr.raw() & (PAGE_2M - 1) == 0, "map_range: vaddr not 2MB-aligned");
-        assert!(phys & (PAGE_2M - 1) == 0, "map_range: phys {phys:#x} not 2MB-aligned");
         if prot == Prot::ReadExec {
             super::cache::make_executable(DirectMap::from_phys(phys).as_ptr::<u8>() as u64, size as usize);
         }
-        let mut offset = 0u64;
-        while offset < size {
-            let va = vaddr.raw() + offset;
+        for leaf in toyos_userbound::leaves(vaddr.raw(), phys, size) {
+            let (va, entry) = match leaf {
+                Leaf::Block { va, pa } => (va, pa | user_leaf(prot, cache)),
+                Leaf::Pages { va, pa, count } => {
+                    let mut pages = Table::new();
+                    for (j, page) in pages.0.iter_mut().take(count as usize).enumerate() {
+                        *page = (pa + j as u64 * PAGE_4K) | user_leaf(prot, cache) | TABLE;
+                    }
+                    let table = self.tables.adopt(pages);
+                    // Filled before any walker can reach it through the link.
+                    published();
+                    (va, table | TABLE | VALID)
+                }
+            };
             let directory = self.tables.directory(va);
             let i = index(va, 2);
             assert!(directory.0[i] & VALID == 0, "map_range: an install at {va:#x} found the present entry {:#x}", directory.0[i]);
-            directory.set(i, (phys + offset) | user_leaf(prot, cache));
-            offset += PAGE_2M;
+            directory.set(i, entry);
         }
         published();
     }
 
-    fn unmap_range(&mut self, vaddr: UserAddr, size: u64) {
+    fn unmap_range(&mut self, vaddr: UserAddr, size: u64) -> Detached {
+        let mut detached = Detached(Vec::new());
         let mut offset = 0u64;
         while offset < size {
-            self.unmap(UserAddr::new(vaddr.raw() + offset));
+            detached.0.extend(self.unmap(UserAddr::new(vaddr.raw() + offset)));
             offset += PAGE_2M;
         }
+        detached
     }
 
     /// Replaces whatever maps `vaddr`, in this space only.
@@ -451,28 +465,33 @@ impl AddressSpace {
 
     /// Ends any futex wait on the frame (its token is a physical address)
     /// before the frame can reach the PMM and be reissued under a waiter.
-    pub fn unmap(&mut self, vaddr: UserAddr) {
+    /// A table of 4 KiB pages it unlinks is answered, with no walker left to
+    /// reach it: `tlb::asid` drops the ASID's translations on every CPU before
+    /// it returns.
+    fn unmap(&mut self, vaddr: UserAddr) -> Option<Box<Table>> {
         let va = vaddr.raw();
         assert!(va & (PAGE_2M - 1) == 0, "unmap: vaddr {va:#x} not 2MB-aligned");
         let asid = self.asid.value();
-        let Some(directory) = self.tables.find_directory(va) else { return };
+        let directory = self.tables.find_directory(va)?;
         let i = index(va, 2);
         let entry = directory.0[i];
         if entry & VALID == 0 {
-            return;
+            return None;
         }
-        // A split window's entries all address one 2 MiB frame, so its first names it.
-        let phys = match directory.child(i) {
-            Some(pages) => pages.0[0] & ADDR_2M,
-            None => entry & ADDR_2M,
-        };
         self.tables.directory(va).set(i, 0);
-        if entry & TABLE != 0 {
-            tlb::asid(asid);
-        } else {
+        if entry & TABLE == 0 {
             tlb::page(asid, va);
+            crate::sched::futex::revoke_range(entry & ADDR_2M, PAGE_2M);
+            return None;
         }
-        crate::sched::futex::revoke_range(phys, PAGE_2M);
+        tlb::asid(asid);
+        let table = entry & ADDR;
+        // SAFETY: valid and a table, so one this space linked; still owned by
+        // `children`, and linked nowhere now.
+        let pages = unsafe { Table::at(table) };
+        crate::mm::revoke_frames(pages.0.iter().filter(|leaf| *leaf & VALID != 0).map(|leaf| leaf & ADDR));
+        let at = self.tables.children.iter().position(|child| child.phys() == table).expect("unmap: a linked table this space owns");
+        Some(self.tables.children.swap_remove(at))
     }
 
     /// Checked here, not at the callers: only a user address names user
@@ -513,16 +532,15 @@ impl AddressSpace {
     }
 
     pub fn alloc_and_map(&mut self, phys: u64, size: u64, prot: Prot, cache: CachePolicy) -> Option<(UserAddr, u64)> {
-        assert!(phys & (PAGE_2M - 1) == 0, "alloc_and_map: phys {phys:#x} not 2MB-aligned");
         let (addr, aligned) = self.regions.alloc_mapped(size)?;
-        self.map_range(addr, phys, aligned, prot, cache);
+        self.map_range(addr, phys, size.next_multiple_of(PAGE_4K), prot, cache);
         Some((addr, aligned))
     }
 
-    pub fn free_and_unmap(&mut self, addr: UserAddr) -> Option<u64> {
+    /// Free a region and unmap it, answering the tables its unmapping unlinked.
+    pub fn free_and_unmap(&mut self, addr: UserAddr) -> Option<Detached> {
         let size = self.regions.remove(addr)?;
-        self.unmap_range(addr, size);
-        Some(size)
+        Some(self.unmap_range(addr, size))
     }
 
     pub fn insert_region(&mut self, addr: UserAddr, region: Region) {
@@ -587,6 +605,12 @@ impl AddressSpace {
         tlb::kernel_page(va);
     }
 }
+
+/// Tables of 4 KiB pages an unmap unlinked, answered as x86-64's are, where
+/// a sibling's walk cache outlives the unlink; here `tlb::asid` already
+/// reached every CPU, so dropping them is safe anywhere.
+#[must_use = "the unmapped tables"]
+pub struct Detached(Vec<Box<Table>>);
 
 /// The kernel's own tables, `TTBR1_EL1`'s.
 static HIGH: Lock<Option<Tables>> = Lock::new(None);
