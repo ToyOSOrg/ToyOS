@@ -1,11 +1,12 @@
 //! The partitions of the disks this kernel drives — the USB disks, until usbd
 //! drives the controller — and the ones the bootloader named.
 //!
-//! **The loader names three partitions** ([`KernelArgs`]): the ROOT it read,
-//! the running slot's volume and the log's. This kernel mounts none of them
-//! but ROOT, which is in memory (`rootfs`); it answers their GUIDs in the
-//! inventory ([`loaded`]) so the file servers for those roles find them, on
-//! whatever disk and whoever drives it.
+//! **The loader names four partitions** ([`KernelArgs`]): the ROOT it read,
+//! the booted slot's volume, the log's and the ESP firmware loaded it from
+//! (`Role::Boot`). This kernel mounts none of them but ROOT, which is in
+//! memory (`rootfs`); it answers their GUIDs in the inventory ([`loaded`]),
+//! so the log and boot file servers find theirs and the supervisor knows the
+//! running slot, on whatever disk and whoever drives it.
 //!
 //! The boot partition's location must match firmware's account on a disk
 //! [`probe`] read, and [`probe_usb_disks`] waits for the disk that carries it

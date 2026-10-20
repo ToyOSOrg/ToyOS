@@ -1090,10 +1090,10 @@ impl<'a> Supervisor<'a> {
     /// **Which slot is idle is the loader's word, not the table's**: the
     /// running ROOT and volume are the ones the loader read, the table is the
     /// one on that ROOT's disk, and the idle slot is the one whose ROOT is not
-    /// it — and
-    /// its two partitions are reached only as `toyos_update::slots::grant`
-    /// admits them: claimed on a disk the kernel drives, and on one the block
-    /// service serves, through connectors minted for each.
+    /// it — and its two partitions are reached only as
+    /// `toyos_update::slots::grant` admits them: claimed on a disk the kernel
+    /// drives, and on one the block service serves, through connectors minted
+    /// for each.
     fn slot_grant(&mut self) -> Result<Extra, String> {
         use toyos_abi::inventory::Role;
         use toyos_update::slots::{BOOT_LABEL, ROOT_LABEL, TABLE_LABEL};
