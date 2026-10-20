@@ -517,7 +517,6 @@ pub fn install() {
 #[derive(Clone, Copy, Debug)]
 pub enum DriverIrq {
     Xhci,
-    Hda,
 }
 
 impl core::fmt::Display for DriverIrq {
@@ -527,7 +526,6 @@ impl core::fmt::Display for DriverIrq {
 }
 
 pub const XHCI_VECTOR: DriverIrq = DriverIrq::Xhci;
-pub const HDA_VECTOR: DriverIrq = DriverIrq::Hda;
 
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the

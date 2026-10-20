@@ -16,6 +16,8 @@ pub struct Dll {
     pub period: f64,
     nominal_period: f64,
     bw: f64,
+    /// Periods counted since the last update that no time has clocked yet.
+    unclocked: u32,
 }
 
 impl Dll {
@@ -25,6 +27,7 @@ impl Dll {
             period: nominal_period_nanos,
             nominal_period: nominal_period_nanos,
             bw: 0.03,
+            unclocked: 0,
         }
     }
 
@@ -33,13 +36,24 @@ impl Dll {
     pub fn reset(&mut self) {
         self.t_estimated = None;
         self.period = self.nominal_period;
+        self.unclocked = 0;
     }
 
-    /// Feed one completion record: `n_periods` buffers finished with a single
-    /// interrupt at `t_actual`. The batch timestamp belongs to the *last* of
-    /// the n grid points, so the prediction error is measured against
-    /// `t_estimated + (n-1)·period`.
-    pub fn update(&mut self, t_actual: f64, n_periods: u32) {
+    /// Feed one completion record: `n_periods` buffers finished, and the first
+    /// `clocked` of them, in play order, end at `t_actual`. The rest completed
+    /// after the message `t_actual` is the time of, so a later record's time
+    /// clocks them.
+    ///
+    /// The timestamp belongs to the *last* grid point it clocks, counting
+    /// every period since the last update, so the prediction error is
+    /// measured against `t_estimated + (n-1)·period` over those `n`.
+    pub fn update(&mut self, t_actual: f64, n_periods: u32, clocked: u32) {
+        assert!(clocked <= n_periods, "dll: {clocked} of {n_periods} periods clocked");
+        if clocked == 0 {
+            self.unclocked += n_periods;
+            return;
+        }
+        let n_periods = core::mem::replace(&mut self.unclocked, n_periods - clocked) + clocked;
         match self.t_estimated {
             None => {
                 self.t_estimated = Some(t_actual + self.period);
@@ -69,7 +83,7 @@ mod tests {
     fn the_first_record_anchors_and_decides_nothing() {
         let mut dll = Dll::new(NOMINAL);
         assert!(dll.t_estimated.is_none());
-        dll.update(1_000.0, 1);
+        dll.update(1_000.0, 1, 1);
         assert_eq!(dll.t_estimated, Some(1_000.0 + NOMINAL));
         assert_eq!(dll.period, NOMINAL);
     }
@@ -84,7 +98,7 @@ mod tests {
         let mut t = 0.0f64;
         for _ in 0..4000 {
             t += real;
-            dll.update(t, 1);
+            dll.update(t, 1, 1);
         }
         assert!(
             (dll.period - real).abs() < NOMINAL * 1e-4,
@@ -104,16 +118,16 @@ mod tests {
     #[test]
     fn a_wild_timestamp_cannot_collapse_or_run_away_the_period() {
         let mut dll = Dll::new(NOMINAL);
-        dll.update(0.0, 1);
+        dll.update(0.0, 1, 1);
         for k in 1..1000u32 {
-            dll.update(k as f64 * NOMINAL * 8.0, 1);
+            dll.update(k as f64 * NOMINAL * 8.0, 1, 1);
         }
         assert_eq!(dll.period, NOMINAL * 2.0);
 
         let mut dll = Dll::new(NOMINAL);
-        dll.update(0.0, 1);
+        dll.update(0.0, 1, 1);
         for k in 1..1000u32 {
-            dll.update(k as f64 * NOMINAL * 0.01, 1);
+            dll.update(k as f64 * NOMINAL * 0.01, 1, 1);
         }
         assert_eq!(dll.period, NOMINAL * 0.5);
     }
@@ -125,13 +139,13 @@ mod tests {
     #[test]
     fn a_batch_is_measured_against_its_last_grid_point() {
         let mut batched = Dll::new(NOMINAL);
-        batched.update(0.0, 1);
-        batched.update(4.0 * NOMINAL, 4);
+        batched.update(0.0, 1, 1);
+        batched.update(4.0 * NOMINAL, 4, 4);
 
         let mut singly = Dll::new(NOMINAL);
-        singly.update(0.0, 1);
+        singly.update(0.0, 1, 1);
         for k in 1..=4 {
-            singly.update(k as f64 * NOMINAL, 1);
+            singly.update(k as f64 * NOMINAL, 1, 1);
         }
         // An exact grid gives zero error either way, so the period is untouched
         // and the estimate is the same next point.
@@ -140,15 +154,49 @@ mod tests {
         assert_eq!(singly.t_estimated, Some(5.0 * NOMINAL));
     }
 
+    /// A period a record counts past the one its time is for is clocked by the
+    /// next record's time, not stamped early with this one's: the grid points
+    /// the two updates measure are the ones a record per period would have.
+    #[test]
+    fn a_period_counted_past_its_message_is_clocked_by_the_next_record() {
+        let mut carried = Dll::new(NOMINAL);
+        carried.update(0.0, 1, 1);
+        carried.update(1.0 * NOMINAL, 3, 1);
+        assert_eq!(carried.t_estimated, Some(2.0 * NOMINAL));
+        carried.update(4.0 * NOMINAL, 1, 1);
+        assert_eq!(carried.t_estimated, Some(5.0 * NOMINAL));
+        assert_eq!(carried.period, NOMINAL);
+
+        // Read as clocking all three, the same records score a two-period
+        // error and the period moves.
+        let mut early = Dll::new(NOMINAL);
+        early.update(0.0, 1, 1);
+        early.update(1.0 * NOMINAL, 3, 3);
+        assert_ne!(early.period, NOMINAL);
+    }
+
+    /// A record whose time clocks none of its periods updates nothing, and its
+    /// periods count toward the next.
+    #[test]
+    fn a_record_clocking_nothing_carries_its_periods() {
+        let mut dll = Dll::new(NOMINAL);
+        dll.update(0.0, 1, 1);
+        dll.update(9e9, 2, 0);
+        assert_eq!(dll.t_estimated, Some(NOMINAL));
+        dll.update(3.0 * NOMINAL, 1, 1);
+        assert_eq!(dll.t_estimated, Some(4.0 * NOMINAL));
+        assert_eq!(dll.period, NOMINAL);
+    }
+
     /// A reset drops the grid entirely: the device restarts its period grid
     /// from whatever is submitted next, so an estimate carried across would
     /// read the discontinuity as drift.
     #[test]
     fn a_reset_forgets_the_grid_and_the_drift() {
         let mut dll = Dll::new(NOMINAL);
-        dll.update(0.0, 1);
+        dll.update(0.0, 1, 1);
         for k in 1..100u32 {
-            dll.update(k as f64 * NOMINAL * 1.1, 1);
+            dll.update(k as f64 * NOMINAL * 1.1, 1, 1);
         }
         assert_ne!(dll.period, NOMINAL);
         dll.reset();

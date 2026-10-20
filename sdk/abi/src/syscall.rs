@@ -128,10 +128,9 @@ pub const SYS_DEBUG: u64 = 92;
 pub const SYS_SCHED_INFO: u64 = 93;
 pub const SYS_PROCESS_STATS: u64 = 94;
 pub const SYS_SET_THREAD_NAME: u64 = 95;
-/// Read one register of a claimed device. See [`device_reg_read`].
+/// Read one register of a claimed PCI function's config space. See
+/// [`device_reg_read`].
 pub const SYS_DEVICE_REG_READ: u64 = 97;
-/// Write one register of a claimed device. See [`device_reg_write`].
-pub const SYS_DEVICE_REG_WRITE: u64 = 98;
 
 /// Read this process's endowment table back: the `(label, handle)` pairs its
 /// parent gave it at spawn, as an `[EndowEntry]` count followed by the entries
@@ -284,23 +283,19 @@ pub const SYS_TRACE_READ: u64 = 127;
 /// See [`acpi_access`], [`acpi_lock_take`] and [`acpi_s5`].
 pub const SYS_ACPI: u64 = 128;
 
-/// Bind the `hda-audio` claim's stream to the listed controller it names. See
-/// [`hda_bind`].
-pub const SYS_HDA_BIND: u64 = 129;
-
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 131;
+pub const SYSCALL_PROFILE_BINS: usize = 130;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_HDA_BIND < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_ACPI < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -1249,9 +1244,6 @@ device_classes! {
     Keyboard = 0 => "keyboard",
     Mouse = 1 => "mouse",
     Framebuffer = 2 => "framebuffer",
-    /// An Intel HDA controller the kernel has brought up but drives no policy
-    /// on.
-    HdaAudio = 5 => "hda-audio",
     /// One PCI function, driven by whoever holds the claim: the kernel binds no
     /// driver to it, keeps config space, puts it in an address space of its own
     /// before it lets it master the bus, and programs its interrupt vector.
@@ -1651,10 +1643,8 @@ pub fn rt_enter(syscap: RawHandle) -> Result<(), SyscallError> {
 
 /// How wide a register access is.
 ///
-/// Not a convenience: a device's registers are 8, 16 and 32 bits and a 32-bit
-/// write to a 16-bit register is a write to its neighbour — HDA's `SDnCTL` and
-/// `SDnSTS` are adjacent bytes of one dword, and the second is the kernel's
-/// alone.
+/// Not a convenience: config space holds 8-, 16- and 32-bit registers, and a
+/// wider read than a register names reads its neighbour too.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u64)]
 pub enum RegWidth {
@@ -1688,13 +1678,9 @@ impl RegWidth {
     }
 }
 
-/// Read one register of the device `handle` claims.
-///
-/// `offset` names a register inside that device's register window, as the
-/// claim's class spells it: a byte offset, or for an HDA claim a
-/// [`crate::hda::Reg`]'s word. The kernel checks it against the device's read
-/// allow-list and refuses anything else by name; there is no way to name an
-/// address here and no way to reach a register the list does not carry.
+/// Read one register of the config space of the PCI function `handle`
+/// claims, at byte `offset`. There is no write: every write config space takes
+/// is the kernel's.
 pub fn device_reg_read(
     handle: RawHandle,
     offset: u64,
@@ -1702,40 +1688,6 @@ pub fn device_reg_read(
 ) -> Result<u32, SyscallError> {
     check(syscall(SYS_DEVICE_REG_READ, handle.0 as u64, offset, width.bytes(), 0))
         .map(|v| v as u32)
-}
-
-/// Write one register of the device `handle` claims.
-///
-/// The allow-list is positive and per-device: an entry is on it because its
-/// value is not an address and indexes nothing the kernel allocated. A missing
-/// entry costs a driver that cannot bring its stream up and says so, which is
-/// the failure mode a refusal list does not have.
-pub fn device_reg_write(
-    handle: RawHandle,
-    offset: u64,
-    width: RegWidth,
-    value: u32,
-) -> Result<(), SyscallError> {
-    check(syscall(
-        SYS_DEVICE_REG_WRITE,
-        handle.0 as u64,
-        offset,
-        width.bytes(),
-        value as u64,
-    ))
-    .map(|_| ())
-}
-
-/// Bind the `hda-audio` claim's stream to the listed controller at
-/// `controller`, and put every other listed controller back into reset.
-///
-/// One-shot for the boot: once a bind has run, the claim's list is the bound
-/// controller alone, at index 0, and binding index 0 again answers success.
-/// [`SyscallError::WouldBlock`] while another bind runs, and
-/// [`SyscallError::Io`] for every call once a bind failed on the device; the
-/// kernel's `hda:` line says why.
-pub fn hda_bind(claim: RawHandle, controller: u8) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_HDA_BIND, claim.0 as u64, controller as u64, 0, 0))
 }
 
 // Ports and namespaces
@@ -2729,7 +2681,6 @@ mod tests {
     #[test]
     fn a_request_writes_back_the_name_it_parsed() {
         for name in [
-            "hda-audio",
             "mouse",
             // The longest entry there is, which is what `MAX_NAME` is for.
             "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4",

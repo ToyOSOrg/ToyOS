@@ -3,10 +3,10 @@
 //! [`Kicker`] knows only a CPU id; [`Machine`] adds the rest of the
 //! task-blind surface (clock, one-shot timer, interrupt gate, halt, trace);
 //! [`Hw`] adds the two operations that carry a task — the context switch and
-//! the finalize sink. The kernel implements them with LAPIC one-shot,
-//! targeted ICR, TSC and the asm switch; the simulator over a virtual
-//! clock and vcpu bookkeeping. No scheduling decision, state transition or
-//! ordering-sensitive code may live behind them.
+//! the finalize sink. The kernel implements them with each architecture's
+//! one-shot timer, targeted IPI, CPU counter and asm switch; the simulator
+//! over a virtual clock and vcpu bookkeeping. No scheduling decision, state
+//! transition or ordering-sensitive code may live behind them.
 
 use crate::sched::cpu::{RunToken, SleepToken};
 use crate::sched::task::{SchedPayload, TaskAccounting, TaskKey};
@@ -91,8 +91,8 @@ pub trait Machine: Kicker + 'static {
     fn now(&self) -> Nanos;
 
     /// Program the one-shot timer for an **absolute** deadline. The kernel's
-    /// LAPIC one-shot is relative, so it converts; TSC-deadline mode is
-    /// absolute and will not.
+    /// one-shot takes a span (`irqchip::arm_one_shot`), so
+    /// `KernelHw::set_timer` converts.
     fn set_timer(&self, deadline: Nanos);
 
     fn stop_timer(&self);
@@ -126,7 +126,7 @@ pub trait Machine: Kicker + 'static {
 
 /// The complete hardware surface. Everything above this trait is shared
 /// between the kernel and the simulator; everything behind it is
-/// LAPIC/TSC/ICR/asm in the kernel and virtual time/pending-IPI bookkeeping
+/// timer/IPI/counter/asm in the kernel and virtual time/pending-IPI bookkeeping
 /// in the sim.
 pub trait Hw: Machine {
     type Payload: SchedPayload;

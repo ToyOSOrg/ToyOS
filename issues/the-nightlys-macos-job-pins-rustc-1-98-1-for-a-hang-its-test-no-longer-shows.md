@@ -137,7 +137,7 @@ PID after 120 s) and with that report's proposed fix
 the fork's compilers exit 0, so the row there tells them apart no more than
 it tells 1.99.0 from 1.98.1.
 
-`guest.yml`, and so `guest / suite` and the nightly's `tcg / suite`, and
+`guest.yml`, and so the nightly's `kvm / suite` and `tcg / suite`, and
 `nightly.yml`'s `portability-linux` install `stable` and log its version:
 the `tcg / suite` of run 37778826093 logged `rustc 1.99.0 (b940084d7
 2026-09-28)`, on x86-64, where this test is compiled right for

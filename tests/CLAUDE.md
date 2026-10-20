@@ -19,3 +19,7 @@ The mechanics live where the work is: profiles and shapes in `tests/common/`, re
 - **A harness field that can be silently inert is this suite's worst defect class** — where two options can describe the same guest they refuse each other by name, and an image is asked what it is armed with.
 - **A test whose premise is arranged by a defect passes for the wrong reason** — a staging device's resource has to survive its own enumeration.
 - **Host suites** are the root `Cargo.toml`'s `[workspace]` members a host builds (`build/hostws.rs`), the kernel's library, the SDK and every program directly under `system/`, `apps/` and `tests/guest/` that `build/userlandhost.rs` finds a test in; `build/ci.rs`'s `host` runs them all. `kernel/loom/` is the memory-ordering check — x86 TSO hides a missing acquire edge from every guest test.
+
+## C corpus
+
+`tests/corpus/` contains only the pinned TinyCC corpus and its licence; changed membership updates the licence count, and `46_grep.c` stays excluded. `NOTICE` accounts for committed third-party files.
