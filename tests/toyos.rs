@@ -205,6 +205,9 @@ const RUST_SKIP: &[&str] = &[
     // It needs ToyOS's own clang and LLD on ROOT, which only its boot stages:
     // `hosted_clang_hello` runs it on tests/images/hostedclangcase.toml.
     "hosted_clang_hello",
+    // A std child's stdio, beside libc's: `libc_children` runs it on
+    // tests/images/libccase.toml.
+    "stdio_named",
     // It claims the xHCI controller `xhci-leave=` leaves alone, which no other
     // boot's kernel does: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.

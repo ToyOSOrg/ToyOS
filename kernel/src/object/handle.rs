@@ -173,12 +173,22 @@ impl HandleTable {
     }
 
     /// A spawned child's table, whose slots 0–2 are its stdin, stdout and
-    /// stderr: what its spawn's slot map names, and nothing else, ever goes
-    /// there unless the child puts it there by number. An endowment installed
-    /// into a gap among them would read as the child's stdio.
+    /// stderr: at its spawn they hold what the slot map names and nothing
+    /// else, so no endowment installed into a gap among them reads as the
+    /// child's stdio. Once the child closes one, its next handle may land
+    /// there.
     pub fn for_child() -> Self {
         let empty = || Slot::Serving { generation: 0, entry: None };
         Self { slots: alloc::vec![empty(), empty(), empty()], free: Vec::new() }
+    }
+
+    /// The handle `slot` holds, at its generation, or `None` for an empty or
+    /// retired slot.
+    pub fn held_at(&self, slot: u16) -> Option<RawHandle> {
+        match self.slots.get(slot as usize)? {
+            Slot::Serving { generation, entry: Some(_) } => Some(RawHandle::new(slot, *generation)),
+            _ => None,
+        }
     }
 
     /// Whether `n` more `install`s can all succeed.

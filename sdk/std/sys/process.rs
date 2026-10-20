@@ -272,12 +272,16 @@ impl Command {
         // The pipes a file server appends a served file from; held until the
         // child has its own copies.
         let mut streams: Vec<toyos::Pipe> = Vec::new();
+        // Copies of this process's own stdio, held until the child has its own.
+        let mut inherited: Vec<toyos::OwnedHandle> = Vec::new();
         let mut stdin_pipe: Option<Pipe> = None;
         let mut stdout_pipe: Option<Pipe> = None;
         let mut stderr_pipe: Option<Pipe> = None;
-        Self::setup_slot(&mut slot_map, &mut child_pipes, &mut streams, &mut stdin_pipe, stdin, 0, true)?;
-        Self::setup_slot(&mut slot_map, &mut child_pipes, &mut streams, &mut stdout_pipe, stdout, 1, false)?;
-        Self::setup_slot(&mut slot_map, &mut child_pipes, &mut streams, &mut stderr_pipe, stderr, 2, false)?;
+        for (pipe, stdio, slot, is_input) in
+            [(&mut stdin_pipe, stdin, 0, true), (&mut stdout_pipe, stdout, 1, false), (&mut stderr_pipe, stderr, 2, false)]
+        {
+            Self::setup_slot(&mut slot_map, &mut child_pipes, &mut streams, &mut inherited, pipe, stdio, slot, is_input)?;
+        }
         let stdio = slot_map.len();
         slot_map.extend_from_slice(&self.extra_slots);
 
@@ -326,6 +330,7 @@ impl Command {
         drop(image);
         drop(child_pipes);
         drop(streams);
+        drop(inherited);
         let handle = spawned.map_err(refused)?;
         Ok((Process { handle }, pipes(stdin_pipe, stdout_pipe, stderr_pipe)))
     }
@@ -334,13 +339,23 @@ impl Command {
         slot_map: &mut Vec<[u32; 2]>,
         child_pipes: &mut Vec<Pipe>,
         streams: &mut Vec<toyos::Pipe>,
+        inherited: &mut Vec<toyos::OwnedHandle>,
         parent_pipe: &mut Option<Pipe>,
         stdio: &Stdio,
         child_slot: u32,
         is_input: bool,
     ) -> io::Result<()> {
+        // What this process's own slot holds, if it holds anything: a slot its
+        // spawn left empty is empty in the child too.
+        let inherit = |from: u16, slot_map: &mut Vec<[u32; 2]>, inherited: &mut Vec<toyos::OwnedHandle>| {
+            if let Some(copy) = toyos::spawn::inherited(from).map_err(refused)? {
+                slot_map.push([child_slot, toyos::AsHandle::as_handle(&copy).0]);
+                inherited.push(copy);
+            }
+            io::Result::Ok(())
+        };
         match stdio {
-            Stdio::Inherit => slot_map.push([child_slot, child_slot]),
+            Stdio::Inherit => inherit(child_slot as u16, slot_map, inherited)?,
             Stdio::MakePipe | Stdio::MakeTtyPipe => {
                 let (r, w) = crate::sys::pipe::pipe()?;
                 if matches!(stdio, Stdio::MakeTtyPipe) {
@@ -363,8 +378,8 @@ impl Command {
                 streams.extend(stream);
             }
             Stdio::InheritPipe(pipe) => slot_map.push([child_slot, pipe.raw_fd() as u32]),
-            Stdio::ParentStdout => slot_map.push([child_slot, 1]),
-            Stdio::ParentStderr => slot_map.push([child_slot, 2]),
+            Stdio::ParentStdout => inherit(1, slot_map, inherited)?,
+            Stdio::ParentStderr => inherit(2, slot_map, inherited)?,
             Stdio::Null => {}
         }
         Ok(())

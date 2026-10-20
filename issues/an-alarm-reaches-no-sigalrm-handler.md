@@ -23,7 +23,7 @@ those cases:
   every thread blocks it.
 
 POSIX gives `alarm` no refusal, and its `SIGALRM` reaches a handler, or waits
-pending on a mask, only through the signals libc imitates from stage 3 of
+pending on a mask, only through the signals libc imitates from stage 4 of
 `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md` on;
 both wait on that stage, its owner.
 

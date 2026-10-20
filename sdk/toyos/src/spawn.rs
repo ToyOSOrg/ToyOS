@@ -17,7 +17,7 @@ use toyos_abi::syscall::{self, EndowEntry, SpawnArgs, SyscallError, MAX_SPAWN_EN
 
 use crate::launch::{self, Launch, LaunchError, Outcome, MAX_LAUNCH_EXTRAS, MAX_LAUNCH_SLOTS};
 use crate::process::{Image, Process};
-use crate::{AsHandle, RawHandle};
+use crate::{AsHandle, OwnedHandle, RawHandle};
 
 /// Whom a child is placed under, whose end takes it down.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -110,8 +110,9 @@ impl Spawn<'_> {
     /// process's namespace under `svc` unless the spawn endows one.
     pub fn direct(&self, env: &[u8], image: Option<&Image>) -> Result<Process, Refused> {
         let path = image_and_name(self.program, self.image).0;
-        if self.endow.len() >= MAX_SPAWN_ENDOWMENTS {
-            return Err(Refused::Invalid("more endowments than a spawn carries beside the namespace"));
+        let names_svc = self.endow.iter().any(|(label, _)| *label == SVC_LABEL);
+        if self.endow.len() + usize::from(!names_svc) > MAX_SPAWN_ENDOWMENTS {
+            return Err(Refused::Invalid("more endowments than a spawn carries"));
         }
         let mut entries = [EndowEntry { label_off: 0, label_len: 0, handle: RawHandle(0), _pad: 0 }; MAX_SPAWN_ENDOWMENTS];
         let mut labels = [0u8; MAX_SPAWN_LABELS_LEN];
@@ -119,7 +120,7 @@ impl Spawn<'_> {
         // A duplicate rather than the handle itself: an endowment is a move,
         // and a parent that gave its namespace away could not spawn a second
         // child.
-        let inherited = match self.endow.iter().any(|(label, _)| *label == SVC_LABEL) {
+        let inherited = match names_svc {
             true => None,
             false => match crate::endow::namespace() {
                 Some(ns) => Some(syscall::dup(ns.as_handle()).map_err(Refused::Syscall)?),
@@ -267,6 +268,21 @@ impl Spawn<'_> {
                 unmade(Unmade::NotSent, None)
             }
         }
+    }
+}
+
+/// A copy of what this process's `slot` holds, for a child to inherit there,
+/// or `None` for a slot it was started without: a stdio slot a spawn left
+/// empty is empty in the child too, as POSIX has a closed descriptor. A
+/// stream's slot is refused as [`Spawn::launch`] refuses its handle.
+pub fn inherited(slot: u16) -> Result<Option<OwnedHandle>, Refused> {
+    if let Some(stream) = crate::net::stream::stream_at(slot) {
+        return Err(Refused::Stream(stream));
+    }
+    match syscall::dup_slot(slot) {
+        Ok(copy) => Ok(Some(OwnedHandle(copy))),
+        Err(SyscallError::NotFound) => Ok(None),
+        Err(e) => Err(Refused::Syscall(e)),
     }
 }
 

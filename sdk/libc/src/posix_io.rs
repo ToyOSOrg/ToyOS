@@ -97,7 +97,6 @@ pub unsafe extern "C" fn creat(path: *const u8, mode: u32) -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
     CLOEXEC.lock().set(raw_fd, false);
-    STDIO.lock().closed(raw_fd as u32);
     syscall::close(fd(raw_fd));
     0
 }
@@ -239,7 +238,6 @@ pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
         Ok(f) => {
             // POSIX: the descriptor `dup2` answers is not closed on `exec`.
             CLOEXEC.lock().set(f.0 as i32, false);
-            STDIO.lock().placed(f);
             // The slot holds something else now, so the stream is asked again.
             match slot {
                 1 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Out),
@@ -407,13 +405,18 @@ pub unsafe extern "C" fn umask(mask: u32) -> u32 {
 }
 
 static CLOEXEC: Lock<CloseOnExec> = Lock::new(CloseOnExec::new());
-static STDIO: Lock<crate::fdreq::Stdio> = Lock::new(crate::fdreq::Stdio::new());
-
-/// What this process holds in slots 0–2, each with whether it is marked
-/// close-on-exec, as `spawnreq::plan` takes them.
-pub(crate) fn stdio_for_spawn() -> [Option<(u32, bool)>; 3] {
-    let cloexec = CLOEXEC.lock();
-    STDIO.lock().held().map(|held| held.map(|h| (h, cloexec.flags(h as i32) != 0)))
+/// What this process holds in slots 0–2, as copies for a child, each with
+/// whether the descriptor is marked close-on-exec, as `spawnreq::plan` takes
+/// them: `None` for a slot it was started without or closed. The copies close
+/// when the caller drops them, once the child has its own.
+pub(crate) fn stdio_for_spawn() -> Result<[Option<(toyos::OwnedHandle, bool)>; 3], toyos::spawn::Refused> {
+    let mut held = [None, None, None];
+    for (slot, at) in (0u16..).zip(&mut held) {
+        if let Some(copy) = toyos::spawn::inherited(slot)? {
+            *at = Some((copy, CLOEXEC.lock().slot_marked(slot)));
+        }
+    }
+    Ok(held)
 }
 
 /// Whether `path` names a file, and not a directory.

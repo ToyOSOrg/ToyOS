@@ -4,6 +4,9 @@
 //! exits 0 once `posix_spawn`, the wait family, `kill`, `environ`, `system`
 //! and `popen` answered as POSIX has them, or with ToyOS's stated departure.
 //!
+//! Beside them std's `stdio_named`: a std child holds the stdio its `Command`
+//! named, as a C one does.
+//!
 //! On QEMU x86-64 (`tests/images/libccase.toml`), every program in one boot:
 //! what they claim is order, completion, contents and counts, which QEMU
 //! establishes, and no hardware is in it.
@@ -13,6 +16,9 @@ use std::time::Duration;
 
 use super::{compile, qemu};
 use qemu::{BootOptions, QemuInstance};
+
+/// std's probe, a binary of `tests/guest/rust-tests`.
+const STD_PROBE: &str = "stdio_named";
 
 /// Each program's bound: `spawn_children_cap` starts and waits for 255.
 const BOUND: Duration = Duration::from_secs(300);
@@ -29,10 +35,12 @@ pub fn libc_children() -> Result<(), String> {
         .map(|name| (name.clone(), compile::link_toyos(&[compile::compile_own_c(&dir, name)], name)))
         .collect();
     let case = compile::repo_root().join("tests/images/libccase.toml");
-    let mut qemu = QemuInstance::boot_with_options(&case, &bins, &[], BootOptions::default());
+    let std_probe = (STD_PROBE.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), STD_PROBE));
+    let mut qemu = QemuInstance::boot_with_options(&case, &bins, &[std_probe], BootOptions::default());
     let mut failed = Vec::new();
-    for name in &names {
-        let result = qemu.run_test(&format!("test_c_{name}"), BOUND);
+    let jobs = names.iter().map(|name| (name.as_str(), format!("test_c_{name}"))).chain([(STD_PROBE, format!("test_rs_{STD_PROBE}"))]);
+    for (name, job) in jobs {
+        let result = qemu.run_test(&job, BOUND);
         match (&result.error, result.exit_code) {
             (None, Some(0)) => {
                 for said in result.stdout.lines().filter(|l| l.contains(&format!("{name}: "))) {

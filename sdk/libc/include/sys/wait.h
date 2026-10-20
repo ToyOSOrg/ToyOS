@@ -14,7 +14,10 @@ extern "C" {
 #define WEXITSTATUS(s) (((s) >> 8) & 0xff)
 #define WTERMSIG(s)    ((s) & 0x7f)
 #define WIFEXITED(s)   (WTERMSIG(s) == 0)
-#define WIFSIGNALED(s) (WTERMSIG(s) != 0)
+#define WIFSIGNALED(s) (WTERMSIG(s) != 0 && WTERMSIG(s) != 0x7f)
+/* No child stops or continues, so no status reads as either. */
+#define WIFSTOPPED(s)   (((s) & 0xff) == 0x7f)
+#define WIFCONTINUED(s) ((s) == 0xffff)
 
 struct rusage;
 

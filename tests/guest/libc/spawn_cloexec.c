@@ -27,9 +27,24 @@ static int child_holds(const char *fd, const posix_spawn_file_actions_t *actions
     return 0;
 }
 
+/* A process started without a stdout starts children of its own: the slot
+   it lacks is no descriptor its children are given, and nothing ends it. */
+static int spawns_without_stdout(void) {
+    char *argv[] = {SELF, "holds", "0", NULL};
+    pid_t pid;
+    if (posix_spawn(&pid, SELF, NULL, NULL, argv, environ) != 0)
+        return 3;
+    int status;
+    if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+        return 4;
+    return system("exit 0") == 0 ? 0 : 5;
+}
+
 int main(int argc, char **argv) {
     if (argc == 3 && strcmp(argv[1], "holds") == 0)
         return holds(atoi(argv[2]));
+    if (argc >= 2 && strcmp(argv[1], "spawner") == 0)
+        return spawns_without_stdout();
 
     CHECK(child_holds("1", NULL), "a child spawned with no actions lacks stdout");
 
@@ -66,6 +81,11 @@ int main(int argc, char **argv) {
     CHECK(posix_spawn_file_actions_addclose(&actions, 1) == 0, "refused");
     CHECK(!child_holds("1", &actions), "the child holds a 1 addclose closed");
     posix_spawn_file_actions_destroy(&actions);
-    printf("spawn_cloexec: FD_CLOEXEC, O_CLOEXEC and addclose each kept a descriptor from the child\n");
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addclose(&actions, 1);
+    int status = waited(spawn_role(SELF, "spawner", "", &actions, NULL));
+    posix_spawn_file_actions_destroy(&actions);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "a child without a stdout, spawning, ended %#x", status);
+    printf("spawn_cloexec: FD_CLOEXEC, O_CLOEXEC and addclose each kept a descriptor from the child, and a child without one spawned its own\n");
     return 0;
 }

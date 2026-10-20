@@ -11,7 +11,7 @@
 use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
-use toyos_abi::end::{End, Fault};
+use toyos_abi::end::End;
 use toyos_abi::RawHandle;
 
 use crate::errcode::EBADF;
@@ -116,24 +116,12 @@ pub(crate) fn plan<P>(
 }
 
 /// The status `waitpid` writes for an end, as `<sys/wait.h>`'s macros read
-/// it: an exit's low byte above the low eight bits, or a signal's number in
-/// the low seven. A kill is `SIGKILL`; a fault is its `<signal.h>` class's
-/// signal, and a handle fault `SIGSEGV`'s, as a pointer is the other way to
-/// name what a process does not hold.
+/// it: an exit's low byte above the low eight bits, or the signal
+/// `toyos::process::signal` names the end by in the low seven.
 pub(crate) fn wait_status(end: End) -> i32 {
-    const SIGILL: i32 = 4;
-    const SIGTRAP: i32 = 5;
-    const SIGBUS: i32 = 7;
-    const SIGFPE: i32 = 8;
-    const SIGKILL: i32 = 9;
-    const SIGSEGV: i32 = 11;
-    match end {
-        End::Exited(code) => (code & 0xff) << 8,
-        End::Killed => SIGKILL,
-        End::Fault(Fault::Memory | Fault::Handle) => SIGSEGV,
-        End::Fault(Fault::Alignment) => SIGBUS,
-        End::Fault(Fault::Instruction) => SIGILL,
-        End::Fault(Fault::Arithmetic) => SIGFPE,
-        End::Fault(Fault::Trap) => SIGTRAP,
+    match (end, toyos::process::signal(end)) {
+        (End::Exited(code), _) => (code & 0xff) << 8,
+        (_, Some(signal)) => signal,
+        (_, None) => unreachable!("only an exit names no signal"),
     }
 }

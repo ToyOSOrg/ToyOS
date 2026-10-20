@@ -74,6 +74,23 @@ pub(super) fn sys_handle_dup(h: RawHandle, want: u64) -> u64 {
     }
 }
 
+/// A second handle to whatever the caller's `slot` holds, `NotFound` for one
+/// that holds nothing.
+pub(super) fn sys_handle_dup_slot(slot: u64) -> u64 {
+    let Ok(slot) = u16::try_from(slot) else {
+        return SyscallError::NotFound.to_u64();
+    };
+    let duplicated = process::with_process_data(|data| {
+        let held = data.handles.held_at(slot).ok_or(SyscallError::NotFound)?;
+        let rights = data.handles.rights_of(held)?;
+        Ok::<_, crate::object::Refusal>(data.handles.duplicate(held, rights)?)
+    });
+    match duplicated {
+        Ok(new_h) => new_h.0 as u64,
+        Err(e) => e.refuse(),
+    }
+}
+
 /// A second handle to `old`, installed at `slot`.
 ///
 /// `slot` is a slot, not a handle: a handle carries a generation this call has no business being told.

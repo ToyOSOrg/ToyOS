@@ -4591,6 +4591,7 @@ version = "0.1.0"
 name = "toyos-libc-copies"
 version = "0.1.0"
 dependencies = [
+ "toyos",
  "toyos-abi",
  "toyos-elf",
 ]

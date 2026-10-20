@@ -39,8 +39,8 @@ const POSIX_SPAWN_SETSIGMASK: i16 = 0x08;
 /// it can see; and a process has no ids to reset.
 const FLAGS: i16 = POSIX_SPAWN_RESETIDS | POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
 
-/// The most children unwaited at once: what one poller watches beside the one
-/// handle the stage that imitates `SIGCHLD` keeps for its own wake
+/// The most children unwaited at once, the track's bound: one poller watches
+/// them all, and its 256th watch is stage 6's notice
 /// (`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`).
 const MAX_CHILDREN: usize = toyos::poller::Poller::MAX_HANDLES as usize - 1;
 
@@ -272,8 +272,11 @@ fn spawn_child(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]>>
 
 /// [`spawn_child`], its place in [`UNWAITED`] taken.
 fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]>>], group: Option<i32>) -> Result<i32, i32> {
+    // Copies of this process's stdio, closed once the child holds its own.
+    let held = crate::posix_io::stdio_for_spawn().map_err(errno_of)?;
+    let stdio = held.each_ref().map(|h| h.as_ref().map(|(copy, marked)| (toyos::AsHandle::as_handle(copy).0, *marked)));
     let plan = spawnreq::plan(
-        crate::posix_io::stdio_for_spawn(),
+        stdio,
         actions,
         |path, oflag, mode| crate::posix_io::open_handle(path, oflag, mode).map(|h| h.0).map_err(crate::errcode::of),
         |handle| syscall::close(RawHandle(handle)),
@@ -282,6 +285,7 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
     for handle in plan.opened {
         syscall::close(RawHandle(handle));
     }
+    drop(held);
     let process = started?;
     // Asked of a child this process just started and holds, which answers.
     let pid = process.stats().expect("posix_spawn: a child's accounting").pid as i32;
@@ -570,6 +574,13 @@ pub unsafe extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut crat
         }
     };
     let stream = unsafe { crate::stdio::fdopen(ours.0 as i32, mode) };
+    if stream.is_null() {
+        // No stream to read the child by: its end goes, and the child is waited for.
+        syscall::close(ours);
+        unsafe { waitpid(pid, ptr::null_mut(), 0) };
+        crate::errno::set(crate::errcode::ENOMEM);
+        return ptr::null_mut();
+    }
     POPENED.lock().push((stream as usize, pid));
     stream
 }

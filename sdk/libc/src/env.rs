@@ -1,9 +1,10 @@
 //! The environment: `environ`, `getenv`, `setenv` and `unsetenv`, read from
 //! the block the kernel started this process with.
 //!
-//! **A string `setenv` replaces or `unsetenv` removes is never freed**, as
-//! glibc's are not: POSIX lets a later call invalidate what `getenv`
-//! answered, and a program that keeps one across it would read freed memory.
+//! **A string `setenv` replaces or `unsetenv` removes is never freed**: a
+//! program that keeps what `getenv` answered across a later call, which POSIX
+//! lets that call invalidate, reads it intact rather than freed. A program
+//! that sets one variable again and again grows its memory by each value.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;

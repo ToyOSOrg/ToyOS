@@ -577,6 +577,12 @@ pub fn is_stream(handle: RawHandle) -> bool {
     TABLE.lock().find(handle).is_some()
 }
 
+/// The stream handle this process holds in table slot `slot`, if one is
+/// there.
+pub fn stream_at(slot: u16) -> Option<RawHandle> {
+    TABLE.lock().handles.iter().flatten().map(|&(held, _)| held).find(|held| held.slot() == slot)
+}
+
 /// A raw handle taken back as a stream: one this process holds an end for
 /// shares it, and any other is refused by name, with nothing written on it.
 pub fn adopt(handle: RawHandle) -> Result<(), Misuse> {

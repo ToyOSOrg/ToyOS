@@ -65,8 +65,11 @@ directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
    `toyos::spawn`, std's launch-or-spawn rule, which std's `Command` now uses
    too. A C child starts with descriptors 0–2 and exactly what its file
    actions name, a stated departure from POSIX, and a spawned child's table
-   keeps slots 0–2 for them (`HandleTable::for_child`): an endowment that
-   filled an empty one read as the child's stdio. libc
+   keeps slots 0–2 for them at its spawn (`HandleTable::for_child`): an
+   endowment that filled an empty one read as the child's stdio. A stdio
+   slot a process was started without is no descriptor of its children
+   (`toyos::spawn::inherited`), and std's stdio answers its errors rather
+   than reading every one as a closed stream (`is_ebadf`). libc
    keeps close-on-exec marks and what slots 0–2 hold (`fdreq`); `waitpid`,
    `wait` and `wait4` answer each child once, by pid, group or any, with
    `<sys/wait.h>`'s status for its stage 2 end (`spawnreq`); `environ`,
@@ -108,8 +111,10 @@ directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
    unwaited children, at most 255 as stage 3 bounds them, the 256th watch
    being stage 6's notice, on its own inbox, and wakes a thread in a blocking
    call through one pipe, so `poll` takes at most 255 descriptors and children
-   never count against them. `ppoll`, `sigpending` and `sigsuspend` come with
-   it. *Exit*, C corpus files beside stage 3's, the mutation that reds an arm
+   never count against them; stage 3's `waitpid(-1)` watches the children
+   unwaited when it was called, so one another thread starts after it, ending
+   first, does not wake it, which libc's own thread ends. `ppoll`,
+   `sigpending` and `sigsuspend` come with it. *Exit*, C corpus files beside stage 3's, the mutation that reds an arm
    after it: under `SIG_IGN`, 256 children each ending before the next all
    spawned, then `ECHILD` (ended children kept); a `ppoll` unblocking
    `SIGCHLD` answering `EINTR` once a child ends, and a second, the child

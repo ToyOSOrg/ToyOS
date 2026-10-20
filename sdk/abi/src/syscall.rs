@@ -282,6 +282,10 @@ pub const SYS_TRACE_READ: u64 = 127;
 /// kernel mediates, the firmware's Global Lock, or the power-off's sleep type.
 /// See [`acpi_access`], [`acpi_lock_take`] and [`acpi_s5`].
 pub const SYS_ACPI: u64 = 128;
+/// A second handle to whatever one of the caller's slots holds, or `NotFound`
+/// for an empty slot: how a spawn hands on a stdio slot it may have been
+/// started without. See [`dup_slot`].
+pub const SYS_HANDLE_DUP_SLOT: u64 = 129;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -289,13 +293,13 @@ pub const SYS_ACPI: u64 = 128;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 130;
+pub const SYSCALL_PROFILE_BINS: usize = 131;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_ACPI < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_HANDLE_DUP_SLOT < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -2092,6 +2096,14 @@ pub fn dup_narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, Sysc
 pub fn dup2(handle: RawHandle, slot: u16) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_HANDLE_DUP_AT, handle.0 as u64, slot as u64, 0, 0))
         .map(|v| RawHandle(v as u32))
+}
+
+/// A second handle to whatever this process's `slot` holds, with its rights;
+/// `Err(NotFound)` for a slot that holds nothing. Asked of the process's own
+/// table by slot, so an empty one is an answer and not a handle it does not
+/// hold.
+pub fn dup_slot(slot: u16) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_HANDLE_DUP_SLOT, slot as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
 /// Get the current process ID.
