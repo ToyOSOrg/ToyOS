@@ -23,6 +23,7 @@ extern crate alloc;
 pub mod aead;
 mod aes;
 mod arch;
+mod block;
 mod chacha;
 mod ct;
 pub mod ecc;

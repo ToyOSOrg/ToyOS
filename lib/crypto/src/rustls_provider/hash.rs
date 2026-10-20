@@ -20,7 +20,7 @@ impl TlsHash for Sha384 {
     const ID: hash::HashAlgorithm = hash::HashAlgorithm::SHA384;
 }
 struct Context<H>(H);
-fn finish<H: Digest>(h: H) -> hash::Output {
+fn finish<H: Digest>(mut h: H) -> hash::Output {
     let mut out = Secret([0; 64]);
     h.finish_into(&mut out.0[..H::OUTPUT_LEN])
         .expect("fixed digest size");
