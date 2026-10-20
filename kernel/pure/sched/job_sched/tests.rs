@@ -567,11 +567,11 @@ fn revoking_an_exited_worker_is_refused_not_a_panic() {
 }
 
 /// A new job alone on its CPU, compared by a fairness step only with an empty
-/// CPU, keeps its standing until it meets a job: a hog that has shared a CPU
-/// once (so holds no standing of its own) and then run alone for a second,
+/// CPU, is still floored when it first meets a job: a hog that has shared a
+/// CPU once (so is not returning itself) and then run alone for a second,
 /// moved in, then shares with it at once.
 #[test]
-fn a_lone_job_keeps_its_standing_until_it_meets_another() {
+fn a_new_job_is_floored_when_it_first_meets_another() {
     let mut s = machine(3);
     let hog = s.create_job(WEIGHT_UNIT);
     let filler = s.create_job(WEIGHT_UNIT);

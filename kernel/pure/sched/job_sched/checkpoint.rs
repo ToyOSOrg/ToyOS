@@ -117,12 +117,18 @@ fn counterexample_a_fair_and_an_unfair_placement_have_the_same_loads() {
 type Scenario = (&'static str, fn(&mut Sim, u32));
 type Shape = (&'static str, fn() -> crate::sched::topology::Topology);
 
-fn scaled_scenarios() -> [Scenario; 8] {
+fn scaled_scenarios() -> [Scenario; 11] {
     [
         ("m+1 single-thread jobs", |sim, m| {
             for c in 0..=m {
                 let j = sim.job(WEIGHT_UNIT);
                 sim.thread(j, Work::Hog, CpuId(c % m), false);
+            }
+        }),
+        ("m+1 single-thread jobs, 20 ms run / 10 us sleep", |sim, m| {
+            for c in 0..=m {
+                let j = sim.job(WEIGHT_UNIT);
+                sim.thread(j, Work::Duty { run: 20 * MS, sleep: 10 * US }, CpuId(c % m), false);
             }
         }),
         ("{A,A}{A,B}{B}{B} per 4 CPUs", |sim, m| {
@@ -162,6 +168,24 @@ fn scaled_scenarios() -> [Scenario; 8] {
         ("2m + m hogs, churn every 10 ms", |sim, m| two_jobs(sim, m, Work::Hog, 10 * MS)),
         ("2m hogs + m duty 2/0.3 ms, churn every 10 ms", |sim, m| two_jobs(sim, m, DUTY, 10 * MS)),
         ("2m hogs + m duty 2/0.3 ms, churn every 1 ms", |sim, m| two_jobs(sim, m, DUTY, MS)),
+        ("m duty 1/0.1 ms + 2m hogs", |sim, m| {
+            let (s, h) = (sim.job(WEIGHT_UNIT), sim.job(WEIGHT_UNIT));
+            for i in 0..m {
+                sim.thread(s, Work::Duty { run: MS, sleep: 100 * US }, CpuId(i), false);
+            }
+            for i in 0..2 * m {
+                sim.thread(h, Work::Hog, CpuId(i % m), false);
+            }
+        }),
+        ("m duty 1/(0.1 + i/1000) ms + 2m hogs", |sim, m| {
+            let (s, h) = (sim.job(WEIGHT_UNIT), sim.job(WEIGHT_UNIT));
+            for i in 0..m {
+                sim.thread(s, Work::Duty { run: MS, sleep: 100 * US + u64::from(i) * US }, CpuId(i), false);
+            }
+            for i in 0..2 * m {
+                sim.thread(h, Work::Hog, CpuId(i % m), false);
+            }
+        }),
         ("2m (weight 2) + 2m (weight 1)", |sim, m| {
             let (a, b) = (sim.job(2 * WEIGHT_UNIT), sim.job(WEIGHT_UNIT));
             for i in 0..2 * m {
@@ -201,8 +225,26 @@ fn two_jobs(sim: &mut Sim, m: u32, work: Work, churn: u64) {
 ///   disjoint CPUs can grow theirs faster, and a job spread over `k` CPUs can
 ///   hold `k·lag_bound`.
 ///
+/// One case is open and listed in [`OPEN`]: there the job's error is held to
+/// that entry's own ceiling instead, and the test says so when it runs.
+///
 /// The cost is printed: placement changes and migrations per second, beside
 /// the scenarios' own random migrations.
+/// Open cases of the cross-CPU rule, with the ceiling each is held to.
+///
+/// - **A dip below the share is repaid later.** A job whose runnable count
+///   dips below its fluid share without reaching zero shows a deficit against
+///   the jobs beside it, and ordering by normalized service repays it after
+///   the dip. On four identical CPUs, each with one sleeper and two hogs,
+///   exact ordering runs the four sleepers in lock-step, so their dips
+///   coincide and the job is over-served by about 1.25% (205 ms over 8 s,
+///   growing). Desynchronized by 1 µs per thread (the scenario after it) the
+///   same job stays within 41 ms. "A job with no waiting thread accrues no
+///   deficit", as a per-job rule, was tried in two forms (at each ordering,
+///   and once when a thread starts waiting): both forgave genuine deficits and
+///   made other scenarios far worse.
+const OPEN: [(&str, &str, f64); 1] = [("flat4", "m duty 1/0.1 ms + 2m hogs", 250.0)];
+
 #[test]
 fn cross_cpu_lag_stays_within_its_ceiling_on_every_scenario_and_shape() {
     let p = Params::DEFAULT;
@@ -234,12 +276,18 @@ fn cross_cpu_lag_stays_within_its_ceiling_on_every_scenario_and_shape() {
                 if partners != Partners::Rotating {
                     continue;
                 }
+                let open = OPEN.iter().find(|o| o.0 == shape && o.1 == name).map(|o| o.2);
+                if let Some(open) = open {
+                    println!("  OPEN case, held to {open:.0} ms instead");
+                }
                 for (j, job) in sim.jobs().iter().enumerate() {
                     let scale = (sim.weight(*job) as f64 / WEIGHT_UNIT as f64).max(1.0);
                     for w in [100 * MS, 1000 * MS, 4000 * MS, 8000 * MS] {
                         let e = sim.window_error(j, w, Nanos::ZERO);
-                        worst = worst.max(e / scale);
-                        if e > ceiling * scale {
+                        if open.is_none() {
+                            worst = worst.max(e / scale);
+                        }
+                        if e > open.unwrap_or(ceiling) * scale {
                             over.push(format!("{shape} {name}: job {j} {e:.1} ms over {} ms", w / MS));
                         }
                     }
@@ -247,35 +295,8 @@ fn cross_cpu_lag_stays_within_its_ceiling_on_every_scenario_and_shape() {
             }
         }
     }
-    println!("rotating: worst error per unit of weight {worst:.1} ms against a ceiling of {ceiling:.0} ms");
+    println!("rotating: worst error per unit of weight {worst:.1} ms against a ceiling of {ceiling:.0} ms, open cases aside");
     assert!(over.is_empty(), "{}", over.join("\n"));
-}
-
-/// **Counterexample for cross-CPU fairness.** Four threads that run 1 ms and
-/// sleep 0.1 ms, beside eight hogs, on four CPUs. The sleepers fall into step,
-/// so the job's runnable count often dips below the two CPUs it is entitled to
-/// without reaching zero. The fluid share gives the hogs the difference; the
-/// per-job counter cannot tell a demand dip from a placement deficit, so it
-/// repays the dip afterwards, and the job is over-served by about 1.25% for as
-/// long as it runs. Telling the two apart needs the job's entitlement, which
-/// depends on every job's demand: a global quantity. A job whose whole demand
-/// stops (every thread asleep) is placed at its standing on return and is
-/// not repaid.
-#[test]
-fn counterexample_a_dip_below_the_share_is_repaid_later() {
-    let mut sim = Sim::new(flat(4), Params::DEFAULT);
-    let s = sim.job(WEIGHT_UNIT);
-    let h = sim.job(WEIGHT_UNIT);
-    for i in 0..4 {
-        sim.thread(s, Work::Duty { run: MS, sleep: 100 * US }, CpuId(i), false);
-    }
-    for i in 0..8 {
-        sim.thread(h, Work::Hog, CpuId(i % 4), false);
-    }
-    sim.run_until(SPAN);
-    println!("{}", sim.report("S4 duty 1 ms / 0.1 ms beside H8 hogs on 4, cross-CPU", Nanos::ZERO, &WINDOWS));
-    let over_served = share(&sim, s) - sim.ideal[&s] / sim.now.0 as f64;
-    assert!(over_served > 0.01, "the dip is no longer repaid: {over_served:.4} CPUs");
 }
 
 fn rt_machine(

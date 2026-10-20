@@ -79,8 +79,11 @@ pub struct Params {
     /// CPU time from the first to the second.
     pub move_lead: u64,
     /// The most normalized service a job may trail another on the same CPU
-    /// by: the cross-CPU counterpart of `lag_bound`, and the longest any job
-    /// can keep a CPU's other jobs waiting (per unit of their weight).
+    /// by: the cross-CPU counterpart of `lag_bound`. It is also a latency
+    /// cost: a job that far behind holds the CPU ahead of the jobs beside it
+    /// until it catches up — up to 64 ms per unit of their weight, about four
+    /// 60 Hz frames for an interactive thread, where EEVDF alone allows one
+    /// request.
     pub lead_cap: u64,
 }
 
@@ -172,16 +175,15 @@ struct Job {
     runnable: u32,
     /// Ordinary service divided by weight, in ns at one weight unit, wrapping:
     /// equal for every job the fluid share does not cap. Written at charges
-    /// (with `served_rem`, the division's remainder), by the `lead_cap` clamp
-    /// and by a restored standing.
+    /// (with `served_rem`, the division's remainder) and by the floors of
+    /// [`JobSched::order_by_service`].
     served: u64,
     served_rem: u64,
-    /// While the job has no runnable thread, and until it next shares a CPU
-    /// with another job: its normalized service relative to the jobs it last
-    /// shared one with, clamped to `lag_bound`. Restored against the jobs it
-    /// meets next, so a sleep earns no cross-CPU credit and costs none, as lag
-    /// carries a sleeper within one queue. A new job starts level.
-    standing: Option<i64>,
+    /// Set for a new job and when the job's last runnable thread blocks;
+    /// cleared when the job next shares a CPU with another job, where a
+    /// deficit beyond `lag_bound` is forgiven and any surplus kept — so a
+    /// sleep earns no credit, and a lone job's lead survives its sleeps.
+    returning: bool,
     /// The CPUs holding a group of the job, sorted.
     cpus: Vec<CpuId>,
     rt: RtOwner,
@@ -275,7 +277,7 @@ impl JobSched {
             runnable: 0,
             served: 0,
             served_rem: 0,
-            standing: Some(0),
+            returning: true,
             cpus: Vec::new(),
             rt: RtOwner::default(),
         };
@@ -582,11 +584,10 @@ impl JobSched {
         }
     }
 
-    /// Order `cpu`'s groups by their jobs' normalized service. First, a job
-    /// back from having no runnable thread (or new) is placed at its standing
-    /// against the jobs here, and any job trailing the CPU's leader by more
-    /// than `lead_cap` is raised to that distance. Then each group's lag
-    /// target is `w·(mean − served)`
+    /// Order `cpu`'s groups by their jobs' normalized service. First, floors:
+    /// a returning job trails the other jobs here by at most `lag_bound`, and
+    /// any job trails the CPU's leader by at most `lead_cap`; a surplus is
+    /// never taken away. Then each group's lag target is `w·(mean − served)`
     /// clamped to `lag_bound`, applied together by [`Eevdf::assign_lags`]: a
     /// group whose target was clamped keeps it, less its share of whatever the
     /// clamping left unbalanced.
@@ -595,7 +596,7 @@ impl JobSched {
             return;
         }
         let c = cpu.0 as usize;
-        self.restore_standings(jobs);
+        self.floor_returning(jobs);
         let reference = self.job(jobs[0]).served;
         let leader = jobs.iter().map(|&j| lead(self.job(j).served, reference)).max().unwrap();
         let cap = self.params.lead_cap as i64;
@@ -631,37 +632,22 @@ impl JobSched {
         self.thread_mut(id).state = State::Blocked;
     }
 
-    /// `job`'s normalized service against the mean of the other jobs on CPU
-    /// `c`, clamped to `lag_bound`; `None` with no other job there.
-    fn standing_on(&self, c: usize, job: JobId) -> Option<i64> {
-        let others: Vec<u64> =
-            self.cpus[c].members.iter().filter(|g| g.job != job).map(|g| self.job(g.job).served).collect();
-        let &reference = others.first()?;
-        let mean = others.iter().map(|&s| lead(s, reference)).sum::<i64>() / others.len() as i64;
+    /// Raise each returning job among `jobs` to at least `lag_bound` below the
+    /// mean of the others, and clear `returning`.
+    fn floor_returning(&mut self, jobs: &[JobId]) {
         let bound = self.params.lag_bound as i64;
-        Some((lead(self.job(job).served, reference) - mean).clamp(-bound, bound))
-    }
-
-    /// Place every job among `jobs` that holds a standing at that standing
-    /// against the mean of those that do not — or, if all do, against the
-    /// first of them — and clear it. A lone job keeps its standing until it
-    /// meets another.
-    fn restore_standings(&mut self, jobs: &[JobId]) {
-        let pending: Vec<JobId> = jobs.iter().copied().filter(|&j| self.job(j).standing.is_some()).collect();
-        if pending.is_empty() || jobs.len() < 2 {
-            return;
-        }
-        let settled: Vec<JobId> = jobs.iter().copied().filter(|&j| self.job(j).standing.is_none()).collect();
-        let (reference, mean) = match settled.first() {
-            Some(&first) => {
-                let r = self.job(first).served;
-                (r, settled.iter().map(|&j| lead(self.job(j).served, r)).sum::<i64>() / settled.len() as i64)
+        for &j in jobs {
+            if !self.job(j).returning {
+                continue;
             }
-            None => (self.job(pending[0]).served, self.job(pending[0]).standing.unwrap()),
-        };
-        for j in pending {
-            let standing = self.job_mut(j).standing.take().unwrap();
-            self.job_mut(j).served = reference.wrapping_add((mean + standing) as u64);
+            let others: Vec<u64> = jobs.iter().filter(|&&o| o != j).map(|&o| self.job(o).served).collect();
+            let reference = others[0];
+            let mean = others.iter().map(|&s| lead(s, reference)).sum::<i64>() / others.len() as i64;
+            let job = self.job_mut(j);
+            if lead(job.served, reference) < mean - bound {
+                job.served = reference.wrapping_add((mean - bound) as u64);
+            }
+            job.returning = false;
         }
     }
 
@@ -808,9 +794,8 @@ impl JobSched {
         self.thread_mut(run.tid).unblocked_rt = 0;
         // The job's last runnable thread sleeps; a migration leaves and enters
         // without one.
-        if fair && self.job(job).runnable == 0 && self.job(job).standing.is_none() {
-            let standing = self.standing_on(c, job).unwrap_or(0);
-            self.job_mut(job).standing = Some(standing);
+        if fair && self.job(job).runnable == 0 {
+            self.job_mut(job).returning = true;
         }
         run.tid
     }
@@ -978,8 +963,7 @@ impl JobSched {
     ///
     /// Only counts per job enter the judgement, so candidates are one thread
     /// per group (a waiting one if the group has one): with `g` groups on the
-    /// pair, `O(g²)` candidates, each judged in `O(g)`. A job on the pair that
-    /// holds a standing is first placed at it. Reads: the pair's queues, and
+    /// pair, `O(g²)` candidates, each judged in `O(g)`. Reads: the pair's queues, and
     /// for each job on them its weight, runnable count, normalized service and
     /// set of CPUs.
     pub fn fairness_move(&mut self, cpu: CpuId, partners: &[CpuId]) -> Option<Move> {
@@ -988,8 +972,6 @@ impl JobSched {
             if other == cpu {
                 continue;
             }
-            let jobs = self.jobs_on(cpu, other);
-            self.restore_standings(&jobs);
             for (gap, change) in self.changes(cpu, other) {
                 if best.as_ref().is_none_or(|(g, _)| gap > *g) {
                     best = Some((gap, change));
