@@ -46,8 +46,9 @@ pub const MAX_JOB_WEIGHT: u64 = 256 * WEIGHT_UNIT;
 /// The smallest job weight: 1/256 of a unit, so a job's normalized service
 /// grows by at most 256 per ns and its `u64` wraps after 2^56 ns of the job's
 /// CPU time. Comparisons are wrapping differences, sound while two compared
-/// jobs are within 2^63 of each other — `lead_cap` keeps every compared pair
-/// far closer.
+/// jobs are within 2^63 of each other: jobs on one CPU are kept within
+/// `lead_cap`, and two that never share one would have to diverge by about a
+/// CPU-year at this weight.
 pub const MIN_JOB_WEIGHT: u64 = WEIGHT_UNIT / 256;
 
 /// The engineering parameters, all in ns.
@@ -77,10 +78,9 @@ pub struct Params {
     /// Normalized service a job must lead another by before placement moves
     /// CPU time from the first to the second.
     pub move_lead: u64,
-    /// The most normalized service a job may trail another on the same CPU, or
-    /// on a CPU it is compared with, by: the cross-CPU counterpart of
-    /// `lag_bound`, and the longest a stale job can keep a CPU's other jobs
-    /// waiting (per unit of their weight).
+    /// The most normalized service a job may trail another on the same CPU
+    /// by: the cross-CPU counterpart of `lag_bound`, and the longest any job
+    /// can keep a CPU's other jobs waiting (per unit of their weight).
     pub lead_cap: u64,
 }
 
@@ -172,8 +172,8 @@ struct Job {
     runnable: u32,
     /// Ordinary service divided by weight, in ns at one weight unit, wrapping:
     /// equal for every job the fluid share does not cap. Written at charges
-    /// (with `served_rem`, the division's remainder) and by the `lead_cap`
-    /// clamps.
+    /// (with `served_rem`, the division's remainder), by the `lead_cap` clamp
+    /// and by a restored standing.
     served: u64,
     served_rem: u64,
     /// While the job has no runnable thread, and until it next shares a CPU
@@ -978,17 +978,18 @@ impl JobSched {
     ///
     /// Only counts per job enter the judgement, so candidates are one thread
     /// per group (a waiting one if the group has one): with `g` groups on the
-    /// pair, `O(g²)` candidates, each judged in `O(g)`. Each pair first raises
-    /// any of its jobs trailing the pair's leader by more than `lead_cap` to
-    /// that distance. Reads: the pair's queues, and for each job on them its
-    /// weight, runnable count, normalized service and set of CPUs.
+    /// pair, `O(g²)` candidates, each judged in `O(g)`. A job on the pair that
+    /// holds a standing is first placed at it. Reads: the pair's queues, and
+    /// for each job on them its weight, runnable count, normalized service and
+    /// set of CPUs.
     pub fn fairness_move(&mut self, cpu: CpuId, partners: &[CpuId]) -> Option<Move> {
         let mut best: Option<(i64, Move)> = None;
         for &other in partners {
             if other == cpu {
                 continue;
             }
-            self.clamp_trailing(cpu, other);
+            let jobs = self.jobs_on(cpu, other);
+            self.restore_standings(&jobs);
             for (gap, change) in self.changes(cpu, other) {
                 if best.as_ref().is_none_or(|(g, _)| gap > *g) {
                     best = Some((gap, change));
@@ -1023,20 +1024,6 @@ impl JobSched {
         jobs.sort_unstable();
         jobs.dedup();
         jobs
-    }
-
-    fn clamp_trailing(&mut self, a: CpuId, b: CpuId) {
-        let jobs = self.jobs_on(a, b);
-        let Some(&first) = jobs.first() else { return };
-        self.restore_standings(&jobs);
-        let reference = self.job(first).served;
-        let leader = jobs.iter().map(|&j| lead(self.job(j).served, reference)).max().unwrap();
-        let cap = self.params.lead_cap as i64;
-        for j in jobs {
-            if leader - lead(self.job(j).served, reference) > cap {
-                self.job_mut(j).served = reference.wrapping_add((leader - cap) as u64);
-            }
-        }
     }
 
     /// Each job's ordinary rate on `a` plus `b`, in CPUs scaled by 2^32, with

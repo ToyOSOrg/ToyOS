@@ -566,22 +566,23 @@ fn revoking_an_exited_worker_is_refused_not_a_panic() {
     assert_eq!(s.revoke_rt(w, Nanos::ZERO), Err(Refused::Gone));
 }
 
-/// The same on two CPUs: the late job wakes onto an idle CPU, a fairness step
-/// compares it with an empty CPU, and only then does the hog arrive. Its
-/// standing waits for a job to stand against.
+/// A new job alone on its CPU, compared by a fairness step only with an empty
+/// CPU, keeps its standing until it meets a job: a hog that has run alone on
+/// another CPU for a second, moved in, then shares with it at once.
 #[test]
-fn stale_credit_survives_no_comparison_with_an_empty_cpu() {
-    let mut s = machine(2);
+fn a_lone_job_keeps_its_standing_until_it_meets_another() {
+    let mut s = machine(3);
     let hog = s.create_job(WEIGHT_UNIT);
     let late = s.create_job(WEIGHT_UNIT);
     let (h, l) = (s.spawn(hog), s.spawn(late));
-    s.wake(h, cpu(0), Nanos::ZERO);
+    s.wake(h, cpu(1), Nanos::ZERO);
     let mut now = Nanos::ZERO;
-    run(&mut s, cpu(0), &mut now, 1000 * MS);
-    s.block(cpu(0), now);
+    run(&mut s, cpu(1), &mut now, 1000 * MS);
     s.wake(l, cpu(0), now);
-    assert_eq!(s.fairness_move(cpu(0), &[cpu(1)]), None);
-    s.wake(h, cpu(0), now);
+    s.schedule(cpu(0), now);
+    assert_eq!(s.fairness_move(cpu(0), &[cpu(2)]), None);
+    s.preempt(cpu(1), now);
+    s.migrate(h, cpu(0), now);
     s.schedule(cpu(0), now);
     assert!(s.served(hog).wrapping_sub(s.served(late)) as i64 <= P.lag_bound as i64);
 }
