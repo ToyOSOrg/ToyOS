@@ -567,16 +567,24 @@ fn revoking_an_exited_worker_is_refused_not_a_panic() {
 }
 
 /// A new job alone on its CPU, compared by a fairness step only with an empty
-/// CPU, keeps its standing until it meets a job: a hog that has run alone on
-/// another CPU for a second, moved in, then shares with it at once.
+/// CPU, keeps its standing until it meets a job: a hog that has shared a CPU
+/// once (so holds no standing of its own) and then run alone for a second,
+/// moved in, then shares with it at once.
 #[test]
 fn a_lone_job_keeps_its_standing_until_it_meets_another() {
     let mut s = machine(3);
     let hog = s.create_job(WEIGHT_UNIT);
+    let filler = s.create_job(WEIGHT_UNIT);
     let late = s.create_job(WEIGHT_UNIT);
-    let (h, l) = (s.spawn(hog), s.spawn(late));
+    let (h, f, l) = (s.spawn(hog), s.spawn(filler), s.spawn(late));
     s.wake(h, cpu(1), Nanos::ZERO);
+    s.wake(f, cpu(1), Nanos::ZERO);
     let mut now = Nanos::ZERO;
+    while s.schedule(cpu(1), now) != Some(f) {
+        now = now.after(MS);
+        s.charge(cpu(1), now);
+    }
+    s.block(cpu(1), now);
     run(&mut s, cpu(1), &mut now, 1000 * MS);
     s.wake(l, cpu(0), now);
     s.schedule(cpu(0), now);
