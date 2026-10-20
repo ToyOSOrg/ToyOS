@@ -55,9 +55,25 @@ that run is red and saves nothing. Until an entry is sealed again, a pull
 request restores the last sealed one, or runs cold once the runner image has
 moved; either way its verdict is its steps'.
 
+That is main's state since 2026-10-15, the second time, after 2026-10-05's
+(`issues/a-red-nightly-on-main-is-reported-to-nobody.md`). Every scheduled
+`host` since is red at its seal and only there, every earlier step green: run
+38701484274 (979d4c539) counted 8,034,022,781 B in 17,193 files, and runs
+38868708235, 39013160165, 39108067326, 39221595037 and 39390441510, all at
+0e6716fc0, 8,033,230,395 to 8,033,351,794 B in 17,181 files. The last entry
+saved is run 38533374419's (f0a987bc6, 2026-10-14): 7,293,414,884 B in 15,246
+files sealed, and the cache list says it stores 1,867,126,459 B, a ratio of
+3.91. The fifteen landings f0a987bc6..979d4c539 added 740,607,897 B and 1,947
+files; which of them did is not measured. The 8 GB is this module's bound on
+uncompressed bytes, not GitHub's: at that ratio the refused tree would store
+about 2.06 GB. The repository's list held 10,562,836,502 B in 24 entries on
+2026-10-20 regardless, the host entry and 23 toolchain layers. The seal lines of
+these runs and that cache list: https://github.com/ToyOSOrg/evidence/tree/a36ad035c72df67b46d2ccee7a916fe5f521a5a3 (`nightly-host-seal`, `cache-list.json`).
+
 Owner: the host cache (`build/cicache.rs`).
 
-**Exit condition.** Two gates that red:
+**Exit condition.** Nightly's `host` seals and saves main's tree again, and
+three gates that red:
 - after nightly's `host` saves, a step reads that entry's stored bytes and every
   toolchain layer's from the repository's cache list, and fails when 2H + T
   passes 10 GB;
