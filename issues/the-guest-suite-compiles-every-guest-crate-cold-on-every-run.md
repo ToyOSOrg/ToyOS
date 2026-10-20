@@ -73,5 +73,5 @@ than `cargo run` builds.
 
 Owner: the guest job (`build/ci.rs`'s `guest`, `.github/workflows/guest.yml`).
 
-**Exit**: `guest / suite` on a pull request that moves no guest source prints
-a `building` figure under 60 s.
+**Exit**: a `guest.yml` run on a tree whose guest sources the restored entry
+already holds prints a `building` figure under 60 s.
