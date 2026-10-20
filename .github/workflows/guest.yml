@@ -17,8 +17,6 @@ on:
 
 jobs:
   suite:
-    # ci.yml's pull request run reports this check skipped.
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     # A wedge guard, not a budget.
     timeout-minutes: 60

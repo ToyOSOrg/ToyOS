@@ -1,9 +1,10 @@
 name: ci
 
-# CI runs once per pull request, in the merge queue. On `pull_request` every
-# check reports skipped, which a required check reads as green; the skip sits
-# in the called workflow's job, because a skipped caller reports its own name
-# and not `toolchain / build` or `guest / suite`.
+# CI runs once per pull request, in the merge queue: the host checks and every
+# architecture's shipped image. The guest suite is nightly's. On `pull_request`
+# every job is skipped, which a required check reads as green. A merge group
+# that changes documentation alone (`build/ci.rs`'s `scope`) runs the host
+# checks that read it and skips `toolchain` and `image`.
 on:
   pull_request:
     branches: [main]
@@ -42,20 +43,40 @@ jobs:
 
       - run: cargo run -- --ci host
 
+  scope:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      build: ${{ steps.scope.outputs.build }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - id: scope
+        run: cargo run -- --ci scope
+
+  # Skipped where `build` is `false` and nowhere else: a `scope` that failed
+  # leaves it empty, and everything builds.
   toolchain:
+    needs: scope
+    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.scope.outputs.build != 'false' }}
     uses: ./.github/workflows/toolchain.yml
 
   # A required check that is skipped reads as green, so this runs whatever
   # `toolchain` concluded.
-  guest:
-    needs: toolchain
-    if: ${{ !cancelled() }}
-    # Its container's pull.
-    permissions:
-      contents: read
-      packages: read
-    uses: ./.github/workflows/guest.yml
-    with:
-      kvm: true
-      sysroot-key: ${{ needs.toolchain.outputs.sysroot-key }}
-      sysroot-path: ${{ needs.toolchain.outputs.sysroot-path }}
+  image:
+    needs: [scope, toolchain]
+    if: ${{ github.event_name != 'pull_request' && !cancelled() && needs.scope.outputs.build != 'false' }}
+    # Bare, as `toolchain / build` is: the sysroot is built for its glibc.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ needs.toolchain.outputs.sysroot-path }}
+          key: ${{ needs.toolchain.outputs.sysroot-key }}
+          fail-on-cache-miss: true
+
+      - run: cargo run -- --ci image
