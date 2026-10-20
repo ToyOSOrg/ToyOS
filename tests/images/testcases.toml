@@ -25,8 +25,17 @@ receives = ["power"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver", "volume"]
-devices = ["pci:04:03:00", "pci:04:01:00/1af4:1059"]
+serves = ["soundserver", "volume", "sound-output"]
+devices = ["pci:04:01:00/1af4:1059"]
+syscap = ["rt"]
+
+# The Intel HD Audio driver: one process per HDA function the kernel does not
+# drive, each walking its own controller's codecs and offering soundserver the
+# output it reaches. A machine with display audio beside an analog codec runs
+# two, and soundserver plays to the one that offers.
+[programs.hda]
+drives = ["pci:04:03:*"]
+receives = ["sound-output"]
 syscap = ["rt"]
 
 # The test estate's authority.

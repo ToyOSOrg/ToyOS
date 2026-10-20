@@ -12,19 +12,21 @@
 //! | [`mix`] | the two loops — a device's, and the null sink's |
 //! | [`ring`] | the lock-free ring every hand-off to or from the mix thread is |
 //! | [`log`] | soundserver's lines, and why the mix thread's never wait |
-//! | [`hda`], [`virtio`] | the two drivers |
+//! | [`output`] | the `sound-output` port: the output drivers, and the one played to |
+//! | [`virtio`] | the virtio-sound driver, the one device this process drives itself |
 //! | [`volume`] | the `volume` port: the master level and mute, on the codec |
 //!
-//! This file is the fourth thing: which of them the machine gets. A sound card
-//! this process was endowed with runs the device loop; anything else — no card,
-//! a card that cannot carry audio, a shape the mixer cannot render — runs the
-//! null sink, because soundserver always runs and always accepts streams.
+//! This file is which of them the machine gets. A virtio-sound function this
+//! process was endowed with runs the device loop; anything else runs the null
+//! sink until an output driver's offer is played to, because soundserver always
+//! runs and always accepts streams.
 
 use toyos::endow;
 use toyos::port::Acceptor;
 use toyos::PciDev;
 use toyos_abi::syscall;
 use toyos_mixer::{period_frames, ramp_frames, DEVICE_RATES};
+use toyos_sound_output as sound_output;
 
 use std::sync::Arc;
 
@@ -39,27 +41,32 @@ mod backend;
 mod client;
 mod command;
 mod control;
-mod hda;
 mod inspect;
 mod mix;
 mod log;
+mod output;
 mod ring;
 mod virtio;
 mod volume;
 
-use backend::{Backend, HdaBackend, VirtioBackend};
+use backend::{Backend, VirtioBackend};
 use command::CommandRing;
 use inspect::{Device, Published, State};
 use control::control_thread;
 use mix::{mix_thread, null_sink_thread};
+use output::{Attached, Outputs};
 
-/// The virtual output soundserver presents when the machine has no audio hardware:
-/// the first device rate, stereo, 128 frames per period. A stream negotiates
+/// The virtual output soundserver presents until it plays to a device: the
+/// first device rate, stereo, 128 frames per period. A stream negotiates
 /// against them exactly as it would a real device, so a no-hardware machine is
 /// invisible to the client.
-const NULL_SINK_RATE: u32 = DEVICE_RATES[0];
-const NULL_SINK_CHANNELS: u16 = 2;
-const NULL_SINK_PERIOD_FRAMES: usize = 128;
+pub(crate) const NULL_SINK: Device = Device {
+    kind: "null",
+    rate: DEVICE_RATES[0],
+    channels: 2,
+    period_frames: 128,
+    buffers: NULL_SINK_BUFFERS as u32,
+};
 /// Same DMA-pipeline depth as both hardware backends: the client ring
 /// is as deep, so a client may fill `NULL_SINK_BUFFERS - 1` periods ahead and
 /// its backpressure is the device's. Power of two — ring indices wrap mod 2^32.
@@ -68,120 +75,58 @@ pub(crate) const NULL_SINK_BUFFERS: usize = 8;
 fn main() {
     // First: `main` becomes the mix thread, and its lines are a lane's from here.
     log::claim_lane();
-    let acceptor = endow::acceptor("soundserver")
-        .expect("the manifest declares this program serves `soundserver`");
-    let volume = endow::acceptor("volume")
-        .expect("the manifest declares this program serves `volume`");
-    let ports = Ports { acceptor, volume };
+    let ports = Ports {
+        acceptor: endow::acceptor("soundserver").expect("the manifest declares this program serves `soundserver`"),
+        volume: endow::acceptor("volume").expect("the manifest declares this program serves `volume`"),
+        output: endow::acceptor(sound_output::PORT)
+            .expect("the manifest declares this program serves `sound-output`"),
+    };
 
-    // **"Which sound card does this machine have?" is already answered.** The supervisor
-    // mints a claim per device entry the manifest names and endows what the machine
-    // actually had, so an absent card is a label missing from this process's
-    // own table rather than two probing syscalls — and a card another process
-    // holds is not a state that can arise, because only the supervisor mints.
-    //
-    // A machine with no sound card is a routing state and not a bug: soundserver
-    // presents a virtual output and discards what is played to it, so a client
-    // building a stream succeeds whether or not hardware is present.
-    //
-    // The order is virtio first, and it is not a preference between two cards:
-    // no machine in this project has both. The T14 has only the second.
+    // The virtio-sound function, where the machine has one, is this process's
+    // own: no machine in this project has it beside an output driver's
+    // function. The T14 and the AMD bench have output drivers' alone.
     if let Some(dev) = endow::claim::<PciDev>(&virtio::FUNCTION.to_string()) {
         match virtio::Virtio::claim(dev) {
-            Ok((virtio, rate, channels)) => return run_virtio(ports, virtio, rate, channels),
-            Err(why) => {
-                say!("soundserver: the virtio-sound device cannot carry audio: {why}");
-                return run_null_sink(ports);
+            Ok((virtio, rate, channels)) => {
+                let device = Device {
+                    kind: "virtio-sound",
+                    rate,
+                    channels: channels as u16,
+                    period_frames: 0,
+                    buffers: toyos_virtio_sound::PERIODS as u32,
+                };
+                match period_frames(toyos_virtio_sound::PERIODS, device.channels, toyos_virtio_sound::PERIOD_BYTES, rate) {
+                    Ok(frames) => {
+                        let device = Device { period_frames: frames as u32, ..device };
+                        return run(ports, Some((VirtioBackend { virtio }, device)));
+                    }
+                    Err(why) => say!("soundserver: this audio device's shape cannot carry audio: {why}"),
+                }
             }
+            Err(why) => say!("soundserver: the virtio-sound device cannot carry audio: {why}"),
         }
     }
-    let Some(dev) = endow::claim::<PciDev>(&hda::FUNCTION.to_string()) else {
-        return run_null_sink(ports);
-    };
-    match hda::Hda::claim(dev) {
-        Ok(claimed) => run_hda(ports, claimed),
-        Err(why) => {
-            say!("soundserver: the HDA controller cannot carry audio: {why}");
-            run_null_sink(ports)
-        }
-    }
+    run(ports, None)
 }
 
-/// The two ports soundserver serves: streams, and the master.
+/// The three ports soundserver serves: streams, the master, and its outputs.
 struct Ports {
     acceptor: Acceptor,
     volume: Acceptor,
+    output: Acceptor,
 }
 
-fn run_virtio(ports: Ports, virtio: virtio::Virtio, rate: u32, channels: u8) {
-    run_with_device(
-        ports,
-        None,
-        "virtio-sound",
-        &mut VirtioBackend { virtio },
-        toyos_virtio_sound::PERIODS,
-        rate,
-        channels as u16,
-        toyos_virtio_sound::PERIOD_BYTES,
-    );
-}
-
-fn run_hda(ports: Ports, claimed: hda::Claimed) {
-    let hda::Claimed { hda, rate, channels, master } = claimed;
-    run_with_device(
-        ports,
-        master,
-        "hda",
-        &mut HdaBackend { hda },
-        toyos_hda::controller::PERIODS,
-        rate,
-        channels as u16,
-        toyos_hda::controller::PERIOD_BYTES,
-    );
-}
-
-fn run_with_device(
-    ports: Ports,
-    master: Option<hda::MasterControl>,
-    kind: &'static str,
-    backend: &mut dyn Backend,
-    num_buffers: usize,
-    device_sample_rate: u32,
-    device_channels: u16,
-    device_period_bytes: usize,
-) {
-    // A shape this mixer cannot render is named and the machine gets the null
-    // sink, which keeps soundserver always running and accepting streams. It is checked before any arithmetic
-    // derives anything from it — a zero channel count divides by zero on the
-    // way to a frame count, which is a panic that names neither the device nor
-    // the reason.
-    let device_period_frames = match period_frames(num_buffers, device_channels, device_period_bytes, device_sample_rate) {
-        Ok(frames) => frames,
-        Err(why) => {
-            say!("soundserver: this audio device's shape cannot carry audio: {why}");
-            return run_null_sink(ports);
-        }
-    };
-
-    // Client ring depth matches the DMA pipeline depth: a wake gap can free
-    // at most num_buffers periods, so a full client ring always covers it.
-    let slot_count = num_buffers as u32;
-
-    let ramp_frames = ramp_frames(device_sample_rate);
-
-    say!("soundserver: ready, {} buffers, {}Hz {}ch, {} bytes/period, {} frames/period",
-        num_buffers, device_sample_rate, device_channels, device_period_bytes, device_period_frames);
-
+/// Serve on `own`, the device this process drives, where there is one, and on
+/// the null sink until an output is played to otherwise.
+fn run(ports: Ports, own: Option<(VirtioBackend, Device)>) {
+    let device = own.as_ref().map_or(NULL_SINK, |(_, device)| *device);
+    let outputs = Outputs::new(ports.output, own.is_some());
     let cmd_ring = Arc::new(CommandRing::new());
     let cmd_pipe = syscall::pipe().expect("soundserver: failed to create the command pipe");
-    let published = Arc::new(Published::new(State::Suspended));
-    let device = Device {
-        kind,
-        rate: device_sample_rate,
-        channels: device_channels,
-        period_frames: device_period_frames as u32,
-        buffers: slot_count,
-    };
+    // The mix thread's word that it ended a device loop on its own finding.
+    let ended = syscall::pipe().expect("soundserver: failed to create the ended pipe");
+    let initial = if own.is_some() { State::Suspended } else { State::Idle };
+    let published = Arc::new(Published::new(initial));
 
     let cmd_ring2 = cmd_ring.clone();
     let published2 = published.clone();
@@ -191,87 +136,78 @@ fn run_with_device(
             control_thread(
                 ports.acceptor,
                 ports.volume,
-                master,
+                outputs,
                 &cmd_ring2,
                 cmd_pipe.write,
-                device_sample_rate,
-                device_channels,
-                device_period_frames as u32,
-                slot_count,
-                ramp_frames,
-                &device,
+                ended.read,
+                device,
                 &published2,
             );
         })
         .expect("soundserver: failed to spawn control thread");
 
+    if let Some((mut backend, device)) = own {
+        let period_bytes = toyos_virtio_sound::PERIOD_BYTES;
+        let why = serve_device(&mut backend, &cmd_ring, &published, cmd_pipe.read, &device, period_bytes, 0, ended.write);
+        panic!("soundserver: its own virtio-sound device loop ended ({why})");
+    }
+    let mut generation = 0;
+    loop {
+        say!(
+            "soundserver: no output yet, presenting a null sink ({}Hz {}ch, {} frames/period, streams discarded)",
+            device.rate, device.channels, device.period_frames
+        );
+        let attached = null_sink_thread(&cmd_ring, &published, cmd_pipe.read, &device, generation);
+        let Attached { mut backend, offer, period_frames, generation: playing } = *attached;
+        let output = output_device(&offer, period_frames);
+        say!(
+            "soundserver: playing to the output offered, {}Hz {}ch, {} frames/period",
+            output.rate, output.channels, output.period_frames
+        );
+        let period_bytes = offer.period_bytes as usize;
+        let why = serve_device(&mut backend, &cmd_ring, &published, cmd_pipe.read, &output, period_bytes, playing, ended.write);
+        say!("soundserver: the output is gone ({why})");
+        generation = playing + 1;
+    }
+}
+
+/// An output driver's offer, as the mixer and the control thread see it.
+pub(crate) fn output_device(offer: &sound_output::Offer, period_frames: usize) -> Device {
+    Device {
+        kind: "driver",
+        rate: offer.rate,
+        channels: offer.channels as u16,
+        period_frames: period_frames as u32,
+        buffers: offer.periods as u32,
+    }
+}
+
+fn serve_device(
+    backend: &mut dyn Backend,
+    cmd_ring: &CommandRing,
+    published: &Published,
+    cmd_pipe_read: toyos_abi::RawHandle,
+    device: &Device,
+    period_bytes: usize,
+    generation: u32,
+    ended_write: toyos_abi::RawHandle,
+) -> String {
+    say!(
+        "soundserver: ready, {} buffers, {}Hz {}ch, {} bytes/period, {} frames/period",
+        device.buffers, device.rate, device.channels, period_bytes, device.period_frames
+    );
     mix_thread(
         backend,
-        &cmd_ring,
-        &published,
-        cmd_pipe.read,
-        num_buffers,
-        device_sample_rate,
-        device_channels,
-        device_period_bytes,
-        device_period_frames,
-        ramp_frames,
-    );
-}
-
-fn run_null_sink(ports: Ports) {
-    let device_sample_rate = NULL_SINK_RATE;
-    let device_channels = NULL_SINK_CHANNELS;
-    let device_period_frames = NULL_SINK_PERIOD_FRAMES;
-    let slot_count = NULL_SINK_BUFFERS as u32;
-
-    let ramp_frames = ramp_frames(device_sample_rate);
-
-    say!(
-        "soundserver: no audio device, presenting a null sink ({}Hz {}ch, {} frames/period, streams discarded)",
-        device_sample_rate, device_channels, device_period_frames
-    );
-
-    let cmd_ring = Arc::new(CommandRing::new());
-    let cmd_pipe = syscall::pipe().expect("soundserver: failed to create the command pipe");
-    let published = Arc::new(Published::new(State::Idle));
-    let device = Device {
-        kind: "null",
-        rate: device_sample_rate,
-        channels: device_channels,
-        period_frames: device_period_frames as u32,
-        buffers: slot_count,
-    };
-
-    let cmd_ring2 = cmd_ring.clone();
-    let published2 = published.clone();
-    std::thread::Builder::new()
-        .name("soundserver-ctrl".into())
-        .spawn(move || {
-            control_thread(
-                ports.acceptor,
-                ports.volume,
-                None,
-                &cmd_ring2,
-                cmd_pipe.write,
-                device_sample_rate,
-                device_channels,
-                device_period_frames as u32,
-                slot_count,
-                ramp_frames,
-                &device,
-                &published2,
-            );
-        })
-        .expect("soundserver: failed to spawn control thread");
-
-    null_sink_thread(
-        &cmd_ring,
-        &published,
-        cmd_pipe.read,
-        device_sample_rate,
-        device_channels,
-        device_period_frames,
-        ramp_frames,
-    );
+        cmd_ring,
+        published,
+        cmd_pipe_read,
+        device.buffers as usize,
+        device.rate,
+        device.channels,
+        period_bytes,
+        device.period_frames as usize,
+        ramp_frames(device.rate),
+        generation,
+        ended_write,
+    )
 }
