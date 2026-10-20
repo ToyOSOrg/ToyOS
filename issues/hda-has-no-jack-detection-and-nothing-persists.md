@@ -22,9 +22,10 @@ set by the driver for soundserver's `volume` port, and the volume keys set them 
 **Two pieces of the shipped work are still owed a verdict.** The four HDA
 sections of the audio baseline were never recorded, so the HDA arm asserts harm
 and claims no distribution and has no thorough tier — that is 30 invocations on
-a quiet host. And a shape profile is missing: a codec with no speaker pin (a
-controller with no codec is refused by name in the controller's host tests). Without them the refusal-to-null-sink path is
-asserted only on a machine that has no controller at all.
+a quiet host. And a shape profile is missing: a codec with no speaker pin. A
+controller with no codec is refused by name, and soundserver stays the null
+sink until another offers, on QEMU's two-controller row
+(`hda_plays_to_the_controller_that_reaches_an_output`).
 
 Constraints worth not re-deriving (each already stated at its site in
 `system/hda/driver/`, listed here because they are what

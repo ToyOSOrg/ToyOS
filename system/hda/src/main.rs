@@ -149,8 +149,9 @@ struct Driver {
     to_engine: Connection,
     underruns: u32,
     /// Held for their mappings' lives: the register window points into the
-    /// first, the link and descriptor list into the second, and the device
-    /// reaches the third while it is mapped.
+    /// first, and the link and descriptor list into the second. The lent ring
+    /// stays alive while it is mapped; its handle is kept as the program's
+    /// own reference to what the device reaches.
     _bar: SharedMemory,
     _region: DmaRegion,
     _ring: OwnedHandle,

@@ -102,11 +102,21 @@ fn signal_clients(streams: &mut [ClientStream], ramp_frames: u32) {
 ///
 /// It stops at an output to play to and answers it: every command behind it
 /// is the output's.
-fn apply_commands(cmd_ring: &CommandRing, streams: &mut Vec<ClientStream>, ramp_frames: u32) -> Option<Box<Attached>> {
+fn apply_commands(
+    cmd_ring: &CommandRing,
+    streams: &mut Vec<ClientStream>,
+    ramp_frames: u32,
+    generation: u32,
+) -> Option<Change> {
     while let Some(cmd) = cmd_ring.pop() {
         match cmd {
-            MixCommand::Attach(attached) => return Some(attached),
-            MixCommand::AddClient(client) => {
+            MixCommand::Attach(attached) => return Some(Change::Attach(attached)),
+            MixCommand::Detach => return Some(Change::Detach),
+            MixCommand::AddClient(client, opened_on) if opened_on != generation => {
+                say!("soundserver: client {} ended: it was opened on an output since gone", client.client_id);
+                syscall::close(client.signal_write);
+            }
+            MixCommand::AddClient(client, _) => {
                 say!("soundserver: client {} connected (id={})", streams.len(), client.client_id);
                 let _ = syscall::write_nonblock(client.signal_write, &[1]);
                 streams.push(*client);
@@ -142,6 +152,21 @@ fn retain_active(streams: &mut Vec<ClientStream>) {
         }
         _ => true,
     });
+}
+
+/// A change of output the command ring carries.
+enum Change {
+    Attach(Box<Attached>),
+    Detach,
+}
+
+/// Every stream the device loop held ends with it: its signal pipe closes, so
+/// its client sees the stream end, and nothing plays it on.
+fn end_streams(streams: &mut Vec<ClientStream>) {
+    for stream in streams.drain(..) {
+        say!("soundserver: client {} ended with its output", stream.client_id);
+        syscall::close(stream.signal_write);
+    }
 }
 
 /// How long one wait of the mix loop may last, and the grid point it is armed
@@ -204,7 +229,9 @@ pub(crate) fn mix_thread(
     device_period_bytes: usize,
     device_period_frames: usize,
     ramp_frames: u32,
-) {
+    generation: u32,
+    ended_write: RawHandle,
+) -> String {
     let device_period_samples = device_period_frames * device_channels as usize;
     let period_nanos = period_nanos(device_period_frames as u64, device_sample_rate as u64);
     let pipeline = backend.pipeline();
@@ -279,10 +306,14 @@ pub(crate) fn mix_thread(
     // `RT`-only capability the manifest's `syscap = ["rt"]` row asks the supervisor for,
     // and soundserver is the only program in the tree that has one. Mixing on
     // without the band would show up only as glitches, so a refusal is loud.
-    let rt: SysCap = Endowments::get()
-        .take(toyos_abi::syscall::SYSCAP_LABEL)
-        .expect("the manifest declares this program `syscap = [\"rt\"]`");
-    rt.enter_rt().expect("an RT capability refused the band it names");
+    // Once: the band is the thread's, and the loop runs again on each output.
+    static RT: std::sync::Once = std::sync::Once::new();
+    RT.call_once(|| {
+        let rt: SysCap = Endowments::get()
+            .take(toyos_abi::syscall::SYSCAP_LABEL)
+            .expect("the manifest declares this program `syscap = [\"rt\"]`");
+        rt.enter_rt().expect("an RT capability refused the band it names");
+    });
 
     let poller = Poller::new(64);
     let mut mix_f32 = vec![0.0f32; device_period_samples];
@@ -340,8 +371,13 @@ pub(crate) fn mix_thread(
             let mut drain = [0u8; 64];
             while matches!(syscall::read_nonblock(cmd_pipe_read, &mut drain), Ok(n) if n == drain.len()) {}
         }
-        if apply_commands(cmd_ring, &mut streams, ramp_frames).is_some() {
-            panic!("soundserver: an output to play to while it plays to a device");
+        match apply_commands(cmd_ring, &mut streams, ramp_frames, generation) {
+            None => {}
+            Some(Change::Detach) => {
+                end_streams(&mut streams);
+                return String::from("soundserver dropped its driver");
+            }
+            Some(Change::Attach(_)) => panic!("soundserver: an output to play to before the last was detached"),
         }
 
         if !was_streaming && !streams.is_empty() {
@@ -351,6 +387,11 @@ pub(crate) fn mix_thread(
         }
 
         let completed = backend.completion();
+        if let Some(why) = backend.ended() {
+            end_streams(&mut streams);
+            let _ = syscall::write_nonblock(ended_write, &[1]);
+            return why.to_string();
+        }
         if let Some(rec) = completed {
             // Read before the record is acted on, because it is what a
             // *pickup* is measured to: the instant soundserver first held the
@@ -672,6 +713,7 @@ pub(crate) fn null_sink_thread(
     published: &Published,
     cmd_pipe_read: RawHandle,
     device: &Device,
+    generation: u32,
 ) -> Box<Attached> {
     let device_sample_rate = device.rate;
     let device_channels = device.channels;
@@ -741,7 +783,11 @@ pub(crate) fn null_sink_thread(
         // Nothing is drained past an output to play to: what is behind it is
         // the output's.
         if attach.is_none() {
-            attach = apply_commands(cmd_ring, &mut streams, ramp_frames);
+            attach = match apply_commands(cmd_ring, &mut streams, ramp_frames, generation) {
+                Some(Change::Attach(attached)) => Some(attached),
+                // A driver dropped before it was played to: nothing here to end.
+                Some(Change::Detach) | None => None,
+            };
         }
 
         // Start the grid when the first client of a run connects, and reset the

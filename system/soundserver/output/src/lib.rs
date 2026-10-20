@@ -24,8 +24,15 @@ pub const PORT: &str = "sound-output";
 /// device runs at, and an offer at another is refused.
 pub use toyos_mixer::DEVICE_RATES as RATES;
 
-/// The deepest ring an offer may name: [`Played::mask`] is a `u32`.
-pub const MAX_PERIODS: usize = 32;
+/// The deepest ring an offer may name: the mixer's deepest pipeline.
+pub const MAX_PERIODS: usize = toyos_mixer::MAX_PIPELINE;
+
+/// The longest period an offer may name, in bytes: 4096 stereo frames, 93 ms
+/// at 44.1 kHz. Policy, not physics: soundserver sizes its mix bus, its
+/// scratch and every client's ring from the period, and lends the ring out of
+/// its own memory, so a driver's word is bounded here, far past any device's
+/// period, before anything is allocated from it.
+pub const MAX_PERIOD_BYTES: u32 = 16 * 1024;
 
 // The control connection, driver to soundserver.
 pub const MSG_OFFER: u32 = 1;
@@ -91,6 +98,7 @@ impl Offer {
             && (2..=MAX_PERIODS).contains(&(periods as usize))
             && periods.is_power_of_two()
             && period_bytes != 0
+            && period_bytes <= MAX_PERIOD_BYTES
             && period_bytes.is_multiple_of(frame);
         whole.then_some(Self { rate, channels, periods, period_bytes, master_bottom })
     }
@@ -259,7 +267,7 @@ pub enum Run {
 /// consecutive ones, and those abut. `None` for anything else, which no walk
 /// of a ring produces.
 pub fn run(mask: u32, periods: usize) -> Option<Run> {
-    if !(2..=MAX_PERIODS).contains(&periods) || (periods < 32 && mask >> periods != 0) {
+    if !(2..=MAX_PERIODS).contains(&periods) || mask >> periods != 0 {
         return None;
     }
     let count = mask.count_ones() as usize;
@@ -305,7 +313,11 @@ mod tests {
         refused(Offer { channels: 3, ..OFFER });
         refused(Offer { periods: 1, ..OFFER });
         refused(Offer { periods: 6, ..OFFER });
-        refused(Offer { periods: 64, ..OFFER });
+        refused(Offer { periods: 32, ..OFFER });
+        refused(Offer { period_bytes: MAX_PERIOD_BYTES + 4, ..OFFER });
+        refused(Offer { period_bytes: !3, ..OFFER });
+        let widest = Offer { periods: MAX_PERIODS as u8, period_bytes: MAX_PERIOD_BYTES, ..OFFER };
+        assert_eq!(FromDriver::decode(MSG_OFFER, &widest.encode()), Some(FromDriver::Offer(widest)));
         refused(Offer { period_bytes: 0, ..OFFER });
         refused(Offer { period_bytes: 514, ..OFFER });
         let mut bytes = OFFER.encode();
@@ -351,7 +363,7 @@ mod tests {
         // Played 6, 7, 0, 1: the run starts at 6, not at its lowest bit.
         assert_eq!(run(0b1100_0011, 8), Some(Run::Of { first: 6, count: 4 }));
         assert_eq!(run(0xFF, 8), Some(Run::Lapped));
-        assert_eq!(run(u32::MAX, 32), Some(Run::Lapped));
+        assert_eq!(run(0xFFFF, 16), Some(Run::Lapped));
     }
 
     #[test]

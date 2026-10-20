@@ -21,14 +21,19 @@ use crate::output::Attached;
 use crate::ring::Spsc;
 
 /// Deep enough that one pass of the control loop can never fill it: a pass
-/// pushes at most one `AddClient` (there is one accept per wait) and one
-/// `Attach`, plus, per connected client, one coalesced `SetVolume` and one
-/// `RemoveClient`.
+/// pushes at most one `AddClient` (there is one accept per wait), one
+/// `Detach` and one `Attach`, plus, per connected client, one coalesced
+/// `SetVolume` and one `RemoveClient`.
 const CMD_RING_SIZE: usize = 256;
-const _: () = assert!(CMD_RING_SIZE >= 2 + 2 * MAX_CONTROL_CLIENTS);
+const _: () = assert!(CMD_RING_SIZE >= 3 + 2 * MAX_CONTROL_CLIENTS);
 
 pub(crate) enum MixCommand {
-    AddClient(Box<ClientStream>),
+    /// A stream, opened against the device of this generation
+    /// ([`Attached::generation`]): one that reaches another device's loop is
+    /// ended rather than mixed at a shape it was not opened for.
+    AddClient(Box<ClientStream>, u32),
+    /// The output driver played to is gone: the device loop ends.
+    Detach,
     /// Play to this output from here. Sent only while no stream is open, so
     /// the streams the null sink still holds are all ramping out; every
     /// command behind it is the output's.

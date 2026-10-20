@@ -19,6 +19,7 @@ use toyos::ipc::{self, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::Connection;
+use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 use toyos_mixer::{period_nanos, Gain, MAX_CLIENT_RATE, MIN_CLIENT_RATE};
 
@@ -124,6 +125,8 @@ fn description(device: &Device) -> DeviceDescription {
 
 /// The tokens [`Outputs::watch`] answers with start here, above every other.
 const TOKEN_OUTPUTS: u64 = 1 << 40;
+/// The mix thread ended its device loop on its own finding.
+const TOKEN_ENDED: u64 = (1 << 40) - 1;
 
 pub(crate) fn control_thread(
     acceptor: Acceptor,
@@ -131,12 +134,13 @@ pub(crate) fn control_thread(
     mut outputs: Outputs,
     cmd_ring: &CommandRing,
     cmd_pipe_write: RawHandle,
+    ended_read: RawHandle,
     mut device: Device,
     published: &Published,
 ) {
     // One handle per client plus the acceptor, the volume port's two and the
     // outputs'.
-    let watched = MAX_CONTROL_CLIENTS + 1 + 2 + Outputs::tokens(0).count();
+    let watched = MAX_CONTROL_CLIENTS + 1 + 2 + 1 + Outputs::tokens(0).count();
     let poller = Poller::new(watched as u32);
     let mut period_nanos = period_nanos(device.period_frames as u64, device.rate as u64);
     let mut ramp_frames = toyos_mixer::ramp_frames(device.rate);
@@ -167,10 +171,16 @@ pub(crate) fn control_thread(
     const TOKEN_VOLUME: u64 = 1 << 32;
 
     let mut events: Vec<Event> = Vec::new();
+    let mut relay = volume::Relay::default();
+    // Which output streams open against: one more at every attach and every
+    // driver dropped ([`MixCommand::AddClient`]).
+    let mut generation: u32 = 0;
     loop {
         // An output waits for no stream to be open: from here every stream
         // opens on it.
-        if let Some(attached) = clients.iter().all(|c| c.stream_idx.is_none()).then(|| outputs.attach()).flatten() {
+        let quiet = clients.iter().all(|c| c.stream_idx.is_none());
+        if let Some(attached) = quiet.then(|| outputs.attach(generation + 1)).flatten() {
+            generation += 1;
             device = crate::output_device(&attached.offer, attached.period_frames);
             period_nanos = toyos_mixer::period_nanos(device.period_frames as u64, device.rate as u64);
             ramp_frames = toyos_mixer::ramp_frames(device.rate);
@@ -178,12 +188,15 @@ pub(crate) fn control_thread(
         }
 
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPT);
+        poller.watch_raw(ended_read, READABLE, TOKEN_ENDED);
         outputs.watch(&poller, TOKEN_OUTPUTS);
         poller.watch(&volume_acceptor, READABLE, TOKEN_VOLUME_ACCEPT);
         for (i, client) in clients.iter().enumerate() {
             poller.watch(&client.conn, READABLE, i as u64);
         }
-        for (i, client) in volume_clients.iter().enumerate() {
+        // Not while a request is in flight: its next is not read until then,
+        // and a connection left readable would wake this loop for nothing.
+        for (i, client) in volume_clients.iter().enumerate().filter(|_| relay.idle()) {
             poller.watch(&client.conn, READABLE, TOKEN_VOLUME + i as u64);
         }
 
@@ -216,21 +229,37 @@ pub(crate) fn control_thread(
             match volume_acceptor.accept() {
                 // The compositor holds the one connector, so a second
                 // connection is a reconnect and the first is dropped.
-                Ok(conn) => volume::accepted(&mut volume_clients, conn),
+                Ok(conn) => volume::accepted(&mut volume_clients, &mut relay, conn),
                 Err(e) => say!("soundserver: volume accept failed: {e:?}"),
             }
+        }
+        if ready.contains(&TOKEN_ENDED) {
+            let mut drain = [0u8; 8];
+            while matches!(syscall::read_nonblock(ended_read, &mut drain), Ok(n) if n == drain.len()) {}
+            outputs.ended(&mut events);
         }
         outputs.serve(&ready, TOKEN_OUTPUTS, &mut events);
         for event in events.drain(..) {
             match event {
-                Event::Master(master) => volume::answer(&mut volume_clients, master),
+                Event::Master(master) => volume::answer(&mut volume_clients, &mut relay, master),
+                Event::Gone(why) => {
+                    say!("soundserver: dropped the output driver played to ({why}); the null sink again");
+                    generation += 1;
+                    device = crate::NULL_SINK;
+                    period_nanos = toyos_mixer::period_nanos(device.period_frames as u64, device.rate as u64);
+                    ramp_frames = toyos_mixer::ramp_frames(device.rate);
+                    submit(cmd_ring, cmd_pipe_write, MixCommand::Detach, period_nanos);
+                    if !relay.idle() {
+                        volume::answer(&mut volume_clients, &mut relay, None);
+                    }
+                }
             }
         }
         let mut at = TOKEN_VOLUME;
         volume_clients.retain_mut(|client| {
             let token = at;
             at += 1;
-            !ready.contains(&token) || volume::serve(client, &mut outputs)
+            !ready.contains(&token) || volume::serve(client, &mut outputs, &mut relay)
         });
 
         let mut dead: Vec<usize> = Vec::new();
@@ -306,7 +335,7 @@ pub(crate) fn control_thread(
                             disconnected = true;
                             break 'msgs;
                         };
-                        submit(cmd_ring, cmd_pipe_write, MixCommand::AddClient(Box::new(client)), period_nanos);
+                        submit(cmd_ring, cmd_pipe_write, MixCommand::AddClient(Box::new(client), generation), period_nanos);
                         clients[i].stream_idx = Some(idx);
                     }
                     Control::SetVolume { idx } => {

@@ -89,6 +89,13 @@ pub(crate) trait Backend {
 
     /// Stop the stream. Idempotent, and cheap when it is already stopped.
     fn stop(&mut self);
+
+    /// Why the device is no longer played to, once it is not: an output
+    /// driver that hung up or broke its protocol, which ends the device loop
+    /// and never soundserver.
+    fn ended(&self) -> Option<&str> {
+        None
+    }
 }
 
 pub(crate) struct VirtioBackend {

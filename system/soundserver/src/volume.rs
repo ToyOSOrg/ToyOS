@@ -19,6 +19,42 @@ use crate::output::{Asked, Outputs};
 pub(crate) struct VolumeClient {
     pub(crate) conn: Connection,
     rx: ipc::FrameRx<{ core::mem::size_of::<VolumeStep>() }>,
+    /// Which connection this is, for [`Relay`]: a reconnect is another.
+    id: u64,
+}
+
+/// The one master request forwarded to the output driver and not yet
+/// answered, and whose it is.
+///
+/// **One at a time**: a holder's next request is not read until its last is
+/// answered, so a holder writing faster than the codec answers fills its own
+/// connection and never the driver's. **And an answer goes to the connection
+/// that asked**: one whose asker reconnected since is dropped.
+#[derive(Default)]
+pub(crate) struct Relay {
+    in_flight: Option<u64>,
+    next_id: u64,
+}
+
+impl Relay {
+    /// Whether a request may be read now.
+    pub(crate) fn idle(&self) -> bool {
+        self.in_flight.is_none()
+    }
+
+    fn forwarded(&mut self, by: u64) {
+        assert!(self.in_flight.replace(by).is_none(), "soundserver: two master requests in flight");
+    }
+
+    /// The asker the answer that just came is owed to, if one is in flight.
+    fn answered(&mut self) -> Option<u64> {
+        self.in_flight.take()
+    }
+
+    fn mint(&mut self) -> u64 {
+        self.next_id += 1;
+        self.next_id
+    }
 }
 
 /// What one framed request asks for, decided before anything is done.
@@ -39,15 +75,15 @@ fn classify(msg_type: u32, payload_len: usize) -> Request {
 
 /// A new connection: one holder at a time, so one before it is a holder that
 /// reconnected, and it goes.
-pub(crate) fn accepted(clients: &mut Vec<VolumeClient>, conn: Connection) {
+pub(crate) fn accepted(clients: &mut Vec<VolumeClient>, relay: &mut Relay, conn: Connection) {
     clients.clear();
-    clients.push(VolumeClient { conn, rx: ipc::FrameRx::new() });
+    clients.push(VolumeClient { conn, rx: ipc::FrameRx::new(), id: relay.mint() });
 }
 
-/// Serve every request the client has framed; `false` once it is to go. One
-/// the output driver answers is answered through [`answer`].
-pub(crate) fn serve(client: &mut VolumeClient, outputs: &mut Outputs) -> bool {
-    loop {
+/// Serve the requests the client has framed, up to one the output driver
+/// answers, which [`answer`] passes on; `false` once it is to go.
+pub(crate) fn serve(client: &mut VolumeClient, outputs: &mut Outputs, relay: &mut Relay) -> bool {
+    while relay.idle() {
         let (msg_type, payload_len) = match client.rx.pump(&client.conn) {
             RxStep::Idle => return true,
             RxStep::Eof => return false,
@@ -70,20 +106,33 @@ pub(crate) fn serve(client: &mut VolumeClient, outputs: &mut Outputs) -> bool {
             }
         };
         let sent = match asked {
-            Asked::Forwarded => Ok(()),
+            Asked::Forwarded => {
+                relay.forwarded(client.id);
+                Ok(())
+            }
             Asked::Unavailable => send(&client.conn, None),
+            Asked::Refused(why) => {
+                say!("soundserver: a master request answered unavailable: {why}");
+                send(&client.conn, None)
+            }
         };
         if let Err(e) = sent {
             say!("soundserver: a volume answer was not taken ({e:?}), disconnecting");
             return false;
         }
     }
+    true
 }
 
-/// The output driver's answer to the oldest request it was forwarded,
-/// to the client holding the port now; a client that will not take it goes.
-pub(crate) fn answer(clients: &mut Vec<VolumeClient>, master: Option<Master>) {
-    let Some(client) = clients.first() else { return };
+/// The output driver's answer to the request in flight, to the connection
+/// that asked it, where that is still the holder; a holder that will not take
+/// it goes.
+pub(crate) fn answer(clients: &mut Vec<VolumeClient>, relay: &mut Relay, master: Option<Master>) {
+    let Some(asker) = relay.answered() else {
+        say!("soundserver: the output driver answered a master request nobody made");
+        return;
+    };
+    let Some(client) = clients.first().filter(|client| client.id == asker) else { return };
     if let Err(e) = send(&client.conn, master) {
         say!("soundserver: a volume answer was not taken ({e:?}), disconnecting");
         clients.clear();
@@ -102,6 +151,43 @@ fn send(conn: &Connection, answer: Option<Master>) -> Result<(), ipc::TrySendErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flood: one request in flight, and the next read only once it is
+    /// answered, however many the holder wrote.
+    #[test]
+    fn one_master_request_is_in_flight_at_a_time() {
+        let mut relay = Relay::default();
+        let holder = relay.mint();
+        assert!(relay.idle());
+        relay.forwarded(holder);
+        for _ in 0..1000 {
+            assert!(!relay.idle(), "a second request read with one in flight");
+        }
+        assert_eq!(relay.answered(), Some(holder));
+        assert!(relay.idle());
+        assert_eq!(relay.answered(), None, "an answer nobody asked for is owed to nobody");
+    }
+
+    /// A holder that reconnected while its request was in flight: the answer
+    /// is the old connection's, and the new one is never handed it.
+    #[test]
+    fn an_answer_goes_only_to_the_connection_that_asked() {
+        let mut relay = Relay::default();
+        let old = relay.mint();
+        relay.forwarded(old);
+        let new = relay.mint();
+        assert_ne!(old, new);
+        assert_eq!(relay.answered(), Some(old));
+        assert!(relay.idle(), "the new holder's requests are read once the old one's is settled");
+    }
+
+    /// A driver whose connection takes no request is a refusal by name,
+    /// answered unavailable, never a panic.
+    #[test]
+    fn a_driver_that_takes_no_request_is_a_named_refusal() {
+        assert_eq!(crate::output::asked::<()>(Ok(())), Asked::Forwarded);
+        assert!(matches!(crate::output::asked(Err("full")), Asked::Refused(why) if why.contains("took no master request")));
+    }
 
     #[test]
     fn a_volume_request_is_refused_unless_its_type_and_width_fit() {
