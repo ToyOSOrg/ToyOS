@@ -13,13 +13,9 @@ use toyos::Connection;
 
 use crate::hda::{Answer, MasterControl};
 
-/// The widest request decoded, plus one, so an over-long frame is refused
-/// rather than truncated into a request.
-const MAX_KEPT_PAYLOAD: usize = core::mem::size_of::<VolumeStep>() + 1;
-
 pub(crate) struct VolumeClient {
     pub(crate) conn: Connection,
-    rx: ipc::FrameRx<MAX_KEPT_PAYLOAD>,
+    rx: ipc::FrameRx<{ core::mem::size_of::<VolumeStep>() }>,
 }
 
 /// What one framed request asks for, decided before anything is done.

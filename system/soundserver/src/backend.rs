@@ -7,7 +7,6 @@
 //! refilled* and nothing else in the loop can be written without knowing which.
 
 use toyos::AsHandle;
-use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
 use crate::{hda, virtio};
@@ -43,8 +42,12 @@ pub(crate) struct Completion {
     /// When the device's first word about these periods landed: where a
     /// wake's lateness is split between the device and soundserver.
     pub(crate) first_nanos: u64,
-    /// When its newest landed, which the DLL takes as the last period's.
+    /// When its newest landed: the time of the last of the first `clocked`
+    /// periods, in play order.
     pub(crate) last_nanos: u64,
+    /// How many of these periods `last_nanos` answers for. The rest completed
+    /// after the message it is the time of, and a later record clocks them.
+    pub(crate) clocked: u32,
 }
 
 /// The device half of the mix loop.
@@ -122,8 +125,6 @@ impl Backend for VirtioBackend {
 
 pub(crate) struct HdaBackend {
     pub(crate) hda: hda::Hda,
-    pub(crate) buffers: Vec<*mut u8>,
-    pub(crate) period_bytes: usize,
 }
 
 impl Backend for HdaBackend {
@@ -136,25 +137,15 @@ impl Backend for HdaBackend {
     }
 
     fn buffer(&self, idx: usize) -> *mut u8 {
-        self.buffers[idx]
+        self.hda.buffer(idx).as_ptr()
     }
 
-    /// The kernel's record has one time, the newest interrupt's, and it is
-    /// both of the completion's.
     fn completion(&mut self) -> Option<Completion> {
-        match self.hda.dev().completions() {
-            Ok(record) => Some(Completion {
-                mask: record.mask,
-                first_nanos: record.timestamp_nanos,
-                last_nanos: record.timestamp_nanos,
-            }),
-            Err(syscall::SyscallError::WouldBlock) => None,
-            Err(e) => panic!("soundserver: hda completions failed: {e:?}"),
-        }
+        self.hda.completion()
     }
 
     fn released(&mut self, idx: usize) {
-        unsafe { core::ptr::write_bytes(self.buffers[idx], 0, self.period_bytes) };
+        self.hda.buffer(idx).zero();
     }
 
     fn submit(&mut self, _idx: usize, _bytes: usize) {

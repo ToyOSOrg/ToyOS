@@ -116,8 +116,8 @@ pub fn last_valid_index(periods: usize) -> Option<u8> {
 /// that a completion never repeats a buffer it still holds.
 ///
 /// `position` is the device's own byte offset and is checked against the
-/// buffer rather than trusted: a read past the end is a device answer this
-/// cannot turn into an index, not a period to mark played.
+/// buffer rather than trusted ([`period_at`]): a read past the end is a device
+/// answer this cannot turn into an index, not a period to mark played.
 ///
 /// A caller that sleeps through the whole ring sees the position where it left
 /// it and is told nothing completed. That aliasing is why the buffer is zeroed
@@ -129,14 +129,10 @@ pub fn completed(
     period_bytes: u32,
     periods: usize,
 ) -> Option<(u32, usize)> {
-    if !(MIN_PERIODS..=MAX_PERIODS).contains(&periods) || period_bytes == 0 || last >= periods {
+    if last >= periods {
         return None;
     }
-    let total = period_bytes as u64 * periods as u64;
-    if position as u64 >= total {
-        return None;
-    }
-    let current = (position / period_bytes) as usize;
+    let current = period_at(position, period_bytes, periods)?;
     let mut mask = 0u32;
     let mut index = last;
     while index != current {
@@ -144,6 +140,23 @@ pub fn completed(
         index = (index + 1) % periods;
     }
     Some((mask, current))
+}
+
+/// The period a link position is in, or `None` for one outside the buffer.
+///
+/// §3.3.37 has `SDnLPIB` count up to the cyclic length *inclusive*, so the
+/// length itself is the wrap: the engine has played the last period and is at
+/// the first.
+pub fn period_at(position: u32, period_bytes: u32, periods: usize) -> Option<usize> {
+    if !(MIN_PERIODS..=MAX_PERIODS).contains(&periods) || period_bytes == 0 {
+        return None;
+    }
+    let total = period_bytes as u64 * periods as u64;
+    match position as u64 {
+        at if at < total => Some((at / period_bytes as u64) as usize),
+        at if at == total => Some(0),
+        _ => None,
+    }
 }
 
 /// What a driver's accumulated completion mask says about the engine.
@@ -334,8 +347,17 @@ mod tests {
     fn a_position_past_the_buffer_is_not_an_index() {
         // The device's own number, and one that cannot be turned into a
         // period: masking it to fit would mark a buffer played that was not.
-        assert_eq!(completed(0, 4096, 512, 8), None);
+        assert_eq!(completed(0, 4097, 512, 8), None);
         assert_eq!(completed(0, u32::MAX, 512, 8), None);
+    }
+
+    #[test]
+    fn a_position_at_the_cyclic_length_is_the_wrap() {
+        // §3.3.37: LPIB counts to CBL inclusive. Was at 6, now at 4096: 6 and
+        // 7 have played and the engine is at 0.
+        assert_eq!(completed(6, 4096, 512, 8), Some((0b1100_0000, 0)));
+        assert_eq!(period_at(4096, 512, 8), Some(0));
+        assert_eq!(period_at(4095, 512, 8), Some(7));
     }
 
     #[test]
@@ -364,7 +386,7 @@ mod tests {
     #[test]
     fn every_position_completed_can_report_reads_back_as_the_run_it_walked() {
         for last in 0..8usize {
-            for position in 0..8 * 512u32 {
+            for position in 0..=8 * 512u32 {
                 let (mask, _) = completed(last, position, 512, 8).unwrap();
                 let count = mask.count_ones() as usize;
                 let want = (count > 0).then_some(Completed::Run { first: last, count });

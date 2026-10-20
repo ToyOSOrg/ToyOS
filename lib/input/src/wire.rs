@@ -29,9 +29,8 @@ pub const MSG_LOST: u32 = 3;
 pub const KEY_LEN: usize = core::mem::size_of::<RawKeyEvent>();
 /// A pointer report's bytes on the wire.
 pub const POINTER_LEN: usize = core::mem::size_of::<MouseEvent>();
-/// How much of a frame's payload the owner keeps: one byte past the longest
-/// record, so a longer frame reads as one and is refused.
-pub const KEEP: usize = POINTER_LEN + 1;
+/// The longest record's payload: the owner refuses a frame declaring more.
+pub const MAX_PAYLOAD: usize = POINTER_LEN;
 
 /// The buttons boot-mouse order names.
 pub const BUTTONS: u8 = 0x1F;

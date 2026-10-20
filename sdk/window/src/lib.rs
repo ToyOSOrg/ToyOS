@@ -35,9 +35,9 @@ const COMPOSITOR: &str = "compositor";
 
 /// The largest payload a client sends inline; past it a region moves instead.
 ///
-/// One number both ends read: `ipc::FrameRx` discards whatever a frame
-/// declares past what its receiver keeps and tells neither end, so a sender
-/// holding the larger of two such numbers loses the tail in silence.
+/// One number both ends read: an `ipc::FrameRx` refuses a frame declaring
+/// more than its receiver holds, so a sender holding the larger of two such
+/// numbers is dropped.
 pub const MAX_INLINE_PAYLOAD: usize = 4096;
 
 // Client → Compositor
@@ -592,8 +592,8 @@ impl Window {
         conn.send(MSG_CREATE_WINDOW, &req)?;
 
         // Header first, then the payload the message type calls for: the two
-        // answers carry different structs, and a payload shorter than the type
-        // it was asked for is a refusal from `recv_payload`, not a window.
+        // answers carry different structs, and a payload of another length than
+        // the type it was asked for is a refusal from `recv_payload`, not a window.
         let header = conn.recv_header()?;
         match header.msg_type {
             MSG_WINDOW_CREATED => {}

@@ -24,7 +24,6 @@ pub enum DeviceInfo {
     /// The function. No buffer handle beside it: a PCI claimant asks for its
     /// own memory, so this mint installs nothing.
     PciFunction(toyos_abi::pci::PciFunctionInfo),
-    Hda(toyos_abi::hda::HdaInfo, Arc<SharedMemObject>),
     /// Which partition, how long, and both its GUIDs; the view it moves blocks
     /// through is the claim's own (`device::Claim::partition`).
     Partition(toyos_abi::part::PartitionInfo),
@@ -61,11 +60,6 @@ impl DeviceInfo {
             Self::Partition(info) => bytes(info).into(),
             Self::Isa(set) => set.wire().iter().flat_map(|word| word.to_ne_bytes()).collect(),
             Self::Acpi(info) => bytes(info).into(),
-            Self::Hda(info, pcm) => {
-                let mut info = *info;
-                info.pcm = install_buffer(table, pcm)?;
-                bytes(&info).into()
-            }
         })
     }
 }

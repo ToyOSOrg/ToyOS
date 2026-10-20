@@ -706,6 +706,9 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
+    /// [`Profile::Metal`] with an Intel HDA controller behind the unit, the
+    /// function soundserver drives whole through its claim on the benches.
+    MetalHda,
     /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
@@ -785,6 +788,7 @@ impl Profile {
             | Self::HeadlessNicBehindPort
             | Self::HeadlessTwoEdu
             | Self::Metal
+            | Self::MetalHda
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
@@ -953,6 +957,10 @@ struct Shape {
     rng: bool,
     /// A virtio-gpu, which the compositor drives.
     virtio_gpu: bool,
+    /// QEMU's ICH9 HDA controller with one output codec behind it, on an
+    /// audio backend that plays nothing: soundserver's claim, on a machine
+    /// with no virtio-sound to take first.
+    hda: bool,
 }
 
 /// The devices a machine has for a test to aim a DMA or a message from, and
@@ -1035,6 +1043,7 @@ impl Profile {
                 probes: Probes::Absent,
                 rng: true,
                 virtio_gpu: false,
+                hda: false,
             },
             Self::Headless => Shape {
                 vga: "none",
@@ -1049,6 +1058,7 @@ impl Profile {
                 probes: Probes::Absent,
                 rng: false,
                 virtio_gpu: false,
+                hda: false,
             },
             Self::Metal => Shape {
                 vga: "std",
@@ -1067,8 +1077,10 @@ impl Profile {
                 probes: Probes::Absent,
                 rng: false,
                 virtio_gpu: false,
+                hda: false,
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
+            Self::MetalHda => Shape { hda: true, ..Self::Metal.shape() },
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
             Self::HeadlessUsbSpareAmdVi => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
@@ -2350,6 +2362,14 @@ fn qemu_command(
         // The size the device prefers at start, stated rather than QEMU's
         // default: `the_compositor_drives_the_virtio_gpu` reads it back.
         qemu.arg("-device").arg(format!("virtio-gpu-pci,xres=1280,yres=800{platform}"));
+    }
+    if shape.hda {
+        qemu.arg("-audiodev")
+            .arg("none,id=hdaout")
+            .arg("-device")
+            .arg("ich9-intel-hda,id=hda0")
+            .arg("-device")
+            .arg("hda-output,audiodev=hdaout,bus=hda0.0");
     }
     if shape.probes == Probes::Testdevs {
         // Two, the first enumerated below the second: the SMMU's selftest

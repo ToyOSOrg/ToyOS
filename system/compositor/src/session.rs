@@ -22,7 +22,7 @@ use toyos::{ipc, system, AsHandle, Keyboard, Mouse};
 use toyos_abi::input::RawKeyEvent;
 use toyos_abi::syscall::DeviceType;
 use toyos_abi::RawHandle;
-use toyos_input::wire::{self, Record, CONNECTIONS, KEEP, KEY_LEN, POINTER_LEN};
+use toyos_input::wire::{self, Record, CONNECTIONS, KEY_LEN, MAX_PAYLOAD, POINTER_LEN};
 use toyos_input::{Merge, Pointer, Slot, State};
 use toyos_desktop::clipboard::{Landing, Watch};
 use toyos_desktop::volume::{overlay_rect, Overlay, Request, Requests, Shown};
@@ -39,7 +39,7 @@ use window::Screen;
 use crate::client::{
     announce, deliver, deliver_signal, deliver_with_handle, mark_dead, note_closed, note_opened,
     Buffer, Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, PendingConn, Watcher, Win,
-    HANDSHAKE_TIMEOUT, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
+    HANDSHAKE_TIMEOUT, MAX_PENDING_CONNS,
 };
 use crate::display::Display;
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
@@ -50,17 +50,13 @@ use crate::{
     VOLUME_POLL_HANDLES,
 };
 
-/// The widest answer on the `volume` port, plus one, so an over-long frame is
-/// refused rather than truncated into an answer.
-const VOLUME_KEPT_PAYLOAD: usize = std::mem::size_of::<Volume>() + 1;
-
 /// The most frames one source's turn takes before the others are served.
 const SOURCE_FRAMES: usize = 64;
 
 /// One connection on the `input` port: a source of keys and pointer reports.
 struct Source {
     conn: Connection,
-    rx: FrameRx<KEEP>,
+    rx: FrameRx<MAX_PAYLOAD>,
 }
 
 const _: () = assert!(
@@ -299,7 +295,7 @@ pub struct Session {
 
     /// soundserver's `volume` port, connected on the first volume key and
     /// again after it ends; the requests on it; and the overlay its answers show.
-    volume: Option<(toyos::Connection, ipc::FrameRx<VOLUME_KEPT_PAYLOAD>)>,
+    volume: Option<(toyos::Connection, ipc::FrameRx<{ std::mem::size_of::<Volume>() }>)>,
     volume_requests: Requests,
     overlay: Overlay,
     /// What the overlay's clock counts from.
@@ -1176,17 +1172,6 @@ impl Session {
     fn dispatch(&mut self, frames: Vec<ClientFrame>) {
         for mut frame in frames {
             let handle = frame.handle;
-            // A payload filling the kept buffer declared more than any client
-            // may inline, so what arrived is a prefix of what was sent.
-            if frame.payload().len() >= MAX_KEPT_PAYLOAD {
-                eprintln!(
-                    "compositor: refusing an inline payload past {} bytes from client {}",
-                    window::MAX_INLINE_PAYLOAD,
-                    handle.0
-                );
-                mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
-                continue;
-            }
             // A connection holding a region may send its commit and nothing
             // else, and a commit is only ever of a region held.
             match (frame.copy.take(), frame.msg_type) {
@@ -1464,10 +1449,8 @@ impl Session {
     /// and hold the connection for its commit.
     fn copy_begin(&mut self, frame: ClientFrame) {
         let handle = frame.handle;
-        // Exactly one `ClipboardShmMsg`: bytes past it are not this protocol.
-        let exact = frame.payload().len() == std::mem::size_of::<window::ClipboardShmMsg>();
         let info = ipc::decode_payload::<window::ClipboardShmMsg>(frame.payload());
-        let (Ok(info), Some(conn), true) = (info, frame.conn, exact) else {
+        let (Ok(info), Some(conn)) = (info, frame.conn) else {
             mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
             return;
         };
@@ -1562,9 +1545,6 @@ impl Session {
             RxStep::Malformed => return mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol),
             RxStep::Frame { msg_type, payload_len } => (msg_type, payload_len),
         };
-        if len >= MAX_KEPT_PAYLOAD {
-            return mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
-        }
         let payload = w.rx.payload(len).to_vec();
         match msg_type {
             window::MSG_CLIPBOARD_WATCH if payload.is_empty() => self.watcher_asks(),
@@ -1611,8 +1591,7 @@ impl Session {
     /// `MSG_COPY_BEGIN` from the watcher: the region its set goes into, held
     /// until its commit.
     fn watcher_begins(&mut self, from: RawHandle, payload: &[u8]) {
-        let exact = payload.len() == std::mem::size_of::<window::ClipboardShmMsg>();
-        let (Ok(info), true) = (ipc::decode_payload::<window::ClipboardShmMsg>(payload), exact) else {
+        let Ok(info) = ipc::decode_payload::<window::ClipboardShmMsg>(payload) else {
             return mark_dead(&mut self.dead, from, DropReason::OutOfProtocol);
         };
         let len = info.len as usize;
