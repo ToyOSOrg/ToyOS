@@ -20,8 +20,6 @@ mod poly1305;
 #[cfg(not(target_os = "uefi"))]
 mod sha;
 #[cfg(not(target_os = "uefi"))]
-mod vaes;
-#[cfg(not(target_os = "uefi"))]
 mod vaes512;
 
 /// What CPUID and XCR0 admit, read once per process. The module contract
@@ -71,35 +69,28 @@ impl Features {
     pub(super) fn sha(self) -> bool {
         self.has(Self::SHA | Self::SSSE3 | Self::SSE41)
     }
-    /// AVX-512F and VL under OS-enabled ZMM state, with 256-bit VAES and
-    /// VPCLMULQDQ.
-    #[cfg(not(target_os = "uefi"))]
-    pub(super) fn vaes_avx512(self) -> bool {
-        self.vaes_clmul() && self.has(Self::AVX512VL)
-    }
     /// AVX2 and AVX-512F and VL under OS-enabled ZMM state.
     #[cfg(not(target_os = "uefi"))]
     pub(super) fn avx512vl(self) -> bool {
         self.has(Self::AVX2 | Self::AVX512VL)
     }
     /// 512-bit VAES and VPCLMULQDQ, with AVX-512F, BW and VL under
-    /// OS-enabled ZMM state.
+    /// OS-enabled ZMM state. GCM takes no 256-bit VAES path: no bench has
+    /// VAES without AVX-512 (the track issue's exit for it).
     #[cfg(not(target_os = "uefi"))]
     pub(super) fn vaes512(self) -> bool {
-        self.vaes_avx512() && self.has(Self::AVX512BW)
-    }
-    /// 256-bit VAES and VPCLMULQDQ under OS-enabled YMM state.
-    #[cfg(not(target_os = "uefi"))]
-    pub(super) fn vaes_clmul(self) -> bool {
-        self.has(Self::AES | Self::CLMUL | Self::SSSE3 | Self::AVX2 | Self::VAES | Self::VPCLMUL)
+        self.has(
+            Self::AES | Self::CLMUL | Self::SSSE3 | Self::AVX2 | Self::VAES | Self::VPCLMUL | Self::AVX512VL | Self::AVX512BW,
+        )
     }
 
     /// Intel SDM Vol. 2A, CPUID: leaf 1 ECX bits 1 (PCLMULQDQ), 9 (SSSE3),
     /// 19 (SSE4.1), 25 (AES), 27 (OSXSAVE) and 28 (AVX); leaf 7 sub-leaf 0
-    /// EBX bits 5 (AVX2), 8 (BMI2) and 29 (SHA), ECX bits 9 (VAES) and 10
-    /// (VPCLMULQDQ), EBX bits 16 (AVX512F), 30 (AVX512BW) and 31 (AVX512VL). Vol. 1 §13.3:
-    /// AVX needs XCR0's SSE and AVX state (bits 1 and 2) enabled by the OS,
-    /// AVX-512 its opmask, ZMM_Hi256 and Hi16_ZMM state (bits 5 to 7) too.
+    /// EBX bits 5 (AVX2), 8 (BMI2), 16 (AVX512F), 29 (SHA), 30 (AVX512BW)
+    /// and 31 (AVX512VL), ECX bits 9 (VAES) and 10 (VPCLMULQDQ). Vol. 1
+    /// §13.3: AVX needs XCR0's SSE and AVX state (bits 1 and 2) enabled by
+    /// the OS, AVX-512 its opmask, ZMM_Hi256 and Hi16_ZMM state (bits 5 to 7)
+    /// too.
     #[allow(unused_unsafe, reason = "CPUID is unsafe on the supported Rust 1.89")]
     fn read() -> Self {
         // Leaf 0 and leaf 1 exist on every x86-64 CPU; leaf 7 where leaf 0
@@ -258,7 +249,7 @@ pub(super) use hosted::*;
 #[cfg(not(target_os = "uefi"))]
 mod hosted {
     //! Each function checks its own admission and reports whether it ran.
-    use super::{Powers, aesni, chacha, features, poly1305, sha, vaes, vaes512};
+    use super::{Powers, aesni, chacha, features, poly1305, sha, vaes512};
 
     pub(in crate::arch) fn aes_expand(key: &[u8], keys: &mut [u8; 240]) -> bool {
         if !features().aes() {
@@ -293,12 +284,6 @@ mod hosted {
         if blocks.len() >= 16 && features.vaes512() {
             // 512-bit VPCLMULQDQ under ZMM state is admitted.
             unsafe { vaes512::hash(powers, state, blocks) }
-        } else if blocks.len() >= 8 && features.vaes_avx512() {
-            // AVX-512VL and VPCLMULQDQ under ZMM state are admitted.
-            unsafe { vaes::avx512::hash(powers, state, blocks) }
-        } else if blocks.len() >= 8 && features.vaes_clmul() {
-            // VPCLMULQDQ under YMM state is admitted.
-            unsafe { vaes::avx2::hash(powers, state, blocks) }
         } else if features.aes_clmul() {
             // CLMUL and SSSE3 are admitted.
             unsafe { aesni::hash(powers, state, blocks) }
@@ -321,12 +306,6 @@ mod hosted {
         if data.len() >= 512 && features.vaes512() {
             // 512-bit VAES under ZMM state is admitted.
             unsafe { vaes512::ctr(keys, rounds, nonce, counter, data) }
-        } else if data.len() >= 256 && features.vaes_avx512() {
-            // AVX-512VL and VAES under ZMM state are admitted.
-            unsafe { vaes::avx512::ctr(keys, rounds, nonce, counter, data) }
-        } else if data.len() >= 256 && features.vaes_clmul() {
-            // VAES under YMM state is admitted.
-            unsafe { vaes::avx2::ctr(keys, rounds, nonce, counter, data) }
         } else if features.aes_clmul() {
             // AES and SSSE3 are admitted.
             unsafe { aesni::ctr(keys, rounds, nonce, counter, data) }
@@ -350,12 +329,6 @@ mod hosted {
         if features.vaes512() {
             // 512-bit VAES and VPCLMULQDQ under ZMM state are admitted.
             unsafe { vaes512::seal(keys, rounds, powers, nonce, state, data) }
-        } else if features.vaes_avx512() {
-            // AVX-512VL, VAES and VPCLMULQDQ under ZMM state are admitted.
-            unsafe { vaes::avx512::seal(keys, rounds, powers, nonce, state, data) }
-        } else if features.vaes_clmul() {
-            // VAES and VPCLMULQDQ under YMM state are admitted.
-            unsafe { vaes::avx2::seal(keys, rounds, powers, nonce, state, data) }
         } else if features.aes_clmul() {
             // AES, CLMUL and SSSE3 are admitted.
             unsafe { aesni::seal(keys, rounds, powers, nonce, state, data) }
@@ -469,14 +442,17 @@ mod tests {
     #[test]
     fn decoding_names_each_cpuid_bit() {
         let all = Features::decode(!0, !0, !0, 0xe7);
-        assert!(all.vaes_avx512());
-        assert!(!Features::decode(!0, !0, !0, 0x7).vaes_avx512(), "ZMM state is the OS's to enable");
-        assert!(!Features::decode(!0, !(1 << 16), !0, 0xe7).vaes_avx512(), "VL needs F");
-        assert!(!Features::decode(!0, !(1 << 31), !0, 0xe7).vaes_avx512());
-        assert!(all.vaes512() && !Features::decode(!0, !(1 << 30), !0, 0xe7).vaes512());
-        assert!(all.aes_clmul() && all.sha() && all.bmi2() && all.avx2() && all.vaes_clmul());
+        assert!(all.aes_clmul() && all.sha() && all.bmi2() && all.avx2() && all.avx512vl() && all.vaes512());
+        assert!(!Features::decode(!0, !0, !0, 0x7).vaes512(), "ZMM state is the OS's to enable");
+        assert!(!Features::decode(!0, !0, !0, 0x7).avx512vl());
+        assert!(!Features::decode(!0, !(1 << 16), !0, 0xe7).vaes512(), "VL and BW need F");
+        for bit in [30, 31] {
+            assert!(!Features::decode(!0, !(1 << bit), !0, 0xe7).vaes512(), "leaf 7 EBX bit {bit}");
+        }
+        for bit in [9, 10] {
+            assert!(!Features::decode(!0, !0, !(1 << bit), 0xe7).vaes512(), "leaf 7 ECX bit {bit}");
+        }
         assert!(!Features::decode(!0, !0, !0, 0x3).avx2(), "YMM state is the OS's to enable");
-        assert!(!Features::decode(!0, !0, !0, 0x3).vaes_clmul());
         for (bit, feature) in [(1, Features::CLMUL), (9, Features::SSSE3), (19, Features::SSE41), (25, Features::AES)] {
             assert_eq!(Features::decode(!(1 << bit), !0, !0, 0xe7).0 & feature, 0, "leaf 1 bit {bit}");
         }
@@ -503,25 +479,25 @@ mod tests {
                 && std::is_x86_feature_detected!("sse4.1")
         );
         assert_eq!(
-            f.vaes_clmul(),
+            f.avx512vl(),
+            f.avx2() && std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl")
+        );
+        assert_eq!(
+            f.vaes512(),
             f.aes_clmul()
-                && f.avx2()
+                && f.avx512vl()
+                && std::is_x86_feature_detected!("avx512bw")
                 && std::is_x86_feature_detected!("vaes")
                 && std::is_x86_feature_detected!("vpclmulqdq")
         );
-        assert_eq!(
-            f.vaes_avx512(),
-            f.vaes_clmul() && std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vl")
-        );
-        assert_eq!(f.vaes512(), f.vaes_avx512() && std::is_x86_feature_detected!("avx512bw"));
         std::println!(
-            "admitted: aes+clmul {} avx2 {} bmi2 {} sha {} vaes+vpclmul {} avx512vl {}",
+            "admitted: aes+clmul {} avx2 {} bmi2 {} sha {} avx512vl {} vaes512 {}",
             f.aes_clmul(),
             f.avx2(),
             f.bmi2(),
             f.sha(),
-            f.vaes_clmul(),
-            f.vaes_avx512()
+            f.avx512vl(),
+            f.vaes512()
         );
     }
 }
