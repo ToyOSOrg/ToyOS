@@ -25,6 +25,7 @@ use toyos_mixer::{period_nanos, Gain, MAX_CLIENT_RATE, MIN_CLIENT_RATE};
 use crate::client::{open_stream, Departure};
 use crate::command::{remove, submit, CommandRing, MixCommand};
 use crate::inspect::{self, Device, Published};
+use crate::output::{Event, Outputs};
 use crate::volume::{self, VolumeClient};
 
 /// Control connections soundserver will hold at once.
@@ -121,24 +122,24 @@ fn description(device: &Device) -> DeviceDescription {
     }
 }
 
+/// The tokens [`Outputs::watch`] answers with start here, above every other.
+const TOKEN_OUTPUTS: u64 = 1 << 40;
+
 pub(crate) fn control_thread(
     acceptor: Acceptor,
     volume_acceptor: Acceptor,
-    mut master: Option<crate::hda::MasterControl>,
+    mut outputs: Outputs,
     cmd_ring: &CommandRing,
     cmd_pipe_write: RawHandle,
-    device_sample_rate: u32,
-    device_channels: u16,
-    device_period_frames: u32,
-    slot_count: u32,
-    ramp_frames: u32,
-    device: &Device,
+    mut device: Device,
     published: &Published,
 ) {
-    // One handle per client plus the acceptor; `MAX_CONTROL_CLIENTS` is derived
-    // from this ring, so the set always fits in one batch.
-    let poller = Poller::new(MAX_CONTROL_CLIENTS as u32 + 1);
-    let period_nanos = period_nanos(device_period_frames as u64, device_sample_rate as u64);
+    // One handle per client plus the acceptor, the volume port's two and the
+    // outputs'.
+    let watched = MAX_CONTROL_CLIENTS + 1 + 2 + Outputs::tokens(0).count();
+    let poller = Poller::new(watched as u32);
+    let mut period_nanos = period_nanos(device.period_frames as u64, device.rate as u64);
+    let mut ramp_frames = toyos_mixer::ramp_frames(device.rate);
 
     struct ControlClient {
         conn: Connection,
@@ -165,8 +166,19 @@ pub(crate) fn control_thread(
     /// A `volume` connection's token: its index above every control client's.
     const TOKEN_VOLUME: u64 = 1 << 32;
 
+    let mut events: Vec<Event> = Vec::new();
     loop {
+        // An output waits for no stream to be open: from here every stream
+        // opens on it.
+        if let Some(attached) = clients.iter().all(|c| c.stream_idx.is_none()).then(|| outputs.attach()).flatten() {
+            device = crate::output_device(&attached.offer, attached.period_frames);
+            period_nanos = toyos_mixer::period_nanos(device.period_frames as u64, device.rate as u64);
+            ramp_frames = toyos_mixer::ramp_frames(device.rate);
+            submit(cmd_ring, cmd_pipe_write, MixCommand::Attach(attached), period_nanos);
+        }
+
         poller.watch(&acceptor, READABLE, TOKEN_ACCEPT);
+        outputs.watch(&poller, TOKEN_OUTPUTS);
         poller.watch(&volume_acceptor, READABLE, TOKEN_VOLUME_ACCEPT);
         for (i, client) in clients.iter().enumerate() {
             poller.watch(&client.conn, READABLE, i as u64);
@@ -208,11 +220,17 @@ pub(crate) fn control_thread(
                 Err(e) => say!("soundserver: volume accept failed: {e:?}"),
             }
         }
+        outputs.serve(&ready, TOKEN_OUTPUTS, &mut events);
+        for event in events.drain(..) {
+            match event {
+                Event::Master(master) => volume::answer(&mut volume_clients, master),
+            }
+        }
         let mut at = TOKEN_VOLUME;
         volume_clients.retain_mut(|client| {
             let token = at;
             at += 1;
-            !ready.contains(&token) || volume::serve(client, master.as_mut())
+            !ready.contains(&token) || volume::serve(client, &mut outputs)
         });
 
         let mut dead: Vec<usize> = Vec::new();
@@ -277,10 +295,10 @@ pub(crate) fn control_thread(
                             idx,
                             &req,
                             &clients[i].conn,
-                            device_sample_rate,
-                            device_channels,
-                            device_period_frames,
-                            slot_count,
+                            device.rate,
+                            device.channels,
+                            device.period_frames,
+                            device.buffers,
                             ramp_frames,
                         ) else {
                             let _ = clients[i].conn.signal(MSG_STREAM_ERROR);
@@ -312,7 +330,7 @@ pub(crate) fn control_thread(
                     // or not the reader took it: a reader that will not take
                     // one frame is not one this thread waits for.
                     Control::Inspect => {
-                        let answer = inspect::snapshot(device, published);
+                        let answer = inspect::snapshot(&device, published);
                         if let Err(e) =
                             clients[i].conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &answer)
                         {
@@ -324,7 +342,7 @@ pub(crate) fn control_thread(
                     }
                     Control::Describe => {
                         if let Err(e) =
-                            clients[i].conn.try_send(MSG_DEVICE_DESCRIBED, &description(device))
+                            clients[i].conn.try_send(MSG_DEVICE_DESCRIBED, &description(&device))
                         {
                             say!("soundserver: a device description was not answered ({e:?})");
                         }

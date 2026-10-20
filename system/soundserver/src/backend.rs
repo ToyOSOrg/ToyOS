@@ -1,6 +1,8 @@
-//! The device half of the mix loop, and the two devices behind it.
+//! The device half of the mix loop, and the two devices behind it: the
+//! virtio-sound function soundserver drives itself, and an output driver's
+//! ring (`crate::output`).
 //!
-//! Everything that differs between virtio-sound and HDA is a method below. The
+//! Everything that differs between them is a method below. The
 //! mixer, the ramps, the DLL, the underrun accounting and the suspend/resume
 //! structure are one body of code either way — and [`Pipeline`] exists to keep
 //! that honest, because the two differ in *who owns a period soundserver has not
@@ -9,7 +11,7 @@
 use toyos::AsHandle;
 use toyos_abi::RawHandle;
 
-use crate::{hda, virtio};
+use crate::virtio;
 
 /// Who owns a period soundserver has been given back and has not refilled.
 ///
@@ -26,7 +28,7 @@ pub(crate) enum Pipeline {
     /// does not have. Holding one costs nothing, indefinitely, and the play
     /// order is the submit order.
     Queue,
-    /// HDA: the engine owns every period for as long as it runs. It returns to
+    /// An output driver's (HDA's) ring: the engine owns every period for as long as it runs. It returns to
     /// buffer `i` exactly `num_buffers` periods after completing it and plays
     /// whatever is there, so a period soundserver holds back is played as the
     /// silence `released` left in it *and* completed a second time — a
@@ -52,11 +54,9 @@ pub(crate) struct Completion {
 
 /// The device half of the mix loop.
 ///
-/// Two implementations and no more: a framework before there are three is an
-/// abstraction with no evidence behind it. Both are drivers in this process
-/// now, and what differs between the two devices is exactly the methods below;
-/// the mixer, the ramps, the DLL, the underrun accounting and the
-/// suspend/resume structure are one body of code either way.
+/// Two implementations and no more: what differs between the two devices is
+/// exactly the methods below; the mixer, the ramps, the DLL, the underrun
+/// accounting and the suspend/resume structure are one body of code either way.
 pub(crate) trait Backend {
     /// Who owns a freed period soundserver does not refill.
     fn pipeline(&self) -> Pipeline;
@@ -120,39 +120,5 @@ impl Backend for VirtioBackend {
 
     fn stop(&mut self) {
         self.virtio.stop();
-    }
-}
-
-pub(crate) struct HdaBackend {
-    pub(crate) hda: hda::Hda,
-}
-
-impl Backend for HdaBackend {
-    fn pipeline(&self) -> Pipeline {
-        Pipeline::Ring
-    }
-
-    fn handle(&self) -> RawHandle {
-        self.hda.dev().as_handle()
-    }
-
-    fn buffer(&self, idx: usize) -> *mut u8 {
-        self.hda.buffer(idx).as_ptr()
-    }
-
-    fn completion(&mut self) -> Option<Completion> {
-        self.hda.completion()
-    }
-
-    fn released(&mut self, idx: usize) {
-        self.hda.buffer(idx).zero();
-    }
-
-    fn submit(&mut self, _idx: usize, _bytes: usize) {
-        self.hda.start();
-    }
-
-    fn stop(&mut self) {
-        self.hda.stop();
     }
 }

@@ -1,17 +1,20 @@
 //! The `volume` port: the master level and mute, on the codec.
 //!
-//! The compositor holds the one connector. Each request is set on the device
-//! and read back, and the answer is what the device read back, never the
-//! intent, sent by one write that does not wait: a peer that will not take it
-//! is dropped by name. A machine whose device has no master — virtio-sound,
-//! the null sink, an HDA path with no amplifier to set — answers every
-//! request unavailable, by name, and no mixer gain stands in for a master.
+//! The compositor holds the one connector. Each request goes to the output
+//! driver played to, which sets it on the codec and reads it back, and the
+//! answer is what the codec read back, never the intent, sent by one write
+//! that does not wait: a peer that will not take it is dropped by name. A
+//! device with no master — virtio-sound, the null sink, a path with no
+//! amplifier to set — answers every request unavailable, by name, and no
+//! mixer gain stands in for a master.
 
 use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_STEP, MSG_VOLUME_UNAVAILABLE};
 use toyos::ipc::{self, RxStep};
 use toyos::Connection;
 
-use crate::hda::{Answer, MasterControl};
+use toyos_sound_output::Master;
+
+use crate::output::{Asked, Outputs};
 
 pub(crate) struct VolumeClient {
     pub(crate) conn: Connection,
@@ -41,8 +44,9 @@ pub(crate) fn accepted(clients: &mut Vec<VolumeClient>, conn: Connection) {
     clients.push(VolumeClient { conn, rx: ipc::FrameRx::new() });
 }
 
-/// Serve every request the client has framed; `false` once it is to go.
-pub(crate) fn serve(client: &mut VolumeClient, mut master: Option<&mut MasterControl>) -> bool {
+/// Serve every request the client has framed; `false` once it is to go. One
+/// the output driver answers is answered through [`answer`].
+pub(crate) fn serve(client: &mut VolumeClient, outputs: &mut Outputs) -> bool {
     loop {
         let (msg_type, payload_len) = match client.rx.pump(&client.conn) {
             RxStep::Idle => return true,
@@ -53,31 +57,44 @@ pub(crate) fn serve(client: &mut VolumeClient, mut master: Option<&mut MasterCon
             }
             RxStep::Frame { msg_type, payload_len } => (msg_type, payload_len),
         };
-        let answer = match classify(msg_type, payload_len) {
+        let asked = match classify(msg_type, payload_len) {
             Request::Step => {
                 let step: VolumeStep = ipc::decode_payload(client.rx.payload(payload_len))
                     .expect("a payload as long as the struct decodes");
-                master.as_deref_mut().and_then(|master| master.step(step.delta))
+                outputs.ask(Some(step.delta))
             }
-            Request::Mute => master.as_deref_mut().and_then(MasterControl::toggle_mute),
+            Request::Mute => outputs.ask(None),
             Request::Violation => {
                 say!("soundserver: volume protocol violation (msg {msg_type}), disconnecting");
                 return false;
             }
         };
-        if let Err(e) = send(&client.conn, answer) {
+        let sent = match asked {
+            Asked::Forwarded => Ok(()),
+            Asked::Unavailable => send(&client.conn, None),
+        };
+        if let Err(e) = sent {
             say!("soundserver: a volume answer was not taken ({e:?}), disconnecting");
             return false;
         }
     }
 }
 
-fn send(conn: &Connection, answer: Option<Answer>) -> Result<(), ipc::TrySendError> {
+/// The output driver's answer to the oldest request it was forwarded,
+/// to the client holding the port now; a client that will not take it goes.
+pub(crate) fn answer(clients: &mut Vec<VolumeClient>, master: Option<Master>) {
+    let Some(client) = clients.first() else { return };
+    if let Err(e) = send(&client.conn, master) {
+        say!("soundserver: a volume answer was not taken ({e:?}), disconnecting");
+        clients.clear();
+    }
+}
+
+fn send(conn: &Connection, answer: Option<Master>) -> Result<(), ipc::TrySendError> {
     match answer {
-        Some(Answer { setting, bottom }) => conn.try_send(
-            MSG_VOLUME,
-            &Volume { position: setting.position, bottom, muted: setting.muted as u8, _pad: 0 },
-        ),
+        Some(Master { position, bottom, muted }) => {
+            conn.try_send(MSG_VOLUME, &Volume { position, bottom, muted: muted as u8, _pad: 0 })
+        }
         None => conn.try_send_bytes(MSG_VOLUME_UNAVAILABLE, &[]),
     }
 }

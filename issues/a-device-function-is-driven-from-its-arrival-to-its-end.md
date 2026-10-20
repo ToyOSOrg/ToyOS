@@ -104,6 +104,19 @@ started. Nothing reaches userland when a device arrives or leaves.
 3. **Drivers leave the shared services.** netstack, soundserver and diskserver
    each become a driver per function plus the service its clients use. The
    client port carries a per-device source and `gone`.
+   - **Done for HDA.** `hda` is a `drives` row on `pci:04:03:*`, one process
+     per controller; each walks its own codecs and offers soundserver the
+     output it reaches on `sound-output` (`toyos-sound-output`), and one that
+     reaches none ends by name. soundserver plays to the first offer it can
+     mix into, beginning when no stream is open; it is the null sink until
+     then, and refuses every later offer. A driver gone after soundserver
+     began playing to it ends soundserver. QEMU's two-controller row is
+     `hda_plays_to_the_controller_that_reaches_an_output`.
+   - Next: virtio-sound is still driven inside soundserver
+     (`system/soundserver/src/virtio.rs`); it becomes a driver on the same
+     port. Then the output set: a second output offered while one plays, a
+     driver's `gone`, and a stream moved to another output, none of which
+     soundserver serves yet; and netstack and diskserver.
 4. **usbd drives every xHCI**, one per controller, started by stage 1's `drives` rows.
    This is step 10 of
    `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`, whose

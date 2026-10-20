@@ -1,5 +1,5 @@
-//! The controller: its reset, the codec link over CORB and RIRB, and one
-//! output stream, laid out in one grant.
+//! The controller: its reset, the codec link over CORB and RIRB in one grant,
+//! and one output stream cycling a ring the device reaches.
 //!
 //! Every `§` is a section of the *Intel High Definition Audio Specification*,
 //! Revision 1.0a.
@@ -33,20 +33,21 @@ pub const PERIOD_BYTES: usize = 512;
 /// is told (§3.3.35: tag 0 is reserved as unused).
 pub const STREAM_TAG: u8 = 1;
 
-/// The grant: CORB, RIRB and the descriptor list each on a 128-byte boundary
-/// (§3.6.2, §3.6.4, §3.6.5), then the periods (§4.5.1).
+/// The grant: CORB, RIRB and the descriptor list, each on a 128-byte boundary
+/// (§3.6.2, §3.6.4, §3.6.5). The periods are the ring soundserver lends.
 const CORB: usize = 0x0000;
 const RIRB: usize = 0x0400;
 const BDL: usize = 0x0C00;
-const PCM: usize = 0x1000;
-pub const GRANT_BYTES: usize = 0x2000;
+pub const GRANT_BYTES: usize = 0x1000;
+
+/// §4.5.1: a buffer starts on a 128-byte boundary.
+const BUFFER_ALIGN: u64 = 128;
 
 const _: () = {
     assert!(CORB + 256 * 4 <= RIRB);
     assert!(RIRB + 256 * 8 <= BDL);
-    assert!(BDL + PERIODS * 16 <= PCM);
-    assert!(PCM + PERIODS * PERIOD_BYTES <= GRANT_BYTES);
-    assert!(PCM.is_multiple_of(128) && PERIOD_BYTES.is_multiple_of(128));
+    assert!(BDL + PERIODS * 16 <= GRANT_BYTES);
+    assert!(PERIOD_BYTES.is_multiple_of(BUFFER_ALIGN as usize));
 };
 
 /// How many times a register is read while a step waits on it.
@@ -185,6 +186,8 @@ pub enum Refusal {
     Beyond32Bits { device_addr: u64 },
     /// GCAP reports no output stream descriptor.
     NoOutputStream { gcap: Gcap },
+    /// The lent ring is where §4.5.1 puts no buffer: off a 128-byte boundary.
+    RingUnaligned { device_addr: u64 },
     /// The output descriptor's SRST never read back 1, or 0 (§3.3.35).
     StreamReset { entered: bool },
 }
@@ -207,6 +210,7 @@ impl core::fmt::Display for Refusal {
                 write!(f, "it addresses 32 bits and the grant is at {device_addr:#x}")
             }
             Self::NoOutputStream { gcap } => write!(f, "it has no output stream (GCAP {:#06x})", gcap.0),
+            Self::RingUnaligned { device_addr } => write!(f, "the lent ring at {device_addr:#x} is off a 128-byte boundary"),
             Self::StreamReset { entered: true } => write!(f, "its output stream never entered reset"),
             Self::StreamReset { entered: false } => write!(f, "its output stream never left reset"),
         }
@@ -519,17 +523,25 @@ pub struct Stream<R: Registers> {
 }
 
 impl<R: Registers> Stream<R> {
-    /// §4.5.3's descriptor half: reset it, point it at the cyclic buffer, and
-    /// arm its interrupt. The codec is told the format and [`STREAM_TAG`]
+    /// §4.5.3's descriptor half: reset it, point it at the cyclic buffer of
+    /// [`PERIODS`] periods of [`PERIOD_BYTES`] the device reaches at `ring`,
+    /// and arm its interrupt. The codec is told the format and [`STREAM_TAG`]
     /// after this and before [`Self::start`].
     ///
     /// # Panics
     /// If the grant is shorter than [`GRANT_BYTES`]: the caller's own mistake.
-    pub fn open(regs: R, mem: &impl DmaBuffers, reset: &Reset, format: u16) -> Result<Self, Refusal> {
+    pub fn open(regs: R, mem: &impl DmaBuffers, ring: u64, reset: &Reset, format: u16) -> Result<Self, Refusal> {
         assert!(mem.bytes() >= GRANT_BYTES, "hda: a grant of {:#x} bytes holds no layout", mem.bytes());
         let gcap = reset.gcap;
         if gcap.output_streams() == 0 {
             return Err(Refusal::NoOutputStream { gcap });
+        }
+        if !ring.is_multiple_of(BUFFER_ALIGN) {
+            return Err(Refusal::RingUnaligned { device_addr: ring });
+        }
+        let end = ring + (PERIODS * PERIOD_BYTES) as u64 - 1;
+        if !gcap.wide() && end >> 32 != 0 {
+            return Err(Refusal::Beyond32Bits { device_addr: ring });
         }
         // §3.3.14: input descriptors are numbered first.
         let index = gcap.input_streams();
@@ -545,8 +557,8 @@ impl<R: Registers> Stream<R> {
             return Err(Refusal::StreamReset { entered: false });
         }
 
-        let entries = stream::build_bdl(mem.device_addr(PCM), PERIOD_BYTES as u32, PERIODS)
-            .expect("hda: the pipeline's own shape builds a descriptor list");
+        let entries = stream::build_bdl(ring, PERIOD_BYTES as u32, PERIODS)
+            .expect("hda: a ring the device reaches builds a descriptor list");
         for (i, entry) in entries.iter().enumerate() {
             let slot = BDL + i * 16;
             mem.write64(slot, entry.address);
@@ -569,12 +581,6 @@ impl<R: Registers> Stream<R> {
         regs.write8(at + SD_STS, SD_STS_CLEAR);
         regs.write32(INTCTL, INTCTL_GIE | 1 << index);
         Ok(Self { regs, at, last: 0, running: false })
-    }
-
-    /// Where period `idx`'s samples are in the grant.
-    pub fn period(idx: usize) -> usize {
-        assert!(idx < PERIODS, "hda: there is no period {idx}");
-        PCM + idx * PERIOD_BYTES
     }
 
     pub fn running(&self) -> bool {

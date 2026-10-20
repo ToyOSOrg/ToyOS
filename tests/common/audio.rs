@@ -54,12 +54,24 @@ fn is_soundserver_stats(text: &str, at: usize) -> bool {
     text[line_start..at].contains("soundserver: wakes=")
 }
 
-/// The tone client played to its end through the HDA controller soundserver drives
-/// itself, soundserver never fell back to the null sink, and no period of it went
-/// unfilled.
+/// soundserver played to an output driver's device before `job` ran, so the
+/// job's stream did not play to the null sink.
+fn on_an_output(log: &str, job: &str) -> Result<(), String> {
+    let playing = log
+        .find(PLAYING)
+        .ok_or_else(|| format!("soundserver never said `{PLAYING}`: no output was offered, and it stayed the null sink"))?;
+    let head = format!("spawn: /system/bin/{job} ");
+    let spawned = log.find(&head).ok_or_else(|| format!("no `{head}` record: {job} never ran"))?;
+    if playing > spawned {
+        return Err(format!("soundserver played to an output only after {job} spawned, so its stream played to the null sink"));
+    }
+    Ok(())
+}
+
+/// The tone client played to its end through the HDA controller an `hda`
+/// driver drives, played to before it ran, and no period of it went unfilled.
 pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
-    log.must_say("soundserver: hda path configured in")?;
-    log.must_not_say(NULL_SINK)?;
+    on_an_output(log.text(), "test_rs_audio_tone")?;
     let window = job_window(log.text(), "test_rs_audio_tone")?;
     let underruns = sum_field(window, "underruns");
     if underruns != 0 {
@@ -74,8 +86,7 @@ pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
 /// The resampled tone client played to its end through the HDA controller, at
 /// a rate the device does not run, and no period of it went unfilled.
 pub fn resampled_tone_on_metal(log: &Serial) -> Result<(), String> {
-    log.must_say("soundserver: hda path configured in")?;
-    log.must_not_say(NULL_SINK)?;
+    on_an_output(log.text(), "test_rs_audio_tone_resampled")?;
     let device = rate_after(log.text(), "soundserver: ready, ")
         .ok_or("soundserver never said the rate it runs the device at")?;
     let window = job_window(log.text(), "test_rs_audio_tone_resampled")?;
@@ -105,8 +116,8 @@ fn rate_after(text: &str, marker: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// soundserver's own word for the sink it took when the machine has none.
-pub const NULL_SINK: &str = "soundserver: no audio device, presenting a null sink";
+/// soundserver's word for beginning to play to an output driver's device.
+pub const PLAYING: &str = "soundserver: playing to the output offered";
 
 /// Sum one `soundserver:` counter across every stats window.
 fn sum_field(serial: &str, key: &str) -> u32 {
