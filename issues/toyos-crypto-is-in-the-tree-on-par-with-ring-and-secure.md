@@ -189,6 +189,79 @@ Not consumers:
      printed samples rounded to 0.1 ns. Its figures agree with these within
      about 5%. Tables:
      https://github.com/ToyOSOrg/evidence/tree/4dfa4dc8c647bee3424a13be28191bdb2213bcbd/pr-932/r2.
+   - **Symmetric families: partial, stage 3a**, at 540c55e35, shipped build.
+     Stage 3 is not complete. Of 64 symmetric rows, the T14 passes 53 and
+     the AMD bench 44.
+     Evidence: `ToyOSOrg/evidence` `pr-958`.
+     - **Each bench's ISA path:**
+       - the T14 runs 512-bit VAES GCM, AVX-512VL ChaCha20 and SHA-512, and
+         SHA-NI;
+       - the AMD bench runs AES-NI GCM, AVX2 ChaCha20 and Poly1305, BMI2
+         SHA-512, and SHA-NI.
+     - **What remains, by measured cause.** Each item's exit is that its
+       rows pass on both benches.
+       - **ChaCha20 on AVX2, the AMD bench**, is a recorded exception
+         (ruling of 2026-10-15).
+         - Rows: ChaCha20-Poly1305 1 KiB and 16 KiB, seal 1.16–1.52 and
+           open 1.22–1.43.
+         - At 16 KiB, open takes 9.83 µs before round 8's Poly1305 change.
+           Its Poly1305 pass alone is 3.95 µs, so ChaCha20 alone is about
+           5.9 µs, against ring's 6.55 µs for the whole AEAD.
+         - The AVX2 rounds come to about 3.4 instructions per byte in both
+           the eight-block and the three-pair layout. An ideal schedule is
+           about 2.8, so the remaining headroom is about 18%.
+         - Opening authenticates before it decrypts, and that stays.
+         - The lever is a faster AVX2 ChaCha20.
+       - **AES-GCM bulk**: 1 KiB and 16 KiB, AMD 1.03–1.16, T14 1.02–1.06.
+         - On AES-NI, the stitched eight-block seal is about 277
+           instructions per 128 bytes, so it is bound by instruction count,
+           not spills.
+         - CTR alone (open less reject) is about 1.95 µs per 16 KiB for
+           AES-128 and 3.0 µs for AES-256. GHASH alone (reject) passes at
+           0.64.
+         - Two schedules lost on the AMD bench and are not to be retried:
+           a VEX build of AES-NI kept all fifteen round keys in registers
+           and serialised the blocks (CTR 2.0 → 2.2 µs); a 256-bit VAES-AVX2
+           batch is not admitted there.
+         - The next lever is a schedule with fewer instructions per block:
+           counter generation and the Karatsuba folds.
+       - **Short ChaCha20-Poly1305**: 0 and 64 B, AMD 1.14–1.34, T14
+         1.10–1.18.
+         - A seal sweep over 1–192 B (a7f814fc3, before round 12) showed
+           ours exceeding ring by a flat amount per message, with a cost per
+           block that matches ring's.
+         - At 540c55e35 the gaps are 23–51 ns on the AMD bench and 17–25 ns
+           on the T14.
+         - One ChaCha20 block (`chacha20-poly1305-openssh/length`) is 1.09
+           on the AMD bench and passes at 0.82 on the T14.
+         - The rest is per-message setup: Poly1305 key and finish, erasing
+           the keystream and state buffers, and the tag.
+         - The lever is a smaller fixed cost per message, measured row by
+           row against the sweep.
+       - **OpenSSH key setup**: 2.5 on the AMD bench, 2.77 on the T14 — a
+         recorded exception (ruling 3 of 2026-10-15).
+         - `SealingKey::new` is one 64-byte copy. Dropping the key erases it
+           with four 16-byte volatile stores and a fence.
+         - Ring's 1.6–1.9 ns is about the copy alone.
+         - The erasure is a stage-4 property and stays. This row is
+           measured beside it, not counted against the exit.
+       - **AMD bench SHA-512 at 16 KiB**: 1.035. The vector message schedule
+         measured slower without AVX-512 (1.385), so the scalar BMI2 rounds
+         run there.
+     - **No row is slower than the first measurement.** Each instruction
+       path's emitted code in the shipped binary was inspected: the only
+       static table it indexes is SHA-2's round constants, by round. Its
+       branches test only public lengths, round counts and CPU features.
+       The fixed-versus-random timing harness is stage 4's own PR.
+     - **A cause not to rediscover.** In `[profile.toyos]`, `array::map`,
+       `zip` and slice iterators stayed out of line in vector loops. Each
+       call spilled every live register: AES-GCM ran 4–5× its unasserted
+       build on the T14.
+       - A large array spilled or moved is a `memcpy`, which is a bare
+         `rep movsb` on ToyOS. The 240-byte AES-256 key schedule cost
+         25–38 ns per call.
+       - Hot loops index fixed-size arrays and read round keys in place.
+         The evidence holds the two binaries' call lists.
    - **First measurement, not a verdict.** `toyos-ssh`'s fuzz
      (`build/ssh/tests/fuzz.rs`), on the crate since stage 1: 33.92 s and
      15.46 s in two runs on the development Mac (an M4 Pro). On ring it took
