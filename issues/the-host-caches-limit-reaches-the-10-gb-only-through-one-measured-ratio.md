@@ -66,8 +66,9 @@ files sealed, and the cache list says it stores 1,867,126,459 B, a ratio of
 3.91. The fifteen landings f0a987bc6..979d4c539 added 740,607,897 B and 1,947
 files; which of them did is not measured. The 8 GB is this module's bound on
 uncompressed bytes, not GitHub's: at that ratio the refused tree would store
-about 2.06 GB. The repository's list held 10,985,138,676 B in 25 entries on
-2026-10-20 regardless, the host entry and 24 toolchain layers.
+about 2.06 GB. The repository's list held 10,562,836,502 B in 24 entries on
+2026-10-20 regardless, the host entry and 23 toolchain layers. The seal lines of
+these runs and that cache list: https://github.com/ToyOSOrg/evidence/tree/a36ad035c72df67b46d2ccee7a916fe5f521a5a3 (`nightly-host-seal`, `cache-list.json`).
 
 Owner: the host cache (`build/cicache.rs`).
 

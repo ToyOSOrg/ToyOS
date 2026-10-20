@@ -29,6 +29,9 @@ toyos-untrusted of this tree, main's tip, so no sdk alias can name it". Runs
 of 2026-10-14 06:30Z. The refusal is right here and names the symptom, not the
 failed publish (`issues/a-release-that-decides-before-its-tips-crates-are-up-reds-the-nightly.md`).
 
+The publish runs' and the releases' log lines, and crates.io's answers:
+https://github.com/ToyOSOrg/evidence/tree/a36ad035c72df67b46d2ccee7a916fe5f521a5a3.
+
 Only an account can create a crate, and only then can it name `publish.yml`
 the crate's trusted publisher. Nothing before a landing tells that a crate it
 adds to `PUBLISHED` is not on crates.io.
