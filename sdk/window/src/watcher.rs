@@ -85,7 +85,7 @@ pub enum Watched {
 /// The clipboard's watcher.
 pub struct Watcher {
     conn: Connection,
-    rx: FrameRx<{ MAX_INLINE_PAYLOAD + 1 }>,
+    rx: FrameRx<MAX_INLINE_PAYLOAD>,
     /// A set past [`MAX_INLINE_PAYLOAD`] waiting for its region.
     region_owed: Option<String>,
     /// A set is in flight, unanswered.
@@ -117,7 +117,7 @@ impl Watcher {
         };
         let payload = self.rx.payload(len);
         match msg_type {
-            MSG_CLIPBOARD_PASTE if len <= MAX_INLINE_PAYLOAD => {
+            MSG_CLIPBOARD_PASTE => {
                 let text = String::from_utf8(payload.to_vec()).map_err(|_| WatchError::NotText)?;
                 self.conn.try_signal(MSG_CLIPBOARD_WATCH)?;
                 Ok(Watched::Copy(text))

@@ -149,7 +149,7 @@ fn main() {
                 RxStep::Eof => {
                     pending.remove(i);
                 }
-                RxStep::Frame { msg_type: MSG_INSPECT, payload_len: 0 } => {
+                RxStep::Frame { msg_type: MSG_INSPECT, .. } => {
                     let p = pending.remove(i);
                     answer(&p.conn, &bus, &wakes, wake_at, now());
                 }

@@ -477,7 +477,7 @@ impl Server {
             RxStep::Malformed => self.drop_client(id, "it sent a frame this protocol cannot describe"),
             RxStep::Frame { msg_type, payload_len } => {
                 let Ok(request) = ipc::decode_payload::<Request>(client.rx.payload(payload_len)) else {
-                    return self.drop_client(id, "its request was short");
+                    return self.drop_client(id, "its request was not one `Request` wide");
                 };
                 let answer = self.answer(id, msg_type, request);
                 self.reply(id, answer);

@@ -162,13 +162,13 @@ const RUST_SKIP: &[&str] = &[
     "readdir_bound",
     // Fills the VFS `created_dirs` cap and leaves it there. `mkdir_cap` runs it.
     "mkdir_cap",
-    // No guest's sound device plays audio: the `hda_tone` and
-    // `hda_tone_resampled` metal rows run these on the T14 and the AMD bench.
+    // They need an HDA controller, which the shared boot's machine has not:
+    // the `hda_tone`, `hda_tone_resampled` and `hda_volume_step` metal rows
+    // run them on the T14 and the AMD bench, and
+    // `hda_plays_to_the_controller_that_reaches_an_output` runs `volume_step`
+    // on QEMU's.
     "audio_tone",
     "audio_tone_resampled",
-    // It steps the codec's master and reads it back, which no guest's sound
-    // device has: the `hda_volume_step` metal row runs it on the T14 and the
-    // AMD bench.
     "volume_step",
     // It hands the ACPI claim to a server of its own and kills it, which needs
     // a boot that starts none: the `acpi_server_death` metal row runs it on
@@ -392,6 +392,14 @@ const MACHINE_TESTS: &[&str] = &[
     // spawns, each process holding its own — which no host build has. No
     // bench has two identical functions the kernel leaves to a claim.
     "a_drives_row_holds_one_process_per_function",
+    // Two HDA controllers, each with an `hda` driver behind VT-d: the one
+    // with no codec plays nothing, soundserver plays to the other, and the
+    // master job the benches' rows judge steps that output's codec. Which
+    // driver offers and which soundserver plays to are three processes and
+    // two claims, which no host build has. The tone rows' stream is the
+    // benches' alone. q35 only: `virt` has no unit to put the functions
+    // behind.
+    "hda_plays_to_the_controller_that_reaches_an_output",
     // Whether QEMU's virtio functions negotiated `VIRTIO_F_ACCESS_PLATFORM`
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
@@ -399,7 +407,7 @@ const MACHINE_TESTS: &[&str] = &[
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot stick is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
-    // hand rather than by the merge queue.
+    // hand rather than by CI.
     "amdvi_firmware_left",
     // A translating AMD-Vi unit's refusal, recorded and read: a kernel-owned
     // record halts the machine, so no metal row reaches it, and only QEMU's
@@ -634,7 +642,7 @@ const METAL: &[(&str, metal::Metal)] = &[
             arms: TESTCASES,
             judge: |b| {
                 b[0].job_passed("test_rs_volume_step")?;
-                b[0].log().must_say("soundserver: hda path configured in").map(|_| ())
+                b[0].log().must_say(audio::PLAYING).map(|_| ())
             },
         },
     ),
@@ -3886,6 +3894,9 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
             claims::NOT_REMAPPED,
         ),
         "a_drives_row_holds_one_process_per_function" => a_drives_row_holds_one_process_per_function(),
+        "hda_plays_to_the_controller_that_reaches_an_output" => {
+            hda_plays_to_the_controller_that_reaches_an_output(test_config)
+        }
         "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
@@ -4241,6 +4252,53 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
         .find(|l| l.contains("drives_judged: PCI "))
         .ok_or_else(|| format!("the job never said who holds the functions:\n{judged}"))?;
     eprintln!("  [drives] {}", line.trim());
+    Ok(())
+}
+
+/// Two HDA controllers, the first with no codec and the second with an
+/// output one ([`qemu::Profile::MetalTwoHda`]), each with an `hda` driver of
+/// its own: the first plays nothing and says why, the second offers its
+/// output, and soundserver plays to it. Then the benches' master job on that
+/// output: reset, CORB/RIRB, the walk, the path and the master's readback,
+/// each behind VT-d and through the claim.
+///
+/// Not the tone jobs: cpal holds a stream's close to a fade and a ring of
+/// periods at the device's rate, and QEMU's controller completes periods in
+/// bursts of up to a ring paced by the host, so that bound is a time only the
+/// benches judge.
+fn hda_plays_to_the_controller_that_reaches_an_output(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "volume_step";
+    const OFFERED: &str = ": path configured in ";
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bins = [(JOB.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB))];
+    let options = BootOptions { profile: qemu::Profile::MetalTwoHda, ..Default::default() };
+    let controllers = qemu::profile_argv(&options).iter().filter(|arg| arg.starts_with("ich9-intel-hda")).count();
+    if controllers != 2 {
+        return Err(format!("the machine was to have two Intel HDA controllers, and QEMU is given {controllers}"));
+    }
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &bins, options);
+    let mut console = format!("{}\n", qemu.boot_log());
+    // Both drivers' verdicts and soundserver's: each comes when its walk does,
+    // which can be after the ready marker.
+    let decided = |t: &str| t.contains(audio::PLAYING) && t.contains("plays nothing: ");
+    await_guest(&mut qemu, &mut console, "both drivers' verdicts and soundserver's", decided)
+        .map_err(|e| format!("{e}\n{console}"))?;
+    console += &job_window(&mut qemu, &format!("test_rs_{JOB}"))?;
+    let said = serial::Serial::named("the two-controller boot", console.clone());
+    said.must_be_clean()?;
+    said.must_not_say("iommu: DMA FAULT")?;
+    let driver = |line: &str, what: &str| line.split_once("] hda ")?.1.split_once(what).map(|(at, _)| at.to_string());
+    let silent: Vec<String> = console.lines().filter_map(|l| driver(l, ": plays nothing: ")).collect();
+    let offered: Vec<String> = console.lines().filter_map(|l| driver(l, OFFERED)).collect();
+    let [silent] = silent.as_slice() else { return Err(format!("not one driver played nothing: {silent:?}\n{console}")) };
+    let [offered] = offered.as_slice() else { return Err(format!("not one driver offered: {offered:?}\n{console}")) };
+    said.must_say(&format!("hda {silent}: plays nothing: the controller refused: no codec is on its link"))?;
+    if silent > offered {
+        return Err(format!("the codec-less controller {silent} was to enumerate before {offered}:\n{console}"));
+    }
+    if console.matches(audio::PLAYING).count() != 1 {
+        return Err(format!("soundserver did not play to one output:\n{console}"));
+    }
     Ok(())
 }
 

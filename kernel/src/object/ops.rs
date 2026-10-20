@@ -19,7 +19,7 @@ use kernel::pipe::End;
 use crate::process::PipeMap;
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::inbox::PollEntry;
-use crate::watch::{IrqWatch, Watch};
+use crate::watch::Watch;
 use crate::{device as device_registry, keyboard, mouse};
 
 use super::device::DeviceClaim;
@@ -245,8 +245,6 @@ pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
 pub enum WatchRef {
     Static(&'static Watch),
     Shared(Arc<Watch>),
-    /// A device class's, which its interrupt handler posts.
-    Irq(&'static IrqWatch),
     /// The watch of the function or row a claim holds: named by the claim,
     /// and reached only with what the claim lends.
     Claim(Arc<DeviceClaim>),
@@ -257,7 +255,6 @@ impl WatchRef {
         match self {
             Self::Static(watch) => watch.add_poll(entry),
             Self::Shared(watch) => watch.add_poll(entry),
-            Self::Irq(watch) => watch.add_poll(entry),
             Self::Claim(claim) => claim.add_poll(entry),
         }
     }
@@ -266,7 +263,6 @@ impl WatchRef {
         match self {
             Self::Static(watch) => watch.cancel_polls(),
             Self::Shared(watch) => watch.cancel_polls(),
-            Self::Irq(watch) => watch.cancel_polls(),
             // Its release answers them, and its close ends none (`close_ends_polls`).
             Self::Claim(_) => unreachable!("a claim's polls are cancelled by its release alone"),
         }
@@ -288,7 +284,6 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
             device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
             | device_registry::DeviceType::Acpi => Some(WatchRef::Claim(d.clone())),
-            device_registry::DeviceType::HdaAudio => Some(WatchRef::Irq(&crate::drivers::AUDIO_WATCH)),
             device_registry::DeviceType::Framebuffer => None,
             // A partition answers its description and has nothing to wait for.
             device_registry::DeviceType::Partition => None,
@@ -360,7 +355,6 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
             | device_registry::DeviceType::Isa
             | device_registry::DeviceType::Acpi => false,
             device_registry::DeviceType::Mouse
-            | device_registry::DeviceType::HdaAudio
             | device_registry::DeviceType::Framebuffer
             | device_registry::DeviceType::Partition => true,
         },
@@ -447,9 +441,9 @@ pub fn read_device(
         // Every read is the description: a partition's bytes move through
         // `SYS_PARTITION_READ`, never through a read of the claim.
         device_registry::DeviceType::Partition => Some(claim.describe(table, buf)),
-        // The description first and interrupts after, the shape the HDA stub
-        // has: a driver reads what it is driving once, and everything it reads
-        // afterwards is what its device has been doing.
+        // The description first and interrupts after: a driver reads what it
+        // is driving once, and everything it reads afterwards is what its
+        // device has been doing.
         device_registry::DeviceType::PciFunction => {
             if !claim.info_read() {
                 return Some(claim.describe(table, buf));
@@ -493,16 +487,6 @@ pub fn read_device(
             };
             buf.write_at(0, record_bytes(&record));
             Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
-        }
-        device_registry::DeviceType::HdaAudio => {
-            if !claim.info_read() {
-                return Some(claim.describe(table, buf));
-            }
-            if buf.len() < toyos_abi::audio::AudioCompletionRecord::SIZE {
-                return Some(SyscallError::InvalidArgument.to_u64());
-            }
-            let n = crate::drivers::hda::drain_completed(buf);
-            if n == 0 { None } else { Some(n as u64) }
         }
     }
 }
@@ -687,7 +671,6 @@ pub fn fstat(object: &KObjectRef) -> Stat {
             device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
             | device_registry::DeviceType::Acpi => FileType::Unknown,
-            device_registry::DeviceType::HdaAudio => FileType::Unknown,
             device_registry::DeviceType::Partition => FileType::Unknown,
         }),
     }
@@ -763,7 +746,6 @@ fn partition_fsync(claim: &DeviceClaim) -> u64 {
         device_registry::DeviceType::Keyboard
         | device_registry::DeviceType::Mouse
         | device_registry::DeviceType::Framebuffer
-        | device_registry::DeviceType::HdaAudio
         | device_registry::DeviceType::PciFunction
         | device_registry::DeviceType::Isa
         | device_registry::DeviceType::Acpi => {
@@ -839,9 +821,6 @@ pub fn has_data(object: &KObjectRef) -> bool {
             }
             device_registry::DeviceType::Framebuffer => true,
             device_registry::DeviceType::Partition => true,
-            device_registry::DeviceType::HdaAudio => {
-                !d.info_read() || crate::drivers::hda::has_pending()
-            }
         },
         KObjectRef::PipeWrite(_) | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
@@ -905,7 +884,6 @@ fn write_device(claim: &DeviceClaim, buf: &UserBytes) -> u64 {
         device_registry::DeviceType::Keyboard
         | device_registry::DeviceType::Mouse
         | device_registry::DeviceType::Framebuffer
-        | device_registry::DeviceType::HdaAudio
         | device_registry::DeviceType::PciFunction
         | device_registry::DeviceType::Partition => return SyscallError::PermissionDenied.to_u64(),
     }

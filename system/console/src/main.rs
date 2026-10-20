@@ -39,7 +39,7 @@ use toyos::surface::{self, Delivery, Host, Notice};
 use toyos::{FramebufferDev, Keyboard, Pipe};
 use toyos_abi::input::RawKeyEvent;
 use toyos_abi::syscall::{DeviceType, SyscallError};
-use toyos_input::wire::{self, Record, CONNECTIONS, KEEP, KEY_LEN};
+use toyos_input::wire::{self, Record, CONNECTIONS, KEY_LEN, MAX_PAYLOAD};
 use toyos_input::{Merge, Slot};
 use toyos_logstream::{Lines, Showing, Source};
 use window::Screen;
@@ -208,7 +208,7 @@ fn main() {
     // stream. Their pointer reports are read and moved by nothing: this
     // program draws no pointer.
     let inputs = endow::acceptor(wire::PORT).expect("the manifest declares this program serves `input`");
-    let mut sources: [Option<(Connection, FrameRx<KEEP>)>; CONNECTIONS] = Default::default();
+    let mut sources: [Option<(Connection, FrameRx<MAX_PAYLOAD>)>; CONNECTIONS] = Default::default();
     let mut merge = Merge::default();
     // What the panel cost, on a machine whose only instrument is the panel.
     // The seed is the heaviest thing this program ever draws — a screenful of

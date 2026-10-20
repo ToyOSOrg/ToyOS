@@ -187,7 +187,7 @@ fn step_outputs() -> Result<PathBuf, String> {
 }
 
 /// Append `text` to the step outputs at `file`.
-fn tell(file: &Path, text: &str) -> Result<(), String> {
+pub(crate) fn tell(file: &Path, text: &str) -> Result<(), String> {
     fs::OpenOptions::new()
         .append(true)
         .open(file)

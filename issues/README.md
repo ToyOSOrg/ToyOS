@@ -93,7 +93,7 @@ nothing at all.
 
 Write a new file — nine agents appending to nine different files produce zero
 conflicts, and that is the whole reason this is a directory and not a document.
-Root `CLAUDE.md`'s Prose says which existing one a pull request may edit.
+Root `CLAUDE.md`'s Comments and instructions section governs updates to existing issues.
 
 ## Closing one
 

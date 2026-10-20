@@ -10,7 +10,7 @@ Every defect class has exactly one owning instrument, and a class with no
 owning instrument is recorded as unowned here. Four instruments carry the whole
 estate — host suites, KVM guest shards, the TCG shard, and metal — and none of
 them owns contention: parallel suites contending for a lock, a lock storm, a
-scheduler collapse under load. KVM CI (`ci.yml`'s `guest` shards) is one
+scheduler collapse under load. KVM CI (`nightly.yml`'s `kvm` suite) is one
 guest per machine by construction, so there is never a second guest to
 contend with, and the KVM row says so itself, listing "contention" under its
 own "blind to". The local suite is developer feedback and never a gate: a

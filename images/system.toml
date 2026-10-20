@@ -100,8 +100,17 @@ devices = ["isa:0060,0064:1,12"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver", "volume"]
-devices = ["hda-audio", "pci:04:01:00/1af4:1059"]
+serves = ["soundserver", "volume", "sound-output"]
+devices = ["pci:04:01:00/1af4:1059"]
+syscap = ["rt"]
+
+# The Intel HD Audio driver: one process per HDA function the kernel does not
+# drive, each walking its own controller's codecs and offering soundserver the
+# output it reaches. A machine with display audio beside an analog codec runs
+# two, and soundserver plays to the one that offers.
+[programs.hda]
+drives = ["pci:04:03:*"]
+receives = ["sound-output"]
 syscap = ["rt"]
 
 # netstack holds the NIC's PCI function and drives it: the virtqueues, the register
@@ -261,7 +270,7 @@ restart = true
 serves = ["block"]
 devices = ["pci:01:08:02/1b36:0010"]
 
-# The file servers: DATA, the log and the running slot's volume, one process
+# The file servers: DATA, the log and the boot volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
 [programs.fileserver]
