@@ -114,6 +114,24 @@ fn migration_churn_is_measured() {
     }
 }
 
+/// Every thread of three jobs starts on CPU 0. Balancing spreads them, but
+/// thread weights of 1/8, 1/2 and 1 of a job weight cannot make the three
+/// shared CPUs' loads equal, and the job on the lighter CPUs keeps the
+/// difference. Measured, not asserted: another instance of the
+/// counterexamples below.
+#[test]
+fn uneven_placement_is_measured() {
+    let mut sim = Sim::new(flat(4), Params::DEFAULT);
+    let jobs = [(sim.job(WEIGHT_UNIT), 8), (sim.job(WEIGHT_UNIT), 2), (sim.job(WEIGHT_UNIT), 1)];
+    for (j, n) in jobs {
+        for _ in 0..n {
+            sim.thread(j, Work::Hog, CpuId(0), false);
+        }
+    }
+    sim.run_until(SPAN);
+    println!("{}", sim.report("A8 B2 C1, all from CPU 0", Nanos::ZERO, &WINDOWS));
+}
+
 /// **Counterexample.** Three single-thread jobs of equal weight on two CPUs.
 /// Each is entitled to 2/3 of a CPU; per-CPU queues give one of them a CPU of
 /// its own for as long as no CPU idles, and no load-driven move can help: any
