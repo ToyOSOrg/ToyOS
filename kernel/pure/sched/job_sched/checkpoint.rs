@@ -487,10 +487,14 @@ fn counterexample_runaway_detection_misses_brief_blocks_and_replaced_threads() {
 ///   fluid share as far as placement leaves loads unequal. Sleeps and churn
 ///   change weights faster than they settle, and the rule is then printed,
 ///   not asserted.
-/// - **A bounded wait.** A runnable thread waits at most `(slice + lag_bound)
-///   / share + 2·slice` — one request plus the most debt it can carry in, at
-///   its rate on its CPU (group weight over load, divided among its siblings
-///   there) at its lowest during the wait.
+/// - **A bounded wait, in service.** While a runnable thread waits, the
+///   service it is entitled to — the integral of its share on its CPU (group
+///   weight over load, divided among its siblings there) — stays within
+///   `slice + 2·lag_bound + 2·slice`: its own debt and its part of its group's
+///   (each at most `lag_bound`), one request, and two requests of EEVDF lag
+///   slack. Argued, not proved, and asserted as an empirical ceiling. In time
+///   it scales with crowding: about `20n` ms for n equal threads on a CPU, a
+///   fairness bound rather than a latency guarantee.
 ///
 /// The table prints, per design: the largest difference between a job's
 /// share and its fluid share (in CPUs, over the run), the longest any
@@ -523,15 +527,23 @@ fn the_simpler_design_follows_its_per_cpu_rule_and_bounds_every_wait() {
                     sim.longest_wait as f64 / MS as f64,
                     sim.migrations as f64 / (span / 1e9)
                 ));
-                line.push_str(&format!(", rule gap {:>6.1} ms, wait/budget {:.2}", rule_gap / MS as f64, sim.wait_over_budget));
+                let earned_ceiling = (3 * p.slice + 2 * p.lag_bound) as f64;
+                line.push_str(&format!(
+                    ", rule gap {:>6.1} ms, entitled while waiting {:.2} of ceiling",
+                    rule_gap / MS as f64,
+                    sim.most_earned_waiting / earned_ceiling
+                ));
                 if design == "simple" {
                     let steady = !name.contains("duty") && !name.contains("churn");
                     let rule_bound = (2 * p.slice * u64::from(m)) as f64;
                     if steady && rule_gap > rule_bound {
                         over.push(format!("{shape} {name}: {:.1} ms from the per-CPU rule", rule_gap / MS as f64));
                     }
-                    if sim.wait_over_budget > 1.0 {
-                        over.push(format!("{shape} {name}: a wait reached {:.2} of its budget", sim.wait_over_budget));
+                    if sim.most_earned_waiting > earned_ceiling {
+                        over.push(format!(
+                            "{shape} {name}: a thread waited through {:.1} ms of its entitled service",
+                            sim.most_earned_waiting / MS as f64
+                        ));
                     }
                 }
             }
@@ -539,4 +551,97 @@ fn the_simpler_design_follows_its_per_cpu_rule_and_bounds_every_wait() {
         }
     }
     assert!(over.is_empty(), "{}", over.join("\n"));
+}
+
+fn percentile(sorted: &[u64], q: f64) -> u64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    sorted[((sorted.len() - 1) as f64 * q).round() as usize]
+}
+
+/// The gap between a job's service and its fluid share over `[from, to)`, in
+/// CPUs.
+fn share_gap(sim: &Sim, job: usize, from: Nanos, to: Nanos) -> f64 {
+    let at = |t: Nanos| sim.samples.iter().find(|(s, _)| *s >= t).map(|s| s.1[job]).unwrap();
+    let ((a0, i0), (a1, i1)) = (at(from), at(to));
+    ((a1 - a0) - (i1 - i0)) / to.since(from) as f64
+}
+
+/// A desktop beside a build, under both designs on both benches' shapes: a
+/// compositor (0.8 ms every 8.333 ms), a browser whose UI thread runs 2 ms and
+/// sleeps 14 ms beside three busy workers, an editor (0.5 ms every 50 ms) and
+/// a build of 2m threads. Reports each interactive thread's wake-to-run
+/// latency and each job's share gap in each half of the run (a gap that
+/// holds in both halves is a persistent rate gap), and asserts that every
+/// interactive wake runs within one 60 Hz frame under both designs, with and
+/// without latency requests (the shortest request) on the interactive threads.
+#[test]
+fn a_desktop_beside_a_build_runs_every_interactive_wake_within_a_frame() {
+    const FRAME: u64 = 16_667 * US;
+    let shapes: [Shape; 2] = [("t14", t14), ("amd", amd)];
+    for (shape, topo) in shapes {
+        for (design, p, latency_requests) in [
+            ("simple", Params::CANDIDATE, false),
+            ("simple+lat", Params::CANDIDATE, true),
+            ("cross", Params::DEFAULT, false),
+            ("cross+lat", Params::DEFAULT, true),
+        ] {
+            let mut sim = Sim::new(topo(), p);
+            let m = sim.topo.cpus() as u32;
+            let compositor = sim.job(WEIGHT_UNIT);
+            let browser = sim.job(WEIGHT_UNIT);
+            let editor = sim.job(WEIGHT_UNIT);
+            let build = sim.job(WEIGHT_UNIT);
+            let c = sim.thread(compositor, Work::Periodic { period: 8_333 * US, work: 800 * US }, CpuId(0), false);
+            let ui = sim.thread(browser, Work::Duty { run: 2 * MS, sleep: 14 * MS }, CpuId(1), false);
+            for i in 0..3 {
+                sim.thread(browser, Work::Hog, CpuId(2 + i), false);
+            }
+            let e = sim.thread(editor, Work::Duty { run: 500 * US, sleep: 50 * MS }, CpuId(5 % m), false);
+            for i in 0..2 * m {
+                sim.thread(build, Work::Hog, CpuId(i % m), false);
+            }
+            for t in [c, ui, e] {
+                sim.track(t);
+                if latency_requests {
+                    sim.s.set_slice(t, p.min_slice, sim.now);
+                }
+            }
+            sim.run_until(SPAN);
+            let mut line = format!("{shape:<4} {design:<10}");
+            for (name, t) in [("compositor", c), ("ui", ui), ("editor", e)] {
+                let mut l = sim.latency[&t].clone();
+                l.sort_unstable();
+                let worst = l.last().copied().unwrap_or(0);
+                assert!(worst <= FRAME, "{shape} {design}: {name} waited {} us to run", worst / US);
+                line.push_str(&format!(
+                    " | {name} p50 {:.2} p99 {:.2} max {:.2} ms",
+                    percentile(&l, 0.5) as f64 / MS as f64,
+                    percentile(&l, 0.99) as f64 / MS as f64,
+                    l.last().copied().unwrap_or(0) as f64 / MS as f64
+                ));
+            }
+            let half = Nanos(SPAN.0 / 2);
+            line.push_str(" | share gaps (CPUs, 1st/2nd half):");
+            for (j, (name, job)) in
+                ["compositor", "browser", "editor", "build"].iter().zip([compositor, browser, editor, build]).enumerate()
+            {
+                let fluid = sim.ideal[&job] / SPAN.0 as f64;
+                let second = share_gap(&sim, j, half, Nanos(SPAN.0 - MS));
+                line.push_str(&format!(
+                    " {name} {:+.3}/{second:+.3} of {fluid:.2} ({:+.1}%)",
+                    share_gap(&sim, j, Nanos(MS), half),
+                    100.0 * second / fluid
+                ));
+            }
+            let (missed, worst_response) = sim.missed(c);
+            line.push_str(&format!(
+                " | compositor frames missed {missed}, worst completion {:.2} ms | migr/s {:.1}",
+                worst_response as f64 / MS as f64,
+                sim.migrations as f64 / 10.0
+            ));
+            println!("{line}");
+        }
+    }
 }

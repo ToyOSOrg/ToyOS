@@ -97,13 +97,14 @@ pub struct Sim {
     /// and the most runnable ordinary threads any CPU held.
     pub longest_wait: u64,
     pub most_threads: usize,
-    /// The largest ratio of a thread's wait to its budget, `(slice +
-    /// lag_bound) / share + 2·slice` — a request, plus the most debt it can
-    /// bring, at its rate — where `share` is its rate on its CPU — its group weight over
-    /// the CPU's load, divided among its siblings there — at its lowest
-    /// during the wait.
-    pub wait_over_budget: f64,
-    /// Per thread: its current wait and the largest budget seen during it.
+    /// The most service any thread was entitled to while it waited: the
+    /// integral over the wait of its share on its CPU — its group weight over
+    /// the CPU's load, divided among its siblings there — in ns.
+    pub most_earned_waiting: f64,
+    /// Per tracked thread: each wake-to-run latency, in ns.
+    pub latency: BTreeMap<ThreadId, Vec<u64>>,
+    woke: BTreeMap<ThreadId, Nanos>,
+    /// Per thread: its current wait and the service it was entitled to in it.
     waited: BTreeMap<ThreadId, (u64, f64)>,
     /// Ordinary service per CPU, for the realtime ceiling's protection.
     pub fair_on: Vec<u64>,
@@ -199,7 +200,9 @@ impl Sim {
             per_cpu_rule: BTreeMap::new(),
             longest_wait: 0,
             most_threads: 0,
-            wait_over_budget: 0.0,
+            most_earned_waiting: 0.0,
+            latency: BTreeMap::new(),
+            woke: BTreeMap::new(),
             waited: BTreeMap::new(),
             fair_on: vec![0; m],
             rt_on: vec![0; m],
@@ -347,7 +350,15 @@ impl Sim {
             .unwrap_or(l.home)
     }
 
+    /// Record `t`'s wake-to-run latencies from now on.
+    pub fn track(&mut self, t: ThreadId) {
+        self.latency.insert(t, Vec::new());
+    }
+
     fn wake(&mut self, t: ThreadId) {
+        if self.latency.contains_key(&t) {
+            self.woke.insert(t, self.now);
+        }
         let cpu = self.place(t);
         self.loads.get_mut(&t).unwrap().home = cpu;
         match self.s.wake(t, cpu, self.now) {
@@ -369,6 +380,9 @@ impl Sim {
         }
         if let Some(t) = next {
             self.loads.get_mut(&t).unwrap().home = c;
+            if let Some(at) = self.woke.remove(&t) {
+                self.latency.get_mut(&t).unwrap().push(self.now.since(at));
+            }
         }
     }
 
@@ -511,21 +525,19 @@ impl Sim {
                     .collect();
                 self.most_threads = self.most_threads.max(fair.len());
                 let load = self.s.load(cpu) as f64;
-                let slice = self.s.params().slice as f64;
-                let debt = self.s.params().lag_bound as f64;
+
                 for &t in &fair {
                     let job = self.s.job_of(t);
                     let siblings = fair.iter().filter(|&&o| self.s.job_of(o) == job).count() as f64;
                     let share = self.s.group_weight_on(cpu, job).unwrap_or(1) as f64 / load / siblings;
-                    let budget = (slice + debt) / share + 2.0 * slice;
-                    let (w, most) = self.waited.entry(t).or_insert((0, 0.0));
+                    let (w, earned) = self.waited.entry(t).or_insert((0, 0.0));
                     if Some(t) == running {
-                        (*w, *most) = (0, 0.0);
+                        (*w, *earned) = (0, 0.0);
                     } else {
                         *w += dt;
-                        *most = f64::max(*most, budget);
+                        *earned += share * dt as f64;
                         self.longest_wait = self.longest_wait.max(*w);
-                        self.wait_over_budget = self.wait_over_budget.max(*w as f64 / *most);
+                        self.most_earned_waiting = self.most_earned_waiting.max(*earned);
                     }
                 }
             }
