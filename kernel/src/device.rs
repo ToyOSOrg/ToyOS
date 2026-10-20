@@ -109,20 +109,7 @@ impl Claim {
 impl Drop for Claim {
     fn drop(&mut self) {
         match &self.what {
-            &Claimed::Class(class) => {
-                // Before the flag goes: a poll the next holder registers is not this claim's to answer.
-                match class {
-                    DeviceType::HdaAudio => crate::drivers::AUDIO_WATCH.cancel_polls(),
-                    DeviceType::Keyboard
-                    | DeviceType::Mouse
-                    | DeviceType::Framebuffer
-                    | DeviceType::PciFunction
-                    | DeviceType::Partition
-                    | DeviceType::Isa
-                    | DeviceType::Acpi => {}
-                }
-                *taken(class).lock() = false;
-            }
+            &Claimed::Class(class) => *taken(class).lock() = false,
             // Bus mastering off, then the domain, then the pages: the
             // binding's drop owns that order, and this is where a dying
             // process reaches it.
@@ -224,11 +211,6 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let (row, info) = crate::arch::acpi_mode::claim()?;
             let claim = Claim { what: Claimed::Acpi(row) };
             Ok(DeviceClaim::new(class, DeviceInfo::Acpi(info), claim))
-        }
-        DeviceType::HdaAudio => {
-            let (info, pcm) = crate::drivers::hda::describe()?;
-            let claim = Claim::acquire(class)?;
-            Ok(DeviceClaim::new(class, DeviceInfo::Hda(info, shm(pcm)), claim))
         }
     }
 }

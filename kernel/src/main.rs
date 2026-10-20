@@ -429,7 +429,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     arch::boot::clock(kernel_args);
     trace::enable();
     arch::boot::timer();
-    // After both halves of what it needs: a TSC period to convert its bound
+    // After both halves of what it needs: a counter period to convert its bound
     // with, and a timer whose every tick polls it.
     deadline::start();
 
@@ -522,8 +522,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     arch::boot::interrupt_selftests();
 
     virtio_console::init(&pci_devices);
-
-    drivers::hda::init(&pci_devices);
 
     if kernel_args.gop_framebuffer != 0 {
         log!("GPU: using UEFI GOP");

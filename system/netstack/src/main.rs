@@ -54,7 +54,7 @@ mod virtio_net;
 mod watches;
 
 use card::Card;
-use client::{Client, ClientRx, HANDSHAKE_TIMEOUT, MAX_KEPT_REQUEST, MAX_PENDING_CONNS, PendingConn, Request};
+use client::{Client, ClientRx, HANDSHAKE_TIMEOUT, MAX_PENDING_CONNS, PendingConn, Request};
 
 /// The cards this program can drive, matched by their class and what
 /// identifies the card rather than by the slot firmware put it in, and each
@@ -531,7 +531,7 @@ fn main() {
                     pending.remove(i);
                 }
                 RxStep::Frame { msg_type, payload_len } => {
-                    let mut payload = [0u8; MAX_KEPT_REQUEST];
+                    let mut payload = [0u8; toyos::net::MAX_REQUEST];
                     payload[..payload_len].copy_from_slice(pending[i].rx.payload(payload_len));
                     let p = pending.remove(i);
                     requests.push(Request {

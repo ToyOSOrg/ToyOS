@@ -10,7 +10,6 @@
 use crate::log;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use crate::hasher::HashMap;
 
 use kernel::pcid::{Alloc, Pcid, PcidPool};
 
@@ -392,8 +391,6 @@ fn alloc_pcid() -> Option<PcidGuard> {
 pub struct AddressSpace {
     root: Box<PageTablePage>,
     children: Vec<Box<PageTablePage>>,
-    /// Physical data pages mapped into user space, keyed by physical address. Freed on drop.
-    pages: HashMap<u64, crate::mm::pmm::PhysPage>,
     /// All virtual memory regions, keyed by start address.
     regions: vma::Regions,
     /// Owned for this space's life: dropping the space returns a user tag, so two
@@ -422,7 +419,6 @@ impl AddressSpace {
         Some(Self {
             root: pml4,
             children: Vec::new(),
-            pages: HashMap::default(),
             regions: vma::Regions::default(),
             pcid: PcidHandle::User(pcid),
         })
@@ -542,10 +538,10 @@ impl AddressSpace {
         true
     }
 
-    /// Runs on every present entry, including shared pages this space does
-    /// not own: unmapping ends any futex wait on the frame (its token is a
-    /// physical address) before the frame can reach the PMM and be reused
-    /// under a waiter's nose — a spurious wake is safe, a use-after-free isn't.
+    /// Runs on every present entry, shared or not: unmapping ends any futex
+    /// wait on the frame (its token is a physical address) before the frame
+    /// can reach the PMM and be reused under a waiter's nose — a spurious
+    /// wake is safe, a use-after-free isn't.
     pub fn unmap(&mut self, vaddr: UserAddr) {
         let va = vaddr.raw();
         assert!(
@@ -574,7 +570,6 @@ impl AddressSpace {
                     pd.write_pde(pd_idx, va, 0).discharge(target);
                     // Before the frame is freed, so waiters stay findable.
                     crate::sched::futex::revoke_range(phys, PAGE_2M);
-                    self.pages.remove(&phys);
                 }
             }
         }
@@ -1031,7 +1026,6 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry], _scanout: Option<(u64, u64)>) 
     let mut kernel = AddressSpace {
         root: Box::new(PageTablePage([0; 512])),
         children: Vec::new(),
-        pages: HashMap::default(),
         regions: vma::Regions::default(),
         pcid: PcidHandle::Kernel,
     };

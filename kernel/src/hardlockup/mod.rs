@@ -36,7 +36,7 @@
 //! `log!` — the interrupted context may hold the log ring's own shard, and
 //! `build/sourcegate.rs`'s `nmi_does_not_log` is the gate. The sampling path is
 //! also on every CPU every second of every boot, so it is atomics and one
-//! `rdtsc` and no division at all. The report divides, and only after the
+//! `cpu::counter` read and no division at all. The report divides, and only after the
 //! machine is already being ended.
 //!
 //! # What it does not cover, stated rather than implied
@@ -45,7 +45,7 @@
 //!   generates no sample. That is the right shape and not a gap: a halted CPU
 //!   is not spinning on anything, and one that is woken takes the interrupt
 //!   that wakes it.
-//! - **The span before `clock::init`,** which has no TSC period to convert a
+//! - **The span before `clock::init`,** which has no counter period to convert a
 //!   bound with, and before `irqchip::init`, which has no LVT to arm. The same
 //!   floor `crate::deadline` states.
 //! - **A CPU with `IF` set that no timer ever interrupts.** Nothing resets it,
@@ -77,20 +77,20 @@ pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 /// lateness reads the same period.
 const SAMPLE_NS: u64 = toyos_tco::HARD_LOCKUP_SAMPLE_NS;
 
-/// The bound in TSC ticks, or 0 for a boot that armed none. Written on the BSP
+/// The bound in counter ticks, or 0 for a boot that armed none. Written on the BSP
 /// before any AP exists.
-static BOUND_TSC: AtomicU64 = AtomicU64::new(0);
+static BOUND_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// The same bound in milliseconds, for the record to quote and the probe to
 /// stage against.
 static BOUND_MS: AtomicU64 = AtomicU64::new(0);
 
-/// TSC ticks per millisecond, so the report can turn a span into a number
+/// Counter ticks per millisecond, so the report can turn a span into a number
 /// without reaching for the nanosecond clock's out-of-line divide.
 static TICKS_PER_MS: AtomicU64 = AtomicU64::new(0);
 
-/// The counter's reload period, in reference cycles — which are TSC ticks,
-/// since fixed counter 2 counts the reference clock (SDM Vol. 3B §20.2.2).
+/// The performance counter's reload period, in `cpu::counter` ticks, the unit
+/// `pmu::arm` takes.
 static PERIOD: AtomicU64 = AtomicU64::new(0);
 
 /// Whether the panic path has taken this machine. A panicked kernel holds its
@@ -104,7 +104,7 @@ static STOOD_DOWN: AtomicBool = AtomicBool::new(false);
 /// and where the last sample found it.
 static PROGRESS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static STILL_SINCE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static AT_TSC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+static AT_COUNTER: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static AT_PC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static AT_SP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
 static AT_FLAGS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
@@ -136,7 +136,7 @@ pub fn start(deadline_ms: u64) -> Armed {
         return Armed { ms: 0, sampled: false };
     }
     BOUND_MS.store(ms, Relaxed);
-    BOUND_TSC.store(ticks, Relaxed);
+    BOUND_TICKS.store(ticks, Relaxed);
     TICKS_PER_MS.store(per_ms, Relaxed);
     PERIOD.store(crate::clock::counter_ticks(SAMPLE_NS), Relaxed);
     arm_this_cpu();
@@ -181,7 +181,7 @@ impl fmt::Display for Armed {
 /// Every CPU, called once as it joins: the counters and the LVT are per logical
 /// CPU, and a CPU nobody armed is one this bound does not cover.
 pub fn arm_this_cpu() {
-    if BOUND_TSC.load(Relaxed) == 0 {
+    if BOUND_TICKS.load(Relaxed) == 0 {
         return;
     }
     let me = percpu::cpu_id() as usize;
@@ -224,7 +224,7 @@ pub fn bound_ms() -> u64 {
 /// that is not this CPU's own overflow, so the diagnostic senders — the blocked
 /// task dump's probe — cost one load and one compare.
 pub fn sample(pc: u64, sp: u64, flags: u64) {
-    if BOUND_TSC.load(Relaxed) == 0 || STOOD_DOWN.load(Relaxed) {
+    if BOUND_TICKS.load(Relaxed) == 0 || STOOD_DOWN.load(Relaxed) {
         return;
     }
     let me = percpu::cpu_id() as usize;
@@ -242,7 +242,7 @@ pub fn sample(pc: u64, sp: u64, flags: u64) {
     AT_PC[me].store(pc, Relaxed);
     AT_SP[me].store(sp, Relaxed);
     AT_FLAGS[me].store(flags, Relaxed);
-    AT_TSC[me].store(now, Relaxed);
+    AT_COUNTER[me].store(now, Relaxed);
 
     let taken = crate::irq_census::taken_here();
     let moved = PROGRESS[me].swap(taken, Relaxed) != taken;
@@ -251,7 +251,7 @@ pub fn sample(pc: u64, sp: u64, flags: u64) {
     // reaches, and this mechanism is not about it.
     if moved || trap::frame_interrupts_enabled(flags) {
         STILL_SINCE[me].store(now, Relaxed);
-    } else if now.wrapping_sub(STILL_SINCE[me].load(Relaxed)) >= BOUND_TSC.load(Relaxed) {
+    } else if now.wrapping_sub(STILL_SINCE[me].load(Relaxed)) >= BOUND_TICKS.load(Relaxed) {
         locked_up(me, pc, sp, now)
     }
     // **After the decision and never before it.** Re-arming clears the mask
@@ -330,7 +330,7 @@ pub fn spinning_on_nothing(was: Spinning) {
     }
 }
 
-/// Milliseconds, from a TSC span. One `div`, and only on the path that has
+/// Milliseconds, from a `cpu::counter` span. One `div`, and only on the path that has
 /// already decided to end the machine.
 struct Ms(u64);
 
@@ -397,7 +397,7 @@ impl fmt::Display for Report {
             // since its own last sample is a CPU that is still running, which
             // is the first thing a reader of a wedged machine wants to know.
             let irqs = crate::irq_census::taken_by(cpu as u32).unwrap_or(0);
-            let at = AT_TSC[cpu].load(Relaxed);
+            let at = AT_COUNTER[cpu].load(Relaxed);
             if at == 0 {
                 writeln!(
                     f,

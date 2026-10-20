@@ -786,7 +786,7 @@ fn clock(o: &mut Out) {
             _ => 1,
         };
         t += nominal * n as f64 * if step % 5 == 0 { 1.0004 } else { 0.9997 };
-        dll.update(t, n);
+        dll.update(t, n, n);
         d.f64(dll.period);
         d.f64(dll.t_estimated.unwrap());
         if step < 6 {
@@ -803,15 +803,15 @@ fn clock(o: &mut Out) {
     // The clamp: a timestamp far off the grid may not collapse or run away the
     // period estimate.
     let mut dll = Dll::new(nominal);
-    dll.update(0.0, 1);
+    dll.update(0.0, 1, 1);
     for k in 1..64u32 {
-        dll.update(k as f64 * nominal * 8.0, 1);
+        dll.update(k as f64 * nominal * 8.0, 1, 1);
     }
     o.line(&format!("dll-runaway-period {:016x}", dll.period.to_bits()));
     let mut dll = Dll::new(nominal);
-    dll.update(0.0, 1);
+    dll.update(0.0, 1, 1);
     for k in 1..64u32 {
-        dll.update(k as f64 * nominal * 0.01, 1);
+        dll.update(k as f64 * nominal * 0.01, 1, 1);
     }
     o.line(&format!("dll-collapse-period {:016x}", dll.period.to_bits()));
     dll.reset();

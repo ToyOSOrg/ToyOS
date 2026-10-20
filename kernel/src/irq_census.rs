@@ -28,8 +28,6 @@ pub enum Source {
     UserDev,
     /// Vector 0x25, the remapping unit's fault event.
     DmaFault,
-    /// Vector 0x26, HDA stream completion.
-    Hda,
     /// Vector 0xFE, the TLB shootdown IPI.
     Tlb,
     /// Vector 0x02, which `crate::hardlockup` samples a CPU with.
@@ -43,12 +41,12 @@ pub enum Source {
 }
 
 impl Source {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 9;
 
     /// Order `tests/toyos.rs`'s `irq_census_conservation` parses back; must match variant order.
     pub const NAMES: [&'static str; Self::COUNT] = [
-        "timer", "kick", "xhci", "userdev", "dmafault", "hda", "tlb", "nmi",
-        "spurious", "unclaimed",
+        "timer", "kick", "xhci", "userdev", "dmafault", "tlb", "nmi", "spurious",
+        "unclaimed",
     ];
 }
 

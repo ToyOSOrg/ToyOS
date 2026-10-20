@@ -1,6 +1,6 @@
 [package]
 name = "soundserver"
-description = "The audio server: ToyOS's audio devices claimed from the kernel, and every client's stream mixed onto them."
+description = "The audio server: every client's stream mixed onto the output an audio driver offers on its sound-output port, or onto the virtio-sound function it claims itself."
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
@@ -9,7 +9,7 @@ toyos-abi = { path = "../../sdk/abi" }
 # The matcher its claim is endowed under, spelled as the manifest spells it.
 toyos-manifest = { path = "../../lib/manifest" }
 toyos = { path = "../../sdk/toyos" }
-toyos-hda = { path = "../../lib/hda" }
+toyos-sound-output = { path = "output" }
 toyos-mixer = { path = "mixer" }
 toyos-virtio-sound = { path = "virtio-sound" }
 toyos-virtio = { path = "../../lib/virtio" }
@@ -19,4 +19,4 @@ toyos-resample = { path = "resample" }
 rubato = { version = "0.16", default-features = false }
 
 [package.metadata.toyos.host]
-exempt.owns = "ToyOS's audio devices, claimed from the kernel"
+exempt.owns = "ToyOS's audio outputs: the drivers' offers on its sound-output port, and the virtio-sound function it claims"

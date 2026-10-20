@@ -488,7 +488,6 @@ toyos-fat32 = { path = "../lib/fat32" }
 toyos-elf = { path = "../lib/elf" }
 toyos-gicv3 = { path = "gicv3" }
 toyos-gpt = { path = "../lib/gpt" }
-toyos-hda = { path = "../lib/hda" }
 toyos-its = { path = "its" }
 toyos-microcode = { path = "../lib/microcode" }
 toyos-pci = { path = "pci" }
