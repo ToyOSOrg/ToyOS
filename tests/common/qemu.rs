@@ -706,9 +706,10 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
-    /// [`Profile::Metal`] with an Intel HDA controller behind the unit, the
-    /// function soundserver drives whole through its claim on the benches.
-    MetalHda,
+    /// [`Profile::Metal`] with two Intel HDA controllers behind the unit, the
+    /// first with no codec and the second with an output codec: a machine
+    /// whose drivers do not both reach an output, as the AMD bench's do not.
+    MetalTwoHda,
     /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
@@ -788,7 +789,7 @@ impl Profile {
             | Self::HeadlessNicBehindPort
             | Self::HeadlessTwoEdu
             | Self::Metal
-            | Self::MetalHda
+            | Self::MetalTwoHda
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
@@ -957,9 +958,9 @@ struct Shape {
     rng: bool,
     /// A virtio-gpu, which the compositor drives.
     virtio_gpu: bool,
-    /// QEMU's ICH9 HDA controller with one output codec behind it, on an
-    /// audio backend that plays nothing: soundserver's claim, on a machine
-    /// with no virtio-sound to take first.
+    /// Two of QEMU's ICH9 HDA controllers, the first with no codec and the
+    /// second with one output codec, on an audio backend that plays nothing:
+    /// a machine with no virtio-sound, whose drivers do not both offer.
     hda: bool,
 }
 
@@ -1080,7 +1081,7 @@ impl Profile {
                 hda: false,
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
-            Self::MetalHda => Shape { hda: true, ..Self::Metal.shape() },
+            Self::MetalTwoHda => Shape { hda: true, ..Self::Metal.shape() },
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
             Self::HeadlessUsbSpareAmdVi => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
@@ -2366,6 +2367,8 @@ fn qemu_command(
     if shape.hda {
         qemu.arg("-audiodev")
             .arg("none,id=hdaout")
+            .arg("-device")
+            .arg("ich9-intel-hda,id=hdanone")
             .arg("-device")
             .arg("ich9-intel-hda,id=hda0")
             .arg("-device")

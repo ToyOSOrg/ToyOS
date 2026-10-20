@@ -32,10 +32,12 @@ is not built.
 
 What is left of the staged work:
 
-1. Done for HDA: soundserver claims the function as `pci:04:03:00` and
-   drives it whole (`system/soundserver/hda/src/controller.rs`) — controller
-   reset, CORB/RIRB, the stream and its descriptor list in the claim's grant,
-   its interrupt as the claim's record. The `hda-audio` class,
+1. Done for HDA: an `hda` process per function of `pci:04:03:*` (a
+   `drives` row, `system/hda`) drives it whole — controller reset, CORB/RIRB,
+   the stream and its descriptor list, the ring soundserver lends it, its
+   interrupt as the claim's record — and offers soundserver its output
+   (`issues/a-device-function-is-driven-from-its-arrival-to-its-end.md`'s
+   stage 3). The `hda-audio` class,
    `SYS_HDA_BIND`, `SYS_DEVICE_REG_WRITE` and the kernel's HDA vector are
    gone; `SYS_DEVICE_REG_READ` reads a PCI claim's config space alone. Every
    machine's DLL is clocked by a claim's record, and a period read before its

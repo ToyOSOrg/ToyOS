@@ -44,9 +44,10 @@ impl State {
     }
 }
 
-/// The device, as it was when the loop started. Fixed for soundserver's life.
+/// The device played to: the null sink until an output driver's is.
+#[derive(Clone, Copy)]
 pub(crate) struct Device {
-    /// `virtio-sound`, `hda` or `null`.
+    /// `virtio-sound`, `driver` or `null`.
     pub(crate) kind: &'static str,
     pub(crate) rate: u32,
     pub(crate) channels: u16,

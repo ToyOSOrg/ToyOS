@@ -6,14 +6,14 @@ opened: 2026-08-03
 
 # HDA plays, but there is no jack detection and nothing persists
 
-The driver is soundserver's, whole, through a `pci` claim: the controller,
-codec decoding, output-path selection and the master are a pure crate
-(`system/soundserver/hda`). The master volume and mute are the codec's, served on
-soundserver's `volume` port, and the volume keys set them from the compositor
+The driver is the `hda` program's, one per function, through a `pci` claim:
+the controller, codec decoding, output-path selection and the master are a
+pure crate (`system/hda/driver`). The master volume and mute are the codec's,
+set by the driver for soundserver's `volume` port, and the volume keys set them from the compositor
 (#877). What remains:
 
 - **Jack detection and routing.** `GET_PIN_SENSE` is spelled
-  (`system/soundserver/hda/src/verb.rs`) and nothing issues it. Still wanted: a poll on the
+  (`system/hda/driver/src/verb.rs`) and nothing issues it. Still wanted: a poll on the
   presence bit, a switch between the fixed speaker and the headphone pin, and a
   ramp across the switch so it is not a click.
 - **Persistence** of the chosen output and the master level, blocked on the
@@ -22,12 +22,13 @@ soundserver's `volume` port, and the volume keys set them from the compositor
 **Two pieces of the shipped work are still owed a verdict.** The four HDA
 sections of the audio baseline were never recorded, so the HDA arm asserts harm
 and claims no distribution and has no thorough tier — that is 30 invocations on
-a quiet host. And a shape profile is missing: a codec with no speaker pin (a
-controller with no codec is refused by name in the controller's host tests). Without them the refusal-to-null-sink path is
-asserted only on a machine that has no controller at all.
+a quiet host. And a shape profile is missing: a codec with no speaker pin. A
+controller with no codec is refused by name, and soundserver stays the null
+sink until another offers, on QEMU's two-controller row
+(`hda_plays_to_the_controller_that_reaches_an_output`).
 
 Constraints worth not re-deriving (each already stated at its site in
-`system/soundserver/hda/`, listed here because they are what
+`system/hda/driver/`, listed here because they are what
 the next pass will want):
 
 - **The T14's trap is pin 0x1b, not the display codec.** Four pins claim

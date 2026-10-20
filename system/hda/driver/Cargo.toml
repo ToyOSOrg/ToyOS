@@ -1,6 +1,6 @@
-# A member of the host workspace (root `Cargo.toml`), like `toyos-virtio-sound`
-# beside it: pure, and its tests run on the host. A codec's answers and every
-# word the controller writes back are input from outside the driver, so the
+# A member of the host workspace (root `Cargo.toml`), like `toyos-virtio-sound`:
+# pure, and its tests run on the host. A codec's answers and every word the
+# controller writes back are input from outside the driver, so the
 # decoders and the controller's rings are exercised against hostile ones far
 # more often than a boot allows — and the machines that matter cannot be booted
 # by a test at all, so their graphs are committed fixtures and the controller is
@@ -8,7 +8,7 @@
 
 [package]
 name = "toyos-hda"
-description = "soundserver's Intel HDA driver: the controller's reset, CORB/RIRB and one output stream over one grant, codec decoding and output-path selection, pure."
+description = "The hda program's Intel HDA driver: the controller's reset, CORB/RIRB and one output stream, codec decoding and output-path selection, pure."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -23,9 +23,9 @@ doctest = false
 toyos-device-memory = { path = "../../../lib/device-memory" }
 
 [dev-dependencies]
-# The device rates soundserver declares, best first: the rate choice is tested
-# against the declaration it runs on.
-toyos-mixer = { path = "../mixer" }
+# The rates soundserver mixes at, best first, which the rate choice is tested
+# against, and the reader's decoding of the masks this crate's stream reports.
+toyos-sound-output = { path = "../../soundserver/output" }
 
 [lints.rust]
 warnings = "deny"
