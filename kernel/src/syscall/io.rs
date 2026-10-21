@@ -22,7 +22,8 @@ use super::handles::with_object_ref;
 
 /// What `sys_write` does when the object took nothing.
 enum WriteBlock {
-    Pipe(pipe::PipeId, WaitClass),
+    /// The pipe, the class of the wait, and the room the write waits for.
+    Pipe(pipe::PipeId, WaitClass, usize),
     Refused(u64),
     /// Carried out of the process's lock: `HandleError::refuse` may take the
     /// process down and cannot run under a guard.
@@ -55,7 +56,7 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
             match ops::try_write(object, buf) {
                 Some(n) => Ok((n, ops::pipe_id_write(object))),
                 None => Err(match ops::pipe_write(object) {
-                    Some((id, class)) => WriteBlock::Pipe(id, class),
+                    Some((id, class, landing)) => WriteBlock::Pipe(id, class, landing.room(buf.len())),
                     None => WriteBlock::Refused(SyscallError::NotFound.to_u64()),
                 }),
             }
@@ -65,7 +66,7 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
                 if let Some(id) = pipe_id { process::wake_pipe_readers(id); }
                 return n;
             }
-            Err(WriteBlock::Pipe(id, class)) => match pipe::write_watch(id) {
+            Err(WriteBlock::Pipe(id, class, room)) => match pipe::write_watch(id) {
                 Some(end) => {
                     let parkable = crate::scheduler::Parkable::at_entry();
                     if watch::wait_until(
@@ -74,7 +75,7 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
                         0,
                         class,
                         Deadline::never(),
-                        || pipe::has_space(id, 1),
+                        || pipe::has_space(id, room),
                     )
                     .is_err()
                     {

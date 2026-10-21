@@ -1,7 +1,7 @@
 use crate::mm::pmm;
 
 use kernel::message::Window;
-use kernel::pipe::{End, Holders, Released};
+use kernel::pipe::{End, Holders, Landing, Released};
 use toyos_abi::ring::Ring;
 
 use alloc::sync::Arc;
@@ -100,6 +100,11 @@ mod handle {
 
 
 pub const PIPE_SIZE: usize = PAGE_2M as usize;
+
+const _: () = assert!(
+    toyos_abi::syscall::MAX_WHOLE_PIPE_WRITE <= PIPE_SIZE - core::mem::size_of::<toyos_abi::ring::RingHeader>(),
+    "a whole pipe write must fit the ring",
+);
 
 /// A pipe's ring page and the cursors over it — cursors stay in kernel memory
 /// because `SYS_PIPE_MAP` maps `page` writable, so anything read back from the page is user-chosen.
@@ -200,7 +205,7 @@ pub fn init() {
 
 /// Create a new pipe. Returns owned reader + writer references.
 ///
-/// Infallible: a pipe with no traffic owns no physical memory, so nothing here can be exhausted; the ring page is allocated on first `try_write` or `map_page`.
+/// Infallible: a pipe with no traffic owns no physical memory, so nothing here can be exhausted; the ring page is allocated on first `write` or `map_page`.
 pub fn create() -> (PipeReader, PipeWriter) {
     with_pipes_mut(|pipes| {
         let id = pipes.insert_with(Pipe::new);
@@ -271,57 +276,29 @@ pub fn read_position(pipe_id: PipeId) -> Option<u64> {
     with_pipes(|pipes| pipes.get(pipe_id).map(|p| p.read))
 }
 
-/// What [`write_whole`] did: all of it, or nothing.
-pub enum WholeWrite {
-    /// Every byte, ending at this stream position.
-    Wrote(u64),
-    /// Not enough room for all of it now.
+pub enum PipeWrite {
+    /// This many bytes, the stream ending at `end`.
+    Wrote { n: usize, end: u64 },
+    /// Not the room its landing needs now: wait for `Landing::room`.
     NoRoom,
     BrokenPipe,
+    /// The ring page could not be allocated; no wait makes space appear, so a caller must not park on it.
     NoMemory,
 }
 
-/// Write all of `buf` or none of it, under the one lock hold.
-pub fn write_whole(pipe_id: PipeId, buf: &UserBytes) -> WholeWrite {
+/// Write `buf` as `landing` has it land, under the one lock hold.
+pub fn write(pipe_id: PipeId, buf: &UserBytes, landing: Landing) -> PipeWrite {
     with_pipes_mut(|pipes| {
-        let Some(pipe) = pipes.get_mut(pipe_id) else { return WholeWrite::BrokenPipe };
+        let Some(pipe) = pipes.get_mut(pipe_id) else { return PipeWrite::BrokenPipe };
         if !pipe.holders.held(End::Read) {
-            return WholeWrite::BrokenPipe;
+            return PipeWrite::BrokenPipe;
         }
-        let Some(backing) = pipe.back() else { return WholeWrite::NoMemory };
-        if (backing.ring.space() as usize) < buf.len() {
-            return WholeWrite::NoRoom;
-        }
-        let n = backing.ring.write(buf.len(), |off, mut dst| buf.read_run(off, &mut dst));
-        assert_eq!(n, buf.len(), "pipe: a ring with room for a write took less of it");
+        let Some(backing) = pipe.back() else { return PipeWrite::NoMemory };
+        let Some(n) = landing.takes(backing.ring.space(), buf.len()) else { return PipeWrite::NoRoom };
+        let wrote = backing.ring.write(n, |off, mut dst| buf.read_run(off, &mut dst));
+        assert_eq!(wrote, n, "pipe: a ring with room for a write took less of it");
         pipe.written += n as u64;
-        WholeWrite::Wrote(pipe.written)
-    })
-}
-
-pub enum PipeWrite {
-    Wrote(usize),
-    BrokenPipe,
-    /// The ring page could not be allocated; distinct from `None`, no wait makes space appear so a caller must not park on it.
-    NoMemory,
-}
-
-pub fn try_write(pipe_id: PipeId, buf: &UserBytes) -> Option<PipeWrite> {
-    with_pipes_mut(|pipes| {
-        let pipe = pipes.get_mut(pipe_id)?;
-        if !pipe.holders.held(End::Read) {
-            return Some(PipeWrite::BrokenPipe);
-        }
-        let Some(backing) = pipe.back() else {
-            return Some(PipeWrite::NoMemory);
-        };
-        if backing.ring.space() > 0 {
-            let n = backing.ring.write(buf.len(), |off, mut dst| buf.read_run(off, &mut dst));
-            pipe.written += n as u64;
-            Some(PipeWrite::Wrote(n))
-        } else {
-            None
-        }
+        PipeWrite::Wrote { n, end: pipe.written }
     })
 }
 
@@ -331,9 +308,8 @@ pub fn has_data(pipe_id: PipeId) -> bool {
     })
 }
 
-/// Whether a write needing `want` bytes at once answers now.
+/// Whether a write waiting for `want` bytes of room answers now.
 pub fn has_space(pipe_id: PipeId, want: usize) -> bool {
-    let want = u32::try_from(want).unwrap_or(u32::MAX);
     with_pipes(|pipes| pipes.get(pipe_id).is_some_and(|p| p.holders.writable(p.space(), want)))
 }
 
