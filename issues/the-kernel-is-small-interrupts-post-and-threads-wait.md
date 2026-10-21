@@ -72,8 +72,9 @@ Beside that order, each waiting on something outside it:
    session reopened over the page a killed server left, by fileserver's
    `a_directory_rename_is_whole_under_one_name_wherever_the_server_is_killed`
    for DATA, and for LOG by the FAT test step 10 owes. **Partly done**
-   (#525, #536): diskserver drives NVMe, and the kernel's NVMe driver is
-   gone. **Left**: on the T14, `/log` and `/home` are on the
+   (#525, #536): NVMe is driven from userland, and the kernel's NVMe
+   driver is gone; the `nvme` driver offers its disk to diskserver, the block
+   service. **Left**: on the T14, `/log` and `/home` are on the
    stick, which the kernel drives until step 10; the kernel's USB storage,
    block layer, page cache and refusal chain go at step 9.
 4. **Where the data filesystem lives** — owner ruling, 2026-09-26, from the
@@ -181,8 +182,11 @@ Beside that order, each waiting on something outside it:
        `issues/a-device-function-is-driven-from-its-arrival-to-its-end.md`:
        usbd is a `drives` row, one process per xHCI controller the kernel
        leaves. The whole xHCI moves, HID delivered
-       to the owner of input over the `input` port and mass storage over
-       `toyos-blockring`. A USB keyboard's transitions never reach the
+       to the owner of input over the `input` port, each device its own
+       `source` with its own `gone`, and each stick a disk offered to the block
+       service on `disk`, whose sessions usbd serves over `toyos-blockring`
+       (`issues/a-device-function-is-driven-from-its-arrival-to-its-end.md`'s
+       block ruling, which replaces #901's `block@` ports). A USB keyboard's transitions never reach the
        kernel, whose keyboard and mouse streams go when their last kernel
        source leaves (the ruling on #899, applied to usbd on #901). It
        depends on stage 7 step 2 landing first, because at step 10 usbd's

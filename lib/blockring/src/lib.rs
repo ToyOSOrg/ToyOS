@@ -28,9 +28,15 @@
 //! **Requests in flight at once are unordered**, as on the device: a client
 //! that needs one to follow another waits for the first's answer.
 //!
+//! **One service, many disks.** The block service serves [`PORT`] to clients
+//! and [`disk::PORT`] to disk drivers, each of which offers its disks and is
+//! handed the sessions opened on them ([`disk`]); data moves between a
+//! driver's device and the client's region alone.
+//!
 //! Pure: `alloc`, `toyos-blockhold` and `toyos-transport`, no `unsafe`. The
-//! ends that map the page — `system/diskserver` and its client — hand it the
-//! page as words ([`toyos_transport::Word`]) and act on what it answers.
+//! ends that map the page — a disk driver (`lib/blockserve`) and the client
+//! (`system/diskserver`'s library) — hand it the page as words
+//! ([`toyos_transport::Word`]) and act on what it answers.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -38,6 +44,7 @@
 extern crate alloc;
 
 pub mod client;
+pub mod disk;
 pub mod entry;
 pub mod layout;
 pub mod server;

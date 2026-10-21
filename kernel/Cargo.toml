@@ -498,6 +498,7 @@ toyos-tsc = { path = "../lib/tsc" }
 toyos-rootimage = { path = "../lib/rootimage" }
 toyos-quiesce = { path = "../lib/quiesce" }
 toyos-random = { path = "../lib/random" }
+toyos-scsi = { path = "../lib/scsi" }
 toyos-symbols = { path = "../lib/symbols" }
 toyos-usbhid = { path = "usbhid" }
 toyos-userbound = { path = "../lib/userbound" }

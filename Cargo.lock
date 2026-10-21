@@ -991,10 +991,9 @@ version = "0.0.0"
 dependencies = [
  "toyos",
  "toyos-abi",
- "toyos-blockhold",
  "toyos-blockring",
+ "toyos-blockserve",
  "toyos-disk",
- "toyos-gpt",
 ]
 
 [[package]]
@@ -1977,6 +1976,7 @@ dependencies = [
  "toyos-quiesce",
  "toyos-random",
  "toyos-rootimage",
+ "toyos-scsi",
  "toyos-smmu",
  "toyos-symbols",
  "toyos-tco",
@@ -2376,6 +2376,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "nvme"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-blockring",
+ "toyos-blockserve",
+ "toyos-gpt",
 ]
 
 [[package]]
@@ -4372,6 +4383,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-blockserve"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-blockhold",
+ "toyos-blockring",
+ "toyos-gpt",
+]
+
+[[package]]
 name = "toyos-bootmap"
 version = "0.1.0"
 dependencies = [
@@ -4769,6 +4791,10 @@ name = "toyos-rootimage"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-scsi"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-sha2"
 version = "0.1.0"
 dependencies = [
@@ -4942,6 +4968,9 @@ dependencies = [
 [[package]]
 name = "toyos-xhci"
 version = "0.1.0"
+dependencies = [
+ "toyos-scsi",
+]
 
 [[package]]
 name = "toyos-xhci-sim"
