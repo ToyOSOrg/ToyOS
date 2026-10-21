@@ -35,7 +35,7 @@ use toyos_blockserve::{table, Device, Partition, Sessions};
 use toyos_input::wire::{self, Record, MAX_PAYLOAD};
 use toyos_inspect::{Snapshot, MSG_INSPECT, MSG_SNAPSHOT};
 use toyos_pci_claim::{Bar, Grant};
-use toyos_xhci::exec::{Dead, Host, Nanos};
+use toyos_xhci::exec::{Dead, Host, Nanos, Tasks};
 use toyos_xhci::hc::Reset;
 use toyos_xhci::input::{Opened, Owner, Sent};
 use toyos_xhci::msc::{Event, Work};
@@ -49,6 +49,7 @@ const TOKEN_IRQ: u64 = 0;
 const TOKEN_ACCEPT: u64 = 1;
 const TOKEN_LINK: u64 = 2;
 const TOKEN_INPUT: u64 = 3;
+const TOKEN_STOP: u64 = 4;
 const TOKEN_PENDING: u64 = 0x1_0000;
 /// A session's doorbell: its disk in bits 16 up, its id below.
 const TOKEN_SESSION: u64 = 0x1_0000_0000;
@@ -156,6 +157,7 @@ fn main() {
     let host = Process { began: Instant::now(), name: format!("usbd {at}") };
     let name = host.name.clone();
     let acceptor = endow::acceptor(toyos_inspect::USB.port);
+    let stop = Endowments::get().take::<toyos::Pipe>(toyos_quiesce::DRIVER_STOP);
     let mut link = Link::new(name.clone());
     // xHCI 1.2 §5.2.1: the capability registers are in BAR 0.
     let (bar, _bar) = Bar::map(&dev, 0, info.bar_bytes[0]).unwrap_or_else(|why| panic!("{name}: {why}"));
@@ -166,7 +168,7 @@ fn main() {
             if let Some(link) = &mut link {
                 link.settle(Settled::Unusable);
             }
-            idle(link)
+            idle(link, stop)
         }
     };
     // After the reset, so a controller refused above never had a grant: the
@@ -177,18 +179,25 @@ fn main() {
     println!("{name}: running, {} ports, a {} KiB grant", hc.max_ports, bytes / 1024);
     let config = Config { input: endow::namespace().is_some(), disks: link.is_some() };
     let usb: Driver = Usb::new(hc, host, config, table::read);
-    serve(&name, &dev, &usb, acceptor, link)
+    serve(&name, &dev, &usb, acceptor, link, stop)
 }
 
 /// A controller that cannot be used: it keeps its link, so the service goes
-/// on saying so, and serves nothing.
-fn idle(mut link: Option<Link>) -> ! {
-    let poller = Poller::new(1);
+/// on saying so, and serves nothing; it ends when the machine stops.
+fn idle(mut link: Option<Link>, stop: Option<toyos::Pipe>) -> ! {
+    let poller = Poller::new(2);
     loop {
         if let Some(link) = &mut link {
             link.watch(&poller, TOKEN_LINK);
         }
-        poller.wait(1, u64::MAX, |_| {});
+        if let Some(stop) = &stop {
+            poller.watch(stop, READABLE, TOKEN_STOP);
+        }
+        let mut stopping = false;
+        poller.wait(1, u64::MAX, |token| stopping |= token == TOKEN_STOP);
+        if stopping {
+            std::process::exit(0);
+        }
         for handed in link.iter_mut().flat_map(Link::take) {
             toyos_abi::syscall::close(handed.region);
         }
@@ -208,7 +217,14 @@ struct Wakes {
     records: u64,
 }
 
-fn serve(name: &str, dev: &PciDev, usb: &Driver, acceptor: Option<toyos::port::Acceptor>, mut link: Option<Link>) -> ! {
+fn serve(
+    name: &str,
+    dev: &PciDev,
+    usb: &Driver,
+    acceptor: Option<toyos::port::Acceptor>,
+    mut link: Option<Link>,
+    stop: Option<toyos::Pipe>,
+) -> ! {
     let mut tasks = usb.tasks();
     let mut disks: BTreeMap<u32, Sessions> = BTreeMap::new();
     let mut input = InputPort::default();
@@ -312,6 +328,9 @@ fn serve(name: &str, dev: &PciDev, usb: &Driver, acceptor: Option<toyos::port::A
             continue;
         }
         poller.watch(dev, READABLE, TOKEN_IRQ);
+        if let Some(stop) = &stop {
+            poller.watch(stop, READABLE, TOKEN_STOP);
+        }
         if let Some(acceptor) = &acceptor {
             poller.watch(acceptor, READABLE, TOKEN_ACCEPT);
         }
@@ -339,6 +358,9 @@ fn serve(name: &str, dev: &PciDev, usb: &Driver, acceptor: Option<toyos::port::A
         if ready.is_empty() {
             wakes.timed += 1;
         }
+        if ready.contains(&TOKEN_STOP) {
+            end_for_the_stop(name, usb, tasks);
+        }
         // **The record is taken, not merely noticed**: a claim reads ready
         // while it holds one, so one left would wake every wait after it.
         if ready.contains(&TOKEN_IRQ) {
@@ -354,6 +376,38 @@ fn serve(name: &str, dev: &PciDev, usb: &Driver, acceptor: Option<toyos::port::A
         }
     }
 }
+
+/// The supervisor says the machine stops, every file server synced: every
+/// device handed back with a port reset and the controller left reset
+/// (`Hc::stop`), and then this process ends, which releases the claim. What
+/// a task still held is let go of: the driver ends here.
+fn end_for_the_stop<'u>(name: &str, usb: &'u Driver, tasks: Tasks<'u>) -> ! {
+    usb.hc.ending.set(true);
+    drop(tasks);
+    let stopped = std::cell::Cell::new(None);
+    let mut stop = Tasks::default();
+    stop.spawn(async {
+        stopped.set(Some(usb.hc.stop(&usb.wake).await));
+        Ok(())
+    });
+    while !stop.is_empty() {
+        match stop.run(&usb.wake) {
+            Ok(Some(at)) => std::thread::sleep(Duration::from_nanos(at.saturating_sub(usb.wake.now()))),
+            Ok(None) => {}
+            Err(Dead(why)) => panic!("{name}: {why}, in the stop"),
+        }
+    }
+    let stopped = stopped.get().expect("the stop's task set it before it ended");
+    println!("{name}: the machine stops: {stopped}");
+    // **The exit code is the account that is sure to be read**: the kernel
+    // records it, and this line may reach no log, whose volume this process
+    // just took down.
+    std::process::exit(if stopped.whole() { 0 } else { STOP_UNFINISHED })
+}
+
+/// What usbd ends with when its stop left a port in reset or the controller
+/// running: [`toyos_xhci::hc::Stopped::whole`] false.
+const STOP_UNFINISHED: i32 = 3;
 
 fn answer(conn: &Connection, usb: &Driver, wakes: &Wakes, wake_at: Option<Nanos>) {
     let mut snap = Snapshot::new(toyos_inspect::USB);

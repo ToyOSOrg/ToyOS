@@ -2338,7 +2338,9 @@ fn console_image_boots() -> Result<(), String> {
 /// stop the machine, and read the stick's log volume back with the metal
 /// judge's verdict: this boot's `logkeeper` files hold `Boot: complete` and the
 /// supervisor's stop line, so the log went through usbd's disk to the stick and
-/// was made durable before the power went.
+/// was made durable before the power went. Then usbd handed the stick back
+/// with a port reset and left its controller reset, before the kernel's stop
+/// ([`usb_stopped_before_the_reset`]).
 fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
     let options = BootOptions { profile: qemu::Profile::Metal, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
@@ -2365,6 +2367,29 @@ fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
         ));
     }
     eprintln!("  [log] {} file(s) on the stick, {} bytes of this boot's log", names.len(), log.len());
+    usb_stopped_before_the_reset(&console)
+}
+
+/// usbd ended for the stop with every connected port's reset finished and its
+/// controller halted and reset (its exit code, which the kernel records,
+/// because its own line may reach no log), and it ended before the kernel's
+/// stop: the supervisor waited for it.
+fn usb_stopped_before_the_reset(console: &str) -> Result<(), String> {
+    let lines: Vec<&str> = console.lines().collect();
+    let at = |what: &dyn Fn(&str) -> bool| lines.iter().position(|l| what(l));
+    let asked = at(&|l| l.contains("supervisor: power: the machine stops"));
+    let ended = at(&|l| l.contains("kernel] exit: usbd pid="));
+    let stopped = at(&|l| l.contains(&format!("kernel] {}", toyos_quiesce::STOPPED)));
+    let (Some(asked), Some(ended), Some(stopped)) = (asked, ended, stopped) else {
+        return Err(format!("no stop request, usbd end and kernel stop, in that order, on the console\n{console}"));
+    };
+    if !(asked < ended && ended < stopped) {
+        return Err(format!("usbd ended on line {ended}, not between the stop's request ({asked}) and the kernel's stop ({stopped})\n{console}"));
+    }
+    if !lines[ended].contains(" code=0 ") {
+        return Err(format!("usbd's stop left a port in reset or its controller running: {}", lines[ended]));
+    }
+    eprintln!("  [stop] {}", lines[ended].trim());
     Ok(())
 }
 

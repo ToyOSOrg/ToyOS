@@ -37,7 +37,7 @@ use crate::recovery::{Act, Command, EndpointState, Recovery};
 /// recovery" (USB 2.0 §7.1.7.3, §7.1.7.5), which xHCI leaves to software
 /// (xHCI 1.2 §4.6.8). A fixed delay the specification mandates and raises no
 /// event for. USB 3.2 §9.2.6.2 lets a SuperSpeed device be accessed at once.
-const RESET_RECOVERY_NS: Nanos = 10_000_000;
+pub(crate) const RESET_RECOVERY_NS: Nanos = 10_000_000;
 
 /// How long a control transfer may go unanswered: "an upper limit of 5
 /// seconds for any command to be processed" (USB 3.2 §9.2.6.1).

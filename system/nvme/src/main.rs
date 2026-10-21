@@ -35,11 +35,16 @@ use nvme::{Controller, Done, Owner};
 /// large cache is the slowest thing a healthy drive does.
 const COMMAND_SILENCE: Duration = Duration::from_secs(10);
 
+/// How long the stop's normal shutdown is given: a policy, below the
+/// supervisor's wait for every disk driver (`toyos_quiesce::DRIVERS_MS`).
+const SHUTDOWN_BOUND: Duration = Duration::from_secs(2);
+
 /// The one disk a controller's first namespace is.
 const DISK: u32 = 0;
 
 const TOKEN_IRQ: u64 = 0;
 const TOKEN_LINK: u64 = 1;
+const TOKEN_STOP: u64 = 2;
 const TOKEN_SESSION: u64 = 0x1_0000;
 
 /// The controller as `toyos_gpt` reads it: its own sectors, served a 4 KiB
@@ -108,6 +113,7 @@ fn main() {
     let dev = claim();
     let info = dev.describe().unwrap_or_else(|why| panic!("nvme: the claim would not describe itself: {why:?}"));
     let name = format!("nvme {:02x}:{:02x}.{}", info.bus, info.dev, info.func);
+    let stop = Endowments::get().take::<toyos::Pipe>(toyos_quiesce::DRIVER_STOP);
     let mut link = Link::new(name.clone())
         .unwrap_or_else(|| panic!("{name}: started with no `{}` port: a disk driver's row receives it", toyos_blockring::disk::PORT));
     let mut ctrl = match Controller::open(dev, &info) {
@@ -115,7 +121,7 @@ fn main() {
         Err(why) => {
             println!("{name}: NOT SERVING — {why}");
             link.settle(Settled::Unusable);
-            idle(&mut link);
+            idle(&mut link, stop.as_ref());
         }
     };
     println!(
@@ -131,16 +137,23 @@ fn main() {
     let mut disk = Sessions::new(name.clone(), parts);
     link.offer(DISK, disk.offered());
     link.settle(Settled::Offered);
-    serve(&name, &mut ctrl, &mut disk, &mut link)
+    serve(&name, &mut ctrl, &mut disk, &mut link, stop.as_ref())
 }
 
 /// A driver whose controller cannot be used: it keeps its link, so the
 /// service goes on saying so, and opens nothing.
-fn idle(link: &mut Link) -> ! {
-    let poller = Poller::new(1);
+fn idle(link: &mut Link, stop: Option<&toyos::Pipe>) -> ! {
+    let poller = Poller::new(2);
     loop {
         link.watch(&poller, TOKEN_LINK);
-        poller.wait(1, u64::MAX, |_| {});
+        if let Some(stop) = stop {
+            poller.watch(stop, toyos::poller::READABLE, TOKEN_STOP);
+        }
+        let mut stopping = false;
+        poller.wait(1, u64::MAX, |token| stopping |= token == TOKEN_STOP);
+        if stopping {
+            std::process::exit(0);
+        }
         for handed in link.take() {
             toyos_abi::syscall::close(handed.region);
             drop(handed.conn);
@@ -148,19 +161,28 @@ fn idle(link: &mut Link) -> ! {
     }
 }
 
-fn serve(name: &str, ctrl: &mut Controller, disk: &mut Sessions, link: &mut Link) -> ! {
-    let poller = Poller::new(2 + MAX_SESSIONS as u32);
+fn serve(name: &str, ctrl: &mut Controller, disk: &mut Sessions, link: &mut Link, stop: Option<&toyos::Pipe>) -> ! {
+    let poller = Poller::new(3 + MAX_SESSIONS as u32);
     let mut ready: Vec<u64> = Vec::new();
     let mut done: Vec<Done> = Vec::new();
     loop {
         poller.watch(ctrl.claim(), toyos::poller::READABLE, TOKEN_IRQ);
         link.watch(&poller, TOKEN_LINK);
         disk.watch(&poller, TOKEN_SESSION);
+        if let Some(stop) = stop {
+            poller.watch(stop, toyos::poller::READABLE, TOKEN_STOP);
+        }
         let timeout = ctrl
             .oldest()
             .map_or(u64::MAX, |at| COMMAND_SILENCE.saturating_sub(at.elapsed()).as_nanos() as u64);
         ready.clear();
         poller.wait(1, timeout, |token| ready.push(token));
+        // The supervisor says the machine stops, every file server synced.
+        if ready.contains(&TOKEN_STOP) {
+            let done = ctrl.shut_down(SHUTDOWN_BOUND);
+            println!("{name}: the machine stops: shutdown {}", if done { "complete" } else { "not complete in its bound" });
+            std::process::exit(0);
+        }
 
         if let Err(why) = ctrl.take_interrupt() {
             panic!(

@@ -644,6 +644,9 @@ struct Instance {
     row: &'static Program,
     function: Pci,
     child: Child,
+    /// A disk driver's [`toyos_quiesce::DRIVER_STOP`] pipe: closing it tells the
+    /// driver the machine stops.
+    stop: Option<Pipe>,
 }
 
 /// A service's kept acceptors, shared with what [`Grants`] mints on them.
@@ -935,7 +938,7 @@ impl<'a> Supervisor<'a> {
         for act in self.drives.decide(&rows, &records, Instant::now()) {
             match act {
                 Act::Start { row, entry, function } => match self.start_instance(row, entry, function) {
-                    Ok(child) => self.instances.push(Instance { row, function, child }),
+                    Ok((child, stop)) => self.instances.push(Instance { row, function, child, stop }),
                     Err(why) => {
                         say!("supervisor: {} was not started on PCI {}: {why}", row.name, pci_at(function.at));
                         refused.push(format!("{entry} at PCI {}", pci_at(function.at)));
@@ -970,7 +973,7 @@ impl<'a> Supervisor<'a> {
 
     /// One `drives` process of `row`, holding `function`'s claim under
     /// `entry`'s spelling.
-    fn start_instance(&mut self, row: &'static Program, entry: PciMatch, function: Pci) -> Result<Child, String> {
+    fn start_instance(&mut self, row: &'static Program, entry: PciMatch, function: Pci) -> Result<(Child, Option<Pipe>), String> {
         if self.services.len() + self.instances.len() >= MAX_CHILDREN {
             return Err(format!("the supervisor watches {MAX_CHILDREN} processes already"));
         }
@@ -980,14 +983,19 @@ impl<'a> Supervisor<'a> {
         let mut extra = Extra { claims: vec![(format!("{DEV_PREFIX}{name}"), claim)], ..Extra::default() };
         // A disk driver is who this start says it is: its `disk` connector
         // carries the function's arrival, which the block service keys it by.
+        // And told when the machine stops, which it waits for (`stop_drivers`).
+        let mut stop = None;
         if is_disk_driver(row) {
             extra.ports.push((toyos_blockring::disk::PORT.to_string(), self.grants.disk(function.arrival)?));
+            let (read, write) = toyos::pipe_pair().map_err(|e| format!("no pipe for its stop: {e:?}"))?;
+            extra.stop = Some(read);
+            stop = Some(write);
         }
         let launcher = (&self.minted, self.sessions.machine());
         let served = Served::Keep { acceptors: &[], owed: &[] };
         let output = Output::Boot(&mut self.log);
         start(Command::new(&row.path), row, self.system, self.syscap, served, &self.connectors, &self.grants, &[], extra, launcher, output)
-            .map(|(child, _)| child)
+            .map(|(child, _)| (child, stop))
             .map_err(|e| e.to_string())
     }
 
@@ -1606,7 +1614,7 @@ impl<'a> Supervisor<'a> {
     /// A request on `power`: `logkeeper` flushed, then the kernel asked with the
     /// machine's capability. Answers only a refusal: a stop that happens takes
     /// the supervisor, and the requester, with it.
-    fn stop(&self, conn: &Connection, msg_type: u32) {
+    fn stop(&mut self, conn: &Connection, msg_type: u32) {
         let Some(how) = Stop::from_message(msg_type) else {
             say!("supervisor: power: dropping client {} — frame {msg_type} is no stop", conn.as_handle().0);
             return;
@@ -1614,13 +1622,71 @@ impl<'a> Supervisor<'a> {
         say!("{STOPPING} ({how:?})");
         self.log.flush();
         self.sync_files();
+        let stopped = self.stop_drivers();
         let refused = match how {
             Stop::Reboot => self.syscap.reboot(),
             Stop::Shutdown => self.syscap.shutdown(),
         };
         self.log.resume();
         toyos::error!("supervisor: power: the kernel refused {how:?}: {refused:?}");
+        // Their functions are owed another driver, as after any end.
+        if stopped {
+            self.drive();
+        }
         let _ = conn.try_send_bytes(power::MSG_REFUSED, &refused.to_u64().to_le_bytes());
+    }
+
+    /// Tell every disk driver the machine stops, after the sync that wrote
+    /// through it, and wait for each to end, within
+    /// [`toyos_quiesce::DRIVERS_MS`]: usbd hands its devices back with a port
+    /// reset and leaves its controller reset. One that does not end in time is
+    /// named, and the machine stops without it: its function is stopped by
+    /// the kernel's own stop, as one whose driver died is. Answers whether any
+    /// was told.
+    fn stop_drivers(&mut self) -> bool {
+        let until = Instant::now() + Duration::from_millis(toyos_quiesce::DRIVERS_MS);
+        let mut waiting: Vec<Arrival> = Vec::new();
+        for instance in &mut self.instances {
+            // The pipe's end closing is the word.
+            if instance.stop.take().is_some() {
+                waiting.push(instance.function.arrival);
+            }
+        }
+        let told = !waiting.is_empty();
+        let poller = Poller::new(waiting.len().max(1) as u32);
+        loop {
+            let mut at = 0;
+            while at < self.instances.len() {
+                let instance = &self.instances[at];
+                let arrival = instance.function.arrival;
+                match waiting.contains(&arrival).then(|| exit_of(&instance.child)).flatten() {
+                    Some(exit) => {
+                        let Instance { row, function, .. } = self.instances.swap_remove(at);
+                        say!("supervisor: power: {} on PCI {} ended for the stop with {exit}", row.name, pci_at(function.at));
+                        self.drives.ended(arrival, true);
+                        waiting.retain(|a| *a != arrival);
+                    }
+                    None => at += 1,
+                }
+            }
+            let left = until.saturating_duration_since(Instant::now());
+            if waiting.is_empty() || left.is_zero() {
+                break;
+            }
+            for instance in self.instances.iter().filter(|i| waiting.contains(&i.function.arrival)) {
+                poller.watch_raw(toyos::RawHandle(instance.child.as_raw_handle()), READABLE, TOKEN_ENDED);
+            }
+            poller.wait(1, left.as_nanos() as u64, |_| {});
+        }
+        for instance in self.instances.iter().filter(|i| waiting.contains(&i.function.arrival)) {
+            say!(
+                "supervisor: power: {} on PCI {} did not end in {} ms of being told; the machine stops without it",
+                instance.row.name,
+                pci_at(instance.function.at),
+                toyos_quiesce::DRIVERS_MS
+            );
+        }
+        told
     }
 
     /// Have every writable file server make its volume durable: the kernel's
@@ -2503,7 +2569,7 @@ fn start<'a>(
     launcher: (&Minted, Session),
     output: Output<'_>,
 ) -> Result<(Child, Vec<String>), StartError> {
-    let Extra { args, claims, ports } = extra;
+    let Extra { args, claims, ports, stop } = extra;
     // A storage row's own arguments first: a file server's role leads its argv.
     command.args(&args);
     command.args(&program.args);
@@ -2528,6 +2594,11 @@ fn start<'a>(
     for (label, claim) in claims {
         let raw = claim.into_raw();
         command.endow(&label, raw.0);
+        held.0.push(raw);
+    }
+    if let Some(stop) = stop {
+        let raw = stop.into_raw();
+        command.endow(toyos_quiesce::DRIVER_STOP, raw.0);
         held.0.push(raw);
     }
     let mut view = grants.view(program, launcher.1);
@@ -3025,6 +3096,8 @@ struct Extra {
     args: Vec<String>,
     claims: Vec<(String, toyos::Device)>,
     ports: Vec<(String, Connector)>,
+    /// A disk driver's end of its [`toyos_quiesce::DRIVER_STOP`] pipe.
+    stop: Option<Pipe>,
 }
 
 /// Every record the kernel's inventory answers.

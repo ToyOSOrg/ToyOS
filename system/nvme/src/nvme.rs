@@ -46,6 +46,12 @@ const DOORBELLS: usize = 0x1000;
 const CC_ENABLED: u32 = 1 | (6 << 16) | (4 << 20);
 const CSTS_RDY: u32 = 1;
 const CSTS_CFS: u32 = 1 << 1;
+/// `CC.SHN` and `CSTS.SHST` (NVMe Base 2.0 §3.1.4.5, §3.1.4.6): a normal
+/// shutdown asked for, and its completion.
+const CC_SHN: u32 = 0b11 << 14;
+const CC_SHN_NORMAL: u32 = 0b01 << 14;
+const CSTS_SHST: u32 = 0b11 << 2;
+const CSTS_SHST_COMPLETE: u32 = 0b10 << 2;
 
 const SQE_BYTES: usize = 64;
 const CQE_BYTES: usize = 16;
@@ -297,6 +303,22 @@ impl Controller {
             std::thread::yield_now();
         }
         Ok(())
+    }
+
+    /// The machine stops: a normal shutdown (NVMe Base 2.0 §3.6.2), which has
+    /// the controller make what it holds durable and finish, answered by
+    /// `CSTS.SHST` within `within`. Polled: the register raises no interrupt.
+    pub fn shut_down(&self, within: Duration) -> bool {
+        let cc: u32 = self.regs.read(REG_CC);
+        self.regs.write::<u32>(REG_CC, (cc & !CC_SHN) | CC_SHN_NORMAL);
+        let start = Instant::now();
+        while self.csts() & CSTS_SHST != CSTS_SHST_COMPLETE {
+            if start.elapsed() > within {
+                return false;
+            }
+            std::thread::yield_now();
+        }
+        true
     }
 
     /// Disable, program the admin queue, and enable.

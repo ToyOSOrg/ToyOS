@@ -315,6 +315,47 @@ pub struct Reset<R> {
     pub protocols: Protocols,
 }
 
+/// How long the stop before a machine reset may take, all of it: the
+/// devices' reset, the controller's halt and its own reset. A policy, below
+/// the supervisor's wait for every disk driver (`toyos_quiesce::DRIVERS_MS`).
+pub const STOP_NS: Nanos = 2_000_000_000;
+
+/// How often a register the stop waits on is read again: none of them raises
+/// an event the stop could wait for.
+const STOP_POLL_NS: Nanos = 1_000_000;
+
+/// What [`Hc::stop`] did, each step as read back from the controller.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Stopped {
+    /// Ports with a device connected, and those whose reset finished.
+    pub connected: u32,
+    pub reset: u32,
+    pub halted: bool,
+    /// HCRST cleared and the controller ready again.
+    pub cleared: bool,
+    pub ports: u32,
+    /// Ports reading Port Power off afterwards: a controller without Port
+    /// Power Control keeps them powered (§5.4.8).
+    pub unpowered: u32,
+}
+
+impl Stopped {
+    /// Every connected device was reset, and the controller halted and reset.
+    pub fn whole(&self) -> bool {
+        self.reset == self.connected && self.halted && self.cleared
+    }
+}
+
+impl core::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{}/{} connected port(s) reset, halted={}, reset={}, {}/{} port(s) unpowered",
+            self.reset, self.connected, self.halted, self.cleared, self.unpowered, self.ports
+        )
+    }
+}
+
 /// The controller, running.
 pub struct Hc<R, D> {
     regs: R,
@@ -474,6 +515,63 @@ impl<R: Registers> Reset<R> {
 }
 
 impl<R: Registers, D: DmaBuffers> Hc<R, D> {
+    /// The machine is about to reset or power off: hand every device back
+    /// with no command outstanding and leave the controller as firmware
+    /// would find it, within [`STOP_NS`].
+    ///
+    /// **A platform reset is not a way to end a transfer.** It leaves VBUS up,
+    /// so a device mid-Bulk-Only command sees no power cycle either. A port
+    /// reset returns the device to its Default state (USB 2.0 §7.1.7.5) and
+    /// abandons whatever command it was inside, so it comes first, on every
+    /// connected port at once, while the controller still runs. A USB 2 device
+    /// then gets TRSTRCY before anything else happens on its bus. After that
+    /// the controller is halted (§5.4.1), reset, and its ports unpowered where
+    /// it has Port Power Control. Every operation still held is let go: the
+    /// driver ends here.
+    pub async fn stop<C: Host>(&self, wake: &Wake<C>) -> Stopped {
+        self.ending.set(true);
+        let deadline = wake.now().saturating_add(STOP_NS);
+        let mut done = Stopped { ports: u32::from(self.max_ports), ..Stopped::default() };
+        let mut usb2 = false;
+        let mut reset: Vec<u8> = Vec::new();
+        for port in 0..self.max_ports {
+            let portsc = self.portsc(port);
+            if !portsc.connected() {
+                continue;
+            }
+            usb2 |= self.protocols.of(port) != Some(crate::protocol::Protocol::Usb3);
+            // An earlier reset's flag cleared with the write, so a flag read
+            // after it is this reset's (`Portsc::reset_finished`).
+            self.write_portsc(port, portsc.neutral().acknowledging_reset(portsc).resetting());
+            reset.push(port);
+        }
+        done.connected = reset.len() as u32;
+        let finished = || reset.iter().filter(|&&p| self.portsc(p).reset_finished()).count() as u32;
+        polled(wake, deadline, || finished() == done.connected).await;
+        done.reset = finished();
+        if usb2 && done.reset > 0 {
+            exec::sleep_until(wake, wake.now().saturating_add(crate::usb::RESET_RECOVERY_NS)).await;
+        }
+        let usbcmd = self.regs.read32(self.op + OP_USBCMD);
+        self.regs.write32(self.op + OP_USBCMD, usbcmd & !USBCMD_RS);
+        done.halted = polled(wake, deadline, || self.regs.read32(self.op + OP_USBSTS) & USBSTS_HCH != 0).await;
+        if done.halted {
+            self.regs.write32(self.op + OP_USBCMD, USBCMD_HCRST);
+            done.cleared = polled(wake, deadline, || {
+                self.regs.read32(self.op + OP_USBCMD) & USBCMD_HCRST == 0
+                    && self.regs.read32(self.op + OP_USBSTS) & USBSTS_CNR == 0
+            })
+            .await;
+        }
+        for port in 0..self.max_ports {
+            self.write_portsc(port, self.portsc(port).neutral().unpowered());
+            if self.portsc(port).raw() & PORTSC_PP == 0 {
+                done.unpowered += 1;
+            }
+        }
+        done
+    }
+
     pub fn portsc(&self, port: u8) -> Portsc {
         Portsc::from_raw(self.regs.read32(self.op + OP_PORT_BASE + usize::from(port) * PORT_REG_SIZE))
     }
@@ -849,6 +947,20 @@ fn read_protocols<C: Host>(read: &dyn Fn(u64) -> Option<u32>, xecp_dwords: u32, 
 
 /// Read until `done` or [`REGISTER_NS`]: the controller sets these bits in
 /// microseconds and raises no interrupt for any of them (§5.4.1, §5.4.2).
+/// Whether `done` came true by `deadline`, read every [`STOP_POLL_NS`].
+async fn polled<C: Host>(wake: &Wake<C>, deadline: Nanos, done: impl Fn() -> bool) -> bool {
+    loop {
+        if done() {
+            return true;
+        }
+        let now = wake.now();
+        if now >= deadline {
+            return false;
+        }
+        exec::sleep_until(wake, now.saturating_add(STOP_POLL_NS).min(deadline)).await;
+    }
+}
+
 fn settle<C: Host>(host: &C, what: &'static str, done: impl Fn() -> bool) -> Result<(), Refusal> {
     let began = host.now();
     while !done() {

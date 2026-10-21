@@ -2382,6 +2382,7 @@ dependencies = [
  "toyos-blockring",
  "toyos-blockserve",
  "toyos-gpt",
+ "toyos-quiesce",
 ]
 
 [[package]]
@@ -5160,6 +5161,7 @@ dependencies = [
  "toyos-input",
  "toyos-inspect",
  "toyos-pci-claim",
+ "toyos-quiesce",
  "toyos-xhci",
 ]
 

@@ -332,6 +332,56 @@ fn a_halt_whose_clear_feature_stalls_costs_only_its_stick() {
     assert!(w.said("its device is reset (Offline)"), "{:#?}", w.host.lines.borrow());
 }
 
+/// The stop before a machine reset: every connected port reset while the
+/// controller still runs, then the controller halted, reset and its ports
+/// unpowered, with a stick's command still open, which is let go of and not
+/// a panic.
+#[test]
+fn the_stop_resets_every_connected_port_then_halts_resets_and_unpowers_the_controller() {
+    let (kb, _) = keyboard();
+    let (stick, _, pipes) = stick("STOP1");
+    let w = World::new(
+        vec![
+            (FakePort::occupied(QUICK), Some(Box::new(stick))),
+            (FakePort::occupied(QUICK), Some(kb)),
+            (FakePort::empty(QUICK), None),
+        ],
+        3,
+    );
+    let usb = w.start(BOTH);
+    let mut tasks = usb.tasks();
+    let mut owner = Mock::default();
+    w.run(&usb, &mut tasks, &mut owner, 400 * MS).unwrap();
+    assert!(w.said("collection 0: a Keyboard"), "{:#?}", w.host.lines.borrow());
+    // The stick's next command goes unanswered, so the stop finds it open.
+    pipes.set(Pipes::SilentIn);
+    usb.disks.submit(0, Work::Io { write: false, block: 0, blocks: 1, at: LENT_BASE, token: (0, 1) });
+    let now = w.host.now.get();
+    w.run(&usb, &mut tasks, &mut owner, now + 50 * MS).unwrap();
+
+    let stopped = Rc::new(Cell::new(None));
+    let mut stop = Tasks::default();
+    {
+        let (usb, stopped) = (&usb, stopped.clone());
+        stop.spawn(async move {
+            stopped.set(Some(usb.hc.stop(&usb.wake).await));
+            Ok(())
+        });
+    }
+    // As usbd does: the driver ends, so what its tasks hold may be let go.
+    usb.hc.ending.set(true);
+    drop(tasks);
+    let now = w.host.now.get();
+    w.run(&usb, &mut stop, &mut owner, now + hc::STOP_NS).unwrap();
+    assert_eq!(
+        stopped.get(),
+        Some(hc::Stopped { connected: 2, reset: 2, halted: true, cleared: true, ports: 3, unpowered: 3 })
+    );
+    for port in 0..3 {
+        assert!(!usb.hc.portsc(port).in_reset(), "port {port} is still in reset");
+    }
+}
+
 /// The stick present at bring-up is read and offered: its table through the
 /// reader the caller gives, and the bus is settled only once it has been.
 #[test]

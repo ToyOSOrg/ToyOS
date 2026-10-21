@@ -13,6 +13,7 @@ toyos-pci-claim = { path = "../../lib/pci-claim" }
 toyos-blockring = { path = "../../lib/blockring" }
 toyos-blockserve = { path = "../../lib/blockserve" }
 toyos-input = { path = "../../lib/input" }
+toyos-quiesce = { path = "../../lib/quiesce" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the xHCI controller ToyOS claims for it"
