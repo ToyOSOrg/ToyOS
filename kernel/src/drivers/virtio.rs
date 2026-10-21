@@ -575,7 +575,8 @@ pub fn cap_selftest() {
     // guess but inside the BAR's real size has a case to be accepted by.
     const WINDOW: u64 = 0x8000;
     // One buffer for both the config space and the BAR window, so a permitted subregion stays inside it.
-    let pool = DmaPool::alloc_in(WINDOW as usize, crate::iommu::DeviceSpace::Untranslated);
+    // No device is told it: it stands in for config space.
+    let pool = DmaPool::alloc_in(WINDOW as usize, crate::iommu::DeviceSpace::Untranslated, crate::iommu::Limit::WIDEST);
     let phys = pool.view().host_phys();
     // SAFETY: the pool owns this page until it drops at end of function, and no Mmio built over it escapes.
     let cfg = unsafe { Mmio::over_phys(DirectMap::from_phys(phys), WINDOW) };

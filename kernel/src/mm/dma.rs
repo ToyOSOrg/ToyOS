@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ptr::{copy_nonoverlapping, read_unaligned, read_volatile, write_bytes, write_volatile};
 
-use crate::iommu::DeviceSpace;
+use crate::iommu::{DeviceSpace, Limit};
 
 use super::pmm::PhysPage;
 use super::DirectMap;
@@ -208,8 +208,9 @@ pub struct DmaPool {
 
 impl DmaPool {
     /// Take enough contiguous 2 MiB pages to cover `size` bytes, mapped into
-    /// `space` and reachable by nothing outside it.
-    pub fn alloc_in(size: usize, space: DeviceSpace) -> Self {
+    /// `space` below `limit`, the device's address width, and reachable by
+    /// nothing outside it.
+    pub fn alloc_in(size: usize, space: DeviceSpace, limit: Limit) -> Self {
         let pages_2m = size.div_ceil(super::PAGE_2M as usize);
         let pages = super::pmm::alloc_contiguous(pages_2m)
             .expect("DmaPool: out of physical memory");
@@ -218,7 +219,7 @@ impl DmaPool {
         // A domain this kernel cannot map into is a kernel bug, not a device's
         // answer: the addresses are the allocator's own and the pages are 2 MiB.
         let device = space
-            .map(base.phys(), size as u64)
+            .map(base.phys(), size as u64, limit)
             .unwrap_or_else(|why| panic!("DmaPool: {why}"));
         Self { pages, base, size, space, device }
     }

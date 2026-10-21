@@ -295,8 +295,9 @@ impl Controller {
         settle("it held HCRST", || regs.read::<u32>(op + OP_USBCMD) & USBCMD_HCRST == 0)?;
         settle("it stayed Controller Not Ready", || regs.read::<u32>(op + OP_USBSTS) & USBSTS_CNR == 0)?;
 
-        // After the reset, so a controller refused above never had a grant:
-        // the grant is what starts the function mastering the bus.
+        // After the reset, so a controller refused above never had a grant.
+        // AC64 is required above, so its addresses are 64 bits (§5.3.6).
+        dev.dma_limit(64).map_err(|e| Refusal::Kernel("the address limit", e))?;
         let dev_blocks = max_slots.min(MAX_DEVICES);
         let bytes = (OFF_SCRATCH + scratch * PAGE + dev_blocks * DEV_STRIDE).next_multiple_of(GRANT_UNIT);
         let region = dev.dma_alloc(bytes as u64).map_err(|e| Refusal::Kernel("a DMA grant", e))?;
@@ -305,6 +306,10 @@ impl Controller {
         let grant = unsafe { Window::new(region.memory.as_ptr(), bytes) };
         grant.zero();
         let base = region.device_addr;
+        // Halted and reset with mastering off: started before it is told any
+        // address, which a controller may read the moment it is written
+        // (QEMU's reads the segment table on the ERSTBA write).
+        dev.dma_start().map_err(|e| Refusal::Kernel("the bus-master start", e))?;
         println!(
             "usbd: PCI {:02x}:{:02x}.{} reset: {max_ports} ports, {max_slots} slots ({dev_blocks} given room), \
              {context_size}-byte contexts, {scratch} scratchpad buffers, a {} KiB grant",

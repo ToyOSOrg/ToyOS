@@ -235,7 +235,8 @@ pub fn init(devices: &[PciDevice]) -> bool {
     // An address space of this device's own, holding one pool and nothing else.
     let space = crate::iommu::DeviceSpace::create(&[pci_dev]);
     // Leaked, not held in a `static`: the console is never unbound.
-    let dma = DmaPool::alloc_in(DMA_SIZE, space).leak();
+    // Virtio 1.x carries every buffer address as 64 bits (§2.7.5).
+    let dma = DmaPool::alloc_in(DMA_SIZE, space, crate::iommu::Limit::WIDEST).leak();
     // Before the device is told an address, and after the only mapping it gets.
     space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 

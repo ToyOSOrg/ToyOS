@@ -111,6 +111,30 @@ pub const SYS_READLINK: u64 = 82;
 ///
 /// [`Acceptor`]: crate::handle::RawHandle
 pub const SYS_ACCEPT: u64 = 86;
+/// State that the function `claim` holds issues device addresses of `bits`
+/// bits, 32 to 64: every grant and lend of the claim is placed below `1 <<
+/// bits`. Once per claim, before any grant: `AlreadyExists` for a second, and
+/// `InvalidArgument` outside that range.
+///
+/// What the device's own capability bits say where they can be trusted, and
+/// the driver's own statement where they cannot: a function that drops its
+/// upper bits issues an address above its width as another grant's.
+pub fn device_dma_limit(claim: RawHandle, bits: u8) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DEVICE_DMA_LIMIT, claim.0 as u64, bits as u64, 0, 0))
+}
+
+/// Let the function `claim` holds master the bus; nothing on a second call.
+///
+/// **The function issues no bus transaction at all, an MSI-X message
+/// included, until this is called.** A claim is handed over with Bus Master
+/// Enable clear, because a previous holder or firmware may have left it
+/// running queues at addresses its domain no longer maps; its driver stops and
+/// resets it through its registers first, lays out its grants, and then starts
+/// it. What it does from then on reaches only what its domain maps.
+pub fn device_dma_start(claim: RawHandle) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DEVICE_DMA_START, claim.0 as u64, 0, 0, 0))
+}
+
 /// Allocate a TLS block for a dlopen'd module on the current thread.
 /// Arg0: module_id (1-based DTV index). Returns the block's virtual address,
 /// or a `SyscallError` word — see [`tls_alloc_block`].
@@ -289,6 +313,11 @@ pub const SYS_HANDLE_DUP_SLOT: u64 = 129;
 /// A fresh null handle: every read answers end of file and every write takes
 /// all it is given. See [`null`].
 pub const SYS_NULL: u64 = 130;
+/// State the address width a claimed PCI function issues. See
+/// [`device_dma_limit`].
+pub const SYS_DEVICE_DMA_LIMIT: u64 = 131;
+/// Let a claimed PCI function master the bus. See [`device_dma_start`].
+pub const SYS_DEVICE_DMA_START: u64 = 132;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -296,13 +325,13 @@ pub const SYS_NULL: u64 = 130;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 132;
+pub const SYSCALL_PROFILE_BINS: usize = 134;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_NULL < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_DEVICE_DMA_START < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -2311,8 +2340,8 @@ pub fn pipe_map(handle: RawHandle) -> Result<*mut u8, SyscallError> {
 /// Every call answers an object of its own over the same window, so a BAR
 /// whose handle was closed can be asked for again.
 ///
-/// A window alone drives nothing: the function masters the bus from its first
-/// [`device_dma_alloc`] and not before.
+/// A window alone drives nothing: the function masters the bus from
+/// [`device_dma_start`] and not before.
 pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_DEVICE_BAR_MAP, claim.0 as u64, bar as u64, 0, 0))
         .map(|v| RawHandle(v as u32))
@@ -2323,15 +2352,9 @@ pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallEr
 ///
 /// An address the caller invents instead of the one this answers is one the
 /// function's domain does not map, and the unit refuses the access. `bytes` is
-/// rounded up to whole 2 MiB pages.
-///
-/// **The function issues no bus transaction at all until this call returns
-/// once.** A claim is handed over with Bus Master Enable clear, because what
-/// comes back from a dead holder still holds device addresses of a domain that
-/// no longer maps them; the first grant is what starts it, after that grant is
-/// in the function's domain. An MSI-X message is a memory write, so a driver
-/// that maps its BAR and waits on its claim without ever calling this is never
-/// interrupted.
+/// rounded up to whole 2 MiB pages, and the grant ends below the claim's
+/// [`device_dma_limit`]: `InvalidArgument` before one is stated, and
+/// `ResourceExhausted` once nothing below it is left.
 pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, SyscallError> {
     let mut grant =
         DmaGrant { shm: HANDLE_INVALID, _pad: 0, device_addr: 0, bytes: 0 };
@@ -2357,8 +2380,8 @@ pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, Syscal
 /// `InvalidArgument` for a region that is not ordinary memory this kernel
 /// allocated — a BAR window, firmware's framebuffer — and for one already
 /// mapped for this claim; `ResourceExhausted` with no run of the region's
-/// length left in the claim's [`LEND_WINDOW`](crate::pci::LEND_WINDOW). Like a
-/// grant, the first mapping is what starts the function mastering the bus.
+/// length left in the claim's [`LEND_WINDOW`](crate::pci::LEND_WINDOW), and
+/// `InvalidArgument` before the claim's [`device_dma_limit`] is stated.
 pub fn device_dma_map(claim: RawHandle, shm: RawHandle) -> Result<DmaMapping, SyscallError> {
     let mut mapping = DmaMapping { device_addr: 0, bytes: 0 };
     check_unit(syscall(

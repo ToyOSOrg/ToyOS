@@ -1155,9 +1155,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // Every domain's addresses end below the first root-bridge window
-        // above where they start.
-        "domain_ends_below_the_host_bridges",
+        // Every device address a domain maps is outside every root-bridge
+        // window firmware declared.
+        "domains_map_clear_of_the_host_bridges",
         metal::Metal { arms: TESTCASES, judge: |b| claims::clear_of_host_bridges(&b[0].kernel()) },
     ),
     (

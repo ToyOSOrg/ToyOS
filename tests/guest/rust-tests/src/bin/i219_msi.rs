@@ -266,11 +266,13 @@ fn main() {
     // A second mapping of the same BAR, for what is read beside the driver.
     let (regs, _held) = Bar::map(&dev, index, bytes).unwrap_or_else(|why| fail(&format!("{why}")));
 
-    // The grant is what lets the function master the bus, and a message is a
+    // The start is what lets the function master the bus, and a message is a
     // write it masters.
     let (driven, _mapping) = Bar::map(&dev, index, bytes).unwrap_or_else(|why| fail(&format!("{why}")));
     toyos_i219::quiesce(&driven);
+    toyos_pci_claim::limit(&dev, 64).unwrap_or_else(|why| fail(&format!("{why}")));
     let (grant, _region) = Grant::alloc(&dev, toyos_i219::GRANT_BYTES).unwrap_or_else(|why| fail(&format!("{why}")));
+    toyos_pci_claim::start(&dev).unwrap_or_else(|why| fail(&format!("{why}")));
     let frames = grant.window();
     let claim = Claim(Rc::clone(&dev));
 

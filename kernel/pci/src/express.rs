@@ -9,7 +9,8 @@
 //! attached. The only reset that means the same thing on every function is the
 //! one the function itself implements — and QEMU's virtio functions implement
 //! none, so `pcidev` does not rest on this: what makes a re-claim safe there is
-//! that bus mastering starts on the first grant. This is the belt, taken where
+//! that bus mastering starts only when its next holder starts it, once that
+//! holder has stopped it. This is the belt, taken where
 //! a function offers it.
 
 /// This capability's id in a function's capability list.

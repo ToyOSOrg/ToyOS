@@ -1,6 +1,6 @@
 //! The unit that decides what a device may reach.
 //!
-//! Inventories the machine's IOMMU units, turns translation on, and hands a driver an address space of its own to put its DMA in; an unusable unit is logged and left off rather than halting boot. Names above the backend stay backend-neutral, and what every backend decides alike is declared here once: a domain's addresses ([`window`]) and what a fault record ends ([`fault`]).
+//! Inventories the machine's IOMMU units, turns translation on, and hands a driver an address space of its own to put its DMA in; an unusable unit is logged and left off rather than halting boot. Names above the backend stay backend-neutral, and what every backend decides alike is declared here once: a domain's addresses (`kernel::iova`, over what each backend reserves) and what a fault record ends ([`fault`]).
 //!
 //! The refusal is deliberately not yet built for a driver in this kernel: landing it before any userspace driver exists would cost every machine and protect nothing. A function a *process* drives is the other case and is refused ([`OwnSpace`], [`remapping`]), because a descriptor it writes a physical address into is an arbitrary read and write over all of memory, and a message nothing translates for it alone raises any claim's interrupt; its message raises its own interrupt, translated for it alone ([`Remapped`]).
 //!
@@ -11,12 +11,12 @@
 
 use crate::arch::iommu_unit as unit;
 use crate::arch::message_unit as messages;
+pub use kernel::iova::Limit;
 
 pub(crate) mod domains;
 pub(crate) mod fault;
 #[cfg(feature = "boot-actuators")]
 pub(crate) mod testdev;
-pub(crate) mod window;
 
 /// The address width a device's translations cover.
 ///
@@ -116,18 +116,13 @@ pub enum IommuError {
     /// The units disagree on the depth a domain's tables would be built at.
     WidthsDisagree,
     DomainsExhausted(u32),
-    /// Every address up to this ceiling is handed out.
-    AddressesExhausted(u64),
-    /// What this machine's units translate does not reach above its memory, so
-    /// a device window has nowhere to sit that a stale descriptor would miss.
-    WindowBelowMemory { translatable: u8, floor: u64, top: u64 },
-    /// The units translate no further than the CPU's physical addresses, so a
-    /// domain has to end under the root bridges' windows, and no declaration
-    /// of them is held.
-    Undeclared { translatable: u8, cpu: u8 },
-    /// From the floor to the first root-bridge window or reserved region above
-    /// it is less than a new domain was asked to hand out.
-    NoRoom { floor: u64, ceiling: u64, room: u64 },
+    /// Every allowed address below this limit is handed out.
+    AddressesExhausted(Limit),
+    /// No declaration of the root bridges' windows is held, so no address is
+    /// known to be clear of them.
+    Undeclared,
+    /// Less than a new domain was asked to hand out is allowed below 4 GiB.
+    NoRoom { room: u64 },
     /// Not a whole number of the 2 MiB leaves this kernel writes.
     Unaligned(u64),
     NotMapped(Iova),
@@ -143,25 +138,17 @@ impl core::fmt::Display for IommuError {
             Self::DomainsExhausted(ceiling) => {
                 write!(f, "every one of this machine's {ceiling} domains is taken")
             }
-            Self::AddressesExhausted(ceiling) => {
-                write!(f, "a domain's device addresses up to {ceiling:#x} are all handed out")
+            Self::AddressesExhausted(limit) => {
+                write!(f, "a domain's device addresses below {:#x} are all handed out", limit.end())
             }
-            Self::WindowBelowMemory { translatable, floor, top } => write!(
+            Self::Undeclared => write!(
                 f,
-                "this machine's units translate {translatable} bits, whose device window would \
-                 start at {floor:#x}, at or below the {top:#x} its memory reaches"
+                "no declaration of the root bridges' windows is held, so no device address is known \
+                 to be clear of them"
             ),
-            Self::Undeclared { translatable, cpu } => write!(
-                f,
-                "this machine's units translate {translatable} bits and its CPUs issue {cpu}, so a \
-                 domain has to end under the root bridges' windows, and no declaration of them \
-                 is held"
-            ),
-            Self::NoRoom { floor, ceiling, room } => write!(
-                f,
-                "a domain's addresses from {floor:#x} end at {ceiling:#x}, where a root bridge's \
-                 window or a reserved region begins, short of the {room:#x} bytes asked of it"
-            ),
+            Self::NoRoom { room } => {
+                write!(f, "less than the {room:#x} bytes a new domain hands out first is allowed below 4 GiB")
+            }
             Self::Unaligned(at) => write!(f, "{at:#x} is not a 2 MiB boundary"),
             Self::NotMapped(at) => write!(f, "{:#x} is not mapped in this domain", at.raw()),
         }
@@ -200,17 +187,19 @@ impl DeviceSpace {
         }
     }
 
-    /// Put `bytes` at `phys` in this space; returns what to program the device
-    /// with.
+    /// Put `bytes` at `phys` in this space, ending at or below `limit`, the
+    /// device's own address width; returns what to program the device with.
     ///
     /// Read and write both, always: nothing here can give a permission set a
     /// second value. The only leaf is 2 MiB, coarser than any split a driver's
     /// pools offer, and QEMU drops an access its cached translation denies
     /// rather than recording a fault — unexpressible and unobservable both.
-    pub fn map(self, phys: u64, bytes: u64) -> Result<u64, IommuError> {
+    pub fn map(self, phys: u64, bytes: u64, limit: Limit) -> Result<u64, IommuError> {
         match self {
+            // The pages are the address, so nothing chooses one the device reaches.
+            Self::Untranslated if phys.saturating_add(bytes) > limit.end() => Err(IommuError::AddressesExhausted(limit)),
             Self::Untranslated => Ok(phys),
-            Self::Own(id) => unit::domain::map(id, phys, bytes).map(Iova::raw),
+            Self::Own(id) => unit::domain::map(id, phys, bytes, limit).map(Iova::raw),
         }
     }
 
@@ -238,16 +227,16 @@ impl DeviceSpace {
 pub struct OwnSpace(DomainId);
 
 impl OwnSpace {
-    /// One with `room` bytes of it handed out at the address answered, or the
-    /// reason there is none: a machine with no unit and a machine out of
-    /// domains are both refusals.
+    /// One with `room` bytes of it below 4 GiB handed out at the address
+    /// answered, or the reason there is none: a machine with no unit and a
+    /// machine out of domains are both refusals.
     pub fn create(room: u64) -> Result<(Self, u64), IommuError> {
         unit::domain::create(room).map(|(id, at)| (Self(id), at.raw()))
     }
 
     /// [`DeviceSpace::map`].
-    pub fn map(self, phys: u64, bytes: u64) -> Result<u64, IommuError> {
-        unit::domain::map(self.0, phys, bytes).map(Iova::raw)
+    pub fn map(self, phys: u64, bytes: u64, limit: Limit) -> Result<u64, IommuError> {
+        unit::domain::map(self.0, phys, bytes, limit).map(Iova::raw)
     }
 
     /// Put `bytes` at `phys` at `at` again, where a device may still be aimed
@@ -294,7 +283,6 @@ pub fn init(
     devices: &[crate::drivers::pci::PciDevice],
     windows: Option<&toyos_pci::aperture::Declaration<alloc::vec::Vec<toyos_abi::boot::RootBridgeWindow>>>,
 ) {
-    log!("iommu: the CPUs issue {}-bit physical addresses", crate::arch::cpu::physical_address_bits());
     unit::init(rsdp_addr, devices, windows.map(|declared| declared.windows()));
 }
 

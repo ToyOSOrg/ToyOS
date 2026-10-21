@@ -633,6 +633,12 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("pcid::tests::two_live_address_spaces_never_share_a_pcid"),
         Passes("pcid::oracle::tests::the_counting_allocator_produces_a_cross_space_read"),
     ]),
+    // A grant past its holder's limit is issued, truncated, as another grant.
+    red(KERNEL, "iova-ignores-limit", None, &[
+        Fails("iova::tests::a_function_that_drops_its_upper_bits_reaches_only_its_own_grant"),
+        Fails("iova::tests::every_grant_is_the_lowest_allowed_run_below_its_limit"),
+        Fails("iova::tests::the_amd_benchs_layout"),
+    ]),
     red(KERNEL, "mutate-spawn-skips-the-insert-recheck", None, &[
         Fails("proclife::interleave::tests::a_published_exit_leaves_no_unretired_thread"),
         Fails("proclife::interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
