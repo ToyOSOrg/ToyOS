@@ -164,46 +164,28 @@ impl Drop for Poly1305 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fiat_crypto::poly1305_64::*;
+    use num_bigint::BigUint;
 
-    /// RFC 8439 §2.5.1 over fiat-crypto's field: h = (h + m)·r, then h + s.
+    /// RFC 8439 §2.5.1 over integers: h = (h + m)·r mod 2^130 - 5, then
+    /// (h + s) mod 2^128.
     fn reference(key: &[u8; 32], message: &[u8]) -> [u8; 16] {
-        let element = |bytes: &[u8], top: u8| {
-            let mut wide = [0u8; 17];
-            wide[..bytes.len()].copy_from_slice(bytes);
-            wide[bytes.len()] |= top;
-            let mut out = fiat_poly1305_tight_field_element([0; 3]);
-            fiat_poly1305_from_bytes(&mut out, &wide);
-            out
-        };
-        let loose = |x: &fiat_poly1305_tight_field_element| {
-            let mut out = fiat_poly1305_loose_field_element([0; 3]);
-            fiat_poly1305_relax(&mut out, x);
-            out
-        };
-        let mut r = key[..16].to_vec();
-        for i in [3, 7, 11, 15] {
-            r[i] &= 15;
-        }
-        for i in [4, 8, 12] {
-            r[i] &= 252;
-        }
-        let r = loose(&element(&r, 0));
-        let mut h = element(&[], 0);
+        let p = (BigUint::from(1u8) << 130) - 5u8;
+        let clamp = BigUint::from(0x0fff_fffc_0fff_fffc_0fff_fffc_0fff_ffffu128);
+        let r = BigUint::from_bytes_le(&key[..16]) & clamp;
+        let mut h = BigUint::from(0u8);
         for chunk in message.chunks(16) {
-            let m = element(chunk, 1);
-            let mut sum = fiat_poly1305_loose_field_element([0; 3]);
-            fiat_poly1305_add(&mut sum, &h, &m);
-            fiat_poly1305_carry_mul(&mut h, &sum, &r);
+            let m = BigUint::from_bytes_le(chunk) + (BigUint::from(1u8) << (8 * chunk.len()));
+            h = (h + m) * &r % &p;
         }
-        let mut bytes = [0u8; 17];
-        fiat_poly1305_to_bytes(&mut bytes, &h);
-        let h = u128::from_le_bytes(bytes[..16].try_into().unwrap());
-        h.wrapping_add(u128::from_le_bytes(key[16..].try_into().unwrap())).to_le_bytes()
+        let tag: BigUint = (h + BigUint::from_bytes_le(&key[16..])) % (BigUint::from(1u8) << 128u32);
+        let mut out = [0; 16];
+        let bytes = tag.to_bytes_le();
+        out[..bytes.len()].copy_from_slice(&bytes);
+        out
     }
 
     #[test]
-    fn matches_fiat_crypto_on_seeded_and_extreme_inputs() {
+    fn matches_integers_on_seeded_and_extreme_inputs() {
         let mut seed = 0x9e37_79b9_7f4a_7c15u64;
         let mut next = move || {
             seed ^= seed << 13;
@@ -212,7 +194,7 @@ mod tests {
             seed
         };
         let mut message = std::vec![0u8; 600];
-        for case in 0..10_000 {
+        for case in 0..if cfg!(miri) { 16 } else { 10_000 } {
             let mut key: [u8; 32] = core::array::from_fn(|_| next() as u8);
             let len = next() as usize % message.len();
             // Every fourth case pushes h and r to their bounds: all-ones key

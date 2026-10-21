@@ -37,10 +37,8 @@ ml-kem = "0.3.0-rc.2"
 chacha20 = "0.9.1"
 poly1305 = "0.8.0"
 serde_json = "1.0.149"
-# Machine-checked field arithmetic, the oracle of Poly1305's.
-fiat-crypto = "0.3"
-# The integers `test_arithmetic` holds the field, scalar and Montgomery
-# arithmetic against.
+# The integers the field, scalar, Montgomery and Poly1305 arithmetic are held
+# against (`test_arithmetic`, `poly1305`).
 num-bigint = "0.4"
 
 [lints.rust]
