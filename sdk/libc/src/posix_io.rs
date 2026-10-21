@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ptr;
 
-use toyos_abi::RawHandle;
+use toyos_abi::{RawHandle, Rights};
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
 use crate::errcode::EINVAL;
@@ -78,15 +78,33 @@ pub unsafe extern "C" fn open(path: *const u8, flags: i32, mode: u32) -> i32 {
 /// `open`'s file, as a handle of this process's: what a spawn's `addopen`
 /// opens too.
 pub(crate) fn open_handle(path: &[u8], flags: i32, _mode: u32) -> Result<RawHandle, syscall::SyscallError> {
-    let mut oflags = OpenFlags(0);
-
     let access = flags & 3;
-    if access == O_RDONLY || access == O_RDWR { oflags |= OpenFlags::READ; }
-    if access == O_WRONLY || access == O_RDWR { oflags |= OpenFlags::WRITE; }
+    let readable = access == O_RDONLY || access == O_RDWR;
+    let writable = access == O_WRONLY || access == O_RDWR;
+    if path == DEV_NULL {
+        return syscall::null(null_rights(readable, writable));
+    }
+
+    let mut oflags = OpenFlags(0);
+    if readable { oflags |= OpenFlags::READ; }
+    if writable { oflags |= OpenFlags::WRITE; }
     if flags & O_CREAT != 0 { oflags |= OpenFlags::CREATE; }
     if flags & O_TRUNC != 0 { oflags |= OpenFlags::TRUNCATE; }
     if flags & O_APPEND != 0 { oflags |= OpenFlags::APPEND; }
     syscall::open(path, oflags)
+}
+
+/// POSIX's null device, which libc answers with a kernel null handle: the
+/// name is libc's, and no filesystem holds it.
+const DEV_NULL: &[u8] = b"/dev/null";
+
+/// What a null handle opened for `readable` and `writable` may do: that, and
+/// what every descriptor may (`dup`, a spawn's stdio, `poll`).
+fn null_rights(readable: bool, writable: bool) -> Rights {
+    let mut rights = Rights::DUP.union(Rights::TRANSFER).union(Rights::WAIT);
+    if readable { rights = rights.union(Rights::READ); }
+    if writable { rights = rights.union(Rights::WRITE); }
+    rights
 }
 
 #[no_mangle]
@@ -165,6 +183,7 @@ unsafe fn answered(answer: Result<syscall::Stat, syscall::SyscallError>, buf: *m
             syscall::FileType::Tty => S_IFCHR | 0o644,
             syscall::FileType::Keyboard => S_IFCHR | 0o444,
             syscall::FileType::Serial => S_IFCHR | 0o644,
+            syscall::FileType::Null => S_IFCHR | 0o666,
             _ => 0o644,
         };
     }

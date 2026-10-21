@@ -1,11 +1,12 @@
 //! libc's children, stage 3 of
 //! `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`:
 //! each C program under `tests/guest/libc` starts children of its own and
-//! exits 0 once `posix_spawn`, the wait family, `kill`, `environ`, `system`
-//! and `popen` answered as POSIX has them, or with ToyOS's stated departure.
+//! exits 0 once `posix_spawn`, the wait family, `kill`, `environ`, `system`,
+//! `popen` and `/dev/null` answered as POSIX has them, or with ToyOS's stated
+//! departure.
 //!
 //! Beside them std's `stdio_named`: a std child holds the stdio its `Command`
-//! named, as a C one does.
+//! named, as a C one does, and `Stdio::null()` is a null handle.
 //!
 //! On QEMU x86-64 (`tests/images/libccase.toml`), every program in one boot:
 //! what they claim is order, completion, contents and counts, which QEMU

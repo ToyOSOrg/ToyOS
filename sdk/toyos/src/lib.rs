@@ -66,6 +66,11 @@ pub fn pipe_pair() -> Result<(Pipe, Pipe), toyos_abi::syscall::SyscallError> {
     Ok((Pipe(OwnedHandle(ends.read)), Pipe(OwnedHandle(ends.write))))
 }
 
+/// A fresh null handle carrying `rights` ([`toyos_abi::syscall::null`]).
+pub fn null(rights: toyos_abi::handle::Rights) -> Result<OwnedHandle, toyos_abi::syscall::SyscallError> {
+    toyos_abi::syscall::null(rights).map(OwnedHandle)
+}
+
 /// One owned handle, closed when it drops.
 ///
 /// `!Copy` and `!Clone`, so a handle cannot be closed twice and cannot be

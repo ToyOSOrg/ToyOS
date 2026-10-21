@@ -84,8 +84,7 @@ libc's state it is `userland/libc` at `15625e0cb`.
   to start a child by spawn and never by fork; brush as the POSIX `sh`
   (`issues/ninja-runs-every-command-through-a-bin-sh-toyos-does-not-have.md`);
   uutils; make; CMake, its libuv ported to spawn; and awk. Those written in C
-  or C++ wait on stage 4 of the child-process track and on
-  `issues/there-is-no-dev-null.md`. A search of Perl 5.44.0's
+  or C++ wait on stage 4 of the child-process track. A search of Perl 5.44.0's
   sources for `posix_spawn` matches nothing. Open: which Python, which make and
   which awk.
 - **`pkg` installs a toolchain**: an archive past 256 MiB, and links. It

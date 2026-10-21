@@ -90,7 +90,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -2667,7 +2667,6 @@ fn start<'a>(
     let log: &mut Log = match output {
         Output::Boot(log) => {
             let own = ring.insert(new_ring()).as_handle();
-            command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             command.inherit_handle(0, log.stdin.0);
             command.inherit_handle(1, own.0);
             command.inherit_handle(2, own.0);
