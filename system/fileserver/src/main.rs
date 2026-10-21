@@ -141,7 +141,24 @@ struct Stream {
     share: u64,
 }
 
+// DIAG (never lands): a request in serve_one past 5 s ends this server with
+// 80 + its op, which the kernel records.
+static DBG_OP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DBG_SINCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+fn dbg_busy(op: u32) {
+    DBG_SINCE.store(toyos_abi::clock::stamp_ns(), std::sync::atomic::Ordering::SeqCst);
+    DBG_OP.store(u64::from(op), std::sync::atomic::Ordering::SeqCst);
+}
+
 fn main() {
+    std::thread::spawn(|| loop {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let op = DBG_OP.load(std::sync::atomic::Ordering::SeqCst);
+        let since = DBG_SINCE.load(std::sync::atomic::Ordering::SeqCst);
+        if op != 0 && toyos_abi::clock::stamp_ns().saturating_sub(since) > 5_000_000_000 {
+            std::process::exit(80 + op.min(40) as i32);
+        }
+    });
     let args: Vec<String> = std::env::args().collect();
     let role = args.get(1).and_then(|r| Role::parse(r)).unwrap_or_else(|| {
         panic!("fileserver: started with {args:?}; the first argument is a role: data, log or boot")
@@ -367,9 +384,11 @@ impl Server {
                 self.drop_client(id, "it never lent its window");
             }
             if self.writeback.take_due(now) {
+                dbg_busy(39);
                 if let Err(e) = self.sync(None) {
                     println!("fileserver: the write-back sync failed: {e:?}");
                 }
+                dbg_busy(0);
             }
         }
     }
@@ -549,6 +568,13 @@ impl Server {
     }
 
     fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, Error> {
+        dbg_busy(op);
+        let answer = self.serve_one_inner(id, op, r);
+        dbg_busy(0);
+        answer
+    }
+
+    fn serve_one_inner(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, Error> {
         match rights::changes(op, r.flags) {
             None => return Ok(Answer::Drop(NO_SUCH_OPERATION)),
             Some(true) if !self.clients[&id].writes => return Err(Error::ReadOnly),

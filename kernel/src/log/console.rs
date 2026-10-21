@@ -317,7 +317,25 @@ static UNSHOWN: AtomicU64 = AtomicU64::new(0);
 /// One console holder's line, or a piece of one it `continues` in the next,
 /// for `klogd` to put on the wire; `false` is a full queue, which the holder's
 /// write answers as bytes it did not take. Never waits.
+// DIAG (temporary, never lands): the newest program lines about storage and
+// the log, kept for the black box in a ring of 40.
+pub static DIAG: Lock<([[u8; 180]; 40], [u8; 40], usize)> = Lock::new(([[0; 180]; 40], [0; 40], 0));
+const DIAG_WORDS: &[&[u8]] = &[b"usbd", b"diskserver", b"fileserver", b"logkeeper", b"supervisor: power", b"ENDED", b"NOT SERVING", b"rror", b"refus", b"panicked", b"would not", b"has not", b"===TEST_"];
+fn diag_keep(line: &[u8]) {
+    if line.windows(7).any(|x| x == b": line ") || !DIAG_WORDS.iter().any(|w| line.windows(w.len()).any(|x| x == *w)) {
+        return;
+    }
+    let mut d = DIAG.lock();
+    let (slots, lens, next) = &mut *d;
+    let n = line.len().min(180);
+    let at = *next % 40;
+    slots[at][..n].copy_from_slice(&line[..n]);
+    lens[at] = n as u8;
+    *next += 1;
+}
+
 pub fn queue(line: &[u8], continues: bool) -> bool {
+    diag_keep(line);
     let line = &line[..line.len().min(MAX_CONSOLE_LINE)];
     {
         let mut queue = QUEUE.lock();

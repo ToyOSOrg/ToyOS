@@ -258,7 +258,31 @@ fn serve(
     let mut ready: Vec<u64> = Vec::new();
     let mut wakes = Wakes::default();
     let mut wake_at;
+    // DIAG (never lands): work in flight with no loop turn, or no answer, for
+    // 5 s ends usbd with 70 or 72, which the kernel records.
+    static LOOP_AT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static INFLIGHT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static ANSWERS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    std::thread::spawn(|| {
+        let (mut seen, mut since) = (0u64, toyos_abi::clock::stamp_ns());
+        loop {
+            std::thread::sleep(Duration::from_secs(1));
+            let now = toyos_abi::clock::stamp_ns();
+            let answers = ANSWERS.load(std::sync::atomic::Ordering::SeqCst);
+            let inflight = INFLIGHT.load(std::sync::atomic::Ordering::SeqCst);
+            if answers != seen || inflight == 0 {
+                (seen, since) = (answers, now);
+                continue;
+            }
+            if now.saturating_sub(since) > 5_000_000_000 {
+                let turned = now.saturating_sub(LOOP_AT.load(std::sync::atomic::Ordering::SeqCst)) < 2_000_000_000;
+                std::process::exit(if turned { 72 } else { 70 });
+            }
+        }
+    });
     loop {
+        LOOP_AT.store(toyos_abi::clock::stamp_ns(), std::sync::atomic::Ordering::SeqCst);
+        INFLIGHT.store(disks.values().map(|s| s.dbg_inflight()).sum(), std::sync::atomic::Ordering::SeqCst);
         // The driver's turn: every task run.
         wake_at = match tasks.run(&usb.wake) {
             Ok(at) => at,
@@ -275,6 +299,7 @@ fn serve(
                     disks.insert(disk, sessions);
                 }
                 Event::Answered { disk, token: (session, tag), write, ok, status } => {
+                    ANSWERS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     disks.get_mut(&disk).expect("an answer for an offered disk").answered(Request { session, tag, write }, ok, status);
                 }
                 Event::Reset { disk } => {

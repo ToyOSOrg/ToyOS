@@ -159,6 +159,7 @@ pub struct Origin {
     own: Limit,
     children: Limit,
     joins: Joins,
+    dbg_stuck: Option<(u64, u64)>,
 }
 
 impl Origin {
@@ -184,6 +185,7 @@ impl Origin {
             own: Limit::new(ALLOWANCE, ALLOWANCE_WINDOW_NS),
             children: Limit::new(ALLOWANCE, ALLOWANCE_WINDOW_NS),
             joins: Joins::default(),
+            dbg_stuck: None,
         })
     }
 
@@ -209,6 +211,28 @@ impl Origin {
             left -= 1;
         }
         counted.refused += self.shared.refused(&self.ring);
+        {
+            use toyos::log::ring::Shared as _;
+            use toyos::log::ring::Slots as _;
+            let pos = self.shared.position();
+            let head = self.ring.head().load(core::sync::atomic::Ordering::Acquire);
+            if left > 0 && head > pos {
+                let now = toyos_abi::clock::stamp_ns();
+                match self.dbg_stuck {
+                    Some((p, at)) if p == pos => {
+                        if now.saturating_sub(at) > 5_000_000_000 {
+                            let slot = (pos % self.ring.slots()) as usize;
+                            let word = self.ring.published(slot).load(core::sync::atomic::Ordering::Acquire);
+                            let base = if word == 0 { 150 } else if word < pos + 1 { 200 } else { 250 };
+                            std::process::exit(base + (head - pos).min(49) as i32);
+                        }
+                    }
+                    _ => self.dbg_stuck = Some((pos, now)),
+                }
+            } else {
+                self.dbg_stuck = None;
+            }
+        }
         counted.ahead = clamp_ahead(&mut bodies, toyos_abi::clock::stamp_ns());
         for body in bodies {
             let limit = if body.pid == self.pid { &self.own } else { &self.children };
@@ -222,6 +246,11 @@ impl Origin {
             }
         }
         counted
+    }
+
+    pub fn dbg_positions(&self) -> (u64, u64, u64) {
+        use toyos::log::ring::Slots as _;
+        (self.shared.position(), self.ring.head().load(core::sync::atomic::Ordering::Acquire), self.ring.refused().load(core::sync::atomic::Ordering::Acquire))
     }
 
     /// Everything its writers left, once none is left to write: the records a

@@ -91,8 +91,35 @@ pub fn seal_tail(after: LogStamp) {
     }
     let from = LogStamp::since_zero(after.nanos().saturating_add(1));
     crate::blackbox::append(|out| {
+        // DIAG (temporary, never lands): the faults and the storage path's ends,
+        // then the newest storage-path program lines, oldest first.
+        {
+            struct Pick<'a>(toyos_blackbox::Whole<'static, &'a mut dyn core::fmt::Write>);
+            impl read::RecordSink for Pick<'_> {
+                fn put(&mut self, record: &LogRecord) -> bool {
+                    let m = record.message();
+                    let ends = ["exit: usbd", "exit: fileserver", "exit: diskserver", "exit: logkeeper", "exit: soundserver", "exit: hda"];
+                    if ["FAULT", "amdvi unit", "pcidev: PCI 03:00", "panic", "refused"].iter().any(|w| m.contains(w)) || ends.iter().any(|w| m.contains(w)) {
+                        self.0.put(format_args!("diag-k: {record}"));
+                    }
+                    true
+                }
+            }
+            let mut pick = Pick(toyos_blackbox::Whole::within(&mut *out, 4500, "diag-k dropped: "));
+            read::snapshot_committed(LogStamp::ZERO, read::newest_committed(), &mut pick);
+            pick.0.close();
+            let d = crate::log::console::DIAG.lock();
+            let (slots, lens, next) = &*d;
+            let mut w = toyos_blackbox::Whole::within(&mut *out, 6500, "diag-p dropped: ");
+            for i in next.saturating_sub(40)..*next {
+                let at = i % 40;
+                let line = core::str::from_utf8(&slots[at][..usize::from(lens[at])]).unwrap_or("diag: not utf-8");
+                w.put(format_args!("diag-p: {}", line.trim_end()));
+            }
+            w.close();
+        }
         let _ = writeln!(out, "{TAIL_HEAD}");
-        let room = toyos_blackbox::REPORT_BYTES - TAIL_HEAD.len() - 1;
+        let room = 1200usize;
         let mut tail = Tail(toyos_blackbox::Whole::within(out, room, toyos_blackbox::DROPPED_OPENS_WITH));
         read::snapshot_committed(from, read::newest_committed(), &mut tail);
         tail.0.close();

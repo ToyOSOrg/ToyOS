@@ -78,6 +78,13 @@ mod serve;
 mod store;
 
 use std::sync::Arc;
+pub static DBG_PHASE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static DBG_STAMP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static DBG_HELD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static DBG: [std::sync::atomic::AtomicU64; 12] = [const { std::sync::atomic::AtomicU64::new(0) }; 12];
+pub fn dbg_add(i: usize, v: u64) { DBG[i].fetch_add(v, std::sync::atomic::Ordering::SeqCst); }
+pub fn dbg_set(i: usize, v: u64) { DBG[i].store(v, std::sync::atomic::Ordering::SeqCst); }
+pub fn dbg(phase: u64) { DBG_PHASE.store(phase, std::sync::atomic::Ordering::SeqCst); DBG_STAMP.store(toyos_abi::clock::stamp_ns(), std::sync::atomic::Ordering::SeqCst); }
 use std::time::{Duration, Instant};
 
 use toyos::endow::{self, Endowments, SYSCAP_LABEL};
@@ -184,6 +191,22 @@ fn main() {
         hub,
         stopping: None,
     };
+    dbg(0);
+    let raw_console = toyos::AsHandle::as_handle(&log.console);
+    std::thread::spawn(move || { let mut held_was = 0u64; let mut held_since = 0u64; let mut tick = 0u64; loop {
+        std::thread::sleep(Duration::from_secs(2));
+        tick += 1;
+        let _ = (tick, raw_console);
+        let at = DBG_STAMP.load(std::sync::atomic::Ordering::SeqCst);
+        if toyos_abi::clock::stamp_ns().saturating_sub(at) > 5_000_000_000 {
+            std::process::exit(50 + DBG_PHASE.load(std::sync::atomic::Ordering::SeqCst) as i32);
+        }
+        let held = DBG_HELD.load(std::sync::atomic::Ordering::SeqCst);
+        if held == 0 || held != held_was { held_was = held; held_since = toyos_abi::clock::stamp_ns(); }
+        else if toyos_abi::clock::stamp_ns().saturating_sub(held_since) > 5_000_000_000 {
+            std::process::exit(100 + (held / 1024).min(100) as i32);
+        }
+    }});
     log.run(&published);
 }
 
@@ -248,6 +271,7 @@ impl Log {
                 (Some(_), true) => inspect::State::Degraded,
                 (Some(_), false) => inspect::State::Writing,
             };
+            dbg(6);
             published.publish(self.volume.as_ref(), state, self.tail.lost());
 
             // **Armed before anything is read**, in the shape every reader of
@@ -263,6 +287,7 @@ impl Log {
                 poller.watch(&origin.alive, READABLE, ORIGIN_BASE + i as u64);
             }
             let mut spent = false;
+            dbg(8);
             poller.wait(0, 0, |token| {
                 spent = true;
                 if token >= ORIGIN_BASE {
@@ -270,7 +295,12 @@ impl Log {
                 }
             });
 
+            dbg(4);
+            dbg_add(0, 1);
+            dbg_set(6, self.waiting.len() as u64);
+            dbg_set(8, self.origins.len() as u64);
             let flush = self.from_supervisor();
+            dbg(5);
             let asked = toyos_abi::clock::stamp_ns();
             let mut read_any = self.round(&mut ended, flush).is_some();
             if flush {
@@ -282,7 +312,9 @@ impl Log {
                 self.flushed();
                 read_any = true;
             }
+            dbg(3);
             self.feed_console();
+            dbg(9);
 
             cadence = if read_any { POLL_QUICK } else { (cadence * 2).min(POLL_SLOW) };
             if spent || read_any {
@@ -290,6 +322,7 @@ impl Log {
             }
             // Nothing new: park until the kernel posts, the supervisor speaks, a program
             // ends, the console has room, or the cadence comes round.
+            dbg(7);
             poller.wait(1, cadence.as_nanos() as u64, |token| {
                 if token >= ORIGIN_BASE {
                     ended.push((token - ORIGIN_BASE) as usize);
@@ -364,7 +397,12 @@ impl Log {
         let mut read: Vec<Said> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         for (i, origin) in self.origins.iter_mut().enumerate() {
+            let before = read.len();
             let counted = origin.read(i, cut, &mut read);
+            dbg_add(1, (read.len() - before) as u64);
+            dbg_add(4, counted.refused + counted.refused_lanes);
+            dbg_add(5, counted.suppressed);
+            if origin.tag == "test-runner" { let (p, h, r) = origin.dbg_positions(); dbg_set(9, p); dbg_set(10, h); dbg_set(11, r); }
             // The machine stops after a flush: a line begun is said as far as it got.
             if all {
                 origin.say_held(&mut read);
@@ -519,6 +557,7 @@ impl Log {
                     };
                     file.push_str(&format!("{line}\n"));
                     line.stamp = "";
+                    dbg_add(2, 1);
                     let console = format!("{line}\n");
                     self.console_line(console.as_bytes());
                 }
@@ -570,11 +609,14 @@ impl Log {
             match self.console.write_nonblock(&self.console_held) {
                 Ok(0) | Err(SyscallError::WouldBlock) => break,
                 Ok(n) => {
+                    dbg_add(3, n as u64);
                     self.console_held.drain(..n);
                 }
                 Err(e) => panic!("logkeeper: its console refused a write: {e:?}"),
             }
         }
+        DBG_HELD.store(self.console_held.len() as u64, std::sync::atomic::Ordering::SeqCst);
+        dbg_set(7, self.console_held.len() as u64);
         if self.console_unshown > 0 && self.console_held.len() < CONSOLE_BYTES / 2 {
             toyos::warn!(
                 "logkeeper: {} line(s) went unshown on the console: it is slower than the log, and \
@@ -590,8 +632,10 @@ impl Log {
     fn to_volume(&mut self, text: &[u8], sync: bool) {
         let Some(v) = self.volume.as_mut() else { return };
         let began = Instant::now();
+        dbg(1);
         let mut refused = v.write(text).err().map(|e| (Step::Append, e.to_string()));
         if refused.is_none() && sync {
+            dbg(2);
             refused = self.sync().err();
         }
         // A volume that answered, and took longer than a log is worth doing it.

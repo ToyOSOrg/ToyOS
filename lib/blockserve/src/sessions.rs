@@ -173,6 +173,11 @@ impl Sessions {
         }
     }
 
+    /// DIAG (never lands).
+    pub fn dbg_inflight(&self) -> u64 {
+        self.sessions.values().map(|s| s.state.inflight().len() as u64).sum()
+    }
+
     pub fn ids(&self) -> Vec<u64> {
         self.sessions.keys().copied().collect()
     }
