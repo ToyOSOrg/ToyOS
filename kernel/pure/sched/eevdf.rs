@@ -259,17 +259,6 @@ impl<K: Copy + Eq> Eevdf<K> {
             .min()
     }
 
-    pub fn is_eligible(&self, key: K) -> bool {
-        let e = self.get(key);
-        mul(self.total, e.v - self.base) <= self.sum
-    }
-
-    /// Whether `a`'s request is due before `b`'s.
-    pub fn earlier(&self, a: K, b: K) -> bool {
-        let (a, b) = (self.get(a), self.get(b));
-        (a.vd, a.seq) < (b.vd, b.seq)
-    }
-
     /// Service, in whole ns rounded up, until `key`'s current request is done.
     pub fn request_left_ns(&self, key: K) -> u64 {
         let e = self.get(key);
@@ -302,31 +291,6 @@ impl<K: Copy + Eq> Eevdf<K> {
 
     pub fn slice(&self, key: K) -> u64 {
         self.get(key).slice
-    }
-
-    /// Give each entity the lag `targets` names for it, less its weighted
-    /// share of the targets' sum: `lag_i = t_i − w_i·Σt/W`. Lags therefore
-    /// still sum to zero whatever the targets, and the result does not depend
-    /// on their order. Each entity keeps the service left in its request.
-    pub fn assign_lags(&mut self, targets: &[(K, Lag)]) {
-        assert_eq!(targets.len(), self.entities.len(), "eevdf: a lag for every entity");
-        if self.total == 0 {
-            return;
-        }
-        self.rebase();
-        let shift = targets.iter().map(|t| t.1 .0).sum::<i128>().div_euclid(self.total);
-        let base = self.base;
-        let mut sum = 0;
-        for &(key, lag) in targets {
-            let i = self.index(key);
-            let e = &mut self.entities[i];
-            let w = e.weight as i128;
-            let left = e.vd - e.v;
-            e.v = add(base, shift - lag.0.div_euclid(w));
-            e.vd = add(e.v, left);
-            sum = add(sum, mul(w, e.v - base));
-        }
-        self.sum = sum;
     }
 
     /// `Σ lag`, which is zero up to the mean's rounding: the conservation the
@@ -402,11 +366,10 @@ mod tests {
             q.charge(0, MS / 4);
             let long = 1;
             assert_eq!(q.pick(), Some(long));
-            assert!(q.earlier(0, long));
             let ns = q.overtaken_in(long).unwrap();
             assert!(ns > 0 && ns < q.request_left_ns(long));
             q.charge(long, ns - 1);
-            assert!(!q.is_eligible(0));
+            assert_eq!(q.pick(), Some(long));
             q.charge(long, 1);
             assert_eq!(q.pick(), Some(0));
             assert_eq!(q.overtaken_in(0), None);
@@ -499,24 +462,6 @@ mod tests {
             assert_eq!(left.lag, held);
             assert!(q.lag_sum().0.abs() <= 8 * UNIT as i128);
         }
-    }
-
-    #[test]
-    fn assigned_lags_sum_to_zero_whatever_the_targets() {
-        let mut q = Eevdf::new();
-        for (k, w) in [(0, UNIT), (1, 3 * UNIT), (2, 5 * UNIT)] {
-            q.join(k, w, 3 * MS, Lag::ZERO);
-        }
-        // Targets that do not sum to zero, as clamping leaves them.
-        let t = [(2, Lag::from_ns(4_000_000)), (0, Lag::from_ns(4_000_000)), (1, Lag::from_ns(-1_000_000))];
-        q.assign_lags(&t);
-        let excess: i128 = t.iter().map(|x| x.1 .0).sum();
-        for (k, l) in t {
-            let w = q.weight(k) as i128;
-            let want = l.0 - w * excess / (9 * UNIT as i128);
-            assert!((q.lag(k).0 - want).abs() <= 2 * w, "{k}");
-        }
-        assert!(q.lag_sum().0.abs() <= 16 * UNIT as i128);
     }
 
     #[test]

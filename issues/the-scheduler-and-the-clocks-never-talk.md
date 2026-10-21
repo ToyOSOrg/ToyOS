@@ -49,30 +49,36 @@ Stage 4 owes an owner-keyed rule that survives thread replacement, brief
 blocking and stream reopening alike, without calling aggregate overload or a
 legitimate multi-worker client abuse.
 
-## Open: the cross-CPU fairness candidate repays a dip below a job's share
+## Job-fair scheduling (owner decision J1, 2026-10-21; stage 3)
 
-The host model's cross-CPU fairness (`Params::cross_cpu_lag`, PR #956, awaiting
-the owner's decision J1) orders each CPU's jobs by their normalized service.
-A job whose runnable count dips below its fluid share without reaching zero
-shows a deficit against the jobs beside it, and that ordering repays it after
-the dip.
+Each CPU runs EEVDF over the job groups it holds, and EEVDF again over each
+group's threads. A group's weight is its job's weight times its share of the
+job's runnable threads, so a helper thread buys no entitlement. Placement
+balances summed group weights and steals to idle CPUs. There is no cross-CPU
+service accounting: a job receives, on each CPU running ordinary work, its
+group weight over that CPU's load, and its aggregate share is as close to its
+entitlement as placement makes it. Prompt interaction, bounded realtime (J2),
+ordinary progress and job creation authority are kept.
 
-- **Evidence.** Four threads running 1 ms and sleeping 0.1 ms beside eight hogs
-  on four identical CPUs: the job receives 2.000 CPUs where its fluid share is
-  1.975, an error of 205 ms after 8 s that grows linearly. The asserted sweep
-  (`checkpoint::OPEN`) holds it to 250 ms, which is specific to its 10 s run.
-  The size depends on how the dips coincide: with 1 µs between the sleepers'
-  sleeps it is 41 ms; on the T14 and AMD shapes 15 and 41 ms. Logs:
-  https://github.com/ToyOSOrg/evidence/tree/7395cd9ba5690abdc571c98c48d99e6a5d117e3a/round3-investigation
-- **Owner.** This track, with J1: the defect belongs to the candidate, not to
-  the plan's per-CPU arithmetic.
-- **Exit.** A rule that tells a demand dip from a deficit owed, shown by this
-  scenario under the sweep's normal ceiling at every window and no regression
-  elsewhere; or J1 choosing a different cross-CPU mechanism. A per-job rule,
-  "a job with no waiting thread accrues no deficit", forgave genuine deficits
-  in both forms tried.
+The host model (`kernel/pure/sched/job_sched.rs`, PR #956) measures the
+approximation as persistent rate gaps decided by placement: m+1 single-thread
+jobs leave 0.30, 0.39 and 0.44 CPUs between jobs on four CPUs, the T14 and the
+AMD shapes; a placement whose loads equal a fair one's, {A,A} {A,B} {B} {B},
+holds 0.5 CPUs on four CPUs and 2 CPUs on AMD. While a runnable thread waits,
+the service it is entitled to on its CPU stays within 0.36 of
+`slice + 2·lag_bound + 2·slice` in every scenario run; in time that wait
+scales with crowding. These are model figures for the scenarios that ran, not
+hardware latency guarantees. Stage 3 validates the kernel implementation on
+the supported machines.
 
-The same ordering bounds each job's share but not each thread's wait: a
-thread of a job served on other CPUs, beside a job behind it, waits until
-placement moves it (`tests::a_thread_of_a_job_served_elsewhere_waits_until_placement_moves_it`:
-under 8 ms of a second, no migration).
+Stage 3 owes these decision points. A CPU decides again when its running
+request ends, and when a queued request due before the running one becomes
+eligible, at either level, once the running thread has run `min_slice`.
+Without the second, a thread whose request is due first but carries a little
+debt waits out every longer request ahead of it. In the model's desktop mix
+beside a build, the compositor then finished a frame 9.4 ms after its release
+and missed it; with the second, it misses none on the T14 and AMD shapes,
+finishing within 1.6 ms. The kernel must arm each CPU's preemption timer for
+the earliest such instant at every decision and enqueue. The model's cost is
+361 to 417 switches per CPU per second in that mix, against 216 to 259
+without.

@@ -13,10 +13,7 @@
 //! idle, else the nearest idle CPU, else its last CPU; an idle CPU takes a
 //! waiting thread from the CPU with the most; and every `balance_period` each
 //! CPU takes from the most loaded CPU the waiting thread whose move most
-//! reduces their difference in summed group weight, if any strictly does. With
-//! `cross_cpu_lag`, every
-//! `fairness_period` each CPU also makes the [`JobSched::fairness_move`] it is
-//! offered against all others.
+//! reduces their difference in summed group weight, if any strictly does.
 
 use super::*;
 use crate::sched::topology::{CpuKeys, Topology};
@@ -27,7 +24,6 @@ use alloc::vec;
 use core::cmp::Reverse;
 use core::fmt::Write;
 
-
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Work {
     Hog,
@@ -35,13 +31,6 @@ pub enum Work {
     Duty { run: u64, sleep: u64 },
     /// Released every `period`; runs `work` and blocks.
     Periodic { period: u64, work: u64 },
-}
-
-/// Which partner CPUs each fairness step examines.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Partners {
-    Rotating,
-    All,
 }
 
 struct Load {
@@ -66,7 +55,6 @@ enum Ev {
     Wake(ThreadId),
     Release(ThreadId),
     Balance(CpuId),
-    Fairness(CpuId),
     Churn,
 }
 
@@ -75,8 +63,6 @@ pub struct Sim {
     pub topo: Topology,
     pub now: Nanos,
     pub balance_period: u64,
-    /// Changes made by [`JobSched::fairness_move`].
-    pub fairness_moves: u64,
     /// Delay before a CPU running realtime work takes a decision: a
     /// non-preemptible section or late timer, for overrun accounting.
     pub rt_overrun: u64,
@@ -114,8 +100,6 @@ pub struct Sim {
     /// Per CPU, the longest stretch realtime ran without a break.
     pub rt_streak_max: Vec<u64>,
     rt_streak: Vec<u64>,
-    rounds: Vec<u32>,
-    pub partners: Partners,
     pub samples: Vec<(Nanos, Vec<(f64, f64)>)>,
     sample_every: u64,
     next_sample: Nanos,
@@ -187,7 +171,6 @@ impl Sim {
             topo,
             now: Nanos::ZERO,
             balance_period: 4 * MS,
-            fairness_moves: 0,
             rt_overrun: 0,
             churn: None,
             loads: BTreeMap::new(),
@@ -209,8 +192,6 @@ impl Sim {
             spare_on: vec![0; m],
             rt_streak_max: vec![0; m],
             rt_streak: vec![0; m],
-            rounds: vec![0; m],
-            partners: Partners::Rotating,
             samples: Vec::new(),
             sample_every: MS,
             next_sample: Nanos::ZERO,
@@ -226,10 +207,6 @@ impl Sim {
         for c in 0..m {
             let at = Nanos(sim.balance_period * c as u64 / m as u64 + 1);
             sim.push(at, Ev::Balance(CpuId(c as u32)));
-            if params.cross_cpu_lag {
-                let at = Nanos(params.fairness_period * c as u64 / m as u64 + 2);
-                sim.push(at, Ev::Fairness(CpuId(c as u32)));
-            }
         }
         sim
     }
@@ -293,10 +270,6 @@ impl Sim {
 
     pub fn jobs(&self) -> &[JobId] {
         &self.jobs
-    }
-
-    pub fn weight(&self, job: JobId) -> u64 {
-        self.weights[&job]
     }
 
     /// The thread exits the next time it runs.
@@ -409,35 +382,6 @@ impl Sim {
         self.s.migrate(t, c, self.now);
         self.migrations += 1;
         true
-    }
-
-    /// Under [`Partners::Rotating`], one partner per step, rotating through
-    /// every other CPU: each CPU examines one pair per `fairness_period`, the
-    /// machine `m`. [`Partners::All`] examines `m − 1` per CPU, `m(m−1)` in all.
-    fn fairness_step(&mut self, c: CpuId) {
-        let m = self.topo.cpus() as u32;
-        if m < 2 {
-            return;
-        }
-        let partners: Vec<CpuId> = match self.partners {
-            Partners::All => (0..m).map(CpuId).collect(),
-            Partners::Rotating => {
-                let r = &mut self.rounds[c.0 as usize];
-                *r = *r % (m - 1) + 1;
-                vec![CpuId((c.0 + *r) % m)]
-            }
-        };
-        let Some(change) = self.s.fairness_move(c, &partners) else { return };
-        if change.threads.iter().flatten().any(|(t, _, _)| self.loads[t].pinned) {
-            return;
-        }
-        self.s.apply(change, self.now);
-        self.fairness_moves += 1;
-        for &(_, from, to) in change.threads.iter().flatten() {
-            self.migrations += 1;
-            self.resched(from);
-            self.resched(to);
-        }
     }
 
     fn balance_step(&mut self, c: CpuId) {
@@ -701,11 +645,6 @@ impl Sim {
                 }
                 let at = self.now.after(period);
                 self.push(at, Ev::Churn);
-            }
-            Ev::Fairness(c) => {
-                self.fairness_step(c);
-                let at = self.now.after(self.s.params().fairness_period);
-                self.push(at, Ev::Fairness(c));
             }
             Ev::Balance(c) => {
                 self.balance_step(c);

@@ -8,13 +8,9 @@
 //! the groups' weights sum to the job's, less one rounding unit per group. Lag
 //! goes with whatever leaves a queue: a thread's to its next queue, and a
 //! dissolving group's with its last thread to the group that thread next
-//! enters.
-//!
-//! Across CPUs, each job counts its ordinary service per unit of weight.
-//! Each CPU orders its groups by that count against the jobs it holds, and
-//! placement moves threads ([`JobSched::fairness_move`]) only between jobs that
-//! share no CPU, once one leads the other by `move_lead`. Per-CPU lag alone
-//! cannot share indivisible thread counts fairly across CPUs.
+//! enters. There is no cross-CPU service accounting: placement balances
+//! summed group weights, and a job's aggregate share is as close to its
+//! entitlement as that placement makes it (owner decision J1).
 //!
 //! Realtime work: an authorized worker runs ahead of ordinary work on a CPU
 //! while that CPU's [`Allowance`] lasts, round-robin with the CPU's other
@@ -22,8 +18,8 @@
 //! that interval's boundary, wherever it goes meanwhile (owner decision J2): a
 //! spare worker runs only when no ordinary work on the CPU is runnable, and
 //! ordinary work becoming runnable preempts it. Spare time is charged to the
-//! thread alone — not to the allowance, not to any group and not to its job's
-//! normalized service — because it is capacity no ordinary work there wanted.
+//! thread alone — not to the allowance and not to any group — because it is
+//! capacity no ordinary work there wanted.
 //!
 //! Every runnable thread is in exactly one queue — one group's, or one CPU's
 //! realtime or spare queue — and the running thread stays in its queue.
@@ -43,12 +39,7 @@ pub const WEIGHT_UNIT: u64 = 1 << 16;
 /// The largest job weight: 256 units, so a group weight (a job weight times a
 /// 16-bit fraction) stays within [`crate::sched::eevdf::MAX_WEIGHT`].
 pub const MAX_JOB_WEIGHT: u64 = 256 * WEIGHT_UNIT;
-/// The smallest job weight: 1/256 of a unit, so a job's normalized service
-/// grows by at most 256 per ns and its `u64` wraps after 2^56 ns of the job's
-/// CPU time. Comparisons are wrapping differences, sound while two compared
-/// jobs are within 2^63 of each other: jobs on one CPU are kept within
-/// `lead_cap`, and two that never share one would have to diverge by about a
-/// CPU-year at this weight.
+/// The smallest job weight: 1/256 of a unit.
 pub const MIN_JOB_WEIGHT: u64 = WEIGHT_UNIT / 256;
 
 /// The engineering parameters, all in ns.
@@ -68,23 +59,6 @@ pub struct Params {
     /// Realtime execution without blocking that marks a runaway.
     pub runaway: u64,
     pub strikes_to_revoke: u32,
-    /// Cross-CPU fairness: order each CPU's groups by their jobs'
-    /// normalized service, and let placement move threads between jobs that
-    /// share no CPU ([`JobSched::fairness_move`]). Off is the plain candidate:
-    /// per-CPU lag only.
-    pub cross_cpu_lag: bool,
-    /// How often each CPU looks for a [`JobSched::fairness_move`].
-    pub fairness_period: u64,
-    /// Normalized service a job must lead another by before placement moves
-    /// CPU time from the first to the second.
-    pub move_lead: u64,
-    /// The most normalized service a job may trail another on the same CPU
-    /// by: the cross-CPU counterpart of `lag_bound`. Ordering by service bounds
-    /// each job's share, not each thread's wait: a thread of a job served
-    /// elsewhere, beside a job behind it, waits until that gap closes, and the
-    /// gap need not close while its job keeps being served on other CPUs. Only
-    /// placement then bounds the thread's wait — a latency request included.
-    pub lead_cap: u64,
 }
 
 impl Params {
@@ -97,14 +71,7 @@ impl Params {
         rt_quantum: MS,
         runaway: 50 * MS,
         strikes_to_revoke: 3,
-        cross_cpu_lag: true,
-        fairness_period: 20 * MS,
-        move_lead: 32 * MS,
-        lead_cap: 64 * MS,
     };
-
-    /// The candidate the checkpoint started from: per-CPU lag only.
-    pub const CANDIDATE: Params = Params { cross_cpu_lag: false, ..Params::DEFAULT };
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
@@ -144,21 +111,6 @@ pub enum Refused {
     OwnerRevoked,
 }
 
-/// Jobs with their normalized service, relative to one of them.
-type Standing = Vec<(JobId, i64)>;
-
-/// `a − b` for two normalized services, read across a wrap.
-fn lead(a: u64, b: u64) -> i64 {
-    a.wrapping_sub(b) as i64
-}
-
-/// A placement change: one thread moved, or two traded, as
-/// `(thread, from, to)`.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Move {
-    pub threads: [Option<(ThreadId, CpuId, CpuId)>; 2],
-}
-
 /// What a wake obliges the CPU to do.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Resched {
@@ -173,19 +125,6 @@ struct Job {
     refs: u32,
     /// Runnable ordinary threads on every CPU.
     runnable: u32,
-    /// Ordinary service divided by weight, in ns at one weight unit, wrapping:
-    /// equal for every job the fluid share does not cap. Written at charges
-    /// (with `served_rem`, the division's remainder) and by the floors of
-    /// [`JobSched::order_by_service`].
-    served: u64,
-    served_rem: u64,
-    /// Set for a new job and when the job's last runnable thread blocks;
-    /// cleared when the job next shares a CPU with another job, where a
-    /// deficit beyond `lag_bound` is forgiven and any surplus kept — so a
-    /// sleep earns no credit, and a lone job's lead survives its sleeps.
-    returning: bool,
-    /// The CPUs holding a group of the job, sorted.
-    cpus: Vec<CpuId>,
     rt: RtOwner,
 }
 
@@ -275,10 +214,6 @@ impl JobSched {
             weight,
             refs: 1,
             runnable: 0,
-            served: 0,
-            served_rem: 0,
-            returning: true,
-            cpus: Vec::new(),
             rt: RtOwner::default(),
         };
         let (index, generation) = match self.jobs.iter().position(|(_, j)| j.is_none()) {
@@ -519,9 +454,6 @@ impl JobSched {
                 i
             }
             None => {
-                let cpus = &mut self.job_mut(job).cpus;
-                let at = cpus.binary_search(&cpu).expect_err("no group yet on this CPU");
-                cpus.insert(at, cpu);
                 self.cpus[c].members.push(Group { job, threads: Eevdf::new() });
                 // Weight is set below, once the thread is counted here.
                 self.cpus[c].groups.join(job, 1, slice, carried);
@@ -552,9 +484,6 @@ impl JobSched {
             self.cpus[c].members.swap_remove(i);
             let lag = self.cpus[c].groups.leave(job).lag.clamp_ns(self.params.lag_bound);
             self.thread_mut(id).group_lag = lag;
-            let cpus = &mut self.job_mut(job).cpus;
-            let at = cpus.binary_search(&cpu).expect("the job's group was on this CPU");
-            cpus.remove(at);
         } else {
             let slice = self.group_slice(cpu, i);
             self.cpus[c].groups.set_slice(job, slice);
@@ -575,49 +504,10 @@ impl JobSched {
     fn refresh_cpu(&mut self, cpu: CpuId) {
         let c = cpu.0 as usize;
         let jobs: Vec<JobId> = self.cpus[c].members.iter().map(|g| g.job).collect();
-        for &job in &jobs {
+        for job in jobs {
             let w = self.group_weight(cpu, job);
             self.cpus[c].groups.reweight(job, w);
         }
-        if self.params.cross_cpu_lag {
-            self.order_by_service(cpu, &jobs);
-        }
-    }
-
-    /// Order `cpu`'s groups by their jobs' normalized service. First, floors:
-    /// a returning job trails the other jobs here by at most `lag_bound`, and
-    /// any job trails the CPU's leader by at most `lead_cap`; a surplus is
-    /// never taken away. Then each group's lag target is `w·(mean − served)`
-    /// clamped to `lag_bound`, applied together by [`Eevdf::assign_lags`]: a
-    /// group whose target was clamped keeps it, less its share of whatever the
-    /// clamping left unbalanced.
-    fn order_by_service(&mut self, cpu: CpuId, jobs: &[JobId]) {
-        if jobs.len() < 2 {
-            return;
-        }
-        let c = cpu.0 as usize;
-        self.floor_returning(jobs);
-        let reference = self.job(jobs[0]).served;
-        let leader = jobs.iter().map(|&j| lead(self.job(j).served, reference)).max().unwrap();
-        let cap = self.params.lead_cap as i64;
-        for &j in jobs {
-            if leader - lead(self.job(j).served, reference) > cap {
-                self.job_mut(j).served = reference.wrapping_add((leader - cap) as u64);
-            }
-        }
-        let w: Vec<i128> = jobs.iter().map(|&j| self.cpus[c].groups.weight(j) as i128).collect();
-        let served: Vec<i128> = jobs.iter().map(|&j| lead(self.job(j).served, reference) as i128).collect();
-        let total: i128 = w.iter().sum();
-        let mean = w.iter().zip(&served).map(|(w, s)| w * s).sum::<i128>() / total;
-        let targets: Vec<(JobId, Lag)> = jobs
-            .iter()
-            .enumerate()
-            .map(|(k, &job)| {
-                let owed = ((mean - served[k]) * w[k]) << crate::sched::eevdf::VSHIFT;
-                (job, Lag(owed / WEIGHT_UNIT as i128).clamp_ns(self.params.lag_bound))
-            })
-            .collect();
-        self.cpus[c].groups.assign_lags(&targets);
     }
 
     fn rt_enter(&mut self, cpu: CpuId, id: ThreadId) {
@@ -630,25 +520,6 @@ impl JobSched {
         let i = rt.iter().position(|&t| t == id).expect("a realtime-queued thread is in its queue");
         rt.remove(i);
         self.thread_mut(id).state = State::Blocked;
-    }
-
-    /// Raise each returning job among `jobs` to at least `lag_bound` below the
-    /// mean of the others, and clear `returning`.
-    fn floor_returning(&mut self, jobs: &[JobId]) {
-        let bound = self.params.lag_bound as i64;
-        for &j in jobs {
-            if !self.job(j).returning {
-                continue;
-            }
-            let others: Vec<u64> = jobs.iter().filter(|&&o| o != j).map(|&o| self.job(o).served).collect();
-            let reference = others[0];
-            let mean = others.iter().map(|&s| lead(s, reference)).sum::<i64>() / others.len() as i64;
-            let job = self.job_mut(j);
-            if lead(job.served, reference) < mean - bound {
-                job.served = reference.wrapping_add((mean - bound) as u64);
-            }
-            job.returning = false;
-        }
     }
 
     fn spare_enter(&mut self, cpu: CpuId, id: ThreadId) {
@@ -713,10 +584,6 @@ impl JobSched {
                 self.cpus[c].groups.charge(job, ns);
                 self.cpus[c].members[i].threads.charge(tid, ns);
                 self.thread_mut(tid).fair_ns += ns;
-                let j = self.job_mut(job);
-                let scaled = ns as u128 * WEIGHT_UNIT as u128 + j.served_rem as u128;
-                j.served = j.served.wrapping_add((scaled / j.weight as u128) as u64);
-                j.served_rem = (scaled % j.weight as u128) as u64;
             }
             Band::Spare => self.thread_mut(tid).spare_ns += ns,
             Band::Rt => {
@@ -788,15 +655,8 @@ impl JobSched {
         self.charge(cpu, now);
         let c = cpu.0 as usize;
         let run = self.cpus[c].current.take().expect("block with nothing running");
-        let job = self.thread(run.tid).job;
-        let fair = self.band_of(run.tid) == Band::Fair;
         self.leave(cpu, run.tid);
         self.thread_mut(run.tid).unblocked_rt = 0;
-        // The job's last runnable thread sleeps; a migration leaves and enters
-        // without one.
-        if fair && self.job(job).runnable == 0 {
-            self.job_mut(job).returning = true;
-        }
         run.tid
     }
 
@@ -946,175 +806,6 @@ impl JobSched {
         next
     }
 
-    // ---- Cross-CPU fairness --------------------------------------------------
-
-    /// Take `cpu`'s running thread off the CPU, leaving it queued, so that it
-    /// can be moved; the caller decides again for `cpu`.
-    pub fn preempt(&mut self, cpu: CpuId, now: Nanos) {
-        self.charge(cpu, now);
-        self.cpus[cpu.0 as usize].current = None;
-    }
-
-    /// The placement change `cpu`'s fairness step makes with one of
-    /// `partners`, if any: one thread moved, or two threads traded.
-    ///
-    /// A change is judged by its exact effect on each job's ordinary rate on
-    /// the two CPUs — group weight over CPU load, with the job's weight split
-    /// by its runnable threads as the queues split it. It is allowed only
-    /// between jobs that share no CPU (those that share one are ordered there
-    /// by [`Self::order_by_service`]), and only if every job that loses rate
-    /// leads the most-behind job that gains by more than `move_lead`. Of the
-    /// allowed changes, the one with the largest such lead is made. A job whose
-    /// threads all run gains nothing from any change and trails the jobs it
-    /// could lose to, so nothing is taken from it. Loads are not an objective.
-    ///
-    /// Only counts per job enter the judgement, so candidates are one thread
-    /// per group (a waiting one if the group has one): with `g` groups on the
-    /// pair, `O(g²)` candidates, each judged in `O(g)`. Reads: the pair's queues, and
-    /// for each job on them its weight, runnable count, normalized service and
-    /// set of CPUs.
-    pub fn fairness_move(&mut self, cpu: CpuId, partners: &[CpuId]) -> Option<Move> {
-        let mut best: Option<(i64, Move)> = None;
-        for &other in partners {
-            if other == cpu {
-                continue;
-            }
-            for (gap, change) in self.changes(cpu, other) {
-                if best.as_ref().is_none_or(|(g, _)| gap > *g) {
-                    best = Some((gap, change));
-                }
-            }
-        }
-        best.map(|(_, change)| change)
-    }
-
-    /// One movable thread per ordinary group on `c`: a waiting one if any.
-    fn representatives(&self, c: CpuId) -> Vec<ThreadId> {
-        let running = self.current(c).map(|r| r.0);
-        self.cpus[c.0 as usize]
-            .members
-            .iter()
-            .filter_map(|g| {
-                let mut threads = g.threads.keys().filter(|&t| !self.thread(t).granted);
-                let first = threads.next()?;
-                if Some(first) != running {
-                    return Some(first);
-                }
-                Some(threads.next().unwrap_or(first))
-            })
-            .collect()
-    }
-
-    fn jobs_on(&self, a: CpuId, b: CpuId) -> Vec<JobId> {
-        let mut jobs: Vec<JobId> = [a, b]
-            .iter()
-            .flat_map(|&c| self.cpus[c.0 as usize].members.iter().map(|g| g.job))
-            .collect();
-        jobs.sort_unstable();
-        jobs.dedup();
-        jobs
-    }
-
-    /// Each job's ordinary rate on `a` plus `b`, in CPUs scaled by 2^32, with
-    /// `count(job, cpu)` runnable threads of it there.
-    fn rates(&self, jobs: &[JobId], count: impl Fn(JobId, usize) -> u32) -> Vec<u128> {
-        let weight = |j: JobId, k: usize| -> u128 {
-            let d = count(j, k) as u128;
-            if d == 0 {
-                return 0;
-            }
-            let job = self.job(j);
-            (job.weight as u128 * d / job.runnable as u128).max(1)
-        };
-        let load: [u128; 2] = [0, 1].map(|k| jobs.iter().map(|&j| weight(j, k)).sum());
-        jobs.iter()
-            .map(|&j| (0..2).filter(|&k| load[k] > 0).map(|k| (weight(j, k) << 32) / load[k]).sum())
-            .collect()
-    }
-
-    /// The jobs on `change`'s two CPUs whose rate there it raises and those it
-    /// lowers, each with its normalized service relative to the pair's first.
-    fn winners_and_losers(&self, change: &Move) -> (Standing, Standing) {
-        let (_, a, b) = change.threads[0].expect("a change moves a thread");
-        let jobs = self.jobs_on(a, b);
-        let cpus = [a, b];
-        let count = |j: JobId, k: usize| -> u32 {
-            let c = &self.cpus[cpus[k].0 as usize];
-            c.members.iter().find(|g| g.job == j).map_or(0, |g| g.threads.len() as u32)
-        };
-        let before = self.rates(&jobs, count);
-        let after = self.rates(&jobs, |j, k| {
-            let mut n = count(j, k) as i64;
-            for &(t, from, _) in change.threads.iter().flatten() {
-                if self.thread(t).job == j {
-                    n += if cpus[k] == from { -1 } else { 1 };
-                }
-            }
-            n as u32
-        });
-        let reference = self.job(jobs[0]).served;
-        let served = |i: usize| (jobs[i], lead(self.job(jobs[i]).served, reference));
-        let gain = (0..jobs.len()).filter(|&i| after[i] > before[i]).map(served).collect();
-        let loss = (0..jobs.len()).filter(|&i| after[i] < before[i]).map(served).collect();
-        (gain, loss)
-    }
-
-    fn share_a_cpu(&self, x: JobId, y: JobId) -> bool {
-        let (x, y) = (&self.job(x).cpus, &self.job(y).cpus);
-        x.iter().any(|c| y.binary_search(c).is_ok())
-    }
-
-    /// Every allowed change between `a` and `b`, with the least lead a loser
-    /// holds over the most-behind gainer.
-    fn changes(&self, a: CpuId, b: CpuId) -> Vec<(i64, Move)> {
-        let cpus = [a, b];
-        let judge = |change: &Move| -> Option<i64> {
-            let (gain, loss) = self.winners_and_losers(change);
-            let &(behind_job, behind) = gain.iter().min_by_key(|g| g.1)?;
-            let gap = loss.iter().map(|&(_, l)| l - behind).min()?;
-            let apart = loss.iter().all(|&(job, _)| !self.share_a_cpu(job, behind_job));
-            (gap > self.params.move_lead as i64 && apart).then_some(gap)
-        };
-        let on = [self.representatives(a), self.representatives(b)];
-        let mut out = Vec::new();
-        for k in 0..2 {
-            for &t in &on[k] {
-                let change = Move { threads: [Some((t, cpus[k], cpus[1 - k])), None] };
-                if let Some(gap) = judge(&change) {
-                    out.push((gap, change));
-                }
-            }
-        }
-        for &x in &on[0] {
-            for &y in &on[1] {
-                if self.thread(x).job == self.thread(y).job {
-                    continue;
-                }
-                let change = Move { threads: [Some((x, a, b)), Some((y, b, a))] };
-                if let Some(gap) = judge(&change) {
-                    out.push((gap, change));
-                }
-            }
-        }
-        out
-    }
-
-    /// Make the change. The caller decides again for both CPUs.
-    pub fn apply(&mut self, change: Move, now: Nanos) {
-        for &(t, from, _) in change.threads.iter().flatten() {
-            if self.current(from).is_some_and(|r| r.0 == t) {
-                self.preempt(from, now);
-            }
-        }
-        for &(t, _, to) in change.threads.iter().flatten() {
-            self.migrate(t, to, now);
-        }
-    }
-
-    pub fn served(&self, job: JobId) -> u64 {
-        self.job(job).served
-    }
-
     // ---- Inspection -----------------------------------------------------------
 
     /// The sum of `cpu`'s group weights: what balancing compares.
@@ -1193,9 +884,6 @@ impl JobSched {
                     self.thread(t).job == id && matches!(self.thread(t).state, State::Queued { band: Band::Fair, .. })
                 });
                 assert_eq!(runnable.count() as u32, job.runnable, "{id:?}'s runnable count");
-                let holding: Vec<CpuId> =
-                    (0..self.cpus.len() as u32).map(CpuId).filter(|&c| self.group_index(c, id).is_some()).collect();
-                assert_eq!(job.cpus, holding, "{id:?}'s CPU set");
             }
         }
     }

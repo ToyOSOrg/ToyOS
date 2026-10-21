@@ -179,8 +179,10 @@ fn a_latency_request_changes_order_not_share() {
     let (got_q, _) = s.service(q);
     let (got_b, _) = s.service(b);
     assert!((got_q as i64 - got_b as i64).abs() <= 2 * P.slice as i64);
-    // Never behind more than one of the bulk job's requests.
-    assert!(longest_wait <= P.slice, "waited {longest_wait}");
+    // Ahead by at most its own request (EEVDF's `lag > −r`), which the bulk
+    // job's service repays at half the rate it accrued: a wait of at most two
+    // short requests, not one of the bulk job's.
+    assert!(longest_wait <= 2 * P.min_slice, "waited {longest_wait}");
     assert_eq!(s.cpus[0].groups.weight(quick), s.cpus[0].groups.weight(bulk));
 }
 
@@ -258,12 +260,12 @@ fn neither_a_new_grant_nor_a_wake_resets_demotion_or_the_runaway_count() {
     assert_eq!(s.thread(w).unblocked_rt, 0, "blocking is the one reset");
 }
 
-/// J2: spare time is charged to the thread alone — not to the allowance,
-/// not to a group and not to its job's normalized service — and spare work
-/// yields at once to an ordinary wake.
+/// J2: spare time is charged to the thread alone — not to the allowance
+/// and not to its realtime service — and spare work yields at once to an
+/// ordinary wake.
 #[test]
 fn spare_time_is_charged_to_the_thread_alone_and_yields_to_ordinary_work() {
-    let (mut s, j, w) = rt_machine(1);
+    let (mut s, _, w) = rt_machine(1);
     let o = s.create_job(WEIGHT_UNIT);
     let ord = s.spawn(o);
     s.wake(w, cpu(0), Nanos::ZERO);
@@ -271,11 +273,11 @@ fn spare_time_is_charged_to_the_thread_alone_and_yields_to_ordinary_work() {
     let mut now = Nanos(P.rt_budget);
     s.schedule(cpu(0), now);
     assert_eq!(s.current(cpu(0)), Some((w, Band::Spare)), "nothing else wants the CPU");
-    let (served, service, remaining) = (s.served(j), s.service(w), s.allowance(cpu(0)).remaining());
+    let (service, remaining) = (s.service(w), s.allowance(cpu(0)).remaining());
     now = now.after(MS);
     s.charge(cpu(0), now);
     assert_eq!(s.spare_service(w), MS);
-    assert_eq!((s.served(j), s.service(w), s.allowance(cpu(0)).remaining()), (served, service, remaining));
+    assert_eq!((s.service(w), s.allowance(cpu(0)).remaining()), (service, remaining));
     assert_eq!(s.wake(ord, cpu(0), now), Resched::Now);
     assert_eq!(s.schedule(cpu(0), now), Some(ord));
     s.check();
@@ -413,136 +415,6 @@ fn every_runnable_thread_is_in_exactly_one_queue() {
     }
 }
 
-#[test]
-fn a_lone_job_ahead_is_made_to_share_once_it_leads_by_move_lead() {
-    let mut s = machine(2);
-    let jobs: Vec<JobId> = (0..3).map(|_| s.create_job(WEIGHT_UNIT)).collect();
-    let t: Vec<ThreadId> = jobs.iter().map(|&j| s.spawn(j)).collect();
-    s.wake(t[0], cpu(1), Nanos::ZERO);
-    s.wake(t[1], cpu(0), Nanos::ZERO);
-    s.wake(t[2], cpu(0), Nanos::ZERO);
-    let mut now = Nanos::ZERO;
-    let mut change = None;
-    // The lead grows at half a CPU: past `move_lead` well within 100 ms.
-    for _ in 0..100 {
-        if change.is_some() {
-            break;
-        }
-        for c in 0..2 {
-            s.schedule(cpu(c), now);
-        }
-        now = now.after(MS);
-        for c in 0..2 {
-            s.charge(cpu(c), now);
-        }
-        change = s.fairness_move(cpu(0), &[cpu(1)]);
-    }
-    assert!(change.is_some(), "no change offered after 100 ms");
-    let behind = s.served(jobs[1]).min(s.served(jobs[2]));
-    let lead = s.served(jobs[0]).wrapping_sub(behind);
-    assert!(lead > P.move_lead && lead <= P.move_lead + MS);
-    s.apply(change.unwrap(), now);
-    // The job ahead no longer has a CPU to itself.
-    let State::Queued { cpu: home, .. } = s.state(t[0]) else { panic!("blocked") };
-    assert_eq!(s.queued(home).count(), 2);
-    s.check();
-}
-
-#[test]
-fn nothing_is_taken_from_a_job_whose_threads_all_run() {
-    let mut s = machine(2);
-    let single = s.create_job(WEIGHT_UNIT);
-    let build = s.create_job(WEIGHT_UNIT);
-    let lone = s.spawn(single);
-    s.wake(lone, cpu(0), Nanos::ZERO);
-    for _ in 0..6 {
-        let t = s.spawn(build);
-        s.wake(t, cpu(1), Nanos::ZERO);
-    }
-    let mut now = Nanos::ZERO;
-    for _ in 0..200 {
-        for c in 0..2 {
-            s.schedule(cpu(c), now);
-        }
-        now = now.after(MS);
-        for c in 0..2 {
-            s.charge(cpu(c), now);
-        }
-        // The single job trails in normalized service, yet gains nothing from
-        // company: no change is ever offered at its expense.
-        assert_eq!(s.fairness_move(cpu(0), &[cpu(1)]), None);
-    }
-}
-
-/// A deficit earned while runnable — sharing a CPU while another job had one
-/// to itself — is repaid where the two jobs meet.
-#[test]
-fn a_cpu_orders_its_jobs_by_their_service_everywhere() {
-    let mut s = machine(2);
-    let behind = s.create_job(WEIGHT_UNIT);
-    let ahead = s.create_job(WEIGHT_UNIT);
-    let other = s.create_job(WEIGHT_UNIT);
-    let (b, a, x) = (s.spawn(behind), s.spawn(ahead), s.spawn(other));
-    s.wake(b, cpu(0), Nanos::ZERO);
-    s.wake(x, cpu(0), Nanos::ZERO);
-    s.wake(a, cpu(1), Nanos::ZERO);
-    let mut now = Nanos::ZERO;
-    while now < Nanos(100 * MS) {
-        for c in 0..2 {
-            s.schedule(cpu(c), now);
-        }
-        now = now.after(MS);
-        for c in 0..2 {
-            s.charge(cpu(c), now);
-        }
-    }
-    let deficit = s.served(ahead).wrapping_sub(s.served(behind)) as i64;
-    assert!(deficit > 40 * MS as i64, "behind by {deficit} ns");
-    // `ahead` comes to CPU 0; `behind` is owed and runs first, for longer.
-    s.preempt(cpu(1), now);
-    s.migrate(a, cpu(0), now);
-    let mut got = [0u64; 2];
-    for _ in 0..100 {
-        let t = s.schedule(cpu(0), now).unwrap();
-        let next = s.next_decision(cpu(0)).unwrap();
-        if t == b {
-            got[0] += next.since(now);
-        } else if t == a {
-            got[1] += next.since(now);
-        }
-        now = next;
-        s.charge(cpu(0), now);
-    }
-    assert!(got[0] > got[1], "behind {} ahead {}", got[0], got[1]);
-    s.check();
-}
-
-#[test]
-fn stale_credit_keeps_others_waiting_at_most_lead_cap() {
-    let mut s = machine(1);
-    let hog = s.create_job(WEIGHT_UNIT);
-    let late = s.create_job(WEIGHT_UNIT);
-    let (h, l) = (s.spawn(hog), s.spawn(late));
-    s.wake(h, cpu(0), Nanos::ZERO);
-    let mut now = Nanos::ZERO;
-    run(&mut s, cpu(0), &mut now, 1000 * MS);
-    s.block(cpu(0), now);
-    s.wake(l, cpu(0), now);
-    s.wake(h, cpu(0), now);
-    let start = s.service(h).0;
-    let end = now.after(200 * MS);
-    while now < end {
-        s.schedule(cpu(0), now);
-        now = s.next_decision(cpu(0)).unwrap().min(end);
-        s.charge(cpu(0), now);
-    }
-    let got = s.service(h).0 - start;
-    // Nothing for at most `lead_cap`, then half, less a request of granularity.
-    let floor = (200 * MS - P.lead_cap) / 2 - P.slice;
-    assert!(got >= floor, "the hog got {} ms of 200", got / MS);
-    assert!(s.served(hog).wrapping_sub(s.served(late)) <= P.lead_cap);
-}
-
 /// An allowance exhausted by a charge that another CPU's move made is a
 /// decision now, not a nanosecond later.
 #[test]
@@ -564,64 +436,4 @@ fn revoking_an_exited_worker_is_refused_not_a_panic() {
     let (mut s, _, w) = rt_machine(1);
     s.exit(w);
     assert_eq!(s.revoke_rt(w, Nanos::ZERO), Err(Refused::Gone));
-}
-
-/// A new job alone on its CPU, compared by a fairness step only with an empty
-/// CPU, is still floored when it first meets a job: a hog that has shared a
-/// CPU once (so is not returning itself) and then run alone for a second,
-/// moved in, then shares with it at once.
-#[test]
-fn a_new_job_is_floored_when_it_first_meets_another() {
-    let mut s = machine(3);
-    let hog = s.create_job(WEIGHT_UNIT);
-    let filler = s.create_job(WEIGHT_UNIT);
-    let late = s.create_job(WEIGHT_UNIT);
-    let (h, f, l) = (s.spawn(hog), s.spawn(filler), s.spawn(late));
-    s.wake(h, cpu(1), Nanos::ZERO);
-    s.wake(f, cpu(1), Nanos::ZERO);
-    let mut now = Nanos::ZERO;
-    while s.schedule(cpu(1), now) != Some(f) {
-        now = now.after(MS);
-        s.charge(cpu(1), now);
-    }
-    s.block(cpu(1), now);
-    run(&mut s, cpu(1), &mut now, 1000 * MS);
-    s.wake(l, cpu(0), now);
-    s.schedule(cpu(0), now);
-    assert_eq!(s.fairness_move(cpu(0), &[cpu(2)]), None);
-    s.preempt(cpu(1), now);
-    s.migrate(h, cpu(0), now);
-    s.schedule(cpu(0), now);
-    assert!(s.served(hog).wrapping_sub(s.served(late)) as i64 <= P.lag_bound as i64);
-}
-
-/// Ordering by service is job-fair, not thread-fair: a thread of a job that
-/// is served elsewhere waits beside a job behind it until placement moves it.
-/// B has one thread on CPU 0; H has h0 beside it and h1 alone on CPU 1. The
-/// fluid share gives B all of CPU 0, and with no migration h0 gets almost
-/// nothing for a second — no slice and no `lead_cap` bounds its wait.
-#[test]
-fn a_thread_of_a_job_served_elsewhere_waits_until_placement_moves_it() {
-    let mut s = machine(2);
-    let b = s.create_job(WEIGHT_UNIT);
-    let h = s.create_job(WEIGHT_UNIT);
-    let tb = s.spawn(b);
-    let (h0, h1) = (s.spawn(h), s.spawn(h));
-    s.wake(tb, cpu(0), Nanos::ZERO);
-    s.wake(h0, cpu(0), Nanos::ZERO);
-    s.wake(h1, cpu(1), Nanos::ZERO);
-    let mut now = Nanos::ZERO;
-    while now < Nanos(1000 * MS) {
-        for c in 0..2 {
-            s.schedule(cpu(c), now);
-        }
-        let next = (0..2).filter_map(|c| s.next_decision(cpu(c))).min().unwrap().min(Nanos(1000 * MS));
-        now = next;
-        for c in 0..2 {
-            s.charge(cpu(c), now);
-        }
-    }
-    let (got, _) = s.service(h0);
-    assert!(got <= 2 * P.lag_bound, "h0 ran {} ms of the second", got / MS);
-    assert!(s.service(tb).0 >= 1000 * MS - 2 * P.lag_bound);
 }

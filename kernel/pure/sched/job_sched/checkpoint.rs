@@ -5,11 +5,8 @@
 //! Each test asserts and prints its table (`cargo test -p kernel --lib
 //! --features sched-check -- checkpoint --nocapture`). "Bounded" means no
 //! persistent drift: a job's error over the longest window is within its error
-//! over a short one plus the EEVDF lag bound of the requests involved. The
-//! tests before the cross-CPU ones run the plain candidate
-//! (`Params::CANDIDATE`, per-CPU lag only); its `counterexample_` tests assert
-//! the drift that makes cross-CPU fairness necessary. Every figure is the
-//! model's, for the scenario that ran: not a hardware guarantee.
+//! over a short one plus the EEVDF lag bound of the requests involved. Every
+//! figure is the model's, for the scenario that ran: not a hardware guarantee.
 
 use super::sim::*;
 use super::*;
@@ -40,7 +37,7 @@ fn share(sim: &Sim, job: JobId) -> f64 {
 fn a_single_thread_job_keeps_one_cpu_beside_a_build_going_1_16_1() {
     for (name, topo) in [("flat4", flat(4)), ("t14", t14()), ("amd", amd()), ("flat16", flat(16))] {
         let m = topo.cpus() as u32;
-        let mut sim = Sim::new(topo, Params::CANDIDATE);
+        let mut sim = Sim::new(topo, Params::DEFAULT);
         let single = sim.job(WEIGHT_UNIT);
         let build = sim.job(WEIGHT_UNIT);
         sim.thread(single, Work::Hog, CpuId(0), false);
@@ -62,7 +59,7 @@ fn a_single_thread_job_keeps_one_cpu_beside_a_build_going_1_16_1() {
 
 #[test]
 fn weighted_builds_split_by_weight() {
-    let mut sim = Sim::new(flat(4), Params::CANDIDATE);
+    let mut sim = Sim::new(flat(4), Params::DEFAULT);
     let a = sim.job(2 * WEIGHT_UNIT);
     let b = sim.job(WEIGHT_UNIT);
     for i in 0..8 {
@@ -75,45 +72,9 @@ fn weighted_builds_split_by_weight() {
     assert_bounded(&sim, 1, "weighted");
 }
 
-/// **Counterexample.** Three single-thread jobs of equal weight on two CPUs.
-/// Each is entitled to 2/3 of a CPU; per-CPU queues give one of them a CPU of
-/// its own for as long as no CPU idles, and no load-driven move can help: any
-/// placement has loads 2 and 1. The error grows by 1/3 CPU-second per second.
-#[test]
-fn counterexample_three_single_thread_jobs_on_two_cpus() {
-    let mut sim = Sim::new(flat(2), Params::CANDIDATE);
-    for c in [0, 0, 1] {
-        let j = sim.job(WEIGHT_UNIT);
-        sim.thread(j, Work::Hog, CpuId(c), false);
-    }
-    sim.run_until(SPAN);
-    println!("{}", sim.report("3 single-thread jobs on 2 CPUs", Nanos::ZERO, &WINDOWS));
-    let drift = sim.window_error(0, 8000 * MS, Nanos::ZERO).max(sim.window_error(1, 8000 * MS, Nanos::ZERO));
-    assert!(drift >= 0.9 * 8000.0 / 3.0, "the error no longer grows with the window: {drift:.1} ms");
-}
-
-/// **Counterexample.** Two jobs of three threads on four CPUs. Placement
-/// {A,A} {A,B} {B} {B} has the same per-CPU loads (2/3, 2/3, 1/3, 1/3 of a
-/// job weight) as the fair {A,B} {A,B} {A} {B}, so balancing by load leaves
-/// it: A receives 1.5 CPUs and B 2.5 where each is entitled to 2.
-#[test]
-fn counterexample_a_fair_and_an_unfair_placement_have_the_same_loads() {
-    let mut sim = Sim::new(flat(4), Params::CANDIDATE);
-    let a = sim.job(WEIGHT_UNIT);
-    let b = sim.job(WEIGHT_UNIT);
-    let threads: Vec<_> =
-        [(a, 0), (a, 0), (a, 1), (b, 1), (b, 2), (b, 3)].iter().map(|&(j, c)| sim.thread(j, Work::Hog, CpuId(c), true)).collect();
-    // Placed by hand, then free once every CPU's weights have settled.
-    sim.run_until(Nanos(20 * MS));
-    for t in threads {
-        sim.unpin(t);
-    }
-    sim.run_until(SPAN);
-    println!("{}", sim.report("A3 B3 on 4 CPUs from {A,A} {A,B} {B} {B}", Nanos::ZERO, &WINDOWS));
-    assert!(share(&sim, a) < 1.6 && share(&sim, b) > 2.4, "balancing found the fair placement");
-}
-
-/// The counterexamples' scenarios and the others above, scaled to `m` CPUs.
+/// Scenarios scaled to `m` CPUs. The first two hold persistent rate gaps the
+/// design accepts (owner decision J1): m+1 single-thread jobs, where one CPU
+/// is always shared, and a placement whose loads equal a fair one's.
 type Scenario = (&'static str, fn(&mut Sim, u32));
 type Shape = (&'static str, fn() -> crate::sched::topology::Topology);
 
@@ -203,91 +164,6 @@ fn two_jobs(sim: &mut Sim, m: u32, work: Work, churn: u64) {
     sim.churn(churn, 1);
 }
 
-/// Open cases of the cross-CPU rule, each held to its own ceiling for the
-/// 10 s these scenarios run; the error grows with time, so the figure holds
-/// for that span only. Recorded on `issues/the-scheduler-and-the-clocks-never-talk.md`.
-///
-/// - **A dip below the share is repaid later.** A job whose runnable count
-///   dips below its fluid share without reaching zero shows a deficit against
-///   the jobs beside it, and ordering by normalized service repays it after
-///   the dip. On four identical CPUs the four sleepers' dips coincide.
-const OPEN: [(&str, &str, f64); 1] = [("flat4", "m duty 1/0.1 ms + 2m hogs", 250.0)];
-
-/// **Cross-CPU fairness** (`Params::cross_cpu_lag`), on every scenario above
-/// at four CPUs and both benches' shapes, with the rotating partner policy
-/// (each CPU compares itself with one other CPU per `fairness_period`; all
-/// partners are run beside it for comparison).
-///
-/// **The ceiling is empirical.** 120 ms per unit of weight, at every window
-/// from 100 ms to 8 s, for these scenarios. It is not a derived bound, and it
-/// depends on what they share:
-/// - widths of 4, 8 and 16 CPUs;
-/// - weights within 2:1;
-/// - the partner policy;
-/// - the simulator's stand-in balancer, which keeps loads roughly even;
-/// - leads that grow by a few ms per ms at most. Two jobs of many threads on
-///   disjoint CPUs can grow theirs faster, and a job spread over `k` CPUs can
-///   hold `k·lag_bound`.
-///
-/// One case is open and listed in [`OPEN`]: there the job's error is held to
-/// that entry's own ceiling instead, and the test says so when it runs.
-///
-/// The cost is printed: placement changes and migrations per second, beside
-/// the scenarios' own random migrations.
-#[test]
-fn cross_cpu_lag_stays_within_its_ceiling_on_every_scenario_and_shape() {
-    let p = Params::DEFAULT;
-    let ceiling = 120.0;
-    let shapes: [Shape; 3] = [("flat4", || flat(4)), ("t14", t14), ("amd", amd)];
-    let mut worst: f64 = 0.0;
-    let mut over = Vec::new();
-    for partners in [Partners::Rotating, Partners::All] {
-        for (shape, topo) in shapes {
-            for (name, setup) in scaled_scenarios() {
-                let mut sim = Sim::new(topo(), p);
-                sim.partners = partners;
-                let m = sim.topo.cpus() as u32;
-                setup(&mut sim, m);
-                sim.run_until(SPAN);
-                let jobs = sim.samples[0].1.len();
-                let mut line = format!("{partners:?} {shape:<6} {name:<46}");
-                for w in [100 * MS, 1000 * MS, 8000 * MS] {
-                    let e = (0..jobs).map(|j| sim.window_error(j, w, Nanos::ZERO)).fold(0.0, f64::max);
-                    line.push_str(&format!(" err@{}ms {e:>6.1}", w / MS));
-                }
-                let secs = SPAN.0 as f64 / 1e9;
-                line.push_str(&format!(
-                    "  changes/s {:>6.1} migrations/s {:>7.1}",
-                    sim.fairness_moves as f64 / secs,
-                    sim.migrations as f64 / secs
-                ));
-                println!("{line}");
-                if partners != Partners::Rotating {
-                    continue;
-                }
-                let open = OPEN.iter().find(|o| o.0 == shape && o.1 == name).map(|o| o.2);
-                if let Some(open) = open {
-                    println!("  OPEN case, held to {open:.0} ms instead");
-                }
-                for (j, job) in sim.jobs().iter().enumerate() {
-                    let scale = (sim.weight(*job) as f64 / WEIGHT_UNIT as f64).max(1.0);
-                    for w in [100 * MS, 1000 * MS, 4000 * MS, 8000 * MS] {
-                        let e = sim.window_error(j, w, Nanos::ZERO);
-                        if open.is_none() {
-                            worst = worst.max(e / scale);
-                        }
-                        if e > open.unwrap_or(ceiling) * scale {
-                            over.push(format!("{shape} {name}: job {j} {e:.1} ms over {} ms", w / MS));
-                        }
-                    }
-                }
-            }
-        }
-    }
-    println!("rotating: worst error per unit of weight {worst:.1} ms against a ceiling of {ceiling:.0} ms, open cases aside");
-    assert!(over.is_empty(), "{}", over.join("\n"));
-}
-
 fn rt_machine(
     params: Params,
     workers_per_cpu: usize,
@@ -369,16 +245,10 @@ fn the_ceiling_bounds_realtime_on_every_cpu() {
 /// any overrun; and realtime never runs continuously longer than two budgets
 /// (one interval's end and the next one's start) plus the overrun. Holds for
 /// never-revoked spinners in place, moved every 0.5 ms, overrunning by 200 µs,
-/// and for legitimate overload, under both the cross-CPU layer and the
-/// simpler design.
+/// and for legitimate overload.
 #[test]
 fn ordinary_work_gets_every_intervals_remainder() {
-    for base in [Params::DEFAULT, Params::CANDIDATE] {
-        ordinary_work_gets_every_intervals_remainder_under(Params { strikes_to_revoke: u32::MAX, ..base });
-    }
-}
-
-fn ordinary_work_gets_every_intervals_remainder_under(p: Params) {
+    let p = Params { strikes_to_revoke: u32::MAX, ..Params::DEFAULT };
     let periodic = Work::Periodic { period: 5_333 * US, work: 1_200 * US };
     for (title, per_cpu, work, hop, overrun) in [
         ("spinners", 1, Work::Hog, false, 0),
@@ -473,13 +343,9 @@ fn counterexample_runaway_detection_misses_brief_blocks_and_replaced_threads() {
     }
 }
 
-/// **The simpler direction** (owner, 2026-10-21): per-CPU EEVDF over job
-/// groups, group weight from the job's weight and its share of its runnable
-/// threads on that CPU, ordinary load balancing and idle steal, no cross-CPU
-/// service accounting — `Params::CANDIDATE`, run beside the cross-CPU layer
-/// (`Params::DEFAULT`) on every scenario and shape.
-///
-/// What the simpler design gives, asserted:
+/// Per-CPU EEVDF over job groups with ordinary load balancing and no
+/// cross-CPU service accounting (owner decision J1), on every scenario and
+/// shape. What it gives, asserted:
 /// - **The per-CPU rule.** A job receives, on each CPU running ordinary work,
 ///   its group weight over that CPU's summed group weight. Where threads
 ///   neither sleep nor are moved by churn, its service stays within two
@@ -496,56 +362,53 @@ fn counterexample_runaway_detection_misses_brief_blocks_and_replaced_threads() {
 ///   it scales with crowding: about `20n` ms for n equal threads on a CPU, a
 ///   fairness bound rather than a latency guarantee.
 ///
-/// The table prints, per design: the largest difference between a job's
-/// share and its fluid share (in CPUs, over the run), the longest any
-/// runnable thread waited, and migrations per second.
+/// The table prints the largest difference between a job's share and its
+/// fluid share (in CPUs, over the run), the longest any runnable thread
+/// waited, and migrations per second.
 #[test]
-fn the_simpler_design_follows_its_per_cpu_rule_and_bounds_every_wait() {
+fn each_job_follows_the_per_cpu_rule_and_every_wait_is_bounded() {
     let shapes: [Shape; 3] = [("flat4", || flat(4)), ("t14", t14), ("amd", amd)];
     let mut over = Vec::new();
     for (shape, topo) in shapes {
         for (name, setup) in scaled_scenarios() {
+            let p = Params::DEFAULT;
             let mut line = format!("{shape:<6} {name:<46}");
-            for (design, p) in [("simple", Params::CANDIDATE), ("cross", Params::DEFAULT)] {
-                let mut sim = Sim::new(topo(), p);
-                let m = sim.topo.cpus() as u32;
-                setup(&mut sim, m);
-                sim.run_until(SPAN);
-                let span = SPAN.0 as f64;
-                let fluid_gap = sim
-                    .jobs()
-                    .iter()
-                    .map(|j| ((sim.got[j].0 + sim.got[j].1) as f64 - sim.ideal[j]).abs() / span)
-                    .fold(0.0, f64::max);
-                let rule_gap = sim
-                    .jobs()
-                    .iter()
-                    .map(|j| ((sim.got[j].0 + sim.got[j].1) as f64 - sim.per_cpu_rule[j]).abs())
-                    .fold(0.0, f64::max);
-                line.push_str(&format!(
-                    " | {design}: share gap {fluid_gap:.3} CPUs, wait {:>5.1} ms, migr/s {:>6.1}",
-                    sim.longest_wait as f64 / MS as f64,
-                    sim.migrations as f64 / (span / 1e9)
+            let mut sim = Sim::new(topo(), p);
+            let m = sim.topo.cpus() as u32;
+            setup(&mut sim, m);
+            sim.run_until(SPAN);
+            let span = SPAN.0 as f64;
+            let fluid_gap = sim
+                .jobs()
+                .iter()
+                .map(|j| ((sim.got[j].0 + sim.got[j].1) as f64 - sim.ideal[j]).abs() / span)
+                .fold(0.0, f64::max);
+            let rule_gap = sim
+                .jobs()
+                .iter()
+                .map(|j| ((sim.got[j].0 + sim.got[j].1) as f64 - sim.per_cpu_rule[j]).abs())
+                .fold(0.0, f64::max);
+            line.push_str(&format!(
+                " | share gap {fluid_gap:.3} CPUs, wait {:>5.1} ms, migr/s {:>6.1}",
+                sim.longest_wait as f64 / MS as f64,
+                sim.migrations as f64 / (span / 1e9)
+            ));
+            let earned_ceiling = (3 * p.slice + 2 * p.lag_bound) as f64;
+            line.push_str(&format!(
+                ", rule gap {:>6.1} ms, entitled while waiting {:.2} of ceiling",
+                rule_gap / MS as f64,
+                sim.most_earned_waiting / earned_ceiling
+            ));
+            let steady = !name.contains("duty") && !name.contains("churn");
+            let rule_bound = (2 * p.slice * u64::from(m)) as f64;
+            if steady && rule_gap > rule_bound {
+                over.push(format!("{shape} {name}: {:.1} ms from the per-CPU rule", rule_gap / MS as f64));
+            }
+            if sim.most_earned_waiting > earned_ceiling {
+                over.push(format!(
+                    "{shape} {name}: a thread waited through {:.1} ms of its entitled service",
+                    sim.most_earned_waiting / MS as f64
                 ));
-                let earned_ceiling = (3 * p.slice + 2 * p.lag_bound) as f64;
-                line.push_str(&format!(
-                    ", rule gap {:>6.1} ms, entitled while waiting {:.2} of ceiling",
-                    rule_gap / MS as f64,
-                    sim.most_earned_waiting / earned_ceiling
-                ));
-                if design == "simple" {
-                    let steady = !name.contains("duty") && !name.contains("churn");
-                    let rule_bound = (2 * p.slice * u64::from(m)) as f64;
-                    if steady && rule_gap > rule_bound {
-                        over.push(format!("{shape} {name}: {:.1} ms from the per-CPU rule", rule_gap / MS as f64));
-                    }
-                    if sim.most_earned_waiting > earned_ceiling {
-                        over.push(format!(
-                            "{shape} {name}: a thread waited through {:.1} ms of its entitled service",
-                            sim.most_earned_waiting / MS as f64
-                        ));
-                    }
-                }
             }
             println!("{line}");
         }
@@ -568,25 +431,23 @@ fn share_gap(sim: &Sim, job: usize, from: Nanos, to: Nanos) -> f64 {
     ((a1 - a0) - (i1 - i0)) / to.since(from) as f64
 }
 
-/// A desktop beside a build, under both designs on both benches' shapes: a
+/// A desktop beside a build on both benches' shapes: a
 /// compositor (0.8 ms every 8.333 ms), a browser whose UI thread runs 2 ms and
 /// sleeps 14 ms beside three busy workers, an editor (0.5 ms every 50 ms) and
 /// a build of 2m threads. Reports each interactive thread's wake-to-run
 /// latency and each job's share gap in each half of the run (a gap that
-/// holds in both halves is a persistent rate gap), and asserts that every
-/// interactive wake runs within one 60 Hz frame under both designs, with and
-/// without latency requests (the shortest request) on the interactive threads.
+/// holds in both halves is a persistent rate gap). Asserts, with and without
+/// latency requests (the shortest request) on the interactive threads, that
+/// every interactive wake runs within one 60 Hz frame and that the compositor
+/// finishes every frame before its next release.
 #[test]
 fn a_desktop_beside_a_build_runs_every_interactive_wake_within_a_frame() {
     const FRAME: u64 = 16_667 * US;
     let shapes: [Shape; 2] = [("t14", t14), ("amd", amd)];
     for (shape, topo) in shapes {
-        for (design, p, latency_requests) in [
-            ("simple", Params::CANDIDATE, false),
-            ("simple+lat", Params::CANDIDATE, true),
-            ("cross", Params::DEFAULT, false),
-            ("cross+lat", Params::DEFAULT, true),
-        ] {
+        for latency_requests in [false, true] {
+            let p = Params::DEFAULT;
+            let design = if latency_requests { "latency requests" } else { "plain" };
             let mut sim = Sim::new(topo(), p);
             let m = sim.topo.cpus() as u32;
             let compositor = sim.job(WEIGHT_UNIT);
@@ -609,7 +470,7 @@ fn a_desktop_beside_a_build_runs_every_interactive_wake_within_a_frame() {
                 }
             }
             sim.run_until(SPAN);
-            let mut line = format!("{shape:<4} {design:<10}");
+            let mut line = format!("{shape:<4} {design:<16}");
             for (name, t) in [("compositor", c), ("ui", ui), ("editor", e)] {
                 let mut l = sim.latency[&t].clone();
                 l.sort_unstable();
