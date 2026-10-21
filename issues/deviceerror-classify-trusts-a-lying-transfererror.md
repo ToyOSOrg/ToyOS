@@ -52,8 +52,8 @@ error[E0277]: the trait bound `OnBudget: bcachefs::block_io::sealed::Sealed` is 
     --> bcachefs/tests/integration.rs:1009:34
 ```
 
-and by the same rule would refuse `kernel/src/block.rs`'s `impl` for the
-kernel's `BlockError`, the fileserver's for its `Attempted`
+and by the same rule would refuse `kernel/src/file_backing.rs`'s `impl` for
+the kernel's `BlockError`, the fileserver's for its `Attempted`
 (`system/fileserver/src/cache.rs`), the loader's `Outside`
 (`loader/src/microcode.rs`) and the crate's own test devices
 (`lib/bcachefs/tests/crash.rs`, `lib/bcachefs/tests/integration.rs`,
