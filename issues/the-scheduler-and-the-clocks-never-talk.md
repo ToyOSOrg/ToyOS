@@ -72,13 +72,15 @@ hardware latency guarantees. Stage 3 validates the kernel implementation on
 the supported machines.
 
 Stage 3 owes these decision points. A CPU decides again when its running
-request ends, and when a queued request due before the running one becomes
-eligible, at either level, once the running thread has run `min_slice`.
-Without the second, a thread whose request is due first but carries a little
+request ends, and when a queued group whose request is due before the running
+group's becomes eligible, once the running thread has run `min_slice`.
+Without the second, a job whose request is due first but carries a little
 debt waits out every longer request ahead of it. In the model's desktop mix
 beside a build, the compositor then finished a frame 9.4 ms after its release
 and missed it; with the second, it misses none on the T14 and AMD shapes,
-finishing within 1.6 ms. The kernel must arm each CPU's preemption timer for
+finishing within 1.7 ms. The kernel must arm each CPU's preemption timer for
 the earliest such instant at every decision and enqueue. The model's cost is
-361 to 417 switches per CPU per second in that mix, against 216 to 259
-without.
+226 to 293 switches per CPU per second in that mix, against 216 to 259
+without. Within a group the group's own request, as short as its shortest
+thread's, bounds the wait; deciding there as well cost 361 to 417 switches
+and improved no latency.
