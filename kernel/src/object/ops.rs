@@ -59,7 +59,7 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Namespace(_) => Rights::DUP.union(Rights::TRANSFER).union(Rights::READ),
         // A spawner gets everything a child handle offers: exit code, kill, and accounting.
         KObjectRef::Process(_) => BASE.union(Rights::READ).union(Rights::MANAGE),
-        KObjectRef::Null(_) => BASE.union(Rights::READ).union(Rights::WRITE),
+        KObjectRef::Null(_) => super::null::NullObject::RIGHTS,
     }
 }
 
@@ -350,8 +350,6 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
         KObjectRef::SysCap(_) => false,
         KObjectRef::Console(_) => false,
         KObjectRef::Process(_) => false,
-        // It has no watch: every poll on it answered as it was asked.
-        KObjectRef::Null(_) => false,
         KObjectRef::Device(d) => match d.class() {
             device_registry::DeviceType::Keyboard
             | device_registry::DeviceType::PciFunction
@@ -364,7 +362,7 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) => true,
+        | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => true,
     }
 }
 

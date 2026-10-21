@@ -208,6 +208,9 @@ const RUST_SKIP: &[&str] = &[
     // A std child's stdio, beside libc's: `libc_children` runs it on
     // tests/images/libccase.toml.
     "stdio_named",
+    // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
+    // runs it on tests/images/launchcase.toml.
+    "launch_unsent_stdio",
     // It claims the xHCI controller `xhci-leave=` leaves alone, which no other
     // boot's kernel does: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.
@@ -492,6 +495,9 @@ const MACHINE_TESTS: &[&str] = &[
     // libc's children: each program starts and waits for its own, which is
     // order, completion, contents and counts, and no hardware is in it.
     "libc_children",
+    // A launch's unsent stdio slots: its own boot, because the launcher it
+    // needs makes every spawn of a declared program a launch.
+    "a_launch_gives_each_unsent_stdio_slot_a_null",
     // A controller the kernel leaves alone, handed over to a claim whose
     // holder's No-Op is answered by an interrupt through it, and a transfer
     // aimed past the claim's grants: the hand-over, the interrupt through the
@@ -3935,6 +3941,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nvme_disk_boots" => nvme_disk_boots(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "libc_children" => common::libcchildren::libc_children(),
+        "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usbd_refused_without_smi_filter" => usbd_refused_on_amdvi(
             test_config,

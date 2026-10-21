@@ -16,12 +16,12 @@ use crate::time::Timespec;
 
 // The values `<fcntl.h>` declares.
 
-const O_RDONLY: i32 = 0;
-const O_WRONLY: i32 = 1;
-const O_RDWR: i32 = 2;
-const O_CREAT: i32 = 0x40;
-const O_TRUNC: i32 = 0x200;
-const O_APPEND: i32 = 0x400;
+pub(crate) const O_RDONLY: i32 = 0;
+pub(crate) const O_WRONLY: i32 = 1;
+pub(crate) const O_RDWR: i32 = 2;
+pub(crate) const O_CREAT: i32 = 0x40;
+pub(crate) const O_TRUNC: i32 = 0x200;
+pub(crate) const O_APPEND: i32 = 0x400;
 
 const SEEK_SET: i32 = 0;
 const SEEK_CUR: i32 = 1;

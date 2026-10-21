@@ -7,6 +7,7 @@
 //! this module runs.
 
 use crate::watch;
+use crate::object::null::NullObject;
 use crate::object::{ops, KObjectRef};
 use crate::time::{Cadence, Deadline, Duration};
 use crate::user_ptr::{UserBytes, UserBytesMut};
@@ -240,17 +241,13 @@ pub(super) fn sys_write_nonblock(h: RawHandle, buf: &UserBytes) -> u64 {
     }
 }
 
-/// A fresh null handle carrying `want`, which may name no right the null
-/// object's own handle lacks.
+/// A fresh null handle carrying `want`, a subset of [`NullObject::RIGHTS`].
 pub(super) fn sys_null(want: u64) -> u64 {
-    let object = KObjectRef::Null(crate::object::null::NullObject::new());
-    let full = ops::initial_rights(&object);
-    let Some(rights) = u32::try_from(want).ok().and_then(Rights::from_bits) else {
-        return SyscallError::InvalidArgument.to_u64();
+    let rights = match u32::try_from(want).ok().and_then(Rights::from_bits) {
+        Some(rights) if NullObject::RIGHTS.contains(rights) => rights,
+        _ => return SyscallError::InvalidArgument.to_u64(),
     };
-    if !full.contains(rights) {
-        return SyscallError::InvalidArgument.to_u64();
-    }
+    let object = KObjectRef::Null(NullObject::new());
     let entry = crate::object::HandleEntry::new(object, rights);
     match process::with_process_data(|data| data.handles.install(entry)) {
         Ok(h) => h.0 as u64,

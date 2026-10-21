@@ -4,14 +4,22 @@
 
 use alloc::sync::Arc;
 
+use toyos_abi::handle::Rights;
+
 use super::{KObjectVariant, ObjectCore};
 
 pub struct NullObject {
-    /// Visible to `object`, where `kobject!` generates this type's `core()`.
     pub(super) core: ObjectCore,
 }
 
 impl NullObject {
+    /// What a fresh null handle may carry.
+    pub const RIGHTS: Rights = Rights::DUP
+        .union(Rights::TRANSFER)
+        .union(Rights::WAIT)
+        .union(Rights::READ)
+        .union(Rights::WRITE);
+
     pub fn new() -> Arc<Self> {
         Arc::new(Self { core: Self::new_core() })
     }

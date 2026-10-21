@@ -90,7 +90,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::path::Path;
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -2661,7 +2661,8 @@ fn start<'a>(
     // and the supervisor's console to read as its stdin; `logkeeper` also gets the acceptor
     // the rings reach it on and the one console handle that may write. A
     // launch keeps the slots its caller sent, but for a ring among them —
-    // the caller's own log — which is replaced by the program's.
+    // the caller's own log — which is replaced by the program's, and a stdio
+    // slot it sent nothing for is a null, never this process's own.
     let mut ring: Option<SharedMemory> = None;
     let mut origins: Option<Acceptor> = None;
     let log: &mut Log = match output {
@@ -2684,6 +2685,7 @@ fn start<'a>(
             log
         }
         Output::Launch { log, slots } => {
+            command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             for &(slot, handle) in slots {
                 let caller_ring = matches!(slot, 1 | 2)
                     && toyos_abi::syscall::fstat(handle)

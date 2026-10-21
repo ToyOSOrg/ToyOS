@@ -567,7 +567,7 @@ pub enum FileType {
     /// Any other shared-memory region, such as a device's registers; `size`
     /// is its length. A peer's buffer is never one.
     DeviceMemory = 13,
-    /// A [null](null) handle: a character device to POSIX.
+    /// A [null](null) handle.
     Null = 14,
 }
 

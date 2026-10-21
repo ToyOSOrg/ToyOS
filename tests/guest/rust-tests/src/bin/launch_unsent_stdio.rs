@@ -1,0 +1,57 @@
+//! A program the supervisor launches holds a null in each stdio slot its
+//! caller sent nothing for, never the supervisor's own console or log ring:
+//! a launched `cat` sent only a stdout reads end of file at once and writes
+//! nothing, and a launched `echo` sent no slot at all says [`UNSENT`]
+//! nowhere. [`SENT`], said by one sent this job's stdout, is what the host
+//! waits for before it asserts that.
+//!
+//! The launches are made through `toyos::spawn` with the slots named
+//! outright, so which ones a launch carries is this test's, not what a
+//! table's free slot happens to hold.
+//!
+//! `a_launch_gives_each_unsent_stdio_slot_a_null` runs it on QEMU x86-64
+//! (`tests/images/launchcase.toml`), whose test-runner holds a launcher.
+
+use toyos::AsHandle;
+use toyos::spawn::{Launched, Parent, Spawn};
+
+const UNSENT: &str = "nothing-sent-said-this";
+const SENT: &str = "slot-sent-said-this";
+
+/// `program` with `argv` launched with exactly `slots`, and waited for.
+fn launched(program: &str, argv: &[u8], slots: &[[u32; 2]]) {
+    let request = Spawn {
+        program,
+        image: None,
+        argv,
+        env: b"",
+        cwd: "/",
+        slots,
+        stdio: slots.len(),
+        endow: &[],
+        provided: &[],
+        parent: Parent::Caller,
+    };
+    let mut answer = vec![0u8; toyos::ipc::MAX_FRAME_LEN as usize];
+    let child = match request.launch(&mut answer) {
+        Ok(Launched::Started(child)) => child,
+        Ok(Launched::Direct { .. }) => panic!("{program} was not launched: this boot's runner holds a launcher"),
+        Err(refused) => panic!("the launch of {program} was refused: {refused:?}"),
+    };
+    let end = child.wait().unwrap_or_else(|e| panic!("wait for {program}: {e:?}"));
+    assert!(end.success(), "{program} launched with slots {slots:?} ended {end:?}");
+}
+
+fn main() {
+    let (read, write) = toyos::pipe_pair().expect("a pipe");
+    launched("/system/bin/cat", b"/system/bin/cat", &[[1, write.as_handle().0]]);
+    drop(write);
+    let mut buf = [0u8; 64];
+    let n = read.read(&mut buf).expect("read what cat wrote");
+    assert_eq!(n, 0, "a launched cat sent no stdin wrote {:?}", String::from_utf8_lossy(&buf[..n]));
+
+    launched("/system/bin/echo", format!("/system/bin/echo\0{UNSENT}").as_bytes(), &[]);
+    let out = toyos::spawn::inherited(1).expect("this job's stdout").expect("this job holds a stdout");
+    launched("/system/bin/echo", format!("/system/bin/echo\0{SENT}").as_bytes(), &[[1, out.as_handle().0]]);
+    eprintln!("launch_unsent_stdio: a launched cat sent no stdin read end of file");
+}

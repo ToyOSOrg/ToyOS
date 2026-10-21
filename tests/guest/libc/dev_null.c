@@ -1,8 +1,8 @@
 /* `/dev/null` opens for reading and writing: a read answers 0, a write of n
    bytes answers n, it is a character device that is no terminal, poll finds it
-   ready both ways, its access mode holds, and a child given it as stdin and
-   stdout by file actions, as Ninja and LLVM give it, reads end of file and has
-   its write taken. */
+   ready both ways, its access mode holds, `fopen` opens it as `open` does,
+   and a child given it as stdin and stdout by file actions, as Ninja and LLVM
+   give it, reads end of file and has its write taken. */
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/stat.h>
@@ -53,6 +53,15 @@ int main(int argc, char **argv) {
     CHECK(write(w, block, 1) == 1, "write of O_WRONLY");
     CHECK(read(w, buf, 1) < 0, "a read of an O_WRONLY /dev/null was answered");
     close(w);
+
+    FILE *out = fopen("/dev/null", "w");
+    CHECK(out != NULL, "fopen \"w\"");
+    CHECK(fputs("taken\n", out) >= 0, "fputs");
+    CHECK(fclose(out) == 0, "fclose of \"w\"");
+    FILE *in = fopen("/dev/null", "r");
+    CHECK(in != NULL, "fopen \"r\"");
+    CHECK(fgetc(in) == EOF && feof(in), "fgetc of \"r\" was not end of file");
+    CHECK(fclose(in) == 0, "fclose of \"r\"");
 
     posix_spawn_file_actions_t actions;
     CHECK(posix_spawn_file_actions_init(&actions) == 0, "refused");
