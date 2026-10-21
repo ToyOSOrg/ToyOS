@@ -89,9 +89,8 @@ const NMI_SILENT: &[&str] =
     &["kernel/src/arch/x86_64/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
 
 /// Every `enable_bus_master(` site `kernel/src` holds, by file and count.
-/// Arming DMA comes after a site's refusals — virtio parses its capability
-/// chain first and disarms on one it cannot use — and the three early-enabling
-/// MMIO drivers are `issues/bus-mastering-rides-memory-decode.md`'s to fix, not a precedent.
+/// Arming DMA comes after a site's refusals: virtio parses its capability
+/// chain first and disarms on one it cannot use.
 ///
 /// A function handed to a *process* takes the other path: `pcidev` arms bus
 /// mastering with `start_bus_mastering`, after the address space that bounds it

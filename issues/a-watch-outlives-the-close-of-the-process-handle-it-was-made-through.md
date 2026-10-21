@@ -18,8 +18,8 @@ ring holding one watch on a duplicate of a held child's handle answers nothing
 at the submit after the duplicate's close, and answers token 7 with result -1
 once the child ends.
 
-By `close_ends_polls`, a console's, the log's and a keyboard claim's polls are
-kept the same way.
+By `close_ends_polls` (`kernel/src/object/ops.rs`), a system capability's, a
+console's and a PCI function, ISA or ACPI claim's polls are kept the same way.
 
 **Exit**: a handle's close answers the polls its own process made through it,
 and no other handle's; a test watches a held child through a duplicate, closes

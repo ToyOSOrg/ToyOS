@@ -36,5 +36,18 @@ Owned by stage S4 of the scheduler design (#872), per-thread EEVDF, which
 deletes the frozen insertion keys: the orchestrator's application of the
 owner's ruling (#885) on PR #874 files it there.
 
+**Before #874**, the scout behind it (`wt/toyos-scout-sys` at `fbb958b17`,
+https://github.com/ToyOSOrg/ToyOS/pull/866#issuecomment-6119438569) timed a
+ping-pong pair beside eight CPU-bound spinners on eight CPUs, post to
+dispatch, as bucket upper bounds: on the T14 p50 ≤3.41 ms, p99 ≤6.82 ms,
+max 6.69 ms; on the AMD bench p50 ≤2.62 ms, p99 ≤7.86 ms, max 7.55 ms. With no
+core idle, such a wake is the fair band's pick to decide. In EEVDF (Stoica et
+al., "A Proportional Share Resource Allocation Algorithm for Real-Time,
+Time-Shared Systems", RTSS 1996) a task woken inside a quantum is picked no
+sooner than the next quantum's start, and a wake's quantum here is the
+protected run, `PROTECTED_RUN_NS` (1 ms).
+
 **Exit**: S4's re-run of K1–K4 on both benches, which reads phases 2, 3 and 5
-against the base numbers above.
+against the base numbers above; and a metal row on the T14 and the AMD bench
+with eight CPU-bound threads on eight CPUs that holds a woken task to run within
+one protected run and reports its p99.

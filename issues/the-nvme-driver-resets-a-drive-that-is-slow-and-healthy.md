@@ -4,10 +4,10 @@ kind: defect
 opened: 2026-09-26
 ---
 
-# blockd resets a drive that is slow and healthy
+# The NVMe driver resets a drive that is slow and healthy
 
-blockd reclaims a command the controller has not answered in
-`COMMAND_SILENCE`, ten seconds (`userland/blockd/src/main.rs`), by resetting the
+The NVMe driver reclaims a command the controller has not answered in
+`COMMAND_SILENCE`, ten seconds (`system/nvme/src/main.rs`), by resetting the
 controller. NVMe bounds no command's time, and a Flush of a large volatile
 cache is the slowest thing a healthy drive does: a drive still flushing at ten
 seconds is reset, every command it held is answered `Device`, and a flush

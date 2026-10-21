@@ -12,12 +12,12 @@ ToyOS (root `CLAUDE.md`), and stage 7 of
 builds each one outside this repository against published SDK crates alone.
 Five of the six apps cannot, because of how they find JetBrains Mono:
 
-- `editor` (`src/main.rs:1444`), `files` (`:59`) and `paint` (`:173`) read
+- `editor` and `paint` (each `src/main.rs`) read
   `/system/share/fonts/JetBrainsMono-Regular-8x16.font` and `expect` it, so on
-  a host they build and then panic at start; `files` reads its icons,
-  `/system/share/icons/*.svg`, the same way, and draws its text from
-  `/system/share/fonts/JetBrainsMono-Regular.ttf` at its window's scale.
-- `calc` (`build.rs:32`) and `snake` (`build.rs:7`) read
+  a host they build and then panic at start; `files` reads its font,
+  `/system/share/fonts/JetBrainsMono-Regular.ttf`, which it draws at its
+  window's scale, and its icons, `/system/share/icons/*.svg`, the same way.
+- `calc` and `snake` (each `build.rs`) read
   `../../assets/JetBrainsMono-Regular.ttf` in their build scripts, a path
   into this tree.
 

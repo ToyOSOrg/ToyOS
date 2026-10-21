@@ -25,8 +25,8 @@ machine has one.
 **It is not the default.** Plain `cargo run` and the default test config still
 boot `-vga none` with virtio-gpu or with no display device, so `gop.rs` is
 exercised only by `--gop`, by `--metal-sim` (which every machine test now
-boots), by the screen tests, and by `screen_gop_firmware_mode`. Every other test
-in the suite still says nothing about the display path a laptop takes.
+boots), by the screen tests, and by metal boots. Every other test in the suite
+still says nothing about the display path a laptop takes.
 
 **Why it is its own landing.** `Profile::Headless` is what the suite's
 non-display profiles are, so giving the floor a display changes the boot config
@@ -39,9 +39,9 @@ panel too.
 firmware already set. A profile says what panel its display advertises over EDID
 (`Shape::panel`) and the firmware sets that mode: `Profile::Metal` advertises
 the T14's 1920x1080 and metal-sim's screen is now the laptop's, 240x67 cells
-with the 8-pixel strip below them. `screen_gop_firmware_mode` is the gate —
+with the 8-pixel strip below them. `screen_gop_firmware_mode`, the gate —
 QEMU's scanout geometry over QMP against the kernel's own `GOP:` line, on two
-machines advertising different panels.
+machines advertising different panels — was cut in `520c0d129`.
 
 **What the repaints cost, re-measured.** `e5e600f`'s message gave two figures
 that cannot both be true — "~13ms per repaint" and "135ms to 181ms" for six of
@@ -66,6 +66,6 @@ images are one millisecond apart.
 The sentence this replaces said each phase boundary also carries a `wbinvd` QEMU
 ignores, so metal would pay six cache-hierarchy flushes the measurement could not
 see. It stopped being true at `1134414e`, which made the scanout write-combining
-and left `flush_stores` — one `SFENCE`, `kernel/src/drivers/panic_console/mod.rs:944` —
-in its place; `grep -rn 'wbinvd' kernel/src/drivers/panic_console/` finds nothing.
+and left `flush_stores` — one `SFENCE`, `arch::barrier::scanout_flush`, from
+`kernel/src/drivers/panic_console/mod.rs` — in its place; `grep -rn 'wbinvd' kernel/src/drivers/panic_console/` finds nothing.
 No unmeasured metal cost hides behind these numbers on that account.

@@ -8,14 +8,14 @@ opened: 2026-08-31
 
 Commit `09250c97` closed the design-debt entry over a hand-written
 `DeviceError::Failed` collapsing a refusal by sealing `DeviceError`'s
-variants behind a private `Sealed` witness (`lib/bcachefs/src/block_io.rs:69-100`)
+variants behind a private `Sealed` witness (`lib/bcachefs/src/block_io.rs`)
 and stating the class was now "unrepresentable in safe code outside the
 crate rather than merely unused." Two `compile_fail` doctests back that —
 the old `.map_err(|_| DeviceError::Failed)` erasure, and naming `Sealed`
 directly — and both do fail to compile.
 
 But `DeviceError::classify<E: TransferError>(err: &E) -> Self`
-(`block_io.rs:93-99`) is `pub`, and `TransferError` (`block_io.rs:83-86`) is
+(`block_io.rs`) is `pub`, and `TransferError` is
 a `pub trait` with one method, `refused_before_attempt(&self) -> bool`, that
 any external crate can implement to answer however it likes. Built and run
 outside the crate (path-dependency on `bcachefs`, 2026-08-31):
@@ -53,8 +53,11 @@ error[E0277]: the trait bound `OnBudget: bcachefs::block_io::sealed::Sealed` is 
 ```
 
 and by the same rule would refuse `kernel/src/block.rs`'s `impl` for the
-kernel's `BlockError`, fsd's for its `DiskError` (`userland/fsd/src/cache.rs`)
-and the host harness's file-backed device (`tests/common/storage.rs`).
+kernel's `BlockError`, the fileserver's for its `Attempted`
+(`system/fileserver/src/cache.rs`), the loader's `Outside`
+(`loader/src/microcode.rs`) and the crate's own test devices
+(`lib/bcachefs/tests/crash.rs`, `lib/bcachefs/tests/integration.rs`,
+`lib/bcachefs/tests/upstream_fixture.rs`).
 Implementing `TransferError` from outside is what the trait is *for*: a
 foreign block device is the only authority on whether its own transfer was
 attempted. Making `classify` crate-private has the identical problem, because

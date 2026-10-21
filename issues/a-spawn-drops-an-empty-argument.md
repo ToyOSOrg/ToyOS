@@ -17,7 +17,16 @@ and `OsStr` allow, refuses the spawn. Read from the code while building
 reproduced: `tests/guest/libc` passes `""` only where the child reads no
 argument. Build tools pass empty arguments (`make`'s recipes, `sh -c ''`).
 
+A launch through the supervisor carries the same blob (`toyos::launch`'s
+request names it "exactly the blobs `SYS_SPAWN` takes") and loses the same
+arguments before any spawn: `serve_launch` (`system/supervisor/src/main.rs`)
+splits `request.argv` on `NUL`, filters out every empty argument, and skips an
+argument that is not UTF-8 without refusing the launch, so a launched child
+sees neither.
+
 *Exit*: a child spawned with `argv` `["a", "", "b"]` and with a non-UTF-8
-argument reads both as given, in a guest test, red with the filter put back.
+argument reads both as given, in a guest test, red with the kernel's filter put
+back; and a host test of the supervisor's decode of a launch request's `argv`
+keeps an empty and a non-UTF-8 argument, red with its filter put back.
 The blob needs a representation that says where an argument ends without
 leaning on an empty one, an argument count beside it, say.

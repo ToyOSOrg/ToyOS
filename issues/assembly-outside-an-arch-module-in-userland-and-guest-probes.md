@@ -17,10 +17,11 @@ the loader now hold none outside those; what is left:
   or the raw `syscall` gate with arguments no SDK call will pass. They run in
   the x86-64 suite, which is the only suite until the harness gains its arch
   axis (the port's stage 8).
-- The userland drivers `netd` (`virtio_net.rs`, `i219.rs`) and `soundd`
-  (`virtio.rs`) order their DMA rings with `fence(Release)`/`fence(Acquire)`.
-  That is not assembly and no rule reds on it, but it is the same missing
-  interface: on AArch64 a `fence` is `dmb ish`, which orders nothing a device
+- The userland drivers order their DMA rings through
+  `toyos_device_memory::DmaBuffers`'s `publish` and `observe`, which a claimed
+  function's `Grant` (`lib/pci-claim/src/lib.rs`) answers with
+  `fence(Release)`/`fence(Acquire)`. That is not assembly and no rule reds on
+  it, but it is the same missing interface: on AArch64 a `fence` is `dmb ish`, which orders nothing a device
   outside the inner-shareable domain observes (the kernel's `arch::barrier`
   says why, and `Mmio` carries `writel`/`readl` ordering there).
 - `usbd` (`hc.rs`'s `Ring` and doorbell, `bus.rs`'s EP0 transfers) has the

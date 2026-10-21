@@ -7,12 +7,12 @@ opened: 2026-09-29
 # A thread's kernel stack has no guard page
 
 A thread's 128 KiB kernel stack is a kernel-heap allocation in the direct map
-(`kernel/src/loader/start.rs:26`), with live heap memory on either side. An
+(`KernelStack`, `kernel/src/loader/start.rs`), with live heap memory on either side. An
 overflow writes into whatever the heap put below it; the only check is
 `check_stack_canary`'s word at the stack's end, read on the thread's next
-scheduler pass (`kernel/src/sched/driver.rs:521,592,925-935`), after the
+scheduler pass (`kernel/src/sched/driver.rs`), after the
 write. The per-CPU idle stacks already have an unmapped page below them
-(`kernel/src/arch/x86_64/percpu.rs:482`). Linux at `Ubuntu-6.8.0-142.142`,
+(`kernel/src/arch/x86_64/percpu.rs`). Linux at `Ubuntu-6.8.0-142.142`,
 under the T14's `CONFIG_VMAP_STACK=y`, maps every task stack in vmalloc space
 between guard pages (`kernel/fork.c:314-318`, `arch/Kconfig:1327-1336`), so
 the first write past the end faults.
