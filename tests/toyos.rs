@@ -4429,7 +4429,7 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Ser
     log.must_say("usbd_spare: the claim refuses its interrupt read: Io")?;
 
     let rewritten = log.must_say("usbd_spare: MSI-X entry 0's data ")?;
-    log.must_say(&format!("usbd {at}: the claim refused its interrupt record (Io)"))?;
+    log.must_say(&format!("usbd {at}: ENDED — the claim refused its interrupt record (Io)"))?;
     log.must_say("usbd_spare: usbd ended on the claim's refusal")?;
     // Refused by the unit, not delivered to a vector nobody holds: the stop's
     // census names every vector the unclaimed gate took.
@@ -4515,6 +4515,19 @@ fn usb_controllers(kernel: &serial::Serial) -> Vec<String> {
         .collect()
 }
 
+/// No DMA refused on the AMD bench's testcases boot but the spare's: that boot
+/// also carries `amdvi_usbd_drives_its_own_entry`, whose jobs aim
+/// [`AMD_XHCI_SPARE`] past its grant and at a vector not its own, and which
+/// judges those records itself.
+fn no_fault_but_the_spares(kernel: &serial::Serial) -> Result<(), String> {
+    kernel.alive()?;
+    let spares = format!(" stream={AMD_XHCI_SPARE} ");
+    match kernel.text().lines().find(|l| l.contains("iommu: DMA FAULT") && !l.contains(&spares)) {
+        Some(line) => Err(format!("a DMA refusal no job asked for: {line:?}")),
+        None => Ok(()),
+    }
+}
+
 /// usbd's word that it serves the boot stick: its first disk offered.
 const STICK_SERVED: &str = ": serving it as disk 0";
 
@@ -4528,7 +4541,7 @@ fn amdvi_translates(kernel: &serial::Serial, log: &serial::Serial) -> Result<(),
         return Err(format!("no AMD-Vi unit is translating:\n{text}"));
     }
     kernel.must_not_say("isolates no device")?;
-    kernel.must_not_say("iommu: DMA FAULT")?;
+    no_fault_but_the_spares(kernel)?;
     let controllers = usb_controllers(kernel);
     if controllers.is_empty() {
         return Err(format!("no xHCI controller was handed over:\n{text}"));
@@ -4581,7 +4594,7 @@ fn amdvi_remaps(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), Str
     if !remaps.contains(&format!(" {apics} I/O APIC(s) named")) {
         return Err(format!("{remaps:?} does not name the {apics} I/O APIC(s) the MADT has"));
     }
-    kernel.must_not_say("iommu: DMA FAULT")?;
+    no_fault_but_the_spares(kernel)?;
     let controllers = usb_controllers(kernel);
     for at in &controllers {
         let data = text
