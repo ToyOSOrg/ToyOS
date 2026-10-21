@@ -51,8 +51,22 @@ fn be(value: &BigUint, n: usize) -> Option<Vec<u8>> {
     support::fixed_be(&value.to_bytes_be(), n)
 }
 
+/// The point of y^2 = x^3 - 3x + b with the least x, for p = 3 mod 4,
+/// whose square roots are a power.
+fn small_x(p: &BigUint, b: &BigUint) -> (BigUint, BigUint) {
+    let root = (p + 1u8) >> 2;
+    (0u32..)
+        .map(BigUint::from)
+        .find_map(|x| {
+            let rhs = (&x * &x * &x + p * 3u8 - &x * 3u8 + b) % p;
+            let y = rhs.modpow(&root, p);
+            (&y * &y % p == rhs).then_some((x, y))
+        })
+        .unwrap()
+}
+
 macro_rules! sec1_case {
-    ($curve:ident, $width:literal, $prime:literal, $case:expr, $rng:expr) => {{
+    ($curve:ident, $width:literal, $prime:literal, $b:literal, $case:expr, $rng:expr) => {{
         use p256::elliptic_curve::sec1::ToEncodedPoint;
         let (case, rng): (usize, &mut Rng) = ($case, $rng);
         let p = BigUint::parse_bytes($prime, 16).unwrap();
@@ -62,7 +76,7 @@ macro_rules! sec1_case {
             }
         };
         let valid = secret.public_key().to_encoded_point(false).as_bytes().to_vec();
-        let (x, y) = (BigUint::from_bytes_be(&valid[1..1 + $width]), BigUint::from_bytes_be(&valid[1 + $width..]));
+        let y = BigUint::from_bytes_be(&valid[1 + $width..]);
         let edges = || [p.clone(), &p + 1u8, &p - 1u8, (BigUint::from(1u8) << (8 * $width)) - 1u8, BigUint::from(0u8)];
         let mut input = valid.clone();
         match rng.below(8) {
@@ -78,11 +92,13 @@ macro_rules! sec1_case {
                 let e = edges()[rng.below(5)].clone();
                 input[1 + $width..].copy_from_slice(&be(&e, $width).unwrap());
             }
-            // A coordinate plus p: the same residue, not a canonical encoding.
+            // A point whose x is small enough to be encoded plus p: the same
+            // residue, not a canonical encoding. Or the point itself.
             4 => {
-                if let Some(bytes) = be(&(&x + &p), $width) {
-                    input[1..1 + $width].copy_from_slice(&bytes);
-                }
+                let (small, y) = small_x(&p, &BigUint::parse_bytes($b, 16).unwrap());
+                let x = if rng.chance(50) { &small + &p } else { small };
+                input[1..1 + $width].copy_from_slice(&be(&x, $width).unwrap());
+                input[1 + $width..].copy_from_slice(&be(&y, $width).unwrap());
             }
             5 => input = secret.public_key().to_encoded_point(true).as_bytes().to_vec(),
             6 => input[0] = [0, 2, 3, 5, 6, 7][rng.below(6)],
@@ -100,13 +116,21 @@ macro_rules! sec1_case {
 #[test]
 fn sec1_points() {
     seeded(CASES, 0x5ec1, |case, rng| {
-        sec1_case!(p256, 32, b"ffffffff00000001000000000000000000000000ffffffffffffffffffffffff", case, rng)
+        sec1_case!(
+            p256,
+            32,
+            b"ffffffff00000001000000000000000000000000ffffffffffffffffffffffff",
+            b"5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b",
+            case,
+            rng
+        )
     });
     seeded(CASES, 0x5ec2, |case, rng| {
         sec1_case!(
             p384,
             48,
             b"fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffeffffffff0000000000000000ffffffff",
+            b"b3312fa7e23ee7e4988e056be3f82d19181d9c6efe8141120314088f5013875ac656398d8a2ed19d2a85c8edd3ec2aef",
             case,
             rng
         )

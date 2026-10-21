@@ -157,6 +157,34 @@ fn nist_curve_boundary_scalars() {
     );
 }
 
+/// RFC 8017 §8.2.2 step 1: a signature is exactly the modulus's length. A
+/// signature whose first byte is zero, without that byte or with another
+/// before it, is the same integer, and refused.
+#[test]
+fn rsa_signature_is_the_modulus_length() {
+    use ring::signature::{self, RsaKeyPair, RsaPublicKeyComponents};
+    let private = RsaKeyPair::from_pkcs8(include_bytes!("keys/rsa-2048.pk8")).unwrap();
+    let public: RsaPublicKeyComponents<Vec<u8>> = private.public().into();
+    let ours = toyos_crypto::rsa::PublicKey::from_components(&public.n, &public.e).unwrap();
+    let random = ring::rand::SystemRandom::new();
+    // PKCS #1 v1.5 is deterministic: about one message in 256 signs to a
+    // leading zero.
+    let (message, sig) = (0u32..)
+        .map(|i| {
+            let mut sig = vec![0; private.public().modulus_len()];
+            private.sign(&signature::RSA_PKCS1_SHA256, &random, &i.to_be_bytes(), &mut sig).unwrap();
+            (i.to_be_bytes(), sig)
+        })
+        .find(|(_, sig)| sig[0] == 0)
+        .unwrap();
+    let verify = |sig: &[u8]| ours.verify_pkcs1_v1_5(toyos_crypto::rsa::Hash::Sha256, &message, sig);
+    verify(&sig).unwrap();
+    for changed in [sig[1..].to_vec(), [&[0][..], &sig].concat()] {
+        assert_eq!(verify(&changed), Err(toyos_crypto::Error::Length), "{} bytes", changed.len());
+        assert!(public.verify(&signature::RSA_PKCS1_2048_8192_SHA256, &message, &changed).is_err());
+    }
+}
+
 #[test]
 fn openssh_construction_matches_independent_primitives() {
     use chacha20::cipher::{KeyIvInit, StreamCipher, StreamCipherSeek};
