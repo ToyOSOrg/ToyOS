@@ -3,8 +3,13 @@
 //! and what starting an AP takes on either architecture.
 
 use core::mem::size_of;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
+use kernel::sched::topology::{CpuKeys, Level, Topology};
+
+use crate::log;
 
 use crate::smp_roster::{Roster, MAX_CPUS};
 
@@ -39,6 +44,36 @@ pub fn set_ready() {
 /// kernel thread can make progress, and the panic path waits for none of them.
 pub fn is_ready() -> bool {
     ROSTER.released()
+}
+
+static TOPOLOGY: AtomicPtr<Topology> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the cache tree, from each online CPU's keys in dense-id order: once,
+/// by bring-up, after its last commit. Keys that are not one tree stop the
+/// boot by name rather than schedule on a guess.
+pub fn set_topology(keys: Vec<CpuKeys>) {
+    assert_eq!(keys.len(), cpu_count() as usize, "smp: a topology key set for every online cpu and no other");
+    for (cpu, k) in keys.iter().enumerate() {
+        log!("topo: cpu{cpu} core={:#x} llc={:#x} pkg={:#x}", k.core, k.llc, k.package);
+    }
+    let topology = Topology::new(keys).unwrap_or_else(|e| panic!("smp: the CPUs' keys are no tree: {e:?}"));
+    log!(
+        "topo: {} cpus in {} cores, {} llcs and {} packages",
+        topology.cpus(),
+        topology.domains(Level::Core),
+        topology.domains(Level::Llc),
+        topology.domains(Level::Package),
+    );
+    let was = TOPOLOGY.swap(Box::into_raw(Box::new(topology)), Ordering::Release);
+    assert!(was.is_null(), "smp: the topology is installed once");
+}
+
+/// The tree [`set_topology`] installed.
+pub fn topology() -> &'static Topology {
+    let ptr = TOPOLOGY.load(Ordering::Acquire);
+    assert!(!ptr.is_null(), "smp: the topology was read before bring-up installed it");
+    // SAFETY: installed once from a leaked `Box` and never freed.
+    unsafe { &*ptr }
 }
 
 /// The actuator staging a non-last AP that never starts; `false` without `boot-actuators`.

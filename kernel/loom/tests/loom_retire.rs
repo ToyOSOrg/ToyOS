@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
 
 use loom::sync::Arc;
 use kernel_loom::sched::cpu::{Balance, CpuHandle, CpuHandles, CpuSched, Env, RunToken, SchedPass};
+use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::fair::{FairShare, Frontier, ShareState};
 use kernel_loom::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent};
 use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer, Urgency};
@@ -38,7 +39,7 @@ fn world() -> (Arc<World>, Vec<MailboxConsumer<Msg>>) {
     let (tx1, rx1) = mailbox::<Msg>();
     (
         Arc::new(World {
-            cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx0), CpuHandle::new(CPU1, tx1)]),
+            cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx0), CpuHandle::new(CPU1, tx1)], Topology::flat(2)),
             kicks: Kicks::new(),
             preempt: PreemptModel::new(),
         }),
@@ -435,7 +436,7 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
     model(|| {
         let (tx, rx) = mailbox::<TaskMsg>();
         let owner = Arc::new(Owner {
-            cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)]),
+            cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)], Topology::flat(1)),
             hw: Silent,
             frontier: Frontier::new(),
         });

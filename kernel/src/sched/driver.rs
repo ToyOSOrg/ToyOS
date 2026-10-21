@@ -367,7 +367,7 @@ pub fn init() {
         }
     }
     CPUS.store(
-        Box::into_raw(Box::new(CpuHandles::new(handles))),
+        Box::into_raw(Box::new(CpuHandles::new(handles, crate::smp::topology().clone()))),
         Ordering::Release,
     );
 }

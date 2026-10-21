@@ -7,6 +7,7 @@
 //! SMT siblings four ids apart on one bench and adjacent on another.
 
 use alloc::collections::BTreeMap;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use crate::sched::hw::CpuId;
@@ -43,10 +44,38 @@ pub enum TopologyError {
     LlcSpansPackages { llc: u32 },
 }
 
+/// Positions `start..end` of [`Topology::order`].
+#[derive(Clone, Copy, Debug)]
+struct Run {
+    start: usize,
+    end: usize,
+}
+
+impl Run {
+    fn contains(self, position: usize) -> bool {
+        (self.start..self.end).contains(&position)
+    }
+}
+
+/// Where one CPU sits in [`Topology::order`]: its own position and the runs
+/// its core, LLC and package occupy, each inside the next.
+#[derive(Clone, Copy, Debug)]
+struct Place {
+    position: usize,
+    core: Run,
+    llc: Run,
+    package: Run,
+}
+
 #[derive(Clone, Debug)]
 pub struct Topology {
     /// Indexed by dense CPU id.
     keys: Vec<CpuKeys>,
+    /// Every CPU, ordered by package, LLC and core key, so that each domain at
+    /// every level is one contiguous run.
+    order: Vec<CpuId>,
+    /// Indexed by dense CPU id.
+    places: Vec<Place>,
 }
 
 impl Topology {
@@ -64,7 +93,43 @@ impl Topology {
                 return Err(TopologyError::LlcSpansPackages { llc: k.llc });
             }
         }
-        Ok(Self { keys })
+        let mut order: Vec<CpuId> = (0..keys.len() as u32).map(CpuId).collect();
+        order.sort_unstable_by_key(|cpu| {
+            let k = keys[cpu.0 as usize];
+            (k.package, k.llc, k.core, cpu.0)
+        });
+        // The checks above make each domain one run of `order`, ending where
+        // the key at its level changes.
+        let runs = |key: fn(&CpuKeys) -> u32| {
+            let key_at = |position: usize| key(&keys[order[position].0 as usize]);
+            let mut runs = vec![Run { start: 0, end: 0 }; order.len()];
+            let mut start = 0;
+            for end in 1..=order.len() {
+                if end == order.len() || key_at(end) != key_at(start) {
+                    runs[start..end].fill(Run { start, end });
+                    start = end;
+                }
+            }
+            runs
+        };
+        let (cores, llcs, packages) = (runs(|k| k.core), runs(|k| k.llc), runs(|k| k.package));
+        let mut places = vec![None; keys.len()];
+        for (position, cpu) in order.iter().enumerate() {
+            places[cpu.0 as usize] = Some(Place {
+                position,
+                core: cores[position],
+                llc: llcs[position],
+                package: packages[position],
+            });
+        }
+        let places = places.into_iter().map(|place| place.expect("`order` holds every CPU")).collect();
+        Ok(Self { keys, order, places })
+    }
+
+    /// `cpus` cores of one thread each, under one LLC in one package.
+    pub fn flat(cpus: u32) -> Self {
+        Self::new((0..cpus).map(|core| CpuKeys { core, llc: 0, package: 0 }).collect())
+            .expect("a flat machine of at least one CPU is a tree")
     }
 
     pub fn cpus(&self) -> usize {
@@ -107,6 +172,47 @@ impl Topology {
         keys.sort_unstable();
         keys.dedup();
         keys.len()
+    }
+
+    /// `cpu`'s position in the order [`Self::ring`] walks.
+    pub fn position(&self, cpu: CpuId) -> usize {
+        self.places[cpu.0 as usize].position
+    }
+
+    /// Every CPU of `cpu`'s core, `cpu` among them.
+    pub fn core(&self, cpu: CpuId) -> &[CpuId] {
+        let core = self.places[cpu.0 as usize].core;
+        &self.order[core.start..core.end]
+    }
+
+    fn run(&self, cpu: CpuId, level: Option<Level>) -> Run {
+        let place = self.places[cpu.0 as usize];
+        match level {
+            None => Run { start: place.position, end: place.position + 1 },
+            Some(Level::Core) => place.core,
+            Some(Level::Llc) => place.llc,
+            Some(Level::Package) => place.package,
+            Some(Level::Machine) => Run { start: 0, end: self.order.len() },
+        }
+    }
+
+    /// The CPUs in `cpu`'s domain at `outer` and outside its domain at `inner`
+    /// (`None` is `cpu` alone), each once, starting at the first whose
+    /// [`Self::position`] is `from` or after and wrapping round.
+    pub fn ring(
+        &self,
+        cpu: CpuId,
+        inner: Option<Level>,
+        outer: Level,
+        from: usize,
+    ) -> impl Iterator<Item = CpuId> + '_ {
+        let (inner, outer) = (self.run(cpu, inner), self.run(cpu, Some(outer)));
+        let span = outer.end - outer.start;
+        let first = if outer.contains(from) { from - outer.start } else { 0 };
+        (0..span)
+            .map(move |step| outer.start + (first + step) % span)
+            .filter(move |&position| !inner.contains(position))
+            .map(|position| self.order[position])
     }
 }
 
@@ -153,5 +259,55 @@ mod tests {
             Topology::new(vec![k(0, 0, 0), k(1, 0, 1)]).unwrap_err(),
             TopologyError::LlcSpansPackages { llc: 0 },
         );
+    }
+
+    fn ids(cpus: impl Iterator<Item = CpuId>) -> Vec<u32> {
+        cpus.map(|cpu| cpu.0).collect()
+    }
+
+    /// Dense ids listed against the tree, as firmware lists them: two packages
+    /// of one LLC of two cores of two threads, each core's threads four ids
+    /// apart and the packages interleaved.
+    fn scattered() -> Topology {
+        Topology::new(vec![
+            k(0, 0, 0),
+            k(2, 1, 1),
+            k(1, 0, 0),
+            k(3, 1, 1),
+            k(0, 0, 0),
+            k(2, 1, 1),
+            k(1, 0, 0),
+            k(3, 1, 1),
+        ])
+        .unwrap()
+    }
+
+    #[test]
+    fn a_ring_is_its_level_and_nothing_nearer_whatever_the_ids() {
+        let t = scattered();
+        let me = CpuId(0);
+        assert_eq!(ids(t.core(me).iter().copied()), [0, 4]);
+        assert_eq!(ids(t.ring(me, None, Level::Core, 0)), [4]);
+        assert_eq!(ids(t.ring(me, Some(Level::Core), Level::Llc, 0)), [2, 6]);
+        assert_eq!(ids(t.ring(me, Some(Level::Llc), Level::Package, 0)), Vec::<u32>::new());
+        assert_eq!(ids(t.ring(me, Some(Level::Package), Level::Machine, 0)), [1, 5, 3, 7]);
+        assert_eq!(ids(t.ring(me, None, Level::Llc, 0)), [4, 2, 6]);
+        let mut every = ids(t.ring(me, None, Level::Machine, 0));
+        every.sort_unstable();
+        assert_eq!(every, [1, 2, 3, 4, 5, 6, 7]);
+    }
+
+    #[test]
+    fn a_ring_starts_at_the_position_it_is_given_and_wraps() {
+        let t = scattered();
+        let me = CpuId(1);
+        let other_package = ids(t.ring(me, Some(Level::Package), Level::Machine, 0));
+        assert_eq!(other_package, [0, 4, 2, 6]);
+        let after_four = t.position(CpuId(4)) + 1;
+        assert_eq!(ids(t.ring(me, Some(Level::Package), Level::Machine, after_four)), [2, 6, 0, 4]);
+        // A position inside the excluded run starts at the run's end, and one
+        // outside the ring's own domain at the domain's start.
+        assert_eq!(ids(t.ring(me, None, Level::Llc, t.position(me))), [5, 3, 7]);
+        assert_eq!(ids(t.ring(me, None, Level::Llc, 0)), [5, 3, 7]);
     }
 }

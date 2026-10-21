@@ -510,6 +510,46 @@ pub fn df_witness_mutate() {
     unsafe { asm!("std", options(nomem, nostack)) };
 }
 
+/// This CPU's place in the cache tree, from the topology leaves it reads of
+/// itself ([`kernel::cpu::topology_keys`] says which and how). Only the CPU
+/// itself can answer: CPUID reports on the CPU that executes it.
+pub fn topology_keys() -> Result<kernel::sched::topology::CpuKeys, kernel::cpu::TopologyRefusal> {
+    /// Past any level or cache count a CPU of this project's range reports.
+    const SUBLEAVES: usize = 16;
+    fn subleaves(leaf: u32, last: impl Fn([u32; 4]) -> bool) -> ([[u32; 4]; SUBLEAVES], usize) {
+        let mut out = [[0; 4]; SUBLEAVES];
+        for (sub, slot) in out.iter_mut().enumerate() {
+            let (a, b, c, d) = cpuid(leaf, sub as u32);
+            *slot = [a, b, c, d];
+            if last(*slot) {
+                return (out, sub + 1);
+            }
+        }
+        (out, SUBLEAVES)
+    }
+    let max = cpuid(0, 0).0;
+    let max_ext = cpuid(0x8000_0000, 0).0;
+    // SDM Vol. 2A, CPUID leaf 1FH: preferred over 0BH where both exist; an
+    // EBX[15:0] of 0 at subleaf 0 is a leaf that enumerates nothing.
+    let (levels, level_count) = [0x1F, 0x0B]
+        .into_iter()
+        .find(|&leaf| max >= leaf && cpuid(leaf, 0).1 & 0xFFFF != 0)
+        .map_or(([[0; 4]; SUBLEAVES], 0), |leaf| subleaves(leaf, |q| (q[2] >> 8) & 0xFF == 0));
+    // Leaf 4 is Intel's and reads zero on AMD; 8000_001DH exists where
+    // CPUID.8000_0001H:ECX[22] (TopologyExtensions) says so (APM Vol. 3).
+    const TOPOLOGY_EXTENSIONS: u32 = 1 << 22;
+    let cache_leaf = if max >= 4 && cpuid(4, 0).0 & 0x1F != 0 {
+        Some(4)
+    } else if max_ext >= 0x8000_001D && cpuid(0x8000_0001, 0).2 & TOPOLOGY_EXTENSIONS != 0 {
+        Some(0x8000_001D)
+    } else {
+        None
+    };
+    let (caches, cache_count) =
+        cache_leaf.map_or(([[0; 4]; SUBLEAVES], 0), |leaf| subleaves(leaf, |q| q[0] & 0x1F == 0));
+    kernel::cpu::topology_keys(&levels[..level_count], &caches[..cache_count])
+}
+
 /// This CPU's APIC id, from CPUID: the id the hardware gives it, readable
 /// before any per-CPU state exists.
 ///

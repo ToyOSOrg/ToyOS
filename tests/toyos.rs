@@ -863,6 +863,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        "topology_readback",
+        metal::Metal { arms: TESTCASES, judge: |b| topology_readback(b[0].kernel().text(), b[0].cpus()?) },
+    ),
+    (
         "pmm_accounting",
         metal::Metal { arms: TESTCASES, judge: |b| pmm_accounting(b[0].kernel().text()) },
     ),
@@ -6304,6 +6308,43 @@ fn smp_roster_and_tsc_trail(log: &str, cpus: u32) -> Result<(), String> {
         "  [smp] {online} CPUs online, {bracketed} AP TSCs inside a BSP bracket at most \
          {widest} cycles wide"
     );
+    Ok(())
+}
+
+/// Each CPU's `topo:` line against its bench's tree as the bench's own scout
+/// read it (`kernel/sim/tests/scout/`, decoded by the simulator's
+/// `a_benchs_shape_is_what_its_scout_read`), the bench told by the CPU
+/// signature on the boot's own microcode line. The line is the CPUID the
+/// kernel read live; the expectation is words another kernel logged.
+///
+/// - **T14** (`0x806c1`): x2APIC ids `0, 2, 4, 6, 1, 3, 5, 7` in MADT order,
+///   a core per id pair and one L3 for the package.
+/// - **AMD bench** (`0x860f01`): APIC ids `0..16`, a core per id pair, an L3
+///   per eight ids and one package.
+fn topology_readback(log: &str, cpus: u32) -> Result<(), String> {
+    let microcode = log
+        .lines()
+        .find(|l| l.contains("microcode: cpu0 "))
+        .ok_or("no `microcode: cpu0` record names this machine's CPU")?;
+    let (bench, ids, smt, llc, package): (&str, &[u32], u32, u32, u32) = if microcode.contains(" signature 0x806c1") {
+        ("the T14", &[0, 2, 4, 6, 1, 3, 5, 7], 1, 4, 4)
+    } else if microcode.contains(" signature 0x860f01") {
+        ("the AMD bench", &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], 1, 3, 7)
+    } else {
+        return Err(format!("no recorded tree for this CPU: {microcode:?}"));
+    };
+    if cpus as usize > ids.len() {
+        return Err(format!("{cpus} CPUs came up and {bench}'s MADT names {}", ids.len()));
+    }
+    for (cpu, id) in ids.iter().take(cpus as usize).enumerate() {
+        let want = format!("topo: cpu{cpu} core={:#x} llc={:#x} pkg={:#x}", id >> smt, id >> llc, id >> package);
+        if !log.lines().any(|l| l.ends_with(&want)) {
+            let said: Vec<&str> = log.lines().filter(|l| l.contains("topo: ")).collect();
+            return Err(format!("{bench}: no `{want}` record; the kernel said {said:#?}"));
+        }
+    }
+    let tree = log.lines().find(|l| l.contains(&format!("topo: {cpus} cpus in "))).ok_or("no `topo:` summary")?;
+    eprintln!("  [topology] {bench}: {}", tree.split("topo: ").nth(1).unwrap_or(tree));
     Ok(())
 }
 

@@ -653,7 +653,7 @@ impl<'q> Vm<'q> {
         let mut vm = Self {
             queues,
             hw,
-            handles: SimHandles::new(handles),
+            handles: SimHandles::new(handles, scenario.topology.topology().clone()),
             frontier: Frontier::new(),
             cpus,
             procs,

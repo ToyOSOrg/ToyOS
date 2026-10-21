@@ -369,8 +369,8 @@ pub fn timer() {
 pub fn platform_devices(_platform: &Platform, _rsdp_addr: u64) {}
 
 /// Every other CPU, running.
-pub fn start_other_cpus(platform: &Platform, _args: &KernelArgs) {
-    super::smp::start(&platform.gic);
+pub fn start_other_cpus(platform: &Platform, args: &KernelArgs) {
+    super::smp::start(&platform.gic, args.rsdp_addr);
 }
 
 /// The interrupt-controller selftests an actuator asks for.

@@ -24,7 +24,7 @@ Both wait for an AML interpreter
 because the kernel reads no C-state on metal and chooses no P-state: it
 declares HWP's bounds (`kernel/src/arch/x86_64/control_regs.rs`), and the CPU
 chooses within them.
-Filed so the placement track (see `placement-is-blind-to-caches-and-topology.md`)
+Filed so the placement track (see `placement-has-no-migration-cost-or-wake-affinity.md`)
 leaves room for an idle-state input when it designs wake placement.
 
 ## Realtime exhaustion (owner decision J2, 2026-10-20; stage 4)
