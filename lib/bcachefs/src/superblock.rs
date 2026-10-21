@@ -5,7 +5,9 @@ use crate::crc32c::crc32c;
 use crate::fs::FsError;
 
 pub const MAGIC: [u8; 4] = *b"BCFS";
-pub const VERSION: u32 = 1;
+/// 2: version 1's insert could order an interior node's children wrongly,
+/// so a volume it wrote is refused rather than read.
+pub const VERSION: u32 = 2;
 
 /// The designation stamp: the *only* thing that authorises ToyOS to destroy
 /// what is on a block device.

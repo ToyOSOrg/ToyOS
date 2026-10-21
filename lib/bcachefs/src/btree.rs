@@ -143,7 +143,9 @@ pub fn value_fits(value_len: usize) -> bool {
     disk_size(value_len) <= MAX_ENTRY_SIZE
 }
 
-/// A child pointer: the minimum key of the subtree, and the block it lives in.
+/// A child pointer: its separator, and the block the subtree lives in. Every
+/// key of the subtree is at least the separator and below the next child's;
+/// the first child's is never read ([`child_index`]).
 #[derive(Debug, Clone, Copy)]
 pub struct Child {
     pub key: Key,
@@ -361,17 +363,17 @@ fn write_entry(b: &mut [u8; BLOCK_SIZE], offset: usize, key: &Key, value: &[u8])
 
 /// The child to descend into for `key`.
 ///
-/// Interior children are in key order, each key at most the least key of its
-/// child's subtree and above every key of the child before it, so the answer
-/// is the last child whose key is `<= key`, defaulting to the first — which
-/// covers everything below the second key.
+/// The children after the first are in order of their separators, so the
+/// answer is the last of them whose separator is `<= key`, or the first child
+/// for a key below them all. The first child's own key goes unread: it is
+/// below every key routed to it only until an insert makes a new least key.
 fn find_child(children: &[Child], key: &Key) -> Option<BlockNum> {
     children.get(child_index(children, key)).map(|c| c.block)
 }
 
 /// [`find_child`]'s answer as an index into `children`.
 fn child_index(children: &[Child], key: &Key) -> usize {
-    children.iter().take_while(|c| c.key <= *key).count().saturating_sub(1)
+    children.iter().skip(1).take_while(|c| c.key <= *key).count()
 }
 
 /// The block a node the operation in progress changed is written to: its
@@ -582,19 +584,11 @@ fn insert_recursive(
         }
         Node::Interior { level, mut children } => {
             let idx = child_index(&children, &entry.key);
-            let child = children.get_mut(idx).ok_or(FsError::CorruptedNode(block))?;
-            let child_block = child.block;
-            // A key below every child's goes to the first, whose key comes
-            // down to it: a sibling split off that child keyed below the old
-            // one is still after it.
-            let lowered = entry.key < child.key;
-            if lowered {
-                child.key = entry.key;
-            }
+            let child_block = children.get(idx).ok_or(FsError::CorruptedNode(block))?.block;
             let deeper = depth.descend(block)?;
 
             let Placed { at, split } = insert_recursive(io, alloc, child_block, deeper, entry)?;
-            if at == child_block && split.is_empty() && !lowered {
+            if at == child_block && split.is_empty() {
                 return Ok(Placed { at: block, split });
             }
             children[idx].block = at;
@@ -866,6 +860,104 @@ mod tests {
         assert!(Node::read(&io, root).unwrap().level() >= 1, "the tree never grew past a leaf");
         let lost: Vec<u64> = keys.iter().copied().filter(|&k| search(&io, root, &key(k)).unwrap().is_none()).collect();
         assert!(lost.is_empty(), "{} of {} keys are not found, {:?} first", lost.len(), keys.len(), lost.first());
+    }
+
+    /// xorshift64*: the model test's whole source of choice, so one seed is
+    /// one run.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn below(&mut self, n: u64) -> u64 {
+            self.next() % n
+        }
+    }
+
+    /// The tree against a plain map of what each operation made it: new keys,
+    /// replacements whose values change size, deletes, a run of ever lower
+    /// keys down the leftmost spine, and values so large a leaf packs three
+    /// ways. Every key the map holds is found with its value, every key it
+    /// deleted is not, and a walk yields exactly the map's keys, strictly
+    /// ascending, which holds the whole tree's order and not only the keys a
+    /// search probes.
+    #[test]
+    fn the_tree_agrees_with_a_map_through_inserts_replacements_and_deletes() {
+        let io = crate::block_io::VecBlockIO::new(1 << 15);
+        let mut alloc = BitmapAllocator::format(&io, BlockNum::new(0), 1, 1 << 15, 1).unwrap();
+        let mut root = alloc.alloc_block(&io).unwrap();
+        Node::Leaf(Vec::new()).write(&io, root).unwrap();
+        let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+        let mut model: alloc::collections::BTreeMap<Key, Vec<u8>> = alloc::collections::BTreeMap::new();
+        let mut gone: Vec<Key> = Vec::new();
+        let big = MAX_ENTRY_SIZE - KEY_HEADER_SIZE;
+        let value = |rng: &mut Rng| {
+            let len = match rng.below(50) {
+                0 => big,
+                1..=4 => 1000 + rng.below(1000) as usize,
+                _ => 8 + rng.below(200) as usize,
+            };
+            vec![rng.next() as u8; len]
+        };
+        let key = |name_hash: u64, hi: u64| Key { name_hash, name_hash_hi: hi, key_type: KeyType::File };
+
+        let check = |root: BlockNum, model: &alloc::collections::BTreeMap<Key, Vec<u8>>, gone: &[Key], at: usize| {
+            for (k, v) in model {
+                assert_eq!(search(&io, root, k).unwrap().as_ref(), Some(v), "op {at}: {k:?} is not found as written");
+            }
+            for k in gone.iter().filter(|k| !model.contains_key(k)) {
+                assert_eq!(search(&io, root, k).unwrap(), None, "op {at}: deleted {k:?} is found");
+            }
+            let mut walked = Vec::new();
+            let walk = for_each_live(&io, root, &mut |e| {
+                walked.push(e.key);
+                Ok(ControlFlow::Continue(()))
+            });
+            assert!(walk.unwrap().is_continue(), "op {at}: the walk did not end");
+            assert!(walked.windows(2).all(|w| w[0] < w[1]), "op {at}: the walk is not strictly ascending");
+            assert!(walked.iter().eq(model.keys()), "op {at}: the walk names other keys than the map");
+        };
+
+        for op in 0..6000 {
+            let roll = rng.below(10);
+            if (2000..2600).contains(&op) {
+                // Below the least key the tree holds, each time.
+                let least = model.keys().next().map_or(u64::MAX, |k| k.name_hash);
+                let k = key(least.saturating_sub(1 + rng.below(3)), rng.next());
+                let v = value(&mut rng);
+                root = insert(&io, &mut alloc, root, Entry { key: k, value: v.clone() }).unwrap();
+                model.insert(k, v);
+            } else if roll < 6 || model.is_empty() {
+                let k = key(rng.next(), rng.next());
+                let v = value(&mut rng);
+                root = insert(&io, &mut alloc, root, Entry { key: k, value: v.clone() }).unwrap();
+                model.insert(k, v);
+            } else {
+                let k = *model.keys().nth(rng.below(model.len() as u64) as usize).unwrap();
+                if roll < 8 {
+                    let v = value(&mut rng);
+                    root = insert(&io, &mut alloc, root, Entry { key: k, value: v.clone() }).unwrap();
+                    model.insert(k, v);
+                } else {
+                    let (at, old) = delete(&io, &mut alloc, root, &k)
+                        .unwrap()
+                        .unwrap_or_else(|| panic!("op {op}: the tree has no {k:?}, which the map holds, to delete"));
+                    assert_eq!(Some(old), model.remove(&k));
+                    root = at;
+                    gone.push(k);
+                }
+            }
+            if op % 500 == 499 {
+                check(root, &model, &gone, op);
+            }
+        }
+        check(root, &model, &gone, 6000);
+        assert!(Node::read(&io, root).unwrap().level() >= 2, "the tree never reached a second interior level");
     }
 
     #[test]
