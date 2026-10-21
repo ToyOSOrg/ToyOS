@@ -61,6 +61,19 @@ That kernel's ten-second report is gone: the owner ruled on 2026-10-04, choosing
 entirely": "Delete the periodic report and its counters; hang triage uses the trace diary and
 panic records instead." A later sighting tells a live kernel from a stopped one by those.
 
+**`crypto_instrument_prints_its_table` hangs this way, and a probe placed every
+byte on the guest's side of the pipe.** On `wt/toyos-usbd-2` (host load average 10–15,
+other worktrees' guests running) it hung in 9 of 12 runs beside eleven other rows, after
+one of its parity jobs printed its table: about 80 KB in one burst. Each hang stopped
+mid-line inside that burst. In one boot with temporary probes, logkeeper had read every
+line from the runner's ring (its position equal to the ring's head, none refused or
+suppressed), and it had written every rendered byte to its console handle, holding none
+back. The kernel's console queue was empty and `klogd` owed no record. The runner then
+exited by its own watchdog, which proved that it had printed `===TEST_END===` and waited
+30 s for a command that never came. The bytes were lost after the guest's virtio
+transmit, in QEMU's `virtconsole`. The same hang happened with no `usbd` in the image, and at the branch's base `e07354fb1`, which
+has none of its changes: `STALLED: 973s of guard expired` with the same idle guest.
+
 ## Exit condition
 
 The console chardev the harness reads cannot refuse a write — for example a
