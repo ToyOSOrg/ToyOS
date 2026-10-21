@@ -153,14 +153,9 @@ impl IpcHeader {
 
 const _: () = assert!(IpcHeader::WIRE_SIZE + MAX_FRAME_LEN as usize <= syscall::MAX_MESSAGE_LEN);
 
-/// The largest typed payload [`try_send`] frames without allocating.
-///
-/// Every `ipc_payload!` struct in the tree is far below this — the largest is
-/// `window::CreateWindowRequest` at 40 bytes. A type past it does not compile,
-/// because the alternative would be a payload split across two writes, and a
-/// non-blocking send that can be half-refused is the thing [`try_send`] exists
-/// to make unrepresentable.
-pub const MAX_TYPED_PAYLOAD: usize = 64;
+/// The payloads framed in a buffer of their own size rather than one of
+/// [`MAX_FRAME_LEN`]: every typed payload and signal, sent per input event.
+const SMALL_PAYLOAD: usize = 64;
 
 #[derive(Debug)]
 pub enum IpcError {
@@ -417,17 +412,22 @@ fn message<H: AsHandle>(
     handles: impl IntoIterator<Item = H>,
     nonblock: bool,
 ) -> Result<(), Unsent> {
-    let mut frame = [0u8; IpcHeader::WIRE_SIZE + MAX_FRAME_LEN as usize];
     let mut too_large = false;
     let sent = move_batch(handles, |batch| {
         let Ok(header) = IpcHeader::frame(msg_type, payload.len(), batch.len()) else {
             too_large = true;
             return Err(SyscallError::InvalidArgument);
         };
-        let end = IpcHeader::WIRE_SIZE + payload.len();
-        frame[..IpcHeader::WIRE_SIZE].copy_from_slice(&header.to_wire());
-        frame[IpcHeader::WIRE_SIZE..end].copy_from_slice(payload);
-        syscall::message_send(handle, &frame[..end], batch, nonblock)
+        let send = |frame: &mut [u8]| {
+            let end = IpcHeader::WIRE_SIZE + payload.len();
+            frame[..IpcHeader::WIRE_SIZE].copy_from_slice(&header.to_wire());
+            frame[IpcHeader::WIRE_SIZE..end].copy_from_slice(payload);
+            syscall::message_send(handle, &frame[..end], batch, nonblock)
+        };
+        match payload.len() <= SMALL_PAYLOAD {
+            true => send(&mut [0u8; IpcHeader::WIRE_SIZE + SMALL_PAYLOAD]),
+            false => send(&mut [0u8; IpcHeader::WIRE_SIZE + MAX_FRAME_LEN as usize]),
+        }
     });
     match sent {
         Ok(()) => Ok(()),
@@ -709,14 +709,6 @@ pub struct Batch {
 }
 
 impl Batch {
-    pub fn len(&self) -> usize {
-        self.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     /// Exactly `N` handles, now the caller's; `None`, with them closed, for
     /// any other number.
     pub fn exact<const N: usize>(mut self) -> Option<[RawHandle; N]> {
@@ -727,9 +719,7 @@ impl Batch {
         self.len = 0;
         Some(core::array::from_fn(|i| self.handles[i]))
     }
-}
 
-impl Batch {
     /// Every handle, as numbers now the caller's to own and close.
     pub fn into_raw(mut self) -> ([RawHandle; syscall::MAX_TRANSFER_HANDLES], usize) {
         let len = core::mem::take(&mut self.len);

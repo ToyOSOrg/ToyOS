@@ -50,9 +50,9 @@ The shared-memory grant's old argument for having no revocation named its own
 trigger: *"with `grant` owner-only, the set that can ever map is exactly the set
 the owner named, so revocation has no caller today … It stops being sound the
 moment the reachable set is no longer exactly what the owner named — if
-delegation or re-grant is reintroduced, or when `SYS_MESSAGE_SEND` makes a grant
-transferable."* `SYS_MESSAGE_SEND` exists, so the trigger has fired: the reachable
-set is no longer what the owner named.
+delegation or re-grant is reintroduced, or when `SYS_HANDLE_SEND` makes a grant
+transferable."* Handles move by `SYS_MESSAGE_SEND`, so the trigger has fired: the
+reachable set is no longer what the owner named.
 
 That leaves two answers and the rights word above is the cheaper one. **Revocation
 proper is rejected by name** in the capability-handle design — shm revoke,

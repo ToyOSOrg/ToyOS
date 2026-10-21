@@ -86,7 +86,7 @@ pub const MSG_COPY_BEGIN: u32 = 13;
 /// copies it once and closes the connection.
 pub const MSG_COPY_COMMIT: u32 = 14;
 /// Compositor → client, bare: a region the compositor made, as long as the copy
-/// [`MSG_COPY_BEGIN`] announced, sent ahead of the frame.
+/// [`MSG_COPY_BEGIN`] announced, carried in the frame.
 pub const MSG_COPY_REGION: u32 = 13;
 /// Watcher → compositor, bare: the first frame on the clipboard port, and the
 /// ask for the next copy ([`watcher`]). Answered, once a client has copied,
@@ -249,7 +249,7 @@ toyos::ipc_payload! {
     }
 
     /// How many bytes of clipboard text a copy region holds. Where a region
-    /// travels with the message, it is one handle sent ahead of the frame.
+    /// travels with the message, it is one handle carried in the frame.
     pub struct ClipboardShmMsg {
         pub len: u32,
     }
@@ -291,7 +291,7 @@ toyos::ipc_payload! {
     /// The shape of the window's buffer, in physical pixels, the scale to
     /// draw into it at, as [`Scale::wire`], and its generation, which every
     /// present drawn into it carries. **The buffer is one transferred
-    /// handle**, sent ahead of the frame that carries this.
+    /// handle**, carried in the frame that carries this.
     pub struct WindowInfo {
         pub width: u32,
         pub height: u32,

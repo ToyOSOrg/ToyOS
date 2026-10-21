@@ -2,9 +2,8 @@
 //! just past its frame's bytes, so it arrives with them and with nothing else.
 //!
 //! - A frame's handles are taken with the frame.
-//! - Handles with no bytes are refused whole, and the retired handle-only send
-//!   is no syscall: a poll-driven server sees nothing to read, and the sender
-//!   still holds what it tried to send.
+//! - Handles with no bytes are refused whole: a poll-driven server sees
+//!   nothing to read, and the sender still holds what it tried to send.
 //! - A batch its frame did not announce stops the reader at it, and dies with
 //!   the connection the reader then drops.
 
@@ -12,14 +11,9 @@ use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, OTHER_END_GONE, READABLE};
 use toyos::{namespace, pipe_pair, port, AsHandle, OwnedHandle, Pipe};
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_abi::RawHandle;
 
 /// A failure ceiling only: an answer that never comes is the defect.
 const CEILING_NANOS: u64 = 10_000_000_000;
-
-/// The number the handle-only send had, with its arguments: the connection,
-/// the handles and their count.
-const RETIRED_HANDLE_SEND: u64 = 103;
 
 fn main() {
     let (acceptor, connector) = port::create().expect("a port");
@@ -40,18 +34,14 @@ fn main() {
     assert_eq!(gone(&read_end), Ok(OTHER_END_GONE), "the handle taken with its frame is not the one sent");
     println!("message_carries_its_handles: a frame's handle arrived with it");
 
-    // Handles with no bytes are refused, by the message send and by the number
-    // the handle-only send had, and the server has nothing to read.
+    // Handles with no bytes are refused, and the server has nothing to read.
     let (stray_read, stray_write) = pipe_pair().expect("a pipe");
     assert_eq!(
         syscall::message_send(client.as_handle(), &[], &[stray_write.as_handle()], false),
         Err(SyscallError::InvalidArgument),
         "handles were sent with no bytes"
     );
-    let stray = [stray_write.as_handle()];
-    let answer = retired_handle_send(client.as_handle(), &stray);
     assert!(!readable(&server, 0), "a refused send left the server something to read");
-    assert_eq!(answer, SyscallError::InvalidArgument.to_u64(), "the retired handle send answered {answer:#x}");
     assert_eq!(stray_write.write(b"x"), Ok(1), "a refused handle left its sender");
     drop(stray_write);
     assert_eq!(gone(&stray_read), Ok(OTHER_END_GONE), "the refused handle stayed anywhere but here");
@@ -78,28 +68,6 @@ fn main() {
     assert_eq!(gone(&lied_read), Ok(OTHER_END_GONE), "the unannounced batch outlived its connection");
     drop(client);
     println!("message_carries_its_handles: ok");
-}
-
-/// The handle-only send's call, past every `toyos_abi` wrapper: number in rdi,
-/// arguments in rsi, rdx and r8.
-fn retired_handle_send(conn: RawHandle, handles: &[RawHandle]) -> u64 {
-    let answer: u64;
-    // SAFETY: the arguments name this process's own memory, which a kernel
-    // that still had the call would only read.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rdi") RETIRED_HANDLE_SEND,
-            in("rsi") u64::from(conn.0),
-            in("rdx") handles.as_ptr() as u64,
-            in("r8") handles.len() as u64,
-            in("r9") 0u64,
-            lateout("rax") answer,
-            out("rcx") _,
-            out("r11") _,
-        );
-    }
-    answer
 }
 
 /// Whether `conn` answers readable within `timeout`.

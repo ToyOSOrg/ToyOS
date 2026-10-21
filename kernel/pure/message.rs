@@ -22,17 +22,14 @@ pub enum Window {
     AtBatch,
 }
 
-/// Why a message is refused. Nothing of it is written or moved.
+/// Why a message is refused before its bytes are written. Nothing of it is
+/// written or moved; room in the stream and the reader are the stream's to answer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refused {
     /// Handles with no bytes announcing them.
     Empty,
     /// The reader holds as many batches as it may.
     QueueFull,
-    /// The stream has no room for the whole message now.
-    NoRoom,
-    /// The reader's end is gone.
-    Gone,
 }
 
 /// The batches a reader has not taken, each at the stream position it
@@ -60,20 +57,14 @@ impl<B> Batches<B> {
         self.pinned.is_empty()
     }
 
-    /// Whether a message of `len` bytes, carrying a batch or not, may be sent
-    /// now: `cap` batches at most, `space` bytes of room, and a reader there.
-    pub fn admit(&self, len: usize, carries: bool, cap: usize, space: usize, reader: bool) -> Result<(), Refused> {
+    /// Whether a message of `len` bytes, carrying a batch or not, may be
+    /// pinned here, `cap` batches at most.
+    pub fn admit(&self, len: usize, carries: bool, cap: usize) -> Result<(), Refused> {
         if carries && len == 0 {
             return Err(Refused::Empty);
         }
-        if !reader {
-            return Err(Refused::Gone);
-        }
         if carries && self.pinned.len() >= cap {
             return Err(Refused::QueueFull);
-        }
-        if len > space {
-            return Err(Refused::NoRoom);
         }
         Ok(())
     }
@@ -142,10 +133,14 @@ mod tests {
         }
 
         /// One send, whole or not at all, as the kernel makes it under the
-        /// queue lock and then the pipe lock.
-        fn send(&mut self, len: usize, batch: Option<u32>) -> Result<(), Refused> {
-            let space = self.ring - self.bytes.len();
-            self.batches.admit(len, batch.is_some(), 4, space, true)?;
+        /// queue lock and then the pipe lock; `None` is a stream without room.
+        fn send(&mut self, len: usize, batch: Option<u32>) -> Option<Result<(), Refused>> {
+            if let Err(refused) = self.batches.admit(len, batch.is_some(), 4) {
+                return Some(Err(refused));
+            }
+            if len > self.ring - self.bytes.len() {
+                return None;
+            }
             for _ in 0..len {
                 self.bytes.push_back(self.written);
                 self.written += 1;
@@ -153,7 +148,7 @@ mod tests {
             if let Some(b) = batch {
                 self.batches.pin(self.written, b);
             }
-            Ok(())
+            Some(Ok(()))
         }
 
         fn read(&mut self, want: usize) -> Result<Vec<u64>, Window> {
@@ -171,8 +166,8 @@ mod tests {
     #[test]
     fn a_batch_is_taken_only_where_its_bytes_end_and_no_read_crosses_it() {
         let mut s = Stream::new(64);
-        s.send(5, Some(7)).unwrap();
-        s.send(3, None).unwrap();
+        s.send(5, Some(7)).unwrap().unwrap();
+        s.send(3, None).unwrap().unwrap();
         assert_eq!(s.batches.take(s.read), None, "a batch taken before its bytes were read");
         assert_eq!(s.read(100).unwrap(), [0, 1, 2, 3, 4], "a read crossed the batch");
         assert_eq!(s.read(100), Err(Window::AtBatch), "a read went on past an untaken batch");
@@ -184,17 +179,14 @@ mod tests {
     #[test]
     fn a_refused_send_leaves_nothing_behind() {
         let mut s = Stream::new(8);
-        assert_eq!(s.send(0, Some(1)), Err(Refused::Empty));
-        assert_eq!(s.send(9, Some(1)), Err(Refused::NoRoom));
+        assert_eq!(s.send(0, Some(1)), Some(Err(Refused::Empty)));
         assert_eq!((s.bytes.len(), s.batches.len()), (0, 0));
         for b in 0..4 {
-            s.send(1, Some(b)).unwrap();
+            s.send(1, Some(b)).unwrap().unwrap();
         }
-        assert_eq!(s.send(1, Some(9)), Err(Refused::QueueFull));
+        assert_eq!(s.send(1, Some(9)), Some(Err(Refused::QueueFull)));
         assert_eq!((s.bytes.len(), s.batches.len()), (4, 4));
-        assert_eq!(s.send(1, None), Ok(()), "a message with no handles waits on no queue");
-        let gone = Batches::<u32>::new().admit(1, true, 4, 8, false);
-        assert_eq!(gone, Err(Refused::Gone));
+        assert_eq!(s.send(1, None), Some(Ok(())), "a message with no handles waits on no queue");
     }
 
     /// xorshift64*: one seed is one run.
@@ -229,7 +221,7 @@ mod tests {
             if rng.below(2) == 0 {
                 let len = 1 + rng.below(40) as usize;
                 let batch = (rng.below(3) == 0).then_some(op);
-                if s.send(len, batch).is_ok() {
+                if s.send(len, batch) == Some(Ok(())) {
                     sent.push_back((s.written, batch));
                 }
             } else {

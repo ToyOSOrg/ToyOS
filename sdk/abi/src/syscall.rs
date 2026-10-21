@@ -1891,6 +1891,7 @@ crate::user_safe! {
         pub len: u64,
         pub handles: u64,
         pub count: u64,
+        /// [`MESSAGE_NONBLOCK`] or none; any other bit is `InvalidArgument`.
         pub flags: u64,
     }
 }

@@ -854,8 +854,8 @@ pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
 
 pub fn has_space(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::PipeWrite(w) => pipe::has_space(w.id()),
-        KObjectRef::Connection(c) => pipe::has_space(c.tx()),
+        KObjectRef::PipeWrite(w) => pipe::has_space(w.id(), 1),
+        KObjectRef::Connection(c) => pipe::has_space(c.tx(), 1),
         KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)

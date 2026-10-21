@@ -299,11 +299,6 @@ pub fn write_whole(pipe_id: PipeId, buf: &UserBytes) -> WholeWrite {
     })
 }
 
-/// Whether the pipe could take `len` bytes in one write now.
-pub fn has_room(pipe_id: PipeId, len: usize) -> bool {
-    with_pipes(|pipes| pipes.get(pipe_id).is_some_and(|p| !p.holders.held(End::Read) || p.space() as usize >= len))
-}
-
 pub enum PipeWrite {
     Wrote(usize),
     BrokenPipe,
@@ -336,10 +331,10 @@ pub fn has_data(pipe_id: PipeId) -> bool {
     })
 }
 
-pub fn has_space(pipe_id: PipeId) -> bool {
-    with_pipes(|pipes| {
-        pipes.get(pipe_id).is_some_and(|p| p.holders.writable(p.space()))
-    })
+/// Whether a write needing `want` bytes at once answers now.
+pub fn has_space(pipe_id: PipeId, want: usize) -> bool {
+    let want = u32::try_from(want).unwrap_or(u32::MAX);
+    with_pipes(|pipes| pipes.get(pipe_id).is_some_and(|p| p.holders.writable(p.space(), want)))
 }
 
 /// Whether the end opposite `end` of this pipe has no holder left.

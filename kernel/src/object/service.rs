@@ -42,13 +42,10 @@ impl HandleQueue {
         let mut guard = self.0.lock();
         let Some(batches) = guard.as_mut() else { return Err((batch, SendRefused::Error(SyscallError::Gone))) };
         let carries = !batch.is_empty();
-        // Room and the reader are the pipe's to answer, under its own lock, below.
-        match batches.admit(bytes.len(), carries, MAX_QUEUED_BATCHES, usize::MAX, true) {
+        match batches.admit(bytes.len(), carries, MAX_QUEUED_BATCHES) {
             Ok(()) => {}
             Err(Refused::Empty) => return Err((batch, SendRefused::Error(SyscallError::InvalidArgument))),
             Err(Refused::QueueFull) => return Err((batch, SendRefused::Error(SyscallError::ResourceExhausted))),
-            Err(Refused::NoRoom) => return Err((batch, SendRefused::NoRoom)),
-            Err(Refused::Gone) => return Err((batch, SendRefused::Error(SyscallError::Gone))),
         }
         match pipe::write_whole(tx, bytes) {
             WholeWrite::Wrote(end) => {

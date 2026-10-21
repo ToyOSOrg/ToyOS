@@ -413,7 +413,7 @@ pub(super) fn sys_message_send(
         let Some(watch) = pipe::write_watch(tx) else { return SyscallError::Gone.to_u64() };
         let len = bytes.len();
         if watch::wait_until(&crate::scheduler::Parkable::at_entry(), &watch, 0, WaitClass::Ipc, Deadline::never(), || {
-            pipe::has_room(tx, len)
+            pipe::has_space(tx, len)
         })
         .is_err()
         {

@@ -57,10 +57,9 @@ impl Client {
     }
 
     /// **The answer goes out in one non-blocking write, and a refusal is not
-    /// retried.** `ipc::send` parks in `sys_write` until the client drains,
-    /// which is a client deciding when the network stack runs again; and
-    /// `TrySendError::Full` can have left part of the frame in the pipe, so
-    /// there is nothing here to retry either. The connection closes either way.
+    /// retried.** `ipc::send` parks in `SYS_MESSAGE_SEND` until the client
+    /// drains, which is a client deciding when the network stack runs again.
+    /// The connection closes either way.
     /// The log is the only place the machine this runs on gets told that a
     /// client asked something and was never answered.
     fn answered(&self, sent: Result<(), ipc::TrySendError>) {

@@ -452,7 +452,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_ACCEPT => sys_accept(RawHandle(a1 as u32)),
         SYS_MESSAGE_SEND => {
             let Ok(args) = ctx.copy_in::<MessageSend>(UserAddr::new(a2)) else { return bad_addr };
-            if args.count as usize > MAX_TRANSFER_HANDLES || args.len as usize > MAX_MESSAGE_LEN {
+            let unknown_flags = args.flags & !MESSAGE_NONBLOCK != 0;
+            if unknown_flags || args.count as usize > MAX_TRANSFER_HANDLES || args.len as usize > MAX_MESSAGE_LEN {
                 return SyscallError::InvalidArgument.to_u64();
             }
             let Some(bytes) = ctx.user_bytes(UserAddr::new(args.bytes), args.len) else { return bad_addr };
