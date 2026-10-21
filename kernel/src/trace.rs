@@ -35,8 +35,8 @@ type TraceRing = Ring<WORDS, SLOTS>;
 
 const _: () = assert!(core::mem::size_of::<TraceRing>() == 64 + SLOTS * toyos_abi::trace::RECORD_BYTES);
 
-/// A ring per CPU the firmware names; empty, and so writing nowhere, until
-/// [`size`] runs.
+/// A ring per CPU the firmware names, online or not, 256 KiB each (64 MiB at
+/// 256 CPUs); empty, and so writing nowhere, until [`size`] runs.
 static RINGS: CpuSlice<&'static TraceRing> = CpuSlice::new();
 
 pub fn size(cpus: usize) {

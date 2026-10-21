@@ -33,13 +33,6 @@ use loom::sync::Arc;
 /// reader can see the pointer with `head` still zero, which reads back as a
 /// shard that has never answered for anything — a machine that lost a CPU's
 /// whole log rather than a machine that noticed.
-/// A registry for a machine of `cpus` CPUs.
-fn slots(cpus: usize) -> Slots {
-    let slots = Slots::new();
-    size(&slots, cpus);
-    slots
-}
-
 #[test]
 fn a_reader_that_finds_a_shard_finds_it_built() {
     loom::model(|| {
@@ -80,4 +73,11 @@ fn an_unpublished_slot_answers_for_nothing() {
         }
         assert!(published(&registry, registry.len()).is_none());
     });
+}
+
+/// A registry for a machine of `cpus` CPUs.
+fn slots(cpus: usize) -> Slots {
+    let slots = Slots::new();
+    size(&slots, cpus);
+    slots
 }

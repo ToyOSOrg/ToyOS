@@ -26,9 +26,12 @@ const THREAD: u32 = 1 << 2;
 const LEAF: u32 = 1 << 3;
 
 /// §5.2.30.2: a cache type structure is 24 bytes up to revision 2 and 28 from
-/// revision 3, which adds the cache ID; attributes at 21, bits 3:2 its type.
+/// revision 3, which adds the cache ID; flags at 4, bit 4 "cache type valid";
+/// attributes at 21, bits 3:2 the type.
 const CACHE: u8 = 1;
 const CACHE_LEN: usize = 24;
+const CACHE_FLAGS: usize = 4;
+const CACHE_TYPE_VALID: u32 = 1 << 4;
 const CACHE_ATTRIBUTES: usize = 21;
 const INSTRUCTION: u8 = 1;
 
@@ -59,8 +62,8 @@ impl From<TableError> for PpttRefused {
 
 /// One processor's nodes, each named by its offset in the table, which is
 /// unique to it: its core, the node owning the last-level cache it reaches,
-/// and its package. A table that describes no shared cache puts the LLC at
-/// the package, the only shared domain it names.
+/// and its package. A table that gives the processor no data or unified cache
+/// at all puts the LLC at the package, the only shared domain it names.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Place {
     pub core: u32,
@@ -119,13 +122,19 @@ impl<P: Phys> Pptt<P> {
         self.table.u32_at(at).expect("an accepted structure lies inside the table")
     }
 
-    /// Whether the node at `at` lists a data or unified cache as its own.
+    /// Whether the node at `at` lists a cache as its own other than one that
+    /// declares itself an instruction cache. A cache whose type is not
+    /// declared valid still says a cache is there, which is the fact a node
+    /// is placed by.
     fn owns_a_cache(&self, at: usize) -> bool {
         let count = self.word(at + NODE_RESOURCES) as usize;
         (0..count).any(|i| {
             let cache = self.word(at + NODE_LEN + 4 * i) as usize;
-            self.structure(cache).is_some_and(|(kind, _)| kind == CACHE)
-                && self.table.byte(cache + CACHE_ATTRIBUTES).is_some_and(|attributes| (attributes >> 2) & 3 != INSTRUCTION)
+            let instruction = || {
+                self.word(cache + CACHE_FLAGS) & CACHE_TYPE_VALID != 0
+                    && self.table.byte(cache + CACHE_ATTRIBUTES).is_some_and(|a| (a >> 2) & 3 == INSTRUCTION)
+            };
+            self.structure(cache).is_some_and(|(kind, _)| kind == CACHE) && !instruction()
         })
     }
 

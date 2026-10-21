@@ -35,7 +35,6 @@ const POLLS: usize = 3;
 /// pass every execution by never reaching the assertion.
 static READ: AtomicBool = AtomicBool::new(false);
 
-
 #[test]
 fn a_cpu_read_as_answered_is_read_with_its_answer() {
     READ.store(false, SeqCst);

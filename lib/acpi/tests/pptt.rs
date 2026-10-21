@@ -60,8 +60,16 @@ impl Builder {
         at
     }
 
-    /// A cache whose attributes byte is `kind << 2`: 0 data, 1 instruction, 2 unified.
+    /// A cache whose attributes byte is `kind << 2`: 0 data, 1 instruction, 2
+    /// unified, its type declared valid (flags bit 4).
     fn cache(&mut self, kind: u8) -> u32 {
+        let at = self.untyped_cache(kind);
+        self.0[at as usize + 4] = 1 << 4;
+        at
+    }
+
+    /// The same with its type not declared valid.
+    fn untyped_cache(&mut self, kind: u8) -> u32 {
         let at = self.0.len() as u32;
         let mut cache = vec![0u8; 24];
         cache[0] = 1;
@@ -84,8 +92,9 @@ impl Builder {
     }
 }
 
+/// Each processor's own L1 and nothing shared: each core is its own LLC.
 #[test]
-fn a_table_that_names_no_shared_cache_puts_the_llc_at_the_package() {
+fn private_caches_alone_make_each_core_its_own_llc() {
     let mut t = Builder::new(3);
     let package = t.node(PACKAGE, 0, 0, &[]);
     let l1 = t.cache(0);
@@ -96,6 +105,8 @@ fn a_table_that_names_no_shared_cache_puts_the_llc_at_the_package() {
     assert_eq!(pptt.place(9), Ok(Place { core: b, llc: b, package }));
 }
 
+/// An instruction cache is no LLC, so a table that gives a processor no
+/// data or unified cache puts its LLC at the package.
 #[test]
 fn an_instruction_cache_alone_is_no_llc() {
     let mut t = Builder::new(2);
@@ -105,6 +116,19 @@ fn an_instruction_cache_alone_is_no_llc() {
     t.node(LEAF | ID_VALID | THREAD, core, 1, &[]);
     let pptt = open(&t.bytes()).unwrap();
     assert_eq!(pptt.place(1), Ok(Place { core, llc: package, package }));
+}
+
+/// A cache whose type is not declared valid still says a cache is there, so
+/// it places its node whatever its type bits read.
+#[test]
+fn a_cache_of_undeclared_type_still_places_its_node() {
+    let mut t = Builder::new(2);
+    let l3 = t.untyped_cache(1);
+    let package = t.node(PACKAGE, 0, 0, &[]);
+    let cluster = t.node(0, package, 0, &[l3]);
+    let leaf = t.node(LEAF | ID_VALID, cluster, 3, &[]);
+    let pptt = open(&t.bytes()).unwrap();
+    assert_eq!(pptt.place(3), Ok(Place { core: leaf, llc: cluster, package }));
 }
 
 #[test]

@@ -40,6 +40,8 @@ pub fn start(gic: &irqchip::Gic, rsdp_addr: u64) {
         gic.cpus.iter().find(|gicc| packed_affinity(gicc.mpidr) == me).expect("smp: the MADT names the boot CPU");
     let mut online = Vec::from([*boot]);
     start_others(gic, me, &mut online);
+    // Arm BBR 2.2 (DEN0044I) §3.1 and §7.3.1.10: the SBBR recipe, an ACPI
+    // Arm machine's, makes the PPTT mandatory.
     let pptt = toyos_acpi::pptt(crate::drivers::acpi::direct_phys(), rsdp_addr)
         .unwrap_or_else(|e| panic!("smp: no PPTT places this machine's CPUs: {e:?}"));
     smp::set_topology(

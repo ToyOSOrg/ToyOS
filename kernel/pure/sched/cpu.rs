@@ -912,11 +912,10 @@ impl<X: SchedPayload> CpuSched<X> {
         }
     }
 
-    /// The CPU [`CpuHandles::idle_near`] chooses among those that have
-    /// published SLEEPING and have no kick coming, for wake-forwarding: one an
-    /// earlier forward has kicked is already being
-    /// handed work, and a burst of wakes drained in one pass would otherwise
-    /// all land on it. Reading the doorbells is a heuristic: a CPU that woke up
+    /// The CPU [`CpuHandles::idle_near`] chooses for a wake forward among those
+    /// that have published SLEEPING and have no kick coming: one an earlier
+    /// forward kicked is already being handed work, and a burst of wakes
+    /// drained in one pass would otherwise all land on it. Reading the doorbells is a heuristic: a CPU that woke up
     /// in the meantime simply gets an ordinary adopt.
     ///
     /// A CPU that stopped mid-idle publishes SLEEPING for ever, and forwarding

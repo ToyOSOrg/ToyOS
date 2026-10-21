@@ -28,7 +28,9 @@ What is left, in order:
 global sequence** — the shape of Linux's `printk_ringbuffer`. The cursor becomes
 one `u64`, so the CPU count leaves the ABI (a cursor holds a position per CPU
 the firmware names today, `toyos_abi::log::CursorHead`); the k-way merge and
-the shard registry go; the loom models are
+the shard registry go, and with them the merge's per-record cost: a stamp read
+and a position store per CPU the firmware names, recomputed each record so no
+fatal path holds a per-CPU array; the loom models are
 rewritten. The ring lives in persistent RAM, so a triple fault or a firmware
 reset — which seal nothing today — leaves the last boot's tail, and the next
 boot's `logd` reads it through `SYS_LOG_READ` under a flag and writes it to
