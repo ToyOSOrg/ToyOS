@@ -170,7 +170,7 @@ enum Answerer {
     Initiator,
 }
 
-/// Every serve's closure but `join`'s.
+/// The flush, then the staged delay: every serve's closure but `join`'s.
 fn answer(by: Answerer) -> impl FnOnce(Reach) {
     move |reach| {
         flush(reach);
