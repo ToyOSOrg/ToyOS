@@ -161,14 +161,6 @@ impl Machine {
 }
 
 /// An acknowledged shootdown means cpu 1 has re-walked since the unmap.
-
-/// A round between the two CPUs every model here names.
-fn two_cpus() -> Shootdown {
-    let shootdown = Shootdown::new();
-    shootdown.size(2);
-    shootdown
-}
-
 #[test]
 fn an_acknowledged_flush_postdates_the_page_table_write() {
     acknowledged_model(|| {
@@ -429,4 +421,11 @@ fn only_a_kernel_half_shootdown_asks_a_wide_answer() {
             "a user-half shootdown after an answered kernel-half one was answered wide",
         );
     });
+}
+
+/// A round between the two CPUs every model here names.
+fn two_cpus() -> Shootdown {
+    let shootdown = Shootdown::new();
+    shootdown.size(2);
+    shootdown
 }

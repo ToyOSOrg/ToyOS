@@ -36,13 +36,6 @@ const POLLS: usize = 3;
 static READ: AtomicBool = AtomicBool::new(false);
 
 
-/// A round between the two CPUs every model here names.
-fn two_cpus() -> Shootdown {
-    let shootdown = Shootdown::new();
-    shootdown.size(2);
-    shootdown
-}
-
 #[test]
 fn a_cpu_read_as_answered_is_read_with_its_answer() {
     READ.store(false, SeqCst);
@@ -75,4 +68,11 @@ fn a_cpu_read_as_answered_is_read_with_its_answer() {
         cpu1.join().unwrap();
     });
     assert!(READ.load(SeqCst), "no interleaving found the round answered, so the assertion never ran");
+}
+
+/// A round between the two CPUs every model here names.
+fn two_cpus() -> Shootdown {
+    let shootdown = Shootdown::new();
+    shootdown.size(2);
+    shootdown
 }

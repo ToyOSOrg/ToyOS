@@ -354,15 +354,13 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
 /// desktop drawn at that scale, and `scale_window`'s 200x100 logical window
 /// given its buffer at it.
 fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
-    const T14: u32 = 0x0008_06c1;
-    const AMD_BENCH: u32 = 0x0086_0f01;
     let signature = microcode_lines(kernel)?
         .first()
         .ok_or("the kernel wrote no microcode line to tell the bench by")?
         .signature;
     let (handle, panel) = match signature {
-        T14 => (0, "panel 309x173 mm, scale 1.5"),
-        AMD_BENCH => (1, "panel 309x174 mm, scale 1.5"),
+        T14_SIGNATURE => (0, "panel 309x173 mm, scale 1.5"),
+        AMD_BENCH_SIGNATURE => (1, "panel 309x174 mm, scale 1.5"),
         other => return Err(format!("no bench of signature {other:#x} says which panel it has")),
     };
     let handed = format!("EDID: GOP handle {handle} of 2 shows the scanout and publishes 128 byte(s), the base block handed over");
@@ -5512,6 +5510,10 @@ enum MicrocodeSaid {
     Unread,
 }
 
+/// Each bench's CPUID.01H:EAX, which its kernel's `microcode:` lines name it by.
+const T14_SIGNATURE: u32 = 0x0008_06c1;
+const AMD_BENCH_SIGNATURE: u32 = 0x0086_0f01;
+
 /// Every `microcode:` line in `log`, or the first CPU that refused the update
 /// it was handed, on any machine.
 fn microcode_lines(log: &str) -> Result<Vec<MicrocodeLine>, String> {
@@ -6313,25 +6315,22 @@ fn smp_roster_and_tsc_trail(log: &str, cpus: u32) -> Result<(), String> {
 
 /// Each CPU's `topo:` line against its bench's tree as the bench's own scout
 /// read it (`kernel/sim/tests/scout/`, decoded by the simulator's
-/// `a_benchs_shape_is_what_its_scout_read`), the bench told by the CPU
-/// signature on the boot's own microcode line. The line is the CPUID the
-/// kernel read live; the expectation is words another kernel logged.
+/// `a_benchs_shape_is_what_its_scout_read`), the bench told by its CPU
+/// signature. The line is the CPUID the kernel read live; the expectation is
+/// words another kernel logged.
 ///
-/// - **T14** (`0x806c1`): x2APIC ids `0, 2, 4, 6, 1, 3, 5, 7` in MADT order,
-///   a core per id pair and one L3 for the package.
-/// - **AMD bench** (`0x860f01`): APIC ids `0..16`, a core per id pair, an L3
-///   per eight ids and one package.
+/// - **T14**: x2APIC ids `0, 2, 4, 6, 1, 3, 5, 7` in MADT order, a core per
+///   id pair and one L3 for the package.
+/// - **AMD bench**: APIC ids `0..16`, a core per id pair, an L3 per eight ids
+///   and one package.
 fn topology_readback(log: &str, cpus: u32) -> Result<(), String> {
-    let microcode = log
-        .lines()
-        .find(|l| l.contains("microcode: cpu0 "))
-        .ok_or("no `microcode: cpu0` record names this machine's CPU")?;
-    let (bench, ids, smt, llc, package): (&str, &[u32], u32, u32, u32) = if microcode.contains(" signature 0x806c1") {
-        ("the T14", &[0, 2, 4, 6, 1, 3, 5, 7], 1, 4, 4)
-    } else if microcode.contains(" signature 0x860f01") {
-        ("the AMD bench", &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15], 1, 3, 7)
-    } else {
-        return Err(format!("no recorded tree for this CPU: {microcode:?}"));
+    let signature =
+        microcode_lines(log)?.first().ok_or("the kernel wrote no microcode line to tell the bench by")?.signature;
+    const AMD_IDS: [u32; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    let (bench, ids, smt, llc, package): (&str, &[u32], u32, u32, u32) = match signature {
+        T14_SIGNATURE => ("the T14", &[0, 2, 4, 6, 1, 3, 5, 7], 1, 4, 4),
+        AMD_BENCH_SIGNATURE => ("the AMD bench", &AMD_IDS, 1, 3, 7),
+        other => return Err(format!("no bench of signature {other:#x} has a recorded tree")),
     };
     if cpus as usize > ids.len() {
         return Err(format!("{cpus} CPUs came up and {bench}'s MADT names {}", ids.len()));

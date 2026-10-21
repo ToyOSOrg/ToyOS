@@ -25,14 +25,6 @@ const MISREAD: u32 = 5;
 const POLLS: usize = 4;
 
 /// A reader that sees a committed count sees the slot it covers.
-
-/// A roster for a boot CPU and the one AP every model here starts.
-fn two_slots() -> Roster {
-    let roster = Roster::new();
-    roster.size(2);
-    roster
-}
-
 #[test]
 fn a_committed_count_never_outruns_its_slot() {
     /// This test's own guard against a bounded exploration passing without
@@ -139,4 +131,11 @@ fn an_ap_that_reads_another_id_is_refused() {
             r.commit(attempt, HARDWARE_ID);
         }
     });
+}
+
+/// A roster for a boot CPU and the one AP every model here starts.
+fn two_slots() -> Roster {
+    let roster = Roster::new();
+    roster.size(2);
+    roster
 }

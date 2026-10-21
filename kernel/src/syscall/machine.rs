@@ -62,7 +62,7 @@ fn read_on_cursor(
         return e.refuse();
     }
     let words = |bytes: &[u8]| -> Vec<u64> {
-        bytes.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().expect("an 8-byte chunk"))).collect()
+        bytes.as_chunks::<8>().0.iter().map(|word| u64::from_le_bytes(*word)).collect()
     };
     let Ok(head) = ctx.user_vec(at, HEAD as u64) else { return SyscallError::BadAddress.to_u64() };
     let mut head = CursorHead::from_words(words(&head).try_into().expect("the head's words"));

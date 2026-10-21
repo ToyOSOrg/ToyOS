@@ -50,8 +50,12 @@ impl<T> CpuSlice<T> {
         let was = self.ptr.swap(ptr, Ordering::Release);
         assert!(was.is_null(), "a per-cpu table is sized once");
     }
+}
 
-    pub fn as_slice(&self) -> &[T] {
+impl<T> core::ops::Deref for CpuSlice<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &[T] {
         let ptr = self.ptr.load(Ordering::Acquire);
         if ptr.is_null() {
             return &[];
@@ -60,32 +64,6 @@ impl<T> CpuSlice<T> {
         // its length stored before the pointer this acquire read.
         unsafe { core::slice::from_raw_parts(ptr, self.len.load(Ordering::Relaxed)) }
     }
-
-    pub fn len(&self) -> usize {
-        self.as_slice().len()
-    }
-
-    pub fn get(&self, index: usize) -> Option<&T> {
-        self.as_slice().get(index)
-    }
-}
-
-impl<T> core::ops::Index<usize> for CpuSlice<T> {
-    type Output = T;
-
-    /// An index past the table is a kernel bug.
-    fn index(&self, index: usize) -> &T {
-        match self.get(index) {
-            Some(element) => element,
-            None => out_of_table(index, self.len()),
-        }
-    }
-}
-
-#[cold]
-#[inline(never)]
-fn out_of_table(index: usize, len: usize) -> ! {
-    panic!("cpu{index} is past a per-cpu table of {len}")
 }
 
 impl<T> Drop for CpuSlice<T> {
