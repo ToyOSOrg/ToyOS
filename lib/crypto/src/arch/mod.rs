@@ -34,6 +34,26 @@ macro_rules! hosted {
     }};
 }
 
+/// `value`, through an assembly block LLVM cannot see into. The block is a
+/// comment: it emits no instruction and keeps the word in its register.
+#[cfg(not(miri))]
+#[inline(always)]
+pub(crate) fn value_barrier(mut value: u64) -> u64 {
+    // The template reads and writes only the operand's register.
+    unsafe {
+        core::arch::asm!("/* {0} */", inout(reg) value, options(pure, nomem, nostack, preserves_flags))
+    };
+    value
+}
+
+/// Miri runs no assembly; a volatile read of the local stands in.
+#[cfg(miri)]
+#[inline(always)]
+pub(crate) fn value_barrier(value: u64) -> u64 {
+    // The local word remains live for this volatile read.
+    unsafe { core::ptr::read_volatile(&value) }
+}
+
 /// GHASH key powers, (H^(i+1))' at index i in the instruction paths' form.
 pub(crate) type Powers = [u128; 16];
 
