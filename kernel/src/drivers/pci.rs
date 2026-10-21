@@ -101,9 +101,7 @@ pub fn stop_bus_mastering(config: Mmio) {
 
 /// One function's ECAM window: PCIe extended config space, PCI 3.0 §7.2.2.
 ///
-/// Declared once because two readers deal in it — an ECAM window carves it and
-/// the reset-time xHCI stop rebuilds one from a bare address.
-pub const CONFIG_BYTES: u64 = 4096;
+const CONFIG_BYTES: u64 = 4096;
 
 /// A PCI function, by its bus, device and function and the configuration
 /// space its ECAM window gives it.
@@ -325,7 +323,7 @@ impl PciDevice {
 
     /// Point an IOMMU unit's own function's MSI at `address`/`data` and
     /// enable it: the one message no unit remaps (AMD 48882 Capability Offset
-    /// 10h), so it is armed here rather than through [`Self::message`].
+    /// 10h), so it is armed here and not through an interrupt remapping entry.
     /// `false` where the function has no MSI capability.
     pub(crate) fn arm_unit_msi(&self, address: u32, data: u32) -> bool {
         let Ok(cap) = self.capability(msi::CAP_ID) else {

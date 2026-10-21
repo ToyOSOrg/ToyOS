@@ -20,4 +20,4 @@ carried the GUID. It is not told that a disk is still arriving.
 **Exit**: diskserver's host tests show the rule. Either sessions already open
 on a GUID that a later offer duplicates are ended, or the open stays routed
 and the duplicate is refused, with that choice stated at `offer`. Owner:
-diskserver, held by whoever takes up USB hot-plug after #971.
+`system/diskserver`, held by the orchestrator until USB hot-plug is assigned.

@@ -181,11 +181,6 @@ impl Inputs {
         }
     }
 
-    /// Whether this usbd was found not to be given the owner's port.
-    pub fn not_given(&self) -> bool {
-        self.not_given
-    }
-
     /// Whether the connection is full, and the caller should send again once
     /// it takes writes.
     pub fn full(&self) -> bool {

@@ -488,10 +488,6 @@ impl<R: Registers, D: DmaBuffers> Hc<R, D> {
         core::mem::take(&mut self.changed.borrow_mut()[usize::from(port)])
     }
 
-    pub fn change_waiting(&self, port: u8) -> bool {
-        self.changed.borrow()[usize::from(port)]
-    }
-
     /// A page of the grant for a device, zeroed, or `None` with none left.
     pub fn page(&self) -> Option<usize> {
         let at = self.free.borrow_mut().pop()?;

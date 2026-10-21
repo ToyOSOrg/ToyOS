@@ -947,6 +947,11 @@ impl<'u, R: Registers, D: DmaBuffers, C: Host, T> Device<'u, R, D, C, T> {
                     let clear = Setup { request_type: 0x02, request: 1, value: 0, index: u16::from(address), length: 0 };
                     // Boxed: a control transfer's own recovery comes back here.
                     if Box::pin(self.control(clear)).await?.is_err() {
+                        // After Set TR Dequeue Pointer (`Recovery`'s order), so
+                        // the ring is already past `held`.
+                        if let Some(op) = held {
+                            op.reclaimed();
+                        }
                         return Ok(Err(()));
                     }
                 }

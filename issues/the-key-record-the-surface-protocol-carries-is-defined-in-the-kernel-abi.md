@@ -16,4 +16,5 @@ types in its own library (root `CLAUDE.md`), so these belong to the surface
 protocol and `toyos-input`, not to `toyos-abi`.
 
 **Exit**: `sdk/abi` defines no input record, and the surface protocol and
-`toyos-input` own theirs.
+`toyos-input` own theirs. Owner: `lib/input`, held by the orchestrator, beside
+the input track's text (#904).

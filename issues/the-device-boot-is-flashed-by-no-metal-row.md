@@ -14,4 +14,5 @@ names its boot now, so its jobs' timings are taken on no machine; only its
 config's job list is still checked (`the_config_runs_exactly_these_jobs`).
 
 **Exit**: a row that rides the device boot and reports its jobs, or the boot
-and its jobs deleted.
+and its jobs deleted. Owner: `tests/toyos.rs`'s metal profile, held by the
+orchestrator, which schedules the benches' boots.

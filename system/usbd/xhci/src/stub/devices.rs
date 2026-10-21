@@ -110,6 +110,9 @@ pub enum Pipes {
     SilentIn,
     /// The Bulk-Out endpoint never answers.
     SilentOut,
+    /// The Bulk-In endpoint halts with its event lost, and CLEAR_FEATURE(HALT)
+    /// stalls.
+    HaltUnannounced,
 }
 
 enum Bot {
@@ -227,6 +230,9 @@ impl Function for Stick {
 
     fn control(&mut self, setup: [u8; 8], _: &[u8]) -> Reply {
         let device = device_descriptor(64, 0x1209, 0x0002, 3);
+        if (setup[0], setup[1], self.pipes.get()) == (0x02, 1, Pipes::HaltUnannounced) {
+            return Reply::Stall;
+        }
         if let Some(reply) = standard(setup, &device, &Self::config(), Some(&self.serial)) {
             return reply;
         }
@@ -243,6 +249,7 @@ impl Function for Stick {
     fn transfer(&mut self, address: u8, out: Option<&[u8]>, max: usize) -> Reply {
         match (address, self.pipes.get()) {
             (0x81, Pipes::SilentIn) | (0x02, Pipes::SilentOut) => return Reply::Wait,
+            (0x81, Pipes::HaltUnannounced) => return Reply::StallUnannounced,
             _ => {}
         }
         match (address, out, std::mem::replace(&mut self.state, Bot::Idle)) {

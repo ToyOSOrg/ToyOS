@@ -1273,14 +1273,6 @@ pub struct PciId {
 }
 
 impl PciId {
-    /// `"<vendor>:<device>"`, four lowercase hex digits each: the kernel's
-    /// `xhci-leave=` boot parameter. A manifest matcher's card is spelled by
-    /// `toyos-manifest`'s own rule.
-    pub fn parse(text: &str) -> Option<Self> {
-        let (vendor, device) = text.split_once(':')?;
-        Some(Self { vendor: hex16(vendor)?, device: hex16(device)? })
-    }
-
     /// The id as one word.
     pub const fn wire(self) -> u64 {
         ((self.vendor as u64) << 16) | self.device as u64
@@ -2548,15 +2540,6 @@ mod tests {
         let mut answer = [0u8; 56 + 4];
         answer[..56].copy_from_slice(crate::usersafe::bytes(&record(0, size, 5)));
         modules(&answer).for_each(drop);
-    }
-
-    /// `xhci-leave=`'s id, four lowercase hex digits each.
-    #[test]
-    fn the_xhci_leave_parameter_is_an_id_in_four_lowercase_hex_digits_each() {
-        assert_eq!(PciId::parse("8086:9a13"), Some(PciId { vendor: 0x8086, device: 0x9a13 }));
-        for bad in ["8086:9A13", "8086:9a1", "8086", "8086:9a13:"] {
-            assert_eq!(PciId::parse(bad), None, "{bad:?} parsed");
-        }
     }
 
     /// The four readers of a `devices` entry share this parser, so what it

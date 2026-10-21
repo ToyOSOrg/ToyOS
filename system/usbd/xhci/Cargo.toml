@@ -1,5 +1,5 @@
 # A member of the host workspace (root `Cargo.toml`): usbd depends on it by
-# path, and its tests drive it against `src/stub.rs` on the host.
+# path, and its tests drive it against `src/stub/` on the host.
 
 [package]
 name = "toyos-xhci"

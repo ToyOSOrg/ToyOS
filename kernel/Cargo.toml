@@ -358,8 +358,7 @@ heap-band-nohead = ["heap-tripwire"]
 # `sched::driver`'s `check_stack_ownership` compares, at every pass, the two
 # words that aim a Ring 3 entry at a stack — `percpu.kernel_rsp` and
 # `tss.rsp0` — against the running task's own stack top, and this CPU's `rsp`
-# against that stack's bounds. The block path's half went with the kernel's
-# xHCI.
+# against that stack's bounds.
 #
 # Its own build and not a boot parameter, for `heap-tripwire`'s reason turned
 # around: it is three comparisons on the pass path, so a kernel carrying it is not

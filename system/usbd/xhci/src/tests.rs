@@ -304,6 +304,34 @@ fn a_stick_whose_bulk_endpoint_never_answers_leaves_a_keyboard_on_the_same_contr
     assert!(w.said("the ladder climbs to its port reset"), "{:#?}", w.host.lines.borrow());
 }
 
+/// A bulk endpoint that halted with its event lost, and whose device stalls
+/// CLEAR_FEATURE(HALT), costs only its stick: the transfer the ring was moved
+/// past is taken back rather than dropped, and the keyboard beside it goes on.
+#[test]
+fn a_halt_whose_clear_feature_stalls_costs_only_its_stick() {
+    let (kb, reports) = keyboard();
+    let (stick, _, pipes) = stick("HALTED1");
+    pipes.set(Pipes::HaltUnannounced);
+    let w = World::new(vec![(FakePort::occupied(QUICK), Some(Box::new(stick))), (FakePort::occupied(QUICK), Some(kb))], 2);
+    let usb = w.start(BOTH);
+    let mut tasks = usb.tasks();
+    let _end = End(&usb);
+    let mut owner = Mock::default();
+    w.run(&usb, &mut tasks, &mut owner, 400 * MS).unwrap();
+    assert!(w.said("collection 0: a Keyboard"));
+    let mut want = Vec::new();
+    for n in 0..20u8 {
+        let key = 0x04 + n;
+        reports.borrow_mut().push_back(vec![0, 0, key, 0, 0, 0, 0, 0]);
+        reports.borrow_mut().push_back(vec![0; 8]);
+        let now = w.host.now.get();
+        w.run(&usb, &mut tasks, &mut owner, now + 1_500 * MS).unwrap();
+        want.extend([(key, true), (key, false)]);
+        assert_eq!(keys(&owner.got), want, "report {n}");
+    }
+    assert!(w.said("its device is reset (Offline)"), "{:#?}", w.host.lines.borrow());
+}
+
 /// The stick present at bring-up is read and offered: its table through the
 /// reader the caller gives, and the bus is settled only once it has been.
 #[test]

@@ -178,6 +178,9 @@ pub enum Reply {
     /// Done: the bytes an IN moves, or none for an OUT taken.
     Data(Vec<u8>),
     Stall,
+    /// A stall whose Transfer Event is lost: the endpoint reads Halted in its
+    /// context, and no event says so.
+    StallUnannounced,
     /// Nothing yet: the transfer stays the endpoint's until the device has
     /// something, as an interrupt IN waits for a report.
     Wait,
@@ -741,6 +744,7 @@ impl Xhc {
                 self.transfer_event(on, CC_STALL, 0, slot, dci);
                 self.set_state(slot, dci, EpState::Halted);
             }
+            Reply::StallUnannounced => self.set_state(slot, dci, EpState::Halted),
             Reply::Data(bytes) => {
                 let bytes = if inbound { bytes } else { Vec::new() };
                 let mut moved = 0usize;
