@@ -6,6 +6,7 @@
 use crate::{
     Error, ct,
     hash::{Sha256, Sha384, Sha512},
+    montgomery::{mac, n0},
 };
 #[derive(Clone, Copy, Debug)]
 pub enum Hash {
@@ -79,16 +80,12 @@ impl PublicKey {
         }
         let words = modulus.len().div_ceil(8);
         let m = read(modulus);
-        let mut inverse = 1u64;
-        for _ in 0..6 {
-            inverse = inverse.wrapping_mul(2u64.wrapping_sub(m[0].wrapping_mul(inverse)))
-        }
         let mut key = Self {
             modulus: m,
             words,
             bits,
             exponent: e,
-            n0: inverse.wrapping_neg(),
+            n0: n0(m[0]),
             r2: [0; WORDS],
         };
         key.r2 = key.montgomery_r2();
@@ -264,15 +261,6 @@ impl PublicKey {
         }
         Ok(())
     }
-}
-/// (lo, hi) of t + a * b + c, which cannot overflow 128 bits.
-#[inline(always)]
-fn mac(t: u64, a: u64, b: u64, c: u64) -> (u64, u64) {
-    let v = u128::from(a)
-        .wrapping_mul(u128::from(b))
-        .wrapping_add(u128::from(t))
-        .wrapping_add(u128::from(c));
-    (v as u64, (v >> 64) as u64)
 }
 /// a < b over the low `n` words.
 fn less(a: &[u64; WORDS], b: &[u64; WORDS], n: usize) -> bool {

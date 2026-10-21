@@ -62,8 +62,8 @@ impl<C: Curve<N>, const N: usize> Scalar<C, N> {
             let bytes = &candidates[i * N * 8..(i + 1) * N * 8];
             let mut candidate = from_be::<N>(bytes);
             let take = crate::ct::mask(Self::valid(&candidate) & (1 ^ selected));
-            for i in 0..N {
-                scalar.0[i] = (scalar.0[i] & !take) | (candidate[i] & take);
+            for j in 0..N {
+                scalar.0[j] = (scalar.0[j] & !take) | (candidate[j] & take);
             }
             selected |= take & 1;
             wipe64(&mut candidate);
@@ -368,4 +368,22 @@ impl Curve<6> for P384 {
         ],
         &P384Field::P,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first valid of four candidates is taken, and four invalid ones are
+    /// refused.
+    #[test]
+    fn generation_takes_the_first_valid_candidate() {
+        let mut n = [0u8; 32];
+        to_be(&P256Order::P, &mut n);
+        let (k1, k2) = ([0x11; 32], [0x22; 32]);
+        let candidates = [n, [0; 32], k1, k2].concat();
+        assert_eq!(Scalar::<P256, 4>::first_valid(&candidates).unwrap().0, from_be::<4>(&k1));
+        let invalid = [n, [0; 32], [0xff; 32], n].concat();
+        assert!(matches!(Scalar::<P256, 4>::first_valid(&invalid), Err(Error::Entropy)));
+    }
 }

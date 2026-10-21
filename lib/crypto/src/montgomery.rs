@@ -243,7 +243,8 @@ const fn one<const N: usize>() -> [u64; N] {
     x
 }
 
-const fn n0(p0: u64) -> u64 {
+/// -p0^-1 mod 2^64 for an odd p0.
+pub(crate) const fn n0(p0: u64) -> u64 {
     // Newton's iteration doubles the correct low bits of p0^-1 from 1 to 64.
     let mut inverse = 1u64;
     let mut i = 0;

@@ -1,5 +1,5 @@
-//! Instruction dispatch is public. Each function here reports whether an
-//! instruction path ran; when none did, the caller computes the same result
+//! Instruction dispatch is public. Each dispatch function here reports whether
+//! an instruction path ran; when none did, the caller computes the same result
 //! portably. UEFI assembly saves and restores every used XMM register;
 //! ordinary hosts use the target's ABI. Hosted AVX paths additionally require
 //! CPUID support and OS-enabled extended state in XCR0.
