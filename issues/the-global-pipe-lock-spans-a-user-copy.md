@@ -4,7 +4,7 @@ kind: defect
 opened: 2026-08-28
 ---
 
-# `pipe::try_read`/`try_write` hold the one global `PIPES` spinlock across a 2 MiB user copy, and a pipe's first write adds a bitmap scan and a 2 MiB zeroing under it
+# `pipe::try_read`/`write` hold the one global `PIPES` spinlock across a 2 MiB user copy, and a pipe's first write adds a bitmap scan and a 2 MiB zeroing under it
 
 Every pipe and every IPC `Connection` in the machine lives behind one static: `static PIPES: Lock<Option<IdMap<PipeId, Pipe>>>` (`kernel/src/pipe.rs:174`). `with_pipes_mut` takes it and runs the whole closure under it (`pipe.rs:181-184`), and `sync::Lock::lock` calls `crate::preempt::disable()` before it spins (`kernel/src/sync.rs:56`), so the holder is non-preemptible and every other CPU that wants a pipe spins with preemption off too.
 
@@ -13,12 +13,12 @@ Every pipe and every IPC `Connection` in the machine lives behind one static: `s
 The bulk copy is inside that closure, not outside it.
 
 * `pipe::try_read` (`pipe.rs:210`) calls `ring.read(len, |off, src| buf.write_at(off, src))` at `pipe.rs:220`, inside `with_pipes_mut`.
-* `pipe::try_write` (`pipe.rs:244`) calls `backing.ring.write(buf.len(), |off, dst| buf.read_at(off, dst))` at `pipe.rs:254`, same acquisition.
+* `pipe::write` (`pipe.rs:244`) calls `backing.ring.write(buf.len(), |off, dst| buf.read_at(off, dst))` at `pipe.rs:254`, same acquisition.
 * `Ring::read`/`Ring::write` (`sdk/abi/src/ring.rs:141`, `:178`) hand the closure one or two contiguous runs; the closure is `UserBytesMut::write_at` / `UserBytes::read_at` (`kernel/src/user_ptr.rs:206`, `:164`), a `copy_nonoverlapping` of the whole run.
 
 The size is bounded only by the ring: `PIPE_SIZE = PAGE_2M` (`pipe.rs:104`), `PAGE_2M = 2 * 1024 * 1024` (`lib/userbound/src/span.rs:27`), and `capacity = total_size - size_of::<RingHeader>()` (`ring.rs:60`) with `RingHeader` `#[repr(C, align(64))]` holding one `AtomicU32` (`ring.rs:24-27`) — so **2,097,088 bytes** is the largest single copy under the lock. Nothing above caps it: `SYS_READ`/`SYS_WRITE` pass the userland length straight through (`kernel/src/syscall/dispatch.rs:110-116`), `object::ops::try_read` hands the full window to `pipe::try_read` (`kernel/src/object/ops.rs:339-340`), and the only other bound, `user_ptr::window` (`user_ptr.rs:269`), requires physical contiguity — which a demand-paged 2 MiB frame satisfies exactly.
 
-A pipe's **first** write is worse, because the page is allocated lazily under the same lock. `try_write` calls `pipe.back()` (`pipe.rs:250`), which calls `pmm::alloc_page()` (`pipe.rs:148`). That takes `BITMAP` nested inside `PIPES` (`kernel/src/mm/pmm.rs:221`), linearly scans up to the whole physical bitmap for a free frame (`pmm.rs:224-241`), and then `write_bytes(..., 0, PAGE_2M)` — a 2 MiB zeroing (`pmm.rs:233-237`) — before `Ring::new` and the user copy that follows it.
+A pipe's **first** write is worse, because the page is allocated lazily under the same lock. `write` calls `pipe.back()` (`pipe.rs:250`), which calls `pmm::alloc_page()` (`pipe.rs:148`). That takes `BITMAP` nested inside `PIPES` (`kernel/src/mm/pmm.rs:221`), linearly scans up to the whole physical bitmap for a free frame (`pmm.rs:224-241`), and then `write_bytes(..., 0, PAGE_2M)` — a 2 MiB zeroing (`pmm.rs:233-237`) — before `Ring::new` and the user copy that follows it.
 
 ## What queues behind it
 
@@ -44,7 +44,7 @@ For the allocation half, the repro is simpler: `SYS_CONNECT` then a single first
 
 `PIPES` is doing two jobs and only one of them needs the global. It is the table lock, and it is also the serialization `Ring` relies on — `ring.rs:41-43` says so plainly: "Every access is serialized by the caller's lock (`kernel::pipe`'s `PIPES`), which is why the cursors are plain integers rather than atomics." So the copy cannot simply be lifted out; the ring's data-race argument has to move with it.
 
-The shape that keeps that argument true is a per-pipe lock under the table lock: `PIPES` guards the `IdMap` and the refcounts, a `Lock` (or a claimed-range token) inside `Pipe` guards `Backing`, and the table lock is dropped once the per-pipe guard is in hand. `try_read`/`try_write` then hold only the pipe's own lock across `Ring::read`/`Ring::write`, and `has_data`/`has_space`/`create`/`clone`/`close` stop queueing behind a stranger's copy. `Ring`'s header sentence changes with it — the serializing lock becomes the pipe's, not the table's.
+The shape that keeps that argument true is a per-pipe lock under the table lock: `PIPES` guards the `IdMap` and the refcounts, a `Lock` (or a claimed-range token) inside `Pipe` guards `Backing`, and the table lock is dropped once the per-pipe guard is in hand. `try_read`/`write` then hold only the pipe's own lock across `Ring::read`/`Ring::write`, and `has_data`/`has_space`/`create`/`clone`/`close` stop queueing behind a stranger's copy. `Ring`'s header sentence changes with it — the serializing lock becomes the pipe's, not the table's.
 
 The lazy allocation should move out from under both: allocate the ring page before taking the table lock (or, on the miss, drop and retry the way `file_cache::read_page` already does at `kernel/src/file_cache.rs:217-231`), so neither the bitmap scan nor the 2 MiB zeroing runs with a global held.
 

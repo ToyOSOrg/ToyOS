@@ -1,4 +1,5 @@
-//! Who holds a pipe's two ends, and what a watch on one of them is told.
+//! Who holds a pipe's two ends, what a watch on one of them is told, and how
+//! a write lands in its ring.
 //!
 //! A pipe end is held by counted references, one per object that names it: a
 //! handle duplicated or moved to another process is the same object or another
