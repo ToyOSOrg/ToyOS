@@ -710,6 +710,10 @@ pub enum Profile {
     /// first with no codec and the second with an output codec: a machine
     /// whose drivers do not both reach an output, as the AMD bench's do not.
     MetalTwoHda,
+    /// [`Profile::Metal`] with a `usb-kbd` beside the stick, which every key
+    /// QMP sends goes to ([`Shape::usb`]): it reaches the owner of input
+    /// through usbd.
+    MetalUsbKeyboard,
     /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
@@ -790,6 +794,7 @@ impl Profile {
             | Self::HeadlessTwoEdu
             | Self::Metal
             | Self::MetalTwoHda
+            | Self::MetalUsbKeyboard
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
@@ -1080,6 +1085,7 @@ impl Profile {
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
             Self::MetalTwoHda => Shape { hda: true, ..Self::Metal.shape() },
+            Self::MetalUsbKeyboard => Shape { usb: &["usb-kbd,bus=xhci.0"], ..Self::Metal.shape() },
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
             Self::HeadlessUsbSpareAmdVi => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }

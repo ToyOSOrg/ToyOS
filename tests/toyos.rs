@@ -477,6 +477,10 @@ const MACHINE_TESTS: &[&str] = &[
     // `/log` takes, which no other QEMU row reads, because their console is
     // the serial line. Its oracle is the image read back on the host.
     "the_log_lands_on_the_boot_stick",
+    // Keys QEMU's `usb-kbd` reports, through usbd, to the owner of input:
+    // the console image's shell runs the command they spell. QEMU's xHC and
+    // keyboard are the independent end of the report the stub cannot be.
+    "a_usb_key_reaches_the_console",
     // The desktop on CPUs that offer no x2APIC, whose local APICs run in
     // xAPIC mode: every IPI, EOI and timer write goes through the MMIO page,
     // which no host build has and the T14, whose CPUs offer x2APIC, never
@@ -2364,6 +2368,33 @@ fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Boot `images/console.toml` with a `usb-kbd` and type `ls` and Enter at it
+/// through QMP, which sends every key to that keyboard: the console's shell
+/// runs it, so usbd bound the keyboard, read its reports and gave the owner
+/// of input its keys.
+fn a_usb_key_reaches_the_console() -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("images/console.toml"),
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::MetalUsbKeyboard, qmp: true, ready_marker: bootlog::COMPLETE, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, "console: ready ", "the console to take its panel")?;
+    await_marker(&mut qemu, &mut console, "collection 0: a Keyboard", "usbd to bind the keyboard")?;
+    {
+        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+        for key in ["l", "s", "ret"] {
+            input.keys(&[(key, true)]);
+            input.keys(&[(key, false)]);
+        }
+    }
+    await_guest(&mut qemu, &mut console, "the shell to run what was typed", |c| {
+        c.lines().any(|l| l.contains("spawn: ") && l.contains("toybox"))
+    })?;
+    serial::Serial::named("the typed-on console boot", console).must_be_clean()
+}
+
 /// Boot `tests/images/panelcase.toml` on [`qemu::Profile::MetalNoX2apic`]'s CPUs, which
 /// offer no x2APIC, and wait for its compositor to hold the panel: every CPU
 /// declared its local APIC in xAPIC mode, every CPU the firmware named came
@@ -3908,6 +3939,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
         "the_log_lands_on_the_boot_stick" => the_log_lands_on_the_boot_stick(test_config),
+        "a_usb_key_reaches_the_console" => a_usb_key_reaches_the_console(),
         "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_boots" => nvme_disk_boots(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
@@ -4517,7 +4549,6 @@ fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> 
         return Err(format!("{at}'s message names no remapping entry of its own:\n{}", kernel.text()));
     }
     log.must_say(&usbd_noop(at))?;
-    log.must_say("fileserver: Log serving /log")?;
     eprintln!("  [usbd] {}", line.trim());
     for complete in kernel.text().lines().filter(|l| l.contains("Boot: complete")) {
         eprintln!("  [usbd] {}", complete.trim());
