@@ -167,15 +167,8 @@ pub enum Refusal {
     Stuck(&'static str),
     PageSize(u32),
     Scratchpad(usize),
-    /// HCCPARAMS1.AC64 clear: the controller would truncate the device
-    /// addresses of a grant, which the kernel does not place below 4 GiB.
-    Addresses32,
     /// The grant is smaller than [`Reset::grant_bytes`].
     Grant(usize),
-    /// Firmware still held HC BIOS Owned after [`HANDOFF_NS`]: it may still be
-    /// running the controller and moving its own buffers, and no reset this
-    /// driver can issue is safe under that. The controller is left as found.
-    FirmwareKeepsIt(u32),
 }
 
 impl core::fmt::Display for Refusal {
@@ -185,14 +178,7 @@ impl core::fmt::Display for Refusal {
             Self::Stuck(what) => write!(f, "{what} within {} ms", REGISTER_NS / 1_000_000),
             Self::PageSize(p) => write!(f, "PAGESIZE={p:#x} does not include 4 KiB, where every ring is placed"),
             Self::Scratchpad(n) => write!(f, "it asks for {n} scratchpad buffers, past the {MAX_SCRATCH} one page names"),
-            Self::Addresses32 => write!(f, "it addresses only 32 bits (HCCPARAMS1.AC64 clear)"),
             Self::Grant(bytes) => write!(f, "a grant of {bytes} bytes is short of the layout"),
-            Self::FirmwareKeepsIt(legsup) => write!(
-                f,
-                "firmware still owns it after {} ms (USBLEGSUP {legsup:#010x}, HC BIOS Owned set), and it is not \
-                 reset under firmware that may be driving it",
-                HANDOFF_NS / 1_000_000
-            ),
         }
     }
 }
@@ -317,6 +303,9 @@ pub struct Counts {
 /// HCRST has run, and nothing of the machine is reachable to it.
 pub struct Reset<R> {
     regs: R,
+    /// The device addresses the controller issues: 64 bits, or 32 where
+    /// HCCPARAMS1.AC64 is clear (§5.3.6).
+    pub address_bits: u8,
     op: usize,
     rt: usize,
     db: usize,
@@ -427,9 +416,6 @@ impl<R: Registers> Reset<R> {
         if scratch > MAX_SCRATCH {
             return Err(Refusal::Scratchpad(scratch));
         }
-        if hccparams1 & HCCPARAMS1_AC64 == 0 {
-            return Err(Refusal::Addresses32);
-        }
         let read = |at: u64| -> Option<u32> {
             let at = usize::try_from(at).ok()?;
             (at % 4 == 0 && at + 4 <= regs.bytes()).then(|| regs.read32(at))
@@ -446,7 +432,8 @@ impl<R: Registers> Reset<R> {
         settle(host, "it held HCRST", || regs.read32(op + OP_USBCMD) & USBCMD_HCRST == 0)?;
         settle(host, "it stayed Controller Not Ready", || regs.read32(op + OP_USBSTS) & USBSTS_CNR == 0)?;
         let slots = max_slots.min(MAX_DEVICES);
-        Ok(Self { regs, op, rt, db, max_ports, slots, context_bytes, scratch, protocols })
+        let address_bits = if hccparams1 & HCCPARAMS1_AC64 != 0 { 64 } else { 32 };
+        Ok(Self { regs, address_bits, op, rt, db, max_ports, slots, context_bytes, scratch, protocols })
     }
 
     /// The grant the layout needs: the fixed head, the scratchpad, and every
@@ -459,7 +446,7 @@ impl<R: Registers> Reset<R> {
     /// (§4.2).
     pub fn start<D: DmaBuffers, C: Host>(self, dma: D, host: &C) -> Result<Hc<R, D>, Refusal> {
         let bytes = self.grant_bytes();
-        let Self { regs, op, rt, db, max_ports, slots, context_bytes, scratch, protocols } = self;
+        let Self { regs, op, rt, db, max_ports, slots, context_bytes, scratch, protocols, .. } = self;
         if dma.bytes() < bytes {
             return Err(Refusal::Grant(dma.bytes()));
         }
@@ -893,10 +880,10 @@ impl<R: Registers, D: DmaBuffers> Drop for Op<'_, R, D> {
 }
 
 /// §4.22.1: ask firmware for the controller (HC OS Owned, USBLEGSUP §7.1.1)
-/// and give it [`HANDOFF_NS`] to clear HC BIOS Owned. Released or never
-/// claimed, its SMIs are turned off and the controller is the driver's;
-/// kept, it is refused by name and left as found: resetting a controller
-/// firmware may still be driving would cut its DMA mid-flight.
+/// and give it [`HANDOFF_NS`] to clear HC BIOS Owned, then turn its SMIs off.
+/// A controller firmware keeps is taken too, by name: its bus mastering is off
+/// until the holder starts it, so the halt and reset after this cut no
+/// transfer of firmware's that could reach memory.
 fn take_from_firmware<R: Registers, C: Host>(
     regs: &R,
     read: &dyn Fn(u64) -> Option<u32>,
@@ -934,7 +921,15 @@ fn take_from_firmware<R: Registers, C: Host>(
         Handoff::Released => host.say(format_args!(
             "firmware released the controller in {took} us (USBLEGSUP {before:#010x} -> {now:#010x})"
         )),
-        Handoff::Kept => return Err(Refusal::FirmwareKeepsIt(now)),
+        // Taken all the same: the kernel hands a claim over with bus mastering
+        // off, and it stays off until the holder starts it after this reset
+        // (`SYS_DEVICE_DMA_START`), so whatever firmware left running reaches
+        // no memory while it is halted and reset (PCIe Base 6.0 §7.5.1.1.3).
+        Handoff::Kept => host.say(format_args!(
+            "firmware still owns the controller after {} ms (USBLEGSUP {before:#010x} -> {now:#010x}); taking it \
+             with its bus mastering off",
+            HANDOFF_NS / 1_000_000
+        )),
     }
     let ctl_at = legsup + xecp::LEGCTLSTS as usize;
     let ctl = regs.read32(ctl_at);

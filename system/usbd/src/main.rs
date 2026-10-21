@@ -171,13 +171,21 @@ fn main() {
         Ok(reset) => reset,
         Err(why) => not_serving(&name, &format!("the controller cannot be driven: {why}"), link, stop),
     };
-    // After the reset, so a controller refused above never had a grant: the
-    // grant is what starts the function mastering the bus.
+    // After the reset, so a controller refused above never had a grant, and
+    // the addresses every grant and lend is placed below stated first.
+    if let Err(why) = dev.dma_limit(reset.address_bits) {
+        not_serving(&name, &format!("the kernel refused its {}-bit address limit: {why:?}", reset.address_bits), link, stop)
+    }
     let bytes = reset.grant_bytes();
     let (grant, _region) = match Grant::alloc(&dev, bytes as u64) {
         Ok(granted) => granted,
         Err(why) => not_serving(&name, &format!("the kernel refused its grant: {why}"), link, stop),
     };
+    // Halted and reset with its mastering off, and started before it is told
+    // any address, which a controller may read the moment it is written.
+    if let Err(why) = dev.dma_start() {
+        not_serving(&name, &format!("the kernel would not start its bus mastering: {why:?}"), link, stop)
+    }
     let hc = match reset.start(grant, &host) {
         Ok(hc) => hc,
         Err(why) => not_serving(&name, &format!("the controller would not run: {why}"), link, stop),
