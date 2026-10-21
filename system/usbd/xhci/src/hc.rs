@@ -446,8 +446,8 @@ impl<R: Registers> Reset<R> {
     /// Give the controller its grant, its rings and interrupter 0, and run it
     /// (§4.2).
     pub fn start<D: DmaBuffers, C: Host>(self, dma: D, host: &C) -> Result<Hc<R, D>, Refusal> {
+        let bytes = self.grant_bytes();
         let Self { regs, op, rt, db, max_ports, slots, context_bytes, scratch, protocols } = self;
-        let bytes = OFF_SCRATCH + scratch * PAGE + slots * DEVICE_PAGES * PAGE;
         if dma.bytes() < bytes {
             return Err(Refusal::Grant(dma.bytes()));
         }
