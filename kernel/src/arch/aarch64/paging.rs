@@ -680,7 +680,8 @@ pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
 }
 
 /// Build the kernel's tables — every page of memory firmware's map names, in
-/// 4 KiB pages each as `image` says where the image lies, and the console
+/// 4 KiB pages where a 2 MiB one holds more than one of `image`'s
+/// protections, and the console
 /// UART and the scanout the boot's own records reach — switch `TTBR1_EL1` to
 /// them and `TTBR0_EL1` to the kernel's empty user half, and answer where the
 /// direct map ends.
@@ -699,7 +700,7 @@ pub(crate) fn init(
         let va = PHYS_OFFSET + at;
         match coverage(memory_map, at) {
             Coverage::Nothing => {}
-            Coverage::Whole if !image.overlaps(at, PAGE_2M) => {
+            Coverage::Whole if image.block(at).is_some() => {
                 tables.directory(va).set(index(va, 2), at | memory(at));
                 blocks += 1;
             }
@@ -738,23 +739,58 @@ pub(crate) fn init(
 
 /// Put this CPU on the kernel's tables — `TTBR1_EL1` the kernel's root,
 /// `TTBR0_EL1` the kernel space's empty user half — from the loader's or from
-/// [`bringup_root`], either of which maps the code, stack and data this runs
-/// on exactly as the kernel's root does. The local `TLBI` then drops every
-/// translation the old tables left, global ones among them.
+/// [`bringup_root`].
+///
+/// The loader's map and the kernel's need not agree on a leaf's size or
+/// permissions for the same address: the loader maps 2 MiB blocks where the
+/// kernel splits its image into pages, and leaves rodata writable. A change of
+/// block size needs break-before-make (Arm ARM DDI 0487 M.d D8.17.1), or the
+/// TLB may hold both translations at once and take a TLB conflict abort. So the
+/// old `TTBR1_EL1` is replaced by an empty root and every translation dropped
+/// with `TLBI VMALLE1` before the kernel's root is installed, while this CPU
+/// runs from its image's identity alias under the old `TTBR0_EL1`, where both
+/// the loader's map and `bringup_root` map the kernel's text executable. The
+/// new `TTBR0_EL1` maps nothing, so switching it only removes translations.
+/// Interrupts stay masked across it: the vectors are at `PHYS_OFFSET`.
 pub(crate) fn join() {
     let ttbr1 = KERNEL_TTBR1.load(core::sync::atomic::Ordering::Acquire);
     let ttbr0 = KERNEL_TTBR0.load(core::sync::atomic::Ordering::Acquire);
     // SAFETY: both roots are published by `init` and live forever, and the
-    // tables this CPU ran on map everything this function touches as they do.
+    // kernel space's root is an empty table, so it is the break's `TTBR1_EL1`
+    // too. Between the two branches nothing is fetched or accessed but this
+    // block's instructions, through the identity alias the old `TTBR0_EL1`
+    // maps; the image runs at `PHYS_OFFSET` plus its physical address, so that
+    // alias is the link address less `PHYS_OFFSET`.
     unsafe {
         core::arch::asm!(
+            "mrs {daif}, daif",
+            "msr daifset, #0xf",
             "dsb ishst",
+            "adr {at}, 1f",
+            "sub {at}, {at}, {offset}",
+            "br {at}",
+            "1:",
+            "msr ttbr1_el1, {empty}",
+            "isb",
+            "tlbi vmalle1",
+            "dsb nsh",
+            "isb",
             "msr ttbr1_el1, {ttbr1}",
+            "isb",
+            "adr {at}, 2f",
+            "add {at}, {at}, {offset}",
+            "br {at}",
+            "2:",
             "msr ttbr0_el1, {ttbr0}",
             "isb",
             "tlbi vmalle1",
             "dsb nsh",
             "isb",
+            "msr daif, {daif}",
+            daif = out(reg) _,
+            at = out(reg) _,
+            offset = in(reg) PHYS_OFFSET,
+            empty = in(reg) ttbr0 & ADDR,
             ttbr1 = in(reg) ttbr1,
             ttbr0 = in(reg) ttbr0,
             options(nostack, preserves_flags),
@@ -826,7 +862,8 @@ pub fn stage_writable_executable(phys: u64) -> u64 {
     let tables = high.as_mut().expect("kernel-wx-leaf: before the kernel's tables exist");
     let i = index(va, 2);
     let entry = tables.directory(va).0[i];
-    let (table, slot, at) = if entry & (VALID | TABLE) == VALID {
+    assert!(entry & VALID != 0, "kernel-wx-leaf: {phys:#x} is not in the direct map");
+    let (table, slot, at) = if entry & TABLE == 0 {
         (tables.directory(va), i, va & !(PAGE_2M - 1))
     } else {
         // SAFETY: a table this root linked, reached under the lock.

@@ -73,16 +73,12 @@ impl Prot {
     }
 }
 
-/// Every bit of a 2 MiB kernel-half leaf but its address and size: the one
-/// writer of [`PAGE_GLOBAL`].
+/// Every bit of a kernel-half leaf but its address and a 2 MiB leaf's size
+/// bit: the one writer of [`PAGE_GLOBAL`]. Its PAT bit is a 2 MiB leaf's (bit
+/// 12; a 4 KiB one's is bit 7), so a 4 KiB leaf takes it only for `Normal`,
+/// which sets neither.
 fn kernel_leaf(cache: CachePolicy, prot: Prot) -> u64 {
     PAGE_PRESENT | PAGE_GLOBAL | prot.kernel_bits() | cache.pde_bits()
-}
-
-/// [`kernel_leaf`] for a 4 KiB page of memory: `Normal` sets no PAT bit, the
-/// one bit a 2 MiB leaf and a 4 KiB one place apart.
-fn kernel_page(prot: Prot) -> u64 {
-    kernel_leaf(CachePolicy::Normal, prot)
 }
 
 /// Every upper-level entry over the kernel half: its leaves decide.
@@ -830,15 +826,15 @@ impl AddressSpace {
         pd.write_pde(pd_idx, virt, entry).subsumed_by_flush();
     }
 
-    /// The 2 MiB page of the direct map at `phys`, which the kernel's image
-    /// shares, in 4 KiB leaves each as the image says. Only `init` calls it,
-    /// before any TLB holds these tables.
+    /// The 2 MiB page of the direct map at `phys`, which holds more than one of
+    /// the image's protections, in 4 KiB leaves each as the image says. Only
+    /// `init` calls it, before any TLB holds these tables.
     fn map_image_pages(&mut self, phys: u64, image: &crate::mm::Image) {
         let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
         let mut pt = Box::new(PageTablePage([0; 512]));
         for i in 0..512 {
             let page = phys + i as u64 * PAGE_4K;
-            pt.init_entry(i, page | kernel_page(image.prot(page).unwrap_or(Prot::ReadWrite)));
+            pt.init_entry(i, page | kernel_leaf(CachePolicy::Normal, image.prot(page).unwrap_or(Prot::ReadWrite)));
         }
         let pt_phys = pt.phys();
         self.children.push(pt);
@@ -1070,7 +1066,7 @@ pub fn debug_global_leaf(how: u64) -> u64 {
 }
 
 /// Build kernel page tables: the direct map in the high half, in 2 MiB pages
-/// of data but where `image` lies, as far as
+/// but where one holds more than one of `image`'s protections, as far as
 /// [`toyos_bootmap::x86_64::direct_map_end`] reaches, and answer that end. The
 /// scanout is not mapped for itself: in the low map the MTRRs type it until
 /// `panic_console::remap` gives it a type of its own.
@@ -1097,10 +1093,9 @@ pub(crate) fn init(
     }
     let mut addr: u64 = 0;
     while addr < end {
-        if image.overlaps(addr, PAGE_2M) {
-            kernel.map_image_pages(addr, image);
-        } else {
-            kernel.map_2m(addr, kernel_leaf(CachePolicy::Normal, Prot::ReadWrite));
+        match image.block(addr) {
+            Some(prot) => kernel.map_2m(addr, kernel_leaf(CachePolicy::Normal, prot)),
+            None => kernel.map_image_pages(addr, image),
         }
         addr += PAGE_2M;
     }
@@ -1151,14 +1146,24 @@ pub fn audit_wx(text: core::ops::Range<u64>) -> kernel::wx::Verdict {
 /// [`audit_wx`] has a writable executable leaf to find. Answers its address.
 #[cfg(feature = "boot-actuators")]
 pub fn stage_writable_executable(phys: u64) -> u64 {
-    let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64 & !(PAGE_2M - 1);
+    let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
     let mut space = kernel().lock();
     let target = space.root();
     let pd = space.ensure_table(virt, KERNEL_TABLE);
-    let pde = pd[indices(virt).2];
-    assert!(pde & PAGE_SIZE_BIT != 0 && pde & PAGE_WRITE != 0, "kernel-wx-leaf: {phys:#x} is not under a writable 2 MiB leaf");
-    pd.write_pde(indices(virt).2, virt, pde & !PAGE_NX).discharge(target);
-    virt
+    let i = indices(virt).2;
+    let pde = pd[i];
+    assert!(pde & PAGE_PRESENT != 0, "kernel-wx-leaf: {phys:#x} is not in the direct map");
+    let (table, slot, at) = if pde & PAGE_SIZE_BIT != 0 {
+        (pd, i, virt & !(PAGE_2M - 1))
+    } else {
+        // SAFETY: a present PDE without the size bit names a table this
+        // module linked; the kernel's lock gives the exclusivity.
+        (unsafe { PageTablePage::from_phys_mut(pde & ADDR_MASK) }, ((virt >> 12) & 0x1FF) as usize, virt & !(PAGE_4K - 1))
+    };
+    let leaf = table[slot];
+    assert!(leaf & PAGE_PRESENT != 0 && leaf & PAGE_WRITE != 0, "kernel-wx-leaf: {phys:#x} is not under a writable leaf");
+    table.write(slot, at, leaf & !PAGE_NX).discharge(target);
+    at
 }
 
 fn has(entry: u64, flag: u64) -> u8 {

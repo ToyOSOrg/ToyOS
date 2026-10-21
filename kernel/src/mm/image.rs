@@ -42,7 +42,7 @@ impl<'a> Image<'a> {
     }
 
     /// Whether any byte of `[phys, phys + len)` is the image's.
-    pub fn overlaps(&self, phys: u64, len: u64) -> bool {
+    fn overlaps(&self, phys: u64, len: u64) -> bool {
         phys < self.memory.end && self.memory.start < phys + len
     }
 
@@ -64,6 +64,15 @@ impl<'a> Image<'a> {
             Some(segment) if !segment.writable() => Prot::Read,
             _ => Prot::ReadWrite,
         })
+    }
+
+    /// What all of the 2 MiB page at `phys` may be used for, where it is one
+    /// thing: a page not the image's is data, and a page that holds two
+    /// protections is `None`, to be mapped page by page.
+    pub fn block(&self, phys: u64) -> Option<Prot> {
+        let of = |page: u64| self.prot(page).unwrap_or(Prot::ReadWrite);
+        let first = of(phys);
+        (1..super::PAGE_2M / PAGE_SIZE).all(|i| of(phys + i * PAGE_SIZE) == first).then_some(first)
     }
 
     /// The text's pages, as the direct map addresses them.
