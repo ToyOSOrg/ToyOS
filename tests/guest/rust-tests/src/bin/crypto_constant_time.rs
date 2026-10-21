@@ -3,7 +3,7 @@
 //! OpenSSH's sealing and refusal, HMAC, HKDF, X25519 and ML-KEM-768's
 //! encapsulation and decapsulation. Its
 //! product is a line per routine on a bench's own CPU; the
-//! `crypto_constant_time` metal row runs it on the T14 and the AMD bench.
+//! `crypto_secret_timing` metal row runs it on the T14 and the AMD bench.
 //!
 //! Each fixed secret is a special value (the issue's rule): the all-zero
 //! key for ciphers and MACs, and for X25519 the all-zero string, which
@@ -11,6 +11,8 @@
 
 #[path = "../constant_time.rs"]
 mod constant_time;
+#[path = "../arch/counter.rs"]
+mod counter;
 
 use constant_time::{leaky_control, measure, Class, Rng};
 use toyos_crypto::aead::{OpeningKey, SealingKey};

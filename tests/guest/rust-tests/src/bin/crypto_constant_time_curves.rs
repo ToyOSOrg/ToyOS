@@ -1,7 +1,7 @@
 //! `toyos-crypto`'s P-256, P-384 and Ed25519 secret routines, timed fixed
 //! against random (`../constant_time.rs`): key derivation, agreement and
 //! signing. Its product is a line per routine on a bench's own CPU; the
-//! `crypto_constant_time_curves` metal row runs it on the T14 and the AMD
+//! `crypto_secret_timing_curves` metal row runs it on the T14 and the AMD
 //! bench, in a boot of its own because it takes the bench for hours.
 //!
 //! Each fixed secret is a special value (the issue's rule): the scalar 1,
@@ -9,6 +9,8 @@
 
 #[path = "../constant_time.rs"]
 mod constant_time;
+#[path = "../arch/counter.rs"]
+mod counter;
 
 use constant_time::{leaky_control, measure, Class, Rng};
 use toyos_crypto::ecc::{p256, p384};

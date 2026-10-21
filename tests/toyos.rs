@@ -247,8 +247,8 @@ const RUST_SKIP: &[&str] = &[
     // bench.
     "crypto_parity",
     // Their product is timing evidence on a bench's own CPU, a million
-    // measurements per routine: the `crypto_constant_time` and
-    // `crypto_constant_time_curves` metal rows run them on the T14 and the
+    // measurements per routine: the `crypto_secret_timing` and
+    // `crypto_secret_timing_curves` metal rows run them on the T14 and the
     // AMD bench.
     "crypto_constant_time",
     "crypto_constant_time_curves",
@@ -1408,14 +1408,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         // each routine's verdict is printed and recorded there, and decides
         // nothing here. The job fails only where its leaky control goes
         // unseen. The T14 and the AMD bench.
-        "crypto_constant_time",
+        "crypto_secret_timing",
         metal::Metal { arms: CRYPTO_CT, judge: |b| crypto_ct_lines(b[0], "test_rs_crypto_constant_time") },
     ),
     (
         // The same of the NIST curves and Ed25519, whose million
         // measurements a routine take the bench for hours, in a boot of
         // their own. The T14 and the AMD bench.
-        "crypto_constant_time_curves",
+        "crypto_secret_timing_curves",
         metal::Metal {
             arms: CRYPTO_CT_CURVES,
             judge: |b| crypto_ct_lines(b[0], "test_rs_crypto_constant_time_curves"),

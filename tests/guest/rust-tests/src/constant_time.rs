@@ -13,7 +13,8 @@
 //! verdict of that run worthless.
 
 use std::hint::black_box;
-use std::time::Instant;
+
+use crate::counter::ticks;
 
 /// Measurements per routine, behind those that warm it and calibrate the
 /// crops.
@@ -85,14 +86,14 @@ pub struct Verdict {
 
 /// Times `run` on `MEASUREMENTS` inputs from `make`, and prints its line:
 /// the raw t, the largest |t| and the crop it was found at, and each
-/// class's mean.
+/// class's mean in ticks.
 pub fn measure<I>(name: &str, rng: &mut Rng, mut make: impl FnMut(Class, &mut Rng) -> I, mut run: impl FnMut(I)) -> Verdict {
     let mut once = |rng: &mut Rng| {
         let class = if rng.next() & 1 == 0 { Class::Fixed } else { Class::Random };
         let input = make(class, rng);
-        let start = Instant::now();
+        let start = ticks();
         run(black_box(input));
-        (class, start.elapsed().as_nanos() as f64)
+        (class, ticks().wrapping_sub(start) as f64)
     };
     for _ in 0..WARMUP {
         once(rng);
@@ -119,12 +120,12 @@ pub fn measure<I>(name: &str, rng: &mut Rng, mut make: impl FnMut(Class, &mut Rn
     let (mut max_t, mut at) = (raw.t().abs(), "raw".to_string());
     for (k, set) in cropped.iter().enumerate() {
         if set.judged() && set.t().abs() > max_t {
-            (max_t, at) = (set.t().abs(), format!("crop {k} (<= {} ns)", crops[k]));
+            (max_t, at) = (set.t().abs(), format!("crop {k} (<= {} ticks)", crops[k]));
         }
     }
     let verdict = if max_t < THRESHOLD { "pass" } else { "LEAKS" };
     println!(
-        "ct {name}: {verdict} max |t| {max_t:.2} at {at}; raw t {:.2}; n {} fixed, {} random; mean {:.1} ns fixed, {:.1} ns random",
+        "ct {name}: {verdict} max |t| {max_t:.2} at {at}; raw t {:.2}; n {} fixed, {} random; mean {:.1} ticks fixed, {:.1} random",
         raw.t(),
         raw.n[0],
         raw.n[1],
