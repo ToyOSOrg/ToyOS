@@ -6,8 +6,6 @@
 //! "without a NUL terminator", and QEMU 11.1.1 ends it with one; the port is
 //! the declared [`crate::PORT_ID`] instead.
 
-use toyos_untrusted::Untrusted;
-
 /// One control message's bytes.
 pub const BYTES: usize = 8;
 
@@ -83,13 +81,10 @@ pub fn decode(bytes: &[u8], max_nr_ports: u32) -> Result<Control, Refused> {
     let id = u32::from_le_bytes([message[0], message[1], message[2], message[3]]);
     let event = u16::from_le_bytes([message[4], message[5]]);
     let value = u16::from_le_bytes([message[6], message[7]]);
-    let event = Untrusted::new(event)
-        .index(Event::ALL.len())
-        .map(|at| Event::ALL[at])
-        .map_err(|_| Refused::Event { event })?;
-    Untrusted::new(id)
-        .index(max_nr_ports as usize)
-        .map_err(|_| Refused::Port { id, max_nr_ports })?;
+    let event = *Event::ALL.get(usize::from(event)).ok_or(Refused::Event { event })?;
+    if id >= max_nr_ports {
+        return Err(Refused::Port { id, max_nr_ports });
+    }
     Ok(Control { id, event, value })
 }
 

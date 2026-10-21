@@ -48,12 +48,18 @@ directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
    after it. No test reads any of the three: `src/metalswap.rs`'s `judge`
    read the third, on the T14 through `toyos-metal --swap`, and is deleted
    (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`).
-2. **An end says how**. An end reads as an exit, a kill or a fault kind
-   alike on every architecture, and a bare code reads the last two as failures.
-   No end reads as a quit's reason. *Exit*: exited 137, killed, and each fault
-   kind the architecture raises, each read from a child that did it. Negative
-   control: the stage reverted whole, where the first two read alike. Oracle:
-   POSIX `<signal.h>`'s classes.
+2. **Done**: **an end says how**. `SYS_PROCESS_WAIT` answers a
+   `toyos_abi::end::End` — an exit with its code, a kill, or a fault of one of
+   `<signal.h>`'s classes (memory, alignment, instruction, arithmetic, trap)
+   or the handle fault — classified at each architecture's fault path, and
+   std's `ExitStatus` has no code for the last two and reads them as failures.
+   No end reads as a quit's reason. Read from children that did each:
+   `process_lifecycle` (exited 137, killed), `fault_gates` and `claim_bar_fault`
+   (memory, instruction, arithmetic), `debug_trap` (trap), the handle-fault
+   probes (handle). x86-64 raises no alignment fault (`CR0.AM` is clear), and
+   AArch64's `virt` rows read only memory and instruction until
+   `issues/toyos-runs-on-arm64.md`'s stage 8 boots the shared suite there.
+   Oracle: POSIX `<signal.h>`'s classes.
 3. **libc starts and waits for children** (blocked on
    `issues/a-childs-stdio-handle-is-not-the-one-command-named.md`).
    libc imitates `SIGCHLD`. A C child starts with descriptors 0–2 and exactly

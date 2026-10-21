@@ -45,12 +45,14 @@ use std::process::{Command, Stdio};
 
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SyscallError};
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_abuse_listener_hijack";
 const NAME: &str = "abuse-listener-hijack";
 
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
+/// How the kernel ends a process that names a handle it does not hold.
+const HANDLE_FAULT: End = End::Fault(Fault::Handle);
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -159,7 +161,7 @@ fn killed(role: &str, arg: Option<&str>, what_would_be_wrong: &str) {
         format!("reached {role}"),
         "{role} never reached its call",
     );
-    assert_eq!(out.status.code(), Some(HANDLE_FAULT), "{what_would_be_wrong}");
+    assert_eq!(End::from_word(out.status.into_raw()), Some(HANDLE_FAULT), "{what_would_be_wrong}");
 }
 
 fn marker(role: &str) {

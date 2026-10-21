@@ -17,7 +17,7 @@ repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [features]
 # std links it through `toyos`, whose stream end is a session's client.
-rustc-dep-of-std = ["core", "toyos-untrusted/rustc-dep-of-std"]
+rustc-dep-of-std = ["core"]
 # Declared, never enabled by any build that ships: each reverts one decision so
 # the model that refuses it is shown able to red at all. `build/ci.rs`'s
 # `CONTROLS` runs each and demands the named test's own FAILED line.
@@ -61,7 +61,6 @@ head-only = []
 
 [dependencies]
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
-toyos-untrusted = { path = "../../lib/untrusted" }
 
 [dev-dependencies]
 loom = "0.7"

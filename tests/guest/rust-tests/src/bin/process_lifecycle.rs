@@ -41,6 +41,8 @@ use toyos_abi::inbox::{
 };
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::End;
 
 #[path = "../roster.rs"]
 mod roster;
@@ -51,8 +53,7 @@ const SELF_PATH: &str = "/system/bin/test_rs_process_lifecycle";
 /// process's own table, and it names nothing anywhere else.
 const SUBJECT_LABEL: &str = "subject";
 
-/// `process::KILLED_EXIT_CODE`.
-const KILLED: i32 = 137;
+const KILLED: End = End::Killed;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -68,6 +69,7 @@ fn test() {
     a_wait_before_the_exit_is_woken_by_it();
     an_unrelated_wake_does_not_end_the_wait();
     two_handles_answer_the_same();
+    an_exit_of_137_is_not_a_kill();
     a_kill_publishes_like_an_exit();
     each_end_completes_its_own_watch();
     a_watch_on_an_ended_child_completes_at_once();
@@ -97,7 +99,7 @@ fn an_undefined_wait_flag_bit_is_refused() {
         Some(SyscallError::InvalidArgument),
         "a wait carrying a flag bit this ABI does not define was served: {refused:#x}",
     );
-    assert_eq!(syscall::process_wait_nonblock(handle), Ok(5), "the same wait without the bit");
+    assert_eq!(syscall::process_wait_nonblock(handle), Ok(End::Exited(5)), "the same wait without the bit");
     println!("  an undefined WNOHANG-word bit is InvalidArgument, and without it the code comes back");
 }
 
@@ -132,8 +134,8 @@ fn reading_the_code_does_not_spend_it() {
     assert_eq!(child.wait().expect("wait").code(), Some(3), "the first wait");
 
     let handle = RawHandle(child.as_raw_handle());
-    assert_eq!(syscall::process_wait(handle), Ok(3), "the second wait");
-    assert_eq!(syscall::process_wait_nonblock(handle), Ok(3), "a wait long after the fact");
+    assert_eq!(syscall::process_wait(handle), Ok(End::Exited(3)), "the second wait");
+    assert_eq!(syscall::process_wait_nonblock(handle), Ok(End::Exited(3)), "a wait long after the fact");
     println!("  the code is read three times and is the same each time");
 }
 
@@ -237,9 +239,19 @@ fn two_handles_answer_the_same() {
     let second = syscall::dup(first).expect("a Process handle duplicates");
     drop(release);
     assert_eq!(child.wait().expect("wait").code(), Some(11), "through the first handle");
-    assert_eq!(syscall::process_wait(second), Ok(11), "through the second handle");
+    assert_eq!(syscall::process_wait(second), Ok(End::Exited(11)), "through the second handle");
     syscall::close(second);
     println!("  two handles to one process answer the same code");
+}
+
+/// An exit of 137 is an exit, whatever a shell spells a kill as: the end says
+/// which it was, and a code is only ever a process's own.
+fn an_exit_of_137_is_not_a_kill() {
+    let (mut child, release) = start(137);
+    drop(release);
+    let end = End::from_word(child.wait().expect("wait").into_raw());
+    assert_eq!(end, Some(End::Exited(137)), "the child that exited 137");
+    println!("  an exit of 137 reads as an exit, and a kill as a kill");
 }
 
 /// A kill is a teardown like any other, so it publishes like one — and asking
@@ -248,9 +260,9 @@ fn a_kill_publishes_like_an_exit() {
     let (mut child, _release) = start(0);
     let handle = RawHandle(child.as_raw_handle());
     syscall::process_kill(handle).expect("kill");
-    assert_eq!(child.wait().expect("wait").code(), Some(KILLED), "a killed process's code");
+    assert_eq!(End::from_word(child.wait().expect("wait").into_raw()), Some(KILLED), "a killed process's end");
     syscall::process_kill(handle).expect("killing a process that has gone is not a failure");
-    assert_eq!(syscall::process_wait(handle), Ok(KILLED), "the code after the second kill");
+    assert_eq!(syscall::process_wait(handle), Ok(KILLED), "the end after the second kill");
     println!("  a kill publishes {KILLED} once, and a second kill changes nothing");
 }
 
@@ -306,7 +318,7 @@ fn a_kill_completes_a_watch() {
     let result = watch_result_across(handle, || child.kill().expect("kill"));
     assert_eq!(result, READABLE as i32, "the killed child's watch");
     let status = child.try_wait().expect("try_wait");
-    assert_eq!(status.and_then(|s| s.code()), Some(KILLED), "the killed child's code");
+    assert_eq!(status.map(|s| End::from_word(s.into_raw())), Some(Some(KILLED)), "the killed child's end");
     println!("  a kill completes a watch, as readable");
 }
 
@@ -417,7 +429,7 @@ fn waiter() -> ! {
     let subject: Process = Endowments::get()
         .take(SUBJECT_LABEL)
         .expect("the waiter was endowed a process handle");
-    let code = subject.wait().expect("wait through an endowed handle");
-    println!("waited {code}");
+    let end = subject.wait().expect("wait through an endowed handle");
+    println!("waited {}", end.code().expect("the subject exits"));
     std::process::exit(0);
 }

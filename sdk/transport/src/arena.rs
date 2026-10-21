@@ -6,7 +6,7 @@
 
 use core::fmt;
 
-use crate::{Untrusted, Violation};
+use crate::Violation;
 
 /// Bytes `offset..offset + len` of the region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -69,12 +69,8 @@ impl fmt::Debug for Run {
 
 impl Run {
     /// The run a peer's two words name.
-    pub fn decode(first: Untrusted<u32>, count: Untrusted<u32>, geometry: &Geometry) -> Result<Self, Violation> {
-        let bounded = |word: Untrusted<u32>| word.at_most(u64::from(geometry.slots)).ok()?.try_into().ok();
-        bounded(first)
-            .zip(bounded(count))
-            .and_then(|(first, count)| geometry.run(first, count))
-            .ok_or(Violation::Run)
+    pub fn decode(first: u32, count: u32, geometry: &Geometry) -> Result<Self, Violation> {
+        geometry.run(first, count).ok_or(Violation::Run)
     }
 
     pub fn first(&self) -> u32 {
@@ -108,11 +104,11 @@ mod tests {
     /// last slot is a run and one past it is not, however the sum wraps.
     #[test]
     fn a_run_a_peer_names_is_inside_the_arena() {
-        let run = Run::decode(Untrusted::new(510), Untrusted::new(1), &PAGES).unwrap();
+        let run = Run::decode(510, 1, &PAGES).unwrap();
         assert_eq!(run.span(), Span { offset: 0x1000 + 510 * 4096, len: 4096 });
         for (first, count) in [(510, 2), (0, 0), (511, 1), (1, u32::MAX), (u32::MAX, 1), (0, 512)] {
             assert_eq!(
-                Run::decode(Untrusted::new(first), Untrusted::new(count), &PAGES),
+                Run::decode(first, count, &PAGES),
                 Err(Violation::Run),
                 "{first}+{count}"
             );

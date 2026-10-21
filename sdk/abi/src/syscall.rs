@@ -180,14 +180,14 @@ pub const SYS_SHM_MAP: u64 = 106;
 /// What [`SYS_SHM_CREATE`] rounds a length up to a whole number of.
 pub const SHM_PAGE: usize = 2 << 20;
 
-/// Wait for the process a handle names and take its exit code, gated by
-/// [`Rights::WAIT`]. See [`process_wait`].
+/// Wait for the process a handle names and take how it ended, an [`End`]'s
+/// word, gated by [`Rights::WAIT`]. See [`process_wait`].
 ///
-/// **An exit code is a property of the object, not of a table entry**, so this
+/// **An end is a property of the object, not of a table entry**, so this
 /// answers whether or not the process is still around: a spawner that waits a
-/// second time gets the same code, and one that waits for the first time long
+/// second time gets the same end, and one that waits for the first time long
 /// after the process is gone gets it too. There is nothing to reap and no
-/// window in which an exit is missed.
+/// window in which an end is missed.
 ///
 /// [`Rights::WAIT`]: crate::handle::Rights::WAIT
 pub const SYS_PROCESS_WAIT: u64 = 108;
@@ -428,6 +428,7 @@ pub const MAX_LABELS_LEN: usize = 4096;
 /// Bytes of label blob one spawn may carry: the kernel adds [`SELF_LABEL`]'s.
 pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len();
 
+use crate::end::End;
 use crate::handle::Rights;
 use crate::pci::{DmaGrant, DmaMapping};
 use crate::{Pid, RawHandle, HANDLE_INVALID};
@@ -951,18 +952,22 @@ pub fn endowments(buf: &mut [u8]) -> usize {
     syscall(SYS_ENDOWMENTS, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as usize
 }
 
-/// Block until the process `proc` names has exited, and take its exit code.
-pub fn process_wait(proc: RawHandle) -> Result<i32, SyscallError> {
-    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, 0, 0, 0)).map(|code| code as i32)
+/// Block until the process `proc` names has ended, and take how.
+pub fn process_wait(proc: RawHandle) -> Result<End, SyscallError> {
+    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, 0, 0, 0)).map(end_of)
 }
 
-/// The exit code if the process has already exited, `Err(WouldBlock)` if it has
-/// not.
+/// How the process ended if it has, `Err(WouldBlock)` if it has not.
 ///
 /// [`WNOHANG`] rather than a syscall of its own: this is the same question with
 /// the wait taken out, and a caller that polls is asking about the same object.
-pub fn process_wait_nonblock(proc: RawHandle) -> Result<i32, SyscallError> {
-    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, WNOHANG, 0, 0)).map(|code| code as i32)
+pub fn process_wait_nonblock(proc: RawHandle) -> Result<End, SyscallError> {
+    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, WNOHANG, 0, 0)).map(end_of)
+}
+
+/// The end the kernel answered, which is one it defines or a kernel bug.
+fn end_of(word: u64) -> End {
+    End::from_word(word).unwrap_or_else(|| panic!("SYS_PROCESS_WAIT answered {word:#x}, which names no end"))
 }
 
 /// Kill the process `proc` names. Answers `Ok` for one already dead: the

@@ -18,6 +18,8 @@ use toyos::process::Process;
 use toyos::{namespace, port, AsHandle, OwnedHandle};
 use toyos_abi::syscall::{self, debug_action, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::End;
 
 const SELF_PATH: &str = "/system/bin/test_rs_spawn_lands_claimed";
 
@@ -27,8 +29,7 @@ const BACK: &str = "back";
 /// The place to the test: a copy of its own `self`.
 const MSG_SELF: u32 = 1;
 
-/// `process::KILLED_EXIT_CODE`.
-const KILLED: i32 = 137;
+const KILLED: End = End::Killed;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -67,7 +68,7 @@ fn test() {
     }
     assert_eq!(child.wait(), Ok(KILLED), "the child that landed under a claimed place was not ended, as killed");
     let status = place.wait().expect("wait for the place");
-    assert_eq!(status.code(), Some(KILLED), "the place was not ended, as killed");
+    assert_eq!(End::from_word(status.into_raw()), Some(KILLED), "the place was not ended, as killed");
     syscall::close(place_self);
     println!("spawn_lands_claimed: the child landed claimed and was retired, and its place was published after it");
 }

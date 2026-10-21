@@ -82,6 +82,7 @@ fn admit<P: Lifecycle>(proc: Option<&P>) -> Admit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proclife::End;
     use crate::proclife::model::World;
     use crate::proclife::{join, teardown, ThreadLocation};
 
@@ -109,7 +110,7 @@ mod tests {
     fn a_claimed_process_refuses_at_the_start_in_both_arms() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        assert!(teardown::claim_teardown(&mut world, pid, 137));
+        assert!(teardown::claim_teardown(&mut world, pid, End::Killed));
         assert_eq!(admit_thread_start(&world, pid), Admit::TearingDown);
     }
 
@@ -118,7 +119,7 @@ mod tests {
     fn a_claimed_process_refuses_at_the_insert_too() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        assert!(teardown::claim_teardown(&mut world, pid, 137));
+        assert!(teardown::claim_teardown(&mut world, pid, End::Killed));
         assert_eq!(admit_thread_insert(&world, pid), Admit::TearingDown);
     }
 
@@ -154,7 +155,7 @@ mod tests {
     fn the_mutation_really_admits_into_a_claimed_teardown() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        assert!(teardown::claim_teardown(&mut world, pid, 137));
+        assert!(teardown::claim_teardown(&mut world, pid, End::Killed));
         assert_eq!(
             admit_thread_insert(&world, pid),
             Admit::Yes,

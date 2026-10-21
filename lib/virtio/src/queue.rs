@@ -21,8 +21,6 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use toyos_untrusted::{Refused, Untrusted};
-
 use toyos_device_memory::DmaBuffers;
 
 /// §2.7: "The maximum Queue Size value is 32768."
@@ -118,14 +116,14 @@ pub struct Used {
 pub enum UsedRefusal {
     /// An element's `id` is past the descriptor table. The element is taken
     /// and names no chain.
-    Head(Refused),
+    Head { id: u32, size: u16 },
     /// An element's `id` is a head no chain is in flight at: one the device
     /// already gave back, or one never published. The element is taken.
     NoChain { head: u16 },
     /// An element's `len` is more than its chain's device-writable elements
     /// hold (§2.7.8). The element is taken and its chain stays in flight: its
     /// buffers are the device's still, and are not handed up.
-    Written { head: u16, len: Refused },
+    Written { head: u16, len: u32, writable: u32 },
     /// The used index stands further on than the chains made available: the
     /// device says it used buffers it was never given, so no element from the
     /// last one taken on is one this driver can tell from a stale one.
@@ -137,14 +135,16 @@ pub enum UsedRefusal {
 impl core::fmt::Display for UsedRefusal {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::Head(why) => write!(f, "a used element's head {why}"),
+            Self::Head { id, size } => {
+                write!(f, "a used element's head {id} is past the queue's {size} descriptors")
+            }
             Self::NoChain { head } => {
                 write!(f, "a used element names head {head}, where no chain is in flight")
             }
-            Self::Written { head, len } => write!(
+            Self::Written { head, len, writable } => write!(
                 f,
                 "the used element for head {head} claims more bytes than its chain may be \
-                 written: {len}"
+                 written: {len} where it may take {writable}"
             ),
             Self::Jumped { used, taken, available } => write!(
                 f,
@@ -345,24 +345,25 @@ impl<M: DmaBuffers> Virtqueue<M> {
         let at = self.parts.used
             + RING_ENTRIES
             + (self.last_used % self.size) as usize * USED_ELEM_BYTES;
-        let id = Untrusted::new(self.mem.read32(at));
-        let len = Untrusted::new(self.mem.read32(at + USED_ELEM_LEN));
+        let id = self.mem.read32(at);
+        let len = self.mem.read32(at + USED_ELEM_LEN);
         self.last_used = self.last_used.wrapping_add(1);
 
-        let first = id.index(self.slots.len()).map_err(UsedRefusal::Head)?;
-        // Exact: `index` proved it below the table's length, a `u16`.
+        let Some(first) = usize::try_from(id).ok().filter(|&first| first < self.slots.len()) else {
+            return Err(UsedRefusal::Head { id, size: self.size });
+        };
+        // Exact: below the table's length, a `u16`.
         let head = first as u16;
         let chain = self.slots[first];
         if chain.descs == 0 {
             return Err(UsedRefusal::NoChain { head });
         }
-        let written = len
-            .at_most(chain.writable as u64)
-            .map_err(|len| UsedRefusal::Written { head, len })?;
+        if len > chain.writable {
+            return Err(UsedRefusal::Written { head, len, writable: chain.writable });
+        }
         for slot in &mut self.slots[first..first + chain.descs as usize] {
             *slot = Slot::default();
         }
-        // Exact: `at_most` proved it no more than `chain.writable`, a `u32`.
-        Ok(Some(Used { head, written: written as u32 }))
+        Ok(Some(Used { head, written: len }))
     }
 }

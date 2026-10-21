@@ -16,6 +16,7 @@ fn main() {
     match kind.as_str() {
         "de" => divide_by_zero(),
         "de_overflow" => divide_overflow(),
+        "ud" => undefined_opcode(),
         "ss" => stack_fault(),
         "ss_rsp" => stack_fault_via_rsp(),
         "mf" => x87_exception(),
@@ -154,6 +155,13 @@ fn simd_exception() {
 fn read_null() {
     // SAFETY: none — the fault is the point, and it ends this process.
     unsafe { core::ptr::read_volatile(core::ptr::null::<u64>()) };
+}
+
+/// #UD (6). `UD2`, the opcode defined to raise it.
+#[inline(never)]
+fn undefined_opcode() {
+    // SAFETY: none — the fault is the point, and it ends this process.
+    unsafe { core::arch::asm!("ud2") };
 }
 
 /// #AC (17). RFLAGS.AC plus a misaligned load. CR0.AM gates it as well and is
