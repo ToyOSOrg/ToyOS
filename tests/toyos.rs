@@ -70,6 +70,9 @@ const RUST_SKIP: &[&str] = &[
     // It writes the stick for ever, so that its boot's deadline resets the
     // machine under it: `stick_survives_a_reset_under_load` runs it alone.
     "stick_load",
+    // The stick-write load `mask_windows` reads windows under, on the boot
+    // whose kernel reports them.
+    "stick_write",
     // It opens a window, which needs a compositor the shared boot does not
     // run: `a_window_is_drawn_at_the_scale_and_relaid_at_the_next` runs it on
     // tests/images/scalecase.toml, and the `gop_edid_scale` metal row on
@@ -172,6 +175,7 @@ const RUST_SKIP: &[&str] = &[
     // on QEMU's.
     "audio_tone",
     "audio_tone_resampled",
+    "tone_beside_stick_write",
     "volume_step",
     // It hands the ACPI claim to a server of its own and kills it, which needs
     // a boot that starts none: the `acpi_server_death` metal row runs it on
@@ -628,6 +632,22 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| {
                 b[0].job_passed("test_rs_audio_tone")?;
                 audio::tone_on_metal(&b[0].log())
+            },
+        },
+    ),
+    (
+        // `hda_tone`'s tone while a thread of its process writes the stick
+        // through usbd: no period soundserver had to fill
+        // (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`'s
+        // exit). It is the kernel's: one claim's interrupts and its holder's
+        // threads never starve another holder's deadline. The T14 and the AMD
+        // bench.
+        "tone_beside_a_stick_write",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed(audio::TONE_BESIDE_STICK_WRITE)?;
+                audio::tone_beside_a_stick_write(&b[0].log())
             },
         },
     ),
@@ -1351,6 +1371,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_wake_onto_busy",
         "test_rs_audio_tone",
         "test_rs_audio_tone_resampled",
+        audio::TONE_BESIDE_STICK_WRITE,
         "test_rs_volume_step",
         "test_rs_syscall_cost",
         "test_rs_spawn_cost",
@@ -1387,16 +1408,20 @@ const WINDOWSCASE: &[metal::Arm] = &[metal::Arm {
         "windowscase",
         "tests/images/testcases.toml",
         &[],
-        &["test_rs_idle_span", "pwd", WINDOWS_LOAD],
+        &["test_rs_idle_span", "pwd", WINDOWS_LOAD, STICK_WRITE],
     )
 }];
 
 /// The load `mask_windows` reads the windows under.
 const WINDOWS_LOAD: &str = "test_rs_ring_park_herd";
 
-/// The head of the kernel's record of [`WINDOWS_LOAD`]'s exit.
-fn windows_load_exited() -> String {
-    format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(WINDOWS_LOAD))
+/// The stick-write load it reads them under too (#901 §9): 32 MiB through
+/// usbd, whose interrupts and threads are a claim's and a process's.
+const STICK_WRITE: &str = "test_rs_stick_write";
+
+/// The head of the kernel's record of `job`'s exit.
+fn exited(job: &str) -> String {
+    format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(job))
 }
 
 /// `tests/images/metalcase.toml`, ended once ps2server's probe has: a boot
@@ -4951,12 +4976,18 @@ fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
     let kernel = boot.kernel();
     let cpus = boot.cpus()?;
     mask_windows(kernel.text(), cpus)?;
-    let read = common::irqcensus::windows_under(kernel.text(), cpus, &windows_load_exited())?;
+    let read = common::irqcensus::windows_under(kernel.text(), cpus, &exited(WINDOWS_LOAD))?;
     eprintln!(
         "  [windows] held irqs_off_ns={} preempt_off_ns={}; herd irqs_off_ns={} preempt_off_ns={}",
         read.held.0, read.held.1, read.load.0, read.load.1
     );
-    Ok(())
+    // Under the stick write, each CPU's longest windows are judged against
+    // the bench's record (`timings::ceiling`), the base they were first read at.
+    boot.job_passed(STICK_WRITE)?;
+    let under = common::irqcensus::windows_under(kernel.text(), cpus, &exited(STICK_WRITE))?;
+    eprintln!("  [windows] stick write irqs_off_ns={} preempt_off_ns={}", under.load.0, under.load.1);
+    boot.measured("boot.windowscase.stick_write.irqs_off_ns", under.load.0)?;
+    boot.measured("boot.windowscase.stick_write.preempt_off_ns", under.load.1)
 }
 
 fn pci_cap_selftest(log: &str) -> Result<(), String> {
