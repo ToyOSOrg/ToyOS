@@ -852,11 +852,12 @@ const METAL: &[(&str, metal::Metal)] = &[
         "smp_roster_and_tsc_trail",
         metal::Metal {
             arms: TESTCASES,
-            // The T14's CPUs offer x2APIC, so the declaration keeps it there.
+            // Each bench's local APIC in the mode its CPUs offer
+            // ([`apic_mode_offered`]), which the declaration takes.
             judge: |b| {
                 let (log, cpus) = (b[0].kernel(), b[0].cpus()?);
                 smp_roster_and_tsc_trail(log.text(), cpus)?;
-                apic_mode_held(&log, cpus, "X2apic")
+                apic_mode_held(&log, cpus, apic_mode_offered(log.text())?)
             },
         },
     ),
@@ -6311,6 +6312,20 @@ fn smp_roster_and_tsc_trail(log: &str, cpus: u32) -> Result<(), String> {
          {widest} cycles wide"
     );
     Ok(())
+}
+
+/// The local APIC mode a bench's CPUs offer, by `CPUID.01H:ECX[21]` as each
+/// bench's scout read it on every CPU (`kernel/sim/tests/scout/`): the T14's
+/// `0x77fafbbf` sets it and the AMD bench's `0x76d8320b` does not, so the
+/// declaration keeps x2APIC on the one and xAPIC on the other.
+fn apic_mode_offered(log: &str) -> Result<&'static str, String> {
+    let signature =
+        microcode_lines(log)?.first().ok_or("the kernel wrote no microcode line to tell the bench by")?.signature;
+    match signature {
+        T14_SIGNATURE => Ok("X2apic"),
+        AMD_BENCH_SIGNATURE => Ok("Xapic"),
+        other => Err(format!("no bench of signature {other:#x} has a recorded APIC mode")),
+    }
 }
 
 /// Each CPU's `topo:` line against its bench's tree as the bench's own scout
