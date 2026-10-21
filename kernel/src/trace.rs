@@ -15,15 +15,16 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use kernel::sched::hw::{TraceEvent, TraceKind};
 pub use toyos_abi::trace::Kind;
-use toyos_abi::trace::{TraceCursor, TraceRecord, NO_THREAD};
+use toyos_abi::trace::{TraceRecord, NO_THREAD};
 use toyos_abi::syscall::SyscallError;
 
 use crate::arch::{cpu, percpu, IrqGuard};
-use crate::log::read::{Rings, Stream};
+use crate::cpu_slice::CpuSlice;
+use crate::log::read::{Cursor, Rings, Stream};
 use crate::log::shard::Ring;
 use crate::user_ptr::UserBytesMut;
 
-/// Records per CPU: 256 KiB of 32-byte slots, 2 MiB at eight CPUs.
+/// Records per CPU: 256 KiB of 32-byte slots.
 const SLOTS: usize = 8192;
 
 /// A slot's words past its sequence number: the stamp; the kind, CPU and
@@ -34,7 +35,18 @@ type TraceRing = Ring<WORDS, SLOTS>;
 
 const _: () = assert!(core::mem::size_of::<TraceRing>() == 64 + SLOTS * toyos_abi::trace::RECORD_BYTES);
 
-static RINGS: [TraceRing; crate::sched::MAX_CPUS] = [const { TraceRing::new() }; crate::sched::MAX_CPUS];
+/// A ring per CPU the firmware names, online or not, 256 KiB each (64 MiB at
+/// 256 CPUs); empty, and so writing nowhere, until [`size`] runs.
+static RINGS: CpuSlice<&'static TraceRing> = CpuSlice::new();
+
+pub fn size(cpus: usize) {
+    RINGS.size(cpus, |_| {
+        // Zeroed in place: a ring is too large to build on a stack.
+        // SAFETY: all-zero is an empty ring, as `log::shard_for`'s shards are.
+        let ring = unsafe { alloc::boxed::Box::<TraceRing>::new_zeroed().assume_init() };
+        alloc::boxed::Box::leak(ring)
+    });
+}
 
 /// Off until the clock is up, so no record is stamped before the counter it is read against is.
 static ENABLED: AtomicBool = AtomicBool::new(false);
@@ -57,7 +69,7 @@ fn push(kind: Kind, task: Option<(u32, u32)>, data: u32) {
     }
     let guard = IrqGuard::close();
     let at = percpu::cpu_id();
-    let ring = &RINGS[at as usize];
+    let Some(&ring) = RINGS.get(at as usize) else { return };
     let (pid, tid) = task.unwrap_or_else(|| {
         (
             percpu::current_pid().map_or(NO_THREAD, |p| p.raw()),
@@ -111,15 +123,27 @@ pub fn record(ev: TraceEvent) {
     push(kind, task.map(|name| ((name >> 32) as u32, name as u32)), data);
 }
 
-/// Every CPU's ring a reader can name: one per CPU online now.
-fn rings() -> Rings<WORDS, SLOTS> {
-    let online = crate::smp::cpu_count() as usize;
-    core::array::from_fn(|cpu| RINGS.get(cpu).filter(|_| cpu < online))
+/// Every ring a reader names: one per CPU the firmware names.
+struct Diary;
+
+impl Rings<WORDS, SLOTS> for Diary {
+    fn count(&self) -> usize {
+        RINGS.len()
+    }
+
+    fn ring(&self, cpu: usize) -> Option<&'static TraceRing> {
+        RINGS.get(cpu).copied()
+    }
 }
 
-/// Copies records `cursor` has not seen into `out`, oldest first; never blocks.
-pub fn read(cursor: &mut TraceCursor, out: &mut UserBytesMut, capacity: usize) -> Result<usize, SyscallError> {
-    crate::log::user::read_rings(&rings(), &mut cursor.0, out, capacity)
+/// How many rings a cursor holds a position for.
+pub fn rings() -> usize {
+    RINGS.len()
+}
+
+/// Copies records the positions `next` have not seen into `out`, oldest first; never blocks.
+pub fn read(next: &[u64], out: &mut UserBytesMut, capacity: usize) -> Result<(usize, Cursor), SyscallError> {
+    crate::log::user::read_rings(&Diary, next, out, capacity)
 }
 
 /// [`Kind::Mark`] records `count` of them on this CPU, `data` counting up, and

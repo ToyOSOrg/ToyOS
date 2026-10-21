@@ -271,7 +271,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // so the count is bounded by the most CPUs there can be.
         SYS_COUNTERS => {
             let count = a3;
-            if count > crate::scheduler::MAX_CPUS as u64 {
+            if count > crate::smp::capacity() as u64 {
                 return SyscallError::InvalidArgument.to_u64();
             }
             let len = count * toyos_abi::counters::RECORD_BYTES as u64;

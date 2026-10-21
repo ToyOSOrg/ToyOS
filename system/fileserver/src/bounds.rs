@@ -9,6 +9,11 @@
 //! connection taken past its share's part of the handshakes is answered
 //! `TooManyConnections` and let go.
 //!
+//! **An export takes its served slot when it is made**, of the share of the
+//! connection that asked, and is refused there: a connection made for a
+//! child is served from its export, waits on no handshake bound or timeout,
+//! and its hello is not counted again.
+//!
 //! **Every client number is bounded where it is kept**: an offset a request
 //! names, and an offset a stream grows by what it drains, stay at or below the
 //! largest a file has ([`MAX_FILE_BYTES`]).
@@ -20,6 +25,8 @@
 //! held to UTF-8 alone.
 
 use toyos::fs::{canonical, Error, MAX_FILE_BYTES, MAX_PATH, WINDOW_BYTES};
+
+use crate::descriptions::MAX_IDS;
 use toyos::shm::Lent;
 
 /// Clients served at once, machine-wide: one connection per directory per
@@ -59,15 +66,53 @@ pub fn handshake(share: u64, waiting: usize) -> Result<(), String> {
     }
 }
 
-/// A hello, while `served` clients are served and `of_share` of them are its
-/// share's. `window` is the region it lent as the kernel describes it, `None`
-/// for a hello that lent none, and is asked only once the bounds have passed.
-pub fn hello<W>(served: usize, of_share: usize, window: impl FnOnce() -> Option<Result<W, Lent>>) -> Hello<W> {
+/// Whether a connection's served slot is still to be taken at its hello, or
+/// was taken when it was exported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    AtHello,
+    Taken,
+}
+
+/// The slot a new served connection takes, while `served` clients are served
+/// and `of_share` of them are its share's: `Err` is why it is refused.
+fn served_slot(served: usize, of_share: usize) -> Result<(), String> {
     if served >= MAX_SERVED {
-        return Hello::Refused(format!("it is refused, since {MAX_SERVED} clients are served already"));
+        return Err(format!("it is refused, since {MAX_SERVED} clients are served already"));
     }
     if of_share >= SERVED_SHARE {
-        return Hello::Refused(format!("it is refused, since its share is served {SERVED_SHARE} clients already"));
+        return Err(format!("it is refused, since its share is served {SERVED_SHARE} clients already"));
+    }
+    Ok(())
+}
+
+/// An export, while `served` clients are served and `of_share` of them are
+/// the asking connection's share's: it takes its slot here or is refused
+/// `TooManyConnections`.
+pub fn export(served: usize, of_share: usize) -> Result<(), Error> {
+    served_slot(served, of_share).map_err(|_| Error::TooManyConnections)
+}
+
+/// How many ids an export names, read before its window is: 1 to
+/// [`MAX_IDS`], what one connection holds, or `InvalidRequest`.
+pub fn export_ids(count: u64) -> Result<usize, Error> {
+    usize::try_from(count).ok().filter(|n| (1..=MAX_IDS).contains(n)).ok_or(Error::InvalidRequest)
+}
+
+/// A hello, while `served` clients are served and `of_share` of them are its
+/// share's; `slot` says whether it takes a slot here. `window` is the region
+/// it lent as the kernel describes it, `None` for a hello that lent none, and
+/// is asked only once the bounds have passed.
+pub fn hello<W>(
+    slot: Slot,
+    served: usize,
+    of_share: usize,
+    window: impl FnOnce() -> Option<Result<W, Lent>>,
+) -> Hello<W> {
+    if slot == Slot::AtHello {
+        if let Err(why) = served_slot(served, of_share) {
+            return Hello::Refused(why);
+        }
     }
     match window() {
         None => Hello::Dropped("its hello carried no window"),
@@ -84,10 +129,14 @@ pub fn in_a_file(at: u64, len: u64) -> Result<u64, Error> {
     at.checked_add(len).filter(|&end| end <= MAX_FILE_BYTES).ok_or(Error::FileTooLarge)
 }
 
-/// A stream asked to start at `at`, while `streams` are served and `of_share`
-/// of them are its share's.
-pub fn stream(at: u64, streams: usize, of_share: usize) -> Result<(), Error> {
-    in_a_file(at, 0)?;
+/// Where a seek of `delta` from `base` lands: at or below the largest offset a
+/// file has and not before its start, or `InvalidRequest`.
+pub fn seek(base: u64, delta: i64) -> Result<u64, Error> {
+    base.checked_add_signed(delta).filter(|&at| at <= MAX_FILE_BYTES).ok_or(Error::InvalidRequest)
+}
+
+/// A stream, while `streams` are served and `of_share` of them are its share's.
+pub fn stream(streams: usize, of_share: usize) -> Result<(), Error> {
     match streams >= MAX_STREAMS || of_share >= STREAM_SHARE {
         true => Err(Error::TooManyStreams),
         false => Ok(()),
@@ -140,9 +189,40 @@ mod tests {
 
     #[test]
     fn a_hello_past_the_server_s_bound_or_its_share_s_part_is_refused_before_its_window_is_asked() {
-        assert!(matches!(hello(MAX_SERVED, 0, unasked), Hello::Refused(why) if why.contains("128 clients are served")));
-        assert!(matches!(hello(SERVED_SHARE, SERVED_SHARE, unasked), Hello::Refused(why) if why.contains("its share is served 32")));
-        assert_eq!(hello(MAX_SERVED - 1, SERVED_SHARE - 1, || Some(Ok(()))), Hello::Served(()));
+        let at = Slot::AtHello;
+        assert!(matches!(hello(at, MAX_SERVED, 0, unasked), Hello::Refused(why) if why.contains("128 clients are served")));
+        assert!(matches!(hello(at, SERVED_SHARE, SERVED_SHARE, unasked), Hello::Refused(why) if why.contains("its share is served 32")));
+        assert_eq!(hello(at, MAX_SERVED - 1, SERVED_SHARE - 1, || Some(Ok(()))), Hello::Served(()));
+    }
+
+    /// An export is refused at the bounds a hello is, before any connection is
+    /// made for it.
+    #[test]
+    fn an_export_past_the_server_s_bound_or_its_share_s_part_is_refused() {
+        assert_eq!(export(MAX_SERVED, 0), Err(Error::TooManyConnections));
+        assert_eq!(export(SERVED_SHARE, SERVED_SHARE), Err(Error::TooManyConnections));
+        assert_eq!(export(MAX_SERVED - 1, SERVED_SHARE - 1), Ok(()));
+    }
+
+    /// An export's count is the client's word: none, more than a connection
+    /// holds, or one whose window span would overflow is refused before
+    /// anything is read.
+    #[test]
+    fn an_export_naming_no_ids_or_more_than_a_connection_holds_is_refused() {
+        for count in [0, MAX_IDS as u64 + 1, 1 << 61, u64::MAX] {
+            assert_eq!(export_ids(count), Err(Error::InvalidRequest), "{count:#x}");
+        }
+        assert_eq!(export_ids(1), Ok(1));
+        assert_eq!(export_ids(MAX_IDS as u64), Ok(MAX_IDS));
+    }
+
+    /// The exported connection's slot was taken at its export, so its hello is
+    /// served at a full server and share, which counted it already; its window
+    /// is still held to what a hello's is.
+    #[test]
+    fn an_exported_connection_s_hello_is_not_counted_again() {
+        assert_eq!(hello(Slot::Taken, MAX_SERVED, SERVED_SHARE, || Some(Ok(()))), Hello::Served(()));
+        assert_eq!(hello::<()>(Slot::Taken, 0, 0, || None), Hello::Dropped("its hello carried no window"));
     }
 
     /// The kernel's answer for a lent region that is not one region of
@@ -157,19 +237,20 @@ mod tests {
             (None, "its hello carried no window"),
         ];
         for (window, why) in refused {
-            assert_eq!(hello(0, 0, || window), Hello::Dropped(why));
+            assert_eq!(hello(Slot::AtHello, 0, 0, || window), Hello::Dropped(why));
         }
     }
 
-    /// A stream asked to start past the largest offset a file has is refused,
-    /// since its offset would grow by what it drains; and the same bound holds
-    /// a write's end and a truncation.
+    /// A seek lands at or below the largest offset a file has, and never
+    /// before its start; a write's end and a truncation are held to the same.
     #[test]
     fn an_offset_past_the_largest_a_file_has_is_refused() {
-        for at in [MAX_FILE_BYTES + 1, u64::MAX - 1] {
-            assert_eq!(stream(at, 0, 0), Err(Error::FileTooLarge), "a stream at {at:#x}");
-        }
-        assert_eq!(stream(MAX_FILE_BYTES, 0, 0), Ok(()));
+        assert_eq!(seek(0, (MAX_FILE_BYTES + 1) as i64), Err(Error::InvalidRequest));
+        assert_eq!(seek(MAX_FILE_BYTES, 1), Err(Error::InvalidRequest));
+        assert_eq!(seek(3, -4), Err(Error::InvalidRequest), "before the start");
+        assert_eq!(seek(u64::MAX, 1), Err(Error::InvalidRequest), "an overflow");
+        assert_eq!(seek(10, -4), Ok(6));
+        assert_eq!(seek(0, MAX_FILE_BYTES as i64), Ok(MAX_FILE_BYTES));
         assert_eq!(in_a_file(MAX_FILE_BYTES - 2, 4), Err(Error::FileTooLarge), "a write straddling the ceiling");
         assert_eq!(in_a_file(u64::MAX, 1), Err(Error::FileTooLarge), "a write whose end overflows");
         assert_eq!(in_a_file(MAX_FILE_BYTES - 4, 4), Ok(MAX_FILE_BYTES));
@@ -177,9 +258,9 @@ mod tests {
 
     #[test]
     fn a_stream_past_the_server_s_bound_or_its_share_s_part_is_refused() {
-        assert_eq!(stream(0, MAX_STREAMS, 0), Err(Error::TooManyStreams));
-        assert_eq!(stream(0, STREAM_SHARE, STREAM_SHARE), Err(Error::TooManyStreams));
-        assert_eq!(stream(0, MAX_STREAMS - 1, STREAM_SHARE - 1), Ok(()));
+        assert_eq!(stream(MAX_STREAMS, 0), Err(Error::TooManyStreams));
+        assert_eq!(stream(STREAM_SHARE, STREAM_SHARE), Err(Error::TooManyStreams));
+        assert_eq!(stream(MAX_STREAMS - 1, STREAM_SHARE - 1), Ok(()));
     }
 
     /// A path put on the wire past std is held to what std would have sent

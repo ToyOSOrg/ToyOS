@@ -41,16 +41,31 @@ use core::sync::atomic::Ordering::Relaxed;
 use kernel::sched::windows::{Unseen, Windows, HELD_NS};
 
 use crate::arch::{cpu, percpu};
-use crate::sched::MAX_CPUS;
+use crate::cpu_local;
 
-static CPUS: [Windows; MAX_CPUS] = [const { Windows::new() }; MAX_CPUS];
+/// A CPU's record, and how many handler bodies it is inside: one at most,
+/// since a maskable handler runs masked.
+pub struct Local {
+    windows: Windows,
+    in_handler: AtomicU32,
+}
+
+impl Local {
+    pub fn new() -> Self {
+        Self { windows: Windows::new(), in_handler: AtomicU32::new(0) }
+    }
+}
+
+fn here() -> &'static Local {
+    &cpu_local::here().windows
+}
 
 /// This CPU's record, once there is a per-CPU block to say which CPU this is.
 fn on(transition: impl FnOnce(&Windows) -> Result<(), Unseen>) {
     if !crate::log::PERCPU_READY.load(Relaxed) {
         return;
     }
-    if let Err(unseen) = transition(&CPUS[percpu::cpu_id() as usize]) {
+    if let Err(unseen) = transition(&here().windows) {
         refuse(unseen);
     }
 }
@@ -59,14 +74,10 @@ fn on(transition: impl FnOnce(&Windows) -> Result<(), Unseen>) {
 #[inline(never)]
 fn refuse(unseen: Unseen) -> ! {
     let cpu = percpu::cpu_id();
-    CPUS[cpu as usize].stop();
+    here().windows.stop();
     stand_down();
     panic!("mask-windows: cpu{cpu} {unseen}");
 }
-
-/// How many handler bodies each CPU is inside: one at most, since a maskable
-/// handler runs masked.
-static IN_HANDLER: [AtomicU32; MAX_CPUS] = [const { AtomicU32::new(0) }; MAX_CPUS];
 
 /// The machine is ending: the witness refuses nothing more.
 static STOOD_DOWN: AtomicBool = AtomicBool::new(false);
@@ -74,14 +85,14 @@ static STOOD_DOWN: AtomicBool = AtomicBool::new(false);
 /// A maskable interrupt's handler body starts on this CPU.
 pub fn handler_entered() {
     if crate::log::PERCPU_READY.load(Relaxed) {
-        IN_HANDLER[percpu::cpu_id() as usize].fetch_add(1, Relaxed);
+        here().in_handler.fetch_add(1, Relaxed);
     }
 }
 
 /// That body ends.
 pub fn handler_leaving() {
     if crate::log::PERCPU_READY.load(Relaxed) {
-        IN_HANDLER[percpu::cpu_id() as usize].fetch_sub(1, Relaxed);
+        here().in_handler.fetch_sub(1, Relaxed);
     }
 }
 
@@ -92,8 +103,8 @@ pub fn outside_a_handler(what: &str) {
         return;
     }
     let cpu = percpu::cpu_id();
-    if IN_HANDLER[cpu as usize].load(Relaxed) != 0 {
-        CPUS[cpu as usize].stop();
+    if here().in_handler.load(Relaxed) != 0 {
+        here().windows.stop();
         stand_down();
         panic!("mask-windows: cpu{cpu} took {what} inside an interrupt handler at {}", core::panic::Location::caller());
     }
@@ -109,7 +120,7 @@ pub fn start_here() {
     // Masked from here whatever it stood with; the guard's drop opens them
     // again, through its hook, if it found them open.
     let _masked = crate::arch::IrqGuard::close();
-    CPUS[percpu::cpu_id() as usize].start(crate::preempt::count(), cpu::counter());
+    here().windows.start(crate::preempt::count(), cpu::counter());
 }
 
 /// Interrupts were open and this CPU has just masked them.
@@ -166,7 +177,7 @@ pub fn woken() {
 /// windows so the next report starts from none.
 pub fn report() {
     for cpu in 0..crate::smp::cpu_count() {
-        let (irqs, preempt) = CPUS[cpu as usize].take();
+        let (irqs, preempt) = cpu_local::of(cpu).windows.windows.take();
         crate::log!(
             "windows: cpu{cpu} irqs_off_ns={} preempt_off_ns={}",
             crate::clock::nanos_of_ticks(irqs),

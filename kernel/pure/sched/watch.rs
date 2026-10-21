@@ -395,6 +395,7 @@ mod tests {
 
     use super::*;
     use crate::sched::cpu::{CpuHandle, CpuHandles};
+    use crate::sched::topology::Topology;
     use crate::sched::hw::CpuId;
     use crate::sched::mailbox::{mailbox, MailboxConsumer, NoPreempt};
     use crate::sched::park::{prepare, Cancel, Commit, CurrentTask};
@@ -476,7 +477,7 @@ mod tests {
 
     fn cpus() -> (CpuHandles<Msg>, MailboxConsumer<Msg>) {
         let (tx, rx) = mailbox();
-        (CpuHandles::new(vec![CpuHandle::new(C0, tx)]), rx)
+        (CpuHandles::new(vec![CpuHandle::new(C0, tx)], Topology::flat(1)), rx)
     }
 
     fn woken() -> WakeCause {

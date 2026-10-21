@@ -1,6 +1,7 @@
 //! What an x86 CPU's CPUID words say it is and has: its vendor and
 //! signature, whether its HWP performance request is declared and the
-//! request, and which of its model-specific counters exist.
+//! request, which of its model-specific counters exist, and where it sits in
+//! the machine's cache tree.
 //!
 //! Intel's facts are the SDM's (325462-093), AMD's its PPRs'. Where neither
 //! states a value, the rule here is ToyOS's own and says so.
@@ -8,6 +9,8 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
+
+use crate::sched::topology::CpuKeys;
 
 /// CPUID.0's identification string (EBX, EDX, ECX bytes in that order):
 /// `"GenuineIntel"` (SDM Vol. 1 §21.1.1) and `"AuthenticAMD"` (PPR 55922,
@@ -223,6 +226,57 @@ fn counts_smis(id: &Ident) -> bool {
     id.vendor == Vendor::Intel && id.family == 6 && SMI_COUNT_MODELS.contains(&id.model)
 }
 
+/// Why a CPU's topology leaves describe no place in a tree.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TopologyRefusal {
+    /// Neither CPUID.1FH nor CPUID.0BH enumerates a level.
+    NoLevels,
+    /// The levels name no SMT level (type 1).
+    NoSmtLevel,
+    /// The last-level cache is shared by fewer ids than a core holds, or by
+    /// more than the package does.
+    CacheOutsidePackage { smt_shift: u32, llc_shift: u32, package_shift: u32 },
+}
+
+/// One CPU's [`CpuKeys`] from the topology leaves it read of itself, each
+/// list running from subleaf 0 to the first invalid subleaf, which ends it
+/// wherever it appears.
+///
+/// `levels` is CPUID.1FH where the CPU has it and CPUID.0BH otherwise (SDM
+/// Vol. 2A, CPUID): EAX\[4:0\] the shift to the next level's id, ECX\[15:8\]
+/// the level type, 0 past the last level, and EDX the x2APIC id, on every
+/// subleaf. The SMT level's shift gives the core and the last level's the
+/// package.
+///
+/// `caches` is the deterministic cache leaf, CPUID.04H on Intel and
+/// CPUID.8000_001DH on AMD (PPR 55922, `CPUID_Fn8000001D`), one layout:
+/// EAX\[4:0\] the type, 0 past the last cache, 1 data and 3 unified;
+/// EAX\[7:5\] the level; EAX\[25:14\] one less than the ids that share it. The
+/// highest data or unified cache is the LLC, keyed by the id shifted by the
+/// width of that count rounded up to a power of two. A CPU that describes no
+/// cache is given one LLC per package: the package is the only shared domain
+/// it names.
+pub fn topology_keys(levels: &[[u32; 4]], caches: &[[u32; 4]]) -> Result<CpuKeys, TopologyRefusal> {
+    let level_type = |q: &[u32; 4]| (q[2] >> 8) & 0xff;
+    let shift = |q: &[u32; 4]| q[0] & 0x1f;
+    let levels: &[[u32; 4]] = &levels[..levels.iter().position(|q| level_type(q) == 0).unwrap_or(levels.len())];
+    let last = levels.last().ok_or(TopologyRefusal::NoLevels)?;
+    let x2apic_id = last[3];
+    let smt_shift = shift(levels.iter().find(|q| level_type(q) == 1).ok_or(TopologyRefusal::NoSmtLevel)?);
+    let package_shift = shift(last);
+    let cache_type = |q: &[u32; 4]| q[0] & 0x1f;
+    let llc_shift = caches
+        .iter()
+        .take_while(|q| cache_type(q) != 0)
+        .filter(|q| matches!(cache_type(q), 1 | 3))
+        .max_by_key(|q| (q[0] >> 5) & 7)
+        .map_or(package_shift, |q| (((q[0] >> 14) & 0xfff) + 1).next_power_of_two().trailing_zeros());
+    if !(smt_shift..=package_shift).contains(&llc_shift) {
+        return Err(TopologyRefusal::CacheOutsidePackage { smt_shift, llc_shift, package_shift });
+    }
+    Ok(CpuKeys { core: x2apic_id >> smt_shift, llc: x2apic_id >> llc_shift, package: x2apic_id >> package_shift })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +414,53 @@ mod tests {
         assert_eq!(std::format!("{:?}", Vendor::from_id(&id)), "Other(\"  Shanghai  \")");
         assert_eq!(Vendor::from_id(b"GenuineIntel"), Vendor::Intel);
         assert_eq!(Vendor::from_id(b"AuthenticAMD"), Vendor::Amd);
+    }
+
+    /// The T14's cpu4 (x2APIC id 1) and the AMD bench's cpu2 (APIC id 2), each
+    /// the words its scout logged (`kernel/sim/tests/scout/`), its invalid
+    /// subleaf last.
+    #[test]
+    fn a_cpus_keys_are_its_id_under_its_own_leaves() {
+        let t14_levels = [[0x1, 0x2, 0x100, 0x1], [0x4, 0x8, 0x201, 0x1], [0x0, 0x0, 0x2, 0x1]];
+        let t14_caches = [
+            [0x1c004121, 0x2c0003f, 0x3f, 0],
+            [0x1c004122, 0x1c0003f, 0x3f, 0],
+            [0x1c004143, 0x4c0003f, 0x3ff, 0],
+            [0x1c03c163, 0x1c0003f, 0x3fff, 4],
+            [0, 0, 0, 0],
+        ];
+        assert_eq!(topology_keys(&t14_levels, &t14_caches), Ok(CpuKeys { core: 0, llc: 0, package: 0 }));
+        let amd_levels = [[0x1, 0x2, 0x100, 0x2], [0x7, 0x10, 0x201, 0x2], [0x0, 0x0, 0x2, 0x2]];
+        let amd_caches = [
+            [0x4121, 0x1c0003f, 0x3f, 0],
+            [0x4122, 0x1c0003f, 0x3f, 0],
+            [0x4143, 0x1c0003f, 0x3ff, 2],
+            [0x1c163, 0x3c0003f, 0xfff, 1],
+            [0, 0, 0, 0],
+        ];
+        assert_eq!(topology_keys(&amd_levels, &amd_caches), Ok(CpuKeys { core: 1, llc: 0, package: 0 }));
+        let ccx1 = [[0x1, 0x2, 0x100, 0x9], [0x7, 0x10, 0x201, 0x9]];
+        assert_eq!(topology_keys(&ccx1, &amd_caches), Ok(CpuKeys { core: 4, llc: 1, package: 0 }));
+    }
+
+    #[test]
+    fn a_cpu_that_describes_no_cache_has_one_llc_per_package() {
+        let levels = [[0x1, 0x2, 0x100, 0x13], [0x4, 0x8, 0x201, 0x13]];
+        assert_eq!(topology_keys(&levels, &[]), Ok(CpuKeys { core: 9, llc: 1, package: 1 }));
+        let after_the_last = [[0, 0, 0, 0], [0x1c163, 0, 0, 0]];
+        assert_eq!(topology_keys(&levels, &after_the_last), Ok(CpuKeys { core: 9, llc: 1, package: 1 }));
+    }
+
+    #[test]
+    fn leaves_that_place_no_cpu_are_refused_by_name() {
+        assert_eq!(topology_keys(&[], &[]), Err(TopologyRefusal::NoLevels));
+        assert_eq!(topology_keys(&[[0, 0, 0x2, 0]], &[]), Err(TopologyRefusal::NoLevels));
+        assert_eq!(topology_keys(&[[0x4, 0x8, 0x201, 0]], &[]), Err(TopologyRefusal::NoSmtLevel));
+        // A cache 32 ids wide on a package of 16.
+        let levels = [[0x1, 0x2, 0x100, 0], [0x4, 0x10, 0x201, 0]];
+        assert_eq!(
+            topology_keys(&levels, &[[0x7c163, 0, 0, 0]]),
+            Err(TopologyRefusal::CacheOutsidePackage { smt_shift: 1, llc_shift: 5, package_shift: 4 }),
+        );
     }
 }

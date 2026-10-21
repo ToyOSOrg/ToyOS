@@ -34,7 +34,7 @@ const MSG_WORDS: usize = MAX_RECORD_MESSAGE / 8;
 const MSG_WORDS: usize = 1;
 
 /// The whole body: everything in a [`LogRecord`] past the word the writer publishes with.
-const BODY_WORDS: usize = HEADER_WORDS + MSG_WORDS;
+pub const BODY_WORDS: usize = HEADER_WORDS + MSG_WORDS;
 
 /// The message bound this file enforces: the ABI's in the kernel build, the model's own under loom.
 const MSG_BYTES: usize = MSG_WORDS * 8;

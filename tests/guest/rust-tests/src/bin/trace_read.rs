@@ -14,8 +14,10 @@
 //! - Every record decodes, and each CPU's come numbered without a gap and
 //!   never earlier than the one before.
 //! - The refusals: a capability without `TRACE` is refused and its buffer and
-//!   cursor left as they were; a buffer of no records or short of a CPU, and a
-//!   cursor ahead of a ring, are refused; a handle nobody holds ends the caller.
+//!   cursor left as they were; a buffer of no records, a cursor without a
+//!   position for each CPU the firmware names, which is still answered their
+//!   count, and a cursor ahead of a ring, are refused; a handle nobody holds
+//!   ends the caller.
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
@@ -24,11 +26,12 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::syscap::SysCap;
+use toyos::syscap::{SysCap, TraceCursor};
 use toyos_abi::end::{End, Fault};
 use toyos_abi::handle::{Rights, HANDLE_INVALID};
 use toyos_abi::syscall::{self, SyscallError};
-use toyos_abi::trace::{TraceCursor, TraceRecord};
+use toyos_abi::log::{CursorHead, CURSOR_HEAD_WORDS};
+use toyos_abi::trace::TraceRecord;
 use toyos_trace::{Entry, Event, Thread};
 
 const SELF_PATH: &str = "/system/bin/test_rs_trace_read";
@@ -49,14 +52,14 @@ fn main() {
         Some("unheld") => {
             println!("reached unheld");
             std::io::stdout().flush().expect("flush the marker");
-            let refused = syscall::trace_read(HANDLE_INVALID, &mut TraceCursor::new(), &mut [TraceRecord::EMPTY; 8]);
+            let refused = syscall::trace_read(HANDLE_INVALID, &mut [0; CURSOR_HEAD_WORDS], &mut [TraceRecord::EMPTY; 8]);
             panic!("a handle nobody holds was answered {refused:?} instead of ending the caller");
         }
         _ => {}
     }
-    let mut first = TraceCursor::new();
+    let mut first = fresh();
     read_to_now(&mut first);
-    let mut second = first;
+    let mut second = first.clone();
 
     let mut child = Command::new(SELF_PATH).arg("waiter").stdin(Stdio::piped()).spawn().expect("spawn the waiter");
     let task = Thread { pid: child.id(), tid: 0 };
@@ -106,9 +109,14 @@ fn cap() -> &'static SysCap {
     CAP.get_or_init(|| Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a capability"))
 }
 
+/// A cursor that has read nothing.
+fn fresh() -> TraceCursor<Vec<u64>> {
+    TraceCursor::new(vec![0; cap().trace_cursor_words().expect("the estate's capability sizes a cursor")])
+}
+
 /// Every record from `cursor` on, until a read leaves its buffer short, and
 /// the records lost on the way.
-fn read_to_now(cursor: &mut TraceCursor) -> (Vec<TraceRecord>, u64) {
+fn read_to_now(cursor: &mut TraceCursor<Vec<u64>>) -> (Vec<TraceRecord>, u64) {
     let mut out = Vec::new();
     let mut lost = 0;
     let mut raw = vec![TraceRecord::EMPTY; BATCH];
@@ -160,9 +168,9 @@ fn woken_before_picked(entries: &[Entry], task: Thread) {
     assert!(picked_after_a_wake > 0, "{task:?} slept and was never read woken and then picked");
 }
 
-fn rights(at: &TraceCursor) {
+fn rights(at: &TraceCursor<Vec<u64>>) {
     let none = cap().narrowed(Rights::TRANSFER).expect("a cap carrying less");
-    let mut cursor = *at;
+    let mut cursor = at.clone();
     let mut buf = vec![TraceRecord::EMPTY; BATCH];
     assert_eq!(none.trace(&mut cursor, &mut buf), Err(SyscallError::PermissionDenied), "a cap without TRACE read the diary");
     // The demand is above every write, so a refusal leaves both as they were.
@@ -170,13 +178,15 @@ fn rights(at: &TraceCursor) {
     assert_eq!(cursor, *at, "a refused read moved the caller's cursor");
 
     assert_eq!(cap().trace(&mut cursor, &mut []), Err(SyscallError::InvalidArgument), "a buffer of no records");
-    let cpus = syscall::cpu_count() as usize;
-    if cpus > 1 {
-        let mut short = vec![TraceRecord::EMPTY; cpus - 1];
-        assert_eq!(cap().trace(&mut cursor, &mut short), Err(SyscallError::InvalidArgument), "a buffer short of a cpu");
-    }
-    let mut ahead = *at;
-    ahead.0.next[0] = u64::MAX;
+    let cpus = at.words().len() - CURSOR_HEAD_WORDS;
+    assert!(cpus >= syscall::cpu_count() as usize, "a cursor of {cpus} positions on a machine of more cpus online");
+    let mut narrow = TraceCursor::new(vec![0; CURSOR_HEAD_WORDS + cpus - 1]);
+    assert_eq!(cap().trace(&mut narrow, &mut buf), Err(SyscallError::InvalidArgument), "a cursor short of a cpu");
+    let head = CursorHead::from_words([narrow.words()[0], narrow.words()[1]]);
+    assert_eq!(head.shards as usize, cpus, "a refused cursor was not answered the cpu count");
+    let mut words = at.words().to_vec();
+    words[CURSOR_HEAD_WORDS] = u64::MAX;
+    let mut ahead = TraceCursor::new(words);
     assert_eq!(cap().trace(&mut ahead, &mut buf), Err(SyscallError::InvalidArgument), "a cursor ahead of cpu0's ring");
 }
 

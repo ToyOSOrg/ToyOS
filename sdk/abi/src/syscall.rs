@@ -997,25 +997,31 @@ pub fn process_kill(proc: RawHandle) -> Result<(), SyscallError> {
 /// source and parks; a syscall that waited would be a second blocking mechanism
 /// in a kernel that is converging on one.
 ///
-/// `out` is whole [`crate::log::LogRecord`]s at a fixed stride, so the caller
-/// indexes by shift and the kernel does no length arithmetic. A buffer that
-/// cannot hold one record, or that cannot hold what the machine's shard count
-/// requires, is `InvalidArgument` — untrusted input that cannot be satisfied is
-/// refused, never truncated to fit. So is a `cursor` ahead of a shard
-/// ([`crate::log::LogCursor::next`]).
+/// `cursor` is a [`crate::log::CursorHead`] and its positions; this stores
+/// how many positions follow into the head. `out` is whole
+/// [`crate::log::LogRecord`]s at a fixed stride, so the caller indexes by shift
+/// and the kernel does no length arithmetic. A buffer of no records, a cursor
+/// with other than a position per shard, and a position ahead of its shard are
+/// `InvalidArgument` — untrusted input that cannot be satisfied is refused,
+/// never truncated to fit — and a refusal past the head still answers the
+/// shard count in it.
 pub fn log_read(
     syscap: RawHandle,
-    cursor: &mut crate::log::LogCursor,
+    cursor: &mut [u64],
     out: &mut [crate::log::LogRecord],
 ) -> Result<usize, SyscallError> {
-    check(syscall(
-        SYS_LOG_READ,
-        syscap.0 as u64,
-        cursor as *mut crate::log::LogCursor as u64,
-        out.as_mut_ptr() as u64,
-        out.len() as u64,
-    ))
-    .map(|n| n as usize)
+    let cursor = sized_cursor(cursor)?;
+    check(syscall(SYS_LOG_READ, syscap.0 as u64, cursor as u64, out.as_mut_ptr() as u64, out.len() as u64))
+        .map(|n| n as usize)
+}
+
+/// `cursor`'s head told how many positions follow it, as the address a read takes.
+fn sized_cursor(cursor: &mut [u64]) -> Result<*mut u64, SyscallError> {
+    use crate::log::{CursorHead, CURSOR_HEAD_WORDS};
+    let (head, positions) = cursor.split_first_chunk_mut::<CURSOR_HEAD_WORDS>().ok_or(SyscallError::InvalidArgument)?;
+    let slots = u32::try_from(positions.len()).map_err(|_| SyscallError::InvalidArgument)?;
+    *head = CursorHead { slots, ..CursorHead::from_words(*head) }.to_words();
+    Ok(cursor.as_mut_ptr())
 }
 
 /// Mark this handle as the controlling TTY for this process.
@@ -1958,24 +1964,18 @@ pub fn counters(
 /// merged across CPUs by stamp, advancing `cursor`. Answers how many were
 /// written, and `0` when there is nothing new; it never blocks.
 ///
-/// `out` is whole [`crate::trace::TraceRecord`]s. A buffer that cannot hold one
-/// record per CPU, and a `cursor` ahead of a CPU's ring, are
-/// [`SyscallError::InvalidArgument`]. `syscap` must carry
+/// `cursor` and `out` are as [`log_read`]'s, over the diary's rings, a ring
+/// per CPU the firmware names, and refused as its are. `syscap` must carry
 /// [`crate::handle::Rights::TRACE`]: a capability without it is refused with
 /// a word, and a handle the caller does not hold ends it.
 pub fn trace_read(
     syscap: RawHandle,
-    cursor: &mut crate::trace::TraceCursor,
+    cursor: &mut [u64],
     out: &mut [crate::trace::TraceRecord],
 ) -> Result<usize, SyscallError> {
-    check(syscall(
-        SYS_TRACE_READ,
-        syscap.0 as u64,
-        cursor as *mut crate::trace::TraceCursor as u64,
-        out.as_mut_ptr() as u64,
-        out.len() as u64,
-    ))
-    .map(|n| n as usize)
+    let cursor = sized_cursor(cursor)?;
+    check(syscall(SYS_TRACE_READ, syscap.0 as u64, cursor as u64, out.as_mut_ptr() as u64, out.len() as u64))
+        .map(|n| n as usize)
 }
 
 /// Have the kernel make one access on the `acpi` claim `claim`, or refuse it

@@ -18,6 +18,7 @@
 use std::sync::Arc as StdArc;
 
 use kernel::sched::cpu::{Action, Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
+use kernel::sched::topology::Topology;
 use kernel::sched::fair::{FairShare, Frontier, ShareState};
 use kernel::sched::hw::{CpuId, Kicker, Nanos};
 use kernel::sched::mailbox::{mailbox, Kick, Urgency};
@@ -78,7 +79,7 @@ fn boot() -> (Machine1, CpuSched<SimPayload>, Arc<TaskShared<SimMsg>>) {
     let (tx, rx) = mailbox::<SimMsg>();
     let m = Machine1 {
         hw: SimHw::new(1),
-        handles: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)]),
+        handles: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)], Topology::flat(1)),
         frontier: Frontier::new(),
     };
     let mut cpu = CpuSched::new(CPU0, rx, SimCtx::default());

@@ -32,7 +32,7 @@ pub fn log() {
 /// A death's: the same lines as text, for the record it seals.
 ///
 /// Within [`toyos_blackbox::CENSUS_BYTES`], because the record is one page and
-/// the lines grow with `MAX_CPUS`: a line that does not fit is dropped whole
+/// the lines grow with the CPU count: a line that does not fit is dropped whole
 /// with every one after it, and the count is said under the ones kept
 /// ([`toyos_blackbox::Whole`]).
 pub struct Sealed;

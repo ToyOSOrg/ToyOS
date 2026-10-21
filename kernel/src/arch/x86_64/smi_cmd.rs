@@ -69,6 +69,11 @@ static PORT: Slot = Slot::empty();
 /// and each is answered by one write.
 static WRITING: Lock<()> = Lock::new(());
 static ROUND: Shootdown = Shootdown::new();
+
+/// An answer for each of the `cpus` CPUs the firmware names.
+pub fn size(cpus: usize) {
+    ROUND.size(cpus);
+}
 /// What the round in flight writes: stored before the round is issued, read by its answer.
 static ASKED: AtomicU8 = AtomicU8::new(0);
 /// When the boot processor took the round in flight, in nanoseconds since

@@ -9,6 +9,7 @@
 
 use loom::sync::Arc;
 use kernel_loom::sched::cpu::{CpuHandle, CpuHandles};
+use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer};
 use kernel_loom::sched_model::{model, Kicks, Msg, PreemptModel, RemoteGuard, CPU0};
 use kernel_loom::sched::park::{notify, prepare, Cancel, Cancelled, Commit, CurrentTask};
@@ -31,7 +32,7 @@ fn world() -> (Arc<World>, MailboxConsumer<Msg>) {
     let (tx, rx) = mailbox::<Msg>();
     (
         Arc::new(World {
-            cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)]),
+            cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)], Topology::flat(1)),
             kicks: Kicks::new(),
             preempt: PreemptModel::new(),
         }),

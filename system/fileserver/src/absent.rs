@@ -53,8 +53,6 @@ impl Volume for Absent {
         Ok(())
     }
 
-    fn hold(&mut self, _node: Node) {}
-
     fn node_meta(&mut self, _node: Node) -> Result<Meta, Error> {
         Err(Error::NotFound)
     }

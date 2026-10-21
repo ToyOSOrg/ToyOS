@@ -4,8 +4,9 @@
 //! can serve ([`data`] for the bcachefs DATA role, [`fat`] for FAT32's LOG and
 //! BOOT, [`absent`] for a role with no volume this boot), and the resolver that
 //! keeps every path inside the directory a connection was given ([`resolve`]),
-//! which requests a read-only one is refused ([`rights`]), and what a client
-//! may take of the server and name in a request ([`bounds`]).
+//! which requests a read-only one is refused ([`rights`]), what a client
+//! may take of the server and name in a request ([`bounds`]), and the open
+//! files its connections share ([`descriptions`]).
 //!
 //! **This is the page cache.** A block of the volume — a btree node, a FAT
 //! sector, a file's data — is read into [`cache::Cache`] once and served from
@@ -19,6 +20,7 @@ pub mod absent;
 pub mod bounds;
 pub mod cache;
 pub mod data;
+pub mod descriptions;
 pub mod fat;
 pub mod ram;
 pub mod resolve;

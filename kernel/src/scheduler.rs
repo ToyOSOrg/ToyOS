@@ -28,7 +28,6 @@ pub use crate::sched::driver::{
     current_address_space, enter_idle_loop, in_pass as in_schedule_self, started, total_cpu_ns,
     write_stack_canary, Ticket,
 };
-pub use crate::sched::MAX_CPUS;
 
 /// Panics unless the preempt depth equals `baseline`: a mismatch means a
 /// spinlock is held across a scheduler entry that switches.

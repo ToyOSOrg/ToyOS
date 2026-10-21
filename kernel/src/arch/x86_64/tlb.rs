@@ -24,6 +24,11 @@ use crate::smp;
 
 static SHOOTDOWN: Shootdown = Shootdown::new();
 
+/// An answer for each of the `cpus` CPUs the firmware names.
+pub fn size(cpus: usize) {
+    SHOOTDOWN.size(cpus);
+}
+
 use crate::invalidation::{Half, Origin};
 
 /// Issuer-side census; `irq_census`'s `tlb` column is the receiver side, and a

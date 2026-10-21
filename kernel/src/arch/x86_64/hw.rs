@@ -101,30 +101,34 @@ struct SwitchShadow {
     outgoing: u64,
 }
 
+/// A CPU's last captured switch frame, touched only by that CPU, which cannot
+/// be preempted across the write-then-read window.
 #[cfg(feature = "switch-witness")]
-struct SwitchShadowSlot(core::cell::UnsafeCell<SwitchShadow>);
+pub struct Local(core::cell::UnsafeCell<SwitchShadow>);
 
-// SAFETY: each slot is touched only by its own CPU, which cannot be preempted across the write-then-read window.
+// SAFETY: each record is touched only by its own CPU; see above.
 #[cfg(feature = "switch-witness")]
-unsafe impl Sync for SwitchShadowSlot {}
+unsafe impl Sync for Local {}
 
 #[cfg(feature = "switch-witness")]
-static SWITCH_SHADOW: [SwitchShadowSlot; crate::sched::MAX_CPUS] = [const {
-    SwitchShadowSlot(core::cell::UnsafeCell::new(SwitchShadow {
-        rsp: 0,
-        words: [0; 8],
-        ctx: core::ptr::null(),
-        save: 0,
-        top: 0,
-        incoming: u64::MAX,
-        outgoing: u64::MAX,
-    }))
-}; crate::sched::MAX_CPUS];
+impl Local {
+    pub fn new() -> Self {
+        Self(core::cell::UnsafeCell::new(SwitchShadow {
+            rsp: 0,
+            words: [0; 8],
+            ctx: core::ptr::null(),
+            save: 0,
+            top: 0,
+            incoming: u64::MAX,
+            outgoing: u64::MAX,
+        }))
+    }
+}
 
 #[cfg(feature = "switch-witness")]
 fn switch_witness_capture(ctx: &KernelCtx, token: &RunToken<KernelPayload>, rsp: u64) {
-    // SAFETY: this CPU's own slot; see the `Sync` justification above.
-    let shadow = unsafe { &mut *SWITCH_SHADOW[percpu::cpu_id() as usize].0.get() };
+    // SAFETY: this CPU's own record; see the `Sync` justification on `Local`.
+    let shadow = unsafe { &mut *crate::cpu_local::here().arch.hw.0.get() };
     shadow.rsp = rsp;
     shadow.ctx = ctx as *const KernelCtx;
     shadow.save = token.save_ptr() as u64;
@@ -146,8 +150,8 @@ fn switch_witness_capture(ctx: &KernelCtx, token: &RunToken<KernelPayload>, rsp:
 /// pointer and this CPU's shadow already filled by [`switch_witness_capture`].
 #[cfg(feature = "switch-witness")]
 pub(crate) unsafe extern "C" fn switch_witness_verify(rsp: u64) {
-    // SAFETY: this CPU's own slot; see the `Sync` justification above.
-    let shadow = unsafe { &*SWITCH_SHADOW[percpu::cpu_id() as usize].0.get() };
+    // SAFETY: this CPU's own record; see the `Sync` justification on `Local`.
+    let shadow = unsafe { &*crate::cpu_local::here().arch.hw.0.get() };
     let mut now = [0u64; 8];
     for (i, word) in now.iter_mut().enumerate() {
         // SAFETY: within the kernel stack this CPU is standing on.

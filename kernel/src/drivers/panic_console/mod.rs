@@ -20,6 +20,7 @@ use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 
 use crate::log;
 use crate::log::LogStamp;
+use crate::log::read::Published;
 use crate::panic_reboot::Bound;
 use crate::time::{Budget, Duration};
 use crate::mm::policy::MmioPolicy;
@@ -141,12 +142,12 @@ impl Rendered {
         Self { text: [0; SNAPSHOT_CAP], marks: [0; MARK_BYTES], len: 0, lines: 0 };
 
     /// Render the newest records stamped in `from..=to` that fit; returns the byte count. Records older than the buffer holds are dropped.
-    fn render(&mut self, from: LogStamp, to: LogStamp) -> usize {
+    fn render(&mut self, from: LogStamp, to: LogStamp, at: &Published) -> usize {
         self.marks = [0; MARK_BYTES];
         self.lines = 0;
         self.len = 0;
         let mut fill = Backfill { at: SNAPSHOT_CAP, into: self };
-        log::read::snapshot_committed(from, to, &mut fill);
+        log::read::snapshot_committed(from, to, &mut fill, at);
         let at = fill.at;
         self.len = SNAPSHOT_CAP - at;
         self.len
@@ -276,6 +277,8 @@ const OUTWAIT: Budget = Budget::of(
 static EARLY: AtomicBool = AtomicBool::new(false);
 
 static SNAPSHOT: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
+/// The positions `SNAPSHOT`'s render walks with, held as `SNAPSHOT` is.
+static SNAPSHOT_AT: Published = Published::new();
 static CAPTURE_ACCESS: access::CaptureAccess = access::CaptureAccess::new();
 
 /// `SNAPSHOT`'s writer owner; the owner may refresh and every other CPU is refused.
@@ -287,6 +290,14 @@ const EARLY_CAPTOR: u32 = 1;
 /// Scratch for readers of the live shards (a boot checkpoint, or a fatal
 /// path with no panic handler run) — separate from `SNAPSHOT` so a checkpoint cannot erase a captured, unpainted report.
 static LIVE: RenderedCell = RenderedCell(UnsafeCell::new(Rendered::EMPTY));
+/// The positions `LIVE`'s render walks with, held as `LIVE` is.
+static LIVE_AT: Published = Published::new();
+
+/// Positions for each of the `cpus` CPUs' shards, for both renders.
+pub fn size(cpus: usize) {
+    SNAPSHOT_AT.size(cpus);
+    LIVE_AT.size(cpus);
+}
 
 /// Set once a process claims `DeviceType::Framebuffer`; a fatal panic ignores this and takes the screen back unconditionally.
 static SCREEN_OWNED_BY_USERLAND: AtomicBool = AtomicBool::new(false);
@@ -550,7 +561,7 @@ fn capture_into(refresh: bool) {
     // panic path may take no lock. `SNAPSHOT` is written only here, under
     // `CAPTURE`, after `CAPTURE_ACCESS` admitted a writer and before publication.
     let into = unsafe { &mut *SNAPSHOT.0.get() };
-    CAPTURE_ACCESS.publish(into.render(LogStamp::ZERO, LogStamp::MAX) > 0);
+    CAPTURE_ACCESS.publish(into.render(LogStamp::ZERO, LogStamp::MAX, &SNAPSHOT_AT) > 0);
 }
 
 /// This CPU's claim on `SNAPSHOT`; tokens never collide, unclaimed-0 and `EARLY_CAPTOR` included.
@@ -575,7 +586,7 @@ fn live_tail() -> View<'static> {
     // SAFETY: sound as `capture`'s `SNAPSHOT` write — `LIVE` is reached only
     // from here, every caller holds `PAINTING`; one block, not two, so render and view can't disagree.
     let into: &'static mut Rendered = unsafe { &mut *LIVE.0.get() };
-    into.render(LogStamp::ZERO, LogStamp::MAX);
+    into.render(LogStamp::ZERO, LogStamp::MAX, &LIVE_AT);
     let rendered: &'static Rendered = into;
     rendered.view()
 }

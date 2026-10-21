@@ -8,7 +8,11 @@ use crate::clock;
 use crate::drivers::acpi::MadtInfo;
 use crate::smp::{self, ROSTER};
 use crate::time::{Delay, Duration, AP_START};
+use crate::sync::Lock;
 use crate::{log, process};
+use alloc::vec::Vec;
+use kernel::cpu::TopologyRefusal;
+use kernel::sched::topology::CpuKeys;
 
 const TRAMPOLINE_PAGE: u64 = 0x8000;
 const TRAMPOLINE_VECTOR: u8 = 0x08;
@@ -23,6 +27,10 @@ const DATA_OFFSET: usize = 0xF00;
 /// serialised, so a synchronised TSC lands inside the bracket by construction
 /// and a skewed one is outside it by at least the skew.
 static AP_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// The started AP's [`cpu::topology_keys`], written before its echo and taken
+/// after it, like [`AP_TSC`]: bring-up is serialised, so one slot serves.
+static AP_TOPOLOGY: Lock<Option<Result<CpuKeys, TopologyRefusal>>> = Lock::new(None);
 
 // Field offsets are hardcoded in the global_asm! trampoline below; the static assertion at the bottom checks the match.
 
@@ -171,7 +179,11 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         bsp_id,
         "smp: the boot CPU reads its own hardware id as {read:#x}, and its roster slot and every IPI name it {bsp_id:#x}"
     );
+    // So every other MADT entry is one attempt and the roster, sized by the
+    // MADT, holds each.
+    assert!(madt.apic_ids.contains(&bsp_id), "smp: the MADT names no CPU with the boot CPU's id {bsp_id:#x}");
     ROSTER.set_bsp(bsp_id);
+    let mut topology = Vec::from([cpu::topology_keys()]);
     copy_trampoline();
 
     let mut data = build_trampoline_data();
@@ -182,11 +194,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     for &ap_id in &madt.apic_ids {
         if ap_id == bsp_id { continue; }
 
-        // Refused at MAX_CPUS, bounding a firmware that over-reports CPUs.
-        let Some(attempt) = ROSTER.begin_attempt() else {
-            log!("SMP: roster full at {} CPUs; ignoring further MADT entries", smp::cpu_count());
-            break;
-        };
+        let attempt = ROSTER.begin_attempt();
 
         let ap_percpu = percpu::alloc_ap(attempt.id(), attempt.token());
 
@@ -227,6 +235,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
                 bracketed += 1;
             }
             ROSTER.commit(attempt, ap_id);
+            topology.push(AP_TOPOLOGY.lock().take().expect("an AP reads its topology before it echoes"));
             log!("SMP: AP cpu{} lapic={} online", attempt.id(), ap_id);
         } else {
             // Neither the id nor the trampoline is reused after a failure: stop here.
@@ -241,6 +250,13 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         online.saturating_sub(1),
     );
     crate::arch::control_regs::report(online);
+    smp::set_topology(
+        topology
+            .into_iter()
+            .enumerate()
+            .map(|(cpu, keys)| keys.unwrap_or_else(|e| panic!("smp: cpu{cpu}'s CPUID places it in no tree: {e:?}")))
+            .collect(),
+    );
 }
 
 /// Whether the AP just started read a TSC between the two the BSP took either
@@ -297,6 +313,7 @@ extern "C" fn ap_entry() -> ! {
     // Before the echo, so every CPU the roster counts has said its line.
     crate::arch::mtrr::compare(percpu::cpu_id());
 
+    *AP_TOPOLOGY.lock() = Some(cpu::topology_keys());
     // Echo this attempt's token, so the BSP counts this AP for its own attempt.
     ROSTER.echo(percpu::ap_token());
 

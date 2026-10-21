@@ -18,7 +18,7 @@ pub mod user;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 pub use stamp::LogStamp;
-use toyos_abi::log::{LogRecord, FLAG_UNTIMED, MAX_LOG_SHARDS, MAX_RECORD_MESSAGE};
+use toyos_abi::log::{LogRecord, FLAG_UNTIMED, MAX_RECORD_MESSAGE};
 
 pub use shard::Shard;
 pub use toyos_abi::log::Severity;
@@ -30,9 +30,6 @@ pub static PERCPU_READY: AtomicBool = AtomicBool::new(false);
 /// allocation, because `log!` runs before the heap exists and before
 /// `PERCPU_READY`.
 pub static BOOT_SHARD: Shard = Shard::new();
-
-// The ABI fixes how many shards a cursor can name; the kernel must not exceed it.
-const _: () = assert!(crate::sched::MAX_CPUS <= MAX_LOG_SHARDS);
 
 /// The shard `cpu` reserves in, published before that CPU runs an instruction,
 /// since a reader finds it only through the registry: the boot shard for CPU
@@ -56,6 +53,11 @@ pub fn shard_for(cpu: u32) -> &'static Shard {
         &*ptr
     }
 }
+
+/// The positions every walk inside the black box's page writer takes — this
+/// tail and the recovery section — which one CPU at a time runs: the panic
+/// path holds the panel, and the stop has stopped every other CPU.
+pub static SEALING: read::Published = read::Published::new();
 
 /// The head the tail is sealed under, read back by `build/bootlog.rs`.
 const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
@@ -94,19 +96,32 @@ pub fn seal_tail(after: LogStamp) {
         let _ = writeln!(out, "{TAIL_HEAD}");
         let room = toyos_blackbox::REPORT_BYTES - TAIL_HEAD.len() - 1;
         let mut tail = Tail(toyos_blackbox::Whole::within(out, room, toyos_blackbox::DROPPED_OPENS_WITH));
-        read::snapshot_committed(from, read::newest_committed(), &mut tail);
+        read::snapshot_committed(from, read::newest_committed(), &mut tail, &SEALING);
         tail.0.close();
     });
 }
 
-/// Every shard a reader can reach, cpu0 first; `None` is a CPU this machine lacks.
-pub fn shards() -> [Option<&'static Shard>; MAX_LOG_SHARDS] {
-    let mut out = [None; MAX_LOG_SHARDS];
-    out[0] = Some(&BOOT_SHARD);
-    for (ap, slot) in out[1..].iter_mut().enumerate() {
-        *slot = registry::published(registry::kernel_slots(), ap);
+/// A shard slot for each of the `cpus` CPUs the firmware names, and the
+/// positions the console and the fatal paths walk them with.
+pub fn size(cpus: usize) {
+    registry::size(registry::kernel_slots(), cpus);
+    console::size(cpus);
+    SEALING.size(cpus);
+    crate::drivers::panic_console::size(cpus);
+}
+
+/// How many shards a reader walks: one per CPU the firmware names, published
+/// or not, so a CPU that started, logged and never came online is read too.
+pub fn shard_count() -> usize {
+    1 + registry::kernel_slots().len()
+}
+
+/// `cpu`'s shard, or `None` where that CPU has published none.
+pub fn shard(cpu: usize) -> Option<&'static Shard> {
+    match cpu.checked_sub(1) {
+        None => Some(&BOOT_SHARD),
+        Some(ap) => registry::published(registry::kernel_slots(), ap),
     }
-    out
 }
 
 /// Builds a record's message bytes in place for [`emit`]; one pass and one

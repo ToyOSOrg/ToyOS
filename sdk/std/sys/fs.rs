@@ -39,18 +39,12 @@ enum Inner {
     Served(Arc<Served>),
 }
 
-/// A file open on a file server.
+/// A file open on a file server, which keeps its offset.
 struct Served {
     dir: Arc<Capability>,
     rel: String,
-    append: bool,
-    state: Mutex<Position>,
-}
-
-struct Position {
     fid: u64,
     generation: u64,
-    offset: u64,
 }
 
 #[path = "turns.rs"]
@@ -378,6 +372,7 @@ fn served_error(e: toyos::fs::Error) -> io::Error {
         Error::InvalidRequest => io::const_error!(Kind::InvalidInput, "the file server takes no such request"),
         Error::Unsupported => io::const_error!(Kind::Unsupported, "the volume's format has no such thing"),
         Error::OutOfResources => io::const_error!(Kind::OutOfMemory, "the kernel had no room for the request"),
+        Error::NoDirectory => io::const_error!(Kind::NotADirectory, "the connection was given files and no directory"),
         Error::Gone => io::const_error!(Kind::StaleNetworkFileHandle, "the file server is gone"),
         Error::NotHeld => io::const_error!(Kind::NotFound, "this process holds no such directory"),
         Error::Malformed => io::const_error!(Kind::InvalidData, "the file server answered outside its protocol"),
@@ -480,19 +475,16 @@ pub fn is_served(path: &Path) -> bool {
 impl Served {
     fn with<T>(
         &self,
-        op: impl FnOnce(&mut toyos::fs::Dir, &mut Position) -> Result<T, toyos::fs::Error>,
+        op: impl FnOnce(&mut toyos::fs::Dir, u64, u64) -> Result<T, toyos::fs::Error>,
     ) -> io::Result<T> {
         let mut dir = self.dir.lock();
-        let mut pos = self.state.lock().unwrap();
-        op(&mut dir, &mut pos).map_err(served_error)
+        op(&mut dir, self.fid, self.generation).map_err(served_error)
     }
 }
 
 impl Drop for Served {
     fn drop(&mut self) {
-        let mut dir = self.dir.lock();
-        let pos = self.state.lock().unwrap();
-        dir.close(pos.fid, pos.generation);
+        self.dir.lock().close(self.fid, self.generation);
     }
 }
 
@@ -515,16 +507,13 @@ impl File {
     }
 
     /// A kernel handle a child may write this file through: the file's own, or
-    /// a pipe its server appends to the file from this file's offset. The
-    /// pipe lives as long as the answer and the child's copy of it.
+    /// a pipe its server writes to the file at this file's offset. The pipe
+    /// lives as long as the answer and the child's copy of it.
     pub fn as_child_stdio(&self) -> io::Result<(RawHandle, Option<toyos::Pipe>)> {
         match &self.0 {
             Inner::Kernel(h) => Ok((*h, None)),
             Inner::Served(s) => {
-                let pipe = s.with(|dir, pos| {
-                    let at = if s.append { dir.fstat(pos.fid, pos.generation)?.size } else { pos.offset };
-                    dir.stream(pos.fid, pos.generation, at)
-                })?;
+                let pipe = s.with(|dir, fid, generation| dir.stream(fid, generation))?;
                 Ok((toyos::AsHandle::as_handle(&pipe), Some(pipe)))
             }
         }
@@ -543,12 +532,8 @@ impl File {
                 Ok(File(Inner::Served(Arc::new(Served {
                     dir: Arc::clone(cap),
                     rel: String::from(rel),
-                    append: opts.append,
-                    state: Mutex::new(Position {
-                        fid: opened.fid,
-                        generation: opened.generation,
-                        offset: 0,
-                    }),
+                    fid: opened.fid,
+                    generation: opened.generation,
                 }))))
             },
         )
@@ -557,14 +542,14 @@ impl File {
     pub fn file_attr(&self) -> io::Result<FileAttr> {
         match &self.0 {
             Inner::Kernel(h) => syscall::fstat(*h).map(FileAttr::of_kernel).map_err(to_io_error),
-            Inner::Served(s) => s.with(|dir, pos| dir.fstat(pos.fid, pos.generation)).map(FileAttr::of),
+            Inner::Served(s) => s.with(|dir, fid, generation| dir.fstat(fid, generation)).map(FileAttr::of),
         }
     }
 
     pub fn fsync(&self) -> io::Result<()> {
         match &self.0 {
             Inner::Kernel(h) => syscall::fsync(*h).map_err(to_io_error),
-            Inner::Served(s) => s.with(|dir, pos| dir.fsync(pos.fid, pos.generation)),
+            Inner::Served(s) => s.with(|dir, fid, generation| dir.fsync(fid, generation)),
         }
     }
 
@@ -591,18 +576,14 @@ impl File {
     pub fn truncate(&self, size: u64) -> io::Result<()> {
         match &self.0 {
             Inner::Kernel(h) => syscall::ftruncate(*h, size).map_err(to_io_error),
-            Inner::Served(s) => s.with(|dir, pos| dir.truncate(pos.fid, pos.generation, size)),
+            Inner::Served(s) => s.with(|dir, fid, generation| dir.truncate(fid, generation, size)),
         }
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         match &self.0 {
             Inner::Kernel(h) => syscall::read(*h, buf).map_err(to_io_error),
-            Inner::Served(s) => s.with(|dir, pos| {
-                let n = dir.read(pos.fid, pos.generation, pos.offset, buf)?;
-                pos.offset += n as u64;
-                Ok(n)
-            }),
+            Inner::Served(s) => s.with(|dir, fid, generation| dir.read(fid, generation, buf)),
         }
     }
 
@@ -637,11 +618,7 @@ impl File {
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         match &self.0 {
             Inner::Kernel(h) => syscall::write(*h, buf).map_err(to_io_error),
-            Inner::Served(s) => s.with(|dir, pos| {
-                let written = dir.write(pos.fid, pos.generation, pos.offset, buf)?;
-                pos.offset = written.offset;
-                Ok(written.len)
-            }),
+            Inner::Served(s) => s.with(|dir, fid, generation| dir.write(fid, generation, buf).map(|w| w.len)),
         }
     }
 
@@ -681,20 +658,18 @@ impl File {
                 };
                 syscall::seek(*h, abi_pos).map_err(to_io_error)
             }
-            Inner::Served(s) => s.with(|dir, p| {
-                let (base, delta) = match pos {
-                    SeekFrom::Start(n) => (n, 0),
-                    SeekFrom::Current(d) => (p.offset, d),
-                    SeekFrom::End(d) => (dir.fstat(p.fid, p.generation)?.size, d),
+            Inner::Served(s) => {
+                let (whence, delta) = match pos {
+                    // Past the largest offset a file has is the request's fault, as the kernel's route says.
+                    SeekFrom::Start(n) => {
+                        let n = i64::try_from(n).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+                        (toyos::fs::SEEK_START, n)
+                    }
+                    SeekFrom::Current(d) => (toyos::fs::SEEK_CURRENT, d),
+                    SeekFrom::End(d) => (toyos::fs::SEEK_END, d),
                 };
-                // Past either end is the request's fault, as the kernel's route says.
-                let at = base
-                    .checked_add_signed(delta)
-                    .filter(|&at| at <= toyos::fs::MAX_FILE_BYTES)
-                    .ok_or(toyos::fs::Error::InvalidRequest)?;
-                p.offset = at;
-                Ok(at)
-            }),
+                s.with(|dir, fid, generation| dir.seek(fid, generation, whence, delta))
+            }
         }
     }
 

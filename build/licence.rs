@@ -406,6 +406,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
+        "lib/acpi/fixtures/qemu-11.1.1-virt-pptt/pptt.bin",
+        "fff116c865c8081e748e03fee505f2ed4fc1b01b8fbd3b131a8d1720552c86ec",
+        "ours: QEMU `virt`'s own PPTT, captured by the commit that decodes it",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
+    (
         "lib/acpi/fixtures/ovmf-pure-efi/root-bridge-0.bin",
         "eb00e68be746a09ac7f0ce1ca492ce8c858e3af1152112b49ffb4708883acbfb",
         "ours: OVMF's answer on a q35 guest, read off that boot's own loader log",

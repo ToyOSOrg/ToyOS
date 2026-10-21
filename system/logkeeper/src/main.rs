@@ -99,9 +99,8 @@ use origin::{Origin, Said};
 use policy::{Step, LOG_WRITE_BUDGET};
 use store::{Volume, DIR, MAX_LOG_BYTES, MAX_LOG_FILES};
 
-/// Records asked of `SYS_LOG_READ` at once: above `MAX_LOG_SHARDS`, which the
-/// call refuses below, and large enough that an ordinary boot's burst is a
-/// handful of syscalls rather than one per line.
+/// Records asked of `SYS_LOG_READ` at once: large enough that an ordinary
+/// boot's burst is a handful of syscalls rather than one per line.
 const BATCH: usize = 64;
 
 /// The poll's tokens: the kernel's readiness, the supervisor's connection, the console's
@@ -166,6 +165,9 @@ fn main() {
         inspect::serve(acceptor, Arc::clone(&published), Arc::clone(&hub));
     }
 
+    let words =
+        toyos::log::cursor_words(&cap).unwrap_or_else(|e| panic!("logkeeper: SYS_LOG_READ sized no cursor ({e:?})"));
+    let tail = LogTail::new(vec![0; words]);
     let mut log = Log {
         cap,
         from_supervisor,
@@ -174,7 +176,7 @@ fn main() {
         console_held: Vec::new(),
         console_unshown: 0,
         origins: Vec::new(),
-        tail: LogTail::new(),
+        tail,
         records: vec![Record::EMPTY; BATCH],
         lost: 0,
         waiting: Vec::new(),
@@ -197,7 +199,7 @@ struct Log {
     console_held: Vec<u8>,
     console_unshown: u64,
     origins: Vec<Origin>,
-    tail: LogTail,
+    tail: LogTail<Vec<u64>>,
     records: Vec<Record>,
     lost: u64,
     /// Lines stamped after the round they were read in began, which the next
@@ -465,8 +467,7 @@ impl Log {
                 // survivable by retrying — the buffer and the rights are the
                 // same every time — so it ends loudly.
                 Err(e) => panic!(
-                    "logkeeper: SYS_LOG_READ refused a {BATCH}-record buffer or a cursor ahead of a \
-                     shard ({e:?})"
+                    "logkeeper: SYS_LOG_READ refused a {BATCH}-record buffer or its cursor ({e:?})"
                 ),
             };
             let short = batch.len() < BATCH;

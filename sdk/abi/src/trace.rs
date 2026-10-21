@@ -4,15 +4,14 @@
 //!
 //! A record's [`TraceRecord::stamp`] is the CPU's free-running counter (TSC,
 //! `CNTVCT_EL0`) in its own ticks, which [`crate::clock::ClockPage`] turns into
-//! nanoseconds since boot. A read takes a [`TraceCursor`], the log's cursor
-//! over these rings, and answers records oldest first, merged across CPUs by
-//! stamp, with the records overwritten before the cursor reached them counted
-//! in its `lost`. What each [`Kind`] means of `pid`, `tid` and `data` is on
-//! the kind; the typed reading of one is `toyos-trace`'s.
+//! nanoseconds since boot. A read takes a cursor laid out as the log's
+//! ([`crate::log::CursorHead`]), a position per CPU the firmware names, and
+//! answers records oldest first, merged across CPUs by stamp, with the
+//! records overwritten before the cursor reached them counted in its `lost`.
+//! What each [`Kind`] means of `pid`, `tid` and `data` is on the kind; the
+//! typed reading of one is `toyos-trace`'s.
 //!
 //! [`SYS_TRACE_READ`]: crate::syscall::SYS_TRACE_READ
-
-use crate::log::LogCursor;
 
 /// One record on the wire. A reader indexes by this stride.
 pub const RECORD_BYTES: usize = 32;
@@ -24,7 +23,7 @@ crate::user_safe! {
     /// One diary record, as a read copies it out.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct TraceRecord {
-        /// Its sequence number in its CPU's ring, which [`LogCursor::next`] counts in.
+        /// Its sequence number in its CPU's ring, which a cursor's positions count in.
         pub seq: u64,
         /// The CPU's counter when the record was written.
         pub stamp: u64,
@@ -98,24 +97,5 @@ impl Kind {
             14 => Self::Mark,
             _ => return None,
         })
-    }
-}
-
-crate::user_safe! {
-    /// A reader's position in the diary: the log's cursor, a type of its own so
-    /// that one is never walked over the other's rings.
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub struct TraceCursor(pub LogCursor);
-}
-
-impl TraceCursor {
-    /// A cursor that has read nothing.
-    pub const fn new() -> Self {
-        Self(LogCursor::new())
-    }
-
-    /// Records the last read skipped because they were overwritten.
-    pub const fn lost(&self) -> u64 {
-        self.0.lost
     }
 }

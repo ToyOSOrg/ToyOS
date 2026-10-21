@@ -1,0 +1,19 @@
+The PPTT QEMU 11.1.1 published to its `virt` machine under edk2-stable202408
+(QEMU's own `edk2-aarch64-code.fd`), with no operating system in the guest: the
+firmware was left to reach its shell, the guest's memory was written out by the
+monitor's `pmemsave`, and the table was found in it by its signature and its
+checksum, so no byte here came through the decoder it judges. It sums to zero.
+
+  qemu-system-aarch64 -M virt,gic-version=3,smp-cache.0.cache=l1d,\
+      smp-cache.0.topology=core,smp-cache.1.cache=l1i,smp-cache.1.topology=core,\
+      smp-cache.3.cache=l3,smp-cache.3.topology=cluster,smp-cache.2.cache=l2,\
+      smp-cache.2.topology=core \
+      -cpu max -smp 8,sockets=1,clusters=2,cores=2,threads=2 -m 256 \
+      -nodefaults -display none \
+      -drive if=pflash,format=raw,readonly=on,file=edk2-aarch64-code.fd
+
+  pptt.bin  0x4cb43498, revision 2, 732 bytes
+
+The command line is the oracle: eight processors, ACPI processor IDs 0 to 7,
+two threads to a core, two cores to a cluster, an L3 to each cluster and one
+socket.

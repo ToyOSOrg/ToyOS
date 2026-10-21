@@ -6,9 +6,8 @@ use core::sync::atomic::{AtomicU8, Ordering::Relaxed};
 
 use kernel::cpu::CounterFacts;
 
-use super::{cpu, percpu};
+use super::cpu;
 use crate::counters::{Firmware, Hardware};
-use crate::scheduler::MAX_CPUS;
 
 const MSR_SMI_COUNT: u32 = 0x34;
 const IA32_MPERF: u32 = 0xE7;
@@ -17,8 +16,20 @@ const IA32_APERF: u32 = 0xE8;
 const SMI: u8 = 1 << 0;
 const APERF_MPERF: u8 = 1 << 1;
 
-/// Each CPU's verdict, written by that CPU before it reads a counter.
-static ADMITTED: [AtomicU8; MAX_CPUS] = [const { AtomicU8::new(0) }; MAX_CPUS];
+/// A CPU's verdict, written by that CPU before it reads a counter.
+pub struct Local {
+    admitted: AtomicU8,
+}
+
+impl Local {
+    pub fn new() -> Self {
+        Self { admitted: AtomicU8::new(0) }
+    }
+}
+
+fn admitted() -> &'static AtomicU8 {
+    &crate::cpu_local::here().arch.counters.admitted
+}
 
 pub fn bring_up() {
     let (signature, _, cpuid_1_ecx, _) = cpu::cpuid(1, 0);
@@ -30,12 +41,12 @@ pub fn bring_up() {
         cpuid_6_ecx,
     });
     let bits = if verdict.smi { SMI } else { 0 } | if verdict.aperf_mperf { APERF_MPERF } else { 0 };
-    ADMITTED[percpu::cpu_id() as usize].store(bits, Relaxed);
+    admitted().store(bits, Relaxed);
 }
 
 /// This CPU's admitted counters.
 pub fn read() -> Hardware {
-    let admitted = ADMITTED[percpu::cpu_id() as usize].load(Relaxed);
+    let admitted = admitted().load(Relaxed);
     let msr = |bit: u8, msr: u32| (admitted & bit != 0).then(|| cpu::rdmsr(msr));
     Hardware {
         // Bits 63:32 are reserved (SDM Vol. 4, MSR 34H).
