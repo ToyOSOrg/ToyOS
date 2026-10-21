@@ -276,6 +276,9 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     // reads what the kernel said of two of them.
     "fault_gates",
     "sched_stress",
+    // Its shared run is each bench's verdict;
+    // `std_threads_count_the_cpus_and_give_back_ended_threads` runs it under QEMU.
+    "std_threads",
     // Its shared run is each bench's verdict, on the T14's AVX-512 and the AMD
     // bench's AVX; `vector_state_survives_a_switch` runs it under QEMU.
     "vector_state",
@@ -553,6 +556,10 @@ const MACHINE_TESTS: &[&str] = &[
     // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
     // the SDM, and the KVM runner's CPU.
     "vector_state_survives_a_switch",
+    // std's CPU count against the CPUs the guest booted with, and an ended
+    // thread's stack and table place given back, joined or detached, on the
+    // two-CPU q35 guest: std's ToyOS layer, which no host builds.
+    "std_threads_count_the_cpus_and_give_back_ended_threads",
     // The parity instrument's two builds in one boot, behind ring's known
     // answers: that every row runs and both builds print the same whole table.
     // Its timings decide nothing here; the `crypto_instrument` metal row takes
@@ -4081,6 +4088,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
             hda_plays_to_the_controller_that_reaches_an_output(test_config)
         }
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
+        "std_threads_count_the_cpus_and_give_back_ended_threads" => std_threads_count_the_cpus_and_give_back_ended_threads(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
         "crypto_instrument_prints_its_table" => crypto_instrument_prints_its_table(test_config),
         "the_compositor_drives_the_virtio_gpu" => the_compositor_drives_the_virtio_gpu(),
@@ -4748,6 +4756,33 @@ fn vector_state_survives_a_switch(test_config: &Path) -> Result<(), String> {
         return Err(format!("the job never said what it held:\n{}", result.stdout));
     };
     eprintln!("  [claims] {}", line.trim());
+    Ok(())
+}
+
+/// `std_threads` on a guest of [`BootOptions`]' CPUs: it asserts what it
+/// frees itself, and the CPU count it prints is held here to the CPUs the
+/// guest was booted with.
+fn std_threads_count_the_cpus_and_give_back_ended_threads(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "std_threads";
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
+    let options = BootOptions::default();
+    let booted = options.smp;
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], options);
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_std_threads", Duration::from_secs(300));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let counted = format!("std_threads: {booted} CPUs");
+    if !result.stdout.lines().any(|l| l.trim_end().ends_with(&counted)) {
+        return Err(format!("the guest was booted with {booted} CPUs and std counted otherwise:\n{}", result.stdout));
+    }
+    for line in result.stdout.lines().filter(|l| l.contains("std_threads: ")) {
+        eprintln!("  [std] {}", line.trim());
+    }
     Ok(())
 }
 
