@@ -241,9 +241,18 @@ fn der_signatures() {
     });
 }
 
-/// The committed keys' components, and a PKCS #1 v1.5 signature of each.
-fn rsa_keys() -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
-    use ring::signature::{self, KeyPair, RsaKeyPair, RsaPublicKeyComponents};
+/// A committed key: its modulus and exponent, a PKCS #1 v1.5 signature by
+/// it, and its `RSAPublicKey` DER.
+struct RsaKey {
+    n: Vec<u8>,
+    e: Vec<u8>,
+    sig: Vec<u8>,
+    #[cfg(feature = "rustls-provider")]
+    der: Vec<u8>,
+}
+
+fn rsa_keys() -> Vec<RsaKey> {
+    use ring::signature::{self, RsaKeyPair, RsaPublicKeyComponents};
     [&include_bytes!("keys/rsa-2048.pk8")[..], include_bytes!("keys/rsa-4096.pk8")]
         .iter()
         .map(|der| {
@@ -251,7 +260,13 @@ fn rsa_keys() -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
             let public: RsaPublicKeyComponents<Vec<u8>> = private.public().into();
             let mut sig = vec![0; private.public().modulus_len()];
             private.sign(&signature::RSA_PKCS1_SHA256, &ring::rand::SystemRandom::new(), b"ToyOS", &mut sig).unwrap();
-            (public.n, public.e, sig, private.public_key().as_ref().to_vec())
+            RsaKey {
+                n: public.n,
+                e: public.e,
+                sig,
+                #[cfg(feature = "rustls-provider")]
+                der: signature::KeyPair::public_key(&private).as_ref().to_vec(),
+            }
         })
         .collect()
 }
@@ -264,7 +279,7 @@ fn rsa_keys() -> Vec<(Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>)> {
 fn rsa_components() {
     let keys = rsa_keys();
     seeded(CASES, 0x45a, |case, rng| {
-        let (n, e, sig, _) = &keys[case % 2];
+        let RsaKey { n, e, sig, .. } = &keys[case % 2];
         let (mut modulus, mut exponent) = (n.clone(), e.clone());
         match rng.below(8) {
             0 => {}
@@ -326,8 +341,7 @@ fn mlkem_encapsulation_keys() {
     use ml_kem::KeyExport;
     seeded(CASES, 0xe4, |case, rng| {
         let seed: [u8; 64] = rng.array();
-        let valid = ml_kem::DecapsulationKey::<ml_kem::MlKem768>::from_seed(seed.into()).encapsulation_key().to_bytes().to_vec();
-        let mut ek = valid.clone();
+        let mut ek = ml_kem::DecapsulationKey::<ml_kem::MlKem768>::from_seed(seed.into()).encapsulation_key().to_bytes().to_vec();
         match rng.below(4) {
             0 => {}
             1 | 2 => {
@@ -505,7 +519,7 @@ mod provider {
             .unwrap();
         let keys = rsa_keys();
         seeded(CASES, 0xd34, |case, rng| {
-            let (_, _, sig, der) = &keys[case % 2];
+            let RsaKey { sig, der, .. } = &keys[case % 2];
             let mut key = der.clone();
             match rng.below(8) {
                 0 => {}

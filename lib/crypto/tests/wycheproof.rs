@@ -74,20 +74,20 @@ impl Aead {
     }
 }
 
+/// One AEAD case's inputs and expected output.
+struct Record<'a> {
+    key: &'a [u8],
+    nonce: [u8; 12],
+    aad: &'a [u8],
+    ct: &'a [u8],
+    tag: &'a [u8],
+    msg: &'a [u8],
+}
+
 /// Opens `ct` under `tag`, checking that a refusal leaves it as it was and
 /// that an open recovers `msg`; seals `msg` too where the file says valid.
-fn aead_case(
-    tally: &mut Tally,
-    file: &str,
-    t: &Value,
-    alg: Aead,
-    key: &[u8],
-    nonce: [u8; 12],
-    aad: &[u8],
-    ct: &[u8],
-    tag: &[u8],
-    msg: &[u8],
-) {
+fn aead_case(tally: &mut Tally, file: &str, t: &Value, alg: Aead, r: Record) {
+    let Record { key, nonce, aad, ct, tag, msg } = r;
     let id = case(file, t);
     let mut opened = ct.to_vec();
     let refusal = alg.opening(key).open(&nonce, aad, &mut opened, tag);
@@ -125,7 +125,8 @@ fn aead() {
                 tally.outside("nonce not 12 bytes");
                 continue;
             };
-            aead_case(&mut tally, file, t, alg, &key, nonce, &h(t, "aad"), &h(t, "ct"), &h(t, "tag"), &h(t, "msg"));
+            let (aad, ct, tag, msg) = (h(t, "aad"), h(t, "ct"), h(t, "tag"), h(t, "msg"));
+            aead_case(&mut tally, file, t, alg, Record { key: &key, nonce, aad: &aad, ct: &ct, tag: &tag, msg: &msg });
         }
         tally.report(file, Some(declared));
     }
@@ -147,7 +148,8 @@ fn aes_gmac() {
             tally.outside("nonce not 12 bytes");
             continue;
         };
-        aead_case(&mut tally, file, t, alg, &key, nonce, &h(t, "msg"), &[], &h(t, "tag"), &[]);
+        let (aad, tag) = (h(t, "msg"), h(t, "tag"));
+        aead_case(&mut tally, file, t, alg, Record { key: &key, nonce, aad: &aad, ct: &[], tag: &tag, msg: &[] });
     }
     tally.report(file, Some(declared));
 }
