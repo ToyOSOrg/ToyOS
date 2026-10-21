@@ -50,8 +50,8 @@ use toyos_blockserve::guid_text;
 
 /// How long, from this service's start or a settled driver's end, every
 /// driver is waited for before a question is answered with what is known;
-/// past it every answer is immediate. Below the client's own bound on an
-/// answer, which it is taken from.
+/// past it every answer is immediate. A client waits twice this for an
+/// answer (`wire::ANSWER_BOUND_NS`), which leaves the driver room for its own.
 const DRIVER_BOUND: Duration = Duration::from_nanos(wire::DRIVER_BOUND_NS);
 
 /// Connections accepted and not yet asked, and how long one may stay so.
@@ -429,8 +429,9 @@ impl Service {
         self.known.offered.extend(offer.parts.into_iter().map(|part| Offered { disk: ours, part }));
     }
 
-    /// Driver `id` is gone, and every disk it offered with it; a driver whose
-    /// connection ended is awaited until a driver of its name settles again.
+    /// Driver `id` is gone, and every disk it offered with it. One that had
+    /// settled is awaited until a driver with its badge settles again; one that
+    /// never settled is forgotten.
     fn drop_driver(&mut self, id: u64, why: &str) {
         let d = self.drivers.remove(&id).expect("a live driver");
         let label = d.label.unwrap_or_else(|| "unnamed".into());
