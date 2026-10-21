@@ -162,13 +162,8 @@ pub const SYS_NAMESPACE_BUILD: u64 = 101;
 /// no other place to ask, and a name it was not given resolves to nothing.
 pub const SYS_NAMESPACE_OPEN: u64 = 102;
 
-/// Move handles to the peer of a connection. See [`handle_send`].
-///
-/// The batch is queued on the connection, not interleaved with its bytes, so
-/// **handles are sent before the frame that announces them** and a receiver
-/// that has the frame already has the handles.
-pub const SYS_HANDLE_SEND: u64 = 103;
-/// Take the oldest batch of handles the peer sent. See [`handle_recv`].
+/// Take the batch of handles at the reader's place in the connection's bytes.
+/// See [`handle_recv`].
 pub const SYS_HANDLE_RECV: u64 = 104;
 /// Make a shared-memory region, sized up to whole [`SHM_PAGE`]s.
 /// See [`shm_create`].
@@ -294,6 +289,9 @@ pub const SYS_NULL: u64 = 130;
 pub const SYS_DEVICE_DMA_LIMIT: u64 = 131;
 /// Let a claimed PCI function master the bus. See [`device_dma_start`].
 pub const SYS_DEVICE_DMA_START: u64 = 132;
+/// Write a message's bytes to a connection and move the handles it carries,
+/// together or not at all. See [`message_send`].
+pub const SYS_MESSAGE_SEND: u64 = 133;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -301,13 +299,13 @@ pub const SYS_DEVICE_DMA_START: u64 = 132;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 134;
+pub const SYSCALL_PROFILE_BINS: usize = 135;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_DEVICE_DMA_START < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_MESSAGE_SEND < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -484,6 +482,9 @@ pub enum SyscallError {
     /// the same rule the storage layer already obeys applies here: a dead peer
     /// must not be indistinguishable from a handle that was never there.
     Gone = 10,
+    /// A read of a connection reached a batch of handles the peer sent with
+    /// the bytes before it: take the batch ([`handle_recv`]) before reading on.
+    HandlesPending = 11,
 }
 
 impl SyscallError {
@@ -508,6 +509,7 @@ impl SyscallError {
             8 => Some(Self::NotSupported),
             9 => Some(Self::Io),
             10 => Some(Self::Gone),
+            11 => Some(Self::HandlesPending),
             _ => Some(Self::Unknown),
         }
     }
@@ -527,6 +529,7 @@ impl core::fmt::Display for SyscallError {
             Self::NotSupported => f.write_str("not supported"),
             Self::Io => f.write_str("the device did not complete the transfer"),
             Self::Gone => f.write_str("the other end is gone"),
+            Self::HandlesPending => f.write_str("handles the peer sent wait at this point of the stream"),
         }
     }
 }
@@ -1863,7 +1866,7 @@ pub fn accept(acceptor: RawHandle) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_ACCEPT, acceptor.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
-/// Handles one [`handle_send`] may carry.
+/// Handles one [`message_send`] may carry.
 ///
 /// Policy on the primitive: a caller asking for one more is refused by name
 /// and never truncated to fit.
@@ -1872,31 +1875,61 @@ pub const MAX_TRANSFER_HANDLES: usize = 8;
 /// Batches one direction of a connection may hold unreceived.
 pub const MAX_QUEUED_BATCHES: usize = 16;
 
-/// Move `handles` to the peer of `conn`.
-///
-/// Each handle must carry [`Rights::TRANSFER`], and so must `conn`. The move is
-/// all-or-nothing: a refusal leaves every handle where it was.
-///
-/// **Send the handles before the frame that announces them.** They travel in a
-/// queue of their own rather than interleaved with the connection's bytes, so a
-/// peer that has read the frame is guaranteed to find them only in that order.
-///
-/// [`Rights::TRANSFER`]: crate::handle::Rights::TRANSFER
-pub fn handle_send(conn: RawHandle, handles: &[RawHandle]) -> Result<(), SyscallError> {
-    check_unit(syscall(
-        SYS_HANDLE_SEND,
-        conn.0 as u64,
-        handles.as_ptr() as u64,
-        handles.len() as u64,
-        0,
-    ))
+/// The most bytes one [`message_send`] writes. Policy on the primitive: the
+/// bytes are copied whole under the connection's locks, so the copy is
+/// bounded, and every frame a protocol here sends is far smaller.
+pub const MAX_MESSAGE_LEN: usize = 16 * 1024;
+
+/// [`message_send`] answers `WouldBlock` rather than waiting for room.
+pub const MESSAGE_NONBLOCK: u64 = 1;
+
+crate::user_safe! {
+    /// Arguments for `SYS_MESSAGE_SEND`, passed as a single pointer.
+    #[derive(Clone, Copy)]
+    pub struct MessageSend {
+        pub bytes: u64,
+        pub len: u64,
+        pub handles: u64,
+        pub count: u64,
+        pub flags: u64,
+    }
 }
 
-/// Take the oldest batch the peer sent, into `out`. Answers how many it wrote.
+/// Write `bytes` to `conn` and move `handles` to its peer, as one message.
 ///
-/// Never blocks: zero means nothing is queued right now. A batch larger than
-/// `out` is `InvalidArgument` and stays queued — `out` should be
-/// [`MAX_TRANSFER_HANDLES`] long.
+/// **All or nothing, and in order.** The bytes go into the connection's
+/// stream whole, and the handles are queued at the byte just past them: the
+/// peer reads the bytes, then takes the batch ([`handle_recv`]), and no read
+/// of its crosses the batch before it is taken. Nothing is written and no
+/// handle moves on a refusal:
+/// - every handle must carry [`Rights::TRANSFER`], and so must `conn` when
+///   there are any; `conn` itself and a handle named twice are refused;
+/// - handles need bytes (`InvalidArgument`), and past [`MAX_MESSAGE_LEN`]
+///   bytes or [`MAX_TRANSFER_HANDLES`] handles is `InvalidArgument`;
+/// - a peer already holding [`MAX_QUEUED_BATCHES`] is `ResourceExhausted`, and
+///   a peer that is gone is `Gone`;
+/// - a stream without room for the whole message waits for it, or with
+///   `nonblock` answers `WouldBlock`.
+///
+/// [`Rights::TRANSFER`]: crate::handle::Rights::TRANSFER
+pub fn message_send(conn: RawHandle, bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Result<(), SyscallError> {
+    let args = MessageSend {
+        bytes: bytes.as_ptr() as u64,
+        len: bytes.len() as u64,
+        handles: handles.as_ptr() as u64,
+        count: handles.len() as u64,
+        flags: if nonblock { MESSAGE_NONBLOCK } else { 0 },
+    };
+    check_unit(syscall(SYS_MESSAGE_SEND, conn.0 as u64, &args as *const MessageSend as u64, 0, 0))
+}
+
+/// Take the batch the peer sent at this reader's place in the connection's
+/// bytes, into `out`. Answers how many it wrote.
+///
+/// Never blocks: zero means no batch sits here, which for a reader that has
+/// just read a message carrying handles is a peer that broke its protocol. A
+/// batch larger than `out` is `InvalidArgument` and stays queued — `out`
+/// should be [`MAX_TRANSFER_HANDLES`] long.
 pub fn handle_recv(conn: RawHandle, out: &mut [RawHandle]) -> Result<usize, SyscallError> {
     check(syscall(
         SYS_HANDLE_RECV,

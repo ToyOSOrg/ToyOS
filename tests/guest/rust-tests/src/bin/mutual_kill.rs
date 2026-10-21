@@ -95,8 +95,7 @@ fn killer_child() -> (Connection, Child) {
 fn arm(conn: &Connection, go: &SharedMemory, victim: RawHandle) {
     // SAFETY: a fresh duplicate, answered for by nothing else.
     let victim = unsafe { OwnedHandle::from_raw(syscall::dup(victim).expect("a handle to send")) };
-    conn.send_handles([go.share().expect("the word to send"), victim]).expect("send the batch");
-    conn.signal(ARM).expect("say the batch is queued");
+    conn.signal_with(ARM, [go.share().expect("the word to send"), victim]).expect("send the batch");
 }
 
 /// Wait for the killer's one line: it holds its victim and is spinning.
@@ -121,7 +120,7 @@ fn killer() -> ! {
     let conn = ns.open(SERVICE).expect("connect through the endowed connector");
     let header = conn.recv_header().expect("the arming frame");
     assert_eq!(header.msg_type, ARM, "an unexpected frame");
-    let [word_handle, victim] = conn.recv_handles_exact::<2>().expect("the word and the victim");
+    let [word_handle, victim] = conn.recv_handles_exact::<2>(&header).expect("the word and the victim");
     let go = SharedMemory::lent(word_handle, WORD_BYTES).expect("map the word");
     // SAFETY: the parent sent one handle to the victim, which nothing else here owns.
     let victim = unsafe { Process::from_raw(victim) };

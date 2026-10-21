@@ -121,6 +121,9 @@ pub struct Request {
     pub msg_type: u32,
     pub payload: [u8; MAX_REQUEST],
     pub payload_len: usize,
+    /// What the frame carried: claimed by the request that takes handles, and
+    /// closed with any other.
+    pub handles: toyos::ipc::Batch,
 }
 
 impl Request {

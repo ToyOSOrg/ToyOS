@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use crate::watch;
 use crate::mm::policy::Prot;
 use crate::object::{ops, port, KObjectRef};
+use crate::object::service::SendRefused;
 use crate::time::Deadline;
 use crate::user_ptr::SyscallContext;
 use crate::UserAddr;
@@ -359,8 +360,17 @@ pub(super) fn sys_shm_map(h: RawHandle) -> u64 {
     }
 }
 
-/// Move handles to the peer of a connection, all or nothing; rights, including `TRANSFER`, travel unchanged.
-pub(super) fn sys_handle_send(conn_h: RawHandle, handles: &crate::user_ptr::UserBytes, count: usize) -> u64 {
+/// Write a message's bytes to a connection and move its handles to the peer,
+/// together or not at all ([`toyos_abi::syscall::message_send`]). Rights,
+/// `TRANSFER` included, travel unchanged. Waits for room in the stream unless
+/// `nonblock`; the copy is the caller's, bounded by `MAX_MESSAGE_LEN`.
+pub(super) fn sys_message_send(
+    conn_h: RawHandle,
+    bytes: &crate::user_ptr::UserBytes,
+    handles: &crate::user_ptr::UserBytes,
+    count: usize,
+    nonblock: bool,
+) -> u64 {
     let mut wanted = [RawHandle(0); MAX_TRANSFER_HANDLES];
     for (i, slot) in wanted.iter_mut().enumerate().take(count) {
         let mut raw = [0u8; HANDLE_LEN];
@@ -368,32 +378,52 @@ pub(super) fn sys_handle_send(conn_h: RawHandle, handles: &crate::user_ptr::User
         *slot = RawHandle(u32::from_ne_bytes(raw));
     }
     let wanted = &wanted[..count];
+    // `TRANSFER` on the connection only when it carries handles: bytes alone
+    // are a write, which `WRITE` already allows.
+    let need = if count == 0 { Rights::WRITE } else { Rights::WRITE.union(Rights::TRANSFER) };
 
-    let sent = process::with_process_data(|data| {
-        let conn = data
-            .handles
-            .get::<crate::object::service::ConnectionEnd>(conn_h, Rights::TRANSFER)?;
-        for (i, h) in wanted.iter().enumerate() {
-            if *h == conn_h || wanted[..i].contains(h) {
-                return Err(SyscallError::InvalidArgument.into());
+    loop {
+        let sent = process::with_process_data(|data| {
+            let conn = data.handles.get::<crate::object::service::ConnectionEnd>(conn_h, need)?;
+            // Every handle is checked before anything is written or moved.
+            for (i, h) in wanted.iter().enumerate() {
+                if *h == conn_h || wanted[..i].contains(h) {
+                    return Err(SyscallError::InvalidArgument.into());
+                }
+                let rights = data.handles.rights_of(*h)?;
+                if !rights.contains(Rights::TRANSFER) {
+                    return Err(SyscallError::PermissionDenied.into());
+                }
             }
-            let rights = data.handles.rights_of(*h)?;
-            if !rights.contains(Rights::TRANSFER) {
-                return Err(SyscallError::PermissionDenied.into());
+            // A refusal restores every handle at its own number, so it is invisible.
+            let moved = data.handles.transfer(wanted, |batch| conn.send(bytes, batch));
+            Ok::<_, crate::object::Refusal>((conn.tx(), moved))
+        });
+        let tx = match sent {
+            Ok((tx, Ok(()))) => {
+                process::wake_pipe_readers(tx);
+                return 0;
             }
+            Ok((tx, Err(SendRefused::NoRoom))) if !nonblock => tx,
+            Ok((_, Err(SendRefused::NoRoom))) => return SyscallError::WouldBlock.to_u64(),
+            Ok((_, Err(SendRefused::Error(e)))) => return e.to_u64(),
+            Err(e) => return e.refuse(),
+        };
+        // Outside every lock: room appears as the reader drains, and its read posts this watch.
+        let Some(watch) = pipe::write_watch(tx) else { return SyscallError::Gone.to_u64() };
+        let len = bytes.len();
+        if watch::wait_until(&crate::scheduler::Parkable::at_entry(), &watch, 0, WaitClass::Ipc, Deadline::never(), || {
+            pipe::has_room(tx, len)
+        })
+        .is_err()
+        {
+            return cancelled();
         }
-        // The peer's queue can still refuse; transfer restores every entry at its own number so a refusal is invisible.
-        data.handles
-            .transfer(wanted, |batch| conn.send(batch))
-            .map_err(crate::object::Refusal::Error)
-    });
-    match sent {
-        Ok(()) => 0,
-        Err(e) => e.refuse(),
     }
 }
 
-/// Take the oldest batch the peer sent. Never blocks; zero means none queued.
+/// Take the batch pinned at the reader's place in the stream. Never blocks;
+/// zero means no batch sits here.
 pub(super) fn sys_handle_recv(
     conn_h: RawHandle,
     out: &mut crate::user_ptr::UserBytesMut,
@@ -403,16 +433,8 @@ pub(super) fn sys_handle_recv(
         let conn = data
             .handles
             .get::<crate::object::service::ConnectionEnd>(conn_h, Rights::READ)?;
-        // The front measured here is the front recv_bounded takes: only the peer pushes, and only to the far end.
-        // Width is measured before the batch is taken: refusing after popping would drop already-taken handles, leaking capabilities nobody could ask for again.
-        let Some(width) = conn.peek_width() else { return Ok(0) };
-        if width > cap {
-            return Err(SyscallError::InvalidArgument.into());
-        }
-        if !data.handles.has_room(width) {
-            return Err(SyscallError::ResourceExhausted.into());
-        }
-        let Some(batch) = conn.recv_bounded(cap)? else { return Ok(0) };
+        // Width and room are measured before the batch is taken: refusing after taking would drop handles nobody could ask for again.
+        let Some(batch) = conn.recv(cap, |width| data.handles.has_room(width))? else { return Ok(0) };
         let count = batch.len();
         for (i, entry) in batch.into_iter().enumerate() {
             let h = data.handles.install(entry).expect("room was asked for first");

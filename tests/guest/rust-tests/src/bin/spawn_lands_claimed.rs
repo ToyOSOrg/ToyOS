@@ -52,7 +52,7 @@ fn test() {
     let conn = acceptor.accept().expect("the place connected back");
     let header = conn.recv_header().expect("the place's word");
     assert_eq!(header.msg_type, MSG_SELF, "the place said something else");
-    let [place_self] = conn.recv_handles_exact::<1>().expect("the place sent its self");
+    let [place_self] = conn.recv_handles_exact::<1>(&header).expect("the place sent its self");
     assert!(place.try_wait().expect("ask after the place").is_none(), "the place ended before the marked spawn");
 
     assert_eq!(
@@ -105,8 +105,7 @@ fn place() -> ! {
     let conn = endow::service(BACK).expect("the test endowed a port back");
     let own = syscall::dup(endow::this_process().as_handle()).expect("a copy of this process's self");
     // SAFETY: a fresh duplicate, answered for by nothing else.
-    conn.send_handles([unsafe { OwnedHandle::from_raw(own) }]).expect("send the test this process's self");
-    conn.send_bytes(MSG_SELF, &[]).expect("announce this process's self");
+    conn.signal_with(MSG_SELF, [unsafe { OwnedHandle::from_raw(own) }]).expect("send the test this process's self");
     park()
 }
 

@@ -1,5 +1,6 @@
 use crate::mm::pmm;
 
+use kernel::message::Window;
 use kernel::pipe::{End, Holders, Released};
 use toyos_abi::ring::Ring;
 
@@ -123,6 +124,10 @@ struct Pipe {
     left: [Arc<Watch>; 2],
     /// Set when a write should hand the next reader transient RT priority — covers readers already runnable, which the wake-time boost misses.
     rt_boost_pending: bool,
+    /// Bytes ever written and ever read: the stream positions a connection's
+    /// batches are pinned at (`kernel::message`), which never wrap.
+    written: u64,
+    read: u64,
 }
 
 // SAFETY: `Backing::ring`'s raw pointer and its owning `PhysPage` move together in the same struct, and the `PIPES` lock is the only way to reach a `Pipe`, serializing all access to it.
@@ -138,6 +143,8 @@ impl Pipe {
             write_watch: Arc::new(Watch::new()),
             left: [Arc::new(Watch::new()), Arc::new(Watch::new())],
             rt_boost_pending: false,
+            written: 0,
+            read: 0,
         }
     }
 
@@ -212,21 +219,42 @@ pub fn map_page(pipe_id: PipeId) -> Option<DirectMap> {
 }
 
 pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {
+    try_read_within(pipe_id, buf, |_, available| Window::Bytes(available))
+        .map(|read| read.expect("a read with no window stops nowhere"))
+}
+
+/// A read stopped at a batch pinned where the reader is.
+#[derive(Debug)]
+pub struct AtBatch;
+
+/// [`try_read`], taking only what `window` allows of the bytes the ring
+/// holds, given the reader's stream position: [`AtBatch`] where it says the
+/// reader is at a pinned batch.
+pub fn try_read_within(
+    pipe_id: PipeId,
+    buf: &mut UserBytesMut,
+    window: impl FnOnce(u64, usize) -> Window,
+) -> Option<Result<usize, AtBatch>> {
     let (result, boost) = with_pipes_mut(|pipes| {
         let Some(pipe) = pipes.get_mut(pipe_id) else { return (None, false) };
-        if pipe.available() > 0 {
-            let len = buf.len();
+        let limit = match window(pipe.read, pipe.available() as usize) {
+            Window::AtBatch => return (Some(Err(AtBatch)), false),
+            Window::Bytes(limit) => limit,
+        };
+        if pipe.available() > 0 && limit > 0 {
+            let len = buf.len().min(limit);
             let n = pipe
                 .backing
                 .as_mut()
                 .expect("available() > 0 implies a ring")
                 .ring
                 .read(len, |off, src| buf.write_run(off, &src));
+            pipe.read += n as u64;
             let boost = pipe.rt_boost_pending;
             pipe.rt_boost_pending = false;
-            (Some(n), boost)
-        } else if !pipe.holders.held(End::Write) {
-            (Some(0), false)
+            (Some(Ok(n)), boost)
+        } else if !pipe.holders.held(End::Write) && pipe.available() == 0 {
+            (Some(Ok(0)), false)
         } else {
             (None, false)
         }
@@ -236,6 +264,44 @@ pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {
         crate::scheduler::boost_current_rt_inherited();
     }
     result
+}
+
+/// The stream position the reader is at: every byte read so far.
+pub fn read_position(pipe_id: PipeId) -> Option<u64> {
+    with_pipes(|pipes| pipes.get(pipe_id).map(|p| p.read))
+}
+
+/// What [`write_whole`] did: all of it, or nothing.
+pub enum WholeWrite {
+    /// Every byte, ending at this stream position.
+    Wrote(u64),
+    /// Not enough room for all of it now.
+    NoRoom,
+    BrokenPipe,
+    NoMemory,
+}
+
+/// Write all of `buf` or none of it, under the one lock hold.
+pub fn write_whole(pipe_id: PipeId, buf: &UserBytes) -> WholeWrite {
+    with_pipes_mut(|pipes| {
+        let Some(pipe) = pipes.get_mut(pipe_id) else { return WholeWrite::BrokenPipe };
+        if !pipe.holders.held(End::Read) {
+            return WholeWrite::BrokenPipe;
+        }
+        let Some(backing) = pipe.back() else { return WholeWrite::NoMemory };
+        if (backing.ring.space() as usize) < buf.len() {
+            return WholeWrite::NoRoom;
+        }
+        let n = backing.ring.write(buf.len(), |off, mut dst| buf.read_run(off, &mut dst));
+        assert_eq!(n, buf.len(), "pipe: a ring with room for a write took less of it");
+        pipe.written += n as u64;
+        WholeWrite::Wrote(pipe.written)
+    })
+}
+
+/// Whether the pipe could take `len` bytes in one write now.
+pub fn has_room(pipe_id: PipeId, len: usize) -> bool {
+    with_pipes(|pipes| pipes.get(pipe_id).is_some_and(|p| !p.holders.held(End::Read) || p.space() as usize >= len))
 }
 
 pub enum PipeWrite {
@@ -255,7 +321,9 @@ pub fn try_write(pipe_id: PipeId, buf: &UserBytes) -> Option<PipeWrite> {
             return Some(PipeWrite::NoMemory);
         };
         if backing.ring.space() > 0 {
-            Some(PipeWrite::Wrote(backing.ring.write(buf.len(), |off, mut dst| buf.read_run(off, &mut dst))))
+            let n = backing.ring.write(buf.len(), |off, mut dst| buf.read_run(off, &mut dst));
+            pipe.written += n as u64;
+            Some(PipeWrite::Wrote(n))
         } else {
             None
         }

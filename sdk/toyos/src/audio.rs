@@ -269,7 +269,7 @@ impl AudioStream {
         };
 
         let batch = control
-            .recv_handles_exact::<STREAM_OPENED_HANDLES>()
+            .recv_handles_exact::<STREAM_OPENED_HANDLES>(&header)
             .ok_or(AudioError::MissingHandles)?;
         let signal = crate::Pipe(crate::OwnedHandle(batch[STREAM_OPENED_SIGNAL]));
 

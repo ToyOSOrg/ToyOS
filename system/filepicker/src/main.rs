@@ -631,7 +631,7 @@ fn main() {
                     );
                     pending.remove(i);
                 }
-                RxStep::Frame { msg_type, payload_len } => {
+                RxStep::Frame { msg_type, payload_len, .. } => {
                     let p = pending.remove(i);
                     if p.consent {
                         match consent::question(p.rx.payload(payload_len), msg_type) {

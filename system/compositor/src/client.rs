@@ -312,9 +312,8 @@ pub fn deliver_with_handle<T: ipc::IpcPayload>(
     msg_type: u32,
     payload: &T,
 ) {
-    match win.client.conn.send_handles([handle]) {
-        Ok(()) => deliver(dead, win, msg_type, payload),
-        Err(e) => mark_dead(dead, win.client.conn.as_handle(), e.into()),
+    if let Err(e) = win.client.conn.try_send_with(msg_type, payload, [handle]) {
+        mark_dead(dead, win.client.conn.as_handle(), e.into());
     }
 }
 

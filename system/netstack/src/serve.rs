@@ -134,8 +134,8 @@ pub struct Sockets {
 /// A stream's region off a request's connection, judged, and its bell made:
 /// the session the node is lent and the bell's read end the answer hands
 /// over. Refused by name, nothing is mapped.
-fn lend(client: Client) -> Result<(Region, Pipe, Rc<Connection>), (Client, u32)> {
-    let Some([region]) = client.conn.recv_handles_exact::<1>() else { return Err((client, ERR_INVALID_INPUT)) };
+fn lend(client: Client, handles: ipc::Batch) -> Result<(Region, Pipe, Rc<Connection>), (Client, u32)> {
+    let Some([region]) = handles.exact::<1>() else { return Err((client, ERR_INVALID_INPUT)) };
     let Ok((bell, ring)) = toyos::pipe_pair() else {
         // The handle is consumed either way.
         toyos_abi::syscall::close(region);
@@ -155,8 +155,7 @@ fn lend(client: Client) -> Result<(Region, Pipe, Rc<Connection>), (Client, u32)>
 /// Answers a stream's request with its bell and `answer`, on the connection
 /// that is the stream's from here on.
 fn hand_over<T: ipc::IpcPayload>(connection: &Connection, bell: Pipe, answer: &T) {
-    let sent = connection.send_handles([OwnedHandle::from(bell)]).map_err(ipc::TrySendError::Syscall);
-    if let Err(why) = sent.and_then(|()| connection.try_send(RespType::Result as u32, answer)) {
+    if let Err(why) = connection.try_send_with(RespType::Result as u32, answer, [OwnedHandle::from(bell)]) {
         say!("netstack: a stream's client left before its answer: {why:?}");
     }
 }
@@ -316,7 +315,7 @@ impl Sockets {
     pub fn request(&mut self, node: &mut Node, now: Instant, req: Request, acceptor: &Acceptor, draw: fn() -> u32) {
         match MsgType::from_u32(req.msg_type) {
             Some(MsgType::TcpClose) => self.close(node, now, &req),
-            Some(MsgType::UdpBind) => self.udp_bind(node, &req, draw),
+            Some(MsgType::UdpBind) => self.udp_bind(node, req, draw),
             Some(MsgType::UdpSendTo) => self.udp_send_to(node, now, &req),
             Some(MsgType::UdpRecvFrom) => self.udp_recv_from(node, now, req),
             Some(MsgType::UdpClose) => self.udp_close(node, now, &req),
@@ -324,7 +323,7 @@ impl Sockets {
             Some(MsgType::TcpListenerSetOption) => self.listener_set_option(node, &req),
             Some(MsgType::UdpSetOption) => self.udp_set_option(node, &req),
             Some(MsgType::TcpConnect) => self.connect(node, now, req),
-            Some(MsgType::TcpBindPiped) => self.listen(node, &req, draw),
+            Some(MsgType::TcpBindPiped) => self.listen(node, req, draw),
             Some(MsgType::TcpAccept) => self.accept(node, now, req),
             None => {
                 say!("netstack: unknown message type {}", req.msg_type);
@@ -395,7 +394,7 @@ impl Sockets {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let (session, bell, connection) = match lend(msg.client) {
+        let (session, bell, connection) = match lend(msg.client, msg.handles) {
             Ok(lent) => lent,
             Err((client, code)) => return client.error(code),
         };
@@ -413,12 +412,12 @@ impl Sockets {
         }
     }
 
-    fn listen(&mut self, node: &mut Node, msg: &Request, draw: fn() -> u32) {
+    fn listen(&mut self, node: &mut Node, msg: Request, draw: fn() -> u32) {
         let Ok(req) = ipc::decode_payload::<TcpBindPipedRequest>(msg.payload()) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let Some([wakes]) = msg.client.conn.recv_handles_exact::<{ NOTIFY_HANDLES }>() else {
+        let Some([wakes]) = msg.handles.exact::<{ NOTIFY_HANDLES }>() else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
@@ -446,7 +445,7 @@ impl Sockets {
             msg.client.error(accept_refused(AcceptRefused::NoListener));
             return;
         };
-        let (session, bell, connection) = match lend(msg.client) {
+        let (session, bell, connection) = match lend(msg.client, msg.handles) {
             Ok(lent) => lent,
             Err((client, code)) => {
                 // Refused, the accept still spends its wake.
@@ -474,12 +473,12 @@ impl Sockets {
         }
     }
 
-    fn udp_bind(&mut self, node: &mut Node, msg: &Request, draw: fn() -> u32) {
+    fn udp_bind(&mut self, node: &mut Node, msg: Request, draw: fn() -> u32) {
         let Ok(req) = ipc::decode_payload::<UdpBindRequest>(msg.payload()) else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let Some([to_client, from_client]) = msg.client.conn.recv_handles_exact::<{ DATA_HANDLES }>() else {
+        let Some([to_client, from_client]) = msg.handles.exact::<{ DATA_HANDLES }>() else {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };

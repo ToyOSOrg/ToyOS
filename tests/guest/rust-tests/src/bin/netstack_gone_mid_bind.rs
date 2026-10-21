@@ -23,16 +23,14 @@
 //!    already worked, and it is asserted through `std::net::TcpListener` as
 //!    well as through the SDK, because `ErrorKind::NotConnected` is the literal
 //!    thing `/system/bin/sshserver` matches on.
-//! 2. **Gone between the connect and the handle transfer.** The client is
-//!    connected and queued when the port closes. `tcp_bind` hands netstack a pipe
-//!    end, and a request that carries handles moves them *before* it writes the
-//!    frame — so `SYS_HANDLE_SEND` is the first thing it can be refused at, and
-//!    it answers `SyscallError::Gone`. The refused send consumed the pipe end
-//!    and closed it, so the pipe's read end, still the child's, reads end of
-//!    file: the kernel left the end at its own number and the SDK closed it.
-//! 3. **The same, for a request that carries no handles**, which reaches the
-//!    frame write instead, where a pipe with no reader is the same
-//!    `SyscallError::Gone`.
+//! 2. **Gone between the connect and the request.** The client is connected
+//!    and queued when the port closes. `tcp_bind` hands netstack a pipe end in
+//!    its request's frame, and `SYS_MESSAGE_SEND` refuses the whole message with
+//!    `SyscallError::Gone`. The refused send consumed the pipe end and closed
+//!    it, so the pipe's read end, still the child's, reads end of file: the
+//!    kernel left the end at its own number and the SDK closed it.
+//! 3. **The same, for a request that carries no handles**, which the same send
+//!    refuses with the same `SyscallError::Gone`.
 //!
 //! Arms 2 and 3 are the ones that produced the panic. They are red on a tree
 //! where `toyos::net::hangup` maps anything but `IpcError::Disconnected` to
@@ -176,10 +174,9 @@ fn already_gone() -> ! {
 
 /// Which syscall the child's request is refused at.
 enum Request {
-    /// Carries a pipe end, so `SYS_HANDLE_SEND` goes first — `tcp_bind`'s own
-    /// shape.
+    /// Carries a pipe end, which a refused send closes — `tcp_bind`'s own shape.
     Bind,
-    /// Carries none, so the frame write is the first thing the kernel sees.
+    /// Carries none.
     Close,
 }
 

@@ -140,7 +140,7 @@ fn grow() -> Grown {
     let conn = acceptor.accept().expect("B connected back");
     let header = conn.recv_header().expect("B's word that its subtree is grown");
     assert_eq!(header.msg_type, MSG_GROWN, "B said something else");
-    let [c, d, b_self, e] = conn.recv_handles_exact::<4>().expect("B sent four handles");
+    let [c, d, b_self, e] = conn.recv_handles_exact::<4>(&header).expect("B sent four handles");
     // SAFETY: B moved each into this table with the frame, and nothing else
     // answers for them.
     let (c, d, e) = unsafe { (Process::from_raw(c), Process::from_raw(d), Process::from_raw(e)) };
@@ -399,8 +399,7 @@ fn b() -> ! {
         syscall::dup(RawHandle(e.as_raw_handle())).expect("a copy of E"),
     ];
     // SAFETY: four fresh duplicates, answered for by nothing else.
-    conn.send_handles(handles.map(|h| unsafe { OwnedHandle::from_raw(h) })).expect("send A the subtree");
-    conn.send_bytes(MSG_GROWN, &[]).expect("announce the subtree");
+    conn.signal_with(MSG_GROWN, handles.map(|h| unsafe { OwnedHandle::from_raw(h) })).expect("send A the subtree");
 
     let header = conn.recv_header().expect("A's word to fault");
     assert_eq!(header.msg_type, MSG_FAULT, "A said something else");

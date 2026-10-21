@@ -91,7 +91,7 @@ pub(crate) fn serve(client: &mut VolumeClient, outputs: &mut Outputs, relay: &mu
                 say!("soundserver: a volume frame this protocol cannot describe, disconnecting");
                 return false;
             }
-            RxStep::Frame { msg_type, payload_len } => (msg_type, payload_len),
+            RxStep::Frame { msg_type, payload_len, .. } => (msg_type, payload_len),
         };
         let asked = match classify(msg_type, payload_len) {
             Request::Step => {

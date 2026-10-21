@@ -525,7 +525,7 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
     if header.msg_type != MSG_COPY_REGION || !header.is_empty() {
         return Err(CreateError::Protocol(header.msg_type));
     }
-    let [region] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
+    let [region] = conn.recv_handles_exact::<1>(&header).ok_or(CreateError::NoHandle)?;
     let mut region = SharedMemory::lent(region, bytes.len()).map_err(CreateError::Lent)?;
     region.as_mut_slice().copy_from_slice(bytes);
     Ok(conn.signal(MSG_COPY_COMMIT)?)
@@ -607,10 +607,10 @@ impl Window {
         let scale = Scale::from_wire(info.scale).ok_or(CreateError::Protocol(MSG_WINDOW_CREATED))?;
 
         let buf_size = info.stride as usize * info.height as usize * 4;
-        // The buffer crossed ahead of the frame. A compositor that announced a
+        // The buffer travels in the frame. A compositor that announced a
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
-        let [buffer] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
+        let [buffer] = conn.recv_handles_exact::<1>(&header).ok_or(CreateError::NoHandle)?;
         let shm = SharedMemory::lent(buffer, buf_size).map_err(CreateError::Lent)?;
 
         let poller = Poller::new(1);
@@ -718,7 +718,7 @@ impl Window {
                 // The compositor shows the old buffer only until this
                 // window's next present, which it reads from the new one, so a
                 // window that cannot map the new one has nothing to present.
-                let Some([buffer]) = self.conn.recv_handles_exact::<1>() else {
+                let Some([buffer]) = self.conn.recv_handles_exact::<1>(header) else {
                     return Event::Close;
                 };
                 let Ok(shm) = SharedMemory::lent(buffer, buf_size) else {
@@ -743,7 +743,7 @@ impl Window {
                 let Ok(info) = self.conn.recv_payload::<ClipboardShmMsg>(header) else {
                     return Event::Close;
                 };
-                let Some([buffer]) = self.conn.recv_handles_exact::<1>() else {
+                let Some([buffer]) = self.conn.recv_handles_exact::<1>(header) else {
                     return Event::ClipboardPaste(Vec::new());
                 };
                 let Ok(shm) = SharedMemory::lent(buffer, info.len as usize) else {
