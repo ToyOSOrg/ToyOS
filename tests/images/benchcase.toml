@@ -3,10 +3,15 @@
 #
 # Only what a job list needs to run and to reach the log on the boot stick: no
 # compositor, sound, ACPI server or network, so little but the measurement asks
-# for a CPU.
+# for a CPU. DATA is memory here, the stick having no DATA partition, and the
+# log volume is the one persistent volume a job can write (`osbench persist`).
 #
 # The runner's capability carries `jobs`, for the fairness run that starts each
-# workload as a job of its own, and `dup`, to hand it down.
+# workload as a job of its own; `counters`, `trace` and `roster`, so `osbench
+# tail` can read each CPU's SMIs and clock, the scheduler's diary and each
+# process's name and CPU time around a late wake; and `dup`, so each job is
+# handed a duplicate. No other benchmark's path uses them. An unprivileged
+# Linux program has no observation rights to match, which the report says.
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
 
@@ -14,19 +19,48 @@ start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
 service = true
 syscap = ["logread"]
 
+# The order `osbench all` runs the groups in. The bound is the metal row's, its
+# 240 s on the 60 s every list has (`tests/toyos.rs`), restated for a boot of
+# this config built without the row; a derived metal config states its own.
 [programs.test-runner]
 receives = ["power"]
-args = ["osbench_system", "osbench_sched", "osbench_fair", "reboot"]
-syscap = ["jobs", "dup"]
+syscap = ["jobs", "counters", "trace", "roster", "dup"]
+args = [
+    "--bound-ms=300000",
+    "osbench_boot",
+    "osbench_system",
+    "osbench_sched",
+    "osbench_fair",
+    "osbench_files",
+    "osbench_ipc",
+    "osbench_net",
+    "osbench_procs",
+    "osbench_mem",
+    "osbench_time",
+    "osbench_work",
+    "osbench_tail",
+    "osbench_persist",
+    "reboot",
+]
 
 [programs.osbench]
 
 [programs.toybox]
 
 [symlinks]
+"bin/osbench_boot" = "/system/bin/osbench"
 "bin/osbench_system" = "/system/bin/osbench"
 "bin/osbench_sched" = "/system/bin/osbench"
 "bin/osbench_fair" = "/system/bin/osbench"
+"bin/osbench_files" = "/system/bin/osbench"
+"bin/osbench_ipc" = "/system/bin/osbench"
+"bin/osbench_net" = "/system/bin/osbench"
+"bin/osbench_procs" = "/system/bin/osbench"
+"bin/osbench_mem" = "/system/bin/osbench"
+"bin/osbench_time" = "/system/bin/osbench"
+"bin/osbench_work" = "/system/bin/osbench"
+"bin/osbench_tail" = "/system/bin/osbench"
+"bin/osbench_persist" = "/system/bin/osbench"
 "bin/reboot" = "/system/bin/toybox"
 
 # The block service: every disk a driver offers on `disk`, listed and opened

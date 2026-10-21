@@ -995,6 +995,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         // The numbers compared with the same program on the bench's own Linux.
         // Evidence and not a verdict: they are read off the log, and the row
         // holds only that every group ran to its end. The T14 and the AMD bench.
+        // One boot runs the whole suite, so three readbacks are three runs.
         "osbench",
         metal::Metal { arms: BENCHCASE, judge: |b| osbench_ran(b[0]) },
     ),
@@ -1422,10 +1423,34 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
     ],
 )];
 
-/// `osbench`'s groups, each a job named by its symlink.
-const OSBENCH_GROUPS: [&str; 3] = ["osbench_system", "osbench_sched", "osbench_fair"];
+/// `osbench`'s groups, each a job named by its symlink, in `osbench all`'s
+/// order: `boot` first, which reads how long the boot took to reach it, and
+/// `persist` last, which writes the log volume.
+const OSBENCH_GROUPS: [&str; 13] = [
+    "osbench_boot",
+    "osbench_system",
+    "osbench_sched",
+    "osbench_fair",
+    "osbench_files",
+    "osbench_ipc",
+    "osbench_net",
+    "osbench_procs",
+    "osbench_mem",
+    "osbench_time",
+    "osbench_work",
+    "osbench_tail",
+    "osbench_persist",
+];
 
-const BENCHCASE: &[metal::Arm] = &[metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)];
+/// The suite runs past every boot's bound on purpose: `tail` alone waits out
+/// 100 s of wakes and spinners. Six boots of `e5573b7fe` ended their last job
+/// at 175 to 191 s on five, and at 244 s on the T14's first, where one
+/// served 64 MiB write stalled and `files` took 80 s against 13; so a list
+/// bound of 300 s leaves that stall 56 s.
+const BENCHCASE: &[metal::Arm] = &[metal::Arm {
+    adds_ms: 240_000,
+    ..metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)
+}];
 
 /// Every group exited 0, which `osbench` does only once each of its
 /// benchmarks measured, and said it was done.
