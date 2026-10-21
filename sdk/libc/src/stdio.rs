@@ -1,14 +1,13 @@
 use core::ptr;
-use toyos_abi::syscall::{self, SeekFrom};
-
-use crate::posix_io::on_fd;
+use toyos::files;
+use toyos_abi::syscall::SeekFrom;
 
 // Platform fd operations
 
 fn sys_close(fd: i32) { let _ = toyos::fd::close(fd); }
 
 fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
-    match on_fd(fd, |h| syscall::read(h, buf)) {
+    match files::read(fd, buf) {
         Ok(n) => n as isize,
         Err(_) => -1,
     }
@@ -28,24 +27,17 @@ fn sys_seek(fd: i32, offset: i64, whence: i32) -> i64 {
         2 => SeekFrom::End(offset),
         _ => return -1,
     };
-    match on_fd(fd, |h| syscall::seek(h, pos)) {
+    match files::seek(fd, pos) {
         Ok(n) => n as i64,
         Err(_) => -1,
     }
 }
 
-fn sys_fsync(fd: i32) { let _ = on_fd(fd, syscall::fsync); }
+fn sys_fsync(fd: i32) { let _ = files::fsync(fd); }
 
-fn sys_delete(path: &[u8]) -> i32 {
-    match syscall::delete(path) { Ok(()) => 0, Err(_) => -1 }
-}
-
-fn sys_rename(old: &[u8], new: &[u8]) -> i32 {
-    match syscall::rename(old, new) { Ok(()) => 0, Err(_) => -1 }
-}
-
-fn sys_mkdir(path: &[u8]) -> i32 {
-    match syscall::mkdir(path) { Ok(()) => 0, Err(_) => -1 }
+/// `0`, or `-1` with `errno` set for the refusal.
+fn answered(done: Result<(), files::Error>) -> i32 {
+    done.map_or_else(super::posix_io::refuse_files, |()| 0)
 }
 
 // FILE struct
@@ -165,11 +157,9 @@ unsafe fn unregister_stream(f: *mut FILE) {
 /// failure mode that is hardest to tell apart from the program never having run.
 /// C's rule is "interactive device", not "terminal", and a serial console is one.
 unsafe fn fd_is_interactive(fd: i32) -> bool {
-    match on_fd(fd, syscall::fstat) {
-        Ok(st) => matches!(
-            st.file_type,
-            syscall::FileType::Tty | syscall::FileType::Serial
-        ),
+    use toyos_abi::syscall::FileType;
+    match files::fstat(fd) {
+        Ok(st) => matches!(st.file_type, FileType::Tty | FileType::Serial),
         Err(_) => false,
     }
 }
@@ -626,12 +616,12 @@ pub(crate) unsafe fn unget(f: *mut FILE, bytes: &[u8]) -> bool {
 
 #[no_mangle]
 pub unsafe extern "C" fn remove(path: *const u8) -> i32 {
-    sys_delete(unsafe { c_str_bytes(path) })
+    answered(files::unlink(unsafe { c_str_bytes(path) }))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rename(old: *const u8, new: *const u8) -> i32 {
-    sys_rename(unsafe { c_str_bytes(old) }, unsafe { c_str_bytes(new) })
+    answered(files::rename(unsafe { c_str_bytes(old) }, unsafe { c_str_bytes(new) }))
 }
 
 #[no_mangle]
@@ -655,7 +645,7 @@ pub unsafe extern "C" fn atof(s: *const u8) -> f64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn mkdir(path: *const u8, _mode: u32) -> i32 {
-    sys_mkdir(unsafe { c_str_bytes(path) })
+    answered(files::mkdir(unsafe { c_str_bytes(path) }))
 }
 
 #[no_mangle]

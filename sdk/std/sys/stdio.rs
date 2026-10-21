@@ -4,7 +4,7 @@ use toyos::log::stdio::{self as log_stdio, Stream};
 use toyos_abi::syscall::{self, FileType};
 
 use crate::io::{self, IoSlice, IoSliceMut};
-use crate::sys::{fd_error, on_fd, on_open_fd, to_io_error};
+use crate::sys::{fd_error, files_error, on_fd, on_open_fd};
 
 /// Standard input's descriptor.
 const STDIN: i32 = 0;
@@ -167,7 +167,7 @@ impl Stdout {
 
 impl io::Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        log_stdio::write(Stream::Out, buf).map_err(to_io_error)
+        log_stdio::write(Stream::Out, buf).map_err(files_error)
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -196,7 +196,7 @@ impl Stderr {
 
 impl io::Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        log_stdio::write(Stream::Err, buf).map_err(to_io_error)
+        log_stdio::write(Stream::Err, buf).map_err(files_error)
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {

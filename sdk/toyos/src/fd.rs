@@ -42,12 +42,20 @@ pub enum Error {
     Full,
 }
 
+/// The tag of a handle and of an object another library keeps.
+pub const UNTAGGED: u32 = 0;
+/// The tag of a file a file server holds open (`crate::files`).
+pub const SERVED_FILE: u32 = 1;
+
 /// What a descriptor names.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct Object {
     /// The kernel handle, or [`toyos_abi::HANDLE_INVALID`] for an opaque object.
     pub handle: RawHandle,
+    /// Which kind of opaque object this crate keeps it is, [`UNTAGGED`] for a
+    /// handle and for another library's.
+    pub tag: u32,
     /// An opaque object's word, its owner's to interpret.
     pub word: u64,
     /// How an opaque object is let go once nothing names it.
@@ -58,13 +66,18 @@ impl Object {
     /// A kernel handle the table owns from here on: it is closed when the
     /// object is released.
     pub const fn handle(handle: RawHandle) -> Self {
-        Self { handle, word: 0, release: None }
+        Self { handle, tag: UNTAGGED, word: 0, release: None }
     }
 
     /// An object a library keeps itself, `word`, which `release` is called
     /// with once no descriptor and no call names it.
     pub const fn opaque(word: u64, release: extern "C" fn(u64)) -> Self {
-        Self { handle: toyos_abi::HANDLE_INVALID, word, release: Some(release) }
+        Self::tagged(UNTAGGED, word, release)
+    }
+
+    /// An opaque object of a kind this crate keeps, which [`Object::tag`] names.
+    pub(crate) const fn tagged(tag: u32, word: u64, release: extern "C" fn(u64)) -> Self {
+        Self { handle: toyos_abi::HANDLE_INVALID, tag, word, release: Some(release) }
     }
 
     /// Let the object go: an opaque one to its library, a handle closed (a
@@ -214,6 +227,7 @@ mod owner {
     /// panic writes to stderr, a descriptor, which would wait on it forever.
     fn table<R>(f: impl FnOnce(&mut Table<MAX_FDS>) -> Result<R, Fault>) -> Result<R, Error> {
         let endowed = Endowments::get();
+        let mut refused = 0;
         let answer = {
             let mut held = TABLE.lock();
             let (ready, table) = &mut *held;
@@ -221,11 +235,15 @@ mod owner {
                 true => Ok(()),
                 false => {
                     *ready = true;
-                    endow(table, endowed)
+                    endow(table, endowed).map(|n| refused = n)
                 }
             };
             installed.and_then(|()| f(table))
         };
+        // Said once the lock is let go, since stderr is a descriptor.
+        for _ in 0..refused {
+            let _ = crate::files::write(2, b"toyos::fd: an fd: endowment whose number was taken was refused\n");
+        }
         answer.map_err(|fault| match fault {
             Fault::Refused(e) => e,
             Fault::Broken => panic!("toyos::fd: the descriptor table is inconsistent"),
@@ -233,19 +251,23 @@ mod owner {
     }
 
     /// Install each `fd:<n>` endowment at `n`. One whose number another
-    /// already took is refused, its handle closed.
-    fn endow(table: &mut Table<MAX_FDS>, endowed: &Endowments) -> Result<(), Fault> {
+    /// already took is refused, its handle closed: how many were.
+    fn endow(table: &mut Table<MAX_FDS>, endowed: &Endowments) -> Result<usize, Fault> {
+        let mut refused = 0;
         for label in endowed.labels() {
             let Some(fd) = endowed_fd(label) else { continue };
             let Some(handle) = endowed.take::<OwnedHandle>(label) else { continue };
             match table.install_at(fd, Object::handle(handle.0), true) {
                 // The table owns the handle from here on.
                 Ok(()) => drop(handle.into_raw()),
-                Err(Fault::Refused(_)) => drop(handle),
+                Err(Fault::Refused(_)) => {
+                    drop(handle);
+                    refused += 1;
+                }
                 Err(Fault::Broken) => return Err(Fault::Broken),
             }
         }
-        Ok(())
+        Ok(refused)
     }
 
     fn released(object: Option<Object>) {

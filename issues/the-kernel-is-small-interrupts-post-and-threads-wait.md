@@ -16,8 +16,8 @@ kernel's part of a restart, and named module tests hold each program's
 
 ## What is left, in order
 
-1. **Step 9's file half** (stage 4), once libc is a file server's client
-   (`issues/c-programs-name-no-file-a-file-server-holds.md`).
+1. **Step 9's file half** (stage 4). libc is a file server's client
+   through `toyos::files`, as std is.
 2. **Step 8's exit** (stage 4). Its empty view needs step 9's file half:
    until then the kernel serves `/system` and `/tmp` to every process.
 3. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
@@ -157,9 +157,8 @@ Beside that order, each waiting on something outside it:
         `fs_rename.rs`), the page cache (`file_cache.rs`) and the file
         syscalls. `/tmp` leaves the kernel per session, as the owner ruled
         ("Per session", 2026-10-03, in the isolation track), and `/system` is
-        read over the file protocol, which
-        `issues/c-programs-name-no-file-a-file-server-holds.md`'s exit puts
-        after libc is a file server's client. **Exit**: `tmpfs.rs`,
+        read over the file protocol, which std and libc both reach through
+        `toyos::files`. **Exit**: `tmpfs.rs`,
         `fs_rename.rs` and `file_cache.rs` are gone, `vfs.rs` resolves ROOT
         for exec and `SYS_DLOPEN` alone, and `sdk/abi` has no `SYS_OPEN` (9),
         `SYS_STAT` (16), `SYS_READDIR` (17), `SYS_DELETE` (18), `SYS_CHDIR`

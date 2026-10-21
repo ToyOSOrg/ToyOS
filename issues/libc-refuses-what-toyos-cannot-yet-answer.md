@@ -11,8 +11,10 @@ These answer failure in their POSIX form and do nothing
 `tests/corpus/tinycc/206_libc_refusals.c`. Each waits on what it names:
 
 - `link`, `ENOSYS`: no call gives a file a second name.
-- `symlink`, `ENOSYS`: `SYS_SYMLINK` displaces what its name held
-  (`issues/a-symbolic-link-on-tmp-displaces-its-name-and-lists-nowhere.md`).
+- `symlink` of a link the kernel would hold, `ENOSYS`: `SYS_SYMLINK`
+  displaces what its name held
+  (`issues/a-symbolic-link-on-tmp-displaces-its-name-and-lists-nowhere.md`). A
+  file server makes one and refuses a name that exists, as POSIX has it.
 - `chmod` and `fchmod`, `ENOSYS`: a file has no mode bits to set.
 - `utimes`, `ENOSYS`: no call sets a file's times.
 - `statvfs` and `fstatvfs`, `ENOSYS`: no call answers a filesystem's size or

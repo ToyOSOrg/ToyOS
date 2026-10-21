@@ -9,7 +9,7 @@ use toyos_abi::syscall::{SyscallError, MAX_LINKS, MAX_PATH};
 
 use crate::errcode::{EIO, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR};
 use crate::header::{self, LIMITS_H};
-use crate::resolve::{resolve, Kernel};
+use crate::resolve::{resolve, resolve_served, Kernel};
 
 #[derive(Clone, Copy)]
 enum Node {
@@ -196,4 +196,46 @@ fn a_kernel_refusal_is_its_errno() {
 #[test]
 fn path_max_is_limits_h_s() {
     assert_eq!(MAX_PATH, header::int(LIMITS_H, "PATH_MAX") as usize);
+}
+
+/// [`resolve_served`] over `tree`: a link's target, or `None`, and `ENOENT`
+/// for a name that is not there.
+fn served(tree: &Tree, abs: &str) -> Result<String, i32> {
+    let read_link = |at: &[u8]| match tree.at(at) {
+        Some(Node::Link(target)) => Ok(Some(target.as_bytes().to_vec())),
+        Some(_) => Ok(None),
+        None => Err(ENOENT),
+    };
+    let exists = |at: &[u8]| tree.at(at).map(drop).ok_or(ENOENT);
+    resolve_served(abs.as_bytes(), read_link, exists).map(|at| String::from_utf8(at).expect("UTF-8"))
+}
+
+/// A served path's last link is read against the link's own directory, as
+/// POSIX has it, and not against a mount as the kernel's is; an absolute one
+/// from the root.
+#[test]
+fn a_served_link_is_read_against_its_own_directory() {
+    let tree = Tree::new(&[
+        ("/home/u/a", Node::Dir),
+        ("/home/u/a/file", Node::File),
+        ("/home/u/a/rel", Node::Link("file")),
+        ("/home/u/up", Node::Link("a/../a/rel")),
+        ("/home/u/abs", Node::Link("/home/u/a/file")),
+    ]);
+    assert_eq!(served(&tree, "/home/u/a/rel"), Ok(String::from("/home/u/a/file")));
+    assert_eq!(served(&tree, "/home/u/up"), Ok(String::from("/home/u/a/file")), "a chain of two");
+    assert_eq!(served(&tree, "/home/u/abs"), Ok(String::from("/home/u/a/file")));
+    assert_eq!(served(&tree, "/home/u/./a//file"), Ok(String::from("/home/u/a/file")), "lexically clean");
+}
+
+#[test]
+fn a_served_loop_is_eloop_and_a_dangling_link_enoent() {
+    let tree = Tree::new(&[
+        ("/home/u", Node::Dir),
+        ("/home/u/x", Node::Link("y")),
+        ("/home/u/y", Node::Link("x")),
+        ("/home/u/dangling", Node::Link("gone")),
+    ]);
+    assert_eq!(served(&tree, "/home/u/x"), Err(ELOOP));
+    assert_eq!(served(&tree, "/home/u/dangling"), Err(ENOENT));
 }

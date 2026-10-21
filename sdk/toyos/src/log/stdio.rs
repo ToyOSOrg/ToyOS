@@ -228,7 +228,10 @@ mod target {
     /// sentence the refusal panics with.
     fn ask(stream: Stream) -> Result<usize, why::Why> {
         use why::Why;
-        let Ok(stat) = crate::fd::with(stream as i32, |o| syscall::fstat(o.handle)) else { return Ok(DESCRIPTOR) };
+        // A descriptor that is not open, or names a file a server holds, is
+        // written as a descriptor.
+        let asked = crate::fd::with(stream as i32, |o| o.release.is_none().then(|| syscall::fstat(o.handle)));
+        let Ok(Some(stat)) = asked else { return Ok(DESCRIPTOR) };
         let stat = stat.map_err(Why::Fstat)?;
         if stat.file_type != FileType::SharedMemory {
             return Ok(DESCRIPTOR);
@@ -314,9 +317,12 @@ mod target {
     /// `buf` onto a stream: whole lines to its ring, or every byte to its
     /// descriptor, and none anywhere for a descriptor that is not open, as
     /// std on unix drops a closed stdout's bytes.
-    pub fn write(stream: Stream, buf: &[u8]) -> Result<usize, SyscallError> {
+    pub fn write(stream: Stream, buf: &[u8]) -> Result<usize, crate::files::Error> {
         match sink(stream) {
-            Sink::Descriptor(fd) => crate::fd::with(fd, |o| syscall::write(o.handle, buf)).unwrap_or(Ok(buf.len())),
+            Sink::Descriptor(fd) => match crate::files::write(fd, buf) {
+                Err(crate::files::Error::Fd(crate::fd::Error::BadFd)) => Ok(buf.len()),
+                written => written,
+            },
             Sink::Ring(ring) => {
                 PENDING[index(stream)].with(|composer| composer.feed(buf, &mut push(&ring)));
                 Ok(buf.len())

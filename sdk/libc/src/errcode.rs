@@ -1,5 +1,5 @@
 //! libc's errno codes, `include/errno.h`'s by name and value, and the one
-//! reading of a kernel refusal as one. Nothing here reads or sets `errno`
+//! reading of a kernel's or a file server's refusal as one. Nothing here reads or sets `errno`
 //! (`errno.rs` does), so the host tests it (`toyos-libc-copies`).
 
 use toyos_abi::syscall::SyscallError;
@@ -17,18 +17,24 @@ pub(crate) const EACCES: i32 = 13;
 pub(crate) const EFAULT: i32 = 14;
 pub(crate) const EBUSY: i32 = 16;
 pub(crate) const EEXIST: i32 = 17;
+pub(crate) const EXDEV: i32 = 18;
 pub(crate) const ENODEV: i32 = 19;
 pub(crate) const ENOTDIR: i32 = 20;
+pub(crate) const EISDIR: i32 = 21;
 pub(crate) const EINVAL: i32 = 22;
+pub(crate) const ENFILE: i32 = 23;
 pub(crate) const EMFILE: i32 = 24;
 pub(crate) const ENOTTY: i32 = 25;
+pub(crate) const EFBIG: i32 = 27;
 pub(crate) const ENOSPC: i32 = 28;
+pub(crate) const EROFS: i32 = 30;
 pub(crate) const EPIPE: i32 = 32;
 pub(crate) const EDOM: i32 = 33;
 pub(crate) const ERANGE: i32 = 34;
 pub(crate) const EDEADLK: i32 = 35;
 pub(crate) const ENAMETOOLONG: i32 = 36;
 pub(crate) const ENOSYS: i32 = 38;
+pub(crate) const ENOTEMPTY: i32 = 39;
 pub(crate) const ELOOP: i32 = 40;
 pub(crate) const EOVERFLOW: i32 = 75;
 pub(crate) const EILSEQ: i32 = 84;
@@ -43,6 +49,7 @@ pub(crate) const ENOTCONN: i32 = 107;
 pub(crate) const ETIMEDOUT: i32 = 110;
 pub(crate) const ECONNREFUSED: i32 = 111;
 pub(crate) const EHOSTUNREACH: i32 = 113;
+pub(crate) const ESTALE: i32 = 116;
 
 /// The errno a kernel refusal is answered with.
 pub(crate) fn of(e: SyscallError) -> i32 {
@@ -58,5 +65,47 @@ pub(crate) fn of(e: SyscallError) -> i32 {
         // A read of a connection met handles no frame announced: the peer broke its protocol.
         SyscallError::HandlesPending => EPROTO,
         _ => EINVAL,
+    }
+}
+
+/// The errno a refusal of `toyos::files` is answered with.
+pub(crate) fn of_files(e: toyos::files::Error) -> i32 {
+    use toyos::files::Error;
+    match e {
+        Error::Kernel(e) => of(e),
+        Error::Served(e) => of_served(e),
+        Error::Fd(toyos::fd::Error::BadFd) | Error::NotAFile => EBADF,
+        Error::Fd(toyos::fd::Error::Full) => EMFILE,
+        Error::NotUtf8 => EILSEQ,
+        Error::Loop => ELOOP,
+        Error::CrossesServers => EXDEV,
+    }
+}
+
+/// The errno a file server's refusal, or its client end's, is answered with.
+fn of_served(e: toyos::fs::Error) -> i32 {
+    use toyos::fs::Error;
+    match e {
+        Error::NotFound | Error::NotHeld => ENOENT,
+        Error::AlreadyExists => EEXIST,
+        Error::NotADirectory | Error::NoDirectory => ENOTDIR,
+        Error::IsADirectory => EISDIR,
+        Error::NotEmpty => ENOTEMPTY,
+        Error::NotALink | Error::IntoItself | Error::UnknownFile | Error::InvalidPath | Error::InvalidRequest => EINVAL,
+        Error::NameTooLong | Error::InvalidName => ENAMETOOLONG,
+        Error::ReadOnly => EROFS,
+        Error::NotOpenForWriting => EBADF,
+        Error::Root => EBUSY,
+        Error::Escapes => EACCES,
+        Error::CrossesDirectories => EXDEV,
+        Error::Loop => ELOOP,
+        Error::NoSpace => ENOSPC,
+        Error::FileTooLarge => EFBIG,
+        Error::LimitExceeded | Error::TooManyConnections | Error::TooManyStreams => EAGAIN,
+        Error::TooManyOpen => ENFILE,
+        Error::Io | Error::Malformed => EIO,
+        Error::Stale | Error::Gone => ESTALE,
+        Error::Unsupported => EOPNOTSUPP,
+        Error::OutOfResources => ENOMEM,
     }
 }

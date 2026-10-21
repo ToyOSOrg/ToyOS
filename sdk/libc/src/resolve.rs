@@ -4,7 +4,9 @@
 //! asks the kernel only through [`Kernel`], so the host tests it
 //! (`toyos-libc-copies`).
 //!
-//! The rules are not POSIX's (`issues/the-kernel-resolves-a-path-by-rules-of-its-own.md`):
+//! A path a file server holds is resolved by [`resolve_served`] instead.
+//!
+//! The kernel's rules are not POSIX's (`issues/the-kernel-resolves-a-path-by-rules-of-its-own.md`):
 //! `..` is read off the text before any name is looked up, only the last
 //! name's link is followed, at most [`MAX_LINKS`] of them, and a relative link
 //! is read against the mount it is on, the first name of its path. The kernel
@@ -120,4 +122,26 @@ fn absent(at: &[u8], kernel: &mut impl Kernel) -> Result<i32, i32> {
         }
     }
     Ok(ENOENT)
+}
+
+/// `abs`, a path a file server holds, its last name's links followed as
+/// POSIX reads a relative one, against the link's own directory, or the errno
+/// it is refused with. `read_link` answers a link's target, `None` for a name
+/// that is no link; `exists` refuses a path that names nothing. The server
+/// resolves the names before the last itself, and they stay as written.
+pub(crate) fn resolve_served(
+    abs: &[u8],
+    mut read_link: impl FnMut(&[u8]) -> Result<Option<Vec<u8>>, i32>,
+    mut exists: impl FnMut(&[u8]) -> Result<(), i32>,
+) -> Result<Vec<u8>, i32> {
+    let mut at = joined(b"/", abs)?;
+    for _ in 0..=MAX_LINKS {
+        let Some(target) = read_link(&at)? else {
+            exists(&at)?;
+            return Ok(at);
+        };
+        let dir = at.rsplitn(2, |&b| b == b'/').nth(1).filter(|d| !d.is_empty()).unwrap_or(b"/");
+        at = joined(dir, &target)?;
+    }
+    Err(ELOOP)
 }

@@ -63,6 +63,72 @@ pub fn on_open_fd<T>(
     })
 }
 
+/// A file server's refusal, or the client end's own, as std says it.
+pub fn served_error(e: toyos::fs::Error) -> crate::io::Error {
+    use crate::io::{self, ErrorKind as Kind};
+    use toyos::fs::Error;
+    match e {
+        Error::NotFound => io::const_error!(Kind::NotFound, "no such file or directory"),
+        Error::AlreadyExists => io::const_error!(Kind::AlreadyExists, "it already exists"),
+        Error::NotADirectory => io::const_error!(Kind::NotADirectory, "not a directory"),
+        Error::IsADirectory => io::const_error!(Kind::IsADirectory, "is a directory"),
+        Error::NotEmpty => io::const_error!(Kind::DirectoryNotEmpty, "the directory is not empty"),
+        Error::NotALink => io::const_error!(Kind::InvalidInput, "not a symbolic link"),
+        Error::NameTooLong => io::const_error!(Kind::InvalidFilename, "the name or path is too long"),
+        Error::InvalidName => io::const_error!(Kind::InvalidFilename, "the volume cannot store that name"),
+        Error::ReadOnly => io::const_error!(Kind::PermissionDenied, "the directory is read-only to this process"),
+        Error::NotOpenForWriting => io::const_error!(Kind::PermissionDenied, "the file is not open for writing"),
+        Error::Root => io::const_error!(Kind::ResourceBusy, "a directory the file server serves stays where it is"),
+        Error::Escapes => io::const_error!(Kind::PermissionDenied, "a link leads out of the directory"),
+        Error::CrossesDirectories => {
+            io::const_error!(Kind::CrossesDevices, "a link leads to another directory capability")
+        }
+        Error::Loop => io::const_error!(Kind::FilesystemLoop, "too many symbolic links"),
+        Error::IntoItself => io::const_error!(Kind::InvalidInput, "a directory cannot move beneath itself"),
+        Error::NoSpace => io::const_error!(Kind::StorageFull, "the volume is full"),
+        Error::FileTooLarge => io::const_error!(Kind::FileTooLarge, "the file would be too large"),
+        Error::LimitExceeded => io::const_error!(Kind::QuotaExceeded, "past a bound the file server keeps"),
+        Error::TooManyOpen => io::const_error!(Kind::QuotaExceeded, "too many files open on the file server"),
+        Error::TooManyConnections => {
+            io::const_error!(Kind::QuotaExceeded, "the file server serves as many connections as it takes")
+        }
+        Error::TooManyStreams => {
+            io::const_error!(Kind::QuotaExceeded, "the file server serves as many streams as it takes")
+        }
+        Error::Io => io::const_error!(Kind::Other, "the volume's device failed, or its structures do not decode"),
+        Error::Stale => io::const_error!(
+            Kind::StaleNetworkFileHandle,
+            "the file was removed, or its file server restarted, since it was opened",
+        ),
+        Error::UnknownFile => io::const_error!(Kind::InvalidInput, "the file server holds no such open file"),
+        Error::InvalidPath => io::const_error!(Kind::InvalidInput, "the path is not one the file server takes"),
+        Error::InvalidRequest => io::const_error!(Kind::InvalidInput, "the file server takes no such request"),
+        Error::Unsupported => io::const_error!(Kind::Unsupported, "the volume's format has no such thing"),
+        Error::OutOfResources => io::const_error!(Kind::OutOfMemory, "the kernel had no room for the request"),
+        Error::NoDirectory => io::const_error!(Kind::NotADirectory, "the connection was given files and no directory"),
+        Error::Gone => io::const_error!(Kind::StaleNetworkFileHandle, "the file server is gone"),
+        Error::NotHeld => io::const_error!(Kind::NotFound, "this process holds no such directory"),
+        Error::Malformed => io::const_error!(Kind::InvalidData, "the file server answered outside its protocol"),
+    }
+}
+
+/// `toyos::files`' refusal, as std says it.
+pub fn files_error(e: toyos::files::Error) -> crate::io::Error {
+    use crate::io;
+    use toyos::files;
+    match e {
+        files::Error::Kernel(e) => to_io_error(e),
+        files::Error::Served(e) => served_error(e),
+        files::Error::Fd(e) => fd_error(e),
+        files::Error::NotUtf8 => io::const_error!(io::ErrorKind::InvalidInput, "path is not UTF-8"),
+        files::Error::Loop => io::const_error!(io::ErrorKind::FilesystemLoop, "too many symbolic links"),
+        files::Error::CrossesServers => {
+            io::const_error!(io::ErrorKind::CrossesDevices, "the two paths are on different servers")
+        }
+        files::Error::NotAFile => io::const_error!(io::ErrorKind::InvalidInput, "the descriptor names no file"),
+    }
+}
+
 /// Why nothing was spawned, as std's error.
 pub fn refused(refused: toyos::spawn::Refused) -> crate::io::Error {
     use toyos::spawn::Refused;

@@ -284,7 +284,7 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
             Ok(Some((handle, !inheritable)))
         },
         actions,
-        |path, oflag, mode| crate::posix_io::open_handle(path, oflag, mode).map(|h| h.0).map_err(crate::errcode::of),
+        |path, oflag, mode| crate::posix_io::open_handle(path, oflag, mode).map(|h| h.0),
         |handle| syscall::close(RawHandle(handle)),
     )?;
     let started = start(path, argv, env, &plan.fds);

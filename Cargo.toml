@@ -85,7 +85,6 @@ members = [
     "sdk/icon",
     "sdk/keymap",
     "sdk/libc/arch",
-    "sdk/std/copies",
     "sdk/osrelease",
     "sdk/toyos",
     "sdk/window",
