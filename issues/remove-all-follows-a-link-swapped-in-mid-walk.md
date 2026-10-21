@@ -18,8 +18,8 @@ holds a descriptor for each directory and resolves every name against it
 `AT_REMOVEDIR`), and ToyOS has no such descriptor: `open` refuses every
 directory, and the kernel resolves every path from the root.
 
-Owner: `issues/toyos-builds-itself.md`, M2, whose clang brought
-`std::filesystem` in.
+Owner: `issues/toyos-builds-itself.md`, beside its path, since no exit there
+needs it; its M2 clang brought `std::filesystem` in.
 
 **Exit**: a directory opens as a handle that the kernel resolves names
 against, libc defines `openat`, `fdopendir` and `unlinkat` over it, and
