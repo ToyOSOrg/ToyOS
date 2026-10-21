@@ -16,8 +16,7 @@ entry and every dirty block of the cache (`system/fileserver/src/main.rs`,
 std's ToyOS `File::flush` is a no-op, as it is on every other platform: a
 `File` buffers nothing, since each `write` is the server's when it answers
 (`toyos::files`), so a flush has nothing to hand on and `Write::flush` asks
-for no durability. It used to be `fsync`, which made every `BufWriter` flush
-sync the volume.
+for no durability.
 
 **Exit**: `FSYNC` makes durable the file it names and what that file's entry
 depends on, with a guest measurement of one file's fsync beside the volume's.

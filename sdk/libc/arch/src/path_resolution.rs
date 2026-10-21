@@ -198,14 +198,16 @@ fn path_max_is_limits_h_s() {
     assert_eq!(MAX_PATH, header::int(LIMITS_H, "PATH_MAX") as usize);
 }
 
-/// A file server holding `/home`, its names in `home`, beside the kernel's
-/// [`tree`]: as `toyos::files` answers, a name is its link's target or
-/// nothing, one that is not there `ENOENT`, and one through a file `ENOTDIR`.
-struct Home(Tree);
+/// A file server holding the capability `grant`, its names in the tree,
+/// beside the kernel's [`tree`]: as `toyos::files` answers, a name is its
+/// link's target or nothing, one that is not there `ENOENT`, and one through
+/// a file `ENOTDIR`.
+struct Home(Tree, &'static str);
 
 impl Served for Home {
     fn holds(&mut self, at: &[u8]) -> bool {
-        at == b"/home" || at.starts_with(b"/home/")
+        let grant = self.1.as_bytes();
+        at == grant || (at.starts_with(grant) && at.get(grant.len()) == Some(&b'/'))
     }
 
     fn name(&mut self, at: &[u8]) -> Result<Name, i32> {
@@ -216,7 +218,7 @@ impl Served for Home {
         match self.0.at(at) {
             Some(Node::Link(target)) => Ok(Name::Link(target.as_bytes().to_vec())),
             Some(_) => Ok(Name::Other),
-            None if at == b"/home" => Ok(Name::Other),
+            None if at == self.1.as_bytes() => Ok(Name::Other),
             None => Err(ENOENT),
         }
     }
@@ -238,7 +240,7 @@ fn home() -> Home {
         ("/home/u/x", Node::Link("y")),
         ("/home/u/y", Node::Link("x")),
         ("/home/u/dangling", Node::Link("gone")),
-    ]))
+    ]), "/home")
 }
 
 fn mixed(cwd: &str, path: &str) -> Result<String, i32> {
@@ -279,4 +281,29 @@ fn a_served_loop_is_eloop_and_a_missing_name_enoent_or_enotdir() {
     assert_eq!(mixed("/", "/home/u/dangling"), Err(ENOENT));
     assert_eq!(mixed("/", "/home/u/a/file/g"), Err(ENOTDIR));
     assert_eq!(mixed("/", "/"), Ok("/".into()));
+}
+
+/// A capability three names deep, `fs:/home/toy/Games` without `fs:/home`, as
+/// a folder grant gives one: the names above it are passed through as the
+/// client routes past them, and a path beside it is the kernel's.
+#[test]
+fn a_path_under_a_deeper_capability_is_walked_and_one_beside_it_is_the_kernels() {
+    let games = || {
+        Home(
+            Tree::new(&[
+                ("/home/toy/Games/save", Node::File),
+                ("/home/toy/Games/rom", Node::Link("roms/a.gba")),
+                ("/home/toy/Games/roms", Node::Dir),
+                ("/home/toy/Games/roms/a.gba", Node::File),
+            ]),
+            "/home/toy/Games",
+        )
+    };
+    let answer = |path: &str| {
+        resolve_path(b"/", path.as_bytes(), &mut games(), &mut tree()).map(|at| String::from_utf8(at).unwrap())
+    };
+    assert_eq!(answer("/home/toy/Games/save"), Ok("/home/toy/Games/save".into()));
+    assert_eq!(answer("/home/toy/Games/rom"), Ok("/home/toy/Games/roms/a.gba".into()));
+    assert_eq!(answer("/home/toy/./Games/../Games/save"), Ok("/home/toy/Games/save".into()));
+    assert_eq!(answer("/home/toy/Other"), Err(ENOENT), "beside the capability: the kernel's, which holds nothing there");
 }

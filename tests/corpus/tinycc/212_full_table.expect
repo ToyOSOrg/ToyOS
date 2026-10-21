@@ -1,5 +1,6 @@
-the table filled with EMFILE: yes
+duplicates filled the table with EMFILE: yes
 an open on /tmp is EMFILE: yes
 an open on /home is EMFILE: yes
 with one free, /home opens: yes
+kernel handles ran out first with ENOMEM: yes
 both are removed: yes

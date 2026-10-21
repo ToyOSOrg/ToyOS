@@ -29,8 +29,10 @@ use toyos_abi::RawHandle;
 pub type Fd = i32;
 
 /// Descriptors and objects one table holds: as many as the kernel holds
-/// handles for one process.
-pub const MAX_FDS: usize = 4096;
+/// handles for one process. The process's own handles take some of those, so
+/// descriptors that are kernel handles meet the kernel's limit first, and
+/// only descriptors that share an object or name none meet this one.
+pub const MAX_FDS: usize = toyos_abi::RawHandle::MAX_SLOTS;
 
 /// Why a table call was refused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

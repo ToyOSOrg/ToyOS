@@ -135,7 +135,8 @@ pub(crate) enum Name {
 /// The two calls [`resolve_path`] asks of the file servers, each of an
 /// absolute path without `.` or `..`.
 pub(crate) trait Served {
-    /// Whether a file server holds `at`, and not the kernel.
+    /// Whether a file server holds `at`, and not the kernel: by the deepest
+    /// capability `at` is under, which may be several names below its first.
     fn holds(&mut self, at: &[u8]) -> bool;
     /// `at` itself, or the errno it is refused with: one that names nothing,
     /// or passes through a file, is refused.
@@ -145,9 +146,9 @@ pub(crate) trait Served {
 /// `path` made absolute against `cwd` and resolved as POSIX resolves it, a
 /// name at a time, while a file server holds the names: each link is
 /// followed where it is met, a relative one against its own directory, and
-/// `..` after it is the parent of where it led. At the first name the kernel
-/// holds, the rest is [`resolve`]d by the kernel's rules, which its `open`
-/// reads it by. The answer holds no link a file server keeps.
+/// `..` after it is the parent of where it led. Once the path as it stands
+/// is the kernel's, it is [`resolve`]d by the kernel's rules, which its
+/// `open` reads it by. The answer holds no link a file server keeps.
 pub(crate) fn resolve_path(cwd: &[u8], path: &[u8], served: &mut impl Served, kernel: &mut impl Kernel) -> Result<Vec<u8>, i32> {
     if path.is_empty() {
         return Err(ENOENT);
@@ -176,12 +177,21 @@ pub(crate) fn resolve_path(cwd: &[u8], path: &[u8], served: &mut impl Served, ke
         if next.len() >= MAX_PATH {
             return Err(ENAMETOOLONG);
         }
+        let mut full = next.clone();
+        for rest in &pending {
+            full.push(b'/');
+            full.extend_from_slice(rest);
+        }
+        // Asked of the path as it reads, `.` and `..` taken off its text: a
+        // link met further on is asked again where it leads.
+        if !served.holds(&joined(b"/", &full)?) {
+            return resolve(b"/", &full, kernel);
+        }
+        // A name above the capability that holds the path, which the client
+        // routes past and no server holds: a directory, as its routing reads it.
         if !served.holds(&next) {
-            for rest in pending {
-                next.push(b'/');
-                next.extend_from_slice(&rest);
-            }
-            return resolve(b"/", &next, kernel);
+            at = next;
+            continue;
         }
         match served.name(&next)? {
             Name::Other => at = next,

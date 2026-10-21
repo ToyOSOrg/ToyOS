@@ -367,7 +367,12 @@ unsafe extern "C" fn toyos_fs_rename(from: *const u8, from_len: usize, to: *cons
         let cwd = cwd();
         let (from, to) = (super::absolute(&cwd, utf8(from)?), super::absolute(&cwd, utf8(to)?));
         match (route(&from)?, route(&to)?) {
-            (Route::Kernel(a), Route::Kernel(b)) => syscall::rename(a.as_bytes(), b.as_bytes()).map_err(Error::Kernel),
+            // The kernel refuses a rename between its own mounts as
+            // unsupported, which is a rename across servers as POSIX reads it.
+            (Route::Kernel(a), Route::Kernel(b)) => syscall::rename(a.as_bytes(), b.as_bytes()).map_err(|e| match e {
+                SyscallError::NotSupported => Error::CrossesServers,
+                e => Error::Kernel(e),
+            }),
             (Route::Served(ca, a), Route::Served(cb, b)) if Arc::ptr_eq(&ca, &cb) => {
                 ca.dir.lock().rename(&a, &b).map_err(|refused| match refused {
                     Refused::Error(e) => Error::Served(e),
