@@ -24,7 +24,7 @@ toyos-net-shard = { path = "shard" }
 toyos-net-tcp = { path = "shard/tcp" }
 toyos-net-udp = { path = "udp" }
 toyos-net-wire = { path = "wire" }
-toyos-transport = { path = "../../lib/blockring/transport" }
+toyos-transport = { path = "../../sdk/transport" }
 
 [dev-dependencies]
 toyos-pci-claim = { path = "../../lib/pci-claim", features = ["host-grant"] }

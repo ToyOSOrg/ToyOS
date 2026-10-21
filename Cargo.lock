@@ -1977,7 +1977,6 @@ dependencies = [
  "toyos-symbols",
  "toyos-tco",
  "toyos-tsc",
- "toyos-untrusted",
  "toyos-userbound",
  "toyos-wallclock",
 ]
@@ -4454,6 +4453,7 @@ dependencies = [
  "chacha20 0.9.1",
  "chacha20poly1305",
  "ed25519-dalek 2.2.0",
+ "fiat-crypto 0.3.0",
  "ml-kem",
  "num-bigint",
  "p256 0.13.2",
@@ -4608,6 +4608,7 @@ version = "0.1.0"
 name = "toyos-libc-copies"
 version = "0.1.0"
 dependencies = [
+ "toyos",
  "toyos-abi",
  "toyos-elf",
 ]
@@ -4877,19 +4878,11 @@ version = "0.1.0"
 dependencies = [
  "loom",
  "rustc-std-workspace-core",
- "toyos-untrusted",
 ]
 
 [[package]]
 name = "toyos-tsc"
 version = "0.1.0"
-
-[[package]]
-name = "toyos-untrusted"
-version = "0.1.0"
-dependencies = [
- "rustc-std-workspace-core",
-]
 
 [[package]]
 name = "toyos-update"
@@ -4922,9 +4915,6 @@ dependencies = [
 [[package]]
 name = "toyos-vdagent"
 version = "0.1.0"
-dependencies = [
- "toyos-untrusted",
-]
 
 [[package]]
 name = "toyos-vdagent-bridge"
@@ -4938,7 +4928,6 @@ name = "toyos-virtio"
 version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
- "toyos-untrusted",
 ]
 
 [[package]]

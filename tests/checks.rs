@@ -1000,6 +1000,11 @@ mod checks {
     }
 
     #[test]
+    fn metal_exit_record_without_a_code_answers_no_code() {
+        metal_checks::an_exit_record_without_a_code_answers_no_code();
+    }
+
+    #[test]
     fn metal_failing_shared_member_fails_itself_alone() {
         metal_checks::a_failing_shared_member_fails_itself_alone();
     }

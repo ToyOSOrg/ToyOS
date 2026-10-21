@@ -66,6 +66,9 @@ mod sigmask;
 #[path = "../../src/sockopt.rs"]
 mod sockopt;
 #[cfg(test)]
+#[path = "../../src/spawnreq.rs"]
+mod spawnreq;
+#[cfg(test)]
 #[path = "../../src/strtonum.rs"]
 mod strtonum;
 #[cfg(test)]
@@ -113,6 +116,8 @@ mod prototypes;
 mod signal_masks;
 #[cfg(test)]
 mod socket_options;
+#[cfg(test)]
+mod spawn_requests;
 #[cfg(test)]
 mod strtonum_differential;
 #[cfg(test)]

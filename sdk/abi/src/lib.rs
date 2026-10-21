@@ -20,6 +20,7 @@ pub mod audio;
 pub mod boot;
 pub mod clock;
 pub mod counters;
+pub mod end;
 pub mod handle;
 pub mod inbox;
 pub mod input;

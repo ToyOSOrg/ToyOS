@@ -41,6 +41,8 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
                     told to the jobs that build (ci.yml)
   seal              `host` from a cold tree, then that tree sealed as the host
                     cache's entry, which the step after it saves (nightly)
+  stored            that entry as the repository's cache list says it stores,
+                    held to the repository's limit beside main's toolchain (nightly)
   toolchain         the cache entry of each store of this tree's toolchain
   bootstrap         build the stores of this tree's toolchain its job did not restore
   image             the shipped image of every architecture, on the sysroot its
@@ -53,6 +55,7 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
 enum Job {
     Host,
     Seal,
+    Stored,
     Scope,
     Toolchain,
     Bootstrap,
@@ -66,6 +69,7 @@ fn parse(words: &[String]) -> Result<Job, String> {
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
         Some("seal") => Job::Seal,
+        Some("stored") => Job::Stored,
         Some("scope") => Job::Scope,
         Some("toolchain") => Job::Toolchain,
         Some("bootstrap") => Job::Bootstrap,
@@ -91,6 +95,7 @@ pub fn dispatch(root: &Path, args: &[String]) {
     let steps = match &job {
         Job::Host => host(root, scope(root)),
         Job::Seal => seal(root),
+        Job::Stored => vec![step("the host cache's entry, as stored", cicache::stored)],
         Job::Scope => vec![step("the change's scope", || tell_scope(scope(root)))],
         Job::Toolchain => vec![step("the stores of this tree's toolchain", || release::toolchain(root))],
         Job::Bootstrap => vec![step("this tree's toolchain", || release::bootstrap(root))],
@@ -1667,6 +1672,7 @@ mod tests {
     fn a_job_is_named_and_takes_nothing_after_it() {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
         assert_eq!(parse(&words("seal")), Ok(Job::Seal));
+        assert_eq!(parse(&words("stored")), Ok(Job::Stored));
         assert_eq!(parse(&words("scope")), Ok(Job::Scope));
         assert_eq!(parse(&words("image")), Ok(Job::Image));
         assert_eq!(parse(&words("guest")), Ok(Job::Guest));

@@ -1,0 +1,19 @@
+# The boot `a_launch_gives_each_unsent_stdio_slot_a_null` runs
+# `launch_unsent_stdio` on: test-runner's row starts `toybox`, so every job
+# holds a launcher, and `cat` and `echo` are links to it, so a spawn of
+# either is a launch.
+[boot]
+start = ["logkeeper", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.test-runner]
+starts = ["toybox"]
+
+[programs.toybox]
+
+[symlinks]
+"bin/cat" = "/system/bin/toybox"
+"bin/echo" = "/system/bin/toybox"

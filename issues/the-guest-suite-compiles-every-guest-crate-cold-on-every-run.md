@@ -58,8 +58,9 @@ not measured since:
 
 What stands in the way:
 
-- The repository's caches are past GitHub's 10 GB and no gate reads a stored
-  size (`issues/the-host-caches-limit-reaches-the-10-gb-only-through-one-measured-ratio.md`).
+- The repository's 10 GB is held to twice the host entry and main's toolchain
+  layers (`build/cicache.rs`'s `budget`), which counts no guest entry: one
+  needs its share there.
 - Only main's scope is read by every ref, so the writer is a run on main, and
   no pull request can show the saving before the writer has landed.
 - A restored target is trusted by content or not at all: `build/cicache.rs` is

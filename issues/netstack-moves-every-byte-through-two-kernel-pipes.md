@@ -52,7 +52,7 @@ The design and its roast are PR #863's body.
   `DeviceMemory`, and a receiver judges a lent region through `fstat` before
   it maps it.
 - Stage 2, done (PR #878): a byte ring with untrusted cursors and want words
-  in `toyos-transport` (`lib/blockring/transport`), host-tested and modelled
+  in `toyos-transport` (`sdk/transport`), host-tested and modelled
   in loom.
 - Stage 3, done (PR #905): a TCP stream, connected or accepted, is one
   region whose two rings are [tcp]'s buffers and the connection it was opened

@@ -97,7 +97,7 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         unsafe { copy_nonoverlapping(src.as_ptr(), self.base.add(offset), src.len()) }
     }
 
-    // Panics, not `Result`: every offset/length here is the driver's own arithmetic, never a device-chosen number (those arrive as `Untrusted` and are bounded before becoming an offset).
+    // Panics, not `Result`: every offset/length here is the driver's own arithmetic, never a device-chosen number (those are bounded at their decode before becoming an offset).
     #[inline]
     fn check(self, offset: usize, len: usize) {
         if let Err(why) = toyos_dma::within(offset, len, self.size) {

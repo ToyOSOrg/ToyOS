@@ -24,6 +24,7 @@ use super::percpu::{self, CpuFaultState};
 use super::{cpu, irqchip};
 use crate::irq_census::Source;
 use crate::{alert, log};
+use toyos_abi::end::Fault;
 
 /// The interrupted context, as the entry stores it: `x0`–`x30`, the stack
 /// pointer before the exception, then the four system registers that say
@@ -348,7 +349,22 @@ fn user_fatal(frame: &Frame) -> ! {
     user_report(frame);
     percpu::set_fault_state(CpuFaultState::Normal);
     crate::panic::forget();
-    crate::syscall::kill_process(-1);
+    crate::syscall::fault_process(fault_of(frame.esr));
+}
+
+/// The `<signal.h>` class an EL0 exception nothing serves ends its process as,
+/// by `ESR_EL1`'s class (Arm ARM K.a, D24.2.40) and, for a data abort, its
+/// `DFSC`; every other class is an instruction it would not run.
+fn fault_of(esr: u64) -> Fault {
+    const DFSC_ALIGNMENT: u64 = 0b10_0001;
+    match esr >> 26 {
+        EC_DABT_LOWER if esr & 0x3F == DFSC_ALIGNMENT => Fault::Alignment,
+        EC_IABT_LOWER | EC_DABT_LOWER => Fault::Memory,
+        0x22 | 0x26 => Fault::Alignment,
+        0x2C => Fault::Arithmetic,
+        0x30 | 0x32 | 0x34 | 0x3C => Fault::Trap,
+        _ => Fault::Instruction,
+    }
 }
 
 /// What a fault from EL0 says about the thread: the signal it would be

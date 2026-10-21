@@ -25,7 +25,7 @@
 use alloc::vec::Vec;
 
 use crate::proclife::table::{Lifecycle, Processes};
-use crate::proclife::{teardown, Pid, Tid};
+use crate::proclife::{teardown, End, Pid, Tid};
 
 /// How far below the supervisor a process may be. Bounds the climb one teardown can
 /// owe.
@@ -123,13 +123,13 @@ pub fn admit_child<T: Processes>(table: &mut T, place: Option<Pid>) -> Admit {
 
 /// Land the admitted child, in one hold: `insert` puts its entry in the table
 /// at its pid with the node it is handed. A child whose place was claimed since
-/// the admission is claimed for `code` before the hold ends, and the threads
+/// the admission is claimed for `end` before the hold ends, and the threads
 /// answered are its, for its spawner to retire: none for any other child.
 #[must_use = "a child claimed as it landed is its spawner's to retire"]
 pub fn land_child<T: Processes, R>(
     table: &mut T,
     admitted: Admitted,
-    code: i32,
+    end: End,
     insert: impl FnOnce(&mut T, Node) -> R,
 ) -> (R, Vec<Tid>) {
     let Admitted { place, depth, pid } = admitted;
@@ -150,7 +150,7 @@ pub fn land_child<T: Processes, R>(
         return (inserted, Vec::new());
     }
     assert!(
-        teardown::claim_teardown(table, pid, code),
+        teardown::claim_teardown(table, pid, end),
         "land_child: pid {pid}, inserted in this hold, was claimed by another",
     );
     // The mutation this feature stages: the child is claimed and nobody
@@ -174,12 +174,12 @@ pub fn refuse_child<T: Processes>(table: &mut T, admitted: Admitted) -> Option<P
     lower(table, admitted.place?)
 }
 
-/// Claim `pid` for `code` and owe its children to the walk, all in this one
+/// Claim `pid` for `end` and owe its children to the walk, all in this one
 /// hold. `false` for a process gone or claimed by another end, whose own walk
 /// owes its children.
 #[must_use = "a caller that did not win the claim must not retire anything"]
-pub fn claim<T: Processes>(table: &mut T, pid: Pid, code: i32, owed: &mut Vec<Pid>) -> bool {
-    if !teardown::claim_teardown(table, pid, code) {
+pub fn claim<T: Processes>(table: &mut T, pid: Pid, end: End, owed: &mut Vec<Pid>) -> bool {
+    if !teardown::claim_teardown(table, pid, end) {
         return false;
     }
     let proc = table.get(pid).expect("claim: the entry the claim just succeeded on");
@@ -253,7 +253,7 @@ mod tests {
         let mut world = World::new();
         let supervisor = world.spawn_process();
         let place = world.spawn_child(supervisor);
-        assert!(claim(&mut world, place, 137, &mut Vec::new()));
+        assert!(claim(&mut world, place, End::Killed, &mut Vec::new()));
         assert_eq!(admit_child(&mut world, Some(place)), Admit::Gone);
         assert_eq!(admit_child(&mut world, Some(Pid(99))), Admit::Gone);
     }
@@ -267,12 +267,12 @@ mod tests {
         let supervisor = world.spawn_process();
         let place = world.spawn_child(supervisor);
         let Admit::Yes(admitted) = admit_child(&mut world, Some(place)) else { panic!("admitted") };
-        assert!(claim(&mut world, place, 137, &mut Vec::new()));
+        assert!(claim(&mut world, place, End::Killed, &mut Vec::new()));
         assert_eq!(teardown_done(&mut world, place), None, "published with a child admitted under it");
         let child = admitted.pid();
-        let ((), retire) = land_child(&mut world, admitted, 137, |world, node| world.insert(child, node));
+        let ((), retire) = land_child(&mut world, admitted, End::Killed, |world, node| world.insert(child, node));
         assert_eq!(retire, [world.main_tid(child)], "the child's spawner was not answered its thread to retire");
-        assert_eq!(world.get(child).unwrap().teardown_code(), Some(137));
+        assert_eq!(world.get(child).unwrap().teardown_end(), Some(End::Killed));
         assert_eq!(teardown_done(&mut world, child), Some(Publish { pid: child, parent: Some(place) }));
         assert_eq!(published(&mut world, place, child), Some(Publish { pid: place, parent: Some(supervisor) }));
     }
@@ -284,11 +284,11 @@ mod tests {
         let mut world = World::new();
         let supervisor = world.spawn_process();
         let child = world.spawn_child(supervisor);
-        assert!(claim(&mut world, child, 0, &mut Vec::new()));
+        assert!(claim(&mut world, child, End::Exited(0), &mut Vec::new()));
         assert_eq!(teardown_done(&mut world, child), Some(Publish { pid: child, parent: Some(supervisor) }));
         assert_eq!(published(&mut world, supervisor, child), None);
         let mut owed = Vec::new();
-        assert!(claim(&mut world, supervisor, 137, &mut owed));
+        assert!(claim(&mut world, supervisor, End::Killed, &mut owed));
         assert_eq!(owed, [], "the supervisor's walk owes pid {child}, which was published");
     }
 
@@ -312,14 +312,14 @@ mod tests {
             assert_eq!(refuse_child(&mut world, again), None);
         }
         let Admit::Yes(lands) = admit_child(&mut world, Some(supervisor)) else { panic!("pid {last} was spent") };
-        let ((), retire) = land_child(&mut world, lands, 137, |world, node| world.insert(last, node));
+        let ((), retire) = land_child(&mut world, lands, End::Killed, |world, node| world.insert(last, node));
         assert_eq!(retire, []);
         assert_eq!(admit_child(&mut world, Some(supervisor)), Admit::NoPid);
         assert_eq!(admit_child(&mut world, None), Admit::NoPid);
         // The supervisor's own hold and its child's are all that hold it.
-        assert!(claim(&mut world, last, 0, &mut Vec::new()));
+        assert!(claim(&mut world, last, End::Exited(0), &mut Vec::new()));
         assert_eq!(teardown_done(&mut world, last), Some(Publish { pid: last, parent: Some(supervisor) }));
-        assert!(claim(&mut world, supervisor, 0, &mut Vec::new()));
+        assert!(claim(&mut world, supervisor, End::Exited(0), &mut Vec::new()));
         assert_eq!(teardown_done(&mut world, supervisor), None);
         assert_eq!(published(&mut world, supervisor, last), Some(Publish { pid: supervisor, parent: None }));
     }

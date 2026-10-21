@@ -88,6 +88,13 @@ impl IdtEntry {
         }
     }
 
+    /// DPL 3: what `INT n` from Ring 3 may name (SDM Vol. 3A §6.12.1.1);
+    /// any other gate it names raises `#GP` instead.
+    fn reachable_from_ring3(mut self) -> Self {
+        self.type_attr = 0xEE; // interrupt gate, DPL=3, present
+        self
+    }
+
     fn with_ist(mut self, ist_index: u8) -> Self {
         self.ist = ist_index;
         self
@@ -426,6 +433,13 @@ pub fn init() {
     disable_pic();
 
     install_gates(&mut IDT.lock());
+    // `INT3` from Ring 3 arrives as the `#BP` it is, and ends its process as a
+    // trap, as `BRK` does on AArch64.
+    {
+        let mut idt = IDT.lock();
+        let breakpoint = &mut idt.entries[Vector::Breakpoint as usize];
+        *breakpoint = breakpoint.reachable_from_ring3();
+    }
     user_dev::install(&mut IDT.lock());
     // Every slot no row filled: delivery through a P = 0 gate is a
     // contributory fault, and the machine would halt as #DF with no name.

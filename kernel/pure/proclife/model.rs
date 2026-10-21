@@ -16,13 +16,13 @@ use alloc::vec::Vec;
 use crate::proclife::table::{Lifecycle, Processes};
 use crate::proclife::teardown::{self, Leave};
 use crate::proclife::tree::{self, Admit, Publish};
-use crate::proclife::{Node, Pid, Pids, ThreadLocation, Tid, Watch};
+use crate::proclife::{End, Node, Pid, Pids, ThreadLocation, Tid, Watch};
 
 /// One process, as its lifecycle sees it.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct ModelProc {
     main_tid: Tid,
-    teardown_code: Option<i32>,
+    teardown_end: Option<End>,
     threads: BTreeMap<Tid, ThreadLocation>,
     next_tid: Tid,
     /// How many times a claim was raised on this process. Counted here because
@@ -35,11 +35,11 @@ impl Lifecycle for ModelProc {
     fn main_tid(&self) -> Tid {
         self.main_tid
     }
-    fn teardown_code(&self) -> Option<i32> {
-        self.teardown_code
+    fn teardown_end(&self) -> Option<End> {
+        self.teardown_end
     }
-    fn begin_teardown(&mut self, code: i32) {
-        self.teardown_code = Some(code);
+    fn begin_teardown(&mut self, end: End) {
+        self.teardown_end = Some(end);
         self.claims += 1;
     }
     fn location(&self, tid: Tid) -> Option<ThreadLocation> {
@@ -75,10 +75,10 @@ enum Out {
     /// `process::leave`'s table section.
     Leave,
     /// The last one out: `teardown_resources`, the process's mappings and handles.
-    Free { code: i32, mark: i32 },
+    Free { end: End, mark: i32 },
     /// The last one out: `teardown`'s last table section, which marks it dead,
     /// stashes its exit and lets its own hold on its publication go.
-    Mark { code: i32, mark: i32 },
+    Mark { end: End, mark: i32 },
     /// A publication that hold owed, and the climb behind it.
     Climb(Climb),
     /// `thread_exit`'s post on its own watch.
@@ -109,7 +109,7 @@ pub struct World {
     pids: Pids,
     /// The exit each process published, which is what `published_exit` reads —
     /// on the object in the kernel, and never on the entry.
-    published: BTreeMap<Pid, i32>,
+    published: BTreeMap<Pid, End>,
     /// Waiters: the subject armed on, and the thread that armed.
     waiters: BTreeSet<(Watch, Pid, Tid)>,
     /// Waiters a post has released.
@@ -132,7 +132,7 @@ pub struct World {
     next_tls: u32,
     /// Exits torn down and not yet published: the kernel keeps each on its
     /// entry until its count lets it go.
-    stash: BTreeMap<Pid, i32>,
+    stash: BTreeMap<Pid, End>,
     /// Processes that landed unclaimed under a place whose end was already
     /// claimed.
     landed_under_claimed: BTreeSet<Pid>,
@@ -246,7 +246,7 @@ impl World {
             self.mint(pid, place);
         }
         self.mint(pid, pid);
-        let ((), retire) = tree::land_child(self, admitted, 137, |world, node| world.insert(pid, node));
+        let ((), retire) = tree::land_child(self, admitted, End::Killed, |world, node| world.insert(pid, node));
         assert_eq!(retire, [], "World::land: {place:?} was claimed");
         pid
     }
@@ -319,7 +319,7 @@ impl World {
             pid,
             ModelProc {
                 main_tid: Tid(0),
-                teardown_code: None,
+                teardown_end: None,
                 threads,
                 next_tid: Tid(1),
                 claims: 0,
@@ -441,18 +441,18 @@ impl World {
         let chosen = departure.chosen;
         let next = match departure.at {
             Out::Leave => match teardown::leave(self, pid, tid, chosen) {
-                Leave::Last { code, mark } => Out::Free { code, mark },
+                Leave::Last { end, mark } => Out::Free { end, mark },
                 Leave::NotLast => Out::Post,
             },
-            Out::Free { code, mark } => {
+            Out::Free { end, mark } => {
                 *self.frees.entry(pid).or_insert(0) += 1;
                 self.mapped.retain(|&(p, _)| p != pid);
                 self.close_table(pid);
-                Out::Mark { code, mark }
+                Out::Mark { end, mark }
             }
-            Out::Mark { code, mark } => {
+            Out::Mark { end, mark } => {
                 teardown::torn_down(self, pid, tid, mark);
-                self.stash.insert(pid, code);
+                self.stash.insert(pid, end);
                 match tree::teardown_done(self, pid) {
                     Some(publish) => Out::Climb(Climb::Publish(publish)),
                     None => Out::Post,
@@ -490,11 +490,11 @@ impl World {
     pub fn climb_step(&mut self, climb: Climb) -> Option<Climb> {
         match climb {
             Climb::Publish(publish) => {
-                let code = self
+                let end = self
                     .stash
                     .remove(&publish.pid)
                     .expect("a publication takes the exit its teardown stashed");
-                self.publish_exit(publish.pid, code);
+                self.publish_exit(publish.pid, end);
                 publish.parent.map(|parent| Climb::Lower { parent, child: publish.pid })
             }
             Climb::Lower { parent, child } => tree::published(self, parent, child).map(Climb::Publish),
@@ -503,15 +503,15 @@ impl World {
 
     /// `ProcessObject::publish_exit`, assertion and all: two publishes mean two
     /// teardowns claimed one process.
-    pub fn publish_exit(&mut self, pid: Pid, code: i32) {
+    pub fn publish_exit(&mut self, pid: Pid, end: End) {
         assert!(
-            self.published.insert(pid, code).is_none(),
+            self.published.insert(pid, end).is_none(),
             "pid {pid} published two exits",
         );
         self.post(Watch::Process(pid));
     }
 
-    pub fn published(&self, pid: Pid) -> Option<i32> {
+    pub fn published(&self, pid: Pid) -> Option<End> {
         self.published.get(&pid).copied()
     }
 

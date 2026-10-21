@@ -695,3 +695,21 @@ pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
     let why = read(stated, " 9.876", "11.665", "").expect_err("a complete boot with no supervisor line");
     assert!(why.contains("no timed supervisor line saying so"), "{why}");
 }
+
+/// **A job's own end with no code is no code**: its lowest-pid record is the
+/// job's, and a kill or a fault there answers an error naming it, never a
+/// child's exit code read in its place.
+pub fn an_exit_record_without_a_code_answers_no_code() {
+    let job = "test_rs_a_killed_job";
+    let kernel = |end: &str| {
+        format!(
+            "{BOOTED}[2026-09-29 18:22:41  2.310 cpu3 kernel] exit: {job} pid=12 {end} cpu=4ms\n\
+             [2026-09-29 18:22:42  3.120 cpu5 kernel] exit: {job} pid=13 code=0 cpu=9ms\n"
+        )
+    };
+    assert_eq!(planted(PANEL, &kernel("code=3")).exit_code(job), Ok(3));
+    for end in ["killed", "fault=memory"] {
+        let answer = planted(PANEL, &kernel(end)).exit_code(job);
+        assert!(answer.as_ref().is_err_and(|why| why.contains(end)), "{end}: {answer:?}");
+    }
+}

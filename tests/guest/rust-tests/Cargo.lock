@@ -1002,20 +1002,12 @@ dependencies = [
 [[package]]
 name = "toyos-transport"
 version = "0.1.0"
-dependencies = [
- "toyos-untrusted",
-]
-
-[[package]]
-name = "toyos-untrusted"
-version = "0.1.0"
 
 [[package]]
 name = "toyos-virtio"
 version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
- "toyos-untrusted",
 ]
 
 [[package]]

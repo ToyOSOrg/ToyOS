@@ -4,7 +4,7 @@
 //! **Exactly one path claims a process.** Two of them can arrive at once — a
 //! `SYS_EXIT` on one of its threads and a `SYS_PROCESS_KILL` from a holder of a
 //! `Process` handle — and [`claim_teardown`] answers `true` to one of them. The
-//! claim fixes the exit code, and its winner posts a retire to every thread
+//! claim fixes the end, and its winner posts a retire to every thread
 //! still in the process ([`retire_set`]) and waits on none of them: a kill's
 //! victim may be killing the killer.
 //!
@@ -18,15 +18,15 @@
 use alloc::vec::Vec;
 
 use crate::proclife::table::{Lifecycle, Processes};
-use crate::proclife::{Pid, ThreadLocation, Tid, Watch, TORN_DOWN_THREAD_CODE};
+use crate::proclife::{End, Pid, ThreadLocation, Tid, Watch, TORN_DOWN_THREAD_CODE};
 
-/// Claim exclusive teardown of a process, for `code`.
+/// Claim exclusive teardown of a process, for `end`.
 ///
 /// Exactly one exit or kill path wins; a later caller's thread simply
 /// leaves. `false` also covers a process that is not in the table at all,
 /// because there is nothing left for a second claimant to do either way.
 #[must_use = "a caller that did not win the claim must not retire anything"]
-pub fn claim_teardown<T: Processes>(table: &mut T, pid: Pid, code: i32) -> bool {
+pub fn claim_teardown<T: Processes>(table: &mut T, pid: Pid, end: End) -> bool {
     let Some(proc) = table.get_mut(pid) else { return false };
     // The mutation this feature stages is the whole of the exclusion: the flag
     // is still raised and still readable, and every arrival is still told it
@@ -35,7 +35,7 @@ pub fn claim_teardown<T: Processes>(table: &mut T, pid: Pid, code: i32) -> bool 
     if proc.tearing_down() {
         return false;
     }
-    proc.begin_teardown(code);
+    proc.begin_teardown(end);
     true
 }
 
@@ -60,13 +60,14 @@ pub enum Leave {
     /// It is emptying a claimed process: it tears the process down, and stays
     /// in the process until [`torn_down`] marks it dead with `mark`, so the
     /// machine's stop counts its teardown as running.
-    Last { code: i32, mark: i32 },
+    Last { end: End, mark: i32 },
     /// Some thread is still in the process, or nobody has claimed it.
     NotLast,
 }
 
-/// Take `tid` out of `pid`: dead with the code it chose, else its process's
-/// for the main thread and [`TORN_DOWN_THREAD_CODE`] for any other. The last
+/// Take `tid` out of `pid`: dead with the code it chose, else for the main
+/// thread its process's exit code, and [`TORN_DOWN_THREAD_CODE`] for any other
+/// thread and for a main thread whose process was killed or faulted. The last
 /// one out of a claimed process is not marked here: [`torn_down`] marks it.
 ///
 /// Panics for a thread that is not in its process's entry or has left already:
@@ -78,11 +79,12 @@ pub fn leave<T: Processes>(table: &mut T, pid: Pid, tid: Tid, chosen: Option<i32
         Some(ThreadLocation::Scheduled),
         "leave: pid {pid} tid {tid} is not a thread still in its process",
     );
-    let claimed = proc.teardown_code();
+    let claimed = proc.teardown_end();
     let mark = match chosen {
         Some(code) => code,
         None if tid == proc.main_tid() => {
-            claimed.expect("leave: a main thread leaves only a process somebody claimed")
+            let end = claimed.expect("leave: a main thread leaves only a process somebody claimed");
+            end.code().unwrap_or(TORN_DOWN_THREAD_CODE)
         }
         None => TORN_DOWN_THREAD_CODE,
     };
@@ -93,12 +95,12 @@ pub fn leave<T: Processes>(table: &mut T, pid: Pid, tid: Tid, chosen: Option<i32
     #[cfg(feature = "mutate-first-out-tears-down")]
     let others_in = false;
     match claimed {
-        Some(code) if !others_in => {
+        Some(end) if !others_in => {
             // The mutation this feature stages: the last one out is marked
             // dead before its teardown runs.
             #[cfg(feature = "mutate-last-out-leaves-before-its-teardown")]
             proc.set_location(tid, ThreadLocation::Zombie(mark));
-            Leave::Last { code, mark }
+            Leave::Last { end, mark }
         }
         _ => {
             proc.set_location(tid, ThreadLocation::Zombie(mark));
@@ -158,10 +160,10 @@ mod tests {
     fn exactly_one_claimant_wins_however_many_arrive() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        assert!(claim_teardown(&mut world, pid, 0));
-        assert!(!claim_teardown(&mut world, pid, 137));
-        assert!(!claim_teardown(&mut world, pid, 137));
-        assert_eq!(world.get(pid).unwrap().teardown_code(), Some(0), "the winner's code stands");
+        assert!(claim_teardown(&mut world, pid, End::Exited(0)));
+        assert!(!claim_teardown(&mut world, pid, End::Killed));
+        assert!(!claim_teardown(&mut world, pid, End::Killed));
+        assert_eq!(world.get(pid).unwrap().teardown_end(), Some(End::Exited(0)), "the winner's code stands");
     }
 
     /// Teeth for the control itself: under the mutation a second claimant
@@ -172,9 +174,9 @@ mod tests {
     fn the_mutation_really_grants_a_second_claim() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        assert!(claim_teardown(&mut world, pid, 0));
+        assert!(claim_teardown(&mut world, pid, End::Exited(0)));
         assert!(
-            claim_teardown(&mut world, pid, 137),
+            claim_teardown(&mut world, pid, End::Killed),
             "the control is inert: the claim is still exclusive, so whatever the \
              model reds on under it is not this mutation",
         );
@@ -183,7 +185,7 @@ mod tests {
     #[test]
     fn a_process_that_is_gone_grants_no_claim() {
         let mut world = World::new();
-        assert!(!claim_teardown(&mut world, Pid(9), 137));
+        assert!(!claim_teardown(&mut world, Pid(9), End::Killed));
     }
 
     #[test]
@@ -213,9 +215,9 @@ mod tests {
 
         // Unclaimed: a sibling's own exit, with its own code.
         assert_eq!(leave(&mut world, pid, t2, Some(5)), Leave::NotLast);
-        assert!(claim_teardown(&mut world, pid, 42));
+        assert!(claim_teardown(&mut world, pid, End::Exited(42)));
         assert_eq!(leave(&mut world, pid, main, None), Leave::NotLast);
-        assert_eq!(leave(&mut world, pid, t1, None), Leave::Last { code: 42, mark: TORN_DOWN_THREAD_CODE });
+        assert_eq!(leave(&mut world, pid, t1, None), Leave::Last { end: End::Exited(42), mark: TORN_DOWN_THREAD_CODE });
         assert_eq!(
             world.get(pid).unwrap().location(t1),
             Some(ThreadLocation::Scheduled),

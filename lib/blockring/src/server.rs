@@ -18,7 +18,6 @@
 use alloc::vec::Vec;
 
 use toyos_blockhold::{Holds, Writer};
-use toyos_transport::Untrusted;
 
 use crate::entry::{Completion, Op, Refused, Request, Status};
 use crate::layout::SQE_WORDS;
@@ -81,7 +80,7 @@ impl ServerSession {
     /// not let it make, are answered at once and never reach the device: the
     /// second would make one tag two requests, and the client could not tell
     /// which answer was whose.
-    pub fn take(&mut self, words: [Untrusted<u32>; SQE_WORDS]) -> Taken {
+    pub fn take(&mut self, words: [u32; SQE_WORDS]) -> Taken {
         let request = match Request::decode(words, self.blocks) {
             Ok(request) => request,
             Err(Refused::Malformed { tag }) => {
@@ -141,11 +140,11 @@ mod tests {
     use super::*;
     use crate::layout::ARENA;
 
-    fn write(tag: u32) -> [Untrusted<u32>; SQE_WORDS] {
-        Request { op: Op::Write { run: ARENA.run(0, 1).unwrap(), lba: 0 }, tag }.encode().map(Untrusted::new)
+    fn write(tag: u32) -> [u32; SQE_WORDS] {
+        Request { op: Op::Write { run: ARENA.run(0, 1).unwrap(), lba: 0 }, tag }.encode()
     }
-    fn flush(tag: u32) -> [Untrusted<u32>; SQE_WORDS] {
-        Request { op: Op::Flush, tag }.encode().map(Untrusted::new)
+    fn flush(tag: u32) -> [u32; SQE_WORDS] {
+        Request { op: Op::Flush, tag }.encode()
     }
 
     #[test]
@@ -201,7 +200,7 @@ mod tests {
         assert_eq!(session.take(write(1)), Taken::Answer(Completion { tag: 1, status: Status::ReadOnly }));
         assert_eq!(session.inflight().len(), 0);
         let read = Request { op: Op::Read { run: ARENA.run(0, 1).unwrap(), lba: 0 }, tag: 2 };
-        assert!(matches!(session.take(read.encode().map(Untrusted::new)), Taken::Issue(_)));
+        assert!(matches!(session.take(read.encode()), Taken::Issue(_)));
         assert!(matches!(session.take(flush(3)), Taken::Issue(_)));
     }
 }

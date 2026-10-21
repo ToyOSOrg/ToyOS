@@ -22,8 +22,7 @@ pub struct Crate {
 /// The published crates, in the order a publisher must take them.
 pub const PUBLISHED: &[Crate] = &[
     Crate { name: "toyos-abi", dir: "sdk/abi" },
-    Crate { name: "toyos-untrusted", dir: "lib/untrusted" },
-    Crate { name: "toyos-transport", dir: "lib/blockring/transport" },
+    Crate { name: "toyos-transport", dir: "sdk/transport" },
     Crate { name: "toyos-keymap", dir: "sdk/keymap" },
     Crate { name: "toyos-font", dir: "sdk/font" },
     Crate { name: "toyos", dir: "sdk/toyos" },

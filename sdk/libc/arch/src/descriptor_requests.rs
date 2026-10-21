@@ -142,3 +142,19 @@ fn each_descriptor_keeps_its_own_close_on_exec_mark() {
     marks.opened(5, read_write);
     assert_eq!(marks.flags(5), 0, "open over a mark");
 }
+
+/// A slot is marked close-on-exec while the descriptor marked there is open:
+/// a mark goes with its `close`, and a later descriptor at the slot is not
+/// marked by an earlier one's.
+#[test]
+fn a_slot_is_marked_by_its_live_descriptor() {
+    use toyos_abi::RawHandle;
+    let mut marks = fdreq::CloseOnExec::new();
+    let first = RawHandle::new(1, 0).0 as i32;
+    marks.set(first, true);
+    assert!(marks.slot_marked(1) && !marks.slot_marked(0));
+    marks.set(first, false);
+    assert!(!marks.slot_marked(1), "closed");
+    marks.set(RawHandle::new(5, 2).0 as i32, true);
+    assert!(marks.slot_marked(5), "a descriptor at a later generation");
+}

@@ -1786,7 +1786,7 @@ impl<'a> Supervisor<'a> {
             };
             any = true;
             let Instance { row, function, .. } = self.instances.swap_remove(at);
-            say!("supervisor: {} on PCI {} ended with {exit}", row.name, pci_at(function.at));
+            say!("supervisor: {} on PCI {} ended, {exit}", row.name, pci_at(function.at));
             self.drives.ended(function.arrival, restart::owed(row, exit));
         }
         if any {
@@ -2531,8 +2531,8 @@ fn pci_at(at: PciAddr) -> String {
     format!("{:02x}:{:02x}.{}", at.bus, at.dev, at.func)
 }
 
-/// The exit code of `child` once it has ended ([`restart::exited`]).
-fn exit_of(child: &Child) -> Option<i32> {
+/// How `child` ended, once it has ([`restart::exited`]).
+fn exit_of(child: &Child) -> Option<toyos_abi::end::End> {
     restart::exited(toyos_abi::syscall::process_wait_nonblock(toyos::RawHandle(child.as_raw_handle())))
 }
 
@@ -2745,13 +2745,13 @@ fn start<'a>(
     // and the supervisor's console to read as its stdin; `logkeeper` also gets the acceptor
     // the rings reach it on and the one console handle that may write. A
     // launch keeps the slots its caller sent, but for a ring among them —
-    // the caller's own log — which is replaced by the program's.
+    // the caller's own log — which is replaced by the program's, and a stdio
+    // slot it sent nothing for is a null, never this process's own.
     let mut ring: Option<SharedMemory> = None;
     let mut origins: Option<Acceptor> = None;
     let log: &mut Log = match output {
         Output::Boot(log) => {
             let own = ring.insert(new_ring()).as_handle();
-            command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             command.inherit_handle(0, log.stdin.0);
             command.inherit_handle(1, own.0);
             command.inherit_handle(2, own.0);
@@ -2769,6 +2769,7 @@ fn start<'a>(
             log
         }
         Output::Launch { log, slots } => {
+            command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             for &(slot, handle) in slots {
                 let caller_ring = matches!(slot, 1 | 2)
                     && toyos_abi::syscall::fstat(handle)

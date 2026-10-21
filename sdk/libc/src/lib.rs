@@ -11,6 +11,7 @@ mod conversion;
 mod ctype;
 mod dgramreq;
 mod elfsym;
+mod env;
 mod errcode;
 mod errno;
 mod fdreq;
@@ -33,6 +34,8 @@ mod resolve;
 mod sigmask;
 mod socket;
 mod sockopt;
+mod spawn;
+mod spawnreq;
 mod stdio;
 mod string;
 mod strtonum;
@@ -57,6 +60,9 @@ mod runtime {
         unsafe extern "C" {
             fn main(argc: i32, argv: *const *const u8) -> i32;
         }
+        // Before the constructors and `main`, either of which may read
+        // `environ` before any call that would make it.
+        crate::env::init();
         // SAFETY: the linker's bounds of the program's constructor array.
         unsafe {
             for hook in hooks(&raw const __init_array_start, &raw const __init_array_end) {

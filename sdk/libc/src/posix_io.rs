@@ -6,7 +6,7 @@ use alloc::boxed::Box;
 use alloc::vec::Vec;
 use core::ptr;
 
-use toyos_abi::RawHandle;
+use toyos_abi::{RawHandle, Rights};
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
 use crate::errcode::EINVAL;
@@ -16,12 +16,12 @@ use crate::time::Timespec;
 
 // The values `<fcntl.h>` declares.
 
-const O_RDONLY: i32 = 0;
-const O_WRONLY: i32 = 1;
-const O_RDWR: i32 = 2;
-const O_CREAT: i32 = 0x40;
-const O_TRUNC: i32 = 0x200;
-const O_APPEND: i32 = 0x400;
+pub(crate) const O_RDONLY: i32 = 0;
+pub(crate) const O_WRONLY: i32 = 1;
+pub(crate) const O_RDWR: i32 = 2;
+pub(crate) const O_CREAT: i32 = 0x40;
+pub(crate) const O_TRUNC: i32 = 0x200;
+pub(crate) const O_APPEND: i32 = 0x400;
 
 const SEEK_SET: i32 = 0;
 const SEEK_CUR: i32 = 1;
@@ -65,24 +65,46 @@ pub fn c_str_to_bytes(s: *const u8) -> &'static [u8] {
 // File descriptor operations
 
 #[no_mangle]
-pub unsafe extern "C" fn open(path: *const u8, flags: i32, _mode: u32) -> i32 {
-    let path_bytes = c_str_to_bytes(path);
-    let mut oflags = OpenFlags(0);
-
-    let access = flags & 3;
-    if access == O_RDONLY || access == O_RDWR { oflags |= OpenFlags::READ; }
-    if access == O_WRONLY || access == O_RDWR { oflags |= OpenFlags::WRITE; }
-    if flags & O_CREAT != 0 { oflags |= OpenFlags::CREATE; }
-    if flags & O_TRUNC != 0 { oflags |= OpenFlags::TRUNCATE; }
-    if flags & O_APPEND != 0 { oflags |= OpenFlags::APPEND; }
-
-    match syscall::open(path_bytes, oflags) {
+pub unsafe extern "C" fn open(path: *const u8, flags: i32, mode: u32) -> i32 {
+    match open_handle(c_str_to_bytes(path), flags, mode) {
         Ok(f) => {
             CLOEXEC.lock().opened(f.0 as i32, flags);
             f.0 as i32
         }
         Err(e) => set_errno(e),
     }
+}
+
+/// `open`'s file, as a handle of this process's: what a spawn's `addopen`
+/// opens too.
+pub(crate) fn open_handle(path: &[u8], flags: i32, _mode: u32) -> Result<RawHandle, syscall::SyscallError> {
+    let access = flags & 3;
+    let readable = access == O_RDONLY || access == O_RDWR;
+    let writable = access == O_WRONLY || access == O_RDWR;
+    if path == DEV_NULL {
+        return syscall::null(null_rights(readable, writable));
+    }
+
+    let mut oflags = OpenFlags(0);
+    if readable { oflags |= OpenFlags::READ; }
+    if writable { oflags |= OpenFlags::WRITE; }
+    if flags & O_CREAT != 0 { oflags |= OpenFlags::CREATE; }
+    if flags & O_TRUNC != 0 { oflags |= OpenFlags::TRUNCATE; }
+    if flags & O_APPEND != 0 { oflags |= OpenFlags::APPEND; }
+    syscall::open(path, oflags)
+}
+
+/// POSIX's null device, which libc answers with a kernel null handle: the
+/// name is libc's, and no filesystem holds it.
+const DEV_NULL: &[u8] = b"/dev/null";
+
+/// What a null handle opened for `readable` and `writable` may do: that, and
+/// what every descriptor may (`dup`, a spawn's stdio, `poll`).
+fn null_rights(readable: bool, writable: bool) -> Rights {
+    let mut rights = Rights::DUP.union(Rights::TRANSFER).union(Rights::WAIT);
+    if readable { rights = rights.union(Rights::READ); }
+    if writable { rights = rights.union(Rights::WRITE); }
+    rights
 }
 
 #[no_mangle]
@@ -160,6 +182,7 @@ unsafe fn answered(answer: Result<syscall::Stat, syscall::SyscallError>, buf: *m
             syscall::FileType::Pipe => S_IFIFO | 0o644,
             syscall::FileType::Tty => S_IFCHR | 0o644,
             syscall::FileType::Serial => S_IFCHR | 0o644,
+            syscall::FileType::Null => S_IFCHR | 0o666,
             _ => 0o644,
         };
     }
@@ -400,6 +423,24 @@ pub unsafe extern "C" fn umask(mask: u32) -> u32 {
 }
 
 static CLOEXEC: Lock<CloseOnExec> = Lock::new(CloseOnExec::new());
+/// What this process holds in slots 0–2, as copies for a child, each with
+/// whether the descriptor is marked close-on-exec, as `spawnreq::plan` takes
+/// them: `None` for a slot it was started without or closed. The copies close
+/// when the caller drops them, once the child has its own.
+pub(crate) fn stdio_for_spawn() -> Result<[Option<(toyos::OwnedHandle, bool)>; 3], toyos::spawn::Refused> {
+    let mut held = [None, None, None];
+    for (slot, at) in (0u16..).zip(&mut held) {
+        if let Some(copy) = toyos::spawn::inherited(slot)? {
+            *at = Some((copy, CLOEXEC.lock().slot_marked(slot)));
+        }
+    }
+    Ok(held)
+}
+
+/// Whether `path` names a file, and not a directory.
+pub(crate) fn is_file(path: &[u8]) -> bool {
+    syscall::stat(path, true).is_ok_and(|st| st.file_type == syscall::FileType::File)
+}
 
 /// `arg` is the register C's variadic third argument arrives in (`fdreq`).
 #[no_mangle]

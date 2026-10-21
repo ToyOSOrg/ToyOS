@@ -5,7 +5,7 @@ use crate::crc32c::crc32c;
 use crate::fs::FsError;
 
 pub const MAGIC: [u8; 4] = *b"BCFS";
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// The designation stamp: the *only* thing that authorises ToyOS to destroy
 /// what is on a block device.

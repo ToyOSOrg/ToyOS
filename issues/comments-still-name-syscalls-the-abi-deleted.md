@@ -7,10 +7,9 @@ opened: 2026-10-02
 # Comments still name syscalls the ABI deleted
 
 A deleted syscall is simply deleted, and a past implementation lives in a commit
-message, never in source. Six comments still tell the history of a syscall
+message, never in source. Five comments still tell the history of a syscall
 `toyos-abi` no longer declares:
 
-- `sdk/libc/src/misc.rs`, `waitpid`'s doc: "`SYS_WAITPID` is retired";
 - `kernel/src/pipe.rs`, `Pipe::backing`'s doc: a pending `SYS_CONNECT`;
 - `userland/soundd/src/virtio.rs`, `submit`'s doc: "the deleted
   `SYS_AUDIO_SUBMIT`";
@@ -24,7 +23,7 @@ message, never in source. Six comments still tell the history of a syscall
 None holds a number or refuses anything, so none is a retirement entry. Each is
 deleted down to what is true of its item now.
 
-Owner: the item each comment documents — `waitpid`, `Pipe::backing`,
+Owner: the item each comment documents — `Pipe::backing`,
 `Virtio::submit`, and the three test binaries' module docs.
 
 **Exit**: `git grep -w -E
