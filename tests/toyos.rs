@@ -246,6 +246,12 @@ const RUST_SKIP: &[&str] = &[
     // sets: the `crypto_instrument` metal row runs it on the T14 and the AMD
     // bench.
     "crypto_parity",
+    // Their product is timing evidence on a bench's own CPU, a million
+    // measurements per routine: the `crypto_constant_time` and
+    // `crypto_constant_time_curves` metal rows run them on the T14 and the
+    // AMD bench.
+    "crypto_constant_time",
+    "crypto_constant_time_curves",
 ];
 
 /// The shared boot's last members, in this order: each fills a bound of its
@@ -1395,7 +1401,61 @@ const METAL: &[(&str, metal::Metal)] = &[
             },
         },
     ),
+    (
+        // `toyos-crypto`'s secret routines timed fixed against random on the
+        // bench's own CPU (stage 4 of
+        // `issues/toyos-crypto-is-in-the-tree-on-par-with-ring-and-secure.md`):
+        // each routine's verdict is printed and recorded there, and decides
+        // nothing here. The job fails only where its leaky control goes
+        // unseen. The T14 and the AMD bench.
+        "crypto_constant_time",
+        metal::Metal { arms: CRYPTO_CT, judge: |b| crypto_ct_lines(b[0], "test_rs_crypto_constant_time") },
+    ),
+    (
+        // The same of the NIST curves and Ed25519, whose million
+        // measurements a routine take the bench for hours, in a boot of
+        // their own. The T14 and the AMD bench.
+        "crypto_constant_time_curves",
+        metal::Metal {
+            arms: CRYPTO_CT_CURVES,
+            judge: |b| crypto_ct_lines(b[0], "test_rs_crypto_constant_time_curves"),
+        },
+    ),
 ];
+
+/// What a constant-time job adds to its list's bound, from the CPU time a
+/// smoke run of it took on the development Mac (exploratory, under load):
+/// 31,000 runs of each routine there, 1,011,000 here (measurements, warmup
+/// and calibration), and four times that, for a bench that is slower.
+const fn crypto_ct_ms(smoke_ms: u64) -> u64 {
+    smoke_ms * (1_011_000 / 31_000) * 4
+}
+
+/// Each constant-time job alone in its boot, which nothing else shares: a
+/// job beside it would be noise in what it times.
+const CRYPTO_CT: &[metal::Arm] = &[metal::Arm {
+    adds_ms: crypto_ct_ms(24_100),
+    ..metal::once("cryptoctcase", "tests/images/testcases.toml", &[], &["test_rs_crypto_constant_time"])
+}];
+const CRYPTO_CT_CURVES: &[metal::Arm] = &[metal::Arm {
+    adds_ms: crypto_ct_ms(145_300),
+    ..metal::once("cryptoctcurvescase", "tests/images/testcases.toml", &[], &["test_rs_crypto_constant_time_curves"])
+}];
+
+/// A constant-time job's lines, once it has passed.
+fn crypto_ct_lines(boot: &metal::Readback, job: &str) -> Result<(), String> {
+    boot.job_passed(job)?;
+    let log = boot.log();
+    let lines: Vec<&str> =
+        log.text().lines().filter_map(toyos_logstream::program_line).map(|said| said.text).filter(|t| t.starts_with("ct ")).collect();
+    if lines.is_empty() {
+        return Err(format!("{job} passed and printed no verdict"));
+    }
+    for line in lines {
+        eprintln!("  [ct] {line}");
+    }
+    Ok(())
+}
 
 /// The jobs of the crypto boot, in order: ring's known answers, then the
 /// instrument as it ships and with debug assertions off.
