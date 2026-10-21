@@ -78,8 +78,15 @@ Without the second, a job whose request is due first but carries a little
 debt waits out every longer request ahead of it. In the model's desktop mix
 beside a build, the compositor then finished a frame 9.4 ms after its release
 and missed it; with the second, it misses none on the T14 and AMD shapes,
-finishing within 1.7 ms. The kernel must arm each CPU's preemption timer for
-the earliest such instant at every decision and enqueue. The model's cost is
+finishing within 1.7 ms. The kernel must re-arm each CPU's preemption timer
+for the earliest such instant on every change to that CPU's queues, not only
+at its own decisions: an enqueue, a dequeue (a last thread blocking, or
+another CPU stealing or migrating a thread away) and a decision. A group in
+debt that leaves shifts `V` and makes the others eligible sooner, and a remote
+dequeue is no decision on the CPU that loses it; armed only there, the timer
+fires late. The query is O(log g) for g groups: the deadline-ordered group
+tree, augmented with each subtree's least virtual time, gives the earliest
+eligibility among groups due before the running one. The model's cost is
 226 to 293 switches per CPU per second in that mix, against 216 to 259
 without. Within a group the group's own request, as short as its shortest
 thread's, bounds the wait; deciding there as well cost 361 to 417 switches

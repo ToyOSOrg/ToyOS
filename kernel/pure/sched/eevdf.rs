@@ -39,11 +39,6 @@ impl Lag {
         Lag((ns as i128) << VSHIFT)
     }
 
-    /// Rounded toward negative infinity.
-    pub fn as_ns(self) -> i64 {
-        (self.0 >> VSHIFT) as i64
-    }
-
     /// Clamped to `±bound_ns`.
     pub fn clamp_ns(self, bound_ns: u64) -> Lag {
         let bound = (bound_ns as i128) << VSHIFT;

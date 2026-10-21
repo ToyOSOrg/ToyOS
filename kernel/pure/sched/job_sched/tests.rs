@@ -135,7 +135,11 @@ fn credit_kept_across_a_sleep_is_bounded() {
     // others far behind.
     let first = run(&mut s, cpu(0), &mut now, 50 * MS).unwrap();
     let bound = Lag::from_ns(P.lag_bound as i64).0;
-    while s.state(a) != State::Blocked || s.state(b) != State::Blocked {
+    // A few decisions suffice; the cap turns a defect into a failure, not a hang.
+    for _ in 0..1000 {
+        if s.state(a) == State::Blocked && s.state(b) == State::Blocked {
+            break;
+        }
         let t = s.schedule(cpu(0), now).unwrap();
         if t == r {
             now = now.after(MS);
@@ -146,6 +150,7 @@ fn credit_kept_across_a_sleep_is_bounded() {
             assert!(kept.0.abs() <= bound, "{t:?} kept {kept:?}");
         }
     }
+    assert_eq!((s.state(a), s.state(b)), (State::Blocked, State::Blocked), "the job's threads never ran");
     for t in [a, b] {
         assert!(s.thread(t).group_lag.0.abs() <= bound);
     }
@@ -293,7 +298,13 @@ fn an_owners_strikes_survive_new_workers_and_revoke_them_all() {
     let mut now = Nanos::ZERO;
     // Spin across intervals until one runaway strike lands, then replace the
     // worker by a fresh grant to a new thread: the strike stays with the owner.
-    while s.rt_owner(j).strikes == 0 {
+    // A strike needs `runaway` of realtime, about 145 steps at the 70% ceiling;
+    // a cap of one second of steps turns a defect into a failure, not a hang.
+    let cap = 2000;
+    for _ in 0..cap {
+        if s.rt_owner(j).strikes > 0 {
+            break;
+        }
         s.schedule(cpu(0), now);
         s.schedule(cpu(1), now);
         now = now.after(MS / 2);
@@ -301,6 +312,7 @@ fn an_owners_strikes_survive_new_workers_and_revoke_them_all() {
         s.charge(cpu(1), now);
     }
     let strikes = s.rt_owner(j).strikes;
+    assert!(strikes > 0, "no strike within a second");
     s.schedule(cpu(0), now);
     if s.current(cpu(0)).is_some_and(|r| r.0 == w) {
         s.block(cpu(0), now);
@@ -310,13 +322,17 @@ fn an_owners_strikes_survive_new_workers_and_revoke_them_all() {
     s.grant_rt(fresh, now).unwrap();
     assert!(s.rt_owner(j).strikes >= strikes);
     s.wake(fresh, cpu(0), now);
-    while !s.rt_owner(j).revoked {
+    for _ in 0..cap {
+        if s.rt_owner(j).revoked {
+            break;
+        }
         s.schedule(cpu(0), now);
         s.schedule(cpu(1), now);
         now = now.after(MS / 2);
         s.charge(cpu(0), now);
         s.charge(cpu(1), now);
     }
+    assert!(s.rt_owner(j).revoked, "not revoked within a second");
     assert_eq!(s.grant_rt(fresh, now), Err(Refused::OwnerRevoked));
     assert!(!s.thread(second).granted && !s.thread(fresh).granted);
     s.check();

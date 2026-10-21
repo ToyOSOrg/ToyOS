@@ -39,8 +39,6 @@ pub const WEIGHT_UNIT: u64 = 1 << 16;
 /// The largest job weight: 256 units, so a group weight (a job weight times a
 /// 16-bit fraction) stays within [`crate::sched::eevdf::MAX_WEIGHT`].
 pub const MAX_JOB_WEIGHT: u64 = 256 * WEIGHT_UNIT;
-/// The smallest job weight: 1/256 of a unit.
-pub const MIN_JOB_WEIGHT: u64 = WEIGHT_UNIT / 256;
 
 /// The engineering parameters, all in ns.
 #[derive(Clone, Copy, Debug)]
@@ -209,7 +207,7 @@ impl JobSched {
 
     /// A new job owner, held by one reference: its creator's.
     pub fn create_job(&mut self, weight: u64) -> JobId {
-        assert!((MIN_JOB_WEIGHT..=MAX_JOB_WEIGHT).contains(&weight), "job weight {weight} out of range");
+        assert!((1..=MAX_JOB_WEIGHT).contains(&weight), "job weight {weight} out of range");
         let job = Job {
             weight,
             refs: 1,
@@ -260,12 +258,6 @@ impl JobSched {
             assert_eq!(job.runnable, 0, "a job with runnable threads lost its last reference");
             self.jobs[id.index as usize].1 = None;
         }
-    }
-
-    /// Takes effect on each CPU at its next decision.
-    pub fn set_weight(&mut self, id: JobId, weight: u64) {
-        assert!((MIN_JOB_WEIGHT..=MAX_JOB_WEIGHT).contains(&weight), "job weight {weight} out of range");
-        self.job_mut(id).weight = weight;
     }
 
     pub fn rt_owner(&self, id: JobId) -> RtOwner {
