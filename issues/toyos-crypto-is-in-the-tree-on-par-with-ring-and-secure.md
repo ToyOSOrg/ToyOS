@@ -311,14 +311,21 @@ Not consumers:
      owner's in-place initialisation is enforced by its type rather than by
      call order. Debug assertions remain only for the limb bounds types cannot
      express.
-   - **Machine-checked arithmetic as oracle.** These modules are differentially
-     tested against `fiat-crypto` (`curve25519_64`, `curve25519_scalar_64`,
-     `p256_64`, `p256_scalar_64`, `p384_64`, `p384_scalar_64`,
-     `poly1305_64`), as a dev-dependency:
+   - **Arithmetic held against integers.** The owner rejected fiat-crypto
+     (2026-10-21): ToyOS keeps its own crypto stack, with no fiat code as a
+     dependency of any kind, and ring and RustCrypto only as test-only
+     oracles. The crate has none since #993. `Cargo.lock` still names it
+     for russh's `p384` 0.14 (`system/sshserver`, gone with stage 2 of
+     `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md`) and as
+     `curve25519-dalek`'s backend behind a `cfg` nothing sets (`lib/update`'s
+     `ed25519-dalek`, gone at stage 6). `num-bigint`, the crate's test-only integer oracle, holds:
      - `field25519` and `scalar25519`;
      - P-256/P-384's field and scalar arithmetic;
      - Poly1305.
 
+     It holds them on every pair of limb and modulus boundary values, on
+     seeded values, on chains that feed each result back unreduced, on
+     inversion, and on distributivity and subtraction (`test_arithmetic`).
      The rest is covered as follows:
      - ML-KEM's modulo-3329 reduction is tested exhaustively over its input
        range.
@@ -365,6 +372,41 @@ Not consumers:
      recorded as evidence.
    - **Audit.** Whether a human cryptographer audits the crate is the owner's
      decision, and it is open.
+   - **Status: the test-side items, #993.** They hold whatever
+     arithmetic sits underneath, so the speed work's rewrite is held to them.
+     - **Done:**
+       - The vectors: 47 Wycheproof files, every case judged or counted
+         outside the interface by a named reason; CAVP's SHAVS (SHA-256/384/512),
+         GCMVS (AES-128/256) and ECDSA SigVer and PKV; ACVP's HMAC and ML-KEM
+         (`lib/crypto/tests/wycheproof.rs`, `nist.rs`).
+       - The integer oracle above, which replaced fiat-crypto in Poly1305's
+         test, and ML-KEM's exhaustive reduction and compression.
+       - The differential (`tests/differential.rs`) and the fuzz
+         (`tests/fuzz.rs`), over every CPU. Each form of `--ci host` spends
+         about 200 s of CPU on them on the development Mac, against about
+         20 s before; nearly all of it is ours and RustCrypto's curve
+         arithmetic.
+       - Negative controls: 15 checked patches, each red by name, two only
+         after a test was added for it.
+       - Miri over the wipes' and `ct`'s unit tests, and a control it
+         catches. The run over every `portable` unit test was still going
+         at the time of writing.
+       - Evidence: `ToyOSOrg/evidence` `pr-993`,
+         https://github.com/ToyOSOrg/evidence/tree/6d185426366f3df082c1b4035e09e4facad905f3/pr-993/stage4-tests.
+     - **Built, not yet run:** the constant-time harness
+       (`tests/guest/rust-tests/src/constant_time.rs`), in two programs
+       because the curves take a bench for hours. The `crypto_secret_timing`
+       and `crypto_secret_timing_curves` metal rows run them on the T14 and
+       the AMD bench; their judge asks only that the job ran and its leaky
+       control was seen. The verdicts are recorded here when the benches
+       have run.
+     - **Not timed:** ML-KEM key generation. Its matrix expansion rejects
+       samples by rho, a public output of the secret seed, so no two classes
+       can share it. Exit: a measurement with rho held fixed, which needs an
+       entry below the seed (a proposal; no API takes rho today).
+     - **Open:** typed domains (the speed work's); each secret routine's
+       module contract naming its secret inputs; the code inspection; the
+       audit.
 5. **Consumers switch.** Rules for every consumer:
    - A consumer on ring today switches only after stages 3 and 4 hold for
      every primitive it uses.
