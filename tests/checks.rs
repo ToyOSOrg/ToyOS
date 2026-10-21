@@ -1159,7 +1159,10 @@ mod checks {
         // were reaching /log; one whose job never wrote, or that handed the
         // machine back, is no reset under load.
         let judge = metal_judge("stick_survives_a_reset_under_load");
-        let wrote = format!("{kernel}[2026-09-29 10:33:40 20.100 test-runner pid=12] stick_load: 4 MiB written and synced\n");
+        let line = |n: u32| format!("[2026-09-29 10:33:40 20.100 test-runner pid=12] stick_load: line {n} {}\n", "x".repeat(840));
+        let wrote = format!("{kernel}{}", (0..1200).map(line).collect::<String>());
+        let short = format!("{kernel}{}", (0..10).map(line).collect::<String>());
+        assert!(judge(&[&readback("usbload", &wedged(""), &short)]).is_err(), "ten lines are no mebibyte");
         assert_eq!(judge(&[&readback("usbload", &wedged(""), &wrote)]), Ok(()));
         assert!(judge(&[&readback("usbload", &wedged(""), kernel)]).is_err());
         let handed_back = format!("{}| log-tail: [20.200 cpu0 kernel] Rebooting.\n", wedged(""));

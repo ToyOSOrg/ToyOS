@@ -825,6 +825,21 @@ pub fn stages_a_wedge(armed: &[impl AsRef<str>]) -> bool {
     armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_ref()))
 }
 
+/// Whether this image is ended by its own boot deadline on purpose: armed to
+/// wedge, or carrying a deadline below the least bound a runner gives its list
+/// ([`toyos_tco::JOB_BOUND_MS`]). The harness gives such a deadline only to a
+/// boot whose load runs until the reset, such as `stick_survives_a_reset_under_load`'s,
+/// so the boot is judged by the record that bound sealed, as a wedge is.
+pub fn ended_by_its_deadline(armed: &[impl AsRef<str>]) -> bool {
+    stages_a_wedge(armed)
+        || armed.iter().any(|name| {
+            name.as_ref()
+                .strip_prefix(toyos_tco::DEADLINE_PARAM)
+                .and_then(|ms| ms.parse::<u64>().ok())
+                .is_some_and(|ms| ms < toyos_tco::JOB_BOUND_MS)
+        })
+}
+
 /// The `boot-deadline=` bound an image armed with `armed` carries, whose
 /// runner bounds its list at `list_ms`.
 pub fn bound_for(armed: &[impl AsRef<str>], list_ms: u64) -> u64 {
@@ -1739,7 +1754,7 @@ fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusa
     // it was not flashed as. *Which* bound sealed it is the page's to say
     // and not this list's — the arm says a bound was staged, and two of them
     // can reach a staged boot.
-    if stages_a_wedge(armed) {
+    if ended_by_its_deadline(armed) {
         return wedged_boot(loader, log);
     }
     let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
@@ -3151,6 +3166,46 @@ mod tests {
         assert_eq!(lockup_lateness_ms(&early), Some(Ok(-1000)));
         let unread = locked.replace("Its bound is", "Its bound was");
         assert!(matches!(lockup_lateness_ms(&unread), Some(Err(_))));
+    }
+
+    /// A boot given a deadline below its runner's least bound is ended by it on
+    /// purpose, as `stick_survives_a_reset_under_load`'s is: judged by the
+    /// record the deadline sealed, never by a supervisor's stop it was never
+    /// going to reach. The same boot under the ordinary deadline is the
+    /// unfinished boot it would be, and one that handed back was not ended
+    /// by its bound.
+    #[test]
+    fn a_boot_its_deadline_ends_on_purpose_is_judged_by_the_record_it_sealed() {
+        let loader = format!(
+            "Loader log: the kernel handoff begins, so this file ends here\n{}\n\
+             ToyOS Bootloader 1.0\n\
+             Previous boot's panic: the last boot read WEDGED, so a bound of its own ended it and this chain ends here\n\
+             | {}: a bound of 40000 ms, reached at 52397 ms, with this machine in `complete`.\n\
+             Loader log: the last boot is accounted for, so this pass resets the machine\n",
+            bootlog::SEPARATOR,
+            bootlog::DEADLINE_EXPIRED
+        );
+        let log = "[2026-10-21 09:02:08 12.400 cpu0 kernel] Boot: complete (12400ms)\n\
+                   [2026-10-21 09:02:48 52.332 test-runner pid=12] stick_load: 32204 lines said\n";
+        let armed = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_string()).collect() };
+        assert!(ended_by_its_deadline(&armed(&["boot-deadline=40000"])));
+        assert!(!ended_by_its_deadline(&armed(&["boot-deadline=120000"])));
+        assert_eq!(boot_verdict(&armed(&["boot-deadline=40000"]), &loader, log), Ok(12400));
+        assert!(matches!(
+            boot_verdict(&armed(&["boot-deadline=120000"]), &loader, log),
+            Err(Refusal::Log(bootlog::Unfit::Unfinished(_)))
+        ));
+        let handed_back = format!(
+            "{}Black box: {} at 2026-10-21-090207\n| {}[52.400 cpu0 kernel] {}\n",
+            loader,
+            bootlog::HANDED_BACK,
+            bootlog::LOG_TAIL,
+            bootlog::REBOOTING
+        );
+        assert!(matches!(
+            boot_verdict(&armed(&["boot-deadline=40000"]), &handed_back, log),
+            Err(Refusal::Wedge { .. })
+        ));
     }
 
     /// The foreign-record arm's pass after the reset: the hang it stages is its

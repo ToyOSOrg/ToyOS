@@ -2373,7 +2373,7 @@ fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
     // power button is pressed, as the metal row's deadline finds it.
     writeln!(qemu.stdin_mut(), "run {}", metal::STICK_LOAD_JOB).map_err(|e| e.to_string())?;
     qemu.flush_stdin();
-    qemu::await_marker(&mut qemu, &mut console, "stick_load: 4 MiB written and synced", "the load to write the stick")?;
+    qemu::await_marker(&mut qemu, &mut console, "stick_load: line 1500 ", "the load to write the stick")?;
     qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET)).power_button();
     let by = qemu.budget(Duration::from_secs(60));
     console.push_str(&qemu.await_exit(by)?);
@@ -2387,8 +2387,9 @@ fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
         .filter(|(name, _)| ours.contains(&name.as_str()))
         .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
         .collect();
-    if !log.contains("stick_load: 4 MiB written and synced") {
-        return Err(format!("the stick's log volume holds no line of the load that wrote it\n--- its log:\n{log}"));
+    let reached = metal::bytes_of_lines(&log, "stick_load: line ");
+    if reached < 1 << 20 {
+        return Err(format!("{reached} bytes of the load's lines are on the stick's log volume, under a mebibyte"));
     }
     if let Err(unfit) = bootlog::verdict(&log) {
         return Err(format!(
@@ -2396,29 +2397,33 @@ fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
         ));
     }
     eprintln!("  [log] {} file(s) on the stick, {} bytes of this boot's log", names.len(), log.len());
-    usb_stopped_before_the_reset(&console)
+    usb_stopped_before_the_reset(&log, &console)
 }
 
 /// usbd ended for the stop with every connected port's reset finished and its
 /// controller halted and reset (its exit code, which the kernel records,
 /// because its own line may reach no log), and it ended before the kernel's
 /// stop: the supervisor waited for it.
-fn usb_stopped_before_the_reset(console: &str) -> Result<(), String> {
-    let lines: Vec<&str> = console.lines().collect();
-    let at = |what: &dyn Fn(&str) -> bool| lines.iter().position(|l| what(l));
-    let asked = at(&|l| l.contains("supervisor: power: the machine stops"));
-    let ended = at(&|l| l.contains("kernel] exit: usbd pid="));
-    let stopped = at(&|l| l.contains(&format!("kernel] {}", toyos_quiesce::STOPPED)));
-    let (Some(asked), Some(ended), Some(stopped)) = (asked, ended, stopped) else {
-        return Err(format!("no stop request, usbd end and kernel stop, in that order, on the console\n{console}"));
+fn usb_stopped_before_the_reset(log: &str, console: &str) -> Result<(), String> {
+    // On the boot's one clock: the request is in the file (its line can be
+    // one the console dropped under the load), and what follows the flush
+    // is the kernel's, on the console.
+    let at = |text: &str, what: &dyn Fn(&str) -> bool| {
+        text.lines().find(|l| what(l)).map(|l| (toyos_logstream::parse(l).and_then(|p| p.ms), l.to_string()))
     };
-    if !(asked < ended && ended < stopped) {
-        return Err(format!("usbd ended on line {ended}, not between the stop's request ({asked}) and the kernel's stop ({stopped})\n{console}"));
+    let asked = at(log, &|l| l.contains("supervisor: power: the machine stops"));
+    let ended = at(console, &|l| l.contains("kernel] exit: usbd pid="));
+    let stopped = at(console, &|l| l.contains(&format!("kernel] {}", toyos_quiesce::STOPPED)));
+    let (Some((Some(asked), _)), Some((Some(ended), line)), Some((Some(stopped), _))) = (asked, ended, stopped) else {
+        return Err(format!("no stop request in the file, or no usbd end and kernel stop on the console\n{console}"));
+    };
+    if !(asked <= ended && ended <= stopped) {
+        return Err(format!("usbd ended at {ended} ms, not between the stop's request ({asked} ms) and the kernel's stop ({stopped} ms)"));
     }
-    if !lines[ended].contains(" code=0 ") {
-        return Err(format!("usbd's stop left a port in reset or its controller running: {}", lines[ended]));
+    if !line.contains(" code=0 ") {
+        return Err(format!("usbd's stop left a port in reset or its controller running: {line}"));
     }
-    eprintln!("  [stop] {}", lines[ended].trim());
+    eprintln!("  [stop] {}", line.trim());
     Ok(())
 }
 
@@ -4963,6 +4968,10 @@ fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
     // Under the stick write, each CPU's longest windows are judged against
     // the bench's record (`timings::ceiling`), the base they were first read at.
     boot.job_passed(STICK_WRITE)?;
+    let reached = metal::bytes_of_lines(boot.log().text(), "stick_write: line ");
+    if reached < 1 << 20 {
+        return Err(format!("{reached} bytes of the stick write's lines reached the stick, under a mebibyte"));
+    }
     let under = common::irqcensus::windows_under(kernel.text(), cpus, &exited(STICK_WRITE))?;
     eprintln!("  [windows] stick write irqs_off_ns={} preempt_off_ns={}", under.load.0, under.load.1);
     boot.measured("boot.windowscase.stick_write.irqs_off_ns", under.load.0)?;

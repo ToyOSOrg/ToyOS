@@ -1,34 +1,14 @@
-//! 32 MiB written to the boot stick through usbd and made durable after every
-//! mebibyte, then an end: the stick-write load `mask_windows` reads the
-//! windows under.
+//! Eight mebibytes of lines to `/log` on the boot stick through usbd
+//! ([`stick_lines`]), then an end: the stick-write load `mask_windows` reads
+//! the windows under.
 
-use std::fs::OpenOptions;
-use std::io::{Seek, SeekFrom, Write};
+#[path = "../stick_lines.rs"]
+mod stick_lines;
 
-const PATH: &str = "/home/stick-write.bin";
-const SPAN: u64 = 8 << 20;
-const TOTAL: u64 = 32 << 20;
-const CHUNK: usize = 256 << 10;
-const SYNC_EVERY: u64 = 1 << 20;
+/// About eight mebibytes.
+const LINES: u64 = (8 << 20) / stick_lines::LINE_BYTES as u64;
 
 fn main() {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(PATH)
-        .unwrap_or_else(|e| panic!("stick_write: {PATH}: {e}"));
-    let chunk = vec![0xa5u8; CHUNK];
-    let mut written: u64 = 0;
-    while written < TOTAL {
-        if written % SPAN == 0 {
-            file.seek(SeekFrom::Start(0)).expect("stick_write: seek");
-        }
-        file.write_all(&chunk).expect("stick_write: write");
-        written += CHUNK as u64;
-        if written % SYNC_EVERY == 0 {
-            file.sync_all().expect("stick_write: fsync");
-        }
-    }
-    println!("stick_write: {} MiB written and synced", written >> 20);
+    let said = stick_lines::say("stick_write", LINES, || true);
+    println!("stick_write: {said} lines of {} bytes said", stick_lines::LINE_BYTES);
 }

@@ -536,6 +536,12 @@ fn within_one_period(late_ms: i64, period_ns: u64) -> Result<(), String> {
 }
 
 /// One image, and every test that rides it.
+/// The bytes of every line of `text` that carries `marker`, newline included:
+/// what of a load's lines a file read back off the stick holds.
+pub fn bytes_of_lines(text: &str, marker: &str) -> usize {
+    text.lines().filter(|l| l.contains(marker)).map(|l| l.len() + 1).sum()
+}
+
 /// The job that writes the boot stick for ever (`stick_load.rs`), so its boot
 /// is reset by its own deadline with a write in flight.
 pub const STICK_LOAD_JOB: &str = "test_rs_stick_load";

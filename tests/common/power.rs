@@ -575,11 +575,12 @@ pub fn stick_survives_a_reset_under_load(back: &super::metal::Readback) -> Resul
     after.must_say(bootlog::PREVIOUS_PANIC)?;
     after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
     says_nothing_of(&after, REBOOTING)?;
-    let log = back.log();
-    let wrote = log.must_say("stick_load: ")?;
-    eprintln!("  [power] {}", wrote.trim());
-    if let Some(last) = log.text().lines().rfind(|l| l.contains("stick_load: ")) {
-        eprintln!("  [power] the last it said before the reset: {}", last.trim());
+    // What reached the medium: the load's lines in the file read back off the
+    // stick, which logkeeper wrote through usbd.
+    let reached = super::metal::bytes_of_lines(back.log().text(), "stick_load: line ");
+    if reached < 1 << 20 {
+        return Err(format!("{reached} bytes of the load's lines reached the stick, under a mebibyte"));
     }
+    eprintln!("  [power] {} KiB of the load's lines reached the stick before the reset", reached >> 10);
     back.measured("boot.usbload.stick_secs", back.stick_secs)
 }
