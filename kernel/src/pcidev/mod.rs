@@ -856,17 +856,6 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
         Err(NoEntry::NoTable(NoCapability::Absent)) if arm_claimed_msi(&message) => Armed::Msi(message),
         Err(NoEntry::NoTable(NoCapability::Absent)) => return Err(Refusal::NoInterrupt),
     };
-    // **Mastering off before the domain is attached**, so [`Bound::mastering`]
-    // is true of the function and not only of this record: a function the
-    // firmware left mastering may still be moving its own buffers (an xHC
-    // whose firmware has not let go of it, xHCI 1.2 §4.22.1), and once its
-    // domain is this claim's every such access is refused and recorded as the
-    // holder's before the holder has granted anything. With the bit clear the
-    // function issues no memory request at all (PCIe Base 6.0 §7.5.1.1.3);
-    // the first grant sets it again ([`Bound::start_mastering`]). What it
-    // wrote before the bit cleared lands before the domain does.
-    pci.disable_bus_master();
-    pci.drain_messages();
     space.attach(pci.bus, pci.dev, pci.func);
     Ok(Bound {
         pci,
