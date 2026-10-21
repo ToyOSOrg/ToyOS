@@ -28,6 +28,26 @@ pub fn describe(dev: &PciDev) -> Result<PciFunctionInfo, KernelRefused> {
     dev.describe().map_err(KernelRefused::on("the claim's description"))
 }
 
+/// The claim's function's vendor and device id, config space's first dword.
+pub fn id(dev: &PciDev) -> Result<(u16, u16), KernelRefused> {
+    let word = dev
+        .config_read(0, toyos_abi::syscall::RegWidth::U32)
+        .map_err(KernelRefused::on("the vendor and device id"))?;
+    Ok((word as u16, (word >> 16) as u16))
+}
+
+/// State the address width the claim's function issues (`PciDev::dma_limit`),
+/// before its first grant or lend.
+pub fn limit(dev: &PciDev, bits: u8) -> Result<(), KernelRefused> {
+    dev.dma_limit(bits).map_err(KernelRefused::on("the address limit"))
+}
+
+/// Let the claim's function master the bus (`PciDev::dma_start`), once its
+/// driver has stopped and reset it.
+pub fn start(dev: &PciDev) -> Result<(), KernelRefused> {
+    dev.dma_start().map_err(KernelRefused::on("the bus-master start"))
+}
+
 /// `region`, which a peer lent, put into the claim's function's domain
 /// (`PciDev::dma_map`).
 pub fn lend(dev: &PciDev, region: RawHandle) -> Result<DmaMapping, KernelRefused> {

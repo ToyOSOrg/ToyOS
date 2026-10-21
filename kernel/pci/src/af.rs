@@ -35,6 +35,12 @@ pub const fn resets(af_capabilities: u8) -> bool {
     af_capabilities & (FLR_CAPABLE | TP_CAPABLE) == FLR_CAPABLE | TP_CAPABLE
 }
 
+/// Whether the function implements AF Status' Transactions Pending, from AF
+/// Capabilities.
+pub const fn reports_pending(af_capabilities: u8) -> bool {
+    af_capabilities & TP_CAPABLE != 0
+}
+
 /// Whether the function still has transactions outstanding.
 pub const fn pending(af_status: u8) -> bool {
     af_status & TRANSACTIONS_PENDING != 0
@@ -50,6 +56,15 @@ mod tests {
         assert!(resets(0xff));
         for without in [0b00, 0b01, 0b10, 0xfc] {
             assert!(!resets(without), "{without:#x}");
+        }
+    }
+
+    #[test]
+    fn transactions_pending_is_reported_by_bit_zero_alone() {
+        assert!(reports_pending(0b01));
+        assert!(reports_pending(0xff));
+        for without in [0b00, 0b10, 0xfe] {
+            assert!(!reports_pending(without), "{without:#x}");
         }
     }
 

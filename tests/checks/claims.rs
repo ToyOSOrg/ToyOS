@@ -11,6 +11,8 @@ use super::*;
 const RECORDED: &str = r"[2026-09-29 11:54:39  0.065 cpu0 kernel]   PCI 00:1f.6 [0200] vendor=8086 device=15fc prog_if=00 bars=[bar0=0xbcf00000]
 [2026-09-29 11:54:39  0.149 cpu0 kernel] pcidev: firmware declared root bridge memory: mem 0xa2000000..0xbd000000, mem 0x4000000000..0x603dc00000, mem 0xa0800000..0xa2000000, mem 0xbd000000..0xc0000000, mem 0xff000000..0xffb80000, mem 0xffd3a070..0x100000000, mem 0x603dc00000..0x8000000000
 [2026-09-29 11:54:39  0.250 cpu0 kernel] iommu: domain2 root=0xa31000 aw=48 mgaw=39 addresses from 0x2000000000 to 0x8000000000
+[2026-09-29 11:54:39  0.251 cpu0 kernel] iommu: domain2 maps 0x1c00000..0x1e00000 at 0x3fffe00000
+[2026-09-29 11:54:39  0.252 cpu0 kernel] iommu: domain2 maps 0x1e00000..0x2200000 at 0x4000000000
 [2026-09-29 12:10:34  1.191 cpu0 kernel] iommu: irte5 source=00:1f.6 p=1 sid=0x00fe svt=1 sq=0 vector=0x28 apic=0x0 dst=0x0 trigger=edge
 [2026-09-29 12:10:34  1.192 cpu0 kernel] pcidev: PCI 00:1f.6 [8086:15fc] handed over on slot 0, vector 0x28
 [2026-09-29 12:10:53 20.233 cpu1 kernel] pcidev: PCI 00:1f.6 [8086:15fc] released from slot 0; reset by nothing (Express: no capability; AF: no capability; PM: No_Soft_Reset set), so where it may still be aimed is kept for its next claim
@@ -70,10 +72,14 @@ pub fn one_entry_per_slot() {
     assert!(why.contains(r#"left (entry, p) [("0", "1"), ("0", "1")]"#), "{why}");
 }
 
-/// The recorded domain reaches into `0x4000000000..`; capped there, it passes.
-pub fn domains_end_below_the_windows() {
-    let why = claims::clear_of_host_bridges(&log(RECORDED)).expect_err("the recorded domain");
+/// A mapping reaching into `0x4000000000..` reds; the same mapping placed
+/// below the window, and one placed again there, pass.
+pub fn domains_map_clear_of_the_windows() {
+    let why = claims::clear_of_host_bridges(&log(RECORDED)).expect_err("the mapping inside a window");
     assert!(why.contains("inside the root-bridge window 0x4000000000..0x603dc00000"), "{why}");
-    let capped = RECORDED.replace("to 0x8000000000", "to 0x4000000000");
-    assert_eq!(claims::clear_of_host_bridges(&log(&capped)), Ok(()));
+    let clear = RECORDED.replace("at 0x4000000000", "at 0x200000 again");
+    assert_eq!(claims::clear_of_host_bridges(&log(&clear)), Ok(()));
+    // One that starts below the window and ends inside it.
+    let straddles = RECORDED.replace("at 0x4000000000", "at 0x3fffe00000");
+    assert!(claims::clear_of_host_bridges(&log(&straddles)).is_err());
 }

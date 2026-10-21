@@ -952,8 +952,8 @@ mod checks {
     }
 
     #[test]
-    fn metal_domains_end_below_the_host_bridges() {
-        claims_checks::domains_end_below_the_windows();
+    fn metal_domains_map_clear_of_the_host_bridges() {
+        claims_checks::domains_map_clear_of_the_windows();
     }
 
     #[test]

@@ -9,7 +9,8 @@
 //! attached. The only reset that means the same thing on every function is the
 //! one the function itself implements — and QEMU's virtio functions implement
 //! none, so `pcidev` does not rest on this: what makes a re-claim safe there is
-//! that bus mastering starts on the first grant. This is the belt, taken where
+//! that bus mastering starts only when its next holder starts it, once that
+//! holder has stopped it. This is the belt, taken where
 //! a function offers it.
 
 /// This capability's id in a function's capability list.
@@ -19,6 +20,7 @@ pub const CAP_ID: u8 = 0x10;
 pub const CAPABILITIES: u64 = 0x02;
 pub const DEVICE_CAPABILITIES: u64 = 0x04;
 pub const DEVICE_CONTROL: u64 = 0x08;
+pub const DEVICE_STATUS: u64 = 0x0A;
 /// Device Control 2 (§7.5.3.16), which only a version 2 structure carries.
 pub const DEVICE_CONTROL_2: u64 = 0x28;
 
@@ -31,6 +33,22 @@ const FLR_CAPABLE: u32 = 1 << 28;
 /// Device Control bit 15, "Initiate Function Level Reset" (§7.5.3.4). Write-only
 /// and self-clearing: it always reads zero.
 const INITIATE_FLR: u16 = 1 << 15;
+
+/// Device Status bit 5, "Transactions Pending" (§7.5.3.5): a Non-Posted
+/// Request the function issued has not yet been completed or timed out.
+const TRANSACTIONS_PENDING: u16 = 1 << 5;
+
+/// How long a function that stopped mastering is given for its last
+/// Non-Posted Requests to complete or time out: twice the default range's top,
+/// 50 ms (§2.8, Device Control 2 §7.5.3.16). One whose request outlasts this
+/// is refused.
+pub const QUIESCE_NANOS: u64 = 100_000_000;
+
+/// Whether the function has a Non-Posted Request outstanding, from its Device
+/// Status.
+pub const fn pending(device_status: u16) -> bool {
+    device_status & TRANSACTIONS_PENDING != 0
+}
 
 /// §6.6.2: after initiating the reset, software waits at least 100 ms before
 /// it may access the function again.
@@ -66,6 +84,18 @@ pub const fn restored(device_control: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Bit 5 and nothing else: its neighbours are AUX Power Detected (4) and
+    /// Emergency Power Reduction Detected (6).
+    #[test]
+    fn only_bit_five_says_a_transaction_is_pending() {
+        assert!(pending(1 << 5));
+        assert!(!pending(0));
+        assert!(!pending(!(1u16 << 5)));
+        for bit in (0..16).filter(|bit| *bit != 5) {
+            assert!(!pending(1 << bit), "bit {bit}");
+        }
+    }
 
     /// Bit 28 and nothing else. The neighbours are Role-Based Error Reporting
     /// (bit 15) and the Captured Slot Power values (25:18), so an off-by-one

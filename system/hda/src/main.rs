@@ -58,6 +58,8 @@ enum Refusal {
     Kernel(KernelRefused),
     NoRegisters,
     Controller(controller::Refusal),
+    /// No width this function reaches is known.
+    Width(controller::Contradicted),
     Link(LinkFault),
     NoOutput(PathError),
     /// The converter behind the chosen pin offers none of soundserver's rates
@@ -108,6 +110,7 @@ impl core::fmt::Display for Refusal {
             Self::Kernel(why) => write!(f, "{why}"),
             Self::NoRegisters => write!(f, "the claim gives its register BAR no window"),
             Self::Controller(why) => write!(f, "the controller refused: {why}"),
+            Self::Width(why) => write!(f, "{why}"),
             Self::Link(why) => write!(f, "the codec link refused: {why}"),
             Self::NoOutput(why) => {
                 write!(f, "its codecs reach no output: ")?;
@@ -208,11 +211,18 @@ impl Driver {
             return Err(Refusal::NoRegisters);
         }
         let (bar, bar_mapping) = Bar::map(&dev, REGISTERS, bar_bytes)?;
+        // With bus mastering still off: the reset stops every DMA engine
+        // before CRST (§3.3.7), so nothing firmware or a previous holder left
+        // running reaches the grants laid out below.
         let reset = controller::reset(&bar, || std::thread::sleep(Duration::from_micros(CODEC_DETECT_MICROS)))?;
         say!("{at}: gcap={:#06x} statests={:#06x}", reset.gcap.0, reset.statests);
+        let (vendor, device) = toyos_pci_claim::id(&dev)?;
+        let bits = controller::address_bits(vendor, device, reset.gcap).map_err(Refusal::Width)?;
+        toyos_pci_claim::limit(&dev, bits)?;
 
         let (grant, region) = Grant::alloc(&dev, GRANT_BYTES as u64)?;
         grant.window().zero();
+        toyos_pci_claim::start(&dev)?;
         let mut link = Link::open(bar, grant, &reset)?;
         let codecs = walk(at, &mut link, reset.statests);
         if let Some(fault) = link.refused() {

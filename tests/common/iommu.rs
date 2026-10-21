@@ -468,3 +468,45 @@ pub fn amdvi_selftest(test_config: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// What the supervisor says refusing netcase's NIC to netstack, on a machine
+/// whose virtio NIC was created without `iommu_platform=on`.
+pub const UNTRANSLATED_NIC: &str = "supervisor: netstack: pci:02:00:00/1af4:1041 is a virtio function that offers \
+     no VIRTIO_F_ACCESS_PLATFORM, so no unit translates its DMA (virtio 1.2 §6.1): refused";
+
+/// A virtio NIC that bypasses the unit ([`Profile::HeadlessNicUntranslated`])
+/// is never handed to netstack: the supervisor reads its offer through the
+/// claim, refuses it by name, and netstack runs with no NIC. Only a QEMU
+/// machine can make one: every bench function is behind its unit.
+pub fn a_virtio_function_without_access_platform_is_refused() -> Result<(), String> {
+    let options = BootOptions { profile: Profile::HeadlessNicUntranslated, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
+    let gone = "netstack: no NIC on this machine";
+    let mut text = qemu.boot_log().to_string();
+    qemu::await_guest(&mut qemu, &mut text, "the supervisor's refusal and netstack without a NIC", |t| {
+        t.contains(UNTRANSLATED_NIC) && t.contains(gone)
+    })
+    .map_err(|e| format!("{e}\n{text}"))?;
+    let log = Serial::named("boot console", text);
+    log.must_be_clean()?;
+    log.must_not_say("netstack: VirtIO: PCI")?;
+    eprintln!("  [iommu] {UNTRANSLATED_NIC}");
+    Ok(())
+}
+
+/// The kernel's virtio console created without `iommu_platform=on`
+/// ([`Profile::HeadlessConsoleUntranslated`]) bypasses the unit, so the kernel
+/// tells it physical addresses and the boot reaches its ready marker over it.
+/// Given a domain's addresses instead, it reads and writes whatever memory
+/// those are, and the boot's console is lost. q35 only: no bench has a virtio
+/// function.
+pub fn the_kernel_tells_a_bypassing_console_physical_addresses() -> Result<(), String> {
+    let options = BootOptions { profile: Profile::HeadlessConsoleUntranslated, ..Default::default() };
+    let qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
+    let log = Serial::named("boot console", qemu.boot_log().to_string());
+    log.must_be_clean()?;
+    log.must_say("offers no ACCESS_PLATFORM, so it is told physical addresses")?;
+    log.must_say("Boot: complete")?;
+    eprintln!("  [iommu] the console bypassing the unit was told physical addresses and carried the boot");
+    Ok(())
+}

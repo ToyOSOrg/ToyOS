@@ -4036,6 +4036,7 @@ dependencies = [
  "toyos-logstream",
  "toyos-manifest",
  "toyos-osrelease",
+ "toyos-pci-claim",
  "toyos-quiesce",
  "toyos-supervisor",
  "toyos-swap",

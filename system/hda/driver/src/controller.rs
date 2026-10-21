@@ -155,6 +155,44 @@ impl Gcap {
     }
 }
 
+/// Functions whose GCAP 64OK a measurement contradicts, with where it is
+/// recorded: no width they are known to reach, so none is driven.
+const CONTRADICTED: &[(u16, u16, &str)] = &[(
+    0x1002,
+    0x1637,
+    "issues/the-hdmi-audio-function-1002-1637-is-driven-at-no-address-width.md",
+)];
+
+/// The device-address width a controller is driven at: 64 bits where GCAP
+/// says 64OK (§3.3.2), 32 where it does not, and none where its 64OK is
+/// contradicted.
+pub fn address_bits(vendor: u16, device: u16, gcap: Gcap) -> Result<u8, Contradicted> {
+    match CONTRADICTED.iter().find(|(v, d, _)| (*v, *d) == (vendor, device)) {
+        Some(&(_, _, record)) => Err(Contradicted { vendor, device, record }),
+        None if gcap.wide() => Ok(64),
+        None => Ok(32),
+    }
+}
+
+/// A function [`address_bits`] knows no width for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Contradicted {
+    pub vendor: u16,
+    pub device: u16,
+    pub record: &'static str,
+}
+
+impl core::fmt::Display for Contradicted {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{:04x}:{:04x} sets 64OK and is measured dropping address bits, so no width it reaches is \
+             known ({})",
+            self.vendor, self.device, self.record
+        )
+    }
+}
+
 /// Which ring a refusal is about.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Ring {

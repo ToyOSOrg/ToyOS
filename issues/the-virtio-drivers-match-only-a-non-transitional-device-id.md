@@ -35,9 +35,8 @@ already whole.
 
 A transitional device offers no `VIRTIO_F_ACCESS_PLATFORM` on either: QEMU
 refuses `iommu_platform=on` on a transitional device, and VirtualBox's virtio
-devices offer the bit nowhere. So behind a unit such a NIC is one no
-claim may take
-(`issues/a-virtio-function-that-offers-no-access-platform-is-handed-over-as-translated.md`);
+devices offer the bit nowhere. So behind a unit such a NIC is one the
+supervisor refuses every holder (`translated` in `system/supervisor/src/main.rs`);
 the matches reach a card only on the path
 `issues/a-machine-without-an-iommu-refuses-every-claim.md` rules for a machine
 with no unit, and the kernel's console on every machine.

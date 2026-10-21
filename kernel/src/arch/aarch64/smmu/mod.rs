@@ -271,7 +271,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[toyos_abi::
             Err(why) => log!("IOMMU: {function}'s IORT route is refused: {why:?}"),
         }
     }
-    let reserved = windows.map(|w| w.iter().map(|w| (w.base, w.end())).collect());
+    // The ITS's doorbell page is mapped at its own address in every domain
+    // (`domain::create`), so no grant may be handed out over it.
+    let doorbell = super::irqchip::its::doorbell_page().map(|page| (page, page + crate::mm::PAGE_SIZE));
+    let reserved = windows.map(|w| w.iter().map(|w| (w.base, w.end())).chain(doorbell).collect());
     let Some(live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, reserved) else {
         return;
     };

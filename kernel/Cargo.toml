@@ -124,6 +124,10 @@ protocol-port = []
 # counter that wrapped at 4095 and reissued a live tag, and the isolation tests
 # red under it. Never a default and reached by no kernel build.
 counting-allocator = []
+# `pure/iova.rs`'s negative control: a grant is handed out whatever the
+# holder's address limit, and the truncation test reds under it. Never a
+# default and reached by no kernel build.
+iova-ignores-limit = []
 # The process lifecycle's controls (`pure/proclife/`), declared for the
 # library's own tests and never enabled by any kernel build: each reverts one
 # decision to the form this kernel really had, so the host model that refuses

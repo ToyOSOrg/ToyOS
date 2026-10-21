@@ -128,11 +128,16 @@ pub(super) fn yn(v: bool) -> char {
     }
 }
 
+/// The interrupt address range, which no domain's addresses may enter: a
+/// request there is a message, not a DMA (VT-d Rev. 5.0 §3.15; AMD 48882 Rev.
+/// 3.09 §2.2.9 for requests without a PASID).
+pub const INTERRUPT_RANGE: (u64, u64) = (0xFEE0_0000, 0xFEF0_0000);
+
 /// A device's address spaces, on whichever backend translates.
 pub mod domain {
     use super::{backend, Backend};
     use crate::arch::x86_64::{amdvi, vtd};
-    use crate::iommu::{DomainId, IommuError, Iova, StreamId};
+    use crate::iommu::{DomainId, IommuError, Iova, Limit, StreamId};
 
     pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
         match backend() {
@@ -170,10 +175,10 @@ pub mod domain {
         found
     }
 
-    pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
+    pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {
         match minted() {
-            Backend::AmdVi => amdvi::domain::map(id, phys, bytes),
-            _ => vtd::domain::map(id, phys, bytes),
+            Backend::AmdVi => amdvi::domain::map(id, phys, bytes, limit),
+            _ => vtd::domain::map(id, phys, bytes, limit),
         }
     }
 

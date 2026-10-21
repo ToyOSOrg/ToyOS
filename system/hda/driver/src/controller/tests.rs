@@ -684,3 +684,14 @@ fn a_stream_that_never_stops_is_refused() {
     stream.start().unwrap();
     assert_eq!(stream.stop(), Err(StreamFault::NeverStopped));
 }
+
+/// 64OK decides the width, except for a function a measurement contradicts,
+/// which is driven at none.
+#[test]
+fn the_address_width_is_64ok_unless_it_is_contradicted() {
+    assert_eq!(address_bits(0x8086, 0xa0c8, Gcap(LAPTOP_GCAP)), Ok(64));
+    assert_eq!(address_bits(0x8086, 0xa0c8, Gcap(LAPTOP_GCAP & !1)), Ok(32));
+    assert_eq!(address_bits(0x1022, 0x15e3, Gcap(0x4401)), Ok(64));
+    let refused = address_bits(0x1002, 0x1637, Gcap(0x4001)).unwrap_err();
+    assert_eq!((refused.vendor, refused.device), (0x1002, 0x1637));
+}

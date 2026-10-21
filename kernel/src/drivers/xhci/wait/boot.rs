@@ -340,7 +340,15 @@ fn init_one(pci_dev: &PciDevice) -> Option<XhciController> {
     // After the reset: a controller refused above never allocates, and
     // `DmaPool` frees the pool — and takes it back out of the domain — on every
     // refusal below when it drops.
-    let pool = DmaPool::alloc_in(layout.pool_size, space);
+    // xHCI 1.2 §5.3.6: HCCPARAMS1's AC64 says whether it issues 64-bit addresses.
+    let limit = if hccparams1 & 1 != 0 { crate::iommu::Limit::WIDEST } else { crate::iommu::Limit::NARROWEST };
+    let pool = match DmaPool::alloc_in(layout.pool_size, space, limit) {
+        Ok(pool) => pool,
+        Err(why) => {
+            refuse(format_args!("its pool cannot be placed where it reaches: {why}"));
+            return None;
+        }
+    };
     space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 
     // MaxSlotsEn caps what this driver can track; the controller then refuses

@@ -51,17 +51,25 @@
 //! interrupts this machine does not remap**, because its message would be
 //! compatibility format, which raises any vector on any CPU.
 //!
-//! **A function masters the bus only once it has memory it may reach.** What
-//! comes back from a process still holds the device addresses of a domain that
-//! no longer maps them, so bus mastering is not started at hand-over: it starts
-//! on the claim's first grant, after that grant is in the function's domain.
+//! **Every grant ends below the address limit its holder stated**
+//! ([`dma_limit`]), and no grant or lend is made before one is: a function
+//! that drops its upper address bits would issue a grant above its limit as
+//! another grant's address.
+//!
+//! **A function masters the bus only when its holder starts it**
+//! ([`dma_start`]), never at hand-over: what comes back from a process, or
+//! from firmware, may still hold addresses and run queues. Its holder has the
+//! registers first, with mastering off, to stop and reset the function by its
+//! own means and lay out its grants; then it starts it. The kernel takes that
+//! as no proof of anything: whatever the function then does reaches only its
+//! domain.
 //!
 //! **A function no mechanism resets is still aimed at what its last holder
 //! granted.** Nothing but that function's own driver can stop its queues, and
 //! no register write retracts a transfer it had taken in before its holder
-//! died: the first grant that starts it mastering again lets that transfer out.
+//! died: the start that lets it master again lets that transfer out.
 //! So [`release`] takes those grants back like any other — mastering is off, so
-//! the function reaches nothing until its next claim's first grant — and keeps
+//! the function reaches nothing until its next holder starts it — and keeps
 //! only their device addresses, as the function's [`Function::residue`], for
 //! the rest of the boot if it is never claimed again. A residue address is
 //! never lent ([`Bound::lend_room`]) and never a fresh grant's, so the next
@@ -121,7 +129,7 @@ use toyos_pci::{af, aperture, bar, express, pages, pm};
 
 use crate::device::{Claim, ClaimError};
 use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, mask_claimed_msix, NoCapability, NoEntry, PciDevice};
-use crate::iommu::{IommuError, OwnSpace, Refused, Remapped};
+use crate::iommu::{IommuError, Limit, OwnSpace, Refused, Remapped};
 use crate::mm::policy::CachePolicy;
 use crate::mm::{align_2m, DirectMap, PAGE_2M};
 use crate::object::shm::{Region, SharedMemObject};
@@ -280,9 +288,13 @@ struct Bound {
     /// to nothing and counted against nothing, and where a grant of a range's
     /// size is placed.
     residue: Vec<Aimed>,
-    /// Whether this function may issue a transaction yet. False until its first
-    /// grant is in its domain, so a function carrying a previous holder's queue
-    /// addresses can act on none of them.
+    /// What the holder stated the function issues ([`dma_limit`]); no grant
+    /// or lend is made before it is.
+    limit: Option<Limit>,
+    /// Whether this function may issue a transaction yet: false until its
+    /// holder starts it ([`dma_start`]), so a function carrying a previous
+    /// holder's or firmware's queue addresses acts on none of them before its
+    /// holder has stopped it.
     mastering: bool,
 }
 
@@ -302,9 +314,7 @@ impl Bound {
             .find(|at| !taken(*at))
     }
 
-    /// Let the function master the bus, once: called after a grant is in its
-    /// domain and never before, so the first thing it may reach exists before
-    /// it may reach anything.
+    /// Let the function master the bus, once.
     fn start_mastering(&mut self) {
         if !self.mastering {
             self.pci.start_bus_mastering();
@@ -646,6 +656,9 @@ enum Refusal {
     BarUnrouted(u8),
     /// This BAR's pages are not its own ([`pages::of_bar`]).
     BarPages(u8, pages::Refused),
+    /// With mastering stopped, its Transactions Pending stayed set past
+    /// [`express::QUIESCE_NANOS`].
+    StillTransacting,
 }
 
 impl core::fmt::Display for Refusal {
@@ -712,6 +725,12 @@ impl core::fmt::Display for Refusal {
                  read of it would come back"
             ),
             Self::BarPages(i, why) => write!(f, "BAR {i}: {why}"),
+            Self::StillTransacting => write!(
+                f,
+                "with its mastering stopped, a request it had issued was still outstanding after {} ms, \
+                 and it would land in a domain that maps none of it",
+                express::QUIESCE_NANOS / 1_000_000
+            ),
         }
     }
 }
@@ -805,11 +824,8 @@ pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
 }
 
 /// Choose the BARs its holder is given, give the function an address space,
-/// arm the interrupt, and only then let it master the bus.
-///
-/// The order is the whole security argument: a function that could master the
-/// bus before its domain existed would be reaching physical memory with
-/// whatever addresses its registers still held.
+/// arm the interrupt, stop its mastering and let what it had in flight finish,
+/// then attach the domain. Its holder starts it ([`dma_start`]).
 fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindow]) -> Result<Bound, Refusal> {
     let remapping = crate::iommu::remapping().map_err(Refusal::NotRemapped)?;
     crate::iommu::isolates(&pci).map_err(Refusal::NotIsolated)?;
@@ -844,6 +860,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
         Err(NoEntry::NoTable(NoCapability::Absent)) if arm_claimed_msi(&message) => Armed::Msi(message),
         Err(NoEntry::NoTable(NoCapability::Absent)) => return Err(Refusal::NoInterrupt),
     };
+    quiesce(&pci)?;
     space.attach(pci.bus, pci.dev, pci.func);
     Ok(Bound {
         pci,
@@ -855,6 +872,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
         bar_bytes,
         grants: Vec::new(),
         residue: Vec::new(),
+        limit: None,
         mastering: false,
     })
 }
@@ -1122,6 +1140,41 @@ fn settle_after_reset(pci: &PciDevice) {
     kept.restore(pci);
 }
 
+/// Stop a function mastering and let everything it already issued finish
+/// before it moves onto a domain that maps none of those addresses. Firmware
+/// may have left it running queues at physical addresses, and what lands after
+/// the attach would fault against its holder.
+///
+/// Clearing Bus Master Enable stops new requests. A config read's completion
+/// passes none of the function's earlier posted writes (PCIe Base §2.4.1), but
+/// Non-Posted Requests, its DMA reads, are only known finished once Transactions
+/// Pending clears: Device Status' (§7.5.3.5), or on a conventional function
+/// the Advanced Features capability's, under the same bound as a hang ceiling,
+/// conventional PCI having no Completion Timeout. A function with neither has
+/// no pending signal: its posted writes are flushed, and a read it still had in
+/// flight may fault in the new domain, against its holder; isolation holds,
+/// since that domain maps only the function's own.
+fn quiesce(pci: &PciDevice) -> Result<(), Refusal> {
+    pci.disable_bus_master();
+    pci.drain_messages();
+    let pending: Box<dyn Fn() -> bool + '_> = match (pci.capability(express::CAP_ID), pci.capability(af::CAP_ID)) {
+        (Err(NoCapability::Truncated), _) | (_, Err(NoCapability::Truncated)) => return Err(Refusal::CapsTruncated),
+        (Ok(cap), _) => Box::new(move || express::pending(cap.read_u16(express::DEVICE_STATUS))),
+        (Err(NoCapability::Absent), Ok(cap)) if af::reports_pending(cap.read_u8(af::AF_CAPABILITIES)) => {
+            Box::new(move || af::pending(cap.read_u8(af::AF_STATUS)))
+        }
+        (Err(NoCapability::Absent), _) => return Ok(()),
+    };
+    let deadline = crate::clock::nanos_since_boot() + express::QUIESCE_NANOS;
+    while pending() {
+        if crate::clock::nanos_since_boot() >= deadline {
+            return Err(Refusal::StillTransacting);
+        }
+        core::hint::spin_loop();
+    }
+    Ok(())
+}
+
 fn wait_until(at: u64) {
     while crate::clock::nanos_since_boot() < at {
         core::hint::spin_loop();
@@ -1233,7 +1286,7 @@ fn tear_down(function: &Function, mut bound: Bound) {
         }
         // Nothing reset it, so whatever it had taken in is still aimed at these
         // addresses; mastering is off, so it reaches none of them until the
-        // next claim's first grant.
+        // next holder starts it.
         None => {
             for grant in grants.iter() {
                 if let Err(why) = bound.space.unmap(grant.at, grant.bytes) {
@@ -1307,6 +1360,7 @@ pub fn dma_alloc(
 ) -> Result<(Arc<SharedMemObject>, u64, u64), SyscallError> {
     let function = binding.function();
     with_bound(binding, |bound| {
+        let limit = bound.limit.ok_or(SyscallError::InvalidArgument)?;
         if bytes == 0 || bytes > MAX_GRANT_BYTES {
             return Err(SyscallError::InvalidArgument);
         }
@@ -1325,7 +1379,7 @@ pub fn dma_alloc(
         // The pages are the allocator's own and 2 MiB, so a domain that cannot
         // take them is a kernel bug rather than the device's answer.
         let refused = |why| -> ! { panic!("pcidev: {function} could not map a grant: {why}") };
-        let (at, residual) = match bound.residue.iter().position(|aimed| aimed.bytes == span) {
+        let (at, residual) = match bound.residue.iter().position(|aimed| aimed.bytes == span && aimed.at + span <= limit.end()) {
             // The function may still be aimed here, so this holder is the one
             // whatever it had in flight lands on.
             Some(index) => {
@@ -1335,7 +1389,7 @@ pub fn dma_alloc(
             }
             // A domain its claims have spent is the machine's limit and not
             // a kernel bug: the holder is refused, and the pages go back.
-            None => match bound.space.map(phys, span) {
+            None => match bound.space.map(phys, span, limit) {
                 Ok(at) => (at, false),
                 Err(IommuError::AddressesExhausted(_)) => return Err(SyscallError::ResourceExhausted),
                 Err(why) => refused(why),
@@ -1343,10 +1397,34 @@ pub fn dma_alloc(
         };
         let origin = Origin::Allocated { residual };
         bound.grants.push(Grant { memory: Arc::clone(&memory), at, bytes: span, origin });
-        // After the mapping and never before: the first thing this function may
-        // reach has to exist before it may reach anything.
-        bound.start_mastering();
         Ok((memory, at, span))
+    })
+}
+
+/// The function issues device addresses of `bits` bits, as its holder states
+/// it: once per claim and before any grant or lend, which are all placed
+/// below it. `InvalidArgument` outside 32 to 64 bits, `AlreadyExists` for a
+/// second statement.
+pub fn dma_limit(binding: &Binding, bits: u64) -> Result<(), SyscallError> {
+    let limit = u8::try_from(bits).ok().and_then(Limit::bits).ok_or(SyscallError::InvalidArgument)?;
+    with_bound(binding, |bound| {
+        if bound.limit.is_some() {
+            return Err(SyscallError::AlreadyExists);
+        }
+        // `OwnSpace::create` hands the lend window out below 4 GiB, which
+        // every limit reaches.
+        assert!(bound.lend + LEND_WINDOW <= limit.end(), "pcidev: a lend window at {:#x} above 4 GiB", bound.lend);
+        bound.limit = Some(limit);
+        Ok(())
+    })
+}
+
+/// Let the function master the bus, as its holder asks once it has stopped
+/// and laid out what the function may reach; nothing on a second call.
+pub fn dma_start(binding: &Binding) -> Result<(), SyscallError> {
+    with_bound(binding, |bound| {
+        bound.start_mastering();
+        Ok(())
     })
 }
 
@@ -1394,6 +1472,7 @@ pub fn dma_undo(binding: &Binding, memory: &Arc<SharedMemObject>) {
 pub fn dma_map(binding: &Binding, region: &Arc<SharedMemObject>) -> Result<(u64, u64), SyscallError> {
     let function = binding.function();
     with_bound(binding, |bound| {
+        bound.limit.ok_or(SyscallError::InvalidArgument)?;
         let (phys, span) = region.ram().ok_or(SyscallError::InvalidArgument)?;
         // One region, one address: a second mapping of it would be two grants
         // naming one set of pages, and taking either back would leave the
@@ -1408,7 +1487,6 @@ pub fn dma_map(binding: &Binding, region: &Arc<SharedMemObject>) -> Result<(u64,
             panic!("pcidev: {function} could not lend a region at {at:#x}: {why}");
         }
         bound.grants.push(Grant { memory: Arc::clone(region), at, bytes: span, origin: Origin::Mapped });
-        bound.start_mastering();
         Ok((at, span))
     })
 }

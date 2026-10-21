@@ -32,6 +32,6 @@ swapped-in netd's first grant started it mastering while it still ran the old
 netd's rings, its write faulted at the unit, and the fault handler cleared its
 bus mastering with receive still enabled. It stayed that way to the reset. The
 swap's fix (the kernel resets a released function, netd stops the part before
-its first grant) removes that state; the next swap run says whether the hang
+it starts it mastering) removes that state; the next swap run says whether the hang
 goes with it. If it does not, the reboot path is owed a quiesce of every
 function a process holds, as it already does for its own xHCI controllers.

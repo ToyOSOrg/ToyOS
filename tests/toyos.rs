@@ -414,6 +414,14 @@ const MACHINE_TESTS: &[&str] = &[
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
     "iommu_virtio_platform",
+    // A virtio NIC created without `iommu_platform=on` on q35 with VT-d, so
+    // its DMA bypasses the unit: the supervisor refuses it to netstack by
+    // name. Only QEMU can create such a function; q35 only.
+    "a_virtio_function_without_access_platform_is_refused",
+    // The kernel's own virtio console created without `iommu_platform=on`
+    // on q35 with VT-d: the kernel tells it physical addresses, and the boot
+    // runs over it. q35 only.
+    "the_kernel_tells_a_bypassing_console_physical_addresses",
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot stick is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
@@ -1155,9 +1163,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // Every domain's addresses end below the first root-bridge window
-        // above where they start.
-        "domain_ends_below_the_host_bridges",
+        // Every device address a domain maps is outside every root-bridge
+        // window firmware declared.
+        "domains_map_clear_of_the_host_bridges",
         metal::Metal { arms: TESTCASES, judge: |b| claims::clear_of_host_bridges(&b[0].kernel()) },
     ),
     (
@@ -3923,6 +3931,12 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(),
+        "a_virtio_function_without_access_platform_is_refused" => {
+            common::iommu::a_virtio_function_without_access_platform_is_refused()
+        }
+        "the_kernel_tells_a_bypassing_console_physical_addresses" => {
+            common::iommu::the_kernel_tells_a_bypassing_console_physical_addresses()
+        }
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
