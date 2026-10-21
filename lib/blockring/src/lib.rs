@@ -33,10 +33,10 @@
 //! handed the sessions opened on them ([`disk`]); data moves between a
 //! driver's device and the client's region alone.
 //!
-//! Pure: `alloc`, `toyos-blockhold` and `toyos-transport`, no `unsafe`. The
+//! Pure: `alloc`, `toyos-blockhold` and `toyos::transport`, no `unsafe`. The
 //! ends that map the page — a disk driver (`lib/blockserve`) and the client
 //! (`system/diskserver`'s library) — hand it the page as words
-//! ([`toyos_transport::Word`]) and act on what it answers.
+//! ([`toyos::transport::Word`]) and act on what it answers.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -54,7 +54,7 @@ pub mod wire;
 mod model;
 
 pub use entry::{Completion, Op, Request, Status};
-pub use toyos_transport::Run;
+pub use toyos::transport::Run;
 pub use layout::{BLOCK_BYTES, DEPTH, MAX_REQUEST_BLOCKS, SESSION_BYTES};
 
 /// The name a block service is served under. A connection opens only what its

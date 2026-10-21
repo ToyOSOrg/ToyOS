@@ -271,7 +271,7 @@ fn a_header_this_does_not_know_is_refused() {
 fn image_with(edit: impl Fn(usize, &mut [u8])) -> Result<u64, Refusal> {
     let header = Header::parse(&X86_64[..HEADER_SIZE]).unwrap();
     let mut phdrs = X86_64[header.phoff..header.phoff + header.phlen].to_vec();
-    for (i, entry) in phdrs.chunks_exact_mut(PHDR_SIZE).enumerate() {
+    for (i, entry) in phdrs.as_chunks_mut::<PHDR_SIZE>().0.iter_mut().enumerate() {
         edit(i, entry);
     }
     Image::new(header, &phdrs).map(|image| image.header_vaddr)

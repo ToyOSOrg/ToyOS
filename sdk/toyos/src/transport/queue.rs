@@ -8,31 +8,31 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::{clamp, word, Violation, Word, PUBLISH};
+use super::{clamp, word, Violation, Word, PUBLISH};
 
 /// Where a queue of `E`-word entries, `D` deep, is among `N` words: the word
 /// its consumer stores its head in, the word its producer stores its tail in,
 /// and its first entry.
 ///
 /// ```
-/// use toyos_transport::Place;
+/// use toyos::transport::Place;
 /// const QUEUE: Place<2, 4, 10> = Place::new::<0, 1, 2>();
 /// ```
 ///
 /// A place with a word at `N` or past it does not compile:
 ///
 /// ```compile_fail,E0080
-/// use toyos_transport::Place;
+/// use toyos::transport::Place;
 /// const QUEUE: Place<2, 4, 10> = Place::new::<0, 1, 3>();
 /// ```
 ///
 /// ```compile_fail,E0080
-/// use toyos_transport::Place;
+/// use toyos::transport::Place;
 /// const QUEUE: Place<2, 4, 10> = Place::new::<10, 1, 2>();
 /// ```
 ///
 /// ```compile_fail,E0080
-/// use toyos_transport::Place;
+/// use toyos::transport::Place;
 /// const QUEUE: Place<2, 4, 10> = Place::new::<0, 10, 2>();
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

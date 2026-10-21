@@ -6,7 +6,7 @@
 
 use core::fmt;
 
-use crate::Violation;
+use super::Violation;
 
 /// Bytes `offset..offset + len` of the region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

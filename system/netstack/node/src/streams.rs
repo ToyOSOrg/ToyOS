@@ -27,8 +27,8 @@ use toyos::net::stream::{Server, Words, LAYOUT, NODELAY, RECEIVE_BYTES, RESET, T
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{ConnId, Endpoint, Error, Failure, Lent, Options, State, Status};
 use toyos_net_wire::{Instant, Port};
-use toyos_transport::session::Rings;
-use toyos_transport::Violation;
+use toyos::transport::session::Rings;
+use toyos::transport::Violation;
 
 use crate::lease::Stack;
 use crate::Node;

@@ -5,24 +5,25 @@
 //! [`Producer`]/[`Consumer`] queues of fixed-size entries and an arena of
 //! [`Run`]s, or byte [`stream`]s and the wants that say when to ring, two of
 //! which with their `end`s are a duplex [`session`]. A protocol says what the
-//! entries and bytes mean; this crate says only what is safe.
+//! entries and bytes mean; this module says only what is safe.
 //!
-//! **Nothing here holds the region.** An adapter hands every call the `N`
-//! [`Word`]s an end was made over, and copies bytes itself, through a run's
-//! [`Span`], once: no reference to the peer's bytes is formed.
+//! **Nothing here holds the region or makes a syscall.** An adapter, such as
+//! [`crate::net::stream`], hands every call the `N` [`Word`]s an end was made
+//! over, and copies bytes itself, through a run's [`Span`], once: no reference
+//! to the peer's bytes is formed.
 //!
 //! **What the peer writes is untrusted until decoded.** An entry comes out as
-//! the peer's words, for the protocol's decoder to bound; a peer's cursor is bounded against the ring before it
-//! is believed, and the variant of [`Violation`] names what it claimed; a run
-//! is bounded against the [`Geometry`], and a tag against the [`Inflight`]
-//! table. An end keeps its own cursor locally and only stores the shared one,
-//! so nothing the peer writes moves it, and a cursor the peer moves backwards
-//! within bounds costs only the peer.
+//! the peer's words, for the protocol's decoder to bound; a peer's cursor is
+//! bounded against the ring before it is believed, and the variant of
+//! [`Violation`] names what it claimed; a run is bounded against the
+//! [`Geometry`], and a tag against the [`Inflight`] table. An end keeps its
+//! own cursor locally and only stores the shared one, so nothing the peer
+//! writes moves it, and a cursor the peer moves backwards within bounds costs
+//! only the peer.
 //!
 //! **A restart is seen only as a hang-up**, and [`Inflight::end`] answers every
 //! tag that was in flight, once; a tag from before it answers nothing.
 
-#![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
 #![cfg_attr(not(test), forbid(clippy::arithmetic_side_effects, clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 #![cfg_attr(not(test), deny(clippy::indexing_slicing, clippy::as_conversions))]
@@ -60,9 +61,9 @@ impl Word for AtomicU32 {
 }
 
 /// How an end stores the cursor that hands what it wrote to the peer.
-#[cfg(not(feature = "publish-relaxed"))]
+#[cfg(not(feature = "transport-publish-relaxed"))]
 const PUBLISH: Ordering = Ordering::Release;
-#[cfg(feature = "publish-relaxed")]
+#[cfg(feature = "transport-publish-relaxed")]
 const PUBLISH: Ordering = Ordering::Relaxed;
 
 /// Word `at` of an end's words, and the one index into them: every `at` an end
@@ -75,7 +76,7 @@ fn word<W, const N: usize>(page: &[W; N], at: usize) -> &W {
 
 /// A distance the peer's cursor claims, believed only up to `cap`.
 fn clamp(claimed: u32, cap: u32, broken: Violation) -> Result<u32, Violation> {
-    let cap = if cfg!(feature = "no-clamp") { u32::MAX } else { cap };
+    let cap = if cfg!(feature = "transport-no-clamp") { u32::MAX } else { cap };
     if claimed > cap { Err(broken) } else { Ok(claimed) }
 }
 
