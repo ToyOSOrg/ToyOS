@@ -92,21 +92,28 @@ a device that does not honour it is one no software on a laptop without VBUS
 control can clear. This bench's device honours it in every state the table above
 records. A different device, or this one in a state no wedge reaches, may not.
 
-## The present state, in the run's own words
+## The present state
 
-Run 47 is the standing guard doing its job for the first time: one boot per
-suite writes to the bench's own stick continuously, is reset out from under
-itself, and is judged on whether the device comes back. `power::usb_load_chain`
-PASSed on it, `boot.usbload.stick_secs` read 0 against a ceiling of 5, and the
-whole account was on the page — which is the other thing that boot established,
-because no wedge page this bench had taken before carried one.
+**Every survival in the table above was measured with the kernel's port
+reset in place**: until #971 every reset this kernel performed reset every
+connected port, halted and reset the controller and unpowered its ports
+before the reset register. That path and its guard, `power::usb_load_chain`
+on `usb-reset-under-load`, went with the kernel's xHCI.
+
+Since #971 the orderly stop does the same from userland: the supervisor tells
+every disk driver the machine stops, after the file servers' sync, and usbd
+resets every connected port and its controller before the kernel's stop
+(`toyos_xhci::hc::Hc::stop`). The boot deadline, the hard-lockup detector and
+a panic reset with no USB register touched, as #901 §6 accepted, and so does
+a stop whose usbd died, its function reset by its claim's release. The
+guard for that path is `stick_survives_a_reset_under_load`: `stick_load`
+writes the stick through usbd until the boot deadline resets the machine,
+judged on `boot.usbload.stick_secs` against the bench's record. It has not
+run yet.
 
 ## Exit condition
 
 A reproduction of the hang itself — not of a reset — that leaves evidence off
 the stick, and an account of what the controller and the device were in when it
-happened. The regression guard, `boot.usbload.stick_secs`, went with the
-kernel's `usb-reset-under-load` arm when the stick became usbd's; the
-small-kernel track's step 10 owes its rewritten row, a userland job writing the
-stick through usbd while the boot deadline resets the machine, and until it
-lands nothing reds if a reset bricks the device.
+happened. The regression guard is `stick_survives_a_reset_under_load`'s
+`boot.usbload.stick_secs`.

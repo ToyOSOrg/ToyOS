@@ -70,11 +70,12 @@ Beside that order, each waiting on something outside it:
    session reopened over the page a killed server left, by fileserver's
    `a_directory_rename_is_whole_under_one_name_wherever_the_server_is_killed`
    for DATA, and for LOG by the FAT test step 10 owes. **Partly done**
-   (#525, #536): NVMe is driven from userland, and the kernel's NVMe
-   driver is gone; the `nvme` driver offers its disk to diskserver, the block
-   service. **Left**: on the T14, `/log` and `/home` are on the
-   stick, which the kernel drives until step 10; the kernel's USB storage,
-   block layer, page cache and refusal chain go at step 9.
+   (#525, #536, #971): NVMe and the stick are driven from userland, and the
+   kernel's NVMe driver, USB storage, block layer and refusal chain are gone;
+   the `nvme` driver and usbd offer their disks to diskserver, the block
+   service. **Left**: the page cache, with step 9's file half, and the client
+   test `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md`
+   owes.
 4. **Where the data filesystem lives** — owner ruling, 2026-09-26, from the
    roasted proposal: userland file servers, the VFS a client library, and a
    program's view a set of directory capabilities the supervisor hands it,
@@ -100,7 +101,7 @@ Beside that order, each waiting on something outside it:
    refused by name, red on a supervisor that starts the role again while its
    claim is held or that drops the name from the `AlreadyExists` refusal
    (`refused` in `system/supervisor/src/main.rs`).
-   **Partly done**: steps 1, 2, 3, 6 and 7 are done, and 4, 5, 8, 9 and 10
+   **Partly done**: steps 1, 2, 3, 4, 6 and 7 are done, and 5, 8, 9 and 10
    partly.
 
    Stages 3 and 4 are built as these steps:
@@ -110,13 +111,11 @@ Beside that order, each waiting on something outside it:
    4. **Partitions in diskserver**. **Exit**: a partition held by one session
       at a time, the idle slot claimed by GUID and written through
       diskserver, and `SYS_PARTITION_READ/WRITE` deleted once no disk the
-      kernel drives serves a claim. **Partly done** (#525, #826): sessions, a
-      block connector that opens only the partitions its badge grants, and
-      the idle slot on diskserver's disk written through one. **Left**: on a
-      disk the kernel drives, the stick among them, the supervisor still
-      claims a role's and the idle slot's partitions from the kernel, and
-      `SYS_PARTITION_READ/WRITE` serve them; both go with the kernel's USB
-      storage at step 10.
+      kernel drives serves a claim. **Done** (#525, #826, #971): sessions, a
+      block connector that opens only the partitions its badge grants, the
+      idle slot written through one, and the stick's partitions diskserver's
+      through usbd; the kernel drives no disk, and `SYS_PARTITION_READ/WRITE`
+      are deleted.
    5. **Spawn and dlopen from an image handle.** **Exit**: a program in
       `/apps` runs having been read by userland, its faults served from the
       image object and not the VFS. **Partly done** (#536): spawn
@@ -140,8 +139,7 @@ Beside that order, each waiting on something outside it:
       whole, shown red on an `open` whose truncate makes a new file under a
       held file's name.
    7. **fileserver for LOG and BOOT; logkeeper on the client library.**
-      **Done** (#536); on a disk the kernel drives, fileserver opens LOG and
-      BOOT through the kernel's partition claims, which step 10 deletes.
+      **Done** (#536, and on the stick #971).
    8. **Views as capabilities**, the isolation track's stage 1
       (`issues/every-program-sees-only-the-files-it-was-given.md`).
       **Exit**: that stage's, run against fileserver: an escape suite red on
@@ -187,8 +185,13 @@ Beside that order, each waiting on something outside it:
        block ruling, which replaces #901's `block@` ports). **Done**: the
        kernel's xHCI, USB storage, block layer, GPT, keyboard and mouse
        streams, partition claims and `sync::OwedLock` are deleted, with the
-       xHCI and USB actuators; every guest boot's stick and every `usb-kbd`
-       and `usb-tablet` go through usbd. **The exit's evidence**: the kernel's
+       xHCI and USB actuators. Every guest boot's stick goes through usbd,
+       and so does the HID of an image whose usbd receives `input`
+       (`images/console.toml`'s, `a_usb_key_reaches_the_console`); a test
+       image's usbd receives no `input`, so its HID is bound and let go at
+       the first `NotGiven`. The machine's stop has usbd reset every connected
+       port and its controller (`Hc::stop`) before the kernel's, as the
+       kernel's xHCI stop did. **The exit's evidence**: the kernel's
        part by `usbd_drives_the_spare` on the default `qemu-xhci` and
        `usbd_drives_the_type_c_controller`, and `usbd_serves_the_boot_stick`
        for the boot controller; the kernel's input streams gone, with no
@@ -200,13 +203,22 @@ Beside that order, each waiting on something outside it:
        `a_recovery_the_controller_refuses_lets_the_device_go`,
        `no_sequence_breaks_an_invariant` — and the owed
        `a_stick_whose_bulk_endpoint_never_answers_leaves_a_keyboard_on_the_same_controller_delivering_every_report`;
-       `/log`'s by the `toyos-blockring` and `fat.rs` tests it named.
-       **Left**, #901 section 9's three metal rows that judge with a
-       userland load: the rewritten `usbload` row (the stick's survival of a
-       reset with a command in flight, whose kernel actuator went), 
-       `tone_beside_a_stick_write`
+       `/log`'s by the `toyos-blockring` and `fat.rs` tests it named, and by
+       `the_log_lands_on_the_boot_stick` on QEMU's stick; the stop's by
+       `the_stop_resets_every_connected_port_then_halts_resets_and_unpowers_the_controller`
+       and the same row's judge of usbd's exit; the HID path's on a real xHC
+       by `a_usb_key_reaches_the_console`.
+       **Left**: the metal rows, which have not run: `usbd_serves_the_boot_stick`
+       and #901 section 9's three that judge with a userland load,
+       `stick_survives_a_reset_under_load` (a deadline reset under
+       `stick_load`), `tone_beside_a_stick_write`
        (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`'s
-       exit) and `mask_windows` under a stick write.
+       exit) and `mask_windows` under `stick_write`. #971's first metal boots
+       came back with no `logkeeper` file on the stick, which every metal
+       row reads; QEMU's stick boot (`the_log_lands_on_the_boot_stick`) has
+       it. And the client test
+       `issues/nothing-reopens-a-diskserver-session-over-a-used-page.md`
+       owes, which `/log`'s evidence names.
 
 5. **USB by userland**, with discovery and recovery written once as
    straight-line code: step 10, and this exit. **Exit**: step 10's, and no
