@@ -143,6 +143,7 @@ members = [
     "system/vdagent/bridge",
     "tests/guest/kernelprobe",
     "tests/guest/metalprobe",
+    "tests/guest/osbench",
     "tests/guest/pciholder",
     "tests/guest/test-runner",
     "tests/metal",

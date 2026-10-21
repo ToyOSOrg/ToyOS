@@ -3111,6 +3111,7 @@ mod tests {
         "images/diag.toml",
         "images/console.toml",
         "tests/images/acpicase.toml",
+        "tests/images/benchcase.toml",
         "tests/images/clipboardcase.toml",
         "tests/images/drivescase.toml",
         "tests/images/hostedclangcase.toml",

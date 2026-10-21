@@ -42,3 +42,11 @@ rustflags = ["-Dwarnings"]
 
 [target.aarch64-unknown-toyos]
 rustflags = ["-Dwarnings"]
+
+# `tests/guest/osbench`'s Linux build, static so a bench runs it without a
+# toolchain, linked by the toolchain's own LLD so no C toolchain is needed, and
+# with the frame pointers the ToyOS targets keep, so both builds run the same
+# code.
+[target.x86_64-unknown-linux-musl]
+linker = "rust-lld"
+rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes"]

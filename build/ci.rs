@@ -802,9 +802,9 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// end, is a test that fills the host's disk one run at a time.
 ///
 /// Clippy needs none of the ToyOS toolchain — the kernel and the bootloader
-/// lint against every architecture's bare targets ([`crate::clippy::BARE_TARGETS`]),
-/// which any rustup installs, and userland carries no clippy shape
-/// (`build/clippy.rs`).
+/// lint against every architecture's bare targets, and osbench's Linux half
+/// against its Linux one ([`crate::clippy::TARGETS`]), which any rustup
+/// installs; no other userland carries a clippy shape (`build/clippy.rs`).
 ///
 /// In a job that carries the cache ([`cicache::carried`]) the restored entry is
 /// read before any step. A developer's tree keeps the dates its edits gave it.
@@ -870,10 +870,10 @@ fn host(root: &Path, scope: Result<(Scope, String), String>) -> Vec<Step> {
         }),
         licences(),
     ]);
-    steps.push(step("clippy and the bare targets", || {
+    steps.push(step("clippy and its targets", || {
         for args in [
             vec!["component", "add", "clippy"],
-            [&["target", "add"][..], &crate::clippy::BARE_TARGETS].concat(),
+            [&["target", "add"][..], &crate::clippy::TARGETS].concat(),
         ] {
             let status = Command::new("rustup").args(&args).status().map_err(|e| e.to_string())?;
             if !status.success() {

@@ -987,6 +987,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         "job_fairness",
         metal::Metal { arms: TESTCASES, judge: |b| job_fairness(b[0]) },
     ),
+    // ---- one image: tests/images/benchcase.toml, `osbench`'s ToyOS half ----
+    (
+        // The numbers compared with the same program on the bench's own Linux.
+        // Evidence and not a verdict: they are read off the log, and the row
+        // holds only that every group ran to its end. The T14 and the AMD bench.
+        "osbench",
+        metal::Metal { arms: BENCHCASE, judge: |b| osbench_ran(b[0]) },
+    ),
     // ---- tests/images/jobcase.toml, each image armed to end its boot its own way ----
     (
         // Its own boot, and it must not share one: it is the only arm in this
@@ -1410,6 +1418,22 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         claims::RECLAIM,
     ],
 )];
+
+/// `osbench`'s groups, each a job named by its symlink.
+const OSBENCH_GROUPS: [&str; 3] = ["osbench_system", "osbench_sched", "osbench_fair"];
+
+const BENCHCASE: &[metal::Arm] = &[metal::once("benchcase", "tests/images/benchcase.toml", &[], &OSBENCH_GROUPS)];
+
+/// Every group exited 0, which `osbench` does only once each of its
+/// benchmarks measured, and said it was done.
+fn osbench_ran(boot: &metal::Readback) -> Result<(), String> {
+    for job in OSBENCH_GROUPS {
+        boot.job_passed(job)?;
+        let group = job.strip_prefix("osbench_").expect("a group's job");
+        boot.log().must_say(&format!("group={group} done"))?;
+    }
+    Ok(())
+}
 
 /// The same boot, its rows ended on the hold, which waits for the ACPI
 /// server's power sources, the last line of its start. The members run
