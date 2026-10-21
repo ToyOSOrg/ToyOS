@@ -107,14 +107,14 @@ fn calloc_refuses_a_product_a_usize_cannot_hold_and_asks_the_heap_nothing() {
         ((1 << 32) + 1, 1 << 32),
         (half + 1, 3),
     ] {
-        assert_eq!(unsafe { malloc::calloc(&heap, count, size) }, Err(Refusal::NoMemory), "calloc({count:#x}, {size:#x})");
+        assert_eq!(malloc::calloc(&heap, count, size), Err(Refusal::NoMemory), "calloc({count:#x}, {size:#x})");
         assert_eq!(heap.asked(), [], "calloc({count:#x}, {size:#x})");
     }
     for (count, size) in [(0, usize::MAX), (usize::MAX, 0), (0, 0)] {
-        assert_eq!(unsafe { malloc::calloc(&heap, count, size) }, Ok(std::ptr::null_mut()));
+        assert_eq!(malloc::calloc(&heap, count, size), Ok(std::ptr::null_mut()));
         assert_eq!(heap.asked(), []);
     }
-    let block = unsafe { malloc::calloc(&heap, 3, 5) }.unwrap();
+    let block = malloc::calloc(&heap, 3, 5).unwrap();
     assert_eq!(heap.asked(), [layout(16 + 15, 16)]);
     assert_eq!(unsafe { std::slice::from_raw_parts(block, 15) }, [0; 15]);
     unsafe { malloc::free(&heap, block) };
@@ -130,16 +130,16 @@ fn a_size_whose_header_does_not_fit_is_refused_before_the_heap() {
     let edge = largest(16);
     let past = (0..=32).map(|k| usize::MAX - k).chain((1..=32).map(|k| edge + k)).chain([isize::MAX as usize]);
     for size in past.clone() {
-        assert_eq!(unsafe { malloc::malloc(&heap, size) }, Err(Refusal::NoMemory), "malloc({size:#x})");
+        assert_eq!(malloc::malloc(&heap, size), Err(Refusal::NoMemory), "malloc({size:#x})");
         assert_eq!(heap.asked(), [], "malloc({size:#x})");
-        assert_eq!(unsafe { malloc::aligned_alloc(&heap, 16, size) }, Err(Refusal::NoMemory), "aligned_alloc(16, {size:#x})");
+        assert_eq!(malloc::aligned_alloc(&heap, 16, size), Err(Refusal::NoMemory), "aligned_alloc(16, {size:#x})");
         assert_eq!(heap.asked(), [], "aligned_alloc(16, {size:#x})");
     }
-    assert_eq!(unsafe { malloc::malloc(&heap, edge) }, Err(Refusal::NoMemory));
+    assert_eq!(malloc::malloc(&heap, edge), Err(Refusal::NoMemory));
     assert_eq!(heap.asked(), [layout(16 + edge, 16)]);
 
     // A live block asked to grow past them is left as it was.
-    let block = unsafe { malloc::malloc(&heap, 8) }.unwrap();
+    let block = malloc::malloc(&heap, 8).unwrap();
     unsafe { block.write_bytes(0x5A, 8) };
     heap.asked();
     for size in past {
@@ -156,11 +156,11 @@ fn a_size_whose_header_does_not_fit_is_refused_before_the_heap() {
 fn an_alignment_is_a_power_of_two_the_heap_is_asked_for_at_least_sixteen() {
     let heap = Heap::default();
     for align in [0, 3, 24, 48, usize::MAX] {
-        assert_eq!(unsafe { malloc::aligned_alloc(&heap, align, 8) }, Err(Refusal::Alignment), "aligned_alloc({align:#x}, 8)");
+        assert_eq!(malloc::aligned_alloc(&heap, align, 8), Err(Refusal::Alignment), "aligned_alloc({align:#x}, 8)");
         assert_eq!(heap.asked(), []);
     }
     for (align, size) in [(1, 8), (2, 1), (8, 0), (16, 100), (32, 1), (4096, 4096), (1 << 21, 3)] {
-        let block = unsafe { malloc::aligned_alloc(&heap, align, size) }.unwrap();
+        let block = malloc::aligned_alloc(&heap, align, size).unwrap();
         let at = align.max(16);
         assert_eq!(block.addr() % at, 0, "aligned_alloc({align:#x}, {size})");
         assert_eq!(heap.only(), layout(at + size, at), "aligned_alloc({align:#x}, {size})");
@@ -170,13 +170,13 @@ fn an_alignment_is_a_power_of_two_the_heap_is_asked_for_at_least_sixteen() {
     heap.asked();
     // Alignments a `Layout` cannot hold with a header in front.
     for align in [1 << (usize::BITS - 2), 1 << (usize::BITS - 1)] {
-        assert_eq!(unsafe { malloc::aligned_alloc(&heap, align, 1) }, Err(Refusal::NoMemory), "aligned_alloc({align:#x}, 1)");
+        assert_eq!(malloc::aligned_alloc(&heap, align, 1), Err(Refusal::NoMemory), "aligned_alloc({align:#x}, 1)");
         assert_eq!(heap.asked(), []);
     }
     let edge = largest(4096);
-    assert_eq!(unsafe { malloc::aligned_alloc(&heap, 4096, edge + 1) }, Err(Refusal::NoMemory));
+    assert_eq!(malloc::aligned_alloc(&heap, 4096, edge + 1), Err(Refusal::NoMemory));
     assert_eq!(heap.asked(), []);
-    assert_eq!(unsafe { malloc::aligned_alloc(&heap, 4096, edge) }, Err(Refusal::NoMemory));
+    assert_eq!(malloc::aligned_alloc(&heap, 4096, edge), Err(Refusal::NoMemory));
     assert_eq!(heap.asked(), [layout(4096 + edge, 4096)]);
 }
 
@@ -184,7 +184,7 @@ fn an_alignment_is_a_power_of_two_the_heap_is_asked_for_at_least_sixteen() {
 fn realloc_keeps_a_blocks_alignment_and_its_bytes() {
     let heap = Heap::default();
     for align in [16, 64, 4096, 1 << 16] {
-        let block = unsafe { malloc::aligned_alloc(&heap, align, 100) }.unwrap();
+        let block = malloc::aligned_alloc(&heap, align, 100).unwrap();
         for i in 0..100 {
             unsafe { block.add(i).write(i as u8) };
         }
@@ -205,6 +205,6 @@ fn realloc_keeps_a_blocks_alignment_and_its_bytes() {
     assert_eq!(heap.only(), layout(16 + 24, 16));
     unsafe { malloc::free(&heap, block) };
     unsafe { malloc::free(&heap, std::ptr::null_mut()) };
-    assert_eq!(unsafe { malloc::malloc(&heap, 0) }, Ok(std::ptr::null_mut()));
+    assert_eq!(malloc::malloc(&heap, 0), Ok(std::ptr::null_mut()));
     heap.assert_empty();
 }

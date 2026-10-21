@@ -49,38 +49,40 @@ unsafe fn block_in(raw: *mut u8, size: usize, align: usize) -> *mut u8 {
 }
 
 /// `size` bytes aligned to `align`, a power of two.
-unsafe fn allocate(heap: &impl GlobalAlloc, size: usize, align: usize, zeroed: bool) -> Result<*mut u8, Refusal> {
+fn allocate(heap: &impl GlobalAlloc, size: usize, align: usize, zeroed: bool) -> Result<*mut u8, Refusal> {
     let align = align.max(MIN_ALIGN);
     let layout = layout(size, align).ok_or(Refusal::NoMemory)?;
+    // SAFETY: `layout` is at least `MIN_ALIGN` bytes, never zero.
     let raw = unsafe { if zeroed { heap.alloc_zeroed(layout) } else { heap.alloc(layout) } };
     if raw.is_null() {
         return Err(Refusal::NoMemory);
     }
+    // SAFETY: `raw` holds `align + size` bytes, `align` at least `MIN_ALIGN`.
     Ok(unsafe { block_in(raw, size, align) })
 }
 
 /// Null for no bytes.
-pub(crate) unsafe fn malloc(heap: &impl GlobalAlloc, size: usize) -> Result<*mut u8, Refusal> {
+pub(crate) fn malloc(heap: &impl GlobalAlloc, size: usize) -> Result<*mut u8, Refusal> {
     if size == 0 {
         return Ok(ptr::null_mut());
     }
-    unsafe { allocate(heap, size, MIN_ALIGN, false) }
+    allocate(heap, size, MIN_ALIGN, false)
 }
 
-pub(crate) unsafe fn aligned_alloc(heap: &impl GlobalAlloc, align: usize, size: usize) -> Result<*mut u8, Refusal> {
+pub(crate) fn aligned_alloc(heap: &impl GlobalAlloc, align: usize, size: usize) -> Result<*mut u8, Refusal> {
     if !align.is_power_of_two() {
         return Err(Refusal::Alignment);
     }
-    unsafe { allocate(heap, size, align, false) }
+    allocate(heap, size, align, false)
 }
 
 /// Null for no bytes; refused for a product a `usize` cannot hold.
-pub(crate) unsafe fn calloc(heap: &impl GlobalAlloc, count: usize, size: usize) -> Result<*mut u8, Refusal> {
+pub(crate) fn calloc(heap: &impl GlobalAlloc, count: usize, size: usize) -> Result<*mut u8, Refusal> {
     let total = count.checked_mul(size).ok_or(Refusal::NoMemory)?;
     if total == 0 {
         return Ok(ptr::null_mut());
     }
-    unsafe { allocate(heap, total, MIN_ALIGN, true) }
+    allocate(heap, total, MIN_ALIGN, true)
 }
 
 /// # Safety
@@ -101,7 +103,7 @@ pub(crate) unsafe fn free(heap: &impl GlobalAlloc, block: *mut u8) {
 /// `block` is null or a live block of this allocator from `heap`.
 pub(crate) unsafe fn realloc(heap: &impl GlobalAlloc, block: *mut u8, new_size: usize) -> Result<*mut u8, Refusal> {
     if block.is_null() {
-        return unsafe { malloc(heap, new_size) };
+        return malloc(heap, new_size);
     }
     if new_size == 0 {
         unsafe { free(heap, block) };
@@ -132,19 +134,19 @@ mod exports {
 
     #[unsafe(no_mangle)]
     unsafe extern "C" fn malloc(size: usize) -> *mut u8 {
-        answer(unsafe { super::malloc(&HEAP, size) })
+        answer(super::malloc(&HEAP, size))
     }
 
     /// C11's, which takes any size: a block need not be a whole number of
     /// alignments.
     #[unsafe(no_mangle)]
     unsafe extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut u8 {
-        answer(unsafe { super::aligned_alloc(&HEAP, align, size) })
+        answer(super::aligned_alloc(&HEAP, align, size))
     }
 
     #[unsafe(no_mangle)]
     unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
-        answer(unsafe { super::calloc(&HEAP, count, size) })
+        answer(super::calloc(&HEAP, count, size))
     }
 
     #[unsafe(no_mangle)]

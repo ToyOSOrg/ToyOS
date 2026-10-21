@@ -25,7 +25,8 @@
 //! the primary's fork repository at the commit this tree pins and never moved ([`fork_checkout`]).
 //! `library/std` names `toyos-abi` and `toyos` by version, and every bootstrap
 //! run is handed this worktree's by one `[patch]` ([`std_patch`]); each file of
-//! its ToyOS backend, `sdk/std`, it names by a `#[path]` up out of the fork. So
+//! its ToyOS backend, `sdk/std` and the C allocator `sdk/libc/src/malloc.rs`
+//! it includes, it names by a `#[path]` up out of the fork. So
 //! each checkout's std compiles against its own worktree's ABI and backend with
 //! nothing rewritten, and the fork names no path to either crate, so moving one
 //! breaks no fork commit pinned before the move. The build is bootstrap's
@@ -66,8 +67,8 @@ use whole_toolchain::{whole, Whole};
 
 /// The per-worktree sources that end up inside a sysroot: std links the
 /// `toyos-abi` and `toyos` [`std_patch`] hands it and compiles its ToyOS
-/// backend from `sdk/std`, and `libtoyos_c.a` is `sdk/libc` with `toyos-elf`
-/// and `toyos-osrelease`.
+/// backend from `sdk/std`, C's allocator among it from `sdk/libc/src`, and
+/// `libtoyos_c.a` is `sdk/libc` with `toyos-elf` and `toyos-osrelease`.
 pub const SYSROOT_SOURCES: [&str; 7] = [
     "sdk/abi/src",
     "sdk/toyos/src",
