@@ -578,7 +578,7 @@ pub fn stick_survives_a_reset_under_load(back: &super::metal::Readback) -> Resul
     let log = back.log();
     let wrote = log.must_say("stick_load: ")?;
     eprintln!("  [power] {}", wrote.trim());
-    if let Some(last) = log.text().lines().filter(|l| l.contains("stick_load: ")).last() {
+    if let Some(last) = log.text().lines().rfind(|l| l.contains("stick_load: ")) {
         eprintln!("  [power] the last it said before the reset: {}", last.trim());
     }
     back.measured("boot.usbload.stick_secs", back.stick_secs)
