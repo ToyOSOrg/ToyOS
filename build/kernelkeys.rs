@@ -44,11 +44,6 @@ pub struct Declared {
 /// Every hashed container in `kernel/src`, with the origin of its keys.
 pub const DECLARED: &[Declared] = &[
     Declared {
-        file: "kernel/src/scheduler.rs",
-        ty: "HashMap<Pid, Arc<KShare>>",
-        keys: "`process::Pid`, minted by the process table",
-    },
-    Declared {
         file: "kernel/src/process.rs",
         ty: "HashMap<Pid, ProcessEntry>",
         keys: "the pid of the entry's `ProcessObject`, which only `kernel::proclife::Pids::take` issues, \

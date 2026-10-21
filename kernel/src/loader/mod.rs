@@ -163,7 +163,7 @@ fn segment_prot(seg: &toyos_elf::Segment) -> crate::mm::policy::Prot {
 /// Load a program and place its main thread under `parent`, answering its pid
 /// and what `commit` left its caller holding of it. `commit` builds the
 /// child's handle table around the child's handle to itself, once nothing is
-/// left to refuse.
+/// left to refuse, and names the job it runs in.
 ///
 /// `path` is the program, opened here — or, with `image`, the bytes the caller
 /// read from it itself, and then nothing opens it. `argv[0]` is only the name the child goes by.
@@ -174,7 +174,9 @@ fn segment_prot(seg: &toyos_elf::Segment) -> crate::mm::policy::Prot {
 pub fn spawn<H>(
     path: &str,
     argv: &[&str],
-    commit: impl FnOnce(crate::object::HandleEntry) -> Result<(HandleTable, Endowments, H), crate::object::Refusal>,
+    commit: impl FnOnce(
+        crate::object::HandleEntry,
+    ) -> Result<(HandleTable, Endowments, Arc<kernel::sched::job::Job>, H), crate::object::Refusal>,
     cwd: String,
     env: Vec<u8>,
     image: Option<Arc<dyn crate::file_backing::FileBacking>>,
@@ -341,7 +343,7 @@ pub fn spawn<H>(
     let object = crate::object::process::ProcessObject::new(pid);
     // The point of no return: every failure above answers the caller with its
     // table untouched.
-    let (handles, endowments, held) = commit(start::own_handle(&object))?;
+    let (handles, endowments, job, held) = commit(start::own_handle(&object))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         cwd,
@@ -372,6 +374,7 @@ pub fn spawn<H>(
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
         endowments,
+        job: job.clone(),
     }));
 
     let thread_data = Arc::new(Lock::new(ThreadData {
@@ -408,6 +411,7 @@ pub fn spawn<H>(
             child_pt.clone(),
             thread_pointer,
             Some(image),
+            job,
         );
         table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
     });
@@ -460,6 +464,7 @@ pub fn spawn_supervisor() -> Pid {
     let rights = Rights::DUP
         .union(Rights::TRANSFER)
         .union(Rights::DEVICE)
+        .union(Rights::JOBS)
         .union(Rights::RT)
         .union(Rights::LOG)
         .union(Rights::WAIT)
@@ -482,7 +487,7 @@ pub fn spawn_supervisor() -> Pid {
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
     let commit = |own| {
         start::endow_self(&mut handles, &mut entries, &mut labels, own);
-        Ok((handles, Endowments::new(entries, labels), ()))
+        Ok((handles, Endowments::new(entries, labels), crate::object::job::new_job(), ()))
     };
     match spawn(SUPERVISOR_PATH, &[SUPERVISOR_PATH], commit, String::from("/"), Vec::new(), None, Parent::Root) {
         Ok((pid, ())) => pid,

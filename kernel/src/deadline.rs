@@ -314,7 +314,7 @@ fn this_cpu() -> ! {
     // hard lockup and not the state this control claims.
     crate::preempt::disable();
     let arrived_awake = crate::arch::cpu::interrupts_enabled();
-    crate::arch::irqchip::arm_within(kernel::sched::fair::QUANTUM_NS);
+    crate::arch::irqchip::arm_within(kernel::sched::task::QUANTUM_NS);
     crate::arch::cpu::enable_interrupts();
     log!(
         "wedge: cpu{} {}",

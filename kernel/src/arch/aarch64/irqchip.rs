@@ -492,7 +492,7 @@ pub fn comparator() -> u64 {
 /// far past `armed`.
 #[cfg(feature = "test-actuators")]
 pub fn rearmed_a_quantum(armed: u64) -> bool {
-    comparator() >= armed + crate::clock::counter_ticks(kernel::sched::fair::QUANTUM_NS)
+    comparator() >= armed + crate::clock::counter_ticks(kernel::sched::task::QUANTUM_NS)
 }
 
 /// Stop the timer: no interrupt until it is armed again.
@@ -518,7 +518,7 @@ pub(super) fn rearm() {
 pub(super) fn rearm_in_kernel() {
     match percpu::armed_ticks() {
         0 => stop_timer_hardware(),
-        _ => compare_at(cpu::counter() + crate::clock::counter_ticks(kernel::sched::fair::QUANTUM_NS)),
+        _ => compare_at(cpu::counter() + crate::clock::counter_ticks(kernel::sched::task::QUANTUM_NS)),
     }
 }
 
@@ -538,7 +538,7 @@ pub fn floor_selftest() {
         ctl & TIMER_ISTATUS != 0
     };
     settles(100, "the timer armed for its floor", due);
-    let now = arm_within(kernel::sched::fair::QUANTUM_NS);
+    let now = arm_within(kernel::sched::task::QUANTUM_NS);
     let cval: u64;
     // SAFETY: reads the EL1 virtual timer's comparator.
     unsafe { core::arch::asm!("mrs {}, cntv_cval_el0", out(reg) cval, options(nomem, nostack, preserves_flags)) };

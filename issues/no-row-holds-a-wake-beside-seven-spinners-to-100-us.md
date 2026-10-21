@@ -11,10 +11,10 @@ could take it. PR #874 (`347e3313d`) changed that. An ordinary wake's doorbell
 now kicks a busy target on its edge (`Doorbell::ring`,
 `kernel/pure/sched/mailbox.rs`), and at the drain `place`
 (`kernel/pure/sched/cpu.rs`) forwards a fair task that would queue behind a
-running fair task to an idle CPU. A task that stays with a strictly lower key
-cuts the running task's quantum to end `PROTECTED_RUN_NS` (1 ms) after its
-dispatch, and one queued task counts as surplus to a steal
-(`PUSH_THRESHOLD` = 1).
+running fair task to an idle CPU. A task that stays and is due first cuts the
+running request at its minimum run, `MIN_SLICE_NS` (250 µs) after its dispatch
+(`kernel/pure/sched/queue.rs`), and one queued task counts as surplus to a
+steal (`PUSH_THRESHOLD` = 1).
 
 **What #874 measured.** The metal row `wake_onto_busy` (`tests/toyos.rs`)
 times a wake onto a CPU that one spinner holds, beside CPUs with nothing to

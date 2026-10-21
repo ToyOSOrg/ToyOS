@@ -71,23 +71,27 @@ scales with crowding. These are model figures for the scenarios that ran, not
 hardware latency guarantees. Stage 3 validates the kernel implementation on
 the supported machines.
 
-Stage 3 owes these decision points. A CPU decides again when its running
-request ends, and when a queued group whose request is due before the running
-group's becomes eligible, once the running thread has run `min_slice`.
-Without the second, a job whose request is due first but carries a little
-debt waits out every longer request ahead of it. In the model's desktop mix
-beside a build, the compositor then finished a frame 9.4 ms after its release
-and missed it; with the second, it misses none on the T14 and AMD shapes,
-finishing within 1.7 ms. The kernel must re-arm each CPU's preemption timer
-for the earliest such instant on every change to that CPU's queues, not only
-at its own decisions: an enqueue, a dequeue (a last thread blocking, or
-another CPU stealing or migrating a thread away) and a decision. A group in
-debt that leaves shifts `V` and makes the others eligible sooner, and a remote
-dequeue is no decision on the CPU that loses it; armed only there, the timer
-fires late. The query is O(log g) for g groups: the deadline-ordered group
-tree, augmented with each subtree's least virtual time, gives the earliest
-eligibility among groups due before the running one. The model's cost is
-226 to 293 switches per CPU per second in that mix, against 216 to 259
-without. Within a group the group's own request, as short as its shortest
-thread's, bounds the wait; deciding there as well cost 361 to 417 switches
-and improved no latency.
+Stage 3 is in the kernel. A job is a kernel object (`kernel/pure/sched/job.rs`,
+`kernel/src/object/job.rs`) a process's threads and its children share unless a
+spawn endows another under `JOB_LABEL`, and a launch carries its caller's; only a system capability's `JOBS` right
+makes one, which the supervisor makes each service with and the compositor
+each program it starts. Each CPU
+runs the two EEVDF levels (`kernel/pure/sched/queue.rs`) over a deadline-ordered
+tree augmented with each subtree's least virtual time, and decides again at a
+request's end, at an earlier-due group's eligibility, and at a wake due first —
+the last two once the running thread has run `MIN_SLICE_NS`. Every change to a
+CPU's queues is made in that CPU's own pass, and every pass ends by arming the
+timer for the earliest of these, so a remote steal re-arms it as a wake does.
+Without the eligibility decision a job whose request is due first but carries a
+little debt waits out every longer request ahead of it: in the model's desktop
+mix beside a build the compositor then missed frames, finishing one 9.4 ms after
+its release; with it, none on the T14 and AMD shapes. Busy CPUs balance summed
+group weight, one request per CPU per `BALANCE_NS`. A voluntary yield ends the
+yielder's request at both levels.
+
+Stage 3 leaves three things. Explicit latency requests have no syscall: the
+queue takes one request size for every thread until a first caller (the
+compositor's or the audio worker's) needs a shorter one. `sshserver` starts its
+sessions as its own helpers, since it has no ToyOS dependency to make a job
+with. std and libc start a child in a new job only by `CommandExt::endow` under
+`JOB_LABEL`.

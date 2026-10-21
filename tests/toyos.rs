@@ -89,6 +89,10 @@ const RUST_SKIP: &[&str] = &[
     // Its exit code is a round trip's p99 in microseconds, which a guest's host
     // sets: the `wake_onto_busy` metal row runs it on the T14.
     "wake_onto_busy",
+    // Its verdict is how the CPU time of a saturated machine split between
+    // jobs, which a guest's host sets: the `job_fairness` metal row runs it on
+    // each bench.
+    "job_fairness",
     // Its product is a cycle count per syscall and the clock rate beside it,
     // which a guest's host sets: the `syscall_cost` metal row runs it.
     "syscall_cost",
@@ -944,6 +948,13 @@ const METAL: &[(&str, metal::Metal)] = &[
         "wake_onto_busy",
         metal::Metal { arms: TESTCASES, judge: |b| wake_onto_busy(b[0]) },
     ),
+    (
+        // Two builds and a helper-heavy job, each its own job, on a saturated
+        // machine: each takes a third whatever its helper count. Its widths are
+        // the benches', eight CPUs and sixteen.
+        "job_fairness",
+        metal::Metal { arms: TESTCASES, judge: |b| job_fairness(b[0]) },
+    ),
     // ---- tests/images/jobcase.toml, each image armed to end its boot its own way ----
     (
         // Its own boot, and it must not share one: it is the only arm in this
@@ -1363,6 +1374,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_volume_step",
         "test_rs_syscall_cost",
         "test_rs_spawn_cost",
+        "test_rs_job_fairness",
         claims::RECLAIM,
     ],
 )];
@@ -6507,6 +6519,15 @@ fn wake_onto_busy(boot: &metal::Readback) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// `job_fairness` judges its own shares and exits on the verdict; its line is
+/// the measurement.
+fn job_fairness(boot: &metal::Readback) -> Result<(), String> {
+    for said in boot.log().text().lines().filter(|l| l.contains("job_fairness: ")) {
+        eprintln!("  [jobs] {}", said.trim());
+    }
+    boot.job_passed("test_rs_job_fairness")
 }
 
 fn run_debug_mode(c_tests: &[(String, Vec<u8>)], rust_bins: &[(String, Vec<u8>)]) {

@@ -15,11 +15,11 @@ use std::sync::atomic::{AtomicBool, Ordering as StdOrdering};
 use loom::sync::Arc;
 use kernel_loom::sched::cpu::{Balance, CpuHandle, CpuHandles, CpuSched, Env, RunToken, SchedPass};
 use kernel_loom::sched::topology::Topology;
-use kernel_loom::sched::fair::{FairShare, Frontier, ShareState};
 use kernel_loom::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent};
+use kernel_loom::sched::job::{Job, JobKey};
 use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer, Urgency};
 use kernel_loom::sched_model::{
-    model, IrqGuard, Kicks, LoomLock, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
+    model, IrqGuard, Kicks, Msg, PreemptModel, RemoteGuard, CPU0, CPU1,
 };
 use kernel_loom::sched::retire;
 use kernel_loom::sched::task::{
@@ -333,13 +333,12 @@ fn a_retire_and_a_wake_never_both_claim_a_parked_task() {
 // The sixth model runs a whole `CpuSched`, so it needs the three things a pass
 // is built against: a payload, a hardware surface, and the shared half of a CPU.
 
-/// The smallest payload a `CpuSched` can be built over: no address space, no
-/// saved context, and loom's mutex as the per-process share cell.
+/// The smallest payload a `CpuSched` can be built over: no address space and
+/// no saved context.
 struct Payload;
 
 impl SchedPayload for Payload {
     type Ctx = ();
-    type ShareLock = LoomLock<ShareState>;
 
     fn name(&self) -> u64 {
         0
@@ -387,12 +386,11 @@ impl Hw for Silent {
 struct Owner {
     cpus: CpuHandles<TaskMsg>,
     hw: Silent,
-    frontier: Frontier,
 }
 
-/// The instant every pass in the model runs at. Constant on purpose: a quantum
-/// that never expires keeps `preempt_if_due` out of the interleavings, which
-/// have nothing to do with it.
+/// The instant every pass in the model runs at. Constant on purpose: a request
+/// that never ends keeps `preempt_if_due` out of the interleavings, which have
+/// nothing to do with it.
 const NOW: Nanos = Nanos(1_000);
 /// The task the retire and the wake race for.
 const KEY: TaskKey = TaskKey(1);
@@ -438,7 +436,6 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
         let owner = Arc::new(Owner {
             cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)], Topology::flat(1)),
             hw: Silent,
-            frontier: Frontier::new(),
         });
         let mut cpu = CpuSched::<Payload>::new(CPU0, rx, ());
         // A pass runs from the IRQ-exit path, which cannot be preempted, so
@@ -450,7 +447,6 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
         let env = Env {
             hw: &owner.hw,
             cpus: &owner.cpus,
-            frontier: &owner.frontier,
             preempt: &guard,
             balance: Balance::None,
         };
@@ -459,12 +455,9 @@ fn the_retire_arm_never_loses_a_parked_task_to_a_racing_wake() {
         };
         // Spawn placement is a message, never a reach into the queue.
         let spawn = |key: TaskKey| {
-            let share = Arc::new(FairShare::new(LoomLock::new(ShareState::NonRunnable {
-                lag: 0,
-            })));
             let task = TaskBuilder {
                 key,
-                share,
+                job: Arc::new(Job::new(JobKey(key.0))),
                 ctx: (),
                 ext: Payload,
                 rt: RtState::default(),

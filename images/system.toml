@@ -79,13 +79,15 @@ receives = ["power"]
 # `screen`. `volume` is soundserver's master level and mute, which the volume
 # keys set and no other row receives. The display is a virtio-gpu function the
 # compositor drives, where the machine has one, and the firmware's framebuffer
-# otherwise.
+# otherwise. `jobs` makes each program it starts a job of its own, with its own
+# share of the CPU.
 [programs.compositor]
 service = true
 serves = ["compositor", "prompt", "clipboard", "input", "display"]
 receives = ["soundserver", "filepicker", "volume"]
 devices = ["pci:03:80:00/1af4:1050", "framebuffer"]
 starts = ["terminal", "files", "/apps"]
+syscap = ["jobs"]
 login = true
 
 # The i8042, driven from userland: its ports and its two lines are this

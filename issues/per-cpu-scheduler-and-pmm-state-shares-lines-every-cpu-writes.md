@@ -20,8 +20,9 @@ every other CPU writes too:
   so two CPUs' handles share a line. Each pass stores its own `load`, `surplus` and `last_pass`
   (`cpu.rs:1669-1672`), and every wake does a read-modify-write on its
   target's doorbell (`kernel/pure/sched/mailbox.rs:475`).
-- **`Frontier`.** One global `AtomicU64`, `fetch_max`ed on every pick
-  (`kernel/pure/sched/fair.rs:44-46`, called at `cpu.rs:1827`).
+- **A job's runnable count.** One `AtomicU32` per job
+  (`kernel/pure/sched/job.rs`), changed by each CPU its threads enter or
+  leave a fair band on, and read at each of those CPUs' decisions.
 
 **Measured on the T14** (`wt/toyos-scout-clock` at `fa6a2a829`, the
 `internet_download` row's twelve download windows over two boots;

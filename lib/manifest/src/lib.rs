@@ -210,6 +210,10 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     // Read what times every other program: each CPU's frequency, its busy
     // fraction and its wake-ups. An admin tool's, and no applet's.
     ("trace", Rights::TRACE),
+    // Start programs as independent jobs, each with its own share of the CPU:
+    // a launcher's. Every other child joins its parent's job, so this is what
+    // lets a program gain aggregate CPU by starting many.
+    ("jobs", Rights::JOBS),
 ];
 
 /// The whole right set a program's `syscap` list asks for.

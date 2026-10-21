@@ -13,6 +13,11 @@
 //! same bound `SYS_SPAWN` has. What it *adds* is that the child's namespace is
 //! its own manifest row rather than a narrowing of its parent's.
 //!
+//! **A launch names the job its program joins**: the caller's own, or one the
+//! caller made with the authority to start an independent job. The supervisor
+//! spawns the program in it, so a launched program is its caller's helper unless
+//! its caller holds that authority and says otherwise.
+//!
 //! **A launch names its parent**, by one of two words: a place, which is a
 //! handle to a process carrying `WRITE` — the caller's own `self`, duplicated —
 //! that the supervisor spawns the program under, so the caller's end takes it down; or
@@ -52,7 +57,7 @@ pub const MSG_REFUSED: u32 = 4;
 pub const MSG_GONE: u32 = 5;
 
 /// Handles beyond stdio one launch may carry from its caller: the connectors
-/// it transfers, and the place it names.
+/// it transfers, the place it names, and its job.
 ///
 /// Policy on the primitive, refused by name. Five and not more because the
 /// batch also carries the three stdio handles and
@@ -87,8 +92,8 @@ pub enum Parent<H = RawHandle> {
 /// `argv` and `env` are exactly the blobs `SYS_SPAWN` takes, so the launcher
 /// path and the direct path build one thing rather than two.
 ///
-/// **Every handle in `fds`, `extras` and `parent` is the caller's to give,
-/// and is named once.** [`launch`] consumes each one that it sends: it is moved
+/// **Every handle in `fds`, `extras`, `parent` and `job` is the caller's to
+/// give, and is named once.** [`launch`] consumes each one that it sends: it is moved
 /// to the launcher, or closed when the kernel refuses the move. A launch that
 /// names one twice, or the connection it is sent on, is a move the kernel
 /// refuses, and is consumed as one: each number it names is closed once, and
@@ -120,6 +125,9 @@ pub struct Launch<'a> {
     /// Whom the program is placed under. A place is **moved** with the batch,
     /// and counts against [`MAX_LAUNCH_EXTRAS`].
     pub parent: Parent,
+    /// The job the program joins, a handle carrying `WRITE`. **Moved** with the
+    /// batch, its last handle, and counts against [`MAX_LAUNCH_EXTRAS`].
+    pub job: RawHandle,
 }
 
 /// Why a request would not go on the wire.
@@ -136,7 +144,7 @@ type Batch = ([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_FDS], usize);
 
 impl Launch<'_> {
     /// The numbers this launch names, each once and never `conn`: descriptors, then
-    /// extras, then the place. [`launch`] takes each as its own, and a number
+    /// extras, then the place, then the job. [`launch`] takes each as its own, and a number
     /// with two owners is closed twice.
     ///
     /// `Err` where one was named twice or is `conn` itself, which is a batch
@@ -152,7 +160,7 @@ impl Launch<'_> {
         };
         let fds = self.fds.iter().map(|(_, h)| h);
         let extras = self.extras.iter().map(|(_, h)| h);
-        for handle in fds.chain(extras).chain(&place) {
+        for handle in fds.chain(extras).chain(&place).chain([&self.job]) {
             if *handle == conn || out[..n].contains(handle) {
                 sendable = false;
                 continue;
@@ -169,7 +177,7 @@ impl Launch<'_> {
             Parent::Place(_) => (1, PARENT_PLACE),
             Parent::Supervisor => (0, PARENT_SUPERVISOR),
         };
-        if self.extras.len() + place > MAX_LAUNCH_EXTRAS || self.fds.len() > MAX_LAUNCH_FDS {
+        if self.extras.len() + place + 1 > MAX_LAUNCH_EXTRAS || self.fds.len() > MAX_LAUNCH_FDS {
             return Err(EncodeError::TooMany);
         }
         let names_len: usize = self.extras.iter().map(|(n, _)| n.len() + 1).sum();
@@ -247,7 +255,7 @@ impl<'a> Request<'a> {
         let (fds_len, program_len, argv_len, env_len, cwd_len, names_len) =
             (field(2), field(3), field(4), field(5), field(6), field(7));
         let parent = field(8) as u32;
-        if extra_count + usize::from(parent == PARENT_PLACE) > MAX_LAUNCH_EXTRAS
+        if extra_count + usize::from(parent == PARENT_PLACE) + 1 > MAX_LAUNCH_EXTRAS
             || fd_count > MAX_LAUNCH_FDS
             || fds_len != fd_count * 4
         {
@@ -291,9 +299,10 @@ impl<'a> Request<'a> {
         }
     }
 
-    /// The handles the batch carries: the descriptors, the extras, then the place.
+    /// The handles the batch carries: the descriptors, the extras, the place,
+    /// then the job.
     pub fn handle_count(&self) -> usize {
-        self.fd_count() + self.extra_count + usize::from(self.parent == PARENT_PLACE)
+        self.fd_count() + self.extra_count + usize::from(self.parent == PARENT_PLACE) + 1
     }
 
     /// The child descriptors the first handles of the batch are for, in order.
@@ -406,6 +415,7 @@ mod tests {
             extras: &[],
             fds: &[],
             parent,
+            job: RawHandle(10),
         };
         for (parent, named) in [(Parent::Place(RawHandle(9)), Parent::Place(())), (Parent::Supervisor, Parent::Supervisor)] {
             let len = request(parent).encode(&mut buf).expect("encode a launch");
@@ -426,32 +436,45 @@ mod tests {
         const CONN: RawHandle = RawHandle(3);
         let h = RawHandle;
         let batch = |fds: &[(u32, RawHandle)], extras: &[(&str, RawHandle)], parent| {
-            let request =
-                Launch { program: "/system/bin/cat", argv: b"", env: b"", cwd: "/", extras, fds, parent };
+            let request = Launch {
+                program: "/system/bin/cat",
+                argv: b"",
+                env: b"",
+                cwd: "/",
+                extras,
+                fds,
+                parent,
+                job: RawHandle(10),
+            };
             let named = |(handles, count): Batch| handles[..count].to_vec();
             request.batch(CONN).map(named).map_err(named)
         };
         assert_eq!(
             batch(&[(0, h(5)), (1, h(6))], &[("a", h(7)), ("b", h(8))], Parent::Place(h(9))),
-            Ok(vec![h(5), h(6), h(7), h(8), h(9)]),
+            Ok(vec![h(5), h(6), h(7), h(8), h(9), h(10)]),
         );
-        assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Supervisor), Err(vec![h(7)]), "two extras");
-        assert_eq!(batch(&[(0, h(5)), (1, h(5))], &[], Parent::Supervisor), Err(vec![h(5)]), "two descriptors");
+        assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Supervisor), Err(vec![h(7), h(10)]), "two extras");
+        assert_eq!(batch(&[(0, h(5)), (1, h(5))], &[], Parent::Supervisor), Err(vec![h(5), h(10)]), "two descriptors");
         assert_eq!(
             batch(&[(0, h(7)), (1, h(6))], &[("a", h(7))], Parent::Supervisor),
-            Err(vec![h(7), h(6)]),
+            Err(vec![h(7), h(6), h(10)]),
             "a descriptor and an extra",
         );
         assert_eq!(
             batch(&[(0, h(5))], &[("a", h(9))], Parent::Place(h(9))),
-            Err(vec![h(5), h(9)]),
+            Err(vec![h(5), h(9), h(10)]),
             "an extra and the place",
         );
         assert_eq!(
             batch(&[(0, h(5))], &[("a", CONN), ("b", h(7))], Parent::Supervisor),
-            Err(vec![h(5), h(7)]),
+            Err(vec![h(5), h(7), h(10)]),
             "the connection as an extra",
         );
-        assert_eq!(batch(&[], &[("a", h(7))], Parent::Place(CONN)), Err(vec![h(7)]), "the connection as the place");
+        assert_eq!(
+            batch(&[], &[("a", h(7))], Parent::Place(CONN)),
+            Err(vec![h(7), h(10)]),
+            "the connection as the place",
+        );
+        assert_eq!(batch(&[(0, h(10))], &[], Parent::Supervisor), Err(vec![h(10)]), "a descriptor and the job");
     }
 }

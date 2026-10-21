@@ -6,6 +6,7 @@
 # note: sibling asleep: place() forwards the corpse instead of reaping it.
 # note: re-shrunk after an awake CPU with nothing loaded came to owe its pass at
 # note: once, which renumbers every decision, and again after a busy CPU is kicked
-# note: and a fair wake behind fair work is forwarded too. This replay's corpse
-# note: is forwarded as fair work by place(), not by a probe's answer.
-2 0 1 1 1 1 1 1 1 1 1 1 1 1 1 2 1 2 1 2 1 2 0 2 
+# note: and a fair wake behind fair work is forwarded too, and again for the
+# note: job-group scheduler's request-length decisions.
+2 0 1 2 0 2 3 0 3 1 3 1 3 0 0 1 1 0 0 1 0 1 0 1 0 2 0 1 0 0 0 0
+3 0 3 0 2 0 0 0 3 1 1 2 0 0 1 1 2 0 1 2 2 2 3 1 3 1 2 0 1 2 1 

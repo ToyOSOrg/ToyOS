@@ -15,34 +15,27 @@ pub struct SweepResult {
     pub steps: u64,
     pub failures: Vec<Outcome>,
     /// Worst invariant-I5 service spread across the sweep, and the bound in
-    /// force when it happened. The sweep's fairness *measurement*, which is what
-    /// compares two frontier implementations against each other; `passed()`
-    /// only says it stayed under the bound.
+    /// force when it happened; `passed()` only says it stayed under the bound.
     pub worst_fair_spread: u64,
     pub worst_fair_bound: u64,
-    /// Worst spread past the derived bound anywhere in the sweep. Non-zero is
-    /// the standard-versus-shipped gap, not a test failure — the run passed on
-    /// the recorded allowance.
+    /// Worst spread past the derived bound anywhere in the sweep, which only a
+    /// lifted ceiling lets pass.
     pub worst_over_bound: u64,
     /// I5's *reach* over the whole sweep: virtual nanoseconds it had a
-    /// comparison open for, against the nanoseconds the sweep executed. Its
-    /// window has four ways to close — an RT task present, a CPU idle, the
-    /// member set changing, a member under its even share — and any of them can
-    /// be narrowed by a change to the pick or the placement without a single
-    /// verdict going red, so this is the number to A/B across one.
+    /// comparison open for. Its window closes for an RT task, an idle CPU, a
+    /// changed member set or an uneven mix, and a change to the pick or the
+    /// placement can narrow it without a verdict going red, so this is the
+    /// number to A/B across one.
     pub fair_covered_ns: u64,
-    /// Invariant I13's three, in the same three roles: the worst service spread
-    /// between threads of one share, the bound in force when it happened, and
-    /// any crossing of the derived per-thread bound the allowance let pass.
-    pub worst_thread_spread: u64,
-    pub worst_thread_bound: u64,
-    pub worst_thread_over_bound: u64,
-    /// I13's *reach* over the whole sweep: virtual nanoseconds it had a
-    /// comparison open for, against the nanoseconds the sweep executed. A
-    /// change to the pick or the balance can close I13's windows instead of
-    /// failing them, so this is the number to A/B across one — a collapse here
-    /// means the gate went quiet, which is not the same as the gate passing.
-    pub thread_covered_ns: u64,
+    /// Invariant I13's three: the most service a ready fair thread was owed
+    /// while it waited, the bound in force when it happened, and the worst
+    /// crossing of it.
+    pub worst_wait_owed: u64,
+    pub worst_wait_bound: u64,
+    pub worst_wait_over_bound: u64,
+    /// I13's *reach* over the whole sweep: virtual nanoseconds some ready fair
+    /// thread was owed service.
+    pub wait_covered_ns: u64,
     pub elapsed_ns: u64,
 }
 
@@ -64,10 +57,10 @@ impl SweepResult {
             worst_fair_bound: 0,
             worst_over_bound: 0,
             fair_covered_ns: 0,
-            worst_thread_spread: 0,
-            worst_thread_bound: 0,
-            worst_thread_over_bound: 0,
-            thread_covered_ns: 0,
+            worst_wait_owed: 0,
+            worst_wait_bound: 0,
+            worst_wait_over_bound: 0,
+            wait_covered_ns: 0,
             elapsed_ns: 0,
         }
     }
@@ -85,12 +78,12 @@ impl SweepResult {
         }
         self.worst_over_bound = self.worst_over_bound.max(outcome.fair_over_bound);
         self.fair_covered_ns += outcome.fair_covered_ns;
-        if outcome.thread_spread > self.worst_thread_spread {
-            self.worst_thread_spread = outcome.thread_spread;
-            self.worst_thread_bound = outcome.thread_bound;
+        if outcome.wait_owed > self.worst_wait_owed {
+            self.worst_wait_owed = outcome.wait_owed;
+            self.worst_wait_bound = outcome.wait_bound;
         }
-        self.worst_thread_over_bound = self.worst_thread_over_bound.max(outcome.thread_over_bound);
-        self.thread_covered_ns += outcome.thread_covered_ns;
+        self.worst_wait_over_bound = self.worst_wait_over_bound.max(outcome.wait_over_bound);
+        self.wait_covered_ns += outcome.wait_covered_ns;
         self.elapsed_ns += outcome.elapsed;
     }
 
@@ -103,20 +96,20 @@ impl SweepResult {
         self.fair_covered_ns * 100 / self.elapsed_ns
     }
 
-    /// What fraction of the sweep's executed time I13 had a comparison open
-    /// for, in percent. The reach, as one number to compare across a change.
-    pub fn thread_coverage_pct(&self) -> u64 {
+    /// What fraction of the sweep's executed time some ready fair thread was
+    /// owed service, in percent: I13's reach.
+    pub fn wait_coverage_pct(&self) -> u64 {
         if self.elapsed_ns == 0 {
             return 0;
         }
-        self.thread_covered_ns * 100 / self.elapsed_ns
+        self.wait_covered_ns * 100 / self.elapsed_ns
     }
 
     pub fn report(&self) -> String {
         if self.passed() {
             format!(
                 "{}: {} runs, {} steps, clean (I5 worst spread {}/{} ns{}, I5 reach {}%, \
-                 I13 worst spread {}/{} ns{}, I13 reach {}%)",
+                 I13 worst owed {}/{} ns{}, I13 reach {}%)",
                 self.scenario,
                 self.runs,
                 self.steps,
@@ -124,10 +117,10 @@ impl SweepResult {
                 self.worst_fair_bound,
                 past_the_bound(self.worst_over_bound),
                 self.fair_coverage_pct(),
-                self.worst_thread_spread,
-                self.worst_thread_bound,
-                past_the_bound(self.worst_thread_over_bound),
-                self.thread_coverage_pct(),
+                self.worst_wait_owed,
+                self.worst_wait_bound,
+                past_the_bound(self.worst_wait_over_bound),
+                self.wait_coverage_pct(),
             )
         } else {
             format!(

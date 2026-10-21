@@ -55,7 +55,7 @@ use crate::time::{Budget, Deadline, Duration};
 /// again covers one inside a syscall that does not park. A thread can
 /// therefore outlast this, which is why its expiry is a clause in the record.
 pub(crate) const PARK: Budget = Budget::of(
-    Duration::from_nanos(2 * kernel::sched::fair::QUANTUM_NS),
+    Duration::from_nanos(2 * kernel::sched::task::QUANTUM_NS),
     "the reset lands wherever the threads that never reached a safe point are, and \
      the record names how many",
 );

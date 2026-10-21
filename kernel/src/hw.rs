@@ -10,7 +10,7 @@
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use kernel::sched::cpu::SleepToken;
-use kernel::sched::fair::QUANTUM_NS;
+use kernel::sched::task::QUANTUM_NS;
 use kernel::sched::hw::{CpuId, Kicker, Machine, Nanos, TraceEvent};
 
 use crate::arch::{irqchip, percpu};

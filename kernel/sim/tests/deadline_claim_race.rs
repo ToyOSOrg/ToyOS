@@ -19,8 +19,8 @@ use std::sync::Arc as StdArc;
 
 use kernel::sched::cpu::{Action, Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
 use kernel::sched::topology::Topology;
-use kernel::sched::fair::{FairShare, Frontier, ShareState};
 use kernel::sched::hw::{CpuId, Kicker, Nanos};
+use kernel::sched::job::{Job, JobKey};
 use kernel::sched::mailbox::{mailbox, Kick, Urgency};
 use kernel::sched::msg::Msg;
 use kernel::sched::sync::Arc;
@@ -31,18 +31,17 @@ use kernel::sched::park::{prepare, Cancel, Commit};
 
 use kernel_sim::hw_impl::SimHw;
 use kernel_sim::msg::SimMsg;
-use kernel_sim::payload::{MockAddressSpace, SimCtx, SimPayload, SimPreempt, StdLock};
+use kernel_sim::payload::{MockAddressSpace, SimCtx, SimPayload, SimPreempt};
 
 const CPU0: CpuId = CpuId(0);
 const KEY: TaskKey = TaskKey(1);
-/// Well inside the quantum, so every arming decision this test observes is
-/// about the deadline and never about a timeslice running out.
-const DEADLINE: Nanos = Nanos(5_000_000);
+/// Well inside the running request, so every arming decision this test
+/// observes is about the deadline and never about a request running out.
+const DEADLINE: Nanos = Nanos(2_000_000);
 
 struct Machine1 {
     hw: SimHw,
     handles: CpuHandles<SimMsg>,
-    frontier: Frontier,
 }
 
 impl Machine1 {
@@ -50,7 +49,6 @@ impl Machine1 {
         Env {
             hw: &self.hw,
             cpus: &self.handles,
-            frontier: &self.frontier,
             preempt: &SimPreempt,
             balance: Balance::None,
         }
@@ -80,15 +78,12 @@ fn boot() -> (Machine1, CpuSched<SimPayload>, Arc<TaskShared<SimMsg>>) {
     let m = Machine1 {
         hw: SimHw::new(1),
         handles: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)], Topology::flat(1)),
-        frontier: Frontier::new(),
     };
     let mut cpu = CpuSched::new(CPU0, rx, SimCtx::default());
 
     let task = TaskBuilder {
         key: KEY,
-        share: Arc::new(FairShare::new(StdLock::new(ShareState::NonRunnable {
-            lag: 0,
-        }))),
+        job: Arc::new(Job::new(JobKey(0))),
         ctx: SimCtx { key: Some(KEY) },
         ext: SimPayload {
             key: KEY,

@@ -20,6 +20,7 @@ use toyos_abi::syscall::{
 };
 
 use crate::ipc::Connection;
+use crate::job::Job;
 use crate::namespace::Namespace;
 use crate::port::{Acceptor, Connector};
 use crate::process::Process;
@@ -69,6 +70,7 @@ from_handle! {
     Connector => Connector,
     Namespace => Namespace,
     SysCap => SysCap,
+    Job => Job,
     Device => Device,
     crate::Console => crate::Console,
     crate::Pipe => crate::Pipe,

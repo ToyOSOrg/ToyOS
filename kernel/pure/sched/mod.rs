@@ -14,10 +14,10 @@
 
 pub mod cpu;
 pub mod eevdf;
-pub mod fair;
 pub mod hw;
-pub mod job_sched;
 pub mod invariants;
+pub mod job;
+pub mod job_sched;
 pub mod mailbox;
 pub mod msg;
 pub mod park;

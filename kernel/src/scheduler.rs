@@ -6,10 +6,8 @@
 
 use alloc::sync::Arc;
 
-use crate::hasher::HashMap;
-use kernel::sched::fair::{ShareState, QUANTUM_NS};
 use kernel::sched::hw::{CpuId, Machine, Nanos};
-use kernel::sched::task::{Refused, SafePoint, WaitClass};
+use kernel::sched::task::{Refused, SafePoint, WaitClass, QUANTUM_NS};
 
 use crate::arch::percpu;
 use crate::watch::{self, Cancel};
@@ -17,10 +15,9 @@ use crate::hw::HW;
 use crate::pipe::PipeId;
 use crate::process::{self, Pid, Tid};
 use crate::sched::driver::{self, cpus, preempt_off, Dispose, NewTask};
-use crate::sched::payload::{KShare, KernelLock, ThreadSched};
+use crate::sched::payload::ThreadSched;
 use crate::sched::reap_gate::ReapGate;
 use crate::sched::futex;
-use crate::sync::Lock;
 use crate::time::Deadline;
 use crate::DirectMap;
 
@@ -105,49 +102,8 @@ impl core::fmt::Display for TaskId {
     }
 }
 
-/// Pid → share; the charge path reaches it through the task, never this lock.
-static SHARES: Lock<Option<HashMap<Pid, Arc<KShare>>>> = Lock::new(None);
-
 pub fn init() {
-    *SHARES.lock() = Some(HashMap::default());
     driver::init();
-}
-
-/// The share a new task of `pid` joins, as `NonRunnable { lag: 0 }` so the
-/// adopting CPU's `enter_runnable` reproduces `new_runnable(frontier)`'s state.
-fn share_for(pid: Pid) -> Arc<KShare> {
-    let mut guard = SHARES.lock();
-    let map = guard.as_mut().expect("scheduler not initialized");
-    map.entry(pid)
-        .or_insert_with(|| {
-            Arc::new(KShare::new(KernelLock::new(ShareState::NonRunnable {
-                lag: 0,
-            })))
-        })
-        .clone()
-}
-
-fn share_of(pid: Pid) -> Option<Arc<KShare>> {
-    SHARES.lock().as_ref()?.get(&pid).cloned()
-}
-
-/// The process is gone from the table; live tasks keep their `Arc` alive.
-pub fn remove_vruntime(pid: Pid) {
-    if let Some(map) = SHARES.lock().as_mut() {
-        map.remove(&pid);
-    }
-}
-
-pub fn process_vruntime(pid: Pid) -> u64 {
-    share_of(pid).map_or(0, |s| s.vruntime(driver::frontier()))
-}
-
-pub fn process_lag(pid: Pid) -> i64 {
-    share_of(pid).map_or(0, |s| s.lag())
-}
-
-pub fn global_min_vruntime() -> u64 {
-    driver::frontier().get()
 }
 
 /// Build and place a new task; returns the CPU it was placed on.
@@ -158,6 +114,7 @@ pub fn enqueue_new(
     address_space: crate::process::PageTables,
     thread_pointer: u64,
     image: Option<alloc::sync::Arc<crate::process::UserImage>>,
+    job: Arc<kernel::sched::job::Job>,
 ) -> (ThreadSched, CpuId) {
     driver::spawn(NewTask {
         id,
@@ -165,7 +122,7 @@ pub fn enqueue_new(
         entry_sp,
         address_space,
         thread_pointer,
-        share: share_for(id.0),
+        job,
         image,
     })
 }
@@ -417,7 +374,7 @@ pub(crate) fn reap_finished() {
     if !REAP_GATE.take() {
         return;
     }
-    // Dropped after the guard: an entry's drop reaches `remove_vruntime`.
+    // Dropped after the guard: an entry's drop releases what it held.
     let reaped = {
         let mut guard = process::PROCESS_TABLE.lock();
         let table = guard.as_mut().unwrap();

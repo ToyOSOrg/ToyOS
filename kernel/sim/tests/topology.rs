@@ -11,7 +11,7 @@
 //! ```
 
 use kernel::sched::cpu::{Balance, PUSH_THRESHOLD};
-use kernel::sched::fair::QUANTUM_NS;
+use kernel::sched::task::QUANTUM_NS;
 use kernel_sim::choice::ChoiceStream;
 use kernel_sim::explore::{run, Outcome};
 use kernel_sim::scenarios;
