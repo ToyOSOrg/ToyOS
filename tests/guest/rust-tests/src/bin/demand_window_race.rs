@@ -219,10 +219,6 @@ fn worker(mode: Mode, base: usize, t: usize, threads: usize, barrier: &SpinBarri
 }
 
 fn child(mode: Mode) {
-    // `syscall::cpu_count` and not `std::thread::available_parallelism`, which
-    // answers 1 on a two-CPU guest — a std gap this file is not the place to
-    // fix, and a wrong answer here would silently unstage the race.
-    //
     // One thread per CPU exactly. Fewer and the window is not contended; more
     // and a thread spinning at the barrier is holding the CPU another
     // participant needs, so every round costs a timeslice instead of a fault.
