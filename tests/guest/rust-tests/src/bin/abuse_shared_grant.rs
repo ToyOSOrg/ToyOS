@@ -29,14 +29,16 @@ use toyos::shm::SharedMemory;
 use toyos::{namespace, port, AsHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_abuse_shared_grant";
 const SECRET: &[u8] = b"owner-private-bytes-do-not-share";
 const REGION: usize = 4096;
 const SERVICE: &str = "region";
 
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
+/// How the kernel ends a process that names a handle it does not hold.
+const HANDLE_FAULT: End = End::Fault(Fault::Handle);
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -135,7 +137,7 @@ fn killed(role: &str, arg: &str, what_would_be_wrong: &str) {
         format!("reached {role}"),
         "{role} never reached its call",
     );
-    assert_eq!(out.status.code(), Some(HANDLE_FAULT), "{what_would_be_wrong}");
+    assert_eq!(End::from_word(out.status.into_raw()), Some(HANDLE_FAULT), "{what_would_be_wrong}");
 }
 
 fn marker(role: &str) {

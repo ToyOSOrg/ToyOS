@@ -79,8 +79,6 @@ The CPU cap is PR #865's (`wt/toyos-cpus`), a design round of its own.
 **Exit**: every issue below is closed. They are listed in the order they are
 taken: the instruments, then what is measured, then the design rounds not
 yet measured.
-`issues/user-programs-use-avx-under-xsave.md` is PR #859's, built ahead of
-that order.
 
 - `issues/no-test-can-hold-a-thread-on-a-named-cpu.md`
 - `issues/no-program-measures-toyos-against-linux-on-one-machine.md`
@@ -89,7 +87,6 @@ that order.
 - `issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`
 - `issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`
 - `issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`
-- `issues/user-programs-use-avx-under-xsave.md`
 - `issues/no-gate-decodes-kernel-elfs-instructions.md`
 - `issues/kernel-forward-copies-and-fills-are-one-rep-movsb-or-stosb-on-every-cpu.md`
 - `issues/the-direct-map-uses-1-gib-leaves-where-the-cpu-has-them.md`

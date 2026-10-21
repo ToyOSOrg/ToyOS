@@ -104,6 +104,10 @@ nameable by every program and make confused-deputy bugs structural.
    read-write, `/apps` included, so a shell and everything it starts can
    rewrite an installed package; whether the installer alone writes `/apps`
    is `issues/whether-pkg-alone-writes-apps.md`.
+   `/dev/null` is a name only libc's `open` knows, answered with a kernel
+   null handle (`SYS_NULL`): no view holds it, so `stat` of it and a program
+   that does not open through libc find nothing. Whether views name it is
+   this stage's.
 3. **Sessions and users.** `issues/a-user-is-a-home-tree-and-a-login-row.md`
    on top of views: a login authority (sshd, and later a local greeter) holds
    a `login` right and asks init's `launcher` for a session, and init builds

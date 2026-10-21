@@ -1,5 +1,5 @@
 //! Which requests change what a connection's directory holds: each is refused
-//! `PermissionDenied` before the volume sees it, on a connection whose grant is
+//! `ReadOnly` before the volume sees it, on a connection whose grant is
 //! read-only (`toyos::fs::Access`) or whose volume is.
 //!
 //! **Closed by default**: an operation this list does not name is one the

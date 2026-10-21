@@ -135,35 +135,32 @@ Depends on: nothing.
   measures it. The scout runs on a branch kept off `origin`.
 
 **P1, a BAR stays where firmware put it, in 4 KiB pages, its MSI-X table's
-page included.** Owner: the orchestrator.
-- **Depends on:** 4 KiB user leaves for device windows: stage 3 of
-  `issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`,
-  or the slice its holder accepts. Its Q2 condition, S1 reading
-  compatibility format blocked, is met.
-- **Exit:**
-  - on the T14, the AX210 claimed with its BAR in place; the NVMe driven
-    through its MSI-X table at BAR 0 + 0x2000 (S1); and
-    `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
-    unchanged;
-  - `msix-exclusive-bar=on` gone from `tests/common/qemu.rs` and
-    `build/qemu.rs`, so the NVMe guests drive QEMU's default controller
-    through its table in BAR 0;
-  - `issues/a-bar-behind-a-bridge-with-no-free-2-mib-of-its-windows-is-not-handed-over.md`
-    closed, and each of the two placement issues it names closed or its exit
-    rewritten to the placement P1 lands;
-  - on the AMD bench, `03:00.4` (`xhci-leave=03:00.4`, its MSI-X table in
-    BAR 0, its only BAR) claimed with that BAR in place and driven by usbd
-    through its own remapping entry, every unit filtering SMIs: the
-    `usbd_spare`, `usbd_spare_fault`, `end_returns_claims` and
+page included.** Owner: the orchestrator. Built: a claim hands each BAR over
+in place, in the 4 KiB pages it covers, and withholds one whose pages another
+function decodes in (`toyos_pci::pages`); nothing moves a BAR, and
+`msix-exclusive-bar=on` is gone, so the NVMe guests drive QEMU's default
+controller through its table in BAR 0.
+- **Exit, owed on the benches:**
+  - on the T14, `msix_table_read_in_place` reading the AX210's and the
+    NVMe's armed MSI-X entries back through their holders' mappings at
+    BAR 0 + 0x2000, and `claim_reuses_its_remapping_entry` and
+    `claim_refused_without_remapping` unchanged;
+  - the T14's NVMe driven through that table: an Identify Controller admin
+    command whose completion arrives through the in-place MSI-X entry, which
+    touches none of the other system's data; no row does it yet;
+  - on the AMD bench, `amdvi_usbd_drives_its_own_entry`: `03:00.4`
+    (`xhci-leave=03:00.4`, its MSI-X table in BAR 0, its only BAR, behind
+    `00:08.1`, whose `0xd0000000..0xd0500000` bus 3 fills) claimed in place
+    and driven by usbd through its own remapping entry, every unit filtering
+    SMIs: the `usbd_spare`, `usbd_spare_fault`, `end_returns_claims` and
     `usbd_spare_vector` jobs pass, the aimed fault is recorded against the
     claim at its address, and the holder's rewrite of its entry to a vector
     not its own is refused, recorded, and absent from the stop's census of
-    unclaimed vectors. The row, `amdvi_usbd_drives_its_own_entry`, left the
-    registered AMD rows with PR #921 (its judge, `amdvi_usbd` in
-    `tests/toyos.rs` at `c648c1439`, comes back with it):
-    the bench's port `00:08.1` forwards only `0xd0000000..0xd0500000`, which
-    bus 3's BARs fill, so the BAR has nowhere routed to move to and stays
-    where firmware put it, which only 4 KiB pages can hand over.
+    unclaimed vectors.
+- **Its rows need no metal-row naming first:** `msix_table_read_in_place`
+  reads whichever of its named functions the machine has and reds only on a
+  machine with none, and `amdvi_usbd_drives_its_own_entry` is run on the AMD
+  bench alone, by row filter.
 
 **P2 and P3, AMD-Vi translation and interrupt remapping.** Owner: the
 orchestrator's AMD track. Translation (PR #909) and remapping with the SMI

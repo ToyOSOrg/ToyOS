@@ -119,10 +119,10 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
             // `insert_region` never overlaps.
             let old = replacing.map(|idx| {
                 let old = data.mmap_regions.swap_remove(idx);
-                as_guard
+                let detached = as_guard
                     .free_and_unmap(old.addr)
                     .expect("an mmap region is registered in the address space it was placed in");
-                old
+                (old, detached)
             });
             as_guard.insert_region(
                 start,
@@ -201,10 +201,11 @@ pub(super) fn sys_munmap(addr: u64, size: u64) -> u64 {
         }
         let region = data.mmap_regions.swap_remove(idx);
         data.free_count += 1;
-        pt.lock()
+        let detached = pt
+            .lock()
             .free_and_unmap(region.addr)
             .expect("an mmap region is registered in the address space it was placed in");
-        Ok(crate::mm::Unmapped::new(region))
+        Ok(crate::mm::Unmapped::new((region, detached)))
     });
     // Dropped here, outside the closure: the drop shoots down and waits, and a
     // sibling can be spinning on the process-data lock.
@@ -313,10 +314,9 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     // unwinds it — VA region and its shootdown — if the copy-out refuses, so a
     // refused dlopen leaves no library mapped or registered.
     let mapping = crate::rollback::Rollback::new(move || {
-        process::with_process_data(|_data| {
-            pt.lock().free_and_unmap(base);
-        });
+        let detached = process::with_process_data(|_data| pt.lock().free_and_unmap(base));
         crate::arch::tlb::shootdown(crate::invalidation::Origin::Dlopen, crate::invalidation::Half::User);
+        drop(detached);
     });
 
     let lib_tls = lib.tls().and_then(toyos_elf::TlsSegment::occupied);

@@ -706,9 +706,10 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
-    /// [`Profile::Metal`] with an Intel HDA controller behind the unit, the
-    /// function soundserver drives whole through its claim on the benches.
-    MetalHda,
+    /// [`Profile::Metal`] with two Intel HDA controllers behind the unit, the
+    /// first with no codec and the second with an output codec: a machine
+    /// whose drivers do not both reach an output, as the AMD bench's do not.
+    MetalTwoHda,
     /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
@@ -788,7 +789,7 @@ impl Profile {
             | Self::HeadlessNicBehindPort
             | Self::HeadlessTwoEdu
             | Self::Metal
-            | Self::MetalHda
+            | Self::MetalTwoHda
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
@@ -957,9 +958,9 @@ struct Shape {
     rng: bool,
     /// A virtio-gpu, which the compositor drives.
     virtio_gpu: bool,
-    /// QEMU's ICH9 HDA controller with one output codec behind it, on an
-    /// audio backend that plays nothing: soundserver's claim, on a machine
-    /// with no virtio-sound to take first.
+    /// Two of QEMU's ICH9 HDA controllers, the first with no codec and the
+    /// second with one output codec, on an audio backend that plays nothing:
+    /// a machine with no virtio-sound, whose drivers do not both offer.
     hda: bool,
 }
 
@@ -995,7 +996,7 @@ enum Storage {
     Stick { nvme_bytes: u64 },
     /// One NVMe disk and no stick: DATA, of this many bytes, and the image
     /// installed after it (`toyos_build::image::install`). The firmware boots
-    /// it, and after the loader every partition of it is `diskserver`'s.
+    /// it, and after the loader every partition of it is the block service's.
     Disk { data_bytes: u64 },
 }
 
@@ -1080,7 +1081,7 @@ impl Profile {
                 hda: false,
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
-            Self::MetalHda => Shape { hda: true, ..Self::Metal.shape() },
+            Self::MetalTwoHda => Shape { hda: true, ..Self::Metal.shape() },
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
             Self::HeadlessUsbSpareAmdVi => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
@@ -2327,10 +2328,9 @@ fn qemu_command(
     // with no NVMe is a shape, and the argv is the only place it is visible:
     // no console line and no screendump can see a device that is absent.
     //
-    // Its MSI-X table in a BAR of its own, because diskserver drives it and a claim
-    // never maps the BAR holding the table. One controller and one namespace
-    // whichever disk it is: diskserver reads namespace 1 of the one controller
-    // its row names.
+    // Its MSI-X table in BAR 0, QEMU's default, which the nvme driver's claim maps
+    // with the registers. One controller and one namespace whichever disk it
+    // is: the nvme driver reads namespace 1 of the controller it drives.
     let namespace = match shape.storage {
         Storage::Stick { nvme_bytes: 0 } => None,
         Storage::Stick { .. } => {
@@ -2341,7 +2341,7 @@ fn qemu_command(
     };
     if let Some(namespace) = namespace {
         qemu.arg("-device")
-            .arg("nvme,serial=deadbeef,id=nvme0ctl,msix-exclusive-bar=on")
+            .arg("nvme,serial=deadbeef,id=nvme0ctl")
             .arg("-device")
             .arg(format!("nvme-ns,{namespace},bus=nvme0ctl,logical_block_size=512,physical_block_size=512"));
     }
@@ -2367,6 +2367,8 @@ fn qemu_command(
     if shape.hda {
         qemu.arg("-audiodev")
             .arg("none,id=hdaout")
+            .arg("-device")
+            .arg("ich9-intel-hda,id=hdanone")
             .arg("-device")
             .arg("ich9-intel-hda,id=hda0")
             .arg("-device")

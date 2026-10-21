@@ -146,10 +146,10 @@ table** can still reach:
   `SYS_STACK_INFO`;
 - **its own record** — `SYS_GETPID`, `SYS_GET_ENV`, `SYS_ENDOWMENTS`,
   `SYS_QUERY_MODULES`, `SYS_SCHED_INFO`, `SYS_GETCWD`, `SYS_CHDIR`;
-- **machine facts** — `SYS_CLOCK_REALTIME`, `SYS_CLOCK_EPOCH`,
-  `SYS_CPU_COUNT`, `SYS_RANDOM`, and `SYS_SYSINFO`'s header (total and used
-  memory, the CPU count, the live-thread count, the uptime and the two CPU-time
-  accumulators) but not the roster after it;
+- **machine facts** — `SYS_CLOCK_EPOCH`, `SYS_CPU_COUNT`, `SYS_RANDOM`, and
+  `SYS_SYSINFO`'s header (total and used memory, the CPU count, the live-thread
+  count, the uptime and the two CPU-time accumulators) but not the roster after
+  it;
 - **object creation, which confers nothing over anything that exists** —
   `SYS_PIPE`, `SYS_PORT_CREATE` ("needs no right and grants none — a port with
   no clients is not authority", `4a98107f^:kernel/src/arch/syscall.rs:1731`),

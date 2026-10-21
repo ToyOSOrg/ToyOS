@@ -26,6 +26,8 @@ use toyos::syscap::SysCap;
 use toyos::volatile::Window;
 use toyos::PciDev;
 use toyos_abi::syscall::{self, PciId, SyscallError};
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_claim_bar_fault";
 
@@ -114,13 +116,19 @@ fn holder() {
         println!("claim_bar_fault: a read into the BAR and a write from it were refused BadAddress, the registers untouched");
     }
 
-    for role in ["frame", "jump"] {
+    // `frame` runs an undefined instruction with its stack in the BAR; `jump`
+    // fetches from the BAR.
+    for (role, fault) in [("frame", Fault::Instruction), ("jump", Fault::Memory)] {
         let status = Command::new(SELF_PATH)
             .arg(role)
             .endow(SYSCAP_LABEL, cap.duplicate().expect("claim_bar_fault: a capability for the child").into_raw().0)
             .status()
             .expect("claim_bar_fault: spawn a child");
-        assert_eq!(status.code(), Some(-1), "claim_bar_fault: the {role} child ended {status:?}, not by its fault");
+        assert_eq!(
+            End::from_word(status.into_raw()),
+            Some(End::Fault(fault)),
+            "claim_bar_fault: the {role} child's end, {status}, was not its fault",
+        );
         println!("claim_bar_fault: the {role} child's fault in the BAR ended it");
     }
 

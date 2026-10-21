@@ -29,22 +29,28 @@ devices = ["pci:02:00:00/1af4:1041"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver", "volume"]
+serves = ["soundserver", "volume", "sound-output"]
 devices = ["pci:04:01:00/1af4:1059"]
 syscap = ["rt"]
 
 [programs.test-runner]
 
-# The block service: the NVMe controller this machine's DATA is on, driven
-# from userland through its claim. Started again when it ends; the claim goes
-# back with the process and is minted again for the next.
+# The block service: every disk a driver offers on `disk`, listed and opened
+# for the clients `block` grants, each session handed to its disk's driver.
+# Started again when it ends; its drivers connect again and offer again.
 [programs.diskserver]
 service = true
 restart = true
-serves = ["block"]
-devices = ["pci:01:08:02/1b36:0010"]
+serves = ["block", "disk"]
 
-# The file servers: DATA, the log and the running slot's volume, one process
+# The NVMe driver: one process per such controller, reading its own table and
+# offering its disk to the block service. QEMU's controller alone, so a metal
+# boot leaves the bench's own NVMe disk to its firmware.
+[programs.nvme]
+drives = ["pci:01:08:02/1b36:0010"]
+receives = ["disk"]
+
+# The file servers: DATA, the log and the boot volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
 [programs.fileserver]

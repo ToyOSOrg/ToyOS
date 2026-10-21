@@ -1,0 +1,16 @@
+[package]
+name = "hda"
+description = "The Intel HD Audio driver: one process per HDA function the kernel does not drive, holding its claim, walking its codecs and offering soundserver the output it reaches."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-hda = { path = "driver" }
+toyos-manifest = { path = "../../lib/manifest" }
+toyos-pci-claim = { path = "../../lib/pci-claim" }
+toyos-sound-output = { path = "../soundserver/output" }
+
+[package.metadata.toyos.host]
+exempt.owns = "one Intel HD Audio function, claimed from the kernel, and its output offered on soundserver's sound-output port"

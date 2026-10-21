@@ -20,7 +20,7 @@
 use crate::job::{CC_SHORT_PACKET, CC_STALL, CC_SUCCESS};
 use crate::ladder::{self, Left};
 use crate::reset_recovery::Pipe;
-use crate::scsi::Cdb;
+use toyos_scsi::Cdb;
 
 /// Where one Bulk-Only round trip stands, published by the driver as it walks
 /// the three phases.

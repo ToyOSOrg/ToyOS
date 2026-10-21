@@ -1,6 +1,6 @@
 //! A process, as something a handle can name.
 //!
-//! The exit code lives on the object, not a table entry: no zombie, no reap,
+//! The end lives on the object, not a table entry: no zombie, no reap,
 //! no orphan adoption. A wait after the fact reads a value; a wait before it
 //! parks and is woken by the publish. An `OP_WATCH` reads the same fact at its
 //! look, so a handle is readable from the publish on. A process nobody holds a
@@ -9,6 +9,7 @@
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicBool, Ordering};
 
+use toyos_abi::end::End;
 use toyos_abi::syscall::ProcessStats;
 
 use crate::process::Pid;
@@ -20,14 +21,14 @@ use super::{KObjectVariant, ObjectCore, Released};
 /// What is left of a process once it has stopped running, built only once
 /// its own releases have run.
 pub struct Exit {
-    pub code: i32,
+    pub end: End,
     pub stats: ProcessStats,
     _released: Released,
 }
 
 impl Exit {
-    pub(crate) fn new(code: i32, stats: ProcessStats, released: Released) -> Self {
-        Self { code, stats, _released: released }
+    pub(crate) fn new(end: End, stats: ProcessStats, released: Released) -> Self {
+        Self { end, stats, _released: released }
     }
 }
 
@@ -62,8 +63,8 @@ impl ProcessObject {
         self.finished.load(Ordering::Acquire)
     }
 
-    pub fn exit_code(&self) -> Option<i32> {
-        self.exit.lock().as_ref().map(|e| e.code)
+    pub fn end(&self) -> Option<End> {
+        self.exit.lock().as_ref().map(|e| e.end)
     }
 
     /// The last accounting the process had; `None` while running — sample `ProcessData` instead.
@@ -81,10 +82,10 @@ impl ProcessObject {
             let mut slot = self.exit.lock();
             assert!(
                 slot.is_none(),
-                "pid {} published two exits ({} then {})",
+                "pid {} published two exits ({:?} then {:?})",
                 self.pid,
-                slot.as_ref().map_or(0, |e| e.code),
-                exit.code,
+                slot.as_ref().map(|e| e.end),
+                exit.end,
             );
             *slot = Some(exit);
         }

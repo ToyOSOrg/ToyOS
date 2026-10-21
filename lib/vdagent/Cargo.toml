@@ -11,9 +11,5 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
-[dependencies]
-# The type a host word stays in until it has met its bound.
-toyos-untrusted = { path = "../untrusted" }
-
 [lib]
 doctest = false

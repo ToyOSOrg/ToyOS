@@ -6,16 +6,18 @@
 //! machine of more CPUs than busy threads runs beside the unmap, on a CPU whose
 //! TLB only a broadcast invalidation reaches.
 
+use std::os::toyos::process::ExitStatusExt;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Release}};
 
+use toyos_abi::end::{End, Fault};
 use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt};
 
 const TRIALS: usize = 4;
 const PAGE: usize = 2 * 1024 * 1024;
-/// The status `kill_process(-1)` gives a process whose fault nothing serves;
-/// a refused unmap or a panic ends the child with another.
-const FAULTED: i32 = -1;
+/// How a read of an unmapped page ends a process; a refused unmap or a panic
+/// ends the child otherwise.
+const FAULTED: End = End::Fault(Fault::Memory);
 /// A child's last line before the unmap.
 const UNMAPPING: &str = "unmap_touch: written; unmapping";
 /// A child's line if its read after the unmap came back.
@@ -46,9 +48,9 @@ fn judge() {
             let said = String::from_utf8_lossy(&out.stdout);
             assert!(said.contains(UNMAPPING), "{mode} trial {trial}: the child never reached the unmap: {said:?}");
             assert!(
-                out.status.code() == Some(FAULTED) && !said.contains(READ_BACK),
-                "{mode} trial {trial}: the child exited {:?}, not faulted ({FAULTED}), on a read of a page it had just unmapped: {said:?}",
-                out.status.code(),
+                End::from_word(out.status.into_raw()) == Some(FAULTED) && !said.contains(READ_BACK),
+                "{mode} trial {trial}: the child's end, {}, was not {FAULTED}, on a read of a page it had just unmapped: {said:?}",
+                out.status,
             );
         }
     }

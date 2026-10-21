@@ -4,6 +4,7 @@ use crate::arch::percpu::CpuFaultState;
 use crate::{alert, log, mm, process, symbols};
 use crate::symbols::kernel_backtrace;
 
+use toyos_abi::end::Fault;
 use toyos_userbound::Ring;
 
 use super::{Vector, TrapFrame, PF_PRESENT, PF_WRITE, PF_INSTRUCTION_FETCH};
@@ -140,6 +141,29 @@ fn vector_name(vector: Vector) -> &'static str {
     }
 }
 
+/// The `<signal.h>` class a Ring 3 fault on `vector` ends its process as.
+fn fault_of(vector: Vector) -> Fault {
+    match vector {
+        Vector::DivideError | Vector::Overflow | Vector::X87FloatingPoint | Vector::SimdFloatingPoint => {
+            Fault::Arithmetic
+        }
+        Vector::Debug | Vector::Breakpoint => Fault::Trap,
+        Vector::InvalidOpcode | Vector::DeviceNotAvailable => Fault::Instruction,
+        Vector::AlignmentCheck => Fault::Alignment,
+        Vector::BoundRange
+        | Vector::InvalidTss
+        | Vector::SegmentNotPresent
+        | Vector::StackSegment
+        | Vector::GeneralProtection
+        | Vector::PageFault
+        | Vector::Virtualization
+        | Vector::ControlProtection => Fault::Memory,
+        // #DF and #MC have handlers of their own, and a direct gate never
+        // reaches `trap_dispatch`.
+        _ => unreachable!("a {} ends no process", vector_name(vector)),
+    }
+}
+
 /// Source of a crash — either a hardware exception or a Rust panic.
 pub(crate) enum CrashInfo<'a> {
     Exception(&'a ExceptionContext<'a>),
@@ -180,7 +204,11 @@ fn crash_report_exception(ctx: &ExceptionContext) {
                 log!("SIGFPE tid={}: {}", tid, name)
             }
             Vector::GeneralProtection | Vector::StackSegment | Vector::AlignmentCheck => {
-                log!("SIGBUS tid={}: {} (error_code={:#x})", tid, name, ctx.frame.error_code);
+                let label = match fault_of(ctx.vector()) {
+                    Fault::Alignment => "SIGBUS",
+                    _ => "SEGFAULT",
+                };
+                log!("{label} tid={}: {} (error_code={:#x})", tid, name, ctx.frame.error_code);
                 // At CPL 3 an `in` or `out` faults only on a port the bitmap refuses.
                 if let Some(access) = (ctx.vector() == Vector::GeneralProtection)
                     .then(|| port_access_at(ctx.frame.rip, ctx.frame.rdx))
@@ -513,7 +541,7 @@ fn fatal_exception(ctx: &ExceptionContext) -> ! {
     if ctx.ring().is_user() {
         percpu::set_fault_state(CpuFaultState::Normal);
         crate::panic::forget();
-        syscall::kill_process(-1);
+        syscall::fault_process(fault_of(ctx.vector()));
     }
     crate::panic::halt_all_cpus();
 }

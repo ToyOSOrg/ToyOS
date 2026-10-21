@@ -40,7 +40,7 @@ mutate-no-reissue-after-loss = []
 # it today.
 toyos-blockhold = { path = "../blockhold" }
 # The rings on the session page.
-toyos-transport = { path = "transport" }
+toyos-transport = { path = "../../sdk/transport" }
 
 [lints.rust]
 warnings = "deny"

@@ -26,7 +26,7 @@ pub(super) fn sys_thread_exit(code: i32) -> u64 {
 pub(super) fn sys_exit(code: i32) -> u64 {
     #[cfg(feature = "mask-windows")]
     crate::windows::hold_once();
-    process::exit(code);
+    process::exit(toyos_abi::end::End::Exited(code));
 }
 
 /// `SpawnArgs::place`: the caller itself, or the process a handle carrying `WRITE` names — a handle a peer sent, so a wrong type is refused rather than ending the caller.
@@ -61,7 +61,7 @@ pub(super) fn sys_spawn(
     }
 }
 
-/// Take a process's exit code, blocking until there is one; repeatable across waiters, and `WNOHANG` skips the block.
+/// Take how a process ended, blocking until it has; repeatable across waiters, and `WNOHANG` skips the block.
 pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
     // First, so the answer is the bit and not the handle's own refusal — which
     // for an unheld handle is the kill policy, so a call carrying both returns
@@ -91,9 +91,8 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
             return cancelled();
         }
     }
-    match object.exit_code() {
-        // Zero-extended: sign-extending -1 would collide with SyscallError's encoding.
-        Some(code) => code as u32 as u64,
+    match object.end() {
+        Some(end) => end.to_word(),
         // Reachable from userland (WNOHANG raced the exit), so this refuses rather than asserts.
         None => SyscallError::WouldBlock.to_u64(),
     }

@@ -123,7 +123,7 @@ use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
     Registration, Tag, ALIVE, CONSOLE, FLUSH, FLUSHED, LOGKEEPER, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
 };
-use toyos_abi::inventory::{Pci, PciAddr, Record};
+use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
 use toyos_abi::syscall::{
     DeviceRequest, FileType, SyscallError, DEV_PREFIX, MAX_BADGE, PROVIDE_PREFIX, SERVE_PREFIX,
     SVC_LABEL, SYSCAP_LABEL,
@@ -496,6 +496,7 @@ fn main() {
         drivers: drives::matchers(system),
         drives: Drives::default(),
         instances: Vec::new(),
+        undriven: Vec::new(),
         log,
         worker: Worker::start(),
         restarting: false,
@@ -582,7 +583,12 @@ impl Worker {
 /// file server. Started before every other row, and never made a home, which
 /// would be a directory on the volume it serves.
 fn is_storage(program: &Program) -> bool {
-    !program.roles.is_empty() || is_block(program)
+    !program.roles.is_empty() || is_block(program) || is_disk_driver(program)
+}
+
+/// A `drives` row that offers its disks to the block service.
+fn is_disk_driver(program: &Program) -> bool {
+    !program.drives.is_empty() && program.receives.iter().any(|r| r == toyos_blockring::disk::PORT)
 }
 
 /// A row serving the block port.
@@ -620,6 +626,9 @@ struct Supervisor<'a> {
     drives: Drives,
     /// The `drives` processes running.
     instances: Vec<Instance>,
+    /// Every disk driver's function on this machine the boot started no
+    /// driver on, whose disks the block service cannot say are absent.
+    undriven: Vec<String>,
     /// Where a service the supervisor (re)starts writes its stdout and stderr, whichever
     /// process ends up holding its row.
     log: Log,
@@ -688,6 +697,7 @@ impl<'a> Service<'a> {
         &mut self,
         path: &str,
         owed: &[String],
+        block: Vec<String>,
         system: &Manifest,
         syscap: &SysCap,
         connectors: &BTreeMap<&str, Connector>,
@@ -706,7 +716,10 @@ impl<'a> Service<'a> {
                 std::io::Error::other(format!("{path} no longer holds what was installed: {why}"))
             })?;
         }
-        let storage = storage_endowment(self.program, self.role, syscap, grants)?;
+        let mut storage = storage_endowment(self.role, syscap, grants)?;
+        if is_block(self.program) {
+            storage.args.extend(block);
+        }
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
         let (child, devices) = start(
@@ -861,6 +874,9 @@ impl<'a> Supervisor<'a> {
                 self.services.push(service);
             }
         }
+        // The disk drivers first, so the block service is started knowing how
+        // many to wait for and a file server's disk is coming before it asks.
+        self.undriven = self.drive_where(is_disk_driver);
         let mut homes_made = false;
         for at in 0..self.services.len() {
             let program = self.services[at].program;
@@ -869,9 +885,19 @@ impl<'a> Supervisor<'a> {
                 homes_made = true;
             }
             self.make_home(program);
+            let block = self.block_args();
             let service = &mut self.services[at];
-            let started =
-                service.spawn(&program.path, &[], system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log);
+            let started = service.spawn(
+                &program.path,
+                &[],
+                block,
+                system,
+                self.syscap,
+                &self.connectors,
+                &self.grants,
+                &self.minted,
+                &mut self.log,
+            );
             match started {
                 Ok(_) => {}
                 Err(StartError::Refused(why)) => {
@@ -891,19 +917,28 @@ impl<'a> Supervisor<'a> {
     /// Start a `drives` process on each function the inventory says is owed
     /// one, and say which functions are given up on.
     fn drive(&mut self) {
+        self.drive_where(|_| true);
+    }
+
+    /// [`Self::drive`], for the rows `which` picks; answers each function a
+    /// start was refused on, by its entry and address.
+    fn drive_where(&mut self, which: fn(&Program) -> bool) -> Vec<String> {
+        let mut refused = Vec::new();
+        let rows: Vec<(&'static Program, PciMatch)> = self.drivers.iter().filter(|(row, _)| which(row)).copied().collect();
         let records = match pci_records(self.syscap) {
             Ok(records) => records,
             Err(why) => {
                 say!("supervisor: {why}, so no `drives` process starts on it");
-                return;
+                return refused;
             }
         };
-        for act in self.drives.decide(&self.drivers, &records, Instant::now()) {
+        for act in self.drives.decide(&rows, &records, Instant::now()) {
             match act {
                 Act::Start { row, entry, function } => match self.start_instance(row, entry, function) {
                     Ok(child) => self.instances.push(Instance { row, function, child }),
                     Err(why) => {
                         say!("supervisor: {} was not started on PCI {}: {why}", row.name, pci_at(function.at));
+                        refused.push(format!("{entry} at PCI {}", pci_at(function.at)));
                         self.drives.refused(function.arrival);
                     }
                 },
@@ -916,6 +951,21 @@ impl<'a> Supervisor<'a> {
                 ),
             }
         }
+        refused
+    }
+
+    /// What the block service is started with: each disk driver running, by
+    /// its badge, which it waits for, and every disk driver's function the
+    /// boot started none on.
+    fn block_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        for instance in self.instances.iter().filter(|i| is_disk_driver(i.row)) {
+            args.extend(["--driver".to_string(), instance.function.arrival.0.to_string()]);
+        }
+        for undriven in &self.undriven {
+            args.extend(["--undriven".to_string(), undriven.clone()]);
+        }
+        args
     }
 
     /// One `drives` process of `row`, holding `function`'s claim under
@@ -927,7 +977,12 @@ impl<'a> Supervisor<'a> {
         let name = entry.to_string();
         let claim = self.syscap.claim_function::<toyos::Device>(function.arrival).map_err(|e| refused(&name, e))?;
         self.make_home(row);
-        let extra = Extra { claims: vec![(format!("{DEV_PREFIX}{name}"), claim)], ..Extra::default() };
+        let mut extra = Extra { claims: vec![(format!("{DEV_PREFIX}{name}"), claim)], ..Extra::default() };
+        // A disk driver is who this start says it is: its `disk` connector
+        // carries the function's arrival, which the block service keys it by.
+        if is_disk_driver(row) {
+            extra.ports.push((toyos_blockring::disk::PORT.to_string(), self.grants.disk(function.arrival)?));
+        }
         let launcher = (&self.minted, self.sessions.machine());
         let served = Served::Keep { acceptors: &[], owed: &[] };
         let output = Output::Boot(&mut self.log);
@@ -1088,16 +1143,18 @@ impl<'a> Supervisor<'a> {
     }
 
     /// **Which slot is idle is the loader's word, not the table's**: the
-    /// running ROOT is the one the loader read, the table is the one on that
-    /// ROOT's disk, and the idle slot is the one whose ROOT is not it — and
-    /// its two partitions are reached only as `toyos_update::slots::grant`
-    /// admits them: claimed on a disk the kernel drives, and on one the block
-    /// service serves, through connectors minted for each.
+    /// running ROOT and volume are the ones the loader read, the table is the
+    /// one on that ROOT's disk, and the idle slot is the one whose ROOT is not
+    /// it — and its two partitions are reached only as
+    /// `toyos_update::slots::grant` admits them: claimed on a disk the kernel
+    /// drives, and on one the block service serves, through connectors minted
+    /// for each.
     fn slot_grant(&mut self) -> Result<Extra, String> {
         use toyos_abi::inventory::Role;
         use toyos_update::slots::{BOOT_LABEL, ROOT_LABEL, TABLE_LABEL};
         let records = inventory(self.syscap)?;
         let running = loaded(&records, Role::Root).ok_or("the loader named no ROOT")?;
+        let volume = loaded(&records, Role::Slot).ok_or("the loader named no slot volume")?;
         let parts: Vec<_> = records
             .iter()
             .filter_map(|r| match r {
@@ -1106,7 +1163,7 @@ impl<'a> Supervisor<'a> {
             })
             .collect();
         if let Some(root) = parts.iter().find(|p| p.unique_guid == running) {
-            return claimed_slots(self.syscap, &parts, *root);
+            return claimed_slots(self.syscap, &parts, *root, volume);
         }
         let mint = |grants: &Grants<'_>, grant: BlockGrant| {
             grants
@@ -1117,11 +1174,11 @@ impl<'a> Supervisor<'a> {
         let tables = mint(&self.grants, kind(toyos_gpt::Guid::TOYOS_SLOTS))?;
         let boots = mint(&self.grants, kind(toyos_gpt::Guid::TOYOS_BOOT))?;
         let roots = mint(&self.grants, kind(toyos_gpt::Guid::TOYOS_ROOT))?;
-        let (table, table_guid, listed) = self.files("the slot table", move || served_slots(tables, boots, roots))??;
+        let (table, table_guid, listed) = self.files("the slot table", move || served_slots(running, tables, boots, roots))??;
         let Some(runs) = listed.iter().find(|p| p.unique_guid == running && p.type_guid == SLOT_KINDS.root) else {
             return Err("the ROOT this boot runs is on no disk the kernel or the block service serves".into());
         };
-        let (idle, slot) = toyos_update::slots::grant(&table, runs, &listed, SLOT_KINDS).map_err(|why| why.to_string())?;
+        let (idle, slot) = toyos_update::slots::grant(&table, runs, volume, &listed, SLOT_KINDS).map_err(|why| why.to_string())?;
         let mut ports = Vec::new();
         for (label, guid) in [(TABLE_LABEL, table_guid), (BOOT_LABEL, slot.boot), (ROOT_LABEL, slot.root)] {
             ports.push((label.to_string(), mint(&self.grants, BlockGrant { scope: Scope::Unique(guid), writes: true })?));
@@ -1468,6 +1525,7 @@ impl<'a> Supervisor<'a> {
         let owed = self.services[index].devices.clone();
         let program = self.services[index].program;
         self.make_home(program);
+        let block = self.block_args();
         let service = &mut self.services[index];
         swapped(
             &name,
@@ -1483,8 +1541,17 @@ impl<'a> Supervisor<'a> {
             let _ = old.kill();
             let _ = old.wait();
         }
-        let started =
-            service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log);
+        let started = service.spawn(
+            &path,
+            &owed,
+            block,
+            self.system,
+            self.syscap,
+            &self.connectors,
+            &self.grants,
+            &self.minted,
+            &mut self.log,
+        );
         match started {
             Ok(pid) => {
                 swapped(
@@ -1580,13 +1647,7 @@ impl<'a> Supervisor<'a> {
             let (done_tx, done_rx) = std::sync::mpsc::channel();
             let (asked, names) = (name.clone(), self.files);
             let spawned = std::thread::Builder::new().name(format!("sync-{role}")).spawn(move || {
-                let answer = toyos::fs::Dir::connect(names, &asked)
-                    .and_then(|mut dir| {
-                        dir.sync().map_err(|e| match e {
-                            toyos::fs::Refused::Error(e) => e,
-                            toyos::fs::Refused::Link(_) => SyscallError::Unknown,
-                        })
-                    });
+                let answer = toyos::fs::Dir::connect(names, &asked).and_then(|mut dir| dir.sync());
                 let _ = done_tx.send(answer);
             });
             match spawned {
@@ -1649,8 +1710,10 @@ impl<'a> Supervisor<'a> {
                 AfterEnd::Restart => {
                     let (path, owed, program) = (service.path.clone(), service.devices.clone(), service.program);
                     self.make_home(program);
+                    let block = self.block_args();
                     let service = &mut self.services[index];
-                    match service.spawn(&path, &owed, self.system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log) {
+                    let (system, syscap, connectors, grants) = (self.system, self.syscap, &self.connectors, &self.grants);
+                    match service.spawn(&path, &owed, block, system, syscap, connectors, grants, &self.minted, &mut self.log) {
                         Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
                         Err(e) => {
                             service.ports.borrow_mut().clear();
@@ -1668,7 +1731,7 @@ impl<'a> Supervisor<'a> {
             };
             any = true;
             let Instance { row, function, .. } = self.instances.swap_remove(at);
-            say!("supervisor: {} on PCI {} ended with {exit}", row.name, pci_at(function.at));
+            say!("supervisor: {} on PCI {} ended, {exit}", row.name, pci_at(function.at));
             self.drives.ended(function.arrival, restart::owed(row, exit));
         }
         if any {
@@ -1682,9 +1745,10 @@ impl<'a> Supervisor<'a> {
     fn restore(&mut self, index: usize, previous: &str, owed: &[String]) {
         let program = self.services[index].program;
         self.make_home(program);
+        let block = self.block_args();
         let service = &mut self.services[index];
         let name = service.program.name.clone();
-        match service.spawn(previous, owed, self.system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log) {
+        match service.spawn(previous, owed, block, self.system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log) {
             Ok(pid) => {
                 service.swapping = false;
                 swapped(&name, Word::Restored, &format!("{previous} as pid {pid}"));
@@ -2315,11 +2379,13 @@ fn resolve<'a, V>(system: &'a Manifest, path: &str, judge: impl FnOnce(Target<'_
 
 /// The slot table's partition and the idle slot's two, claimed on a disk the
 /// kernel drives: the grant a `slots` row is endowed (`toyos_update::slots`),
-/// where the ROOT this boot runs, `running`, is one of `parts`.
+/// where the ROOT this boot runs, `running`, is one of `parts`, and `volume`
+/// is the slot volume it was booted from.
 fn claimed_slots(
     syscap: &SysCap,
     parts: &[toyos_abi::inventory::Partition],
     running: toyos_abi::inventory::Partition,
+    volume: [u8; 16],
 ) -> Result<Extra, String> {
     use toyos_abi::inventory::Partition;
     let tables: Vec<&Partition> = parts
@@ -2344,7 +2410,7 @@ fn claimed_slots(
         unique_guid: p.unique_guid,
     };
     let all: Vec<_> = parts.iter().map(listed).collect();
-    let (idle, slot) = toyos_update::slots::grant(&table, &listed(&running), &all, SLOT_KINDS).map_err(|why| why.to_string())?;
+    let (idle, slot) = toyos_update::slots::grant(&table, &listed(&running), volume, &all, SLOT_KINDS).map_err(|why| why.to_string())?;
     let boot = claim(slot.boot, "idle slot's volume")?;
     let root = claim(slot.root, "idle slot's ROOT")?;
     say!("supervisor: the idle slot is {}, granted with the slot table", idle.letter());
@@ -2370,6 +2436,7 @@ const SLOT_KINDS: toyos_update::slots::Kinds =
 /// service the supervisor restarts, from its loop alone, would wait in the
 /// port's queue for a process only the loop can start.
 fn served_slots(
+    running: [u8; 16],
     tables: Connector,
     boots: Connector,
     roots: Connector,
@@ -2385,24 +2452,31 @@ fn served_slots(
         diskserver::list(&names(connector)?, toyos_blockring::PORT)
             .map_err(|why| format!("the block service would not list the slots' partitions: {why:?}"))
     };
+    let root_parts = list(&roots)?;
     let table_parts = list(&tables)?;
-    let [table_part] = table_parts[..] else {
-        return Err(format!("the block service serves {} slot tables, and a grant needs one", table_parts.len()));
+    // The table is the one on the running ROOT's disk.
+    let disk = root_parts.iter().find(|p| p.unique == running).map(|p| p.disk);
+    let on_its_disk: Vec<_> = table_parts.iter().filter(|p| Some(p.disk) == disk).collect();
+    let [table_part] = on_its_disk[..] else {
+        return Err(format!(
+            "the block service serves {} slot tables on the running ROOT's disk, and a grant needs one",
+            on_its_disk.len()
+        ));
     };
     let session = diskserver::Session::open(names(&tables)?, toyos_blockring::PORT, table_part.unique)
         .map_err(|why| format!("the slot table would not open: {why:?}"))?;
+    let table_unique = table_part.unique;
     let mut disk = diskserver::disk::Served::new(session);
     let (table, _) =
         toyos_update::slots::read(|copies| disk.read(0, copies.as_flattened_mut())).map_err(|why| why.to_string())?;
     let mut listed = table_parts;
     listed.extend(list(&boots)?);
-    listed.extend(list(&roots)?);
-    // One block service is one disk.
+    listed.extend(root_parts);
     let listed = listed
         .into_iter()
-        .map(|p| toyos_update::slots::Listed { device: 0, type_guid: p.kind, unique_guid: p.unique })
+        .map(|p| toyos_update::slots::Listed { device: p.disk, type_guid: p.kind, unique_guid: p.unique })
         .collect();
-    Ok((table, table_part.unique, listed))
+    Ok((table, table_unique, listed))
 }
 
 /// What the supervisor says about a device it could not mint a claim for.
@@ -2448,8 +2522,8 @@ fn pci_at(at: PciAddr) -> String {
     format!("{:02x}:{:02x}.{}", at.bus, at.dev, at.func)
 }
 
-/// The exit code of `child` once it has ended ([`restart::exited`]).
-fn exit_of(child: &Child) -> Option<i32> {
+/// How `child` ended, once it has ([`restart::exited`]).
+fn exit_of(child: &Child) -> Option<toyos_abi::end::End> {
     restart::exited(toyos_abi::syscall::process_wait_nonblock(toyos::RawHandle(child.as_raw_handle())))
 }
 
@@ -2634,12 +2708,6 @@ fn start<'a>(
         // sentence for all of them sends whoever reads the line looking in
         // the wrong place.
         say!("supervisor: {}: {}", program.name, missing(name, &why));
-        // A block service is told, so the partitions on a controller the
-        // machine has are refused and never taken for none.
-        let absent = matches!(why, Missing::Unresolved(Unresolved::Absent) | Missing::Refused(SyscallError::NotFound));
-        if !absent && is_block(program) {
-            command.args(["--claim-refused", name.as_str()]);
-        }
     }
 
     if !program.syscap.is_empty() {
@@ -2663,13 +2731,13 @@ fn start<'a>(
     // and the supervisor's console to read as its stdin; `logkeeper` also gets the acceptor
     // the rings reach it on and the one console handle that may write. A
     // launch keeps the slots its caller sent, but for a ring among them —
-    // the caller's own log — which is replaced by the program's.
+    // the caller's own log — which is replaced by the program's, and a stdio
+    // slot it sent nothing for is a null, never this process's own.
     let mut ring: Option<SharedMemory> = None;
     let mut origins: Option<Acceptor> = None;
     let log: &mut Log = match output {
         Output::Boot(log) => {
             let own = ring.insert(new_ring()).as_handle();
-            command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             command.inherit_handle(0, log.stdin.0);
             command.inherit_handle(1, own.0);
             command.inherit_handle(2, own.0);
@@ -2687,6 +2755,7 @@ fn start<'a>(
             log
         }
         Output::Launch { log, slots } => {
+            command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             for &(slot, handle) in slots {
                 let caller_ring = matches!(slot, 1 | 2)
                     && toyos_abi::syscall::fstat(handle)
@@ -2776,12 +2845,15 @@ fn build_namespace(
     // Never the swap port nor the grants port: [`swap_namespace`] and
     // [`grants_namespace`] say why. Never the block port's own connector,
     // which reaches nothing: a holder of `block` holds one minted for what it
-    // reaches, in `view`; nor netstack's, which nothing holds: a holder of
-    // `netstack` holds one minted for its row and session, in `view` too.
+    // reaches, in `view`, and a disk driver one of `disk` minted for who it
+    // is; nor netstack's, which nothing holds: a holder of `netstack` holds
+    // one minted for its row and session, in `view` too.
     let receives: Vec<&String> = program
         .receives
         .iter()
-        .filter(|name| *name != toyos_swap::PORT && *name != grants::PORT && *name != toyos_blockring::PORT && *name != NETSTACK)
+        .filter(|name| {
+            ![toyos_swap::PORT, grants::PORT, toyos_blockring::PORT, toyos_blockring::disk::PORT, NETSTACK].contains(&name.as_str())
+        })
         .collect();
     if receives.is_empty() && extras.is_empty() && view.is_empty() {
         return Ok(None);
@@ -2851,6 +2923,18 @@ impl Grants<'_> {
         acceptor
             .mint(&grant.encode())
             .map(Some)
+            .map_err(|e| format!("no connector to the block service could be minted: {e:?}"))
+    }
+
+    /// The block service's `disk` port minted for the disk driver of the
+    /// function that arrived as `arrival`.
+    fn disk(&self, arrival: Arrival) -> Result<Connector, String> {
+        let ports = self.block.as_ref().ok_or("no block service runs to offer a disk to")?.borrow();
+        let Some((_, acceptor)) = ports.iter().find(|(name, _)| name == toyos_blockring::disk::PORT) else {
+            return Err("the block service's port has closed for good".into());
+        };
+        acceptor
+            .mint(&toyos_blockring::disk::badge(arrival.0))
             .map_err(|e| format!("no connector to the block service could be minted: {e:?}"))
     }
 
@@ -3037,37 +3121,24 @@ fn guid_text(guid: [u8; 16]) -> String {
     toyos_abi::part::PartGuid(guid).write_text(&mut buf).to_string()
 }
 
-/// A storage row's arguments, claims and block connector for one start.
+/// A file server's arguments, claims and block connector for one start.
 ///
-/// A block service is told the ROOT the machine runs from, which it serves no
-/// session on. A file server is told its role, and gets a claim on every
-/// partition of its role a disk the kernel drives carries — the stick, until
-/// usbd serves it — and otherwise the partition's GUID and `block` minted for
+/// A file server is told its role, and gets a claim on every partition of its
+/// role a disk the kernel drives carries — the stick, until usbd serves it —
+/// and otherwise the partition's GUID and `block` minted for
 /// that partition alone, writing for the log and reading for the boot volume;
 /// DATA it finds by type, through `block` minted for every DATA partition,
 /// and counts with its claims. A log or boot role the loader named no
 /// partition for, a claim the kernel refuses, and a block port closed for
 /// good each refuse the start: the role is then absent, never served from
 /// memory.
-fn storage_endowment(
-    program: &Program,
-    role: Option<&str>,
-    syscap: &SysCap,
-    grants: &Grants<'_>,
-) -> Result<Extra, StartError> {
+fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>) -> Result<Extra, StartError> {
     use toyos_abi::inventory::{Record, Role};
     let mut storage = Extra::default();
-    if !is_block(program) && role.is_none() {
+    let Some(role) = role else {
         return Ok(storage);
-    }
+    };
     let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
-    if is_block(program) {
-        if let Some(root) = loaded(&records, Role::Root) {
-            storage.args.extend(["--running".to_string(), guid_text(root)]);
-        }
-        return Ok(storage);
-    }
-    let role = role.expect("checked above");
     storage.args.push(role.to_string());
     let on_kernel_disk = |pick: &dyn Fn(&toyos_abi::inventory::Partition) -> bool| -> Vec<[u8; 16]> {
         records

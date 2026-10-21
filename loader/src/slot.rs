@@ -47,6 +47,8 @@ pub struct Chosen {
     pub kernel: Vec<u8>,
     pub cmdline: Vec<u8>,
     pub root: RootImage,
+    /// The unique GUID of its volume, which the kernel and its parameter were read from.
+    pub volume: [u8; 16],
     /// The slot tried before this one, and why it was refused.
     pub refused: Option<(Which, Refusal)>,
 }
@@ -121,12 +123,17 @@ fn verify(
 ) -> Result<Chosen, Refusal> {
     let letter = which.letter();
     // First, because it costs one read of the table and refuses by name a
-    // ROOT its own table does not vouch for — one overlapping a neighbour —
-    // before a byte of the slot is read.
+    // ROOT its own table does not vouch for — one overlapping a neighbour, or
+    // of another type — before a byte of the slot is read.
     let part = disk.locate(slot.root).map_err(|why| {
         println!("{HEAD} {letter}: {why}");
         Refusal::Unreadable("root")
     })?;
+    let stated = part.partition().type_guid();
+    if stated != toyos_gpt::Guid::TOYOS_ROOT {
+        println!("{HEAD} {letter}: ROOT's partition is typed {stated}, not TOYOS-ROOT");
+        return Err(Refusal::Type("root"));
+    }
     let (header, digest) = signed_header(bs, which, &slot)?;
     if record.is_some_and(|record| record::died(record, which, &digest)) {
         return Err(Refusal::Died);
@@ -150,7 +157,7 @@ fn verify(
         return Err(Refusal::Hash("root"));
     }
     println!("{HEAD} {letter}: kernel, cmdline and ROOT are the bytes the signed header names");
-    Ok(Chosen { which, version: header.version, digest, kernel, cmdline, root, refused: None })
+    Ok(Chosen { which, version: header.version, digest, kernel, cmdline, root, volume: slot.boot, refused: None })
 }
 
 /// `slot`'s signed header, held to [`KEY`], and its SHA-256.

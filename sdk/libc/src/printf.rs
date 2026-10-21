@@ -1,6 +1,7 @@
 use alloc::vec;
 use core::ffi::VaList;
-use core::fmt::Write;
+
+use crate::conversion::{self, Sink};
 
 /// Output buffer for printf family. Writes to a raw C buffer with optional
 /// capacity limit, and counts every byte it was given, as C's return value
@@ -13,256 +14,13 @@ struct BufWriter {
     refused: bool,
 }
 
-impl BufWriter {
+impl Sink for BufWriter {
     fn put(&mut self, b: u8) {
         if !self.buf.is_null() && self.pos + 1 < self.cap {
             unsafe { *self.buf.add(self.pos) = b; }
         }
         self.pos += 1;
     }
-}
-
-impl Write for BufWriter {
-    fn write_str(&mut self, s: &str) -> core::fmt::Result {
-        for &b in s.as_bytes() {
-            self.put(b);
-        }
-        Ok(())
-    }
-}
-
-fn write_padded(w: &mut BufWriter, s: &str, width: usize, pad: char, left: bool) {
-    let len = s.len();
-    if !left && len < width {
-        for _ in 0..(width - len) { let _ = w.write_char(pad); }
-    }
-    let _ = w.write_str(s);
-    if left && len < width {
-        for _ in 0..(width - len) { let _ = w.write_char(' '); }
-    }
-}
-
-/// Write an integer with optional precision (minimum digits, zero-padded).
-fn write_int_padded(
-    w: &mut BufWriter, s: &str, prefix_len: usize,
-    width: usize, pad_char: char, left_align: bool, precision: Option<usize>,
-) {
-    if let Some(prec) = precision {
-        let digit_len = s.len() - prefix_len;
-        if digit_len < prec {
-            let zeros = prec - digit_len;
-            let mut padded = vec![0u8; prefix_len + zeros + digit_len];
-            let (mut p, bytes) = (0, s.as_bytes());
-            for &b in &bytes[..prefix_len] { padded[p] = b; p += 1; }
-            for _ in 0..zeros { padded[p] = b'0'; p += 1; }
-            for &b in &bytes[prefix_len..] { padded[p] = b; p += 1; }
-            // SAFETY: padded contains only ASCII digits and sign characters
-            let s2 = unsafe { core::str::from_utf8_unchecked(&padded[..p]) };
-            write_padded(w, s2, width, ' ', left_align);
-            return;
-        }
-        write_padded(w, s, width, ' ', left_align);
-    } else {
-        write_padded(w, s, width, pad_char, left_align);
-    }
-}
-
-fn format_signed<'a>(val: i64, buf: &'a mut [u8; 24], plus: bool, space: bool) -> &'a str {
-    let negative = val < 0;
-    let abs = if negative { (val as i128).unsigned_abs() as u64 } else { val as u64 };
-    let mut pos = buf.len();
-    if abs == 0 {
-        pos -= 1;
-        buf[pos] = b'0';
-    } else {
-        let mut v = abs;
-        while v > 0 {
-            pos -= 1;
-            buf[pos] = b'0' + (v % 10) as u8;
-            v /= 10;
-        }
-    }
-    if negative {
-        pos -= 1; buf[pos] = b'-';
-    } else if plus {
-        pos -= 1; buf[pos] = b'+';
-    } else if space {
-        pos -= 1; buf[pos] = b' ';
-    }
-    // SAFETY: buf contains only ASCII
-    unsafe { core::str::from_utf8_unchecked(&buf[pos..]) }
-}
-
-fn format_unsigned<'a>(val: u64, base: u64, upper: bool, buf: &'a mut [u8]) -> &'a str {
-    let digits = if upper { b"0123456789ABCDEF" } else { b"0123456789abcdef" };
-    let mut pos = buf.len();
-    if val == 0 {
-        pos -= 1;
-        buf[pos] = b'0';
-    } else {
-        let mut v = val;
-        while v > 0 {
-            pos -= 1;
-            buf[pos] = digits[(v % base) as usize];
-            v /= base;
-        }
-    }
-    // SAFETY: buf contains only ASCII hex digits
-    unsafe { core::str::from_utf8_unchecked(&buf[pos..]) }
-}
-
-/// Write an unsigned integer into `buf` starting at `pos`, return new pos.
-fn write_u64_at(buf: &mut [u8], pos: usize, val: u64) -> usize {
-    let mut tmp = [0u8; 24];
-    let mut t = tmp.len();
-    if val == 0 {
-        t -= 1;
-        tmp[t] = b'0';
-    } else {
-        let mut v = val;
-        while v > 0 {
-            t -= 1;
-            tmp[t] = b'0' + (v % 10) as u8;
-            v /= 10;
-        }
-    }
-    let len = tmp.len() - t;
-    buf[pos..pos + len].copy_from_slice(&tmp[t..]);
-    pos + len
-}
-
-/// Format a float in %f style into `buf` starting at `pos`. Returns new pos.
-fn write_float_f(buf: &mut [u8], pos: usize, abs_val: f64, precision: usize) -> usize {
-    let mut p = pos;
-    let int_part = super::math::floor(abs_val);
-    let frac = abs_val - int_part;
-
-    let mut mul = 1u64;
-    for _ in 0..precision { mul *= 10; }
-    let mut frac_int = (frac * mul as f64 + 0.5) as u64;
-    let mut int_val = int_part as u64;
-    if frac_int >= mul {
-        int_val += 1;
-        frac_int -= mul;
-    }
-
-    p = write_u64_at(buf, p, int_val);
-
-    if precision > 0 {
-        buf[p] = b'.'; p += 1;
-        // Write fractional digits with leading zeros
-        let mut frac_tmp = [0u8; 24];
-        let mut ft = frac_tmp.len();
-        if frac_int == 0 {
-            ft -= 1;
-            frac_tmp[ft] = b'0';
-        } else {
-            let mut v = frac_int;
-            while v > 0 {
-                ft -= 1;
-                frac_tmp[ft] = b'0' + (v % 10) as u8;
-                v /= 10;
-            }
-        }
-        let frac_len = frac_tmp.len() - ft;
-        for _ in 0..(precision - frac_len) { buf[p] = b'0'; p += 1; }
-        buf[p..p + frac_len].copy_from_slice(&frac_tmp[ft..]);
-        p += frac_len;
-    }
-    p
-}
-
-/// Format a float in %e style into `buf` starting at `pos`. Returns new pos.
-fn write_float_e(buf: &mut [u8], pos: usize, abs_val: f64, precision: usize, upper: bool) -> usize {
-    let mut p = pos;
-    if abs_val == 0.0 {
-        p = write_float_f(buf, p, 0.0, precision);
-        buf[p] = if upper { b'E' } else { b'e' }; p += 1;
-        buf[p] = b'+'; p += 1;
-        buf[p] = b'0'; p += 1;
-        buf[p] = b'0'; p += 1;
-        return p;
-    }
-
-    let mut exp = super::math::floor(super::math::log10(abs_val)) as i32;
-    let mut mantissa = abs_val / super::math::pow(10.0, exp as f64);
-    // Correct floating-point imprecision
-    if mantissa >= 10.0 { mantissa /= 10.0; exp += 1; }
-    if mantissa < 1.0 { mantissa *= 10.0; exp -= 1; }
-
-    p = write_float_f(buf, p, mantissa, precision);
-    buf[p] = if upper { b'E' } else { b'e' }; p += 1;
-    buf[p] = if exp < 0 { b'-' } else { b'+' }; p += 1;
-    let abs_exp = exp.unsigned_abs();
-    if abs_exp >= 100 {
-        buf[p] = b'0' + (abs_exp / 100) as u8; p += 1;
-        buf[p] = b'0' + ((abs_exp / 10) % 10) as u8; p += 1;
-        buf[p] = b'0' + (abs_exp % 10) as u8; p += 1;
-    } else {
-        buf[p] = b'0' + (abs_exp / 10) as u8; p += 1;
-        buf[p] = b'0' + (abs_exp % 10) as u8; p += 1;
-    }
-    p
-}
-
-/// Format a float value (handles sign, NaN, inf, then dispatches to f/e/g).
-fn format_float<'a>(
-    val: f64, mode: u8, precision: Option<usize>,
-    plus: bool, space: bool, buf: &'a mut [u8; 512],
-) -> &'a str {
-    let mut p = 0;
-    let upper = mode == b'E' || mode == b'G' || mode == b'F';
-
-    if val.is_nan() {
-        let s = if upper { b"NAN" } else { b"nan" };
-        buf[..3].copy_from_slice(s);
-        return unsafe { core::str::from_utf8_unchecked(&buf[..3]) };
-    }
-
-    let negative = val.is_sign_negative();
-    let abs_val = super::math::fabs(val);
-
-    if abs_val.is_infinite() {
-        if negative { buf[p] = b'-'; p += 1; }
-        else if plus { buf[p] = b'+'; p += 1; }
-        else if space { buf[p] = b' '; p += 1; }
-        let s = if upper { b"INF" } else { b"inf" };
-        buf[p..p + 3].copy_from_slice(s);
-        return unsafe { core::str::from_utf8_unchecked(&buf[..p + 3]) };
-    }
-
-    if negative { buf[p] = b'-'; p += 1; }
-    else if plus { buf[p] = b'+'; p += 1; }
-    else if space { buf[p] = b' '; p += 1; }
-
-    match mode | 0x20 {
-        b'f' => {
-            let prec = precision.unwrap_or(6);
-            p = write_float_f(buf, p, abs_val, prec);
-        }
-        b'e' => {
-            let prec = precision.unwrap_or(6);
-            p = write_float_e(buf, p, abs_val, prec, upper);
-        }
-        b'g' => {
-            let prec = precision.unwrap_or(6).max(1);
-            let exp = if abs_val == 0.0 { 0 } else { super::math::floor(super::math::log10(abs_val)) as i32 };
-            if exp < -4 || exp >= prec as i32 {
-                p = write_float_e(buf, p, abs_val, prec - 1, upper);
-            } else {
-                let frac_prec = (prec as i32 - 1 - exp).max(0) as usize;
-                p = write_float_f(buf, p, abs_val, frac_prec);
-            }
-            // Strip trailing zeros after decimal point
-            if buf[..p].contains(&b'.') {
-                while p > 0 && buf[p - 1] == b'0' { p -= 1; }
-                if p > 0 && buf[p - 1] == b'.' { p -= 1; }
-            }
-        }
-        _ => unreachable!(),
-    }
-    // SAFETY: buf contains only ASCII
-    unsafe { core::str::from_utf8_unchecked(&buf[..p]) }
 }
 
 /// Core printf engine. Parses the format string as a byte slice.
@@ -277,106 +35,21 @@ unsafe fn do_printf(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>)
             i += 1;
             continue;
         }
-        i += 1;
+        let Some((spec, len)) = conversion::spec(&fmt[i + 1..], || ap.next_arg::<i32>()) else { break };
+        i += 1 + len;
 
-        // Flags
-        let mut left_align = false;
-        let mut zero_pad = false;
-        let mut plus_sign = false;
-        let mut space_sign = false;
-        while i < fmt.len() {
-            match fmt[i] {
-                b'-' => { left_align = true; i += 1; }
-                b'0' => { zero_pad = true; i += 1; }
-                b'+' => { plus_sign = true; i += 1; }
-                b' ' => { space_sign = true; i += 1; }
-                b'#' => { i += 1; }
-                _ => break,
-            }
-        }
-
-        // Width
-        let mut width: usize = 0;
-        if i < fmt.len() && fmt[i] == b'*' {
-            let w = ap.next_arg::<i32>();
-            if w < 0 { left_align = true; width = (-w) as usize; } else { width = w as usize; }
-            i += 1;
-        } else {
-            while i < fmt.len() && fmt[i].is_ascii_digit() {
-                width = width * 10 + (fmt[i] - b'0') as usize;
-                i += 1;
-            }
-        }
-
-        // Precision
-        let mut precision: Option<usize> = None;
-        if i < fmt.len() && fmt[i] == b'.' {
-            i += 1;
-            let mut prec = 0;
-            if i < fmt.len() && fmt[i] == b'*' {
-                prec = ap.next_arg::<i32>().max(0) as usize;
-                i += 1;
-            } else {
-                while i < fmt.len() && fmt[i].is_ascii_digit() {
-                    prec = prec * 10 + (fmt[i] - b'0') as usize;
-                    i += 1;
-                }
-            }
-            precision = Some(prec);
-        }
-
-        if i >= fmt.len() { break; }
-
-        // Length modifier
-        let mut long = false;
-        let mut long_long = false;
-        let mut long_double = false;
-        match fmt[i] {
-            b'l' => {
-                i += 1;
-                if i < fmt.len() && fmt[i] == b'l' { long_long = true; i += 1; } else { long = true; }
-            }
-            b'h' => { i += 1; if i < fmt.len() && fmt[i] == b'h' { i += 1; } }
-            b'z' | b't' | b'j' => { long = true; i += 1; }
-            b'L' => { long_double = true; i += 1; }
-            _ => {}
-        }
-        let _ = long_double; // our long double == double
-
-        if i >= fmt.len() { break; }
-
-        let pad_char = if zero_pad && !left_align { '0' } else { ' ' };
-        match fmt[i] {
+        let (width, left_align, precision, long) = (spec.width, spec.left, spec.precision, spec.wide);
+        match spec.conversion {
             b'd' | b'i' => {
-                let val: i64 = if long_long || long { ap.next_arg::<i64>() } else { ap.next_arg::<i32>() as i64 };
-                let mut tmp = [0u8; 24];
-                let s = format_signed(val, &mut tmp, plus_sign, space_sign);
-                let prefix = s.len() - s.trim_start_matches(|c: char| !c.is_ascii_digit()).len();
-                write_int_padded(&mut w, s, prefix, width, pad_char, left_align, precision);
+                let val: i64 = if long { ap.next_arg::<i64>() } else { ap.next_arg::<i32>() as i64 };
+                conversion::signed(&mut w, &spec, val);
             }
-            b'u' => {
-                let val: u64 = if long_long || long { ap.next_arg::<u64>() } else { ap.next_arg::<u32>() as u64 };
-                let mut tmp = [0u8; 24];
-                let s = format_unsigned(val, 10, false, &mut tmp);
-                write_int_padded(&mut w, s, 0, width, pad_char, left_align, precision);
+            b'u' | b'o' | b'x' | b'X' => {
+                let val: u64 = if long { ap.next_arg::<u64>() } else { ap.next_arg::<u32>() as u64 };
+                conversion::unsigned(&mut w, &spec, val);
             }
-            b'x' => {
-                let val: u64 = if long_long || long { ap.next_arg::<u64>() } else { ap.next_arg::<u32>() as u64 };
-                let mut tmp = [0u8; 20];
-                let s = format_unsigned(val, 16, false, &mut tmp);
-                write_int_padded(&mut w, s, 0, width, pad_char, left_align, precision);
-            }
-            b'X' => {
-                let val: u64 = if long_long || long { ap.next_arg::<u64>() } else { ap.next_arg::<u32>() as u64 };
-                let mut tmp = [0u8; 20];
-                let s = format_unsigned(val, 16, true, &mut tmp);
-                write_int_padded(&mut w, s, 0, width, pad_char, left_align, precision);
-            }
-            b'o' => {
-                let val: u64 = if long_long || long { ap.next_arg::<u64>() } else { ap.next_arg::<u32>() as u64 };
-                let mut tmp = [0u8; 24];
-                let s = format_unsigned(val, 8, false, &mut tmp);
-                write_int_padded(&mut w, s, 0, width, pad_char, left_align, precision);
+            b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'a' | b'A' => {
+                conversion::float(&mut w, &spec, ap.next_arg::<f64>());
             }
             b'c' if long => {
                 let mut utf8 = [0u8; 4];
@@ -413,39 +86,28 @@ unsafe fn do_printf(buf: *mut u8, n: usize, fmt: *const u8, ap: &mut VaList<'_>)
             b's' => {
                 let p: *const u8 = ap.next_arg::<*const u8>();
                 if p.is_null() {
-                    write_padded(&mut w, "(null)", width, ' ', left_align);
+                    write_padded_bytes(&mut w, b"(null)", width, left_align);
                 } else {
                     let len = super::string::strlen(p);
                     let actual_len = precision.map_or(len, |prec| prec.min(len));
-                    let s = core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, actual_len));
-                    write_padded(&mut w, s, width, ' ', left_align);
+                    write_padded_bytes(&mut w, core::slice::from_raw_parts(p, actual_len), width, left_align);
                 }
             }
             b'p' => {
                 let p: *const u8 = ap.next_arg::<*const u8>();
-                let mut hex = [0u8; 20];
-                let hex_s = format_unsigned(p as u64, 16, false, &mut hex);
-                let mut tmp = [0u8; 22];
-                tmp[0] = b'0';
-                tmp[1] = b'x';
-                let len = hex_s.len();
-                tmp[2..2 + len].copy_from_slice(hex_s.as_bytes());
-                let s = core::str::from_utf8_unchecked(&tmp[..2 + len]);
-                write_padded(&mut w, s, width, ' ', left_align);
+                let mut hex = [0u8; 22];
+                let hex = conversion::digits(p as u64, 16, false, &mut hex);
+                let mut tmp = [0u8; 18];
+                tmp[..2].copy_from_slice(b"0x");
+                tmp[2..2 + hex.len()].copy_from_slice(hex);
+                write_padded_bytes(&mut w, &tmp[..2 + hex.len()], width, left_align);
             }
-            b'f' | b'F' | b'e' | b'E' | b'g' | b'G' => {
-                let val: f64 = ap.next_arg::<f64>();
-                let mut tmp = [0u8; 512];
-                let s = format_float(val, fmt[i], precision, plus_sign, space_sign, &mut tmp);
-                write_padded(&mut w, s, width, pad_char, left_align);
-            }
-            b'%' => { let _ = w.write_char('%'); }
+            b'%' => w.put(b'%'),
             other => {
                 w.put(b'%');
                 w.put(other);
             }
         }
-        i += 1;
     }
 
     if !buf.is_null() && n > 0 {

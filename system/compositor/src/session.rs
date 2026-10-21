@@ -22,8 +22,9 @@ use toyos::{ipc, system, AsHandle, Keyboard, Mouse};
 use toyos_abi::input::RawKeyEvent;
 use toyos_abi::syscall::DeviceType;
 use toyos_abi::RawHandle;
-use toyos_input::wire::{self, Record, CONNECTIONS, KEY_LEN, MAX_PAYLOAD, POINTER_LEN};
-use toyos_input::{Merge, Pointer, Slot, State};
+use toyos_input::wire::{self, Record, CONNECTIONS, MAX_PAYLOAD, STREAM_KEY_LEN, STREAM_POINTER_LEN};
+use toyos_input::wire::DEVICES;
+use toyos_input::{Full, Merge, Pointer, Slot, State};
 use toyos_desktop::clipboard::{Landing, Watch};
 use toyos_desktop::volume::{overlay_rect, Overlay, Request, Requests, Shown};
 use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_STEP, MSG_VOLUME_UNAVAILABLE};
@@ -669,28 +670,37 @@ impl Session {
 
     /// The kernel's keyboard stream, one source to the merge.
     fn keys(&mut self) {
-        let mut buf = [0u8; 8 * KEY_LEN];
+        let mut buf = [0u8; 8 * STREAM_KEY_LEN];
         // Never read blocking here. The kernel wakes only when a report queued
         // an event, so readiness and `has_data` agree — but a blocking read on
         // an empty queue parks the compositor until the next real key, and one
         // spurious wake anywhere would freeze it.
         let n = self.kb.read_nonblock(&mut buf).unwrap_or(0);
-        let (events, torn) = buf[..n].as_chunks::<KEY_LEN>();
+        let (events, torn) = buf[..n].as_chunks::<STREAM_KEY_LEN>();
         assert!(torn.is_empty(), "compositor: the keyboard read {n} bytes, not whole events");
         for raw in events {
-            match wire::key(raw) {
-                Ok(key) => self.merged_key(Slot::KERNEL, key),
-                Err(why) => eprintln!("compositor: the kernel's keyboard stream carried {raw:02x?}, refused: {why:?}"),
+            let merged = wire::key(raw).map(|key| self.merged_key(Slot::KERNEL, 0, key));
+            if !matches!(merged, Ok(Ok(()))) {
+                eprintln!("compositor: the kernel's keyboard stream carried {raw:02x?}, refused: {merged:?}");
             }
         }
     }
 
-    /// `key` from `slot`, and whatever it changed of the merged keyboard.
-    fn merged_key(&mut self, slot: Slot, key: RawKeyEvent) {
-        let delivered: Vec<RawKeyEvent> = self.merge.key(slot, key).collect();
+    /// `key` from `slot`'s device `source`, and whatever it changed of the
+    /// merged keyboard.
+    fn merged_key(&mut self, slot: Slot, source: u16, key: RawKeyEvent) -> Result<(), Full> {
+        let delivered: Vec<RawKeyEvent> = self.merge.key(slot, source, key)?.collect();
         for event in delivered {
             self.key(event);
         }
+        Ok(())
+    }
+
+    /// `slot`'s device `source` went: what it held is released.
+    fn gone(&mut self, slot: Slot, source: u16) -> State {
+        let released: Vec<RawKeyEvent> = self.merge.gone(slot, source).collect();
+        released.into_iter().for_each(|key| self.key(key));
+        self.pointers.gone(slot, source)
     }
 
     /// One transition of the merged keyboard.
@@ -767,15 +777,15 @@ impl Session {
 
     /// The kernel's mouse stream, one source to the merge.
     fn pointer(&mut self) {
-        let mut buf = [0u8; 64 * POINTER_LEN];
+        let mut buf = [0u8; 64 * STREAM_POINTER_LEN];
         let n = self.mouse.read_nonblock(&mut buf).unwrap_or(0);
-        let (reports, torn) = buf[..n].as_chunks::<POINTER_LEN>();
+        let (reports, torn) = buf[..n].as_chunks::<STREAM_POINTER_LEN>();
         assert!(torn.is_empty(), "compositor: the mouse read {n} bytes, not whole reports");
         let mut states = Vec::with_capacity(reports.len());
         for raw in reports {
-            match wire::pointer(raw) {
-                Ok(report) => states.push(self.pointers.report(Slot::KERNEL, report)),
-                Err(why) => eprintln!("compositor: the kernel's mouse stream carried {raw:02x?}, refused: {why:?}"),
+            match wire::pointer(raw).map(|report| self.pointers.report(Slot::KERNEL, report)) {
+                Ok(Ok(state)) => states.push(state),
+                refused => eprintln!("compositor: the kernel's mouse stream carried {raw:02x?}, refused: {refused:?}"),
             }
         }
         self.motion(&states);
@@ -1024,12 +1034,20 @@ impl Session {
                 RxStep::Frame { msg_type, payload_len } => wire::decode(msg_type, source.rx.payload(payload_len)),
             };
             match record {
-                Ok(Record::Key(key)) => self.merged_key(slot, key),
-                Ok(Record::Pointer(report)) => states.push(self.pointers.report(slot, report)),
-                Ok(Record::Lost) => {
-                    let released: Vec<RawKeyEvent> = self.merge.end(slot).collect();
-                    released.into_iter().for_each(|key| self.key(key));
+                Ok(Record::Key { source, key }) => {
+                    if let Err(full) = self.merged_key(slot, source, key) {
+                        ended = Some(format!("{full:?}: more than {DEVICES} of its devices hold something"));
+                        break;
+                    }
                 }
+                Ok(Record::Pointer(report)) => match self.pointers.report(slot, report) {
+                    Ok(state) => states.push(state),
+                    Err(full) => {
+                        ended = Some(format!("{full:?}: more than {DEVICES} of its devices hold something"));
+                        break;
+                    }
+                },
+                Ok(Record::Gone { source }) => states.push(self.gone(slot, source)),
                 Err(why) => {
                     ended = Some(format!("a record refused: {why:?}"));
                     break;

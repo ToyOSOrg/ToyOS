@@ -25,11 +25,10 @@ use std::collections::HashSet;
 use crate::proclife::model::{Climb, World};
 use crate::proclife::table::Processes;
 use crate::proclife::tree::{self, Admit, Admitted};
-use crate::proclife::{join, reap, spawn, teardown, Pid, Tid, Watch};
+use crate::proclife::{join, reap, spawn, teardown, End, Pid, Tid, Watch};
 
-/// `process::KILLED_EXIT_CODE`, which a walk claims every process below an end
-/// with.
-const KILLED: i32 = 137;
+/// The end a walk claims every process below an end with.
+const KILLED: End = End::Killed;
 
 /// One kernel path, mid-flight.
 ///
@@ -48,7 +47,7 @@ pub enum Op {
     Exit { pid: Pid, tid: Tid, code: i32, pc: u32, retire: Vec<(Pid, Tid)>, owed: Vec<Pid> },
     /// `process::kill_process`: claim, retire every thread, walk the subtree,
     /// return. `by` is the killing thread when the model holds it.
-    Kill { pid: Pid, code: i32, pc: u32, retire: Vec<(Pid, Tid)>, owed: Vec<Pid>, by: Option<(Pid, Tid)> },
+    Kill { pid: Pid, end: End, pc: u32, retire: Vec<(Pid, Tid)>, owed: Vec<Pid>, by: Option<(Pid, Tid)> },
     /// `loader::spawn` under `place` by `by`'s thread: the admission, the
     /// whole of a process built with every lock given up, then the commit
     /// under the caller's own lock — its handles move, and its handle to the
@@ -86,13 +85,13 @@ impl Op {
     pub fn exit(pid: Pid, tid: Tid, code: i32) -> Self {
         Op::Exit { pid, tid, code, pc: 0, retire: Vec::new(), owed: Vec::new() }
     }
-    pub fn kill(pid: Pid, code: i32) -> Self {
-        Op::Kill { pid, code, pc: 0, retire: Vec::new(), owed: Vec::new(), by: None }
+    pub fn kill(pid: Pid, end: End) -> Self {
+        Op::Kill { pid, end, pc: 0, retire: Vec::new(), owed: Vec::new(), by: None }
     }
     /// A kill issued by a thread the model holds, which is in the kernel until
     /// the kill returns.
-    pub fn kill_by(pid: Pid, code: i32, by: (Pid, Tid)) -> Self {
-        Op::Kill { pid, code, pc: 0, retire: Vec::new(), owed: Vec::new(), by: Some(by) }
+    pub fn kill_by(pid: Pid, end: End, by: (Pid, Tid)) -> Self {
+        Op::Kill { pid, end, pc: 0, retire: Vec::new(), owed: Vec::new(), by: Some(by) }
     }
     /// A spawn under `place` by `by`'s thread, which is in the kernel until it
     /// returns.
@@ -172,7 +171,7 @@ impl Op {
                 // The claim, the threads its winner retires and the children
                 // it owes, under the table lock.
                 0 => {
-                    if tree::claim(world, *pid, *code, owed) {
+                    if tree::claim(world, *pid, End::Exited(*code), owed) {
                         let proc = world.get(*pid).expect("just claimed");
                         *retire = teardown::retire_set(proc, Some(*tid)).into_iter().map(|t| (*pid, t)).collect();
                     }
@@ -196,10 +195,10 @@ impl Op {
                     *pc = POST;
                 }
             },
-            Op::Kill { pid, code, pc, retire, owed, by } => {
+            Op::Kill { pid, end, pc, retire, owed, by } => {
                 match *pc {
                     0 => {
-                        if tree::claim(world, *pid, *code, owed) {
+                        if tree::claim(world, *pid, *end, owed) {
                             let proc = world.get(*pid).expect("just claimed");
                             *retire = teardown::retire_set(proc, None).into_iter().map(|t| (*pid, t)).collect();
                             *pc = POST;
@@ -568,7 +567,7 @@ mod tests {
     fn a_kill_racing_a_spawn_leaves_no_unretired_thread() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        holds(&world, vec![Op::kill(pid, 137), Op::spawn(pid)]);
+        holds(&world, vec![Op::kill(pid, KILLED), Op::spawn(pid)]);
     }
 
     /// **The second negative control's subject.** Two teardowns and one
@@ -587,7 +586,7 @@ mod tests {
         let pid = world.spawn_process();
         let main = world.main_tid(pid);
         world.spawn_thread(pid);
-        holds(&world, vec![Op::exit(pid, main, 0), Op::kill(pid, 137)]);
+        holds(&world, vec![Op::exit(pid, main, 0), Op::kill(pid, KILLED)]);
     }
 
     /// A sibling exits while another sibling — not the main thread — is joining
@@ -624,7 +623,7 @@ mod tests {
     fn a_spawn_racing_a_kill_and_the_pass_that_reaps_it() {
         let mut world = World::new();
         let pid = world.spawn_process();
-        holds(&world, vec![Op::kill(pid, 137), Op::spawn(pid), Op::idle_pass()]);
+        holds(&world, vec![Op::kill(pid, KILLED), Op::spawn(pid), Op::idle_pass()]);
     }
 
     /// A sibling leaving through `SYS_THREAD_EXIT` while the main thread's own
@@ -696,7 +695,7 @@ mod tests {
         let pid = world.spawn_process();
         let target = world.spawn_thread(pid);
         let waiter = world.spawn_thread(pid);
-        holds(&world, vec![Op::kill(pid, 137), Op::join(pid, target, waiter)]);
+        holds(&world, vec![Op::kill(pid, KILLED), Op::join(pid, target, waiter)]);
     }
 
     /// **`KillEachOther`, K1's shape**: two processes, each one's thread inside
@@ -715,7 +714,7 @@ mod tests {
         world.spawn_thread(c);
         let states = holds(
             &world,
-            vec![Op::kill_by(c, 137, (p, p_sibling)), Op::kill_by(p, 137, (c, world.main_tid(c)))],
+            vec![Op::kill_by(c, KILLED, (p, p_sibling)), Op::kill_by(p, KILLED, (c, world.main_tid(c)))],
         );
         std::println!("KillEachOther: {states} states, every schedule ends");
     }
@@ -730,9 +729,9 @@ mod tests {
         holds(
             &world,
             vec![
-                Op::kill_by(b, 137, (a, world.main_tid(a))),
-                Op::kill_by(c, 137, (b, world.main_tid(b))),
-                Op::kill_by(a, 137, (c, world.main_tid(c))),
+                Op::kill_by(b, KILLED, (a, world.main_tid(a))),
+                Op::kill_by(c, KILLED, (b, world.main_tid(b))),
+                Op::kill_by(a, KILLED, (c, world.main_tid(c))),
             ],
         );
     }
@@ -749,8 +748,8 @@ mod tests {
             &world,
             vec![
                 Op::exit(p, world.main_tid(p), 0),
-                Op::kill_by(c, 137, (p, killer)),
-                Op::kill_by(p, 137, (c, world.main_tid(c))),
+                Op::kill_by(c, KILLED, (p, killer)),
+                Op::kill_by(p, KILLED, (c, world.main_tid(c))),
             ],
         );
     }
@@ -774,7 +773,7 @@ mod tests {
         let mut world = World::new();
         let p = world.spawn_process();
         let sibling = world.spawn_thread(p);
-        holds(&world, vec![Op::kill_by(p, 137, (p, sibling))]);
+        holds(&world, vec![Op::kill_by(p, KILLED, (p, sibling))]);
     }
 
     /// **A spawn racing its place's kill**, every ordering, with the spawner a

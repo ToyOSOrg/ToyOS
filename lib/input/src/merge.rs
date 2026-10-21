@@ -4,7 +4,7 @@
 use toyos_abi::input::{RawKeyEvent, MOD_ALT, MOD_CTRL, MOD_GUI, MOD_RELEASED, MOD_SHIFT, POINTER_ABSOLUTE_MAX};
 
 use crate::keys::{Keys, Transitions, Usages};
-use crate::wire::{Motion, Report, CONNECTIONS};
+use crate::wire::{Motion, Report, CONNECTIONS, DEVICES};
 
 /// The sources the owner merges: the kernel's streams, until usbd takes the
 /// last kernel source, and one per connection on the port.
@@ -24,37 +24,100 @@ impl Slot {
     }
 }
 
-/// One keyboard made of every source's: a key is held while any source holds
-/// it.
-#[derive(Default)]
+/// A connection's [`DEVICES`]th device holding something already, and a
+/// record for another: the sender broke the protocol.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Full {
+    pub source: u16,
+}
+
+/// What each device of one slot holds, by its `source`. A device holding
+/// nothing has no entry.
+struct Devices<T> {
+    held: [Option<(u16, T)>; DEVICES],
+}
+
+impl<T: Default> Devices<T> {
+    const EMPTY: Self = Self { held: [const { None }; DEVICES] };
+
+    /// `source`'s state, with `change` made to it; an entry left holding
+    /// nothing, as `empty` judges, goes.
+    fn change<R>(&mut self, source: u16, empty: fn(&T) -> bool, change: impl FnOnce(&mut T) -> R) -> Result<R, Full> {
+        let at = match self.held.iter().position(|d| matches!(d, Some((s, _)) if *s == source)) {
+            Some(at) => at,
+            None => {
+                let at = self.held.iter().position(Option::is_none).ok_or(Full { source })?;
+                self.held[at] = Some((source, T::default()));
+                at
+            }
+        };
+        let (_, state) = self.held[at].as_mut().expect("just found or made");
+        let changed = change(state);
+        if empty(state) {
+            self.held[at] = None;
+        }
+        Ok(changed)
+    }
+
+    fn gone(&mut self, source: u16) {
+        self.held.iter_mut().filter(|d| matches!(d, Some((s, _)) if *s == source)).for_each(|d| *d = None);
+    }
+
+    fn end(&mut self) {
+        self.held = [const { None }; DEVICES];
+    }
+
+    fn states(&self) -> impl Iterator<Item = &T> {
+        self.held.iter().flatten().map(|(_, state)| state)
+    }
+}
+
+/// One keyboard made of every device's: a key is held while any device
+/// holds it.
 pub struct Merge {
-    sources: [Keys; SLOTS],
+    slots: [Devices<Keys>; SLOTS],
     union: Keys,
 }
 
+impl Default for Merge {
+    fn default() -> Self {
+        Self { slots: [const { Devices::EMPTY }; SLOTS], union: Keys::default() }
+    }
+}
+
 impl Merge {
-    /// `key` from `slot`: what it changed of the union, each transition with
-    /// the union's modifiers after it. A repeated make, or a key another
-    /// source already holds, changes nothing.
-    pub fn key(&mut self, slot: Slot, key: RawKeyEvent) -> Delivered {
-        let mut now = self.sources[slot.0].held();
-        if key.pressed() {
-            now.insert(key.keycode);
-        } else {
-            now.remove(key.keycode);
-        }
-        self.sources[slot.0].hold(now);
+    /// `key` from `slot`'s device `source`: what it changed of the union,
+    /// each transition with the union's modifiers after it. A repeated make,
+    /// or a key another device already holds, changes nothing.
+    pub fn key(&mut self, slot: Slot, source: u16, key: RawKeyEvent) -> Result<Delivered, Full> {
+        let empty = |keys: &Keys| keys.held() == Usages::NONE;
+        self.slots[slot.0].change(source, empty, |keys| {
+            let mut now = keys.held();
+            if key.pressed() {
+                now.insert(key.keycode);
+            } else {
+                now.remove(key.keycode);
+            }
+            keys.hold(now);
+        })?;
+        Ok(self.merge())
+    }
+
+    /// `slot`'s device `source` holds nothing: it left, or lost what it held.
+    pub fn gone(&mut self, slot: Slot, source: u16) -> Delivered {
+        self.slots[slot.0].gone(source);
         self.merge()
     }
 
-    /// `slot` holds nothing: its source ended, or lost what it held.
+    /// Every device `slot` carried holds nothing: its source ended.
     pub fn end(&mut self, slot: Slot) -> Delivered {
-        self.sources[slot.0].hold(Usages::NONE);
+        self.slots[slot.0].end();
         self.merge()
     }
 
     fn merge(&mut self) -> Delivered {
-        let union = self.sources.iter().fold(Usages::NONE, |all, keys| all.union(keys.held()));
+        let held = self.slots.iter().flat_map(Devices::states);
+        let union = held.fold(Usages::NONE, |all, keys| all.union(keys.held()));
         let before = self.union.held();
         Delivered { transitions: self.union.hold(union), held: before }
     }
@@ -110,7 +173,7 @@ fn rel_scale_for(width: u32, height: u32) -> (u16, u16) {
 /// absolute space, `0..=POINTER_ABSOLUTE_MAX` on each axis.
 pub struct Pointer {
     /// Each pointer's buttons, by its slot and its record's `source`.
-    buttons: [[u8; 256]; SLOTS],
+    buttons: [Devices<u8>; SLOTS],
     x: i32,
     y: i32,
     scale: (u16, u16),
@@ -129,7 +192,7 @@ impl Pointer {
     /// At the middle of a `width` by `height` screen, holding nothing.
     pub fn new(width: u32, height: u32) -> Self {
         let middle = (POINTER_ABSOLUTE_MAX as i32 + 1) / 2;
-        Self { buttons: [[0; 256]; SLOTS], x: middle, y: middle, scale: rel_scale_for(width, height) }
+        Self { buttons: [const { Devices::EMPTY }; SLOTS], x: middle, y: middle, scale: rel_scale_for(width, height) }
     }
 
     /// The screen relative motion is scaled for.
@@ -139,8 +202,8 @@ impl Pointer {
 
     /// `report` from `slot`: relative motion moves the position by the
     /// screen's scale, and absolute motion sets it.
-    pub fn report(&mut self, slot: Slot, report: Report) -> State {
-        self.buttons[slot.0][usize::from(report.source)] = report.buttons;
+    pub fn report(&mut self, slot: Slot, report: Report) -> Result<State, Full> {
+        self.buttons[slot.0].change(report.source, |held| *held == 0, |held| *held = report.buttons)?;
         let most = i32::from(POINTER_ABSOLUTE_MAX);
         match report.motion {
             Motion::Relative { dx, dy } => {
@@ -149,17 +212,23 @@ impl Pointer {
             }
             Motion::Absolute { x, y } => (self.x, self.y) = (i32::from(x), i32::from(y)),
         }
-        self.state(report.scroll)
+        Ok(self.state(report.scroll))
+    }
+
+    /// `slot`'s pointer `source` holds nothing.
+    pub fn gone(&mut self, slot: Slot, source: u16) -> State {
+        self.buttons[slot.0].gone(source);
+        self.state(0)
     }
 
     /// Every pointer `slot` carried holds nothing.
     pub fn end(&mut self, slot: Slot) -> State {
-        self.buttons[slot.0] = [0; 256];
+        self.buttons[slot.0].end();
         self.state(0)
     }
 
     fn state(&self, scroll: i8) -> State {
-        let buttons = self.buttons.iter().flatten().fold(0, |all, &held| all | held);
+        let buttons = self.buttons.iter().flat_map(Devices::states).fold(0, |all, &held| all | held);
         // Both are clamped to `0..=POINTER_ABSOLUTE_MAX`.
         State { buttons, scroll, x: self.x as u16, y: self.y as u16 }
     }

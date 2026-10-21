@@ -35,7 +35,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use bcachefs::{Extent, Formatted, FsError, Mounted, ReadWrite};
-use toyos_abi::syscall::SyscallError;
+use toyos::fs::Error;
 
 use crate::cache::{Cache, Shared};
 use diskserver::disk::{Disk, DiskError, BLOCK};
@@ -116,13 +116,12 @@ pub fn find(claims: usize, served: Result<&[[u8; 16]], String>) -> Located {
     }
 }
 
-fn io(e: &FsError) -> SyscallError {
+fn refusal(e: &FsError) -> Error {
     match e {
-        FsError::NotFound => SyscallError::NotFound,
-        FsError::NoSpace { .. } | FsError::EntryTooLarge { .. } | FsError::ListTooLong { .. } => {
-            SyscallError::ResourceExhausted
-        }
-        FsError::NameTooLong { .. } => SyscallError::InvalidArgument,
+        FsError::NotFound => Error::NotFound,
+        FsError::NoSpace { .. } => Error::NoSpace,
+        FsError::EntryTooLarge { .. } | FsError::ListTooLong { .. } => Error::LimitExceeded,
+        FsError::NameTooLong { .. } => Error::NameTooLong,
         FsError::DeviceRead(..)
         | FsError::DeviceWrite(..)
         | FsError::DeviceSync(_)
@@ -136,23 +135,24 @@ fn io(e: &FsError) -> SyscallError {
         | FsError::TreeTooDeep(_)
         | FsError::BadSuperblock { .. }
         | FsError::NodeOverfull { .. }
-        | FsError::TargetTooLong { .. } => SyscallError::Io,
+        | FsError::TargetTooLong { .. } => Error::Io,
     }
 }
 
 /// Logs the format's own account, answers the word a client can act on.
-fn mapped<T>(what: &str, path: &str, r: Result<T, FsError>) -> Result<T, SyscallError> {
+fn mapped<T>(what: &str, path: &str, r: Result<T, FsError>) -> Result<T, Error> {
     r.map_err(|e| {
         println!("fileserver: {what} of '{path}' failed: {e:?}");
-        io(&e)
+        refusal(&e)
     })
 }
 
-fn disk_word(e: DiskError) -> SyscallError {
+/// A block service that ended is a device that did not do it, as far as a
+/// client of this volume can act on.
+fn disk_word(e: DiskError) -> Error {
     match e {
-        DiskError::Device | DiskError::Range => SyscallError::Io,
-        DiskError::Gone => SyscallError::Gone,
-        DiskError::ReadOnly => SyscallError::PermissionDenied,
+        DiskError::Device | DiskError::Range | DiskError::Gone => Error::Io,
+        DiskError::ReadOnly => Error::ReadOnly,
     }
 }
 
@@ -307,16 +307,16 @@ impl<D: Disk> DataVolume<D> {
             || (!self.names.contains_key(path) && self.has_children(path))
     }
 
-    fn entry(&mut self, node: Node) -> Result<&mut Open, SyscallError> {
-        let open = self.open.get_mut(&node).ok_or(SyscallError::NotFound)?;
+    fn entry(&mut self, node: Node) -> Result<&mut Open, Error> {
+        let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
         if open.gone {
-            return Err(SyscallError::Gone);
+            return Err(Error::Stale);
         }
         Ok(open)
     }
 
     /// Write one open file's length and extents to its entry.
-    fn persist(&mut self, node: Node) -> Result<(), SyscallError> {
+    fn persist(&mut self, node: Node) -> Result<(), Error> {
         let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
         if !open.dirty || open.gone {
             return Ok(());
@@ -354,11 +354,11 @@ impl<D: Disk> DataVolume<D> {
     /// A name is made under directories that need not exist yet — the format
     /// makes every prefix one, as the kernel's mount did — but never under a
     /// file or a symlink, which would then be two things at once.
-    fn require_parent_dir(&self, path: &str) -> Result<(), SyscallError> {
+    fn require_parent_dir(&self, path: &str) -> Result<(), Error> {
         let mut dir = parent(path);
         while !dir.is_empty() {
             if matches!(self.names.get(dir), Some(Kind::File | Kind::Symlink)) {
-                return Err(SyscallError::NotFound);
+                return Err(Error::NotADirectory);
             }
             dir = parent(dir);
         }
@@ -371,36 +371,32 @@ impl<D: Disk> Volume for DataVolume<D> {
         true
     }
 
-    fn lstat(&mut self, path: &str) -> Result<Meta, SyscallError> {
+    fn lstat(&mut self, path: &str) -> Result<Meta, Error> {
         match self.names.get(path).copied() {
             Some(Kind::Dir) => Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 }),
             Some(kind) => {
                 if let Some(open) = self.by_path.get(path).and_then(|n| self.open.get(n)) {
                     return Ok(Meta { kind, size: open.size, mtime: open.mtime });
                 }
-                let (_, size) = mapped("a lookup", path, self.fs.file_extents(path))?.ok_or(SyscallError::NotFound)?;
-                let mtime = mapped("a lookup", path, self.fs.file_mtime(path))?.ok_or(SyscallError::NotFound)?;
+                let (_, size) = mapped("a lookup", path, self.fs.file_extents(path))?.ok_or(Error::NotFound)?;
+                let mtime = mapped("a lookup", path, self.fs.file_mtime(path))?.ok_or(Error::NotFound)?;
                 Ok(Meta { kind, size, mtime })
             }
             None if self.is_dir(path) => Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 }),
-            None => Err(SyscallError::NotFound),
+            None => Err(Error::NotFound),
         }
     }
 
-    fn read_link(&mut self, path: &str) -> Result<String, SyscallError> {
+    fn read_link(&mut self, path: &str) -> Result<String, Error> {
         if self.names.get(path) != Some(&Kind::Symlink) {
-            return Err(if self.names.contains_key(path) || self.is_dir(path) {
-                SyscallError::InvalidArgument
-            } else {
-                SyscallError::NotFound
-            });
+            return Err(if self.names.contains_key(path) || self.is_dir(path) { Error::NotALink } else { Error::NotFound });
         }
-        mapped("readlink", path, self.fs.read_link(path, MAX_LINK))?.ok_or(SyscallError::Io)
+        mapped("readlink", path, self.fs.read_link(path, MAX_LINK))?.ok_or(Error::Io)
     }
 
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, SyscallError> {
+    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, Error> {
         if !self.is_dir(dir) {
-            return Err(if self.names.contains_key(dir) { SyscallError::InvalidArgument } else { SyscallError::NotFound });
+            return Err(if self.names.contains_key(dir) { Error::NotADirectory } else { Error::NotFound });
         }
         let prefix = if dir.is_empty() { String::new() } else { format!("{dir}/") };
         let mut children: BTreeMap<String, Kind> = BTreeMap::new();
@@ -426,23 +422,23 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(out)
     }
 
-    fn open(&mut self, path: &str, how: OpenHow) -> Result<Node, SyscallError> {
+    fn open(&mut self, path: &str, how: OpenHow) -> Result<Node, Error> {
         if self.is_dir(path) {
-            return Err(SyscallError::InvalidArgument);
+            return Err(Error::IsADirectory);
         }
         let node = match self.by_path.get(path).copied() {
-            Some(_) if how.create_new => return Err(SyscallError::AlreadyExists),
+            Some(_) if how.create_new => return Err(Error::AlreadyExists),
             Some(node) => node,
             None => match self.names.get(path).copied() {
-                Some(_) if how.create_new => return Err(SyscallError::AlreadyExists),
+                Some(_) if how.create_new => return Err(Error::AlreadyExists),
                 Some(Kind::File) => {
                     let (extents, size) =
-                        mapped("open", path, self.fs.file_extents(path))?.ok_or(SyscallError::NotFound)?;
-                    let mtime = mapped("open", path, self.fs.file_mtime(path))?.ok_or(SyscallError::NotFound)?;
+                        mapped("open", path, self.fs.file_extents(path))?.ok_or(Error::NotFound)?;
+                    let mtime = mapped("open", path, self.fs.file_mtime(path))?.ok_or(Error::NotFound)?;
                     self.new_node(path, extents, size, mtime)
                 }
                 // A link the resolver did not follow is one with nothing behind it.
-                Some(_) => return Err(SyscallError::NotFound),
+                Some(_) => return Err(Error::NotFound),
                 None if how.create || how.create_new => {
                     self.require_parent_dir(path)?;
                     let now = (self.clock)();
@@ -450,7 +446,7 @@ impl<D: Disk> Volume for DataVolume<D> {
                     self.names.insert(path.to_string(), Kind::File);
                     self.new_node(path, Vec::new(), 0, now)
                 }
-                None => return Err(SyscallError::NotFound),
+                None => return Err(Error::NotFound),
             },
         };
         self.open.get_mut(&node).expect("just found or made").holders += 1;
@@ -464,7 +460,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(node)
     }
 
-    fn close(&mut self, node: Node) -> Result<(), SyscallError> {
+    fn close(&mut self, node: Node) -> Result<(), Error> {
         let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
         open.holders -= 1;
         if open.holders > 0 {
@@ -484,19 +480,19 @@ impl<D: Disk> Volume for DataVolume<D> {
         }
     }
 
-    fn node_meta(&mut self, node: Node) -> Result<Meta, SyscallError> {
+    fn node_meta(&mut self, node: Node) -> Result<Meta, Error> {
         let open = self.entry(node)?;
         Ok(Meta { kind: Kind::File, size: open.size, mtime: open.mtime })
     }
 
-    fn identity(&mut self, path: &str) -> Result<u64, SyscallError> {
+    fn identity(&mut self, path: &str) -> Result<u64, Error> {
         if !self.names.contains_key(path) && !self.is_dir(path) {
-            return Err(SyscallError::NotFound);
+            return Err(Error::NotFound);
         }
         Ok(self.ids.of(path.to_string()))
     }
 
-    fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError> {
+    fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, Error> {
         let cache = Rc::clone(&self.cache);
         let open = self.entry(node)?;
         if offset >= open.size {
@@ -538,20 +534,20 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(n)
     }
 
-    fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), SyscallError> {
-        let end = offset.checked_add(data.len() as u64).ok_or(SyscallError::InvalidArgument)?;
+    fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), Error> {
+        let end = offset.checked_add(data.len() as u64).ok_or(Error::FileTooLarge)?;
         let cache = Rc::clone(&self.cache);
         let now = (self.clock)();
-        let open = self.open.get_mut(&node).ok_or(SyscallError::NotFound)?;
+        let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
         if open.gone {
-            return Err(SyscallError::Gone);
+            return Err(Error::Stale);
         }
         // Every page past the extents is allocated before a byte is written,
         // so a write the file's one entry could not name is refused whole.
         let covered: u64 = open.extents.iter().map(|e| e.block_count as u64).sum();
         for page in (offset / BLOCK as u64).max(covered)..end.div_ceil(BLOCK as u64) {
             let grown = u32::try_from(page)
-                .map_err(|_| SyscallError::ResourceExhausted)
+                .map_err(|_| Error::FileTooLarge)
                 .and_then(|p| mapped("an allocation", &open.path, self.fs.resolve_or_alloc_block(&mut open.extents, p)))
                 .and_then(|_| match bcachefs::file_entry_fits(&open.path, &open.extents) {
                     true => Ok(()),
@@ -561,7 +557,7 @@ impl<D: Disk> Volume for DataVolume<D> {
                             open.path,
                             open.extents.len()
                         );
-                        Err(SyscallError::ResourceExhausted)
+                        Err(Error::LimitExceeded)
                     }
                 });
             if let Err(e) = grown {
@@ -599,12 +595,12 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(())
     }
 
-    fn truncate(&mut self, node: Node, size: u64) -> Result<(), SyscallError> {
+    fn truncate(&mut self, node: Node, size: u64) -> Result<(), Error> {
         let cache = Rc::clone(&self.cache);
         let now = (self.clock)();
-        let open = self.open.get_mut(&node).ok_or(SyscallError::NotFound)?;
+        let open = self.open.get_mut(&node).ok_or(Error::Stale)?;
         if open.gone {
-            return Err(SyscallError::Gone);
+            return Err(Error::Stale);
         }
         if size >= open.size {
             open.size = size;
@@ -633,9 +629,9 @@ impl<D: Disk> Volume for DataVolume<D> {
         mapped("a truncate's free", &path, self.fs.free_extents(&dropped))
     }
 
-    fn mkdir(&mut self, path: &str) -> Result<(), SyscallError> {
+    fn mkdir(&mut self, path: &str) -> Result<(), Error> {
         if self.names.contains_key(path) || self.is_dir(path) {
-            return Err(SyscallError::AlreadyExists);
+            return Err(Error::AlreadyExists);
         }
         self.require_parent_dir(path)?;
         let now = (self.clock)();
@@ -644,36 +640,36 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(())
     }
 
-    fn rmdir(&mut self, path: &str) -> Result<(), SyscallError> {
+    fn rmdir(&mut self, path: &str) -> Result<(), Error> {
         if self.roots.iter().any(|r| r == path) || path.is_empty() {
-            return Err(SyscallError::PermissionDenied);
+            return Err(Error::Root);
         }
         if !self.is_dir(path) {
-            return Err(if self.names.contains_key(path) { SyscallError::InvalidArgument } else { SyscallError::NotFound });
+            return Err(if self.names.contains_key(path) { Error::NotADirectory } else { Error::NotFound });
         }
         if self.has_children(path) {
-            return Err(SyscallError::InvalidArgument);
+            return Err(Error::NotEmpty);
         }
         let marker = format!("{path}/");
         if !mapped("rmdir", path, self.fs.delete(&marker))? {
-            return Err(SyscallError::NotFound);
+            return Err(Error::NotFound);
         }
         self.names.remove(path);
         self.forget(path);
         Ok(())
     }
 
-    fn unlink(&mut self, path: &str) -> Result<(), SyscallError> {
+    fn unlink(&mut self, path: &str) -> Result<(), Error> {
         match self.names.get(path) {
             Some(Kind::File) | Some(Kind::Symlink) => {}
-            Some(Kind::Dir) => return Err(SyscallError::InvalidArgument),
-            None if self.is_dir(path) => return Err(SyscallError::InvalidArgument),
-            None => return Err(SyscallError::NotFound),
+            Some(Kind::Dir) => return Err(Error::IsADirectory),
+            None if self.is_dir(path) => return Err(Error::IsADirectory),
+            None => return Err(Error::NotFound),
         }
         // Asked of the volume first: a delete the device refused leaves every
         // holder of the file its file.
         if !mapped("unlink", path, self.fs.delete(path))? {
-            return Err(SyscallError::NotFound);
+            return Err(Error::NotFound);
         }
         self.orphan(path);
         self.names.remove(path);
@@ -681,19 +677,19 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(())
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> Result<(), SyscallError> {
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), Error> {
         if from == to {
             return self.lstat(from).map(drop);
         }
         let kind = self.lstat(from)?.kind;
         self.require_parent_dir(to)?;
         if self.roots.iter().any(|r| r == from || r == to) {
-            return Err(SyscallError::PermissionDenied);
+            return Err(Error::Root);
         }
         match kind {
             Kind::File | Kind::Symlink => {
                 if self.is_dir(to) {
-                    return Err(SyscallError::InvalidArgument);
+                    return Err(Error::IsADirectory);
                 }
                 // Written first, so a file renamed while open keeps its
                 // length under its new name.
@@ -716,10 +712,10 @@ impl<D: Disk> Volume for DataVolume<D> {
             }
             Kind::Dir => {
                 if self.names.contains_key(to) || self.is_dir(to) {
-                    return Err(SyscallError::AlreadyExists);
+                    return Err(Error::AlreadyExists);
                 }
                 if to.starts_with(&format!("{from}/")) {
-                    return Err(SyscallError::InvalidArgument);
+                    return Err(Error::IntoItself);
                 }
                 // Every entry beneath, and the directory's own, in one
                 // operation of the format's: the directory moves whole or not at all.
@@ -764,9 +760,9 @@ impl<D: Disk> Volume for DataVolume<D> {
         }
     }
 
-    fn symlink(&mut self, path: &str, target: &str) -> Result<(), SyscallError> {
+    fn symlink(&mut self, path: &str, target: &str) -> Result<(), Error> {
         if self.names.contains_key(path) || self.is_dir(path) {
-            return Err(SyscallError::AlreadyExists);
+            return Err(Error::AlreadyExists);
         }
         self.require_parent_dir(path)?;
         mapped("symlink", path, self.fs.create_symlink(path, target))?;
@@ -774,7 +770,7 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(())
     }
 
-    fn sync(&mut self) -> Result<Vec<(Node, SyscallError)>, SyscallError> {
+    fn sync(&mut self) -> Result<Vec<(Node, Error)>, Error> {
         let mut unwritten = Vec::new();
         let nodes: Vec<Node> = self.open.keys().copied().collect();
         for node in nodes {
@@ -856,11 +852,11 @@ mod tests {
         v.symlink("home/toy/Games", "Apps/other").unwrap();
         let root = "home/toy/Games";
         assert_eq!(v.lstat(root).unwrap().kind, Kind::Symlink);
-        assert_eq!(v.list(root).map(drop), Err(SyscallError::InvalidArgument));
-        assert_eq!(v.lstat("home/toy/Games/kept"), Err(SyscallError::NotFound));
-        assert_eq!(v.open("home/toy/Games/kept", PLAIN).map(drop), Err(SyscallError::NotFound));
-        assert_eq!(v.open("home/toy/Games/made", CREATE).map(drop), Err(SyscallError::NotFound));
-        assert_eq!(v.mkdir("home/toy/Games/sub"), Err(SyscallError::NotFound));
+        assert_eq!(v.list(root).map(drop), Err(Error::NotADirectory));
+        assert_eq!(v.lstat("home/toy/Games/kept"), Err(Error::NotFound));
+        assert_eq!(v.open("home/toy/Games/kept", PLAIN).map(drop), Err(Error::NotFound));
+        assert_eq!(v.open("home/toy/Games/made", CREATE).map(drop), Err(Error::NotADirectory));
+        assert_eq!(v.mkdir("home/toy/Games/sub"), Err(Error::NotADirectory));
         let listed: Vec<String> = v.list("home/toy/Apps/other").unwrap().into_iter().map(|(name, _)| name).collect();
         assert_eq!(listed, ["kept"]);
     }
@@ -903,8 +899,8 @@ mod tests {
         let n = v.open("home/a", CREATE).unwrap();
         v.write(n, 0, b"x").unwrap();
         v.unlink("home/a").unwrap();
-        assert_eq!(v.read(n, 0, &mut Buf(&mut [0u8; 1])), Err(SyscallError::Gone));
-        assert_eq!(v.lstat("home/a"), Err(SyscallError::NotFound));
+        assert_eq!(v.read(n, 0, &mut Buf(&mut [0u8; 1])), Err(Error::Stale));
+        assert_eq!(v.lstat("home/a"), Err(Error::NotFound));
     }
 
     #[test]
@@ -926,18 +922,18 @@ mod tests {
         let f = v.open("home/nodir/a", CREATE).unwrap();
         v.close(f).unwrap();
         assert_eq!(v.lstat("home/nodir").unwrap().kind, Kind::Dir, "a create makes its directories");
-        assert_eq!(v.open("home/nodir/a/b", CREATE), Err(SyscallError::NotFound), "never under a file");
+        assert_eq!(v.open("home/nodir/a/b", CREATE), Err(Error::NotADirectory), "never under a file");
         v.mkdir("home/d").unwrap();
-        assert_eq!(v.mkdir("home/d"), Err(SyscallError::AlreadyExists));
+        assert_eq!(v.mkdir("home/d"), Err(Error::AlreadyExists));
         let n = v.open("home/d/f", CREATE).unwrap();
         v.close(n).unwrap();
-        assert_eq!(v.rmdir("home/d"), Err(SyscallError::InvalidArgument), "not empty");
+        assert_eq!(v.rmdir("home/d"), Err(Error::NotEmpty));
         let names: Vec<String> = v.list("home").unwrap().into_iter().map(|(n, _)| n).collect();
         assert_eq!(names, ["d", "nodir"]);
         v.unlink("home/d/f").unwrap();
         v.rmdir("home/d").unwrap();
-        assert_eq!(v.lstat("home/d"), Err(SyscallError::NotFound));
-        assert_eq!(v.rmdir("home"), Err(SyscallError::PermissionDenied), "a root stays");
+        assert_eq!(v.lstat("home/d"), Err(Error::NotFound));
+        assert_eq!(v.rmdir("home"), Err(Error::Root), "a root stays");
     }
 
     /// A file's number is one across renames, its own directory's and one
@@ -957,7 +953,7 @@ mod tests {
             .collect();
         assert!(ids.iter().all(|&n| n != 0 && ids.iter().filter(|&&m| m == n).count() == 1), "{ids:?}");
         let (f, g, a, x) = (ids[0], ids[1], ids[2], ids[3]);
-        assert_eq!(v.identity("home/nothing"), Err(SyscallError::NotFound));
+        assert_eq!(v.identity("home/nothing"), Err(Error::NotFound));
 
         v.rename("home/a", "home/b").unwrap();
         assert_eq!(v.identity("home/b"), Ok(a), "a directory's rename keeps its number");
@@ -966,7 +962,7 @@ mod tests {
         assert_eq!(v.identity("home/b/f"), Ok(g), "a rename over a file takes its name, not its number");
 
         v.unlink("home/x/only").unwrap();
-        assert_eq!(v.identity("home/x"), Err(SyscallError::NotFound), "a directory that held only the file went");
+        assert_eq!(v.identity("home/x"), Err(Error::NotFound), "a directory that held only the file went");
         let n = v.open("home/x/only", CREATE).unwrap();
         v.close(n).unwrap();
         let (dir, file) = (v.identity("home/x").unwrap(), v.identity("home/x/only").unwrap());
@@ -1097,7 +1093,7 @@ mod tests {
                 let at = round as usize % paths.len();
                 assert_eq!(
                     v.write(nodes[at], 64 << 20, b"past every block"),
-                    Err(SyscallError::ResourceExhausted),
+                    Err(Error::NoSpace),
                     "{}: a write the volume has no blocks for",
                     paths[at]
                 );
@@ -1142,13 +1138,13 @@ mod tests {
                 Err(e) => break e,
             }
         };
-        assert_eq!(refused, SyscallError::ResourceExhausted);
+        assert_eq!(refused, Error::LimitExceeded);
         // One block a run: (4064 − 24 − 19 − "home/a".len()) / 16 runs is
         // what the one entry holding `home/a` names.
         assert_eq!(pages, 250, "the entry filled, not the volume");
         assert_eq!(page_count(&mut v, "home/a"), pages, "the refused write changed nothing");
         let before = free_blocks(&mut v);
-        assert_eq!(v.write(a, pages * BLOCK as u64, &[4; 4 * BLOCK]), Err(SyscallError::ResourceExhausted));
+        assert_eq!(v.write(a, pages * BLOCK as u64, &[4; 4 * BLOCK]), Err(Error::LimitExceeded));
         assert_eq!(free_blocks(&mut v), before, "a refused write's blocks went back");
         v.close(a).unwrap();
         let mut v = remount(v);
@@ -1173,10 +1169,10 @@ mod tests {
         let too_many = vec![real[0]; 300];
         v.open.get_mut(&a).unwrap().extents = too_many.clone();
 
-        assert_eq!(v.sync(), Ok(vec![(a, SyscallError::ResourceExhausted)]));
+        assert_eq!(v.sync(), Ok(vec![(a, Error::LimitExceeded)]));
         v.close(b).unwrap();
-        assert_eq!(v.close(a), Err(SyscallError::ResourceExhausted), "a close that lost the writes is refused");
-        assert_eq!(v.sync(), Ok(vec![(a, SyscallError::ResourceExhausted)]), "unheld, it is named again");
+        assert_eq!(v.close(a), Err(Error::LimitExceeded), "a close that lost the writes is refused");
+        assert_eq!(v.sync(), Ok(vec![(a, Error::LimitExceeded)]), "unheld, it is named again");
         assert!(v.open.contains_key(&a), "and kept again");
         assert_eq!(page_count(&mut v, "home/a"), 1, "the refused file is still what its writes made it");
 
@@ -1203,7 +1199,7 @@ mod tests {
         let to = v.open(&to_path, CREATE).unwrap();
         v.write(to, 0, b"written and not synced").unwrap();
 
-        assert_eq!(v.rename("home/f", &to_path), Err(SyscallError::ResourceExhausted));
+        assert_eq!(v.rename("home/f", &to_path), Err(Error::LimitExceeded));
 
         let mut back = [0u8; 22];
         assert_eq!(v.read(to, 0, &mut Buf(&mut back)), Ok(22), "the holder of `to` still reads it");
@@ -1435,16 +1431,16 @@ mod tests {
         v.close(z).unwrap();
         let to = format!("home/{}", "t".repeat(300));
 
-        assert_eq!(v.rename("home/staged", &to), Err(SyscallError::ResourceExhausted));
+        assert_eq!(v.rename("home/staged", &to), Err(Error::LimitExceeded));
 
         let names = |v: &mut DataVolume<Ram>, dir: &str| -> Vec<String> {
             v.list(dir).map(|l| l.into_iter().map(|(n, _)| n).collect()).unwrap_or_default()
         };
         assert_eq!(names(&mut v, "home/staged"), ["a", "z"]);
-        assert_eq!(v.lstat(&to), Err(SyscallError::NotFound));
+        assert_eq!(v.lstat(&to), Err(Error::NotFound));
         assert_eq!(v.sync(), Ok(Vec::new()));
         let mut v = remount(v);
         assert_eq!(names(&mut v, "home/staged"), ["a", "z"]);
-        assert_eq!(v.lstat(&to), Err(SyscallError::NotFound));
+        assert_eq!(v.lstat(&to), Err(Error::NotFound));
     }
 }

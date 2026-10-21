@@ -53,6 +53,22 @@ started. Nothing reaches userland when a device arrives or leaves.
   pull request before stage 1's guest smoke
   (`issues/a-cargo-run-boot-claims-every-pcidev-slot.md`).
 
+**Ruled** (orchestrator, 2026-10-20, on the step-10 brief; it replaces #901's
+`block@<location>` ports, `each`, `pci@` and several block services):
+
+- One shared block service, diskserver, serves `block` to its clients
+  (unchanged: grants are supervisor-minted badges) and `disk` to disk drivers.
+  A disk driver is a `drives` row receiving `disk`: it reads its own GPT,
+  offers each disk's partitions, and says when a disk is gone.
+- On an open the service checks the grant and hands the client's connection
+  and region to the offering driver, which answers `MSG_OPENED` on the
+  client's connection and serves the session itself; data never passes the
+  service (`toyos_blockring::disk`, `lib/blockserve`).
+- The supervisor starts the `drives` processes before the storage rows and
+  tells the block service how many disk drivers it started. An open of a
+  partition no disk offers, and a listing, wait until every boot-started disk
+  driver has settled, each wait bounded and naming the driver that did not.
+
 **Measured**:
 
 - **Releases versus the end**, before stage 1a (`usbd_drives_the_spare` on
@@ -100,14 +116,37 @@ started. Nothing reaches userland when a device arrives or leaves.
    - The kernel provides native PCIe hot-plug on a port whose host bridge
      `_OSC` granted it.
    - A removed function's claim answers `Gone`.
-   - An arrived endpoint's BARs are placed inside its port's window.
+   - An arrived endpoint's BARs are placed inside its port's window. No
+     BAR-moving path is left to build on (P1 of `issues/there-is-no-wifi.md`):
+     `place_unassigned` on `wt/toyos-lifecycle-2` is rewritten as one
+     assignment inside the port's window with no probe, and an arrived
+     function's BARs enter `Machine::decoded`, which `pages::of_bar`'s
+     sharing check reads.
 3. **Drivers leave the shared services.** netstack, soundserver and diskserver
    each become a driver per function plus the service its clients use. The
    client port carries a per-device source and `gone`.
+   - **Done for HDA.** `hda` is a `drives` row on `pci:04:03:*`, one process
+     per controller; each walks its own codecs and offers soundserver the
+     output it reaches on `sound-output` (`toyos-sound-output`), and one that
+     reaches none ends by name. soundserver plays to the first offer it can
+     mix into, beginning when no stream is open; it is the null sink until
+     then, and refuses every later offer. A driver gone after soundserver
+     began playing to it ends soundserver. QEMU's two-controller row is
+     `hda_plays_to_the_controller_that_reaches_an_output`.
+   - **Done for NVMe.** `nvme` is a `drives` row, one process per
+     controller, offering its disk to diskserver, which is the block service
+     alone (the ruling above).
+   - Next: virtio-sound is still driven inside soundserver
+     (`system/soundserver/src/virtio.rs`); it becomes a driver on the same
+     port. Then the output set: a second output offered while one plays, a
+     driver's `gone`, and a stream moved to another output, none of which
+     soundserver serves yet; and netstack.
 4. **usbd drives every xHCI**, one per controller, started by stage 1's `drives` rows.
    This is step 10 of
    `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`, whose
-   `input` port is this track's per-device source and `gone`.
+   `input` port is this track's per-device source and `gone` (`toyos-input`
+   carries both), and whose sticks are disks offered on `disk` (the ruling
+   above).
 
 ## Folded here
 

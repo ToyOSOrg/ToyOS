@@ -7,9 +7,9 @@
 # `exit: <name> pid=N code=N cpu=Nms` record is what carries it off the stick.
 #
 # No compositor: the framebuffer jobs claim the display themselves, and a claim
-# is minted for one holder. soundserver *is* here, and claims the HDA controller
-# without a client: on this machine the controller is real, and its codec walk
-# and output-path choice are the only exercise of `toyos-hda` that hardware can
+# is minted for one holder. soundserver and the hda driver *are* here, with no
+# client: on this machine the controller is real, and its codec walk and
+# output-path choice are the only exercise of `toyos-hda` that hardware can
 # give.
 [boot]
 start = ["logkeeper", "diskserver", "fileserver", "soundserver", "test-runner"]
@@ -20,8 +20,16 @@ syscap = ["logread"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver", "volume"]
-devices = ["pci:04:03:00"]
+serves = ["soundserver", "volume", "sound-output"]
+syscap = ["rt"]
+
+# The Intel HD Audio driver: one process per HDA function the kernel does not
+# drive, each walking its own controller's codecs and offering soundserver the
+# output it reaches. A machine with display audio beside an analog codec runs
+# two, and soundserver plays to the one that offers.
+[programs.hda]
+drives = ["pci:04:03:*"]
+receives = ["sound-output"]
 syscap = ["rt"]
 
 # `device` because every framebuffer job mints its own claim and no manifest row
@@ -53,16 +61,22 @@ syscap = ["device", "dup"]
 "bin/usbread" = "/system/bin/metalprobe"
 "bin/reboot" = "/system/bin/toybox"
 
-# The block service: the NVMe controller this machine's DATA is on, driven
-# from userland through its claim. Started again when it ends; the claim goes
-# back with the process and is minted again for the next.
+# The block service: every disk a driver offers on `disk`, listed and opened
+# for the clients `block` grants, each session handed to its disk's driver.
+# Started again when it ends; its drivers connect again and offer again.
 [programs.diskserver]
 service = true
 restart = true
-serves = ["block"]
-devices = ["pci:01:08:02/1b36:0010"]
+serves = ["block", "disk"]
 
-# The file servers: DATA, the log and the running slot's volume, one process
+# The NVMe driver: one process per such controller, reading its own table and
+# offering its disk to the block service. QEMU's controller alone, so a metal
+# boot leaves the bench's own NVMe disk to its firmware.
+[programs.nvme]
+drives = ["pci:01:08:02/1b36:0010"]
+receives = ["disk"]
+
+# The file servers: DATA, the log and the boot volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
 [programs.fileserver]

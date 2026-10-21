@@ -30,8 +30,8 @@ use toyos_xhci::job::CC_SUCCESS;
 use toyos_xhci::ladder::{self, AfterReset, AfterRung, Left, PortStep, Run, Rung};
 use toyos_xhci::port;
 use toyos_xhci::reset_recovery::{self, Answered, GaveUp, Look, Pipe, Quiescing, SlotGoes, Step};
-use toyos_xhci::scsi::{self, BringUp, Cdb, Fail, Flushed, Geometry, Heard, Moved, Printable, Reply};
-use toyos_xhci::scsi::{Refusal, Sense, Transfer, HOST_BLOCK};
+use toyos_scsi::{self as scsi, BringUp, Cdb, Fail, Flushed, Geometry, Heard, Moved, Printable, Reply};
+use toyos_scsi::{Refusal, Sense, Transfer, HOST_BLOCK};
 
 /// A region, not an address: the CBW's length is the region's own size, so
 /// no command can name a length its destination lacks.
@@ -858,7 +858,10 @@ impl XhciController {
             Ok(Bot::Done { delivered }) => {
                 let mut response = [0u8; scsi::SENSE_BYTES];
                 dma.copy_to(dev.block + MSC_SCRATCH, &mut response);
-                Sense::of(&response, delivered)
+                Sense::of(&response, delivered).unwrap_or_else(|why| {
+                    log!("usb-storage: {} answered sense this driver does not read: {why:?}", self.slot(dev.slot_id));
+                    Sense::NONE
+                })
             }
             _ => Sense::NONE,
         }
@@ -1461,7 +1464,7 @@ enum Up {
 }
 
 /// Everything between a configured interface and a disk with a size, as
-/// `toyos_xhci::scsi::BringUp` asks for it.
+/// `toyos_scsi::BringUp` asks for it.
 fn bring_up(ctrl: &mut XhciController, dev: &mut MscDevice) -> Up {
     let slot = dev.slot_id;
     let dma = ctrl.dma();

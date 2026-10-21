@@ -31,6 +31,8 @@ use toyos::AsHandle;
 use toyos_abi::clock;
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::End;
 
 const SELF_PATH: &str = "/system/bin/test_rs_kill_ends_every_wait";
 
@@ -56,8 +58,7 @@ const POSTERS: usize = 4;
 /// child outlived it.
 const HELD: Duration = Duration::from_secs(1);
 
-/// `process::KILLED_EXIT_CODE`.
-const KILLED: i32 = 137;
+const KILLED: End = End::Killed;
 
 /// `sched::payload::SCHED_BLOCKED`, the state column of the roster.
 const BLOCKED: u8 = 2;
@@ -98,8 +99,8 @@ fn test() {
         if let Some(posts) = posts {
             posts.until_the_child_ends();
         }
-        let code = child.wait().expect("wait for the killed child").code();
-        assert_eq!(code, Some(KILLED), "a child killed in its {role} wait ended with {code:?}");
+        let end = End::from_word(child.wait().expect("wait for the killed child").into_raw());
+        assert_eq!(end, Some(KILLED), "a child killed in its {role} wait ended {end:?}");
         if let Some(mut waited) = waited.take() {
             waited.kill().expect("kill the waited process");
             waited.wait().expect("wait for the waited process");

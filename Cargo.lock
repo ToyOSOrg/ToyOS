@@ -582,6 +582,7 @@ dependencies = [
  "toyos-pci-claim",
  "toyos-virtio",
  "toyos-virtio-gpu",
+ "toyos-wallclock",
  "toyos-window",
 ]
 
@@ -990,10 +991,9 @@ version = "0.0.0"
 dependencies = [
  "toyos",
  "toyos-abi",
- "toyos-blockhold",
  "toyos-blockring",
+ "toyos-blockserve",
  "toyos-disk",
- "toyos-gpt",
 ]
 
 [[package]]
@@ -1610,6 +1610,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "841d1cc9bed7f9236f321df977030373f4a4163ae1a7dbfe1a51a2c1a51d9100"
 
 [[package]]
+name = "hda"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-hda",
+ "toyos-manifest",
+ "toyos-pci-claim",
+ "toyos-sound-output",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1964,11 +1976,11 @@ dependencies = [
  "toyos-quiesce",
  "toyos-random",
  "toyos-rootimage",
+ "toyos-scsi",
  "toyos-smmu",
  "toyos-symbols",
  "toyos-tco",
  "toyos-tsc",
- "toyos-untrusted",
  "toyos-usbhid",
  "toyos-userbound",
  "toyos-wallclock",
@@ -2364,6 +2376,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "nvme"
+version = "0.0.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-blockring",
+ "toyos-blockserve",
+ "toyos-gpt",
 ]
 
 [[package]]
@@ -3921,12 +3944,12 @@ dependencies = [
  "rubato",
  "toyos",
  "toyos-abi",
- "toyos-hda",
  "toyos-inspect",
  "toyos-manifest",
  "toyos-mixer",
  "toyos-pci-claim",
  "toyos-resample",
+ "toyos-sound-output",
  "toyos-virtio",
  "toyos-virtio-sound",
 ]
@@ -4360,6 +4383,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "toyos-blockserve"
+version = "0.1.0"
+dependencies = [
+ "toyos",
+ "toyos-abi",
+ "toyos-blockhold",
+ "toyos-blockring",
+ "toyos-gpt",
+]
+
+[[package]]
 name = "toyos-bootmap"
 version = "0.1.0"
 dependencies = [
@@ -4425,6 +4459,7 @@ dependencies = [
  "chacha20 0.9.1",
  "chacha20poly1305",
  "ed25519-dalek 2.2.0",
+ "fiat-crypto 0.3.0",
  "ml-kem",
  "num-bigint",
  "p256 0.13.2",
@@ -4526,7 +4561,7 @@ name = "toyos-hda"
 version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
- "toyos-mixer",
+ "toyos-sound-output",
 ]
 
 [[package]]
@@ -4578,6 +4613,7 @@ version = "0.1.0"
 name = "toyos-libc-copies"
 version = "0.1.0"
 dependencies = [
+ "toyos",
  "toyos-abi",
  "toyos-elf",
 ]
@@ -4755,6 +4791,10 @@ name = "toyos-rootimage"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-scsi"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-sha2"
 version = "0.1.0"
 dependencies = [
@@ -4774,6 +4814,13 @@ version = "0.1.0"
 dependencies = [
  "toyos-bootmap",
  "toyos-phys",
+]
+
+[[package]]
+name = "toyos-sound-output"
+version = "0.1.0"
+dependencies = [
+ "toyos-mixer",
 ]
 
 [[package]]
@@ -4836,19 +4883,11 @@ version = "0.1.0"
 dependencies = [
  "loom",
  "rustc-std-workspace-core",
- "toyos-untrusted",
 ]
 
 [[package]]
 name = "toyos-tsc"
 version = "0.1.0"
-
-[[package]]
-name = "toyos-untrusted"
-version = "0.1.0"
-dependencies = [
- "rustc-std-workspace-core",
-]
 
 [[package]]
 name = "toyos-update"
@@ -4880,9 +4919,6 @@ dependencies = [
 [[package]]
 name = "toyos-vdagent"
 version = "0.1.0"
-dependencies = [
- "toyos-untrusted",
-]
 
 [[package]]
 name = "toyos-vdagent-bridge"
@@ -4896,7 +4932,6 @@ name = "toyos-virtio"
 version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
- "toyos-untrusted",
 ]
 
 [[package]]
@@ -4933,6 +4968,9 @@ dependencies = [
 [[package]]
 name = "toyos-xhci"
 version = "0.1.0"
+dependencies = [
+ "toyos-scsi",
+]
 
 [[package]]
 name = "toyos-xhci-sim"

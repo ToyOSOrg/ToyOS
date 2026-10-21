@@ -7,7 +7,7 @@ opened: 2026-08-10
 # A disk plugged in after boot is bound inside a scheduling pass
 
 The BOT round trip and the SCSI bring-up above it are pure machines,
-`toyos_xhci::bot::RoundTrip` and `toyos_xhci::scsi::BringUp`, and the kernel
+`toyos_xhci::bot::RoundTrip` and `toyos_scsi::BringUp`, and the kernel
 drives both blocking, in place. For the read/write entry points that is the
 caller's own time. For the bind it is not: `msc::bind` is the one call site
 where a scheduling pass can still spend its transfer budget inside xHCI — for a

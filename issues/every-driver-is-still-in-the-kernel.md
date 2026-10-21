@@ -32,10 +32,12 @@ is not built.
 
 What is left of the staged work:
 
-1. Done for HDA: soundserver claims the function as `pci:04:03:00` and
-   drives it whole (`system/soundserver/hda/src/controller.rs`) — controller
-   reset, CORB/RIRB, the stream and its descriptor list in the claim's grant,
-   its interrupt as the claim's record. The `hda-audio` class,
+1. Done for HDA: an `hda` process per function of `pci:04:03:*` (a
+   `drives` row, `system/hda`) drives it whole — controller reset, CORB/RIRB,
+   the stream and its descriptor list, the ring soundserver lends it, its
+   interrupt as the claim's record — and offers soundserver its output
+   (`issues/a-device-function-is-driven-from-its-arrival-to-its-end.md`'s
+   stage 3). The `hda-audio` class,
    `SYS_HDA_BIND`, `SYS_DEVICE_REG_WRITE` and the kernel's HDA vector are
    gone; `SYS_DEVICE_REG_READ` reads a PCI claim's config space alone. Every
    machine's DLL is clocked by a claim's record, and a period read before its
@@ -58,9 +60,8 @@ What is left of the staged work:
    accepted wherever offered, and a device that drops `FEATURES_OK`
    refused. `Profile::HeadlessVirtioGpu` stays, the suite's one machine whose
    display a process drives.
-2. Done: **BAR sizing and re-assignment onto 2 MiB boundaries** is
-   `pcidev::place_bar`, with the overlap refusal kept as the assertion that it
-   worked rather than as the mechanism.
+2. Done: **BAR sizing, and each BAR handed over in place in its own 4 KiB
+   pages**, is `pcidev::publish` and `pcidev::bars`.
 3. Done: **the capability itself** is `DeviceType::PciFunction` plus
    `SYS_DEVICE_BAR_MAP` and `SYS_DEVICE_DMA_ALLOC`, with config space readable
    and unwritable and the interrupt delivered as a record on the claim.
@@ -74,8 +75,7 @@ What is left of the staged work:
   claim arms MSI-X or MSI (`bring_up`, `kernel/src/pcidev/mod.rs`). QEMU
   11.1's `nec-usb-xhci` arms MSI-X and publishes one memory BAR, BAR 0, so
   its table is there, and a claim hands that BAR over with the rest where
-  the machine remaps; the device's `msix=off` leaves it on MSI, as
-  `msix-exclusive-bar=on` moves NVMe's table for blockd. The T14's two xHCI functions each publish
+  the machine remaps; the device's `msix=off` leaves it on MSI. The T14's two xHCI functions each publish
   only BAR 0 and armed MSI in the kernel's own bring-up, with no `MSI-X not
   armed` line and one remapping entry each (a `testcases` readback): no MSI-X
   capability came off either walk, so a claim arms MSI and hands BAR 0 over —

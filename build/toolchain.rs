@@ -825,7 +825,7 @@ mod tests {
         let registry = |name: &str, version: &str| {
             format!("/home/runner/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/{name}-{version}/src/lib.rs")
         };
-        let rest = format!("{} {}", ours("lib/blockring/transport"), ours("lib/untrusted"));
+        let rest = ours("sdk/transport");
         let built_from = |abi: &str, toyos: &str| {
             fs::write(built.join("dist/libstd.d"), format!("{}/dist/libstd.rlib: {abi} {toyos} {rest}\n", built.display()))
                 .unwrap();
