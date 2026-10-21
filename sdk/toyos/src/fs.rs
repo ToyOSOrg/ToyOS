@@ -18,6 +18,12 @@
 //! target and the rest of the path in the window, and resolved again in the
 //! client's own table, so it reaches nothing the client does not hold.
 //!
+//! **An open file is a description the server keeps**: the file, the access
+//! the open fixed and the offset. A connection names descriptions by id, and
+//! [`DUP`] and [`EXPORT`] make second ids that share one description's offset,
+//! on the same connection or on a connection made for another process. An
+//! exported connection was given files and no directory: it names no path.
+//!
 //! **One connection per directory per process, a request and then its
 //! reply.** The client lends the server a [`WINDOW_BYTES`] region at connect
 //! ([`HELLO`]); paths, data and listings travel through it and the frames stay
@@ -75,6 +81,21 @@ pub const SYMLINK: u32 = 16;
 pub const READLINK: u32 = 17;
 pub const STREAM: u32 = 18;
 pub const SYNC: u32 = 19;
+/// A second id on the description `fid` names: `value`.
+pub const DUP: u32 = 20;
+/// Move the description's offset: `flags` is [`SEEK_START`], [`SEEK_CURRENT`]
+/// or [`SEEK_END`], `offset` the signed distance from it; `value` is where it
+/// landed.
+pub const SEEK: u32 = 21;
+/// A connection to this server holding the descriptions of the `len` ids in
+/// the window, little-endian `u64`s, as ids 1.. in that order: the reply
+/// carries its other end. It spends a served slot of this connection's share
+/// from here, and names no path.
+pub const EXPORT: u32 = 22;
+
+pub const SEEK_START: u64 = 0;
+pub const SEEK_CURRENT: u64 = 1;
+pub const SEEK_END: u64 = 2;
 
 // Replies, by frame type.
 pub const REPLY: u32 = 0x100;
@@ -220,6 +241,8 @@ errors! {
         /// The kernel had no room for what the request needs: a handle, memory,
         /// a place in a queue.
         OutOfResources = 28,
+        /// A path on a connection that was given files and no directory.
+        NoDirectory = 32,
     }
     local {
         /// The server ended, and the connection with it.
@@ -448,11 +471,17 @@ impl From<Error> for Refused {
     }
 }
 
-/// One directory capability, connected.
+/// Where a [`Dir`]'s connection comes from.
+enum Source {
+    /// A directory capability, connected again through the same connector.
+    Named { names: &'static Namespace, name: [u8; MAX_SERVICE_NAME], len: usize },
+    /// A connection another process exported: one connection, never another.
+    Exported,
+}
+
+/// One directory capability, or one exported connection, connected.
 pub struct Dir {
-    names: &'static Namespace,
-    name: [u8; MAX_SERVICE_NAME],
-    name_len: usize,
+    source: Source,
     conn: Option<Connection>,
     window: SharedMemory,
     generation: u64,
@@ -470,16 +499,23 @@ impl Dir {
         }
         let mut buf = [0u8; MAX_SERVICE_NAME];
         buf[..name.len()].copy_from_slice(name.as_bytes());
-        let window = SharedMemory::create(WINDOW_BYTES).map_err(|e| Error::kernel("a window", e))?;
-        let mut dir =
-            Self { names, name: buf, name_len: name.len(), conn: None, window, generation: 0, writable: false, volume: 0 };
+        let mut dir = Self::unconnected(Source::Named { names, name: buf, len: name.len() })?;
         dir.reconnect()?;
         Ok(dir)
     }
 
-    /// The capability's namespace name.
-    pub fn name(&self) -> &str {
-        core::str::from_utf8(&self.name[..self.name_len]).expect("copied from a str")
+    /// Serve the connection an [`EXPORT`] answered, whose descriptions are ids
+    /// 1.. in the order exported. It names no path, and is not connected again
+    /// once it has ended.
+    pub fn adopt(conn: Connection) -> Result<Self, Error> {
+        let mut dir = Self::unconnected(Source::Exported)?;
+        dir.attach(conn)?;
+        Ok(dir)
+    }
+
+    fn unconnected(source: Source) -> Result<Self, Error> {
+        let window = SharedMemory::create(WINDOW_BYTES).map_err(|e| Error::kernel("a window", e))?;
+        Ok(Self { source, conn: None, window, generation: 0, writable: false, volume: 0 })
     }
 
     /// Counts this directory's connections; a file id is good only on the one
@@ -500,14 +536,22 @@ impl Dir {
     }
 
     /// Open a fresh connection through the same connector, and lend it the
-    /// window again. The old one's file ids name nothing from here on.
+    /// window again. The old one's file ids name nothing from here on; an
+    /// exported connection has no connector, and stays gone.
     fn reconnect(&mut self) -> Result<(), Error> {
         self.conn = None;
-        let conn = match self.names.open(self.name()) {
+        let Source::Named { names, name, len } = &self.source else { return Err(Error::Gone) };
+        let name = core::str::from_utf8(&name[..*len]).expect("copied from a str");
+        let conn = match names.open(name) {
             Ok(conn) => conn,
             Err(SyscallError::NotFound) => return Err(Error::NotHeld),
             Err(e) => return Err(Error::kernel("a connection", e)),
         };
+        self.attach(conn)
+    }
+
+    /// Lend `conn` the window and serve on it.
+    fn attach(&mut self, conn: Connection) -> Result<(), Error> {
         let reply = hello(&conn, &self.window)?;
         self.writable = reply.value & RIGHT_WRITE != 0;
         self.volume = reply.value2 | SERVED_VOLUME;
@@ -602,22 +646,63 @@ impl Dir {
         let _ = self.fid_call(CLOSE, generation, &Request { fid, ..Request::new() });
     }
 
-    /// Read at most `out.len()` bytes, and at most the window, at `offset`.
-    pub fn read(&mut self, fid: u64, generation: u64, offset: u64, out: &mut [u8]) -> Result<usize, Error> {
+    /// Read at most `out.len()` bytes, and at most the window, at the
+    /// description's offset, which moves past them.
+    pub fn read(&mut self, fid: u64, generation: u64, out: &mut [u8]) -> Result<usize, Error> {
         let len = out.len().min(WINDOW_BYTES);
-        let reply = self.fid_call(READ, generation, &Request { fid, offset, len: len as u64, ..Request::new() })?;
+        let reply = self.fid_call(READ, generation, &Request { fid, len: len as u64, ..Request::new() })?;
         let n = counted(reply.value, len)?;
         window_take(self.window(), 0, &mut out[..n]);
         Ok(n)
     }
 
-    /// Write at most the window of `data` at `offset`, or at the end for a file
-    /// opened to append. Answers how much, and the offset after it.
-    pub fn write(&mut self, fid: u64, generation: u64, offset: u64, data: &[u8]) -> Result<Written, Error> {
+    /// Write at most the window of `data` at the description's offset, or at
+    /// the end for a file opened to append; the offset moves past it. Answers
+    /// how much, and the offset after it.
+    pub fn write(&mut self, fid: u64, generation: u64, data: &[u8]) -> Result<Written, Error> {
         let len = data.len().min(WINDOW_BYTES);
         window_put(self.window(), 0, &data[..len]);
-        let reply = self.fid_call(WRITE, generation, &Request { fid, offset, len: len as u64, ..Request::new() })?;
+        let reply = self.fid_call(WRITE, generation, &Request { fid, len: len as u64, ..Request::new() })?;
         Ok(Written { len: counted(reply.value, len)?, offset: reply.value2 })
+    }
+
+    /// Move the description's offset `delta` from `whence` ([`SEEK_START`],
+    /// [`SEEK_CURRENT`] or [`SEEK_END`]): where it landed.
+    pub fn seek(&mut self, fid: u64, generation: u64, whence: u64, delta: i64) -> Result<u64, Error> {
+        let request = Request { fid, offset: delta as u64, flags: whence, ..Request::new() };
+        self.fid_call(SEEK, generation, &request).map(|r| r.value)
+    }
+
+    /// A second id on `fid`'s description, sharing its offset.
+    pub fn dup(&mut self, fid: u64, generation: u64) -> Result<u64, Error> {
+        self.fid_call(DUP, generation, &Request { fid, ..Request::new() }).map(|r| r.value)
+    }
+
+    /// A connection for another process holding the descriptions `fids` name,
+    /// as ids 1.. in this order ([`Dir::adopt`]). It spends a served slot of
+    /// this connection's share for as long as anybody holds it.
+    pub fn export(&mut self, generation: u64, fids: &[u64]) -> Result<Connection, Error> {
+        if generation != self.generation || self.conn.is_none() {
+            return Err(Error::Stale);
+        }
+        if fids.is_empty() || fids.len() * 8 > WINDOW_BYTES {
+            return Err(Error::InvalidRequest);
+        }
+        for (i, fid) in fids.iter().enumerate() {
+            window_put(self.window(), i * 8, &fid.to_le_bytes());
+        }
+        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
+        let request = Request { len: fids.len() as u64, ..Request::new() };
+        let (msg_type, reply, carried) = self.call_with(EXPORT, &request, &mut batch)?;
+        match (answer(msg_type, reply), carried) {
+            (Ok(_), 1) => Ok(Connection::received(batch[0])),
+            (Err(e), 0) => Err(e),
+            (_, n) => {
+                close_all(&batch[..n]);
+                self.conn = None;
+                Err(Error::Malformed)
+            }
+        }
     }
 
     pub fn fstat(&mut self, fid: u64, generation: u64) -> Result<Stat, Error> {
@@ -643,15 +728,14 @@ impl Dir {
         })
     }
 
-    /// A pipe whose bytes the server appends to this file from `offset` on,
-    /// for a program's standard output: the write end.
-    pub fn stream(&mut self, fid: u64, generation: u64, offset: u64) -> Result<Pipe, Error> {
+    /// A pipe whose bytes the server writes to this file at the description's
+    /// offset, which they move, for a program's standard output: the write end.
+    pub fn stream(&mut self, fid: u64, generation: u64) -> Result<Pipe, Error> {
         if generation != self.generation || self.conn.is_none() {
             return Err(Error::Stale);
         }
         let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
-        let (msg_type, reply, carried) =
-            self.call_with(STREAM, &Request { fid, offset, ..Request::new() }, &mut batch)?;
+        let (msg_type, reply, carried) = self.call_with(STREAM, &Request { fid, ..Request::new() }, &mut batch)?;
         match (answer(msg_type, reply), carried) {
             (Ok(_), 1) => Ok(Pipe(crate::OwnedHandle(batch[0]))),
             (Err(e), 0) => Err(e),
@@ -957,7 +1041,7 @@ mod tests {
     /// refused by name, never read as another answer.
     #[test]
     fn a_reply_outside_the_protocol_is_malformed() {
-        let past = Error::WIRE.len() as u64 + 1;
+        let past = Error::WIRE.iter().filter_map(|e| e.code()).max().expect("wire words") + 1;
         // 29 to 31 are what the client's own words once were, and 0x80 on what
         // their discriminants are.
         for status in [past, 29, 30, 31, 0x80, 0x81, 0x82, u64::MAX, SyscallError::NotFound.to_u64()] {

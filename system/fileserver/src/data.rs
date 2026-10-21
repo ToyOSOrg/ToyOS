@@ -474,12 +474,6 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(())
     }
 
-    fn hold(&mut self, node: Node) {
-        if let Some(open) = self.open.get_mut(&node) {
-            open.holders += 1;
-        }
-    }
-
     fn node_meta(&mut self, node: Node) -> Result<Meta, Error> {
         let open = self.entry(node)?;
         Ok(Meta { kind: Kind::File, size: open.size, mtime: open.mtime })
