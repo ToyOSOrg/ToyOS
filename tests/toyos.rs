@@ -4417,14 +4417,14 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Ser
         .find_map(|l| l.split_once("usbd_spare: the command ring aimed at ")?.1.split_once(',').map(|(a, _)| a.to_string()))
         .ok_or_else(|| format!("the fault arm never said where it aimed:\n{}", log.text()))?;
     let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
-    let records: Vec<&str> = kernel
-        .text()
-        .lines()
-        .filter(|l| l.contains("iommu: DMA FAULT owner=process") && l.contains(&format!("stream={at} ")))
-        .collect();
+    // Every record of the spare's: the boot's other rows leave these to this
+    // one ([`no_fault_but_the_spares`]), so each must be one the jobs staged.
+    let records: Vec<&str> =
+        kernel.text().lines().filter(|l| l.contains("iommu: DMA FAULT") && l.contains(&format!(" stream={at} "))).collect();
+    let process = |l: &&&str| l.contains("iommu: DMA FAULT owner=process ");
     let aimed_at = records
         .iter()
-        .find(|l| l.split_once(" addr=").and_then(|(_, a)| hex(a.split_whitespace().next()?)) == hex(&aimed))
+        .find(|l| process(l) && l.contains(" access=read ") && l.split_once(" addr=").and_then(|(_, a)| hex(a.split_whitespace().next()?)) == hex(&aimed))
         .ok_or_else(|| format!("no record of {at} names the aimed {aimed}: {records:?}"))?;
     log.must_say("usbd_spare: the claim refuses its interrupt read: Io")?;
 
@@ -4445,8 +4445,11 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Ser
     // An interrupt's record states no read or write (48882 Table 57, `I`).
     let foreign = records
         .iter()
-        .find(|l| l.contains(" access=none ") && l.ends_with("IO_PAGE_FAULT"))
+        .find(|l| process(l) && l.contains(" access=none ") && l.ends_with("IO_PAGE_FAULT"))
         .ok_or_else(|| format!("no record of {at}'s message on a vector not its own: {records:?}"))?;
+    if records.len() != 2 {
+        return Err(format!("{at} has {} fault records, not the aimed read and the foreign message alone: {records:?}", records.len()));
+    }
     eprintln!("  [amdvi] {at}: handed over on {vector}, its No-Op answered through its own entry");
     eprintln!("  [amdvi] aimed at {aimed}: {}", aimed_at.trim());
     eprintln!("  [amdvi] a vector not its own: {}", foreign.trim());

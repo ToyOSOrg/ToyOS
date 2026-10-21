@@ -273,18 +273,29 @@ impl Ring {
 
     /// A Link TD at the tail, back to the ring's first TRB: where the
     /// controller next turns, its cycle state toggled.
+    ///
+    /// **Every slot of a lap carries that lap's cycle when it closes**, so
+    /// none matches the cycle the controller expects on the next (§4.9.2): a
+    /// Link put early also marks each slot it skips, the ring's own Link
+    /// included, with the closing lap's cycle, or a slot two laps old would
+    /// be the controller's once the next lap's tail rests on it.
     fn link<D: DmaBuffers>(&mut self, dma: &D) {
+        for skipped in self.tail + 1..RING_TRBS {
+            dma.write32(self.at + skipped * 16 + 12, u32::from(self.cycle));
+        }
         let control = TRB_LINK | LINK_TC | u32::from(self.cycle);
         put(dma, self.at + self.tail * 16, Trb { param: dma.device_addr(self.at), status: 0, control });
         self.tail = 0;
         self.cycle = !self.cycle;
     }
 
-    /// TRBs that may still be enqueued before the ring would overrun one the
-    /// controller has not consumed: a ring holds one operation at a time
-    /// here, so only the operation's own length matters.
+    /// The most TRBs one TD may have. A ring holds one operation at a time
+    /// here, so nothing the controller has not consumed is overrun but an
+    /// early Link: put at a tail `t` because `t + n` would pass the ring's
+    /// Link, it must not be overwritten by the TD that follows it, and this
+    /// bound makes `t + n > RING_TRBS - 1` imply `n <= t`.
     pub const fn room() -> usize {
-        RING_TRBS - 1
+        (RING_TRBS - 1) / 2
     }
 }
 
@@ -1039,4 +1050,112 @@ fn settle<C: Host>(host: &C, what: &'static str, done: impl Fn() -> bool) -> Res
         core::hint::spin_loop();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ring_tests {
+    use super::*;
+
+    /// One ring page, its device address its offset.
+    struct Page(RefCell<Vec<u8>>);
+
+    impl DmaBuffers for Page {
+        fn bytes(&self) -> usize {
+            self.0.borrow().len()
+        }
+        fn device_addr(&self, at: usize) -> u64 {
+            at as u64
+        }
+        fn read16(&self, at: usize) -> u16 {
+            u16::from_le_bytes(self.0.borrow()[at..at + 2].try_into().unwrap())
+        }
+        fn read32(&self, at: usize) -> u32 {
+            u32::from_le_bytes(self.0.borrow()[at..at + 4].try_into().unwrap())
+        }
+        fn read64(&self, at: usize) -> u64 {
+            u64::from_le_bytes(self.0.borrow()[at..at + 8].try_into().unwrap())
+        }
+        fn write16(&self, at: usize, v: u16) {
+            self.0.borrow_mut()[at..at + 2].copy_from_slice(&v.to_le_bytes());
+        }
+        fn write32(&self, at: usize, v: u32) {
+            self.0.borrow_mut()[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        }
+        fn write64(&self, at: usize, v: u64) {
+            self.0.borrow_mut()[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        }
+        fn publish(&self) {}
+        fn observe(&self) {}
+    }
+
+    /// The controller's walk (§4.9.2): from its dequeue, take each TRB whose
+    /// cycle is its Consumer Cycle State, following Links and toggling at
+    /// one with TC, and stop at the first that is not its own.
+    fn walk(page: &Page, at: &mut u64, ccs: &mut bool) -> Vec<u64> {
+        let mut took = Vec::new();
+        for _ in 0..4 * RING_TRBS {
+            let control = page.read32(*at as usize + 12);
+            if (control & TRB_CYCLE != 0) != *ccs {
+                return took;
+            }
+            if control & (0x3f << 10) == TRB_LINK {
+                *at = page.read64(*at as usize);
+                *ccs ^= control & LINK_TC != 0;
+            } else {
+                took.push(*at);
+                *at += 16;
+            }
+        }
+        panic!("the walk never stopped");
+    }
+
+    /// TDs of 1 to 3 TRBs over many laps, early Links leaving gaps at every
+    /// offset: after each, the controller takes exactly that TD and stops at
+    /// the tail, from where a Set TR Dequeue would also resume it.
+    #[test]
+    fn the_controller_takes_each_td_and_stops_at_the_tail() {
+        let page = Page(RefCell::new(alloc::vec![0; PAGE]));
+        let mut ring = Ring::new(&page, 0);
+        let (mut at, mut ccs) = (0u64, true);
+        let mut seed = 0x2545_f491_u32;
+        let mut early = 0;
+        // The reviewer's lap first: one TRB a TD to the end, then to 253
+        // and a 3-TRB TD, then one TRB a TD to rest on the gap.
+        let lengths = core::iter::repeat_n(1, 255 + 253)
+            .chain([3])
+            .chain(core::iter::repeat_n(1, 254))
+            .chain(core::iter::from_fn(|| {
+                seed ^= seed << 13;
+                seed ^= seed >> 17;
+                seed ^= seed << 5;
+                Some([1, 1, 2, 3][seed as usize % 4])
+            }))
+            .take(20_000);
+        for n in lengths {
+            if ring.tail + n > RING_TRBS - 1 && ring.tail < RING_TRBS - 1 {
+                early += 1;
+            }
+            let trbs: Vec<Trb> = (0..n).map(|i| Trb { param: i as u64, status: 0, control: TRB_NORMAL }).collect();
+            let named = ring.enqueue(&page, &trbs);
+            assert_eq!(walk(&page, &mut at, &mut ccs), named);
+            assert_eq!((at, ccs), (ring.dequeue(&page) & !1, ring.dequeue(&page) & 1 == 1));
+        }
+        assert!(early > 20, "{early} early Links");
+    }
+
+    /// TDs as long as [`Ring::room`] allows, put behind an early Link at
+    /// every tail that forces one: none overwrites the Link before it.
+    #[test]
+    fn the_longest_td_leaves_the_early_link_before_it_whole() {
+        let page = Page(RefCell::new(alloc::vec![0; PAGE]));
+        let mut ring = Ring::new(&page, 0);
+        let (mut at, mut ccs) = (0u64, true);
+        for lead in 0..RING_TRBS {
+            for n in [lead % 7 + 1, Ring::room()] {
+                let trbs: Vec<Trb> = (0..n).map(|i| Trb { param: i as u64, status: 0, control: TRB_NORMAL }).collect();
+                let named = ring.enqueue(&page, &trbs);
+                assert_eq!(walk(&page, &mut at, &mut ccs), named, "a TD of {n}");
+            }
+        }
+    }
 }
