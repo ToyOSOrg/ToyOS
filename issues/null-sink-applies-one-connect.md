@@ -7,6 +7,12 @@ task: 172
 
 # The null sink's mix loop applies exactly one connect and then stops, on the T14 only
 
+**Read against the tree of 2026-08.** soundd is soundserver now, with its own
+null-sink thread (`system/soundserver/src/mix.rs`); the kernel's `io_uring`
+and its `IO_URINGS` are gone (`232f69bb6`), and
+`tests/desktopaudiocase` and `null_sink_shipped_client` with them
+(`520c0d129`). Not seen or measured since; the cause was never found.
+
 Read off two T14 boots (`boot7-usba-doom.log`, `boot5-doom-wedge.log`). The
 shape is the same in both and it is narrow:
 

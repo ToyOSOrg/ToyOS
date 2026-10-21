@@ -16,7 +16,7 @@ the host has, and the verdict differs between a Linux host and a macOS host:
   `getsockname`, with `darwin_reads` for where macOS parts from Linux.
 - `socket_options.rs`: `setsockopt` and `getsockopt` on real host sockets, with `darwin` for where
   macOS parts from Linux.
-- `fparts_differential.rs`: `modf` and `logb`.
+- `fparts_differential.rs`: `modf`, `round`, `lround` and `logb`.
 - `text_differential.rs`: `strnlen` (its `strsignal` half is held to a committed glibc table and
   conforms).
 

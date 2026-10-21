@@ -4,7 +4,10 @@ kind: defect
 opened: 2026-09-21
 ---
 
-# `logd` ends the boot's log on one refused create, and nothing durable says so
+# logkeeper ends the boot's log on one refused create, and nothing durable says so
+
+logkeeper was `logd` when this was measured, and the kernel still drove the
+stick; the sections below keep the names of then.
 
 T14 run 69 (`usb-transport-break` on the boot stick, this tree at `a9adf0d7`)
 ran its job, synced, said `Rebooting.` at 5.808 s and read back `DONE`. Its
@@ -29,15 +32,15 @@ reached the device before the shutdown's own.
   such boot has `spawn:
   /system/bin/logd` at 0.301 s, the break at 0.323 s and `logd: this boot's
   kernel log is …` after it: the write is `Volume::open` creating the file.
-- **One refused create is no log for the boot.** `userland/logd/src/store.rs`'s
-  `Volume::open` answers `None` on any error from `create`, with no retry, and
-  `main` then runs to the end of the boot with `volume = None`. `policy::fate`
-  does not see this path at all; it rules on appends and flushes, where every
-  answer but a budget-refused flush is `GiveUp` for the rest of the boot.
-- **What it says reaches nothing on this machine.** `logd: cannot create …` and
-  `logd: no /log on this machine …` go to `logd`'s console, which on a laptop
-  with no serial port is no channel, and they are not kernel records, so the
-  black box's tail does not carry them either.
+- **One refused create is no log for the boot.** `Volume::open`
+  (`system/logkeeper/src/store.rs`) answers `None` on any error from `create`,
+  with no retry, and `main` then runs to the end of the boot with no volume. A
+  refused append or flush later in the boot ends the volume the same way
+  (`answered`, `system/logkeeper/src/main.rs`).
+- **What it says reaches nothing on this machine.** `logkeeper: cannot create …`
+  is logkeeper's own record, which with no volume reaches only its console; a
+  laptop with no serial port has no channel there, and it is not a kernel
+  record, so the black box's tail does not carry it either.
 - Under QEMU the same boot's recovery takes in about a millisecond, the create
   succeeds and `/log` is complete, so no QEMU boot shows any of this.
 

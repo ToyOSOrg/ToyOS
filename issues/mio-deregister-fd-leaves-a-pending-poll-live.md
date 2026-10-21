@@ -4,69 +4,53 @@ kind: defect
 opened: 2026-08-16
 ---
 
-# mio's ToyOS selector deregisters a token but not the kernel's poll on it
+# mio's ToyOS selector deregisters a token but not the kernel's watch on it
 
-`mio/src/sys/toyos/selector.rs` in the mio fork (currently pinned at `e8068c2`,
-`Cargo.lock`) keeps its own registration list rather than asking the
-kernel to track interest:
+`src/sys/toyos/selector.rs` in the mio fork (pinned at `9f34d36c`,
+`Cargo.lock`) keeps its own registration list rather than asking the kernel to
+track interest:
 
 ```rust
-pub fn deregister_fd(&self, fd: RawHandle) -> io::Result<()> {
+pub fn deregister_handle(&self, handle: RawHandle) -> io::Result<()> {
     let mut inner = self.inner.lock().unwrap();
-    inner.registrations.retain(|r| r.0 != fd);
+    inner.registrations.retain(|r| r.0 != handle);
     Ok(())
 }
 ```
 
-This removes the entry from `SelectorInner::registrations`, so `select()`
-(lines 169–214) stops re-arming a `POLL_ADD` for it on future calls — the
-re-arm loop at 172–185 only iterates what is still in the list. But a
-`POLL_ADD` already submitted for that fd in an *earlier* `select()` is not
-touched: nothing here cancels it, and nothing waits for it to land. If the
-kernel completes that stale poll after `deregister_fd` returns, the CQE still
-carries the old token, and the next `select()`'s drain loop (198–211) does not
-check the token against the current registration list before turning it into
-an `Event` — it matches purely on `cqe.user_data`. The caller (tokio's
+This removes the entry from `SelectorInner::registrations`, so `select()` stops
+queuing an `OP_WATCH` for it on later calls: its re-arm loop iterates only what
+is still in the list. But a watch already submitted for that handle in an
+*earlier* `select()` is not touched: nothing here cancels it, and nothing waits
+for it to land. If the kernel completes that stale watch after
+`deregister_handle` returns, the completion still carries the old token, and
+the next `select()`'s drain loop does not check the token against the current
+registration list before turning it into an `Event`. The caller (tokio's
 reactor, or anything else built on mio's `Registry`) gets one readiness
 notification for a resource it was promised was gone.
 
 ## Why there is nothing to cancel with
 
-There used to be an ABI op for this. `sdk/abi/src/inbox.rs` op code 2 was
-`IORING_OP_POLL_REMOVE`, retired in PR #89 (`c41b831`,
-"abi: four names retired, and the number each one held") as caller-less:
-
-```
-// Op code 2 unused (formerly IORING_OP_POLL_REMOVE). It had no submitter
-// anywhere either — and the selector that would have been its caller cancels
-// nothing: mio's ToyOS selector keeps its own registration list, re-arms every
-// registration on each `select`, and deregisters by dropping the entry. A poll
-// this kernel takes is one-shot, consumed by the completion it posts, so the
-// interest a remove would withdraw is gone before there is anything to name.
-```
-
-The last sentence is the part this entry disagrees with. "One-shot, consumed
-by the completion it posts" is true of the poll itself, but it says nothing
-about *when* that completion is consumed relative to `deregister_fd` — and the
-selector's own code shows the two are not synchronized. The retirement
-correctly observed that mio never calls a remove op; it did not establish that
-nothing needs one. Those are different claims, and PR #89 only re-verified the
-first (grepped the estate for a submitter — found none, which is true and
-remains true) rather than asking whether `deregister_fd`'s behavior was itself
-correct.
+There used to be an ABI op for this. `sdk/abi/src/inbox.rs`'s op code 2 was
+`IORING_OP_POLL_REMOVE`, retired in PR #89 (`c41b831`, "abi: four names
+retired, and the number each one held") as caller-less, on the reasoning that
+a poll the kernel takes is one-shot and consumed by the completion it posts.
+That is true of the watch itself, but says nothing about *when* the completion
+is consumed relative to `deregister_handle`, and the selector shows the two are
+not synchronized. The retirement established that mio never calls a remove op,
+not that nothing needs one.
 
 ## What a fix has to promise
 
 A kernel wait a kill ends is answered `Cancelled` (`kernel/src/watch.rs`).
 mio's selector is the userland mirror of that, and a `deregister` that cannot
-promise "no event after this point" is what it lacks: no ring op withdraws a
+promise "no event after this point" is what it lacks: no inbox op withdraws a
 watch (`sdk/abi/src/inbox.rs` has `OP_NOP`, `OP_WATCH` and `OP_ACCEPT`).
-Re-adding a cancel op (or otherwise making `deregister_fd` synchronous with
-the kernel's pending state — draining the SQ/CQ for that fd, or having the
-kernel answer a targeted query) is in scope for whoever fixes this; retiring
-`IORING_OP_POLL_REMOVE` a second time without addressing this would repeat the
-same reasoning gap.
+Re-adding a cancel op, or otherwise making `deregister_handle` synchronous with
+the kernel's pending state (draining the inbox for that handle, or the drain
+loop dropping a token no registration holds), is in scope for whoever fixes
+this; retiring a remove op a second time without addressing this would repeat
+the same reasoning gap.
 
-Filed rather than fixed: this is a fork (mio, not this repository) and a
-design question (what the cancel primitive should look like), not a local bug
-fix.
+Filed rather than fixed: this is a fork (mio, not this repository) and a design
+question (what the cancel primitive should look like), not a local bug fix.

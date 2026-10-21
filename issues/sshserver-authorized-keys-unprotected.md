@@ -4,12 +4,14 @@ kind: defect
 opened: 2026-08-06
 ---
 
-# Sshd's keys are as protected as any other file, which is not at all
+# sshserver's keys are as protected as any other file, which is not at all
 
-`/state/sshd/host_ed25519` is the machine's SSH private key and
-`/state/sshd/authorized_keys` is the list of who may log in. There is no
-user model and no file permissions, so **any process on the machine can read
-the first and rewrite the second** — the second being the one that matters:
+`/state/sshserver/host_ed25519` is the machine's SSH private key and
+`/state/sshserver/authorized_keys` is the list of who may log in. There is no
+user model and no file permissions, and every program the image ships sees the
+whole tree (`Program::view`, `lib/manifest/src/lib.rs`; only an installed
+package is held to its own directories), so **any shipped program can read the
+first and rewrite the second** — the second being the one that matters:
 appending a line to it is a remote login, and nothing stops a process doing it.
 
 This is not an sshd defect and cannot be fixed inside sshd. It is the absence of

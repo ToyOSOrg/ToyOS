@@ -27,14 +27,9 @@ These answer failure in their POSIX form and do nothing
   maps neither.
 - `madvise`'s `MADV_DONTNEED`, `ENOSYS`: no call discards a range's pages and
   keeps it mapped, so it cannot read back as zeros as Linux's does.
-- `fcntl`: a record lock, `EINVAL`, POSIX's answer for a file that supports no
-  locking; `F_DUPFD_CLOEXEC`, `F_GETFL`, `F_SETFL`, `F_GETOWN` and `F_SETOWN`,
-  `ENOSYS`. `F_DUPFD` answers a duplicate at or above its argument, the first
-  the kernel hands `dup`, where POSIX has the lowest free number, and refuses
-  `EINVAL` an argument at or above the slots a handle table has
-  (`RawHandle::MAX_SLOTS`). `F_GETFD` and `F_SETFD` of a descriptor the
-  process does not hold answer 0, where POSIX has `EBADF`: the kernel ends a
-  process that names a handle it does not hold, so libc asks it nothing.
+- `fcntl` (`sdk/libc/src/fdreq.rs`): a record lock, `EINVAL`, POSIX's answer
+  for a file that supports no locking; `F_GETFL`, `F_SETFL`, `F_GETOWN` and
+  `F_SETOWN`, `ENOSYS`.
 
 Ruled out, and owed nothing while the ruling stands: `execv` and `execve`, no
 call replacing a process's image; `setsid` and `getsid`, no POSIX session;
