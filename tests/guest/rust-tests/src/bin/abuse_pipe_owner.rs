@@ -31,11 +31,13 @@ use std::process::{Command, Stdio};
 use toyos::AsHandle;
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_abuse_pipe_owner";
 
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
+/// How the kernel ends a process that names a handle it does not hold.
+const HANDLE_FAULT: End = End::Fault(Fault::Handle);
 
 /// Where the victim parks its ends. High, and nothing in this tree grows a
 /// table that far: a process holding 900 handles would be a different bug.
@@ -101,11 +103,11 @@ fn test() {
             "{role} never reached its call",
         );
         assert_eq!(
-            said.status.code(),
+            End::from_word(said.status.into_raw()),
             Some(HANDLE_FAULT),
             "{role}: {what_would_be_wrong}",
         );
-        println!("  {role}: ended the caller, exit {HANDLE_FAULT}");
+        println!("  {role}: ended the caller, {HANDLE_FAULT}");
     }
 
     // Release the victim and read what it made of all that. Nothing reached its

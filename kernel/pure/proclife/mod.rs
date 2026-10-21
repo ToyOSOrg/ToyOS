@@ -30,7 +30,7 @@
 //! alive. The same split the kernel already had between [`ThreadLocation`] and
 //! `scheduler::task_sched_state`.
 //!
-//! The exit *code* of a process, which is published on its `ProcessObject` and
+//! The [`End`] of a process, which is published on its `ProcessObject` and
 //! not on any entry — [`Processes::published_exit`] is how a decision here asks
 //! about it, and the answer comes from outside the table.
 //!
@@ -64,11 +64,12 @@ pub use pids::Pids;
 pub use table::{Lifecycle, Processes};
 pub use tree::{Node, MAX_DEPTH};
 
+pub use toyos_abi::end::End;
 pub use toyos_abi::{Pid, Tid};
 
 /// Where a *thread* is in its lifecycle.
 ///
-/// **A process has no such state.** Its exit code lives on its
+/// **A process has no such state.** Its end lives on its
 /// `ProcessObject`, published once and readable for ever after, so the table
 /// never holds a corpse waiting for somebody entitled to claim it. A thread
 /// still has one, because `SYS_THREAD_JOIN` reads it out of the table and a
