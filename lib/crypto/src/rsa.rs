@@ -50,14 +50,17 @@ impl Hash {
     }
 }
 pub struct PublicKey {
-    modulus: [u64; 64],
+    modulus: [u64; WORDS],
     words: usize,
     bits: usize,
     exponent: u32,
-    inverse: u64,
-    r2: [u64; 64],
-    one: [u64; 64],
+    /// -modulus^-1 mod 2^64.
+    n0: u64,
+    /// R^2 mod modulus, R = 2^(64 * words).
+    r2: [u64; WORDS],
 }
+/// The limbs of the largest modulus, 4096 bits.
+const WORDS: usize = 64;
 impl PublicKey {
     /// Minimal unsigned big-endian integers. ASN.1 belongs to the consumer.
     pub fn from_components(modulus: &[u8], exponent: &[u8]) -> Result<Self, Error> {
@@ -85,94 +88,108 @@ impl PublicKey {
             words,
             bits,
             exponent: e,
-            inverse: inverse.wrapping_neg(),
-            r2: [0; 64],
-            one: [0; 64],
+            n0: inverse.wrapping_neg(),
+            r2: [0; WORDS],
         };
-        let mut value = [0; 64];
-        value[0] = 1;
-        for _ in 0..2 * words * 64 {
-            let mut d = [0; 64];
-            let mut c = 0;
-            for i in 0..words {
-                let t = u128::from(value[i]) * 2 + c;
-                d[i] = t as u64;
-                c = t >> 64
-            }
-            value = key.reduce(d, c as u64)
-        }
-        key.r2 = value;
-        let mut raw = [0; 64];
-        raw[0] = 1;
-        key.one = key.mul(&raw, &key.r2);
+        key.r2 = key.montgomery_r2();
         Ok(key)
     }
-    fn reduce(&self, value: [u64; 64], high: u64) -> [u64; 64] {
-        let mut d = [0; 64];
-        let mut borrow = 0u128;
-        for i in 0..self.words {
-            let t = (1u128 << 64) + u128::from(value[i]) - u128::from(self.modulus[i]) - borrow;
-            d[i] = t as u64;
-            borrow = 1 - (t >> 64)
+    /// R^2 mod n from 2^(bits-1) < n: doublings to 2^words * R, then six
+    /// Montgomery squarings, each taking 2^t * R to 2^(2t) * R, up to
+    /// 2^(64 * words) * R.
+    fn montgomery_r2(&self) -> [u64; WORDS] {
+        let mut x = [0; WORDS];
+        x[(self.bits - 1) / 64] = 1 << ((self.bits - 1) % 64);
+        for _ in 0..64 * self.words - (self.bits - 1) + self.words {
+            self.double(&mut x);
         }
-        if high != 0 || borrow == 0 { d } else { value }
+        let mut y = [0; WORDS];
+        for _ in 0..3 {
+            self.mul(&x, &x, &mut y);
+            self.mul(&y, &y, &mut x);
+        }
+        x
     }
-    fn mul(&self, a: &[u64; 64], b: &[u64; 64]) -> [u64; 64] {
+    /// x = 2x mod n, for x < n.
+    fn double(&self, x: &mut [u64; WORDS]) {
+        let mut carry = 0;
+        for word in &mut x[..self.words] {
+            let top = *word >> 63;
+            *word = (*word << 1) | carry;
+            carry = top;
+        }
+        if carry != 0 || !less(x, &self.modulus, self.words) {
+            subtract(x, &self.modulus, self.words);
+        }
+    }
+    /// out = a * b / R mod n, for a, b < n: word-serial Montgomery
+    /// multiplication with the reduction step interleaved (CIOS; Koc, Acar and
+    /// Kaliski, "Analyzing and comparing Montgomery multiplication
+    /// algorithms", IEEE Micro 1996).
+    fn mul(&self, a: &[u64; WORDS], b: &[u64; WORDS], out: &mut [u64; WORDS]) {
         let n = self.words;
-        let mut t = [0u64; 130];
-        for i in 0..n {
-            let mut c = 0u128;
+        let (a, b, m) = (&a[..n], &b[..n], &self.modulus[..n]);
+        let mut t = [0u64; WORDS + 2];
+        let t = &mut t[..n + 2];
+        for &bi in b {
+            let mut c = 0;
             for j in 0..n {
-                let v = u128::from(a[i]) * u128::from(b[j]) + u128::from(t[i + j]) + c;
-                t[i + j] = v as u64;
-                c = v >> 64
+                (t[j], c) = mac(t[j], a[j], bi, c);
             }
-            t[i + n] = c as u64
+            let (s, overflow) = t[n].overflowing_add(c);
+            t[n] = s;
+            t[n + 1] = u64::from(overflow);
+            let q = t[0].wrapping_mul(self.n0);
+            let (_, mut c) = mac(t[0], q, m[0], 0);
+            for j in 1..n {
+                (t[j - 1], c) = mac(t[j], q, m[j], c);
+            }
+            let (s, overflow) = t[n].overflowing_add(c);
+            t[n - 1] = s;
+            t[n] = t[n + 1].wrapping_add(u64::from(overflow));
         }
-        for i in 0..n {
-            let q = t[i].wrapping_mul(self.inverse);
-            let mut c = 0u128;
-            for j in 0..n {
-                let v = u128::from(q) * u128::from(self.modulus[j]) + u128::from(t[i + j]) + c;
-                t[i + j] = v as u64;
-                c = v >> 64
-            }
-            for word in t.iter_mut().take(2 * n + 1).skip(i + n) {
-                let v = u128::from(*word) + c;
-                *word = v as u64;
-                c = v >> 64
-            }
-            assert_eq!(c, 0)
+        out[..n].copy_from_slice(&t[..n]);
+        if t[n] != 0 || !less(out, &self.modulus, n) {
+            subtract(out, &self.modulus, n);
         }
-        let mut result = [0; 64];
-        result[..n].copy_from_slice(&t[n..2 * n]);
-        self.reduce(result, t[2 * n])
     }
+    /// The signature raised to e, big-endian in the low bytes of 512.
     fn representative(&self, signature: &[u8]) -> Result<[u8; 512], Error> {
         if signature.len() != self.bits.div_ceil(8) {
             return Err(Error::Length);
         }
-        let raw = read(signature);
-        let reduced = self.reduce(raw, 0);
-        if raw != reduced {
+        let s = read(signature);
+        if !less(&s, &self.modulus, self.words) {
             return Err(Error::InvalidSignature);
         }
-        let base = self.mul(&raw, &self.r2);
-        let mut r = self.one;
-        for i in (0..32).rev() {
-            r = self.mul(&r, &r);
-            if (self.exponent >> i) & 1 == 1 {
-                r = self.mul(&r, &base)
-            }
-        }
-        let mut one = [0; 64];
-        one[0] = 1;
-        let value = self.mul(&r, &one);
+        let value = self.power(&s);
         let mut bytes = [0; 512];
-        for i in 0..64 {
+        for i in 0..WORDS {
             bytes[512 - 8 * (i + 1)..512 - 8 * i].copy_from_slice(&value[i].to_be_bytes())
         }
         Ok(bytes)
+    }
+    /// s^e mod n for s < n: s^(e-1) in Montgomery form by left-to-right
+    /// square-and-multiply, then one Montgomery multiplication by the
+    /// unencoded s, which also leaves Montgomery form. 65537 is 18
+    /// multiplications.
+    fn power(&self, s: &[u64; WORDS]) -> [u64; WORDS] {
+        let mut base = [0; WORDS];
+        self.mul(s, &self.r2, &mut base);
+        // e - 1 is even and at least 2, so its top bit is the starting `base`.
+        let e = self.exponent - 1;
+        let mut x = base;
+        let mut y = [0; WORDS];
+        for i in (0..31 - e.leading_zeros()).rev() {
+            self.mul(&x, &x, &mut y);
+            if (e >> i) & 1 == 1 {
+                self.mul(&y, &base, &mut x);
+            } else {
+                core::mem::swap(&mut x, &mut y);
+            }
+        }
+        self.mul(&x, s, &mut y);
+        y
     }
     pub fn verify_pkcs1_v1_5(
         &self,
@@ -248,10 +265,85 @@ impl PublicKey {
         Ok(())
     }
 }
-fn read(bytes: &[u8]) -> [u64; 64] {
-    let mut out = [0; 64];
+/// (lo, hi) of t + a * b + c, which cannot overflow 128 bits.
+#[inline(always)]
+fn mac(t: u64, a: u64, b: u64, c: u64) -> (u64, u64) {
+    let v = u128::from(a)
+        .wrapping_mul(u128::from(b))
+        .wrapping_add(u128::from(t))
+        .wrapping_add(u128::from(c));
+    (v as u64, (v >> 64) as u64)
+}
+/// a < b over the low `n` words.
+fn less(a: &[u64; WORDS], b: &[u64; WORDS], n: usize) -> bool {
+    for i in (0..n).rev() {
+        if a[i] != b[i] {
+            return a[i] < b[i];
+        }
+    }
+    false
+}
+/// a -= b over the low `n` words, modulo 2^(64n).
+fn subtract(a: &mut [u64; WORDS], b: &[u64; WORDS], n: usize) {
+    let mut borrow = false;
+    for i in 0..n {
+        let (d, b1) = a[i].overflowing_sub(b[i]);
+        let (d, b2) = d.overflowing_sub(u64::from(borrow));
+        a[i] = d;
+        borrow = b1 | b2;
+    }
+}
+fn read(bytes: &[u8]) -> [u64; WORDS] {
+    let mut out = [0; WORDS];
     for (i, &byte) in bytes.iter().rev().enumerate() {
         out[i / 8] |= u64::from(byte) << (8 * (i % 8))
     }
     out
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use num_bigint::BigUint;
+
+    /// Odd moduli of every limb shape, including partial top limbs, and
+    /// exponents up to four bytes against the integer oracle.
+    #[test]
+    fn power_and_r2_match_integer_oracle() {
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed as u8
+        };
+        for len in [256, 257, 263, 300, 384, 511, 512] {
+            let mut modulus: std::vec::Vec<u8> = (0..len).map(|_| next()).collect();
+            modulus[0] |= 0x80 >> (len % 8);
+            modulus[len - 1] |= 1;
+            let n = BigUint::from_bytes_be(&modulus);
+            for e in [3u32, 17, 65537, 0x8000_0001, 0xffff_ffff] {
+                let key = PublicKey::from_components(&modulus, &e.to_be_bytes()[e.leading_zeros() as usize / 8..])
+                    .unwrap();
+                let r = BigUint::from(1u8) << (64 * key.words);
+                assert_eq!(integer(&key.r2), (&r * &r) % &n);
+                for _ in 0..4 {
+                    let s: std::vec::Vec<u8> = (0..len).map(|_| next()).collect();
+                    let s = BigUint::from_bytes_be(&s) % &n;
+                    let mut bytes = std::vec![0; len];
+                    let raw = s.to_bytes_be();
+                    bytes[len - raw.len()..].copy_from_slice(&raw);
+                    let ours = key.representative(&bytes).unwrap();
+                    assert_eq!(BigUint::from_bytes_be(&ours), s.modpow(&BigUint::from(e), &n));
+                }
+                let mut n_bytes = modulus.clone();
+                assert_eq!(key.representative(&n_bytes), Err(Error::InvalidSignature));
+                n_bytes[len - 1] -= 1;
+                assert!(key.representative(&n_bytes).is_ok());
+            }
+        }
+    }
+
+    fn integer(words: &[u64; WORDS]) -> BigUint {
+        BigUint::from_bytes_le(&words.iter().flat_map(|w| w.to_le_bytes()).collect::<std::vec::Vec<_>>())
+    }
 }
