@@ -6,10 +6,10 @@
 //! algorithm choices and CPU capabilities are public. Module contracts identify
 //! operations permitted to depend on public data.
 //!
-//! Owned secret storage is overwritten with volatile writes on drop. This does
-//! not promise erasure of compiler-created copies, registers or abandoned
-//! storage after process termination. Constant-time source structure requires
-//! validation of the compiler and hardware used to deploy it.
+//! Secret owners and secret operations' workspaces are erased as `secret`'s
+//! contract states; arithmetic intermediates, registers and compiler-made
+//! copies are not. Constant-time source structure requires validation of the
+//! compiler and hardware used to deploy it.
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
