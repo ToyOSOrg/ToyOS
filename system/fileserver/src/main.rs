@@ -27,9 +27,9 @@
 //!
 //! **An export is a connection this server makes to itself** through a private
 //! port only it holds a connector to, for its life: connect, then accept, which
-//! answers exactly that connection since this loop is single-threaded (with a
-//! second thread, one lock covers the pair). A restart takes the port with it,
-//! so nothing pending reaches a new instance.
+//! answers exactly that connection since this loop is single-threaded. The end
+//! handed out cannot be duplicated, so it has one holder. A restart takes the
+//! port with it, so nothing pending reaches a new instance.
 //!
 //! **A server never blocks on a client.** Accept and the first frame are two
 //! events; a request is buffered until whole; every reply is one `try_send`,
@@ -67,18 +67,24 @@ use toyos::port::{self, Acceptor};
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::Pipe;
-use toyos_abi::syscall::{SyscallError, DEV_PREFIX, MAX_BADGE, SERVE_PREFIX};
+use toyos_abi::handle::Rights;
+use toyos_abi::syscall::{self, SyscallError, DEV_PREFIX, MAX_BADGE, SERVE_PREFIX};
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
 
 /// The turns that drain what one stream holds before a request on its
-/// description: its ring's whole, 2 MiB, so a writer that keeps writing
-/// cannot hold the loop.
+/// description: the kernel's whole pipe ring (`PIPE_SIZE`, 2 MiB), so a
+/// writer that keeps writing cannot hold the loop.
 const STREAM_PRESENT: usize = (2 << 20) / STREAM_READ;
 
 /// The name the private export port has in this server's own namespace.
 const EXPORT_PORT: &str = "export";
+
+/// What the end an export hands out carries: a connection's rights without
+/// `DUP`, so whoever holds it is its one holder, and may pass it on.
+const EXPORTED: Rights =
+    Rights::TRANSFER.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE).union(Rights::MAP);
 
 // One wait watches the acceptor, every connection and every stream at once.
 const _: () = assert!(1 + MAX_SERVED + MAX_HANDSHAKES + MAX_STREAMS <= Poller::MAX_HANDLES as usize);
@@ -139,14 +145,18 @@ struct Client {
     window: Option<SharedMemory>,
     fids: Ids,
     since: Instant,
-    /// Its served slot was taken at its export, so it waits on no handshake.
-    exported: bool,
 }
 
 impl Client {
+    /// Whether it was exported: its served slot was taken then, so it waits on
+    /// no handshake.
+    fn exported(&self) -> bool {
+        self.root.is_none()
+    }
+
     /// Whether it holds a served slot.
     fn served(&self) -> bool {
-        self.window.is_some() || self.exported
+        self.window.is_some() || self.exported()
     }
 
     /// Whether it is a handshake still waiting on its hello.
@@ -181,11 +191,14 @@ impl Exports {
         Self { acceptor, names }
     }
 
-    /// A connection to this server: the end to hand away, and this server's.
+    /// A connection to this server: the end to hand away, narrowed to
+    /// [`EXPORTED`], and this server's.
     fn connect(&self) -> Result<(Connection, Connection), Error> {
         let theirs = self.names.open(EXPORT_PORT).map_err(|e| Error::kernel("an export's connection", e))?;
         let ours = self.acceptor.accept().unwrap_or_else(|e| panic!("fileserver: the export port refused an accept ({e:?})"));
-        Ok((theirs, ours))
+        let narrowed = syscall::dup_narrowed(toyos::AsHandle::as_handle(&theirs), EXPORTED)
+            .map_err(|e| Error::kernel("an export's narrowed end", e))?;
+        Ok((Connection::received(narrowed), ours))
     }
 }
 
@@ -494,7 +507,6 @@ impl Server {
             window: None,
             fids: Ids::default(),
             since: Instant::now(),
-            exported: false,
         };
         self.clients.insert(id, client);
     }
@@ -596,7 +608,7 @@ impl Server {
             if client.window.is_some() {
                 return Answer::Drop("it lent a second window");
             }
-            let slot = if client.exported { Slot::Taken } else { Slot::AtHello };
+            let slot = if client.exported() { Slot::Taken } else { Slot::AtHello };
             // The window travels in the HELLO frame: its reader took it with the frame.
             let lent = || client.rx.take_handles::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
             match bounds::hello(slot, all, mine, lent) {
@@ -761,7 +773,7 @@ impl Server {
             EXPORT => self.export(id, r.len),
             FSTAT => {
                 let (node, identity) = {
-                    let f = self.fid(id, r.fid)?;
+                    let f = self.settled(id, r.fid)?;
                     let f = f.borrow();
                     (f.node, f.identity)
                 };
@@ -783,7 +795,7 @@ impl Server {
                 Ok(Answer::Reply(Reply::ok()))
             }
             FSYNC => {
-                let node = self.fid(id, r.fid)?.borrow().node;
+                let node = self.settled(id, r.fid)?.borrow().node;
                 self.sync(Some(node))
             }
             SYNC => self.sync(None),
@@ -936,7 +948,7 @@ impl Server {
     /// descriptions of the `count` ids in client `id`'s window. Its served
     /// slot is taken here, of `id`'s share, or the export is refused.
     fn export(&mut self, id: u64, count: u64) -> Result<Answer, Error> {
-        let count = usize::try_from(count).ok().filter(|&n| n * 8 <= WINDOW_BYTES).ok_or(Error::InvalidRequest)?;
+        let count = bounds::export_ids(count)?;
         let mut words = vec![0u8; count * 8];
         window_take(window_of(self.clients[&id].window.as_ref().expect("lent")), 0, &mut words);
         let fids: Vec<u64> =
@@ -956,7 +968,6 @@ impl Server {
             window: None,
             fids,
             since: Instant::now(),
-            exported: true,
         };
         let child = self.next_client;
         self.next_client += 1;

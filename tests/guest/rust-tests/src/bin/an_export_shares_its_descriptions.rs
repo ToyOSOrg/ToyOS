@@ -7,11 +7,19 @@
 //!   share, and a seek through one is where the other reads next.
 //! - A path on the exported connection is refused `NoDirectory`.
 //! - Closing the exporter's id leaves the description to the exported one.
+//! - What a stream was given before a write through an id is written first:
+//!   the write lands after every byte of it, and the file ends there.
 
-use toyos::fs::{Dir, Error, Refused, O_CREATE, O_READ, O_TRUNCATE, O_WRITE, SEEK_CURRENT, SEEK_START};
+use toyos::fs::{Dir, Error, Refused, O_CREATE, O_READ, O_TRUNCATE, O_WRITE, SEEK_CURRENT, SEEK_END, SEEK_START};
 
 const DIR: &str = "fs:/home";
 const FILE: &str = "an-export-shares-its-descriptions";
+const STREAMED: &str = "an-export-shares-its-descriptions-streamed";
+
+/// What the stream is given: half the pipe's ring, so it is all in the pipe
+/// before the write through the id is asked, and the server has drained at
+/// most a turn or two of it.
+const STREAM_BYTES: usize = 1 << 20;
 
 fn main() {
     let names = toyos::endow::namespace().expect("a test is endowed a namespace");
@@ -43,5 +51,26 @@ fn main() {
     assert_eq!(&buf, b"ab");
     child.close(1, theirs);
     parent.unlink(FILE).expect("unlink");
+    println!("an_export_shares_its_descriptions: the description outlived its exporter's id");
+
+    let opened = parent.open(STREAMED, O_READ | O_WRITE | O_CREATE | O_TRUNCATE).expect("open the streamed file");
+    let (fid, generation) = (opened.fid, opened.generation);
+    let stream = parent.stream(fid, generation).expect("a stream on the description");
+    let pattern: Vec<u8> = (0..STREAM_BYTES).map(|i| (i % 251) as u8).collect();
+    let mut sent = 0;
+    while sent < pattern.len() {
+        sent += stream.write(&pattern[sent..]).expect("the stream took its bytes");
+    }
+    let written = parent.write(fid, generation, b"tail").expect("a write through the id");
+    assert_eq!(written.offset, STREAM_BYTES as u64 + 4, "the write did not land after what the stream was given");
+    assert_eq!(parent.seek(fid, generation, SEEK_END, 0), Ok(STREAM_BYTES as u64 + 4), "the file does not end at the tail");
+    assert_eq!(parent.seek(fid, generation, SEEK_START, STREAM_BYTES as i64 - 2), Ok(STREAM_BYTES as u64 - 2));
+    let mut tail = [0u8; 6];
+    assert_eq!(parent.read(fid, generation, &mut tail), Ok(6));
+    assert_eq!(&tail[..2], &pattern[STREAM_BYTES - 2..], "the stream's last bytes are not before the tail");
+    assert_eq!(&tail[2..], b"tail");
+    drop(stream);
+    parent.close(fid, generation);
+    parent.unlink(STREAMED).expect("unlink the streamed file");
     println!("an_export_shares_its_descriptions: ok");
 }

@@ -25,6 +25,8 @@
 //! held to UTF-8 alone.
 
 use toyos::fs::{canonical, Error, MAX_FILE_BYTES, MAX_PATH, WINDOW_BYTES};
+
+use crate::descriptions::MAX_IDS;
 use toyos::shm::Lent;
 
 /// Clients served at once, machine-wide: one connection per directory per
@@ -89,6 +91,12 @@ fn served_slot(served: usize, of_share: usize) -> Result<(), String> {
 /// `TooManyConnections`.
 pub fn export(served: usize, of_share: usize) -> Result<(), Error> {
     served_slot(served, of_share).map_err(|_| Error::TooManyConnections)
+}
+
+/// How many ids an export names, read before its window is: 1 to
+/// [`MAX_IDS`], what one connection holds, or `InvalidRequest`.
+pub fn export_ids(count: u64) -> Result<usize, Error> {
+    usize::try_from(count).ok().filter(|n| (1..=MAX_IDS).contains(n)).ok_or(Error::InvalidRequest)
 }
 
 /// A hello, while `served` clients are served and `of_share` of them are its
@@ -194,6 +202,18 @@ mod tests {
         assert_eq!(export(MAX_SERVED, 0), Err(Error::TooManyConnections));
         assert_eq!(export(SERVED_SHARE, SERVED_SHARE), Err(Error::TooManyConnections));
         assert_eq!(export(MAX_SERVED - 1, SERVED_SHARE - 1), Ok(()));
+    }
+
+    /// An export's count is the client's word: none, more than a connection
+    /// holds, or one whose window span would overflow is refused before
+    /// anything is read.
+    #[test]
+    fn an_export_naming_no_ids_or_more_than_a_connection_holds_is_refused() {
+        for count in [0, MAX_IDS as u64 + 1, 1 << 61, u64::MAX] {
+            assert_eq!(export_ids(count), Err(Error::InvalidRequest), "{count:#x}");
+        }
+        assert_eq!(export_ids(1), Ok(1));
+        assert_eq!(export_ids(MAX_IDS as u64), Ok(MAX_IDS));
     }
 
     /// The exported connection's slot was taken at its export, so its hello is
