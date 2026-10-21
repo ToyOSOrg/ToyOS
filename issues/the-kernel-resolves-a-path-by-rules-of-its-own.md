@@ -12,7 +12,7 @@ A path on the kernel's own mounts, ROOT and `/tmp`, is resolved by
 - `..` is read off the text before any name is looked up (`normalize`), so
   `/tmp/d/dir/../f`, where `dir` links to `/tmp/x`, names `/tmp/d/f` and not
   `/tmp/f`.
-- Only the last name's link is followed (`resolve_for_open_depth`): a path
+- Only the last name's link is followed (`resolve_for_open`): a path
   through a link to a directory, `/tmp/d/dir/f`, names nothing.
 - A relative link is read against the mount it is on, the first name of its
   path, and not against its own directory.

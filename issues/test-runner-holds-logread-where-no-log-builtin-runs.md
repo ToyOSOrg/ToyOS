@@ -6,20 +6,21 @@ opened: 2026-09-28
 
 # test-runner holds `logread` where no log builtin runs
 
-`logread` in a `[programs.test-runner]` row is authority for the builtins that
-read the log inside test-runner (`log-gate`, `log-storm`, `log-close`,
-`tests/guest/test-runner/src/main.rs`'s `BUILTINS`). Every boot that runs one is a
-`tests/images/testcases.toml` boot (`tests/common/logread.rs` boots the machine tests' config;
-`tests/toyos.rs`'s one job list naming `log-close` is `tests/images/testcases.toml`). Seven
-other manifests grant it anyway: `tests/partclaimcase`, `tests/blockdcase`,
-`tests/doommusiccase`, `tests/logrotatecase`, `tests/images/metalcase.toml`, `tests/images/netcase.toml`
-and `tests/sshdcase`.
+test-runner has no builtin that reads the log any more: `log-gate`,
+`log-storm` and `log-close` are gone from `tests/guest/test-runner`. Its
+`logread` is used only by the children it hands a `SysCap` duplicate to, and
+it hands one only where its row also grants `dup` (`run_one`,
+`tests/guest/test-runner/src/main.rs`).
 
-`partclaimcase` and `blockdcase` also grant `dup`, so there every child
-test-runner spawns receives a `SysCap` duplicate carrying `LOG` as well.
+- `tests/images/testcases.toml`'s row grants `dup` beside `logread`, and its
+  children `disk_backtrace` and `inbox_log_post` read the log through the
+  duplicate. Its comment still gives "the log gate" as the reason.
+- `tests/images/metalcase.toml`'s row grants `logread` and no `dup`, so no
+  child receives it and test-runner reads no log itself: nothing on that boot
+  uses it.
 
-**Evidence:** `rg -n '"log-gate"|"log-storm"|"log-close"' tests userland`, and
-`rg -n logread -g system.toml tests`.
+**Evidence:** `rg -n logread tests/images` and `rg -n 'log_read|cursor_words'
+tests/guest`.
 
 **Exit:** every `logread` in a test manifest is one a program on that boot
-uses, or the row says which use it is for.
+uses, and the row's comment says which use it is for.

@@ -12,8 +12,11 @@ before `attempt::read`.
 When the foreign record was the only word of this image's last boot, the same
 pass then prints `Boot attempts: the previous boot of this image never
 reported; the machine is handed back` and boots nothing, so `loader.log`
-carries two lines that contradict each other. The QEMU test
-`blackbox_foreign_record` asserts the first phrase on exactly that pass.
+carries two lines that contradict each other. The metal row
+`blackbox_foreign_record` (`tests/toyos.rs`) reads that pass for the record's
+opening (`bootlog::FOREIGN_DONE`), and the host check of that judge in
+`tests/checks.rs` feeds it a fixture carrying the whole line, the first phrase
+among it.
 
 Seen on the T14 run of `main` at `7e151819`,
 the `foreignrecord` readback's `loader.log`,
@@ -23,4 +26,5 @@ last boot`, then the hand-back line.
 ## Exit condition
 
 A pass that clears a foreign record says what it then does, in one line that
-is true of that pass, and `blackbox_foreign_record` asserts that line.
+is true of that pass, and `blackbox_foreign_record`'s judge asserts that
+line, its host check's fixture carrying it.

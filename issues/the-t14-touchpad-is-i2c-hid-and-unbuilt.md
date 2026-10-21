@@ -30,7 +30,6 @@ Machine facts it will need, none of which QEMU can supply:
   this machine.
 - Metal boot is about **1151 ms against QEMU's 196 ms**, roughly 5.9×.
 
-Three T14 defects are open beside this one:
+Two T14 defects are open beside this one:
 `issues/t14-lost-every-integrated-input.md`,
-`issues/pulling-the-boot-stick-freezes-the-t14.md`,
-`issues/t14-keyboard-will-not-report-its-scancode-set.md`.
+`issues/pulling-the-boot-stick-freezes-the-t14.md`.

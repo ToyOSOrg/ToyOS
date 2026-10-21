@@ -15,8 +15,8 @@ error. The one test written for it, `blockd_lends_within_its_bound`, refused
 virtio-sound's pool, which left the kernel with its driver; the test is out of
 the guest suite and staged as a T14 row in
 `issues/the-guest-suite-runs-only-what-no-cheaper-tier-reaches.md`'s stage J,
-where the kernel driver's pool it can refuse is HDA's. And the field's name
-says nothing about lending.
+which named HDA's pool for it to refuse, and HDA has left the kernel too
+(#950). And the field's name says nothing about lending.
 
 **Exit condition.** A region's kind is a type — owned pages, a kernel driver's
 pool, an aperture — and `dma_map` takes only the owned-pages kind, so a region
