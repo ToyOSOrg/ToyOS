@@ -180,14 +180,14 @@ pub const SYS_SHM_MAP: u64 = 106;
 /// What [`SYS_SHM_CREATE`] rounds a length up to a whole number of.
 pub const SHM_PAGE: usize = 2 << 20;
 
-/// Wait for the process a handle names and take its exit code, gated by
-/// [`Rights::WAIT`]. See [`process_wait`].
+/// Wait for the process a handle names and take how it ended, an [`End`]'s
+/// word, gated by [`Rights::WAIT`]. See [`process_wait`].
 ///
-/// **An exit code is a property of the object, not of a table entry**, so this
+/// **An end is a property of the object, not of a table entry**, so this
 /// answers whether or not the process is still around: a spawner that waits a
-/// second time gets the same code, and one that waits for the first time long
+/// second time gets the same end, and one that waits for the first time long
 /// after the process is gone gets it too. There is nothing to reap and no
-/// window in which an exit is missed.
+/// window in which an end is missed.
 ///
 /// [`Rights::WAIT`]: crate::handle::Rights::WAIT
 pub const SYS_PROCESS_WAIT: u64 = 108;
@@ -282,6 +282,13 @@ pub const SYS_TRACE_READ: u64 = 127;
 /// kernel mediates, the firmware's Global Lock, or the power-off's sleep type.
 /// See [`acpi_access`], [`acpi_lock_take`] and [`acpi_s5`].
 pub const SYS_ACPI: u64 = 128;
+/// A second handle to whatever one of the caller's slots holds, or `NotFound`
+/// for an empty slot: how a spawn hands on a stdio slot it may have been
+/// started without. See [`dup_slot`].
+pub const SYS_HANDLE_DUP_SLOT: u64 = 129;
+/// A fresh null handle: every read answers end of file and every write takes
+/// all it is given. See [`null`].
+pub const SYS_NULL: u64 = 130;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -289,13 +296,13 @@ pub const SYS_ACPI: u64 = 128;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 130;
+pub const SYSCALL_PROFILE_BINS: usize = 132;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_ACPI < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_NULL < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -428,6 +435,7 @@ pub const MAX_LABELS_LEN: usize = 4096;
 /// Bytes of label blob one spawn may carry: the kernel adds [`SELF_LABEL`]'s.
 pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len();
 
+use crate::end::End;
 use crate::handle::Rights;
 use crate::pci::{DmaGrant, DmaMapping};
 use crate::{Pid, RawHandle, HANDLE_INVALID};
@@ -559,6 +567,8 @@ pub enum FileType {
     /// Any other shared-memory region, such as a device's registers; `size`
     /// is its length. A peer's buffer is never one.
     DeviceMemory = 13,
+    /// A [null](null) handle.
+    Null = 14,
 }
 
 impl FileType {
@@ -577,6 +587,7 @@ impl FileType {
             11 => Some(Self::Directory),
             12 => Some(Self::Symlink),
             13 => Some(Self::DeviceMemory),
+            14 => Some(Self::Null),
             _ => None,
         }
     }
@@ -951,18 +962,22 @@ pub fn endowments(buf: &mut [u8]) -> usize {
     syscall(SYS_ENDOWMENTS, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as usize
 }
 
-/// Block until the process `proc` names has exited, and take its exit code.
-pub fn process_wait(proc: RawHandle) -> Result<i32, SyscallError> {
-    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, 0, 0, 0)).map(|code| code as i32)
+/// Block until the process `proc` names has ended, and take how.
+pub fn process_wait(proc: RawHandle) -> Result<End, SyscallError> {
+    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, 0, 0, 0)).map(end_of)
 }
 
-/// The exit code if the process has already exited, `Err(WouldBlock)` if it has
-/// not.
+/// How the process ended if it has, `Err(WouldBlock)` if it has not.
 ///
 /// [`WNOHANG`] rather than a syscall of its own: this is the same question with
 /// the wait taken out, and a caller that polls is asking about the same object.
-pub fn process_wait_nonblock(proc: RawHandle) -> Result<i32, SyscallError> {
-    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, WNOHANG, 0, 0)).map(|code| code as i32)
+pub fn process_wait_nonblock(proc: RawHandle) -> Result<End, SyscallError> {
+    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, WNOHANG, 0, 0)).map(end_of)
+}
+
+/// The end the kernel answered, which is one it defines or a kernel bug.
+fn end_of(word: u64) -> End {
+    End::from_word(word).unwrap_or_else(|| panic!("SYS_PROCESS_WAIT answered {word:#x}, which names no end"))
 }
 
 /// Kill the process `proc` names. Answers `Ok` for one already dead: the
@@ -2087,6 +2102,23 @@ pub fn dup_narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, Sysc
 pub fn dup2(handle: RawHandle, slot: u16) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_HANDLE_DUP_AT, handle.0 as u64, slot as u64, 0, 0))
         .map(|v| RawHandle(v as u32))
+}
+
+/// A second handle to whatever this process's `slot` holds, with its rights;
+/// `Err(NotFound)` for a slot that holds nothing. Asked of the process's own
+/// table by slot, so an empty one is an answer and not a handle it does not
+/// hold.
+pub fn dup_slot(slot: u16) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_HANDLE_DUP_SLOT, slot as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// A fresh null handle carrying `rights`: a read answers 0 bytes, a write of
+/// n bytes answers n, and a poll is ready at once in either direction. It
+/// names nothing and so carries no authority; `rights` may be any subset of
+/// `READ | WRITE | DUP | TRANSFER | WAIT`, and anything else is refused
+/// `InvalidArgument`.
+pub fn null(rights: Rights) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_NULL, rights.bits() as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
 /// Get the current process ID.

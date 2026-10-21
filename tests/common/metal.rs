@@ -411,7 +411,7 @@ impl Readback {
     /// cannot ask what a handle it does not hold does re-executes *itself*, one
     /// child per fault, and every child is recorded under that same name with whatever
     /// exit the fault gave it. Measured on a metal-shaped guest that binary left
-    /// forty-two records reading `code=139` and the job's own reading zero, and
+    /// forty-two records of a handle fault and the job's own of exit 0, and
     /// the last of them is a child. The job's is the one with the **lowest
     /// pid**: the runner spawned it before it spawned anything.
     ///
@@ -421,14 +421,19 @@ impl Readback {
     pub fn exit_code(&self, binary: &str) -> Result<i32, String> {
         let name = bootlog::recorded_name(binary);
         let head = format!("{}{name} pid=", bootlog::EXIT);
-        let mut family: Vec<(u64, i32)> = Vec::new();
+        // A kill or a fault carries no code: `killed` or `fault=<kind>` in its place.
+        let mut family: Vec<(u64, Result<i32, String>)> = Vec::new();
         for line in self.kernel.lines().filter_map(bootlog::message).filter(|m| m.starts_with(&head)) {
             let field = |label: &str| -> Option<&str> {
                 line.split_once(label).and_then(|(_, rest)| rest.split_whitespace().next())
             };
-            let (Some(pid), Some(code)) = (field(" pid="), field(" code=")) else { continue };
-            let (Ok(pid), Ok(code)) = (pid.parse(), code.parse()) else {
+            let Some(Ok(pid)) = field(" pid=").map(str::parse) else {
                 return Err(format!("unreadable exit record: {line:?}"));
+            };
+            let code = match field(" code=").map(str::parse) {
+                Some(Ok(code)) => Ok(code),
+                Some(Err(_)) => return Err(format!("unreadable exit record: {line:?}")),
+                None => Err(format!("{binary} ended without an exit code: {line:?}")),
             };
             family.push((pid, code));
         }
@@ -436,11 +441,11 @@ impl Readback {
             .into_iter()
             .min_by_key(|(pid, _)| *pid)
             .map(|(_, code)| code)
-            .ok_or_else(|| {
-                format!(
+            .unwrap_or_else(|| {
+                Err(format!(
                     "no `{head}` record in {}'s log: {binary} never ran, or never ended",
                     self.label
-                )
+                ))
             })
     }
 

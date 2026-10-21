@@ -84,8 +84,7 @@ libc's state it is `userland/libc` at `15625e0cb`.
   to start a child by spawn and never by fork; brush as the POSIX `sh`
   (`issues/ninja-runs-every-command-through-a-bin-sh-toyos-does-not-have.md`);
   uutils; make; CMake, its libuv ported to spawn; and awk. Those written in C
-  or C++ wait on stage 3 of the child-process track and on
-  `issues/there-is-no-dev-null.md`. A search of Perl 5.44.0's
+  or C++ wait on stage 4 of the child-process track. A search of Perl 5.44.0's
   sources for `posix_spawn` matches nothing. Open: which Python, which make and
   which awk.
 - **`pkg` installs a toolchain**: an archive past 256 MiB, and links. It
@@ -110,7 +109,7 @@ HTTPS
 wait on the network stack under them
 (`issues/the-lan-is-not-yet-production-grade.md`,
 `issues/the-internet-clients-work-unchanged.md`), and M2 does not.
-M2 and M4 also need libc to start a child process
+M4 also needs the rest of the child-process track
 (`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`). M4 needs git in the guest, storage durable and fast
 enough for an LLVM build tree
 (`issues/storage-is-layers-and-a-role-is-a-filesystem.md`), and
@@ -125,16 +124,14 @@ the ToyOS-hosted rustc names no linker the guest has
 (`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`). *Exit*: the
 commit that lands M2's compile-and-run test, which links inside the guest.
 
-**What stops M2: the driver's link and the install.** `cargo run --
---hosted-clang` makes a clang and an `ld.lld` for `x86_64-unknown-toyos`,
-static PIEs that name no library (`build/hostedclang.rs`): 147.5 MB and
-85.6 MB, 121.9 MB and 70.9 MB stripped. Both run in a guest:
-`hosted_clang_hello` (`tests/common/hostedclang.rs`, run on demand) stages them
-on ROOT, compiles `hello.c` with `clang -c`, links it by running `ld.lld` on the
-line the driver gives it, runs the program, and both products are the host's
-bytes.
-- Link through the driver: `clang hello.c` starts LLD as a child, which libc
-  cannot (`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`).
+**What stops M2: the install.** `cargo run -- --hosted-clang` makes a clang
+and an `ld.lld` for `x86_64-unknown-toyos`, static PIEs that name no library
+(`build/hostedclang.rs`): 147.5 MB and 85.6 MB, 121.9 MB and 70.9 MB stripped.
+Both run in a guest: `hosted_clang_hello` (`tests/common/hostedclang.rs`, run
+on demand) stages them on ROOT, compiles `hello.c` with `clang -c`, has the
+driver link it, `clang hello.c`, which starts LLD as a child by libc's
+`posix_spawn` and waits for it by `wait4`, runs the program, and both products
+are the host's bytes.
 - Install: `pkg` installs neither (**To build**, "`pkg` installs a toolchain").
 - Run past `hello.c`: what `issues/libc-refuses-what-toyos-cannot-yet-answer.md`
   lists, and `issues/libc-has-no-pread-or-pwrite.md`.

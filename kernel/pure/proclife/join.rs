@@ -115,7 +115,7 @@ mod tests {
         let mut world = World::new();
         let pid = world.spawn_process();
         let t1 = world.spawn_thread(pid);
-        assert!(crate::proclife::teardown::claim_teardown(&mut world, pid, 137));
+        assert!(crate::proclife::teardown::claim_teardown(&mut world, pid, crate::proclife::End::Killed));
         let _ = crate::proclife::teardown::leave(&mut world, pid, t1, None);
         assert_eq!(collect_zombie(&mut world, pid, t1), Ok(None));
         assert!(world.get(pid).unwrap().location(t1).is_some(), "the entry keeps the thread");

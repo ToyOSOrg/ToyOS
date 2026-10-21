@@ -16,6 +16,7 @@
 
 use toyos_abi::syscall::{self, debug_action, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
+use toyos_abi::end::End;
 
 const SELF_PATH: &str = "/system/bin/test_rs_spawn_child_ends_first";
 
@@ -38,7 +39,7 @@ fn test() {
     let child = spawn("exit", &[]).expect("a spawn whose child ended inside it");
     assert_eq!(
         syscall::process_wait_nonblock(child),
-        Ok(CODE),
+        Ok(End::Exited(CODE)),
         "the child had not ended when its spawn answered, so the kernel held nothing"
     );
     syscall::close(child);

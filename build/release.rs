@@ -87,8 +87,18 @@ struct Layer {
 impl Layer {
     /// Its cache entry's key.
     fn entry(&self) -> String {
-        format!("toolchain-{}-{}", self.name, self.key)
+        format!("{}{}", entry_prefix(self.name), self.key)
     }
+}
+
+/// What the cache entry of every key of the [`LAYERS`] layer `name` starts with.
+fn entry_prefix(name: &str) -> String {
+    format!("toolchain-{name}-")
+}
+
+/// Each of [`LAYERS`], as what every one of its cache entries' keys starts with.
+pub(crate) fn entry_prefixes() -> impl Iterator<Item = String> {
+    LAYERS.iter().map(|(_, name)| entry_prefix(name))
 }
 
 const TAG: &str = "toolchain-linux-x86_64-";
@@ -489,27 +499,27 @@ fn put_up(github: &Github, root: &Path, tag: &str, notes: &str, file: &Path) -> 
 }
 
 /// GitHub's REST API for one repository, as the token its job was handed.
-struct Github {
+pub(crate) struct Github {
     agent: ureq::Agent,
     repo: String,
     token: String,
 }
 
 impl Github {
-    fn new(repo: &str) -> Result<Self, String> {
+    pub(crate) fn new(repo: &str) -> Result<Self, String> {
         let token = std::env::var("GH_TOKEN").map_err(|_| "GH_TOKEN is unset".to_string())?;
         Ok(Self { agent: agent(), repo: repo.to_string(), token })
     }
 
     /// The URL of `path` under the repository's API.
-    fn api(&self, path: &str) -> String {
+    pub(crate) fn api(&self, path: &str) -> String {
         format!("https://api.github.com/repos/{}/{path}", self.repo)
     }
 
     /// GitHub's answer to `method` on `url`, sent `body` as its content type
     /// where there is one: the JSON it answered, null for no content, and `None`
     /// for a 404.
-    fn call(&self, method: &str, url: &str, body: Option<(&[u8], &str)>) -> Result<Option<Value>, String> {
+    pub(crate) fn call(&self, method: &str, url: &str, body: Option<(&[u8], &str)>) -> Result<Option<Value>, String> {
         let request = ureq::http::Request::builder()
             .method(method)
             .uri(url)

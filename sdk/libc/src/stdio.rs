@@ -1,21 +1,8 @@
 use core::ptr;
 use toyos_abi::RawHandle;
-use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
+use toyos_abi::syscall::{self, SeekFrom};
 
 // Platform fd operations
-
-fn sys_open(path: &[u8], read: bool, write: bool, create: bool, truncate: bool, append: bool) -> i32 {
-    let mut flags = OpenFlags(0);
-    if read { flags |= OpenFlags::READ; }
-    if write { flags |= OpenFlags::WRITE; }
-    if create { flags |= OpenFlags::CREATE; }
-    if truncate { flags |= OpenFlags::TRUNCATE; }
-    if append { flags |= OpenFlags::APPEND; }
-    match syscall::open(path, flags) {
-        Ok(fd) => fd.0 as i32,
-        Err(_) => -1,
-    }
-}
 
 fn sys_close(fd: i32) { syscall::close(RawHandle(fd as u32)); }
 
@@ -331,25 +318,22 @@ unsafe fn c_str_bytes(s: *const u8) -> &'static [u8] {
 
 #[no_mangle]
 pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut FILE {
-    let path_bytes = unsafe { c_str_bytes(path) };
-
-    let (read, write, create, truncate, append) = match unsafe { *mode } {
-        b'r' => {
-            let plus = unsafe { *mode.add(1) == b'+' || (*mode.add(1) != 0 && *mode.add(2) == b'+') };
-            (true, plus, false, false, false)
+    use super::posix_io::{O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+    let plus = unsafe { *mode != 0 && (*mode.add(1) == b'+' || (*mode.add(1) != 0 && *mode.add(2) == b'+')) };
+    let flags = match (unsafe { *mode }, plus) {
+        (b'r', false) => O_RDONLY,
+        (b'r', true) => O_RDWR,
+        (b'w', false) => O_WRONLY | O_CREAT | O_TRUNC,
+        (b'w', true) => O_RDWR | O_CREAT | O_TRUNC,
+        (b'a', false) => O_WRONLY | O_CREAT | O_APPEND,
+        (b'a', true) => O_RDWR | O_CREAT | O_APPEND,
+        _ => {
+            crate::errno::set(crate::errcode::EINVAL);
+            return ptr::null_mut();
         }
-        b'w' => {
-            let plus = unsafe { *mode.add(1) == b'+' || (*mode.add(1) != 0 && *mode.add(2) == b'+') };
-            (plus, true, true, true, false)
-        }
-        b'a' => {
-            let plus = unsafe { *mode.add(1) == b'+' || (*mode.add(1) != 0 && *mode.add(2) == b'+') };
-            (plus, true, true, false, true)
-        }
-        _ => return ptr::null_mut(),
     };
-
-    let fd = sys_open(path_bytes, read, write, create, truncate, append);
+    // `open`'s own path, so a name libc answers itself (`/dev/null`) opens here too.
+    let fd = unsafe { super::posix_io::open(path, flags, 0o666) };
     if fd < 0 {
         return ptr::null_mut();
     }
@@ -662,9 +646,6 @@ pub unsafe extern "C" fn perror(s: *const u8) {
 }
 
 // Remaining stdio-adjacent functions
-
-#[no_mangle]
-pub unsafe extern "C" fn system(_command: *const u8) -> i32 { -1 }
 
 #[no_mangle]
 pub unsafe extern "C" fn atof(s: *const u8) -> f64 {

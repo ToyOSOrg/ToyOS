@@ -17,6 +17,8 @@ use toyos::shm::SharedMemory;
 use toyos::{endow, namespace, port, OwnedHandle};
 use toyos_abi::syscall::{self, SVC_LABEL};
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::End;
 
 const SELF_PATH: &str = "/system/bin/test_rs_mutual_kill";
 
@@ -30,8 +32,7 @@ const ARM: u32 = 1;
 
 const WORD_BYTES: usize = 4096;
 
-/// `process::KILLED_EXIT_CODE`.
-const KILLED: i32 = 137;
+const KILLED: End = End::Killed;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -55,11 +56,11 @@ fn test() {
 
         word(&go).store(1, Ordering::Release);
 
-        let codes = [a.wait().expect("wait a").code(), b.wait().expect("wait b").code()];
+        let ends = [a.wait().expect("wait a"), b.wait().expect("wait b")].map(|s| End::from_word(s.into_raw()));
         assert!(
-            codes.iter().all(|c| *c == Some(KILLED) || *c == Some(0))
-                && codes.contains(&Some(KILLED)),
-            "round {round}: two processes that killed each other ended with {codes:?}",
+            ends.iter().all(|e| *e == Some(KILLED) || *e == Some(End::Exited(0)))
+                && ends.contains(&Some(KILLED)),
+            "round {round}: two processes that killed each other ended {ends:?}",
         );
     }
     println!("mutual_kill: {ROUNDS} rounds of two processes killing each other, every one ended");
@@ -69,8 +70,8 @@ fn test() {
     arm(&conn, &go, RawHandle(own.as_raw_handle()));
     armed(&mut own);
     word(&go).store(1, Ordering::Release);
-    let code = own.wait().expect("wait the self-killer").code();
-    assert_eq!(code, Some(KILLED), "a process that killed itself ended with {code:?}");
+    let end = End::from_word(own.wait().expect("wait the self-killer").into_raw());
+    assert_eq!(end, Some(KILLED), "a process that killed itself ended {end:?}");
     println!("mutual_kill: a process that killed itself ended {KILLED}");
 }
 

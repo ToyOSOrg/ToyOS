@@ -210,8 +210,11 @@ impl io::Write for Stderr {
 
 pub const STDIN_BUF_SIZE: usize = 64;
 
+/// No error means a stdio stream is closed: a slot a process does not hold
+/// ends it at its first use rather than answering one, and every error a
+/// held stream answers is the caller's to see.
 pub fn is_ebadf(_err: &io::Error) -> bool {
-    true
+    false
 }
 
 pub fn panic_output() -> Option<Stderr> {

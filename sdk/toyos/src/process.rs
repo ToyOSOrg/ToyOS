@@ -6,6 +6,7 @@
 //! wait for a process, kill it or read its accounting is exactly what was given
 //! a handle to it.
 
+pub use toyos_abi::end::{End, Fault};
 use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, ProcessStats, SyscallError};
 
@@ -13,20 +14,42 @@ use crate::endow::FromHandle;
 use crate::shm::SharedMemory;
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
+/// The `<signal.h>` number POSIX names an end by, as libc's `WTERMSIG`
+/// answers it and a shell's `$?` adds to 128: a kill is `SIGKILL`, a fault its
+/// class's signal, and a handle fault `SIGSEGV`'s, a pointer being the other way
+/// to name what a process does not hold. `None` for an exit.
+pub fn signal(end: End) -> Option<i32> {
+    const SIGILL: i32 = 4;
+    const SIGTRAP: i32 = 5;
+    const SIGBUS: i32 = 7;
+    const SIGFPE: i32 = 8;
+    const SIGKILL: i32 = 9;
+    const SIGSEGV: i32 = 11;
+    Some(match end {
+        End::Exited(_) => return None,
+        End::Killed => SIGKILL,
+        End::Fault(Fault::Memory | Fault::Handle) => SIGSEGV,
+        End::Fault(Fault::Alignment) => SIGBUS,
+        End::Fault(Fault::Instruction) => SIGILL,
+        End::Fault(Fault::Arithmetic) => SIGFPE,
+        End::Fault(Fault::Trap) => SIGTRAP,
+    })
+}
+
 pub struct Process(pub(crate) OwnedHandle);
 
 impl Process {
-    /// Block until it exits, and take the code.
+    /// Block until it ends, and take how.
     ///
-    /// **Repeatable and never missed.** The code is on the object, so waiting a
+    /// **Repeatable and never missed.** The end is on the object, so waiting a
     /// second time answers the same thing and waiting long after the process is
     /// gone still answers.
-    pub fn wait(&self) -> Result<i32, SyscallError> {
+    pub fn wait(&self) -> Result<End, SyscallError> {
         syscall::process_wait(self.0.raw())
     }
 
-    /// The exit code if it has already exited, `Err(WouldBlock)` if not.
-    pub fn try_wait(&self) -> Result<i32, SyscallError> {
+    /// How it ended if it has, `Err(WouldBlock)` if not.
+    pub fn try_wait(&self) -> Result<End, SyscallError> {
         syscall::process_wait_nonblock(self.0.raw())
     }
 
@@ -124,5 +147,35 @@ impl Image {
     /// this process's until the spawn returns; the child keeps its own.
     pub fn spawn_words(&self) -> (u64, u64) {
         (u64::from(self.object.as_handle().0), self.len)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The number `<signal.h>` defines `name` as.
+    fn defined(name: &str) -> i32 {
+        let header = include_str!("../../libc/include/signal.h");
+        let line = header.lines().find(|l| l.split_whitespace().nth(1) == Some(name)).expect(name);
+        line.split_whitespace().nth(2).and_then(|n| n.parse().ok()).expect(name)
+    }
+
+    /// Each end is the signal libc's header names its class by, and an exit
+    /// is none, 137 included.
+    #[test]
+    fn each_end_is_its_classes_signal() {
+        for (end, name) in [
+            (End::Killed, "SIGKILL"),
+            (End::Fault(Fault::Memory), "SIGSEGV"),
+            (End::Fault(Fault::Handle), "SIGSEGV"),
+            (End::Fault(Fault::Alignment), "SIGBUS"),
+            (End::Fault(Fault::Instruction), "SIGILL"),
+            (End::Fault(Fault::Arithmetic), "SIGFPE"),
+            (End::Fault(Fault::Trap), "SIGTRAP"),
+        ] {
+            assert_eq!(signal(end), Some(defined(name)), "{end:?}");
+        }
+        assert_eq!(signal(End::Exited(137)), None);
     }
 }

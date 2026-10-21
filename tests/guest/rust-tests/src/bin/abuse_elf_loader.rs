@@ -19,6 +19,7 @@ use std::process::Command;
 
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
+use toyos_abi::end::{End, Fault};
 
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
 const CWD: &str = "/";
@@ -331,8 +332,8 @@ fn dies(name: &str, outcome: Result<RawHandle, SyscallError>) {
         Ok(child) => {
             // SAFETY: the handle `SYS_SPAWN` just answered, held nowhere else.
             let child = unsafe { toyos::process::Process::from_raw(child) };
-            let code = child.wait().unwrap_or_else(|e| panic!("{name}: wait for the child: {e:?}"));
-            assert_ne!(code, 0, "{name}: a child entering at bytes that are no program exited 0");
+            let end = child.wait().unwrap_or_else(|e| panic!("{name}: wait for the child: {e:?}"));
+            assert!(!end.success(), "{name}: a child entering at bytes that are no program exited 0");
         }
         Err(e) => assert!(
             matches!(e, SyscallError::InvalidArgument | SyscallError::ResourceExhausted),
@@ -1045,8 +1046,8 @@ fn tls_refs_so(name: &[u8; 4], addend: i64) -> Vec<u8> {
 const REFUSED_LINE: &str = "this program's relocations are refused: it cannot start\n";
 /// The status it exits with then.
 const REFUSED_STATUS: i32 = 127;
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
+/// How the kernel ends a process that names a handle it does not hold.
+const HANDLE_FAULT: End = End::Fault(Fault::Handle);
 /// The argument a refused copy is handed, which its `main` panics on.
 const REFUSED_COPY: &str = "--refused-copy";
 
@@ -1089,6 +1090,6 @@ fn refuses_itself(name: &str, tag: u64) {
         .unwrap_or_else(|e| panic!("{name} without slot 2: spawn gave {e:?}"));
     // SAFETY: the handle `SYS_SPAWN` just answered, held nowhere else.
     let child = unsafe { toyos::process::Process::from_raw(child) };
-    let code = child.wait().unwrap_or_else(|e| panic!("{name} without slot 2: wait: {e:?}"));
-    assert_eq!(code, HANDLE_FAULT, "{name} without slot 2");
+    let end = child.wait().unwrap_or_else(|e| panic!("{name} without slot 2: wait: {e:?}"));
+    assert_eq!(end, HANDLE_FAULT, "{name} without slot 2");
 }

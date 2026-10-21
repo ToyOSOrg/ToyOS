@@ -29,6 +29,7 @@ pub mod process;
 pub mod relocate;
 pub mod surface;
 pub mod shm;
+pub mod spawn;
 pub mod syscap;
 pub mod sync;
 pub mod system;
@@ -63,6 +64,11 @@ pub trait AsHandle {
 pub fn pipe_pair() -> Result<(Pipe, Pipe), toyos_abi::syscall::SyscallError> {
     let ends = toyos_abi::syscall::pipe()?;
     Ok((Pipe(OwnedHandle(ends.read)), Pipe(OwnedHandle(ends.write))))
+}
+
+/// A fresh null handle carrying `rights` ([`toyos_abi::syscall::null`]).
+pub fn null(rights: toyos_abi::handle::Rights) -> Result<OwnedHandle, toyos_abi::syscall::SyscallError> {
+    toyos_abi::syscall::null(rights).map(OwnedHandle)
 }
 
 /// One owned handle, closed when it drops.

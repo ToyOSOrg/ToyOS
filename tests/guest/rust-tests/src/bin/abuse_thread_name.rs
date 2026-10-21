@@ -1,8 +1,5 @@
-//! `SYS_SET_THREAD_NAME` used to clamp an oversized name with `(a2 as
-//! usize).min(THREAD_NAME_LEN)` and set the truncated prefix — a silent
-//! clamp. `Untrusted::at_most` replaced it with a refusal, which is a
-//! behaviour change worth its own gate: this proves the refusal actually
-//! fires, rather than the clamp it replaced.
+//! `SYS_SET_THREAD_NAME` refuses a name longer than `THREAD_NAME_LEN` rather
+//! than setting its truncated prefix: this proves the refusal fires.
 //!
 //! `toyos_abi::syscall::set_thread_name` throws its own return value away —
 //! it always has, and that is not this test's to fix — so the return code
@@ -80,11 +77,8 @@ fn main() {
     );
     println!("  at the bound: accepted, and reads back whole");
 
-    // One byte over: before this conversion this call silently set the first
-    // THREAD_NAME_LEN bytes of `over` — indistinguishable, from calling code
-    // that does not check the (discarded) return value, from asking for
-    // `at_bound` again. `Untrusted::at_most` refuses it instead, and this is
-    // the only way to see that from userland: the name is still `at_bound`.
+    // One byte over is refused, and the only way to see that from userland is
+    // that the name is still `at_bound`, not a truncated `over`.
     let mut over = [b'b'; THREAD_NAME_LEN + 1];
     over[THREAD_NAME_LEN] = b'!';
     syscall::set_thread_name(&over);

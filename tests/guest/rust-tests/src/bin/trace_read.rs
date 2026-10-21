@@ -19,11 +19,13 @@
 
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
+use std::os::toyos::process::ExitStatusExt;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
+use toyos_abi::end::{End, Fault};
 use toyos_abi::handle::{Rights, HANDLE_INVALID};
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::trace::{TraceCursor, TraceRecord};
@@ -31,8 +33,8 @@ use toyos_trace::{Entry, Event, Thread};
 
 const SELF_PATH: &str = "/system/bin/test_rs_trace_read";
 
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
+/// How the kernel ends a process that names a handle it does not hold.
+const HANDLE_FAULT: End = End::Fault(Fault::Handle);
 
 /// Records asked for at once.
 const BATCH: usize = 512;
@@ -188,5 +190,5 @@ fn unheld() {
         .wait_with_output()
         .expect("wait the unheld child");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "reached unheld", "the child never reached its call");
-    assert_eq!(out.status.code(), Some(HANDLE_FAULT), "SYS_TRACE_READ took a handle nobody holds");
+    assert_eq!(End::from_word(out.status.into_raw()), Some(HANDLE_FAULT), "SYS_TRACE_READ took a handle nobody holds");
 }

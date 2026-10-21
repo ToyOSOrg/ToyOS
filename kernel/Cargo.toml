@@ -500,7 +500,6 @@ toyos-quiesce = { path = "../lib/quiesce" }
 toyos-random = { path = "../lib/random" }
 toyos-scsi = { path = "../lib/scsi" }
 toyos-symbols = { path = "../lib/symbols" }
-toyos-untrusted = { path = "../lib/untrusted" }
 toyos-usbhid = { path = "usbhid" }
 toyos-userbound = { path = "../lib/userbound" }
 toyos-wallclock = { path = "../lib/wallclock" }

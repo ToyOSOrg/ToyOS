@@ -74,6 +74,8 @@ use toyos_abi::syscall::{
     NAMESPACE_KEEP_ALL, SVC_LABEL,
 };
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_endowment_denied";
 const OPEN: &str = "echo";
@@ -87,8 +89,8 @@ const _: () = assert!(UNDEFINED_FLAG & NAMESPACE_FLAGS_KNOWN == 0);
 /// `Rights::ROSTER`, and one byte more than the largest that does not.
 const ONE_ENTRY: usize = SYSINFO_HEADER_SIZE + SYSINFO_ENTRY_SIZE;
 
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
+/// How the kernel ends a process that names a handle it does not hold.
+const HANDLE_FAULT: End = End::Fault(Fault::Handle);
 
 /// The artifacts this image carries, not the `system.toml` that produced them.
 const MANIFEST: &str = "/system/etc/system.manifest";
@@ -550,7 +552,7 @@ fn killed(role: &str, what_would_be_wrong: &str) {
         format!("reached {role}"),
         "{role} never reached its call",
     );
-    assert_eq!(out.status.code(), Some(HANDLE_FAULT), "{what_would_be_wrong}");
+    assert_eq!(End::from_word(out.status.into_raw()), Some(HANDLE_FAULT), "{what_would_be_wrong}");
     println!("  {role}: ended the caller");
 }
 

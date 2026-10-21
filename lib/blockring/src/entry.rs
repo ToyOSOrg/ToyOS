@@ -4,7 +4,7 @@
 //! request is bounded here against the arena and the partition, and a word
 //! this protocol does not define is a refusal, never a default.
 
-use toyos_transport::{Run, Untrusted};
+use toyos_transport::Run;
 
 use crate::layout::{ARENA, CQE_WORDS, MAX_REQUEST_BLOCKS, SQE_WORDS};
 
@@ -57,22 +57,18 @@ impl Request {
     /// `partition_blocks`: every block it names is inside both the arena and
     /// the partition, a transfer moves at least one block and at most
     /// [`MAX_REQUEST_BLOCKS`], and a flush names nothing.
-    pub fn decode(words: [Untrusted<u32>; SQE_WORDS], partition_blocks: u64) -> Result<Self, Refused> {
+    pub fn decode(words: [u32; SQE_WORDS], partition_blocks: u64) -> Result<Self, Refused> {
         let [op, tag, lba_low, lba_high, blocks, arena, reserved @ ..] = words;
-        let tag = opaque(tag);
         let refused = Refused::Malformed { tag };
-        if !reserved.iter().all(|word| word.is(0)) {
+        if reserved.iter().any(|&word| word != 0) {
             return Err(refused);
         }
-        let lba = u64::from(opaque(lba_low)) | (u64::from(opaque(lba_high)) << 32);
-        let transfer: fn(Run, u64) -> Op = if op.is(READ) {
-            |run, lba| Op::Read { run, lba }
-        } else if op.is(WRITE) {
-            |run, lba| Op::Write { run, lba }
-        } else if op.is(FLUSH) && lba == 0 && blocks.is(0) && arena.is(0) {
-            return Ok(Self { op: Op::Flush, tag });
-        } else {
-            return Err(refused);
+        let lba = u64::from(lba_low) | (u64::from(lba_high) << 32);
+        let transfer: fn(Run, u64) -> Op = match op {
+            READ => |run, lba| Op::Read { run, lba },
+            WRITE => |run, lba| Op::Write { run, lba },
+            FLUSH if lba == 0 && blocks == 0 && arena == 0 => return Ok(Self { op: Op::Flush, tag }),
+            _ => return Err(refused),
         };
         let run = Run::decode(arena, blocks, &ARENA).map_err(|_| refused)?;
         let blocks = run.count();
@@ -81,15 +77,6 @@ impl Request {
         }
         Ok(Self { op: transfer(run, lba), tag })
     }
-}
-
-/// A word every value of which means something: a tag its answer echoes, or
-/// half of an `lba` the partition bounds whole.
-fn opaque(word: Untrusted<u32>) -> u32 {
-    word.at_most(u32::MAX.into())
-        .ok()
-        .and_then(|word| u32::try_from(word).ok())
-        .expect("every u32 is at most u32::MAX")
 }
 
 /// What a completion says of its request.
@@ -139,13 +126,13 @@ impl Completion {
 
     /// `None` for words no server of this protocol writes: the client treats a
     /// server that wrote them as one that broke the session.
-    pub fn decode(words: [Untrusted<u32>; CQE_WORDS]) -> Option<Self> {
+    pub fn decode(words: [u32; CQE_WORDS]) -> Option<Self> {
         let [tag, status, reserved @ ..] = words;
-        if !reserved.iter().all(|word| word.is(0)) {
+        if reserved.iter().any(|&word| word != 0) {
             return None;
         }
-        let status = Status::ALL.into_iter().find(|s| status.is(s.word()))?;
-        Some(Self { tag: opaque(tag), status })
+        let status = Status::ALL.into_iter().find(|s| s.word() == status)?;
+        Some(Self { tag, status })
     }
 }
 
@@ -159,10 +146,6 @@ mod tests {
         ARENA.run(first, count).unwrap()
     }
 
-    fn peer<const N: usize>(words: [u32; N]) -> [Untrusted<u32>; N] {
-        words.map(Untrusted::new)
-    }
-
     #[test]
     fn a_request_survives_its_words() {
         let last = ARENA.slots() - MAX_REQUEST_BLOCKS;
@@ -171,10 +154,10 @@ mod tests {
             Request { op: Op::Write { run: run(last, MAX_REQUEST_BLOCKS), lba: 0 }, tag: u32::MAX },
             Request { op: Op::Flush, tag: 0 },
         ] {
-            assert_eq!(Request::decode(peer(request.encode()), PARTITION), Ok(request));
+            assert_eq!(Request::decode(request.encode(), PARTITION), Ok(request));
         }
         let wide = Request { op: Op::Read { run: run(3, 2), lba: 1 << 40 }, tag: 1 };
-        assert_eq!(Request::decode(peer(wide.encode()), u64::MAX), Ok(wide));
+        assert_eq!(Request::decode(wide.encode(), u64::MAX), Ok(wide));
     }
 
     /// Every field a hostile client can set out of range is refused, and the
@@ -202,7 +185,7 @@ mod tests {
         ];
         for (what, words) in cases {
             assert_eq!(
-                Request::decode(peer(words), PARTITION),
+                Request::decode(words, PARTITION),
                 Err(Refused::Malformed { tag: 42 }),
                 "{what} was not refused"
             );
@@ -213,9 +196,9 @@ mod tests {
     fn a_completion_survives_its_words_and_refuses_what_it_does_not_define() {
         for status in Status::ALL {
             let c = Completion { tag: 9, status };
-            assert_eq!(Completion::decode(peer(c.encode())), Some(c));
+            assert_eq!(Completion::decode(c.encode()), Some(c));
         }
-        assert_eq!(Completion::decode(peer([1, 5, 0, 0])), None);
-        assert_eq!(Completion::decode(peer([1, 0, 1, 0])), None);
+        assert_eq!(Completion::decode([1, 5, 0, 0]), None);
+        assert_eq!(Completion::decode([1, 0, 1, 0]), None);
     }
 }

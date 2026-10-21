@@ -20,9 +20,6 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-# The type a used-ring element's two fields stay in until each has met its
-# bound.
-toyos-untrusted = { path = "../untrusted" }
 # `Registers` and `DmaBuffers`: the boundary every userland driver is written
 # against, and the order of its two barriers.
 toyos-device-memory = { path = "../device-memory" }
