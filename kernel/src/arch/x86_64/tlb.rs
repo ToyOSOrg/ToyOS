@@ -81,7 +81,7 @@ pub fn shootdown(origin: Origin, half: Half) {
     let me = percpu::cpu_id() as usize;
     let generation = SHOOTDOWN.issue(reach);
     // This CPU answers itself locally instead of by self-IPI.
-    SHOOTDOWN.serve(me, flush);
+    SHOOTDOWN.serve(me, answer(Answerer::Initiator));
     apic::tlb_ipi();
     for cpu in 0..cpus {
         if cpu as usize != me {
@@ -133,7 +133,7 @@ pub fn bench() {
 fn wait_for(me: usize, cpu: u32, generation: Generation) {
     let mut spins = 0u32;
     let mut deadline = None;
-    while !SHOOTDOWN.wait_turn(me, cpu as usize, generation, flush) {
+    while !SHOOTDOWN.wait_turn(me, cpu as usize, generation, answer(Answerer::Initiator)) {
         core::hint::spin_loop();
         spins += 1;
         if spins == SPINS_PER_DEADLINE_CHECK {
@@ -161,13 +161,27 @@ fn flush(reach: Reach) {
     }
 }
 
+/// Which side of a shootdown this CPU answers from: asked, by the interrupt or
+/// a spin's poll, or inside a shootdown of its own, whose serves answer every
+/// generation this CPU owes as well as its own.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Answerer {
+    Asked,
+    Initiator,
+}
+
+/// Every serve's closure but `join`'s.
+fn answer(by: Answerer) -> impl FnOnce(Reach) {
+    move |reach| {
+        flush(reach);
+        stage_ack_delay(by);
+    }
+}
+
 /// Vector 0xFE's whole body: flush this CPU and say which generation it covers.
 pub fn serve_ipi() {
     let cpu = percpu::cpu_id() as usize;
-    SHOOTDOWN.serve(cpu, |reach| {
-        flush(reach);
-        stage_ack_delay();
-    });
+    SHOOTDOWN.serve(cpu, answer(Answerer::Asked));
 }
 
 /// Answers a pending shootdown without taking a lock or allocating, so it is
@@ -180,10 +194,7 @@ pub fn poll() {
         return;
     }
     let cpu = percpu::cpu_id() as usize;
-    SHOOTDOWN.serve_if_owed(cpu, |reach| {
-        flush(reach);
-        stage_ack_delay();
-    });
+    SHOOTDOWN.serve_if_owed(cpu, answer(Answerer::Asked));
 }
 
 /// Settle every shootdown issued before this CPU could answer one; called
@@ -195,7 +206,7 @@ pub fn join() {
 }
 
 #[cfg(not(feature = "test-actuators"))]
-fn stage_ack_delay() {}
+fn stage_ack_delay(_by: Answerer) {}
 
 #[cfg(feature = "test-actuators")]
 mod delay {
@@ -226,16 +237,22 @@ fn open_arm_window() {
 /// Delays after the flush and before publication, so it can only slow a
 /// correct answer, never hide an incorrect one.
 ///
-/// An initiator's own flush is not part of the wait under measurement, so
-/// delaying it would spend that wait on the initiator's own hand.
+/// **One held CPU is held whichever side it answers from**: inside a shootdown
+/// of its own it answers the staged generation from that shootdown's serves,
+/// and an unheld answer there brings a correct wait for it back fast.
+/// **Under [`delay::EVERY`] no initiator is held**: the shootdown being timed
+/// is an initiator's, and its own answer is not the wait under measurement.
 #[cfg(feature = "test-actuators")]
-fn stage_ack_delay() {
+fn stage_ack_delay(by: Answerer) {
     let now = crate::clock::nanos_since_boot();
     if now >= delay::UNTIL.load(Ordering::Relaxed) {
         return;
     }
-    let target = delay::TARGET.load(Ordering::Relaxed);
-    if target != delay::EVERY && target != percpu::cpu_id() {
+    let held = match delay::TARGET.load(Ordering::Relaxed) {
+        delay::EVERY => by == Answerer::Asked,
+        target => target == percpu::cpu_id(),
+    };
+    if !held {
         return;
     }
     let until = now.saturating_add(delay::NANOS.load(Ordering::Relaxed));
@@ -253,7 +270,8 @@ fn stage_ack_delay() {
 ///
 /// Preemption is off across the sweep because each held-back CPU is chosen
 /// against this one: a thread that migrated mid-sweep would arm the CPU it is
-/// about to initiate from, which holds nobody back.
+/// about to initiate from, which spends the delay on its own hand and holds
+/// back no wait.
 #[cfg(feature = "test-actuators")]
 pub fn debug_arm_ack_delay(nanos: u64) -> u64 {
     delay::NANOS.store(nanos, Ordering::Relaxed);
