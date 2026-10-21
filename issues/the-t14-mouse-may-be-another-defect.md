@@ -22,9 +22,11 @@ What that session left open, and where `usbd` stands on each:
   (`system/usbd/xhci/src/configure.rs`). QEMU has no bandwidth scheduler and
   never reads the field, so no host or QEMU test tells the values apart.
 - **A first transfer that completes with an error, or an endpoint never
-  scheduled at all.** That session's log could not tell them apart; under
-  `usbd` the first names the completion code, and the second leaves no
-  completion.
+  scheduled at all.** That session's log could not tell them apart, and
+  `usbd`'s does not either. A transfer that ends with an error code is
+  restarted, and `usbd` names the code only when the endpoint will not run
+  again (`system/usbd/xhci/src/hid.rs`). An error the restart clears says
+  nothing, and neither does an endpoint that never completes.
 - **`SET_IDLE`.** The old driver never sent it; `usbd` sends `SET_IDLE(0)` to a
   keyboard and says a refusal (`hid.rs`).
 
@@ -32,5 +34,6 @@ No T14 boot has had a USB mouse read under `usbd`: its T14 rows serve the boot
 stick and drive the Type-C controller, and none binds a pointer.
 
 **Exit**: a T14 boot with a USB mouse plugged in whose `usbd` lines show the
-pointer's reports reaching the owner of input, or the completion code or
-silence that says which of the two cases above it is.
+pointer's reports reaching the owner of input. Or, where none arrive, the
+boot's `usbd` says whether the endpoint completed transfers with an error
+code, naming the code, or completed none at all.

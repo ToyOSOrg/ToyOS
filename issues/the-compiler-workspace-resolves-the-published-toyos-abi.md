@@ -11,7 +11,7 @@ requirement accepts. The four forks `rust/Cargo.lock`
 pins that name `toyos-abi` — getrandom `toyos-0.2` at 46592414 and `toyos-0.3`
 at d3045447, libloading `toyos` at fa0abe77, stacker `toyos` at c25842ac — each
 require `"0.1"`, and the tree's crate is 0.16.0. So the committed lock (the
-`rust` fork at `11e31a5277`) names `toyos-abi 0.1.0` from crates.io, and a
+`rust` fork at `a56b4057`) names `toyos-abi 0.1.0` from crates.io, and a
 bootstrap run handed the `[patch]` records `[[patch.unused]] toyos-abi
 0.16.0`. On a macOS or Linux host those
 dependencies are `cfg(target_os = "toyos")` and never compiled; the
