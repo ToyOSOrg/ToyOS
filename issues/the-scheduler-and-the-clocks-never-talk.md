@@ -65,7 +65,7 @@ approximation as persistent rate gaps decided by placement: m+1 single-thread
 jobs leave 0.30, 0.39 and 0.44 CPUs between jobs on four CPUs, the T14 and the
 AMD shapes; a placement whose loads equal a fair one's, {A,A} {A,B} {B} {B},
 holds 0.5 CPUs on four CPUs and 2 CPUs on AMD. While a runnable thread waits,
-the service it is entitled to on its CPU stays within 0.36 of
+the service it is entitled to on its CPU stays within 0.48 of
 `slice + 2·lag_bound + 2·slice` in every scenario run; in time that wait
 scales with crowding. These are model figures for the scenarios that ran, not
 hardware latency guarantees. Stage 3 validates the kernel implementation on
