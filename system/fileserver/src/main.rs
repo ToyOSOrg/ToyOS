@@ -761,6 +761,10 @@ impl Server {
                 self.sync(Some(node))
             }
             SYNC => self.sync(None),
+            ROOM => {
+                let room = self.volume.room()?;
+                Ok(Answer::Reply(Reply { value: room.free, value2: room.unit, ..Reply::ok() }))
+            }
             STREAM => {
                 let file = self.fid(id, r.fid)?;
                 if !file.borrow().write {

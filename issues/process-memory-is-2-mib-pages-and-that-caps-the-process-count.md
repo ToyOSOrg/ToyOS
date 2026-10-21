@@ -18,6 +18,16 @@ IOMMU's superpages, the kernel's own mappings. One paging design serves both,
 on x86-64 and on the ARM64 the tree is kept portable for
 (`issues/toyos-runs-on-arm64.md`).
 
+**A large program spawned from a large parent is refused.** A program a file
+server holds is spawned from a copy in one memory object, and `SYS_SHM_CREATE`
+allocates that object physically contiguous (`kernel/src/object/shm.rs`,
+`alloc_contiguous`): about 148 MB for the hosted clang. A small std parent
+spawns `ld.lld` that way, but clang's driver, starting `cc1` and `ld.lld` from
+`/apps/clang`, is refused `ResourceExhausted` (`ENOMEM` in libc), so
+`hosted_clang_hello` compiles and cannot link. That the contiguous allocation
+is the one refused is inferred: the errno is measured, the allocation is
+not. Removing contiguous user memory is the exit's; this row is its check.
+
 **The constraint that makes this a track, measured on the T14** (run 29
 readback, `PMM: 100/16038MB used` at 11 s with four user processes and three
 kernel threads live; the same record's rows: stack 16 pages held, init-tls 5,

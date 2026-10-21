@@ -1,11 +1,30 @@
-# The boot `hosted_clang_hello` stages ToyOS's own clang and LLD on, with the C
-# sysroot they read: a ROOT of its own, since they are a quarter of a gigabyte
-# and no other test reads them.
+# The boot `hosted_clang_hello` installs ToyOS's own clang and LLD in, by `pkg`
+# from the package staged on its ROOT: a ROOT of its own, since the package is
+# a hundred megabytes and no other test reads it, and DATA, where `/apps` is.
 [boot]
-start = ["logkeeper", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
 
 [programs.test-runner]
+
+# The installer the job runs, as `images/system.toml` declares it.
+[programs.pkg]
+
+# The block service, the NVMe driver for the disk DATA is on, and the file
+# servers.
+[programs.diskserver]
+service = true
+restart = true
+serves = ["block", "disk"]
+
+[programs.nvme]
+drives = ["pci:01:08:02/1b36:0010"]
+receives = ["disk"]
+
+[programs.fileserver]
+restart = true
+roles = ["data", "log", "boot"]
+receives = ["block"]

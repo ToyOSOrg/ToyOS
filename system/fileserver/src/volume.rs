@@ -132,6 +132,9 @@ pub trait Volume {
     /// volume's own flush refused.
     fn sync(&mut self) -> Result<Vec<(Node, Error)>, Error>;
 
+    /// What more can be written to the volume: none, where nothing can be.
+    fn room(&mut self) -> Result<toyos::fs::Room, Error>;
+
     /// One line of what the volume and its cache have done, for a log.
     fn describe(&self) -> String;
 }

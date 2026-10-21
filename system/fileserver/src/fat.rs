@@ -458,6 +458,15 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(unlevel)
     }
 
+    fn room(&mut self) -> Result<fs::Room, fs::Error> {
+        let unit = u64::from(self.fs.geometry().bytes_per_cluster());
+        if !self.writable {
+            return Ok(fs::Room { free: 0, unit });
+        }
+        let free = self.fs.free_bytes().map_err(|e| logged("free space", "", e))?;
+        Ok(fs::Room { free, unit })
+    }
+
     fn describe(&self) -> String {
         let c = self.cache.counts();
         format!(

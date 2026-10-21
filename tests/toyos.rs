@@ -212,8 +212,8 @@ const RUST_SKIP: &[&str] = &[
     // must not take from its members: `bar_map_again` and the
     // `msix_table_read_in_place` metal row run it.
     "msix_in_place",
-    // It needs ToyOS's own clang and LLD on ROOT, which only its boot stages:
-    // `hosted_clang_hello` runs it on tests/images/hostedclangcase.toml.
+    // It needs ToyOS's own clang and LLD packaged on ROOT, which only its boot
+    // stages: `hosted_clang_hello` runs it on tests/images/hostedclangcase.toml.
     "hosted_clang_hello",
     // A std child's stdio, beside libc's: `libc_children` runs it on
     // tests/images/libccase.toml.
@@ -529,9 +529,11 @@ const MACHINE_TESTS: &[&str] = &[
     // block service's sessions through have no host build, and the T14 boots
     // from a stick beside an NVMe disk that is another system's.
     "nvme_disk_boots",
-    // clang and LLD built for ToyOS, compiling and linking inside it: the
-    // claim is that they run on ToyOS, which no host test can make, and the
-    // T14 would read nothing a guest does not. On demand: [`ON_DEMAND`].
+    // clang and LLD built for ToyOS, installed by `pkg` and compiling and
+    // linking inside it: the claim is that they install and run on ToyOS,
+    // which no host test can make, and the T14 would read nothing a guest does
+    // not. On demand: [`ON_DEMAND`]. Red at the link until item 5 of
+    // `issues/toyos-builds-itself.md` lands.
     "hosted_clang_hello",
     // libc's children: each program starts and waits for its own, which is
     // order, completion, contents and counts, and no hardware is in it.

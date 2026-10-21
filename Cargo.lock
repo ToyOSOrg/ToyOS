@@ -3011,7 +3011,10 @@ name = "pkg"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "tar",
+ "toyos",
  "toyos-manifest",
+ "toyos-sha2",
  "toyos-sha2-hw",
  "toyos-tmpdir",
 ]

@@ -1,6 +1,6 @@
 [package]
 name = "pkg"
-description = "The installer: an archive checked against its release's SHA256SUMS and unpacked as one directory under /apps; the decoders are a library tested on the host."
+description = "The installer: an archive checked against its release's SHA256SUMS and streamed into one directory under /apps within the room its volume has; the decoders are a library tested on the host."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
@@ -12,10 +12,18 @@ license = "MIT OR Apache-2.0"
 doctest = false
 
 [dependencies]
+# The room `/apps`'s volume has, which only its file server answers.
+toyos = { path = "../../sdk/toyos" }
 toyos-manifest = { path = "../../lib/manifest" }
+toyos-sha2 = { path = "../../lib/sha2" }
 toyos-sha2-hw = { path = "../../lib/sha2-hw" }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 
 [dev-dependencies]
+# Archives made by a writer that is not this crate's reader.
+tar = { version = "0.4.46", default-features = false }
 # Test scratch that is gone on every way out; `--ci host` reds on any left behind.
 toyos-tmpdir = { path = "../../lib/tmpdir" }
+
+[package.metadata.toyos.host]
+exempt.manages = "ToyOS's installed packages: the directories under /apps the supervisor launches from"

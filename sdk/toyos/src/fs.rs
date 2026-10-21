@@ -92,6 +92,8 @@ pub const SEEK: u32 = 21;
 /// carries its other end. It spends a served slot of this connection's share
 /// from here, and names no path.
 pub const EXPORT: u32 = 22;
+/// The free space of the volume behind the capability ([`Room`]).
+pub const ROOM: u32 = 23;
 
 pub const SEEK_START: u64 = 0;
 pub const SEEK_CURRENT: u64 = 1;
@@ -453,6 +455,16 @@ pub struct Stat {
     pub node: u64,
 }
 
+/// How much more the volume behind a capability holds: `free` bytes, taken in
+/// allocation units of `unit` bytes, so a file of `n` bytes takes `n` rounded
+/// up to `unit`. A volume's own structures take room too, so it is a bound and
+/// never a promise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Room {
+    pub free: u64,
+    pub unit: u64,
+}
+
 /// A write answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Written {
@@ -741,6 +753,18 @@ impl Dir {
             Refused::Error(e) => e,
             Refused::Link(_) => Error::Malformed,
         })
+    }
+
+    /// The volume's [`Room`]. Like [`Self::sync`], it names no path.
+    pub fn room(&mut self) -> Result<Room, Error> {
+        let reply = self.path_call(ROOM, Request::new(), "", "").map_err(|refused| match refused {
+            Refused::Error(e) => e,
+            Refused::Link(_) => Error::Malformed,
+        })?;
+        match reply.value2 {
+            0 => Err(Error::Malformed),
+            unit => Ok(Room { free: reply.value, unit }),
+        }
     }
 
     /// A pipe whose bytes the server writes to this file at the description's

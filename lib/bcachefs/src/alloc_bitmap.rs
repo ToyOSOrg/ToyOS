@@ -141,7 +141,7 @@ impl BitmapAllocator {
 
     /// What an allocation may take now: every free block, but for those
     /// [`NODE_RESERVE`] keeps from all but an operation that draws on it.
-    fn spare(&self) -> u64 {
+    pub(crate) fn spare(&self) -> u64 {
         match !self.shadow || self.op.as_ref().is_some_and(|op| op.reserve == Reserve::Draw) {
             true => self.free_blocks,
             false => self.free_blocks.saturating_sub(NODE_RESERVE),

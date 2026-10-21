@@ -13,7 +13,7 @@ use toyos::fs::*;
 pub fn changes(op: u32, flags: u64) -> Option<bool> {
     match op {
         OPEN => Some(flags & (O_WRITE | O_APPEND | O_CREATE | O_TRUNCATE | O_CREATE_NEW) != 0),
-        HELLO | CLOSE | READ | STAT | LSTAT | FSTAT | FSYNC | SYNC | READDIR | READLINK | DUP | SEEK | EXPORT => {
+        HELLO | CLOSE | READ | STAT | LSTAT | FSTAT | FSYNC | SYNC | READDIR | READLINK | DUP | SEEK | EXPORT | ROOM => {
             Some(false)
         }
         WRITE | TRUNCATE | MKDIR | RMDIR | UNLINK | RENAME | SYMLINK | STREAM => Some(true),
@@ -27,7 +27,7 @@ mod tests {
 
     /// Every request the wire has, by what it does to the directory: the
     /// independent spelling `changes` is held to.
-    const READS: [u32; 13] = [HELLO, CLOSE, READ, STAT, LSTAT, FSTAT, FSYNC, SYNC, READDIR, READLINK, DUP, SEEK, EXPORT];
+    const READS: [u32; 14] = [HELLO, CLOSE, READ, STAT, LSTAT, FSTAT, FSYNC, SYNC, READDIR, READLINK, DUP, SEEK, EXPORT, ROOM];
     const WRITES: [u32; 8] = [WRITE, TRUNCATE, MKDIR, RMDIR, UNLINK, RENAME, SYMLINK, STREAM];
 
     #[test]
@@ -41,7 +41,7 @@ mod tests {
         // Every request number the wire has is one of the two, or `OPEN`.
         let mut named: Vec<u32> = READS.iter().chain(&WRITES).copied().chain([OPEN]).collect();
         named.sort_unstable();
-        assert_eq!(named, (HELLO..=EXPORT).collect::<Vec<_>>());
+        assert_eq!(named, (HELLO..=ROOM).collect::<Vec<_>>());
     }
 
     /// An open changes the directory by any one flag that writes, creates or
@@ -60,7 +60,7 @@ mod tests {
     /// client is let go whatever its grant.
     #[test]
     fn a_request_the_wire_does_not_have_is_neither() {
-        for op in [0, EXPORT + 1, REPLY, LINK, u32::MAX] {
+        for op in [0, ROOM + 1, REPLY, LINK, u32::MAX] {
             assert_eq!(changes(op, 0), None, "request {op}");
         }
     }
