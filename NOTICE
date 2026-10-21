@@ -420,20 +420,53 @@ a work of theirs. Two things the tools wrote are not:
 lib/crypto/tests/data/*_test.json — Wycheproof test vectors, Apache-2.0
 -----------------------------------------------------------------------
 
-    aes_gcm_test.json                      sha256 985e5ecc172e181eaf49e89508b9470dcf478002eb7e8559c707eb42dc97dfe7
-    chacha20_poly1305_test.json            sha256 fe61d25f90e1bde4461d00eafe61049e5f29bd999f36b766df9cda90906ad53d
-    ecdsa_secp256r1_sha256_test.json       sha256 182db4f3e230f6f9fa9f800d2a614dede30284b8e8438bbfe1171905402e9332
-    ecdsa_secp384r1_sha384_test.json       sha256 8a5b3ae1760975143414811f13588c24d951d9d8c904195087ba327591dfe9cc
-    ed25519_test.json                      sha256 752d2ea7d7c6cf4736381b6cbacb61f8182b126ab7cd9b058f00c50084975536
-    hkdf_sha256_test.json                  sha256 bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e
-    hkdf_sha384_test.json                  sha256 69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678
-    hkdf_sha512_test.json                  sha256 bb9a21f4e86041caf5d7792b030349f8ff289087f195b2fbc0fc0afc39deca6f
-    hmac_sha256_test.json                  sha256 2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f
-    hmac_sha384_test.json                  sha256 28b9776e979dd755d852ca471043ea6cedce8b15f7a28abdf6ea9efd982b43c0
-    hmac_sha512_test.json                  sha256 b6c90477bdb4a6fc8ee3d1f7b2c0b69a8dfffab34718abaa6cabd71cc2ba1207
-    rsa_pss_2048_sha256_mgf1_32_test.json  sha256 7f6efafc160f4816b96cbf1c12188a31051d7e3f001e27505d9edb5f2a0e325c
-    rsa_signature_2048_sha256_test.json    sha256 94a917b01ff50fb874cfc05bf29b4af44868d944a6558201cf18380da93fb393
-    x25519_test.json                       sha256 35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d
+    aes_gcm_test.json                          sha256 985e5ecc172e181eaf49e89508b9470dcf478002eb7e8559c707eb42dc97dfe7
+    aes_gmac_test.json                         sha256 e2f98488d4d3a38ec5f72b5cf75b85ed393d6763a4c1828c090c81a79534aab6
+    aes_wrap_test.json                         sha256 2fdb3661fd8823d1ec50e03886b24066415018975677dff83d83e77f5a51562d
+    chacha20_poly1305_test.json                sha256 fe61d25f90e1bde4461d00eafe61049e5f29bd999f36b766df9cda90906ad53d
+    ecdh_secp256r1_ecpoint_test.json           sha256 648f16d077caf2400d02331ca51f44744c72c799830c8d0595d0b18b6dd9f886
+    ecdh_secp384r1_ecpoint_test.json           sha256 ffa7835fe1de359dff762c8f1272b98acebd5578e2f855d969051ff956c6dca3
+    ecdsa_secp256r1_sha256_test.json           sha256 182db4f3e230f6f9fa9f800d2a614dede30284b8e8438bbfe1171905402e9332
+    ecdsa_secp256r1_sha512_test.json           sha256 8e940baad7c6172c58c8f354b10366d307be43a3cb82a5880cb46686c3e8f858
+    ecdsa_secp384r1_sha256_test.json           sha256 660c948e5433279ecdf966e8a1386b69ecec618efc1ff00269e85aa9dc84f0a6
+    ecdsa_secp384r1_sha384_test.json           sha256 8a5b3ae1760975143414811f13588c24d951d9d8c904195087ba327591dfe9cc
+    ecdsa_secp384r1_sha512_test.json           sha256 f44bae32e419fc75c5b5af751cff4e35145cfbcc24944e378d5f30889d310513
+    ed25519_test.json                          sha256 752d2ea7d7c6cf4736381b6cbacb61f8182b126ab7cd9b058f00c50084975536
+    hkdf_sha256_test.json                      sha256 bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e
+    hkdf_sha384_test.json                      sha256 69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678
+    hkdf_sha512_test.json                      sha256 bb9a21f4e86041caf5d7792b030349f8ff289087f195b2fbc0fc0afc39deca6f
+    hmac_sha1_test.json                        sha256 b521c6180a862247986392d3cb49b511fc7fe790e75bee236f84e36ca290c7c0
+    hmac_sha256_test.json                      sha256 2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f
+    hmac_sha384_test.json                      sha256 28b9776e979dd755d852ca471043ea6cedce8b15f7a28abdf6ea9efd982b43c0
+    hmac_sha512_test.json                      sha256 b6c90477bdb4a6fc8ee3d1f7b2c0b69a8dfffab34718abaa6cabd71cc2ba1207
+    mlkem_768_encaps_test.json                 sha256 9d4381f94c40853bba430245b94968b7390d9175aacd9f1ae4e250a71c78b713
+    mlkem_768_keygen_seed_test.json            sha256 fde5abe284396f4cb3c4610b90d680f0b57782e94c3365c97aee59e24881ebe4
+    mlkem_768_semi_expanded_decaps_test.json   sha256 e4438ab7d4dd7b6ace7165e45aeed4403082f981f86300c8369f69d3d071060a
+    mlkem_768_test.json                        sha256 c59c067ae794c343df575dd90f6f7458f51881b11a22d6e9d8677c8d9ee21e90
+    pbkdf2_hmacsha1_test.json                  sha256 5ef5307e119bd118da50ad276426ed3baade2d093e93b643a1d70be0bf0b861a
+    rsa_pss_2048_sha256_mgf1_0_test.json       sha256 b22a8d9a2e7e47f681d0ff1d1a55455daaf325d989c64ad005f848bd50b9b4c0
+    rsa_pss_2048_sha256_mgf1_32_test.json      sha256 7f6efafc160f4816b96cbf1c12188a31051d7e3f001e27505d9edb5f2a0e325c
+    rsa_pss_2048_sha256_mgf1sha1_20_test.json  sha256 8099d28e300c86cf1cac2ab09cd777186b5ecc0f555d7c178c665b4ff3c08307
+    rsa_pss_2048_sha384_mgf1_48_test.json      sha256 66d464778b0b2f683a1d1a20e94f77e9472b8cc393b45f423fa08a48e677063c
+    rsa_pss_3072_sha256_mgf1_32_test.json      sha256 cca48433e6d1accb57f65b3396c4f4dd93c776467101c3f0948e74c283fd4749
+    rsa_pss_4096_sha256_mgf1_32_test.json      sha256 e627cbf5139a01e0a446c4fe15911f6268224fdd3ef4a1eb714b3942b5686410
+    rsa_pss_4096_sha384_mgf1_48_test.json      sha256 d632649a7630f7c267eda576714ca11cf0ff068d6622f576b8701f923c112577
+    rsa_pss_4096_sha512_mgf1_32_test.json      sha256 af1e1c1c593edf91be3e9880927231d57f9df082f2d8caec2a61d9874ade101f
+    rsa_pss_4096_sha512_mgf1_64_test.json      sha256 c93ceaa56a190c9fd4707441c5c6a75839f108202d88aec891697f9623042547
+    rsa_pss_misc_test.json                     sha256 1fac515f67fea8ccbf44ea08fde2de00cd76169f774a54ce2994c9963c31e84f
+    rsa_signature_2048_sha256_test.json        sha256 94a917b01ff50fb874cfc05bf29b4af44868d944a6558201cf18380da93fb393
+    rsa_signature_2048_sha384_test.json        sha256 c571c105d261c0ff588a2888a529f152563fb3b77894b7620d4e4f8f934f2c1d
+    rsa_signature_2048_sha512_test.json        sha256 16ea24b039905d054bdb6004f5fd179374e150b7b6d73a7ba654b6d00eab12ef
+    rsa_signature_3072_sha256_test.json        sha256 0f5f18cabfaad3e2792e82f7e9882f8999049b456714de924b8a5e202f61ca43
+    rsa_signature_3072_sha384_test.json        sha256 73499ee649d8fb703b3f0f455fa36f7682fde677c590a736958ebce05ab27dae
+    rsa_signature_3072_sha512_test.json        sha256 09aa3336fdb7be216180ce944ca7b2a052e1de38c210435c19506327d4a36ebd
+    rsa_signature_4096_sha256_test.json        sha256 957aca128e30bd02c8982f8ca482d6521d16683f4bbc3f193cdfd4c8f04bc667
+    rsa_signature_4096_sha384_test.json        sha256 bc26f16b9fc9a90628864d3d1111ef48a4bd00b9d4870bfab88ff326e309e073
+    rsa_signature_4096_sha512_test.json        sha256 9d6e67b1eb0d7040db411835238efd20e9302399a258bdff82de3f38e0f2855a
+    rsa_signature_8192_sha256_test.json        sha256 86df4075b4ce5954726abfa00cc19ebe8b608d6d99094d5e123d6a3a86568bd9
+    rsa_signature_8192_sha384_test.json        sha256 382c2795790021798099bc8e94d0f078ef1f78787f5c7a87aaa25b5556efacff
+    rsa_signature_8192_sha512_test.json        sha256 c9e5463742d192b5ff1108538841d4d302fd799604a051d09db5f496f2f851f7
+    x25519_test.json                           sha256 35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d
     Upstream: https://github.com/C2SP/wycheproof, `testvectors_v1/` at
     commit 7a325932231bd7a724c791c8b0d65ea4d6d2f435, byte for byte
     Licence text: lib/crypto/tests/data/wycheproof-LICENSE (upstream's `LICENSE`,
@@ -441,12 +474,21 @@ lib/crypto/tests/data/*_test.json — Wycheproof test vectors, Apache-2.0
     SPDX-License-Identifier: Apache-2.0
 
 `toyos-crypto`'s host tests read them (`lib/crypto/tests/wycheproof.rs`); no
-image carries them.
+image carries them. These are every file of that directory for an interface the
+crate offers.
 
 
-lib/crypto/tests/data/nist-mlkem-*.json — NIST ACVP ML-KEM vectors, NIST-Software
----------------------------------------------------------------------------------
+lib/crypto/tests/data/nist-*.json — NIST ACVP HMAC and ML-KEM vectors, NIST-Software
+------------------------------------------------------------------------------------
 
+    nist-hmac-sha1.json         sha256 6e96eb5f53065219c437a99fedec7299c916c76e170d6b74507dc5409ed9cd6b
+      HMAC-SHA-1-2.0/internalProjection.json
+    nist-hmac-sha256.json       sha256 a9d0734b93aee71bc6f30b47daab782fd96b39688afe4fbddb009e99402ec989
+      HMAC-SHA2-256-2.0/internalProjection.json
+    nist-hmac-sha384.json       sha256 0ffa9332b9430ae94cfac0f23b3843293903fa34a3ac9c11a8af2bfdf7276ed3
+      HMAC-SHA2-384-2.0/internalProjection.json
+    nist-hmac-sha512.json       sha256 ea6e03f012d5237b95421b7d50c504f8ab010c4f7f18cd46fe61d8912d3442a0
+      HMAC-SHA2-512-2.0/internalProjection.json
     nist-mlkem-encapdecap.json  sha256 5e88fbd351dc2915b2ab399f5dffd269e1cdbdd0186103ab0e90b374cf592187
       ML-KEM-encapDecap-FIPS203-tr1/internalProjection.json
     nist-mlkem-keygen.json      sha256 d7a62a2c3476957f56dd8d24f9004ea6776ccfe995ffe71a65bb9506dc9c7b1b
@@ -458,8 +500,8 @@ lib/crypto/tests/data/nist-mlkem-*.json — NIST ACVP ML-KEM vectors, NIST-Softw
     8e6833bd6bd35dadd415147ba53a8eca4c3d31c53cb589e97abba6a4efd5b953)
     SPDX-License-Identifier: NIST-Software
 
-`toyos-crypto`'s host tests read them (`lib/crypto/tests/wycheproof.rs`); no
-image carries them. The notice asks that copies keep it intact and acknowledge
+`toyos-crypto`'s host tests read them (`lib/crypto/tests/nist.rs`); no image
+carries them. The notice asks that copies keep it intact and acknowledge
 NIST as the source, which this section and the file beside the vectors do.
 
 
@@ -551,8 +593,8 @@ derived from it; no reverse engineering, decompilation or disassembly; and
 export law is observed.
 
 
-tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
-----------------------------------------------------
+tests/cavp/SHA*.rsp — NIST's SHA-2 test vectors, CAVP SHAVS
+------------------------------------------------------------
 
     SHA256ShortMsg.rsp     10,299 bytes
       sha256 75e1cb83994638481808e225b9eb0c1ebd0c232d952ac42b61abce6363be283c
@@ -560,6 +602,12 @@ tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
       sha256 6fac36f37360bcf74ffcf4465c18e30d6d5a04cc90885b901fc3130c16060974
     SHA256Monte.rsp         8,751 bytes
       sha256 29ea30c6bb4b84e425fb8c1d731c6bb852dac935825f2bd1143e5d3c4f10bfb9
+    SHA384ShortMsg.rsp     32,672 bytes
+      sha256 7ea7bcf00fadc20949fae63703e40681ddf288fea808471cb3cbc95f3ec16811
+    SHA384LongMsg.rsp   1,683,749 bytes
+      sha256 536171765a4278c000ac3c9913edb2eed0ca7ccd5a10b72ed79fdfe7901a6d6a
+    SHA384Monte.rsp        11,983 bytes
+      sha256 4270099431ff52ee1686dc472351e681c26c507433df8f107c7de203b771424e
     SHA512ShortMsg.rsp     36,800 bytes
       sha256 e53a36c03609e5a3e3cc4b6e117a499db7864c23ec825c6cec99503a45f40764
     SHA512LongMsg.rsp   1,687,845 bytes
@@ -574,10 +622,54 @@ tests/cavp/ — NIST's SHA-2 test vectors, CAVP SHAVS
 
 The response files NIST's Cryptographic Algorithm Validation Program publishes
 for the SHA Validation System: messages and the digests FIPS 180-4 gives them,
-the external oracle `toyos-sha2`'s and `toyos-sha2-hw`'s tests hold them to. A
-work of the United States government, not under copyright in the United States
-(17 U.S.C. §105). Test input only: nothing built from this repository carries
-them, and no shipped package's directory holds them.
+the external oracle `toyos-sha2`'s, `toyos-sha2-hw`'s and `toyos-crypto`'s tests
+hold them to. A work of the United States government, not under copyright in
+the United States (17 U.S.C. §105). Test input only: nothing built from this
+repository carries them, and no shipped package's directory holds them.
 
-Of the archive, only SHA-256's and SHA-512's files, the two hashes the crate
-has.
+Of the archive, only SHA-256's, SHA-384's and SHA-512's files, the hashes
+these crates have.
+
+
+tests/cavp/gcm/ — NIST's AES-GCM test vectors, CAVP GCMVS
+---------------------------------------------------------
+
+    gcmEncryptExtIV128.rsp  2,930,939 bytes
+      sha256 30156236f768b0d81e58a3e5bd3bd79ce294cf9ef0ba0a84cf7b869c89ebd9fd
+    gcmEncryptExtIV256.rsp  3,182,939 bytes
+      sha256 4448b4998c3f58cd9f5542ddf7c573189a721ff3d3ac24cd5177bb4910a787f8
+    gcmDecrypt128.rsp       2,748,606 bytes
+      sha256 0d1f98d0c9e176ede1f3e85484dd13de92c3436ca97df378ec3481e04c19a732
+    gcmDecrypt256.rsp       3,001,776 bytes
+      sha256 ed318735a517d5a85c82d2846c23dcf56e57a352fb0f0a163d9e7617a7bd12ad
+    Upstream: https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/
+    gcmtestvectors.zip (sha256
+    f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023), each
+    file byte for byte
+    SPDX-License-Identifier: NIST-PD
+
+The response files of the Galois/Counter Mode Validation System (SP 800-38D):
+keys, IVs, plaintexts, AAD, ciphertexts and tags, and the decryptions that must
+fail. `toyos-crypto`'s tests hold its AES-GCM to them (`lib/crypto/tests/nist.rs`).
+A work of the United States government, not under copyright in the United States
+(17 U.S.C. §105). Test input only. Of the archive, AES-128's and AES-256's files,
+the key sizes the crate has.
+
+
+tests/cavp/ecdsa/ — NIST's ECDSA test vectors, CAVP ECDSA2VS
+------------------------------------------------------------
+
+    SigVer.rsp    730,106 bytes
+      sha256 e9841c3d12e323042751460d0b8ef4bc59c2640105ec7da4852775f80ab10191
+    PKV.rsp        38,511 bytes
+      sha256 1d33551c1a199b1fc2b0e4075cdfd52d4830503ef37e6b16f04ce617d524f3f1
+    Upstream: https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/dss/
+    186-4ecdsatestvectors.zip (sha256
+    fe47cc92b4cee418236125c9ffbcd9bb01c8c34e74a4ba195d954bcb72824752), its
+    `186-4ecdsatestvectors/SigVer.rsp` and `PKV.rsp` byte for byte
+    SPDX-License-Identifier: NIST-PD
+
+FIPS 186-4's signature verification and public-key validation response files.
+`toyos-crypto`'s tests hold its ECDSA verification and SEC 1 decoding to them
+(`lib/crypto/tests/nist.rs`). A work of the United States government, not under
+copyright in the United States (17 U.S.C. §105). Test input only.
