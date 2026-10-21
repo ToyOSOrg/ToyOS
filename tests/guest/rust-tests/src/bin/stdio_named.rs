@@ -1,8 +1,7 @@
 //! A std child holds exactly the stdio its `Command` named: a pipe's write end
 //! given as stdin refuses the child's read, a pipe whose one reader the parent
 //! dropped refuses the child's write, and a child started with a null stdin
-//! starts one of its own that inherits it, which ends neither. The first two
-//! are the shapes a child's stdio was once seen to hold something else in.
+//! starts one of its own that inherits it, which ends neither.
 //!
 //! `libc_children` runs it on QEMU x86-64 (`tests/common/libcchildren.rs`).
 

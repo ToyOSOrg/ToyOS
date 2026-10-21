@@ -70,7 +70,7 @@ directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
    slot a process was started without is no descriptor of its children
    (`toyos::spawn::inherited`), and std's stdio answers its errors rather
    than reading every one as a closed stream (`is_ebadf`). libc
-   keeps close-on-exec marks and what slots 0–2 hold (`fdreq`); `waitpid`,
+   keeps close-on-exec marks (`fdreq`); `waitpid`,
    `wait` and `wait4` answer each child once, by pid, group or any, with
    `<sys/wait.h>`'s status for its stage 2 end (`spawnreq`); `environ`,
    `setenv` and `unsetenv`; `kill` with `SIGKILL` for a child or a group of

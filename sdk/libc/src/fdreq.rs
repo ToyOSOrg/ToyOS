@@ -77,9 +77,10 @@ pub(crate) fn dup_at_least<E>(
     }
 }
 
-/// The descriptors marked close-on-exec, by number, which a spawn reads
-/// (`posix_io::stdio_for_spawn`). A number is a slot at one generation, so a handle
-/// made later in the slot is never taken for one marked here.
+/// The descriptors marked close-on-exec, by number, which a spawn reads by
+/// slot (`posix_io::stdio_for_spawn`). A mark goes with its descriptor's
+/// `close`; a descriptor closed some other way leaves its mark, which then
+/// reads as the slot's next descriptor's.
 pub(crate) struct CloseOnExec(BTreeSet<i32>);
 
 impl CloseOnExec {
