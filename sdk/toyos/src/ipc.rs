@@ -153,8 +153,9 @@ impl IpcHeader {
 
 const _: () = assert!(IpcHeader::WIRE_SIZE + MAX_FRAME_LEN as usize <= syscall::MAX_MESSAGE_LEN);
 
-/// The payloads framed in a buffer of their own size rather than one of
-/// [`MAX_FRAME_LEN`]: every typed payload and signal, sent per input event.
+/// A payload of at most this many bytes, such as a signal or a small typed
+/// payload sent per input event, is framed in a buffer this size rather than
+/// one of [`MAX_FRAME_LEN`], which would be zeroed on every send.
 const SMALL_PAYLOAD: usize = 64;
 
 #[derive(Debug)]
