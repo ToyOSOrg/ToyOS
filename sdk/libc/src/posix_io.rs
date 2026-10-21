@@ -419,6 +419,22 @@ pub unsafe extern "C" fn symlink(target: *const u8, link: *const u8) -> i32 {
     files::symlink(c_str_to_bytes(target), link).map_or_else(refuse_files, |()| 0)
 }
 
+struct TheServers;
+
+impl crate::resolve::Served for TheServers {
+    fn holds(&mut self, at: &[u8]) -> bool {
+        files::is_served(at)
+    }
+
+    fn name(&mut self, at: &[u8]) -> Result<crate::resolve::Name, i32> {
+        let st = files::stat(at, false).map_err(crate::errcode::of_files)?;
+        match st.file_type {
+            syscall::FileType::Symlink => files::read_link(at).map(crate::resolve::Name::Link).map_err(crate::errcode::of_files),
+            _ => Ok(crate::resolve::Name::Other),
+        }
+    }
+}
+
 struct TheKernel;
 
 impl crate::resolve::Kernel for TheKernel {
@@ -435,9 +451,10 @@ impl crate::resolve::Kernel for TheKernel {
     }
 }
 
-/// POSIX's `realpath`, by the kernel's rules of resolution (`resolve`) or a
-/// file server's: the file `open` of `path` reaches, in a block of `malloc`'s
-/// when `resolved` is null.
+/// POSIX's `realpath` (`resolve::resolve_path`): POSIX's resolution where a
+/// file server holds the names, the kernel's rules where it does, so the
+/// answer is the file `open` of `path` reaches, in a block of `malloc`'s when
+/// `resolved` is null.
 #[no_mangle]
 pub unsafe extern "C" fn realpath(path: *const u8, resolved: *mut u8) -> *mut u8 {
     use syscall::MAX_PATH;
@@ -448,20 +465,7 @@ pub unsafe extern "C" fn realpath(path: *const u8, resolved: *mut u8) -> *mut u8
     let mut cwd = [0u8; MAX_PATH];
     let n = syscall::getcwd(&mut cwd);
     assert!(n != 0 && n <= MAX_PATH, "SYS_GETCWD: a working directory past MAX_PATH");
-    let path = c_str_to_bytes(path);
-    let resolved_at = match core::str::from_utf8(&cwd[..n]).ok().zip(core::str::from_utf8(path).ok()) {
-        Some((cwd, text)) if files::is_served(path) => {
-            let abs = files::absolute(cwd, text);
-            let read_link = |at: &[u8]| match files::read_link(at) {
-                Ok(target) => Ok(Some(target)),
-                Err(files::Error::Served(toyos::fs::Error::NotALink)) => Ok(None),
-                Err(e) => Err(crate::errcode::of_files(e)),
-            };
-            let exists = |at: &[u8]| files::stat(at, true).map(drop).map_err(crate::errcode::of_files);
-            crate::resolve::resolve_served(abs.as_bytes(), read_link, exists)
-        }
-        _ => crate::resolve::resolve(&cwd[..n], path, &mut TheKernel),
-    };
+    let resolved_at = crate::resolve::resolve_path(&cwd[..n], c_str_to_bytes(path), &mut TheServers, &mut TheKernel);
     let at = match resolved_at {
         Ok(at) => at,
         Err(code) => {

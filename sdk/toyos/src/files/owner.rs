@@ -100,7 +100,9 @@ fn route(abs: &str) -> Result<Route, Error> {
 }
 
 /// Ask whoever serves `path`, following an absolute link a server meets to
-/// wherever it lands in this process's own table.
+/// wherever it lands in this process's own table. `served` runs on the
+/// capability's turn, so nothing it does may reach the descriptor table,
+/// whose release of an open file takes that turn again.
 fn on_path<T>(
     path: &[u8],
     mut kernel: impl FnMut(&str) -> Result<T, SyscallError>,
@@ -147,9 +149,17 @@ fn on_fd<T>(
     }
 }
 
-/// A descriptor for an open file a server answered.
-fn served_fd(cap: &Arc<Capability>, opened: fs::Opened, cloexec: bool) -> Result<Fd, Refused> {
-    let file = Arc::new(OpenFile { cap: Arc::clone(cap), fid: opened.fid, generation: opened.generation });
+/// What an open opened, before a descriptor names it.
+enum Opened {
+    Kernel(RawHandle),
+    Served(Arc<Capability>, fs::Opened),
+}
+
+/// A descriptor for an open file a server answered: on a full table the
+/// file is closed again, which takes its capability's turn, so no turn may be
+/// held here.
+fn served_fd(cap: Arc<Capability>, opened: fs::Opened, cloexec: bool) -> Result<Fd, fd::Error> {
+    let file = Arc::new(OpenFile { cap, fid: opened.fid, generation: opened.generation });
     let word = {
         let mut open = OPEN.lock();
         match open.iter().position(Option::is_none) {
@@ -164,7 +174,7 @@ fn served_fd(cap: &Arc<Capability>, opened: fs::Opened, cloexec: bool) -> Result
         }
     };
     let object = Object::tagged(SERVED_FILE, word as u64, release_file);
-    fd::install(object, !cloexec, 0).map_err(|_| Refused::Error(fs::Error::TooManyOpen))
+    fd::install(object, !cloexec, 0)
 }
 
 /// What a server answered, as the kernel's `Stat` says it.
@@ -207,8 +217,7 @@ unsafe extern "C" fn toyos_fs_open(path: *const u8, len: usize, how: Open) -> i6
             if how.append { flags |= OpenFlags::APPEND; }
             if how.create || how.create_new { flags |= OpenFlags::CREATE; }
             if how.truncate { flags |= OpenFlags::TRUNCATE; }
-            let handle = syscall::open(abs.as_bytes(), flags)?;
-            fd::install(Object::handle(handle), !how.cloexec, 0).map_err(|_| SyscallError::ResourceExhausted)
+            syscall::open(abs.as_bytes(), flags).map(Opened::Kernel)
         },
         |cap, dir, rel| {
             let mut flags = 0;
@@ -218,10 +227,19 @@ unsafe extern "C" fn toyos_fs_open(path: *const u8, len: usize, how: Open) -> i6
             if how.create { flags |= fs::O_CREATE; }
             if how.create_new { flags |= fs::O_CREATE_NEW; }
             if how.truncate { flags |= fs::O_TRUNCATE; }
-            served_fd(cap, dir.open(rel, flags)?, how.cloexec)
+            dir.open(rel, flags).map(|opened| Opened::Served(Arc::clone(cap), opened))
         },
     );
-    answer(opened.map(|fd| fd as u64))
+    // Installed once the turn is let go: on a full table the open file is
+    // closed again (`served_fd`), and a kernel one by the table.
+    let installed = opened.and_then(|opened| {
+        match opened {
+            Opened::Kernel(handle) => fd::install(Object::handle(handle), !how.cloexec, 0),
+            Opened::Served(cap, opened) => served_fd(cap, opened, how.cloexec),
+        }
+        .map_err(Error::Fd)
+    });
+    answer(installed.map(|fd| fd as u64))
 }
 
 #[no_mangle]

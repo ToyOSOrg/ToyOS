@@ -4,7 +4,8 @@
 //! asks the kernel only through [`Kernel`], so the host tests it
 //! (`toyos-libc-copies`).
 //!
-//! A path a file server holds is resolved by [`resolve_served`] instead.
+//! A path a file server holds is resolved POSIX's way by [`resolve_path`],
+//! which hands the kernel what it holds.
 //!
 //! The kernel's rules are not POSIX's (`issues/the-kernel-resolves-a-path-by-rules-of-its-own.md`):
 //! `..` is read off the text before any name is looked up, only the last
@@ -124,24 +125,82 @@ fn absent(at: &[u8], kernel: &mut impl Kernel) -> Result<i32, i32> {
     Ok(ENOENT)
 }
 
-/// `abs`, a path a file server holds, its last name's links followed as
-/// POSIX reads a relative one, against the link's own directory, or the errno
-/// it is refused with. `read_link` answers a link's target, `None` for a name
-/// that is no link; `exists` refuses a path that names nothing. The server
-/// resolves the names before the last itself, and they stay as written.
-pub(crate) fn resolve_served(
-    abs: &[u8],
-    mut read_link: impl FnMut(&[u8]) -> Result<Option<Vec<u8>>, i32>,
-    mut exists: impl FnMut(&[u8]) -> Result<(), i32>,
-) -> Result<Vec<u8>, i32> {
-    let mut at = joined(b"/", abs)?;
-    for _ in 0..=MAX_LINKS {
-        let Some(target) = read_link(&at)? else {
-            exists(&at)?;
-            return Ok(at);
-        };
-        let dir = at.rsplitn(2, |&b| b == b'/').nth(1).filter(|d| !d.is_empty()).unwrap_or(b"/");
-        at = joined(dir, &target)?;
+/// What a name a file server holds is, as resolution asks it, its own link
+/// not followed.
+pub(crate) enum Name {
+    Link(Vec<u8>),
+    Other,
+}
+
+/// The two calls [`resolve_path`] asks of the file servers, each of an
+/// absolute path without `.` or `..`.
+pub(crate) trait Served {
+    /// Whether a file server holds `at`, and not the kernel.
+    fn holds(&mut self, at: &[u8]) -> bool;
+    /// `at` itself, or the errno it is refused with: one that names nothing,
+    /// or passes through a file, is refused.
+    fn name(&mut self, at: &[u8]) -> Result<Name, i32>;
+}
+
+/// `path` made absolute against `cwd` and resolved as POSIX resolves it, a
+/// name at a time, while a file server holds the names: each link is
+/// followed where it is met, a relative one against its own directory, and
+/// `..` after it is the parent of where it led. At the first name the kernel
+/// holds, the rest is [`resolve`]d by the kernel's rules, which its `open`
+/// reads it by. The answer holds no link a file server keeps.
+pub(crate) fn resolve_path(cwd: &[u8], path: &[u8], served: &mut impl Served, kernel: &mut impl Kernel) -> Result<Vec<u8>, i32> {
+    if path.is_empty() {
+        return Err(ENOENT);
     }
-    Err(ELOOP)
+    let names = |text: &[u8]| -> Vec<Vec<u8>> { text.split(|&b| b == b'/').map(<[u8]>::to_vec).collect() };
+    let mut pending: alloc::collections::VecDeque<Vec<u8>> = alloc::collections::VecDeque::new();
+    if path.first() != Some(&b'/') {
+        pending.extend(names(cwd));
+    }
+    pending.extend(names(path));
+    let mut at: Vec<u8> = Vec::new();
+    let mut followed = 0;
+    while let Some(name) = pending.pop_front() {
+        match &name[..] {
+            b"" | b"." => continue,
+            b".." => {
+                let parent = at.iter().rposition(|&b| b == b'/').unwrap_or(0);
+                at.truncate(parent);
+                continue;
+            }
+            _ => {}
+        }
+        let mut next = at.clone();
+        next.push(b'/');
+        next.extend_from_slice(&name);
+        if next.len() >= MAX_PATH {
+            return Err(ENAMETOOLONG);
+        }
+        if !served.holds(&next) {
+            for rest in pending {
+                next.push(b'/');
+                next.extend_from_slice(&rest);
+            }
+            return resolve(b"/", &next, kernel);
+        }
+        match served.name(&next)? {
+            Name::Other => at = next,
+            Name::Link(target) => {
+                if followed == MAX_LINKS {
+                    return Err(ELOOP);
+                }
+                followed += 1;
+                if target.first() == Some(&b'/') {
+                    at.clear();
+                }
+                for name in names(&target).into_iter().rev() {
+                    pending.push_front(name);
+                }
+            }
+        }
+    }
+    if at.is_empty() {
+        at.push(b'/');
+    }
+    Ok(at)
 }

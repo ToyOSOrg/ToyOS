@@ -186,7 +186,7 @@ pub fn copy(fd: Fd) -> Result<Option<crate::OwnedHandle>, crate::spawn::Refused>
     let copied = with(fd, |o| match o.release {
         None if crate::net::stream::is_stream(o.handle) => Err(Refused::Stream(o.handle)),
         None => toyos_abi::syscall::dup(o.handle).map(crate::OwnedHandle).map_err(Refused::Syscall),
-        Some(_) => Err(Refused::Syscall(toyos_abi::syscall::SyscallError::InvalidArgument)),
+        Some(_) => Err(Refused::Syscall(toyos_abi::syscall::SyscallError::NotSupported)),
     });
     copied.map_or(Ok(None), |copied| copied.map(Some))
 }

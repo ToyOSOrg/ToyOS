@@ -1,0 +1,5 @@
+the table filled with EMFILE: yes
+an open on /tmp is EMFILE: yes
+an open on /home is EMFILE: yes
+with one free, /home opens: yes
+both are removed: yes

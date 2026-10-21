@@ -62,6 +62,7 @@ pub(crate) fn of(e: SyscallError) -> i32 {
         // A write whose reader is gone, and not `ENOENT`, which says the file does not exist.
         SyscallError::Gone => EPIPE,
         SyscallError::Io => EIO,
+        SyscallError::NotSupported => EOPNOTSUPP,
         // A read of a connection met handles no frame announced: the peer broke its protocol.
         SyscallError::HandlesPending => EPROTO,
         _ => EINVAL,
@@ -92,7 +93,8 @@ fn of_served(e: toyos::fs::Error) -> i32 {
         Error::IsADirectory => EISDIR,
         Error::NotEmpty => ENOTEMPTY,
         Error::NotALink | Error::IntoItself | Error::UnknownFile | Error::InvalidPath | Error::InvalidRequest => EINVAL,
-        Error::NameTooLong | Error::InvalidName => ENAMETOOLONG,
+        Error::NameTooLong => ENAMETOOLONG,
+        Error::InvalidName => EINVAL,
         Error::ReadOnly => EROFS,
         Error::NotOpenForWriting => EBADF,
         Error::Root => EBUSY,

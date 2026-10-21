@@ -57,72 +57,71 @@ impl<T> Drop for Held<'_, T> {
     }
 }
 
-/// How a [`Turnstile`]'s waiters sleep on and wake from its word.
-pub trait Sleep {
-    /// Sleep while `word` still says `expected`; a spurious return is allowed.
-    fn wait(word: &AtomicU32, expected: u32);
-    /// Wake every sleeper on `word`.
-    fn wake_all(word: &AtomicU32);
+/// Sleep while `word` still says `expected`; a spurious return is allowed.
+#[cfg(not(test))]
+fn wait(word: &AtomicU32, expected: u32) {
+    // SAFETY: `word` is a live, aligned u32.
+    unsafe { syscall::futex_wait(word.as_ptr(), expected, None) };
 }
 
-/// The kernel's futex.
-pub struct Futex;
-
-impl Sleep for Futex {
-    fn wait(word: &AtomicU32, expected: u32) {
-        // SAFETY: `word` is a live, aligned u32.
-        unsafe { syscall::futex_wait(word.as_ptr(), expected, None) };
-    }
-    fn wake_all(word: &AtomicU32) {
-        // SAFETY: `word` is a live, aligned u32.
-        unsafe { syscall::futex_wake(word.as_ptr(), u32::MAX) };
-    }
+/// Wake every sleeper on `word`.
+#[cfg(not(test))]
+fn wake_all(word: &AtomicU32) {
+    // SAFETY: `word` is a live, aligned u32.
+    unsafe { syscall::futex_wake(word.as_ptr(), u32::MAX) };
 }
+
+// A host test has no futex: a waiter yields and spins.
+#[cfg(test)]
+fn wait(_: &AtomicU32, _: u32) {
+    std::thread::yield_now();
+}
+
+#[cfg(test)]
+fn wake_all(_: &AtomicU32) {}
 
 /// `T` held in turn: each [`Turnstile::lock`] takes a ticket, and the value
 /// goes to the tickets in the order they were taken. A plain lock lets the
 /// thread that let go take it straight back ahead of the one it woke, so
 /// threads sharing one connection would not be served in turn.
-pub struct Turnstile<T, S: Sleep = Futex> {
+pub struct Turnstile<T> {
     /// The next ticket handed out.
     next: AtomicU32,
     /// The ticket whose turn it is, which waiters sleep on.
     serving: AtomicU32,
     value: UnsafeCell<T>,
-    sleep: core::marker::PhantomData<S>,
 }
 
 // SAFETY: the value is reached only through a `Turn`, which only the ticket
 // being served holds.
-unsafe impl<T: Send, S: Sleep> Sync for Turnstile<T, S> {}
+unsafe impl<T: Send> Sync for Turnstile<T> {}
 
 /// The value, held for one turn.
-pub struct Turn<'a, T, S: Sleep = Futex>(&'a Turnstile<T, S>);
+pub struct Turn<'a, T>(&'a Turnstile<T>);
 
-impl<T, S: Sleep> Turnstile<T, S> {
+impl<T> Turnstile<T> {
     pub const fn new(value: T) -> Self {
         Self {
             next: AtomicU32::new(0),
             serving: AtomicU32::new(0),
             value: UnsafeCell::new(value),
-            sleep: core::marker::PhantomData,
         }
     }
 
     /// The value, once every ticket taken before this one has had its turn.
-    pub fn lock(&self) -> Turn<'_, T, S> {
+    pub fn lock(&self) -> Turn<'_, T> {
         let ticket = self.next.fetch_add(1, Ordering::Relaxed);
         loop {
             let serving = self.serving.load(Ordering::Acquire);
             if serving == ticket {
                 return Turn(self);
             }
-            S::wait(&self.serving, serving);
+            wait(&self.serving, serving);
         }
     }
 }
 
-impl<T, S: Sleep> core::ops::Deref for Turn<'_, T, S> {
+impl<T> core::ops::Deref for Turn<'_, T> {
     type Target = T;
     fn deref(&self) -> &T {
         // SAFETY: this ticket is the one being served.
@@ -130,19 +129,19 @@ impl<T, S: Sleep> core::ops::Deref for Turn<'_, T, S> {
     }
 }
 
-impl<T, S: Sleep> core::ops::DerefMut for Turn<'_, T, S> {
+impl<T> core::ops::DerefMut for Turn<'_, T> {
     fn deref_mut(&mut self) -> &mut T {
         // SAFETY: this ticket is the one being served.
         unsafe { &mut *self.0.value.get() }
     }
 }
 
-impl<T, S: Sleep> Drop for Turn<'_, T, S> {
+impl<T> Drop for Turn<'_, T> {
     fn drop(&mut self) {
         self.0.serving.fetch_add(1, Ordering::Release);
         // Every waiter, since only the next ticket's may go on and only it
         // knows it is the next.
-        S::wake_all(&self.0.serving);
+        wake_all(&self.0.serving);
     }
 }
 
@@ -173,21 +172,11 @@ mod tests {
 
     use super::*;
 
-    /// A host's stand-in for the futex: a wait yields once.
-    struct Yield;
-
-    impl Sleep for Yield {
-        fn wait(_: &AtomicU32, _: u32) {
-            std::thread::yield_now();
-        }
-        fn wake_all(_: &AtomicU32) {}
-    }
-
     /// A thread that lets the value go and asks for it again waits behind
     /// the threads that asked first, in the order they asked.
     #[test]
     fn the_value_goes_to_the_tickets_in_the_order_they_were_taken() {
-        let stile: Arc<Turnstile<Vec<&str>, Yield>> = Arc::new(Turnstile::new(Vec::new()));
+        let stile: Arc<Turnstile<Vec<&str>>> = Arc::new(Turnstile::new(Vec::new()));
         let mut held = stile.lock();
         held.push("first");
         let queued: Vec<_> = ["second", "third"]
