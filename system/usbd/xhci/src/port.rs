@@ -21,16 +21,22 @@ pub type Nanos = u64;
 /// TCON_RST.
 pub const DEBOUNCE_NS: Nanos = 100_000_000;
 
-/// How long a scan on which *nothing at all* has connected keeps looking, from
-/// the instant the ports were powered.
+/// How long after its port is powered a device present at the driver's start
+/// has to make itself seen, by the protocol the port speaks; a port still
+/// reading no connect past it is empty, and a device that arrives later is a
+/// hot-plug.
 ///
-/// Debounce alone can't tell an empty bus from a device still connecting: both
-/// read as already-settled until something changes.
-pub const EMPTY_BUS_NS: Nanos = 1_000_000_000;
-
-/// How long the slow-connect injection reports an empty root hub, from that same
-/// port power.
-pub const SLOW_CONNECT_NS: Nanos = 300_000_000;
+/// USB 2: TSIGATT, the most a device may take to signal attach after VBUS is
+/// valid (USB 2.0 §7.1.7.3, Table 7-14). USB 3: tPollingLFPSTimeout, the most
+/// Polling.LFPS waits for its partner's LFPS once a receiver is detected
+/// (USB 3.2 §7.5.4.3), past which the link trains no further.
+pub fn attach_window(usb3: bool) -> Nanos {
+    if usb3 {
+        360_000_000
+    } else {
+        100_000_000
+    }
+}
 
 /// How long a reset may take before the port is given up on.
 ///

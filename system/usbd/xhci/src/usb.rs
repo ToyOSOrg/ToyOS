@@ -85,6 +85,9 @@ pub struct Usb<R: Registers, D: DmaBuffers, C: Host, T> {
     ports: Vec<RefCell<PortState>>,
     /// Ports connected at bring-up whose first look has not ended.
     unsettled: RefCell<Vec<bool>>,
+    /// When each port's [`port::attach_window`] ends: an empty port is settled
+    /// only past it.
+    attach_by: Vec<Nanos>,
     pub named: RefCell<BTreeMap<u8, Named>>,
     pub disks: Disks<T>,
     pub input: RefCell<Inputs>,
@@ -105,13 +108,19 @@ impl<R: Registers, D: DmaBuffers, C: Host, T> Usb<R, D, C, T> {
     pub fn new(hc: Hc<R, D>, host: C, config: Config, table: fn(&mut dyn toyos_gpt::Sectors) -> T) -> Self {
         let wake = Wake::new(host);
         let now = wake.now();
-        let mut unsettled = Vec::new();
+        // **Every port is unsettled at the start**, connected or not: the
+        // ports were powered at `start`, and a device on one may not read
+        // connected yet. A connected one settles once enumerated or given up
+        // on; an empty one once its attach window has passed.
+        let unsettled = alloc::vec![true; usize::from(hc.max_ports)];
+        let attach_by = (0..hc.max_ports)
+            .map(|p| now.saturating_add(port::attach_window(hc.protocols.of(p) == Some(crate::protocol::Protocol::Usb3))))
+            .collect();
         let ports = (0..hc.max_ports)
             .map(|p| {
                 let mut port = PortState::EMPTY;
                 port.speaks(hc.protocols.of(p));
                 let portsc = hc.portsc(p);
-                unsettled.push(portsc.connected());
                 if portsc.connected() {
                     let (kind, writes) = port.adopt(portsc, now);
                     wake.host().say(format_args!(
@@ -131,6 +140,7 @@ impl<R: Registers, D: DmaBuffers, C: Host, T> Usb<R, D, C, T> {
             wake,
             ports,
             unsettled: RefCell::new(unsettled),
+            attach_by,
             named: RefCell::new(BTreeMap::new()),
             disks: Disks::default(),
             input: RefCell::new(Inputs::default()),
@@ -184,7 +194,20 @@ impl<R: Registers, D: DmaBuffers, C: Host, T> Usb<R, D, C, T> {
     async fn port(&self, p: u8) -> Result<(), Dead> {
         loop {
             match self.look(p) {
-                Look::Idle => exec::until(&self.wake, || self.hc.take_change(p).then_some(())).await,
+                Look::Idle => {
+                    // An empty port: settled once its attach window is over
+                    // with nothing connected, and its next change awaited.
+                    let by = self.attach_by[usize::from(p)];
+                    if self.unsettled.borrow()[usize::from(p)] && !self.hc.portsc(p).connected() {
+                        if self.wake.now() >= by {
+                            self.settle(p);
+                        } else {
+                            exec::until_or(&self.wake, by, || self.hc.take_change(p).then_some(())).await;
+                            continue;
+                        }
+                    }
+                    exec::until(&self.wake, || self.hc.take_change(p).then_some(())).await
+                }
                 Look::Wait(at) => {
                     exec::until_or(&self.wake, at, || self.hc.take_change(p).then_some(())).await;
                 }

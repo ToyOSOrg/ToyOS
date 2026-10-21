@@ -382,6 +382,48 @@ fn the_stop_resets_every_connected_port_then_halts_resets_and_unpowers_the_contr
     }
 }
 
+/// A stick whose connect is only seen after the driver started, as the T14's
+/// is once its ports are powered again: the bus is not settled until the
+/// stick is read and offered, and an empty port settles once its attach
+/// window (USB 2's TSIGATT) has passed with nothing on it.
+#[test]
+fn a_stick_that_connects_after_the_start_is_offered_before_the_bus_settles() {
+    let (stick, _, _) = stick("LATE1");
+    let w = World::new(vec![(FakePort::empty(QUICK), Some(Box::new(stick))), (FakePort::empty(QUICK), None)], 2);
+    let usb = w.start(BOTH);
+    let mut tasks = usb.tasks();
+    let _end = End(&usb);
+    let mut owner = Mock::default();
+    w.run(&usb, &mut tasks, &mut owner, 20 * MS).unwrap();
+    assert!(!usb.settled(), "the bus settled before its ports' attach window was over");
+    w.xhc().ports[0].attach();
+    let mut offered = false;
+    for step in 1..=80 {
+        w.run(&usb, &mut tasks, &mut owner, 20 * MS + step * 10 * MS).unwrap();
+        offered |= usb.disks.take_events().iter().any(|e| matches!(e, Event::Arrived { .. }));
+        if usb.settled() {
+            assert!(offered, "the bus settled at {} ms with the stick not yet offered", 20 + step * 10);
+            return;
+        }
+    }
+    panic!("the bus never settled: {:#?}", w.host.lines.borrow());
+}
+
+/// A bus with nothing on it settles once the attach window has passed, and
+/// not before.
+#[test]
+fn an_empty_bus_settles_when_its_attach_window_ends() {
+    let w = World::new(vec![(FakePort::empty(QUICK), None)], 1);
+    let usb = w.start(BOTH);
+    let mut tasks = usb.tasks();
+    let _end = End(&usb);
+    let mut owner = Mock::default();
+    w.run(&usb, &mut tasks, &mut owner, 90 * MS).unwrap();
+    assert!(!usb.settled());
+    w.run(&usb, &mut tasks, &mut owner, 110 * MS).unwrap();
+    assert!(usb.settled());
+}
+
 /// The stick present at bring-up is read and offered: its table through the
 /// reader the caller gives, and the bus is settled only once it has been.
 #[test]
