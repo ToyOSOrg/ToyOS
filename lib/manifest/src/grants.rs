@@ -56,8 +56,8 @@ pub const MAX_STORE_BYTES: usize = HEADER.len() + 1 + MAX_ENTRIES * MAX_LINE;
 /// `toyos::fs::MAX_GRANT_ROOT` leaves, which the supervisor asserts.
 pub const MAX_ROOT: usize = 54;
 
-/// The deepest folder, in components: std finds a capability by probing at
-/// most this many (`MAX_CAPABILITY_DEPTH` in `sdk/std/sys/fs.rs`).
+/// The deepest folder, in components: std and libc find a capability by
+/// probing at most this many (`toyos::files::MAX_CAPABILITY_DEPTH`).
 pub const MAX_DEPTH: usize = 4;
 
 const MAX_LINE: usize = "grant ".len() + crate::USER.len() + 1 + MAX_PROGRAM_NAME + 1 + DIGEST_LEN + 1 + 11 + 1 + MAX_ROOT + 2;

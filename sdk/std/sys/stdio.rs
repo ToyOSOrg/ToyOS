@@ -4,7 +4,7 @@ use toyos::log::stdio::{self as log_stdio, Stream};
 use toyos_abi::syscall::{self, FileType};
 
 use crate::io::{self, IoSlice, IoSliceMut};
-use crate::sys::{fd_error, on_fd, on_open_fd, to_io_error};
+use crate::sys::{files_error, on_fd};
 
 /// Standard input's descriptor.
 const STDIN: i32 = 0;
@@ -35,13 +35,12 @@ struct LineBuf {
 // is single-threaded, so there is no concurrent access.
 static mut LINE_BUF: LineBuf = LineBuf { buf: [0; LINE_BUF_CAP], len: 0, pos: 0 };
 
-/// A read of stdin, closed or not: a closed one is at its end, as std's on
-/// unix reads one.
+/// A read of stdin, whoever serves it, closed or not: a closed one is at its
+/// end, as std's on unix reads one.
 fn read_stdin(buf: &mut [u8]) -> io::Result<usize> {
-    match on_open_fd(STDIN, |h| syscall::read(h, buf)) {
-        Ok(read) => read,
-        Err(toyos::fd::Error::BadFd) => Ok(0),
-        Err(e) => Err(fd_error(e)),
+    match toyos::files::read(STDIN, buf) {
+        Err(toyos::files::Error::Fd(toyos::fd::Error::BadFd)) => Ok(0),
+        read => read.map_err(files_error),
     }
 }
 
@@ -167,7 +166,7 @@ impl Stdout {
 
 impl io::Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        log_stdio::write(Stream::Out, buf).map_err(to_io_error)
+        log_stdio::write(Stream::Out, buf).map_err(files_error)
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -196,7 +195,7 @@ impl Stderr {
 
 impl io::Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        log_stdio::write(Stream::Err, buf).map_err(to_io_error)
+        log_stdio::write(Stream::Err, buf).map_err(files_error)
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {

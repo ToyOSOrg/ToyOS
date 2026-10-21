@@ -47,13 +47,6 @@ pub unsafe extern "C" fn link(_existing: *const u8, _new: *const u8) -> i32 {
     refuse()
 }
 
-/// `SYS_SYMLINK` displaces whatever holds the name, where POSIX refuses one
-/// that exists, and a question asked first races its answer.
-#[no_mangle]
-pub unsafe extern "C" fn symlink(_target: *const u8, _link: *const u8) -> i32 {
-    refuse()
-}
-
 /// A file has no owner.
 #[no_mangle]
 pub extern "C" fn fchown(_fd: i32, _owner: u32, _group: u32) -> i32 {

@@ -12,11 +12,14 @@
 // directory is the only build that is not, and it links no syscall.
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 pub mod audio;
 pub mod census;
 pub mod device;
 pub mod endow;
 pub mod fd;
+pub mod files;
 pub mod fs;
 pub mod poller;
 pub mod power;

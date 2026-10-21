@@ -7,7 +7,7 @@ description = "The ToyOS userland SDK: typed handles, IPC, ports, namespaces, su
 repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [features]
-rustc-dep-of-std = ["core", "toyos-abi/rustc-dep-of-std", "fd-table"]
+rustc-dep-of-std = ["core", "alloc", "toyos-abi/rustc-dep-of-std", "fd-table"]
 # This copy owns the process's descriptor table (`src/fd.rs`): on in std's
 # build and in libc's C-only build, and in no other.
 fd-table = []
@@ -74,6 +74,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("toyos")
 
 [dependencies]
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
+alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-alloc" }
 toyos-abi = { path = "../abi", default-features = false }
 
 [dev-dependencies]

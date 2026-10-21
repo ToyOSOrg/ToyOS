@@ -29,7 +29,7 @@ open O_CLOEXEC; F_GETFD: 1
 dup2 onto it: answered it; F_GETFD: 0
 fcntl F_DUPFD -1: -1, EINVAL
 fcntl F_DUPFD 4096: -1, EINVAL
-fcntl F_DUPFD_CLOEXEC: -1, ENOSYS
+fcntl F_DUPFD_CLOEXEC: 10, no errno
 fcntl F_GETFL: -1, ENOSYS
 fcntl F_SETFL: -1, ENOSYS
 fcntl 12345: -1, EINVAL

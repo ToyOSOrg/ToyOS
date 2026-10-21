@@ -83,6 +83,7 @@ int *__errno_location(void);
 #define ETIMEDOUT    110
 #define ECONNREFUSED 111
 #define EHOSTUNREACH 113
+#define ESTALE       116
 #define ECANCELED    125
 #define EOWNERDEAD   130
 #define ENOTRECOVERABLE 131

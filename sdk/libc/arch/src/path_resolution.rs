@@ -9,7 +9,7 @@ use toyos_abi::syscall::{SyscallError, MAX_LINKS, MAX_PATH};
 
 use crate::errcode::{EIO, ELOOP, ENAMETOOLONG, ENOENT, ENOTDIR};
 use crate::header::{self, LIMITS_H};
-use crate::resolve::{resolve, Kernel};
+use crate::resolve::{resolve, resolve_path, Kernel, Name, Served};
 
 #[derive(Clone, Copy)]
 enum Node {
@@ -196,4 +196,114 @@ fn a_kernel_refusal_is_its_errno() {
 #[test]
 fn path_max_is_limits_h_s() {
     assert_eq!(MAX_PATH, header::int(LIMITS_H, "PATH_MAX") as usize);
+}
+
+/// A file server holding the capability `grant`, its names in the tree,
+/// beside the kernel's [`tree`]: as `toyos::files` answers, a name is its
+/// link's target or nothing, one that is not there `ENOENT`, and one through
+/// a file `ENOTDIR`.
+struct Home(Tree, &'static str);
+
+impl Served for Home {
+    fn holds(&mut self, at: &[u8]) -> bool {
+        let grant = self.1.as_bytes();
+        at == grant || (at.starts_with(grant) && at.get(grant.len()) == Some(&b'/'))
+    }
+
+    fn name(&mut self, at: &[u8]) -> Result<Name, i32> {
+        let parent = &at[..at.iter().rposition(|&b| b == b'/').unwrap()];
+        if parent.len() > b"/home".len() && matches!(self.0.at(parent), Some(Node::File)) {
+            return Err(ENOTDIR);
+        }
+        match self.0.at(at) {
+            Some(Node::Link(target)) => Ok(Name::Link(target.as_bytes().to_vec())),
+            Some(_) => Ok(Name::Other),
+            None if at == self.1.as_bytes() => Ok(Name::Other),
+            None => Err(ENOENT),
+        }
+    }
+}
+
+fn home() -> Home {
+    Home(Tree::new(&[
+        ("/home/u", Node::Dir),
+        ("/home/u/a", Node::Dir),
+        ("/home/u/a/b", Node::Dir),
+        ("/home/u/a/file", Node::File),
+        ("/home/u/a/f", Node::File),
+        ("/home/u/rel", Node::Link("a/file")),
+        ("/home/u/abs", Node::Link("/home/u/a/file")),
+        ("/home/u/d", Node::Link("a")),
+        ("/home/u/deep", Node::Link("a/b")),
+        ("/home/u/out", Node::Link("/tmp/d/f")),
+        ("/home/u/outdir", Node::Link("/tmp/x")),
+        ("/home/u/x", Node::Link("y")),
+        ("/home/u/y", Node::Link("x")),
+        ("/home/u/dangling", Node::Link("gone")),
+    ]), "/home")
+}
+
+fn mixed(cwd: &str, path: &str) -> Result<String, i32> {
+    resolve_path(cwd.as_bytes(), path.as_bytes(), &mut home(), &mut tree()).map(|at| String::from_utf8(at).unwrap())
+}
+
+/// A served link is read against its own directory, as POSIX has it, and
+/// not against a mount as the kernel's is; an absolute one from the root.
+#[test]
+fn a_served_link_is_read_against_its_own_directory() {
+    assert_eq!(mixed("/", "/home/u/rel"), Ok("/home/u/a/file".into()));
+    assert_eq!(mixed("/", "/home/u/abs"), Ok("/home/u/a/file".into()));
+    assert_eq!(mixed("/home/u", "./a//file"), Ok("/home/u/a/file".into()), "relative and lexically clean");
+}
+
+/// Every name's link is followed where it is met, so `..` after one is the
+/// parent of where it led, and two spellings of one file answer one path.
+#[test]
+fn a_served_link_before_the_last_name_is_followed_and_dot_dot_after_it_is_its_parent() {
+    assert_eq!(mixed("/", "/home/u/d/file"), Ok("/home/u/a/file".into()));
+    assert_eq!(mixed("/", "/home/u/deep/../f"), Ok("/home/u/a/f".into()), "the parent of a/b, not of deep");
+    assert_eq!(mixed("/", "/home/u/d/../d/file"), mixed("/", "/home/u/a/file"));
+}
+
+/// A served link to a path the kernel holds is resolved there, by the
+/// kernel's rules, whether it is the last name or one before it.
+#[test]
+fn a_served_link_out_to_the_kernel_is_resolved_by_the_kernel() {
+    assert_eq!(mixed("/", "/home/u/out"), Ok("/tmp/d/f".into()));
+    assert_eq!(mixed("/", "/home/u/outdir/f"), Ok("/tmp/x/f".into()));
+    assert_eq!(mixed("/", "/tmp/d/abs"), Ok("/tmp/x/f".into()), "a kernel path is the kernel's from its first name");
+    assert_eq!(mixed("/home/u", "../../tmp/d/f"), Ok("/tmp/d/f".into()));
+}
+
+#[test]
+fn a_served_loop_is_eloop_and_a_missing_name_enoent_or_enotdir() {
+    assert_eq!(mixed("/", "/home/u/x"), Err(ELOOP));
+    assert_eq!(mixed("/", "/home/u/dangling"), Err(ENOENT));
+    assert_eq!(mixed("/", "/home/u/a/file/g"), Err(ENOTDIR));
+    assert_eq!(mixed("/", "/"), Ok("/".into()));
+}
+
+/// A capability three names deep, `fs:/home/toy/Games` without `fs:/home`, as
+/// a folder grant gives one: the names above it are passed through as the
+/// client routes past them, and a path beside it is the kernel's.
+#[test]
+fn a_path_under_a_deeper_capability_is_walked_and_one_beside_it_is_the_kernels() {
+    let games = || {
+        Home(
+            Tree::new(&[
+                ("/home/toy/Games/save", Node::File),
+                ("/home/toy/Games/rom", Node::Link("roms/a.gba")),
+                ("/home/toy/Games/roms", Node::Dir),
+                ("/home/toy/Games/roms/a.gba", Node::File),
+            ]),
+            "/home/toy/Games",
+        )
+    };
+    let answer = |path: &str| {
+        resolve_path(b"/", path.as_bytes(), &mut games(), &mut tree()).map(|at| String::from_utf8(at).unwrap())
+    };
+    assert_eq!(answer("/home/toy/Games/save"), Ok("/home/toy/Games/save".into()));
+    assert_eq!(answer("/home/toy/Games/rom"), Ok("/home/toy/Games/roms/a.gba".into()));
+    assert_eq!(answer("/home/toy/./Games/../Games/save"), Ok("/home/toy/Games/save".into()));
+    assert_eq!(answer("/home/toy/Other"), Err(ENOENT), "beside the capability: the kernel's, which holds nothing there");
 }

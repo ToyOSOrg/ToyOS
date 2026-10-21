@@ -167,6 +167,21 @@ macro_rules! errors {
                 }
             }
 
+            /// The word [`Self::byte`] answered, the client's own among them:
+            /// how one crosses `crate::files`' C interface.
+            pub const fn from_byte(byte: u8) -> Option<Self> {
+                match byte {
+                    $($code => Some(Self::$name),)*
+                    $($lcode => Some(Self::$lname),)*
+                    _ => None,
+                }
+            }
+
+            /// This word's discriminant, the client's own words' too.
+            pub const fn byte(self) -> u8 {
+                self as u8
+            }
+
             #[cfg(test)]
             const WIRE: &[Error] = &[$(Error::$name,)*];
             #[cfg(test)]

@@ -26,9 +26,11 @@ A path on the kernel's own mounts, ROOT and `/tmp`, is resolved by
 A file server resolves its own paths POSIX's way, with a bound of its own
 (`system/fileserver/src/resolve.rs`, `MAX_LINKS`), so the same link reads
 differently on `/tmp` and on a served directory. libc's `realpath`
-(`sdk/libc/src/resolve.rs`) answers by the kernel's rules, so that a
-program that canonicalises a path and then opens it opens the same file;
-`sdk/libc/arch/src/path_resolution.rs` pins those rules.
+(`sdk/libc/src/resolve.rs`, `resolve_path`) resolves the names a file server
+holds POSIX's way and hands the kernel the rest at the first name it holds,
+answering that part by the kernel's rules, so that a program that
+canonicalises a path and then opens it opens the same file;
+`sdk/libc/arch/src/path_resolution.rs` pins both.
 
 **Owner**: the kernel VFS, `kernel/src/vfs.rs`.
 
