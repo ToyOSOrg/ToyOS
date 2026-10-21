@@ -632,6 +632,10 @@ impl OpenFlags {
     pub const CREATE: Self = Self(4);
     pub const TRUNCATE: Self = Self(8);
     pub const APPEND: Self = Self(16);
+    /// With [`Self::CREATE`] only: refused `AlreadyExists` when the name is
+    /// there, a link or a directory included, decided in the one call that
+    /// creates it.
+    pub const EXCLUSIVE: Self = Self(32);
 
     pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
 }
