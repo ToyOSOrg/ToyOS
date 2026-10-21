@@ -11,8 +11,9 @@
 //! - **A stream's handle is no file**: `File::from_raw_fd` of one panics with
 //!   that refusal.
 //! - **No spawn moves one**: a stdio descriptor and one past them by
-//!   `inherit_handle`, `endow` and `provide` each answer the refusal, start no
-//!   child, and leave the stream reading and writing through the handle.
+//!   `inherit_handle`, `endow`, `provide` and a stdin the child inherits each
+//!   answer the refusal, start no child, and leave the stream reading and
+//!   writing through the handle.
 //!
 //! - **netstack's watch of a stream's connection** (`SERVER_WATCH`) is one
 //!   the kernel takes, and is answered by the client's hang-up.
@@ -80,7 +81,14 @@ fn shares_and_refuses_moves() {
     let status = child.wait().expect("wait the client");
     assert_eq!(
         said,
-        ["shared", "stdio descriptor refused", "descriptor past stdio refused", "endow refused", "provide refused"],
+        [
+            "shared",
+            "stdio descriptor refused",
+            "descriptor past stdio refused",
+            "endow refused",
+            "provide refused",
+            "inherited stdio refused",
+        ],
         "the client said otherwise",
     );
     assert!(status.success(), "the client exited {status:?}");
@@ -227,28 +235,34 @@ fn client() -> ! {
             command.provide("stream", handle);
         }),
     ];
+    let fd = taken.as_raw_fd();
     let mut at = 16;
+    let mut answered = |path: &str, spawned: std::io::Result<Child>| match spawned {
+        Err(refused)
+            if refused.kind() == std::io::ErrorKind::InvalidInput
+                && refused.to_string() == Misuse::Moved(RawHandle(handle)).to_string() =>
+        {
+            taken.write_all(b"x").unwrap_or_else(|e| panic!("{path}: the stream writes no more: {e}"));
+            reads(&mut taken, at, 1);
+            at += 1;
+            say(&format!("{path} refused"));
+        }
+        Err(other) => say(&format!("{path} answered {other}")),
+        Ok(mut child) => {
+            let _ = child.wait();
+            say(&format!("{path} took the stream's handle"));
+        }
+    };
     for (path, moving) in paths {
         let mut command = Command::new(SELF_PATH);
         command.arg("child").stdout(Stdio::null());
         moving(&mut command, handle);
-        match command.spawn() {
-            Err(refused)
-                if refused.kind() == std::io::ErrorKind::InvalidInput
-                    && refused.to_string() == Misuse::Moved(RawHandle(handle)).to_string() =>
-            {
-                taken.write_all(b"x").unwrap_or_else(|e| panic!("{path}: the stream writes no more: {e}"));
-                reads(&mut taken, at, 1);
-                at += 1;
-                say(&format!("{path} refused"));
-            }
-            Err(other) => say(&format!("{path} answered {other}")),
-            Ok(mut child) => {
-                let _ = child.wait();
-                say(&format!("{path} took the stream's handle"));
-            }
-        }
+        answered(path, command.spawn());
     }
+    // Last, as every spawn inherits stdin from here: the stream as this
+    // process's own stdin, which the child would inherit.
+    toyos::fd::dup2(fd, 0, false).expect("the stream onto stdin");
+    answered("inherited stdio", Command::new(SELF_PATH).arg("child").stdin(Stdio::inherit()).stdout(Stdio::null()).spawn());
     std::process::exit(0)
 }
 

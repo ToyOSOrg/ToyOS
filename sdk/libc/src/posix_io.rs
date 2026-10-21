@@ -277,12 +277,6 @@ pub unsafe extern "C" fn dup(raw_fd: i32) -> i32 {
 /// closing what it named.
 #[no_mangle]
 pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
-    if old_fd == new_fd {
-        return match toyos::fd::inheritable(old_fd) {
-            Ok(_) => new_fd,
-            Err(e) => refuse(fd_errno(e)),
-        };
-    }
     match toyos::fd::dup2(old_fd, new_fd, true) {
         Ok(fd) => {
             // The descriptor names something else now, so the stream is asked again.
@@ -667,6 +661,7 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
 
     const POLLIN: i16 = 1;
     const POLLOUT: i16 = 4;
+    const POLLNVAL: i16 = 0x20;
 
     if nfds == 0 {
         if timeout > 0 {
@@ -700,8 +695,11 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
             }
         })
         .collect();
+    // A descriptor that is not open answers `POLLNVAL`; a negative one is
+    // ignored, as POSIX has it.
+    let closed: alloc::vec::Vec<bool> = entries.iter().map(|&(fd, _)| fd >= 0 && toyos::fd::with(fd, drop).is_err()).collect();
     loop {
-        let mut revents = alloc::vec![0i16; n];
+        let mut revents: alloc::vec::Vec<i16> = closed.iter().map(|&closed| if closed { POLLNVAL } else { 0 }).collect();
         let mut watching = alloc::vec::Vec::new();
         for (i, &(fd, events)) in entries.iter().enumerate() {
             let Some(handle) = crate::socket::stream_of(fd) else { continue };

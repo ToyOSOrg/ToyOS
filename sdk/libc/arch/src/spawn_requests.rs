@@ -5,7 +5,7 @@ use std::cell::RefCell;
 
 use toyos_abi::end::{End, Fault};
 
-use crate::errcode::EBADF;
+use crate::errcode::{EBADF, EINVAL};
 use crate::header::{self, FCNTL_H, SIGNAL_H};
 use crate::spawnreq::{any_fd, child_fd, plan, wait_status, Action, Plan};
 
@@ -20,6 +20,10 @@ const HELD: [Option<(u32, bool)>; 3] = [Some((STDIN, false)), Some((STDOUT, fals
 /// This process's descriptor beyond 2 the tests name, holding [`PIPE`].
 const PIPE_FD: u32 = 9;
 
+/// A descriptor this process holds but cannot give a child: a stream's, or
+/// a socket a library keeps as no kernel handle.
+const UNCOPYABLE_FD: u32 = 10;
+
 /// The plan, for this process's `stdio` and its descriptor [`PIPE_FD`], with
 /// `open` handing out handles from 0x5000 and recording each close of a
 /// handle it opened.
@@ -27,9 +31,10 @@ fn planned(stdio: [Option<(u32, bool)>; 3], actions: &[Action<&str>]) -> (Result
     let next = RefCell::new(0x5000);
     let closed = RefCell::new(Vec::new());
     let held = |fd: u32| match fd {
-        0..=2 => stdio[fd as usize],
-        PIPE_FD => Some((PIPE, false)),
-        _ => None,
+        0..=2 => Ok(stdio[fd as usize]),
+        PIPE_FD => Ok(Some((PIPE, false))),
+        UNCOPYABLE_FD => Err(EINVAL),
+        _ => Ok(None),
     };
     let plan = plan(
         held,
@@ -45,6 +50,17 @@ fn planned(stdio: [Option<(u32, bool)>; 3], actions: &[Action<&str>]) -> (Result
         |handle| closed.borrow_mut().push(handle),
     );
     (plan, closed.into_inner())
+}
+
+/// A descriptor this process holds but cannot give refuses the spawn with
+/// its `errno`, and what the plan opened is closed, rather than the child
+/// starting without it.
+#[test]
+fn a_descriptor_that_cannot_be_given_refuses_the_spawn() {
+    let open = Action::Open { fd: 3, path: "/tmp/in", oflag: 0, mode: 0 };
+    let (plan, closed) = planned(HELD, &[open, Action::Dup2 { fd: UNCOPYABLE_FD, newfd: 1 }]);
+    assert_eq!(plan, Err(EINVAL));
+    assert_eq!(closed, [0x5000], "the file the plan opened was left open");
 }
 
 /// With no actions, the child holds what this process holds of 0–2 and

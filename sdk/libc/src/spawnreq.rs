@@ -17,9 +17,6 @@ use crate::errcode::EBADF;
 
 const O_CLOEXEC: i32 = 0x80000;
 
-/// The descriptors a child's table holds (`toyos::fd::MAX_FDS`).
-pub(crate) const CHILD_FDS: usize = 4096;
-
 /// One `posix_spawn_file_actions_add*`, in the child's descriptor numbers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Action<P> {
@@ -31,13 +28,13 @@ pub(crate) enum Action<P> {
 /// A descriptor of the child's an action makes, `addopen`'s and `adddup2`'s
 /// `newfd`, or `EBADF` for one no child's table has.
 pub(crate) fn child_fd(fd: i32) -> Result<u32, i32> {
-    u32::try_from(fd).ok().filter(|&fd| (fd as usize) < CHILD_FDS).ok_or(EBADF)
+    u32::try_from(fd).ok().filter(|&fd| (fd as usize) < toyos::fd::MAX_FDS).ok_or(EBADF)
 }
 
 /// A descriptor an action reads or closes, `adddup2`'s `fd` and
 /// `addclose`'s: one of the child's, or of this process's.
 pub(crate) fn any_fd(fd: i32) -> Result<u32, i32> {
-    u32::try_from(fd).ok().filter(|&fd| (fd as usize) < CHILD_FDS).ok_or(EBADF)
+    u32::try_from(fd).ok().filter(|&fd| (fd as usize) < toyos::fd::MAX_FDS).ok_or(EBADF)
 }
 
 /// What the spawn gives the child: `(child descriptor, this process's
@@ -59,21 +56,21 @@ struct Entry {
 
 /// The child's table: `held(n)` is this process's handle for its descriptor
 /// `n` and whether it is marked close-on-exec, `None` for one it does not
-/// hold; 0 to 2 first, then each action in order, as POSIX runs them in the
+/// hold, or the `errno` of one it holds but cannot give; 0 to 2 first, then each action in order, as POSIX runs them in the
 /// child; then the exec, which closes what is marked. A descriptor of this
 /// process's beyond 2 that no action closed is one an action may name, and is
 /// not the child's otherwise. `open` opens a path here, answering the handle
 /// or an `errno`; a refusal ends the plan with the handles it opened closed
 /// by `close`.
 pub(crate) fn plan<P>(
-    mut held: impl FnMut(u32) -> Option<(u32, bool)>,
+    mut held: impl FnMut(u32) -> Result<Option<(u32, bool)>, i32>,
     actions: &[Action<P>],
     mut open: impl FnMut(&P, i32, u32) -> Result<u32, i32>,
     mut close: impl FnMut(u32),
 ) -> Result<Plan, i32> {
     let mut table: BTreeMap<u32, Entry> = BTreeMap::new();
     for fd in 0..3 {
-        if let Some((handle, cloexec)) = held(fd) {
+        if let Some((handle, cloexec)) = held(fd)? {
             table.insert(fd, Entry { handle, cloexec });
         }
     }
@@ -101,11 +98,15 @@ pub(crate) fn plan<P>(
             }
             Action::Dup2 { fd, newfd } => {
                 let source = match table.get(fd) {
-                    Some(entry) => Some(entry.handle),
-                    None if *fd > 2 && !closed.contains(fd) => held(*fd).map(|(handle, _)| handle),
-                    None => None,
+                    Some(entry) => Ok(Some(entry.handle)),
+                    None if *fd > 2 && !closed.contains(fd) => held(*fd).map(|held| held.map(|(handle, _)| handle)),
+                    None => Ok(None),
                 };
-                let Some(source) = source else { return refuse(&mut opened, &mut close, EBADF) };
+                let source = match source {
+                    Ok(Some(source)) => source,
+                    Ok(None) => return refuse(&mut opened, &mut close, EBADF),
+                    Err(errno) => return refuse(&mut opened, &mut close, errno),
+                };
                 table.insert(*newfd, Entry { handle: source, cloexec: false });
                 closed.remove(newfd);
             }

@@ -277,11 +277,11 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
     let mut held: Vec<toyos::OwnedHandle> = Vec::new();
     let plan = spawnreq::plan(
         |fd| {
-            let copy = toyos::fd::copy(fd as i32).ok().flatten()?;
-            let cloexec = !toyos::fd::inheritable(fd as i32).ok()?;
+            let Some(copy) = toyos::fd::copy(fd as i32).map_err(errno_of)? else { return Ok(None) };
+            let Ok(inheritable) = toyos::fd::inheritable(fd as i32) else { return Ok(None) };
             let handle = toyos::AsHandle::as_handle(&copy).0;
             held.push(copy);
-            Some((handle, cloexec))
+            Ok(Some((handle, !inheritable)))
         },
         actions,
         |path, oflag, mode| crate::posix_io::open_handle(path, oflag, mode).map(|h| h.0).map_err(crate::errcode::of),

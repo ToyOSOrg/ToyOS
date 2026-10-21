@@ -81,9 +81,9 @@ struct SocketEntry {
 const MAX_SOCKETS: usize = 128;
 
 /// A socket's descriptor names an object of this library's own
-/// (`toyos::fd::Object::opaque`), whose word is this tag beside the socket's
-/// index here.
-const SOCKET_TAG: u64 = 0x736f_636b << 32;
+/// (`toyos::fd::Object::opaque`), whose word is this tag, `libc`, beside the
+/// socket's index here, its upper half unlike socket2's.
+const SOCKET_TAG: u64 = 0x6c69_6263 << 32;
 
 static mut SOCKETS: [Option<SocketEntry>; MAX_SOCKETS] = [None; MAX_SOCKETS];
 

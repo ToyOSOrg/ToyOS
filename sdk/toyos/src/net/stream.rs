@@ -101,11 +101,21 @@ type Tx = Sending<SEND_BYTES, WORDS>;
 
 /// An end's two halves, each behind its own lock.
 struct Halves {
-    rx: Lock<Option<Rx>>,
-    tx: Lock<Option<Tx>>,
+    rx: Lock<Kept<Rx>>,
+    tx: Lock<Kept<Tx>>,
 }
 
-static HALVES: [Halves; MAX_STREAMS] = [const { Halves { rx: Lock::new(None), tx: Lock::new(None) } }; MAX_STREAMS];
+/// A half, or none. `repr(u8)` puts `Empty` at zero, as it does
+/// [`Slot::Free`], so the tables cost a program that makes no stream no
+/// initialised data.
+#[repr(u8)]
+enum Kept<T> {
+    Empty,
+    Held(T),
+}
+
+static HALVES: [Halves; MAX_STREAMS] =
+    [const { Halves { rx: Lock::new(Kept::Empty), tx: Lock::new(Kept::Empty) } }; MAX_STREAMS];
 
 static TABLE: Lock<Table> = Lock::new(Table::new());
 
@@ -125,6 +135,7 @@ struct End {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 enum Slot {
     Free,
     /// Reserved: by a connect or an accept that has not answered, or by an end
@@ -213,8 +224,8 @@ impl Table {
 /// Lets go of an end no handle or call reaches: its halves, its bell and its
 /// region, whose mapping goes with its handle.
 fn free(slot: usize, end: End) {
-    *HALVES[slot].rx.lock() = None;
-    *HALVES[slot].tx.lock() = None;
+    *HALVES[slot].rx.lock() = Kept::Empty;
+    *HALVES[slot].tx.lock() = Kept::Empty;
     syscall::close(end.bell);
     syscall::close(end.region);
     TABLE.lock().unreserve(slot);
@@ -322,11 +333,14 @@ fn call<R>(handle: RawHandle, f: impl FnOnce(&Call) -> R) -> Result<R, Refused> 
 }
 
 /// A half reached through its slot's lock.
-struct Half<T: 'static>(&'static Lock<Option<T>>);
+struct Half<T: 'static>(&'static Lock<Kept<T>>);
 
 impl<T> session::Lock<T> for Half<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        f(self.0.lock().as_mut().expect("a live end has both halves"))
+        match &mut *self.0.lock() {
+            Kept::Held(half) => f(half),
+            Kept::Empty => panic!("a live end has both halves"),
+        }
     }
 }
 
@@ -687,8 +701,8 @@ fn open<A: Answered>(
         let (rx, tx) = session::client(words, LAYOUT);
         let lent = region.share().map_err(|_| NetError::Io)?;
         let (answer, bell, connection) = ask(NetstackConn::connect()?, lent)?;
-        *HALVES[slot].rx.lock() = Some(rx);
-        *HALVES[slot].tx.lock() = Some(tx);
+        *HALVES[slot].rx.lock() = Kept::Held(rx);
+        *HALVES[slot].tx.lock() = Kept::Held(tx);
         let (region, base) = region.into_raw();
         let peer = answer.peer().unwrap_or(peer);
         let end = End { region, base: base as usize, bell, peer, local_port: answer.local_port(), read_shut: false, handles: 0, calls: 0 };

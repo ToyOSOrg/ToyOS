@@ -7,6 +7,7 @@ use crate::path::Path;
 use crate::process::StdioPipes;
 use crate::sys::fs::File;
 use crate::sys::pipe::Pipe;
+use crate::sys::refused;
 use crate::{fmt, io};
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -347,15 +348,7 @@ impl Command {
     ) -> io::Result<Option<toyos::OwnedHandle>> {
         // What this process's own descriptor names, if it is open: one it
         // closed is closed in the child too.
-        let inherit = |from: i32| -> io::Result<Option<toyos::OwnedHandle>> {
-            let copy = toyos::fd::copy(from).map_err(crate::sys::to_io_error)?;
-            match copy {
-                Some(copy) if toyos::net::stream::is_stream(toyos::AsHandle::as_handle(&copy)) => {
-                    Err(refused(toyos::spawn::Refused::Stream(toyos::AsHandle::as_handle(&copy))))
-                }
-                copy => Ok(copy),
-            }
-        };
+        let inherit = |from: i32| toyos::fd::copy(from).map_err(refused);
         // SAFETY: each `dup` answers a fresh handle nothing else answers for.
         let copy = |pipe: &Pipe| pipe.with_handle(toyos_abi::syscall::dup)?.map(|h| unsafe { toyos::OwnedHandle::from_raw(h) }).map_err(crate::sys::to_io_error);
         Ok(match stdio {
@@ -388,19 +381,6 @@ impl Command {
 /// A path the kernel and the launcher take, which is UTF-8.
 fn utf8<'a>(path: &'a OsStr, what: &'static str) -> io::Result<&'a str> {
     path.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, what))
-}
-
-fn refused(refused: toyos::spawn::Refused) -> io::Error {
-    use toyos::spawn::Refused;
-    match refused {
-        Refused::Permission(why) => io::Error::new(io::ErrorKind::PermissionDenied, why),
-        Refused::Invalid(why) => io::Error::new(io::ErrorKind::InvalidInput, why),
-        Refused::Stream(handle) => {
-            io::Error::new(io::ErrorKind::InvalidInput, toyos::net::stream::Misuse::Moved(handle).to_string())
-        }
-        Refused::NotStarted => io::Error::from(io::ErrorKind::Other),
-        Refused::Syscall(e) => crate::sys::to_io_error(e),
-    }
 }
 
 impl From<ChildPipe> for Stdio {

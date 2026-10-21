@@ -45,14 +45,38 @@ pub fn on_fd<T>(
     fd: i32,
     f: impl FnOnce(toyos_abi::RawHandle) -> Result<T, toyos_abi::syscall::SyscallError>,
 ) -> crate::io::Result<T> {
-    let answer = toyos::fd::with(fd, |object| match object.release {
+    on_open_fd(fd, f).map_err(fd_error)?
+}
+
+/// [`on_fd`], the table's refusal answered as it is, for a caller to whom a
+/// descriptor not open means something of its own.
+pub fn on_open_fd<T>(
+    fd: i32,
+    f: impl FnOnce(toyos_abi::RawHandle) -> Result<T, toyos_abi::syscall::SyscallError>,
+) -> Result<crate::io::Result<T>, toyos::fd::Error> {
+    toyos::fd::with(fd, |object| match object.release {
         None => f(object.handle).map_err(to_io_error),
         Some(_) => Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "the descriptor names an object of a library's own",
         )),
-    });
-    answer.map_err(fd_error)?
+    })
+}
+
+/// Why nothing was spawned, as std's error.
+pub fn refused(refused: toyos::spawn::Refused) -> crate::io::Error {
+    use toyos::spawn::Refused;
+
+    use crate::io::{Error, ErrorKind};
+    match refused {
+        Refused::Permission(why) => Error::new(ErrorKind::PermissionDenied, why),
+        Refused::Invalid(why) => Error::new(ErrorKind::InvalidInput, why),
+        Refused::Stream(handle) => {
+            Error::new(ErrorKind::InvalidInput, toyos::net::stream::Misuse::Moved(handle).to_string())
+        }
+        Refused::NotStarted => Error::from(ErrorKind::Other),
+        Refused::Syscall(e) => to_io_error(e),
+    }
 }
 
 /// A kernel handle this process just got, as a descriptor of its own: std

@@ -527,8 +527,9 @@ impl File {
     /// offset. The caller holds it until the child has its own.
     pub fn as_child_stdio(&self) -> io::Result<toyos::OwnedHandle> {
         match &self.0 {
-            // SAFETY: a fresh duplicate, which nothing else answers for.
-            Inner::Kernel(fd) => crate::sys::on_fd(*fd, syscall::dup).map(|h| unsafe { toyos::OwnedHandle::from_raw(h) }),
+            Inner::Kernel(fd) => toyos::fd::copy(*fd)
+                .map_err(crate::sys::refused)?
+                .ok_or_else(|| crate::sys::fd_error(toyos::fd::Error::BadFd)),
             Inner::Served(s) => s.with(|dir, fid, generation| dir.stream(fid, generation)).map(toyos::OwnedHandle::from),
         }
     }

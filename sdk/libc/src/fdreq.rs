@@ -14,8 +14,8 @@ const F_GETOWN: i32 = 9;
 const F_DUPFD_CLOEXEC: i32 = 1030;
 pub(crate) const FD_CLOEXEC: i32 = 1;
 
-/// `{OPEN_MAX}`: the descriptors one table holds (`toyos::fd::MAX_FDS`).
-pub(crate) const OPEN_MAX: usize = 4096;
+/// `{OPEN_MAX}`: the descriptors one table holds.
+pub(crate) const OPEN_MAX: usize = toyos::fd::MAX_FDS;
 
 /// What `fcntl` does for one command.
 #[derive(Debug, PartialEq, Eq)]
