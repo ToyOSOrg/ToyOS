@@ -152,34 +152,50 @@ fn claim() -> PciDev {
 
 fn main() {
     let dev = claim();
-    let info = toyos_pci_claim::describe(&dev).unwrap_or_else(|why| panic!("usbd: {why}"));
+    let info = match toyos_pci_claim::describe(&dev) {
+        Ok(info) => info,
+        Err(why) => not_serving("usbd", &format!("the claim would not describe itself: {why}"), Link::new("usbd".into()), None),
+    };
     let at = format!("{:02x}:{:02x}.{}", info.bus, info.dev, info.func);
     let host = Process { began: Instant::now(), name: format!("usbd {at}") };
     let name = host.name.clone();
     let acceptor = endow::acceptor(toyos_inspect::USB.port);
     let stop = Endowments::get().take::<toyos::Pipe>(toyos_quiesce::DRIVER_STOP);
-    let mut link = Link::new(name.clone());
+    let link = Link::new(name.clone());
     // xHCI 1.2 §5.2.1: the capability registers are in BAR 0.
-    let (bar, _bar) = Bar::map(&dev, 0, info.bar_bytes[0]).unwrap_or_else(|why| panic!("{name}: {why}"));
+    let (bar, _bar) = match Bar::map(&dev, 0, info.bar_bytes[0]) {
+        Ok(mapped) => mapped,
+        Err(why) => not_serving(&name, &format!("its registers would not map: {why}"), link, stop),
+    };
     let reset = match Reset::new(bar, &host) {
         Ok(reset) => reset,
-        Err(why) => {
-            println!("{name}: NOT SERVING — the controller cannot be driven: {why}");
-            if let Some(link) = &mut link {
-                link.settle(Settled::Unusable);
-            }
-            idle(link, stop)
-        }
+        Err(why) => not_serving(&name, &format!("the controller cannot be driven: {why}"), link, stop),
     };
     // After the reset, so a controller refused above never had a grant: the
     // grant is what starts the function mastering the bus.
     let bytes = reset.grant_bytes();
-    let (grant, _region) = Grant::alloc(&dev, bytes as u64).unwrap_or_else(|why| panic!("{name}: {why}"));
-    let hc = reset.start(grant, &host).unwrap_or_else(|why| panic!("{name}: the controller would not run: {why}"));
+    let (grant, _region) = match Grant::alloc(&dev, bytes as u64) {
+        Ok(granted) => granted,
+        Err(why) => not_serving(&name, &format!("the kernel refused its grant: {why}"), link, stop),
+    };
+    let hc = match reset.start(grant, &host) {
+        Ok(hc) => hc,
+        Err(why) => not_serving(&name, &format!("the controller would not run: {why}"), link, stop),
+    };
     println!("{name}: running, {} ports, a {} KiB grant", hc.max_ports, bytes / 1024);
     let config = Config { input: endow::namespace().is_some(), disks: link.is_some() };
     let usb: Driver = Usb::new(hc, host, config, table::read);
     serve(&name, &dev, &usb, acceptor, link, stop)
+}
+
+/// A refusal this driver can name, before it serves anything: said once, the
+/// block service told this controller is unusable, and nothing served.
+fn not_serving(name: &str, why: &str, mut link: Option<Link>, stop: Option<toyos::Pipe>) -> ! {
+    println!("{name}: NOT SERVING — {why}");
+    if let Some(link) = &mut link {
+        link.settle(Settled::Unusable);
+    }
+    idle(link, stop)
 }
 
 /// A controller that cannot be used: it keeps its link, so the service goes
@@ -236,7 +252,10 @@ fn serve(
     let mut wake_at;
     loop {
         // The driver's turn: every task run.
-        wake_at = tasks.run(&usb.wake).unwrap_or_else(|Dead(why)| panic!("{name}: {why}; nothing drives the controller from here"));
+        wake_at = match tasks.run(&usb.wake) {
+            Ok(at) => at,
+            Err(Dead(why)) => ended(name, &format!("{why}; nothing drives the controller from here")),
+        };
         for event in usb.disks.take_events() {
             match event {
                 Event::Arrived { disk, name: disk_name, table } => {
@@ -371,7 +390,7 @@ fn serve(
                     while usb.hc.take_events() && usb.hc.event_waiting() {}
                 }
                 Err(SyscallError::WouldBlock) => wakes.empty += 1,
-                Err(why) => panic!("{name}: the claim refused its interrupt record ({why:?}); nothing drives it from here"),
+                Err(why) => ended(name, &format!("the claim refused its interrupt record ({why:?}); nothing drives it from here")),
             }
         }
     }
@@ -394,7 +413,7 @@ fn end_for_the_stop<'u>(name: &str, usb: &'u Driver, tasks: Tasks<'u>) -> ! {
         match stop.run(&usb.wake) {
             Ok(Some(at)) => std::thread::sleep(Duration::from_nanos(at.saturating_sub(usb.wake.now()))),
             Ok(None) => {}
-            Err(Dead(why)) => panic!("{name}: {why}, in the stop"),
+            Err(Dead(why)) => ended(name, &format!("{why}, in the stop")),
         }
     }
     let stopped = stopped.get().expect("the stop's task set it before it ended");
@@ -404,6 +423,18 @@ fn end_for_the_stop<'u>(name: &str, usb: &'u Driver, tasks: Tasks<'u>) -> ! {
     // just took down.
     std::process::exit(if stopped.whole() { 0 } else { STOP_UNFINISHED })
 }
+
+/// The controller stopped answering, or the claim refused it, while usbd
+/// served it: said by name, and this process ends, which takes every device
+/// on the controller with it and releases the claim, so the supervisor may
+/// drive the function again.
+fn ended(name: &str, why: &str) -> ! {
+    println!("{name}: ENDED — {why}");
+    std::process::exit(CONTROLLER_LOST)
+}
+
+/// What usbd ends with when the controller it served is lost ([`ended`]).
+const CONTROLLER_LOST: i32 = 2;
 
 /// What usbd ends with when its stop left a port in reset or the controller
 /// running: [`toyos_xhci::hc::Stopped::whole`] false.
