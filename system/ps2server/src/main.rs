@@ -28,7 +28,7 @@ use toyos::endow::{self, EndowError};
 use toyos::ipc::Connection;
 use toyos::Device;
 use toyos_abi::syscall::IsaId;
-use toyos_input::wire::{self, Record, POINTER_LEN};
+use toyos_input::wire::{self, Record, MAX_PAYLOAD};
 
 use crate::bus::Controller;
 use crate::probe::Probed;
@@ -79,7 +79,7 @@ fn connect() -> Connection {
 /// for again, and the new connection is a new source to it.
 fn deliver(owner: &mut Connection, records: &[Record]) {
     for record in records {
-        let mut payload = [0u8; POINTER_LEN];
+        let mut payload = [0u8; MAX_PAYLOAD];
         let (msg_type, len) = record.frame(&mut payload);
         if owner.send_bytes(msg_type, &payload[..len]).is_err() {
             *owner = connect();

@@ -996,7 +996,7 @@ enum Storage {
     Stick { nvme_bytes: u64 },
     /// One NVMe disk and no stick: DATA, of this many bytes, and the image
     /// installed after it (`toyos_build::image::install`). The firmware boots
-    /// it, and after the loader every partition of it is `diskserver`'s.
+    /// it, and after the loader every partition of it is the block service's.
     Disk { data_bytes: u64 },
 }
 
@@ -2328,9 +2328,9 @@ fn qemu_command(
     // with no NVMe is a shape, and the argv is the only place it is visible:
     // no console line and no screendump can see a device that is absent.
     //
-    // Its MSI-X table in BAR 0, QEMU's default, which diskserver's claim maps
+    // Its MSI-X table in BAR 0, QEMU's default, which the nvme driver's claim maps
     // with the registers. One controller and one namespace whichever disk it
-    // is: diskserver reads namespace 1 of the one controller its row names.
+    // is: the nvme driver reads namespace 1 of the controller it drives.
     let namespace = match shape.storage {
         Storage::Stick { nvme_bytes: 0 } => None,
         Storage::Stick { .. } => {

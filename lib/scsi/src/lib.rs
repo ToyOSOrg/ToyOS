@@ -7,7 +7,11 @@
 //! size this driver cannot address, a block size that does not divide the host
 //! block, a peripheral that is not a disk.
 
-use crate::Nanos;
+#![no_std]
+#![forbid(unsafe_code)]
+
+/// A monotonic instant in nanoseconds, on the caller's clock.
+pub type Nanos = u64;
 
 /// The block size everything above this driver is written in; a device whose
 /// sectors do not divide it is refused, not approximated.
@@ -76,38 +80,69 @@ impl Cdb {
 /// Bytes a REQUEST SENSE asks for.
 pub const SENSE_BYTES: usize = 18;
 
-/// The sense key, ASC and ASCQ of fixed-format sense data (SPC-4 §4.5.3).
+/// The sense key, ASC and ASCQ of fixed-format sense data (SPC-4 §4.5.3),
+/// and whether it reports a deferred error: one about a command that already
+/// completed, and never the current command's answer (§4.5.5).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Sense {
     pub key: u8,
     pub asc: u8,
     pub ascq: u8,
+    pub deferred: bool,
+}
+
+/// Why sense data is not believed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SenseRefused {
+    /// Fewer than the fourteen bytes that reach ASCQ arrived.
+    Truncated { delivered: u32 },
+    /// A response code other than fixed format's two (SPC-4 §4.5.1, table 27):
+    /// 0x72 and 0x73 are descriptor format, whose byte 2 is the ASC, and 0x7F
+    /// is vendor specific. REQUEST SENSE is sent with DESC 0, so any of them
+    /// is a device outside the standard.
+    Format(u8),
+    /// An additional sense length that ends before ASCQ (§4.5.3, byte 7).
+    Short { additional: u8 },
 }
 
 impl Sense {
     /// What a device that would not say is taken to have said: zero is the
     /// failing side of every decision made from it.
-    pub const NONE: Self = Self { key: 0, asc: 0, ascq: 0 };
+    pub const NONE: Self = Self { key: 0, asc: 0, ascq: 0, deferred: false };
 
-    /// The sense `response` carries, of which `delivered` bytes arrived. ASCQ
-    /// is byte 13, so fourteen must have or none of it is believed.
-    pub fn of(response: &[u8; SENSE_BYTES], delivered: u32) -> Self {
+    /// The fixed-format sense `response` carries, of which `delivered` bytes
+    /// arrived.
+    pub fn of(response: &[u8; SENSE_BYTES], delivered: u32) -> Result<Self, SenseRefused> {
         if delivered < 14 {
-            return Self::NONE;
+            return Err(SenseRefused::Truncated { delivered });
         }
-        Self { key: response[2] & 0x0F, asc: response[12], ascq: response[13] }
+        // Bit 7 is VALID, which speaks for the INFORMATION field alone.
+        let deferred = match response[0] & 0x7F {
+            0x70 => false,
+            0x71 => true,
+            other => return Err(SenseRefused::Format(other)),
+        };
+        // Byte 7 counts the bytes after it, so ASCQ at byte 13 needs six.
+        if response[7] < 6 {
+            return Err(SenseRefused::Short { additional: response[7] });
+        }
+        Ok(Self { key: response[2] & 0x0F, asc: response[12], ascq: response[13], deferred })
     }
 
-    /// ILLEGAL REQUEST / INVALID COMMAND OPERATION CODE: an answer, not a
-    /// failure, for a command SBC makes optional.
+    /// ILLEGAL REQUEST / INVALID COMMAND OPERATION CODE about the current
+    /// command: an answer, not a failure, for a command SBC makes optional.
     pub fn unimplemented(self) -> bool {
-        (self.key, self.asc, self.ascq) == (0x05, 0x20, 0x00)
+        !self.deferred && (self.key, self.asc, self.ascq) == (0x05, 0x20, 0x00)
     }
 }
 
 impl core::fmt::Display for Sense {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:#04x}/{:#04x}/{:#04x}", self.key, self.asc, self.ascq)
+        write!(f, "{:#04x}/{:#04x}/{:#04x}", self.key, self.asc, self.ascq)?;
+        if self.deferred {
+            f.write_str(" (deferred)")?;
+        }
+        Ok(())
     }
 }
 
@@ -571,20 +606,55 @@ mod tests {
         assert_eq!(usize::from(Query::Capacity16.cdb().bytes()[13]), Query::Capacity16.allocation());
     }
 
+    fn fixed(code: u8, additional: u8, key: u8, asc: u8, ascq: u8) -> [u8; SENSE_BYTES] {
+        let mut response = [0u8; SENSE_BYTES];
+        response[0] = code;
+        response[2] = key;
+        response[7] = additional;
+        response[12] = asc;
+        response[13] = ascq;
+        response
+    }
+
     #[test]
     fn sense_is_believed_only_when_its_ascq_arrived() {
-        let mut response = [0u8; SENSE_BYTES];
-        response[2] = 0xF5;
-        response[12] = 0x20;
-        response[13] = 0x00;
-        assert_eq!(Sense::of(&response, 14), Sense { key: 0x05, asc: 0x20, ascq: 0 });
-        assert!(Sense::of(&response, 18).unimplemented());
-        assert_eq!(Sense::of(&response, 13), Sense::NONE);
+        let response = fixed(0x70, 10, 0xF5, 0x20, 0x00);
+        let sense = Sense { key: 0x05, asc: 0x20, ascq: 0, deferred: false };
+        assert_eq!(Sense::of(&response, 14), Ok(sense));
+        assert!(Sense::of(&response, 18).is_ok_and(Sense::unimplemented));
+        assert_eq!(Sense::of(&response, 13), Err(SenseRefused::Truncated { delivered: 13 }));
         assert!(!Sense::NONE.unimplemented());
-        assert!(!Sense { key: 0x04, asc: 0x44, ascq: 0 }.unimplemented());
+        assert!(!Sense { key: 0x04, asc: 0x44, ..Sense::NONE }.unimplemented());
         extern crate std;
         use std::string::ToString;
-        assert_eq!(Sense { key: 0x04, asc: 0x44, ascq: 0 }.to_string(), "0x04/0x44/0x00");
+        assert_eq!(Sense { key: 0x04, asc: 0x44, ..Sense::NONE }.to_string(), "0x04/0x44/0x00");
+    }
+
+    /// SPC-4 §4.5.1's response codes, table 27: 0x70 and 0x71 are fixed
+    /// format, current and deferred; 0x72 and 0x73 descriptor format; 0x7F
+    /// vendor specific. Only the first two are read as fixed format, VALID
+    /// whatever it says, and a deferred error is never the current command's.
+    #[test]
+    fn sense_is_read_only_in_the_fixed_format_its_response_code_names() {
+        for valid in [0x00, 0x80] {
+            let current = Sense::of(&fixed(0x70 | valid, 10, 0x05, 0x20, 0x00), 18).expect("current, fixed");
+            assert!(!current.deferred && current.unimplemented());
+            let deferred = Sense::of(&fixed(0x71 | valid, 10, 0x05, 0x20, 0x00), 18).expect("deferred, fixed");
+            assert!(deferred.deferred, "0x71 is a deferred error");
+            assert!(!deferred.unimplemented(), "a deferred error is not about the command just sent");
+            for code in [0x72, 0x73, 0x7F, 0x00, 0x6F] {
+                let response = fixed(code | valid, 10, 0x05, 0x20, 0x00);
+                assert_eq!(Sense::of(&response, 18), Err(SenseRefused::Format(code)), "{code:#x}");
+            }
+        }
+    }
+
+    /// Byte 7 counts the bytes after it: six reach ASCQ at byte 13, five do not.
+    #[test]
+    fn sense_whose_additional_length_ends_before_ascq_is_refused() {
+        assert!(Sense::of(&fixed(0x70, 6, 0x02, 0x04, 0x01), 18).is_ok());
+        assert_eq!(Sense::of(&fixed(0x70, 5, 0x02, 0x04, 0x01), 18), Err(SenseRefused::Short { additional: 5 }));
+        assert_eq!(Sense::of(&fixed(0x70, 0, 0x02, 0x04, 0x01), 18), Err(SenseRefused::Short { additional: 0 }));
     }
 
     const STICK: Geometry = Geometry { sector_bytes: 512, sectors: 160, sectors_per_block: 8, blocks: 20 };
@@ -632,7 +702,7 @@ mod tests {
         let first = transfer.next().expect("a batch");
         assert_eq!(transfer.answered(&first, Reply::Budget), Moved::Ended(Fail::Budget));
         assert_eq!(transfer.answered(&first, Reply::Broken), Moved::Ended(Fail::Device));
-        let sense = Sense { key: 3, asc: 0x11, ascq: 0 };
+        let sense = Sense { key: 3, asc: 0x11, ..Sense::NONE };
         assert_eq!(transfer.answered(&first, Reply::Refused(sense)), Moved::Refused(sense));
         assert_eq!(transfer.answered(&first, Reply::Ok { delivered: 8 * 4096 }), Moved::Whole);
         let second = transfer.next().expect("a batch");
@@ -643,8 +713,8 @@ mod tests {
 
     #[test]
     fn a_flush_the_device_does_not_implement_is_no_failure_and_every_other_refusal_is() {
-        let unimplemented = Sense { key: 0x05, asc: 0x20, ascq: 0 };
-        let failed = Sense { key: 0x04, asc: 0x44, ascq: 0 };
+        let unimplemented = Sense { key: 0x05, asc: 0x20, ..Sense::NONE };
+        let failed = Sense { key: 0x04, asc: 0x44, ..Sense::NONE };
         assert_eq!(flushed(Reply::Refused(unimplemented)), Flushed::NoCache);
         assert_eq!(flushed(Reply::Refused(failed)), Flushed::Refused(failed));
         assert_eq!(flushed(Reply::Ok { delivered: 0 }), Flushed::Emptied);
@@ -720,7 +790,7 @@ mod tests {
                     Heard::CheckCondition
                 }
                 Ask::TestUnitReady => Heard::Good,
-                Ask::RequestSense => Heard::Sense(Sense { key: 0x02, asc: 0x04, ascq: 0x01 }),
+                Ask::RequestSense => Heard::Sense(Sense { key: 0x02, asc: 0x04, ascq: 0x01, deferred: false }),
                 Ask::Recover => Heard::Recovered { offline: device.offline },
                 Ask::Read(query) => {
                     let data = match query {
@@ -790,7 +860,7 @@ mod tests {
     fn a_disk_that_never_becomes_ready_is_given_up_on_at_its_budget() {
         let (inquiry, capacity) = (inquiry(0), capacity10(8191, 512));
         let route = bring_up(Device { not_ready: u32::MAX, ..disk(&inquiry, &capacity) }, 100 * MS);
-        assert_eq!(route.up, Up::Unready { sense: Sense { key: 0x02, asc: 0x04, ascq: 0x01 }, offline: false });
+        assert_eq!(route.up, Up::Unready { sense: Sense { key: 0x02, asc: 0x04, ascq: 0x01, deferred: false }, offline: false });
         assert_eq!(route.asks().filter(|a| *a == Ask::TestUnitReady).count(), 3, "at 0, 200 and 400 ms");
         assert_eq!(route.disk, None);
     }

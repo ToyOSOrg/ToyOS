@@ -168,8 +168,9 @@ pub enum TrySendError {
     Syscall(SyscallError),
 }
 
-/// An IPC connection. A server gets one from [`crate::port::Acceptor::accept`]
-/// and a client from [`crate::endow::service`].
+/// An IPC connection. A server gets one from [`crate::port::Acceptor::accept`],
+/// a client from [`crate::endow::service`], and a server one end a peer
+/// handed it from [`Self::received`].
 pub struct Connection(pub(crate) OwnedHandle);
 
 impl AsHandle for Connection {
@@ -177,6 +178,18 @@ impl AsHandle for Connection {
 }
 
 impl Connection {
+    /// A connection end a peer sent, consumed. Its type is the sender's
+    /// word: the kernel refuses each connection call on a handle of another
+    /// type, so trust the sender only as far as its protocol says.
+    pub fn received(raw: RawHandle) -> Self {
+        Self(OwnedHandle(raw))
+    }
+
+    /// This end as a handle, to send it on ([`Self::send_handles`]).
+    pub fn into_owned(self) -> OwnedHandle {
+        self.0
+    }
+
     pub fn send<T: IpcPayload>(&self, msg_type: u32, payload: &T) -> Result<(), IpcError> {
         send(self.0.raw(), msg_type, payload)
     }

@@ -1,0 +1,13 @@
+[package]
+name = "toyos-blockserve"
+description = "A disk driver's side of the block service: its partition table, its link on the `disk` port, and each disk's sessions served straight out of its clients' regions."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-blockring = { path = "../blockring" }
+toyos-blockhold = { path = "../blockhold" }
+toyos-gpt = { path = "../gpt" }

@@ -1,0 +1,6 @@
+[package]
+name = "toyos-scsi"
+description = "The SCSI command set a Bulk-Only disk speaks (SPC-4, SBC-3): the commands sent, the answers believed, and the bring-up to a disk with a size."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
