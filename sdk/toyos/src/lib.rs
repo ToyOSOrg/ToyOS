@@ -80,7 +80,7 @@ pub fn null(rights: toyos_abi::handle::Rights) -> Result<OwnedHandle, toyos_abi:
 /// giving up ownership, and the single thing to grep for when asking who does.
 ///
 /// Consumers hold the typed wrappers below; this is what a handle is while it
-/// travels, the currency of [`Connection::send_handles`].
+/// travels, the currency of [`Connection::send_with`].
 pub struct OwnedHandle(pub(crate) RawHandle);
 
 impl OwnedHandle {

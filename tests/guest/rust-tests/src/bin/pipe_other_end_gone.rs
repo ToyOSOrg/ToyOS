@@ -98,9 +98,10 @@ fn test() {
     assert_eq!(at_last(&reader), Ok(OTHER_END_GONE), "the write end's last handle closed");
 
     let (reader, writer) = pipe("");
-    client.send_handles([OwnedHandle::from(writer)]).expect("the write end into the connection's queue");
+    client.signal_with(1, [OwnedHandle::from(writer)]).expect("the write end into the connection's queue");
     held(&reader, "its handle sits unreceived in a connection's queue");
-    let [received] = server.recv_handles_exact::<1>().expect("the handle the queue held");
+    let header = server.recv_header().expect("the frame that carried it");
+    let [received] = server.recv_handles_exact::<1>(&header).expect("the handle the queue held");
     held(&reader, "its handle was received");
     syscall::close(received);
     assert_eq!(at_last(&reader), Ok(OTHER_END_GONE), "the received handle closed");

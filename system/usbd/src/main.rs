@@ -95,8 +95,8 @@ impl Owner for InputPort {
         let (msg_type, len) = record.frame(&mut payload);
         match conn.try_send_bytes(msg_type, &payload[..len]) {
             Ok(()) => Sent::Taken,
-            Err(TrySendError::Busy) => Sent::Full,
-            // Part of a frame went: the connection is no longer framed.
+            // Nothing went: a frame is sent whole or not at all.
+            Err(TrySendError::Full) => Sent::Full,
             Err(_) => Sent::Ended,
         }
     }

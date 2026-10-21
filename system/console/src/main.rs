@@ -359,7 +359,7 @@ fn main() {
                         ended = Some("a frame no protocol here can make".to_string());
                         break;
                     }
-                    RxStep::Frame { msg_type, payload_len } => wire::decode(msg_type, rx.payload(payload_len)),
+                    RxStep::Frame { msg_type, payload_len, .. } => wire::decode(msg_type, rx.payload(payload_len)),
                 };
                 match record {
                     Ok(Record::Key { source, key }) => match merge.key(slot, source, key) {

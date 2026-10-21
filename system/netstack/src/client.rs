@@ -57,16 +57,15 @@ impl Client {
     }
 
     /// **The answer goes out in one non-blocking write, and a refusal is not
-    /// retried.** `ipc::send` parks in `sys_write` until the client drains,
-    /// which is a client deciding when the network stack runs again; and
-    /// `TrySendError::Full` can have left part of the frame in the pipe, so
-    /// there is nothing here to retry either. The connection closes either way.
+    /// retried.** `ipc::send` parks in `SYS_MESSAGE_SEND` until the client
+    /// drains, which is a client deciding when the network stack runs again.
+    /// The connection closes either way.
     /// The log is the only place the machine this runs on gets told that a
     /// client asked something and was never answered.
     fn answered(&self, sent: Result<(), ipc::TrySendError>) {
         if let Err(e) = sent {
             let why = match e {
-                ipc::TrySendError::Busy | ipc::TrySendError::Full => {
+                ipc::TrySendError::Full => {
                     "its pipe will not take the answer and it is not reading"
                 }
                 ipc::TrySendError::TooLarge => "the answer netstack built is larger than a frame",
@@ -121,6 +120,9 @@ pub struct Request {
     pub msg_type: u32,
     pub payload: [u8; MAX_REQUEST],
     pub payload_len: usize,
+    /// What the frame carried: claimed by the request that takes handles, and
+    /// closed with any other.
+    pub handles: toyos::ipc::Batch,
 }
 
 impl Request {

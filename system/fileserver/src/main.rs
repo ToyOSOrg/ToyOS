@@ -49,7 +49,7 @@ use fileserver::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
 use fileserver::writeback::WriteBack;
 use toyos::endow::{self, Endowments};
 use toyos::fs::*;
-use toyos::ipc::{self, Connection, RxStep, TrySendError};
+use toyos::ipc::{self, Connection, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
@@ -437,7 +437,7 @@ impl Server {
             RxStep::Idle => {}
             RxStep::Eof => self.drop_client(id, ""),
             RxStep::Malformed => self.drop_client(id, "it sent a frame this protocol cannot describe"),
-            RxStep::Frame { msg_type, payload_len } => {
+            RxStep::Frame { msg_type, payload_len, .. } => {
                 let Ok(request) = ipc::decode_payload::<Request>(client.rx.payload(payload_len)) else {
                     return self.drop_client(id, "its request was not one `Request` wide");
                 };
@@ -453,11 +453,7 @@ impl Server {
         let sent = match answer {
             Answer::Reply(reply) => client.conn.try_send(REPLY, &reply),
             Answer::Link(len) => client.conn.try_send(LINK, &Reply { value: len as u64, ..Reply::ok() }),
-            Answer::WithHandle(reply, handle) => client
-                .conn
-                .send_handles([handle])
-                .map_err(TrySendError::Syscall)
-                .and_then(|()| client.conn.try_send(REPLY, &reply)),
+            Answer::WithHandle(reply, handle) => client.conn.try_send_with(REPLY, &reply, [handle]),
             Answer::Drop(why) => return self.drop_client(id, why),
             Answer::Refuse(e, why) => {
                 // Let go whether or not the refusal went: either way it is said.
@@ -512,7 +508,8 @@ impl Server {
             if client.window.is_some() {
                 return Answer::Drop("it lent a second window");
             }
-            let lent = || client.conn.recv_handles_exact::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
+            // The window travels in the HELLO frame: its reader took it with the frame.
+            let lent = || client.rx.take_handles::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
             match bounds::hello(all, mine, lent) {
                 Hello::Served(window) => client.window = Some(window),
                 Hello::Refused(why) => return Answer::Refuse(Error::TooManyConnections, why),

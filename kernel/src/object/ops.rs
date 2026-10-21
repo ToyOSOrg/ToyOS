@@ -476,7 +476,12 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
     match object {
         KObjectRef::File(f) => read_file(f, buf),
         KObjectRef::PipeRead(r) => pipe::try_read(r.id(), buf).map(|n| n as u64),
-        KObjectRef::Connection(c) => pipe::try_read(c.rx(), buf).map(|n| n as u64),
+        // A batch pinned where the reader is answers the read, so no byte
+        // after it is read until the batch is taken.
+        KObjectRef::Connection(c) => c.read(buf).map(|read| match read {
+            Ok(n) => n as u64,
+            Err(crate::pipe::AtBatch) => SyscallError::HandlesPending.to_u64(),
+        }),
         KObjectRef::Device(_) => unreachable!("a device claim is read by `read_device`"),
         KObjectRef::Console(_) => {
             let mut count = 0usize;
@@ -667,7 +672,7 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
 pub fn has_data(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::PipeRead(r) => pipe::has_data(r.id()),
-        KObjectRef::Connection(c) => pipe::has_data(c.rx()),
+        KObjectRef::Connection(c) => c.has_data(),
         KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
         KObjectRef::Process(p) => p.finished(),
@@ -704,8 +709,8 @@ pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
 
 pub fn has_space(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::PipeWrite(w) => pipe::has_space(w.id()),
-        KObjectRef::Connection(c) => pipe::has_space(c.tx()),
+        KObjectRef::PipeWrite(w) => pipe::has_space(w.id(), 1),
+        KObjectRef::Connection(c) => pipe::has_space(c.tx(), 1),
         KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)

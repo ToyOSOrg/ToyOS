@@ -314,8 +314,7 @@ impl Log {
         let ring = ring.share().expect("supervisor: a log ring would not duplicate");
         let mut payload = [0u8; 4 + MAX_TAG];
         let len = Registration { pid, tag }.encode(&mut payload);
-        let sent = self.conn.send_handles([ring, alive.into()]).map_err(ipc::IpcError::Syscall);
-        if let Err(e) = sent.and_then(|()| self.conn.send_bytes(REGISTER, &payload[..len])) {
+        if let Err(e) = self.conn.send_bytes_with(REGISTER, &payload[..len], [ring, alive.into()]) {
             panic!("supervisor: logkeeper's origins connection refused {name}'s ring: {e:?}");
         }
     }
@@ -1353,12 +1352,13 @@ impl<'a> Supervisor<'a> {
                         );
                         pending.remove(i);
                     }
-                    RxStep::Frame { msg_type, payload_len } => {
-                        let p = pending.remove(i);
+                    RxStep::Frame { msg_type, payload_len, .. } => {
+                        let mut p = pending.remove(i);
                         match p.port {
                             Port::Launcher(caller) => {
                                 let payload = p.rx.payload(payload_len).to_vec();
-                                self.serve_launch(p.conn, &caller, msg_type, &payload, &mut parked)
+                                let carried = p.rx.take_batch();
+                                self.serve_launch(p.conn, &caller, msg_type, &payload, carried, &mut parked)
                             }
                             Port::Grants(caller) => self.serve_grants(&p.conn, &caller, msg_type, p.rx.payload(payload_len)),
                             Port::Power => self.stop(&p.conn, msg_type),
@@ -1922,13 +1922,13 @@ impl Supervisor<'_> {
         caller: &Caller,
         msg_type: u32,
         payload: &[u8],
+        carried: ipc::Batch,
         parked: &mut Option<Parked>,
     ) {
         if msg_type != launch::MSG_LAUNCH {
             return;
         }
-        let mut batch = [toyos::RawHandle(0); toyos_abi::syscall::MAX_TRANSFER_HANDLES];
-        let received = conn.recv_handles(&mut batch).unwrap_or(0);
+        let (batch, received) = carried.into_raw();
 
         // **Owned on the statement after they arrive, and before anything can
         // refuse.** The send moved them into the supervisor's table, so every path out of
@@ -2264,11 +2264,8 @@ impl Supervisor<'_> {
                 let handle = unsafe { toyos::OwnedHandle::from_raw(toyos::RawHandle(child.into_raw_handle())) };
                 // Consumed either way, so the supervisor keeps no `Process` handle from a
                 // launch, or a client launching `/system/bin/true` in a loop exhausts the
-                // one table the machine cannot do without. A frame refused after the move
-                // leaves it queued on a connection this call is about to drop.
-                if conn.send_handles([handle]).is_ok() {
-                    let _ = conn.try_signal(launch::MSG_LAUNCHED);
-                }
+                // one table the machine cannot do without.
+                let _ = conn.try_signal_with(launch::MSG_LAUNCHED, [handle]);
             }
             // std's word for the kernel's `Gone` for the place, and nothing else
             // here answers it: the command is prepared, so its spawn calls no
@@ -2330,7 +2327,7 @@ struct Parked {
 fn heard<'a, const MAX: usize>(step: RxStep, rx: &'a ipc::FrameRx<MAX>, ended: &'static str) -> consent::Heard<'a> {
     match step {
         RxStep::Idle => consent::Heard::Nothing,
-        RxStep::Frame { msg_type, payload_len } => consent::Heard::Frame(msg_type, rx.payload(payload_len)),
+        RxStep::Frame { msg_type, payload_len, .. } => consent::Heard::Frame(msg_type, rx.payload(payload_len)),
         RxStep::Eof => consent::Heard::Ended(ended),
         RxStep::Malformed => consent::Heard::Ended("it sent a frame the protocol cannot describe"),
     }

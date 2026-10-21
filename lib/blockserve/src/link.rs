@@ -145,9 +145,9 @@ impl Link {
                 RxStep::Idle => return handed,
                 RxStep::Eof => "its process ended",
                 RxStep::Malformed => "a frame this protocol does not make",
-                RxStep::Frame { msg_type: disk::MSG_SESSION, payload_len } => {
+                RxStep::Frame { msg_type: disk::MSG_SESSION, payload_len, .. } => {
                     let session = disk::Session::decode(self.rx.payload(payload_len));
-                    let handles = conn.recv_handles_exact::<2>();
+                    let handles = self.rx.take_handles::<2>();
                     match (session, handles) {
                         (Some(session), Some([conn, region])) => {
                             let conn = Connection::received(conn);

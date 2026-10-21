@@ -71,7 +71,7 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
                         0,
                         class,
                         Deadline::never(),
-                        || pipe::has_space(id),
+                        || pipe::has_space(id, 1),
                     )
                     .is_err()
                     {

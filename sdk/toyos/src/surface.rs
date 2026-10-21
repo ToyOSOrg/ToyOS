@@ -320,7 +320,7 @@ impl Host {
         match sent {
             Ok(()) => {}
             Err(TrySendError::Syscall(_)) => self.close(i),
-            Err(TrySendError::Busy | TrySendError::Full | TrySendError::TooLarge) => {
+            Err(TrySendError::Full) | Err(TrySendError::TooLarge) => {
                 self.close(i);
                 self.drops[i] = Some((client, why));
             }

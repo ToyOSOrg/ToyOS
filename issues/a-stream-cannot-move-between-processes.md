@@ -30,7 +30,7 @@ either side. Stage 3 makes std refuse both loudly instead.
 Every path std offers to move a raw handle into another process answers that
 refusal before anything moves: a spawn's stdio slots,
 `CommandExt::inherit_handle` into any slot, `CommandExt::endow` and
-`Command::provide`, each starting no child. `toyos::ipc`'s `send_handles`
+`Command::provide`, each starting no child. `toyos::ipc`'s `send_with`
 takes only `OwnedHandle`s, and a stream's handle becomes one only through
 `OwnedHandle::from_raw`, whose contract stage 3 says excludes a handle
 `toyos::net` answers for: the type refuses it. And `toyos::net` refuses by
@@ -40,7 +40,7 @@ as an inetd-style server does through its child's stdio, then fails loudly
 on ToyOS where today it works, and one that takes a moved stream back as a
 `TcpStream`, as socket activation does and as no ToyOS std builds today, is
 refused, though root `CLAUDE.md` says existing Rust just works. The bare
-`dup`, `SYS_HANDLE_SEND` and `SYS_SPAWN` syscalls are not checked.
+`dup`, `SYS_MESSAGE_SEND` and `SYS_SPAWN` syscalls are not checked.
 
 Owner: the orchestrator, who stages
 `issues/netstack-moves-every-byte-through-two-kernel-pipes.md`.

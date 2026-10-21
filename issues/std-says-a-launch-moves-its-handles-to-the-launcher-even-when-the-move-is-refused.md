@@ -7,7 +7,7 @@ opened: 2026-10-05
 # std says a launch moves its handles to the launcher, even when the move is refused
 
 `toyos::launch::launch` consumes every handle a `Launch` names: the kernel
-moves them to the launcher, or refuses the move and `Connection::send_handles`
+moves them to the launcher, or refuses the move and `Connection::send_with`
 closes them in the caller (`sdk/toyos/src/ipc.rs`, `sdk/toyos/src/launch.rs`). The
 prose of std's ToyOS backend about the same handles says something else:
 
