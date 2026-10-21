@@ -9,6 +9,6 @@ mod stick_lines;
 const LINES: u64 = (8 << 20) / stick_lines::LINE_BYTES as u64;
 
 fn main() {
-    let said = stick_lines::say("stick_write", LINES, || true);
+    let said = stick_lines::say("stick_write", LINES, 2000, || true);
     println!("stick_write: {said} lines of {} bytes said", stick_lines::LINE_BYTES);
 }

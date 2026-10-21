@@ -22,7 +22,7 @@ fn main() {
     let playing = Arc::new(AtomicBool::new(true));
     let writer = {
         let playing = playing.clone();
-        std::thread::spawn(move || stick_lines::say("tone_beside_stick_write", u64::MAX, || playing.load(Ordering::Relaxed)))
+        std::thread::spawn(move || stick_lines::say("tone_beside_stick_write", u64::MAX, 2000, || playing.load(Ordering::Relaxed)))
     };
     tone::play(&device, config.into());
     playing.store(false, Ordering::Relaxed);
