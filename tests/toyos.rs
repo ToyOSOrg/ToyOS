@@ -67,6 +67,9 @@ const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // It writes the stick for ever, so that its boot's deadline resets the
+    // machine under it: `stick_survives_a_reset_under_load` runs it alone.
+    "stick_load",
     // It opens a window, which needs a compositor the shared boot does not
     // run: `a_window_is_drawn_at_the_scale_and_relaid_at_the_next` runs it on
     // tests/images/scalecase.toml, and the `gop_edid_scale` metal row on
@@ -1206,6 +1209,17 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| usbd_serves_the_boot_stick(&b[0].kernel(), &b[0].log()) },
     ),
     (
+        // The stick written through usbd while the boot deadline resets the
+        // machine, which touches no USB register (#901 §6): the stick must
+        // enumerate on the next host within the bench's record. It is the
+        // kernel's reset path that is judged; usbd and the job are the load.
+        "stick_survives_a_reset_under_load",
+        metal::Metal {
+            arms: &[metal::once("usbload", "tests/images/testcases.toml", &[], &[metal::STICK_LOAD_JOB])],
+            judge: |b| power::stick_survives_a_reset_under_load(b[0]),
+        },
+    ),
+    (
         // The Type-C controller, which no row of the image names, claimed,
         // and usbd driving it: handed
         // over, MSI armed through remapping, and the No-Op answered by an
@@ -2335,20 +2349,30 @@ fn console_image_boots() -> Result<(), String> {
 }
 
 /// Boot `tests/images/testcases.toml` from a USB stick, as a metal boot does,
-/// stop the machine, and read the stick's log volume back with the metal
+/// write the stick through usbd ([`metal::STICK_LOAD_JOB`]), press the power
+/// button while it writes, and read the stick's log volume back with the metal
 /// judge's verdict: this boot's `logkeeper` files hold `Boot: complete` and the
 /// supervisor's stop line, so the log went through usbd's disk to the stick and
 /// was made durable before the power went. Then usbd handed the stick back
 /// with a port reset and left its controller reset, before the kernel's stop
 /// ([`usb_stopped_before_the_reset`]).
 fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
-    let options = BootOptions { profile: qemu::Profile::Metal, ..Default::default() };
+    let options = BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, "stick_load")],
+        ..Default::default()
+    };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
     let mut console = qemu.boot_log().to_string();
     qemu::await_marker(&mut qemu, &mut console, ": serving it as disk 0", "usbd to serve the boot stick")?;
     qemu::await_marker(&mut qemu, &mut console, toyos_logstream::LOG_OPENED, "logkeeper to open the log")?;
-    writeln!(qemu.stdin_mut(), "run shutdown").map_err(|e| e.to_string())?;
+    // The stop is asked for under load: the stick is being written when the
+    // power button is pressed, as the metal row's deadline finds it.
+    writeln!(qemu.stdin_mut(), "run {}", metal::STICK_LOAD_JOB).map_err(|e| e.to_string())?;
     qemu.flush_stdin();
+    qemu::await_marker(&mut qemu, &mut console, "stick_load: 4 MiB written and synced", "the load to write the stick")?;
+    qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET)).power_button();
     let by = qemu.budget(Duration::from_secs(60));
     console.push_str(&qemu.await_exit(by)?);
     let mut stick = std::fs::File::open(qemu.boot_image()).map_err(|e| e.to_string())?;
@@ -2361,6 +2385,9 @@ fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
         .filter(|(name, _)| ours.contains(&name.as_str()))
         .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
         .collect();
+    if !log.contains("stick_load: 4 MiB written and synced") {
+        return Err(format!("the stick's log volume holds no line of the load that wrote it\n--- its log:\n{log}"));
+    }
     if let Err(unfit) = bootlog::verdict(&log) {
         return Err(format!(
             "the stick's log volume ({names:?}) is no whole boot's log: {unfit:?}\n--- its log:\n{log}\n--- the console:\n{console}"

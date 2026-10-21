@@ -564,3 +564,22 @@ pub fn blackbox_unclaimed(
 /// What `/system/bin/acpiserver` says once it serves q35's power button,
 /// whole, before it loads the tables.
 const ACPI_ARMED: &str = "acpiserver: armed: power button served";
+
+/// [`STICK_LOAD_JOB`](super::metal::STICK_LOAD_JOB)'s boot: the job wrote the
+/// stick through usbd, the boot deadline ended the machine while it did, and
+/// the stick came back on the next host. How long it took to enumerate is
+/// judged against the bench's record (`boot.usbload.stick_secs`), and a stick
+/// that never came back is a readback that failed before this was asked.
+pub fn stick_survives_a_reset_under_load(back: &super::metal::Readback) -> Result<(), String> {
+    let after = back.after_the_reset()?;
+    after.must_say(bootlog::PREVIOUS_PANIC)?;
+    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
+    says_nothing_of(&after, REBOOTING)?;
+    let log = back.log();
+    let wrote = log.must_say("stick_load: ")?;
+    eprintln!("  [power] {}", wrote.trim());
+    if let Some(last) = log.text().lines().filter(|l| l.contains("stick_load: ")).last() {
+        eprintln!("  [power] the last it said before the reset: {}", last.trim());
+    }
+    back.measured("boot.usbload.stick_secs", back.stick_secs)
+}

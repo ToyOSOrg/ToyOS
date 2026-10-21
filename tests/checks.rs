@@ -1150,6 +1150,15 @@ mod checks {
         let unnamed = format!("{staged}{}{}|   cpu0 pc=0xffff80006051b0b2  {spin}\n", awake(1), awake(0));
         assert!(judge(&[&readback("deadlinewedge", &wedged(&unnamed), kernel)]).is_err());
 
+        // The stick load's boot: its deadline ended it while the job's lines
+        // were reaching /log; one whose job never wrote, or that handed the
+        // machine back, is no reset under load.
+        let judge = metal_judge("stick_survives_a_reset_under_load");
+        let wrote = format!("{kernel}[2026-09-29 10:33:40 20.100 test-runner pid=12] stick_load: 4 MiB written and synced\n");
+        assert_eq!(judge(&[&readback("usbload", &wedged(""), &wrote)]), Ok(()));
+        assert!(judge(&[&readback("usbload", &wedged(""), kernel)]).is_err());
+        let handed_back = format!("{}| log-tail: [20.200 cpu0 kernel] Rebooting.\n", wedged(""));
+        assert!(judge(&[&readback("usbload", &handed_back, &wrote)]).is_err());
     }
 
     /// The foreign-identity arm's pass after the reset: the record it cleared
