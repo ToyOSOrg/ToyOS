@@ -62,7 +62,7 @@ const SOURCE_FRAMES: usize = 64;
 /// apply.
 const SEED_MAX_BYTES: usize = 64 * 1024;
 
-/// The name `/system/bin/supervisor` starts this program under, which its own lines
+/// The name the supervisor starts this program under, which its own lines
 /// come back from `logkeeper` tagged with.
 const OWN_TAG: &str = "console";
 

@@ -16,6 +16,10 @@
 //! length the protocol says, is refused before it is mapped, since mapping a
 //! handle that names no region ends this process. [`SharedMemory::adopt`] is
 //! for a region the kernel itself handed this process.
+//!
+//! **A region nobody can write is an [`Immutable`]**, taken only once the
+//! kernel answers it is one: every mapping of it is read-only, so it has no
+//! mutable view to offer.
 
 use core::fmt;
 use core::sync::atomic::AtomicU8;
@@ -147,6 +151,45 @@ fn judge(stat: &Stat, bytes: usize) -> Result<(), Lent> {
 }
 
 impl AsHandle for SharedMemory {
+    fn as_handle(&self) -> RawHandle {
+        self.handle.raw()
+    }
+}
+
+/// A region nobody can write, mapped read-only: a payload the loader verified,
+/// as the kernel hands it out (`toyos_abi::boot::BootImage`).
+pub struct Immutable {
+    handle: OwnedHandle,
+    ptr: *const u8,
+    len: usize,
+}
+
+// SAFETY: the mapping is read-only and nobody writes the region.
+unsafe impl Send for Immutable {}
+// SAFETY: as for `Send`: there is nothing to race with.
+unsafe impl Sync for Immutable {}
+
+impl Immutable {
+    /// Map `handle`, refused and never mapped unless the kernel answers it is
+    /// a region nobody can write. Its length is the kernel's answer. The handle
+    /// is consumed either way.
+    pub fn adopt(handle: OwnedHandle) -> Result<Self, Lent> {
+        let stat = syscall::fstat(handle.raw()).map_err(Lent::Kernel)?;
+        if stat.file_type != FileType::ImmutableMemory {
+            return Err(Lent::NotRam);
+        }
+        // A region the kernel maps is within the address space, so its length is a `usize`.
+        Ok(Self { ptr: map(&handle).map_err(Lent::Kernel)?, handle, len: stat.size as usize })
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: the mapping is `len` bytes, lives as long as `self`, and is
+        // written by nobody, so a shared reference over it is sound.
+        unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+impl AsHandle for Immutable {
     fn as_handle(&self) -> RawHandle {
         self.handle.raw()
     }

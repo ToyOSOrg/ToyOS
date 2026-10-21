@@ -2,7 +2,7 @@
 //! header, [`LANES`] lanes of [`LANE_SLOTS`] slots, and [`SHARED_SLOTS`] slots
 //! of shared ring — each slot a protocol word and a [`Body`].
 //!
-//! `/system/bin/supervisor` creates one per program it starts, lays it out before
+//! The supervisor creates one per program it starts, lays it out before
 //! any other process can map it ([`Ring::lay_out`]), gives the program
 //! duplicates as its stdout and stderr, and hands `/system/bin/logkeeper` the
 //! region with the program's name. The program writes, `logkeeper` reads, and

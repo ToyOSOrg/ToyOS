@@ -758,7 +758,7 @@ fn phy_configured<R: Registers, C: Clock>(regs: &R, clock: &C, since: u64) -> Op
 
 /// Which part the claim is on.
 ///
-/// **The parent's answer and never a probe**: `/system/bin/supervisor` moved a claim
+/// **The parent's answer and never a probe**: the supervisor moved a claim
 /// on a declared vendor and device into this process, and a driver that read
 /// the register file to work out which part it was on would be guessing at the
 /// registers it does not yet trust.

@@ -36,6 +36,7 @@ mod floor;
 mod gcd;
 mod loaderlog;
 mod microcode;
+mod payload;
 mod rootbridge;
 mod rootimage;
 mod seed;
@@ -532,8 +533,15 @@ fn report_reach(what: &str, at: u64, len: u64) {
     );
 }
 
+/// What the chosen slot hands the kernel beside its ELF and parameter.
+struct Handed {
+    root: rootimage::RootImage,
+    supervisor: payload::Payload,
+    fileserver: payload::Payload,
+}
+
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, slot_volume_guid: [u8; 16], microcode: Option<&'static [u8]>, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], handed: Handed, slot_volume_guid: [u8; 16], microcode: Option<&'static [u8]>, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -628,7 +636,9 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             None => ([0u8; 16], 0, 0, 0),
         };
 
-    let (root_image_addr, root_image_len, root_partition_guid, root_read_ticks) = root_image.handoff();
+    let root_image = handed.root.pages.handoff();
+    let (root_partition_guid, root_read_ticks) = (handed.root.partition, handed.root.ticks);
+    let (supervisor_image, fileserver_image) = (handed.supervisor.handoff(), handed.fileserver.handoff());
 
     // The BSP loads it before `mm::init`, through the boot map.
     let (microcode_addr, microcode_len) = microcode.map_or((0, 0), |patch| (patch.as_ptr() as u64, patch.len() as u64));
@@ -667,8 +677,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         cmdline_len: cmdline.len() as u64,
         root_bridge_window_count,
         root_bridge_windows,
-        root_image_addr,
-        root_image_len,
+        root_image,
         root_partition_guid,
         loader_entry_counter: entry_counter,
         loader_handoff_counter: 0,
@@ -684,6 +693,8 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         microcode_addr,
         microcode_len,
         slot_volume_guid,
+        supervisor_image,
+        fileserver_image,
     };
     if let Some(edid) = gop.as_ref().and_then(|g| g.edid) {
         kernel_args.gop_edid = edid;
@@ -944,8 +955,8 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
 
     println!("Log partition: signature {:02x?}", log_guid);
 
-    // Every byte the kernel is handed below — its ELF, its parameter and ROOT —
-    // is one the chosen slot's signed header names. ROOT is read before the
+    // Every byte the kernel is handed below — its ELF, its parameter, the two
+    // programs and ROOT — is one the chosen slot's signed header names. ROOT is read before the
     // kernel is loaded and not after: it is the allocation the image pages come
     // from, and a slot whose ROOT is refused has no use for the kernel's.
     let chosen = slot::choose(handle, &system_table, image_floor.value, &record)
@@ -985,7 +996,7 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     println!("Loading kernel elf...");
     let loaded_kernel = load_kernel_elf(&kernel_bytes);
 
-    let microcode = microcode::find(system_table.boot_services(), &chosen.root);
+    let microcode = microcode::find(system_table.boot_services(), &chosen.root.pages);
 
     // Query UEFI GOP before exiting boot services
     let gop = query_gop(&system_table);
@@ -1014,5 +1025,5 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, chosen.volume, microcode, entry_counter, wall_clock, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, Handed { root: chosen.root, supervisor: chosen.supervisor, fileserver: chosen.fileserver }, chosen.volume, microcode, entry_counter, wall_clock, system_table);
 }

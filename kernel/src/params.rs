@@ -18,7 +18,7 @@ static EARLY_PANEL_NAMED: AtomicBool = AtomicBool::new(false);
 static PARSED: AtomicBool = AtomicBool::new(false);
 
 pub fn init(cmdline: &str) {
-    for token in toyos_abi::boot::actuators(cmdline) {
+    for token in toyos_abi::boot::tokens(cmdline) {
         if let Some((_, named)) = PARAMS.iter().find(|(name, _)| *name == token) {
             named.store(true, Ordering::Relaxed);
         }
@@ -49,7 +49,7 @@ pub const SLOT_RECORD: &str = "boot: slot";
 /// loader wrote them: the last of each, because the loader appends its words
 /// after the slot's own parameter and so has the last one.
 pub fn slot(cmdline: &str) -> (Option<&str>, Option<&str>) {
-    let word = |prefix: &str| toyos_abi::boot::actuators(cmdline).filter_map(|t| t.strip_prefix(prefix)).last();
+    let word = |prefix: &str| toyos_abi::boot::tokens(cmdline).filter_map(|t| t.strip_prefix(prefix)).last();
     (word(toyos_abi::boot::SLOT_PARAM), word(toyos_abi::boot::SLOT_REFUSED_PARAM))
 }
 

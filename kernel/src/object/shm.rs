@@ -43,9 +43,21 @@ pub struct Region {
     pub phys: DirectMap,
     pub size: u64,
     pub cache: CachePolicy,
-    /// The pages, when the kernel owns them; `None` for firmware's
-    /// framebuffer or an MMIO aperture it does not own.
-    pub pages: Option<Arc<Pages>>,
+    pub memory: Memory,
+}
+
+/// Whose memory a region is.
+#[derive(Clone)]
+pub enum Memory {
+    /// Pages the kernel allocated, freed with the last `Arc`, which the
+    /// field only keeps alive.
+    Owned { _pages: Arc<Pages> },
+    /// A payload the loader verified and handed over, `len` bytes of the
+    /// region's pages: kept for the machine's life and written by nobody, so
+    /// every mapping of it is read-only (`crate::bootimage`).
+    Boot { len: u64 },
+    /// Firmware's framebuffer or an MMIO aperture the kernel does not own.
+    Foreign,
 }
 
 pub struct SharedMemObject {
@@ -103,7 +115,7 @@ impl SharedMemObject {
             phys,
             size: aligned,
             cache: CachePolicy::Normal,
-            pages: Some(Arc::new(Pages(pages))),
+            memory: Memory::Owned { _pages: Arc::new(Pages(pages)) },
         }))
     }
 
@@ -117,8 +129,23 @@ impl SharedMemObject {
     /// a second device's domain would be one device reaching another's
     /// registers.
     pub fn ram(&self) -> Option<(u64, u64)> {
-        (self.region.pages.is_some() && self.region.cache == CachePolicy::Normal)
+        (matches!(self.region.memory, Memory::Owned { .. }) && self.region.cache == CachePolicy::Normal)
             .then(|| (self.region.phys.phys(), self.region.size))
+    }
+
+    /// The payload's length, for a region the loader handed over: memory
+    /// nobody writes.
+    pub fn immutable(&self) -> Option<u64> {
+        match self.region.memory {
+            Memory::Boot { len } => Some(len),
+            Memory::Owned { .. } | Memory::Foreign => None,
+        }
+    }
+
+    /// Whether a program may be paged from it: ordinary memory, never a
+    /// device's, whose read is a device access.
+    pub fn is_ordinary(&self) -> bool {
+        self.ram().is_some() || self.immutable().is_some()
     }
 
     /// The kernel's own view of the pages, through the direct map; a mapped
@@ -153,9 +180,13 @@ impl SharedMemObject {
             if let Some(m) = mapped.iter().find(|m| m.space.as_ptr() == Arc::as_ptr(pt)) {
                 return Ok(m.at.raw());
             }
+            let prot = match self.region.memory {
+                Memory::Boot { .. } => Prot::Read,
+                Memory::Owned { .. } | Memory::Foreign => Prot::ReadWrite,
+            };
             let (addr, _) = pt
                 .lock()
-                .alloc_and_map(self.region.phys.phys(), self.region.size, Prot::ReadWrite, self.region.cache)
+                .alloc_and_map(self.region.phys.phys(), self.region.size, prot, self.region.cache)
                 .ok_or(SyscallError::ResourceExhausted)?;
             // Logged only for a non-default policy: this process is the one
             // paying for it. Read back the installed policy, not the request,
@@ -191,7 +222,7 @@ impl SharedMemObject {
 
 /// Every mapping goes, flushed here, and with the list gone no later map can
 /// add one; the pages do not, since a handle holds an `Arc` and
-/// `Region::pages` frees them only when the last one drops.
+/// [`Memory::Owned`] frees them only when the last one drops.
 impl ZeroHandles for SharedMemObject {
     fn on_zero_handles(&self) {
         let mapped = self.mapped_in.take().expect("the zero-handle hook runs once");

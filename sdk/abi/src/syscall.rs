@@ -341,7 +341,7 @@ crate::user_safe! {
         pub labels_ptr: u64,
         pub labels_len: u64,
         /// The child's working directory, absolute, or the spawn is refused
-        /// `InvalidArgument`. Under a name the kernel serves (`/system`, `/tmp`) it
+        /// `InvalidArgument`. Under the name the kernel serves (`/tmp`) it
         /// must be a directory there or the spawn is `NotFound`; under any other
         /// name it is a file server's directory, which the caller's client asked
         /// that server about and the kernel cannot. **Always the caller's
@@ -418,6 +418,13 @@ const _: () = assert!(core::mem::size_of::<EndowEntry>() == 16);
 pub const SYSCAP_LABEL: &str = "syscap";
 /// The label for a program's namespace — what its manifest `receives` becomes.
 pub const SVC_LABEL: &str = "svc";
+/// The labels the kernel puts on the immutable memory objects it hands the
+/// supervisor beside the system capability: the file server's executable and
+/// ROOT's bytes, both as the loader verified them (`boot::KernelArgs`). The
+/// file server's is also the path its manifest row names, which is where its
+/// image comes from.
+pub const FILESERVER_IMAGE_LABEL: &str = "boot:fileserver";
+pub const ROOT_IMAGE_LABEL: &str = "boot:root";
 /// The label every process starts holding a handle to itself under, carrying
 /// `WRITE`, `DUP` and `TRANSFER`: what it hands on for a child to be placed
 /// under it ([`SpawnArgs::place`]). The kernel puts it in every table.
@@ -604,6 +611,10 @@ pub enum FileType {
     DeviceMemory = 13,
     /// A [null](null) handle.
     Null = 14,
+    /// A region nobody can write, which every mapping of is read-only: a
+    /// payload the loader verified (`boot::BootImage`); `size` is the
+    /// payload's length, within the region's pages.
+    ImmutableMemory = 15,
 }
 
 impl FileType {
@@ -621,6 +632,7 @@ impl FileType {
             12 => Some(Self::Symlink),
             13 => Some(Self::DeviceMemory),
             14 => Some(Self::Null),
+            15 => Some(Self::ImmutableMemory),
             _ => None,
         }
     }

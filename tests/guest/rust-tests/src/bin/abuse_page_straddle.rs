@@ -13,6 +13,9 @@
 //! them contiguously, so the bytes the kernel would have written past the end
 //! of the first physical page are bytes this process can read back.
 
+#[path = "../image.rs"]
+mod image;
+
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{
     self, MmapFlags, MmapProt, OpenFlags, ProcessStats, SpawnArgs, Stat, SyscallError, SYS_FSTAT,
@@ -68,7 +71,8 @@ fn main() {
     let boundary = base + PAGE_2M;
     assert_eq!(base % PAGE_2M, 0, "mmap did not return a 2 MiB-aligned region");
 
-    let handle = syscall::open(b"/system/bin/test_rs_abuse_page_straddle", OpenFlags::READ).expect("open self");
+    let own = image::in_tmp("/system/bin/test_rs_abuse_page_straddle");
+    let handle = syscall::open(own.as_bytes(), OpenFlags::READ).expect("open self");
 
     // 1. A `Stat` eight bytes below the boundary: eight bytes of it are in this
     //    page and the rest are not.
@@ -111,6 +115,8 @@ fn main() {
     //    That is the observation: a child means the kernel acted on bytes
     //    it never validated.
     let argv = b"/system/bin/echo\0straddle\0";
+    let echo = image::image_of("/system/bin/echo");
+    let (image, image_len) = echo.spawn_words();
     unsafe {
         core::ptr::copy_nonoverlapping(argv.as_ptr(), base as *mut u8, argv.len());
     }
@@ -127,8 +133,8 @@ fn main() {
         labels_len: 0,
         cwd_ptr: CWD.as_ptr() as u64,
         cwd_len: CWD.len() as u64,
-        image: 0,
-        image_len: 0,
+        image,
+        image_len,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     let placed = (boundary - 8) as *mut SpawnArgs;

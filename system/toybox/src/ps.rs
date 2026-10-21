@@ -5,7 +5,7 @@
 //! the image's `[programs.toybox]` row declares — a config that does not name
 //! `roster` there builds an image whose `ps` says it cannot and changes nothing
 //! else. Nothing here asks for the capability: it is either in the endowment
-//! table `/system/bin/supervisor` filled at spawn or it does not exist for this process.
+//! table the supervisor filled at spawn or it does not exist for this process.
 //! What the roster says is [`crate::roster`]'s to read.
 //!
 //! `free` is the other half of the same syscall and needs none of this: the

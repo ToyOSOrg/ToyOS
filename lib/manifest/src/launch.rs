@@ -1,4 +1,4 @@
-//! Who may start what through `/system/bin/supervisor`'s launcher.
+//! Who may start what through the supervisor's launcher.
 //!
 //! **A caller starts only the rows its own row's `starts` lists**: program
 //! keys, and [`APPS`] for any installed package. **A row that replaces what the

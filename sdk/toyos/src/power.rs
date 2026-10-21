@@ -1,4 +1,4 @@
-//! Asking `/system/bin/supervisor` to stop the machine.
+//! Asking the supervisor to stop the machine.
 //!
 //! **The stop is the supervisor's to sequence, because the log is a process.** The
 //! kernel stops every userland thread at once and waits for none of them, so

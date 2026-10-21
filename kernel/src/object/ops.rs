@@ -677,8 +677,12 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         KObjectRef::Acceptor(_) => plain(FileType::Pipe),
         KObjectRef::SharedMem(m) => Stat {
             // The verdict `pcidev::dma_map` lends a device by: a receiver judges a peer's region on it before mapping.
-            file_type: if m.ram().is_some() { FileType::SharedMemory } else { FileType::DeviceMemory } as u64,
-            size: m.size(),
+            file_type: match (m.ram(), m.immutable()) {
+                (Some(_), _) => FileType::SharedMemory,
+                (None, Some(_)) => FileType::ImmutableMemory,
+                (None, None) => FileType::DeviceMemory,
+            } as u64,
+            size: m.immutable().unwrap_or(m.size()),
             mtime: 0,
             volume: 0,
             node: 0,

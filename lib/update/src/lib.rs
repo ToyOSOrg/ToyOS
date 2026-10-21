@@ -4,8 +4,8 @@
 //! about it. Pure: no firmware, no device, and no allocation but [`repo`]'s.
 //!
 //! **The contract.** An [`image`] is a header naming a monotonic version and
-//! the SHA-256 of each of its sections — the kernel, its boot parameter and
-//! ROOT — followed by an Ed25519 signature over that header, and then the
+//! the SHA-256 of each of its sections — the kernel, its boot parameter, the
+//! supervisor, the file server that serves ROOT, and ROOT — followed by an Ed25519 signature over that header, and then the
 //! sections. The signature covers the hashes and never the bytes, so the
 //! bytes may arrive by any path and in any order: an `ssh … update < image`
 //! today, a pull of content-addressed chunks tomorrow, the same signature over
@@ -14,7 +14,7 @@
 //! ordinary Ed25519 key and a second implementation can sign or check an image.
 //!
 //! A machine carries two [`slots`], each a FAT partition holding the kernel,
-//! its boot parameter and the signed header, and a ROOT partition holding
+//! its boot parameter, the two programs and the signed header, and a ROOT partition holding
 //! ROOT; the slot table names both slots and marks one. The loader boots the
 //! marked slot, and falls back to the other where the marked one is refused or
 //! died on its last boot ([`record`]); the updater writes only the slot the

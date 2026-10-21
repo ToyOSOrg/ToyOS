@@ -125,8 +125,8 @@ use toyos_logstream::{
 };
 use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
 use toyos_abi::syscall::{
-    DeviceRequest, FileType, SyscallError, DEV_PREFIX, JOB_LABEL, MAX_BADGE, PROVIDE_PREFIX, SERVE_PREFIX,
-    SVC_LABEL, SYSCAP_LABEL,
+    DeviceRequest, FileType, SyscallError, DEV_PREFIX, FILESERVER_IMAGE_LABEL, JOB_LABEL, MAX_BADGE, PROVIDE_PREFIX,
+    ROOT_IMAGE_LABEL, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL,
 };
 
 /// netstack's port, whose every connector the supervisor mints for one row and
@@ -403,47 +403,22 @@ fn make_dir(path: &str) -> std::io::Result<()> {
 fn main() {
     // Before anything is started, and before the supervisor says anything: from here
     // the supervisor's own lines are records in its ring.
-    let log = Log::open();
-    say_release();
+    let mut log = Log::open();
 
     let syscap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("supervisor: the kernel spawns this program holding the system capability");
+    let boot: &'static Boot = Box::leak(Box::new(Boot::take()));
 
-    let bytes = read_root(toyos_manifest::GUEST_PATH)
-        .unwrap_or_else(|e| panic!("supervisor: cannot read {}: {e:?}", toyos_manifest::GUEST_PATH));
-    let text = String::from_utf8(bytes)
-        .unwrap_or_else(|_| panic!("supervisor: {} is not text", toyos_manifest::GUEST_PATH));
-    // For the machine's life, and `'static` so a launch's path can be resolved
-    // against it on the supervisor's file worker.
-    let system: &'static Manifest = Box::leak(Box::new(toyos_manifest::parse(&text)));
-
-    // Before anything is spawned, and for every `serves` name in the manifest
-    // rather than only the ones `[boot] start` names: the filepicker is
-    // launched by the compositor, and an editor holding its connector must be
-    // able to ask for a file before the picker has run an instruction.
-    let mut acceptors = BTreeMap::new();
-    let mut connectors: BTreeMap<&str, Connector> = BTreeMap::new();
-    let names = system
-        .served_names()
-        .into_iter()
-        .chain(system.supervisor_serves.iter().map(String::as_str));
-    for name in names {
-        let (acceptor, connector) =
-            port::create().unwrap_or_else(|e| panic!("supervisor: no port for `{name}`: {e:?}"));
-        acceptors.insert(name, acceptor);
-        connectors.insert(name, connector);
-    }
-    // Its connector goes at once: every `netstack` a program holds is one
-    // minted with that program's row and session (`Grants::netstack`).
-    drop(connectors.remove(NETSTACK));
-
-    // One port per file-server role, made here for the same reason: a
+    // **Everything the supervisor's own files and the SYSTEM server need is
+    // made before a file is read**, since the manifest is a file of `/system`
+    // and SYSTEM is what serves it. One port per file-server role, then: a
     // program's first open works whether or not its server runs yet. Its
     // connector goes at once: every connector a program holds to it is a
-    // grant minted for that program's share (`Grants`).
+    // grant minted for that program's share (`Grants`). A role no row serves
+    // has its port closed once the manifest says so.
     let mut role_acceptors: BTreeMap<&str, Acceptor> = BTreeMap::new();
-    for role in system.programs.iter().flat_map(|p| p.roles.iter()) {
+    for (role, _) in toyos_manifest::ROLES {
         let (acceptor, _) = port::create().unwrap_or_else(|e| panic!("supervisor: no port for the `{role}` role: {e:?}"));
         role_acceptors.insert(role, acceptor);
     }
@@ -455,7 +430,7 @@ fn main() {
         let whole = toyos_manifest::whole_tree();
         let own: Vec<(String, Connector)> = whole
             .iter()
-            .filter_map(|view| Some((role_acceptors.get(view.role)?, view)))
+            .map(|view| (&role_acceptors[view.role], view))
             .map(|(acceptor, view)| mint(acceptor, authority::SUPERVISOR_SHARE, view))
             .collect();
         let build = || {
@@ -471,13 +446,77 @@ fn main() {
         }
         Box::leak(Box::new(build()))
     };
-
     // Its connector goes at once: every launcher a program holds is one minted
     // with that program's row.
     let (launcher, _) = port::create().expect("supervisor: no port for `launcher`");
-    let grants_port = acceptors
-        .remove(grants::PORT)
-        .expect("supervisor: the manifest declares the supervisor serves `grants`");
+    let (grants_port, grants_connector) = port::create().expect("supervisor: no port for `grants`");
+    let minted = Minted { launcher, grants: grants_port };
+    let mut sessions = Sessions::default();
+
+    // SYSTEM, from the file server's boot image: what serves `/system`. No
+    // manifest row holds it, since it serves the manifest.
+    let system_row: &'static Program = Box::leak(Box::new(system_row()));
+    let acceptor = role_acceptors.remove(toyos_manifest::SYSTEM).expect("SYSTEM is a role");
+    let mut system_service = Service::new(
+        system_row,
+        Some(toyos_manifest::SYSTEM),
+        vec![(format!("{CAPABILITY_PREFIX}{}", toyos_manifest::SYSTEM), acceptor)],
+        sessions.machine(),
+    );
+    let no_grants = Grants { roles: Vec::new(), block: None, netstack: None };
+    let unread = Manifest::default();
+    let started = system_service.spawn(
+        &system_row.path,
+        &[],
+        Vec::new(),
+        &unread,
+        &syscap,
+        &BTreeMap::new(),
+        &no_grants,
+        &minted,
+        boot,
+        &mut log,
+    );
+    if let Err(e) = started {
+        bootstrap_fails(format!("the file server serving /system did not start: {e}"));
+    }
+
+    say_release(&system_service);
+    let text = read_system(toyos_manifest::GUEST_PATH, &system_service);
+    // For the machine's life, and `'static` so a launch's path can be resolved
+    // against it on the supervisor's file worker.
+    let system: &'static Manifest = Box::leak(Box::new(toyos_manifest::parse(&text)));
+    // A role no row serves: closed before anything asks it, so a connect to it
+    // answers `ServerGone` rather than waiting in a queue nothing will ever
+    // accept from.
+    role_acceptors.retain(|role, _| system.programs.iter().any(|p| p.roles.iter().any(|r| r == role)));
+
+    // Before anything is spawned, and for every `serves` name in the manifest
+    // rather than only the ones `[boot] start` names: the filepicker is
+    // launched by the compositor, and an editor holding its connector must be
+    // able to ask for a file before the picker has run an instruction.
+    // `grants` was made above, before the manifest said the supervisor serves it.
+    assert!(
+        system.supervisor_serves.iter().any(|name| name == grants::PORT),
+        "supervisor: the manifest declares the supervisor serves `grants`"
+    );
+    let mut acceptors = BTreeMap::new();
+    let mut connectors: BTreeMap<&str, Connector> = BTreeMap::from([(grants::PORT, grants_connector)]);
+    let names = system
+        .served_names()
+        .into_iter()
+        .chain(system.supervisor_serves.iter().map(String::as_str))
+        .filter(|name| *name != grants::PORT);
+    for name in names {
+        let (acceptor, connector) =
+            port::create().unwrap_or_else(|e| panic!("supervisor: no port for `{name}`: {e:?}"));
+        acceptors.insert(name, acceptor);
+        connectors.insert(name, connector);
+    }
+    // Its connector goes at once: every `netstack` a program holds is one
+    // minted with that program's row and session (`Grants::netstack`).
+    drop(connectors.remove(NETSTACK));
+
     // The supervisor alone holds a connector to it, so a connection on it is
     // the supervisor's question and nobody else's.
     let consent = connectors.remove(consent::PORT).map(|connector| {
@@ -486,18 +525,21 @@ fn main() {
             .finish()
             .expect("supervisor: no namespace for the consent port")
     });
+    let mut grants = no_grants;
+    grants.roles.push((toyos_manifest::SYSTEM, Rc::clone(&system_service.ports)));
     let mut supervisor = Supervisor {
         system,
-        minted: Minted { launcher, grants: grants_port },
+        minted,
         store: Store::default(),
         consent,
         syscap: &syscap,
+        boot,
         acceptors,
         connectors,
-        grants: Grants { roles: Vec::new(), block: None, netstack: None },
-        sessions: Sessions::default(),
+        grants,
+        sessions,
         files,
-        services: Vec::new(),
+        services: vec![system_service],
         drivers: drives::matchers(system),
         drives: Drives::default(),
         instances: Vec::new(),
@@ -613,6 +655,8 @@ struct Supervisor<'a> {
     /// the screen on.
     consent: Option<Namespace>,
     syscap: &'a SysCap,
+    /// The images the kernel handed the supervisor.
+    boot: &'static Boot,
     /// The `serves` acceptors nobody has been started with yet, which a launch
     /// takes by move.
     acceptors: BTreeMap<&'a str, Acceptor>,
@@ -711,6 +755,7 @@ impl<'a> Service<'a> {
         connectors: &BTreeMap<&str, Connector>,
         grants: &Grants<'_>,
         minted: &Minted,
+        boot: &Boot,
         log: &mut Log,
     ) -> Result<u32, StartError> {
         // **Checked again at every start, not only on arrival**: the installed
@@ -724,14 +769,19 @@ impl<'a> Service<'a> {
                 std::io::Error::other(format!("{path} no longer holds what was installed: {why}"))
             })?;
         }
-        let mut storage = storage_endowment(self.role, syscap, grants)?;
+        let mut storage = storage_endowment(self.role, syscap, grants, boot)?;
         if is_block(self.program) {
             storage.args.extend(block);
         }
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
+        let mut command = Command::new(path);
+        if path == FILESERVER_IMAGE_LABEL {
+            command = Command::new(&self.program.name);
+            command.boot_image(boot.fileserver.as_handle().0);
+        }
         let (child, devices) = start(
-            Command::new(path),
+            command,
             self.program,
             system,
             syscap,
@@ -895,6 +945,10 @@ impl<'a> Supervisor<'a> {
             self.make_home(program);
             let block = self.block_args();
             let service = &mut self.services[at];
+            // SYSTEM was started before the manifest was read.
+            if service.child.is_some() {
+                continue;
+            }
             let started = service.spawn(
                 &program.path,
                 &[],
@@ -904,6 +958,7 @@ impl<'a> Supervisor<'a> {
                 &self.connectors,
                 &self.grants,
                 &self.minted,
+                self.boot,
                 &mut self.log,
             );
             match started {
@@ -1554,6 +1609,7 @@ impl<'a> Supervisor<'a> {
             &self.connectors,
             &self.grants,
             &self.minted,
+            self.boot,
             &mut self.log,
         );
         match started {
@@ -1775,7 +1831,7 @@ impl<'a> Supervisor<'a> {
                     let block = self.block_args();
                     let service = &mut self.services[index];
                     let (system, syscap, connectors, grants) = (self.system, self.syscap, &self.connectors, &self.grants);
-                    match service.spawn(&path, &owed, block, system, syscap, connectors, grants, &self.minted, &mut self.log) {
+                    match service.spawn(&path, &owed, block, system, syscap, connectors, grants, &self.minted, self.boot, &mut self.log) {
                         Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
                         Err(e) => {
                             service.ports.borrow_mut().clear();
@@ -1810,7 +1866,7 @@ impl<'a> Supervisor<'a> {
         let block = self.block_args();
         let service = &mut self.services[index];
         let name = service.program.name.clone();
-        match service.spawn(previous, owed, block, self.system, self.syscap, &self.connectors, &self.grants, &self.minted, &mut self.log) {
+        match service.spawn(previous, owed, block, self.system, self.syscap, &self.connectors, &self.grants, &self.minted, self.boot, &mut self.log) {
             Ok(pid) => {
                 service.swapping = false;
                 swapped(&name, Word::Restored, &format!("{previous} as pid {pid}"));
@@ -2605,7 +2661,7 @@ fn start<'a>(
     launcher: (&Minted, Session),
     output: Output<'_>,
 ) -> Result<(Child, Vec<String>), StartError> {
-    let Extra { args, claims, ports, stop } = extra;
+    let Extra { args, claims, root, ports, stop } = extra;
     // A storage row's own arguments first: a file server's role leads its argv.
     command.args(&args);
     command.args(&program.args);
@@ -2647,6 +2703,10 @@ fn start<'a>(
         let raw = stop.into_raw();
         command.endow(toyos_quiesce::DRIVER_STOP, raw.0);
         held.0.push(raw);
+    }
+    if let Some(root) = root {
+        command.endow(ROOT_IMAGE_LABEL, root.0);
+        held.0.push(root);
     }
     let mut view = grants.view(program, launcher.1);
     view.extend(ports);
@@ -3152,6 +3212,8 @@ fn swapped(service: &str, word: Word, detail: &str) {
 struct Extra {
     args: Vec<String>,
     claims: Vec<(String, toyos::Device)>,
+    /// SYSTEM's ROOT image: a duplicate the start owns until the spawn moves it.
+    root: Option<toyos::RawHandle>,
     ports: Vec<(String, Connector)>,
     /// A disk driver's end of its [`toyos_quiesce::DRIVER_STOP`] pipe.
     stop: Option<Pipe>,
@@ -3191,15 +3253,15 @@ fn guid_text(guid: [u8; 16]) -> String {
     toyos_gpt::Guid(guid).to_string()
 }
 
-/// A file server's arguments and block connector for one start.
+/// A file server's arguments and the volume it is endowed for one start.
 ///
-/// A file server is told its role, and for LOG and BOOT the partition's GUID
+/// A file server is told its role. SYSTEM is handed ROOT's image. For LOG and BOOT, the partition's GUID
 /// the loader named, with `block` minted for that partition alone, writing for
 /// the log and reading for the boot volume; DATA it finds by type, through
 /// `block` minted for every DATA partition. A log or boot role the loader
 /// named no partition for, and a block port closed for good, each refuse the
 /// start: the role is then absent, never served from memory.
-fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>) -> Result<Extra, StartError> {
+fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>, boot: &Boot) -> Result<Extra, StartError> {
     use toyos_abi::inventory::Role;
     let mut storage = Extra::default();
     let Some(role) = role else {
@@ -3207,6 +3269,12 @@ fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>) -
     };
     storage.args.push(role.to_string());
     let served = match role {
+        toyos_manifest::SYSTEM => {
+            let root = toyos_abi::syscall::dup(boot.root.as_handle())
+                .map_err(|e| std::io::Error::other(format!("ROOT's image did not duplicate: {e:?}")))?;
+            storage.root = Some(root);
+            return Ok(storage);
+        }
         "data" => BlockGrant { scope: Scope::Kind(toyos_gpt::Guid::TOYOS_DATA.0), writes: true },
         "log" | "boot" => {
             let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
@@ -3225,34 +3293,12 @@ fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>) -
     Ok(storage)
 }
 
-/// A file of ROOT, through the kernel's own `open`.
-///
-/// **Not through std**: std resolves a path through this process's namespace,
-/// and the first path it resolves fixes that namespace for the process's life.
-/// The supervisor builds its namespace out of the manifest, so ROOT's files are read
-/// before std is asked anything.
-fn read_root(path: &str) -> Result<Vec<u8>, SyscallError> {
-    use toyos_abi::syscall::{self, OpenFlags};
-    let handle = syscall::open(path.as_bytes(), OpenFlags::READ)?;
-    let mut bytes = Vec::new();
-    let mut buf = [0u8; 4096];
-    let read = loop {
-        match syscall::read(handle, &mut buf) {
-            Ok(0) => break Ok(()),
-            Ok(n) => bytes.extend_from_slice(&buf[..n]),
-            Err(e) => break Err(e),
-        }
-    };
-    syscall::close(handle);
-    read.map(|()| bytes)
-}
-
-/// Say which build this machine runs: the first thing it says, so a boot
-/// that dies past here names its build in its log.
-fn say_release() {
+/// Say which build this machine runs: the first file the supervisor reads,
+/// so a boot that dies past here names its build in its log.
+fn say_release(server: &Service<'_>) {
     let path = toyos_osrelease::GUEST_PATH;
-    let bytes = read_root(path).unwrap_or_else(|e| panic!("supervisor: cannot read {path}: {e:?}"));
-    let release = toyos_osrelease::parse(&bytes)
+    let text = read_system(path, server);
+    let release = toyos_osrelease::parse(text.as_bytes())
         .unwrap_or_else(|e| panic!("supervisor: {path} is not one the build wrote: {e:?}"));
     say!(
         "{}{} {}, committed {} UTC, toolchain {}, {}",
@@ -3263,4 +3309,74 @@ fn say_release() {
         release.toolchain.as_str(),
         release.arch.machine()
     );
+}
+
+/// The file `path` of `/system`, read before the loop exists to start SYSTEM
+/// again: a server that ended or will not answer within [`FILES_BOUND`] is
+/// this boot's end, said by name.
+fn read_system(path: &'static str, server: &Service<'_>) -> String {
+    let (answer, answered) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("bootstrap".into())
+        .spawn(move || {
+            // The receiver is gone once the bound has passed.
+            let _ = answer.send(std::fs::read_to_string(path));
+        })
+        .expect("supervisor: no thread to read /system on");
+    match answered.recv_timeout(FILES_BOUND) {
+        Ok(Ok(text)) => text,
+        Ok(Err(e)) => bootstrap_fails(format!("cannot read {path}: {e}")),
+        Err(_) => bootstrap_fails(format!(
+            "{path} was not read in {} s; {} {}",
+            FILES_BOUND.as_secs(),
+            server.label(),
+            match server.child.as_ref().map(exit_of) {
+                Some(Some(exit)) => format!("ended, {exit}"),
+                _ => "is running and did not answer".to_string(),
+            }
+        )),
+    }
+}
+
+/// The boot's end before `logkeeper` runs, which no ring reaches yet: said on
+/// the console the kernel gave the supervisor, then a panic like any other.
+fn bootstrap_fails(why: String) -> ! {
+    let line = format!("supervisor: {why}\n");
+    let _ = toyos::fd::with(0, |console| toyos_abi::syscall::write(console.handle, line.as_bytes()));
+    panic!("supervisor: {why}");
+}
+
+/// The images the kernel hands the supervisor beside the system capability:
+/// the file server's executable and ROOT's bytes, which nobody writes
+/// (`toyos_abi::boot::BootImage`). Kept for the machine's life, since SYSTEM
+/// is started again from them.
+struct Boot {
+    fileserver: toyos::shm::Immutable,
+    root: toyos::shm::Immutable,
+}
+
+impl Boot {
+    fn take() -> Self {
+        let image = |label: &str| {
+            let handle: toyos::OwnedHandle = Endowments::get()
+                .take(label)
+                .unwrap_or_else(|| panic!("supervisor: the kernel spawns this program holding `{label}`"));
+            toyos::shm::Immutable::adopt(handle)
+                .unwrap_or_else(|why| panic!("supervisor: `{label}` is no image nobody writes: {why}"))
+        };
+        Self { fileserver: image(FILESERVER_IMAGE_LABEL), root: image(ROOT_IMAGE_LABEL) }
+    }
+}
+
+/// The row SYSTEM is started under, which no manifest declares since it
+/// serves the manifest: the file server's boot image, serving ROOT, started
+/// again when it ends, and holding nothing but its role's port and ROOT.
+fn system_row() -> Program {
+    Program {
+        name: "fileserver".to_string(),
+        path: FILESERVER_IMAGE_LABEL.to_string(),
+        roles: vec![toyos_manifest::SYSTEM.to_string()],
+        restart: true,
+        ..Program::default()
+    }
 }

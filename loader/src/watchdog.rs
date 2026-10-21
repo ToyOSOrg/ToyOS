@@ -48,7 +48,7 @@ impl Phys for Identity {
 /// Arm the watchdog when `cmdline` names it, and say on the console what was
 /// armed or why nothing was.
 pub fn arm(system_table: &SystemTable, rsdp_addr: u64, cmdline: &str) {
-    if !toyos_abi::boot::actuators(cmdline).any(|token| token == toyos_tco::PARAM) {
+    if !toyos_abi::boot::tokens(cmdline).any(|token| token == toyos_tco::PARAM) {
         return;
     }
     if !crate::arch::pio::EXISTS {

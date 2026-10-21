@@ -1,5 +1,5 @@
 //! What every program in an image is allowed to hold, written by the build
-//! system and read by `/system/bin/supervisor`.
+//! system and read by the supervisor.
 //!
 //! **One definition of the format, used by both halves.** `build/build.rs`
 //! resolves `system.toml` into a [`Manifest`] and [`render`]s it into the
@@ -52,7 +52,7 @@ pub mod package;
 /// spelling. [`GUEST_PATH`] is what a process opens.
 pub const PATH: &str = "etc/system.manifest";
 
-/// The path `/system/bin/supervisor` opens.
+/// The path the supervisor opens.
 pub const GUEST_PATH: &str = "/system/etc/system.manifest";
 
 /// A program key may be this long. Policy on the primitive: the launcher
@@ -60,7 +60,7 @@ pub const GUEST_PATH: &str = "/system/etc/system.manifest";
 /// truncated into some other program's.
 pub const MAX_PROGRAM_NAME: usize = 32;
 
-/// The port `/system/bin/supervisor` serves swaps on: its one holder replaces a
+/// The port the supervisor serves swaps on: its one holder replaces a
 /// running service's binary, so a row receiving it starts only in a login
 /// session ([`launch`]).
 pub const SWAP_PORT: &str = "swap";
@@ -100,18 +100,25 @@ pub struct RoleDir {
     /// What every program's namespace calls it, after `fs:`: `/home`.
     pub dir: &'static str,
     /// Where it is on the role's volume, which a grant on it names
-    /// (`toyos::fs::Grant`): DATA keeps its directories side by side, and LOG
-    /// and BOOT are each served whole.
+    /// (`toyos::fs::Grant`): DATA keeps its directories side by side, and
+    /// SYSTEM, LOG and BOOT are each served whole.
     pub root: &'static str,
+    /// Whether a grant on it may change it: SYSTEM's ROOT is the signed
+    /// image, which nothing does.
+    pub write: bool,
 }
 
 const fn dir(dir: &'static str, root: &'static str) -> RoleDir {
-    RoleDir { dir, root }
+    RoleDir { dir, root, write: true }
 }
+
+/// The role serving ROOT, which the supervisor starts before it reads a file.
+pub const SYSTEM: &str = "system";
 
 /// The file-server roles, and the directories each serves: one port per role,
 /// and one grant on it per directory.
-pub const ROLES: [(&str, &[RoleDir]); 3] = [
+pub const ROLES: [(&str, &[RoleDir]); 4] = [
+    (SYSTEM, &[RoleDir { dir: "/system", root: "", write: false }]),
     ("data", &[dir("/apps", "apps"), dir("/config", "config"), dir("/home", "home"), dir("/state", "state")]),
     ("log", &[dir("/log", "")]),
     ("boot", &[dir("/boot", "")]),
@@ -135,15 +142,21 @@ pub struct View {
     pub write: bool,
 }
 
-/// Every directory every role serves, each read-write: the view of a program
-/// no narrower one is declared for.
+/// Every directory every role serves, each read-write but `/system`: the view
+/// of a program no narrower one is declared for.
 pub fn whole_tree() -> Vec<View> {
     ROLES
         .iter()
         .flat_map(|(role, dirs)| {
-            dirs.iter().map(|d| View { role, dir: d.dir.to_string(), root: d.root.to_string(), write: true })
+            dirs.iter().map(|d| View { role, dir: d.dir.to_string(), root: d.root.to_string(), write: d.write })
         })
         .collect()
+}
+
+/// `/system`, read-only: in every view.
+fn system() -> View {
+    let [only] = role_dirs(SYSTEM).expect("SYSTEM is a role") else { panic!("SYSTEM serves one directory") };
+    View { role: SYSTEM, dir: only.dir.to_string(), root: only.root.to_string(), write: false }
 }
 
 /// The DATA directory `dir`, beneath one DATA serves.
@@ -307,9 +320,9 @@ impl Program {
     }
 
     /// The directories this row's program is endowed. **An installed package
-    /// sees its own directory read-only, its own folder of the home
-    /// read-write and the folder its launch was granted, and nothing else any
-    /// role serves**: no other package, no other part of the home, no
+    /// sees `/system` and its own directory read-only, its own folder of the
+    /// home read-write and the folder its launch was granted, and nothing else
+    /// any role serves**: no other package, no other part of the home, no
     /// `/config`, `/state`, `/log` or `/boot`.
     /// Every other row sees the whole tree, until each declares its own
     /// (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2).
@@ -317,7 +330,10 @@ impl Program {
         match self.package() {
             Some(name) => {
                 let granted = self.folder.iter().map(|f| data_dir(f.path.clone(), f.access == grants::Access::ReadWrite));
-                [data_dir(package::Package::dir(name), false), data_dir(app_home(name), true)].into_iter().chain(granted).collect()
+                [system(), data_dir(package::Package::dir(name), false), data_dir(app_home(name), true)]
+                    .into_iter()
+                    .chain(granted)
+                    .collect()
             }
             None => whole_tree(),
         }
@@ -651,7 +667,7 @@ mod tests {
                 },
                 Program {
                     name: "fileserver".into(),
-                    path: "/system/bin/fileserver".into(),
+                    path: toyos_abi::syscall::FILESERVER_IMAGE_LABEL.into(),
                     receives: vec!["block".into()],
                     roles: vec!["data".into(), "log".into()],
                     restart: true,
@@ -757,15 +773,22 @@ mod tests {
         row.view().into_iter().map(|v| (v.role, v.dir, v.root, v.write)).collect()
     }
 
-    /// **An installed package sees its own directory read-only and its own
-    /// folder read-write, and nothing else any role serves.** Spelled out
-    /// whole, so a third directory, a wider root or a writable package is red.
+    /// `/system`, read-only, as every view holds it.
+    fn system() -> (&'static str, String, String, bool) {
+        (SYSTEM, "/system".into(), String::new(), false)
+    }
+
+    /// **An installed package sees `/system` and its own directory read-only
+    /// and its own folder read-write, and nothing else any role serves.**
+    /// Spelled out whole, so a fourth directory, a wider root or a writable
+    /// package is red.
     #[test]
     fn a_package_s_view_is_its_own_directory_read_only_and_its_own_folder() {
         let row = sample().app_row("gbae", "/apps/gbae/gbae").unwrap();
         assert_eq!(
             views(&row),
             [
+                system(),
                 ("data", "/apps/gbae".into(), "apps/gbae".into(), false),
                 ("data", "/home/toy/Apps/gbae".into(), "home/toy/Apps/gbae".into(), true),
             ]
@@ -774,7 +797,7 @@ mod tests {
         let longest = "n".repeat(MAX_PROGRAM_NAME);
         let row = sample().app_row(&longest, &format!("/apps/{longest}/{longest}")).unwrap();
         assert_eq!(
-            views(&row).into_iter().map(|(_, _, root, write)| (root, write)).collect::<Vec<_>>(),
+            views(&row).into_iter().skip(1).map(|(_, _, root, write)| (root, write)).collect::<Vec<_>>(),
             [(format!("apps/{longest}"), false), (format!("home/toy/Apps/{longest}"), true)]
         );
     }
@@ -789,6 +812,7 @@ mod tests {
             assert_eq!(
                 views(&row),
                 [
+                    system(),
                     ("data", "/apps/gbae".into(), "apps/gbae".into(), false),
                     ("data", "/home/toy/Apps/gbae".into(), "home/toy/Apps/gbae".into(), true),
                     ("data", "/home/toy/Games".into(), "home/toy/Games".into(), write),
@@ -797,17 +821,20 @@ mod tests {
         }
     }
 
-    /// Every row the image declares sees the whole tree read-write, the
-    /// installer and the shell included: neither has authority over `/apps`
-    /// the other lacks.
+    /// Every row the image declares sees the whole tree read-write but
+    /// `/system`, the installer and the shell included: neither has authority
+    /// over `/apps` the other lacks, and nobody writes the signed image.
     #[test]
     fn every_declared_row_sees_the_whole_tree_read_write() {
         let m = parse("program pkg /system/bin/pkg\nprogram shell /system/bin/shell\n");
-        let whole: Vec<_> = ["/apps", "/config", "/home", "/state", "/log", "/boot"]
-            .iter()
-            .zip(["apps", "config", "home", "state", "", ""])
-            .zip(["data", "data", "data", "data", "log", "boot"])
-            .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), true))
+        let whole: Vec<_> = std::iter::once(system())
+            .chain(
+                ["/apps", "/config", "/home", "/state", "/log", "/boot"]
+                    .iter()
+                    .zip(["apps", "config", "home", "state", "", ""])
+                    .zip(["data", "data", "data", "data", "log", "boot"])
+                    .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), true)),
+            )
             .collect();
         let s = sample();
         for row in [m.program("pkg").unwrap(), m.program("shell").unwrap(), s.program("compositor").unwrap()] {

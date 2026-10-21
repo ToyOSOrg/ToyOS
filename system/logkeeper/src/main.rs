@@ -12,7 +12,7 @@
 //! (`toyos_logstream`'s header is the form):
 //!
 //! - **the kernel's records**, read off its ring with `SYS_LOG_READ`;
-//! - **every program's records**, read off the log ring `/system/bin/supervisor` made
+//! - **every program's records**, read off the log ring the supervisor made
 //!   for it and sent here with the manifest's name for the program and its pid,
 //!   on a connection only the supervisor holds ([`toyos_logstream::ORIGINS`]). A record is
 //!   that program's because it came out of that ring ([`origin`]). This

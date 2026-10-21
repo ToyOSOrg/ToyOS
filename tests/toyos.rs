@@ -512,6 +512,17 @@ const MACHINE_TESTS: &[&str] = &[
     // `images/console.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
+    // The UEFI loader's check of a boot program, which no host test reaches:
+    // a slot whose supervisor is bent is refused before boot services end,
+    // and the other slot boots. On both architectures' QEMU machines; the
+    // `bent_supervisor_falls_back` metal row runs it on a bench.
+    "a_bent_supervisor_is_refused_and_the_other_slot_boots",
+    // Memory the kernel frees only when a process's address space goes: a
+    // child spawned from an image (every program of `/system` is) holds the
+    // image until then, and a region its parent still maps must not keep
+    // that space alive. The kernel's object lifetimes, which no host test
+    // holds; one boot of QEMU's x86-64 machine.
+    "a_spawn_from_an_image_frees_it_when_the_child_ends",
     // The boot's log written through usbd onto the stick it booted from, and
     // still there once the machine has stopped: the path every metal boot's
     // `/log` takes, which no other QEMU row reads, because their console is
@@ -609,6 +620,10 @@ const MACHINE_TESTS: &[&str] = &[
 /// than derived from its config and parameters, because sharing is not always
 /// safe and only the author knows.
 const METAL: &[(&str, metal::Metal)] = &[
+    (
+        "bent_supervisor_falls_back",
+        metal::Metal { arms: BENT_SUPERVISOR, judge: |b| bent_supervisor_fell_back(&b[0].loader(), &b[0].kernel()) },
+    ),
     // ---- one image: tests/images/testcases.toml, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -2463,6 +2478,47 @@ fn console_image_boots() -> Result<(), String> {
     said.must_be_clean()
 }
 
+/// Megabytes in use, by `free`'s line, after `free` itself has ended.
+fn used_mib(qemu: &mut QemuInstance) -> Result<u64, String> {
+    let said = qemu.run_test("free", Duration::from_secs(30)).stdout;
+    let line = said.lines().find(|l| l.trim_end().ends_with('M')).ok_or_else(|| format!("free said no figures:\n{said}"))?;
+    let used = line.split_whitespace().nth(1).and_then(|w| w.strip_suffix('M')?.parse().ok());
+    used.ok_or_else(|| format!("free's line {line:?} names no used megabytes"))
+}
+
+/// Eight spawns of a program read from `/system` into an image, each of a
+/// child that maps the log ring its parent keeps: what is in use after them is
+/// what was before, give or take one 2 MiB image. A child's ended address
+/// space kept alive by its parent's ring holds the image, 2 MiB a spawn.
+fn a_spawn_from_an_image_frees_it_when_the_child_ends(test_config: &Path) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], BootOptions::default());
+    let before = used_mib(&mut qemu)?;
+    for _ in 0..8 {
+        used_mib(&mut qemu)?;
+    }
+    let after = used_mib(&mut qemu)?;
+    match after <= before + 2 {
+        true => Ok(()),
+        false => Err(format!("{} MiB more is in use after eight spawns than before them: {before} MiB, then {after}", after - before)),
+    }
+}
+
+/// What a boot whose marked slot's supervisor is bent says: the loader refused
+/// that slot by the section, and the kernel was booted from the other.
+fn bent_supervisor_fell_back(loader: &serial::Serial, kernel: &serial::Serial) -> Result<(), String> {
+    let refused = toyos_update::policy::Refusal::Hash(toyos_update::image::SUPERVISOR);
+    loader.must_say(&format!("Slot A: REFUSED, {refused}"))?;
+    // `kernel/src/params.rs`'s `SLOT_RECORD`, which the kernel's binary keeps.
+    kernel.must_say(&format!("boot: slot B, because the marked slot A was refused: {}", refused.word()))?;
+    Ok(())
+}
+
+/// [`bent_supervisor_fell_back`] on a bench, whose loader keeps its own log.
+const BENT_SUPERVISOR: &[metal::Arm] = &[metal::Arm {
+    bent: Some(toyos_update::slots::SUPERVISOR_FILE),
+    ..metal::once("bentsupervisor", "tests/images/testcases.toml", &[], &[])
+}];
+
 /// Boot `tests/images/testcases.toml` from a USB stick, as a metal boot does,
 /// write the stick through usbd ([`metal::STICK_LOAD_JOB`]), press the power
 /// button while it writes, and read the stick's log volume back with the metal
@@ -3782,7 +3838,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 "percpu: BSP cpu_id=0",
                 "GIC: v",
                 "clock: the generic timer counts at",
-                "spawned /system/bin/supervisor pid=",
+                "spawned the supervisor pid=",
                 SPAWNED,
             ] {
                 if !serial.contains(want) {
@@ -4121,6 +4177,16 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
+        "a_spawn_from_an_image_frees_it_when_the_child_ends" => a_spawn_from_an_image_frees_it_when_the_child_ends(test_config),
+        "a_bent_supervisor_is_refused_and_the_other_slot_boots" => {
+            [qemu::Profile::Headless, qemu::Profile::Virt].into_iter().try_for_each(|profile| {
+                let options = BootOptions { profile, bent: Some(toyos_update::slots::SUPERVISOR_FILE), ..Default::default() };
+                let qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+                let loader = serial::Serial::named("loader's serial", qemu.loader_log());
+                let kernel = serial::Serial::named("boot's console", qemu.boot_log().to_string());
+                bent_supervisor_fell_back(&loader, &kernel)
+            })
+        }
         "the_log_lands_on_the_boot_stick" => the_log_lands_on_the_boot_stick(test_config),
         "a_usb_key_reaches_the_console" => a_usb_key_reaches_the_console(),
         "desktop_without_x2apic" => desktop_without_x2apic(),

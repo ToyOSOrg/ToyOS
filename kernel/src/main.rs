@@ -45,14 +45,13 @@ mod power;
 mod inventory;
 mod loaded;
 mod rollback;
-mod rootfs;
+mod bootimage;
 mod file_cache;
 #[cfg(feature = "boot-actuators")]
 #[cfg(feature = "boot-actuators")]
 mod revoke_selftest;
 mod tmpfs;
 mod file_backing;
-mod bcachefs_adapter;
 mod fs_rename;
 mod vfs;
 mod elf;
@@ -265,7 +264,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
-    let root_image = rootfs::init(cmdline, &kernel_args, maps);
+    let [supervisor_image, fileserver_image, root_image] = bootimage::init(&kernel_args, maps);
 
     arch::boot::after_console(&kernel_args, maps);
 
@@ -310,13 +309,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         "boot: cmdline {:#x}+{}",
         kernel_args.cmdline_addr, kernel_args.cmdline_len
     );
-    // ROOT's name hashes every file it carries, `/system/etc/os-release` among
-    // them: the build, named before anything is mounted.
-    match toyos_abi::boot::root_uuid(cmdline).map(bcachefs::FsUuid::parse) {
-        Some(Some(root)) => log!("boot: root={root}"),
-        Some(None) => log!("boot: root= names no filesystem this kernel can parse"),
-        None => log!("boot: the cmdline carries no root="),
-    }
     // Before `mm::init`, which may hand the parameter's memory out. This record
     // is how a slot that died or was refused reaches the next boot's `/log`.
     match params::slot(cmdline) {
@@ -351,8 +343,9 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
         // memory the allocator would otherwise hand out. Empty on a boot whose
         // parameter line names none.
         blackbox::reserved_region(),
-        // ROOT's image, `LoaderData` like the black box's page. Empty on a
-        // boot the loader handed none.
+        // The boot images (`bootimage`), `LoaderData` like the black box's page.
+        supervisor_image,
+        fileserver_image,
         root_image,
         // Firmware's memory map as the loader copied it, which `mm` keeps
         // (`mm::firmware_map`): `LoaderData` too.
@@ -382,8 +375,17 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // name, rather than indexing it, means a region added to `loader` fails
     // to compile here instead of compiling and being silently dropped from
     // what `mm::init` withholds.
-    let [image, elf, black_box, root, map, microcode] = loader;
-    let reserved = [image, elf, black_box, root, map, microcode, arch::boot::reserved()];
+    let [image, elf, black_box, supervisor, fileserver, root, map, microcode] = loader;
+    let reserved = [image, elf, black_box, supervisor, fileserver, root, map, microcode, arch::boot::reserved()];
+    // A region another one shares is two allocations the loader made of one
+    // byte, and whichever writes it second corrupts the first.
+    let extents = reserved.map(|r| r.start..r.end);
+    if let Some((a, b)) = toyos_rootimage::handoff::overlapping(&extents) {
+        panic!(
+            "boot: the reserved regions {:#x}..{:#x} and {:#x}..{:#x} share memory",
+            reserved[a].start, reserved[a].end, reserved[b].start, reserved[b].end
+        );
+    }
     let layout = toyos_elf::Layout::parse(kernel_elf, arch::ELF_MACHINE)
         .unwrap_or_else(|e| panic!("boot: the loader's kernel.elf: {e}"));
     let image = mm::Image::new(&layout, image);
@@ -446,22 +448,15 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     scheduler::init();
     pipe::init();
 
-    // ROOT is the loader's image in memory, so nothing from here to the supervisor's
-    // spawn asks a disk for anything: every storage driver comes up after it.
-    use vfs::UserAccess;
-    let root_fs = rootfs::mount();
-    vfs::lock().mount(
-        &["system"],
-        Box::new(bcachefs_adapter::ReadOnlyBcacheFsAdapter::new(root_fs)),
-        UserAccess::KernelOnly,
-    );
-    vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()), UserAccess::ReadWrite);
+    vfs::lock().mount(&["tmp"], Box::new(crate::tmpfs::TmpFs::new()));
 
     boot_phase!("subsystems ready", t_subsys);
 
+    // Off the loader's images, so nothing from here to the supervisor's
+    // spawn asks a disk for anything: every storage driver comes up after it.
     // The supervisor reads /system/etc/system.manifest itself; the boot config never names the program it starts.
-    let pid = process::spawn_supervisor();
-    log!("spawned {} pid={pid}", process::SUPERVISOR_PATH);
+    let pid = process::spawn_supervisor(bootimage::objects());
+    log!("spawned the supervisor pid={pid}");
 
     #[cfg(feature = "boot-actuators")]
     if actuator::revoked_backing_selftest() {

@@ -211,7 +211,7 @@ impl From<Pipe> for OwnedHandle {
     fn from(pipe: Pipe) -> Self { pipe.0 }
 }
 
-/// A console handle: the one `/system/bin/supervisor` endows `/system/bin/logkeeper` with,
+/// A console handle: the one the supervisor endows `/system/bin/logkeeper` with,
 /// the only one in the machine that may write.
 ///
 /// **A write takes whole lines and says how many bytes that was.** The
