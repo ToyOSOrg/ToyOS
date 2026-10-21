@@ -323,12 +323,6 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(())
     }
 
-    fn hold(&mut self, node: Node) {
-        if let Some(open) = self.open.get_mut(&node) {
-            open.holders += 1;
-        }
-    }
-
     fn node_meta(&mut self, node: Node) -> Result<Meta, fs::Error> {
         let open = self.entry(node)?;
         let (path, size) = (open.path.clone(), open.file.len());

@@ -98,9 +98,6 @@ pub trait Volume {
     /// next sync to write, and the refusal is the last holder's answer.
     fn close(&mut self, node: Node) -> Result<(), Error>;
 
-    /// Hold the node once more, for a second file id or a stream.
-    fn hold(&mut self, node: Node);
-
     fn node_meta(&mut self, node: Node) -> Result<Meta, Error>;
 
     /// The number of the file `path` names, without following it
