@@ -23,6 +23,10 @@ and whether real hardware shows it, where the stick is not an emulated one.
 Nothing in `logd` is special about the write: any program writing that much to
 the stick while a tone plays is the same stimulus.
 
+Since the small-kernel track's step 10 the stick is usbd's: the interrupts are
+its claim's and the waits its thread's, and the kernel's two-second transport
+break is gone. Whether the starvation remains is unmeasured.
+
 ## Exit condition
 
 On the T14, a `METAL` row plays `hda_tone`'s tone while a program writes a

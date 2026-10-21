@@ -251,10 +251,6 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
 /// interrupt to whatever the handle bits spell. Every condition below therefore
 /// refuses for the machine, not for the unit that failed it.
 fn remappable(ready: &[(Unit, Plan)], described: usize, flags: u8) -> Option<bool> {
-    // Stands in for firmware, so the flag's own arm is what refuses.
-    #[cfg(feature = "boot-actuators")]
-    let flags =
-        if crate::actuator::iommu_no_remap() { flags & !dmar::FLAG_INTR_REMAP } else { flags };
     if ready.is_empty() {
         return None;
     }

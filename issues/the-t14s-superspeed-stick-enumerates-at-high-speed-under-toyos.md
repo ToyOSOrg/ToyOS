@@ -43,5 +43,5 @@ the stick leaves: that is the USB 3.x specification's device-side rule.
 
 ## Exit condition
 
-A T14 boot whose kernel log shows the stick enumerated on the USB3 port of its
-receptacle at the first scan, or the measurement that says why it cannot be.
+A T14 boot whose usbd lines show the stick enumerated on the USB3 port of its
+receptacle at bring-up, or the measurement that says why it cannot be.

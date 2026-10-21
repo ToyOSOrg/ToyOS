@@ -2,15 +2,13 @@
 //! of that role as capabilities.
 //!
 //! **What it holds**: the acceptor of its role's one port, endowed by the
-//! supervisor under `serve:fs:<role>`; for its volume, a claim on each partition
-//! of its role a disk the kernel drives carries, and `block` in its namespace,
-//! a connector to diskserver minted for its role's partition alone — every
-//! DATA partition, or the one the loader named, read-only for the boot
-//! volume; and nothing else of the machine. DATA is one
-//! partition counted over both, and two are refused by name, never guessed
-//! between (`fileserver::data::find`). Argv is the role, and for LOG and BOOT the
-//! unique GUID of the partition the loader named for it when no claim on it
-//! was minted.
+//! supervisor under `serve:fs:<role>`; for its volume, `block` in its
+//! namespace, a connector to the block service minted for its role's
+//! partition alone — every DATA partition, or the one the loader named,
+//! read-only for the boot volume; and nothing else of the machine. Two DATA
+//! partitions are refused by name, never guessed between
+//! (`fileserver::data::find`). Argv is the role, and for LOG and BOOT the
+//! unique GUID of the partition the loader named for it.
 //!
 //! **A connection is what its grant says** (`toyos::fs::Grant`): the badge
 //! the supervisor minted its connector with, which the kernel stamped on it and
@@ -51,7 +49,7 @@ use fileserver::absent::Absent;
 use fileserver::bounds::{self, Hello, Slot, MAX_HANDSHAKES, MAX_SERVED, MAX_STREAMS};
 use fileserver::data::{DataVolume, Located, Probed};
 use fileserver::descriptions::{self, Description, Ids, Shared};
-use diskserver::disk::{Claimed, Disk, Served};
+use diskserver::disk::{Disk, Served};
 use fileserver::ram::Ram;
 use fileserver::fat::FatVolume;
 use fileserver::resolve::{self, Found, Refusal as Escape, Resolved};
@@ -68,7 +66,7 @@ use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::Pipe;
 use toyos_abi::handle::Rights;
-use toyos_abi::syscall::{self, SyscallError, DEV_PREFIX, MAX_BADGE, SERVE_PREFIX};
+use toyos_abi::syscall::{self, SyscallError, MAX_BADGE, SERVE_PREFIX};
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
@@ -242,19 +240,6 @@ fn main() {
     .serve()
 }
 
-/// The partition claims the supervisor minted: one per partition of the role on a disk
-/// the kernel drives.
-fn claims() -> Vec<toyos::PartitionDev> {
-    let prefix = format!("{DEV_PREFIX}part:");
-    let labels: Vec<String> =
-        Endowments::get().labels().filter(|l| l.starts_with(&prefix)).map(str::to_string).collect();
-    labels.iter().map(|l| Endowments::get().take(l).expect("fileserver: the claim its label names")).collect()
-}
-
-fn describe(claim: toyos::PartitionDev) -> Result<Claimed, String> {
-    Claimed::new(claim).map_err(|why| format!("the partition claim would not describe itself ({why:?})"))
-}
-
 /// A session on the partition diskserver serves under `guid`.
 fn served(guid: [u8; 16]) -> Option<Served> {
     let names = endow::namespace()?;
@@ -284,59 +269,36 @@ fn data_partitions() -> Result<Vec<[u8; 16]>, String> {
 
 fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> Box<dyn Volume> {
     match role {
-        Role::Data => {
-            let mut claims = claims();
-            let found = fileserver::data::find(claims.len(), data_partitions().as_deref().map_err(String::clone));
-            let absent = |why: String| -> Box<dyn Volume> {
-                println!("fileserver: {why}; DATA is absent this boot");
-                Box::new(Absent::new(roots, why))
-            };
-            match found {
-                Located::Nowhere => ram(roots, "this machine has no DATA partition"),
-                Located::Claimed => match describe(claims.pop().expect("one claim")) {
-                    Ok(disk) => data_on(disk, roots),
-                    Err(why) => absent(why),
-                },
-                Located::Served(guid) => match served(guid) {
-                    Some(disk) => data_on(disk, roots),
-                    None => absent("the DATA partition would not open".into()),
-                },
-                Located::Refused(why) => absent(why),
-            }
-        }
+        Role::Data => match fileserver::data::find(data_partitions().as_deref().map_err(String::clone)) {
+            Located::Nowhere => ram(roots, "this machine has no DATA partition"),
+            Located::Served(guid) => match served(guid) {
+                Some(disk) => data_on(disk, roots),
+                None => absent(roots, "the DATA partition would not open".into()),
+            },
+            Located::Refused(why) => absent(roots, why),
+        },
         Role::Log | Role::Boot => {
-            let writable = role == Role::Log;
-            let mut claims = claims();
-            let mounted = match claims.pop() {
-                Some(claim) => {
-                    // The supervisor claims by the loader's GUID, which the kernel
-                    // refuses when two partitions carry it.
-                    assert!(claims.is_empty(), "fileserver: the supervisor handed the {role:?} server two claims");
-                    Ok(describe(claim).and_then(|disk| fat_on(disk, writable)))
-                }
-                // The supervisor starts this role with its partition's claim or its GUID, never neither.
-                None => {
-                    let guid = guid.unwrap_or_else(|| {
-                        panic!("fileserver: the {role:?} server was started with neither its partition's claim nor its GUID")
-                    });
-                    let parsed = toyos_abi::part::PartGuid::parse(guid)
-                        .unwrap_or_else(|| panic!("fileserver: {guid} is no partition GUID"));
-                    served(parsed.0).map(|disk| fat_on(disk, writable)).ok_or(guid)
-                }
-            };
-            match mounted {
-                Ok(Ok(volume)) => volume,
-                Ok(Err(why)) => {
+            // The supervisor starts this role with its partition's GUID.
+            let guid = guid.unwrap_or_else(|| panic!("fileserver: the {role:?} server was started without its partition's GUID"));
+            let parsed = toyos_gpt::Guid::parse(guid).unwrap_or_else(|| panic!("fileserver: {guid} is no partition GUID"));
+            match served(parsed.0).map(|disk| fat_on(disk, role == Role::Log)) {
+                Some(Ok(volume)) => volume,
+                Some(Err(why)) => {
                     println!("fileserver: the {role:?} partition does not mount: {why}");
                     Box::new(Absent::new(roots, why))
                 }
-                Err(guid) => Box::new(Absent::new(
+                None => Box::new(Absent::new(
                     roots,
                     format!("the {role:?} partition {guid} is on no disk this server reaches"),
                 )),
             }
         }
     }
+}
+
+fn absent(roots: &[&str], why: String) -> Box<dyn Volume> {
+    println!("fileserver: {why}; DATA is absent this boot");
+    Box::new(Absent::new(roots, why))
 }
 
 fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {

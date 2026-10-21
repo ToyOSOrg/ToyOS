@@ -7,7 +7,6 @@
 pub const JOBS: &[&str] = &["usbwrite", "usbread", "fbcheck", "fbfill", "fbread"];
 
 pub const CONFIG: &str = "tests/images/metaldevicecase.toml";
-pub const BOOT: &str = "metaldevicecase";
 
 /// The runner's job list is the one this file names, under the symlinks that
 /// give each job the name the kernel's `exit:` record carries.

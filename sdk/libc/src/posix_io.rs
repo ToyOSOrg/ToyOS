@@ -181,7 +181,6 @@ unsafe fn answered(answer: Result<syscall::Stat, syscall::SyscallError>, buf: *m
             syscall::FileType::Symlink => S_IFLNK | 0o777,
             syscall::FileType::Pipe => S_IFIFO | 0o644,
             syscall::FileType::Tty => S_IFCHR | 0o644,
-            syscall::FileType::Keyboard => S_IFCHR | 0o444,
             syscall::FileType::Serial => S_IFCHR | 0o644,
             syscall::FileType::Null => S_IFCHR | 0o666,
             _ => 0o644,
@@ -409,7 +408,7 @@ pub unsafe extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn isatty(raw_fd: i32) -> i32 {
     match syscall::fstat(fd(raw_fd)) {
-        Ok(st) => (st.file_type == syscall::FileType::Tty || st.file_type == syscall::FileType::Keyboard) as i32,
+        Ok(st) => (st.file_type == syscall::FileType::Tty) as i32,
         Err(_) => 0,
     }
 }

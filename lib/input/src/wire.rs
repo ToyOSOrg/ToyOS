@@ -1,5 +1,5 @@
-//! The `input` port's frames, and the records the kernel's streams carry,
-//! decoded by one reader whichever source sent them.
+//! The `input` port's frames, decoded by one reader whichever source sent
+//! them.
 //!
 //! A sender numbers its devices `source`s: a source names one device for the
 //! life of its connection, so a late record never reaches a later device. A
@@ -9,14 +9,14 @@
 //! trust: a record that does not decode is refused by name and changes
 //! nothing.
 
-use toyos_abi::input::{MouseEvent, RawKeyEvent, MOD_RELEASED, POINTER_ABSOLUTE, POINTER_ABSOLUTE_MAX, POINTER_RELATIVE};
+use toyos_abi::input::{RawKeyEvent, MOD_RELEASED, POINTER_ABSOLUTE, POINTER_ABSOLUTE_MAX, POINTER_RELATIVE};
 
 /// The port the owner of input serves.
 pub const PORT: &str = "input";
 
-/// The one row that may receive [`PORT`]: a connector is the authority to type
-/// into the focused window.
-pub const HOLDER: &str = "ps2server";
+/// The rows that may receive [`PORT`]: a connector is the authority to type
+/// into the focused window, and these are the programs that drive keyboards.
+pub const HOLDERS: &[&str] = &["ps2server", "usbd"];
 
 /// The most connections the owner serves at once; one past it is refused.
 pub const CONNECTIONS: usize = 4;
@@ -43,11 +43,6 @@ pub const MAX_PAYLOAD: usize = POINTER_LEN;
 /// protocol, and its connection is dropped. A sender binds no more devices
 /// than this.
 pub const DEVICES: usize = 16;
-
-/// A key record's bytes on the kernel's keyboard stream: one [`RawKeyEvent`].
-pub const STREAM_KEY_LEN: usize = core::mem::size_of::<RawKeyEvent>();
-/// A pointer record's bytes on the kernel's mouse stream: one [`MouseEvent`].
-pub const STREAM_POINTER_LEN: usize = core::mem::size_of::<MouseEvent>();
 
 /// The buttons boot-mouse order names.
 pub const BUTTONS: u8 = 0x1F;
@@ -135,7 +130,7 @@ pub fn decode(msg_type: u32, payload: &[u8]) -> Result<Record, Refused> {
     match msg_type {
         MSG_KEY => {
             let [s0, s1, keycode, modifiers]: [u8; KEY_LEN] = payload.try_into().map_err(|_| length())?;
-            Ok(Record::Key { source: u16::from_le_bytes([s0, s1]), key: key(&[keycode, modifiers])? })
+            Ok(Record::Key { source: u16::from_le_bytes([s0, s1]), key: key(keycode, modifiers)? })
         }
         MSG_POINTER => {
             let [s0, s1, buttons, scroll, kind, x0, x1, y0, y1]: [u8; POINTER_LEN] =
@@ -152,10 +147,8 @@ pub fn decode(msg_type: u32, payload: &[u8]) -> Result<Record, Refused> {
     }
 }
 
-/// One key's usage and transition, as a source's frame or the kernel's
-/// keyboard stream carries it.
-pub fn key(bytes: &[u8; STREAM_KEY_LEN]) -> Result<RawKeyEvent, Refused> {
-    let [keycode, modifiers] = *bytes;
+/// One key's usage and transition.
+fn key(keycode: u8, modifiers: u8) -> Result<RawKeyEvent, Refused> {
     if keycode == 0 {
         return Err(Refused::NoUsage);
     }
@@ -163,13 +156,6 @@ pub fn key(bytes: &[u8; STREAM_KEY_LEN]) -> Result<RawKeyEvent, Refused> {
         return Err(Refused::Modifiers(modifiers));
     }
     Ok(RawKeyEvent { keycode, modifiers })
-}
-
-/// One pointer report, as the kernel's mouse stream carries it.
-pub fn pointer(bytes: &[u8; STREAM_POINTER_LEN]) -> Result<Report, Refused> {
-    let [source, buttons, scroll, kind, x0, x1, y0, y1] = *bytes;
-    let motion = motion(kind, i16::from_ne_bytes([x0, x1]), i16::from_ne_bytes([y0, y1]))?;
-    believed(Report { source: u16::from(source), buttons, scroll: scroll as i8, motion })
 }
 
 fn motion(kind: u8, x: i16, y: i16) -> Result<Motion, Refused> {

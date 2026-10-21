@@ -295,11 +295,6 @@ pub fn drivers_settled() {
 /// Why a source could not be given a message: the architecture's own reasons.
 pub use messages::Refused;
 
-pub struct MsiMessage {
-    pub address: u32,
-    pub data: u32,
-}
-
 /// Every claimed function's message is translated to its own interrupt, and
 /// no other's. Only [`remapping`] makes one.
 #[derive(Clone, Copy)]
@@ -385,19 +380,6 @@ pub fn claim_msi(
     let stream = StreamId::pci(function.bus, function.dev, function.func);
     let claimed = messages::claim(number, stream)?;
     Ok(Remapped { claimed, function: *function })
-}
-
-/// The message a kernel driver's `bus:device.function` raises `irq` with.
-/// Takes the triple, not a [`StreamId`]: what a requester id is stays in this
-/// module.
-pub fn driver_msi(
-    bus: u8,
-    device: u8,
-    function: u8,
-    irq: crate::arch::DriverIrq,
-) -> Result<MsiMessage, Refused> {
-    messages::msi(StreamId::pci(bus, device, function), irq)
-        .map(|msi| MsiMessage { address: msi.address, data: msi.data })
 }
 
 /// Reached from the IDT gate the unit's own `FEDATA` names.

@@ -376,6 +376,29 @@ pub fn read_file_on(file: &mut std::fs::File, guid: [u8; 16], name: &str) -> Res
     Ok(bytes)
 }
 
+/// Every file in the root of the image's log volume (its one Microsoft basic
+/// data partition), by name, read with the driver the kernel mounts it with.
+pub fn log_volume_files(file: &mut std::fs::File) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let part = only_partition(&mut FileSectors(file), toyos_gpt::Guid::MICROSOFT_BASIC)?;
+    let (start, len) = (part.first_lba() * u64::from(LBA), part.lba_count().get() * u64::from(LBA));
+    let len = usize::try_from(len).map_err(|_| format!("a {len}-byte volume"))?;
+    let mut volume = vec![0u8; len];
+    file.seek(SeekFrom::Start(start))
+        .and_then(|_| file.read_exact(&mut volume))
+        .map_err(|e| format!("reading the log volume at byte {start}: {e}"))?;
+    let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("the log volume does not mount: {e}"))?;
+    let entries = fs.read_dir("/", usize::MAX).map_err(|e| format!("listing the log volume: {e}"))?;
+    let mut files = Vec::new();
+    for entry in entries.into_iter().filter(|e| !e.is_dir) {
+        let path = format!("/{}", entry.name);
+        let mut found = fs.open(&path).map_err(|e| format!("opening {path}: {e}"))?;
+        let mut bytes = vec![0u8; usize::try_from(found.len()).unwrap_or(usize::MAX)];
+        fs.read(&mut found, 0, &mut bytes).map_err(|e| format!("reading {path}: {e}"))?;
+        files.push((entry.name, bytes));
+    }
+    Ok(files)
+}
+
 /// Why a scan's `out[0]` and `matched` count did not pick out exactly one
 /// partition, once the table itself was readable.
 pub enum OnePartitionError {

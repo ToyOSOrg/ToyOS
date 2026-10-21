@@ -167,6 +167,37 @@ pub enum Complaint {
     More { dropped: usize },
 }
 
+/// What of `complaints` no stop mid-call can explain, on a volume written by a
+/// writer that orders its writes as `toyos-fat32` does (`toyos_fat32`'s
+/// `repair` module names the windows):
+///
+/// - **clusters claimed before anything reaches them** (a lost chain);
+/// - **one file's chain grown before its size is** (too long for its size):
+///   a claim is end-of-chain before it is linked and the size is written
+///   last, so every byte the size names is held. One call grows one file, so
+///   a second such file is not explained;
+/// - **one FAT entry's copies disagreeing**, written one copy at a time;
+/// - **the FSInfo free count off**: fatgen103 §5 calls `FSI_Free_Count` "not
+///   necessarily correct" and has a driver that uses it range-check it, so it
+///   is a hint and never the volume.
+///
+/// A chain too short for its size, a cross-link, a cycle or a broken entry is
+/// never explained: no stop leaves a size naming bytes no cluster holds.
+pub fn unexplained_by_a_stop(complaints: &[Complaint]) -> Vec<&Complaint> {
+    let mut grown = 0;
+    complaints
+        .iter()
+        .filter(|c| match c {
+            Complaint::LostChain { .. } | Complaint::FatMirror { .. } | Complaint::FsInfoFreeCount { .. } => false,
+            Complaint::ChainTooLong { .. } => {
+                grown += 1;
+                grown > 1
+            }
+            _ => true,
+        })
+        .collect()
+}
+
 /// The complaints one per line, for a caller that is about to fail a test.
 pub fn describe(complaints: &[Complaint]) -> String {
     let mut out = String::new();
@@ -542,5 +573,24 @@ impl fmt::Display for Complaint {
                 "and {dropped} more, past the {MAX_COMPLAINTS} this checker enumerates"
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    /// What the T14's first unclean reset mid-append left (#971, r5): a chain
+    /// two clusters past its file's size and FSInfo two clusters behind. A stop
+    /// explains those, one file's growth only, and never a short chain.
+    #[test]
+    fn a_stop_explains_a_grown_chain_and_a_stale_free_count_and_nothing_worse() {
+        let grown = |path: &str| Complaint::ChainTooLong { path: path.into(), size: 200_402, held: 394, needed: 392 };
+        let free = Complaint::FsInfoFreeCount { declared: 53_763, counted: 53_761 };
+        assert!(unexplained_by_a_stop(&[grown("/a_0008.log"), free.clone()]).is_empty());
+        assert!(unexplained_by_a_stop(&[Complaint::LostChain { first: 9, clusters: 2 }]).is_empty());
+        assert_eq!(unexplained_by_a_stop(&[grown("/a.log"), grown("/b.log")]).len(), 1, "two files grown by one stop");
+        let short = Complaint::ChainTooShort { path: "/a.log".into(), size: 200_402, held: 390, needed: 392 };
+        assert_eq!(unexplained_by_a_stop(&[short, free]).len(), 1, "a size naming bytes no cluster holds");
     }
 }

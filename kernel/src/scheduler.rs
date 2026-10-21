@@ -1,11 +1,10 @@
 //! The kernel-facing scheduler API surface: no decision, state transition or
 //! ordering-sensitive step happens here.
 //!
-//! Exception: [`Parkable`] and [`Operation`] live here because the park token
-//! has no public constructor outside the two doors this module defines.
+//! Exception: [`Parkable`] lives here because the park token has no public
+//! constructor outside the door this module defines.
 
 use alloc::sync::Arc;
-use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::hasher::HashMap;
 use kernel::sched::fair::{ShareState, QUANTUM_NS};
@@ -18,7 +17,7 @@ use crate::hw::HW;
 use crate::pipe::PipeId;
 use crate::process::{self, Pid, Tid};
 use crate::sched::driver::{self, cpus, preempt_off, Dispose, NewTask};
-use crate::sched::payload::{KShare, KernelLock, TaskHandle, ThreadSched};
+use crate::sched::payload::{KShare, KernelLock, ThreadSched};
 use crate::sched::reap_gate::ReapGate;
 use crate::sched::futex;
 use crate::sync::Lock;
@@ -60,8 +59,7 @@ fn blocking_baseline() -> u32 {
 }
 
 /// Proof that the calling context may park; threaded by reference rather
-/// than stored, with no public constructor beside [`Parkable::at_entry`] and
-/// [`Operation::parkable`].
+/// than stored, with no public constructor beside [`Parkable::at_entry`].
 pub struct Parkable(());
 
 impl Parkable {
@@ -69,11 +67,6 @@ impl Parkable {
     /// nothing below one, then mints the proof.
     #[track_caller]
     pub fn at_entry() -> Parkable {
-        assert!(
-            !Operation::established(),
-            "scheduler: a frame inside an established operation minted its own park \
-             permission — a leaf receives one from the operation, it does not make one",
-        );
         Parkable::mint()
     }
 
@@ -81,138 +74,6 @@ impl Parkable {
     fn mint() -> Parkable {
         assert_baseline(blocking_baseline());
         Parkable(())
-    }
-}
-
-/// One operation the running context is inside. Establishments nest; an
-/// inner one may only narrow the deadline, and the guard restores what it
-/// displaced on drop.
-#[must_use = "an operation lasts exactly as long as this guard"]
-pub struct Operation {
-    /// Held rather than re-derived, so the drop restores the slot even if
-    /// the task has migrated; `None` selects the per-CPU slot named by `cpu`.
-    task: Option<Arc<TaskHandle>>,
-    cpu: usize,
-    /// What the slot held before this establishment; `None` is "no operation".
-    outer: Option<u64>,
-}
-
-/// Two words rather than one sentinel: [`Deadline`] is total over its range
-/// and has no value left to mean "none". Read as a pair only by the writer
-/// that wrote them, so Relaxed ordering between the two is sound.
-pub struct OperationSlot {
-    live: core::sync::atomic::AtomicBool,
-    until: AtomicU64,
-}
-
-impl OperationSlot {
-    pub const fn new() -> Self {
-        Self {
-            live: core::sync::atomic::AtomicBool::new(false),
-            until: AtomicU64::new(0),
-        }
-    }
-}
-
-impl Default for OperationSlot {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Where a context with no task establishes: one per CPU, since boot and an
-/// idle CPU's pass cannot be moved off theirs.
-fn no_task_operation(cpu: usize) -> &'static OperationSlot {
-    &crate::cpu_local::of(cpu as u32).no_task_operation
-}
-
-impl Operation {
-    /// Declare the running context inside one operation, bounded by `until`
-    /// or by whatever already bounds it, whichever comes first.
-    pub fn begin(until: Deadline) -> Operation {
-        let task = driver::current_handle();
-        let cpu = percpu::cpu_id() as usize;
-        let outer = {
-            let slot = operation_slot(&task, cpu);
-            let outer = slot
-                .live
-                .load(Ordering::Relaxed)
-                .then(|| slot.until.load(Ordering::Relaxed));
-            slot.until.store(
-                outer.map_or(until.nanos(), |outer| outer.min(until.nanos())),
-                Ordering::Relaxed,
-            );
-            slot.live.store(true, Ordering::Relaxed);
-            outer
-        };
-        Operation { task, cpu, outer }
-    }
-
-    /// The deadline the operation this depth is part of has left to spend.
-    /// Panics if no operation is established above this depth.
-    #[track_caller]
-    pub fn deadline() -> Deadline {
-        let (live, until) = Self::read();
-        assert!(
-            live,
-            "scheduler: a depth asked for its operation's deadline with no operation \
-             established above it",
-        );
-        Deadline::at(crate::time::Instant::from_nanos_since_boot(until))
-    }
-
-    /// The park token of the operation this depth is part of. Panics if no
-    /// operation is established above this depth. No caller yet:
-    /// `xhci::wait_transfer` wants this, but the ticket locks above it fail
-    /// [`Parkable::mint`]'s baseline assertion until they convert.
-    #[allow(dead_code)]
-    #[track_caller]
-    pub fn parkable() -> Parkable {
-        assert!(
-            Self::established(),
-            "scheduler: a depth asked to park with no operation established above it",
-        );
-        Parkable::mint()
-    }
-
-    /// Whether the running context is inside one.
-    pub fn established() -> bool {
-        Self::read().0
-    }
-
-    /// A borrow and not a clone: `Arc::clone`'s read-modify-write is too
-    /// costly on this hot path.
-    fn read() -> (bool, u64) {
-        fn of(slot: &OperationSlot) -> (bool, u64) {
-            (
-                slot.live.load(Ordering::Relaxed),
-                slot.until.load(Ordering::Relaxed),
-            )
-        }
-        driver::with_current_handle(|task| of(task.operation()))
-            .unwrap_or_else(|| of(no_task_operation(percpu::cpu_id() as usize)))
-    }
-
-    fn slot(&self) -> &OperationSlot {
-        operation_slot(&self.task, self.cpu)
-    }
-}
-
-/// The slot a context establishes in: its task's, or its CPU's if it has none.
-fn operation_slot(task: &Option<Arc<TaskHandle>>, cpu: usize) -> &OperationSlot {
-    match task {
-        Some(task) => task.operation(),
-        None => no_task_operation(cpu),
-    }
-}
-
-impl Drop for Operation {
-    fn drop(&mut self) {
-        let slot = self.slot();
-        match self.outer {
-            Some(until) => slot.until.store(until, Ordering::Relaxed),
-            None => slot.live.store(false, Ordering::Relaxed),
-        }
     }
 }
 
@@ -312,9 +173,7 @@ pub fn enqueue_new(
 /// Phase 1 of the wait handshake on the running thread's own word, or
 /// [`Refused`]: a post reached it since it registered on a watch, and the
 /// caller re-reads its condition, or a revoke ended the registration, and the
-/// wait is over. Mints via [`Parkable::mint`], not [`Parkable::at_entry`]: a
-/// context already inside an [`Operation`] must receive the token here too,
-/// which `at_entry` would refuse.
+/// wait is over.
 #[must_use = "a wait ticket must be blocked on or cancelled"]
 #[track_caller]
 pub fn prepare_wait(cancel: Cancel, class: WaitClass) -> Result<Ticket, Refused> {

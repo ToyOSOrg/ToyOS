@@ -6,32 +6,27 @@ opened: 2026-09-16
 
 # A disk taken offline is never brought back
 
-A mass-storage device whose transport breaks climbs `toyos_xhci::ladder`: the
-class reset, then a port reset after which the device is addressed and
-configured again on the slot, the pool block and the disk number it already
-has, so a mount on it carries on. A device that does not answer after the port
-reset is taken offline behind one more reset, its slot goes back, and every
-later operation on it is refused until it is unplugged. On the T14 that disk is
-the root filesystem, so the boot is over from there.
+A mass-storage device whose transport breaks climbs usbd's ladder
+(`system/usbd/xhci/src/msc.rs`, over `toyos_xhci::ladder`): the class
+reset, then a port reset and enumeration again, its disk held meanwhile for
+its return. A device that does not answer after the port reset is taken
+offline: the last thing it is sent is a reset, its disk ends `Gone` with every
+session on it, and its port keeps it, unasked, until it is unplugged. On the
+T14 that disk carries the log volume and the data volume.
 
-Two ways a disk that could still be served is lost today:
-
-- **The port reset moves it.** T14 runs 74 and 79: a SuperSpeed stick
+- **The port reset may move it.** T14 runs 74 and 79: a SuperSpeed stick
   enumerated on the USB2 half of its receptacle answered the bus reset by
   training SuperSpeed on the other half, so it left port 1 and arrived on port
-  13. `toyos_xhci::identity` now holds such a disk for `RETURN_WINDOW` and
-  gives its number back to a device that proves the same identity.
+  13. usbd holds the disk for `identity::RETURN_WINDOW` after its own reset
+  and gives it back, sessions and queued work whole, to a device that proves
+  the same identity on any port
+  (`a_stick_back_from_its_port_reset_keeps_its_disk_and_its_work`, on the
+  stub). No bench has measured the move under usbd.
 - **Offline is for the connection's life.** Nothing asks an offline device
   again, however long it stays plugged in.
-
-Both come to the same missing piece: a mount holds a disk number for life
-(`usb_storage::handle`, `release_blocks`), and nothing re-attaches a number to
-a device that is the same device.
 
 ## Exit condition
 
 A T14 boot whose stick's transport broke mid-boot and that finishes with its
-mounts intact, on either half of the receptacle; and a disk that left its port
-under a reset and arrived on another keeps its number.
-
-`usb_transport_break` is deleted; `issues/a-held-disk-waits-for-a-pass-no-cpu-takes-when-every-cpu-is-in-a-call-on-it.md` records the commit that restores it.
+mounts intact, on either half of the receptacle; and an offline device asked
+again, or the reason it must not be, stated.

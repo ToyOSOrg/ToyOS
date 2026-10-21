@@ -41,19 +41,6 @@ impl SysCap {
         self.mint(DeviceRequest::Function(arrival))
     }
 
-    /// Mint the claim for one GPT partition, by its unique GUID. Apart from
-    /// [`Self::claim`] for the reason [`Self::claim_function`] is: this one
-    /// cannot be asked without naming which.
-    ///
-    /// `PermissionDenied` is a partition the kernel has mounted, and
-    /// `AlreadyExists` one another process holds: a partition has one holder.
-    pub fn claim_partition<T: FromHandle>(
-        &self,
-        guid: toyos_abi::part::PartGuid,
-    ) -> Result<T, SyscallError> {
-        self.mint(DeviceRequest::Partition(guid))
-    }
-
     /// Mint the claim for one legacy ISA function, by exactly its ports and
     /// lines. Apart from [`Self::claim`] for the reason [`Self::claim_function`] is.
     ///

@@ -528,21 +528,6 @@ pub fn install() {
     }
 }
 
-/// What a driver in this kernel names its function's interrupt by, which
-/// it is refused a message for (`irqchip::its::msi`).
-#[derive(Clone, Copy, Debug)]
-pub enum DriverIrq {
-    Xhci,
-}
-
-impl core::fmt::Display for DriverIrq {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{self:?}'s")
-    }
-}
-
-pub const XHCI_VECTOR: DriverIrq = DriverIrq::Xhci;
-
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the
 /// running thread was doing.

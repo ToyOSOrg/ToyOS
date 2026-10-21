@@ -12,12 +12,10 @@ use crate::cpu_slice::CpuSlice;
 pub struct CpuLocal {
     pub arch: crate::arch::CpuLocal,
     pub sched: crate::sched::driver::Local,
-    pub no_task_operation: crate::scheduler::OperationSlot,
     pub hardlockup: crate::hardlockup::Local,
     pub deadline: crate::deadline::Local,
     pub hw: crate::hw::Local,
     pub irq_census: crate::irq_census::Local,
-    pub irq_ring: crate::irq_ring::Local,
     pub counters: crate::counters::Local,
     #[cfg(feature = "mask-windows")]
     pub windows: crate::windows::Local,
@@ -29,12 +27,10 @@ pub fn size(capacity: usize) {
     TABLE.size(capacity, |_| alloc::boxed::Box::leak(alloc::boxed::Box::new(CpuLocal {
         arch: crate::arch::CpuLocal::new(),
         sched: crate::sched::driver::Local::new(),
-        no_task_operation: crate::scheduler::OperationSlot::new(),
         hardlockup: crate::hardlockup::Local::new(),
         deadline: crate::deadline::Local::new(),
         hw: crate::hw::Local::new(),
         irq_census: crate::irq_census::Local::new(),
-        irq_ring: crate::irq_ring::Local::new(),
         counters: crate::counters::Local::new(),
         #[cfg(feature = "mask-windows")]
         windows: crate::windows::Local::new(),

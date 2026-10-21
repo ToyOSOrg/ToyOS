@@ -395,8 +395,6 @@ pub struct Msi {
 /// Why a source could not be given a message.
 #[derive(Clone, Copy)]
 pub enum Refused {
-    /// It is a driver in this kernel's.
-    KernelDriver,
     /// The SMMUv3 translates it to no DeviceID at this ITS.
     NoDeviceId,
     /// Its DeviceID is past the device table's.
@@ -421,11 +419,6 @@ impl Refused {
 impl core::fmt::Display for Refused {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            Self::KernelDriver => write!(
-                f,
-                "a driver in this kernel is given no LPI: the ITS maps only a claimed function's \
-                 DeviceID, and such a driver has no address space for its DMA"
-            ),
             Self::NoDeviceId => write!(
                 f,
                 "the IORT gives it no DeviceID at this kernel's ITS behind the SMMUv3, so no \
@@ -446,13 +439,6 @@ impl core::fmt::Display for Refused {
             Self::NoMemory => write!(f, "there is no memory for its translation table"),
         }
     }
-}
-
-/// A driver in this kernel is given no LPI: only a claimed function is
-/// mapped, and a driver in this kernel on this machine has no address space
-/// to do DMA in (`super::super::iommu_unit`).
-pub fn msi(_source: StreamId, _irq: crate::arch::DriverIrq) -> Result<Msi, Refused> {
-    Err(Refused::KernelDriver)
 }
 
 /// The DeviceID `routed` names at this ITS: what the SMMUv3's own routes

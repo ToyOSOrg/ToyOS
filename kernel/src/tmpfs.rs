@@ -20,7 +20,7 @@ struct TmpfsBacking {
 
 impl FileBacking for TmpfsBacking {
     /// `Err` once the file is deleted: a gone file is not a file of zeros.
-    fn read_page(&self, file_offset: u64, buf: &mut [u8; PAGE_BYTES]) -> crate::block::BlockResult {
+    fn read_page(&self, file_offset: u64, buf: &mut [u8; PAGE_BYTES]) -> crate::file_backing::BlockResult {
         // copy_page_out, not file_cache::read_page: reading through the miss path here would recurse.
         // A hole below the file size, left by a seek-and-write, reads as zero.
         if file_offset >= file_cache::size(self.file_id)
@@ -29,7 +29,7 @@ impl FileBacking for TmpfsBacking {
             // After the miss: `retire` clears the flag before the pages drop.
             if !self.alive.load(Ordering::Acquire) {
                 log!("tmpfs: read through a backing whose file was deleted");
-                return Err(crate::block::BlockError::Device);
+                return Err(crate::file_backing::BlockError::Device);
             }
             buf.fill(0);
         }

@@ -227,11 +227,8 @@ pub const SYS_DEVICE_BAR_MAP: u64 = 117;
 /// [`device_dma_alloc`].
 pub const SYS_DEVICE_DMA_ALLOC: u64 = 118;
 
-/// Read blocks of a claimed partition. See [`partition_read`].
-pub const SYS_PARTITION_READ: u64 = 119;
-
-/// Write blocks of a claimed partition. See [`partition_write`].
-pub const SYS_PARTITION_WRITE: u64 = 120;
+// 119 and 120 were `SYS_PARTITION_READ` and `SYS_PARTITION_WRITE`, a
+// partition claim's blocks on a disk this kernel drove; it drives none.
 
 /// What the machine is made of, and who holds each part of it, as
 /// [`crate::inventory`] records. Gated by [`Rights::INVENTORY`] on a `SysCap`.
@@ -555,11 +552,11 @@ pub enum FileType {
     Unknown = 0,
     File = 1,
     Pipe = 2,
-    Keyboard = 3,
+    // 3 was `Keyboard` and 7 `Mouse`, the kernel's input streams: input is
+    // userland's, over the `input` port.
     Serial = 4,
     Framebuffer = 5,
     Tty = 6,
-    Mouse = 7,
     Socket = 8,
     // 9 was `Nic`, the type a claim on the kernel's own NIC driver reported.
     // A claim on a PCI function reports `Unknown`: what it is, is the driver's
@@ -585,11 +582,9 @@ impl FileType {
             0 => Some(Self::Unknown),
             1 => Some(Self::File),
             2 => Some(Self::Pipe),
-            3 => Some(Self::Keyboard),
             4 => Some(Self::Serial),
             5 => Some(Self::Framebuffer),
             6 => Some(Self::Tty),
-            7 => Some(Self::Mouse),
             8 => Some(Self::Socket),
             10 => Some(Self::SharedMemory),
             11 => Some(Self::Directory),
@@ -1277,8 +1272,7 @@ macro_rules! device_classes {
 }
 
 device_classes! {
-    Keyboard = 0 => "keyboard",
-    Mouse = 1 => "mouse",
+    // 0 was `keyboard` and 1 `mouse`, the kernel's input streams.
     Framebuffer = 2 => "framebuffer",
     /// One PCI function, driven by whoever holds the claim: the kernel binds no
     /// driver to it, keeps config space, puts it in an address space of its own
@@ -1289,12 +1283,7 @@ device_classes! {
     /// here: which functions a manifest row asks for is `toyos-manifest`'s
     /// grammar, resolved against the inventory.
     PciFunction = 7 => "pci",
-    /// One GPT partition, named by its unique partition GUID: the holder reads
-    /// and writes its blocks and no other's ([`crate::part`]).
-    ///
-    /// Like `pci`, a class whose name is not the whole of the entry —
-    /// `part:<GUID>` — and [`DeviceRequest`] is the one parser.
-    Partition = 8 => "part",
+    // 8 was `part`, one GPT partition of a disk this kernel drove.
     /// One legacy ISA function, driven by whoever holds the claim: the process
     /// that first reads the claim may `in` and `out` the function's ports for
     /// the rest of its life and no other process may, and the function's lines
@@ -1320,14 +1309,6 @@ pub struct PciId {
 }
 
 impl PciId {
-    /// `"<vendor>:<device>"`, four lowercase hex digits each: the kernel's
-    /// `xhci-leave=` boot parameter. A manifest matcher's card is spelled by
-    /// `toyos-manifest`'s own rule.
-    pub fn parse(text: &str) -> Option<Self> {
-        let (vendor, device) = text.split_once(':')?;
-        Some(Self { vendor: hex16(vendor)?, device: hex16(device)? })
-    }
-
     /// The id as one word.
     pub const fn wire(self) -> u64 {
         ((self.vendor as u64) << 16) | self.device as u64
@@ -1489,8 +1470,7 @@ fn decimal_line(text: &str) -> Option<u8> {
 }
 
 /// What a claim asks for: a class, and for [`DeviceType::PciFunction`] which
-/// function, for a partition which partition, and for an ISA function which
-/// ports and lines.
+/// function, and for an ISA function which ports and lines.
 ///
 /// Every request but a PCI function's is also a `devices` entry, spelled once
 /// here ([`Self::parse`], [`Self::write_name`]): the manifest that names it and
@@ -1499,35 +1479,28 @@ fn decimal_line(text: &str) -> Option<u8> {
 pub enum DeviceRequest {
     Class(DeviceType),
     Function(crate::inventory::Arrival),
-    Partition(crate::part::PartGuid),
     Isa(IsaId),
 }
 
 impl DeviceRequest {
-    /// The spelling that carries a unique partition GUID.
-    pub const PART_PREFIX: &'static str = "part:";
-
     /// The spelling that carries an ISA function's ports and lines.
     pub const ISA_PREFIX: &'static str = "isa:";
 
     /// The longest a `devices` entry, and so a `dev:` label's tail, can be:
-    /// `part:` and a GUID, rounded up to a multiple of eight.
-    pub const MAX_NAME: usize = 48;
+    /// an `isa:` entry's whole set, rounded up to a multiple of eight.
+    pub const MAX_NAME: usize = 40;
 
     /// The request a `devices` entry spells, or `None`; never a
     /// [`Self::Function`], which has no spelling.
     pub fn parse(name: &str) -> Option<Self> {
-        if let Some(guid) = name.strip_prefix(Self::PART_PREFIX) {
-            return crate::part::PartGuid::parse(guid).map(Self::Partition);
-        }
         if let Some(set) = name.strip_prefix(Self::ISA_PREFIX) {
             return IsaId::parse(set).map(Self::Isa);
         }
         let class = DeviceType::from_class_name(name)?;
         match class {
-            // A bare `pci`, `part` or `isa` names no device, and would
-            // otherwise leave the selector at zero.
-            DeviceType::PciFunction | DeviceType::Partition | DeviceType::Isa => None,
+            // A bare `pci` or `isa` names no device, and would otherwise leave
+            // the selector at zero.
+            DeviceType::PciFunction | DeviceType::Isa => None,
             _ => Some(Self::Class(class)),
         }
     }
@@ -1536,7 +1509,6 @@ impl DeviceRequest {
         match self {
             Self::Class(class) => class,
             Self::Function(_) => DeviceType::PciFunction,
-            Self::Partition(_) => DeviceType::Partition,
             Self::Isa(_) => DeviceType::Isa,
         }
     }
@@ -1547,7 +1519,6 @@ impl DeviceRequest {
         match self {
             Self::Class(_) => [0, 0],
             Self::Function(arrival) => [arrival.0 as u64, 0],
-            Self::Partition(guid) => guid.wire(),
             Self::Isa(set) => set.wire(),
         }
     }
@@ -1557,21 +1528,12 @@ impl DeviceRequest {
     /// none. The name is also the tail of the `dev:` label the claim arrives
     /// under, and it is composed here so the two cannot drift.
     pub fn write_name(self, buf: &mut [u8; Self::MAX_NAME]) -> Option<&str> {
-        use crate::part::GUID_TEXT_LEN;
         Some(match self {
             Self::Function(_) => return None,
             Self::Class(class) => {
                 let name = class.class_name();
                 buf[..name.len()].copy_from_slice(name.as_bytes());
                 core::str::from_utf8(&buf[..name.len()]).expect("a class name is ASCII")
-            }
-            Self::Partition(guid) => {
-                let at = Self::PART_PREFIX.len();
-                buf[..at].copy_from_slice(Self::PART_PREFIX.as_bytes());
-                let mut text = [0u8; GUID_TEXT_LEN];
-                guid.write_text(&mut text);
-                buf[at..at + GUID_TEXT_LEN].copy_from_slice(&text);
-                core::str::from_utf8(&buf[..at + GUID_TEXT_LEN]).expect("a prefix and a GUID's text are ASCII")
             }
             Self::Isa(set) => {
                 let mut at = Self::ISA_PREFIX.len();
@@ -1626,46 +1588,6 @@ pub fn device_claim(syscap: RawHandle, request: DeviceRequest) -> Result<RawHand
     let [lo, hi] = request.selector();
     check(syscall(SYS_DEVICE_CLAIM, syscap.0 as u64, request.class() as u64, lo, hi))
         .map(|v| RawHandle(v as u32))
-}
-
-/// Read `buf.len()` blocks of the partition `claim` holds, from its block
-/// `first` — the partition's own number, from 0.
-///
-/// `InvalidArgument` for a run that does not end inside the partition or is
-/// longer than [`crate::part::MAX_BLOCKS_PER_CALL`], `Io` for a device that
-/// did not do it, and `Gone` for a claim whose last handle has been let go.
-pub fn partition_read(
-    claim: RawHandle,
-    first: u64,
-    buf: &mut [crate::part::Block],
-) -> Result<(), SyscallError> {
-    check_unit(syscall(
-        SYS_PARTITION_READ,
-        claim.0 as u64,
-        first,
-        buf.as_mut_ptr() as u64,
-        buf.len() as u64,
-    ))
-}
-
-/// Write `buf.len()` blocks to the partition `claim` holds, from its block
-/// `first`, refused as [`partition_read`] is.
-///
-/// `Ok` is the device having taken the blocks, and **not** their being
-/// durable: that is [`fsync`] on the claim, which a writer that must survive a
-/// power cut calls before it tells anyone the write happened.
-pub fn partition_write(
-    claim: RawHandle,
-    first: u64,
-    buf: &[crate::part::Block],
-) -> Result<(), SyscallError> {
-    check_unit(syscall(
-        SYS_PARTITION_WRITE,
-        claim.0 as u64,
-        first,
-        buf.as_ptr() as u64,
-        buf.len() as u64,
-    ))
 }
 
 /// Enter the real-time scheduling band, presenting a `SysCap` handle that
@@ -2718,15 +2640,6 @@ mod tests {
         modules(&answer).for_each(drop);
     }
 
-    /// `xhci-leave=`'s id, four lowercase hex digits each.
-    #[test]
-    fn the_xhci_leave_parameter_is_an_id_in_four_lowercase_hex_digits_each() {
-        assert_eq!(PciId::parse("8086:9a13"), Some(PciId { vendor: 0x8086, device: 0x9a13 }));
-        for bad in ["8086:9A13", "8086:9a1", "8086", "8086:9a13:"] {
-            assert_eq!(PciId::parse(bad), None, "{bad:?} parsed");
-        }
-    }
-
     /// The four readers of a `devices` entry share this parser, so what it
     /// accepts is what a config may say; a PCI function is named by its
     /// arrival, which no entry spells.
@@ -2779,30 +2692,16 @@ mod tests {
     #[test]
     fn a_request_writes_back_the_name_it_parsed() {
         for name in [
-            "mouse",
-            // The longest entry there is, which is what `MAX_NAME` is for.
-            "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+            "framebuffer",
             "isa:0060,0064:1,12",
             "isa:0001:0",
-            // The longest an ISA entry can be.
+            // The longest entry there is, which is what `MAX_NAME` is for.
             "isa:fff0,fff1,fff2,fffe:12,13,14,15",
         ] {
             let request = DeviceRequest::parse(name).expect("a name this table has");
             let mut buf = [0u8; DeviceRequest::MAX_NAME];
             assert_eq!(request.write_name(&mut buf), Some(name));
         }
-    }
-
-    /// A `part:` entry is the partition class carrying its GUID's sixteen bytes
-    /// in both selector words.
-    #[test]
-    fn a_partition_entry_carries_its_guid_in_both_selector_words() {
-        use crate::part::PartGuid;
-        let guid = PartGuid::parse("0FC63DAF-8483-4772-8E79-3D69D8477DE4").expect("a GUID");
-        let request = DeviceRequest::parse("part:0FC63DAF-8483-4772-8E79-3D69D8477DE4");
-        assert_eq!(request, Some(DeviceRequest::Partition(guid)));
-        assert_eq!(request.map(DeviceRequest::class), Some(DeviceType::Partition));
-        assert_eq!(request.map(DeviceRequest::selector), Some(guid.wire()));
     }
 
     /// An `isa:` entry is its ports in the first selector word and its lines in

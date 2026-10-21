@@ -2,7 +2,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use bcachefs::Extent;
-use crate::block::BlockResult;
 use crate::object::shm::SharedMemObject;
 use crate::rootfs::MemoryImage;
 use toyos_abi::syscall::SyscallError;
@@ -10,6 +9,22 @@ use toyos_abi::syscall::SyscallError;
 /// `mm::PAGE_SIZE`: `usize` for buffer sizing, `u64` for file offsets.
 const BLOCK_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 const BLOCK_SIZE_U64: u64 = crate::mm::PAGE_SIZE;
+
+/// Why a page a backing holds could not be read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockError {
+    /// The backing itself failed the read.
+    Device,
+}
+
+/// Every failure here was attempted: the bcachefs crate retries none.
+impl bcachefs::TransferError for BlockError {
+    fn refused_before_attempt(&self) -> bool {
+        false
+    }
+}
+
+pub type BlockResult = Result<(), BlockError>;
 
 /// Backing store for a memory-mapped file: ROOT's image, an image a caller
 /// handed over, or a tmpfs file; callers do not know which.

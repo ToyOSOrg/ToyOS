@@ -128,8 +128,7 @@ impl Stdin {
 impl io::Read for Stdin {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let stat = syscall::fstat(STDIN).ok();
-        let interactive =
-            stat.is_some_and(|s| s.file_type == FileType::Keyboard || s.file_type == FileType::Tty);
+        let interactive = stat.is_some_and(|s| s.file_type == FileType::Tty);
         if STDIN_RAW.load(Ordering::Relaxed) || !interactive {
             syscall::read(STDIN, buf).map_err(to_io_error)
         } else {

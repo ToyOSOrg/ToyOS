@@ -124,6 +124,13 @@ impl Msix {
     pub fn enabled(message_control: u16) -> u16 {
         (message_control | ENABLE) & !FUNCTION_MASK
     }
+
+    /// Message Control with every vector of the function masked at once
+    /// (PCIe Base §7.7.2.2), whatever each entry's own mask says; nothing
+    /// else changed.
+    pub fn function_masked(message_control: u16) -> u16 {
+        message_control | FUNCTION_MASK
+    }
 }
 
 #[cfg(test)]
@@ -143,6 +150,14 @@ mod tests {
     #[test]
     fn the_control_bits_are_not_part_of_the_size() {
         assert_eq!(Msix::decode(ENABLE | FUNCTION_MASK, 0).unwrap().entries(), 1);
+    }
+
+    /// Function Mask is bit 14, and masking touches neither Enable nor the
+    /// table size the register also carries.
+    #[test]
+    fn the_function_mask_is_bit_14_and_nothing_else() {
+        assert_eq!(Msix::function_masked(ENABLE | 0x07FF), ENABLE | FUNCTION_MASK | 0x07FF);
+        assert_eq!(Msix::function_masked(0), 1 << 14);
     }
 
     #[test]

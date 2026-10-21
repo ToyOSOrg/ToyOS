@@ -37,10 +37,17 @@ pci:1b36:0010 is on this machine and the kernel refused this service its
 claim`), so the three file servers say `Data serving … — absent`, `Log serving
 /log — absent` and `Boot serving /boot — absent`, and `logkeeper` says `no
 /log on this machine - this boot's kernel log is on the console only`. Read off the no-unit arm of `iommu_virtio_platform`, which is
-green with it: the arm asserts the refusal and reads no volume. Where the
-image is on a USB stick the kernel drives, LOG and BOOT are served through
-kernel partition claims, which need no unit, and DATA alone is absent; that
-is read off the claim path and not run.
+green with it: the arm asserts the refusal and reads no volume. **The kernel
+drives no USB either** since usbd took the xHCI (the small-kernel track's step
+10), so on such a machine usbd is refused its controller too, a USB stick's
+volumes are absent like the NVMe disk's, and no USB keyboard or pointer
+reaches the owner of input; the arm asserts that refusal as well. A machine
+whose unit remaps no message, or filters no SMI, refuses the same claims for
+those reasons (QEMU's AMD unit is both, by profile). On a bench that is the
+stick too, so such a boot leaves no `/log` for a metal judge to read: the
+metal rows that staged it (`iommu-no-remap`) are deleted, and QEMU's
+`usbd_refused_without_amdvi_remapping` and `amdvi_firmware_left` hold the
+refusal.
 
 Exit, in both arms of `iommu_virtio_platform` (`tests/common/iommu.rs`):
 

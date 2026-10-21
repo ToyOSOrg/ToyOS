@@ -8,9 +8,8 @@
 //!
 //! **What it holds is the whole of what it can write** (`slots` in its
 //! `system.toml` row): the slot table's partition and the idle slot's FAT
-//! volume and ROOT, as claims the supervisor endows under their labels on a
-//! disk the kernel drives, or as connectors in its namespace under the same
-//! names, each minted for its one partition on the block service's port; the
+//! volume and ROOT, as connectors in its namespace under their labels, each
+//! minted for its one partition on the block service's port; the
 //! slot this boot runs is never among them (`toyos_update::slots::idle`). What
 //! it writes there, and in what order, is [`install`]'s.
 
@@ -18,9 +17,8 @@ mod install;
 
 use std::time::Instant;
 
-use diskserver::disk::{Claimed, Disk, Served};
-use toyos::endow::{self, Endowments};
-use toyos::PartitionDev;
+use diskserver::disk::{Disk, Served};
+use toyos::endow;
 use toyos_update::sig;
 use toyos_update::slots;
 use install::Partition;
@@ -48,15 +46,10 @@ struct Held {
     unique: [u8; 16],
 }
 
-/// The partition endowed under `label`: a claim, or a session through the
-/// connector of that name, which reaches one partition and lists it.
+/// The partition endowed under `label`: a session through the connector of
+/// that name, which reaches one partition and lists it.
 fn held(label: &str) -> Result<Held, String> {
     let none = || format!("this process holds no `{label}`: the supervisor grants the idle slot to one update at a time, and says why where it grants none");
-    if let Some(claim) = Endowments::get().take::<PartitionDev>(label) {
-        let unique = claim.describe().map_err(|e| format!("the `{label}` claim: {e:?}"))?.unique_guid;
-        let disk = Claimed::new(claim).map_err(|e| format!("the `{label}` claim: {e:?}"))?;
-        return Ok(Held { disk: Box::new(disk), unique });
-    }
     let names = endow::namespace().ok_or_else(none)?;
     let own = toyos::namespace::build().keep(names, &[label]).finish().map_err(|_| none())?;
     let listed = diskserver::list(&own, label).map_err(|why| format!("`{label}` would not list its partition: {why:?}"))?;

@@ -287,7 +287,7 @@ fn a_right_the_capability_lacks_is_a_word() {
 
     let toothless = cap.narrowed(Rights::DUP).expect("a capability carrying less");
     assert_eq!(
-        syscall::device_claim(toothless.as_handle(), DeviceRequest::Class(DeviceType::Keyboard)).err(),
+        syscall::device_claim(toothless.as_handle(), DeviceRequest::Class(DeviceType::Framebuffer)).err(),
         Some(SyscallError::PermissionDenied),
         "a capability without DEVICE minted a claim",
     );
@@ -318,7 +318,7 @@ fn a_right_the_capability_lacks_is_a_word() {
     // check: `DEVICE` and `RT` are bits nothing else carries, so this is the
     // same refusal the narrowed capability got.
     assert_eq!(
-        syscall::device_claim(RawHandle(1), DeviceRequest::Class(DeviceType::Keyboard)).err(),
+        syscall::device_claim(RawHandle(1), DeviceRequest::Class(DeviceType::Framebuffer)).err(),
         Some(SyscallError::PermissionDenied),
         "a pipe was taken as a capability by SYS_DEVICE_CLAIM",
     );
@@ -339,7 +339,7 @@ fn a_right_the_capability_lacks_is_a_word() {
     // the assertion says only that it is not the refusal. A claim is released
     // as soon as it is taken, because a claim moves and the boot runs other
     // binaries that need this one.
-    let with_the_bit = syscall::device_claim(cap.as_handle(), DeviceRequest::Class(DeviceType::Keyboard));
+    let with_the_bit = syscall::device_claim(cap.as_handle(), DeviceRequest::Class(DeviceType::Framebuffer));
     assert_ne!(
         with_the_bit.err(),
         Some(SyscallError::PermissionDenied),
@@ -572,7 +572,7 @@ fn not_a_handle(role: &str) -> ! {
     std::io::stdout().flush().expect("flush the marker");
     let answered = match role {
         "claim-absent" => {
-            format!("{:?}", syscall::device_claim(HANDLE_INVALID, DeviceRequest::Class(DeviceType::Keyboard)))
+            format!("{:?}", syscall::device_claim(HANDLE_INVALID, DeviceRequest::Class(DeviceType::Framebuffer)))
         }
         "rt-absent" => format!("{:?}", syscall::rt_enter(HANDLE_INVALID)),
         // `HANDLE_INVALID` with room for one entry. The same number is the

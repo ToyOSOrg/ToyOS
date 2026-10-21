@@ -1,6 +1,5 @@
 //! The spare controller a job claims: the one function of any of a set of
-//! cards the kernel does not drive, or, on a kernel that drives every one,
-//! the only one there is. Named by its arrival, because a machine may have
+//! cards no driver holds. Named by its arrival, because a machine may have
 //! two of one card.
 
 use toyos::syscap::SysCap;
@@ -9,6 +8,11 @@ use toyos_abi::syscall::PciId;
 
 /// That function, or `None` where it is not one.
 pub fn of(cap: &SysCap, ids: &[PciId]) -> Option<Pci> {
+    one(cap, ids, Driven::Free)
+}
+
+/// The one function of `ids` that `driven` says of.
+pub fn one(cap: &SysCap, ids: &[PciId], driven: Driven) -> Option<Pci> {
     let records: Vec<Record> =
         cap.records(|n| vec![RawRecord::EMPTY; n]).unwrap_or_else(|why| panic!("the job's capability reads no inventory: {why:?}"));
     let spares: Vec<Pci> = records
@@ -18,9 +22,8 @@ pub fn of(cap: &SysCap, ids: &[PciId]) -> Option<Pci> {
             _ => None,
         })
         .collect();
-    let left: Vec<Pci> = spares.iter().copied().filter(|pci| pci.driven != Driven::Kernel).collect();
-    match (left.as_slice(), spares.as_slice()) {
-        ([one], _) | ([], [one]) => Some(*one),
+    match spares.iter().copied().filter(|pci| pci.driven == driven).collect::<Vec<_>>()[..] {
+        [one] => Some(one),
         _ => None,
     }
 }

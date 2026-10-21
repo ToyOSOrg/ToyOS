@@ -35,7 +35,6 @@ use toyos_build::image::LBA;
 
 use crate::timings::{Machine, Record, Stick};
 
-pub mod devices;
 pub mod image;
 pub mod testargs;
 pub mod timings;
@@ -749,8 +748,6 @@ pub const FLASHABLE: &[&str] = &[
     "revoked-backing-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
-    "xhci-xecp-selftest",
-    "xhci-descriptor-selftest",
     // A probe rather than staged inputs, and a read: it runs inside the first
     // syscall's own context switch.
     "sysret-ss-probe",
@@ -761,16 +758,11 @@ pub const FLASHABLE: &[&str] = &[
     // Three nested `scheduler::Operation`s with known deadlines, in both homes,
     // each printing what it asked for and what it observed. It establishes and
     // drops them and reaches nothing else.
-    "sched-operation-nesting",
     // Every IOMMU unit left translating, remapping and queueing just before the
     // kernel programs it, which switches each of those off again first. It
     // writes only the units' registers, which a reset returns to firmware, and
     // tables in memory this boot owns.
     "iommu-firmware-left",
-    // No interrupt remapping: the DMAR's flags read with INTR_REMAP clear, or
-    // every AMD-Vi unit's interrupt halves left invalid. It writes no
-    // register a reset does not return to firmware.
-    "iommu-no-remap",
     // Every CPU is handed the loader's Intel update with its header's revision
     // raised by one and its checksum sealed again. Its payload is Intel's own,
     // the revision the CPU already runs, so the CPU refuses it or runs what it
@@ -802,35 +794,6 @@ pub const FLASHABLE: &[&str] = &[
     // register and writes no firmware state; the kernel implies `WEDGE_ARM`
     // behind it, so the boot cannot end itself before its own bound.
     LOCKUP_ARM,
-    // **The arm that stops nothing and never stops writing**, so the reset
-    // lands on a controller that is moving bytes. Admissible for the rows
-    // above's reason and one more: every run is read first and written back
-    // byte for byte in the last eighth of the disk, once and never twice, so
-    // the medium is what it was and no partition a boot mounts is the subject;
-    // and the sweep is refused by name on a disk with no room for it.
-    LOAD_ARM,
-    // It withholds transfers to the boot stick so the transport breaks on
-    // purpose. Admissible because it writes nothing the stick did not already
-    // hold, reaches no firmware state, and the worst
-    // it leaves is a stick a replug clears — the defect the arm exists to stage.
-    "usb-transport-break",
-    // The kernel leaves the T14's Type-C xHCI controller, `00:0d.0`, to a
-    // claim, and `usbd` drives it through the unit: the handoff, a reset and
-    // its own rings, as this kernel's driver does every boot. Firmware owns
-    // neither of the T14's two (each reads `USBLEGSUP 0x01002201`, every SMI
-    // enable clear). Whatever state a boot leaves it in, the reset that ends
-    // every boot resets the function and runs POST again, which takes it
-    // back. Only this address: the other controller carries the boot stick.
-    "xhci-leave=00:0d.0",
-    // The AMD bench's `03:00.4`, the xHCI the Bluetooth module is on, left to
-    // a claim the same way. Firmware owns it (`USBLEGSUP 0x00010401`) until
-    // `usbd` takes it; a boot may leave it halted with bus mastering off
-    // after the fault arm, or, where the claim is refused, still firmware's
-    // with its SMI on an ownership change armed. Either way the reset that
-    // ends every boot resets the function and runs POST again, which takes
-    // the controller back. Only this address: `03:00.3`, which shares its id,
-    // carries the boot stick.
-    "xhci-leave=03:00.4",
 ];
 
 /// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and
@@ -843,17 +806,13 @@ pub const WEDGE_ARM: &str = "wedge-before-reset";
 /// and which bound sealed the page is the page's own first line to say.
 pub const LOCKUP_ARM: &str = "hard-lockup-probe";
 
-/// The arm that leaves the machine to its bound with the bus busy rather than
-/// idle: it stops no CPU and never stops writing.
-pub const LOAD_ARM: &str = "usb-reset-under-load";
-
 /// Every arm that deliberately leaves this machine to be ended by a bound.
 ///
 /// **One list and not a condition spelled out at each reader.** A further such
 /// arm added to [`FLASHABLE`] and not here is an image whose boot is judged by
 /// the word a shutdown writes — which it never reaches — so the reader that
 /// forgot it reds every boot it was staged for.
-pub const WEDGE_ARMS: &[&str] = &[WEDGE_ARM, LOCKUP_ARM, LOAD_ARM];
+pub const WEDGE_ARMS: &[&str] = &[WEDGE_ARM, LOCKUP_ARM];
 
 /// The arm whose boot the pass after it reads as a hang on purpose: its record
 /// is sealed under another stick's identity, so that pass clears it and finds
@@ -864,6 +823,21 @@ pub const FOREIGN_RECORD_ARM: &str = "blackbox-foreign-identity";
 /// rather than `Rebooting.`.
 pub fn stages_a_wedge(armed: &[impl AsRef<str>]) -> bool {
     armed.iter().any(|name| WEDGE_ARMS.contains(&name.as_ref()))
+}
+
+/// Whether this image is ended by its own boot deadline on purpose: armed to
+/// wedge, or carrying a deadline below the least bound a runner gives its list
+/// ([`toyos_tco::JOB_BOUND_MS`]). The harness gives such a deadline only to a
+/// boot whose load runs until the reset, such as `stick_survives_a_reset_under_load`'s,
+/// so the boot is judged by the record that bound sealed, as a wedge is.
+pub fn ended_by_its_deadline(armed: &[impl AsRef<str>]) -> bool {
+    stages_a_wedge(armed)
+        || armed.iter().any(|name| {
+            name.as_ref()
+                .strip_prefix(toyos_tco::DEADLINE_PARAM)
+                .and_then(|ms| ms.parse::<u64>().ok())
+                .is_some_and(|ms| ms < toyos_tco::JOB_BOUND_MS)
+        })
 }
 
 /// The `boot-deadline=` bound an image armed with `armed` carries, whose
@@ -1705,9 +1679,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
             })?;
         }
         let complaints = toyos_fat32_check::check(&bytes);
-        if !complaints.is_empty() {
-            return Err(Refusal::Fat32(toyos_fat32_check::describe(&complaints)));
-        }
+        fat32_verdict(&armed, &complaints)?;
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
     let raw_log = args.fat32_check.then(|| began.elapsed().as_secs_f64());
@@ -1724,6 +1696,28 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     println!("phases: {phases}");
     let boot = BootFile { back, stick, machine, phases }.text();
     judge_and_write_readback(&armed, &loader, &log, args.readback.as_deref(), &boot).map(Some)
+}
+
+/// The outside judge's verdict on the log partition. A boot that hands the
+/// machine back owes a volume with nothing to say about it. One its own
+/// deadline ends ([`ended_by_its_deadline`]) stopped wherever logkeeper's
+/// append was, and owes only what such a stop can leave
+/// ([`toyos_fat32_check::unexplained_by_a_stop`]), each of which is printed.
+fn fat32_verdict(armed: &[String], complaints: &[toyos_fat32_check::Complaint]) -> Result<(), Refusal> {
+    let refused: Vec<toyos_fat32_check::Complaint> = if ended_by_its_deadline(armed) {
+        let unexplained = toyos_fat32_check::unexplained_by_a_stop(complaints);
+        for left in complaints.iter().filter(|c| !unexplained.iter().any(|u| std::ptr::eq(*u, *c))) {
+            println!("toyos-fat32-check: what the reset's stop left: {}", toyos_fat32_check::describe(std::slice::from_ref(left)));
+        }
+        unexplained.into_iter().cloned().collect()
+    } else {
+        complaints.to_vec()
+    };
+    if refused.is_empty() {
+        Ok(())
+    } else {
+        Err(Refusal::Fat32(toyos_fat32_check::describe(&refused)))
+    }
 }
 
 /// What [`Driver::flash`] took, on a run that was no rehearsal.
@@ -1780,7 +1774,7 @@ fn boot_verdict(armed: &[String], loader: &str, log: &str) -> Result<u64, Refusa
     // it was not flashed as. *Which* bound sealed it is the page's to say
     // and not this list's — the arm says a bound was staged, and two of them
     // can reach a staged boot.
-    if stages_a_wedge(armed) {
+    if ended_by_its_deadline(armed) {
         return wedged_boot(loader, log);
     }
     let ms = bootlog::verdict(log).map_err(Refusal::Log)?;
@@ -3192,6 +3186,64 @@ mod tests {
         assert_eq!(lockup_lateness_ms(&early), Some(Ok(-1000)));
         let unread = locked.replace("Its bound is", "Its bound was");
         assert!(matches!(lockup_lateness_ms(&unread), Some(Err(_))));
+    }
+
+    /// The outside judge on what the T14's first unclean reset mid-append left
+    /// (r5 at d36af3872): accepted for a boot its deadline ends, refused for
+    /// one that handed back, and a short chain refused for both.
+    #[test]
+    fn a_deadline_boot_s_volume_may_hold_what_a_stop_leaves_and_no_more() {
+        use toyos_fat32_check::Complaint;
+        let left = [
+            Complaint::ChainTooLong { path: "/2026-10-21-094046_0008.log".into(), size: 200_402, held: 394, needed: 392 },
+            Complaint::FsInfoFreeCount { declared: 53_763, counted: 53_761 },
+        ];
+        let deadline = ["boot-deadline=40000".to_string()];
+        let ordinary = ["boot-deadline=120000".to_string()];
+        assert!(fat32_verdict(&deadline, &left).is_ok());
+        assert!(fat32_verdict(&ordinary, &left).is_err());
+        let short = [Complaint::ChainTooShort { path: "/a.log".into(), size: 200_402, held: 390, needed: 392 }];
+        assert!(fat32_verdict(&deadline, &short).is_err());
+    }
+
+    /// A boot given a deadline below its runner's least bound is ended by it on
+    /// purpose, as `stick_survives_a_reset_under_load`'s is: judged by the
+    /// record the deadline sealed, never by a supervisor's stop it was never
+    /// going to reach. The same boot under the ordinary deadline is the
+    /// unfinished boot it would be, and one that handed back was not ended
+    /// by its bound.
+    #[test]
+    fn a_boot_its_deadline_ends_on_purpose_is_judged_by_the_record_it_sealed() {
+        let loader = format!(
+            "Loader log: the kernel handoff begins, so this file ends here\n{}\n\
+             ToyOS Bootloader 1.0\n\
+             Previous boot's panic: the last boot read WEDGED, so a bound of its own ended it and this chain ends here\n\
+             | {}: a bound of 40000 ms, reached at 52397 ms, with this machine in `complete`.\n\
+             Loader log: the last boot is accounted for, so this pass resets the machine\n",
+            bootlog::SEPARATOR,
+            bootlog::DEADLINE_EXPIRED
+        );
+        let log = "[2026-10-21 09:02:08 12.400 cpu0 kernel] Boot: complete (12400ms)\n\
+                   [2026-10-21 09:02:48 52.332 test-runner pid=12] stick_load: 32204 lines said\n";
+        let armed = |names: &[&str]| -> Vec<String> { names.iter().map(|n| (*n).to_string()).collect() };
+        assert!(ended_by_its_deadline(&armed(&["boot-deadline=40000"])));
+        assert!(!ended_by_its_deadline(&armed(&["boot-deadline=120000"])));
+        assert_eq!(boot_verdict(&armed(&["boot-deadline=40000"]), &loader, log), Ok(12400));
+        assert!(matches!(
+            boot_verdict(&armed(&["boot-deadline=120000"]), &loader, log),
+            Err(Refusal::Log(bootlog::Unfit::Unfinished(_)))
+        ));
+        let handed_back = format!(
+            "{}Black box: {} at 2026-10-21-090207\n| {}[52.400 cpu0 kernel] {}\n",
+            loader,
+            bootlog::HANDED_BACK,
+            bootlog::LOG_TAIL,
+            bootlog::REBOOTING
+        );
+        assert!(matches!(
+            boot_verdict(&armed(&["boot-deadline=40000"]), &handed_back, log),
+            Err(Refusal::Wedge { .. })
+        ));
     }
 
     /// The foreign-record arm's pass after the reset: the hang it stages is its

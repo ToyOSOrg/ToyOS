@@ -822,6 +822,9 @@ mod tests {
         let whole = [&held[..], &appended[..]].concat();
         written(&mut image, epochs[..synced].iter().flatten());
 
+        // Whether a stop between the chain's growth and the size's write was
+        // reached, the state a reset mid-append leaves on the stick.
+        let mut grown_before_its_size = false;
         for (e, epoch) in epochs.iter().enumerate().skip(synced) {
             for kept in 0..1u32 << epoch.len() {
                 let stop = format!("stopped in flush epoch {e} of {} with writes {kept:#b} of its {}", epochs.len(), epoch.len());
@@ -831,7 +834,9 @@ mod tests {
                 // Clusters no entry reaches yet, and the last sync's entry over
                 // the append's chain: the window between the chain and its
                 // entry, closed once the sync is whole on the disk.
-                let refused: Vec<_> = check(&bytes)
+                let complaints = check(&bytes);
+                grown_before_its_size |= complaints.iter().any(|c| matches!(c, Complaint::ChainTooLong { .. }));
+                let refused: Vec<_> = complaints
                     .into_iter()
                     .filter(|c| match c {
                         _ if synced_whole => true,
@@ -856,6 +861,7 @@ mod tests {
             }
             written(&mut image, epoch);
         }
+        assert!(grown_before_its_size, "no stop fell between the chain's growth and the size's write");
     }
 
     /// What the driver says of a volume that stopped answering is `Io`, which

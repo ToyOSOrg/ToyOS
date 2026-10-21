@@ -24,8 +24,6 @@ mod checks {
     mod screen_checks;
     #[path = "serial.rs"]
     mod serial_checks;
-    #[path = "usb.rs"]
-    mod usb_checks;
 
     /// One subject: what a console line says died, what a wait does about it,
     /// and that only one place in the harness answers either.
@@ -520,7 +518,7 @@ mod checks {
         let opening = [report((100, 100), read_back), exit("pwd")].concat();
         let own = [report((3_000_000, 1_100_000), (700_000, 600_000)), exit(WINDOWS_LOAD)].concat();
         let good = [hold.as_str(), &first, &opening, &own].concat();
-        let exited = windows_load_exited();
+        let exited = exited(WINDOWS_LOAD);
 
         mask_windows(&good, 2).map_err(|e| format!("the good capture was refused: {e}"))?;
         let unpaired = |what: &str, capture: &str, says: &str| match mask_windows(capture, 2) {
@@ -584,9 +582,9 @@ mod checks {
     #[test]
     fn irq_census_verdict() -> Result<(), String> {
         let census = |at: &str, on: u32, cpu: u32, kick: u64, tlb: u64| {
-            let xhci = if cpu == 0 { 40 } else { 0 };
+            let userdev = if cpu == 0 { 40 } else { 0 };
             format!(
-                "[ {at} cpu{on} kernel] irq: cpu{cpu} timer=100 kick={kick} xhci={xhci} userdev=0 \
+                "[ {at} cpu{on} kernel] irq: cpu{cpu} timer=100 kick={kick} userdev={userdev} \
                  dmafault=0 tlb={tlb} nmi=0 spurious=0 unclaimed=0\n"
             )
         };
@@ -621,7 +619,7 @@ mod checks {
         };
         refused(
             "an AP's device delivery on a line that is not that AP's last",
-            &good.replace(&y_cpu2, &y_cpu2.replace("xhci=0", "xhci=1")),
+            &good.replace(&y_cpu2, &y_cpu2.replace("userdev=0", "userdev=1")),
             "addressed to physical destination 0",
         )?;
         refused(
@@ -942,11 +940,6 @@ mod checks {
     }
 
     #[test]
-    fn metal_usb_judge() -> Result<(), String> {
-        usb_checks::transport_break_verdict()
-    }
-
-    #[test]
     fn metal_claim_spends_one_remapping_entry() {
         claims_checks::one_entry_per_slot();
     }
@@ -957,8 +950,8 @@ mod checks {
     }
 
     #[test]
-    fn metal_stop_owes_its_record_and_leaves_no_operation_open() {
-        metal_checks::the_stop_owes_its_record_and_leaves_no_operation_open();
+    fn metal_stop_owes_its_record() {
+        metal_checks::the_stop_owes_its_record();
     }
 
     #[test]
@@ -1106,7 +1099,7 @@ mod checks {
         assert!(judge(&[&readback("jobcase", &done(stopped), jobcase)]).is_err());
 
         // What the seal itself writes of the machine, above the ring's tail.
-        let census = "| irq: cpu0 timer=9 kick=2 xhci=1729 userdev=0 dmafault=0 tlb=0 \
+        let census = "| irq: cpu0 timer=9 kick=2 userdev=1729 dmafault=0 tlb=0 \
                       nmi=0 spurious=0 unclaimed=0\n\
                       | tlb: shootdowns=4 wait=12us max=3us dlopen=0 pcid=0 mmio=0 unmap=4 pipe=0 staged=0 \
                       bench=0\n\
@@ -1162,12 +1155,18 @@ mod checks {
         let unnamed = format!("{staged}{}{}|   cpu0 pc=0xffff80006051b0b2  {spin}\n", awake(1), awake(0));
         assert!(judge(&[&readback("deadlinewedge", &wedged(&unnamed), kernel)]).is_err());
 
-        let sweep = "| [ 1.526 cpu0 kernel] usb-load: sweeping disk 0 from block 6569336 to 7507812, \
-                     rewriting each run with the bytes just read from it, until this machine is \
-                     reset out from under it\n";
-        let judge = metal_judge("usb_reset_records_the_phase_it_cut");
-        assert_eq!(judge(&[&readback("usbload", &wedged(sweep), kernel)]), Ok(()));
+        // The stick load's boot: its deadline ended it while the job's lines
+        // were reaching /log; one whose job never wrote, or that handed the
+        // machine back, is no reset under load.
+        let judge = metal_judge("stick_survives_a_reset_under_load");
+        let line = |n: u32| format!("[2026-09-29 10:33:40 20.100 test-runner pid=12] stick_load: line {n} {}\n", "x".repeat(840));
+        let wrote = format!("{kernel}{}", (0..1200).map(line).collect::<String>());
+        let short = format!("{kernel}{}", (0..10).map(line).collect::<String>());
+        assert!(judge(&[&readback("usbload", &wedged(""), &short)]).is_err(), "ten lines are no mebibyte");
+        assert_eq!(judge(&[&readback("usbload", &wedged(""), &wrote)]), Ok(()));
         assert!(judge(&[&readback("usbload", &wedged(""), kernel)]).is_err());
+        let handed_back = format!("{}| log-tail: [20.200 cpu0 kernel] Rebooting.\n", wedged(""));
+        assert!(judge(&[&readback("usbload", &handed_back, &wrote)]).is_err());
     }
 
     /// The foreign-identity arm's pass after the reset: the record it cleared
@@ -1199,40 +1198,6 @@ mod checks {
         }
         let unbounded = loader.replace(bootlog::HUNG_WITHOUT_A_RECORD, "");
         assert!(judge(&[&readback("foreignrecord", &unbounded, kernel)]).is_err());
-    }
-
-    /// A T14 controller's handoff: it publishes USB Legacy Support and
-    /// firmware never claimed it. The T14 has two, and each is judged.
-    #[test]
-    fn the_xecp_judge_reads_the_t14s_handoff() {
-        let t14 = "[2026-09-29 11:05:25  0.253 cpu0 kernel] xHCI: xecp selftest 8/8 malformed lists refused\n\
-                   [2026-09-29 11:05:25  0.253 cpu0 kernel] xHCI: firmware did not claim the controller \
-                   (USBLEGSUP 0x01002201)\n\
-                   [2026-09-29 11:05:25  0.253 cpu0 kernel] xHCI: USBLEGCTLSTS 0xe0000000 -> 0x00000000 \
-                   (SMI generation off)\n\
-                   [2026-09-29 11:05:25  0.253 cpu0 kernel] xHCI: controller reset\n\
-                   [2026-09-29 11:05:25  0.254 cpu0 kernel] xHCI: controller started\n";
-        assert_eq!(xhci_xecp(t14), Ok(()));
-        assert_eq!(xhci_xecp(&format!("{t14}{t14}")), Ok(()));
-        // Firmware that kept the controller handed nothing over.
-        let held = t14.replace(
-            "firmware did not claim the controller (USBLEGSUP 0x01002201)",
-            "firmware still owns the controller after 1000ms (USBLEGSUP 0x01010001 -> \
-             0x01010001) — resetting it anyway",
-        );
-        assert!(xhci_xecp(&held).is_err());
-        assert!(xhci_xecp(&format!("{t14}{held}")).is_err());
-        let kept = held.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
-        assert!(xhci_xecp(&format!("{t14}{kept}")).is_err());
-        // A second controller's handoff with no reset of its own, and a reset
-        // with no handoff before it.
-        let unreset = t14.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
-        assert!(xhci_xecp(&format!("{t14}{unreset}")).is_err());
-        assert!(xhci_xecp(&format!("{unreset}{t14}")).is_err());
-        let unhanded = t14.replace("firmware did not claim the controller", "USB 3.1 on ports 2..=5");
-        assert!(xhci_xecp(&format!("{t14}{unhanded}")).is_err());
-        let silent = unhanded.replace("xHCI: controller reset", "xHCI: 34 scratchpad buffers configured");
-        assert!(xhci_xecp(&silent).is_err());
     }
 
     /// A member that reads another test binary by path.

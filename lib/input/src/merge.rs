@@ -6,21 +6,17 @@ use toyos_abi::input::{RawKeyEvent, MOD_ALT, MOD_CTRL, MOD_GUI, MOD_RELEASED, MO
 use crate::keys::{Keys, Transitions, Usages};
 use crate::wire::{Motion, Report, CONNECTIONS, DEVICES};
 
-/// The sources the owner merges: the kernel's streams, until usbd takes the
-/// last kernel source, and one per connection on the port.
-pub const SLOTS: usize = CONNECTIONS + 1;
+/// The sources the owner merges: one per connection on the port.
+pub const SLOTS: usize = CONNECTIONS;
 
 /// Which source a record came from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Slot(usize);
 
 impl Slot {
-    /// The kernel's keyboard and mouse streams.
-    pub const KERNEL: Self = Self(0);
-
     /// The `n`th connection on the port, of [`CONNECTIONS`].
     pub fn connection(n: usize) -> Option<Self> {
-        (n < CONNECTIONS).then_some(Self(n + 1))
+        (n < CONNECTIONS).then_some(Self(n))
     }
 }
 

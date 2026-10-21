@@ -1,6 +1,6 @@
-//! A holder's end gives its claim back before anyone can see it end: the
-//! function `xhci-leave=` leaves is handed to a child that holds it, the
-//! child is killed and waited for, and the claim is asked for at once, for
+//! A holder's end gives its claim back before anyone can see it end: a
+//! function no `drives` row names ([`SPARES`]) is handed to a child that holds
+//! it, the child is killed and waited for, and the claim is asked for at once, for
 //! [`ROUNDS`] rounds. Any refusal is red; how long each step took is printed
 //! and not judged.
 //!

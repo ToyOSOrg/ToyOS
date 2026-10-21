@@ -124,7 +124,7 @@ mod tests {
         for missing in [Missing::Unresolved(Unresolved::Absent), Missing::Refused(SyscallError::AlreadyExists)] {
             assert!(goes_on_without(entry, &missing, &[]), "{missing:?}");
             assert!(!goes_on_without(entry, &missing, &owed), "{missing:?}");
-            assert!(goes_on_without("keyboard", &missing, &owed), "{missing:?}");
+            assert!(goes_on_without("acpi", &missing, &owed), "{missing:?}");
         }
     }
 }

@@ -92,7 +92,13 @@ reported. `stop::OpenCommand` already publishes where the round trip stands;
 what is missing is the driver keeping it across `with_disk` and `dispatch_event`
 recording a mass-storage completion nobody is waiting on.
 
+Since the small-kernel track's step 10 the stick is usbd's, which gives one
+Bulk-Only transfer ten seconds (`msc::COMMAND_NS`, a policy) before it takes
+it back and climbs its ladder; the paragraphs above describe the kernel's
+driver, which is gone.
+
 ## Exit condition
 
 A T14 boot in which a CSW arrives more than two seconds after its CBW and the
-command completes on the caller's retry with no `transport broke` record.
+command completes with no break on usbd's ladder, or the measurement that says
+ten seconds is not enough.

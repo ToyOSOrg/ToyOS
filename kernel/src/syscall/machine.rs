@@ -105,13 +105,6 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     if crate::actuator::wedge_before_reset() {
         crate::deadline::stage_a_wedge();
     }
-    // The same machine ended by the same bound, with the bus busy rather than
-    // idle: this one never stops writing, so the reset lands on a controller
-    // that is moving bytes.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::usb_reset_under_load() {
-        crate::usb_gate::sweep_under_load();
-    }
     let parkable = crate::scheduler::Parkable::at_entry();
     // The console's writer holding the wire as the stop begins, which a
     // shipping `klogd` does at any moment.
@@ -141,10 +134,6 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     } else {
         crate::alert!("{stopped}");
     }
-    // Above the boot's last word, because these are ordinary records and the
-    // volume that carries them is still there: every USB disk's write cache is
-    // emptied and waited for before anything is taken down.
-    crate::drivers::xhci::flush_disks();
     // `klogd` inside its hold of the wire as the last word is logged, which a
     // stop that did not hold the wire would leave it in at the seal below.
     #[cfg(feature = "boot-actuators")]
@@ -165,16 +154,6 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     // census and the last word among them. Nothing wrote them to `/log`,
     // and on a machine with no serial port this is their only reader.
     crate::log::seal_tail(stop_began);
-    // Whether or not the volume got them: a stick this boot's transport broke
-    // on is a stick the next host may not be able to read the log off.
-    crate::blackbox::append_recovery();
-    // **The barrier, and last of all.** Below the sync, because before it the
-    // volumes still have bytes to take and this takes the controller away from
-    // them; and after everything else here,
-    // because nothing may run between it and the register stop
-    // `power::reboot`/`power::shutdown` do — which every reset this kernel
-    // performs goes through. It is bounded, and the reset follows either way.
-    crate::drivers::xhci::seal_shut();
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::wire_held_at_the_last_word() {
         crate::log::console::sealed();

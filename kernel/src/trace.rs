@@ -1,6 +1,6 @@
 //! The diary: a ring per CPU of `toyos_abi::trace` records, written always from
-//! the timer, the scheduler, `irq_ring` and every
-//! `kernel::sched::hw::TraceEvent` the core emits, and read by
+//! the timer, the scheduler and every `kernel::sched::hw::TraceEvent` the core
+//! emits, and read by
 //! `SYS_TRACE_READ` on `Rights::TRACE`.
 //!
 //! Each ring is the log's slot protocol ([`crate::log::shard::Ring`]) and is
@@ -121,12 +121,6 @@ pub fn record(ev: TraceEvent) {
     };
     // A task's name is its `TaskId::pack`, pid in the high half.
     push(kind, task.map(|name| ((name >> 32) as u32, name as u32)), data);
-}
-
-/// Record consumption of an `irq_ring` record (see [`Kind::IrqDrain`]).
-pub fn trace_irq_drain(source: crate::irq_ring::IrqSource, latency_us: u64) {
-    let data = ((source as u32) << 24) | (latency_us.min(0x00FF_FFFF) as u32);
-    trace(Kind::IrqDrain, data);
 }
 
 /// Every ring a reader names: one per CPU the firmware names.

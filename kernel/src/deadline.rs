@@ -42,7 +42,6 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 pub const PHASES: &[&str] = &[
     "before the first boot phase",
     "CPU ready",
-    "storage ready",
     "peripherals ready",
     "subsystems ready",
     "devices ready",

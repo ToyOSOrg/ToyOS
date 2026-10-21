@@ -101,9 +101,7 @@ pub fn stop_bus_mastering(config: Mmio) {
 
 /// One function's ECAM window: PCIe extended config space, PCI 3.0 §7.2.2.
 ///
-/// Declared once because two readers deal in it — an ECAM window carves it and
-/// the reset-time xHCI stop rebuilds one from a bare address.
-pub const CONFIG_BYTES: u64 = 4096;
+const CONFIG_BYTES: u64 = 4096;
 
 /// A PCI function, by its bus, device and function and the configuration
 /// space its ECAM window gives it.
@@ -269,23 +267,6 @@ impl PciDevice {
         self.mmio.read_u16(COMMAND);
     }
 
-    /// Point this function's [`MSIX_ENTRY`] at `irq` and enable it: a kernel
-    /// driver's arming, whose message the architecture makes
-    /// ([`crate::iommu::driver_msi`]). A claimed function is armed by
-    /// [`arm_claimed_msix`] instead.
-    ///
-    /// Answers the entry's own window, which stays this kernel's: masking is a
-    /// write to it, and a claimant that could reach it could aim the device's
-    /// message at any address the LAPIC decodes.
-    ///
-    /// `None` where it has no MSI-X entry this kernel can write, or it is
-    /// refused a message.
-    pub(in crate::drivers) fn enable_msix(&self, irq: crate::arch::DriverIrq) -> Option<Mmio> {
-        let entry = self.msix_entry().ok()?;
-        let (address, data) = self.message(irq)?;
-        Some(self.write_msix(entry, address, data))
-    }
-
     pub(in crate::drivers) fn msix_entry(&self) -> Result<MsixEntry<'_>, NoEntry> {
         let cap = self.capability(msix::CAP_ID).map_err(NoEntry::NoTable)?;
         let control = cap.read_u16(msix::MESSAGE_CONTROL);
@@ -340,42 +321,9 @@ impl PciDevice {
             self.bus, self.dev, self.func);
     }
 
-    /// The address and data this function's interrupt registers take for `irq`.
-    ///
-    /// `None` refuses the device: the message it would otherwise write is one
-    /// nothing delivers.
-    fn message(&self, irq: crate::arch::DriverIrq) -> Option<(u32, u32)> {
-        match crate::iommu::driver_msi(self.bus, self.dev, self.func, irq) {
-            Ok(message) => Some((message.address, message.data)),
-            Err(why) => {
-                log!("PCI {:02x}:{:02x}.{}: not armed — {why}", self.bus, self.dev, self.func);
-                None
-            }
-        }
-    }
-
-    /// Point this function's single MSI message at `irq` and enable it: a
-    /// kernel driver's arming, as [`Self::enable_msix`] is.
-    ///
-    /// **A driver in this kernel may arm this however the MSI-X walk failed**, a
-    /// list that ended early included: it hands no BAR of its function to a
-    /// holder, so an MSI-X table past that link is one nobody but this kernel
-    /// could reach. A hand-over is the caller that has to tell the two apart,
-    /// and `crate::pcidev`'s header says why.
-    pub(in crate::drivers) fn enable_msi(&self, irq: crate::arch::DriverIrq) -> bool {
-        let Ok(cap) = self.capability(msi::CAP_ID) else {
-            return false;
-        };
-        let Some((address, data)) = self.message(irq) else {
-            return false;
-        };
-        self.write_msi(cap, address, data);
-        true
-    }
-
     /// Point an IOMMU unit's own function's MSI at `address`/`data` and
     /// enable it: the one message no unit remaps (AMD 48882 Capability Offset
-    /// 10h), so it is armed here rather than through [`Self::message`].
+    /// 10h), so it is armed here and not through an interrupt remapping entry.
     /// `false` where the function has no MSI capability.
     pub(crate) fn arm_unit_msi(&self, address: u32, data: u32) -> bool {
         let Ok(cap) = self.capability(msi::CAP_ID) else {
@@ -402,6 +350,14 @@ impl PciDevice {
             cap.read_u32(msi.address_lo()),
             cap.read_u16(msi.data()) as u32,
         );
+    }
+
+    /// Mask every MSI-X vector at once with the capability's Function Mask:
+    /// nothing where the function has no MSI-X capability.
+    pub fn mask_msix_function(&self) {
+        let Ok(cap) = self.capability(msix::CAP_ID) else { return };
+        let control = cap.read_u16(msix::MESSAGE_CONTROL);
+        cap.write_u16(msix::MESSAGE_CONTROL, msix::Msix::function_masked(control));
     }
 
     /// Put MSI back off.
@@ -454,14 +410,6 @@ impl PciDevice {
         self.vendor_id() == vendor && self.device_id() == device
     }
 
-    pub fn matches_class(&self, class: u8, subclass: u8, prog_if: Option<u8>) -> bool {
-        if self.mmio.read_u8(CLASS) != class { return false; }
-        if self.mmio.read_u8(SUBCLASS) != subclass { return false; }
-        match prog_if {
-            Some(pi) => self.mmio.read_u8(PROG_IF) == pi,
-            None => true,
-        }
-    }
 }
 
 /// Point a claimed function's [`MSIX_ENTRY`] at the message `claim_msi` made

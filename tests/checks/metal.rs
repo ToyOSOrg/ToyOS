@@ -146,18 +146,15 @@ fn read(dir: &Path, labels: &[&str]) -> BTreeMap<String, Result<Readback, String
     labels.iter().map(|label| (label.to_string(), metal::read_readback(dir, label))).collect()
 }
 
-/// **The stop's two refusals, each on the page that has to draw it**: a boot
-/// that handed the machine back owes the stop's record, and a record with a
-/// block operation still open is a sync about a machine that was still writing.
-pub fn the_stop_owes_its_record_and_leaves_no_operation_open() {
+/// **A boot that handed the machine back owes the stop's record**, drawn on
+/// the page that has to carry it.
+pub fn the_stop_owes_its_record() {
     let whole = toyos_quiesce::Record {
         sweep: toyos_quiesce::Sweep { stopped: 6, running: 0 },
         elapsed_ms: 11,
         budget_ms: 2010,
         sweeps: 3,
         cpus: 8,
-        in_flight: 0,
-        begun: 4812,
     };
     let handed_back = |stop: &str| format!("Black box: {}\n{PANEL}{stop}", bootlog::HANDED_BACK);
     assert_eq!(planted(&handed_back(&format!("| {whole}\n")), BOOTED).stop_completed(), Ok(()));
@@ -165,11 +162,6 @@ pub fn the_stop_owes_its_record_and_leaves_no_operation_open() {
         .stop_completed()
         .expect_err("a boot that handed the machine back with no record of its stop");
     assert!(why.contains("carries no record of the stop"), "{why}");
-    let open = toyos_quiesce::Record { in_flight: 1, ..whole };
-    let why = planted(&handed_back(&format!("| {open}\n")), BOOTED)
-        .stop_completed()
-        .expect_err("a stop that left an operation open");
-    assert!(why.contains("1 block operation(s) open"), "{why}");
     let ended = format!("Previous boot's panic: the last boot read WEDGED\n{PANEL}");
     assert_eq!(planted(&ended, BOOTED).stop_completed(), Ok(()));
 }

@@ -15,5 +15,5 @@ close. So the timed read is fsd's memory, and the `usbread` span is no longer
 the stick's.
 
 **Exit**: the timed read is one the stick answers — a file fsd has not read
-since it started, or a read through the partition claim that bypasses the
-file server.
+since it started, or a read through a block session that bypasses the file
+server.

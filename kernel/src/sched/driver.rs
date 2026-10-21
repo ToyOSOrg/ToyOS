@@ -518,11 +518,10 @@ pub fn pass(dispose: Dispose) {
     crate::preempt::disable();
     #[cfg(feature = "boot-actuators")]
     crate::deadline::wedge_if_staged();
-    // Must clear before it drains, so a wake from this pass's own drain survives into the next poll.
+    // Cleared before the pass, so a wake landing during it survives into the next poll.
     crate::preempt::clear_need_resched();
-    drain_irqs();
-    // After `drain_irqs` and before the pass picks, so a wake this
-    // posts is in the run queue by the time the pass chooses.
+    // Before the pass picks, so a wake this posts is in the run queue by the
+    // time the pass chooses.
     crate::object::drain_zero_handles();
     let now = HW.now();
     crate::arch::watchdog::feed(now.0);
@@ -602,7 +601,6 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
     // No `preempt::disable()` of its own: the ticket has held the count raised since registration; that guard is this bracket.
     let ticket = ticket.into_raw();
     crate::preempt::clear_need_resched();
-    drain_irqs();
     let now = HW.now();
     let (action, parked) = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
@@ -656,10 +654,8 @@ fn execute(action: Action<KernelPayload>) {
             let cpu = CpuId(percpu::cpu_id());
             let awake = cpus().get(cpu).doorbell().kick_pending()
                 || crate::preempt::need_resched()
-                || !with_cpu(|c| c.mailbox_is_empty())
-                // No log condition here: a log to write means a runnable process, covered above. A pending
-                // root-hub port needs a pass too — no interrupt is coming.
-                || crate::drivers::xhci::port_work_pending();
+                // No log condition here: a log to write means a runnable process, covered above.
+                || !with_cpu(|c| c.mailbox_is_empty());
             if awake {
                 crate::arch::cpu::enable_interrupts();
                 drop(token);
@@ -668,11 +664,6 @@ fn execute(action: Action<KernelPayload>) {
             HW.idle_wait(token);
         }
     }
-}
-
-/// Consume this CPU's `irq_ring` records into wakes, before the mailbox drain, so a wake posted here reaches this pass's pick.
-fn drain_irqs() {
-    crate::drivers::xhci::poll_if_pending();
 }
 
 /// Leave the current stack for this CPU's idle stack and never come back.
@@ -719,11 +710,6 @@ pub fn current_shared() -> Option<Arc<KShared>> {
 /// The running task's cross-CPU face, where its own watch lives. `None` off-task.
 pub fn current_handle() -> Option<Arc<crate::sched::payload::TaskHandle>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handle.clone())).flatten()
-}
-
-/// The same face, borrowed rather than cloned, for a peek that does not outlive it — [`current_handle`]'s clone is a hot-path RMW.
-pub fn with_current_handle<R>(f: impl FnOnce(&crate::sched::payload::TaskHandle) -> R) -> Option<R> {
-    try_with_cpu(|cpu| cpu.running().map(|t| f(t.ext().handle.as_ref())))?
 }
 
 /// The image of the task this CPU is running, `None` inside for a kernel thread.

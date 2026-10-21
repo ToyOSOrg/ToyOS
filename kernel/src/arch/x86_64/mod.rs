@@ -49,7 +49,6 @@ pub use idt as trap;
 pub use iommu_unit::interrupt as message_unit;
 
 pub use apic::MSI_DOORBELL;
-pub use idt::DriverIrq;
 
 /// The machine every program image this kernel loads must be built for.
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::X86_64;

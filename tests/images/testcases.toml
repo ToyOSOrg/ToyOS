@@ -70,12 +70,6 @@ syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace", "i
 [programs.toybox]
 receives = ["soundserver"]
 
-# One xHCI controller driven from userland: `usbd_spare` claims the controller
-# the kernel was told to leave alone (`xhci-leave=`, `pci:1b36:000d` on the
-# guest and the Type-C controller on the T14), and starts and ends this itself,
-# holding the claim, its `usb` port and its process.
-[programs.usbd]
-
 [symlinks]
 "bin/cat" = "/system/bin/toybox"
 "bin/cp" = "/system/bin/toybox"
@@ -108,6 +102,15 @@ serves = ["block", "disk"]
 # boot leaves the bench's own NVMe disk to its firmware.
 [programs.nvme]
 drives = ["pci:01:08:02/1b36:0010"]
+receives = ["disk"]
+
+# The USB driver, one process per boot controller: QEMU's `nec-usb-xhci`, the
+# T14's 00:14.0 and the AMD bench's 03:00.3. QEMU's spare, the T14's Type-C
+# controller and the AMD bench's 03:00.4 stay free: `usbd_spare` claims the
+# one a machine has and starts its own usbd on it, holding the claim, its
+# `usb` port and its process.
+[programs.usbd]
+drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30/8086:a0ed", "pci:0c:03:30/1022:1639@03:00.3"]
 receives = ["disk"]
 
 # The file servers: DATA, the log and the boot volume, one process

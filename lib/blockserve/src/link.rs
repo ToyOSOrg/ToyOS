@@ -39,11 +39,16 @@ pub struct Link {
 }
 
 impl Link {
-    /// The link of the driver `label` names.
-    pub fn new(label: String) -> Self {
+    /// The link of the driver `label` names; `None` for a process its
+    /// manifest gives no `disk`.
+    pub fn new(label: String) -> Option<Self> {
+        let first = match endow::service(disk::PORT) {
+            Err(EndowError::NotEndowed) => return None,
+            first => first,
+        };
         let mut link = Self { label, conn: None, rx: FrameRx::new(), offers: BTreeMap::new(), settled: None };
-        link.connect();
-        link
+        link.connect_from(first);
+        Some(link)
     }
 
     /// Connect, and say everything again; a fresh connection that will not
@@ -51,9 +56,15 @@ impl Link {
     /// connection's frames on any of them is a refusal that does not change,
     /// and the driver ends by name.
     fn connect(&mut self) {
+        self.connect_from(endow::service(disk::PORT));
+    }
+
+    /// [`Self::connect`], its first connection's answer already in hand.
+    fn connect_from(&mut self, first: Result<Connection, EndowError>) {
+        let mut first = Some(first);
         for _ in 0..CONNECTS {
             self.rx = FrameRx::new();
-            self.conn = match endow::service(disk::PORT) {
+            self.conn = match first.take().unwrap_or_else(|| endow::service(disk::PORT)) {
                 Ok(conn) => Some(conn),
                 Err(EndowError::ServerGone) => {
                     println!("{}: the block service's port is closed for good; nothing new is served", self.label);

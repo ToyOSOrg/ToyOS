@@ -19,13 +19,6 @@ impl Instant {
     pub const fn from_nanos_since_boot(nanos: u64) -> Self {
         Self(nanos)
     }
-
-    /// Leaves the type system that keeps an instant from being confused with a duration.
-    // Read only by the `boot-actuators` gate `sched_gate`.
-    #[cfg_attr(not(feature = "boot-actuators"), allow(dead_code))]
-    pub const fn nanos_since_boot(self) -> u64 {
-        self.0
-    }
 }
 
 impl Add<Duration> for Instant {
@@ -168,10 +161,6 @@ impl Cadence {
 
     pub const fn duration(self) -> Duration {
         self.period
-    }
-
-    pub const fn nanos(self) -> u64 {
-        self.period.nanos()
     }
 }
 

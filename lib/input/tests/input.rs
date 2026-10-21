@@ -1,9 +1,8 @@
 //! The owner of input's merge and the one reader of a source's records.
 
-use toyos_abi::input::{MouseEvent, RawKeyEvent, MOD_RELEASED, MOD_SHIFT, POINTER_ABSOLUTE, POINTER_RELATIVE};
+use toyos_abi::input::{RawKeyEvent, MOD_RELEASED, MOD_SHIFT, POINTER_ABSOLUTE, POINTER_RELATIVE};
 use toyos_input::wire::{
     self, Motion, Record, Refused, Report, DEVICES, GONE_LEN, KEY_LEN, MAX_PAYLOAD, MSG_GONE, MSG_KEY, MSG_POINTER, POINTER_LEN,
-    STREAM_POINTER_LEN,
 };
 use toyos_input::{Full, Merge, Pointer, Slot, State};
 
@@ -22,8 +21,21 @@ fn slot(n: usize) -> Slot {
     Slot::connection(n).expect("a connection the port holds")
 }
 
-fn bytes(event: &MouseEvent) -> [u8; STREAM_POINTER_LEN] {
-    toyos_abi::usersafe::bytes(event).try_into().expect("a record's length")
+/// A key frame of source 0.
+fn key(keycode: u8, modifiers: u8) -> Result<RawKeyEvent, Refused> {
+    match wire::decode(MSG_KEY, &[0, 0, keycode, modifiers])? {
+        Record::Key { key, .. } => Ok(key),
+        other => panic!("a key frame decoded as {other:?}"),
+    }
+}
+
+/// A pointer frame of source 0.
+fn pointer(buttons: u8, kind: u8, x: i16, y: i16) -> Result<Report, Refused> {
+    let ([x0, x1], [y0, y1]) = (x.to_le_bytes(), y.to_le_bytes());
+    match wire::decode(MSG_POINTER, &[0, 0, buttons, 0, kind, x0, x1, y0, y1])? {
+        Record::Pointer(report) => Ok(report),
+        other => panic!("a pointer frame decoded as {other:?}"),
+    }
 }
 
 fn relative(source: u16, buttons: u8, dx: i16, dy: i16) -> Report {
@@ -32,38 +44,31 @@ fn relative(source: u16, buttons: u8, dx: i16, dy: i16) -> Report {
 
 #[test]
 fn a_key_with_no_usage_or_a_modifier_bit_is_refused() {
-    assert_eq!(wire::key(&[0, 0]), Err(Refused::NoUsage));
-    assert_eq!(wire::key(&[0, MOD_RELEASED]), Err(Refused::NoUsage));
+    assert_eq!(key(0, 0), Err(Refused::NoUsage));
+    assert_eq!(key(0, MOD_RELEASED), Err(Refused::NoUsage));
     for bit in (0..8).map(|n| 1u8 << n).filter(|&bit| bit != MOD_RELEASED) {
-        assert_eq!(wire::key(&[A, bit]), Err(Refused::Modifiers(bit)), "modifier bit {bit:#04x}");
-        assert_eq!(wire::key(&[A, bit | MOD_RELEASED]), Err(Refused::Modifiers(bit | MOD_RELEASED)));
+        assert_eq!(key(A, bit), Err(Refused::Modifiers(bit)), "modifier bit {bit:#04x}");
+        assert_eq!(key(A, bit | MOD_RELEASED), Err(Refused::Modifiers(bit | MOD_RELEASED)));
     }
-    assert_eq!(wire::key(&[A, 0]), Ok(press(A)));
-    assert_eq!(wire::key(&[A, MOD_RELEASED]), Ok(lift(A)));
+    assert_eq!(key(A, 0), Ok(press(A)));
+    assert_eq!(key(A, MOD_RELEASED), Ok(lift(A)));
 }
 
 #[test]
 fn a_pointer_report_past_five_buttons_of_no_kind_or_off_the_surface_is_refused() {
-    let event = |buttons, kind, x, y| MouseEvent { source: 0, buttons, scroll: 0, kind, x, y };
     for button in 5..8 {
         let buttons = 1 << button;
-        assert_eq!(wire::pointer(&bytes(&event(buttons, POINTER_RELATIVE, 0, 0))), Err(Refused::Buttons(buttons)));
+        assert_eq!(pointer(buttons, POINTER_RELATIVE, 0, 0), Err(Refused::Buttons(buttons)));
     }
-    assert!(wire::pointer(&bytes(&event(0x1F, POINTER_RELATIVE, 0, 0))).is_ok(), "five buttons");
+    assert!(pointer(0x1F, POINTER_RELATIVE, 0, 0).is_ok(), "five buttons");
     for kind in 2..=u8::MAX {
-        assert_eq!(wire::pointer(&bytes(&event(0, kind, 0, 0))), Err(Refused::Kind(kind)));
+        assert_eq!(pointer(0, kind, 0, 0), Err(Refused::Kind(kind)));
     }
     for (x, y) in [(-1, 0), (0, -1), (i16::MIN, 5)] {
-        assert_eq!(wire::pointer(&bytes(&event(0, POINTER_ABSOLUTE, x, y))), Err(Refused::Position { x, y }));
+        assert_eq!(pointer(0, POINTER_ABSOLUTE, x, y), Err(Refused::Position { x, y }));
     }
-    assert_eq!(
-        wire::pointer(&bytes(&event(1, POINTER_ABSOLUTE, 32767, 0))).map(|r| r.motion),
-        Ok(Motion::Absolute { x: 32767, y: 0 })
-    );
-    assert_eq!(
-        wire::pointer(&bytes(&event(1, POINTER_RELATIVE, -300, 255))).map(|r| r.motion),
-        Ok(Motion::Relative { dx: -300, dy: 255 })
-    );
+    assert_eq!(pointer(1, POINTER_ABSOLUTE, 32767, 0).map(|r| r.motion), Ok(Motion::Absolute { x: 32767, y: 0 }));
+    assert_eq!(pointer(1, POINTER_RELATIVE, -300, 255).map(|r| r.motion), Ok(Motion::Relative { dx: -300, dy: 255 }));
 }
 
 #[test]
@@ -79,20 +84,6 @@ fn a_frame_of_another_type_or_length_is_refused() {
     for len in [0, GONE_LEN - 1, GONE_LEN + 1] {
         assert_eq!(wire::decode(MSG_GONE, &vec![0; len]), Err(Refused::Length { msg_type: MSG_GONE, len }));
     }
-}
-
-/// A frame's key and pointer fields are refused as the kernel's streams' are.
-#[test]
-fn a_frames_key_and_pointer_are_held_to_the_same_rules() {
-    assert_eq!(wire::decode(MSG_KEY, &[1, 0, 0, 0]), Err(Refused::NoUsage));
-    assert_eq!(wire::decode(MSG_KEY, &[1, 0, A, MOD_SHIFT]), Err(Refused::Modifiers(MOD_SHIFT)));
-    let pointer = |buttons, kind, x: i16| {
-        let [x0, x1] = x.to_le_bytes();
-        wire::decode(MSG_POINTER, &[0, 0, buttons, 0, kind, x0, x1, 0, 0])
-    };
-    assert_eq!(pointer(1 << 5, POINTER_RELATIVE, 0), Err(Refused::Buttons(1 << 5)));
-    assert_eq!(pointer(0, 2, 0), Err(Refused::Kind(2)));
-    assert_eq!(pointer(0, POINTER_ABSOLUTE, -1), Err(Refused::Position { x: -1, y: 0 }));
 }
 
 #[test]
@@ -116,9 +107,9 @@ fn every_record_decodes_as_the_frame_it_was_sent_as() {
 fn shift_from_one_source_and_a_from_another_arrive_as_a_shifted_a() {
     let mut merge = Merge::default();
     assert_eq!(merge.key(slot(0), 0, press(SHIFT)).unwrap().collect::<Vec<_>>(), [RawKeyEvent { keycode: SHIFT, modifiers: MOD_SHIFT }]);
-    assert_eq!(merge.key(Slot::KERNEL, 0, press(A)).unwrap().collect::<Vec<_>>(), [RawKeyEvent { keycode: A, modifiers: MOD_SHIFT }]);
+    assert_eq!(merge.key(slot(3), 0, press(A)).unwrap().collect::<Vec<_>>(), [RawKeyEvent { keycode: A, modifiers: MOD_SHIFT }]);
     assert_eq!(merge.key(slot(0), 0, lift(SHIFT)).unwrap().collect::<Vec<_>>(), [RawKeyEvent { keycode: SHIFT, modifiers: MOD_RELEASED }]);
-    assert_eq!(merge.key(Slot::KERNEL, 0, lift(A)).unwrap().collect::<Vec<_>>(), [RawKeyEvent { keycode: A, modifiers: MOD_RELEASED }]);
+    assert_eq!(merge.key(slot(3), 0, lift(A)).unwrap().collect::<Vec<_>>(), [RawKeyEvent { keycode: A, modifiers: MOD_RELEASED }]);
 }
 
 #[test]
@@ -147,9 +138,9 @@ fn a_source_that_ends_releases_what_it_held_and_nothing_another_holds() {
 fn two_pointers_buttons_or_and_ones_empty_report_clears_none_of_the_others() {
     let mut pointer = Pointer::new(1920, 1080);
     assert_eq!(pointer.report(slot(0), relative(0, 1, 0, 0)).unwrap().buttons, 1);
-    assert_eq!(pointer.report(Slot::KERNEL, relative(4, 2, 0, 0)).unwrap().buttons, 3, "another slot's pointer");
-    assert_eq!(pointer.report(Slot::KERNEL, relative(5, 0, 0, 0)).unwrap().buttons, 3, "a third pointer, holding nothing");
-    assert_eq!(pointer.report(Slot::KERNEL, relative(4, 0, 0, 0)).unwrap().buttons, 1);
+    assert_eq!(pointer.report(slot(3), relative(4, 2, 0, 0)).unwrap().buttons, 3, "another slot's pointer");
+    assert_eq!(pointer.report(slot(3), relative(5, 0, 0, 0)).unwrap().buttons, 3, "a third pointer, holding nothing");
+    assert_eq!(pointer.report(slot(3), relative(4, 0, 0, 0)).unwrap().buttons, 1);
     assert_eq!(pointer.report(slot(0), relative(1, 4, 0, 0)).unwrap().buttons, 5, "one slot's two pointers");
 }
 

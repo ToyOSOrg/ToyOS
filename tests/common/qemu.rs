@@ -686,9 +686,9 @@ pub enum Profile {
     /// its claim.
     HeadlessVirtioGpu,
     /// [`Profile::Headless`] with a second controller at [`SPARE_AT`], QEMU's
-    /// `qemu-xhci` on MSI and with no MSI-X, carrying a stick and a keyboard:
-    /// the controller `xhci-leave=00:10.0` leaves to `usbd`, armed on MSI as
-    /// the T14's two are.
+    /// default `qemu-xhci`, its MSI-X table in the BAR that holds its
+    /// registers, carrying a stick and a keyboard: the controller no image's
+    /// `drives` row names, which `usbd_spare` claims.
     HeadlessUsbSpare,
     /// [`Profile::Headless`] with its virtio NIC behind a `pcie-root-port`:
     /// a function a claim may take whose BAR has to land inside the port's
@@ -718,6 +718,10 @@ pub enum Profile {
     /// first with no codec and the second with an output codec: a machine
     /// whose drivers do not both reach an output, as the AMD bench's do not.
     MetalTwoHda,
+    /// [`Profile::Metal`] with a `usb-kbd` beside the stick, which every key
+    /// QMP sends goes to ([`Shape::usb`]): it reaches the owner of input
+    /// through usbd.
+    MetalUsbKeyboard,
     /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
@@ -800,6 +804,7 @@ impl Profile {
             | Self::HeadlessTwoEdu
             | Self::Metal
             | Self::MetalTwoHda
+            | Self::MetalUsbKeyboard
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
@@ -884,11 +889,9 @@ const XHCI_DEFAULT: &str = "nec-usb-xhci,id=xhci";
 
 /// [`Profile::HeadlessUsbSpare`]'s second controller, and the stick on it,
 /// whose bytes are zeros and whose writes go nowhere: what is on it is no
-/// question this machine asks. `msi=on` stated, because with MSI-X off and
-/// MSI left `auto` this QEMU's `qemu-xhci` offers neither, and the kernel
-/// refuses the claim for it.
-const XHCI_SPARE: &str = "qemu-xhci,id=spare,addr=0x10,msix=off,msi=on";
-/// Where [`XHCI_SPARE`] puts the spare, which `xhci-leave=` names.
+/// question this machine asks.
+const XHCI_SPARE: &str = "qemu-xhci,id=spare,addr=0x10";
+/// Where [`XHCI_SPARE`] puts the spare.
 pub const SPARE_AT: &str = "00:10.0";
 const SPARE_STICK: &str = "driver=null-co,node-name=spare-stick,size=67108864,read-zeroes=on";
 
@@ -1100,6 +1103,7 @@ impl Profile {
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
             Self::MetalTwoHda => Shape { hda: true, ..Self::Metal.shape() },
+            Self::MetalUsbKeyboard => Shape { usb: &["usb-kbd,bus=xhci.0"], ..Self::Metal.shape() },
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
             Self::HeadlessUsbSpareAmdVi => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
@@ -1636,6 +1640,12 @@ impl QemuInstance {
     /// and carries everything; empty when [`BootOptions::mute`] takes it away.
     pub fn boot_log(&self) -> &str {
         &self.boot_log
+    }
+
+    /// The disk image this boot runs from: the stick under a stick profile.
+    /// What the guest wrote to it is whole once [`Self::await_exit`] answers.
+    pub fn boot_image(&self) -> &Path {
+        &self.boot_image
     }
 
     pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {

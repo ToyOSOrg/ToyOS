@@ -229,7 +229,7 @@ pub mod fault {
 /// with, and the claim's vector it delivers.
 pub mod interrupt {
     use super::{backend, Backend};
-    use crate::arch::x86_64::idt::{user_dev, ClaimVector, DriverIrq};
+    use crate::arch::x86_64::idt::{user_dev, ClaimVector};
     use crate::arch::x86_64::{amdvi, vtd};
     use crate::iommu::StreamId;
 
@@ -318,14 +318,6 @@ pub mod interrupt {
             Backend::Vtd => vtd::interrupt::is_armed(),
             Backend::AmdVi => amdvi::interrupt::is_armed(),
             Backend::None => false,
-        }
-    }
-
-    /// The message a kernel driver's `source` raises `irq` with.
-    pub fn msi(source: StreamId, irq: DriverIrq) -> Result<Msi, Refused> {
-        match backend() {
-            Backend::AmdVi => amdvi::interrupt::msi(source, irq.vector()),
-            Backend::Vtd | Backend::None => vtd::interrupt::msi(source, irq),
         }
     }
 

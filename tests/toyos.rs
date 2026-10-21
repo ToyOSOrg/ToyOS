@@ -14,7 +14,7 @@ use common::qemu::{
     self, await_guest, await_marker, await_marker_new, BootOptions, QemuInstance,
     STALLED, TIMED_OUT,
 };
-use common::{audio, claims, compile, devices, faults, isa, metal, power, ps2server, screen, serial, usb};
+use common::{audio, claims, compile, devices, faults, isa, metal, power, ps2server, screen, serial};
 use toyos_build::bootlog::{self};
 use toyos_metal::testargs::{self, SUITE};
 
@@ -67,6 +67,12 @@ const ACTUATOR_KERNEL: &[&str] = toyos_build::build::TEST_KERNEL;
 
 // Rust helper binaries that are spawned by tests, not tests themselves.
 const RUST_SKIP: &[&str] = &[
+    // It writes the stick for ever, so that its boot's deadline resets the
+    // machine under it: `stick_survives_a_reset_under_load` runs it alone.
+    "stick_load",
+    // The stick-write load `mask_windows` reads windows under, on the boot
+    // whose kernel reports them.
+    "stick_write",
     // It opens a window, which needs a compositor the shared boot does not
     // run: `a_window_is_drawn_at_the_scale_and_relaid_at_the_next` runs it on
     // tests/images/scalecase.toml, and the `gop_edid_scale` metal row on
@@ -123,8 +129,7 @@ const RUST_SKIP: &[&str] = &[
     // `isa_claim_refused_on_a_kernel_port` metal row runs it.
     "isa_claim_refused",
     // It claims the T14's I219, which no guest has: the
-    // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
-    // metal rows run it.
+    // `claim_reuses_its_remapping_entry` metal row runs it.
     "pci_reclaim",
     // It measures the T14's I219, which no guest has: the
     // `i219_messages_on_its_msi_vector` metal row runs it.
@@ -169,6 +174,7 @@ const RUST_SKIP: &[&str] = &[
     // on QEMU's.
     "audio_tone",
     "audio_tone_resampled",
+    "tone_beside_stick_write",
     "volume_step",
     // It hands the ACPI claim to a server of its own and kills it, which needs
     // a boot that starts none: the `acpi_server_death` metal row runs it on
@@ -211,17 +217,15 @@ const RUST_SKIP: &[&str] = &[
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",
-    // It claims the xHCI controller `xhci-leave=` leaves alone, which no other
-    // boot's kernel does: `usbd_drives_the_spare` and the
+    // It claims the xHCI controller no image's usbd row names, which only a
+    // machine with a spare has: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.
     "usbd_spare",
-    // `usbd_spare`'s fault, foreign-vector and refusal arms, one binary each
-    // because a metal job takes no argument: the AMD bench's
-    // `amdvi_usbd_drives_its_own_entry` and
-    // `amdvi_claim_refused_without_remapping` rows run them.
+    // `usbd_spare`'s fault and foreign-vector arms, one binary each because a
+    // metal job takes no argument: the AMD bench's
+    // `amdvi_usbd_drives_its_own_entry` row runs them.
     "usbd_spare_fault",
     "usbd_spare_vector",
-    "usbd_spare_unhanded",
     // The same controller, handed to a holder that is killed and claimed
     // again at once, in the same boots as `usbd_spare`.
     "end_returns_claims",
@@ -484,6 +488,15 @@ const MACHINE_TESTS: &[&str] = &[
     // `images/console.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
+    // The boot's log written through usbd onto the stick it booted from, and
+    // still there once the machine has stopped: the path every metal boot's
+    // `/log` takes, which no other QEMU row reads, because their console is
+    // the serial line. Its oracle is the image read back on the host.
+    "the_log_lands_on_the_boot_stick",
+    // Keys QEMU's `usb-kbd` reports, through usbd, to the owner of input:
+    // the console image's shell runs the command they spell. QEMU's xHC and
+    // keyboard are the independent end of the report the stub cannot be.
+    "a_usb_key_reaches_the_console",
     // The desktop on CPUs that offer no x2APIC, whose local APICs run in
     // xAPIC mode: every IPI, EOI and timer write goes through the MMIO page,
     // which no host build has and the T14, whose CPUs offer x2APIC, never
@@ -505,12 +518,11 @@ const MACHINE_TESTS: &[&str] = &[
     // A launch's unsent stdio slots: its own boot, because the launcher it
     // needs makes every spawn of a declared program a launch.
     "a_launch_gives_each_unsent_stdio_slot_a_null",
-    // A controller the kernel leaves alone, handed over to a claim whose
-    // holder's No-Op is answered by an interrupt through it, and a transfer
-    // aimed past the claim's grants: the hand-over, the interrupt through the
-    // claim and the unit have no host build, and the T14's unit is not asked
-    // to fault. What usbd names on the bus is `toyos-xhci`'s and its
-    // simulator's to hold.
+    // A controller no row names, handed over to a claim whose holder's No-Op
+    // is answered by an interrupt through it, and a transfer aimed past the
+    // claim's grants: the hand-over, the interrupt through the claim and the
+    // unit have no host build, and the T14's unit is not asked to fault. What
+    // usbd does on the bus is `toyos-xhci`'s stub tests' to hold.
     "usbd_drives_the_spare",
     // The same behind QEMU's AMD unit, remapping and with no SMI filter: the
     // claim is refused by that reason before anything on the function
@@ -518,13 +530,9 @@ const MACHINE_TESTS: &[&str] = &[
     // filter.
     "usbd_refused_without_smi_filter",
     // The same machine with its AMD unit remapping nothing: the claim is
-    // refused by that reason. The AMD bench's arm is
-    // `amdvi_claim_refused_without_remapping`.
+    // refused by that reason. No metal row asks it: a bench without remapping
+    // drives no USB, so no `/log` reaches its stick to judge.
     "usbd_refused_without_amdvi_remapping",
-    // A boot keyboard reporting more keys than its six slots name: the
-    // kernel's driver reading a report a device delivered over xHCI has no host
-    // build, and the T14 binds no USB keyboard.
-    "usb_keyboard_rollover",
     // Every vector register a thread holds, across switches to threads holding
     // others, against a scheduler, which no host build has. The shared boot's
     // run is the benches'; this is TCG's, whose XSAVE is QEMU's own reading of
@@ -639,6 +647,22 @@ const METAL: &[(&str, metal::Metal)] = &[
             judge: |b| {
                 b[0].job_passed("test_rs_audio_tone")?;
                 audio::tone_on_metal(&b[0].log())
+            },
+        },
+    ),
+    (
+        // `hda_tone`'s tone while a thread of its process writes the stick
+        // through usbd: no period soundserver had to fill
+        // (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`'s
+        // exit). It is the kernel's: one claim's interrupts and its holder's
+        // threads never starve another holder's deadline. The T14 and the AMD
+        // bench.
+        "tone_beside_a_stick_write",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed(audio::TONE_BESIDE_STICK_WRITE)?;
+                audio::tone_beside_a_stick_write(&b[0].log())
             },
         },
     ),
@@ -932,23 +956,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // One boot: a machine writing to the stick continuously, reset out from
-        // under itself by the deadline with the controller mid-transfer, and
-        // the stick enumerable on the next host afterwards.
-        "usb_reset_records_the_phase_it_cut",
-        metal::Metal {
-            arms: &[metal::once("usbload", "tests/images/jobcase.toml", &["usb-reset-under-load"], &[])],
-            judge: |b| power::usb_load_chain(&b[0].after_the_reset()?),
-        },
-    ),
-    (
-        "usb_stick_left",
-        metal::Metal {
-            arms: &[metal::once("usbbreak", "tests/images/jobcase.toml", &["usb-transport-break"], &[])],
-            judge: |b| usb::transport_break_on_metal(&b[0].kernel(), &b[0].after_the_reset()?),
-        },
-    ),
-    (
         // Its own boot, and the one arm in this profile the machine itself is
         // the instrument for: QEMU's TCG guest has no performance counter, so
         // only here is the NMI that samples a deaf CPU the counter's own. It
@@ -1053,16 +1060,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // Two boots the suite already flashes: the device boot writes and
-        // fsyncs megabytes before its reset, and `metalcase` is the same reset
-        // with nothing written behind it but the hold's line.
-        "usb_reset_hands_devices_back",
-        metal::Metal {
-            arms: USB_RESET_BOOTS,
-            judge: power::usb_reset_on_metal,
-        },
-    ),
-    (
         // On the T14 the chain is what every metal boot does — the loader
         // points `BootNext` at itself before each handoff, so the pass that
         // reads the page appends its report to the same `loader.log` the
@@ -1103,30 +1100,10 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: SELFTESTS, judge: |b| lapic_vectors(b[0].kernel().text()) },
     ),
     (
-        // The T14's own controller publishes a real capability list, which is
-        // the half of this QEMU cannot give: q35's nec-usb-xhci has no USB
-        // Legacy Support capability in it at all.
-        "xhci_xecp_walk",
-        metal::Metal { arms: SELFTESTS, judge: |b| xhci_xecp(b[0].kernel().text()) },
-    ),
-    (
-        // Same: the crafted nine are the point, and beside them the parser
-        // binds a boot stick off a descriptor a real controller delivered.
-        "xhci_descriptor_walk",
-        metal::Metal { arms: SELFTESTS, judge: |b| xhci_descriptors(b[0].kernel().text()) },
-    ),
-    (
         // No drain on this side: the whole boot's records are on the stick, so
         // the probe's line is either in them or it never ran.
         "sysret_ss_reload",
         metal::Metal { arms: SELFTESTS, judge: |b| sysret_ss(b[0].kernel().text()) },
-    ),
-    (
-        "operation_nesting",
-        metal::Metal {
-            arms: SELFTESTS,
-            judge: |b| operation_nesting_log(b[0].kernel().text()),
-        },
     ),
     (
         // A unit handed over translating, remapping and queueing, or on an
@@ -1176,27 +1153,27 @@ const METAL: &[(&str, metal::Metal)] = &[
         // through a domain of its own: the register sequence, the device
         // table and the host tables on real silicon. The AMD bench's row.
         "amdvi_translates_the_stick_controller",
-        metal::Metal { arms: TESTCASES, judge: |b| amdvi_translates(&b[0].kernel()) },
+        metal::Metal { arms: TESTCASES, judge: |b| amdvi_translates(&b[0].kernel(), &b[0].log()) },
     ),
     (
         // An AMD-Vi unit remapping every message: the boot stick's
         // controller's interrupt delivered through an entry of its own
         // table, on real silicon, and every I/O APIC named.
         "amdvi_remaps_the_stick_controller",
-        metal::Metal { arms: TESTCASES, judge: |b| amdvi_remaps(&b[0].kernel()) },
+        metal::Metal { arms: TESTCASES, judge: |b| amdvi_remaps(&b[0].kernel(), &b[0].log()) },
     ),
     (
-        // The AMD bench's Bluetooth controller's xHCI, `03:00.4`, left to a
-        // claim and driven by usbd through an entry of its own table, its
+        // The AMD bench's Bluetooth controller's xHCI, `03:00.4`, which no
+        // row of the image names, claimed and driven by usbd through an entry of its own table, its
         // MSI-X table in the register BAR it hands over; then aimed past its
         // grant, recorded against the claim; then its holder rewriting its
         // own table entry to a vector not its own, refused and recorded.
         "amdvi_usbd_drives_its_own_entry",
         metal::Metal {
             arms: &[metal::once(
-                "testcases-amd-xhci-leave",
+                "testcases",
                 "tests/images/testcases.toml",
-                &["xhci-leave=03:00.4"],
+                &[],
                 &[
                     "test_rs_usbd_spare",
                     "test_rs_usbd_spare_fault",
@@ -1210,38 +1187,6 @@ const METAL: &[(&str, metal::Metal)] = &[
                 }
                 amdvi_usbd(&b[0].kernel(), &b[0].log(), &b[0].after_the_reset()?)
             },
-        },
-    ),
-    (
-        // The AMD bench with its unit remapping nothing (`iommu-no-remap`):
-        // the claim on `03:00.4` is refused before anything on it changes.
-        "amdvi_claim_refused_without_remapping",
-        metal::Metal {
-            arms: &[metal::once(
-                "testcases-amd-no-remap",
-                "tests/images/testcases.toml",
-                &["iommu-no-remap", "xhci-leave=03:00.4"],
-                &["test_rs_usbd_spare_unhanded"],
-            )],
-            judge: |b| {
-                let kernel = b[0].kernel();
-                kernel.must_say("no message is remapped")?;
-                claims::refused_at(&kernel, AMD_XHCI_SPARE, claims::NOT_REMAPPED)
-            },
-        },
-    ),
-    (
-        // A machine whose units do not remap: the claim is refused before
-        // anything on the function changes, and the boot goes on.
-        "claim_refused_without_remapping",
-        metal::Metal {
-            arms: &[metal::once(
-                "iommu-no-remap",
-                "tests/images/testcases.toml",
-                &["iommu-no-remap"],
-                &[claims::RECLAIM],
-            )],
-            judge: |b| claims::refused_unremapped(&b[0].kernel()),
         },
     ),
     (
@@ -1263,7 +1208,28 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // The Type-C controller left to a claim, and usbd driving it: handed
+        // The boot controller handed over to the image's usbd row (the T14's
+        // 00:14.0, the AMD bench's 03:00.3), its message through its remapping
+        // entry, its No-Op answered by that interrupt, and the boot stick
+        // served through it: what every metal boot's `/log` now rides.
+        // `Boot: complete` and the log volume's mount are printed, not judged.
+        "usbd_serves_the_boot_stick",
+        metal::Metal { arms: TESTCASES, judge: |b| usbd_serves_the_boot_stick(&b[0].kernel(), &b[0].log()) },
+    ),
+    (
+        // The stick written through usbd while the boot deadline resets the
+        // machine, which touches no USB register (#901 §6): the stick must
+        // enumerate on the next host within the bench's record. It is the
+        // kernel's reset path that is judged; usbd and the job are the load.
+        "stick_survives_a_reset_under_load",
+        metal::Metal {
+            arms: &[metal::once("usbload", "tests/images/testcases.toml", &[], &[metal::STICK_LOAD_JOB])],
+            judge: |b| power::stick_survives_a_reset_under_load(b[0]),
+        },
+    ),
+    (
+        // The Type-C controller, which no row of the image names, claimed,
+        // and usbd driving it: handed
         // over, MSI armed through remapping, and the No-Op answered by an
         // interrupt; usbd is killed, so the release says which reset the
         // function advertises. Then a holder of it is killed and the claim
@@ -1271,9 +1237,9 @@ const METAL: &[(&str, metal::Metal)] = &[
         "usbd_drives_the_type_c_controller",
         metal::Metal {
             arms: &[metal::once(
-                "testcases-xhci-leave",
+                "testcases",
                 "tests/images/testcases.toml",
-                &["xhci-leave=00:0d.0"],
+                &[],
                 &["test_rs_usbd_spare", "test_rs_end_returns_claims"],
             )],
             judge: |b| {
@@ -1393,6 +1359,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_wake_onto_busy",
         "test_rs_audio_tone",
         "test_rs_audio_tone_resampled",
+        audio::TONE_BESIDE_STICK_WRITE,
         "test_rs_volume_step",
         "test_rs_syscall_cost",
         "test_rs_spawn_cost",
@@ -1429,30 +1396,21 @@ const WINDOWSCASE: &[metal::Arm] = &[metal::Arm {
         "windowscase",
         "tests/images/testcases.toml",
         &[],
-        &["test_rs_idle_span", "pwd", WINDOWS_LOAD],
+        &["test_rs_idle_span", "pwd", WINDOWS_LOAD, STICK_WRITE],
     )
 }];
 
 /// The load `mask_windows` reads the windows under.
 const WINDOWS_LOAD: &str = "test_rs_ring_park_herd";
 
-/// The head of the kernel's record of [`WINDOWS_LOAD`]'s exit.
-fn windows_load_exited() -> String {
-    format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(WINDOWS_LOAD))
-}
+/// The stick-write load it reads them under too (#901 §9): 32 MiB through
+/// usbd, whose interrupts and threads are a claim's and a process's.
+const STICK_WRITE: &str = "test_rs_stick_write";
 
-/// The two boots the reset ruling is judged on: the device boot for a reset
-/// with megabytes behind it, and `metalcase` for one with nothing written
-/// behind it but the hold's line.
-const USB_RESET_BOOTS: &[metal::Arm] = &[
-    metal::once(
-        devices::BOOT,
-        devices::CONFIG,
-        &[],
-        devices::JOBS,
-    ),
-    metal::once("metalcase", "tests/images/metalcase.toml", &[], &[]),
-];
+/// The head of the kernel's record of `job`'s exit.
+fn exited(job: &str) -> String {
+    format!("{}{} pid=", toyos_build::bootlog::EXIT, toyos_build::bootlog::recorded_name(job))
+}
 
 /// `tests/images/metalcase.toml`, ended once ps2server's probe has: a boot
 /// that ended sooner would cut off what `ps2server_arms` reads.
@@ -1491,10 +1449,7 @@ const SELFTEST_PARAMS: &[&str] = &[
     "revoked-backing-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
-    "xhci-xecp-selftest",
-    "xhci-descriptor-selftest",
     "sysret-ss-probe",
-    "sched-operation-nesting",
     "iommu-firmware-left",
 ];
 
@@ -2404,6 +2359,113 @@ fn console_image_boots() -> Result<(), String> {
     let said = serial::Serial::named("the console image's boot", console);
     eprintln!("  [ps2server] {}", said.must_say(ps2server::KEYBOARD_RESET)?.trim());
     said.must_be_clean()
+}
+
+/// Boot `tests/images/testcases.toml` from a USB stick, as a metal boot does,
+/// write the stick through usbd ([`metal::STICK_LOAD_JOB`]), press the power
+/// button while it writes, and read the stick's log volume back with the metal
+/// judge's verdict: this boot's `logkeeper` files hold `Boot: complete` and the
+/// supervisor's stop line, so the log went through usbd's disk to the stick and
+/// was made durable before the power went. Then usbd handed the stick back
+/// with a port reset and left its controller reset, before the kernel's stop
+/// ([`usb_stopped_before_the_reset`]).
+fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions {
+        profile: qemu::Profile::Metal,
+        qmp: true,
+        extra_root_files: vec![suite_bin(toyos_build::arch::Arch::X86_64, "stick_load")],
+        ..Default::default()
+    };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let mut console = qemu.boot_log().to_string();
+    qemu::await_marker(&mut qemu, &mut console, ": serving it as disk 0", "usbd to serve the boot stick")?;
+    qemu::await_marker(&mut qemu, &mut console, toyos_logstream::LOG_OPENED, "logkeeper to open the log")?;
+    // The stop is asked for under load: the stick is being written when the
+    // power button is pressed, as the metal row's deadline finds it.
+    writeln!(qemu.stdin_mut(), "run {}", metal::STICK_LOAD_JOB).map_err(|e| e.to_string())?;
+    qemu.flush_stdin();
+    qemu::await_marker(&mut qemu, &mut console, "stick_load: line 1500 ", "the load to write the stick")?;
+    qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET)).power_button();
+    let by = qemu.budget(Duration::from_secs(60));
+    console.push_str(&qemu.await_exit(by)?);
+    let mut stick = std::fs::File::open(qemu.boot_image()).map_err(|e| e.to_string())?;
+    let files = toyos_build::image::log_volume_files(&mut stick)?;
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    let listing = names.join("\n");
+    let (_, ours) = bootlog::split_listing(&listing);
+    let log: String = files
+        .iter()
+        .filter(|(name, _)| ours.contains(&name.as_str()))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .collect();
+    let reached = metal::bytes_of_lines(&log, "stick_load: line ");
+    if reached < 1 << 20 {
+        return Err(format!("{reached} bytes of the load's lines are on the stick's log volume, under a mebibyte"));
+    }
+    if let Err(unfit) = bootlog::verdict(&log) {
+        return Err(format!(
+            "the stick's log volume ({names:?}) is no whole boot's log: {unfit:?}\n--- its log:\n{log}\n--- the console:\n{console}"
+        ));
+    }
+    eprintln!("  [log] {} file(s) on the stick, {} bytes of this boot's log", names.len(), log.len());
+    usb_stopped_before_the_reset(&log, &console)
+}
+
+/// usbd ended for the stop with every connected port's reset finished and its
+/// controller halted and reset (its exit code, which the kernel records,
+/// because its own line may reach no log), and it ended before the kernel's
+/// stop: the supervisor waited for it.
+fn usb_stopped_before_the_reset(log: &str, console: &str) -> Result<(), String> {
+    // On the boot's one clock: the request is in the file (its line can be
+    // one the console dropped under the load), and what follows the flush
+    // is the kernel's, on the console.
+    use toyos_logstream::Source;
+    let at = |text: &str, from: Source, opens: &str| {
+        text.lines()
+            .find_map(|l| toyos_logstream::parse(l).filter(|p| p.source == from && p.text.starts_with(opens)))
+            .map(|p| (p.ms, p.text.to_string()))
+    };
+    let asked = at(log, Source::Program("supervisor"), "supervisor: power: the machine stops");
+    let ended = at(console, Source::Kernel, "exit: usbd pid=");
+    let stopped = at(console, Source::Kernel, toyos_quiesce::STOPPED);
+    let (Some((Some(asked), _)), Some((Some(ended), line)), Some((Some(stopped), _))) = (asked, ended, stopped) else {
+        return Err(format!("no stop request in the file, or no usbd end and kernel stop on the console\n{console}"));
+    };
+    if !(asked <= ended && ended <= stopped) {
+        return Err(format!("usbd ended at {ended} ms, not between the stop's request ({asked} ms) and the kernel's stop ({stopped} ms)"));
+    }
+    if !line.contains(" code=0 ") {
+        return Err(format!("usbd's stop left a port in reset or its controller running: {line}"));
+    }
+    eprintln!("  [stop] {}", line.trim());
+    Ok(())
+}
+
+/// Boot `images/console.toml` with a `usb-kbd` and type `ls` and Enter at it
+/// through QMP, which sends every key to that keyboard: the console's shell
+/// runs it, so usbd bound the keyboard, read its reports and gave the owner
+/// of input its keys.
+fn a_usb_key_reaches_the_console() -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(
+        &compile::repo_root().join("images/console.toml"),
+        &[],
+        &[],
+        BootOptions { profile: qemu::Profile::MetalUsbKeyboard, qmp: true, ready_marker: bootlog::COMPLETE, ..Default::default() },
+    );
+    let mut console = format!("{}\n", qemu.boot_log());
+    await_marker(&mut qemu, &mut console, "console: ready ", "the console to take its panel")?;
+    await_marker(&mut qemu, &mut console, "collection 0: a Keyboard", "usbd to bind the keyboard")?;
+    {
+        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
+        for key in ["l", "s", "ret"] {
+            input.keys(&[(key, true)]);
+            input.keys(&[(key, false)]);
+        }
+    }
+    await_guest(&mut qemu, &mut console, "the shell to run what was typed", |c| {
+        c.lines().any(|l| l.contains("spawn: ") && l.contains("toybox"))
+    })?;
+    serial::Serial::named("the typed-on console boot", console).must_be_clean()
 }
 
 /// Boot `tests/images/panelcase.toml` on [`qemu::Profile::MetalNoX2apic`]'s CPUs, which
@@ -3955,6 +4017,8 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
+        "the_log_lands_on_the_boot_stick" => the_log_lands_on_the_boot_stick(test_config),
+        "a_usb_key_reaches_the_console" => a_usb_key_reaches_the_console(),
         "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_boots" => nvme_disk_boots(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
@@ -3977,7 +4041,6 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "hda_plays_to_the_controller_that_reaches_an_output" => {
             hda_plays_to_the_controller_that_reaches_an_output(test_config)
         }
-        "usb_keyboard_rollover" => usb_keyboard_rollover(test_config),
         "vector_state_survives_a_switch" => vector_state_survives_a_switch(test_config),
         "the_opening_exchange_with_qemus_agent_completes" => the_opening_exchange_with_qemus_agent_completes(),
         "crypto_instrument_prints_its_table" => crypto_instrument_prints_its_table(test_config),
@@ -4188,15 +4251,12 @@ fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> 
     Ok(result.serial)
 }
 
-/// The AMD bench's Bluetooth controller's xHCI, the one `xhci-leave=` leaves
-/// to a claim there: the stick is on the other, `03:00.3`.
+/// The AMD bench's Bluetooth controller's xHCI, which no row of the test
+/// images names: the stick is on the other, `03:00.3`.
 const AMD_XHCI_SPARE: &str = "03:00.4";
 
-/// QEMU's spare controller left to a claim, by the address the profile pins.
-const XHCI_LEAVE_SPARE: &str = "xhci-leave=00:10.0";
-
-/// The job that kills a holder of the `xhci-leave=` controller and claims it
-/// again at once, in `usbd_spare`'s boots.
+/// The job that kills a holder of the spare and claims it again at once, in
+/// `usbd_spare`'s boots.
 const END_RETURNS_CLAIMS: &str = "end_returns_claims";
 
 /// `end_returns_claims`'s summary: every round's claim granted after its
@@ -4209,55 +4269,47 @@ fn ends_returned_claims(said: &str) -> Result<String, String> {
         .ok_or_else(|| format!("end_returns_claims never said every claim came back:\n{said}"))
 }
 
-/// What usbd says once the bring-up's No-Op has completed: its ring and the
-/// interrupt through the claim both work.
-const USBD_NOOP: &str = "usbd: a No-Op command completed, announced by an interrupt";
+/// What usbd on the controller at `at` says once the bring-up's No-Op has
+/// completed: its ring and the interrupt through the claim both work, since
+/// usbd reads its event ring only when an interrupt record says to.
+fn usbd_noop(at: &str) -> String {
+    format!("usbd {at}: a No-Op command completed")
+}
 
-/// The controller `xhci-leave=` names, handed over to `usbd_spare`'s claim and
+/// The spare no `drives` row names, handed over to `usbd_spare`'s claim and
 /// driven by usbd as far as its No-Op, answered by an interrupt through the
 /// claim, with every event announced by one. Then the two controls: the
 /// function aimed past every grant is the kernel's `DMA FAULT` record against
-/// its slot and the claim's refusal, and on a kernel without the switch the
-/// claim is refused because the kernel drives the function. Between them, a
-/// holder of the function is killed and the claim asked for again at once,
-/// each round, which only a release finished before the end grants.
+/// its slot and the claim's refusal, and a claim on the boot controller, which
+/// the image's usbd holds, is refused as held. Between them, a holder of the
+/// spare is killed and the claim asked for again at once, each round, which
+/// only a release finished before the end grants.
 fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     const JOB: &str = "usbd_spare";
     const SPARE: &str = "1b36:000d";
+    let at = qemu::SPARE_AT;
     let tests = compile::repo_root().join("tests/guest/rust-tests");
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
     let ends = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, END_RETURNS_CLAIMS);
-    let profile = qemu::Profile::HeadlessUsbSpare;
-    let options = BootOptions {
-        profile,
-        kernel_params: &[XHCI_LEAVE_SPARE],
-        ..Default::default()
-    };
+    let options = BootOptions { profile: qemu::Profile::HeadlessUsbSpare, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(
         test_config,
         &[],
-        &[(JOB.to_string(), bin.clone()), (END_RETURNS_CLAIMS.to_string(), ends)],
+        &[(JOB.to_string(), bin), (END_RETURNS_CLAIMS.to_string(), ends)],
         options,
     );
-    let boot = serial::Serial::boot(&qemu);
-    boot.must_be_clean()?;
-    let left = format!(" {SPARE} to a claim (xhci-leave)");
-    let at = boot
-        .text()
-        .lines()
-        .find_map(|l| l.split_once("xHCI: leaving PCI ")?.1.strip_suffix(left.as_str()).map(str::to_string))
-        .ok_or_else(|| format!("the kernel never said it left {SPARE} alone:\n{}", boot.text()))?;
+    serial::Serial::boot(&qemu).must_be_clean()?;
 
     let said = job_window(&mut qemu, "test_rs_usbd_spare")?;
     let run = serial::Serial::named("usbd_spare", said.clone());
     run.must_be_clean()?;
-    run.must_say(USBD_NOOP)?;
+    run.must_say(&usbd_noop(at))?;
     run.must_say("usbd_spare: settled: usb.events.unannounced = 0")?;
     let handed = format!("pcidev: PCI {at} [{SPARE}] handed over, vector ");
     if said.matches(&handed).count() != 1 {
         return Err(format!("{at} was not handed over once, to the one usbd:\n{said}"));
     }
-    run.must_say(&format!("PCI {at}: msi address="))?;
+    run.must_say(&format!("PCI {at}: msix address="))?;
 
     let faulted = job_window(&mut qemu, "test_rs_usbd_spare fault")?;
     let fault = serial::Serial::named("usbd_spare fault", faulted.clone());
@@ -4279,20 +4331,10 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
     let ended = job_window(&mut qemu, "test_rs_end_returns_claims")?;
     let line = ends_returned_claims(&ended)?;
     eprintln!("  [usbd] {line}");
-    drop(qemu);
 
-    // The control: the same machine and no switch, so the kernel drives it.
-    let mut qemu = QemuInstance::boot_with_options(
-        test_config,
-        &[],
-        &[(JOB.to_string(), bin)],
-        BootOptions { profile, ..Default::default() },
-    );
-    serial::Serial::boot(&qemu).must_not_say("(xhci-leave)")?;
+    // The control: the boot controller, which the image's usbd holds.
     let said = job_window(&mut qemu, "test_rs_usbd_spare refused")?;
-    let refused = serial::Serial::named("usbd_spare refused", said);
-    refused.must_say(&format!("usbd_spare: the claim on pci:{SPARE} was refused: PermissionDenied"))?;
-    refused.must_say(&format!("pcidev: PCI {at} is driven by this kernel and cannot be claimed"))?;
+    serial::Serial::named("usbd_spare refused", said).must_say("usbd_spare: the claim on pci:1033:0194 was refused: AlreadyExists")?;
     Ok(())
 }
 
@@ -4301,7 +4343,7 @@ fn usbd_drives_the_spare(test_config: &Path) -> Result<(), String> {
 fn usbd_refused_on_amdvi(test_config: &Path, profile: qemu::Profile, said: &str, why: &str) -> Result<(), String> {
     const JOB: &str = "usbd_spare";
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
-    let options = BootOptions { profile, kernel_params: &[XHCI_LEAVE_SPARE], ..Default::default() };
+    let options = BootOptions { profile, ..Default::default() };
     let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], options);
     serial::Serial::boot(&qemu).must_say(said)?;
     let run = job_window(&mut qemu, "test_rs_usbd_spare unhanded")?;
@@ -4359,7 +4401,6 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
 fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
     const ID: &str = "1022:1639";
     let at = AMD_XHCI_SPARE;
-    kernel.must_say(&format!("xHCI: leaving PCI {at} {ID} to a claim (xhci-leave)"))?;
     let handed = format!("pcidev: PCI {at} [{ID}] handed over, vector ");
     let vector = kernel
         .text()
@@ -4368,7 +4409,7 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Ser
         .ok_or_else(|| format!("{at} was never handed over:\n{}", kernel.text()))?;
     kernel.must_say(&format!("PCI {at}: msix address="))?;
     kernel.must_say(&format!("iommu: amdvi irte source={at} vector={vector} p=1 "))?;
-    log.must_say(USBD_NOOP)?;
+    log.must_say(&usbd_noop(at))?;
 
     let aimed = log
         .text()
@@ -4376,19 +4417,19 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Ser
         .find_map(|l| l.split_once("usbd_spare: the command ring aimed at ")?.1.split_once(',').map(|(a, _)| a.to_string()))
         .ok_or_else(|| format!("the fault arm never said where it aimed:\n{}", log.text()))?;
     let hex = |text: &str| u64::from_str_radix(text.trim_start_matches("0x"), 16).ok();
-    let records: Vec<&str> = kernel
-        .text()
-        .lines()
-        .filter(|l| l.contains("iommu: DMA FAULT owner=process") && l.contains(&format!("stream={at} ")))
-        .collect();
+    // Every record of the spare's: the boot's other rows leave these to this
+    // one ([`no_fault_but_the_spares`]), so each must be one the jobs staged.
+    let records: Vec<&str> =
+        kernel.text().lines().filter(|l| l.contains("iommu: DMA FAULT") && l.contains(&format!(" stream={at} "))).collect();
+    let process = |l: &&&str| l.contains("iommu: DMA FAULT owner=process ");
     let aimed_at = records
         .iter()
-        .find(|l| l.split_once(" addr=").and_then(|(_, a)| hex(a.split_whitespace().next()?)) == hex(&aimed))
+        .find(|l| process(l) && l.contains(" access=read ") && l.split_once(" addr=").and_then(|(_, a)| hex(a.split_whitespace().next()?)) == hex(&aimed))
         .ok_or_else(|| format!("no record of {at} names the aimed {aimed}: {records:?}"))?;
     log.must_say("usbd_spare: the claim refuses its interrupt read: Io")?;
 
     let rewritten = log.must_say("usbd_spare: MSI-X entry 0's data ")?;
-    log.must_say("usbd: the claim refused its interrupt record (Io)")?;
+    log.must_say(&format!("usbd {at}: ENDED — the claim refused its interrupt record (Io)"))?;
     log.must_say("usbd_spare: usbd ended on the claim's refusal")?;
     // Refused by the unit, not delivered to a vector nobody holds: the stop's
     // census names every vector the unclaimed gate took.
@@ -4404,8 +4445,11 @@ fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Ser
     // An interrupt's record states no read or write (48882 Table 57, `I`).
     let foreign = records
         .iter()
-        .find(|l| l.contains(" access=none ") && l.ends_with("IO_PAGE_FAULT"))
+        .find(|l| process(l) && l.contains(" access=none ") && l.ends_with("IO_PAGE_FAULT"))
         .ok_or_else(|| format!("no record of {at}'s message on a vector not its own: {records:?}"))?;
+    if records.len() != 2 {
+        return Err(format!("{at} has {} fault records, not the aimed read and the foreign message alone: {records:?}", records.len()));
+    }
     eprintln!("  [amdvi] {at}: handed over on {vector}, its No-Op answered through its own entry");
     eprintln!("  [amdvi] aimed at {aimed}: {}", aimed_at.trim());
     eprintln!("  [amdvi] a vector not its own: {}", foreign.trim());
@@ -4459,10 +4503,40 @@ fn hda_plays_to_the_controller_that_reaches_an_output(test_config: &Path) -> Res
     Ok(())
 }
 
-/// Every AMD-Vi unit translating, every xHCI controller the kernel drives
-/// moved to a domain of its own, the boot stick bound through one, and no
-/// DMA refused.
-fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
+/// Every xHCI controller handed over to a usbd: by the kernel's hand-over
+/// record, of the ids the test images' usbd rows and spares name.
+fn usb_controllers(kernel: &serial::Serial) -> Vec<String> {
+    const XHCI: [&str; 5] = ["1033:0194", "8086:a0ed", "8086:9a13", "1022:1639", "1b36:000d"];
+    kernel
+        .text()
+        .lines()
+        .filter_map(|l| {
+            let (at, rest) = l.split_once("pcidev: PCI ")?.1.split_once(" [")?;
+            let (id, rest) = rest.split_once(']')?;
+            (XHCI.contains(&id) && rest.starts_with(" handed over")).then(|| at.to_string())
+        })
+        .collect()
+}
+
+/// No DMA refused on the AMD bench's testcases boot but the spare's: that boot
+/// also carries `amdvi_usbd_drives_its_own_entry`, whose jobs aim
+/// [`AMD_XHCI_SPARE`] past its grant and at a vector not its own, and which
+/// judges those records itself.
+fn no_fault_but_the_spares(kernel: &serial::Serial) -> Result<(), String> {
+    kernel.alive()?;
+    let spares = format!(" stream={AMD_XHCI_SPARE} ");
+    match kernel.text().lines().find(|l| l.contains("iommu: DMA FAULT") && !l.contains(&spares)) {
+        Some(line) => Err(format!("a DMA refusal no job asked for: {line:?}")),
+        None => Ok(()),
+    }
+}
+
+/// usbd's word that it serves the boot stick: its first disk offered.
+const STICK_SERVED: &str = ": serving it as disk 0";
+
+/// Every AMD-Vi unit translating, every xHCI controller usbd drives on a
+/// domain of its own, the boot stick served through one, and no DMA refused.
+fn amdvi_translates(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
     let text = kernel.text();
     let units: Vec<&str> =
         text.lines().filter(|l| l.contains("iommu: amdvi unit") && l.contains(" translating control=")).collect();
@@ -4470,32 +4544,29 @@ fn amdvi_translates(kernel: &serial::Serial) -> Result<(), String> {
         return Err(format!("no AMD-Vi unit is translating:\n{text}"));
     }
     kernel.must_not_say("isolates no device")?;
-    kernel.must_not_say("iommu: DMA FAULT")?;
-    let controllers: Vec<&str> = text
-        .lines()
-        .filter_map(|l| l.split_once("xHCI: found at PCI ")?.1.split_whitespace().next())
-        .collect();
+    no_fault_but_the_spares(kernel)?;
+    let controllers = usb_controllers(kernel);
     if controllers.is_empty() {
-        return Err(format!("the kernel drove no xHCI controller:\n{text}"));
+        return Err(format!("no xHCI controller was handed over:\n{text}"));
     }
     for at in &controllers {
         kernel.must_say(&format!("iommu: {at} moves to domain"))?;
     }
-    kernel.must_say("usb-storage: 1 device(s)")?;
+    log.must_say(STICK_SERVED)?;
     for unit in units {
         eprintln!("  [amdvi] {}", unit.trim());
     }
-    eprintln!("  [amdvi] {} controller(s) on domains of their own, the stick bound", controllers.len());
+    eprintln!("  [amdvi] {} controller(s) on domains of their own, the stick served", controllers.len());
     Ok(())
 }
 
 /// Every AMD-Vi unit remapping (`GAEn`, MMIO 0018h bit 17) and, once the
 /// kernel's drivers are settled, filtering SMIs and logging each it refuses
 /// (`SmiFEn` bit 22, `SmiFLogEn` bit 24); every I/O APIC the MADT has named
-/// by the IVRS; and each xHCI controller the kernel drives armed through a
-/// present entry of its own table at the vector its message carries, the
-/// stick bound by those interrupts.
-fn amdvi_remaps(kernel: &serial::Serial) -> Result<(), String> {
+/// by the IVRS; and each xHCI controller usbd drives armed through a present
+/// entry of its own table at the vector its message carries, the stick served
+/// by those interrupts.
+fn amdvi_remaps(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
     let text = kernel.text();
     let remaps = kernel.must_say("iommu: amdvi remaps every message through its requester's table")?;
     let control = |line: &str| {
@@ -4526,11 +4597,8 @@ fn amdvi_remaps(kernel: &serial::Serial) -> Result<(), String> {
     if !remaps.contains(&format!(" {apics} I/O APIC(s) named")) {
         return Err(format!("{remaps:?} does not name the {apics} I/O APIC(s) the MADT has"));
     }
-    kernel.must_not_say("iommu: DMA FAULT")?;
-    let controllers: Vec<&str> = text
-        .lines()
-        .filter_map(|l| l.split_once("xHCI: found at PCI ")?.1.split_whitespace().next())
-        .collect();
+    no_fault_but_the_spares(kernel)?;
+    let controllers = usb_controllers(kernel);
     for at in &controllers {
         let data = text
             .lines()
@@ -4539,7 +4607,7 @@ fn amdvi_remaps(kernel: &serial::Serial) -> Result<(), String> {
         let vector = u32::from_str_radix(data.trim_start_matches("0x"), 16).map_err(|e| format!("{data}: {e}"))? & 0xFF;
         kernel.must_say(&format!("iommu: amdvi irte source={at} vector={vector:#04x} p=1 "))?;
     }
-    kernel.must_say("usb-storage: 1 device(s)")?;
+    log.must_say(STICK_SERVED)?;
     eprintln!("  [amdvi] {}", remaps.trim());
     for filter in filters {
         eprintln!("  [amdvi] {}", filter.trim());
@@ -4547,7 +4615,44 @@ fn amdvi_remaps(kernel: &serial::Serial) -> Result<(), String> {
     for refused in text.lines().filter(|l| l.contains("iommu: amdvi unit") && l.contains(" said so far")) {
         eprintln!("  [amdvi] {}", refused.trim());
     }
-    eprintln!("  [amdvi] {} controller(s) armed through their own entries, the stick bound", controllers.len());
+    eprintln!("  [amdvi] {} controller(s) armed through their own entries, the stick served", controllers.len());
+    Ok(())
+}
+
+/// The controller the boot stick is on, handed over once to the image's
+/// usbd, its message armed in remappable format through an entry of its own
+/// (VT-d's Interrupt Format, bit 4 of an MSI address; AMD-Vi's entry for its
+/// source), its No-Op answered, and the stick served by it.
+fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
+    let served: Vec<String> = usb_controllers(kernel)
+        .into_iter()
+        .filter(|at| log.text().lines().any(|l| l.contains(&format!("usbd {at}: ")) && l.ends_with(STICK_SERVED)))
+        .collect();
+    let [at] = &served[..] else {
+        return Err(format!("not one controller served the stick: {served:?}\n{}", log.text()));
+    };
+    let handed = format!("pcidev: PCI {at} [");
+    let handovers: Vec<&str> =
+        kernel.text().lines().filter(|l| l.contains(&handed) && l.contains("] handed over")).collect();
+    let [line] = handovers[..] else {
+        return Err(format!("{at} was not handed over once: {handovers:?}"));
+    };
+    let remapped = kernel.text().lines().any(|l| {
+        l.split_once(&format!("PCI {at}: msi address="))
+            .and_then(|(_, a)| u32::from_str_radix(a.split_whitespace().next()?.trim_start_matches("0x"), 16).ok())
+            .is_some_and(|address| address & (1 << 4) != 0)
+    }) || kernel.text().contains(&format!("iommu: amdvi irte source={at} "));
+    if !remapped {
+        return Err(format!("{at}'s message names no remapping entry of its own:\n{}", kernel.text()));
+    }
+    log.must_say(&usbd_noop(at))?;
+    eprintln!("  [usbd] {}", line.trim());
+    for complete in kernel.text().lines().filter(|l| l.contains("Boot: complete")) {
+        eprintln!("  [usbd] {}", complete.trim());
+    }
+    if let Some(mounted) = log.text().lines().find(|l| l.contains("fileserver: Log serving /log")) {
+        eprintln!("  [usbd] {}", mounted.trim());
+    }
     Ok(())
 }
 
@@ -4558,12 +4663,12 @@ fn amdvi_remaps(kernel: &serial::Serial) -> Result<(), String> {
 /// release and printed, not judged.
 fn usbd_on_metal(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
     const TYPE_C: &str = "8086:9a13";
+    let handed = format!(" [{TYPE_C}] handed over, vector ");
     let at = kernel
         .text()
         .lines()
-        .find_map(|l| l.split_once("xHCI: leaving PCI ")?.1.strip_suffix(&format!(" {TYPE_C} to a claim (xhci-leave)")).map(str::to_string))
-        .ok_or_else(|| format!("the kernel never said it left {TYPE_C} alone:\n{}", kernel.text()))?;
-    kernel.must_say(&format!("pcidev: PCI {at} [{TYPE_C}] handed over, vector "))?;
+        .find_map(|l| l.split_once("pcidev: PCI ")?.1.split_once(&handed).map(|(at, _)| at.to_string()))
+        .ok_or_else(|| format!("{TYPE_C} was never handed over:\n{}", kernel.text()))?;
     let message = kernel
         .text()
         .lines()
@@ -4577,40 +4682,12 @@ fn usbd_on_metal(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), St
     }
     kernel.must_say(&format!(" source={at} p=1 "))?;
     kernel.must_say("took its first message on vector")?;
-    log.must_say(USBD_NOOP)?;
+    log.must_say(&usbd_noop(&at))?;
     for released in kernel.text().lines().filter(|l| l.contains(&format!("pcidev: PCI {at} [{TYPE_C}] released; "))) {
         eprintln!("  [usbd] {}", released.trim());
     }
     eprintln!("  [usbd] {at}: handed over, MSI {address:#010x} through its remapping entry, the No-Op answered");
     Ok(())
-}
-
-/// Seven keys held on QEMU's `usb-kbd`, whose seventh report is ErrorRollOver
-/// in every slot: the driver counts it as a rollover, and as no refusal.
-fn usb_keyboard_rollover(test_config: &Path) -> Result<(), String> {
-    const BOUND: &str = "xHCI: USB keyboard ready on slot ";
-    const ROLLED_OVER: &str = " keyboard report in rollover, its modifiers believed and its other keys held, 1 since it bound";
-    const REFUSED: &str = " report refused, ";
-    let options = BootOptions { qmp: true, ..Default::default() };
-    if !qemu::profile_argv(&options).iter().any(|arg| arg.starts_with("usb-kbd,")) {
-        return Err("this machine was to have a usb-kbd".to_string());
-    }
-    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
-    let mut console = format!("{}\n", qemu.boot_log());
-    await_guest(&mut qemu, &mut console, "the keyboard to bind", |c| c.contains(BOUND))?;
-    const KEYS: [&str; 7] = ["q", "w", "e", "r", "t", "y", "u"];
-    {
-        let mut input = qemu::QmpInput::open(qemu.qmp_socket());
-        input.keys(&KEYS.map(|key| (key, true)));
-        input.keys(&KEYS.map(|key| (key, false)));
-    }
-    await_guest(&mut qemu, &mut console, "the driver to read the rollover", |c| {
-        c.contains(ROLLED_OVER) || c.contains(REFUSED)
-    })?;
-    let said = serial::Serial::named("the typed-on boot", console);
-    said.must_not_say(REFUSED)?;
-    eprintln!("  [usbhid] {}", said.must_say(ROLLED_OVER)?.trim());
-    said.must_be_clean()
 }
 
 /// [`MACHINE_TESTS`]' `vector_state_survives_a_switch`: the shared boot's
@@ -4919,12 +4996,22 @@ fn windows_on_metal(boot: &metal::Readback) -> Result<(), String> {
     let kernel = boot.kernel();
     let cpus = boot.cpus()?;
     mask_windows(kernel.text(), cpus)?;
-    let read = common::irqcensus::windows_under(kernel.text(), cpus, &windows_load_exited())?;
+    let read = common::irqcensus::windows_under(kernel.text(), cpus, &exited(WINDOWS_LOAD))?;
     eprintln!(
         "  [windows] held irqs_off_ns={} preempt_off_ns={}; herd irqs_off_ns={} preempt_off_ns={}",
         read.held.0, read.held.1, read.load.0, read.load.1
     );
-    Ok(())
+    // Under the stick write, each CPU's longest windows are judged against
+    // the bench's record (`timings::ceiling`), the base they were first read at.
+    boot.job_passed(STICK_WRITE)?;
+    let reached = metal::bytes_of_lines(boot.log().text(), "stick_write: line ");
+    if reached < 1 << 20 {
+        return Err(format!("{reached} bytes of the stick write's lines reached the stick, under a mebibyte"));
+    }
+    let under = common::irqcensus::windows_under(kernel.text(), cpus, &exited(STICK_WRITE))?;
+    eprintln!("  [windows] stick write irqs_off_ns={} preempt_off_ns={}", under.load.0, under.load.1);
+    boot.measured("boot.windowscase.stick_write.irqs_off_ns", under.load.0)?;
+    boot.measured("boot.windowscase.stick_write.preempt_off_ns", under.load.1)
 }
 
 fn pci_cap_selftest(log: &str) -> Result<(), String> {
@@ -5053,96 +5140,6 @@ fn lapic_vectors(log: &str) -> Result<(), String> {
         Ok(())
 }
 
-/// Nine crafted USB configuration descriptors, parsed at init.
-fn xhci_descriptors(log: &str) -> Result<(), String> {
-        if let Some(bad) = log.lines().find(|l| l.contains("descriptor selftest FAILED")) {
-            return Err(format!("{bad}\n{log}"));
-        }
-        let Some(verdict) = log.lines().find(|l| l.contains("descriptor selftest")) else {
-            return Err(format!("the parser's self-test never ran:\n{log}"));
-        };
-        // `9/9`, not "no failures": a self-test that ran zero cases would
-        // satisfy the absence of a FAILED line.
-        if !verdict.contains("9/9") {
-            return Err(format!("not every descriptor was parsed as required: {verdict}"));
-        }
-        // Once for the machine. It reads no register, so a per-controller
-        // run would be two verdicts about the same nine byte arrays.
-        let ran = log.matches("descriptor selftest").count();
-        if ran != 1 {
-            return Err(format!("the self-test ran {ran} times, wanted once\n{log}"));
-        }
-        // And the ordinary boot beside it: the same parser bound the boot
-        // stick off a descriptor a real controller delivered.
-        if !log.contains("usb-storage: 1 device(s)") {
-            return Err(format!("the boot stick did not bind on this boot\n{log}"));
-        }
-        eprintln!("  [xhci] {}", verdict.trim());
-        Ok(())
-}
-
-/// Eight malformed extended-capability lists refused, and the handoff on every controller.
-fn xhci_xecp(log: &str) -> Result<(), String> {
-        if let Some(bad) = log.lines().find(|l| l.contains("xecp selftest FAILED")) {
-            return Err(format!("{bad}\n{log}"));
-        }
-        let Some(verdict) = log.lines().find(|l| l.contains("xecp selftest")) else {
-            return Err(format!("the walk's self-test never ran:\n{log}"));
-        };
-        // `8/8`, not "no failures": a self-test that ran zero cases would
-        // satisfy the absence of a FAILED line.
-        if !verdict.contains("8/8") {
-            return Err(format!("not every malformed list was refused: {verdict}"));
-        }
-        // And the handoff on every controller, in `take_ownership`'s words for
-        // each outcome that leaves the kernel owning it: no capability
-        // (QEMU's), firmware that never claimed it (the T14's), and firmware
-        // that released it. Each precedes its own reset — a reset that already
-        // happened is what the whole capability exists to avoid.
-        const HANDED_OVER: &[&str] = &[
-            "xHCI: no USB Legacy Support capability",
-            "xHCI: firmware did not claim the controller",
-            "xHCI: firmware released the controller",
-        ];
-        const KEPT: &[&str] = &[
-            "xHCI: extended capability list unusable",
-            "runs past the register window — no handoff",
-            "xHCI: firmware still owns the controller",
-        ];
-        let mut handoffs = Vec::new();
-        let mut pending: Option<&str> = None;
-        for line in log.lines() {
-            if KEPT.iter().any(|said| line.contains(said)) {
-                return Err(format!("a controller was never handed over: {line}\n{log}"));
-            }
-            if HANDED_OVER.iter().any(|said| line.contains(said)) {
-                if let Some(earlier) = pending.replace(line) {
-                    return Err(format!("a handoff with no reset of its own: {earlier}\n{log}"));
-                }
-            } else if line.contains("xHCI: controller reset") {
-                let Some(handoff) = pending.take() else {
-                    return Err(format!("a controller reset before its handoff: {line}\n{log}"));
-                };
-                handoffs.push(handoff);
-            }
-        }
-        if let Some(unreset) = pending {
-            return Err(format!("a handoff with no reset of its own: {unreset}\n{log}"));
-        }
-        if handoffs.is_empty() {
-            return Err(format!("no controller was handed over and reset:\n{log}"));
-        }
-        // A controller that still enumerates its bus afterwards.
-        if !log.contains("xHCI: controller started") {
-            return Err(format!("the controller did not come up:\n{log}"));
-        }
-        eprintln!("  [xhci] {}", verdict.trim());
-        for handoff in handoffs {
-            eprintln!("  [xhci] {}", handoff.trim());
-        }
-        Ok(())
-}
-
 /// `kernel/src/arch/x86_64/hw.rs`'s probe, when it could not run.
 const SYSRET_SS_UNARMED: &str = "sysret-ss: probe could not arm";
 /// The probe, when a switch refreshed SS from null.
@@ -5229,114 +5226,6 @@ fn iommu_firmware_left(log: &str) -> Result<(), String> {
             "  [iommu-firmware-left] {units} unit(s) switched off what they were handed over with; \
              {passed} of them reported compatibility format passed"
         );
-        Ok(())
-}
-
-/// An inner `scheduler::Operation` may only narrow, and its drop restores what it displaced.
-fn operation_nesting_log(log: &str) -> Result<(), String> {
-
-        /// One `key=value` off a gate line, as a number.
-        fn number(line: &str, key: &str) -> Result<u64, String> {
-            line.split_whitespace()
-                .find_map(|word| word.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
-                .ok_or_else(|| format!("no numeric {key} in {line:?}"))
-        }
-        /// One `key=value` off a gate line, as a flag.
-        fn flag(line: &str, key: &str) -> Result<bool, String> {
-            line.split_whitespace()
-                .find_map(|word| word.strip_prefix(key)?.strip_prefix('=')?.parse().ok())
-                .ok_or_else(|| format!("no boolean {key} in {line:?}"))
-        }
-
-        // Both homes. A task's word is on its `TaskHandle` and a context
-        // with no task uses one slot per CPU, and the two are reached by
-        // different arms of `operation_slot` — so a gate that ran in one
-        // place would leave the other arm unexecuted by any test at all.
-        for site in ["boot", "syscall"] {
-            let say = |what: &str| -> Result<String, String> {
-                let needle = format!("sched-op: {site} {what}");
-                log.lines()
-                    .find(|line| line.contains(&needle))
-                    .map(str::to_string)
-                    .ok_or_else(|| format!("no {needle:?} line on this boot:\n{log}"))
-            };
-
-            let outside = say("outside")?;
-            if flag(&outside, "established")? {
-                return Err(format!(
-                    "{site}: an operation was already established before the gate began, \
-                     so nothing below is about the nesting it made: {outside}"
-                ));
-            }
-
-            // Every level: what it asked for, and what the depth below it
-            // recovered. The bound is the running minimum — an inner
-            // establishment takes the earlier of its own deadline and its
-            // parent's, and only that.
-            let mut asked = Vec::new();
-            let mut narrowest = u64::MAX;
-            for level in 1..=3 {
-                let line = say(&format!("begin level={level}"))?;
-                let want = number(&line, "asked")?;
-                let saw = number(&line, "observed")?;
-                narrowest = narrowest.min(want);
-                if saw != narrowest {
-                    return Err(format!(
-                        "{site}: level {level} asked for {want} ns and the depth inside it \
-                         recovered {saw} ns, against the {narrowest} ns that is the \
-                         earliest of it and every level above it. An establishment that \
-                         observes more than its parent allowed is a caller buying itself \
-                         device time by nesting: {line}"
-                    ));
-                }
-                asked.push(want);
-            }
-            // The widening attempt has to have been a real one, or the line
-            // above is satisfied by a scenario in which nothing was asked.
-            if asked[2] <= asked[1] {
-                return Err(format!(
-                    "{site}: level 3 asked for {} ns inside a level 2 of {} ns, so the \
-                     gate never attempted to widen and the narrowing it reports is vacuous",
-                    asked[2], asked[1],
-                ));
-            }
-
-            // And the restore: each drop puts back what that establishment
-            // displaced rather than clearing the slot, so the operation
-            // above it survives the one below ending.
-            for (level, restored) in [(3, asked[1].min(asked[0])), (2, asked[0])] {
-                let line = say(&format!("end level={level}"))?;
-                let saw = number(&line, "observed")?;
-                if saw != restored {
-                    return Err(format!(
-                        "{site}: with level {level} dropped the depth recovered {saw} ns \
-                         and the frame above it established {restored} ns — a guard that \
-                         restores something else has ended an operation its caller is \
-                         still inside: {line}"
-                    ));
-                }
-                if !flag(&line, "established")? {
-                    return Err(format!(
-                        "{site}: dropping level {level} left no operation established at \
-                         all, and its caller is still inside one: {line}"
-                    ));
-                }
-            }
-
-            let last = say("end level=1")?;
-            if flag(&last, "established")? {
-                return Err(format!(
-                    "{site}: the outermost guard dropped and an operation is still \
-                     established — the slot was restored rather than cleared, so the next \
-                     depth to ask would be answered a deadline nobody set: {last}"
-                ));
-            }
-            eprintln!(
-                "  [operation] {site}: {} ns narrowed to {} ns, a {} ns request changed \
-                 nothing, and both drops restored",
-                asked[0], asked[1], asked[2],
-            );
-        }
         Ok(())
 }
 

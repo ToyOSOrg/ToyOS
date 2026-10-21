@@ -58,12 +58,6 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         Self { base, device, size, pool: PhantomData, how: PhantomData }
     }
 
-    /// How many bytes this view covers.
-    #[inline]
-    pub fn size(self) -> usize {
-        self.size
-    }
-
     /// The address to program a device with for the first byte; never a
     /// physical address once a unit translates this pool's domain.
     #[inline]
@@ -78,24 +72,6 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
     #[inline]
     pub fn host_phys(self) -> u64 {
         DirectMap::phys_of(self.base)
-    }
-
-    /// This view's base as a number, to be handed back to [`Self::from_addr`].
-    #[inline]
-    pub fn addr(self) -> u64 {
-        self.base as u64
-    }
-
-    /// Rebuild a view from an [`addr`](Self::addr), a
-    /// [`device_addr`](Self::device_addr) and a [`size`](Self::size) taken off a
-    /// live one.
-    ///
-    /// # Safety
-    /// The three must be one live view's own, over a pool that lives for the
-    /// machine's life.
-    #[inline]
-    pub unsafe fn from_addr(addr: u64, device: u64, size: usize) -> Self {
-        Self::new(addr as *mut u8, device, size)
     }
 
     /// The `size` bytes at `offset`, refused if not wholly inside `self`.
@@ -119,14 +95,6 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         self.check(offset, src.len());
         // SAFETY: `check` bounded the destination for `src.len()` bytes; `src` and `self` cannot overlap since the heap is never allocated from DMA pages.
         unsafe { copy_nonoverlapping(src.as_ptr(), self.base.add(offset), src.len()) }
-    }
-
-    /// Copy `dst.len()` bytes at `offset` into `dst`, never a borrow into DMA memory.
-    #[inline]
-    pub fn copy_to(self, offset: usize, dst: &mut [u8]) {
-        self.check(offset, dst.len());
-        // SAFETY: `check` bounded the source for `dst.len()` bytes; the two cannot overlap, as `copy_from` explains.
-        unsafe { copy_nonoverlapping(self.base.add(offset), dst.as_mut_ptr(), dst.len()) }
     }
 
     // Panics, not `Result`: every offset/length here is the driver's own arithmetic, never a device-chosen number (those are bounded at their decode before becoming an offset).
@@ -227,7 +195,9 @@ impl DmaPool {
         Ok(Self { pages, base, size, space, device })
     }
 
-    /// The whole pool as a view, borrowed so it cannot outlive `self`.
+    /// The whole pool as a view, borrowed so it cannot outlive `self`: the
+    /// virtio parse selftest's alone.
+    #[cfg(feature = "boot-actuators")]
     pub fn view(&self) -> Dma<'_> {
         Dma::new(self.base.as_mut_ptr(), self.device, self.size)
     }

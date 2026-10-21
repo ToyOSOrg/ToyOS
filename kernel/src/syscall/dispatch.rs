@@ -24,7 +24,7 @@ use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_
 use super::device::{
     sys_acpi, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
     sys_device_dma_limit, sys_device_dma_start, sys_device_dma_unmap,
-    sys_device_reg_read, sys_partition_transfer, Transfer,
+    sys_device_reg_read,
 };
 use super::fs::{
     spawn_cwd, sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink,
@@ -52,24 +52,16 @@ use super::proc::{
 };
 use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
 
-/// `sched-operation-nesting`'s task half and `sysret-ss-probe`, run once a boot
-/// on the first syscall: a task's own deadline slot, and a park that switches
-/// away from it and back.
+/// `sysret-ss-probe`, run once a boot on the first syscall: a park that
+/// switches away from it and back.
 #[cfg(feature = "boot-actuators")]
 fn task_probes() {
     use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
     static RAN: AtomicBool = AtomicBool::new(false);
-    let nesting = crate::actuator::sched_operation_nesting();
-    let ss = crate::actuator::sysret_ss_probe();
-    if !(nesting || ss) || RAN.swap(true, Relaxed) {
+    if !crate::actuator::sysret_ss_probe() || RAN.swap(true, Relaxed) {
         return;
     }
-    if nesting {
-        crate::sched_gate::run("syscall");
-    }
-    if ss {
-        crate::arch::hw::sysret_ss_probe(&crate::scheduler::Parkable::at_entry());
-    }
+    crate::arch::hw::sysret_ss_probe(&crate::scheduler::Parkable::at_entry());
 }
 
 pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
@@ -407,25 +399,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_endowments(&mut buf)
         }
         SYS_DEVICE_CLAIM => sys_device_claim(RawHandle(a1 as u32), a2, [a3, a4]),
-        // The count is bounded before it becomes a window, and a transfer of
-        // nothing is refused rather than sent to a device as a zero-length command.
-        SYS_PARTITION_READ | SYS_PARTITION_WRITE => {
-            let count = a4;
-            if count == 0 || count > toyos_abi::part::MAX_BLOCKS_PER_CALL as u64 {
-                return SyscallError::InvalidArgument.to_u64();
-            }
-            let len = count * toyos_abi::part::BLOCK_BYTES as u64;
-            let handle = RawHandle(a1 as u32);
-            if num == SYS_PARTITION_READ {
-                let Some(mut into) = ctx.user_bytes_mut(UserAddr::new(a3), len) else {
-                    return bad_addr;
-                };
-                sys_partition_transfer(handle, a2, count as u32, Transfer::Read(&mut into))
-            } else {
-                let Some(from) = ctx.user_bytes(UserAddr::new(a3), len) else { return bad_addr };
-                sys_partition_transfer(handle, a2, count as u32, Transfer::Write(&from))
-            }
-        }
         SYS_RT_ENTER => sys_rt_enter(RawHandle(a1 as u32)),
         SYS_LOG_READ => {
             // checked_mul before mapping: a product that doesn't fit is a bad argument,

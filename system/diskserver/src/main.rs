@@ -112,6 +112,20 @@ impl Known {
         self.expected.iter().all(|d| self.fates.contains_key(d)) && !self.fates.values().any(|f| *f == Fate::Ended)
     }
 
+    /// Driver `badge`'s connection ended. One that had settled is awaited until
+    /// it settles again (`true`, so the bound counts from now). One that never
+    /// settled is unusable at once: its end is its last word, and every
+    /// question waiting on it is answered now rather than at the bound.
+    fn ended(&mut self, badge: Badge) -> bool {
+        match self.fates.insert(badge, Fate::Ended) {
+            Some(_) => true,
+            None => {
+                self.fates.insert(badge, Fate::Unusable);
+                false
+            }
+        }
+    }
+
     /// The drivers whose controllers' partitions cannot be said absent: those
     /// expected and never heard, and those unusable or ended.
     fn unsettled(&self) -> Vec<Badge> {
@@ -429,19 +443,17 @@ impl Service {
         self.known.offered.extend(offer.parts.into_iter().map(|part| Offered { disk: ours, part }));
     }
 
-    /// Driver `id` is gone, and every disk it offered with it. One that had
-    /// settled is awaited until a driver with its badge settles again; one that
-    /// never settled is forgotten.
+    /// Driver `id` is gone, and every disk it offered with it ([`Known::ended`]).
     fn drop_driver(&mut self, id: u64, why: &str) {
         let d = self.drivers.remove(&id).expect("a live driver");
         let label = d.label.unwrap_or_else(|| "unnamed".into());
         println!("diskserver: dropping disk driver {} ({label}) — {why}; its {} disk(s) leave", d.badge, d.disks.len());
         let gone: Vec<u32> = d.disks.values().copied().collect();
         self.known.offered.retain(|o| !gone.contains(&o.disk));
-        if self.known.fates.insert(d.badge, Fate::Ended).is_some() {
+        if self.known.ended(d.badge) {
             self.awaited_since = Instant::now();
         } else {
-            self.known.fates.remove(&d.badge);
+            println!("diskserver: disk driver {} ended before it settled; its controller is unusable", d.badge);
         }
     }
 
@@ -710,6 +722,22 @@ mod tests {
         assert_eq!(known.open(LOG, unique(LOG), false), None);
         known.fates.insert(STICK, Fate::Offered);
         assert!(known.settled());
+    }
+
+    /// A driver that ends before it settles holds nothing up: what was waiting
+    /// on it is answered at once, `Unusable` for its controller's partitions,
+    /// and it is awaited again only once it has settled.
+    #[test]
+    fn a_driver_that_ends_before_it_settles_is_unusable_at_once() {
+        let mut known = known(&[STICK, NVME]);
+        known.fates.insert(NVME, Fate::Offered);
+        assert_eq!(known.open(LOG, unique(LOG), false), None);
+        assert!(!known.ended(STICK), "a driver that never settled was awaited again");
+        assert!(known.settled());
+        assert_eq!(known.open(LOG, unique(LOG), false), Some(Err(Refusal::Unusable)));
+        known.fates.insert(STICK, Fate::Offered);
+        assert!(known.ended(STICK), "a settled driver's end is awaited");
+        assert!(!known.settled());
     }
 
     /// A controller its driver cannot use, or one with no driver, is a disk

@@ -23,7 +23,7 @@ syscap = ["logread"]
 [programs.compositor]
 service = true
 serves = ["compositor", "prompt", "clipboard", "input", "display"]
-devices = ["pci:03:80:00/1af4:1050", "keyboard", "mouse"]
+devices = ["pci:03:80:00/1af4:1050"]
 args = ["scale=2"]
 
 # One process per virtio-serial function the kernel does not drive: the
