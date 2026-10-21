@@ -29,7 +29,7 @@ Neither obvious fix is available without a ruling:
 
 - **Set `CR4.OSFXSR` in the trampoline before the `lidt`.** This is the direct
   fix and it puts a second decider on a control register, which `CLAUDE.md`
-  forbids by name — "a CPU's control registers come from one declaration".
+  forbids by name — "CPU control registers come from one declaration".
 - **Move the `lidt` out of the trampoline into `init_ap`, after
   `control_regs::init`.** This matches the BSP exactly, but it needs an
   `idt::load` separate from `idt::init` (which fills the table and is BSP-only),

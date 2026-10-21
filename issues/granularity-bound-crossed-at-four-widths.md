@@ -13,13 +13,15 @@ sharper statement.
 
 The bound is derived from granularities the policy itself picked:
 `lag_spread + (ΣT_i + 1) × (QUANTUM + max KernelSection + 2 × RUN_CHUNK)`
-(`kernel/sim/src/invariants.rs:695-697`).
+(`kernel/sim/src/invariants.rs`).
 
 **Re-measured 2026-08-24 at `739af0c2`**, the whole sweep, 500 seeds a width:
 
 ```
 cargo run --release -p toyos-sched-sim -- measure fairness_storm:<cpus> 500
 ```
+
+(The package is `kernel-sim` now.)
 
 | CPUs | 1 | 2 | 3 | 4 | 6 | 8 | 12 | 16 | 24 | 32 |
 |---|---|---|---|---|---|---|---|---|---|---|
@@ -36,9 +38,9 @@ kind as well as in one figure; the 4-CPU number is 112 ms today.
 
 **The gate handles this honestly rather than hiding it**, which is the part worth
 preserving. It reds on `max(derived, recorded allowance)`
-(`invariants.rs:723`), so a sampled scenario is gated on not regressing — but
+(`invariants.rs`), so a sampled scenario is gated on not regressing — but
 `fair_over_bound` records every crossing of the *derived* bound regardless, and
 the sweep prints `N ns PAST THE DERIVED BOUND on the recorded allowance`
-(`sweep.rs:150-156`). **The allowance cannot quietly become the standard**, which
+(`past_the_bound`, `sweep.rs`). **The allowance cannot quietly become the standard**, which
 is the failure mode of every temporary baseline and the reason most of them end
 up permanent.

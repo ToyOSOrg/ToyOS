@@ -29,6 +29,6 @@ logs outlive them. Everything quoted above is already here for that reason.
 
 ## Exit condition
 
-A `METAL` row reads `soundd: suspended` after each last client's removal on the
-T14's HDA ring, and it holds across the T14's boots. Owner: the metal suite
+A `METAL` row reads `soundserver: suspended` (soundd's line, renamed) after each
+last client's removal on the T14's HDA ring, and it holds across the T14's boots. Owner: the metal suite
 (`tests/toyos.rs`'s `METAL`).

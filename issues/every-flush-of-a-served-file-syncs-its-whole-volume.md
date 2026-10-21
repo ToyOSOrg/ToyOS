@@ -8,8 +8,9 @@ opened: 2026-09-27
 
 std's ToyOS `File::flush` is `File::fsync`
 (`sdk/std/sys/fs.rs`), where every other platform's is a
-no-op, and fsd answers `FSYNC` by syncing the volume, every open file's entry
-and every dirty block of the cache (`userland/fsd/src/main.rs`, `FSYNC`). So a
+no-op, and the file server answers `FSYNC` by syncing the volume, every open
+file's entry and every dirty block of the cache (`system/fileserver/src/main.rs`,
+`FSYNC`, which calls `sync` with the file's node and syncs the whole volume). So a
 `BufWriter` over a file on `/home` syncs all of DATA each time it flushes, and a
 4 KiB create and fsync cost 3.5–3.6 ms p50 on QEMU TCG against the kernel's
 1.0–1.3 ms, measured on the branch that moved DATA to fsd.

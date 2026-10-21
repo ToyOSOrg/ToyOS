@@ -7,7 +7,7 @@ opened: 2026-09-27
 # A C program names no file a file server holds
 
 `/apps`, `/config`, `/home`, `/state`, `/log` and `/boot` are served by
-`/system/bin/fsd` through directory capabilities in each program's namespace,
+`/system/bin/fileserver` through directory capabilities in each program's namespace,
 and std reaches them through `toyos::fs` (`sdk/std/sys/fs.rs`).
 `sdk/libc` does not: `open`, `stat`, `opendir` and every other path call
 in `sdk/libc/src/posix_io.rs` and `sdk/libc/src/stdio.rs` go to the

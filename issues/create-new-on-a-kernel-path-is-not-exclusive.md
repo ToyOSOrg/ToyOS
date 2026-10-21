@@ -12,7 +12,7 @@ std's `OpenOptions::create_new(true)` promises an open that fails with
 plain `OpenFlags::CREATE`, and the kernel has no exclusive flag to turn it
 into, so on `/tmp` a second `create_new` of one path opens the file the first
 made and says nothing. A served path does not share it: the file protocol
-carries `O_CREATE_NEW` and fsd refuses. Found when fsd's test actuator took two
+carries `O_CREATE_NEW` and the file server refuses. Found when fsd's test actuator took two
 `create_new`s of one `/tmp` mark from two processes as two first times.
 
 **Exit**: an exclusive create reaches the kernel's `/tmp` and is refused

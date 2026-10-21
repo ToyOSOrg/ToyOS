@@ -15,6 +15,7 @@ window over `arch::console_uart::frame()` writes the PL011 without the
 `serial::Registers` that `arch::console_uart::write_byte` asks for.
 
 **Evidence:** the code. Its callers are `map_mmio` on both architectures, the
-AArch64 GIC redistributor's window and the PL011's.
+x86-64 local APIC's window, the AArch64 GIC distributor's and redistributor's
+windows, the ITS's redistributor window and the PL011's.
 
 **Exit:** no safe call builds a window over memory it was not handed.

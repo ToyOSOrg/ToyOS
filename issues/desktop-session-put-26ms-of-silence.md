@@ -40,7 +40,7 @@ whose *worst of 30* is 10090. The two distributions are disjoint.
 **Whose lateness it is, is not the same question in the two phases, and the
 `deferred` column separates them.** `deferred` counts a mix cycle declining to
 submit because a streaming client's ring was empty and there was still playout
-margin (the `mid_refill` arm of `mix_thread`, `userland/soundd/src/mix.rs`) —
+margin (the `mid_refill` arm of `mix_thread`, now `system/soundserver/src/mix.rs`) —
 soundd's restraint, waiting for a producer:
 
 ```
@@ -75,16 +75,17 @@ gate A reddening on its own configuration:
 **Read the tone-phase cluster carefully before treating it as load.** It is far
 too tight to be scheduling noise (min 18116, p50 21896, p90 24079 over 88
 windows, one per stream start). One candidate mechanism, offered as a
-hypothesis and not a measurement: `signal_clients`' caller arms its wait on
+hypothesis and not a measurement: the mix loop arms its wait on
 `target` — the *next future* grid point when the DLL estimate is past due — but
 records `armed_on = Some(t_est)`, the stale estimate, so the sample is taken
 from an instant soundd deliberately did not ask to be woken at and includes
 every whole period it skipped.
 
-**Where that code is now, and what has moved under it.** The mix loop left
-`userland/soundd/src/main.rs` for `mix_thread` in `userland/soundd/src/mix.rs`;
-the arming block and `armed_on = Some(t_est)` survive there unchanged, and so
-does the sample taken against `armed_on`. Two things have changed around it and
+**Where that code is now, and what has moved under it.** soundd is
+`/system/bin/soundserver`, and its mix loop is `mix_thread` in
+`system/soundserver/src/mix.rs`. The arming is `armed`, which computes the wait
+to `target` and answers `Some(t_est)` as `armed_on`, and the sample is still
+taken against `armed_on`. Two things have changed around it and
 neither settles the question:
 
 - The site now argues the choice rather than only asserting it: reading the DLL
@@ -95,8 +96,9 @@ neither settles the question:
   about `t_est` versus `target`, which is the instant the timer was actually
   armed for, and which is what this entry asks about.
 - Since 2026-08-21 the statistic is recorded in two halves, split at the oldest
-  record's ISR timestamp: `worst_irq_late_us` is the device failing to complete
-  when it was due and `worst_pickup_us` is soundd failing to run once it had.
+  record's ISR timestamp (`WorstWake`'s `irq_late_ns` and `pickup_ns`,
+  `system/soundserver/mixer/src/stats.rs`): the device failing to complete
+  when it was due, and soundserver failing to run once it had.
   Both are clamped to the same `t_est`, so the split re-attributes the number
   above without changing what it is measured from — and the `max_wake_lat_us`
   distribution quoted in this entry is a pre-split statistic.
@@ -116,7 +118,7 @@ this a defect under the audio law rather than a comparability note.
 
 ## Exit condition
 
-`armed_on` is settled against `target` in `signal_clients`, and on the T14 a
+`armed_on` is settled against `target` in `armed`, and on the T14 a
 `METAL` row streams a client while `tone` restarts beside it, as the session
-above did, with soundd reporting `underruns=0` in every window a client holds,
+above did, with soundserver reporting `underruns=0` in every window a client holds,
 across repeated boots. Owner: the metal suite (`tests/toyos.rs`'s `METAL`).

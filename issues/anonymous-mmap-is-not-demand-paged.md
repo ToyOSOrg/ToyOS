@@ -18,11 +18,11 @@ called for the full rounded size before anything is mapped, and
 and never a `#PF`, and a program that reserves a large region pays for all of it
 immediately. Measured: `syscall_cost` mapping 128 MiB and touching one byte per
 page reported the guest's `peak=130MB` and its fault trace named two faults, both
-in the ELF. CLAUDE.md's "Demand paging" is true of a *file-backed* segment and
+in the ELF. The root README's "Demand paging" is true of a *file-backed* segment and
 of nothing else. Whether it should be lazy is a design question with a real
 answer either way — the eager path is simpler and cannot fail late — but the
 description and the code should agree.
 
 The one demand-paged thing a userland program can still reach is a *writable
-file-backed* page — `demand_paging_sse` and `fpu_isolation` both use one — at
-2 MiB of test image per fault.
+file-backed* page — `demand_paging_sse` uses one — at 2 MiB of test image per
+fault.
