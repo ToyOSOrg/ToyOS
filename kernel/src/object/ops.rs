@@ -8,14 +8,14 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use toyos_abi::handle::{RawHandle, Rights};
-use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError};
+use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError, MAX_WHOLE_PIPE_WRITE};
 use kernel::sched::task::WaitClass;
 
 use crate::drivers::serial;
 use crate::file_cache;
 use crate::time::Deadline;
 use crate::pipe::{self, PipeId};
-use kernel::pipe::End;
+use kernel::pipe::{End, Landing};
 use crate::process::PipeMap;
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::inbox::PollEntry;
@@ -211,7 +211,7 @@ pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
 }
 
 pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
-    pipe_write(object).map(|(id, _)| id)
+    pipe_write(object).map(|(id, _, _)| id)
 }
 
 /// The pipe a blocking read of `object` parks on, and the class its wait is
@@ -228,11 +228,12 @@ pub fn pipe_read(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
     }
 }
 
-/// [`pipe_read`]'s answer for a blocking write.
-pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
+/// [`pipe_read`]'s answer for a blocking write, and how a write lands in
+/// that pipe.
+pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass, Landing)> {
     match object {
-        KObjectRef::PipeWrite(w) => Some((w.id(), WaitClass::Pipe)),
-        KObjectRef::Connection(c) => Some((c.tx(), WaitClass::Ipc)),
+        KObjectRef::PipeWrite(w) => Some((w.id(), WaitClass::Pipe, Landing::Pipe)),
+        KObjectRef::Connection(c) => Some((c.tx(), WaitClass::Ipc, Landing::Partial)),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
@@ -546,13 +547,14 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
     }
 }
 
-fn write_pipe(id: PipeId, buf: &UserBytes) -> Option<u64> {
-    match pipe::try_write(id, buf) {
+fn write_pipe(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
+    let (id, _, landing) = pipe_write(object).expect("a pipe's write end writes its pipe");
+    match pipe::write(id, buf, landing) {
         // The reader is gone, not absent: `NotFound` means the name is not there and nothing else may say so.
-        Some(pipe::PipeWrite::BrokenPipe) => Some(SyscallError::Gone.to_u64()),
-        Some(pipe::PipeWrite::NoMemory) => Some(SyscallError::ResourceExhausted.to_u64()),
-        Some(pipe::PipeWrite::Wrote(n)) => Some(n as u64),
-        None => None,
+        pipe::PipeWrite::BrokenPipe => Some(SyscallError::Gone.to_u64()),
+        pipe::PipeWrite::NoMemory => Some(SyscallError::ResourceExhausted.to_u64()),
+        pipe::PipeWrite::Wrote { n, .. } => Some(n as u64),
+        pipe::PipeWrite::NoRoom => None,
     }
 }
 
@@ -593,8 +595,7 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
             file_cache::touch(state.file_id, state.mtime);
             Some(written as u64)
         }),
-        KObjectRef::PipeWrite(w) => write_pipe(w.id(), buf),
-        KObjectRef::Connection(c) => write_pipe(c.tx(), buf),
+        KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) => write_pipe(object, buf),
         // The whole lines `klogd`'s queue has room for, and a trailing partial one:
         // a short count is a writer ahead of the console, told so.
         KObjectRef::Console(c) => Some(c.write(buf) as u64),
@@ -854,7 +855,9 @@ pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
 
 pub fn has_space(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::PipeWrite(w) => pipe::has_space(w.id(), 1),
+        // Writable is room for any write that lands whole, so a non-blocking
+        // one refused, retried on readiness, lands.
+        KObjectRef::PipeWrite(w) => pipe::has_space(w.id(), MAX_WHOLE_PIPE_WRITE),
         KObjectRef::Connection(c) => pipe::has_space(c.tx(), 1),
         KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Console(_) => crate::log::console::has_room(),

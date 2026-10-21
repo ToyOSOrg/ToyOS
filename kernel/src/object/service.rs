@@ -4,9 +4,10 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use kernel::message::{Batches, Refused, Window};
+use kernel::pipe::Landing;
 use toyos_abi::syscall::{SyscallError, MAX_QUEUED_BATCHES};
 
-use crate::pipe::{self, AtBatch, PipeId, PipeReader, PipeWriter, WholeWrite};
+use crate::pipe::{self, AtBatch, PipeId, PipeReader, PipeWrite, PipeWriter};
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::sync::Lock;
 
@@ -47,16 +48,16 @@ impl HandleQueue {
             Err(Refused::Empty) => return Err((batch, SendRefused::Error(SyscallError::InvalidArgument))),
             Err(Refused::QueueFull) => return Err((batch, SendRefused::Error(SyscallError::ResourceExhausted))),
         }
-        match pipe::write_whole(tx, bytes) {
-            WholeWrite::Wrote(end) => {
+        match pipe::write(tx, bytes, Landing::Whole) {
+            PipeWrite::Wrote { end, .. } => {
                 if carries {
                     batches.pin(end, batch);
                 }
                 Ok(())
             }
-            WholeWrite::NoRoom => Err((batch, SendRefused::NoRoom)),
-            WholeWrite::BrokenPipe => Err((batch, SendRefused::Error(SyscallError::Gone))),
-            WholeWrite::NoMemory => Err((batch, SendRefused::Error(SyscallError::ResourceExhausted))),
+            PipeWrite::NoRoom => Err((batch, SendRefused::NoRoom)),
+            PipeWrite::BrokenPipe => Err((batch, SendRefused::Error(SyscallError::Gone))),
+            PipeWrite::NoMemory => Err((batch, SendRefused::Error(SyscallError::ResourceExhausted))),
         }
     }
 

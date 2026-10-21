@@ -752,7 +752,8 @@ fn encode_timeout(timeout: Option<u64>) -> u64 {
 }
 
 /// Write bytes to a handle. Returns number of bytes written; a pipe or
-/// connection whose other end has closed is [`SyscallError::Gone`].
+/// connection whose other end has closed is [`SyscallError::Gone`]. A pipe
+/// write of at most [`MAX_WHOLE_PIPE_WRITE`] bytes writes all of them.
 pub fn write(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_WRITE, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
@@ -1066,6 +1067,12 @@ pub const MAX_LINKS: u32 = 10;
 /// The longest path a file server's wire carries (`sdk/toyos/src/fs.rs`), and
 /// libc's `PATH_MAX` (`sdk/libc/include/limits.h`).
 pub const MAX_PATH: usize = 4096;
+
+/// The longest pipe write that lands whole: never interleaved with another
+/// writer's bytes, it waits for room for all of it, and a pipe end polls
+/// writable only with this much room. A longer write may land in parts.
+/// libc's `PIPE_BUF` (`sdk/libc/include/limits.h`).
+pub const MAX_WHOLE_PIPE_WRITE: usize = 4096;
 
 /// Open a file.
 pub fn open(path: &[u8], flags: OpenFlags) -> Result<RawHandle, SyscallError> {
@@ -2328,7 +2335,9 @@ pub fn read_nonblock(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Syscall
 }
 
 /// Non-blocking write. Returns bytes written, `Err(WouldBlock)` if no space is
-/// available, or [`SyscallError::Gone`] if the other end has closed.
+/// available, or [`SyscallError::Gone`] if the other end has closed. A pipe
+/// write of at most [`MAX_WHOLE_PIPE_WRITE`] bytes writes all of them or
+/// answers `WouldBlock`.
 pub fn write_nonblock(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_WRITE_NONBLOCK, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
