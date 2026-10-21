@@ -6,11 +6,12 @@ opened: 2026-10-02
 
 # A launch too large for one frame becomes a direct spawn
 
-`toyos::launch::launch` (`sdk/toyos/src/launch.rs`) answers `LaunchError::NotSent`
-when `Launch::encode` refuses the request, and std's `Command::launch`
-(`sdk/std/sys/process.rs`) answers `NotSent` with the direct
-spawn. `encode` refuses a request whose header, program, argv, environment,
-working directory and connector names do not fit `MAX_FRAME_LEN`
+`toyos::launch::launch` (`sdk/toyos/src/launch.rs`) answers
+`LaunchError::NotSent` when `Launch::encode` refuses the request, and
+`Spawn::launch` (`sdk/toyos/src/spawn.rs`, `unmade`), which std's `Command`
+spawn takes (`sdk/std/sys/process.rs`), answers `NotSent` with the direct spawn.
+`encode` refuses a request whose header, program, argv, environment, working
+directory and connector names do not fit `MAX_FRAME_LEN`
 (`sdk/toyos/src/ipc.rs`). Its other refusal, too many connectors or slots, std
 never reaches: it refuses the connectors itself, and a launch carries stdio
 alone.
@@ -19,7 +20,8 @@ So a declared program started with an argv and environment past one frame is
 not launched. Its caller spawns it: it holds its caller's namespace and not its
 manifest row, a connector the caller `provide`d does not reach it, and it
 carries no `HOME` unless its caller named one. Neither side is told. A child
-asked of init (`under_init`) is refused `PermissionDenied` instead.
+asked of the supervisor (`under_supervisor`) is refused `PermissionDenied`
+instead.
 
 Evidence: by reading. No test sends a launch past one frame.
 

@@ -40,7 +40,9 @@ panel is the only channel a laptop has. The line also names *which* state the
 arriving panic found, which is the fact this sighting most wanted:
 `DOUBLE PANIC` with the depth guard at zero means the first event was a fault
 or a demand-paging fault and not a panic at all.
-`double_panic_names_the_first` stages both dead ends and reads them.
+The guest test that staged both dead ends and read them
+(`double_panic_names_the_first`, later `double_panic_names_the_fault`) was
+cut in `520c0d129`.
 
 **Finding 1 stays open**, and the next sighting of it will carry what this one
 could not: the first crash's identity and site, the second panic's site, and

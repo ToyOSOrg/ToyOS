@@ -7,13 +7,13 @@ opened: 2026-09-26
 # A corrupt chain met by a queued free is answered by the next call
 
 `Fat32::atomic` re-drives an earlier call's queued repair before a mutating
-call starts (`settle_first`, `lib/fat32/src/repair.rs`). A queued
+call starts (`settle`, `lib/fat32/src/repair.rs`). A queued
 `Repair::Free` walks the rest of a chain whose name is already gone, and a
 walk that meets a cyclic or out-of-range link answers `Error::CorruptChain`.
 That error is returned by whichever call came next, for a chain it never
-named, and the call did not start. fsd logs it as that call failing
-(`logged` in `userland/fsd/src/fat.rs`: "`<op>` of '`<name>`': corrupt cluster
-chain") and its client reads `SyscallError::Io`.
+named, and the call did not start. The file server logs it as that call failing
+(`logged` in `system/fileserver/src/fat.rs`: "`<op>` of '`<name>`': corrupt
+cluster chain") and its client reads `fs::Error::Io`.
 
 Two things are lost:
 
@@ -27,7 +27,7 @@ Two things are lost:
 
 ## Owner
 
-`toyos-fat32`, which owns `settle_first` and `free_chain`; the adapter's log
+`toyos-fat32`, which owns `settle` and `free_chain`; the adapter's log
 line follows from what the crate answers.
 
 ## Exit condition

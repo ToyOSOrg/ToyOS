@@ -7,9 +7,10 @@ opened: 2026-09-29
 # A device without a domain of its own reaches all memory
 
 Every enumerated PCI function is bound to one identity domain over
-`[0, pmm::top())` (`kernel/src/arch/x86_64/vtd/mod.rs:148,456-490`), and only
+`[0, pmm::top())` (`kernel/src/arch/x86_64/vtd/mod.rs`, `table::identity_domain` and
+`identity_root`), and only
 a driver that asks gets an address space of its own
-(`kernel/src/iommu/mod.rs:3-5`). A device the kernel drives, or one nothing
+(`kernel/src/iommu/mod.rs`'s header). A device the kernel drives, or one nothing
 drives, can read and write every page by DMA. Linux at `Ubuntu-6.8.0-142.142`,
 under the T14's `CONFIG_INTEL_IOMMU_DEFAULT_ON=y` and
 `CONFIG_IOMMU_DEFAULT_DMA_LAZY=y`, turns DMA remapping on

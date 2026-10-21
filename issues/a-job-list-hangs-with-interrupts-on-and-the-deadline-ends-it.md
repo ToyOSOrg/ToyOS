@@ -6,10 +6,10 @@ opened: 2026-09-08
 
 # A job list hangs with interrupts on, and only the deadline ends it
 
-T14 run 25 (`/Users/jan/.claude/jobs/2280e09e/tmp/t14-run25-metal.log`, lines
-26-47). The `ccorpus` image — 118 C cases that had run in 49 s on the previous
-tip — came back after **187 s**, so its boot spent the whole
-`boot-deadline=120000` and the deadline is what ended it.
+T14 run 25 (its metal log, outside the tree, lines 26-47). The `ccorpus` image —
+118 C cases that had run in 49 s on the previous tip — came back after **187
+s**, so its boot spent the whole `boot-deadline=120000` and the deadline is what
+ended it.
 
 **That narrows it past the hang this branch already fixed.** A deadline that
 fires is a machine where some CPU was still taking a timer interrupt, so this is
@@ -27,9 +27,12 @@ hung in run 22, `metaldevicecase` in run 20 showed the same span of
 **The record exists and could not be read.** The deadline seals `EXPIRED` and
 the tail of the log ring into the black box, and the next loader pass prints it
 into `loader.log` on the stick — but this reset cut a bulk transfer in its data
-phase and left the stick unenumerable, so there was no readback at all. The stop
-now waits a transfer out first (`xhci/stop.rs`'s `settle_transfers`), so the
-next occurrence should leave a stick the driver can read.
+phase and left the stick unenumerable, so there was no readback at all. The kernel
+drives no USB now (`af1c5af25`): the stick is usbd's, and a reset this kernel
+performs stops every claimed function's mastering first, usbd's controller
+among them (`pcidev::stop_before_reset`, from `kernel/src/power.rs`). What a
+cut command costs the stick is
+`issues/a-cut-bulk-only-command-does-not-brick-the-benchs-stick.md`'s.
 
 **Run 55 does not bear on this.** Its `lancase` boot ran no job list — the
 ring tail records `spawn: /system/bin/test-runner: ELF: fewer bytes than a

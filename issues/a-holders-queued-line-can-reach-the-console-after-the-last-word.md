@@ -18,7 +18,7 @@ FAIL quiesce_stops_the_machine: 3 line(s) reached the console after the boot's l
 ```
 
 The lines are stamped before the stop and reached the wire after `Rebooting.`.
-The mechanism read off the code: `logd` puts a program's line in
+The mechanism read off the code: `logd` (now `logkeeper`) puts a program's line in
 `kernel/src/log/console.rs`'s queue, and `klogd` drains it a chunk of records
 and then a chunk of queued lines per hold of the wire, whatever their age. The
 stop stops every userland thread and writes its last word as a record, which

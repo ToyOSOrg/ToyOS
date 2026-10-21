@@ -36,9 +36,9 @@ netstack's listener is the node's now, whose queue is [tcp]'s: a connect
 that arrives while another waits to be accepted is queued
 (`a_connect_between_two_accepts_is_queued_not_reset`,
 `system/netstack/node/tests/listeners.rs`), and in a guest two host peers
-that dial before any accept are both accepted (`netstack_streams`, which on
-smoltcp ended `the listener was woken for 1 of two peers`). What is left of the
-exit is `lan_swap`.
+that dialled before any accept were both accepted (`netstack_streams`, which on
+smoltcp ended `the listener was woken for 1 of two peers`, and which
+`ff1a11dbd` cut). What is left of the exit is `lan_swap`.
 
 QEMU's own forward is a third place such a reset can come from, and it was
 not ruled out of the reading above: its listener queues one connection, and a

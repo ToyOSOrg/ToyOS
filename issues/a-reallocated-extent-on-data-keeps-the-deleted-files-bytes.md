@@ -50,7 +50,9 @@ capture either way.
 ## Exit condition
 
 A test deletes a file, writes another that reuses its blocks, and finds the new
-file's bytes on the device. `pkg_install_gbae` runs its symlink and removal
-probes *after* the install it reads back, so that judge is about packages and
-not about this; the ordering is stated at that site and comes out when this
-closes.
+file's bytes on the device.
+
+`pkg_install_gbae`, whose boot measured this, was cut in `520c0d129`. DATA was
+then the kernel's; it is the file server's now (`system/fileserver/src/data.rs`),
+and its commits have been shadow-paged since `3adcf424e`. Nothing has looked
+again, so whether either change removed the cause is not known.

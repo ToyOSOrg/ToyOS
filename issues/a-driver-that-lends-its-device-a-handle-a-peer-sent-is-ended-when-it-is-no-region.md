@@ -13,16 +13,16 @@ kind is `HandleError::WrongType`, which ends the caller, exit 139
 for it instead, and is what `SYS_SPAWN` and `SYS_NAMESPACE_BUILD` take a
 handle a peer sent with (`kernel/src/object/handle.rs`).
 
-The region a holder lends is a peer's by contract: `toyos_pci_claim::lend`
-maps "`region`, which a peer lent", and reads `InvalidArgument` as
-`Unlendable` (`lib/pci-claim/src/lib.rs`), a refusal the kernel never answers
-for a handle of another kind. Since #953 the hda driver lends its controller
-the ring soundserver sent with its acceptance, unchecked
-(`offered` and `toyos_pci_claim::lend` in `system/hda/src/main.rs`): a
-soundserver that sends a pipe end or a connection there ends hda rather than
-being refused. diskserver is not reached, because `SharedMemory::lent` refuses
-what `SYS_FSTAT` does not answer as a region before it maps one
-(`system/diskserver/src/region.rs`). A region's kind is one `SYS_FSTAT` settles,
+The region a holder lends is a peer's by contract: `toyos_pci_claim::lend` maps
+"`region`, which a peer lent", and reads `InvalidArgument` as `Unlendable`
+(`lib/pci-claim/src/lib.rs`), a refusal the kernel never answers for a handle of
+another kind. Since #953 the hda driver lends its controller the ring
+soundserver sent with its acceptance, unchecked (`offered` and
+`toyos_pci_claim::lend` in `system/hda/src/main.rs`): a soundserver that sends a
+pipe end or a connection there ends hda rather than being refused. A disk driver
+is not reached, because `Region::lent` refuses what `SYS_FSTAT` does not answer
+as a region before the session lends it (`Sessions::open`,
+`lib/blockserve/src/sessions.rs`). A region's kind is one `SYS_FSTAT` settles,
 so this is not `issues/a-received-handle-has-no-knowable-type.md`'s case.
 
 The kernel owns the fix rather than each lender: what a holder lends is a

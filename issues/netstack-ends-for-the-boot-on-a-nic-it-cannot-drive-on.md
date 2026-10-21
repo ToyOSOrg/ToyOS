@@ -22,9 +22,8 @@ Ending is the right answer to the device: none of the four is something a
 conforming device writes, and a ring read on past one loses frames silently.
 What is missing is what comes after the end.
 
-A restart is not one line in `system.toml`. A second netstack on the same
-address meets `issues/a-replacement-netstack-reuses-its-predecessors-ports.md`,
-every claim it mints spends device addresses
+A restart is not one line in `system.toml`. Every claim a second netstack
+mints spends device addresses
 (`issues/a-claim-spends-device-addresses-its-slot-never-gets-back.md`), and
 section 3 of `issues/the-lan-is-not-yet-production-grade.md` splits the driver
 from the stack so that a driver's end does not take the stack's connections.
