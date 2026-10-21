@@ -9,17 +9,21 @@
 //!
 //! **No clipboard byte is ever logged**: a refusal names a length and a client.
 
+use std::os::toyos::process::CommandExt;
 use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use toyos::endow;
+use toyos::job::JOB_LABEL;
+use toyos::syscap::SysCap;
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
 use toyos::{ipc, system, AsHandle};
 use toyos_abi::input::RawKeyEvent;
+use toyos_abi::syscall::SYSCAP_LABEL;
 use toyos_abi::RawHandle;
 use toyos_input::wire::{self, Record, CONNECTIONS, MAX_PAYLOAD};
 use toyos_input::wire::DEVICES;
@@ -2137,13 +2141,29 @@ fn text(from: RawHandle, bytes: Vec<u8>) -> Option<String> {
 
 /// The thread every launch is made on, and the channel to it: one at a time,
 /// in order, since a launch waits as long as its question does.
+///
+/// **Everything the desktop starts is a job of its own**, made with the
+/// `jobs` right this row's system capability carries: a program started from
+/// the taskbar is no helper of the compositor's, and must not share its CPU.
 fn launcher() -> mpsc::Sender<String> {
     let (launches, queue) = mpsc::channel::<String>();
     std::thread::Builder::new()
         .name("launcher".into())
         .spawn(move || {
+            let jobs = endow::Endowments::get().take::<SysCap>(SYSCAP_LABEL);
             for program in queue {
-                if let Err(e) = Command::new(&program).spawn() {
+                let Some(jobs) = &jobs else {
+                    eprintln!("compositor: {program} did not start: this row holds no `jobs` right to start it as its own job");
+                    continue;
+                };
+                let job = match jobs.new_job() {
+                    Ok(job) => job,
+                    Err(e) => {
+                        eprintln!("compositor: {program} did not start: no job for it: {e:?}");
+                        continue;
+                    }
+                };
+                if let Err(e) = Command::new(&program).endow(JOB_LABEL, job.into_raw().0).spawn() {
                     eprintln!("compositor: {program} did not start: {e}");
                 }
             }

@@ -9,11 +9,12 @@
 use alloc::boxed::Box;
 use core::ptr::addr_of_mut;
 
-use crate::sched::fair::{FairShare, ShareState, QUANTUM_NS};
+use crate::sched::eevdf::{Lag, Left};
 use crate::sched::hw::{CpuId, Nanos};
+use crate::sched::job::Job;
 use crate::sched::mailbox::MailboxNode;
 use crate::sched::msg::Msg;
-use crate::sched::sync::{Arc, AtomicBool, AtomicU64, CellLock, Ordering};
+use crate::sched::sync::{Arc, AtomicBool, AtomicU64, Ordering};
 use crate::sched::park::CommittedTicket;
 
 /// Monotonic, never reused. Stale messages keyed by `TaskKey` are provably
@@ -29,19 +30,27 @@ pub trait SchedPayload: Sized + Send + 'static {
     /// Saved callee context, restored by `Hw::switch`.
     type Ctx: Sized + Send;
 
-    /// The cell the per-process [`FairShare`] lives in. Supplied by the
-    /// environment because the scheduler core may not implement a lock itself
-    /// (see [`CellLock`]).
-    type ShareLock: CellLock<ShareState> + Send;
-
     /// The environment's own name for the task, which a [`crate::sched::hw::TraceEvent`]
     /// carries beside its key: a key is never reused and names nothing outside
     /// the core.
     fn name(&self) -> u64;
 }
 
-/// Shorthand for the share type a payload implies.
-pub type Share<X> = FairShare<<X as SchedPayload>::ShareLock>;
+/// The round-robin turn of the real-time band and a dying task's turn, and
+/// how long a lent real-time window lasts.
+pub const QUANTUM_NS: u64 = 10_000_000;
+
+/// What a thread took with it out of the last ordinary queue it left, for the
+/// one it enters next.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Standing {
+    /// Its lag and unfinished request in its group.
+    pub(crate) left: Option<Left>,
+    /// The lag of the group it was the last to leave: a group's standing
+    /// against other jobs goes with its last thread to the group that thread
+    /// enters next.
+    pub(crate) group_lag: Lag,
+}
 
 /// Why a task is being woken, and whether the waker lends it RT priority for
 /// a bounded window.
@@ -771,7 +780,8 @@ pub struct Task<X: SchedPayload>(Box<TaskInner<X>>);
 struct TaskInner<X: SchedPayload> {
     key: TaskKey,
     shared: Arc<TaskShared<Msg<X>>>,
-    share: Arc<Share<X>>,
+    job: Arc<Job>,
+    standing: Standing,
     ctx: X::Ctx,
     rt: RtState,
     acct: TaskAccounting,
@@ -808,8 +818,8 @@ impl<X: SchedPayload> Task<X> {
         &self.0.shared
     }
 
-    pub fn share(&self) -> &Arc<Share<X>> {
-        &self.0.share
+    pub fn job(&self) -> &Arc<Job> {
+        &self.0.job
     }
 
     pub fn rt(&self) -> RtState {
@@ -878,8 +888,8 @@ macro_rules! linear_state {
                 self.0.shared()
             }
 
-            pub fn share(&self) -> &Arc<Share<X>> {
-                self.0.share()
+            pub fn job(&self) -> &Arc<Job> {
+                self.0.job()
             }
 
             pub fn rt(&self) -> RtState {
@@ -947,7 +957,7 @@ linear_state!(
 /// the destination's queue.
 pub struct TaskBuilder<X: SchedPayload> {
     pub key: TaskKey,
-    pub share: Arc<Share<X>>,
+    pub job: Arc<Job>,
     pub ctx: X::Ctx,
     pub ext: X,
     pub rt: RtState,
@@ -959,7 +969,8 @@ impl<X: SchedPayload> TaskBuilder<X> {
         TransitTask(Task(Box::new(TaskInner {
             key: self.key,
             shared,
-            share: self.share,
+            job: self.job,
+            standing: Standing::default(),
             ctx: self.ctx,
             rt: self.rt,
             acct: TaskAccounting::default(),
@@ -995,6 +1006,10 @@ impl<X: SchedPayload> TransitTask<X> {
 }
 
 impl<X: SchedPayload> ReadyTask<X> {
+    pub(crate) fn standing_mut(&mut self) -> &mut Standing {
+        &mut self.0 .0.standing
+    }
+
     /// Entering the dying list: a borrowed RT window ends here, unconditionally
     /// and exactly as a park ends one.
     ///
@@ -1054,6 +1069,10 @@ impl<X: SchedPayload> ReadyTask<X> {
 }
 
 impl<X: SchedPayload> RunningTask<X> {
+    pub(crate) fn standing_mut(&mut self) -> &mut Standing {
+        &mut self.0 .0.standing
+    }
+
     /// A retire found this task running: it will unwind and die on this stack,
     /// so its borrowed RT window ends now. [`ReadyTask::end_lend`] carries the
     /// argument; this is the arm where the victim never passes through the
@@ -1154,7 +1173,7 @@ impl<X: SchedPayload> RunningTask<X> {
     }
 
     /// Time consumed since dispatch or since the last charge, folded into the
-    /// accounting. The pass charges the share with the same number.
+    /// accounting. The pass charges the run queue with the same number.
     pub(crate) fn charge(&mut self, now: Nanos) -> u64 {
         let elapsed = now.since(self.0 .0.since);
         self.0.charge_residency(now, Residency::Running);

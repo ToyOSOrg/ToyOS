@@ -508,3 +508,34 @@ fn a_desktop_beside_a_build_runs_every_interactive_wake_within_a_frame() {
         }
     }
 }
+
+/// The stage-3 metal workload (`tests/guest/rust-tests/src/bin/job_fairness.rs`)
+/// on the model: two independent builds of `m` busy helpers each beside a
+/// helper-heavy job of `4m`, on both benches' shapes. Every job can fill a third
+/// of the machine, so each is owed a third whatever its helper count. Asserts
+/// each job's share within the tolerance the guest test applies, which a job
+/// per helper — the heavy job owed two thirds — breaks by twice over.
+#[test]
+fn two_builds_and_a_helper_heavy_job_split_the_machine_in_thirds() {
+    const TOLERANCE: f64 = 0.1;
+    let shapes: [Shape; 2] = [("t14", t14), ("amd", amd)];
+    for (shape, topo) in shapes {
+        let mut sim = Sim::new(topo(), Params::DEFAULT);
+        let m = sim.topo.cpus() as u32;
+        let jobs: Vec<(JobId, u32)> = [m, m, 4 * m].iter().map(|&n| (sim.job(WEIGHT_UNIT), n)).collect();
+        for &(job, threads) in &jobs {
+            for i in 0..threads {
+                sim.thread(job, Work::Hog, CpuId(i % m), false);
+            }
+        }
+        sim.run_until(SPAN);
+        let shares: Vec<f64> = jobs.iter().map(|&(job, _)| share(&sim, job) / f64::from(m)).collect();
+        println!(
+            "{shape}: machine shares {:.3} {:.3} {:.3}, migrations {}",
+            shares[0], shares[1], shares[2], sim.migrations
+        );
+        for (i, s) in shares.iter().enumerate() {
+            assert!((s - 1.0 / 3.0).abs() <= TOLERANCE, "{shape}: job {i} took {s:.3} of the machine");
+        }
+    }
+}

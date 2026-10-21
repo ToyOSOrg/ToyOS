@@ -9,7 +9,6 @@
 
 use std::sync::{Arc, Mutex};
 
-use kernel::sched::fair::ShareState;
 use kernel::sched::mailbox::PreemptGuard;
 use kernel::sched::sync::CellLock;
 use kernel::sched::task::{SchedPayload, TaskKey};
@@ -36,7 +35,6 @@ impl<T: Send> CellLock<T> for StdLock<T> {
 }
 
 pub type SimWatchList = StdLock<Waiters<SimMsg, NoRing>>;
-pub type SimShareLock = StdLock<ShareState>;
 
 /// The simulator's waiters are all threads: no process in it polls, so a
 /// ring entry has no value to be.
@@ -88,7 +86,6 @@ pub struct SimCtx {
 
 impl SchedPayload for SimPayload {
     type Ctx = SimCtx;
-    type ShareLock = SimShareLock;
 
     fn name(&self) -> u64 {
         self.key.0

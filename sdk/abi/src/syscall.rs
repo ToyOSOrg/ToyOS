@@ -122,7 +122,11 @@ pub const SYS_QUERY_MODULES: u64 = 91;
 ///   0 = kernel panic (triggers panic!() in syscall context)
 ///   1 = kernel fault (null pointer deref in kernel context)
 pub const SYS_DEBUG: u64 = 92;
-pub const SYS_SCHED_INFO: u64 = 93;
+/// Make a new job — the owner its threads share CPU time under — gated by
+/// [`Rights::JOBS`] on a `SysCap`. See [`job_create`].
+///
+/// [`Rights::JOBS`]: crate::handle::Rights::JOBS
+pub const SYS_JOB_CREATE: u64 = 93;
 pub const SYS_PROCESS_STATS: u64 = 94;
 pub const SYS_SET_THREAD_NAME: u64 = 95;
 /// Read one register of a claimed PCI function's config space. See
@@ -282,6 +286,8 @@ pub const SYS_DEVICE_DMA_START: u64 = 132;
 /// Write a message's bytes to a connection and move the handles it carries,
 /// together or not at all. See [`message_send`].
 pub const SYS_MESSAGE_SEND: u64 = 133;
+/// A handle to the job the caller runs in. See [`job_own`].
+pub const SYS_JOB_OWN: u64 = 134;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -289,13 +295,13 @@ pub const SYS_MESSAGE_SEND: u64 = 133;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 135;
+pub const SYSCALL_PROFILE_BINS: usize = 136;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_MESSAGE_SEND < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_JOB_OWN < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -391,6 +397,14 @@ pub const SVC_LABEL: &str = "svc";
 /// `WRITE`, `DUP` and `TRANSFER`: what it hands on for a child to be placed
 /// under it ([`SpawnArgs::place`]). The kernel puts it in every table.
 pub const SELF_LABEL: &str = "self";
+/// The label a spawn endows a job under to put its child in it: the owner its
+/// threads, and its children's unless a spawn names another, share CPU time
+/// under. It takes a handle carrying [`Rights::WRITE`] to a job — the caller's
+/// own is [`job_own`]'s, and a new one [`job_create`]'s. A spawn naming none
+/// puts the child in its spawner's job.
+///
+/// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+pub const JOB_LABEL: &str = "job";
 /// `serve:<name>`: the acceptor of a machine-wide port this program serves.
 pub const SERVE_PREFIX: &str = "serve:";
 /// `dev:<class>`: the claim for a device class this program was given.
@@ -1576,6 +1590,23 @@ pub fn device_claim(syscap: RawHandle, request: DeviceRequest) -> Result<RawHand
         .map(|v| RawHandle(v as u32))
 }
 
+/// Make a new job, presenting a `SysCap` handle that carries
+/// [`Rights::JOBS`], and answer a handle to it carrying `WRITE`, `DUP` and
+/// `TRANSFER`: what a spawn endows under [`JOB_LABEL`] to start an independent
+/// job, with its own share of the CPU.
+///
+/// [`Rights::JOBS`]: crate::handle::Rights::JOBS
+pub fn job_create(syscap: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_JOB_CREATE, syscap.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// A handle to the job the caller runs in, carrying `WRITE`, `DUP` and
+/// `TRANSFER`: what a launch carries for its program to join the caller's job.
+/// Asks no right: it names only what the caller is already in.
+pub fn job_own() -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_JOB_OWN, 0, 0, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
 /// Enter the real-time scheduling band, presenting a `SysCap` handle that
 /// carries [`Rights::RT`]. The privilege a device claim was never enough to
 /// confer.
@@ -2022,7 +2053,7 @@ pub fn nanosleep(nanos: u64) {
 /// source's own set.
 ///
 /// A wire encoding of `Option<Rights>`, decoded at the syscall boundary and
-/// never carried inward: `Rights::ALL` is twelve bits, so this value is not a
+/// never carried inward: `Rights::ALL` fits in sixteen bits, so this value is not a
 /// rights set and never becomes one. The two wrappers below are the only
 /// writers, so no caller ever spells it.
 pub const RIGHTS_UNCHANGED: u64 = u64::MAX;
@@ -2453,32 +2484,6 @@ pub fn modules(answer: &[u8]) -> impl Iterator<Item = (ModuleInfo, &[u8])> {
         let path = info.path_offset as usize;
         (info, &answer[path..path + info.path_len as usize])
     })
-}
-
-crate::user_safe! {
-    /// Scheduler info for the calling process.
-    #[derive(Clone, Copy, Debug)]
-    pub struct SchedInfo {
-        /// Current vruntime of this process (nanoseconds of virtual CPU time).
-        pub vruntime: u64,
-        /// Global min_vruntime frontier (monotonic non-decreasing).
-        pub min_vruntime: u64,
-        /// Signed contract lag, frozen at the most recent runnable-state
-        /// transition. Positive = process was behind the frontier when it last
-        /// woke / blocked (entitled to catch up); negative = process ran ahead
-        /// and will be throttled. Bounded to [-50ms, +50ms] (MAX_VRUNTIME_LAG_NS)
-        /// by construction. This is the scheduler's contract, not the live
-        /// `min_vruntime - vruntime` drift that accumulates while running on
-        /// multi-CPU systems — compute that at the call site if you need it.
-        pub lag: i64,
-    }
-}
-
-/// Get scheduler info for the calling process.
-pub fn sched_info() -> SchedInfo {
-    let mut info = SchedInfo { vruntime: 0, min_vruntime: 0, lag: 0 };
-    syscall(SYS_SCHED_INFO, &mut info as *mut SchedInfo as u64, 0, 0, 0);
-    info
 }
 
 crate::user_safe! {

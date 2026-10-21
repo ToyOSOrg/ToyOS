@@ -53,6 +53,14 @@ impl SysCap {
         self.mint(DeviceRequest::Isa(set))
     }
 
+    /// Make a new job, with its own share of the CPU: what a launcher endows
+    /// a program it starts independently. Needs [`Rights::JOBS`].
+    pub fn new_job(&self) -> Result<crate::job::Job, SyscallError> {
+        let raw = syscall::job_create(self.0.raw())?;
+        // SAFETY: the kernel installed this handle for this call and no other.
+        Ok(crate::job::Job(unsafe { OwnedHandle::from_raw(raw) }))
+    }
+
     fn mint<T: FromHandle>(&self, request: DeviceRequest) -> Result<T, SyscallError> {
         let raw = syscall::device_claim(self.0.raw(), request)?;
         // SAFETY: the kernel installed this handle in this process's table for

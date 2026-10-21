@@ -23,18 +23,17 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 use core::marker::PhantomData;
 
-use crate::sched::fair::{Frontier, QUANTUM_NS};
 use crate::sched::hw::{CpuId, Hw, Nanos, TraceEvent, TraceKind};
 use crate::sched::mailbox::{
     Doorbell, Kick, MailboxConsumer, MailboxNode, MailboxProducer, PostSlot, PreemptGuard,
     Quiesced, SchedMsg, SleepArm, Urgency,
 };
 use crate::sched::msg::Msg;
-use crate::sched::queue::RunQueue;
+use crate::sched::queue::{RunQueue, MIN_SLICE_NS};
 use crate::sched::sync::{fence, Arc, AtomicU32, AtomicU64, Ordering};
 use crate::sched::task::{
     BlockedTask, Claim, DeadTask, ReadyTask, RunningTask, SchedPayload, TaskKey, TaskShared,
-    TaskState, TransitTask, WaitClass, WakeCause, WakeReason,
+    TaskState, TransitTask, WaitClass, WakeCause, WakeReason, QUANTUM_NS,
 };
 use crate::sched::timer::{TimerApplied, TimerPlan};
 use crate::sched::topology::{Level, Topology};
@@ -237,9 +236,8 @@ pub struct CpuSched<X: SchedPayload> {
     /// value in exactly one container, and a stopped task still owns a kernel
     /// stack and an address space that only a reset will release.
     ///
-    /// Counted into its share exactly as [`Self::dying`] is, because the state
-    /// word of everything in here reads `Ready`; excluded from the published
-    /// load, because nothing queues behind work that will never run.
+    /// In no fair band, as [`Self::dying`]'s tasks are not; excluded from the
+    /// published load, because nothing queues behind work that will never run.
     stopped: VecDeque<ReadyTask<X>>,
     /// The task that exited on this CPU, freed by the NEXT pass — a pass
     /// cannot free the stack it is running on.
@@ -252,15 +250,26 @@ pub struct CpuSched<X: SchedPayload> {
     /// Thieves that asked this pass; answered in `finish` from surplus, after
     /// the pick, so answering can never hand away the task we were about to
     /// run.
-    steal_requests: Vec<CpuId>,
-    quantum_end: Nanos,
-    /// When the running task was dispatched: where [`PROTECTED_RUN_NS`] is
-    /// counted from. Its own field because a cut moves
-    /// [`Self::quantum_end`], which then no longer says when the quantum began.
+    /// Each asker, with the summed group weight it asked at: zero for an
+    /// idle one.
+    steal_requests: Vec<(CpuId, u64)>,
+    /// When this CPU next decides for its running task, absent other events:
+    /// a real-time or dying task's turn end as its dispatch set it, and a fair
+    /// thread's [`RunQueue::decision`] as each pass recomputes it.
+    decide_at: Nanos,
+    /// A queued fair thread the band would run in place of the running one,
+    /// which takes the CPU at this instant: [`MIN_SLICE_NS`] after the running
+    /// thread's dispatch, or at once if it has run that long.
+    cut: Option<Nanos>,
+    /// When the running task began its current run here: where
+    /// [`MIN_SLICE_NS`] is counted from.
     dispatched_at: Nanos,
+    /// When this CPU next looks for a busier CPU to take a thread from while
+    /// it runs fair work ([`SchedPass::balance_busy`]).
+    next_balance: Nanos,
     /// The running task is a corpse that was dispatched **ahead of a ready
     /// real-time task** because it had aged, and holds the CPU until
-    /// [`Self::quantum_end`] — one [`DYING_CHUNK_NS`] — against that band.
+    /// [`Self::decide_at`] — one [`DYING_CHUNK_NS`] — against that band.
     ///
     /// Without this the grant is worth nothing: `preempt_if_due`'s RT arm fires
     /// at the *next pass*, not at the chunk boundary, so any interrupt landing
@@ -332,8 +341,10 @@ impl<X: SchedPayload> CpuSched<X> {
             mailbox,
             steal_probe: MailboxNode::new(),
             steal_requests: Vec::new(),
-            quantum_end: Nanos::ZERO,
+            decide_at: Nanos::ZERO,
+            cut: None,
             dispatched_at: Nanos::ZERO,
+            next_balance: Nanos::ZERO,
             aged_grant: false,
             idle_probes_spent: 0,
             cursor: 0,
@@ -398,8 +409,9 @@ impl<X: SchedPayload> CpuSched<X> {
         self.armed
     }
 
-    pub fn quantum_end(&self) -> Nanos {
-        self.quantum_end
+    /// When this CPU next decides for its running task, absent other events.
+    pub fn decide_at(&self) -> Nanos {
+        self.decide_at
     }
 
     /// Is this CPU on its idle context? Only then may it halt.
@@ -438,19 +450,38 @@ impl<X: SchedPayload> CpuSched<X> {
     /// Lend the running task an RT window: the path for a client
     /// that was *not* blocked when its producer signalled, and so takes the
     /// boost at its own consume point instead of through a wake cause.
-    pub fn boost_current(&mut self, until: Nanos) {
+    pub fn boost_current(&mut self, now: Nanos, until: Nanos) {
         if let Some(current) = self.running.as_mut() {
             current.boost(until);
         }
+        self.leave_fair_for_rt(now);
     }
 
     /// `SYS_RT_ENTER` on the running task — permanent RT, as opposed to the
     /// bounded window a waker lends. The privilege gate lives at the syscall
     /// layer.
-    pub fn set_current_rt(&mut self, permanent: bool) {
+    pub fn set_current_rt(&mut self, now: Nanos, permanent: bool) {
         if let Some(current) = self.running.as_mut() {
             current.set_permanent_rt(permanent);
         }
+        self.leave_fair_for_rt(now);
+    }
+
+    /// A running fair thread that has just become real-time leaves the fair
+    /// band charged up to `now`, and its real-time turn starts now: one lend
+    /// buys at most one quantum of running at the borrowed priority.
+    fn leave_fair_for_rt(&mut self, now: Nanos) {
+        let Some(current) = self.running.as_mut() else {
+            return;
+        };
+        if !current.is_rt() || !self.rq.running_is_fair() {
+            return;
+        }
+        let ns = current.charge(now);
+        self.rq.charge_running(ns);
+        self.rq.leave_running(current.key(), current.standing_mut());
+        self.decide_at = now.after(QUANTUM_NS);
+        self.cut = None;
     }
 }
 
@@ -524,7 +555,7 @@ impl<X: SchedPayload> CpuSched<X> {
             &[
                 (core::mem::offset_of!(Self, id), "id"),
                 (core::mem::offset_of!(Self, running), "running"),
-                (core::mem::offset_of!(Self, rq), "rq (the ready band: rt deque, fair map, insert_seq)"),
+                (core::mem::offset_of!(Self, rq), "rq (the ready bands: rt deque, job groups)"),
                 (core::mem::offset_of!(Self, parked), "parked (the park map)"),
                 (core::mem::offset_of!(Self, dying), "dying"),
                 (core::mem::offset_of!(Self, stopped), "stopped"),
@@ -532,8 +563,10 @@ impl<X: SchedPayload> CpuSched<X> {
                 (core::mem::offset_of!(Self, mailbox), "mailbox"),
                 (core::mem::offset_of!(Self, steal_probe), "steal_probe (excluded: a sibling writes it)"),
                 (core::mem::offset_of!(Self, steal_requests), "steal_requests"),
-                (core::mem::offset_of!(Self, quantum_end), "quantum_end"),
+                (core::mem::offset_of!(Self, decide_at), "decide_at"),
+                (core::mem::offset_of!(Self, cut), "cut"),
                 (core::mem::offset_of!(Self, dispatched_at), "dispatched_at"),
+                (core::mem::offset_of!(Self, next_balance), "next_balance"),
                 (core::mem::offset_of!(Self, aged_grant), "aged_grant"),
                 (core::mem::offset_of!(Self, idle_probes_spent), "idle_probes_spent"),
                 (core::mem::offset_of!(Self, cursor), "cursor"),
@@ -563,12 +596,11 @@ impl<X: SchedPayload> CpuSched<X> {
     /// pre-cutover steal ported as it was, and a port that quietly acquired a
     /// later fix is a negative gate that no longer reproduces what it names.
     pub fn steal_ready(&mut self) -> Option<ReadyTask<X>> {
-        self.rq.pop_surplus(None)
+        self.rq.pop_surplus(None, 0)
     }
 
     pub fn install_stolen(&mut self, task: ReadyTask<X>) {
-        let vruntime = task.share().runnable_vruntime().unwrap_or(0);
-        self.rq.insert(vruntime, task);
+        self.rq.insert(task);
     }
 
     /// Clear the borrowed window at a park only `if now >= until`, so a lend
@@ -604,11 +636,14 @@ impl<X: SchedPayload> CpuSched<X> {
         self.rt_outranks_every_corpse = outranks;
     }
 
-    /// Order the fair band by something other than its insertion sequence.
-    /// Invariant I13 must catch what that does to a share's threads;
-    /// `scenarios::sibling_storm`'s two gates are what prove it does.
-    pub fn set_fair_order(&mut self, order: crate::sched::queue::FairOrder) {
-        self.rq.set_order(order);
+    /// See [`RunQueue::set_lowest_key_within_group`].
+    pub fn set_lowest_key_within_group(&mut self, on: bool) {
+        self.rq.set_lowest_key_within_group(on);
+    }
+
+    /// See [`RunQueue::set_double_charge`].
+    pub fn set_double_charge(&mut self, job: Option<crate::sched::job::JobKey>) {
+        self.rq.set_double_charge(job);
     }
 }
 
@@ -763,7 +798,6 @@ pub fn balance_fence() {
 pub struct Env<'e, H: Hw, P: PreemptGuard> {
     pub hw: &'e H,
     pub cpus: &'e CpuHandles<Msg<H::Payload>>,
-    pub frontier: &'e Frontier,
     /// The pass runs preempt-disabled, which is also what its own mailbox
     /// pushes need (N3).
     pub preempt: &'e P,
@@ -824,24 +858,11 @@ impl<X: SchedPayload> CpuSched<X> {
         self.release(dead, env);
     }
 
-    /// Put a ready task in this CPU's queue, counting it into its share, and
-    /// answer the key it was queued at.
-    fn enqueue<H: Hw<Payload = X>, P: PreemptGuard>(
-        &mut self,
-        task: ReadyTask<X>,
-        env: Env<'_, H, P>,
-    ) -> u64 {
-        let vruntime = task.share().enter_runnable(env.frontier);
-        self.rq.insert(vruntime, task);
-        vruntime
-    }
-
-    /// Transfer a ready task to `dst` as an unconsumed `Adopt`. The caller has
-    /// already settled the share refcount: a task taken out of this queue must
-    /// leave it, a task that never entered must not.
+    /// Transfer a ready task to `dst` as an unconsumed `Adopt`. The task is in
+    /// no band here: one taken out of the run queue has left it.
     ///
     /// **A killed task is kept here instead**, and dispatched on this CPU —
-    /// see [`CpuSched::begin_dying`]. The retire that carries
+    /// see [`CpuSched::keep_dying`]. The retire that carries
     /// `Urgency::Preempt` is consumed and dropped by a destination that gets it
     /// ahead of the adopt (`handle_retire`'s home-is-me arm), so handing a
     /// corpse on trades an unwind that could start here for a wait on another
@@ -888,7 +909,7 @@ impl<X: SchedPayload> CpuSched<X> {
             // invariant I14: handing a corpse on trades an unwind that could
             // start here for a wait on another CPU's pick. So it is kept here
             // and dispatched, not reaped.
-            self.begin_dying(task, env, now);
+            self.keep_dying(task, now);
             return;
         }
         let key = task.key();
@@ -938,14 +959,11 @@ impl<X: SchedPayload> CpuSched<X> {
     /// behind RT or fair behind fair, in which case an idle sibling gets it: it
     /// displaces nobody there.
     ///
-    /// A fair task that stays, with a key strictly below the running fair
-    /// task's, is owed the CPU ahead of it: the running task's quantum is cut
-    /// to end [`PROTECTED_RUN_NS`] after its dispatch, or now if it has run
-    /// that long, and the pick serves the lowest key. **Strictly**, because two
-    /// threads of one process share a pot and so a key: an equal key says
-    /// nothing about which of them is owed the CPU, and preempting on it would
-    /// let a thread that sleeps briefly between long spins take nearly all of
-    /// a sibling's time.
+    /// A fair task that stays and is what the fair band would now run in place
+    /// of the running fair thread takes the CPU [`MIN_SLICE_NS`] after that
+    /// thread's dispatch, or now if it has run that long: the floor is what
+    /// bounds the switching a stream of short wakes can cost the thread they
+    /// preempt.
     fn place<H: Hw<Payload = X>, P: PreemptGuard>(
         &mut self,
         task: ReadyTask<X>,
@@ -959,7 +977,7 @@ impl<X: SchedPayload> CpuSched<X> {
         // it takes no further instruction. Forwarding it to a sibling or
         // dispatching it to unwind would each undo that.
         if task.shared().stop_pending() {
-            self.begin_stopped(task, env);
+            self.keep_stopped(task);
             return;
         }
         // **The forward is decided first, and the kill check stays inside
@@ -968,21 +986,14 @@ impl<X: SchedPayload> CpuSched<X> {
         // takes — which is the path `old_migrate_kept_the_corpse` stages, and
         // a negative gate that has become unreachable is a gate that has been
         // weakened.
-        // The key the running fair task holds, where this one is fair too. A
-        // running corpse is not fair-band work: the dying list's bound times
-        // its unwind, not the band's order.
-        let behind_fair = self
-            .running
-            .as_ref()
-            .filter(|r| !task.is_rt() && !r.is_rt() && !r.shared().kill_pending())
-            .map(|running| {
-                running
-                    .share()
-                    .runnable_vruntime()
-                    .expect("a running task's share is runnable")
-            });
+        // A fair wake behind a running fair thread. A running corpse is not
+        // fair-band work: the dying list's bound times its unwind, not the
+        // band's order.
+        let behind_fair = !task.is_rt()
+            && self.rq.running_is_fair()
+            && self.running.as_ref().is_some_and(|r| !r.shared().kill_pending());
         let behind_rt = task.is_rt() && self.running.as_ref().is_some_and(|r| r.is_rt());
-        if behind_fair.is_some() || behind_rt {
+        if behind_fair || behind_rt {
             if let Some(dst) = self.forward_target(env) {
                 self.hand_off(task, dst, env, now);
                 return;
@@ -991,58 +1002,29 @@ impl<X: SchedPayload> CpuSched<X> {
         if task.shared().kill_pending() {
             // A dying task is not queued behind work: it is dispatched next,
             // so its unwind starts inside this pass's own pick.
-            self.begin_dying(task, env, now);
+            self.keep_dying(task, now);
             return;
         }
-        let queued = self.enqueue(task, env);
-        if behind_fair.is_some_and(|held| queued < held) {
-            let protected = self.dispatched_at.after(PROTECTED_RUN_NS);
-            self.quantum_end = self.quantum_end.min(now.max(protected));
+        let key = task.key();
+        self.rq.insert(task);
+        if behind_fair && self.rq.would_preempt_for(key) {
+            let at = now.max(self.dispatched_at.after(MIN_SLICE_NS));
+            self.cut = Some(self.cut.map_or(at, |cut| cut.min(at)));
         }
     }
 
-    /// Put a killed task where the pick takes it first, counting it into its
-    /// share exactly as [`Self::enqueue`] would.
+    /// Put a killed task where the pick takes it first. It is in no band: an
+    /// unwind is not competing for its job's share of the CPU.
     ///
-    /// The refcount is the reason this is not a bare `push`: `Ready` and
-    /// `Running` both count as runnable, so a dying task that skipped
-    /// `enter_runnable` would desynchronise the per-share count the sim walks
-    /// in `check_share_refcounts`.
-    fn begin_dying<H: Hw<Payload = X>, P: PreemptGuard>(
-        &mut self,
-        task: ReadyTask<X>,
-        env: Env<'_, H, P>,
-        now: Nanos,
-    ) {
-        let _vruntime = task.share().enter_runnable(env.frontier);
-        self.keep_dying(task, now);
-    }
-
-    /// The same, for a task that is *already* counted — one taken out of the
-    /// run queue, which never left it.
-    ///
-    /// Both routes end a borrowed RT window: [`ReadyTask::end_lend`] carries
+    /// Every route ends a borrowed RT window: [`ReadyTask::end_lend`] carries
     /// the argument, and this is the one place that has to remember it.
     fn keep_dying(&mut self, mut task: ReadyTask<X>, now: Nanos) {
         task.end_lend();
         self.dying.push_back(Corpse { since: now, task });
     }
 
-    /// Band a task that reached this CPU already stopped, counting it into its
-    /// share exactly as [`Self::begin_dying`] does and for the same reason: the
-    /// word reads `Ready`, so a task that skipped `enter_runnable` would
-    /// desynchronise the per-share count.
-    fn begin_stopped<H: Hw<Payload = X>, P: PreemptGuard>(
-        &mut self,
-        task: ReadyTask<X>,
-        env: Env<'_, H, P>,
-    ) {
-        let _vruntime = task.share().enter_runnable(env.frontier);
-        self.keep_stopped(task);
-    }
-
-    /// The same, for a task that is already counted — the running task at its
-    /// own safe point, which never left the runnable set.
+    /// Band a stopped task: one that reached this CPU stopped, or the running
+    /// task at its own safe point. Like a dying task it is in no fair band.
     fn keep_stopped(&mut self, mut task: ReadyTask<X>) {
         task.end_lend();
         self.stopped.push_back(task);
@@ -1117,8 +1099,7 @@ impl<X: SchedPayload> CpuSched<X> {
             return;
         }
         if let Some(ready) = self.rq.remove(key) {
-            // Out of the fair queue and into the dying list. No refcount
-            // movement: it was runnable in the queue and it is runnable here.
+            // Out of its band and into the dying list.
             self.trace(env, now, TraceKind::Wake { task: key, name: ready.ext().name() });
             self.keep_dying(ready, now);
             return;
@@ -1174,10 +1155,19 @@ impl<X: SchedPayload> CpuSched<X> {
             match msg {
                 Msg::Wake { key, cause } => self.handle_wake(key, cause, env, now),
                 Msg::Adopt { task } => self.handle_adopt(task, env, now),
-                Msg::StealRequest { thief } => self.steal_requests.push(thief),
+                Msg::StealRequest { thief, load } => self.steal_requests.push((thief, load)),
                 Msg::Retire { shared } => self.handle_retire(&shared, env, now),
             }
         }
+    }
+
+    /// Bring [`Self::decide_at`] up to date for a running fair thread, whose
+    /// decision moves with every change to this CPU's queues, and answer it.
+    fn settle_decision(&mut self, now: Nanos) -> Nanos {
+        if let Some(at) = self.rq.decision(now, self.dispatched_at) {
+            self.decide_at = self.cut.map_or(at, |cut| cut.min(at));
+        }
+        self.decide_at
     }
 
     /// The earliest deadline this CPU owes, and the only thing `apply_timer`
@@ -1316,17 +1306,9 @@ pub const DYING_AGE_NS: u64 = QUANTUM_NS;
 /// of added worst-case jitter once per 10 ms is the trade this picks.
 pub const DYING_CHUNK_NS: u64 = QUANTUM_NS / 10;
 
-/// How long a fair task keeps the CPU after its dispatch against a fair wake
-/// that outranks it: [`CpuSched::place`]'s cut ends a quantum no sooner.
-///
-/// **It caps what wakers can charge the task they preempt.** A preemption
-/// costs the preempted task two switches and its caches, and a process that
-/// wakes briefly and often stays behind a compute process in virtual time for
-/// as long as it keeps doing so — without a floor every one of its wakes would
-/// preempt. With one, a CPU takes at most one fair wake preemption per this
-/// long whatever the wakers do, and an owed wake on a saturated machine waits
-/// at most this rather than a quantum. A policy number, like [`QUANTUM_NS`].
-pub const PROTECTED_RUN_NS: u64 = QUANTUM_NS / 10;
+/// How often a CPU running fair work looks for a busier one to take a thread
+/// from: once per request at most, on a pass it takes anyway.
+pub const BALANCE_NS: u64 = crate::sched::queue::SLICE_NS;
 
 /// Power-of-two buckets a pass-cost histogram keeps. The top one saturates at
 /// 2^30 ns ≈ 1.07 s, which is longer than any pass a machine survives.
@@ -1536,10 +1518,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         if let Some(current) = cpu.running.as_mut() {
             let ns = current.charge(now);
             if ns > 0 {
-                current
-                    .share()
-                    .charge(ns)
-                    .expect("charging a share with no runnable threads");
+                cpu.rq.charge_running(ns);
             }
         }
         cpu.drain(env, now);
@@ -1566,19 +1545,16 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         self.dispose()
     }
 
-    /// Voluntary yield, or a quantum the driver already decided to end.
+    /// Voluntary yield: a fair thread gives up the rest of its request.
     pub fn dispose_yield(self) -> SchedPass<'c, 'e, H, P, Disposed> {
         if let Some(current) = self.cpu.running.take() {
-            let task = current.preempt(self.cpu.id, self.now);
+            let mut task = current.preempt(self.cpu.id, self.now);
             if task.shared().kill_pending() {
+                self.cpu.rq.leave_running(task.key(), task.standing_mut());
                 self.cpu.keep_dying(task, self.now);
                 return self.dispose();
             }
-            let vruntime = task
-                .share()
-                .runnable_vruntime()
-                .expect("a yielding task's share must be runnable");
-            self.cpu.rq.insert(vruntime, task);
+            self.cpu.rq.put_back(task, true);
         }
         self.dispose()
     }
@@ -1593,7 +1569,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         ticket: CommittedTicket<Msg<H::Payload>>,
         deadline: Option<Nanos>,
     ) -> SchedPass<'c, 'e, H, P, Disposed> {
-        let current = self
+        let mut current = self
             .cpu
             .running
             .take()
@@ -1601,6 +1577,7 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
         let key = current.key();
         let name = current.ext().name();
         let class = ticket.class();
+        self.cpu.rq.leave_running(key, current.standing_mut());
         let task = current.park(
             &ticket,
             self.cpu.id,
@@ -1608,7 +1585,6 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             #[cfg(feature = "protocol-port")]
             self.cpu.park_keeps_lapsed_lend,
         );
-        task.share().leave_runnable(self.env.frontier);
         self.cpu.parked.insert(
             key,
             ParkedEntry {
@@ -1636,7 +1612,8 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
             .running
             .take()
             .expect("dispose_stop without a running task");
-        let task = current.preempt(self.cpu.id, self.now);
+        let mut task = current.preempt(self.cpu.id, self.now);
+        self.cpu.rq.leave_running(task.key(), task.standing_mut());
         task.shared().mark_stop();
         self.cpu.keep_stopped(task);
         self.dispose()
@@ -1645,15 +1622,15 @@ impl<'c, 'e, H: Hw, P: PreemptGuard> SchedPass<'c, 'e, H, P, Undisposed> {
     /// The current task exits. Its record survives as the zombie until the
     /// next pass, which runs on another stack.
     pub fn dispose_exit(self) -> SchedPass<'c, 'e, H, P, Disposed> {
-        let current = self
+        let mut current = self
             .cpu
             .running
             .take()
             .expect("dispose_exit without a running task");
         let key = current.key();
         let name = current.ext().name();
+        self.cpu.rq.leave_running(key, current.standing_mut());
         let dead = current.die(self.cpu.id, self.now);
-        dead.share().leave_runnable(self.env.frontier);
         self.cpu.dispose_dead(dead, self.env);
         self.cpu
             .trace(self.env, self.now, TraceKind::Retire { task: key, name });
@@ -1699,6 +1676,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             self.preempt_if_due();
             self.pick();
             self.answer_steal_requests();
+            self.balance_busy();
             // **Two numbers, because two consumers ask two questions** — see
             // [`CpuHandle::load`] and [`CpuHandle::surplus`]. Spawn placement
             // wants everything a new task would queue behind, and a corpse
@@ -1718,6 +1696,8 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             let surplus = self.cpu.rq.fair_len() as u32;
             handle.publish_load((self.cpu.rq.len() + self.cpu.dying.len()) as u32);
             handle.publish_surplus(surplus);
+            self.cpu.rq.refresh();
+            handle.publish_weight(self.cpu.rq.weight());
             // The stamp goes with them: it is what says they are about now.
             handle.publish_pass(self.now);
             self.push_on_surplus(surplus);
@@ -1763,12 +1743,16 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let kill_due = current.shared().kill_pending()
             && !self.cpu.aged_grant
             && matches!(current.shared().state(), TaskState::Running(_));
-        let due = self.now >= self.cpu.quantum_end || rt_due || kill_due;
+        // Both instants count: `begin`'s charge has already issued the next
+        // request, so a recomputed decision alone would never reach the end of
+        // the one the last pass armed. A stale armed instant at worst decides
+        // early, and the pick keeps `dispatched_at` if it picks this thread again.
+        let due = self.now >= self.cpu.decide_at || self.now >= self.cpu.settle_decision(self.now) || rt_due || kill_due;
         if !due {
             return;
         }
         let current = self.cpu.running.take().expect("checked above");
-        let task = current.preempt(self.cpu.id, self.now);
+        let mut task = current.preempt(self.cpu.id, self.now);
         if task.shared().kill_pending() {
             // Once `Commit::Killed` is `dispose_none` the killed thread keeps
             // running and unwinds, and its next quantum expiry must not put it
@@ -1785,14 +1769,11 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             // `a_killed_task_that_expires_its_quantum_goes_back_to_the_dying_list`
             // — the fair queue is where the task would land instead, and that
             // test asserts it never does.
+            self.cpu.rq.leave_running(task.key(), task.standing_mut());
             self.cpu.keep_dying(task, self.now);
             return;
         }
-        let vruntime = task
-            .share()
-            .runnable_vruntime()
-            .expect("a preempted task's share must be runnable");
-        self.cpu.rq.insert(vruntime, task);
+        self.cpu.rq.put_back(task, false);
     }
 
     /// **RT band, then the dying list, then the fair band — and no kill check
@@ -1807,8 +1788,8 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// so `ReadyTask::dispatch`'s note about the kill bit not being asserted
     /// away is the whole of what remains true.
     ///
-    /// A dying task jumps the *fair* queue and the vruntime frontier does not
-    /// advance for it: it is not spending a share of the CPU, it is finishing.
+    /// A dying task jumps the *fair* queue and is in no band: it is not
+    /// spending a share of the CPU, it is finishing.
     ///
     /// **It does not jump the RT band, and it is not held off by it for ever
     /// either — the deferral is bounded, and both absolutes are wrong.**
@@ -1857,11 +1838,12 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
                 let name = task.ext().name();
                 self.cpu.running = Some(task.dispatch(self.cpu.id, self.now));
                 self.cpu.dispatched_at = self.now;
+                self.cpu.cut = None;
                 // An aged corpse is borrowing the CPU from the RT band, so it
                 // borrows a chunk and not a quantum. With the band empty it is
                 // ordinary normal-band work and gets the ordinary quantum.
                 self.cpu.aged_grant = self.cpu.rq.has_rt();
-                self.cpu.quantum_end = self.now.after(if self.cpu.aged_grant {
+                self.cpu.decide_at = self.now.after(if self.cpu.aged_grant {
                     DYING_CHUNK_NS
                 } else {
                     QUANTUM_NS
@@ -1874,14 +1856,20 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         // A lapsed borrowed window must not demote the task out of the RT band
         // here: queue time spends none of it, so `ReadyTask::dispatch` re-arms
         // it instead. The band stays whatever it was at insert.
-        if let Some((vruntime, task)) = self.cpu.rq.pop_next() {
-            self.env.frontier.advance(vruntime);
+        if let Some(task) = self.cpu.rq.pop_next() {
             let key = task.key();
             let name = task.ext().name();
+            // The task this CPU stands on, picked again, is still in the run it
+            // was in: the floor a preemption waits for counts from its start.
+            if self.cpu.loaded != Loaded::Task(key) {
+                self.cpu.dispatched_at = self.now;
+            }
             self.cpu.running = Some(task.dispatch(self.cpu.id, self.now));
-            self.cpu.dispatched_at = self.now;
             self.cpu.aged_grant = false;
-            self.cpu.quantum_end = self.now.after(QUANTUM_NS);
+            self.cpu.cut = None;
+            // A real-time task's turn; a fair thread's decision is the run
+            // queue's, settled before the timer is armed.
+            self.cpu.decide_at = self.now.after(QUANTUM_NS);
             self.cpu
                 .trace(self.env, self.now, TraceKind::Schedule { task: key, name });
         }
@@ -1936,7 +1924,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             self.cpu.steal_requests.clear();
             return;
         }
-        while let Some(&thief) = self.cpu.steal_requests.last() {
+        while let Some(&(thief, asking)) = self.cpu.steal_requests.last() {
             if self.stealable() == 0 {
                 if self.cpu.rq.fair_len() > 0 {
                     // The one queued task is the one this CPU still stands on,
@@ -1949,13 +1937,44 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
                 return;
             }
             self.cpu.steal_requests.pop();
-            let task = self
-                .cpu
-                .rq
-                .pop_surplus(self.cpu.loaded_key())
-                .expect("a stealable task is one `pop_surplus` hands over");
-            task.share().leave_runnable(self.env.frontier);
-            self.cpu.hand_off(task, thief, self.env, self.now);
+            // A busy asker that no move brings closer goes without.
+            if let Some(task) = self.cpu.rq.pop_surplus(self.cpu.loaded_key(), asking) {
+                self.cpu.hand_off(task, thief, self.env, self.now);
+            }
+        }
+    }
+
+    /// Ordinary load balancing between busy CPUs: a CPU running fair work asks
+    /// the CPU whose job groups weigh most, nearest first among equals, for the
+    /// thread whose move narrows their difference most — when that CPU weighs
+    /// more and has a thread to give. Once per [`BALANCE_NS`], on a pass this
+    /// CPU takes anyway; the answer is [`RunQueue::pop_surplus`]'s.
+    fn balance_busy(&mut self) {
+        if !self.env.balance.pulls() || !self.cpu.rq.running_is_fair() || self.now < self.cpu.next_balance {
+            return;
+        }
+        self.cpu.next_balance = self.now.after(BALANCE_NS);
+        let (cpus, me, now) = (self.env.cpus, self.cpu.id, self.now);
+        let mine = self.cpu.rq.weight();
+        let heaviest = STEAL_RINGS
+            .into_iter()
+            .flat_map(|(inner, outer)| cpus.topology().ring(me, inner, outer, 0))
+            .filter(|&cpu| cpus.get(cpu).answering(now) && cpus.get(cpu).surplus() >= PUSH_THRESHOLD)
+            .map(|cpu| (cpus.get(cpu).weight(), cpu))
+            .fold(None, |best: Option<(u64, CpuId)>, (weight, cpu)| match best {
+                Some((most, _)) if most >= weight => best,
+                _ => Some((weight, cpu)),
+            });
+        let Some((_, victim)) = heaviest.filter(|&(weight, _)| weight > mine) else {
+            return;
+        };
+        let Some(slot) = self.cpu.steal_probe.claim() else {
+            return;
+        };
+        if cpus.get(victim).post(slot, Msg::StealRequest { thief: me, load: mine }, Urgency::Normal, self.env.preempt)
+            == Kick::Send
+        {
+            self.env.hw.kick(victim);
         }
     }
 
@@ -1984,8 +2003,11 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// deadline.
     fn apply_timer_no_later_than(&mut self, extra: Option<Nanos>) -> TimerApplied {
         let deadline = self.cpu.earliest_deadline();
-        let quantum = self.cpu.running.as_ref().map(|_| self.cpu.quantum_end);
-        let plan = TimerPlan::compute(quantum, deadline).no_later_than(extra);
+        let decision = match self.cpu.running {
+            Some(_) => Some(self.cpu.settle_decision(self.now)),
+            None => None,
+        };
+        let plan = TimerPlan::compute(decision, deadline).no_later_than(extra);
         match plan {
             TimerPlan::Arm(at) => self.env.hw.set_timer(at),
             TimerPlan::Stop => self.env.hw.stop_timer(),
@@ -2126,7 +2148,7 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let thief = self.cpu.id;
         if self.env.cpus.get(victim).post(
             slot,
-            Msg::StealRequest { thief },
+            Msg::StealRequest { thief, load: 0 },
             Urgency::Normal,
             self.env.preempt,
         ) == Kick::Send
@@ -2231,7 +2253,10 @@ pub struct CpuHandle<M> {
     /// with nothing, and sleeps — and the probe is one-shot per idle trip, so
     /// the genuinely surplus-holding CPU goes unprobed for a whole idle round.
     surplus: AtomicU32,
-    /// When the pass that published the two numbers above ran, so that a reader
+    /// **The summed weight of this CPU's job groups**, published for busy
+    /// balancing ([`SchedPass::balance_busy`]) and for nothing else.
+    weight: AtomicU64,
+    /// When the pass that published the numbers above ran, so that a reader
     /// can tell a claim about the present from one a stopped CPU left behind.
     /// See [`CpuHandle::answering`].
     last_pass: AtomicU64,
@@ -2259,6 +2284,7 @@ impl<M: SchedMsg> CpuHandle<M> {
             doorbell: Doorbell::new(),
             load: AtomicU32::new(0),
             surplus: AtomicU32::new(0),
+            weight: AtomicU64::new(0),
             last_pass: AtomicU64::new(0),
             #[cfg(feature = "sched-check")]
             pass_costs: PassCosts::new(),
@@ -2294,7 +2320,15 @@ impl<M: SchedMsg> CpuHandle<M> {
         self.surplus.store(fair, Ordering::Relaxed);
     }
 
-    /// Stamp the two numbers above with the pass that published them.
+    pub fn weight(&self) -> u64 {
+        self.weight.load(Ordering::Relaxed)
+    }
+
+    pub fn publish_weight(&self, weight: u64) {
+        self.weight.store(weight, Ordering::Relaxed);
+    }
+
+    /// Stamp the numbers above with the pass that published them.
     pub fn publish_pass(&self, now: Nanos) {
         self.last_pass.store(now.0, Ordering::Relaxed);
     }
@@ -2512,26 +2546,17 @@ mod tests {
     extern crate std;
 
     use super::*;
-    use crate::sched::fair::{FairShare, ShareState};
     use crate::sched::hw::{Kicker, Machine};
+    use crate::sched::job::{Job, JobKey};
     use crate::sched::mailbox::{mailbox, NoPreempt};
-    use crate::sched::sync::CellLock;
+    use crate::sched::queue::SLICE_NS;
     use crate::sched::task::{RtState, TaskAccounting, TaskBuilder};
     use std::sync::Mutex;
-
-    struct TestLock<T>(Mutex<T>);
-
-    impl<T: Send> CellLock<T> for TestLock<T> {
-        fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-            f(&mut self.0.lock().expect("a test never poisons a lock"))
-        }
-    }
 
     struct TestPayload;
 
     impl SchedPayload for TestPayload {
         type Ctx = ();
-        type ShareLock = TestLock<ShareState>;
 
         fn name(&self) -> u64 {
             0
@@ -2597,7 +2622,6 @@ mod tests {
         cpus: Vec<CpuSched<TestPayload>>,
         handles: CpuHandles<Msg<TestPayload>>,
         hw: TestHw,
-        frontier: Frontier,
         preempt: NoPreempt,
         next_key: u64,
         /// `Env::balance`. [`Balance::None`] by default because most tests want
@@ -2624,7 +2648,6 @@ mod tests {
                 cpus,
                 handles: CpuHandles::new(handles, topology),
                 hw: TestHw::default(),
-                frontier: Frontier::new(),
                 preempt: NoPreempt,
                 next_key: 1,
                 balance: Balance::None,
@@ -2645,7 +2668,6 @@ mod tests {
                 Env {
                     hw: &self.hw,
                     cpus: &self.handles,
-                    frontier: &self.frontier,
                     preempt: &self.preempt,
                     balance: self.balance,
                 },
@@ -2675,42 +2697,41 @@ mod tests {
             dst: CpuId,
             rt: RtState,
         ) -> (TaskKey, Arc<TaskShared<Msg<TestPayload>>>) {
-            let share = Arc::new(FairShare::new(TestLock(Mutex::new(
-                ShareState::NonRunnable { lag: 0 },
-            ))));
-            self.spawn_into(dst, rt, share)
+            let job = Arc::new(Job::new(JobKey(self.next_key)));
+            self.spawn_into(dst, rt, job)
         }
 
-        /// A thread of the process whose pot `share` is.
+        /// A thread of `of`'s job.
         fn spawn_sibling(
             &mut self,
             dst: CpuId,
             of: TaskKey,
         ) -> (TaskKey, Arc<TaskShared<Msg<TestPayload>>>) {
-            let share = (0..self.cpus.len())
+            let job = (0..self.cpus.len())
                 .find_map(|cpu| {
                     let sched = &self.cpus[cpu];
                     sched
                         .running()
                         .filter(|t| t.key() == of)
-                        .map(|t| t.share().clone())
-                        .or_else(|| sched.parked_task(of).map(|t| t.share().clone()))
+                        .map(|t| t.job().clone())
+                        .or_else(|| sched.parked_task(of).map(|t| t.job().clone()))
+                        .or_else(|| sched.rq().tasks().find(|t| t.key() == of).map(|t| t.job().clone()))
                 })
-                .expect("the sibling is running or parked");
-            self.spawn_into(dst, RtState::default(), share)
+                .expect("the sibling is running, parked or queued");
+            self.spawn_into(dst, RtState::default(), job)
         }
 
         fn spawn_into(
             &mut self,
             dst: CpuId,
             rt: RtState,
-            share: Arc<crate::sched::task::Share<TestPayload>>,
+            job: Arc<Job>,
         ) -> (TaskKey, Arc<TaskShared<Msg<TestPayload>>>) {
             let key = TaskKey(self.next_key);
             self.next_key += 1;
             let task = TaskBuilder {
                 key,
-                share,
+                job,
                 ctx: (),
                 ext: TestPayload,
                 rt,
@@ -3301,7 +3322,6 @@ mod tests {
         {
             let (cpus, env) = w.split();
             let task = cpus[0].rq.remove(key).expect("ready on cpu0");
-            task.share().leave_runnable(env.frontier);
             cpus[0].hand_off(task, C1, env, NOW);
         }
 
@@ -3331,7 +3351,6 @@ mod tests {
         {
             let (cpus, env) = w.split();
             let task = cpus[0].rq.remove(key).expect("ready on cpu0");
-            task.share().leave_runnable(env.frontier);
             cpus[0].hand_off(task, C1, env, NOW);
         }
         assert_eq!(shared.state(), TaskState::InTransit(C1));
@@ -3820,8 +3839,8 @@ mod tests {
     /// which one was made.
     ///
     /// It reds on a tree without the `loaded` argument: the just-preempted task
-    /// carries the highest vruntime in the band, so `pop_surplus`'s `next_back`
-    /// names it first and every run hands over exactly the wrong one.
+    /// is the newest ready thread of its group, which `pop_surplus` names
+    /// first, so every run hands over exactly the wrong one.
     ///
     /// **Under that mutation the red is [`CpuSched::hand_off`]'s own
     /// assertion**, which fires inside `run_a_pass_at` before this function's
@@ -3844,7 +3863,7 @@ mod tests {
             .expect("the pick took one of the three");
 
         // An idle sibling's probe, waiting for this CPU's next pass.
-        w.cpus[1].steal_requests.push(C0);
+        w.cpus[1].steal_requests.push((C0, 0));
 
         // A quantum later: `preempt_if_due` returns the loaded task to the
         // band, `pick` takes a fresher one, and `answer_steal_requests` runs
@@ -3880,14 +3899,57 @@ mod tests {
         w.post_claimed_wake(cpu, shared, WakeReason::Woken);
     }
 
-    /// **A wake owed the CPU ahead of the running fair task cuts its quantum to
-    /// the protected run**, and the pick then serves the wake.
-    ///
-    /// The sleeper parked having run nothing, so its key is the frontier; the
-    /// hog has been charged half the protected run since its dispatch, so its
-    /// key is above that. The cut lands on the protected run's end, not on now.
+    /// A hog of a two-thread job on cpu0, its sibling queued on cpu1, so its
+    /// group there weighs half of a single-thread job's; and `sleepers`
+    /// single-thread jobs parked on cpu0 with no standing. Answers the hog and
+    /// the sleepers.
+    fn hog_beside_sleepers(
+        w: &mut World,
+        sleepers: usize,
+        at: Nanos,
+    ) -> (TaskKey, Vec<Arc<TaskShared<Msg<TestPayload>>>>) {
+        let mut parked = Vec::new();
+        for _ in 0..sleepers {
+            let (_, shared) = w.spawn(C0);
+            w.run_a_pass_at(C0, at);
+            w.park_running(C0);
+            parked.push(shared);
+        }
+        let (hog, _) = w.spawn(C0);
+        w.spawn_sibling(C1, hog);
+        w.run_a_pass_at(C0, at);
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
+        (hog, parked)
+    }
+
+    /// **A wake the fair band would run ahead of the running thread takes the
+    /// CPU [`MIN_SLICE_NS`] after that thread's dispatch**, and not before. The
+    /// sleeper's job weighs twice the hog's group here, so its request is due
+    /// first.
     #[test]
-    fn a_wake_with_a_lower_key_cuts_the_running_quantum_to_the_protected_run() {
+    fn a_wake_due_first_takes_the_cpu_once_the_running_thread_has_its_minimum_run() {
+        let mut w = World::new(2);
+        let (hog, sleepers) = hog_beside_sleepers(&mut w, 1, NOW);
+
+        wake(&w, C0, &sleepers[0]);
+        w.run_a_pass_at(C0, NOW.after(MIN_SLICE_NS / 2));
+        assert_eq!(w.cpus[0].decide_at(), NOW.after(MIN_SLICE_NS), "the hog keeps its minimum run");
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog), "and not before");
+
+        w.run_a_pass_at(C0, NOW.after(MIN_SLICE_NS));
+        assert_eq!(
+            w.cpus[0].running().map(|t| t.key()),
+            Some(sleepers[0].key()),
+            "the minimum run ends and the band serves the wake",
+        );
+        w.abandon();
+    }
+
+    /// **A wake of an equal job with no standing waits for the running
+    /// request**: its deadline is a whole request after the queue's virtual
+    /// time, and the running thread's is due first.
+    #[test]
+    fn a_wake_with_no_claim_ahead_waits_for_the_running_request() {
         let mut w = World::new(1);
         let (sleeper, sleeper_shared) = w.spawn(C0);
         w.run_a_pass(C0);
@@ -3897,77 +3959,54 @@ mod tests {
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
 
         wake(&w, C0, &sleeper_shared);
-        w.run_a_pass_at(C0, NOW.after(PROTECTED_RUN_NS / 2));
-        assert_eq!(
-            w.cpus[0].quantum_end(),
-            NOW.after(PROTECTED_RUN_NS),
-            "the hog's quantum ends where its protected run does",
-        );
-        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog), "and not before");
+        w.run_a_pass_at(C0, NOW.after(2 * MIN_SLICE_NS));
+        assert_eq!(w.cpus[0].decide_at(), NOW.after(SLICE_NS), "the hog keeps its whole request");
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
 
-        w.run_a_pass_at(C0, NOW.after(PROTECTED_RUN_NS));
-        assert_eq!(
-            w.cpus[0].running().map(|t| t.key()),
-            Some(sleeper),
-            "the cut quantum ends and the pick serves the lower key",
-        );
+        w.run_a_pass_at(C0, NOW.after(SLICE_NS));
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(sleeper), "and the wake runs at its end");
         w.abandon();
     }
 
-    /// **A tie is not a debt**: two threads of one process share a pot and so a
-    /// key, and a sibling's wake cuts nothing, however long the running one has
-    /// run.
+    /// **The minimum run is counted from the dispatch, and a cut does not say
+    /// where that was.** A second wake due first leaves the first cut where it
+    /// is; reading the dispatch back off the cut would preempt now.
     #[test]
-    fn a_wake_that_ties_the_running_tasks_key_cuts_nothing() {
-        let mut w = World::new(1);
-        let (napper, napper_shared) = w.spawn(C0);
-        w.run_a_pass(C0);
-        w.park_running(C0);
-        let (spinner, _) = w.spawn_sibling(C0, napper);
-        w.run_a_pass(C0);
-        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(spinner));
-
-        wake(&w, C0, &napper_shared);
-        w.run_a_pass_at(C0, NOW.after(2 * PROTECTED_RUN_NS));
-        assert_eq!(
-            w.cpus[0].quantum_end(),
-            NOW.after(QUANTUM_NS),
-            "the spinner keeps its whole quantum",
-        );
-        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(spinner));
-        w.abandon();
-    }
-
-    /// **The protected run is counted from the dispatch, and a cut quantum does
-    /// not say where that was.** A second owed wake inside the protected run
-    /// leaves the first cut where it is; reading the dispatch back off the cut
-    /// `quantum_end` would put it a quantum early and preempt now.
-    #[test]
-    fn a_second_owed_wake_does_not_cut_inside_the_protected_run() {
+    fn a_second_wake_due_first_does_not_cut_inside_the_minimum_run() {
         let at = Nanos(5 * QUANTUM_NS);
-        let mut w = World::new(1);
-        let (_, first) = w.spawn(C0);
-        w.run_a_pass(C0);
-        w.park_running(C0);
-        let (_, second) = w.spawn(C0);
-        w.run_a_pass(C0);
-        w.park_running(C0);
-        let (hog, _) = w.spawn(C0);
-        w.run_a_pass_at(C0, at);
-        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
+        let mut w = World::new(2);
+        let (hog, sleepers) = hog_beside_sleepers(&mut w, 2, at);
 
-        wake(&w, C0, &first);
-        w.run_a_pass_at(C0, at.after(PROTECTED_RUN_NS / 5));
-        assert_eq!(w.cpus[0].quantum_end(), at.after(PROTECTED_RUN_NS));
+        wake(&w, C0, &sleepers[0]);
+        w.run_a_pass_at(C0, at.after(MIN_SLICE_NS / 5));
+        assert_eq!(w.cpus[0].decide_at(), at.after(MIN_SLICE_NS));
 
-        wake(&w, C0, &second);
-        w.run_a_pass_at(C0, at.after(PROTECTED_RUN_NS / 2));
+        wake(&w, C0, &sleepers[1]);
+        w.run_a_pass_at(C0, at.after(MIN_SLICE_NS / 2));
         assert_eq!(
-            w.cpus[0].quantum_end(),
-            at.after(PROTECTED_RUN_NS),
-            "the second wake moved the cut inside the protected run",
+            w.cpus[0].decide_at(),
+            at.after(MIN_SLICE_NS),
+            "the second wake moved the cut inside the minimum run",
         );
         assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(hog));
+        w.abandon();
+    }
+
+    /// **A fair thread is decided again at the end of the request armed for
+    /// it**, though the pass that takes the decision has already issued its
+    /// next one. A thread alone on its CPU and lent a real-time window while it
+    /// runs is the case where nothing else would preempt it: at its request's
+    /// end it goes to the real-time band.
+    #[test]
+    fn a_fair_thread_is_decided_again_at_its_armed_request_end() {
+        let mut w = World::new(1);
+        let (alone, _) = w.spawn(C0);
+        w.run_a_pass(C0);
+        assert_eq!(w.cpus[0].decide_at(), NOW.after(SLICE_NS));
+        w.cpus[0].boost_current(NOW, NOW.after(10 * SLICE_NS));
+        w.run_a_pass_at(C0, NOW.after(SLICE_NS));
+        assert_eq!(w.cpus[0].running().map(|t| t.key()), Some(alone));
+        assert!(!w.cpus[0].rq().running_is_fair(), "the lent thread left the fair band at its request end");
         w.abandon();
     }
 
@@ -4038,7 +4077,7 @@ mod tests {
         let (_, queued) = tasks.iter().find(|(key, _)| *key != running).expect("one queues");
         assert_eq!(w.handles.get(C1).surplus(), 1, "one queued task is published as surplus");
 
-        w.cpus[1].steal_requests.push(C0);
+        w.cpus[1].steal_requests.push((C0, 0));
         w.run_a_pass_at(C1, Nanos(NOW.0 + 1));
         assert_eq!(queued.state(), TaskState::InTransit(C0), "and handed to the probe");
         w.abandon();
@@ -4057,12 +4096,12 @@ mod tests {
         let loaded = w.cpus[1].running().map(|t| t.key()).expect("one was picked");
         let (_, loaded_shared) = tasks.iter().find(|(key, _)| *key == loaded).expect("loaded");
 
-        w.cpus[1].steal_requests.push(C0);
+        w.cpus[1].steal_requests.push((C0, 0));
         w.run_a_pass_at(C1, Nanos(NOW.0 + QUANTUM_NS + 1));
         assert_ne!(w.cpus[1].running().map(|t| t.key()), Some(loaded), "the quantum ended");
         assert_eq!(loaded_shared.state(), TaskState::Ready(C1), "the loaded task stayed");
         assert_eq!(w.handles.get(C1).surplus(), 1, "and is published as surplus");
-        assert_eq!(w.cpus[1].steal_requests, std::vec![C0], "the probe is kept");
+        assert_eq!(w.cpus[1].steal_requests, std::vec![(C0, 0)], "the probe is kept");
         assert_eq!(w.hw.state().need_resched, std::vec![C1], "for a pass asked for now");
 
         w.run_a_pass_at(C1, Nanos(NOW.0 + QUANTUM_NS + 2));

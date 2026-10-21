@@ -16,9 +16,8 @@ measurement owed. The one observed red of this shape, `virtio_sound_counts`, is 
   halted or reset within 2 s.
 - `kill_ends_every_wait` (`kill_ends_every_wait.rs`, `HELD` 1 s): a kill that takes more than 1 s
   of starved wall time to land reads as "the child outlived" it. A timing claim.
-- `sched_stress` (`sched_stress.rs`): the post-wake vruntime lag held to ±50 ms after a 10 ms
-  sleep, where vCPU time the host takes is charged as the thread's runtime. Its connect-storm pace
-  is `issues/timing-verdicts-ruled-off-qemu-have-no-metal-arm.md`'s.
+- `sched_stress` (`sched_stress.rs`): its connect-storm pace is
+  `issues/timing-verdicts-ruled-off-qemu-have-no-metal-arm.md`'s.
 - `abuse_thread_table` (`abuse_thread_table.rs`, `RUN_BOUND` 10 s): each thread runs within 10 s.
 - `netstack_socket_churn` (`netstack_socket_churn.rs`, `LET_GO` 20 s), `netstack_streams` and
   `netstack_streams_e1000e` (`netstack_streams.rs`, `WOKEN` 60 s, and the harness's 30 s

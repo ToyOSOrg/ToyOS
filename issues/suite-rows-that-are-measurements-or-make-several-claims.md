@@ -31,7 +31,7 @@ Guest binaries in `tests/guest/rust-tests/src/bin/` that make several claims:
 - `allocator_stress.rs`: twelve checks.
 - `std_process.rs`: eight std process behaviours.
 - `std_sync.rs`: mutex, condvar, park and rwlock.
-- `sched_stress.rs`: io_uring acceptor isolation, the post-wake vruntime lag, and a connect storm.
+- `sched_stress.rs`: io_uring acceptor isolation and a connect storm.
 - `std_fs.rs`: listing, a self-read, NotFound, and file types.
 
 Owner: the orchestrator, which dispatches the reshape.

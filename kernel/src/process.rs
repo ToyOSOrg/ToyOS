@@ -445,13 +445,6 @@ impl Processes for ProcessTable {
     }
 }
 
-impl Drop for ProcessEntry {
-    fn drop(&mut self) {
-        // vruntime must live as long as the table entry: a zombified process's threads still yield inside their own exit path and read it.
-        scheduler::remove_vruntime(self.pid);
-    }
-}
-
 
 /// Record of a single demand-paged fault, stored in a ring buffer for crash diagnostics.
 #[derive(Clone, Copy)]
@@ -573,6 +566,9 @@ pub struct ProcessData {
     pub accounting: ProcessAccounting,
     /// What this process's parent called each handle it moved in at spawn.
     pub endowments: Endowments,
+    /// The job its threads, and its children unless a spawn names another,
+    /// run in.
+    pub job: Arc<kernel::sched::job::Job>,
 }
 
 /// The labels a parent put on the handles it endowed — names, not authority: the handle is in the table whether or not the child ever asks.
@@ -766,7 +762,7 @@ pub fn stats_of(
 }
 
 /// Take every entry whose process has published its exit.
-/// Entries come back rather than being dropped here: the caller holds the table lock, and an entry's drop reaches `remove_vruntime`.
+/// Entries come back rather than being dropped here: the caller holds the table lock, and an entry's drop releases what its process held.
 #[must_use = "the reaped entries must be dropped outside the table lock"]
 pub fn reap_finished(table: &mut ProcessTable, _proof: IdleProof) -> Vec<ProcessEntry> {
     reap::finished_pids(table).into_iter().filter_map(|pid| table.remove(pid)).collect()
@@ -921,9 +917,9 @@ pub fn spawn_thread(
             .expect("spawn_thread: the spawning thread runs in an address space");
         (addr_space, Arc::clone(&proc.process_data))
     };
-    let (tls_modules, tls) = {
+    let (tls_modules, tls, job) = {
         let data = process_data_arc.lock();
-        (data.elf.tls_modules.clone(), data.elf.tls)
+        (data.elf.tls_modules.clone(), data.elf.tls, data.job.clone())
     };
 
     // Phase 2: build the TLS block outside any lock, then publish it into the
@@ -995,6 +991,7 @@ pub fn spawn_thread(
         parent_addr_space,
         thread_pointer,
         image,
+        job,
     );
     proc.threads.get_mut(tid).unwrap().set_sched(sched);
     drop(guard);

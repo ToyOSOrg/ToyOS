@@ -21,9 +21,10 @@ pub enum Msg<X: SchedPayload> {
     /// on the node embedded in the transferred task's own record, which is
     /// why a transfer can never be dropped for lack of queue space.
     Adopt { task: TransitTask<X> },
-    /// "If you are overloaded, send me one". Rides on the thief's
-    /// single reusable probe node.
-    StealRequest { thief: CpuId },
+    /// "Send me a fair thread": from an idle thief (`load` 0) any, from a busy
+    /// one whose job groups weigh `load` only one whose move brings the two
+    /// closer. Rides on the thief's single reusable probe node.
+    StealRequest { thief: CpuId, load: u64 },
     /// Kill protocol. Rides on `TaskShared.retire_node`.
     Retire { shared: Arc<TaskShared<Msg<X>>> },
 }
@@ -62,7 +63,7 @@ impl<X: SchedPayload> core::fmt::Debug for Msg<X> {
         match self {
             Msg::Wake { key, cause } => write!(f, "Wake({:?}, {:?})", key, cause.reason),
             Msg::Adopt { task } => write!(f, "Adopt({:?})", task.key()),
-            Msg::StealRequest { thief } => write!(f, "StealRequest({thief:?})"),
+            Msg::StealRequest { thief, load } => write!(f, "StealRequest({thief:?}, {load})"),
             Msg::Retire { shared } => write!(f, "Retire({:?})", shared.key()),
         }
     }

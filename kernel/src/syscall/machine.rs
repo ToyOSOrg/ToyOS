@@ -2,8 +2,7 @@
 //!
 //! [`sys_log_read`], [`sys_trace_read`], the roster half of [`sys_sysinfo`], and both of
 //! [`sys_shutdown`] and [`sys_reboot`] each require a `SysCap` bit from
-//! `/system/bin/supervisor`'s `system.toml`; `SYS_SYSINFO`'s header is ambient, and
-//! [`sys_sched_info`] demands nothing.
+//! `/system/bin/supervisor`'s `system.toml`; `SYS_SYSINFO`'s header is ambient.
 
 use alloc::vec::Vec;
 
@@ -319,15 +318,6 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     }
 
     pos as u64
-}
-
-pub(super) fn sys_sched_info() -> toyos_abi::syscall::SchedInfo {
-    let pid = process::current_process();
-    toyos_abi::syscall::SchedInfo {
-        vruntime: crate::scheduler::process_vruntime(pid),
-        min_vruntime: crate::scheduler::global_min_vruntime(),
-        lag: crate::scheduler::process_lag(pid),
-    }
 }
 
 /// Every online CPU's counters into `out`, or the CPU count when `out` is

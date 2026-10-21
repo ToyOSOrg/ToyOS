@@ -63,9 +63,10 @@ syscap = ["rt"]
 # holds its own line, read back off logkeeper.
 # `inventory` because a claim names a PCI function by its arrival, which the
 # jobs that claim one read off the inventory.
+# `jobs` because `job_fairness` starts each of its workloads as a job of its own.
 [programs.test-runner]
 receives = ["soundserver", "volume", "power", "log"]
-syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace", "inventory"]
+syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace", "inventory", "jobs"]
 
 [programs.toybox]
 receives = ["soundserver"]

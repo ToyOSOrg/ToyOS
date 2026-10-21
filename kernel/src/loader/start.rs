@@ -8,6 +8,7 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use crate::object::job::JobObject;
 use crate::object::process::ProcessObject;
 use crate::object::{ops, HandleEntry, HandleTable, KObjectRef, Refusal};
 use crate::process::{
@@ -16,8 +17,9 @@ use crate::process::{
 use crate::scheduler;
 use crate::user_ptr::UserBytes;
 use toyos_abi::handle::{RawHandle, Rights};
+use kernel::sched::job::Job;
 use toyos_abi::syscall::{
-    EndowEntry, SyscallError, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SELF_LABEL,
+    EndowEntry, SyscallError, JOB_LABEL, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SELF_LABEL,
 };
 
 /// Where a new context first runs.
@@ -105,14 +107,16 @@ pub struct PendingHandles {
 
 impl PendingHandles {
     /// Take the endowed handles out of the caller's table and put its handle to the child in it, all under one lock hold: a refusal leaves the table unchanged.
-    /// `own` is the child's handle to itself, which its table holds under [`SELF_LABEL`] beside the endowments, and the caller's handle is the third answer.
-    pub fn commit(self, own: HandleEntry) -> Result<(HandleTable, Endowments, RawHandle), Refusal> {
+    /// `own` is the child's handle to itself, which its table holds under [`SELF_LABEL`] beside the endowments. The child's job is the one endowed under
+    /// [`JOB_LABEL`], or else the caller's; the caller's handle to the child is the last answer.
+    pub fn commit(self, own: HandleEntry) -> Result<(HandleTable, Endowments, Arc<Job>, RawHandle), Refusal> {
         let Self { mut table, endow, mut labels } = self;
         let data_arc = process_data();
         let mut data = data_arc.lock();
 
         let count = endow.len() / ENDOW_ENTRY_LEN;
         let mut moving: Vec<(EndowEntry, RawHandle)> = Vec::with_capacity(count);
+        let mut endowed_job: Option<Arc<Job>> = None;
         for raw in endow.as_chunks::<ENDOW_ENTRY_LEN>().0 {
             let label_off = u32::from_ne_bytes([raw[0], raw[1], raw[2], raw[3]]);
             let label_len = u32::from_ne_bytes([raw[4], raw[5], raw[6], raw[7]]);
@@ -123,9 +127,17 @@ impl PendingHandles {
             if end > labels.len() {
                 return Err(SyscallError::InvalidArgument.into());
             }
+            let label = &labels[label_off as usize..end];
             // The kernel's own, which a caller's of that name would shadow in the child's lookup.
-            if &labels[label_off as usize..end] == SELF_LABEL.as_bytes() {
+            if label == SELF_LABEL.as_bytes() {
                 return Err(SyscallError::InvalidArgument.into());
+            }
+            if label == JOB_LABEL.as_bytes() {
+                // One owner: a second would be a job the child's lookup cannot name.
+                if endowed_job.is_some() {
+                    return Err(SyscallError::InvalidArgument.into());
+                }
+                endowed_job = Some(data.handles.get_sent::<JobObject>(handle, Rights::WRITE)?.job().clone());
             }
             // Checked before any removal, so a missing `TRANSFER` refuses the spawn instead of leaving a hole.
             let rights = data.handles.rights_of(handle)?;
@@ -182,10 +194,11 @@ impl PendingHandles {
         // Minted while `own` is held, and `own` goes into a table no thread reaches until the child lands: another thread of the caller closing this handle never closes the object's last.
         let held = ops::install(&mut data.handles, own.object().clone())
             .expect("a caller's table with verified room refused its child");
+        let job = endowed_job.unwrap_or_else(|| data.job.clone());
         drop(data);
         drop(displaced);
         endow_self(&mut table, &mut entries, &mut labels, own);
-        Ok((table, Endowments::new(entries, labels), held))
+        Ok((table, Endowments::new(entries, labels), job, held))
     }
 }
 

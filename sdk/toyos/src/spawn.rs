@@ -12,9 +12,13 @@
 //! names its image and provides a connector; one that decided what its child
 //! holds or runs is spawned directly; and one whose launch was not made is
 //! spawned directly only where it asked nothing a launch alone gives.
+//!
+//! **The job the child joins is no endowment of that kind**: a launch carries
+//! it too. The one endowed under [`JOB_LABEL`], or else this process's own.
 
 use toyos_abi::syscall::{
-    self, EndowEntry, SpawnArgs, SyscallError, FD_PREFIX, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SVC_LABEL,
+    self, EndowEntry, SpawnArgs, SyscallError, FD_PREFIX, JOB_LABEL, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN,
+    SVC_LABEL,
 };
 
 use crate::launch::{self, Launch, LaunchError, Outcome, MAX_LAUNCH_EXTRAS, MAX_LAUNCH_FDS};
@@ -53,7 +57,8 @@ pub struct Spawn<'a> {
     /// handles, which a spawn duplicates. A launch carries 0 to 2; a
     /// descriptor past them only a direct spawn gives.
     pub fds: &'a [(u32, RawHandle)],
-    /// `(label, handle)` the child is endowed, each moved.
+    /// `(label, handle)` the child is endowed, each moved. One under
+    /// [`JOB_LABEL`] is the job the child joins, which a launch carries too.
     pub endow: &'a [(&'a str, RawHandle)],
     /// `(name, connector)` put in a launched child's namespace beside its
     /// row's, each moved.
@@ -94,7 +99,7 @@ impl Spawn<'_> {
         self.refuse_streams()?;
         let asked = Asked {
             supervisor: self.parent == Parent::Supervisor,
-            endowed: !self.endow.is_empty(),
+            endowed: self.endow.iter().any(|(label, _)| *label != JOB_LABEL),
             extra_fds: self.fds.iter().any(|&(fd, _)| fd > 2),
             image_named: self.image.is_some(),
             provided: !self.provided.is_empty(),
@@ -213,8 +218,9 @@ impl Spawn<'_> {
     /// does not declare — but a child asked of the supervisor is launched or
     /// refused, never spawned here.
     ///
-    /// The stdio handles and the place are **duplicated** before they go: a
-    /// launch moves what it carries.
+    /// The stdio handles and the place are **duplicated** before they go, and
+    /// a handle to this process's own job made: a launch moves what it
+    /// carries. A job the spawn endowed goes itself, moved as an endowment is.
     fn ask_launcher<'h>(&self, answer: &'h mut [u8]) -> Result<Launched<'h>, Refused> {
         let for_supervisor = self.parent == Parent::Supervisor;
         let unmade = |why, home| match unmade(why, for_supervisor) {
@@ -225,10 +231,11 @@ impl Spawn<'_> {
         let Some(conn) = crate::endow::launcher().and_then(|held| held.open(launch::LAUNCHER).ok()) else {
             return unmade(Unmade::NoLauncher { provided: !self.provided.is_empty() }, None);
         };
-        // A place is one of the batch's extras. Refused rather than spawned
-        // directly: that child would hold this process's namespace, not its row.
-        if self.provided.len() + usize::from(!for_supervisor) > MAX_LAUNCH_EXTRAS {
-            return Err(Refused::Invalid("more connectors provided than a launch carries beside its place"));
+        // The place and the job are two of the batch's extras. Refused rather
+        // than spawned directly: that child would hold this process's
+        // namespace, not its row.
+        if self.provided.len() + usize::from(!for_supervisor) + 1 > MAX_LAUNCH_EXTRAS {
+            return Err(Refused::Invalid("more connectors provided than a launch carries beside its place and job"));
         }
         let stdio = self.fds;
         if stdio.len() > MAX_LAUNCH_FDS || stdio.iter().any(|&(fd, _)| fd > 2) {
@@ -239,11 +246,22 @@ impl Spawn<'_> {
             Parent::Place(place) => Some(place),
             Parent::Caller => Some(crate::endow::this_process().as_handle()),
         };
+        let endowed_job = self.endow.iter().find(|(label, _)| *label == JOB_LABEL).map(|&(_, job)| job);
+        let job_copy = match endowed_job {
+            Some(_) => None,
+            None => match crate::job::own() {
+                Ok(own) => Some(own.into_raw()),
+                Err(e) => return unmade(Unmade::NotCopied(e), None),
+            },
+        };
         let parent = match place {
             None => launch::Parent::Supervisor,
             Some(place) => match syscall::dup(place) {
                 Ok(copy) => launch::Parent::Place(copy),
-                Err(e) => return unmade(Unmade::PlaceNotCopied(e), None),
+                Err(e) => {
+                    job_copy.into_iter().for_each(syscall::close);
+                    return unmade(Unmade::NotCopied(e), None);
+                }
             },
         };
         let mut fds = [(0u32, RawHandle(0)); MAX_LAUNCH_FDS];
@@ -252,6 +270,7 @@ impl Spawn<'_> {
             if let launch::Parent::Place(copy) = parent {
                 syscall::close(copy);
             }
+            job_copy.into_iter().for_each(syscall::close);
         };
         for (i, &(child, handle)) in stdio.iter().enumerate() {
             match syscall::dup(handle) {
@@ -273,6 +292,7 @@ impl Spawn<'_> {
             extras: &extras[..self.provided.len()],
             fds,
             parent,
+            job: job_copy.or(endowed_job).expect("a job endowed or copied"),
         };
         // **The send moved them.** Every arm but `NotSent` is past the point
         // where the duplicates left this table, so closing them would be this
@@ -364,8 +384,9 @@ enum Unmade {
     NotDeclared,
     /// The launch never left this process.
     NotSent,
-    /// The copy of its place a launch carries could not be made.
-    PlaceNotCopied(SyscallError),
+    /// The copy of its place or of this process's job a launch carries could
+    /// not be made.
+    NotCopied(SyscallError),
 }
 
 /// What a spawn whose launch was not made gets.
@@ -383,7 +404,7 @@ enum Unlaunched {
 /// this process's namespace and not its row's.
 fn unmade(why: Unmade, supervisor: bool) -> Unlaunched {
     match why {
-        Unmade::PlaceNotCopied(e) => Unlaunched::Failed(e),
+        Unmade::NotCopied(e) => Unlaunched::Failed(e),
         Unmade::NoLauncher { provided: true } => {
             Unlaunched::Refused("only a launch carries a provided connector, and this process holds no launcher")
         }
@@ -442,14 +463,15 @@ mod tests {
         }
     }
 
-    /// A launch carries a copy of its place: one this process cannot copy
-    /// refuses the launch as the copy was refused, and nothing is spawned
-    /// directly in its place, whoever the spawn asked for.
+    /// A launch carries a copy of its place and of this process's job: one
+    /// this process cannot copy refuses the launch as the copy was refused,
+    /// and nothing is spawned directly in its place, whoever the spawn asked
+    /// for.
     #[test]
-    fn a_launch_whose_place_cannot_be_copied_is_refused_and_not_spawned_directly() {
+    fn a_launch_whose_place_or_job_cannot_be_copied_is_refused_and_not_spawned_directly() {
         for supervisor in [false, true] {
             let e = SyscallError::PermissionDenied;
-            assert_eq!(unmade(Unmade::PlaceNotCopied(e), supervisor), Unlaunched::Failed(e));
+            assert_eq!(unmade(Unmade::NotCopied(e), supervisor), Unlaunched::Failed(e));
         }
     }
 

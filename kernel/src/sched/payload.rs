@@ -6,7 +6,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use kernel::sched::fair::{FairShare, ShareState};
 use kernel::sched::hw::Nanos;
 use kernel::sched::msg::Msg;
 use kernel::sched::sync::CellLock;
@@ -36,7 +35,6 @@ impl<T: Send> CellLock<T> for KernelLock<T> {
 
 pub type KMsg = Msg<KernelPayload>;
 pub type KShared = TaskShared<KMsg>;
-pub type KShare = FairShare<KernelLock<ShareState>>;
 /// The core's wait ticket; blocking sites use `driver::Ticket`, which wraps it in the needed preempt guard.
 pub type RawTicket = WaitTicket<KMsg>;
 
@@ -88,7 +86,6 @@ pub struct KernelPayload {
 
 impl SchedPayload for KernelPayload {
     type Ctx = KernelCtx;
-    type ShareLock = KernelLock<ShareState>;
 
     /// The thread, as `TaskId::pack` packs it: what a diary record names.
     fn name(&self) -> u64 {

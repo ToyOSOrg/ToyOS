@@ -15,8 +15,8 @@
 
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{
-    self, MmapFlags, MmapProt, OpenFlags, ProcessStats, SchedInfo, SpawnArgs, Stat, SyscallError,
-    SYS_FSTAT, SYS_PROCESS_STATS, SYS_SCHED_INFO,
+    self, MmapFlags, MmapProt, OpenFlags, ProcessStats, SpawnArgs, Stat, SyscallError, SYS_FSTAT,
+    SYS_PROCESS_STATS,
 };
 
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
@@ -145,25 +145,7 @@ fn main() {
     let child = unsafe { syscall::spawn(&*fitting) }.expect("spawn a SpawnArgs that fits");
     syscall::process_wait(child).expect("wait for the child that fits");
 
-    // 5. `SchedInfo`, which the kernel fills. It used to be reached by
-    //    casting a validated byte slice to `&mut SchedInfo`, which checked
-    //    neither the alignment the cast needs nor the page the write lands in.
-    let info_len = core::mem::size_of::<SchedInfo>();
-    let straddling = boundary - 8;
-    poison(straddling, info_len);
-    let ret = raw(SYS_SCHED_INFO, straddling, 0, 0);
-    assert!(
-        intact(boundary, info_len - 8),
-        "sched_info wrote {} bytes past the end of the physical page it translated",
-        info_len - 8,
-    );
-    assert!(intact(straddling, 8), "sched_info wrote the near half of a SchedInfo it refused");
-    assert_eq!(err(ret), Some(SyscallError::BadAddress), "sched_info took a straddling SchedInfo");
-
-    let ret = raw(SYS_SCHED_INFO, boundary - info_len as u64, 0, 0);
-    assert!(err(ret).is_none(), "sched_info refused a SchedInfo that ends at the boundary: {ret:#x}");
-
-    // 6. `ProcessStats`, and the child waited for above still
+    // 5. `ProcessStats`, which the kernel fills, and the child waited for above still
     //    answers for one — the numbers are the object's and the handle outlives
     //    the process.
     let stats_len = core::mem::size_of::<ProcessStats>();

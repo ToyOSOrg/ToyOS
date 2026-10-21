@@ -26,9 +26,9 @@ pub enum Container {
     /// can unwind. Its state word reads `Ready`, because that is what it is —
     /// a task the pick takes before the fair queue.
     Dying,
-    /// Stopped for the life of this machine. Its state word reads `Ready` for
-    /// the reason a dying task's does — it is still counted into its share —
-    /// but no pick serves this band, so `Ready` here is where it stays.
+    /// Stopped for the life of this machine. Its state word reads `Ready`, as a
+    /// dying task's does, but no pick serves this band, so `Ready` here is
+    /// where it stays.
     Stopped,
     Parked,
     Zombie,
@@ -125,7 +125,7 @@ pub fn check_cpu<X: SchedPayload>(cpu: &CpuSched<X>) {
 }
 
 /// Invariant T: outside a pass, the armed deadline is no later than the
-/// earliest thing that must happen — the running task's quantum end or the
+/// earliest thing that must happen — the running task's next decision or the
 /// earliest valid parked deadline. And a CPU with nothing loaded and a pending
 /// deadline must have the timer armed at all.
 pub fn check_timer<X: SchedPayload>(cpu: &CpuSched<X>) {
@@ -145,9 +145,9 @@ pub fn check_timer<X: SchedPayload>(cpu: &CpuSched<X>) {
 }
 
 fn earliest_event<X: SchedPayload>(cpu: &CpuSched<X>) -> Option<Nanos> {
-    let quantum = cpu.running().map(|_| cpu.quantum_end());
+    let decision = cpu.running().map(|_| cpu.decide_at());
     let deadline = cpu.parked().filter_map(|p| p.deadline()).min();
-    match (quantum, deadline) {
+    match (decision, deadline) {
         (Some(q), Some(d)) => Some(q.min(d)),
         (Some(q), None) => Some(q),
         (None, d) => d,

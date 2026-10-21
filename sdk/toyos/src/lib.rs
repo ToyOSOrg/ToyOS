@@ -22,6 +22,7 @@ pub mod poller;
 pub mod power;
 pub mod wake;
 pub mod ipc;
+pub mod job;
 pub mod namespace;
 pub mod launch;
 pub mod log;

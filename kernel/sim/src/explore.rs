@@ -60,27 +60,25 @@ pub struct Outcome {
     pub unwind_gate_ns: u64,
     /// Invariant I5's measurement: the widest service spread seen over one
     /// contention window, and the bound in force when it was seen. A number
-    /// rather than a verdict, because comparing a per-CPU frontier against the
-    /// global one needs a number: "both passed" is not a comparison.
+    /// rather than a verdict, so two runs can be compared.
     pub fair_spread: u64,
     pub fair_bound: u64,
-    /// Worst spread past the *derived* bound, even where the recorded sample
-    /// allowed the run to pass. Zero means the run met the standard.
+    /// Worst spread past the *derived* bound, even where a lifted ceiling let
+    /// the run pass. Zero means the run met the standard.
     pub fair_over_bound: u64,
-    /// Virtual nanoseconds I5 had a comparison open for. Its *reach*, which is a
-    /// separate question from its verdict and one that four different conditions
-    /// can silently shrink; see [`crate::vm::Vm::fair_covered_ns`].
+    /// Virtual nanoseconds I5 had a comparison open for: its *reach*, which
+    /// several conditions can silently shrink; see
+    /// [`crate::vm::Vm::fair_covered_ns`].
     pub fair_covered_ns: u64,
-    /// Invariant I13's measurement, in the same three roles: the widest service
-    /// spread between threads of one share, the bound in force when it was
-    /// seen, and any crossing of the derived bound the allowance let pass.
-    pub thread_spread: u64,
-    pub thread_bound: u64,
-    pub thread_over_bound: u64,
-    /// Virtual nanoseconds I13 had a comparison open for. Its *reach*, which is
-    /// a separate question from its verdict and one a change to the pick or the
-    /// balance can silently shrink; see [`crate::vm::Vm::thread_covered_ns`].
-    pub thread_covered_ns: u64,
+    /// Invariant I13's measurement: the most service a ready fair thread was
+    /// owed while it waited, the bound in force when it was seen, and the worst
+    /// crossing of it.
+    pub wait_owed: u64,
+    pub wait_bound: u64,
+    pub wait_over_bound: u64,
+    /// Virtual nanoseconds some ready fair thread was owed service: I13's
+    /// reach; see [`crate::vm::Vm::wait_covered_ns`].
+    pub wait_covered_ns: u64,
     /// Per process: how long its threads waited between being owed a dispatch
     /// and getting one, split by why they were owed one. The measured policy
     /// suite's instrument — see [`crate::latency`] and `sim/tests/policy.rs`.
@@ -99,6 +97,12 @@ pub struct Outcome {
     pub thread_finish_ns: std::collections::BTreeMap<kernel::sched::task::TaskKey, u64>,
     /// How many tasks the balance path moved between CPUs.
     pub migrations: u64,
+    /// See [`crate::vm::Vm::migrations_before_exit`].
+    pub migrations_before_exit: u64,
+    /// See [`crate::vm::Vm::call_site_commits`].
+    pub call_site_commits: u64,
+    /// Threads that ran to their exit.
+    pub exits: u64,
     /// Per CPU: when it first took an execution step — see
     /// [`crate::vm::Vm::first_exec_ns`].
     pub first_exec_ns: Vec<Option<u64>>,
@@ -192,7 +196,7 @@ impl Outcome {
         if self.passed() {
             return format!(
                 "{}: ok ({} steps, {} ns, {} switches, {} kicks, I5 spread {}/{} ns, \
-                 I13 spread {}/{} ns, I14 retire {}/{} ns)",
+                 I13 owed {}/{} ns, I14 retire {}/{} ns)",
                 self.scenario,
                 self.steps,
                 self.elapsed,
@@ -200,8 +204,8 @@ impl Outcome {
                 self.kicks,
                 self.fair_spread,
                 self.fair_bound,
-                self.thread_spread,
-                self.thread_bound,
+                self.wait_owed,
+                self.wait_bound,
                 self.retire_latency,
                 self.retire_bound,
             );
@@ -317,15 +321,18 @@ fn outcome_of(scenario: &'static str, vm: &Vm<'_>, choices: &ChoiceStream) -> Ou
         fair_bound: vm.fair_bound,
         fair_over_bound: vm.fair_over_bound,
         fair_covered_ns: vm.fair_covered_ns,
-        thread_spread: vm.thread_spread,
-        thread_bound: vm.thread_bound,
-        thread_over_bound: vm.thread_over_bound,
-        thread_covered_ns: vm.thread_covered_ns,
+        wait_owed: vm.wait_owed,
+        wait_bound: vm.wait_bound,
+        wait_over_bound: vm.wait_over_bound,
+        wait_covered_ns: vm.wait_covered_ns,
         run_wait: vm.run_wait.clone(),
         process_service_ns: vm.service_ns.clone(),
         process_finish_ns: vm.finish_ns.clone(),
         thread_finish_ns: vm.thread_finish_ns.clone(),
         migrations: vm.migrations,
+        migrations_before_exit: vm.migrations_before_exit,
+        call_site_commits: vm.call_site_commits,
+        exits: vm.exits,
         first_exec_ns: vm.first_exec_ns.clone(),
         never_ran: vm.spawned.difference(&vm.ran).count(),
         idle_wakes: vm.idle_wakes.clone(),

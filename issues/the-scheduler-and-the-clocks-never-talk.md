@@ -71,23 +71,22 @@ scales with crowding. These are model figures for the scenarios that ran, not
 hardware latency guarantees. Stage 3 validates the kernel implementation on
 the supported machines.
 
-Stage 3 owes these decision points. A CPU decides again when its running
-request ends, and when a queued group whose request is due before the running
-group's becomes eligible, once the running thread has run `min_slice`.
-Without the second, a job whose request is due first but carries a little
-debt waits out every longer request ahead of it. In the model's desktop mix
-beside a build, the compositor then finished a frame 9.4 ms after its release
-and missed it; with the second, it misses none on the T14 and AMD shapes,
-finishing within 1.7 ms. The kernel must re-arm each CPU's preemption timer
-for the earliest such instant on every change to that CPU's queues, not only
-at its own decisions: an enqueue, a dequeue (a last thread blocking, or
-another CPU stealing or migrating a thread away) and a decision. A group in
-debt that leaves shifts `V` and makes the others eligible sooner, and a remote
-dequeue is no decision on the CPU that loses it; armed only there, the timer
-fires late. The query is O(log g) for g groups: the deadline-ordered group
-tree, augmented with each subtree's least virtual time, gives the earliest
-eligibility among groups due before the running one. The model's cost is
-226 to 293 switches per CPU per second in that mix, against 216 to 259
-without. Within a group the group's own request, as short as its shortest
-thread's, bounds the wait; deciding there as well cost 361 to 417 switches
-and improved no latency.
+Stage 3 is in the kernel (`kernel/pure/sched/queue.rs`, `kernel/pure/sched/job.rs`,
+`kernel/src/object/job.rs`). Its remaining work:
+
+- **Explicit latency requests.** The queue gives every thread one request
+  size, and no syscall asks for a shorter one. Deferred until a first caller
+  needs it (orchestrator, 2026-10-21): stage 4's audio workers are the
+  expected one. Exit: that caller's stage adds a bounded request that changes
+  order, not weight, and its test shows the caller meeting its deadline beside
+  saturating jobs.
+- **sshserver sessions.** `sshserver` starts every session as one of its own
+  helpers, so all remote logins share its job: it has no ToyOS dependency
+  through which to make one. Exit: sshserver holds `jobs` and starts each session in a job
+  of its own, through std's endowment of `JOB_LABEL` or the std/libc path
+  below.
+- **A new job from std and libc.** Their spawn reaches a new job only through
+  `CommandExt::endow(JOB_LABEL, …)`, and libc has no such call. This waits
+  for the fd-table work that rewrites spawn. Exit: std and libc each take a
+  job for a child through their ordinary spawn interface, which is then the
+  route the bullet above uses.

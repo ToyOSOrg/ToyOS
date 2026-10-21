@@ -196,6 +196,7 @@ fn under_b_is_gone(grown: &Grown) {
         extras: &[],
         fds: &[],
         parent: Parent::Place(place),
+        job: toyos::job::own().expect("a handle to this process's job").into_raw(),
     };
     let mut home = [0u8; 256];
     match launch::launch(&conn, &request, &mut home) {
@@ -278,6 +279,7 @@ fn a_pipe_is_no_place() {
         extras: &[],
         fds: &[],
         parent: Parent::Place(place),
+        job: toyos::job::own().expect("a handle to this process's job").into_raw(),
     };
     let mut home = [0u8; 256];
     match launch::launch(&conn, &request, &mut home) {

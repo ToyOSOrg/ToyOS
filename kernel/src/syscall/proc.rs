@@ -108,6 +108,30 @@ pub(super) fn sys_rt_enter(syscap: RawHandle) -> u64 {
     0
 }
 
+/// Make a new job, gated on a `SysCap` carrying [`Rights::JOBS`], and install a handle to it.
+pub(super) fn sys_job_create(syscap: RawHandle) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::JOBS) {
+        return e.refuse();
+    }
+    let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(crate::object::job::new_job()));
+    match process::with_process_data(|data| crate::object::ops::install(&mut data.handles, object)) {
+        Ok(h) => u64::from(h.0),
+        Err(e) => e.to_u64(),
+    }
+}
+
+/// Install a handle to the job the caller runs in.
+pub(super) fn sys_job_own() -> u64 {
+    let installed = process::with_process_data(|data| {
+        let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(data.job.clone()));
+        crate::object::ops::install(&mut data.handles, object)
+    });
+    match installed {
+        Ok(h) => u64::from(h.0),
+        Err(e) => e.to_u64(),
+    }
+}
+
 /// Answer this process's endowment table; an empty buffer asks only for its size.
 pub(super) fn sys_endowments(out: &mut crate::user_ptr::UserBytesMut) -> u64 {
     let data_arc = process::process_data();

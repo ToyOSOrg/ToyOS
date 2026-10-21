@@ -12,7 +12,6 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use kernel::sched::cpu::{Action, Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
-use kernel::sched::fair::Frontier;
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos};
 use kernel::sched::mailbox::{mailbox, Kick, PreemptGuard, Urgency};
 use kernel::sched::msg::Msg;
@@ -28,7 +27,7 @@ use crate::process::{OwnedAlloc, PageTables, TaskId};
 use crate::process::KERNEL_STACK_SIZE;
 
 use super::payload::{
-    KMsg, KShare, KShared, KernelCtx, KernelPayload, RawTicket, Runs, TaskHandle, ThreadSched,
+    KMsg, KShared, KernelCtx, KernelPayload, RawTicket, Runs, TaskHandle, ThreadSched,
 };
 
 /// Proof that preemption is disabled for as long as the borrow lasts.
@@ -58,7 +57,6 @@ pub fn irq_off<R>(f: impl FnOnce(&IrqOff) -> R) -> R {
 }
 
 static CPUS: AtomicPtr<CpuHandles<KMsg>> = AtomicPtr::new(ptr::null_mut());
-static FRONTIER: Frontier = Frontier::new();
 static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
 
 
@@ -149,10 +147,6 @@ pub fn cpus() -> &'static CpuHandles<KMsg> {
     assert!(!ptr.is_null(), "scheduler used before sched::init");
     // SAFETY: set once by `init` from a leaked Box, never cleared.
     unsafe { &*ptr }
-}
-
-pub fn frontier() -> &'static Frontier {
-    &FRONTIER
 }
 
 /// Monotonic and never reused, so a message names a dead task unambiguously. Not `TaskId`: pids and tids are
@@ -422,7 +416,8 @@ pub struct NewTask {
     pub entry_sp: u64,
     pub address_space: PageTables,
     pub thread_pointer: u64,
-    pub share: Arc<KShare>,
+    /// The job the thread's time is charged to.
+    pub job: Arc<kernel::sched::job::Job>,
     /// The process's image; `None` for a kernel thread.
     pub image: Option<Arc<crate::process::UserImage>>,
 }
@@ -447,7 +442,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
     let handle = Arc::new(TaskHandle::new());
     let task = TaskBuilder {
         key: next_key(),
-        share: new.share,
+        job: new.job,
         ctx,
         ext: KernelPayload {
             id: new.id,
@@ -500,7 +495,6 @@ fn env(preempt: &PreemptOff) -> Env<'_, crate::hw::KernelHw, PreemptOff> {
     Env {
         hw: &HW,
         cpus: cpus(),
-        frontier: &FRONTIER,
         preempt,
         balance: Balance::PushOnSurplus {
             threshold: kernel::sched::cpu::PUSH_THRESHOLD,
@@ -748,11 +742,11 @@ pub fn with_current_acct<R>(
 }
 
 pub fn set_current_rt(permanent: bool) {
-    with_cpu(|cpu| cpu.set_current_rt(permanent));
+    with_cpu(|cpu| cpu.set_current_rt(HW.now(), permanent));
 }
 
 pub fn boost_current(until: Nanos) {
-    with_cpu(|cpu| cpu.boost_current(until));
+    with_cpu(|cpu| cpu.boost_current(HW.now(), until));
 }
 
 pub fn current_is_rt() -> bool {

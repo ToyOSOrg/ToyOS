@@ -125,7 +125,7 @@ use toyos_logstream::{
 };
 use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
 use toyos_abi::syscall::{
-    DeviceRequest, FileType, SyscallError, DEV_PREFIX, MAX_BADGE, PROVIDE_PREFIX, SERVE_PREFIX,
+    DeviceRequest, FileType, SyscallError, DEV_PREFIX, JOB_LABEL, MAX_BADGE, PROVIDE_PREFIX, SERVE_PREFIX,
     SVC_LABEL, SYSCAP_LABEL,
 };
 
@@ -1961,9 +1961,11 @@ impl Supervisor<'_> {
         // can be split. Every part still releases on every path below.
         let all = held.take();
         let (fd_handles, rest) = all.split_at(request.fd_count());
-        let (extra_handles, place_handle) = rest.split_at(request.extra_count);
+        let (extra_handles, rest) = rest.split_at(request.extra_count);
+        let (place_handle, job_handle) = rest.split_at(rest.len() - 1);
         let fds = Moved(fd_handles.to_vec());
         let place = Moved(place_handle.to_vec());
+        let job = Moved(job_handle.to_vec());
         // Owned, so they close when the launch is done with: `SYS_NAMESPACE_BUILD`
         // copies a connector into the namespace and leaves the caller's handle,
         // and the supervisor's copy of a client's connector has no life beyond
@@ -2115,6 +2117,7 @@ impl Supervisor<'_> {
             caller_fds,
             _place: place,
             placed: under.is_some(),
+            job,
             extras,
             cwd: request.cwd.to_string(),
         };
@@ -2217,7 +2220,8 @@ impl Supervisor<'_> {
     /// Start `launch`, holding `folder` and in it ([`grants::cwd`]) where it
     /// holds one, and answer its caller.
     fn start_launch(&mut self, launch: Launch, folder: Option<grants::Folder>) {
-        let Launch { conn, mut program, mut command, session, fds, caller_fds, _place, placed, extras, cwd } = launch;
+        let Launch { conn, mut program, mut command, session, fds, caller_fds, _place, placed, mut job, extras, cwd } =
+            launch;
         if let Some(folder) = folder {
             // The image `prepare` read is kept: only the working directory is
             // judged again.
@@ -2261,7 +2265,7 @@ impl Supervisor<'_> {
             &extras,
             storage,
             (&self.minted, session),
-            Output::Launch { log: &mut self.log, fds: &caller_fds },
+            Output::Launch { log: &mut self.log, fds: &caller_fds, job: job.take()[0] },
         );
         drop(fds);
         match started {
@@ -2305,6 +2309,8 @@ struct Launch {
     _place: Moved,
     /// Whether it names a place, or the supervisor.
     placed: bool,
+    /// The job its caller named, owned until the spawn moves it.
+    job: Moved,
     extras: Vec<(String, Connector)>,
     /// The caller's working directory, which a granted folder's launch keeps
     /// where it lies inside the folder.
@@ -2617,6 +2623,17 @@ fn start<'a>(
     // class nothing can mint again. A client picks whether a spawn fails — an
     // unreachable `cwd` is enough — so this is its path as much as a bug's.
     let mut held = Moved(Vec::new());
+    // **Every service the supervisor starts is a job of its own**, made with the
+    // system capability's `JOBS`; a launch's program joins the job its caller
+    // named, which is the caller's own unless it holds that right itself.
+    let job = match &output {
+        Output::Boot(_) => {
+            syscap.new_job().map_err(|e| std::io::Error::other(format!("no job for it: {e:?}")))?.into_raw()
+        }
+        Output::Launch { job, .. } => *job,
+    };
+    command.endow(JOB_LABEL, job.0);
+    held.0.push(job);
     // Acceptors are given *back* rather than closed: a `serves` port whose
     // acceptor is gone can never be served again.
     let mut taken: Vec<(&'a str, Acceptor)> = Vec::new();
@@ -2806,7 +2823,7 @@ fn start<'a>(
             }
             log
         }
-        Output::Launch { log, fds } => {
+        Output::Launch { log, fds, .. } => {
             command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
             for &(fd, handle) in fds {
                 let caller_ring = matches!(fd, 1 | 2)
@@ -2871,10 +2888,11 @@ fn start<'a>(
 }
 
 /// Where a started program's output goes: a service's own ring, or a
-/// launch's caller's descriptors with any ring among them replaced.
+/// launch's caller's descriptors with any ring among them replaced — and, for
+/// a launch, the job its caller named, which `start` owns from its first line.
 enum Output<'l> {
     Boot(&'l mut Log),
-    Launch { log: &'l mut Log, fds: &'l [(u32, toyos::RawHandle)] },
+    Launch { log: &'l mut Log, fds: &'l [(u32, toyos::RawHandle)], job: toyos::RawHandle },
 }
 
 /// The namespace this program's `receives` names, [`toyos_swap::PORT`] and
