@@ -550,10 +550,10 @@ pub fn insert(
         .level()
         .checked_add(1)
         .ok_or(FsError::CorruptedNode(at))?;
-    let old_min_key = min_key(io, at, Depth::ROOT)?;
     let new_root_block = alloc.alloc_block(io)?;
 
-    let mut children = alloc::vec![Child { key: old_min_key, block: at }];
+    // A first child's key is never read (`child_index`).
+    let mut children = alloc::vec![Child { key: Key::ZERO, block: at }];
     children.extend(split);
     Node::Interior { level, children }.write(io, new_root_block)?;
 
@@ -681,17 +681,6 @@ fn pack(entries: Vec<Entry>) -> Vec<Vec<Entry>> {
         nodes.last_mut().expect("a node was begun").push(entry);
     }
     nodes
-}
-
-/// Find the minimum key in a subtree.
-fn min_key(io: &dyn BlockIO, block: BlockNum, depth: Depth) -> Result<Key, FsError> {
-    match Node::read(io, block)? {
-        Node::Leaf(entries) => Ok(entries.first().map_or(Key::ZERO, |e| e.key)),
-        Node::Interior { children, .. } => {
-            let first = children.first().ok_or(FsError::CorruptedNode(block))?.block;
-            min_key(io, first, depth.descend(block)?)
-        }
-    }
 }
 
 #[cfg(test)]
