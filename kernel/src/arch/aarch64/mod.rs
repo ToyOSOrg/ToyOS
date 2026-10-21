@@ -40,7 +40,6 @@ pub mod watchdog;
 
 pub use irqchip::its as message_unit;
 pub use smmu as iommu_unit;
-pub use trap::DriverIrq;
 
 /// The machine every program image this kernel loads must be built for.
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::Aarch64;

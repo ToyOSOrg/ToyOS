@@ -35,7 +35,6 @@ use toyos_build::image::LBA;
 
 use crate::timings::{Machine, Record, Stick};
 
-pub mod devices;
 pub mod image;
 pub mod testargs;
 pub mod timings;
@@ -749,8 +748,6 @@ pub const FLASHABLE: &[&str] = &[
     "revoked-backing-selftest",
     "lapic-spurious-selftest",
     "unclaimed-vector-selftest",
-    "xhci-xecp-selftest",
-    "xhci-descriptor-selftest",
     // A probe rather than staged inputs, and a read: it runs inside the first
     // syscall's own context switch.
     "sysret-ss-probe",
@@ -761,7 +758,6 @@ pub const FLASHABLE: &[&str] = &[
     // Three nested `scheduler::Operation`s with known deadlines, in both homes,
     // each printing what it asked for and what it observed. It establishes and
     // drops them and reaches nothing else.
-    "sched-operation-nesting",
     // Every IOMMU unit left translating, remapping and queueing just before the
     // kernel programs it, which switches each of those off again first. It
     // writes only the units' registers, which a reset returns to firmware, and
@@ -802,35 +798,6 @@ pub const FLASHABLE: &[&str] = &[
     // register and writes no firmware state; the kernel implies `WEDGE_ARM`
     // behind it, so the boot cannot end itself before its own bound.
     LOCKUP_ARM,
-    // **The arm that stops nothing and never stops writing**, so the reset
-    // lands on a controller that is moving bytes. Admissible for the rows
-    // above's reason and one more: every run is read first and written back
-    // byte for byte in the last eighth of the disk, once and never twice, so
-    // the medium is what it was and no partition a boot mounts is the subject;
-    // and the sweep is refused by name on a disk with no room for it.
-    LOAD_ARM,
-    // It withholds transfers to the boot stick so the transport breaks on
-    // purpose. Admissible because it writes nothing the stick did not already
-    // hold, reaches no firmware state, and the worst
-    // it leaves is a stick a replug clears — the defect the arm exists to stage.
-    "usb-transport-break",
-    // The kernel leaves the T14's Type-C xHCI controller, `00:0d.0`, to a
-    // claim, and `usbd` drives it through the unit: the handoff, a reset and
-    // its own rings, as this kernel's driver does every boot. Firmware owns
-    // neither of the T14's two (each reads `USBLEGSUP 0x01002201`, every SMI
-    // enable clear). Whatever state a boot leaves it in, the reset that ends
-    // every boot resets the function and runs POST again, which takes it
-    // back. Only this address: the other controller carries the boot stick.
-    "xhci-leave=00:0d.0",
-    // The AMD bench's `03:00.4`, the xHCI the Bluetooth module is on, left to
-    // a claim the same way. Firmware owns it (`USBLEGSUP 0x00010401`) until
-    // `usbd` takes it; a boot may leave it halted with bus mastering off
-    // after the fault arm, or, where the claim is refused, still firmware's
-    // with its SMI on an ownership change armed. Either way the reset that
-    // ends every boot resets the function and runs POST again, which takes
-    // the controller back. Only this address: `03:00.3`, which shares its id,
-    // carries the boot stick.
-    "xhci-leave=03:00.4",
 ];
 
 /// The arm that stops the machine, named once: [`FLASHABLE`] rules on it and
@@ -843,17 +810,13 @@ pub const WEDGE_ARM: &str = "wedge-before-reset";
 /// and which bound sealed the page is the page's own first line to say.
 pub const LOCKUP_ARM: &str = "hard-lockup-probe";
 
-/// The arm that leaves the machine to its bound with the bus busy rather than
-/// idle: it stops no CPU and never stops writing.
-pub const LOAD_ARM: &str = "usb-reset-under-load";
-
 /// Every arm that deliberately leaves this machine to be ended by a bound.
 ///
 /// **One list and not a condition spelled out at each reader.** A further such
 /// arm added to [`FLASHABLE`] and not here is an image whose boot is judged by
 /// the word a shutdown writes — which it never reaches — so the reader that
 /// forgot it reds every boot it was staged for.
-pub const WEDGE_ARMS: &[&str] = &[WEDGE_ARM, LOCKUP_ARM, LOAD_ARM];
+pub const WEDGE_ARMS: &[&str] = &[WEDGE_ARM, LOCKUP_ARM];
 
 /// The arm whose boot the pass after it reads as a hang on purpose: its record
 /// is sealed under another stick's identity, so that pass clears it and finds

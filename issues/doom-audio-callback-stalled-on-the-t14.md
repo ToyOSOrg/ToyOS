@@ -23,9 +23,9 @@ device. So the one thing that keeps a 2.9 ms deadline met was absent there and
 is present in every config the suite runs.
 
 That is a mechanism, not a measurement, and two others are equally live: the
-`drain_irqs` entry, `issues/scheduler-pass-blocks-in-xhci.md`,
-where any syscall on that thread can become the USB
-driver's engine for as long as a second; and plain scheduling pressure from a
+`drain_irqs` entry, where any syscall on that thread could become the
+kernel's USB driver's engine for as long as a second, which this tree no
+longer has (the driver is usbd's); and plain scheduling pressure from a
 game thread and a compositor that never yield to it.
 
 What would decide it is the callback's own period count against wall clock, on

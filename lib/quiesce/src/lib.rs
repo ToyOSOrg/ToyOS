@@ -92,8 +92,7 @@ const THREADS: &str = " userland thread(s) stopped across ";
 const CPUS: &str = " cpu(s) in ";
 const BUDGET: &str = " ms of a ";
 const MS: &str = " ms budget over ";
-const SWEEPS: &str = " sweep(s), ";
-const OPEN: &str = " userland block operation(s) still open";
+const SWEEPS: &str = " sweep(s)";
 const SHORTFALL: &str = "; this reset lands wherever the other ";
 const ARE: &str = " are";
 
@@ -109,14 +108,6 @@ pub struct Record {
     pub budget_ms: u64,
     pub sweeps: u32,
     pub cpus: u32,
-    /// Block-device operations still open on a thread the stop stops: an
-    /// operation lasts only while its opener is inside the device, so a thread
-    /// that has stopped holds none.
-    pub in_flight: u32,
-    /// How many such operations this boot began. Zero says the counter behind
-    /// [`Self::in_flight`] never counted at all, which no boot that wrote a
-    /// file can honestly report.
-    pub begun: u64,
 }
 
 impl Record {
@@ -134,8 +125,6 @@ impl Record {
         let (elapsed_ms, rest) = rest.split_once(BUDGET)?;
         let (budget_ms, rest) = rest.split_once(MS)?;
         let (sweeps, rest) = rest.split_once(SWEEPS)?;
-        let (in_flight, rest) = rest.split_once(OF)?;
-        let (begun, rest) = rest.split_once(OPEN)?;
 
         let stopped: u32 = stopped.parse().ok()?;
         let running = total.parse::<u32>().ok()?.checked_sub(stopped)?;
@@ -153,8 +142,6 @@ impl Record {
             budget_ms: budget_ms.parse().ok()?,
             sweeps: sweeps.parse().ok()?,
             cpus: cpus.parse().ok()?,
-            in_flight: in_flight.parse().ok()?,
-            begun: begun.parse().ok()?,
         })
     }
 
@@ -168,15 +155,13 @@ impl fmt::Display for Record {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{STOPPED}{}{OF}{}{THREADS}{}{CPUS}{}{BUDGET}{}{MS}{}{SWEEPS}{}{OF}{}{OPEN}",
+            "{STOPPED}{}{OF}{}{THREADS}{}{CPUS}{}{BUDGET}{}{MS}{}{SWEEPS}",
             self.sweep.stopped,
             self.sweep.total(),
             self.cpus,
             self.elapsed_ms,
             self.budget_ms,
             self.sweeps,
-            self.in_flight,
-            self.begun,
         )?;
         if self.sweep.running > 0 {
             write!(f, "{SHORTFALL}{}{ARE}", self.sweep.running)?;
@@ -242,12 +227,10 @@ mod tests {
         budget_ms: 2010,
         sweeps: 3,
         cpus: 8,
-        in_flight: 0,
-        begun: 4812,
     };
 
     fn short() -> Record {
-        Record { sweep: Sweep { stopped: 4, running: 2 }, in_flight: 1, ..WHOLE }
+        Record { sweep: Sweep { stopped: 4, running: 2 }, ..WHOLE }
     }
 
     #[test]
@@ -255,12 +238,12 @@ mod tests {
         assert_eq!(
             alloc::format!("{WHOLE}"),
             "stop: 6 of 6 userland thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 ms \
-             budget over 3 sweep(s), 0 of 4812 userland block operation(s) still open",
+             budget over 3 sweep(s)",
         );
         assert_eq!(
             alloc::format!("{}", short()),
             "stop: 4 of 6 userland thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 ms \
-             budget over 3 sweep(s), 1 of 4812 userland block operation(s) still open; this \
+             budget over 3 sweep(s); this \
              reset lands wherever the other 2 are",
         );
         assert!(WHOLE.stopped_the_machine());
@@ -285,15 +268,15 @@ mod tests {
             "[stamp] stop: 6 of 6 userland thread(s) stopped across 8 cpu(s)",
             // The shortfall clause disagreeing with the counts it restates.
             "[stamp] stop: 4 of 6 userland thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 \
-             ms budget over 3 sweep(s), 1 of 4812 userland block operation(s) still open; this \
+             ms budget over 3 sweep(s); this \
              reset lands wherever the other 9 are",
             // A shortfall clause on a record that claims to have stopped.
             "[stamp] stop: 6 of 6 userland thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 \
-             ms budget over 3 sweep(s), 0 of 4812 userland block operation(s) still open; this \
+             ms budget over 3 sweep(s); this \
              reset lands wherever the other 2 are",
             // More threads stopped than there were.
             "[stamp] stop: 7 of 6 userland thread(s) stopped across 8 cpu(s) in 11 ms of a 2010 \
-             ms budget over 3 sweep(s), 0 of 4812 userland block operation(s) still open",
+             ms budget over 3 sweep(s)",
         ] {
             assert_eq!(Record::parse(line), None, "{line}");
         }

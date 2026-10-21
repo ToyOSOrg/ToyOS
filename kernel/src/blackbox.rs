@@ -99,7 +99,6 @@ pub fn record_panic(records: &[u8]) {
         // The machine's census, which a death takes as a stop does: atomics
         // alone, so it is inside this region's rules (`crate::census`).
         let _ = core::fmt::Write::write_fmt(&mut report, format_args!("{}", crate::census::Sealed));
-        crate::log::recovery::seal_into(&mut report);
         report.tail(records, toyos_blackbox::RECORD_OPENS_WITH);
         report.seal(State::Panic, stamp, identity);
     });
@@ -132,13 +131,6 @@ pub fn record_done() {
 /// waits on devices that may not answer.
 pub fn append(account: impl FnOnce(&mut dyn core::fmt::Write)) -> bool {
     reopened(|lines| account(lines))
-}
-
-/// Append the recovery section to what this boot already sealed: a boot that
-/// hands the machine back says what its transport went through as a boot that
-/// dies does, because the stick that would carry the log may be what broke.
-pub fn append_recovery() -> bool {
-    reopened(|lines| lines.block(crate::log::recovery::seal_into))
 }
 
 fn reopened(account: impl FnOnce(&mut toyos_blackbox::Account<'_, &mut dyn FnMut()>)) -> bool {
@@ -183,10 +175,6 @@ pub fn record_wedge(said: core::fmt::Arguments, records: &[u8]) {
         // Why first, then as much of the tail as is left: a report cut to its
         // tail alone does not say what ended the machine.
         let _ = core::fmt::Write::write_fmt(&mut report, said);
-        // Above the tail and not in it: on a boot that outlived its transport's
-        // break the tail is everything written since, and the cut takes the
-        // break first.
-        crate::log::recovery::seal_into(&mut report);
         report.tail(records, toyos_blackbox::RECORD_OPENS_WITH);
         report.seal(State::Wedged, stamp, identity);
     });

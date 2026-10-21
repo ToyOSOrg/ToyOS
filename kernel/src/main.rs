@@ -40,15 +40,8 @@ mod panic;
 mod panic_reboot;
 mod power;
 
-mod keyboard;
-mod mouse;
-#[cfg(feature = "boot-actuators")]
-mod usb_gate;
-#[cfg(feature = "boot-actuators")]
-mod sched_gate;
-mod block;
-mod gpt;
 mod inventory;
+mod loaded;
 mod rollback;
 mod rootfs;
 mod file_cache;
@@ -74,7 +67,6 @@ mod census;
 mod irq_census;
 #[cfg(feature = "mask-windows")]
 mod windows;
-mod irq_ring;
 mod trace;
 mod time;
 mod clock;
@@ -106,7 +98,7 @@ mod late_panic {
 
 use alloc::boxed::Box;
 use arch::{cpu, percpu};
-use drivers::{acpi, gop, pci, serial, virtio_console, xhci};
+use drivers::{acpi, gop, pci, serial, virtio_console};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_rootimage::handoff::{held, Descriptor};
 
@@ -202,29 +194,11 @@ fn report_power_on(args: &KernelArgs, complete: u64) {
 
 /// Says where this boot's log can be read, on the last surface still showing it once userland owns the screen.
 fn report_log_destination() {
-    // Kernel-side because panic_console owns the panel; logkeeper reports which file it opened separately.
-    // Whether the partition is on a disk this kernel reads, not whether its file server mounted it:
-    // that server says so itself, and this kernel mounts nothing but ROOT.
-    let console = drivers::serial::has_console();
-    let has_log = match gpt::log_place() {
-        gpt::LogPlace::Driven => true,
-        gpt::LogPlace::Unnamed | gpt::LogPlace::Absent => false,
-        gpt::LogPlace::Undriven => {
-            log!("log: /log is on a disk this kernel does not drive; its file server says whether it mounted");
-            return;
-        }
-    };
+    // Kernel-side because panic_console owns the panel; `/log` is its file server's, which says whether it mounted.
     // ASCII only: the panel's font renders anything outside 0x20..=0x7E as a dot.
-    match (console, has_log) {
-        (true, true) => log!("log: this boot is on the console and on /log"),
-        (false, true) => log!("log: no serial console - this boot is on /log and on the screen"),
-        // alert! reddens the panel's Level for exactly the two states that leave no account of this boot anywhere.
-        (true, false) => {
-            alert!("log: no /log - this boot is on the console only, and nothing outlives the power")
-        }
-        (false, false) => {
-            alert!("log: no serial console and no /log - this boot is on this screen and nowhere else")
-        }
+    match drivers::serial::has_console() {
+        true => log!("log: this boot is on the console, and on /log once its file server mounts it"),
+        false => log!("log: no serial console - this boot is on the screen, and on /log once its file server mounts it"),
     }
 }
 
@@ -454,7 +428,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // boot, and a wedge down there is the reason to have one.
     arch::watchdog::init(&pci_devices);
     file_cache::init();
-    gpt::init(kernel_args);
+    loaded::init(kernel_args);
 
     boot_phase!("peripherals ready", t_periph);
 
@@ -464,11 +438,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     vfs::init();
     process::init();
     scheduler::init();
-    // Task-less half of the operation-nesting gate: this boot phase has no current task, so it establishes into the per-CPU slot.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::sched_operation_nesting() {
-        sched_gate::run("boot");
-    }
     pipe::init();
 
     // ROOT is the loader's image in memory, so nothing from here to the supervisor's
@@ -488,29 +457,10 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     let pid = process::spawn_supervisor();
     log!("spawned {} pid={pid}", process::SUPERVISOR_PATH);
 
-    // The proof the boot up to here needed no disk: ROOT and the supervisor's image both
-    // came out of memory.
-    log!("{} {}", rootfs::SUPERVISOR_WITHOUT_A_DISK, block::census::commands_issued());
-
-    // After the supervisor's spawn and before it runs: nothing runs a task until
-    // `smp::set_ready` below. This kernel mounts no disk: `/apps`, `/config`,
-    // `/home`, `/state`, `/log` and `/boot` are file servers' (`/system/bin/fileserver`),
-    // and an NVMe controller is `/system/bin/diskserver`'s. The USB disks are still
-    // this kernel's, served to their file servers as partition claims, until
-    // usbd drives the controller.
-    let t_storage = clock::nanos_since_boot();
-
-    xhci::init(&pci_devices);
-    // After xhci::init: a USB-booted disk doesn't exist until the controller binds it.
-    gpt::probe_usb_disks();
-    rootfs::hold_source();
-
     #[cfg(feature = "boot-actuators")]
     if actuator::revoked_backing_selftest() {
         revoke_selftest::run();
     }
-
-    boot_phase!("storage ready", t_storage);
 
     let t_devices = clock::nanos_since_boot();
 

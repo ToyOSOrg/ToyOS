@@ -337,7 +337,6 @@ Each stage lands on its own, in this order.
    - It runs over the cable that
      `issues/the-t14-answers-only-through-a-usb-stick.md` owns, and
      waits on
-     `issues/a-reset-stops-xhci-and-leaves-every-claimed-pci-function-armed.md`,
      `issues/the-t14-hung-after-rebooting-with-its-i219-faulted.md`,
      `issues/a-fatal-event-stands-down-both-bounds-and-may-leave-nothing-to-end-the-machine.md`,
      `issues/most-t14-leases-land-one-dhcp-retry-late.md` and

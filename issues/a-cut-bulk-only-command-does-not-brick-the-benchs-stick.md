@@ -105,5 +105,8 @@ because no wedge page this bench had taken before carried one.
 
 A reproduction of the hang itself — not of a reset — that leaves evidence off
 the stick, and an account of what the controller and the device were in when it
-happened. `boot.usbload.stick_secs` stands as the regression guard meanwhile, and it reds
-if a reset ever does brick the device.
+happened. The regression guard, `boot.usbload.stick_secs`, went with the
+kernel's `usb-reset-under-load` arm when the stick became usbd's; the
+small-kernel track's step 10 owes its rewritten row, a userland job writing the
+stick through usbd while the boot deadline resets the machine, and until it
+lands nothing reds if a reset bricks the device.

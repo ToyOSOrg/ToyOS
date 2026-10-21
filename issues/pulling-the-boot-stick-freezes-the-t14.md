@@ -88,3 +88,10 @@ class. With `ran=` they read as a time *and* one of two classes, which is what
 makes a fourth flash worth more than the third was.
 
 `usb_boot_stick_pulled` is deleted, so no gate covers the pull.
+
+## Since usbd
+
+The kernel holds no USB lock any more: the stick is usbd's (the small-kernel
+track's step 10), and a pulled stick is a disk whose sessions end `Gone`, so
+the log volume's file server loses its disk and no CPU waits on the device.
+Whether the T14 still freezes when its stick is pulled is unmeasured.

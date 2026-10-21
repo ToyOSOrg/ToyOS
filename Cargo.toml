@@ -34,7 +34,6 @@ members = [
     "kernel/phys",
     "kernel/sim",
     "kernel/smmu",
-    "kernel/usbhid",
     "lib/acpi",
     "lib/acpiserver-api",
     "lib/bcachefs",
@@ -75,13 +74,12 @@ members = [
     "lib/trace",
     "lib/tsc",
     "lib/untrusted",
+    "lib/usbhid",
     "lib/update",
     "lib/userbound",
     "lib/vdagent",
     "lib/virtio",
     "lib/wallclock",
-    "lib/xhci",
-    "lib/xhci/sim",
     "loader",
     "sdk/abi",
     "sdk/filepicker",
@@ -142,6 +140,7 @@ members = [
     "system/update",
     "system/update/copies",
     "system/usbd",
+    "system/usbd/xhci",
     "system/vdagent",
     "system/vdagent/bridge",
     "tests/guest/kernelprobe",
@@ -298,9 +297,6 @@ toyos-userbound = { path = "lib/userbound" }
 # The scheduler's quantum and the windows' hold, so the harness judges a boot
 # against the constants the kernel schedules by.
 kernel = { path = "kernel" }
-# The Bulk-Only phases, so the harness judging a wedge reads the word
-# `toyos_xhci::bot::Phase` declares instead of spelling it a second time.
-toyos-xhci = { path = "lib/xhci" }
 # The ACPI server's count line, so the judge reads the words the server writes
 # and the job that waits for them matches.
 acpiserver-api = { path = "lib/acpiserver-api" }

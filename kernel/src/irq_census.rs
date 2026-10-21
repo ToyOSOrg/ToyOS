@@ -19,8 +19,6 @@ pub enum Source {
     Timer,
     /// Vector 0xFC, `irqchip::kick_cpu`'s IPI.
     Kick,
-    /// Vector 0x21, xHCI MSI-X (or MSI).
-    Xhci,
     /// Vectors 0x28-0x2C: the MSI-X of a PCI function a process drives, and
     /// the lines of an ISA function one does. One count for all five: which
     /// claim an interrupt belonged to is the claim's own record, and the census
@@ -41,12 +39,11 @@ pub enum Source {
 }
 
 impl Source {
-    pub const COUNT: usize = 9;
+    pub const COUNT: usize = 8;
 
     /// Order `tests/toyos.rs`'s `irq_census_conservation` parses back; must match variant order.
     pub const NAMES: [&'static str; Self::COUNT] = [
-        "timer", "kick", "xhci", "userdev", "dmafault", "tlb", "nmi", "spurious",
-        "unclaimed",
+        "timer", "kick", "userdev", "dmafault", "tlb", "nmi", "spurious", "unclaimed",
     ];
 }
 

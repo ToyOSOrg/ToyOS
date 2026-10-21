@@ -180,7 +180,7 @@ unsafe fn fd_is_interactive(fd: i32) -> bool {
     match syscall::fstat(RawHandle(fd as u32)) {
         Ok(st) => matches!(
             st.file_type,
-            syscall::FileType::Tty | syscall::FileType::Serial | syscall::FileType::Keyboard
+            syscall::FileType::Tty | syscall::FileType::Serial
         ),
         Err(_) => false,
     }

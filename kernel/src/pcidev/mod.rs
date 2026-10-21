@@ -147,6 +147,8 @@ const CONFIG_BYTES: u64 = 4096;
 /// drives, and what outlives a holder.
 struct Function {
     who: u16,
+    /// Its configuration space, which the reset's stop writes with no lock.
+    pci: PciDevice,
     /// Whether a claim holds it: taken by [`claim`] before the function is
     /// touched, and given back last by [`release`].
     ///
@@ -190,6 +192,20 @@ fn functions() -> &'static [Function] {
     // SAFETY: non-null only as `publish` stored it: a leaked box, never freed
     // or written again, published with Release once it was whole.
     unsafe { *published }
+}
+
+/// Every function a claim holds, stopped before the machine resets or powers
+/// off with its holder alive: Bus Master Enable cleared, which ends its DMA
+/// and its messages, since a message is a write it masters (PCIe Base
+/// §7.5.1.1); MSI Enable cleared (§7.7.1) and MSI-X's Function Mask set
+/// (§7.7.2) as well. Registers alone, with no lock and no allocation: a panic
+/// and a wedge reach it.
+pub fn stop_before_reset() {
+    for function in functions().iter().filter(|f| f.held.load(Ordering::Acquire)) {
+        function.pci.disable_bus_master();
+        function.pci.disable_msi();
+        function.pci.mask_msix_function();
+    }
 }
 
 /// The arrival of function `number`, counted from 1 so a zeroed record names
@@ -458,11 +474,6 @@ pub fn with_bar_memory<T>(f: impl FnOnce(&mut dyn Iterator<Item = (u64, u64)>) -
     }))
 }
 
-/// The PCI segment group every enumerated function is on.
-pub fn segment() -> u16 {
-    MACHINE.lock().segment
-}
-
 /// The function a claim holds.
 pub fn held_at(binding: &Binding) -> toyos_abi::inventory::PciAddr {
     addr_of(MACHINE.lock().segment, binding.function().who)
@@ -541,6 +552,7 @@ pub fn publish(devices: &[PciDevice], segment: u16, firmware: &[RootBridgeWindow
         .iter()
         .map(|device| Function {
             who: requester(device),
+            pci: *device,
             held: AtomicBool::new(false),
             irq: Interrupt::new(),
             watch: IrqWatch::new(),

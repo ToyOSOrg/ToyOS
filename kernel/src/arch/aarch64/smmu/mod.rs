@@ -255,7 +255,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[toyos_abi::
     };
 
     crate::iommu::fault::describe(devices);
-    let segment = u32::from(crate::pcidev::segment());
+    let segment = u32::from(toyos_acpi::SEGMENT_GROUP);
     let mut routes = Vec::new();
     for device in devices {
         let function = StreamId::pci(device.bus, device.dev, device.func);

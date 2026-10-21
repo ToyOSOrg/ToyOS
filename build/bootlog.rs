@@ -67,18 +67,6 @@ pub const SEAL_PC: &str = " pc=";
 /// that names the wrong instruction.
 pub const WEDGE_SPIN: &str = "kernel::deadline::this_cpu+";
 
-/// What the `usb-reset-under-load` arm says once it is streaming, and the three
-/// ways it says it is not, in `kernel/src/usb_gate.rs`.
-///
-/// **The witness that the reset landed on a busy bus.** A boot whose page
-/// carries the first line and none of the other three is one whose reset found
-/// a controller still moving bytes; any of the other three is the idle case
-/// under this arm's name.
-pub const USB_LOAD_RUNNING: &str = "usb-load: sweeping disk 0";
-pub const USB_LOAD_REFUSED: &str = "usb-load: refused";
-pub const USB_LOAD_STOPPED: &str = "usb-load: the disk stopped answering";
-pub const USB_LOAD_SWEPT: &str = "usb-load: the sweep reached the end of the disk";
-
 /// What one CPU's own NMI writes into the black box when that CPU has taken no
 /// interrupt for its bound, in `kernel/src/hardlockup/mod.rs`.
 ///
@@ -703,10 +691,6 @@ mod tests {
                 "kernel/src/deadline.rs",
                 format!("fn {}() -> !", WEDGE_SPIN.trim_end_matches('+').rsplit("::").next().expect("a path")),
             ),
-            ("kernel/src/usb_gate.rs", format!("LOAD_RUNNING: &str = \"{USB_LOAD_RUNNING}\"")),
-            ("kernel/src/usb_gate.rs", format!("LOAD_REFUSED: &str = \"{USB_LOAD_REFUSED}\"")),
-            ("kernel/src/usb_gate.rs", format!("LOAD_STOPPED: &str = \"{USB_LOAD_STOPPED}\"")),
-            ("kernel/src/usb_gate.rs", format!("LOAD_SWEPT: &str = \"{USB_LOAD_SWEPT}\"")),
             ("kernel/src/hardlockup/mod.rs", format!("LOCKED_UP: &str = \"{LOCKED_UP}\"")),
             ("kernel/src/hardlockup/mod.rs", format!("\"{LOCKUP_PC}{{}}\", At(pc)")),
             ("kernel/src/sync.rs", "pub fn lock(&self) -> LockGuard<'_, T>".to_string()),

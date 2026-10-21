@@ -327,6 +327,17 @@ impl Sessions {
         answered
     }
 
+    /// The disk left: every request on it is answered not done, every
+    /// client told, and every session ended.
+    pub fn end(&mut self, dev: &mut impl Device) {
+        self.reset();
+        for s in self.sessions.values_mut() {
+            s.closing = true;
+        }
+        self.publish();
+        self.retire(dev);
+    }
+
     pub fn losses(&self) -> u64 {
         self.losses
     }

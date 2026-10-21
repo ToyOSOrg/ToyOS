@@ -61,7 +61,7 @@ impl From<CreateError> for WatchError {
 impl From<TrySendError> for WatchError {
     fn from(e: TrySendError) -> Self {
         match e {
-            TrySendError::Full => Self::NotReading,
+            TrySendError::Busy | TrySendError::Full => Self::NotReading,
             TrySendError::Syscall(e) => Self::Compositor(CreateError::Kernel(e)),
             TrySendError::TooLarge => unreachable!("every frame the watcher sends is within ipc::MAX_FRAME_LEN"),
         }

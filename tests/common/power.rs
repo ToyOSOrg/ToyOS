@@ -364,9 +364,6 @@ pub fn done_chain(after: &serial::Serial) -> Result<(), String> {
     // The chain ends rather than going round: a pass that booted a kernel would
     // have said so, and this one must not have.
     says_nothing_of(after, bootlog::LOADER_LAST_LINE)?;
-    // What its transport went through is on every record, in one line where
-    // nothing broke.
-    after.must_say_after(bootlog::HANDED_BACK, toyos_blackbox::RECOVERY_OPENS_WITH)?;
     after.must_say(bootlog::CHAIN_ENDS_LINE)?;
     eprintln!("  [power] a deliberate reboot sealed DONE and the chain ended in a reset");
     Ok(())
@@ -402,49 +399,6 @@ fn the_tail_is_the_stops(after: &serial::Serial) -> Result<(), String> {
 fn death_took_the_census(after: &serial::Serial) -> Result<(), String> {
     for line in ["irq: cpu0 ", "tlb: shootdowns=", "irq: unclaimed vectors", bootlog::PANEL_CENSUS] {
         after.must_say_after(bootlog::PREVIOUS_PANIC, line)?;
-    }
-    Ok(())
-}
-
-/// The metal half of the load arm: a T14 boot that never stopped writing, ended
-/// by the boot deadline with its controller mid-transfer, and the stick still
-/// there afterwards.
-///
-/// **The bound is the boot deadline's and not the hard-lockup detector's.** The
-/// sweep keeps its CPU taking interrupts for exactly that reason
-/// (`usb_gate::sweep_under_load`): a CPU that takes none is ended half a bound
-/// earlier by `kernel/src/hardlockup`, which is a different mechanism reported
-/// under this arm's name, so this judge names the bound it demands.
-pub fn usb_load_chain(after: &serial::Serial) -> Result<(), String> {
-    after.must_say(bootlog::PREVIOUS_PANIC)?;
-    death_took_the_census(after)?;
-    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::DEADLINE_EXPIRED)?;
-    // The sweep starts inside the stop, after the supervisor had the file made whole, so
-    // its records cross only in the page's tail.
-    after.must_say_after(bootlog::PREVIOUS_PANIC, bootlog::USB_LOAD_RUNNING)?;
-    // A sweep that refused, one the disk stopped answering, and one that swept
-    // its whole span before the reset: each is a boot that measured the idle
-    // case again under this arm's name.
-    says_nothing_of(after, bootlog::USB_LOAD_REFUSED)?;
-    says_nothing_of(after, bootlog::USB_LOAD_STOPPED)?;
-    says_nothing_of(after, bootlog::USB_LOAD_SWEPT)?;
-    says_nothing_of(after, REBOOTING)?;
-    // A page that names the other bound is this arm measuring a hard lockup.
-    says_nothing_of(after, bootlog::LOCKED_UP)?;
-    // **The account reaching the page is itself under test**: it is made a line
-    // at a time from the reset path, under the reserve
-    // `toyos_blackbox::ACCOUNT_BYTES` keeps for it.
-    after.must_say(toyos_metal::devices::QUIESCE_HEAD)?;
-    after.must_say(bootlog::CHAIN_ENDS_LINE)?;
-    // **Reported and not judged.** Which state the reset found the controller
-    // in is the open question this arm gathers answers to; a predicate over it
-    // would be the suite deciding it. A reset that found no command open writes
-    // no such line, and that is a fact about the boot rather than a failure of
-    // it.
-    let endpoint = toyos_metal::devices::QUIESCE_ENDPOINT;
-    match after.text().lines().find(|line| line.contains(endpoint)) {
-        Some(said) => eprintln!("  [power] {}", said.trim()),
-        None => eprintln!("  [power] the reset found no command open on the device"),
     }
     Ok(())
 }
@@ -605,46 +559,6 @@ pub fn blackbox_unclaimed(
 
     eprintln!("  [power] the loader named the page and the kernel took it: {}", claimed.trim());
     Ok(())
-}
-
-const TOOK_THE_LOCK: &str = "the controller lock was held from before the log volume's";
-
-/// The T14's judge for [`usb_reset_hands_devices_back`].
-///
-/// **The machine is the judge of the device, and nothing else is.** QEMU cannot
-/// wedge a stick. What is left for this to read is the reset's own account,
-/// which on this machine is in `loader.log`'s pass after the reset rather than
-/// in any file the kernel wrote.
-///
-/// Both arms are orderly reboots, so both owe the barrier.
-pub fn usb_reset_on_metal(arms: &[&super::metal::Readback]) -> Result<(), String> {
-    let mut bad = Vec::new();
-    for back in arms {
-        let text = back.loader();
-        let head = toyos_metal::devices::QUIESCE_HEAD;
-        let Some(account) = toyos_metal::devices::quiesced(text.text()) else {
-            bad.push(format!(
-                "{}: loader.log carries no readable {head:?} summary, so nothing stopped this \
-                 machine's USB before it reset",
-                back.label
-            ));
-            continue;
-        };
-        if !account.complete() {
-            bad.push(format!("{}: {account:?}", back.label));
-        }
-        if !text.text().contains(TOOK_THE_LOCK) {
-            bad.push(format!(
-                "{}: this is an orderly reboot and its account does not say {TOOK_THE_LOCK:?}",
-                back.label
-            ));
-        }
-        eprintln!("  [power] {}: {account:?}", back.label);
-    }
-    if bad.is_empty() {
-        return Ok(());
-    }
-    Err(format!("{} finding(s):\n  {}", bad.len(), bad.join("\n  ")))
 }
 
 /// What `/system/bin/acpiserver` says once it serves q35's power button,

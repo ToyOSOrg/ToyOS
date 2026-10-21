@@ -155,6 +155,10 @@ pub enum IpcError {
 /// Why a whole frame could not be handed over without blocking.
 #[derive(Debug)]
 pub enum TrySendError {
+    /// The peer's pipe took nothing: it is full. The connection is still at a
+    /// message boundary, and the frame may be sent again once it is
+    /// writable.
+    Busy,
     /// The peer's pipe would not take the whole frame in one write.
     ///
     /// **The connection is no longer at a message boundary.** The kernel
@@ -586,15 +590,16 @@ fn read_exact(handle: RawHandle, buf: &mut [u8]) -> Result<(), IpcError> {
     Ok(())
 }
 
-/// All of `buf` in one non-blocking write, or [`TrySendError::Full`].
+/// All of `buf` in one non-blocking write, [`TrySendError::Busy`] where none of
+/// it went, or [`TrySendError::Full`] where part did.
 ///
 /// A short write is `Full`, not a partial success: the caller asked for a
 /// frame, and half a frame is a stream the peer can no longer parse.
 fn write_whole(handle: RawHandle, buf: &[u8]) -> Result<(), TrySendError> {
     match syscall::write_nonblock(handle, buf) {
         Ok(n) if n == buf.len() => Ok(()),
+        Ok(0) | Err(SyscallError::WouldBlock) => Err(TrySendError::Busy),
         Ok(_) => Err(TrySendError::Full),
-        Err(SyscallError::WouldBlock) => Err(TrySendError::Full),
         Err(e) => Err(TrySendError::Syscall(e)),
     }
 }

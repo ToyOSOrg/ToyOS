@@ -21,7 +21,6 @@ macro_rules! device_info {
 device_info!(
     toyos_abi::FramebufferInfo,
     toyos_abi::pci::PciFunctionInfo,
-    toyos_abi::part::PartitionInfo,
     toyos_abi::acpi::AcpiInfo,
 );
 
@@ -49,41 +48,6 @@ pub(crate) fn read_info<T: IpcPayload>(dev: &Device) -> Result<T, SyscallError> 
     assert_eq!(n, size, "device info size mismatch");
     // SAFETY: the assertion above proves the read filled all `size` bytes.
     Ok(unsafe { val.assume_init() })
-}
-
-pub struct Keyboard(pub(crate) Device);
-
-impl Keyboard {
-    /// Non-blocking read of pending key events; empty surfaces as `Err(WouldBlock)`.
-    ///
-    /// Event loops must only ever read this handle non-blocking. The kernel wakes
-    /// keyboard watchers only when a report queued an event, so readiness and
-    /// "there is data" agree today — but a blocking read that loses the race
-    /// with another reader parks the caller until the next real key, and an
-    /// event loop that stops pumping is a frozen window.
-    pub fn read_nonblock(&self, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        self.0.0.read_nonblock(buf)
-    }
-}
-
-impl AsHandle for Keyboard {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
-}
-
-pub struct Mouse(pub(crate) Device);
-
-impl Mouse {
-    /// Non-blocking read of pending mouse events; empty surfaces as `Err(WouldBlock)`.
-    ///
-    /// Same rationale as [`Keyboard::read_nonblock`]: an event loop that can
-    /// park on an empty queue is a frozen window.
-    pub fn read_nonblock(&self, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        self.0.0.read_nonblock(buf)
-    }
-}
-
-impl AsHandle for Mouse {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 
 pub struct FramebufferDev(pub(crate) Device);
@@ -241,33 +205,3 @@ impl AsHandle for PciDev {
     fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 
-/// One GPT partition, read and written in its own block numbers
-/// ([`toyos_abi::part`]); a neighbour's blocks have no spelling here.
-pub struct PartitionDev(pub(crate) Device);
-
-impl PartitionDev {
-    /// Which partition this is and how long; read once per claim.
-    pub fn describe(&self) -> Result<toyos_abi::part::PartitionInfo, SyscallError> {
-        read_info(&self.0)
-    }
-
-    /// `buf.len()` blocks from the partition's block `first`.
-    pub fn read(&self, first: u64, buf: &mut [toyos_abi::part::Block]) -> Result<(), SyscallError> {
-        syscall::partition_read(self.0.as_handle(), first, buf)
-    }
-
-    /// `buf.len()` blocks to the partition's block `first`; durable only once
-    /// [`Self::sync`] answers `Ok`.
-    pub fn write(&self, first: u64, buf: &[toyos_abi::part::Block]) -> Result<(), SyscallError> {
-        syscall::partition_write(self.0.as_handle(), first, buf)
-    }
-
-    /// Every write this claim returned from, out of the device's cache.
-    pub fn sync(&self) -> Result<(), SyscallError> {
-        syscall::fsync(self.0.as_handle())
-    }
-}
-
-impl AsHandle for PartitionDev {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
-}

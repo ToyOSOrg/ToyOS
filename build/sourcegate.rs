@@ -100,7 +100,6 @@ const NMI_SILENT: &[&str] =
 const BUS_MASTER_SITES: &[(&str, usize)] = &[
     ("kernel/src/drivers/pci.rs", 1),
     ("kernel/src/drivers/virtio.rs", 1),
-    ("kernel/src/drivers/xhci/wait/boot.rs", 1),
     ("kernel/src/arch/x86_64/amdvi/mod.rs", 1),
 ];
 
@@ -307,10 +306,7 @@ const HOSTNAME: &str = "a hostname carrying a personal name";
 /// Every value of a refused shape the tree keeps, by file, each identifying
 /// nobody. A value a shape passes says the same without a row here: a locally
 /// administered MAC, an RFC 5737 or RFC 3849 address.
-const IDENTIFIES_NOBODY: &[(&str, &str)] = &[
-    // Made up, in the kernel's own record of a disk that came back.
-    ("tests/checks/usb.rs", "FEDCBA98765432FEDCBA"),
-];
+const IDENTIFIES_NOBODY: &[(&str, &str)] = &[];
 
 /// Every maximal run of `line`'s bytes that `of` takes, and where it starts.
 /// `of` takes ASCII alone, so a run begins and ends on a character.

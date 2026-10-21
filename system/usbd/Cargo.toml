@@ -1,14 +1,18 @@
 [package]
 name = "usbd"
-description = "One xHCI controller driven from userland: the handoff, its reset and rings, its interrupt through the claim, and every root-hub device enumerated through toyos-xhci and named over inspect."
+description = "One xHCI controller driven from userland: its sticks offered to the block service and served, its keyboards and pointers reported to the owner of input, and every device named over inspect."
 edition = "2024"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }
 toyos = { path = "../../sdk/toyos" }
-toyos-xhci = { path = "../../lib/xhci" }
+toyos-xhci = { path = "xhci" }
 toyos-inspect = { path = "../../lib/inspect" }
+toyos-pci-claim = { path = "../../lib/pci-claim" }
+toyos-blockring = { path = "../../lib/blockring" }
+toyos-blockserve = { path = "../../lib/blockserve" }
+toyos-input = { path = "../../lib/input" }
 
 [package.metadata.toyos.host]
 exempt.owns = "the xHCI controller ToyOS claims for it"

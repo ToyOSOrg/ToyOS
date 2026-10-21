@@ -49,7 +49,7 @@ provides = ["surface"]
 serves = ["input"]
 receives = ["log"]
 starts = ["shell"]
-devices = ["framebuffer", "keyboard", "mouse"]
+devices = ["framebuffer"]
 
 [programs.shell]
 receives = ["surface"]
@@ -106,6 +106,13 @@ serves = ["block", "disk"]
 [programs.nvme]
 drives = ["pci:01:08:02/1b36:0010"]
 receives = ["disk"]
+
+# The USB driver: one process per xHCI controller, its sticks offered to the
+# block service as disks it serves, its keyboards and pointers reported to the
+# owner of input.
+[programs.usbd]
+drives = ["pci:0c:03:30"]
+receives = ["disk", "input"]
 
 # The file servers: DATA, the log and the boot volume, one process
 # each, serving every program the directories of its role. Started again when

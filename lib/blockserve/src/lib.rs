@@ -17,7 +17,5 @@ pub use table::Partition;
 
 /// A partition GUID as the lines say it.
 pub fn guid_text(bytes: [u8; 16]) -> String {
-    use toyos_abi::part::{PartGuid, GUID_TEXT_LEN};
-    let mut buf = [0u8; GUID_TEXT_LEN];
-    PartGuid(bytes).write_text(&mut buf).to_string()
+    toyos_gpt::Guid(bytes).to_string()
 }

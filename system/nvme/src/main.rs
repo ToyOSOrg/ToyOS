@@ -108,7 +108,8 @@ fn main() {
     let dev = claim();
     let info = dev.describe().unwrap_or_else(|why| panic!("nvme: the claim would not describe itself: {why:?}"));
     let name = format!("nvme {:02x}:{:02x}.{}", info.bus, info.dev, info.func);
-    let mut link = Link::new(name.clone());
+    let mut link = Link::new(name.clone())
+        .unwrap_or_else(|| panic!("{name}: started with no `{}` port: a disk driver's row receives it", toyos_blockring::disk::PORT));
     let mut ctrl = match Controller::open(dev, &info) {
         Ok(ctrl) => ctrl,
         Err(why) => {
@@ -125,7 +126,8 @@ fn main() {
         ctrl.lba_bytes,
         ctrl.sectors
     );
-    let parts = toyos_blockserve::table::read(&name, &mut Sectors { ctrl: &mut ctrl, block: vec![0u8; BLOCK_BYTES] });
+    let read = toyos_blockserve::table::read(&mut Sectors { ctrl: &mut ctrl, block: vec![0u8; BLOCK_BYTES] });
+    let parts = toyos_blockserve::table::say(&name, read);
     let mut disk = Sessions::new(name.clone(), parts);
     link.offer(DISK, disk.offered());
     link.settle(Settled::Offered);

@@ -135,17 +135,6 @@ fn arm(source: StreamId, vector: u8) {
     report(source, vector, read);
 }
 
-/// The message a kernel driver's `source` raises `vector` with: its own
-/// compatibility message, an entry for it written first where every unit
-/// remaps.
-pub(in crate::arch::x86_64) fn msi(source: StreamId, vector: u8) -> Result<Msi, Refused> {
-    if is_armed() {
-        arm(source, vector);
-    }
-    let (address, data) = msi_message(vector);
-    Ok(Msi { address, data })
-}
-
 /// A claim's entry at `vector` for `source`, whose entry from now on passes
 /// nothing firmware declared for it and gives it no `SysMgt`.
 pub(in crate::arch::x86_64) fn claim(vector: u8, source: StreamId) -> Result<Msi, Refused> {
@@ -158,7 +147,11 @@ pub(in crate::arch::x86_64) fn claim(vector: u8, source: StreamId) -> Result<Msi
         "amdvi: a claim on {source}, whose remapping table another source already wrote"
     );
     domain::claimed(source.requester());
-    msi(source, vector)
+    if is_armed() {
+        arm(source, vector);
+    }
+    let (address, data) = msi_message(vector);
+    Ok(Msi { address, data })
 }
 
 /// A claim's entry absent again and gone from every unit's cache.

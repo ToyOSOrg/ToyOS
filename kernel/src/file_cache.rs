@@ -3,8 +3,7 @@ use alloc::collections::btree_map::Entry;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
-use crate::block;
-use crate::file_backing::FileBacking;
+use crate::file_backing::{BlockError, FileBacking};
 use crate::sync::Lock;
 use crate::user_ptr::{ByteSource, UserBytesMut};
 
@@ -65,7 +64,8 @@ static FILE_CACHE: Lock<FileCache> = Lock::new(FileCache {
 
 /// Install the memory budget; must run after the PMM sizes RAM and before any file is opened.
 pub fn init() {
-    let max_pages = block::file_cache_pages();
+    let (total, _) = crate::mm::pmm::stats();
+    let max_pages = (((total / 64) / PAGE_SIZE as u64) as usize).clamp(2048, 65536);
     FILE_CACHE.lock().max_pages = max_pages;
     log!("file cache: budget {} pages ({} MiB)", max_pages, max_pages * PAGE_SIZE / (1024 * 1024));
 }
@@ -163,7 +163,7 @@ pub fn read_page(
     page_idx: u32,
     offset: usize,
     buf: &mut UserBytesMut,
-) -> Result<(), block::BlockError> {
+) -> Result<(), BlockError> {
     let backing;
     {
         let mut cache = FILE_CACHE.lock();
@@ -223,7 +223,7 @@ pub fn write_page<S: ByteSource + ?Sized>(
     page_idx: u32,
     offset: usize,
     data: &S,
-) -> Result<(), block::BlockError> {
+) -> Result<(), BlockError> {
     // A resident page is written under the same lock acquisition that found it; the fetch path below drops the lock, and a sibling's eviction in that window would otherwise merge the write into a blank page.
     let backing;
     {

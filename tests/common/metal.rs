@@ -375,10 +375,6 @@ impl Readback {
                 self.label,
                 park.sweep.running,
             )),
-            Some(park) if park.in_flight != 0 => Err(format!(
-                "{}'s stop ended with {} block operation(s) open:\n    {park}",
-                self.label, park.in_flight,
-            )),
             Some(_) => Ok(()),
         }
     }

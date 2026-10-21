@@ -236,7 +236,7 @@ impl From<SyscallError> for DropReason {
 impl From<ipc::TrySendError> for DropReason {
     fn from(e: ipc::TrySendError) -> Self {
         match e {
-            ipc::TrySendError::Full => Self::NotReading,
+            ipc::TrySendError::Busy | ipc::TrySendError::Full => Self::NotReading,
             ipc::TrySendError::TooLarge => Self::TooLarge,
             ipc::TrySendError::Syscall(e) => e.into(),
         }

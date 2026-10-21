@@ -25,7 +25,6 @@ pub mod inbox;
 pub mod input;
 pub mod inventory;
 pub mod log;
-pub mod part;
 pub mod pci;
 pub mod ring;
 pub mod syscall;

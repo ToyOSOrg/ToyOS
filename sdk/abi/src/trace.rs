@@ -74,9 +74,7 @@ pub enum Kind {
     TimerFire = 11,
     /// `data` timer expiries taken in Ring 0 since the last return to Ring 3.
     TimerFireBurst = 12,
-    /// An interrupt's record was consumed: `data`'s top byte is its source,
-    /// its low 24 bits the microseconds since the interrupt, saturating.
-    IrqDrain = 13,
+    // 13 was `IrqDrain`, the kernel's own drivers' interrupt records.
     /// Written only by a test kernel's flood; `data` is its index.
     Mark = 14,
 }
@@ -97,7 +95,6 @@ impl Kind {
             10 => Self::TimerStop,
             11 => Self::TimerFire,
             12 => Self::TimerFireBurst,
-            13 => Self::IrqDrain,
             14 => Self::Mark,
             _ => return None,
         })

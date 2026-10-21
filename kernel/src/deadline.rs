@@ -43,7 +43,6 @@ use crate::sched::MAX_CPUS;
 pub const PHASES: &[&str] = &[
     "before the first boot phase",
     "CPU ready",
-    "storage ready",
     "peripherals ready",
     "subsystems ready",
     "devices ready",

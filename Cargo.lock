@@ -1962,13 +1962,10 @@ dependencies = [
  "toyos-acpi",
  "toyos-amdvi",
  "toyos-blackbox",
- "toyos-blockhold",
  "toyos-bootmap",
  "toyos-dma",
  "toyos-elf",
- "toyos-fat32",
  "toyos-gicv3",
- "toyos-gpt",
  "toyos-its",
  "toyos-microcode",
  "toyos-pci",
@@ -1976,16 +1973,13 @@ dependencies = [
  "toyos-quiesce",
  "toyos-random",
  "toyos-rootimage",
- "toyos-scsi",
  "toyos-smmu",
  "toyos-symbols",
  "toyos-tco",
  "toyos-tsc",
  "toyos-untrusted",
- "toyos-usbhid",
  "toyos-userbound",
  "toyos-wallclock",
- "toyos-xhci",
 ]
 
 [[package]]
@@ -4447,7 +4441,6 @@ dependencies = [
  "toyos-userbound",
  "toyos-vdagent",
  "toyos-wallclock",
- "toyos-xhci",
  "ureq",
  "webpki-root-certs",
 ]
@@ -4596,6 +4589,7 @@ name = "toyos-inspect"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
+ "toyos-gpt",
 ]
 
 [[package]]
@@ -4910,6 +4904,7 @@ dependencies = [
 name = "toyos-usbhid"
 version = "0.1.0"
 dependencies = [
+ "toyos-abi",
  "toyos-input",
 ]
 
@@ -4980,15 +4975,13 @@ dependencies = [
 name = "toyos-xhci"
 version = "0.1.0"
 dependencies = [
+ "toyos-abi",
+ "toyos-blockring",
+ "toyos-device-memory",
+ "toyos-gpt",
+ "toyos-input",
  "toyos-scsi",
-]
-
-[[package]]
-name = "toyos-xhci-sim"
-version = "0.1.0"
-dependencies = [
- "rand 0.9.5",
- "toyos-xhci",
+ "toyos-usbhid",
 ]
 
 [[package]]
@@ -5162,7 +5155,11 @@ version = "0.0.0"
 dependencies = [
  "toyos",
  "toyos-abi",
+ "toyos-blockring",
+ "toyos-blockserve",
+ "toyos-input",
  "toyos-inspect",
+ "toyos-pci-claim",
  "toyos-xhci",
 ]
 

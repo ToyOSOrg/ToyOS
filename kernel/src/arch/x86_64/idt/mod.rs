@@ -9,7 +9,6 @@ mod timer;
 mod tlb;
 pub(crate) mod unclaimed;
 pub(crate) mod user_dev;
-mod xhci;
 
 pub(crate) use user_dev::ClaimVector;
 
@@ -36,26 +35,6 @@ pub const ISA_VECTORS: [u8; crate::isa::MAX_ROWS] = [Vector::Isa0 as u8, Vector:
 
 /// The vector an IOMMU writes into its own `FEDATA`.
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
-
-/// The vector a driver in this kernel arms its function's message with: one
-/// of the two below, each its own gate.
-#[derive(Clone, Copy)]
-pub struct DriverIrq(Vector);
-
-impl DriverIrq {
-    pub(crate) const fn vector(self) -> u8 {
-        self.0 as u8
-    }
-}
-
-impl core::fmt::Display for DriverIrq {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "vector {:#x}", self.vector())
-    }
-}
-
-/// The vector the xHCI controller's message-signalled interrupt carries.
-pub const XHCI_VECTOR: DriverIrq = DriverIrq(Vector::Xhci);
 
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;
@@ -255,7 +234,6 @@ idt_vectors! {
         // ist 2: SYSCALL's brief CPL0-on-user-stack window would fault SMAP without it.
         Nmi          = 0x02, nmi::nmi_entry, ist 2;
         Timer        = 0x20, timer::timer_entry;
-        Xhci         = 0x21, xhci::xhci_entry;
         DmaFault     = 0x25, dma_fault::dma_fault_entry;
         Isa0         = 0x2C, isa::isa0_entry;
         Isa1         = 0x2D, isa::isa1_entry;

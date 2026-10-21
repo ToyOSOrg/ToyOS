@@ -120,7 +120,7 @@ is owed; a cause is.
 
 ## What is known and what is not
 
-- `issues/an-xhci-storm-starves-the-cpu-that-takes-it.md` carries the
+- The kernel's xHCI storm, closed when that driver left the kernel (the small-kernel track's step 10), carried the
   same shape, over the 34 s the stick was being written, on run 20's
   `metaldevicecase` boot at tip `f46f91eb`
   (`[2026-09-07 08:51:28 34.609 cpu1] irq: cpu0 total=103171 timer=10 xhci=103161 net=0 sound=0 i8042=0 dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0`)

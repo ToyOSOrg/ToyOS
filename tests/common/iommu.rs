@@ -155,6 +155,10 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
 /// the one its nvme row drives.
 const NVME_AT: &str = "00:02.0";
 
+/// The slot QEMU's `-device` order puts the boot controller on, the one the
+/// image's usbd row drives.
+const XHCI_AT: &str = "00:01.0";
+
 /// The slot QEMU's `-device` order puts the virtio-sound function on, the one
 /// `tests/images/netcase.toml`'s soundserver row claims.
 const SOUND_AT: &str = "00:04.0";
@@ -180,7 +184,11 @@ fn not_handed_over(at: &str, why: &str) -> String {
 /// would fail. The NVMe controller and the virtio-sound function are refused
 /// the same.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
-    refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[NVME_AT, SOUND_AT])?;
+    refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[XHCI_AT, NVME_AT, SOUND_AT])?;
+    log.must_say(&not_handed_over(XHCI_AT, NOT_REMAPPED))?;
+    log.must_say(&format!(
+        "supervisor: usbd was not started on PCI {XHCI_AT}: pci:0c:03:30/1033:0194 is on this machine and could not be handed over"
+    ))?;
     log.must_say(&not_handed_over(SOUND_AT, NOT_REMAPPED))?;
     log.must_say("supervisor: soundserver: pci:04:01:00/1af4:1059 is on this machine and could not be handed over")?;
     log.must_say(&not_handed_over(NVME_AT, NOT_REMAPPED))?;
@@ -305,7 +313,7 @@ pub(crate) fn unit_fields(line: &str) -> BTreeMap<String, String> {
 }
 
 /// Every function `pci::enumerate` printed. Anchored on the class field that
-/// follows the address, so `xHCI: found at PCI 00:02.0` is not one of them.
+/// follows the address, so `pcidev: PCI 00:02.0 [...]` is not one of them.
 fn enumerated_functions(log: &Serial) -> BTreeSet<String> {
     log.text()
         .lines()
@@ -325,12 +333,10 @@ const AMDVI_SERVES_XHCI: &str = "iommu: amdvi unit0 serves 00:03.0 data=0x00";
 const AMDVI_OFF: &str = "iommu: amdvi unit0 @0xfed80000 switched off control=0x0000000000000000";
 /// The unit programmed and on.
 const AMDVI_TRANSLATING: &str = "iommu: amdvi unit0 @0xfed80000 translating control=";
-/// The boot stick's controller on the first domain a driver made, the one
-/// past the identity domain.
-const XHCI_MOVED: &str = "iommu: 00:03.0 moves to domain2";
-/// The USB gate: the boot stick bound through the controller behind the unit,
-/// which only DMA the unit lets through can do.
-const STICK_BOUND: &str = "usb-storage: 1 device(s)";
+/// The boot stick's controller refused to a claim: this unit remaps no
+/// message, so no function behind it is handed to a process, and the
+/// controller's DMA is no question this machine can answer.
+const XHCI_REFUSED: &str = "pcidev: PCI 00:03.0 NOT HANDED OVER — its interrupts would not be remapped on this machine";
 
 /// What the actuator leaves on an AMD-Vi unit, in the kernel's words for
 /// `unit`: one line per field the hand-over switches off by its own write.
@@ -339,20 +345,19 @@ pub(crate) fn amdvi_left_on(unit: &str) -> [String; 3] {
         .map(|field| format!("iommu: amdvi {unit} was handed over with {field} on; it goes off"))
 }
 
-/// **A unit an AMD machine's firmware left on is switched off and programmed,
-/// and the boot stick's DMA reaches memory through its controller's own
-/// domain.** QEMU's `amd-iommu` is the only AMD-Vi unit
-/// the nightly guest suite runs: the T14 is an Intel machine, and the hand-over's
-/// register sequence and the DMA it frees are neither of them a host test's.
-/// Two boots: the shipped kernel finds a unit nothing left on and switches
-/// nothing off; the test kernel's `iommu-firmware-left` leaves the unit blocking
-/// every device's DMA with its command buffer and event log running, and
-/// each goes off by its own write before the stick is driven. With the
-/// switch-off reverted that boot reds on the fields' lines and on `control`
-/// reading back zero, and its stick still binds: QEMU 11.1.1 moves no
-/// function to translation on `INVALIDATE_IOMMU_ALL`
-/// (`issues/qemus-invalidate-iommu-all-leaves-every-function-untranslated.md`),
-/// so the AMD bench's `iommu_firmware_left` row holds the DMA half.
+/// **A unit an AMD machine's firmware left on is switched off and
+/// programmed.** QEMU's `amd-iommu` is the only AMD-Vi unit the nightly guest
+/// suite runs: the T14 is an Intel machine, and the hand-over's register
+/// sequence is no host test's. Two boots: the shipped kernel finds a unit
+/// nothing left on and switches nothing off; the test kernel's
+/// `iommu-firmware-left` leaves the unit blocking every device's DMA with its
+/// command buffer and event log running, and each goes off by its own write.
+/// With the switch-off reverted that boot reds on the fields' lines and on
+/// `control` reading back zero. **The DMA half is the AMD bench's
+/// `iommu_firmware_left` row's**: the kernel drives no function behind this
+/// unit, and this one remaps no message, so the boot stick's controller is
+/// refused to usbd here; QEMU's unit that remaps filters no SMI, which is
+/// refused too (`usbd_refused_without_smi_filter`).
 pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
     let profile = Profile::MetalAmdVi;
     let argv = qemu::profile_argv(&BootOptions { profile, ..Default::default() });
@@ -367,14 +372,13 @@ pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
         let log = Serial::boot(&qemu);
         log.must_be_clean()?;
         log.must_say("Boot: complete")?;
-        log.must_say(STICK_BOUND)?;
+        log.must_say(XHCI_REFUSED)?;
         log.must_say("iommu: IVRS rev=1 ivinfo=0x00002801 efr_images=y preboot_dma_protection=n pa=40 va=0")?;
         log.must_say(AMDVI_UNIT)?;
         log.must_say(AMDVI_SUPERSEDED)?;
         log.must_say(AMDVI_SERVES_XHCI)?;
         log.must_say(AMDVI_OFF)?;
         log.must_say(AMDVI_TRANSLATING)?;
-        log.must_say(XHCI_MOVED)?;
         log.must_not_say("isolates no device")?;
         log.must_not_say("no DMAR or IVRS table")?;
         let handed = log.must_say("iommu: amdvi unit0 handed over control=")?;
@@ -392,7 +396,7 @@ pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
         } else {
             log.must_not_say("was handed over with")?;
         }
-        eprintln!("  [amdvi] left on = {left}: {handed}; the stick bound behind the unit");
+        eprintln!("  [amdvi] left on = {left}: {handed}; the stick's controller refused to a claim behind it");
     }
     Ok(())
 }

@@ -68,9 +68,9 @@ What is left of the staged work:
 4. **The i8042 (PS/2)**: staged as stage 7 of
    `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`.
 
-- **USB HID cannot move to userspace without moving the boot block device or
-  splitting the controller.** It shares the controller, the event ring and the
-  lock with the boot disk.
+- **USB HID moved with the boot disk**: usbd drives each xHCI controller
+  whole, its sticks and its HID devices alike (the small-kernel track's step
+  10).
 - **Where each xHCI keeps its MSI-X table**, which decides whether usbd's
   claim arms MSI-X or MSI (`bring_up`, `kernel/src/pcidev/mod.rs`). QEMU
   11.1's `nec-usb-xhci` arms MSI-X and publishes one memory BAR, BAR 0, so
@@ -79,8 +79,8 @@ What is left of the staged work:
   only BAR 0 and armed MSI in the kernel's own bring-up, with no `MSI-X not
   armed` line and one remapping entry each (a `testcases` readback): no MSI-X
   capability came off either walk, so a claim arms MSI and hands BAR 0 over —
-  if the walk reached the list's terminator. Whether it did is not read:
-  `drivers/xhci/wait/boot.rs`'s `arm_interrupt` falls back to MSI on
+  if the walk reached the list's terminator. Whether it did is not read: the
+  kernel's own xHCI bring-up, which went with step 10, fell back to MSI on
   `NoCapability::Absent` and `Truncated` alike, and the second refuses the
   claim as `CapsTruncated`. One T14 boot printing which, or the PCI inventory
   printing each function's capability ids and how its walk ended, closes it.

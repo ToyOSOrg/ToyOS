@@ -119,66 +119,30 @@ and NVMe. Exit: as stage A.
   `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`, stage 3's module tests hold
   the bytes a file server ended under its clients had flushed, and stage 4 owes the client's
   `Gone` and reconnect, and the supervisor's restart, its bound and its refusal by name of a
-  restart whose claim is held, as module tests. The kernel's `AlreadyExists` on a held partition
-  is `partition_claim`'s.
+  restart whose claim is held, as module tests.
 - metal `layout_fresh_boot`: `/home`'s layout on the disk.
 - metal `pkg_install_gbae`: `pkg install` lands a package that runs.
-- metal `partition_claim`: a partition claimed as a device, and its refusals.
 - metal `kernel_log_file`, `log_partition_layout`, `log_partition_identity`: `/log` on the stick
   and its layout.
 - metal `file_mtime_survives_a_reboot`: a file's mtime survives a reboot.
 
 ## Stage E: USB and xHCI
 
-Host: `toyos-xhci` and its sim. Metal: the T14's controller and stick. Exit: as stage A.
+The kernel drives no USB; usbd does (the small-kernel track's step 10). Host:
+`toyos-xhci`'s stub tests, the driver against an xHC written from xHCI 1.2,
+and `toyos-usbhid`'s and `toyos-scsi`'s decoders. Metal: the usbd rows.
+Exit: as stage A, with what is still owed:
 
-- host `xhci_many_devices`, `xhci_second_controller`, `xhci_two_controllers`: devices across one
-  and two controllers enumerate and deliver.
-- host `xhci_msi_only`, `xhci_no_interrupt`: a controller with MSI only, and with no interrupt.
-- host `xhci_slot_exhaustion`, `xhci_scan_hands_over_a_free_slot`: slots run out by name and are
-  handed back.
-- host `xhci_deaf_registers`, `xhci_slow_connect`, `xhci_portsc_rw1c`, `xhci_flap`: registers that
-  never answer, a slow connect, PORTSC's write-one-to-clear, a replug inside the debounce.
-- host `xhci_superspeed_ports`: device speeds bind to their ports.
-- host `usb_storage_shapes`, `usb_refused_disk_first`, `usb_pool_exhausted`: disk sizes, sector
-  sizes and counts the driver serves or refuses.
-- host `usb_storage_write_error`, `usb_flush_optional`: a refused write and a missing cache flush.
-- host `usb_stick_left`: a stick that leaves its port while the port-reset rung holds it, at each
-  of three points (before the reset's completion is read, after it, and before the rung's TEST
-  UNIT READY), ends the run as the stick leaving: never `Rung::Offline`, no second break counted,
-  no Reset Device or Address Device sent to a port the reset or the TEST UNIT READY read empty,
-  and its slot disabled. Its row arms only `usb-transport-break`, and the T14 cannot pull its own
-  stick. Exit: a `toyos-xhci` sim test per point, red on each fact alone: when the empty port
-  climbs the ladder to `Offline`, when it counts a second break, when the sim's port is sent a
-  Reset Device or Address Device after it read empty, and when the stick's slot is never
-  disabled.
-- metal `usb_reset_records_the_phase_it_cut`: a machine stopped inside a Bulk-Only command at
-  each of `DataOwed`, `Data` and `StatusOwed` resets itself, and the account the next pass reads
-  names that phase. Its row arms only `usb-reset-under-load` and reads whichever phase the sweep
-  cuts. Brings back `usb-wedge-data-owed`, `usb-wedge-in-data` and `usb-wedge-before-status`,
-  which meet `issues/a-deliberate-wedge-inside-a-driver-panics-every-other-cpu-that-wants-its-lock.md`
-  there. Exit: a row per phase, red when `stop::OpenCommand` publishes nothing.
-- host `usb_reset_records_the_phase_it_cut`: `usb-reset-under-load` on a disk smaller than
-  `SWEEP_FLOOR` refuses by name and sweeps nothing; the T14's stick has the room. Exit: a host
-  test over the sweep's span lifted out of `kernel/src/usb_gate.rs`, red when the floor goes.
-- metal `usb_reset_hands_devices_back`, the three resets its row does not reach, each judged on
-  the account in `loader.log` that `devices::quiesced` reads. Its row judges two orderly
-  reboots.
-  - The test runner's job deadline, with `quiesce-late-word` on `tests/jobdeadlinecase`: the stop
-    took the controller lock before the log volume's flush and completed. Exit: red when
-    `stop::settle_commands` is reverted.
-  - The panic console's bound, with `test-late-panic` and `panic-reboot-fast`: no barrier taken,
-    nothing flushed, and the stop still complete. Waits on
-    `issues/the-metal-loop-cannot-judge-a-boot-that-panics.md`, whose loop refuses that
-    boot. Exit: as the deadline's.
-  - The negative control, a controller lock that never comes free (`xhci-lock-wedged`): the
-    machine hands itself back anyway, and the account says the lock was not free inside its
-    bound. Exit: red when the barrier's bound is removed, which leaves the machine wedged.
-- metal `usb_storage_gate`: the stick is read and written byte for byte.
-- metal `late_storage_connect`: a disk that connects after the boot scan is bound, and `/boot` and
-  `/log` mount off it. Nothing is plugged: `xhci-slow-storage-connect` reports the first root-hub
-  port empty until the scan has run, and a row whose stick is on another port is red, not vacuous,
-  because its boot then logs no `usb-storage: 0 device(s)`.
+- metal: the rewritten `usbload` row, a stick written continuously through
+  usbd and the machine reset under it by the boot deadline, judged on
+  `boot.usbload.stick_secs` (#901 section 9).
+- metal: `tone_beside_a_stick_write`
+  (`issues/a-megabyte-written-to-the-stick-starves-a-tone-beside-it.md`).
+- metal `late_storage_connect`: a disk that connects after bring-up is
+  served, and `/boot` and `/log` mount off it — on the stub, a device plugged
+  in later runs the same path as one present at bring-up
+  (`a_device_plugged_in_later_runs_the_same_path_as_one_present_at_bring_up`);
+  no bench has a stick connected late.
 
 ## Stage F: input and the i8042
 

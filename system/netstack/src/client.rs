@@ -66,7 +66,7 @@ impl Client {
     fn answered(&self, sent: Result<(), ipc::TrySendError>) {
         if let Err(e) = sent {
             let why = match e {
-                ipc::TrySendError::Full => {
+                ipc::TrySendError::Busy | ipc::TrySendError::Full => {
                     "its pipe will not take the answer and it is not reading"
                 }
                 ipc::TrySendError::TooLarge => "the answer netstack built is larger than a frame",

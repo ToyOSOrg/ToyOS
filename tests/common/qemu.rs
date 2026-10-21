@@ -686,9 +686,9 @@ pub enum Profile {
     /// its claim.
     HeadlessVirtioGpu,
     /// [`Profile::Headless`] with a second controller at [`SPARE_AT`], QEMU's
-    /// `qemu-xhci` on MSI and with no MSI-X, carrying a stick and a keyboard:
-    /// the controller `xhci-leave=00:10.0` leaves to `usbd`, armed on MSI as
-    /// the T14's two are.
+    /// default `qemu-xhci`, its MSI-X table in the BAR that holds its
+    /// registers, carrying a stick and a keyboard: the controller no image's
+    /// `drives` row names, which `usbd_spare` claims.
     HeadlessUsbSpare,
     /// [`Profile::Headless`] with its virtio NIC behind a `pcie-root-port`:
     /// a function a claim may take whose BAR has to land inside the port's
@@ -874,11 +874,9 @@ const XHCI_DEFAULT: &str = "nec-usb-xhci,id=xhci";
 
 /// [`Profile::HeadlessUsbSpare`]'s second controller, and the stick on it,
 /// whose bytes are zeros and whose writes go nowhere: what is on it is no
-/// question this machine asks. `msi=on` stated, because with MSI-X off and
-/// MSI left `auto` this QEMU's `qemu-xhci` offers neither, and the kernel
-/// refuses the claim for it.
-const XHCI_SPARE: &str = "qemu-xhci,id=spare,addr=0x10,msix=off,msi=on";
-/// Where [`XHCI_SPARE`] puts the spare, which `xhci-leave=` names.
+/// question this machine asks.
+const XHCI_SPARE: &str = "qemu-xhci,id=spare,addr=0x10";
+/// Where [`XHCI_SPARE`] puts the spare.
 pub const SPARE_AT: &str = "00:10.0";
 const SPARE_STICK: &str = "driver=null-co,node-name=spare-stick,size=67108864,read-zeroes=on";
 

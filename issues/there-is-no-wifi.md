@@ -149,7 +149,7 @@ controller through its table in BAR 0.
     command whose completion arrives through the in-place MSI-X entry, which
     touches none of the other system's data; no row does it yet;
   - on the AMD bench, `amdvi_usbd_drives_its_own_entry`: `03:00.4`
-    (`xhci-leave=03:00.4`, its MSI-X table in BAR 0, its only BAR, behind
+    (which no test image's usbd row names, its MSI-X table in BAR 0, its only BAR, behind
     `00:08.1`, whose `0xd0000000..0xd0500000` bus 3 fills) claimed in place
     and driven by usbd through its own remapping entry, every unit filtering
     SMIs: the `usbd_spare`, `usbd_spare_fault`, `end_returns_claims` and

@@ -59,9 +59,7 @@ fn control_features() -> Vec<String> {
 /// set never sees; the third is the one `--kernel-param` builds, `boot-actuators`
 /// without `test-actuators`, whose dead code neither of the others can see.
 /// `undocumented_unsafe_blocks` is adopted per area as each area's
-/// justifications land. `toyos-xhci` has a shape of its own because the
-/// workspace run builds it only with `toyos-xhci-sim`'s `flaws`, never as the
-/// kernel does. `toyos-pci-claim` has one because `$GUESTS` excludes it and
+/// justifications land. `toyos-pci-claim` has one because `$GUESTS` excludes it and
 /// only netstack's host tests build its `host-grant`. `kernel-loom` has one
 /// because `victim-retires-mid-probe`'s test arm excludes `no-preempt-guard`,
 /// which `$CONTROLS` turns on beside it. `toyos-crypto` has three because the
@@ -149,10 +147,6 @@ const SHAPES: &[Shape] = &[
     Shape {
         before: &["-p", "bootloader", "--target", Arch::Aarch64.loader()],
         after: &["$ADOPTED", "-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
-    },
-    Shape {
-        before: &["-p", "toyos-xhci", "--all-targets"],
-        after: &["$ADOPTED", "-D", "warnings"],
     },
     Shape {
         before: &["-p", CRYPTO, "--all-targets", "--features", CRYPTO_DISPATCHED],

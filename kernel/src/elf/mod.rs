@@ -320,7 +320,7 @@ pub(crate) fn read_backing_into(
     backing: &dyn crate::file_backing::FileBacking,
     offset: u64,
     dst: KernelSlice,
-) -> crate::block::BlockResult {
+) -> crate::file_backing::BlockResult {
     let mut remaining = dst.size();
     let mut file_off = offset;
     let mut buf_off = 0usize;

@@ -18,11 +18,10 @@ use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
-use toyos::{ipc, system, AsHandle, Keyboard, Mouse};
+use toyos::{ipc, system, AsHandle};
 use toyos_abi::input::RawKeyEvent;
-use toyos_abi::syscall::DeviceType;
 use toyos_abi::RawHandle;
-use toyos_input::wire::{self, Record, CONNECTIONS, MAX_PAYLOAD, STREAM_KEY_LEN, STREAM_POINTER_LEN};
+use toyos_input::wire::{self, Record, CONNECTIONS, MAX_PAYLOAD};
 use toyos_input::wire::DEVICES;
 use toyos_input::{Full, Merge, Pointer, Slot, State};
 use toyos_desktop::clipboard::{Landing, Watch};
@@ -246,12 +245,10 @@ pub struct Session {
     /// whose package asks a question only once the question is answered,
     /// through this loop.
     launcher: mpsc::Sender<String>,
-    kb: Keyboard,
-    mouse: Mouse,
     /// The `input` port, and the sources on it, by their slot.
     inputs: Acceptor,
     sources: [Option<Source>; CONNECTIONS],
-    /// Every source's keys and pointers, the kernel's streams among them.
+    /// Every source's keys and pointers.
     merge: Merge,
     pointers: Pointer,
     poller: Poller,
@@ -324,10 +321,6 @@ impl Session {
             .expect("the manifest declares this program serves `clipboard`");
         let settings = endow::acceptor(toyos_manifest::display::PORT)
             .expect("the manifest declares this program serves `display`");
-        let kb: Keyboard = endow::device(DeviceType::Keyboard)
-            .expect("the manifest gives this program the keyboard");
-        let mouse: Mouse = endow::device(DeviceType::Mouse)
-            .expect("the manifest gives this program the mouse");
         let inputs = endow::acceptor(wire::PORT)
             .expect("the manifest declares this program serves `input`");
         let (mut display, panel) = Display::claim();
@@ -383,8 +376,6 @@ impl Session {
                 + VOLUME_POLL_HANDLES,
         );
         poller.watch(&inputs, READABLE, inputs.as_handle().0 as u64);
-        poller.watch(&kb, READABLE, kb.as_handle().0 as u64);
-        poller.watch(&mouse, READABLE, mouse.as_handle().0 as u64);
         poller.watch(&acceptor, READABLE, acceptor.as_handle().0 as u64);
         poller.watch(&prompts, READABLE, prompts.as_handle().0 as u64);
         poller.watch(&clipboards, READABLE, clipboards.as_handle().0 as u64);
@@ -416,8 +407,6 @@ impl Session {
             watcher: None,
             watch: Watch::default(),
             launcher,
-            kb,
-            mouse,
             inputs,
             sources: Default::default(),
             merge: Merge::default(),
@@ -500,8 +489,6 @@ impl Session {
         self.poller.wait(1, timeout.as_nanos() as u64, |token| ready.push(token));
         self.ready = ready;
 
-        let kb_ready = self.is_ready(self.kb.as_handle());
-        let mouse_ready = self.is_ready(self.mouse.as_handle());
         let inputs_ready = self.is_ready(self.inputs.as_handle());
         let sources_ready: Vec<usize> = (0..CONNECTIONS)
             .filter(|&n| self.sources[n].as_ref().is_some_and(|s| self.is_ready(s.conn.as_handle())))
@@ -530,9 +517,7 @@ impl Session {
         }
         self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
-        if !kb_ready
-            && !mouse_ready
-            && !inputs_ready
+        if !inputs_ready
             && sources_ready.is_empty()
             && !accept_ready
             && !prompt_ready
@@ -548,12 +533,6 @@ impl Session {
         self.dead.clear();
         if display_ready {
             self.display.woke();
-        }
-        if kb_ready {
-            self.keys();
-        }
-        if mouse_ready {
-            self.pointer();
         }
         if inputs_ready {
             self.admit();
@@ -581,7 +560,7 @@ impl Session {
         self.watched();
         self.reap();
         self.prompt_gone();
-        self.rearm(kb_ready, mouse_ready, inputs_ready, accept_ready, prompt_ready, clipboard_ready, settings_ready);
+        self.rearm(inputs_ready, accept_ready, prompt_ready, clipboard_ready, settings_ready);
         true
     }
 
@@ -666,24 +645,6 @@ impl Session {
 
     fn pixel_format(&self) -> u32 {
         self.display.screen().pixel_format_raw()
-    }
-
-    /// The kernel's keyboard stream, one source to the merge.
-    fn keys(&mut self) {
-        let mut buf = [0u8; 8 * STREAM_KEY_LEN];
-        // Never read blocking here. The kernel wakes only when a report queued
-        // an event, so readiness and `has_data` agree — but a blocking read on
-        // an empty queue parks the compositor until the next real key, and one
-        // spurious wake anywhere would freeze it.
-        let n = self.kb.read_nonblock(&mut buf).unwrap_or(0);
-        let (events, torn) = buf[..n].as_chunks::<STREAM_KEY_LEN>();
-        assert!(torn.is_empty(), "compositor: the keyboard read {n} bytes, not whole events");
-        for raw in events {
-            let merged = wire::key(raw).map(|key| self.merged_key(Slot::KERNEL, 0, key));
-            if !matches!(merged, Ok(Ok(()))) {
-                eprintln!("compositor: the kernel's keyboard stream carried {raw:02x?}, refused: {merged:?}");
-            }
-        }
     }
 
     /// `key` from `slot`'s device `source`, and whatever it changed of the
@@ -773,22 +734,6 @@ impl Session {
                 self.damage_all();
             }
         }
-    }
-
-    /// The kernel's mouse stream, one source to the merge.
-    fn pointer(&mut self) {
-        let mut buf = [0u8; 64 * STREAM_POINTER_LEN];
-        let n = self.mouse.read_nonblock(&mut buf).unwrap_or(0);
-        let (reports, torn) = buf[..n].as_chunks::<STREAM_POINTER_LEN>();
-        assert!(torn.is_empty(), "compositor: the mouse read {n} bytes, not whole reports");
-        let mut states = Vec::with_capacity(reports.len());
-        for raw in reports {
-            match wire::pointer(raw).map(|report| self.pointers.report(Slot::KERNEL, report)) {
-                Ok(Ok(state)) => states.push(state),
-                refused => eprintln!("compositor: the kernel's mouse stream carried {raw:02x?}, refused: {refused:?}"),
-            }
-        }
-        self.motion(&states);
     }
 
     /// What the merged pointer did over `states`.
@@ -1914,8 +1859,6 @@ impl Session {
     /// Re-arm the one-shot poll registrations for every handle that fired.
     fn rearm(
         &mut self,
-        kb: bool,
-        mouse: bool,
         inputs: bool,
         acceptor: bool,
         prompts: bool,
@@ -1948,12 +1891,6 @@ impl Session {
             if self.is_ready(handle) {
                 self.poller.watch(&w.conn, READABLE, handle.0 as u64);
             }
-        }
-        if kb {
-            self.poller.watch(&self.kb, READABLE, self.kb.as_handle().0 as u64);
-        }
-        if mouse {
-            self.poller.watch(&self.mouse, READABLE, self.mouse.as_handle().0 as u64);
         }
         if acceptor {
             let h = self.acceptor.as_handle();

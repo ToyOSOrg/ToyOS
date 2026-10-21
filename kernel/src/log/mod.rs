@@ -8,7 +8,6 @@
 pub mod console;
 mod handoff;
 pub mod read;
-pub mod recovery;
 pub mod registry;
 pub mod shard;
 mod stamp;

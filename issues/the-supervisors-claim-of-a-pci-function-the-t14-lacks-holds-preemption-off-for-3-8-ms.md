@@ -42,8 +42,8 @@ On the head no CPU but the one `hold_once` held reads more than 44537 ns of
 interrupts off in that report, which bounds every window inside the claim
 from above; no reading separates the claim's own windows from the rest.
 
-Before the first job's exit cpu0 also carries init's partition claims, 6.0
-and 6.6 ms in that boot (`issues/xhci-waits-are-spins.md`), and the
+Before the first job's exit cpu0 also carried init's partition claims, 6.0
+and 6.6 ms in that boot, which left the kernel with its xHCI, and the
 `mask-windows` kernel (`kernel/src/windows.rs`) prints each CPU's longest
 window and no opener, so its cpu0 line there reads this claim only once those
 have left the kernel.

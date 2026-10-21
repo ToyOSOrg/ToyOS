@@ -65,8 +65,8 @@ pub fn current_is_kernel_thread() -> bool {
 }
 
 /// Is `id` a kernel thread?
-// No lock: `drain_irqs` calls this on a machine already suspected of being
-// stuck, where taking one could hang diagnostics.
+// No lock: the stop asks this on a machine already suspected of being stuck,
+// where taking one could hang diagnostics.
 pub fn is_kernel_task(id: TaskId) -> bool {
     let packed = id.pack();
     ROWS.iter().any(|row| row.load(Ordering::Relaxed) == packed)

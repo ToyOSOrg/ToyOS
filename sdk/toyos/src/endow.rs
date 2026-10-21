@@ -70,12 +70,9 @@ from_handle! {
     SysCap => SysCap,
     Device => Device,
     crate::Console => crate::Console,
-    crate::Keyboard => |h| crate::Keyboard(Device(h)),
-    crate::Mouse => |h| crate::Mouse(Device(h)),
     crate::FramebufferDev => |h| crate::FramebufferDev(Device(h)),
     crate::PciDev => |h| crate::PciDev(Device(h)),
     crate::AcpiDev => |h| crate::AcpiDev(Device(h)),
-    crate::PartitionDev => |h| crate::PartitionDev(Device(h)),
 }
 
 /// This process's endowment table, parsed once.
@@ -235,16 +232,8 @@ pub fn claim<T: FromHandle>(name: &str) -> Option<T> {
     with_prefixed(DEV_PREFIX, name, |label| Endowments::get().take::<T>(label))
 }
 
-/// The claim for one partition the manifest says this program gets, looked up
-/// by the entry's own spelling, written by the one [`DeviceRequest`] that also
-/// parsed it.
-pub fn partition<T: FromHandle>(guid: toyos_abi::part::PartGuid) -> Option<T> {
-    let mut buf = [0u8; DeviceRequest::MAX_NAME];
-    claim(DeviceRequest::Partition(guid).write_name(&mut buf)?)
-}
-
 /// The claim for one legacy ISA function the manifest says this program gets,
-/// looked up by the entry's own spelling exactly as [`partition`] is.
+/// looked up by the entry's own spelling.
 pub fn isa<T: FromHandle>(set: toyos_abi::syscall::IsaId) -> Option<T> {
     let mut buf = [0u8; DeviceRequest::MAX_NAME];
     claim(DeviceRequest::Isa(set).write_name(&mut buf)?)

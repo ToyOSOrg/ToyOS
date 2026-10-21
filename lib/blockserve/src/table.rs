@@ -18,13 +18,12 @@ pub struct Partition {
 
 /// Every partition the table on `sectors` names, each checked past
 /// `toyos_gpt::locate`'s range and overlap checks and held to whole blocks;
-/// none for a disk whose table does not read, said by `name`.
-pub fn read(name: &str, sectors: &mut impl toyos_gpt::Sectors) -> Vec<Partition> {
+/// or why the disk carries no table this reads. Pure: [`say`] says it.
+pub fn read(sectors: &mut dyn toyos_gpt::Sectors) -> Result<Vec<Partition>, String> {
     let per = BLOCK_BYTES as u64 / u64::from(sectors.lba_bytes());
     let mut found = [None; 128];
     if let Err(why) = toyos_gpt::list(sectors, &mut found) {
-        println!("{name}: the disk carries no partition table this driver reads: {why:?}");
-        return Vec::new();
+        return Err(format!("{why:?}"));
     }
     let mut parts = Vec::new();
     for entry in found.iter().flatten() {
@@ -50,6 +49,19 @@ pub fn read(name: &str, sectors: &mut impl toyos_gpt::Sectors) -> Vec<Partition>
         };
         parts.push(Partition { unique: listed.unique_guid().0, kind: listed.type_guid().0, span });
     }
+    Ok(parts)
+}
+
+/// Say what [`read`] found, as `name`, and answer the partitions: none for a
+/// disk with no table.
+pub fn say(name: &str, read: Result<Vec<Partition>, String>) -> Vec<Partition> {
+    let parts = match read {
+        Ok(parts) => parts,
+        Err(why) => {
+            println!("{name}: the disk carries no partition table this driver reads: {why}");
+            return Vec::new();
+        }
+    };
     for part in &parts {
         let guid = crate::guid_text(part.unique);
         match &part.span {

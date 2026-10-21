@@ -38,7 +38,6 @@ use alloc::vec::Vec;
 use kernel::owners::Owners;
 
 use super::super::apic::{narrow_destination, MSG_DEST};
-use super::super::idt::DriverIrq;
 use crate::iommu::StreamId;
 use crate::sync::Lock;
 
@@ -211,17 +210,6 @@ pub(in crate::arch::x86_64) fn message(index: usize) -> Msi {
             | ((index >> 15) << 2),
         data: 0,
     }
-}
-
-/// The message a kernel driver's `source` raises `irq` with: an entry of its
-/// own where the table is armed, and the compatibility format where no unit
-/// remaps, which is what that message has always said.
-pub fn msi(source: StreamId, irq: DriverIrq) -> Result<Msi, Refused> {
-    if !is_armed() {
-        let (address, data) = super::super::apic::msi_message(irq.vector());
-        return Ok(Msi { address, data });
-    }
-    Ok(message(allocate(source, irq.vector(), MSG_DEST, false)?))
 }
 
 /// An entry delivering a claim's `vector`, written for `source` and published
