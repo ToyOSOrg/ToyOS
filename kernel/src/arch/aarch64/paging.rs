@@ -22,6 +22,9 @@
 //! translation dropped on every CPU (`super::tlb`), and only then written
 //! again (D8.14.1). An entry that was invalid owes nothing, since no TLB holds
 //! a translation that faulted.
+//!
+//! **No kernel leaf is both writable and executable**, and only the image's
+//! text is executable (`mm::audit_wx`).
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -102,10 +105,20 @@ fn user_leaf(prot: Prot, cache: CachePolicy) -> u64 {
     VALID | AF | NOT_GLOBAL | typed(cache) | prot.user_bits()
 }
 
-/// A kernel leaf: EL1 read-write, EL0 nothing, global, and executable at EL1
-/// only where it is memory — the kernel runs from the direct map.
-fn kernel_leaf(cache: CachePolicy) -> u64 {
-    VALID | AF | typed(cache) | UXN
+impl Prot {
+    /// A kernel leaf's permissions: EL0 has none, and EL1 executes only code.
+    fn kernel_bits(self) -> u64 {
+        match self {
+            Self::Read => AP_READ_ONLY | PXN,
+            Self::ReadWrite => PXN,
+            Self::ReadExec => AP_READ_ONLY,
+        }
+    }
+}
+
+/// A kernel leaf, bar its address and whether it is a block or a page: global.
+fn kernel_leaf(cache: CachePolicy, prot: Prot) -> u64 {
+    VALID | AF | typed(cache) | prot.kernel_bits() | UXN
 }
 
 /// A leaf with its address and its block-or-page bit taken out: what two
@@ -656,21 +669,30 @@ pub const MMIO_GRAIN: u64 = PAGE_4K;
 /// asked for and free. No invalidation is owed, since only an invalid entry is
 /// ever written.
 pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
-    high().as_mut().expect("map_mmio: before the kernel's tables exist").map_direct(phys, size, kernel_leaf(policy.cache()));
+    high()
+        .as_mut()
+        .expect("map_mmio: before the kernel's tables exist")
+        .map_direct(phys, size, kernel_leaf(policy.cache(), Prot::ReadWrite));
     let installed = kernel().lock().direct_map_policy(phys).expect("map_mmio: the window was just mapped");
     assert!(installed == policy.cache(), "map_mmio: {phys:#x} installed {installed:?}");
     crate::log!("mmio: {phys:#x}+{size:#x} {installed:?}");
     crate::mm::Mmio::new(DirectMap::from_phys(phys), size)
 }
 
-/// Build the kernel's tables — every page of memory firmware's map names,
-/// and the console UART and the scanout the boot's own records reach —
-/// switch `TTBR1_EL1` to them and `TTBR0_EL1` to the kernel's empty user
-/// half, and answer where the direct map ends.
-pub(crate) fn init(memory_map: &[MemoryMapEntry], scanout: Option<(u64, u64)>) -> toyos_bootmap::DirectMapEnd {
+/// Build the kernel's tables — every page of memory firmware's map names, in
+/// 4 KiB pages where a 2 MiB one holds more than one of `image`'s
+/// protections, and the console
+/// UART and the scanout the boot's own records reach — switch `TTBR1_EL1` to
+/// them and `TTBR0_EL1` to the kernel's empty user half, and answer where the
+/// direct map ends.
+pub(crate) fn init(
+    memory_map: &[MemoryMapEntry],
+    scanout: Option<(u64, u64)>,
+    image: &crate::mm::Image,
+) -> toyos_bootmap::DirectMapEnd {
     let extent = direct_map_end(memory_map).unwrap_or_else(|refusal| panic!("paging: firmware's memory map: {refusal}"));
     let end = extent.get();
-    let memory = kernel_leaf(CachePolicy::Normal);
+    let memory = |phys: u64| kernel_leaf(CachePolicy::Normal, image.prot(phys).unwrap_or(Prot::ReadWrite));
     let mut tables = Tables::new();
     let (mut blocks, mut pages) = (0u64, 0u64);
     let mut at = 0;
@@ -678,14 +700,15 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry], scanout: Option<(u64, u64)>) -
         let va = PHYS_OFFSET + at;
         match coverage(memory_map, at) {
             Coverage::Nothing => {}
-            Coverage::Whole => {
-                tables.directory(va).set(index(va, 2), at | memory);
+            Coverage::Whole if image.block(at).is_some() => {
+                tables.directory(va).set(index(va, 2), at | memory(at));
                 blocks += 1;
             }
-            held @ Coverage::Pages(_) => {
+            held => {
                 let mut table = Table::new();
                 for j in (0..512).filter(|&j| held.holds(j)) {
-                    table.0[j as usize] = (at + j * PAGE_4K) | memory | TABLE;
+                    let page = at + j * PAGE_4K;
+                    table.0[j as usize] = page | memory(page) | TABLE;
                     pages += 1;
                 }
                 let table = tables.adopt(table);
@@ -695,10 +718,10 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry], scanout: Option<(u64, u64)>) -
         at += PAGE_2M;
     }
     if let Some(uart) = super::console_uart::frame() {
-        tables.map_direct(uart, PAGE_4K, kernel_leaf(CachePolicy::Uncacheable));
+        tables.map_direct(uart, PAGE_4K, kernel_leaf(CachePolicy::Uncacheable, Prot::ReadWrite));
     }
     if let Some((scanout, size)) = scanout {
-        tables.map_direct(scanout, size, kernel_leaf(CachePolicy::WriteCombining));
+        tables.map_direct(scanout, size, kernel_leaf(CachePolicy::WriteCombining, Prot::ReadWrite));
     }
 
     KERNEL_TTBR1.store(tables.root.phys(), core::sync::atomic::Ordering::Release);
@@ -716,23 +739,58 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry], scanout: Option<(u64, u64)>) -
 
 /// Put this CPU on the kernel's tables — `TTBR1_EL1` the kernel's root,
 /// `TTBR0_EL1` the kernel space's empty user half — from the loader's or from
-/// [`bringup_root`], either of which maps the code, stack and data this runs
-/// on exactly as the kernel's root does. The local `TLBI` then drops every
-/// translation the old tables left, global ones among them.
+/// [`bringup_root`].
+///
+/// The loader's map and the kernel's need not agree on a leaf's size or
+/// permissions for the same address: the loader maps 2 MiB blocks where the
+/// kernel splits its image into pages, and leaves rodata writable. A change of
+/// block size needs break-before-make (Arm ARM DDI 0487 M.d D8.17.1), or the
+/// TLB may hold both translations at once and take a TLB conflict abort. So the
+/// old `TTBR1_EL1` is replaced by an empty root and every translation dropped
+/// with `TLBI VMALLE1` before the kernel's root is installed, while this CPU
+/// runs from its image's identity alias under the old `TTBR0_EL1`, where both
+/// the loader's map and `bringup_root` map the kernel's text executable. The
+/// new `TTBR0_EL1` maps nothing, so switching it only removes translations.
+/// Interrupts stay masked across it: the vectors are at `PHYS_OFFSET`.
 pub(crate) fn join() {
     let ttbr1 = KERNEL_TTBR1.load(core::sync::atomic::Ordering::Acquire);
     let ttbr0 = KERNEL_TTBR0.load(core::sync::atomic::Ordering::Acquire);
     // SAFETY: both roots are published by `init` and live forever, and the
-    // tables this CPU ran on map everything this function touches as they do.
+    // kernel space's root is an empty table, so it is the break's `TTBR1_EL1`
+    // too. Between the two branches nothing is fetched or accessed but this
+    // block's instructions, through the identity alias the old `TTBR0_EL1`
+    // maps; the image runs at `PHYS_OFFSET` plus its physical address, so that
+    // alias is the link address less `PHYS_OFFSET`.
     unsafe {
         core::arch::asm!(
+            "mrs {daif}, daif",
+            "msr daifset, #0xf",
             "dsb ishst",
+            "adr {at}, 1f",
+            "sub {at}, {at}, {offset}",
+            "br {at}",
+            "1:",
+            "msr ttbr1_el1, {empty}",
+            "isb",
+            "tlbi vmalle1",
+            "dsb nsh",
+            "isb",
             "msr ttbr1_el1, {ttbr1}",
+            "isb",
+            "adr {at}, 2f",
+            "add {at}, {at}, {offset}",
+            "br {at}",
+            "2:",
             "msr ttbr0_el1, {ttbr0}",
             "isb",
             "tlbi vmalle1",
             "dsb nsh",
             "isb",
+            "msr daif, {daif}",
+            daif = out(reg) _,
+            at = out(reg) _,
+            offset = in(reg) PHYS_OFFSET,
+            empty = in(reg) ttbr0 & ADDR,
             ttbr1 = in(reg) ttbr1,
             ttbr0 = in(reg) ttbr0,
             options(nostack, preserves_flags),
@@ -782,6 +840,41 @@ pub fn bringup_root() -> u64 {
 /// Nothing to seal: every space runs under the one `TTBR1_EL1`, so no space
 /// holds a copy of the kernel's root slots to fall behind.
 pub(crate) fn seal_kernel_half() {}
+
+/// [`kernel::wx::audit`] of the kernel's tables, `TTBR1_EL1`'s on every CPU;
+/// the kernel space's `TTBR0_EL1` half maps nothing.
+pub fn audit_wx(text: core::ops::Range<u64>) -> kernel::wx::Verdict {
+    let high = high();
+    let tables = high.as_ref().expect("audit_wx: before the kernel's tables exist");
+    // SAFETY: every table the kernel's root names is one this file linked, and
+    // the lock held keeps them in place while they are read.
+    let table = |phys: u64| unsafe { &Table::at(phys).0 };
+    kernel::wx::audit::<kernel::wx::Aarch64>(&tables.root.0, text, &table)
+}
+
+/// `kernel-wx-leaf`: the direct map's leaf over `phys` made executable at
+/// EL1, so [`audit_wx`] has a writable executable leaf to find. Answers its
+/// address. Nothing runs from it, so no invalidation is owed.
+#[cfg(feature = "boot-actuators")]
+pub fn stage_writable_executable(phys: u64) -> u64 {
+    let va = PHYS_OFFSET + phys;
+    let mut high = high();
+    let tables = high.as_mut().expect("kernel-wx-leaf: before the kernel's tables exist");
+    let i = index(va, 2);
+    let entry = tables.directory(va).0[i];
+    assert!(entry & VALID != 0, "kernel-wx-leaf: {phys:#x} is not in the direct map");
+    let (table, slot, at) = if entry & TABLE == 0 {
+        (tables.directory(va), i, va & !(PAGE_2M - 1))
+    } else {
+        // SAFETY: a table this root linked, reached under the lock.
+        (unsafe { Table::at_mut(entry & ADDR) }, index(va, 3), va & !(PAGE_4K - 1))
+    };
+    let leaf = table.0[slot];
+    assert!(leaf & VALID != 0 && leaf & AP_READ_ONLY == 0, "kernel-wx-leaf: {phys:#x} is not under a writable leaf");
+    table.set(slot, leaf & !PXN);
+    published();
+    at
+}
 
 /// `PAR_EL1` after the MMU translated `addr` for an EL1 read in the tables
 /// this CPU runs on now (`AT S1E1R`; Arm ARM K.a, C6.2.x and D24.2.131):

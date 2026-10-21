@@ -5,7 +5,7 @@
 
 use toyos_abi::boot::MemoryMapEntry;
 
-use crate::{is_read_as_memory, Cache, DirectMapEnd, Encoding, Refusal, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW, PAGE_2M};
+use crate::{is_read_as_memory, Access, Cache, DirectMapEnd, Encoding, Refusal, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW, PAGE_2M};
 
 /// One past the kernel direct map's last byte: [`BOOT_MAP_BYTES`], or the end
 /// of the highest range the kernel reads as memory in whole [`PAGE_2M`] pages,
@@ -43,18 +43,27 @@ pub const fn table(phys: u64) -> u64 {
 /// PWT with the PAT bit clear), uncacheable under every MTRR type and under an
 /// unprogrammed PAT, which is what the machine has until the kernel's
 /// `pat::init`.
-pub const fn block(phys: u64, cache: Cache) -> u64 {
+///
+/// The text is read-only, and every leaf is executable: bit 63 means
+/// execute-disable only under `IA32_EFER.NXE` and is reserved otherwise (§4.5),
+/// and the loader switches to these tables, and each AP enters them, before
+/// the kernel declares `NXE`.
+pub const fn block(phys: u64, cache: Cache, access: Access) -> u64 {
     let typed = match cache {
         Cache::Firmware | Cache::Memory => 0,
         Cache::Device | Cache::Scanout => PCD | PWT,
     };
-    phys | PRESENT | WRITABLE | PAGE_SIZE | typed
+    let writable = match access {
+        Access::Text => 0,
+        Access::Data => WRITABLE,
+    };
+    phys | PRESENT | writable | PAGE_SIZE | typed
 }
 
 /// A 4 KiB leaf at `phys` (Table 4-19), typed as [`block`] types a 2 MiB one;
 /// a 4 KiB entry's PAT bit is bit 7, and it stays clear.
-pub const fn page(phys: u64, cache: Cache) -> u64 {
-    block(phys, cache) & !PAGE_SIZE
+pub const fn page(phys: u64, cache: Cache, access: Access) -> u64 {
+    block(phys, cache, access) & !PAGE_SIZE
 }
 
 /// The three, for [`Plan::write`](crate::Plan::write).

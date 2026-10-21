@@ -290,6 +290,10 @@ const DRIVEN_AND_SHARED: &[&str] = &[
     "wall_clock_now",
 ];
 
+/// What the boot's audit of the kernel's tables says when every leaf passed
+/// (`kernel/src/mm/mod.rs`).
+const KERNEL_WX_HOLDS: &str = " kernel leaves, none writable and executable, none executable outside the text ";
+
 /// What `test-early-panic` panics with (`kernel/src/main.rs`): the last line its
 /// report puts on serial.
 const EARLY_PANIC_MESSAGE: &str = "test-early-panic: on-screen console check";
@@ -314,6 +318,8 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
     ("screen_loader_clears", qemu::Profile::Metal),
     ("virt_early_panic", qemu::Profile::Virt),
     ("virt_early_fault", qemu::Profile::Virt),
+    // `kernel_wx_leaf_is_refused` on `virt`: no metal bench is AArch64.
+    ("virt_kernel_wx_leaf_is_refused", qemu::Profile::Virt),
     ("virt_el2_drop", qemu::Profile::VirtEl2NoVhe),
     ("virt_user_mode", qemu::Profile::Virt),
     ("virt_timer_preempts", qemu::Profile::Virt),
@@ -436,6 +442,11 @@ const MACHINE_TESTS: &[&str] = &[
     // The nested-NMI report is a raw write to the 16550, which the T14 does not
     // have.
     "nested_nmi_is_loud",
+    // The boot's W^X audit refusing a leaf an actuator staged: the panic ends
+    // the boot, so it cannot share one, and the T14's `kernel_wx` row reads
+    // the same audit passing. q35 on `Profile::Metal`, whose 16550 carries
+    // the panic.
+    "kernel_wx_leaf_is_refused",
     // A press of the fixed power button reaches the `acpi` claim's holder as
     // one SCI, its line masked until the holder serves it: the kernel's SCI
     // and its mask have no host build, QEMU raises the event on demand, and
@@ -867,7 +878,7 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
     // ---- the boot facts, riding the same tests/images/testcases.toml image ----
     //
-    // **Six names and no extra minute of the machine.** Every needle below is a
+    // **Seven names and no extra minute of the machine.** Every needle below is a
     // record the *shipping* kernel writes on any boot it takes, so each rides
     // whatever image is already going on the stick; the two rows after them are
     // the two things this suite measures rather than reads, and those cost a
@@ -913,6 +924,20 @@ const METAL: &[(&str, metal::Metal)] = &[
     (
         "pci_inventory",
         metal::Metal { arms: TESTCASES, judge: |b| pci_inventory(b[0].kernel().text()) },
+    ),
+    (
+        // The shipping kernel's W^X audit of its own tables, on the firmware
+        // and memory map it was built for: the T14 and the AMD bench. Its
+        // negative control is `kernel_wx_leaf_is_refused`, on QEMU.
+        "kernel_wx",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                let kernel = b[0].kernel();
+                eprintln!("  [kernel_wx] {}", kernel.must_say(KERNEL_WX_HOLDS)?);
+                Ok(())
+            },
+        },
     ),
     // ---- one image: tests/images/latencycase.toml armed with the shootdown bench ----
     (
@@ -3616,6 +3641,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
             }
             Ok(())
         }
+        "virt_kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, profile),
         "virt_early_fault" => {
             // The vectors, judged by the one thing a broken table cannot do:
             // report. An undefined instruction right after the console step
@@ -4005,6 +4031,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),
+        "kernel_wx_leaf_is_refused" => faults::kernel_wx_leaf_is_refused(test_config, qemu::Profile::Metal),
         "acpi_press_is_one_sci" => acpi_press_is_one_sci(),
         "acpi_mediated_access" => acpi_mediated_access(2),
         "acpi_lock_given_back_on_one_cpu" => acpi_mediated_access(1),

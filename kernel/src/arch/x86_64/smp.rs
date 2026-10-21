@@ -74,9 +74,10 @@ struct TrampolineData {
     _pad5: [u8; 2],                          // +0x6E
     cs_reload_addr: u64,                     // +0x70
     percpu_ptr: u64,                         // +0x78
+    efer: u64,                               // +0x80
 }
 
-const _: () = assert!(size_of::<TrampolineData>() == 0x80);
+const _: () = assert!(size_of::<TrampolineData>() == 0x88);
 
 
 
@@ -107,7 +108,9 @@ macro_rules! asm_label_addr {
     }};
 }
 
-/// Copies the trampoline blob to physical page 0x8000 via the direct map; there is no identity map this early.
+/// Copies the trampoline blob to physical page 0x8000 via the direct map, where
+/// it is data and never executed; an AP, started only after the copy, fetches
+/// it through the boot map's identity view.
 fn copy_trampoline() {
     let start = asm_label_addr!(_trampoline_start);
     let end = asm_label_addr!(_trampoline_end);
@@ -167,6 +170,7 @@ fn build_trampoline_data() -> TrampolineData {
         _pad5: [0; 2],
         cs_reload_addr,
         percpu_ptr: 0, // filled per-AP
+        efer: crate::arch::control_regs::EFER_BEFORE_LONG_MODE,
     }
 }
 
@@ -295,7 +299,7 @@ extern "C" fn ap_entry() -> ! {
     AP_TSC.store(cpu::rdtsc(), Ordering::Release);
 
     // Must run before `pat::init`, which restores the CR0 this call sets.
-    crate::arch::control_regs::init_cr0(percpu::cpu_id());
+    crate::arch::control_regs::init_paging(percpu::cpu_id());
     // Before `control_regs::init` reads what an update changes.
     crate::arch::microcode::load(percpu::cpu_id());
 
@@ -370,10 +374,11 @@ global_asm!(
     "mov eax, [0x8F00]",
     "mov cr3, eax",
 
-    // Enable Long Mode (IA32_EFER.LME)
+    // IA32_EFER from TrampolineData.efer (+0x80): long mode, and `NXE` before
+    // the kernel's tables, where bit 63 is otherwise a reserved bit.
     "mov ecx, 0xC0000080",
-    "rdmsr",
-    "or eax, 0x100",
+    "mov eax, [0x8F80]",
+    "mov edx, [0x8F84]",
     "wrmsr",
 
     // Enable Paging (CR0.PG)

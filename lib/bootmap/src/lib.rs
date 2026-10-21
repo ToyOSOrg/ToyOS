@@ -5,7 +5,8 @@
 //! there is one mapping in the machine, and everything the kernel touches in
 //! that window has to be in it — its own image, the boot parameter, and the
 //! panel it reports a wedge on — and so is the loader's own image, wherever
-//! firmware put it: on x86-64 the switch runs from it.
+//! firmware put it: on x86-64 the switch runs from it. The kernel's text is
+//! read-only in it ([`Access`]).
 //!
 //! Both architectures walk the same shape — a root (x86-64's PML4, AArch64's
 //! L0), a table per 512 GiB (PDPT, L1), a table per GiB (page directory, L2)
@@ -19,9 +20,10 @@
 //! every directory. The map reaches as far as the high half can hold, and
 //! refuses by name what lies past it.
 //!
-//! Pure: the scanout, the loader's image and, where the architecture types
-//! memory by firmware's map, the write-back ranges in; a [`Plan`] out, which
-//! [`Plan::write`] lays into a pool of [`Table`]s the loader allocates.
+//! Pure: the scanout, the loader's image, the kernel's text and, where the
+//! architecture types memory by firmware's map, the write-back ranges in; a
+//! [`Plan`] out, which [`Plan::write`] lays into a pool of [`Table`]s the
+//! loader allocates.
 //!
 //! What the kernel takes from firmware's map when it builds its own tables is
 //! here too, because it may never map less than this map did: which types the
@@ -148,8 +150,9 @@ pub const PAGE_4K: u64 = 4096;
 /// Leaves in one table.
 const PAGES_PER_TABLE: u64 = PAGE_2M / PAGE_4K;
 
-/// The 2 MiB pages a scanout covers only in part: at most its first and its last.
-const FINE_TABLES: usize = 2;
+/// The 2 MiB pages split into 4 KiB leaves: the first and last a scanout
+/// covers only in part, and the same two of the kernel's text.
+const FINE_TABLES: usize = 4;
 
 /// The pool a builder needs: a root, every second-level table, every
 /// directory, and a table of 4 KiB leaves per split page.
@@ -170,8 +173,8 @@ impl Table {
 #[derive(Clone, Copy)]
 pub struct Encoding {
     pub table: fn(u64) -> u64,
-    pub block: fn(u64, Cache) -> u64,
-    pub page: fn(u64, Cache) -> u64,
+    pub block: fn(u64, Cache, Access) -> u64,
+    pub page: fn(u64, Cache, Access) -> u64,
 }
 
 /// Why a machine's memory does not fit these tables.
@@ -192,6 +195,8 @@ pub enum Refusal {
     /// A range of firmware's map that begins or ends here, off the 4 KiB page
     /// UEFI describes memory in.
     OffPage(u64),
+    /// The kernel's text is not whole 4 KiB pages inside [`BOOT_MAP_BYTES`].
+    Text { base: u64, len: u64 },
 }
 
 impl fmt::Display for Refusal {
@@ -216,6 +221,10 @@ impl fmt::Display for Refusal {
                 "a range ends at {end:#x}, past the {DIRECT_MAP_WINDOW:#x} bytes a direct map can hold"
             ),
             Self::OffPage(at) => write!(f, "a range of firmware's map is bounded at {at:#x}, off a {PAGE_4K:#x}-byte page"),
+            Self::Text { base, len } => write!(
+                f,
+                "the kernel's text at {base:#x}+{len:#x} is not whole {PAGE_4K:#x}-byte pages below {BOOT_MAP_BYTES:#x}"
+            ),
         }
     }
 }
@@ -232,6 +241,16 @@ pub enum Cache {
     Device,
     /// The scanout.
     Scanout,
+}
+
+/// What a leaf may be used for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Access {
+    /// The kernel's text: read and executed, never written.
+    Text,
+    /// Everything else: read and written. Where the architecture's encoding
+    /// can, never executed.
+    Data,
 }
 
 /// How the pages that are not the scanout are typed.
@@ -280,6 +299,7 @@ pub struct Entry {
     pub phys: u64,
     pub slot: Slot,
     pub cache: Cache,
+    pub access: Access,
 }
 
 /// Where a machine's memory, its scanout and the loader itself go in the
@@ -297,12 +317,14 @@ pub struct Plan<'a> {
     scanout: Option<(u64, u64)>,
     /// The loader's image in whole 2 MiB pages: `(first page, bytes)`.
     loader: (u64, u64),
+    /// The kernel's text, `(base, end)`.
+    text: (u64, u64),
     typing: Typing<'a>,
 }
 
 impl<'a> Plan<'a> {
     /// Lay out [`BOOT_MAP_BYTES`], `scanout` and `loader`, typed by `typing`,
-    /// or say why they cannot be.
+    /// with `text` read-only, or say why they cannot be.
     ///
     /// `scanout` is firmware's framebuffer as firmware reports it. Under
     /// [`Typing::Firmware`] its base must be 2 MiB aligned and its length is
@@ -319,7 +341,21 @@ impl<'a> Plan<'a> {
     /// so its pages are rounded out both ways and typed as the rest of memory.
     ///
     /// A byte of either past [`DIRECT_MAP_WINDOW`] is [`Refusal::PastWindow`].
-    pub fn new(scanout: Option<(u64, u64)>, loader: (u64, u64), typing: Typing<'a>) -> Result<Self, Refusal> {
+    ///
+    /// `text` is the kernel's text, `(base, len)` in whole 4 KiB pages inside
+    /// the low map, where the loader places the kernel. A 2 MiB page it covers
+    /// in part is split, so the pages beside it stay writable.
+    pub fn new(
+        scanout: Option<(u64, u64)>,
+        loader: (u64, u64),
+        text: (u64, u64),
+        typing: Typing<'a>,
+    ) -> Result<Self, Refusal> {
+        let (base, len) = text;
+        let whole = base.is_multiple_of(PAGE_4K) && len.is_multiple_of(PAGE_4K) && len > 0;
+        if !whole || base.checked_add(len).is_none_or(|end| end > BOOT_MAP_BYTES) {
+            return Err(Refusal::Text { base, len });
+        }
         let mut plan = Self {
             gibs: [0; MAX_DIRECTORIES],
             directories: 0,
@@ -329,6 +365,7 @@ impl<'a> Plan<'a> {
             fines: 0,
             scanout: None,
             loader: whole_pages(loader.0, loader.1)?,
+            text: (base, base + len),
             typing,
         };
         let scanout = scanout.map(|(base, len)| plan.scanout_extent(base, len)).transpose()?;
@@ -360,6 +397,7 @@ impl<'a> Plan<'a> {
         if let Some((base, end)) = scanout {
             plan.split_scanout(base, end);
         }
+        plan.split_partial(plan.text.0, plan.text.1);
         // Every leaf that is not the scanout typed once here, so `entries`
         // cannot meet a refusal.
         for page in 0..BOOT_MAP_BYTES / PAGE_2M {
@@ -400,9 +438,14 @@ impl<'a> Plan<'a> {
 
     /// Split the pages the scanout `base..end` covers in part, and record it.
     fn split_scanout(&mut self, base: u64, end: u64) {
+        self.split_partial(base, end);
+        self.scanout = Some((base, end - base));
+    }
+
+    /// Split the pages `base..end` covers in part: at most its first and its last.
+    fn split_partial(&mut self, base: u64, end: u64) {
         let first = base / PAGE_2M * PAGE_2M;
         let last = (end - 1) / PAGE_2M * PAGE_2M;
-        // At most the first and the last page are covered in part.
         for page in [first, last] {
             let whole = base <= page && page + PAGE_2M <= end;
             if !whole && !self.is_split(page) {
@@ -410,7 +453,6 @@ impl<'a> Plan<'a> {
                 self.fines += 1;
             }
         }
-        self.scanout = Some((base, end - base));
     }
 
     /// Write this map over whatever `pool` holds, its first byte at physical
@@ -436,10 +478,10 @@ impl<'a> Plan<'a> {
         for entry in self.entries() {
             match entry.slot {
                 Slot::Directory { directory, index } => {
-                    pool[first_directory + directory].0[index] = (encoding.block)(entry.phys, entry.cache)
+                        pool[first_directory + directory].0[index] = (encoding.block)(entry.phys, entry.cache, entry.access)
                 }
                 Slot::Fine { table, index } => {
-                    pool[first_fine + table].0[index] = (encoding.page)(entry.phys, entry.cache)
+                    pool[first_fine + table].0[index] = (encoding.page)(entry.phys, entry.cache, entry.access)
                 }
             }
         }
@@ -494,6 +536,11 @@ impl<'a> Plan<'a> {
         self.loader
     }
 
+    /// The kernel's text, `(base, len)`.
+    pub fn text(&self) -> (u64, u64) {
+        (self.text.0, self.text.1 - self.text.0)
+    }
+
     /// The pages the loader's image adds: those past the low map that neither
     /// the scanout nor a split page already holds.
     fn loader_pages(&self) -> impl Iterator<Item = u64> + '_ {
@@ -528,6 +575,7 @@ impl<'a> Plan<'a> {
                     phys,
                     slot: Slot::Fine { table, index: index as usize },
                     cache: self.cache_of(phys, PAGE_4K),
+                    access: self.access_of(phys, PAGE_4K),
                 }
             })
         });
@@ -552,6 +600,16 @@ impl<'a> Plan<'a> {
         self.typing.of(phys, size).expect("`new` typed every leaf")
     }
 
+    /// A leaf is the text's only where all of it is, and a page the text
+    /// covers in part is split, so no leaf is the text's in part.
+    fn access_of(&self, phys: u64, size: u64) -> Access {
+        if self.text.0 <= phys && phys + size <= self.text.1 {
+            Access::Text
+        } else {
+            Access::Data
+        }
+    }
+
     fn directory_slot(&self, phys: u64) -> (usize, usize) {
         let directory = self
             .directories()
@@ -563,7 +621,7 @@ impl<'a> Plan<'a> {
 
     fn leaf(&self, phys: u64, cache: Cache) -> Entry {
         let (directory, index) = self.directory_slot(phys);
-        Entry { phys, slot: Slot::Directory { directory, index }, cache }
+        Entry { phys, slot: Slot::Directory { directory, index }, cache, access: self.access_of(phys, PAGE_2M) }
     }
 
     /// Name the directory for `gib`, unless it is already named. Infallible:

@@ -7,6 +7,7 @@ pub mod pmm;
 pub use crate::arch::paging;
 mod alloc;
 mod dma;
+mod image;
 mod mmio;
 pub mod policy;
 mod region;
@@ -22,6 +23,7 @@ pub use alloc::sweep as sweep_heap_bands;
 #[cfg(feature = "heap-lockspin")]
 pub use alloc::hold_lock as hold_heap_lock;
 pub use dma::{Dma, DmaPool, Unaligned};
+pub use image::Image;
 pub use mmio::Mmio;
 pub use region::{Allocation, KernelSlice};
 pub use unmapped::Unmapped;
@@ -191,15 +193,41 @@ pub fn firmware_map() -> &'static [MemoryMapEntry] {
 
 /// Call once at boot, in order: pmm (physical pages) → paging (direct map) →
 /// alloc (heap) → every kernel root slot, before the first user space copies
-/// them. `reserved` holds `memory_map`'s own memory.
-pub fn init(memory_map: &'static [MemoryMapEntry], reserved: &[Region]) {
+/// them. `reserved` holds `memory_map`'s own memory and `image`'s.
+pub fn init(memory_map: &'static [MemoryMapEntry], reserved: &[Region], image: &Image) {
     FIRMWARE_MAP.1.store(memory_map.len(), core::sync::atomic::Ordering::Release);
     FIRMWARE_MAP.0.store(memory_map.as_ptr().cast_mut(), core::sync::atomic::Ordering::Release);
     alloc::init_early();
     pmm::init(memory_map, reserved);
-    DIRECT_MAP_END.set(paging::init(memory_map, crate::drivers::panic_console::scanout()));
+    DIRECT_MAP_END.set(paging::init(memory_map, crate::drivers::panic_console::scanout(), image));
     alloc::init();
     paging::seal_kernel_half();
+}
+
+/// Walk the kernel's tables and stop the boot on a leaf that is writable and
+/// executable, or executable outside `image`'s text.
+pub fn audit_wx(image: &Image) {
+    let text = image.text();
+    let verdict = paging::audit_wx(text.clone());
+    let said = |finding: Option<kernel::wx::Finding>| match finding {
+        Some(found) => ::alloc::format!("{} (the first at {:#x})", found.leaves, found.first),
+        None => ::alloc::string::String::from("none"),
+    };
+    assert!(
+        verdict.holds(),
+        "paging: of {} kernel leaves, writable and executable: {}; executable outside the text {:#x}..{:#x}: {}",
+        verdict.leaves,
+        said(verdict.writable_executable),
+        text.start,
+        text.end,
+        said(verdict.executable_outside_text),
+    );
+    crate::log!(
+        "paging: {} kernel leaves, none writable and executable, none executable outside the text {:#x}..{:#x}",
+        verdict.leaves,
+        text.start,
+        text.end
+    );
 }
 
 /// The two memory facts every crash report ends its contexts with: how deep

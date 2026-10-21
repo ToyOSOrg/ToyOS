@@ -23,4 +23,5 @@ pub mod pipe;
 pub mod pointers;
 pub mod proclife;
 pub mod sched;
+pub mod wx;
 pub mod xsave;

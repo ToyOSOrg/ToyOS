@@ -384,11 +384,14 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // what `mm::init` withholds.
     let [image, elf, black_box, root, map, microcode] = loader;
     let reserved = [image, elf, black_box, root, map, microcode, arch::boot::reserved()];
+    let layout = toyos_elf::Layout::parse(kernel_elf, arch::ELF_MACHINE)
+        .unwrap_or_else(|e| panic!("boot: the loader's kernel.elf: {e}"));
+    let image = mm::Image::new(&layout, image);
 
     // Before the first hash container, `mm::init`'s address space.
     hasher::seed();
 
-    mm::init(maps, &reserved);
+    mm::init(maps, &reserved, &image);
     drivers::panic_console::remap();
 
     // Before the first table is decoded for its contents: what a machine owner
@@ -401,9 +404,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     let platform = arch::boot::interrupts(kernel_args.rsdp_addr);
     counters::bring_up();
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
-    if !kernel_elf.is_empty() {
-        symbols::load_kernel(kernel_elf, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);
-    }
+    symbols::load_kernel(kernel_elf, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);
 
     arch::boot::clock(kernel_args);
     trace::enable();
@@ -501,6 +502,18 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // After every kernel driver took its functions from firmware, before
     // userland runs and asks for a claim.
     iommu::drivers_settled();
+
+    // Once the boot's own mappings are made: every later kernel leaf is
+    // written by the same constructors.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::kernel_wx_leaf() {
+        let frame = mm::pmm::alloc_page().expect("kernel-wx-leaf: no frame to stage on");
+        let at = mm::paging::stage_writable_executable(frame.direct_map().phys());
+        log!("kernel-wx-leaf: the leaf at {at:#x} is writable and executable");
+        #[expect(clippy::disallowed_methods, reason = "the audit below ends this boot on the leaf staged over it")]
+        core::mem::forget(frame);
+    }
+    mm::audit_wx(&image);
 
     report_log_destination();
     let complete = cpu::counter();

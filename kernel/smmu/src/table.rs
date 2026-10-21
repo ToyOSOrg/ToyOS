@@ -8,7 +8,7 @@
 //! takes a message on is the one 4 KiB page at level 3: a block there would
 //! hand the device every register that shares its 2 MiB.
 
-use toyos_bootmap::aarch64::{block, page, table, MAIR, PXN};
+use toyos_bootmap::aarch64::{block, page, table, MAIR};
 use toyos_bootmap::Cache;
 use toyos_phys::Phys;
 
@@ -39,10 +39,12 @@ const AP_READ_ONLY: u64 = 1 << 7;
 /// and no invalidation by ASID removes it.
 const NOT_GLOBAL: u64 = 1 << 11;
 
-/// What a device's leaf adds to the loader's: unprivileged, its context's
-/// alone, and executable at no level — the loader's memory is executable at
-/// EL1, which no device's access is.
-const DEVICES: u64 = AP_UNPRIVILEGED | NOT_GLOBAL | PXN;
+/// What a device's leaf adds to the loader's data leaf, which is executable at
+/// no level: unprivileged, and its context's alone.
+const DEVICES: u64 = AP_UNPRIVILEGED | NOT_GLOBAL;
+
+/// The loader's leaves that are not the kernel's text.
+const DATA: toyos_bootmap::Access = toyos_bootmap::Access::Data;
 
 /// What a device may do to memory mapped for it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -100,9 +102,9 @@ pub const fn plan(at: u64, leaf: Leaf, unit: &Unit) -> Option<Path> {
                 Access::Read => AP_READ_ONLY,
                 Access::ReadWrite => 0,
             };
-            (3, 1u64 << 21, memory.get(), block(memory.get(), Cache::Memory) | DEVICES | access)
+            (3, 1u64 << 21, memory.get(), block(memory.get(), Cache::Memory, DATA) | DEVICES | access)
         }
-        Leaf::Doorbell(register) => (4, 1u64 << 12, register.get(), page(register.get(), Cache::Device) | DEVICES),
+        Leaf::Doorbell(register) => (4, 1u64 << 12, register.get(), page(register.get(), Cache::Device, DATA) | DEVICES),
     };
     if at >> INPUT_BITS != 0 || at & (size - 1) != 0 || !unit.reaches(output, size) {
         return None;
