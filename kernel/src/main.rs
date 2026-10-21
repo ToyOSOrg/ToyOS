@@ -15,6 +15,8 @@ pub use mm::{UserAddr, DirectMap, PHYS_OFFSET};
 mod invalidation;
 mod seqlock;
 mod shootdown;
+mod cpu_local;
+mod cpu_slice;
 mod sleeplock;
 mod smp;
 mod smp_roster;
@@ -419,6 +421,9 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // reads off a refusal below is which tables the firmware published at all.
     acpi::inventory(kernel_args.rsdp_addr);
 
+    // Before this CPU's own per-CPU block: everything sized per CPU is sized
+    // here, once, while it runs alone.
+    smp::size(acpi::madt_processors(kernel_args.rsdp_addr));
     let platform = arch::boot::interrupts(kernel_args.rsdp_addr);
     counters::bring_up();
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);

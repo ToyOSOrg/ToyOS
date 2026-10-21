@@ -41,7 +41,7 @@ fn a_cpu_read_as_answered_is_read_with_its_answer() {
     let mut builder = loom::model::Builder::new();
     builder.preemption_bound = Some(2);
     builder.check(|| {
-        let rounds = Arc::new(Shootdown::new());
+        let rounds = Arc::new(two_cpus());
         let block = Arc::new(Published::new());
         block.publish(BEFORE);
         let generation = rounds.issue(Reach::Narrow);
@@ -67,4 +67,11 @@ fn a_cpu_read_as_answered_is_read_with_its_answer() {
         cpu1.join().unwrap();
     });
     assert!(READ.load(SeqCst), "no interleaving found the round answered, so the assertion never ran");
+}
+
+/// A round between the two CPUs every model here names.
+fn two_cpus() -> Shootdown {
+    let shootdown = Shootdown::new();
+    shootdown.size(2);
+    shootdown
 }

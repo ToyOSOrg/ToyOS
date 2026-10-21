@@ -3,15 +3,47 @@
 //! and what starting an AP takes on either architecture.
 
 use core::mem::size_of;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
+use kernel::sched::topology::{CpuKeys, Level, Topology};
 
-use crate::smp_roster::{Roster, MAX_CPUS};
+use crate::log;
+
+use crate::smp_roster::Roster;
 
 pub static ROSTER: Roster = Roster::new();
 
-const _: () = assert!(MAX_CPUS == crate::scheduler::MAX_CPUS);
+/// Size every per-CPU table for the `capacity` CPUs the MADT enables, while
+/// the boot CPU runs alone and before its own per-CPU block exists: once, and
+/// never freed, so no fatal path allocates.
+///
+/// Bounded by the trace diary's record, which names its CPU in 16 bits
+/// (`toyos_abi::trace::TraceRecord::cpu`): a machine past it is refused by
+/// name. The MADT's own length bounds what firmware can ask for below that.
+pub fn size(capacity: usize) {
+    assert!(capacity > 0, "smp: the MADT enables no processor, the boot CPU's own among them");
+    assert!(
+        capacity <= usize::from(u16::MAX) + 1,
+        "smp: the MADT enables {capacity} processors and a diary record names a CPU in 16 bits"
+    );
+    ROSTER.size(capacity);
+    crate::cpu_local::size(capacity);
+    crate::arch::size(capacity);
+    crate::counters::size(capacity);
+    crate::log::size(capacity);
+    crate::trace::size(capacity);
+    log!("smp: tables sized for the {capacity} processors the MADT enables");
+}
 
+/// The CPUs the firmware names, online or not: what every per-CPU table and
+/// log cursor is sized by. 1 before [`size`].
+pub fn capacity() -> u32 {
+    ROSTER.capacity().max(1) as u32
+}
+
+/// The CPUs committed so far, dense ids `0..cpu_count()`.
 pub fn cpu_count() -> u32 {
     ROSTER.count()
 }
@@ -39,6 +71,36 @@ pub fn set_ready() {
 /// kernel thread can make progress, and the panic path waits for none of them.
 pub fn is_ready() -> bool {
     ROSTER.released()
+}
+
+static TOPOLOGY: AtomicPtr<Topology> = AtomicPtr::new(core::ptr::null_mut());
+
+/// Install the cache tree, from each online CPU's keys in dense-id order: once,
+/// by bring-up, after its last commit. Keys that are not one tree stop the
+/// boot by name rather than schedule on a guess.
+pub fn set_topology(keys: Vec<CpuKeys>) {
+    assert_eq!(keys.len(), cpu_count() as usize, "smp: a topology key set for every online cpu and no other");
+    for (cpu, k) in keys.iter().enumerate() {
+        log!("topo: cpu{cpu} core={:#x} llc={:#x} pkg={:#x}", k.core, k.llc, k.package);
+    }
+    let topology = Topology::new(keys).unwrap_or_else(|e| panic!("smp: the CPUs' keys are no tree: {e:?}"));
+    log!(
+        "topo: {} cpus in {} cores, {} llcs and {} packages",
+        topology.cpus(),
+        topology.domains(Level::Core),
+        topology.domains(Level::Llc),
+        topology.domains(Level::Package),
+    );
+    let was = TOPOLOGY.swap(Box::into_raw(Box::new(topology)), Ordering::Release);
+    assert!(was.is_null(), "smp: the topology is installed once");
+}
+
+/// The tree [`set_topology`] installed.
+pub fn topology() -> &'static Topology {
+    let ptr = TOPOLOGY.load(Ordering::Acquire);
+    assert!(!ptr.is_null(), "smp: the topology was read before bring-up installed it");
+    // SAFETY: installed once from a leaked `Box` and never freed.
+    unsafe { &*ptr }
 }
 
 /// The actuator staging a non-last AP that never starts; `false` without `boot-actuators`.

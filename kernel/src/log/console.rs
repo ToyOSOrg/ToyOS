@@ -37,7 +37,7 @@ use crate::scheduler::{self, Parkable};
 use crate::sync::Lock;
 
 use super::handoff::Handoff;
-use super::read::{drain_ordered, Cursor, Published, RecordSink};
+use super::read::{drain_ordered, Published, RecordSink, Shards};
 use super::shard;
 
 const NAME: &str = "klogd";
@@ -67,6 +67,15 @@ pub fn mode() -> Drain {
 /// One position for every drain context, so a record never reaches the wire
 /// twice. Moved only by the holder of the wire, or by the panic path.
 static DRAINED: Published = Published::new();
+
+/// [`StopWire::Kept`]'s position, walked by the stop alone.
+static KEPT: Published = Published::new();
+
+/// Positions for each of the `cpus` CPUs' shards.
+pub fn size(cpus: usize) {
+    DRAINED.size(cpus);
+    KEPT.size(cpus);
+}
 
 /// Start the thread. Called once, from `kernel_main`, before the scheduler starts.
 /// Placement matters: APs spin until the machine is released, so an earlier spawn could not run while the machine has no console.
@@ -150,9 +159,9 @@ pub enum StopWire {
     /// The wire, which `klogd` let go of and never takes again.
     Held(SleepGuard<'static, ()>),
     /// Its holder kept the wire through [`LET_GO`]; the stop writes over it
-    /// from this position, taken once and never published, so a holder
-    /// still inside a drain cannot move it back under the stop.
-    Kept(Cursor),
+    /// from [`KEPT`], a copy of the position taken once, so a holder still
+    /// inside a drain cannot move it back under the stop.
+    Kept,
 }
 
 impl StopWire {
@@ -164,8 +173,8 @@ impl StopWire {
                 drain_records(wire, u64::MAX, Yield::Never);
                 drain_queue(wire, usize::MAX, Yield::Never);
             }
-            Self::Kept(cursor) => serial::over_the_wire(|guard| {
-                drain_ordered(&super::shards(), cursor, &mut Registers { out: guard });
+            Self::Kept => serial::over_the_wire(|guard| {
+                drain_ordered(&Shards, &mut &KEPT, &mut Registers { out: guard });
             }),
         }
     }
@@ -210,7 +219,8 @@ pub fn take_for_the_stop(parkable: &Parkable) -> StopWire {
                     "console: {holder} kept the wire through the stop's {LET_GO}; the lines console holders queued \
                      are not on it"
                 );
-                return StopWire::Kept(DRAINED.take());
+                KEPT.copy_from(&DRAINED);
+                return StopWire::Kept;
             }
             Err(holder) => refused = Some(holder),
         }
@@ -226,29 +236,22 @@ const CHUNK: u64 = 8;
 /// The whole record backlog through the registers the panic path holds.
 /// Unbounded because interrupt latency doesn't matter while halting, and the report should be whole.
 pub fn drain_locked(guard: &mut BackendGuard) {
-    let mut cursor = DRAINED.take();
     let mut sink = Registers { out: guard };
-    drain_ordered(&super::shards(), &mut cursor, &mut sink);
-    DRAINED.put(&cursor);
+    drain_ordered(&Shards, &mut &DRAINED, &mut sink);
 }
 
 /// Advances the position with no backend: standing still, an armed waiter would find the same record on every rescan and spin.
 /// Safe to advance: shards keep every record for the panel regardless, and a backend arriving later rewinds this position whole.
 fn discard_pending() {
-    let mut cursor = DRAINED.take();
     let mut sink = Discard;
-    drain_ordered(&super::shards(), &mut cursor, &mut sink);
-    DRAINED.put(&cursor);
+    drain_ordered(&Shards, &mut &DRAINED, &mut sink);
 }
 
 /// At most `budget` records onto the wire the caller holds. Returns how many went.
 fn drain_records(wire: &SleepGuard<'_, ()>, budget: u64, yields: Yield) -> u64 {
-    let mut cursor = DRAINED.take();
     let mut sink = Wire { wire, records: 0, budget, yields };
-    drain_ordered(&super::shards(), &mut cursor, &mut sink);
-    let records = sink.records;
-    DRAINED.put(&cursor);
-    records
+    drain_ordered(&Shards, &mut &DRAINED, &mut sink);
+    sink.records
 }
 
 /// Drain straight to the 16550, over whoever holds its registers.
@@ -256,10 +259,8 @@ fn drain_records(wire: &SleepGuard<'_, ()>, budget: u64, yields: Yield) -> u64 {
 /// # Safety
 /// Panic path only, once `serial::panic_flush` found no clean handoff; the position is unsynchronised and a record may reach the wire twice.
 pub unsafe fn drain_bypassed(uart: &mut PanicUart) {
-    let mut cursor = DRAINED.take();
     let mut sink = Raw { uart };
-    drain_ordered(&super::shards(), &mut cursor, &mut sink);
-    DRAINED.put(&cursor);
+    drain_ordered(&Shards, &mut &DRAINED, &mut sink);
 }
 
 /// Which backend the drain has already spoken to, as `serial::Backend`'s discriminant.

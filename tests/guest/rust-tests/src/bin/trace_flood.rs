@@ -9,9 +9,9 @@
 //! answers are printed and judged on the T14 alone (`trace_record_cost`).
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::syscap::SysCap;
+use toyos::syscap::{SysCap, TraceCursor};
 use toyos_abi::syscall::{self, debug_action, SyscallError};
-use toyos_abi::trace::{TraceCursor, TraceRecord};
+use toyos_abi::trace::TraceRecord;
 use toyos_trace::{Entry, Event};
 
 /// A million: the count the track's exit measures a record's cost over.
@@ -27,7 +27,7 @@ fn main() {
         SyscallError::InvalidArgument.to_u64(),
         "a flood past the most one call writes was written",
     );
-    let mut cursor = TraceCursor::new();
+    let mut cursor = TraceCursor::new(vec![0; cap.trace_cursor_words().expect("the estate's capability sizes a cursor")]);
     read_to_now(&cap, &mut cursor);
 
     let ticks = syscall::debug_with(debug_action::TRACE_FLOOD, COUNT);
@@ -62,7 +62,7 @@ fn main() {
 
 /// Every record from `cursor` on, decoded, until a read leaves its buffer
 /// short, and the records lost on the way.
-fn read_to_now(cap: &SysCap, cursor: &mut TraceCursor) -> (Vec<Entry>, u64) {
+fn read_to_now(cap: &SysCap, cursor: &mut TraceCursor<Vec<u64>>) -> (Vec<Entry>, u64) {
     let mut out = Vec::new();
     let mut lost = 0;
     let mut raw = vec![TraceRecord::EMPTY; BATCH];

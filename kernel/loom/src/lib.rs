@@ -164,6 +164,10 @@ macro_rules! log {
 #[path = "../../src/sync.rs"]
 pub mod sync;
 
+/// What `shootdown.rs`, `smp_roster.rs` and `log/registry.rs` size per CPU.
+#[path = "../../src/cpu_slice.rs"]
+pub mod cpu_slice;
+
 #[path = "../../src/shootdown.rs"]
 pub mod shootdown;
 
@@ -198,11 +202,17 @@ pub mod log_read;
 #[path = "../../src/log/stamp.rs"]
 pub mod stamp;
 
-/// What `read.rs`'s log-only walks name as `super::shards()`: none, since no
-/// test here drives them; the walks a test drives take their shards.
+/// What `read.rs`'s log-only walks name as `super::shard_count()` and
+/// `super::shard()`: none, since no test here drives them; the walks a test
+/// drives take their rings.
 #[cfg(not(feature = "loom"))]
-pub fn shards() -> [Option<&'static shard::Shard>; toyos_abi::log::MAX_LOG_SHARDS] {
-    [None; toyos_abi::log::MAX_LOG_SHARDS]
+pub fn shard_count() -> usize {
+    0
+}
+
+#[cfg(not(feature = "loom"))]
+pub fn shard(_cpu: usize) -> Option<&'static shard::Shard> {
+    None
 }
 
 #[path = "../../src/sched/reap_gate.rs"]

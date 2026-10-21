@@ -6,7 +6,7 @@ opened: 2026-10-12
 
 # Per-CPU scheduler and PMM state shares lines every CPU writes
 
-Four structures put what each CPU writes, on its hot path, on a line or a lock
+Three structures put what each CPU writes, on its hot path, on a line or a lock
 every other CPU writes too:
 
 - **The PMM lock, per user copy.** Every user-copy window pins the frames it
@@ -15,10 +15,6 @@ every other CPU writes too:
   (`kernel/src/mm/pmm.rs:98`, `pin_range` and `unpin_range` at `:249-279`):
   two acquisitions of the machine's one frame-allocator lock per copied run,
   on every syscall that copies.
-- **`IN_PASS`.** One `AtomicBool` per CPU in one array
-  (`kernel/src/sched/driver.rs:181`), so every CPU's flag is on one line, and
-  each pass writes its own twice, a `swap` on entry and a `store` on exit
-  (`driver.rs:194`, `:206`).
 - **`CpuHandle`.** Unpadded (`kernel/pure/sched/cpu.rs:2136-2175`) in one
   boxed slice (`cpu.rs:2290`), 32 bytes by its fields without `sched-check`,
   so two CPUs' handles share a line. Each pass stores its own `load`, `surplus` and `last_pass`
@@ -54,6 +50,9 @@ Nothing in the run attributes a miss to the `BITMAP` lock, `IN_PASS`,
 measurement attributes the HITM count to the lines it lands on, on both
 benches.
 
+A fourth, `IN_PASS`, was measured with them and now sits in its CPU's own
+record (`kernel/src/cpu_local.rs`), a line no other CPU writes.
+
 **Exit**: that attribution, posted, and read again after the change; and
-each of the four either written per CPU on a line no other CPU writes, or
+each of the three either written per CPU on a line no other CPU writes, or
 kept with its refusal reason at its site.

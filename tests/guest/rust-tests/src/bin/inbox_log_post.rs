@@ -26,7 +26,7 @@ fn main() {
         .take(SYSCAP_LABEL)
         .expect("test-runner endows every binary it spawns a system capability");
     let poller = Poller::new(1);
-    let mut tail = LogTail::new();
+    let mut tail = LogTail::new(vec![0; toyos::log::cursor_words(&cap).expect("the capability sizes a log cursor")]);
     let mut ended: Option<u32> = None;
     loop {
         // Armed before the log is read, as every reader of an edge arms. An
@@ -61,7 +61,7 @@ fn end_a_process() -> u32 {
 
 /// Read every record the tail has not seen; whether one of them is the end of
 /// `pid`.
-fn recorded(tail: &mut LogTail, cap: &SysCap, pid: Option<u32>) -> bool {
+fn recorded(tail: &mut LogTail<Vec<u64>>, cap: &SysCap, pid: Option<u32>) -> bool {
     let end = pid.map(|pid| format!(" pid={pid} code=0 "));
     let mut records = vec![Record::EMPTY; 64];
     let mut found = false;

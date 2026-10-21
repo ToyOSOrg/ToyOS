@@ -33,7 +33,6 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering::Relaxed};
 
-use crate::sched::MAX_CPUS;
 
 /// Every phase [`boot_phase!`](crate::boot_phase) publishes, in the order a
 /// boot reaches them, so a sealed record can name where the machine stopped.
@@ -195,10 +194,18 @@ fn past(at: u64) {
     expire()
 }
 
-/// Where each CPU's timer last interrupted the kernel, kept only on a boot
-/// with a bound: the seal's account of a CPU stuck with interrupts open, which
-/// no hard-lockup sample reports.
-static KERNEL_PC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// Where a CPU's timer last interrupted the kernel, kept only on a boot with
+/// a bound: the seal's account of a CPU stuck with interrupts open, which no
+/// hard-lockup sample reports.
+pub struct Local {
+    kernel_pc: AtomicU64,
+}
+
+impl Local {
+    pub fn new() -> Self {
+        Self { kernel_pc: AtomicU64::new(0) }
+    }
+}
 
 /// [`poll`], for a timer interrupt that found the kernel at `pc`.
 ///
@@ -207,19 +214,20 @@ static KERNEL_PC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS
 pub extern "C" fn poll_in_kernel(pc: u64) {
     let at = AT_COUNTER.load(Relaxed);
     if at != 0 {
-        KERNEL_PC[crate::arch::percpu::cpu_id() as usize].store(pc, Relaxed);
+        crate::cpu_local::here().deadline.kernel_pc.store(pc, Relaxed);
     }
     past(at)
 }
 
 /// A line `  cpuN pc=<pc>  <symbol>+<offset>` for each online CPU, out of
-/// [`KERNEL_PC`]; the harness reads the symbol (`build/bootlog.rs`).
+/// [`Local`]; the harness reads the symbol (`build/bootlog.rs`).
 struct KernelPcs;
 
 impl core::fmt::Display for KernelPcs {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        for (cpu, pc) in KERNEL_PC.iter().enumerate().take(crate::smp::cpu_count() as usize) {
-            writeln!(f, "  cpu{cpu} pc={}", crate::symbols::At(pc.load(Relaxed)))?;
+        for cpu in 0..crate::smp::cpu_count() {
+            let pc = crate::cpu_local::get(cpu).map_or(0, |local| local.deadline.kernel_pc.load(Relaxed));
+            writeln!(f, "  cpu{cpu} pc={}", crate::symbols::At(pc))?;
         }
         Ok(())
     }

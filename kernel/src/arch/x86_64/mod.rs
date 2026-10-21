@@ -119,3 +119,27 @@ pub unsafe fn percpu_fetch_add(
     }
     previous
 }
+
+/// This architecture's part of a CPU's `cpu_local` record.
+pub struct CpuLocal {
+    pub counters: counters::Local,
+    #[cfg(feature = "switch-witness")]
+    pub hw: hw::Local,
+}
+
+impl CpuLocal {
+    pub fn new() -> Self {
+        Self {
+            counters: counters::Local::new(),
+            #[cfg(feature = "switch-witness")]
+            hw: hw::Local::new(),
+        }
+    }
+}
+
+/// What this architecture keeps for each of the `cpus` CPUs the firmware
+/// names outside that record: the TLB's and the SMI command port's rounds.
+pub fn size(cpus: usize) {
+    tlb::size(cpus);
+    smi_cmd::size(cpus);
+}

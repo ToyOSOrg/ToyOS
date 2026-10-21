@@ -1447,8 +1447,6 @@ impl XhciController {
 /// holds the lock.
 static XHCI: OwedLock<Vec<XhciController>> = OwedLock::new(Vec::new(), bring_to_pass);
 
-const _: () = assert!(crate::scheduler::MAX_CPUS <= u64::BITS as usize, "XHCI's owed word has a bit per cpu");
-
 /// [`XHCI`]'s answer: every CPU in `owed` takes a scheduler pass, whose
 /// [`poll_if_pending`] finds the record it left.
 fn bring_to_pass(owed: u64) {

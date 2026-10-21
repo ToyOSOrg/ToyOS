@@ -12,10 +12,10 @@
 use std::io::Write;
 
 use toyos::endow::{Endowments, SYSCAP_LABEL};
-use toyos::syscap::SysCap;
+use toyos::syscap::{SysCap, TraceCursor};
 use toyos_abi::clock;
 use toyos_abi::syscall::SyscallError;
-use toyos_abi::trace::{TraceCursor, TraceRecord};
+use toyos_abi::trace::TraceRecord;
 use toyos_trace::Entry;
 
 const USAGE: &str = "usage: trace";
@@ -33,7 +33,14 @@ fn main() {
     let page = clock::page();
     let until = clock::stamp_ns();
 
-    let mut cursor = TraceCursor::new();
+    let words = match cap.trace_cursor_words() {
+        Ok(words) => words,
+        Err(SyscallError::PermissionDenied) => {
+            refuse("trace: the kernel refused: this program's capability does not carry `trace`")
+        }
+        Err(e) => refuse(&format!("trace: the diary would not size a cursor: {e:?}")),
+    };
+    let mut cursor = TraceCursor::new(vec![0; words]);
     let mut raw = vec![TraceRecord::EMPTY; BATCH];
     let mut lost = 0;
     let mut stdout = std::io::stdout().lock();

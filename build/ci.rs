@@ -905,6 +905,8 @@ fn host(root: &Path, scope: Result<(Scope, String), String>) -> Vec<Step> {
             "log_body_words",
             "--test",
             "log_cursor",
+            "--test",
+            "cpu_slice",
         ])
     }));
     for control in CONTROLS {

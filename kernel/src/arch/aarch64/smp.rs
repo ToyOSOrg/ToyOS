@@ -5,6 +5,9 @@
 use core::mem::size_of;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
+use kernel::sched::topology::CpuKeys;
+use toyos_acpi::Gicc;
 use toyos_gicv3::packed_affinity;
 
 use super::percpu::{self, PerCpu};
@@ -29,9 +32,34 @@ pub struct ApStart {
 }
 
 /// Start every other CPU `gic` names, in the MADT's order, until one does not
-/// echo within [`AP_START`] or the roster is full.
-pub fn start(gic: &irqchip::Gic) {
+/// echo within [`AP_START`], then install the tree the
+/// PPTT at `rsdp_addr` places the online ones in.
+pub fn start(gic: &irqchip::Gic, rsdp_addr: u64) {
     let me = cpu::hardware_id();
+    let boot =
+        gic.cpus.iter().find(|gicc| packed_affinity(gicc.mpidr) == me).expect("smp: the MADT names the boot CPU");
+    let mut online = Vec::from([*boot]);
+    start_others(gic, me, &mut online);
+    // Arm BBR 2.2 (DEN0044I) §3.1 and §7.3.1.10: the SBBR recipe, an ACPI
+    // Arm machine's, makes the PPTT mandatory.
+    let pptt = toyos_acpi::pptt(crate::drivers::acpi::direct_phys(), rsdp_addr)
+        .unwrap_or_else(|e| panic!("smp: no PPTT places this machine's CPUs: {e:?}"));
+    smp::set_topology(
+        online
+            .iter()
+            .enumerate()
+            .map(|(cpu, gicc)| {
+                let place = pptt
+                    .place(gicc.uid)
+                    .unwrap_or_else(|e| panic!("smp: the PPTT places cpu{cpu} (uid {}) nowhere: {e:?}", gicc.uid));
+                CpuKeys { core: place.core, llc: place.llc, package: place.package }
+            })
+            .collect(),
+    );
+}
+
+/// The bring-up `start` wraps: each other CPU committed is pushed to `online`.
+fn start_others(gic: &irqchip::Gic, me: u32, online: &mut Vec<Gicc>) {
     ROSTER.set_bsp(me);
     let others = gic.cpus.iter().filter(|gicc| packed_affinity(gicc.mpidr) != me);
     let Some(psci) = psci::conduit() else {
@@ -41,10 +69,7 @@ pub fn start(gic: &irqchip::Gic) {
     let root = paging::bringup_root();
     let entry = DirectMap::phys_of(super::boot::ap_start as *const u8);
     for gicc in others {
-        let Some(attempt) = ROSTER.begin_attempt() else {
-            log!("SMP: roster full at {} CPUs; ignoring further MADT entries", smp::cpu_count());
-            break;
-        };
+        let attempt = ROSTER.begin_attempt();
         let start: &'static ApStart = Box::leak(Box::new(ApStart {
             root,
             stack_top: smp::bringup_stack(),
@@ -68,6 +93,7 @@ pub fn start(gic: &irqchip::Gic) {
             break;
         }
         ROSTER.commit(attempt, packed_affinity(gicc.mpidr));
+        online.push(*gicc);
         log!("SMP: cpu{} mpidr={:#x} online", attempt.id(), gicc.mpidr);
     }
     log!("SMP: {} of {} MADT CPUs online", smp::cpu_count(), gic.cpus.len());

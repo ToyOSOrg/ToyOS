@@ -354,15 +354,13 @@ const SCREEN_TESTS: &[(&str, qemu::Profile)] = &[
 /// desktop drawn at that scale, and `scale_window`'s 200x100 logical window
 /// given its buffer at it.
 fn gop_edid_scale(loader: &str, log: &str, kernel: &str) -> Result<(), String> {
-    const T14: u32 = 0x0008_06c1;
-    const AMD_BENCH: u32 = 0x0086_0f01;
     let signature = microcode_lines(kernel)?
         .first()
         .ok_or("the kernel wrote no microcode line to tell the bench by")?
         .signature;
     let (handle, panel) = match signature {
-        T14 => (0, "panel 309x173 mm, scale 1.5"),
-        AMD_BENCH => (1, "panel 309x174 mm, scale 1.5"),
+        T14_SIGNATURE => (0, "panel 309x173 mm, scale 1.5"),
+        AMD_BENCH_SIGNATURE => (1, "panel 309x174 mm, scale 1.5"),
         other => return Err(format!("no bench of signature {other:#x} says which panel it has")),
     };
     let handed = format!("EDID: GOP handle {handle} of 2 shows the scanout and publishes 128 byte(s), the base block handed over");
@@ -854,13 +852,18 @@ const METAL: &[(&str, metal::Metal)] = &[
         "smp_roster_and_tsc_trail",
         metal::Metal {
             arms: TESTCASES,
-            // The T14's CPUs offer x2APIC, so the declaration keeps it there.
+            // Each bench's local APIC in the mode its CPUs offer
+            // ([`apic_mode_offered`]), which the declaration takes.
             judge: |b| {
                 let (log, cpus) = (b[0].kernel(), b[0].cpus()?);
                 smp_roster_and_tsc_trail(log.text(), cpus)?;
-                apic_mode_held(&log, cpus, "X2apic")
+                apic_mode_held(&log, cpus, apic_mode_offered(log.text())?)
             },
         },
+    ),
+    (
+        "topology_readback",
+        metal::Metal { arms: TESTCASES, judge: |b| topology_readback(b[0].kernel().text(), b[0].cpus()?) },
     ),
     (
         "pmm_accounting",
@@ -5508,6 +5511,10 @@ enum MicrocodeSaid {
     Unread,
 }
 
+/// Each bench's CPUID.01H:EAX, which its kernel's `microcode:` lines name it by.
+const T14_SIGNATURE: u32 = 0x0008_06c1;
+const AMD_BENCH_SIGNATURE: u32 = 0x0086_0f01;
+
 /// Every `microcode:` line in `log`, or the first CPU that refused the update
 /// it was handed, on any machine.
 fn microcode_lines(log: &str) -> Result<Vec<MicrocodeLine>, String> {
@@ -6304,6 +6311,54 @@ fn smp_roster_and_tsc_trail(log: &str, cpus: u32) -> Result<(), String> {
         "  [smp] {online} CPUs online, {bracketed} AP TSCs inside a BSP bracket at most \
          {widest} cycles wide"
     );
+    Ok(())
+}
+
+/// The local APIC mode a bench's CPUs offer, by `CPUID.01H:ECX[21]` as each
+/// bench's scout read it on every CPU (`kernel/sim/tests/scout/`): the T14's
+/// `0x77fafbbf` sets it and the AMD bench's `0x76d8320b` does not, so the
+/// declaration keeps x2APIC on the one and xAPIC on the other.
+fn apic_mode_offered(log: &str) -> Result<&'static str, String> {
+    let signature =
+        microcode_lines(log)?.first().ok_or("the kernel wrote no microcode line to tell the bench by")?.signature;
+    match signature {
+        T14_SIGNATURE => Ok("X2apic"),
+        AMD_BENCH_SIGNATURE => Ok("Xapic"),
+        other => Err(format!("no bench of signature {other:#x} has a recorded APIC mode")),
+    }
+}
+
+/// Each CPU's `topo:` line against its bench's tree as the bench's own scout
+/// read it (`kernel/sim/tests/scout/`, decoded by the simulator's
+/// `a_benchs_shape_is_what_its_scout_read`), the bench told by its CPU
+/// signature. The line is the CPUID the kernel read live; the expectation is
+/// words another kernel logged.
+///
+/// - **T14**: x2APIC ids `0, 2, 4, 6, 1, 3, 5, 7` in MADT order, a core per
+///   id pair and one L3 for the package.
+/// - **AMD bench**: APIC ids `0..16`, a core per id pair, an L3 per eight ids
+///   and one package.
+fn topology_readback(log: &str, cpus: u32) -> Result<(), String> {
+    let signature =
+        microcode_lines(log)?.first().ok_or("the kernel wrote no microcode line to tell the bench by")?.signature;
+    const AMD_IDS: [u32; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+    let (bench, ids, smt, llc, package): (&str, &[u32], u32, u32, u32) = match signature {
+        T14_SIGNATURE => ("the T14", &[0, 2, 4, 6, 1, 3, 5, 7], 1, 4, 4),
+        AMD_BENCH_SIGNATURE => ("the AMD bench", &AMD_IDS, 1, 3, 7),
+        other => return Err(format!("no bench of signature {other:#x} has a recorded tree")),
+    };
+    if cpus as usize > ids.len() {
+        return Err(format!("{cpus} CPUs came up and {bench}'s MADT names {}", ids.len()));
+    }
+    for (cpu, id) in ids.iter().take(cpus as usize).enumerate() {
+        let want = format!("topo: cpu{cpu} core={:#x} llc={:#x} pkg={:#x}", id >> smt, id >> llc, id >> package);
+        if !log.lines().any(|l| l.ends_with(&want)) {
+            let said: Vec<&str> = log.lines().filter(|l| l.contains("topo: ")).collect();
+            return Err(format!("{bench}: no `{want}` record; the kernel said {said:#?}"));
+        }
+    }
+    let tree = log.lines().find(|l| l.contains(&format!("topo: {cpus} cpus in "))).ok_or("no `topo:` summary")?;
+    eprintln!("  [topology] {bench}: {}", tree.split("topo: ").nth(1).unwrap_or(tree));
     Ok(())
 }
 

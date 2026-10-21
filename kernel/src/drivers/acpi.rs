@@ -199,6 +199,22 @@ pub fn find_hpet_base(rsdp_addr: u64) -> Option<u64> {
     Some(base)
 }
 
+/// How many processors the MADT enables, of either architecture's kind: its
+/// Local APIC and x2APIC entries, or its GICC entries. What every per-CPU
+/// table is sized by, before either architecture's own walk of the MADT.
+pub fn madt_processors(rsdp_addr: u64) -> usize {
+    let madt = toyos_acpi::find_table(direct_phys(), rsdp_addr, b"APIC", MADT_ENTRIES)
+        .unwrap_or_else(|e| panic!("ACPI: the MADT, which names this machine's CPUs, is unusable: {e:?}"));
+    toyos_acpi::madt_entries(&madt)
+        .map_while(Result::ok)
+        .filter(|entry| match entry {
+            MadtEntry::LocalApic { enabled, .. } => *enabled,
+            MadtEntry::Gicc(gicc) => gicc.enabled,
+            _ => false,
+        })
+        .count()
+}
+
 /// Parse MADT (signature "APIC") to discover per-CPU APIC IDs.
 pub fn parse_madt(rsdp_addr: u64) -> Option<MadtInfo> {
     let madt = match toyos_acpi::find_table(direct_phys(), rsdp_addr, b"APIC", MADT_ENTRIES) {

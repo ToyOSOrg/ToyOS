@@ -34,10 +34,10 @@ pub fn seal_into(report: &mut Report<'_>) {
     // stamped past it, so the second walk places what the first measured.
     let to = read::newest_committed();
     let mut measure = Measure(Recovery::new());
-    read::snapshot_committed(LogStamp::ZERO, to, &mut measure);
+    read::snapshot_committed(LogStamp::ZERO, to, &mut measure, &super::SEALING);
     let mut kept = report.recovery(measure.0);
     if let Some(from) = kept.from() {
-        read::snapshot_committed(LogStamp::since_zero(from), to, &mut Place(&mut kept));
+        read::snapshot_committed(LogStamp::since_zero(from), to, &mut Place(&mut kept), &super::SEALING);
     }
     kept.close();
 }

@@ -37,6 +37,7 @@ use crate::sched::task::{
     TaskState, TransitTask, WaitClass, WakeCause, WakeReason,
 };
 use crate::sched::timer::{TimerApplied, TimerPlan};
+use crate::sched::topology::{Level, Topology};
 use crate::sched::park::{CommittedTicket, CurrentTask};
 
 /// Permission to switch. Holds pointers into the stable Box-backed task
@@ -286,18 +287,15 @@ pub struct CpuSched<X: SchedPayload> {
     /// something real wakes it — so a machine with nothing to run stops ticking
     /// after `times × every_ns` instead of waking for ever.
     idle_probes_spent: u32,
-    /// Where [`Balance::PushOnSurplus`]'s next push starts looking for a
-    /// sleeping CPU.
+    /// The topology position after the CPU this one last pushed to or
+    /// forwarded a wake to, where the next such choice starts looking among
+    /// equals.
     ///
     /// A pass pushes to **one** CPU, and without this it is the same CPU every
     /// time: the target posts its probe and halts again with SLEEPING still
-    /// published, so the next pass re-pokes the CPU that is already coming and
-    /// the CPU behind it waits for the first one's probe to be *answered*. Two
-    /// passes per sleeper instead of one, measured at 130,000,000 ns of probe
-    /// gap on an eight-CPU lopsided machine against the 44,000,000 ns four CPUs
-    /// cost. The cursor makes consecutive pushes walk the machine, so `k`
-    /// sleeping CPUs are reached in `k` passes.
-    push_cursor: u32,
+    /// published, so the next pass re-pokes the CPU that is already coming
+    /// while the CPU behind it waits for the first one's probe to be answered.
+    cursor: usize,
     loaded: Loaded,
     loaded_ctx: *mut X::Ctx,
     idle_ctx: Box<X::Ctx>,
@@ -338,7 +336,7 @@ impl<X: SchedPayload> CpuSched<X> {
             dispatched_at: Nanos::ZERO,
             aged_grant: false,
             idle_probes_spent: 0,
-            push_cursor: 0,
+            cursor: 0,
             loaded: Loaded::Idle,
             loaded_ctx,
             idle_ctx,
@@ -538,7 +536,7 @@ impl<X: SchedPayload> CpuSched<X> {
                 (core::mem::offset_of!(Self, dispatched_at), "dispatched_at"),
                 (core::mem::offset_of!(Self, aged_grant), "aged_grant"),
                 (core::mem::offset_of!(Self, idle_probes_spent), "idle_probes_spent"),
-                (core::mem::offset_of!(Self, push_cursor), "push_cursor"),
+                (core::mem::offset_of!(Self, cursor), "cursor"),
                 (core::mem::offset_of!(Self, loaded), "loaded"),
                 (core::mem::offset_of!(Self, loaded_ctx), "loaded_ctx"),
                 (core::mem::offset_of!(Self, idle_ctx), "idle_ctx"),
@@ -914,25 +912,25 @@ impl<X: SchedPayload> CpuSched<X> {
         }
     }
 
-    /// A CPU that has published SLEEPING and has no kick coming, for
-    /// wake-forwarding: one an earlier forward has kicked is already being
-    /// handed work, and a burst of wakes drained in one pass would otherwise
-    /// all land on it. Reading the doorbells is a heuristic: a CPU that woke up
+    /// The CPU [`CpuHandles::idle_near`] chooses for a wake forward among those
+    /// that have published SLEEPING and have no kick coming: one an earlier
+    /// forward kicked is already being handed work, and a burst of wakes
+    /// drained in one pass would otherwise all land on it. Reading the doorbells is a heuristic: a CPU that woke up
     /// in the meantime simply gets an ordinary adopt.
     ///
     /// A CPU that stopped mid-idle publishes SLEEPING for ever, and forwarding
     /// a real-time task to one is the worst outcome this scan has — RT is the
     /// band with nothing behind it to notice. The first forward to it kicks
     /// it, and the edge it never clears refuses it every forward after.
-    fn idle_sibling<H: Hw<Payload = X>, P: PreemptGuard>(
-        &self,
+    fn forward_target<H: Hw<Payload = X>, P: PreemptGuard>(
+        &mut self,
         env: Env<'_, H, P>,
     ) -> Option<CpuId> {
-        (0..env.cpus.len()).map(|i| CpuId(i as u32)).find(|&cpu| {
-            cpu != self.id
-                && env.cpus.get(cpu).doorbell().sleeping()
-                && !env.cpus.get(cpu).doorbell().kick_pending()
-        })
+        let cpu = env.cpus.idle_near(self.id, self.cursor, |cpu| {
+            cpu.doorbell().sleeping() && !cpu.doorbell().kick_pending()
+        })?;
+        self.cursor = env.cpus.topology().position(cpu) + 1;
+        Some(cpu)
     }
 
     /// Wake placement: keep the task local — that is where its cache lines
@@ -985,7 +983,7 @@ impl<X: SchedPayload> CpuSched<X> {
             });
         let behind_rt = task.is_rt() && self.running.as_ref().is_some_and(|r| r.is_rt());
         if behind_fair.is_some() || behind_rt {
-            if let Some(dst) = self.idle_sibling(env) {
+            if let Some(dst) = self.forward_target(env) {
                 self.hand_off(task, dst, env, now);
                 return;
             }
@@ -2156,13 +2154,23 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
     /// probe rides one node per thief, and a node posted into a CPU that never
     /// drains is never freed, so one probe spent on a stopped CPU costs this one
     /// the pull half for the rest of the machine's life.
+    ///
+    /// **Nearest first**: an SMT sibling, then the LLC, the package and the
+    /// machine, the most surplus winning inside the first of those holding any
+    /// worth a probe. A steal takes one task whichever victim answers, so the
+    /// nearer victim moves the same work for less cache refill.
     fn best_victim(&self) -> Option<CpuId> {
-        let (victim, surplus) = (0..self.env.cpus.len())
-            .map(|i| CpuId(i as u32))
-            .filter(|&cpu| cpu != self.cpu.id && self.env.cpus.get(cpu).answering(self.now))
-            .map(|cpu| (cpu, self.env.cpus.get(cpu).surplus()))
-            .max_by_key(|&(_, surplus)| surplus)?;
-        (surplus >= PUSH_THRESHOLD).then_some(victim)
+        let cpus = self.env.cpus;
+        let me = self.cpu.id;
+        STEAL_RINGS.into_iter().find_map(|(inner, outer)| {
+                let (victim, surplus) = cpus
+                    .topology()
+                    .ring(me, inner, outer, 0)
+                    .filter(|&cpu| cpus.get(cpu).answering(self.now))
+                    .map(|cpu| (cpu, cpus.get(cpu).surplus()))
+                    .max_by_key(|&(_, surplus)| surplus)?;
+                (surplus >= PUSH_THRESHOLD).then_some(victim)
+            })
     }
 
     /// [`Balance::PushOnSurplus`]: this pass has just published `surplus`, so
@@ -2186,21 +2194,14 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
             return;
         }
         balance_fence();
-        let n = self.env.cpus.len();
-        let me = self.cpu.id.0 as usize;
-        let base = self.cpu.push_cursor as usize;
-        let Some(target) = (0..n)
-            .map(|offset| (base + offset) % n)
-            .filter(|&cpu| cpu != me)
-            .map(|cpu| CpuId(cpu as u32))
-            .find(|&cpu| {
-                self.env.cpus.get(cpu).doorbell().sleeping()
-                    && self.env.cpus.get(cpu).answering(self.now)
-            })
+        let cpus = self.env.cpus;
+        let now = self.now;
+        let Some(target) =
+            cpus.idle_near(self.cpu.id, self.cpu.cursor, |cpu| cpu.doorbell().sleeping() && cpu.answering(now))
         else {
             return;
         };
-        self.cpu.push_cursor = (target.0 + 1) % n as u32;
+        self.cpu.cursor = cpus.topology().position(target) + 1;
         if self.env.cpus.get(target).poke() == Kick::Send {
             self.env.hw.kick(target);
         }
@@ -2366,14 +2367,31 @@ impl<M: SchedMsg> CpuHandle<M> {
     }
 }
 
-/// The boot-initialized slice of handles. Indexed by [`CpuId`]; an unknown
-/// CPU id is a bug, not a lookup failure.
+/// The boot-initialized slice of handles, and the machine's cache tree that
+/// every choice of a CPU reads. Indexed by [`CpuId`]; an unknown CPU id is a
+/// bug, not a lookup failure.
 pub struct CpuHandles<M> {
     handles: Box<[CpuHandle<M>]>,
+    topology: Topology,
 }
 
+/// The CPUs an idle CPU is chosen among, nearest first: `me`'s LLC, then the
+/// rest of its package, then the machine. A choice stays in the first group
+/// with a candidate, so locality decides before core idleness does.
+const IDLE_GROUPS: [(Option<Level>, Level); 3] =
+    [(None, Level::Llc), (Some(Level::Llc), Level::Package), (Some(Level::Package), Level::Machine)];
+
+/// The rings a steal probe searches, nearest first: an SMT sibling, the rest
+/// of the LLC, the rest of the package and the machine.
+const STEAL_RINGS: [(Option<Level>, Level); 4] = [
+    (None, Level::Core),
+    (Some(Level::Core), Level::Llc),
+    (Some(Level::Llc), Level::Package),
+    (Some(Level::Package), Level::Machine),
+];
+
 impl<M: SchedMsg> CpuHandles<M> {
-    pub fn new(handles: Vec<CpuHandle<M>>) -> Self {
+    pub fn new(handles: Vec<CpuHandle<M>>, topology: Topology) -> Self {
         for (index, handle) in handles.iter().enumerate() {
             assert_eq!(
                 handle.id(),
@@ -2381,8 +2399,10 @@ impl<M: SchedMsg> CpuHandles<M> {
                 "cpu handles must be indexed by their own id",
             );
         }
+        assert_eq!(topology.cpus(), handles.len(), "the topology describes every cpu and no other");
         Self {
             handles: handles.into_boxed_slice(),
+            topology,
         }
     }
 
@@ -2400,8 +2420,47 @@ impl<M: SchedMsg> CpuHandles<M> {
         self.handles.is_empty()
     }
 
-    /// Where a new task goes: the least loaded CPU still answering, scanned from
-    /// `start` so that ties spread instead of piling on one CPU.
+    pub fn topology(&self) -> &Topology {
+        &self.topology
+    }
+
+    /// How many of `cpu`'s SMT siblings, `cpu` excluded, read other than SLEEPING.
+    fn busy_siblings(&self, cpu: CpuId) -> usize {
+        self.topology
+            .core(cpu)
+            .iter()
+            .filter(|&&sibling| sibling != cpu && !self.get(sibling).doorbell().sleeping())
+            .count()
+    }
+
+    /// The CPU nearest `me` that `usable` accepts, preferring within each
+    /// group of [`IDLE_GROUPS`] one whose SMT siblings all sleep too, so work
+    /// goes to a free physical core before it shares one with running work.
+    /// Ties go to the first at or after topology position `from`, which is how
+    /// consecutive choices rotate.
+    pub fn idle_near(&self, me: CpuId, from: usize, usable: impl Fn(&CpuHandle<M>) -> bool) -> Option<CpuId> {
+        for (inner, outer) in IDLE_GROUPS {
+            let mut shared_core = None;
+            for cpu in self.topology.ring(me, inner, outer, from) {
+                if !usable(self.get(cpu)) {
+                    continue;
+                }
+                if self.busy_siblings(cpu) == 0 {
+                    return Some(cpu);
+                }
+                shared_core.get_or_insert(cpu);
+            }
+            if shared_core.is_some() {
+                return shared_core;
+            }
+        }
+        None
+    }
+
+    /// Where a new task goes: the CPU still answering whose queue it would wait
+    /// least behind, and among those one that sleeps, then one whose SMT
+    /// siblings run least. Scanned from `start` so that ties spread instead of
+    /// piling on one CPU.
     ///
     /// **It lives here rather than in the driver because the simulator places
     /// tasks too**, and a placement rule written twice is one the sim is not
@@ -2417,7 +2476,10 @@ impl<M: SchedMsg> CpuHandles<M> {
             (0..n)
                 .map(|offset| CpuId(((start.0 as usize + offset) % n) as u32))
                 .filter(|&cpu| !answering_only || self.get(cpu).answering(now))
-                .min_by_key(|&cpu| self.get(cpu).load())
+                .min_by_key(|&cpu| {
+                    let handle = self.get(cpu);
+                    (handle.load(), !handle.doorbell().sleeping(), self.busy_siblings(cpu))
+                })
         };
         scan(true)
             .or_else(|| scan(false))
@@ -2546,6 +2608,11 @@ mod tests {
 
     impl World {
         fn new(count: usize) -> Self {
+            Self::on(Topology::flat(count as u32))
+        }
+
+        fn on(topology: Topology) -> Self {
+            let count = topology.cpus();
             let mut cpus = Vec::new();
             let mut handles = Vec::new();
             for i in 0..count {
@@ -2555,7 +2622,7 @@ mod tests {
             }
             Self {
                 cpus,
-                handles: CpuHandles::new(handles),
+                handles: CpuHandles::new(handles, topology),
                 hw: TestHw::default(),
                 frontier: Frontier::new(),
                 preempt: NoPreempt,
@@ -4020,7 +4087,7 @@ mod tests {
             handles.push(CpuHandle::new(CpuId(i), tx));
             keep.push(rx);
         }
-        let handles = CpuHandles::new(handles);
+        let handles = CpuHandles::new(handles, Topology::flat(3));
         let (idle, busy, stopped) = (CpuId(0), CpuId(1), CpuId(2));
         let late = Nanos(STALE_PASS_NS + 1);
         // The `Kick` a poster owes an IPI has nowhere to go in a harness with no
@@ -4061,6 +4128,104 @@ mod tests {
         handles.get(busy).publish_load(2);
         handles.get(stopped).publish_load(9);
         assert_eq!(handles.place(idle, late), busy);
+    }
+
+    /// One package of two LLCs, each two cores of two threads, listed against
+    /// the tree: a core's threads are four ids apart and the LLCs interleave,
+    /// so cpu0's core is {0, 4}, its LLC {0, 4, 2, 6} and the other {1, 5, 3, 7}.
+    fn two_llcs() -> Topology {
+        use crate::sched::topology::CpuKeys;
+        let core_of = [0, 2, 1, 3, 0, 2, 1, 3];
+        Topology::new(core_of.iter().map(|&core| CpuKeys { core, llc: core / 2, package: 0 }).collect())
+            .expect("a tree")
+    }
+
+    type Consumers = Vec<crate::sched::mailbox::MailboxConsumer<Msg<TestPayload>>>;
+
+    fn bare_handles(topology: Topology) -> (CpuHandles<Msg<TestPayload>>, Consumers) {
+        let (handles, consumers) = (0..topology.cpus() as u32)
+            .map(|i| {
+                let (tx, rx) = mailbox::<Msg<TestPayload>>();
+                (CpuHandle::new(CpuId(i), tx), rx)
+            })
+            .unzip();
+        (CpuHandles::new(handles, topology), consumers)
+    }
+
+    fn sleep(handles: &CpuHandles<Msg<TestPayload>>, cpus: &[u32]) {
+        for &cpu in cpus {
+            handles.get(CpuId(cpu)).doorbell().arm_sleep().abandon();
+        }
+    }
+
+    fn wake_up(handles: &CpuHandles<Msg<TestPayload>>, cpus: &[u32]) {
+        for &cpu in cpus {
+            handles.get(CpuId(cpu)).doorbell().begin_pass();
+        }
+    }
+
+    /// **Locality first, then a free physical core, then rotation**: a forward
+    /// or push from cpu0 takes a core whose threads all sleep in its own LLC,
+    /// shares a busy core there before crossing to the other LLC's free ones,
+    /// and crosses only when its LLC has nobody asleep.
+    #[test]
+    fn an_idle_cpu_is_chosen_near_and_on_a_free_core_first() {
+        let (handles, _consumers) = bare_handles(two_llcs());
+        let me = CpuId(0);
+        let asleep = |h: &CpuHandle<_>| h.doorbell().sleeping();
+        sleep(&handles, &[1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(handles.idle_near(me, 0, asleep), Some(CpuId(2)), "core {{2, 6}} is free");
+        let after_two = handles.topology().position(CpuId(2)) + 1;
+        assert_eq!(handles.idle_near(me, after_two, asleep), Some(CpuId(6)), "the next choice rotates");
+
+        wake_up(&handles, &[2]);
+        assert_eq!(
+            handles.idle_near(me, 0, asleep),
+            Some(CpuId(4)),
+            "no free core in the LLC, so a busy core's thread there beats a free core in the other",
+        );
+
+        wake_up(&handles, &[4, 6]);
+        let other = handles.idle_near(me, 0, asleep).expect("the other LLC sleeps");
+        assert!(handles.topology().core(other).iter().all(|&c| handles.get(c).doorbell().sleeping()));
+        assert_eq!(handles.topology().level(me, other), Some(Level::Package));
+        assert_eq!(handles.idle_near(me, 0, |h| asleep(h) && h.id() == CpuId(9)), None);
+    }
+
+    /// **A spawn takes the least queue, then a sleeping CPU, then the CPU
+    /// whose SMT siblings run least**, scanned from its rotating start.
+    #[test]
+    fn a_spawn_goes_to_a_free_core_before_a_busy_cores_thread() {
+        let (handles, _consumers) = bare_handles(two_llcs());
+        for cpu in 0..8 {
+            handles.get(CpuId(cpu)).publish_pass(NOW);
+        }
+        sleep(&handles, &[1, 2, 3, 4, 5, 6, 7]);
+        assert_eq!(handles.place(CpuId(4), NOW), CpuId(5), "4's sibling runs; 5's core is free");
+        assert_eq!(handles.place(CpuId(0), NOW), CpuId(1), "0 itself runs");
+        wake_up(&handles, &[1, 2, 3, 5, 6, 7]);
+        assert_eq!(handles.place(CpuId(0), NOW), CpuId(4), "the one sleeper is placed on, sibling or not");
+        handles.get(CpuId(4)).publish_load(1);
+        assert_eq!(handles.place(CpuId(0), NOW), CpuId(0), "a queue outweighs who runs");
+    }
+
+    /// **A probe goes to the nearest CPU with surplus**: an SMT sibling's one
+    /// task before the other LLC's five, and the own LLC's before the other's.
+    #[test]
+    fn a_steal_probe_asks_the_nearest_surplus_first() {
+        for (near, victim) in [(4, 4), (2, 2)] {
+            let mut w = World::on(two_llcs());
+            w.balance = Balance::Pull;
+            for cpu in 0..8 {
+                w.handles.get(CpuId(cpu)).publish_pass(NOW);
+            }
+            w.handles.get(CpuId(near)).publish_surplus(1);
+            w.handles.get(CpuId(1)).publish_surplus(5);
+            w.run_a_pass(C0);
+            let asked: Vec<u32> = (0..8u32).filter(|&cpu| !w.cpus[cpu as usize].mailbox_is_empty()).collect();
+            assert_eq!(asked, [victim], "the probe's victim");
+            w.abandon();
+        }
     }
 }
 
