@@ -35,6 +35,15 @@ directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
   cleanup without cooperation, run on the causing path in bounded steps. init
   never dies and stays tiny.
 
+**Ruled** (owner, 2026-10-21): libc's signals are the focused set this track
+plans, over native process events: a child's end (stage 4) and an interrupt,
+hang-up or terminate request (stage 6), and no POSIX signal subsystem up
+front. libc's adaptation stays in userland, and ordinary Rust behaviour is
+kept. Further signal behaviour comes when a required program shows a
+concrete need, with its semantics and cost reviewed then. An unsupported
+signal operation never appears to succeed
+(`issues/libc-sigaction-answers-success-and-keeps-nothing.md`).
+
 ## Stages
 
 1. **Done** (#926, stage 1.2 of

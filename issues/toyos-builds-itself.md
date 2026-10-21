@@ -42,117 +42,112 @@ AArch64 one step behind, on `issues/toyos-runs-on-arm64.md`'s track.
 first, without waiting for packages over HTTPS, and links them statically:
 "Yes, decoupled and static (Recommended)".
 
-**To build** (2026-10-01), in an order that is open. Where a stage names
-libc's state it is `userland/libc` at `15625e0cb`.
-- **The `libc` crate gains a ToyOS module**, checked by `ctest` against
-  `sdk/libc`'s headers. `libc` 0.2.189 has none (`rg -i toyos` over its
-  `src` matches nothing) and is empty for an OS it does not know
-  (`src/lib.rs`), and `ToyOSOrg/libc` does not exist (GitHub's API answers
-  404). cargo's `curl-sys`, `libssh2-sys` and `libgit2-sys` import its C types
-  unconditionally.
-- **libc gains `select`.** curl 8.21.0, which `curl-sys` 0.4.90 builds, does
-  not compile without it (`lib/curlx/wait.c`: `#error "We cannot compile
-  without select() support."`) and waits on its sockets through it: `select.c`
-  calls `poll` only under `HAVE_POLL`, which `curl-sys` does not define. Stage
-  3 of `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
-  builds none, because a descriptor is a handle and passes `FD_SETSIZE`; what
-  `select` answers for such a descriptor is open.
-- **libc gains what cargo's libraries call**, among them `setvbuf` and
-  `socketpair`, which it does not define; a file `mmap` and record locks
-  (`issues/libc-refuses-what-toyos-cannot-yet-answer.md`); paths resolved by
-  POSIX's rules, which `realpath` answers by the kernel's
-  (`issues/the-kernel-resolves-a-path-by-rules-of-its-own.md`); and socket
-  descriptors that are pollable and
-  can be non-blocking
-  (`issues/libc-close-of-a-socket-is-unproven-on-a-connected-socket.md`). Read from each
-  library's source and not run: SQLite's default VFS takes `fcntl` record
-  locks and keys them on `st_dev` and `st_ino`; libgit2 opens every repository
-  through `realpath` and reads packs through a file `mmap`; curl and libssh2
-  wait on non-blocking sockets, curl's multi handle wakes through a
+## From today to M4
+
+The one list of what self-hosting still needs, in dependency order: an item
+needs only items above it, and names them. An item points at the issue that
+holds its facts; where the design is not yet in the tree, the item says so.
+Status, as of 2026-10-22:
+- **done**;
+- **in progress**: built in part, on `main` or in an open pull request;
+- **direction set**: the owner ruled what it must do, and its design is
+  engineering's, not yet written in the tree or not yet reviewed;
+- **not started**.
+
+An owner is an issue under `issues/`, or this track.
+
+**M2: clang and lld installed and run.**
+
+| # | Item | Status | Owner | Blocked on |
+|---|---|---|---|---|
+| 1 | clang and `ld.lld` built for ToyOS, static, run in a guest (`hosted_clang_hello`) | done | this track (`build/hostedclang.rs`) | — |
+| 2 | C reaches every file a process holds: descriptors (#975, #978) and served files through `toyos::files` (#988) | done | this track | — |
+| 3 | `pkg` installs a toolchain: a streamed archive bounded by its volume's room, and links. #970 installs the clang package (83.8 MB archive, 279 MB installed) on a 1 GiB DATA in QEMU | in progress | `a-package-is-a-directory-under-apps-and-the-installer-is-a-program` | — |
+| 4 | Room for a toolchain on DATA, durable. DATA serves `/apps`, `/config`, `/home` and `/state`; the full toolchain is about 1 GB | in progress | `storage-is-layers-and-a-role-is-a-filesystem` | — |
+| 5 | **M2 exit**: a `pkg`-installed clang compiles, links and runs `hello.c` (#970's guest row), as `hosted_clang_hello` already does with a clang staged on ROOT | in progress | this track, `toyos-has-no-c-compiler-inside-it` | 2–4 |
+
+**M3: an LLVM-backed rustc.**
+
+| # | Item | Status | Owner | Blocked on |
+|---|---|---|---|---|
+| 6 | Threads mature enough for LLVM | not started | `std-and-libc-drop-the-answer-thread-join-gives` | — |
+| 7 | Concurrent reads and writes of one file: `pread` and `pwrite`. Without them LLVM reads a file slice with `lseek` and `read`, which moves an offset other threads share | not started | `libc-has-no-pread-or-pwrite` | — |
+| 8 | LLVM, clang and lld built by bootstrap for a ToyOS host, and the libc names they call | not started | `bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host`, `rustc-llvm-cannot-build-for-a-toyos-host`, `libc-lacks-names-llvm-for-a-toyos-host-calls`, `a-toyos-hosted-llvm-is-configured-as-running-on-the-build-machine` | — |
+| 9 | A std binary links the C++ runtime | not started | `a-rust-std-binary-cannot-link-the-cxx-runtime` | 8 |
+| 10 | A package ships its own libraries (`librustc_driver`); moot for M2's static PIEs | not started | `a-package-cannot-ship-its-own-libraries` | 3 |
+| 11 | **M3 exit**: the hosted rustc, which runs LLVM on several threads, builds and runs a program in the guest, linking with the guest's `ld.lld` | not started | `nothing-builds-the-toyos-hosted-rustc`, `the-hosted-rustc-names-a-linker-toyos-does-not-have`, `the-hosted-rustcs-stage2-carries-seventeen-proc-macro-libraries-no-image-needs` | 5–10 |
+
+**M4: cargo, rustc and clang build ToyOS in the guest, byte-identical.**
+
+| # | Item | Status | Owner | Blocked on |
+|---|---|---|---|---|
+| 12 | Process memory: 4 KiB pages, a ledger, demand paging, one mapping inventory, then private file mappings and coherent shared ones (owner direction, 2026-10-21; the design is out of the tree, under review) | direction set | `process-memory-is-2-mib-pages-and-that-caps-the-process-count`, `one-mapping-inventory-nobody-can-read`, `anonymous-mmap-is-not-demand-paged`, `nothing-charges-kernel-memory-to-a-process` | engineering: the design, with a wait and progress design for mapped pages without an automatic hang restart (owner, 2026-10-21) |
+| 13 | Record locks the file server serves, and std's and cargo's locks on them | direction set | `std-file-lock-answers-ok-and-locks-nothing`, `libc-refuses-what-toyos-cannot-yet-answer` | engineering: the lock design, part of 12's |
+| 14 | An unlinked open file lives until its last close or unmap | direction set | `an-unlinked-open-file-answers-stale` | 12 for the mapping |
+| 15 | An exclusive create on `/tmp` (`O_CREAT\|O_EXCL`, `create_new`) | not started | `create-new-on-a-kernel-path-is-not-exclusive` | — |
+| 16 | libc tells the truth: `sigaction` refuses what it does not keep, `st_nlink` is 1, and the user and group ids are the process's own | not started | `libc-sigaction-answers-success-and-keeps-nothing`, `libc-answers-st-nlink-0`, `libc-answers-uid-0-for-every-process` | — |
+| 17 | libc gains `select`, `setvbuf` and `socketpair`. A descriptor is a small table number since #978, so `FD_SETSIZE` holds | not started | this track | — |
+| 18 | The `libc` crate gains a ToyOS module, checked by `ctest` against `sdk/libc`'s headers | not started | this track | 17 |
+| 19 | Children: `SIGCHLD`, sessions, a quit notice and Ctrl+C, the process track's stages 4–7 | not started | `a-childs-end-is-an-event-and-a-parent-takes-its-children-down` | — |
+| 20 | Sockets shared by their holders and inherited by a child, which curl, libssh2 and every inheriting server need | direction set | `a-stream-cannot-move-between-processes`, `libc-close-of-a-socket-is-unproven-on-a-connected-socket` | engineering: the sharing and recovery design, out of the tree, under review |
+| 21 | cargo's eight C libraries cross-built: curl, libgit2, libssh2, OpenSSL, SQLite, nghttp2, zlib, blake3; five stopped on headers, types and functions libc lacked at `15625e0cb` | not started | this track | 17, 18 |
+| 22 | cargo's TLS: OpenSSL through its Perl `Configure`, or curl's rustls backend on `ToyOSOrg/ring`. A build from vendored sources needs neither, and neither needs the `toyos-crypto` track | not started, choice open | this track, `the-internet-clients-work-unchanged` | 21; HTTPS on `the-lan-is-not-yet-production-grade` |
+| 23 | cargo at run time: its SQLite and its locks, sockets and children | not started | this track, `sqlite-and-postgresql-run-on-toyos` | 13–16, 19–21 |
+| 24 | The tools a build runs: Perl and Python started by spawn, brush as `sh`, uutils, make, CMake with libuv on spawn, awk, and a script started by its interpreter line | not started | `ninja-runs-every-command-through-a-bin-sh-toyos-does-not-have`, `nothing-launches-a-script-by-its-interpreter-line` | 19 for the C tools |
+| 25 | git in the guest | not started | this track | 21 |
+| 26 | The toolchain as `pkg` packages, none of it in the image. #970 makes the clang package; how the rest splits, and how a self-host test's guest reaches them, is open | in progress | this track | 3, 10 |
+| 27 | Storage durable and fast enough for an LLVM build tree, unmeasured | not started | `storage-is-layers-and-a-role-is-a-filesystem`, `an-fsync-of-a-served-file-syncs-its-whole-volume` | 4 |
+| 28 | A build reproduces: an image's GUIDs from the commit, and one checkout building one kernel | not started | `an-images-guids-are-drawn-from-the-hosts-random-source`, `one-checkout-of-one-tree-builds-two-kernels` | — |
+| 29 | **M4 exit**: the guest builds a userland program and then the kernel, and the hashes equal the host build's of the same commit | not started | this track | 11–28 |
+
+What the items rest on. The compiles were made against libc at `15625e0cb`
+(2026-10-01), before #975, #978 and #988 changed it:
+- **3, 26, measured:** the old `pkg` inflated a whole archive in memory under
+  `MAX_INFLATED`, 256 MiB, and refused every link (`system/pkg/src/main.rs`,
+  `archive.rs`), which #970 replaces. Measured on the Linux-host release
+  `toolchain-linux-x86_64-48dd24f826263d6c`, stripped: `librustc_driver`
+  184.7 MB, clang 122.8 MB, lld 78.6 MB, and 181.1 MB of
+  `x86_64-unknown-toyos` libraries.
+- **10, read:** rustc's launcher names `librustc_driver` as needed
+  (`llvm-readobj --needed-libs`).
+- **17, read:** curl 8.21.0, which `curl-sys` 0.4.90 builds, does not compile
+  without `select` (`lib/curlx/wait.c`), and waits through it, since `curl-sys`
+  does not define `HAVE_POLL`. curl's multi handle wakes through a
   `socketpair`, and its TLS key log sets its buffering through `setvbuf`.
-- **cargo's eight C libraries are cross-built for ToyOS**: curl, libgit2,
-  libssh2, OpenSSL, SQLite, nghttp2, zlib and blake3. Compiled and linked
-  with the toolchain's clang against that libc's C sysroot, the sources of
-  nghttp2, zlib and blake3 build with nothing undefined, and the other five
-  stop on headers, types or functions libc lacks. `openssl-src` 300.6.1 knows
-  no ToyOS target and refuses one it does not know (`src/lib.rs`), and
-  `openssl-sys` is a `cfg(unix)` dependency of `curl-sys` and `libssh2-sys`,
-  which ToyOS is not. Open until M4: whether cargo's OpenSSL is built for
-  ToyOS through its Perl `Configure`, or cargo takes curl's rustls backend
-  there.
-- **The tools a self-build runs are built for ToyOS**: Perl and Python, ported
-  to start a child by spawn and never by fork; brush as the POSIX `sh`
-  (`issues/ninja-runs-every-command-through-a-bin-sh-toyos-does-not-have.md`);
-  uutils; make; CMake, its libuv ported to spawn; and awk. Those written in C
-  or C++ wait on stage 4 of the child-process track. A search of Perl 5.44.0's
-  sources for `posix_spawn` matches nothing. Open: which Python, which make and
-  which awk.
-- **`pkg` installs a toolchain**: an archive past 256 MiB, and links. It
-  inflates a whole archive in memory under `MAX_INFLATED`, 256 MiB, and refuses
-  every link (`system/pkg/src/main.rs`, `archive.rs`). A toolchain's size is
-  measured on a proxy, the Linux-host release
-  `toolchain-linux-x86_64-48dd24f826263d6c`: stripped with `llvm-objcopy
-  --strip-all`, its `librustc_driver` is 184.7 MB, its clang 122.8 MB and its
-  lld 78.6 MB, beside 181.1 MB of `x86_64-unknown-toyos` libraries. And the
-  loader finds a package's own libraries
-  (`issues/a-package-cannot-ship-its-own-libraries.md`): rustc's
-  launcher names `librustc_driver` as needed (`llvm-readobj --needed-libs`).
-- **The toolchain is `pkg` packages, and the image carries none of it.** Open:
-  how it is split into packages, and how a self-host test's guest reaches
-  them.
+- **18, read:** `libc` 0.2.189 has no ToyOS module (`rg -i toyos` over `src`)
+  and is empty for an OS it does not know; `ToyOSOrg/libc` does not exist.
+  cargo's `curl-sys`, `libssh2-sys` and `libgit2-sys` import its C types
+  unconditionally.
+- **21, compiled at `15625e0cb`:** nghttp2, zlib and blake3 build with nothing
+  undefined; curl, libgit2, libssh2, OpenSSL and SQLite stop on headers, types
+  or functions libc lacked.
+- **21 and 23, read:** SQLite's unix VFS takes `fcntl` record locks keyed on
+  `st_dev` and `st_ino`; libgit2 opens every repository through `realpath` and
+  reads packs through a file `mmap`; curl and libssh2 wait on non-blocking
+  sockets. `openssl-src` 300.6.1 refuses a target it does not know
+  (`src/lib.rs`), and `openssl-sys` is a `cfg(unix)` dependency of `curl-sys`
+  and `libssh2-sys`, which ToyOS is not. That cargo bundles SQLite is read from
+  its dependencies, not run.
+- **24, read:** Perl 5.44.0's sources never call `posix_spawn`. Which Python,
+  which make and which awk is open.
 
-**Blocked on other tracks.** M2 needs room for about a gigabyte of toolchain,
-and threads and `mmap` mature enough for LLVM
-(`issues/std-and-libc-drop-the-answer-thread-join-gives.md`). Packages over
-HTTPS
-(`issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`)
-wait on the network stack under them
-(`issues/the-lan-is-not-yet-production-grade.md`,
-`issues/the-internet-clients-work-unchanged.md`), and M2 does not.
-M4 also needs the rest of the child-process track
-(`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`). M4 needs git in the guest, storage durable and fast
-enough for an LLVM build tree
-(`issues/storage-is-layers-and-a-role-is-a-filesystem.md`), and
-memory beyond what 2 MiB process pages allow
-(`issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`).
+Beside the path, and needed by none of its exits:
+- **The boot handoff** (owner, 2026-10-21) removes the kernel's ROOT mount: the
+  loader hands the supervisor and the system file server over as signed
+  payloads, and `/system` goes onto the file protocol
+  (`the-kernel-is-small-interrupts-post-and-threads-wait`, step 9).
+- **Paths on `/tmp` resolve by the kernel's rules**
+  (`the-kernel-resolves-a-path-by-rules-of-its-own`); a served path resolves
+  by POSIX's (#988).
+- **libc++'s `std::filesystem`** is proven in no guest, and its `remove_all`
+  walks by path where a directory handle (`openat`, `unlinkat`) would not
+  follow a link swapped in (`no-guest-case-reads-std-filesystem`,
+  `remove-all-follows-a-link-swapped-in-mid-walk`). clang, lld and rustc
+  call neither, so no exit waits on them; a C++ program that does is
+  affected.
+- **M5:** `n2-does-not-compile-for-toyos`, and Python and CMake for ToyOS.
+- Every AArch64 stage lands one step behind x86-64, on `toyos-runs-on-arm64`.
 
-**No linker runs inside ToyOS** (owner, 2026-10-04: "Just get rid of toyos
-ld"). `/system/bin/toyos-ld` went with its crate, its `[programs]` row and its
-host tests, and no image ships a linker: `ld.lld` links inside ToyOS only
-where `hosted_clang_hello` stages it, and
-the ToyOS-hosted rustc names no linker the guest has
-(`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`). *Exit*: the
-commit that lands M2's compile-and-run test, which links inside the guest.
-
-**What stops M2: the install.** `cargo run -- --hosted-clang` makes a clang
-and an `ld.lld` for `x86_64-unknown-toyos`, static PIEs that name no library
-(`build/hostedclang.rs`): 147.5 MB and 85.6 MB, 121.9 MB and 70.9 MB stripped.
-Both run in a guest: `hosted_clang_hello` (`tests/common/hostedclang.rs`, run
-on demand) stages them on ROOT, compiles `hello.c` with `clang -c`, has the
-driver link it, `clang hello.c`, which starts LLD as a child by libc's
-`posix_spawn` and waits for it by `wait4`, runs the program, and both products
-are the host's bytes.
-- Install: `pkg` installs neither (**To build**, "`pkg` installs a toolchain").
-- Run past `hello.c`: what `issues/libc-refuses-what-toyos-cannot-yet-answer.md`
-  lists, and `issues/libc-has-no-pread-or-pwrite.md`.
-
-**What M3 adds: a rustc that carries that LLVM**, after all of M2's.
-- Build: `issues/rustc-llvm-cannot-build-for-a-toyos-host.md`, and
-  `issues/bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host.md`,
-  whose build of clang and lld replaces M2's.
-- Link: `issues/a-rust-std-binary-cannot-link-the-cxx-runtime.md`.
-- Test: `issues/nothing-builds-the-toyos-hosted-rustc.md`.
-
-M3's exit then waits on a linker in the guest
-(`issues/the-hosted-rustc-names-a-linker-toyos-does-not-have.md`).
-
-**Also owed, by milestone.**
-- M3: the host triple the ToyOS-hosted LLVM bootstrap builds records
-  (`issues/a-toyos-hosted-llvm-is-configured-as-running-on-the-build-machine.md`,
-  whose other half, the configure inside ToyOS, is M5's).
-- M3: `issues/the-hosted-rustcs-stage2-carries-seventeen-proc-macro-libraries-no-image-needs.md`.
-- M4: cargo's file locks,
-  `issues/std-file-lock-answers-ok-and-locks-nothing.md`.
-- M5: `issues/n2-does-not-compile-for-toyos.md`.
-- The tools of "To build", the first programs that start a script by its
-  path: `issues/nothing-launches-a-script-by-its-interpreter-line.md`.
+**No image ships a linker** (owner, 2026-10-04: "Just get rid of toyos ld").
+Until item 5 lands, `ld.lld` links inside ToyOS only where `hosted_clang_hello`
+stages it.

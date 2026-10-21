@@ -14,7 +14,7 @@ directory by its path (`issues/remove-all-follows-a-link-swapped-in-mid-walk.md`
 Each of libc's is read back by `tests/corpus/tinycc/207_libc_names.c`
 and `206_libc_refusals.c`; no C++ program in a guest uses any of it.
 
-Owner: `issues/toyos-builds-itself.md`, M2.
+Owner: `issues/toyos-builds-itself.md`, beside its path: no exit there needs it.
 
 **Exit**: a guest test lists a directory through `std::filesystem`, and reads
 a file back through `std::ifstream`.
