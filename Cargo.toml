@@ -88,7 +88,6 @@ members = [
     "sdk/std/copies",
     "sdk/osrelease",
     "sdk/toyos",
-    "sdk/transport",
     "sdk/window",
     "system/acpiserver",
     "system/acpiserver/aml",

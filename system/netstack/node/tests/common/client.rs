@@ -1,4 +1,4 @@
-//! A client's end of a stream: `toyos_transport::session`'s own client sequences over a region
+//! A client's end of a stream: `toyos::transport::session`'s own client sequences over a region
 //! on the heap, laid out as `toyos::net::stream` lays one out, and the session the node is lent.
 //! No call waits: a doorbell is a count, the client's ring of netstack a flag the test reads to
 //! say which streams a pass is owed.
@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use toyos::net::stream::{Words, LAYOUT, NODELAY, RECEIVE_BYTES, RECEIVE_RING, REGION_BYTES, SEND_BYTES, SEND_RING};
 use toyos_net_node::Session;
 use toyos_net_tcp::Lent;
-use toyos_transport::session::{self, Bells, Doorbell, Lock, Mode, Receiving, Refused, Rings, Sending, Took, Waited};
+use toyos::transport::session::{self, Bells, Doorbell, Lock, Mode, Receiving, Refused, Rings, Sending, Took, Waited};
 
 /// The region and its doorbells, which the client and the node share.
 pub struct Region {

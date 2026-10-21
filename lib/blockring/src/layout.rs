@@ -3,7 +3,7 @@
 //! The four ring indices sit on cache lines of their own, so the client's
 //! stores to its two and the server's to its two never share a line.
 
-use toyos_transport::{Consumer, Geometry, Place, Producer, Word};
+use toyos::transport::{Consumer, Geometry, Place, Producer, Word};
 
 /// A session's whole region: the one size shared memory comes in.
 pub const SESSION_BYTES: usize = Geometry::BYTES as usize;

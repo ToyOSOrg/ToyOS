@@ -2734,6 +2734,7 @@ mod tests {
         "core",
         "default",
         "flaws",
+        "host-grant",
         "loom",
         "portable",
         "rustc-dep-of-std",
@@ -2741,6 +2742,7 @@ mod tests {
         "sign",
         "std",
         "std-runtime",
+        "ttf",
         "wpa2",
     ];
 
@@ -2799,7 +2801,8 @@ mod tests {
 
     /// Every negative control the tree declares: every feature of the kernel's
     /// manifest but its builds and [`KERNEL_CARRIES`], and every feature of every
-    /// host workspace member's but [`NOT_A_CONTROL`].
+    /// host workspace member's and guest library's (`hostws::GUEST_LIBRARIES`,
+    /// which a host tests too) but [`NOT_A_CONTROL`].
     ///
     /// **Every manifest, and no list of the crates that hold a model.** A model
     /// of memory orderings, of the process table's interleavings, of a simulated
@@ -2809,7 +2812,10 @@ mod tests {
     /// Each file's own comment beside a name carries the argument for it.
     fn declared_model_controls(root: &Path) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
-        for dir in std::iter::once(crate::ci::KERNEL_DIR.to_string()).chain(crate::hostws::host_members(root)) {
+        let host_tested = crate::hostws::host_members(root)
+            .into_iter()
+            .chain(crate::hostws::GUEST_LIBRARIES.map(String::from));
+        for dir in std::iter::once(crate::ci::KERNEL_DIR.to_string()).chain(host_tested) {
             let path = root.join(&dir).join("Cargo.toml");
             let text = fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));

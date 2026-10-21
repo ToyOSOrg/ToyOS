@@ -21,7 +21,7 @@ use toyos::shm::{self, SharedMemory};
 use toyos::{Connection, Pipe};
 use toyos_net_node::Session;
 use toyos_net_tcp::Lent;
-use toyos_transport::session::Rings;
+use toyos::transport::session::Rings;
 
 /// The region's mapping.
 struct Mapping(SharedMemory);

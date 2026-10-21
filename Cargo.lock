@@ -2250,7 +2250,6 @@ dependencies = [
  "toyos-net-wire",
  "toyos-pci-claim",
  "toyos-tco",
- "toyos-transport",
  "toyos-virtio",
 ]
 
@@ -4321,9 +4320,9 @@ dependencies = [
 name = "toyos"
 version = "0.18.0"
 dependencies = [
+ "loom",
  "rustc-std-workspace-core",
  "toyos-abi",
- "toyos-transport",
 ]
 
 [[package]]
@@ -4367,8 +4366,8 @@ version = "0.1.0"
 name = "toyos-blockring"
 version = "0.1.0"
 dependencies = [
+ "toyos",
  "toyos-blockhold",
- "toyos-transport",
 ]
 
 [[package]]
@@ -4662,7 +4661,6 @@ dependencies = [
  "toyos-net-tcp",
  "toyos-net-udp",
  "toyos-net-wire",
- "toyos-transport",
 ]
 
 [[package]]
@@ -4849,14 +4847,6 @@ name = "toyos-trace"
 version = "0.1.0"
 dependencies = [
  "toyos-abi",
-]
-
-[[package]]
-name = "toyos-transport"
-version = "0.1.0"
-dependencies = [
- "loom",
- "rustc-std-workspace-core",
 ]
 
 [[package]]

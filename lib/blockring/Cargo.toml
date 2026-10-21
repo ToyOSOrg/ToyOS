@@ -1,6 +1,6 @@
 # A member of the host workspace (root `Cargo.toml`). What lives here is the
 # block protocol between a block service and its client — the shared session
-# page's layout, where its two `toyos-transport` rings are, the words a request
+# page's layout, where its two `toyos::transport` rings are, the words a request
 # and a completion are, the control frames a session is opened with, and every
 # decision either end makes about what a completion means — with nothing that
 # touches a device, a handle or a mapping. `system/diskserver` serves it and its
@@ -9,7 +9,7 @@
 # Its defects are orders — a completion racing a crash, a flush racing a reset,
 # a reconnect racing a reissue — so `src/model.rs` enumerates every ordering of
 # a scripted client against a server, a device and a crash; the rings'
-# publication is `toyos-transport`'s, and checked under loom there.
+# publication is `toyos::transport`'s, and checked under loom there.
 
 [package]
 name = "toyos-blockring"
@@ -39,8 +39,8 @@ mutate-no-reissue-after-loss = []
 # the server half's bookkeeping, decided where the kernel's block layer decides
 # it today.
 toyos-blockhold = { path = "../blockhold" }
-# The rings on the session page.
-toyos-transport = { path = "../../sdk/transport" }
+# The rings on the session page: `toyos::transport`.
+toyos = { path = "../../sdk/toyos" }
 
 [lints.rust]
 warnings = "deny"

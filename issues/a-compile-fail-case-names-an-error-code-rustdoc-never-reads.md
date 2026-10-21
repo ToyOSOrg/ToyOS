@@ -18,7 +18,7 @@ crate's doc-tests green:
 | case | names | `cargo test -p <crate> --doc` under `E0308` |
 |---|---|---|
 | `toyos_bootmap::DirectMapEnd` | `E0603` | EXIT=0 |
-| `toyos_transport::Place`, three blocks | `E0080` | EXIT=0 |
+| `toyos::transport::Place`, three blocks | `E0080` | EXIT=0 |
 
 What does hold a case to its reason in this tree is the block beside it that
 compiles (`system/netstack/wire/src/lib.rs`, `mod compile_fail`). `Place`'s three

@@ -35,7 +35,7 @@ use core::sync::atomic::Ordering;
 use std::collections::HashSet;
 
 use toyos_blockhold::Holds;
-use toyos_transport::{Consumer, Place, Producer, Violation, Word};
+use toyos::transport::{Consumer, Place, Producer, Violation, Word};
 
 use crate::client::{Client, Outcome, Ticket, MAX_ATTEMPTS};
 use crate::entry::{Completion, Op, Request};

@@ -37,13 +37,14 @@ Only an account can create a crate, and only then can it name `publish.yml`
 the crate's trusted publisher. Nothing before a landing tells that a crate it
 adds to `PUBLISHED` is not on crates.io.
 
-Owner: the owner's crates.io account for the first versions; `build/sdkversion.rs`
+Owner: the orchestrator, for the runs after landing; `build/sdkversion.rs`
 for the rule.
 
-`toyos-untrusted` has since been removed from the tree and from `PUBLISHED`,
-so `toyos-transport` is the one crate still owed.
+Neither crate is owed any more: #965 removed `toyos-untrusted`, and the
+transport is now the `toyos` SDK's `transport` module, so `PUBLISHED` names
+only crates the crates.io index holds (checked 2026-10-21). Its doc comment
+says a crate joins only once crates.io holds it with `publish.yml` its trusted
+publisher. Nothing yet shows a green run.
 
-**Exit**: `toyos-transport` is on crates.io, naming `publish.yml` its trusted
-publisher; a `publish` run at main's tip and the next
-nightly's `release` are green; and `PUBLISHED`'s doc comment says a crate joins
-it only once crates.io holds it under that publisher.
+**Exit**: a `publish` run at main's tip after the transport merge lands, and
+the next nightly's `release`, are green.

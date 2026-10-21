@@ -18,7 +18,7 @@
 //! server's ends and its answer together: nothing else makes the ends, and an
 //! answer is otherwise only read off the wire ([`Opened::decode`]).
 
-use toyos_transport::Word;
+use toyos::transport::Word;
 
 use crate::layout::{self, ServerRings, RING_WORDS};
 
