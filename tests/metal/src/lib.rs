@@ -1679,9 +1679,7 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
             })?;
         }
         let complaints = toyos_fat32_check::check(&bytes);
-        if !complaints.is_empty() {
-            return Err(Refusal::Fat32(toyos_fat32_check::describe(&complaints)));
-        }
+        fat32_verdict(&armed, &complaints)?;
         println!("toyos-fat32-check: the log partition's {} bytes check out", bytes.len());
     }
     let raw_log = args.fat32_check.then(|| began.elapsed().as_secs_f64());
@@ -1698,6 +1696,28 @@ pub fn run(args: &Args) -> Result<Option<u64>, Refusal> {
     println!("phases: {phases}");
     let boot = BootFile { back, stick, machine, phases }.text();
     judge_and_write_readback(&armed, &loader, &log, args.readback.as_deref(), &boot).map(Some)
+}
+
+/// The outside judge's verdict on the log partition. A boot that hands the
+/// machine back owes a volume with nothing to say about it. One its own
+/// deadline ends ([`ended_by_its_deadline`]) stopped wherever logkeeper's
+/// append was, and owes only what such a stop can leave
+/// ([`toyos_fat32_check::unexplained_by_a_stop`]), each of which is printed.
+fn fat32_verdict(armed: &[String], complaints: &[toyos_fat32_check::Complaint]) -> Result<(), Refusal> {
+    let refused: Vec<toyos_fat32_check::Complaint> = if ended_by_its_deadline(armed) {
+        let unexplained = toyos_fat32_check::unexplained_by_a_stop(complaints);
+        for left in complaints.iter().filter(|c| !unexplained.iter().any(|u| std::ptr::eq(*u, *c))) {
+            println!("toyos-fat32-check: what the reset's stop left: {}", toyos_fat32_check::describe(std::slice::from_ref(left)));
+        }
+        unexplained.into_iter().cloned().collect()
+    } else {
+        complaints.to_vec()
+    };
+    if refused.is_empty() {
+        Ok(())
+    } else {
+        Err(Refusal::Fat32(toyos_fat32_check::describe(&refused)))
+    }
 }
 
 /// What [`Driver::flash`] took, on a run that was no rehearsal.
@@ -3166,6 +3186,24 @@ mod tests {
         assert_eq!(lockup_lateness_ms(&early), Some(Ok(-1000)));
         let unread = locked.replace("Its bound is", "Its bound was");
         assert!(matches!(lockup_lateness_ms(&unread), Some(Err(_))));
+    }
+
+    /// The outside judge on what the T14's first unclean reset mid-append left
+    /// (r5 at d36af3872): accepted for a boot its deadline ends, refused for
+    /// one that handed back, and a short chain refused for both.
+    #[test]
+    fn a_deadline_boot_s_volume_may_hold_what_a_stop_leaves_and_no_more() {
+        use toyos_fat32_check::Complaint;
+        let left = [
+            Complaint::ChainTooLong { path: "/2026-10-21-094046_0008.log".into(), size: 200_402, held: 394, needed: 392 },
+            Complaint::FsInfoFreeCount { declared: 53_763, counted: 53_761 },
+        ];
+        let deadline = ["boot-deadline=40000".to_string()];
+        let ordinary = ["boot-deadline=120000".to_string()];
+        assert!(fat32_verdict(&deadline, &left).is_ok());
+        assert!(fat32_verdict(&ordinary, &left).is_err());
+        let short = [Complaint::ChainTooShort { path: "/a.log".into(), size: 200_402, held: 390, needed: 392 }];
+        assert!(fat32_verdict(&deadline, &short).is_err());
     }
 
     /// A boot given a deadline below its runner's least bound is ended by it on
