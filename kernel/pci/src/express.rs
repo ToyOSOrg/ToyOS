@@ -39,9 +39,9 @@ const INITIATE_FLR: u16 = 1 << 15;
 const TRANSACTIONS_PENDING: u16 = 1 << 5;
 
 /// How long a function that stopped mastering is given for its last
-/// Non-Posted Requests to complete or time out: twice the top of the
-/// Completion Timeout's default range, 50 ms (§2.8). One programmed longer, or
-/// with it disabled, outlasts this and is refused.
+/// Non-Posted Requests to complete or time out: twice the default range's top,
+/// 50 ms (§2.8, Device Control 2 §7.5.3.16). One whose request outlasts this
+/// is refused.
 pub const QUIESCE_NANOS: u64 = 100_000_000;
 
 /// Whether the function has a Non-Posted Request outstanding, from its Device

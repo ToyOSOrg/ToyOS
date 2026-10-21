@@ -1148,14 +1148,25 @@ fn settle_after_reset(pci: &PciDevice) {
 /// Clearing Bus Master Enable stops new requests. A config read's completion
 /// passes none of the function's earlier posted writes (PCIe Base §2.4.1), but
 /// Non-Posted Requests, its DMA reads, are only known finished once Transactions
-/// Pending clears (§7.5.3.5). A function with no Express capability has no such
-/// bit, and the write flush is all that is known of it.
+/// Pending clears: Device Status' (§7.5.3.5), or on a conventional function
+/// the Advanced Features capability's, under the same bound as a hang ceiling,
+/// conventional PCI having no Completion Timeout. A function with neither has
+/// no pending signal: its posted writes are flushed, and a read it still had in
+/// flight may fault in the new domain, against its holder; isolation holds,
+/// since that domain maps only the function's own.
 fn quiesce(pci: &PciDevice) -> Result<(), Refusal> {
     pci.disable_bus_master();
     pci.drain_messages();
-    let Ok(cap) = pci.capability(express::CAP_ID) else { return Ok(()) };
+    let pending: Box<dyn Fn() -> bool + '_> = match (pci.capability(express::CAP_ID), pci.capability(af::CAP_ID)) {
+        (Err(NoCapability::Truncated), _) | (_, Err(NoCapability::Truncated)) => return Err(Refusal::CapsTruncated),
+        (Ok(cap), _) => Box::new(move || express::pending(cap.read_u16(express::DEVICE_STATUS))),
+        (Err(NoCapability::Absent), Ok(cap)) if af::reports_pending(cap.read_u8(af::AF_CAPABILITIES)) => {
+            Box::new(move || af::pending(cap.read_u8(af::AF_STATUS)))
+        }
+        (Err(NoCapability::Absent), _) => return Ok(()),
+    };
     let deadline = crate::clock::nanos_since_boot() + express::QUIESCE_NANOS;
-    while express::pending(cap.read_u16(express::DEVICE_STATUS)) {
+    while pending() {
         if crate::clock::nanos_since_boot() >= deadline {
             return Err(Refusal::StillTransacting);
         }

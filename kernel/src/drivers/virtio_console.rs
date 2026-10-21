@@ -251,6 +251,7 @@ pub fn init(devices: &[PciDevice]) -> bool {
         Ok(pool) => pool.leak(),
         Err(why) => {
             log!("virtio-console: PCI {:02x}:{:02x}.{} {why} — device refused", pci_dev.bus, pci_dev.dev, pci_dev.func);
+            offered.decline();
             return false;
         }
     };
