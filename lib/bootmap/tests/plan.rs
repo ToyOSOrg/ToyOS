@@ -3,8 +3,8 @@
 //! and a loader firmware put below the map's end or above it.
 
 use toyos_bootmap::{
-    aarch64, x86_64, Cache, Entry, Plan, Refusal, Slot, Typing, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW, MAX_PAGES,
-    PAGE_2M, PAGE_4K, ROOT_HIGH_HALF, ROOT_IDENTITY,
+    aarch64, x86_64, Access, Cache, Entry, Plan, Refusal, Slot, Typing, BOOT_MAP_BYTES, DIRECT_MAP_WINDOW,
+    MAX_PAGES, PAGE_2M, PAGE_4K, ROOT_HIGH_HALF, ROOT_IDENTITY,
 };
 
 const GIB: u64 = 1 << 30;
@@ -12,6 +12,8 @@ const GIB: u64 = 1 << 30;
 const PANEL: u64 = 0x7e9000;
 /// The loader as OVMF loads it on a 2 GiB guest: relocated low, and not on a page.
 const LOADER: (u64, u64) = (0x7e5f_0000, 0x3_5000);
+/// A kernel's text on a 2 MiB page of its own, so it splits nothing.
+const TEXT: (u64, u64) = (0x7c00_0000, PAGE_2M);
 
 /// Every leaf lands in a table the plan named, at an index inside it, no two
 /// land in the same place, and no leaf lands where a split page's table is
@@ -63,7 +65,7 @@ fn directory(e: &Entry) -> usize {
 
 #[test]
 fn a_machine_with_no_framebuffer_is_the_low_map_and_nothing_else() {
-    let plan = Plan::new(None, LOADER, Typing::Firmware).expect("the low map alone");
+    let plan = Plan::new(None, LOADER, TEXT, Typing::Firmware).expect("the low map alone");
     assert_eq!(plan.directories(), [0, 1, 2, 3]);
     assert_eq!(plan.scanout(), None);
     assert_eq!(plan.entries().count() as u64, BOOT_MAP_BYTES / PAGE_2M);
@@ -75,7 +77,7 @@ fn a_machine_with_no_framebuffer_is_the_low_map_and_nothing_else() {
 /// retypes pages the low map already holds.
 #[test]
 fn a_framebuffer_inside_the_low_map_adds_no_directory() {
-    let plan = Plan::new(Some((0xc000_0000, PANEL)), LOADER, Typing::Firmware).expect("inside the low map");
+    let plan = Plan::new(Some((0xc000_0000, PANEL)), LOADER, TEXT, Typing::Firmware).expect("inside the low map");
     assert_eq!(plan.directories(), [0, 1, 2, 3]);
     // Rounded up to whole pages, and up only.
     assert_eq!(plan.scanout(), Some((0xc000_0000, 0x80_0000)));
@@ -89,7 +91,7 @@ fn a_framebuffer_inside_the_low_map_adds_no_directory() {
 /// the low map untouched.
 #[test]
 fn a_framebuffer_above_the_low_map_adds_its_own_directory() {
-    let plan = Plan::new(Some((256 * GIB, PANEL)), LOADER, Typing::Firmware).expect("above the low map");
+    let plan = Plan::new(Some((256 * GIB, PANEL)), LOADER, TEXT, Typing::Firmware).expect("above the low map");
     assert_eq!(plan.directories(), [0, 1, 2, 3, 256]);
     assert_eq!(plan.scanout(), Some((256 * GIB, 0x80_0000)));
     let mine: Vec<usize> = plan
@@ -109,13 +111,13 @@ fn a_framebuffer_above_the_low_map_adds_its_own_directory() {
 /// past it, not the last GiB of it.
 #[test]
 fn a_framebuffer_at_the_boundary_is_outside_the_low_map() {
-    let plan = Plan::new(Some((BOOT_MAP_BYTES, PANEL)), LOADER, Typing::Firmware).expect("at the boundary");
+    let plan = Plan::new(Some((BOOT_MAP_BYTES, PANEL)), LOADER, TEXT, Typing::Firmware).expect("at the boundary");
     assert_eq!(plan.directories(), [0, 1, 2, 3, 4]);
     assert!(plan.entries().filter(|e| e.cache == Cache::Scanout).all(|e| directory(&e) == 4));
     is_consistent(&plan);
 
     // One page below it is the low map's last page, and adds nothing.
-    let inside = Plan::new(Some((BOOT_MAP_BYTES - PAGE_2M, PAGE_2M)), LOADER, Typing::Firmware).expect("the last page");
+    let inside = Plan::new(Some((BOOT_MAP_BYTES - PAGE_2M, PAGE_2M)), LOADER, TEXT, Typing::Firmware).expect("the last page");
     assert_eq!(inside.directories(), [0, 1, 2, 3]);
     is_consistent(&inside);
 }
@@ -126,7 +128,7 @@ fn a_framebuffer_at_the_boundary_is_outside_the_low_map() {
 #[test]
 fn a_framebuffer_that_straddles_the_low_maps_end_is_mapped_from_both_arms() {
     let base = BOOT_MAP_BYTES - PAGE_2M;
-    let plan = Plan::new(Some((base, 4 * PAGE_2M)), LOADER, Typing::Firmware).expect("across the end");
+    let plan = Plan::new(Some((base, 4 * PAGE_2M)), LOADER, TEXT, Typing::Firmware).expect("across the end");
     assert_eq!(plan.directories(), [0, 1, 2, 3, 4]);
     let mine: Vec<(u64, usize)> = plan
         .entries()
@@ -152,7 +154,7 @@ fn a_framebuffer_that_straddles_the_low_maps_end_is_mapped_from_both_arms() {
 #[test]
 fn a_framebuffer_that_straddles_a_gib_claims_both() {
     let base = 8 * GIB - PAGE_2M;
-    let plan = Plan::new(Some((base, 4 * PAGE_2M)), LOADER, Typing::Firmware).expect("straddling");
+    let plan = Plan::new(Some((base, 4 * PAGE_2M)), LOADER, TEXT, Typing::Firmware).expect("straddling");
     assert_eq!(plan.directories(), [0, 1, 2, 3, 7, 8]);
     assert!(plan.fine_tables().is_empty());
     is_consistent(&plan);
@@ -160,7 +162,7 @@ fn a_framebuffer_that_straddles_a_gib_claims_both() {
     // With a loader straddling another, every directory the budget has; the
     // two split-page tables are a map-typed plan's, and this one splits nothing.
     let loader = (12 * GIB - 0x1000, 0x3_5000);
-    let full = Plan::new(Some((base, 4 * PAGE_2M)), loader, Typing::Firmware).expect("both straddling");
+    let full = Plan::new(Some((base, 4 * PAGE_2M)), loader, TEXT, Typing::Firmware).expect("both straddling");
     assert_eq!(full.directories(), [0, 1, 2, 3, 7, 8, 11, 12]);
     assert_eq!(full.regions(), [0]);
     is_consistent(&full);
@@ -177,7 +179,7 @@ fn the_high_half_slot_is_the_top_nine_bits_of_phys_offset() {
 
 #[test]
 fn a_base_off_the_page_is_refused_rather_than_rounded_down() {
-    assert_eq!(Plan::new(Some((0xc000_1000, PANEL)), LOADER, Typing::Firmware), Err(Refusal::Unaligned(0xc000_1000)));
+    assert_eq!(Plan::new(Some((0xc000_1000, PANEL)), LOADER, TEXT, Typing::Firmware), Err(Refusal::Unaligned(0xc000_1000)));
     // The refusal names the address, because a machine owner reads it.
     assert!(Refusal::Unaligned(0xc000_1000).to_string().contains("0xc0001000"));
 }
@@ -186,11 +188,11 @@ fn a_base_off_the_page_is_refused_rather_than_rounded_down() {
 fn a_range_no_map_can_hold_is_refused_by_name() {
     // Its own end does not fit an address, either as it is given...
     let base = u64::MAX - PAGE_2M + 1;
-    assert_eq!(Plan::new(Some((base, u64::MAX)), LOADER, Typing::Firmware), Err(Refusal::Extent { base, len: u64::MAX }));
+    assert_eq!(Plan::new(Some((base, u64::MAX)), LOADER, TEXT, Typing::Firmware), Err(Refusal::Extent { base, len: u64::MAX }));
     // ...or once rounded up to the page it must end on.
-    assert_eq!(Plan::new(Some((base, 1)), LOADER, Typing::Firmware), Err(Refusal::Extent { base, len: 1 }));
+    assert_eq!(Plan::new(Some((base, 1)), LOADER, TEXT, Typing::Firmware), Err(Refusal::Extent { base, len: 1 }));
     // Wider than the directories a plan may name, and told what it would need.
-    assert_eq!(Plan::new(Some((16 * GIB, 10 * GIB)), LOADER, Typing::Firmware), Err(Refusal::Directories(14)));
+    assert_eq!(Plan::new(Some((16 * GIB, 10 * GIB)), LOADER, TEXT, Typing::Firmware), Err(Refusal::Directories(14)));
     assert!(Refusal::Directories(14).to_string().contains("14 page directories"));
 }
 
@@ -203,11 +205,17 @@ fn uncacheable_is_pat_entry_three_and_plain_memory_is_entry_zero() {
     const PCD: u64 = 1 << 4;
     const PAT_2M: u64 = 1 << 12;
     let at = 0x4020_0000;
-    assert_eq!(x86_64::block(at, Cache::Firmware), at | PRESENT_WRITABLE_2M);
-    assert_eq!(x86_64::block(at, Cache::Scanout), at | PRESENT_WRITABLE_2M | PCD | PWT);
+    assert_eq!(x86_64::block(at, Cache::Firmware, Access::Data), at | PRESENT_WRITABLE_2M);
+    assert_eq!(x86_64::block(at, Cache::Scanout, Access::Data), at | PRESENT_WRITABLE_2M | PCD | PWT);
     // The PAT bit is what would select entry 4, and nothing here sets it.
     for cache in [Cache::Firmware, Cache::Memory, Cache::Device, Cache::Scanout] {
-        assert_eq!(x86_64::block(at, cache) & PAT_2M, 0, "{cache:?}");
+        assert_eq!(x86_64::block(at, cache, Access::Data) & PAT_2M, 0, "{cache:?}");
+    }
+    // The text is the same leaf with R/W (bit 1) clear, and nothing sets XD (bit 63).
+    assert_eq!(x86_64::block(at, Cache::Firmware, Access::Text), at | 1 | 1 << 7);
+    assert_eq!(x86_64::page(at, Cache::Firmware, Access::Text), at | 1);
+    for access in [Access::Text, Access::Data] {
+        assert_eq!(x86_64::block(at, Cache::Firmware, access) & 1 << 63, 0, "{access:?}");
     }
     assert_eq!(x86_64::table(0x1000), 0x1003);
 }
@@ -217,7 +225,7 @@ fn uncacheable_is_pat_entry_three_and_plain_memory_is_entry_zero() {
 #[test]
 fn a_map_typed_plan_is_memory_where_firmware_says_write_back_and_a_device_elsewhere() {
     let ram = [(0x4000_0000, 0x4000_0000)];
-    let plan = Plan::new(None, LOADER, Typing::ByMap(&ram)).expect("virt's map");
+    let plan = Plan::new(None, LOADER, TEXT, Typing::ByMap(&ram)).expect("virt's map");
     for entry in plan.entries() {
         let want = if (0x4000_0000..0x8000_0000).contains(&entry.phys) { Cache::Memory } else { Cache::Device };
         assert_eq!(entry.cache, want, "{entry:?}");
@@ -229,56 +237,66 @@ fn a_map_typed_plan_is_memory_where_firmware_says_write_back_and_a_device_elsewh
 #[test]
 fn a_page_that_is_part_memory_is_refused_by_address() {
     let ram = [(0x4000_0000, 0x4000_0000 + 0x1000)];
-    assert_eq!(Plan::new(None, LOADER, Typing::ByMap(&ram)), Err(Refusal::Mixed(0x8000_0000)));
+    assert_eq!(Plan::new(None, LOADER, TEXT, Typing::ByMap(&ram)), Err(Refusal::Mixed(0x8000_0000)));
     assert!(Refusal::Mixed(0x8000_0000).to_string().contains("0x80000000"));
     // Two adjacent ranges that meet inside a page make it whole.
     let split = [(0x4000_0000, 0x4010_0000 - 0x4000_0000), (0x4010_0000, 0x3ff0_0000)];
-    assert!(Plan::new(None, LOADER, Typing::ByMap(&split)).is_ok());
+    assert!(Plan::new(None, LOADER, TEXT, Typing::ByMap(&split)).is_ok());
 }
 
 /// A scanout inside memory is the scanout's leaves, not a mixed page.
 #[test]
 fn a_scanout_inside_memory_is_typed_as_the_scanout() {
     let ram = [(0x4000_0000, 0x4000_0000)];
-    let plan = Plan::new(Some((0x5000_0000, 0x10_0000)), LOADER, Typing::ByMap(&ram)).expect("inside");
+    let plan = Plan::new(Some((0x5000_0000, 0x10_0000)), LOADER, TEXT, Typing::ByMap(&ram)).expect("inside");
     let scanout: Vec<u64> =
         plan.entries().filter(|e| e.cache == Cache::Scanout).map(|e| e.phys).collect();
     assert_eq!(scanout, (0..256).map(|page| 0x5000_0000 + page * PAGE_4K).collect::<Vec<_>>());
     is_consistent(&plan);
     // And a scanout over a page that is part memory takes that page whole.
     let part = [(0x4000_0000, 0x1000)];
-    assert!(Plan::new(Some((0x4000_0000, PAGE_2M)), LOADER, Typing::ByMap(&part)).is_ok());
-    assert_eq!(Plan::new(None, LOADER, Typing::ByMap(&part)), Err(Refusal::Mixed(0x4000_0000)));
+    assert!(Plan::new(Some((0x4000_0000, PAGE_2M)), LOADER, TEXT, Typing::ByMap(&part)).is_ok());
+    assert_eq!(Plan::new(None, LOADER, TEXT, Typing::ByMap(&part)), Err(Refusal::Mixed(0x4000_0000)));
 }
 
-/// The AArch64 descriptors, against the Arm ARM's bit positions (K.a, D8.3.1
-/// and D8.3.2): a table is 0b11; a block 0b01 with `AttrIndx` at 4:2, `SH` at
-/// 9:8, `AF` at 10, `PXN` at 53 and `UXN` at 54; and `MAIR_EL1`'s bytes are the
-/// Device-nGnRE, Normal write-back and Normal non-cacheable encodings of
-/// D24.2.110.
+/// The AArch64 descriptors, against the Arm ARM's bit positions (DDI 0487
+/// M.d, D8.3, Table D8-52): a table is 0b11; a block 0b01 with `AttrIndx` at
+/// 4:2, `AP[2:1]` at 7:6, `SH` at 9:8, `AF` at 10, `PXN` at 53 and `UXN` at 54;
+/// and `MAIR_EL1`'s bytes are the Device-nGnRE, Normal write-back and Normal
+/// non-cacheable encodings of D24.2.110.
 #[test]
 fn the_aarch64_descriptors_carry_the_attribute_index_the_mair_names() {
     let at = 0x4020_0000;
     let attr_index = |d: u64| (d >> 2) & 0b111;
-    let memory = aarch64::block(at, Cache::Memory);
-    let device = aarch64::block(at, Cache::Device);
-    let scanout = aarch64::block(at, Cache::Scanout);
-    for d in [memory, device, scanout] {
+    let memory = aarch64::block(at, Cache::Memory, Access::Data);
+    let device = aarch64::block(at, Cache::Device, Access::Data);
+    let scanout = aarch64::block(at, Cache::Scanout, Access::Data);
+    let text = aarch64::block(at, Cache::Memory, Access::Text);
+    for d in [memory, device, scanout, text] {
         assert_eq!(d & 0b11, 0b01, "a block");
         assert_ne!(d & 1 << 10, 0, "the access flag");
-        assert_eq!(d & 0b11 << 6, 0, "EL1 read-write, EL0 nothing");
+        assert_eq!(d & 1 << 6, 0, "EL0 nothing");
         assert_ne!(d & 1 << 54, 0, "never executable at EL0");
         assert_eq!(d & 0x0000_FFFF_FFE0_0000, at, "the output address");
     }
     assert_eq!(aarch64::ATTRS[attr_index(memory) as usize], 0xFF);
     assert_eq!(aarch64::ATTRS[attr_index(device) as usize], 0x04);
     assert_eq!(aarch64::ATTRS[attr_index(scanout) as usize], 0x44);
-    assert_eq!(memory & 1 << 53, 0, "the kernel executes from memory");
-    assert_ne!(device & 1 << 53, 0, "and never from a device");
+    for d in [memory, device, scanout] {
+        assert_eq!(d & 1 << 7, 0, "EL1 read-write");
+        assert_ne!(d & 1 << 53, 0, "never executable at EL1");
+    }
+    assert_ne!(text & 1 << 7, 0, "the text is read-only");
+    assert_eq!(text & 1 << 53, 0, "and the kernel executes it");
+    assert_ne!(aarch64::block(at, Cache::Device, Access::Text) & 1 << 53, 0, "never a device's");
+    assert_eq!(text & !(1 << 7 | 1 << 53), memory & !(1 << 53), "and is memory as the rest is");
     assert_eq!((memory >> 8) & 0b11, 0b11, "memory is inner shareable");
     assert_eq!(aarch64::MAIR, 0x44_FF_04);
     // A level-3 page is 0b11 with the same attributes.
-    assert_eq!(aarch64::page(0x5000_1000, Cache::Scanout), (scanout & !0x0000_FFFF_FFFF_F000 & !0b11) | 0x5000_1000 | 0b11);
+    assert_eq!(
+        aarch64::page(0x5000_1000, Cache::Scanout, Access::Data),
+        (scanout & !0x0000_FFFF_FFFF_F000 & !0b11) | 0x5000_1000 | 0b11
+    );
     assert_eq!(aarch64::table(0x1000), 0x1003);
 }
 
@@ -290,7 +308,7 @@ fn the_aarch64_descriptors_carry_the_attribute_index_the_mair_names() {
 fn a_scanout_carved_out_of_ram_splits_the_pages_it_shares() {
     let ram = [(0x4000_0000, 0x8000_0000)];
     let (base, len) = (0xbc7a_0000, 0x30_0000);
-    let plan = Plan::new(Some((base, len)), LOADER, Typing::ByMap(&ram)).expect("ramfb");
+    let plan = Plan::new(Some((base, len)), LOADER, TEXT, Typing::ByMap(&ram)).expect("ramfb");
     assert_eq!(plan.fine_tables(), [0xbc60_0000, 0xbca0_0000]);
     let scanout: Vec<Entry> = plan.entries().filter(|e| e.cache == Cache::Scanout).collect();
     let bytes: u64 = scanout
@@ -309,7 +327,7 @@ fn a_scanout_carved_out_of_ram_splits_the_pages_it_shares() {
     assert_eq!(at(0xbc80_0000), Cache::Scanout);
     is_consistent(&plan);
     // The same framebuffer under range-register typing is refused, as before.
-    assert_eq!(Plan::new(Some((base, len)), LOADER, Typing::Firmware), Err(Refusal::Unaligned(base)));
+    assert_eq!(Plan::new(Some((base, len)), LOADER, TEXT, Typing::Firmware), Err(Refusal::Unaligned(base)));
 }
 
 /// A map-typed scanout must still start on a 4 KiB page.
@@ -317,7 +335,7 @@ fn a_scanout_carved_out_of_ram_splits_the_pages_it_shares() {
 fn a_map_typed_scanout_off_a_small_page_is_refused() {
     let ram = [(0x4000_0000, 0x8000_0000)];
     assert_eq!(
-        Plan::new(Some((0xbc7a_0800, 0x1000)), LOADER, Typing::ByMap(&ram)),
+        Plan::new(Some((0xbc7a_0800, 0x1000)), LOADER, TEXT, Typing::ByMap(&ram)),
         Err(Refusal::Unaligned(0xbc7a_0800))
     );
 }
@@ -328,7 +346,7 @@ fn a_map_typed_scanout_off_a_small_page_is_refused() {
 #[test]
 fn a_loader_above_the_low_map_adds_its_own_directory_of_plain_memory() {
     let loader = (0x1_4000_0000, 0x3_4a00);
-    let plan = Plan::new(None, loader, Typing::Firmware).expect("above the low map");
+    let plan = Plan::new(None, loader, TEXT, Typing::Firmware).expect("above the low map");
     assert_eq!(plan.directories(), [0, 1, 2, 3, 5]);
     assert_eq!(plan.loader(), (0x1_4000_0000, PAGE_2M));
     let mine: Vec<(u64, usize, Cache)> = plan
@@ -343,7 +361,7 @@ fn a_loader_above_the_low_map_adds_its_own_directory_of_plain_memory() {
 /// A loader inside the low map is already mapped, and adds nothing.
 #[test]
 fn a_loader_inside_the_low_map_adds_nothing() {
-    let plan = Plan::new(None, LOADER, Typing::Firmware).expect("inside");
+    let plan = Plan::new(None, LOADER, TEXT, Typing::Firmware).expect("inside");
     assert_eq!(plan.directories(), [0, 1, 2, 3]);
     assert_eq!(plan.entries().count() as u64, BOOT_MAP_BYTES / PAGE_2M);
     assert_eq!(plan.loader(), (0x7e40_0000, 2 * PAGE_2M));
@@ -354,7 +372,7 @@ fn a_loader_inside_the_low_map_adds_nothing() {
 #[test]
 fn a_loader_across_a_page_is_both_pages() {
     let loader = (6 * GIB + PAGE_2M - 0x1000, 0x3_4a00);
-    let plan = Plan::new(None, loader, Typing::Firmware).expect("across a page");
+    let plan = Plan::new(None, loader, TEXT, Typing::Firmware).expect("across a page");
     assert_eq!(plan.loader(), (6 * GIB, 2 * PAGE_2M));
     let mine: Vec<u64> = plan.entries().filter(|e| e.phys >= BOOT_MAP_BYTES).map(|e| e.phys).collect();
     assert_eq!(mine, [6 * GIB, 6 * GIB + PAGE_2M]);
@@ -365,7 +383,7 @@ fn a_loader_across_a_page_is_both_pages() {
 /// scanout holds is not written twice.
 #[test]
 fn a_loader_beside_the_scanout_shares_its_directory() {
-    let plan = Plan::new(Some((256 * GIB, PANEL)), (256 * GIB + 0x7f_0000, 0x3_4a00), Typing::Firmware)
+    let plan = Plan::new(Some((256 * GIB, PANEL)), (256 * GIB + 0x7f_0000, 0x3_4a00), TEXT, Typing::Firmware)
         .expect("one GiB for both");
     assert_eq!(plan.directories(), [0, 1, 2, 3, 256]);
     let above: Vec<(u64, Cache)> =
@@ -388,14 +406,14 @@ fn a_loader_beside_the_scanout_shares_its_directory() {
 #[test]
 fn a_map_typed_loader_is_memory() {
     let ram = [(0x4000_0000, 0x4000_0000), (5 * GIB, GIB)];
-    let plan = Plan::new(None, (5 * GIB + 0x1000, 0x3_4a00), Typing::ByMap(&ram)).expect("in memory");
+    let plan = Plan::new(None, (5 * GIB + 0x1000, 0x3_4a00), TEXT, Typing::ByMap(&ram)).expect("in memory");
     let above: Vec<(u64, Cache)> =
         plan.entries().filter(|e| e.phys >= BOOT_MAP_BYTES).map(|e| (e.phys, e.cache)).collect();
     assert_eq!(above, [(5 * GIB, Cache::Memory)]);
     is_consistent(&plan);
     let part = [(0x4000_0000, 0x4000_0000), (5 * GIB, 0x10_0000)];
     assert_eq!(
-        Plan::new(None, (5 * GIB, 0x3_4a00), Typing::ByMap(&part)),
+        Plan::new(None, (5 * GIB, 0x3_4a00), TEXT, Typing::ByMap(&part)),
         Err(Refusal::Mixed(5 * GIB))
     );
 }
@@ -403,16 +421,16 @@ fn a_map_typed_loader_is_memory() {
 #[test]
 fn a_loader_no_map_can_hold_is_refused_by_name() {
     assert_eq!(
-        Plan::new(None, (0x1_4000_0000, 0), Typing::Firmware),
+        Plan::new(None, (0x1_4000_0000, 0), TEXT, Typing::Firmware),
         Err(Refusal::Extent { base: 0x1_4000_0000, len: 0 })
     );
     // Its directories count against the same budget as the scanout's, and a
     // GiB both need is counted once.
     assert_eq!(
-        Plan::new(Some((16 * GIB, 4 * GIB)), (32 * GIB, 0x3_4a00), Typing::Firmware),
+        Plan::new(Some((16 * GIB, 4 * GIB)), (32 * GIB, 0x3_4a00), TEXT, Typing::Firmware),
         Err(Refusal::Directories(9))
     );
-    let shared = Plan::new(Some((16 * GIB, 4 * GIB)), (17 * GIB, 0x3_4a00), Typing::Firmware)
+    let shared = Plan::new(Some((16 * GIB, 4 * GIB)), (17 * GIB, 0x3_4a00), TEXT, Typing::Firmware)
         .expect("the loader inside the scanout's GiBs");
     assert_eq!(shared.directories(), [0, 1, 2, 3, 16, 17, 18, 19]);
     is_consistent(&shared);
@@ -424,7 +442,7 @@ fn a_loader_no_map_can_hold_is_refused_by_name() {
 #[test]
 fn a_framebuffer_past_512_gib_adds_its_own_second_level_table() {
     let base = 0xfc_9000_0000;
-    let plan = Plan::new(Some((base, 8_294_400)), LOADER, Typing::Firmware).expect("at 1010 GiB");
+    let plan = Plan::new(Some((base, 8_294_400)), LOADER, TEXT, Typing::Firmware).expect("at 1010 GiB");
     assert_eq!(base / GIB, 1010);
     assert_eq!(plan.directories(), [0, 1, 2, 3, 1010]);
     assert_eq!(plan.regions(), [0, 1]);
@@ -440,7 +458,7 @@ fn a_framebuffer_past_512_gib_adds_its_own_second_level_table() {
 #[test]
 fn a_framebuffer_across_512_gib_names_both_second_level_tables() {
     let base = 512 * GIB - PAGE_2M;
-    let plan = Plan::new(Some((base, 4 * PAGE_2M)), (520 * GIB, 0x3_4a00), Typing::Firmware)
+    let plan = Plan::new(Some((base, 4 * PAGE_2M)), (520 * GIB, 0x3_4a00), TEXT, Typing::Firmware)
         .expect("across 512 GiB");
     assert_eq!(plan.directories(), [0, 1, 2, 3, 511, 512, 520]);
     assert_eq!(plan.regions(), [0, 1]);
@@ -450,13 +468,15 @@ fn a_framebuffer_across_512_gib_names_both_second_level_tables() {
 
 /// The most the map can be asked for: a scanout and a loader each straddling a
 /// 512 GiB boundary, four second-level tables past the low map's, the last
-/// below the high half's last root slot.
+/// below the high half's last root slot, and text that splits two pages.
 #[test]
 fn every_second_level_table_the_budget_has_fits_the_pool() {
     let scanout = (1024 * GIB - PAGE_2M, 4 * PAGE_2M);
     let loader = (DIRECT_MAP_WINDOW - 512 * GIB - 0x1000, 0x3_4a00);
-    let plan = Plan::new(Some(scanout), loader, Typing::Firmware).expect("both straddling");
+    let text = (0x7c1f_f000, PAGE_2M + 0x2000);
+    let plan = Plan::new(Some(scanout), loader, text, Typing::Firmware).expect("both straddling");
     assert_eq!(plan.regions(), [0, 1, 2, 254, 255]);
+    // Short of the pool only by the two pages a map-typed scanout splits.
     assert_eq!(1 + plan.regions().len() + plan.directories().len() + plan.fine_tables().len(), MAX_PAGES - 2);
     is_consistent(&plan);
 }
@@ -466,14 +486,76 @@ fn every_second_level_table_the_budget_has_fits_the_pool() {
 #[test]
 fn a_range_past_the_window_is_refused_by_name() {
     assert_eq!(
-        Plan::new(Some((DIRECT_MAP_WINDOW, PANEL)), LOADER, Typing::Firmware),
+        Plan::new(Some((DIRECT_MAP_WINDOW, PANEL)), LOADER, TEXT, Typing::Firmware),
         Err(Refusal::PastWindow(DIRECT_MAP_WINDOW + 0x80_0000))
     );
     assert_eq!(
-        Plan::new(None, (DIRECT_MAP_WINDOW - 0x1000, 0x3_4a00), Typing::Firmware),
+        Plan::new(None, (DIRECT_MAP_WINDOW - 0x1000, 0x3_4a00), TEXT, Typing::Firmware),
         Err(Refusal::PastWindow(DIRECT_MAP_WINDOW + PAGE_2M))
     );
-    let last = Plan::new(Some((DIRECT_MAP_WINDOW - 0x80_0000, PANEL)), LOADER, Typing::Firmware).expect("the window's last GiB");
+    let last = Plan::new(Some((DIRECT_MAP_WINDOW - 0x80_0000, PANEL)), LOADER, TEXT, Typing::Firmware).expect("the window's last GiB");
     assert_eq!(last.regions(), [0, 255]);
     is_consistent(&last);
+}
+
+/// The kernel's text as rust-lld lays it out: inside one 2 MiB page, which is
+/// split so exactly the text's 4 KiB pages are read-only.
+#[test]
+fn the_text_inside_one_page_splits_that_page() {
+    let text = (0x7c04_1000, 0x13_1000);
+    let plan = Plan::new(None, LOADER, text, Typing::Firmware).expect("the text");
+    assert_eq!(plan.text(), text);
+    assert_eq!(plan.fine_tables(), [0x7c00_0000]);
+    let mine: Vec<u64> = plan.entries().filter(|e| e.access == Access::Text).map(|e| e.phys).collect();
+    assert_eq!(mine, (0..0x131).map(|page| text.0 + page * PAGE_4K).collect::<Vec<_>>());
+    assert!(plan.entries().filter(|e| e.access == Access::Text).all(|e| matches!(e.slot, Slot::Fine { .. })));
+    is_consistent(&plan);
+}
+
+/// Text across two 2 MiB boundaries: the page wholly inside it is one
+/// read-only leaf, and the two it shares are split.
+#[test]
+fn text_across_pages_splits_the_two_it_shares() {
+    let text = (0x7c1f_f000, PAGE_2M + 0x2000);
+    let plan = Plan::new(None, LOADER, text, Typing::Firmware).expect("the text");
+    assert_eq!(plan.fine_tables(), [0x7c00_0000, 0x7c40_0000]);
+    let mine: Vec<(u64, bool)> = plan
+        .entries()
+        .filter(|e| e.access == Access::Text)
+        .map(|e| (e.phys, matches!(e.slot, Slot::Fine { .. })))
+        .collect();
+    assert_eq!(mine, [(0x7c20_0000, false), (0x7c1f_f000, true), (0x7c40_0000, true)]);
+    is_consistent(&plan);
+}
+
+/// A scanout carved out of RAM beside the kernel's text shares its split page.
+#[test]
+fn text_beside_the_scanout_shares_its_split_page() {
+    let ram = [(0x4000_0000, 0x8000_0000)];
+    let (base, len) = (0xbc7a_0000, 0x30_0000);
+    let text = (0xbc60_0000, 0x1_0000);
+    let plan = Plan::new(Some((base, len)), LOADER, text, Typing::ByMap(&ram)).expect("both");
+    assert_eq!(plan.fine_tables(), [0xbc60_0000, 0xbca0_0000]);
+    let at = |phys: u64| plan.entries().find(|e| e.phys == phys).map(|e| (e.cache, e.access));
+    assert_eq!(at(text.0), Some((Cache::Memory, Access::Text)));
+    assert_eq!(at(text.0 + text.1), Some((Cache::Memory, Access::Data)));
+    assert_eq!(at(base), Some((Cache::Scanout, Access::Data)));
+    is_consistent(&plan);
+}
+
+/// Text off a 4 KiB page, empty, or reaching past the low map is refused by its extent.
+#[test]
+fn text_that_is_not_whole_pages_in_the_low_map_is_refused() {
+    let refused = [
+        (0x7c04_1800, 0x1000),
+        (0x7c04_1000, 0x800),
+        (0x7c04_1000, 0),
+        (BOOT_MAP_BYTES - 0x1000, 0x2000),
+        (!0xfff, 0x1000),
+    ];
+    for (base, len) in refused {
+        let plan = Plan::new(None, LOADER, (base, len), Typing::Firmware);
+        assert_eq!(plan, Err(Refusal::Text { base, len }), "{base:#x}+{len:#x}");
+    }
+    assert!(Refusal::Text { base: 0x7c04_1800, len: 0x1000 }.to_string().contains("0x7c041800+0x1000"));
 }

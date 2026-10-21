@@ -37,7 +37,7 @@ work needs.
 - `issues/every-syscall-runs-at-one-kernel-stack-offset.md`
 - `issues/kernel-functions-return-with-their-used-registers-intact.md`
 - `issues/a-threads-kernel-stack-has-no-guard-page.md`
-- `issues/kernel-text-is-writable-and-every-kernel-page-executable.md`
+- `issues/the-kernels-relro-stays-writable.md`
 - `issues/the-kernel-heap-has-none-of-slubs-hardening.md`
 - `issues/a-device-without-a-domain-of-its-own-reaches-all-memory.md`
 - `issues/user-programs-run-without-a-shadow-stack.md`

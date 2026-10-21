@@ -119,6 +119,11 @@ actuators! {
     /// Leave every AP holding the CR0/CR4 that INIT left it.
     no_ap_control_regs = "no-ap-control-regs";
 
+    /// Make one direct-map leaf writable and executable before the boot's
+    /// audit of the kernel's tables, which must stop the boot on it. Judged by
+    /// `kernel_wx_leaf_is_refused` and `virt_kernel_wx_leaf_is_refused`.
+    kernel_wx_leaf = "kernel-wx-leaf";
+
     /// Hand every CPU the loader's Intel update with its header's revision
     /// raised by one and its checksum sealed again: the read-back's negative
     /// control on real Intel, whose payload still says the revision it did.

@@ -98,3 +98,40 @@ pub fn crash_report_reads_no_kernel_memory(kernel: &Serial) -> Result<(), String
         None => Ok(()),
     }
 }
+
+/// What `kernel-wx-leaf` says of the leaf it stages (`kernel/src/main.rs`).
+const STAGED: &str = "kernel-wx-leaf: the leaf at ";
+/// The middle of the boot's audit refusal (`kernel/src/mm/mod.rs`).
+const AUDIT_REFUSED: &str = " kernel leaves, writable and executable: ";
+
+/// The boot's audit of the kernel's tables against one direct-map leaf
+/// `kernel-wx-leaf` made writable and executable: the refusal names that leaf
+/// under both rules and counts no other, so every leaf the boot made itself
+/// passed the same walk.
+pub fn kernel_wx_leaf_is_refused(test_config: &Path, profile: qemu::Profile) -> Result<(), String> {
+    let qemu = QemuInstance::boot_with_options(
+        test_config,
+        &[],
+        &[],
+        BootOptions { profile, kernel_params: &["kernel-wx-leaf"], ready_marker: AUDIT_REFUSED, ..Default::default() },
+    );
+    let serial = qemu.boot_log();
+    let at = serial
+        .lines()
+        .find_map(|line| line.split(STAGED).nth(1)?.split_whitespace().next())
+        .ok_or_else(|| format!("no {STAGED:?} line\n{serial}"))?;
+    let refusal = serial
+        .lines()
+        .find(|line| line.contains(AUDIT_REFUSED))
+        .map(str::trim_end)
+        .ok_or_else(|| format!("no audit refusal\n{serial}"))?;
+    let once = format!(": 1 (the first at {at})");
+    let (both, outside) = (format!("writable and executable{once}"), "; executable outside the text ");
+    match refusal.split_once(outside) {
+        Some((writable, executable)) if writable.ends_with(&both) && executable.ends_with(&once) => {
+            eprintln!("  [kernel_wx] {refusal}");
+            Ok(())
+        }
+        _ => Err(format!("the audit did not name {at} alone under both rules: {refusal}\n{serial}")),
+    }
+}

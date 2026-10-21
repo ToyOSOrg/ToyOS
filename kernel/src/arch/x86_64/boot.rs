@@ -54,10 +54,10 @@ pub fn after_console(args: &KernelArgs, _maps: &[MemoryMapEntry]) {
         panic!("test-early-fault: x86-64 has no vectors of its own this early");
     }
     // After actuator::init, whose table the `control-regs-bench` probe inside
-    // this call reads. `pat::init` restored the `CR0` it found, so a firmware
-    // `CD` — which would make every mapping uncacheable whatever the PAT
-    // says — ends here.
-    control_regs::init_cr0(0);
+    // this call reads, and before `mm::init` loads the kernel's tables.
+    // `pat::init` restored the `CR0` it found, so a firmware `CD` — which
+    // would make every mapping uncacheable whatever the PAT says — ends here.
+    control_regs::init_paging(0);
     // The first point with every channel a refusal reaches, and before
     // anything reads what an update changes: `random::key`'s RDRAND and
     // RDSEED, and `control_regs::init`'s CPUID.

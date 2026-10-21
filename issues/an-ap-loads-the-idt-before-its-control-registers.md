@@ -16,7 +16,7 @@ ordering is stated at the site.
 trampoline's long-mode half sets `CR4.PAE` and nothing else, then sets the GS
 base, then `lidt`s the kernel's table — and `CR4.OSFXSR` is not set until
 `percpu::init_ap` reaches `control_regs::init`, several Rust statements later.
-Between them an AP runs `control_regs::init_cr0`, `pat::init` (MSR writes and a
+Between them an AP runs `control_regs::init_paging`, `pat::init` (MSR writes and a
 CR0 round trip) and `mm::paging::load_kernel_flush` (a CR3 reload) with a table
 loaded whose every stub is `#UD` on entry. Any exception in that window is a
 triple fault with nothing on any channel.

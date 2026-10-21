@@ -6,7 +6,7 @@
 
 use toyos_abi::boot::MemoryMapEntry;
 
-use crate::{is_read_as_memory, Cache, DirectMapEnd, Encoding, Refusal, DIRECT_MAP_WINDOW, PAGE_2M, PAGE_4K};
+use crate::{is_read_as_memory, Access, Cache, DirectMapEnd, Encoding, Refusal, DIRECT_MAP_WINDOW, PAGE_2M, PAGE_4K};
 
 /// `MAIR_EL1` index 0: Device-nGnRE, registers.
 pub const ATTR_DEVICE: u64 = 0;
@@ -32,6 +32,8 @@ const INNER_SHAREABLE: u64 = 0b11 << 8;
 const OUTER_SHAREABLE: u64 = 0b10 << 8;
 /// The access flag, bit 10: set, so the first access does not fault.
 const AF: u64 = 1 << 10;
+/// `AP[2]`, bit 7: read-only. `AP[1]`, bit 6, stays clear: EL0 has no access.
+const READ_ONLY: u64 = 1 << 7;
 /// Privileged execute-never, bit 53.
 pub const PXN: u64 = 1 << 53;
 /// Unprivileged execute-never, bit 54.
@@ -45,26 +47,32 @@ pub const fn table(phys: u64) -> u64 {
     phys | TABLE
 }
 
-/// A 2 MiB block at `phys`: EL1 read-write and EL0 nothing (`AP` = 0b00), and
-/// executable at EL1 only where it is memory — the kernel's image is. A
-/// device is never executable, since a speculative fetch from one is a read
-/// of its registers.
-pub const fn block(phys: u64, cache: Cache) -> u64 {
-    phys | BLOCK | AF | attributes(cache)
+/// A 2 MiB block at `phys`: EL0 nothing, and at EL1 the kernel's text
+/// read-only and executable and everything else read-write and never
+/// executable. A device is not executable even as text, since a speculative
+/// fetch from one is a read of its registers.
+pub const fn block(phys: u64, cache: Cache, access: Access) -> u64 {
+    phys | BLOCK | AF | attributes(cache, access)
 }
 
-const fn attributes(cache: Cache) -> u64 {
-    match cache {
-        Cache::Memory => ATTR_NORMAL << 2 | INNER_SHAREABLE | UXN,
-        Cache::Device => ATTR_DEVICE << 2 | PXN | UXN,
-        Cache::Scanout => ATTR_NORMAL_NC << 2 | OUTER_SHAREABLE | PXN | UXN,
+const fn attributes(cache: Cache, access: Access) -> u64 {
+    let typed = match cache {
+        Cache::Memory => ATTR_NORMAL << 2 | INNER_SHAREABLE,
+        Cache::Device => ATTR_DEVICE << 2,
+        Cache::Scanout => ATTR_NORMAL_NC << 2 | OUTER_SHAREABLE,
         Cache::Firmware => panic!("AArch64 has no range registers to type memory: its plan types by the map"),
-    }
+    };
+    let access = match (access, cache) {
+        (Access::Text, Cache::Memory) => READ_ONLY,
+        (Access::Text, _) => READ_ONLY | PXN,
+        (Access::Data, _) => PXN,
+    };
+    typed | access | UXN
 }
 
 /// A 4 KiB page at `phys`, with [`block`]'s attributes.
-pub const fn page(phys: u64, cache: Cache) -> u64 {
-    phys | PAGE | AF | attributes(cache)
+pub const fn page(phys: u64, cache: Cache, access: Access) -> u64 {
+    phys | PAGE | AF | attributes(cache, access)
 }
 
 /// The three, for [`Plan::write`](crate::Plan::write).
