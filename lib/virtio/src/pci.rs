@@ -301,6 +301,12 @@ impl Layout {
     pub fn bar(&self) -> u8 {
         self.common.bar
     }
+
+    /// How much of [`Self::bar`] a window needs for [`offered_features`]: up
+    /// to the end of the common structure.
+    pub fn common_end(&self) -> u64 {
+        u64::from(self.common.offset) + u64::from(self.common.length)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -365,6 +371,18 @@ impl<R: Registers> Wires<R> {
         }
         Ok(base + at)
     }
+}
+
+/// Every feature bit the device behind `layout` offers, read with nothing
+/// written but the feature select (§4.1.4.3): whoever hands a function over
+/// asks it before its driver resets it.
+pub fn offered_features<R: Registers>(regs: &R, layout: &Layout) -> Result<u64, Refusal> {
+    let common = Region::of(&layout.common, "COMMON_CFG", regs.bytes(), common::BYTES, 4)?;
+    regs.write32(common.at + common::DEVICE_FEATURE_SELECT, 0);
+    let low = regs.read32(common.at + common::DEVICE_FEATURE);
+    regs.write32(common.at + common::DEVICE_FEATURE_SELECT, 1);
+    let high = regs.read32(common.at + common::DEVICE_FEATURE);
+    Ok((high as u64) << 32 | low as u64)
 }
 
 /// A device reset and acknowledged, and the features it offers.

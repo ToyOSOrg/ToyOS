@@ -976,6 +976,7 @@ impl<'a> Supervisor<'a> {
         }
         let name = entry.to_string();
         let claim = self.syscap.claim_function::<toyos::Device>(function.arrival).map_err(|e| refused(&name, e))?;
+        let claim = translated(claim, &function).map_err(|why| missing(&name, &why))?;
         self.make_home(row);
         let mut extra = Extra { claims: vec![(format!("{DEV_PREFIX}{name}"), claim)], ..Extra::default() };
         // A disk driver is who this start says it is: its `disk` connector
@@ -2514,6 +2515,32 @@ fn missing(name: &str, why: &Missing) -> String {
             format!("{name} names {}, and its row has one process to drive one", functions(at))
         }
         Missing::Refused(e) => refused(name, *e),
+        Missing::Untranslated(None) => format!(
+            "{name} is a virtio function that offers no VIRTIO_F_ACCESS_PLATFORM, so no unit translates its DMA \
+             (virtio 1.2 §6.1): refused"
+        ),
+        Missing::Untranslated(Some(why)) => format!(
+            "{name} is a virtio function whose offer was not read ({why}), so whether a unit translates its DMA is \
+             unknown: refused"
+        ),
+    }
+}
+
+/// `claim` on `function`, refused where `function` is a virtio function whose
+/// DMA no unit confines: a holder is never handed one.
+fn translated(claim: toyos::Device, function: &Pci) -> Result<toyos::Device, Missing> {
+    if !claims::is_virtio(function) {
+        return Ok(claim);
+    }
+    // SAFETY: the claim is this process's own, just minted, and moves in whole.
+    let dev = unsafe { <toyos::PciDev as toyos::endow::FromHandle>::from_handle(claim.into_raw()) };
+    let offered = toyos_pci_claim::virtio::offers_access_platform(&dev);
+    // SAFETY: the same handle, moving back out whole.
+    let claim = unsafe { <toyos::Device as toyos::endow::FromHandle>::from_handle(dev.into_raw()) };
+    match offered {
+        Ok(true) => Ok(claim),
+        Ok(false) => Err(Missing::Untranslated(None)),
+        Err(why) => Err(Missing::Untranslated(Some(why.to_string()))),
     }
 }
 
@@ -2675,17 +2702,24 @@ fn start<'a>(
         // The build refuses to render an entry that names no device, so a
         // failure here is an image whose halves disagree.
         let entry = Entry::parse(name).unwrap_or_else(|| panic!("supervisor: `{name}` names no device"));
-        let request = match entry {
-            Entry::Fixed(request) => Ok(request),
+        let (request, function) = match entry {
+            Entry::Fixed(request) => (Ok(request), None),
             Entry::Pci(matcher) => {
                 let records = match &mut functions {
                     Some(records) => records,
                     None => functions.insert(pci_records(syscap).map_err(StartError::Refused)?),
                 };
-                claims::function(&matcher, records).map(DeviceRequest::Function).map_err(Missing::Unresolved)
+                let found = claims::function(&matcher, records);
+                let function = found.as_ref().ok().and_then(|at| records.iter().find(|pci| pci.arrival == *at)).copied();
+                (found.map(DeviceRequest::Function).map_err(Missing::Unresolved), function)
             }
         };
-        let minted = request.and_then(|request| claim(syscap, request).map_err(Missing::Refused));
+        let minted = request.and_then(|request| claim(syscap, request).map_err(Missing::Refused)).and_then(|minted| {
+            match &function {
+                Some(function) => translated(minted, function),
+                None => Ok(minted),
+            }
+        });
         // The label is the manifest's own spelling, which is exactly what the
         // claimant looks the claim up by: one string, written once.
         let why = match minted {

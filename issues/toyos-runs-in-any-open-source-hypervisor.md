@@ -30,7 +30,6 @@ signature. What they do depend on, each filed:
 
 - `issues/diskserver-claims-qemus-nvme-by-its-pci-id.md`
 - `issues/the-virtio-drivers-match-only-a-non-transitional-device-id.md`
-- `issues/a-virtio-function-that-offers-no-access-platform-is-handed-over-as-translated.md`
 - `issues/the-x86-clock-calibrates-against-an-hpet-or-the-boot-panics.md`
 - `issues/a-hardware-reduced-x86-machine-has-no-power-off-and-no-power-button.md`
 - `issues/no-claim-gets-an-address-space-under-virtio-iommu.md`

@@ -414,6 +414,10 @@ const MACHINE_TESTS: &[&str] = &[
     // behind its emulated VT-d unit and without one: no shipped machine has a
     // virtio function, so only a QEMU machine can be asked.
     "iommu_virtio_platform",
+    // A virtio NIC created without `iommu_platform=on` on q35 with VT-d, so
+    // its DMA bypasses the unit: the supervisor refuses it to netstack by
+    // name. Only QEMU can create such a function; q35 only.
+    "a_virtio_function_without_access_platform_is_refused",
     // An AMD-Vi unit left blocking every device, switched off and programmed
     // before the boot stick is driven behind it: the register sequence and the
     // DMA it lets through are no host test's, and the AMD bench is staged by
@@ -3923,6 +3927,9 @@ fn scanout_wc(console: &str) -> Result<(), String> {
 fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
     match name {
         "iommu_virtio_platform" => common::iommu::iommu_virtio_platform(),
+        "a_virtio_function_without_access_platform_is_refused" => {
+            common::iommu::a_virtio_function_without_access_platform_is_refused()
+        }
         "amdvi_firmware_left" => common::iommu::amdvi_firmware_left(test_config),
         "amdvi_selftest" => common::iommu::amdvi_selftest(test_config),
         "nested_nmi_is_loud" => faults::nested_nmi_is_loud(test_config),

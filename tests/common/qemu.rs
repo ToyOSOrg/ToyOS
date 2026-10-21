@@ -694,6 +694,10 @@ pub enum Profile {
     /// a function a claim may take whose BAR has to land inside the port's
     /// windows, as every function behind a bridge on a laptop does.
     HeadlessNicBehindPort,
+    /// [`Profile::Headless`] with its virtio NIC created without
+    /// `iommu_platform=on`, so behind the unit on paper and bypassing it in
+    /// fact: the function a claim must never be handed.
+    HeadlessNicUntranslated,
     /// [`Profile::Headless`] with two of QEMU's `edu`, which the kernel drives
     /// neither of: two identical functions, each a `drives` row's to start a
     /// process on.
@@ -787,6 +791,7 @@ impl Profile {
             | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
             | Self::HeadlessNicBehindPort
+            | Self::HeadlessNicUntranslated
             | Self::HeadlessTwoEdu
             | Self::Metal
             | Self::MetalTwoHda
@@ -910,6 +915,8 @@ enum Nic {
     Virtio,
     /// The virtio NIC on the secondary bus of a root port of its own.
     BehindPort,
+    /// The virtio NIC without `iommu_platform=on`, whatever unit the machine has.
+    Untranslated,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -1094,6 +1101,7 @@ impl Profile {
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
+            Self::HeadlessNicUntranslated => Shape { nic: Nic::Untranslated, ..Self::Headless.shape() },
             Self::HeadlessTwoEdu => Shape { probes: Probes::Edus, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
                 xhci: &[XHCI_DEFAULT, XHCI_SPARE],
@@ -2402,6 +2410,9 @@ fn qemu_command(
             qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0{platform}"
             ));
+        }
+        Nic::Untranslated => {
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg("virtio-net-pci-non-transitional,netdev=net0");
         }
         Nic::BehindPort => {
             qemu.arg("-device").arg("pcie-root-port,id=nicport,chassis=9");

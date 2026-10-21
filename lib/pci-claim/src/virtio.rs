@@ -9,7 +9,9 @@
 use toyos::shm::SharedMemory;
 use toyos::PciDev;
 use toyos_abi::syscall::RegWidth;
-use toyos_virtio::pci::{vendor_caps, ConfigSpace, Layout, Offer, Setup, WalkRefusal, VIRTIO_F_ACCESS_PLATFORM};
+use toyos_virtio::pci::{
+    offered_features, vendor_caps, ConfigSpace, Layout, Offer, Setup, WalkRefusal, VIRTIO_F_ACCESS_PLATFORM,
+};
 
 use crate::{Bar, KernelRefused, Why};
 
@@ -93,6 +95,17 @@ impl std::fmt::Display for Features {
             if self.negotiated & VIRTIO_F_ACCESS_PLATFORM != 0 { 'y' } else { 'n' },
         )
     }
+}
+
+/// Whether the claim's virtio function offers `VIRTIO_F_ACCESS_PLATFORM`,
+/// read without resetting it. One that does not uses physical addresses
+/// whatever translates the bus (virtio 1.2 §6.1): no domain confines it.
+///
+/// Not the claim's description, which is its holder's to read once.
+pub fn offers_access_platform(dev: &PciDev) -> Result<bool, Refusal> {
+    let layout = Layout::of(&vendor_caps(&ClaimConfig(dev)).map_err(Refusal::Walk)?)?;
+    let (window, _mapping) = Bar::map(dev, u32::from(layout.bar()), layout.common_end())?;
+    Ok(offered_features(&window, &layout)? & VIRTIO_F_ACCESS_PLATFORM != 0)
 }
 
 /// Walk the claim's capabilities, map the BAR they name, and negotiate

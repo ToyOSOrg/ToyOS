@@ -145,6 +145,11 @@ impl PciDev {
         crate::shm::SharedMemory::adopt(handle, bytes as usize)
     }
 
+    /// Give up ownership, for a claim about to be endowed.
+    pub fn into_raw(self) -> RawHandle {
+        self.0.into_raw()
+    }
+
     /// State that this function issues `bits`-bit device addresses, before any
     /// grant or lend: every one is placed below `1 << bits`.
     pub fn dma_limit(&self, bits: u8) -> Result<(), SyscallError> {
