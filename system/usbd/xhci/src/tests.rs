@@ -532,6 +532,60 @@ fn a_disks_work_moves_between_the_stick_and_the_lent_region() {
     assert_eq!(w.xhc().mem.borrow().faults, 0);
 }
 
+/// Writes that each cross 64 KiB, so their data phase is a TD of two TRBs,
+/// interleaved with reads, whose bulk-out share is their CBW alone: the
+/// bulk-out ring laps with TDs at every offset from its Link, and the stub
+/// refuses any TD that crosses it.
+#[test]
+fn a_td_that_would_cross_the_rings_link_starts_behind_it() {
+    let (stick, disk, _) = stick("SERIAL1");
+    let w = World::new(vec![(FakePort::occupied(QUICK), Some(Box::new(stick)))], 1);
+    w.xhc().mem.borrow_mut().lend(LENT_BASE, 128 * 1024);
+    let usb = w.start(BOTH);
+    let mut tasks = usb.tasks();
+    let _end = End(&usb);
+    let mut owner = Mock::default();
+    w.run(&usb, &mut tasks, &mut owner, 600 * MS).unwrap();
+    assert!(matches!(usb.disks.take_events()[..], [Event::Arrived { disk: 0, .. }]));
+    let pattern: Vec<u8> = (0..8192u32).map(|i| (i * 13) as u8).collect();
+    w.xhc().mem.borrow_mut().write(LENT_BASE + 0xF000, &pattern);
+    let works = 400u32;
+    let (mut queued, mut ok, mut until) = (0u32, 0usize, 600 * MS);
+    while ok < works as usize {
+        while queued < works && usb.disks.has_room(0) {
+            let write = queued % 2 == 0;
+            let (block, blocks, at) = if write { (300, 2, LENT_BASE + 0xF000) } else { (310, 1, LENT_BASE + 0x1_8000) };
+            usb.disks.submit(0, Work::Io { write, block, blocks, at, token: (1, queued) });
+            queued += 1;
+        }
+        until += 50 * MS;
+        assert!(until < 60_000 * MS, "{ok} of {works} answered");
+        w.run(&usb, &mut tasks, &mut owner, until).unwrap();
+        ok += usb.disks.take_events().iter().filter(|e| matches!(e, Event::Answered { ok: true, .. })).count();
+    }
+    assert_eq!(&disk.borrow()[300 * 4096..302 * 4096], &pattern[..]);
+    assert_eq!(w.xhc().mem.borrow().faults, 0);
+}
+
+/// TD Size (§4.11.2.4): the packets left after each TRB, 0 in the last.
+#[test]
+fn a_tds_size_counts_the_packets_left_after_each_trb() {
+    let mps = |n| core::num::NonZeroU16::new(n).unwrap();
+    let sizes = |pieces: &[(u64, u32)], max_packet| -> Vec<u32> {
+        hc::normal_td(pieces, mps(max_packet)).iter().map(|t| t.status >> 17).collect()
+    };
+    // 8 KiB from 60 KiB at 512 bytes a packet: 16 packets, 8 after the first.
+    assert_eq!(sizes(&[(0xF000, 0x1000), (0x1_0000, 0x1000)], 512), [8, 0]);
+    // 64 KiB from 512 bytes in at 1024: 64 packets, and the first TRB's 63
+    // whole ones leave 1 (its residue begins the next).
+    assert_eq!(sizes(&[(0x200, 0xFE00), (0x1_0000, 0x200)], 1024), [1, 0]);
+    // More than 31 left is 31.
+    assert_eq!(sizes(&[(0, 0x1000), (0x1000, 0x1_0000), (0x1_1000, 0x1000)], 512), [31, 8, 0]);
+    // Every TRB but the last chains; the last interrupts.
+    let trbs = hc::normal_td(&[(0, 0x1000), (0x1000, 0x1000)], mps(512));
+    assert_eq!(trbs.iter().map(|t| (t.control & hc::TRB_CHAIN != 0, t.control & hc::TRB_IOC != 0)).collect::<Vec<_>>(), [(true, false), (false, true)]);
+}
+
 /// A controller that answers no command once a device has left: the
 /// teardown's Disable Slot is aborted on its deadline (§4.6.1.2), the port is
 /// released and can enumerate again, and the slot's pages stay the

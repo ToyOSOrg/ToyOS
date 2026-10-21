@@ -19,7 +19,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
-use core::num::NonZeroU64;
+use core::num::{NonZeroU16, NonZeroU64};
 
 use toyos_device_memory::{DmaBuffers, Registers};
 use toyos_scsi::{self as scsi, Cdb, Geometry, Reply, Sense, HOST_BLOCK, SENSE_BYTES};
@@ -214,6 +214,8 @@ struct Msc<'d, 'u, R: Registers, D: DmaBuffers, C: Host, T> {
     interface: u8,
     bulk_in: Endpoint,
     bulk_out: Endpoint,
+    in_packet: NonZeroU16,
+    out_packet: NonZeroU16,
     /// CBW at 0, CSW at 64, a small data phase at 512.
     io: usize,
     /// A bring-up read's sectors.
@@ -257,12 +259,16 @@ pub async fn serve<R: Registers, D: DmaBuffers, C: Host, T>(
         say(format_args!("Bulk-Only with no bulk pair; not bound"));
         return Ok(());
     };
+    let (Some(in_packet), Some(out_packet)) = (NonZeroU16::new(bulk_in.max_packet), NonZeroU16::new(bulk_out.max_packet)) else {
+        say(format_args!("a bulk endpoint states a max packet size of 0; not bound"));
+        return Ok(());
+    };
     let (Some(io), Some(block)) = (dev.page(), dev.page()) else {
         say(format_args!("no pages left in the grant; not bound"));
         return Ok(());
     };
     let run = usb.runs.borrow_mut().remove(&dev.port).unwrap_or(Run::NONE);
-    let mut msc = Msc { dev, interface: interface.number, bulk_in, bulk_out, io, block, tag: 0, run, asked: false };
+    let mut msc = Msc { dev, interface: interface.number, bulk_in, bulk_out, in_packet, out_packet, io, block, tag: 0, run, asked: false };
     let serial = msc.serial().await?;
     let Some((geometry, inquiry)) = msc.bring_up(&say).await? else { return Ok(()) };
     let device = dev.descriptor.get().expect("enumerated");
@@ -714,15 +720,11 @@ impl<'d, 'u, R: Registers, D: DmaBuffers, C: Host, T> Msc<'d, 'u, R, D, C, T> {
         }
         let dci = self.dci(pipe);
         let total: u32 = pieces.iter().map(|(_, len)| len).sum();
-        let trbs: Vec<Trb> = pieces
-            .iter()
-            .enumerate()
-            .map(|(i, &(at, len))| {
-                let last = i + 1 == pieces.len();
-                let flags = if last { hc::TRB_IOC } else { hc::TRB_CHAIN };
-                Trb { param: at, status: len, control: hc::TRB_NORMAL | hc::TRB_ISP | flags }
-            })
-            .collect();
+        let max_packet = match pipe {
+            Pipe::In => self.in_packet,
+            Pipe::Out => self.out_packet,
+        };
+        let trbs = hc::normal_td(pieces, max_packet);
         let mut op = self.dev.submit(dci, &trbs);
         let deadline = self.dev.wake().now() + COMMAND_NS;
         Ok(match op.answer(self.dev.wake(), deadline).await {

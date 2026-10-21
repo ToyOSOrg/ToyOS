@@ -703,12 +703,16 @@ impl Xhc {
         // stages up to its Status.
         let mut trbs = Vec::new();
         loop {
+            let before = at;
             let Some((here, trb)) = self.next_trb(&mut at, &mut cycle) else {
                 if trbs.is_empty() {
                     self.slots.get_mut(&slot).unwrap().eps.get_mut(&dci).unwrap().rung = false;
                 }
                 return false;
             };
+            // The driver's contract (`Ring::enqueue`): a TD starts behind any
+            // Link it would cross, so none spans the ring's end (§4.11.7.1).
+            assert!(trbs.is_empty() || here == before, "slot {slot} dci {dci}: a TD crosses the ring's Link at {before:#x}");
             let kind = (trb.control >> 10) & 0x3F;
             trbs.push((here, trb));
             let ends = match kind {

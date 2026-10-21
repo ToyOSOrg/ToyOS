@@ -22,6 +22,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 use core::cell::{Cell, RefCell};
+use core::num::NonZeroU16;
 
 use toyos_device_memory::{DmaBuffers, Registers};
 
@@ -157,6 +158,26 @@ pub struct Trb {
     pub control: u32,
 }
 
+/// One TD of Normal TRBs moving `pieces` on an endpoint of `max_packet`:
+/// every TRB but the last chains, the last interrupts, each interrupts on a
+/// short packet, and each states the packets left after it (TD Size, §4.11.2.4).
+pub fn normal_td(pieces: &[(u64, u32)], max_packet: NonZeroU16) -> Vec<Trb> {
+    let mps = u64::from(max_packet.get());
+    let packets = pieces.iter().map(|&(_, len)| u64::from(len)).sum::<u64>().div_ceil(mps);
+    let mut moved = 0u64;
+    pieces
+        .iter()
+        .enumerate()
+        .map(|(i, &(at, len))| {
+            moved += u64::from(len);
+            let last = i + 1 == pieces.len();
+            let left = if last { 0 } else { (packets - moved / mps).min(31) as u32 };
+            let flags = if last { TRB_IOC } else { TRB_CHAIN };
+            Trb { param: at, status: left << 17 | len, control: TRB_NORMAL | TRB_ISP | flags }
+        })
+        .collect()
+}
+
 /// Why the controller was not brought up.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refusal {
@@ -220,22 +241,43 @@ impl Ring {
         dma.device_addr(self.at + self.tail * 16) | u64::from(self.cycle)
     }
 
-    /// Put `trb` on the ring with this ring's cycle bit, and answer where it
-    /// landed: the name its event will carry.
-    fn enqueue<D: DmaBuffers>(&mut self, dma: &D, mut trb: Trb) -> u64 {
-        trb.control = (trb.control & !TRB_CYCLE) | u32::from(self.cycle);
-        let at = dma.device_addr(self.at + self.tail * 16);
-        put(dma, self.at + self.tail * 16, trb);
-        self.tail += 1;
-        if self.tail == RING_TRBS - 1 {
-            // The Link takes the chain bit of the TD it carries on (§4.11.7).
-            let chain = trb.control & TRB_CHAIN;
-            let link = TRB_LINK | LINK_TC | chain | u32::from(self.cycle);
-            put(dma, self.at + self.tail * 16, Trb { param: dma.device_addr(self.at), status: 0, control: link });
-            self.tail = 0;
-            self.cycle = !self.cycle;
+    /// Put `trbs`, one TD, on the ring with this ring's cycle bit, and answer
+    /// where each landed: the names their events will carry.
+    ///
+    /// **A TD never crosses the ring's Link**: one that would not fit before
+    /// it starts on the ring's first TRB, behind a Link TD put where it would
+    /// have begun (§4.11.7), so no TD Fragment spans a segment (§4.11.5.1,
+    /// §4.11.7.1). **Its first TRB is written last** (§4.11.7.1), so the
+    /// controller finds none of the TD before all of it.
+    fn enqueue<D: DmaBuffers>(&mut self, dma: &D, trbs: &[Trb]) -> Vec<u64> {
+        assert!(!trbs.is_empty() && trbs.len() <= Self::room(), "a TD of {} TRBs on a ring that holds {}", trbs.len(), Self::room());
+        if self.tail + trbs.len() > RING_TRBS - 1 {
+            self.link(dma);
         }
+        let (first, cycle) = (self.at + self.tail * 16, self.cycle);
+        let owned = |trb: &Trb, cycle: bool| Trb { control: (trb.control & !TRB_CYCLE) | u32::from(cycle), ..*trb };
+        let mut at = Vec::with_capacity(trbs.len());
+        for (i, trb) in trbs.iter().enumerate() {
+            at.push(dma.device_addr(self.at + self.tail * 16));
+            // The first is put as the controller's not yet, and given to it below.
+            put(dma, self.at + self.tail * 16, owned(trb, if i == 0 { !cycle } else { cycle }));
+            self.tail += 1;
+        }
+        if self.tail == RING_TRBS - 1 {
+            self.link(dma);
+        }
+        dma.publish();
+        dma.write32(first + 12, owned(&trbs[0], cycle).control);
         at
+    }
+
+    /// A Link TD at the tail, back to the ring's first TRB: where the
+    /// controller next turns, its cycle state toggled.
+    fn link<D: DmaBuffers>(&mut self, dma: &D) {
+        let control = TRB_LINK | LINK_TC | u32::from(self.cycle);
+        put(dma, self.at + self.tail * 16, Trb { param: dma.device_addr(self.at), status: 0, control });
+        self.tail = 0;
+        self.cycle = !self.cycle;
     }
 
     /// TRBs that may still be enqueued before the ring would overrun one the
@@ -770,17 +812,20 @@ impl<R: Registers, D: DmaBuffers> Hc<R, D> {
     /// Put `trbs`, one transfer descriptor, on `ring` and ring the endpoint's
     /// doorbell. The last TRB interrupts; every one before it chains.
     pub fn transfer(&self, slot: u8, dci: u8, ring: &mut Ring, trbs: &[Trb], control: bool) -> Op<'_, R, D> {
-        let mut named = Vec::with_capacity(trbs.len());
-        for trb in trbs {
-            let at = ring.enqueue(&self.dma, *trb);
-            // A Setup stage's length is its own eight bytes, which no data
-            // count includes.
-            let moves = match trb.control & (0x3f << 10) {
-                TRB_SETUP | TRB_STATUS => 0,
-                _ => trb.status & 0x1_ffff,
-            };
-            named.push((at, moves));
-        }
+        let at = ring.enqueue(&self.dma, trbs);
+        let named = at
+            .into_iter()
+            .zip(trbs)
+            .map(|(at, trb)| {
+                // A Setup stage's length is its own eight bytes, which no data
+                // count includes.
+                let moves = match trb.control & (0x3f << 10) {
+                    TRB_SETUP | TRB_STATUS => 0,
+                    _ => trb.status & 0x1_ffff,
+                };
+                (at, moves)
+            })
+            .collect();
         self.dma.publish();
         self.regs.write32(self.db + 4 * usize::from(slot), u32::from(dci));
         Op { hc: self, id: Some(self.hold(slot, dci, named, control)) }
@@ -794,7 +839,7 @@ impl<R: Registers, D: DmaBuffers> Hc<R, D> {
     pub async fn command<C: Host>(&self, wake: &Wake<C>, trb: Trb) -> Result<Done, Dead> {
         exec::until(wake, || (!self.commanding.get()).then_some(())).await;
         self.commanding.set(true);
-        let at = self.cmd.borrow_mut().enqueue(&self.dma, trb);
+        let at = self.cmd.borrow_mut().enqueue(&self.dma, &[trb])[0];
         self.dma.publish();
         self.regs.write32(self.db, 0);
         let mut op = Op { hc: self, id: Some(self.hold(0, 0, alloc::vec![(at, 0)], false)) };
