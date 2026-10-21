@@ -158,7 +158,7 @@ fn run(role: &str) -> (Child, Netstack) {
     let header = conn.recv_header().expect("a request");
     assert_eq!(header.msg_type, MsgType::TcpConnect as u32, "a stream's connect");
     let _: TcpConnectRequest = conn.recv_payload(&header).expect("the connect's request");
-    let [region] = conn.recv_handles_exact::<1>().expect("the stream's region");
+    let [region] = conn.recv_handles_exact::<1>(&header).expect("the stream's region");
     let region = SharedMemory::lent(region, REGION_BYTES).expect("a region netstack takes");
     // SAFETY: the mapping is `REGION_BYTES`, 2 MiB aligned, and its header is reached only as atomics.
     let words = unsafe { &*(region.as_ptr() as *const Words) };
@@ -167,8 +167,8 @@ fn run(role: &str) -> (Child, Netstack) {
     unsafe { std::ptr::copy_nonoverlapping(PEER.as_ptr(), region.as_ptr().add(RECEIVE_RING), PEER.len()) };
     let _ = server.publish(words, PEER.len() as u32).expect("the client keeps the protocol");
     let (bell, ring) = toyos::pipe_pair().expect("the bell");
-    conn.send_handles([OwnedHandle::from(bell)]).expect("hand over the bell");
-    conn.send(RespType::Result as u32, &TcpConnectResponse { local_port: 49_152, _pad: 0 }).expect("answer the connect");
+    conn.send_with(RespType::Result as u32, &TcpConnectResponse { local_port: 49_152, _pad: 0 }, [OwnedHandle::from(bell)])
+        .expect("answer the connect with the bell");
     (child, Netstack { conn, _region: region, _bell: ring, _server: server })
 }
 

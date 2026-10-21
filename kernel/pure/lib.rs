@@ -14,6 +14,7 @@ pub mod clock;
 pub mod cpu;
 pub mod dirnodes;
 pub mod iova;
+pub mod message;
 pub mod microcode;
 pub mod mtrr;
 pub mod owners;

@@ -83,9 +83,10 @@ impl Holders {
         available > 0 || !self.held(End::Write)
     }
 
-    /// A write answers now: it takes bytes, or is refused for want of a reader.
-    pub fn writable(&self, space: u32) -> bool {
-        space > 0 || !self.held(End::Read)
+    /// A write that needs `want` bytes at once, at least one, answers now: it
+    /// takes them, or is refused for want of a reader.
+    pub fn writable(&self, space: u32, want: u32) -> bool {
+        space >= want.max(1) || !self.held(End::Read)
     }
 
     /// The end opposite `end` has no holder, whatever the ring holds.
@@ -127,7 +128,7 @@ mod tests {
             let mut pipe = made();
             assert_eq!(pipe.release(End::Read), Released::EndGone);
             assert!(pipe.other_end_gone(End::Write), "the reader left with room for {space} byte(s)");
-            assert!(pipe.writable(space));
+            assert!(pipe.writable(space, 1));
             assert!(!pipe.other_end_gone(End::Read), "a writer that is held was told gone");
         }
     }
@@ -138,8 +139,8 @@ mod tests {
     fn readable_and_writable_say_nothing_of_the_other_end() {
         let pipe = made();
         assert!(pipe.readable(1) && !pipe.other_end_gone(End::Read));
-        assert!(pipe.writable(1) && !pipe.other_end_gone(End::Write));
-        assert!(!pipe.readable(0) && !pipe.writable(0));
+        assert!(pipe.writable(1, 1) && !pipe.other_end_gone(End::Write));
+        assert!(!pipe.readable(0) && !pipe.writable(0, 1));
     }
 
     /// A handle duplicated, or moved to another process, is a second

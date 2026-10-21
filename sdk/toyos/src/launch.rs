@@ -317,10 +317,10 @@ impl<'a> Request<'a> {
 /// Why a launch did not answer, and — the part that matters — whether the
 /// handles it was going to carry are still the caller's.
 ///
-/// **A send consumes them.** `SYS_HANDLE_SEND` takes them out of the sender's
-/// table, and a refused one closes them ([`Connection::send_handles`]), so a
-/// caller that closed them after either would be closing handles it no longer
-/// holds — which, under the bad-handle policy, is the caller exiting. Which
+/// **A send consumes them.** `SYS_MESSAGE_SEND` takes them out of the sender's
+/// table, and a refused one closes them ([`Connection::send_bytes_with`]), so
+/// a caller that closed them after either would be closing handles it no
+/// longer holds — which, under the bad-handle policy, is the caller exiting. Which
 /// side owns them is therefore not a detail of the error but the whole of what
 /// the caller needs from it.
 pub enum LaunchError {
@@ -346,9 +346,8 @@ pub enum Outcome<'a> {
 
 /// Send one launch and read its answer, a `HOME` in `answer`.
 ///
-/// The handles go before the frame that announces them, which is
-/// [`Connection::send_handles`]'s whole rule — and the `Process` handle comes
-/// back the same way. A `HOME` longer than `answer` or not UTF-8 is a
+/// The handles travel in the launch frame itself, and the `Process` handle
+/// comes back in the answer's. A `HOME` longer than `answer` or not UTF-8 is a
 /// malformed answer, never a shortened one.
 pub fn launch<'a>(
     conn: &Connection,
@@ -362,18 +361,17 @@ pub fn launch<'a>(
     // Each is the caller's, which is `Launch`'s contract, and `batch` named it once.
     let owned = |(handles, count): Batch| (0..count).map(move |i| OwnedHandle(handles[i]));
     let sent = match request.batch(conn.as_handle()) {
-        Ok(batch) => conn.send_handles(owned(batch)),
+        Ok(batch) => conn.send_bytes_with(MSG_LAUNCH, &buf[..len], owned(batch)),
         // Refused here as the kernel would refuse it, and closed as any refused move is.
         Err(named) => {
             owned(named).for_each(drop);
-            Err(SyscallError::InvalidArgument)
+            Err(IpcError::Syscall(SyscallError::InvalidArgument))
         }
     };
-    sent.map_err(|e| LaunchError::Sent(IpcError::Syscall(e)))?;
-    conn.send_bytes(MSG_LAUNCH, &buf[..len]).map_err(LaunchError::Sent)?;
+    sent.map_err(LaunchError::Sent)?;
     let header = conn.recv_header().map_err(LaunchError::Sent)?;
     match header.msg_type {
-        MSG_LAUNCHED => match conn.recv_handles_exact::<1>() {
+        MSG_LAUNCHED => match conn.recv_handles_exact::<1>(&header) {
             Some([process]) => Ok(Outcome::Started(process)),
             None => Err(LaunchError::Sent(IpcError::Malformed)),
         },

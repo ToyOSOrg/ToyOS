@@ -454,7 +454,7 @@ fn offered(control: &Connection, offer: &Offer) -> Result<OwnedHandle, Refusal> 
     match ToDriver::decode(header.msg_type, &payload[..n]) {
         Some(ToDriver::Accepted) => {
             let [ring] = control
-                .recv_handles_exact::<{ output::ACCEPTED_HANDLES }>()
+                .recv_handles_exact::<{ output::ACCEPTED_HANDLES }>(&header)
                 .ok_or_else(|| refused("its acceptance carried no ring".into()))?;
             // SAFETY: the kernel moved this handle into this table with the
             // frame that names it, and nothing else answers for it.
@@ -469,7 +469,7 @@ fn offered(control: &Connection, offer: &Offer) -> Result<OwnedHandle, Refusal> 
 fn frame(rx: &mut FrameRx<MAX_REQUEST>, conn: &Connection, at: &str, which: &str) -> Option<(u32, Vec<u8>)> {
     match rx.pump(conn) {
         RxStep::Idle => None,
-        RxStep::Frame { msg_type, payload_len } => Some((msg_type, rx.payload(payload_len).to_vec())),
+        RxStep::Frame { msg_type, payload_len, .. } => Some((msg_type, rx.payload(payload_len).to_vec())),
         RxStep::Eof => {
             say!("{at}: soundserver hung up the {which} connection; the stream stops with it");
             std::process::exit(0);

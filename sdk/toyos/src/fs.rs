@@ -31,7 +31,7 @@
 //! here keeps a write the server acknowledged and never made durable: that is
 //! what `Fsync` is for.
 
-use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME, MAX_TRANSFER_HANDLES};
 
 use crate::ipc::{Connection, IpcError};
 use crate::ipc_payload;
@@ -519,6 +519,24 @@ impl Dir {
     /// One request and its reply on the current connection. A connection that
     /// has ended answers `Gone` and is dropped, so the next call reconnects.
     fn call(&mut self, op: u32, request: &Request) -> Result<(u32, Reply), Error> {
+        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
+        let (msg_type, reply, carried) = self.call_with(op, request, &mut batch)?;
+        if carried != 0 {
+            // A reply that brings handles nobody asked for speaks another protocol.
+            close_all(&batch[..carried]);
+            self.conn = None;
+            return Err(Error::Malformed);
+        }
+        Ok((msg_type, reply))
+    }
+
+    /// [`Self::call`], and the handles the reply frame carries into `batch`.
+    fn call_with(
+        &mut self,
+        op: u32,
+        request: &Request,
+        batch: &mut [RawHandle; MAX_TRANSFER_HANDLES],
+    ) -> Result<(u32, Reply, usize), Error> {
         if self.conn.is_none() {
             self.reconnect()?;
         }
@@ -526,7 +544,8 @@ impl Dir {
         let answered = conn.send(op, request).map_err(transport).and_then(|()| {
             let header = conn.recv_header().map_err(transport)?;
             let reply: Reply = conn.recv_payload(&header).map_err(transport)?;
-            Ok((header.msg_type, reply))
+            let carried = conn.recv_handles(&header, batch).map_err(transport)?;
+            Ok((header.msg_type, reply, carried))
         });
         if answered.is_err() {
             self.conn = None;
@@ -627,23 +646,19 @@ impl Dir {
     /// A pipe whose bytes the server appends to this file from `offset` on,
     /// for a program's standard output: the write end.
     pub fn stream(&mut self, fid: u64, generation: u64, offset: u64) -> Result<Pipe, Error> {
-        self.fid_call(STREAM, generation, &Request { fid, offset, ..Request::new() })?;
-        let conn = self.conn.as_ref().expect("a call answered on it");
-        let mut batch = [toyos_abi::HANDLE_INVALID; toyos_abi::syscall::MAX_TRANSFER_HANDLES];
-        match conn.recv_handles(&mut batch) {
-            Ok(1) => Ok(Pipe(crate::OwnedHandle(batch[0]))),
-            Ok(n) => {
-                for &h in &batch[..n] {
-                    toyos_abi::syscall::close(h);
-                }
+        if generation != self.generation || self.conn.is_none() {
+            return Err(Error::Stale);
+        }
+        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
+        let (msg_type, reply, carried) =
+            self.call_with(STREAM, &Request { fid, offset, ..Request::new() }, &mut batch)?;
+        match (answer(msg_type, reply), carried) {
+            (Ok(_), 1) => Ok(Pipe(crate::OwnedHandle(batch[0]))),
+            (Err(e), 0) => Err(e),
+            (_, n) => {
+                close_all(&batch[..n]);
                 self.conn = None;
                 Err(Error::Malformed)
-            }
-            // A table with no room leaves the pipe queued, where the next
-            // stream's answer would find it: the connection goes with it.
-            Err(e) => {
-                self.conn = None;
-                Err(Error::kernel("a stream's pipe", e))
             }
         }
     }
@@ -765,6 +780,12 @@ pub fn encode_entry(out: &mut [u8], kind: u64, size: u64, name: &str) -> Option<
     Some(need)
 }
 
+fn close_all(handles: &[RawHandle]) {
+    for h in handles {
+        toyos_abi::syscall::close(*h);
+    }
+}
+
 fn stat_of(reply: &Reply, volume: u64) -> Stat {
     Stat { kind: reply.kind, size: reply.value2, mtime: reply.mtime, volume, node: reply.node }
 }
@@ -775,11 +796,11 @@ fn stat_of(reply: &Reply, volume: u64) -> Stat {
 /// A server that refuses a connection as it takes it answers before it lets
 /// go, so a hello that finds it gone still reads why.
 fn hello(conn: &Connection, window: &SharedMemory) -> Result<Reply, Error> {
+    // The window travels in the HELLO frame itself, as one message.
     let sent = window
         .share()
-        .and_then(|lent| conn.send_handles([lent]))
         .map_err(|e| Error::kernel("a window's loan", e))
-        .and_then(|()| conn.send(HELLO, &Request::new()).map_err(transport));
+        .and_then(|lent| conn.send_with(HELLO, &Request::new(), [lent]).map_err(transport));
     match sent {
         Ok(()) | Err(Error::Gone) => {}
         Err(e) => return Err(e),

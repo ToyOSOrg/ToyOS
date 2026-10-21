@@ -29,6 +29,17 @@ never had one start past 3 served connections, 1 waiting on its hello or 0
 streams, nor more than 5 of DATA's connections served at once. A parallel
 build (cargo with rustc as its direct children) is the unmeasured load.
 
+Each writer streaming to a file at once holds one of its share's 16 streams,
+so a `make -j16` whose jobs each stream to a log of their own holds all 16,
+and separate stdout and stderr files per job need 32. Inferred, not
+measured: the share's 32 served connections, spent by every process of the
+session at one per directory, are probably the first bound such a build
+reaches. Raising `STREAM_SHARE` doubles the uncharged rings a share can pin,
+2 MiB each (`issues/nothing-charges-kernel-memory-to-a-process.md`), so it
+waits for one of two exits: a measured parallel build on ToyOS shows which
+bound it reaches and by how much, or kernel memory is charged and a share's
+streams are bounded by bytes rather than by count.
+
 Owner: the file server.
 
 ## Exit condition

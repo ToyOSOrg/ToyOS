@@ -312,13 +312,13 @@ impl Log {
                 RxStep::Malformed => {
                     panic!("logkeeper: the supervisor sent a frame the origins protocol cannot carry")
                 }
-                RxStep::Frame { msg_type: REGISTER, payload_len } => {
+                RxStep::Frame { msg_type: REGISTER, payload_len, .. } => {
                     let payload = self.supervisor_rx.payload(payload_len).to_vec();
                     let Some(registration) = Registration::decode(&payload) else {
                         panic!("logkeeper: the supervisor registered a ring under no name");
                     };
                     let name = registration.tag.as_str();
-                    let Some([ring, alive]) = self.from_supervisor.recv_handles_exact::<2>() else {
+                    let Some([ring, alive]) = self.supervisor_rx.take_handles::<2>() else {
                         panic!("logkeeper: the supervisor registered {name:?} with no ring");
                     };
                     // SAFETY: the kernel moved this handle into this table with

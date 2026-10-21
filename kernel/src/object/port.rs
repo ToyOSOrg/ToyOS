@@ -175,7 +175,7 @@ impl ZeroHandles for Acceptor {
             core::mem::take(&mut queue.pending)
         };
         // Nobody will ever hold this inbox's read end, so a queued
-        // `SYS_HANDLE_SEND` on it must say `Gone`, not queue.
+        // `SYS_MESSAGE_SEND` on it must say `Gone`, not queue.
         for connection in &queued {
             connection.inbox.close_now();
         }

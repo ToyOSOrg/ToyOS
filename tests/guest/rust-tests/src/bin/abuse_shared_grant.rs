@@ -6,7 +6,8 @@
 //! unreported, and the target pid was unchecked so the list would take pids
 //! that had never existed. None of that has a spelling any more — a region is a
 //! handle, holding one is the whole of being allowed to map it, and giving one
-//! away is `SYS_HANDLE_SEND` over a connection the giver already holds.
+//! away is a frame carrying it (`SYS_MESSAGE_SEND`) over a connection the
+//! giver already holds.
 //!
 //! So the subject moves to what replaced it. The negative arm is the one the
 //! ACL could never state: a process that was sent nothing cannot reach the
@@ -73,10 +74,8 @@ fn owner() {
 
     let conn = acceptor.accept().expect("the invited peer connects");
     let shared = region.share().expect("a second handle to our own region");
-    conn.send_handles([shared]).expect("send the region to its peer");
-    // The frame the handle was sent ahead of. The peer reads the frame first
-    // and is guaranteed to find the handle already queued.
-    conn.signal(1).expect("announce the region");
+    // In the frame that announces it: the peer takes it with the frame.
+    conn.signal_with(1, [shared]).expect("send the region to its peer");
 
     let said = report(&mut invited);
     assert!(invited.wait().expect("wait the invited peer").success(), "the invited peer failed");
@@ -147,9 +146,8 @@ fn marker(role: &str) {
 
 fn invited() {
     let conn = toyos::endow::service(SERVICE).expect("the invited peer holds a connector");
-    // The frame first, then the handle it was sent ahead of.
-    conn.recv_header().expect("the owner's announcement");
-    let [handle] = conn.recv_handles_exact::<1>().expect("the region the owner sent");
+    let header = conn.recv_header().expect("the owner's announcement");
+    let [handle] = conn.recv_handles_exact::<1>(&header).expect("the region the owner sent");
     let region = SharedMemory::lent(handle, REGION).expect("take the region");
     println!("read {}", String::from_utf8_lossy(&region.as_slice()[..SECRET.len()]));
     std::io::stdout().flush().expect("invited: flush the report");

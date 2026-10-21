@@ -530,15 +530,17 @@ fn main() {
                     );
                     pending.remove(i);
                 }
-                RxStep::Frame { msg_type, payload_len } => {
+                RxStep::Frame { msg_type, payload_len, .. } => {
                     let mut payload = [0u8; toyos::net::MAX_REQUEST];
                     payload[..payload_len].copy_from_slice(pending[i].rx.payload(payload_len));
+                    let handles = pending[i].rx.take_batch();
                     let p = pending.remove(i);
                     requests.push(Request {
                         client: Client { conn: p.conn },
                         msg_type,
                         payload,
                         payload_len,
+                        handles,
                     });
                 }
             }

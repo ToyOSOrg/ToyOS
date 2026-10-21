@@ -294,9 +294,8 @@ pub fn note_opened(client: RawHandle, content: toyos_desktop::Rect, live: usize)
 
 /// Hand a window a typed frame, or mark it for removal.
 ///
-/// A failure is never retried and never ignored: `TrySendError::Full` can have
-/// left part of the frame in the pipe, so the peer's stream is past saving —
-/// which is the price of never blocking on it.
+/// A failure is never retried and never ignored: the window is dropped, which
+/// is the price of never blocking on a client.
 pub fn deliver<T: ipc::IpcPayload>(dead: &mut Vec<Dead>, win: &Win, msg_type: u32, payload: &T) {
     if let Err(e) = win.client.conn.try_send(msg_type, payload) {
         mark_dead(dead, win.client.conn.as_handle(), e.into());
@@ -312,9 +311,8 @@ pub fn deliver_with_handle<T: ipc::IpcPayload>(
     msg_type: u32,
     payload: &T,
 ) {
-    match win.client.conn.send_handles([handle]) {
-        Ok(()) => deliver(dead, win, msg_type, payload),
-        Err(e) => mark_dead(dead, win.client.conn.as_handle(), e.into()),
+    if let Err(e) = win.client.conn.try_send_with(msg_type, payload, [handle]) {
+        mark_dead(dead, win.client.conn.as_handle(), e.into());
     }
 }
 

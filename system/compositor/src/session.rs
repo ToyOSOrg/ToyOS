@@ -626,7 +626,7 @@ impl Session {
             let Some((conn, rx)) = self.volume.as_mut() else { return };
             let shown = match rx.pump(conn) {
                 RxStep::Idle => return,
-                RxStep::Frame { msg_type: MSG_VOLUME, payload_len } => {
+                RxStep::Frame { msg_type: MSG_VOLUME, payload_len, .. } => {
                     match ipc::decode_payload::<Volume>(rx.payload(payload_len)) {
                         Ok(v) if v.muted != 0 => Shown::Muted,
                         Ok(v) => Shown::Level { position: v.position, bottom: v.bottom },
@@ -1031,7 +1031,7 @@ impl Session {
                     ended = Some("a frame no protocol here can make".to_string());
                     break;
                 }
-                RxStep::Frame { msg_type, payload_len } => wire::decode(msg_type, source.rx.payload(payload_len)),
+                RxStep::Frame { msg_type, payload_len, .. } => wire::decode(msg_type, source.rx.payload(payload_len)),
             };
             match record {
                 Ok(Record::Key { source, key }) => {
@@ -1142,7 +1142,7 @@ impl Session {
                 RxStep::Malformed => {
                     mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol)
                 }
-                RxStep::Frame { msg_type, payload_len } => {
+                RxStep::Frame { msg_type, payload_len, .. } => {
                     let mut frame = ClientFrame::new(handle, msg_type);
                     frame.set_payload(self.pending[i].rx.payload(payload_len));
                     // A connection is identified by its first frame and by
@@ -1177,7 +1177,7 @@ impl Session {
                 RxStep::Malformed => {
                     mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol)
                 }
-                RxStep::Frame { msg_type, payload_len } => {
+                RxStep::Frame { msg_type, payload_len, .. } => {
                     let mut frame = ClientFrame::new(handle, msg_type);
                     frame.set_payload(win.client.rx.payload(payload_len));
                     out.push(frame);
@@ -1501,11 +1501,7 @@ impl Session {
                 return;
             }
         };
-        if let Err(e) = conn.send_handles([theirs]) {
-            mark_dead(&mut self.dead, handle, e.into());
-            return;
-        }
-        if let Err(e) = conn.try_signal(window::MSG_COPY_REGION) {
+        if let Err(e) = conn.try_signal_with(window::MSG_COPY_REGION, [theirs]) {
             mark_dead(&mut self.dead, handle, e.into());
             return;
         }
@@ -1561,7 +1557,7 @@ impl Session {
             RxStep::Idle => return,
             RxStep::Eof => return mark_dead(&mut self.dead, handle, DropReason::Gone),
             RxStep::Malformed => return mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol),
-            RxStep::Frame { msg_type, payload_len } => (msg_type, payload_len),
+            RxStep::Frame { msg_type, payload_len, .. } => (msg_type, payload_len),
         };
         let payload = w.rx.payload(len).to_vec();
         match msg_type {
@@ -1627,10 +1623,7 @@ impl Session {
             return mark_dead(&mut self.dead, from, DropReason::OutOfProtocol);
         }
         let w = self.watcher.as_ref().expect("a region is opened only off the watcher");
-        if let Err(e) = w.conn.send_handles([theirs]) {
-            return mark_dead(&mut self.dead, from, e.into());
-        }
-        if let Err(e) = w.conn.try_signal(window::MSG_COPY_REGION) {
+        if let Err(e) = w.conn.try_signal_with(window::MSG_COPY_REGION, [theirs]) {
             mark_dead(&mut self.dead, from, e.into());
         }
     }
@@ -1650,13 +1643,8 @@ impl Session {
             }) {
                 Ok(theirs) => w
                     .conn
-                    .send_handles([theirs])
-                    .map_err(DropReason::from)
-                    .and_then(|()| {
-                        w.conn
-                            .try_send(window::MSG_CLIPBOARD_PASTE_SHM, &window::ClipboardShmMsg { len: len as u32 })
-                            .map_err(DropReason::from)
-                    }),
+                    .try_send_with(window::MSG_CLIPBOARD_PASTE_SHM, &window::ClipboardShmMsg { len: len as u32 }, [theirs])
+                    .map_err(DropReason::from),
                 Err(e) => Err(DropReason::Refused(e)),
             }
         };

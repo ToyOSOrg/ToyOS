@@ -1,6 +1,6 @@
 //! A region of memory more than one process can see.
 //!
-//! Holding a handle allows mapping it; giving one away is `SYS_HANDLE_SEND`.
+//! Holding a handle allows mapping it; giving one away is `SYS_MESSAGE_SEND`.
 //! The handle count owns the mappings and the `Arc` count owns the pages: the
 //! last handle takes the list of mappings away for good and tears each one
 //! down, and the pages are freed when the last `Arc` goes, always later since

@@ -86,7 +86,7 @@ pub const MSG_COPY_BEGIN: u32 = 13;
 /// copies it once and closes the connection.
 pub const MSG_COPY_COMMIT: u32 = 14;
 /// Compositor → client, bare: a region the compositor made, as long as the copy
-/// [`MSG_COPY_BEGIN`] announced, sent ahead of the frame.
+/// [`MSG_COPY_BEGIN`] announced, carried in the frame.
 pub const MSG_COPY_REGION: u32 = 13;
 /// Watcher → compositor, bare: the first frame on the clipboard port, and the
 /// ask for the next copy ([`watcher`]). Answered, once a client has copied,
@@ -249,7 +249,7 @@ toyos::ipc_payload! {
     }
 
     /// How many bytes of clipboard text a copy region holds. Where a region
-    /// travels with the message, it is one handle sent ahead of the frame.
+    /// travels with the message, it is one handle carried in the frame.
     pub struct ClipboardShmMsg {
         pub len: u32,
     }
@@ -291,7 +291,7 @@ toyos::ipc_payload! {
     /// The shape of the window's buffer, in physical pixels, the scale to
     /// draw into it at, as [`Scale::wire`], and its generation, which every
     /// present drawn into it carries. **The buffer is one transferred
-    /// handle**, sent ahead of the frame that carries this.
+    /// handle**, carried in the frame that carries this.
     pub struct WindowInfo {
         pub width: u32,
         pub height: u32,
@@ -525,7 +525,7 @@ fn copy(bytes: &[u8]) -> Result<(), CreateError> {
     if header.msg_type != MSG_COPY_REGION || !header.is_empty() {
         return Err(CreateError::Protocol(header.msg_type));
     }
-    let [region] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
+    let [region] = conn.recv_handles_exact::<1>(&header).ok_or(CreateError::NoHandle)?;
     let mut region = SharedMemory::lent(region, bytes.len()).map_err(CreateError::Lent)?;
     region.as_mut_slice().copy_from_slice(bytes);
     Ok(conn.signal(MSG_COPY_COMMIT)?)
@@ -607,10 +607,10 @@ impl Window {
         let scale = Scale::from_wire(info.scale).ok_or(CreateError::Protocol(MSG_WINDOW_CREATED))?;
 
         let buf_size = info.stride as usize * info.height as usize * 4;
-        // The buffer crossed ahead of the frame. A compositor that announced a
+        // The buffer travels in the frame. A compositor that announced a
         // window and sent nothing with it is not serving this client, whatever
         // else it is doing.
-        let [buffer] = conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
+        let [buffer] = conn.recv_handles_exact::<1>(&header).ok_or(CreateError::NoHandle)?;
         let shm = SharedMemory::lent(buffer, buf_size).map_err(CreateError::Lent)?;
 
         let poller = Poller::new(1);
@@ -718,7 +718,7 @@ impl Window {
                 // The compositor shows the old buffer only until this
                 // window's next present, which it reads from the new one, so a
                 // window that cannot map the new one has nothing to present.
-                let Some([buffer]) = self.conn.recv_handles_exact::<1>() else {
+                let Some([buffer]) = self.conn.recv_handles_exact::<1>(header) else {
                     return Event::Close;
                 };
                 let Ok(shm) = SharedMemory::lent(buffer, buf_size) else {
@@ -743,7 +743,7 @@ impl Window {
                 let Ok(info) = self.conn.recv_payload::<ClipboardShmMsg>(header) else {
                     return Event::Close;
                 };
-                let Some([buffer]) = self.conn.recv_handles_exact::<1>() else {
+                let Some([buffer]) = self.conn.recv_handles_exact::<1>(header) else {
                     return Event::ClipboardPaste(Vec::new());
                 };
                 let Ok(shm) = SharedMemory::lent(buffer, info.len as usize) else {

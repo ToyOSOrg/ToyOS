@@ -35,7 +35,7 @@ use super::io::{
     sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
 };
 use super::ipc::{
-    sys_accept, sys_handle_recv, sys_handle_send, sys_inbox_setup,
+    sys_accept, sys_handle_recv, sys_inbox_setup, sys_message_send,
     sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe, sys_pipe_map,
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map,
 };
@@ -450,17 +450,26 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_trace_read(&ctx, RawHandle(a1 as u32), UserAddr::new(a2), &mut out, a4 as usize)
         }
         SYS_ACCEPT => sys_accept(RawHandle(a1 as u32)),
-        SYS_HANDLE_SEND => {
-            if a3 as usize > MAX_TRANSFER_HANDLES {
+        SYS_MESSAGE_SEND => {
+            let Ok(args) = ctx.copy_in::<MessageSend>(UserAddr::new(a2)) else { return bad_addr };
+            let unknown_flags = args.flags & !MESSAGE_NONBLOCK != 0;
+            if unknown_flags || args.count as usize > MAX_TRANSFER_HANDLES || args.len as usize > MAX_MESSAGE_LEN {
                 return SyscallError::InvalidArgument.to_u64();
             }
-            let Some(handles) = (a3 as usize)
+            let Some(bytes) = ctx.user_bytes(UserAddr::new(args.bytes), args.len) else { return bad_addr };
+            let Some(handles) = (args.count as usize)
                 .checked_mul(HANDLE_LEN)
-                .and_then(|len| ctx.user_bytes(UserAddr::new(a2), len as u64))
+                .and_then(|len| ctx.user_bytes(UserAddr::new(args.handles), len as u64))
             else {
                 return bad_addr;
             };
-            sys_handle_send(RawHandle(a1 as u32), &handles, a3 as usize)
+            sys_message_send(
+                RawHandle(a1 as u32),
+                &bytes,
+                &handles,
+                args.count as usize,
+                args.flags & MESSAGE_NONBLOCK != 0,
+            )
         }
         SYS_HANDLE_RECV => {
             if a3 as usize > MAX_TRANSFER_HANDLES {

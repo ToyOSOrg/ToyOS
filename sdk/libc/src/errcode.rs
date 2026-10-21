@@ -34,6 +34,7 @@ pub(crate) const ENOPROTOOPT: i32 = 92;
 pub(crate) const EOPNOTSUPP: i32 = 95;
 pub(crate) const EAFNOSUPPORT: i32 = 97;
 pub(crate) const EADDRINUSE: i32 = 98;
+pub(crate) const EPROTO: i32 = 71;
 pub(crate) const ECONNABORTED: i32 = 103;
 pub(crate) const ECONNRESET: i32 = 104;
 pub(crate) const ENOTCONN: i32 = 107;
@@ -52,6 +53,8 @@ pub(crate) fn of(e: SyscallError) -> i32 {
         // A write whose reader is gone, and not `ENOENT`, which says the file does not exist.
         SyscallError::Gone => EPIPE,
         SyscallError::Io => EIO,
+        // A read of a connection met handles no frame announced: the peer broke its protocol.
+        SyscallError::HandlesPending => EPROTO,
         _ => EINVAL,
     }
 }

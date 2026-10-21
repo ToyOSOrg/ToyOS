@@ -186,10 +186,8 @@ impl Outputs {
                 return;
             }
         };
-        if let Err(why) = driver.conn.send_handles([handle]).map_err(|e| format!("{e:?}")).and_then(|()| {
-            driver.conn.try_send_bytes(MSG_ACCEPTED, &[]).map_err(|e| format!("{e:?}"))
-        }) {
-            say!("soundserver: an output offer's driver took no acceptance ({why})");
+        if let Err(why) = driver.conn.try_signal_with(MSG_ACCEPTED, [handle]) {
+            say!("soundserver: an output offer's driver took no acceptance ({why:?})");
             return;
         }
         say!(
@@ -238,7 +236,7 @@ impl Outputs {
         loop {
             let (msg_type, len) = match control.rx.pump(&control.conn) {
                 RxStep::Idle => return,
-                RxStep::Frame { msg_type, payload_len } => (msg_type, payload_len),
+                RxStep::Frame { msg_type, payload_len, .. } => (msg_type, payload_len),
                 RxStep::Eof => return self.drop_driver("it hung up".into(), events),
                 RxStep::Malformed => {
                     return self.drop_driver("it sent a frame this protocol cannot describe".into(), events);
@@ -300,7 +298,7 @@ fn first_frame(driver: &mut Driver) -> Option<Result<FromDriver, &'static str>> 
         RxStep::Idle => None,
         RxStep::Eof => Some(Err("it hung up before its first frame")),
         RxStep::Malformed => Some(Err("its first frame is one this protocol cannot describe")),
-        RxStep::Frame { msg_type, payload_len } => Some(
+        RxStep::Frame { msg_type, payload_len, .. } => Some(
             FromDriver::decode(msg_type, driver.rx.payload(payload_len)).ok_or("its first frame is no message"),
         ),
     }
@@ -397,7 +395,7 @@ impl Backend for DriverBackend {
         while self.ended.is_none() {
             let len = match self.rx.pump(&self.stream) {
                 RxStep::Idle => break,
-                RxStep::Frame { msg_type: MSG_PLAYED, payload_len } => payload_len,
+                RxStep::Frame { msg_type: MSG_PLAYED, payload_len, .. } => payload_len,
                 RxStep::Frame { msg_type, .. } => {
                     self.end(format!("the output driver sent stream frame {msg_type}, which this protocol has not"));
                     break;

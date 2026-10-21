@@ -223,8 +223,8 @@ pub enum AudioError {
     /// soundserver closed the signal pipe (daemon exit or client removal).
     Disconnected,
     /// soundserver announced the stream and did not send the ring and the signal
-    /// pipe with it. Handles cross before the frame that names them, so a
-    /// short batch is a protocol violation and never something to wait for.
+    /// pipe with it. Handles travel in the frame that names them, so a short
+    /// batch is a protocol violation and never something to wait for.
     MissingHandles,
     /// The slot ring soundserver sent is refused ([`SharedMemory::lent`]).
     Lent(crate::shm::Lent),
@@ -269,7 +269,7 @@ impl AudioStream {
         };
 
         let batch = control
-            .recv_handles_exact::<STREAM_OPENED_HANDLES>()
+            .recv_handles_exact::<STREAM_OPENED_HANDLES>(&header)
             .ok_or(AudioError::MissingHandles)?;
         let signal = crate::Pipe(crate::OwnedHandle(batch[STREAM_OPENED_SIGNAL]));
 

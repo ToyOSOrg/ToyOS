@@ -297,7 +297,7 @@ pub(crate) fn control_thread(
                         disconnected = true;
                         break 'msgs;
                     }
-                    RxStep::Frame { msg_type, payload_len } => (msg_type, payload_len),
+                    RxStep::Frame { msg_type, payload_len, .. } => (msg_type, payload_len),
                 };
                 // The payload travels with the frame instead of being read off
                 // the connection during dispatch: the read side is finished before

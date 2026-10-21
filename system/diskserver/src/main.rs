@@ -331,7 +331,7 @@ impl Service {
                     RxStep::Eof | RxStep::Malformed => {
                         pending.remove(i);
                     }
-                    RxStep::Frame { msg_type, payload_len } => {
+                    RxStep::Frame { msg_type, payload_len, .. } => {
                         let p = pending.remove(i);
                         self.asked(clients, p, msg_type, payload_len);
                     }
@@ -355,7 +355,7 @@ impl Service {
                 RxStep::Idle => return,
                 RxStep::Eof => return self.drop_driver(id, "its connection ended"),
                 RxStep::Malformed => return self.drop_driver(id, "a frame this protocol does not make"),
-                RxStep::Frame { msg_type, payload_len } => (msg_type, d.rx.payload(payload_len).to_vec()),
+                RxStep::Frame { msg_type, payload_len, .. } => (msg_type, d.rx.payload(payload_len).to_vec()),
             };
             if let Err(why) = self.heard(id, msg_type, &payload) {
                 return self.drop_driver(id, why);
@@ -446,13 +446,13 @@ impl Service {
     }
 
     /// One client's first frame: a listing, or an open.
-    fn asked(&mut self, clients: &toyos::port::Acceptor, p: Pending, msg_type: u32, payload_len: usize) {
+    fn asked(&mut self, clients: &toyos::port::Acceptor, mut p: Pending, msg_type: u32, payload_len: usize) {
         let grant = grant(clients, &p.conn);
         if msg_type == wire::MSG_LIST && payload_len == 0 {
             return self.waiting.push(Waiting { conn: p.conn, grant, ask: Ask::List });
         }
         let guid = wire::guid(p.rx.payload(payload_len));
-        let handles = p.conn.recv_handles_exact::<1>();
+        let handles = p.rx.take_handles::<1>();
         let (Some(guid), Some([region]), wire::MSG_OPEN) = (guid, handles, msg_type) else {
             if let Some([region]) = handles {
                 toyos_abi::syscall::close(region);
@@ -506,8 +506,8 @@ impl Service {
         );
     }
 
-    /// The session goes to the driver whose disk `offered` is: the client's
-    /// connection and region, then the frame naming them.
+    /// The session goes to the driver whose disk `offered` is: the frame
+    /// naming it, carrying the client's connection and region.
     fn hand_over(&mut self, offered: Offered, guid: [u8; 16], writes: bool, conn: Connection, region: OwnedHandle) {
         let Some((&id, d)) = self.drivers.iter().find(|(_, d)| d.disks.values().any(|&ours| ours == offered.disk)) else {
             unreachable!("diskserver: disk {} is offered and no driver has it", offered.disk)
@@ -515,14 +515,11 @@ impl Service {
         let theirs = *d.disks.iter().find(|(_, ours)| **ours == offered.disk).expect("just found").0;
         let session = disk::Session { disk: theirs, unique: guid, writes };
         // The client hears nothing from here: its open is the driver's to
-        // answer, and a refused move closes the client's connection.
-        if let Err(why) = d.conn.send_handles([conn.into_owned(), region]) {
-            return println!("diskserver: the kernel would not move a session to disk driver {}: {why:?}", d.badge);
-        }
-        // Its handles are in the driver's queue ahead of any later frame's,
-        // so a frame the driver will not take ends the driver.
-        if d.conn.try_send_bytes(disk::MSG_SESSION, &session.encode()).is_err() {
-            return self.drop_driver(id, "it would not take a session");
+        // answer, and a refused send closes the client's connection.
+        match d.conn.try_send_bytes_with(disk::MSG_SESSION, &session.encode(), [conn.into_owned(), region]) {
+            Ok(()) => {}
+            Err(ipc::TrySendError::Full) => self.drop_driver(id, "it would not take a session"),
+            Err(why) => println!("diskserver: the kernel would not move a session to disk driver {}: {why:?}", d.badge),
         }
     }
 }
