@@ -361,9 +361,10 @@ fn write_entry(b: &mut [u8; BLOCK_SIZE], offset: usize, key: &Key, value: &[u8])
 
 /// The child to descend into for `key`.
 ///
-/// Interior children are sorted and each key is the minimum key of that
-/// child's subtree, so the answer is the last child whose key is `<= key`,
-/// defaulting to the first — which covers everything below the second key.
+/// Interior children are in key order, each key at most the least key of its
+/// child's subtree and above every key of the child before it, so the answer
+/// is the last child whose key is `<= key`, defaulting to the first — which
+/// covers everything below the second key.
 fn find_child(children: &[Child], key: &Key) -> Option<BlockNum> {
     children.get(child_index(children, key)).map(|c| c.block)
 }
@@ -581,21 +582,24 @@ fn insert_recursive(
         }
         Node::Interior { level, mut children } => {
             let idx = child_index(&children, &entry.key);
-            let child_block = children.get(idx).ok_or(FsError::CorruptedNode(block))?.block;
+            let child = children.get_mut(idx).ok_or(FsError::CorruptedNode(block))?;
+            let child_block = child.block;
+            // A key below every child's goes to the first, whose key comes
+            // down to it: a sibling split off that child keyed below the old
+            // one is still after it.
+            let lowered = entry.key < child.key;
+            if lowered {
+                child.key = entry.key;
+            }
             let deeper = depth.descend(block)?;
 
             let Placed { at, split } = insert_recursive(io, alloc, child_block, deeper, entry)?;
-            if at == child_block && split.is_empty() {
+            if at == child_block && split.is_empty() && !lowered {
                 return Ok(Placed { at: block, split });
             }
             children[idx].block = at;
-            for sibling in split {
-                let pos = match children.binary_search_by(|c| c.key.cmp(&sibling.key)) {
-                    Ok(i) => i + 1,
-                    Err(i) => i,
-                };
-                children.insert(pos, sibling);
-            }
+            // The siblings hold the keys of `idx` past those it kept, in order.
+            children.splice(idx + 1..idx + 1, split);
             write_or_split(io, alloc, block, Node::Interior { level, children })
         }
     }
@@ -841,6 +845,27 @@ mod tests {
         assert_eq!(alloc.free_blocks, 0, "the first sibling took the last block");
         alloc.fail(&io);
         assert_eq!(alloc.free_blocks, 1, "the first sibling's block went back");
+    }
+
+    /// Keys below every key the tree holds go down its leftmost spine, into
+    /// child 0 of every node on it. When that child splits, its siblings take
+    /// keys below the one child 0 was split off at, and every key the tree
+    /// holds is still found by its own search afterwards.
+    #[test]
+    fn keys_below_the_tree_s_least_split_its_first_child_and_every_key_is_still_found() {
+        let io = crate::block_io::VecBlockIO::new(4096);
+        let mut alloc = BitmapAllocator::format(&io, BlockNum::new(0), 1, 4096, 1).unwrap();
+        let mut root = alloc.alloc_block(&io).unwrap();
+        Node::Leaf(Vec::new()).write(&io, root).unwrap();
+        let key = |name_hash: u64| Key { name_hash, name_hash_hi: 0, key_type: KeyType::File };
+        // Above, then ever further below, so the second run splits child 0.
+        let keys: Vec<u64> = (0..400).map(|i| 1_000_000 + i).chain((0..800).map(|i| 999_999 - i)).collect();
+        for &k in &keys {
+            root = insert(&io, &mut alloc, root, Entry { key: key(k), value: vec![k as u8; 200] }).unwrap();
+        }
+        assert!(Node::read(&io, root).unwrap().level() >= 1, "the tree never grew past a leaf");
+        let lost: Vec<u64> = keys.iter().copied().filter(|&k| search(&io, root, &key(k)).unwrap().is_none()).collect();
+        assert!(lost.is_empty(), "{} of {} keys are not found, {:?} first", lost.len(), keys.len(), lost.first());
     }
 
     #[test]
