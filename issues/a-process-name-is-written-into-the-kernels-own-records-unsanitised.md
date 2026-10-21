@@ -9,18 +9,19 @@ opened: 2026-09-23
 `make_name` (`kernel/src/loader/start.rs`) keeps a spawned file's name as the
 process-table name, and the kernel writes that name into records a judge parses
 by field: `exit: {name} pid=N code=N cpu=Nms` (`kernel/src/process.rs`) is the
-verdict channel `bootlog::EXIT` and `devices::exit_of` read. A program
+verdict channel `bootlog::EXIT` and the metal judge's `Boot::exit_code`
+(`tests/common/metal.rs`) read. A program
 that can write and spawn a file whose name holds a space and the record's own
 words — `test_rs_job pid=1 code=0`, inside `THREAD_NAME_LEN` — gets a kernel
 record that opens as the job's own: `exit: test_rs_job pid=1 code=0 pid=7
-code=3 cpu=0ms`. `exit_of(log, "test_rs_job")` matches its head, takes the
-first `code=` after it, and the forger's record is the last one. Not run: the
-reading of the two functions.
+code=3 cpu=0ms`. `exit_code("test_rs_job")` matches its head, takes the
+first `pid=` and `code=` after it, and keeps the record with the lowest pid,
+which is the one the forger named. Not run: the reading of the two functions.
 
-A program's own lines are not this: they reach `/log` under the head `logd`
-writes for them, whose name is init's and refused outside `[A-Za-z0-9._+-]`
-(`toyos_logstream::Tag`). This is the kernel's record quoting a name it does
-not clean.
+A program's own lines are not this: they reach `/log` under the head `logkeeper`
+writes for them, whose name is the supervisor's and refused outside
+`[A-Za-z0-9._+-]` (`toyos_logstream::Tag`). This is the kernel's record quoting
+a name it does not clean.
 
 ## Exit condition
 

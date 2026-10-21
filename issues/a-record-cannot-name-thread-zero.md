@@ -23,7 +23,7 @@ every `tid=` in the T14 boot logs then committed: **738 `tid=0` against 49
 `tid=1`** — the value the formatter drops is the one almost every line carries.
 
 The kernel's own sentinel is a third value again: `PerCpu::current_tid` is
-`u32::MAX` when no thread is running (`kernel/src/arch/x86_64/percpu.rs:85`), which the
+`u32::MAX` when no thread is running (`kernel/src/arch/x86_64/percpu.rs`), which the
 formatter would render as `tid=4294967295` on every line a kernel thread logs.
 
 ## What is in the tree now
@@ -38,23 +38,23 @@ render identically, where the byte ring's prefix distinguished them (`[kernel
 the panel alone.** The byte ring is gone (`kernel/src/log/mod.rs`: "the byte
 ring is gone, and the line the console carries is rendered from the record by
 `log::console`, through the one formatter in `toyos-abi`"), and
-`console::write_line` is public precisely so that `/log`'s sink renders the
-same line — `logd` puts a wall-clock prefix in front of the same `Display` and
-changes nothing else. Serial, panel and file are one rendering, and it is the
-one that drops `tid=0`.
+`console::write_line` is public precisely so that `/log`'s sink renders the same
+line — `logd` (now `logkeeper`) puts a wall-clock prefix in front of the same
+`Display` and changes nothing else. Serial, panel and file are one rendering,
+and it is the one that drops `tid=0`.
 
 ## Why it was not fixed there
 
-`sdk/abi/src/log.rs` is a sysroot source (`build/toolchain.rs`'s
+`sdk/abi/src/log.rs` is a sysroot source (`build/sysroot.rs`'s
 `SYSROOT_SOURCES`), so an ABI change lands on its own pull request and the
 kernel-side commit could not carry one.
 
 ## The options
 
-1. **A `flags` bit.** `LogRecord::flags` has one bit used (`FLAG_EARLY`); a
+1. **A `flags` bit.** `LogRecord::flags` has one bit used (`FLAG_UNTIMED`); a
    `FLAG_NO_THREAD` says "this record has no thread" out loud and leaves `tid`
    meaning only what it says. Costs nothing on the wire and matches how the
-   early-boot label is already carried.
+   untimed label is already carried.
 2. **Render `pid`/`tid` together.** The record already holds `pid` and no
    consumer prints it, which is its own smell: a per-process tid is only an
    identity beside the pid it belongs to. `[0.123 cpu0 3/0]` names a thread;
