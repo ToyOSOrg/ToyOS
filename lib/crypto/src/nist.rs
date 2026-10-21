@@ -10,7 +10,7 @@
 use crate::{
     Error,
     montgomery::{self, Modulus, Residue, below, from_be, to_be},
-    secret::wipe64,
+    secret::{Workspace, wipe64},
 };
 
 /// A short Weierstrass curve y^2 = x^3 - 3x + b of prime order and cofactor
@@ -85,6 +85,13 @@ pub(crate) struct Point<C: Curve<N>, const N: usize> {
     y: Coord<C, N>,
     z: Coord<C, N>,
 }
+impl<C: Curve<N>, const N: usize> Clone for Point<C, N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<C: Curve<N>, const N: usize> Copy for Point<C, N> {}
+impl<C: Curve<N>, const N: usize> crate::secret::Zeroable for Point<C, N> {}
 impl<C: Curve<N>, const N: usize> Point<C, N> {
     fn identity() -> Self {
         Self {
@@ -143,14 +150,16 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let out = Self::select(&out, self, q.z.is_zero());
         Self::select(&out, q, self.z.is_zero())
     }
+    /// scalar * self on a fixed schedule. The accumulator is the operation's
+    /// secret state, erased when it returns; the result is the caller's.
     pub(crate) fn mul(&self, scalar: &Scalar<C, N>) -> Self {
-        let mut r = Self::identity();
+        let mut r = Workspace(Self::identity());
         for i in (0..N * 64).rev() {
-            let doubled = r.double();
+            let doubled = r.0.double();
             let added = doubled.add(self);
-            r = Self::select(&doubled, &added, scalar.bit(i))
+            r.0 = Self::select(&doubled, &added, scalar.bit(i))
         }
-        r
+        r.0
     }
     fn affine(&self) -> Result<([u64; N], [u64; N]), Error> {
         if self.z.is_zero() == 1 {
@@ -159,8 +168,8 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let inverse = self.z.invert();
         let inv2 = inverse.square();
         Ok((
-            self.x.mul(&inv2).to_integer(),
-            self.y.mul(&inv2.mul(&inverse)).to_integer(),
+            self.x.mul(&inv2).integer(),
+            self.y.mul(&inv2.mul(&inverse)).integer(),
         ))
     }
     /// The uncompressed SEC 1 encoding, 1 + 16N bytes.
@@ -168,12 +177,10 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         if out.len() != 1 + N * 16 {
             return Err(Error::Length);
         }
-        let (mut x, mut y) = self.affine()?;
+        let (x, y) = self.affine()?;
         out[0] = 4;
         to_be(&x, &mut out[1..1 + N * 8]);
         to_be(&y, &mut out[1 + N * 8..]);
-        wipe64(&mut x);
-        wipe64(&mut y);
         Ok(())
     }
     /// An uncompressed SEC 1 point on the curve.
@@ -207,13 +214,11 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
     pub(crate) fn agree(&self, scalar: &Scalar<C, N>, output: &mut [u8]) {
         // Both curves have prime order and cofactor one; validated nonzero
         // scalars and finite peers cannot multiply to infinity.
-        let (mut x, mut y) = self
+        let (x, _) = self
             .mul(scalar)
             .affine()
             .expect("validated prime-order point and nonzero scalar");
         to_be(&x, output);
-        wipe64(&mut x);
-        wipe64(&mut y);
     }
     /// ECDSA verification of a DER signature over an 8N-byte digest. All
     /// inputs are public.
@@ -226,11 +231,11 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let s = Scalar::<C, N>::from_bytes(&s[..N * 8]).map_err(|_| Error::InvalidSignature)?;
         let z = ModN::<C, N>::from_wide(&from_be(digest));
         let inverse = ModN::<C, N>::from_wide(&s.0).invert();
-        let u = Scalar(z.mul(&inverse).to_integer(), core::marker::PhantomData);
-        let v = Scalar(ModN::<C, N>::from_wide(&r.0).mul(&inverse).to_integer(), core::marker::PhantomData);
+        let u = Scalar(z.mul(&inverse).integer(), core::marker::PhantomData);
+        let v = Scalar(ModN::<C, N>::from_wide(&r.0).mul(&inverse).integer(), core::marker::PhantomData);
         let result = Self::base().mul(&u).add(&self.mul(&v));
         let (x, _) = result.affine().map_err(|_| Error::InvalidSignature)?;
-        let x = ModN::<C, N>::from_wide(&x).to_integer();
+        let x = ModN::<C, N>::from_wide(&x).integer();
         if x == r.0 {
             Ok(())
         } else {
