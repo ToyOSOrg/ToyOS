@@ -440,6 +440,15 @@ pub struct Vm<'q> {
     /// than judged: a wakeup storm that drains in parallel across a machine is
     /// only evidence about the balance path if the balance path ran.
     pub migrations: u64,
+    /// Of [`Self::migrations`], those made before any thread exited: the moves
+    /// the initial placement alone called for.
+    pub migrations_before_exit: u64,
+    /// Blocks that committed at the call site and went on to park: under
+    /// [`BlockShape::CommitAtCallSite`], each is a task whose word says
+    /// `Blocked` while its CPU still runs it.
+    pub call_site_commits: u64,
+    /// Threads that ran to their exit.
+    pub exits: u64,
     /// Per CPU: the instant it first took an execution step, or `None` for a
     /// CPU that never ran anything at all.
     ///
@@ -639,6 +648,9 @@ impl<'q> Vm<'q> {
             finish_ns: vec![None; process_count],
             thread_finish_ns: BTreeMap::new(),
             migrations: 0,
+            migrations_before_exit: 0,
+            call_site_commits: 0,
+            exits: 0,
             first_exec_ns: vec![None; n],
             idle_wakes: vec![0; n],
             late_kick_wakes: vec![0; n],
@@ -1624,6 +1636,7 @@ impl<'q> Vm<'q> {
             BlockShape::CommitAtCallSite | BlockShape::CommitAtCallSiteFused => {
                 match ticket.commit() {
                     Commit::Parked(committed) => {
+                        self.call_site_commits += 1;
                         self.registrations.insert(key, queue);
                         BlockPhase::Committed(committed)
                     }
@@ -1805,6 +1818,7 @@ impl<'q> Vm<'q> {
         }
         self.programs.remove(&key);
         self.unwind_left.remove(&key);
+        self.exits += 1;
         self.run_pass(cpu, Dispose::Exit);
     }
 

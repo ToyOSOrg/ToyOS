@@ -1743,10 +1743,10 @@ impl<H: Hw, P: PreemptGuard> SchedPass<'_, '_, H, P, Disposed> {
         let kill_due = current.shared().kill_pending()
             && !self.cpu.aged_grant
             && matches!(current.shared().state(), TaskState::Running(_));
-        // The instant the last pass armed is when the running request ends or
-        // an earlier-due group became eligible, and `begin`'s charge has
-        // already issued the next request; this pass's own queue changes can
-        // only bring the decision forward.
+        // Both instants count: `begin`'s charge has already issued the next
+        // request, so a recomputed decision alone would never reach the end of
+        // the one the last pass armed. A stale armed instant at worst decides
+        // early, and the pick keeps `dispatched_at` if it picks this thread again.
         let due = self.now >= self.cpu.decide_at || self.now >= self.cpu.settle_decision(self.now) || rt_due || kill_due;
         if !due {
             return;

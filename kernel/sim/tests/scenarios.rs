@@ -19,7 +19,7 @@
 //! | gate | breaks | caught by |
 //! |---|---|---|
 //! | `old_steal_port` | the old steal-and-scan algorithm | I1 **and** I8 |
-//! | `old_commit_before_pass` | the pre-`8508b37` blocking shape | I1, on every seed |
+//! | `old_commit_before_pass` | the pre-`8508b37` blocking shape | I1, on every seed that commits at the call site |
 //! | `old_preemptible_window` | preemption left on in the registration window | an abort inside `check_cpu` |
 //! | `old_migrate_kept_the_corpse` | the balance path handing on a killed task | I14 |
 //! | `old_rt_starved_the_corpse` | the RT band outranking the dying list without a bound | I14, on every seed |
@@ -178,7 +178,7 @@ fn old_steal_port_is_caught() {
 fn old_commit_before_pass_is_caught() {
     let scenario = scenarios::old_commit_before_pass();
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
-    let mut caught = 0;
+    let (mut caught, mut reached) = (0, 0);
     let mut worst_steps = 0;
     for seed in 0..SEEDS {
         let mut choices = if seed % 2 == 0 {
@@ -187,6 +187,20 @@ fn old_commit_before_pass_is_caught() {
             ChoiceStream::pct(seed, scenario.cpus(), 3)
         };
         let outcome = run(scenario.clone(), &mut choices);
+        // The shape is reached the first time a block commits at the call
+        // site and goes on to park: its word then reads `Blocked` while its
+        // CPU still runs it. A schedule in which every block found a token
+        // waiting never executes the defect.
+        let reaches = outcome.call_site_commits > 0;
+        reached += usize::from(reaches);
+        assert_eq!(
+            !outcome.passed(),
+            reaches,
+            "seed {seed}: {} call-site commit(s), and the run {} — the gate must catch exactly \
+             the schedules that commit before the pass",
+            outcome.call_site_commits,
+            if outcome.passed() { "passed" } else { "failed" },
+        );
         if outcome.passed() {
             continue;
         }
@@ -197,21 +211,19 @@ fn old_commit_before_pass_is_caught() {
             *kinds.entry(id).or_default() += 1;
         }
     }
-    // Not every schedule: the explorer may leave a CPU un-stepped while it
-    // holds a task, so a consumer's request can end before it took a step, and
-    // the producer's tokens then outpace the consumers and no block finds the
-    // queue empty. Measured 415 of 500 on `e74dbf1` with the job-group
-    // scheduler applied.
+    // Coverage, not detection: the workload must keep reaching the window. In
+    // 85 of 500 schedules the producer stays ahead and every consumer block
+    // finds a token waiting (507 at entry, 2 at the re-check), so none commits.
     assert!(
-        caught * 4 >= 3 * SEEDS as usize,
-        "committing the wait ticket before the pass must be caught in at least \
-         three schedules of four: {caught}/{SEEDS}",
+        reached * 4 >= 3 * SEEDS as usize,
+        "only {reached}/{SEEDS} schedules reached a call-site commit; the workload has stopped \
+         exercising the window",
     );
     // 50 steps at worst, measured with `caught` above.
     assert!(
         worst_steps < 64,
-        "the worst schedule took {worst_steps} steps to expose it; this is a \
-         structural break and should surface almost immediately",
+        "the worst of {caught} caught schedules took {worst_steps} steps to expose it; this is \
+         a structural break and should surface almost immediately",
     );
     assert!(
         kinds.contains_key("I1"),

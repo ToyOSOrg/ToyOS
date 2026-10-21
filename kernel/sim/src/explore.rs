@@ -97,6 +97,12 @@ pub struct Outcome {
     pub thread_finish_ns: std::collections::BTreeMap<kernel::sched::task::TaskKey, u64>,
     /// How many tasks the balance path moved between CPUs.
     pub migrations: u64,
+    /// See [`crate::vm::Vm::migrations_before_exit`].
+    pub migrations_before_exit: u64,
+    /// See [`crate::vm::Vm::call_site_commits`].
+    pub call_site_commits: u64,
+    /// Threads that ran to their exit.
+    pub exits: u64,
     /// Per CPU: when it first took an execution step — see
     /// [`crate::vm::Vm::first_exec_ns`].
     pub first_exec_ns: Vec<Option<u64>>,
@@ -324,6 +330,9 @@ fn outcome_of(scenario: &'static str, vm: &Vm<'_>, choices: &ChoiceStream) -> Ou
         process_finish_ns: vm.finish_ns.clone(),
         thread_finish_ns: vm.thread_finish_ns.clone(),
         migrations: vm.migrations,
+        migrations_before_exit: vm.migrations_before_exit,
+        call_site_commits: vm.call_site_commits,
+        exits: vm.exits,
         first_exec_ns: vm.first_exec_ns.clone(),
         never_ran: vm.spawned.difference(&vm.ran).count(),
         idle_wakes: vm.idle_wakes.clone(),

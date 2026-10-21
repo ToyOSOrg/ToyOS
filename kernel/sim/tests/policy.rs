@@ -84,7 +84,7 @@
 //! doing what a sweep is for.
 
 use kernel::sched::cpu::Balance;
-use kernel::sched::cpu::{BALANCE_NS, STALE_PASS_NS};
+use kernel::sched::cpu::STALE_PASS_NS;
 use kernel::sched::queue::{MIN_SLICE_NS, SLICE_NS};
 use kernel::sched::task::QUANTUM_NS;
 use kernel_sim::choice::ChoiceStream;
@@ -654,13 +654,39 @@ fn stealable(threads: usize) -> u64 {
     threads as u64 - 1
 }
 
-/// The most migrations a run of `elapsed` may make: everything above cpu0's
-/// floor once, plus what busy balancing moves between CPUs that are both
-/// running work — one request per CPU per [`BALANCE_NS`] at most, which is how
-/// a thread can move twice: a thief becomes a victim when the threads it took
-/// outlast cpu0's.
-fn migration_ceiling(threads: usize, cpus: usize, elapsed: u64) -> u64 {
-    stealable(threads) + cpus as u64 * (elapsed / BALANCE_NS + 1)
+/// **Every move a lopsided run makes has a cause, and none is a bounce.**
+///
+/// Before any thread exits, the counts only change by moves. cpu0 gives up
+/// [`even_drain`] tasks net, and each other CPU sources at most two moves of
+/// its own:
+/// - one at start-up, when an idle CPU's nearest neighbour holding surplus is
+///   one busy balancing has just given a second thread, rather than cpu0;
+/// - one at the end of the drain, when cpu0 answers a burst of requests posted
+///   in the same instant, drops below a CPU that took threads earlier, and that
+///   CPU hands one on.
+///
+/// After the first exit, a move needs a pair whose weights differ by more than
+/// one thread (`pop_surplus`'s quarter-thread margin), and only an exit opens
+/// one, so the moves are at most one per exit. Measured over 20 seeds: at most
+/// even + 8 before an exit (8 CPUs, 64 threads) and 53 moves after 64 exits
+/// (4 CPUs, 64 threads). A pair that bounces a thread with no exit between
+/// exceeds one bound or the other.
+fn assert_moves_have_causes(outcome: &Outcome, cpus: usize, threads: usize, label: &str) {
+    let before = even_drain(threads, cpus) + 2 * (cpus as u64 - 1);
+    assert!(
+        outcome.migrations_before_exit <= before,
+        "{label} at {cpus} cpus and {threads} threads: {} moves before any thread exited, past \
+         the {before} that an even split, one start-up chain and one end-of-drain correction \
+         per other CPU account for",
+        outcome.migrations_before_exit,
+    );
+    let after = outcome.migrations - outcome.migrations_before_exit;
+    assert!(
+        after <= outcome.exits,
+        "{label} at {cpus} cpus and {threads} threads: {after} moves after the first exit, \
+         against {} exits that could each open one imbalance",
+        outcome.exits,
+    );
 }
 
 /// The fewest migrations that leave cpu0 holding no more than an even split of
@@ -724,15 +750,7 @@ fn the_balance_path_drains_the_cpu_an_adversary_loaded() {
                  those CPUs was given work by something that is not the balance path",
                 outcome.migrations,
             );
-            // And the ceiling: what cpu0 has to give, plus what busy balancing
-            // is rate-limited to.
-            let ceiling = migration_ceiling(threads, cpus, outcome.elapsed);
-            assert!(
-                outcome.migrations <= ceiling,
-                "at {cpus} cpus the balance path moved {} of {threads} tasks, past the {ceiling} \
-                 that cpu0's surplus and one busy request per CPU per `BALANCE_NS` allow",
-                outcome.migrations,
-            );
+            assert_moves_have_causes(outcome, cpus, threads, "the shipped policy");
             best = best.max(outcome.migrations);
             widest = widest.max(ran);
             full += usize::from(ran == cpus);
@@ -900,7 +918,7 @@ fn wake_rate(outcome: &Outcome) -> f64 {
 /// The two ceilings the shipped path already obeys are asserted here rather than
 /// in each case, because every policy below is built on the same balance path:
 /// no CPU is given work by anything but the balance path, and the migrations
-/// stay under [`migration_ceiling`].
+/// each have a cause ([`assert_moves_have_causes`]).
 fn recover(cpus: usize, threads: usize, balance: Balance) -> Recovery {
     let scenario = scenarios::lopsided_placement(cpus, threads, WORK).with_balance(balance);
     let mut r = Recovery::default();
@@ -913,13 +931,7 @@ fn recover(cpus: usize, threads: usize, balance: Balance) -> Recovery {
              those CPUs was given work by something that is not the balance path",
             outcome.migrations,
         );
-        let ceiling = migration_ceiling(threads, cpus, outcome.elapsed);
-        assert!(
-            outcome.migrations <= ceiling,
-            "{balance:?} at {cpus} cpus: the balance path moved {} of {threads} tasks, past the \
-             {ceiling} that cpu0's surplus and one busy request per CPU per `BALANCE_NS` allow",
-            outcome.migrations,
-        );
+        assert_moves_have_causes(outcome, cpus, threads, &format!("{balance:?}"));
         r.full += usize::from(ran == cpus);
         r.second += usize::from(ran > 1);
         r.best_migrations = r.best_migrations.max(outcome.migrations);

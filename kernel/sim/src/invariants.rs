@@ -282,6 +282,9 @@ fn check_retires(vm: &mut Vm<'_>) {
     // case claims a machine drains in parallel, and that claim is only about the
     // balance path if the balance path moved something.
     vm.migrations += migrated.len() as u64;
+    if vm.exits == 0 {
+        vm.migrations_before_exit += migrated.len() as u64;
+    }
     for (key, to) in migrated {
         if vm.killed.contains_key(&key) {
             problems.push(format!(
