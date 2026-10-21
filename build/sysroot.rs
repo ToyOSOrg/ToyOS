@@ -71,7 +71,7 @@ use whole_toolchain::{whole, Whole};
 pub const SYSROOT_SOURCES: [&str; 9] = [
     "sdk/abi/src",
     "sdk/toyos/src",
-    "lib/blockring/transport/src",
+    "sdk/transport/src",
     "lib/untrusted/src",
     "sdk/std",
     "lib/elf/src",
@@ -85,7 +85,7 @@ pub const SYSROOT_SOURCES: [&str; 9] = [
 pub(crate) const SYSROOT_MANIFESTS: [&str; 9] = [
     "sdk/abi/Cargo.toml",
     "sdk/toyos/Cargo.toml",
-    "lib/blockring/transport/Cargo.toml",
+    "sdk/transport/Cargo.toml",
     "lib/untrusted/Cargo.toml",
     "lib/elf/Cargo.toml",
     "sdk/osrelease/Cargo.toml",
@@ -98,7 +98,7 @@ pub(crate) const SYSROOT_MANIFESTS: [&str; 9] = [
 /// lockfile resolves with the fork's own through [`std_patch`]: what of a
 /// worktree can move a freestanding target's dependency versions.
 const STD_MANIFESTS: [&str; 4] =
-    ["sdk/abi/Cargo.toml", "sdk/toyos/Cargo.toml", "lib/blockring/transport/Cargo.toml", "lib/untrusted/Cargo.toml"];
+    ["sdk/abi/Cargo.toml", "sdk/toyos/Cargo.toml", "sdk/transport/Cargo.toml", "lib/untrusted/Cargo.toml"];
 
 /// One of the crates std names by version, in a worktree.
 pub(crate) struct StdCrate {
@@ -1321,7 +1321,7 @@ pub(crate) mod tests {
                 "--config".to_string(),
                 format!("patch.crates-io.toyos.path=\"{at}/sdk/toyos\""),
                 "--config".to_string(),
-                format!("patch.crates-io.toyos-transport.path=\"{at}/lib/blockring/transport\""),
+                format!("patch.crates-io.toyos-transport.path=\"{at}/sdk/transport\""),
                 "--config".to_string(),
                 format!("patch.crates-io.toyos-untrusted.path=\"{at}/lib/untrusted\""),
             ],
