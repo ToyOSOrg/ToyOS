@@ -243,6 +243,22 @@ impl<K: Copy + Eq> Eevdf<K> {
         best.map(|e| e.key)
     }
 
+    /// Service, in whole ns of `running` being served, until a queued entity
+    /// whose request is due before `running`'s becomes eligible and so the
+    /// pick: `V` advances by `1 / total` per unit of service, and an entity
+    /// with lag `l < 0` becomes eligible once it has advanced `−l / w`.
+    pub fn overtaken_in(&self, running: K) -> Option<u64> {
+        let r = self.get(running);
+        self.entities
+            .iter()
+            .filter(|e| (e.vd, e.seq) < (r.vd, r.seq))
+            .map(|e| {
+                let behind = mul(self.total, e.v - self.base) - self.sum;
+                ((behind.max(0) + (1 << VSHIFT) - 1) >> VSHIFT) as u64
+            })
+            .min()
+    }
+
     pub fn is_eligible(&self, key: K) -> bool {
         let e = self.get(key);
         mul(self.total, e.v - self.base) <= self.sum
@@ -370,6 +386,31 @@ mod tests {
             assert_eq!(g, 3000 * MS);
         }
         assert!(q.lag_sum().0.abs() < 4 * (UNIT as i128));
+    }
+
+    /// A short request that ran ahead of its share is due before the long one
+    /// now running; `overtaken_in` is exactly the service after which it is
+    /// eligible and so picked.
+    #[test]
+    fn overtaken_in_is_the_service_until_an_earlier_request_becomes_the_pick() {
+        let mut rng = Lcg(11);
+        for _trial in 0..200 {
+            let mut q = Eevdf::new();
+            // Within a factor of 4, so the short request's deadline is first.
+            q.join(0u32, UNIT / 2 + rng.below(UNIT * 3 / 2), MS / 4, Lag::ZERO);
+            q.join(1, UNIT / 2 + rng.below(UNIT * 3 / 2), 4 * MS, Lag::ZERO);
+            q.charge(0, MS / 4);
+            let long = 1;
+            assert_eq!(q.pick(), Some(long));
+            assert!(q.earlier(0, long));
+            let ns = q.overtaken_in(long).unwrap();
+            assert!(ns > 0 && ns < q.request_left_ns(long));
+            q.charge(long, ns - 1);
+            assert!(!q.is_eligible(0));
+            q.charge(long, 1);
+            assert_eq!(q.pick(), Some(0));
+            assert_eq!(q.overtaken_in(0), None);
+        }
     }
 
     /// The paper's Theorem 3 bounds for a steady set joining at zero lag:

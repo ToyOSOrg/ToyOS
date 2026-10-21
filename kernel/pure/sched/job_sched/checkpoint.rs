@@ -637,11 +637,13 @@ fn a_desktop_beside_a_build_runs_every_interactive_wake_within_a_frame() {
             }
             let (missed, worst_response) = sim.missed(c);
             line.push_str(&format!(
-                " | compositor frames missed {missed}, worst completion {:.2} ms | migr/s {:.1}",
+                " | compositor frames missed {missed}, worst completion {:.2} ms | migr/s {:.1} switch/s/cpu {:.0}",
                 worst_response as f64 / MS as f64,
-                sim.migrations as f64 / 10.0
+                sim.migrations as f64 / 10.0,
+                sim.switches as f64 / 10.0 / m as f64
             ));
             println!("{line}");
+            assert_eq!(missed, 0, "{shape} {design}: the compositor missed a frame");
         }
     }
 }

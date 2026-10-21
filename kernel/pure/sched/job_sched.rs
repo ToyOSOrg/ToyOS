@@ -898,8 +898,11 @@ impl JobSched {
     }
 
     /// The next instant `cpu` must be scheduled again absent other events: its
-    /// running request's end, its realtime turn or allowance running out, a
-    /// deferred wake preemption, or a demoted worker becoming due.
+    /// running request's end; a queued request due before it becoming eligible,
+    /// at either level, once the running thread has had `min_slice` (else a
+    /// thread whose request is due first waits out every longer request ahead);
+    /// its realtime turn or allowance running out; a deferred wake preemption;
+    /// or a demoted worker becoming due.
     pub fn next_decision(&self, cpu: CpuId) -> Option<Nanos> {
         let c = &self.cpus[cpu.0 as usize];
         let mut next: Option<Nanos> = c.preempt_at;
@@ -911,6 +914,10 @@ impl JobSched {
                     let group = c.members.iter().find(|g| g.job == job).unwrap();
                     let left = c.groups.request_left_ns(job).min(group.threads.request_left_ns(run.tid));
                     at(c.charged.after(left));
+                    let overtaken = [c.groups.overtaken_in(job), group.threads.overtaken_in(run.tid)];
+                    if let Some(ns) = overtaken.into_iter().flatten().min() {
+                        at(c.charged.after(ns).max(run.since.after(self.params.min_slice)));
+                    }
                 }
                 Band::Rt => {
                     // Already exhausted by a charge another CPU's move made:
