@@ -16,9 +16,10 @@
 //! the peer's words, for the protocol's decoder to bound; a peer's cursor is
 //! bounded against the ring before it is believed, and the variant of
 //! [`Violation`] names what it claimed; a run is bounded against the
-//! [`Geometry`], and a tag against the [`Inflight`] table. An end keeps its own cursor locally and only stores the shared one,
-//! so nothing the peer writes moves it, and a cursor the peer moves backwards
-//! within bounds costs only the peer.
+//! [`Geometry`], and a tag against the [`Inflight`] table. An end keeps its
+//! own cursor locally and only stores the shared one, so nothing the peer
+//! writes moves it, and a cursor the peer moves backwards within bounds costs
+//! only the peer.
 //!
 //! **A restart is seen only as a hang-up**, and [`Inflight::end`] answers every
 //! tag that was in flight, once; a tag from before it answers nothing.

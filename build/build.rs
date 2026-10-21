@@ -2724,12 +2724,14 @@ mod tests {
         "test-actuators",
     ];
 
-    /// Features of a host workspace member that choose a build's world rather
+    /// Features of a host-tested member that choose a build's world rather
     /// than revert a decision: loom's atomics, a crate's `std` and its default
     /// set, the toolchain's `core` and `rustc-dep-of-std`, libc's `std-runtime`,
     /// the signer's `sign`, `flaws`, which compiles what a simulator's
-    /// negative gates select at run time, and `toyos-crypto`'s `portable`,
-    /// `wpa2` and `rustls-provider`, which `--ci host` tests as forms of its own.
+    /// negative gates select at run time, `toyos-crypto`'s `portable`, `wpa2`
+    /// and `rustls-provider`, which `--ci host` tests as forms of its own, and
+    /// of the guest libraries, `toyos-font`'s `ttf`, its TrueType rendering,
+    /// and `toyos-pci-claim`'s `host-grant`, which netstack's host tests build.
     const NOT_A_CONTROL: &[&str] = &[
         "core",
         "default",
