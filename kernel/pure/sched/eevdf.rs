@@ -16,7 +16,12 @@
 //! so charging never loses service. The only rounding is the queue's mean
 //! (`V`), which is below one virtual unit: a lag read or a join is exact to
 //! within `w · 2^-VSHIFT` ns, under `2^-8` ns at [`MAX_WEIGHT`].
+//!
+//! Entities sit in an AVL tree ordered by deadline, each node holding its
+//! subtree's least `v`, so a pick, an eligibility query and every update are
+//! O(log n) in the entities queued.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 /// Fine service units per nanosecond, as a shift.
@@ -50,6 +55,8 @@ impl Lag {
     }
 }
 
+const NIL: u32 = u32::MAX;
+
 struct Entity<K> {
     key: K,
     weight: u64,
@@ -63,6 +70,13 @@ struct Entity<K> {
     slice: u64,
     /// Issue order of the current request: earlier wins a deadline tie.
     seq: u64,
+    left: u32,
+    right: u32,
+    height: u8,
+    /// The least `v` in this entity's subtree.
+    min_v: i128,
+    /// Where it is in [`Eevdf::order`].
+    pos: u32,
 }
 
 /// What [`Eevdf::leave`] hands back: everything needed to rejoin elsewhere.
@@ -74,7 +88,15 @@ pub struct Left {
 }
 
 pub struct Eevdf<K> {
-    entities: Vec<Entity<K>>,
+    /// Every entity queued, and the slots of those that left, which `free`
+    /// lists for reuse.
+    nodes: Vec<Entity<K>>,
+    free: Vec<u32>,
+    slots: BTreeMap<K, u32>,
+    /// The queued slots in join order, a leave moving the last into its place:
+    /// the order [`Self::keys`] answers in.
+    order: Vec<u32>,
+    root: u32,
     total: i128,
     /// Origin of `sum`, kept within one virtual unit of `V`.
     base: i128,
@@ -96,25 +118,35 @@ fn fine(ns: u64) -> i128 {
     (ns as i128) << VSHIFT
 }
 
-impl<K: Copy + Eq> Eevdf<K> {
+impl<K: Copy + Ord> Eevdf<K> {
     pub fn new() -> Self {
-        Self { entities: Vec::new(), total: 0, base: 0, sum: 0, seq: 0 }
+        Self {
+            nodes: Vec::new(),
+            free: Vec::new(),
+            slots: BTreeMap::new(),
+            order: Vec::new(),
+            root: NIL,
+            total: 0,
+            base: 0,
+            sum: 0,
+            seq: 0,
+        }
     }
 
     pub fn len(&self) -> usize {
-        self.entities.len()
+        self.order.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.entities.is_empty()
+        self.order.is_empty()
     }
 
     pub fn contains(&self, key: K) -> bool {
-        self.entities.iter().any(|e| e.key == key)
+        self.slots.contains_key(&key)
     }
 
     pub fn keys(&self) -> impl Iterator<Item = K> + '_ {
-        self.entities.iter().map(|e| e.key)
+        self.order.iter().map(|&i| self.nodes[i as usize].key)
     }
 
     pub fn total_weight(&self) -> u128 {
@@ -125,13 +157,167 @@ impl<K: Copy + Eq> Eevdf<K> {
         self.get(key).weight
     }
 
-    fn index(&self, key: K) -> usize {
-        self.entities.iter().position(|e| e.key == key).expect("eevdf: entity is not queued")
+    fn index(&self, key: K) -> u32 {
+        *self.slots.get(&key).expect("eevdf: entity is not queued")
     }
 
     fn get(&self, key: K) -> &Entity<K> {
-        &self.entities[self.index(key)]
+        &self.nodes[self.index(key) as usize]
     }
+
+    fn node(&self, i: u32) -> &Entity<K> {
+        &self.nodes[i as usize]
+    }
+
+    fn node_mut(&mut self, i: u32) -> &mut Entity<K> {
+        &mut self.nodes[i as usize]
+    }
+
+    /// Tree order: deadline, then issue order.
+    fn order_of(&self, i: u32) -> (i128, u64) {
+        let e = self.node(i);
+        (e.vd, e.seq)
+    }
+
+    fn eligible(&self, v: i128) -> bool {
+        mul(self.total, v - self.base) <= self.sum
+    }
+
+    // ---- The tree ------------------------------------------------------------
+
+    fn height(&self, i: u32) -> u8 {
+        if i == NIL { 0 } else { self.node(i).height }
+    }
+
+    fn update(&mut self, i: u32) {
+        let (l, r) = (self.node(i).left, self.node(i).right);
+        let mut min_v = self.node(i).v;
+        if l != NIL {
+            min_v = min_v.min(self.node(l).min_v);
+        }
+        if r != NIL {
+            min_v = min_v.min(self.node(r).min_v);
+        }
+        let height = 1 + self.height(l).max(self.height(r));
+        let e = self.node_mut(i);
+        e.min_v = min_v;
+        e.height = height;
+    }
+
+    fn rotate_right(&mut self, i: u32) -> u32 {
+        let l = self.node(i).left;
+        self.node_mut(i).left = self.node(l).right;
+        self.node_mut(l).right = i;
+        self.update(i);
+        self.update(l);
+        l
+    }
+
+    fn rotate_left(&mut self, i: u32) -> u32 {
+        let r = self.node(i).right;
+        self.node_mut(i).right = self.node(r).left;
+        self.node_mut(r).left = i;
+        self.update(i);
+        self.update(r);
+        r
+    }
+
+    fn balance(&mut self, i: u32) -> u32 {
+        self.update(i);
+        let (l, r) = (self.node(i).left, self.node(i).right);
+        let skew = i16::from(self.height(l)) - i16::from(self.height(r));
+        if skew > 1 {
+            if self.height(self.node(l).left) < self.height(self.node(l).right) {
+                let l = self.rotate_left(l);
+                self.node_mut(i).left = l;
+            }
+            return self.rotate_right(i);
+        }
+        if skew < -1 {
+            if self.height(self.node(r).right) < self.height(self.node(r).left) {
+                let r = self.rotate_right(r);
+                self.node_mut(i).right = r;
+            }
+            return self.rotate_left(i);
+        }
+        i
+    }
+
+    /// Insert the detached node `n` under `t`; answers the subtree's new root.
+    fn insert(&mut self, t: u32, n: u32) -> u32 {
+        if t == NIL {
+            let e = self.node_mut(n);
+            (e.left, e.right, e.height, e.min_v) = (NIL, NIL, 1, e.v);
+            return n;
+        }
+        if self.order_of(n) < self.order_of(t) {
+            let l = self.insert(self.node(t).left, n);
+            self.node_mut(t).left = l;
+        } else {
+            let r = self.insert(self.node(t).right, n);
+            self.node_mut(t).right = r;
+        }
+        self.balance(t)
+    }
+
+    /// Detach the node at tree order `at` from under `t`.
+    fn remove(&mut self, t: u32, at: (i128, u64)) -> u32 {
+        assert!(t != NIL, "eevdf: a queued entity is missing from the tree");
+        let here = self.order_of(t);
+        if at < here {
+            let l = self.remove(self.node(t).left, at);
+            self.node_mut(t).left = l;
+        } else if at > here {
+            let r = self.remove(self.node(t).right, at);
+            self.node_mut(t).right = r;
+        } else {
+            let (l, r) = (self.node(t).left, self.node(t).right);
+            if l == NIL {
+                return r;
+            }
+            if r == NIL {
+                return l;
+            }
+            let (next, rest) = self.remove_first(r);
+            let e = self.node_mut(next);
+            (e.left, e.right) = (l, rest);
+            return self.balance(next);
+        }
+        self.balance(t)
+    }
+
+    /// Detach the first node under `t`: answers it and the subtree's new root.
+    fn remove_first(&mut self, t: u32) -> (u32, u32) {
+        let l = self.node(t).left;
+        if l == NIL {
+            return (t, self.node(t).right);
+        }
+        let (first, l) = self.remove_first(l);
+        self.node_mut(t).left = l;
+        (first, self.balance(t))
+    }
+
+    /// Recompute the least `v` on the path to the node at `at`, whose `v`
+    /// changed and whose place did not.
+    fn refresh(&mut self, t: u32, at: (i128, u64)) {
+        let here = self.order_of(t);
+        if at < here {
+            self.refresh(self.node(t).left, at);
+        } else if at > here {
+            self.refresh(self.node(t).right, at);
+        }
+        self.update(t);
+    }
+
+    /// Give node `i` a fresh request, moving it to its new place in the tree.
+    fn reissue(&mut self, i: u32, request: i128) {
+        let at = self.order_of(i);
+        self.root = self.remove(self.root, at);
+        self.issue(i, request);
+        self.root = self.insert(self.root, i);
+    }
+
+    // ---- The queue -----------------------------------------------------------
 
     /// Move `base` to `⌊V⌋` so the sums stay small.
     fn rebase(&mut self) {
@@ -142,11 +328,13 @@ impl<K: Copy + Eq> Eevdf<K> {
         }
     }
 
-    fn issue(&mut self, i: usize, request: i128) {
+    /// Set a detached node's request.
+    fn issue(&mut self, i: u32, request: i128) {
         self.seq += 1;
-        let e = &mut self.entities[i];
+        let seq = self.seq;
+        let e = self.node_mut(i);
         e.vd = add(e.v, request.div_euclid(e.weight as i128).max(1));
-        e.seq = self.seq;
+        e.seq = seq;
     }
 
     /// Enter with `lag` and a fresh request of `slice` ns. Returns the lag the
@@ -169,9 +357,34 @@ impl<K: Copy + Eq> Eevdf<K> {
             let num = mul(w, self.sum - l) - mul(l, self.total);
             num.div_euclid(mul(self.total, w))
         };
-        self.entities.push(Entity { key, weight, v: add(self.base, v_rel), rem: 0, vd: 0, slice, seq: 0 });
-        let i = self.entities.len() - 1;
+        let entity = Entity {
+            key,
+            weight,
+            v: add(self.base, v_rel),
+            rem: 0,
+            vd: 0,
+            slice,
+            seq: 0,
+            left: NIL,
+            right: NIL,
+            height: 1,
+            min_v: 0,
+            pos: self.order.len() as u32,
+        };
+        let i = match self.free.pop() {
+            Some(i) => {
+                self.nodes[i as usize] = entity;
+                i
+            }
+            None => {
+                self.nodes.push(entity);
+                (self.nodes.len() - 1) as u32
+            }
+        };
+        self.slots.insert(key, i);
+        self.order.push(i);
         self.issue(i, request);
+        self.root = self.insert(self.root, i);
         self.sum = add(self.sum, mul(w, v_rel));
         self.total += w;
         self.lag(key)
@@ -181,15 +394,24 @@ impl<K: Copy + Eq> Eevdf<K> {
     pub fn leave(&mut self, key: K) -> Left {
         self.rebase();
         let lag = self.lag(key);
-        let i = self.index(key);
-        let e = self.entities.swap_remove(i);
+        let i = self.slots.remove(&key).expect("eevdf: entity is not queued");
+        let at = self.order_of(i);
+        self.root = self.remove(self.root, at);
+        let pos = self.node(i).pos as usize;
+        self.order.swap_remove(pos);
+        if let Some(&moved) = self.order.get(pos) {
+            self.node_mut(moved).pos = pos as u32;
+        }
+        self.free.push(i);
+        let e = self.node(i);
         let w = e.weight as i128;
-        self.sum -= mul(w, e.v - self.base);
+        let (v, vd) = (e.v, e.vd);
+        self.sum -= mul(w, v - self.base);
         self.total -= w;
         if self.total == 0 {
             self.sum = 0;
         }
-        Left { lag, request_left: mul(e.vd - e.v, w) }
+        Left { lag, request_left: mul(vd - v, w) }
     }
 
     /// Enter carrying what [`Self::leave`] returned elsewhere: the lag and the
@@ -214,28 +436,38 @@ impl<K: Copy + Eq> Eevdf<K> {
     /// once by the next, whose deadline counts from where service now stands.
     pub fn charge(&mut self, key: K, ns: u64) {
         let i = self.index(key);
-        let e = &mut self.entities[i];
+        let e = self.node_mut(i);
         let total = fine(ns) + e.rem as i128;
         let w = e.weight as i128;
         let dv = total / w;
         e.rem = (total % w) as u64;
         e.v = add(e.v, dv);
+        let (v, vd, slice) = (e.v, e.vd, e.slice);
         self.sum = add(self.sum, mul(dv, w));
-        if e.v >= e.vd {
-            let slice = e.slice;
-            self.issue(i, fine(slice));
+        if v >= vd {
+            self.reissue(i, fine(slice));
+        } else {
+            self.refresh(self.root, self.order_of(i));
         }
     }
 
     /// The eligible entity with the earliest deadline.
     pub fn pick(&self) -> Option<K> {
-        let best = self
-            .entities
-            .iter()
-            .filter(|e| mul(self.total, e.v - self.base) <= self.sum)
-            .min_by_key(|e| (e.vd, e.seq));
-        assert!(best.is_some() || self.is_empty(), "eevdf: a non-empty queue with nothing eligible");
-        best.map(|e| e.key)
+        let mut t = self.root;
+        while t != NIL {
+            let e = self.node(t);
+            if e.left != NIL && self.eligible(self.node(e.left).min_v) {
+                t = e.left;
+            } else if self.eligible(e.v) {
+                return Some(e.key);
+            } else if e.right != NIL && self.eligible(self.node(e.right).min_v) {
+                t = e.right;
+            } else {
+                break;
+            }
+        }
+        assert!(self.is_empty(), "eevdf: a non-empty queue with nothing eligible");
+        None
     }
 
     /// Service, in whole ns of `running` being served, until a queued entity
@@ -243,15 +475,26 @@ impl<K: Copy + Eq> Eevdf<K> {
     /// pick: `V` advances by `1 / total` per unit of service, and an entity
     /// with lag `l < 0` becomes eligible once it has advanced `−l / w`.
     pub fn overtaken_in(&self, running: K) -> Option<u64> {
-        let r = self.get(running);
-        self.entities
-            .iter()
-            .filter(|e| (e.vd, e.seq) < (r.vd, r.seq))
-            .map(|e| {
-                let behind = mul(self.total, e.v - self.base) - self.sum;
-                ((behind.max(0) + (1 << VSHIFT) - 1) >> VSHIFT) as u64
-            })
-            .min()
+        let before = self.order_of(self.index(running));
+        let mut least: Option<i128> = None;
+        let mut t = self.root;
+        while t != NIL {
+            let e = self.node(t);
+            if self.order_of(t) < before {
+                let here = match e.left {
+                    NIL => e.v,
+                    l => e.v.min(self.node(l).min_v),
+                };
+                least = Some(least.map_or(here, |m| m.min(here)));
+                t = e.right;
+            } else {
+                t = e.left;
+            }
+        }
+        least.map(|v| {
+            let behind = mul(self.total, v - self.base) - self.sum;
+            ((behind.max(0) + (1 << VSHIFT) - 1) >> VSHIFT) as u64
+        })
     }
 
     /// Service, in whole ns rounded up, until `key`'s current request is done.
@@ -260,6 +503,14 @@ impl<K: Copy + Eq> Eevdf<K> {
         let left = mul(e.vd - e.v, e.weight as i128) - e.rem as i128;
         let ns = (left + (1 << VSHIFT) - 1) >> VSHIFT;
         ns.max(1) as u64
+    }
+
+    /// End `key`'s current request where its service stands, and issue the
+    /// next: what a voluntary yield gives up.
+    pub fn end_request(&mut self, key: K) {
+        let i = self.index(key);
+        let slice = self.node(i).slice;
+        self.reissue(i, fine(slice));
     }
 
     /// Change weight, keeping lag and the service left in the current request.
@@ -276,11 +527,11 @@ impl<K: Copy + Eq> Eevdf<K> {
     /// new size if that ends sooner.
     pub fn set_slice(&mut self, key: K, slice: u64) {
         let i = self.index(key);
-        let e = &mut self.entities[i];
+        let e = self.node_mut(i);
         e.slice = slice;
         let request = mul(e.vd - e.v, e.weight as i128);
         if fine(slice) < request {
-            self.issue(i, fine(slice));
+            self.reissue(i, fine(slice));
         }
     }
 
@@ -291,11 +542,11 @@ impl<K: Copy + Eq> Eevdf<K> {
     /// `Σ lag`, which is zero up to the mean's rounding: the conservation the
     /// whole construction rests on, for tests.
     pub fn lag_sum(&self) -> Lag {
-        Lag(self.entities.iter().map(|e| self.lag(e.key).0).sum())
+        Lag(self.keys().map(|k| self.lag(k).0).sum())
     }
 }
 
-impl<K: Copy + Eq> Default for Eevdf<K> {
+impl<K: Copy + Ord> Default for Eevdf<K> {
     fn default() -> Self {
         Self::new()
     }
@@ -476,6 +727,96 @@ mod tests {
         assert!((q.lag(0).0 - lag.0).abs() <= 8 * UNIT as i128);
         assert!(q.request_left_ns(0).abs_diff(left) <= 1);
         assert_eq!(q.weight(0), 7 * UNIT);
+    }
+
+    /// The tree's shape and augmentation, and its answers against a scan of
+    /// every entity, after each of a long random run of joins, leaves,
+    /// charges, reweights and slice changes.
+    #[test]
+    fn the_tree_answers_as_a_scan_of_every_entity_does() {
+        fn scan_pick(q: &Eevdf<u32>) -> Option<u32> {
+            q.order
+                .iter()
+                .map(|&i| q.node(i))
+                .filter(|e| q.eligible(e.v))
+                .min_by_key(|e| (e.vd, e.seq))
+                .map(|e| e.key)
+        }
+        fn scan_overtaken(q: &Eevdf<u32>, running: u32) -> Option<u64> {
+            let r = q.get(running);
+            q.order
+                .iter()
+                .map(|&i| q.node(i))
+                .filter(|e| (e.vd, e.seq) < (r.vd, r.seq))
+                .map(|e| {
+                    let behind = mul(q.total, e.v - q.base) - q.sum;
+                    ((behind.max(0) + (1 << VSHIFT) - 1) >> VSHIFT) as u64
+                })
+                .min()
+        }
+        /// Height, least `v` and the ordered keys of the subtree at `t`.
+        fn walk(q: &Eevdf<u32>, t: u32, out: &mut Vec<(i128, u64)>) -> (u8, i128) {
+            if t == NIL {
+                return (0, i128::MAX);
+            }
+            let e = q.node(t);
+            let (hl, ml) = walk(q, e.left, out);
+            out.push((e.vd, e.seq));
+            let (hr, mr) = walk(q, e.right, out);
+            assert!(hl.abs_diff(hr) <= 1, "an unbalanced node");
+            assert_eq!(e.height, 1 + hl.max(hr));
+            assert_eq!(e.min_v, e.v.min(ml).min(mr));
+            (e.height, e.min_v)
+        }
+        let mut rng = Lcg(23);
+        let mut q: Eevdf<u32> = Eevdf::new();
+        let mut running: Option<u32> = None;
+        for step in 0..20_000 {
+            match rng.below(10) {
+                0 | 1 if q.len() < 64 => {
+                    let k = (0..).find(|k| !q.contains(*k)).unwrap();
+                    let lag = rng.below(8 * MS) as i64 - 4 * MS as i64;
+                    q.join(k, 1 + rng.below(1 << 24), MS / 4 + rng.below(4 * MS), Lag::from_ns(lag));
+                }
+                2 if !q.is_empty() => {
+                    let k = q.keys().nth(rng.below(q.len() as u64) as usize).unwrap();
+                    let left = q.leave(k);
+                    if running == Some(k) {
+                        running = None;
+                    }
+                    if rng.below(2) == 0 {
+                        q.rejoin(k, 1 + rng.below(1 << 24), MS / 4 + rng.below(4 * MS), left);
+                    }
+                }
+                3 if !q.is_empty() => {
+                    let k = q.keys().nth(rng.below(q.len() as u64) as usize).unwrap();
+                    q.reweight(k, 1 + rng.below(1 << 24));
+                }
+                4 if !q.is_empty() => {
+                    let k = q.keys().nth(rng.below(q.len() as u64) as usize).unwrap();
+                    q.set_slice(k, MS / 4 + rng.below(4 * MS));
+                }
+                _ => {
+                    if running.is_none() {
+                        running = q.pick();
+                    }
+                    if let Some(k) = running {
+                        q.charge(k, 1 + rng.below(q.request_left_ns(k)));
+                        if rng.below(3) == 0 {
+                            running = None;
+                        }
+                    }
+                }
+            }
+            let mut ordered = Vec::new();
+            walk(&q, q.root, &mut ordered);
+            assert!(ordered.windows(2).all(|w| w[0] < w[1]), "step {step}: out of deadline order");
+            assert_eq!(ordered.len(), q.len());
+            assert_eq!(q.pick(), scan_pick(&q), "step {step}: pick");
+            if let Some(k) = running {
+                assert_eq!(q.overtaken_in(k), scan_overtaken(&q, k), "step {step}: overtaken_in");
+            }
+        }
     }
 
     #[test]
