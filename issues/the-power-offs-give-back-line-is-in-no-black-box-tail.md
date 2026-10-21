@@ -29,9 +29,8 @@ tail is read after a power-off only where the write did not take: `S5 did not
 take`, a panic and then a reset.
 
 Not moved in #767, which put the settle above the console's drain: the seal
-is `quiesce`'s, shared by the reboot, which settles nothing; it stands above
-`xhci::seal_shut`, which must be the last thing `quiesce` does, and the
-settle needs the `Stopping` and runs below it. Sealing after the settle, or
+is `quiesce`'s, shared by the reboot, which settles nothing, and the settle
+needs the `Stopping` `quiesce` returns and runs below it. Sealing after the settle, or
 settling above the last word, is a second change of the stop's order.
 
 Owner: the `acpi` claim's author (#749).

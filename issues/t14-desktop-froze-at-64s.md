@@ -57,7 +57,7 @@ ruled it out.
 
 **What the next boot should capture.** Nothing new, which is the point: the
 compositor now names every client it drops and why. A recurrence with no
-`compositor: dropping pid` line and no telemetry is a mechanism none of the
+`compositor: dropping client` line and no telemetry is a mechanism none of the
 four closed ones covers, and that is itself the finding.
 
 **Nothing replaces the 2 s report as a heartbeat.** It left the log (#891),

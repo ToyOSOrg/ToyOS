@@ -21,8 +21,8 @@ rewrite of a library on `/tmp` carries the identity it had.
 
 *Exit condition:* an identity that does not rest on a clock — a content hash, a
 per-file generation the mount bumps on every write, or a `FileId` plus a write
-counter — with a test that rewrites a library at the same size on the
-`rtc-dead` machine and loads the second image.
+counter — with a test that rewrites a library at the same size with every
+write stamped 0 and loads the second image.
 
 ## The budget is a machine-wide, boot-permanent denial
 
@@ -40,7 +40,7 @@ track gives a mapped image a rule that lets one be taken back.
 
 ## The key is the caller's spelling, so an alias walks past the refusal
 
-`Vfs::resolve_absolute` (`kernel/src/vfs.rs:237`) normalises `.` and `..` and
+`Vfs::resolve_absolute` (`kernel/src/vfs.rs`) normalises `.` and `..` and
 resolves no symlink, so one file under two spellings is two entries and two
 physical images. The base had the same key, so this is not a regression — but
 the refusal is now **per spelling**, which is worse than the key alone: a

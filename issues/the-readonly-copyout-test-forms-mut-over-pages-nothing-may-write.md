@@ -13,7 +13,6 @@ wrappers take `&mut [u8]` and `&mut ProcessStats` and no wrapper takes a raw
 address. The `&mut` covers a read-only anonymous map, the binary's own `.text`
 and the clock page, and is never written through, so the test rests on the
 compiler inventing no store through it, not on a language guarantee.
-`tls_dtv_race` forms the same reference.
 
 Owner: `toyos-abi`'s syscall wrappers, which would need a raw-address entry
 for a caller that names memory it may not hold a `&mut` to; that is an ABI

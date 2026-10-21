@@ -34,4 +34,4 @@ bus mastering with receive still enabled. It stayed that way to the reset. The
 swap's fix (the kernel resets a released function, netd stops the part before
 it starts it mastering) removes that state; the next swap run says whether the hang
 goes with it. If it does not, the reboot path is owed a quiesce of every
-function a process holds, as it already does for its own xHCI controllers.
+function a process holds.

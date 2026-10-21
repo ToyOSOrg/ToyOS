@@ -6,7 +6,7 @@ opened: 2026-10-08
 
 # The socket2 fork's SO_BROADCAST setter does nothing
 
-Read from the fork at the commit the lock names (`1d90250`), not run. On
+Read from the fork at the commit the root `Cargo.lock` names (`2aa6b00`), not run. On
 ToyOS, socket2's `setsockopt` (`src/sys/toyos.rs`) matches
 `(SOL_SOCKET, SO_BROADCAST)` to an empty arm and answers `Ok`, and its
 `getsockopt` answers 0 for it: a setter that says yes to a permission it hands

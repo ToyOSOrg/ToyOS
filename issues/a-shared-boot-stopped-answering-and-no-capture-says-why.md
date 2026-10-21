@@ -46,8 +46,8 @@ shared boot waiting for its next command is parked at almost every sample.
 `SYS_THREAD_JOIN` whose wake was lost: it parks on the target thread's own watch
 at `Deadline::never()` (`kernel/src/syscall/proc.rs:171`), and nothing else
 would leave a whole boot idle straight after a sibling thread's clean exit.
-`issues/thread-exits-completion-post-is-the-second-one.md` owns that
-path's two posts.
+That wake is the one post `process::thread_exit` makes on the thread's own
+watch before its exit pass.
 
 **Exit condition.** A capture taken from a boot that has actually stopped, which
 names the first waiter and the subject it waits on — that boot's trace diary
