@@ -208,11 +208,11 @@ const SHAPES: &[Shape] = &[
         ],
         after: &["$ADOPTED", "-D", "warnings"],
     },
-    // The transport's loom models: the workspace shapes lint `toyos`'s library
-    // only as their members' dependency, and its own test targets are not
-    // clippy-clean on a host but this one.
+    // `toyos`'s tests, its transport's loom models among them: the workspace
+    // shapes exclude it and lint its library only as their members'
+    // dependency.
     Shape {
-        before: &["-p", "toyos", "--test", "transport_loom"],
+        before: &["-p", "toyos", "--all-targets"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     // Its own target directory: cargo keeps one check of a unit, so a unit

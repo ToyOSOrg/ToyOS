@@ -470,9 +470,9 @@ mod tests {
         use std::sync::{Arc, Mutex};
         let held = Arc::new(Held::new(Stream::Err));
         let got = Arc::new(Mutex::new(Vec::new()));
-        let writers: Vec<_> = [b'a', b'b']
-            .into_iter()
-            .map(|tag| {
+        let writers: Vec<_> = b"ab"
+            .iter()
+            .map(|&tag| {
                 let (held, got) = (Arc::clone(&held), Arc::clone(&got));
                 std::thread::spawn(move || {
                     for _ in 0..200 {
