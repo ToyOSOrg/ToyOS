@@ -763,10 +763,6 @@ pub const FLASHABLE: &[&str] = &[
     // writes only the units' registers, which a reset returns to firmware, and
     // tables in memory this boot owns.
     "iommu-firmware-left",
-    // No interrupt remapping: the DMAR's flags read with INTR_REMAP clear, or
-    // every AMD-Vi unit's interrupt halves left invalid. It writes no
-    // register a reset does not return to firmware.
-    "iommu-no-remap",
     // Every CPU is handed the loader's Intel update with its header's revision
     // raised by one and its checksum sealed again. Its payload is Intel's own,
     // the revision the CPU already runs, so the CPU refuses it or runs what it

@@ -129,8 +129,7 @@ const RUST_SKIP: &[&str] = &[
     // `isa_claim_refused_on_a_kernel_port` metal row runs it.
     "isa_claim_refused",
     // It claims the T14's I219, which no guest has: the
-    // `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
-    // metal rows run it.
+    // `claim_reuses_its_remapping_entry` metal row runs it.
     "pci_reclaim",
     // It measures the T14's I219, which no guest has: the
     // `i219_messages_on_its_msi_vector` metal row runs it.
@@ -222,13 +221,11 @@ const RUST_SKIP: &[&str] = &[
     // machine with a spare has: `usbd_drives_the_spare` and the
     // `usbd_drives_the_type_c_controller` metal row run it.
     "usbd_spare",
-    // `usbd_spare`'s fault, foreign-vector and refusal arms, one binary each
-    // because a metal job takes no argument: the AMD bench's
-    // `amdvi_usbd_drives_its_own_entry` and
-    // `amdvi_claim_refused_without_remapping` rows run them.
+    // `usbd_spare`'s fault and foreign-vector arms, one binary each because a
+    // metal job takes no argument: the AMD bench's
+    // `amdvi_usbd_drives_its_own_entry` row runs them.
     "usbd_spare_fault",
     "usbd_spare_vector",
-    "usbd_spare_unhanded",
     // The same controller, handed to a holder that is killed and claimed
     // again at once, in the same boots as `usbd_spare`.
     "end_returns_claims",
@@ -527,8 +524,8 @@ const MACHINE_TESTS: &[&str] = &[
     // filter.
     "usbd_refused_without_smi_filter",
     // The same machine with its AMD unit remapping nothing: the claim is
-    // refused by that reason. The AMD bench's arm is
-    // `amdvi_claim_refused_without_remapping`.
+    // refused by that reason. No metal row asks it: a bench without remapping
+    // drives no USB, so no `/log` reaches its stick to judge.
     "usbd_refused_without_amdvi_remapping",
     // Every vector register a thread holds, across switches to threads holding
     // others, against a scheduler, which no host build has. The shared boot's
@@ -1179,38 +1176,6 @@ const METAL: &[(&str, metal::Metal)] = &[
                 }
                 amdvi_usbd(&b[0].kernel(), &b[0].log(), &b[0].after_the_reset()?)
             },
-        },
-    ),
-    (
-        // The AMD bench with its unit remapping nothing (`iommu-no-remap`):
-        // the claim on `03:00.4` is refused before anything on it changes.
-        "amdvi_claim_refused_without_remapping",
-        metal::Metal {
-            arms: &[metal::once(
-                "iommu-no-remap",
-                "tests/images/testcases.toml",
-                &["iommu-no-remap"],
-                &["test_rs_usbd_spare_unhanded"],
-            )],
-            judge: |b| {
-                let kernel = b[0].kernel();
-                kernel.must_say("no message is remapped")?;
-                claims::refused_at(&kernel, AMD_XHCI_SPARE, claims::NOT_REMAPPED)
-            },
-        },
-    ),
-    (
-        // A machine whose units do not remap: the claim is refused before
-        // anything on the function changes, and the boot goes on.
-        "claim_refused_without_remapping",
-        metal::Metal {
-            arms: &[metal::once(
-                "iommu-no-remap",
-                "tests/images/testcases.toml",
-                &["iommu-no-remap"],
-                &[claims::RECLAIM],
-            )],
-            judge: |b| claims::refused_unremapped(&b[0].kernel()),
         },
     ),
     (

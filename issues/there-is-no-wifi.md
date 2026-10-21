@@ -143,8 +143,7 @@ controller through its table in BAR 0.
 - **Exit, owed on the benches:**
   - on the T14, `msix_table_read_in_place` reading the AX210's and the
     NVMe's armed MSI-X entries back through their holders' mappings at
-    BAR 0 + 0x2000, and `claim_reuses_its_remapping_entry` and
-    `claim_refused_without_remapping` unchanged;
+    BAR 0 + 0x2000, and `claim_reuses_its_remapping_entry` unchanged;
   - the T14's NVMe driven through that table: an Identify Controller admin
     command whose completion arrives through the in-place MSI-X entry, which
     touches none of the other system's data; no row does it yet;

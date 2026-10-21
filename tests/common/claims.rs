@@ -24,10 +24,6 @@ pub const NOT_REMAPPED: &str = "its interrupts would not be remapped on this mac
 /// The kernel's reason where the units remap and one filters no SMI.
 pub const SMI_UNFILTERED: &str = "an IOMMU unit on this machine filters no SMI";
 
-/// The kernel's line where firmware's DMAR flags leave interrupt remapping off,
-/// which `iommu-no-remap` stands in for: the premise of the refusal.
-const INTR_REMAP_CLEAR: &str = "leave INTR_REMAP clear, so firmware says this platform does not remap";
-
 fn records(log: &Serial) -> impl Iterator<Item = &str> {
     log.text().lines().filter_map(bootlog::message)
 }
@@ -160,17 +156,6 @@ pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
         return Err(format!("no domain was made on this boot:\n{}", log.text()));
     }
     eprintln!("  [claims] {domains} domain(s), none reaching a root-bridge window");
-    Ok(())
-}
-
-/// On a machine whose units do not remap, the I219's claim is refused by that
-/// reason before anything on the function is armed, and the boot completes.
-pub fn refused_unremapped(log: &Serial) -> Result<(), String> {
-    log.must_say(INTR_REMAP_CLEAR)?;
-    let at = function(log)?;
-    log.must_not_say(&format!("[{I219}] handed over"))?;
-    refused_at(log, &at, NOT_REMAPPED)?;
-    log.must_say(bootlog::COMPLETE)?;
     Ok(())
 }
 

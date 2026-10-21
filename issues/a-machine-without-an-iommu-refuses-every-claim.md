@@ -43,7 +43,11 @@ drives no USB either** since usbd took the xHCI (the small-kernel track's step
 volumes are absent like the NVMe disk's, and no USB keyboard or pointer
 reaches the owner of input; the arm asserts that refusal as well. A machine
 whose unit remaps no message, or filters no SMI, refuses the same claims for
-those reasons (QEMU's AMD unit is both, by profile).
+those reasons (QEMU's AMD unit is both, by profile). On a bench that is the
+stick too, so such a boot leaves no `/log` for a metal judge to read: the
+metal rows that staged it (`iommu-no-remap`) are deleted, and QEMU's
+`usbd_refused_without_amdvi_remapping` and `amdvi_firmware_left` hold the
+refusal.
 
 Exit, in both arms of `iommu_virtio_platform` (`tests/common/iommu.rs`):
 

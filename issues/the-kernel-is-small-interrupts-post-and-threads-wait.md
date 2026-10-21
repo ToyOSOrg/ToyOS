@@ -208,6 +208,11 @@ Beside that order, each waiting on something outside it:
        `the_stop_resets_every_connected_port_then_halts_resets_and_unpowers_the_controller`
        and the same row's judge of usbd's exit; the HID path's on a real xHC
        by `a_usb_key_reaches_the_console`.
+       A machine whose units cannot remap refuses every claim, usbd's
+       included, so it drives no USB and its stick receives no `/log`: the
+       metal rows that asked for that machine (`iommu-no-remap`) are deleted,
+       and the refusal is QEMU's to hold, by
+       `usbd_refused_without_amdvi_remapping` and `amdvi_firmware_left`.
        **Left**: the metal rows, which have not run: `usbd_serves_the_boot_stick`
        and #901 section 9's three that judge with a userland load,
        `stick_survives_a_reset_under_load` (a deadline reset under
