@@ -139,7 +139,9 @@ const MAX_SCRATCH: usize = PAGE / 8;
 /// without an interrupt, since the controller raises none for these bits
 /// (§5.4.1, §5.4.2). Policy.
 const REGISTER_NS: Nanos = 2_000_000_000;
-/// How long firmware is given to let go of the controller (§4.22.1). Policy.
+/// How long firmware is given to let go of the controller: the OS sets HC OS
+/// Owned and waits for HC BIOS Owned to clear (§4.22.1; USBLEGSUP, §7.1.1),
+/// a wait the specification does not bound. Policy.
 const HANDOFF_NS: Nanos = 1_000_000_000;
 /// How long a command may go unanswered before it is aborted, and an abort
 /// before the controller is called dead: "an upper limit of 5 seconds for any
@@ -170,6 +172,10 @@ pub enum Refusal {
     Addresses32,
     /// The grant is smaller than [`Reset::grant_bytes`].
     Grant(usize),
+    /// Firmware still held HC BIOS Owned after [`HANDOFF_NS`]: it may still be
+    /// running the controller and moving its own buffers, and no reset this
+    /// driver can issue is safe under that. The controller is left as found.
+    FirmwareKeepsIt(u32),
 }
 
 impl core::fmt::Display for Refusal {
@@ -181,6 +187,12 @@ impl core::fmt::Display for Refusal {
             Self::Scratchpad(n) => write!(f, "it asks for {n} scratchpad buffers, past the {MAX_SCRATCH} one page names"),
             Self::Addresses32 => write!(f, "it addresses only 32 bits (HCCPARAMS1.AC64 clear)"),
             Self::Grant(bytes) => write!(f, "a grant of {bytes} bytes is short of the layout"),
+            Self::FirmwareKeepsIt(legsup) => write!(
+                f,
+                "firmware still owns it after {} ms (USBLEGSUP {legsup:#010x}, HC BIOS Owned set), and it is not \
+                 reset under firmware that may be driving it",
+                HANDOFF_NS / 1_000_000
+            ),
         }
     }
 }
@@ -422,7 +434,7 @@ impl<R: Registers> Reset<R> {
             let at = usize::try_from(at).ok()?;
             (at % 4 == 0 && at + 4 <= regs.bytes()).then(|| regs.read32(at))
         };
-        take_from_firmware(&regs, &read, hccparams1 >> 16, host);
+        take_from_firmware(&regs, &read, hccparams1 >> 16, host)?;
         let protocols = read_protocols(&read, hccparams1 >> 16, max_ports, host);
 
         let usbcmd = regs.read32(op + OP_USBCMD);
@@ -880,15 +892,31 @@ impl<R: Registers, D: DmaBuffers> Drop for Op<'_, R, D> {
     }
 }
 
-/// §4.22.1: ask firmware for the controller, give it [`HANDOFF_NS`] to let
-/// go, and turn every SMI off whatever it answered — a controller is reset
-/// from under firmware rather than left to it, with the line naming which.
-fn take_from_firmware<R: Registers, C: Host>(regs: &R, read: &dyn Fn(u64) -> Option<u32>, xecp_dwords: u32, host: &C) {
+/// §4.22.1: ask firmware for the controller (HC OS Owned, USBLEGSUP §7.1.1)
+/// and give it [`HANDOFF_NS`] to clear HC BIOS Owned. Released or never
+/// claimed, its SMIs are turned off and the controller is the driver's;
+/// kept, it is refused by name and left as found: resetting a controller
+/// firmware may still be driving would cut its DMA mid-flight.
+fn take_from_firmware<R: Registers, C: Host>(
+    regs: &R,
+    read: &dyn Fn(u64) -> Option<u32>,
+    xecp_dwords: u32,
+    host: &C,
+) -> Result<(), Refusal> {
     let legsup = match xecp::find(read, xecp_dwords, xecp::CAP_ID_LEGACY) {
         Ok(Some(at)) if read(at + xecp::LEGCTLSTS).is_some() => at as usize,
-        Ok(Some(at)) => return host.say(format_args!("USB Legacy Support at {at:#x} runs past the register window — no handoff")),
-        Ok(None) => return host.say(format_args!("no USB Legacy Support capability, nothing to hand over")),
-        Err(why) => return host.say(format_args!("the extended capability list does not walk ({why:?}) — no handoff")),
+        Ok(Some(at)) => {
+            host.say(format_args!("USB Legacy Support at {at:#x} runs past the register window — no handoff"));
+            return Ok(());
+        }
+        Ok(None) => {
+            host.say(format_args!("no USB Legacy Support capability, nothing to hand over"));
+            return Ok(());
+        }
+        Err(why) => {
+            host.say(format_args!("the extended capability list does not walk ({why:?}) — no handoff"));
+            return Ok(());
+        }
     };
     let before = regs.read32(legsup);
     regs.write32(legsup, before | xecp::LEGSUP_OS_OWNED);
@@ -906,16 +934,14 @@ fn take_from_firmware<R: Registers, C: Host>(regs: &R, read: &dyn Fn(u64) -> Opt
         Handoff::Released => host.say(format_args!(
             "firmware released the controller in {took} us (USBLEGSUP {before:#010x} -> {now:#010x})"
         )),
-        Handoff::Kept => host.say(format_args!(
-            "firmware still owns the controller after {} ms (USBLEGSUP {before:#010x} -> {now:#010x}) — resetting it anyway",
-            HANDOFF_NS / 1_000_000
-        )),
+        Handoff::Kept => return Err(Refusal::FirmwareKeepsIt(now)),
     }
     let ctl_at = legsup + xecp::LEGCTLSTS as usize;
     let ctl = regs.read32(ctl_at);
     regs.write32(ctl_at, xecp::smis_off(ctl));
     let after = regs.read32(ctl_at);
     host.say(format_args!("USBLEGCTLSTS {ctl:#010x} -> {after:#010x} (SMI generation off)"));
+    Ok(())
 }
 
 /// What each port register speaks, from every Supported Protocol capability.

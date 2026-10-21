@@ -424,6 +424,37 @@ fn an_empty_bus_settles_when_its_attach_window_ends() {
     assert!(usb.settled());
 }
 
+/// Firmware that never clears HC BIOS Owned: the controller is refused by
+/// name after the handoff's bound and left as found, its SMIs and its
+/// run state untouched, rather than reset under firmware that may be
+/// driving it.
+#[test]
+fn a_controller_firmware_keeps_is_refused_and_left_as_found() {
+    struct Ticking(Cell<Nanos>, RefCell<Vec<String>>);
+    impl Host for &Ticking {
+        fn now(&self) -> Nanos {
+            self.0.set(self.0.get() + MS);
+            self.0.get()
+        }
+        fn say(&self, line: core::fmt::Arguments<'_>) {
+            self.1.borrow_mut().push(line.to_string());
+        }
+    }
+    let w = World::new(vec![(FakePort::empty(QUICK), None)], 1);
+    w.xhc().firmware_keeps = true;
+    // Running, as firmware left it.
+    w.xhc().usbcmd = 1;
+    let host = Ticking(Cell::new(0), RefCell::new(Vec::new()));
+    let commanded = w.xhc().usbcmd;
+    match Reset::new(w.regs.clone(), &&host) {
+        Err(hc::Refusal::FirmwareKeepsIt(legsup)) => assert_ne!(legsup & 1 << 16, 0),
+        Err(other) => panic!("refused for {other}"),
+        Ok(_) => panic!("a controller firmware keeps was taken"),
+    }
+    assert_eq!(w.xhc().usbcmd, commanded, "the controller was halted or reset under firmware");
+    assert!(!host.1.borrow().iter().any(|l| l.contains("SMI generation off")), "{:#?}", host.1.borrow());
+}
+
 /// The stick present at bring-up is read and offered: its table through the
 /// reader the caller gives, and the bus is settled only once it has been.
 #[test]

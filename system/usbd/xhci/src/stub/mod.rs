@@ -237,7 +237,7 @@ pub struct Xhc {
     pub ports: Vec<FakePort>,
     pub devices: Vec<Option<Box<dyn Function>>>,
     pub usb3: Vec<bool>,
-    usbcmd: u32,
+    pub usbcmd: u32,
     crcr: u64,
     dcbaap: u64,
     erstba: u64,
@@ -253,6 +253,8 @@ pub struct Xhc {
     pub now: Nanos,
     pub answers: Answers,
     legsup: u32,
+    /// Firmware holds HC BIOS Owned and never lets go of it (§7.1.1).
+    pub firmware_keeps: bool,
     legctl: u32,
     /// Every PORTSC write the driver made that broke an invariant.
     pub violations: Vec<(usize, invariants::Violation)>,
@@ -295,6 +297,7 @@ impl Xhc {
             now: 0,
             answers: Answers::Always,
             legsup: 1,
+            firmware_keeps: false,
             legctl: 0,
             violations: Vec::new(),
             commands: Vec::new(),
@@ -328,7 +331,9 @@ impl Xhc {
             }
             // Legacy Support, then a Supported Protocol capability for each
             // protocol some port speaks (§7.2), each four dwords on.
-            a if a == XECP => self.legsup & !(0xFF << 8) | (u32::from(usb2 > 0 || n > usb2) * 4) << 8,
+            a if a == XECP => {
+                (self.legsup | u32::from(self.firmware_keeps) << 16) & !(0xFF << 8) | (u32::from(usb2 > 0 || n > usb2) * 4) << 8
+            }
             a if a == XECP + 4 => self.legctl,
             a if a == XECP + 0x10 && usb2 > 0 => 2 | (u32::from(n > usb2) * 4) << 8 | (2 << 24),
             a if a == XECP + 0x18 && usb2 > 0 => 1 | (usb2 << 8),
@@ -428,7 +433,7 @@ impl Xhc {
                     }
                 }
             }
-            a if a == XECP => self.legsup = v & !(1 << 16),
+            a if a == XECP => self.legsup = v & !(1 << 16) | u32::from(self.firmware_keeps) << 16,
             a if a == XECP + 4 => self.legctl = v,
             _ => {}
         }
