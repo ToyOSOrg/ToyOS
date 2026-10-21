@@ -474,9 +474,9 @@ A flaky test is deleted at once. Each commit below takes one out:
   and `log-close-cancels-any-syscap`;
 - `metal_sim_pointer_churn` — `525e59ad1`;
 - `blocked_dump` — `0a7fc5f70`, red after its retirement here on the
-  sightings `issues/log-reserve-window-negative-times-out-beside-other-guests.md`
-  and `issues/process-stats-exits-101-beside-other-guests.md` record; nothing
-  restores it, since the kernel no longer has the Ctrl+Alt+D report it drove;
+  sighting `issues/log-reserve-window-negative-times-out-beside-other-guests.md`
+  records and one beside `process_stats`; nothing restores it, since the kernel
+  no longer has the Ctrl+Alt+D report it drove;
 - `metal_sim_input` — `415d9a102`;
 - `xhci_full_speed_device` — `5e4223525`, with `Profile::MetalFullSpeed`.
 

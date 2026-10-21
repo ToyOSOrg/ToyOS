@@ -7,7 +7,7 @@ opened: 2026-08-01
 # `probe()` mounts on a checksum, and a stamp over a used volume does not reformat
 
 Two things, from reading DATA's probe (`DataVolume::probe` in
-`userland/fsd/src/data.rs`, the kernel's `bcachefs_adapter::probe` before it)
+`system/fileserver/src/data.rs`, the kernel's `bcachefs_adapter::probe` before it)
 against the crate:
 
 **The threshold does not match the consequence.** `Probed::Mounted` is a
@@ -26,16 +26,15 @@ Recommendation, for the owner to decide:
 - **Done:** `Superblock::check` takes `block_count != device_blocks`, so a
   volume image copied onto a different disk stops mounting — the same property
   the designation stamp's block count gives a format. It is not authentication:
-  an attacker who knows the disk size writes the right number. `volume_from_another_disk`
-  is the guest arm and `a_volume_copied_onto_a_larger_device_does_not_mount` the
-  host one.
+  an attacker who knows the disk size writes the right number.
+  `a_volume_copied_onto_a_larger_device_does_not_mount` holds it.
 - **Done, 2026-08-23:** a file's extents are range-checked against the volume
   in `decode_leaf_value`, so "mounting a hostile volume is merely rude" no
   longer has an unchecked extent reaching a block read — or a bitmap write —
   behind it. The residual bound this left — `read_link` sizing one kernel
   allocation from the volume rather than the smaller heap ceiling — was closed
-  by giving `Mounted::read_link` a `max_len` its caller passes (fsd's
-  `MAX_LINK`), refused as `FsError::TargetTooLong` before the allocation.
+  by giving `Mounted::read_link` a `max_len` its caller passes (the file
+  server's), refused as `FsError::TargetTooLong` before the allocation.
 - **The real fix, if the threat model wants one:** read-write requires
   something the attacker cannot compute — a keyed MAC, or a designation-like
   stamp — and everything else mounts read-only. ToyOS has no key store and no
@@ -58,8 +57,6 @@ read-write means written on sight.
 already held a ToyOS volume does **not** cause a reformat. `designate_for_format`
 writes block 0 only, `Superblock::read` falls back to the backup superblock at
 the last block when block 0 does not parse, and a stamp does not parse — so
-`mount()` succeeds from the backup and `probe()` returns `Ours`, mounting the old
+`mount()` succeeds from the backup and `probe()` answers `Mounted`, mounting the old
 volume. Harmless for the harness, which stamps freshly created sparse files, but
 it means "re-stamp the disk to reformat `/home`" is not a workflow that works.
-`probe`'s doc comment claims the decision comes "from one read of block 0"; it
-comes from two, and the second one wins.

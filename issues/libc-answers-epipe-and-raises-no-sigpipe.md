@@ -10,9 +10,9 @@ POSIX's `write` to a pipe or socket whose reader is gone, and its `send` on a
 stream that can send no more, fail `EPIPE` and also send the calling thread
 `SIGPIPE`, whose default action ends the process; `send` raises none only with
 `MSG_NOSIGNAL`. ToyOS's libc fails `EPIPE` and raises nothing
-(`sdk/libc/src/posix_io.rs`, `SyscallError::Gone`): it has no signals
-(`signal`, `sigaction` and `raise` in `sdk/libc/src/misc.rs` do nothing),
-and none of those
+(`sdk/libc/src/errcode.rs`, `SyscallError::Gone`): it raises no signal but
+`SIGALRM` (`signal` and `sigaction` in `sdk/libc/src/misc.rs` act only on that
+one, and `raise` does nothing), and none of those
 `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`
 has it imitate is `SIGPIPE`. So every write behaves as if `MSG_NOSIGNAL` were
 given, and a C program that relies on the default action to stop writing into a
@@ -24,7 +24,7 @@ others, is a decision of libc's design that nobody has made.
 
 Read from the code, not measured.
 
-**Exit condition**: the decision is made and recorded at `posix_io.rs`, and a
+**Exit condition**: the decision is made and recorded at `errcode.rs`, and a
 guest C case asserts it on both paths, a `write` into a pipe whose reader is
 gone and a `send` after `shutdown(SHUT_WR)`: with `SIGPIPE` raised, the default
 action ends the process, an ignored one leaves `EPIPE` and `MSG_NOSIGNAL`

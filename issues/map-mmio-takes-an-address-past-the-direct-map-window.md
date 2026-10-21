@@ -10,9 +10,12 @@ opened: 2026-09-28
 `PHYS_OFFSET + phys` and bounds nothing. The direct map's window is
 `toyos_bootmap::DIRECT_MAP_WINDOW`, `0x800000000000` (128 TiB): root slots
 256 to 511. A firmware-named register base at or past it overflows that sum.
-`vtd::window` (`kernel/src/arch/x86_64/vtd/mod.rs`) bounds a DMAR register base
-by its own `MAX_PHYS`, `1 << 52`, so a base between the two reaches it; a BAR
-in a firmware window past 128 TiB reaches it through `pcidev::probe_dword`.
+`iommu_unit::register_window` (`kernel/src/arch/x86_64/iommu_unit.rs`) bounds a
+DMAR or IVRS register base by its own `MAX_PHYS`, `1 << 52`, so a base between
+the two reaches it, and nothing read here holds a BAR a kernel driver maps
+(`drivers/virtio.rs`, the MSI-X table in `drivers/pci.rs`) below the window. ECAM windows are already
+checked against `DIRECT_MAP_WINDOW` before they are mapped
+(`kernel/src/drivers/acpi.rs`, `ecam_windows`).
 
 Nothing has been observed to reach it: every firmware this tree has booted
 puts its registers far below.

@@ -7,7 +7,8 @@ opened: 2026-09-29
 # Kernel text is writable, and every kernel page is executable
 
 The kernel maps the whole direct map `PRESENT | WRITE` with no `NX`
-(`kernel/src/arch/x86_64/paging.rs:946-949`), and the kernel image runs from
+(`kernel_leaf`, which `paging::init` maps every 2 MiB with,
+`kernel/src/arch/x86_64/paging.rs`), and the kernel image runs from
 it, at `PHYS_OFFSET` plus its physical address. Its text can be overwritten,
 and its heap, its stacks and every user page's direct-map alias can be
 executed at CPL 0. Linux at `Ubuntu-6.8.0-142.142`, under the T14's

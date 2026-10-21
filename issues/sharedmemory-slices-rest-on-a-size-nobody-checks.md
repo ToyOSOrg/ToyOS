@@ -11,8 +11,11 @@ are safe functions that make a slice of `size` bytes over the mapping. The type
 enforces neither premise that makes this sound:
 
 - `adopt` is safe and takes `size` from its caller without checking it against
-  the region the kernel mapped. A server that adopts a peer's region at the
-  peer's declared length reads and writes past it in safe code.
+  the region the kernel mapped. A peer's region is mapped through `lent`, which
+  refuses a length the kernel's `fstat` does not answer; `adopt` is held to the
+  kernel's own regions (a device window, a DMA grant, the scanout) only by its
+  doc comment, so a caller that adopts a peer's region at the peer's declared
+  length reads and writes past it in safe code.
 - `shm_map` is idempotent, so `share()` followed by `adopt` gives two
   `SharedMemory` values over one mapping in one process. `as_mut_slice` on one
   then aliases `as_slice` or `as_atomic` on the other.

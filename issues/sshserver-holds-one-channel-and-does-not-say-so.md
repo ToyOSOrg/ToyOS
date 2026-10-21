@@ -6,7 +6,7 @@ opened: 2026-09-08
 
 # A second session channel on one sshd connection aliases the first one's input
 
-`userland/sshd`'s session handler keeps one channel and one input sender:
+`system/sshserver`'s session handler keeps one channel and one input sender:
 `SshSession::channel` holds the channel a request has not taken yet, and
 `SshSession::input` is where `Handler::data` puts everything a client sends.
 Neither is keyed on a `ChannelId`, and `channel_open_session` accepts every

@@ -24,9 +24,9 @@ told `EINVAL` and keeps all of what it mapped. Nothing it kept is taken.
 
 The kernel is why: a mapping is one `vma::Region` over one `PageAlloc`, with
 no part to take away, and `SYS_MUNMAP` takes only the length the mapping's
-`mmap` was asked for (`kernel/src/syscall/vm.rs`). That is the ruling in
+`mmap` was asked for (`kernel/src/syscall/vm.rs`). That was the ruling in
 `issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`'s
-stage 4.
+stage 4, which the owner has since revised (below).
 
 `mmap` with `MAP_FIXED` has the same gap. POSIX replaces whatever pages
 `[addr, addr + len)` overlaps, of any mappings, and leaves the rest of each
@@ -52,11 +52,11 @@ corpus, and not across what a user builds against this libc.
 `206_libc_refusals` reads 0 for `munmap` of the first of two pages, the second
 page still holds its byte, and a touch of the first faults; and its
 `mmap the first of two pages fixed` line reads 0, with the second page's byte
-kept after it. Or the owner rules the refusals final and this file becomes
-`kind: rejected`.
+kept after it.
 
 ## Owner
 
-The orchestrator, who holds the 2 MiB track and ruled the refusal in its
-stage 4. The first exit needs a region that splits, and no stage of that
-track builds one.
+The orchestrator, who holds the 2 MiB track. The owner ruled on 2026-10-21
+that whole-mapping-only unmap and replacement is not the final application
+contract, and that the track's refusal of partial unmaps is to be revised. The
+exit needs a region that splits, and no stage of that track builds one yet.
