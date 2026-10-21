@@ -7,7 +7,9 @@
 //! coordinate at or past the modulus, a padding byte, a coefficient past q —
 //! or random bytes. Every input ends in a value or a refusal, never a panic,
 //! and the verdict is an independent decoder's: RustCrypto's or ring's, or
-//! the interface's own documented rule where the two differ by design.
+//! the interface's own documented rule where the two differ by design. A
+//! decoder with no instruction path is the same code in every form, so it
+//! runs in the `portable` form alone.
 
 mod support;
 
@@ -114,6 +116,7 @@ macro_rules! sec1_case {
 }
 
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn sec1_points() {
     seeded(CASES, 0x5ec1, |case, rng| {
         sec1_case!(
@@ -225,6 +228,7 @@ macro_rules! der_case {
 }
 
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn der_signatures() {
     seeded(CASES, 0xde5, |case, rng| {
         der_case!(p256, 32, ECDSA_P256_SHA256_ASN1, b"ffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551", case, rng)
@@ -276,6 +280,7 @@ fn rsa_keys() -> Vec<RsaKey> {
 /// exponent from 3 that fits 32 bits. A key accepted verifies the
 /// signature only where it is the signer's.
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn rsa_components() {
     let keys = rsa_keys();
     seeded(CASES, 0x45a, |case, rng| {
@@ -316,6 +321,7 @@ fn rsa_components() {
 /// x = 0 with the sign set and small order, so it decodes exactly what
 /// dalek decodes canonically and finds not weak.
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn ed25519_encodings() {
     let p = (BigUint::from(1u8) << 255) - 19u8;
     seeded(CASES, 0xed5, |case, rng| {
@@ -337,6 +343,7 @@ fn ed25519_encodings() {
 /// An encapsulation key with a coefficient set past q, or other changes:
 /// FIPS 203 §7.2's modulus check, as RustCrypto applies it.
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn mlkem_encapsulation_keys() {
     use ml_kem::KeyExport;
     seeded(CASES, 0xe4, |case, rng| {
@@ -371,6 +378,7 @@ fn mlkem_encapsulation_keys() {
 /// Ciphertexts changed or cut: a length is refused, and every 1088-byte
 /// input decapsulates to RustCrypto's key, rejected implicitly or not.
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn mlkem_ciphertexts() {
     use ml_kem::Decapsulate;
     seeded(CASES, 0xc7, |case, rng| {
@@ -434,6 +442,7 @@ mod provider {
     /// the share's own decoders': RustCrypto's for SEC 1 and ML-KEM keys,
     /// dalek's ladder for the zero X25519 result.
     #[test]
+    #[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
     fn key_shares() {
         use p256::elliptic_curve::sec1::ToEncodedPoint;
         use rustls::NamedGroup;
@@ -507,6 +516,7 @@ mod provider {
     /// integer padding and trailing bytes. Only the signer's key, however
     /// spelled, can verify, and DER spells it one way.
     #[test]
+    #[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
     fn rsa_public_key_der() {
         use ring::signature;
         use rustls::pki_types::alg_id;

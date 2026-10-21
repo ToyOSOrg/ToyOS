@@ -41,7 +41,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn masks_selection_and_equality_over_their_whole_range() {
+    fn masks_selection_and_equality_at_their_edges() {
         for (bit, m) in [(0, 0), (1, u64::MAX), (2, 0), (3, u64::MAX)] {
             assert_eq!(mask(bit), m);
         }

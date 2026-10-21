@@ -207,8 +207,10 @@ mod tests {
         let gcm = Gcm::aes128(&[7; 16]);
         std::println!("GHASH aggregated: {}", gcm.aggregated);
         let h = u128::from_be_bytes(gcm.h.0);
+        // Miri interprets every bit operation: a spread of each, not all.
+        let stride = if cfg!(miri) { 37 } else { 1 };
         // Every basis product, through the one-block path.
-        for i in 0..128 {
+        for i in (0..128).step_by(stride) {
             let mut state = (1u128 << i).to_be_bytes();
             gcm.hash_blocks(&mut state, &[[0; 16]]);
             assert_eq!(u128::from_be_bytes(state), multiply(1 << i, h), "x^{i}");
@@ -217,15 +219,15 @@ mod tests {
         let blocks: [[u8; 16]; 41] = core::array::from_fn(|i| {
             (!h.wrapping_mul(i as u128 + 1)).rotate_left(i as u32).to_be_bytes()
         });
-        for n in 0..=blocks.len() {
+        for n in (0..=blocks.len()).step_by(if cfg!(miri) { 9 } else { 1 }) {
             let start = h.rotate_left(n as u32);
             let mut state = start.to_be_bytes();
             gcm.hash_blocks(&mut state, &blocks[..n]);
             assert_eq!(u128::from_be_bytes(state), portable(h, start, &blocks[..n]), "{n} blocks");
         }
         // Every bit of every block in a batch meets its own power.
-        for lane in 0..8 {
-            for bit in 0..128 {
+        for lane in (0..8).step_by(if cfg!(miri) { 7 } else { 1 }) {
+            for bit in (0..128).step_by(stride) {
                 let mut basis = [[0; 16]; 8];
                 basis[lane][bit / 8] = 1 << (bit % 8);
                 let mut state = [0; 16];
@@ -245,7 +247,14 @@ mod tests {
                 Gcm::aes256(key.try_into().unwrap())
             };
             let nonce = [0xfe; 12];
-            for n in [0usize, 1, 15, 16, 17, 48, 49, 64, 65, 96, 97, 112, 113, 127, 128, 129, 192, 223, 224, 225, 255, 256, 257, 383, 384, 511, 512, 513, 1024, 1040] {
+            // Miri interprets each AES round: an empty message, a tail, and a
+            // batch with a tail.
+            let lengths: &[usize] = if cfg!(miri) {
+                &[0, 17, 113]
+            } else {
+                &[0, 1, 15, 16, 17, 48, 49, 64, 65, 96, 97, 112, 113, 127, 128, 129, 192, 223, 224, 225, 255, 256, 257, 383, 384, 511, 512, 513, 1024, 1040]
+            };
+            for &n in lengths {
                 let input: std::vec::Vec<u8> = (0..n).map(|i| (i * 31 + 7) as u8).collect();
                 let mut sealed = input.clone();
                 let tag = gcm.seal(&nonce, b"aad", &mut sealed).unwrap();

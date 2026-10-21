@@ -179,7 +179,9 @@ fn check<A: Field>(field: &A, seed: u64) {
     values.extend((0..CASES).map(|_| rng.below(&bound)));
 
     // Each pair of edges, and each seeded value against a random partner.
-    let pairs = (0..edges).flat_map(|i| (0..edges).map(move |j| (i, j))).chain((edges..values.len()).map(|i| (i, i - edges)));
+    // Miri interprets every limb operation: the first edges' pairs there.
+    let paired = if cfg!(miri) { 4 } else { edges };
+    let pairs = (0..paired).flat_map(|i| (0..paired).map(move |j| (i, j))).chain((edges..values.len()).map(|i| (i, i - edges)));
     for (i, j) in pairs {
         let (a, b) = (&values[i], &values[j]);
         let (x, y) = (field.from(a), field.from(b));
@@ -192,7 +194,7 @@ fn check<A: Field>(field: &A, seed: u64) {
     }
 
     // Inversion is a^(p-2) for every edge and some seeded values.
-    for a in values.iter().take(edges + 16) {
+    for a in values.iter().take(if cfg!(miri) { 3 } else { edges + 16 }) {
         let x = field.from(a);
         let inverse = field.invert(&x);
         assert_eq!(field.value(&inverse), (a % &p).modpow(&(&p - 2u8), &p), "1 / {a}");

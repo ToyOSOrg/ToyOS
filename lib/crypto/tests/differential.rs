@@ -1,6 +1,7 @@
 //! The crate against ring and RustCrypto, dev-dependencies alone: length
 //! and boundary sweeps, then [`CASES`] seeded cases per primitive, each
-//! numbered so a red names it.
+//! numbered so a red names it. A primitive with no instruction path is the
+//! same code in every form, so it runs in the `portable` form alone.
 
 mod support;
 
@@ -432,6 +433,7 @@ fn seeded_openssh_against_rustcrypto() {
 /// Random scalars against random u-coordinates, the high bit and values from
 /// p up included: RFC 7748 takes them all.
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn seeded_x25519_against_dalek() {
     use toyos_crypto::x25519::{PublicKey, SecretKey};
     support::seeded(CASES, 0x255, |case, rng| {
@@ -451,6 +453,7 @@ fn seeded_x25519_against_dalek() {
 /// raised by the order, another message. Ours agrees with `verify_strict`
 /// and with ring, and a random encoding decodes where dalek's does.
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn seeded_ed25519_against_ring_and_dalek() {
     use ring::signature::{self, KeyPair};
     let order = num_bigint::BigUint::parse_bytes(b"1000000000000000000000000000000014def9dea2f79cd65812631a5cf5d3ed", 16).unwrap();
@@ -486,7 +489,8 @@ fn seeded_ed25519_against_ring_and_dalek() {
         let ours = key.verify(&message, &sig).is_ok();
         let strict = ed25519_dalek::VerifyingKey::from_bytes(&public).unwrap().verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&sig)).is_ok();
         let ring = signature::UnparsedPublicKey::new(&signature::ED25519, public).verify(&message, &sig).is_ok();
-        assert_eq!((ours, ours), (strict, ring), "case {case}, change {}", case % 4);
+        assert_eq!(ours, strict, "case {case}, change {}: dalek's verify_strict", case % 4);
+        assert_eq!(ours, ring, "case {case}, change {}: ring", case % 4);
         assert_eq!(ours, case % 4 == 0, "case {case}");
 
         let encoding: [u8; 32] = rng.array();
@@ -542,11 +546,13 @@ macro_rules! nist_case {
 }
 
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn seeded_p256_against_rustcrypto_and_ring() {
     support::seeded(CASES, 0x9256, |case, rng| nist_case!(p256, 32, ECDSA_P256_SHA256_ASN1, case, rng));
 }
 
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn seeded_p384_against_rustcrypto_and_ring() {
     support::seeded(CASES, 0x9384, |case, rng| nist_case!(p384, 48, ECDSA_P384_SHA384_ASN1, case, rng));
 }
@@ -555,6 +561,7 @@ fn seeded_p384_against_rustcrypto_and_ring() {
 /// by ours and by ring. Signing is the slow side, so each case changes one
 /// of a pool's signatures.
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn seeded_rsa_against_ring() {
     use ring::signature::{self, RsaKeyPair, RsaPublicKeyComponents};
     use toyos_crypto::rsa::Hash;
@@ -603,7 +610,9 @@ fn seeded_rsa_against_ring() {
             }
             2 => message.push(1),
             3 => sig = public.n.clone(),
-            4 => sig.pop().map(drop).unwrap_or(()),
+            4 => {
+                sig.pop();
+            }
             _ => rng.fill(&mut sig[1..]),
         }
         let verdict = if pss { ours.verify_pss(hash, &message, &sig) } else { ours.verify_pkcs1_v1_5(hash, &message, &sig) };
@@ -616,6 +625,7 @@ fn seeded_rsa_against_ring() {
 /// Keys from seeds, deterministic encapsulation, and decapsulation of the
 /// ciphertext and of a changed one, whose implicit rejection must agree.
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn seeded_mlkem768_against_rustcrypto() {
     use ml_kem::{Decapsulate, KeyExport};
     use support::Given;
@@ -640,6 +650,7 @@ fn seeded_mlkem768_against_rustcrypto() {
 
 #[cfg(feature = "wpa2")]
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn seeded_wpa2_against_ring() {
     use ring::{hmac, pbkdf2};
     use toyos_crypto::wpa2;

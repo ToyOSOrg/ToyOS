@@ -386,7 +386,8 @@ mod tests {
             if group["parameterSet"] != "ML-KEM-768" {
                 continue;
             }
-            for test in group["tests"].as_array().unwrap() {
+            // Miri interprets each key generation: one case there.
+            for test in group["tests"].as_array().unwrap().iter().take(if cfg!(miri) { 1 } else { usize::MAX }) {
                 let mut bytes = hex(test["d"].as_str().unwrap());
                 bytes.extend(hex(test["z"].as_str().unwrap()));
                 let key = DecapsulationKey::generate(&mut Input { bytes }).unwrap();
