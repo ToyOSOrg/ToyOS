@@ -20,10 +20,13 @@ impl F {
     pub(crate) fn small(x: u32) -> Self {
         Self([u64::from(x), 0, 0, 0, 0])
     }
-    pub(crate) fn from_bytes(b: &[u8; 32]) -> Self {
+    /// The low 255 bits of a little-endian encoding.
+    pub(crate) const fn from_bytes(b: &[u8; 32]) -> Self {
         let mut v = [0u64; 5];
-        for i in 0..255 {
-            v[i / 51] |= u64::from((b[i / 8] >> (i % 8)) & 1) << (i % 51)
+        let mut i = 0;
+        while i < 255 {
+            v[i / 51] |= (((b[i / 8] >> (i % 8)) & 1) as u64) << (i % 51);
+            i += 1;
         }
         Self(v)
     }
