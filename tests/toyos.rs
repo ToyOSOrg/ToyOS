@@ -472,6 +472,11 @@ const MACHINE_TESTS: &[&str] = &[
     // `images/console.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
+    // The boot's log written through usbd onto the stick it booted from, and
+    // still there once the machine has stopped: the path every metal boot's
+    // `/log` takes, which no other QEMU row reads, because their console is
+    // the serial line. Its oracle is the image read back on the host.
+    "the_log_lands_on_the_boot_stick",
     // The desktop on CPUs that offer no x2APIC, whose local APICs run in
     // xAPIC mode: every IPI, EOI and timer write goes through the MMIO page,
     // which no host build has and the T14, whose CPUs offer x2APIC, never
@@ -2325,6 +2330,40 @@ fn console_image_boots() -> Result<(), String> {
     said.must_be_clean()
 }
 
+/// Boot `tests/images/testcases.toml` from a USB stick, as a metal boot does,
+/// stop the machine, and read the stick's log volume back with the metal
+/// judge's verdict: this boot's `logkeeper` files hold `Boot: complete` and the
+/// supervisor's stop line, so the log went through usbd's disk to the stick and
+/// was made durable before the power went.
+fn the_log_lands_on_the_boot_stick(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions { profile: qemu::Profile::Metal, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let mut console = qemu.boot_log().to_string();
+    qemu::await_marker(&mut qemu, &mut console, ": serving it as disk 0", "usbd to serve the boot stick")?;
+    qemu::await_marker(&mut qemu, &mut console, toyos_logstream::LOG_OPENED, "logkeeper to open the log")?;
+    writeln!(qemu.stdin_mut(), "run shutdown").map_err(|e| e.to_string())?;
+    qemu.flush_stdin();
+    let by = qemu.budget(Duration::from_secs(60));
+    console.push_str(&qemu.await_exit(by)?);
+    let mut stick = std::fs::File::open(qemu.boot_image()).map_err(|e| e.to_string())?;
+    let files = toyos_build::image::log_volume_files(&mut stick)?;
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    let listing = names.join("\n");
+    let (_, ours) = bootlog::split_listing(&listing);
+    let log: String = files
+        .iter()
+        .filter(|(name, _)| ours.contains(&name.as_str()))
+        .map(|(_, bytes)| String::from_utf8_lossy(bytes).into_owned())
+        .collect();
+    if let Err(unfit) = bootlog::verdict(&log) {
+        return Err(format!(
+            "the stick's log volume ({names:?}) is no whole boot's log: {unfit:?}\n--- its log:\n{log}\n--- the console:\n{console}"
+        ));
+    }
+    eprintln!("  [log] {} file(s) on the stick, {} bytes of this boot's log", names.len(), log.len());
+    Ok(())
+}
+
 /// Boot `tests/images/panelcase.toml` on [`qemu::Profile::MetalNoX2apic`]'s CPUs, which
 /// offer no x2APIC, and wait for its compositor to hold the panel: every CPU
 /// declared its local APIC in xAPIC mode, every CPU the firmware named came
@@ -3868,6 +3907,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
+        "the_log_lands_on_the_boot_stick" => the_log_lands_on_the_boot_stick(test_config),
         "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_boots" => nvme_disk_boots(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),

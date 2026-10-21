@@ -1616,6 +1616,12 @@ impl QemuInstance {
         &self.boot_log
     }
 
+    /// The disk image this boot runs from: the stick under a stick profile.
+    /// What the guest wrote to it is whole once [`Self::await_exit`] answers.
+    pub fn boot_image(&self) -> &Path {
+        &self.boot_image
+    }
+
     pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
         &mut self.stdin
     }
