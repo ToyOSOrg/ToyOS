@@ -2416,12 +2416,15 @@ fn usb_stopped_before_the_reset(log: &str, console: &str) -> Result<(), String> 
     // On the boot's one clock: the request is in the file (its line can be
     // one the console dropped under the load), and what follows the flush
     // is the kernel's, on the console.
-    let at = |text: &str, what: &dyn Fn(&str) -> bool| {
-        text.lines().find(|l| what(l)).map(|l| (toyos_logstream::parse(l).and_then(|p| p.ms), l.to_string()))
+    use toyos_logstream::Source;
+    let at = |text: &str, from: Source, opens: &str| {
+        text.lines()
+            .find_map(|l| toyos_logstream::parse(l).filter(|p| p.source == from && p.text.starts_with(opens)))
+            .map(|p| (p.ms, p.text.to_string()))
     };
-    let asked = at(log, &|l| l.contains("supervisor: power: the machine stops"));
-    let ended = at(console, &|l| l.contains("kernel] exit: usbd pid="));
-    let stopped = at(console, &|l| l.contains(&format!("kernel] {}", toyos_quiesce::STOPPED)));
+    let asked = at(log, Source::Program("supervisor"), "supervisor: power: the machine stops");
+    let ended = at(console, Source::Kernel, "exit: usbd pid=");
+    let stopped = at(console, Source::Kernel, toyos_quiesce::STOPPED);
     let (Some((Some(asked), _)), Some((Some(ended), line)), Some((Some(stopped), _))) = (asked, ended, stopped) else {
         return Err(format!("no stop request in the file, or no usbd end and kernel stop on the console\n{console}"));
     };
