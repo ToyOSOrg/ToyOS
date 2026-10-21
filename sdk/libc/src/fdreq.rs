@@ -77,10 +77,10 @@ pub(crate) fn dup_at_least<E>(
     }
 }
 
-/// The descriptors marked close-on-exec, by number: kept for stage 3 of
-/// `issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`,
-/// whose spawn reads them. A number is a slot at one generation, so a handle
-/// made later in the slot is never taken for one marked here.
+/// The descriptors marked close-on-exec, by number, which a spawn reads by
+/// slot (`posix_io::stdio_for_spawn`). A mark goes with its descriptor's
+/// `close`; a descriptor closed some other way leaves its mark, which then
+/// reads as the slot's next descriptor's.
 pub(crate) struct CloseOnExec(BTreeSet<i32>);
 
 impl CloseOnExec {
@@ -99,6 +99,12 @@ impl CloseOnExec {
         } else {
             self.0.remove(&fd);
         }
+    }
+
+    /// Whether the descriptor in table slot `slot` is marked: a mark goes with
+    /// its descriptor's `close`, so one at that slot is its live one's.
+    pub(crate) fn slot_marked(&self, slot: u16) -> bool {
+        self.0.iter().any(|&fd| RawHandle(fd as u32).slot() == slot)
     }
 
     /// `F_GETFD`'s answer.

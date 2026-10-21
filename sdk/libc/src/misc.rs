@@ -1,4 +1,4 @@
-// Miscellaneous POSIX/C functions: environment, process, signals, sysconf.
+// Miscellaneous POSIX/C functions: process, signals, sysconf.
 
 use alloc::vec::Vec;
 use core::ptr;
@@ -7,67 +7,8 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use toyos_abi::syscall;
 
 use crate::alarmreq::SIGALRM;
-use crate::errcode::{ECHILD, ENOSYS};
+use crate::errcode::ENOSYS;
 use crate::strtonum;
-
-// Environment variables
-
-// Cached environment block from kernel. Format: "KEY=VALUE\0KEY=VALUE\0\0"
-static mut ENV_BUF: [u8; 8192] = [0; 8192];
-static mut ENV_INITED: bool = false;
-
-unsafe fn ensure_env() {
-    let inited = ptr::addr_of!(ENV_INITED).read_volatile();
-    if !inited {
-        let buf = ptr::addr_of_mut!(ENV_BUF).as_mut().unwrap();
-        let n = syscall::get_env(buf);
-        if n < buf.len() {
-            buf[n] = 0;
-        }
-        ptr::addr_of_mut!(ENV_INITED).write_volatile(true);
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn getenv(name: *const u8) -> *mut u8 {
-    if name.is_null() { return ptr::null_mut(); }
-    ensure_env();
-
-    let name_len = super::string::strlen(name);
-    let name_slice = core::slice::from_raw_parts(name, name_len);
-
-    let buf = &*ptr::addr_of!(ENV_BUF);
-    let buf_mut = ptr::addr_of_mut!(ENV_BUF).cast::<u8>();
-    let mut i = 0;
-    while i < buf.len() && buf[i] != 0 {
-        // Find end of this entry
-        let start = i;
-        while i < buf.len() && buf[i] != 0 {
-            i += 1;
-        }
-        let entry = &buf[start..i];
-        // Check if entry starts with name=
-        if entry.len() > name_len && entry[name_len] == b'='
-            && entry[..name_len] == *name_slice
-        {
-            return buf_mut.add(start + name_len + 1);
-        }
-        i += 1; // skip null terminator
-    }
-    ptr::null_mut()
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, _overwrite: i32) -> i32 {
-    // Not implemented — env is read-only from kernel
-    let _ = (name, value);
-    0
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn unsetenv(_name: *const u8) -> i32 {
-    0
-}
 
 // Process
 
@@ -103,36 +44,6 @@ pub unsafe extern "C" fn fork() -> i32 {
 pub unsafe extern "C" fn execvp(_file: *const u8, _argv: *const *const u8) -> i32 {
     crate::errno::set(ENOSYS);
     -1
-}
-
-/// POSIX `waitpid`, for a layer that cannot make a child.
-///
-/// **There is no pid-addressed wait left**: `SYS_WAITPID` is retired and
-/// `SYS_PROCESS_WAIT` takes the handle a spawn answered with. This layer holds
-/// no such handle for anything, because it has no spawn path at all — `fork`,
-/// `execvp` and `system` all answer `-1` above — so every pid it could be
-/// asked about is a pid it has no child for, and `ECHILD` is the true answer
-/// rather than a stub.
-///
-/// The day this layer grows `posix_spawn`, it grows a `pid -> Process handle`
-/// map beside it and this reads that. Faking ambient authority is what the
-/// compat layer is for; faking it over an empty set is not.
-#[no_mangle]
-pub unsafe extern "C" fn waitpid(_pid: i32, _status: *mut i32, _options: i32) -> i32 {
-    crate::errno::set(ECHILD);
-    -1
-}
-
-/// `waitpid(-1, status, 0)`.
-#[no_mangle]
-pub unsafe extern "C" fn wait(status: *mut i32) -> i32 {
-    unsafe { waitpid(-1, status, 0) }
-}
-
-/// [`waitpid`]: it answers no child, so no usage is written.
-#[no_mangle]
-pub unsafe extern "C" fn wait4(pid: i32, status: *mut i32, options: i32, _usage: *mut u8) -> i32 {
-    unsafe { waitpid(pid, status, options) }
 }
 
 // Exit / abort / atexit
@@ -293,11 +204,6 @@ pub unsafe extern "C" fn raise(_sig: i32) -> i32 {
     0
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn kill(_pid: i32, _sig: i32) -> i32 {
-    0
-}
-
 // sysconf
 
 const _SC_ARG_MAX: i32 = 0;
@@ -312,9 +218,12 @@ pub unsafe extern "C" fn sysconf(name: i32) -> i64 {
         _SC_PAGESIZE => crate::memreq::PAGE as i64,
         _SC_NPROCESSORS_ONLN => syscall::cpu_count() as i64,
         _SC_CLK_TCK => 100,
-        // POSIX's -1 with `errno` untouched: the function each bounds, `exec`
-        // and the `getpw*_r` lookups, is one ToyOS does not have.
-        _SC_ARG_MAX | _SC_GETPW_R_SIZE_MAX => -1,
+        // What `SYS_SPAWN` takes of each of `argv` and the environment
+        // (`kernel/src/user_ptr.rs`'s `MAX_USER_STR`), so both together fit.
+        _SC_ARG_MAX => 64 * 1024,
+        // POSIX's -1 with `errno` untouched: the `getpw*_r` lookups it bounds
+        // are ones ToyOS does not have.
+        _SC_GETPW_R_SIZE_MAX => -1,
         _ => {
             crate::errno::set(crate::errcode::EINVAL);
             -1

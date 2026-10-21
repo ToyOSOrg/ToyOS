@@ -89,6 +89,14 @@ pub fn compile_c(name: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Compile `<name>.c` in `dir`, one of ToyOS's own C programs, to an object,
+/// with warnings refused.
+pub fn compile_own_c(dir: &Path, name: &str) -> PathBuf {
+    let object = scratch(name, ".o");
+    compile_one(&c_sysroot(), dir, &["-Wall", "-Werror"], &format!("{name}.c"), &object);
+    object
+}
+
 /// Link flags a case needs beyond the corpus's, by case name.
 ///
 /// An image whose lowest address is 0 hides a table reported from the load bias

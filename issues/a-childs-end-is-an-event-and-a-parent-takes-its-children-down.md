@@ -6,11 +6,11 @@ opened: 2026-09-29
 
 # A child's end is an event, and a parent takes its children down
 
-libc cannot start a child: `fork` and `execvp` answer `ENOSYS`, `waitpid`,
-`wait` and `wait4` `ECHILD`, and `system` `-1` (`sdk/libc/src/misc.rs`,
-`sdk/libc/src/stdio.rs`), and there is no `posix_spawn`. M2 and M4 of
-`issues/toyos-builds-itself.md` and the exit of
-`issues/toyos-runs-on-arm64.md` need it.
+A child starts by spawn, never by fork: `fork` and the `exec` family answer
+`ENOSYS`, and libc starts one by `posix_spawn` (stage 3). What is left is a
+child's end as a signal (stage 4), sessions (5), a request to quit (6) and job
+control (7). M4 of `issues/toyos-builds-itself.md` and the exit of
+`issues/toyos-runs-on-arm64.md` need the rest.
 
 **Constraints.** libc is built on ToyOS and never ToyOS on libc (owner,
 2026-09-30: "toyos moderness and anti legacy may never be compromised because
@@ -60,56 +60,70 @@ directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
    AArch64's `virt` rows read only memory and instruction until
    `issues/toyos-runs-on-arm64.md`'s stage 8 boots the shared suite there.
    Oracle: POSIX `<signal.h>`'s classes.
-3. **libc starts and waits for children** (blocked on
-   `issues/a-childs-stdio-handle-is-not-the-one-command-named.md`).
-   libc imitates `SIGCHLD`. A C child starts with descriptors 0–2 and exactly
-   what its file actions name, a stated departure from POSIX. `posix_spawn` and
-   `posix_spawnp` with file actions and attributes, routed by std's
-   launch-or-spawn rule moved into `toyos`; a descriptor table with
-   close-on-exec; `waitpid`, `wait`, `wait4`; `ppoll`, `sigpending` and the
-   signal-set calls; `environ`, `setenv`, `unsetenv`; `kill` with `SIGKILL` for
-   a child or a `-pgid` of its children, 0 as a probe, `EINVAL` for other
-   signals until stage 6; `system`, `popen` and `pclose` through
-   `/system/bin/shell -c`. No `select` in this stage: `issues/toyos-builds-itself.md`
-   owns it. A handler for any signal libc imitates runs at once, beside the
-   program: inside a blocking call of a thread that leaves the signal unblocked
-   (`ppoll` and `sigsuspend` under their mask), and, while no thread is in one,
-   on libc's own thread. After it `read`, `recv`, `accept`, `wait`, `waitpid`
-   and `wait4` restart if it was installed with `SA_RESTART` and answer `EINTR`
-   if not, and `poll`, `ppoll`, `pause`, `sigsuspend`, `nanosleep` and `usleep`
-   answer `EINTR`, `sleep` the time left; while every thread blocks the signal,
-   it stays pending, as `sigpending` reports, until one unblocks it. libc's own
-   thread watches at most 255 unwaited children on its own inbox, the 256th
-   watch being stage 6's notice, and wakes a thread in a blocking call through
-   one pipe, so `poll` takes at most 255 descriptors and children never count
-   against them. *Exit*, C corpus files, the mutation that reds an arm after it:
-   a piped stdout read to EOF through `poll`, then `waitpid`;
-   `waitpid(-1)` answering three children once each in the order they end, then
-   `ECHILD` (waiting on the first alone), and `wait` and `wait4` alike (either
-   answering `ECHILD` as `waitpid` does today); a killed child `WIFSIGNALED`
-   `SIGKILL`, and one per stage 2 fault kind with its `<signal.h>` class's
-   signal (every kernel end `SIGKILL`); `setenv` and `unsetenv` seen in a
-   child's `environ` (the start-up environment passed); `kill(-pgid, SIGKILL)`
-   ending that group's two children and not a third (every child ended), and
-   `kill(pid, 0)` answering 0 for a live child and `ESRCH` once it is waited
-   (the probe kills); `system` and `pclose` answering a command's exit 3 and
-   `popen` its output (the shell's `-c` answering 0); the parent's stdout
-   marked `FD_CLOEXEC`, a 0 that `addopen` opened `O_CLOEXEC`, and a 1 that
-   `adddup2` made and `addclose` closed, each absent in the child (`F_SETFD`,
-   `O_CLOEXEC` or `addclose` ignored); the 256th unwaited child refused
-   `EAGAIN` (no capacity check, which panics in the poller), and beside 255 of
-   them a `poll` of 255 descriptors answering (children watched in `poll`'s own
-   poller, which panics); under `SIG_IGN`, 256 children each ending before the
-   next all spawned, then `ECHILD` (ended children kept); a `ppoll` unblocking
+3. **Done**: **libc starts and waits for children**. `posix_spawn` and
+   `posix_spawnp` with file actions and attributes start a child by
+   `toyos::spawn`, std's launch-or-spawn rule, which std's `Command` now uses
+   too. A C child starts with descriptors 0–2 and exactly what its file
+   actions name, a stated departure from POSIX, and a spawned child's table
+   keeps slots 0–2 for them at its spawn (`HandleTable::for_child`): an
+   endowment that filled an empty one read as the child's stdio. A stdio
+   slot a process was started without is no descriptor of its children
+   (`toyos::spawn::inherited`), and std's stdio answers its errors rather
+   than reading every one as a closed stream (`is_ebadf`). libc
+   keeps close-on-exec marks (`fdreq`); `waitpid`,
+   `wait` and `wait4` answer each child once, by pid, group or any, with
+   `<sys/wait.h>`'s status for its stage 2 end (`spawnreq`); `environ`,
+   `setenv` and `unsetenv`; `kill` with `SIGKILL` for a child or a group of
+   them, 0 as a probe, `EPERM` for its own pid (a process holds no right to
+   kill itself) and `EINVAL` for other signals until stage 6; `system`,
+   `popen` and `pclose` through `/system/bin/shell -c`; at most 255
+   unwaited children, the 256th refused `EAGAIN`. *Exit*, met by
+   `tests/guest/libc` on QEMU x86-64 (`libc_children`), each row with the
+   mutation that reds it: a piped stdout read to EOF through `poll`, then
+   `waitpid`; a child's write refused `EPIPE` once its pipe's one reader
+   closed; a child given a pipe's write end as stdin refused its read (the
+   `adddup2` onto 0 ignored); `waitpid(-1)` answering three children once
+   each in the order they end, then `ECHILD` (waiting on the first alone),
+   and `wait` and `wait4` alike (`wait` answering `ECHILD`); a killed child
+   `WIFSIGNALED` `SIGKILL`, and one per stage 2 fault kind with its
+   `<signal.h>` class's signal (every kernel end `SIGKILL`); `setenv` and
+   `unsetenv` seen in a child's `environ` (the start-up environment passed);
+   `kill(-pgid, SIGKILL)` ending that group's two children and not a third
+   (every child ended), and `kill(pid, 0)` answering 0 for a live child and
+   `ESRCH` once it is waited (the probe kills); `system` and `pclose`
+   answering a command's exit 3 and `popen` its output (`system` answering
+   0); the parent's stdout marked `FD_CLOEXEC`, a 0 that `addopen` opened
+   `O_CLOEXEC`, and a descriptor that `adddup2` made and `addclose` closed,
+   each absent in the child (`F_SETFD`, `O_CLOEXEC` or `addclose` ignored,
+   and the child's table without its stdio slots kept); the 256th unwaited
+   child refused `EAGAIN` beside a `poll` of 255 descriptors answering (no
+   capacity check); a negative descriptor beside a pipe, the pipe answering
+   (passed to the kernel, which ends the caller).
+4. **libc imitates `SIGCHLD`**. A handler for any signal libc imitates runs
+   at once, beside the program: inside a blocking call of a thread that leaves
+   the signal unblocked (`ppoll` and `sigsuspend` under their mask), and,
+   while no thread is in one, on libc's own thread. After it `read`, `recv`,
+   `accept`, `wait`, `waitpid` and `wait4` restart if it was installed with
+   `SA_RESTART` and answer `EINTR` if not, and `poll`, `ppoll`, `pause`,
+   `sigsuspend`, `nanosleep` and `usleep` answer `EINTR`, `sleep` the time
+   left; while every thread blocks the signal, it stays pending, as
+   `sigpending` reports, until one unblocks it. libc's own thread watches the
+   unwaited children, at most 255 as stage 3 bounds them, the 256th watch
+   being stage 6's notice, on its own inbox, and wakes a thread in a blocking
+   call through one pipe, so `poll` takes at most 255 descriptors and children
+   never count against them; stage 3's `waitpid(-1)` watches the children
+   unwaited when it was called, so one another thread starts after it, ending
+   first, does not wake it, which libc's own thread ends. `ppoll`,
+   `sigpending` and `sigsuspend` come with it. *Exit*, C corpus files beside stage 3's, the mutation that reds an arm
+   after it: under `SIG_IGN`, 256 children each ending before the next all
+   spawned, then `ECHILD` (ended children kept); a `ppoll` unblocking
    `SIGCHLD` answering `EINTR` once a child ends, and a second, the child
    unwaited, answering its readable pipe, and with nothing ready blocking until
    a second child writes (`SIGCHLD` raised again at every blocking call, or at
    every one that finds nothing ready); a `read` of an empty pipe, `SIGCHLD`
    handled with `SA_RESTART`, answering the byte a second child writes after
-   the first ends (`SA_RESTART` ignored); a negative descriptor beside a pipe,
-   the pipe answering (passed to the kernel, which ends the caller). Negative
-   control: today's libc, against which the corpus does not link. Oracle:
-   POSIX's `posix_spawn`, `waitpid`, `poll` and `SA_RESTART`, and signal(7).
+   the first ends (`SA_RESTART` ignored). Oracle: POSIX's `waitpid`, `poll`
+   and `SA_RESTART`, and signal(7).
 5. **A login is a session under init**. Per login init starts a session
    program that logout ends and that only parents what its user starts — the
    desktop's at boot, one per SSH connection at sshd's request. As it starts
