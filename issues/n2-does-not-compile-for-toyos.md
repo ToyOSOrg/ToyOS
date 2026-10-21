@@ -17,7 +17,7 @@ fork). Read from the source, not built.
 Its unix arm is `posix_spawn` of `/bin/sh -c <command>` with `/dev/null` as
 stdin, a pipe and `waitpid`, so a ToyOS arm waits on what
 `issues/ninja-runs-every-command-through-a-bin-sh-toyos-does-not-have.md`
-and `issues/there-is-no-dev-null.md` wait on.
+waits on.
 
 Owner: `issues/toyos-builds-itself.md`, whose M5 builds LLVM in the
 guest.

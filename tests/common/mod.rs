@@ -9,6 +9,7 @@ pub mod devices;
 pub mod faults;
 pub mod hostedclang;
 pub mod iommu;
+pub mod launchstdio;
 pub mod libcchildren;
 pub mod irqcensus;
 /// The `isa` claim's rows on the T14.

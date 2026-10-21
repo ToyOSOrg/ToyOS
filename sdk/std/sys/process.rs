@@ -272,7 +272,8 @@ impl Command {
         // The pipes a file server appends a served file from; held until the
         // child has its own copies.
         let mut streams: Vec<toyos::Pipe> = Vec::new();
-        // Copies of this process's own stdio, held until the child has its own.
+        // Copies of this process's own stdio and fresh null handles, held
+        // until the child has its own.
         let mut inherited: Vec<toyos::OwnedHandle> = Vec::new();
         let mut stdin_pipe: Option<Pipe> = None;
         let mut stdout_pipe: Option<Pipe> = None;
@@ -280,6 +281,10 @@ impl Command {
         for (pipe, stdio, slot, is_input) in
             [(&mut stdin_pipe, stdin, 0, true), (&mut stdout_pipe, stdout, 1, false), (&mut stderr_pipe, stderr, 2, false)]
         {
+            // A slot `inherit_handle` names is that handle's.
+            if self.extra_slots.iter().any(|&[child, _]| child == slot) {
+                continue;
+            }
             Self::setup_slot(&mut slot_map, &mut child_pipes, &mut streams, &mut inherited, pipe, stdio, slot, is_input)?;
         }
         let stdio = slot_map.len();
@@ -380,7 +385,14 @@ impl Command {
             Stdio::InheritPipe(pipe) => slot_map.push([child_slot, pipe.raw_fd() as u32]),
             Stdio::ParentStdout => inherit(1, slot_map, inherited)?,
             Stdio::ParentStderr => inherit(2, slot_map, inherited)?,
-            Stdio::Null => {}
+            Stdio::Null => {
+                use toyos_abi::handle::Rights;
+                let direction = if is_input { Rights::READ } else { Rights::WRITE };
+                let null = toyos::null(direction.union(Rights::DUP).union(Rights::TRANSFER).union(Rights::WAIT))
+                    .map_err(crate::sys::to_io_error)?;
+                slot_map.push([child_slot, toyos::AsHandle::as_handle(&null).0]);
+                inherited.push(null);
+            }
         }
         Ok(())
     }

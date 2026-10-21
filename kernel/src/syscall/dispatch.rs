@@ -32,7 +32,7 @@ use super::fs::{
 };
 use super::handles::{sys_close, sys_dup2, sys_handle_dup, sys_handle_dup_slot, with_object, with_object_ref};
 use super::io::{
-    sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
+    sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
 };
 use super::ipc::{
     sys_accept, sys_handle_recv, sys_handle_send, sys_inbox_setup,
@@ -290,6 +290,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_HANDLE_DUP => sys_handle_dup(RawHandle(a1 as u32), a2),
         SYS_HANDLE_DUP_AT => sys_dup2(RawHandle(a1 as u32), a2),
         SYS_HANDLE_DUP_SLOT => sys_handle_dup_slot(a1),
+        SYS_NULL => sys_null(a1),
         SYS_GETPID => process::current_process().raw() as u64,
         SYS_RENAME => {
             let old = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };

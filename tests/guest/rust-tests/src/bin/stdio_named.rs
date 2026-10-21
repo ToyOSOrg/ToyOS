@@ -1,7 +1,8 @@
 //! A std child holds exactly the stdio its `Command` named: a pipe's write end
 //! given as stdin refuses the child's read, a pipe whose one reader the parent
-//! dropped refuses the child's write, and a child started with a null stdin
-//! starts one of its own that inherits it, which ends neither.
+//! dropped refuses the child's write, a null stdin answers end of file and a
+//! null stdout and stderr take every write, and a child started with a null
+//! stdin starts one of its own that inherits it, which ends neither.
 //!
 //! `libc_children` runs it on QEMU x86-64 (`tests/common/libcchildren.rs`).
 
@@ -30,6 +31,25 @@ fn writer() -> i32 {
     3
 }
 
+fn null_reader() -> i32 {
+    match std::io::stdin().read(&mut [0u8; 16]) {
+        Ok(0) => 0,
+        _ => 6,
+    }
+}
+
+fn null_writer() -> i32 {
+    let block = [b'x'; 4096];
+    if !matches!(std::io::stderr().write(&block), Ok(n) if n == block.len()) {
+        return 7;
+    }
+    let mut out = std::io::stdout();
+    match out.write_all(&block).and_then(|()| out.flush()) {
+        Ok(()) => 0,
+        Err(_) => 8,
+    }
+}
+
 fn spawner() -> i32 {
     match Command::new(SELF_PATH).arg("leaf").stdin(Stdio::inherit()).status() {
         Ok(status) if status.success() => 0,
@@ -46,6 +66,8 @@ fn main() {
     let code = match std::env::args().nth(1).as_deref() {
         Some("reader") => reader(),
         Some("writer") => writer(),
+        Some("null_reader") => null_reader(),
+        Some("null_writer") => null_writer(),
         Some("spawner") => spawner(),
         Some("leaf") => 0,
         Some(other) => panic!("unknown role {other:?}"),
@@ -61,6 +83,12 @@ fn main() {
             drop(child.stdout.take());
             let status = child.wait().expect("wait for the writer");
             assert!(status.success(), "a write to a pipe whose reader is gone: the writer ended {status}");
+
+            ended(Command::new(SELF_PATH).arg("null_reader").stdin(Stdio::null()), "a null stdin");
+            ended(
+                Command::new(SELF_PATH).arg("null_writer").stdout(Stdio::null()).stderr(Stdio::null()),
+                "a null stdout and stderr",
+            );
 
             ended(Command::new(SELF_PATH).arg("spawner").stdin(Stdio::null()), "a child with a null stdin spawning");
             println!("stdio_named: a std child held exactly the stdio its Command named");

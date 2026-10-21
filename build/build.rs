@@ -3099,6 +3099,7 @@ mod tests {
         "tests/images/hostedclangcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
+        "tests/images/launchcase.toml",
         "tests/images/libccase.toml",
         "tests/images/metalcase.toml",
         "tests/images/metaldevicecase.toml",

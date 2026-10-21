@@ -286,6 +286,9 @@ pub const SYS_ACPI: u64 = 128;
 /// for an empty slot: how a spawn hands on a stdio slot it may have been
 /// started without. See [`dup_slot`].
 pub const SYS_HANDLE_DUP_SLOT: u64 = 129;
+/// A fresh null handle: every read answers end of file and every write takes
+/// all it is given. See [`null`].
+pub const SYS_NULL: u64 = 130;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -293,13 +296,13 @@ pub const SYS_HANDLE_DUP_SLOT: u64 = 129;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 131;
+pub const SYSCALL_PROFILE_BINS: usize = 132;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_HANDLE_DUP_SLOT < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_NULL < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -564,6 +567,8 @@ pub enum FileType {
     /// Any other shared-memory region, such as a device's registers; `size`
     /// is its length. A peer's buffer is never one.
     DeviceMemory = 13,
+    /// A [null](null) handle.
+    Null = 14,
 }
 
 impl FileType {
@@ -582,6 +587,7 @@ impl FileType {
             11 => Some(Self::Directory),
             12 => Some(Self::Symlink),
             13 => Some(Self::DeviceMemory),
+            14 => Some(Self::Null),
             _ => None,
         }
     }
@@ -2104,6 +2110,15 @@ pub fn dup2(handle: RawHandle, slot: u16) -> Result<RawHandle, SyscallError> {
 /// hold.
 pub fn dup_slot(slot: u16) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_HANDLE_DUP_SLOT, slot as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
+}
+
+/// A fresh null handle carrying `rights`: a read answers 0 bytes, a write of
+/// n bytes answers n, and a poll is ready at once in either direction. It
+/// names nothing and so carries no authority; `rights` may be any subset of
+/// `READ | WRITE | DUP | TRANSFER | WAIT`, and anything else is refused
+/// `InvalidArgument`.
+pub fn null(rights: Rights) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_NULL, rights.bits() as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
 /// Get the current process ID.
