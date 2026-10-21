@@ -368,6 +368,11 @@ impl core::fmt::Display for Stopped {
     }
 }
 
+std::thread_local! {
+    // DIAG (never lands): each slot's output context page.
+    static DBG_OUTS: RefCell<BTreeMap<u8, usize>> = RefCell::new(BTreeMap::new());
+}
+
 /// The controller, running.
 pub struct Hc<R, D> {
     regs: R,
@@ -622,6 +627,13 @@ impl<R: Registers, D: DmaBuffers> Hc<R, D> {
     /// Name `out`, a device's output context page, as `slot`'s (§6.1); `None`
     /// takes the name away once the slot is disabled.
     pub fn name_slot(&self, slot: u8, out: Option<usize>) {
+        DBG_OUTS.with(|o| {
+            let mut o = o.borrow_mut();
+            match out {
+                Some(at) => o.insert(slot, at),
+                None => o.remove(&slot),
+            };
+        });
         let addr = out.map_or(0, |at| self.dma.device_addr(at));
         self.dma.write64(OFF_DCBAA + usize::from(slot) * 8, addr);
         self.dma.publish();
@@ -669,6 +681,43 @@ impl<R: Registers, D: DmaBuffers> Hc<R, D> {
         self.regs.write32(self.rt + IR0_ERDP, erdp as u32);
         self.regs.write32(self.rt + IR0_ERDP + 4, (erdp >> 32) as u32);
         took
+    }
+
+    /// DIAG (never lands): the controller's state while an operation waits
+    /// unanswered, as bits: 1 an event on the ring untaken, 2 IMAN.IP,
+    /// 4 ERDP.EHB, 8 USBSTS.EINT, 16 USBSTS HCH|HSE|HCE, 32 an unanswered
+    /// transfer's endpoint context not Running.
+    pub fn dbg_state(&self) -> u8 {
+        let mut bits = 0u8;
+        if self.event_waiting() {
+            bits |= 1;
+        }
+        if self.regs.read32(self.rt + IR0_IMAN) & 1 != 0 {
+            bits |= 2;
+        }
+        if self.regs.read32(self.rt + IR0_ERDP) & ERDP_EHB as u32 != 0 {
+            bits |= 4;
+        }
+        let sts = self.regs.read32(self.op + OP_USBSTS);
+        if sts & (1 << 3) != 0 {
+            bits |= 8;
+        }
+        if sts & (USBSTS_HCH | 1 << 2 | 1 << 12) != 0 {
+            bits |= 16;
+        }
+        let outs = DBG_OUTS.with(|o| o.borrow().clone());
+        for op in self.held.borrow().values() {
+            if op.done.is_some() || op.dci == 0 {
+                continue;
+            }
+            let Some(&out) = outs.get(&op.slot) else { continue };
+            self.dma.observe();
+            let state = self.dma.read32(self.context(out, usize::from(op.dci))) & 7;
+            if state != 1 {
+                bits |= 32;
+            }
+        }
+        bits
     }
 
     /// Whether an event is on the ring that nothing has taken.

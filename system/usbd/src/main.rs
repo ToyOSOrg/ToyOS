@@ -280,6 +280,7 @@ fn serve(
             }
         }
     });
+    let mut dbg_seen = (0u64, 0u64);
     loop {
         LOOP_AT.store(toyos_abi::clock::stamp_ns(), std::sync::atomic::Ordering::SeqCst);
         INFLIGHT.store(disks.values().map(|s| s.dbg_inflight()).sum(), std::sync::atomic::Ordering::SeqCst);
@@ -404,6 +405,23 @@ fn serve(
         let mut timeout = wake_at.map_or(u64::MAX, |at| at.saturating_sub(now));
         if let Some(first) = pending.iter().map(|p| p.since).min() {
             timeout = timeout.min(HANDSHAKE_TIMEOUT.saturating_sub(first.elapsed()).as_nanos() as u64);
+        }
+        // DIAG (never lands): an operation unanswered for 3 s ends usbd with
+        // 128 | the controller's state (`Hc::dbg_state`) and 64 if the claim
+        // held an interrupt record no wait reported.
+        let inflight = INFLIGHT.load(std::sync::atomic::Ordering::SeqCst);
+        let answers = ANSWERS.load(std::sync::atomic::Ordering::SeqCst);
+        if inflight == 0 || answers != dbg_seen.0 {
+            dbg_seen = (answers, now);
+        } else if now.saturating_sub(dbg_seen.1) > 3_000_000_000 {
+            let mut bits = usb.hc.dbg_state();
+            if dev.irq().is_ok() {
+                bits |= 64;
+            }
+            std::process::exit(i32::from(128 | bits));
+        }
+        if inflight != 0 {
+            timeout = timeout.min(250_000_000);
         }
         ready.clear();
         poller.wait(1, timeout, |token| ready.push(token));
