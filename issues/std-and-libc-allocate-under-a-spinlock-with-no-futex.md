@@ -14,8 +14,8 @@ process-wide `AtomicI32` that a waiter takes with `swap(1, Acquire)` in a
   `alloc_zeroed`, `dealloc` and `realloc`, lines 74–96.
 - libc's, in a program linked without std: `sdk/libc/src/lib.rs`, lines
   174–188, taken by `LibcAllocator`'s `alloc`, `dealloc` and `realloc`, lines
-  192–207. Beside std (`std-runtime`), libc's C allocator calls std's
-  (`sdk/libc/src/memory.rs`).
+  192–207. C's allocator (`sdk/libc/src/malloc.rs`) takes its blocks
+  from whichever of the two the program has.
 
 A holder that is preempted, or that is inside the `mmap` or `munmap` syscall
 `dlmalloc` makes under the lock through its backing allocator, leaves every
