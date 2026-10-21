@@ -369,6 +369,13 @@ fn main() {
         counters.stranded,
         wire.sent,
     ));
+    // The MAC's own counts of the wire: a network that sent nothing reads as
+    // nothing seen, and a frame the MAC took but no descriptor got as more
+    // taken than received.
+    say(&format!(
+        "the wire: the MAC saw {} frame(s), took {} good, missed {}, {} with CRC errors",
+        wire.seen, wire.received, wire.missed, wire.crc_errors
+    ));
 
     drop(driver);
 
