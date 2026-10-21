@@ -22,46 +22,71 @@ use super::handles::demand_syscap;
 pub(super) fn sys_log_read(
     ctx: &SyscallContext,
     syscap: RawHandle,
-    cursor_ptr: UserAddr,
+    cursor: UserAddr,
     out: &mut UserBytesMut,
     capacity: usize,
 ) -> u64 {
-    read_on_cursor(ctx, syscap, Rights::LOG, cursor_ptr, |cursor| log::user::read(cursor, out, capacity))
+    read_on_cursor(ctx, syscap, Rights::LOG, cursor, log::shard_count(), |next| log::user::read(next, out, capacity))
 }
 
 /// Copies the diary's records into the caller's buffer; requires a `SysCap` carrying [`Rights::TRACE`].
 pub(super) fn sys_trace_read(
     ctx: &SyscallContext,
     syscap: RawHandle,
-    cursor_ptr: UserAddr,
+    cursor: UserAddr,
     out: &mut UserBytesMut,
     capacity: usize,
 ) -> u64 {
-    read_on_cursor(ctx, syscap, Rights::TRACE, cursor_ptr, |cursor| crate::trace::read(cursor, out, capacity))
+    read_on_cursor(ctx, syscap, Rights::TRACE, cursor, crate::trace::rings(), |next| {
+        crate::trace::read(next, out, capacity)
+    })
 }
 
-/// A read of records on a cursor the caller holds, under `need`.
+/// A read of records under `need` on the cursor at `at`, which holds a
+/// position for each of `rings`: its head is read first, answered the ring
+/// count whatever follows, and the positions copied in only once it declares
+/// one per ring.
 ///
 /// A copy-out failure after a successful read costs the caller those records; the cursor round-trips through the caller's own memory.
-fn read_on_cursor<C: toyos_abi::UserSafe>(
+fn read_on_cursor(
     ctx: &SyscallContext,
     syscap: RawHandle,
     need: Rights,
-    cursor_ptr: UserAddr,
-    read: impl FnOnce(&mut C) -> Result<usize, SyscallError>,
+    at: UserAddr,
+    rings: usize,
+    read: impl FnOnce(&[u64]) -> Result<(usize, log::read::Cursor), SyscallError>,
 ) -> u64 {
+    use toyos_abi::log::{CursorHead, CURSOR_HEAD_WORDS};
+    const HEAD: usize = CURSOR_HEAD_WORDS * 8;
     if let Err(e) = demand_syscap(syscap, need) {
         return e.refuse();
     }
-    let mut cursor = match ctx.copy_in::<C>(cursor_ptr) {
-        Ok(cursor) => cursor,
-        Err(e) => return e.to_u64(),
+    let words = |bytes: &[u8]| -> Vec<u64> {
+        bytes.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().expect("an 8-byte chunk"))).collect()
     };
-    let count = match read(&mut cursor) {
-        Ok(count) => count,
-        Err(e) => return e.to_u64(),
+    let Ok(head) = ctx.user_vec(at, HEAD as u64) else { return SyscallError::BadAddress.to_u64() };
+    let mut head = CursorHead::from_words(words(&head).try_into().expect("the head's words"));
+    head.shards = u32::try_from(rings).expect("`smp::size` bounds the CPUs below a u32");
+    let put = |head: CursorHead, positions: &[u64]| -> Result<(), SyscallError> {
+        let mut window = ctx.user_bytes_mut(at, (HEAD + 8 * positions.len()) as u64).ok_or(SyscallError::BadAddress)?;
+        for (i, word) in head.to_words().iter().chain(positions).enumerate() {
+            window.write_at(8 * i, &word.to_le_bytes());
+        }
+        Ok(())
     };
-    match ctx.copy_out(cursor_ptr, &cursor) {
+    if head.slots as usize != rings {
+        return put(head, &[]).err().unwrap_or(SyscallError::InvalidArgument).to_u64();
+    }
+    let Some(positions) = at.raw().checked_add(HEAD as u64).and_then(|p| ctx.user_vec(UserAddr::new(p), (8 * rings) as u64).ok())
+    else {
+        return SyscallError::BadAddress.to_u64();
+    };
+    let (count, walk) = match read(&words(&positions)) {
+        Ok(read) => read,
+        Err(e) => return put(head, &[]).err().unwrap_or(e).to_u64(),
+    };
+    head.lost = walk.lost();
+    match put(head, walk.next()) {
         Ok(()) => count as u64,
         Err(e) => e.to_u64(),
     }

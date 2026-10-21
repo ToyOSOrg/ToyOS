@@ -110,7 +110,7 @@ struct Machine {
 impl Machine {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            shootdown: Shootdown::new(),
+            shootdown: two_cpus(),
             pte: AtomicU64::new(MAPPED),
             tlb: AtomicU64::new(MAPPED),
             kernel_pte: AtomicU64::new(MAPPED),
@@ -161,6 +161,14 @@ impl Machine {
 }
 
 /// An acknowledged shootdown means cpu 1 has re-walked since the unmap.
+
+/// A round between the two CPUs every model here names.
+fn two_cpus() -> Shootdown {
+    let shootdown = Shootdown::new();
+    shootdown.size(2);
+    shootdown
+}
+
 #[test]
 fn an_acknowledged_flush_postdates_the_page_table_write() {
     acknowledged_model(|| {
@@ -238,7 +246,7 @@ fn one_serve_answers_two_concurrent_shootdowns() {
 #[test]
 fn an_initiator_answers_while_it_waits() {
     model(|| {
-        let s = Shootdown::new();
+        let s = two_cpus();
 
         // cpu 0 unmaps and answers for itself; cpu 1 has not issued yet, so the
         // generation cpu 0 publishes is its own.
@@ -273,7 +281,7 @@ fn an_initiator_answers_while_it_waits() {
 #[test]
 fn a_nested_serve_is_not_undone_by_the_one_it_interrupted() {
     model(|| {
-        let s = Arc::new(Shootdown::new());
+        let s = Arc::new(two_cpus());
         let first = s.issue(Reach::Narrow);
         let nested = {
             let s = Arc::clone(&s);
@@ -402,7 +410,7 @@ fn a_serve_nested_in_an_unfinished_wide_one_answers_wide() {
 #[test]
 fn only_a_kernel_half_shootdown_asks_a_wide_answer() {
     model(|| {
-        let s = Shootdown::new();
+        let s = two_cpus();
         let reach_of = |s: &Shootdown| {
             let mut answered = None;
             s.serve(1, |reach| answered = Some(reach));

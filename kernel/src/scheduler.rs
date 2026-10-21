@@ -29,7 +29,6 @@ pub use crate::sched::driver::{
     current_address_space, enter_idle_loop, in_pass as in_schedule_self, started, total_cpu_ns,
     write_stack_canary, Ticket,
 };
-pub use crate::sched::MAX_CPUS;
 
 /// Panics unless the preempt depth equals `baseline`: a mismatch means a
 /// spinlock is held across a scheduler entry that switches.
@@ -123,8 +122,9 @@ impl Default for OperationSlot {
 
 /// Where a context with no task establishes: one per CPU, since boot and an
 /// idle CPU's pass cannot be moved off theirs.
-static NO_TASK_OPERATION: [OperationSlot; MAX_CPUS] =
-    [const { OperationSlot::new() }; MAX_CPUS];
+fn no_task_operation(cpu: usize) -> &'static OperationSlot {
+    &crate::cpu_local::of(cpu as u32).no_task_operation
+}
 
 impl Operation {
     /// Declare the running context inside one operation, bounded by `until`
@@ -190,7 +190,7 @@ impl Operation {
             )
         }
         driver::with_current_handle(|task| of(task.operation()))
-            .unwrap_or_else(|| of(&NO_TASK_OPERATION[percpu::cpu_id() as usize]))
+            .unwrap_or_else(|| of(no_task_operation(percpu::cpu_id() as usize)))
     }
 
     fn slot(&self) -> &OperationSlot {
@@ -202,7 +202,7 @@ impl Operation {
 fn operation_slot(task: &Option<Arc<TaskHandle>>, cpu: usize) -> &OperationSlot {
     match task {
         Some(task) => task.operation(),
-        None => &NO_TASK_OPERATION[cpu],
+        None => no_task_operation(cpu),
     }
 }
 

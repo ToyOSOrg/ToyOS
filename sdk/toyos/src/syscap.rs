@@ -149,12 +149,20 @@ impl SysCap {
     /// answers how many, and never blocks — see [`syscall::trace_read`].
     ///
     /// Needs [`Rights::TRACE`].
-    pub fn trace(
+    pub fn trace<W: AsRef<[u64]> + AsMut<[u64]>>(
         &self,
-        cursor: &mut toyos_abi::trace::TraceCursor,
+        cursor: &mut TraceCursor<W>,
         out: &mut [toyos_abi::trace::TraceRecord],
     ) -> Result<usize, SyscallError> {
-        syscall::trace_read(self.0.raw(), cursor, out)
+        syscall::trace_read(self.0.raw(), cursor.words.as_mut(), out)
+    }
+
+    /// How many `u64`s a [`TraceCursor`] takes: a head and a position per
+    /// CPU the firmware names. Needs [`Rights::TRACE`].
+    pub fn trace_cursor_words(&self) -> Result<usize, SyscallError> {
+        crate::log::words_for(|cursor| {
+            syscall::trace_read(self.0.raw(), cursor, &mut [toyos_abi::trace::TraceRecord::EMPTY])
+        })
     }
 
     /// Every inventory record, read whole or refused whole, never a shorter
@@ -347,3 +355,28 @@ mod tests {
         assert_eq!(read(|buf| answer(&raw, buf)), Err(Unread::Record { index: 1, why: Undecodable::Kind(0) }));
     }
 }
+
+/// A reader's position in the diary, in words the reader owns:
+/// [`SysCap::trace_cursor_words`] of them, zeroed. A type of its own, so that
+/// one is never walked over the log's rings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraceCursor<W> {
+    words: W,
+}
+
+impl<W: AsRef<[u64]>> TraceCursor<W> {
+    pub fn new(words: W) -> Self {
+        Self { words }
+    }
+
+    /// Records the last read skipped because they were overwritten.
+    pub fn lost(&self) -> u64 {
+        crate::log::head_of(self.words.as_ref()).lost
+    }
+
+    /// The cursor's words: its head, then a position per CPU.
+    pub fn words(&self) -> &[u64] {
+        self.words.as_ref()
+    }
+}
+

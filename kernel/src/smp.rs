@@ -11,12 +11,39 @@ use kernel::sched::topology::{CpuKeys, Level, Topology};
 
 use crate::log;
 
-use crate::smp_roster::{Roster, MAX_CPUS};
+use crate::smp_roster::Roster;
 
 pub static ROSTER: Roster = Roster::new();
 
-const _: () = assert!(MAX_CPUS == crate::scheduler::MAX_CPUS);
+/// Size every per-CPU table for the `capacity` CPUs the MADT enables, while
+/// the boot CPU runs alone and before its own per-CPU block exists: once, and
+/// never freed, so no fatal path allocates.
+///
+/// Bounded by the trace diary's record, which names its CPU in 16 bits
+/// (`toyos_abi::trace::TraceRecord::cpu`): a machine past it is refused by
+/// name. The MADT's own length bounds what firmware can ask for below that.
+pub fn size(capacity: usize) {
+    assert!(capacity > 0, "smp: the MADT enables no processor, the boot CPU's own among them");
+    assert!(
+        capacity <= usize::from(u16::MAX) + 1,
+        "smp: the MADT enables {capacity} processors and a diary record names a CPU in 16 bits"
+    );
+    ROSTER.size(capacity);
+    crate::cpu_local::size(capacity);
+    crate::arch::size(capacity);
+    crate::counters::size(capacity);
+    crate::log::size(capacity);
+    crate::trace::size(capacity);
+    log!("smp: tables sized for the {capacity} processors the MADT enables");
+}
 
+/// The CPUs the firmware names, online or not: what every per-CPU table and
+/// log cursor is sized by. 1 before [`size`].
+pub fn capacity() -> u32 {
+    ROSTER.capacity().max(1) as u32
+}
+
+/// The CPUs committed so far, dense ids `0..cpu_count()`.
 pub fn cpu_count() -> u32 {
     ROSTER.count()
 }

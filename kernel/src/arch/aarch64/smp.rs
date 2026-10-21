@@ -32,7 +32,7 @@ pub struct ApStart {
 }
 
 /// Start every other CPU `gic` names, in the MADT's order, until one does not
-/// echo within [`AP_START`] or the roster is full, then install the tree the
+/// echo within [`AP_START`], then install the tree the
 /// PPTT at `rsdp_addr` places the online ones in.
 pub fn start(gic: &irqchip::Gic, rsdp_addr: u64) {
     let me = cpu::hardware_id();
@@ -67,10 +67,7 @@ fn start_others(gic: &irqchip::Gic, me: u32, online: &mut Vec<Gicc>) {
     let root = paging::bringup_root();
     let entry = DirectMap::phys_of(super::boot::ap_start as *const u8);
     for gicc in others {
-        let Some(attempt) = ROSTER.begin_attempt() else {
-            log!("SMP: roster full at {} CPUs; ignoring further MADT entries", smp::cpu_count());
-            break;
-        };
+        let attempt = ROSTER.begin_attempt();
         let start: &'static ApStart = Box::leak(Box::new(ApStart {
             root,
             stack_top: smp::bringup_stack(),

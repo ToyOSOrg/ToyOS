@@ -109,14 +109,21 @@ impl Machine for KernelHw {
 #[cfg(feature = "boot-actuators")]
 const DIAG_TICK_NS: u64 = 100_000_000;
 
-/// Which context each CPU last switched onto; read by [`report_contexts`] on crash, since a
+/// Which context a CPU last switched onto; read by [`report_contexts`] on crash, since a
 /// sibling's real `CpuSched` is `!Sync` and unreadable directly.
-static RUNNING_CTX: [AtomicU64; crate::sched::MAX_CPUS] =
-    [const { AtomicU64::new(0) }; crate::sched::MAX_CPUS];
+pub struct Local {
+    running_ctx: AtomicU64,
+}
+
+impl Local {
+    pub fn new() -> Self {
+        Self { running_ctx: AtomicU64::new(0) }
+    }
+}
 
 /// This CPU is about to stand on `ctx`: `Hw::switch`'s last word before the stack moves.
 pub(crate) fn note_running(ctx: *const KernelCtx) {
-    RUNNING_CTX[percpu::cpu_id() as usize].store(ctx as u64, Relaxed);
+    crate::cpu_local::here().hw.running_ctx.store(ctx as u64, Relaxed);
 }
 
 /// Prints which CPU is standing on which context and stack, on every kernel crash.
@@ -127,12 +134,12 @@ pub(crate) fn note_running(ctx: *const KernelCtx) {
 /// could try to take.
 pub fn report_contexts(sp: u64, subject: Option<u64>) {
     let me = percpu::cpu_id() as usize;
-    let count = (crate::smp::cpu_count() as usize).min(crate::sched::MAX_CPUS);
-    let mine = RUNNING_CTX.get(me).map_or(0, |slot| slot.load(Relaxed));
+    let running = |cpu: usize| crate::cpu_local::get(cpu as u32).map_or(0, |local| local.hw.running_ctx.load(Relaxed));
+    let mine = running(me);
     let subject = subject.unwrap_or(mine);
     crate::log!("  Contexts: cpu{me} crashed at sp={sp:#018x}, asking about ctx {subject:#x}");
-    for (cpu, slot) in RUNNING_CTX.iter().enumerate().take(count) {
-        let held = slot.load(Relaxed);
+    for cpu in 0..crate::smp::cpu_count() as usize {
+        let held = running(cpu);
         if !crate::mm::is_kernel_addr(held) || !held.is_multiple_of(8) {
             crate::log!("  cpu{cpu} is on ctx {held:#x} (never switched, or not a context)");
             continue;

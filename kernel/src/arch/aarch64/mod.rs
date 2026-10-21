@@ -102,3 +102,16 @@ pub unsafe fn percpu_fetch_add(
     counter.store(previous + 1, core::sync::atomic::Ordering::Relaxed);
     previous
 }
+
+/// This architecture's part of a CPU's `cpu_local` record: nothing.
+pub struct CpuLocal;
+
+impl CpuLocal {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// What this architecture keeps for each CPU outside that record: nothing,
+/// since a broadcast `TLBI` needs no answer from each CPU.
+pub fn size(_cpus: usize) {}

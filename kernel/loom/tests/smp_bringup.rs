@@ -25,14 +25,22 @@ const MISREAD: u32 = 5;
 const POLLS: usize = 4;
 
 /// A reader that sees a committed count sees the slot it covers.
+
+/// A roster for a boot CPU and the one AP every model here starts.
+fn two_slots() -> Roster {
+    let roster = Roster::new();
+    roster.size(2);
+    roster
+}
+
 #[test]
 fn a_committed_count_never_outruns_its_slot() {
     /// This test's own guard against a bounded exploration passing without
     /// reaching the state: the tests run in parallel in one binary.
     static SAW: AtomicBool = AtomicBool::new(false);
     loom::model(|| {
-        let r = Arc::new(Roster::new());
-        let attempt = r.begin_attempt().expect("a slot is free");
+        let r = Arc::new(two_slots());
+        let attempt = r.begin_attempt();
         assert_eq!(attempt.id(), 1, "cpu1 is the first AP");
         become_cpu(HARDWARE_ID);
         r.echo(attempt.token());
@@ -69,7 +77,7 @@ fn a_released_machine_is_answering() {
     /// reaching the state: the tests run in parallel in one binary.
     static SAW: AtomicBool = AtomicBool::new(false);
     loom::model(|| {
-        let r = Arc::new(Roster::new());
+        let r = Arc::new(two_slots());
 
         let release = {
             let r = r.clone();
@@ -109,8 +117,8 @@ fn a_released_machine_is_answering() {
 )]
 fn an_ap_that_reads_another_id_is_refused() {
     loom::model(|| {
-        let r = Arc::new(Roster::new());
-        let attempt = r.begin_attempt().expect("a slot is free");
+        let r = Arc::new(two_slots());
+        let attempt = r.begin_attempt();
 
         let ap = {
             let r = r.clone();

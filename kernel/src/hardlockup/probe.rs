@@ -58,7 +58,7 @@ static PROBE_LOCK: crate::sync::Lock<()> = crate::sync::Lock::new(());
 /// Called from `deadline`'s staged wedge as each CPU arrives there, and from
 /// nowhere else. Two CPUs have a part; the rest go back and spin out the wedge.
 pub fn stage() {
-    let cpus = (smp::cpu_count() as usize).min(crate::sched::MAX_CPUS);
+    let cpus = smp::cpu_count() as usize;
     let bound_ms = super::bound_ms();
     // Refused by name: two CPUs, one to hold the lock and one to go deaf
     // wanting it, and a bound for the deaf one to outlast. A control that

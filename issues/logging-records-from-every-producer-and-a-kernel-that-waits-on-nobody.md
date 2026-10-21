@@ -26,8 +26,9 @@ What is left, in order:
 
 **1. The kernel's ring, rebuilt as one lockless variable-length ring with a
 global sequence** — the shape of Linux's `printk_ringbuffer`. The cursor becomes
-one `u64`, so the CPU count leaves the ABI (`MAX_LOG_SHARDS` is `LogCursor`'s
-width today); the k-way merge and the shard registry go; the loom models are
+one `u64`, so the CPU count leaves the ABI (a cursor holds a position per CPU
+the firmware names today, `toyos_abi::log::CursorHead`); the k-way merge and
+the shard registry go; the loom models are
 rewritten. The ring lives in persistent RAM, so a triple fault or a firmware
 reset — which seal nothing today — leaves the last boot's tail, and the next
 boot's `logd` reads it through `SYS_LOG_READ` under a flag and writes it to

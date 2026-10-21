@@ -179,6 +179,9 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         bsp_id,
         "smp: the boot CPU reads its own hardware id as {read:#x}, and its roster slot and every IPI name it {bsp_id:#x}"
     );
+    // So every other MADT entry is one attempt and the roster, sized by the
+    // MADT, holds each.
+    assert!(madt.apic_ids.contains(&bsp_id), "smp: the MADT names no CPU with the boot CPU's id {bsp_id:#x}");
     ROSTER.set_bsp(bsp_id);
     let mut topology = Vec::from([cpu::topology_keys()]);
     copy_trampoline();
@@ -191,11 +194,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     for &ap_id in &madt.apic_ids {
         if ap_id == bsp_id { continue; }
 
-        // Refused at MAX_CPUS, bounding a firmware that over-reports CPUs.
-        let Some(attempt) = ROSTER.begin_attempt() else {
-            log!("SMP: roster full at {} CPUs; ignoring further MADT entries", smp::cpu_count());
-            break;
-        };
+        let attempt = ROSTER.begin_attempt();
 
         let ap_percpu = percpu::alloc_ap(attempt.id(), attempt.token());
 

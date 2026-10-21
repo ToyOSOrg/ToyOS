@@ -35,13 +35,21 @@ const POLLS: usize = 3;
 /// pass every execution by never reaching the assertion.
 static READ: AtomicBool = AtomicBool::new(false);
 
+
+/// A round between the two CPUs every model here names.
+fn two_cpus() -> Shootdown {
+    let shootdown = Shootdown::new();
+    shootdown.size(2);
+    shootdown
+}
+
 #[test]
 fn a_cpu_read_as_answered_is_read_with_its_answer() {
     READ.store(false, SeqCst);
     let mut builder = loom::model::Builder::new();
     builder.preemption_bound = Some(2);
     builder.check(|| {
-        let rounds = Arc::new(Shootdown::new());
+        let rounds = Arc::new(two_cpus());
         let block = Arc::new(Published::new());
         block.publish(BEFORE);
         let generation = rounds.issue(Reach::Narrow);

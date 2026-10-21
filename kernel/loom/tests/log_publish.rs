@@ -21,7 +21,7 @@
 
 #![cfg(feature = "loom")]
 
-use kernel_loom::log_registry::{published, publish, slots};
+use kernel_loom::log_registry::{published, publish, size, Slots};
 use kernel_loom::log_shard::{Shard, FIRST_SEQ};
 use loom::sync::Arc;
 
@@ -33,21 +33,28 @@ use loom::sync::Arc;
 /// reader can see the pointer with `head` still zero, which reads back as a
 /// shard that has never answered for anything — a machine that lost a CPU's
 /// whole log rather than a machine that noticed.
+/// A registry for a machine of `cpus` CPUs.
+fn slots(cpus: usize) -> Slots {
+    let slots = Slots::new();
+    size(&slots, cpus);
+    slots
+}
+
 #[test]
 fn a_reader_that_finds_a_shard_finds_it_built() {
     loom::model(|| {
-        let registry = Arc::new(slots());
+        let registry = Arc::new(slots(2));
         let publisher = registry.clone();
 
         let w = loom::thread::spawn(move || {
             let shard = Box::into_raw(Box::new(Shard::new()));
             // SAFETY: leaked, so it outlives every reader; published once.
-            unsafe { publish(&publisher[..], 1, shard) };
+            unsafe { publish(&publisher, 1, shard) };
         });
 
         // The reader races the publication and must see nothing, or a shard
         // whose reservation counter is the one the constructor wrote.
-        if let Some(shard) = published(&registry[..], 0) {
+        if let Some(shard) = published(&registry, 0) {
             assert_eq!(
                 shard.head(),
                 FIRST_SEQ,
@@ -57,7 +64,7 @@ fn a_reader_that_finds_a_shard_finds_it_built() {
         }
 
         w.join().unwrap();
-        let shard = published(&registry[..], 0).expect("published once the writer has joined");
+        let shard = published(&registry, 0).expect("published once the writer has joined");
         assert_eq!(shard.head(), FIRST_SEQ);
     });
 }
@@ -67,10 +74,10 @@ fn a_reader_that_finds_a_shard_finds_it_built() {
 #[test]
 fn an_unpublished_slot_answers_for_nothing() {
     loom::model(|| {
-        let registry = slots();
+        let registry = slots(8);
         for ap in 0..registry.len() {
-            assert!(published(&registry[..], ap).is_none());
+            assert!(published(&registry, ap).is_none());
         }
-        assert!(published(&registry[..], registry.len()).is_none());
+        assert!(published(&registry, registry.len()).is_none());
     });
 }
