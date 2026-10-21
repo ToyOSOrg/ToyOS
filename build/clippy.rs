@@ -160,10 +160,10 @@ const SHAPES: &[Shape] = &[
         before: &["-p", CRYPTO, "--all-targets"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
-    // `--no-deps` because its dependency `toyos` is a guest crate no shape
-    // lints. Its own target directory because `--no-deps` checks without clippy
-    // the host crates the workspace shapes lint, which `toyos-abi`'s shape
-    // below says costs every run.
+    // `--no-deps` because its dependency `toyos` is a guest crate, linted by
+    // the shapes that build it. Its own target directory because `--no-deps`
+    // checks without clippy the host crates the workspace shapes lint, which
+    // `toyos-abi`'s shape below says costs every run.
     Shape {
         before: &[
             "-p",
@@ -200,6 +200,13 @@ const SHAPES: &[Shape] = &[
             "--target-dir",
             "target/clippy-font",
         ],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    // `toyos`'s tests, its transport's loom models among them: the workspace
+    // shapes exclude it and lint its library only as their members'
+    // dependency.
+    Shape {
+        before: &["-p", "toyos", "--all-targets"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     // Its own target directory: cargo keeps one check of a unit, so a unit

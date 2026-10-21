@@ -4,7 +4,7 @@
 //! request is bounded here against the arena and the partition, and a word
 //! this protocol does not define is a refusal, never a default.
 
-use toyos_transport::Run;
+use toyos::transport::Run;
 
 use crate::layout::{ARENA, CQE_WORDS, MAX_REQUEST_BLOCKS, SQE_WORDS};
 

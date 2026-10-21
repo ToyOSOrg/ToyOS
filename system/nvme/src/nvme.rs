@@ -245,6 +245,8 @@ impl Controller {
         if mqes < IO_DEPTH as u32 {
             return Err(Refusal::Geometry(format!("the controller's queues hold {mqes} entries")));
         }
+        // Every address NVMe carries — queue bases and PRP entries — is 64 bits.
+        dev.dma_limit(64).map_err(|e| Refusal::Kernel("the address limit", e))?;
         let grant = dev.dma_alloc(GRANT_BYTES).map_err(|e| Refusal::Kernel("a DMA grant", e))?;
         // SAFETY: the grant is at least `GRANT_BYTES` and lives as long as
         // `grant`, which this struct holds.
@@ -328,6 +330,8 @@ impl Controller {
             self.regs.write::<u32>(REG_CC, cc & !1);
         }
         self.settle(false, "CSTS.RDY clearing")?;
+        // Disabled, so it runs no queue a previous holder or firmware left.
+        self.dev.dma_start().map_err(|e| Refusal::Kernel("the bus-master start", e))?;
         self.dma.sub(OFF_ADMIN_SQ, PAGE).zero();
         self.dma.sub(OFF_ADMIN_CQ, PAGE).zero();
         self.admin = Queue::new(0, ADMIN_DEPTH, OFF_ADMIN_SQ, OFF_ADMIN_CQ);

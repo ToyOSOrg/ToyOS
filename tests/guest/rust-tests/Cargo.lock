@@ -890,7 +890,6 @@ name = "toyos"
 version = "0.18.0"
 dependencies = [
  "toyos-abi",
- "toyos-transport",
 ]
 
 [[package]]
@@ -998,10 +997,6 @@ version = "0.1.0"
 dependencies = [
  "toyos-abi",
 ]
-
-[[package]]
-name = "toyos-transport"
-version = "0.1.0"
 
 [[package]]
 name = "toyos-virtio"

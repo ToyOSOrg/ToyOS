@@ -1,7 +1,8 @@
 //! ToyOS userland SDK.
 //!
 //! Typed handles, IPC framing, ports and namespaces, shared memory, and
-//! ergonomic wrappers over the kernel ABI defined in `toyos-abi`.
+//! ergonomic wrappers over the kernel ABI defined in `toyos-abi`, and the
+//! [`transport`] client/server sessions run over.
 
 // `not(test)` so this crate's own decisions can be unit-tested on the host.
 // [`net::hangup`] is a total function from a kernel word to a [`net::NetError`]
@@ -33,6 +34,7 @@ pub mod spawn;
 pub mod syscap;
 pub mod sync;
 pub mod system;
+pub mod transport;
 pub mod volatile;
 
 pub use ipc::Connection;

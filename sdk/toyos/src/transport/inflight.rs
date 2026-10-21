@@ -12,7 +12,7 @@
 
 use core::fmt;
 
-use crate::Violation;
+use super::Violation;
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 struct Slot<T> {
@@ -76,9 +76,9 @@ impl<T, const D: usize> Inflight<T, D> {
     /// it carried, and none of them is answered again.
     pub fn end(&mut self, mut each: impl FnMut(u32, T)) {
         for (index, slot) in (0u32..).zip(self.slots.iter_mut()) {
-            #[cfg(not(feature = "end-keeps-inflight"))]
+            #[cfg(not(feature = "transport-end-keeps-inflight"))]
             let value = slot.value.take();
-            #[cfg(feature = "end-keeps-inflight")]
+            #[cfg(feature = "transport-end-keeps-inflight")]
             let value = None;
             if let Some(value) = value {
                 each(Self::tag(slot.seq, index), value);

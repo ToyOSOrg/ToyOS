@@ -25,6 +25,9 @@ toyos-gpt = { path = "../../lib/gpt" }
 toyos-blockring = { path = "../../lib/blockring" }
 # The slot table, read through a session where the block service serves it.
 diskserver = { path = "../diskserver" }
+# Whether a virtio function offers `VIRTIO_F_ACCESS_PLATFORM`, read through
+# its claim before the claim moves to its holder.
+toyos-pci-claim = { path = "../../lib/pci-claim" }
 # How long a stop is prepared before the kernel is asked for it.
 toyos-quiesce = { path = "../../lib/quiesce" }
 

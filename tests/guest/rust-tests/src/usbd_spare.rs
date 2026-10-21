@@ -200,8 +200,11 @@ pub fn fault(cap: &SysCap) {
     let bar = dev.map_bar(0, info.bar_bytes[0]).expect("usbd_spare: BAR 0");
     // SAFETY: the mapping is the BAR's length and lives as long as `bar`.
     let regs = unsafe { Window::new(bar.as_ptr(), info.bar_bytes[0] as usize) };
-    // One page granted, which is what starts the function mastering the bus.
+    // One page granted, and the function started: mastering is what its
+    // aimed fetch needs.
+    dev.dma_limit(64).expect("usbd_spare: the address limit");
     let grant = dev.dma_alloc(4096).expect("usbd_spare: a grant");
+    dev.dma_start().expect("usbd_spare: the start");
     let op = usize::from(regs.read::<u8>(0));
     let db = (regs.read::<u32>(0x14) & !3) as usize;
     let settle = |what: &str, done: &dyn Fn() -> bool| {

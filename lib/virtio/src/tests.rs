@@ -6,6 +6,7 @@ use std::vec::Vec;
 
 
 use crate::pci::{
+    offered_features,
     status, Layout, Live, Offer, Refusal, Setup, Source, VendorCap, WalkRefusal,
     VIRTIO_F_ACCESS_PLATFORM, VIRTIO_F_VERSION_1,
 };
@@ -1079,4 +1080,20 @@ fn a_ring_past_the_grant_is_the_drivers_mistake() {
 fn a_part_off_its_alignment_is_the_drivers_mistake() {
     let machine = Machine::new();
     let _ = Virtqueue::new(machine, 0, SIZE, Parts { desc: 0, avail: 128, used: 154 });
+}
+
+/// The offer is read without the device being reset or told anything: its
+/// status is untouched, and a device that withholds `ACCESS_PLATFORM` is
+/// seen to.
+#[test]
+fn the_offer_is_read_without_touching_the_device() {
+    let machine = Machine::new();
+    assert_eq!(
+        offered_features(&machine, &layout(&machine)),
+        Ok(VIRTIO_F_VERSION_1 | VIRTIO_F_ACCESS_PLATFORM | FEATURE_OFFERED)
+    );
+    assert_eq!(machine.statuses(), Vec::<u8>::new());
+    machine.state(|s| s.offered &= !VIRTIO_F_ACCESS_PLATFORM);
+    let offered = offered_features(&machine, &layout(&machine)).expect("read");
+    assert_eq!(offered & VIRTIO_F_ACCESS_PLATFORM, 0);
 }

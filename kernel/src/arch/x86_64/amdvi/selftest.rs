@@ -61,9 +61,12 @@ pub fn run(devices: &[PciDevice]) {
 
     let before = super::fault::recorded();
     let masked = crate::arch::IrqGuard::close();
-    let refused = write(kept_regs, at, phys);
+    // Past the memory the identity domain maps; a domain's own addresses are
+    // handed out lowest first, so they are no such address.
+    let unmapped = crate::mm::pmm::top().next_multiple_of(PAGE_2M);
+    let refused = write(kept_regs, unmapped, phys);
     log!(
-        "amdvi-selftest: {on_identity}'s write at {at:#x}, which the identity domain does not map, answered \
+        "amdvi-selftest: {on_identity}'s write at {unmapped:#x}, which the identity domain does not map, answered \
          {refused:#x}: {}",
         verdict(refused, REFUSED)
     );

@@ -450,7 +450,8 @@ pub(crate) const SDK_DIR: &str = "sdk/toyos";
 const KERNEL_LOOM: &str = "kernel-loom";
 const KERNEL_SIM: &str = "kernel-sim";
 const BLOCKRING: &str = "toyos-blockring";
-const TRANSPORT: &str = "toyos-transport";
+/// The SDK package, whose `transport` module carries its own controls.
+const SDK: &str = "toyos";
 
 /// `toyos-crypto`, tested and linted in each of [`CRYPTO_FORMS`] rather than
 /// with the features the workspace's other members unify onto it.
@@ -630,6 +631,12 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("pcid::tests::two_live_address_spaces_never_share_a_pcid"),
         Passes("pcid::oracle::tests::the_counting_allocator_produces_a_cross_space_read"),
     ]),
+    // A grant past its holder's limit is issued, truncated, as another grant.
+    red(KERNEL, "iova-ignores-limit", None, &[
+        Fails("iova::tests::a_function_that_drops_its_upper_bits_reaches_only_its_own_grant"),
+        Fails("iova::tests::every_grant_is_the_lowest_allowed_run_below_its_limit"),
+        Fails("iova::tests::the_amd_benchs_layout"),
+    ]),
     red(KERNEL, "mutate-spawn-skips-the-insert-recheck", None, &[
         Fails("proclife::interleave::tests::a_published_exit_leaves_no_unretired_thread"),
         Fails("proclife::interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
@@ -689,20 +696,20 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         Fails("model::tests::what_a_flush_calls_durable_is_on_the_medium"),
     ]),
-    red(TRANSPORT, "publish-relaxed", Some("loom"), &[
+    red(SDK, "transport-publish-relaxed", Some("transport_loom"), &[
         Fails("a_published_entry_is_read_whole"),
         Fails("a_published_byte_is_read_as_written"),
     ]),
-    red(TRANSPORT, "head-relaxed", Some("loom"), &[Fails("a_published_byte_is_read_as_written")]),
-    red(TRANSPORT, "no-clamp", Some("loom"), &[Fails(
+    red(SDK, "transport-head-relaxed", Some("transport_loom"), &[Fails("a_published_byte_is_read_as_written")]),
+    red(SDK, "transport-no-clamp", Some("transport_loom"), &[Fails(
         "a_hostile_producer_yields_entries_or_a_violation",
     )]),
-    red(TRANSPORT, "no-clamp", None, &[Fails(
-        "stream::tests::a_hostile_producer_hands_the_consumer_at_most_the_ring",
+    red(SDK, "transport-no-clamp", None, &[Fails(
+        "transport::stream::tests::a_hostile_producer_hands_the_consumer_at_most_the_ring",
     )]),
     // The stream's lost wake: a sleeper whose exchange read the waker's clear
     // looks at a cursor from before it, and sleeps with nobody to ring.
-    red(TRANSPORT, "want-relaxed", Some("loom"), &[
+    red(SDK, "transport-want-relaxed", Some("transport_loom"), &[
         Fails("a_consumer_that_looked_again_is_rung_for_bytes_it_missed"),
         Fails("a_producer_that_looked_again_is_rung_for_room_it_missed"),
         Fails("two_sleepers_each_wake_when_room_is_released_first"),
@@ -718,24 +725,24 @@ pub(crate) const CONTROLS: &[Control] = &[
     // A session's lost wakes: a reader and a writer on one doorbell, a take
     // not passed on, a registration that neither arms nor rings, and a reset
     // a look that arms does not see.
-    red(TRANSPORT, "one-doorbell", Some("loom"), &[
+    red(SDK, "transport-one-doorbell", Some("transport_loom"), &[
         Fails("two_sleepers_each_wake_when_room_is_released_first"),
         Fails("two_sleepers_each_wake_when_data_is_published_first"),
     ]),
-    red(TRANSPORT, "no-pass-on", Some("loom"), &[
+    red(SDK, "transport-no-pass-on", Some("transport_loom"), &[
         Fails("a_poll_beside_a_blocking_read_is_answered_for_the_bytes_it_left"),
         Fails("a_poll_beside_a_blocking_read_is_answered_for_the_end_it_left"),
         Fails("a_poll_beside_a_blocking_write_is_answered_for_the_room_it_left"),
     ]),
-    red(TRANSPORT, "register-no-arm", Some("loom"), REGISTERED),
-    red(TRANSPORT, "register-no-ring", Some("loom"), REGISTERED),
-    red(TRANSPORT, "register-neither", Some("loom"), REGISTERED),
-    red(TRANSPORT, "head-only", Some("loom"), &[
+    red(SDK, "transport-register-no-arm", Some("transport_loom"), REGISTERED),
+    red(SDK, "transport-register-no-ring", Some("transport_loom"), REGISTERED),
+    red(SDK, "transport-register-neither", Some("transport_loom"), REGISTERED),
+    red(SDK, "transport-head-only", Some("transport_loom"), &[
         Fails("a_source_registered_over_a_full_ring_after_a_reset_gets_its_first_event"),
         Fails("a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event"),
     ]),
-    red(TRANSPORT, "end-keeps-inflight", None, &[Fails(
-        "inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
+    red(SDK, "transport-end-keeps-inflight", None, &[Fails(
+        "transport::inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
     )]),
 ];
 

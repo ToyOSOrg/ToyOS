@@ -25,7 +25,8 @@ a_consumer_that_looked_again_is_rung_for_bytes_it_missed --exact` kills the
 test binary with SIGABRT, `panic in a destructor during cleanup`, through
 `<loom::sync::arc::Arc<Stream> as Drop>::drop` and `rt::arc::Arc::ref_dec`.
 On std's `Arc` the same run prints the test's `FAILED` line and loom's
-`deadlock; threads = ...`.
+`deadlock; threads = ...`. That model is now `sdk/toyos/tests/transport_loom.rs`,
+its control `transport-want-relaxed` of `toyos`.
 
 **Owner**: the orchestrator. Nobody holds it.
 

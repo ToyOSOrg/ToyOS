@@ -7,7 +7,6 @@
 
 use alloc::vec::Vec;
 
-use crate::iommu::window;
 use crate::iommu::{AddressWidth, Iova, StreamId};
 use crate::mm::pmm::{self, PhysPage};
 use crate::mm::{DirectMap, Mmio, PAGE_2M};
@@ -209,18 +208,14 @@ pub const fn translatable_bits(width: AddressWidth, mgaw: u8) -> u8 {
     if mgaw < width.bits() { mgaw } else { width.bits() }
 }
 
-/// A unit whose `MGAW` is narrower than its `SAGAW` gets its window under the
-/// smaller of the two.
+/// A unit whose `MGAW` is narrower than its `SAGAW` gets its addresses under
+/// the smaller of the two.
 ///
 /// Asserted here rather than in a guest because no guest holds the shape: QEMU's
 /// `intel-iommu` derives both fields from one `aw-bits` property, so its model
 /// cannot report a `SAGAW` wider than its `MGAW` at all.
 const _: () = {
     assert!(translatable_bits(AddressWidth::Bits48, 39) == 39);
-    assert!(window::first_address(39) < 1 << 39);
-    // What a window placed by the table depth alone would be, against the
-    // ceiling such a unit reports.
-    assert!(window::first_address(48) >= 1 << 39);
     // A unit whose two limits agree is unchanged by any of this.
     assert!(translatable_bits(AddressWidth::Bits48, 48) == 48);
     assert!(translatable_bits(AddressWidth::Bits39, 39) == 39);

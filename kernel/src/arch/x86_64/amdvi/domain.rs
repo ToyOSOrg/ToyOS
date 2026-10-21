@@ -16,7 +16,7 @@
 use alloc::vec::Vec;
 
 use crate::iommu::domains::{self, Domains};
-use crate::iommu::{DomainId, IommuError, Iova, StreamId};
+use crate::iommu::{DomainId, IommuError, Iova, Limit, StreamId};
 use crate::log;
 use crate::sync::Lock;
 use toyos_acpi::Requesters;
@@ -121,10 +121,10 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     Ok(amd.domains.add(next, space, alloc::format!("root={:#x} mode={ROOT_LEVEL}", space.root.get())))
 }
 
-pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
+pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {
     let mut held = DOMAINS.lock();
     let amd = held.as_mut().expect("amdvi: a domain exists only once a unit translates");
-    let (space, at) = amd.domains.map(id, phys, bytes)?;
+    let (space, at) = amd.domains.map(id, phys, bytes, limit)?;
     place_leaves(id, space, at, phys, bytes);
     Ok(at)
 }

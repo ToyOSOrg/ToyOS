@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::marker::PhantomData;
 use core::ptr::{copy_nonoverlapping, read_unaligned, read_volatile, write_bytes, write_volatile};
 
-use crate::iommu::DeviceSpace;
+use crate::iommu::{DeviceSpace, IommuError, Limit};
 
 use super::pmm::PhysPage;
 use super::DirectMap;
@@ -176,19 +176,23 @@ pub struct DmaPool {
 
 impl DmaPool {
     /// Take enough contiguous 2 MiB pages to cover `size` bytes, mapped into
-    /// `space` and reachable by nothing outside it.
-    pub fn alloc_in(size: usize, space: DeviceSpace) -> Self {
+    /// `space` below `limit`, the device's address width, and reachable by
+    /// nothing outside it; refused where none below it is left — for an
+    /// untranslated device, where the pages lie above it.
+    pub fn alloc_in(size: usize, space: DeviceSpace, limit: Limit) -> Result<Self, IommuError> {
         let pages_2m = size.div_ceil(super::PAGE_2M as usize);
         let pages = super::pmm::alloc_contiguous(pages_2m)
             .expect("DmaPool: out of physical memory");
         let base = pages[0].direct_map();
         let size = pages_2m * super::PAGE_2M as usize;
-        // A domain this kernel cannot map into is a kernel bug, not a device's
-        // answer: the addresses are the allocator's own and the pages are 2 MiB.
-        let device = space
-            .map(base.phys(), size as u64)
-            .unwrap_or_else(|why| panic!("DmaPool: {why}"));
-        Self { pages, base, size, space, device }
+        // A device's width is its answer; any other refusal is a kernel bug:
+        // the addresses are the allocator's own and the pages are 2 MiB.
+        let device = match space.map(base.phys(), size as u64, limit) {
+            Ok(device) => device,
+            Err(why @ IommuError::AddressesExhausted(_)) => return Err(why),
+            Err(why) => panic!("DmaPool: {why}"),
+        };
+        Ok(Self { pages, base, size, space, device })
     }
 
     /// The whole pool as a view, borrowed so it cannot outlive `self`: the

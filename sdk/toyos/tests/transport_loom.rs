@@ -2,16 +2,16 @@
 //! runs both ends on one thread can reach.
 //!
 //! - **Publication**: a consumer that sees a tail sees every word of the
-//!   entries below it. `publish-relaxed` takes the edge away.
+//!   entries below it. `transport-publish-relaxed` takes the edge away.
 //! - **A hostile peer** leaves the honest end with entries, nothing, or a
-//!   named violation, and never more entries than the ring holds. `no-clamp`
-//!   believes the peer.
+//!   named violation, and never more entries than the ring holds.
+//!   `transport-no-clamp` believes the peer.
 //! - **A session's three waits**, each over `session`'s own sequences: a
 //!   reader and a writer asleep at once, a poll beside a blocking call of one
 //!   direction, and a source registered while its direction is ready. Each
 //!   case names the controls that red it.
 //!
-//!   cargo test -p toyos-transport --features <control> --test loom
+//!   cargo test -p toyos --features <control> --test transport_loom
 
 use core::sync::atomic::Ordering;
 use std::rc::Rc;
@@ -19,7 +19,7 @@ use std::rc::Rc;
 use loom::cell::Cell;
 use loom::sync::atomic::AtomicU32;
 use loom::sync::{Arc, Notify};
-use toyos_transport::{stream, Consumer, Place, Producer, Violation, Word};
+use toyos::transport::{stream, Consumer, Place, Producer, Violation, Word};
 
 /// A loom atomic as a region word: the trait is this crate's and the type is
 /// loom's, so the two meet through a wrapper.
@@ -207,7 +207,7 @@ fn receive(s: &Stream, rx: &mut stream::Consumer<RING, 4>) -> u32 {
 /// A consumer that polls reads each byte as the producer wrote it, through a
 /// ring that wraps under it: its copy out follows the producer's copy in, and
 /// the producer's next copy into that byte follows its copy out.
-/// `publish-relaxed` takes the first edge away.
+/// `transport-publish-relaxed` takes the first edge away.
 #[test]
 fn a_published_byte_is_read_as_written() {
     loom::model(|| {
@@ -234,8 +234,9 @@ fn a_published_byte_is_read_as_written() {
 }
 
 /// A consumer sleeps whenever the look after arming finds the ring empty, and
-/// the byte published around its sleep still reaches it. `want-relaxed` lets
-/// it miss the tail stored before the want it read cleared.
+/// the byte published around its sleep still reaches it.
+/// `transport-want-relaxed` lets it miss the tail stored before the want it
+/// read cleared.
 #[test]
 fn a_consumer_that_looked_again_is_rung_for_bytes_it_missed() {
     loom::model(|| {
@@ -253,8 +254,9 @@ fn a_consumer_that_looked_again_is_rung_for_bytes_it_missed() {
 }
 
 /// A producer sleeps whenever the look after arming finds the ring full, and
-/// the room released around its sleep still reaches it. `want-relaxed` lets
-/// it miss the head stored before the want it read cleared.
+/// the room released around its sleep still reaches it.
+/// `transport-want-relaxed` lets it miss the head stored before the want it
+/// read cleared.
 #[test]
 fn a_producer_that_looked_again_is_rung_for_room_it_missed() {
     loom::model(|| {
@@ -289,7 +291,7 @@ fn a_producer_that_looked_again_is_rung_for_room_it_missed() {
 
 use loom::sync::atomic::AtomicBool;
 use loom::sync::{Condvar, Mutex};
-use toyos_transport::session::{
+use toyos::transport::session::{
     self, Bells, Doorbell, Layout, Lock, Mode, Polled, Receiving, Refused, Rings, Sending, Server, Took, Waited, Way,
 };
 
@@ -527,8 +529,8 @@ enum First {
 /// A reader asleep over an empty receive ring and a writer asleep over a full
 /// send ring, while the server releases room and publishes data in either
 /// order: each wakes, as each waits on a doorbell of its own.
-/// `one-doorbell` lets the reader take the writer's wake, or the writer the
-/// reader's.
+/// `transport-one-doorbell` lets the reader take the writer's wake, or the
+/// writer the reader's.
 fn two_sleepers(first: First) {
     bounded(move || {
         let (s, mut server) = Session::new();
@@ -579,9 +581,10 @@ enum Left {
 }
 
 /// A blocking call and a `poll` of one direction, the server making the
-/// direction ready once and then answering each ring: the poll is answered
-/// with the direction ready, whichever of them took the doorbell.
-/// `no-pass-on` lets the blocking call take the wake the poll sleeps over.
+/// direction ready once and then answering each ring: the poll is answered with
+/// the direction ready, whichever of them took the doorbell.
+/// `transport-no-pass-on` lets the blocking call take the wake the poll sleeps
+/// over.
 fn same_direction(left: Left) {
     bounded(move || {
         let (s, mut server) = Session::new();
@@ -661,13 +664,13 @@ enum Ready {
 }
 
 /// A source registered while its direction is ready, or racing the server
-/// making it so, gets its first event: its doorbell is watched, as mio's
-/// select watches it, and each event leads to the nonblocking operation,
-/// until that finds the direction ready. `register-no-arm`,
-/// `register-no-ring` and `register-neither` take the registration's arm or
-/// ring or both away; `want-relaxed` lets a racing server's clear go unseen;
-/// `head-only` makes the reset no readiness to the arm's look or the ring
-/// back.
+/// making it so, gets its first event: its doorbell is watched, as mio's select
+/// watches it, and each event leads to the nonblocking operation, until that
+/// finds the direction ready. `transport-register-no-arm`,
+/// `transport-register-no-ring` and `transport-register-neither` take the
+/// registration's arm or ring or both away; `transport-want-relaxed` lets a
+/// racing server's clear go unseen; `transport-head-only` makes the reset no
+/// readiness to the arm's look or the ring back.
 fn registered(ready: Ready, racing: bool) {
     bounded(move || {
         let (s, mut server) = Session::new();

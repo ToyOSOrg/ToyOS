@@ -110,7 +110,7 @@ and the ACPI read-out in `s1-r2/`
   alone.
 
 **S2, the link hop's cost on the T14.** A scout, never landing: two
-processes over `toyos-transport`, one entry per 1,514-byte frame, batches of
+processes over `toyos::transport`, one entry per 1,514-byte frame, batches of
 1, 8 and 32, both directions, each side copying each frame once. Owner: the
 orchestrator. Depends on: nothing. Exit: cycles per frame and frames a
 second on one CPU, reported in P4's design round. Beside them stands the
@@ -180,7 +180,7 @@ stage 3 of `issues/the-lan-is-not-yet-production-grade.md`, whole.
 - **Exit:** that stage's exit, a driver killed and restarted with the
   stack's connections intact (held in a guest) and an unlisted but matching
   NIC up with no configuration change; and with it:
-  - the `link` protocol on `toyos-transport`, adding no transport primitive;
+  - the `link` protocol on `toyos::transport`, adding no transport primitive;
   - `Card` gone;
   - the supervisor binding drivers from a declared match table by vendor,
     device and class;

@@ -121,41 +121,42 @@ pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// Every domain's addresses lie outside every root-bridge window firmware
-/// declared: a bridge may route a request in one of those before the unit
-/// sees it.
+/// Every address a domain mapped lies outside every root-bridge window
+/// firmware declared: a bridge may route a request in one of those before the
+/// unit sees it.
 pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
     const DECLARED: &str = "pcidev: firmware declared root bridge memory: ";
     let declared = records(log)
         .find_map(|m| m.strip_prefix(DECLARED))
         .ok_or_else(|| format!("no `{DECLARED}` record:\n{}", log.text()))?;
+    let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
     let range = |text: &str| -> Option<(u64, u64)> {
         let (from, to) = text.split_once("..")?;
-        let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
         Some((hex(from)?, hex(to)?))
     };
     let windows = declared
         .split(", ")
         .map(|w| w.strip_prefix("mem ").and_then(range).ok_or_else(|| format!("{w:?} in {declared:?}")))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut domains = 0;
-    for record in records(log).filter(|m| m.starts_with("iommu: domain")) {
-        let Some((_, span)) = record.split_once(" addresses from ") else { continue };
-        let (floor, ceiling) = span
-            .split_once(" to ")
-            .and_then(|(from, to)| range(&format!("{from}..{to}")))
-            .ok_or_else(|| format!("an unreadable domain record: {record:?}"))?;
-        if let Some((base, end)) = windows.iter().find(|(base, end)| *end > floor && *base < ceiling) {
-            return Err(format!(
-                "{record:?} hands out addresses inside the root-bridge window {base:#x}..{end:#x}"
-            ));
+    let mut mapped = 0;
+    // `iommu: domainN maps <phys>..<end> at <device address>[ again]`.
+    for record in records(log).filter(|m| m.starts_with("iommu: domain") && m.contains(" maps ")) {
+        let parsed = record.split_once(" maps ").and_then(|(_, rest)| {
+            let (phys, at) = rest.split_once(" at ")?;
+            let (from, to) = range(phys)?;
+            let at = hex(at.trim_end_matches(" again"))?;
+            Some((at, at + (to - from)))
+        });
+        let (at, end) = parsed.ok_or_else(|| format!("an unreadable mapping record: {record:?}"))?;
+        if let Some((base, top)) = windows.iter().find(|(base, top)| *top > at && *base < end) {
+            return Err(format!("{record:?} maps device addresses inside the root-bridge window {base:#x}..{top:#x}"));
         }
-        domains += 1;
+        mapped += 1;
     }
-    if domains == 0 {
-        return Err(format!("no domain was made on this boot:\n{}", log.text()));
+    if mapped == 0 {
+        return Err(format!("no domain mapped anything on this boot:\n{}", log.text()));
     }
-    eprintln!("  [claims] {domains} domain(s), none reaching a root-bridge window");
+    eprintln!("  [claims] {mapped} mapping(s), none reaching a root-bridge window");
     Ok(())
 }
 

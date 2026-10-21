@@ -1,6 +1,7 @@
 //! A virtio function's claim, brought to the features its driver and device
 //! agreed: the capability walk, the register window, and §3.1.1 up to
-//! `FEATURES_OK`, in the order `toyos-virtio`'s types fix.
+//! `FEATURES_OK`, in the order `toyos-virtio`'s types fix; then its 64-bit
+//! address width stated and the function started.
 //!
 //! What is the device type's own — its queues, their vectors, its
 //! configuration — begins at the [`Setup`] this answers.
@@ -8,7 +9,9 @@
 use toyos::shm::SharedMemory;
 use toyos::PciDev;
 use toyos_abi::syscall::RegWidth;
-use toyos_virtio::pci::{vendor_caps, ConfigSpace, Layout, Offer, Setup, WalkRefusal, VIRTIO_F_ACCESS_PLATFORM};
+use toyos_virtio::pci::{
+    offered_features, vendor_caps, ConfigSpace, Layout, Offer, Setup, WalkRefusal, VIRTIO_F_ACCESS_PLATFORM,
+};
 
 use crate::{Bar, KernelRefused, Why};
 
@@ -94,6 +97,17 @@ impl std::fmt::Display for Features {
     }
 }
 
+/// Whether the claim's virtio function offers `VIRTIO_F_ACCESS_PLATFORM`,
+/// read without resetting it. One that does not uses physical addresses
+/// whatever translates the bus (virtio 1.2 §6.1): no domain confines it.
+///
+/// Not the claim's description, which is its holder's to read once.
+pub fn offers_access_platform(dev: &PciDev) -> Result<bool, Refusal> {
+    let layout = Layout::of(&vendor_caps(&ClaimConfig(dev)).map_err(Refusal::Walk)?)?;
+    let (window, _mapping) = Bar::map(dev, u32::from(layout.bar()), layout.common_end())?;
+    Ok(offered_features(&window, &layout)? & VIRTIO_F_ACCESS_PLATFORM != 0)
+}
+
 /// Walk the claim's capabilities, map the BAR they name, and negotiate
 /// `wanted` beside what `toyos-virtio` accepts wherever it is offered.
 ///
@@ -112,6 +126,10 @@ pub fn negotiate(dev: &PciDev, wanted: u64) -> Result<Negotiated, Refusal> {
     let offer = Offer::acknowledge(window, &layout)?;
     let offered = offer.features();
     let setup = offer.accept(wanted)?;
+    // Every address a virtqueue carries is 64 bits (virtio 1.2 §2.7.5), and
+    // the device just reset (§3.1.1) uses none before `DRIVER_OK`.
+    crate::limit(dev, 64)?;
+    crate::start(dev)?;
     let features = Features { at: (info.bus, info.dev, info.func), offered, negotiated: setup.features() };
     Ok(Negotiated { setup, mapping, features })
 }

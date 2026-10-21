@@ -153,7 +153,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
     let mut ready: Vec<(Unit, Plan)> = Vec::new();
     // What no domain's addresses may reach, RMRRs added below as the walk
     // meets them; nothing where no declaration is held.
-    let mut reserved: Option<Vec<(u64, u64)>> = windows.map(|w| w.iter().map(|w| (w.base, w.end())).collect());
+    let mut reserved: Option<Vec<(u64, u64)>> = windows
+        .map(|w| w.iter().map(|w| (w.base, w.end())).chain([super::iommu_unit::INTERRUPT_RANGE]).collect());
     for structure in dmar.structures() {
         match structure {
             Ok(Structure::Drhd(drhd)) => {
@@ -180,8 +181,8 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
             // at or above `top` is one firmware requires stay mapped and this
             // kernel does not map — a device in its scope would fault on the
             // access firmware reserved the range for. The other half, that it
-            // is mapped *nowhere else*, is structural: a driver domain's window
-            // begins above `top` or `Domain::new` refuses it.
+            // is mapped *nowhere else*, is structural: every domain's addresses
+            // are built clear of it (`domain::avoid`).
             Ok(Structure::Rmrr(rmrr)) => {
                 let held = rmrr.limit() < identity_top;
                 // Spelled whole in each arm rather than with the verdict as a

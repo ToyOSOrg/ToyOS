@@ -26,18 +26,18 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
-use toyos_transport::session::{self, Bells, Doorbell, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
-use toyos_transport::stream::Place;
-use toyos_transport::Span;
 
 use crate::ipc::Connection;
 use crate::shm::SharedMemory;
 use crate::sync::Lock;
+use crate::transport::session::{self, Bells, Doorbell, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
+use crate::transport::stream::Place;
+use crate::transport::Span;
 use crate::OwnedHandle;
 
 use super::{MsgType, NetError, NetstackConn, TcpAcceptRequest, TcpAcceptResponse, TcpConnectRequest, TcpConnectResponse, TcpSocketId};
 
-pub use toyos_transport::session::Way;
+pub use crate::transport::session::Way;
 
 // ---- the region ----
 

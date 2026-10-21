@@ -29,19 +29,19 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::{clamp, word, Span, Violation, Word, PUBLISH};
+use super::{clamp, word, Span, Violation, Word, PUBLISH};
 
 /// A sleeper's exchange: what the waker published before clearing the want is
 /// seen by the look that follows.
 const ARM: Ordering = Ordering::Acquire;
-#[cfg(not(feature = "want-relaxed"))]
-pub(crate) const WAKE: Ordering = Ordering::Release;
-#[cfg(feature = "want-relaxed")]
-pub(crate) const WAKE: Ordering = Ordering::Relaxed;
+#[cfg(not(feature = "transport-want-relaxed"))]
+pub(super) const WAKE: Ordering = Ordering::Release;
+#[cfg(feature = "transport-want-relaxed")]
+pub(super) const WAKE: Ordering = Ordering::Relaxed;
 /// The head's edge: a producer that loads the head copies into a byte only
 /// after the consumer's copy out of it, which the consumer's store carries.
-const GIVE_BACK: Ordering = if cfg!(feature = "head-relaxed") { Ordering::Relaxed } else { Ordering::Release };
-const TAKE_BACK: Ordering = if cfg!(feature = "head-relaxed") { Ordering::Relaxed } else { Ordering::Acquire };
+const GIVE_BACK: Ordering = if cfg!(feature = "transport-head-relaxed") { Ordering::Relaxed } else { Ordering::Release };
+const TAKE_BACK: Ordering = if cfg!(feature = "transport-head-relaxed") { Ordering::Relaxed } else { Ordering::Acquire };
 
 /// `n` as an offset into the region; `Place::new` holds `usize` to every `u32`.
 #[allow(clippy::as_conversions)]
@@ -53,14 +53,14 @@ const fn bytes(n: u32) -> usize {
 /// of its first byte.
 ///
 /// ```
-/// use toyos_transport::stream::Place;
+/// use toyos::transport::stream::Place;
 /// const RING: Place<4096, 64> = Place::new::<0, 16, 32, 48, 4096>();
 /// ```
 ///
 /// A place with a word at `N` or past it does not compile:
 ///
 /// ```compile_fail,E0080
-/// use toyos_transport::stream::Place;
+/// use toyos::transport::stream::Place;
 /// const RING: Place<4096, 64> = Place::new::<0, 16, 32, 64, 4096>();
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -94,7 +94,7 @@ impl<const C: u32, const N: usize> Place<C, N> {
     }
 
     /// Its four words: head, tail and the two wants.
-    pub(crate) const fn words(&self) -> [usize; 4] {
+    pub(super) const fn words(&self) -> [usize; 4] {
         [self.head, self.tail, self.data, self.room]
     }
 

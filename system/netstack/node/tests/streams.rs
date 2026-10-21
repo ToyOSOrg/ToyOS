@@ -1,5 +1,5 @@
 //! Streams on the node, against peers the test scripts, at 192.0.2.2:80 unless a test puts one
-//! elsewhere, and clients that are `toyos_transport::session`'s own client end over a region on
+//! elsewhere, and clients that are `toyos::transport::session`'s own client end over a region on
 //! the heap (`common::client`). No scenario ids: the specifications' TCP scenarios are
 //! `toyos-net-tcp`'s; these are what the node does between [tcp] and a client's region.
 //!
@@ -24,8 +24,8 @@ use toyos_net_node::{ConnectRefused, Node, StreamEvent, StreamId};
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{Counter, Endpoint, Failure};
 use toyos_net_wire::{Instant, Port};
-use toyos_transport::session::Refused;
-use toyos_transport::Violation;
+use toyos::transport::session::Refused;
+use toyos::transport::Violation;
 
 const B: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
 /// A second peer's address, and its MAC.

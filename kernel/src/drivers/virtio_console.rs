@@ -14,7 +14,7 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use super::pci::PciDevice;
 use super::serial::BackendGuard;
-use super::virtio::{wait_used, BufDir, DescSlot, Offered, Virtqueue, VirtioDevice, VIRTIO_F_VERSION_1};
+use super::virtio::{wait_used, BufDir, DescSlot, Offered, Virtqueue, VirtioDevice, VIRTIO_F_ACCESS_PLATFORM, VIRTIO_F_VERSION_1};
 use super::DmaPool;
 use crate::log;
 use crate::mm::{Dma, Unaligned};
@@ -232,10 +232,29 @@ pub fn init(devices: &[PciDevice]) -> bool {
     };
     log!("virtio-console: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
 
-    // An address space of this device's own, holding one pool and nothing else.
-    let space = crate::iommu::DeviceSpace::create(&[pci_dev]);
+    // An address space of this device's own, holding one pool and nothing
+    // else — unless it does not offer ACCESS_PLATFORM: then it uses physical
+    // addresses whatever translates the bus, and a driver MUST give it physical
+    // ones (virtio 1.2 §6.1); a domain's addresses would be other memory's.
+    let space = if offered.features & VIRTIO_F_ACCESS_PLATFORM != 0 {
+        crate::iommu::DeviceSpace::create(&[pci_dev])
+    } else {
+        log!(
+            "virtio-console: PCI {:02x}:{:02x}.{} offers no ACCESS_PLATFORM, so it is told physical addresses",
+            pci_dev.bus, pci_dev.dev, pci_dev.func
+        );
+        crate::iommu::DeviceSpace::Untranslated
+    };
     // Leaked, not held in a `static`: the console is never unbound.
-    let dma = DmaPool::alloc_in(DMA_SIZE, space).leak();
+    // Virtio 1.x carries every buffer address as 64 bits (§2.7.5).
+    let dma = match DmaPool::alloc_in(DMA_SIZE, space, crate::iommu::Limit::WIDEST) {
+        Ok(pool) => pool.leak(),
+        Err(why) => {
+            log!("virtio-console: PCI {:02x}:{:02x}.{} {why} — device refused", pci_dev.bus, pci_dev.dev, pci_dev.func);
+            offered.decline();
+            return false;
+        }
+    };
     // Before the device is told an address, and after the only mapping it gets.
     space.attach(pci_dev.bus, pci_dev.dev, pci_dev.func);
 

@@ -23,7 +23,7 @@ use super::HANDLE_LEN;
 use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
     sys_acpi, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
-    sys_device_dma_unmap,
+    sys_device_dma_limit, sys_device_dma_start, sys_device_dma_unmap,
     sys_device_reg_read,
 };
 use super::fs::{
@@ -382,6 +382,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_device_dma_map(&ctx, RawHandle(a1 as u32), RawHandle(a2 as u32), out)
         }
         SYS_DEVICE_DMA_UNMAP => sys_device_dma_unmap(RawHandle(a1 as u32), a2),
+        SYS_DEVICE_DMA_LIMIT => sys_device_dma_limit(RawHandle(a1 as u32), a2),
+        SYS_DEVICE_DMA_START => sys_device_dma_start(RawHandle(a1 as u32)),
         SYS_SYMLINK => {
             let target = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             let link = match ctx.user_str(UserAddr::new(a3), a4) { Ok(s) => s, Err(e) => return e.to_u64() };

@@ -1,5 +1,6 @@
-//! A duplex byte stream between a client and a server: two [`stream`] rings
-//! and two `end` words among `N` words, and two doorbells the server rings.
+//! A duplex byte stream between a client and a server: two
+//! [`stream`](super::stream) rings and two `end` words among `N` words, and
+//! two doorbells the server rings.
 //!
 //! **Nothing here is any protocol's.** The receive ring carries the server's
 //! bytes to the client and the send ring the client's to the server. The
@@ -32,8 +33,8 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::stream::{Consumer, Place, Producer, WAKE};
-use crate::{word, Span, Violation, Word};
+use super::stream::{Consumer, Place, Producer, WAKE};
+use super::{word, Span, Violation, Word};
 
 /// An `end` while its ring runs.
 pub const OPEN: u32 = 0;
@@ -67,7 +68,7 @@ pub enum Doorbell {
 pub const fn doorbell(way: Way) -> Doorbell {
     match way {
         Way::Receive => Doorbell::Connection,
-        Way::Send if cfg!(feature = "one-doorbell") => Doorbell::Connection,
+        Way::Send if cfg!(feature = "transport-one-doorbell") => Doorbell::Connection,
         Way::Send => Doorbell::Bell,
     }
 }
@@ -336,7 +337,7 @@ impl<const C: u32, const N: usize> Half<N> for Sending<C, N> {
 
     fn arm<W: Word>(&mut self, page: &[W; N]) -> Result<Option<Writable>, Violation> {
         let room = self.ring.arm(page)?;
-        Ok(self.seen(page, room, !cfg!(feature = "head-only")))
+        Ok(self.seen(page, room, !cfg!(feature = "transport-head-only")))
     }
 }
 
@@ -364,7 +365,7 @@ fn leave<const N: usize, H: Half<N>, W: Word>(half: &mut H, page: &[W; N], count
         let waiters = half.waiters();
         *waiters = waiters.saturating_sub(1);
     }
-    let pass_on = !cfg!(feature = "no-pass-on") && took && *half.waiters() > 0;
+    let pass_on = !cfg!(feature = "transport-no-pass-on") && took && *half.waiters() > 0;
     pass_on && matches!(half.arm(page), Ok(Some(_)))
 }
 
@@ -587,7 +588,7 @@ where
 
 /// What a registration found of one half.
 fn registered<const N: usize, H: Half<N>, W: Word>(half: &mut H, page: &[W; N]) -> Result<bool, Violation> {
-    let seen = if cfg!(feature = "register-no-arm") { half.look(page)? } else { half.arm(page)? };
+    let seen = if cfg!(feature = "transport-register-no-arm") { half.look(page)? } else { half.arm(page)? };
     Ok(seen.is_some())
 }
 
@@ -613,7 +614,7 @@ where
     if let Some(lock) = send {
         ready |= lock.with(|half| registered(half, page))?;
     }
-    if ready && !cfg!(feature = "register-no-ring") {
+    if ready && !cfg!(feature = "transport-register-no-ring") {
         bells.ring();
     }
     Ok(())
@@ -732,7 +733,7 @@ impl<const RX: u32, const TX: u32, const N: usize> Server<RX, TX, N> {
     /// for 0, and the doorbells of those that were set.
     pub fn rung<W: Word>(&mut self, page: &[W; N]) -> Result<Rings, Violation> {
         let receive = self.rx.ring_back(page, self.ended != OPEN)?;
-        let send = self.tx.ring_back(page, fatal(self.ended) && !cfg!(feature = "head-only"))?;
+        let send = self.tx.ring_back(page, fatal(self.ended) && !cfg!(feature = "transport-head-only"))?;
         Ok(Rings::of(Way::Receive, receive).and(Rings::of(Way::Send, send)))
     }
 }

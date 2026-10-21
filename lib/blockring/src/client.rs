@@ -36,7 +36,7 @@
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
-use toyos_transport::{Inflight, Run, Violation};
+use toyos::transport::{Inflight, Run, Violation};
 
 use crate::entry::{Completion, Op, Request, Status};
 use crate::layout::DEPTH;
