@@ -79,29 +79,67 @@ struct SocketEntry {
 }
 
 const MAX_SOCKETS: usize = 128;
-// Socket FDs start at 1024 to avoid collisions with file FDs
-const SOCKET_FD_BASE: i32 = 1024;
+
+/// A socket's descriptor names an object of this library's own
+/// (`toyos::fd::Object::opaque`), whose word is this tag beside the socket's
+/// index here.
+const SOCKET_TAG: u64 = 0x736f_636b << 32;
 
 static mut SOCKETS: [Option<SocketEntry>; MAX_SOCKETS] = [None; MAX_SOCKETS];
 
+/// The socket descriptor `fd` names, or `None` for a descriptor that is no
+/// socket of this library's.
 fn sock_from_fd(fd: i32) -> Option<&'static mut Option<SocketEntry>> {
-    let idx = (fd - SOCKET_FD_BASE) as usize;
-    if idx >= MAX_SOCKETS {
+    let word = toyos::fd::with(fd, |o| o.release.map(|_| o.word)).ok().flatten()?;
+    if word & !0xffff_ffff != SOCKET_TAG {
         return None;
     }
+    let idx = usize::try_from(word & 0xffff_ffff).ok().filter(|&i| i < MAX_SOCKETS)?;
     unsafe { Some(&mut SOCKETS[idx]) }
 }
 
+/// `entry` as a socket descriptor, the lowest free and inherited, or `-1`
+/// with `errno` set and everything it held let go.
 fn alloc_socket(entry: SocketEntry) -> i32 {
-    unsafe {
-        for i in 0..MAX_SOCKETS {
-            if SOCKETS[i].is_none() {
-                SOCKETS[i] = Some(entry);
-                return SOCKET_FD_BASE + i as i32;
-            }
+    let Some(idx) = (0..MAX_SOCKETS).find(|&i| unsafe { SOCKETS[i].is_none() }) else {
+        let_go(entry);
+        set_errno(ENOMEM);
+        return -1;
+    };
+    unsafe { SOCKETS[idx] = Some(entry) };
+    match toyos::fd::install(toyos::fd::Object::opaque(SOCKET_TAG | idx as u64, release_socket), true, 0) {
+        Ok(fd) => fd,
+        // The table let the object go, and with it the socket.
+        Err(_) => {
+            set_errno(crate::errcode::EMFILE);
+            -1
         }
     }
-    -1
+}
+
+/// A socket no descriptor names any more: its pipes, its stream and
+/// netstack's socket go.
+extern "C" fn release_socket(word: u64) {
+    let idx = (word & 0xffff_ffff) as usize;
+    if idx < MAX_SOCKETS {
+        if let Some(entry) = unsafe { SOCKETS[idx].take() } {
+            let_go(entry);
+        }
+    }
+}
+
+fn let_go(entry: SocketEntry) {
+    // A stream's leaving is its connection's hang-up.
+    if entry.stream != 0 { stream::let_go(RawHandle(entry.stream as u32)); }
+    if entry.rx_fd != 0 { syscall::close(RawHandle(entry.rx_fd as u32)); }
+    if entry.tx_fd != 0 { syscall::close(RawHandle(entry.tx_fd as u32)); }
+    if entry.notify_fd != 0 { syscall::close(RawHandle(entry.notify_fd as u32)); }
+    if entry.netstack_id != 0 {
+        match entry.kind {
+            SocketKind::Tcp => { let _ = toyos::net::tcp_close(TcpSocketId(entry.netstack_id)); }
+            SocketKind::Udp => { let _ = toyos::net::udp_close(UdpSocketId(entry.netstack_id)); }
+        }
+    }
 }
 
 use crate::errno::set as set_errno;
@@ -204,11 +242,7 @@ pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, _protocol: i32) -> 
         nodelay: false,
         broadcast: false,
     };
-    let fd = alloc_socket(entry);
-    if fd < 0 {
-        set_errno(ENOMEM);
-    }
-    fd
+    alloc_socket(entry)
 }
 
 #[no_mangle]
@@ -337,13 +371,7 @@ pub unsafe extern "C" fn accept(
         nodelay: accepted.nodelay,
         broadcast: false,
     };
-    let new_fd = alloc_socket(new_entry);
-    if new_fd < 0 {
-        // The client's leaving: netstack closes the connection.
-        stream::let_go(accepted.handle);
-        set_errno(ENOMEM);
-    }
-    new_fd
+    alloc_socket(new_entry)
 }
 
 #[no_mangle]
@@ -562,36 +590,6 @@ pub(crate) fn watched_of(fd: i32) -> Option<RawHandle> {
     (handle != 0).then_some(RawHandle(handle as u32))
 }
 
-
-// close (for socket fds)
-
-#[no_mangle]
-pub unsafe extern "C" fn close_socket(fd: i32) -> bool {
-    let slot = match sock_from_fd(fd) {
-        Some(s) => s,
-        None => return false,
-    };
-    let entry = match slot.take() {
-        Some(e) => e,
-        None => return false,
-    };
-
-    // A stream's leaving is its connection's hang-up.
-    if entry.stream != 0 { stream::let_go(RawHandle(entry.stream as u32)); }
-    // Close pipe fds
-    if entry.rx_fd != 0 { syscall::close(RawHandle(entry.rx_fd as u32)); }
-    if entry.tx_fd != 0 { syscall::close(RawHandle(entry.tx_fd as u32)); }
-    if entry.notify_fd != 0 { syscall::close(RawHandle(entry.notify_fd as u32)); }
-
-    // Tell netstack to close the socket
-    if entry.netstack_id != 0 {
-        match entry.kind {
-            SocketKind::Tcp => { let _ = toyos::net::tcp_close(TcpSocketId(entry.netstack_id)); }
-            SocketKind::Udp => { let _ = toyos::net::udp_close(UdpSocketId(entry.netstack_id)); }
-        }
-    }
-    true
-}
 
 // setsockopt / getsockopt
 

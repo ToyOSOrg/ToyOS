@@ -61,9 +61,9 @@ pub const MSG_GONE: u32 = 5;
 /// authority in two batches that can arrive apart.
 pub const MAX_LAUNCH_EXTRAS: usize = 5;
 
-/// Slots a launch may install in the child: stdin, stdout and stderr, and a
+/// Descriptors a launch may give the child: stdin, stdout and stderr, and a
 /// caller that wants anything else in a child's table spawns it directly.
-pub const MAX_LAUNCH_SLOTS: usize = 3;
+pub const MAX_LAUNCH_FDS: usize = 3;
 
 const HEADER: usize = 36;
 
@@ -87,7 +87,7 @@ pub enum Parent<H = RawHandle> {
 /// `argv` and `env` are exactly the blobs `SYS_SPAWN` takes, so the launcher
 /// path and the direct path build one thing rather than two.
 ///
-/// **Every handle in `slots`, `extras` and `parent` is the caller's to give,
+/// **Every handle in `fds`, `extras` and `parent` is the caller's to give,
 /// and is named once.** [`launch`] consumes each one that it sends: it is moved
 /// to the launcher, or closed when the kernel refuses the move. A launch that
 /// names one twice, or the connection it is sent on, is a move the kernel
@@ -113,11 +113,10 @@ pub struct Launch<'a> {
     /// `surface` port it made — a name the supervisor cannot know, because there is one
     /// per terminal.
     pub extras: &'a [(&'a str, RawHandle)],
-    /// `(child slot, handle)`, at most [`MAX_LAUNCH_SLOTS`] of them. The
-    /// handles are **moved**, so a caller passing on its own stdout duplicates
-    /// first — which is the same rule `SpawnArgs`'s two vectors state, with the
-    /// duplication moved to the caller because a launch has only the one verb.
-    pub slots: &'a [(u32, RawHandle)],
+    /// `(child descriptor, handle)`, at most [`MAX_LAUNCH_FDS`] of them, which
+    /// the launcher endows as `fd:<n>`. The handles are **moved**, so a caller
+    /// passing on its own stdout duplicates first.
+    pub fds: &'a [(u32, RawHandle)],
     /// Whom the program is placed under. A place is **moved** with the batch,
     /// and counts against [`MAX_LAUNCH_EXTRAS`].
     pub parent: Parent,
@@ -126,17 +125,17 @@ pub struct Launch<'a> {
 /// Why a request would not go on the wire.
 #[derive(Debug, PartialEq, Eq)]
 pub enum EncodeError {
-    /// More than [`MAX_LAUNCH_EXTRAS`], or more than [`MAX_LAUNCH_SLOTS`].
+    /// More than [`MAX_LAUNCH_EXTRAS`], or more than [`MAX_LAUNCH_FDS`].
     TooMany,
     /// The blobs do not fit one frame.
     TooLarge,
 }
 
 /// The handles of one launch, and how many of them.
-type Batch = ([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS], usize);
+type Batch = ([RawHandle; MAX_LAUNCH_EXTRAS + MAX_LAUNCH_FDS], usize);
 
 impl Launch<'_> {
-    /// The numbers this launch names, each once and never `conn`: slots, then
+    /// The numbers this launch names, each once and never `conn`: descriptors, then
     /// extras, then the place. [`launch`] takes each as its own, and a number
     /// with two owners is closed twice.
     ///
@@ -144,16 +143,16 @@ impl Launch<'_> {
     /// the kernel refuses `InvalidArgument`: what it holds is to close, not to
     /// send.
     fn batch(&self, conn: RawHandle) -> Result<Batch, Batch> {
-        let mut out = [RawHandle(0); MAX_LAUNCH_EXTRAS + MAX_LAUNCH_SLOTS];
+        let mut out = [RawHandle(0); MAX_LAUNCH_EXTRAS + MAX_LAUNCH_FDS];
         let mut n = 0;
         let mut sendable = true;
         let place = match self.parent {
             Parent::Place(place) => Some(place),
             Parent::Supervisor => None,
         };
-        let slots = self.slots.iter().map(|(_, h)| h);
+        let fds = self.fds.iter().map(|(_, h)| h);
         let extras = self.extras.iter().map(|(_, h)| h);
-        for handle in slots.chain(extras).chain(&place) {
+        for handle in fds.chain(extras).chain(&place) {
             if *handle == conn || out[..n].contains(handle) {
                 sendable = false;
                 continue;
@@ -170,13 +169,13 @@ impl Launch<'_> {
             Parent::Place(_) => (1, PARENT_PLACE),
             Parent::Supervisor => (0, PARENT_SUPERVISOR),
         };
-        if self.extras.len() + place > MAX_LAUNCH_EXTRAS || self.slots.len() > MAX_LAUNCH_SLOTS {
+        if self.extras.len() + place > MAX_LAUNCH_EXTRAS || self.fds.len() > MAX_LAUNCH_FDS {
             return Err(EncodeError::TooMany);
         }
         let names_len: usize = self.extras.iter().map(|(n, _)| n.len() + 1).sum();
-        let slots_len = self.slots.len() * 4;
+        let fds_len = self.fds.len() * 4;
         let total = HEADER
-            + slots_len
+            + fds_len
             + self.program.len()
             + self.argv.len()
             + self.env.len()
@@ -186,9 +185,9 @@ impl Launch<'_> {
             return Err(EncodeError::TooLarge);
         }
         let lens = [
-            self.slots.len() as u32,
+            self.fds.len() as u32,
             self.extras.len() as u32,
-            slots_len as u32,
+            fds_len as u32,
             self.program.len() as u32,
             self.argv.len() as u32,
             self.env.len() as u32,
@@ -204,8 +203,8 @@ impl Launch<'_> {
             buf[*at..*at + bytes.len()].copy_from_slice(bytes);
             *at += bytes.len();
         };
-        for (slot, _) in self.slots {
-            put(&slot.to_le_bytes(), &mut at);
+        for (fd, _) in self.fds {
+            put(&fd.to_le_bytes(), &mut at);
         }
         put(self.program.as_bytes(), &mut at);
         put(self.argv, &mut at);
@@ -230,7 +229,7 @@ pub struct Request<'a> {
     pub env: &'a [u8],
     pub cwd: &'a str,
     pub extra_count: usize,
-    slots: &'a [u8],
+    fds: &'a [u8],
     names: &'a [u8],
     parent: u32,
 }
@@ -244,18 +243,18 @@ impl<'a> Request<'a> {
             u32::from_le_bytes([buf[i * 4], buf[i * 4 + 1], buf[i * 4 + 2], buf[i * 4 + 3]])
                 as usize
         };
-        let (slot_count, extra_count) = (field(0), field(1));
-        let (slots_len, program_len, argv_len, env_len, cwd_len, names_len) =
+        let (fd_count, extra_count) = (field(0), field(1));
+        let (fds_len, program_len, argv_len, env_len, cwd_len, names_len) =
             (field(2), field(3), field(4), field(5), field(6), field(7));
         let parent = field(8) as u32;
         if extra_count + usize::from(parent == PARENT_PLACE) > MAX_LAUNCH_EXTRAS
-            || slot_count > MAX_LAUNCH_SLOTS
-            || slots_len != slot_count * 4
+            || fd_count > MAX_LAUNCH_FDS
+            || fds_len != fd_count * 4
         {
             return None;
         }
         let total = HEADER
-            .checked_add(slots_len)?
+            .checked_add(fds_len)?
             .checked_add(program_len)?
             .checked_add(argv_len)?
             .checked_add(env_len)?
@@ -270,7 +269,7 @@ impl<'a> Request<'a> {
             *at += len;
             slice
         };
-        let slots = take(slots_len, &mut at);
+        let fds = take(fds_len, &mut at);
         let program = core::str::from_utf8(take(program_len, &mut at)).ok()?;
         let argv = take(argv_len, &mut at);
         let env = take(env_len, &mut at);
@@ -279,7 +278,7 @@ impl<'a> Request<'a> {
         if names.iter().filter(|&&b| b == 0).count() != extra_count {
             return None;
         }
-        Some(Self { program, argv, env, cwd, extra_count, slots, names, parent })
+        Some(Self { program, argv, env, cwd, extra_count, fds, names, parent })
     }
 
     /// Whom the request names as the parent: `None` for neither word, which
@@ -292,18 +291,18 @@ impl<'a> Request<'a> {
         }
     }
 
-    /// The handles the batch carries: the slots, the extras, then the place.
+    /// The handles the batch carries: the descriptors, the extras, then the place.
     pub fn handle_count(&self) -> usize {
-        self.slot_count() + self.extra_count + usize::from(self.parent == PARENT_PLACE)
+        self.fd_count() + self.extra_count + usize::from(self.parent == PARENT_PLACE)
     }
 
-    /// The child slots the first handles of the batch are for, in order.
-    pub fn slot_numbers(&self) -> impl Iterator<Item = u32> + '_ {
-        self.slots.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c))
+    /// The child descriptors the first handles of the batch are for, in order.
+    pub fn fd_numbers(&self) -> impl Iterator<Item = u32> + '_ {
+        self.fds.as_chunks::<4>().0.iter().map(|c| u32::from_le_bytes(*c))
     }
 
-    pub fn slot_count(&self) -> usize {
-        self.slots.len() / 4
+    pub fn fd_count(&self) -> usize {
+        self.fds.len() / 4
     }
 
     /// The extra connectors' names, in the order their handles arrive.
@@ -405,7 +404,7 @@ mod tests {
             env: b"",
             cwd: "/",
             extras: &[],
-            slots: &[],
+            fds: &[],
             parent,
         };
         for (parent, named) in [(Parent::Place(RawHandle(9)), Parent::Place(())), (Parent::Supervisor, Parent::Supervisor)] {
@@ -426,9 +425,9 @@ mod tests {
     fn a_batch_names_each_handle_once_and_never_its_connection() {
         const CONN: RawHandle = RawHandle(3);
         let h = RawHandle;
-        let batch = |slots: &[(u32, RawHandle)], extras: &[(&str, RawHandle)], parent| {
+        let batch = |fds: &[(u32, RawHandle)], extras: &[(&str, RawHandle)], parent| {
             let request =
-                Launch { program: "/system/bin/cat", argv: b"", env: b"", cwd: "/", extras, slots, parent };
+                Launch { program: "/system/bin/cat", argv: b"", env: b"", cwd: "/", extras, fds, parent };
             let named = |(handles, count): Batch| handles[..count].to_vec();
             request.batch(CONN).map(named).map_err(named)
         };
@@ -437,11 +436,11 @@ mod tests {
             Ok(vec![h(5), h(6), h(7), h(8), h(9)]),
         );
         assert_eq!(batch(&[], &[("a", h(7)), ("b", h(7))], Parent::Supervisor), Err(vec![h(7)]), "two extras");
-        assert_eq!(batch(&[(0, h(5)), (1, h(5))], &[], Parent::Supervisor), Err(vec![h(5)]), "two slots");
+        assert_eq!(batch(&[(0, h(5)), (1, h(5))], &[], Parent::Supervisor), Err(vec![h(5)]), "two descriptors");
         assert_eq!(
             batch(&[(0, h(7)), (1, h(6))], &[("a", h(7))], Parent::Supervisor),
             Err(vec![h(7), h(6)]),
-            "a slot and an extra",
+            "a descriptor and an extra",
         );
         assert_eq!(
             batch(&[(0, h(5))], &[("a", h(9))], Parent::Place(h(9))),

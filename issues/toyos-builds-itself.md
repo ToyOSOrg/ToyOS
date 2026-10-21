@@ -64,7 +64,7 @@ libc's state it is `userland/libc` at `15625e0cb`.
   (`issues/the-kernel-resolves-a-path-by-rules-of-its-own.md`); and socket
   descriptors that are pollable and
   can be non-blocking
-  (`issues/libc-close-of-a-socket-ends-the-process.md`). Read from each
+  (`issues/libc-close-of-a-socket-is-unproven-on-a-connected-socket.md`). Read from each
   library's source and not run: SQLite's default VFS takes `fcntl` record
   locks and keys them on `st_dev` and `st_ino`; libgit2 opens every repository
   through `realpath` and reads packs through a file `mmap`; curl and libssh2

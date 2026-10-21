@@ -24,7 +24,7 @@
 //!   whose mapping is the scanout, so it is the one that pays for a read.
 
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process;
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -234,8 +234,8 @@ fn main() {
     // as it wrote it, for a line of the log to be drawn above.
     let mut partial: Vec<u8> = Vec::new();
     loop {
-        poller.watch_raw(toyos::RawHandle(shell.stdout.as_raw_fd() as u32), READABLE, TOKEN_STDOUT);
-        poller.watch_raw(toyos::RawHandle(shell.stderr.as_raw_fd() as u32), READABLE, TOKEN_STDERR);
+        poller.watch_raw(toyos::RawHandle(shell.stdout.as_raw_handle()), READABLE, TOKEN_STDOUT);
+        poller.watch_raw(toyos::RawHandle(shell.stderr.as_raw_handle()), READABLE, TOKEN_STDERR);
         poller.watch_raw(host.acceptor_handle(), READABLE, TOKEN_LISTEN);
         for client in host.client_handles() {
             poller.watch_raw(client, READABLE, TOKEN_CLIENT);

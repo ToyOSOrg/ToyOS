@@ -8,6 +8,9 @@ license = "MIT OR Apache-2.0"
 [features]
 # Enable when linking with Rust std (skips panic_handler and global_allocator)
 std-runtime = []
+# The C-only build's: this copy of `toyos` owns the process's descriptor
+# table, which in a Rust program std's owns (`toyos::fd`).
+fd-owner = ["toyos/fd-table"]
 
 [dependencies]
 toyos-abi = { path = "../abi" }

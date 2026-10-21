@@ -272,16 +272,22 @@ fn spawn_child(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]>>
 
 /// [`spawn_child`], its place in [`UNWAITED`] taken.
 fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]>>], group: Option<i32>) -> Result<i32, i32> {
-    // Copies of this process's stdio, closed once the child holds its own.
-    let held = crate::posix_io::stdio_for_spawn().map_err(errno_of)?;
-    let stdio = held.each_ref().map(|h| h.as_ref().map(|(copy, marked)| (toyos::AsHandle::as_handle(copy).0, *marked)));
+    // Copies of what this process's descriptors name, closed once the child
+    // holds its own.
+    let mut held: Vec<toyos::OwnedHandle> = Vec::new();
     let plan = spawnreq::plan(
-        stdio,
+        |fd| {
+            let copy = toyos::fd::copy(fd as i32).ok().flatten()?;
+            let cloexec = !toyos::fd::inheritable(fd as i32).ok()?;
+            let handle = toyos::AsHandle::as_handle(&copy).0;
+            held.push(copy);
+            Some((handle, cloexec))
+        },
         actions,
         |path, oflag, mode| crate::posix_io::open_handle(path, oflag, mode).map(|h| h.0).map_err(crate::errcode::of),
         |handle| syscall::close(RawHandle(handle)),
     )?;
-    let started = start(path, argv, env, &plan.slots);
+    let started = start(path, argv, env, &plan.fds);
     for handle in plan.opened {
         syscall::close(RawHandle(handle));
     }
@@ -301,20 +307,18 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
 /// The launch-or-spawn of `toyos::spawn`, from this process's own working
 /// directory, the child's `HOME` the one `env` names if it differs from this
 /// process's start-up one.
-fn start(path: &str, argv: &[u8], env: &[u8], slots: &[[u32; 2]]) -> Result<Process, i32> {
+fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, u32)]) -> Result<Process, i32> {
     let mut cwd = alloc::vec![0u8; syscall::MAX_PATH];
     let n = syscall::getcwd(&mut cwd);
     let cwd = core::str::from_utf8(&cwd[..n]).map_err(|_| EINVAL)?;
-    let split = slots.partition_point(|&[child, _]| child <= 2);
+    let fds: Vec<(u32, RawHandle)> = fds.iter().map(|&(fd, handle)| (fd, RawHandle(handle))).collect();
     let request = Spawn {
         program: path,
         image: None,
         argv,
         env,
         cwd,
-        // `plan` answers them by descriptor, so stdio comes first.
-        slots,
-        stdio: split,
+        fds: &fds,
         endow: &[],
         provided: &[],
         parent: Parent::Caller,
@@ -559,24 +563,35 @@ pub unsafe extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut crat
             return ptr::null_mut();
         }
     };
-    let (theirs, ours, slot) = match reading {
+    let (theirs, ours, child) = match reading {
         true => (ends.write, ends.read, 1),
         false => (ends.read, ends.write, 0),
     };
-    let started = shell(command, &[Action::Dup2 { fd: theirs.0, newfd: slot }]);
-    syscall::close(theirs);
+    // Both ends as descriptors, this process's own closed on exec.
+    let (theirs, ours) = match (crate::posix_io::install(theirs, true), crate::posix_io::install(ours, true)) {
+        (Ok(theirs), Ok(ours)) => (theirs, ours),
+        (theirs, ours) => {
+            for fd in [theirs, ours].into_iter().flatten() {
+                let _ = toyos::fd::close(fd);
+            }
+            crate::errno::set(crate::errcode::EMFILE);
+            return ptr::null_mut();
+        }
+    };
+    let started = shell(command, &[Action::Dup2 { fd: theirs as u32, newfd: child }]);
+    let _ = toyos::fd::close(theirs);
     let pid = match started {
         Ok(pid) => pid,
         Err(errno) => {
-            syscall::close(ours);
+            let _ = toyos::fd::close(ours);
             crate::errno::set(errno);
             return ptr::null_mut();
         }
     };
-    let stream = unsafe { crate::stdio::fdopen(ours.0 as i32, mode) };
+    let stream = unsafe { crate::stdio::fdopen(ours, mode) };
     if stream.is_null() {
         // No stream to read the child by: its end goes, and the child is waited for.
-        syscall::close(ours);
+        let _ = toyos::fd::close(ours);
         unsafe { waitpid(pid, ptr::null_mut(), 0) };
         crate::errno::set(crate::errcode::ENOMEM);
         return ptr::null_mut();

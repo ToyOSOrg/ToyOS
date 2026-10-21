@@ -38,6 +38,41 @@ pub fn to_io_error(e: toyos_abi::syscall::SyscallError) -> crate::io::Error {
     crate::io::Error::from(kind)
 }
 
+/// `f` on the kernel handle descriptor `fd` names, held for the call
+/// (`toyos::fd::with`): a descriptor that is not open answers EBADF's error,
+/// and one a library keeps as no kernel handle is no file to a kernel call.
+pub fn on_fd<T>(
+    fd: i32,
+    f: impl FnOnce(toyos_abi::RawHandle) -> Result<T, toyos_abi::syscall::SyscallError>,
+) -> crate::io::Result<T> {
+    let answer = toyos::fd::with(fd, |object| match object.release {
+        None => f(object.handle).map_err(to_io_error),
+        Some(_) => Err(crate::io::const_error!(
+            crate::io::ErrorKind::Unsupported,
+            "the descriptor names an object of a library's own",
+        )),
+    });
+    answer.map_err(fd_error)?
+}
+
+/// A kernel handle this process just got, as a descriptor of its own: std
+/// creates descriptors not inherited, as std is close-on-exec on unix.
+pub fn new_fd(handle: toyos_abi::RawHandle) -> crate::io::Result<i32> {
+    toyos::fd::install(toyos::fd::Object::handle(handle), false, 0).map_err(fd_error)
+}
+
+/// The descriptor table's refusal as std's error.
+pub fn fd_error(e: toyos::fd::Error) -> crate::io::Error {
+    match e {
+        toyos::fd::Error::BadFd => {
+            crate::io::const_error!(crate::io::ErrorKind::Uncategorized, "the descriptor is not open")
+        }
+        toyos::fd::Error::Full => {
+            crate::io::const_error!(crate::io::ErrorKind::QuotaExceeded, "the descriptor table is full")
+        }
+    }
+}
+
 // argc/argv stored by _start for std::env::args()
 pub(crate) static ARGC: AtomicUsize = AtomicUsize::new(0);
 pub(crate) static ARGV: AtomicUsize = AtomicUsize::new(0); // *const *const u8 as usize

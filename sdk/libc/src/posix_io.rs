@@ -9,9 +9,7 @@ use core::ptr;
 use toyos_abi::{RawHandle, Rights};
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
-use crate::errcode::EINVAL;
-use crate::fdreq::CloseOnExec;
-use crate::pthread::Lock;
+use crate::errcode::{EBADF, EINVAL};
 use crate::time::Timespec;
 
 // The values `<fcntl.h>` declares.
@@ -22,6 +20,7 @@ pub(crate) const O_RDWR: i32 = 2;
 pub(crate) const O_CREAT: i32 = 0x40;
 pub(crate) const O_TRUNC: i32 = 0x200;
 pub(crate) const O_APPEND: i32 = 0x400;
+pub(crate) const O_CLOEXEC: i32 = 0x80000;
 
 const SEEK_SET: i32 = 0;
 const SEEK_CUR: i32 = 1;
@@ -41,17 +40,50 @@ pub(crate) fn set_errno(e: toyos_abi::syscall::SyscallError) -> i32 {
     -1
 }
 
-fn fd(raw: i32) -> RawHandle { RawHandle(raw as u32) }
+/// Why a call on a descriptor was not made: an `errno`.
+pub(crate) type Errno = i32;
+
+/// `-1`, with `errno` set to `e`.
+pub(crate) fn refuse(e: Errno) -> i32 {
+    crate::errno::set(e);
+    -1
+}
+
+/// `f` on the kernel handle descriptor `raw` names, held for the call
+/// (`toyos::fd`): `EBADF` for a descriptor not open, and for one naming no
+/// kernel handle, as a socket not yet connected names none.
+pub(crate) fn on_fd<T>(raw: i32, f: impl FnOnce(RawHandle) -> Result<T, syscall::SyscallError>) -> Result<T, Errno> {
+    match toyos::fd::with(raw, |o| o.release.is_none().then(|| f(o.handle))) {
+        Ok(Some(answer)) => answer.map_err(crate::errcode::of),
+        Ok(None) | Err(_) => Err(EBADF),
+    }
+}
+
+/// The table's refusal as `errno`.
+pub(crate) fn fd_errno(e: toyos::fd::Error) -> Errno {
+    match e {
+        toyos::fd::Error::BadFd => EBADF,
+        toyos::fd::Error::Full => crate::errcode::EMFILE,
+    }
+}
+
+/// A kernel handle this process just got, as the lowest free descriptor,
+/// inherited unless `cloexec`.
+pub(crate) fn install(handle: RawHandle, cloexec: bool) -> Result<i32, Errno> {
+    toyos::fd::install(toyos::fd::Object::handle(handle), !cloexec, 0).map_err(fd_errno)
+}
 
 /// A `write` to a descriptor. Stdout and stderr go through the SDK's stream
-/// sinks, which are a program's log ring when its slot holds one
+/// sinks, which are a program's log ring when its descriptor names one
 /// (`toyos::log::stdio`); every other descriptor is its handle.
-pub fn write_fd(raw: i32, buf: &[u8]) -> Result<usize, syscall::SyscallError> {
+pub fn write_fd(raw: i32, buf: &[u8]) -> Result<usize, Errno> {
     use toyos::log::stdio::{self, Stream};
+    // A closed stdout is `EBADF`'s, where the stream sink drops its bytes.
+    toyos::fd::inheritable(raw).map_err(fd_errno)?;
     match raw {
-        1 => stdio::write(Stream::Out, buf),
-        2 => stdio::write(Stream::Err, buf),
-        other => syscall::write(fd(other), buf),
+        1 => stdio::write(Stream::Out, buf).map_err(crate::errcode::of),
+        2 => stdio::write(Stream::Err, buf).map_err(crate::errcode::of),
+        other => on_fd(other, |h| syscall::write(h, buf)),
     }
 }
 
@@ -67,10 +99,7 @@ pub fn c_str_to_bytes(s: *const u8) -> &'static [u8] {
 #[no_mangle]
 pub unsafe extern "C" fn open(path: *const u8, flags: i32, mode: u32) -> i32 {
     match open_handle(c_str_to_bytes(path), flags, mode) {
-        Ok(f) => {
-            CLOEXEC.lock().opened(f.0 as i32, flags);
-            f.0 as i32
-        }
+        Ok(handle) => install(handle, flags & O_CLOEXEC != 0).unwrap_or_else(refuse),
         Err(e) => set_errno(e),
     }
 }
@@ -114,18 +143,19 @@ pub unsafe extern "C" fn creat(path: *const u8, mode: u32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
-    CLOEXEC.lock().set(raw_fd, false);
-    syscall::close(fd(raw_fd));
-    0
+    match toyos::fd::close(raw_fd) {
+        Ok(()) => 0,
+        Err(e) => refuse(fd_errno(e)),
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn read(raw_fd: i32, buf: *mut u8, count: usize) -> isize {
     if buf.is_null() || count == 0 { return 0; }
     let slice = core::slice::from_raw_parts_mut(buf, count);
-    match syscall::read(fd(raw_fd), slice) {
+    match on_fd(raw_fd, |h| syscall::read(h, slice)) {
         Ok(n) => n as isize,
-        Err(e) => { set_errno(e); -1 }
+        Err(e) => refuse(e) as isize,
     }
 }
 
@@ -135,7 +165,7 @@ pub unsafe extern "C" fn write(raw_fd: i32, buf: *const u8, count: usize) -> isi
     let slice = core::slice::from_raw_parts(buf, count);
     match write_fd(raw_fd, slice) {
         Ok(n) => n as isize,
-        Err(e) => { set_errno(e); -1 }
+        Err(e) => refuse(e) as isize,
     }
 }
 
@@ -147,15 +177,18 @@ pub unsafe extern "C" fn lseek(raw_fd: i32, offset: i64, whence: i32) -> i64 {
         SEEK_END => SeekFrom::End(offset),
         _ => { crate::errno::set(EINVAL); return -1; }
     };
-    match syscall::seek(fd(raw_fd), pos) {
+    match on_fd(raw_fd, |h| syscall::seek(h, pos)) {
         Ok(n) => n as i64,
-        Err(e) => { set_errno(e); -1 }
+        Err(e) => refuse(e) as i64,
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn fstat(raw_fd: i32, buf: *mut Stat) -> i32 {
-    unsafe { answered(syscall::fstat(fd(raw_fd)), buf) }
+    match on_fd(raw_fd, syscall::fstat) {
+        Ok(st) => unsafe { answered(Ok(st), buf) },
+        Err(e) => refuse(e),
+    }
 }
 
 /// `buf` filled from the kernel's `answer`, or `errno` from its refusal.
@@ -191,9 +224,9 @@ unsafe fn answered(answer: Result<syscall::Stat, syscall::SyscallError>, buf: *m
 
 #[no_mangle]
 pub unsafe extern "C" fn ftruncate(raw_fd: i32, length: i64) -> i32 {
-    match syscall::ftruncate(fd(raw_fd), length as u64) {
+    match on_fd(raw_fd, |h| syscall::ftruncate(h, length as u64)) {
         Ok(()) => 0,
-        Err(e) => set_errno(e),
+        Err(e) => refuse(e),
     }
 }
 
@@ -227,55 +260,65 @@ pub unsafe extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn fsync(raw_fd: i32) -> i32 {
-    match syscall::fsync(fd(raw_fd)) {
+    match on_fd(raw_fd, syscall::fsync) {
         Ok(()) => 0,
-        Err(e) => set_errno(e),
+        Err(e) => refuse(e),
     }
 }
 
+/// POSIX's `dup`: the lowest free descriptor on the same object, not
+/// close-on-exec.
 #[no_mangle]
 pub unsafe extern "C" fn dup(raw_fd: i32) -> i32 {
-    match syscall::dup(fd(raw_fd)) {
-        Ok(f) => f.0 as i32,
-        Err(e) => set_errno(e),
-    }
+    toyos::fd::dup(raw_fd, 0, true).unwrap_or_else(|e| refuse(fd_errno(e)))
 }
 
-/// **This does not honour POSIX's "returns `newfd`".** `newfd` is a slot, and
-/// the handle the kernel hands back carries that slot's generation, so
-/// `dup2(x, 1)` answers `1` only while slot 1 has never been closed. Nothing in
-/// the tree redirects by closing a slot first, and this layer is where the
-/// bookkeeping to fake it would go if something ever does.
+/// POSIX's `dup2`: `new_fd` on `old_fd`'s object, not close-on-exec, after
+/// closing what it named.
 #[no_mangle]
 pub unsafe extern "C" fn dup2(old_fd: i32, new_fd: i32) -> i32 {
-    if old_fd == new_fd { return new_fd; }
-    let Ok(slot) = u16::try_from(new_fd) else {
-        return set_errno(syscall::SyscallError::InvalidArgument);
-    };
-    match syscall::dup2(fd(old_fd), slot) {
-        Ok(f) => {
-            // POSIX: the descriptor `dup2` answers is not closed on `exec`.
-            CLOEXEC.lock().set(f.0 as i32, false);
-            // The slot holds something else now, so the stream is asked again.
-            match slot {
+    if old_fd == new_fd {
+        return match toyos::fd::inheritable(old_fd) {
+            Ok(_) => new_fd,
+            Err(e) => refuse(fd_errno(e)),
+        };
+    }
+    match toyos::fd::dup2(old_fd, new_fd, true) {
+        Ok(fd) => {
+            // The descriptor names something else now, so the stream is asked again.
+            match fd {
                 1 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Out),
                 2 => toyos::log::stdio::forget(toyos::log::stdio::Stream::Err),
                 _ => {}
             }
-            f.0 as i32
+            fd
         }
-        Err(e) => set_errno(e),
+        Err(e) => refuse(fd_errno(e)),
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn pipe(pipefd: *mut i32) -> i32 {
-    let fds = match syscall::pipe() {
-        Ok(fds) => fds,
+    let ends = match syscall::pipe() {
+        Ok(ends) => ends,
         Err(e) => return set_errno(e),
     };
-    *pipefd = fds.read.0 as i32;
-    *pipefd.add(1) = fds.write.0 as i32;
+    let read = match install(ends.read, false) {
+        Ok(fd) => fd,
+        Err(e) => {
+            syscall::close(ends.write);
+            return refuse(e);
+        }
+    };
+    let write = match install(ends.write, false) {
+        Ok(fd) => fd,
+        Err(e) => {
+            let _ = toyos::fd::close(read);
+            return refuse(e);
+        }
+    };
+    *pipefd = read;
+    *pipefd.add(1) = write;
     0
 }
 
@@ -407,9 +450,12 @@ pub unsafe extern "C" fn access(path: *const u8, _mode: i32) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn isatty(raw_fd: i32) -> i32 {
-    match syscall::fstat(fd(raw_fd)) {
+    match on_fd(raw_fd, syscall::fstat) {
         Ok(st) => (st.file_type == syscall::FileType::Tty) as i32,
-        Err(_) => 0,
+        Err(e) => {
+            crate::errno::set(if e == EBADF { EBADF } else { crate::errcode::ENOTTY });
+            0
+        }
     }
 }
 
@@ -422,21 +468,6 @@ pub unsafe extern "C" fn umask(mask: u32) -> u32 {
     old
 }
 
-static CLOEXEC: Lock<CloseOnExec> = Lock::new(CloseOnExec::new());
-/// What this process holds in slots 0–2, as copies for a child, each with
-/// whether the descriptor is marked close-on-exec, as `spawnreq::plan` takes
-/// them: `None` for a slot it was started without or closed. The copies close
-/// when the caller drops them, once the child has its own.
-pub(crate) fn stdio_for_spawn() -> Result<[Option<(toyos::OwnedHandle, bool)>; 3], toyos::spawn::Refused> {
-    let mut held = [None, None, None];
-    for (slot, at) in (0u16..).zip(&mut held) {
-        if let Some(copy) = toyos::spawn::inherited(slot)? {
-            *at = Some((copy, CLOEXEC.lock().slot_marked(slot)));
-        }
-    }
-    Ok(held)
-}
-
 /// Whether `path` names a file, and not a directory.
 pub(crate) fn is_file(path: &[u8]) -> bool {
     syscall::stat(path, true).is_ok_and(|st| st.file_type == syscall::FileType::File)
@@ -445,29 +476,15 @@ pub(crate) fn is_file(path: &[u8]) -> bool {
 /// `arg` is the register C's variadic third argument arrives in (`fdreq`).
 #[no_mangle]
 pub unsafe extern "C" fn fcntl(raw_fd: i32, cmd: i32, arg: u64) -> i32 {
-    use crate::fdreq::Command;
-    let refused = match crate::fdreq::command(cmd, arg) {
-        Command::DupAtLeast(floor) => {
-            let duplicate = crate::fdreq::dup_at_least(
-                floor,
-                || syscall::dup(fd(raw_fd)).map(|h| h.0),
-                |below| syscall::close(RawHandle(below)),
-            );
-            return match duplicate {
-                Ok(n) => n as i32,
-                Err(e) => set_errno(e),
-            };
-        }
-        Command::GetFd => return CLOEXEC.lock().flags(raw_fd),
-        Command::SetFd(cloexec) => {
-            CLOEXEC.lock().set(raw_fd, cloexec);
-            return 0;
-        }
-        Command::Invalid => EINVAL,
-        Command::Unsupported => crate::errcode::ENOSYS,
+    use crate::fdreq::{Command, FD_CLOEXEC};
+    let answer = match crate::fdreq::command(cmd, arg) {
+        Command::DupAtLeast { floor, cloexec } => toyos::fd::dup(raw_fd, floor, !cloexec).map_err(fd_errno),
+        Command::GetFd => toyos::fd::inheritable(raw_fd).map(|inherited| if inherited { 0 } else { FD_CLOEXEC }).map_err(fd_errno),
+        Command::SetFd(cloexec) => toyos::fd::set_inheritable(raw_fd, !cloexec).map(|()| 0).map_err(fd_errno),
+        Command::Invalid => Err(EINVAL),
+        Command::Unsupported => Err(crate::errcode::ENOSYS),
     };
-    crate::errno::set(refused);
-    -1
+    answer.unwrap_or_else(refuse)
 }
 
 // Directory operations
@@ -677,7 +694,10 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
         .iter()
         .map(|&(fd, events)| match crate::socket::stream_of(fd) {
             Some(_) => (-1, 0),
-            None => (crate::socket::watched_of(fd).map_or(fd, |handle| handle.0 as i32), events),
+            None => {
+                let handle = crate::socket::watched_of(fd).or_else(|| on_fd(fd, Ok).ok());
+                (handle.map_or(-1, |handle| handle.0 as i32), events)
+            }
         })
         .collect();
     loop {

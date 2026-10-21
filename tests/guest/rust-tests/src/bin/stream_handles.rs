@@ -10,7 +10,7 @@
 //!   panics with `toyos::net`'s refusal.
 //! - **A stream's handle is no file**: `File::from_raw_fd` of one panics with
 //!   that refusal.
-//! - **No spawn moves one**: a stdio slot and a slot past them by
+//! - **No spawn moves one**: a stdio descriptor and one past them by
 //!   `inherit_handle`, `endow` and `provide` each answer the refusal, start no
 //!   child, and leave the stream reading and writing through the handle.
 //!
@@ -28,6 +28,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::os::fd::{AsFd, AsRawFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 
@@ -79,7 +80,7 @@ fn shares_and_refuses_moves() {
     let status = child.wait().expect("wait the client");
     assert_eq!(
         said,
-        ["shared", "stdio slot refused", "slot past stdio refused", "endow refused", "provide refused"],
+        ["shared", "stdio descriptor refused", "descriptor past stdio refused", "endow refused", "provide refused"],
         "the client said otherwise",
     );
     assert!(status.success(), "the client exited {status:?}");
@@ -211,12 +212,12 @@ fn client() -> ! {
     reads(&mut taken, 12, 4);
     say("shared");
 
-    let handle = taken.as_raw_fd() as u32;
+    let handle = taken.as_raw_handle();
     let paths: [(&str, fn(&mut Command, u32)); 4] = [
-        ("stdio slot", |command, handle| {
+        ("stdio descriptor", |command, handle| {
             command.inherit_handle(1, handle);
         }),
-        ("slot past stdio", |command, handle| {
+        ("descriptor past stdio", |command, handle| {
             command.inherit_handle(5, handle);
         }),
         ("endow", |command, handle| {
@@ -254,12 +255,13 @@ fn client() -> ! {
 /// A client that takes a bare `dup` of its stream's handle as a stream.
 fn foreign() -> ! {
     let stream = connect();
-    let copy = syscall::dup(RawHandle(stream.as_raw_fd() as u32)).expect("a bare duplicate");
+    let copy = syscall::dup(RawHandle(stream.as_raw_handle())).expect("a bare duplicate");
+    let fd = toyos::fd::install(toyos::fd::Object::handle(copy), false, 0).expect("a descriptor for the duplicate");
     say("duplicated");
     let mut go = String::new();
     std::io::stdin().read_line(&mut go).expect("the test's go");
-    // SAFETY: a handle this process holds and nothing else answers for.
-    let _adopted = unsafe { TcpStream::from_raw_fd(copy.0 as i32) };
+    // SAFETY: a descriptor this process holds and nothing else answers for.
+    let _adopted = unsafe { TcpStream::from_raw_fd(fd) };
     say("adopted");
     std::process::exit(0)
 }

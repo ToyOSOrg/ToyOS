@@ -2161,7 +2161,7 @@ dependencies = [
 [[package]]
 name = "mio"
 version = "1.2.0"
-source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#836d14f1cca5d3597135216430d296aaa712300e"
+source = "git+https://github.com/ToyOSOrg/mio?branch=toyos#9f34d36c2eb0f747bbe79be613bf5ee943a5c50d"
 dependencies = [
  "libc",
  "toyos-abi",
@@ -3897,9 +3897,10 @@ dependencies = [
 [[package]]
 name = "socket2"
 version = "0.6.3"
-source = "git+https://github.com/ToyOSOrg/socket2?branch=toyos#12abd8f732277436da2718073cec90f9d2d67f66"
+source = "git+https://github.com/ToyOSOrg/socket2?branch=toyos#d38850198a97a55eeccedb5fb8d91a22efc89ba3"
 dependencies = [
  "libc",
+ "toyos",
  "windows-sys 0.61.2",
 ]
 

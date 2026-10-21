@@ -13,9 +13,10 @@
 //! connection and a writer on the stream's bell, so neither takes the other's
 //! wake. A doorbell says "look", never "there are bytes".
 //!
-//! **A stream belongs to the process that connected or accepted it.** Every
-//! handle of its connection in this process shares one end; a handle with no
-//! end here is refused by name and nothing is written on it
+//! **A stream belongs to the process that connected or accepted it.** Its
+//! connection's one handle reaches its end, and descriptors on it share that
+//! one handle (`crate::fd`); a handle with no end here is refused by name and
+//! nothing is written on it
 //! (`issues/a-stream-cannot-move-between-processes.md`). An end goes once no
 //! handle and no call is left. The table is the instance std links: a program
 //! that also links `toyos` itself and drives these functions holds ends std
@@ -197,15 +198,6 @@ impl Table {
             self.slots[slot] = Slot::Making;
             end
         })
-    }
-
-    /// `copy`, a new handle of `handle`'s connection, reaches its end too;
-    /// `false` with no room for it.
-    fn add(&mut self, slot: usize, copy: RawHandle) -> bool {
-        let Some(room) = self.handles.iter().position(Option::is_none) else { return false };
-        self.handles[room] = Some((copy, slot));
-        self.end(slot).handles += 1;
-        true
     }
 
     /// `handle` reaches its end no more: `None` for a handle that reached
@@ -577,30 +569,10 @@ pub fn is_stream(handle: RawHandle) -> bool {
     TABLE.lock().find(handle).is_some()
 }
 
-/// The stream handle this process holds in table slot `slot`, if one is
-/// there.
-pub fn stream_at(slot: u16) -> Option<RawHandle> {
-    TABLE.lock().handles.iter().flatten().map(|&(held, _)| held).find(|held| held.slot() == slot)
-}
-
 /// A raw handle taken back as a stream: one this process holds an end for
 /// shares it, and any other is refused by name, with nothing written on it.
 pub fn adopt(handle: RawHandle) -> Result<(), Misuse> {
     if is_stream(handle) { Ok(()) } else { Err(Misuse::NotThisProcess(handle)) }
-}
-
-/// A new handle of `handle`'s object: of a stream's connection, one that
-/// reaches the same end; of anything else, the bare `dup`.
-pub fn duplicate(handle: RawHandle) -> Result<RawHandle, SyscallError> {
-    let copy = syscall::dup(handle)?;
-    let mut table = TABLE.lock();
-    let Some(slot) = table.find(handle) else { return Ok(copy) };
-    if table.add(slot, copy) {
-        return Ok(copy);
-    }
-    drop(table);
-    syscall::close(copy);
-    Err(SyscallError::ResourceExhausted)
 }
 
 /// Closes `handle`: of a stream's connection, its end goes with the last
@@ -747,19 +719,16 @@ mod tests {
         End { region: h(1), base: 0x20_0000, bell: h(2), peer: ([192, 0, 2, 2], 80), local_port: 49_152, read_shut: false, handles: 0, calls: 0 }
     }
 
-    /// A handle given out and taken back reaches the end it was given out of,
-    /// and the end goes only with its last handle and its last call.
+    /// The end goes only with its handle and its last call.
     #[test]
-    fn an_end_goes_with_its_last_handle_and_its_last_call() {
+    fn an_end_goes_with_its_handle_and_its_last_call() {
         let mut table = Table::new();
         let slot = table.reserve().unwrap();
         table.enter(slot, end(), h(10));
-        assert!(table.add(slot, h(11)));
-        assert_eq!(table.find(h(11)), Some(slot), "a duplicate reaches the end");
-        let (called, _) = table.call(h(11)).unwrap();
-        assert_eq!(table.forget(h(10)), Some(None), "a handle is left");
-        assert_eq!(table.forget(h(11)), Some(None), "a call is left");
-        assert_eq!(table.find(h(11)), None, "the handle reaches nothing");
+        assert_eq!(table.find(h(10)), Some(slot), "the handle reaches the end");
+        let (called, _) = table.call(h(10)).unwrap();
+        assert_eq!(table.forget(h(10)), Some(None), "a call is left");
+        assert_eq!(table.find(h(10)), None, "the handle reaches nothing");
         assert_eq!(table.returned(called), Some(End { handles: 0, calls: 0, ..end() }), "the last call frees it");
         assert_eq!(table.reserve(), Some(slot + 1), "a freed slot is not taken before its halves are cleared");
         table.unreserve(slot);

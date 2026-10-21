@@ -1,34 +1,35 @@
 /* A descriptor the parent marked FD_CLOEXEC, a 0 that addopen opened
    O_CLOEXEC, and a 1 that adddup2 made and addclose closed are each absent in
-   the child. A child cannot ask about a slot it does not hold and live
-   (tests/CLAUDE.md), so each child asks about one: a child that holds it
-   exits 0, and one that does not ends with SIGSEGV's handle fault. */
+   the child. Each child asks about one: a child that holds it exits 0, and
+   one that does not is answered EBADF and exits 2. */
+#include <errno.h>
 #include <fcntl.h>
-#include <signal.h>
 #include <sys/stat.h>
 
 #include "check.h"
 
 #define SELF "/system/bin/test_c_spawn_cloexec"
 
-/* The child's verdict on descriptor `fd`. */
+/* The child's verdict on descriptor `fd`: 0 held, 2 not, and 3 for any
+   other answer. */
 static int holds(int fd) {
     struct stat st;
-    return fstat(fd, &st) == 0 ? 0 : 2;
+    if (fstat(fd, &st) == 0)
+        return 0;
+    return errno == EBADF ? 2 : 3;
 }
 
 /* How a child asking about `fd`, its descriptors as `actions` leave them,
    ended: 1 for held, 0 for absent. */
 static int child_holds(const char *fd, const posix_spawn_file_actions_t *actions) {
     int status = waited(spawn_role(SELF, "holds", fd, actions, NULL));
-    if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
-        return 1;
-    CHECK(WIFSIGNALED(status) && WTERMSIG(status) == SIGSEGV, "the child asking about %s ended %#x", fd, status);
-    return 0;
+    CHECK(WIFEXITED(status) && (WEXITSTATUS(status) == 0 || WEXITSTATUS(status) == 2),
+          "the child asking about %s ended %#x", fd, status);
+    return WEXITSTATUS(status) == 0;
 }
 
-/* A process started without a stdout starts children of its own: the slot
-   it lacks is no descriptor its children are given, and nothing ends it. */
+/* A process started without a stdout starts children of its own: the
+   descriptor it lacks is none its children are given, and nothing ends it. */
 static int spawns_without_stdout(void) {
     char *argv[] = {SELF, "holds", "0", NULL};
     pid_t pid;

@@ -100,9 +100,6 @@ pub const SYS_READ_NONBLOCK: u64 = 66;
 pub const SYS_WRITE_NONBLOCK: u64 = 67;
 pub const SYS_EXIT: u64 = 72;
 pub const SYS_GET_ENV: u64 = 73;
-/// A second handle to the same object, at a slot the caller picks. See
-/// [`dup2`].
-pub const SYS_HANDLE_DUP_AT: u64 = 74;
 pub const SYS_CLOCK_EPOCH: u64 = 75;
 pub const SYS_PIPE_MAP: u64 = 77;
 pub const SYS_SYMLINK: u64 = 81;
@@ -274,10 +271,6 @@ pub const SYS_TRACE_READ: u64 = 127;
 /// kernel mediates, the firmware's Global Lock, or the power-off's sleep type.
 /// See [`acpi_access`], [`acpi_lock_take`] and [`acpi_s5`].
 pub const SYS_ACPI: u64 = 128;
-/// A second handle to whatever one of the caller's slots holds, or `NotFound`
-/// for an empty slot: how a spawn hands on a stdio slot it may have been
-/// started without. See [`dup_slot`].
-pub const SYS_HANDLE_DUP_SLOT: u64 = 129;
 /// A fresh null handle: every read answers end of file and every write takes
 /// all it is given. See [`null`].
 pub const SYS_NULL: u64 = 130;
@@ -309,11 +302,13 @@ pub const WNOHANG: u64 = 1;
 crate::user_safe! {
     /// Arguments for the `SYS_SPAWN` syscall, passed as a single pointer.
     ///
-    /// **Two vectors, two verbs.** `slot_map` *duplicates* — the parent keeps its
-    /// stdout — and `endow` *moves*, so a parent that wants to keep what it endows
-    /// duplicates first. That is what makes endowing a device claim work with no
-    /// special case: a claim carries no [`Rights::DUP`], so the move is the only
-    /// expressible form and the parent provably no longer holds it.
+    /// **Every handle a child starts with is endowed, and an endowment moves**,
+    /// so a parent that wants to keep what it endows duplicates first. That is
+    /// what makes endowing a device claim work with no special case: a claim
+    /// carries no [`Rights::DUP`], so the move is the only expressible form and
+    /// the parent provably no longer holds it. A child's descriptors are
+    /// endowments labelled [`FD_PREFIX`] and their number; a console among
+    /// them is the child's own, minted for it.
     ///
     /// [`Rights::DUP`]: crate::handle::Rights::DUP
     #[derive(Clone, Copy)]
@@ -326,10 +321,6 @@ crate::user_safe! {
         pub path_len: u64,
         pub argv_ptr: u64,
         pub argv_len: u64,
-        /// `[[child_slot: u32, parent_handle: RawHandle]]`, duplicated into the
-        /// child. Stdio and nothing else, in practice.
-        pub slot_map_ptr: u64,
-        pub slot_map_count: u64,
         pub env_ptr: u64,
         pub env_len: u64,
         /// `[EndowEntry]`, moved out of the parent's table.
@@ -404,6 +395,10 @@ pub const SELF_LABEL: &str = "self";
 pub const SERVE_PREFIX: &str = "serve:";
 /// `dev:<class>`: the claim for a device class this program was given.
 pub const DEV_PREFIX: &str = "dev:";
+/// `fd:<n>`: the child's descriptor `n`, which its descriptor table installs
+/// at that number (`toyos::fd`). Numbering is userland's: the kernel only
+/// moves the handle.
+pub const FD_PREFIX: &str = "fd:";
 /// `provide:<name>`: a connector a *launching client* transferred, beside the
 /// namespace entry the launcher made from it.
 ///
@@ -421,15 +416,6 @@ pub const PROVIDE_PREFIX: &str = "provide:";
 pub const MAX_ENDOWMENTS: usize = 32;
 /// `(label, handle)` pairs one spawn may carry: the kernel adds [`SELF_LABEL`].
 pub const MAX_SPAWN_ENDOWMENTS: usize = MAX_ENDOWMENTS - 1;
-/// `(child slot, parent handle)` pairs one spawn may carry.
-///
-/// **Derived rather than chosen.** A slot map installs into the child's table,
-/// which has [`RawHandle::MAX_SLOTS`] slots, so a longer one necessarily names
-/// a slot twice and the second pair says everything the first did. Without it
-/// the only bound is the 2 MiB window the arguments are read through, and every
-/// pair is a `duplicate_entry` under the parent's own lock — enough of them to
-/// pass `MAX_HEAP_ALLOC`, where the allocator's refusal is a kernel panic.
-pub const MAX_SLOT_MAP: usize = RawHandle::MAX_SLOTS;
 /// Bytes of label blob one endowment table holds, [`SELF_LABEL`]'s among them.
 pub const MAX_LABELS_LEN: usize = 4096;
 /// Bytes of label blob one spawn may carry: the kernel adds [`SELF_LABEL`]'s.
@@ -2056,28 +2042,6 @@ pub fn dup(handle: RawHandle) -> Result<RawHandle, SyscallError> {
 pub fn dup_narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_HANDLE_DUP, handle.0 as u64, rights.bits() as u64, 0, 0))
         .map(|v| RawHandle(v as u32))
-}
-
-/// A second handle to the same object, at a **slot** the caller picks.
-///
-/// A slot and not a handle: a handle carries a generation the caller has no
-/// business choosing, and the one this hands back is the slot's own — so the
-/// answer is not the number that went in. Whatever was at that slot is closed
-/// first.
-/// The rights are the source's: narrowing at a slot is [`dup_narrowed`]
-/// followed by this, and a third argument no caller writes would be a right
-/// nobody can request.
-pub fn dup2(handle: RawHandle, slot: u16) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_HANDLE_DUP_AT, handle.0 as u64, slot as u64, 0, 0))
-        .map(|v| RawHandle(v as u32))
-}
-
-/// A second handle to whatever this process's `slot` holds, with its rights;
-/// `Err(NotFound)` for a slot that holds nothing. Asked of the process's own
-/// table by slot, so an empty one is an answer and not a handle it does not
-/// hold.
-pub fn dup_slot(slot: u16) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_HANDLE_DUP_SLOT, slot as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
 /// A fresh null handle carrying `rights`: a read answers 0 bytes, a write of

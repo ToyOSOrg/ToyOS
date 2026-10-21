@@ -40,8 +40,6 @@ fn main() {
         path_len: 1,
         argv_ptr: region as u64,
         argv_len: 0,
-        slot_map_ptr: 0,
-        slot_map_count: 0,
         env_ptr: 0,
         env_len: 0,
         endow_ptr: 0,

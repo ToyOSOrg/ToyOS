@@ -1,21 +1,20 @@
 //! The handle-table cap must hold on every insertion path.
 //!
-//! There are three of them — plain open, `dup2` and `SYS_SPAWN`'s slot map — and
-//! a table that grows past the cap on any one reaches a hashbrown doubling
-//! above the kernel's 2 MiB single-allocation ceiling.
+//! There are two of them — a plain install, as an open or a `dup` makes, and
+//! `SYS_SPAWN`'s endowments — and a table that grows past the cap on either
+//! reaches a hashbrown doubling above the kernel's 2 MiB single-allocation
+//! ceiling.
 //!
 //! The cap **is** the slot range now: a `RawHandle` carries twelve bits of
 //! slot, so "the table is full" and "that slot does not exist" are one event
 //! and one error word rather than two that could disagree.
 //!
-//! **`SYS_SPAWN`'s two vectors are bounded by their own counts as well, and
-//! the cap cannot stand in for either.** A slot map that names one slot over
-//! and over never trips the cap — the child's table stays one entry wide — and
-//! an endowment vector that names one handle twice passes a preflight run
-//! against a table nothing has been taken out of yet. Both were reachable with
-//! one argument and both ended in the kernel rather than in an error word, so
-//! each has an arm here and the last arm is what says the machine survived
-//! them.
+//! **`SYS_SPAWN`'s endowments are bounded by their own count as well, and
+//! the cap cannot stand in for it.** An endowment vector that names one handle
+//! twice passes a preflight run against a table nothing has been taken out of
+//! yet. It was reachable with one argument and ended in the kernel rather than
+//! in an error word, so it has an arm here and the last arm is what says the
+//! machine survived it.
 //!
 //! **A spawn's answer is an insert into its caller's table**, whose room is
 //! checked before the spawn's endowments move: at the cap the spawn is
@@ -29,9 +28,7 @@
 //! **A pipe and a port are two inserts answered as one**: at the cap, and one
 //! slot short of fitting, each is refused with the table as it was.
 
-use toyos_abi::syscall::{
-    self, EndowEntry, MmapFlags, MmapProt, SpawnArgs, SyscallError, MAX_ENDOWMENTS, MAX_SLOT_MAP, SELF_LABEL,
-};
+use toyos_abi::syscall::{self, EndowEntry, MmapFlags, MmapProt, SpawnArgs, SyscallError, MAX_ENDOWMENTS, SELF_LABEL};
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
 
@@ -47,7 +44,6 @@ const CWD: &str = "/";
 const MAX_HANDLES: u32 = 4096;
 
 const REGION: usize = 4 * 1024 * 1024;
-const PAIRS: usize = 100_000;
 
 /// The label blob the endowment arms index into. Its content is never read —
 /// the vector is refused before anything is installed — but the offsets have to
@@ -68,23 +64,16 @@ fn main() {
     };
     assert!(!region.is_null(), "mmap failed");
 
-    // The child's table is built by a different insert path than dup2's.
-    let pairs = region as *mut [u32; 2];
-    for i in 0..PAIRS {
-        unsafe { pairs.add(i).write([i as u32, 1]) };
-    }
     let argv = unsafe { region.add(REGION / 2) };
     const ARGV0: &[u8] = b"/system/bin/echo\0";
     unsafe { core::ptr::copy_nonoverlapping(ARGV0.as_ptr(), argv, ARGV0.len()) };
 
-    let spawn_with = |slot_map_count: u64, endow_count: u64| {
+    let spawn_with = |endow_count: u64| {
         let args = SpawnArgs {
             path_ptr: argv as u64,
             path_len: (ARGV0.len() - 1) as u64,
             argv_ptr: argv as u64,
             argv_len: ARGV0.len() as u64,
-            slot_map_ptr: region as u64,
-            slot_map_count,
             env_ptr: 0,
             env_len: 0,
             endow_ptr: (region as u64) + (REGION / 4) as u64,
@@ -100,35 +89,12 @@ fn main() {
         unsafe { syscall::spawn(&args) }
     };
 
-    // A slot map longer than the child's table has slots. Past this the count
-    // is bounded only by the 2 MiB window the arguments are read through.
-    let err = spawn_with(PAIRS as u64, 0)
-        .expect_err("a slot_map past MAX_SLOT_MAP must be rejected");
-    assert_eq!(err, SyscallError::InvalidArgument, "wrong error for an oversized slot_map");
-
-    // **The same length, every pair naming slot 0.** The cap never fires: the
-    // child's table stays one entry wide while the parent duplicates a handle
-    // per pair under its own lock and carries every displaced entry out of it.
-    for i in 0..PAIRS {
-        unsafe { pairs.add(i).write([0, 1]) };
-    }
-    let err = spawn_with(PAIRS as u64, 0)
-        .expect_err("a slot_map repeating one slot must be rejected");
-    assert_eq!(err, SyscallError::InvalidArgument, "wrong error for a repeated slot");
-
-    // And the cap itself, which is a different refusal and is what says the two
-    // above are the *count* rather than a blanket no. One pair, naming a slot
-    // no table has.
-    unsafe { pairs.write([MAX_SLOT_MAP as u32 + 1, 1]) };
-    let err = spawn_with(1, 0).expect_err("a slot past the table must be rejected");
-    assert_eq!(err, SyscallError::ResourceExhausted, "wrong error at the child's table cap");
-
     // **An endowment vector naming one handle twice.** Every check in the
     // preflight runs against a table nothing has been removed from, so a repeat
     // passed both times; the first removal retired the slot and the second
     // answered `Stale` into an `expect`.
     let endow = unsafe { region.add(REGION / 4) } as *mut EndowEntry;
-    let entry = EndowEntry { label_off: 0, label_len: LABELS.len() as u32, handle: RawHandle(1), _pad: 0 };
+    let entry = EndowEntry { label_off: 0, label_len: LABELS.len() as u32, handle: stdout(), _pad: 0 };
     unsafe {
         endow.write(entry);
         endow.add(1).write(entry);
@@ -138,18 +104,16 @@ fn main() {
             LABELS.len(),
         );
     }
-    let err = spawn_with(0, 2).expect_err("an endowment vector naming one handle twice must be rejected");
+    let err = spawn_with(2).expect_err("an endowment vector naming one handle twice must be rejected");
     assert_eq!(err, SyscallError::InvalidArgument, "wrong error for a repeated endowment");
 
     a_caller_endows_no_self();
     a_spawn_carries_one_entry_fewer_than_a_table();
 
-    // dup2 picks the slot, so it never went through the allocating path that
-    // carried the cap.
     let mut filled = Vec::new();
     let mut refused = None;
-    for n in 3..40_000u16 {
-        match syscall::dup2(RawHandle(1), n) {
+    for n in 0..40_000u32 {
+        match syscall::dup(stdout()) {
             Ok(handle) => filled.push(handle),
             Err(e) => {
                 refused = Some((n, e));
@@ -157,12 +121,9 @@ fn main() {
             }
         }
     }
-    let (n, e) = refused.expect("dup2 must eventually refuse to grow the handle table");
+    let (n, e) = refused.expect("dup must eventually refuse to grow the handle table");
     assert_eq!(e, SyscallError::ResourceExhausted, "wrong error at the handle cap");
-    assert!(
-        u32::from(n) <= MAX_HANDLES + 16,
-        "handle table reached {n} slots, past the {MAX_HANDLES} cap"
-    );
+    assert!(n <= MAX_HANDLES, "the handle table took {n} more handles, past the {MAX_HANDLES} cap");
 
     a_pair_is_refused_whole(&mut filled);
 
@@ -178,8 +139,7 @@ fn main() {
     assert_eq!(spawned, Err(SyscallError::ResourceExhausted), "a spawn from a full table was not refused");
     // Still this process's: the close ends it if the refused spawn moved it.
     syscall::close(last);
-    let reused = syscall::dup2(RawHandle(1), 3)
-        .expect("dup2 must work again after closing handles");
+    let reused = syscall::dup(stdout()).expect("dup must work again after closing handles");
     syscall::close(reused);
 
     unsafe { syscall::munmap(region, REGION) }.expect("munmap");
@@ -205,9 +165,9 @@ fn a_pair_is_refused_whole(filled: &mut Vec<RawHandle>) {
     refused("no slot free");
     syscall::close(filled.pop().expect("the fill installed a handle"));
     refused("one slot free");
-    filled.push(syscall::dup(RawHandle(1)).expect("the one free slot survived two refused pairs"));
+    filled.push(syscall::dup(stdout()).expect("the one free slot survived two refused pairs"));
     assert_eq!(
-        syscall::dup(RawHandle(1)),
+        syscall::dup(stdout()),
         Err(SyscallError::ResourceExhausted),
         "a refused pair left a second slot free"
     );
@@ -224,8 +184,6 @@ fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, Sys
             path_len: SELF.len() as u64,
             argv_ptr: argv.as_ptr() as u64,
             argv_len: argv.len() as u64,
-            slot_map_ptr: 0,
-            slot_map_count: 0,
             env_ptr: 0,
             env_len: 0,
             endow_ptr: entries.as_ptr() as u64,
@@ -287,4 +245,9 @@ fn a_spawn_carries_one_entry_fewer_than_a_table() {
     syscall::close(child);
     syscall::close(handles[fewer]);
     println!("an endowment labelled self and {MAX_ENDOWMENTS} entries are refused, and {fewer} start");
+}
+
+/// The kernel handle this process's standard output is, descriptor 1's.
+fn stdout() -> RawHandle {
+    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
 }

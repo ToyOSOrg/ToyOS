@@ -22,7 +22,7 @@ pub struct Command {
     stdin: Option<Stdio>,
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
-    extra_slots: Vec<[u32; 2]>,
+    extra_fds: Vec<(u32, u32)>,
     endowments: Vec<(String, u32)>,
     provided: Vec<(String, u32)>,
     parent: toyos::spawn::Parent,
@@ -75,7 +75,7 @@ impl Command {
             stdin: None,
             stdout: None,
             stderr: None,
-            extra_slots: Vec::new(),
+            extra_fds: Vec::new(),
             endowments: Vec::new(),
             provided: Vec::new(),
             parent: toyos::spawn::Parent::Caller,
@@ -171,10 +171,11 @@ impl Command {
         self.cwd.as_ref().map(|cs| Path::new(cs))
     }
 
-    /// Add an extra handle mapping for the child process.
-    /// The child will see slot `child_slot` holding the parent's `parent_handle`.
-    pub fn inherit_handle(&mut self, child_slot: u32, parent_handle: u32) {
-        self.extra_slots.push([child_slot, parent_handle]);
+    /// Give the child descriptor `child_fd`, naming this process's
+    /// `parent_handle`, which this process keeps: the spawn duplicates it.
+    pub fn inherit_handle(&mut self, child_fd: u32, parent_handle: u32) {
+        self.extra_fds.retain(|&(fd, _)| fd != child_fd);
+        self.extra_fds.push((child_fd, parent_handle));
     }
 
     /// Give the child `handle` under the name `label`.
@@ -267,28 +268,26 @@ impl Command {
         let stdout = self.stdout.as_ref().unwrap_or(&default);
         let stderr = self.stderr.as_ref().unwrap_or(&default);
 
-        let mut slot_map: Vec<[u32; 2]> = Vec::new();
-        let mut child_pipes: Vec<Pipe> = Vec::new();
-        // The pipes a file server appends a served file from; held until the
-        // child has its own copies.
-        let mut streams: Vec<toyos::Pipe> = Vec::new();
-        // Copies of this process's own stdio and fresh null handles, held
-        // until the child has its own.
-        let mut inherited: Vec<toyos::OwnedHandle> = Vec::new();
+        // The handles the child's descriptors are, each held here until the
+        // spawn has duplicated it into the child.
+        let mut held: Vec<(u32, toyos::OwnedHandle)> = Vec::new();
         let mut stdin_pipe: Option<Pipe> = None;
         let mut stdout_pipe: Option<Pipe> = None;
         let mut stderr_pipe: Option<Pipe> = None;
-        for (pipe, stdio, slot, is_input) in
+        for (pipe, stdio, fd, is_input) in
             [(&mut stdin_pipe, stdin, 0, true), (&mut stdout_pipe, stdout, 1, false), (&mut stderr_pipe, stderr, 2, false)]
         {
-            // A slot `inherit_handle` names is that handle's.
-            if self.extra_slots.iter().any(|&[child, _]| child == slot) {
+            // A descriptor `inherit_handle` names is that handle's.
+            if self.extra_fds.iter().any(|&(child, _)| child == fd) {
                 continue;
             }
-            Self::setup_slot(&mut slot_map, &mut child_pipes, &mut streams, &mut inherited, pipe, stdio, slot, is_input)?;
+            if let Some(handle) = Self::child_stdio(pipe, stdio, fd, is_input)? {
+                held.push((fd, handle));
+            }
         }
-        let stdio = slot_map.len();
-        slot_map.extend_from_slice(&self.extra_slots);
+        let mut fds: Vec<(u32, toyos_abi::RawHandle)> =
+            held.iter().map(|(fd, h)| (*fd, toyos::AsHandle::as_handle(h))).collect();
+        fds.extend(self.extra_fds.iter().map(|&(fd, h)| (fd, toyos_abi::RawHandle(h))));
 
         let capture = self.env.capture();
         let env_buf = env_blob(&capture);
@@ -302,8 +301,7 @@ impl Command {
             argv: &argv_buf,
             env: &env_buf,
             cwd: &cwd,
-            slots: &slot_map,
-            stdio,
+            fds: &fds,
             endow: &endow,
             provided: &provided,
             parent: self.parent,
@@ -333,68 +331,57 @@ impl Command {
         // The child keeps the object alive; this process's handle, and with it
         // its own mapping, goes.
         drop(image);
-        drop(child_pipes);
-        drop(streams);
-        drop(inherited);
+        drop(held);
         let handle = spawned.map_err(refused)?;
         Ok((Process { handle }, pipes(stdin_pipe, stdout_pipe, stderr_pipe)))
     }
 
-    fn setup_slot(
-        slot_map: &mut Vec<[u32; 2]>,
-        child_pipes: &mut Vec<Pipe>,
-        streams: &mut Vec<toyos::Pipe>,
-        inherited: &mut Vec<toyos::OwnedHandle>,
+    /// The handle the child's descriptor `fd` is, as `stdio` configures it,
+    /// owned until the spawn has its own: `None` for one the child starts
+    /// without. A pipe's other end is put in `parent_pipe`.
+    fn child_stdio(
         parent_pipe: &mut Option<Pipe>,
         stdio: &Stdio,
-        child_slot: u32,
+        fd: u32,
         is_input: bool,
-    ) -> io::Result<()> {
-        // What this process's own slot holds, if it holds anything: a slot its
-        // spawn left empty is empty in the child too.
-        let inherit = |from: u16, slot_map: &mut Vec<[u32; 2]>, inherited: &mut Vec<toyos::OwnedHandle>| {
-            if let Some(copy) = toyos::spawn::inherited(from).map_err(refused)? {
-                slot_map.push([child_slot, toyos::AsHandle::as_handle(&copy).0]);
-                inherited.push(copy);
+    ) -> io::Result<Option<toyos::OwnedHandle>> {
+        // What this process's own descriptor names, if it is open: one it
+        // closed is closed in the child too.
+        let inherit = |from: i32| -> io::Result<Option<toyos::OwnedHandle>> {
+            let copy = toyos::fd::copy(from).map_err(crate::sys::to_io_error)?;
+            match copy {
+                Some(copy) if toyos::net::stream::is_stream(toyos::AsHandle::as_handle(&copy)) => {
+                    Err(refused(toyos::spawn::Refused::Stream(toyos::AsHandle::as_handle(&copy))))
+                }
+                copy => Ok(copy),
             }
-            io::Result::Ok(())
         };
-        match stdio {
-            Stdio::Inherit => inherit(child_slot as u16, slot_map, inherited)?,
+        // SAFETY: each `dup` answers a fresh handle nothing else answers for.
+        let copy = |pipe: &Pipe| pipe.with_handle(toyos_abi::syscall::dup)?.map(|h| unsafe { toyos::OwnedHandle::from_raw(h) }).map_err(crate::sys::to_io_error);
+        Ok(match stdio {
+            Stdio::Inherit => inherit(fd as i32)?,
             Stdio::MakePipe | Stdio::MakeTtyPipe => {
                 let (r, w) = crate::sys::pipe::pipe()?;
                 if matches!(stdio, Stdio::MakeTtyPipe) {
-                    toyos_abi::syscall::mark_tty(toyos_abi::RawHandle(r.raw_fd() as u32));
-                    toyos_abi::syscall::mark_tty(toyos_abi::RawHandle(w.raw_fd() as u32));
+                    r.with_handle(toyos_abi::syscall::mark_tty)?;
+                    w.with_handle(toyos_abi::syscall::mark_tty)?;
                 }
-                if is_input {
-                    slot_map.push([child_slot, r.raw_fd() as u32]);
-                    child_pipes.push(r);
-                    *parent_pipe = Some(w);
-                } else {
-                    slot_map.push([child_slot, w.raw_fd() as u32]);
-                    child_pipes.push(w);
-                    *parent_pipe = Some(r);
-                }
+                let (theirs, ours) = if is_input { (r, w) } else { (w, r) };
+                *parent_pipe = Some(ours);
+                Some(copy(&theirs)?)
             }
-            Stdio::InheritFile(file) => {
-                let (handle, stream) = file.as_child_stdio()?;
-                slot_map.push([child_slot, handle.0]);
-                streams.extend(stream);
-            }
-            Stdio::InheritPipe(pipe) => slot_map.push([child_slot, pipe.raw_fd() as u32]),
-            Stdio::ParentStdout => inherit(1, slot_map, inherited)?,
-            Stdio::ParentStderr => inherit(2, slot_map, inherited)?,
+            Stdio::InheritFile(file) => Some(file.as_child_stdio()?),
+            Stdio::InheritPipe(pipe) => Some(copy(pipe)?),
+            Stdio::ParentStdout => inherit(1)?,
+            Stdio::ParentStderr => inherit(2)?,
             Stdio::Null => {
                 use toyos_abi::handle::Rights;
                 let direction = if is_input { Rights::READ } else { Rights::WRITE };
                 let null = toyos::null(direction.union(Rights::DUP).union(Rights::TRANSFER).union(Rights::WAIT))
                     .map_err(crate::sys::to_io_error)?;
-                slot_map.push([child_slot, toyos::AsHandle::as_handle(&null).0]);
-                inherited.push(null);
+                Some(null)
             }
-        }
-        Ok(())
+        })
     }
 }
 

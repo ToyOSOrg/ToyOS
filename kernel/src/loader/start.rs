@@ -17,11 +17,8 @@ use crate::scheduler;
 use crate::user_ptr::UserBytes;
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{
-    EndowEntry, SyscallError, MAX_SLOT_MAP, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SELF_LABEL,
+    EndowEntry, SyscallError, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SELF_LABEL,
 };
-
-/// One `[child_slot, parent_handle]` pair of `SpawnArgs::slot_map_ptr`, in bytes.
-pub const SLOT_PAIR_LEN: usize = 8;
 
 /// Where a new context first runs.
 pub(crate) enum Start {
@@ -148,11 +145,35 @@ impl PendingHandles {
         }
 
         let mut entries = Vec::with_capacity(moving.len());
+        // The consoles this spawn endowed, by the parent's object, each with the child's own.
+        let mut minted: Vec<(usize, KObjectRef)> = Vec::new();
+        // Moved-out console handles, dropped once the parent's lock is let go.
+        let mut displaced = Vec::new();
         for (mut entry, parent_handle) in moving {
             let moved = data
                 .handles
                 .remove(parent_handle)
                 .expect("an endowed handle verified under this lock stopped resolving");
+            // A console is minted, not moved: it is its own line buffer, and one shared
+            // would splice two processes' half-lines. Two endowments of one parent console
+            // are one child console, or aliased stdout and stderr would split in two.
+            let moved = match moved.object() {
+                KObjectRef::Console(parent_console) => {
+                    let key = Arc::as_ptr(parent_console) as usize;
+                    let object = match minted.iter().find(|(seen, _)| *seen == key) {
+                        Some((_, object)) => object.clone(),
+                        None => {
+                            let object = KObjectRef::Console(crate::object::device::ConsoleObject::new());
+                            minted.push((key, object.clone()));
+                            object
+                        }
+                    };
+                    let rights = moved.rights();
+                    displaced.push(moved);
+                    HandleEntry::new(object, rights)
+                }
+                _ => moved,
+            };
             entry.handle = table
                 .install(moved)
                 .expect("a child table with verified room refused an endowment");
@@ -162,6 +183,7 @@ impl PendingHandles {
         let held = ops::install(&mut data.handles, own.object().clone())
             .expect("a caller's table with verified room refused its child");
         drop(data);
+        drop(displaced);
         endow_self(&mut table, &mut entries, &mut labels, own);
         Ok((table, Endowments::new(entries, labels), held))
     }
@@ -187,75 +209,16 @@ pub(super) fn endow_self(table: &mut HandleTable, entries: &mut Vec<EndowEntry>,
     labels.extend_from_slice(SELF_LABEL.as_bytes());
 }
 
-/// Reads `SpawnArgs`'s two handle vectors into the child's pending handle state.
+/// Reads `SpawnArgs`'s endowments into the child's pending handle state.
 // Every refusal here precedes any child state, so nothing is enqueued or orphaned.
-pub fn build_child_handles(
-    slot_map: &UserBytes,
-    endow: &UserBytes,
-    labels: &[u8],
-) -> Result<PendingHandles, Refusal> {
+pub fn build_child_handles(endow: &UserBytes, labels: &[u8]) -> Result<PendingHandles, Refusal> {
     if endow.len() / ENDOW_ENTRY_LEN > MAX_SPAWN_ENDOWMENTS {
-        return Err(SyscallError::InvalidArgument.into());
-    }
-    // Checked before the loop: `install_at`'s cap misses a repeated slot, which would duplicate
-    // handles under the parent's lock without bound.
-    if slot_map.len() / SLOT_PAIR_LEN > MAX_SLOT_MAP {
         return Err(SyscallError::InvalidArgument.into());
     }
     if labels.len() > MAX_SPAWN_LABELS_LEN {
         return Err(SyscallError::InvalidArgument.into());
     }
-    let data_arc = process_data();
-    let data = data_arc.lock();
-    let mut handles = HandleTable::for_child();
-    // Dropped after the lock releases, not inside it: `install_at` leaves *where* to the caller.
-    let mut displaced = Vec::new();
-    // Parent console objects already minted a replacement for, keyed by address.
-    let mut minted: Vec<(usize, crate::object::KObjectRef)> = Vec::new();
-    for i in 0..slot_map.len() / SLOT_PAIR_LEN {
-        let mut pair = [0u8; SLOT_PAIR_LEN];
-        slot_map.read_at(i * SLOT_PAIR_LEN, &mut pair);
-        let child_slot = u32::from_ne_bytes([pair[0], pair[1], pair[2], pair[3]]);
-        let parent = RawHandle(u32::from_ne_bytes([pair[4], pair[5], pair[6], pair[7]]));
-        // An unheld handle ends the parent (`object::HandleError`'s rule) rather than silently skipping the slot.
-        let rights = data.handles.rights_of(parent)?;
-        // A device claim carries no `DUP` and is refused by name.
-        let entry = data.handles.duplicate_entry(parent, rights)?;
-        // A console is minted, not duplicated: it is its own line buffer, and sharing one would splice
-        // two half-lines together.
-        let entry = match entry.object() {
-            crate::object::KObjectRef::Console(parent_console) => {
-                // Two slots naming the same parent console land on one child console — what this
-                // address-keyed lookup preserves — or aliased stdout/stderr would split into two buffers.
-                let key = alloc::sync::Arc::as_ptr(parent_console) as usize;
-                let object = match minted.iter().find(|(seen, _)| *seen == key) {
-                    Some((_, object)) => object.clone(),
-                    None => {
-                        let object = crate::object::KObjectRef::Console(
-                            crate::object::device::ConsoleObject::new(),
-                        );
-                        minted.push((key, object.clone()));
-                        object
-                    }
-                };
-                // The duplicate is displaced too, dropped outside the parent's lock.
-                displaced.push(Some(entry));
-                crate::object::HandleEntry::new(object, rights)
-            }
-            _ => entry,
-        };
-        let slot = u16::try_from(child_slot)
-            .map_err(|_| SyscallError::ResourceExhausted)?;
-        let (_, replaced) = handles
-            .install_at(slot, entry)
-            .map_err(|_| SyscallError::ResourceExhausted)?;
-        displaced.push(replaced);
-    }
-
-    drop(data);
-    drop(displaced);
-
     let mut raw = alloc::vec![0u8; endow.len()];
     endow.read_at(0, &mut raw);
-    Ok(PendingHandles { table: handles, endow: raw, labels: labels.to_vec() })
+    Ok(PendingHandles { table: HandleTable::new(), endow: raw, labels: labels.to_vec() })
 }

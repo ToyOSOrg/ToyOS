@@ -192,18 +192,19 @@ delegation and not a widening.
 
 ## 7. What authority is implicit in process creation? — COMMITTED
 
-A child starts with an empty `HandleTable` and gets exactly two vectors:
-`slot_map` *duplicates* (the parent keeps its copy) and `endow` *moves*
-(`sdk/abi/src/syscall.rs:283`). Both are all-or-nothing and refuse by name — a
-slot-map pair naming a handle the parent does not hold ends the parent
-(`kernel/src/loader/start.rs:308`), an endowed handle without `TRANSFER` refuses
-the spawn before anything leaves the table (`:206`), and the move is the last
-thing a spawn does (`kernel/src/loader/mod.rs:649`). **Two things are implicit
+A child starts with an empty `HandleTable` and gets exactly one vector,
+`endow`, which *moves* (`sdk/abi/src/syscall.rs`, `SpawnArgs`): its stdio
+and every other descriptor are endowments labelled `fd:<n>`, which its
+userland table numbers, and a console among them is minted for the child. It
+is all-or-nothing and refuses by name — an endowed handle without `TRANSFER`
+refuses the spawn before anything leaves the table
+(`kernel/src/loader/start.rs`, `PendingHandles::commit`), and the move is the
+last thing a spawn does (`kernel/src/loader/mod.rs`). **Two things are implicit
 and nothing else is:**
 
-1. a `Console` slot is *minted fresh* rather than duplicated, at the parent's
-   rights, because the object is the line buffer
-   (`kernel/src/loader/start.rs:325`);
+1. an endowed `Console` is *minted fresh* rather than moved, at the moved
+   handle's rights, because the object is the line buffer
+   (`kernel/src/loader/start.rs`, `PendingHandles::commit`);
 2. the spawner is handed a `Process` handle carrying
    `DUP|TRANSFER|WAIT|READ|MANAGE` by type (`kernel/src/object/ops.rs:74`), and
    must dup-narrow and close if it wants to hold less.
