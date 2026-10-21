@@ -42,8 +42,8 @@ impl SecretKey {
         }
     }
 }
-/// The u-coordinate of scalar * u. The ladder's (x2, z2, x3, z3) is the
-/// operation's secret state, erased when it returns.
+/// The u-coordinate of scalar * u. The ladder's (x2, z2, x3, z3) and the
+/// shared value x2 / z2 are erased when it returns.
 fn multiply(scalar: &[u8; 32], point: &[u8; 32]) -> Secret<32> {
     let x1 = Tight::from_bytes(point);
     let mut state = Workspace([Tight::ONE, Tight::ZERO, x1, Tight::ONE]);
@@ -72,5 +72,6 @@ fn multiply(scalar: &[u8; 32], point: &[u8; 32]) -> Secret<32> {
     let mask = ct::mask(swap);
     Tight::swap(x2, x3, mask);
     Tight::swap(z2, z3, mask);
-    Secret(x2.mul(&z2.invert()).bytes())
+    let shared = Workspace(x2.mul(&z2.invert()));
+    Secret(shared.0.bytes())
 }

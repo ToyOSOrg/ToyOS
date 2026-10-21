@@ -91,7 +91,8 @@ impl<C: Curve<N>, const N: usize> Clone for Point<C, N> {
     }
 }
 impl<C: Curve<N>, const N: usize> Copy for Point<C, N> {}
-impl<C: Curve<N>, const N: usize> crate::secret::Zeroable for Point<C, N> {}
+// Three residues: zero is a valid point representation.
+unsafe impl<C: Curve<N>, const N: usize> crate::secret::Zeroable for Point<C, N> {}
 impl<C: Curve<N>, const N: usize> Point<C, N> {
     fn identity() -> Self {
         Self {
@@ -150,16 +151,15 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let out = Self::select(&out, self, q.z.is_zero());
         Self::select(&out, q, self.z.is_zero())
     }
-    /// scalar * self on a fixed schedule. The accumulator is the operation's
-    /// secret state, erased when it returns; the result is the caller's.
+    /// scalar * self on a fixed schedule.
     pub(crate) fn mul(&self, scalar: &Scalar<C, N>) -> Self {
-        let mut r = Workspace(Self::identity());
+        let mut r = Self::identity();
         for i in (0..N * 64).rev() {
-            let doubled = r.0.double();
+            let doubled = r.double();
             let added = doubled.add(self);
-            r.0 = Self::select(&doubled, &added, scalar.bit(i))
+            r = Self::select(&doubled, &added, scalar.bit(i))
         }
-        r.0
+        r
     }
     fn affine(&self) -> Result<([u64; N], [u64; N]), Error> {
         if self.z.is_zero() == 1 {
@@ -210,15 +210,19 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
             z: Residue::one(),
         })
     }
-    /// The x-coordinate of scalar * self into `output`, 8N bytes.
+    /// The x-coordinate of scalar * self into `output`, 8N bytes. The product
+    /// and its affine coordinates are the shared secret's, erased here.
     pub(crate) fn agree(&self, scalar: &Scalar<C, N>, output: &mut [u8]) {
+        let product = Workspace(self.mul(scalar));
         // Both curves have prime order and cofactor one; validated nonzero
         // scalars and finite peers cannot multiply to infinity.
-        let (x, _) = self
-            .mul(scalar)
+        let (mut x, mut y) = product
+            .0
             .affine()
             .expect("validated prime-order point and nonzero scalar");
         to_be(&x, output);
+        wipe64(&mut x);
+        wipe64(&mut y);
     }
     /// ECDSA verification of a DER signature over an 8N-byte digest. All
     /// inputs are public.

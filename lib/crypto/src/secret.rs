@@ -2,19 +2,29 @@
 //!
 //! - **Erased: owners.** A [`Secret`], and every type that owns a key, seed,
 //!   expanded key, key schedule, scalar or shared secret, erases its own
-//!   storage when it drops.
-//! - **Erased: workspaces.** A secret operation's explicitly managed state,
-//!   such as the X25519 ladder's coordinates or a scalar multiplication's
-//!   accumulator, is a [`Workspace`]. It drops when the operation returns, on
-//!   every path out of it, early returns and `?` included.
+//!   storage when it drops. So do the hash, HMAC, Keccak, SHA-1 and Poly1305
+//!   states.
+//! - **Erased: key-equivalent results.** Each key agreement erases its
+//!   shared value before it becomes the returned bytes: X25519's x2 / z2, and
+//!   P-256/P-384's product point with its affine coordinates. The bytes are
+//!   then the caller's `SharedSecret`, an owner.
+//! - **Erased: workspaces.** A secret operation's explicitly managed state is
+//!   a [`Workspace`], dropped when the operation returns, on every path out of
+//!   it, early returns and `?` included. The X25519 ladder's (x2, z2, x3, z3)
+//!   is one. Its slot is what LLVM writes at the ladder's end; the copies the
+//!   loop works on in registers and other slots are not erased.
+//! - **Erased per value, for now.** Ed25519 scalars (`scalar25519::S`, until
+//!   its reduction is rewritten) and ML-KEM polynomials (`mlkem::Poly`) still
+//!   erase every temporary on drop.
 //! - **How.** Volatile stores of zero over the value's own storage, then a
 //!   sequentially consistent compiler fence. They erase that location and no
 //!   other.
-//! - **Not erased.** Arithmetic intermediates (field elements and residues
-//!   are `Copy` values); registers; spill slots and every other copy the
-//!   compiler makes, by-value moves and returns included; a moved value's
-//!   earlier location; finished stack frames; the caller's buffers and public
-//!   outputs. These remain until something overwrites them.
+//! - **Not erased.** Other arithmetic intermediates: 2^255 - 19 field
+//!   elements, NIST residues and both curves' points are `Copy` values.
+//!   Registers; spill slots and every other copy the compiler makes, by-value
+//!   moves and returns included; a moved value's earlier location; finished
+//!   stack frames; the caller's buffers and public outputs. These remain
+//!   until something overwrites them.
 //! - **Panics.** An unwinding panic drops, and so erases, every owner and
 //!   workspace on the unwound frames. Under `panic = "abort"` nothing runs
 //!   after the panic.
@@ -46,13 +56,18 @@ pub(crate) fn wipe64(words: &mut [u64]) {
     compiler_fence(Ordering::SeqCst);
 }
 
-/// Element types whose all-zero bytes are a valid value.
-pub(crate) trait Zeroable: Copy {}
-impl Zeroable for u8 {}
-impl Zeroable for u32 {}
-impl Zeroable for u64 {}
-impl Zeroable for u128 {}
-impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
+/// Types whose all-zero bytes are a valid value.
+///
+/// # Safety
+/// Every bit pattern of zero bytes must be a valid `Self`: no references,
+/// `NonZero` fields or enums without a zero discriminant.
+pub(crate) unsafe trait Zeroable: Copy {}
+// Integers and arrays of zeroable elements are valid at zero.
+unsafe impl Zeroable for u8 {}
+unsafe impl Zeroable for u32 {}
+unsafe impl Zeroable for u64 {}
+unsafe impl Zeroable for u128 {}
+unsafe impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
 
 /// Erases a whole value, 16 bytes per volatile store. A single volatile store
 /// of a large array is lowered through a stack copy, a `memcpy` call.

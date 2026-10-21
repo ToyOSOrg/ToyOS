@@ -36,7 +36,8 @@ impl<M: Modulus<N>, const N: usize> Clone for Residue<M, N> {
     }
 }
 impl<M: Modulus<N>, const N: usize> Copy for Residue<M, N> {}
-impl<M: Modulus<N>, const N: usize> crate::secret::Zeroable for Residue<M, N> {}
+// Words and a zero-sized marker: zero is a valid residue.
+unsafe impl<M: Modulus<N>, const N: usize> crate::secret::Zeroable for Residue<M, N> {}
 
 impl<M: Modulus<N>, const N: usize> Residue<M, N> {
     /// Words already in Montgomery form and below p: a compile-time constant

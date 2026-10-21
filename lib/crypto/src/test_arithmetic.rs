@@ -72,10 +72,10 @@ fn field25519_carries_and_noncanonical_inputs_match_integer_oracle() {
     }
 }
 
-/// The largest limbs each bound admits, through every operation: the bounds
-/// the types state are enough for the carries.
+/// The largest limbs the operations reach, through every operation: the
+/// bounds the types state are enough for the carries.
 #[test]
-fn field25519_limb_bounds_hold_at_their_extremes() {
+fn field25519_largest_reachable_limbs_stay_within_their_bounds() {
     let p = (BigUint::from(1u8) << 255) - 19u8;
     let tight = Tight::from_limbs([(1 << 51) - 1, (1 << 51) + (1 << 19) - 1, (1 << 51) - 1, (1 << 51) - 1, (1 << 51) - 1]);
     let value = |l: &[u64; 5]| l.iter().enumerate().fold(BigUint::from(0u8), |v, (i, &x)| v + (BigUint::from(x) << (51 * i)));

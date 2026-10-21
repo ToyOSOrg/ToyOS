@@ -128,8 +128,9 @@ impl Tight {
         Self::ZERO.sub(self)
     }
 
-    /// self^(2^k).
+    /// self^(2^k), for k >= 1.
     pub(crate) fn square_times(&self, k: u32) -> Tight {
+        debug_assert!(k >= 1);
         let mut r = self.square();
         for _ in 1..k {
             r = r.square();
@@ -298,4 +299,5 @@ fn square(a: &[u64; 5]) -> Tight {
     carry(v)
 }
 
-impl crate::secret::Zeroable for Tight {}
+// Five words: zero is a valid element.
+unsafe impl crate::secret::Zeroable for Tight {}

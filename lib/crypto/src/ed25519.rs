@@ -9,7 +9,6 @@ use crate::{
     field25519::{Multiply, Tight},
     hash::Sha512,
     scalar25519::S,
-    secret::Workspace,
 };
 #[cfg(feature = "sign")]
 use crate::{Random, secret::Secret};
@@ -41,8 +40,8 @@ const B_T: Tight = Tight::from_bytes(&[
     0xa3, 0xdd, 0xb7, 0xa5, 0xb3, 0x8a, 0xde, 0x6d, 0xf5, 0x52, 0x51, 0x77, 0x80, 0x9f, 0xf0, 0x20,
     0x7d, 0xe3, 0xab, 0x64, 0x8e, 0x4e, 0xea, 0x66, 0x65, 0x76, 0x8b, 0xd7, 0x0f, 0x5f, 0x87, 0x67,
 ]);
-#[derive(Clone, Copy)]
 /// Extended coordinates (X : Y : Z : T) with x = X/Z, y = Y/Z, xy = T/Z.
+#[derive(Clone, Copy)]
 struct Point {
     x: Tight,
     y: Tight,
@@ -143,16 +142,15 @@ impl Point {
             t: Tight::select(&a.t, &b.t, bit),
         }
     }
-    /// scalar * self, on a fixed schedule. The accumulator is the operation's
-    /// secret state, erased when it returns; the result is the caller's.
+    /// scalar * self, on a fixed schedule.
     fn mul(&self, scalar: &[u8; 32]) -> Self {
-        let mut r = Workspace(Self::identity());
+        let mut r = Self::identity();
         for i in (0..256).rev() {
-            let double = r.0.double();
+            let double = r.double();
             let added = double.add(self);
-            r.0 = Self::select(&double, &added, u64::from((scalar[i / 8] >> (i % 8)) & 1));
+            r = Self::select(&double, &added, u64::from((scalar[i / 8] >> (i % 8)) & 1));
         }
-        r.0
+        r
     }
     fn eq(&self, q: &Self) -> u64 {
         self.x.mul(&q.z).eq(&q.x.mul(&self.z)) & self.y.mul(&q.z).eq(&q.y.mul(&self.z))
@@ -162,7 +160,6 @@ impl Point {
     }
 }
 
-impl crate::secret::Zeroable for Point {}
 
 pub struct PublicKey {
     encoded: [u8; 32],
