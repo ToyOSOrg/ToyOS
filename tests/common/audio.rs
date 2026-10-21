@@ -83,6 +83,32 @@ pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
+/// The job that plays `hda_tone`'s tone while it writes the stick.
+pub const TONE_BESIDE_STICK_WRITE: &str = "test_rs_tone_beside_stick_write";
+
+/// That job's tone played to its end through the HDA controller with no
+/// period left to soundserver, while at least a mebibyte of its lines reached
+/// the stick: counted in the file read back off it, not in what the job says.
+pub fn tone_beside_a_stick_write(log: &Serial) -> Result<(), String> {
+    on_an_output(log.text(), TONE_BESIDE_STICK_WRITE)?;
+    let window = job_window(log.text(), TONE_BESIDE_STICK_WRITE)?;
+    let reached = window.lines().filter(|l| l.contains("tone_beside_stick_write: line ")).map(|l| l.len() + 1).sum::<usize>();
+    if reached < 1 << 20 {
+        return Err(format!("{reached} bytes of the job's lines reached the stick beside the tone, under a mebibyte"));
+    }
+    let wrote = format!("{} KiB of lines reached the stick beside the tone", reached >> 10);
+    let underruns = sum_field(window, "underruns");
+    if underruns != 0 {
+        return Err(format!(
+            "soundserver filled {underruns} period(s) the tone client had not covered, beside a stick \
+             write ({}):\n{window}",
+            wrote.trim()
+        ));
+    }
+    eprintln!("  [audio] {}", wrote.trim());
+    Ok(())
+}
+
 /// The resampled tone client played to its end through the HDA controller, at
 /// a rate the device does not run, and no period of it went unfilled.
 pub fn resampled_tone_on_metal(log: &Serial) -> Result<(), String> {

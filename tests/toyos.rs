@@ -645,6 +645,18 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
+        // DIAG (never lands): #971's tone_beside_a_stick_write on main, the
+        // kernel's xHCI serving the stick: a baseline for the AMD stall.
+        "tone_beside_a_stick_write",
+        metal::Metal {
+            arms: TESTCASES,
+            judge: |b| {
+                b[0].job_passed(audio::TONE_BESIDE_STICK_WRITE)?;
+                audio::tone_beside_a_stick_write(&b[0].log())
+            },
+        },
+    ),
+    (
         // A tone at the device rate the device does not run, through cpal,
         // played to its end with every period covered: soundserver resamples it.
         // The T14 (44.1 kHz) and the AMD bench (48 kHz).
@@ -1390,6 +1402,7 @@ const TESTCASES: &[metal::Arm] = &[metal::once(
         "test_rs_wake_onto_busy",
         "test_rs_audio_tone",
         "test_rs_audio_tone_resampled",
+        audio::TONE_BESIDE_STICK_WRITE,
         "test_rs_volume_step",
         "test_rs_syscall_cost",
         "test_rs_spawn_cost",
