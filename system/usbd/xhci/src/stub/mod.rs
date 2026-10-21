@@ -255,6 +255,8 @@ pub struct Xhc {
     legsup: u32,
     /// Firmware holds HC BIOS Owned and never lets go of it (§7.1.1).
     pub firmware_keeps: bool,
+    /// HCCPARAMS1.AC64: 64-bit addressing (§5.3.6).
+    pub ac64: bool,
     legctl: u32,
     /// Every PORTSC write the driver made that broke an invariant.
     pub violations: Vec<(usize, invariants::Violation)>,
@@ -298,6 +300,7 @@ impl Xhc {
             answers: Answers::Always,
             legsup: 1,
             firmware_keeps: false,
+            ac64: true,
             legctl: 0,
             violations: Vec::new(),
             commands: Vec::new(),
@@ -318,7 +321,7 @@ impl Xhc {
             0x04 => SLOTS as u32 | (1 << 8) | (n << 24),
             0x08 | 0x0C => 0,
             // AC64, 32-byte contexts, the extended capabilities at XECP.
-            0x10 => 1 | ((XECP as u32 / 4) << 16),
+            0x10 => u32::from(self.ac64) | ((XECP as u32 / 4) << 16),
             0x14 => DB as u32,
             0x18 => RTS as u32,
             a if a == CAPLENGTH => self.usbcmd,

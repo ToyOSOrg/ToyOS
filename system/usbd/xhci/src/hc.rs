@@ -141,7 +141,7 @@ const MAX_SCRATCH: usize = PAGE / 8;
 const REGISTER_NS: Nanos = 2_000_000_000;
 /// How long firmware is given to let go of the controller: the OS sets HC OS
 /// Owned and waits for HC BIOS Owned to clear (§4.22.1; USBLEGSUP, §7.1.1),
-/// a wait the specification does not bound. Policy.
+/// a wait §4.22.1 says "should not exceed '1' second".
 const HANDOFF_NS: Nanos = 1_000_000_000;
 /// How long a command may go unanswered before it is aborted, and an abort
 /// before the controller is called dead: "an upper limit of 5 seconds for any
@@ -169,6 +169,11 @@ pub enum Refusal {
     Scratchpad(usize),
     /// The grant is smaller than [`Reset::grant_bytes`].
     Grant(usize),
+    /// Firmware still held HC BIOS Owned after [`HANDOFF_NS`]. §4.22.1 has the
+    /// OS wait for it to clear "before attempting to use the xHC": firmware
+    /// may still be driving the controller, and two agents would each believe
+    /// they own it. The controller is left as found.
+    FirmwareKeepsIt(u32),
 }
 
 impl core::fmt::Display for Refusal {
@@ -179,6 +184,12 @@ impl core::fmt::Display for Refusal {
             Self::PageSize(p) => write!(f, "PAGESIZE={p:#x} does not include 4 KiB, where every ring is placed"),
             Self::Scratchpad(n) => write!(f, "it asks for {n} scratchpad buffers, past the {MAX_SCRATCH} one page names"),
             Self::Grant(bytes) => write!(f, "a grant of {bytes} bytes is short of the layout"),
+            Self::FirmwareKeepsIt(legsup) => write!(
+                f,
+                "firmware still owns it after {} ms (USBLEGSUP {legsup:#010x}, HC BIOS Owned set), and \
+                 xHCI 1.2 §4.22.1 has the OS wait for that to clear before it uses the controller",
+                HANDOFF_NS / 1_000_000
+            ),
         }
     }
 }
@@ -880,10 +891,10 @@ impl<R: Registers, D: DmaBuffers> Drop for Op<'_, R, D> {
 }
 
 /// §4.22.1: ask firmware for the controller (HC OS Owned, USBLEGSUP §7.1.1)
-/// and give it [`HANDOFF_NS`] to clear HC BIOS Owned, then turn its SMIs off.
-/// A controller firmware keeps is taken too, by name: its bus mastering is off
-/// until the holder starts it, so the halt and reset after this cut no
-/// transfer of firmware's that could reach memory.
+/// and give it [`HANDOFF_NS`] to clear HC BIOS Owned. Released or never
+/// claimed, its SMIs are turned off and the controller is the driver's;
+/// kept, it is refused by name and left as found, since §4.22.1 has the OS
+/// wait for firmware to let go "before attempting to use the xHC".
 fn take_from_firmware<R: Registers, C: Host>(
     regs: &R,
     read: &dyn Fn(u64) -> Option<u32>,
@@ -921,15 +932,7 @@ fn take_from_firmware<R: Registers, C: Host>(
         Handoff::Released => host.say(format_args!(
             "firmware released the controller in {took} us (USBLEGSUP {before:#010x} -> {now:#010x})"
         )),
-        // Taken all the same: the kernel hands a claim over with bus mastering
-        // off, and it stays off until the holder starts it after this reset
-        // (`SYS_DEVICE_DMA_START`), so whatever firmware left running reaches
-        // no memory while it is halted and reset (PCIe Base 6.0 §7.5.1.1.3).
-        Handoff::Kept => host.say(format_args!(
-            "firmware still owns the controller after {} ms (USBLEGSUP {before:#010x} -> {now:#010x}); taking it \
-             with its bus mastering off",
-            HANDOFF_NS / 1_000_000
-        )),
+        Handoff::Kept => return Err(Refusal::FirmwareKeepsIt(now)),
     }
     let ctl_at = legsup + xecp::LEGCTLSTS as usize;
     let ctl = regs.read32(ctl_at);

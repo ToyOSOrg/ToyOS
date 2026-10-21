@@ -593,9 +593,8 @@ fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
 }
 
 /// Every unit's SMI filter on, once every function this kernel drives is out
-/// of firmware's hands: until then, a controller firmware still owns may
-/// raise SMIs to be handed over (xHCI §4.22.1). A refused SMI is logged as an
-/// `IO_PAGE_FAULT` (§2.1.5.1) for [`fault`].
+/// of firmware's hands. A refused SMI is logged as an `IO_PAGE_FAULT`
+/// (§2.1.5.1) for [`fault`].
 pub fn settle() {
     let mut units = UNITS.lock();
     let mut everywhere = !units.is_empty();
