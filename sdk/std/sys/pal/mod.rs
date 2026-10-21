@@ -1,3 +1,4 @@
+mod c_allocator;
 pub mod futex;
 pub mod os;
 pub mod tls;
@@ -113,107 +114,6 @@ extern "C" fn start_rust(argc: usize, argv: *const *const u8) -> ! {
 
 pub fn abort_internal() -> ! {
     toyos_abi::syscall::exit(128 + 6) // SIGABRT-like — kill entire process
-}
-
-// C allocator shims — many crates (zlib-rs, etc.) call malloc/free/calloc
-// via extern "C". Route through the Rust global allocator (arena+slab)
-// to avoid per-allocation syscalls.
-mod c_allocator {
-    use crate::alloc::{GlobalAlloc, Layout, System};
-
-    /// The alignment every block has at least, and the bytes in front of a
-    /// block that hold its size and its alignment: the layout `free` and
-    /// `realloc` release it at is the one it was allocated with.
-    const MIN_ALIGN: usize = 16;
-
-    /// A block of `size` bytes at `align`, the allocation beginning `align`
-    /// bytes before it.
-    fn layout(size: usize, align: usize) -> Option<Layout> {
-        Layout::from_size_align(align.checked_add(size)?, align).ok()
-    }
-
-    /// The size and alignment in front of `block`.
-    unsafe fn header(block: *mut u8) -> (usize, usize) {
-        unsafe { ((block.sub(16) as *const usize).read(), (block.sub(8) as *const usize).read()) }
-    }
-
-    /// `size` bytes aligned to `align`, a power of two.
-    unsafe fn alloc(size: usize, align: usize) -> *mut u8 {
-        let align = align.max(MIN_ALIGN);
-        let Some(layout) = layout(size, align) else { return core::ptr::null_mut() };
-        let raw = unsafe { System.alloc(layout) };
-        if raw.is_null() {
-            return raw;
-        }
-        unsafe {
-            let block = raw.add(align);
-            (block.sub(16) as *mut usize).write(size);
-            (block.sub(8) as *mut usize).write(align);
-            block
-        }
-    }
-
-    #[unsafe(no_mangle)]
-    unsafe extern "C" fn malloc(size: usize) -> *mut u8 {
-        if size == 0 {
-            return core::ptr::null_mut();
-        }
-        unsafe { alloc(size, MIN_ALIGN) }
-    }
-
-    /// C11's: null for an alignment that is no power of two.
-    #[unsafe(no_mangle)]
-    unsafe extern "C" fn aligned_alloc(align: usize, size: usize) -> *mut u8 {
-        if !align.is_power_of_two() {
-            return core::ptr::null_mut();
-        }
-        unsafe { alloc(size, align) }
-    }
-
-    #[unsafe(no_mangle)]
-    unsafe extern "C" fn calloc(count: usize, size: usize) -> *mut u8 {
-        let total = count.saturating_mul(size);
-        let ptr = malloc(total);
-        if !ptr.is_null() && total > 0 {
-            unsafe { core::ptr::write_bytes(ptr, 0, total) };
-        }
-        ptr
-    }
-
-    #[unsafe(no_mangle)]
-    unsafe extern "C" fn free(ptr: *mut u8) {
-        if ptr.is_null() {
-            return;
-        }
-        let (size, align) = unsafe { header(ptr) };
-        let layout = layout(size, align).expect("a block's header is the layout it was allocated with");
-        unsafe { System.dealloc(ptr.sub(align), layout) };
-    }
-
-    /// `System.realloc` keeps the allocation's alignment, so the block stays
-    /// `align` bytes in, its header carried with its bytes.
-    #[unsafe(no_mangle)]
-    unsafe extern "C" fn realloc(ptr: *mut u8, new_size: usize) -> *mut u8 {
-        if ptr.is_null() {
-            return malloc(new_size);
-        }
-        if new_size == 0 {
-            free(ptr);
-            return core::ptr::null_mut();
-        }
-        let (size, align) = unsafe { header(ptr) };
-        let Some(new) = layout(new_size, align) else { return core::ptr::null_mut() };
-        let old = layout(size, align).expect("a block's header is the layout it was allocated with");
-        let raw = unsafe { System.realloc(ptr.sub(align), old, new.size()) };
-        if raw.is_null() {
-            return raw;
-        }
-        unsafe {
-            let block = raw.add(align);
-            (block.sub(16) as *mut usize).write(new_size);
-            block
-        }
-    }
 }
 
 /// DWARF EH frame finder for the `unwinding` crate.

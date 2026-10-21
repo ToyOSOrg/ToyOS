@@ -202,10 +202,10 @@ mod runtime {
         }
     }
 
-    struct LibcAllocator;
+    pub(crate) struct LibcAllocator;
 
     #[global_allocator]
-    static ALLOCATOR: LibcAllocator = LibcAllocator;
+    pub(crate) static ALLOCATOR: LibcAllocator = LibcAllocator;
 
     unsafe impl core::alloc::GlobalAlloc for LibcAllocator {
         unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
