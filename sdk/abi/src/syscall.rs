@@ -111,30 +111,6 @@ pub const SYS_READLINK: u64 = 82;
 ///
 /// [`Acceptor`]: crate::handle::RawHandle
 pub const SYS_ACCEPT: u64 = 86;
-/// State that the function `claim` holds issues device addresses of `bits`
-/// bits, 32 to 64: every grant and lend of the claim is placed below `1 <<
-/// bits`. Once per claim, before any grant: `AlreadyExists` for a second, and
-/// `InvalidArgument` outside that range.
-///
-/// What the device's own capability bits say where they can be trusted, and
-/// the driver's own statement where they cannot: a function that drops its
-/// upper bits issues an address above its width as another grant's.
-pub fn device_dma_limit(claim: RawHandle, bits: u8) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_DEVICE_DMA_LIMIT, claim.0 as u64, bits as u64, 0, 0))
-}
-
-/// Let the function `claim` holds master the bus; nothing on a second call.
-///
-/// **The function issues no bus transaction at all, an MSI-X message
-/// included, until this is called.** A claim is handed over with Bus Master
-/// Enable clear, because a previous holder or firmware may have left it
-/// running queues at addresses its domain no longer maps; its driver stops and
-/// resets it through its registers first, lays out its grants, and then starts
-/// it. What it does from then on reaches only what its domain maps.
-pub fn device_dma_start(claim: RawHandle) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_DEVICE_DMA_START, claim.0 as u64, 0, 0, 0))
-}
-
 /// Allocate a TLS block for a dlopen'd module on the current thread.
 /// Arg0: module_id (1-based DTV index). Returns the block's virtual address,
 /// or a `SyscallError` word — see [`tls_alloc_block`].
@@ -2366,6 +2342,30 @@ pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, Syscal
         0,
     ))?;
     Ok(grant)
+}
+
+/// State that the function `claim` holds issues device addresses of `bits`
+/// bits, 32 to 64: every grant and lend of the claim is placed below `1 <<
+/// bits`. Once per claim, before any grant: `AlreadyExists` for a second, and
+/// `InvalidArgument` outside that range.
+///
+/// What the device's own capability bits say where they can be trusted, and
+/// the driver's own statement where they cannot: a function that drops its
+/// upper bits issues an address above its width as another grant's.
+pub fn device_dma_limit(claim: RawHandle, bits: u8) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DEVICE_DMA_LIMIT, claim.0 as u64, bits as u64, 0, 0))
+}
+
+/// Let the function `claim` holds master the bus; nothing on a second call.
+///
+/// **The function issues no bus transaction at all, an MSI-X message
+/// included, until this is called.** A claim is handed over with Bus Master
+/// Enable clear, because a previous holder or firmware may have left it
+/// running queues at addresses its domain no longer maps; its driver stops and
+/// resets it through its registers first, lays out its grants, and then starts
+/// it. What it does from then on reaches only what its domain maps.
+pub fn device_dma_start(claim: RawHandle) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DEVICE_DMA_START, claim.0 as u64, 0, 0, 0))
 }
 
 /// Put the region `shm` names into the address space of the function `claim`

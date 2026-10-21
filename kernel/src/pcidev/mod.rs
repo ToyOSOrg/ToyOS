@@ -656,6 +656,9 @@ enum Refusal {
     BarUnrouted(u8),
     /// This BAR's pages are not its own ([`pages::of_bar`]).
     BarPages(u8, pages::Refused),
+    /// With mastering stopped, its Transactions Pending stayed set past
+    /// [`express::QUIESCE_NANOS`].
+    StillTransacting,
 }
 
 impl core::fmt::Display for Refusal {
@@ -722,6 +725,12 @@ impl core::fmt::Display for Refusal {
                  read of it would come back"
             ),
             Self::BarPages(i, why) => write!(f, "BAR {i}: {why}"),
+            Self::StillTransacting => write!(
+                f,
+                "with its mastering stopped, a request it had issued was still outstanding after {} ms, \
+                 and it would land in a domain that maps none of it",
+                express::QUIESCE_NANOS / 1_000_000
+            ),
         }
     }
 }
@@ -815,11 +824,8 @@ pub fn claim(arrival: Arrival) -> Result<(PciFunctionInfo, Claim), ClaimError> {
 }
 
 /// Choose the BARs its holder is given, give the function an address space,
-/// arm the interrupt, and only then let it master the bus.
-///
-/// The order is the whole security argument: a function that could master the
-/// bus before its domain existed would be reaching physical memory with
-/// whatever addresses its registers still held.
+/// arm the interrupt, stop its mastering and let what it had in flight finish,
+/// then attach the domain. Its holder starts it ([`dma_start`]).
 fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindow]) -> Result<Bound, Refusal> {
     let remapping = crate::iommu::remapping().map_err(Refusal::NotRemapped)?;
     crate::iommu::isolates(&pci).map_err(Refusal::NotIsolated)?;
@@ -854,12 +860,7 @@ fn bring_up(pci: PciDevice, id: PciId, number: usize, windows: &[RootBridgeWindo
         Err(NoEntry::NoTable(NoCapability::Absent)) if arm_claimed_msi(&message) => Armed::Msi(message),
         Err(NoEntry::NoTable(NoCapability::Absent)) => return Err(Refusal::NoInterrupt),
     };
-    // Firmware may have left it mastering, running queues at physical
-    // addresses: it stops, and what it had in flight lands, before it moves
-    // onto a domain that maps none of them, so no fault of firmware's is the
-    // holder's. It masters again only once its holder starts it.
-    pci.disable_bus_master();
-    pci.drain_messages();
+    quiesce(&pci)?;
     space.attach(pci.bus, pci.dev, pci.func);
     Ok(Bound {
         pci,
@@ -1137,6 +1138,30 @@ fn settle_after_reset(pci: &PciDevice) {
         wait_until(crate::clock::nanos_since_boot() + pm::TRANSITION_NANOS);
     }
     kept.restore(pci);
+}
+
+/// Stop a function mastering and let everything it already issued finish
+/// before it moves onto a domain that maps none of those addresses. Firmware
+/// may have left it running queues at physical addresses, and what lands after
+/// the attach would fault against its holder.
+///
+/// Clearing Bus Master Enable stops new requests. A config read's completion
+/// passes none of the function's earlier posted writes (PCIe Base §2.4.1), but
+/// Non-Posted Requests, its DMA reads, are only known finished once Transactions
+/// Pending clears (§7.5.3.5). A function with no Express capability has no such
+/// bit, and the write flush is all that is known of it.
+fn quiesce(pci: &PciDevice) -> Result<(), Refusal> {
+    pci.disable_bus_master();
+    pci.drain_messages();
+    let Ok(cap) = pci.capability(express::CAP_ID) else { return Ok(()) };
+    let deadline = crate::clock::nanos_since_boot() + express::QUIESCE_NANOS;
+    while express::pending(cap.read_u16(express::DEVICE_STATUS)) {
+        if crate::clock::nanos_since_boot() >= deadline {
+            return Err(Refusal::StillTransacting);
+        }
+        core::hint::spin_loop();
+    }
+    Ok(())
 }
 
 fn wait_until(at: u64) {

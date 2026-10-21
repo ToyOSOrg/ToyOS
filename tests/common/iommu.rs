@@ -493,3 +493,20 @@ pub fn a_virtio_function_without_access_platform_is_refused() -> Result<(), Stri
     eprintln!("  [iommu] {UNTRANSLATED_NIC}");
     Ok(())
 }
+
+/// The kernel's virtio console created without `iommu_platform=on`
+/// ([`Profile::HeadlessConsoleUntranslated`]) bypasses the unit, so the kernel
+/// tells it physical addresses and the boot reaches its ready marker over it.
+/// Given a domain's addresses instead, it reads and writes whatever memory
+/// those are, and the boot's console is lost. q35 only: no bench has a virtio
+/// function.
+pub fn the_kernel_tells_a_bypassing_console_physical_addresses() -> Result<(), String> {
+    let options = BootOptions { profile: Profile::HeadlessConsoleUntranslated, ..Default::default() };
+    let qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
+    let log = Serial::named("boot console", qemu.boot_log().to_string());
+    log.must_be_clean()?;
+    log.must_say("offers no ACCESS_PLATFORM, so it is told physical addresses")?;
+    log.must_say("Boot: complete")?;
+    eprintln!("  [iommu] the console bypassing the unit was told physical addresses and carried the boot");
+    Ok(())
+}

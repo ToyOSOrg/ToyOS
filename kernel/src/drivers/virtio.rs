@@ -576,7 +576,8 @@ pub fn cap_selftest() {
     const WINDOW: u64 = 0x8000;
     // One buffer for both the config space and the BAR window, so a permitted subregion stays inside it.
     // No device is told it: it stands in for config space.
-    let pool = DmaPool::alloc_in(WINDOW as usize, crate::iommu::DeviceSpace::Untranslated, crate::iommu::Limit::WIDEST);
+    let pool = DmaPool::alloc_in(WINDOW as usize, crate::iommu::DeviceSpace::Untranslated, crate::iommu::Limit::WIDEST)
+        .expect("pci-cap-selftest: a 64-bit untranslated pool is never refused");
     let phys = pool.view().host_phys();
     // SAFETY: the pool owns this page until it drops at end of function, and no Mmio built over it escapes.
     let cfg = unsafe { Mmio::over_phys(DirectMap::from_phys(phys), WINDOW) };
