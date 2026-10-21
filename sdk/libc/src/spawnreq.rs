@@ -12,14 +12,10 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use toyos_abi::end::End;
-use toyos_abi::RawHandle;
 
 use crate::errcode::EBADF;
 
 const O_CLOEXEC: i32 = 0x80000;
-
-/// The child's descriptors are its slots, each at its first generation.
-pub(crate) const CHILD_FDS: usize = RawHandle::MAX_SLOTS;
 
 /// One `posix_spawn_file_actions_add*`, in the child's descriptor numbers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,22 +28,21 @@ pub(crate) enum Action<P> {
 /// A descriptor of the child's an action makes, `addopen`'s and `adddup2`'s
 /// `newfd`, or `EBADF` for one no child's table has.
 pub(crate) fn child_fd(fd: i32) -> Result<u32, i32> {
-    u32::try_from(fd).ok().filter(|&fd| (fd as usize) < CHILD_FDS).ok_or(EBADF)
+    u32::try_from(fd).ok().filter(|&fd| (fd as usize) < toyos::fd::MAX_FDS).ok_or(EBADF)
 }
 
 /// A descriptor an action reads or closes, `adddup2`'s `fd` and
-/// `addclose`'s: one of the child's, or of this process's, whose numbers run
-/// past the child's slots once a slot is reused (`RawHandle`'s generation).
+/// `addclose`'s: one of the child's, or of this process's.
 pub(crate) fn any_fd(fd: i32) -> Result<u32, i32> {
-    u32::try_from(fd).map_err(|_| EBADF)
+    u32::try_from(fd).ok().filter(|&fd| (fd as usize) < toyos::fd::MAX_FDS).ok_or(EBADF)
 }
 
-/// What the spawn hands the kernel: `[child slot, this process's handle]`
-/// for every descriptor the child starts with, and the handles the actions
+/// What the spawn gives the child: `(child descriptor, this process's
+/// handle)` for every descriptor it starts with, and the handles the actions
 /// opened here, which are this process's to close once the spawn returns.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Plan {
-    pub(crate) slots: Vec<[u32; 2]>,
+    pub(crate) fds: Vec<(u32, u32)>,
     pub(crate) opened: Vec<u32>,
 }
 
@@ -59,22 +54,23 @@ struct Entry {
     cloexec: bool,
 }
 
-/// The child's table: `stdio[n]` is this process's handle for descriptor `n`
-/// and whether it is marked close-on-exec, `None` for one it does not hold;
-/// then each action in order, as POSIX runs them in the child; then the exec,
-/// which closes what is marked. A descriptor of this process's beyond 2 that
-/// no action closed is one an action may name, and is not the child's
-/// otherwise. `open` opens a path here, answering the handle or an `errno`;
-/// a refusal ends the plan with the handles it opened closed by `close`.
+/// The child's table: `held(n)` is this process's handle for its descriptor
+/// `n` and whether it is marked close-on-exec, `None` for one it does not
+/// hold, or the `errno` of one it holds but cannot give; 0 to 2 first, then each action in order, as POSIX runs them in the
+/// child; then the exec, which closes what is marked. A descriptor of this
+/// process's beyond 2 that no action closed is one an action may name, and is
+/// not the child's otherwise. `open` opens a path here, answering the handle
+/// or an `errno`; a refusal ends the plan with the handles it opened closed
+/// by `close`.
 pub(crate) fn plan<P>(
-    stdio: [Option<(u32, bool)>; 3],
+    mut held: impl FnMut(u32) -> Result<Option<(u32, bool)>, i32>,
     actions: &[Action<P>],
     mut open: impl FnMut(&P, i32, u32) -> Result<u32, i32>,
     mut close: impl FnMut(u32),
 ) -> Result<Plan, i32> {
     let mut table: BTreeMap<u32, Entry> = BTreeMap::new();
-    for (fd, held) in (0..).zip(stdio) {
-        if let Some((handle, cloexec)) = held {
+    for fd in 0..3 {
+        if let Some((handle, cloexec)) = held(fd)? {
             table.insert(fd, Entry { handle, cloexec });
         }
     }
@@ -102,17 +98,22 @@ pub(crate) fn plan<P>(
             }
             Action::Dup2 { fd, newfd } => {
                 let source = match table.get(fd) {
-                    Some(entry) => entry.handle,
-                    None if *fd > 2 && !closed.contains(fd) => *fd,
-                    None => return refuse(&mut opened, &mut close, EBADF),
+                    Some(entry) => Ok(Some(entry.handle)),
+                    None if *fd > 2 && !closed.contains(fd) => held(*fd).map(|held| held.map(|(handle, _)| handle)),
+                    None => Ok(None),
+                };
+                let source = match source {
+                    Ok(Some(source)) => source,
+                    Ok(None) => return refuse(&mut opened, &mut close, EBADF),
+                    Err(errno) => return refuse(&mut opened, &mut close, errno),
                 };
                 table.insert(*newfd, Entry { handle: source, cloexec: false });
                 closed.remove(newfd);
             }
         }
     }
-    let slots = table.into_iter().filter(|(_, e)| !e.cloexec).map(|(fd, e)| [fd, e.handle]).collect();
-    Ok(Plan { slots, opened })
+    let fds = table.into_iter().filter(|(_, e)| !e.cloexec).map(|(fd, e)| (fd, e.handle)).collect();
+    Ok(Plan { fds, opened })
 }
 
 /// The status `waitpid` writes for an end, as `<sys/wait.h>`'s macros read

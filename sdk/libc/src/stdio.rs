@@ -1,13 +1,14 @@
 use core::ptr;
-use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, SeekFrom};
+
+use crate::posix_io::on_fd;
 
 // Platform fd operations
 
-fn sys_close(fd: i32) { syscall::close(RawHandle(fd as u32)); }
+fn sys_close(fd: i32) { let _ = toyos::fd::close(fd); }
 
 fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
-    match syscall::read(RawHandle(fd as u32), buf) {
+    match on_fd(fd, |h| syscall::read(h, buf)) {
         Ok(n) => n as isize,
         Err(_) => -1,
     }
@@ -27,13 +28,13 @@ fn sys_seek(fd: i32, offset: i64, whence: i32) -> i64 {
         2 => SeekFrom::End(offset),
         _ => return -1,
     };
-    match syscall::seek(RawHandle(fd as u32), pos) {
+    match on_fd(fd, |h| syscall::seek(h, pos)) {
         Ok(n) => n as i64,
         Err(_) => -1,
     }
 }
 
-fn sys_fsync(fd: i32) { let _ = syscall::fsync(RawHandle(fd as u32)); }
+fn sys_fsync(fd: i32) { let _ = on_fd(fd, syscall::fsync); }
 
 fn sys_delete(path: &[u8]) -> i32 {
     match syscall::delete(path) { Ok(()) => 0, Err(_) => -1 }
@@ -164,7 +165,7 @@ unsafe fn unregister_stream(f: *mut FILE) {
 /// failure mode that is hardest to tell apart from the program never having run.
 /// C's rule is "interactive device", not "terminal", and a serial console is one.
 unsafe fn fd_is_interactive(fd: i32) -> bool {
-    match syscall::fstat(RawHandle(fd as u32)) {
+    match on_fd(fd, syscall::fstat) {
         Ok(st) => matches!(
             st.file_type,
             syscall::FileType::Tty | syscall::FileType::Serial

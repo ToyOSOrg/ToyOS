@@ -148,8 +148,6 @@ fn spawn_as(path: &str, image: &[u8]) -> SyscallError {
             path_len: path.len() as u64,
             argv_ptr: argv.as_ptr() as u64,
             argv_len: argv.len() as u64,
-            slot_map_ptr: 0,
-            slot_map_count: 0,
             env_ptr: 0,
             env_len: 0,
             endow_ptr: 0,

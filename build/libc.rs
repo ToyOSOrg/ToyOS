@@ -16,7 +16,7 @@ pub const FEATURES: &str = "std-runtime";
 pub(crate) const BUILD: [&str; 5] = ["build", "--release", "--features", FEATURES, "--message-format=json"];
 
 /// What [`build_c`] asks cargo for, as [`BUILD`] is [`build`]'s.
-pub(crate) const BUILD_C: [&str; 4] = ["rustc", "--release", "--crate-type", "staticlib"];
+pub(crate) const BUILD_C: [&str; 6] = ["rustc", "--release", "--features", "fd-owner", "--crate-type", "staticlib"];
 
 /// Build toyos-libc against the toolchain at `toolchain`, in `target_dir`, and
 /// install it there as `libtoyos_c.a`. Part of making a sysroot

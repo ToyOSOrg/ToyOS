@@ -64,6 +64,7 @@ macro_rules! from_handle {
 }
 
 from_handle! {
+    OwnedHandle => |h| h,
     Acceptor => Acceptor,
     Connector => Connector,
     Namespace => Namespace,
@@ -113,8 +114,8 @@ impl Endowments {
             .is_some_and(|i| self.handles[i].load(Ordering::Acquire) != HANDLE_INVALID.0)
     }
 
-    /// Every label in the table, taken or not. For a diagnostic; nothing
-    /// resolves through it.
+    /// Every label in the table, taken or not: for a diagnostic, and for a
+    /// family of labels such as `toyos::fd`'s, each then taken by name.
     pub fn labels(&self) -> impl Iterator<Item = &str> {
         (0..self.count).map(|i| self.label_at(i))
     }

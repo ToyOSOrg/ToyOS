@@ -209,6 +209,12 @@ const SHAPES: &[Shape] = &[
         before: &["-p", "toyos", "--all-targets"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
+    // The copy that owns the descriptor table, as std's and C-only libc's
+    // build it: `fd-table`, which no other shape turns on.
+    Shape {
+        before: &["-p", "toyos", "--lib", "--features", "fd-table"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
     // Its own target directory: cargo keeps one check of a unit, so a unit
     // linted under two sets of lints is checked again by each, every run, and
     // so is every crate depending on it.

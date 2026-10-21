@@ -14,6 +14,19 @@ use crate::time::Duration;
 
 // --- Helpers ---
 
+/// A kernel handle this process just got, as an owned descriptor.
+fn owned(handle: RawHandle) -> io::Result<OwnedFd> {
+    let fd = crate::sys::new_fd(handle)?;
+    // SAFETY: a descriptor just installed for this handle alone.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
+/// The kernel handle an owned descriptor names. Its owner alone closes it,
+/// so one gone is another owner having closed it, against I/O safety.
+fn kernel(fd: &OwnedFd) -> RawHandle {
+    toyos::fd::with(fd.as_raw_fd(), |o| o.handle).expect("std::net: an owned descriptor was closed by another owner")
+}
+
 fn net_err_to_io(e: NetError) -> io::Error {
     let kind = match e {
         NetError::ConnectionRefused => io::ErrorKind::ConnectionRefused,
@@ -138,12 +151,11 @@ impl TcpStream {
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         let (ip, port) = addr_to_v4(addr)?;
         let connected = stream::connect(ip, port, duration_to_ms(Some(timeout)), false).map_err(net_err_to_io)?;
-        // SAFETY: the connect made this handle for this stream and nothing else answers for it.
-        Ok(TcpStream::from_fd(unsafe { OwnedFd::from_raw_fd(connected.handle.0 as i32) }))
+        Ok(TcpStream::from_fd(owned(connected.handle)?))
     }
 
     fn handle(&self) -> RawHandle {
-        RawHandle(self.fd.as_raw_fd() as u32)
+        kernel(&self.fd)
     }
 
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
@@ -222,11 +234,10 @@ impl TcpStream {
         Ok(())
     }
 
+    /// A second descriptor on the same stream's end.
     pub fn duplicate(&self) -> io::Result<TcpStream> {
-        let copy = stream::duplicate(self.handle()).map_err(syscall_err)?;
         let duplicate = TcpStream {
-            // SAFETY: `duplicate` made this handle of the same stream, entered against its end.
-            fd: unsafe { OwnedFd::from_raw_fd(copy.0 as i32) },
+            fd: self.fd.try_clone()?,
             read_timeout_ms: AtomicU32::new(self.read_timeout_ms.load(Relaxed)),
             write_timeout_ms: AtomicU32::new(self.write_timeout_ms.load(Relaxed)),
             nonblocking: AtomicBool::new(self.nonblocking.load(Relaxed)),
@@ -286,9 +297,9 @@ impl TcpStream {
     }
 
     /// The stream's bell: the handle a watch for room is made on, for reading.
-    pub fn bell(&self) -> io::Result<i32> {
+    pub fn bell(&self) -> io::Result<u32> {
         let bell = stream::doorbell(self.handle(), stream::Way::Send).map_err(stream_refused)?;
-        Ok(bell.0 as i32)
+        Ok(bell.0)
     }
 
     /// Registered for readiness: each named way's want armed, and netstack rung
@@ -329,7 +340,7 @@ impl TcpListener {
         let (ip, port) = addr_to_v4(&addr)?;
         let bound = toyos::net::tcp_bind(ip, port).map_err(net_err_to_io)?;
         Ok(TcpListener {
-            notify_fd: unsafe { OwnedFd::from_raw_fd(bound.notify.into_raw().0 as i32) },
+            notify_fd: owned(bound.notify.into_raw())?,
             socket: Arc::new(NetstackSocket::Tcp(bound.socket_id)),
             local: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), bound.bound_port)),
             nonblocking: AtomicBool::new(false),
@@ -342,7 +353,7 @@ impl TcpListener {
 
     pub fn accept(&self) -> io::Result<(TcpStream, SocketAddr)> {
         let mut byte = [0u8; 1];
-        let notify_fd = RawHandle(self.notify_fd.as_raw_fd() as u32);
+        let notify_fd = kernel(&self.notify_fd);
         if self.nonblocking.load(Relaxed) {
             syscall::read_nonblock(notify_fd, &mut byte).map_err(syscall_err)?;
         } else {
@@ -354,16 +365,12 @@ impl TcpListener {
             Ipv4Addr::from(accepted.remote_addr),
             accepted.remote_port,
         ));
-        // SAFETY: the accept made this handle for this stream and nothing else answers for it.
-        let fd = unsafe { OwnedFd::from_raw_fd(accepted.handle.0 as i32) };
-        Ok((TcpStream::from_fd(fd), peer))
+        Ok((TcpStream::from_fd(owned(accepted.handle)?), peer))
     }
 
     pub fn duplicate(&self) -> io::Result<TcpListener> {
-        let new_fd =
-            syscall::dup(RawHandle(self.notify_fd.as_raw_fd() as u32)).map_err(syscall_err)?;
         Ok(TcpListener {
-            notify_fd: unsafe { OwnedFd::from_raw_fd(new_fd.0 as i32) },
+            notify_fd: self.notify_fd.try_clone()?,
             socket: Arc::clone(&self.socket),
             local: self.local,
             nonblocking: AtomicBool::new(self.nonblocking.load(Relaxed)),
@@ -444,8 +451,8 @@ impl UdpSocket {
         let bound = toyos::net::udp_bind(ip, port).map_err(net_err_to_io)?;
         Ok(UdpSocket {
             socket: Arc::new(NetstackSocket::Udp(bound.socket_id)),
-            tx_fd: unsafe { OwnedFd::from_raw_fd(bound.tx.into_raw().0 as i32) },
-            rx_fd: unsafe { OwnedFd::from_raw_fd(bound.rx.into_raw().0 as i32) },
+            tx_fd: owned(bound.tx.into_raw())?,
+            rx_fd: owned(bound.rx.into_raw())?,
             local: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), bound.bound_port)),
             peer: crate::sync::Mutex::new(None),
             broadcast: Arc::new(crate::sync::Mutex::new(false)),
@@ -471,7 +478,7 @@ impl UdpSocket {
 
         let n = (resp.len as usize).min(buf.len());
         if n > 0 {
-            let rx_fd = RawHandle(self.rx_fd.as_raw_fd() as u32);
+            let rx_fd = kernel(&self.rx_fd);
             syscall::read(rx_fd, &mut buf[..n]).map_err(syscall_err)?;
         }
 
@@ -487,7 +494,7 @@ impl UdpSocket {
         let (ip, port) = addr_to_v4(addr)?;
 
         // Write data to TX pipe first, then send control message
-        let tx_fd = RawHandle(self.tx_fd.as_raw_fd() as u32);
+        let tx_fd = kernel(&self.tx_fd);
         if !buf.is_empty() {
             syscall::write(tx_fd, buf).map_err(syscall_err)?;
         }
@@ -498,14 +505,10 @@ impl UdpSocket {
     }
 
     pub fn duplicate(&self) -> io::Result<UdpSocket> {
-        let new_tx_fd =
-            syscall::dup(RawHandle(self.tx_fd.as_raw_fd() as u32)).map_err(syscall_err)?;
-        let new_rx_fd =
-            syscall::dup(RawHandle(self.rx_fd.as_raw_fd() as u32)).map_err(syscall_err)?;
         Ok(UdpSocket {
             socket: Arc::clone(&self.socket),
-            tx_fd: unsafe { OwnedFd::from_raw_fd(new_tx_fd.0 as i32) },
-            rx_fd: unsafe { OwnedFd::from_raw_fd(new_rx_fd.0 as i32) },
+            tx_fd: self.tx_fd.try_clone()?,
+            rx_fd: self.rx_fd.try_clone()?,
             local: self.local,
             peer: crate::sync::Mutex::new(*self.peer.lock().unwrap()),
             broadcast: Arc::clone(&self.broadcast),

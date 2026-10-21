@@ -16,6 +16,7 @@ pub mod audio;
 pub mod census;
 pub mod device;
 pub mod endow;
+pub mod fd;
 pub mod fs;
 pub mod poller;
 pub mod power;

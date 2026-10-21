@@ -127,7 +127,7 @@ fn rights(full: &[Record]) {
     assert_eq!(read(&none).err(), Some(SyscallError::PermissionDenied), "a cap without COUNTERS read the counters");
     let mut buf = vec![RawRecord::EMPTY; full.len()];
     assert_eq!(
-        syscall::counters(RawHandle(1), &mut buf),
+        syscall::counters(stdout(), &mut buf),
         Err(SyscallError::PermissionDenied),
         "a console was taken as a capability",
     );
@@ -167,4 +167,9 @@ fn unheld() {
         .expect("wait the unheld child");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "reached unheld", "the child never reached its call");
     assert_eq!(End::from_word(out.status.into_raw()), Some(HANDLE_FAULT), "SYS_COUNTERS took a handle nobody holds");
+}
+
+/// The kernel handle this process's standard output is, descriptor 1's.
+fn stdout() -> RawHandle {
+    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
 }

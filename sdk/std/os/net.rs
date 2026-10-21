@@ -9,15 +9,15 @@
 //! `WouldBlock`, which arms the want the next ring answers.
 
 use crate::io;
-use crate::os::fd::RawFd;
+use crate::os::toyos::io::RawHandle;
 
 /// ToyOS's extensions of [`crate::net::TcpStream`].
 #[stable(feature = "toyos_ext", since = "1.0.0")]
 pub trait TcpStreamExt {
-    /// The stream's bell, watched for reading where the stream is watched for
-    /// writing.
+    /// The stream's bell, a kernel handle watched for reading where the stream
+    /// is watched for writing.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn bell(&self) -> io::Result<RawFd>;
+    fn bell(&self) -> io::Result<RawHandle>;
 
     /// Registers the stream for its readable and writable readiness: each
     /// named way's want armed and looked at, and netstack rung where one is
@@ -28,7 +28,7 @@ pub trait TcpStreamExt {
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
 impl TcpStreamExt for crate::net::TcpStream {
-    fn bell(&self) -> io::Result<RawFd> {
+    fn bell(&self) -> io::Result<RawHandle> {
         crate::sys::AsInner::as_inner(self).bell()
     }
 

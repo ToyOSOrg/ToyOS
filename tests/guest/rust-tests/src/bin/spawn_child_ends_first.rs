@@ -14,7 +14,7 @@
 //!
 //! Every wait is unbounded: the runner's deadline is the only clock.
 
-use toyos_abi::syscall::{self, debug_action, SpawnArgs, SyscallError};
+use toyos_abi::syscall::{self, debug_action, EndowEntry, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
 
@@ -27,7 +27,8 @@ fn main() {
     match std::env::args().nth(1).as_deref() {
         Some("exit") => std::process::exit(CODE),
         Some("speak") => {
-            assert_eq!(syscall::write(RawHandle(1), b"x"), Ok(1), "the child's one byte");
+            let wrote = toyos::fd::with(1, |o| syscall::write(o.handle, b"x")).expect("the child's descriptor 1");
+            assert_eq!(wrote, Ok(1), "the child's one byte");
         }
         Some(other) => panic!("unknown role {other:?}"),
         None => test(),
@@ -36,7 +37,7 @@ fn main() {
 
 fn test() {
     hold_the_next_spawn();
-    let child = spawn("exit", &[]).expect("a spawn whose child ended inside it");
+    let child = spawn("exit", None).expect("a spawn whose child ended inside it");
     assert_eq!(
         syscall::process_wait_nonblock(child),
         Ok(End::Exited(CODE)),
@@ -61,7 +62,7 @@ fn a_spawn_from_a_full_table_starts_no_child() {
     };
     assert_eq!(full, SyscallError::ResourceExhausted, "the table did not fill");
     hold_the_next_spawn();
-    let spawned = spawn("speak", &[[1, ends.write.0]]);
+    let spawned = spawn("speak", Some(ends.write));
     for handle in filled {
         syscall::close(handle);
     }
@@ -81,23 +82,24 @@ fn hold_the_next_spawn() {
     );
 }
 
-/// `SYS_SPAWN` of this binary in `role`, duplicating each `[child_slot,
-/// parent_handle]` pair of `slot_map` into the child.
-fn spawn(role: &str, slot_map: &[[u32; 2]]) -> Result<RawHandle, SyscallError> {
+/// `SYS_SPAWN` of this binary in `role`, endowed `stdout` as its descriptor 1,
+/// which moves only on a spawn that happens.
+fn spawn(role: &str, stdout: Option<RawHandle>) -> Result<RawHandle, SyscallError> {
     let argv = format!("{SELF_PATH}\0{role}");
+    const LABEL: &str = "fd:1";
+    let endow: Vec<EndowEntry> =
+        stdout.into_iter().map(|handle| EndowEntry { label_off: 0, label_len: LABEL.len() as u32, handle, _pad: 0 }).collect();
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
         argv_ptr: argv.as_ptr() as u64,
         argv_len: argv.len() as u64,
-        slot_map_ptr: slot_map.as_ptr() as u64,
-        slot_map_count: slot_map.len() as u64,
         env_ptr: 0,
         env_len: 0,
-        endow_ptr: 0,
-        endow_count: 0,
-        labels_ptr: 0,
-        labels_len: 0,
+        endow_ptr: endow.as_ptr() as u64,
+        endow_count: endow.len() as u64,
+        labels_ptr: LABEL.as_ptr() as u64,
+        labels_len: LABEL.len() as u64,
         cwd_ptr: "/".as_ptr() as u64,
         cwd_len: 1,
         image: 0,

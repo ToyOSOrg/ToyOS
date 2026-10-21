@@ -28,8 +28,8 @@ netstack would drain what the child writes as doorbells, with no error on
 either side. Stage 3 makes std refuse both loudly instead.
 `File::from_raw_fd` of a stream's handle panics with `toyos::net`'s refusal.
 Every path std offers to move a raw handle into another process answers that
-refusal before anything moves: a spawn's stdio slots,
-`CommandExt::inherit_handle` into any slot, `CommandExt::endow` and
+refusal before anything moves: a spawn's stdio descriptors,
+`CommandExt::inherit_handle` as any descriptor, `CommandExt::endow` and
 `Command::provide`, each starting no child. `toyos::ipc`'s `send_with`
 takes only `OwnedHandle`s, and a stream's handle becomes one only through
 `OwnedHandle::from_raw`, whose contract stage 3 says excludes a handle

@@ -85,7 +85,7 @@ fn main() {
     // Standard output fills the table: a claim's own handle carries no `DUP`.
     let mut filled = Vec::new();
     let full = loop {
-        match syscall::dup(RawHandle(1)) {
+        match syscall::dup(stdout()) {
             Ok(handle) => filled.push(handle),
             Err(why) => break why,
         }
@@ -105,4 +105,9 @@ fn main() {
     let after = ask(&nic, bar, bytes);
     assert_eq!(after, first, "bar_map_again: the ask after the refusal maps another window");
     println!("bar_map_again: answered after the refusal with a handle that maps");
+}
+
+/// The kernel handle this process's standard output is, descriptor 1's.
+fn stdout() -> RawHandle {
+    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
 }

@@ -11,7 +11,6 @@
 //! A file server that restarts is survived: its capability is connected
 //! again.
 
-use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, OpenFlags};
 
 use crate::collections::BTreeMap;
@@ -35,7 +34,8 @@ const MAX_LINKS: usize = 40;
 pub struct File(Inner);
 
 enum Inner {
-    Kernel(RawHandle),
+    /// A descriptor naming a file the kernel serves.
+    Kernel(i32),
     Served(Arc<Served>),
 }
 
@@ -489,16 +489,17 @@ impl Drop for Served {
 }
 
 impl File {
-    pub fn from_fd(fd: RawHandle) -> Self {
+    /// The file descriptor `fd` names, owned from here on.
+    pub fn from_fd(fd: i32) -> Self {
         File(Inner::Kernel(fd))
     }
 
-    /// The kernel handle behind this file. A file a file server holds has
-    /// none: `as_child_stdio` is how one reaches a child.
+    /// This file's descriptor. A file a file server holds has none yet:
+    /// `as_child_stdio` is how one reaches a child.
     pub fn raw_fd(&self) -> i32 {
         match &self.0 {
-            Inner::Kernel(h) => h.0 as i32,
-            Inner::Served(_) => panic!("a file on a file server has no kernel handle"),
+            Inner::Kernel(fd) => *fd,
+            Inner::Served(_) => panic!("a file on a file server has no descriptor"),
         }
     }
 
@@ -506,16 +507,30 @@ impl File {
         self.raw_fd()
     }
 
-    /// A kernel handle a child may write this file through: the file's own, or
-    /// a pipe its server writes to the file at this file's offset. The pipe
-    /// lives as long as the answer and the child's copy of it.
-    pub fn as_child_stdio(&self) -> io::Result<(RawHandle, Option<toyos::Pipe>)> {
+    /// This file's descriptor, given up: closing it is the caller's.
+    pub fn into_raw_fd(self) -> i32 {
+        let fd = self.raw_fd();
+        crate::mem::forget(self);
+        fd
+    }
+
+    /// The kernel handle behind this file, held for `f`.
+    pub fn with_handle<T>(&self, f: impl FnOnce(toyos_abi::RawHandle) -> T) -> io::Result<T> {
         match &self.0 {
-            Inner::Kernel(h) => Ok((*h, None)),
-            Inner::Served(s) => {
-                let pipe = s.with(|dir, fid, generation| dir.stream(fid, generation))?;
-                Ok((toyos::AsHandle::as_handle(&pipe), Some(pipe)))
-            }
+            Inner::Kernel(fd) => crate::sys::on_fd(*fd, |h| Ok(f(h))),
+            Inner::Served(_) => Err(io::const_error!(io::ErrorKind::Unsupported, "a file on a file server has no kernel handle")),
+        }
+    }
+
+    /// A kernel handle a child may use this file through: a copy of the
+    /// file's own, or a pipe its server writes to the file at this file's
+    /// offset. The caller holds it until the child has its own.
+    pub fn as_child_stdio(&self) -> io::Result<toyos::OwnedHandle> {
+        match &self.0 {
+            Inner::Kernel(fd) => toyos::fd::copy(*fd)
+                .map_err(crate::sys::refused)?
+                .ok_or_else(|| crate::sys::fd_error(toyos::fd::Error::BadFd)),
+            Inner::Served(s) => s.with(|dir, fid, generation| dir.stream(fid, generation)).map(toyos::OwnedHandle::from),
         }
     }
 
@@ -523,8 +538,8 @@ impl File {
         on_path(
             path,
             |abs| {
-                let fd = syscall::open(abs.as_bytes(), opts.to_flags()).map_err(to_io_error)?;
-                Ok(File(Inner::Kernel(fd)))
+                let handle = syscall::open(abs.as_bytes(), opts.to_flags()).map_err(to_io_error)?;
+                Ok(File(Inner::Kernel(crate::sys::new_fd(handle)?)))
             },
             |cap, dir, rel| {
                 let flags = opts.served_flags();
@@ -541,14 +556,14 @@ impl File {
 
     pub fn file_attr(&self) -> io::Result<FileAttr> {
         match &self.0 {
-            Inner::Kernel(h) => syscall::fstat(*h).map(FileAttr::of_kernel).map_err(to_io_error),
+            Inner::Kernel(fd) => crate::sys::on_fd(*fd, syscall::fstat).map(FileAttr::of_kernel),
             Inner::Served(s) => s.with(|dir, fid, generation| dir.fstat(fid, generation)).map(FileAttr::of),
         }
     }
 
     pub fn fsync(&self) -> io::Result<()> {
         match &self.0 {
-            Inner::Kernel(h) => syscall::fsync(*h).map_err(to_io_error),
+            Inner::Kernel(fd) => crate::sys::on_fd(*fd, syscall::fsync),
             Inner::Served(s) => s.with(|dir, fid, generation| dir.fsync(fid, generation)),
         }
     }
@@ -575,14 +590,14 @@ impl File {
 
     pub fn truncate(&self, size: u64) -> io::Result<()> {
         match &self.0 {
-            Inner::Kernel(h) => syscall::ftruncate(*h, size).map_err(to_io_error),
+            Inner::Kernel(fd) => crate::sys::on_fd(*fd, |h| syscall::ftruncate(h, size)),
             Inner::Served(s) => s.with(|dir, fid, generation| dir.truncate(fid, generation, size)),
         }
     }
 
     pub fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
         match &self.0 {
-            Inner::Kernel(h) => syscall::read(*h, buf).map_err(to_io_error),
+            Inner::Kernel(fd) => crate::sys::on_fd(*fd, |h| syscall::read(h, buf)),
             Inner::Served(s) => s.with(|dir, fid, generation| dir.read(fid, generation, buf)),
         }
     }
@@ -617,7 +632,7 @@ impl File {
 
     pub fn write(&self, buf: &[u8]) -> io::Result<usize> {
         match &self.0 {
-            Inner::Kernel(h) => syscall::write(*h, buf).map_err(to_io_error),
+            Inner::Kernel(fd) => crate::sys::on_fd(*fd, |h| syscall::write(h, buf)),
             Inner::Served(s) => s.with(|dir, fid, generation| dir.write(fid, generation, buf).map(|w| w.len)),
         }
     }
@@ -650,13 +665,13 @@ impl File {
 
     pub fn seek(&self, pos: SeekFrom) -> io::Result<u64> {
         match &self.0 {
-            Inner::Kernel(h) => {
+            Inner::Kernel(fd) => {
                 let abi_pos = match pos {
                     SeekFrom::Start(n) => syscall::SeekFrom::Start(n),
                     SeekFrom::Current(n) => syscall::SeekFrom::Current(n),
                     SeekFrom::End(n) => syscall::SeekFrom::End(n),
                 };
-                syscall::seek(*h, abi_pos).map_err(to_io_error)
+                crate::sys::on_fd(*fd, |h| syscall::seek(h, abi_pos))
             }
             Inner::Served(s) => {
                 let (whence, delta) = match pos {
@@ -683,7 +698,7 @@ impl File {
 
     pub fn duplicate(&self) -> io::Result<File> {
         match &self.0 {
-            Inner::Kernel(h) => Ok(File(Inner::Kernel(syscall::dup(*h).map_err(to_io_error)?))),
+            Inner::Kernel(fd) => Ok(File(Inner::Kernel(toyos::fd::dup(*fd, 0, false).map_err(crate::sys::fd_error)?))),
             Inner::Served(s) => Ok(File(Inner::Served(Arc::clone(s)))),
         }
     }
@@ -699,8 +714,8 @@ impl File {
 
 impl Drop for File {
     fn drop(&mut self) {
-        if let Inner::Kernel(h) = self.0 {
-            syscall::close(h);
+        if let Inner::Kernel(fd) = self.0 {
+            let _ = toyos::fd::close(fd);
         }
     }
 }
@@ -722,7 +737,7 @@ impl DirBuilder {
 impl fmt::Debug for File {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.0 {
-            Inner::Kernel(h) => write!(f, "File({})", h.0),
+            Inner::Kernel(fd) => write!(f, "File({fd})"),
             Inner::Served(s) => write!(f, "File({}/{})", s.dir.prefix, s.rel),
         }
     }

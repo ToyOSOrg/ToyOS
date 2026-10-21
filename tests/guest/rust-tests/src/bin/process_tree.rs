@@ -194,7 +194,7 @@ fn under_b_is_gone(grown: &Grown) {
         env: b"",
         cwd: "/",
         extras: &[],
-        slots: &[],
+        fds: &[],
         parent: Parent::Place(place),
     };
     let mut home = [0u8; 256];
@@ -228,8 +228,6 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
         path_len: SELF_PATH.len() as u64,
         argv_ptr: argv.as_ptr() as u64,
         argv_len: argv.len() as u64,
-        slot_map_ptr: 0,
-        slot_map_count: 0,
         env_ptr: 0,
         env_len: 0,
         endow_ptr: 0,
@@ -278,7 +276,7 @@ fn a_pipe_is_no_place() {
         env: b"",
         cwd: "/",
         extras: &[],
-        slots: &[],
+        fds: &[],
         parent: Parent::Place(place),
     };
     let mut home = [0u8; 256];

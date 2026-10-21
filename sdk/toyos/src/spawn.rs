@@ -8,16 +8,18 @@
 //! **The supervisor starts a child only by a launch**, and a launch runs its
 //! row's own program with no authority but its row's and the connectors
 //! provided beside it. So a spawn asked of the supervisor that carries an
-//! endowment or an extra slot, or names its image, is refused, as is one that
+//! endowment or a descriptor past stdio, or names its image, is refused, as is one that
 //! names its image and provides a connector; one that decided what its child
 //! holds or runs is spawned directly; and one whose launch was not made is
 //! spawned directly only where it asked nothing a launch alone gives.
 
-use toyos_abi::syscall::{self, EndowEntry, SpawnArgs, SyscallError, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SVC_LABEL};
+use toyos_abi::syscall::{
+    self, EndowEntry, SpawnArgs, SyscallError, FD_PREFIX, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SVC_LABEL,
+};
 
-use crate::launch::{self, Launch, LaunchError, Outcome, MAX_LAUNCH_EXTRAS, MAX_LAUNCH_SLOTS};
+use crate::launch::{self, Launch, LaunchError, Outcome, MAX_LAUNCH_EXTRAS, MAX_LAUNCH_FDS};
 use crate::process::{Image, Process};
-use crate::{AsHandle, OwnedHandle, RawHandle};
+use crate::{AsHandle, RawHandle};
 
 /// Whom a child is placed under, whose end takes it down.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -46,12 +48,11 @@ pub struct Spawn<'a> {
     pub env: &'a [u8],
     /// Absolute: the kernel starts a child only where its spawn says.
     pub cwd: &'a str,
-    /// `[child slot, caller's handle]`, installed in order, so a later one for
-    /// a slot wins.
-    pub slots: &'a [[u32; 2]],
-    /// How many of `slots`, first, are the child's stdin, stdout and stderr,
-    /// which a launch carries; any after them only a direct spawn installs.
-    pub stdio: usize,
+    /// `(child descriptor, caller's handle)`, each a number once: the child
+    /// starts with these and no other descriptors. The caller keeps its
+    /// handles, which a spawn duplicates. A launch carries 0 to 2; a
+    /// descriptor past them only a direct spawn gives.
+    pub fds: &'a [(u32, RawHandle)],
     /// `(label, handle)` the child is endowed, each moved.
     pub endow: &'a [(&'a str, RawHandle)],
     /// `(name, connector)` put in a launched child's namespace beside its
@@ -94,7 +95,7 @@ impl Spawn<'_> {
         let asked = Asked {
             supervisor: self.parent == Parent::Supervisor,
             endowed: !self.endow.is_empty(),
-            extra_slots: self.slots.len() > self.stdio,
+            extra_fds: self.fds.iter().any(|&(fd, _)| fd > 2),
             image_named: self.image.is_some(),
             provided: !self.provided.is_empty(),
         };
@@ -111,35 +112,57 @@ impl Spawn<'_> {
     pub fn direct(&self, env: &[u8], image: Option<&Image>) -> Result<Process, Refused> {
         let path = image_and_name(self.program, self.image).0;
         let names_svc = self.endow.iter().any(|(label, _)| *label == SVC_LABEL);
-        if self.endow.len() + usize::from(!names_svc) > MAX_SPAWN_ENDOWMENTS {
-            return Err(Refused::Invalid("more endowments than a spawn carries"));
+        if self.endow.len() + self.fds.len() + usize::from(!names_svc) > MAX_SPAWN_ENDOWMENTS {
+            return Err(Refused::Invalid("more endowments and descriptors than a spawn carries"));
         }
         let mut entries = [EndowEntry { label_off: 0, label_len: 0, handle: RawHandle(0), _pad: 0 }; MAX_SPAWN_ENDOWMENTS];
         let mut labels = [0u8; MAX_SPAWN_LABELS_LEN];
         let (mut count, mut used) = (0, 0);
-        // A duplicate rather than the handle itself: an endowment is a move,
-        // and a parent that gave its namespace away could not spawn a second
-        // child.
-        let inherited = match names_svc {
-            true => None,
-            false => match crate::endow::namespace() {
-                Some(ns) => Some(syscall::dup(ns.as_handle()).map_err(Refused::Syscall)?),
-                None => None,
-            },
-        };
-        let release = |e| {
-            if let Some(handle) = inherited {
-                syscall::close(handle);
-            }
+        // Duplicates rather than the handles themselves: an endowment is a
+        // move, and a parent that gave its namespace or its stdout away could
+        // not spawn a second child.
+        let mut copies = [toyos_abi::HANDLE_INVALID; MAX_SPAWN_ENDOWMENTS];
+        let mut copied = 0;
+        let release = |copies: &[RawHandle], e| {
+            copies.iter().for_each(|&h| syscall::close(h));
             e
         };
-        for (label, handle) in self.endow.iter().copied().chain(inherited.map(|h| (SVC_LABEL, h))) {
-            let Some(room) = labels.get_mut(used..used + label.len()) else {
-                return Err(release(Refused::Invalid("endowment labels past what a spawn carries")));
+        let svc = match (names_svc, crate::endow::namespace()) {
+            (false, Some(ns)) => Some(syscall::dup(ns.as_handle()).map_err(Refused::Syscall)?),
+            _ => None,
+        };
+        if let Some(svc) = svc {
+            copies[copied] = svc;
+            copied += 1;
+        }
+        let mut number = [0u8; 10];
+        let mut put = |label: &[&[u8]], handle: RawHandle, count: &mut usize, used: &mut usize| {
+            let len: usize = label.iter().map(|part| part.len()).sum();
+            let room = labels.get_mut(*used..*used + len).ok_or(Refused::Invalid("endowment labels past what a spawn carries"))?;
+            let mut at = 0;
+            for part in label {
+                room[at..at + part.len()].copy_from_slice(part);
+                at += part.len();
+            }
+            entries[*count] = EndowEntry { label_off: *used as u32, label_len: len as u32, handle, _pad: 0 };
+            (*count, *used) = (*count + 1, *used + len);
+            Ok(())
+        };
+        for &(label, handle) in self.endow {
+            put(&[label.as_bytes()], handle, &mut count, &mut used).map_err(|e| release(&copies[..copied], e))?;
+        }
+        if let Some(svc) = svc {
+            put(&[SVC_LABEL.as_bytes()], svc, &mut count, &mut used).map_err(|e| release(&copies[..copied], e))?;
+        }
+        for &(fd, handle) in self.fds {
+            let copy = match syscall::dup(handle) {
+                Ok(copy) => copy,
+                Err(e) => return Err(release(&copies[..copied], Refused::Syscall(e))),
             };
-            room.copy_from_slice(label.as_bytes());
-            entries[count] = EndowEntry { label_off: used as u32, label_len: label.len() as u32, handle, _pad: 0 };
-            (count, used) = (count + 1, used + label.len());
+            copies[copied] = copy;
+            copied += 1;
+            let digits = decimal(fd, &mut number);
+            put(&[FD_PREFIX.as_bytes(), digits], copy, &mut count, &mut used).map_err(|e| release(&copies[..copied], e))?;
         }
         let (image, image_len) = image.map_or((0, 0), Image::spawn_words);
         let args = SpawnArgs {
@@ -147,8 +170,6 @@ impl Spawn<'_> {
             path_len: path.len() as u64,
             argv_ptr: self.argv.as_ptr() as u64,
             argv_len: self.argv.len() as u64,
-            slot_map_ptr: self.slots.as_ptr() as u64,
-            slot_map_count: self.slots.len() as u64,
             env_ptr: env.as_ptr() as u64,
             env_len: env.len() as u64,
             endow_ptr: entries.as_ptr() as u64,
@@ -170,8 +191,8 @@ impl Spawn<'_> {
             // SAFETY: the kernel installed this handle for this call and no other.
             Ok(handle) => Ok(unsafe { Process::from_raw(handle) }),
             // An endowment moves only on a spawn that happened, so the
-            // duplicate is still this process's to close.
-            Err(e) => Err(release(Refused::Syscall(e))),
+            // duplicates are still this process's to close.
+            Err(e) => Err(release(&copies[..copied], Refused::Syscall(e))),
         }
     }
 
@@ -179,9 +200,9 @@ impl Spawn<'_> {
     /// handle in another process: a stream belongs to the process that
     /// connected or accepted it.
     fn refuse_streams(&self) -> Result<(), Refused> {
-        let slots = self.slots.iter().map(|&[_, handle]| RawHandle(handle));
+        let fds = self.fds.iter().map(|&(_, handle)| handle);
         let given = self.endow.iter().chain(self.provided).map(|&(_, handle)| handle);
-        match slots.chain(given).find(|h| crate::net::stream::is_stream(*h)) {
+        match fds.chain(given).find(|h| crate::net::stream::is_stream(*h)) {
             Some(stream) => Err(Refused::Stream(stream)),
             None => Ok(()),
         }
@@ -209,9 +230,9 @@ impl Spawn<'_> {
         if self.provided.len() + usize::from(!for_supervisor) > MAX_LAUNCH_EXTRAS {
             return Err(Refused::Invalid("more connectors provided than a launch carries beside its place"));
         }
-        let stdio = &self.slots[..self.stdio];
-        if stdio.len() > MAX_LAUNCH_SLOTS {
-            return Err(Refused::Invalid("more than three stdio slots"));
+        let stdio = self.fds;
+        if stdio.len() > MAX_LAUNCH_FDS || stdio.iter().any(|&(fd, _)| fd > 2) {
+            return Err(Refused::Invalid("a launch carries descriptors 0 to 2 alone"));
         }
         let place = match self.parent {
             Parent::Supervisor => None,
@@ -225,23 +246,23 @@ impl Spawn<'_> {
                 Err(e) => return unmade(Unmade::PlaceNotCopied(e), None),
             },
         };
-        let mut slots = [(0u32, RawHandle(0)); MAX_LAUNCH_SLOTS];
-        let release = |slots: &[(u32, RawHandle)]| {
-            slots.iter().for_each(|(_, h)| syscall::close(*h));
+        let mut fds = [(0u32, RawHandle(0)); MAX_LAUNCH_FDS];
+        let release = |fds: &[(u32, RawHandle)]| {
+            fds.iter().for_each(|(_, h)| syscall::close(*h));
             if let launch::Parent::Place(copy) = parent {
                 syscall::close(copy);
             }
         };
-        for (i, &[child, handle]) in stdio.iter().enumerate() {
-            match syscall::dup(RawHandle(handle)) {
-                Ok(copy) => slots[i] = (child, copy),
+        for (i, &(child, handle)) in stdio.iter().enumerate() {
+            match syscall::dup(handle) {
+                Ok(copy) => fds[i] = (child, copy),
                 Err(e) => {
-                    release(&slots[..i]);
+                    release(&fds[..i]);
                     return Err(Refused::Syscall(e));
                 }
             }
         }
-        let slots = &slots[..stdio.len()];
+        let fds = &fds[..stdio.len()];
         let mut extras = [("", RawHandle(0)); MAX_LAUNCH_EXTRAS];
         extras[..self.provided.len()].copy_from_slice(self.provided);
         let request = Launch {
@@ -250,7 +271,7 @@ impl Spawn<'_> {
             env: self.env,
             cwd: self.cwd,
             extras: &extras[..self.provided.len()],
-            slots,
+            fds,
             parent,
         };
         // **The send moved them.** Every arm but `NotSent` is past the point
@@ -264,25 +285,23 @@ impl Spawn<'_> {
             Ok(Outcome::Refused) | Err(LaunchError::Sent(_)) => Err(Refused::NotStarted),
             Ok(Outcome::Gone) => Err(Refused::Syscall(SyscallError::Gone)),
             Err(LaunchError::NotSent(_)) => {
-                release(slots);
+                release(fds);
                 unmade(Unmade::NotSent, None)
             }
         }
     }
 }
 
-/// A copy of what this process's `slot` holds, for a child to inherit there,
-/// or `None` for a slot it was started without: a stdio slot a spawn left
-/// empty is empty in the child too, as POSIX has a closed descriptor. A
-/// stream's slot is refused as [`Spawn::launch`] refuses its handle.
-pub fn inherited(slot: u16) -> Result<Option<OwnedHandle>, Refused> {
-    if let Some(stream) = crate::net::stream::stream_at(slot) {
-        return Err(Refused::Stream(stream));
-    }
-    match syscall::dup_slot(slot) {
-        Ok(copy) => Ok(Some(OwnedHandle(copy))),
-        Err(SyscallError::NotFound) => Ok(None),
-        Err(e) => Err(Refused::Syscall(e)),
+/// `n` in decimal, in `buf`.
+fn decimal(mut n: u32, buf: &mut [u8; 10]) -> &[u8] {
+    let mut at = buf.len();
+    loop {
+        at -= 1;
+        buf[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            return &buf[at..];
+        }
     }
 }
 
@@ -309,7 +328,7 @@ pub fn direct_env(env: &[u8], named: bool, from_supervisor: Option<&str>, out: &
 struct Asked {
     supervisor: bool,
     endowed: bool,
-    extra_slots: bool,
+    extra_fds: bool,
     image_named: bool,
     provided: bool,
 }
@@ -324,13 +343,13 @@ enum Route {
 }
 
 fn route(asked: Asked) -> Route {
-    if asked.supervisor && (asked.endowed || asked.extra_slots) {
-        return Route::Refused("the supervisor starts only a launch, which carries no endowment and no extra slot");
+    if asked.supervisor && (asked.endowed || asked.extra_fds) {
+        return Route::Refused("the supervisor starts only a launch, which carries no endowment and no descriptor past stdio");
     }
     if asked.image_named && (asked.supervisor || asked.provided) {
         return Route::Refused("a launch runs its row's own program, so it takes no image the caller names");
     }
-    match asked.endowed || asked.extra_slots || asked.image_named {
+    match asked.endowed || asked.extra_fds || asked.image_named {
         true => Route::Direct,
         false => Route::Launch,
     }
@@ -385,7 +404,7 @@ pub fn image_and_name<'a>(program: &'a str, image: Option<&'a str>) -> (&'a str,
 mod tests {
     use super::*;
 
-    const SUPERVISOR: Asked = Asked { supervisor: true, endowed: false, extra_slots: false, image_named: false, provided: false };
+    const SUPERVISOR: Asked = Asked { supervisor: true, endowed: false, extra_fds: false, image_named: false, provided: false };
 
     /// What the supervisor would not start is refused here, and nothing is
     /// spawned in its place.
@@ -393,7 +412,7 @@ mod tests {
     fn the_supervisor_is_asked_only_by_a_launch_of_its_row_s_own_program() {
         for asked in [
             Asked { endowed: true, ..SUPERVISOR },
-            Asked { extra_slots: true, ..SUPERVISOR },
+            Asked { extra_fds: true, ..SUPERVISOR },
             Asked { image_named: true, ..SUPERVISOR },
             Asked { image_named: true, provided: true, ..Asked::default() },
         ] {
@@ -412,7 +431,7 @@ mod tests {
     fn a_spawn_that_decided_its_child_is_spawned_directly() {
         for asked in [
             Asked { endowed: true, ..Asked::default() },
-            Asked { extra_slots: true, ..Asked::default() },
+            Asked { extra_fds: true, ..Asked::default() },
             Asked { image_named: true, ..Asked::default() },
         ] {
             assert_eq!(route(asked), Route::Direct);

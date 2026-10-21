@@ -30,7 +30,7 @@ use super::fs::{
     spawn_cwd, sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink,
     sys_rename, sys_rmdir, sys_stat, sys_symlink,
 };
-use super::handles::{sys_close, sys_dup2, sys_handle_dup, sys_handle_dup_slot, with_object, with_object_ref};
+use super::handles::{sys_close, sys_handle_dup, with_object, with_object_ref};
 use super::io::{
     sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
 };
@@ -192,14 +192,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             {
                 return SyscallError::InvalidArgument.to_u64();
             }
-            // slot_map and endow stay windows, not copies: both counts are userland's
-            // and each entry is read once. labels is copied because the child keeps it.
-            let Some(slot_map) = (args.slot_map_count as usize)
-                .checked_mul(crate::loader::SLOT_PAIR_LEN)
-                .and_then(|len| ctx.user_bytes(UserAddr::new(args.slot_map_ptr), len as u64))
-            else {
-                return bad_addr;
-            };
+            // endow stays a window, not a copy: its count is userland's and each entry
+            // is read once. labels is copied because the child keeps it.
             let Some(endow) = (args.endow_count as usize)
                 .checked_mul(core::mem::size_of::<toyos_abi::syscall::EndowEntry>())
                 .and_then(|len| ctx.user_bytes(UserAddr::new(args.endow_ptr), len as u64))
@@ -210,7 +204,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(bytes) => bytes,
                 Err(e) => return e.to_u64(),
             };
-            let pending = match process::build_child_handles(&slot_map, &endow, &labels) {
+            let pending = match process::build_child_handles(&endow, &labels) {
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
@@ -280,8 +274,6 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         }
         SYS_NANOSLEEP => sys_nanosleep(a1),
         SYS_HANDLE_DUP => sys_handle_dup(RawHandle(a1 as u32), a2),
-        SYS_HANDLE_DUP_AT => sys_dup2(RawHandle(a1 as u32), a2),
-        SYS_HANDLE_DUP_SLOT => sys_handle_dup_slot(a1),
         SYS_NULL => sys_null(a1),
         SYS_GETPID => process::current_process().raw() as u64,
         SYS_RENAME => {

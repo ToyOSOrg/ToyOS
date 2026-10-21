@@ -26,10 +26,6 @@ static void fault(const char *kind) {
 #else
         __asm__ volatile("brk #0");
 #endif
-    } else if (strcmp(kind, "handle") == 0) {
-        /* Slot 4000 at its first generation, which nothing gave this process. */
-        char byte;
-        read(4000, &byte, 1);
     }
 }
 
@@ -44,7 +40,6 @@ static const struct {
     {"arithmetic", SIGFPE},
 #endif
     {"trap", SIGTRAP},
-    {"handle", SIGSEGV},
 };
 
 int main(int argc, char **argv) {

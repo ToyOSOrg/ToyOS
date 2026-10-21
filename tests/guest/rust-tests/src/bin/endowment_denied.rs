@@ -318,17 +318,17 @@ fn a_right_the_capability_lacks_is_a_word() {
     // check: `DEVICE` and `RT` are bits nothing else carries, so this is the
     // same refusal the narrowed capability got.
     assert_eq!(
-        syscall::device_claim(RawHandle(1), DeviceRequest::Class(DeviceType::Framebuffer)).err(),
+        syscall::device_claim(stdout(), DeviceRequest::Class(DeviceType::Framebuffer)).err(),
         Some(SyscallError::PermissionDenied),
         "a pipe was taken as a capability by SYS_DEVICE_CLAIM",
     );
     assert_eq!(
-        syscall::rt_enter(RawHandle(1)),
+        syscall::rt_enter(stdout()),
         Err(SyscallError::PermissionDenied),
         "a pipe was taken as a capability by SYS_RT_ENTER",
     );
     assert_eq!(
-        syscall::shutdown(RawHandle(1)),
+        syscall::shutdown(stdout()),
         SyscallError::PermissionDenied,
         "a pipe was taken as a capability by SYS_SHUTDOWN",
     );
@@ -411,7 +411,7 @@ fn the_roster_is_a_right_and_the_header_is_not() {
     // arms above assert for `DEVICE`, `RT` and `POWER`.
     let mut by_a_console = [0u8; ONE_ENTRY];
     assert_eq!(
-        syscall::sysinfo(RawHandle(1), &mut by_a_console),
+        syscall::sysinfo(stdout(), &mut by_a_console),
         0,
         "a console was taken as a capability by SYS_SYSINFO",
     );
@@ -591,4 +591,9 @@ fn not_a_handle(role: &str) -> ! {
         _ => format!("{:?}", syscall::shutdown(HANDLE_INVALID)),
     };
     panic!("{role} was answered {answered} instead of ending the caller");
+}
+
+/// The kernel handle this process's standard output is, descriptor 1's.
+fn stdout() -> RawHandle {
+    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
 }

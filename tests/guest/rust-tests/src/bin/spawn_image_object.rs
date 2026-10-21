@@ -38,8 +38,6 @@ fn spawn(image: RawHandle, len: u64) -> Result<RawHandle, SyscallError> {
             path_len: SELF.len() as u64,
             argv_ptr: argv.as_ptr() as u64,
             argv_len: argv.len() as u64,
-            slot_map_ptr: 0,
-            slot_map_count: 0,
             env_ptr: 0,
             env_len: 0,
             endow_ptr: 0,

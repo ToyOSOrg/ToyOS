@@ -64,13 +64,13 @@ directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
    `posix_spawnp` with file actions and attributes start a child by
    `toyos::spawn`, std's launch-or-spawn rule, which std's `Command` now uses
    too. A C child starts with descriptors 0–2 and exactly what its file
-   actions name, a stated departure from POSIX, and a spawned child's table
-   keeps slots 0–2 for them at its spawn (`HandleTable::for_child`): an
-   endowment that filled an empty one read as the child's stdio. A stdio
-   slot a process was started without is no descriptor of its children
-   (`toyos::spawn::inherited`), and std's stdio answers its errors rather
-   than reading every one as a closed stream (`is_ebadf`). libc
-   keeps close-on-exec marks (`fdreq`); `waitpid`,
+   actions name, a stated departure from POSIX, each endowed as
+   `fd:<n>`, which the child's descriptor table installs at its number
+   (`toyos::fd`). A descriptor a process was started without is no
+   descriptor of its children (`toyos::fd::copy`), and std's stdio answers
+   its errors rather than reading every one as a closed stream
+   (`is_ebadf`). libc's close-on-exec flag is the table's per-descriptor
+   inheritable flag; `waitpid`,
    `wait` and `wait4` answer each child once, by pid, group or any, with
    `<sys/wait.h>`'s status for its stage 2 end (`spawnreq`); `environ`,
    `setenv` and `unsetenv`; `kill` with `SIGKILL` for a child or a group of
@@ -95,7 +95,7 @@ directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
    0); the parent's stdout marked `FD_CLOEXEC`, a 0 that `addopen` opened
    `O_CLOEXEC`, and a descriptor that `adddup2` made and `addclose` closed,
    each absent in the child (`F_SETFD`, `O_CLOEXEC` or `addclose` ignored,
-   and the child's table without its stdio slots kept); the 256th unwaited
+   and the child's stdio not taken from its endowments); the 256th unwaited
    child refused `EAGAIN` beside a `poll` of 255 descriptors answering (no
    capacity check); a negative descriptor beside a pipe, the pipe answering
    (passed to the kernel, which ends the caller).

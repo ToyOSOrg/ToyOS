@@ -281,7 +281,8 @@ impl Log {
             .finish()
             .expect("supervisor: no namespace for the log's origins");
         let conn = names.open(ORIGINS).expect("supervisor: the log's origins port refused the supervisor");
-        let stdin = toyos_abi::syscall::dup_narrowed(toyos::RawHandle(0), STDIN_RIGHTS)
+        let stdin = toyos::fd::with(0, |o| toyos_abi::syscall::dup_narrowed(o.handle, STDIN_RIGHTS))
+            .expect("supervisor: the kernel gave it no console as descriptor 0")
             .expect("supervisor: its console would not narrow");
         let log = Self {
             conn,
@@ -290,12 +291,17 @@ impl Log {
             rx: RefCell::new(ipc::FrameRx::new()),
             unanswered: Cell::new(0),
         };
-        // The supervisor's own lines: a ring like every program's, in the two slots the
-        // kernel filled with its console.
+        // The supervisor's own lines: a ring like every program's, as the two
+        // descriptors the kernel gave its console.
         let ring = new_ring();
-        for slot in [1, 2] {
-            toyos_abi::syscall::dup2(ring.as_handle(), slot).expect("supervisor: its ring would not take its own slot");
+        let copy = toyos_abi::syscall::dup(ring.as_handle()).expect("supervisor: its ring would not duplicate");
+        let held = toyos::fd::install(toyos::fd::Object::handle(copy), false, 0)
+            .expect("supervisor: no descriptor for its own ring");
+        for (fd, stream) in [(1, toyos::log::stdio::Stream::Out), (2, toyos::log::stdio::Stream::Err)] {
+            toyos::fd::dup2(held, fd, false).expect("supervisor: its ring would not take its own descriptor");
+            toyos::log::stdio::forget(stream);
         }
+        toyos::fd::close(held).expect("supervisor: the ring's descriptor it just made");
         let (alive, keep) = toyos::pipe_pair().expect("supervisor: no pipe to say it lives");
         // Held for the machine's life: the supervisor's end is the machine's.
         core::mem::forget(keep);
@@ -1954,9 +1960,9 @@ impl Supervisor<'_> {
         // Past every refusal that does not know which handle is which, so ownership
         // can be split. Every part still releases on every path below.
         let all = held.take();
-        let (slot_handles, rest) = all.split_at(request.slot_count());
+        let (fd_handles, rest) = all.split_at(request.fd_count());
         let (extra_handles, place_handle) = rest.split_at(request.extra_count);
-        let slots = Moved(slot_handles.to_vec());
+        let fds = Moved(fd_handles.to_vec());
         let place = Moved(place_handle.to_vec());
         // Owned, so they close when the launch is done with: `SYS_NAMESPACE_BUILD`
         // copies a connector into the namespace and leaves the caller's handle,
@@ -2098,15 +2104,15 @@ impl Supervisor<'_> {
             }
         };
         let session = starts.session(&mut self.sessions);
-        let caller_slots: Vec<(u32, toyos::RawHandle)> =
-            request.slot_numbers().zip(slots.0.iter().copied()).collect();
+        let caller_fds: Vec<(u32, toyos::RawHandle)> =
+            request.fd_numbers().zip(fds.0.iter().copied()).collect();
         let launch = Launch {
             conn,
             program,
             command,
             session,
-            slots,
-            caller_slots,
+            fds,
+            caller_fds,
             _place: place,
             placed: under.is_some(),
             extras,
@@ -2211,7 +2217,7 @@ impl Supervisor<'_> {
     /// Start `launch`, holding `folder` and in it ([`grants::cwd`]) where it
     /// holds one, and answer its caller.
     fn start_launch(&mut self, launch: Launch, folder: Option<grants::Folder>) {
-        let Launch { conn, mut program, mut command, session, slots, caller_slots, _place, placed, extras, cwd } = launch;
+        let Launch { conn, mut program, mut command, session, fds, caller_fds, _place, placed, extras, cwd } = launch;
         if let Some(folder) = folder {
             // The image `prepare` read is kept: only the working directory is
             // judged again.
@@ -2234,7 +2240,7 @@ impl Supervisor<'_> {
         let program = &program;
 
         // `inherit_handle` duplicates into the child, so the supervisor's own copies go with
-        // `slots` when this returns.
+        // `fds` when this returns.
         self.make_home(program);
         if program.package().is_some() {
             if let Err(why) = self.make_app_home(program) {
@@ -2255,9 +2261,9 @@ impl Supervisor<'_> {
             &extras,
             storage,
             (&self.minted, session),
-            Output::Launch { log: &mut self.log, slots: &caller_slots },
+            Output::Launch { log: &mut self.log, fds: &caller_fds },
         );
-        drop(slots);
+        drop(fds);
         match started {
             Ok((child, _)) => {
                 // SAFETY: `into_raw_handle` gave up the child's one handle in this table.
@@ -2292,9 +2298,9 @@ struct Launch {
     /// Prepared: its image read and hashed, its working directory judged.
     command: Command,
     session: Session,
-    /// The caller's stdio and extra slots, owned until the spawn duplicates them.
-    slots: Moved,
-    caller_slots: Vec<(u32, toyos::RawHandle)>,
+    /// The caller's stdio, owned until the spawn duplicates it.
+    fds: Moved,
+    caller_fds: Vec<(u32, toyos::RawHandle)>,
     /// The place the child is spawned under, owned until then.
     _place: Moved,
     /// Whether it names a place, or the supervisor.
@@ -2775,9 +2781,9 @@ fn start<'a>(
     // A service the supervisor starts gets a ring of its own as its stdout and stderr
     // and the supervisor's console to read as its stdin; `logkeeper` also gets the acceptor
     // the rings reach it on and the one console handle that may write. A
-    // launch keeps the slots its caller sent, but for a ring among them —
-    // the caller's own log — which is replaced by the program's, and a stdio
-    // slot it sent nothing for is a null, never this process's own.
+    // launch keeps the descriptors its caller sent, but for a ring among them
+    // — the caller's own log — which is replaced by the program's, and a stdio
+    // descriptor it sent nothing for is a null, never this process's own.
     let mut ring: Option<SharedMemory> = None;
     let mut origins: Option<Acceptor> = None;
     let log: &mut Log = match output {
@@ -2792,24 +2798,25 @@ fn start<'a>(
                 };
                 command.endow(ORIGINS, acceptor.as_handle().0);
                 origins = Some(acceptor);
-                let console = toyos_abi::syscall::dup(toyos::RawHandle(0))
+                let console = toyos::fd::with(0, |o| toyos_abi::syscall::dup(o.handle))
+                    .expect("supervisor: its console is descriptor 0")
                     .expect("supervisor: its console would not duplicate for logkeeper");
                 command.endow(CONSOLE, console.0);
                 held.0.push(console);
             }
             log
         }
-        Output::Launch { log, slots } => {
+        Output::Launch { log, fds } => {
             command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-            for &(slot, handle) in slots {
-                let caller_ring = matches!(slot, 1 | 2)
+            for &(fd, handle) in fds {
+                let caller_ring = matches!(fd, 1 | 2)
                     && toyos_abi::syscall::fstat(handle)
                         .is_ok_and(|stat| stat.file_type == FileType::SharedMemory);
                 if caller_ring {
                     let own = ring.get_or_insert_with(new_ring).as_handle();
-                    command.inherit_handle(slot, own.0);
+                    command.inherit_handle(fd, own.0);
                 } else {
-                    command.inherit_handle(slot, handle.0);
+                    command.inherit_handle(fd, handle.0);
                 }
             }
             log
@@ -2864,10 +2871,10 @@ fn start<'a>(
 }
 
 /// Where a started program's output goes: a service's own ring, or a
-/// launch's caller's slots with any ring among them replaced.
+/// launch's caller's descriptors with any ring among them replaced.
 enum Output<'l> {
     Boot(&'l mut Log),
-    Launch { log: &'l mut Log, slots: &'l [(u32, toyos::RawHandle)] },
+    Launch { log: &'l mut Log, fds: &'l [(u32, toyos::RawHandle)] },
 }
 
 /// The namespace this program's `receives` names, [`toyos_swap::PORT`] and
