@@ -153,6 +153,8 @@ default-members = ["."]
 # a directory with a `Cargo.toml` under it is a red, so a stale excuse cannot
 # outlive what it excused.
 exclude = [
+    # The M1 probe's per-temporary-erasure copy of toyos-crypto (probe branch only).
+    "lib/crypto-wiped",
     # The Rust compiler/std fork: its own workspaces, its own lockfiles, and a
     # submodule this repository does not resolve for.
     "rust",

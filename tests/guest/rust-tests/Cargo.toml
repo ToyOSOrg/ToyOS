@@ -34,6 +34,8 @@ ring = "0.17"
 # What `crypto_parity` measures beside ring, the rule it is judged by, its
 # ML-KEM reference, and the system's random bytes, where ring takes them.
 toyos-crypto = { path = "../../../lib/crypto", features = ["sign"] }
+# The M1 probe's per-temporary-erasure copy (probe branch only).
+toyos-crypto-wiped = { path = "../../../lib/crypto-wiped", features = ["sign"] }
 toyos-parity = { path = "../../../lib/parity" }
 ml-kem = { version = "0.3", features = ["hazmat"] }
 getrandom = "0.2"

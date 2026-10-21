@@ -901,6 +901,10 @@ name = "toyos-crypto"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-crypto-wiped"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-device-memory"
 version = "0.1.0"
 
@@ -975,6 +979,7 @@ dependencies = [
  "toyos",
  "toyos-abi",
  "toyos-crypto",
+ "toyos-crypto-wiped",
  "toyos-device-memory",
  "toyos-i219",
  "toyos-inspect",

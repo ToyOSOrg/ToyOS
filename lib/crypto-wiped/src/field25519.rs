@@ -1,0 +1,320 @@
+//! Arithmetic modulo p = 2^255 - 19 in five radix-2^51 limbs with u128
+//! products (Bernstein, "Curve25519: new Diffie-Hellman speed records", PKC
+//! 2006). The limb bounds are types: a [`Tight`] element is what a
+//! multiplication or a carry leaves, a [`Loose`] one the sum or difference of
+//! two tight ones. Multiplication takes either; addition and subtraction take
+//! tight operands. Every operation has a fixed schedule and no branch or
+//! address that depends on an element. Encodings and equality are public at
+//! verification boundaries.
+//!
+//! Elements are `Copy` values and are not erased: an owner of secret state
+//! erases its own storage (see `secret`).
+
+use crate::ct;
+
+const MASK: u64 = (1 << 51) - 1;
+
+/// Limbs 0, 2, 3 and 4 below 2^51, limb 1 below 2^51 + 2^19.
+pub(crate) struct Tight([u64; 5]);
+impl Drop for Tight {
+    fn drop(&mut self) {
+        crate::secret::wipe64(&mut self.0)
+    }
+}
+impl Clone for Tight {
+    fn clone(&self) -> Self {
+        Self(self.0)
+    }
+}
+
+/// Every limb below 2^53.
+pub(crate) struct Loose([u64; 5]);
+impl Drop for Loose {
+    fn drop(&mut self) {
+        crate::secret::wipe64(&mut self.0)
+    }
+}
+
+/// A multiplication operand: either bound.
+pub(crate) trait Operand {
+    fn limbs(&self) -> &[u64; 5];
+}
+
+impl Operand for Tight {
+    #[inline(always)]
+    fn limbs(&self) -> &[u64; 5] {
+        &self.0
+    }
+}
+
+impl Operand for Loose {
+    #[inline(always)]
+    fn limbs(&self) -> &[u64; 5] {
+        &self.0
+    }
+}
+
+/// 2p, limb by limb: above every tight limb, so a subtraction never borrows.
+const TWO_P: [u64; 5] = [2 * (MASK - 18), 2 * MASK, 2 * MASK, 2 * MASK, 2 * MASK];
+
+#[inline(always)]
+fn wide(a: u64, b: u64) -> u128 {
+    u128::from(a).wrapping_mul(u128::from(b))
+}
+
+/// A column of products. The limb bounds keep every sum below 2^115, so the
+/// wrapping additions are exact and carry no overflow check.
+macro_rules! column {
+    ($first:expr $(, $rest:expr)*) => { $first $(.wrapping_add($rest))* };
+}
+
+/// Columns below 2^115 into tight limbs: one carry pass, the top carry times
+/// 19 into limb 0 (2^255 = 19 mod p), and one more carry into limb 1.
+#[inline(always)]
+fn carry(v: [u128; 5]) -> Tight {
+    let [v0, v1, v2, v3, v4] = v;
+    let v1 = v1.wrapping_add(v0 >> 51);
+    let v2 = v2.wrapping_add(v1 >> 51);
+    let v3 = v3.wrapping_add(v2 >> 51);
+    let v4 = v4.wrapping_add(v3 >> 51);
+    let r0 = u128::from(v0 as u64 & MASK).wrapping_add((v4 >> 51).wrapping_mul(19));
+    let r1 = (v1 as u64 & MASK).wrapping_add((r0 >> 51) as u64);
+    Tight([
+        r0 as u64 & MASK,
+        r1,
+        v2 as u64 & MASK,
+        v3 as u64 & MASK,
+        v4 as u64 & MASK,
+    ])
+}
+
+impl Tight {
+    pub(crate) const ZERO: Self = Self([0; 5]);
+    pub(crate) const ONE: Self = Self([1, 0, 0, 0, 0]);
+
+    /// The low 255 bits of a little-endian encoding.
+    pub(crate) const fn from_bytes(b: &[u8; 32]) -> Self {
+        let mut w = [0u64; 4];
+        let mut i = 0;
+        while i < 32 {
+            w[i / 8] |= (b[i] as u64) << (8 * (i % 8));
+            i += 1;
+        }
+        Self([
+            w[0] & MASK,
+            (w[0] >> 51 | w[1] << 13) & MASK,
+            (w[1] >> 38 | w[2] << 26) & MASK,
+            (w[2] >> 25 | w[3] << 39) & MASK,
+            (w[3] >> 12) & MASK,
+        ])
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_limbs(limbs: [u64; 5]) -> Self {
+        Self(limbs)
+    }
+
+    pub(crate) fn add(&self, b: &Tight) -> Loose {
+        let (a, b) = (&self.0, &b.0);
+        Loose([
+            a[0].wrapping_add(b[0]),
+            a[1].wrapping_add(b[1]),
+            a[2].wrapping_add(b[2]),
+            a[3].wrapping_add(b[3]),
+            a[4].wrapping_add(b[4]),
+        ])
+    }
+
+    /// self + 2p - b, limb by limb.
+    pub(crate) fn sub(&self, b: &Tight) -> Loose {
+        let (a, b) = (&self.0, &b.0);
+        Loose([
+            a[0].wrapping_add(TWO_P[0]).wrapping_sub(b[0]),
+            a[1].wrapping_add(TWO_P[1]).wrapping_sub(b[1]),
+            a[2].wrapping_add(TWO_P[2]).wrapping_sub(b[2]),
+            a[3].wrapping_add(TWO_P[3]).wrapping_sub(b[3]),
+            a[4].wrapping_add(TWO_P[4]).wrapping_sub(b[4]),
+        ])
+    }
+
+    pub(crate) fn neg(&self) -> Loose {
+        Self::ZERO.sub(self)
+    }
+
+    /// self^(2^k).
+    pub(crate) fn square_times(&self, k: u32) -> Tight {
+        let mut r = self.square();
+        for _ in 1..k {
+            r = r.square();
+        }
+        r
+    }
+
+    /// self^(2^250 - 1) and self^11, the shared head of the inversion and
+    /// square-root chains (Bernstein 2006, section 5).
+    fn pow_2_250_1(&self) -> (Tight, Tight) {
+        let z2 = self.square();
+        let z9 = z2.square_times(2).mul(self);
+        let z11 = z9.mul(&z2);
+        let z_5_0 = z11.square().mul(&z9);
+        let z_10_0 = z_5_0.square_times(5).mul(&z_5_0);
+        let z_20_0 = z_10_0.square_times(10).mul(&z_10_0);
+        let z_40_0 = z_20_0.square_times(20).mul(&z_20_0);
+        let z_50_0 = z_40_0.square_times(10).mul(&z_10_0);
+        let z_100_0 = z_50_0.square_times(50).mul(&z_50_0);
+        let z_200_0 = z_100_0.square_times(100).mul(&z_100_0);
+        let z_250_0 = z_200_0.square_times(50).mul(&z_50_0);
+        (z_250_0, z11)
+    }
+
+    /// self^(p - 2) = self^(2^255 - 21): 254 squarings and 11 multiplications.
+    pub(crate) fn invert(&self) -> Tight {
+        let (z_250_0, z11) = self.pow_2_250_1();
+        z_250_0.square_times(5).mul(&z11)
+    }
+
+    /// self^((p - 5) / 8) = self^(2^252 - 3), for square roots.
+    pub(crate) fn pow_p58(&self) -> Tight {
+        let (z_250_0, _) = self.pow_2_250_1();
+        z_250_0.square_times(2).mul(self)
+    }
+
+    pub(crate) fn select(a: &Self, b: &Self, bit: u64) -> Self {
+        let m = ct::mask(bit);
+        let (a, b) = (&a.0, &b.0);
+        Self([
+            a[0] ^ ((a[0] ^ b[0]) & m),
+            a[1] ^ ((a[1] ^ b[1]) & m),
+            a[2] ^ ((a[2] ^ b[2]) & m),
+            a[3] ^ ((a[3] ^ b[3]) & m),
+            a[4] ^ ((a[4] ^ b[4]) & m),
+        ])
+    }
+
+    /// Exchanges a and b under a mask of all ones, and leaves them under zero.
+    pub(crate) fn swap(a: &mut Self, b: &mut Self, mask: u64) {
+        for i in 0..5 {
+            let t = (a.0[i] ^ b.0[i]) & mask;
+            a.0[i] ^= t;
+            b.0[i] ^= t;
+        }
+    }
+
+    /// The canonical little-endian encoding.
+    pub(crate) fn bytes(&self) -> [u8; 32] {
+        let h = &self.0;
+        // q = floor((h + 19) / 2^255), which is 1 exactly when h >= p for a
+        // tight h < 2p.
+        let mut q = h[0].wrapping_add(19) >> 51;
+        q = h[1].wrapping_add(q) >> 51;
+        q = h[2].wrapping_add(q) >> 51;
+        q = h[3].wrapping_add(q) >> 51;
+        q = h[4].wrapping_add(q) >> 51;
+        // h - q p = h + 19 q - q 2^255, with bit 255 dropped.
+        let h0 = h[0].wrapping_add(q.wrapping_mul(19));
+        let h1 = h[1].wrapping_add(h0 >> 51);
+        let h2 = h[2].wrapping_add(h1 >> 51);
+        let h3 = h[3].wrapping_add(h2 >> 51);
+        let h4 = h[4].wrapping_add(h3 >> 51);
+        let mut l = [h0 & MASK, h1 & MASK, h2 & MASK, h3 & MASK, h4 & MASK];
+        let words = [
+            l[0] | l[1] << 51,
+            l[1] >> 13 | l[2] << 38,
+            l[2] >> 26 | l[3] << 25,
+            l[3] >> 39 | l[4] << 12,
+        ];
+        crate::secret::wipe64(&mut l);
+        let mut out = [0; 32];
+        for (i, word) in words.iter().enumerate() {
+            out[8 * i..8 * i + 8].copy_from_slice(&word.to_le_bytes());
+        }
+        out
+    }
+
+    /// One when the canonical encoding's low bit is set.
+    pub(crate) fn is_negative(&self) -> u64 {
+        u64::from(self.bytes()[0] & 1)
+    }
+
+    /// One when both encode the same element.
+    pub(crate) fn eq(&self, b: &Self) -> u64 {
+        u64::from(ct::equal(&self.bytes(), &b.bytes()))
+    }
+
+    pub(crate) fn is_zero(&self) -> u64 {
+        self.eq(&Self::ZERO)
+    }
+}
+
+impl Loose {
+    /// The same element, carried tight.
+    pub(crate) fn carry(&self) -> Tight {
+        let v = &self.0;
+        carry([v[0].into(), v[1].into(), v[2].into(), v[3].into(), v[4].into()])
+    }
+}
+
+/// Multiplications, each leaving a tight element.
+pub(crate) trait Multiply: Operand {
+    /// The 25 products, with b's limbs that wrap past 2^255 premultiplied by
+    /// 19.
+    #[inline(always)]
+    fn mul(&self, b: &impl Operand) -> Tight {
+        let (a, b) = (self.limbs(), b.limbs());
+        let b1 = b[1].wrapping_mul(19);
+        let b2 = b[2].wrapping_mul(19);
+        let b3 = b[3].wrapping_mul(19);
+        let b4 = b[4].wrapping_mul(19);
+        let mut v = [
+            column!(wide(a[0], b[0]), wide(a[1], b4), wide(a[2], b3), wide(a[3], b2), wide(a[4], b1)),
+            column!(wide(a[0], b[1]), wide(a[1], b[0]), wide(a[2], b4), wide(a[3], b3), wide(a[4], b2)),
+            column!(wide(a[0], b[2]), wide(a[1], b[1]), wide(a[2], b[0]), wide(a[3], b4), wide(a[4], b3)),
+            column!(wide(a[0], b[3]), wide(a[1], b[2]), wide(a[2], b[1]), wide(a[3], b[0]), wide(a[4], b4)),
+            column!(wide(a[0], b[4]), wide(a[1], b[3]), wide(a[2], b[2]), wide(a[3], b[1]), wide(a[4], b[0])),
+        ];
+        let r = carry(v);
+        crate::secret::erase(&mut v);
+        r
+    }
+
+    #[inline(always)]
+    fn square(&self) -> Tight {
+        square(self.limbs())
+    }
+
+    /// self * k for k < 2^17.
+    #[inline(always)]
+    fn mul_small(&self, k: u32) -> Tight {
+        let a = self.limbs();
+        let k = u64::from(k);
+        let mut v = [wide(a[0], k), wide(a[1], k), wide(a[2], k), wide(a[3], k), wide(a[4], k)];
+        let r = carry(v);
+        crate::secret::erase(&mut v);
+        r
+    }
+}
+
+impl Multiply for Tight {}
+impl Multiply for Loose {}
+
+/// The 15 distinct products of a square.
+#[inline(always)]
+fn square(a: &[u64; 5]) -> Tight {
+    let d0 = a[0].wrapping_mul(2);
+    let d1 = a[1].wrapping_mul(2);
+    let d2 = a[2].wrapping_mul(2);
+    let d3 = a[3].wrapping_mul(2);
+    let a3_19 = a[3].wrapping_mul(19);
+    let a4_19 = a[4].wrapping_mul(19);
+    let mut v = [
+        column!(wide(a[0], a[0]), wide(d1, a4_19), wide(d2, a3_19)),
+        column!(wide(d0, a[1]), wide(a[3], a3_19), wide(d2, a4_19)),
+        column!(wide(d0, a[2]), wide(a[1], a[1]), wide(d3, a4_19)),
+        column!(wide(d0, a[3]), wide(d1, a[2]), wide(a[4], a4_19)),
+        column!(wide(d0, a[4]), wide(d1, a[3]), wide(a[2], a[2])),
+    ];
+    let r = carry(v);
+    crate::secret::erase(&mut v);
+    r
+}
+

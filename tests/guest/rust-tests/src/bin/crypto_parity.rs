@@ -27,6 +27,10 @@ use toyos_parity::{Backend, Build, EndLine, IsaLine, Row, RowLine, SamplesLine, 
 #[path = "../arch/features.rs"]
 mod features;
 
+#[cfg(target_arch = "x86_64")]
+#[path = "../probe_kernels.rs"]
+mod kernels;
+
 const KEY: [u8; 64] = [0x42; 64];
 const IV: [u8; 12] = [0x24; 12];
 /// A TLS 1.3 record header.
@@ -695,6 +699,7 @@ fn main() {
     agreement_rows(&mut rows);
     signature_rows(&mut rows);
     ml_kem_rows(&mut rows);
+    probe_rows(&mut rows);
 
     let start = Instant::now();
     let times = toyos_parity::measure(&mut rows, &mut || start.elapsed().as_nanos() as u64);
@@ -703,4 +708,391 @@ fn main() {
         println!("{}", RowLine(build, &Summary::of(row.name(), times)));
     }
     println!("{}", EndLine(build, rows.len()));
+}
+
+/// A row of three explicit backends, each running `ops` operations.
+fn probe(name: &str, run: [Box<dyn FnMut(u64)>; 3]) -> Box<dyn Row> {
+    Box::new(Trio { name: name.into(), run })
+}
+
+/// The exploratory probe's rows (never lands): M1 per-temporary erasure
+/// against boundary erasure, M2 kernels, M3 the system's random bytes, M4
+/// X25519 split, M9 RSA split. In an M1 or M2 row ours is the candidate and
+/// A and B are the baseline it is held against.
+fn probe_rows(rows: &mut Vec<Box<dyn Row>>) {
+    use toyos_crypto::{ecc, ed25519, rsa, x25519};
+    use toyos_crypto_wiped as wiped;
+
+    // M1: the same arithmetic, boundary erasure (ours) against per-temporary
+    // erasure (A and B).
+    let mut peer = [9u8; 32];
+    peer[0] = 0x2a;
+    let peer = x25519::PublicKey(peer);
+    let wiped_peer = wiped::x25519::PublicKey(peer.0);
+    assert_eq!(
+        x25519::SecretKey::from_bytes(SEED).agree(&peer).unwrap().as_bytes(),
+        wiped::x25519::SecretKey::from_bytes(SEED).agree(&wiped_peer).unwrap().as_bytes(),
+        "the M1 variants agree"
+    );
+    let wiped_x25519 = move || -> Box<dyn FnMut(u64)> {
+        Box::new(move |ops| {
+            for _ in 0..ops {
+                let key = wiped::x25519::SecretKey::generate(&mut WipedSystem).expect("a key");
+                keep(key.public_key());
+                keep(key.agree(&wiped_peer).expect("the agreement").as_bytes()[0]);
+            }
+        })
+    };
+    rows.push(probe(
+        "m1/x25519/ecdh",
+        [
+            Box::new(move |ops| {
+                for _ in 0..ops {
+                    let key = x25519::SecretKey::generate(&mut System).expect("a key");
+                    keep(key.public_key());
+                    keep(key.agree(&peer).expect("the agreement").as_bytes()[0]);
+                }
+            }),
+            wiped_x25519(),
+            wiped_x25519(),
+        ],
+    ));
+    let signing = ed25519::SigningKey::from_seed(SEED);
+    let public = *signing.public_key().as_bytes();
+    let signed = signing.sign(&MESSAGE).unwrap();
+    let wiped_signing = wiped::ed25519::SigningKey::from_seed(SEED);
+    assert_eq!(wiped_signing.sign(&MESSAGE).unwrap(), signed, "the M1 variants sign alike");
+    let wiped_verify = move || -> Box<dyn FnMut(u64)> {
+        Box::new(move |ops| {
+            for _ in 0..ops {
+                wiped::ed25519::PublicKey::from_bytes(public).unwrap().verify(&MESSAGE, &signed).unwrap();
+            }
+        })
+    };
+    rows.push(probe(
+        "m1/ed25519/verify/64",
+        [
+            Box::new(move |ops| {
+                for _ in 0..ops {
+                    ed25519::PublicKey::from_bytes(public).unwrap().verify(&MESSAGE, &signed).unwrap();
+                }
+            }),
+            wiped_verify(),
+            wiped_verify(),
+        ],
+    ));
+    let wiped_sign = || -> Box<dyn FnMut(u64)> {
+        let key = wiped::ed25519::SigningKey::from_seed(SEED);
+        Box::new(move |ops| {
+            for _ in 0..ops {
+                keep(key.sign(&MESSAGE).unwrap());
+            }
+        })
+    };
+    rows.push(probe(
+        "m1/ed25519/sign/64",
+        [
+            Box::new(move |ops| {
+                for _ in 0..ops {
+                    keep(signing.sign(&MESSAGE).unwrap());
+                }
+            }),
+            wiped_sign(),
+            wiped_sign(),
+        ],
+    ));
+    let p256_peer = ecc::p256::SecretKey::from_bytes([0x11; 32]).unwrap().public_key().as_sec1().to_vec();
+    let wiped_p256 = |peer: Vec<u8>| -> Box<dyn FnMut(u64)> {
+        Box::new(move |ops| {
+            for _ in 0..ops {
+                let key = wiped::ecc::p256::SecretKey::generate(&mut WipedSystem).expect("a key");
+                keep(key.public_key());
+                let peer = wiped::ecc::p256::PublicKey::from_sec1(&peer).expect("the peer");
+                keep(key.agree(&peer).expect("the agreement").as_bytes()[0]);
+            }
+        })
+    };
+    let ours_peer = p256_peer.clone();
+    rows.push(probe(
+        "m1/p-256/ecdh",
+        [
+            Box::new(move |ops| {
+                for _ in 0..ops {
+                    let key = ecc::p256::SecretKey::generate(&mut System).expect("a key");
+                    keep(key.public_key());
+                    let peer = ecc::p256::PublicKey::from_sec1(&ours_peer).expect("the peer");
+                    keep(key.agree(&peer).expect("the agreement").as_bytes()[0]);
+                }
+            }),
+            wiped_p256(p256_peer.clone()),
+            wiped_p256(p256_peer),
+        ],
+    ));
+
+    // M3: the system's random bytes, ours through getrandom and ring's.
+    for len in [32usize, 128] {
+        let ring_fill = move || -> Box<dyn FnMut(u64)> {
+            let rng = rand::SystemRandom::new();
+            Box::new(move |ops| {
+                let mut buffer = vec![0; len];
+                for _ in 0..ops {
+                    rand::SecureRandom::fill(&rng, &mut buffer).expect("random bytes");
+                    keep(buffer[0]);
+                }
+            })
+        };
+        rows.push(probe(
+            &format!("m3/random/{len}"),
+            [
+                Box::new(move |ops| {
+                    let mut buffer = vec![0; len];
+                    for _ in 0..ops {
+                        getrandom::getrandom(&mut buffer).expect("random bytes");
+                        keep(buffer[0]);
+                    }
+                }),
+                ring_fill(),
+                ring_fill(),
+            ],
+        ));
+    }
+
+    // M4: X25519's key generation and agreement apart.
+    let ring_peer = {
+        let key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rand::SystemRandom::new()).unwrap();
+        key.compute_public_key().unwrap().as_ref().to_vec()
+    };
+    let ours_peer = x25519::PublicKey(ring_peer.as_slice().try_into().unwrap());
+    let ring_keygen = || -> Box<dyn FnMut(u64)> {
+        let rng = rand::SystemRandom::new();
+        Box::new(move |ops| {
+            for _ in 0..ops {
+                let key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng).expect("a key");
+                keep(key.compute_public_key().expect("its public key"));
+            }
+        })
+    };
+    rows.push(probe(
+        "m4/x25519/keygen",
+        [
+            Box::new(|ops| {
+                for _ in 0..ops {
+                    keep(x25519::SecretKey::generate(&mut System).expect("a key").public_key());
+                }
+            }),
+            ring_keygen(),
+            ring_keygen(),
+        ],
+    ));
+    let ring_agree = |peer: Vec<u8>| -> Box<dyn FnMut(u64)> {
+        let rng = rand::SystemRandom::new();
+        Box::new(move |ops| {
+            for _ in 0..ops {
+                let key = agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng).expect("a key");
+                let peer = agreement::UnparsedPublicKey::new(&agreement::X25519, &peer);
+                agreement::agree_ephemeral(key, &peer, |secret| black_box(secret[0])).expect("the agreement");
+            }
+        })
+    };
+    rows.push(probe(
+        "m4/x25519/agree",
+        [
+            Box::new(move |ops| {
+                for _ in 0..ops {
+                    let key = x25519::SecretKey::generate(&mut System).expect("a key");
+                    keep(key.agree(&ours_peer).expect("the agreement").as_bytes()[0]);
+                }
+            }),
+            ring_agree(ring_peer.clone()),
+            ring_agree(ring_peer),
+        ],
+    ));
+
+    // M9: RSA-2048 key construction and exponentiation apart; ring's row is
+    // whole.
+    {
+        let pair = signature::RsaKeyPair::from_pkcs8(include_bytes!("../../../../../lib/crypto/tests/keys/rsa-2048.pk8"))
+            .expect("the key");
+        let public: signature::RsaPublicKeyComponents<Vec<u8>> = pair.public().into();
+        let mut sig = vec![0; pair.public().modulus_len()];
+        pair.sign(&signature::RSA_PKCS1_SHA256, &rand::SystemRandom::new(), &MESSAGE, &mut sig).expect("sign");
+        let ring_whole = |n: Vec<u8>, e: Vec<u8>, sig: Vec<u8>| -> Box<dyn FnMut(u64)> {
+            Box::new(move |ops| {
+                for _ in 0..ops {
+                    let key = signature::RsaPublicKeyComponents { n: &n, e: &e };
+                    key.verify(&signature::RSA_PKCS1_2048_8192_SHA256, &MESSAGE, &sig).expect("verify");
+                }
+            })
+        };
+        let (n, e) = (public.n.clone(), public.e.clone());
+        rows.push(probe(
+            "m9/rsa-2048/key",
+            [
+                Box::new(move |ops| {
+                    for _ in 0..ops {
+                        keep(rsa::PublicKey::from_components(&n, &e).expect("the key"));
+                    }
+                }),
+                ring_whole(public.n.clone(), public.e.clone(), sig.clone()),
+                ring_whole(public.n.clone(), public.e.clone(), sig.clone()),
+            ],
+        ));
+        let key = rsa::PublicKey::from_components(&public.n, &public.e).expect("the key");
+        let signed = sig.clone();
+        rows.push(probe(
+            "m9/rsa-2048/exp",
+            [
+                Box::new(move |ops| {
+                    for _ in 0..ops {
+                        key.verify_pkcs1_v1_5(rsa::Hash::Sha256, &MESSAGE, &signed).expect("verify");
+                    }
+                }),
+                ring_whole(public.n.clone(), public.e.clone(), sig.clone()),
+                ring_whole(public.n.clone(), public.e.clone(), sig),
+            ],
+        ));
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    m2_rows(rows);
+}
+
+struct WipedSystem;
+
+impl toyos_crypto_wiped::Random for WipedSystem {
+    fn fill(&mut self, destination: &mut [u8]) -> Result<(), toyos_crypto_wiped::Error> {
+        getrandom::getrandom(destination).map_err(|_| toyos_crypto_wiped::Error::Entropy)
+    }
+}
+
+/// M2: each multiplication kernel as u128, as mulx with addcarry intrinsics,
+/// and as asm! with adcx/adox carry chains. Each kernel is first checked
+/// against the u128 one on pseudorandom inputs.
+#[cfg(target_arch = "x86_64")]
+fn m2_rows(rows: &mut Vec<Box<dyn Row>>) {
+    if !(std::is_x86_feature_detected!("bmi2") && std::is_x86_feature_detected!("adx")) {
+        println!("probe: no BMI2 and ADX; M2 rows skipped");
+        return;
+    }
+    let mut seed = 0x0123_4567_89ab_cdefu64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    // 2^255 - 19 results lie in [0, 2^256); compare them modulo p.
+    let canonical = |x: [u64; 4]| {
+        let p = [0xffff_ffff_ffff_ffedu64, u64::MAX, u64::MAX, 0x7fff_ffff_ffff_ffff];
+        let mut x = x;
+        for _ in 0..2 {
+            let mut d = [0u64; 4];
+            let mut borrow = false;
+            for i in 0..4 {
+                let (v, b1) = x[i].overflowing_sub(p[i]);
+                let (v, b2) = v.overflowing_sub(u64::from(borrow));
+                d[i] = v;
+                borrow = b1 | b2;
+            }
+            if !borrow {
+                x = d;
+            }
+        }
+        x
+    };
+    let below_p256 = |mut x: [u64; 4]| {
+        x[3] %= 0xffff_ffff_0000_0001;
+        x
+    };
+    // A disagreeing kernel is reported and its rows skipped, so the boot's
+    // table survives it.
+    let mut wrong: Vec<&'static str> = Vec::new();
+    fn agree<T: PartialEq>(wrong: &mut Vec<&'static str>, got: T, want: T, name: &'static str) {
+        if got != want && !wrong.contains(&name) {
+            wrong.push(name);
+        }
+    }
+    for _ in 0..10_000 {
+        let a = [next(), next(), next(), next()];
+        let b = [next(), next(), next(), next()];
+        let want = canonical(kernels::f25519_mul_u128(&a, &b));
+        agree(&mut wrong, canonical(unsafe { kernels::f25519_mul_mulx(&a, &b) }), want, "25519 mulx");
+        agree(&mut wrong, canonical(unsafe { kernels::f25519_mul_asm(&a, &b) }), want, "25519 asm");
+        let (a, b) = (below_p256(a), below_p256(b));
+        let want = kernels::p256_mul_u128(&a, &b);
+        agree(&mut wrong, unsafe { kernels::p256_mul_mulx(&a, &b) }, want, "P-256 mulx");
+        agree(&mut wrong, unsafe { kernels::p256_mul_asm(&a, &b) }, want, "P-256 asm");
+    }
+    let mut m = [0u64; kernels::W];
+    for word in &mut m {
+        *word = next();
+    }
+    m[0] |= 1;
+    m[kernels::W - 1] |= 1 << 63;
+    let mut inverse = 1u64;
+    for _ in 0..6 {
+        inverse = inverse.wrapping_mul(2u64.wrapping_sub(m[0].wrapping_mul(inverse)));
+    }
+    let n0 = inverse.wrapping_neg();
+    let y4 = [next(), next(), next(), next() >> 1];
+    let x4 = [next(), next(), next(), next() >> 1];
+    let mut residue = || {
+        let mut x = [0u64; kernels::W];
+        for word in &mut x {
+            *word = next();
+        }
+        x[kernels::W - 1] >>= 1;
+        x
+    };
+    for _ in 0..1000 {
+        let (a, b) = (residue(), residue());
+        let want = kernels::mont_u128(&a, &b, &m, n0);
+        agree(&mut wrong, unsafe { kernels::mont_mulx(&a, &b, &m, n0) }, want, "2048-bit mulx");
+        agree(&mut wrong, unsafe { kernels::mont_asm(&a, &b, &m, n0) }, want, "2048-bit asm");
+    }
+    if !wrong.is_empty() {
+        println!("probe: M2 kernels disagree with their u128 form: {wrong:?}; M2 rows skipped");
+        return;
+    }
+    println!("probe: every M2 kernel agrees with its u128 form");
+    macro_rules! chain_row {
+        ($name:expr, $ours:path, $base:path) => {
+            rows.push(probe(
+                $name,
+                [
+                    Box::new(move |ops| {
+                        let mut x = x4;
+                        unsafe { $ours(ops, &mut x, &y4) };
+                        keep(x[0]);
+                    }),
+                    Box::new(move |ops| {
+                        let mut x = x4;
+                        #[allow(unused_unsafe)]
+                        unsafe { $base(ops, &mut x, &y4) };
+                        keep(x[0]);
+                    }),
+                    Box::new(move |ops| {
+                        let mut x = x4;
+                        #[allow(unused_unsafe)]
+                        unsafe { $base(ops, &mut x, &y4) };
+                        keep(x[0]);
+                    }),
+                ],
+            ))
+        };
+    }
+    chain_row!("m2/f25519-mul/mulx-over-u128", kernels::f25519_chain_mulx, kernels::f25519_chain_u128);
+    chain_row!("m2/f25519-mul/asm-over-mulx", kernels::f25519_chain_asm, kernels::f25519_chain_mulx);
+    chain_row!("m2/p256-mul/mulx-over-u128", kernels::p256_chain_mulx, kernels::p256_chain_u128);
+    chain_row!("m2/p256-mul/asm-over-mulx", kernels::p256_chain_asm, kernels::p256_chain_mulx);
+    let (x, y) = (residue(), residue());
+    let mont = |variant: u8| -> Box<dyn FnMut(u64)> {
+        Box::new(move |ops| {
+            let mut v = x;
+            kernels::mont_chain(variant, ops, &mut v, &y, &m, n0);
+            keep(v[0]);
+        })
+    };
+    rows.push(probe("m2/mont-2048/mulx-over-u128", [mont(1), mont(0), mont(0)]));
+    rows.push(probe("m2/mont-2048/asm-over-mulx", [mont(2), mont(1), mont(1)]));
 }
