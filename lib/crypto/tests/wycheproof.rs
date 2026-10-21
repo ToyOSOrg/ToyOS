@@ -2,8 +2,10 @@
 //! `NOTICE`). Each case is judged against the file's result, or counted
 //! outside the interface and refused: by an error where the interface can be
 //! handed the input, by its types where it cannot. The other files are other
-//! interfaces: other algorithms, curves, hashes or key sizes, ASN.1, PEM, JWK
-//! and P1363 encodings, and expanded ML-KEM decapsulation keys.
+//! interfaces: other algorithms, curves and hashes, RSA moduli past 4096
+//! bits, ASN.1, PEM, JWK and P1363 encodings, and expanded and semi-expanded
+//! ML-KEM decapsulation keys. A primitive with no instruction path is the
+//! same code in every form, so its files run in the `portable` form alone.
 
 mod support;
 
@@ -155,6 +157,7 @@ fn aes_gmac() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn x25519() {
     use toyos_crypto::x25519::{PublicKey, SecretKey};
     let file = "x25519_test.json";
@@ -176,6 +179,7 @@ fn x25519() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn ed25519() {
     let file = "ed25519_test.json";
     let (cases, declared) = load(file);
@@ -189,6 +193,7 @@ fn ed25519() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn ecdsa_der() {
     for file in [
         "ecdsa_secp256r1_sha256_test.json",
@@ -218,6 +223,7 @@ fn ecdsa_der() {
 }
 
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn ecdh_sec1() {
     use toyos_crypto::ecc::{p256, p384};
     for (file, width) in [("ecdh_secp256r1_ecpoint_test.json", 32), ("ecdh_secp384r1_ecpoint_test.json", 48)] {
@@ -252,18 +258,14 @@ fn ecdh_sec1() {
     }
 }
 
-/// The group's key, or the case counted outside where its size is.
-fn rsa_key(g: &Value, tally: &mut Tally, id: &str) -> Option<toyos_crypto::rsa::PublicKey> {
+/// The group's key: every file here is of a size the crate takes.
+fn rsa_key(g: &Value) -> toyos_crypto::rsa::PublicKey {
     let modulus = minimal(&h(&g["publicKey"], "modulus"));
-    let key = toyos_crypto::rsa::PublicKey::from_components(&modulus, &h(&g["publicKey"], "publicExponent"));
-    if key.is_err() {
-        assert!(!(2048..=4096).contains(&g["keySize"].as_u64().unwrap()), "{id}: the key refused");
-        tally.outside("modulus outside 2048 to 4096 bits");
-    }
-    key.ok()
+    toyos_crypto::rsa::PublicKey::from_components(&modulus, &h(&g["publicKey"], "publicExponent")).unwrap()
 }
 
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn rsa_pkcs1() {
     use toyos_crypto::rsa::Hash;
     for file in [
@@ -276,14 +278,11 @@ fn rsa_pkcs1() {
         "rsa_signature_4096_sha256_test.json",
         "rsa_signature_4096_sha384_test.json",
         "rsa_signature_4096_sha512_test.json",
-        "rsa_signature_8192_sha256_test.json",
-        "rsa_signature_8192_sha384_test.json",
-        "rsa_signature_8192_sha512_test.json",
     ] {
         let (cases, declared) = load(file);
         let mut tally = Tally::default();
         for (g, t) in &cases {
-            let Some(key) = rsa_key(g, &mut tally, &case(file, t)) else { continue };
+            let key = rsa_key(g);
             let hash = match g["sha"].as_str().unwrap() {
                 "SHA-256" => Hash::Sha256,
                 "SHA-384" => Hash::Sha384,
@@ -301,6 +300,7 @@ fn rsa_pkcs1() {
 /// and a salt one digest long. A signature valid under another salt or mask
 /// hash is refused; another message hash cannot be named.
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn rsa_pss() {
     use toyos_crypto::rsa::Hash;
     for file in [
@@ -327,7 +327,7 @@ fn rsa_pss() {
                     continue;
                 }
             };
-            let Some(key) = rsa_key(g, &mut tally, &case(file, t)) else { continue };
+            let key = rsa_key(g);
             let accepted = key.verify_pss(hash, &h(t, "msg"), &h(t, "sig")).is_ok();
             let tls = g["mgf"] == "MGF1" && g["mgfSha"] == g["sha"] && g["sLen"].as_u64() == Some(length);
             // A valid signature under the file's other parameters is refused.
@@ -451,6 +451,7 @@ fn wpa2_hmac_sha1_pbkdf2_and_key_unwrap() {
 /// FIPS 203 ML-KEM-768 by seed: the crate's decapsulation key is made only
 /// from `d || z`, so an expanded or semi-expanded key cannot be handed to it.
 #[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
 fn mlkem768() {
     use toyos_crypto::mlkem::{DecapsulationKey, EncapsulationKey};
     let generate = |seed: Vec<u8>| DecapsulationKey::generate(&mut Given::new(seed)).unwrap();
@@ -493,14 +494,6 @@ fn mlkem768() {
             Err(e) => assert_eq!(*e, Error::Length, "{}", case(file, t)),
         }
         tally.judged(result(t), shared.is_ok(), case(file, t));
-    }
-    tally.report(file, Some(declared));
-
-    let file = "mlkem_768_semi_expanded_decaps_test.json";
-    let (cases, declared) = load(file);
-    let mut tally = Tally::default();
-    for _ in &cases {
-        tally.outside("semi-expanded decapsulation key");
     }
     tally.report(file, Some(declared));
 }

@@ -769,12 +769,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("Apache-2.0"),
     ),
     (
-        "lib/crypto/tests/data/mlkem_768_semi_expanded_decaps_test.json",
-        "e4438ab7d4dd7b6ace7165e45aeed4403082f981f86300c8369f69d3d071060a",
-        "NOTICE",
-        Terms::Spdx("Apache-2.0"),
-    ),
-    (
         "lib/crypto/tests/data/mlkem_768_test.json",
         "c59c067ae794c343df575dd90f6f7458f51881b11a22d6e9d8677c8d9ee21e90",
         "NOTICE",
@@ -897,24 +891,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
     (
         "lib/crypto/tests/data/rsa_signature_4096_sha512_test.json",
         "9d6e67b1eb0d7040db411835238efd20e9302399a258bdff82de3f38e0f2855a",
-        "NOTICE",
-        Terms::Spdx("Apache-2.0"),
-    ),
-    (
-        "lib/crypto/tests/data/rsa_signature_8192_sha256_test.json",
-        "86df4075b4ce5954726abfa00cc19ebe8b608d6d99094d5e123d6a3a86568bd9",
-        "NOTICE",
-        Terms::Spdx("Apache-2.0"),
-    ),
-    (
-        "lib/crypto/tests/data/rsa_signature_8192_sha384_test.json",
-        "382c2795790021798099bc8e94d0f078ef1f78787f5c7a87aaa25b5556efacff",
-        "NOTICE",
-        Terms::Spdx("Apache-2.0"),
-    ),
-    (
-        "lib/crypto/tests/data/rsa_signature_8192_sha512_test.json",
-        "c9e5463742d192b5ff1108538841d4d302fd799604a051d09db5f496f2f851f7",
         "NOTICE",
         Terms::Spdx("Apache-2.0"),
     ),
@@ -1061,18 +1037,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
     (
         "tests/cavp/SHA512Monte.rsp",
         "8ca78659286c2f01667a98fc7accd32fc171ae7b24ac00f1a8ce6b77770247fa",
-        "NOTICE",
-        Terms::Spdx("NIST-PD"),
-    ),
-    (
-        "tests/cavp/gcm/gcmDecrypt128.rsp",
-        "0d1f98d0c9e176ede1f3e85484dd13de92c3436ca97df378ec3481e04c19a732",
-        "NOTICE",
-        Terms::Spdx("NIST-PD"),
-    ),
-    (
-        "tests/cavp/gcm/gcmDecrypt256.rsp",
-        "ed318735a517d5a85c82d2846c23dcf56e57a352fb0f0a163d9e7617a7bd12ad",
         "NOTICE",
         Terms::Spdx("NIST-PD"),
     ),

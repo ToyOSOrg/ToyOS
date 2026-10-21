@@ -441,7 +441,6 @@ lib/crypto/tests/data/*_test.json — Wycheproof test vectors, Apache-2.0
     hmac_sha512_test.json                      sha256 b6c90477bdb4a6fc8ee3d1f7b2c0b69a8dfffab34718abaa6cabd71cc2ba1207
     mlkem_768_encaps_test.json                 sha256 9d4381f94c40853bba430245b94968b7390d9175aacd9f1ae4e250a71c78b713
     mlkem_768_keygen_seed_test.json            sha256 fde5abe284396f4cb3c4610b90d680f0b57782e94c3365c97aee59e24881ebe4
-    mlkem_768_semi_expanded_decaps_test.json   sha256 e4438ab7d4dd7b6ace7165e45aeed4403082f981f86300c8369f69d3d071060a
     mlkem_768_test.json                        sha256 c59c067ae794c343df575dd90f6f7458f51881b11a22d6e9d8677c8d9ee21e90
     pbkdf2_hmacsha1_test.json                  sha256 5ef5307e119bd118da50ad276426ed3baade2d093e93b643a1d70be0bf0b861a
     rsa_pss_2048_sha256_mgf1_0_test.json       sha256 b22a8d9a2e7e47f681d0ff1d1a55455daaf325d989c64ad005f848bd50b9b4c0
@@ -463,9 +462,6 @@ lib/crypto/tests/data/*_test.json — Wycheproof test vectors, Apache-2.0
     rsa_signature_4096_sha256_test.json        sha256 957aca128e30bd02c8982f8ca482d6521d16683f4bbc3f193cdfd4c8f04bc667
     rsa_signature_4096_sha384_test.json        sha256 bc26f16b9fc9a90628864d3d1111ef48a4bd00b9d4870bfab88ff326e309e073
     rsa_signature_4096_sha512_test.json        sha256 9d6e67b1eb0d7040db411835238efd20e9302399a258bdff82de3f38e0f2855a
-    rsa_signature_8192_sha256_test.json        sha256 86df4075b4ce5954726abfa00cc19ebe8b608d6d99094d5e123d6a3a86568bd9
-    rsa_signature_8192_sha384_test.json        sha256 382c2795790021798099bc8e94d0f078ef1f78787f5c7a87aaa25b5556efacff
-    rsa_signature_8192_sha512_test.json        sha256 c9e5463742d192b5ff1108538841d4d302fd799604a051d09db5f496f2f851f7
     x25519_test.json                           sha256 35c3f5231cf25cc640b524d403461deee9e49441d5d915a3a25b2c8ff5adbe7d
     Upstream: https://github.com/C2SP/wycheproof, `testvectors_v1/` at
     commit 7a325932231bd7a724c791c8b0d65ea4d6d2f435, byte for byte
@@ -638,22 +634,18 @@ tests/cavp/gcm/ — NIST's AES-GCM test vectors, CAVP GCMVS
       sha256 30156236f768b0d81e58a3e5bd3bd79ce294cf9ef0ba0a84cf7b869c89ebd9fd
     gcmEncryptExtIV256.rsp  3,182,939 bytes
       sha256 4448b4998c3f58cd9f5542ddf7c573189a721ff3d3ac24cd5177bb4910a787f8
-    gcmDecrypt128.rsp       2,748,606 bytes
-      sha256 0d1f98d0c9e176ede1f3e85484dd13de92c3436ca97df378ec3481e04c19a732
-    gcmDecrypt256.rsp       3,001,776 bytes
-      sha256 ed318735a517d5a85c82d2846c23dcf56e57a352fb0f0a163d9e7617a7bd12ad
     Upstream: https://csrc.nist.gov/CSRC/media/Projects/Cryptographic-Algorithm-Validation-Program/documents/mac/
     gcmtestvectors.zip (sha256
     f9fc479e134cde2980b3bb7cddbcb567b2cd96fd753835243ed067699f26a023), each
     file byte for byte
     SPDX-License-Identifier: NIST-PD
 
-The response files of the Galois/Counter Mode Validation System (SP 800-38D):
-keys, IVs, plaintexts, AAD, ciphertexts and tags, and the decryptions that must
-fail. `toyos-crypto`'s tests hold its AES-GCM to them (`lib/crypto/tests/nist.rs`).
+The encryption response files of the Galois/Counter Mode Validation System
+(SP 800-38D): keys, IVs, plaintexts, AAD, ciphertexts and tags. `toyos-crypto`'s tests hold its AES-GCM to them (`lib/crypto/tests/nist.rs`).
 A work of the United States government, not under copyright in the United States
-(17 U.S.C. §105). Test input only. Of the archive, AES-128's and AES-256's files,
-the key sizes the crate has.
+(17 U.S.C. §105). Test input only. Of the archive, AES-128's and AES-256's
+encryption files: the key sizes the crate has, and refusals Wycheproof and the
+differential already hold.
 
 
 tests/cavp/ecdsa/ — NIST's ECDSA test vectors, CAVP ECDSA2VS
