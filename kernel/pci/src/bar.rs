@@ -19,12 +19,7 @@
 //! these bits are the device's, and a field that says "this is not memory" is
 //! not a field to decode past.
 //!
-//! **Why this is a decode and not a `toyos_untrusted::Untrusted`.** That type
-//! is for a number used as an *index* or a *length*, where the fix is a
-//! comparison with a bound. Nothing here is indexed and nothing is sized: the
-//! defect was reading the register as the wrong *kind* of thing, and the fix is
-//! a type that has no address in it until the encoding said there was one.
-//! [`Width`] is that type — a caller cannot reach an address without having
+//! [`Width`] is the decode — a caller cannot reach an address without having
 //! been handed a [`Memory`], and it cannot be handed one for an I/O BAR.
 //!
 //! **What this does not bound is the address.** A BAR that says memory names a

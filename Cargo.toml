@@ -71,7 +71,6 @@ members = [
     "lib/tmpdir",
     "lib/trace",
     "lib/tsc",
-    "lib/untrusted",
     "lib/update",
     "lib/userbound",
     "lib/vdagent",

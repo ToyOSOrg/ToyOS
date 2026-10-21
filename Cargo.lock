@@ -1981,7 +1981,6 @@ dependencies = [
  "toyos-symbols",
  "toyos-tco",
  "toyos-tsc",
- "toyos-untrusted",
  "toyos-usbhid",
  "toyos-userbound",
  "toyos-wallclock",
@@ -4857,19 +4856,11 @@ version = "0.1.0"
 dependencies = [
  "loom",
  "rustc-std-workspace-core",
- "toyos-untrusted",
 ]
 
 [[package]]
 name = "toyos-tsc"
 version = "0.1.0"
-
-[[package]]
-name = "toyos-untrusted"
-version = "0.1.0"
-dependencies = [
- "rustc-std-workspace-core",
-]
 
 [[package]]
 name = "toyos-update"
@@ -4901,9 +4892,6 @@ dependencies = [
 [[package]]
 name = "toyos-vdagent"
 version = "0.1.0"
-dependencies = [
- "toyos-untrusted",
-]
 
 [[package]]
 name = "toyos-vdagent-bridge"
@@ -4917,7 +4905,6 @@ name = "toyos-virtio"
 version = "0.1.0"
 dependencies = [
  "toyos-device-memory",
- "toyos-untrusted",
 ]
 
 [[package]]

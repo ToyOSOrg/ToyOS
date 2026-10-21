@@ -29,7 +29,7 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::{clamp, word, Span, Untrusted, Violation, Word, PUBLISH};
+use crate::{clamp, word, Span, Violation, Word, PUBLISH};
 
 /// A sleeper's exchange: what the waker published before clearing the want is
 /// seen by the look that follows.
@@ -113,8 +113,8 @@ impl<const C: u32, const N: usize> Place<C, N> {
     /// How far the peer's `claimed` position is from this end's, by `apart`:
     /// at most the ring. A word past the lap names no position, so it is
     /// farther than any ring.
-    fn reach(claimed: Untrusted<u32>, apart: impl FnOnce(u32) -> u32, broken: Violation) -> Result<u32, Violation> {
-        clamp(claimed.map(|at| if at < Self::LAP { apart(at) } else { u32::MAX }), C, broken)
+    fn reach(claimed: u32, apart: impl FnOnce(u32) -> u32, broken: Violation) -> Result<u32, Violation> {
+        clamp(if claimed < Self::LAP { apart(claimed) } else { u32::MAX }, C, broken)
     }
 
     /// The region's bytes `len` on from position `at`, in ring order: the
@@ -148,7 +148,7 @@ impl<const C: u32, const N: usize> Producer<C, N> {
     /// How many bytes past the tail may be written, the consumer's head read
     /// again.
     pub fn room<W: Word>(&mut self, page: &[W; N]) -> Result<u32, Violation> {
-        let head = Untrusted::new(word(page, self.place.head).load(TAKE_BACK));
+        let head = word(page, self.place.head).load(TAKE_BACK);
         let published = self.published;
         let unreleased =
             Place::<C, N>::reach(head, |head| Place::<C, N>::distance(head, published), Violation::HeadPastTail)?;
@@ -198,7 +198,7 @@ impl<const C: u32, const N: usize> Producer<C, N> {
     /// `ended`. With neither, nothing is exchanged and the want waits for the
     /// next publish.
     pub fn ring_back<W: Word>(&self, page: &[W; N], ended: bool) -> Result<bool, Violation> {
-        let head = Untrusted::new(word(page, self.place.head).load(TAKE_BACK));
+        let head = word(page, self.place.head).load(TAKE_BACK);
         let published = self.published;
         let held =
             Place::<C, N>::reach(head, |head| Place::<C, N>::distance(head, published), Violation::HeadPastTail)?;
@@ -227,7 +227,7 @@ impl<const C: u32, const N: usize> Consumer<C, N> {
     /// How many bytes past the head are published, the producer's tail read
     /// again.
     pub fn ready<W: Word>(&mut self, page: &[W; N]) -> Result<u32, Violation> {
-        let tail = Untrusted::new(word(page, self.place.tail).load(Ordering::Acquire));
+        let tail = word(page, self.place.tail).load(Ordering::Acquire);
         let released = self.released;
         let published =
             Place::<C, N>::reach(tail, |tail| Place::<C, N>::distance(released, tail), Violation::TailPastDepth)?;
@@ -276,7 +276,7 @@ impl<const C: u32, const N: usize> Consumer<C, N> {
     /// or `fatal`. With neither, nothing is exchanged and the want waits for
     /// the next release.
     pub fn ring_back<W: Word>(&self, page: &[W; N], fatal: bool) -> Result<bool, Violation> {
-        let tail = Untrusted::new(word(page, self.place.tail).load(Ordering::Acquire));
+        let tail = word(page, self.place.tail).load(Ordering::Acquire);
         let released = self.released;
         let unreleased =
             Place::<C, N>::reach(tail, |tail| Place::<C, N>::distance(released, tail), Violation::TailPastDepth)?;

@@ -40,7 +40,10 @@ adds to `PUBLISHED` is not on crates.io.
 Owner: the owner's crates.io account for the first versions; `build/sdkversion.rs`
 for the rule.
 
-**Exit**: `toyos-untrusted` and `toyos-transport` are on crates.io, each naming
-`publish.yml` its trusted publisher; a `publish` run at main's tip and the next
+`toyos-untrusted` has since been removed from the tree and from `PUBLISHED`,
+so `toyos-transport` is the one crate still owed.
+
+**Exit**: `toyos-transport` is on crates.io, naming `publish.yml` its trusted
+publisher; a `publish` run at main's tip and the next
 nightly's `release` are green; and `PUBLISHED`'s doc comment says a crate joins
 it only once crates.io holds it under that publisher.

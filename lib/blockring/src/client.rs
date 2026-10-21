@@ -36,7 +36,7 @@
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
-use toyos_transport::{Inflight, Run, Untrusted, Violation};
+use toyos_transport::{Inflight, Run, Violation};
 
 use crate::entry::{Completion, Op, Request, Status};
 use crate::layout::DEPTH;
@@ -196,7 +196,7 @@ impl<const D: usize> Client<D> {
 
     /// What the server answered.
     pub fn complete(&mut self, completion: Completion) -> Result<(), Violation> {
-        let sent = self.wire.answer(Untrusted::new(completion.tag))?;
+        let sent = self.wire.answer(completion.tag)?;
         let q = sent.queued;
         match (q.kind, completion.status) {
             (Kind::User(ticket), Status::Ok) => {

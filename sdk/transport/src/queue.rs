@@ -8,7 +8,7 @@
 
 use core::sync::atomic::Ordering;
 
-use crate::{clamp, word, Untrusted, Violation, Word, PUBLISH};
+use crate::{clamp, word, Violation, Word, PUBLISH};
 
 /// Where a queue of `E`-word entries, `D` deep, is among `N` words: the word
 /// its consumer stores its head in, the word its producer stores its tail in,
@@ -66,13 +66,13 @@ impl<const E: usize, const D: u32, const N: usize> Place<E, D, N> {
     /// How far past `released` the producer's tail is: at most `D`.
     fn published<W: Word>(&self, page: &[W; N], released: u32) -> Result<u32, Violation> {
         let tail = word(page, self.tail).load(Ordering::Acquire);
-        clamp(Untrusted::new(tail).map(|t| t.wrapping_sub(released)), D, Violation::TailPastDepth)
+        clamp(tail.wrapping_sub(released), D, Violation::TailPastDepth)
     }
 
     /// How far behind `published` the consumer's head is: at most `D`.
     fn unreleased<W: Word>(&self, page: &[W; N], published: u32) -> Result<u32, Violation> {
         let head = word(page, self.head).load(Ordering::Acquire);
-        clamp(Untrusted::new(head).map(|h| published.wrapping_sub(h)), D, Violation::HeadPastTail)
+        clamp(published.wrapping_sub(head), D, Violation::HeadPastTail)
     }
 }
 
@@ -145,8 +145,9 @@ impl<const E: usize, const D: u32, const N: usize> Consumer<E, D, N> {
         Self { place, local: 0, released: 0, ready: 0 }
     }
 
-    /// The next published entry, or `None` for none.
-    pub fn pop<W: Word>(&mut self, page: &[W; N]) -> Result<Option<[Untrusted<u32>; E]>, Violation> {
+    /// The next published entry, or `None` for none. Its words are the peer's,
+    /// for the protocol's decoder to bound before any is believed.
+    pub fn pop<W: Word>(&mut self, page: &[W; N]) -> Result<Option<[u32; E]>, Violation> {
         if self.ready == 0 {
             let published = self.place.published(page, self.released)?;
             self.ready = published.saturating_sub(self.local.wrapping_sub(self.released));
@@ -154,9 +155,9 @@ impl<const E: usize, const D: u32, const N: usize> Consumer<E, D, N> {
                 return Ok(None);
             }
         }
-        let mut words = [Untrusted::new(0); E];
+        let mut words = [0; E];
         for (out, shared) in words.iter_mut().zip(self.place.entry(page, self.local)) {
-            *out = Untrusted::new(shared.load(Ordering::Relaxed));
+            *out = shared.load(Ordering::Relaxed);
         }
         self.local = self.local.wrapping_add(1);
         self.ready = self.ready.wrapping_sub(1);
@@ -189,20 +190,16 @@ mod tests {
         (Producer::new(page, PLACE), Consumer::new(page, PLACE))
     }
 
-    fn plain(words: Option<[Untrusted<u32>; 2]>) -> Option<[u32; 2]> {
-        words.map(|w| w.map(|w| w.at_most(u32::MAX.into()).unwrap() as u32))
-    }
-
     #[test]
     fn an_entry_is_nobodys_before_it_is_published() {
         let page = page();
         let (mut tx, mut rx) = ends(&page);
         assert_eq!(tx.push(&page, [3, 4]), Ok(true));
-        assert_eq!(rx.pop(&page).map(plain), Ok(None));
+        assert_eq!(rx.pop(&page), Ok(None));
         assert!(tx.publish(&page));
         assert!(!tx.publish(&page), "nothing new, nothing published");
-        assert_eq!(rx.pop(&page).map(plain), Ok(Some([3, 4])));
-        assert_eq!(rx.pop(&page).map(plain), Ok(None));
+        assert_eq!(rx.pop(&page), Ok(Some([3, 4])));
+        assert_eq!(rx.pop(&page), Ok(None));
     }
 
     /// The ring wraps many times over, and space is exactly what the consumer
@@ -223,7 +220,7 @@ mod tests {
             }
             tx.publish(&page);
             for _ in 0..1 + round % 7 {
-                let Some(words) = plain(rx.pop(&page).unwrap()) else { break };
+                let Some(words) = rx.pop(&page).unwrap() else { break };
                 assert_eq!(words, [popped, !popped], "entries come out whole, in the order they went in");
                 popped += 1;
             }
