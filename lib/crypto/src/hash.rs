@@ -235,7 +235,6 @@ pub trait Digest: sealed::Sealed + Sized {
     /// The digest into `output`, which must be `OUTPUT_LEN` bytes, then the
     /// hasher reset to its initial state.
     fn finish_into(&mut self, output: &mut [u8]) -> Result<(), crate::Error>;
-    #[cfg(feature = "rustls-provider")]
     fn fork(&self) -> Self;
 }
 
@@ -333,7 +332,6 @@ macro_rules! hash {
         }
         impl sealed::Sealed for $name {}
         impl Digest for $name {
-            #[cfg(feature = "rustls-provider")]
             fn fork(&self) -> Self {
                 Self {
                     state: self.state,
