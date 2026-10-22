@@ -49,6 +49,7 @@
 
 pub mod join;
 pub mod pids;
+pub mod quit;
 pub mod reap;
 pub mod spawn;
 pub mod table;

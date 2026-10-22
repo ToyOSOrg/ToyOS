@@ -175,7 +175,7 @@ pub fn spawn<H>(
     path: &str,
     argv: &[&str],
     commit: impl FnOnce(
-        crate::object::HandleEntry,
+        start::Own,
     ) -> Result<(HandleTable, Endowments, Arc<kernel::sched::job::Job>, H), crate::object::Refusal>,
     cwd: String,
     env: Vec<u8>,
@@ -341,9 +341,10 @@ pub fn spawn<H>(
 
     let pid = admission.pid();
     let object = crate::object::process::ProcessObject::new(pid);
+    let notice = crate::object::notice::NoticeObject::new();
     // The point of no return: every failure above answers the caller with its
     // table untouched.
-    let (handles, endowments, job, held) = commit(start::own_handle(&object))?;
+    let (handles, endowments, job, held) = commit(start::Own::new(&object, &notice))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         cwd,
@@ -400,6 +401,7 @@ pub fn spawn<H>(
             Some(Arc::clone(&image)),
             ThreadEntry::new(thread_data),
             node,
+            notice,
         ));
         let tid = table.get(pid).unwrap().main_tid();
         // Placed while still holding the table lock: kill_process claims teardown
@@ -485,8 +487,8 @@ pub fn spawn_supervisor() -> Pid {
     });
     labels.extend_from_slice(label.as_bytes());
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
-    let commit = |own| {
-        start::endow_self(&mut handles, &mut entries, &mut labels, own);
+    let commit = |own: start::Own| {
+        own.endow(&mut handles, &mut entries, &mut labels);
         Ok((handles, Endowments::new(entries, labels), crate::object::job::new_job(), ()))
     };
     match spawn(SUPERVISOR_PATH, &[SUPERVISOR_PATH], commit, String::from("/"), Vec::new(), None, Parent::Root) {

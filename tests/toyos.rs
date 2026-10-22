@@ -221,6 +221,9 @@ const RUST_SKIP: &[&str] = &[
     // libc's `recv` across a `close` of its descriptor, as its own netstack:
     // `libc_children` runs it on tests/images/libccase.toml.
     "libc_recv_beside_close",
+    // A quit's walk over a tree of its own children: `libc_children` runs it
+    // beside the children libc starts, on tests/images/libccase.toml.
+    "quit_tree",
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",
@@ -535,8 +538,9 @@ const MACHINE_TESTS: &[&str] = &[
     // not. On demand: [`ON_DEMAND`]. Red at the link until item 5 of
     // `issues/toyos-builds-itself.md` lands.
     "hosted_clang_hello",
-    // libc's children: each program starts and waits for its own, which is
-    // order, completion, contents and counts, and no hardware is in it.
+    // libc's children, and a quit's walk over a tree of std children: each
+    // program starts and waits for its own, which is order, completion,
+    // contents and counts, and no hardware is in it.
     "libc_children",
     // A launch's unsent stdio slots: its own boot, because the launcher it
     // needs makes every spawn of a declared program a launch.

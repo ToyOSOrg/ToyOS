@@ -16,9 +16,11 @@ control (7). M4 of `issues/toyos-builds-itself.md` and the exit of
 2026-09-30: "toyos moderness and anti legacy may never be compromised because
 of libc. no legacy"). One mechanism (owner: "i dont want multiple
 mechanisms"): the `Process` handle is the only control, and the kernel grows
-no job object, process group, POSIX session, controlling terminal, signal,
-wait-any, pid-addressed call or thread. What names a child's image and working
-directory is `issues/every-program-sees-only-the-files-it-was-given.md`'s.
+no job-control object, process group, POSIX session, controlling terminal,
+signal, wait-any, pid-addressed call or thread. The scheduler's job (#979,
+`kernel::sched::job`) is the owner CPU time is shared under, and no quit or
+kill reads it. What names a child's image and working directory is
+`issues/every-program-sees-only-the-files-it-was-given.md`'s.
 
 **Ruled** (owner, 2026-09-30):
 
@@ -43,6 +45,8 @@ kept. Further signal behaviour comes when a required program shows a
 concrete need, with its semantics and cost reviewed then. An unsupported
 signal operation never appears to succeed
 (`issues/libc-sigaction-answers-success-and-keeps-nothing.md`).
+
+init is `/system/bin/supervisor`.
 
 ## Stages
 
@@ -144,64 +148,70 @@ signal operation never appears to succeed
    a dropped SSH connection ends its session and all under it. Negative control:
    the stage reverted whole, where the compositor's programs die with it.
    Oracle: systemd-logind, whose session scope ends every process of a login.
-6. **A program is asked to quit**. `SYS_PROCESS_QUIT` (124, never
-   assigned), `(process, reason)`, needs `MANAGE` as the kill does, and the
-   reason is interrupt, hang-up or terminate. A quit reaches the process's
-   subtree. Each process is started holding its notice, a new
-   object kind under the label `quit`, `READABLE` while a reason is asked and
-   not yet read, whose read takes it. A quit kills a process that has never
-   watched its notice or whose notice still holds a reason, whoever asks, in
-   one act no read comes between. A child started under a process whose notice
-   holds a reason starts holding it too, and the quit that put it there asks
-   that child no second time. std's `os::toyos` hands a program its notice; the
-   `ctrlc` fork `rust/Cargo.toml` patches in waits there for the reasons its
-   Unix arm maps; rustc stops skipping its handler on ToyOS
-   (`rust/compiler/rustc_driver_impl/src/lib.rs`, `install_ctrlc_handler`).
-   Stage 5's session, `/system/bin/terminal` and `/system/bin/shell` listen and
-   relay nothing, each ending once what it runs has, `-c` with its status, but
-   an interactive shell does not end on an interrupt.
-   libc takes the three reasons as `SIGINT`, `SIGHUP` and `SIGTERM`, watching
-   the notice once one is handled, ignored or blocked: an ignored reason is
-   dropped and an unhandled one ends the process with exit code 128 plus the
-   signal's number. `kill` with one of the three is a quit with that reason.
-   *Exit*: host — `kernel::proclife`'s interleavings of a notice's read racing a
-   second quit kill only where the read comes second; of a spawn racing a quit
-   on its spawner leave each child holding the reason once or started after the
-   read; of a quit on a process that never watched leave every notice below it
-   unreadable until that process is claimed. Guest — quit, a child watching its
-   notice writes its file and exits 0, and so does its own child, watching too;
-   one that never watched reads killed, and so does a watching child of it, its
-   file unwritten; under `shell -c`, a child that reports its watch armed and
-   holds its interrupt unread until released survives the quit and ends 130,
-   and so does its shell; a desktop session asked to hang up sees a watching
-   child under a terminal's shell write its file; a Rust child's `ctrlc`
-   handler writes its file and exits 0; a C child with LLVM's handlers —
-   restore the default, remove its output, raise — that computes without
-   calling libc, asked with interrupt, ends at once with its output gone and
-   code 130; a C child's `read` of an empty pipe, `SIGINT` handled without
-   `SA_RESTART`, answers `EINTR` on an interrupt; a C child in `pause` whose
-   `SIGHUP` handler reloads returns from it after a hang-up and exits on a
-   terminate; a C child that only ignores `SIGINT` runs on after an interrupt,
-   and so does one spawned ignoring it, while one spawned blocking it, by its
-   caller's mask or `SETSIGMASK`, shows it in `sigpending` and ends with 130 on
-   unblocking it, and one whose `SETSIGDEF` names it reads killed; a quit that
-   arrives while `SIGINT` is blocked and `ppoll` answers a ready descriptor
-   shows in `sigpending`, and the next `ppoll` runs the handler and answers
-   `EINTR`. Negative control: the stage reverted whole, where a parent can only
-   kill. Mutations: the check and the kill in two acts (killed after the read);
-   no rule for a spawn under an unread reason (the child runs unasked), and the
-   quit asking such a child again (it is killed); the walk depositing the
-   reason in each watcher below one that never watched before it claims (a
-   notice below readable); a quit notifying a process that never watched (it
-   runs on); a quit reaching the named process alone (the grandchild runs on);
-   `ctrlc` parked as today (killed); a shell that never listens, and one that
-   relays (the held child reads killed); a terminal that never listens (the
-   desktop child's file unwritten); handlers run only in blocking libc calls
-   (the LLVM child to the hang ceiling); `EINTR` from `poll` alone (`read` and
-   `pause` never return); a quit without its reason (the reload exits);
-   watching only from a handler's install (the ignoring child is killed); a
-   spawn carrying no ignore, no mask or no `SETSIGDEF` (each spawned child in
-   turn). Oracle: POSIX's signal actions (XSH 2.4.3) and `posix_spawn`.
+6. **A program is asked to quit**.
+   - 6.1 **Done** (#995, the kernel's half): `SYS_PROCESS_QUIT` (135: the 124 this
+     stage named went to `SYS_COUNTERS`), `(process, reason)`, needs `MANAGE`
+     as the kill does, and the reason is `toyos_abi::quit::Reason`:
+     interrupt, hang-up or terminate. A quit reaches the process's subtree.
+     Each process is started holding its notice, the object kind `Notice`
+     under `QUIT_LABEL` (`quit`), `READ` and `WAIT` alone, readable while a
+     reason is asked and not yet read, whose read takes it and an empty read
+     takes nothing. A process listens from its first read of its notice or
+     the first readable watch armed on it. A quit kills a process that never
+     listened or whose notice still holds a reason, whoever asks, in one act
+     no read comes between, and asks nothing below it. A child started under a
+     process whose notice holds a reason starts holding it too, and the quit
+     that put it there asks that child no second time (`kernel::proclife::quit`).
+     *Exit*, met: host — `proclife::interleave`'s orderings of a notice's
+     read racing a second quit kill only where the read comes second, of a
+     spawn racing a quit on its place ask each child once, of a quit of a
+     process that never listened ask nothing below it, and of a quit of a
+     listening one reach everything below it, each with its `mutate-quit-*`
+     control; guest, `quit_tree` in `libc_children`'s QEMU x86-64 boot —
+     two generations listening by read and by watch each read the reason and
+     exit 0, one that never listened is killed and its listening child with
+     it unread, a second quit kills a reason left unread, a reader survives
+     three, and a quit without `MANAGE` is refused. Negative control: a
+     readable watch that listens to nothing reds the watch arm. No shipped
+     program sends a quit yet.
+   - 6.2 The rest. What libc owes the landing that first sends a quit is the
+     signals constraint #1001 records. std's `os::toyos` hands a program its
+     notice; the `ctrlc` fork `rust/Cargo.toml` patches in waits there for the
+     reasons its Unix arm maps; rustc stops skipping its handler on ToyOS
+     (`rust/compiler/rustc_driver_impl/src/lib.rs`, `install_ctrlc_handler`).
+     Stage 5's session, `/system/bin/terminal` and `/system/bin/shell` listen
+     and relay nothing, each ending once what it runs has, `-c` with its
+     status, but an interactive shell does not end on an interrupt. libc takes
+     the three reasons as `SIGINT`, `SIGHUP` and `SIGTERM`, watching the notice
+     once one is handled, ignored or blocked: an ignored reason is dropped and
+     an unhandled one ends the process with exit code 128 plus the signal's
+     number. `kill` with one of the three is a quit with that reason. *Exit*,
+     guest: under `shell -c`, a child that reports its watch armed and holds
+     its interrupt unread until released survives the quit and ends 130, and so
+     does its shell; a desktop session asked to hang up sees a watching child
+     under a terminal's shell write its file; a Rust child's `ctrlc` handler
+     writes its file and exits 0; a C child with LLVM's handlers — restore the
+     default, remove its output, raise — that computes without calling libc,
+     asked with interrupt, ends at once with its output gone and code 130; a C
+     child's `read` of an empty pipe, `SIGINT` handled without `SA_RESTART`,
+     answers `EINTR` on an interrupt; a C child in `pause` whose `SIGHUP`
+     handler reloads returns from it after a hang-up and exits on a terminate;
+     a C child that only ignores `SIGINT` runs on after an interrupt, and so
+     does one spawned ignoring it, while one spawned blocking it, by its
+     caller's mask or `SETSIGMASK`, shows it in `sigpending` and ends with 130
+     on unblocking it, and one whose `SETSIGDEF` names it reads killed; a quit
+     that arrives while `SIGINT` is blocked and `ppoll` answers a ready
+     descriptor shows in `sigpending`, and the next `ppoll` runs the handler
+     and answers `EINTR`. Negative control: the stage reverted whole, where a
+     parent can only kill. Mutations: `ctrlc` parked as today (killed); a shell
+     that never listens, and one that relays (the held child reads killed); a
+     terminal that never listens (the desktop child's file unwritten); handlers
+     run only in blocking libc calls (the LLVM child to the hang ceiling);
+     `EINTR` from `poll` alone (`read` and `pause` never return); a quit
+     without its reason (the reload exits); watching only from a handler's
+     install (the ignoring child is killed); a spawn carrying no ignore, no
+     mask or no `SETSIGDEF` (each spawned child in turn). Oracle: POSIX's
+     signal actions (XSH 2.4.3) and `posix_spawn`.
 7. **Job control**. The shell hands its terminal a `MANAGE`-only
    duplicate of each process of the foreground line over its `surface` port. The
    terminal turns each Ctrl+C into their interrupt, and a second kills only a

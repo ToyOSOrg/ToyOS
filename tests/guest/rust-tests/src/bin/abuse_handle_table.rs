@@ -20,15 +20,17 @@
 //! checked before the spawn's endowments move: at the cap the spawn is
 //! refused with every handle it named still the caller's.
 //!
-//! **An endowment vector is one entry and one label short of a table**, which
-//! the kernel's own `self` fills. So a caller's entry labelled `self` is
-//! refused before anything moves, and so is a vector of `MAX_ENDOWMENTS`
-//! entries, while one entry fewer starts.
+//! **An endowment vector is two entries and two labels short of a table**,
+//! which the kernel's own `self` and `quit` fill. So a caller's entry labelled
+//! either is refused before anything moves, and so is a vector of one entry
+//! more than `MAX_SPAWN_ENDOWMENTS`, while that many start.
 //!
 //! **A pipe and a port are two inserts answered as one**: at the cap, and one
 //! slot short of fitting, each is refused with the table as it was.
 
-use toyos_abi::syscall::{self, EndowEntry, MmapFlags, MmapProt, SpawnArgs, SyscallError, MAX_ENDOWMENTS, SELF_LABEL};
+use toyos_abi::syscall::{
+    self, EndowEntry, MmapFlags, MmapProt, SpawnArgs, SyscallError, MAX_SPAWN_ENDOWMENTS, QUIT_LABEL, SELF_LABEL,
+};
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
 
@@ -108,7 +110,7 @@ fn main() {
     assert_eq!(err, SyscallError::InvalidArgument, "wrong error for a repeated endowment");
 
     a_caller_endows_no_self();
-    a_spawn_carries_one_entry_fewer_than_a_table();
+    a_spawn_carries_two_entries_fewer_than_a_table();
 
     let mut filled = Vec::new();
     let mut refused = None;
@@ -199,26 +201,30 @@ fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, Sys
     }
 }
 
-/// An entry labelled `self` would shadow the kernel's in the child's lookup:
-/// refused before anything moves, so the pipe end it named is still this
-/// process's and still carries a byte.
+/// An entry labelled `self` or `quit` would shadow the kernel's in the
+/// child's lookup: refused before anything moves, so the pipe end it named is
+/// still this process's and still carries a byte.
 fn a_caller_endows_no_self() {
-    let ends = syscall::pipe().expect("a pipe for the self arm");
-    let entry = EndowEntry { label_off: 0, label_len: SELF_LABEL.len() as u32, handle: ends.write, _pad: 0 };
-    let err = spawn_endowed(&[entry], SELF_LABEL.as_bytes()).expect_err("an endowment labelled self must be refused");
-    assert_eq!(err, SyscallError::InvalidArgument, "wrong error for an endowment labelled self");
-    assert_eq!(syscall::write(ends.write, b"x"), Ok(1), "the end an endowment labelled self named is gone");
-    let mut byte = [0u8; 1];
-    assert_eq!(syscall::read(ends.read, &mut byte), Ok(1), "the byte did not arrive");
-    syscall::close(ends.read);
-    syscall::close(ends.write);
+    for label in [SELF_LABEL, QUIT_LABEL] {
+        let ends = syscall::pipe().expect("a pipe for the self arm");
+        let entry = EndowEntry { label_off: 0, label_len: label.len() as u32, handle: ends.write, _pad: 0 };
+        let err = spawn_endowed(&[entry], label.as_bytes()).expect_err("an endowment labelled as the kernel's must be refused");
+        assert_eq!(err, SyscallError::InvalidArgument, "wrong error for an endowment labelled {label}");
+        assert_eq!(syscall::write(ends.write, b"x"), Ok(1), "the end an endowment labelled {label} named is gone");
+        let mut byte = [0u8; 1];
+        assert_eq!(syscall::read(ends.read, &mut byte), Ok(1), "the byte did not arrive");
+        syscall::close(ends.read);
+        syscall::close(ends.write);
+    }
 }
 
-/// `MAX_ENDOWMENTS` entries naming distinct `TRANSFER` handles, so the count
-/// is the only refusal: refused, and one fewer starts.
-fn a_spawn_carries_one_entry_fewer_than_a_table() {
-    let mut handles = Vec::with_capacity(MAX_ENDOWMENTS);
-    while handles.len() < MAX_ENDOWMENTS {
+/// One entry more than `MAX_SPAWN_ENDOWMENTS`, each naming a distinct
+/// `TRANSFER` handle, so the count is the only refusal: refused, and one fewer
+/// starts.
+fn a_spawn_carries_two_entries_fewer_than_a_table() {
+    let over = MAX_SPAWN_ENDOWMENTS + 1;
+    let mut handles = Vec::with_capacity(over + 1);
+    while handles.len() < over {
         let ends = syscall::pipe().expect("a pipe for the count arm");
         handles.extend([ends.read, ends.write]);
     }
@@ -234,17 +240,20 @@ fn a_spawn_carries_one_entry_fewer_than_a_table() {
             entry
         })
         .collect();
-    let err = spawn_endowed(&entries, &labels).expect_err("a spawn carrying MAX_ENDOWMENTS entries must be refused");
-    assert_eq!(err, SyscallError::InvalidArgument, "wrong error for MAX_ENDOWMENTS entries");
+    let entries = &entries[..over];
+    let err = spawn_endowed(entries, &labels).expect_err("a spawn carrying an entry past MAX_SPAWN_ENDOWMENTS must be refused");
+    assert_eq!(err, SyscallError::InvalidArgument, "wrong error for {over} entries");
 
-    let fewer = MAX_ENDOWMENTS - 1;
+    let fewer = MAX_SPAWN_ENDOWMENTS;
     let used = entries[fewer].label_off as usize;
     let child = spawn_endowed(&entries[..fewer], &labels[..used])
         .unwrap_or_else(|e| panic!("a spawn carrying {fewer} entries was refused: {e:?}"));
     assert_eq!(syscall::process_wait(child), Ok(End::Exited(0)), "the child carrying {fewer} entries");
     syscall::close(child);
-    syscall::close(handles[fewer]);
-    println!("an endowment labelled self and {MAX_ENDOWMENTS} entries are refused, and {fewer} start");
+    for &handle in &handles[fewer..] {
+        syscall::close(handle);
+    }
+    println!("an endowment labelled self or quit and {over} entries are refused, and {fewer} start");
 }
 
 /// The kernel handle this process's standard output is, descriptor 1's.
