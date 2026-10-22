@@ -17,7 +17,7 @@ mod image;
 
 use toyos_abi::RawHandle;
 use toyos_abi::syscall::{
-    self, MmapFlags, MmapProt, OpenFlags, ProcessStats, SpawnArgs, Stat, SyscallError, SYS_FSTAT,
+    self, VmAt, VmProt, OpenFlags, ProcessStats, SpawnArgs, Stat, SyscallError, SYS_FSTAT,
     SYS_PROCESS_STATS,
 };
 
@@ -58,12 +58,7 @@ fn err(ret: u64) -> Option<SyscallError> {
 
 fn main() {
     let region = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            2 * PAGE as usize,
-            MmapProt::READ | MmapProt::WRITE,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
+        syscall::vm_reserve(2 * PAGE as usize, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
     };
     assert!(!region.is_null(), "mmap failed");
     let base = region as u64;
@@ -128,6 +123,6 @@ fn main() {
     let stats = unsafe { (straddling as *const ProcessStats).read_unaligned() };
     assert!(stats.wall_ns > 0 && stats.pid != 0, "process_stats wrote a snapshot with no wall time or pid in it");
 
-    unsafe { syscall::munmap(region, 2 * PAGE as usize) }.expect("munmap");
+    unsafe { syscall::vm_release(region, 2 * PAGE as usize) }.expect("munmap");
     println!("a typed syscall argument across a page boundary is read and written whole");
 }

@@ -117,8 +117,3 @@ pub unsafe extern "C" fn msync(_addr: *mut u8, _len: usize, _flags: i32) -> i32 
     refuse()
 }
 
-/// A mapping's protection is fixed when it is made.
-#[no_mangle]
-pub unsafe extern "C" fn mprotect(_addr: *mut u8, _len: usize, _prot: i32) -> i32 {
-    refuse()
-}

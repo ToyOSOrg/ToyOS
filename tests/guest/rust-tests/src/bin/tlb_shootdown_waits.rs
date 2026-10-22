@@ -20,7 +20,7 @@
 //! the whole TLB within milliseconds — so what is measured is the property that
 //! closes the window: the free happens after the flush.
 
-use toyos_abi::syscall::{self, MmapFlags, MmapProt, SYS_DEBUG};
+use toyos_abi::syscall::{self, VmAt, VmProt, SYS_DEBUG};
 
 /// Long enough to read off a clock through two syscalls, short enough that a
 /// sweep of them is not a boot's worth of stalled CPU. The delay spins with
@@ -92,12 +92,7 @@ fn timed(f: impl FnOnce()) -> u64 {
 
 fn map(size: usize) -> *mut u8 {
     let p = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            size,
-            MmapProt::READ | MmapProt::WRITE,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
+        syscall::vm_reserve(size, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
     };
     assert!(!p.is_null(), "mmap failed");
     p
@@ -121,7 +116,7 @@ fn main() {
         let region = map(PAGE_2M);
         armed(cpus);
         let elapsed = timed(|| {
-            unsafe { syscall::munmap(region, PAGE_2M) }.expect("munmap");
+            unsafe { syscall::vm_release(region, PAGE_2M) }.expect("munmap");
         });
         if elapsed >= FLOOR_NANOS {
             judged = true;
@@ -145,12 +140,7 @@ fn main() {
     armed(cpus);
     let elapsed = timed(|| {
         let p = unsafe {
-            syscall::mmap(
-                placed,
-                PAGE_2M,
-                MmapProt::READ | MmapProt::WRITE,
-                MmapFlags::ANONYMOUS | MmapFlags::PRIVATE | MmapFlags::FIXED,
-            )
+            syscall::vm_reserve(PAGE_2M, VmProt::ReadWrite, VmAt::Fixed(placed)).unwrap_or(core::ptr::null_mut())
         };
         assert_eq!(p, placed, "MAP_FIXED did not honour the address");
     });
@@ -159,7 +149,7 @@ fn main() {
         "a fixed mmap returned in {elapsed}ns with every other CPU answering {DELAY_NANOS}ns \
          late — it replaced the mapping without waiting for the flush",
     );
-    unsafe { syscall::munmap(placed, PAGE_2M) }.expect("munmap the fixed mapping");
+    unsafe { syscall::vm_release(placed, PAGE_2M) }.expect("munmap the fixed mapping");
 
     disarm();
 

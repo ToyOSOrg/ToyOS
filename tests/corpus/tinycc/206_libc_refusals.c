@@ -83,7 +83,8 @@ int main(void) {
     said("getrlimit", getrlimit(RLIMIT_STACK, &limit));
     said("setrlimit", setrlimit(RLIMIT_CORE, &limit));
     said("msync", msync(page, 4096, MS_SYNC));
-    said("mprotect", mprotect(page, 4096, PROT_READ));
+    said("mprotect executable", mprotect(page, 4096, PROT_READ | PROT_EXEC));
+    said("mprotect off a page", mprotect(page + 1, 4096, PROT_READ));
     said("utimes", utimes(FILE_PATH, NULL));
     int status = 0;
     said("wait", wait(&status));
@@ -179,8 +180,8 @@ int main(void) {
     said("sysconf 12345", sysconf(12345));
 
     /* posix_madvise takes every advice and answers an error number; madvise
-       takes its hints and refuses MADV_DONTNEED's discard, which would have
-       zeroed the page. */
+       takes its hints, and MADV_DONTNEED discards the page, which then reads
+       zeros. */
     page[0] = 'x';
     printf("posix_madvise WILLNEED: %d\n", posix_madvise(page, 4096, POSIX_MADV_WILLNEED));
     printf("posix_madvise 99: %s\n", errno_name(posix_madvise(page, 4096, 99)));
@@ -188,7 +189,7 @@ int main(void) {
     said("madvise DONTNEED", madvise(page, 4096, MADV_DONTNEED));
     said("madvise off a page", madvise(page + 1, 4096, MADV_WILLNEED));
     said("madvise 99", madvise(page, 4096, 99));
-    printf("page after madvise: %c\n", page[0]);
+    printf("page after madvise: %s\n", page[0] == 0 ? "zeros" : "its old bytes");
 
     /* Nothing refused was done: the file has its one byte, its mode through
        its name and its descriptor, and no second name; the page is still

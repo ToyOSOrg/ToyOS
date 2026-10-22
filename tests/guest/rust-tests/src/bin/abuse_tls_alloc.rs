@@ -8,7 +8,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use toyos_abi::syscall::{self, MmapFlags, MmapProt, SyscallError};
+use toyos_abi::syscall::{self, VmAt, VmProt, SyscallError};
 
 const PAGE_2M: usize = 2 * 1024 * 1024;
 
@@ -41,12 +41,7 @@ fn alloc_block_preserving_dtv(module_id: u64) -> Result<u64, SyscallError> {
 
 fn map_2m() -> *mut u8 {
     let p = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            PAGE_2M,
-            MmapProt::READ | MmapProt::WRITE,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
+        syscall::vm_reserve(PAGE_2M, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
     };
     assert!(!p.is_null(), "mmap failed");
     p
@@ -127,7 +122,7 @@ fn main() {
     }
     assert_eq!(unsafe { block.read_volatile() }, MINE, "TLS block at {first:#x} was reissued to another mapping");
     for p in claimed {
-        unsafe { syscall::munmap(p, PAGE_2M) }.expect("munmap");
+        unsafe { syscall::vm_release(p, PAGE_2M) }.expect("munmap");
     }
 
     // 3. A thread's mappings come back when it exits. Each run gets a fresh

@@ -32,7 +32,7 @@
 mod image;
 
 use toyos_abi::syscall::{
-    self, EndowEntry, MmapFlags, MmapProt, SpawnArgs, SyscallError, MAX_SPAWN_ENDOWMENTS, QUIT_LABEL, SELF_LABEL,
+    self, EndowEntry, VmAt, VmProt, SpawnArgs, SyscallError, MAX_SPAWN_ENDOWMENTS, QUIT_LABEL, SELF_LABEL,
 };
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
@@ -68,12 +68,7 @@ fn main() {
     }
     own();
     let region = unsafe {
-        syscall::mmap(
-            core::ptr::null_mut(),
-            REGION,
-            MmapProt::READ | MmapProt::WRITE,
-            MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
-        )
+        syscall::vm_reserve(REGION, VmProt::ReadWrite, VmAt::ANYWHERE).unwrap_or(core::ptr::null_mut())
     };
     assert!(!region.is_null(), "mmap failed");
 
@@ -157,7 +152,7 @@ fn main() {
     let reused = syscall::dup(stdout()).expect("dup must work again after closing handles");
     syscall::close(reused);
 
-    unsafe { syscall::munmap(region, REGION) }.expect("munmap");
+    unsafe { syscall::vm_release(region, REGION) }.expect("munmap");
     println!("handle table capped at {MAX_HANDLES} on every insert path (refused at {n})");
 }
 

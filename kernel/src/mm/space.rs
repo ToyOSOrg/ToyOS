@@ -269,7 +269,7 @@ impl AddressSpace {
         }
         self.room_at(len, at)?;
         let start = self.locate(len, at)?;
-        self.inventory.insert(start, Entry { end: start + len, prot, kind: Kind::Object { object, offset } });
+        self.inventory.insert(start, Entry { end: start + len, prot, kind: Kind::Object { object, offset, max: prot } });
         self.tables.build(start, start + len);
         self.usage.made.fetch_add(1, Relaxed);
         Ok(UserAddr::new(start))
@@ -291,6 +291,91 @@ impl AddressSpace {
         self.usage.taken.fetch_add(1, Relaxed);
         // The objects go here, after every CPU has stopped reaching them.
         drop(removed);
+    }
+
+    /// Give every page of `[start, start + len)` protection `prot`: a reserved
+    /// private page is committed unless `prot` is `None`, and a committed one
+    /// keeps its frame and commitment whatever `prot` is. An object's page
+    /// takes nothing past what it was mapped with. All or nothing: every page
+    /// is held (`BadAddress`) and allowed `prot` (`PermissionDenied`) first.
+    /// Every CPU stops using a present leaf's old protection before this
+    /// returns, a widening included.
+    pub fn protect(&mut self, start: UserAddr, len: u64, prot: Prot) -> Result<(), SyscallError> {
+        let (start, end) = self.held(start, len)?;
+        self.room(start, end, 0)?;
+        let allowed = self.inventory.meeting(start, end).all(|(_, entry)| match entry.kind {
+            Kind::Object { max, .. } => prot.within(max),
+            Kind::Private { .. } => true,
+        });
+        if !allowed {
+            return Err(SyscallError::PermissionDenied);
+        }
+        let mut commits = false;
+        self.inventory.update(start, end, |_, entry| {
+            entry.prot = prot;
+            if let Kind::Private { committed } = &mut entry.kind {
+                if !*committed && prot != Prot::None {
+                    *committed = true;
+                    commits = true;
+                }
+            }
+        });
+        if commits {
+            self.tables.build(start, end);
+        }
+        let leaf = leaf_prot(prot);
+        let mut present = false;
+        self.tables.edit(start, end, |_, old| match (old, leaf) {
+            (Leaf::Mapped(m), Some(p)) if m.prot == p => None,
+            (Leaf::Mapped(m), Some(p)) => {
+                present = true;
+                Some(Leaf::Mapped(Mapping { prot: p, ..m }))
+            }
+            (Leaf::Mapped(m), None) => {
+                present = true;
+                Some(if m.owned { Leaf::Held(m.phys) } else { Leaf::Empty })
+            }
+            (Leaf::Held(phys), Some(p)) => Some(Leaf::Mapped(Mapping { phys, prot: p, owned: true, cache: CachePolicy::Normal })),
+            (Leaf::Held(_), None) | (Leaf::Empty, _) => None,
+        });
+        if present {
+            self.tables.shoot_down(start, end, &Unlinked::none());
+        }
+        Ok(())
+    }
+
+    /// Free every frame behind `[start, start + len)` and keep its ranges as
+    /// they are: a private page reads zeros at its next touch, an object's
+    /// page is mapped again from the object.
+    pub fn discard(&mut self, start: UserAddr, len: u64) -> Result<(), SyscallError> {
+        let (start, end) = self.held(start, len)?;
+        self.clear(start, end);
+        Ok(())
+    }
+
+    /// Free every frame and the commitment of `[start, start + len)`, which
+    /// is all private memory: it is reserved again.
+    pub fn decommit(&mut self, start: UserAddr, len: u64) -> Result<(), SyscallError> {
+        let (start, end) = self.held(start, len)?;
+        self.room(start, end, 0)?;
+        if !self.inventory.meeting(start, end).all(|(_, entry)| matches!(entry.kind, Kind::Private { .. })) {
+            return Err(SyscallError::InvalidArgument);
+        }
+        self.inventory.update(start, end, |_, entry| {
+            entry.prot = Prot::None;
+            entry.kind = Kind::Private { committed: false };
+        });
+        self.clear(start, end);
+        Ok(())
+    }
+
+    /// `[start, start + len)` as pages every one of which a range holds.
+    fn held(&self, start: UserAddr, len: u64) -> Result<(u64, u64), SyscallError> {
+        let end = pages(start.raw(), len).ok_or(SyscallError::InvalidArgument)?;
+        if !self.inventory.holds(start.raw(), end) || !self.inventory.covered(start.raw(), end) {
+            return Err(SyscallError::BadAddress);
+        }
+        Ok((start.raw(), end))
     }
 
     /// [`release`](Self::release) of every page of `[start, start + len)`
@@ -468,7 +553,7 @@ fn page_leaf(start: u64, entry: &Entry<Arc<SharedMemObject>>, page: u64) -> Opti
             };
             Leaf::Mapped(Mapping { phys: frame.into_raw(), prot, owned: true, cache: CachePolicy::Normal })
         }
-        Kind::Object { object, offset } => {
+        Kind::Object { object, offset, .. } => {
             Leaf::Mapped(Mapping { phys: object.page(offset + (page - start)), prot, owned: false, cache: object.cache() })
         }
     })

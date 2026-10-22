@@ -73,8 +73,8 @@ pub enum Kind<O> {
     /// Memory of this space's own, its frames recorded in the leaves that map
     /// them. Uncommitted, it is a reservation: no page of it can be touched.
     Private { committed: bool },
-    /// `object`'s bytes from `offset` on.
-    Object { object: O, offset: u64 },
+    /// `object`'s bytes from `offset` on, never given more than `max` allows.
+    Object { object: O, offset: u64, max: Prot },
 }
 
 #[derive(Clone, Debug)]
@@ -98,7 +98,9 @@ impl<O: Object> Entry<O> {
     fn tail(&self, start: u64, at: u64) -> Self {
         let kind = match &self.kind {
             Kind::Private { committed } => Kind::Private { committed: *committed },
-            Kind::Object { object, offset } => Kind::Object { object: object.clone(), offset: offset + (at - start) },
+            Kind::Object { object, offset, max } => {
+                Kind::Object { object: object.clone(), offset: offset + (at - start), max: *max }
+            }
         };
         Self { end: self.end, prot: self.prot, kind }
     }
@@ -108,8 +110,8 @@ impl<O: Object> Entry<O> {
         self.prot == next.prot
             && match (&self.kind, &next.kind) {
                 (Kind::Private { committed: a }, Kind::Private { committed: b }) => a == b,
-                (Kind::Object { object: a, offset: x }, Kind::Object { object: b, offset: y }) => {
-                    a.same(b) && x + (self.end - start) == *y
+                (Kind::Object { object: a, offset: x, max: m }, Kind::Object { object: b, offset: y, max: n }) => {
+                    a.same(b) && x + (self.end - start) == *y && m == n
                 }
                 _ => false,
             }
@@ -334,7 +336,7 @@ mod tests {
     }
 
     fn object(end: u64, object: u32, offset: u64) -> Entry<Obj> {
-        Entry { end, prot: Prot::ReadWrite, kind: Kind::Object { object: Obj(object), offset } }
+        Entry { end, prot: Prot::ReadWrite, kind: Kind::Object { object: Obj(object), offset, max: Prot::ReadWrite } }
     }
 
     fn starts(v: &Inventory<Obj>) -> Vec<(u64, u64)> {

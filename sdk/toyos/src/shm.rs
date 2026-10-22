@@ -89,7 +89,7 @@ impl SharedMemory {
     }
 
     /// Give up ownership: the handle and its mapping stay, the mapping for
-    /// the caller to take away with `munmap` of [`len`](Self::len) bytes
+    /// the caller to take away with `vm_release` of [`len`](Self::len) bytes
     /// before it closes the handle.
     pub fn into_raw(self) -> (RawHandle, *mut u8) {
         let this = core::mem::ManuallyDrop::new(self);
@@ -127,7 +127,7 @@ impl Drop for SharedMemory {
     fn drop(&mut self) {
         // SAFETY: the mapping `map` made, which nothing reaches once this drops;
         // the handle closes after it.
-        let _ = unsafe { syscall::munmap(self.ptr, self.mapped) };
+        let _ = unsafe { syscall::vm_release(self.ptr, self.mapped) };
     }
 }
 

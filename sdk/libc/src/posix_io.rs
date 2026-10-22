@@ -850,44 +850,68 @@ pub struct Stat {
 
 const NANOS_PER_SEC: u64 = 1_000_000_000;
 
-// mmap/munmap (real implementations using toyos-abi)
+// mmap, munmap, mprotect, madvise: the process's own private memory.
+
+const MAP_FAILED: *mut u8 = usize::MAX as *mut u8;
+
+/// The protection `prot` names, or the errno it is refused with.
+fn vm_prot(prot: i32) -> Result<syscall::VmProt, i32> {
+    use crate::memreq::Access;
+    match crate::memreq::access(prot) {
+        None => Err(EINVAL),
+        // POSIX's ENOTSUP, which is EOPNOTSUPP here.
+        Some(Access::Exec) => Err(crate::errcode::EOPNOTSUPP),
+        Some(Access::None) => Ok(syscall::VmProt::None),
+        Some(Access::Read) => Ok(syscall::VmProt::Read),
+        Some(Access::ReadWrite) => Ok(syscall::VmProt::ReadWrite),
+    }
+}
+
+/// POSIX's errno for a refusal of the pages of a range: `ENOMEM` for pages
+/// the process does not hold, `EACCES` for a protection a shared mapping was
+/// not made with.
+fn range_errno(e: syscall::SyscallError) -> i32 {
+    match e {
+        syscall::SyscallError::PermissionDenied => crate::errcode::EACCES,
+        syscall::SyscallError::InvalidArgument => EINVAL,
+        _ => crate::errcode::ENOMEM,
+    }
+}
 
 #[no_mangle]
 pub unsafe extern "C" fn mmap(
     addr: *mut u8, len: usize, prot: i32, flags: i32, _fd: i32, _offset: i64,
 ) -> *mut u8 {
     use crate::memreq::{self, MapRefusal};
-    use toyos_abi::syscall::{MmapProt, MmapFlags};
 
-    const MAP_FAILED: *mut u8 = usize::MAX as *mut u8;
     if let Some(refusal) = memreq::mmap_refusal(addr.addr(), len, prot, flags) {
         crate::errno::set(match refusal {
             MapRefusal::Invalid => EINVAL,
             MapRefusal::File => crate::errcode::ENODEV,
-            // POSIX's ENOTSUP, which is EOPNOTSUPP here.
             MapRefusal::Exec => crate::errcode::EOPNOTSUPP,
         });
         return MAP_FAILED;
     }
-
-    let mut mp = MmapProt::NONE;
-    if prot & memreq::PROT_READ != 0 { mp = mp | MmapProt::READ; }
-    if prot & memreq::PROT_WRITE != 0 { mp = mp | MmapProt::WRITE; }
-
-    let mut mf = MmapFlags::PRIVATE | MmapFlags::ANONYMOUS;
-    if flags & memreq::MAP_FIXED != 0 { mf = mf | MmapFlags::FIXED; }
-
-    // Asked for in whole pages; more pages than a `usize` counts is the null
-    // the kernel answers a size it cannot map.
-    let ptr = memreq::whole_pages(len)
-        .map_or(core::ptr::null_mut(), |len| unsafe { syscall::mmap(addr, len, mp, mf) });
-    if ptr.is_null() {
-        // The kernel's refusal does not say which it is: ENOMEM is POSIX's
-        // for a place or size the address space does not allow.
-        crate::errno::set(crate::errcode::ENOMEM);
-        MAP_FAILED
-    } else {
-        ptr
+    let prot = match vm_prot(prot) {
+        Ok(prot) => prot,
+        Err(errno) => {
+            crate::errno::set(errno);
+            return MAP_FAILED;
+        }
+    };
+    // POSIX takes a null address with `MAP_FIXED` as the address zero, which
+    // no process holds; anything else without it is only a hint.
+    let at = if flags & memreq::MAP_FIXED != 0 { syscall::VmAt::Fixed(addr) } else { syscall::VmAt::ANYWHERE };
+    // SAFETY: a `MAP_FIXED` caller gives up what those pages held, as POSIX says.
+    match unsafe { syscall::vm_reserve(len, prot, at) } {
+        Ok(ptr) => ptr,
+        Err(e) => {
+            crate::errno::set(match e {
+                syscall::SyscallError::InvalidArgument => EINVAL,
+                _ => crate::errcode::ENOMEM,
+            });
+            MAP_FAILED
+        }
     }
 }
 
@@ -897,17 +921,42 @@ pub unsafe extern "C" fn posix_madvise(_addr: *mut u8, _len: usize, advice: i32)
     if crate::memreq::is_advice(advice) { 0 } else { EINVAL }
 }
 
-/// Linux's `madvise`, which POSIX does not define (`memreq::madvise_refusal`).
+/// Linux's `madvise`, which POSIX does not define: its hints are taken and
+/// ignored, and `MADV_DONTNEED` discards the range, which then reads zeros.
 #[no_mangle]
-pub unsafe extern "C" fn madvise(addr: *mut u8, _len: usize, advice: i32) -> i32 {
-    use crate::memreq::AdviceRefusal;
-    match crate::memreq::madvise_refusal(addr.addr(), advice) {
-        None => 0,
-        Some(refusal) => {
-            crate::errno::set(match refusal {
-                AdviceRefusal::Invalid => EINVAL,
-                AdviceRefusal::Discard => crate::errcode::ENOSYS,
-            });
+pub unsafe extern "C" fn madvise(addr: *mut u8, len: usize, advice: i32) -> i32 {
+    use crate::memreq::Advice;
+    let done = match crate::memreq::madvise(addr.addr(), advice) {
+        None => Err(EINVAL),
+        Some(Advice::Hint) => Ok(()),
+        Some(Advice::Discard) => match crate::memreq::whole_pages(len) {
+            None => Err(EINVAL),
+            // SAFETY: the caller's, as Linux's `madvise` leaves it.
+            Some(len) => unsafe { syscall::vm_discard(addr, len) }.map_err(range_errno),
+        },
+    };
+    match done {
+        Ok(()) => 0,
+        Err(errno) => {
+            crate::errno::set(errno);
+            -1
+        }
+    }
+}
+
+/// POSIX's `mprotect`: every whole page `[addr, addr + len)` reaches into
+/// takes `prot`, or none does.
+#[no_mangle]
+pub unsafe extern "C" fn mprotect(addr: *mut u8, len: usize, prot: i32) -> i32 {
+    let done = vm_prot(prot).and_then(|prot| match crate::memreq::whole_pages(len) {
+        None => Err(EINVAL),
+        // SAFETY: the caller's, as POSIX's `mprotect` leaves it.
+        Some(len) => unsafe { syscall::vm_protect(addr, len, prot) }.map_err(range_errno),
+    });
+    match done {
+        Ok(()) => 0,
+        Err(errno) => {
+            crate::errno::set(errno);
             -1
         }
     }
@@ -923,7 +972,7 @@ pub unsafe extern "C" fn munmap(addr: *mut u8, len: usize) -> i32 {
     let unmapped = match crate::memreq::whole_pages(len) {
         None => Err(EINVAL),
         // SAFETY: the caller's, as C's `munmap` leaves it.
-        Some(len) => unsafe { syscall::munmap(addr, len) }.map_err(|e| match e {
+        Some(len) => unsafe { syscall::vm_release(addr, len) }.map_err(|e| match e {
             syscall::SyscallError::ResourceExhausted => crate::errcode::ENOMEM,
             _ => EINVAL,
         }),

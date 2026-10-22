@@ -142,7 +142,7 @@ table** can still reach:
 - **its own execution** — `SYS_EXIT`, `SYS_THREAD_EXIT`, `SYS_THREAD_SPAWN`,
   `SYS_THREAD_JOIN`, `SYS_FUTEX_WAIT`/`WAKE`, `SYS_NANOSLEEP`,
   `SYS_SET_THREAD_NAME`;
-- **its own address space** — `SYS_MMAP`, `SYS_MUNMAP`, `SYS_TLS_ALLOC_BLOCK`,
+- **its own address space** — `SYS_VM_*`, `SYS_TLS_ALLOC_BLOCK`,
   `SYS_STACK_INFO`;
 - **its own record** — `SYS_GETPID`, `SYS_GET_ENV`, `SYS_ENDOWMENTS`,
   `SYS_QUERY_MODULES`, `SYS_GETCWD`, `SYS_CHDIR`;
