@@ -10,8 +10,9 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-# Every primitive the one algorithm set needs: X25519, Ed25519 sign and
-# verify, `chacha20-poly1305@openssh.com` and SHA-256. Its randomness is the
+# Every primitive the one algorithm set needs: ML-KEM-768 and its SSH
+# combiner, X25519, Ed25519 sign and verify, `chacha20-poly1305@openssh.com`
+# and SHA-256. Its randomness is the
 # caller's.
 toyos-crypto = { path = "../../lib/crypto", features = ["sign"] }
 # The one `SHA256:` fingerprint a key is named by, the one the package

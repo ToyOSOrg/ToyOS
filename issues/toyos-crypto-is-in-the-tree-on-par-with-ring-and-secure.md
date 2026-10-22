@@ -463,10 +463,9 @@ Not consumers:
      `tests/acvp/`, outside the crate's directory, so no image ships them.
 
    The consumers:
-   - `toyos-ssh`'s protocol offers `mlkem768x25519-sha256` first, at any time
-     after stage 1
-     (`issues/toyos-ssh-offers-only-a-classical-key-exchange.md`). sshserver's
-     switch, stage 2 of the SSH track, is the shipping step. It waits for
+   - `toyos-ssh`'s protocol offers `mlkem768x25519-sha256` first, on the
+     crate's ML-KEM-768 and its SSH combiner. sshserver's switch, stage 2 of
+     the SSH track, is the shipping step. It waits for
      stage 4 on SSH's primitives.
    - Every SHA-2 is the crate's since #1016 (owner, 2026-10-22: "use our
      own crypto where possible"): `build/`'s digests, `pkg`, `lib/swap`,

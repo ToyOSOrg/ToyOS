@@ -8,13 +8,16 @@ use std::sync::OnceLock;
 use toyos_crypto::ed25519::{self, SigningKey};
 use toyos_crypto::hash::Sha256;
 use toyos_crypto::ssh::{OpeningKey, SealingKey};
-use toyos_crypto::x25519;
+use toyos_crypto::{mlkem, x25519};
 
 use toyos_ssh::{Event, Random, Refusal, Server};
 
 use super::driver::Keys;
 
 pub const STRICT: &str = "kex-strict-c-v00@openssh.com";
+
+pub const HYBRID: &str = "mlkem768x25519-sha256";
+pub const CURVE25519: &str = "curve25519-sha256";
 
 /// The Poly1305 tag after every sealed packet.
 pub const TAG_LEN: usize = 16;
@@ -44,22 +47,33 @@ pub fn sha256(parts: &[&[u8]]) -> [u8; 32] {
     c.finalize()
 }
 
-/// RFC 8731 §3's `H`.
+/// `K` as RFC 8731 §3 encodes the X25519 secret: an `mpint`.
+pub fn curve25519_k(shared: &[u8; 32]) -> Vec<u8> {
+    mpint(shared)
+}
+
+/// `K` as RFC 10042 §2.4 and §2.5 make it: `SHA-256(K_PQ || K_CL)`, a `string`.
+pub fn hybrid_k(k_pq: &[u8; 32], k_cl: &[u8; 32]) -> Vec<u8> {
+    let mut out = Vec::new();
+    string(&mut out, &sha256(&[k_pq, k_cl]));
+    out
+}
+
+/// RFC 8731 §3's and RFC 10042 §2.5's `H`; `k` is encoded.
 #[allow(clippy::too_many_arguments)]
 pub fn exchange_hash(v_c: &[u8], v_s: &[u8], i_c: &[u8], i_s: &[u8], k_s: &[u8], q_c: &[u8], q_s: &[u8], k: &[u8]) -> [u8; 32] {
     let mut data = Vec::new();
     for field in [v_c, v_s, i_c, i_s, k_s, q_c, q_s] {
         string(&mut data, field);
     }
-    data.extend_from_slice(&mpint(k));
+    data.extend_from_slice(k);
     sha256(&[&data])
 }
 
-/// RFC 4253 §7.2, 64 bytes.
+/// RFC 4253 §7.2, 64 bytes; `k` is encoded.
 pub fn derive(k: &[u8], h: &[u8; 32], letter: u8, session_id: &[u8; 32]) -> [u8; 64] {
-    let k = mpint(k);
-    let k1 = sha256(&[&k, h, &[letter], session_id]);
-    let k2 = sha256(&[&k, h, &k1]);
+    let k1 = sha256(&[k, h, &[letter], session_id]);
+    let k2 = sha256(&[k, h, &k1]);
     [k1, k2].concat().try_into().unwrap()
 }
 
@@ -163,11 +177,25 @@ pub struct Client<R> {
 /// A key exchange the client has started.
 pub struct Exchange {
     i_c: Vec<u8>,
+    /// The client's ML-KEM-768 key when the server picks the hybrid: the first
+    /// of the client's methods it runs.
+    kem: Option<mlkem::DecapsulationKey>,
     private: x25519::SecretKey,
 }
 
 /// The client's ephemeral X25519 key, the same in every exchange.
 const EPHEMERAL: [u8; 32] = [0x3c; 32];
+
+/// The seeds of the client's ephemeral ML-KEM-768 key, the same in every
+/// exchange.
+struct KemSeed;
+
+impl Random for KemSeed {
+    fn fill(&mut self, destination: &mut [u8]) -> Result<(), toyos_crypto::Error> {
+        destination.fill(0x5e);
+        Ok(())
+    }
+}
 
 impl<R: Random> Client<R> {
     /// A client that has sent its identification line and read the server's.
@@ -230,25 +258,36 @@ impl<R: Random> Client<R> {
     pub fn start_exchange(&mut self, kex: &str) -> Result<Exchange, Refusal> {
         let i_c = kexinit(kex);
         self.send(&i_c)?;
-        Ok(Exchange { i_c, private: x25519::SecretKey::from_bytes(EPHEMERAL) })
+        let hybrid = kex.split(',').find(|name| [HYBRID, CURVE25519].contains(name)) == Some(HYBRID);
+        let kem = hybrid.then(|| mlkem::DecapsulationKey::generate(&mut KemSeed).unwrap());
+        Ok(Exchange { i_c, kem, private: x25519::SecretKey::from_bytes(EPHEMERAL) })
     }
 
     /// The rest of the exchange as OpenSSH runs it: the server's KEXINIT is
     /// the next packet, and its signature over `H` is verified here.
     pub fn finish_exchange(&mut self, exchange: Exchange) -> Result<(), Refusal> {
-        let q_c = exchange.private.public_key().0;
+        let x25519_public = exchange.private.public_key().0;
+        let q_c = match &exchange.kem {
+            Some(kem) => [&kem.public_key().as_bytes()[..], &x25519_public].concat(),
+            None => x25519_public.to_vec(),
+        };
         let mut init = vec![30];
         string(&mut init, &q_c);
         self.send(&init)?;
         let i_s = self.next().expect("the server's KEXINIT");
         assert_eq!(i_s[0], 20);
-        let reply = self.next().expect("KEX_ECDH_REPLY");
+        let reply = self.next().expect("the exchange's reply");
         let mut f = Fields(&reply);
         assert_eq!(f.byte(), 31);
         let (k_s, q_s, signature) = (f.string().to_vec(), f.string().to_vec(), f.string().to_vec());
         assert_eq!(self.next().expect("NEWKEYS"), [21]);
-        let k = exchange.private.agree(&x25519::PublicKey(q_s[..].try_into().unwrap())).unwrap();
-        let k = k.as_bytes();
+        let (ciphertext, server_x25519) = q_s.split_at(q_s.len() - 32);
+        let k_cl = exchange.private.agree(&x25519::PublicKey(server_x25519.try_into().unwrap())).unwrap();
+        let k = match exchange.kem {
+            Some(kem) => hybrid_k(kem.decapsulate(ciphertext).unwrap().as_bytes(), k_cl.as_bytes()),
+            None => curve25519_k(k_cl.as_bytes()),
+        };
+        let k = &k[..];
         let h = exchange_hash(VERSION, &self.server_version, &exchange.i_c, &i_s, &k_s, &q_c, &q_s, k);
         let host = Fields(&k_s).string_pair();
         let sig = Fields(&signature).string_pair();
@@ -272,7 +311,7 @@ impl<R: Random> Client<R> {
     }
 
     pub fn handshake(server: Server<Keys, R>) -> Result<Self, Refusal> {
-        Self::handshake_with(server, &format!("curve25519-sha256,ext-info-c,{STRICT}"))
+        Self::handshake_with(server, &format!("{HYBRID},{CURVE25519},ext-info-c,{STRICT}"))
     }
 
     pub fn session_id(&self) -> [u8; 32] {

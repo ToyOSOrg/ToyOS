@@ -25,9 +25,10 @@ pub enum Refusal {
     /// The client's first KEXINIT does not offer `kex-strict-c-v00@openssh.com`,
     /// and no session runs without the sequence-number reset (CVE-2023-48795).
     NotStrict,
-    /// The client's X25519 key, refused because the secret it makes is zero
-    /// (RFC 7748 §6.1).
-    KeyAgreement,
+    /// The client's key exchange value, refused for the reason named: its
+    /// length (RFC 8731 §3, RFC 10042 §2.1), FIPS 203 §7.2's encapsulation
+    /// key check, or an X25519 key that makes the zero secret (RFC 7748 §6.1).
+    KeyExchange(&'static str),
     /// A packet whose tag does not verify. The peer is told nothing.
     Integrity,
     /// A sealed packet's length, decrypted but not yet verified, above the
@@ -53,7 +54,7 @@ impl fmt::Display for Refusal {
             Self::Unexpected { phase, message } => write!(f, "message {message} during {phase}"),
             Self::NoCommonAlgorithm(list) => write!(f, "no algorithm in {list} this server offers"),
             Self::NotStrict => f.write_str("the client does not offer kex-strict-c-v00@openssh.com"),
-            Self::KeyAgreement => f.write_str("the client's X25519 key makes a zero secret"),
+            Self::KeyExchange(why) => f.write_str(why),
             Self::Integrity => f.write_str("a packet whose tag does not verify"),
             Self::SealedLength { len, cap } => {
                 write!(f, "a sealed packet_length of {len}, above the cap of {cap} or off the block, before its tag")

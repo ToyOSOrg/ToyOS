@@ -2,11 +2,12 @@
 //! held with this server, replayed byte for byte.
 //!
 //! `examples/record.rs` served each with the fixture host key, the scripted
-//! driver and a fixed-byte randomness, so the server's ephemeral key, cookie
-//! and padding come again from the transcript's seed, and its every output
-//! byte must come again too. OpenSSH accepted those bytes: it verified the host
-//! key against a pinned `known_hosts` entry and the signature over `H`, opened
-//! every packet, and exited with the status the driver sent. Its own bytes —
+//! driver and a fixed-byte randomness, so the server's ephemeral key, its
+//! ML-KEM encapsulation, cookie and padding come again from the transcript's
+//! seed, and its every output byte must come again too. OpenSSH accepted those
+//! bytes: it verified the host key against a pinned `known_hosts` entry and the
+//! signature over `H`, opened every packet, and exited with the status the
+//! driver sent. Its own bytes —
 //! sealed under the keys it derived — open here only under the keys this server
 //! derives. Nothing runs `ssh` at test time.
 //!
@@ -16,10 +17,10 @@
 
 mod common;
 
-use common::client::{derive, exchange_hash, open_packet, plain_packet, Fields, TAG_LEN};
+use common::client::{curve25519_k, derive, exchange_hash, hybrid_k, open_packet, plain_packet, Fields, CURVE25519, HYBRID, TAG_LEN};
 use common::driver::{drive, host_key, public_key, Fixed, Keys, Side, Transcript, USER};
 use toyos_crypto::ssh::OpeningKey;
-use toyos_crypto::{ed25519, x25519};
+use toyos_crypto::{ed25519, mlkem, x25519};
 use toyos_ssh::{Declined, Event, Refusal, Server};
 
 const EXEC: &str = include_str!("fixtures/exec.transcript");
@@ -28,6 +29,10 @@ const REKEY: &str = include_str!("fixtures/rekey.transcript");
 const STRANGER: &str = include_str!("fixtures/stranger.transcript");
 const RSA: &str = include_str!("fixtures/rsa.transcript");
 const FORWARD: &str = include_str!("fixtures/forward.transcript");
+const CURVE: &str = include_str!("fixtures/curve25519.transcript");
+
+/// Every recording but [`CURVE`] negotiated the hybrid.
+const HYBRID_RECORDINGS: [&str; 6] = [EXEC, STDIN, REKEY, STRANGER, RSA, FORWARD];
 
 /// Feed `chunks` to a server seeded with `seed`, each in `piece`-byte inputs
 /// and the driver run after each whole chunk, as the recorder ran it: the
@@ -89,6 +94,28 @@ fn an_exec_openssh_ran_replays() {
         Event::Eof { .. },
         Event::Disconnected,
     ] if user == USER && command == b"echo hello"));
+}
+
+/// `-o KexAlgorithms=curve25519-sha256`: the classical method, which the
+/// server still runs for a client that offers no other.
+#[test]
+fn an_exec_over_the_classical_exchange_replays() {
+    assert_eq!(Recorded::read(CURVE).method, CURVE25519);
+    let events = replay(CURVE);
+    assert!(matches!(&events[..], [
+        Event::Authenticated { .. },
+        Event::Exec { command, .. },
+        Event::Eof { .. },
+        Event::Disconnected,
+    ] if command == b"echo hello"));
+}
+
+/// OpenSSH offers the hybrid first, and the server runs it.
+#[test]
+fn openssh_negotiated_the_hybrid() {
+    for text in HYBRID_RECORDINGS {
+        assert_eq!(Recorded::read(text).method, HYBRID);
+    }
 }
 
 #[test]
@@ -156,8 +183,11 @@ struct Recorded {
     /// Where each side's sealed packets start.
     client_sealed: usize,
     server_sealed: usize,
-    /// Where the client's KEXINIT, KEX_ECDH_INIT and NEWKEYS start.
+    /// Where the client's KEXINIT, its message 30 and NEWKEYS start.
     client_packets: [usize; 3],
+    /// The method: the first of the client's the server runs.
+    method: &'static str,
+    /// `K`, encoded as its method says.
     k: Vec<u8>,
     h: [u8; 32],
 }
@@ -183,19 +213,34 @@ impl Recorded {
         }
         assert_eq!((c[0][0], c[1][0], c[2][..].to_vec()), (20, 30, vec![21]));
         assert_eq!((s[0][0], s[1][0], s[2][..].to_vec()), (20, 31, vec![21]));
+        let mut kexinit = Fields(&c[0][17..]);
+        let offered = std::str::from_utf8(kexinit.string()).unwrap();
+        let method = offered.split(',').find_map(|name| [HYBRID, CURVE25519].into_iter().find(|&m| m == name)).unwrap();
         let q_c = Fields(&c[1][1..]).string().to_vec();
         let mut reply = Fields(&s[1][1..]);
         let (k_s, q_s, signature) = (reply.string().to_vec(), reply.string().to_vec(), reply.string().to_vec());
-        // The server's ephemeral key is the seed's: generated here as the
-        // server generates it, it is the Q_S the recording carries.
+        // The server's ephemeral X25519 key and its encapsulation are the
+        // seed's: made here as the server makes them, they are what the
+        // recording carries.
         let private = x25519::SecretKey::generate(&mut Fixed(t.seed)).unwrap();
-        assert_eq!(private.public_key().0, q_s[..]);
-        let k = private.agree(&x25519::PublicKey(q_c[..].try_into().unwrap())).unwrap().as_bytes().to_vec();
+        let (client_x25519, server_x25519) = (&q_c[q_c.len() - 32..], &q_s[q_s.len() - 32..]);
+        assert_eq!(private.public_key().0, server_x25519);
+        let k_cl = private.agree(&x25519::PublicKey(client_x25519.try_into().unwrap())).unwrap();
+        let k = if method == HYBRID {
+            assert_eq!((q_c.len(), q_s.len()), (1184 + 32, 1088 + 32));
+            let kem_key = mlkem::EncapsulationKey::from_bytes(&q_c[..1184]).unwrap();
+            let (ciphertext, k_pq) = kem_key.encapsulate(&mut Fixed(t.seed)).unwrap();
+            assert_eq!(ciphertext[..], q_s[..1088]);
+            hybrid_k(k_pq.as_bytes(), k_cl.as_bytes())
+        } else {
+            assert_eq!((q_c.len(), q_s.len()), (32, 32));
+            curve25519_k(k_cl.as_bytes())
+        };
         let h = exchange_hash(v_c, v_s, &c[0], &s[0], &k_s, &q_c, &q_s, &k);
         let (host, sig) = (Fields(&k_s).string_pair().1, Fields(&signature).string_pair().1);
         let host = ed25519::PublicKey::from_bytes(host.try_into().unwrap()).unwrap();
         host.verify(&h, sig).expect("the recorded signature covers H");
-        Self { client_sealed: at.0, server_sealed: at.1, client, server, client_packets, k, h }
+        Self { client_sealed: at.0, server_sealed: at.1, client, server, client_packets, method, k, h }
     }
 
     fn key(&self, letter: u8) -> OpeningKey {
@@ -209,12 +254,17 @@ impl Recorded {
 }
 
 /// **Key derivation against OpenSSH's.** The exchange hash and the keys of
-/// RFC 4253 §7.2, computed here from the recorded exchange, open the first
-/// packets OpenSSH sealed, at sequence number zero — strict key exchange's
-/// reset — and the first the server sealed.
+/// RFC 4253 §7.2, computed here from the recorded exchange under each method,
+/// open the first packets OpenSSH sealed, at sequence number zero — strict key
+/// exchange's reset — and the first the server sealed.
 #[test]
 fn the_keys_derived_from_a_recorded_exchange_open_what_openssh_sealed() {
-    let r = Recorded::read(EXEC);
+    keys_open_what_openssh_sealed(EXEC);
+    keys_open_what_openssh_sealed(CURVE);
+}
+
+fn keys_open_what_openssh_sealed(text: &str) {
+    let r = Recorded::read(text);
     let c = r.key(b'C');
     let (service, used) = open_packet(Some(&c), 0, &r.client[r.client_sealed..]).unwrap();
     let mut want = vec![5];

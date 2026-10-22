@@ -20,12 +20,15 @@
 //! NEWKEYS is held, and sent under the new keys (RFC 4253 §7.1).
 
 use toyos_crypto::ssh::{OpeningKey, SealingKey};
-use toyos_crypto::{x25519, Random};
+use toyos_crypto::{hybrid, mlkem, x25519, Random};
 
 use crate::hostkey::HostKey;
 use crate::kex::{self, Exchange, Method, Negotiated};
 use crate::msg;
 use crate::wire::{put_mpint, put_string, put_u32, Reader, Refusal};
+
+/// An ML-KEM-768 encapsulation key (FIPS 203 §8).
+const MLKEM768_KEY_LEN: usize = 1184;
 
 /// The server's identification (RFC 4253 §4.2), without its CR LF.
 const VERSION: &[u8] = b"SSH-2.0-ToyOS";
@@ -60,7 +63,7 @@ enum Kex {
     /// The server's KEXINIT is sent and the client's awaited: the session's
     /// start, so it is the client's first packet.
     Started,
-    /// Both KEXINITs are exchanged and the client's `KEX_ECDH_INIT` is awaited.
+    /// Both KEXINITs are exchanged and the client's message 30 is awaited.
     Negotiated { negotiated: Negotiated, client_kexinit: Vec<u8> },
     /// The server's NEWKEYS is sent; the client's is awaited, after which its
     /// packets open with `opening`.
@@ -149,7 +152,7 @@ impl<R: Random> Transport<R> {
         let reason = match refusal {
             Refusal::Integrity | Refusal::SealedLength { .. } | Refusal::SequenceExhausted | Refusal::Ended => return,
             Refusal::TooManyAttempts => msg::DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE,
-            Refusal::NoCommonAlgorithm(_) | Refusal::NotStrict | Refusal::KeyAgreement => msg::DISCONNECT_KEY_EXCHANGE_FAILED,
+            Refusal::NoCommonAlgorithm(_) | Refusal::NotStrict | Refusal::KeyExchange(_) => msg::DISCONNECT_KEY_EXCHANGE_FAILED,
             Refusal::Truncated(_)
             | Refusal::TooLong { .. }
             | Refusal::Trailing(_)
@@ -205,7 +208,7 @@ impl<R: Random> Transport<R> {
             match (std::mem::replace(&mut self.kex, Kex::Idle), kind) {
                 (Kex::Started, msg::KEXINIT) => self.on_kexinit(payload)?,
                 (Kex::Negotiated { negotiated, client_kexinit }, msg::KEX_ECDH_INIT) => {
-                    self.on_ecdh_init(&payload, &negotiated, &client_kexinit)?;
+                    self.on_kex_init(&payload, &negotiated, &client_kexinit)?;
                 }
                 (Kex::NewKeys { opening }, msg::NEWKEYS) => {
                     Reader::new(&payload[1..]).end("NEWKEYS")?;
@@ -329,19 +332,23 @@ impl<R: Random> Transport<R> {
         Ok(())
     }
 
-    fn on_ecdh_init(&mut self, payload: &[u8], negotiated: &Negotiated, client_kexinit: &[u8]) -> Result<(), Refusal> {
+    /// The client's message 30: the server's half of the exchange, its reply,
+    /// NEWKEYS and the keys.
+    fn on_kex_init(&mut self, payload: &[u8], negotiated: &Negotiated, client_kexinit: &[u8]) -> Result<(), Refusal> {
         let mut r = Reader::new(payload);
-        r.byte("KEX_ECDH_INIT")?;
-        match negotiated.method {
-            Method::Curve25519Sha256 => {}
-        }
-        let client_public: [u8; 32] = r.fixed("Q_C")?;
-        r.end("KEX_ECDH_INIT")?;
-        let private = x25519::SecretKey::generate(&mut self.rng).expect("the caller's randomness");
-        let server_public = private.public_key().0;
-        let shared = private.agree(&x25519::PublicKey(client_public)).map_err(|_| Refusal::KeyAgreement)?;
-        let mut secret = Vec::new();
-        put_mpint(&mut secret, shared.as_bytes());
+        r.byte("message 30")?;
+        let client_public = r.string("Q_C or C_INIT", r.rest_len())?;
+        r.end("message 30")?;
+        let (server_public, secret) = match negotiated.method {
+            Method::MlKem768X25519Sha256 => self.hybrid(client_public)?,
+            Method::Curve25519Sha256 => {
+                let client = <[u8; 32]>::try_from(client_public).map_err(|_| Refusal::KeyExchange("a Q_C that is not 32 bytes"))?;
+                let (server, shared) = self.x25519(client)?;
+                let mut secret = Vec::new();
+                put_mpint(&mut secret, shared.as_bytes());
+                (server.to_vec(), secret)
+            }
+        };
         let host_key = self.host.blob();
         let hash = Exchange {
             client_version: self.client_version.as_deref().unwrap_or_default(),
@@ -349,7 +356,7 @@ impl<R: Random> Transport<R> {
             client_kexinit,
             server_kexinit: &self.server_kexinit,
             host_key: &host_key,
-            client_public: &client_public,
+            client_public,
             server_public: &server_public,
             secret: &secret,
         }
@@ -376,5 +383,32 @@ impl<R: Random> Transport<R> {
         }
         self.kex = Kex::NewKeys { opening: Box::new(OpeningKey::new(key(b'C'))) };
         Ok(())
+    }
+
+    /// `mlkem768x25519-sha256` (RFC 10042 §2): `S_REPLY`, the ciphertext and
+    /// the server's X25519 key; and `K = SHA-256(K_PQ || K_CL)` as a `string`.
+    fn hybrid(&mut self, init: &[u8]) -> Result<(Vec<u8>, Vec<u8>), Refusal> {
+        let (kem_key, ecdh_key) = init
+            .split_at_checked(MLKEM768_KEY_LEN)
+            .and_then(|(kem, ecdh)| Some((kem, <[u8; 32]>::try_from(ecdh).ok()?)))
+            .ok_or(Refusal::KeyExchange("a C_INIT that is not an ML-KEM-768 key and an X25519 key"))?;
+        let kem_key = mlkem::EncapsulationKey::from_bytes(kem_key)
+            .map_err(|_| Refusal::KeyExchange("an ML-KEM-768 encapsulation key that fails FIPS 203's check"))?;
+        let (server, ecdh) = self.x25519(ecdh_key)?;
+        let (ciphertext, kem) = kem_key.encapsulate(&mut self.rng).expect("the caller's randomness");
+        let mut secret = Vec::new();
+        put_string(&mut secret, hybrid::for_ssh(kem, ecdh).as_bytes());
+        Ok(([&ciphertext[..], &server].concat(), secret))
+    }
+
+    /// The server's ephemeral X25519 key and the secret it shares with
+    /// `client`, refused when that secret is zero (RFC 8731 §3).
+    fn x25519(&mut self, client: [u8; 32]) -> Result<([u8; 32], x25519::SharedSecret), Refusal> {
+        let private = x25519::SecretKey::generate(&mut self.rng).expect("the caller's randomness");
+        let server = private.public_key().0;
+        let shared = private
+            .agree(&x25519::PublicKey(client))
+            .map_err(|_| Refusal::KeyExchange("an X25519 key that makes the zero secret"))?;
+        Ok((server, shared))
     }
 }
