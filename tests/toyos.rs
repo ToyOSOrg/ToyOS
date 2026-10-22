@@ -568,6 +568,10 @@ const MACHINE_TESTS: &[&str] = &[
     // A launch's unsent stdio slots: its own boot, because the launcher it
     // needs makes every spawn of a declared program a launch.
     "a_launch_gives_each_unsent_stdio_slot_a_null",
+    // A job reaches its row's own `/state/<name>` and nothing else of `/state`:
+    // which grants the supervisor mints and the file server honours, which no
+    // host build has. Contents and refusals, and no hardware is in it.
+    "a_row_reaches_its_own_state_and_no_other",
     // A controller no row names, handed over to a claim whose holder's No-Op
     // is answered by an interrupt through it, and a transfer aimed past the
     // claim's grants: the hand-over, the interrupt through the claim and the
@@ -4286,6 +4290,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "libc_children" => common::libcchildren::libc_children(),
         "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
+        "a_row_reaches_its_own_state_and_no_other" => common::stateview::a_row_reaches_its_own_state_and_no_other(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
         "usbd_refused_without_smi_filter" => usbd_refused_on_amdvi(
             test_config,
