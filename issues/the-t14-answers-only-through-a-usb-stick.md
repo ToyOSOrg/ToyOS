@@ -30,8 +30,8 @@ Constraints a reader would otherwise pay to re-derive:
   `iommu_virtio_platform`'s no-unit arm is where that is read back. The T14
   has VT-d, so this is not a bound on the bench — but a `pcidev` refusal there
   is the first thing to check before suspecting the driver.
-- **ssh is the bench's transport and a real feature**: sshd is built on russh
-  and the harness's client was russh too, until it was deleted
+- **ssh is the bench's transport and a real feature**: sshserver is built on
+  `toyos-ssh`, and the harness's client was russh until it was deleted
   (`issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md`). No host
   ssh binary, no fork.
 - **Addressing is DHCP with a hostname**, resolved through the router's DNS. The

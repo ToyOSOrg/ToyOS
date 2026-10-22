@@ -138,9 +138,6 @@ back with it:
 - A network reader that never reads holds one of `MAX_NETWORK_READERS` slots
   until the pipe, netstack's send buffer and the peer's window are full. Exit:
   it is let go on a bound that does not depend on how fast the log grows.
-- The ssh client is no second implementation: its lock pins the `russh` commit
-  `Cargo.lock` pins for sshserver, so a defect in the fork's protocol code is
-  on both ends of every exchange.
 
 Owner: the orchestrator, which holds the T14.
 

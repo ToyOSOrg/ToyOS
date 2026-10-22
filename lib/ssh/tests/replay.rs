@@ -18,7 +18,7 @@
 mod common;
 
 use common::client::{curve25519_k, derive, exchange_hash, hybrid_k, open_packet, plain_packet, Fields, CURVE25519, HYBRID, TAG_LEN};
-use common::driver::{drive, host_key, public_key, Fixed, Keys, Side, Transcript, USER};
+use common::driver::{host_key, user_key, public_key, Driver, Fixed, Keys, Side, Transcript, USER};
 use toyos_crypto::ssh::OpeningKey;
 use toyos_crypto::{ed25519, mlkem, x25519};
 use toyos_ssh::{Declined, Event, Refusal, Server};
@@ -30,20 +30,24 @@ const STRANGER: &str = include_str!("fixtures/stranger.transcript");
 const RSA: &str = include_str!("fixtures/rsa.transcript");
 const FORWARD: &str = include_str!("fixtures/forward.transcript");
 const CURVE: &str = include_str!("fixtures/curve25519.transcript");
+const SHELL: &str = include_str!("fixtures/shell.transcript");
+const SFTP: &str = include_str!("fixtures/sftp.transcript");
+const CHANNELS: &str = include_str!("fixtures/channels.transcript");
 
 /// Every recording but [`CURVE`] negotiated the hybrid.
-const HYBRID_RECORDINGS: [&str; 6] = [EXEC, STDIN, REKEY, STRANGER, RSA, FORWARD];
+const HYBRID_RECORDINGS: [&str; 9] = [EXEC, STDIN, REKEY, STRANGER, RSA, FORWARD, SHELL, SFTP, CHANNELS];
 
 /// Feed `chunks` to a server seeded with `seed`, each in `piece`-byte inputs
 /// and the driver run after each whole chunk, as the recorder ran it: the
 /// server's output, its events and how the last input ended.
 fn run_split(seed: u8, chunks: &[&[u8]], piece: usize) -> (Vec<u8>, Vec<Event>, Result<(), Refusal>) {
     let mut server = Server::new(host_key(), Keys::recorded(), Fixed(seed));
+    let mut driver = Driver::default();
     let mut out = server.output();
     let mut events = Vec::new();
     for chunk in chunks {
         let result = chunk.chunks(piece).try_for_each(|piece| server.input(piece));
-        events.extend(drive(&mut server));
+        events.extend(driver.drive(&mut server));
         out.extend(server.output());
         if result.is_err() {
             return (out, events, result);
@@ -89,11 +93,11 @@ fn lines(n: u32) -> Vec<u8> {
 fn an_exec_openssh_ran_replays() {
     let events = replay(EXEC);
     assert!(matches!(&events[..], [
-        Event::Authenticated { user },
+        Event::Authenticated { user, fingerprint },
         Event::Exec { command, .. },
         Event::Eof { .. },
         Event::Disconnected,
-    ] if user == USER && command == b"echo hello"));
+    ] if user == USER && *fingerprint == toyos_update::repo::fingerprint(&user_key()) && command == b"echo hello"));
 }
 
 /// `-o KexAlgorithms=curve25519-sha256`: the classical method, which the
@@ -108,6 +112,49 @@ fn an_exec_over_the_classical_exchange_replays() {
         Event::Eof { .. },
         Event::Disconnected,
     ] if command == b"echo hello"));
+}
+
+/// `ssh -tt`: a `pty-req`, then `shell`, its input echoed until its EOF.
+#[test]
+fn a_shell_with_a_terminal_replays() {
+    let events = replay(SHELL);
+    assert!(matches!(&events[..], [
+        Event::Authenticated { .. },
+        Event::Shell { pty: true, .. },
+        Event::Data { data, .. },
+        Event::Eof { .. },
+        Event::Disconnected,
+    ] if data == b"one\ntwo\n"));
+}
+
+/// `sftp -b`: a `put`, an `ls -l`, a `get` the client found the same as what
+/// it put, and an `rm` the driver's SFTP server refuses, which ends the batch.
+#[test]
+fn an_sftp_session_replays() {
+    let events = replay(SFTP);
+    assert!(matches!(&events[..2], [Event::Authenticated { .. }, Event::Sftp { .. }]));
+    let sent = data(&events);
+    assert!(sent.windows(22).any(|w| w == b"hello from the client\n"), "the put's bytes reach the subsystem");
+    assert!(matches!(&events[events.len() - 2..], [Event::Eof { .. }, Event::Disconnected]));
+}
+
+/// `ssh -M` and two clients through its socket: a `cat` whose channel stays
+/// open while an `echo` runs on a second one beside it.
+#[test]
+fn two_channels_at_once_replay() {
+    let events = replay(CHANNELS);
+    let [Event::Authenticated { .. }, Event::Exec { channel: cat, command }, Event::Data { channel: first, .. }, rest @ ..] = &events[..] else {
+        panic!("{events:?}")
+    };
+    assert_eq!((command.as_slice(), first), (&b"cat"[..], cat));
+    let Some(Event::Exec { channel: echo, command }) = rest.iter().find(|e| matches!(e, Event::Exec { .. })) else { panic!("{events:?}") };
+    assert_eq!(command, b"echo two");
+    assert_ne!(cat, echo);
+    let cat_data: Vec<u8> =
+        events.iter().filter_map(|e| if let Event::Data { channel, data } = e { (channel == cat).then_some(&data[..]) } else { None }).flatten().copied().collect();
+    assert_eq!(cat_data, b"one\nthree\n");
+    let eofs: Vec<_> = events.iter().filter_map(|e| if let Event::Eof { channel } = e { Some(channel) } else { None }).collect();
+    assert_eq!(eofs, [echo, cat], "the echo ended while the cat's channel was open");
 }
 
 /// OpenSSH offers the hybrid first, and the server runs it.

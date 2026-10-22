@@ -23,7 +23,6 @@ members = [
     "apps/snake",
     "apps/toyfetch",
     "build/root",
-    "build/ssh",
     "kernel",
     "kernel/amdvi",
     "kernel/dma",
@@ -64,6 +63,7 @@ members = [
     "lib/random",
     "lib/rootimage",
     "lib/scsi",
+    "lib/ssh",
     "lib/swap",
     "lib/symbols",
     "lib/tco",
@@ -264,7 +264,7 @@ getrandom = "0.3"
 libm = "0.2.16"
 # The one `openssh-key-v1` reader and writer, shared with the SSH server's
 # host key, and the `SHA256:` fingerprint the owner's key is named by.
-toyos-ssh = { path = "build/ssh" }
+toyos-ssh = { path = "lib/ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "lib/wallclock" }
@@ -323,9 +323,6 @@ getrandom = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.2
 getrandom_03 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.3-sdk-0.12", package = "getrandom" }
 getrandom_04 = { git = "https://github.com/ToyOSOrg/getrandom", branch = "toyos-0.4", package = "getrandom" }
 mio = { git = "https://github.com/ToyOSOrg/mio", branch = "toyos" }
-tokio = { git = "https://github.com/ToyOSOrg/tokio", branch = "toyos" }
-russh = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos" }
-russh-cryptovec = { git = "https://github.com/ToyOSOrg/russh", branch = "toyos" }
 socket2 = { git = "https://github.com/ToyOSOrg/socket2", branch = "toyos" }
 raw-window-handle = { git = "https://github.com/ToyOSOrg/raw-window-handle", branch = "toyos-0.6.2" }
 cpal = { git = "https://github.com/ToyOSOrg/cpal", branch = "toyos-0.18.0" }

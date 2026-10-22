@@ -59,9 +59,9 @@ review has been done, and passing vectors does not show it is safer than ring.
 
 | Consumer | Today | Needs from the crate |
 |---|---|---|
-| `toyos-ssh`'s SSH protocol (`build/ssh`: `kex`, the server, the client). Host-only until `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md` stage 2 | the crate, since stage 1 | X25519, ML-KEM-768 and its hybrid, Ed25519 sign/verify, `chacha20-poly1305@openssh.com`, SHA-256/512, and a caller-supplied `Random` for replays |
+| `toyos-ssh`'s SSH protocol (`lib/ssh`: `kex`, the server, the client). In the image through `system/sshserver` since `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md` stage 2 | the crate, since stage 1 | X25519, ML-KEM-768 and its hybrid, Ed25519 sign/verify, `chacha20-poly1305@openssh.com`, SHA-256/512, and a caller-supplied `Random` for replays |
 | `toyos-ssh`'s `hostkey` on the signing path. `build/signing.rs` reads the owner's image-signing key through `openssh_seed` and writes a minted one through `openssh_private`; both derive the public key from the seed | `toyos_update::sig::public_of`, the crate's since #1019 | nothing |
-| `system/sshserver` | russh with the RustCrypto stack, including `rsa` (RUSTSEC-2023-0071) | none directly; it reaches the crate through `toyos-ssh` |
+| `system/sshserver` | `toyos-ssh`, since the SSH track's stage 2 | none directly; it reaches the crate through `toyos-ssh` |
 | Image and package signing: `lib/update` (the loader, `/system/bin/update`, `build/signing.rs`, `build/root`, #892's repository keys) | the crate's strict Ed25519 and SHA-2, since #1019; signing and a seed's public key behind `sign`, on the host | stage 6's bench readings |
 | Every SHA-256: the build, `pkg`, `lib/swap`, `system/update`, `lib/update` and the loader | the crate, since #1016: SHA-NI on x86-64, the UEFI loader's in a block that saves the XMM registers it uses; the Armv8 SHA instructions where the target promises them. No slower than `toyos-sha2-hw`, which it replaces, on either bench: on the T14 4.6 times as fast at 64 B and 9 and 6 percent faster at 16 KiB and 1 MiB, on the AMD bench 2.8 times at 64 B, 2 percent at 16 KiB and equal at 1 MiB (#1016's evidence) | nothing |
 | ToyOS's own HTTPS clients. On the host: the build's `ureq` (`build/release.rs`) and doom's build script (`apps/doom/build.rs`). In a guest, none today: `https_tls13` and `pkg install <url>` are stages 3 and 5 of `issues/the-internet-clients-work-unchanged.md` | the host's two: the crate's rustls provider through ureq's `rustls-no-provider`, since #1020, its key exchange on X25519 and X25519MLKEM768 alone while the T14 finding stands. In a guest, none | the NIST groups back once the T14 finding is resolved |
@@ -103,7 +103,7 @@ Not consumers:
    - Every vector file has a `NOTICE` entry and a `COMMITTED_FILES` row.
    - `Cargo.lock` has no `rsa` package that the crate brings in. There is no
      `rsa` crate in the crate's dependencies of any kind.
-   - `build/ssh/Cargo.toml` names no `ring`.
+   - `lib/ssh/Cargo.toml` names no `ring`.
    - `hostkey`'s derivation calls no `lib/crypto` code. `build/signing.rs`
      derives public keys only through `toyos_update::sig::public_of`.
    - `toyos-ssh`'s OpenSSH recordings replay byte for byte, and the issue
@@ -307,7 +307,7 @@ Not consumers:
        - Hot loops therefore index fixed-size arrays and read round keys in
          place. The evidence holds the two binaries' call lists.
    - **First measurement, not a verdict.** `toyos-ssh`'s fuzz
-     (`build/ssh/tests/fuzz.rs`), on the crate since stage 1: 33.92 s and
+     (`lib/ssh/tests/fuzz.rs`), on the crate since stage 1: 33.92 s and
      15.46 s in two runs on the development Mac (an M4 Pro). On ring it took
      1.27 s in main's nightly host job, on GitHub's runner.
 4. **Secure.** **Exit**, for each primitive a consumer uses:
@@ -327,11 +327,6 @@ Not consumers:
        sets, so no build compiles it. It is reached through `toyos-crypto`'s
        own oracles `x25519-dalek` 2.0.1 and `ed25519-dalek` 2.2.0, and
        `lib/update`'s `ed25519-dalek` oracle: test-only since #1019.
-     - Under russh (`system/sshserver`), `curve25519-dalek` 5.0.0-pre.6
-       names `fiat-crypto` 0.3.0 behind the same unset `cfg`.
-     - Under russh, `p384` 0.14.0-rc.8 names `fiat-crypto` 0.3.0 unless
-       `p384_backend = "bignum"`. #1005 sets that for every build, host and
-       guest; before it, fiat compiled into sshserver.
 
      `num-bigint`, the crate's test-only integer oracle, holds:
      - `field25519` and `scalar25519`;
@@ -355,7 +350,7 @@ Not consumers:
    - **A structured fuzz** of every decoder: SEC 1 points, DER signatures,
      RSA components, ML-KEM keys and ciphertexts, and the provider's inputs.
      It is seeded and runs 4,000 cases per decoder under `--ci host`, as
-     `build/ssh/tests/fuzz.rs` does.
+     `lib/ssh/tests/fuzz.rs` does.
    - **Constant time where secrets flow.** Each secret routine's module
      contract names its secret inputs. For each such routine:
      - **Classes.** Fixed-versus-random: one class holds a fixed secret, the
@@ -475,9 +470,11 @@ Not consumers:
 
    The consumers:
    - `toyos-ssh`'s protocol offers `mlkem768x25519-sha256` first, on the
-     crate's ML-KEM-768 and its SSH combiner. sshserver's switch, stage 2 of
-     the SSH track, is the shipping step. It waits for
-     stage 4 on SSH's primitives.
+     crate's ML-KEM-768 and its SSH combiner. sshserver ships it since stage
+     2 of the SSH track, before this track's stages 3 and 4 hold for SSH's
+     primitives, by the owner's ruling (2026-10-22): "Use our own crypto where
+     possible; we optimize and improve until done, but we can already use
+     it."
    - Every SHA-2 is the crate's since #1016 (owner, 2026-10-22: "use our
      own crypto where possible"): `build/`'s digests, `pkg`, `lib/swap`,
      `sdk/icon`'s test, `lib/update`, the loader and `system/update`.

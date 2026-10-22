@@ -1,0 +1,63 @@
+//! A program this daemon started, which one thread waits for while another
+//! may end it.
+//!
+//! std's `Child` is waited on and ended through one `&mut`. The connection
+//! starts the wait once both output streams reach end of file, and until then
+//! `end` kills the program. A program that closed both and runs on is waited
+//! for and cannot be ended:
+//! `issues/sshserver-cannot-end-a-program-that-closed-its-output.md`.
+
+use std::process::Child;
+use std::sync::Mutex;
+
+use crate::connection::EXIT_LOST;
+
+pub struct Program(Mutex<Child>);
+
+impl Program {
+    /// `child`, whose pipes are taken.
+    pub fn new(child: Child) -> Self {
+        Self(Mutex::new(child))
+    }
+
+    /// Its exit status once it ends, or [`EXIT_LOST`] for an end the protocol's
+    /// status cannot carry, which the console is told.
+    pub fn wait(&self, name: &str) -> u32 {
+        let status = self.0.lock().expect("no holder panics").wait();
+        match status.map(|status| status.code()) {
+            Ok(Some(code @ 0..=255)) => code as u32,
+            Ok(code) => {
+                println!("sshserver: {name} ended with {code:?}, which is not an exit status this protocol carries");
+                EXIT_LOST
+            }
+            Err(e) => {
+                println!("sshserver: cannot wait for {name}: {e}");
+                EXIT_LOST
+            }
+        }
+    }
+
+    /// Kill it and reap it, unless a thread is already waiting for its end.
+    pub fn end(&self) {
+        if let Ok(mut child) = self.0.try_lock() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    /// A program ended is reaped, so it leaves no zombie behind.
+    #[test]
+    fn a_program_ended_is_reaped() {
+        let child = Command::new("sleep").arg("1000").stdin(Stdio::null()).spawn().expect("spawn sleep");
+        let program = Program::new(child);
+        program.end();
+        let status = program.0.lock().unwrap().try_wait().expect("try_wait");
+        assert!(status.is_some_and(|s| !s.success()), "the killed program was reaped: {status:?}");
+    }
+}

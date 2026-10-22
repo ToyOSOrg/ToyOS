@@ -27,9 +27,9 @@ graph including untouched upstream crates.
 so running the audit means cloning all 14 beside the monorepo and adding
 overrides — which changes what every build in the repo resolves, so it needs a
 quiet tree. Cover every patch site, not just userland. Then one full build with
-the complete output captured to a file: expect real volume, because tokio,
-winit, russh and cpal are large and their ToyOS deltas have never been linted
-once. Triage against the fork rule — a warning in upstream's own code is not
+the complete output captured to a file: expect real volume, because winit
+and cpal are large and their ToyOS deltas have never been linted once.
+Triage against the fork rule — a warning in upstream's own code is not
 ours and must not be "fixed", because that inflates the delta; only warnings
 inside ToyOS-added modules and `target_os = "toyos"` arms are actionable.
 Restore the overrides afterwards; they are dev-only and must never be committed.
