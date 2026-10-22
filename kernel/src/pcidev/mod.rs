@@ -775,15 +775,20 @@ pub fn declare(declared: &toyos_abi::acpi::Apertures) -> Result<(), aperture::De
         (Err(aperture::Declined::Late), _) => log!("pcidev: a declaration of the root bridges' memory after the first answer is refused"),
         (Ok(()), _) => unreachable!("a declaration taken is the answer"),
     }
-    let roots = machine.roots.clone();
     drop(machine);
     if answer != Err(aperture::Declined::Late) {
         DECLARATION.post();
     }
-    if answer.is_ok() {
-        slot::arm(&roots);
-    }
     answer
+}
+
+/// Arm the hot-plug slots below the roots a held declaration commits, on the
+/// declarer's thread once [`declare`] has answered, outside the `acpi`
+/// claim's borrow: arming claims a message from the units and writes each
+/// port's configuration.
+pub fn arm_slots() {
+    let roots = MACHINE.lock().roots.clone();
+    slot::arm(&roots);
 }
 
 /// The `acpi` claim went: where it declared nothing, nothing will be.
@@ -1462,9 +1467,11 @@ fn take_residue(number: usize) -> Vec<Aimed> {
 /// could still reach it is a device writing into memory the allocator has
 /// already handed to somebody else.
 ///
-/// **A function that left the device set is never asked anything**
+/// **A function that left the device set is never asked anything here**
 /// ([`tear_down_departed`]): what it held is undone at the units, and its
-/// slot is powered off once nothing behind it is held.
+/// slot is powered off once nothing behind it is held. Only a fault it still
+/// raises reaches its configuration space, to clear its bus mastering
+/// ([`note_fault`]), since a card its button asked out may still be powered.
 fn release(number: usize, arrival: Arrival) {
     let function = function(number);
     let departed = function.arrival.load(Ordering::Acquire) != arrival.0;

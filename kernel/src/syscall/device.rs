@@ -109,6 +109,9 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
             _ => Err(SyscallError::InvalidArgument),
         }
     });
+    if op == ops::DECLARE && done == Some(Ok(0)) {
+        crate::pcidev::arm_slots();
+    }
     let done = done.unwrap_or(Err(SyscallError::Gone)).and_then(|word| match &request {
         Some(request) => ctx.copy_out(UserAddr::new(at), request).map(|()| word),
         None => Ok(word),

@@ -184,6 +184,14 @@ started. Nothing reaches userland when a device arrives or leaves.
      not offered: a press removes at once.
    - A bridge below a slot (a switch) is not read: the kernel assigns no bus
      numbers.
+   - A powered, occupied slot whose link never comes up is owed nothing and
+     says nothing: no settle time asks again, and no line names the stall,
+     where its port enables no Link Changed interrupt (QEMU's does not).
+     Exit: such a slot is given a deadline, and its stall is said once the
+     deadline passes, with the bound cited from PCIe base spec 6.0.
+   - §6.6.1's 100 ms after the link comes up is waited out on every port;
+     Readiness Notifications (§6.23), which end it early where a port and
+     device support them, are not read.
    - On AArch64's SMMUv3 a function that arrived after the unit was
      programmed is refused a claim by name: its routes are read for the
      functions enumerated at boot.

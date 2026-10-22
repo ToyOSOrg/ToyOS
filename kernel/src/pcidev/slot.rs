@@ -47,7 +47,8 @@ use crate::sync::{Lock, Masked};
 static SLOTS: Lock<Vec<&'static HotPlug>> = Lock::new(Vec::new());
 
 /// Held across a [`refresh`], so two readers of the set never enumerate one
-/// arrival twice.
+/// arrival twice: a spinlock over at most one enumeration, eight functions'
+/// BAR sizing, which a second reader waits out.
 static REFRESHING: Lock<()> = Lock::new(());
 
 /// One armed slot: its port's registers, and what its handler and the device
@@ -108,9 +109,17 @@ pub(super) fn arm(roots: &[RootBridge]) {
         }
         match arm_one(number, port, express, slot, buses) {
             Ok(armed) => {
-                MACHINE.lock().ports.iter_mut().filter(|p| p.number == number).for_each(|p| p.armed = true);
+                {
+                    // The port is this kernel's now: the set lists it so, and
+                    // a claim on it is refused as one on a kernel driver's.
+                    let mut machine = MACHINE.lock();
+                    machine.ports.iter_mut().filter(|p| p.number == number).for_each(|p| p.armed = true);
+                    if !machine.kernel_driven.contains(&port.who) {
+                        machine.kernel_driven.push(port.who);
+                    }
+                }
                 SLOTS.lock().push(armed);
-                log!("pcidev: {port}'s hot-plug slot is armed: its root bridge's _OSC commit was granted {granted:#x}");
+                log!("pcidev: {port}'s hot-plug slot is armed, and the port is this kernel's: its root bridge's _OSC commit was granted {granted:#x}");
                 armed.command(Some(slot.control(armed.seen().occupied && armed.powered())), false);
                 super::changed();
             }

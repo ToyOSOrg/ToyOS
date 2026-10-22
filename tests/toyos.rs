@@ -4633,7 +4633,7 @@ fn a_function_arrives_and_leaves() -> Result<(), String> {
     let config = compile::repo_root().join("tests/images/hotplugcase.toml");
     let mut qemu = QemuInstance::boot_with_options(&config, &[], &[], options);
     let mut console = format!("{}\n", qemu.boot_log());
-    await_guest(&mut qemu, &mut console, "the slot armed", |t| t.contains("hot-plug slot is armed"))
+    await_guest(&mut qemu, &mut console, "the slot armed", |t| t.contains("hot-plug slot is armed, and the port is this kernel's"))
         .map_err(|e| format!("{e}\n{console}"))?;
     let arrival = |text: &str, nth: usize| -> Option<u32> {
         text.lines().filter_map(|l| l.split_once(JOINED)?.1.trim().parse().ok()).nth(nth)
