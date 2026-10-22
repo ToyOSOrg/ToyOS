@@ -4,7 +4,7 @@ ignoring SIGPIPE is kept: yes
 and read back: yes
 the default is kept again: yes
 SIGKILL's disposition is EINVAL: yes
-ignoring SIGCHLD is EINVAL: yes
+ignoring SIGCHLD is kept: yes
 no signal 0: yes
 raise of a signal whose default ignores does nothing: yes
 raise of an ignored signal does nothing: yes

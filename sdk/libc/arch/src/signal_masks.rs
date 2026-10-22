@@ -52,3 +52,12 @@ fn the_full_set_holds_every_signal() {
     }
     assert_eq!((1..=64).fold(0, |set, n| sigmask::with(set, n).unwrap()), sigmask::FULL);
 }
+
+#[test]
+fn sigdelset_takes_its_signal_alone_out() {
+    assert_eq!(sigmask::without(bit(1) | bit(10), 10), Some(bit(1)));
+    assert_eq!(sigmask::without(bit(1), 10), Some(bit(1)), "a signal not in the set");
+    for n in [0, -1, 65] {
+        assert_eq!(sigmask::without(bit(1), n), None, "signal {n}");
+    }
+}

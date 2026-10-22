@@ -10,6 +10,13 @@
 //! 0–2 and exactly what its file actions name (`spawnreq`). A child's group is
 //! a number this library keeps, which `kill(-pgid, …)` and `waitpid(-pgid,
 //! …)` read; the kernel has none.
+//!
+//! **A child's end raises `SIGCHLD` once** (`crate::signal`): libc's own
+//! thread watches every child that has not raised it, while a handler is
+//! installed for it, and a wait that takes a child it had not seen end
+//! tells it so. With `SIGCHLD` ignored an ended child is not kept, so a wait
+//! for children blocks until every one it names has ended and answers
+//! `ECHILD`.
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
@@ -21,7 +28,7 @@ use toyos::spawn::{self, Launched, Parent, Refused, Spawn};
 use toyos_abi::syscall;
 use toyos_abi::RawHandle;
 
-use crate::errcode::{E2BIG, EACCES, EAGAIN, EBADF, ECHILD, EINVAL, ENOENT, EPERM, ESRCH};
+use crate::errcode::{E2BIG, EACCES, EAGAIN, EBADF, ECHILD, EINTR, EINVAL, ENOENT, EPERM, ESRCH};
 use crate::pthread::Lock;
 use crate::spawnreq::{self, Action};
 
@@ -34,15 +41,15 @@ const POSIX_SPAWN_RESETIDS: i16 = 0x01;
 const POSIX_SPAWN_SETPGROUP: i16 = 0x02;
 const POSIX_SPAWN_SETSIGDEF: i16 = 0x04;
 const POSIX_SPAWN_SETSIGMASK: i16 = 0x08;
-/// The flags a spawn honours. No signal but `SIGKILL` reaches a child yet,
-/// and that one no mask holds, so a child's mask and defaults change nothing
-/// it can see; and a process has no ids to reset.
+/// The flags a spawn honours. A child starts with every signal at its default
+/// and none blocked, which is what `SETSIGDEF` asks and an empty `SETSIGMASK`
+/// asks; one naming a signal is refused at the spawn. A process has no ids to
+/// reset.
 const FLAGS: i16 = POSIX_SPAWN_RESETIDS | POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
 
-/// The most children unwaited at once, the track's bound: one poller watches
-/// them all, and its 256th watch is stage 6's notice
-/// (`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`).
-const MAX_CHILDREN: usize = toyos::poller::Poller::MAX_HANDLES as usize - 1;
+/// The most children unwaited at once: libc's own thread watches them all on
+/// one poller, beside its own control pipe and the process's notice.
+pub(crate) const MAX_CHILDREN: usize = toyos::poller::Poller::MAX_HANDLES as usize - 2;
 
 /// What the shell `system` and `popen` run a command with.
 const SHELL: &str = "/system/bin/shell";
@@ -51,6 +58,8 @@ struct Child {
     pid: i32,
     group: i32,
     process: Process,
+    /// Whether its end has raised `SIGCHLD`.
+    raised: bool,
 }
 
 /// Every child not yet waited for, in the order they were spawned.
@@ -218,6 +227,9 @@ pub unsafe extern "C" fn posix_spawn(
         None => &[],
     };
     let group = match unsafe { attr.as_ref() } {
+        // The child starts blocking nothing, so a mask that names a signal
+        // would be a mask it does not have.
+        Some(attr) if attr.flags & POSIX_SPAWN_SETSIGMASK != 0 && attr.mask != 0 => return crate::errcode::ENOSYS,
         Some(attr) if attr.flags & POSIX_SPAWN_SETPGROUP != 0 => Some(attr.pgroup),
         _ => None,
     };
@@ -259,6 +271,9 @@ pub unsafe extern "C" fn posix_spawnp(
 /// Start `path` with `argv` and `env`, its descriptors as `actions` leave
 /// them, in `group` or this process's: its pid, or an `errno`.
 fn spawn_child(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]>>], group: Option<i32>) -> Result<i32, i32> {
+    if crate::signal::children_ignored() {
+        forget_ended();
+    }
     if UNWAITED.fetch_add(1, Ordering::Relaxed) >= MAX_CHILDREN {
         UNWAITED.fetch_sub(1, Ordering::Relaxed);
         return Err(EAGAIN);
@@ -300,7 +315,8 @@ fn spawn_counted(path: &str, argv: &[u8], env: &[u8], actions: &[Action<Box<[u8]
         Some(group) => group,
         None => own_group(),
     };
-    CHILDREN.lock().push(Child { pid, group, process });
+    CHILDREN.lock().push(Child { pid, group, process, raised: false });
+    crate::signal::children_changed(false);
     Ok(pid)
 }
 
@@ -377,16 +393,77 @@ fn reap(pid: i32) -> Option<(i32, End, toyos_abi::syscall::ProcessStats)> {
     let at = children.iter().position(|c| c.pid == pid)?;
     let end = children[at].process.try_wait().ok()?;
     let child = children.remove(at);
+    drop(children);
     UNWAITED.fetch_sub(1, Ordering::Relaxed);
+    crate::signal::children_changed(!child.raised);
     // An ended child's accounting stays on its object, which answers.
     let stats = child.process.stats().expect("waitpid: an ended child's accounting");
     Some((pid, end, stats))
 }
 
+/// Every child that has ended, out of the table and kept for no wait, as
+/// `SIGCHLD` ignored has it.
+pub(crate) fn forget_ended() {
+    let ended: Vec<Child> = {
+        let mut children = CHILDREN.lock();
+        let (ended, live) = core::mem::take(&mut *children).into_iter().partition(|c| c.process.try_wait().is_ok());
+        *children = live;
+        ended
+    };
+    UNWAITED.fetch_sub(ended.len(), Ordering::Relaxed);
+}
+
+/// Each child whose end has not raised `SIGCHLD`, by pid.
+pub(crate) fn unraised() -> Vec<i32> {
+    CHILDREN.lock().iter().filter(|c| !c.raised).map(|c| c.pid).collect()
+}
+
+/// A copy of child `pid`'s handle to watch its end on, the caller's to close:
+/// a wait on another thread closes the table's own, whose number another
+/// handle may then take. `None` for a child gone, or a table with no room.
+pub(crate) fn copy_of(pid: i32) -> Option<toyos::OwnedHandle> {
+    let children = CHILDREN.lock();
+    let child = children.iter().find(|c| c.pid == pid)?;
+    let copy = syscall::dup(toyos::AsHandle::as_handle(&child.process)).ok()?;
+    // SAFETY: a copy just made, which nothing else answers for.
+    Some(unsafe { toyos::OwnedHandle::from_raw(copy) })
+}
+
+/// Whether `pid` has ended and not yet raised `SIGCHLD`, which it now has.
+pub(crate) fn raise(pid: i32) -> bool {
+    let mut children = CHILDREN.lock();
+    let Some(child) = children.iter_mut().find(|c| c.pid == pid && !c.raised) else { return false };
+    child.raised = child.process.try_wait().is_ok();
+    child.raised
+}
+
+/// Every child that has ended raises no `SIGCHLD`: a handler installed after
+/// an end is not told of it.
+pub(crate) fn mark_ended_raised() {
+    for child in CHILDREN.lock().iter_mut() {
+        child.raised |= child.process.try_wait().is_ok();
+    }
+}
+
 /// The first child `pid` names that has ended, waiting for one where
-/// `block`; `Ok(None)` for none ended without it.
+/// `block`; `Ok(None)` for none ended without it. A handler that interrupts
+/// the wait restarts it if it was installed with `SA_RESTART` and answers
+/// `EINTR` if not; a child started while it waits is one it waits for.
 fn wait_child(pid: i32, block: bool) -> Result<Option<(i32, End, toyos_abi::syscall::ProcessStats)>, i32> {
+    let mut call = crate::signal::Call::enter(None, true, false).expect("a wait for children is always a call");
     loop {
+        if let Some(delivery) = call.take() {
+            if !call.interrupted(delivery) {
+                return Err(EINTR);
+            }
+            continue;
+        }
+        // Before the table is read: a child started after it moves the turn
+        // this records, and the wake pipe says so.
+        call.children_seen();
+        if crate::signal::children_ignored() {
+            forget_ended();
+        }
         // Copies of the handles, watched with the table given up: a reap on
         // another thread closes the table's own.
         let watched: Vec<(i32, RawHandle)> = {
@@ -418,19 +495,16 @@ fn wait_child(pid: i32, block: bool) -> Result<Option<(i32, End, toyos_abi::sysc
             }
             copies
         };
-        let poller = toyos::poller::Poller::new(watched.len() as u32);
+        let poller = toyos::poller::Poller::new(watched.len() as u32 + 1);
         for (i, (_, handle)) in watched.iter().enumerate() {
             poller.watch_raw(*handle, toyos::poller::READABLE, i as u64);
         }
-        let mut first = None;
-        poller.wait(1, u64::MAX, |token| {
-            first.get_or_insert(token as usize);
-        });
+        poller.watch_raw(call.wake(), toyos::poller::READABLE, u64::MAX);
+        // Whatever woke it, the next turn looks: an ended child is reaped
+        // there, or forgotten under an ignored `SIGCHLD`.
+        poller.wait(1, u64::MAX, |_| {});
         drop(poller);
         watched.iter().for_each(|(_, h)| syscall::close(*h));
-        if let Some(reaped) = first.and_then(|i| reap(watched[i].0)) {
-            return Ok(Some(reaped));
-        }
     }
 }
 
@@ -486,27 +560,41 @@ pub unsafe extern "C" fn wait4(pid: i32, status: *mut i32, options: i32, usage: 
     }
 }
 
-/// `SIGKILL` for a child or a group of them, and 0 to ask whether one is
-/// there; no other signal reaches a process yet, so it is `EINVAL`. A process
-/// holds no right to kill itself, so `SIGKILL` for its own pid is `EPERM`, and
-/// a kill of its own group reaches its children in it and not itself.
+/// `SIGKILL` for a child or a group of them, `SIGINT`, `SIGHUP` and
+/// `SIGTERM` as a quit with that reason, which asks the child and everything
+/// below it as a POSIX `kill` does not, and 0 to ask whether one is there; no
+/// other signal reaches another process, so it is `EINVAL`. A process holds
+/// no right to kill itself, so `SIGKILL` for its own pid is `EPERM`, and one
+/// of the three is raised in it, as it is by a kill of its own group, which
+/// reaches its children in it too.
 #[no_mangle]
 pub unsafe extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     let me = own_group();
+    let quit = quit_of(sig);
     let refused = match (sig, pid == me) {
-        (0 | SIGKILL, false) => {
+        (_, false) if sig == 0 || sig == SIGKILL || quit.is_some() => {
             let mut any = false;
             for child in CHILDREN.lock().iter().filter(|c| names(pid, c)) {
                 any = true;
-                if sig == SIGKILL {
-                    // `Ok` for one already ended, which is still unwaited.
-                    let _ = child.process.kill();
-                }
+                // `Ok` for one already ended, which is still unwaited, and
+                // `MANAGE` is on every child's handle libc holds.
+                let asked = match quit {
+                    Some(reason) => child.process.quit(reason),
+                    None if sig == SIGKILL => child.process.kill(),
+                    None => Ok(()),
+                };
+                asked.expect("kill: a child's handle refused what its spawn gave it");
             }
-            (!any).then_some(ESRCH)
+            let own_group = pid == 0 || pid == -me;
+            match quit.is_some() && own_group {
+                true => crate::signal::raise(sig).err(),
+                false => (!any).then_some(ESRCH),
+            }
         }
         (0, true) => None,
         (SIGKILL, true) => Some(EPERM),
+        // A quit of this process is its own signal, raised here.
+        (_, true) if quit.is_some() => crate::signal::raise(sig).err(),
         _ => Some(EINVAL),
     };
     match refused {
@@ -515,6 +603,18 @@ pub unsafe extern "C" fn kill(pid: i32, sig: i32) -> i32 {
             crate::errno::set(errno);
             -1
         }
+    }
+}
+
+/// The reason a quit asks for `sig`, for one of the three it raises.
+fn quit_of(sig: i32) -> Option<toyos::quit::Reason> {
+    use crate::sigreq::{SIGHUP, SIGINT, SIGTERM};
+    use toyos::quit::Reason;
+    match sig {
+        SIGINT => Some(Reason::Interrupt),
+        SIGHUP => Some(Reason::HangUp),
+        SIGTERM => Some(Reason::Terminate),
+        _ => None,
     }
 }
 

@@ -372,9 +372,22 @@ pub unsafe extern "C" fn accept(
     let listener_id = TcpSocketId(entry.netstack_id);
     let notify_fd = entry.notify_fd;
 
-    // Block until a connection arrives (read 1 byte from notify pipe)
-    let mut notify_byte = [0u8; 1];
-    let _ = syscall::read(RawHandle(notify_fd as u32), &mut notify_byte);
+    // A connection's arrival is a byte on the notify pipe.
+    let notify = RawHandle(notify_fd as u32);
+    let arrived = interruptibly(fd, |block| match block {
+        true => {
+            let _ = syscall::read(notify, &mut [0u8; 1]);
+            Some(())
+        }
+        false => match syscall::read_nonblock(notify, &mut [0u8; 1]) {
+            Err(syscall::SyscallError::WouldBlock) => None,
+            _ => Some(()),
+        },
+    });
+    if let Err(errno) = arrived {
+        set_errno(errno);
+        return -1;
+    }
 
     let accepted = match stream::accept(listener_id) {
         Ok(a) => a,
@@ -456,9 +469,15 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, _flags: i32) ->
     match entry.kind {
         SocketKind::Tcp => {
             let data = core::slice::from_raw_parts_mut(buf, len);
-            match stream::read(RawHandle(entry.stream as u32), data, Wait::Blocking(None)) {
-                Ok(n) => n as isize,
-                Err(refused) => { set_errno(stream_errno(refused)); -1 }
+            let stream = RawHandle(entry.stream as u32);
+            let read = interruptibly(fd, |block| match stream::read(stream, data, if block { Wait::Blocking(None) } else { Wait::Nonblocking }) {
+                Err(Refused::WouldBlock) if !block => None,
+                answer => Some(answer),
+            });
+            match read {
+                Ok(Ok(n)) => n as isize,
+                Ok(Err(refused)) => { set_errno(stream_errno(refused)); -1 }
+                Err(errno) => { set_errno(errno); -1 }
             }
         }
         SocketKind::Udp => {
@@ -596,6 +615,31 @@ pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
 const SHUT_RD: i32 = 0;
 const SHUT_WR: i32 = 1;
 const SHUT_RDWR: i32 = 2;
+
+/// `attempt`'s answer, asked without blocking until it has one and waiting
+/// between for `fd` to be readable: a handler that interrupts the wait
+/// restarts it if it was installed with `SA_RESTART`, and answers `EINTR` if
+/// not. With no handler kept nothing interrupts it, and `attempt(true)`
+/// blocks for the answer.
+fn interruptibly<T>(fd: i32, mut attempt: impl FnMut(bool) -> Option<T>) -> Result<T, i32> {
+    let Some(mut call) = crate::signal::Call::enter(None, false, false) else {
+        return Ok(attempt(true).expect("a blocking attempt answers"));
+    };
+    loop {
+        if let Some(delivery) = call.take() {
+            if !call.interrupted(delivery) {
+                return Err(crate::errcode::EINTR);
+            }
+            continue;
+        }
+        if let Some(answer) = attempt(false) {
+            return Ok(answer);
+        }
+        let mut entry = crate::posix_io::pollfd { fd, events: 1, revents: 0 };
+        // SAFETY: one entry, this one.
+        unsafe { crate::posix_io::wait_fds(&mut entry, 1, None, Some(call.wake())) }?;
+    }
+}
 
 /// A stream's refusal in POSIX's word: `send`'s and `recv`'s.
 fn stream_errno(refused: Refused) -> i32 {

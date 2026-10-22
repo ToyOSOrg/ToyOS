@@ -26,6 +26,12 @@ pub(crate) fn with(set: u64, signo: i32) -> Option<u64> {
     Some(set | 1 << (n - 1))
 }
 
+/// `set` without signal `signo`, or `None` for a number no bit stands for,
+/// which POSIX's `sigdelset` refuses `EINVAL`.
+pub(crate) fn without(set: u64, signo: i32) -> Option<u64> {
+    Some(set & !with(0, signo)?)
+}
+
 /// `mask` changed by `set` as `how` says, or `None` for a `how` that is none
 /// of the three, which POSIX refuses `EINVAL`.
 pub(crate) fn changed(mask: u64, how: i32, set: u64) -> Option<u64> {
