@@ -232,7 +232,7 @@ Depends on: nothing; W6 waits on it.
   - the reorder window.
 - **Exit:** host tests of every refusal and hostile length, a malformed
   country element among them; a seeded structured fuzz of a fixed count, as
-  `build/ssh/tests/fuzz.rs`; and a third-party capture corpus from outside the
+  `lib/ssh/tests/fuzz.rs`; and a third-party capture corpus from outside the
   references, beside the crate, with provenance, terms and `NOTICE` rows,
   pinned by hash.
 - **Landed** in #924 and #930; the exit is met, the readings checked

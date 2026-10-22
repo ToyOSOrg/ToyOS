@@ -35,6 +35,11 @@ impl HostKey {
         *self.key.public_key().as_bytes()
     }
 
+    /// The `SHA256:` fingerprint OpenSSH names the key by.
+    pub fn fingerprint(&self) -> String {
+        toyos_update::repo::fingerprint(&self.public())
+    }
+
     /// `K_S`, the public key blob the exchange hash covers.
     pub(crate) fn blob(&self) -> Vec<u8> {
         public_blob(&self.public())

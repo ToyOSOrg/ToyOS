@@ -170,8 +170,8 @@ Where this differs from the tree the owner adopted:
   step 4).
 - `toyos-pci-claim`, `acpiserver-api` and `logkeeper-api` are in `lib/`:
   each has two users (rule step 5).
-- `toyos-ssh` is `build/ssh`: its one user is `build/signing.rs`, and
-  sshserver serves on russh (rule step 4).
+- `toyos-ssh` is `lib/ssh`: `build/signing.rs` and `system/sshserver` use it
+  (rule step 5).
 - `tests/metal/` is the metal loop. A machine's records are in the host's
   store since #852, so there is no `tests/machines/t14/` and no descriptor.
 - `tests/cavp/` stays: `toyos-crypto`'s `tests/nist.rs` reads it. It was

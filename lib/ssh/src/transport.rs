@@ -19,6 +19,8 @@
 //! payload the session layer sends between the server's KEXINIT and its
 //! NEWKEYS is held, and sent under the new keys (RFC 4253 §7.1).
 
+use std::sync::Arc;
+
 use toyos_crypto::ssh::{OpeningKey, SealingKey};
 use toyos_crypto::{hybrid, mlkem, x25519, Random};
 
@@ -74,7 +76,7 @@ enum Kex {
 
 pub(crate) struct Transport<R> {
     rng: R,
-    host: HostKey,
+    host: Arc<HostKey>,
     /// The client's identification line, once read.
     client_version: Option<Vec<u8>>,
     /// The client's bytes; those before `read` are read, and dropped only at
@@ -97,7 +99,7 @@ pub(crate) struct Transport<R> {
 }
 
 impl<R: Random> Transport<R> {
-    pub(crate) fn new(host: HostKey, rng: R) -> Self {
+    pub(crate) fn new(host: Arc<HostKey>, rng: R) -> Self {
         let mut transport = Self {
             rng,
             host,

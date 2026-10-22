@@ -131,9 +131,19 @@ fn message(rng: &mut Rng, session_id: &[u8; 32]) -> (Vec<u8>, bool) {
         15 | 16 => {
             out.push(98);
             out.extend_from_slice(&(rng.below(3) as u32).to_be_bytes());
-            string(&mut out, [&b"exec"[..], b"shell", b"pty-req", b"subsystem"][rng.below(4)]);
+            let request = [&b"exec"[..], b"shell", b"pty-req", b"subsystem"][rng.below(4)];
+            string(&mut out, request);
             out.push(rng.below(2) as u8);
-            string(&mut out, &rng.bytes(24));
+            match (request, rng.chance(50)) {
+                (b"shell", true) => {}
+                (b"subsystem", true) => string(&mut out, b"sftp"),
+                (b"pty-req", true) => {
+                    string(&mut out, b"xterm");
+                    out.extend_from_slice(&[0; 16]);
+                    string(&mut out, &[0]);
+                }
+                _ => string(&mut out, &rng.bytes(24)),
+            }
         }
         17 => {
             out.push(94);
@@ -290,7 +300,7 @@ fn every_session_is_total_and_none_logs_in_without_a_right_signature() {
                         assert!(signed_rightly, "iteration {iteration}: an Authenticated event without a right signature");
                         authenticated += 1;
                     }
-                    Event::Exec { channel, .. } | Event::Writable { channel } => {
+                    Event::Exec { channel, .. } | Event::Shell { channel, .. } | Event::Sftp { channel } | Event::Writable { channel } => {
                         assert!(authenticated_now, "iteration {iteration}: a channel event before authentication");
                         let _ = c.server.send(channel, &rng.bytes(100));
                         if rng.chance(20) {
@@ -437,6 +447,9 @@ fn answer<R: Random>(server: &mut Server<Keys, R>) -> bool {
         match event {
             Event::Exec { channel, command } => {
                 let _ = server.send(channel, &command);
+            }
+            Event::Shell { channel, .. } | Event::Sftp { channel } => {
+                let _ = server.send(channel, b"started");
             }
             Event::Data { channel, data } => {
                 let _ = server.send(channel, &data);

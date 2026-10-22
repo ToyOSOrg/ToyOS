@@ -12,7 +12,7 @@ mod driver;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 
-use driver::{Fixed, Keys, Side, Transcript};
+use driver::{Driver, Fixed, Keys, Side, Transcript};
 use toyos_ssh::Server;
 
 fn main() {
@@ -24,6 +24,7 @@ fn main() {
     let listener = TcpListener::bind(("127.0.0.1", port.parse::<u16>().expect("a port"))).expect("bind");
     let (mut socket, _) = listener.accept().expect("accept");
     let mut server = Server::new(driver::host_key(), Keys::recorded(), Fixed(seed));
+    let mut driver = Driver::default();
     let mut transcript = Transcript { seed, chunks: Vec::new() };
     let mut buf = vec![0; 64 * 1024];
     loop {
@@ -38,7 +39,7 @@ fn main() {
         }
         transcript.chunks.push((Side::Client, buf[..n].to_vec()));
         let result = server.input(&buf[..n]);
-        for event in driver::drive(&mut server) {
+        for event in driver.drive(&mut server) {
             eprintln!("event: {event:?}");
         }
         if let Err(refusal) = result {

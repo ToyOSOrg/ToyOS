@@ -3,9 +3,14 @@
 //! file. `examples/record.rs` includes this file, so a replay drives the
 //! server exactly as the recording did.
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
-use toyos_ssh::{Authorizer, Event, HostKey, Random, Server};
+use toyos_ssh::{Authorizer, ChannelId, Event, HostKey, Random, Server};
+
+#[path = "sftp.rs"]
+mod sftp;
 
 /// The user every recording logs in as.
 pub const USER: &str = "toyos";
@@ -15,8 +20,8 @@ pub const USER: &str = "toyos";
 pub const STATUS: u32 = 3;
 
 /// The host key every recording was made with: a throwaway `ssh-keygen` key.
-pub fn host_key() -> HostKey {
-    HostKey::from_openssh(include_str!("../fixtures/host_ed25519")).expect("the fixture host key")
+pub fn host_key() -> Arc<HostKey> {
+    Arc::new(HostKey::from_openssh(include_str!("../fixtures/host_ed25519")).expect("the fixture host key"))
 }
 
 /// The key blob of an OpenSSH `.pub` line.
@@ -71,30 +76,51 @@ impl Random for Fixed {
     }
 }
 
-/// Answer every event: an `exec` is greeted with a line naming its command,
-/// stdin is echoed back, and EOF ends the program with [`STATUS`].
-pub fn drive<R: Random>(server: &mut Server<Keys, R>) -> Vec<Event> {
-    let mut seen = Vec::new();
-    while let Some(event) = server.poll() {
-        match &event {
-            Event::Exec { channel, command } => {
-                let line = [b"exec: ", &command[..], b"\n"].concat();
-                assert_eq!(server.send(*channel, &line), Ok(line.len()));
+/// The scripted driver: an `exec` is greeted with a line naming its command,
+/// a shell with a line saying whether it has a terminal, and both echo their
+/// input and end with [`STATUS`] at its EOF; `sftp` is served by
+/// [`sftp::Sftp`]. Every answer is a function of the events alone.
+#[derive(Default)]
+pub struct Driver {
+    sftp: BTreeMap<ChannelId, sftp::Sftp>,
+}
+
+impl Driver {
+    /// Answer every event the server has, and say which.
+    pub fn drive<R: Random>(&mut self, server: &mut Server<Keys, R>) -> Vec<Event> {
+        let mut seen = Vec::new();
+        while let Some(event) = server.poll() {
+            match &event {
+                Event::Exec { channel, command } => send(server, *channel, &[b"exec: ", &command[..], b"\n"].concat()),
+                Event::Shell { channel, pty } => send(server, *channel, format!("shell, pty {pty}\n").as_bytes()),
+                Event::Sftp { channel } => {
+                    self.sftp.insert(*channel, sftp::Sftp::default());
+                }
+                Event::Data { channel, data } => {
+                    let reply = match self.sftp.get_mut(channel) {
+                        Some(sftp) => sftp.input(data),
+                        None => data.clone(),
+                    };
+                    send(server, *channel, &reply);
+                    server.consumed(*channel, data.len()).unwrap();
+                }
+                Event::Eof { channel } => {
+                    let status = if self.sftp.remove(channel).is_some() { 0 } else { STATUS };
+                    server.exit(*channel, status).unwrap();
+                }
+                Event::Closed { channel } => {
+                    self.sftp.remove(channel);
+                }
+                Event::Authenticated { .. } | Event::Writable { .. } | Event::Declined(_) | Event::Disconnected => {}
             }
-            Event::Data { channel, data } => {
-                assert_eq!(server.send(*channel, data), Ok(data.len()), "the client's window is wide enough for an echo");
-                server.consumed(*channel, data.len()).unwrap();
-            }
-            Event::Eof { channel } => server.exit(*channel, STATUS).unwrap(),
-            Event::Authenticated { .. }
-            | Event::Closed { .. }
-            | Event::Writable { .. }
-            | Event::Declined(_)
-            | Event::Disconnected => {}
+            seen.push(event);
         }
-        seen.push(event);
+        seen
     }
-    seen
+}
+
+fn send<R: Random>(server: &mut Server<Keys, R>, channel: ChannelId, data: &[u8]) {
+    assert_eq!(server.send(channel, data), Ok(data.len()), "the client's window is wide enough for the driver's answer");
 }
 
 /// Which side a transcript chunk came from.

@@ -41,14 +41,20 @@ pub(crate) struct PreAuth {
     failures: u32,
 }
 
-/// A client whose signature verified, and the user it logged in as.
+/// A client whose signature verified, the user it logged in as and the key
+/// it signed with.
 pub(crate) struct Verified {
     user: String,
+    key: [u8; 32],
 }
 
 impl Verified {
     pub(crate) fn user(&self) -> &str {
         &self.user
+    }
+
+    pub(crate) fn key(&self) -> &[u8; 32] {
+        &self.key
     }
 }
 
@@ -125,7 +131,7 @@ impl PreAuth {
                         data.extend_from_slice(payload.get(..unsigned_len).unwrap_or_default());
                         if PublicKey::from_bytes(key).and_then(|key| key.verify(&data, &signature)).is_ok() {
                             out.push(vec![msg::USERAUTH_SUCCESS]);
-                            return Ok(Some(Verified { user: user.to_string() }));
+                            return Ok(Some(Verified { user: user.to_string(), key }));
                         }
                         Declined::Signature { user: user.to_string() }
                     } else {

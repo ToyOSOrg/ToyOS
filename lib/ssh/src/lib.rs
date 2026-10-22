@@ -5,7 +5,8 @@
 //! **One algorithm set, and nothing else offered**: `mlkem768x25519-sha256`,
 //! then `curve25519-sha256`, with strict key exchange; an `ssh-ed25519` host key,
 //! `chacha20-poly1305@openssh.com` both ways, no compression; `publickey`
-//! authentication with `ssh-ed25519` keys; `session` channels serving `exec`.
+//! authentication with `ssh-ed25519` keys; `session` channels serving `exec`,
+//! `shell` and the `sftp` subsystem.
 //!
 //! **Every byte [`Server::input`] takes is the peer's.** Every length is held
 //! to what remains and to a cap named for its field, and what breaks a rule
@@ -21,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 mod auth;
+pub mod authorized_keys;
 mod base64;
 mod connection;
 pub mod hostkey;
@@ -32,6 +34,8 @@ pub use connection::ChannelId;
 pub use hostkey::HostKey;
 pub use toyos_crypto::Random;
 pub use wire::Refusal;
+
+use std::sync::Arc;
 
 use auth::PreAuth;
 use connection::Session;
@@ -102,8 +106,11 @@ pub enum Declined {
     /// A channel open past the most a session holds, OpenSSH's `MaxSessions`,
     /// or past the 2^32 numbers it gives.
     ChannelLimit,
-    /// A channel request other than one `exec`.
+    /// A channel request other than one program request — `exec`, `shell` or
+    /// `subsystem` — after at most one `pty-req`.
     Request(String),
+    /// A subsystem other than `sftp`.
+    Subsystem(String),
     /// A global request; none is served.
     GlobalRequest(String),
 }
@@ -111,10 +118,16 @@ pub enum Declined {
 /// What the driver is told.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Event {
-    /// The client proved it holds a key the authorizer named for `user`.
-    Authenticated { user: String },
+    /// The client proved it holds the key named by `fingerprint`, which the
+    /// authorizer named for `user`.
+    Authenticated { user: String, fingerprint: String },
     /// Run `command` on `channel`. Its bytes are the client's.
     Exec { channel: ChannelId, command: Vec<u8> },
+    /// Run the shell on `channel`; `pty` says the client asked for a
+    /// terminal first.
+    Shell { channel: ChannelId, pty: bool },
+    /// Serve the `sftp` subsystem on `channel`.
+    Sftp { channel: ChannelId },
     /// Bytes for the program's standard input. The client's window comes back
     /// only as [`Server::consumed`] says they were taken.
     Data { channel: ChannelId, data: Vec<u8> },
@@ -151,7 +164,7 @@ pub struct Server<A, R> {
 impl<A: Authorizer, R: Random> Server<A, R> {
     /// A session whose identification line and KEXINIT are already in
     /// [`Server::output`].
-    pub fn new(host_key: HostKey, authorizer: A, rng: R) -> Self {
+    pub fn new(host_key: Arc<HostKey>, authorizer: A, rng: R) -> Self {
         Self {
             transport: Transport::new(host_key, rng),
             authorizer,
@@ -193,7 +206,10 @@ impl<A: Authorizer, R: Random> Server<A, R> {
             self.events.extend(events);
             if let Some(verified) = verified? {
                 self.transport.authenticated();
-                self.events.push_back(Event::Authenticated { user: verified.user().to_string() });
+                self.events.push_back(Event::Authenticated {
+                    user: verified.user().to_string(),
+                    fingerprint: toyos_update::repo::fingerprint(verified.key()),
+                });
                 self.phase = Phase::Authenticated(Box::new(Session::new(verified)));
             }
             self.flush(out)?;

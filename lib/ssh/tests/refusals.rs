@@ -38,7 +38,8 @@ fn logged_in() -> C {
     let mut c = with_service();
     c.sign_in(USER, &pair(1).0).unwrap();
     assert_eq!(c.recv(), [vec![52]]);
-    assert_eq!(c.events, [Event::Authenticated { user: USER.into() }]);
+    let fingerprint = toyos_update::repo::fingerprint(&pair(1).1);
+    assert_eq!(c.events, [Event::Authenticated { user: USER.into(), fingerprint }]);
     c.events.clear();
     c
 }
@@ -331,23 +332,69 @@ fn exec(c: &mut C, ours: u32) -> toyos_ssh::ChannelId {
     channel
 }
 
-/// **Exec only, one per channel; ten channels; session channels only.**
+/// A `pty-req` as OpenSSH sends one (RFC 4254 §6.2): `TERM`, the size in
+/// characters and pixels, and the encoded modes, ending in `TTY_OP_END`.
+fn pty_req() -> Vec<u8> {
+    let mut rest = Vec::new();
+    string(&mut rest, b"xterm-256color");
+    for v in [80u32, 24, 0, 0] {
+        rest.extend_from_slice(&v.to_be_bytes());
+    }
+    string(&mut rest, &[0]);
+    rest
+}
+
+/// **One program a channel, after at most one terminal; ten channels;
+/// session channels only.**
 #[test]
-fn a_channel_serves_one_exec_and_nothing_else() {
+fn a_channel_serves_one_program_and_nothing_else() {
+    let success = |peer: u32| [&[99u8][..], &peer.to_be_bytes()].concat();
+    let failure = |peer: u32| [&[100u8][..], &peer.to_be_bytes()].concat();
     let mut c = logged_in();
     let ours = open(&mut c, 7, 1 << 20, 32 * 1024);
-    for (name, rest) in [("shell", &[][..]), ("subsystem", &[0, 0, 0, 4, b's', b'f', b't', b'p'][..]), ("pty-req", &[][..]), ("env", &[][..])] {
+    c.send(&channel_request(ours, "env", true, &[0, 0, 0, 1, b'A', 0, 0, 0, 1, b'b'])).unwrap();
+    assert_eq!(c.recv(), [failure(7)]);
+    assert_eq!(c.events.pop(), Some(Event::Declined(Declined::Request("env".into()))));
+    let mut other = Vec::new();
+    string(&mut other, b"netconf");
+    c.send(&channel_request(ours, "subsystem", true, &other)).unwrap();
+    assert_eq!(c.recv(), [failure(7)]);
+    assert_eq!(c.events.pop(), Some(Event::Declined(Declined::Subsystem("netconf".into()))));
+    c.send(&channel_request(ours, "pty-req", true, &pty_req())).unwrap();
+    assert_eq!((c.recv(), c.events.pop()), (vec![success(7)], None));
+    c.send(&channel_request(ours, "pty-req", true, &pty_req())).unwrap();
+    assert_eq!(c.recv(), [failure(7)]);
+    assert_eq!(c.events.pop(), Some(Event::Declined(Declined::Request("pty-req".into()))));
+    c.send(&channel_request(ours, "shell", true, &[])).unwrap();
+    assert_eq!(c.recv(), [success(7)]);
+    assert!(matches!(c.events.pop(), Some(Event::Shell { pty: true, .. })));
+    let mut sftp = Vec::new();
+    string(&mut sftp, b"sftp");
+    let mut command = Vec::new();
+    string(&mut command, b"true");
+    for (name, rest) in [("shell", &[][..]), ("exec", &command[..]), ("subsystem", &sftp[..]), ("pty-req", &pty_req()[..])] {
         c.send(&channel_request(ours, name, true, rest)).unwrap();
-        assert_eq!(c.recv(), [[&[100u8][..], &7u32.to_be_bytes()].concat()]);
+        assert_eq!(c.recv(), [failure(7)], "a {name} after the shell");
         assert_eq!(c.events.pop(), Some(Event::Declined(Declined::Request(name.into()))));
     }
+    // A shell without a terminal, the sftp subsystem and an exec, each on a
+    // channel of its own.
+    let ours = open(&mut c, 8, 1 << 20, 32 * 1024);
+    c.send(&channel_request(ours, "shell", false, &[])).unwrap();
+    assert!(matches!(c.events.pop(), Some(Event::Shell { pty: false, .. })));
+    let ours = open(&mut c, 9, 1 << 20, 32 * 1024);
+    c.send(&channel_request(ours, "subsystem", true, &sftp)).unwrap();
+    assert_eq!(c.recv(), [success(9)]);
+    assert!(matches!(c.events.pop(), Some(Event::Sftp { .. })));
+    let ours = open(&mut c, 10, 1 << 20, 32 * 1024);
     exec(&mut c, ours);
-    assert_eq!(c.recv(), [[&[99u8][..], &7u32.to_be_bytes()].concat()]);
-    let mut again = Vec::new();
-    string(&mut again, b"true");
-    c.send(&channel_request(ours, "exec", true, &again)).unwrap();
-    assert_eq!(c.recv(), [[&[100u8][..], &7u32.to_be_bytes()].concat()]);
-    assert_eq!(c.events.pop(), Some(Event::Declined(Declined::Request("exec".into()))));
+    assert_eq!(c.recv(), [success(10)]);
+    // A pty-req that ends early ends the session.
+    let ours = open(&mut c, 11, 1 << 20, 32 * 1024);
+    let request = pty_req();
+    assert_eq!(c.send(&channel_request(ours, "pty-req", true, &request[..request.len() - 1])), Err(Refusal::Truncated("encoded terminal modes")));
+    let mut c = logged_in();
+    open(&mut c, 7, 1 << 20, 32 * 1024);
     // Up to ten channels, then a refusal by name.
     for peer in 1..10 {
         open(&mut c, 100 + peer, 1 << 20, 32 * 1024);

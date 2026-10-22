@@ -17,9 +17,7 @@ metal rows.
   and config name, and costs no boot, unless it ends the machine (a panic, a
   wedge, a reset) or judges a boot (the loader, an update, a file read back
   after a reboot). Its registration says which.
-- **One exec channel**, to `test-runner`'s stdin loop, since `sshd` aliases a
-  second channel's input (`issues/sshserver-holds-one-channel-and-does-not-say-so.md`).
-  The harness's ssh client relayed it through `pipe`, once that wrote output
+- **One exec channel**, to `test-runner`'s stdin loop. The harness's ssh client relayed it through `pipe`, once that wrote output
   as it arrived; the client was built and is deleted, and
   `issues/the-host-cannot-reach-the-t14-while-it-runs-toyos.md` records the
   commit that restores it.

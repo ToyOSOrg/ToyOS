@@ -1,6 +1,7 @@
 //! The connection layer of an authenticated session (RFC 4254): `session`
 //! channels keyed by the id the server gave each, every one serving one
-//! `exec`, and the windows that bound what each side may send.
+//! program — an `exec`, a `shell` or the `sftp` subsystem, after at most one
+//! `pty-req` — and the windows that bound what each side may send.
 //!
 //! **A [`ChannelId`] exists only here**, made when a channel opens, so a
 //! channel event cannot be written outside an authenticated [`Session`]. It is
@@ -9,7 +10,7 @@
 //! [`Gone`] and never names a channel opened later. A message naming a channel
 //! the session does not hold ends the session. A channel the server has closed
 //! tells the driver nothing more. Every
-//! other channel type, every other channel request and every global request is
+//! other channel type, subsystem, channel request and global request is
 //! refused by name.
 //!
 //! **The client's window is spent as the driver consumes**: the server returns
@@ -30,6 +31,13 @@ const WINDOW: u32 = 2 * 1024 * 1024;
 const MAX_PACKET: u32 = 32 * 1024;
 
 const COMMAND_CAP: usize = 32 * 1024;
+
+/// The longest `TERM` and encoded terminal modes of a `pty-req`.
+const TERM_CAP: usize = 256;
+const MODES_CAP: usize = 4096;
+
+/// The one subsystem served.
+const SFTP: &str = "sftp";
 
 const OPEN_ADMINISTRATIVELY_PROHIBITED: u32 = 1;
 const OPEN_RESOURCE_SHORTAGE: u32 = 4;
@@ -53,7 +61,10 @@ struct Channel {
     unconsumed: u32,
     /// Bytes consumed and not yet given back as window.
     consumed: u32,
-    command: bool,
+    /// A program was asked for; nothing more is.
+    started: bool,
+    /// The client asked for a terminal (`pty-req`).
+    pty: bool,
     eof: bool,
     /// The server sent CLOSE and awaits the client's.
     closing: bool,
@@ -145,15 +156,15 @@ impl Session {
                         if channel.closing {
                             return Ok(());
                         }
-                        let reply = if request == "exec" && !channel.command {
-                            let command = r.string("command", COMMAND_CAP)?;
-                            r.end("CHANNEL_REQUEST exec")?;
-                            channel.command = true;
-                            events.push(Event::Exec { channel: id, command: command.to_vec() });
-                            msg::CHANNEL_SUCCESS
-                        } else {
-                            events.push(Event::Declined(Declined::Request(request.to_string())));
-                            msg::CHANNEL_FAILURE
+                        let reply = match channel.request(id, request, r)? {
+                            Ok(event) => {
+                                events.extend(event);
+                                msg::CHANNEL_SUCCESS
+                            }
+                            Err(declined) => {
+                                events.push(Event::Declined(declined));
+                                msg::CHANNEL_FAILURE
+                            }
                         };
                         if want_reply {
                             out.push(to_peer(reply, channel.peer));
@@ -198,7 +209,8 @@ impl Session {
             recv_window: WINDOW,
             unconsumed: 0,
             consumed: 0,
-            command: false,
+            started: false,
+            pty: false,
             eof: false,
             closing: false,
         });
@@ -265,6 +277,50 @@ impl Session {
             channel.consumed = 0;
         }
         Ok(())
+    }
+}
+
+impl Channel {
+    /// A `CHANNEL_REQUEST` of type `request`, its fields in `r`: the event it
+    /// makes, if any, or why it is refused.
+    fn request(&mut self, id: ChannelId, request: &str, mut r: Reader<'_>) -> Result<Result<Option<Event>, Declined>, Refusal> {
+        if self.started {
+            return Ok(Err(Declined::Request(request.to_string())));
+        }
+        let event = match request {
+            "exec" => {
+                let command = r.string("command", COMMAND_CAP)?;
+                r.end("CHANNEL_REQUEST exec")?;
+                Some(Event::Exec { channel: id, command: command.to_vec() })
+            }
+            "shell" => {
+                r.end("CHANNEL_REQUEST shell")?;
+                Some(Event::Shell { channel: id, pty: self.pty })
+            }
+            "subsystem" => {
+                let name = r.text("subsystem name", COMMAND_CAP)?;
+                r.end("CHANNEL_REQUEST subsystem")?;
+                if name != SFTP {
+                    return Ok(Err(Declined::Subsystem(name.to_string())));
+                }
+                Some(Event::Sftp { channel: id })
+            }
+            // RFC 4254 §6.2. The terminal's size and modes are read and kept by
+            // nobody: this system has no terminal layer to give them to.
+            "pty-req" if !self.pty => {
+                r.text("TERM", TERM_CAP)?;
+                for field in ["terminal width, characters", "terminal height, rows", "terminal width, pixels", "terminal height, pixels"] {
+                    r.u32(field)?;
+                }
+                r.string("encoded terminal modes", MODES_CAP)?;
+                r.end("CHANNEL_REQUEST pty-req")?;
+                self.pty = true;
+                return Ok(Ok(None));
+            }
+            _ => return Ok(Err(Declined::Request(request.to_string()))),
+        };
+        self.started = true;
+        Ok(Ok(event))
     }
 }
 
