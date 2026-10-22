@@ -156,13 +156,18 @@ fn main() {
     };
     let info = dev.describe().expect("acpiserver: the claim's first read is its description");
     let claim = Claim { dev: &dev, info, poller: Poller::new(1), watching: Cell::new(false) };
+    let mut internal = false;
+    for arg in std::env::args().skip(1) {
+        assert!(arg == apertures::PORTS_INTERNAL, "acpiserver: {arg:?} is no argument this server takes");
+        internal = true;
+    }
     let mut server = Server::new(&claim, Machine, info);
     if info.flags & HARDWARE_REDUCED == 0 {
         server.arm(&dev);
     }
     let (loaded, kept) = aml::load(&claim, server.info.rsdp);
     let names = server.loaded(loaded.handed, kept);
-    server.declare(names.as_ref());
+    server.declare(names.as_ref(), internal);
     let (batteries, adapters) = server.arm_controller(names.as_ref());
     if let Some(names) = server.negotiate(names) {
         println!("{}", server.census.line());
@@ -419,9 +424,9 @@ impl<'a, K: Kernel, P: Ports> Server<'a, K, P> {
 
     /// Declare the root bridges' memory ([`apertures`]) out of the namespace
     /// as initialised; with no namespace, no window.
-    fn declare(&mut self, names: Option<&Names>) {
+    fn declare(&mut self, names: Option<&Names>, internal: bool) {
         let read = match (self.aml.as_mut(), names) {
-            (Some(aml), Some(names)) => apertures::read(aml, names, &mut self.census),
+            (Some(aml), Some(names)) => apertures::read(aml, names, &mut self.census, internal),
             _ => Err("no namespace was kept".into()),
         };
         if apertures::declare(self.kernel, read).is_err() {

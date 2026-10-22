@@ -11,10 +11,15 @@
 //! negotiated, and what it offers and what a commit was granted recorded
 //! (`crate::osc::negotiate_root`).
 //!
-//! **No root with an external-facing port below it is committed native
-//! hot-plug**, nor one whose port's `_DSD` cannot be read: the owner's
-//! "refuse external" holds no claim behind such a port refused yet, so its
-//! slot stays the firmware's ([`external_facing`]).
+//! **Native hot-plug is committed only where the image declares every
+//! hot-plug port internal** ([`PORTS_INTERNAL`]), and even then not on a root
+//! with a port its firmware marks external-facing, nor one whose port's
+//! `_DSD` cannot be read ([`external_facing`]). The owner's "refuse external"
+//! holds and no claim behind an external port is refused in code yet, and no
+//! firmware signal says a port is internal: ACPI 6.5 defines no such
+//! property (§6.2.5 only frames `_DSD`), and Microsoft's `ExternalFacingPort`
+//! ("Kernel DMA Protection", Microsoft Learn) marks the external ports alone,
+//! so a port without it is unknown, not internal.
 //!
 //! **The declaration is every root together, or none at all**: a root whose
 //! `_STA`, `_SEG` or `_CRS` is refused, a list the decoder refuses or that
@@ -43,8 +48,14 @@ pub struct Root {
     pub committed: Option<u32>,
 }
 
-/// Every root bridge, in walk order, or why there is no declaration.
-pub fn read<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, census: &mut Census) -> Result<Vec<Root>, String> {
+/// The argument an image's acpiserver row carries to declare every hot-plug
+/// port below the machine's roots internal; only the hot-plug test's image,
+/// whose ports are QEMU's own, carries it.
+pub const PORTS_INTERNAL: &str = "--hot-plug-ports-internal";
+
+/// Every root bridge, in walk order, or why there is no declaration;
+/// `internal` is the image's [`PORTS_INTERNAL`].
+pub fn read<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, census: &mut Census, internal: bool) -> Result<Vec<Root>, String> {
     let devices = names.objects.iter().filter(|named| named.kind == Kind::Device).map(|named| named.path.as_str());
     let mut bridges: Vec<&str> = Vec::new();
     for device in devices {
@@ -82,6 +93,10 @@ pub fn read<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, census: &mut Census)
         let buses = found.buses.ok_or_else(|| said(&path, "a root bridge's _CRS names no bus range"))?;
         room -= found.windows;
         let commit = match external_ports(aml, names, root) {
+            _ if !internal => {
+                println!("{OWN}{root}'s hot-plug ports are not declared internal, so native hot-plug is not committed");
+                false
+            }
             Ok(external) if external.is_empty() => true,
             Ok(external) => {
                 println!("{OWN}{root} has external-facing ports ({}), so native hot-plug is not committed", external.join(", "));
@@ -248,7 +263,7 @@ mod tests {
         let (_, kept) = load(&kernel, CRAFTED_RSDP);
         let mut aml = kept.expect("the DSDT loads");
         let names = Names::read(&aml.interpreter).expect("its namespace walks");
-        read(&mut aml, &names, &mut Census::default())
+        read(&mut aml, &names, &mut Census::default(), true)
     }
 
     fn windows(root: &Root) -> Vec<RootBridgeWindow> {
@@ -436,7 +451,7 @@ mod tests {
         let (_, kept) = load(&kernel, CRAFTED_RSDP);
         let mut aml = kept.expect("the DSDT loads");
         let names = Names::read(&aml.interpreter).expect("its namespace walks");
-        let roots = read(&mut aml, &names, &mut Census::default()).expect("one root");
+        let roots = read(&mut aml, &names, &mut Census::default(), true).expect("one root");
         assert_eq!((roots[0].osc, roots[0].committed), (Osc::Offered(ROOT_CONTROL), Some(ROOT_CONTROL)));
         let integer = |aml: &mut Aml<'_, Scripted>, path| aml.interpreter.evaluate(&mut aml.host, path, &[]);
         assert!(matches!(integer(&mut aml, "\\_SB_.PCI0.CNT_"), Ok(Value::Integer(2))));
@@ -482,6 +497,18 @@ mod tests {
         assert_eq!(negotiated(&rest(&port(0))), Ok((Osc::Offered(ROOT_CONTROL), Some(ROOT_CONTROL))));
         let unreadable = device("RP01", &def_name("_DSD", &int(1)));
         assert_eq!(negotiated(&rest(&unreadable)), Ok((Osc::Offered(ROOT_CONTROL), None)));
+    }
+
+    /// An image that declares no port internal commits nothing, whatever the
+    /// firmware offers: no firmware property says a port is internal.
+    #[test]
+    fn a_root_is_not_committed_unless_its_ports_are_declared_internal() {
+        let kernel = crate::aml::tests::crafted(&root(&crs(), &osc(&[0x6B])), &[]);
+        let (_, kept) = load(&kernel, CRAFTED_RSDP);
+        let mut aml = kept.expect("the DSDT loads");
+        let names = Names::read(&aml.interpreter).expect("its namespace walks");
+        let roots = read(&mut aml, &names, &mut Census::default(), false).expect("one root");
+        assert_eq!((roots[0].osc, roots[0].committed), (Osc::Offered(ROOT_CONTROL), None));
     }
 
     /// A root that is not a list of windows, one whose `_CRS` is refused or

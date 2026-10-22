@@ -132,7 +132,8 @@ started. Nothing reaches userland when a device arrives or leaves.
      and reads again.
    - The kernel provides native PCIe hot-plug on a port whose root bridge's
      `_OSC` commit granted native hot-plug and capability structure control.
-     acpiserver commits both where the query offered both. The port is the
+     acpiserver commits both where the query offered both and the image
+     declares its ports internal (below). The port is the
      kernel's, its MSI-X entry on the claim path's remapped message; its
      handler reads and clears Slot Status, takes a lost or button-removed
      slot's functions out of the set, makes at most one Slot Control write
@@ -167,15 +168,18 @@ started. Nothing reaches userland when a device arrives or leaves.
    - acpiserver commits native hot-plug before the kernel knows whether a
      slot can be armed; a machine whose units remap no interrupt has its
      slots left unserved after firmware gave them up.
-   - **No root with an external-facing port is committed native hot-plug**
-     (orchestrator, 2026-10-22, holding the owner's "refuse external"):
-     a port whose `_DSD` names it `ExternalFacingPort` (Microsoft's Kernel
-     DMA Protection property, the Thunderbolt ports), or whose `_DSD` cannot
-     be read, keeps every slot below its root the firmware's, since no claim
-     behind such a port is refused in code yet
-     (`issues/the-iommu-refuses-nothing-yet.md`). A firmware that marks no
-     port reads as all-internal. Exit: claims behind an external-facing port
-     are refused by name, and then its slot is armed.
+   - **No machine's hot-plug slot is armed** (orchestrator, 2026-10-22,
+     holding the owner's "refuse external"): no claim behind an
+     external-facing port is refused in code yet
+     (`issues/the-iommu-refuses-nothing-yet.md`), and no firmware signal says
+     a port is internal. ACPI 6.5 defines none, and Microsoft's
+     `ExternalFacingPort` `_DSD` property ("Kernel DMA Protection") marks
+     the external ports alone. So acpiserver commits native hot-plug only
+     where its image declares every hot-plug port internal
+     (`--hot-plug-ports-internal`), which only the QEMU hot-plug test's image
+     does, and even then not on a root with a port marked external or one
+     whose `_DSD` it cannot read. Exit: claims behind an external-facing port
+     are refused by name, and a machine's own ports are then armed.
    - §6.7.1.5's five seconds in which a second press cancels a removal are
      not offered: a press removes at once.
    - A bridge below a slot (a switch) is not read: the kernel assigns no bus

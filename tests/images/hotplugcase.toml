@@ -11,9 +11,13 @@ start = ["logkeeper", "acpiserver", "test-runner"]
 service = true
 syscap = ["logread"]
 
+# QEMU's `pcie-root-port` is no port a device outside the machine plugs
+# into, and no firmware property can say so: this image declares it, and no
+# other image does (`system/acpiserver/src/apertures.rs`).
 [programs.acpiserver]
 service = true
 devices = ["acpi"]
+args = ["--hot-plug-ports-internal"]
 
 # Started on each function the kernel does not drive, never by `[boot] start`.
 [programs.pciholder]

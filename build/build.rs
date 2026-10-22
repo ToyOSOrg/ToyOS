@@ -3067,6 +3067,21 @@ mod tests {
         }
     }
 
+    /// Only the hot-plug test's image declares its hot-plug ports internal to
+    /// acpiserver: anywhere else it would hand native hot-plug of a port that
+    /// may face outside the machine to a kernel that refuses no claim behind
+    /// one yet.
+    #[test]
+    fn only_the_hot_plug_test_declares_its_ports_internal() {
+        const DECLARES: &str = "tests/images/hotplugcase.toml";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for config in ALL_CONFIGS {
+            let parsed = parse_config(&root.join(config));
+            let declared = parsed.programs.values().any(|p| p.args.iter().any(|a| a == "--hot-plug-ports-internal"));
+            assert_eq!(declared, *config == DECLARES, "{config} declares its hot-plug ports internal: {declared}");
+        }
+    }
+
     /// Every config renders, so a row the manifest refuses — one that serves a
     /// port and is not marked `service` — reds here rather than at a build.
     #[test]
