@@ -16,6 +16,8 @@ mod aesni;
 #[cfg(not(target_os = "uefi"))]
 mod chacha;
 #[cfg(not(target_os = "uefi"))]
+mod montgomery;
+#[cfg(not(target_os = "uefi"))]
 mod poly1305;
 #[cfg(not(target_os = "uefi"))]
 mod sha;
@@ -40,6 +42,7 @@ impl Features {
     const VPCLMUL: u32 = 1 << 8;
     const AVX512VL: u32 = 1 << 9;
     const AVX512BW: u32 = 1 << 10;
+    const ADX: u32 = 1 << 11;
 
     fn has(self, bits: u32) -> bool {
         self.0 & bits == bits
@@ -64,6 +67,11 @@ impl Features {
     pub(super) fn bmi2(self) -> bool {
         self.has(Self::BMI2)
     }
+    /// MULX and ADCX/ADOX.
+    #[cfg(not(target_os = "uefi"))]
+    pub(super) fn bmi2_adx(self) -> bool {
+        self.has(Self::BMI2 | Self::ADX)
+    }
     /// SHA-NI with the SSSE3 and SSE4.1 shuffles its message schedule takes.
     #[cfg(not(target_os = "uefi"))]
     pub(super) fn sha(self) -> bool {
@@ -86,7 +94,7 @@ impl Features {
 
     /// Intel SDM Vol. 2A, CPUID: leaf 1 ECX bits 1 (PCLMULQDQ), 9 (SSSE3),
     /// 19 (SSE4.1), 25 (AES), 27 (OSXSAVE) and 28 (AVX); leaf 7 sub-leaf 0
-    /// EBX bits 5 (AVX2), 8 (BMI2), 16 (AVX512F), 29 (SHA), 30 (AVX512BW)
+    /// EBX bits 5 (AVX2), 8 (BMI2), 16 (AVX512F), 19 (ADX), 29 (SHA), 30 (AVX512BW)
     /// and 31 (AVX512VL), ECX bits 9 (VAES) and 10 (VPCLMULQDQ). Vol. 1
     /// §13.3: AVX needs XCR0's SSE and AVX state (bits 1 and 2) enabled by
     /// the OS, AVX-512 its opmask, ZMM_Hi256 and Hi16_ZMM state (bits 5 to 7)
@@ -116,6 +124,7 @@ impl Features {
             | bit(leaf1, 9, Self::SSSE3)
             | bit(leaf1, 19, Self::SSE41)
             | bit(leaf7b, 8, Self::BMI2)
+            | bit(leaf7b, 19, Self::ADX)
             | bit(leaf7b, 29, Self::SHA);
         if ymm {
             bits |= bit(leaf7b, 5, Self::AVX2) | bit(leaf7c, 9, Self::VAES) | bit(leaf7c, 10, Self::VPCLMUL);
@@ -149,6 +158,18 @@ fn first_features() -> Features {
     let read = Features::read();
     FEATURES.store(read.0, Ordering::Relaxed);
     read
+}
+
+/// RSA's Montgomery multiplication on BMI2 and ADX, when the CPU has them:
+/// the top word of the unreduced result, which is below 2m.
+#[cfg(not(target_os = "uefi"))]
+pub(super) fn rsa_mul(a: &[u64], b: &[u64], m: &[u64], n0: u64, n: usize, out: &mut [u64]) -> Option<u64> {
+    if !features().bmi2_adx() {
+        return None;
+    }
+    assert!(n.is_multiple_of(4) && n <= 64 && a.len() >= n && b.len() >= n && m.len() >= n && out.len() >= n);
+    // CPUID admitted BMI2 and ADX, and the lengths are checked above.
+    Some(unsafe { montgomery::mul(a, b, m, n0, n, out) })
 }
 
 /// A vector from 16 bytes by value. With no pointer there is no copy
@@ -465,7 +486,7 @@ mod tests {
         for (bit, feature) in [(1, Features::CLMUL), (9, Features::SSSE3), (19, Features::SSE41), (25, Features::AES)] {
             assert_eq!(Features::decode(!(1 << bit), !0, !0, 0xe7).0 & feature, 0, "leaf 1 bit {bit}");
         }
-        for (bit, feature) in [(5, Features::AVX2), (8, Features::BMI2), (29, Features::SHA)] {
+        for (bit, feature) in [(5, Features::AVX2), (8, Features::BMI2), (19, Features::ADX), (29, Features::SHA)] {
             assert_eq!(Features::decode(!0, !(1 << bit), !0, 0xe7).0 & feature, 0, "leaf 7 EBX bit {bit}");
         }
         for (bit, feature) in [(9, Features::VAES), (10, Features::VPCLMUL)] {
@@ -481,6 +502,10 @@ mod tests {
         assert_eq!(f.clmul(), on && std::is_x86_feature_detected!("pclmulqdq"));
         assert_eq!(f.avx2(), on && std::is_x86_feature_detected!("avx2"));
         assert_eq!(f.bmi2(), on && std::is_x86_feature_detected!("bmi2"));
+        assert_eq!(
+            f.bmi2_adx(),
+            on && std::is_x86_feature_detected!("bmi2") && std::is_x86_feature_detected!("adx")
+        );
         assert_eq!(
             f.sha(),
             on && std::is_x86_feature_detected!("sha")
