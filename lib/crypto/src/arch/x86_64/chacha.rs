@@ -456,8 +456,9 @@ pub(super) mod avx512 {
         ]
     }
 
-    /// The four blocks into `out`, XORed in or written over it, 16 bytes per
-    /// access as [`load_data`]'s alignment note explains.
+    /// The four blocks into `out`, XORed in or written over it. Caller data
+    /// is accessed 16 bytes at a time, as [`load_data`]'s alignment note
+    /// explains.
     #[inline]
     #[target_feature(enable = "avx512f")]
     fn quad_emit(rows: Quad, out: &mut [u8; 256], xor: bool) {
