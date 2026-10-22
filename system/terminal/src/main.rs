@@ -23,7 +23,7 @@ use std::time::Duration;
 use terminal::Console;
 use toyos::poller::{Poller, READABLE};
 use toyos::port;
-use toyos::surface::{self, Delivery, Host, Notice};
+use toyos::surface::{self, Delivery, Host, Leaving, Notice};
 use toyos::RawHandle;
 use window::Window;
 
@@ -101,7 +101,7 @@ fn main() {
     // with no trace.
     println!("terminal: ready");
 
-    loop {
+    let leaving = loop {
         poller.watch_raw(RawHandle(shell_stdout.as_raw_handle()), READABLE, TOKEN_STDOUT);
         poller.watch_raw(RawHandle(shell_stderr.as_raw_handle()), READABLE, TOKEN_STDERR);
         poller.watch_raw(window.handle(), READABLE, TOKEN_WINDOW);
@@ -130,7 +130,7 @@ fn main() {
                     console.write_bytes(&buf[..n]);
                     present(&console, &window);
                 }
-                break;
+                break Leaving::ShellEnded;
             }
             console.write_bytes(&buf[..n]);
             present(&console, &window);
@@ -153,8 +153,8 @@ fn main() {
         // reached already; a hang-up or a terminate closes this terminal.
         if ready[TOKEN_NOTICE as usize] {
             let asked = notice.and_then(|n| n.try_read().ok().flatten());
-            if matches!(asked, Some(toyos::quit::Reason::HangUp | toyos::quit::Reason::Terminate)) {
-                break;
+            if let Some(reason @ (toyos::quit::Reason::HangUp | toyos::quit::Reason::Terminate)) = asked {
+                break Leaving::Asked(reason);
             }
         }
 
@@ -230,7 +230,7 @@ fn main() {
                         _ => {}
                     }
                 }
-                window::Event::Close => break,
+                window::Event::Close => break Leaving::Closed,
                 window::Event::Resized => {
                     let font = (window.scale() != scale).then(|| font_at(&ttf, window.scale()));
                     scale = window.scale();
@@ -240,20 +240,22 @@ fn main() {
                 window::Event::Frame => {}
             }
         }
-    }
+    };
 
     drop(window);
-    hang_up(&mut child);
+    if let Some(reason) = leaving.asks() {
+        let _ = toyos_abi::syscall::process_quit(toyos::RawHandle(child.as_raw_handle()), reason);
+    }
+    wait_for(&mut child);
     drop(shell_stdin);
     drop(shell_stdout);
     drop(shell_stderr);
 }
 
-/// Ask the shell's tree to hang up, and wait for the shell to end, saying
-/// every [`STILL_WAITING`] how long it has been outstanding.
-fn hang_up(child: &mut std::process::Child) {
+/// Wait for the shell to end, saying every [`STILL_WAITING`] how long it has
+/// been outstanding.
+fn wait_for(child: &mut std::process::Child) {
     let shell = toyos::RawHandle(child.as_raw_handle());
-    let _ = toyos_abi::syscall::process_quit(shell, toyos::quit::Reason::HangUp);
     let poller = Poller::new(1);
     let mut waited = Duration::ZERO;
     loop {
@@ -264,7 +266,7 @@ fn hang_up(child: &mut std::process::Child) {
             return;
         }
         waited += STILL_WAITING;
-        eprintln!("terminal: the shell (pid {}) has not ended {}s after its hang-up; still waiting", child.id(), waited.as_secs());
+        eprintln!("terminal: the shell (pid {}) has not ended {}s after this terminal left it; still waiting", child.id(), waited.as_secs());
     }
 }
 

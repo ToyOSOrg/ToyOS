@@ -86,6 +86,17 @@ pub const MSG_FOREGROUND: u32 = 6;
 pub const LINE_REPLACE: u32 = 0;
 pub const LINE_ADD: u32 = 1;
 
+/// How many processes one client's line holds. Policy on the host's handle
+/// table, which a client's frames would otherwise fill: a client whose line
+/// grows past it is dropped, and a shell hands over its line's first this
+/// many, so a Ctrl+C reaches a longer pipeline's first processes alone.
+pub const MAX_LINE: usize = 64;
+
+/// Whether a line holding `held` processes takes `added` more.
+fn line_takes(held: usize, added: usize) -> bool {
+    held + added <= MAX_LINE
+}
+
 /// How many clients one surface will hold at once.
 ///
 /// Policy, not physics. A surface's clients are the programs running under it
@@ -284,6 +295,12 @@ impl Host {
                     let (handles, n) = peer.rx.take_batch().into_raw();
                     // SAFETY: the batch is this process's now, each handle once.
                     let line = handles[..n].iter().map(|&h| unsafe { OwnedHandle::from_raw(h) });
+                    let held = if how == LINE_ADD { peer.line.len() } else { 0 };
+                    if !line_takes(held, n) {
+                        drop(line.collect::<Vec<_>>());
+                        self.close(i);
+                        return Some(Notice::Dropped { client, why: "its foreground line grew past what a surface holds" });
+                    }
                     match how {
                         LINE_REPLACE => peer.line = line.collect(),
                         LINE_ADD => peer.line.extend(line),
@@ -496,6 +513,29 @@ impl AsHandle for Keys {
     }
 }
 
+/// Why a surface's host, a terminal, stops serving the shell it started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Leaving {
+    /// Its window was closed.
+    Closed,
+    /// It was asked to quit, and with it everything below it.
+    Asked(Reason),
+    /// The shell ended.
+    ShellEnded,
+}
+
+impl Leaving {
+    /// What the host asks its shell's tree as it goes: a hang-up for a close
+    /// alone. A quit that asked the host reached that tree already, and a
+    /// second would kill every process that has not read the first.
+    pub fn asks(self) -> Option<Reason> {
+        match self {
+            Self::Closed => Some(Reason::HangUp),
+            Self::Asked(_) | Self::ShellEnded => None,
+        }
+    }
+}
+
 /// The client side of the foreground line: what a shell hands its surface of
 /// the line it waits for. A process with no surface above it hands nothing.
 #[derive(Default)]
@@ -511,7 +551,7 @@ impl Foreground {
         let Some(conn) = self.conn() else { return };
         // `TRANSFER` alone beside `MANAGE`, which the move takes.
         let rights = Rights::MANAGE.union(Rights::TRANSFER);
-        let mut copies = processes.iter().filter_map(|&p| syscall::dup_narrowed(p, rights).ok());
+        let mut copies = processes.iter().take(MAX_LINE).filter_map(|&p| syscall::dup_narrowed(p, rights).ok());
         let mut how = LINE_REPLACE;
         loop {
             // SAFETY: each a duplicate just made, which nothing else answers for.
@@ -555,6 +595,28 @@ pub fn notify_layout_changed() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A line takes processes up to its bound, a replacement counting from
+    /// none, and refuses the one past it.
+    #[test]
+    fn a_line_holds_at_most_its_bound() {
+        assert!(line_takes(0, MAX_LINE));
+        assert!(line_takes(MAX_LINE - MAX_TRANSFER_HANDLES, MAX_TRANSFER_HANDLES));
+        assert!(!line_takes(MAX_LINE, 1));
+        assert!(!line_takes(MAX_LINE - 1, 2));
+    }
+
+    /// Only a closed window asks the shell's tree to hang up. A quit that
+    /// asked the terminal reached that tree already, and asking again would
+    /// kill what has not read the first; a shell that ended is asked nothing.
+    #[test]
+    fn a_host_asks_its_shell_to_hang_up_only_when_closed() {
+        assert_eq!(Leaving::Closed.asks(), Some(Reason::HangUp));
+        for reason in [Reason::Interrupt, Reason::HangUp, Reason::Terminate] {
+            assert_eq!(Leaving::Asked(reason).asks(), None, "{reason:?}");
+        }
+        assert_eq!(Leaving::ShellEnded.asks(), None);
+    }
 
     /// The line set most recently is the foreground, an addition does not move
     /// it, and clearing it hands the foreground back to the line under it.

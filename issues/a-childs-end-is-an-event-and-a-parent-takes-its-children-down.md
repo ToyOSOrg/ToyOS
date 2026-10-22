@@ -61,8 +61,8 @@ the session alive. Ordinary shell commands spawn helpers, which inherit only
 what is passed to them; `launch <app>` is the explicit independent launch, with
 the app's own identity and saved decisions, and independent identity does not
 mean detached lifetime. Sign-out coordinates a graceful shutdown, with cancel
-and force, before it ends the session's subtree. A session owner's failure ends
-that session alone, never another session or a system service. SSH
+and force, before it ends the session's subtree. A session owner's failure may end
+that session, never another session or a system service. SSH
 authentication starts the user's session, and its shell inherits no host key
 and no SSH service authority. The kernel's mechanisms stay ordinary processes,
 parent and child, jobs and capabilities; login and session policy is
@@ -275,8 +275,11 @@ an explicit force issues it, and never a timer's.
      shell and the terminal listen: an interactive shell does not end on an
      interrupt, a `-c` shell ends once what it runs has, with its status, and a
      hang-up or a terminate ends either once its line has. Closing a terminal's
-     window, or a hang-up or terminate of the terminal, asks the shell's tree
-     to hang up and waits, saying every ten seconds what it still waits for.
+     window asks the shell's tree to hang up; a hang-up or terminate of the
+     terminal reached that tree already and asks nothing more
+     (`surface::Leaving`). Either way the terminal waits, saying every ten
+     seconds what it still waits for. That close path is host-tested as a
+     decision only, and unverified until 6.2's desktop hang-up arm is met.
      One copy of `toyos` takes the notice in a process, the descriptor table's
      owner, and the others ask it. *Exit*, met by `tty_interrupt` in
      `libc_children`'s QEMU x86-64 boot, the probe being the shell's surface:
@@ -294,7 +297,8 @@ an explicit force issues it, and never a timer's.
      says what stays and keeps waiting. A stop of the machine is a request
      carrying its mode, wait or terminate, and only a terminate request, itself
      the explicit force, asks with terminate; test-runner's stops are terminate
-     requests. No timeout makes one. `&` is a line the shell watches. sshd
+     requests. No product timeout makes one; a test's hang ceiling may still
+     end its test with one, the test reporting its own stall. `&` is a line the shell watches. sshd
      awaits exits through a ToyOS `tokio/src/process` arm in the tokio fork,
      shaped as its Linux pidfd arm (`process/unix/pidfd_reaper.rs`). *Exit*: a
      dropped SSH connection whose session runs a watching child sees it write
