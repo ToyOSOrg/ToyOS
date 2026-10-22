@@ -104,7 +104,11 @@ fn a_holder_killed_inside_the_gate_leaves_the_parent_working() {
     let mut out = BufReader::new(parent.stdout.take().expect("the parent's stdout"));
     netstack.serve_export(Holder::FIRST);
     let said = line(&mut out);
-    assert!(said.starts_with("the child ended") && said.contains("Fault(Memory)"), "the faulting child: {said}");
+    if !(said.starts_with("the child ended") && said.contains("Fault(Memory)")) {
+        let mut why = String::new();
+        let _ = parent.stderr.take().expect("the parent's stderr").read_to_string(&mut why);
+        panic!("the faulting child: the parent said {said:?}, ended {:?}, and wrote {why}", parent.wait());
+    }
     assert_eq!(line(&mut out), "contended", "the parent's write did not find the gate held");
     let second = Holder::new(2).expect("a holder's number");
     netstack.hung_up(second);
@@ -318,7 +322,10 @@ impl Netstack {
 /// stream's receive ring holding `peer`.
 fn run(role: &str, peer: &[u8]) -> (Child, Netstack) {
     let (acceptor, connector) = port::create().expect("a port");
-    let ns = namespace::build().add(SERVICE, &connector).finish().expect("a namespace");
+    // This test's own names, so a child reaches the file server its own
+    // spawns read images through, and this test as its `netstack`.
+    let own = toyos::endow::namespace().expect("this test's namespace");
+    let ns = namespace::build().keep_all(own).add(SERVICE, &connector).finish().expect("a namespace");
     let child = Command::new(SELF_PATH)
         .arg(role)
         .endow(SVC_LABEL, ns.into_raw().0)
