@@ -498,13 +498,19 @@ Not consumers:
    - Ring stays a host differential oracle of the verifier.
    - The edge corpus is Wycheproof's `ed25519` and the vectors of Chalkias
      et al., "Taming the many EdDSAs" (2020). On both corpora the crate agrees
-     with `ed25519-dalek`'s `verify_strict`, and with ring where ring is
-     strict. Done (#1019): every verdict on the twelve cases is
-     `verify_strict`'s; ring accepts cases 0, 1, 2 and 11, which strict
-     verification refuses, and its verdicts are pinned.
+     with `ed25519-dalek`'s `verify_strict` and with ring.
+     - **Awaiting the owner, as this exit cannot hold as written:** on the
+       twelve cases every verdict of the crate's is `verify_strict`'s, and
+       ring accepts four that `verify_strict` refuses: the small-order key of
+       cases 0 and 1, the small-order R of case 2 and case 11's
+       non-canonical R. No verifier agrees with both. #1019 pins ring's
+       verdicts (`lib/crypto/tests/differential.rs`,
+       `speccheck_cases_against_dalek_strict_and_ring`).
    - The loader verifies a signed image on the T14 and the AMD bench, with
-     its verification time measured on each. The loader logs it in counter
-     ticks since #1019.
+     its verification time measured on each. Done (#1019's probe image,
+     #1016's evidence): 253,975 counter ticks on the T14 at its stated
+     2.4192 GHz, about 105 µs, and 122,724 on the AMD bench, whose CPU states
+     no counter rate.
    - An AArch64 QEMU loader boot verifies a signed image. Done:
      `a_bent_supervisor_is_refused_and_the_other_slot_boots` boots QEMU's
      AArch64 machine too.

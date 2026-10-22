@@ -22,8 +22,7 @@ sign = ["toyos-crypto/sign"]
 [dependencies]
 # Strict Ed25519 verification (RFC 8032, small-order and non-canonical
 # encodings refused), SHA-512 over the signed header as SSHSIG names it, and
-# SHA-256 over the sections and a package archive. `no_std`, with no table the
-# soft-float loader cannot hold.
+# SHA-256 over the sections and a package archive. `no_std`.
 toyos-crypto = { path = "../crypto" }
 # The calendar a repository document's `expires` is written in, the tree's one.
 toyos-wallclock = { path = "../wallclock" }
