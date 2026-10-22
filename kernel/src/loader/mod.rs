@@ -85,7 +85,10 @@ pub(crate) fn read_file_range(
 
 
 /// Commit one range of private memory per `PT_LOAD` segment at `image_start`
-/// plus its offset, its file bytes copied in and the rest of it zero.
+/// plus its offset, its file bytes and the rest of it zero: out of an image
+/// object, each page copied at its first touch, as `file_backing::SharedImage`
+/// promises a change after the hand-off reaches only pages not yet read; out
+/// of any other backing, copied in whole now.
 ///
 /// `Err` when two segments would share a page, which their ranges cannot, or
 /// when the file's bytes cannot be read: checked before the first range, and
@@ -109,11 +112,19 @@ fn load_segments(
         if seg_end == seg_start {
             continue;
         }
-        space.reserve(seg_end - seg_start, At::Fixed(UserAddr::new(seg_start)), segment_prot(seg))?;
         // The file's bytes from the segment's first page: the bytes of that
         // page before the segment are the file's too, as a linker lays them.
         let file_start = seg.file_offset() & !4095;
         let file_bytes = seg.filesz() + seg.file_offset() % 4096;
+        let at = At::Fixed(UserAddr::new(seg_start));
+        if let Some(object) = backing.object() {
+            // Each page copied out of the object at its first touch, the file
+            // past its end and the segment past its file size reading zeros.
+            let copied = file_bytes.min(backing.file_size().saturating_sub(file_start));
+            space.copy(seg_end - seg_start, at, segment_prot(seg), Arc::clone(object), file_start, copied)?;
+            continue;
+        }
+        space.reserve(seg_end - seg_start, at, segment_prot(seg))?;
         let mut done = 0;
         while done < file_bytes {
             if backing.read_page(file_start + done, &mut page).is_err() {

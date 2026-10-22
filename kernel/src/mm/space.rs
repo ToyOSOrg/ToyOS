@@ -257,11 +257,23 @@ impl AddressSpace {
     /// `len` bytes of private memory, committed unless `prot` is `None`, which
     /// reserves the range and nothing more.
     pub fn reserve(&mut self, len: u64, at: At, prot: Prot) -> Result<UserAddr, SyscallError> {
+        self.private(len, at, prot, Kind::Private { committed: prot != Prot::None })
+    }
+
+    /// `len` bytes of private memory, committed, whose pages start as a copy
+    /// of `source` from `offset` as far as their first `copied` bytes go and
+    /// zeros past them, each taken at its first touch: a program's segment
+    /// read lazily out of the object it was handed in.
+    pub fn copy(&mut self, len: u64, at: At, prot: Prot, source: Arc<SharedMemObject>, offset: u64, copied: u64) -> Result<UserAddr, SyscallError> {
+        self.private(len, at, prot, Kind::Copy { source, offset, len: copied })
+    }
+
+    fn private(&mut self, len: u64, at: At, prot: Prot, kind: Kind<Arc<SharedMemObject>>) -> Result<UserAddr, SyscallError> {
         self.room_at(len, at)?;
         let start = self.locate(len, at)?;
-        let committed = prot != Prot::None;
-        self.inventory.insert(start, Entry { end: start + len, prot, kind: Kind::Private { committed } });
-        if committed {
+        let backed = !matches!(kind, Kind::Private { committed: false });
+        self.inventory.insert(start, Entry { end: start + len, prot, kind });
+        if backed {
             self.tables.build(start, start + len);
         }
         self.usage.made.fetch_add(1, Relaxed);
@@ -313,7 +325,7 @@ impl AddressSpace {
         self.room(start, end, 0)?;
         let allowed = self.inventory.meeting(start, end).all(|(_, entry)| match entry.kind {
             Kind::Object { max, .. } => prot.within(max),
-            Kind::Private { .. } => true,
+            Kind::Private { .. } | Kind::Copy { .. } => true,
         });
         if !allowed {
             return Err(SyscallError::PermissionDenied);
@@ -366,7 +378,7 @@ impl AddressSpace {
     pub fn decommit(&mut self, start: UserAddr, len: u64) -> Result<(), SyscallError> {
         let (start, end) = self.held(start, len)?;
         self.room(start, end, 0)?;
-        if !self.inventory.meeting(start, end).all(|(_, entry)| matches!(entry.kind, Kind::Private { .. })) {
+        if !self.inventory.meeting(start, end).all(|(_, entry)| matches!(entry.kind, Kind::Private { .. } | Kind::Copy { .. })) {
             return Err(SyscallError::InvalidArgument);
         }
         self.inventory.update(start, end, |_, entry| {
@@ -572,7 +584,29 @@ fn page_leaf(start: u64, entry: &Entry<Arc<SharedMemObject>>, page: u64) -> Opti
         Kind::Object { object, offset, .. } => {
             Leaf::Mapped(Mapping { phys: object.page(offset + (page - start)), prot, owned: false, cache: object.cache() })
         }
+        Kind::Copy { source, offset, len } => {
+            let Some(frame) = super::pmm::alloc_frame() else {
+                crate::log!("space: no frame to populate {page:#x}");
+                return None;
+            };
+            let phys = frame.into_raw();
+            copy_in(source, offset + (page - start), len.saturating_sub(page - start), phys);
+            Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
+        }
     })
+}
+
+/// Write `source`'s bytes from `offset` into the zeroed frame at `phys`, as
+/// many of the page's as `len` and the object both hold.
+fn copy_in(source: &SharedMemObject, offset: u64, len: u64, phys: u64) {
+    let n = len.min(PAGE_SIZE).min(source.size().saturating_sub(offset)) as usize;
+    if n == 0 {
+        return;
+    }
+    // SAFETY: a frame just allocated to this page, which no leaf maps yet, so
+    // nothing else reaches it; `n` bytes stay inside it.
+    let frame = unsafe { core::slice::from_raw_parts_mut(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), n) };
+    source.read(offset, frame);
 }
 
 /// Every frame the space owns goes back; its tables go with `UserTables`.

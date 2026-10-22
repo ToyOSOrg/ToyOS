@@ -75,6 +75,11 @@ pub enum Kind<O> {
     Private { committed: bool },
     /// `object`'s bytes from `offset` on, never given more than `max` allows.
     Object { object: O, offset: u64, max: Prot },
+    /// Memory of this space's own, committed, whose every page starts as a
+    /// copy of `source` from `offset` on as far as the range's first `len`
+    /// bytes go, and zeros past them: taken at the page's first touch, as a
+    /// program's segments are.
+    Copy { source: O, offset: u64, len: u64 },
 }
 
 #[derive(Clone, Debug)]
@@ -85,12 +90,18 @@ pub struct Entry<O> {
 }
 
 impl<O: Object> Entry<O> {
+    /// Whether its pages are this space's own, committed: each owns a frame
+    /// once touched, and a promise of one before.
+    pub fn committed(&self) -> bool {
+        matches!(self.kind, Kind::Private { committed: true } | Kind::Copy { .. })
+    }
+
     /// Whether the range needs page tables: memory a fault or a copy can
     /// populate or reach.
     pub fn backed(&self) -> bool {
         match self.kind {
             Kind::Private { committed } => committed,
-            Kind::Object { .. } => true,
+            Kind::Object { .. } | Kind::Copy { .. } => true,
         }
     }
 
@@ -100,6 +111,9 @@ impl<O: Object> Entry<O> {
             Kind::Private { committed } => Kind::Private { committed: *committed },
             Kind::Object { object, offset, max } => {
                 Kind::Object { object: object.clone(), offset: offset + (at - start), max: *max }
+            }
+            Kind::Copy { source, offset, len } => {
+                Kind::Copy { source: source.clone(), offset: offset + (at - start), len: len.saturating_sub(at - start) }
             }
         };
         Self { end: self.end, prot: self.prot, kind }
@@ -112,6 +126,9 @@ impl<O: Object> Entry<O> {
                 (Kind::Private { committed: a }, Kind::Private { committed: b }) => a == b,
                 (Kind::Object { object: a, offset: x, max: m }, Kind::Object { object: b, offset: y, max: n }) => {
                     a.same(b) && x + (self.end - start) == *y && m == n
+                }
+                (Kind::Copy { source: a, offset: x, len: l }, Kind::Copy { source: b, offset: y, len: k }) => {
+                    a.same(b) && x + (self.end - start) == *y && l.saturating_sub(self.end - start) == *k
                 }
                 _ => false,
             }
@@ -394,6 +411,24 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert_eq!(starts(&v), vec![(FLOOR, FLOOR + PAGE), (FLOOR + 6 * PAGE, FLOOR + 8 * PAGE)]);
+    }
+
+    /// A copied range cut in two keeps, in its tail, where the copy goes on
+    /// and how much of it is left; a tail past the copied bytes is all zeros;
+    /// and the halves made one again are the range they were.
+    #[test]
+    fn a_copied_range_cut_keeps_its_source_offset_and_length() {
+        let mut v = Inventory::new(FLOOR, TOP);
+        let copy = |end, offset, len| Entry { end, prot: Prot::ReadWrite, kind: Kind::Copy { source: Obj(7), offset, len } };
+        v.insert(FLOOR, copy(FLOOR + 4 * PAGE, 3 * PAGE, PAGE + 100));
+        v.update(FLOOR + PAGE, FLOOR + 2 * PAGE, |_, e| e.prot = Prot::Read);
+        let kind = |at| v.find(at).unwrap().1.kind.clone();
+        assert!(matches!(kind(FLOOR), Kind::Copy { offset, len, .. } if offset == 3 * PAGE && len == PAGE + 100));
+        assert!(matches!(kind(FLOOR + PAGE), Kind::Copy { offset, len, .. } if offset == 4 * PAGE && len == 100));
+        assert!(matches!(kind(FLOOR + 2 * PAGE), Kind::Copy { offset, len, .. } if offset == 5 * PAGE && len == 0));
+        assert!(v.find(FLOOR).unwrap().1.committed(), "a copied range is committed");
+        v.update(FLOOR + PAGE, FLOOR + 2 * PAGE, |_, e| e.prot = Prot::ReadWrite);
+        assert_eq!(starts(&v), vec![(FLOOR, FLOOR + 4 * PAGE)], "the cut halves did not join again");
     }
 
     #[test]

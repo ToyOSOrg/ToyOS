@@ -24,6 +24,13 @@ pub trait FileBacking: Send + Sync {
 
     /// Total file size in bytes.
     fn file_size(&self) -> u64;
+
+    /// The memory object the file's bytes are, from its start, where they
+    /// are one: what a spawn copies a segment out of page by page as each is
+    /// first touched, rather than whole when the process is made.
+    fn object(&self) -> Option<&Arc<SharedMemObject>> {
+        None
+    }
 }
 
 /// An executable in a shared memory object handed over by handle: one a
@@ -69,5 +76,9 @@ impl FileBacking for SharedImage {
 
     fn file_size(&self) -> u64 {
         self.size
+    }
+
+    fn object(&self) -> Option<&Arc<SharedMemObject>> {
+        Some(&self.object)
     }
 }

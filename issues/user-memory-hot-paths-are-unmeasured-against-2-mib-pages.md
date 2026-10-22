@@ -21,7 +21,10 @@ did, and none is measured on the T14 against the base or against Linux:
   space's lock: 1/512 of the range.
 - **Copies.** One round trip of the space's lock per 16 pages, plus an
   inventory lookup and a table walk per page.
-- **Spawn.** The whole image is copied when the process is made.
+- **Spawn.** A segment out of an image object is copied a page at a time at
+  first touch, so while a child lives the image is held twice: once by the
+  spawner's object, which the child's ranges keep alive, and once promised
+  to the child, until shared text removes one.
 
 - **Shootdowns.** A change to a present leaf reaches the CPUs running the
   space, each of which flushes every user translation, and a CPU entering a
