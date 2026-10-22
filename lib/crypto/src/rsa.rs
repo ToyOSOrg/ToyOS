@@ -346,7 +346,8 @@ mod tests {
     }
 
     /// The instruction path, where the CPU has one, equals the portable
-    /// multiplication for every word count and at the largest residues.
+    /// multiplication for the padded word counts 32 to 64 in steps of 8, and
+    /// at the largest residues.
     #[test]
     fn instruction_path_matches_the_portable_multiplication() {
         let mut seed = 0x2545f4914f6cdd1du64;

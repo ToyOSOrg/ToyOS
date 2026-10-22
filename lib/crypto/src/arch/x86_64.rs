@@ -161,7 +161,7 @@ fn first_features() -> Features {
 }
 
 /// RSA's Montgomery multiplication on BMI2 and ADX, when the CPU has them:
-/// the top word of the unreduced result, which is below 2m.
+/// out and the returned top word are the unreduced result, below 2m.
 #[cfg(not(target_os = "uefi"))]
 pub(super) fn rsa_mul(a: &[u64], b: &[u64], m: &[u64], n0: u64, n: usize, out: &mut [u64]) -> Option<u64> {
     if !features().bmi2_adx() {

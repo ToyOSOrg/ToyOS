@@ -5,9 +5,10 @@
 
 use core::arch::asm;
 
-/// out = a b / 2^(64n) mod m for a, b < m, n a multiple of four up to 64:
-/// for each word of b, one product row and one reduction row, each four
-/// words of a or m per loop step. `t` holds the n + 2 running words.
+/// For a, b < m and n a multiple of four up to 64: out and the returned top
+/// word are a b / 2^(64n) mod m plus at most one m, below 2m and unreduced.
+/// For each word of b, one product row and one reduction row, each four
+/// words of a or m per loop step; `t` holds the n + 2 running words.
 ///
 /// # Safety
 /// The CPU has BMI2 and ADX; n is a multiple of four up to 64, and `a`, `b`,
