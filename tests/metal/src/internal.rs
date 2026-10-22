@@ -281,13 +281,15 @@ pub fn recognise(disk: &Disk) -> Result<Area, String> {
         let after = gap(data.end(), last);
         let largest_before = bench.windows(2).map(|w| gap(w[0].end(), w[1].start)).chain([bench[0].start]).max().unwrap_or(0);
         // The partitioner places each new partition at the start of the
-        // largest free block, which must be the one after DATA.
-        if after < needed_sectors() || after <= largest_before {
+        // largest free block as it stands, so the block after DATA has to
+        // stay the largest until the last partition is carved from it.
+        if after < needed_sectors() || after - needed_sectors() <= largest_before {
             return Err(format!(
-                "the free space after partition 4 is {} MiB, and the install area needs {} MiB in \
-                 the largest free block of the disk",
+                "the free space after partition 4 is {} MiB, and the install area needs {} MiB of \
+                 it with the rest still larger than any other free block of the disk ({} MiB)",
                 after * SECTOR / MIB,
-                needed_sectors() * SECTOR / MIB
+                needed_sectors() * SECTOR / MIB,
+                largest_before * SECTOR / MIB
             ));
         }
         return Ok(Area::Absent);
@@ -535,6 +537,24 @@ mod tests {
         // holds it, a T14 whose DATA grew does not.
         let full = swap(bench(), &format!("SIZE=\"{}\"", 170 * 2 * 1024 * 1024 * SECTOR), &format!("SIZE=\"{}\"", 200 * 2 * 1024 * 1024 * SECTOR));
         assert!(recognised(&full).expect_err("too small").contains("free space after partition 4"));
+        // Room for the area after DATA, but a gap before DATA larger than
+        // what the area leaves: the last partitions would land in that gap.
+        // p4 moves 15 GiB later and shrinks by 15 GiB, so the gap after it is
+        // unchanged at 33.5 GiB and the gap before it is 15 GiB.
+        let gib = 2 * 1024 * 1024;
+        let gapped = swap(
+            bench(),
+            &format!("START=\"{}\" SIZE=\"{}\"", 2048 + 35 * gib, 170 * gib * SECTOR),
+            &format!("START=\"{}\" SIZE=\"{}\"", 2048 + 50 * gib, 155 * gib * SECTOR),
+        );
+        assert_ne!(gapped, bench(), "the fixture moved nothing");
+        assert!(recognised(&gapped).expect_err("the remainder is not the largest").contains("larger than any other free block"));
+        let small_gap = swap(
+            bench(),
+            &format!("START=\"{}\" SIZE=\"{}\"", 2048 + 35 * gib, 170 * gib * SECTOR),
+            &format!("START=\"{}\" SIZE=\"{}\"", 2048 + 36 * gib, 169 * gib * SECTOR),
+        );
+        assert_eq!(recognised(&small_gap), Ok(Area::Absent), "a 1 GiB gap before DATA is smaller than what the area leaves");
     }
 
     #[test]
@@ -611,15 +631,5 @@ mod tests {
         assert!(refused("half-b.img", &built[..6], [Some((ba, ra)), Some((bb, rb))]).contains("slot B"));
         let swapped = [&built[..3], &[(Guid::TOYOS_ROOT, ba), (Guid::TOYOS_BOOT, ra)]].concat();
         assert!(refused("swapped.img", &swapped, [Some((ba, ra)), None]).contains("is of type"));
-    }
-
-    /// The area fits the T14's free space with room to spare, and every
-    /// partition is a whole number of MiB, which every start is aligned to.
-    #[test]
-    fn the_area_fits_the_t14s_free_space() {
-        let free_gib = 33;
-        assert!(needed_sectors() * SECTOR < free_gib << 30, "{} MiB", needed_sectors() * SECTOR / MIB);
-        let indices: Vec<u32> = Owned::ALL.iter().map(|o| o.index()).collect();
-        assert_eq!(indices, [5, 6, 7, 8, 9, 10, 11]);
     }
 }

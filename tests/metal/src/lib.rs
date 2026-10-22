@@ -696,7 +696,9 @@ impl Target {
         };
         match job {
             Job::Wipe => literal(&[WIPEFS, "--all", &node]),
-            Job::Flash => literal(&[DD, &of, "bs=4M", "conv=fsync"]),
+            // `nocreat`: a node that is not there is refused, rather than
+            // created as a file in `/dev` that every later write lands in.
+            Job::Flash => literal(&[DD, &of, "bs=4M", "conv=fsync,nocreat"]),
             // The log partition read whole, as bytes rather than as files: what
             // `toyos-fat32-check` judges is the volume `logkeeper` wrote, and a
             // `mount` has already had a driver's opinion about it. Read-only, and
@@ -709,10 +711,10 @@ impl Target {
             Job::Umount => literal(&[UMOUNT, &home.mount()]),
             Job::Reboot => literal(&[REBOOT]),
             Job::Probe => literal(&[TRUE]),
-            // Every owned partition at once, each at the start of the largest
-            // free block (sgdisk(8), `--new`'s start of 0), which
-            // `internal::recognise` established is the one after DATA. The
-            // table is rewritten whole, so nothing but this line touches it.
+            // Every owned partition in one line, each at the start of the
+            // largest free block as it stands (sgdisk(8), `--new`'s start of
+            // 0), which `internal::recognise` established stays the one after
+            // DATA until the last is made.
             Job::Partition => {
                 let mut words = vec![SGDISK.to_string()];
                 for o in Owned::ALL {
@@ -740,7 +742,7 @@ impl Target {
                 Ok(words)
             }
             Job::CreateInternal => create(&internal, &Owned::Esp.index().to_string(), INTERNAL_LABEL),
-            Job::Write(o) => literal(&[DD, &format!("of={}", o.node(&self.internal)), "bs=4M", "conv=fsync"]),
+            Job::Write(o) => literal(&[DD, &format!("of={}", o.node(&self.internal)), "bs=4M", "conv=fsync,nocreat"]),
         }
     }
 
@@ -1513,14 +1515,14 @@ impl Driver {
     fn install_internal(&self, image: &internal::Install) -> Result<Option<String>, Refusal> {
         let node = self.target.internal;
         if internal::recognise(&self.internal_disk()?).map_err(Refusal::Layout)? == internal::Area::Absent {
-            println!("{}: no install area, so it is made after partition 4", node.whole());
-            self.as_root("making the install partitions", Job::Partition, &[], None)?;
-            self.as_root("adding them to the kernel's view", Job::AddPartitions, &[], None)?;
+            self.make_area()?;
             if self.dry_run {
-                println!("dry run: the install area was not made, so nothing after it can be read");
+                println!(
+                    "dry run: the install area was not made, so the lines after it were not asked of \
+                     sudo; `--install-sudoers` asks it of every line"
+                );
                 return Ok(None);
             }
-            self.ssh("settling the new table", "udevadm settle")?;
         }
         let parts = self.install_area()?;
         if let Some(mounted) = parts.iter().find(|p| p.mounted) {
@@ -1567,6 +1569,32 @@ impl Driver {
         let entry = self.boot_entry(INTERNAL_LABEL, Job::CreateInternal, kept(Owned::Esp))?;
         println!("installed {} on {}; Boot{entry} ({INTERNAL_LABEL}) boots it", image.path.display(), node.whole());
         Ok(Some(entry))
+    }
+
+    /// Make the install area, which the kernel's view says is absent.
+    ///
+    /// **An area a run made and the kernel never added is added first**: a
+    /// `Job::Partition` that wrote the table, followed by a `Job::AddPartitions`
+    /// that failed, leaves partitions 5–11 in the table and out of the kernel's
+    /// view, where a second `Job::Partition` fails on numbers already taken.
+    /// So the add is asked first, and refused harmlessly where the table holds
+    /// no such range.
+    fn make_area(&self) -> Result<(), Refusal> {
+        let node = self.target.internal;
+        if !self.dry_run && self.as_root("adding an area the table may already hold", Job::AddPartitions, &[], None).is_ok() {
+            self.ssh("settling the table", "udevadm settle")?;
+            if internal::recognise(&self.internal_disk()?).map_err(Refusal::Layout)? != internal::Area::Absent {
+                println!("{}: the table already held the install area, and the kernel now does too", node.whole());
+                return Ok(());
+            }
+        }
+        println!("{}: no install area, so it is made after partition 4", node.whole());
+        self.as_root("making the install partitions", Job::Partition, &[], None)?;
+        self.as_root("adding them to the kernel's view", Job::AddPartitions, &[], None)?;
+        if !self.dry_run {
+            self.ssh("settling the new table", "udevadm settle")?;
+        }
+        Ok(())
     }
 
     /// The boot entry an earlier install made for the internal ESP.
@@ -3108,7 +3136,7 @@ mod tests {
         let mut want = format!(
             "# toyos-metal: the whole of what the metal loop runs as root.\n\
              {rule} /usr/sbin/wipefs --all /dev/sda\n\
-             {rule} /usr/bin/dd of\\=/dev/sda bs\\=4M conv\\=fsync\n\
+             {rule} /usr/bin/dd of\\=/dev/sda bs\\=4M conv\\=fsync\\,nocreat\n\
              {rule} /usr/bin/dd if\\=/dev/sda3 bs\\=4M\n\
              {rule} /usr/bin/efibootmgr --create-only --disk /dev/sda \
              --part 1 --label ToyOS --loader \\\\\\\\EFI\\\\\\\\BOOT\\\\\\\\BOOTX64.EFI\n\
@@ -3134,7 +3162,7 @@ mod tests {
              --part 5 --label ToyOS-internal --loader \\\\\\\\EFI\\\\\\\\BOOT\\\\\\\\BOOTX64.EFI\n"
         );
         for p in 5..=11 {
-            want.push_str(&format!("{rule} /usr/bin/dd of\\=/dev/nvme0n1p{p} bs\\=4M conv\\=fsync\n"));
+            want.push_str(&format!("{rule} /usr/bin/dd of\\=/dev/nvme0n1p{p} bs\\=4M conv\\=fsync\\,nocreat\n"));
         }
         assert_eq!(target().sudoers(&home()).unwrap(), want);
     }
@@ -3295,7 +3323,7 @@ mod tests {
         );
         assert_eq!(
             t.remote(Job::Flash, &[], &home()).unwrap(),
-            "sudo -n '/usr/bin/dd' 'of=/dev/sda' 'bs=4M' 'conv=fsync'"
+            "sudo -n '/usr/bin/dd' 'of=/dev/sda' 'bs=4M' 'conv=fsync,nocreat'"
         );
         assert_eq!(
             t.remote(Job::Create, &[], &home()).unwrap(),
