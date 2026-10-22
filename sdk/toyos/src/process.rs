@@ -58,6 +58,12 @@ impl Process {
         syscall::process_kill(self.0.raw())
     }
 
+    /// Ask it, and everything below it, to quit for `reason` ([`crate::quit`]).
+    /// `Ok` for one already ended, as [`Self::kill`] answers.
+    pub fn quit(&self, reason: crate::quit::Reason) -> Result<(), SyscallError> {
+        syscall::process_quit(self.0.raw(), reason)
+    }
+
     pub fn stats(&self) -> Result<ProcessStats, SyscallError> {
         let mut stats = ProcessStats::default();
         syscall::process_stats(self.0.raw(), &mut stats)?;

@@ -22,6 +22,7 @@ pub mod handle;
 pub mod inbox;
 pub mod job;
 pub mod namespace;
+pub mod notice;
 pub mod null;
 pub mod ops;
 pub mod pipe;
@@ -257,6 +258,8 @@ kobject! {
     immediate Null => null::NullObject,
     // A job outlives its handles while a thread of it runs: what ends it is its last reference.
     immediate Job => job::JobObject,
+    // Its one handle is its process's, and goes with it.
+    immediate Notice => notice::NoticeObject,
 }
 
 /// Objects whose last handle has gone, waiting for release with nothing held;

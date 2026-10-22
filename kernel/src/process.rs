@@ -47,6 +47,7 @@ use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES, MAX_REGIONS};
 
 /// The lifecycle's decisions; this file only performs them.
 pub use kernel::proclife::{ThreadLocation, Watch};
+use kernel::proclife::quit::{self, Notice, Reason};
 use kernel::proclife::{join, reap, spawn as proclife_spawn, teardown as proclife, tree, Lifecycle, Node, Processes};
 
 /// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
@@ -351,6 +352,8 @@ pub struct ProcessEntry {
     node: Node,
     /// The exit its teardown made, kept until every end below it is published.
     exit: Option<crate::object::process::Exit>,
+    /// What a quit asks it, which its own table holds the one handle to.
+    notice: Arc<crate::object::notice::NoticeObject>,
 }
 
 impl ProcessEntry {
@@ -362,6 +365,7 @@ impl ProcessEntry {
         image: Option<Arc<UserImage>>,
         main_thread: ThreadEntry,
         node: Node,
+        notice: Arc<crate::object::notice::NoticeObject>,
     ) -> Self {
         let mut threads = crate::id_map::IdMap::new();
         let main_tid = threads.insert(main_thread);
@@ -376,6 +380,7 @@ impl ProcessEntry {
             teardown_end: None,
             node,
             exit: None,
+            notice,
         }
     }
     pub fn pid(&self) -> Pid { self.pid }
@@ -876,6 +881,11 @@ impl Admission {
         let admitted = self.0.take().expect("Admission: landed once");
         let pid = admitted.pid();
         let (inserted, retire) = tree::land_child(table, admitted, End::Killed, insert);
+        let child = table.get(pid).expect("Admission::land: the child inserted in this hold");
+        if let Some(parent) = child.node.parent() {
+            let held = table.get(parent).expect("Admission::land: a landed child's parent is unpublished").notice.with(|n| *n);
+            child.notice.with(|n| *n = Notice::under(&held));
+        }
         (inserted, scheds(table, pid, retire))
     }
 }
@@ -1705,6 +1715,52 @@ fn kill(pid: Pid) {
         scheduler::post_retire(&sched);
     }
     walk(owed);
+}
+
+/// Ask the process an object names, and everything below it, to quit for
+/// `reason`, on the asking thread: one ask per hold of the table lock, each
+/// claim's retires and each notice's post made with it given up, then the
+/// kill walk of what it claimed. The authorization is the handle's `MANAGE`,
+/// as a kill's.
+pub fn quit_process(object: &crate::object::process::ProcessObject, reason: Reason) {
+    let mut owed = quit::Owed::of(object.pid());
+    while let Some(visit) = owed.ask.pop() {
+        let (retire, notified) = {
+            let mut guard = PROCESS_TABLE.lock();
+            let table = guard.as_mut().unwrap();
+            match visit {
+                quit::Visit::Ask(pid) => ask(table, pid, reason, &mut owed),
+                quit::Visit::Children(pid) => {
+                    quit::owed_children(table, pid, &mut owed);
+                    (Vec::new(), None)
+                }
+            }
+        };
+        for sched in &retire {
+            scheduler::post_retire(sched);
+        }
+        if let Some(notice) = notified {
+            notice.watch().post();
+        }
+        if !owed.ask.is_empty() && crate::preempt::need_resched() {
+            scheduler::yield_now();
+        }
+    }
+    walk(owed.kill);
+}
+
+/// One ask of a quit, under `table`'s hold and `pid`'s notice's: the threads a
+/// claim of it retires, or the notice a reason was put in.
+fn ask(table: &mut ProcessTable, pid: Pid, reason: Reason, owed: &mut quit::Owed) -> (Vec<ThreadSched>, Option<Arc<crate::object::notice::NoticeObject>>) {
+    let Some(notice) = table.get(pid).map(|proc| Arc::clone(&proc.notice)) else { return (Vec::new(), None) };
+    match notice.with(|held| quit::ask(table, pid, held, reason, owed)) {
+        quit::Asked::Gone => (Vec::new(), None),
+        quit::Asked::Killed => {
+            let proc = table.get(pid).expect("ask: a claimed process is in the table");
+            (scheds(table, pid, proclife::retire_set(proc, None)), None)
+        }
+        quit::Asked::Notified => (Vec::new(), Some(notice)),
+    }
 }
 
 /// The process whose next spawn `debug_action::KILL_PLACE_AS_SPAWN_LANDS` marked; `Pid::MAX`, which is never issued, for none.

@@ -60,6 +60,7 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Process(_) => BASE.union(Rights::READ).union(Rights::MANAGE),
         KObjectRef::Null(_) => super::null::NullObject::RIGHTS,
         KObjectRef::Job(_) => super::job::JobObject::RIGHTS,
+        KObjectRef::Notice(_) => super::notice::NoticeObject::RIGHTS,
     }
 }
 
@@ -223,7 +224,8 @@ pub fn pipe_read(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
+        | KObjectRef::Notice(_) => None,
     }
 }
 
@@ -237,7 +239,8 @@ pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass, Landing)> {
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
+        | KObjectRef::Notice(_) => None,
     }
 }
 
@@ -278,6 +281,7 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::Connection(c) => pipe::read_watch(c.rx()).map(WatchRef::Shared),
         KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
         KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
+        KObjectRef::Notice(n) => Some(WatchRef::Shared(n.watch().clone())),
         // Nothing posts for a serial byte, so a console's readable poll has
         // no source (`issues/a-console-watch-waits-on-the-keyboard-not-the-serial-line.md`).
         KObjectRef::Console(_) => None,
@@ -295,6 +299,18 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
     }
 }
 
+/// A readable poll is registered on this object: its process listens to a
+/// notice from now on (`kernel::proclife::quit`).
+pub fn watched_readable(object: &KObjectRef) {
+    match object {
+        KObjectRef::Notice(n) => n.listen(),
+        KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) | KObjectRef::Device(_)
+        | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::Connector(_)
+        | KObjectRef::Namespace(_) | KObjectRef::File(_) | KObjectRef::Console(_) | KObjectRef::SysCap(_)
+        | KObjectRef::Process(_) | KObjectRef::Null(_) | KObjectRef::Job(_) => {}
+    }
+}
+
 /// The watch a writable poll on this object registers on.
 pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
@@ -305,7 +321,8 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
+        | KObjectRef::Notice(_) => None,
     }
 }
 
@@ -316,6 +333,7 @@ pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::PipeRead(r) => pipe::left_watch(r.id(), End::Read).map(WatchRef::Shared),
         KObjectRef::PipeWrite(w) => pipe::left_watch(w.id(), End::Write).map(WatchRef::Shared),
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
+        | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => None,
@@ -329,6 +347,7 @@ pub fn other_end_gone(object: &KObjectRef) -> bool {
         KObjectRef::PipeRead(r) => pipe::other_end_gone(r.id(), End::Read),
         KObjectRef::PipeWrite(w) => pipe::other_end_gone(w.id(), End::Write),
         KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
+        | KObjectRef::Notice(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
         | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => false,
@@ -356,7 +375,7 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => true,
+        | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) => true,
     }
 }
 
@@ -503,6 +522,15 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
             Some(count as u64)
         }
         KObjectRef::Null(_) => Some(0),
+        // An empty read listens and takes nothing: the reason would have nowhere to go.
+        KObjectRef::Notice(n) if buf.is_empty() => {
+            n.listen();
+            Some(0)
+        }
+        KObjectRef::Notice(n) => n.read().map(|reason| {
+            buf.write_at(0, &[reason.to_byte()]);
+            1
+        }),
         KObjectRef::PipeWrite(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
@@ -567,7 +595,7 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
         KObjectRef::PipeRead(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) | KObjectRef::Job(_) => {
+        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) => {
             Some(SyscallError::PermissionDenied.to_u64())
         }
     }
@@ -636,7 +664,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         },
         KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) | KObjectRef::Job(_) => plain(FileType::Unknown),
+        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) => plain(FileType::Unknown),
         KObjectRef::Device(d) => plain(match d.class() {
             device_registry::DeviceType::Framebuffer => FileType::Framebuffer,
             device_registry::DeviceType::PciFunction
@@ -679,6 +707,7 @@ pub fn has_data(object: &KObjectRef) -> bool {
         KObjectRef::Acceptor(a) => a.has_pending(),
         KObjectRef::Process(p) => p.finished(),
         KObjectRef::Job(_) => false,
+        KObjectRef::Notice(n) => n.readable(),
         KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Device(d) => match d.class() {
             // A claim its last handle has let go has nothing to read: a poll
@@ -706,7 +735,8 @@ pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
         KObjectRef::Console(_) | KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) => false,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_)
+        | KObjectRef::Notice(_) => false,
     }
 }
 
@@ -721,7 +751,7 @@ pub fn has_space(object: &KObjectRef) -> bool {
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) => false,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Notice(_) => false,
     }
 }
 
@@ -740,7 +770,9 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_) | KObjectRef::SharedMem(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) => SyscallError::InvalidArgument.to_u64(),
+        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::Notice(_) => {
+            SyscallError::InvalidArgument.to_u64()
+        }
     }
 }
 

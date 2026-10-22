@@ -99,6 +99,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
         None,
         ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
         kernel::proclife::Node::root(),
+        crate::object::notice::NoticeObject::new(),
     ));
     let tid = table.get(pid).expect("kthread: the entry just inserted is gone").main_tid();
     claim.publish(TaskId(pid, tid));

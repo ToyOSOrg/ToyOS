@@ -262,7 +262,7 @@ fn with_prefixed<T>(prefix: &str, name: &str, f: impl FnOnce(&str) -> Option<T>)
 /// Whatever is in here lives for the process's life, which is what makes
 /// handing out a `&'static` to it sound: nothing in the table is ever released
 /// while the table exists.
-struct Once<T> {
+pub(crate) struct Once<T> {
     state: AtomicU8,
     value: UnsafeCell<MaybeUninit<T>>,
 }
@@ -276,11 +276,11 @@ const READY: u8 = 2;
 unsafe impl<T: Send> Sync for Once<T> {}
 
 impl<T> Once<T> {
-    const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self { state: AtomicU8::new(UNSET), value: UnsafeCell::new(MaybeUninit::uninit()) }
     }
 
-    fn get_or_init(&self, build: impl FnOnce() -> T) -> &T {
+    pub(crate) fn get_or_init(&self, build: impl FnOnce() -> T) -> &T {
         if self
             .state
             .compare_exchange(UNSET, BUILDING, Ordering::AcqRel, Ordering::Acquire)

@@ -98,6 +98,24 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
     }
 }
 
+/// Ask a process and everything below it to quit, gated by `MANAGE` as a kill is.
+pub(super) fn sys_process_quit(h: RawHandle, reason: u64) -> u64 {
+    // First, so a word that names no reason is the answer, not the handle's
+    // own refusal.
+    let Some(reason) = u8::try_from(reason).ok().and_then(toyos_abi::quit::Reason::from_byte) else {
+        return SyscallError::InvalidArgument.to_u64();
+    };
+    match process::with_process_data(|data| {
+        data.handles.get::<crate::object::process::ProcessObject>(h, Rights::MANAGE)
+    }) {
+        Ok(object) => {
+            process::quit_process(&object, reason);
+            0
+        }
+        Err(e) => e.refuse(),
+    }
+}
+
 /// Enter the real-time band, gated on a `SysCap` carrying [`Rights::RT`].
 pub(super) fn sys_rt_enter(syscap: RawHandle) -> u64 {
     // Gated by manifest, not audio ownership: winning the sound-card race would grant the band too.

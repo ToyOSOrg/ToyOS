@@ -5,10 +5,12 @@
 //! `popen` and `/dev/null` answered as POSIX has them, or with ToyOS's stated
 //! departure.
 //!
-//! Beside them two Rust programs: std's `stdio_named`, where a std child holds
+//! Beside them three Rust programs: std's `stdio_named`, where a std child holds
 //! the stdio its `Command` named, as a C one does, and `Stdio::null()` is a
 //! null handle; and `libc_recv_beside_close`, where libc's `recv` outlives a
-//! `close` of its descriptor on another thread, its own netstack serving it.
+//! `close` of its descriptor on another thread, its own netstack serving it;
+//! and `quit_tree`, stage 6's kernel half: a quit asks every process below it
+//! that listens and kills the rest.
 //!
 //! On QEMU x86-64 (`tests/images/libccase.toml`), every program in one boot:
 //! what they claim is order, completion, contents and counts, which QEMU
@@ -21,7 +23,7 @@ use super::{compile, qemu};
 use qemu::{BootOptions, QemuInstance};
 
 /// The Rust programs, binaries of `tests/guest/rust-tests`.
-const RUST_PROBES: [&str; 2] = ["stdio_named", "libc_recv_beside_close"];
+const RUST_PROBES: [&str; 3] = ["stdio_named", "libc_recv_beside_close", "quit_tree"];
 
 /// Each program's bound: `spawn_children_cap` starts and waits for 255.
 const BOUND: Duration = Duration::from_secs(300);

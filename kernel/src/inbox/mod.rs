@@ -533,6 +533,9 @@ fn arm(
     object: &KObjectRef,
 ) -> Result<(), SyscallError> {
     let flags = WatchFlags(poll.flags);
+    if flags.readable() {
+        ops::watched_readable(object);
+    }
     let ready = readiness_of(object, flags).any();
     let read = if flags.readable() { ops::read_watch(object) } else { None };
     let write = if flags.writable() { ops::write_watch(object) } else { None };
