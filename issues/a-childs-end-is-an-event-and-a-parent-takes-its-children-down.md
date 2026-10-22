@@ -43,8 +43,13 @@ hang-up or terminate request (stage 6), and no POSIX signal subsystem up
 front. libc's adaptation stays in userland, and ordinary Rust behaviour is
 kept. Further signal behaviour comes when a required program shows a
 concrete need, with its semantics and cost reviewed then. An unsupported
-signal operation never appears to succeed
-(`issues/libc-sigaction-answers-success-and-keeps-nothing.md`).
+signal operation never appears to succeed.
+
+Until stages 4 and 6, `signal` and `sigaction` refuse a handler libc would
+never call, and `raise` does what the kept disposition says
+(`sdk/libc/src/sigreq.rs`). Stage 6 lifts the refusal for `SIGINT`, `SIGHUP`
+and `SIGTERM` in the landing that first sends a quit, so that a kept ignore
+stays true.
 
 init is `/system/bin/supervisor`.
 

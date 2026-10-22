@@ -80,7 +80,8 @@ const OPEN_FLAGS_KNOWN: u64 = OpenFlags::READ.0
     | OpenFlags::WRITE.0
     | OpenFlags::CREATE.0
     | OpenFlags::TRUNCATE.0
-    | OpenFlags::APPEND.0;
+    | OpenFlags::APPEND.0
+    | OpenFlags::EXCLUSIVE.0;
 
 /// A file opened at absolute `path`, installed in `table`.
 pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
@@ -92,6 +93,10 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
     let create = flags.contains(OpenFlags::CREATE);
     let truncate = flags.contains(OpenFlags::TRUNCATE);
     let append = flags.contains(OpenFlags::APPEND);
+    let exclusive = flags.contains(OpenFlags::EXCLUSIVE);
+    if exclusive && !create {
+        return SyscallError::InvalidArgument.to_u64();
+    }
     let modifies = writable || create || truncate || append;
 
     let opened = {
@@ -103,6 +108,16 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
         } else {
             crate::vfs::ResolveIntent::KernelOrRead
         };
+        // An exclusive create decides on the name itself, its link not
+        // followed, so a link (dangling or not) or a directory there is
+        // `AlreadyExists`, as POSIX's `O_EXCL` has it.
+        if exclusive {
+            match vfs.stat(path, false) {
+                Ok(_) => return SyscallError::AlreadyExists.to_u64(),
+                Err(SyscallError::NotFound) => {}
+                Err(e) => return e.to_u64(),
+            }
+        }
         let target = match vfs.resolve_for_open(path, intent) {
             Ok(target) => target,
             Err(e) => return e.to_u64(),
@@ -115,7 +130,13 @@ pub fn open(table: &mut HandleTable, path: &str, flags: OpenFlags) -> u64 {
             }
         }
 
-        let built = if truncate && create {
+        // Under the same VFS lock as the check above, so two exclusive
+        // creates of one name cannot both find it missing; nothing is there,
+        // so the target is the name itself.
+        let built = if exclusive {
+            let mtime = crate::clock::mtime_now();
+            vfs.create_file(target.as_str(), mtime).map(|(file_id, volume)| (file_id, volume, mtime, 0))
+        } else if truncate && create {
             let mtime = crate::clock::mtime_now();
             // `NotFound` is not a failure: truncating past a name that was not there is fine.
             // Any `vfs.delete_file` error other than `NotFound` is propagated, not swallowed: truncating past it could silently create a file over one the mount could not confirm was missing.

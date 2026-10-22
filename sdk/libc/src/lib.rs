@@ -6,6 +6,8 @@ extern crate alloc;
 
 mod alarm;
 mod alarmreq;
+mod sigreq;
+mod errtext;
 mod arch;
 mod conversion;
 mod ctype;

@@ -140,6 +140,7 @@ pub(crate) fn open_handle(path: &[u8], flags: i32, _mode: u32) -> Result<RawHand
     if readable { oflags |= OpenFlags::READ; }
     if writable { oflags |= OpenFlags::WRITE; }
     if flags & O_CREAT != 0 { oflags |= OpenFlags::CREATE; }
+    if flags & O_CREAT != 0 && flags & O_EXCL != 0 { oflags |= OpenFlags::EXCLUSIVE; }
     if flags & O_TRUNC != 0 { oflags |= OpenFlags::TRUNCATE; }
     if flags & O_APPEND != 0 { oflags |= OpenFlags::APPEND; }
     syscall::open(path, oflags).map_err(crate::errcode::of)
@@ -222,6 +223,8 @@ unsafe fn answered(answer: Result<syscall::Stat, files::Error>, buf: *mut Stat) 
         let s = unsafe { &mut *buf };
         s.st_dev = st.volume;
         s.st_ino = st.node;
+        // Neither the kernel's `/tmp` nor the file server has hard links.
+        s.st_nlink = 1;
         s.st_size = st.size as i64;
         s.st_mtim = Timespec {
             tv_sec: (st.mtime / NANOS_PER_SEC) as i64,

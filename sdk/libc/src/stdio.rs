@@ -629,11 +629,14 @@ pub unsafe extern "C" fn tmpfile() -> *mut FILE { ptr::null_mut() }
 
 #[no_mangle]
 pub unsafe extern "C" fn perror(s: *const u8) {
+    // Read first: a write below may set it.
+    let errnum = crate::errno::get();
     if !s.is_null() && unsafe { *s } != 0 {
         fputs(s, unsafe { stderr });
         fputs(b": \0".as_ptr(), unsafe { stderr });
     }
-    fputs(b"error\n\0".as_ptr(), unsafe { stderr });
+    fputs(unsafe { crate::string::strerror(errnum) }, unsafe { stderr });
+    fputs(b"\n\0".as_ptr(), unsafe { stderr });
 }
 
 // Remaining stdio-adjacent functions
