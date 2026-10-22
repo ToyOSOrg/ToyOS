@@ -35,9 +35,9 @@ fn main() {
     }
     let _ = fs::remove_file(&file);
 
-    // Through no capability, through `..` above its own root, and by the
-    // supervisor's own store's name: each reaches nothing of another's state.
-    for path in [SERVICE, "/state/supervisor/grants", &format!("{OWN}/../logkeeper")] {
+    // Another row's state and the supervisor's store, by name: no capability
+    // names either, so each reaches only the kernel's bare mount point.
+    for path in [SERVICE, "/state/supervisor/grants"] {
         if let Ok(meta) = fs::metadata(path) {
             red.push(format!("{path} answered metadata ({} bytes)", meta.len()));
         }

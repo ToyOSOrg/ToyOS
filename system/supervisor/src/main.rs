@@ -2681,7 +2681,7 @@ fn start<'a>(
 
     // **Set here, over whatever a launching caller carried**: the row decides
     // where a program's home is, and a service's is made before this
-    // (`Supervisor::make_home`), on the supervisor's file worker.
+    // (`Supervisor::make_state_dir`), on the supervisor's file worker.
     command.env("HOME", program.home());
 
     // **Everything endowed stays owned until the spawn that moves it

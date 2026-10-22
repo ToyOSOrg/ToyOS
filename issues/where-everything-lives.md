@@ -65,8 +65,9 @@ until that lands nothing verifies it.
 ## Stages
 
 1. **Everything that needs no isolation.** `/config` and `/state` are DATA
-   names; init makes `/home/toy`, its eight folders, and each service's
-   `/state/<name>`, and it sets `HOME` from each row (`service = true` in
+   names; init makes `/home/toy`, its eight folders, and each service's and
+   `state = true` row's `/state/<name>`, the only part of `/state` that row's
+   view holds, and it sets `HOME` from each row (`service = true` in
    `system.toml`, which a row that serves a port must say); a program no row
    names carries the `HOME` init answers for it, never its spawner's own;
    the kernel makes no home, and lists a directory it carries; the keyboard
@@ -83,8 +84,8 @@ until that lands nothing verifies it.
    `/home/<user>/Apps/shell/State/history` (`OWN_FOLDER` in `system/shell`).
    Built for a package launched from `/apps` (`toyos_manifest::Program::view`,
    judged by the `app_view` metal row). Each desktop app in the image still
-   runs with the session's `HOME` and the whole tree: its row declares no view
-   until that isolation stage gives every row one.
+   runs with the session's `HOME` and the whole tree but `/state`: its row
+   declares no view until that isolation stage gives every row one.
 3. **Users.** The users track creates `/home/<user>` and its folders from a
    login row, and `toy` stops being a constant in `toyos-manifest`.
    **Exit**: init names no user.

@@ -373,8 +373,8 @@ impl Program {
     /// any role serves**: no other package, no other part of the home, no
     /// `/config`, `/state`, `/log` or `/boot`.
     /// **Every other row sees the whole tree but [`STATE`], and of that only its
-    /// own [`Self::state_dir`]**: no program reads or rewrites another's machine
-    /// state, the supervisor's included. The rest stays whole until each row
+    /// own [`Self::state_dir`]**: no row's view holds another row's, the
+    /// supervisor's included. The rest stays whole until each row
     /// declares its own view (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2).
     pub fn view(&self) -> Vec<View> {
         match self.package() {

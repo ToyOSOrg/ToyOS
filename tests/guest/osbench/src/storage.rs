@@ -4,7 +4,7 @@
 //!
 //! On a ToyOS benchcase boot that is the boot USB stick's `TOYOS-LOG`
 //! partition, FAT32, through the LOG file server and usbd: the boot has no
-//! DATA partition, so `/home` and `/state` are memory (`files`'s `served` is `HOME`),
+//! DATA partition, so `/home` and `/state` are memory (`files`'s `served`),
 //! and the stick's other volumes are read-only. On Linux it is a directory in
 //! the runner's home, on whatever disk and filesystem hold it, which the
 //! conditions name. Every file here is removed at the end; the most alive at
