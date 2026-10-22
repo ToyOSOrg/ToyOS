@@ -348,11 +348,13 @@ struct Pipe {
 struct Level {
     bytes: u32,
     posts: u32,
+    /// A holder rang, since the server last took it: the server's pipe alone.
+    rang: bool,
 }
 
 impl Pipe {
     fn new() -> Self {
-        Self { level: Mutex::new(Level { bytes: 0, posts: 0 }), posted: Condvar::new() }
+        Self { level: Mutex::new(Level { bytes: 0, posts: 0, rang: false }), posted: Condvar::new() }
     }
 
     /// `SYS_WRITE` of one byte: the watch's post wakes every waiter.
@@ -361,6 +363,26 @@ impl Pipe {
         level.bytes += 1;
         level.posts += 1;
         self.posted.notify_all();
+    }
+
+    /// A holder's ring of the server: a byte that says it is a holder's, as a
+    /// `RING` frame does, so the server that takes it looks at the words after
+    /// the holder wrote them.
+    fn ring_as_holder(&self) {
+        self.level.lock().unwrap().rang = true;
+        self.ring();
+    }
+
+    /// [`Self::wait`], and whether a holder rang since the last: a departure
+    /// alone asks no ring back of the server, as netstack's pass rings back
+    /// only a stream whose client rang.
+    fn wait_rang(&self) -> bool {
+        let mut level = self.level.lock().unwrap();
+        while level.bytes == 0 {
+            level = self.posted.wait(level).unwrap();
+        }
+        level.bytes = 0;
+        std::mem::take(&mut level.rang)
     }
 
     /// A nonblocking `SYS_READ` of every byte there: whether there was one.
@@ -439,10 +461,6 @@ struct Session {
     bytes: [Cell<u32>; 2 * BYTES as usize],
     holders: Vec<Holding>,
     server: Pipe,
-    /// The holders rang since the server last answered: a departure alone
-    /// asks no ring back of the server, as netstack's pass rings back only a
-    /// stream whose client rang.
-    rang: AtomicBool,
     /// A bit for each holder that left, as the kernel tells the server of a
     /// hang-up.
     left: AtomicU32,
@@ -535,8 +553,7 @@ impl Bells for By<'_> {
 
     fn ring(&self) -> Result<(), HungUp> {
         if lives(self.fate) {
-            self.s.rang.store(true, Ordering::Release);
-            self.s.server.ring();
+            self.s.server.ring_as_holder();
         }
         Ok(())
     }
@@ -554,7 +571,6 @@ impl Session {
             bytes: core::array::from_fn(|_| Cell::new(0)),
             holders: all,
             server: Pipe::new(),
-            rang: AtomicBool::new(false),
             left: AtomicU32::new(0),
             quit: AtomicBool::new(false),
         };
@@ -646,7 +662,7 @@ impl Session {
     fn serve(&self, server: &mut End) {
         let mut departed = 0u32;
         loop {
-            self.server.wait();
+            let rang = self.server.wait_rang();
             let left = self.left.load(Ordering::Acquire);
             for at in 0..self.holders.len() {
                 let bit = 1 << at;
@@ -656,16 +672,16 @@ impl Session {
                     self.rings(server.departed(&self.page, holder).expect("the client keeps the protocol"));
                 }
             }
-            self.answer_rings(server);
+            self.answer_rings(server, rang);
             if self.quit.load(Ordering::Acquire) {
                 return;
             }
         }
     }
 
-    /// [`Server::rung`]'s rings, where a holder rang.
-    fn answer_rings(&self, server: &mut End) {
-        if self.rang.swap(false, Ordering::Acquire) {
+    /// [`Server::rung`]'s rings, where a holder `rang`.
+    fn answer_rings(&self, server: &mut End, rang: bool) {
+        if rang {
             self.rings(server.rung(&self.page).expect("the client keeps the protocol"));
         }
     }
@@ -955,6 +971,13 @@ fn a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event(
 // model below meets it dead at every point of its call, with a gate held or
 // not, and its departure is answered whenever the server's loop reads it.
 
+/// The two-holder models explore interleavings with at most this many
+/// preemptions. Each of their mutations is red at two already
+/// (`build/ci.rs`'s controls), and a death is a stop of its own that takes no
+/// preemption. At five the death sweeps alone ran past the host CI job's 45
+/// minutes; at three each model takes seconds.
+const TWO_HOLDERS: usize = 3;
+
 thread_local! {
     /// Whether a holder died in any execution of the model since the last
     /// [`whenever_it_dies`] count: loom runs every execution of a model, its
@@ -984,7 +1007,7 @@ fn whenever_it_dies(model: impl Fn(Option<u32>)) {
 /// `transport-gate-no-want`, `transport-contended-no-arm` and
 /// `transport-want-before-arm` leave it asleep after the owner let go.
 fn two_writers(dies: Option<u32>) {
-    bounded(move || {
+    bounded_by(TWO_HOLDERS, move || {
         let (s, mut server) = Session::new(2);
         let net = {
             let s = Rc::clone(&s);
@@ -1038,7 +1061,7 @@ fn a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure() {
 /// asleep for a gate the dead holder held; `transport-no-resume` has a holder
 /// read again what the other released.
 fn two_readers(dies: Option<u32>) {
-    bounded(move || {
+    bounded_by(TWO_HOLDERS, move || {
         let (s, mut server) = Session::new(2);
         s.publish_at(&mut server, 0, &[0xA, 0xB]);
         s.rings(server.finish(&s.page));
@@ -1085,7 +1108,7 @@ fn two_holders_read_each_byte_once() {
 /// shutdown.
 #[test]
 fn a_write_after_another_holders_shutdown_answers_shut() {
-    bounded(|| {
+    bounded_by(TWO_HOLDERS, || {
         let (s, mut server) = Session::new(2);
         let net = {
             let s = Rc::clone(&s);
@@ -1119,7 +1142,7 @@ fn a_write_after_another_holders_shutdown_answers_shut() {
 /// byte is published after the `end` the server saw. A shutdown under the
 /// writer's gate is the writer's to store, or its departure's.
 fn shutdown_racing_a_write(dies: Option<u32>) {
-    bounded(move || {
+    bounded_by(TWO_HOLDERS, move || {
         let (s, mut server) = Session::new(2);
         let net = {
             let s = Rc::clone(&s);
@@ -1127,7 +1150,7 @@ fn shutdown_racing_a_write(dies: Option<u32>) {
                 let mut at_the_end = None;
                 let mut departed = 0u32;
                 loop {
-                    s.server.wait();
+                    let rang = s.server.wait_rang();
                     let left = s.left.load(Ordering::Acquire);
                     if left & 2 != 0 && departed == 0 {
                         departed = 2;
@@ -1137,7 +1160,7 @@ fn shutdown_racing_a_write(dies: Option<u32>) {
                         let sent = server.sent(&s.page).expect("the client keeps the protocol");
                         assert_eq!(*at_the_end.get_or_insert(sent), sent, "a byte published past the end");
                     }
-                    s.answer_rings(&mut server);
+                    s.answer_rings(&mut server, rang);
                     if s.quit.load(Ordering::Acquire) {
                         return (server, at_the_end);
                     }
@@ -1182,7 +1205,8 @@ fn a_shutdown_racing_a_write_is_never_written_past_whenever_the_writer_dies() {
 /// before the room was released, which overstates and loses no wake, and
 /// every byte is read once. `transport-ungated-violation` ends a read over
 /// such a look. The stale head is a load loom answers with an older store,
-/// which takes no preemption, so the model's bound is two.
+/// which takes no preemption, so its bound is two: at three it explores for
+/// over ten minutes, and its control is red at two.
 #[test]
 fn looks_without_the_gate_lose_no_wake() {
     bounded_by(2, || {
@@ -1191,8 +1215,11 @@ fn looks_without_the_gate_lose_no_wake() {
         let net = {
             let s = Rc::clone(&s);
             loom::thread::spawn(move || {
+                // Every ring taken here is answered, as a server answers each:
+                // a release a waiting holder asked for rings it through `rung`.
                 while server.want_room(&s.page).expect("the client keeps the protocol") == 0 {
-                    s.server.wait();
+                    let rang = s.server.wait_rang();
+                    s.answer_rings(&mut server, rang);
                 }
                 s.publish_at(&mut server, 2, &[0xC]);
                 s.rings(server.finish(&s.page));
