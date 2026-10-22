@@ -3804,6 +3804,7 @@ name = "shell"
 version = "0.1.0"
 dependencies = [
  "toyos",
+ "toyos-abi",
  "toyos-manifest",
 ]
 
@@ -4138,6 +4139,7 @@ name = "terminal"
 version = "0.1.0"
 dependencies = [
  "toyos",
+ "toyos-abi",
  "toyos-font",
  "toyos-window",
 ]

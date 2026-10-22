@@ -325,6 +325,8 @@ fn main() {
                 Notice::Dropped { client, why } => {
                     eprintln!("console: dropping client {client} — {why}")
                 }
+                // What Ctrl+C reaches; nothing to say about it.
+                Notice::Foreground { .. } => {}
             }
         }
 
@@ -406,6 +408,11 @@ fn main() {
                 }
                 usage => {
                     let text = translator.press(usage, window::KeyEvent::from(event).mods());
+                    // Ctrl+C is the foreground line's interrupt, and its
+                    // byte only when no line is held.
+                    if text.as_bytes() == b"\x03" && host.interrupt() {
+                        continue;
+                    }
                     if !text.is_empty() {
                         shell.stdin.write_all(text.as_bytes()).ok();
                     }
