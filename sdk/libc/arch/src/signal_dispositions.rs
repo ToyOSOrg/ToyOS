@@ -8,7 +8,7 @@
 use crate::alarmreq::{SIG_DFL, SIG_IGN};
 use crate::errcode::{EINVAL, ENOSYS};
 use crate::header::{self, SIGNAL_H};
-use crate::sigreq::{bit, index, kept, raised, set, Delivery, Kept, Raised, SigAction, Signals, SIGNALS};
+use crate::sigreq::{bit, index, kept, raised, set, Delivery, Kept, Raised, SigAction, Signals, KEEPER_MASK, SIGNALS};
 
 fn sig(name: &str) -> i32 {
     header::int(SIGNAL_H, name)
@@ -207,3 +207,27 @@ fn a_signal_a_leaving_call_did_not_take_goes_to_libcs_own_thread() {
     assert_eq!(signals.orphan(), None);
     assert_eq!(signals.pending(), bit(int));
 }
+
+/// A call a handler makes on libc's own thread takes nothing: a signal every
+/// program thread blocks stays pending through it, it wants no wake, and what
+/// libc's own thread would deliver is unchanged.
+#[test]
+fn a_call_on_libcs_own_thread_takes_no_signal() {
+    let (term, chld) = (sig("SIGTERM"), sig("SIGCHLD"));
+    let mut signals = Signals::new();
+    signals.act(term, Some(handler(0))).unwrap();
+    signals.act(chld, Some(handler(0))).unwrap();
+    assert!(signals.set_mask(0, bit(term)));
+    assert_eq!(signals.arrive(term), Raised::Pending, "the only program thread blocks it");
+    let orphaned = signals.has_orphan();
+    signals.enter(KEEPER_TID, KEEPER_MASK, true);
+    assert!(!signals.wake_wanted(), "the pending signal wakes no call there");
+    assert_eq!(signals.take(KEEPER_MASK), None);
+    assert_eq!(signals.has_orphan(), orphaned);
+    assert!(matches!(signals.arrive(chld), Raised::Deliver(Delivery::Handle { sig, .. }) if sig == chld), "no waiter takes it there");
+    signals.leave(KEEPER_TID);
+    assert_eq!(signals.pending(), bit(term));
+}
+
+/// A tid no thread of the program has: libc's own thread's is never registered.
+const KEEPER_TID: u32 = 77;

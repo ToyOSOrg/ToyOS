@@ -93,6 +93,11 @@ pub(crate) enum Kept {
 
 /// The index of signal `signum` in a table of [`SIGNALS`], or `EINVAL` for a
 /// number that names none.
+/// The mask libc's own thread is in a blocking call under, a handler run
+/// there having made the call: every signal, so it takes none and is no
+/// waiter a signal goes pending for.
+pub(crate) const KEEPER_MASK: u64 = u64::MAX;
+
 pub(crate) fn index(signum: i32) -> Result<usize, i32> {
     usize::try_from(signum).ok().filter(|&n| (1..=SIGNALS).contains(&n)).map(|n| n - 1).ok_or(EINVAL)
 }

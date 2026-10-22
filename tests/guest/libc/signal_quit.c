@@ -102,9 +102,22 @@ static int computes(void) {
     }
 }
 
+/* The child the parent is driving, which its hang ceiling names. */
+static const char *volatile step = "none";
+
+static void stalled(int sig) {
+    (void)sig;
+    static const char said[] = "signal_quit: stalled driving the child that ";
+    write(2, said, sizeof said - 1);
+    write(2, step, strlen(step));
+    write(2, "\n", 1);
+    _exit(142);
+}
+
 /* A child in `role`, its stdout a pipe answered in `out` and its stdin one
    held in `in`, past its "armed". */
 static pid_t start(const char *role, int *out, int *in) {
+    step = role;
     int said[2], stdin_pipe[2];
     CHECK(pipe(said) == 0 && pipe(stdin_pipe) == 0, "pipe");
     posix_spawn_file_actions_t actions;
@@ -162,7 +175,9 @@ int main(int argc, char **argv) {
             return ppolls();
     }
     /* A hang ceiling, not a timing claim: a child that never ends ends this
-       test with SIGALRM's 142 rather than leaving it to the harness's. */
+       test naming the child it stalled on, rather than leaving the harness's
+       bound to say only that it did. */
+    signal(SIGALRM, stalled);
     alarm(120);
     int out, in, status;
 

@@ -223,10 +223,11 @@ init is `/system/bin/supervisor`.
      `libc_children`'s QEMU x86-64 boot (`signal_quit`): the LLVM child, the
      `read` answering `EINTR`, the reload in `pause` and its terminate, the
      child that only ignores `SIGINT`, and the quit held over a ready `ppoll`;
-     with the stage's libc reverted whole the same cases red, and the mutations
-     for handlers run only in blocking calls, `EINTR` from `poll` alone, a quit
-     without its reason and watching only from a handler's install each red its
-     arm. *Open*: the spawned children's ignore, mask and `SETSIGDEF`, whose
+     with the stage's libc reverted whole the cases do not build
+     (`sig_atomic_t` is undeclared), so that control runs no case, and the arm
+     controls are the mutations: handlers run only in blocking calls, `EINTR`
+     from `poll` alone, a quit without its reason and watching only from a
+     handler's install each red its arm. *Open*: the spawned children's ignore, mask and `SETSIGDEF`, whose
      carrying across a spawn is a decision with the owner, and with it their
      spawn mutations; and the shell, terminal, session and `ctrlc` arms, stage
      7's. Until a spawn carries them a child starts with every signal at its

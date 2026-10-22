@@ -364,7 +364,13 @@ impl Call {
         }
         let tid = tid();
         let mut state = STATE.lock();
-        let mask = mask.unwrap_or_else(|| state.signals.mask(tid));
+        // libc's own thread takes no signal in a call a handler makes there:
+        // what it would take stays pending for its next turn or for a thread
+        // whose mask leaves it unblocked.
+        let mask = match on_keeper(tid) {
+            true => crate::sigreq::KEEPER_MASK,
+            false => mask.unwrap_or_else(|| state.signals.mask(tid)),
+        };
         let wake = state.wake.get_or_insert_with(Pipe::new).read;
         state.signals.enter(tid, mask, children);
         state.settle();
