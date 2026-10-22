@@ -1442,7 +1442,12 @@ const CRYPTO_CT: &[metal::Arm] = &[metal::Arm {
 const CRYPTO_CT_CURVES: &[metal::Arm] = &[metal::Arm {
     adds_ms: CRYPTO_CT_CURVES_MS,
     named_only: true,
-    ..metal::once("cryptoctcurvescase", "tests/images/testcases.toml", &[], &["test_rs_crypto_constant_time_curves"])
+    ..metal::once(
+        "cryptoctcurvescase",
+        "tests/images/testcases.toml",
+        &[],
+        &["test_rs_crypto_constant_time_curves", "test_rs_crypto_parity_unasserted"],
+    )
 }];
 
 /// A constant-time job's lines, once it has passed.

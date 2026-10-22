@@ -1,5 +1,5 @@
 //! What `CR0`, `CR4`, `IA32_EFER`, `XCR0`, `IA32_XSS`, the save form,
-//! `IA32_APIC_BASE` and the performance request hold on every CPU in this
+//! `IA32_UARCH_MISC_CTL`, `IA32_APIC_BASE` and the performance request hold on every CPU in this
 //! machine. One declaration, applied by the BSP and every AP and checked on
 //! each; nothing else may write any of them but [`flush_global`], which puts
 //! back the `CR4` it read, and an AP's trampoline, which enters long mode
@@ -48,6 +48,38 @@ mod xss {
 
 /// `IA32_XSS` on every CPU that has it: no supervisor component.
 const XSS: u64 = 0;
+
+/// Data operand independent timing: Intel, "Data Operand Independent Timing
+/// Instruction Set Architecture (ISA) Guidance", Tables 1 and 2.
+/// `IA32_ARCH_CAPABILITIES` exists where `CPUID.(EAX=07H,ECX=0):EDX[29]` is
+/// set; its bit 12 enumerates `IA32_UARCH_MISC_CTL`, a logical-processor
+/// register whose bit 0 (DOITM) gives the guidance's listed instructions
+/// timing independent of their data operands. It resets to 0, bits 63:1 are
+/// reserved, and a write to it does not serialize.
+mod doit {
+    pub const CPUID_7_EDX_ARCH_CAPABILITIES: u32 = 1 << 29;
+    pub const ARCH_CAPABILITIES: u32 = 0x10A;
+    pub const ARCH_CAPABILITIES_DOITM: u64 = 1 << 12;
+    pub const UARCH_MISC_CTL: u32 = 0x1B01;
+    pub const DOITM: u64 = 1 << 0;
+}
+
+/// `IA32_UARCH_MISC_CTL` on every CPU: DOITM on. A CPU that does not
+/// enumerate it is refused.
+const UARCH_MISC_CTL: u64 = doit::DOITM;
+
+/// Refuses a CPU without DOITM, by name: the guidance's enumeration, CPUID
+/// first, since reading `IA32_ARCH_CAPABILITIES` where it does not exist is
+/// `#GP`.
+fn require_doitm(cpu_id: u32) {
+    let enumerated = cpu::leaf_7().3 & doit::CPUID_7_EDX_ARCH_CAPABILITIES != 0
+        && cpu::rdmsr(doit::ARCH_CAPABILITIES) & doit::ARCH_CAPABILITIES_DOITM != 0;
+    assert!(
+        enumerated,
+        "control_regs: cpu{cpu_id} does not enumerate DOITM (IA32_ARCH_CAPABILITIES[12]), \
+         which this kernel declares on",
+    );
+}
 
 /// `CR0`, SDM Vol. 3A §2.5.
 mod cr0 {
@@ -266,6 +298,7 @@ pub fn init(cpu_id: u32) {
     let declared = declaration(cpu_id);
     let (xcr0, form) = xsave_declaration(cpu_id);
     let has_xss = has_xss();
+    require_doitm(cpu_id);
     if !skipped(cpu_id) {
         // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
         // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
@@ -284,6 +317,9 @@ pub fn init(cpu_id: u32) {
             if has_xss {
                 cpu::wrmsr(xss::MSR, XSS);
             }
+            // SAFETY: `require_doitm` found the register enumerated, and the
+            // value sets no reserved bit.
+            cpu::wrmsr(doit::UARCH_MISC_CTL, UARCH_MISC_CTL);
         }
         if declared & cr4::SMAP != 0 {
             // Nothing in this kernel sets `RFLAGS.AC`, so this is the only
@@ -572,13 +608,15 @@ fn self_check(cpu_id: u32, declared_cr4: u64, declared_xcr0: u64, form: kernel::
     // missing it reads as holding no `XCR0`, which no declaration is.
     let live_xcr0 = if live_cr4 & cr4::OSXSAVE != 0 { unsafe { cpu::xgetbv0() } } else { 0 };
     let live_xss = has_xss.then(|| cpu::rdmsr(xss::MSR));
+    let live_uarch_misc_ctl = cpu::rdmsr(doit::UARCH_MISC_CTL);
     log!(
-        "control_regs: cpu{} cr0={:#010x} cr4={:#010x} efer={:#06x} xcr0={:#x} save={}{}{}{}{}{}",
+        "control_regs: cpu{} cr0={:#010x} cr4={:#010x} efer={:#06x} xcr0={:#x} uarch_misc_ctl={:#x} save={}{}{}{}{}{}",
         cpu_id,
         live_cr0,
         live_cr4,
         live_efer,
         live_xcr0,
+        live_uarch_misc_ctl,
         form.name(),
         opt(live_cr4, cr4::SMEP, " smep"),
         opt(live_cr4, cr4::SMAP, " smap"),
@@ -604,6 +642,11 @@ fn self_check(cpu_id: u32, declared_cr4: u64, declared_xcr0: u64, form: kernel::
     assert!(
         live_xcr0 == declared_xcr0,
         "control_regs: cpu{cpu_id} holds xcr0={live_xcr0:#x}, the declaration is {declared_xcr0:#x}",
+    );
+    assert!(
+        live_uarch_misc_ctl == UARCH_MISC_CTL,
+        "control_regs: cpu{cpu_id} holds uarch_misc_ctl={live_uarch_misc_ctl:#x}, the declaration is \
+         {UARCH_MISC_CTL:#x}",
     );
     if let Some(live_xss) = live_xss {
         assert!(live_xss == XSS, "control_regs: cpu{cpu_id} holds ia32_xss={live_xss:#x}, the declaration is {XSS:#x}");
