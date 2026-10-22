@@ -9,7 +9,7 @@ opened: 2026-10-13
 Owner goal (2026-10-13): adopt `toyos-crypto`, the crate Codex wrote for
 ToyOS outside the tree, own it here, and bring it into this repository. The
 bar is at least ring's speed, and secure. It is pure Rust and `no_std`: hashes,
-HMAC/HKDF, AES-GCM, ChaCha20-Poly1305, OpenSSH's ChaCha20-Poly1305, X25519,
+HMAC/HKDF, PBKDF2, scrypt, AES-GCM, ChaCha20-Poly1305, OpenSSH's ChaCha20-Poly1305, X25519,
 Ed25519, P-256/P-384 ECDH and ECDSA verification, RSA verification, ML-KEM-768,
 WPA2's primitives and an optional rustls provider. It has no entropy source;
 the caller supplies one through its `Random` trait. No independent arithmetic
@@ -66,6 +66,7 @@ review has been done, and passing vectors does not show it is safer than ring.
 | Every SHA-256: the build, `pkg`, `lib/swap`, `system/update`, `lib/update` and the loader | the crate, since #1016: SHA-NI on x86-64, the UEFI loader's in a block that saves the XMM registers it uses; the Armv8 SHA instructions where the target promises them. No slower than `toyos-sha2-hw`, which it replaces, on either bench: on the T14 4.6 times as fast at 64 B and 9 and 6 percent faster at 16 KiB and 1 MiB, on the AMD bench 2.8 times at 64 B, 2 percent at 16 KiB and equal at 1 MiB (#1016's evidence) | nothing |
 | ToyOS's own HTTPS clients. On the host: the build's `ureq` (`build/release.rs`) and doom's build script (`apps/doom/build.rs`). In a guest, none today: `https_tls13` and `pkg install <url>` are stages 3 and 5 of `issues/the-internet-clients-work-unchanged.md` | rustls on `ring`, which is `ToyOSOrg/ring` in a guest | the rustls provider through ureq's `rustls-no-provider` feature. Stage 5, once parity and security hold (owner, 2026-10-13) |
 | Wi-Fi's `wlan` (`issues/there-is-no-wifi.md` P6, W2) | nothing yet | PBKDF2-HMAC-SHA1, the 802.11i PRF and RFC 3394 unwrap, which the crate has. AES-CMAC-128, SAE over P-256 by hash-to-element, a public constant-time comparison and a public wiping secret, which it lacks |
+| Encrypted DATA storage (`issues/storage-is-layers-and-a-role-is-a-filesystem.md`): the bcachefs engine's `crypt` unlock and its key holder | nothing yet | scrypt (RFC 7914) at bcachefs's default and smallest costs, which the crate has; ChaCha20 at a chosen block counter and raw Poly1305 for the format's own AEAD composition, which it lacks publicly |
 | `issues/programs-hold-aes-keys-as-key-locker-handles.md` | blocked on a session-long AES key | a TLS client on the crate is that consumer: AES behind a Key Locker handle. SSH holds no AES key |
 
 Not consumers:
@@ -448,6 +449,9 @@ Not consumers:
        samples by rho, a public output of the secret seed, so no two classes
        can share it. Exit: a measurement with rho held fixed, which needs an
        entry below the seed (a proposal; no API takes rho today).
+     - **Not timed, by design:** scrypt's ROMix. Its second loop reads the
+       table entry the secret state names (RFC 7914 §5); that access pattern
+       is what makes it memory-hard. Its PBKDF2 and Salsa20/8 are timed.
      - **Open:** typed domains (the speed work's); each secret routine's
        module contract naming its secret inputs; the code inspection; the
        audit.
