@@ -168,9 +168,15 @@ fn check_montgomery<M: Modulus<N>, const N: usize>() {
             assert_eq!(integer(&difference.integer()), (a + &p - b) % &p);
             assert_eq!(integer(&product.integer()), (a * b) % &p);
             assert_eq!(integer(&a_encoded.square().integer()), (a * a) % &p);
+            // The compile-time forms compute the same residues.
+            assert_eq!(a_encoded.plus(&b_encoded).eq(&sum), 1);
+            assert_eq!(a_encoded.minus(&b_encoded).eq(&difference), 1);
+            assert_eq!(a_encoded.times(&b_encoded).eq(&product), 1);
         }
         if (1..=4).contains(&i) {
-            assert_eq!(a_encoded.mul(&a_encoded.invert()).eq(&Residue::one()), 1);
+            let inverse = a_encoded.invert();
+            assert_eq!(a_encoded.mul(&inverse).eq(&Residue::one()), 1);
+            assert_eq!(a_encoded.inverted().eq(&inverse), 1);
         }
     }
 }
