@@ -420,9 +420,7 @@ pub const SYSCAP_LABEL: &str = "syscap";
 pub const SVC_LABEL: &str = "svc";
 /// The labels the kernel puts on the immutable memory objects it hands the
 /// supervisor beside the system capability: the file server's executable and
-/// ROOT's bytes, both as the loader verified them (`boot::KernelArgs`). The
-/// file server's is also the path its manifest row names, which is where its
-/// image comes from.
+/// ROOT's bytes, both as the loader verified them (`boot::KernelArgs`).
 pub const FILESERVER_IMAGE_LABEL: &str = "boot:fileserver";
 pub const ROOT_IMAGE_LABEL: &str = "boot:root";
 /// The label every process starts holding a handle to itself under, carrying

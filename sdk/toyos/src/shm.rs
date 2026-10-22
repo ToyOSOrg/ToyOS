@@ -173,19 +173,37 @@ impl Immutable {
     /// Map `handle`, refused and never mapped unless the kernel answers it is
     /// a region nobody can write. Its length is the kernel's answer. The handle
     /// is consumed either way.
-    pub fn adopt(handle: OwnedHandle) -> Result<Self, Lent> {
-        let stat = syscall::fstat(handle.raw()).map_err(Lent::Kernel)?;
+    pub fn adopt(handle: OwnedHandle) -> Result<Self, NotImmutable> {
+        let stat = syscall::fstat(handle.raw()).map_err(NotImmutable::Kernel)?;
         if stat.file_type != FileType::ImmutableMemory {
-            return Err(Lent::NotRam);
+            return Err(NotImmutable::Writable);
         }
         // A region the kernel maps is within the address space, so its length is a `usize`.
-        Ok(Self { ptr: map(&handle).map_err(Lent::Kernel)?, handle, len: stat.size as usize })
+        Ok(Self { ptr: map(&handle).map_err(NotImmutable::Kernel)?, handle, len: stat.size as usize })
     }
 
     pub fn as_slice(&self) -> &[u8] {
         // SAFETY: the mapping is `len` bytes, lives as long as `self`, and is
         // written by nobody, so a shared reference over it is sound.
         unsafe { core::slice::from_raw_parts(self.ptr, self.len) }
+    }
+}
+
+/// Why a handle was not taken as an [`Immutable`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NotImmutable {
+    /// The kernel would not describe or map it.
+    Kernel(SyscallError),
+    /// It names something other than a region nobody can write.
+    Writable,
+}
+
+impl fmt::Display for NotImmutable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Kernel(e) => write!(f, "the kernel would not describe or map it ({e:?})"),
+            Self::Writable => write!(f, "it is not a region nobody can write"),
+        }
     }
 }
 

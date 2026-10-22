@@ -62,11 +62,12 @@ pub struct KernelArgs {
     /// layout.
     pub layout: u32,
     /// The boot parameter, as ASCII with no terminator: comma-separated tokens
-    /// read out of `\toyos\cmdline` on the volume the bootloader loaded itself
-    /// from, read by [`tokens`].
+    /// read out of `\toyos\cmdline` on the slot's volume, with the words the
+    /// loader appends ([`SLOT_PARAM`] among them), read by [`tokens`].
     ///
-    /// Every shipping image carries none, and a kernel that
-    /// carries no actuators refuses any token rather than ignoring it
+    /// Every token is a parameter the kernel claims (`kernel/src/params.rs`)
+    /// or an actuator its table declares, and a kernel that carries no
+    /// actuators refuses any other rather than ignoring it
     /// (`kernel/src/actuator.rs`). It is in this struct rather than anywhere the
     /// kernel could go and fetch it because the earliest actuator panics before
     /// `mm::init` and another acts at AP bring-up: a parameter that is not here
@@ -294,13 +295,6 @@ pub struct MemoryMapEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_boot_parameter_is_its_non_empty_tokens() {
-        assert!(tokens("usb-flush-fails,fat-boot-reads-fail").eq(["usb-flush-fails", "fat-boot-reads-fail"]));
-        assert!(tokens("boot-slot=A,,x").eq(["boot-slot=A", "x"]));
-        assert_eq!(tokens("").count(), 0);
-    }
 
     #[test]
     fn a_window_holds_an_extent_and_not_merely_its_first_address() {

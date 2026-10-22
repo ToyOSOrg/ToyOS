@@ -24,18 +24,14 @@ use toyos_rootimage::handoff::{held, Descriptor};
 use crate::mm::policy::CachePolicy;
 use crate::mm::{DirectMap, Region, PAGE_SIZE};
 use crate::object::shm::{Memory, SharedMemObject};
-use crate::sync::Lock;
 
-/// The three images, as the loader handed them: kept from [`init`] to
-/// [`objects`].
+/// The three images, as the loader handed them and [`init`] judged them.
 #[derive(Clone, Copy)]
-struct Handed {
+pub struct Handed {
     supervisor: BootImage,
     fileserver: BootImage,
     root: BootImage,
 }
-
-static HANDED: Lock<Option<Handed>> = Lock::new(None);
 
 /// Every image in the order [`init`] returns their regions, by name.
 fn named(handed: &Handed) -> [(&'static str, BootImage); 3] {
@@ -48,9 +44,9 @@ fn pages(image: BootImage) -> Region {
 }
 
 /// Take the images out of the handoff, refusing the boot by name on one the
-/// kernel may not keep, and answer their regions for `mm::init` to withhold.
-/// Runs before `mm::init`, so it neither allocates nor logs.
-pub fn init(args: &KernelArgs, map: &[MemoryMapEntry]) -> [Region; 3] {
+/// kernel may not keep, and answer them with their regions for `mm::init` to
+/// withhold. Runs before `mm::init`, so it neither allocates nor logs.
+pub fn init(args: &KernelArgs, map: &[MemoryMapEntry]) -> (Handed, [Region; 3]) {
     let handed = Handed { supervisor: args.supervisor_image, fileserver: args.fileserver_image, root: args.root_image };
     for (what, image) in named(&handed) {
         assert!(image.len != 0, "boot: the loader handed no {what} image");
@@ -72,8 +68,7 @@ pub fn init(args: &KernelArgs, map: &[MemoryMapEntry]) -> [Region; 3] {
             image.len
         );
     }
-    *HANDED.lock() = Some(handed);
-    named(&handed).map(|(_, image)| pages(image))
+    (handed, named(&handed).map(|(_, image)| pages(image)))
 }
 
 /// The objects the supervisor is spawned from and handed.
@@ -83,10 +78,9 @@ pub struct Objects {
     pub root: Arc<SharedMemObject>,
 }
 
-/// One object over each image, once `mm::init` has run: called once, by the
-/// supervisor's spawn.
-pub fn objects() -> Objects {
-    let handed = HANDED.lock().take().expect("boot: the images are taken once, after `init`");
+/// One object over each image, once `mm::init` has run, for the supervisor's
+/// spawn.
+pub fn objects(handed: Handed) -> Objects {
     let object = |image: BootImage| {
         let region = pages(image);
         SharedMemObject::over(crate::object::shm::Region {

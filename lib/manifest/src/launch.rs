@@ -259,7 +259,7 @@ mod tests {
     use super::*;
 
     fn row(name: &str) -> Program {
-        Program { name: name.into(), path: format!("/system/bin/{name}"), ..Program::default() }
+        Program { name: name.into(), source: crate::Source::Path(format!("/system/bin/{name}")), ..Program::default() }
     }
 
     fn swap() -> Program {

@@ -264,7 +264,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     params::init(cmdline);
     deadline::claim(cmdline);
     actuator::init(cmdline);
-    let [supervisor_image, fileserver_image, root_image] = bootimage::init(&kernel_args, maps);
+    let (boot_images, [supervisor_image, fileserver_image, root_image]) = bootimage::init(&kernel_args, maps);
 
     arch::boot::after_console(&kernel_args, maps);
 
@@ -455,7 +455,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // Off the loader's images, so nothing from here to the supervisor's
     // spawn asks a disk for anything: every storage driver comes up after it.
     // The supervisor reads /system/etc/system.manifest itself; the boot config never names the program it starts.
-    let pid = process::spawn_supervisor(bootimage::objects());
+    let pid = process::spawn_supervisor(bootimage::objects(boot_images));
     log!("spawned the supervisor pid={pid}");
 
     #[cfg(feature = "boot-actuators")]

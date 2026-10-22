@@ -101,7 +101,7 @@ use toyos_manifest::grants::{self, Answer, Decision, Store};
 use toyos_manifest::launch::{self as authority, Authority, Session, Sessions, Target};
 use toyos_manifest::package::{self, Package};
 use toyos_manifest::device::{Entry, PciMatch};
-use toyos_manifest::{Manifest, Program, View};
+use toyos_manifest::{Manifest, Program, Source, View};
 use toyos_supervisor::claims::{self, Missing, Unresolved};
 use toyos_supervisor::drives::{self, Act, Drives};
 use toyos_supervisor::restart::{self, AfterEnd, Budget};
@@ -466,7 +466,7 @@ fn main() {
     let no_grants = Grants { roles: Vec::new(), block: None, netstack: None };
     let unread = Manifest::default();
     let started = system_service.spawn(
-        &system_row.path,
+        &system_row.source,
         &[],
         Vec::new(),
         &unread,
@@ -707,9 +707,9 @@ struct Service<'a> {
     program: &'a Program,
     /// The file-server role this process serves, for a row with `roles`.
     role: Option<&'a str>,
-    /// The binary the running process was started from: the row's path, or a
-    /// swap's installed one.
-    path: String,
+    /// What the running process was started from: the row's source, or a
+    /// swap's installed binary.
+    source: Source,
     /// `None` once neither binary would start.
     child: Option<Child>,
     /// The row's devices the running process was endowed: what a process
@@ -731,7 +731,7 @@ impl<'a> Service<'a> {
         Self {
             program,
             role,
-            path: program.path.clone(),
+            source: program.source.clone(),
             child: None,
             devices: Vec::new(),
             ports: Rc::new(RefCell::new(acceptors)),
@@ -741,13 +741,13 @@ impl<'a> Service<'a> {
         }
     }
 
-    /// Start `path` holding this service's manifest row, and answer its pid.
+    /// Start `source` holding this service's manifest row, and answer its pid.
     ///
     /// `owed` is what the process this start follows held: a start refused any
     /// of it is no start, so a service never runs on without a device it had.
     fn spawn(
         &mut self,
-        path: &str,
+        source: &Source,
         owed: &[String],
         block: Vec<String>,
         system: &Manifest,
@@ -763,7 +763,7 @@ impl<'a> Service<'a> {
         // wrote it is not a claim about what is there now. This narrows the
         // window to the spawn itself and does not close it
         // (`issues/a-swapped-binary-lives-where-any-process-can-rewrite-it.md`).
-        if let Some(digest) = toyos_swap::installed_digest(path) {
+        if let Some((path, digest)) = source.path().and_then(|path| Some((path, toyos_swap::installed_digest(path)?))) {
             let bytes = read_binary(path).map_err(|why| std::io::Error::other(why.to_string()))?;
             toyos_swap::verify(&bytes, &digest).map_err(|why| {
                 std::io::Error::other(format!("{path} no longer holds what was installed: {why}"))
@@ -775,11 +775,14 @@ impl<'a> Service<'a> {
         }
         let ports = self.ports.borrow();
         let served = Served::Keep { acceptors: &ports, owed };
-        let mut command = Command::new(path);
-        if path == FILESERVER_IMAGE_LABEL {
-            command = Command::new(&self.program.name);
-            command.boot_image(boot.fileserver.as_handle().0);
-        }
+        let command = match source {
+            Source::Path(path) => Command::new(path),
+            Source::BootFileServer => {
+                let mut command = Command::new(&self.program.name);
+                command.boot_image(boot.fileserver.as_handle().0);
+                command
+            }
+        };
         let (child, devices) = start(
             command,
             self.program,
@@ -796,7 +799,7 @@ impl<'a> Service<'a> {
         drop(ports);
         let pid = child.id();
         self.child = Some(child);
-        self.path = path.to_string();
+        self.source = source.clone();
         self.devices = devices;
         Ok(pid)
     }
@@ -854,7 +857,7 @@ enum Phase {
     Answered { conn: Connection, rx: LaunchRx, since: Instant },
     /// The new binary runs; it is the service if it is still running at
     /// `until`, and `previous` is started again if it is not.
-    Probation { until: Instant, previous: String, owed: Vec<String> },
+    Probation { until: Instant, previous: Source, owed: Vec<String> },
 }
 
 impl Flight {
@@ -950,7 +953,7 @@ impl<'a> Supervisor<'a> {
                 continue;
             }
             let started = service.spawn(
-                &program.path,
+                &program.source,
                 &[],
                 block,
                 system,
@@ -1055,7 +1058,8 @@ impl<'a> Supervisor<'a> {
         let launcher = (&self.minted, self.sessions.machine());
         let served = Served::Keep { acceptors: &[], owed: &[] };
         let output = Output::Boot(&mut self.log);
-        start(Command::new(&row.path), row, self.system, self.syscap, served, &self.connectors, &self.grants, &[], extra, launcher, output)
+        let path = row.source.path().ok_or_else(|| format!("{} runs {}, and a `drives` row runs a file", row.name, row.source))?;
+        start(Command::new(path), row, self.system, self.syscap, served, &self.connectors, &self.grants, &[], extra, launcher, output)
             .map(|(child, _)| (child, stop))
             .map_err(|e| e.to_string())
     }
@@ -1118,7 +1122,8 @@ impl<'a> Supervisor<'a> {
             grants::Request::Add { package, folder } => {
                 let (system, name) = (self.system, package.clone());
                 let binary = self.files("a grant's files", move || -> Result<String, String> {
-                    binary_digest(&installed(system, &name)?.path)
+                    let row = installed(system, &name)?;
+                    binary_digest(row.source.path().ok_or_else(|| format!("{name} runs {}", row.source))?)
                 })??;
                 let said = format!("{package} is granted {} {}", folder.path, folder.access);
                 self.keep(&package, binary, Answer::Granted(folder))?;
@@ -1501,7 +1506,9 @@ impl<'a> Supervisor<'a> {
         // request leaves nothing staged behind it.
         let bytes = read_binary(&request.staged);
         let _ = std::fs::remove_file(&request.staged);
-        let Some(index) = self.services.iter().position(|s| s.program.name == name) else {
+        // Not SYSTEM, which no manifest row declares: it runs the signed boot
+        // image whatever is installed.
+        let Some(index) = self.services.iter().position(|s| s.program.name == name && s.role != Some(toyos_manifest::SYSTEM)) else {
             return refuse(name, Refusal::NotAService(name.to_string()));
         };
         if let Some(busy) = flight {
@@ -1525,7 +1532,7 @@ impl<'a> Supervisor<'a> {
             return refuse(name, why);
         }
         let installed = toyos_swap::installed_path(name, &request.digest);
-        if installed == service.path {
+        if service.source.path() == Some(installed.as_str()) {
             return refuse(name, Refusal::AlreadyRuns(installed));
         }
         if let Err(why) = install(&installed, &request.digest, &bytes) {
@@ -1538,7 +1545,7 @@ impl<'a> Supervisor<'a> {
                 "{installed} ({} bytes, sha256 {}) replaces {} (pid {})",
                 bytes.len(),
                 toyos_swap::hex(&request.digest),
-                service.path,
+                service.source,
                 service.pid().map_or(0, |p| p)
             ),
         );
@@ -1578,7 +1585,7 @@ impl<'a> Supervisor<'a> {
     /// Stop the service and start the installed binary in its place.
     fn cut_over(&mut self, index: usize, path: String) -> Option<Flight> {
         let name = self.services[index].program.name.clone();
-        let previous = self.services[index].path.clone();
+        let previous = self.services[index].source.clone();
         // What the process being stopped holds, which its replacement and the
         // binary a failed swap starts again are each owed.
         let owed = self.services[index].devices.clone();
@@ -1601,7 +1608,7 @@ impl<'a> Supervisor<'a> {
             let _ = old.wait();
         }
         let started = service.spawn(
-            &path,
+            &Source::Path(path.clone()),
             &owed,
             block,
             self.system,
@@ -1636,7 +1643,7 @@ impl<'a> Supervisor<'a> {
 
     /// Probation is over: the new binary is the service, or the one it
     /// replaced is started again.
-    fn end_probation(&mut self, index: usize, path: &str, previous: &str, owed: &[String]) {
+    fn end_probation(&mut self, index: usize, path: &str, previous: &Source, owed: &[String]) {
         let service = &mut self.services[index];
         let name = service.program.name.clone();
         // The loop watches its end from here, and an end before this answer
@@ -1652,7 +1659,7 @@ impl<'a> Supervisor<'a> {
                     Word::InService,
                     &format!("{path} as pid {}", service.pid().map_or(0, |p| p)),
                 );
-                if previous != path {
+                if let Some(previous) = previous.path().filter(|&previous| previous != path) {
                     forget(previous);
                 }
             }
@@ -1826,12 +1833,12 @@ impl<'a> Supervisor<'a> {
                     );
                 }
                 AfterEnd::Restart => {
-                    let (path, owed, program) = (service.path.clone(), service.devices.clone(), service.program);
+                    let (source, owed, program) = (service.source.clone(), service.devices.clone(), service.program);
                     self.make_home(program);
                     let block = self.block_args();
                     let service = &mut self.services[index];
                     let (system, syscap, connectors, grants) = (self.system, self.syscap, &self.connectors, &self.grants);
-                    match service.spawn(&path, &owed, block, system, syscap, connectors, grants, &self.minted, self.boot, &mut self.log) {
+                    match service.spawn(&source, &owed, block, system, syscap, connectors, grants, &self.minted, self.boot, &mut self.log) {
                         Ok(new) => say!("supervisor: {label} (pid {pid}) ended; started again as pid {new}"),
                         Err(e) => {
                             service.ports.borrow_mut().clear();
@@ -1860,7 +1867,7 @@ impl<'a> Supervisor<'a> {
 
     /// Start the binary a failed swap replaced, or close the service's ports
     /// when that will not start either.
-    fn restore(&mut self, index: usize, previous: &str, owed: &[String]) {
+    fn restore(&mut self, index: usize, previous: &Source, owed: &[String]) {
         let program = self.services[index].program;
         self.make_home(program);
         let block = self.block_args();
@@ -2099,12 +2106,15 @@ impl Supervisor<'_> {
             resolve(system, &path, |target| -> Result<_, authority::Refusal> {
                 let starts = authority::may_start(row, session, target)?;
                 let (Target::Row(program) | Target::Package(program)) = target;
-                let prepared = command.image_from(Path::new(&program.path)).prepare().map(drop);
+                let prepared = match program.source.path() {
+                    Some(path) => command.image_from(Path::new(path)).prepare().map(drop),
+                    None => Err(std::io::Error::other(format!("{} runs {}, which no launch starts", program.name, program.source))),
+                };
                 let binary = matches!(target, Target::Package(_)).then(|| {
                     command
                         .prepared_image()
                         .map(|bytes| toyos_swap::hex(&toyos_swap::digest(bytes)))
-                        .ok_or_else(|| format!("{} was not read before its start, so no grant can name it", program.path))
+                        .ok_or_else(|| format!("{} was not read before its start, so no grant can name it", program.source))
                 });
                 Ok((starts, binary, prepared.map(|()| command)))
             })
@@ -2445,7 +2455,7 @@ impl Drop for Moved {
 /// named that row's binary — directly, or through a link that lands on it.
 fn declared<'a>(system: &'a Manifest, path: &str) -> Option<&'a Program> {
     let key = |p: &str| p.rsplit('/').next().unwrap_or(p).to_string();
-    let row = |p: &str| system.program(&key(p)).filter(|program| program.path == p);
+    let row = |p: &str| system.program(&key(p)).filter(|program| program.source.path() == Some(p));
     if let Some(program) = row(path) {
         return Some(program);
     }
@@ -2491,8 +2501,8 @@ fn resolve<'a, V>(system: &'a Manifest, path: &str, judge: impl FnOnce(Target<'_
         Ok(row) => row,
         Err(why) => return Resolved::Refused(why),
     };
-    if row.path != path {
-        return Resolved::Refused(format!("{} launches {:?} and this asks for {path:?}", Package::path(name), row.path));
+    if row.source.path() != Some(path) {
+        return Resolved::Refused(format!("{} launches {} and this asks for {path:?}", Package::path(name), row.source));
     }
     let verdict = judge(Target::Package(&row));
     Resolved::Package(row, verdict)
@@ -3299,7 +3309,7 @@ fn say_release(server: &Service<'_>) {
     let path = toyos_osrelease::GUEST_PATH;
     let text = read_system(path, server);
     let release = toyos_osrelease::parse(text.as_bytes())
-        .unwrap_or_else(|e| panic!("supervisor: {path} is not one the build wrote: {e:?}"));
+        .unwrap_or_else(|e| bootstrap_fails(format!("{path} is not one the build wrote: {e:?}")));
     say!(
         "{}{} {}, committed {} UTC, toolchain {}, {}",
         toyos_osrelease::SAID,
@@ -3316,14 +3326,19 @@ fn say_release(server: &Service<'_>) {
 /// this boot's end, said by name.
 fn read_system(path: &'static str, server: &Service<'_>) -> String {
     let (answer, answered) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
+    let reader = std::thread::Builder::new()
         .name("bootstrap".into())
         .spawn(move || {
             // The receiver is gone once the bound has passed.
             let _ = answer.send(std::fs::read_to_string(path));
         })
         .expect("supervisor: no thread to read /system on");
-    match answered.recv_timeout(FILES_BOUND) {
+    let read = answered.recv_timeout(FILES_BOUND);
+    // Answered, so it is on its way out.
+    if read.is_ok() {
+        reader.join().expect("supervisor: the bootstrap reader panicked");
+    }
+    match read {
         Ok(Ok(text)) => text,
         Ok(Err(e)) => bootstrap_fails(format!("cannot read {path}: {e}")),
         Err(_) => bootstrap_fails(format!(
@@ -3350,9 +3365,11 @@ fn bootstrap_fails(why: String) -> ! {
 /// the file server's executable and ROOT's bytes, which nobody writes
 /// (`toyos_abi::boot::BootImage`). Kept for the machine's life, since SYSTEM
 /// is started again from them.
+///
+/// Handles and not mappings: the supervisor reads neither, it hands them on.
 struct Boot {
-    fileserver: toyos::shm::Immutable,
-    root: toyos::shm::Immutable,
+    fileserver: toyos::OwnedHandle,
+    root: toyos::OwnedHandle,
 }
 
 impl Boot {
@@ -3361,8 +3378,9 @@ impl Boot {
             let handle: toyos::OwnedHandle = Endowments::get()
                 .take(label)
                 .unwrap_or_else(|| panic!("supervisor: the kernel spawns this program holding `{label}`"));
-            toyos::shm::Immutable::adopt(handle)
-                .unwrap_or_else(|why| panic!("supervisor: `{label}` is no image nobody writes: {why}"))
+            let kind = toyos_abi::syscall::fstat(handle.as_handle()).map(|stat| stat.file_type);
+            assert_eq!(kind, Ok(FileType::ImmutableMemory), "supervisor: `{label}` is no image nobody writes");
+            handle
         };
         Self { fileserver: image(FILESERVER_IMAGE_LABEL), root: image(ROOT_IMAGE_LABEL) }
     }
@@ -3374,7 +3392,7 @@ impl Boot {
 fn system_row() -> Program {
     Program {
         name: "fileserver".to_string(),
-        path: FILESERVER_IMAGE_LABEL.to_string(),
+        source: Source::BootFileServer,
         roles: vec![toyos_manifest::SYSTEM.to_string()],
         restart: true,
         ..Program::default()

@@ -787,9 +787,9 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                 let cfg = &config.programs[*name];
                 toyos_manifest::Program {
                     name: (*name).clone(),
-                    path: match name.as_str() {
-                        FILESERVER_PROGRAM => toyos_abi::syscall::FILESERVER_IMAGE_LABEL.to_string(),
-                        _ => format!("/system/bin/{name}"),
+                    source: match name.as_str() {
+                        FILESERVER_PROGRAM => toyos_manifest::Source::BootFileServer,
+                        _ => toyos_manifest::Source::Path(format!("/system/bin/{name}")),
                     },
                     args: cfg.args.clone(),
                     serves: cfg.serves.clone(),

@@ -13,7 +13,8 @@
 //! job already done.
 //!
 //! ```text
-//! program <name> <path>     starts a program's records
+//! program <name> <path>     starts a program's records: the executable at <path>
+//! boot-program <name>       starts one whose process runs the file server's boot image
 //! arg <text>                argv after argv[0]
 //! serve <name>              the supervisor makes one machine-wide port and endows the acceptor
 //! provide <name>            this program makes its own port, once per instance
@@ -242,10 +243,46 @@ pub fn syscap_rights(names: &[String]) -> Result<Rights, String> {
     Ok(rights)
 }
 
+/// What a row's process runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Source {
+    /// The executable at this path: a file of `/system`, or an installed
+    /// package's.
+    Path(String),
+    /// The file server's boot image, which the kernel hands the supervisor
+    /// (`toyos_abi::boot::BootImage`): what serves `/system` runs from no file.
+    BootFileServer,
+}
+
+impl Default for Source {
+    fn default() -> Self {
+        Self::Path(String::new())
+    }
+}
+
+impl core::fmt::Display for Source {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Path(path) => f.write_str(path),
+            Self::BootFileServer => f.write_str("the file server's boot image"),
+        }
+    }
+}
+
+impl Source {
+    /// The executable's path; `None` for a boot image.
+    pub fn path(&self) -> Option<&str> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::BootFileServer => None,
+        }
+    }
+}
+
 #[derive(Clone, Default, Debug, PartialEq, Eq)]
 pub struct Program {
     pub name: String,
-    pub path: String,
+    pub source: Source,
     pub args: Vec<String>,
     /// Machine-wide ports the supervisor creates and endows the **acceptor** of.
     pub serves: Vec<String>,
@@ -306,7 +343,7 @@ impl Program {
     /// The installed package this row launches: a row [`Manifest::app_row`]
     /// made.
     pub fn package(&self) -> Option<&str> {
-        package::package_of(&self.path)
+        package::package_of(self.source.path()?)
     }
 
     /// The `HOME` the supervisor starts this row with. A location grants nothing: what
@@ -378,7 +415,7 @@ impl Manifest {
         }
         Ok(Program {
             name: name.to_string(),
-            path: program.to_string(),
+            source: Source::Path(program.to_string()),
             receives: self.apps.clone(),
             ..Program::default()
         })
@@ -439,11 +476,16 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
             return Err(RenderError::NameTooLong(program.name.clone()));
         }
         check(&program.name, "name", &program.name)?;
-        check(&program.name, "path", &program.path)?;
         if !program.serves.is_empty() && !program.service {
             return Err(RenderError::ServesWithoutService(program.name.clone()));
         }
-        out.push_str(&format!("program {} {}\n", program.name, program.path));
+        match &program.source {
+            Source::Path(path) => {
+                check(&program.name, "path", path)?;
+                out.push_str(&format!("program {} {path}\n", program.name));
+            }
+            Source::BootFileServer => out.push_str(&format!("boot-program {}\n", program.name)),
+        }
         for arg in &program.args {
             reject_newline(&program.name, "args", arg)?;
             out.push_str(&format!("arg {arg}\n"));
@@ -593,7 +635,18 @@ pub fn parse(text: &str) -> Manifest {
                 );
                 manifest.programs.push(Program {
                     name: name.to_string(),
-                    path: path.to_string(),
+                    source: Source::Path(path.to_string()),
+                    ..Program::default()
+                });
+            }
+            "boot-program" => {
+                assert!(
+                    rest.len() <= MAX_PROGRAM_NAME,
+                    "manifest: program name longer than {MAX_PROGRAM_NAME}: {rest}"
+                );
+                manifest.programs.push(Program {
+                    name: rest.to_string(),
+                    source: Source::BootFileServer,
                     ..Program::default()
                 });
             }
@@ -641,7 +694,7 @@ mod tests {
             programs: vec![
                 Program {
                     name: "compositor".into(),
-                    path: "/system/bin/compositor".into(),
+                    source: Source::Path("/system/bin/compositor".into()),
                     serves: vec!["compositor".into()],
                     receives: vec!["soundserver".into()],
                     devices: vec!["framebuffer".into(), "acpi".into()],
@@ -652,7 +705,7 @@ mod tests {
                 },
                 Program {
                     name: "soundserver".into(),
-                    path: "/system/bin/soundserver".into(),
+                    source: Source::Path("/system/bin/soundserver".into()),
                     serves: vec!["soundserver".into()],
                     devices: vec!["pci:04:01:00/1af4:1059".into()],
                     syscap: vec!["rt".into()],
@@ -661,13 +714,13 @@ mod tests {
                 },
                 Program {
                     name: "update".into(),
-                    path: "/system/bin/update".into(),
+                    source: Source::Path("/system/bin/update".into()),
                     slots: true,
                     ..Program::default()
                 },
                 Program {
                     name: "fileserver".into(),
-                    path: toyos_abi::syscall::FILESERVER_IMAGE_LABEL.into(),
+                    source: Source::BootFileServer,
                     receives: vec!["block".into()],
                     roles: vec!["data".into(), "log".into()],
                     restart: true,
@@ -675,14 +728,14 @@ mod tests {
                 },
                 Program {
                     name: "vdagent".into(),
-                    path: "/system/bin/vdagent".into(),
+                    source: Source::Path("/system/bin/vdagent".into()),
                     receives: vec!["clipboard".into()],
                     drives: vec!["pci:07:80:00/1af4:1043".into()],
                     ..Program::default()
                 },
                 Program {
                     name: "terminal".into(),
-                    path: "/system/bin/terminal".into(),
+                    source: Source::Path("/system/bin/terminal".into()),
                     args: vec!["--login shell".into()],
                     provides: vec!["surface".into()],
                     receives: vec!["compositor".into()],
@@ -706,7 +759,7 @@ mod tests {
         assert!(row.syscap.is_empty());
         assert!(row.serves.is_empty());
         assert!(row.provides.is_empty());
-        assert_eq!(row.path, "/apps/gbae/gbae");
+        assert_eq!(row.source.path(), Some("/apps/gbae/gbae"));
     }
 
     /// The one property both halves depend on, and the reason they live here.
@@ -960,7 +1013,7 @@ mod tests {
                 .iter()
                 .map(|(name, devices, drives)| Program {
                     name: name.to_string(),
-                    path: format!("/system/bin/{name}"),
+                    source: Source::Path(format!("/system/bin/{name}")),
                     devices: devices.iter().map(|d| d.to_string()).collect(),
                     drives: drives.iter().map(|d| d.to_string()).collect(),
                     ..Program::default()

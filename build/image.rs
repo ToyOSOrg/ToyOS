@@ -1379,8 +1379,8 @@ mod tests {
 
     /// **The independent oracle for the hierarchy.** ROOT is served at
     /// `/system`, so every absolute path the shipped image declares is
-    /// `/system/` plus a name ROOT carries, but the file server's, whose image
-    /// is the slot's and is named by the label it is handed under. Asked of a
+    /// `/system/` plus a name ROOT carries; the file server's row names no
+    /// path, its image being the slot's. Asked of a
     /// finished image by readers that did not write it: `toyos-gpt` finds ROOT
     /// by type where the table says, `bcachefs` mounts it, and `toyos-manifest`
     /// parses the records out of the volume.
@@ -1391,18 +1391,17 @@ mod tests {
         let declared = toyos_manifest::parse(
             std::str::from_utf8(&manifest).expect("the manifest this build renders is text"),
         );
-        let on_root: Vec<&toyos_manifest::Program> =
-            declared.programs.iter().filter(|p| p.path != toyos_abi::syscall::FILESERVER_IMAGE_LABEL).collect();
+        let on_root: Vec<&str> = declared.programs.iter().filter_map(|p| p.source.path()).collect();
         assert_eq!(
             declared.programs.len() - on_root.len(),
             1,
-            "the shipped image declares one file server, named by its image's label"
+            "the shipped image declares one program run from a boot image, the file server"
         );
 
         // Placeholders: what this judges is the path scheme, and the bytes of a
         // real binary say nothing about it.
         let mut files: Vec<(String, Vec<u8>)> =
-            on_root.iter().map(|p| (under_system(&p.path).to_string(), b"placeholder".to_vec())).collect();
+            on_root.iter().map(|path| (under_system(path).to_string(), b"placeholder".to_vec())).collect();
         files.push((toyos_manifest::PATH.to_string(), manifest.clone()));
 
         let root_image = create_root_image(&files, &symlinks, true);
@@ -1434,9 +1433,9 @@ mod tests {
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        for path in on_root.iter().map(|p| &p.path) {
+        for &path in &on_root {
             let name = under_system(path);
-            assert_ne!(name, path.as_str(), "{path} is not under the mount ROOT gets");
+            assert_ne!(name, path, "{path} is not under the mount ROOT gets");
             assert!(names.contains(name), "ROOT has no {name} for the declared path {path}");
         }
     }
