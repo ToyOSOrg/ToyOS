@@ -27,6 +27,11 @@ use toyos_parity::{Backend, Build, EndLine, IsaLine, Row, RowLine, SamplesLine, 
 #[path = "../arch/features.rs"]
 mod features;
 
+#[cfg(target_arch = "x86_64")]
+#[path = "../probe_kernels.rs"]
+#[allow(dead_code, unused_unsafe, clippy::all)]
+mod kernels;
+
 const KEY: [u8; 64] = [0x42; 64];
 const IV: [u8; 12] = [0x24; 12];
 /// A TLS 1.3 record header.
@@ -719,6 +724,8 @@ fn main() {
     signature_rows(&mut rows);
     ml_kem_rows(&mut rows);
     m11_rows(&mut rows);
+    #[cfg(target_arch = "x86_64")]
+    field_rows(&mut rows);
 
     let start = Instant::now();
     let times = toyos_parity::measure(&mut rows, &mut || start.elapsed().as_nanos() as u64);
@@ -727,4 +734,40 @@ fn main() {
         println!("{}", RowLine(build, &Summary::of(row.name(), times)));
     }
     println!("{}", EndLine(build, rows.len()));
+}
+
+/// PROBE (never lands): the crate's 5 x 51 multiplication modulo 2^255 - 19
+/// (ours) against the 4 x 64 mulx-and-addcarry form (A and B), each a chain
+/// of dependent multiplications, and the 4 x 64 u128 form against mulx.
+#[cfg(target_arch = "x86_64")]
+fn field_rows(rows: &mut Vec<Box<dyn Row>>) {
+    if !(std::is_x86_feature_detected!("bmi2") && std::is_x86_feature_detected!("adx")) {
+        println!("probe: no BMI2 and ADX; field rows skipped");
+        return;
+    }
+    let mask = (1u64 << 51) - 1;
+    let x5 = [0x1234_5678_9abc_d & mask, 0x2_3456_789a_bcde & mask, 0x3_4567_89ab_cdef & mask, 0x4_5678_9abc_def0 & mask, 0x5_6789_abcd_ef01 & mask];
+    let y5 = [0x7_6543_210f_edcb & mask, 0x6_5432_10fe_dcba & mask, 0x5_4321_0fed_cba9 & mask, 0x4_3210_fedc_ba98 & mask, 0x3_210f_edcb_a987 & mask];
+    let x4 = [0x0123_4567_89ab_cdefu64, 0xfedc_ba98_7654_3210, 0x1111_2222_3333_4444, 0x0555_6666_7777_8888];
+    let y4 = [0x9999_aaaa_bbbb_ccccu64, 0xdddd_eeee_ffff_0000, 0x1357_9bdf_2468_ace0, 0x0246_8ace_1357_9bdf];
+    let four = move || -> Box<dyn FnMut(u64)> {
+        Box::new(move |ops| {
+            let mut x = x4;
+            // The caller checked BMI2 and ADX.
+            unsafe { kernels::f25519_chain_mulx(ops, &mut x, &y4) };
+            keep(x[0]);
+        })
+    };
+    rows.push(Box::new(Trio {
+        name: "m2/f25519-mul/5x51-over-4x64-mulx".into(),
+        run: [
+            Box::new(move |ops| {
+                let mut x = x5;
+                kernels::f25519_chain_5x51(ops, &mut x, &y5);
+                keep(x[0]);
+            }),
+            four(),
+            four(),
+        ],
+    }));
 }
