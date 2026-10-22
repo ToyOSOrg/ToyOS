@@ -336,7 +336,7 @@ pub fn watched_readable(object: &KObjectRef) {
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) | KObjectRef::Device(_)
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::Connector(_)
         | KObjectRef::Namespace(_) | KObjectRef::File(_) | KObjectRef::Console(_) | KObjectRef::SysCap(_)
-        | KObjectRef::Process(_) | KObjectRef::Null(_) | KObjectRef::Job(_) => {}
+        | KObjectRef::Process(_) | KObjectRef::Null(_) | KObjectRef::Job(_) | KObjectRef::DeviceSet(_) => {}
     }
 }
 
