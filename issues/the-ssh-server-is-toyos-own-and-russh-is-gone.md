@@ -32,6 +32,18 @@ Compromises of `toyos-ssh` recorded on their own:
 `issues/toyos-ssh-offers-only-a-classical-key-exchange.md` and
 `issues/toyos-ssh-leaves-its-secrets-in-freed-memory.md`.
 
+A compromise of the server shipped today, until stage 2: russh's `p384`
+runs on its `bignum` backend (`--cfg=p384_backend="bignum"` in
+`.cargo/config.toml`), which keeps fiat-crypto out under the owner's ruling
+that ToyOS takes it as a dependency of no kind. `p384` 0.14.0-rc.8 calls that
+backend experimental and says it "might also have bugs", where fiat's is
+formally verified (`src/lib.rs`). sshserver reaches P-384 in two places:
+it verifies a client's `ecdsa-sha2-nistp384` publickey signature, which is
+untrusted input before authentication, and it signs with a P-384 host key
+when the operator's host-key file holds one (a minted key is Ed25519). It
+negotiates no `ecdh-sha2-nistp384`: russh's default order leaves it out.
+Owner: this track's. Exit: stage 2, which deletes russh and the setting.
+
 ## Stages
 
 1. **The core, on the host.** `toyos-ssh`: strict `curve25519-sha256`, the
@@ -59,8 +71,7 @@ Compromises of `toyos-ssh` recorded on their own:
      entry.
    - `Cargo.lock` has no `russh`, `russh-cryptovec`, `rsa`, `pageant` or
      `internal-russh-num-bigint` package.
-   - The guest targets' `--cfg=p384_backend="bignum"` in `.cargo/config.toml`,
-     which keeps fiat-crypto out of russh's `p384`, is gone with it.
+   - `.cargo/config.toml` sets no `p384_backend`.
    - A recorded `sftp` session and a recorded shell session replay byte for
      byte under `cargo run -- --ci host`.
 3. **ML-KEM.** Our own `mlkem768x25519-sha256`, on `toyos-crypto`'s
