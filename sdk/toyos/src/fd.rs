@@ -137,21 +137,21 @@ pub fn install(object: Object, inheritable: bool, floor: Fd) -> Result<Fd, Error
     decode(unsafe { toyos_fd_install(object, inheritable, floor) })
 }
 
-/// `fd`'s object, held until the [`Held`] drops: `BadFd` for a descriptor
+/// `fd`'s object, held until the [`Hold`] drops: `BadFd` for a descriptor
 /// not open.
-pub fn hold(fd: Fd) -> Result<(Held, Object), Error> {
+pub fn hold(fd: Fd) -> Result<(Hold, Object), Error> {
     let mut object = Object::handle(toyos_abi::HANDLE_INVALID);
     // SAFETY: `object` is a live place for the answer.
     let token = decode(unsafe { toyos_fd_acquire(fd, &mut object) })?;
-    Ok((Held(token), object))
+    Ok((Hold(token), object))
 }
 
 /// A call's hold of a descriptor's object: a `close` meanwhile releases the
 /// object only once this drops.
 #[must_use]
-pub struct Held(i32);
+pub struct Hold(i32);
 
-impl Drop for Held {
+impl Drop for Hold {
     fn drop(&mut self) {
         // SAFETY: a token `toyos_fd_acquire` answered, given back once.
         unsafe { toyos_fd_unuse(self.0) }

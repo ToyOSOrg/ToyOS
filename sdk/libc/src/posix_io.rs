@@ -54,16 +54,6 @@ pub(crate) fn refuse(e: Errno) -> i32 {
     -1
 }
 
-/// `f` on the kernel handle descriptor `raw` names, held for the call
-/// (`toyos::fd`): `EBADF` for a descriptor not open, and for one naming no
-/// kernel handle, as a socket not yet connected names none.
-pub(crate) fn on_fd<T>(raw: i32, f: impl FnOnce(RawHandle) -> Result<T, syscall::SyscallError>) -> Result<T, Errno> {
-    match toyos::fd::with(raw, |o| o.release.is_none().then(|| f(o.handle))) {
-        Ok(Some(answer)) => answer.map_err(crate::errcode::of),
-        Ok(None) | Err(_) => Err(EBADF),
-    }
-}
-
 /// The table's refusal as `errno`.
 pub(crate) fn fd_errno(e: toyos::fd::Error) -> Errno {
     match e {
@@ -767,11 +757,16 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     // for an nfds it cannot serve.
     let n = nfds as usize;
     let entries: alloc::vec::Vec<(i32, i16)> = (0..n).map(|i| ((*fds.add(i)).fd, (*fds.add(i)).events)).collect();
-    // Every open descriptor held until `poll` returns, so a `close` on another
-    // thread meanwhile releases no handle this call still watches or drains.
-    let _held: alloc::vec::Vec<toyos::fd::Held> = entries.iter().filter_map(|&(fd, _)| toyos::fd::hold(fd).ok().map(|(held, _)| held)).collect();
+    // Every open descriptor held until `poll` returns, and each one's handles
+    // taken from its held object once: a `close` on another thread meanwhile
+    // releases nothing this call watches or drains, and a number it reuses
+    // is never looked at.
+    let held: alloc::vec::Vec<Option<(toyos::fd::Hold, toyos::fd::Object)>> =
+        entries.iter().map(|&(fd, _)| toyos::fd::hold(fd).ok()).collect();
+    let objects = || held.iter().map(|held| held.as_ref().map(|(_, object)| object));
+    let streams: alloc::vec::Vec<Option<RawHandle>> = objects().map(|object| object.and_then(crate::socket::stream_of)).collect();
     let ways = |events: i16| [(POLLIN, Way::Receive), (POLLOUT, Way::Send)].into_iter().filter(move |(flag, _)| events & flag != 0);
-    let doorbells: usize = entries.iter().filter(|(fd, _)| crate::socket::stream_of(*fd).is_some()).map(|(_, events)| ways(*events).count()).sum();
+    let doorbells: usize = entries.iter().zip(&streams).filter(|(_, stream)| stream.is_some()).map(|((_, events), _)| ways(*events).count()).sum();
     if nfds as usize + doorbells > toyos::poller::Poller::MAX_HANDLES as usize {
         crate::errno::set(EINVAL);
         return -1;
@@ -781,22 +776,26 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     // The descriptors that are no stream, each as the kernel handle it is watched by.
     let others: alloc::vec::Vec<(i32, i16)> = entries
         .iter()
-        .map(|&(fd, events)| match crate::socket::stream_of(fd) {
+        .zip(objects())
+        .zip(&streams)
+        .map(|((&(_, events), object), stream)| match stream {
             Some(_) => (-1, 0),
             None => {
-                let handle = crate::socket::watched_of(fd).or_else(|| on_fd(fd, Ok).ok());
+                let handle = object.and_then(|object| {
+                    crate::socket::watched_of(object).or_else(|| object.release.is_none().then_some(object.handle))
+                });
                 (handle.map_or(-1, |handle| handle.0 as i32), events)
             }
         })
         .collect();
     // A descriptor that is not open answers `POLLNVAL`; a negative one is
     // ignored, as POSIX has it.
-    let closed: alloc::vec::Vec<bool> = entries.iter().map(|&(fd, _)| fd >= 0 && toyos::fd::with(fd, drop).is_err()).collect();
+    let closed: alloc::vec::Vec<bool> = entries.iter().zip(&held).map(|(&(fd, _), held)| fd >= 0 && held.is_none()).collect();
     loop {
         let mut revents: alloc::vec::Vec<i16> = closed.iter().map(|&closed| if closed { POLLNVAL } else { 0 }).collect();
         let mut watching = alloc::vec::Vec::new();
-        for (i, &(fd, events)) in entries.iter().enumerate() {
-            let Some(handle) = crate::socket::stream_of(fd) else { continue };
+        for (i, &(_, events)) in entries.iter().enumerate() {
+            let Some(handle) = streams[i] else { continue };
             for (flag, way) in ways(events) {
                 match stream::watch(handle, way) {
                     Ok(Poll::Ready) | Err(_) => revents[i] |= flag,

@@ -92,24 +92,34 @@ static mut SOCKETS: [Option<SocketEntry>; MAX_SOCKETS] = [None; MAX_SOCKETS];
 /// meets a handle closed under it. `None` for a descriptor that is no socket
 /// of this library's.
 fn sock_from_fd(fd: i32) -> Option<Socket> {
-    let (held, object) = toyos::fd::hold(fd).ok()?;
+    let (hold, object) = toyos::fd::hold(fd).ok()?;
+    Some(Socket { _hold: hold, idx: index_of(&object)? })
+}
+
+/// The index of the socket `object` is, or `None` for an object that is no
+/// socket of this library's.
+fn index_of(object: &toyos::fd::Object) -> Option<usize> {
     object.release?;
     if object.word & !0xffff_ffff != SOCKET_TAG {
         return None;
     }
-    let idx = usize::try_from(object.word & 0xffff_ffff).ok().filter(|&i| i < MAX_SOCKETS)?;
-    Some(Socket { _held: held, idx })
+    usize::try_from(object.word & 0xffff_ffff).ok().filter(|&i| i < MAX_SOCKETS)
 }
 
 /// A socket descriptor's entry, for as long as its descriptor is held.
 struct Socket {
-    _held: toyos::fd::Held,
+    _hold: toyos::fd::Hold,
     idx: usize,
 }
 
 impl Socket {
+    /// The entry, which lives as long as the hold.
+    ///
+    /// Nothing makes the `&mut` exclusive: two calls on one socket each make
+    /// one (`issues/concurrent-libc-calls-on-one-socket-alias-its-entry.md`).
     fn slot(&mut self) -> &mut Option<SocketEntry> {
-        // SAFETY: the held descriptor keeps `release_socket` off this entry.
+        // SAFETY: the hold keeps `release_socket` from taking the entry for as
+        // long as the borrow lives; exclusivity is the defect above.
         unsafe { &mut *core::ptr::addr_of_mut!(SOCKETS[self.idx]) }
     }
 }
@@ -600,21 +610,27 @@ fn stream_errno(refused: Refused) -> i32 {
     }
 }
 
-/// The handle of the stream a socket descriptor is, for `poll`, which holds
-/// the descriptor while it uses the handle.
-pub(crate) fn stream_of(fd: i32) -> Option<RawHandle> {
-    let mut socket = sock_from_fd(fd)?;
-    let entry = socket.slot().as_ref()?;
+/// The handle of the stream a socket is, for `poll`, given the object of a
+/// descriptor `poll` holds.
+pub(crate) fn stream_of(object: &toyos::fd::Object) -> Option<RawHandle> {
+    let entry = entry_of(object)?;
     (matches!(entry.kind, SocketKind::Tcp) && entry.stream != 0).then_some(RawHandle(entry.stream as u32))
 }
 
-/// The kernel handle a socket descriptor that is no stream is watched by,
-/// for `poll`: a listener's wake pipe, a datagram socket's receive pipe.
-pub(crate) fn watched_of(fd: i32) -> Option<RawHandle> {
-    let mut socket = sock_from_fd(fd)?;
-    let entry = socket.slot().as_ref()?;
+/// The kernel handle a socket that is no stream is watched by, for `poll`: a
+/// listener's wake pipe, a datagram socket's receive pipe.
+pub(crate) fn watched_of(object: &toyos::fd::Object) -> Option<RawHandle> {
+    let entry = entry_of(object)?;
     let handle = if entry.notify_fd != 0 { entry.notify_fd } else { entry.rx_fd };
     (handle != 0).then_some(RawHandle(handle as u32))
+}
+
+/// A copy of the entry of the socket a held descriptor's `object` is.
+fn entry_of(object: &toyos::fd::Object) -> Option<SocketEntry> {
+    let idx = index_of(object)?;
+    // SAFETY: the caller's hold keeps `release_socket` off the entry; the
+    // read is unserialized, as `Socket::slot`'s is.
+    unsafe { *core::ptr::addr_of!(SOCKETS[idx]) }
 }
 
 
