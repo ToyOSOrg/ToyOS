@@ -1,6 +1,6 @@
 //! NIST's vectors (`NOTICE`): CAVP's response files under the repository's
 //! `tests/cavp/` for SHA-2, AES-GCM and ECDSA, and ACVP's for HMAC and
-//! ML-KEM under `tests/data`. A case whose parameters the crate does not
+//! ML-KEM under its `tests/acvp/`. A case whose parameters the crate does not
 //! offer is counted outside the interface by the reason it names, and each
 //! file's cases are held to a count taken from its text apart from the
 //! parse: its `Count = `, `Len = `, `Msg = ` or `Qx = ` lines, or its
@@ -11,7 +11,7 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use support::{Given, Tally, cavp, data, der_signature, ecdsa, fixed_be, hex, integer};
+use support::{Given, Tally, acvp, cavp, der_signature, ecdsa, fixed_be, hex, integer};
 use toyos_crypto::{
     aead::SealingKey,
     hash::{Sha256, Sha384, Sha512},
@@ -246,8 +246,7 @@ fn cavp_ecdsa() {
 
 /// An ACVP file's cases, counted in its text rather than its parse.
 fn tc_ids(name: &str) -> usize {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data").join(name);
-    std::fs::read_to_string(path).unwrap().matches("\"tcId\"").count()
+    support::acvp_text(name).matches("\"tcId\"").count()
 }
 
 /// ACVP's HMAC vectors. A `macLen` below the hash's is the prefix of the
@@ -256,7 +255,7 @@ fn tc_ids(name: &str) -> usize {
 fn acvp_hmac() {
     fn run(file: &str, mac: impl Fn(&[u8], &[u8]) -> Vec<u8>) {
         let mut count = 0;
-        for g in data(file)["testGroups"].as_array().unwrap() {
+        for g in acvp(file)["testGroups"].as_array().unwrap() {
             for t in g["tests"].as_array().unwrap() {
                 let field = |name: &str| hex(t[name].as_str().unwrap());
                 let want = field("mac");
@@ -294,7 +293,7 @@ fn acvp_mlkem768() {
     let field = |t: &serde_json::Value, name: &str| hex(t[name].as_str().unwrap());
     let seed = |t: &serde_json::Value| [field(t, "d"), field(t, "z")].concat();
     let mut tally = Tally::default();
-    for g in data("nist-mlkem-keygen.json")["testGroups"].as_array().unwrap() {
+    for g in acvp("nist-mlkem-keygen.json")["testGroups"].as_array().unwrap() {
         for t in g["tests"].as_array().unwrap() {
             if g["parameterSet"] != "ML-KEM-768" {
                 tally.outside("not ML-KEM-768");
@@ -308,7 +307,7 @@ fn acvp_mlkem768() {
     tally.report("nist-mlkem-keygen.json", Some(tc_ids("nist-mlkem-keygen.json")));
 
     let mut tally = Tally::default();
-    for g in data("nist-mlkem-encapdecap.json")["testGroups"].as_array().unwrap() {
+    for g in acvp("nist-mlkem-encapdecap.json")["testGroups"].as_array().unwrap() {
         for t in g["tests"].as_array().unwrap() {
             let id = format!("tcId {} {}", t["tcId"], t["reason"]);
             if g["parameterSet"] != "ML-KEM-768" {

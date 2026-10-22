@@ -14,7 +14,7 @@ doctest = false
 libm = "0.2.16"
 
 [dev-dependencies]
-toyos-sha2-hw = { path = "../../lib/sha2-hw" }
+toyos-crypto = { path = "../../lib/crypto" }
 
 [lints.rust]
 warnings = "deny"

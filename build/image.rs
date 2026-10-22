@@ -134,10 +134,10 @@ fn format_root(
 /// the bytes, so no two entries can run together into an input a different
 /// split would also produce.
 fn root_uuid(files: &[&(String, Vec<u8>)], symlinks: &[&(String, String)]) -> FsUuid {
-    let mut hasher = toyos_sha2_hw::sha256();
+    let mut hasher = toyos_crypto::hash::Sha256::new();
     let mut field = |bytes: &[u8]| {
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(bytes);
+        hasher.update(&(bytes.len() as u64).to_le_bytes()).expect(crate::SHA256_BOUND);
+        hasher.update(bytes).expect(crate::SHA256_BOUND);
     };
     for (name, data) in files {
         field(name.as_bytes());
@@ -1362,8 +1362,8 @@ mod tests {
         for (name, data) in &files {
             let read = fs.read_file(name).unwrap_or_else(|e| panic!("read {name}: {e:?}"));
             assert_eq!(
-                toyos_sha2_hw::sha256_digest(&read),
-                toyos_sha2_hw::sha256_digest(data),
+                crate::sha256(&read),
+                crate::sha256(data),
                 "{name} reads back as {} bytes that are not the {} it was given",
                 read.len(),
                 data.len()

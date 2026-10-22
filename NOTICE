@@ -474,8 +474,8 @@ image carries them. These are every file of that directory for an interface the
 crate offers.
 
 
-lib/crypto/tests/data/nist-*.json — NIST ACVP HMAC and ML-KEM vectors, NIST-Software
-------------------------------------------------------------------------------------
+tests/acvp/nist-*.json — NIST ACVP HMAC and ML-KEM vectors, NIST-Software
+-------------------------------------------------------------------------
 
     nist-hmac-sha1.json         sha256 6e96eb5f53065219c437a99fedec7299c916c76e170d6b74507dc5409ed9cd6b
       HMAC-SHA-1-2.0/internalProjection.json
@@ -491,7 +491,7 @@ lib/crypto/tests/data/nist-*.json — NIST ACVP HMAC and ML-KEM vectors, NIST-So
       ML-KEM-keyGen-FIPS203/internalProjection.json
     Upstream: https://github.com/usnistgov/ACVP-Server, `gen-val/json-files/`
     at commit 975de31eb83d87039ec88934fdc47d8c312b892d, byte for byte
-    Licence text: lib/crypto/tests/data/nist-LICENSE (the `License` section of upstream's
+    Licence text: tests/acvp/nist-LICENSE (the `License` section of upstream's
     `README.md` at that commit, sha256
     8e6833bd6bd35dadd415147ba53a8eca4c3d31c53cb589e97abba6a4efd5b953)
     SPDX-License-Identifier: NIST-Software
@@ -618,8 +618,7 @@ tests/cavp/SHA*.rsp — NIST's SHA-2 test vectors, CAVP SHAVS
 
 The response files NIST's Cryptographic Algorithm Validation Program publishes
 for the SHA Validation System: messages and the digests FIPS 180-4 gives them,
-the external oracle `toyos-sha2`'s, `toyos-sha2-hw`'s and `toyos-crypto`'s tests
-hold them to. A work of the United States government, not under copyright in
+the external oracle `toyos-crypto`'s tests hold them to. A work of the United States government, not under copyright in
 the United States (17 U.S.C. §105). Test input only: nothing built from this
 repository carries them, and no shipped package's directory holds them.
 

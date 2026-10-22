@@ -128,7 +128,7 @@ impl<C: Curve<N>, const N: usize> Clone for Point<C, N> {
     }
 }
 impl<C: Curve<N>, const N: usize> Copy for Point<C, N> {}
-// Three residues: zero is a valid point representation.
+// SAFETY: three residues, and zero is a valid point representation.
 unsafe impl<C: Curve<N>, const N: usize> crate::secret::Zeroable for Point<C, N> {}
 impl<C: Curve<N>, const N: usize> Point<C, N> {
     fn identity() -> Self {

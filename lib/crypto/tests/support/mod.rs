@@ -11,6 +11,19 @@ pub fn data(name: &str) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
 
+/// A NIST ACVP vector file under the repository's `tests/acvp/`, outside
+/// this crate's directory: test input, which the licence gate would count as
+/// shipping inside it.
+pub fn acvp(name: &str) -> serde_json::Value {
+    serde_json::from_str(&acvp_text(name)).unwrap()
+}
+
+/// [`acvp`]'s file as text.
+pub fn acvp_text(name: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/acvp").join(name);
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
 /// A response file under the repository's `tests/cavp/`.
 pub fn cavp(name: &str) -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/cavp").join(name);

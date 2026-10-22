@@ -78,7 +78,7 @@ fn plan_of(
             // A requirement's build metadata is ignored, and cargo warns of it.
             spec.insert("version".into(), dep.version.split('+').next().unwrap_or(&dep.version).into());
         }
-        let key = crate::release::sha256_hex(hashed.as_bytes())[..16].to_string();
+        let key = crate::sha256_hex(hashed.as_bytes())[..16].to_string();
         let (version, publish) = assign(&index(krate.name)?, &key)?;
         let package = manifest.get_mut("package").and_then(|p| p.as_table_mut()).ok_or("no [package]")?;
         package.insert("version".into(), version.clone().into());

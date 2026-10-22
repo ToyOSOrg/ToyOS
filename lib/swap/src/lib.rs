@@ -87,7 +87,9 @@ pub type Digest = [u8; 32];
 
 /// The digest of `bytes`.
 pub fn digest(bytes: &[u8]) -> Digest {
-    toyos_sha2_hw::sha256_digest(bytes)
+    // FIPS 180-4 bounds a message at 2^61 bytes; a service binary is far
+    // below it.
+    toyos_crypto::hash::Sha256::digest(bytes).expect("a binary below SHA-256's 2^61-byte bound")
 }
 
 pub fn hex(digest: &Digest) -> String {

@@ -39,8 +39,14 @@ pub type Digest = [u8; 32];
 /// The SHA-256 of `bytes`: the one definition the Mac, the loader and the
 /// updater share.
 pub fn sha256(bytes: &[u8]) -> Digest {
-    toyos_sha2_hw::sha256_digest(bytes)
+    toyos_crypto::hash::Sha256::digest(bytes).expect(SHA_BOUND)
 }
+
+/// Why a hash here cannot refuse: FIPS 180-4 bounds a message at 2^61 bytes,
+/// and what these hash is an image's section, a signed header or a signed
+/// archive length, each held in memory or bounded by a `u64` the owner's key
+/// signed.
+pub(crate) const SHA_BOUND: &str = "a hashed input is far below SHA-2's 2^61-byte bound";
 
 /// A digest in lowercase hex, into `out`.
 pub fn hex<'a>(digest: &[u8], out: &'a mut [u8]) -> &'a str {

@@ -17,7 +17,7 @@
 //! from verifying as this.
 
 use ed25519_dalek::{Signature, VerifyingKey};
-use toyos_sha2::Sha512;
+use toyos_crypto::hash::Sha512;
 
 use crate::image::{HEADER_BYTES, SIGNATURE_BYTES};
 
@@ -74,7 +74,7 @@ pub fn message<S: Signed + ?Sized>(signed: &S) -> Message {
         put(field);
     }
     put(&64u32.to_be_bytes());
-    put(&Sha512::digest(signed.bytes()));
+    put(&Sha512::digest(signed.bytes()).expect(crate::SHA_BOUND));
     out
 }
 
@@ -245,7 +245,7 @@ mod tests {
         assert_eq!(&m[25..29], &6u32.to_be_bytes());
         assert_eq!(&m[29..35], b"sha512");
         assert_eq!(&m[35..39], &64u32.to_be_bytes());
-        assert_eq!(&m[39..], &Sha512::digest(header)[..]);
+        assert_eq!(&m[39..], &Sha512::digest(&header).unwrap()[..]);
     }
 
     /// A seed's key-file text reads back as the seed.
