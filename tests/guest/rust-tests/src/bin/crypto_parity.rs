@@ -158,6 +158,29 @@ fn seals_as_ring(alg: Tls, len: usize) {
     assert_eq!((sealed, tag), ring_sealed(&alg.ring(), len, false), "{} seals {len} B as ring", alg.name());
 }
 
+/// PROBE (never lands): M11, ChaCha20-Poly1305 seal from 1 to 192 bytes, to
+/// fit the per-message constant and the per-block cost against ring's.
+fn m11_rows(rows: &mut Vec<Box<dyn Row>>) {
+    let alg = Tls::ChaCha;
+    for len in [1usize, 16, 32, 48, 64, 80, 96, 112, 128, 144, 160, 176, 192] {
+        seals_as_ring(alg, len);
+        let mut key = alg.sealing();
+        let mut buf = vec![0x70; len];
+        rows.push(trio(
+            format!("m11/chacha20-poly1305/seal/{len}"),
+            move || keep(key.seal(&AAD, &mut buf).expect("seal")),
+            move || {
+                let (key, mut buf, mut sequence) = (alg.ring(), vec![0x70; len], 0);
+                move || {
+                    let tag = key.seal_in_place_separate_tag(nonce(sequence), aead::Aad::from(AAD), &mut buf);
+                    keep(tag.expect("seal"));
+                    sequence += 1;
+                }
+            },
+        ));
+    }
+}
+
 fn tls_rows(alg: Tls, rows: &mut Vec<Box<dyn Row>>) {
     let name = alg.name();
     rows.push(trio(format!("{name}/key"), move || keep(alg.sealing()), move || {
@@ -695,6 +718,7 @@ fn main() {
     agreement_rows(&mut rows);
     signature_rows(&mut rows);
     ml_kem_rows(&mut rows);
+    m11_rows(&mut rows);
 
     let start = Instant::now();
     let times = toyos_parity::measure(&mut rows, &mut || start.elapsed().as_nanos() as u64);
