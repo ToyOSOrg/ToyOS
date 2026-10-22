@@ -949,13 +949,15 @@ impl<'a> Supervisor<'a> {
         // declaration; then the disk drivers, so the block service is started
         // knowing how many to wait for and a file server's disk is coming
         // before it asks.
-        let declaring = self.services.iter().take_while(|service| declares(service.program)).count();
+        // SYSTEM, started before the manifest was read, is first in the list.
+        let (declaring, rest): (Vec<usize>, Vec<usize>) =
+            (0..self.services.len()).partition(|&at| declares(self.services[at].program));
         let mut homes_made = false;
-        for at in 0..declaring {
+        for at in declaring {
             self.start_service(at, &mut homes_made);
         }
         self.undriven = self.drive_where(is_disk_driver);
-        for at in declaring..self.services.len() {
+        for at in rest {
             self.start_service(at, &mut homes_made);
         }
         if !homes_made {
@@ -976,7 +978,7 @@ impl<'a> Supervisor<'a> {
         if !is_storage(program) && !declares(program) && !*homes_made {
             self.make_session_home();
             *homes_made = true;
-            for early in self.services[..at].iter().map(|s| s.program).filter(|p| declares(p)).collect::<Vec<_>>() {
+            for early in self.services.iter().map(|s| s.program).filter(|p| declares(p)).collect::<Vec<_>>() {
                 self.make_home(early);
             }
         }
