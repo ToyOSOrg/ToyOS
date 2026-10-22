@@ -265,17 +265,19 @@ toyos-ssh = { path = "build/ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "lib/wallclock" }
-# Every SHA-256 the build takes (`toyos_build::sha256`).
-toyos-crypto = { path = "lib/crypto" }
+# Every SHA-256 the build takes (`toyos_build::sha256`), and the TLS provider of
+# every request it makes (`release::agent`).
+toyos-crypto = { path = "lib/crypto", features = ["std", "rustls-provider"] }
+# The provider's types: its random source and its key-exchange groups.
+rustls = { version = "0.23.45", default-features = false }
 # The toolchain release's tarball, packed in-process (`build/release.rs`): Rust's
 # own tar and gzip, where the binaries are hosts' tools.
 tar = { version = "0.4.46", default-features = false }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 # Every request the build system makes, GitHub's API and the crates.io index,
-# where curl is a host's tool: rustls on ring, the one TLS provider the tree
-# takes (`issues/the-internet-clients-work-unchanged.md`), whose C
-# and assembly the host's `cc` compiles.
-ureq = { version = "3", default-features = false, features = ["rustls"] }
+# where curl is a host's tool: rustls on toyos-crypto's provider, with webpki's
+# roots.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots"] }
 # The authorities `build::trust_roots` writes to ROOT, as the rustls project
 # publishes the Mozilla root program, and the PEM it writes them in.
 webpki-root-certs = "1"
