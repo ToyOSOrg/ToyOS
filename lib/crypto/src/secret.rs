@@ -16,9 +16,9 @@
 //!   it, early returns and `?` included. The X25519 ladder's (x2, z2, x3, z3)
 //!   is one. A workspace erases its own storage; the copies the computation
 //!   works on in registers and other slots are not erased.
-//! - **Erased per value, for now.** Ed25519 scalars (`scalar25519::S`, until
-//!   its reduction is rewritten) and ML-KEM polynomials (`mlkem::Poly`) still
-//!   erase every temporary on drop.
+//! - **Erased per value.** Ed25519's secret scalars (`scalar25519::S`) are
+//!   owners, and their reduction erases its workspaces; ML-KEM polynomials
+//!   (`mlkem::Poly`) erase every temporary on drop.
 //! - **How.** Volatile stores of zero over the value's own storage, then a
 //!   sequentially consistent compiler fence. They erase that location and no
 //!   other.

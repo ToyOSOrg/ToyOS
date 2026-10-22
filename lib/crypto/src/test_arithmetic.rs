@@ -105,10 +105,14 @@ fn scalar25519_reduction_and_signing_arithmetic_match_integer_oracle() {
     .unwrap();
     let wide = (BigUint::from(1u8) << 512) - 1u8;
     let mut values = fixtures(&wide, 64);
-    // Barrett's quotient estimate is short by up to two at x = k L + r with
-    // r just below L; those and the multiples of L are the edges.
+    // Multiples of L and their predecessors, small and near 2^512: where the
+    // one subtraction is taken and where it is not.
     values.extend([wide, order.clone(), &order - 1u8, &order * 2u8, &order * 3u8 - 1u8]);
-    values.extend((1u8..=8).map(|k| (BigUint::from(1u8) << 512) / &order * k * &order - 1u8));
+    let top = (BigUint::from(1u8) << 512) / &order;
+    for j in 0u8..4 {
+        let multiple = (&top - j) * &order;
+        values.extend([&multiple - 1u8, multiple]);
+    }
     let int = |b: [u8; 32]| BigUint::from_bytes_le(&b);
     for (i, a) in values.iter().enumerate() {
         let a = a % (BigUint::from(1u8) << 512);

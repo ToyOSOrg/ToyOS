@@ -133,8 +133,7 @@ impl Tight {
         Self::ZERO.sub(self)
     }
 
-    /// self * b, for constants; at run time [`Multiply::mul`] takes either
-    /// bound.
+    /// The `const` form of [`Multiply::mul`], tight by tight.
     pub(crate) const fn times(&self, b: &Tight) -> Tight {
         product(&self.0, &b.0)
     }
