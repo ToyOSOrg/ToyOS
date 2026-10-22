@@ -314,11 +314,21 @@ Not consumers:
    - **Arithmetic held against integers.** The owner rejected fiat-crypto
      (2026-10-21): ToyOS keeps its own crypto stack, with no fiat code as a
      dependency of any kind, and ring and RustCrypto only as test-only
-     oracles. The crate has none since #993. `Cargo.lock` still names it
-     for russh's `p384` 0.14 (`system/sshserver`, gone with stage 2 of
-     `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md`) and as
-     `curve25519-dalek`'s backend behind a `cfg` nothing sets (`lib/update`'s
-     `ed25519-dalek`, gone at stage 6). `num-bigint`, the crate's test-only integer oracle, holds:
+     oracles. The crate's dependencies of every kind name none since #993.
+     `Cargo.lock` still does:
+     - `curve25519-dalek` 4.1.3 names `fiat-crypto` 0.2.9 behind
+       `cfg(curve25519_dalek_backend = "fiat")`, which nothing in the tree
+       sets, so no build compiles it. It is reached through `toyos-crypto`'s
+       own oracles `x25519-dalek` 2.0.1 and `ed25519-dalek` 2.2.0, and
+       through `lib/update`'s `ed25519-dalek`.
+     - Under russh (`system/sshserver`), `curve25519-dalek` 5.0.0-pre.6
+       names `fiat-crypto` 0.3.0 behind the same unset `cfg`.
+     - Under russh, `p384` 0.14.0-rc.8 depends on `fiat-crypto` 0.3.0
+       unless `p384_backend = "bignum"`, which nothing sets: fiat code is
+       compiled into sshserver today. It goes with russh, at stage 2 of
+       `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md`.
+
+     `num-bigint`, the crate's test-only integer oracle, holds:
      - `field25519` and `scalar25519`;
      - P-256/P-384's field and scalar arithmetic;
      - Poly1305.
@@ -362,7 +372,10 @@ Not consumers:
        `aarch64-unknown-toyos` and the UEFI loader target.
      - **Record.** The result is evidence recorded in this issue, with its
        run, revision and compiler. It is not a suite row, and it is rerun when
-       the routine or the compiler changes.
+       the routine or the compiler changes. Its metal rows,
+       `crypto_secret_timing` and `crypto_secret_timing_curves`, are
+       named-only: a metal pass takes them by their whole name or their boot,
+       never unfiltered.
    - **Negative controls.** Each check a forgery would pass is mutated as a
        checked patch, and its exact test fails: the tag compare, point and
        range validation, S < L, and the lengths. No mutation runner is
@@ -375,31 +388,38 @@ Not consumers:
    - **Status: the test-side items, #993.** They hold whatever
      arithmetic sits underneath, so the speed work's rewrite is held to them.
      - **Done:**
-       - The vectors: 47 Wycheproof files, every case judged or counted
-         outside the interface by a named reason; CAVP's SHAVS (SHA-256/384/512),
-         GCMVS (AES-128/256) and ECDSA SigVer and PKV; ACVP's HMAC and ML-KEM
+       - The vectors: 43 Wycheproof files, every case judged or counted
+         outside the interface by a named reason and held to the file's
+         `numberOfTests`; CAVP's SHAVS (SHA-256/384/512), GCMVS encryption
+         (AES-128/256) and ECDSA SigVer and PKV, and ACVP's HMAC and ML-KEM,
+         each held to a count taken from its text apart from the parse
          (`lib/crypto/tests/wycheproof.rs`, `nist.rs`).
        - The integer oracle above, which replaced fiat-crypto in Poly1305's
          test, and ML-KEM's exhaustive reduction and compression.
        - The differential (`tests/differential.rs`) and the fuzz
-         (`tests/fuzz.rs`), over every CPU. Each form of `--ci host` spends
-         about 200 s of CPU on them on the development Mac, against about
-         20 s before; nearly all of it is ours and RustCrypto's curve
-         arithmetic.
-       - Negative controls: 15 checked patches, each red by name, two only
-         after a test was added for it.
-       - Miri over the wipes' and `ct`'s unit tests, and a control it
-         catches. The run over every `portable` unit test was still going
-         at the time of writing.
+         (`tests/fuzz.rs`), over every CPU. A primitive with no instruction
+         path runs in the `portable` form alone. On the development Mac the
+         crate's three forms took 20 s of wall time and 15 s of CPU on main,
+         and take 74 s and 396 s with this, nearly all of it ours and
+         RustCrypto's curve arithmetic in the `portable` form.
+       - Negative controls: 15 checked patches, each red by its named test,
+         two only after a test was added for it.
+       - Miri over every `portable` unit test but the provider's (ring is
+         C): 25 pass and ML-KEM's exhaustive reduction is ignored under it;
+         the heavy tests take a spread of their inputs there. A patch that
+         writes past `erase`'s array is caught.
        - Evidence: `ToyOSOrg/evidence` `pr-993`,
-         https://github.com/ToyOSOrg/evidence/tree/6d185426366f3df082c1b4035e09e4facad905f3/pr-993/stage4-tests.
-     - **Built, not yet run:** the constant-time harness
+         https://github.com/ToyOSOrg/evidence/tree/187abe7793116cbbbfb4dec63098032b1b8d61de/pr-993/r2
+         and the first round's beside it.
+     - **Built, not yet judged:** the constant-time harness
        (`tests/guest/rust-tests/src/constant_time.rs`), in two programs
-       because the curves take a bench for hours. The `crypto_secret_timing`
-       and `crypto_secret_timing_curves` metal rows run them on the T14 and
-       the AMD bench; their judge asks only that the job ran and its leaky
-       control was seen. The verdicts are recorded here when the benches
-       have run.
+       because the curves take a bench for hours, with a null and a leaky
+       control in each. Their judge asks only that the job ran and its
+       controls held. The first bench boots, of the fast program at
+       ec5a0cd18, read LEAKS for every routine on both benches; that harness
+       made each random input next to the clock, a confound the review of
+       #993 named, so those readings are no finding. The verdicts are
+       recorded here when the benches have run the fixed harness.
      - **Not timed:** ML-KEM key generation. Its matrix expansion rejects
        samples by rho, a public output of the secret seed, so no two classes
        can share it. Exit: a measurement with rho held fixed, which needs an
