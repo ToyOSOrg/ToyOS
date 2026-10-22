@@ -45,8 +45,8 @@ impl Operand for Loose {
 const TWO_P: [u64; 5] = [2 * (MASK - 18), 2 * MASK, 2 * MASK, 2 * MASK, 2 * MASK];
 
 #[inline(always)]
-fn wide(a: u64, b: u64) -> u128 {
-    u128::from(a).wrapping_mul(u128::from(b))
+const fn wide(a: u64, b: u64) -> u128 {
+    (a as u128).wrapping_mul(b as u128)
 }
 
 /// A column of products. The limb bounds keep every sum below 2^115, so the
@@ -58,13 +58,13 @@ macro_rules! column {
 /// Columns below 2^115 into tight limbs: one carry pass, the top carry times
 /// 19 into limb 0 (2^255 = 19 mod p), and one more carry into limb 1.
 #[inline(always)]
-fn carry(v: [u128; 5]) -> Tight {
+const fn carry(v: [u128; 5]) -> Tight {
     let [v0, v1, v2, v3, v4] = v;
     let v1 = v1.wrapping_add(v0 >> 51);
     let v2 = v2.wrapping_add(v1 >> 51);
     let v3 = v3.wrapping_add(v2 >> 51);
     let v4 = v4.wrapping_add(v3 >> 51);
-    let r0 = u128::from(v0 as u64 & MASK).wrapping_add((v4 >> 51).wrapping_mul(19));
+    let r0 = ((v0 as u64 & MASK) as u128).wrapping_add((v4 >> 51).wrapping_mul(19));
     let r1 = (v1 as u64 & MASK).wrapping_add((r0 >> 51) as u64);
     Tight([
         r0 as u64 & MASK,
@@ -101,7 +101,7 @@ impl Tight {
         Self(limbs)
     }
 
-    pub(crate) fn add(&self, b: &Tight) -> Loose {
+    pub(crate) const fn add(&self, b: &Tight) -> Loose {
         let (a, b) = (&self.0, &b.0);
         Loose([
             a[0].wrapping_add(b[0]),
@@ -113,7 +113,7 @@ impl Tight {
     }
 
     /// self + 2p - b, limb by limb.
-    pub(crate) fn sub(&self, b: &Tight) -> Loose {
+    pub(crate) const fn sub(&self, b: &Tight) -> Loose {
         let (a, b) = (&self.0, &b.0);
         Loose([
             a[0].wrapping_add(TWO_P[0]).wrapping_sub(b[0]),
@@ -124,49 +124,66 @@ impl Tight {
         ])
     }
 
-    pub(crate) fn neg(&self) -> Loose {
+    /// The same element as a loose operand.
+    pub(crate) const fn widen(&self) -> Loose {
+        Loose(self.0)
+    }
+
+    pub(crate) const fn neg(&self) -> Loose {
         Self::ZERO.sub(self)
     }
 
+    /// The `const` form of [`Multiply::mul`], tight by tight.
+    pub(crate) const fn times(&self, b: &Tight) -> Tight {
+        product(&self.0, &b.0)
+    }
+
+    pub(crate) const fn squared(&self) -> Tight {
+        square(&self.0)
+    }
+
     /// self^(2^k), for k >= 1.
-    pub(crate) fn square_times(&self, k: u32) -> Tight {
+    pub(crate) const fn square_times(&self, k: u32) -> Tight {
         debug_assert!(k >= 1);
-        let mut r = self.square();
-        for _ in 1..k {
-            r = r.square();
+        let mut r = self.squared();
+        let mut i = 1;
+        while i < k {
+            r = r.squared();
+            i += 1;
         }
         r
     }
 
     /// self^(2^250 - 1) and self^11, the shared head of the inversion and
     /// square-root chains (Bernstein 2006, section 5).
-    fn pow_2_250_1(&self) -> (Tight, Tight) {
-        let z2 = self.square();
-        let z9 = z2.square_times(2).mul(self);
-        let z11 = z9.mul(&z2);
-        let z_5_0 = z11.square().mul(&z9);
-        let z_10_0 = z_5_0.square_times(5).mul(&z_5_0);
-        let z_20_0 = z_10_0.square_times(10).mul(&z_10_0);
-        let z_40_0 = z_20_0.square_times(20).mul(&z_20_0);
-        let z_50_0 = z_40_0.square_times(10).mul(&z_10_0);
-        let z_100_0 = z_50_0.square_times(50).mul(&z_50_0);
-        let z_200_0 = z_100_0.square_times(100).mul(&z_100_0);
-        let z_250_0 = z_200_0.square_times(50).mul(&z_50_0);
+    const fn pow_2_250_1(&self) -> (Tight, Tight) {
+        let z2 = self.squared();
+        let z9 = z2.square_times(2).times(self);
+        let z11 = z9.times(&z2);
+        let z_5_0 = z11.squared().times(&z9);
+        let z_10_0 = z_5_0.square_times(5).times(&z_5_0);
+        let z_20_0 = z_10_0.square_times(10).times(&z_10_0);
+        let z_40_0 = z_20_0.square_times(20).times(&z_20_0);
+        let z_50_0 = z_40_0.square_times(10).times(&z_10_0);
+        let z_100_0 = z_50_0.square_times(50).times(&z_50_0);
+        let z_200_0 = z_100_0.square_times(100).times(&z_100_0);
+        let z_250_0 = z_200_0.square_times(50).times(&z_50_0);
         (z_250_0, z11)
     }
 
     /// self^(p - 2) = self^(2^255 - 21): 254 squarings and 11 multiplications.
-    pub(crate) fn invert(&self) -> Tight {
+    pub(crate) const fn invert(&self) -> Tight {
         let (z_250_0, z11) = self.pow_2_250_1();
-        z_250_0.square_times(5).mul(&z11)
+        z_250_0.square_times(5).times(&z11)
     }
 
     /// self^((p - 5) / 8) = self^(2^252 - 3), for square roots.
-    pub(crate) fn pow_p58(&self) -> Tight {
+    pub(crate) const fn pow_p58(&self) -> Tight {
         let (z_250_0, _) = self.pow_2_250_1();
-        z_250_0.square_times(2).mul(self)
+        z_250_0.square_times(2).times(self)
     }
 
+    #[cfg(feature = "sign")]
     pub(crate) fn select(a: &Self, b: &Self, bit: u64) -> Self {
         let m = ct::mask(bit);
         let (a, b) = (&a.0, &b.0);
@@ -235,31 +252,17 @@ impl Tight {
 
 impl Loose {
     /// The same element, carried tight.
-    pub(crate) fn carry(&self) -> Tight {
+    pub(crate) const fn carry(&self) -> Tight {
         let v = &self.0;
-        carry([v[0].into(), v[1].into(), v[2].into(), v[3].into(), v[4].into()])
+        carry([v[0] as u128, v[1] as u128, v[2] as u128, v[3] as u128, v[4] as u128])
     }
 }
 
 /// Multiplications, each leaving a tight element.
 pub(crate) trait Multiply: Operand {
-    /// The 25 products, with b's limbs that wrap past 2^255 premultiplied by
-    /// 19.
     #[inline(always)]
     fn mul(&self, b: &impl Operand) -> Tight {
-        let (a, b) = (self.limbs(), b.limbs());
-        let b1 = b[1].wrapping_mul(19);
-        let b2 = b[2].wrapping_mul(19);
-        let b3 = b[3].wrapping_mul(19);
-        let b4 = b[4].wrapping_mul(19);
-        let v = [
-            column!(wide(a[0], b[0]), wide(a[1], b4), wide(a[2], b3), wide(a[3], b2), wide(a[4], b1)),
-            column!(wide(a[0], b[1]), wide(a[1], b[0]), wide(a[2], b4), wide(a[3], b3), wide(a[4], b2)),
-            column!(wide(a[0], b[2]), wide(a[1], b[1]), wide(a[2], b[0]), wide(a[3], b4), wide(a[4], b3)),
-            column!(wide(a[0], b[3]), wide(a[1], b[2]), wide(a[2], b[1]), wide(a[3], b[0]), wide(a[4], b4)),
-            column!(wide(a[0], b[4]), wide(a[1], b[3]), wide(a[2], b[2]), wide(a[3], b[1]), wide(a[4], b[0])),
-        ];
-        carry(v)
+        product(self.limbs(), b.limbs())
     }
 
     #[inline(always)]
@@ -271,7 +274,7 @@ pub(crate) trait Multiply: Operand {
     #[inline(always)]
     fn mul_small(&self, k: u32) -> Tight {
         let a = self.limbs();
-        let k = u64::from(k);
+        let k = k as u64;
         let v = [wide(a[0], k), wide(a[1], k), wide(a[2], k), wide(a[3], k), wide(a[4], k)];
         carry(v)
     }
@@ -280,9 +283,26 @@ pub(crate) trait Multiply: Operand {
 impl Multiply for Tight {}
 impl Multiply for Loose {}
 
+/// The 25 products, with b's limbs that wrap past 2^255 premultiplied by 19.
+#[inline(always)]
+const fn product(a: &[u64; 5], b: &[u64; 5]) -> Tight {
+    let b1 = b[1].wrapping_mul(19);
+    let b2 = b[2].wrapping_mul(19);
+    let b3 = b[3].wrapping_mul(19);
+    let b4 = b[4].wrapping_mul(19);
+    let v = [
+        column!(wide(a[0], b[0]), wide(a[1], b4), wide(a[2], b3), wide(a[3], b2), wide(a[4], b1)),
+        column!(wide(a[0], b[1]), wide(a[1], b[0]), wide(a[2], b4), wide(a[3], b3), wide(a[4], b2)),
+        column!(wide(a[0], b[2]), wide(a[1], b[1]), wide(a[2], b[0]), wide(a[3], b4), wide(a[4], b3)),
+        column!(wide(a[0], b[3]), wide(a[1], b[2]), wide(a[2], b[1]), wide(a[3], b[0]), wide(a[4], b4)),
+        column!(wide(a[0], b[4]), wide(a[1], b[3]), wide(a[2], b[2]), wide(a[3], b[1]), wide(a[4], b[0])),
+    ];
+    carry(v)
+}
+
 /// The 15 distinct products of a square.
 #[inline(always)]
-fn square(a: &[u64; 5]) -> Tight {
+const fn square(a: &[u64; 5]) -> Tight {
     let d0 = a[0].wrapping_mul(2);
     let d1 = a[1].wrapping_mul(2);
     let d2 = a[2].wrapping_mul(2);

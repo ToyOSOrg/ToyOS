@@ -105,22 +105,31 @@ fn scalar25519_reduction_and_signing_arithmetic_match_integer_oracle() {
     .unwrap();
     let wide = (BigUint::from(1u8) << 512) - 1u8;
     let mut values = fixtures(&wide, 64);
-    values.extend([wide, order.clone(), &order - 1u8]);
+    // Multiples of L and their predecessors, small and near 2^512: where the
+    // one subtraction is taken and where it is not.
+    values.extend([wide, order.clone(), &order - 1u8, &order * 2u8, &order * 3u8 - 1u8]);
+    let top = (BigUint::from(1u8) << 512) / &order;
+    for j in 0u8..4 {
+        let multiple = (&top - j) * &order;
+        values.extend([&multiple - 1u8, multiple]);
+    }
+    let int = |b: [u8; 32]| BigUint::from_bytes_le(&b);
     for (i, a) in values.iter().enumerate() {
-        let scalar = S::reduce(&fixed::<64>(a));
-        assert_eq!(BigUint::from_bytes_le(&scalar.bytes()), a % &order);
+        let a = a % (BigUint::from(1u8) << 512);
+        let scalar = S::reduce(&fixed::<64>(&a));
+        assert_eq!(int(scalar.bytes()), &a % &order);
+        assert_eq!(int(crate::scalar25519::PublicScalar::reduce(&fixed::<64>(&a)).bytes()), &a % &order);
         #[cfg(feature = "sign")]
         {
-            let b = &values[(i * 17 + 3) % values.len()];
-            let b_scalar = S::reduce(&fixed::<64>(b));
+            let b = &values[(i * 17 + 3) % values.len()] % (BigUint::from(1u8) << 512);
+            let c = &values[(i * 5 + 1) % values.len()] % (BigUint::from(1u8) << 512);
+            let (b_scalar, c_scalar) = (S::reduce(&fixed::<64>(&b)), S::reduce(&fixed::<64>(&c)));
             assert_eq!(
-                BigUint::from_bytes_le(&scalar.add(&b_scalar).bytes()),
-                (a + b) % &order
+                int(scalar.mul_add(&b_scalar, &c_scalar).bytes()),
+                ((&a % &order) * (&b % &order) + &c % &order) % &order
             );
-            assert_eq!(
-                BigUint::from_bytes_le(&scalar.mul(&b_scalar).bytes()),
-                (a * b) % &order
-            );
+            let low = &a % (BigUint::from(1u8) << 256);
+            assert_eq!(int(S::reduce32(&fixed::<32>(&low)).bytes()), &low % &order);
         }
         #[cfg(not(feature = "sign"))]
         let _ = i;
