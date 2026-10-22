@@ -14,8 +14,9 @@
 //! - **Erased: workspaces.** A secret operation's explicitly managed state is
 //!   a [`Workspace`], dropped when the operation returns, on every path out of
 //!   it, early returns and `?` included. The X25519 ladder's (x2, z2, x3, z3)
-//!   and the Ed25519 comb's signed digits are workspaces. A workspace erases its own storage; the copies the computation
-//!   works on in registers and other slots are not erased.
+//!   and the Ed25519 comb's signed digits are workspaces. A workspace erases
+//!   its own storage; the copies the computation works on in registers and
+//!   other slots are not erased.
 //! - **Erased per value.** Ed25519's secret scalars (`scalar25519::S`) are
 //!   owners, and their reduction erases its workspaces; ML-KEM polynomials
 //!   (`mlkem::Poly`) erase every temporary on drop.

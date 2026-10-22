@@ -1,9 +1,9 @@
 //! RFC 7748 X25519. Agreement uses the 255-step Montgomery ladder with masked
 //! swaps and fixed-schedule inversion; a public key is the Edwards base
 //! point's fixed-base comb multiple, mapped to u. Both run on a fixed
-//! schedule. Public inputs accept the
-//! RFC's noncanonical field encodings. All-zero shared secrets are refused.
-//! The caller supplies entropy; this module never queries the CPU for it.
+//! schedule. Public inputs accept the RFC's noncanonical field encodings.
+//! All-zero shared secrets are refused. The caller supplies entropy; this
+//! module never queries the CPU for it.
 
 use crate::{
     Error, Random, ct,
