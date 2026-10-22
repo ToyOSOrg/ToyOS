@@ -53,7 +53,7 @@ use kernel::proclife::{join, reap, spawn as proclife_spawn, teardown as proclife
 /// One `EndowEntry` on the wire; `loader::start` and [`Endowments::encode`] both index by it.
 pub const ENDOW_ENTRY_LEN: usize = core::mem::size_of::<EndowEntry>();
 
-pub use crate::loader::{build_child_handles, spawn, spawn_supervisor, SUPERVISOR_PATH};
+pub use crate::loader::{build_child_handles, spawn, spawn_supervisor};
 
 /// Page tables shared between a process and all its threads.
 pub type PageTables = Arc<Lock<crate::mm::paging::AddressSpace>>;

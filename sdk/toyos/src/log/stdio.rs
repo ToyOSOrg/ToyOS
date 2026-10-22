@@ -2,7 +2,7 @@
 //! when the stream is one, bytes into its descriptor when it is anything else.
 //!
 //! **Where a stream goes is what its descriptor names** (`crate::fd`).
-//! `/system/bin/supervisor` gives a program its log ring as descriptors 1 and
+//! The supervisor gives a program its log ring as descriptors 1 and
 //! 2, so a daemon's output is records; a program a terminal started holds that
 //! terminal's pipes there, so its output is bytes on the terminal. The first
 //! write to a stream asks the descriptor once ([`FileType::SharedMemory`] is a

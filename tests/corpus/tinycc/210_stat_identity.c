@@ -62,7 +62,7 @@ static void judge(const char *what, int is, int want) {
 }
 
 int main(void) {
-    struct stat a, b, a2, opened, moved, toybox, cat, supervisor;
+    struct stat a, b, a2, opened, moved, toybox, cat, release;
     struct stat bin, bin2, etc, sys, tmpdir, catlink, cplink;
     int fd;
 
@@ -90,10 +90,10 @@ int main(void) {
     close(fd);
 
     if (stat_of("/system/bin/toybox", &toybox) || stat_of("/system/bin/cat", &cat) ||
-        stat_of("/system/bin/supervisor", &supervisor))
+        stat_of("/system/etc/os-release", &release))
         return 1;
     judge("a link is the file it names", same(&toybox, &cat), 1);
-    judge("two files on /system are two", same(&toybox, &supervisor), 0);
+    judge("two files on /system are two", same(&toybox, &release), 0);
     judge("/system and /tmp are two volumes", toybox.st_dev == a.st_dev, 0);
 
     if (mkdir("/tmp/210_d", 0755) != 0 || stat_of("/system/bin", &bin) || stat_of("/system/etc/../bin", &bin2) ||

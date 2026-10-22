@@ -7,6 +7,6 @@ license = "MIT OR Apache-2.0"
 
 # The one place a `devices` class name and a `syscap` right name are decoded.
 # Both are ABI vocabulary, and a manifest crate holding its own copy of either
-# would be a config the build system accepts and `/system/bin/supervisor` cannot act on.
+# would be a config the build system accepts and the supervisor cannot act on.
 [dependencies]
 toyos-abi = { path = "../../sdk/abi" }

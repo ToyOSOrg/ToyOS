@@ -15,6 +15,9 @@
 //! clock page asserts in every stamp any process takes, `logkeeper`'s among them, so
 //! the clock arm's verdict may reach no other line.
 
+#[path = "../image.rs"]
+mod image;
+
 use std::os::toyos::process::ChildExt;
 use std::process::Command;
 
@@ -53,9 +56,12 @@ fn snapshot(addr: u64) -> [u8; LEN] {
     out
 }
 
-/// A fresh handle on this binary at offset 0, so every `read` has bytes to give.
+/// A fresh handle on this binary at offset 0, so every `read` has bytes to give:
+/// its copy in the kernel's `/tmp`, made once.
 fn open_self() -> RawHandle {
-    syscall::open(SELF_PATH.as_bytes(), OpenFlags::READ).expect("open self")
+    static OWN: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let own = OWN.get_or_init(|| image::in_tmp(SELF_PATH));
+    syscall::open(own.as_bytes(), OpenFlags::READ).expect("open self")
 }
 
 /// `len` bytes at `addr`, as the buffer a `read` is asked to fill.

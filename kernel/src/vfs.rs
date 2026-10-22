@@ -47,7 +47,7 @@ pub trait FileSystem: Send {
     /// Whether `dir` (`""` is the mount root) is a directory: a working
     /// directory is judged by this, on every spawn and `SYS_CHDIR`, under the
     /// VFS lock. Nothing beneath it is materialised and nothing caps it; what it costs is
-    /// the mount's — a bcachefs answer of no reads the whole tree.
+    /// the mount's.
     fn is_dir(&mut self, dir: &str) -> Result<bool, SyscallError>;
 
     /// When `name` was last written, as `toyos_abi::syscall::Stat::mtime` says,
@@ -80,14 +80,6 @@ pub trait FileSystem: Send {
 }
 
 
-/// Whether userland may modify a mount; stated at every `mount`, defaulted nowhere.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum UserAccess {
-    ReadWrite,
-    /// Readable, and every userland syscall that would change it is refused.
-    KernelOnly,
-}
-
 /// The entries `/` has, in listing order. `/` is synthesized rather than
 /// mounted: it is no filesystem, and nothing outside this set can be mounted.
 pub const ROOT_ENTRIES: [&str; 9] =
@@ -95,7 +87,6 @@ pub const ROOT_ENTRIES: [&str; 9] =
 
 struct Mount {
     fs: Box<dyn FileSystem>,
-    access: UserAccess,
 }
 
 /// A name at `/`, and where in its filesystem that name begins.
@@ -217,9 +208,9 @@ impl Vfs {
 
     /// Mount one filesystem under `names`, each a [`ROOT_ENTRIES`] name. Several
     /// names put each under its own directory of it.
-    pub fn mount(&mut self, names: &[&'static str], fs: Box<dyn FileSystem>, access: UserAccess) {
+    pub fn mount(&mut self, names: &[&'static str], fs: Box<dyn FileSystem>) {
         let index = self.mounts.len();
-        self.mounts.push(Mount { fs, access });
+        self.mounts.push(Mount { fs });
         for name in names {
             let prefix = if names.len() == 1 { "" } else { *name };
             let slot = Self::entry(name).expect("a mount name is one of the root's entries");
@@ -240,7 +231,7 @@ impl Vfs {
     /// and a bare mount point, answer no: the read-only refusal, not a missing name.
     pub fn user_may_modify(&self, path: &str) -> bool {
         let (mount, _) = self.resolve_path("/", path);
-        self.point(&mount).is_some_and(|p| self.mounts[p.fs].access == UserAccess::ReadWrite)
+        self.point(&mount).is_some()
     }
 
     fn resolve_fs(&mut self, mount: &str, file: &str) -> Option<(&mut dyn FileSystem, String)> {

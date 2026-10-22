@@ -109,7 +109,7 @@ struct SystemConfig {
     symlinks: BTreeMap<String, String>,
     #[serde(default)]
     assets: Vec<String>,
-    /// What `/system/bin/supervisor` starts at boot. Program *keys*, never paths — a path
+    /// What the supervisor starts at boot. Program *keys*, never paths — a path
     /// here is a second spelling of a `[programs]` key and is what let a boot
     /// list smuggle an argument through. Arguments live on the program entry's
     /// `args` instead.
@@ -350,12 +350,16 @@ fn config_crates(root: &Path, config: &SystemConfig) -> Vec<ConfigCrate> {
             features: Features::Default,
         });
     }
-    crates.push(ConfigCrate {
-        name: SUPERVISOR_PROGRAM.to_string(),
-        dir: program_dir(root, SUPERVISOR_PROGRAM),
-        built: Built::Member,
-        features: Features::Default,
-    });
+    for name in BOOT_PROGRAMS {
+        if !config.programs.contains_key(name) {
+            crates.push(ConfigCrate {
+                name: name.to_string(),
+                dir: program_dir(root, name),
+                built: Built::Member,
+                features: Features::Default,
+            });
+        }
+    }
     crates
 }
 
@@ -598,13 +602,35 @@ fn assert_overflow_checked(what: &str, image: &[u8]) {
 
 // --- Shared root-image assembly ---
 
-/// Build all programs from a config and assemble the ROOT image.
 /// The one program the kernel starts, in **every** image whatever `[programs]`
-/// says. It reads the manifest below and starts what that names, so a ROOT image
+/// says. It reads the manifest below and starts what that names, so an image
 /// without it is a machine with a kernel and no userland at all.
 const SUPERVISOR_PROGRAM: &str = "supervisor";
 
-/// Names `/system/bin/supervisor` serves itself.
+/// The file server, which the supervisor serves ROOT with before it reads the
+/// manifest, so in every image too.
+const FILESERVER_PROGRAM: &str = "fileserver";
+
+/// The programs a slot carries beside the kernel, as signed sections of their
+/// own, and ROOT does not (`toyos_update::image`).
+const BOOT_PROGRAMS: [&str; 2] = [SUPERVISOR_PROGRAM, FILESERVER_PROGRAM];
+
+/// What a config's userland build makes: ROOT, and the two programs a slot
+/// carries beside it.
+pub struct Userland {
+    pub root: Vec<u8>,
+    pub supervisor: Vec<u8>,
+    pub fileserver: Vec<u8>,
+}
+
+impl Userland {
+    /// The image of this userland and `kernel`.
+    pub fn release<'a>(&'a self, kernel: &'a [u8]) -> image::Release<'a> {
+        image::Release { kernel, supervisor: &self.supervisor, fileserver: &self.fileserver, root: &self.root }
+    }
+}
+
+/// Names the supervisor serves itself.
 ///
 /// The supervisor is in every image and is no `[programs]` key, so these have no
 /// declaration to come from. They travel in the manifest so the supervisor creates
@@ -741,7 +767,7 @@ fn receives_reach_a_running_server(config: &SystemConfig) -> Result<(), String> 
     }
 }
 
-/// The resolved config as the records `/system/bin/supervisor` reads.
+/// The resolved config as the records the supervisor reads.
 ///
 /// The format, the renderer and the parser are `lib/manifest/`, whose
 /// round-trip test is what makes "what the build writes is what the supervisor reads" a
@@ -761,7 +787,10 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                 let cfg = &config.programs[*name];
                 toyos_manifest::Program {
                     name: (*name).clone(),
-                    path: format!("/system/bin/{name}"),
+                    source: match name.as_str() {
+                        FILESERVER_PROGRAM => toyos_manifest::Source::BootFileServer,
+                        _ => toyos_manifest::Source::Path(format!("/system/bin/{name}")),
+                    },
                     args: cfg.args.clone(),
                     serves: cfg.serves.clone(),
                     provides: cfg.provides.clone(),
@@ -858,13 +887,18 @@ fn build_and_assemble(
     quiet: bool,
     arch: Arch,
     machines: crate::microcode::Machines,
-) -> Vec<u8> {
+) -> Userland {
     // Before anything is built, so a file edited during the build is not
     // credited to the state it was read in.
     let release = release(root, env.sysroot.identity.of_target(arch.userland()), arch);
     let mut root_files: Vec<(String, Vec<u8>)> =
         vec![(toyos_osrelease::PATH.to_string(), release.to_string().into_bytes())];
     build_programs(root, config, env, quiet, arch, &mut root_files);
+    let mut take = |name: &str| {
+        let at = root_files.iter().position(|(file, _)| *file == format!("bin/{name}")).expect("every image builds its boot programs");
+        root_files.remove(at).1
+    };
+    let (supervisor, fileserver) = (take(SUPERVISOR_PROGRAM), take(FILESERVER_PROGRAM));
     root_files.push((toyos_manifest::PATH.to_string(), render_manifest(config)));
 
     let programs: BTreeSet<&str> = config.programs.keys().map(String::as_str).collect();
@@ -905,10 +939,10 @@ fn build_and_assemble(
         panic!("{why}");
     }
 
-    image::create_root_image(&root_files, &symlinks, quiet)
+    Userland { root: image::create_root_image(&root_files, &symlinks, quiet), supervisor, fileserver }
 }
 
-/// Build `config`'s programs and the supervisor for `arch`, and add each to `root_files`.
+/// Build `config`'s programs and [`BOOT_PROGRAMS`] for `arch`, and add each to `root_files`.
 fn build_programs(
     root: &Path,
     config: &SystemConfig,
@@ -970,7 +1004,7 @@ fn symlink_target_name(to: &str) -> &str {
 }
 
 /// The converse of the crate assertion above: a `bin/` entry no name reaches.
-/// A name buys authority — `/system/bin/supervisor` builds a `[programs]` row's namespace and
+/// A name buys authority — the supervisor builds a `[programs]` row's namespace and
 /// device claims — and a harness binary has none, holding only what its spawner
 /// moved in, so it is legal exactly when the config starts something that could
 /// spawn it. **An inventory over the `bin/` namespace, not a reachability
@@ -982,7 +1016,7 @@ fn unnamed_program(
 ) -> Result<(), String> {
     for name in names {
         let Some(program) = name.strip_prefix("bin/") else { continue };
-        if program == SUPERVISOR_PROGRAM || programs.contains(program) {
+        if programs.contains(program) {
             continue;
         }
         if HARNESS_PREFIXES.iter().any(|p| name.starts_with(p)) {
@@ -997,7 +1031,7 @@ fn unnamed_program(
             continue;
         }
         return Err(format!(
-            "the image carries {name} and no `[programs]` row names it, so `/system/bin/supervisor` can build \
+            "the image carries {name} and no `[programs]` row names it, so the supervisor can build \
              it no namespace and no device claim; add a row or take the file out"
         ));
     }
@@ -1809,17 +1843,16 @@ pub fn build(root: &Path, boot: Boot, plan: &Plan) -> PathBuf {
         return image_path;
     }
 
-    let (kernel_bytes, bl_bytes, root_bytes) = shipped_parts(root, &boot, plan);
+    let (kernel_bytes, bl_bytes, userland) = shipped_parts(root, &boot, plan);
     let key = said_key(plan);
     // A machine this image is flashed onto updates itself, so it carries
     // the second slot an update is written to, with room for a ROOT twice
     // this one's size.
-    let second = image::SecondSlot { root_bytes: 2 * root_bytes.len() as u64 };
+    let second = image::SecondSlot { root_bytes: 2 * userland.root.len() as u64 };
     let disk_bytes = image::create_boot_image(
         plan.arch,
-        &kernel_bytes,
         &bl_bytes,
-        &root_bytes,
+        userland.release(&kernel_bytes),
         &plan.params.join(","),
         image::Signing { key, version: plan.version },
         Some(second),
@@ -1840,11 +1873,10 @@ pub fn build(root: &Path, boot: Boot, plan: &Plan) -> PathBuf {
 /// slot, signed with this run's key at the plan's version.
 pub fn build_update(root: &Path, boot: &Boot, plan: &Plan, out: &Path) {
     assert!(!boot.case, "an update image is built from a mode's config, and a case's image is a test's");
-    let (kernel_bytes, _, root_bytes) = shipped_parts(root, boot, plan);
+    let (kernel_bytes, _, userland) = shipped_parts(root, boot, plan);
     let key = said_key(plan);
     let bytes = image::update_image(
-        &kernel_bytes,
-        &root_bytes,
+        userland.release(&kernel_bytes),
         &plan.params.join(","),
         image::Signing { key, version: plan.version },
     );
@@ -1866,8 +1898,8 @@ fn said_key(plan: &Plan) -> &'static crate::signing::Key {
     key
 }
 
-/// The kernel, the loader and ROOT a mode's image is made of.
-fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Vec<u8>) {
+/// The kernel, the loader and the userland a mode's image is made of.
+fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Userland) {
     let kernel_features = plan.features.join(",");
     let arch = plan.arch;
 
@@ -1894,10 +1926,10 @@ fn shipped_parts(root: &Path, boot: &Boot, plan: &Plan) -> (Vec<u8>, Vec<u8>, Ve
         )
     };
 
-    let root_bytes = build_and_assemble(root, &config, &env, &[], false, arch, plan.machines);
+    let userland = build_and_assemble(root, &config, &env, &[], false, arch, plan.machines);
 
     let bl_bytes = fs::read(&bl_art).expect("Failed to read staged bootloader");
-    (kernel_bytes, bl_bytes, root_bytes)
+    (kernel_bytes, bl_bytes, userland)
 }
 
 /// Create an empty disk image the guest sees at full size and the host pays
@@ -1955,21 +1987,21 @@ pub fn designate_for_format(path: &Path, len: u64) {
 /// What it does not see is a source edit that lands mid-run. A run is a
 /// measurement of one tree, so that is the behaviour wanted either way; a run
 /// that *starts* after a kernel edit still rebuilds every variant it uses.
-struct Memo(std::sync::Mutex<BTreeMap<u64, Arc<Vec<u8>>>>);
+struct Memo<T = Vec<u8>>(std::sync::Mutex<BTreeMap<u64, Arc<T>>>);
 
-impl Memo {
+impl<T> Memo<T> {
     const fn new() -> Self {
         Self(std::sync::Mutex::new(BTreeMap::new()))
     }
 
-    fn get(&self, key: u64) -> Option<Arc<Vec<u8>>> {
+    fn get(&self, key: u64) -> Option<Arc<T>> {
         self.0.lock().expect("a build panicked holding the artifact memo").get(&key).cloned()
     }
 
     /// The lock is deliberately not held across `make`: a build that panics
     /// under it would poison the memo, and every later boot would then fail on
     /// the poison instead of on whatever went wrong with it.
-    fn get_or_build(&self, key: u64, make: impl FnOnce() -> Vec<u8>) -> Arc<Vec<u8>> {
+    fn get_or_build(&self, key: u64, make: impl FnOnce() -> T) -> Arc<T> {
         if let Some(hit) = self.get(key) {
             return hit;
         }
@@ -1984,7 +2016,7 @@ impl Memo {
 
 static KERNEL: Memo = Memo::new();
 static BOOTLOADER: Memo = Memo::new();
-static ROOT_IMAGE: Memo = Memo::new();
+static USERLAND: Memo<Userland> = Memo::new();
 
 /// What the ROOT image is a function of: the config naming the programs, the
 /// architecture and whether they are built at all, the key its
@@ -2020,9 +2052,8 @@ pub fn build_test_image(
     let parts = build_test_parts(root, plan, quiet, extra_files);
     image::create_boot_image(
         plan.arch,
-        &parts.kernel,
         &parts.bootloader,
-        &parts.root,
+        parts.userland.release(&parts.kernel),
         &plan.params.join(","),
         image::Signing { key: crate::signing::key(), version: plan.version },
         None,
@@ -2033,7 +2064,7 @@ pub fn build_test_image(
 pub struct Parts {
     pub kernel: Arc<Vec<u8>>,
     pub bootloader: Arc<Vec<u8>>,
-    pub root: Arc<Vec<u8>>,
+    pub userland: Arc<Userland>,
 }
 
 /// [`Parts`] for a plan: built, or this process's memo of them.
@@ -2067,9 +2098,9 @@ pub fn build_test_parts(
 
     // Nothing left to build, so nothing for the lock, the toolchain check or the
     // staleness sweep to protect.
-    let memo = (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), ROOT_IMAGE.get(root_image_key));
-    if let (Some(kernel), Some(bootloader), Some(root)) = memo {
-        return Parts { kernel, bootloader, root };
+    let memo = (KERNEL.get(kernel_key), BOOTLOADER.get(bl_key), USERLAND.get(root_image_key));
+    if let (Some(kernel), Some(bootloader), Some(userland)) = memo {
+        return Parts { kernel, bootloader, userland };
     }
 
     // A cache miss is shared setup, not a property of whichever test happened
@@ -2113,13 +2144,13 @@ pub fn build_test_parts(
         (kernel, bl)
     };
 
-    let root_bytes = ROOT_IMAGE.get_or_build(root_image_key, || {
+    let userland = USERLAND.get_or_build(root_image_key, || {
         build_and_assemble(root, &config, &env, extra_files, quiet, arch, plan.machines)
     });
 
     drop(building);
 
-    Parts { kernel: kernel_bytes, bootloader: bl_bytes, root: root_bytes }
+    Parts { kernel: kernel_bytes, bootloader: bl_bytes, userland }
 }
 
 /// Build all binaries in a multi-binary crate. Returns vec of (binary_name, bytes).
@@ -3364,7 +3395,7 @@ mod tests {
     }
 
     /// The diagnostic image's whole reason for existing: nothing in it can claim
-    /// the framebuffer, so the kernel's boot log stays on the panel. `/system/bin/supervisor`
+    /// the framebuffer, so the kernel's boot log stays on the panel. The supervisor
     /// is in every image and could reach a device, so the property becomes "the
     /// config declares no `devices`" — checkable here for the first time.
     #[test]
@@ -3379,7 +3410,7 @@ mod tests {
     }
 
     /// `[boot] start` names program keys, so a typo is a build error rather than
-    /// a refusal `/system/bin/supervisor` reports at boot.
+    /// a refusal the supervisor reports at boot.
     fn started_programs_are_declared(cfg: &SystemConfig) -> Result<(), String> {
         for name in &cfg.boot.start {
             if !cfg.programs.contains_key(name) {
@@ -3408,7 +3439,7 @@ mod tests {
         let programs = declared(&["shell"]);
         let started = ["shell".to_string()];
         assert!(unnamed_program(
-            &["bin/supervisor", "bin/shell", "lib/libtls_lib.so", "etc/system.manifest"],
+            &["bin/shell", "lib/libtls_lib.so", "etc/system.manifest"],
             &programs,
             &started,
         )

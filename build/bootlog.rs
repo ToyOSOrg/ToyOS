@@ -16,7 +16,7 @@ use std::fmt;
 /// running to write it there.
 pub const REBOOTING: &str = "Rebooting.";
 
-/// What `/system/bin/supervisor` says as it asks `logkeeper` to make the log whole, before
+/// What the supervisor says as it asks `logkeeper` to make the log whole, before
 /// it stops the machine: the last line a passing boot's log is owed, because
 /// nothing after it waits for the file.
 pub const STOPPING: &str = toyos_logstream::STOPPING;

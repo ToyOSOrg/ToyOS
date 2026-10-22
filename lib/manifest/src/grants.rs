@@ -1,5 +1,5 @@
 //! Which folder of the session user's home an installed package is granted,
-//! and the store `/system/bin/supervisor` keeps those grants in.
+//! and the store the supervisor keeps those grants in.
 //!
 //! **The supervisor is the only writer of [`STORE`].** A grant reaches it as a
 //! request on [`PORT`], which the build gives to [`HOLDER`] alone and the

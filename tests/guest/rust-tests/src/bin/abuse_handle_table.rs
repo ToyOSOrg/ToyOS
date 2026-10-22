@@ -28,6 +28,9 @@
 //! **A pipe and a port are two inserts answered as one**: at the cap, and one
 //! slot short of fitting, each is refused with the table as it was.
 
+#[path = "../image.rs"]
+mod image;
+
 use toyos_abi::syscall::{
     self, EndowEntry, MmapFlags, MmapProt, SpawnArgs, SyscallError, MAX_SPAWN_ENDOWMENTS, QUIT_LABEL, SELF_LABEL,
 };
@@ -52,10 +55,18 @@ const REGION: usize = 4 * 1024 * 1024;
 /// be in range or the refusal would be the label check rather than the repeat.
 const LABELS: &[u8] = b"twice";
 
+/// This binary as an image, read before the table is filled: a full table has
+/// no slot for the object a read makes.
+fn own() -> &'static toyos::process::Image {
+    static OWN: std::sync::OnceLock<toyos::process::Image> = std::sync::OnceLock::new();
+    OWN.get_or_init(|| image::image_of(SELF))
+}
+
 fn main() {
     if std::env::args().nth(1).as_deref() == Some(CHILD) {
         return;
     }
+    own();
     let region = unsafe {
         syscall::mmap(
             core::ptr::null_mut(),
@@ -70,6 +81,8 @@ fn main() {
     const ARGV0: &[u8] = b"/system/bin/echo\0";
     unsafe { core::ptr::copy_nonoverlapping(ARGV0.as_ptr(), argv, ARGV0.len()) };
 
+    let echo = image::image_of("/system/bin/echo");
+    let (image, image_len) = echo.spawn_words();
     let spawn_with = |endow_count: u64| {
         let args = SpawnArgs {
             path_ptr: argv as u64,
@@ -84,8 +97,8 @@ fn main() {
             labels_len: LABELS.len() as u64,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
-            image: 0,
-            image_len: 0,
+            image,
+            image_len,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
         };
         unsafe { syscall::spawn(&args) }
@@ -179,6 +192,7 @@ fn a_pair_is_refused_whole(filled: &mut Vec<RawHandle>) {
 /// `entries` into the blob `labels`.
 fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, SyscallError> {
     let argv = format!("{SELF}\0{CHILD}");
+    let (image, image_len) = own().spawn_words();
     // SAFETY: every pointer names a live local for the whole call.
     unsafe {
         syscall::spawn(&SpawnArgs {
@@ -194,8 +208,8 @@ fn spawn_endowed(entries: &[EndowEntry], labels: &[u8]) -> Result<RawHandle, Sys
             labels_len: labels.len() as u64,
             cwd_ptr: CWD.as_ptr() as u64,
             cwd_len: CWD.len() as u64,
-            image: 0,
-            image_len: 0,
+            image,
+            image_len,
             place: u64::from(toyos_abi::HANDLE_INVALID.0),
         })
     }

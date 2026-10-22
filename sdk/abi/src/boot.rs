@@ -62,11 +62,12 @@ pub struct KernelArgs {
     /// layout.
     pub layout: u32,
     /// The boot parameter, as ASCII with no terminator: comma-separated tokens
-    /// read out of `\toyos\cmdline` on the volume the bootloader loaded itself
-    /// from. [`root_uuid`] and [`actuators`] are the two readings of it.
+    /// read out of `\toyos\cmdline` on the slot's volume, with the words the
+    /// loader appends ([`SLOT_PARAM`] among them), read by [`tokens`].
     ///
-    /// Every shipping image carries exactly `root=<uuid>`, and a kernel that
-    /// carries no actuators refuses any other token rather than ignoring it
+    /// Every token is a parameter the kernel claims (`kernel/src/params.rs`)
+    /// or an actuator its table declares, and a kernel that carries no
+    /// actuators refuses any other rather than ignoring it
     /// (`kernel/src/actuator.rs`). It is in this struct rather than anywhere the
     /// kernel could go and fetch it because the earliest actuator panics before
     /// `mm::init` and another acts at AP bring-up: a parameter that is not here
@@ -88,16 +89,10 @@ pub struct KernelArgs {
     /// land inside, and there is no deriving it from the memory map — the map
     /// says what firmware *used*, not what the bridge would decode.
     pub root_bridge_windows: [RootBridgeWindow; MAX_ROOT_BRIDGE_WINDOWS],
-    /// Where the loader put ROOT: its filesystem, read through the firmware's
-    /// block I/O into `LoaderData` pages, which the kernel mounts from memory and
-    /// keeps out of its allocator by this address, as it keeps the black box's.
-    ///
-    /// These are the bytes a signature check over ROOT has to cover: the loader
-    /// writes them once, and nothing writes them between that read and the
-    /// kernel's mount. Zero length is a loader that handed no image, and the
-    /// kernel refuses to boot on it by name; it never reads ROOT anywhere else.
-    pub root_image_addr: u64,
-    pub root_image_len: u64,
+    /// ROOT's bytes, opaque to the kernel: the slot's ROOT partition read
+    /// through the firmware's block I/O. [`Self::supervisor_image`] says what
+    /// every [`BootImage`] is.
+    pub root_image: BootImage,
     /// The unique GUID of the partition the image was read from, raw as in the
     /// GPT entry like [`Self::boot_partition_guid`]; zero with no image. The
     /// kernel holds that partition so no claim writes the slot it is running.
@@ -145,6 +140,27 @@ pub struct KernelArgs {
     /// read the kernel and its parameter from, raw as in the GPT entry like
     /// [`Self::root_partition_guid`]; zero with no image.
     pub slot_volume_guid: [u8; 16],
+    /// The supervisor's executable and the file server's, which the kernel
+    /// hands the supervisor with [`Self::root_image`]: the programs that serve
+    /// ROOT, so the kernel opens no file to start the machine.
+    ///
+    /// **Every `BootImage` is a section of the slot's signed header**, read
+    /// into page-aligned `LoaderData` pages and held to its hash before the
+    /// loader exits boot services; nothing writes it after. The kernel keeps
+    /// each out of its allocator for the machine's life, and refuses by name a
+    /// boot whose image is empty, unaligned, outside one `LoaderData`
+    /// descriptor or overlapping another region the loader handed.
+    pub supervisor_image: BootImage,
+    pub fileserver_image: BootImage,
+}
+
+/// One payload the loader hands the kernel: `len` bytes at the physical
+/// address `addr`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BootImage {
+    pub addr: u64,
+    pub len: u64,
 }
 
 /// The bytes of [`KernelArgs::gop_edid`]: one EDID base block.
@@ -162,10 +178,6 @@ pub const LAYOUT: u32 = 0x5459_0000 | core::mem::size_of::<KernelArgs>() as u32;
 /// what an older loader writes there on firmware that names no zone: the
 /// negative control on the kernel's refusal, and read by both of them.
 pub const WRITE_NO_LAYOUT_PARAM: &str = "loader-writes-no-layout";
-
-/// The boot parameter on which the loader hands the kernel no ROOT image: the
-/// negative control on the kernel's refusal, and read by both of them.
-pub const WITHHOLD_ROOT_PARAM: &str = "loader-withholds-root";
 
 /// The word the loader appends naming the slot it booted, `A` or `B`: the
 /// signed boot parameter is the slot's own, and which slot carried it is a
@@ -211,23 +223,9 @@ impl RootBridgeWindow {
     }
 }
 
-/// The token naming the filesystem the kernel mounts as root.
-const ROOT_PARAM: &str = "root=";
-
-/// What the boot parameter names ROOT, or `None` on a parameter that names none.
-///
-/// `bcachefs::FsUuid`'s text, compared against each candidate partition's
-/// *superblock* and never against a partition GUID: a role names a filesystem,
-/// and a filesystem may have members on more than one disk.
-pub fn root_uuid(cmdline: &str) -> Option<&str> {
-    cmdline.split(',').find_map(|token| token.strip_prefix(ROOT_PARAM))
-}
-
-/// Every token of the boot parameter that is not [`root_uuid`]'s. A token this
-/// yields is one the actuator table has to declare, so a `root=` left in would
-/// panic a kernel that boots.
-pub fn actuators(cmdline: &str) -> impl Iterator<Item = &str> {
-    cmdline.split(',').filter(|t| !t.is_empty() && !t.starts_with(ROOT_PARAM))
+/// Every token of the boot parameter: each one a parameter of the kernel's (`params`) or an actuator its table declares.
+pub fn tokens(cmdline: &str) -> impl Iterator<Item = &str> {
+    cmdline.split(',').filter(|t| !t.is_empty())
 }
 
 impl KernelArgs {
@@ -262,8 +260,7 @@ const _: () = {
     assert!(offset_of!(KernelArgs, cmdline_len) == 176);
     assert!(offset_of!(KernelArgs, root_bridge_window_count) == 184);
     assert!(offset_of!(KernelArgs, root_bridge_windows) == 192);
-    assert!(offset_of!(KernelArgs, root_image_addr) == 1216);
-    assert!(offset_of!(KernelArgs, root_image_len) == 1224);
+    assert!(offset_of!(KernelArgs, root_image) == 1216);
     assert!(offset_of!(KernelArgs, root_partition_guid) == 1232);
     assert!(offset_of!(KernelArgs, loader_entry_counter) == 1248);
     assert!(offset_of!(KernelArgs, loader_handoff_counter) == 1256);
@@ -278,7 +275,10 @@ const _: () = {
     assert!(offset_of!(KernelArgs, microcode_addr) == 1472);
     assert!(offset_of!(KernelArgs, microcode_len) == 1480);
     assert!(offset_of!(KernelArgs, slot_volume_guid) == 1488);
-    assert!(size_of::<KernelArgs>() == 1504);
+    assert!(offset_of!(KernelArgs, supervisor_image) == 1504);
+    assert!(offset_of!(KernelArgs, fileserver_image) == 1520);
+    assert!(size_of::<KernelArgs>() == 1536);
+    assert!(size_of::<BootImage>() == 16);
     assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
     assert!(size_of::<RootBridgeWindow>() == 16);
@@ -295,28 +295,6 @@ pub struct MemoryMapEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every token is one reading's or the other's, and neither sees the
-    /// other's: a `root=` reaching the actuator table panics a kernel.
-    #[test]
-    fn the_two_readings_of_a_boot_parameter_partition_it() {
-        const ROOT: &str = "0123456789abcdef0123456789abcdef";
-        const SHIPPING: &str = "root=0123456789abcdef0123456789abcdef";
-        const ARMED: &str =
-            "root=0123456789abcdef0123456789abcdef,usb-flush-fails,fat-boot-reads-fail";
-
-        assert_eq!(root_uuid(SHIPPING), Some(ROOT));
-        assert_eq!(actuators(SHIPPING).count(), 0);
-
-        assert_eq!(root_uuid(ARMED), Some(ROOT));
-        assert!(actuators(ARMED).eq(["usb-flush-fails", "fat-boot-reads-fail"]));
-
-        // No root filesystem, and no parameter at all: neither reading invents.
-        assert_eq!(root_uuid("usb-flush-fails"), None);
-        assert!(actuators("usb-flush-fails").eq(["usb-flush-fails"]));
-        assert_eq!(root_uuid(""), None);
-        assert_eq!(actuators("").count(), 0);
-    }
 
     #[test]
     fn a_window_holds_an_extent_and_not_merely_its_first_address() {
@@ -367,8 +345,7 @@ mod tests {
         root_bridge_window_count: 0,
         root_bridge_windows: [RootBridgeWindow { base: 0, length: 0 };
             MAX_ROOT_BRIDGE_WINDOWS],
-        root_image_addr: 0,
-        root_image_len: 0,
+        root_image: BootImage { addr: 0, len: 0 },
         root_partition_guid: [0; 16],
         loader_entry_counter: 0,
         loader_handoff_counter: 0,
@@ -383,6 +360,8 @@ mod tests {
         microcode_addr: 0,
         microcode_len: 0,
         slot_volume_guid: [0; 16],
+        supervisor_image: BootImage { addr: 0, len: 0 },
+        fileserver_image: BootImage { addr: 0, len: 0 },
     };
 
     #[test]

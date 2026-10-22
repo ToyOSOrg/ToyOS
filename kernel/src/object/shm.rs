@@ -7,8 +7,13 @@
 //! a handle holds an `Arc`. An `Arc` a syscall cloned out of its table can
 //! outlive the last handle, so a map through one finds no list and is refused
 //! under the lock the teardown took it with.
+//!
+//! **A mapping does not keep its process's address space**: the list holds it
+//! weakly, so a process that ended while another still holds the region has
+//! its space, and everything the space holds, freed with it; its entry is dead
+//! and is passed over.
 
-use alloc::sync::Arc;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use toyos_abi::syscall::SyscallError;
@@ -17,6 +22,7 @@ use crate::mm::policy::{CachePolicy, Prot};
 use crate::mm::paging::Detached;
 use crate::mm::{align_2m_checked, pmm, Unmapped, PAGE_2M, PAGE_SIZE};
 use crate::process::{PageTables, Pid};
+use crate::sync::Lock;
 use crate::{DirectMap, UserAddr};
 
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
@@ -37,16 +43,41 @@ pub struct Region {
     pub phys: DirectMap,
     pub size: u64,
     pub cache: CachePolicy,
-    /// The pages, when the kernel owns them; `None` for firmware's
-    /// framebuffer or an MMIO aperture it does not own.
-    pub pages: Option<Arc<Pages>>,
+    pub memory: Memory,
+}
+
+/// Whose memory a region is.
+#[derive(Clone)]
+pub enum Memory {
+    /// Pages the kernel allocated, freed with the last `Arc`, which the
+    /// field only keeps alive.
+    Owned { _pages: Arc<Pages> },
+    /// A payload the loader verified and handed over, `len` bytes of the
+    /// region's pages: kept for the machine's life and written by nobody, so
+    /// every mapping of it is read-only (`crate::bootimage`).
+    Boot { len: u64 },
+    /// Firmware's framebuffer or an MMIO aperture the kernel does not own.
+    Foreign,
 }
 
 pub struct SharedMemObject {
     pub(super) core: ObjectCore,
     region: Region,
     /// Where this region is mapped, per process; released by the zero-handle hook.
-    mapped_in: Held<Vec<(Pid, PageTables, UserAddr)>>,
+    mapped_in: Held<Vec<Mapping>>,
+}
+
+/// One process's mapping of a region: dead once its address space is gone.
+struct Mapping {
+    pid: Pid,
+    space: Weak<Lock<crate::mm::paging::AddressSpace>>,
+    at: UserAddr,
+}
+
+impl Mapping {
+    fn live(&self) -> Option<PageTables> {
+        self.space.upgrade()
+    }
 }
 
 impl SharedMemObject {
@@ -84,7 +115,7 @@ impl SharedMemObject {
             phys,
             size: aligned,
             cache: CachePolicy::Normal,
-            pages: Some(Arc::new(Pages(pages))),
+            memory: Memory::Owned { _pages: Arc::new(Pages(pages)) },
         }))
     }
 
@@ -98,8 +129,23 @@ impl SharedMemObject {
     /// a second device's domain would be one device reaching another's
     /// registers.
     pub fn ram(&self) -> Option<(u64, u64)> {
-        (self.region.pages.is_some() && self.region.cache == CachePolicy::Normal)
+        (matches!(self.region.memory, Memory::Owned { .. }) && self.region.cache == CachePolicy::Normal)
             .then(|| (self.region.phys.phys(), self.region.size))
+    }
+
+    /// The payload's length, for a region the loader handed over: memory
+    /// nobody writes.
+    pub fn immutable(&self) -> Option<u64> {
+        match self.region.memory {
+            Memory::Boot { len } => Some(len),
+            Memory::Owned { .. } | Memory::Foreign => None,
+        }
+    }
+
+    /// Whether a program may be paged from it: ordinary memory, never a
+    /// device's, whose read is a device access.
+    pub fn is_ordinary(&self) -> bool {
+        self.ram().is_some() || self.immutable().is_some()
     }
 
     /// The kernel's own view of the pages, through the direct map; a mapped
@@ -122,19 +168,25 @@ impl SharedMemObject {
     }
 
     fn mapped_nowhere(&self) -> bool {
-        self.mapped_in.with(|mapped| mapped.is_empty()).unwrap_or(true)
+        self.mapped_in.with(|mapped| mapped.iter().all(|m| m.space.strong_count() == 0)).unwrap_or(true)
     }
 
     /// Map into `pt`, or answer the address it is already mapped at;
     /// idempotent per process. `Gone` once the last handle has gone.
     pub fn map_into(&self, pid: Pid, pt: &PageTables) -> Result<u64, SyscallError> {
-        let map = |mapped: &mut Vec<(Pid, PageTables, UserAddr)>| {
-            if let Some((_, _, vaddr)) = mapped.iter().find(|(p, _, _)| *p == pid) {
-                return Ok(vaddr.raw());
+        let map = |mapped: &mut Vec<Mapping>| {
+            // A dead entry's pid may be this process's, reused.
+            mapped.retain(|m| m.space.strong_count() > 0);
+            if let Some(m) = mapped.iter().find(|m| m.space.as_ptr() == Arc::as_ptr(pt)) {
+                return Ok(m.at.raw());
             }
+            let prot = match self.region.memory {
+                Memory::Boot { .. } => Prot::Read,
+                Memory::Owned { .. } | Memory::Foreign => Prot::ReadWrite,
+            };
             let (addr, _) = pt
                 .lock()
-                .alloc_and_map(self.region.phys.phys(), self.region.size, Prot::ReadWrite, self.region.cache)
+                .alloc_and_map(self.region.phys.phys(), self.region.size, prot, self.region.cache)
                 .ok_or(SyscallError::ResourceExhausted)?;
             // Logged only for a non-default policy: this process is the one
             // paying for it. Read back the installed policy, not the request,
@@ -148,7 +200,7 @@ impl SharedMemObject {
                     pid
                 );
             }
-            mapped.push((pid, Arc::clone(pt), addr));
+            mapped.push(Mapping { pid, space: Arc::downgrade(pt), at: addr });
             Ok(addr.raw())
         };
         self.mapped_in.with_mut(map).unwrap_or(Err(SyscallError::Gone))
@@ -159,9 +211,10 @@ impl SharedMemObject {
     #[must_use = "the caller owes a shootdown before the address can be reissued"]
     pub fn unmap_from(&self, pid: Pid) -> Option<Unmapped<Option<Detached>>> {
         self.mapped_in.with_mut(|mapped| {
-            let pos = mapped.iter().position(|(p, _, _)| *p == pid)?;
-            let (_, pt, vaddr) = mapped.swap_remove(pos);
-            let detached = pt.lock().free_and_unmap(vaddr);
+            mapped.retain(|m| m.space.strong_count() > 0);
+            let pos = mapped.iter().position(|m| m.pid == pid)?;
+            let m = mapped.swap_remove(pos);
+            let detached = m.live().and_then(|pt| pt.lock().free_and_unmap(m.at));
             Some(Unmapped::new(detached))
         })?
     }
@@ -169,14 +222,15 @@ impl SharedMemObject {
 
 /// Every mapping goes, flushed here, and with the list gone no later map can
 /// add one; the pages do not, since a handle holds an `Arc` and
-/// `Region::pages` frees them only when the last one drops.
+/// [`Memory::Owned`] frees them only when the last one drops.
 impl ZeroHandles for SharedMemObject {
     fn on_zero_handles(&self) {
         let mapped = self.mapped_in.take().expect("the zero-handle hook runs once");
         if mapped.is_empty() {
             return;
         }
-        let detached: Vec<_> = mapped.iter().filter_map(|(_, pt, vaddr)| pt.lock().free_and_unmap(*vaddr)).collect();
+        let detached: Vec<_> =
+            mapped.iter().filter_map(|m| m.live().and_then(|pt| pt.lock().free_and_unmap(m.at))).collect();
         drop(Unmapped::new((mapped, detached)));
     }
 }

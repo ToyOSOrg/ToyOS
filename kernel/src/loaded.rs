@@ -1,8 +1,8 @@
 //! The partitions the loader named: the ROOT it read, the booted slot's
 //! volume, the log's, and the ESP firmware loaded it from (`Role::Boot`).
-//! This kernel reads none of them but ROOT, which is in memory (`rootfs`); it
-//! answers their GUIDs in the inventory, so the log and boot file servers find
-//! theirs and the supervisor knows the running slot, whoever drives the disk.
+//! This kernel reads none of them; it answers their GUIDs in the inventory, so
+//! the log and boot file servers find theirs and the supervisor knows the
+//! running slot, whoever drives the disk.
 
 use alloc::vec::Vec;
 

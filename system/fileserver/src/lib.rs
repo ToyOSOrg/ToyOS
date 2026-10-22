@@ -1,8 +1,9 @@
 //! A file server's decisions: the blocks memory stands in for a partition
 //! with ([`ram`]) — a partition's own are `diskserver::disk`'s — the one
 //! cache every byte of its volume passes through ([`cache`]), the volumes it
-//! can serve ([`data`] for the bcachefs DATA role, [`fat`] for FAT32's LOG and
-//! BOOT, [`absent`] for a role with no volume this boot), and the resolver that
+//! can serve ([`data`] for the bcachefs DATA role, [`root`] for the SYSTEM
+//! role's ROOT in memory, [`fat`] for FAT32's LOG and BOOT, [`absent`] for a
+//! role with no volume this boot), and the resolver that
 //! keeps every path inside the directory a connection was given ([`resolve`]),
 //! which requests a read-only one is refused ([`rights`]), what a client
 //! may take of the server and name in a request ([`bounds`]), and the open
@@ -25,5 +26,6 @@ pub mod fat;
 pub mod ram;
 pub mod resolve;
 pub mod rights;
+pub mod root;
 pub mod volume;
 pub mod writeback;

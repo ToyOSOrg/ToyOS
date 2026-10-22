@@ -21,7 +21,7 @@
 //! reading the roster of every process in the machine, and powering the machine
 //! off
 //! — and each is one bit on a handle to a `SysCap` the kernel mints exactly once,
-//! for `/system/bin/supervisor`. A handle that carries the wrong *bit* is refused with a word,
+//! for the supervisor. A handle that carries the wrong *bit* is refused with a word,
 //! because probing what an attenuated capability can still do is what
 //! attenuation is for; a handle that is **no handle at all** ends the caller.
 //!

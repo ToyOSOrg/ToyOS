@@ -7,7 +7,7 @@
 //! here; `kernel/src/quiesce.rs` marks the threads and spends the time.
 //!
 //! **Nothing is carved out.** The log's writer stops with every other thread:
-//! `/system/bin/supervisor` has it flush before it asks for the stop, and what the
+//! the supervisor has it flush before it asks for the stop, and what the
 //! kernel says after that goes to its console and its black box, never to a
 //! process it would have to keep running.
 //!

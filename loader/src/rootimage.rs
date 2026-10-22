@@ -1,6 +1,7 @@
 //! The boot disk as the loader reads it: its slot table, and a slot's ROOT
-//! read whole into memory the kernel keeps, so the kernel mounts `/system`
-//! from these bytes and needs no storage driver to boot.
+//! read whole into memory the kernel keeps and hands the supervisor, whose
+//! file server serves `/system` from these bytes, so no storage driver is
+//! needed to boot.
 //!
 //! **Which disk** is the one firmware loaded this image from and no other: a
 //! slot is a pair of partitions on one disk, and a slot table on another disk
@@ -10,21 +11,19 @@
 //! length, and never a superblock's word: the header's SHA-256 is what those
 //! bytes are held to (`crate::slot`).
 //!
-//! **The contract with the kernel**: [`RootImage`] is made only by
-//! [`Disk::read_root`], its pages are `LoaderData`, which the kernel keeps out
-//! of its allocator by the address it is handed, as it keeps the black box's
-//! page, and nothing writes them between the read and the jump. A check over
-//! the image between the read and [`RootImage::handoff`] is therefore a check
-//! over exactly what the kernel mounts.
+//! [`RootImage`] is made only by [`Disk::read_root`], and its pages are a
+//! [`Payload`], whose contract with the kernel its module states.
 
 use alloc::alloc::Layout;
 use alloc::string::String;
 use core::num::NonZeroU64;
 
+use crate::payload::Payload;
+
 use toyos_gpt::{Guid, Located, Sectors};
 use toyos_rootimage::chunk;
 use toyos_update::slots::{self, Table};
-use crate::efi::{AllocateType, BlockIo, BootServices, DevicePath, Handle, HardDrive, LoadedImage, Scoped, Status};
+use crate::efi::{BlockIo, BootServices, DevicePath, Handle, HardDrive, LoadedImage, Scoped, Status};
 
 /// The unit ROOT's filesystem is written in, and the alignment every buffer
 /// here is allocated at.
@@ -43,41 +42,13 @@ const CHUNK_BOUND: usize = 1 << 20;
 /// The line a read ROOT is reported on, with where it went and what it cost.
 pub const READ_AT: &str = "ROOT: read into memory at";
 
-/// ROOT in memory: `len` bytes at the physical address `at`, identity-mapped
-/// while boot services live.
+/// ROOT in memory, and where it was read from.
 pub struct RootImage {
-    at: u64,
-    len: u64,
+    pub pages: Payload,
     /// The partition it was read from, raw as in its GPT entry.
-    partition: [u8; 16],
+    pub partition: [u8; 16],
     /// The counter ticks the read took.
-    ticks: u64,
-}
-
-impl RootImage {
-    /// Where the kernel is told the image is, which partition it came from, and
-    /// the counter ticks reading it took.
-    pub fn handoff(&self) -> (u64, u64, [u8; 16], u64) {
-        (self.at, self.len, self.partition, self.ticks)
-    }
-
-    /// The image's bytes, for the hash its slot's header names.
-    pub fn bytes(&self) -> &[u8] {
-        // SAFETY: `at` and `len` are the pages `Disk::read_root` allocated and
-        // filled, identity-mapped while boot services live, written by nothing
-        // after that read, and released only by `free`, which takes `self`.
-        unsafe { core::slice::from_raw_parts(self.at as *const u8, self.len as usize) }
-    }
-
-    /// Give the pages back: a ROOT whose slot was refused is not the kernel's.
-    pub fn free(self, bs: &BootServices) {
-        // SAFETY: the pages are this image's own allocation, and `self` is
-        // consumed, so nothing reads them after this.
-        let freed = unsafe { bs.free_pages(self.at, (self.len as usize).div_ceil(BLOCK)) };
-        if let Err(e) = freed {
-            println!("ROOT: firmware would not take back the {} bytes at {:#x} ({e:?})", self.len, self.at);
-        }
-    }
+    pub ticks: u64,
 }
 
 /// The whole-disk block device carrying the partition firmware loaded this
@@ -199,15 +170,8 @@ impl<'a> Disk<'a> {
         if len > capacity || !len.is_multiple_of(BLOCK as u64) {
             return Err(alloc::format!("{len} bytes of ROOT do not fit whole in its {capacity}-byte partition"));
         }
-        let pages = (len / BLOCK as u64) as usize;
-        // `LoaderData`, as the black box's page is, for the reason its module
-        // header gives.
-        let at = bs
-            .allocate_pages(AllocateType::AnyPages, pages)
-            .map_err(|e| alloc::format!("firmware would not give {len} bytes for ROOT: {e:?}"))?;
-        // SAFETY: the `pages` pages at `at` were just allocated to this loader,
-        // are identity-mapped while boot services live, and nothing else holds them.
-        let into = unsafe { core::slice::from_raw_parts_mut(at as *mut u8, len as usize) };
+        let mut pages = Payload::allocate(bs, len).map_err(|why| alloc::format!("ROOT: {why}"))?;
+        let at = pages.handoff().addr;
 
         let granularity = self.granularity_lbas();
         // Chunks are whole `BLOCK`s from a page-aligned buffer, so each one
@@ -215,8 +179,8 @@ impl<'a> Disk<'a> {
         let chunk = chunk::chunk_bytes(CHUNK_BOUND, BLOCK, self.lba_bytes, granularity.unwrap_or(0));
         let began = crate::arch::counter();
         let mut device = Firmware { io: &self.io, media_id: self.media_id };
-        let read = chunk::read(&mut device, part.first_lba(), self.lba_bytes, chunk, into);
-        let image = RootImage { at, len, partition: part.unique_guid().0, ticks: crate::arch::counter().wrapping_sub(began) };
+        let read = chunk::read(&mut device, part.first_lba(), self.lba_bytes, chunk, pages.bytes_mut());
+        let image = RootImage { pages, partition: part.unique_guid().0, ticks: crate::arch::counter().wrapping_sub(began) };
         if let Err(failed) = read {
             let why = alloc::format!(
                 "the read of {} blocks at LBA {} failed: {:?}, after {} of {len} bytes read",
@@ -225,7 +189,7 @@ impl<'a> Disk<'a> {
                 failed.error,
                 failed.read
             );
-            image.free(bs);
+            image.pages.free(bs);
             return Err(why);
         }
         println!(

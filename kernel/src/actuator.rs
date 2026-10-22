@@ -218,7 +218,7 @@ static ARMED: [AtomicU64; ARM_WORDS] = [const { AtomicU64::new(0) }; ARM_WORDS];
 #[cfg(feature = "boot-actuators")]
 pub fn init(cmdline: &str) {
     let mut armed = [0u64; ARM_WORDS];
-    for token in toyos_abi::boot::actuators(cmdline).filter(|t| !crate::params::claims(t)) {
+    for token in toyos_abi::boot::tokens(cmdline).filter(|t| !crate::params::claims(t)) {
         arm(&mut armed, token);
     }
     for (name, implied) in IMPLIES {
@@ -257,7 +257,7 @@ const fn at(index: usize) -> (usize, u64) {
 /// Refuses any actuator: a kernel with none must not boot looking like one that was given none.
 #[cfg(not(feature = "boot-actuators"))]
 pub fn init(cmdline: &str) {
-    let mut named = toyos_abi::boot::actuators(cmdline).filter(|t| !crate::params::claims(t));
+    let mut named = toyos_abi::boot::tokens(cmdline).filter(|t| !crate::params::claims(t));
     assert!(
         named.next().is_none(),
         "this kernel carries no actuators and was handed the boot parameter {cmdline:?}"

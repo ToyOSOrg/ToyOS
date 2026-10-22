@@ -22,7 +22,7 @@ still panics on any refusal. What answered `WouldBlock` was never found.
 
 The same run red `log_reserve_window` on a ROOT read that missed its 2000 ms
 budget in the kernel's usb-storage driver. That half is gone: the kernel reads
-ROOT only from the image the loader read into memory (`kernel/src/rootfs.rs`)
+no ROOT, which the supervisor's file server serves from the loader's image,
 and drives no USB (`13ed7b4f4`).
 
 **Both tests are deleted**, as flaky tests are: `aedcf17dc` took
