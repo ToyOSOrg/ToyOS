@@ -7,7 +7,6 @@ use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::arch::percpu;
-use crate::scheduler::MAX_CPUS;
 
 /// One variant per interrupt source this kernel counts; order matches `arch::idt`'s vector table.
 /// Adding a device vector means adding a variant here and one `irq_took!` at its handler.
@@ -19,8 +18,6 @@ pub enum Source {
     Timer,
     /// Vector 0xFC, `irqchip::kick_cpu`'s IPI.
     Kick,
-    /// Vector 0x21, xHCI MSI-X (or MSI).
-    Xhci,
     /// Vectors 0x28-0x2C: the MSI-X of a PCI function a process drives, and
     /// the lines of an ISA function one does. One count for all five: which
     /// claim an interrupt belonged to is the claim's own record, and the census
@@ -28,8 +25,6 @@ pub enum Source {
     UserDev,
     /// Vector 0x25, the remapping unit's fault event.
     DmaFault,
-    /// Vector 0x26, HDA stream completion.
-    Hda,
     /// Vector 0xFE, the TLB shootdown IPI.
     Tlb,
     /// Vector 0x02, which `crate::hardlockup` samples a CPU with.
@@ -43,12 +38,11 @@ pub enum Source {
 }
 
 impl Source {
-    pub const COUNT: usize = 10;
+    pub const COUNT: usize = 8;
 
     /// Order `tests/toyos.rs`'s `irq_census_conservation` parses back; must match variant order.
     pub const NAMES: [&'static str; Self::COUNT] = [
-        "timer", "kick", "xhci", "userdev", "dmafault", "hda", "tlb", "nmi",
-        "spurious", "unclaimed",
+        "timer", "kick", "userdev", "dmafault", "tlb", "nmi", "spurious", "unclaimed",
     ];
 }
 
@@ -60,20 +54,25 @@ fn sum_bar_nmi(counts: &[u64; Source::COUNT]) -> u64 {
 // Counted where each is taken, by the architecture's handlers
 // (`arch::percpu::irq_took!`), into this CPU's own block.
 
-/// Each CPU's counter-array address; only the array is published, so a reader never touches the rest of the block the owning CPU writes through raw pointers.
-static BLOCKS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+/// A CPU's counter-array address; only the array is published, so a reader never touches the rest of the block the owning CPU writes through raw pointers.
+pub struct Local {
+    block: AtomicU64,
+}
+
+impl Local {
+    pub fn new() -> Self {
+        Self { block: AtomicU64::new(0) }
+    }
+}
 
 /// Publishes one CPU's counter block; called from `percpu::alloc_percpu` before that CPU runs.
 pub(crate) fn publish(cpu_id: u32, block: *const AtomicU64) {
-    let Some(slot) = BLOCKS.get(cpu_id as usize) else {
-        return;
-    };
-    slot.store(block as u64, Ordering::Release);
+    crate::cpu_local::of(cpu_id).irq_census.block.store(block as u64, Ordering::Release);
 }
 
 /// One CPU's counters, or `None` if that CPU has never been built.
 fn read(cpu: u32) -> Option<[u64; Source::COUNT]> {
-    let base = BLOCKS.get(cpu as usize)?.load(Ordering::Acquire) as *const AtomicU64;
+    let base = crate::cpu_local::get(cpu)?.irq_census.block.load(Ordering::Acquire) as *const AtomicU64;
     if base.is_null() {
         return None;
     }

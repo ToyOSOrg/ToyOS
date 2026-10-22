@@ -1,6 +1,7 @@
 use crate::mm::pmm;
 
-use kernel::pipe::{End, Holders, Released};
+use kernel::message::Window;
+use kernel::pipe::{End, Holders, Landing, Released};
 use toyos_abi::ring::Ring;
 
 use alloc::sync::Arc;
@@ -100,6 +101,11 @@ mod handle {
 
 pub const PIPE_SIZE: usize = PAGE_2M as usize;
 
+const _: () = assert!(
+    toyos_abi::syscall::MAX_WHOLE_PIPE_WRITE <= PIPE_SIZE - core::mem::size_of::<toyos_abi::ring::RingHeader>(),
+    "a whole pipe write must fit the ring",
+);
+
 /// A pipe's ring page and the cursors over it — cursors stay in kernel memory
 /// because `SYS_PIPE_MAP` maps `page` writable, so anything read back from the page is user-chosen.
 struct Backing {
@@ -123,6 +129,10 @@ struct Pipe {
     left: [Arc<Watch>; 2],
     /// Set when a write should hand the next reader transient RT priority — covers readers already runnable, which the wake-time boost misses.
     rt_boost_pending: bool,
+    /// Bytes ever written and ever read: the stream positions a connection's
+    /// batches are pinned at (`kernel::message`), which never wrap.
+    written: u64,
+    read: u64,
 }
 
 // SAFETY: `Backing::ring`'s raw pointer and its owning `PhysPage` move together in the same struct, and the `PIPES` lock is the only way to reach a `Pipe`, serializing all access to it.
@@ -138,6 +148,8 @@ impl Pipe {
             write_watch: Arc::new(Watch::new()),
             left: [Arc::new(Watch::new()), Arc::new(Watch::new())],
             rt_boost_pending: false,
+            written: 0,
+            read: 0,
         }
     }
 
@@ -193,7 +205,7 @@ pub fn init() {
 
 /// Create a new pipe. Returns owned reader + writer references.
 ///
-/// Infallible: a pipe with no traffic owns no physical memory, so nothing here can be exhausted; the ring page is allocated on first `try_write` or `map_page`.
+/// Infallible: a pipe with no traffic owns no physical memory, so nothing here can be exhausted; the ring page is allocated on first `write` or `map_page`.
 pub fn create() -> (PipeReader, PipeWriter) {
     with_pipes_mut(|pipes| {
         let id = pipes.insert_with(Pipe::new);
@@ -212,21 +224,42 @@ pub fn map_page(pipe_id: PipeId) -> Option<DirectMap> {
 }
 
 pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {
+    try_read_within(pipe_id, buf, |_, available| Window::Bytes(available))
+        .map(|read| read.expect("a read with no window stops nowhere"))
+}
+
+/// A read stopped at a batch pinned where the reader is.
+#[derive(Debug)]
+pub struct AtBatch;
+
+/// [`try_read`], taking only what `window` allows of the bytes the ring
+/// holds, given the reader's stream position: [`AtBatch`] where it says the
+/// reader is at a pinned batch.
+pub fn try_read_within(
+    pipe_id: PipeId,
+    buf: &mut UserBytesMut,
+    window: impl FnOnce(u64, usize) -> Window,
+) -> Option<Result<usize, AtBatch>> {
     let (result, boost) = with_pipes_mut(|pipes| {
         let Some(pipe) = pipes.get_mut(pipe_id) else { return (None, false) };
-        if pipe.available() > 0 {
-            let len = buf.len();
+        let limit = match window(pipe.read, pipe.available() as usize) {
+            Window::AtBatch => return (Some(Err(AtBatch)), false),
+            Window::Bytes(limit) => limit,
+        };
+        if pipe.available() > 0 && limit > 0 {
+            let len = buf.len().min(limit);
             let n = pipe
                 .backing
                 .as_mut()
                 .expect("available() > 0 implies a ring")
                 .ring
                 .read(len, |off, src| buf.write_run(off, &src));
+            pipe.read += n as u64;
             let boost = pipe.rt_boost_pending;
             pipe.rt_boost_pending = false;
-            (Some(n), boost)
-        } else if !pipe.holders.held(End::Write) {
-            (Some(0), false)
+            (Some(Ok(n)), boost)
+        } else if !pipe.holders.held(End::Write) && pipe.available() == 0 {
+            (Some(Ok(0)), false)
         } else {
             (None, false)
         }
@@ -238,27 +271,34 @@ pub fn try_read(pipe_id: PipeId, buf: &mut UserBytesMut) -> Option<usize> {
     result
 }
 
+/// The stream position the reader is at: every byte read so far.
+pub fn read_position(pipe_id: PipeId) -> Option<u64> {
+    with_pipes(|pipes| pipes.get(pipe_id).map(|p| p.read))
+}
+
 pub enum PipeWrite {
-    Wrote(usize),
+    /// This many bytes, the stream ending at `end`.
+    Wrote { n: usize, end: u64 },
+    /// Not the room its landing needs now: wait for `Landing::room`.
+    NoRoom,
     BrokenPipe,
-    /// The ring page could not be allocated; distinct from `None`, no wait makes space appear so a caller must not park on it.
+    /// The ring page could not be allocated; no wait makes space appear, so a caller must not park on it.
     NoMemory,
 }
 
-pub fn try_write(pipe_id: PipeId, buf: &UserBytes) -> Option<PipeWrite> {
+/// Write `buf` as `landing` has it land, under the one lock hold.
+pub fn write(pipe_id: PipeId, buf: &UserBytes, landing: Landing) -> PipeWrite {
     with_pipes_mut(|pipes| {
-        let pipe = pipes.get_mut(pipe_id)?;
+        let Some(pipe) = pipes.get_mut(pipe_id) else { return PipeWrite::BrokenPipe };
         if !pipe.holders.held(End::Read) {
-            return Some(PipeWrite::BrokenPipe);
+            return PipeWrite::BrokenPipe;
         }
-        let Some(backing) = pipe.back() else {
-            return Some(PipeWrite::NoMemory);
-        };
-        if backing.ring.space() > 0 {
-            Some(PipeWrite::Wrote(backing.ring.write(buf.len(), |off, mut dst| buf.read_run(off, &mut dst))))
-        } else {
-            None
-        }
+        let Some(backing) = pipe.back() else { return PipeWrite::NoMemory };
+        let Some(n) = landing.takes(backing.ring.space(), buf.len()) else { return PipeWrite::NoRoom };
+        let wrote = backing.ring.write(n, |off, mut dst| buf.read_run(off, &mut dst));
+        assert_eq!(wrote, n, "pipe: a ring with room for a write took less of it");
+        pipe.written += n as u64;
+        PipeWrite::Wrote { n, end: pipe.written }
     })
 }
 
@@ -268,10 +308,9 @@ pub fn has_data(pipe_id: PipeId) -> bool {
     })
 }
 
-pub fn has_space(pipe_id: PipeId) -> bool {
-    with_pipes(|pipes| {
-        pipes.get(pipe_id).is_some_and(|p| p.holders.writable(p.space()))
-    })
+/// Whether a write waiting for `want` bytes of room answers now.
+pub fn has_space(pipe_id: PipeId, want: usize) -> bool {
+    with_pipes(|pipes| pipes.get(pipe_id).is_some_and(|p| p.holders.writable(p.space(), want)))
 }
 
 /// Whether the end opposite `end` of this pipe has no holder left.

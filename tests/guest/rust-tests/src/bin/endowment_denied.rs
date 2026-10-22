@@ -74,6 +74,8 @@ use toyos_abi::syscall::{
     NAMESPACE_KEEP_ALL, SVC_LABEL,
 };
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_endowment_denied";
 const OPEN: &str = "echo";
@@ -87,8 +89,8 @@ const _: () = assert!(UNDEFINED_FLAG & NAMESPACE_FLAGS_KNOWN == 0);
 /// `Rights::ROSTER`, and one byte more than the largest that does not.
 const ONE_ENTRY: usize = SYSINFO_HEADER_SIZE + SYSINFO_ENTRY_SIZE;
 
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
+/// How the kernel ends a process that names a handle it does not hold.
+const HANDLE_FAULT: End = End::Fault(Fault::Handle);
 
 /// The artifacts this image carries, not the `system.toml` that produced them.
 const MANIFEST: &str = "/system/etc/system.manifest";
@@ -285,7 +287,7 @@ fn a_right_the_capability_lacks_is_a_word() {
 
     let toothless = cap.narrowed(Rights::DUP).expect("a capability carrying less");
     assert_eq!(
-        syscall::device_claim(toothless.as_handle(), DeviceRequest::Class(DeviceType::Keyboard)).err(),
+        syscall::device_claim(toothless.as_handle(), DeviceRequest::Class(DeviceType::Framebuffer)).err(),
         Some(SyscallError::PermissionDenied),
         "a capability without DEVICE minted a claim",
     );
@@ -316,17 +318,17 @@ fn a_right_the_capability_lacks_is_a_word() {
     // check: `DEVICE` and `RT` are bits nothing else carries, so this is the
     // same refusal the narrowed capability got.
     assert_eq!(
-        syscall::device_claim(RawHandle(1), DeviceRequest::Class(DeviceType::Keyboard)).err(),
+        syscall::device_claim(stdout(), DeviceRequest::Class(DeviceType::Framebuffer)).err(),
         Some(SyscallError::PermissionDenied),
         "a pipe was taken as a capability by SYS_DEVICE_CLAIM",
     );
     assert_eq!(
-        syscall::rt_enter(RawHandle(1)),
+        syscall::rt_enter(stdout()),
         Err(SyscallError::PermissionDenied),
         "a pipe was taken as a capability by SYS_RT_ENTER",
     );
     assert_eq!(
-        syscall::shutdown(RawHandle(1)),
+        syscall::shutdown(stdout()),
         SyscallError::PermissionDenied,
         "a pipe was taken as a capability by SYS_SHUTDOWN",
     );
@@ -337,7 +339,7 @@ fn a_right_the_capability_lacks_is_a_word() {
     // the assertion says only that it is not the refusal. A claim is released
     // as soon as it is taken, because a claim moves and the boot runs other
     // binaries that need this one.
-    let with_the_bit = syscall::device_claim(cap.as_handle(), DeviceRequest::Class(DeviceType::Keyboard));
+    let with_the_bit = syscall::device_claim(cap.as_handle(), DeviceRequest::Class(DeviceType::Framebuffer));
     assert_ne!(
         with_the_bit.err(),
         Some(SyscallError::PermissionDenied),
@@ -409,7 +411,7 @@ fn the_roster_is_a_right_and_the_header_is_not() {
     // arms above assert for `DEVICE`, `RT` and `POWER`.
     let mut by_a_console = [0u8; ONE_ENTRY];
     assert_eq!(
-        syscall::sysinfo(RawHandle(1), &mut by_a_console),
+        syscall::sysinfo(stdout(), &mut by_a_console),
         0,
         "a console was taken as a capability by SYS_SYSINFO",
     );
@@ -550,7 +552,7 @@ fn killed(role: &str, what_would_be_wrong: &str) {
         format!("reached {role}"),
         "{role} never reached its call",
     );
-    assert_eq!(out.status.code(), Some(HANDLE_FAULT), "{what_would_be_wrong}");
+    assert_eq!(End::from_word(out.status.into_raw()), Some(HANDLE_FAULT), "{what_would_be_wrong}");
     println!("  {role}: ended the caller");
 }
 
@@ -570,7 +572,7 @@ fn not_a_handle(role: &str) -> ! {
     std::io::stdout().flush().expect("flush the marker");
     let answered = match role {
         "claim-absent" => {
-            format!("{:?}", syscall::device_claim(HANDLE_INVALID, DeviceRequest::Class(DeviceType::Keyboard)))
+            format!("{:?}", syscall::device_claim(HANDLE_INVALID, DeviceRequest::Class(DeviceType::Framebuffer)))
         }
         "rt-absent" => format!("{:?}", syscall::rt_enter(HANDLE_INVALID)),
         // `HANDLE_INVALID` with room for one entry. The same number is the
@@ -589,4 +591,9 @@ fn not_a_handle(role: &str) -> ! {
         _ => format!("{:?}", syscall::shutdown(HANDLE_INVALID)),
     };
     panic!("{role} was answered {answered} instead of ending the caller");
+}
+
+/// The kernel handle this process's standard output is, descriptor 1's.
+fn stdout() -> RawHandle {
+    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
 }

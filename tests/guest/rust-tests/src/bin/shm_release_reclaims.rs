@@ -83,10 +83,8 @@ fn main() {
         .expect("spawn donor");
 
     let conn = acceptor.accept().expect("the donor connects");
-    conn.recv_header().expect("the donor announces its region");
-    let [sent] = conn
-        .recv_handles_exact::<1>()
-        .expect("the donor sent the region ahead of the frame");
+    let header = conn.recv_header().expect("the donor announces its region");
+    let [sent] = conn.recv_handles_exact::<1>(&header).expect("the donor sent the region with the frame");
 
     // Only now, after the donor has let go — its line says so.
     let mut out = BufReader::new(donor.stdout.take().expect("donor stdout"));
@@ -120,8 +118,7 @@ fn donor() {
     region.as_mut_slice()[..PAYLOAD.len()].copy_from_slice(PAYLOAD);
 
     let shared = region.share().expect("donor: a second handle");
-    conn.send_handles([shared]).expect("donor: send the region");
-    conn.signal(1).expect("donor: announce it");
+    conn.signal_with(1, [shared]).expect("donor: send the region");
 
     // The maker lets go while the peer has not mapped yet: no process has this
     // region mapped, and the in-flight handle is the only thing keeping it —

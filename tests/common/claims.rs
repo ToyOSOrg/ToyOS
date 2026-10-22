@@ -24,10 +24,6 @@ pub const NOT_REMAPPED: &str = "its interrupts would not be remapped on this mac
 /// The kernel's reason where the units remap and one filters no SMI.
 pub const SMI_UNFILTERED: &str = "an IOMMU unit on this machine filters no SMI";
 
-/// The kernel's line where firmware's DMAR flags leave interrupt remapping off,
-/// which `iommu-no-remap` stands in for: the premise of the refusal.
-const INTR_REMAP_CLEAR: &str = "leave INTR_REMAP clear, so firmware says this platform does not remap";
-
 fn records(log: &Serial) -> impl Iterator<Item = &str> {
     log.text().lines().filter_map(bootlog::message)
 }
@@ -125,57 +121,62 @@ pub fn reuses_its_entry(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
-/// Every domain's addresses lie outside every root-bridge window firmware
-/// declared: a bridge may route a request in one of those before the unit
-/// sees it.
-pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
-    const DECLARED: &str = "pcidev: firmware declared root bridge memory: ";
+/// The kernel's record of a declaration it refused.
+pub const REFUSED_DECLARATION: &str = "pcidev: the root bridges' memory is refused as declared";
+
+/// What the `acpi` claim's holder declared the root bridges decode.
+pub const DECLARED: &str = "pcidev: the acpi claim declared root bridge memory: ";
+
+fn hex(text: &str) -> Option<u64> {
+    u64::from_str_radix(text.trim().strip_prefix("0x")?, 16).ok()
+}
+
+/// `a..b` in hex, as the kernel's records write a span.
+fn span(text: &str) -> Option<(u64, u64)> {
+    let (from, to) = text.split_once("..")?;
+    Some((hex(from)?, hex(to)?))
+}
+
+/// The declared windows, as `(start, end)`.
+fn declared(log: &Serial) -> Result<Vec<(u64, u64)>, String> {
     let declared = records(log)
         .find_map(|m| m.strip_prefix(DECLARED))
         .ok_or_else(|| format!("no `{DECLARED}` record:\n{}", log.text()))?;
-    let range = |text: &str| -> Option<(u64, u64)> {
-        let (from, to) = text.split_once("..")?;
-        let hex = |t: &str| u64::from_str_radix(t.trim().strip_prefix("0x")?, 16).ok();
-        Some((hex(from)?, hex(to)?))
-    };
-    let windows = declared
+    declared
         .split(", ")
-        .map(|w| w.strip_prefix("mem ").and_then(range).ok_or_else(|| format!("{w:?} in {declared:?}")))
-        .collect::<Result<Vec<_>, _>>()?;
-    let mut domains = 0;
-    for record in records(log).filter(|m| m.starts_with("iommu: domain")) {
-        let Some((_, span)) = record.split_once(" addresses from ") else { continue };
-        let (floor, ceiling) = span
-            .split_once(" to ")
-            .and_then(|(from, to)| range(&format!("{from}..{to}")))
-            .ok_or_else(|| format!("an unreadable domain record: {record:?}"))?;
-        if let Some((base, end)) = windows.iter().find(|(base, end)| *end > floor && *base < ceiling) {
-            return Err(format!(
-                "{record:?} hands out addresses inside the root-bridge window {base:#x}..{end:#x}"
-            ));
-        }
-        domains += 1;
-    }
-    if domains == 0 {
-        return Err(format!("no domain was made on this boot:\n{}", log.text()));
-    }
-    eprintln!("  [claims] {domains} domain(s), none reaching a root-bridge window");
-    Ok(())
+        .map(|w| w.strip_prefix("mem ").and_then(span).ok_or_else(|| format!("{w:?} in {declared:?}")))
+        .collect()
 }
 
-/// On a machine whose units do not remap, the I219's claim is refused by that
-/// reason before anything on the function is armed, and the boot completes.
-pub fn refused_unremapped(log: &Serial) -> Result<(), String> {
-    log.must_say(INTR_REMAP_CLEAR)?;
-    let at = function(log)?;
-    log.must_not_say(&format!("[{I219}] handed over"))?;
-    refused_at(log, &at, NOT_REMAPPED)?;
-    log.must_say(bootlog::COMPLETE)?;
+/// Every address a domain mapped lies outside every root-bridge window the
+/// `acpi` claim's holder declared: a bridge may route a request in one before
+/// the unit sees it.
+pub fn clear_of_host_bridges(log: &Serial) -> Result<(), String> {
+    let windows = declared(log)?;
+    let mut mapped = 0;
+    // `iommu: domainN maps <phys>..<end> at <device address>[ again]`.
+    for record in records(log).filter(|m| m.starts_with("iommu: domain") && m.contains(" maps ")) {
+        let parsed = record.split_once(" maps ").and_then(|(_, rest)| {
+            let (phys, at) = rest.split_once(" at ")?;
+            let (from, to) = span(phys)?;
+            let at = hex(at.trim_end_matches(" again"))?;
+            Some((at, at + (to - from)))
+        });
+        let (at, end) = parsed.ok_or_else(|| format!("an unreadable mapping record: {record:?}"))?;
+        if let Some((base, top)) = windows.iter().find(|(base, top)| *top > at && *base < end) {
+            return Err(format!("{record:?} maps device addresses inside the root-bridge window {base:#x}..{top:#x}"));
+        }
+        mapped += 1;
+    }
+    if mapped == 0 {
+        return Err(format!("no domain mapped anything on this boot:\n{}", log.text()));
+    }
+    eprintln!("  [claims] {mapped} mapping(s), none reaching a root-bridge window");
     Ok(())
 }
 
 /// The claim of the function at `at` refused for `why`, before anything on
-/// it changed: no message armed, no entry written, no BAR moved.
+/// it changed: no message armed and no entry written.
 pub fn refused_at(log: &Serial, at: &str, why: &str) -> Result<(), String> {
     log.must_say(&format!("pcidev: PCI {at} NOT HANDED OVER — {why}"))?;
     log.must_not_say(&format!("PCI {at}: msi address="))?;

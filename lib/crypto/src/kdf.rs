@@ -17,7 +17,14 @@ impl<H: Digest> Hmac<H> {
             outer: self.outer.fork(),
         }
     }
-    pub fn new(key: &[u8]) -> Result<Self, Error> {
+    /// Hashers as `H::new` makes them. Keying happens in place, in the
+    /// caller's frame, because moving the keyed pair is a library copy.
+    #[inline(always)]
+    fn unkeyed() -> Self {
+        Self { inner: H::new(), outer: H::new() }
+    }
+    #[inline(always)]
+    fn key(&mut self, key: &[u8]) -> Result<(), Error> {
         let mut block = Secret([0u8; 128]);
         if key.len() > H::BLOCK_LEN {
             let mut hash = H::new();
@@ -29,39 +36,50 @@ impl<H: Digest> Hmac<H> {
         for byte in &mut block.0[..H::BLOCK_LEN] {
             *byte ^= 0x36;
         }
-        let mut inner = H::new();
-        inner.update(&block.0[..H::BLOCK_LEN])?;
+        self.inner.update(&block.0[..H::BLOCK_LEN])?;
         for byte in &mut block.0[..H::BLOCK_LEN] {
             *byte ^= 0x36 ^ 0x5c;
         }
-        let mut outer = H::new();
-        outer.update(&block.0[..H::BLOCK_LEN])?;
-        Ok(Self { inner, outer })
+        self.outer.update(&block.0[..H::BLOCK_LEN])
     }
-    pub fn update(&mut self, message: &[u8]) -> Result<(), Error> {
-        self.inner.update(message)
-    }
-    pub fn finalize(self, output: &mut [u8]) -> Result<(), Error> {
+    #[inline(always)]
+    fn finish(&mut self, output: &mut [u8]) -> Result<(), Error> {
         if output.len() != H::OUTPUT_LEN {
             return Err(Error::Length);
         }
-        let Self { inner, mut outer } = self;
         let mut digest = Secret([0u8; 64]);
-        inner.finish_into(&mut digest.0[..H::OUTPUT_LEN])?;
-        outer.update(&digest.0[..H::OUTPUT_LEN])?;
-        outer.finish_into(output)
+        self.inner.finish_into(&mut digest.0[..H::OUTPUT_LEN])?;
+        self.outer.update(&digest.0[..H::OUTPUT_LEN])?;
+        self.outer.finish_into(output)
     }
+    #[inline(always)]
+    pub fn new(key: &[u8]) -> Result<Self, Error> {
+        let mut mac = Self::unkeyed();
+        mac.key(key)?;
+        Ok(mac)
+    }
+    #[inline]
+    pub fn update(&mut self, message: &[u8]) -> Result<(), Error> {
+        self.inner.update(message)
+    }
+    #[inline(always)]
+    pub fn finalize(mut self, output: &mut [u8]) -> Result<(), Error> {
+        self.finish(output)
+    }
+    #[inline(always)]
     pub fn authenticate(key: &[u8], message: &[u8], output: &mut [u8]) -> Result<(), Error> {
-        let mut mac = Self::new(key)?;
+        let mut mac = Self::unkeyed();
+        mac.key(key)?;
         mac.update(message)?;
-        mac.finalize(output)
+        mac.finish(output)
     }
-    pub fn verify(self, tag: &[u8]) -> Result<(), Error> {
+    #[inline(always)]
+    pub fn verify(mut self, tag: &[u8]) -> Result<(), Error> {
         if tag.len() != H::OUTPUT_LEN {
             return Err(Error::Length);
         }
         let mut expected = Secret([0u8; 64]);
-        self.finalize(&mut expected.0[..H::OUTPUT_LEN])?;
+        self.finish(&mut expected.0[..H::OUTPUT_LEN])?;
         if crate::ct::equal(&expected.0[..H::OUTPUT_LEN], tag) {
             Ok(())
         } else {
@@ -77,6 +95,7 @@ pub struct Hkdf<H: Digest> {
 }
 
 impl<H: Digest> Hkdf<H> {
+    #[inline]
     pub fn extract(salt: &[u8], input_key_material: &[u8]) -> Result<Self, Error> {
         let mut prk = Secret([0u8; 64]);
         Hmac::<H>::authenticate(salt, input_key_material, &mut prk.0[..H::OUTPUT_LEN])?;
@@ -97,6 +116,7 @@ impl<H: Digest> Hkdf<H> {
             hash: core::marker::PhantomData,
         })
     }
+    #[inline]
     pub fn expand(&self, info: &[&[u8]], output: &mut [u8]) -> Result<(), Error> {
         if output.len() > 255 * H::OUTPUT_LEN {
             return Err(Error::Length);
@@ -113,13 +133,14 @@ impl<H: Digest> Hkdf<H> {
         let mut previous = Secret([0u8; 64]);
         let mut used = 0;
         for (i, chunk) in output.chunks_mut(H::OUTPUT_LEN).enumerate() {
-            let mut mac = Hmac::<H>::new(&self.prk.0[..H::OUTPUT_LEN])?;
+            let mut mac = Hmac::<H>::unkeyed();
+            mac.key(&self.prk.0[..H::OUTPUT_LEN])?;
             mac.update(&previous.0[..used])?;
             for part in info {
                 mac.update(part)?;
             }
             mac.update(&[(i + 1) as u8])?;
-            mac.finalize(&mut previous.0[..H::OUTPUT_LEN])?;
+            mac.finish(&mut previous.0[..H::OUTPUT_LEN])?;
             chunk.copy_from_slice(&previous.0[..chunk.len()]);
             used = H::OUTPUT_LEN;
         }

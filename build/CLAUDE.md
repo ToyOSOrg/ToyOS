@@ -21,3 +21,7 @@ Loads when you read a file under `build/` — the root cargo project, package na
 ## Caveats that bite every agent
 
 - **A workflow job that runs in a container adds `safe.directory` itself** — `actions/checkout` sets it into a temporary global config it discards when its step ends, so the first git command a container step runs after checkout dies on a dubiously-owned repository.
+
+## CI cache
+
+Preserve the current host-cache contract unless the task changes it explicitly: nightly host writes, CI host reads, using `build/cicache.rs` paths and driver on the same runner with matching debug settings. No combined `actions/cache`, extra commands around the designated CI driver, or environment overrides that invalidate cache provenance. Scheduling policy changes require explicit workflow work, not silently skipped required checks.

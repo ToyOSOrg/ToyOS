@@ -17,17 +17,11 @@ use super::{Held, KObjectRef, KObjectVariant, ObjectCore, ZeroHandles};
 
 /// What the class answers when its holder reads it.
 pub enum DeviceInfo {
-    // Keyboard and mouse answer with events, not a description.
-    Events,
     /// The scanout, whose handle the mint installs.
     Framebuffer(FramebufferInfo, Arc<SharedMemObject>),
     /// The function. No buffer handle beside it: a PCI claimant asks for its
     /// own memory, so this mint installs nothing.
     PciFunction(toyos_abi::pci::PciFunctionInfo),
-    Hda(toyos_abi::hda::HdaInfo, Arc<SharedMemObject>),
-    /// Which partition, how long, and both its GUIDs; the view it moves blocks
-    /// through is the claim's own (`device::Claim::partition`).
-    Partition(toyos_abi::part::PartitionInfo),
     /// The ports and lines granted, as the selector named them.
     Isa(toyos_abi::syscall::IsaId),
     /// The fixed hardware's blocks.
@@ -49,7 +43,6 @@ impl DeviceInfo {
     /// read mints again.
     fn mint(&self, table: &mut HandleTable) -> Result<Box<[u8]>, SyscallError> {
         Ok(match self {
-            Self::Events => Box::new([]),
             Self::Framebuffer(info, scanout) => {
                 let mut info = *info;
                 info.scanout = install_buffer(table, scanout)?;
@@ -58,14 +51,8 @@ impl DeviceInfo {
             // Nothing to install: every address in it is a size, and the memory
             // is what `SYS_DEVICE_DMA_ALLOC` answers later.
             Self::PciFunction(info) => bytes(info).into(),
-            Self::Partition(info) => bytes(info).into(),
             Self::Isa(set) => set.wire().iter().flat_map(|word| word.to_ne_bytes()).collect(),
             Self::Acpi(info) => bytes(info).into(),
-            Self::Hda(info, pcm) => {
-                let mut info = *info;
-                info.pcm = install_buffer(table, pcm)?;
-                bytes(&info).into()
-            }
         })
     }
 }
@@ -129,28 +116,6 @@ impl DeviceClaim {
         if let Some(entry) = entry {
             kernel::sched::watch::Ring::fire(&entry, kernel::sched::watch::Fire::Gone);
         }
-    }
-
-    /// The view a partition claim transfers through: `None` for a claim on
-    /// anything else, and once the last handle has let the partition go.
-    ///
-    /// A clone, and a clone holds the partition for as long as it lives — so
-    /// one is kept across a device operation and never across a wait, where a
-    /// killed thread's stack could strand it.
-    pub fn partition_view(&self) -> Option<crate::block::Partition> {
-        self.reference.with(|claim| claim.partition().cloned()).flatten()
-    }
-
-    /// The block device and unique GUID of the partition a partition claim is
-    /// on; `None` for a claim on anything else, and once the last handle has
-    /// let the partition go.
-    pub fn partition_on(&self) -> Option<(crate::block::DeviceId, [u8; 16])> {
-        let unique = match &self.described.lock().info {
-            DeviceInfo::Partition(info) => info.unique_guid,
-            _ => return None,
-        };
-        let device = self.reference.with(|claim| claim.partition().map(|view| view.device_id())).flatten()?;
-        Some((device, unique))
     }
 
     pub fn info_read(&self) -> bool {

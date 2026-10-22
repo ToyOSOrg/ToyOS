@@ -6,15 +6,18 @@ opened: 2026-10-04
 
 # The ACPI server's holder drives the embedded controller unfiltered
 
-The `acpi` claim (`kernel/src/arch/x86_64/acpi_mode.rs`) opens the embedded
-controller's command and data ports to `/system/bin/acpiserver` through the
-TSS I/O permission bitmap, which grants a port or refuses it and cannot see
-the value written. Stage 1 sends the controller nothing but queries, but the
-same two ports take `WR_EC` (ACPI 6.5 §12.3), which writes any byte of the
-controller's space: on a laptop that is where fan control, charge thresholds
-and the controller's own thermal limits live. So a bug in that one program can
-reach whatever the machine's controller lets its host write, which the kernel
-never sees.
+The holder of the `acpi` claim, `/system/bin/acpiserver`, reaches the
+embedded controller's command and data ports through the kernel's mediated
+access, one byte each (`access`, `kernel/src/arch/x86_64/acpi_mode.rs`;
+`system/acpiserver/src/host.rs`). No row names those ports, and the fence
+(`toyos_userbound::firmware`) refuses a port only for whose it is, never for
+the value written. The server sends queries and, for the AML's accesses to
+the controller's space, `RD_EC` and `WR_EC` (`system/acpiserver/src/ec.rs`).
+`WR_EC` (ACPI 6.5 §12.3) writes any byte of the controller's space: on a
+laptop that is where fan control, charge thresholds and the controller's own
+thermal limits live. So a bug in that one program, or in the AML it runs, can
+reach whatever the machine's controller lets its host write, and the kernel
+makes the write without judging it.
 
 The command port also takes any byte, and §12.3 defines five commands
 (0x80–0x84); every other is the controller's maker's. Whether one of them puts

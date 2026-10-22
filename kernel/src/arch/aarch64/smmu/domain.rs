@@ -21,7 +21,7 @@ use toyos_smmu::Asid;
 
 use super::{window, Live, UNIT};
 use crate::iommu::domains;
-use crate::iommu::{DomainId, IommuError, Iova, StreamId};
+use crate::iommu::{DomainId, IommuError, Iova, Limit, StreamId};
 use crate::log;
 use crate::mm::PAGE_SIZE;
 
@@ -100,14 +100,15 @@ pub fn unclaimable(function: StreamId) -> Option<&'static str> {
     (!routed).then_some("the IORT routes it through no unit this kernel programmed")
 }
 
-/// A new domain, with `room` bytes of it handed out first: refused, with no id
-/// spent, where it would have less than that.
-pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
+/// A new domain, with `room` bytes of it handed out first, clear of the root
+/// bridges' declared `windows`, `None` where none are held: refused, with no
+/// id spent, where it would have less than that.
+pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(DomainId, Iova), IommuError> {
     let doorbell = super::super::irqchip::its::doorbell_page();
     let mut held = UNIT.lock();
     let live = held.as_mut().ok_or(IommuError::NoUnit)?;
     let ceiling = if live.unit.asid(0x100).is_some() { 1 << 16 } else { 1 << 8 };
-    let next = live.domains.prepare(INPUT_BITS as u8, ceiling, room)?;
+    let next = live.domains.prepare(INPUT_BITS as u8, ceiling, room, windows)?;
     let asid = live.unit.asid(next.id).expect("SMMU: an id below the unit's ASIDs");
     let root = Phys::new(live.memory.alloc(PAGE_SIZE)).expect("SMMU: a table below the unit's output size");
     let context = Phys::new(live.memory.alloc(64)).expect("SMMU: a descriptor below the unit's output size");
@@ -119,7 +120,10 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     }
     descriptor.write_u64(0, words[0]);
     if let Some(page) = doorbell {
-        assert!(page < next.addresses.floor(), "SMMU: the doorbell at {page:#x} is inside the addresses a domain hands out");
+        assert!(
+            !next.addresses.allowed().iter().any(|&(start, end)| start <= page && page < end),
+            "SMMU: the doorbell at {page:#x} is inside the addresses a domain hands out"
+        );
         live.put(root, page, Leaf::Doorbell(Phys::new(page).expect("SMMU: a 4 KiB page below 2^48")));
     }
     let what = alloc::format!(
@@ -135,10 +139,10 @@ pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
     Ok(live.domains.add(next, Space { asid, root, context }, what))
 }
 
-pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
+pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {
     let mut held = UNIT.lock();
     let live = held.as_mut().expect("a domain exists only on an armed unit");
-    let (space, at) = live.domains.map(id, phys, bytes)?;
+    let (space, at) = live.domains.map(id, phys, bytes, limit)?;
     for (at, phys) in domains::leaves(at, phys, bytes) {
         live.put(space.root, at, block(phys));
     }

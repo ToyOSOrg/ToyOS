@@ -91,117 +91,12 @@ pub struct Pci {
     pub driven: Driven,
 }
 
-/// What a USB device was bound as.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum UsbFunction {
-    Keyboard,
-    /// A mouse or a tablet: the kernel dispatches the two identically.
-    Pointer,
-    Storage,
-}
-
-/// The speed a USB port trained at: PORTSC's Port Speed under the default
-/// Protocol Speed IDs (xHCI 1.2 §7.2.2.1.1, Table 7-13), which are the only
-/// ones a device this kernel binds can have.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum UsbSpeed {
-    Full,
-    Low,
-    High,
-    /// SuperSpeed, Gen 1 on one lane.
-    Super,
-    /// SuperSpeedPlus, Gen 2 on one lane.
-    SuperPlusGen2x1,
-    /// SuperSpeedPlus, Gen 1 on two lanes.
-    SuperPlusGen1x2,
-    /// SuperSpeedPlus, Gen 2 on two lanes.
-    SuperPlusGen2x2,
-}
-
-impl UsbSpeed {
-    /// The Port Speed value, or `None` for one no default ID names.
-    pub fn from_psiv(psiv: u8) -> Option<Self> {
-        Some(match psiv {
-            1 => Self::Full,
-            2 => Self::Low,
-            3 => Self::High,
-            4 => Self::Super,
-            5 => Self::SuperPlusGen2x1,
-            6 => Self::SuperPlusGen1x2,
-            7 => Self::SuperPlusGen2x2,
-            _ => return None,
-        })
-    }
-
-    pub fn psiv(self) -> u8 {
-        match self {
-            Self::Full => 1,
-            Self::Low => 2,
-            Self::High => 3,
-            Self::Super => 4,
-            Self::SuperPlusGen2x1 => 5,
-            Self::SuperPlusGen1x2 => 6,
-            Self::SuperPlusGen2x2 => 7,
-        }
-    }
-}
-
-/// One USB device a kernel driver bound.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Usb {
-    /// The xHCI controller it hangs off.
-    pub controller: PciAddr,
-    /// The root-hub port, from 1.
-    pub port: u8,
-    pub speed: UsbSpeed,
-    pub vendor: u16,
-    pub product: u16,
-    pub function: UsbFunction,
-}
-
-/// One block device.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Block {
-    pub device: u32,
-    /// In [`crate::part::BLOCK_BYTES`] blocks.
-    pub blocks: u64,
-}
-
-/// Who holds a partition's blocks, as the block layer records every hold.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum PartState {
-    /// No hold is exactly this partition's span.
-    Free,
-    /// This kernel holds it: a filesystem it mounted, or a probe of its own.
-    Kernel,
-    /// A process's partition claim holds it; a [`Claim`] record says whose,
-    /// when the handle was in a table.
-    Claimed,
-}
-
-/// One GPT entry, as its table stated it when the disk was probed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Partition {
-    pub device: u32,
-    /// Its entry's index in the table.
-    pub index: u32,
-    pub type_guid: [u8; 16],
-    pub unique_guid: [u8; 16],
-    /// In the device's own logical blocks, as GPT stores them.
-    pub first_lba: u64,
-    pub lbas: u64,
-    pub state: PartState,
-}
-
 /// What a claim is on.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Claimed {
     /// A device class.
     Class(DeviceType),
     Pci(PciAddr),
-    /// A partition, by the block device it is on and its unique GUID: a
-    /// GUID a table carries twice is refused a claim, so the pair names one.
-    Partition { device: u32, unique_guid: [u8; 16] },
 }
 
 /// A claim, and the process holding its handle.
@@ -216,10 +111,12 @@ pub struct Claim {
 pub enum Role {
     /// The ROOT this boot runs, read whole by the loader.
     Root,
-    /// The running slot's volume: the kernel and its parameter.
+    /// The partition firmware loaded the loader from.
     Boot,
     /// The log partition.
     Log,
+    /// The booted slot's volume: the kernel and its parameter.
+    Slot,
 }
 
 /// A partition the loader named, by its unique GUID: what a file server for
@@ -234,9 +131,6 @@ pub struct Loaded {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Record {
     Pci(Pci),
-    Usb(Usb),
-    Block(Block),
-    Partition(Partition),
     Claim(Claim),
     Loaded(Loaded),
 }
@@ -263,9 +157,6 @@ impl core::fmt::Display for Undecodable {
 }
 
 const KIND_PCI: u8 = 1;
-const KIND_USB: u8 = 2;
-const KIND_BLOCK: u8 = 3;
-const KIND_PARTITION: u8 = 4;
 const KIND_CLAIM: u8 = 5;
 const KIND_LOADED: u8 = 6;
 
@@ -352,44 +243,6 @@ impl Record {
                 );
                 o.u32(16, p.arrival.0);
             }
-            Self::Usb(u) => {
-                o.u8(0, KIND_USB);
-                o.addr(1, u.controller);
-                o.u8(6, u.port);
-                o.u8(7, u.speed.psiv());
-                o.u16(8, u.vendor);
-                o.u16(10, u.product);
-                o.u8(
-                    12,
-                    match u.function {
-                        UsbFunction::Keyboard => 0,
-                        UsbFunction::Pointer => 1,
-                        UsbFunction::Storage => 2,
-                    },
-                );
-            }
-            Self::Block(b) => {
-                o.u8(0, KIND_BLOCK);
-                o.u32(4, b.device);
-                o.u64(8, b.blocks);
-            }
-            Self::Partition(p) => {
-                o.u8(0, KIND_PARTITION);
-                o.u8(
-                    1,
-                    match p.state {
-                        PartState::Free => 0,
-                        PartState::Kernel => 1,
-                        PartState::Claimed => 2,
-                    },
-                );
-                o.u32(4, p.device);
-                o.u64(8, p.first_lba);
-                o.u64(16, p.lbas);
-                o.bytes(24, &p.type_guid);
-                o.bytes(40, &p.unique_guid);
-                o.u32(56, p.index);
-            }
             Self::Claim(c) => {
                 o.u8(0, KIND_CLAIM);
                 match c.on {
@@ -400,11 +253,6 @@ impl Record {
                     Claimed::Pci(at) => {
                         o.u8(1, 1);
                         o.addr(4, at);
-                    }
-                    Claimed::Partition { device, unique_guid } => {
-                        o.u8(1, 2);
-                        o.u32(4, device);
-                        o.bytes(8, &unique_guid);
                     }
                 }
                 holder_out(&mut o, 28, &c.holder);
@@ -417,6 +265,7 @@ impl Record {
                         Role::Root => 0,
                         Role::Boot => 1,
                         Role::Log => 2,
+                        Role::Slot => 3,
                     },
                 );
                 o.bytes(8, &l.unique_guid);
@@ -443,36 +292,8 @@ impl Record {
                     _ => None,
                 })?,
             }),
-            KIND_USB => Self::Usb(Usb {
-                controller: r.addr(1),
-                port: r.u8(6),
-                speed: r.variant(7, UsbSpeed::from_psiv)?,
-                vendor: r.u16(8),
-                product: r.u16(10),
-                function: r.variant(12, |b| match b {
-                    0 => Some(UsbFunction::Keyboard),
-                    1 => Some(UsbFunction::Pointer),
-                    2 => Some(UsbFunction::Storage),
-                    _ => None,
-                })?,
-            }),
-            KIND_BLOCK => Self::Block(Block { device: r.u32(4), blocks: r.u64(8) }),
-            KIND_PARTITION => Self::Partition(Partition {
-                state: r.variant(1, |b| match b {
-                    0 => Some(PartState::Free),
-                    1 => Some(PartState::Kernel),
-                    2 => Some(PartState::Claimed),
-                    _ => None,
-                })?,
-                device: r.u32(4),
-                first_lba: r.u64(8),
-                lbas: r.u64(16),
-                type_guid: r.array(24),
-                unique_guid: r.array(40),
-                index: r.u32(56),
-            }),
             KIND_CLAIM => Self::Claim(Claim {
-                on: match r.variant(1, |b| (b <= 2).then_some(b))? {
+                on: match r.variant(1, |b| (b <= 1).then_some(b))? {
                     0 => {
                         let raw = r.u64(4);
                         Claimed::Class(
@@ -480,8 +301,7 @@ impl Record {
                                 .ok_or(Undecodable::Variant { at: 4, value: raw })?,
                         )
                     }
-                    1 => Claimed::Pci(r.addr(4)),
-                    _ => Claimed::Partition { device: r.u32(4), unique_guid: r.array(8) },
+                    _ => Claimed::Pci(r.addr(4)),
                 },
                 holder: holder_in(&r, 28),
             }),
@@ -490,6 +310,7 @@ impl Record {
                     0 => Some(Role::Root),
                     1 => Some(Role::Boot),
                     2 => Some(Role::Log),
+                    3 => Some(Role::Slot),
                     _ => None,
                 })?,
                 unique_guid: r.array(8),
@@ -509,7 +330,7 @@ mod tests {
         n
     }
 
-    fn every_kind() -> [Record; 8] {
+    fn every_kind() -> [Record; 4] {
         let at = PciAddr { segment: 0x1234, bus: 0, dev: 0x1f, func: 6 };
         let holder = Holder { pid: 7, name: name("netstack") };
         [
@@ -523,30 +344,8 @@ mod tests {
                 prog_if: 0,
                 driven: Driven::Claimed,
             }),
-            Record::Usb(Usb {
-                controller: PciAddr { segment: 0, bus: 0, dev: 4, func: 0 },
-                port: 3,
-                speed: UsbSpeed::SuperPlusGen2x2,
-                vendor: 0x0627,
-                product: 1,
-                function: UsbFunction::Pointer,
-            }),
-            Record::Block(Block { device: 1, blocks: u64::MAX }),
-            Record::Partition(Partition {
-                device: 1,
-                index: 128,
-                type_guid: [0xab; 16],
-                unique_guid: [0xcd; 16],
-                first_lba: 2048,
-                lbas: 4096,
-                state: PartState::Kernel,
-            }),
             Record::Claim(Claim { on: Claimed::Pci(at), holder }),
-            Record::Claim(Claim { on: Claimed::Class(DeviceType::HdaAudio), holder }),
-            Record::Claim(Claim {
-                on: Claimed::Partition { device: 3, unique_guid: [0x11; 16] },
-                holder,
-            }),
+            Record::Claim(Claim { on: Claimed::Class(DeviceType::Framebuffer), holder }),
             Record::Loaded(Loaded { role: Role::Log, unique_guid: [0x22; 16] }),
         ]
     }
@@ -557,11 +356,6 @@ mod tests {
             assert_eq!(Record::decode(&record.encode()), Ok(record));
         }
         assert_eq!(Holder { pid: 1, name: name("soundserver") }.name(), Some("soundserver"));
-        for psiv in 0..=u8::MAX {
-            if let Some(speed) = UsbSpeed::from_psiv(psiv) {
-                assert_eq!(speed.psiv(), psiv);
-            }
-        }
     }
 
     #[test]
@@ -570,34 +364,14 @@ mod tests {
         let mut raw = RawRecord::EMPTY;
         raw.0[0] = 99;
         assert_eq!(Record::decode(&raw), Err(Undecodable::Kind(99)));
-        for (kind, at) in [(KIND_PCI, 13), (KIND_USB, 12), (KIND_PARTITION, 1), (KIND_CLAIM, 1)] {
+        for (kind, at) in [(KIND_PCI, 13), (KIND_CLAIM, 1), (KIND_LOADED, 1)] {
             let mut raw = RawRecord::EMPTY;
             raw.0[0] = kind;
             raw.0[at] = 9;
-            if kind == KIND_USB {
-                raw.0[7] = 1;
-            }
             assert_eq!(Record::decode(&raw), Err(Undecodable::Variant { at, value: 9 }), "{kind}");
         }
-        // A speed no default Protocol Speed ID names.
-        let mut raw = Record::Usb(Usb {
-            controller: PciAddr { segment: 0, bus: 0, dev: 4, func: 0 },
-            port: 1,
-            speed: UsbSpeed::Full,
-            vendor: 0,
-            product: 0,
-            function: UsbFunction::Keyboard,
-        })
-        .encode();
-        for psiv in [0, 8, 15] {
-            raw.0[7] = psiv;
-            assert_eq!(
-                Record::decode(&raw),
-                Err(Undecodable::Variant { at: 7, value: u64::from(psiv) })
-            );
-        }
         let mut raw = Record::Claim(Claim {
-            on: Claimed::Class(DeviceType::Keyboard),
+            on: Claimed::Class(DeviceType::Framebuffer),
             holder: Holder { pid: 1, name: name("x") },
         })
         .encode();

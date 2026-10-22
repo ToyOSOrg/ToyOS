@@ -86,12 +86,6 @@ pub const MAX_CLIENTS: usize = 4;
 /// names one connection for as long as its holder does not itself point the
 /// slot somewhere else — and it designates nothing anywhere else, because a
 /// handle is a slot in one table.
-///
-/// That qualification is `SYS_HANDLE_DUP_AT`, which replaces a live slot
-/// *without* advancing its generation because the bare number is what a POSIX
-/// `dup2` caller goes on using. A surface owner that `dup2`'d over one of its
-/// own client connections would hand two clients one name; none does, and the
-/// number is a log line rather than an authority.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ClientId(RawHandle);
 

@@ -16,6 +16,14 @@
 //! spin, and reading the functions below it. What a slot is owed is
 //! `toyos_pci::hotplug::next`'s.
 //!
+//! **An arrived function's BARs are assigned once, before it is listed**: each
+//! one the device leaves unassigned is given the lowest address inside its
+//! port's windows that no other function decodes in
+//! (`toyos_pci::hotplug::assign`) and that lies inside the declared root
+//! bridges' memory, and is kept only where the register then reads it back.
+//! Nothing reads through the BAR to prove it; the port's windows are
+//! firmware's, inside its root's.
+//!
 //! **Removal is the button's or the card's**: a press on a powered slot whose
 //! functions are listed removes them at once, and the slot is powered off when
 //! the last claim on them is released. §6.7.1.5's five seconds in which a
@@ -25,30 +33,21 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+use toyos_abi::acpi::{RootBridgeWindow, CAPABILITY_STRUCTURE, NATIVE_HOT_PLUG};
 use toyos_abi::inventory::Arrival;
-use toyos_pci::bridge::Bridge;
 use toyos_pci::hotplug::{self, Next, Seen};
+use toyos_pci::{aperture, bar};
 
-use super::{function, functions, record, requester, Armed, Function, Refusal, MACHINE};
+use super::{function, functions, record, requester, Armed, Decoded, Function, Refusal, RootBridge, MACHINE};
 use crate::drivers::pci::{arm_claimed_msi, arm_claimed_msix, NoCapability, NoEntry, PciDevice, MSIX_ENTRY};
 use crate::sync::{Lock, Masked};
 
-/// PCI Firmware Specification 3.3 §4.5.1, the `_OSC` Control field of a PCI
-/// host bridge: native hot-plug control, and control of the PCI Express
-/// capability structure, in which Slot Control lives.
-pub const NATIVE_HOT_PLUG: u32 = 1 << 0;
-pub const CAPABILITY_STRUCTURE: u32 = 1 << 4;
-
-/// A PCI host bridge as its declaration describes it.
-pub struct HostBridge {
-    pub segment: u16,
-    pub buses: core::ops::RangeInclusive<u8>,
-    /// What its `_OSC` granted: `None` where it has none.
-    pub granted: Option<u32>,
-}
-
 /// Every slot armed, for the reader to walk.
 static SLOTS: Lock<Vec<&'static HotPlug>> = Lock::new(Vec::new());
+
+/// Held across a [`refresh`], so two readers of the set never enumerate one
+/// arrival twice.
+static REFRESHING: Lock<()> = Lock::new(());
 
 /// One armed slot: its port's registers, and what its handler and the device
 /// set's reader share.
@@ -75,40 +74,28 @@ struct Command {
     since: Option<u64>,
 }
 
-/// Arm the slot of every port below a host bridge whose `_OSC` granted both
-/// controls, and say for every port why its slot is or is not armed.
-pub fn arm(bridges: &[HostBridge]) {
-    let ports: Vec<(usize, u64, hotplug::Slot, Bridge, u16)> = {
+/// Arm the slot of every port below a root bridge whose `_OSC` commit was
+/// granted both controls, and say for every port why its slot is or is not
+/// armed. Once the declaration is held, on its declarer's thread.
+pub(super) fn arm(roots: &[RootBridge]) {
+    let (ports, segment): (Vec<(usize, u64, hotplug::Slot, (u8, u8))>, u16) = {
         let machine = MACHINE.lock();
-        machine.ports.iter().filter(|port| !port.armed).map(|p| (p.number, p.express, p.slot, p.bridge, machine.segment)).collect()
+        (machine.ports.iter().filter(|port| !port.armed).map(|p| (p.number, p.express, p.slot, p.buses)).collect(), machine.segment)
     };
-    log!("pcidev: {} host bridge(s) declared, {} hot-plug slot(s) not yet armed", bridges.len(), ports.len());
-    for bridge in bridges {
-        match bridge.granted {
-            Some(granted) => log!(
-                "pcidev: host bridge on segment {:#06x} buses {:#04x}..={:#04x}: its _OSC granted {granted:#x}",
-                bridge.segment,
-                bridge.buses.start(),
-                bridge.buses.end()
-            ),
-            None => log!(
-                "pcidev: host bridge on segment {:#06x} buses {:#04x}..={:#04x}: no _OSC, so no native hot-plug below it",
-                bridge.segment,
-                bridge.buses.start(),
-                bridge.buses.end()
-            ),
-        }
+    if ports.is_empty() {
+        return;
     }
-    for (number, express, slot, bridge, segment) in ports {
+    for (number, express, slot, buses) in ports {
         let port = function(number);
-        let declared = bridges.iter().find(|b| b.segment == segment && b.buses.contains(&bridge.bus));
-        let granted = match declared.map(|b| b.granted) {
+        let bus = port.pci.bus;
+        let declared = roots.iter().find(|root| root.segment == segment && (root.buses.0..=root.buses.1).contains(&bus));
+        let granted = match declared.map(|root| root.committed) {
             None => {
-                log!("pcidev: {port}'s hot-plug slot is not armed: no host bridge declared covers bus {:#04x}", bridge.bus);
+                log!("pcidev: {port}'s hot-plug slot is not armed: no root bridge declared covers bus {bus:#04x}");
                 continue;
             }
             Some(None) => {
-                log!("pcidev: {port}'s hot-plug slot is not armed: its host bridge has no _OSC to grant native hot-plug");
+                log!("pcidev: {port}'s hot-plug slot is not armed: its root bridge's _OSC committed nothing");
                 continue;
             }
             Some(Some(granted)) => granted,
@@ -121,7 +108,7 @@ pub fn arm(bridges: &[HostBridge]) {
             );
             continue;
         }
-        match arm_one(number, port, express, slot, bridge) {
+        match arm_one(number, port, express, slot, buses) {
             Ok(armed) => {
                 MACHINE.lock().ports.iter_mut().filter(|p| p.number == number).for_each(|p| p.armed = true);
                 SLOTS.lock().push(armed);
@@ -136,7 +123,7 @@ pub fn arm(bridges: &[HostBridge]) {
 
 /// Take `port` for this kernel and arm its slot's interrupt, on the message
 /// a claim's would be: remapped for the port alone.
-fn arm_one(number: usize, port: &'static Function, express: u64, slot: hotplug::Slot, bridge: Bridge) -> Result<&'static HotPlug, String> {
+fn arm_one(number: usize, port: &'static Function, express: u64, slot: hotplug::Slot, buses: (u8, u8)) -> Result<&'static HotPlug, String> {
     if usize::from(slot.message) != usize::from(MSIX_ENTRY) {
         return Err("its slot signals on a message other than the one entry this kernel arms".into());
     }
@@ -164,8 +151,8 @@ fn arm_one(number: usize, port: &'static Function, express: u64, slot: hotplug::
         pci,
         express,
         slot,
-        secondary: bridge.secondary,
-        subordinate: bridge.subordinate,
+        secondary: buses.0,
+        subordinate: buses.1,
         _armed: armed,
         removing: AtomicBool::new(false),
         link_since: AtomicU64::new(0),
@@ -192,6 +179,7 @@ pub(super) fn above(function: &Function) -> Option<&'static HotPlug> {
 /// change with no interrupt to say so.
 pub(super) fn refresh() -> Option<u64> {
     let slots: Vec<&'static HotPlug> = SLOTS.lock().clone();
+    let _refreshing = REFRESHING.lock();
     slots.iter().filter_map(|slot| slot.refresh()).min()
 }
 
@@ -365,20 +353,121 @@ impl HotPlug {
             if pci.vendor_id() == crate::drivers::pci::INVALID_VENDOR {
                 continue;
             }
-            if pci.bridge().is_some() {
+            if pci.header_type() != 0 {
                 log!(
                     "pcidev: PCI {bus:02x}:00.{func} is a bridge, which needs bus numbers below it that \
                      this kernel does not assign, so nothing behind it is read"
                 );
                 continue;
             }
-            arrive(pci);
+            self.arrive(pci);
         }
+    }
+
+    /// `pci` in the device set as a new arrival, its BARs assigned first.
+    fn arrive(&self, pci: PciDevice) {
+        let (declared, taken): (Vec<RootBridgeWindow>, Vec<(u64, u64)>) = {
+            let machine = MACHINE.lock();
+            let declared = match machine.apertures.answer() {
+                Some(Ok(declaration)) => declaration.windows().to_vec(),
+                _ => unreachable!("pcidev: a slot is armed only once the root bridges' memory is held"),
+            };
+            let who = requester(&pci);
+            let taken = machine.decoded.iter().filter(|bar| bar.who != who).map(|bar| {
+                let (_, start, end) = bar.extent();
+                (start, end)
+            });
+            (declared, taken.collect())
+        };
+        let bars = self.assign(&pci, &declared, taken);
+        arrive(pci, bars);
+    }
+
+    /// Size every memory BAR of `pci`, which nothing drives yet, and give
+    /// each one it leaves unassigned an address ([`hotplug::assign`]) clear of
+    /// `taken`: what it decodes then, for [`super::Machine::decoded`].
+    fn assign(&self, pci: &PciDevice, declared: &[RootBridgeWindow], mut taken: Vec<(u64, u64)>) -> Vec<Decoded> {
+        let windows = hotplug::Windows::read(
+            self.pci.read_config_u32(hotplug::MEMORY_WINDOW),
+            self.pci.read_config_u32(hotplug::PREFETCHABLE_WINDOW),
+            self.pci.read_config_u32(hotplug::PREFETCHABLE_BASE_UPPER),
+            self.pci.read_config_u32(hotplug::PREFETCHABLE_LIMIT_UPPER),
+        );
+        let who = requester(pci);
+        let at = |index: u8| (pci.bus, pci.dev, pci.func, index);
+        let mut decoded = Vec::new();
+        pci.set_memory_decode(false);
+        let mut index = 0u8;
+        while index < pci.bar_slots() {
+            let offset = bar::BASE + u64::from(index) * 4;
+            let low = pci.read_config_u32(offset);
+            let Ok(kind) = bar::kind(index, low) else {
+                index += 1;
+                continue;
+            };
+            let step = if kind.wide { 2 } else { 1 };
+            let size = match pci.bar_size(index) {
+                Ok(size) => size,
+                Err(bar::BadSize::Unimplemented) => {
+                    index += step;
+                    continue;
+                }
+                Err(why) => {
+                    let (b, d, f, i) = at(index);
+                    log!("pcidev: PCI {b:02x}:{d:02x}.{f} BAR {i} answers no size it can be placed by ({why:?}), so it is given no address");
+                    index += step;
+                    continue;
+                }
+            };
+            let base = match pci.memory_bar(index) {
+                Ok(memory) => Some(memory.address()),
+                Err(bar::Unusable::Unassigned) => self.place(pci, index, low, kind, size, windows, declared, &taken),
+                Err(_) => None,
+            };
+            if let Some(base) = base {
+                decoded.push(Decoded { who, index, base, bytes: Ok(size) });
+                taken.push((base, base.saturating_add(size)));
+            }
+            index += step;
+        }
+        decoded
+    }
+
+    /// One address for BAR `index`, which its device left unassigned, inside
+    /// the port's `windows` and the `declared` memory and clear of `taken`;
+    /// written, and kept where the register reads it back.
+    #[allow(clippy::too_many_arguments)]
+    fn place(&self, pci: &PciDevice, index: u8, low: u32, kind: bar::Kind, size: u64, windows: hotplug::Windows, declared: &[RootBridgeWindow], taken: &[(u64, u64)]) -> Option<u64> {
+        let (b, d, f) = (pci.bus, pci.dev, pci.func);
+        let Some(at) = hotplug::assign(kind, size, windows, taken) else {
+            log!("pcidev: PCI {b:02x}:{d:02x}.{f} BAR {index} ({size:#x} bytes) fits in no window of its port {windows:x?}, so it is given no address");
+            return None;
+        };
+        if !matches!(aperture::decode(declared, at, at + size), aperture::Decode::Inside(_)) {
+            log!("pcidev: PCI {b:02x}:{d:02x}.{f} BAR {index}'s place at {at:#x} in its port's window is inside no declared root bridge window, so it is given no address");
+            return None;
+        }
+        let placed = bar::placement(index, low, at).ok()?;
+        let offset = bar::BASE + u64::from(index) * 4;
+        pci.write_config_u32(offset, placed.low);
+        if let Some(high) = placed.high {
+            pci.write_config_u32(offset + 4, high);
+        }
+        if !matches!(pci.memory_bar(index), Ok(memory) if memory.address() == at) {
+            pci.write_config_u32(offset, low);
+            if placed.high.is_some() {
+                pci.write_config_u32(offset + 4, 0);
+            }
+            log!("pcidev: PCI {b:02x}:{d:02x}.{f} BAR {index} did not take {at:#x}, so it is given no address");
+            return None;
+        }
+        log!("pcidev: PCI {b:02x}:{d:02x}.{f} BAR {index} ({size:#x} bytes) assigned {at:#x}, inside its port's window");
+        Some(at)
     }
 }
 
-/// `pci` in the device set as a new arrival.
-fn arrive(pci: PciDevice) {
+/// `pci` in the device set as a new arrival, decoding `bars`.
+fn arrive(pci: PciDevice, bars: Vec<Decoded>) {
     let mut machine = MACHINE.lock();
     let arrival = Arrival(machine.next_arrival);
     let identity = pci.identity(arrival, super::addr_of(machine.segment, requester(&pci)));
@@ -402,6 +491,7 @@ fn arrive(pci: PciDevice) {
         },
     };
     machine.next_arrival += 1;
+    machine.decoded.extend(bars);
     function(number).arrival.store(arrival.0, Ordering::Release);
     drop(machine);
     log!(

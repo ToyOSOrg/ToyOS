@@ -4,9 +4,9 @@
 use std::collections::BTreeMap;
 use std::vec::Vec;
 
-use toyos_untrusted::Refused;
 
 use crate::pci::{
+    offered_features,
     status, Layout, Live, Offer, Refusal, Setup, Source, VendorCap, WalkRefusal,
     VIRTIO_F_ACCESS_PLATFORM, VIRTIO_F_VERSION_1,
 };
@@ -731,7 +731,7 @@ fn a_head_past_the_table_is_refused() {
         ring.use_chain(id, 0);
         assert_eq!(
             queue.poll_used(),
-            Err(UsedRefusal::Head(Refused::PastTable { value: id as u64, len: SIZE as u64 }))
+            Err(UsedRefusal::Head { id, size: SIZE })
         );
     }
     assert_eq!(queue.poll_used(), Ok(None));
@@ -783,10 +783,7 @@ fn more_bytes_than_the_chain_may_be_written_is_refused() {
         ring.use_chain(0, len);
         assert_eq!(
             queue.poll_used(),
-            Err(UsedRefusal::Written {
-                head: 0,
-                len: Refused::PastBound { value: len as u64, bound: 64 }
-            })
+            Err(UsedRefusal::Written { head: 0, len, writable: 64 })
         );
         ring.use_chain(0, 64);
         assert_eq!(queue.poll_used(), Ok(Some(Used { head: 0, written: 64 })));
@@ -795,7 +792,7 @@ fn more_bytes_than_the_chain_may_be_written_is_refused() {
         ring.use_chain(2, 1);
         assert_eq!(
             queue.poll_used(),
-            Err(UsedRefusal::Written { head: 2, len: Refused::PastBound { value: 1, bound: 0 } })
+            Err(UsedRefusal::Written { head: 2, len: 1, writable: 0 })
         );
         ring.use_chain(2, 0);
         assert_eq!(queue.poll_used(), Ok(Some(Used { head: 2, written: 0 })));
@@ -851,7 +848,7 @@ fn a_refused_element_does_not_hide_the_ones_behind_it() {
     ring.use_chain(0x55, 0);
     ring.use_chain(1, 64);
     ring.use_chain(2, 3);
-    assert!(matches!(queue.poll_used(), Err(UsedRefusal::Head(_))));
+    assert!(matches!(queue.poll_used(), Err(UsedRefusal::Head { .. })));
     assert_eq!(queue.poll_used(), Ok(Some(Used { head: 1, written: 64 })));
     assert_eq!(queue.poll_used(), Ok(Some(Used { head: 2, written: 3 })));
     assert_eq!(queue.poll_used(), Ok(None));
@@ -1005,15 +1002,9 @@ fn a_hostile_device_is_believed_only_where_the_model_agrees() {
                 taken = taken.wrapping_add(1);
                 let chain = u16::try_from(id).ok().and_then(|head| flying.get(&head).map(|c| (head, *c)));
                 let want = match chain {
-                    _ if id >= SIZE as u32 => Err(UsedRefusal::Head(Refused::PastTable {
-                        value: id as u64,
-                        len: SIZE as u64,
-                    })),
+                    _ if id >= SIZE as u32 => Err(UsedRefusal::Head { id, size: SIZE }),
                     None => Err(UsedRefusal::NoChain { head: id as u16 }),
-                    Some((head, (_, writable))) if len > writable => Err(UsedRefusal::Written {
-                        head,
-                        len: Refused::PastBound { value: len as u64, bound: writable as u64 },
-                    }),
+                    Some((head, (_, writable))) if len > writable => Err(UsedRefusal::Written { head, len, writable }),
                     Some((head, _)) => {
                         flying.remove(&head);
                         believed += 1;
@@ -1021,7 +1012,7 @@ fn a_hostile_device_is_believed_only_where_the_model_agrees() {
                     }
                 };
                 match want {
-                    Err(UsedRefusal::Head(_)) => refused[0] += 1,
+                    Err(UsedRefusal::Head { .. }) => refused[0] += 1,
                     Err(UsedRefusal::NoChain { .. }) => refused[1] += 1,
                     Err(UsedRefusal::Written { .. }) => refused[2] += 1,
                     Err(UsedRefusal::Jumped { .. }) | Ok(_) => {}
@@ -1089,4 +1080,20 @@ fn a_ring_past_the_grant_is_the_drivers_mistake() {
 fn a_part_off_its_alignment_is_the_drivers_mistake() {
     let machine = Machine::new();
     let _ = Virtqueue::new(machine, 0, SIZE, Parts { desc: 0, avail: 128, used: 154 });
+}
+
+/// The offer is read without the device being reset or told anything: its
+/// status is untouched, and a device that withholds `ACCESS_PLATFORM` is
+/// seen to.
+#[test]
+fn the_offer_is_read_without_touching_the_device() {
+    let machine = Machine::new();
+    assert_eq!(
+        offered_features(&machine, &layout(&machine)),
+        Ok(VIRTIO_F_VERSION_1 | VIRTIO_F_ACCESS_PLATFORM | FEATURE_OFFERED)
+    );
+    assert_eq!(machine.statuses(), Vec::<u8>::new());
+    machine.state(|s| s.offered &= !VIRTIO_F_ACCESS_PLATFORM);
+    let offered = offered_features(&machine, &layout(&machine)).expect("read");
+    assert_eq!(offered & VIRTIO_F_ACCESS_PLATFORM, 0);
 }

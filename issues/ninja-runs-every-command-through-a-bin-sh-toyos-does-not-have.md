@@ -14,9 +14,9 @@ too. ToyOS has no `/bin`: `/` holds exactly the names `kernel/src/vfs.rs`'s
 nothing establishes that it runs the POSIX shell language build files are
 written in.
 
-Blocked on `posix_spawn`, stage 3 of
-`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`.
-Where the path comes from is
+libc's `posix_spawn` starts a child (stage 3 of
+`issues/a-childs-end-is-an-event-and-a-parent-takes-its-children-down.md`);
+what Ninja still waits on is a POSIX `sh` at a path it names. Where the path comes from is
 `issues/every-program-sees-only-the-files-it-was-given.md`'s.
 
 **Exit**: inside ToyOS, Ninja builds a file whose commands chain with `&&`,

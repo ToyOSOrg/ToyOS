@@ -18,6 +18,8 @@ use toyos::process::Process;
 use toyos::{namespace, port, AsHandle, OwnedHandle};
 use toyos_abi::syscall::{self, debug_action, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::End;
 
 const SELF_PATH: &str = "/system/bin/test_rs_spawn_lands_claimed";
 
@@ -27,8 +29,7 @@ const BACK: &str = "back";
 /// The place to the test: a copy of its own `self`.
 const MSG_SELF: u32 = 1;
 
-/// `process::KILLED_EXIT_CODE`.
-const KILLED: i32 = 137;
+const KILLED: End = End::Killed;
 
 fn main() {
     match std::env::args().nth(1).as_deref() {
@@ -51,7 +52,7 @@ fn test() {
     let conn = acceptor.accept().expect("the place connected back");
     let header = conn.recv_header().expect("the place's word");
     assert_eq!(header.msg_type, MSG_SELF, "the place said something else");
-    let [place_self] = conn.recv_handles_exact::<1>().expect("the place sent its self");
+    let [place_self] = conn.recv_handles_exact::<1>(&header).expect("the place sent its self");
     assert!(place.try_wait().expect("ask after the place").is_none(), "the place ended before the marked spawn");
 
     assert_eq!(
@@ -67,7 +68,7 @@ fn test() {
     }
     assert_eq!(child.wait(), Ok(KILLED), "the child that landed under a claimed place was not ended, as killed");
     let status = place.wait().expect("wait for the place");
-    assert_eq!(status.code(), Some(KILLED), "the place was not ended, as killed");
+    assert_eq!(End::from_word(status.into_raw()), Some(KILLED), "the place was not ended, as killed");
     syscall::close(place_self);
     println!("spawn_lands_claimed: the child landed claimed and was retired, and its place was published after it");
 }
@@ -80,8 +81,6 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
         path_len: SELF_PATH.len() as u64,
         argv_ptr: argv.as_ptr() as u64,
         argv_len: argv.len() as u64,
-        slot_map_ptr: 0,
-        slot_map_count: 0,
         env_ptr: 0,
         env_len: 0,
         endow_ptr: 0,
@@ -104,8 +103,7 @@ fn place() -> ! {
     let conn = endow::service(BACK).expect("the test endowed a port back");
     let own = syscall::dup(endow::this_process().as_handle()).expect("a copy of this process's self");
     // SAFETY: a fresh duplicate, answered for by nothing else.
-    conn.send_handles([unsafe { OwnedHandle::from_raw(own) }]).expect("send the test this process's self");
-    conn.send_bytes(MSG_SELF, &[]).expect("announce this process's self");
+    conn.signal_with(MSG_SELF, [unsafe { OwnedHandle::from_raw(own) }]).expect("send the test this process's self");
     park()
 }
 

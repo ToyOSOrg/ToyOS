@@ -11,11 +11,11 @@
 //! ```
 
 use kernel::sched::cpu::{Balance, PUSH_THRESHOLD};
-use kernel::sched::fair::QUANTUM_NS;
+use kernel::sched::task::QUANTUM_NS;
 use kernel_sim::choice::ChoiceStream;
 use kernel_sim::explore::{run, Outcome};
 use kernel_sim::scenarios;
-use kernel_sim::topology::{self, Keys, LevelCounts, Shape};
+use kernel_sim::topology::{self, CpuKeys, LevelCounts, Shape};
 use kernel_sim::workload::{Scenario, SurplusShape};
 
 const MS: u64 = 1_000_000;
@@ -49,14 +49,12 @@ fn quads(line: &str, label: &str) -> Vec<[u32; 4]> {
         .collect()
 }
 
-/// What a bench's scout logged, decoded the way the SDM and the APM define the
-/// fields: each listed CPU's x2APIC id from the MADT, and from every CPU that
-/// came up its leaf 0xB SMT and package widths (the subleaves of level type 1
-/// and 2, EAX bits 4:0) and how many ids share its highest data or unified
-/// cache (the deterministic cache leaf, 4 on Intel and 0x8000001D on AMD, EAX
-/// bits 25:14 plus one). Those three are identical on every CPU that ran, or
-/// the shape would not be one tree.
-fn scouted(log: &str) -> Vec<Keys> {
+/// What a bench's scout logged, decoded by the kernel's own
+/// [`kernel::cpu::topology_keys`]: each listed CPU's x2APIC id from the MADT,
+/// and the leaves of every CPU that came up as that CPU read them. A CPU that
+/// never ran is read under cpu0's leaves with its own MADT id in EDX, the id
+/// those leaves report on every subleaf.
+fn scouted(log: &str) -> Vec<CpuKeys> {
     let madt: Vec<u32> = log
         .lines()
         .find_map(|line| line.split("MADT cpus=[").nth(1))
@@ -65,41 +63,34 @@ fn scouted(log: &str) -> Vec<Keys> {
         .split(", ")
         .map(|id| id.parse().expect("a decimal id"))
         .collect();
-    let mut widths = Vec::new();
-    for line in log.lines().filter(|line| line.contains(" levels B=")) {
-        let cpu: usize = line
-            .split("scout-topo: cpu")
+    let cpu_of = |line: &str| -> usize {
+        line.split("scout-topo: cpu")
             .nth(1)
             .and_then(|rest| rest.split(' ').next())
             .and_then(|cpu| cpu.parse().ok())
-            .expect("the line names its cpu");
-        let levels = quads(line, "B=");
-        assert_eq!(levels[0][3], madt[cpu], "cpu{cpu}'s own x2APIC id is the MADT's");
-        let shift = |kind: u32| {
-            levels.iter().find(|q| (q[2] >> 8) & 0xff == kind).expect("the level is listed")[0] & 0x1f
-        };
-        widths.push((shift(1), shift(2)));
-    }
-    let mut sharing = Vec::new();
-    for line in log.lines().filter(|line| line.contains(" caches ")) {
-        let leaf = if line.contains("8000001D=") { "8000001D=" } else { "4=" };
-        let (_, shared) = quads(line, leaf)
-            .into_iter()
-            .take_while(|q| q[0] & 0x1f != 0)
-            .filter(|q| matches!(q[0] & 0x1f, 1 | 3))
-            .map(|q| ((q[0] >> 5) & 7, ((q[0] >> 14) & 0xfff) + 1))
-            .max()
-            .expect("the CPU has a data cache");
-        sharing.push(shared);
-    }
-    widths.dedup();
-    sharing.dedup();
-    let ([(smt, package)], [shared]) = (widths.as_slice(), sharing.as_slice()) else {
-        panic!("the CPUs that ran disagree: widths {widths:?}, sharing {sharing:?}");
+            .expect("the line names its cpu")
     };
-    let llc = shared.next_power_of_two().trailing_zeros();
+    let mut levels = vec![None; madt.len()];
+    let mut caches = vec![None; madt.len()];
+    for line in log.lines() {
+        if line.contains(" levels B=") {
+            levels[cpu_of(line)] = Some(quads(line, "B="));
+        } else if line.contains(" caches ") {
+            let leaf = if line.contains("8000001D=") { "8000001D=" } else { "4=" };
+            caches[cpu_of(line)] = Some(quads(line, leaf));
+        }
+    }
+    let (cpu0_levels, cpu0_caches) = (levels[0].clone().expect("cpu0 ran"), caches[0].clone().expect("cpu0 ran"));
     madt.iter()
-        .map(|&id| Keys { core: id >> smt, llc: id >> llc, package: id >> package })
+        .enumerate()
+        .map(|(cpu, &id)| {
+            let levels = levels[cpu]
+                .clone()
+                .unwrap_or_else(|| cpu0_levels.iter().map(|q| [q[0], q[1], q[2], id]).collect());
+            assert_eq!(levels[0][3], id, "cpu{cpu}'s own x2APIC id is the MADT's");
+            let caches = caches[cpu].clone().unwrap_or_else(|| cpu0_caches.clone());
+            kernel::cpu::topology_keys(&levels, &caches).unwrap_or_else(|e| panic!("cpu{cpu}: {e:?}"))
+        })
         .collect()
 }
 
@@ -107,9 +98,7 @@ fn scouted(log: &str) -> Vec<Keys> {
 /// are the scouts' boots as posted on the topology measurement
 /// (https://github.com/ToyOSOrg/ToyOS/pull/865#issuecomment-6119427274), staged
 /// from `042015035`. The AMD bench brought up 8 of its 16 CPUs, so the other
-/// eight are read as its MADT lists them under the widths the eight that ran
-/// reported — the MADT's ids being APIC ids, as they are for every CPU that
-/// came up.
+/// eight are read as [`scouted`] reads a CPU that never ran.
 #[test]
 fn a_benchs_shape_is_what_its_scout_read() {
     for (shape, log) in [

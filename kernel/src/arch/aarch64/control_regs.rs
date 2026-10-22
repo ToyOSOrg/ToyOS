@@ -21,10 +21,12 @@ pub use toyos_bootmap::aarch64::MAIR;
 /// stack alignment checked at EL1 and EL0 (`SA`, `SA0`), AArch32 EL0's `IT`
 /// and `SETEND` disabled (`ITD`, `SED` — RES1 on a CPU with no AArch32 EL0,
 /// and nothing this kernel runs is AArch32), over the bits Armv8.0 makes
-/// RES1 (29, 28, 23, 22, 20, 11). `WXN` stays clear: the direct map the
-/// kernel runs from is writable and executable both. Little-endian at both
-/// levels; EL0's cache maintenance and `WFI`/`WFE` trap.
-pub const SCTLR: u64 = SCTLR_RES1 | 1 << 0 | 1 << 2 | 1 << 3 | 1 << 4 | 1 << 7 | 1 << 8 | 1 << 12;
+/// RES1 (29, 28, 23, 22, 20, 11). `WXN` (bit 19, DDI 0601 2023-12): a page
+/// writable at EL1 is never executed there, nor one writable at EL0 at EL0,
+/// whatever its descriptor says (DDI 0487 M.d D8.4.1.2.4) — the loader's
+/// tables, which map the kernel's text read-only, included. Little-endian at
+/// both levels; EL0's cache maintenance and `WFI`/`WFE` trap.
+pub const SCTLR: u64 = SCTLR_RES1 | 1 << 0 | 1 << 2 | 1 << 3 | 1 << 4 | 1 << 7 | 1 << 8 | 1 << 12 | 1 << 19;
 
 const SCTLR_RES1: u64 = 1 << 29 | 1 << 28 | 1 << 23 | 1 << 22 | 1 << 20 | 1 << 11;
 

@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc as StdArc;
 
 use kernel::sched::cpu::{Action, CpuHandle, CpuSched, Env, SchedPass};
-use kernel::sched::fair::{FairShare, Frontier, ShareState};
+use kernel::sched::job::{Job, JobKey};
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos, TraceEvent, TraceKind};
 use kernel::sched::invariants::Container;
 use kernel::sched::mailbox::{mailbox, Kick, Urgency};
@@ -33,11 +33,11 @@ use crate::choice::ChoiceStream;
 use crate::hw_impl::SimHw;
 use crate::latency::{ReadyCause, RunWait};
 use crate::msg::{SimHandles, SimMsg, SimQueue};
-use crate::payload::{MockAddressSpace, SimCtx, SimPayload, SimPreempt, SimShareLock, StdLock};
+use crate::payload::{MockAddressSpace, SimCtx, SimPayload, SimPreempt, StdLock};
 use crate::topology::LevelCounts;
 use crate::workload::{
-    AgeShape, BlockShape, ChargeShape, MigrateShape, Op, ParkShape, PlacementShape,
-    Protocol, Scenario, Script, ShareShape, SurplusShape, WindowShape,
+    AgeShape, BlockShape, ChargeShape, GroupPick, JobShape, MigrateShape, Op, ParkShape, PlacementShape,
+    Protocol, Scenario, Script, SurplusShape, WindowShape,
 };
 
 /// How finely a `Run(ns)` op is chopped. Small enough that a 10 ms quantum
@@ -106,12 +106,6 @@ impl QueueState {
     }
 }
 
-fn new_share() -> Arc<FairShare<SimShareLock>> {
-    Arc::new(FairShare::new(StdLock::new(ShareState::NonRunnable {
-        lag: 0,
-    })))
-}
-
 pub fn build_queues(scenario: &Scenario) -> Vec<QueueState> {
     scenario
         .queues
@@ -122,11 +116,10 @@ pub fn build_queues(scenario: &Scenario) -> Vec<QueueState> {
 
 pub struct ProcState {
     pub name: &'static str,
-    /// Every fair share this process's threads hold. Exactly one under
-    /// [`ShareShape::PerProcess`]; one per spawned thread under the `PerThread`
-    /// negative gate, which is why invariant I6 sums over the vector rather
-    /// than reading a single share.
-    pub shares: Vec<Arc<FairShare<SimShareLock>>>,
+    /// Every job this process's threads hold. Exactly one under
+    /// [`JobShape::PerProcess`]; one per spawned thread under the `PerThread`
+    /// negative gate.
+    pub jobs: Vec<Arc<Job>>,
     /// The process's own reference to its address space. Dropped when the
     /// process concludes every one of its threads is gone — under the new
     /// protocol because they were all finalized, under the old one because a
@@ -261,7 +254,6 @@ pub struct Vm<'q> {
     pub queues: &'q [QueueState],
     pub hw: SimHw,
     pub handles: SimHandles,
-    pub frontier: Frontier,
     pub cpus: Vec<CpuSched<SimPayload>>,
     pub procs: Vec<ProcState>,
     pub programs: BTreeMap<TaskKey, Program>,
@@ -373,69 +365,42 @@ pub struct Vm<'q> {
     /// summed at the same clock advances `busy_ns` is, so the two are exact
     /// against each other.
     pub service_ns: Vec<u64>,
-    /// Invariant I13's measurement: the same nanoseconds, attributed to the
-    /// *thread* that consumed them. A share is one pot for every thread of a
-    /// process, so `service_ns` cannot tell a share that round-robins its
-    /// threads from one that runs a single thread and starves the rest.
+    /// The same nanoseconds, attributed to the *thread* that consumed them.
     pub thread_service: BTreeMap<TaskKey, u64>,
+    /// Invariant I13's measurement: per ready fair thread, the service its CPU
+    /// has owed it since it last ran — its group's weight over the CPU's
+    /// summed group weight, shared among the group's threads there, for as long
+    /// as that CPU runs fair work. A thread keeps it across a migration and
+    /// drops it when it runs or stops being runnable.
+    pub owed_waiting: BTreeMap<TaskKey, f64>,
     /// The contention window I5 measures service over; see
     /// [`crate::invariants`].
     pub fair_epoch: FairEpoch,
     /// The widest service spread I5 has seen, and the bound that was in force
-    /// when it saw it. Reported rather than only asserted, so a per-CPU
-    /// frontier can be compared against the global one by a number.
+    /// when it saw it.
     pub fair_spread: u64,
     pub fair_bound: u64,
-    /// Worst spread that exceeded the *derived* bound, whether or not the
-    /// recorded allowance let the run pass. This is the gap between the standard
-    /// and the shipped scheduler, surfaced by the instrument on every run.
+    /// Worst spread that exceeded the *derived* bound, whether or not a lifted
+    /// ceiling let the run pass.
     pub fair_over_bound: u64,
-    /// How many virtual nanoseconds invariant I5 actually had a comparison open
-    /// for, and whether it has one open right now — [`Self::thread_covered_ns`]
-    /// for the per-*process* check.
-    ///
-    /// **I5 is exposed to the same silent switch-off as I13, through more
-    /// conditions.** Its window needs a saturated machine, an empty RT band, an
-    /// unchanged member set, and at least two members that are not limited by
-    /// their own thread count. Every one of those is a property the pick, the
-    /// placement or the balance can change, so a change that stops satisfying
-    /// one makes I5 measure less rather than fail — and I5 is the check the
-    /// per-process fairness verdict on every other scenario rests on.
-    ///
-    /// Its liveness gate asserted only that *some* window opened, which one
-    /// window a nanosecond wide satisfies. The reach is the quantity that
-    /// distinguishes those, so it is published here and gated in
-    /// `the_fairness_storm_is_measured_and_holds` — a collapse read as loudly as
-    /// a violation.
-    ///
-    /// The flag is consulted by `advance`, which runs before the step's checks,
-    /// so the accounting lags the window by one step — I13's rounding error, for
-    /// I13's reason.
+    /// How many virtual nanoseconds invariant I5 had a comparison open for,
+    /// and whether it has one open right now. Its window needs a saturated
+    /// machine, an empty RT band, an unchanged member set and every CPU holding
+    /// the same mix, so a change to the pick, the placement or the balance can
+    /// make I5 measure less rather than fail: the reach is gated in
+    /// `the_fairness_storm_is_measured_and_holds`. `advance` reads the flag
+    /// before the step's checks, so the count lags the window by one step.
     pub fair_covered_ns: u64,
     pub fair_window_open: bool,
-    /// How many virtual nanoseconds invariant I13 actually had a comparison
-    /// open for, and whether it has one open right now.
-    ///
-    /// **A live gate can be switched off by the very change it guards**, and
-    /// I13 is exposed to exactly that: its window closes when a member's threads
-    /// stop being evenly spread over the CPUs, so a change that disturbs
-    /// *placement* makes this check measure less rather than fail. The reach is
-    /// therefore a published number, to be compared across any change to the
-    /// pick or the balance — a collapse here has to be read as loudly as a
-    /// violation. See [`crate::invariants`].
-    ///
-    /// The flag is consulted by `advance`, which runs before the step's checks,
-    /// so the accounting lags the window by one step. That is a rounding error
-    /// against a run and not worth a second traversal to remove.
-    pub thread_covered_ns: u64,
-    pub thread_window_open: bool,
-    /// Invariant I13's three numbers, in the same three roles as I5's above:
-    /// the widest service spread seen *between threads of one share*, the bound
-    /// in force when it was seen, and the worst crossing of the derived bound
-    /// whatever the recorded allowance permitted.
-    pub thread_spread: u64,
-    pub thread_bound: u64,
-    pub thread_over_bound: u64,
+    /// Invariant I13's three numbers: the most service any ready fair thread
+    /// was owed while it waited, the bound in force when it was seen, and the
+    /// worst crossing of that bound.
+    pub wait_owed: u64,
+    pub wait_bound: u64,
+    pub wait_over_bound: u64,
+    /// How many virtual nanoseconds some ready fair thread was owed service:
+    /// I13's reach, which a change to placement or the pick could shrink.
+    pub wait_covered_ns: u64,
     /// Every task currently owed a dispatch and not getting one, with the
     /// instant it became owed one, why, and the [`Vm::round`] it was in — the
     /// measured policy suite's instrument (`crate::latency`,
@@ -475,6 +440,15 @@ pub struct Vm<'q> {
     /// than judged: a wakeup storm that drains in parallel across a machine is
     /// only evidence about the balance path if the balance path ran.
     pub migrations: u64,
+    /// Of [`Self::migrations`], those made before any thread exited: the moves
+    /// the initial placement alone called for.
+    pub migrations_before_exit: u64,
+    /// Blocks that committed at the call site and went on to park: under
+    /// [`BlockShape::CommitAtCallSite`], each is a task whose word says
+    /// `Blocked` while its CPU still runs it.
+    pub call_site_commits: u64,
+    /// Threads that ran to their exit.
+    pub exits: u64,
     /// Per CPU: the instant it first took an execution step, or `None` for a
     /// CPU that never ran anything at all.
     ///
@@ -573,40 +547,18 @@ pub struct Vm<'q> {
 pub const PROBE_WORTH_IT: u32 = kernel::sched::cpu::PUSH_THRESHOLD;
 
 /// One contention window: a maximal interval over which the same set of
-/// fair-band processes was continuously runnable.
+/// fair-band processes was continuously runnable and every CPU held the same
+/// number of each one's runnable threads.
 ///
 /// Fairness has nothing to say across a window boundary — a process that was
-/// blocked was not owed service — so the measurement restarts whenever the set
-/// changes, and the bound carries the widest thread count and stored-lag spread
-/// seen inside the window.
+/// blocked was not owed service, and an unequal placement is owed unequal
+/// service (owner decision J1) — so the measurement restarts whenever either
+/// changes.
 #[derive(Default)]
 pub struct FairEpoch {
     pub members: Vec<usize>,
     /// Each process's `service_ns` when the window opened.
     pub base: Vec<u64>,
-    /// Widest total runnable-thread count the window has held, and widest
-    /// stored-lag spread. Both are terms of I5's bound, and both are running
-    /// maxima so a thread that exits mid-window cannot shrink the bound under a
-    /// separation it helped create.
-    pub threads: u32,
-    pub lag_spread: u64,
-    /// Invariant I13's members: every thread that was runnable when *its*
-    /// window opened, with its `thread_service` at that instant. Entries are
-    /// only ever removed — a thread that stops being runnable is owed nothing
-    /// further and never rejoins — so a thread blocking or exiting narrows the
-    /// comparison instead of restarting it.
-    ///
-    /// I13's window is a sub-interval of this one, re-baselined whenever the
-    /// members' threads stop being spread evenly across the CPUs; see
-    /// [`crate::invariants`].
-    pub thread_base: BTreeMap<TaskKey, u64>,
-    /// The widest count of members' runnable threads that *one CPU* held inside
-    /// I13's window — how many dispatches a waiting thread can be passed over
-    /// by before its own key comes up, and the only term of I13's bound. Well
-    /// defined only because that window requires every CPU to carry the same
-    /// number of each member's threads, which is the same reason it is a
-    /// per-CPU count where I5's `threads` is a machine-wide one.
-    pub thread_rivals: u32,
 }
 
 impl<'q> Vm<'q> {
@@ -622,7 +574,12 @@ impl<'q> Vm<'q> {
             cpu.set_park_keeps_lapsed_lend(scenario.park == ParkShape::KeepLapsedLend);
             cpu.set_migrate_keeps_the_corpse(scenario.migrate == MigrateShape::KeepTheCorpse);
             cpu.set_rt_outranks_every_corpse(scenario.age == AgeShape::RtOutranksEveryCorpse);
-            cpu.set_fair_order(scenario.order);
+            cpu.set_lowest_key_within_group(scenario.group_pick == GroupPick::LowestKey);
+            // A process's own job is keyed by its index.
+            cpu.set_double_charge(match scenario.charge {
+                ChargeShape::Honest => None,
+                ChargeShape::Double { process } => scenario.process_index(process).map(|p| JobKey(p as u64)),
+            });
             cpus.push(cpu);
         }
         hw.set_pass_cost(scenario.pass_cost_ns);
@@ -632,7 +589,7 @@ impl<'q> Vm<'q> {
             .enumerate()
             .map(|(index, spec)| ProcState {
                 name: spec.name,
-                shares: vec![new_share()],
+                jobs: vec![Arc::new(Job::new(JobKey(index as u64)))],
                 address_space: Some(StdArc::new(MockAddressSpace {
                     process: index as u32,
                 })),
@@ -653,8 +610,7 @@ impl<'q> Vm<'q> {
         let mut vm = Self {
             queues,
             hw,
-            handles: SimHandles::new(handles),
-            frontier: Frontier::new(),
+            handles: SimHandles::new(handles, scenario.topology.topology().clone()),
             cpus,
             procs,
             programs: BTreeMap::new(),
@@ -681,17 +637,20 @@ impl<'q> Vm<'q> {
             fair_over_bound: 0,
             fair_covered_ns: 0,
             fair_window_open: false,
-            thread_covered_ns: 0,
-            thread_window_open: false,
-            thread_spread: 0,
-            thread_bound: 0,
-            thread_over_bound: 0,
+            owed_waiting: BTreeMap::new(),
+            wait_owed: 0,
+            wait_bound: 0,
+            wait_over_bound: 0,
+            wait_covered_ns: 0,
             awaiting: BTreeMap::new(),
             prev_container: BTreeMap::new(),
             run_wait: vec![RunWait::default(); process_count],
             finish_ns: vec![None; process_count],
             thread_finish_ns: BTreeMap::new(),
             migrations: 0,
+            migrations_before_exit: 0,
+            call_site_commits: 0,
+            exits: 0,
             first_exec_ns: vec![None; n],
             idle_wakes: vec![0; n],
             late_kick_wakes: vec![0; n],
@@ -762,12 +721,13 @@ impl<'q> Vm<'q> {
             .address_space
             .clone()
             .expect("spawning into a process whose address space is gone");
-        let share = match self.scenario.share {
-            ShareShape::PerProcess => self.procs[process].shares[0].clone(),
-            ShareShape::PerThread => {
-                let share = new_share();
-                self.procs[process].shares.push(share.clone());
-                share
+        let job = match self.scenario.job {
+            JobShape::PerProcess => self.procs[process].jobs[0].clone(),
+            JobShape::PerThread => {
+                // Keys past every process's own, never reused.
+                let job = Arc::new(Job::new(JobKey(self.procs.len() as u64 + key.0)));
+                self.procs[process].jobs.push(job.clone());
+                job
             }
         };
         let rt = RtState {
@@ -796,7 +756,7 @@ impl<'q> Vm<'q> {
         };
         let builder = TaskBuilder {
             key,
-            share,
+            job,
             ctx: SimCtx { key: Some(key) },
             ext: SimPayload {
                 key,
@@ -1266,24 +1226,12 @@ impl<'q> Vm<'q> {
         if delta == 0 {
             return;
         }
-        let doubled = match self.scenario.charge {
-            ChargeShape::Honest => None,
-            ChargeShape::Double { process } => self.scenario.process_index(process),
-        };
         for cpu in 0..self.scenario.cpus() {
             let Some(task) = self.cpus[cpu].running() else {
                 continue;
             };
             self.busy_ns[cpu] += delta;
             let (key, rt, process) = (task.key(), task.rt(), task.ext().process as usize);
-            if doubled == Some(process) {
-                // The second charge for one nanosecond of running: what a
-                // charge applied at two transitions instead of one looks like
-                // from outside the core.
-                task.share()
-                    .charge(delta)
-                    .expect("a running task's share is runnable");
-            }
             self.service_ns[process] += delta;
             *self.thread_service.entry(key).or_default() += delta;
             let entry = self.boosted_run.entry(key).or_insert((rt.lends, 0));
@@ -1297,11 +1245,39 @@ impl<'q> Vm<'q> {
         if self.fair_window_open {
             self.fair_covered_ns += delta;
         }
-        if self.thread_window_open {
-            self.thread_covered_ns += delta;
-        }
+        self.owe_waiting(delta);
         self.clock = self.clock.after(delta);
         self.hw.with(|s| s.now = self.clock);
+    }
+
+    /// Invariant I13's accumulator: what each CPU running fair work owed
+    /// every ready fair thread on it over `delta`, by its group's share of the
+    /// CPU's summed group weight. A running thread is owed nothing; one that
+    /// is no longer runnable anywhere leaves.
+    fn owe_waiting(&mut self, delta: u64) {
+        let mut waiting = false;
+        for cpu in &self.cpus {
+            if let Some(running) = cpu.running() {
+                self.owed_waiting.remove(&running.key());
+            }
+            if !cpu.rq().running_is_fair() {
+                continue;
+            }
+            let load = cpu.rq().weight() as f64;
+            for task in cpu.rq().tasks().filter(|t| !t.rt().is_rt()) {
+                let job = task.job().key();
+                let (_, weight, here) = cpu.rq().groups().find(|g| g.0 == job).expect("a queued thread's group");
+                *self.owed_waiting.entry(task.key()).or_default() += weight as f64 / load / here as f64 * delta as f64;
+                waiting = true;
+            }
+        }
+        let shared = &self.shared;
+        self.owed_waiting.retain(|key, _| {
+            shared.get(key).is_some_and(|s| matches!(s.state(), TaskState::Ready(_) | TaskState::InTransit(_)))
+        });
+        if waiting {
+            self.wait_covered_ns += delta;
+        }
     }
 
     fn device_irq(&mut self, index: usize) {
@@ -1357,13 +1333,11 @@ impl<'q> Vm<'q> {
                 cpus,
                 hw,
                 handles,
-                frontier,
                 ..
             } = self;
             let env = Env {
                 hw,
                 cpus: handles,
-                frontier,
                 preempt: &SimPreempt,
                 balance,
             };
@@ -1540,7 +1514,7 @@ impl<'q> Vm<'q> {
                 self.run_pass(cpu, Dispose::Yield);
             }
             Op::SetRt => {
-                self.cpus[cpu].set_current_rt(true);
+                self.cpus[cpu].set_current_rt(self.clock, true);
                 self.programs.get_mut(&key).expect("live").pc += 1;
             }
             Op::Spawn { template } => {
@@ -1662,6 +1636,7 @@ impl<'q> Vm<'q> {
             BlockShape::CommitAtCallSite | BlockShape::CommitAtCallSiteFused => {
                 match ticket.commit() {
                     Commit::Parked(committed) => {
+                        self.call_site_commits += 1;
                         self.registrations.insert(key, queue);
                         BlockPhase::Committed(committed)
                     }
@@ -1782,7 +1757,7 @@ impl<'q> Vm<'q> {
     fn take_pending_boost(&mut self, cpu: usize, queue: usize) {
         if let Some(until) = self.queues[queue].boost_until.get() {
             if until > self.clock {
-                self.cpus[cpu].boost_current(until);
+                self.cpus[cpu].boost_current(self.clock, until);
             } else {
                 self.queues[queue].boost_until.set(None);
             }
@@ -1843,6 +1818,7 @@ impl<'q> Vm<'q> {
         }
         self.programs.remove(&key);
         self.unwind_left.remove(&key);
+        self.exits += 1;
         self.run_pass(cpu, Dispose::Exit);
     }
 

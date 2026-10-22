@@ -30,7 +30,7 @@
 //! exactly. Verified 2026-08-17, both ways round.
 //!
 //! **Every spin is bounded and every assertion is conditional on the ack having
-//! arrived, so [`ACKED`] is what stops the models passing vacuously.** An
+//! arrived, so [`acknowledged_model`] stops the models passing vacuously.** An
 //! unbounded serve loop is the same trap `kernel-loom`'s lock models document:
 //! loom explores it as an unbounded branch and never finishes. Safety is what
 //! the bounded form checks, and safety is the whole property — liveness in the
@@ -77,13 +77,23 @@ fn model(f: impl Fn() + Sync + Send + 'static) {
     builder.check(f);
 }
 
-/// Set by any execution in which the initiator's wait actually completed.
+/// [`model`] over `f`, which answers whether its interleaving completed a
+/// wait, failing unless one did.
 ///
-/// Outside `loom::model` on purpose: loom re-runs the closure once per
-/// interleaving, so a flag inside it says nothing about the model as a whole.
-/// Without this, bounding the spins would make every assertion below skippable
-/// and a broken protocol could pass by never being asked.
-static ACKED: AtomicBool = AtomicBool::new(false);
+/// The witness is outside the closure because loom re-runs it once per
+/// interleaving, and is this call's own because the tests run in parallel in
+/// one binary. Without it, bounding the spins would make every assertion
+/// skippable and a broken protocol could pass by never being asked.
+fn acknowledged_model(f: impl Fn() -> bool + Sync + Send + 'static) {
+    let acked = std::sync::Arc::new(AtomicBool::new(false));
+    let witness = std::sync::Arc::clone(&acked);
+    model(move || {
+        if f() {
+            witness.store(true, SeqCst);
+        }
+    });
+    assert!(acked.load(SeqCst), "no interleaving completed a wait, so the assertions never ran");
+}
 
 struct Machine {
     shootdown: Shootdown,
@@ -100,7 +110,7 @@ struct Machine {
 impl Machine {
     fn new() -> Arc<Self> {
         Arc::new(Self {
-            shootdown: Shootdown::new(),
+            shootdown: two_cpus(),
             pte: AtomicU64::new(MAPPED),
             tlb: AtomicU64::new(MAPPED),
             kernel_pte: AtomicU64::new(MAPPED),
@@ -142,7 +152,6 @@ impl Machine {
         let generation = self.shootdown.issue(reach);
         for _ in 0..POLLS {
             if self.shootdown.served(1, generation) {
-                ACKED.store(true, SeqCst);
                 return Some(tlb.load(Relaxed));
             }
             loom::thread::yield_now();
@@ -154,8 +163,7 @@ impl Machine {
 /// An acknowledged shootdown means cpu 1 has re-walked since the unmap.
 #[test]
 fn an_acknowledged_flush_postdates_the_page_table_write() {
-    ACKED.store(false, SeqCst);
-    model(|| {
+    acknowledged_model(|| {
         let m = Machine::new();
 
         let target = {
@@ -163,7 +171,8 @@ fn an_acknowledged_flush_postdates_the_page_table_write() {
             loom::thread::spawn(move || m.take_interrupts())
         };
 
-        if let Some(reachable) = m.unmap_and_wait(Reach::Narrow) {
+        let answer = m.unmap_and_wait(Reach::Narrow);
+        if let Some(reachable) = answer {
             assert_eq!(
                 reachable, UNMAPPED,
                 "cpu 1 acknowledged the shootdown while still holding a \
@@ -172,11 +181,8 @@ fn an_acknowledged_flush_postdates_the_page_table_write() {
         }
 
         target.join().unwrap();
+        answer.is_some()
     });
-    assert!(
-        ACKED.load(SeqCst),
-        "no interleaving completed the wait, so the assertion never ran",
-    );
 }
 
 /// Two initiators, one target: one serve may answer both, which is what makes a
@@ -188,8 +194,7 @@ fn an_acknowledged_flush_postdates_the_page_table_write() {
 /// this model is what says so.
 #[test]
 fn one_serve_answers_two_concurrent_shootdowns() {
-    ACKED.store(false, SeqCst);
-    model(|| {
+    acknowledged_model(|| {
         let m = Machine::new();
 
         let target = {
@@ -202,19 +207,18 @@ fn one_serve_answers_two_concurrent_shootdowns() {
             loom::thread::spawn(move || m.unmap_and_wait(Reach::Narrow))
         };
 
-        if let Some(reachable) = m.unmap_and_wait(Reach::Narrow) {
+        let first = m.unmap_and_wait(Reach::Narrow);
+        if let Some(reachable) = first {
             assert_eq!(reachable, UNMAPPED, "the first initiator freed a page cpu 1 could still reach");
         }
-        if let Some(reachable) = second.join().unwrap() {
+        let second = second.join().unwrap();
+        if let Some(reachable) = second {
             assert_eq!(reachable, UNMAPPED, "the second initiator freed a page cpu 1 could still reach");
         }
 
         target.join().unwrap();
+        first.is_some() || second.is_some()
     });
-    assert!(
-        ACKED.load(SeqCst),
-        "no interleaving completed a wait, so the assertions never ran",
-    );
 }
 
 /// A CPU that is waiting for an acknowledgement has not stopped giving them.
@@ -234,7 +238,7 @@ fn one_serve_answers_two_concurrent_shootdowns() {
 #[test]
 fn an_initiator_answers_while_it_waits() {
     model(|| {
-        let s = Shootdown::new();
+        let s = two_cpus();
 
         // cpu 0 unmaps and answers for itself; cpu 1 has not issued yet, so the
         // generation cpu 0 publishes is its own.
@@ -269,7 +273,7 @@ fn an_initiator_answers_while_it_waits() {
 #[test]
 fn a_nested_serve_is_not_undone_by_the_one_it_interrupted() {
     model(|| {
-        let s = Arc::new(Shootdown::new());
+        let s = Arc::new(two_cpus());
         let first = s.issue(Reach::Narrow);
         let nested = {
             let s = Arc::clone(&s);
@@ -299,8 +303,7 @@ fn a_nested_serve_is_not_undone_by_the_one_it_interrupted() {
 /// issued, where a serve can owe it and still answer narrow.
 #[test]
 fn an_acknowledged_kernel_half_shootdown_dropped_the_global_translation() {
-    ACKED.store(false, SeqCst);
-    model(|| {
+    acknowledged_model(|| {
         let m = Machine::new();
 
         let target = {
@@ -308,7 +311,8 @@ fn an_acknowledged_kernel_half_shootdown_dropped_the_global_translation() {
             loom::thread::spawn(move || m.take_interrupts())
         };
 
-        if let Some(reachable) = m.unmap_and_wait(Reach::Wide) {
+        let answer = m.unmap_and_wait(Reach::Wide);
+        if let Some(reachable) = answer {
             assert_eq!(
                 reachable, UNMAPPED,
                 "cpu 1 acknowledged a kernel-half shootdown while still holding the \
@@ -317,11 +321,8 @@ fn an_acknowledged_kernel_half_shootdown_dropped_the_global_translation() {
         }
 
         target.join().unwrap();
+        answer.is_some()
     });
-    assert!(
-        ACKED.load(SeqCst),
-        "no interleaving completed the wait, so the assertion never ran",
-    );
 }
 
 /// One serve may answer a user-half and a kernel-half shootdown at once, and
@@ -329,8 +330,7 @@ fn an_acknowledged_kernel_half_shootdown_dropped_the_global_translation() {
 /// either way, and the kernel-half initiator's global translation with it.
 #[test]
 fn one_serve_answering_a_user_half_and_a_kernel_half_shootdown_answers_wide() {
-    ACKED.store(false, SeqCst);
-    model(|| {
+    acknowledged_model(|| {
         let m = Machine::new();
 
         let target = {
@@ -343,19 +343,18 @@ fn one_serve_answering_a_user_half_and_a_kernel_half_shootdown_answers_wide() {
             loom::thread::spawn(move || m.unmap_and_wait(Reach::Wide))
         };
 
-        if let Some(reachable) = m.unmap_and_wait(Reach::Narrow) {
+        let first = m.unmap_and_wait(Reach::Narrow);
+        if let Some(reachable) = first {
             assert_eq!(reachable, UNMAPPED, "the user-half initiator freed a page cpu 1 could still reach");
         }
-        if let Some(reachable) = kernel.join().unwrap() {
+        let kernel = kernel.join().unwrap();
+        if let Some(reachable) = kernel {
             assert_eq!(reachable, UNMAPPED, "the kernel-half initiator's global translation outlived cpu 1's answer");
         }
 
         target.join().unwrap();
+        first.is_some() || kernel.is_some()
     });
-    assert!(
-        ACKED.load(SeqCst),
-        "no interleaving completed a wait, so the assertions never ran",
-    );
 }
 
 /// A serve nested inside a wide one that has not yet flushed answers wide
@@ -367,8 +366,7 @@ fn one_serve_answering_a_user_half_and_a_kernel_half_shootdown_answers_wide() {
 /// generation while the global translation is still held.
 #[test]
 fn a_serve_nested_in_an_unfinished_wide_one_answers_wide() {
-    ACKED.store(false, SeqCst);
-    model(|| {
+    acknowledged_model(|| {
         let m = Machine::new();
 
         let outer = {
@@ -380,7 +378,8 @@ fn a_serve_nested_in_an_unfinished_wide_one_answers_wide() {
             loom::thread::spawn(move || m.serve())
         };
 
-        if let Some(reachable) = m.unmap_and_wait(Reach::Wide) {
+        let answer = m.unmap_and_wait(Reach::Wide);
+        if let Some(reachable) = answer {
             assert_eq!(
                 reachable, UNMAPPED,
                 "a nested serve published the kernel-half shootdown while the wide \
@@ -390,11 +389,8 @@ fn a_serve_nested_in_an_unfinished_wide_one_answers_wide() {
 
         outer.join().unwrap();
         nested.join().unwrap();
+        answer.is_some()
     });
-    assert!(
-        ACKED.load(SeqCst),
-        "no interleaving completed the wait, so the assertion never ran",
-    );
 }
 
 /// A serve owing only user-half shootdowns answers narrow, before and after a
@@ -406,7 +402,7 @@ fn a_serve_nested_in_an_unfinished_wide_one_answers_wide() {
 #[test]
 fn only_a_kernel_half_shootdown_asks_a_wide_answer() {
     model(|| {
-        let s = Shootdown::new();
+        let s = two_cpus();
         let reach_of = |s: &Shootdown| {
             let mut answered = None;
             s.serve(1, |reach| answered = Some(reach));
@@ -425,4 +421,11 @@ fn only_a_kernel_half_shootdown_asks_a_wide_answer() {
             "a user-half shootdown after an answered kernel-half one was answered wide",
         );
     });
+}
+
+/// A round between the two CPUs every model here names.
+fn two_cpus() -> Shootdown {
+    let shootdown = Shootdown::new();
+    shootdown.size(2);
+    shootdown
 }

@@ -7,7 +7,7 @@
 //! terminal writing only translated bytes into a pipe could never give it.
 
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process;
 use std::os::toyos::process::CommandExt;
 use std::process::Command;
@@ -88,8 +88,8 @@ fn main() {
     println!("terminal: ready");
 
     loop {
-        poller.watch_raw(RawHandle(shell_stdout.as_raw_fd() as u32), READABLE, TOKEN_STDOUT);
-        poller.watch_raw(RawHandle(shell_stderr.as_raw_fd() as u32), READABLE, TOKEN_STDERR);
+        poller.watch_raw(RawHandle(shell_stdout.as_raw_handle()), READABLE, TOKEN_STDOUT);
+        poller.watch_raw(RawHandle(shell_stderr.as_raw_handle()), READABLE, TOKEN_STDERR);
         poller.watch_raw(window.handle(), READABLE, TOKEN_WINDOW);
         poller.watch_raw(host.acceptor_handle(), READABLE, TOKEN_LISTEN);
         for client in host.client_handles() {

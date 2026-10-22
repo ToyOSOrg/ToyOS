@@ -31,14 +31,16 @@ use std::process::{Command, Stdio};
 use toyos::AsHandle;
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_abuse_pipe_owner";
 
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
+/// How the kernel ends a process that names a handle it does not hold.
+const HANDLE_FAULT: End = End::Fault(Fault::Handle);
 
-/// Where the victim parks its ends. High, and nothing in this tree grows a
-/// table that far: a process holding 900 handles would be a different bug.
+/// Where the victim's ends are. High, and nothing in this tree grows a table
+/// that far: a process holding 900 handles would be a different bug.
 const VICTIM_READ_SLOT: u16 = 900;
 const VICTIM_WRITE_SLOT: u16 = 901;
 
@@ -101,11 +103,11 @@ fn test() {
             "{role} never reached its call",
         );
         assert_eq!(
-            said.status.code(),
+            End::from_word(said.status.into_raw()),
             Some(HANDLE_FAULT),
             "{role}: {what_would_be_wrong}",
         );
-        println!("  {role}: ended the caller, exit {HANDLE_FAULT}");
+        println!("  {role}: ended the caller, {HANDLE_FAULT}");
     }
 
     // Release the victim and read what it made of all that. Nothing reached its
@@ -151,11 +153,17 @@ fn attacker(role: &str) -> ! {
 /// Holds a live pipe at two numbers it publishes, and afterwards says what
 /// crossed it.
 fn victim() -> ! {
+    // A pipe made once every slot below the victim's is taken lands at the
+    // next two fresh ones, and stays there when the fillers go.
+    let stdout = toyos::fd::with(1, |o| o.handle).expect("the victim is given a standard output");
+    let mut fillers = Vec::new();
+    while fillers.last().is_none_or(|h: &RawHandle| h.slot() + 1 < VICTIM_READ_SLOT) {
+        fillers.push(syscall::dup(stdout).expect("fill the victim's table below its slots"));
+    }
     let (read, write) = toyos::pipe_pair().expect("the pipe the attack is aimed at");
-    let parked_read =
-        syscall::dup2(read.as_handle(), VICTIM_READ_SLOT).expect("park the read end");
-    let parked_write =
-        syscall::dup2(write.as_handle(), VICTIM_WRITE_SLOT).expect("park the write end");
+    let (parked_read, parked_write) = (read.as_handle(), write.as_handle());
+    assert_eq!((parked_read.slot(), parked_write.slot()), (VICTIM_READ_SLOT, VICTIM_WRITE_SLOT), "the pipe is not where it is published");
+    fillers.into_iter().for_each(syscall::close);
     println!("{} {}", parked_read.0, parked_write.0);
     std::io::stdout().flush().expect("flush");
 

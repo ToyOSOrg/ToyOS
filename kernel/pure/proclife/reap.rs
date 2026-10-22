@@ -38,6 +38,7 @@ pub fn finished_pids<T: Processes>(table: &T) -> Vec<Pid> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proclife::End;
     use crate::proclife::model::World;
 
     #[test]
@@ -54,8 +55,8 @@ mod tests {
         let a = world.spawn_process();
         let b = world.spawn_process();
         let c = world.spawn_process();
-        world.publish_exit(c, 0);
-        world.publish_exit(a, 0);
+        world.publish_exit(c, End::Exited(0));
+        world.publish_exit(a, End::Exited(0));
         assert_eq!(finished_pids(&world), [a, c]);
         assert!(world.get(b).is_some());
     }

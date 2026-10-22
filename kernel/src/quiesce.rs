@@ -51,12 +51,11 @@ use crate::time::{Budget, Deadline, Duration};
 /// How long the machine gets to stop.
 ///
 /// **A budget, and not a bound the kernel can prove.** One `QUANTUM_NS` is
-/// what a thread running in Ring 3 needs to reach the boundary, and one
-/// `block::OPERATION` is the longest a thread lies inside the block layer
-/// without parking. A thread can therefore outlast this, which is why its
-/// expiry is a clause in the record.
+/// what a thread running in Ring 3 needs to reach the boundary, and as long
+/// again covers one inside a syscall that does not park. A thread can
+/// therefore outlast this, which is why its expiry is a clause in the record.
 pub(crate) const PARK: Budget = Budget::of(
-    Duration::from_nanos(kernel::sched::fair::QUANTUM_NS + crate::block::OPERATION.nanos()),
+    Duration::from_nanos(2 * kernel::sched::task::QUANTUM_NS),
     "the reset lands wherever the threads that never reached a safe point are, and \
      the record names how many",
 );
@@ -179,7 +178,6 @@ pub fn stop() -> (Record, Stopping) {
         // Read here and not by the caller: the question is what was open at the
         // moment the stop ended, and every line between here and the record's
         // own would open more.
-        let (in_flight, begun) = crate::block::userland_operations();
         return (
             Record {
                 sweep: swept,
@@ -187,8 +185,6 @@ pub fn stop() -> (Record, Stopping) {
                 budget_ms: budget.nanos() / 1_000_000,
                 sweeps,
                 cpus,
-                in_flight,
-                begun,
             },
             Stopping(()),
         );

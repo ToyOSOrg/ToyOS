@@ -33,9 +33,7 @@ pub const MSG_REPLY: u32 = 2;
 /// The longest [`Ask`]: the longer access, a NUL and the longest name.
 pub const MAX_ASK: usize = LONGER_ACCESS + 1 + crate::MAX_PROGRAM_NAME;
 /// The longest [`Reply`] whose folder [`crate::grants::folder`] admits: its
-/// kind, the longer access, a NUL, and the longest folder, `/` and all. A
-/// receiver keeps a byte more, so a longer one is refused rather than read as
-/// the prefix kept.
+/// kind, the longer access, a NUL, and the longest folder, `/` and all.
 pub const MAX_REPLY: usize = 1 + LONGER_ACCESS + 1 + 1 + crate::grants::MAX_ROOT;
 const LONGER_ACCESS: usize = "read-write".len();
 
@@ -142,7 +140,7 @@ impl Reply {
 #[derive(Clone, Copy, Debug)]
 pub enum Heard<'a> {
     Nothing,
-    /// A whole frame: its type, and its payload as the receiver kept it.
+    /// A whole frame: its type, and its payload.
     Frame(u32, &'a [u8]),
     /// It hung up, or sent what no frame is: why, in words.
     Ended(&'static str),
@@ -177,10 +175,8 @@ pub fn settle(caller: Heard<'_>, server: Heard<'_>, ceiling: Option<Access>) -> 
 
 /// The server's frame on a question's connection, as the supervisor honours
 /// it: a [`Reply`] whose folder [`crate::grants::admit`] gives under the
-/// image's `ceiling`, or why it is none. `payload` is what the receiver kept,
-/// a byte past [`MAX_REPLY`] at most, so a longer frame is refused rather than
-/// read as the prefix kept. **The server is a program like any**: nothing it
-/// says is trusted past this.
+/// image's `ceiling`, or why it is none. **The server is a program like
+/// any**: nothing it says is trusted past this.
 pub fn judge(msg_type: u32, payload: &[u8], ceiling: Option<Access>) -> Result<Reply, String> {
     if msg_type != MSG_REPLY {
         return Err(format!("it sent message {msg_type}, which is no answer"));
@@ -288,8 +284,8 @@ mod tests {
                 other => panic!("{reply:?} under {ceiling:?}: {other:?}, not {said:?}"),
             }
         }
-        // A frame past the longest answer, the receiver keeping a byte more:
-        // refused for its length, and not read as the answer it begins with.
+        // A payload past the longest answer is refused for its length, and not
+        // read as the answer it begins with.
         let mut long = Reply::Deny.encode();
         long.resize(MAX_REPLY + 1, 0);
         assert_eq!(judge(MSG_REPLY, &long, rw), Err(format!("its answer is longer than the {MAX_REPLY} bytes any answer is")));

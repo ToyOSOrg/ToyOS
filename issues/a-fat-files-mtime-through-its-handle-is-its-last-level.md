@@ -6,8 +6,8 @@ opened: 2026-09-29
 
 # A FAT file's mtime through an open handle is its entry's last level, not its last write
 
-fsd's FAT volume answers a file's mtime off its directory entry
-(`userland/fsd/src/fat.rs`, `node_meta` and `lstat`), and an entry is stamped
+The file server's FAT volume answers a file's mtime off its directory entry
+(`system/fileserver/src/fat.rs`, `node_meta` and `lstat`), and an entry is stamped
 only when it is brought level: at the last close, an fsync or a sync. A write
 moves nothing an `fstat` reads, so a writer that writes and `fstat`s reads the
 stamp of the entry's last level, and the same file closed and opened again reads

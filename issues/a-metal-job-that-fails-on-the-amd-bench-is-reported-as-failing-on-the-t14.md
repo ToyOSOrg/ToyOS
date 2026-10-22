@@ -6,7 +6,7 @@ opened: 2026-10-11
 
 # A metal job that fails on the AMD bench is reported as failing on the T14
 
-`Boot::job_passed` (`tests/common/metal.rs:490-498`) words every non-zero
+`Boot::job_passed` (`tests/common/metal.rs`) words every non-zero
 exit as `"{binary} exited {code} on the T14"`, whichever bench ran the boot.
 A `--metal-host` run on the AMD bench printed
 `FAIL test_rs_vector_state: test_rs_vector_state exited 101 on the T14`

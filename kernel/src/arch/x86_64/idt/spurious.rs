@@ -110,7 +110,7 @@ pub fn selftest() {
     // Confirms the CPU still takes interrupts afterward, by the one it arms here.
     // The timer's own count and never a total: the hard-lockup sampler's NMI lands whatever `IF` holds.
     let taken = crate::irq_census::deliveries(cpu, Source::Timer).unwrap_or(0);
-    apic::arm_within(kernel::sched::fair::QUANTUM_NS);
+    apic::arm_within(kernel::sched::task::QUANTUM_NS);
     let ran_on = crate::clock::settles(ARRIVES.nanos(), || {
         crate::irq_census::deliveries(cpu, Source::Timer).unwrap_or(taken) > taken
     });

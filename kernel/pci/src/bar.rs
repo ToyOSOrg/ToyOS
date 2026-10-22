@@ -19,12 +19,7 @@
 //! these bits are the device's, and a field that says "this is not memory" is
 //! not a field to decode past.
 //!
-//! **Why this is a decode and not a `toyos_untrusted::Untrusted`.** That type
-//! is for a number used as an *index* or a *length*, where the fix is a
-//! comparison with a bound. Nothing here is indexed and nothing is sized: the
-//! defect was reading the register as the wrong *kind* of thing, and the fix is
-//! a type that has no address in it until the encoding said there was one.
-//! [`Width`] is that type — a caller cannot reach an address without having
+//! [`Width`] is the decode — a caller cannot reach an address without having
 //! been handed a [`Memory`], and it cannot be handed one for an I/O BAR.
 //!
 //! **What this does not bound is the address.** A BAR that says memory names a
@@ -73,13 +68,6 @@ pub enum Unusable {
     /// 64-bit in slot [`MAX_INDEX`], whose neighbour is the CardBus CIS
     /// pointer and not a BAR: no high half to read or probe.
     WideAtLastIndex,
-    /// A 32-bit BAR was asked to hold an address that does not fit in one.
-    /// Only [`placement`] answers this — a decode never invents an address.
-    AddressTooWide(u64),
-    /// An address that is not a multiple of the window's own size. The spec
-    /// hardwires a BAR's low address bits to zero, so a device given one would
-    /// silently decode somewhere else (PCIe §7.5.1.2.1).
-    Misaligned { address: u64, size: u64 },
 }
 
 impl fmt::Display for Unusable {
@@ -97,12 +85,6 @@ impl fmt::Display for Unusable {
                 "it claims a 64-bit address in BAR {MAX_INDEX}, whose neighbour is the CardBus \
                  CIS pointer and not a BAR"
             ),
-            Self::AddressTooWide(at) => {
-                write!(f, "{at:#x} does not fit the 32 bits this BAR decodes")
-            }
-            Self::Misaligned { address, size } => {
-                write!(f, "{address:#x} is not a multiple of the {size:#x} bytes it decodes")
-            }
         }
     }
 }
@@ -115,34 +97,24 @@ pub struct Placement {
     pub high: Option<u32>,
 }
 
-/// Where to move BAR `index`, given the low dword read out of it and the byte
-/// `size` its own probe advertised.
+/// The dwords that put BAR `index`, whose low dword reads `low`, at
+/// `address`: for a BAR its device left unassigned, whose address the caller
+/// chose aligned to its size and, for a 32-bit one, below 4 GiB.
 ///
 /// **The low four bits are carried through rather than recomputed.** They say
 /// memory or I/O, 32-bit or 64-bit, and prefetchable, and they are the
 /// *device's* — hardwired, read-only, and not something a caller placing a
-/// window gets an opinion about. A caller that rebuilt them from what it wanted
-/// would be telling a device what kind of BAR it has.
-pub fn placement(index: u8, low: u32, address: u64, size: u64) -> Result<Placement, Unusable> {
-    if size == 0 || !size.is_power_of_two() {
-        return Err(Unusable::Misaligned { address, size });
-    }
-    if !address.is_multiple_of(size) {
-        return Err(Unusable::Misaligned { address, size });
-    }
-    let flags = low & !MEMORY_ADDRESS;
-    match kind(index, low)?.wide {
-        false => {
-            if address > u32::MAX as u64 {
-                return Err(Unusable::AddressTooWide(address));
-            }
-            Ok(Placement { low: (address as u32 & MEMORY_ADDRESS) | flags, high: None })
-        }
-        true => Ok(Placement {
-            low: (address as u32 & MEMORY_ADDRESS) | flags,
-            high: Some((address >> 32) as u32),
-        }),
-    }
+/// window gets an opinion about.
+///
+/// # Panics
+/// Where `address` holds a flag bit, or is past 4 GiB for a 32-bit BAR: the
+/// caller's choice, not the device's.
+pub fn placement(index: u8, low: u32, address: u64) -> Result<Placement, Unusable> {
+    let wide = kind(index, low)?.wide;
+    assert!(address & !u64::from(MEMORY_ADDRESS) & 0xFFFF_FFFF == 0, "bar: {address:#x} holds a BAR's flag bits");
+    assert!(wide || address <= u64::from(u32::MAX), "bar: {address:#x} is past a 32-bit BAR's reach");
+    let low = (address as u32 & MEMORY_ADDRESS) | (low & !MEMORY_ADDRESS);
+    Ok(Placement { low, high: wide.then_some((address >> 32) as u32) })
 }
 
 /// A Memory Space BAR whose upper half is in the register after it.
@@ -441,46 +413,27 @@ mod tests {
         ));
     }
 
-    /// The four flag bits are the device's and survive a move; the address bits
-    /// are the caller's. A placement that recomputed the flags would tell a
-    /// 64-bit prefetchable BAR it is a 32-bit non-prefetchable one — and the
-    /// register would take it, because software writes the whole dword.
+    /// The four flag bits are the device's and survive a placement; the
+    /// address bits are the caller's. A placement that recomputed the flags
+    /// would tell a 64-bit prefetchable BAR it is a 32-bit non-prefetchable
+    /// one — and the register would take it, because software writes the
+    /// whole dword.
     #[test]
-    fn a_placement_moves_the_address_and_keeps_the_devices_own_bits() {
-        // The virtio NIC this machine has: BAR 4, 64-bit prefetchable, 16 KiB
-        // at 0x800000000.
-        let placed = placement(4, 0x0000_000C, 0x8_0020_0000, 0x4000).unwrap();
+    fn a_placement_writes_the_address_and_keeps_the_devices_own_bits() {
+        let placed = placement(4, 0x0000_000C, 0x8_0020_0000).unwrap();
         assert_eq!(placed.low, 0x0020_000C, "the low four bits are the device's");
         assert_eq!(placed.high, Some(8));
         // A 32-bit BAR keeps its own flags too, and has no second register.
-        // A register firmware assigned nothing is placed like any other: its
-        // flags are the device's whatever its address.
-        assert_eq!(placement(0, 0x0000_0000, 0xC020_0000, 0x10_0000), Ok(Placement { low: 0xC020_0000, high: None }));
+        assert_eq!(placement(0, 0x0000_0008, 0xC020_0000), Ok(Placement { low: 0xC020_0008, high: None }));
         assert_eq!(kind(0, 0x0000_0008), Ok(Kind { wide: false, prefetchable: true }));
         assert_eq!(kind(2, 0x0000_000C), Ok(Kind { wide: true, prefetchable: true }));
-        let placed = placement(1, 0xC004_3000, 0xC020_0000, 0x1000).unwrap();
-        assert_eq!(placed.low, 0xC020_0000);
-        assert_eq!(placed.high, None);
+        // An I/O BAR has no memory address to be given.
+        assert_eq!(placement(1, 0x0000_C001, 0xC020_0000), Err(Unusable::IoSpace { port: 0xC000 }));
     }
 
-    /// Three ways to hand a BAR an address it cannot hold, each refused by
-    /// name. A device given one of these decodes somewhere else and says
-    /// nothing about it.
     #[test]
-    fn an_address_a_bar_cannot_hold_is_refused_by_name() {
-        assert_eq!(
-            placement(1, 0xC004_3000, 0x8_0020_0000, 0x1000),
-            Err(Unusable::AddressTooWide(0x8_0020_0000)),
-        );
-        assert_eq!(
-            placement(4, 0x0000_000C, 0x8_0020_1000, 0x4000),
-            Err(Unusable::Misaligned { address: 0x8_0020_1000, size: 0x4000 }),
-        );
-        // An I/O BAR has no window to place at all, and the refusal is the
-        // decode's rather than a size check that ran first.
-        assert_eq!(
-            placement(1, 0x0000_C001, 0xC020_0000, 0x1000),
-            Err(Unusable::IoSpace { port: 0xC000 }),
-        );
+    #[should_panic(expected = "past a 32-bit BAR's reach")]
+    fn a_32_bit_bar_is_never_placed_past_4_gib() {
+        let _ = placement(1, 0x0000_0000, 0x8_0020_0000);
     }
 }

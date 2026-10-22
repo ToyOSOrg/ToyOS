@@ -26,5 +26,7 @@
 #define PATH_MAX   4096
 #define _POSIX_ARG_MAX 4096
 #define NAME_MAX   255
+/* A pipe write of at most this many bytes lands whole. */
+#define PIPE_BUF   4096
 
 #endif

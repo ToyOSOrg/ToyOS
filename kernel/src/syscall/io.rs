@@ -7,10 +7,11 @@
 //! this module runs.
 
 use crate::watch;
+use crate::object::null::NullObject;
 use crate::object::{ops, KObjectRef};
 use crate::time::{Cadence, Deadline, Duration};
 use crate::user_ptr::{UserBytes, UserBytesMut};
-use crate::{device, pipe, process};
+use crate::{pipe, process};
 
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::*;
@@ -21,7 +22,8 @@ use super::handles::with_object_ref;
 
 /// What `sys_write` does when the object took nothing.
 enum WriteBlock {
-    Pipe(pipe::PipeId, WaitClass),
+    /// The pipe, the class of the wait, and the room the write waits for.
+    Pipe(pipe::PipeId, WaitClass, usize),
     Refused(u64),
     /// Carried out of the process's lock: `HandleError::refuse` may take the
     /// process down and cannot run under a guard.
@@ -31,12 +33,8 @@ enum WriteBlock {
 /// What `sys_read` parks on when the handle has nothing to give.
 enum ReadBlock {
     Pipe(alloc::sync::Arc<crate::watch::Watch>, pipe::PipeId, WaitClass),
-    Hda,
-    /// A claimed keyboard, woken by its own IRQ.
-    Keyboard(Deadline),
-    /// A console, which reads the serial line and nothing else: it waits on
-    /// the serial line, never on the keyboard's queue, which only a claim
-    /// drains and which would answer it at once for as long as a key sits there.
+    /// A console, which reads the serial line and nothing else: nothing posts
+    /// a serial byte, so it parks on its own thread's watch until its re-poll.
     Console(Deadline),
     /// Nothing to wait for: the answer is this word.
     Refused(u64),
@@ -55,7 +53,7 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
             match ops::try_write(object, buf) {
                 Some(n) => Ok((n, ops::pipe_id_write(object))),
                 None => Err(match ops::pipe_write(object) {
-                    Some((id, class)) => WriteBlock::Pipe(id, class),
+                    Some((id, class, landing)) => WriteBlock::Pipe(id, class, landing.room(buf.len())),
                     None => WriteBlock::Refused(SyscallError::NotFound.to_u64()),
                 }),
             }
@@ -65,7 +63,7 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
                 if let Some(id) = pipe_id { process::wake_pipe_readers(id); }
                 return n;
             }
-            Err(WriteBlock::Pipe(id, class)) => match pipe::write_watch(id) {
+            Err(WriteBlock::Pipe(id, class, room)) => match pipe::write_watch(id) {
                 Some(end) => {
                     let parkable = crate::scheduler::Parkable::at_entry();
                     if watch::wait_until(
@@ -74,7 +72,7 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
                         0,
                         class,
                         Deadline::never(),
-                        || pipe::has_space(id),
+                        || pipe::has_space(id, room),
                     )
                     .is_err()
                     {
@@ -89,22 +87,11 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
     }
 }
 
-/// Only these device classes block; the rest answer `NotFound` on an
-/// empty blocking read.
-fn read_block_device(claim: &crate::object::device::DeviceClaim) -> ReadBlock {
-    match claim.class() {
-        device::DeviceType::Keyboard => ReadBlock::Keyboard(Deadline::never()),
-        device::DeviceType::HdaAudio if claim.info_read() => ReadBlock::Hda,
-        _ => ReadBlock::Refused(SyscallError::NotFound.to_u64()),
-    }
-}
-
 fn read_block(object: &KObjectRef) -> ReadBlock {
     match object {
         KObjectRef::Device(_) => unreachable!("a device claim blocks via `read_block_device`"),
         KObjectRef::Console(_) => {
-            // Parks on `keyboard::WATCH` and re-polls: nothing posts a
-            // serial-console key, so the timer alone wakes it.
+            // Nothing posts a serial-console key, so the timer alone wakes it.
             const CONSOLE_REPOLL: Cadence = Cadence::every(
                 Duration::from_millis(10),
                 "nothing posts a serial-console key, so this rate is the whole of the wake",
@@ -135,10 +122,10 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
                     .handles
                     .get::<crate::object::device::DeviceClaim>(h, Rights::READ)
                     .expect("a Device resolved a moment ago under this same hold");
-                let blocked = read_block_device(&claim);
+                // No device class blocks: an empty read answers `NotFound`.
                 return match ops::read_device(&claim, &mut data.handles, buf) {
                     Some(n) => Ok((n, None)),
-                    None => Err(blocked),
+                    None => Err(ReadBlock::Refused(SyscallError::NotFound.to_u64())),
                 };
             }
             match ops::try_read(object, buf) {
@@ -166,41 +153,12 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
                     return cancelled();
                 }
             }
-            Err(ReadBlock::Hda) => {
-                let parkable = crate::scheduler::Parkable::at_entry();
-                if watch::wait_until(
-                    &parkable,
-                    &crate::drivers::AUDIO_WATCH,
-                    0,
-                    WaitClass::Io,
-                    Deadline::never(),
-                    crate::drivers::hda::has_pending,
-                )
-                .is_err()
-                {
-                    return cancelled();
-                }
-            }
-            Err(ReadBlock::Keyboard(deadline)) => {
-                let parkable = crate::scheduler::Parkable::at_entry();
-                if watch::wait_until(
-                    &parkable,
-                    &crate::keyboard::WATCH,
-                    0,
-                    WaitClass::Io,
-                    deadline,
-                    crate::keyboard::has_data,
-                )
-                .is_err()
-                {
-                    return cancelled();
-                }
-            }
             Err(ReadBlock::Console(deadline)) => {
                 let parkable = crate::scheduler::Parkable::at_entry();
+                let Some(handle) = crate::sched::driver::current_handle() else { return cancelled() };
                 if watch::wait_until(
                     &parkable,
-                    &crate::keyboard::WATCH,
+                    handle.watch(),
                     0,
                     WaitClass::Io,
                     deadline,
@@ -254,6 +212,20 @@ pub(super) fn sys_write_nonblock(h: RawHandle, buf: &UserBytes) -> u64 {
         }
         Ok((None, _)) => SyscallError::WouldBlock.to_u64(),
         Err(e) => e.refuse(),
+    }
+}
+
+/// A fresh null handle carrying `want`, a subset of [`NullObject::RIGHTS`].
+pub(super) fn sys_null(want: u64) -> u64 {
+    let rights = match u32::try_from(want).ok().and_then(Rights::from_bits) {
+        Some(rights) if NullObject::RIGHTS.contains(rights) => rights,
+        _ => return SyscallError::InvalidArgument.to_u64(),
+    };
+    let object = KObjectRef::Null(NullObject::new());
+    let entry = crate::object::HandleEntry::new(object, rights);
+    match process::with_process_data(|data| data.handles.install(entry)) {
+        Ok(h) => h.0 as u64,
+        Err(_) => SyscallError::ResourceExhausted.to_u64(),
     }
 }
 

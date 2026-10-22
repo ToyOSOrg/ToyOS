@@ -1,12 +1,12 @@
 //! Content-independent comparisons and selection. Lengths are public.
 //!
-//! The volatile barrier prevents LLVM from retaining a boolean's provenance;
-//! deployed machine code must still be inspected and tested for timing leakage.
+//! The register barrier prevents LLVM from retaining a boolean's provenance,
+//! which would let it turn a masked select into a branch; deployed machine
+//! code must still be inspected and tested for timing leakage.
 
 #[inline(always)]
 pub(crate) fn opaque(value: u64) -> u64 {
-    // The local word remains live for this volatile read.
-    unsafe { core::ptr::read_volatile(&value) }
+    crate::arch::value_barrier(value)
 }
 
 #[inline(always)]
@@ -30,8 +30,8 @@ pub(crate) fn equal(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     let mut difference = 0u64;
-    for (&a, &b) in a.iter().zip(b) {
-        difference |= u64::from(a ^ b);
+    for (i, &a) in a.iter().enumerate() {
+        difference |= u64::from(a ^ b[i]);
     }
     opaque(nonzero(difference)) == 0
 }

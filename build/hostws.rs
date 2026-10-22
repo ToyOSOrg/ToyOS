@@ -84,10 +84,9 @@ pub(crate) fn rel(root: &Path, path: &Path) -> String {
 }
 
 /// The library members built for a guest: the SDK, its window, font and
-/// file-picker clients and the two shared crates that link the SDK, whose
-/// `toyos` is not clippy-clean on a host. Their tests run in a step of their
-/// own ([`guest_libraries`]).
-const GUEST_LIBRARIES: [&str; 6] = [
+/// file-picker clients and the two shared crates that link the SDK. Their
+/// tests run in a step of their own ([`guest_libraries`]).
+pub(crate) const GUEST_LIBRARIES: [&str; 6] = [
     crate::ci::SDK_DIR,
     "sdk/window",
     "sdk/font",
@@ -312,7 +311,7 @@ mod tests {
     #[test]
     fn the_gate_refuses_a_crate_that_joined_neither_list() {
         let members: BTreeSet<String> =
-            [".", "lib/elf", "lib/xhci", "lib/xhci/sim"].iter().map(|s| s.to_string()).collect();
+            [".", "lib/elf", "system/usbd", "system/usbd/xhci"].iter().map(|s| s.to_string()).collect();
 
         let all_declared: BTreeSet<String> = members.clone();
         assert!(unclaimed(&members, &all_declared).is_empty());
@@ -325,8 +324,8 @@ mod tests {
 
         // And a nested one.
         let with_a_nested_newcomer: BTreeSet<String> =
-            members.union(&["lib/xhci/newthing".to_string()].into()).cloned().collect();
-        assert_eq!(unclaimed(&members, &with_a_nested_newcomer), ["lib/xhci/newthing"]);
+            members.union(&["system/usbd/newthing".to_string()].into()).cloned().collect();
+        assert_eq!(unclaimed(&members, &with_a_nested_newcomer), ["system/usbd/newthing"]);
     }
 
     /// The walk has teeth only if it can find anything: it must reach the real
@@ -339,7 +338,7 @@ mod tests {
         assert!(found.contains("."), "the walk did not find the root package");
         assert!(found.contains("lib/elf"), "the walk did not find lib/elf: {found:?}");
         assert!(
-            found.contains("lib/xhci/sim"),
+            found.contains("system/usbd/xhci"),
             "the walk did not descend past the first level, so a nested member could \
              go missing without this gate noticing: {found:?}"
         );

@@ -30,7 +30,6 @@ name = "toyos"
 version = "0.18.0"
 dependencies = [
  "toyos-abi",
- "toyos-transport",
 ]
 
 [[package]]
@@ -54,17 +53,6 @@ dependencies = [
 
 [[package]]
 name = "toyos-osrelease"
-version = "0.1.0"
-
-[[package]]
-name = "toyos-transport"
-version = "0.1.0"
-dependencies = [
- "toyos-untrusted",
-]
-
-[[package]]
-name = "toyos-untrusted"
 version = "0.1.0"
 
 [[package]]

@@ -1,6 +1,7 @@
 //! A generation one CPU issues and every other acknowledges, with no hardware
 //! in it: a TLB shootdown's, and a counters read's round.
-//! Compiled a second time into `kernel/loom/` against loom's atomics, so this file must hold no `crate::` references.
+//! Compiled a second time into `kernel/loom/` against loom's atomics, so this file names nothing of the kernel but
+//! [`CpuSlice`], which `kernel/loom/` compiles beside it.
 //! The read must happen before the answer, or a target could publish a generation its answer does not cover;
 //! and an initiator that sees a generation served sees everything that answer wrote.
 //! A generation is narrow or wide, and an answer reaches as far as the widest generation it covers: one
@@ -12,8 +13,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicU64, Ordering};
 
-/// Matches `sched::MAX_CPUS`.
-pub const MAX_CPUS: usize = 8;
+use crate::cpu_slice::CpuSlice;
 
 // Acquire: makes the flush that follows see the initiator's page-table write.
 #[cfg(not(feature = "shootdown-serve-relaxed"))]
@@ -40,25 +40,26 @@ pub enum Reach {
     Wide,
 }
 
+/// One CPU's side, which its serve writes every round.
+struct Answer {
+    flushed: AtomicU64,
+    /// `wide` as the last wide answer this CPU finished read it.
+    widened: AtomicU64,
+}
+
 pub struct Shootdown {
     requested: AtomicU64,
     /// Wide generations issued, each counted before it is issued.
     wide: AtomicU64,
-    flushed: [AtomicU64; MAX_CPUS],
-    /// Per CPU, `wide` as the last wide answer it finished read it.
-    widened: [AtomicU64; MAX_CPUS],
+    answers: CpuSlice<Answer>,
 }
 
 impl Shootdown {
-    /// Must stay `const`: the kernel's single instance is a `static`.
+    /// Must stay `const`: the kernel's instances are `static`s, each
+    /// [`Self::size`]d before an AP is attempted.
     #[cfg(not(feature = "loom"))]
     pub const fn new() -> Self {
-        Self {
-            requested: AtomicU64::new(0),
-            wide: AtomicU64::new(0),
-            flushed: [const { AtomicU64::new(0) }; MAX_CPUS],
-            widened: [const { AtomicU64::new(0) }; MAX_CPUS],
-        }
+        Self { requested: AtomicU64::new(0), wide: AtomicU64::new(0), answers: CpuSlice::new() }
     }
 
     // Not `const`: loom's atomics have no const constructor.
@@ -66,12 +67,12 @@ impl Shootdown {
     #[allow(clippy::new_without_default)]
     #[cfg(feature = "loom")]
     pub fn new() -> Self {
-        Self {
-            requested: AtomicU64::new(0),
-            wide: AtomicU64::new(0),
-            flushed: core::array::from_fn(|_| AtomicU64::new(0)),
-            widened: core::array::from_fn(|_| AtomicU64::new(0)),
-        }
+        Self { requested: AtomicU64::new(0), wide: AtomicU64::new(0), answers: CpuSlice::new() }
+    }
+
+    /// An answer for each of the `cpus` CPUs the firmware names.
+    pub fn size(&self, cpus: usize) {
+        self.answers.size(cpus, |_| Answer { flushed: AtomicU64::new(0), widened: AtomicU64::new(0) });
     }
 
     /// Names the generation every other CPU now owes a flush for, of `reach`.
@@ -89,31 +90,31 @@ impl Shootdown {
     pub fn serve(&self, cpu: usize, flush: impl FnOnce(Reach)) {
         let owed = self.requested.load(OWED);
         let wide = self.wide.load(Ordering::Acquire);
-        let reach = if wide > self.widened[cpu].load(Ordering::Acquire) { Reach::Wide } else { Reach::Narrow };
+        let reach = if wide > self.answers[cpu].widened.load(Ordering::Acquire) { Reach::Wide } else { Reach::Narrow };
         flush(reach);
         if reach == Reach::Wide {
             // After the flush: a serve nested inside this one, reading this record first, answers wide itself.
-            self.widened[cpu].fetch_max(wide, Ordering::Release);
+            self.answers[cpu].widened.fetch_max(wide, Ordering::Release);
         }
         // A max, not a store: a serve nested inside this one may already have published a later generation.
-        self.flushed[cpu].fetch_max(owed, Ordering::Release);
+        self.answers[cpu].flushed.fetch_max(owed, Ordering::Release);
     }
 
     /// `wide` as `cpu`'s last wide answer read it: a change across a span is a wide answer inside it.
     #[cfg(feature = "test-actuators")]
     pub fn widened(&self, cpu: usize) -> u64 {
-        self.widened[cpu].load(Ordering::Relaxed)
+        self.answers[cpu].widened.load(Ordering::Relaxed)
     }
 
     /// Does `cpu` owe anyone a flush?
     pub fn owes(&self, cpu: usize) -> bool {
         // A hint: `serve` carries the real ordering, so a stale `false` costs nothing.
-        self.requested.load(Ordering::Relaxed) > self.flushed[cpu].load(Ordering::Relaxed)
+        self.requested.load(Ordering::Relaxed) > self.answers[cpu].flushed.load(Ordering::Relaxed)
     }
 
     /// Has `cpu` flushed since `generation` was issued?
     pub fn served(&self, cpu: usize, generation: Generation) -> bool {
-        self.flushed[cpu].load(SERVED) >= generation.0
+        self.answers[cpu].flushed.load(SERVED) >= generation.0
     }
 
     /// [`serve`](Self::serve) for a CPU not taking the interrupt; whether it served.

@@ -4,18 +4,21 @@ kind: defect
 opened: 2026-09-26
 ---
 
-# netd's lookup slots have no per-client share
+# netstack's lookup slots have no per-client share
 
-`toyos_dns::MAX_LOOKUPS` (`system/netstack/node/src/resolve.rs`) bounds the lookups in
-flight across every client at once. One holder of `netd` that asks for names
+`toyos_dns::MAX_LOOKUPS` (`system/netstack/dns/src/lib.rs`, held by
+`system/netstack/node/src/resolve.rs`) bounds the lookups in flight across every
+client at once. One holder of `netstack` that asks for names
 its servers answer slowly, or not at all, holds all of them for up to a
 lookup's whole schedule each, and every other program's lookup is refused with
 `ERR_RESOURCE_EXHAUSTED` meanwhile.
 
-netd cannot share the slots out itself: a client is a connection, a program
-opens as many as it likes, and netd holds no word for the program behind one
-(there is no pid-as-authority, by design). The same is true of the
-node's places (`system/netstack/node/src/places.rs`), one number across all
+A client is a connection, and a program opens as many as it likes. The one
+word netstack holds for the program behind one is its connector's badge, the
+row and session the supervisor minted it for (`system/netstack/src/serve.rs`),
+and anyone can multiply sessions, since every ssh login opens one
+(`issues/netstack-replaces-one-programs-cached-answers-to-keep-anothers.md`).
+The same is true of the node's places (`system/netstack/node/src/places.rs`), one number across all
 clients.
 
 Exit condition: a lookup is charged to something a program cannot multiply by

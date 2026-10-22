@@ -17,11 +17,12 @@ what survives it is a different question.
 - `compositor/main.rs` → `toyos-desktop/` (pure, since moved to
   `system/compositor/desktop/`), `763712b`; the effects shell
   is `system/compositor/` over five files with a 71-line `main.rs`, `72705d9`.
-- `xhci/mod.rs` → the port machine is `lib/xhci/`, with a host simulator,
-  `2e81ae8`.
+- `xhci/mod.rs` → the port machine went to a crate with a host simulator,
+  `2e81ae8`; the whole driver has since left the kernel for `usbd`
+  (`13ed7b4f4`).
 - `soundd/main.rs` → `toyos-mixer/` (pure, `no_std`; since moved to
   `system/soundserver/mixer/`), 2026-08-20; the effects
-  shell is `userland/soundd/` over eight files with a 261-line `main.rs`, from a
+  shell was `userland/soundd/` (now `system/soundserver/`) over eight files with a 261-line `main.rs`, from a
   2,366-line one. What the note asked for is what it got: **the mixing is
   sample-exact and proven so.** `system/soundserver/mixer/fixtures/mix-corpus.txt` was
   written by `soundd/src/main.rs` before a line of it moved, and
@@ -49,10 +50,11 @@ what survives it is a different question.
 - `process.rs` — the lifecycle state machine is `kernel/pure/proclife/` (pure,
   `forbid(unsafe_code)`, every interleaving of a scripted pair of paths
   enumerated; #142's mechanism class now has a host reproduction). Three
-  subjects are still decided inside the file and reachable only by a booted
-  guest: the handle/endowment build (`build_child_handles` +
-  `Endowments::encode`, a crafted-input corpus's natural subject — the natural
-  second chunk), `handle_page_fault`'s window arithmetic (~290 pure lines
+  subjects are still decided in the kernel and reachable only by a booted
+  guest: the handle/endowment build (`build_child_handles`, now in
+  `kernel/src/loader/start.rs`, + `Endowments::encode`, a crafted-input
+  corpus's natural subject — the natural second chunk),
+  `handle_page_fault`'s window arithmetic (~290 pure lines
   inside a function that also does device I/O), and the accounting
   (`stats_from`, `retire_threads`' merge, `PageFaultTrace`). #142 and #156
   remain the standing evidence.

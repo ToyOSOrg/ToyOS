@@ -57,21 +57,6 @@ actuators! {
     /// name. Judged by `isa_claim_refused_on_a_kernel_port`.
     isa_port_declared = "isa-port-declared";
 
-    /// Run the xHCI extended-capability walk over eight malformed lists at init.
-    xhci_xecp_selftest = "xhci-xecp-selftest";
-
-    /// Establish three nested `scheduler::Operation`s and report what each observed and restored; it stages nothing, touching no device.
-    sched_operation_nesting = "sched-operation-nesting";
-
-    /// Abandon the boot's first WRITE(10) data phase without waiting for it.
-    usb_transport_break = "usb-transport-break";
-
-    /// Sweep the boot stick from the shutdown syscall so the reset lands on a
-    /// controller that is moving bytes rather than on a bus idle since the
-    /// wedge. See `usb_gate::sweep_under_load`; judged by
-    /// `usb_reset_records_the_phase_it_cut`.
-    usb_reset_under_load = "usb-reset-under-load";
-
     /// Give the machine's stop no time: one sweep, and a thread not parked at
     /// it outlasts the stop. Judged by `machine_shutdown_short_stop`.
     stop_budget_spent = "stop-budget-spent";
@@ -99,9 +84,6 @@ actuators! {
 
     /// Send one NMI from the idle loop, and return from its handler via `iretq` with a second NMI already pending.
     nmi_nested = "nmi-nested";
-
-    /// Run `parse_config` over nine crafted configuration descriptors at init.
-    xhci_descriptor_selftest = "xhci-descriptor-selftest";
 
     /// Walk the PCI capability list, window check and parse over crafted config-space layouts at init.
     pci_cap_selftest = "pci-cap-selftest";
@@ -134,14 +116,13 @@ actuators! {
     /// `amdvi_selftest`.
     amdvi_selftest = "amdvi-selftest";
 
-    /// Remap no message, as on a platform that cannot: VT-d reads the DMAR's
-    /// flags with `INTR_REMAP` clear, and AMD-Vi leaves every interrupt half
-    /// invalid. Judged by `claim_refused_without_remapping` and
-    /// `amdvi_claim_refused_without_remapping`.
-    iommu_no_remap = "iommu-no-remap";
-
     /// Leave every AP holding the CR0/CR4 that INIT left it.
     no_ap_control_regs = "no-ap-control-regs";
+
+    /// Make one direct-map leaf writable and executable before the boot's
+    /// audit of the kernel's tables, which must stop the boot on it. Judged by
+    /// `kernel_wx_leaf_is_refused` and `virt_kernel_wx_leaf_is_refused`.
+    kernel_wx_leaf = "kernel-wx-leaf";
 
     /// Hand every CPU the loader's Intel update with its header's revision
     /// raised by one and its checksum sealed again: the read-back's negative
@@ -214,11 +195,6 @@ actuators! {
     /// Have the last boot checkpoint's painter go fatal holding the panel's
     /// latch: a fatal path meeting a painter that will never let go.
     panel_painter_stalls = "panel-painter-stalls";
-
-    /// Leave the xHCI controller at `xhci-leave=<bus>:<device>.<function>` to a
-    /// claim: `drivers::xhci` never touches it. Read through [`xhci_left`];
-    /// judged by `usbd_drives_the_spare`.
-    xhci_leave = "xhci-leave=";
 }
 
 #[cfg(feature = "boot-actuators")]
@@ -243,16 +219,7 @@ static ARMED: [AtomicU64; ARM_WORDS] = [const { AtomicU64::new(0) }; ARM_WORDS];
 pub fn init(cmdline: &str) {
     let mut armed = [0u64; ARM_WORDS];
     for token in toyos_abi::boot::actuators(cmdline).filter(|t| !crate::params::claims(t)) {
-        // A name that ends in `=` carries the rest of its token as a value.
-        let name = match token.split_once('=') {
-            Some((name, value)) => {
-                let name = &token[..=name.len()];
-                take_value(name, value);
-                name
-            }
-            None => token,
-        };
-        arm(&mut armed, name);
+        arm(&mut armed, token);
     }
     for (name, implied) in IMPLIES {
         if is_armed(&armed, name) {
@@ -268,48 +235,6 @@ pub fn init(cmdline: &str) {
     if armed.iter().any(|&word| word != 0) {
         log!("actuators: {cmdline}");
     }
-}
-
-/// The value a valued actuator carries, kept where its reader finds it.
-#[cfg(feature = "boot-actuators")]
-fn take_value(name: &str, value: &str) {
-    match name {
-        "xhci-leave=" => {
-            let at = function_address(value).unwrap_or_else(|| {
-                panic!("boot parameter {name}{value}: not <bus>:<device>.<function> in hex")
-            });
-            XHCI_LEFT.store(u64::from(at), Ordering::Relaxed);
-        }
-        _ => panic!("boot parameter {name}{value}: this kernel declares no such valued actuator"),
-    }
-}
-
-/// `bb:dd.f` in hex as a requester id, bus over device over function: a
-/// machine with two controllers of one id names one by where it is.
-#[cfg(feature = "boot-actuators")]
-fn function_address(value: &str) -> Option<u16> {
-    let (bus, rest) = value.split_once(':')?;
-    let (dev, func) = rest.split_once('.')?;
-    let (bus, dev, func) =
-        (u8::from_str_radix(bus, 16).ok()?, u8::from_str_radix(dev, 16).ok()?, u8::from_str_radix(func, 16).ok()?);
-    (dev < 32 && func < 8).then_some(u16::from(bus) << 8 | u16::from(dev) << 3 | u16::from(func))
-}
-
-/// The requester id of the controller `xhci-leave=` names, read only once
-/// that actuator is armed.
-#[cfg(feature = "boot-actuators")]
-static XHCI_LEFT: AtomicU64 = AtomicU64::new(0);
-
-/// The requester id of the xHCI controller `xhci-leave=` leaves to a claim,
-/// if it is armed.
-#[cfg(feature = "boot-actuators")]
-pub fn xhci_left() -> Option<u16> {
-    xhci_leave().then(|| XHCI_LEFT.load(Ordering::Relaxed) as u16)
-}
-
-#[cfg(not(feature = "boot-actuators"))]
-pub const fn xhci_left() -> Option<u16> {
-    None
 }
 
 #[cfg(feature = "boot-actuators")]

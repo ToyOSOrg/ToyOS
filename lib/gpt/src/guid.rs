@@ -91,6 +91,25 @@ impl Guid {
     pub const fn is_zero(&self) -> bool {
         u128::from_ne_bytes(self.0) == 0
     }
+
+    /// The registry text form [`Display`](fmt::Display) writes — uppercase
+    /// hex, the first three groups little-endian on the disk (UEFI 2.10
+    /// Appendix A) — exactly, and nothing else: one spelling per GUID.
+    pub fn parse(text: &str) -> Option<Self> {
+        const TEXT_ORDER: [usize; 16] = [3, 2, 1, 0, 5, 4, 7, 6, 8, 9, 10, 11, 12, 13, 14, 15];
+        let text = text.as_bytes();
+        if text.len() != 36 || [8, 13, 18, 23].iter().any(|&at| text.get(at) != Some(&b'-')) {
+            return None;
+        }
+        let hex = |byte: u8| char::from(byte).to_digit(16).filter(|_| !byte.is_ascii_lowercase());
+        let mut digits = text.iter().filter(|&&b| b != b'-').map(|&b| hex(b));
+        let mut bytes = [0u8; 16];
+        for &at in &TEXT_ORDER {
+            let (high, low) = (digits.next()??, digits.next()??);
+            *bytes.get_mut(at)? = u8::try_from(high << 4 | low).ok()?;
+        }
+        digits.next().is_none().then_some(Self(bytes))
+    }
 }
 
 impl fmt::Display for Guid {
@@ -129,6 +148,32 @@ mod tests {
 
         let text = heapless_format(Guid(ON_DISK));
         assert_eq!(&text[..], b"C12A7328-F81F-11D2-BA4B-00A0C93EC93B");
+    }
+
+    #[test]
+    fn the_registry_text_parses_to_the_bytes_it_prints_from() {
+        let text = heapless_format(Guid::EFI_SYSTEM);
+        let text = core::str::from_utf8(&text).expect("ASCII");
+        assert_eq!(Guid::parse(text), Some(Guid::EFI_SYSTEM));
+    }
+
+    /// One spelling per GUID: every near miss a config could plausibly write
+    /// is refused, not normalised.
+    #[test]
+    fn a_guid_is_the_uppercase_registry_form_and_nothing_else() {
+        for bad in [
+            "c12a7328-f81f-11d2-ba4b-00a0c93ec93b",
+            "{C12A7328-F81F-11D2-BA4B-00A0C93EC93B}",
+            "C12A7328F81F11D2BA4B00A0C93EC93B",
+            "C12A7328-F81F-11D2-BA4B-00A0C93EC93",
+            "C12A7328-F81F-11D2-BA4B-00A0C93EC93BB",
+            "C12A7328-F81F-11D2-BA4B00-A0C93EC93B",
+            "G12A7328-F81F-11D2-BA4B-00A0C93EC93B",
+            "C12A7328-F81F-11D2-BA4B-00A0C93EC9\u{e9}",
+            "",
+        ] {
+            assert_eq!(Guid::parse(bad), None, "{bad:?} parsed");
+        }
     }
 
     #[test]

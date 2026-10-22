@@ -36,7 +36,7 @@
 //! `log!` — the interrupted context may hold the log ring's own shard, and
 //! `build/sourcegate.rs`'s `nmi_does_not_log` is the gate. The sampling path is
 //! also on every CPU every second of every boot, so it is atomics and one
-//! `rdtsc` and no division at all. The report divides, and only after the
+//! `cpu::counter` read and no division at all. The report divides, and only after the
 //! machine is already being ended.
 //!
 //! # What it does not cover, stated rather than implied
@@ -45,7 +45,7 @@
 //!   generates no sample. That is the right shape and not a gap: a halted CPU
 //!   is not spinning on anything, and one that is woken takes the interrupt
 //!   that wakes it.
-//! - **The span before `clock::init`,** which has no TSC period to convert a
+//! - **The span before `clock::init`,** which has no counter period to convert a
 //!   bound with, and before `irqchip::init`, which has no LVT to arm. The same
 //!   floor `crate::deadline` states.
 //! - **A CPU with `IF` set that no timer ever interrupts.** Nothing resets it,
@@ -60,7 +60,6 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering::{Acquire, Relaxed, Rel
 
 use crate::arch::{cpu, percpu, pmu, trap};
 use crate::smp;
-use crate::sched::MAX_CPUS;
 use crate::symbols::At;
 
 /// The negative control, in a file of its own because it says what it staged
@@ -77,20 +76,20 @@ pub const LOCKED_UP: &str = "a cpu locked up with interrupts off";
 /// lateness reads the same period.
 const SAMPLE_NS: u64 = toyos_tco::HARD_LOCKUP_SAMPLE_NS;
 
-/// The bound in TSC ticks, or 0 for a boot that armed none. Written on the BSP
+/// The bound in counter ticks, or 0 for a boot that armed none. Written on the BSP
 /// before any AP exists.
-static BOUND_TSC: AtomicU64 = AtomicU64::new(0);
+static BOUND_TICKS: AtomicU64 = AtomicU64::new(0);
 
 /// The same bound in milliseconds, for the record to quote and the probe to
 /// stage against.
 static BOUND_MS: AtomicU64 = AtomicU64::new(0);
 
-/// TSC ticks per millisecond, so the report can turn a span into a number
+/// Counter ticks per millisecond, so the report can turn a span into a number
 /// without reaching for the nanosecond clock's out-of-line divide.
 static TICKS_PER_MS: AtomicU64 = AtomicU64::new(0);
 
-/// The counter's reload period, in reference cycles — which are TSC ticks,
-/// since fixed counter 2 counts the reference clock (SDM Vol. 3B §20.2.2).
+/// The performance counter's reload period, in `cpu::counter` ticks, the unit
+/// `pmu::arm` takes.
 static PERIOD: AtomicU64 = AtomicU64::new(0);
 
 /// Whether the panic path has taken this machine. A panicked kernel holds its
@@ -99,22 +98,44 @@ static PERIOD: AtomicU64 = AtomicU64::new(0);
 /// machine out from under its own report.
 static STOOD_DOWN: AtomicBool = AtomicBool::new(false);
 
-/// Per CPU, all of it written by that CPU from its own NMI and read by whichever
-/// CPU seals: the progress count at its last sample, when that count last moved,
-/// and where the last sample found it.
-static PROGRESS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static STILL_SINCE: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static AT_TSC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static AT_PC: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static AT_SP: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static AT_FLAGS: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static ARMED_PMU: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// A CPU's words, all of them written by that CPU — from its own NMI, or from
+/// `sync::Lock::lock`'s spin — and read by whichever CPU seals.
+pub struct Local {
+    /// The progress count at its last sample, when that count last moved, and
+    /// where the last sample found it.
+    progress: AtomicU64,
+    still_since: AtomicU64,
+    at_counter: AtomicU64,
+    at_pc: AtomicU64,
+    at_sp: AtomicU64,
+    at_flags: AtomicU64,
+    armed_pmu: AtomicBool,
+    /// The lock it is spinning on and the `#[track_caller]` site that asked for
+    /// it, written at the top of the spin and cleared when it acquires. Zero is
+    /// a CPU inside no contended acquisition.
+    spin_lock: AtomicU64,
+    spin_at: AtomicU64,
+}
 
-/// The lock a CPU is spinning on and the `#[track_caller]` site that asked for
-/// it, written by `sync::Lock::lock` at the top of its spin and cleared when it
-/// acquires. Zero is a CPU that is inside no contended acquisition.
-static SPIN_LOCK: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
-static SPIN_AT: [AtomicU64; MAX_CPUS] = [const { AtomicU64::new(0) }; MAX_CPUS];
+impl Local {
+    pub fn new() -> Self {
+        Self {
+            progress: AtomicU64::new(0),
+            still_since: AtomicU64::new(0),
+            at_counter: AtomicU64::new(0),
+            at_pc: AtomicU64::new(0),
+            at_sp: AtomicU64::new(0),
+            at_flags: AtomicU64::new(0),
+            armed_pmu: AtomicBool::new(false),
+            spin_lock: AtomicU64::new(0),
+            spin_at: AtomicU64::new(0),
+        }
+    }
+}
+
+fn of(cpu: usize) -> &'static Local {
+    &crate::cpu_local::of(cpu as u32).hardlockup
+}
 
 /// Turn the bound this boot named into a bound on one CPU, and arm the BSP.
 ///
@@ -136,7 +157,7 @@ pub fn start(deadline_ms: u64) -> Armed {
         return Armed { ms: 0, sampled: false };
     }
     BOUND_MS.store(ms, Relaxed);
-    BOUND_TSC.store(ticks, Relaxed);
+    BOUND_TICKS.store(ticks, Relaxed);
     TICKS_PER_MS.store(per_ms, Relaxed);
     PERIOD.store(crate::clock::counter_ticks(SAMPLE_NS), Relaxed);
     arm_this_cpu();
@@ -181,22 +202,19 @@ impl fmt::Display for Armed {
 /// Every CPU, called once as it joins: the counters and the LVT are per logical
 /// CPU, and a CPU nobody armed is one this bound does not cover.
 pub fn arm_this_cpu() {
-    if BOUND_TSC.load(Relaxed) == 0 {
+    if BOUND_TICKS.load(Relaxed) == 0 {
         return;
     }
     let me = percpu::cpu_id() as usize;
-    if me >= MAX_CPUS {
-        return;
-    }
     // The baseline first and unconditionally: a CPU with no counter of its own
     // is still sampled by any NMI that reaches it, and a sample against an
     // unwritten baseline would read as a CPU that has been stuck since boot.
-    PROGRESS[me].store(crate::irq_census::taken_here(), Relaxed);
-    STILL_SINCE[me].store(cpu::counter(), Relaxed);
+    of(me).progress.store(crate::irq_census::taken_here(), Relaxed);
+    of(me).still_since.store(cpu::counter(), Relaxed);
     if !pmu::arm(PERIOD.load(Relaxed)) {
         return;
     }
-    ARMED_PMU[me].store(true, Relaxed);
+    of(me).armed_pmu.store(true, Relaxed);
 }
 
 /// Stand the detector down for the rest of this machine's life.
@@ -224,14 +242,11 @@ pub fn bound_ms() -> u64 {
 /// that is not this CPU's own overflow, so the diagnostic senders — the blocked
 /// task dump's probe — cost one load and one compare.
 pub fn sample(pc: u64, sp: u64, flags: u64) {
-    if BOUND_TSC.load(Relaxed) == 0 || STOOD_DOWN.load(Relaxed) {
+    if BOUND_TICKS.load(Relaxed) == 0 || STOOD_DOWN.load(Relaxed) {
         return;
     }
     let me = percpu::cpu_id() as usize;
-    if me >= MAX_CPUS {
-        return;
-    }
-    let mine = ARMED_PMU[me].load(Relaxed) && pmu::overflowed();
+    let mine = of(me).armed_pmu.load(Relaxed) && pmu::overflowed();
     // A machine with no PMU has this bound only under the actuator that sends
     // the NMI the counter would have, which is how QEMU's guest reaches this
     // decision at all.
@@ -239,19 +254,19 @@ pub fn sample(pc: u64, sp: u64, flags: u64) {
         return;
     }
     let now = cpu::counter();
-    AT_PC[me].store(pc, Relaxed);
-    AT_SP[me].store(sp, Relaxed);
-    AT_FLAGS[me].store(flags, Relaxed);
-    AT_TSC[me].store(now, Relaxed);
+    of(me).at_pc.store(pc, Relaxed);
+    of(me).at_sp.store(sp, Relaxed);
+    of(me).at_flags.store(flags, Relaxed);
+    of(me).at_counter.store(now, Relaxed);
 
     let taken = crate::irq_census::taken_here();
-    let moved = PROGRESS[me].swap(taken, Relaxed) != taken;
+    let moved = of(me).progress.swap(taken, Relaxed) != taken;
     // `IF` set is the whole difference between this bound and the deadline's: a
     // CPU that can still take an interrupt is one the timer entry's poll
     // reaches, and this mechanism is not about it.
     if moved || trap::frame_interrupts_enabled(flags) {
-        STILL_SINCE[me].store(now, Relaxed);
-    } else if now.wrapping_sub(STILL_SINCE[me].load(Relaxed)) >= BOUND_TSC.load(Relaxed) {
+        of(me).still_since.store(now, Relaxed);
+    } else if now.wrapping_sub(of(me).still_since.load(Relaxed)) >= BOUND_TICKS.load(Relaxed) {
         locked_up(me, pc, sp, now)
     }
     // **After the decision and never before it.** Re-arming clears the mask
@@ -279,7 +294,7 @@ fn locked_up(me: usize, pc: u64, sp: u64, now: u64) -> ! {
     }
     crate::drivers::panic_console::seal_wedge(format_args!(
         "{}",
-        Report { me, pc, sp, now, cpus: (smp::cpu_count() as usize).min(MAX_CPUS) }
+        Report { me, pc, sp, now, cpus: smp::cpu_count() as usize }
     ));
     // The seal first, because the USB stop `reset_now` makes before it writes
     // the register is bounded but not instant, and this record is the
@@ -309,14 +324,11 @@ pub struct Spinning {
 #[must_use]
 pub fn spinning_on(lock: u64, at: &'static core::panic::Location<'static>) -> Spinning {
     let me = percpu::cpu_id() as usize;
-    if me >= MAX_CPUS {
-        return Spinning { lock: 0, at: 0 };
-    }
-    let was = Spinning { lock: SPIN_LOCK[me].load(Relaxed), at: SPIN_AT[me].load(Relaxed) };
-    SPIN_AT[me].store(at as *const _ as u64, Relaxed);
+    let was = Spinning { lock: of(me).spin_lock.load(Relaxed), at: of(me).spin_at.load(Relaxed) };
+    of(me).spin_at.store(at as *const _ as u64, Relaxed);
     // Last, and what the reader tests: a non-zero lock means the site beside it
     // was already stored — `Release`, so that holds on another CPU's record.
-    SPIN_LOCK[me].store(lock, Release);
+    of(me).spin_lock.store(lock, Release);
     was
 }
 
@@ -324,13 +336,11 @@ pub fn spinning_on(lock: u64, at: &'static core::panic::Location<'static>) -> Sp
 /// for before, which is nothing at the outermost spin.
 pub fn spinning_on_nothing(was: Spinning) {
     let me = percpu::cpu_id() as usize;
-    if me < MAX_CPUS {
-        SPIN_AT[me].store(was.at, Relaxed);
-        SPIN_LOCK[me].store(was.lock, Release);
-    }
+    of(me).spin_at.store(was.at, Relaxed);
+    of(me).spin_lock.store(was.lock, Release);
 }
 
-/// Milliseconds, from a TSC span. One `div`, and only on the path that has
+/// Milliseconds, from a `cpu::counter` span. One `div`, and only on the path that has
 /// already decided to end the machine.
 struct Ms(u64);
 
@@ -350,12 +360,12 @@ impl fmt::Display for Waiting {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // `Acquire`: pairs with the store that set it, so the site read below is
         // at least the one stored before it.
-        let lock = SPIN_LOCK[self.0].load(Acquire);
+        let lock = of(self.0).spin_lock.load(Acquire);
         if lock == 0 {
             return Ok(());
         }
         write!(f, " spinning on the lock at {lock:#x}")?;
-        let at = SPIN_AT[self.0].load(Relaxed);
+        let at = of(self.0).spin_at.load(Relaxed);
         if at != 0 {
             // SAFETY: written by `spinning_on` from a `&'static Location`, which
             // `#[track_caller]` places in this image's read-only data and which
@@ -384,7 +394,7 @@ impl fmt::Display for Report {
             f,
             "{LOCKED_UP}: cpu{me} has taken no interrupt for {}, with `IF` clear at every sample \
              in that span. Its bound is {} ms.",
-            Ms(now.wrapping_sub(STILL_SINCE[me].load(Relaxed))),
+            Ms(now.wrapping_sub(of(me).still_since.load(Relaxed))),
             BOUND_MS.load(Relaxed),
         )?;
         writeln!(f, "  pc={}", At(pc))?;
@@ -397,7 +407,7 @@ impl fmt::Display for Report {
             // since its own last sample is a CPU that is still running, which
             // is the first thing a reader of a wedged machine wants to know.
             let irqs = crate::irq_census::taken_by(cpu as u32).unwrap_or(0);
-            let at = AT_TSC[cpu].load(Relaxed);
+            let at = of(cpu).at_counter.load(Relaxed);
             if at == 0 {
                 writeln!(
                     f,
@@ -410,10 +420,10 @@ impl fmt::Display for Report {
             writeln!(
                 f,
                 "  cpu{cpu} irqs={irqs} (={} when sampled {} ago) if={} at {}{}",
-                PROGRESS[cpu].load(Relaxed),
+                of(cpu).progress.load(Relaxed),
                 Ms(now.wrapping_sub(at)),
-                u8::from(trap::frame_interrupts_enabled(AT_FLAGS[cpu].load(Relaxed))),
-                At(AT_PC[cpu].load(Relaxed)),
+                u8::from(trap::frame_interrupts_enabled(of(cpu).at_flags.load(Relaxed))),
+                At(of(cpu).at_pc.load(Relaxed)),
                 Waiting(cpu),
             )?;
         }
@@ -425,5 +435,5 @@ impl fmt::Display for Report {
 /// Whether `cpu` armed a counter of its own — what separates a boot the counter
 /// samples from one only the control's sender reaches.
 fn has_a_counter(cpu: usize) -> bool {
-    cpu < MAX_CPUS && ARMED_PMU[cpu].load(Relaxed)
+    of(cpu).armed_pmu.load(Relaxed)
 }

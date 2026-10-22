@@ -18,6 +18,12 @@
 //! target and the rest of the path in the window, and resolved again in the
 //! client's own table, so it reaches nothing the client does not hold.
 //!
+//! **An open file is a description the server keeps**: the file, the access
+//! the open fixed and the offset. A connection names descriptions by id, and
+//! [`DUP`] and [`EXPORT`] make second ids that share one description's offset,
+//! on the same connection or on a connection made for another process. An
+//! exported connection was given files and no directory: it names no path.
+//!
 //! **One connection per directory per process, a request and then its
 //! reply.** The client lends the server a [`WINDOW_BYTES`] region at connect
 //! ([`HELLO`]); paths, data and listings travel through it and the frames stay
@@ -31,7 +37,7 @@
 //! here keeps a write the server acknowledged and never made durable: that is
 //! what `Fsync` is for.
 
-use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME};
+use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME, MAX_TRANSFER_HANDLES};
 
 use crate::ipc::{Connection, IpcError};
 use crate::ipc_payload;
@@ -75,6 +81,23 @@ pub const SYMLINK: u32 = 16;
 pub const READLINK: u32 = 17;
 pub const STREAM: u32 = 18;
 pub const SYNC: u32 = 19;
+/// A second id on the description `fid` names: `value`.
+pub const DUP: u32 = 20;
+/// Move the description's offset: `flags` is [`SEEK_START`], [`SEEK_CURRENT`]
+/// or [`SEEK_END`], `offset` the signed distance from it; `value` is where it
+/// landed.
+pub const SEEK: u32 = 21;
+/// A connection to this server holding the descriptions of the `len` ids in
+/// the window, little-endian `u64`s, as ids 1.. in that order: the reply
+/// carries its other end. It spends a served slot of this connection's share
+/// from here, and names no path.
+pub const EXPORT: u32 = 22;
+/// The free space of the volume behind the capability ([`Room`]).
+pub const ROOM: u32 = 23;
+
+pub const SEEK_START: u64 = 0;
+pub const SEEK_CURRENT: u64 = 1;
+pub const SEEK_END: u64 = 2;
 
 // Replies, by frame type.
 pub const REPLY: u32 = 0x100;
@@ -105,6 +128,163 @@ pub const RIGHT_WRITE: u64 = 1;
 /// (`toyos_abi::syscall::Stat::volume`).
 pub const SERVED_VOLUME: u64 = 1 << 63;
 
+/// Declares [`Error`]: the refusals a server sends, each with its wire code,
+/// and the client end's own words, which have none.
+macro_rules! errors {
+    (
+        wire { $($(#[$doc:meta])* $name:ident = $code:literal,)* }
+        local { $($(#[$ldoc:meta])* $lname:ident = $lcode:literal,)* }
+    ) => {
+        /// Why a request was not answered with its result: the server's word
+        /// on the wire, or the client end's own.
+        ///
+        /// A kernel refusal of a call either end makes for the protocol is
+        /// translated once, by [`Error::kernel`]; this protocol carries no
+        /// kernel word.
+        // The discriminants are the wire codes, and past them, the client's
+        // words', so the compiler holds every one to its own.
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        #[repr(u8)]
+        pub enum Error {
+            $($(#[$doc])* $name = $code,)*
+            $($(#[$ldoc])* $lname = $lcode,)*
+        }
+
+        impl Error {
+            /// The word a reply's `status` carries: `None` for one of the
+            /// client end's own, which no server sends.
+            pub const fn code(self) -> Option<u64> {
+                match self {
+                    $(Self::$name => Some($code),)*
+                    $(Self::$lname => None,)*
+                }
+            }
+
+            /// The refusal a server's `code` names: `None` for a word no
+            /// server sends.
+            pub const fn from_code(code: u64) -> Option<Self> {
+                match code {
+                    $($code => Some(Self::$name),)*
+                    _ => None,
+                }
+            }
+
+            /// The word [`Self::byte`] answered, the client's own among them:
+            /// how one crosses `crate::files`' C interface.
+            pub const fn from_byte(byte: u8) -> Option<Self> {
+                match byte {
+                    $($code => Some(Self::$name),)*
+                    $($lcode => Some(Self::$lname),)*
+                    _ => None,
+                }
+            }
+
+            /// This word's discriminant, the client's own words' too.
+            pub const fn byte(self) -> u8 {
+                self as u8
+            }
+
+            #[cfg(test)]
+            const WIRE: &[Error] = &[$(Error::$name,)*];
+            #[cfg(test)]
+            const LOCAL: &[Error] = &[$(Error::$lname,)*];
+        }
+    };
+}
+
+errors! {
+    wire {
+        NotFound = 1,
+        AlreadyExists = 2,
+        /// A directory was asked for and this is a file or a link.
+        NotADirectory = 3,
+        /// A file was asked for and this is a directory.
+        IsADirectory = 4,
+        /// A directory with anything in it is not removed.
+        NotEmpty = 5,
+        /// A link's target was asked of something that is not one.
+        NotALink = 6,
+        /// A name, a path or a link's target longer than the volume or the wire
+        /// holds.
+        NameTooLong = 7,
+        /// A name the volume's format cannot store.
+        InvalidName = 8,
+        /// The directory's grant, or its volume, lets nothing in it change.
+        ReadOnly = 9,
+        /// A write, a truncate or a stream on a file not opened to write.
+        NotOpenForWriting = 10,
+        /// A directory the server serves as a root is not removed or renamed.
+        Root = 11,
+        /// A link's target climbs out of the directory the connection was given.
+        Escapes = 12,
+        /// A rename or a link made through an absolute link would span two
+        /// directories, which one connection does not.
+        CrossesDirectories = 13,
+        /// More links on the way than are followed, or a cycle of them.
+        Loop = 14,
+        /// A directory renamed beneath itself.
+        IntoItself = 15,
+        /// The volume has no room for it.
+        NoSpace = 16,
+        /// Past [`MAX_FILE_BYTES`], or past the largest file the volume's format
+        /// holds.
+        FileTooLarge = 17,
+        /// A bound the server or its volume keeps, refused rather than answered
+        /// short: a listing larger than the window, a directory with more entries
+        /// than it reads, a file in more pieces than its entry records.
+        LimitExceeded = 18,
+        /// The connection holds as many files open as the server keeps for one.
+        TooManyOpen = 19,
+        /// The server, or the share the grant names, serves as many connections
+        /// as it takes.
+        TooManyConnections = 20,
+        /// The server, or the share the grant names, serves as many streams as it
+        /// takes.
+        TooManyStreams = 21,
+        /// The device did not do it, or the volume's own structures do not decode.
+        Io = 22,
+        /// The file was removed or renamed over while it was open, or was opened
+        /// on an earlier connection to a server that has since restarted.
+        Stale = 23,
+        /// A file id the connection does not hold.
+        UnknownFile = 24,
+        /// A path that is not UTF-8, not [`canonical`], or not inside the window.
+        InvalidPath = 25,
+        /// A request whose words the protocol gives no meaning: an open flag it
+        /// does not have, a length past the window, an empty name or target.
+        InvalidRequest = 26,
+        /// The volume's format has no such thing, as FAT32 has no symlink.
+        Unsupported = 27,
+        /// The kernel had no room for what the request needs: a handle, memory,
+        /// a place in a queue.
+        OutOfResources = 28,
+        /// A path on a connection that was given files and no directory.
+        NoDirectory = 32,
+    }
+    local {
+        /// The server ended, and the connection with it.
+        Gone = 0x80,
+        /// This process holds no directory capability by that name.
+        NotHeld = 0x81,
+        /// The server answered something this protocol does not say.
+        Malformed = 0x82,
+    }
+}
+
+impl Error {
+    /// A kernel refusal of `call`, a call made for this protocol, as the
+    /// protocol names it. The kernel answers these calls nothing else for a
+    /// handle this end holds as it made it, so any other word is a broken
+    /// invariant.
+    pub fn kernel(call: &str, e: SyscallError) -> Self {
+        match e {
+            SyscallError::Gone => Self::Gone,
+            SyscallError::ResourceExhausted => Self::OutOfResources,
+            other => panic!("toyos::fs: the kernel refused {call} {other:?}, which it never answers it"),
+        }
+    }
+}
+
 ipc_payload! {
     /// Every request's words; what each means is its frame type's. Paths are
     /// in the window: the first `len` bytes, and for [`RENAME`] and
@@ -117,7 +297,7 @@ ipc_payload! {
         pub flags: u64,
     }
 
-    /// Every reply's words. `status` is 0 or a [`SyscallError`]'s wire value.
+    /// Every reply's words. `status` is 0 or an [`Error`]'s [`Error::code`].
     pub struct Reply {
         pub status: u64,
         pub kind: u64,
@@ -146,14 +326,18 @@ impl Reply {
         Self { status: 0, kind: 0, value: 0, value2: 0, mtime: 0, node: 0 }
     }
 
-    pub const fn refused(e: SyscallError) -> Self {
-        Self { status: e.to_u64(), kind: 0, value: 0, value2: 0, mtime: 0, node: 0 }
+    /// A server's refusal; one of the client end's own words is never one.
+    pub fn refused(e: Error) -> Self {
+        let status = e.code().unwrap_or_else(|| panic!("toyos::fs: a server refused with {e:?}, which is the client's"));
+        Self { status, kind: 0, value: 0, value2: 0, mtime: 0, node: 0 }
     }
 
-    fn result(self) -> Result<Self, SyscallError> {
+    /// The reply, or the refusal its status names; a status this protocol
+    /// does not have is [`Error::Malformed`].
+    fn result(self) -> Result<Self, Error> {
         match self.status {
             0 => Ok(self),
-            raw => Err(SyscallError::from_u64(raw).unwrap_or(SyscallError::Unknown)),
+            code => Err(Error::from_code(code).unwrap_or(Error::Malformed)),
         }
     }
 }
@@ -178,7 +362,7 @@ pub struct Grant<'a> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Access {
     /// Read, list and stat; every request that would change what the
-    /// directory holds is refused `PermissionDenied`.
+    /// directory holds is refused [`Error::ReadOnly`].
     ReadOnly,
     ReadWrite,
 }
@@ -271,6 +455,16 @@ pub struct Stat {
     pub node: u64,
 }
 
+/// How much more the volume behind a capability holds: `free` bytes, taken in
+/// allocation units of `unit` bytes, so a file of `n` bytes takes `n` rounded
+/// up to `unit`. A volume's own structures take room too, so it is a bound and
+/// never a promise.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Room {
+    pub free: u64,
+    pub unit: u64,
+}
+
 /// A write answered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Written {
@@ -292,24 +486,29 @@ pub struct Opened {
 /// Why a request on a path was not answered with its result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refused {
-    /// The server's word.
-    Error(SyscallError),
+    Error(Error),
     /// The path met an absolute symlink; [`Dir::link_target`] holds the
     /// absolute path, `.0` bytes long, to resolve in the client's own table.
     Link(usize),
 }
 
-impl From<SyscallError> for Refused {
-    fn from(e: SyscallError) -> Self {
+impl From<Error> for Refused {
+    fn from(e: Error) -> Self {
         Refused::Error(e)
     }
 }
 
-/// One directory capability, connected.
+/// Where a [`Dir`]'s connection comes from.
+enum Source {
+    /// A directory capability, connected again through the same connector.
+    Named { names: &'static Namespace, name: [u8; MAX_SERVICE_NAME], len: usize },
+    /// A connection another process exported: one connection, never another.
+    Exported,
+}
+
+/// One directory capability, or one exported connection, connected.
 pub struct Dir {
-    names: &'static Namespace,
-    name: [u8; MAX_SERVICE_NAME],
-    name_len: usize,
+    source: Source,
     conn: Option<Connection>,
     window: SharedMemory,
     generation: u64,
@@ -319,24 +518,31 @@ pub struct Dir {
 }
 
 impl Dir {
-    /// Connect to the directory `names` calls `name`. `NotFound` is a name this
-    /// process was not given.
-    pub fn connect(names: &'static Namespace, name: &str) -> Result<Self, SyscallError> {
+    /// Connect to the directory `names` calls `name`: [`Error::NotHeld`] for a
+    /// name this process was not given.
+    pub fn connect(names: &'static Namespace, name: &str) -> Result<Self, Error> {
         if name.len() > MAX_SERVICE_NAME {
-            return Err(SyscallError::InvalidArgument);
+            return Err(Error::NotHeld);
         }
         let mut buf = [0u8; MAX_SERVICE_NAME];
         buf[..name.len()].copy_from_slice(name.as_bytes());
-        let window = SharedMemory::create(WINDOW_BYTES)?;
-        let mut dir =
-            Self { names, name: buf, name_len: name.len(), conn: None, window, generation: 0, writable: false, volume: 0 };
+        let mut dir = Self::unconnected(Source::Named { names, name: buf, len: name.len() })?;
         dir.reconnect()?;
         Ok(dir)
     }
 
-    /// The capability's namespace name.
-    pub fn name(&self) -> &str {
-        core::str::from_utf8(&self.name[..self.name_len]).unwrap_or("")
+    /// Serve the connection an [`EXPORT`] answered, whose descriptions are ids
+    /// 1.. in the order exported. It names no path, and is not connected again
+    /// once it has ended.
+    pub fn adopt(conn: Connection) -> Result<Self, Error> {
+        let mut dir = Self::unconnected(Source::Exported)?;
+        dir.attach(conn)?;
+        Ok(dir)
+    }
+
+    fn unconnected(source: Source) -> Result<Self, Error> {
+        let window = SharedMemory::create(WINDOW_BYTES).map_err(|e| Error::kernel("a window", e))?;
+        Ok(Self { source, conn: None, window, generation: 0, writable: false, volume: 0 })
     }
 
     /// Counts this directory's connections; a file id is good only on the one
@@ -357,11 +563,22 @@ impl Dir {
     }
 
     /// Open a fresh connection through the same connector, and lend it the
-    /// window again. The old one's file ids name nothing from here on.
-    fn reconnect(&mut self) -> Result<(), SyscallError> {
+    /// window again. The old one's file ids name nothing from here on; an
+    /// exported connection has no connector, and stays gone.
+    fn reconnect(&mut self) -> Result<(), Error> {
         self.conn = None;
-        let name = core::str::from_utf8(&self.name[..self.name_len]).map_err(|_| SyscallError::InvalidArgument)?;
-        let conn = self.names.open(name)?;
+        let Source::Named { names, name, len } = &self.source else { return Err(Error::Gone) };
+        let name = core::str::from_utf8(&name[..*len]).expect("copied from a str");
+        let conn = match names.open(name) {
+            Ok(conn) => conn,
+            Err(SyscallError::NotFound) => return Err(Error::NotHeld),
+            Err(e) => return Err(Error::kernel("a connection", e)),
+        };
+        self.attach(conn)
+    }
+
+    /// Lend `conn` the window and serve on it.
+    fn attach(&mut self, conn: Connection) -> Result<(), Error> {
         let reply = hello(&conn, &self.window)?;
         self.writable = reply.value & RIGHT_WRITE != 0;
         self.volume = reply.value2 | SERVED_VOLUME;
@@ -372,7 +589,25 @@ impl Dir {
 
     /// One request and its reply on the current connection. A connection that
     /// has ended answers `Gone` and is dropped, so the next call reconnects.
-    fn call(&mut self, op: u32, request: &Request) -> Result<(u32, Reply), SyscallError> {
+    fn call(&mut self, op: u32, request: &Request) -> Result<(u32, Reply), Error> {
+        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
+        let (msg_type, reply, carried) = self.call_with(op, request, &mut batch)?;
+        if carried != 0 {
+            // A reply that brings handles nobody asked for speaks another protocol.
+            close_all(&batch[..carried]);
+            self.conn = None;
+            return Err(Error::Malformed);
+        }
+        Ok((msg_type, reply))
+    }
+
+    /// [`Self::call`], and the handles the reply frame carries into `batch`.
+    fn call_with(
+        &mut self,
+        op: u32,
+        request: &Request,
+        batch: &mut [RawHandle; MAX_TRANSFER_HANDLES],
+    ) -> Result<(u32, Reply, usize), Error> {
         if self.conn.is_none() {
             self.reconnect()?;
         }
@@ -380,7 +615,8 @@ impl Dir {
         let answered = conn.send(op, request).map_err(transport).and_then(|()| {
             let header = conn.recv_header().map_err(transport)?;
             let reply: Reply = conn.recv_payload(&header).map_err(transport)?;
-            Ok((header.msg_type, reply))
+            let carried = conn.recv_handles(&header, batch).map_err(transport)?;
+            Ok((header.msg_type, reply, carried))
         });
         if answered.is_err() {
             self.conn = None;
@@ -393,7 +629,7 @@ impl Dir {
     /// same thing on both.
     fn path_call(&mut self, op: u32, mut request: Request, first: &str, second: &str) -> Result<Reply, Refused> {
         if !canonical(first) || !canonical(second) {
-            return Err(Refused::Error(SyscallError::InvalidArgument));
+            return Err(Refused::Error(Error::InvalidPath));
         }
         let mut attempt = 0;
         loop {
@@ -402,10 +638,8 @@ impl Dir {
             request.len = first.len() as u64;
             request.len2 = second.len() as u64;
             match self.call(op, &request) {
-                Ok((LINK, reply)) => return Err(Refused::Link(reply.value.min(MAX_PATH as u64) as usize)),
-                Ok((REPLY, reply)) => return reply.result().map_err(Refused::Error),
-                Ok(_) => return Err(Refused::Error(SyscallError::Unknown)),
-                Err(SyscallError::Gone) if attempt == 0 => {
+                Ok((msg_type, reply)) => return path_answer(msg_type, reply),
+                Err(Error::Gone) if attempt == 0 => {
                     attempt += 1;
                     self.reconnect()?;
                 }
@@ -420,15 +654,14 @@ impl Dir {
         &buf[..len]
     }
 
-    /// A call on a file id: `Gone` when `generation` is not this connection's.
-    fn fid_call(&mut self, op: u32, generation: u64, request: &Request) -> Result<Reply, SyscallError> {
+    /// A call on a file id: [`Error::Stale`] when `generation` is not this
+    /// connection's.
+    fn fid_call(&mut self, op: u32, generation: u64, request: &Request) -> Result<Reply, Error> {
         if generation != self.generation || self.conn.is_none() {
-            return Err(SyscallError::Gone);
+            return Err(Error::Stale);
         }
-        match self.call(op, request)? {
-            (REPLY, reply) => reply.result(),
-            _ => Err(SyscallError::Unknown),
-        }
+        let (msg_type, reply) = self.call(op, request)?;
+        answer(msg_type, reply)
     }
 
     pub fn open(&mut self, path: &str, flags: u64) -> Result<Opened, Refused> {
@@ -440,50 +673,117 @@ impl Dir {
         let _ = self.fid_call(CLOSE, generation, &Request { fid, ..Request::new() });
     }
 
-    /// Read at most `out.len()` bytes, and at most the window, at `offset`.
-    pub fn read(&mut self, fid: u64, generation: u64, offset: u64, out: &mut [u8]) -> Result<usize, SyscallError> {
+    /// Read at most `out.len()` bytes, and at most the window, at the
+    /// description's offset, which moves past them.
+    pub fn read(&mut self, fid: u64, generation: u64, out: &mut [u8]) -> Result<usize, Error> {
         let len = out.len().min(WINDOW_BYTES);
-        let reply = self.fid_call(READ, generation, &Request { fid, offset, len: len as u64, ..Request::new() })?;
-        let n = (reply.value as usize).min(len);
+        let reply = self.fid_call(READ, generation, &Request { fid, len: len as u64, ..Request::new() })?;
+        let n = counted(reply.value, len)?;
         window_take(self.window(), 0, &mut out[..n]);
         Ok(n)
     }
 
-    /// Write at most the window of `data` at `offset`, or at the end for a file
-    /// opened to append. Answers how much, and the offset after it.
-    pub fn write(&mut self, fid: u64, generation: u64, offset: u64, data: &[u8]) -> Result<Written, SyscallError> {
+    /// Write at most the window of `data` at the description's offset, or at
+    /// the end for a file opened to append; the offset moves past it. Answers
+    /// how much, and the offset after it.
+    pub fn write(&mut self, fid: u64, generation: u64, data: &[u8]) -> Result<Written, Error> {
         let len = data.len().min(WINDOW_BYTES);
         window_put(self.window(), 0, &data[..len]);
-        let reply = self.fid_call(WRITE, generation, &Request { fid, offset, len: len as u64, ..Request::new() })?;
-        Ok(Written { len: (reply.value as usize).min(len), offset: reply.value2 })
+        let reply = self.fid_call(WRITE, generation, &Request { fid, len: len as u64, ..Request::new() })?;
+        Ok(Written { len: counted(reply.value, len)?, offset: reply.value2 })
     }
 
-    pub fn fstat(&mut self, fid: u64, generation: u64) -> Result<Stat, SyscallError> {
+    /// Move the description's offset `delta` from `whence` ([`SEEK_START`],
+    /// [`SEEK_CURRENT`] or [`SEEK_END`]): where it landed.
+    pub fn seek(&mut self, fid: u64, generation: u64, whence: u64, delta: i64) -> Result<u64, Error> {
+        let request = Request { fid, offset: delta as u64, flags: whence, ..Request::new() };
+        self.fid_call(SEEK, generation, &request).map(|r| r.value)
+    }
+
+    /// A second id on `fid`'s description, sharing its offset.
+    pub fn dup(&mut self, fid: u64, generation: u64) -> Result<u64, Error> {
+        self.fid_call(DUP, generation, &Request { fid, ..Request::new() }).map(|r| r.value)
+    }
+
+    /// A connection for another process holding the descriptions `fids` name,
+    /// as ids 1.. in this order ([`Dir::adopt`]). It spends a served slot of
+    /// this connection's share for as long as anybody holds it.
+    pub fn export(&mut self, generation: u64, fids: &[u64]) -> Result<Connection, Error> {
+        if generation != self.generation || self.conn.is_none() {
+            return Err(Error::Stale);
+        }
+        if fids.is_empty() || fids.len() * 8 > WINDOW_BYTES {
+            return Err(Error::InvalidRequest);
+        }
+        for (i, fid) in fids.iter().enumerate() {
+            window_put(self.window(), i * 8, &fid.to_le_bytes());
+        }
+        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
+        let request = Request { len: fids.len() as u64, ..Request::new() };
+        let (msg_type, reply, carried) = self.call_with(EXPORT, &request, &mut batch)?;
+        match (answer(msg_type, reply), carried) {
+            (Ok(_), 1) => Ok(Connection::received(batch[0])),
+            (Err(e), 0) => Err(e),
+            (_, n) => {
+                close_all(&batch[..n]);
+                self.conn = None;
+                Err(Error::Malformed)
+            }
+        }
+    }
+
+    pub fn fstat(&mut self, fid: u64, generation: u64) -> Result<Stat, Error> {
         let volume = self.volume;
         self.fid_call(FSTAT, generation, &Request { fid, ..Request::new() }).map(|r| stat_of(&r, volume))
     }
 
-    pub fn truncate(&mut self, fid: u64, generation: u64, size: u64) -> Result<(), SyscallError> {
+    pub fn truncate(&mut self, fid: u64, generation: u64, size: u64) -> Result<(), Error> {
         self.fid_call(TRUNCATE, generation, &Request { fid, offset: size, ..Request::new() }).map(drop)
     }
 
     /// Make what this file was written durable on the volume.
-    pub fn fsync(&mut self, fid: u64, generation: u64) -> Result<(), SyscallError> {
+    pub fn fsync(&mut self, fid: u64, generation: u64) -> Result<(), Error> {
         self.fid_call(FSYNC, generation, &Request { fid, ..Request::new() }).map(drop)
     }
 
-    /// Make the whole volume durable.
-    pub fn sync(&mut self) -> Result<(), Refused> {
-        self.path_call(SYNC, Request::new(), "", "").map(drop)
+    /// Make the whole volume durable. A sync names no path, so a link is no
+    /// answer to it.
+    pub fn sync(&mut self) -> Result<(), Error> {
+        self.path_call(SYNC, Request::new(), "", "").map(drop).map_err(|refused| match refused {
+            Refused::Error(e) => e,
+            Refused::Link(_) => Error::Malformed,
+        })
     }
 
-    /// A pipe whose bytes the server appends to this file from `offset` on,
-    /// for a program's standard output: the write end.
-    pub fn stream(&mut self, fid: u64, generation: u64, offset: u64) -> Result<Pipe, SyscallError> {
-        self.fid_call(STREAM, generation, &Request { fid, offset, ..Request::new() })?;
-        let conn = self.conn.as_ref().ok_or(SyscallError::Gone)?;
-        let [end] = conn.recv_handles_exact::<1>().ok_or(SyscallError::Unknown)?;
-        Ok(Pipe(crate::OwnedHandle(end)))
+    /// The volume's [`Room`]. Like [`Self::sync`], it names no path.
+    pub fn room(&mut self) -> Result<Room, Error> {
+        let reply = self.path_call(ROOM, Request::new(), "", "").map_err(|refused| match refused {
+            Refused::Error(e) => e,
+            Refused::Link(_) => Error::Malformed,
+        })?;
+        match reply.value2 {
+            0 => Err(Error::Malformed),
+            unit => Ok(Room { free: reply.value, unit }),
+        }
+    }
+
+    /// A pipe whose bytes the server writes to this file at the description's
+    /// offset, which they move, for a program's standard output: the write end.
+    pub fn stream(&mut self, fid: u64, generation: u64) -> Result<Pipe, Error> {
+        if generation != self.generation || self.conn.is_none() {
+            return Err(Error::Stale);
+        }
+        let mut batch = [toyos_abi::HANDLE_INVALID; MAX_TRANSFER_HANDLES];
+        let (msg_type, reply, carried) = self.call_with(STREAM, &Request { fid, ..Request::new() }, &mut batch)?;
+        match (answer(msg_type, reply), carried) {
+            (Ok(_), 1) => Ok(Pipe(crate::OwnedHandle(batch[0]))),
+            (Err(e), 0) => Err(e),
+            (_, n) => {
+                close_all(&batch[..n]);
+                self.conn = None;
+                Err(Error::Malformed)
+            }
+        }
     }
 
     pub fn stat(&mut self, path: &str, follow: bool) -> Result<Stat, Refused> {
@@ -497,7 +797,7 @@ impl Dir {
     /// was short asks again with one that long.
     pub fn read_dir(&mut self, path: &str, out: &mut [u8]) -> Result<usize, Refused> {
         let reply = self.path_call(READDIR, Request::new(), path, "")?;
-        let n = (reply.value as usize).min(WINDOW_BYTES);
+        let n = counted(reply.value, WINDOW_BYTES)?;
         if n <= out.len() {
             window_take(self.window(), 0, &mut out[..n]);
         }
@@ -522,46 +822,69 @@ impl Dir {
 
     /// Make `link` a symlink holding `target`, which is stored as written and
     /// resolved by whoever follows it.
-    pub fn symlink(&mut self, target: &str, link: &str) -> Result<(), Refused> {
-        if target.is_empty() || target.len() > MAX_PATH {
-            return Err(Refused::Error(SyscallError::InvalidArgument));
+    pub fn symlink(&mut self, target: &str, link: &str) -> Result<(), Error> {
+        if target.is_empty() {
+            return Err(Error::InvalidRequest);
+        }
+        if target.len() > MAX_PATH {
+            return Err(Error::NameTooLong);
         }
         // The target is stored, not resolved, so it is not held to `canonical`.
         if !canonical(link) {
-            return Err(Refused::Error(SyscallError::InvalidArgument));
+            return Err(Error::InvalidPath);
         }
         let mut request = Request::new();
         window_put(self.window(), 0, link.as_bytes());
         window_put(self.window(), link.len(), target.as_bytes());
         request.len = link.len() as u64;
         request.len2 = target.len() as u64;
-        match self.call(SYMLINK, &request) {
-            Ok((REPLY, reply)) => reply.result().map(drop).map_err(Refused::Error),
-            Ok(_) => Err(Refused::Error(SyscallError::Unknown)),
-            Err(e) => Err(Refused::Error(e)),
-        }
+        let (msg_type, reply) = self.call(SYMLINK, &request)?;
+        answer(msg_type, reply).map(drop)
     }
 
     /// What the symlink at `path` holds, into `out`.
     pub fn read_link(&mut self, path: &str, out: &mut [u8; MAX_PATH]) -> Result<usize, Refused> {
         let reply = self.path_call(READLINK, Request::new(), path, "")?;
-        let n = (reply.value as usize).min(MAX_PATH);
+        let n = counted(reply.value, MAX_PATH)?;
         window_take(self.window(), 0, &mut out[..n]);
         Ok(n)
     }
 }
 
+/// A path request's reply frame: its reply, an absolute link to resolve again,
+/// or the refusal it names.
+fn path_answer(msg_type: u32, reply: Reply) -> Result<Reply, Refused> {
+    match msg_type {
+        LINK => Err(Refused::Link(counted(reply.value, MAX_PATH)?)),
+        _ => answer(msg_type, reply).map_err(Refused::Error),
+    }
+}
+
+/// A reply frame that carries no link: the reply, or the refusal it names.
+fn answer(msg_type: u32, reply: Reply) -> Result<Reply, Error> {
+    match msg_type {
+        REPLY => reply.result(),
+        _ => Err(Error::Malformed),
+    }
+}
+
+/// A count of bytes a reply says it put in the window, which is at most what
+/// was asked, `most`.
+fn counted(value: u64, most: usize) -> Result<usize, Error> {
+    usize::try_from(value).ok().filter(|&n| n <= most).ok_or(Error::Malformed)
+}
+
 /// Each entry of a listing [`Dir::read_dir`] answered: `(kind, size, name)`.
 /// An entry is its kind byte, its size, its name's length and the name.
-pub fn for_each_entry(listing: &[u8], mut f: impl FnMut(u64, u64, &str)) -> Result<(), SyscallError> {
+pub fn for_each_entry(listing: &[u8], mut f: impl FnMut(u64, u64, &str)) -> Result<(), Error> {
     let mut at = 0;
     while at < listing.len() {
-        let head = listing.get(at..at + 11).ok_or(SyscallError::Unknown)?;
+        let head = listing.get(at..at + 11).ok_or(Error::Malformed)?;
         let kind = head[0] as u64;
         let size = u64::from_le_bytes(head[1..9].try_into().expect("eight bytes"));
         let len = u16::from_le_bytes([head[9], head[10]]) as usize;
-        let name = listing.get(at + 11..at + 11 + len).ok_or(SyscallError::Unknown)?;
-        f(kind, size, core::str::from_utf8(name).map_err(|_| SyscallError::Unknown)?);
+        let name = listing.get(at + 11..at + 11 + len).ok_or(Error::Malformed)?;
+        f(kind, size, core::str::from_utf8(name).map_err(|_| Error::Malformed)?);
         at += 11 + len;
     }
     Ok(())
@@ -580,6 +903,12 @@ pub fn encode_entry(out: &mut [u8], kind: u64, size: u64, name: &str) -> Option<
     Some(need)
 }
 
+fn close_all(handles: &[RawHandle]) {
+    for h in handles {
+        toyos_abi::syscall::close(*h);
+    }
+}
+
 fn stat_of(reply: &Reply, volume: u64) -> Stat {
     Stat { kind: reply.kind, size: reply.value2, mtime: reply.mtime, volume, node: reply.node }
 }
@@ -589,32 +918,28 @@ fn stat_of(reply: &Reply, volume: u64) -> Stat {
 ///
 /// A server that refuses a connection as it takes it answers before it lets
 /// go, so a hello that finds it gone still reads why.
-pub fn hello(conn: &Connection, window: &SharedMemory) -> Result<Reply, SyscallError> {
-    let sent = conn
-        .send_handles([window.share()?])
-        .and_then(|()| conn.send(HELLO, &Request::new()).map_err(transport));
+fn hello(conn: &Connection, window: &SharedMemory) -> Result<Reply, Error> {
+    // The window travels in the HELLO frame itself, as one message.
+    let sent = window
+        .share()
+        .map_err(|e| Error::kernel("a window's loan", e))
+        .and_then(|lent| conn.send_with(HELLO, &Request::new(), [lent]).map_err(transport));
     match sent {
-        Ok(()) | Err(SyscallError::Gone) => {}
+        Ok(()) | Err(Error::Gone) => {}
         Err(e) => return Err(e),
     }
-    receive(conn)?.result()
-}
-
-fn receive(conn: &Connection) -> Result<Reply, SyscallError> {
     let header = conn.recv_header().map_err(transport)?;
-    if header.msg_type != REPLY {
-        return Err(SyscallError::Unknown);
-    }
-    conn.recv_payload(&header).map_err(transport)
+    let reply = conn.recv_payload(&header).map_err(transport)?;
+    answer(header.msg_type, reply)
 }
 
-/// Every way a connection's transport can fail is the server having gone.
-fn transport(e: IpcError) -> SyscallError {
+/// A connection's transport refused, as the protocol names it.
+fn transport(e: IpcError) -> Error {
     match e {
-        IpcError::Disconnected => SyscallError::Gone,
-        IpcError::Syscall(SyscallError::Gone) => SyscallError::Gone,
-        IpcError::Syscall(e) => e,
-        IpcError::Malformed | IpcError::TooLarge => SyscallError::Unknown,
+        IpcError::Disconnected => Error::Gone,
+        IpcError::Malformed => Error::Malformed,
+        IpcError::Syscall(e) => Error::kernel("a frame", e),
+        IpcError::TooLarge => unreachable!("every frame of this protocol is one fixed payload"),
     }
 }
 
@@ -724,7 +1049,79 @@ mod tests {
         let mut seen = Vec::new();
         for_each_entry(&buf[..n], |k, s, name| seen.push((k, s, name.to_string()))).unwrap();
         assert_eq!(seen, [(KIND_DIR, 42, "Documents".to_string())]);
-        assert!(for_each_entry(&buf[..n - 1], |_, _, _| {}).is_err());
+        assert_eq!(for_each_entry(&buf[..n - 1], |_, _, _| {}), Err(Error::Malformed));
         assert_eq!(encode_entry(&mut buf[..10], KIND_FILE, 0, "x"), None);
+    }
+
+    /// Every refusal a server sends reads back as itself, and 0 — a reply's
+    /// success — is none of them.
+    #[test]
+    fn every_server_refusal_round_trips_through_its_code() {
+        for &e in Error::WIRE {
+            let code = e.code().expect("a server's refusal has a code");
+            assert_ne!(code, 0, "{e:?}");
+            assert_eq!(Error::from_code(code), Some(e));
+            assert_eq!(Reply::refused(e).result().err(), Some(e));
+        }
+        assert!(Reply::ok().result().is_ok());
+    }
+
+    /// The client end's own words have no code, so no server's status reads
+    /// as one, and a server that tried to send one is a bug that fails loudly.
+    #[test]
+    fn the_client_s_own_words_never_cross_the_wire() {
+        for &e in Error::LOCAL {
+            assert_eq!(e.code(), None, "{e:?}");
+            assert!(std::panic::catch_unwind(|| Reply::refused(e)).is_err(), "{e:?}");
+        }
+    }
+
+    /// A status, a frame type or a count no server of this protocol sends is
+    /// refused by name, never read as another answer.
+    #[test]
+    fn a_reply_outside_the_protocol_is_malformed() {
+        let past = Error::WIRE.iter().filter_map(|e| e.code()).max().expect("wire words") + 1;
+        // 29 to 31 are what the client's own words once were, and 0x80 on what
+        // their discriminants are.
+        for status in [past, 29, 30, 31, 0x80, 0x81, 0x82, u64::MAX, SyscallError::NotFound.to_u64()] {
+            assert_eq!(Error::from_code(status), None, "{status:#x}");
+            assert_eq!(Reply { status, ..Reply::ok() }.result().err(), Some(Error::Malformed), "{status:#x}");
+        }
+        for msg_type in [0, HELLO, OPEN, LINK + 1, u32::MAX] {
+            assert_eq!(answer(msg_type, Reply::ok()).err(), Some(Error::Malformed), "frame {msg_type:#x}");
+            assert_eq!(path_answer(msg_type, Reply::ok()).err(), Some(Refused::Error(Error::Malformed)), "frame {msg_type:#x}");
+        }
+        assert_eq!(answer(LINK, Reply::ok()).err(), Some(Error::Malformed), "a link answers only a path");
+        let link = |value| Reply { value, ..Reply::ok() };
+        assert_eq!(path_answer(LINK, link(MAX_PATH as u64)).err(), Some(Refused::Link(MAX_PATH)));
+        assert_eq!(path_answer(LINK, link(MAX_PATH as u64 + 1)).err(), Some(Refused::Error(Error::Malformed)));
+        assert_eq!(path_answer(REPLY, Reply::refused(Error::Loop)).err(), Some(Refused::Error(Error::Loop)));
+        assert_eq!(counted(7, 7), Ok(7));
+        assert_eq!(counted(8, 7), Err(Error::Malformed), "more bytes than were asked for");
+    }
+
+    /// Each word the kernel answers a call this protocol makes is one named
+    /// refusal; the rest are words those calls never get, and fail loudly.
+    #[test]
+    fn every_kernel_refusal_the_calls_can_see_is_one_named_error() {
+        assert_eq!(Error::kernel("a call", SyscallError::Gone), Error::Gone);
+        assert_eq!(Error::kernel("a call", SyscallError::ResourceExhausted), Error::OutOfResources);
+        assert_eq!(transport(IpcError::Disconnected), Error::Gone);
+        assert_eq!(transport(IpcError::Syscall(SyscallError::Gone)), Error::Gone);
+        assert_eq!(transport(IpcError::Syscall(SyscallError::ResourceExhausted)), Error::OutOfResources);
+        assert_eq!(transport(IpcError::Malformed), Error::Malformed);
+        for never in [
+            SyscallError::Unknown,
+            SyscallError::NotFound,
+            SyscallError::PermissionDenied,
+            SyscallError::AlreadyExists,
+            SyscallError::InvalidArgument,
+            SyscallError::BadAddress,
+            SyscallError::WouldBlock,
+            SyscallError::NotSupported,
+            SyscallError::Io,
+        ] {
+            assert!(std::panic::catch_unwind(|| Error::kernel("a call", never)).is_err(), "{never:?}");
+        }
     }
 }

@@ -53,6 +53,22 @@ started. Nothing reaches userland when a device arrives or leaves.
   pull request before stage 1's guest smoke
   (`issues/a-cargo-run-boot-claims-every-pcidev-slot.md`).
 
+**Ruled** (orchestrator, 2026-10-20, on the step-10 brief; it replaces #901's
+`block@<location>` ports, `each`, `pci@` and several block services):
+
+- One shared block service, diskserver, serves `block` to its clients
+  (unchanged: grants are supervisor-minted badges) and `disk` to disk drivers.
+  A disk driver is a `drives` row receiving `disk`: it reads its own GPT,
+  offers each disk's partitions, and says when a disk is gone.
+- On an open the service checks the grant and hands the client's connection
+  and region to the offering driver, which answers `MSG_OPENED` on the
+  client's connection and serves the session itself; data never passes the
+  service (`toyos_blockring::disk`, `lib/blockserve`).
+- The supervisor starts the `drives` processes before the storage rows and
+  tells the block service how many disk drivers it started. An open of a
+  partition no disk offers, and a listing, wait until every boot-started disk
+  driver has settled, each wait bounded and naming the driver that did not.
+
 **Measured**:
 
 - **Releases versus the end**, before stage 1a (`usbd_drives_the_spare` on
@@ -106,16 +122,17 @@ started. Nothing reaches userland when a device arrives or leaves.
       child's `Process` handle and its waiter threads went; vdagent is a
       `drives` row. `a_drives_row_holds_one_process_per_function` is the
       guest arm, on `Profile::HeadlessTwoEdu`.
-2. **Functions arrive and leave.** Built on `wt/toyos-lifecycle-2`, landing
-   after the apertures track's stage B, whose per-bridge declaration carries
-   each host bridge's `_OSC` grant to `pcidev::arm_hot_plug`.
-   - The device set (`toyos_abi::devset`): a level-triggered snapshot of
-     every PCI function the kernel hands out, minted from `DEVICE`, carrying
-     `READ` and `WAIT` and neither `DUP` nor `TRANSFER`, so the supervisor
-     alone holds it. Its header names the time by which a slot may change
-     with no interrupt; the supervisor waits to it and reads again.
-   - Native PCIe hot-plug on a port below a host bridge whose `_OSC` granted
-     native hot-plug and capability structure control. The port is the
+2. **Functions arrive and leave** (#934, after the apertures track's stage B,
+   #935, whose declaration carries each root bridge's `_OSC` commit).
+   - Readers get a device-set object (`toyos_abi::devset`): a
+     level-triggered snapshot of every PCI function the kernel hands out,
+     minted from `DEVICE`, carrying `READ` and `WAIT` and neither `DUP` nor
+     `TRANSFER`, so the supervisor alone holds it. Its header names the time
+     by which a slot may change with no interrupt; the supervisor waits to it
+     and reads again.
+   - The kernel provides native PCIe hot-plug on a port whose root bridge's
+     `_OSC` commit granted native hot-plug and capability structure control.
+     acpiserver commits both where the query offered both. The port is the
      kernel's, its MSI-X entry on the claim path's remapped message; its
      handler reads and clears Slot Status, takes a lost or button-removed
      slot's functions out of the set, makes at most one Slot Control write
@@ -125,9 +142,13 @@ started. Nothing reaches userland when a device arrives or leaves.
      returns is a new arrival on the same record and domain. A claim of an
      older arrival answers `Gone` on every call, and its release asks the
      device nothing. The last release behind a removed slot powers it off.
-   - A BAR firmware assigned no address, behind a bridge, is placed where
-     every bridge on its path forwards, and the register taking the address
-     is the proof.
+   - An arrived endpoint's BARs are assigned once, before it is listed: each
+     one it leaves unassigned is given the lowest address inside its port's
+     windows that no other function decodes in and that lies inside the
+     declared root bridges' memory, kept where the register reads it back,
+     with no probe through it. They enter `Machine::decoded`, which
+     `pages::of_bar`'s sharing check reads. No BAR is moved (P1 of
+     `issues/there-is-no-wifi.md`).
    - The supervisor diffs the set (`toyos-supervisor`): a departed arrival
      is never started again, and the restart budget is the address's.
    - `a_function_arrives_and_leaves` is the guest arm, on
@@ -136,13 +157,16 @@ started. Nothing reaches userland when a device arrives or leaves.
    Gaps it records:
    - **Physical arrival is QEMU's alone**: no bench has a hot-plug port the
      owner lets a driver claim behind, so a metal row reads only the boot set
-     and each bridge's grant. That comes through
+     and each bridge's commit. That comes through
      `issues/toyos-supports-thunderbolt-and-usb4.md`.
    - QEMU's `device_del` presses the slot's button, so a surprise removal
      (presence lost) is reached by `toyos_pci::hotplug`'s host tests and no
      guest.
    - A machine whose `_OSC` keeps hot-plug for ACPI, q35's default, has no
      slot armed, and says so by port.
+   - acpiserver commits native hot-plug before the kernel knows whether a
+     slot can be armed; a machine whose units remap no interrupt has its
+     slots left unserved after firmware gave them up.
    - §6.7.1.5's five seconds in which a second press cancels a removal are
      not offered: a press removes at once.
    - A bridge below a slot (a switch) is not read: the kernel assigns no bus
@@ -153,10 +177,32 @@ started. Nothing reaches userland when a device arrives or leaves.
 3. **Drivers leave the shared services.** netstack, soundserver and diskserver
    each become a driver per function plus the service its clients use. The
    client port carries a per-device source and `gone`.
+   - **Done for HDA.** `hda` is a `drives` row on `pci:04:03:*`, one process
+     per controller; each walks its own codecs and offers soundserver the
+     output it reaches on `sound-output` (`toyos-sound-output`), and one that
+     reaches none ends by name. soundserver plays to the first offer it can
+     mix into, beginning when no stream is open; it is the null sink until
+     then, and refuses every later offer. A driver gone after soundserver
+     began playing to it ends soundserver. QEMU's two-controller row is
+     `hda_plays_to_the_controller_that_reaches_an_output`.
+   - **Done for NVMe.** `nvme` is a `drives` row, one process per
+     controller, offering its disk to diskserver, which is the block service
+     alone (the ruling above).
+   - Next: virtio-sound is still driven inside soundserver
+     (`system/soundserver/src/virtio.rs`); it becomes a driver on the same
+     port. Then the output set: a second output offered while one plays, a
+     driver's `gone`, and a stream moved to another output, none of which
+     soundserver serves yet; and netstack.
 4. **usbd drives every xHCI**, one per controller, started by stage 1's `drives` rows.
    This is step 10 of
    `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`, whose
-   `input` port is this track's per-device source and `gone`.
+   `input` port is this track's per-device source and `gone` (`toyos-input`
+   carries both), and whose sticks are disks offered on `disk` (the ruling
+   above). **Done**, its metal rows that judge with a userland load
+   still owed at that step. The test images name each machine's boot
+   controller by id, and the AMD bench's by place (`@03:00.3`, the one
+   `drives` selector a place narrows), so the spares stay free for the claim
+   tests.
 
 ## Folded here
 

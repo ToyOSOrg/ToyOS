@@ -21,9 +21,13 @@ use toyos_abi::syscall::{self, PciId, SyscallError, SYSCAP_LABEL};
 
 const NIC: PciId = PciId { vendor: 0x1af4, device: 0x1041 };
 
-/// `device_feature` of the common configuration QEMU puts at the base of the
-/// NIC's one mappable BAR (virtio 1.2 §4.1.4.3): a dword that is the device's
-/// own, never zero for a NIC, and that no read changes.
+/// The BAR QEMU's virtio-pci puts the modern structures in, the common
+/// configuration at its base: BAR 1 holds the MSI-X table.
+const COMMON: u32 = 4;
+
+/// `device_feature` of that common configuration (virtio 1.2 §4.1.4.3): a
+/// dword that is the device's own, never zero for a NIC, and that no read
+/// changes.
 const DEVICE_FEATURE: usize = 4;
 
 /// What the function answers through `window`, a live mapping of its BAR.
@@ -51,13 +55,9 @@ fn main() {
         .expect("the test estate is endowed a device-minting capability");
     let nic: PciDev = function::claim(&cap, NIC).expect("bar_map_again: the virtio NIC's claim");
     let info = nic.describe().expect("bar_map_again: the claim's description");
-    let bar = info
-        .bar_bytes
-        .iter()
-        .position(|&bytes| bytes != 0)
-        .expect("bar_map_again: the function has a memory BAR its holder may map");
-    let bytes = info.bar_bytes[bar];
-    let bar = bar as u32;
+    let bar = COMMON;
+    let bytes = info.bar_bytes[bar as usize];
+    assert!(bytes != 0, "bar_map_again: the NIC's BAR {bar} is not one its holder may map");
 
     // Two answers held at once are two mappings, and letting the earlier one
     // go takes nothing from the later.
@@ -85,7 +85,7 @@ fn main() {
     // Standard output fills the table: a claim's own handle carries no `DUP`.
     let mut filled = Vec::new();
     let full = loop {
-        match syscall::dup(RawHandle(1)) {
+        match syscall::dup(stdout()) {
             Ok(handle) => filled.push(handle),
             Err(why) => break why,
         }
@@ -105,4 +105,9 @@ fn main() {
     let after = ask(&nic, bar, bytes);
     assert_eq!(after, first, "bar_map_again: the ask after the refusal maps another window");
     println!("bar_map_again: answered after the refusal with a handle that maps");
+}
+
+/// The kernel handle this process's standard output is, descriptor 1's.
+fn stdout() -> RawHandle {
+    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
 }

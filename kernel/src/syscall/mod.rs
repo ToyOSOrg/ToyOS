@@ -27,7 +27,7 @@ fn cancelled() -> u64 {
     SyscallError::Gone.to_u64()
 }
 
-/// Terminate the current userspace process (called from exception handlers).
-pub fn kill_process(code: i32) -> ! {
-    process::exit(code);
+/// End the current userspace process for a fault nothing serves (called from exception handlers).
+pub fn fault_process(fault: toyos_abi::end::Fault) -> ! {
+    process::exit(toyos_abi::end::End::Fault(fault));
 }

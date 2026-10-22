@@ -1,25 +1,75 @@
 use toyos_abi::syscall;
 
+use crate::alloc::Layout;
+use crate::cell::UnsafeCell;
 use crate::ffi::CStr;
 use crate::io;
+use crate::mem::ManuallyDrop;
 use crate::num::NonZero;
+use crate::ptr;
+use crate::sync::atomic::{AtomicPtr, AtomicU32, Ordering};
 use crate::thread::ThreadInit;
 use crate::time::Duration;
 
+/// A thread's handle. Joined, it frees the thread's stack; dropped, it
+/// detaches the thread, whose stack the next spawn frees once it has ended.
 pub struct Thread {
-    tid: u32,
+    block: *mut Block,
 }
 
 unsafe impl Send for Thread {}
 unsafe impl Sync for Thread {}
 
+/// What a thread and its handle share. Freed by whoever reaps the thread:
+/// its joiner, or for a detached thread the first spawn after it ended.
+struct Block {
+    tid: AtomicU32,
+    state: AtomicU32,
+    stack: *mut u8,
+    layout: Layout,
+    /// Taken by the thread as it starts.
+    init: UnsafeCell<Option<Box<ThreadInit>>>,
+    /// The next block on [`REAPED`].
+    next: *mut Block,
+}
+
+const JOINABLE: u32 = 0;
+const DETACHED: u32 = 1;
+const EXITED: u32 = 2;
+
+/// Detached threads that have ended, linked through [`Block::next`]: a thread
+/// cannot free the stack it stands on, and pushing allocates nothing.
+static REAPED: AtomicPtr<Block> = AtomicPtr::new(ptr::null_mut());
+
 pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
+
+/// Wait for `block`'s thread to be gone, then free its stack and `block`. A
+/// join the kernel refuses frees nothing, since the stack may still be in use.
+///
+/// # Safety
+/// `block` is a live block whose thread no one else reaps.
+unsafe fn reap(block: *mut Block) {
+    let b = unsafe { &*block };
+    if syscall::thread_join(b.tid.load(Ordering::Relaxed) as u64) == 0 {
+        unsafe {
+            crate::alloc::dealloc(b.stack, b.layout);
+            drop(Box::from_raw(block));
+        }
+    }
+}
 
 impl Thread {
     pub unsafe fn new(stack: usize, init: Box<ThreadInit>) -> io::Result<Thread> {
+        let mut ended = REAPED.swap(ptr::null_mut(), Ordering::Acquire);
+        while !ended.is_null() {
+            // SAFETY: a block on the list was handed over by its ended thread.
+            let next = unsafe { (*ended).next };
+            unsafe { reap(ended) };
+            ended = next;
+        }
+
         let stack_size = stack.max(DEFAULT_MIN_STACK_SIZE);
-        // Allocate user stack (page-aligned)
-        let layout = crate::alloc::Layout::from_size_align(stack_size, 4096).unwrap();
+        let layout = Layout::from_size_align(stack_size, 4096).unwrap();
         let stack_base = unsafe { crate::alloc::alloc(layout) };
         if stack_base.is_null() {
             return Err(io::const_error!(
@@ -28,40 +78,61 @@ impl Thread {
             ));
         }
         let stack_top = stack_base.expose_provenance() as u64 + stack_size as u64;
+        let block = Box::into_raw(Box::new(Block {
+            tid: AtomicU32::new(0),
+            state: AtomicU32::new(JOINABLE),
+            stack: stack_base,
+            layout,
+            init: UnsafeCell::new(Some(init)),
+            next: ptr::null_mut(),
+        }));
 
-        let data = Box::into_raw(init);
-        // SAFETY: entry point and stack are valid; data is a valid pointer to the thread init.
+        // SAFETY: entry point and stack are valid; the block outlives the thread.
         let tid = unsafe {
             syscall::thread_spawn(
                 (thread_trampoline as *const ()).expose_provenance() as u64,
                 stack_top,
-                data.expose_provenance() as u64,
+                block.expose_provenance() as u64,
                 stack_base.expose_provenance() as u64,
             )
         };
 
         if syscall::SyscallError::from_u64(tid).is_some() {
             unsafe {
-                drop(Box::from_raw(data));
-            }
-            unsafe {
+                drop(Box::from_raw(block));
                 crate::alloc::dealloc(stack_base, layout);
             }
             return Err(io::const_error!(io::ErrorKind::Uncategorized, "thread spawn failed"));
         }
-
-        Ok(Thread { tid: tid as u32 })
+        // Before the handle exists: only a dropped handle detaches the
+        // thread, so every reaper sees this through the handle or the list.
+        unsafe { (*block).tid.store(tid as u32, Ordering::Relaxed) };
+        Ok(Thread { block })
     }
 
     pub fn join(self) {
-        syscall::thread_join(self.tid as u64);
+        let this = ManuallyDrop::new(self);
+        // SAFETY: a handle that joins is the only reaper of its thread.
+        unsafe { reap(this.block) };
+    }
+}
+
+impl Drop for Thread {
+    fn drop(&mut self) {
+        // SAFETY: the block lives until the thread is reaped, which only this
+        // handle or, once it is detached, the thread's own exit arranges.
+        let b = unsafe { &*self.block };
+        if b.state.compare_exchange(JOINABLE, DETACHED, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            // It has ended already, so nothing will hand it to `REAPED`.
+            unsafe { reap(self.block) };
+        }
     }
 }
 
 extern "C" fn thread_trampoline(data: u64) {
-    let init = unsafe {
-        Box::from_raw(crate::ptr::with_exposed_provenance_mut::<ThreadInit>(data as usize))
-    };
+    let block = crate::ptr::with_exposed_provenance_mut::<Block>(data as usize);
+    // SAFETY: the spawner put the init here and only this thread takes it.
+    let init = unsafe { (*(*block).init.get()).take() }.expect("a thread's init is taken once");
     let main = init.init();
     main();
     // Run TLS destructors then clean up the current thread handle.
@@ -70,13 +141,23 @@ extern "C" fn thread_trampoline(data: u64) {
         crate::sys::thread_local::destructors::run();
     }
     crate::rt::thread_cleanup();
+    // SAFETY: the block is this thread's until it is handed over below.
+    if unsafe { &*block }.state.swap(EXITED, Ordering::AcqRel) == DETACHED {
+        let mut head = REAPED.load(Ordering::Relaxed);
+        loop {
+            unsafe { (*block).next = head };
+            match REAPED.compare_exchange_weak(head, block, Ordering::Release, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(now) => head = now,
+            }
+        }
+    }
     syscall::thread_exit(0);
 }
 
 pub fn available_parallelism() -> io::Result<NonZero<usize>> {
-    // ToyOS runs on QEMU with a known number of CPUs, but we don't expose
-    // a syscall for this yet. Return 1 for now.
-    Ok(unsafe { NonZero::new_unchecked(1) })
+    NonZero::new(syscall::cpu_count() as usize)
+        .ok_or(io::const_error!(io::ErrorKind::NotFound, "the kernel counts no CPU"))
 }
 
 pub fn current_os_id() -> Option<u64> {

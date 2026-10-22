@@ -85,7 +85,7 @@ pub enum Watched {
 /// The clipboard's watcher.
 pub struct Watcher {
     conn: Connection,
-    rx: FrameRx<{ MAX_INLINE_PAYLOAD + 1 }>,
+    rx: FrameRx<MAX_INLINE_PAYLOAD>,
     /// A set past [`MAX_INLINE_PAYLOAD`] waiting for its region.
     region_owed: Option<String>,
     /// A set is in flight, unanswered.
@@ -113,11 +113,11 @@ impl Watcher {
             RxStep::Idle => return Ok(Watched::Idle),
             RxStep::Eof => return Err(CreateError::CompositorGone.into()),
             RxStep::Malformed => return Err(CreateError::BrokenOff.into()),
-            RxStep::Frame { msg_type, payload_len } => (msg_type, payload_len),
+            RxStep::Frame { msg_type, payload_len, .. } => (msg_type, payload_len),
         };
         let payload = self.rx.payload(len);
         match msg_type {
-            MSG_CLIPBOARD_PASTE if len <= MAX_INLINE_PAYLOAD => {
+            MSG_CLIPBOARD_PASTE => {
                 let text = String::from_utf8(payload.to_vec()).map_err(|_| WatchError::NotText)?;
                 self.conn.try_signal(MSG_CLIPBOARD_WATCH)?;
                 Ok(Watched::Copy(text))
@@ -129,7 +129,7 @@ impl Watcher {
                 if !copy_fits(len) {
                     return Err(WatchError::TooLong(len));
                 }
-                let [region] = self.conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
+                let [region] = self.rx.take_handles::<1>().ok_or(CreateError::NoHandle)?;
                 let region = SharedMemory::lent(region, len).map_err(CreateError::Lent)?;
                 let text = String::from_utf8(region.as_slice().to_vec()).map_err(|_| WatchError::NotText)?;
                 self.conn.try_signal(MSG_CLIPBOARD_WATCH)?;
@@ -137,7 +137,7 @@ impl Watcher {
             }
             MSG_COPY_REGION if len == 0 => {
                 let text = self.region_owed.take().ok_or(CreateError::Protocol(msg_type))?;
-                let [region] = self.conn.recv_handles_exact::<1>().ok_or(CreateError::NoHandle)?;
+                let [region] = self.rx.take_handles::<1>().ok_or(CreateError::NoHandle)?;
                 let mut region = SharedMemory::lent(region, text.len()).map_err(CreateError::Lent)?;
                 region.as_mut_slice().copy_from_slice(text.as_bytes());
                 self.conn.try_signal(MSG_COPY_COMMIT)?;

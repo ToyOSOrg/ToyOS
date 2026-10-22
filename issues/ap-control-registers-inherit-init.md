@@ -11,7 +11,7 @@ opened: 2026-08-09
 and `PG` into, so cores 1..N ran with `CD`/`NW` set — caching off — and with
 `WP`, `NE` and `MP` clear. Both registers are now written whole from one
 declaration, applied on every CPU and asserted there, and the `control_regs`
-gate holds every bit of `CR0` and eight of `CR4` against that declaration
+gate holds every bit of `CR0` and `CR4` it names against that declaration
 independently of the kernel's own self-check.
 
 What that leaves is a number nobody has: **how much an uncached AP cost.** It is
@@ -61,13 +61,12 @@ on a host that prices `CD` at zero it would answer the same on both.
 ## What is *not* open, recorded because three places used to say it was
 
 **`CR4.OSXSAVE` diverging between the BSP and the APs** — the hypothesis
-that firmware leaves it set so cpu0 permits AVX and an AP `#UD`s on it,
-killing a thread that migrates. The
-declaration is written whole rather than OR'd, so `write_cr4` clears the bit on
-the BSP as well; it is in neither `CR4_REQUIRED` nor `CR4_OPTIONAL`, the gate
-asserts it clear on every CPU by name, and a second arm refuses any bit the gate
-never named. The divergence is unrepresentable on the T14 as much as here, so
-that hypothesis needs no machine.
+that one CPU permits AVX and another `#UD`s on it, killing a thread that
+migrates. The declaration is written whole rather than OR'd; `OSXSAVE` is in
+`CR4_REQUIRED`, every CPU asserts it set and asserts the `XCR0` the BSP
+declared, the gate checks it set on every CPU by name, and a second arm refuses
+any bit the gate never named. The divergence is unrepresentable on the T14 as
+much as here, so that hypothesis needs no machine.
 
 **Whether `CR0.NE` clear was *the* cause of `fault_gates`' one `0xb881`
 survivor** — an unmasked x87 exception signalled on FERR# instead of raising

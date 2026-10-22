@@ -3,7 +3,7 @@
 //! shallow-copies the kernel's PML4 half, so a kernel address resolved to a
 //! present, writable 2 MiB leaf of the direct map.
 //!
-//! `SYS_DLOPEN`'s third argument was the one the syscall layer never validated
+//! `SYS_DLOPEN`'s `init_out` was the one the syscall layer never validated
 //! at all — sixteen bytes of arbitrary kernel memory, written by any process
 //! that can call `dlopen`. `SYS_FUTEX_WAIT`'s word is the other: it was
 //! guarded, but by an expression at the dispatch arm whose value was thrown
@@ -18,7 +18,7 @@
 //! (`SYS_DEBUG` actions 10 and 11): where they are, and whether they still say
 //! what it put there.
 
-use toyos_abi::syscall::{self, MmapFlags, MmapProt, SyscallError, SYS_DLOPEN};
+use toyos_abi::syscall::{self, DlopenArgs, MmapFlags, MmapProt, SyscallError};
 
 use toyos_abi::syscall::debug_action::{CANARY_ADDR, CANARY_CHANGED};
 
@@ -29,24 +29,14 @@ const LIB: &[u8] = b"/system/lib/libtls_dlopen_lib.so";
 const PAGE_2M: u64 = 2 * 1024 * 1024;
 
 /// `dl_open` builds its own `init_info` on the stack, so the typed wrapper
-/// cannot express the argument under test. Everything else about the call is
-/// the ABI's own: number in rdi, arguments in rsi/rdx/r8/r9.
+/// cannot express the argument under test: `SYS_DLOPEN` of [`LIB`], read once
+/// into an image, with `init_out` as given.
 fn dlopen_raw(path: &[u8], init_out: u64) -> u64 {
-    let ret: u64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            in("rdi") SYS_DLOPEN,
-            in("rsi") path.as_ptr() as u64,
-            in("rdx") path.len() as u64,
-            in("r8") init_out,
-            in("r9") 0u64,
-            lateout("rax") ret,
-            out("rcx") _,
-            out("r11") _,
-        );
-    }
-    ret
+    static IMAGE: std::sync::OnceLock<toyos::process::Image> = std::sync::OnceLock::new();
+    let image = IMAGE.get_or_init(|| toyos::files::read_image(path).unwrap_or_else(|e| panic!("read the library: {e:?}")));
+    let (handle, image_len) = image.spawn_words();
+    let args = DlopenArgs { name_ptr: path.as_ptr() as u64, name_len: path.len() as u64, image: handle, image_len, init_out };
+    syscall::dl_open_args(&args).unwrap_or_else(SyscallError::to_u64)
 }
 
 fn err(ret: u64) -> Option<SyscallError> {

@@ -29,6 +29,11 @@ pub(crate) fn int(header: &str, name: &str) -> i32 {
     as_int(found.unwrap_or_else(|| panic!("no integer #define {name}"))).1
 }
 
+#[test]
+fn pipe_buf_is_the_kernels_whole_pipe_write() {
+    assert_eq!(toyos_abi::syscall::MAX_WHOLE_PIPE_WRITE, int(LIMITS_H, "PIPE_BUF") as usize);
+}
+
 /// Each signal `signal.h` numbers: `SIGHUP`, and not `SIG_BLOCK`.
 pub(crate) fn signals() -> Vec<(&'static str, i32)> {
     defines(SIGNAL_H).filter(|(name, _)| name.starts_with("SIG") && !name.contains('_')).map(as_int).collect()

@@ -41,7 +41,9 @@ pub fn run(devices: &[PciDevice]) {
     let (on_own, on_identity) =
         (StreamId::pci(moved.bus, moved.dev, moved.func), StreamId::pci(kept.bus, kept.dev, kept.func));
 
-    let (space, at) = OwnSpace::create(PAGE_2M).expect("amdvi-selftest: a domain on the programmed unit");
+    // Before any declaration, so clear of no window: QEMU routes nothing on
+    // its root bus peer to peer, so the device's write reaches the unit.
+    let (space, at) = OwnSpace::create(PAGE_2M, &[]).expect("amdvi-selftest: a domain on the programmed unit");
     space.place(at, phys, PAGE_2M).expect("amdvi-selftest: the domain's own first leaf");
     space.attach(moved.bus, moved.dev, moved.func);
     let landed = write(moved_regs, at + 0x40, phys + 0x40);
@@ -61,9 +63,12 @@ pub fn run(devices: &[PciDevice]) {
 
     let before = super::fault::recorded();
     let masked = crate::arch::IrqGuard::close();
-    let refused = write(kept_regs, at, phys);
+    // Past the memory the identity domain maps; a domain's own addresses are
+    // handed out lowest first, so they are no such address.
+    let unmapped = crate::mm::pmm::top().next_multiple_of(PAGE_2M);
+    let refused = write(kept_regs, unmapped, phys);
     log!(
-        "amdvi-selftest: {on_identity}'s write at {at:#x}, which the identity domain does not map, answered \
+        "amdvi-selftest: {on_identity}'s write at {unmapped:#x}, which the identity domain does not map, answered \
          {refused:#x}: {}",
         verdict(refused, REFUSED)
     );

@@ -6,7 +6,6 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use kernel::sched::fair::{FairShare, ShareState};
 use kernel::sched::hw::Nanos;
 use kernel::sched::msg::Msg;
 use kernel::sched::sync::CellLock;
@@ -15,7 +14,6 @@ use kernel::sched::park::WaitTicket;
 
 use crate::watch::Watch;
 use crate::mm::paging::Root;
-use crate::scheduler::OperationSlot;
 use crate::loader::KernelStack;
 use crate::process::{PageTables, ProcessAccounting, TaskId, UserImage};
 use crate::sync::Lock;
@@ -37,7 +35,6 @@ impl<T: Send> CellLock<T> for KernelLock<T> {
 
 pub type KMsg = Msg<KernelPayload>;
 pub type KShared = TaskShared<KMsg>;
-pub type KShare = FairShare<KernelLock<ShareState>>;
 /// The core's wait ticket; blocking sites use `driver::Ticket`, which wraps it in the needed preempt guard.
 pub type RawTicket = WaitTicket<KMsg>;
 
@@ -89,7 +86,6 @@ pub struct KernelPayload {
 
 impl SchedPayload for KernelPayload {
     type Ctx = KernelCtx;
-    type ShareLock = KernelLock<ShareState>;
 
     /// The thread, as `TaskId::pack` packs it: what a diary record names.
     fn name(&self) -> u64 {
@@ -112,8 +108,6 @@ pub struct TaskHandle {
     watch: Watch,
     /// Cancels reported to this thread; a second one means a caller swallowed the first, so it panics rather than spinning.
     cancels: AtomicU32,
-    /// The operation this thread is inside, if any; kept here so it survives a mid-operation migration. `scheduler::Operation` owns the rules.
-    operation: OperationSlot,
     /// The releases this thread owns while its process is torn down (`object::Releases`); kept here, as `operation` is, so they follow the thread across a migration.
     releases: Lock<Option<Vec<crate::object::KObjectRef>>>,
 }
@@ -125,7 +119,6 @@ impl TaskHandle {
             running_since: AtomicU64::new(0),
             watch: Watch::new(),
             cancels: AtomicU32::new(0),
-            operation: OperationSlot::new(),
             releases: Lock::new(None),
         }
     }
@@ -142,10 +135,6 @@ impl TaskHandle {
         self.running_since.store(0, Ordering::Relaxed);
     }
 
-    /// Where this thread's establishment lives; `scheduler::Operation` owns every rule about it.
-    pub fn operation(&self) -> &OperationSlot {
-        &self.operation
-    }
 
     /// Where `object::Releases` collects this thread's releases; `None` while it holds none open.
     pub(crate) fn releases(&self) -> &Lock<Option<Vec<crate::object::KObjectRef>>> {

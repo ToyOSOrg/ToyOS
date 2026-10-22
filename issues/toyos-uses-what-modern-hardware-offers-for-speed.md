@@ -37,8 +37,9 @@ and contention).
 
 **Measured.** Each issue carries its reading.
 
-- A wake to a busy CPU waits out a whole 10 ms quantum on both benches:
-  `issues/a-wake-to-a-busy-cpu-waits-for-its-next-pass-and-no-idle-cpu-can-take-it.md`.
+- A wake to a busy CPU beside idle ones is forwarded since #874, p99 5 µs
+  on the T14 and 25 µs on the AMD bench; beside seven spinners no row holds it
+  to 100 µs: `issues/no-row-holds-a-wake-beside-seven-spinners-to-100-us.md`.
 - An MWAIT doorbell: the IPI's send and delivery and the kick's handler are
   at most 14.7 to 14.9 % of an idle wake on the T14 and 22.4 to 22.6 % on the
   AMD bench (`issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`).
@@ -74,22 +75,17 @@ is nothing to enable.
 - **The wake storm's per-waiter gap** between the benches; next, its split
   (`issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`).
 
-The CPU cap is PR #865's (`wt/toyos-cpus`), a design round of its own.
-
 **Exit**: every issue below is closed. They are listed in the order they are
 taken: the instruments, then what is measured, then the design rounds not
 yet measured.
-`issues/user-programs-use-avx-under-xsave.md` is PR #859's, built ahead of
-that order.
 
 - `issues/no-test-can-hold-a-thread-on-a-named-cpu.md`
 - `issues/no-program-measures-toyos-against-linux-on-one-machine.md`
-- `issues/a-wake-to-a-busy-cpu-waits-for-its-next-pass-and-no-idle-cpu-can-take-it.md`
+- `issues/no-row-holds-a-wake-beside-seven-spinners-to-100-us.md`
 - `issues/per-cpu-scheduler-and-pmm-state-shares-lines-every-cpu-writes.md`
 - `issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`
 - `issues/idle-is-hlt-so-every-wake-of-an-idle-cpu-is-an-ipi.md`
 - `issues/the-timer-is-a-lapic-count-re-armed-every-pass-never-a-tsc-deadline.md`
-- `issues/user-programs-use-avx-under-xsave.md`
 - `issues/no-gate-decodes-kernel-elfs-instructions.md`
 - `issues/kernel-forward-copies-and-fills-are-one-rep-movsb-or-stosb-on-every-cpu.md`
 - `issues/the-direct-map-uses-1-gib-leaves-where-the-cpu-has-them.md`

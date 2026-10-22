@@ -7,9 +7,7 @@
 //! inside one `LoaderData` descriptor of firmware's map, returning the region
 //! `mm::init` keeps out of the allocator. [`mount`] refuses the boot by name on
 //! a handoff with no image, and on an image whose superblock is not the one
-//! `root=` names. [`hold_source`] holds the partition the image came from once
-//! the disks are up, so no claim writes the slot this boot runs, and withholds
-//! its GUID from every claim when it cannot hold it. The image's bytes crossed a
+//! `root=` names. The image's bytes crossed a
 //! trust boundary like any disk's, so every read of it is bounds-checked and a
 //! block outside it is a refused read, never a panic.
 
@@ -17,17 +15,12 @@ use bcachefs::{BlockBuf, BlockIO, BlockNum, DeviceError, FsUuid, Mounted, ReadOn
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_rootimage::handoff::{held, Descriptor};
 
-use crate::block::{BlockError, Holder, Partition};
-use crate::gpt::Unnamed;
+use crate::file_backing::BlockError;
 use crate::mm::{DirectMap, Region};
 use crate::sync::Lock;
 
 /// The unit ROOT's filesystem is written in, which is the page.
 const BLOCK: usize = crate::mm::PAGE_SIZE as usize;
-
-/// The record the supervisor's spawn is reported on, followed by how many storage
-/// commands the boot had issued by then: zero is the claim.
-pub const SUPERVISOR_WITHOUT_A_DISK: &str = "boot: the supervisor spawned with ROOT from memory; storage commands before it:";
 
 /// The record a ROOT mounted off the loader's image is reported on.
 pub const MOUNTED_FROM_MEMORY: &str = "root: mounted read-only from memory at";
@@ -47,14 +40,9 @@ enum Handed {
 struct Boot {
     named: Option<FsUuid>,
     handed: Handed,
-    /// The partition the image was read from, raw as in its GPT entry.
-    source: [u8; 16],
 }
 
-static BOOT: Lock<Boot> = Lock::new(Boot { named: None, handed: Handed::Nothing, source: [0; 16] });
-
-/// The kernel's hold on the partition ROOT was read from, for the machine's life.
-static SOURCE: Lock<Option<Partition>> = Lock::new(None);
+static BOOT: Lock<Boot> = Lock::new(Boot { named: None, handed: Handed::Nothing });
 
 /// ROOT's bytes: whole blocks, read-only, in memory the kernel never frees.
 #[derive(Clone, Copy)]
@@ -118,7 +106,6 @@ pub fn init(cmdline: &str, args: &KernelArgs, map: &[MemoryMapEntry]) -> Region 
     *BOOT.lock() = Boot {
         named: toyos_abi::boot::root_uuid(cmdline).and_then(FsUuid::parse),
         handed,
-        source: args.root_partition_guid,
     };
     region
 }
@@ -148,61 +135,4 @@ pub fn mount() -> Mounted<MemoryImage, ReadOnly> {
     let (at, len) = image.extent();
     log!("{MOUNTED_FROM_MEMORY} {at:#x}+{len:#x}, filesystem {named}, {} blocks", image.block_count());
     fs
-}
-
-/// Hold the partition ROOT was read from, so no process's claim writes the
-/// slot this boot is running. Runs once the disks are probed.
-///
-/// Found on the disks that answered, its span is held: a disk that did not
-/// answer and later does either lacks it, or carries it again and makes every
-/// claim of it `Ambiguous`. Anywhere else — on no disk that answered, carried
-/// twice, refused by its own table, or no span a view can hold — its GUID is
-/// withheld from every claim instead, so no disk's answer, now or later, can
-/// hand it out. Neither path refuses the boot: a disk is a device, and a device
-/// never crashes this kernel.
-pub fn hold_source() {
-    let guid = toyos_abi::part::PartGuid(BOOT.lock().source);
-    let sought = crate::gpt::seek(guid);
-    let held: Result<(crate::gpt::Claimable, Partition), &'static str> = match sought.found {
-        Ok(Some(found)) => {
-            let volume = found.volume;
-            crate::block::open(volume.device)
-                .ok_or(())
-                .and_then(|handle| {
-                    let (first, blocks) =
-                        crate::block::span_blocks(volume.start_lba, volume.blocks, volume.lba_bytes)
-                            .map_err(drop)?;
-                    Partition::of(handle, first, blocks, Holder::Kernel("system")).map_err(drop)
-                })
-                .map(|view| (found, view))
-                .map_err(|()| "it is no span a view can hold")
-        }
-        // Every disk this kernel drives answered and lacks it: a disk a process
-        // drives, NVMe's under diskserver, is never asked.
-        Ok(None) if sought.silent.is_empty() => Err("it is on no disk this kernel drives"),
-        Ok(None) => Err("it is on no disk that answered"),
-        Err(Unnamed::Ambiguous) => Err("it is carried twice"),
-        Err(Unnamed::Unusable) => Err("its table refuses it"),
-    };
-    match held {
-        Ok((found, view)) => {
-            log!(
-                "root: holding {}, the partition ROOT was read from, on device {}; disks that did \
-                 not answer: {:?}",
-                found.unique, found.volume.device, sought.silent
-            );
-            *SOURCE.lock() = Some(view);
-        }
-        Err(why) => withhold(guid, why, &sought.silent),
-    }
-}
-
-/// Refuse every claim of ROOT's source, saying why it was not held.
-fn withhold(guid: toyos_abi::part::PartGuid, why: &str, silent: &[crate::block::DeviceId]) {
-    log!(
-        "root: the partition ROOT was read from, {}, is not held because {why}; every claim of it \
-         is refused; disks that did not answer: {silent:?}",
-        toyos_gpt::Guid(guid.0)
-    );
-    crate::gpt::withhold(guid);
 }

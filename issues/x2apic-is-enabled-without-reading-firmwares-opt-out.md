@@ -8,10 +8,10 @@ opened: 2026-10-04
 
 VT-d Rev. 4.1 §8.1, DMAR Flags bit 1 `X2APIC_OPT_OUT`: firmware asks system
 software "to opt out of enabling Extended xAPIC (X2APIC) mode", and software
-checks it "as part of detecting X2APIC mode support". This kernel enables
-x2APIC unconditionally in `arch::apic::init` (`enable_x2apic`), reached from
-`arch::boot::interrupts`, before the DMAR is first read in `iommu::init`
-(`kernel/src/main.rs`). The flag is logged (`x2apic_opt_out=` on the `iommu:
+checks it "as part of detecting X2APIC mode support". This kernel declares
+x2APIC on every CPU wherever `CPUID.01H:ECX[21]` offers it
+(`kernel/src/arch/x86_64/control_regs.rs`), and nothing else decides the mode;
+the DMAR is first read later, in `iommu::init` (`kernel/src/main.rs`). The flag is logged (`x2apic_opt_out=` on the `iommu:
 DMAR` line) and decides nothing.
 
 The owner's ruling on extended interrupt mode

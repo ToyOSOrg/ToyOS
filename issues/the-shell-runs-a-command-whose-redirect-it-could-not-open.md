@@ -13,15 +13,13 @@ of the file. `echo secret > /somewhere/refused` therefore writes `secret` to
 the terminal, or into whatever the shell's output is, and the line's status is
 the command's. The `2>` arms do the same without the line.
 
-Read from the source, not measured. `tests/guest/rust-tests/src/bin/fs_share.rs`
-launches a shell whose redirect's connection is refused and judges only that
-the file was never made, so it does not hold this behaviour in place.
+Read from the source, not measured, and no test holds it.
 
 Owner: the shell.
 
 ## Exit condition
 
 A command whose redirect could not be opened is not run, the shell says the
-error the open answered, and the line's status is a failure; a guest probe
+error the open answered, and the line's status is a failure; a test
 redirects into a path that does not open and reads back neither the command's
 output nor a zero status.

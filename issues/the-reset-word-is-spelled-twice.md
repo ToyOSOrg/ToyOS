@@ -6,8 +6,8 @@ opened: 2026-09-07
 
 # The word a metal verdict turns on is spelled twice, and neither speller reads the other
 
-`kernel/src/syscall/machine.rs:86` writes `quiesce("Rebooting.")` and
-`build/bootlog.rs:15` declares `REBOOTING: &str = "Rebooting."` as the last line a
+`kernel/src/syscall/machine.rs` writes `quiesce("Rebooting.")` and
+`build/bootlog.rs` declares `REBOOTING: &str = "Rebooting."` as the last line a
 passing boot must leave. Two literals, no shared declaration: reword the
 kernel's and every metal run refuses with `the log's last line is … and not
 "Rebooting."` while the kernel is behaving exactly as intended.

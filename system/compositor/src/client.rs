@@ -38,18 +38,10 @@ pub const MAX_PENDING_CONNS: u32 = 32;
 /// statement after `connect`. What this bounds is the one that never sends it.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 
-/// The largest client payload the compositor keeps.
-///
-/// One byte past [`window::MAX_INLINE_PAYLOAD`], which is the whole of what a
-/// client inlines — `MSG_CLIPBOARD_SET` is the widest, every typed payload
-/// smaller (`CreateWindowRequest`, 40). The extra byte is what makes a longer
-/// payload refusable rather than silently truncated: a frame kept at exactly
-/// this length declared more than any sender may inline. Past it a client may
-/// declare up to `ipc::MAX_FRAME_LEN` and the excess is discarded unread.
-pub const MAX_KEPT_PAYLOAD: usize = window::MAX_INLINE_PAYLOAD + 1;
-
-/// One client's inbound framing.
-pub type ClientRx = ipc::FrameRx<MAX_KEPT_PAYLOAD>;
+/// One client's inbound framing: [`window::MAX_INLINE_PAYLOAD`] is the whole
+/// of what a client inlines — `MSG_CLIPBOARD_SET` is the widest, every typed
+/// payload smaller.
+pub type ClientRx = ipc::FrameRx<{ window::MAX_INLINE_PAYLOAD }>;
 
 /// What the compositor needs to reach one window's client.
 ///
@@ -86,7 +78,7 @@ pub type Win = Window<Client>;
 pub struct ClientFrame {
     pub handle: RawHandle,
     pub msg_type: u32,
-    payload: [u8; MAX_KEPT_PAYLOAD],
+    payload: [u8; window::MAX_INLINE_PAYLOAD],
     payload_len: usize,
     pub conn: Option<Connection>,
     /// The connection's [`PendingConn::copy`].
@@ -100,7 +92,7 @@ impl ClientFrame {
         Self {
             handle,
             msg_type,
-            payload: [0; MAX_KEPT_PAYLOAD],
+            payload: [0; window::MAX_INLINE_PAYLOAD],
             payload_len: 0,
             conn: None,
             copy: None,
@@ -302,9 +294,8 @@ pub fn note_opened(client: RawHandle, content: toyos_desktop::Rect, live: usize)
 
 /// Hand a window a typed frame, or mark it for removal.
 ///
-/// A failure is never retried and never ignored: `TrySendError::Full` can have
-/// left part of the frame in the pipe, so the peer's stream is past saving —
-/// which is the price of never blocking on it.
+/// A failure is never retried and never ignored: the window is dropped, which
+/// is the price of never blocking on a client.
 pub fn deliver<T: ipc::IpcPayload>(dead: &mut Vec<Dead>, win: &Win, msg_type: u32, payload: &T) {
     if let Err(e) = win.client.conn.try_send(msg_type, payload) {
         mark_dead(dead, win.client.conn.as_handle(), e.into());
@@ -320,9 +311,8 @@ pub fn deliver_with_handle<T: ipc::IpcPayload>(
     msg_type: u32,
     payload: &T,
 ) {
-    match win.client.conn.send_handles([handle]) {
-        Ok(()) => deliver(dead, win, msg_type, payload),
-        Err(e) => mark_dead(dead, win.client.conn.as_handle(), e.into()),
+    if let Err(e) = win.client.conn.try_send_with(msg_type, payload, [handle]) {
+        mark_dead(dead, win.client.conn.as_handle(), e.into());
     }
 }
 

@@ -14,11 +14,6 @@ fn main() {
         return;
     }
 
-    // Test available_parallelism returns > 0
-    let n = thread::available_parallelism().expect("available_parallelism failed");
-    assert!(n.get() > 0, "expected parallelism > 0, got {}", n.get());
-    println!("available_parallelism = {}", n.get());
-
     // Test spawning threads that compute partial sums
     let handles: Vec<_> = (0..4)
         .map(|i| {

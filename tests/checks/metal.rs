@@ -146,18 +146,15 @@ fn read(dir: &Path, labels: &[&str]) -> BTreeMap<String, Result<Readback, String
     labels.iter().map(|label| (label.to_string(), metal::read_readback(dir, label))).collect()
 }
 
-/// **The stop's two refusals, each on the page that has to draw it**: a boot
-/// that handed the machine back owes the stop's record, and a record with a
-/// block operation still open is a sync about a machine that was still writing.
-pub fn the_stop_owes_its_record_and_leaves_no_operation_open() {
+/// **A boot that handed the machine back owes the stop's record**, drawn on
+/// the page that has to carry it.
+pub fn the_stop_owes_its_record() {
     let whole = toyos_quiesce::Record {
         sweep: toyos_quiesce::Sweep { stopped: 6, running: 0 },
         elapsed_ms: 11,
         budget_ms: 2010,
         sweeps: 3,
         cpus: 8,
-        in_flight: 0,
-        begun: 4812,
     };
     let handed_back = |stop: &str| format!("Black box: {}\n{PANEL}{stop}", bootlog::HANDED_BACK);
     assert_eq!(planted(&handed_back(&format!("| {whole}\n")), BOOTED).stop_completed(), Ok(()));
@@ -165,11 +162,6 @@ pub fn the_stop_owes_its_record_and_leaves_no_operation_open() {
         .stop_completed()
         .expect_err("a boot that handed the machine back with no record of its stop");
     assert!(why.contains("carries no record of the stop"), "{why}");
-    let open = toyos_quiesce::Record { in_flight: 1, ..whole };
-    let why = planted(&handed_back(&format!("| {open}\n")), BOOTED)
-        .stop_completed()
-        .expect_err("a stop that left an operation open");
-    assert!(why.contains("1 block operation(s) open"), "{why}");
     let ended = format!("Previous boot's panic: the last boot read WEDGED\n{PANEL}");
     assert_eq!(planted(&ended, BOOTED).stop_completed(), Ok(()));
 }
@@ -177,7 +169,7 @@ pub fn the_stop_owes_its_record_and_leaves_no_operation_open() {
 /// Each bound's lateness against the period of what polls it, a millisecond
 /// either way and no further.
 pub fn a_bound_fires_within_one_period_of_itself() {
-    let quantum = i64::try_from(kernel::sched::fair::QUANTUM_NS / 1_000_000).expect("ms");
+    let quantum = i64::try_from(kernel::sched::task::QUANTUM_NS / 1_000_000).expect("ms");
     let deadline = |late: i64| planted(&expired_at(120_060 + late), &armed()).deadline_on_time();
     assert_eq!(deadline(4), Ok(()));
     assert_eq!(deadline(quantum + 1), Ok(()));
@@ -702,4 +694,22 @@ pub fn the_loader_the_kernel_and_a_program_count_from_one_zero() {
     assert!(why.contains("said nothing of its clock"), "{why}");
     let why = read(stated, " 9.876", "11.665", "").expect_err("a complete boot with no supervisor line");
     assert!(why.contains("no timed supervisor line saying so"), "{why}");
+}
+
+/// **A job's own end with no code is no code**: its lowest-pid record is the
+/// job's, and a kill or a fault there answers an error naming it, never a
+/// child's exit code read in its place.
+pub fn an_exit_record_without_a_code_answers_no_code() {
+    let job = "test_rs_a_killed_job";
+    let kernel = |end: &str| {
+        format!(
+            "{BOOTED}[2026-09-29 18:22:41  2.310 cpu3 kernel] exit: {job} pid=12 {end} cpu=4ms\n\
+             [2026-09-29 18:22:42  3.120 cpu5 kernel] exit: {job} pid=13 code=0 cpu=9ms\n"
+        )
+    };
+    assert_eq!(planted(PANEL, &kernel("code=3")).exit_code(job), Ok(3));
+    for end in ["killed", "fault=memory"] {
+        let answer = planted(PANEL, &kernel(end)).exit_code(job);
+        assert!(answer.as_ref().is_err_and(|why| why.contains(end)), "{end}: {answer:?}");
+    }
 }

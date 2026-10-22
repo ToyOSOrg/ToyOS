@@ -2,8 +2,7 @@
 //!
 //! [`sys_log_read`], [`sys_trace_read`], the roster half of [`sys_sysinfo`], and both of
 //! [`sys_shutdown`] and [`sys_reboot`] each require a `SysCap` bit from
-//! `/system/bin/supervisor`'s `system.toml`; `SYS_SYSINFO`'s header is ambient, and
-//! [`sys_sched_info`] demands nothing.
+//! `/system/bin/supervisor`'s `system.toml`; `SYS_SYSINFO`'s header is ambient.
 
 use alloc::vec::Vec;
 
@@ -22,46 +21,71 @@ use super::handles::demand_syscap;
 pub(super) fn sys_log_read(
     ctx: &SyscallContext,
     syscap: RawHandle,
-    cursor_ptr: UserAddr,
+    cursor: UserAddr,
     out: &mut UserBytesMut,
     capacity: usize,
 ) -> u64 {
-    read_on_cursor(ctx, syscap, Rights::LOG, cursor_ptr, |cursor| log::user::read(cursor, out, capacity))
+    read_on_cursor(ctx, syscap, Rights::LOG, cursor, log::shard_count(), |next| log::user::read(next, out, capacity))
 }
 
 /// Copies the diary's records into the caller's buffer; requires a `SysCap` carrying [`Rights::TRACE`].
 pub(super) fn sys_trace_read(
     ctx: &SyscallContext,
     syscap: RawHandle,
-    cursor_ptr: UserAddr,
+    cursor: UserAddr,
     out: &mut UserBytesMut,
     capacity: usize,
 ) -> u64 {
-    read_on_cursor(ctx, syscap, Rights::TRACE, cursor_ptr, |cursor| crate::trace::read(cursor, out, capacity))
+    read_on_cursor(ctx, syscap, Rights::TRACE, cursor, crate::trace::rings(), |next| {
+        crate::trace::read(next, out, capacity)
+    })
 }
 
-/// A read of records on a cursor the caller holds, under `need`.
+/// A read of records under `need` on the cursor at `at`, which holds a
+/// position for each of `rings`: its head is read first, answered the ring
+/// count whatever follows, and the positions copied in only once it declares
+/// one per ring.
 ///
 /// A copy-out failure after a successful read costs the caller those records; the cursor round-trips through the caller's own memory.
-fn read_on_cursor<C: toyos_abi::UserSafe>(
+fn read_on_cursor(
     ctx: &SyscallContext,
     syscap: RawHandle,
     need: Rights,
-    cursor_ptr: UserAddr,
-    read: impl FnOnce(&mut C) -> Result<usize, SyscallError>,
+    at: UserAddr,
+    rings: usize,
+    read: impl FnOnce(&[u64]) -> Result<(usize, log::read::Cursor), SyscallError>,
 ) -> u64 {
+    use toyos_abi::log::{CursorHead, CURSOR_HEAD_WORDS};
+    const HEAD: usize = CURSOR_HEAD_WORDS * 8;
     if let Err(e) = demand_syscap(syscap, need) {
         return e.refuse();
     }
-    let mut cursor = match ctx.copy_in::<C>(cursor_ptr) {
-        Ok(cursor) => cursor,
-        Err(e) => return e.to_u64(),
+    let words = |bytes: &[u8]| -> Vec<u64> {
+        bytes.as_chunks::<8>().0.iter().map(|word| u64::from_le_bytes(*word)).collect()
     };
-    let count = match read(&mut cursor) {
-        Ok(count) => count,
-        Err(e) => return e.to_u64(),
+    let Ok(head) = ctx.user_vec(at, HEAD as u64) else { return SyscallError::BadAddress.to_u64() };
+    let mut head = CursorHead::from_words(words(&head).try_into().expect("the head's words"));
+    head.shards = u32::try_from(rings).expect("`smp::size` bounds the CPUs below a u32");
+    let put = |head: CursorHead, positions: &[u64]| -> Result<(), SyscallError> {
+        let mut window = ctx.user_bytes_mut(at, (HEAD + 8 * positions.len()) as u64).ok_or(SyscallError::BadAddress)?;
+        for (i, word) in head.to_words().iter().chain(positions).enumerate() {
+            window.write_at(8 * i, &word.to_le_bytes());
+        }
+        Ok(())
     };
-    match ctx.copy_out(cursor_ptr, &cursor) {
+    if head.slots as usize != rings {
+        return put(head, &[]).err().unwrap_or(SyscallError::InvalidArgument).to_u64();
+    }
+    let Some(positions) = at.raw().checked_add(HEAD as u64).and_then(|p| ctx.user_vec(UserAddr::new(p), (8 * rings) as u64).ok())
+    else {
+        return SyscallError::BadAddress.to_u64();
+    };
+    let (count, walk) = match read(&words(&positions)) {
+        Ok(read) => read,
+        Err(e) => return put(head, &[]).err().unwrap_or(e).to_u64(),
+    };
+    head.lost = walk.lost();
+    match put(head, walk.next()) {
         Ok(()) => count as u64,
         Err(e) => e.to_u64(),
     }
@@ -79,13 +103,6 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::wedge_before_reset() {
         crate::deadline::stage_a_wedge();
-    }
-    // The same machine ended by the same bound, with the bus busy rather than
-    // idle: this one never stops writing, so the reset lands on a controller
-    // that is moving bytes.
-    #[cfg(feature = "boot-actuators")]
-    if crate::actuator::usb_reset_under_load() {
-        crate::usb_gate::sweep_under_load();
     }
     let parkable = crate::scheduler::Parkable::at_entry();
     // The console's writer holding the wire as the stop begins, which a
@@ -116,10 +133,6 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     } else {
         crate::alert!("{stopped}");
     }
-    // Above the boot's last word, because these are ordinary records and the
-    // volume that carries them is still there: every USB disk's write cache is
-    // emptied and waited for before anything is taken down.
-    crate::drivers::xhci::flush_disks();
     // `klogd` inside its hold of the wire as the last word is logged, which a
     // stop that did not hold the wire would leave it in at the seal below.
     #[cfg(feature = "boot-actuators")]
@@ -140,16 +153,6 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     // census and the last word among them. Nothing wrote them to `/log`,
     // and on a machine with no serial port this is their only reader.
     crate::log::seal_tail(stop_began);
-    // Whether or not the volume got them: a stick this boot's transport broke
-    // on is a stick the next host may not be able to read the log off.
-    crate::blackbox::append_recovery();
-    // **The barrier, and last of all.** Below the sync, because before it the
-    // volumes still have bytes to take and this takes the controller away from
-    // them; and after everything else here,
-    // because nothing may run between it and the register stop
-    // `power::reboot`/`power::shutdown` do — which every reset this kernel
-    // performs goes through. It is bounded, and the reset follows either way.
-    crate::drivers::xhci::seal_shut();
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::wire_held_at_the_last_word() {
         crate::log::console::sealed();
@@ -288,10 +291,7 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
             let demand = data.demand_pages.iter().map(|p| p.size() as u64).sum::<u64>();
             let mmap = data.mmap_regions.iter().filter_map(|r| r._pages.as_ref()).map(|p| p.size() as u64).sum::<u64>();
             let tls = data.elf.dynamic_tls_blocks.values().map(|p| p.size() as u64).sum::<u64>();
-            let libs: u64 = data.elf.loaded_libs.iter().map(|l| match &l.memory {
-                crate::elf::LibMemory::Owned(alloc) => alloc.size() as u64,
-                crate::elf::LibMemory::Shared { rw_alloc, .. } => rw_alloc.size() as u64,
-            }).sum();
+            let libs: u64 = data.elf.loaded_libs.iter().map(|l| l.memory.size() as u64).sum();
             demand + mmap + tls + libs
         } else {
             0
@@ -315,15 +315,6 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
     }
 
     pos as u64
-}
-
-pub(super) fn sys_sched_info() -> toyos_abi::syscall::SchedInfo {
-    let pid = process::current_process();
-    toyos_abi::syscall::SchedInfo {
-        vruntime: crate::scheduler::process_vruntime(pid),
-        min_vruntime: crate::scheduler::global_min_vruntime(),
-        lag: crate::scheduler::process_lag(pid),
-    }
 }
 
 /// Every online CPU's counters into `out`, or the CPU count when `out` is

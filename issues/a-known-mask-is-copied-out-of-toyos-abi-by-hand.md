@@ -17,12 +17,15 @@ change that added them was not allowed to touch the shared sysroot.
 compiling clean, and `MMAP_PROT_KNOWN` — still `READ.0 | WRITE.0` — then refuses
 a bit the ABI defines. Fail-closed, so it is a maintenance hazard and not a
 hole: the caller is told `InvalidArgument` rather than served something else.
-The same union is copied a third time into each guest arm's local `const KNOWN`,
-so a drift would take the test with it and the arm would still pass.
+The same union is copied a third time into a guest arm's local `const KNOWN`
+(`tests/guest/rust-tests/src/bin/handle_lifetime.rs`, the one left after the
+guest suite's cut), so a drift would take the test with it and the arm would
+still pass.
 
 **The fix is one line per word and the precedent is in the same file.**
-`NAMESPACE_FLAGS_KNOWN` (`sdk/abi/src/syscall.rs:1340`) is the mask that
+`NAMESPACE_FLAGS_KNOWN` (`sdk/abi/src/syscall.rs`) is the mask that
 cannot drift, because it sits beside the constants it unions and every reader
 names it. Four more of those — for `MmapProt`, `MmapFlags`, `OpenFlags` and
-`WNOHANG` — delete this entry, the three copies in the kernel and the three in
-the tests.
+`WNOHANG` — delete this entry, the copies in the kernel (`kernel/src/syscall/vm.rs`,
+`kernel/src/object/ops.rs`, `kernel/src/inbox/mod.rs`, and the
+`!WNOHANG` test in `kernel/src/syscall/proc.rs`) and the one in the tests.

@@ -6,44 +6,46 @@ opened: 2026-10-12
 
 # A stream cannot move between processes
 
-Today a TCP stream's handle reads and writes the stream in any process that
-holds it. The handle is the stream's two data pipes joined into one
-connection (`make_socket_fd`, `sdk/std/sys/net/connection.rs`), which
-`TcpStream` reads and writes with `syscall::read` and `write`.
-`File::from_raw_fd` takes any handle (`sdk/std/os/io.rs`) and reads and writes
-it with the same calls (`sdk/std/sys/fs.rs`), and `Stdio::from(File)` hands
-it to a child, whose slot the kernel fills with a duplicate
-(`sdk/std/sys/process.rs`; `build_child_handles`,
-`kernel/src/loader/start.rs`). So an inetd-style child serves the stream on
-its stdin and stdout for as long as the process that connected it holds its
-`TcpStream`.
+A TCP stream belongs to the process that connected or accepted it
+(`sdk/toyos/src/net/stream.rs`). Its connection carries only the request, its
+answer, doorbells and the hang-up; the stream's bytes are in a region mapped
+only by that process. So std refuses every move loudly: `File::from_raw_fd` of
+a stream's handle panics with `toyos::net::stream::Misuse::AsFile`
+(`sdk/std/os/io.rs`); a spawn whose stdio, inherited or endowed descriptors
+carry a stream's handle is refused with `Misuse::Moved` before any child
+starts (`sdk/toyos/src/spawn.rs`, `sdk/toyos/src/fd.rs`'s `copy`,
+`sdk/std/sys/pal/mod.rs`); and
+`TcpStream::from_raw_fd` of a handle this process holds no end for panics with
+`Misuse::NotThisProcess` (`sdk/std/os/io.rs`). The bare
+`dup`, `SYS_MESSAGE_SEND` and `SYS_SPAWN` syscalls are not checked.
 
-The session design takes that away
-(`issues/netstack-moves-every-byte-through-two-kernel-pipes.md`, stage 3; PR
-#863, amendment E). After its answer, a stream's connection carries only
-doorbells, and the region that holds the stream's bytes is mapped only by
-the process that connected or accepted it. Read through a `File` or a
-child's stdio, the handle would wait for ever or read doorbells as data, and
-netstack would drain what the child writes as doorbells, with no error on
-either side. Stage 3 makes std refuse both loudly instead.
-`File::from_raw_fd` of a stream's handle panics with `toyos::net`'s refusal.
-Every path std offers to move a raw handle into another process answers that
-refusal before anything moves: a spawn's stdio slots,
-`CommandExt::inherit_handle` into any slot, `CommandExt::endow` and
-`Command::provide`, each starting no child. `toyos::ipc`'s `send_handles`
-takes only `OwnedHandle`s, and a stream's handle becomes one only through
-`OwnedHandle::from_raw`, whose contract stage 3 says excludes a handle
-`toyos::net` answers for: the type refuses it. And `toyos::net` refuses by
-name a handle the process holds no end for, std's `TcpStream::from_raw_fd`
-included. A program that hands a stream to another process by any of these,
-as an inetd-style server does through its child's stdio, then fails loudly
-on ToyOS where today it works, and one that takes a moved stream back as a
-`TcpStream`, as socket activation does and as no ToyOS std builds today, is
-refused, though root `CLAUDE.md` says existing Rust just works. The bare
-`dup`, `SYS_HANDLE_SEND` and `SYS_SPAWN` syscalls are not checked.
+A program that hands a stream to another process, as an inetd-style server
+does through its child's stdio, fails on ToyOS where it works elsewhere, and
+one that takes a moved stream back as a `TcpStream`, as socket activation
+does, is refused, though root `CLAUDE.md` says existing Rust just works. What
+replaces the refusal is a socket shared by its holders, not moved, as the
+ruling below says.
+
+**Ruled** (owner, 2026-10-21): sharing, inheritance and the surviving holders
+are preserved: a socket given to a child stays the parent's too, and the
+others keep working when one holder exits or is killed. Neither resetting
+every holder's connection when one is interrupted nor a temporary refusal to
+give a socket to a child is approved. Nginx's shared listeners establish its
+inheritance and lifetime requirements. The ruling covers every socket kind,
+so listeners and datagram sockets are shared as streams are.
+
+Planning's reading of the evidence (2026-10-21): data a dead holder already
+consumed need not be recovered.
+
+The sharing and recovery design is engineering's and under review, outside
+the tree. It proposes, and nobody has accepted, that the descriptor work's
+spawn from the table (PR 4) lands after its stages for shared streams,
+listeners and datagrams, and unconnected C sockets, since every interim rule
+for an inheritable socket is rejected or unapproved.
 
 Owner: the orchestrator, who stages
 `issues/netstack-moves-every-byte-through-two-kernel-pipes.md`.
 
-Exit: a stream moved by its handle reads and writes in the receiving process,
-and the process that moved it holds no end.
+Exit: a stream, a listener and a datagram socket given to a child read, write
+and accept in both processes at once, and each keeps working in the survivor
+when the other holder exits or is killed.

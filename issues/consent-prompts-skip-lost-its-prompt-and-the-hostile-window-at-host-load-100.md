@@ -26,13 +26,18 @@ minute later, load average 64.47, scaled its ceilings 5.84x and was green.
 The log is on https://github.com/ToyOSOrg/ToyOS/pull/859.
 
 Neither 20 s wait that went red is one of those ceilings. The launcher's
-wait and the per-key wait on the prompt are each a fixed
-`Duration::from_secs(20)` (`tests/toyos.rs`, `Consent::begin` and
+wait and the per-key wait on the prompt were each a fixed
+`Duration::from_secs(20)` (`tests/toyos.rs` as it stood, `Consent::begin` and
 `Consent::prompt_up`), never passed through `qemu::budget_smp`, so the
-harness does not scale them for the host's speed or the guest's width.
+harness did not scale them for the host's speed or the guest's width.
 
 Owner: the desktop track, `issues/toyos-has-a-desktop.md`.
 
+**Its test is deleted**: `ff1a11dbd` cut `consent_prompt` with its image and
+the harness's `Consent` steps, the two fixed 20 s waits among them, under the
+testing ruling that a test which launches software and drives it through
+steps is cut.
+
 **Exit**: why the prompt's connection and the hostile window ended under
-load is named, and fixed or bounded; or the suite's ceilings are shown to
-be what ran out, and the harness scales them by the load the test met.
+load is named, and fixed or bounded, or shown to be the harness's unscaled
+waits and nothing in the guest.

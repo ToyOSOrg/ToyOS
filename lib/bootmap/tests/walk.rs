@@ -3,7 +3,7 @@
 //! than from the encoder, so a table named from the wrong slot or the wrong
 //! second-level table is an address that does not translate.
 
-use toyos_bootmap::{x86_64, Cache, Plan, Table, Typing, BOOT_MAP_BYTES, MAX_PAGES, PAGE_2M, PAGE_4K};
+use toyos_bootmap::{x86_64, Access, Cache, Plan, Table, Typing, BOOT_MAP_BYTES, MAX_PAGES, PAGE_2M, PAGE_4K};
 
 const GIB: u64 = 1 << 30;
 const PHYS_OFFSET: u64 = 0xFFFF_8000_0000_0000;
@@ -14,6 +14,8 @@ const AT: u64 = 0x7f80_0000;
 const LOADER: (u64, u64) = (0x7e5f_0000, 0x3_5000);
 /// The AMD laptop's framebuffer, as its GOP reports it.
 const LAPTOP: (u64, u64) = (0xfc_9000_0000, 8_294_400);
+/// A kernel's text on a 2 MiB page of its own, so it splits nothing.
+const TEXT: (u64, u64) = (0x7c00_0000, PAGE_2M);
 
 /// Bits M-1:12 of an entry that names a page, for the widest M (52) §4.1.4 allows.
 const ADDRESS: u64 = 0x000F_FFFF_FFFF_F000;
@@ -107,7 +109,8 @@ fn expected_pat(cache: Cache) -> u64 {
 }
 
 /// Every leaf the plan names translates, at identity and at `PHYS_OFFSET`, its
-/// first byte and its last, to itself, writable and of its kind's type.
+/// first byte and its last, to itself, of its kind's type, and writable unless
+/// it is the text's.
 fn every_leaf_translates_in_both_views(plan: &Plan, pool: &[Table; MAX_PAGES], root: u64) {
     for entry in plan.entries() {
         let size = match entry.slot {
@@ -115,7 +118,7 @@ fn every_leaf_translates_in_both_views(plan: &Plan, pool: &[Table; MAX_PAGES], r
             toyos_bootmap::Slot::Fine { .. } => PAGE_4K,
         };
         for phys in [entry.phys, entry.phys + size - 1] {
-            let want = Translation { phys, pat: expected_pat(entry.cache), writable: true };
+            let want = Translation { phys, pat: expected_pat(entry.cache), writable: entry.access == Access::Data };
             assert_eq!(walk(pool, root, phys).as_ref(), Some(&want), "{entry:?} at identity");
             assert_eq!(walk(pool, root, PHYS_OFFSET + phys).as_ref(), Some(&want), "{entry:?} at PHYS_OFFSET");
         }
@@ -128,7 +131,7 @@ fn every_leaf_translates_in_both_views(plan: &Plan, pool: &[Table; MAX_PAGES], r
 #[test]
 fn the_laptops_scanout_at_1010_gib_translates_in_both_views() {
     let (base, len) = LAPTOP;
-    let plan = Plan::new(Some(LAPTOP), LOADER, Typing::Firmware).expect("the laptop's plan");
+    let plan = Plan::new(Some(LAPTOP), LOADER, TEXT, Typing::Firmware).expect("the laptop's plan");
     let (pool, root) = written(&plan);
     assert_eq!(root, AT, "the root is the pool's first page");
 
@@ -138,7 +141,7 @@ fn the_laptops_scanout_at_1010_gib_translates_in_both_views() {
         assert_eq!(walk(&pool, root, phys), scanout(phys), "identity {phys:#x}");
         assert_eq!(walk(&pool, root, PHYS_OFFSET + phys), scanout(phys), "PHYS_OFFSET + {phys:#x}");
     }
-    for phys in [0, BOOT_MAP_BYTES - 1, LOADER.0] {
+    for phys in [0, TEXT.0 - 1, TEXT.0 + TEXT.1, BOOT_MAP_BYTES - 1, LOADER.0] {
         assert_eq!(walk(&pool, root, phys), memory(phys), "identity {phys:#x}");
         assert_eq!(walk(&pool, root, PHYS_OFFSET + phys), memory(phys), "PHYS_OFFSET + {phys:#x}");
     }
@@ -156,7 +159,7 @@ fn the_laptops_scanout_at_1010_gib_translates_in_both_views() {
 /// second-level tables: each directory under its own 512 GiB's table.
 #[test]
 fn every_second_level_table_is_reached_from_its_own_root_slots() {
-    let across = Plan::new(Some((512 * GIB - PAGE_2M, 4 * PAGE_2M)), (520 * GIB, 0x3_4a00), Typing::Firmware)
+    let across = Plan::new(Some((512 * GIB - PAGE_2M, 4 * PAGE_2M)), (520 * GIB, 0x3_4a00), TEXT, Typing::Firmware)
         .expect("across 512 GiB");
     let (pool, root) = written(&across);
     every_leaf_translates_in_both_views(&across, &pool, root);
@@ -164,6 +167,7 @@ fn every_second_level_table_is_reached_from_its_own_root_slots() {
     let budget = Plan::new(
         Some((1024 * GIB - PAGE_2M, 4 * PAGE_2M)),
         (toyos_bootmap::DIRECT_MAP_WINDOW - 512 * GIB - 0x1000, 0x3_4a00),
+        TEXT,
         Typing::Firmware,
     )
     .expect("both straddling");
@@ -178,9 +182,29 @@ fn every_second_level_table_is_reached_from_its_own_root_slots() {
 fn a_split_page_translates_through_its_table_of_small_leaves() {
     let ram = [(0x4000_0000, 0x8000_0000)];
     let (base, len) = (0xbc7a_0000, 0x30_0000);
-    let plan = Plan::new(Some((base, len)), LOADER, Typing::ByMap(&ram)).expect("ramfb");
+    let plan = Plan::new(Some((base, len)), LOADER, TEXT, Typing::ByMap(&ram)).expect("ramfb");
     let (pool, root) = written(&plan);
     assert_eq!(walk(&pool, root, base - 1), Some(Translation { phys: base - 1, pat: 0, writable: true }));
     assert_eq!(walk(&pool, root, base), Some(Translation { phys: base, pat: 3, writable: true }));
+    every_leaf_translates_in_both_views(&plan, &pool, root);
+}
+
+/// The kernel's text read-only in both views, over the pages it shares split,
+/// and the bytes on either side of it still writable.
+#[test]
+fn the_text_is_read_only_and_its_neighbours_are_writable() {
+    let text = (0x7c04_1000, 0x13_1000);
+    let plan = Plan::new(None, LOADER, text, Typing::Firmware).expect("the text");
+    let (pool, root) = written(&plan);
+    let at = |phys: u64, writable: bool| Some(Translation { phys, pat: 0, writable });
+    for (phys, writable) in [
+        (text.0 - 1, true),
+        (text.0, false),
+        (text.0 + text.1 - 1, false),
+        (text.0 + text.1, true),
+    ] {
+        assert_eq!(walk(&pool, root, phys), at(phys, writable), "identity {phys:#x}");
+        assert_eq!(walk(&pool, root, PHYS_OFFSET + phys), at(phys, writable), "PHYS_OFFSET + {phys:#x}");
+    }
     every_leaf_translates_in_both_views(&plan, &pool, root);
 }

@@ -1,5 +1,5 @@
-//! What starting a program costs: `/system/bin/toybox echo` spawned and waited
-//! for, its line to nowhere. It returns as soon as it has started, so what the
+//! What starting a program costs: `/system/bin/toybox echo` spawned with null
+//! stdio and waited for. It returns as soon as it has started, so what the
 //! clock reads is the kernel's spawn, the program's own start, its relocation
 //! among it, and its exit. `toybox` because it is on the ROOT of the boot this
 //! runs on, `tests/images/testcases.toml`, and carries the most `RELATIVE` entries of what
@@ -24,10 +24,11 @@ fn spawn_ns() -> u64 {
         .arg("echo")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .unwrap_or_else(|e| panic!("spawn {PROGRAM}: {e}"));
     let end = clock_nanos();
-    assert!(status.success(), "{PROGRAM} echo exited {status:?}");
+    assert!(status.success(), "{PROGRAM} echo ended {status}");
     end - start
 }
 

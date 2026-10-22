@@ -59,9 +59,7 @@ fn control_features() -> Vec<String> {
 /// set never sees; the third is the one `--kernel-param` builds, `boot-actuators`
 /// without `test-actuators`, whose dead code neither of the others can see.
 /// `undocumented_unsafe_blocks` is adopted per area as each area's
-/// justifications land. `toyos-xhci` has a shape of its own because the
-/// workspace run builds it only with `toyos-xhci-sim`'s `flaws`, never as the
-/// kernel does. `toyos-pci-claim` has one because `$GUESTS` excludes it and
+/// justifications land. `toyos-pci-claim` has one because `$GUESTS` excludes it and
 /// only netstack's host tests build its `host-grant`. `kernel-loom` has one
 /// because `victim-retires-mid-probe`'s test arm excludes `no-preempt-guard`,
 /// which `$CONTROLS` turns on beside it. `toyos-crypto` has three because the
@@ -151,10 +149,6 @@ const SHAPES: &[Shape] = &[
         after: &["$ADOPTED", "-W", "clippy::undocumented_unsafe_blocks", "-D", "warnings"],
     },
     Shape {
-        before: &["-p", "toyos-xhci", "--all-targets"],
-        after: &["$ADOPTED", "-D", "warnings"],
-    },
-    Shape {
         before: &["-p", CRYPTO, "--all-targets", "--features", CRYPTO_DISPATCHED],
         after: &["$ADOPTED", "-D", "warnings"],
     },
@@ -166,10 +160,10 @@ const SHAPES: &[Shape] = &[
         before: &["-p", CRYPTO, "--all-targets"],
         after: &["$ADOPTED", "-D", "warnings"],
     },
-    // `--no-deps` because its dependency `toyos` is a guest crate no shape
-    // lints. Its own target directory because `--no-deps` checks without clippy
-    // the host crates the workspace shapes lint, which `toyos-abi`'s shape
-    // below says costs every run.
+    // `--no-deps` because its dependency `toyos` is a guest crate, linted by
+    // the shapes that build it. Its own target directory because `--no-deps`
+    // checks without clippy the host crates the workspace shapes lint, which
+    // `toyos-abi`'s shape below says costs every run.
     Shape {
         before: &[
             "-p",
@@ -208,6 +202,24 @@ const SHAPES: &[Shape] = &[
         ],
         after: &["$ADOPTED", "-D", "warnings"],
     },
+    // `toyos`'s tests, its transport's loom models among them: the workspace
+    // shapes exclude it and lint its library only as their members'
+    // dependency.
+    Shape {
+        before: &["-p", "toyos", "--all-targets"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    // The copy that owns the descriptor table, as std's and C-only libc's
+    // build it: `fd-table`, which no other shape turns on.
+    Shape {
+        before: &["-p", "toyos", "--lib", "--features", "fd-table"],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    // osbench's Linux half, which no image builds: a check, so nothing links.
+    Shape {
+        before: &["-p", "osbench", "--target", OSBENCH_LINUX],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
     // Its own target directory: cargo keeps one check of a unit, so a unit
     // linted under two sets of lints is checked again by each, every run, and
     // so is every crate depending on it.
@@ -217,10 +229,14 @@ const SHAPES: &[Shape] = &[
     },
 ];
 
-/// The bare targets the kernel and bootloader shapes lint against, which
-/// `rustup target add` installs: every architecture's.
-pub const BARE_TARGETS: [&str; 4] =
-    [Arch::X86_64.kernel(), Arch::X86_64.loader(), Arch::Aarch64.kernel(), Arch::Aarch64.loader()];
+/// The Linux target `tests/guest/osbench` is built for beside ToyOS.
+const OSBENCH_LINUX: &str = "x86_64-unknown-linux-musl";
+
+/// The targets the shapes lint against, which `rustup target add` installs:
+/// every architecture's bare targets for the kernel and bootloader, and
+/// osbench's Linux one.
+pub const TARGETS: [&str; 5] =
+    [Arch::X86_64.kernel(), Arch::X86_64.loader(), Arch::Aarch64.kernel(), Arch::Aarch64.loader(), OSBENCH_LINUX];
 
 impl Shape {
     /// The command as a reader writes it, its tokens unexpanded.

@@ -8,9 +8,3 @@ pub mod payload;
 pub mod reap_gate;
 pub mod futex;
 pub mod idle_stack;
-
-/// Ceiling on CPUs the percpu arrays are sized for.
-pub const MAX_CPUS: usize = 8;
-
-// Duplicates `shootdown::MAX_CPUS`, pinned here because `kernel-loom` never compiles this file.
-const _: () = assert!(MAX_CPUS == crate::shootdown::MAX_CPUS);

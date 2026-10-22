@@ -16,7 +16,7 @@
 use alloc::vec::Vec;
 
 use crate::iommu::domains::{self, Domains};
-use crate::iommu::{DomainId, IommuError, Iova, StreamId};
+use crate::iommu::{DomainId, IommuError, Iova, Limit, StreamId};
 use crate::log;
 use crate::sync::Lock;
 use toyos_acpi::Requesters;
@@ -59,7 +59,7 @@ static DOMAINS: Lock<Option<Amd>> = Lock::new(None);
 /// clear of `reserved`, `kept`'s requesters stay on the identity domain, and
 /// only a requester in `translated` is given one.
 pub(super) fn start(
-    reserved: Option<Vec<(u64, u64)>>,
+    reserved: Vec<(u64, u64)>,
     settings: Vec<Setting>,
     kept: Vec<Requesters>,
     translated: Vec<(u16, u16)>,
@@ -110,21 +110,22 @@ pub fn untranslated(stream: StreamId) -> Option<&'static str> {
     }
 }
 
-/// A new domain, with `room` bytes of it handed out first: refused, with no id
-/// spent, where the domain would have less than that.
-pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
+/// A new domain, with `room` bytes of it handed out first, clear of the root
+/// bridges' declared `windows`, `None` where none are held: refused, with no
+/// id spent, where it would have less than that.
+pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(DomainId, Iova), IommuError> {
     let mut held = DOMAINS.lock();
     let amd = held.as_mut().ok_or(IommuError::NoUnit)?;
     // Mode-4 host tables translate 48 bits of device address (48882 §2.2.3).
-    let next = amd.domains.prepare(9 * ROOT_LEVEL + 12, 1 << 16, room)?;
+    let next = amd.domains.prepare(9 * ROOT_LEVEL + 12, 1 << 16, room, windows)?;
     let space = Space { root: TABLES.lock().alloc() };
     Ok(amd.domains.add(next, space, alloc::format!("root={:#x} mode={ROOT_LEVEL}", space.root.get())))
 }
 
-pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
+pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {
     let mut held = DOMAINS.lock();
     let amd = held.as_mut().expect("amdvi: a domain exists only once a unit translates");
-    let (space, at) = amd.domains.map(id, phys, bytes)?;
+    let (space, at) = amd.domains.map(id, phys, bytes, limit)?;
     place_leaves(id, space, at, phys, bytes);
     Ok(at)
 }

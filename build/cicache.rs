@@ -34,13 +34,16 @@
 //! would make every crate depending on them stale. A job that builds it
 //! anywhere else runs as a developer's tree does.
 //!
-//! **A seal refuses a tree whose [`PATHS`] hold more than [`LIMIT`]**, `~`
-//! being `HOME`, so the save, which follows only a green run, never stores
-//! one.
+//! **The entry is held to what GitHub stores of it, after the save**
+//! ([`stored`]): twice its stored bytes, since the entry before it stays until
+//! evicted, and main's largest entry of each toolchain layer fit in
+//! [`REPOSITORY_LIMIT`]. An entry past it is still saved and read; the run is
+//! red.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::ErrorKind;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -56,9 +59,14 @@ const PATHS: [&str; 4] = [
     "target",
 ];
 
-/// The most the files under [`PATHS`] may hold, uncompressed. The repository's
-/// caches are evicted by last access past 10 GB.
-const LIMIT: u64 = 8_000_000_000;
+/// GitHub's default limit on a repository's caches, in the bytes its cache list
+/// says each entry stores, read as decimal gigabytes: past it, entries are
+/// evicted in order of last access (GitHub Docs, "Dependency caching
+/// reference", "Usage limits and eviction policy").
+const REPOSITORY_LIMIT: u64 = 10_000_000_000;
+
+/// The scope of main's entries, which every ref restores from.
+const MAIN: &str = "refs/heads/main";
 
 /// 2001-09-09T01:46:40Z: older than any build, so a file dated so is never
 /// newer than one.
@@ -188,39 +196,15 @@ fn listed(paths: &[PathBuf]) -> String {
     paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")
 }
 
-/// After the last step of the writer's run, which [`cold`] began: the tree
-/// refused if its [`PATHS`] hold more than [`LIMIT`], `~` being `HOME`, and
-/// otherwise every file under every target dated [`built`], then the manifest.
+/// After the last step of the writer's run, which [`cold`] began: every file
+/// under every target dated [`built`], then the manifest.
 pub fn seal(root: &Path, cold: &Cold) -> Result<String, String> {
     let home = std::env::var_os("HOME").ok_or("HOME is unset, and the cache's paths name it as `~`")?;
     seal_at(root, Path::new(&home), cold)
 }
 
 fn seal_at(root: &Path, home: &Path, cold: &Cold) -> Result<String, String> {
-    let (mut files, mut bytes) = (0u64, 0u64);
-    for path in PATHS {
-        let dir = match path.strip_prefix("~/") {
-            Some(under) => home.join(under),
-            None => root.join(path),
-        };
-        // A path the save finds nothing at stores nothing.
-        if !dir.try_exists().map_err(|e| format!("{}: {e}", dir.display()))? {
-            continue;
-        }
-        each_under(&dir, &mut |_, meta| {
-            if meta.is_file() {
-                files += 1;
-                bytes += meta.len();
-            }
-            Ok(())
-        })?;
-    }
-    if bytes > LIMIT {
-        return Err(format!(
-            "{bytes} B in {files} files under the cache's paths, above the {LIMIT} B an entry may \
-             hold: saved, it could evict a toolchain layer or the next host one"
-        ));
-    }
+    let (files, bytes) = held(root, home)?;
     let now = sources(root)?;
     let moved: Vec<&String> = cold
         .sources
@@ -245,11 +229,94 @@ fn seal_at(root: &Path, home: &Path, cold: &Cold) -> Result<String, String> {
     }
     fs::write(root.join(MANIFEST), text).map_err(|e| format!("write {MANIFEST}: {e}"))?;
     Ok(format!(
-        "{files} files, {bytes} B of the {LIMIT} B an entry may hold; sealed: {} sources, built on {}, \
-         every target dated as built",
+        "{files} files, {bytes} B, under the cache's paths; sealed: {} sources, built on {}, every target \
+         dated as built",
         cold.sources.len(),
         cold.runner
     ))
+}
+
+/// The files under [`PATHS`], `~` being `home`, and their bytes, as the save
+/// archives them: a file of several names once.
+fn held(root: &Path, home: &Path) -> Result<(u64, u64), String> {
+    let (mut files, mut bytes, mut linked) = (0, 0, BTreeSet::new());
+    for path in PATHS {
+        let dir = match path.strip_prefix("~/") {
+            Some(under) => home.join(under),
+            None => root.join(path),
+        };
+        // A path the save finds nothing at stores nothing.
+        if !dir.try_exists().map_err(|e| format!("{}: {e}", dir.display()))? {
+            continue;
+        }
+        each_under(&dir, &mut |_, meta| {
+            if meta.is_file() && (meta.nlink() == 1 || linked.insert((meta.dev(), meta.ino()))) {
+                files += 1;
+                bytes += meta.len();
+            }
+            Ok(())
+        })?;
+    }
+    Ok((files, bytes))
+}
+
+/// After the writer's save: the entry `ENTRY` names, held to [`budget`] as
+/// the repository's cache list, read with `GH_TOKEN`, says main's caches store.
+pub fn stored() -> Result<String, String> {
+    let var = |name: &str| std::env::var(name).map_err(|_| format!("{name} is unset: nightly's `host` sets it"));
+    let entry = var("ENTRY")?;
+    let github = crate::release::Github::new(&var("GITHUB_REPOSITORY")?)?;
+    let mut main = Vec::new();
+    for page in 1.. {
+        let url = github.api(&format!("actions/caches?ref={MAIN}&per_page=100&page={page}"));
+        let answer = github.call("GET", &url, None)?.ok_or_else(|| format!("GET {url} found nothing"))?;
+        let (total, entries) = cache_page(&answer)?;
+        let last = entries.is_empty();
+        main.extend(entries);
+        if last || main.len() as u64 >= total {
+            break;
+        }
+    }
+    budget(&entry, &main)
+}
+
+/// One page of the cache list GitHub answers for [`MAIN`]: the entries it
+/// counts in all, and each of these by its key and stored bytes.
+fn cache_page(answer: &serde_json::Value) -> Result<(u64, Vec<(String, u64)>), String> {
+    let total = answer["total_count"].as_u64().ok_or_else(|| format!("a cache list without a total: {answer}"))?;
+    let entries = answer["actions_caches"].as_array().ok_or_else(|| format!("a cache list without entries: {answer}"))?;
+    let entries = entries.iter().map(|entry| {
+        match (entry["key"].as_str(), entry["ref"].as_str(), entry["size_in_bytes"].as_u64()) {
+            (Some(key), Some(MAIN), Some(bytes)) => Ok((key.to_string(), bytes)),
+            _ => Err(format!("the cache list of {MAIN} holds {entry}")),
+        }
+    });
+    Ok((total, entries.collect::<Result<_, _>>()?))
+}
+
+/// Whether main's caches, each as its key and stored bytes, hold `entry` twice
+/// beside the largest of each toolchain layer within [`REPOSITORY_LIMIT`]. The
+/// largest stands for the layer main's runs restore; the rest of main's
+/// entries, and every other scope's, are read by nothing, so evicted before
+/// what every run reads.
+fn budget(entry: &str, main: &[(String, u64)]) -> Result<String, String> {
+    let (_, host) = main
+        .iter()
+        .find(|(key, _)| key == entry)
+        .ok_or_else(|| format!("main's caches hold no {entry}: its save stored nothing"))?;
+    let mut layers = 0u64;
+    for prefix in crate::release::entry_prefixes() {
+        let largest = main.iter().filter(|(key, _)| key.starts_with(&prefix)).map(|(_, bytes)| *bytes).max();
+        let largest = largest.ok_or_else(|| format!("main's caches hold no {prefix}* entry, which every toolchain job restores"))?;
+        layers = layers.saturating_add(largest);
+    }
+    let needed = host.saturating_mul(2).saturating_add(layers);
+    let said = format!("{entry} stores {host} B; twice that and main's toolchain layers, {layers} B, need {needed} B");
+    if needed > REPOSITORY_LIMIT {
+        Err(format!("{said}, past the repository's {REPOSITORY_LIMIT} B: the next entry or a layer may be evicted"))
+    } else {
+        Ok(format!("{said} of the repository's {REPOSITORY_LIMIT} B"))
+    }
 }
 
 /// The commit an entry was built from, the runner, and its sources.
@@ -620,27 +687,76 @@ pub fn word(_: proc_macro::TokenStream) -> proc_macro::TokenStream {
         }
     }
 
-    /// What a save would store is the files under [`PATHS`], `~` being the
-    /// home: one byte above the bound, between a target and the home's
-    /// registry, is refused and gets no manifest; at the bound the tree is
-    /// sealed, and a target no save stores is not counted. The bound's bytes
-    /// are a hole `set_len` made, so no test writes them.
+    /// What the save archives is the files under [`PATHS`], `~` being the home,
+    /// a file of two names once, and nothing in a target no save stores.
     #[test]
-    fn a_seal_refuses_what_its_save_would_store_above_the_bound() {
-        let tmp = TempDir::new("cicache-bound");
+    fn the_tree_counts_a_file_once_however_many_names_it_has() {
+        let tmp = TempDir::new("cicache-held");
         let home = tmp.join("home");
-        let cold = cold_repo(&tmp, RUNNER);
         write(&home, ".cargo/registry/cache/one", "1");
         write(&tmp, "tests/target/unsaved", "1");
-        let big = tmp.join("target/debug/big");
-        fs::create_dir_all(big.parent().unwrap()).unwrap();
-        fs::File::create(&big).unwrap().set_len(LIMIT).unwrap();
-        let refusal = seal_at(&tmp, &home, &cold).expect_err("one byte above the bound");
-        assert!(refusal.starts_with(&format!("{} B", LIMIT + 1)), "{refusal}");
-        assert!(!tmp.join(MANIFEST).exists(), "a refused tree carries a manifest");
-        fs::remove_file(home.join(".cargo/registry/cache/one")).unwrap();
-        seal_at(&tmp, &home, &cold).expect("at the bound");
-        assert!(tmp.join(MANIFEST).exists(), "a tree at the bound is sealed");
+        write(&tmp, "target/debug/deps/app-0123", "0123456789");
+        fs::hard_link(tmp.join("target/debug/deps/app-0123"), tmp.join("target/debug/app")).unwrap();
+        assert_eq!(held(&tmp, &home), Ok((2, 11)));
+    }
+
+    /// Main's caches as the budget reads them: `entry` storing `host` bytes,
+    /// the one before it, and each toolchain layer at `layer` bytes beside an
+    /// older and smaller one, which no run restores.
+    fn main_caches(entry: &str, host: u64, layer: u64) -> Vec<(String, u64)> {
+        let mut main = vec![(entry.to_string(), host), ("host-sealed-Linux-X64-1".to_string(), host)];
+        for prefix in crate::release::entry_prefixes() {
+            main.push((format!("{prefix}1111111111111111"), layer - 1));
+            main.push((format!("{prefix}2222222222222222"), layer));
+        }
+        main
+    }
+
+    /// Twice the entry and the largest of each layer may reach the limit and
+    /// not pass it, whichever of them grows; an entry the cache list does not
+    /// hold, and a layer main holds none of, are refused.
+    #[test]
+    fn the_saved_entry_is_held_to_the_repositorys_limit() {
+        const ENTRY: &str = "host-sealed-Linux-X64-2";
+        let layers = crate::release::entry_prefixes().count() as u64;
+        let layer = 1_000_000_000;
+        let host = (REPOSITORY_LIMIT - layers * layer) / 2;
+        assert_eq!(2 * host + layers * layer, REPOSITORY_LIMIT, "the bound is reached exactly");
+        let said = budget(ENTRY, &main_caches(ENTRY, host, layer)).expect("at the limit");
+        assert!(said.contains(&format!("{ENTRY} stores {host} B")), "{said}");
+        for (host, layer) in [(host + 1, layer), (host, layer + 1)] {
+            let refusal = budget(ENTRY, &main_caches(ENTRY, host, layer)).expect_err("past the limit");
+            assert!(refusal.contains("past the repository's"), "{refusal}");
+        }
+        let refusal = budget("host-sealed-Linux-X64-3", &main_caches(ENTRY, 1, 1)).expect_err("an unsaved entry");
+        assert!(refusal.contains("stored nothing"), "{refusal}");
+        for prefix in crate::release::entry_prefixes() {
+            let mut main = main_caches(ENTRY, 1, 1);
+            main.retain(|(key, _)| !key.starts_with(&prefix));
+            let refusal = budget(ENTRY, &main).expect_err("a layer main holds none of");
+            assert!(refusal.contains(&prefix), "{refusal}");
+        }
+    }
+
+    /// A page of the cache list in the shape GitHub's REST API documents, and
+    /// an entry of another scope, or without its size, refused.
+    #[test]
+    fn a_page_of_the_cache_list_holds_only_mains_entries() {
+        let entry = |scope: &str| {
+            serde_json::json!({
+                "id": 7, "ref": scope, "key": "toolchain-llvm-cc80e6c5b01b2cf1", "version": "0",
+                "last_accessed_at": "2026-10-20T22:32:58Z", "created_at": "2026-10-10T23:12:33Z",
+                "size_in_bytes": 231_108_403u64
+            })
+        };
+        let page = |entries: Vec<serde_json::Value>| serde_json::json!({ "total_count": 9, "actions_caches": entries });
+        let read = cache_page(&page(vec![entry(MAIN)]));
+        assert_eq!(read, Ok((9, vec![("toolchain-llvm-cc80e6c5b01b2cf1".to_string(), 231_108_403)])));
+        let mut sizeless = entry(MAIN);
+        sizeless.as_object_mut().unwrap().remove("size_in_bytes");
+        for wrong in [entry("refs/heads/gh-readonly-queue/main/pr-1-0"), sizeless] {
+            assert!(cache_page(&page(vec![wrong.clone()])).is_err(), "{wrong}");
+        }
     }
 
     /// One commit of `a.rs`, begun cold on `runner`.

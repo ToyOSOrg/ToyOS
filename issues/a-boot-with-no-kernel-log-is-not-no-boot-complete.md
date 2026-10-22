@@ -11,7 +11,7 @@ Run 22's hung mkdir image left the stick holding `attempts` and `loader.log` and
 left a 325-line file ending at a spawn. `loader.log` shows an ordinary handoff,
 so that kernel started; `logd` either never created its file or its first write
 never completed. The stick after the power cut is
-`/Users/jan/.claude/jobs/2280e09e/tmp/t14-run22/stick-after-cycle.log`.
+`t14-run22/stick-after-cycle.log`, outside the tree.
 
 `tests/metal/src/lib.rs` reads that back as the absence of `Boot: complete`, which is the
 same verdict it gives a boot that ran and stopped late. They are not the same

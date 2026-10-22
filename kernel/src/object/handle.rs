@@ -119,6 +119,10 @@ impl HandleEntry {
         &self.object
     }
 
+    pub fn rights(&self) -> Rights {
+        self.rights
+    }
+
     /// A second handle to the same object, carrying no more than this one.
     pub fn duplicate(&self, rights: Rights) -> Result<Self, HandleError> {
         if !self.rights.contains(Rights::DUP) {
@@ -197,32 +201,6 @@ impl HandleTable {
         Ok(RawHandle::new(slot, 0))
     }
 
-    /// Install at a caller-chosen slot, replacing whatever is there.
-    #[must_use = "the displaced entry must be dropped by the caller"]
-    pub fn install_at(
-        &mut self,
-        slot: u16,
-        entry: HandleEntry,
-    ) -> Result<(RawHandle, Option<HandleEntry>), TableFull> {
-        let slot_index = slot as usize;
-        // A slot past MAX_HANDLES is the table's cap, not a malformed argument.
-        if slot_index >= MAX_HANDLES {
-            return Err(TableFull);
-        }
-        while self.slots.len() <= slot_index {
-            self.free.push(self.slots.len() as u16);
-            self.slots.push(Slot::Serving { generation: 0, entry: None });
-        }
-        self.free.retain(|&s| s != slot);
-        // A retired slot answers `TableFull` too: the table no longer has that slot at all.
-        let Slot::Serving { generation, entry: at } = &mut self.slots[slot_index] else {
-            return Err(TableFull);
-        };
-        // Generation stays put: dup2 keeps the number the caller already holds valid.
-        let displaced = at.replace(entry);
-        Ok((RawHandle::new(slot, *generation), displaced))
-    }
-
     /// The entry a handle names, or why it names none; a retired slot is `Stale`, not `BadHandle`, since the slot is in range.
     fn entry_of(&self, h: RawHandle) -> Result<&HandleEntry, HandleError> {
         match self.slots.get(h.slot() as usize).ok_or(HandleError::BadHandle)? {
@@ -282,15 +260,6 @@ impl HandleTable {
     /// What a handle carries, for a caller about to duplicate it unchanged.
     pub fn rights_of(&self, h: RawHandle) -> Result<Rights, HandleError> {
         Ok(self.entry_of(h)?.rights)
-    }
-
-    /// A duplicate for *another* table — a child's, built at spawn.
-    pub fn duplicate_entry(
-        &self,
-        h: RawHandle,
-        rights: Rights,
-    ) -> Result<HandleEntry, HandleError> {
-        self.entry_of(h)?.duplicate(rights)
     }
 
     /// Take a handle out of the table and retire its slot.

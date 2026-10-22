@@ -18,7 +18,7 @@
 //! server's ends and its answer together: nothing else makes the ends, and an
 //! answer is otherwise only read off the wire ([`Opened::decode`]).
 
-use toyos_transport::Word;
+use toyos::transport::Word;
 
 use crate::layout::{self, ServerRings, RING_WORDS};
 
@@ -38,6 +38,18 @@ pub const MSG_LISTED: u32 = 5;
 
 /// The bytes of a GUID payload.
 pub const GUID_BYTES: usize = 16;
+
+/// How long the service waits for its disk drivers to settle, from its start
+/// or a settled driver's end, before it answers a listing or an open with
+/// what it knows. Policy: a stick's bring-up is a port's reset and
+/// enumeration and a Bulk-Only disk's first commands, each bounded far below
+/// this.
+pub const DRIVER_BOUND_NS: u64 = 30_000_000_000;
+
+/// How long a client waits for a listing's or an open's answer before it
+/// takes the service for wedged: the service's wait for its drivers, and as
+/// long again for the driver's answer to an open it hands over.
+pub const ANSWER_BOUND_NS: u64 = 2 * DRIVER_BOUND_NS;
 
 /// What an open was answered with: the partition's length in blocks, and its
 /// unique GUID as the table stores it.
@@ -97,24 +109,27 @@ impl Opened {
     }
 }
 
-/// One partition of the table a service drives, as [`MSG_LISTED`] carries
-/// it: its unique and type GUIDs as the table stores them. Every entry the
-/// grant admits is listed, one the service will not open among them, so a
-/// client that finds its partition by type learns why from the open's refusal
-/// rather than taking the partition for missing.
+/// One partition a service serves, as [`MSG_LISTED`] carries it: the
+/// service's number for the disk it is on, and its unique and type GUIDs as
+/// the disk's table stores them. Every entry the grant admits is listed, one
+/// the service will not open among them, so a client that finds its
+/// partition by type learns why from the open's refusal rather than taking
+/// the partition for missing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Listed {
+    pub disk: u32,
     pub unique: [u8; GUID_BYTES],
     pub kind: [u8; GUID_BYTES],
 }
 
 impl Listed {
-    pub const BYTES: usize = 2 * GUID_BYTES;
+    pub const BYTES: usize = 4 + 2 * GUID_BYTES;
 
     pub fn encode(&self) -> [u8; Self::BYTES] {
         let mut out = [0u8; Self::BYTES];
-        out[..GUID_BYTES].copy_from_slice(&self.unique);
-        out[GUID_BYTES..].copy_from_slice(&self.kind);
+        out[..4].copy_from_slice(&self.disk.to_le_bytes());
+        out[4..4 + GUID_BYTES].copy_from_slice(&self.unique);
+        out[4 + GUID_BYTES..].copy_from_slice(&self.kind);
         out
     }
 
@@ -125,8 +140,9 @@ impl Listed {
         }
         let (chunks, _) = bytes.as_chunks::<{ Self::BYTES }>();
         Some(chunks.iter().map(|c| Self {
-            unique: c[..GUID_BYTES].try_into().expect("sixteen bytes"),
-            kind: c[GUID_BYTES..].try_into().expect("sixteen bytes"),
+            disk: u32::from_le_bytes(c[..4].try_into().expect("four bytes")),
+            unique: c[4..4 + GUID_BYTES].try_into().expect("sixteen bytes"),
+            kind: c[4 + GUID_BYTES..].try_into().expect("sixteen bytes"),
         }))
     }
 }
@@ -201,16 +217,18 @@ pub enum Refusal {
     /// A session holds it already.
     Held,
     /// The partition is there and cannot be served: its range is not whole
-    /// blocks, its GUID is on two entries, its table did not read, or its
-    /// controller would not open — the answer to a listing then too.
+    /// blocks, its GUID is on two disks, or its controller would not open. A
+    /// listing that finds nothing it admits is refused the same while a disk
+    /// driver cannot use its controller or never settled.
     Unusable,
     /// The frame, its handles or its region are not what this protocol sends.
     Malformed,
     /// The service is holding as many sessions as it serves.
     Exhausted,
-    /// The controller is on this machine and the kernel would not hand the
-    /// service its claim: nothing on it is served, and a listing is refused
-    /// the same.
+    /// A disk controller is on this machine and no driver of it started — the
+    /// kernel would not hand over its claim, or the driver would not spawn:
+    /// nothing on it is served, and a listing that finds nothing it admits is
+    /// refused the same.
     ClaimRefused,
     /// The connection's grant does not reach that partition, whether or not
     /// the service has it. A connection with no grant, or with bytes no
@@ -266,8 +284,8 @@ mod tests {
     #[test]
     fn opened_and_refusal_survive_their_bytes_and_nothing_else_decodes() {
         let listed = [
-            Listed { unique: [1; GUID_BYTES], kind: [2; GUID_BYTES] },
-            Listed { unique: [4; GUID_BYTES], kind: [5; GUID_BYTES] },
+            Listed { disk: 0, unique: [1; GUID_BYTES], kind: [2; GUID_BYTES] },
+            Listed { disk: u32::MAX, unique: [4; GUID_BYTES], kind: [5; GUID_BYTES] },
         ];
         let bytes: Vec<u8> = listed.iter().flat_map(|l| l.encode()).collect();
         assert_eq!(Listed::decode_all(&bytes).map(|all| all.collect::<Vec<_>>()), Some(listed.to_vec()));

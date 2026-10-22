@@ -102,13 +102,10 @@ Cost, so the question is priced: a directory move is `git mv` plus `mod` lines,
 it touches no logic, and it collides with every worktree in flight — which is
 why it is a scheduling decision and not a technical one.
 
-Two smaller layout items ride the same answer. `usb_gate.rs` (242 lines) and
-`input_merge_test.rs` (178) are correctly `#[cfg]`-gated at declaration and
-call (`kernel/src/main.rs:34`, `:36`, `:408`, `:537`) and are never in an
-ordinary build, but
-they sit interleaved with production sources; the review's target is one
-`gates` directory under `kernel/src/` so that what test machinery exists is auditable
-in one listing. And `input_merge_test` is the tell that pure logic is trapped
-in the kernel: the merge state machine (one held-set, one button-merge, both
-bounded) is host-testable with synthetic multi-source streams, after which the
-gate shrinks or goes.
+Two smaller layout items rode the same answer, and both left the kernel
+with its xHCI and input streams (the small-kernel track's step 10):
+`usb_gate.rs` and `input_merge_test.rs` sat interleaved with production
+sources, and the review's target was one `gates` directory under
+`kernel/src/` so that what test machinery exists is auditable in one listing.
+`input_merge_test` was the tell that pure logic was trapped in the kernel: the
+merge is `toyos-input`'s now, host-tested with synthetic multi-source streams.

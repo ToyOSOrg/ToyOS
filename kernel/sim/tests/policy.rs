@@ -2,41 +2,34 @@
 //! as numbers, against bounds derived from its own constants.
 //!
 //! `scenarios.rs` next door is the exit criterion — every negative gate fails,
-//! every scenario passes. That is a suite of *verdicts*, and the external review
-//! of 2026-08-20 named what it leaves out: the policy this scheduler states —
-//! "threads execute, processes own fair share" — is encoded in implementation
-//! intent and was validated nowhere empirically. A verdict cannot say how much
-//! share a process actually got, how long an interactive wake actually waited,
-//! or how long a runnable task can actually be passed over. Those are the
-//! quantities a user feels, and each one below is measured and then asserted.
+//! every scenario passes. That is a suite of *verdicts*. The policy this
+//! scheduler states — a job owns its share and its threads divide it, and each
+//! CPU runs EEVDF over the job groups it holds (owner decision J1) — is about
+//! quantities: how much share a process got, how long an interactive wake
+//! waited, how long a runnable task was passed over. Each one below is
+//! measured and then asserted.
 //!
-//! # The one constant every bound here is made of
-//!
-//! Every case in this file lands on the same term, and it is not a coincidence:
+//! # The constant every bound here is made of
 //!
 //! ```text
-//! (runnable threads on one CPU + 1) × (QUANTUM_NS + max KernelSection + 2 × RUN_CHUNK_NS)
+//! one request = SLICE_NS + 2 × RUN_CHUNK_NS
 //! ```
 //!
-//! The fair band is keyed by the vruntime a thread held **when it was inserted**
-//! (`queue.rs`), and a share's pot advances only when one of its
-//! threads runs. So a thread queued behind `R` others can be passed over by all
-//! `R` of them on the strength of keys that were already stale when its own wait
-//! began, and the leader spends one more quantum on top. It is invariant I5's
-//! staleness term and invariant I13's whole bound, and this file is the finding
-//! that it is *also* the interactive wake latency, *also* the starvation bound,
-//! and *also* exactly what a thread-count attack is worth. The kernel-section
-//! and chunk terms are I9's, for I9's reason: a preempt-off section overruns the
-//! quantum it started in, and the model observes an expiry one chunk late.
+//! EEVDF holds each entity's lag inside one request plus the granularity a
+//! decision is taken late by (Stoica and Abdel-Wahab, Theorem 3), and the model
+//! observes a decision up to two chunks late. So a group's service stays within
+//! a request of its share, a thread whose group is due waits out at most the
+//! request running ahead of it, and a thread in a group of `n` waits out its
+//! `n − 1` siblings' requests at the rate its group is served.
 //!
 //! # What each case measures, and what it found
 //!
 //! | case | measured | derived bound | measured/bound |
 //! |---|---|---|---|
-//! | thread-count asymmetry | `solo` finishes `N+1` quanta late, at every `N` | `(N+2) × 12 ms` | 0.82 at N=64 |
-//! | the deficit over time | 50 ms at N=4, 170 ms at N=16, unchanged as the window doubles twice | an offset, not a drift | — |
-//! | wakeup storm drain | 27.75 ms for 64 waiters on one CPU, 3.1× the 16-waiter figure | `(per queue+1) × 12 ms` = 780 ms | 0.04 |
-//! | starvation | 70 ms at 5 runnable threads, 680 ms at 65 | `(threads+1) × 12 ms` | 0.97 / 0.86 |
+//! | thread-count asymmetry | `solo` finishes one slice late at every `N` ≥ 2 | `2 × WORK + 2` requests | 0.94 |
+//! | the deficit over time | 4 ms at N=4 and N=16, unchanged as the window doubles twice | an offset, not a drift | — |
+//! | interactive wake | 5 ms at worst, 2 ms for every wake but one per run | one request; the minimum run and two chunks | 0.83 / 0.89 |
+//! | starvation | 20 ms at 4 runnable threads, 120 ms at 17 | groups × the largest group × one request | 0.55–0.63 |
 //! | a bounded re-arm | every CPU is reached at every width; 10 ms of probe gap | `every_ns + 3 × RUN_CHUNK` = 13 ms | 0.77 |
 //!
 //! The adversarial-placement case is the only one whose bound is a *count*
@@ -52,32 +45,30 @@
 //! quantity the protocol owns end to end.
 //!
 //! Every number came from this file at 16–40 seeds per point:
-//! `cargo test -p kernel-sim --test policy -- --nocapture`. The tables in
-//! each test carry the full sweeps.
+//! `cargo test --release -p kernel-sim --test policy -- --nocapture`, on
+//! `e74dbf1` with the job-group scheduler applied. The tables in each test
+//! carry the full sweeps.
 //!
 //! # What the numbers say, in one paragraph
 //!
-//! **A process cannot buy CPU by forking, and the qualifier is a window
-//! length.** `swarm` with N threads delays a single-threaded rival by exactly
-//! `N+1` quanta — once — and never again however long the run goes on. Over the
-//! 120 ms `solo` would take against one rival that is a fall from a 500‰ share
-//! to 77‰ at N=64; over a window four times as long the same deficit is 453‰ at
-//! N=4. So the policy's claim holds asymptotically and is a granularity
-//! statement, not a guarantee about any particular window — which is the honest
-//! form of "processes own fair share", and it is measured here rather than
-//! asserted anywhere.
+//! **A process cannot buy CPU by forking.** `swarm` with N threads delays a
+//! single-threaded rival by one slice — the EEVDF lag of one request — at every
+//! N from 2 to 64, once, and never again however long the run goes on. The
+//! wait a runnable thread can see grows with its own group's size, not with
+//! the machine's thread count: a thread among 16 siblings waits out 15 of their
+//! requests at the half of the CPU its job is owed.
 //!
 //! **The pull half is one-shot, and the shipped push is what closes it.** An
 //! idle CPU posts one probe on its way to `hlt` and nothing re-posts it, so
 //! under plain `Balance::Pull` a CPU that halted before any neighbour published
-//! surplus was never probed again: 0 of 20 seeds reach every CPU at eight. A
-//! bounded re-arm of the probe and a push on surplus each take that to 20 of 20
-//! at every width, and they cost opposite things — the timer ticks whether or
-//! not there is anything to come for, the push fires only where there is. On
-//! the audio pipeline that is 154 extra idle wakes per second against **zero**,
-//! which is why `Balance::PushOnSurplus` ships (owner decision 2026-08-23) and
-//! the re-arm was declined; these three cases are the numbers the decision was
-//! made on.
+//! surplus was never probed again. A bounded re-arm of the probe and a push on
+//! surplus each reach every CPU at every width, and they cost opposite things —
+//! the timer ticks whether or not there is anything to come for, the push fires
+//! only where there is. That is why `Balance::PushOnSurplus` ships (owner
+//! decision 2026-08-23) and the re-arm was declined; these three cases are the
+//! numbers the decision was made on. Busy CPUs also balance their job groups'
+//! summed weight between themselves (`SchedPass::balance_busy`), at most one
+//! request per CPU per `BALANCE_NS`.
 //!
 //! # Determinism, seeds, and what varies
 //!
@@ -93,21 +84,22 @@
 //! doing what a sweep is for.
 
 use kernel::sched::cpu::Balance;
-use kernel::sched::cpu::{PROTECTED_RUN_NS, STALE_PASS_NS};
-use kernel::sched::fair::QUANTUM_NS;
+use kernel::sched::cpu::STALE_PASS_NS;
+use kernel::sched::queue::{MIN_SLICE_NS, SLICE_NS};
+use kernel::sched::task::QUANTUM_NS;
 use kernel_sim::choice::ChoiceStream;
 use kernel_sim::explore::{run, Outcome};
 use kernel_sim::latency::{Latency, ReadyCause};
 use kernel_sim::scenarios;
 use kernel_sim::vm::{IPI_LATENCY_NS, RUN_CHUNK_NS};
-use kernel_sim::workload::{Scenario, ShareShape};
+use kernel_sim::workload::{JobShape, Scenario};
 
 const MS: u64 = 1_000_000;
 
-/// One thread's work in the share-gain cases: six quanta, the same figure
-/// `scenarios::WORK` gives a `fairness_storm` thread and for the same reason —
-/// a window many quanta wide is what a granularity bound needs before it can
-/// separate a fair split from a broken one.
+/// One thread's work in the share-gain cases, the figure `scenarios::WORK`
+/// gives a `fairness_storm` thread and for the same reason — a window many
+/// requests wide is what a granularity bound needs before it can separate a
+/// fair split from a broken one.
 const WORK: u64 = 60 * MS;
 
 /// Seeds per point for the one-CPU cases. They are deterministic (see the module
@@ -115,13 +107,13 @@ const WORK: u64 = 60 * MS;
 /// search; the cases that actually explore say so where they set their own.
 const SEEDS: u64 = 16;
 
-/// The fair band's granularity: one dispatch of one run queue. Every bound in
-/// this file is a multiple of it.
+/// The fair band's granularity: one request, observed up to two chunks late.
+/// Every bound in this file is made of it.
 ///
 /// `max KernelSection` is zero in all three policy workloads — none of them runs
 /// an `Op::KernelSection` — so the term is dropped here rather than carried as a
 /// zero, and any workload that grows one has to add it back.
-const DISPATCH_NS: u64 = QUANTUM_NS + 2 * RUN_CHUNK_NS;
+const DISPATCH_NS: u64 = SLICE_NS + 2 * RUN_CHUNK_NS;
 
 fn stream(scenario: &Scenario, seed: u64) -> ChoiceStream {
     if seed.is_multiple_of(2) {
@@ -152,33 +144,22 @@ fn sweep(scenario: &Scenario, seeds: u64, mut fold: impl FnMut(&Outcome)) {
 /// finishes *is* the share it was served at: 120 ms means half the CPU, 240 ms
 /// means a quarter.
 ///
-/// **What it found.** `solo` finishes exactly `N+1` quanta late at every width
-/// above one, and the seeds do not disagree by a nanosecond
-/// (`cargo test -p kernel-sim --test policy -- --nocapture`):
+/// **What it found.** `solo` finishes one slice late at every width above one,
+/// and the seeds do not disagree by a nanosecond
+/// (`cargo test --release -p kernel-sim --test policy -- --nocapture`):
 ///
-/// | N | T_solo | deficit | in quanta | `solo`'s share over that window |
-/// |---|---|---|---|---|
-/// | 1  | 120 ms |   0 ms |  0 | 500‰ |
-/// | 2  | 150 ms |  30 ms |  3 | 400‰ |
-/// | 4  | 170 ms |  50 ms |  5 | 352‰ |
-/// | 8  | 210 ms |  90 ms |  9 | 285‰ |
-/// | 16 | 290 ms | 170 ms | 17 | 206‰ |
-/// | 32 | 450 ms | 330 ms | 33 | 133‰ |
-/// | 64 | 770 ms | 650 ms | 65 |  77‰ |
+/// | N | T_solo | deficit | `solo`'s share over that window |
+/// |---|---|---|---|
+/// | 1  | 120 ms | 0 ms | 500‰ |
+/// | 2–64 | 124 ms | 4 ms | 483‰ |
 ///
-/// So the attack **works, once, and by exactly the fair band's staleness**: at
-/// t=0 every thread is inserted at vruntime 0, `solo` is dispatched first and
-/// re-inserted with its share's pot at 10 ms, and every one of `swarm`'s N
-/// threads still holds the stale key it was queued with — so all N run a quantum
-/// ahead of `solo`'s second turn. After that burst each swarm thread carries a
-/// key its own dispatch set, and the two processes alternate one for one.
+/// On one CPU the two jobs' groups weigh the same whatever N is — a group
+/// weighs its job's weight times its share of the job's runnable threads, all
+/// of which are here — so the swarm's threads divide its half among themselves.
 ///
-/// **The bound is derived and it is not moved.** `(N + 2)` dispatches of the one
-/// run queue — the N+1 runnable threads and the leader's extra quantum, which is
-/// invariant I5's `(ΣT + 1)` term exactly. The measured deficit fills 0.63 of it
-/// at N=2 and climbs to 0.82 at N=64, so the scheduler is closing on its own
-/// granularity as the swarm widens rather than living comfortably inside it —
-/// which is the same thing `scenarios::FAIRNESS_SAMPLE` records about I5.
+/// **The bound is derived and it is not moved.** `solo`'s group's lag stays
+/// within one request of zero, so it has had at least half the CPU less one
+/// request at every instant, and spends its work at most two requests late.
 #[test]
 fn a_process_cannot_buy_cpu_by_forking() {
     let mut table = Vec::new();
@@ -187,7 +168,7 @@ fn a_process_cannot_buy_cpu_by_forking() {
         let solo = scenario
             .process_index("solo")
             .expect("share_gain has a solo");
-        let bound = 2 * WORK + (threads as u64 + 2) * DISPATCH_NS;
+        let bound = 2 * WORK + 2 * DISPATCH_NS;
         let (mut worst, mut best) = (0, u64::MAX);
         sweep(&scenario, SEEDS, |outcome| {
             let finish = outcome.process_finish_ns[solo]
@@ -198,44 +179,39 @@ fn a_process_cannot_buy_cpu_by_forking() {
         assert!(
             worst <= bound,
             "at {threads} rival thread(s) a single-threaded process took {worst} ns to spend \
-             {WORK} ns of CPU, against a derived {bound} ns — two quanta of its own plus \
-             {} dispatches of stale fair-band keys at {DISPATCH_NS} ns. Past this, forking \
-             buys more CPU than the policy says it can.",
-            threads + 2,
+             {WORK} ns of CPU, against a derived {bound} ns — two of its own shares plus two \
+             requests at {DISPATCH_NS} ns. Past this, forking buys more CPU than the policy \
+             says it can.",
         );
         table.push((threads, worst, worst - 2 * WORK, WORK * 1000 / worst, best));
     }
 
     for &(threads, finish, deficit, permille, best) in &table {
         println!(
-            "share_gain N={threads}: T_solo={finish} ns deficit={deficit} ns ({} quanta) \
+            "share_gain N={threads}: T_solo={finish} ns deficit={deficit} ns \
              share={permille}permille (best seed {best})",
-            deficit / QUANTUM_NS,
         );
     }
 
-    // The measurement has to be a comparison and not an accident of a bound
-    // nothing could reach: at one CPU the deficit is the band's granularity and
-    // the scheduler spends nearly all of it.
-    let (threads, _, deficit, _, _) = table[table.len() - 1];
-    let bound = (threads as u64 + 2) * DISPATCH_NS;
+    // The shape of the finding, asserted rather than only tabulated: the
+    // deficit does not grow with the rival count, which is what "a helper buys
+    // no entitlement" means for one CPU.
+    let deficits: Vec<u64> = table.iter().map(|&(_, _, deficit, _, _)| deficit).collect();
+    let (two, many) = (deficits[1], deficits[deficits.len() - 1]);
     assert!(
-        deficit * 2 > bound,
-        "at {threads} rivals the deficit is {deficit} ns against a {bound} ns bound — more \
-         than a factor of two of slack means the bound has stopped constraining anything and \
-         a real regression could hide under it (it sits at 0.82 of the bound today)",
-    );
-
-    // And the shape of the finding, asserted rather than only tabulated: the
-    // deficit grows with the rival count, which is what makes this a *bound* on
-    // an attack rather than a constant nobody can move.
-    let one = table[0].2;
-    let many = table[table.len() - 1].2;
-    assert!(
-        one == 0 && many > 0,
-        "the deficit went from {one} ns at one rival thread to {many} ns at {} — if it no \
-         longer grows with the thread count, this case is measuring something else",
+        many <= two,
+        "the deficit went from {two} ns at two rival threads to {many} ns at {} — a deficit \
+         that grows with the swarm is a share bought by forking",
         table[table.len() - 1].0,
+    );
+    // And the measurement has to be a comparison and not an accident of a
+    // bound nothing could reach.
+    assert!(
+        many * 4 > 2 * DISPATCH_NS,
+        "at {} rivals the deficit is {many} ns against a {} ns bound — more than a factor of \
+         four of slack means the bound has stopped constraining anything",
+        table[table.len() - 1].0,
+        2 * DISPATCH_NS,
     );
 }
 
@@ -243,7 +219,7 @@ fn a_process_cannot_buy_cpu_by_forking() {
 /// between a granularity and a process that permanently owns more of the machine
 /// than it is entitled to.
 ///
-/// The case above measures `solo` finishing `N+1` quanta late over a 120 ms
+/// The case above measures `solo` finishing one slice late over a 120 ms
 /// window. That number is only tolerable if it is paid *once*: if it were paid
 /// per unit of work, `swarm` would be taking a fixed fraction of the machine for
 /// ever and the policy would simply be false. So the identical scenario is run
@@ -254,18 +230,12 @@ fn a_process_cannot_buy_cpu_by_forking() {
 ///
 /// | N | work | T_solo | deficit | share |
 /// |---|---|---|---|---|
-/// | 4  |  60 ms | 170 ms |  50 ms | 352‰ |
-/// | 4  | 120 ms | 290 ms |  50 ms | 413‰ |
-/// | 4  | 240 ms | 530 ms |  50 ms | 452‰ |
-/// | 16 |  60 ms | 290 ms | 170 ms | 206‰ |
-/// | 16 | 120 ms | 410 ms | 170 ms | 292‰ |
-/// | 16 | 240 ms | 650 ms | 170 ms | 369‰ |
+/// | 4, 16 |  60 ms | 124 ms | 4 ms | 483‰ |
+/// | 4, 16 | 120 ms | 244 ms | 4 ms | 491‰ |
+/// | 4, 16 | 240 ms | 484 ms | 4 ms | 495‰ |
 ///
-/// The deficit is the same nanosecond at every window length, so the share
-/// climbs toward 500‰ as the window grows — the floor a reader wants is
-/// `1/2 − (N+1) × QUANTUM / 2L` for a window of length `L`, and it is a floor
-/// independent of N only in the limit. That sentence is the honest form of the
-/// policy's claim, and this is the measurement it rests on.
+/// The deficit is the same nanosecond at every window length and every swarm,
+/// so the share climbs toward 500‰ as the window grows.
 #[test]
 fn the_share_deficit_is_an_offset_and_not_a_drift() {
     for threads in [4usize, 16] {
@@ -315,32 +285,32 @@ fn the_share_deficit_is_an_offset_and_not_a_drift() {
     }
 }
 
-/// The negative control for both cases above: the **rejected** policy, one fair
-/// share per thread instead of one per process.
+/// The negative control for both cases above: the **rejected** policy, one job
+/// per thread instead of one per process.
 ///
 /// Without it, "a process cannot buy CPU by forking" is a number with nothing to
-/// compare it to. Under per-thread shares `swarm` is entitled to N times what
+/// compare it to. Under a job per thread `swarm` is entitled to N times what
 /// `solo` is, and the instrument has to see that — not as a slightly worse
 /// deficit, but as a different machine. Measured: `solo` takes **1,020 ms** to
-/// spend the same 60 ms of CPU, against 290 ms under the shipped policy and a
-/// 336 ms derived bound, so the case above would red by 3.0×.
+/// spend the same 60 ms of CPU, against 124 ms under the shipped policy and a
+/// 132 ms derived bound, so the case above would red by 7.7×.
 ///
-/// **Invariant I5's ceiling is lifted for this run, and only for it.** Per-thread
-/// shares fail I5 within a few hundred microseconds — that verdict is
-/// `scenarios::fair_share_per_thread`'s and is asserted next door — and the
+/// **Invariant I5's ceiling is lifted for this run, and only for it.** A job per
+/// thread fails I5 within a few hundred microseconds — that verdict is
+/// `scenarios::fair_job_per_thread`'s and is asserted next door — and the
 /// explorer stops at the first violation, so `solo` would never finish and the
-/// quantity this file measures could not be read at all. The allowance suppresses
-/// the *verdict* and changes no scheduling decision: `ShareShape::PerThread` is
-/// still the whole of what differs from the control's control below.
+/// quantity this file measures could not be read at all. The lifted ceiling
+/// suppresses the *verdict* and changes no scheduling decision:
+/// `JobShape::PerThread` is still the whole of what differs from the control.
 #[test]
-fn per_thread_shares_lose_the_floor() {
+fn a_job_per_thread_loses_the_floor() {
     const THREADS: usize = 16;
-    let mut broken = scenarios::share_gain(THREADS, WORK).with_share(ShareShape::PerThread);
+    let mut broken = scenarios::share_gain(THREADS, WORK).with_job(JobShape::PerThread);
     // Past anything this run can produce, so I5 records the spread and reports
     // no violation; `Vm::fair_over_bound` still counts every crossing.
     broken = broken.with_fair_allowance(u64::MAX);
     let solo = broken.process_index("solo").expect("share_gain has a solo");
-    let bound = 2 * WORK + (THREADS as u64 + 2) * DISPATCH_NS;
+    let bound = 2 * WORK + 2 * DISPATCH_NS;
 
     let mut broken_finish = 0;
     sweep(&broken, SEEDS, |outcome| {
@@ -361,7 +331,7 @@ fn per_thread_shares_lose_the_floor() {
     );
     assert!(
         broken_finish > bound,
-        "under one fair share per *thread* a single-threaded process against {THREADS} rival \
+        "under one job per *thread* a single-threaded process against {THREADS} rival \
          threads finished its 60 ms of work at {broken_finish} ns — inside the {bound} ns the \
          case above allows. A policy that hands `swarm` sixteen times `solo`'s entitlement has \
          to break that bound, or the bound is not measuring the policy.",
@@ -378,22 +348,19 @@ fn per_thread_shares_lose_the_floor() {
 /// runs briefly waits for a CPU held by threads that never yield.
 ///
 /// The sleeper uses a quarter of a millisecond every three, so it is far under
-/// its share, its stored lag is positive and clamped, and
-/// `ShareState::enter_runnable` re-derives a vruntime at `frontier − lag` —
-/// below every hog that has run recently. It should therefore be picked the
-/// instant the running hog gives the CPU up.
+/// its share and carries that back in with it: its group joins with no debt
+/// and outweighs the hogs' group there, so its request is due first and it
+/// takes the CPU once the running hog has had its minimum run.
 ///
-/// **The exception is the spawn burst**: at t=0 every hog thread is queued at
-/// vruntime 0 with a key that stays stale until its own first dispatch, so the
-/// sleeper's *first* wake waits behind all of them. Every later wake finds a
-/// band whose keys its lag beats.
+/// **What it found**, 40 seeds per point: the worst wake is 5 ms at every hog
+/// count from 1 to 64 and at both widths — at most the hog request running
+/// ahead of it — and every wake but one per run at one CPU waits 2 ms at most,
+/// the minimum run and the model's two chunks.
 ///
-/// So the bound asserted is the band's granularity — `(rivals + 1)` dispatches,
-/// where rivals is what one run queue holds — and the sharper one-quantum claim
-/// is asserted at one CPU on the runner-up, where the burst is provably a single
-/// wake.
+/// So the bound asserted on every wake is one request, and the sharper claim
+/// is asserted at one CPU on the runner-up.
 #[test]
-fn an_interactive_wake_waits_out_at_most_the_band_it_is_queued_behind() {
+fn an_interactive_wake_waits_out_at_most_one_request() {
     /// Enough runs that the distribution has a few hundred wakes in it; the
     /// device interrupt's position among the enabled steps is the freedom the
     /// seeds explore.
@@ -403,10 +370,7 @@ fn an_interactive_wake_waits_out_at_most_the_band_it_is_queued_behind() {
         let sleeper = scenario
             .process_index("sleeper")
             .expect("interactive_mix has a sleeper");
-        // What one run queue holds: the hogs spread over the CPUs, plus the
-        // sleeper itself, plus the leader's extra quantum.
-        let rivals = hogs.div_ceil(cpus) as u64 + 1;
-        let bound = (rivals + 1) * DISPATCH_NS;
+        let bound = DISPATCH_NS;
 
         let mut merged = Latency::default();
         let mut worst_runner_up = 0;
@@ -432,21 +396,19 @@ fn an_interactive_wake_waits_out_at_most_the_band_it_is_queued_behind() {
         );
         assert!(
             merged.max_ns() <= bound,
-            "at {cpus} cpu(s) and {hogs} hog(s) an interactive wake waited {} ns against a \
-             derived {bound} ns — {rivals} runnable thread(s) on one run queue plus the \
-             leader, at {DISPATCH_NS} ns a dispatch. Distribution: {}",
+            "at {cpus} cpu(s) and {hogs} hog(s) an interactive wake waited {} ns against one \
+             request, {bound} ns. Distribution: {}",
             merged.max_ns(),
             merged.summary(),
         );
         if cpus == 1 {
-            let contract = DISPATCH_NS;
+            let contract = MIN_SLICE_NS + 2 * RUN_CHUNK_NS;
             assert!(
                 worst_runner_up <= contract,
                 "at {hogs} hog(s) on one CPU, more than one wake per run waited out more \
-                 than a quantum: the second-worst wake of some run took \
-                 {worst_runner_up} ns against one quantum plus granularity, {contract} ns. \
-                 The spawn burst delays the first wake and is measured as the maximum; a \
-                 second slow wake means the fair band's keys are staying stale.",
+                 than the minimum run: the second-worst wake of some run took \
+                 {worst_runner_up} ns against {contract} ns. A wake due first is waiting for \
+                 the running request instead of taking the CPU after the minimum run.",
             );
         }
     }
@@ -462,9 +424,9 @@ const HOP_NS: u64 = IPI_LATENCY_NS + 2 * RUN_CHUNK_NS;
 /// the sibling.
 ///
 /// `scenarios::busy_home` puts a sleeper and a hog of one process on one CPU
-/// beside an idle one, with the balance path off — so the woken thread's key
-/// ties the hog's, no cut can serve it, and nothing but the forward can run it
-/// before the hog's quantum ends.
+/// beside an idle one, with the balance path off — so the woken thread joins
+/// the hog's group, no cut can serve it, and nothing but the forward can run it
+/// before the hog's request ends.
 ///
 /// **Only a run that forwarded is measured**, and most must. The model does
 /// not oblige a CPU with nothing to do to take its first pass, so in some
@@ -501,30 +463,28 @@ fn a_wake_to_a_busy_cpu_beside_an_idle_one_runs_within_two_hops() {
     assert!(
         merged.max_ns() <= bound,
         "a wake waited {} ns against two hops, {bound} ns: the busy home's kick and the \
-         idle CPU's adopt. Past this the wake is waiting for the hog's quantum. \
+         idle CPU's adopt. Past this the wake is waiting for the hog's request. \
          Distribution: {}",
         merged.max_ns(),
         merged.summary(),
     );
 }
 
-/// **A wake that is owed the CPU ahead of the running task waits out
-/// [`PROTECTED_RUN_NS`] and a hop, not a quantum** — on one CPU, against one
-/// rival process, every wake but one per run.
+/// **A wake due ahead of the running task waits out [`MIN_SLICE_NS`] and a
+/// hop, not a request** — on one CPU, against one rival process, every wake
+/// but one per run.
 ///
 /// `interactive_mix(1, 1)`'s sleeper runs a quarter of a millisecond every
-/// three, so its key is below the hog's at nearly every wake, and the one
-/// exception is the burst at the start: the frontier is still the spawn's
-/// zero when the sleeper first parks, so the lag it stores is measured against
-/// a key the hog has long since left. That wake waits its turn in the band;
-/// the per-run runner-up is the claim about every other, exactly as the case
-/// above reads it.
+/// three, so its request is due first at nearly every wake. The exception is
+/// the start, where the sleeper's first wake can find the hog's group still
+/// ahead; the per-run runner-up is the claim about every other, exactly as the
+/// case above reads it.
 #[test]
-fn a_wake_owed_the_cpu_waits_out_the_protected_run_and_no_more() {
+fn a_wake_due_first_waits_out_the_minimum_run_and_no_more() {
     const OWED_SEEDS: u64 = 40;
     let scenario = scenarios::interactive_mix(1, 1);
     let sleeper = scenario.process_index("sleeper").expect("interactive_mix has a sleeper");
-    let bound = PROTECTED_RUN_NS + HOP_NS;
+    let bound = MIN_SLICE_NS + HOP_NS;
     let mut merged = Latency::default();
     let mut worst_runner_up = 0;
     sweep(&scenario, OWED_SEEDS, |outcome| {
@@ -544,26 +504,28 @@ fn a_wake_owed_the_cpu_waits_out_the_protected_run_and_no_more() {
     assert!(
         worst_runner_up <= bound,
         "a second wake in one run waited {worst_runner_up} ns against {bound} ns — the \
-         protected run and one hop. Past this a wake owed the CPU is waiting for the \
-         running task's quantum.",
+         minimum run and one hop. Past this a wake due first is waiting for the running \
+         task's request.",
     );
 }
 
 /// **A thread that naps does not preempt the sibling that spins**: two threads
-/// of one share tie, and a tie says nothing about which is owed the CPU.
+/// of one job are one group, and inside a group the CPU decides only at a
+/// request's end.
 ///
 /// `scenarios::sleep_spin_siblings` puts them on one CPU. The spinner runs a
-/// whole quantum per turn and the napper one burst between turns, so the
+/// whole request per turn and the napper one burst between turns, so the
 /// spinner's [`scenarios::SPINNER_WORK`] is done within
-/// `SPINNER_WORK / QUANTUM` turns of `QUANTUM + burst + 2 × RUN_CHUNK`. A
-/// napper whose every wake cut the spinner's quantum would hold it to
-/// [`PROTECTED_RUN_NS`] a burst, and double the time it takes.
+/// `SPINNER_WORK / SLICE` turns of `SLICE + burst + 2 × RUN_CHUNK`. A napper
+/// whose every wake cut the spinner's request would hold it to
+/// [`MIN_SLICE_NS`] a burst, and double the time it takes. Measured: 148 ms
+/// against 175.
 #[test]
 fn a_sibling_that_naps_does_not_preempt_the_one_that_spins() {
     let scenario = scenarios::sleep_spin_siblings();
     let spinner = kernel::sched::task::TaskKey(1);
-    let turns = scenarios::SPINNER_WORK.div_ceil(QUANTUM_NS);
-    let bound = turns * (QUANTUM_NS + scenarios::NAP_BURST_NS + 2 * RUN_CHUNK_NS);
+    let turns = scenarios::SPINNER_WORK.div_ceil(SLICE_NS);
+    let bound = turns * (SLICE_NS + scenarios::NAP_BURST_NS + 2 * RUN_CHUNK_NS);
     let mut worst = 0;
     sweep(&scenario, SEEDS, |outcome| {
         let finish = *outcome
@@ -576,7 +538,7 @@ fn a_sibling_that_naps_does_not_preempt_the_one_that_spins() {
     assert!(
         worst <= bound,
         "the spinner took {worst} ns for {} ns of work against {bound} ns — its napping \
-         sibling is taking the CPU off it between quanta, which a tied key does not earn",
+         sibling is taking the CPU off it inside its requests",
         scenarios::SPINNER_WORK,
     );
 }
@@ -688,11 +650,49 @@ const LOPSIDED: [(usize, usize); 4] = [(2, 8), (4, 16), (4, 64), (8, 64)];
 /// it runs, and everything above that floor is stealable, one task per
 /// answered probe.
 ///
-/// It is also the ceiling on the *whole run's* migrations, because in this
-/// workload a thief never becomes a victim: a CPU holding one task publishes a
-/// surplus of zero, so no task in flight here is ever moved twice.
 fn stealable(threads: usize) -> u64 {
     threads as u64 - 1
+}
+
+/// **Every move a lopsided run makes has a cause, and none is a bounce.**
+///
+/// Before any thread exits, the counts only change by moves. cpu0 gives up
+/// [`even_drain`] tasks net, and each other CPU sources at most two moves of
+/// its own:
+/// - one at start-up, when an idle CPU's nearest neighbour holding surplus is
+///   one busy balancing has just given a second thread, rather than cpu0;
+/// - one at the end of the drain, when cpu0 answers a burst of requests posted
+///   in the same instant, drops below a CPU that took threads earlier, and that
+///   CPU hands one on.
+///
+/// After the first exit, a move needs a pair whose weights differ by more than
+/// one thread (`pop_surplus`'s quarter-thread margin), and only an exit opens
+/// one, so the moves are at most one per exit. Measured over 20 seeds: at most
+/// even + 8 before an exit (8 CPUs, 64 threads) and 53 moves after 64 exits
+/// (4 CPUs, 64 threads). A pair that bounces a thread with no exit between
+/// exceeds one bound or the other.
+fn assert_moves_have_causes(outcome: &Outcome, cpus: usize, threads: usize, label: &str) {
+    let before = even_drain(threads, cpus) + 2 * (cpus as u64 - 1);
+    assert!(
+        outcome.migrations_before_exit <= before,
+        "{label} at {cpus} cpus and {threads} threads: {} moves before any thread exited, past \
+         the {before} that an even split, one start-up chain and one end-of-drain correction \
+         per other CPU account for",
+        outcome.migrations_before_exit,
+    );
+    let after = outcome.migrations - outcome.migrations_before_exit;
+    assert!(
+        after <= outcome.exits,
+        "{label} at {cpus} cpus and {threads} threads: {after} moves after the first exit, \
+         against {} exits that could each open one imbalance",
+        outcome.exits,
+    );
+}
+
+/// The fewest migrations that leave cpu0 holding no more than an even split of
+/// the job, which every CPU's threads weigh the same in.
+fn even_drain(threads: usize, cpus: usize) -> u64 {
+    (threads - threads.div_ceil(cpus)) as u64
 }
 
 /// **Adversarial placement**: every thread of a saturating workload spawned onto
@@ -710,10 +710,10 @@ fn stealable(threads: usize) -> u64 {
 /// [`Balance::PushOnSurplus`] since the owner's 2026-08-23 decision.
 ///
 /// **Two findings.** Where the balance path runs at all it drains the loaded
-/// CPU *completely*: the best seed at every width moves exactly [`stealable`]
-/// tasks — all but the one cpu0 is running — so a machine an adversary piled
-/// onto one CPU is emptied to the protocol's own floor, one task per answered
-/// probe.
+/// CPU to an even split: idle CPUs each take a thread, and then busy CPUs ask
+/// for threads by their summed group weight, which for one job is their thread
+/// count, until no move narrows it. The best seed at every width moves at least
+/// [`even_drain`] tasks.
 ///
 /// And the pull alone **only ever reaches the CPUs that are still awake.** The
 /// probe is posted from an idle pass, one per idle trip, and only against a
@@ -750,15 +750,7 @@ fn the_balance_path_drains_the_cpu_an_adversary_loaded() {
                  those CPUs was given work by something that is not the balance path",
                 outcome.migrations,
             );
-            // And the ceiling: no task is moved twice, so the whole run cannot
-            // exceed what cpu0 held above the surplus floor.
-            assert!(
-                outcome.migrations <= floor,
-                "at {cpus} cpus the balance path moved {} of {threads} tasks, past the {floor} \
-                 that stand above cpu0's surplus floor — a task is being migrated more than \
-                 once, which is a thief that became a victim",
-                outcome.migrations,
-            );
+            assert_moves_have_causes(outcome, cpus, threads, "the shipped policy");
             best = best.max(outcome.migrations);
             widest = widest.max(ran);
             full += usize::from(ran == cpus);
@@ -768,19 +760,17 @@ fn the_balance_path_drains_the_cpu_an_adversary_loaded() {
         println!(
             "lopsided cpus={cpus} threads={threads}: {full}/{LOPSIDED_SEEDS} seeds reached \
              every cpu, {reached}/{LOPSIDED_SEEDS} reached a second, widest={widest}, best \
-             seed moved {best} of a {floor} floor",
+             seed moved {best} with {floor} stealable",
         );
         // **The drain, asserted where it is a law.** The best seed is the one in
         // which a thief was awake for the whole run, and there the balance path
-        // has to empty cpu0 down to the floor and no further. Anything less is a
-        // path that gives up while surplus is still published; anything more is
-        // the ceiling above.
-        assert_eq!(
-            best, floor,
+        // has to bring cpu0 down to an even split.
+        let even = even_drain(threads, cpus);
+        assert!(
+            best >= even,
             "at {cpus} cpus and {threads} threads on cpu0, the best of {LOPSIDED_SEEDS} \
-             schedules moved {best} tasks and the surplus floor leaves {floor} stealable. A \
-             machine with a thief awake for the whole run must be drained to that floor: one \
-             task per answered probe, while a task is queued",
+             schedules moved {best} tasks, and leaving cpu0 an even split takes {even}: the \
+             balance path gave up while cpu0 still weighed more than its peers",
         );
         // **The shipped default reaches every CPU in every schedule.** This is
         // the push's whole reason to ship: under plain `Balance::Pull` a CPU
@@ -803,7 +793,7 @@ fn the_balance_path_drains_the_cpu_an_adversary_loaded() {
     for &(cpus, threads, full, reached, best, floor) in &table {
         println!(
             "lopsided cpus={cpus} threads={threads}: every-cpu {full}/{LOPSIDED_SEEDS}, \
-             second-cpu {reached}/{LOPSIDED_SEEDS}, drained {best}/{floor}",
+             second-cpu {reached}/{LOPSIDED_SEEDS}, moved {best} with {floor} stealable",
         );
     }
 }
@@ -853,10 +843,9 @@ fn without_the_balance_path_a_lopsided_machine_stays_lopsided() {
 
 /// How long a cure waits before probing again, and how many times.
 ///
-/// One quantum, because that is the interval the rest of this scheduler already
-/// works in: a loaded CPU reaches a pass at every quantum boundary, so a thief
-/// that re-probes faster than that is asking a question whose answer cannot have
-/// changed. Four, because the re-arm has to be **bounded** — `times × every_ns`
+/// One quantum, because a loaded CPU reaches a pass at least that often — at
+/// each fair request's end, or a real-time turn's — so a thief that re-probes
+/// faster than that is asking a question whose answer may not have changed. Four, because the re-arm has to be **bounded** — `times × every_ns`
 /// is the whole window a cure of this shape can see a surplus in, and past it
 /// the CPU halts for good rather than ticking for ever on a machine with nothing
 /// to run.
@@ -927,12 +916,11 @@ fn wake_rate(outcome: &Outcome) -> f64 {
 /// Run the lopsided machine under one policy and fold what it did.
 ///
 /// The two ceilings the shipped path already obeys are asserted here rather than
-/// in each case, because they are claims about the *pull* half and every policy
-/// below is built on it: no CPU is given work by anything but the balance path,
-/// and no task is moved twice.
+/// in each case, because every policy below is built on the same balance path:
+/// no CPU is given work by anything but the balance path, and the migrations
+/// each have a cause ([`assert_moves_have_causes`]).
 fn recover(cpus: usize, threads: usize, balance: Balance) -> Recovery {
     let scenario = scenarios::lopsided_placement(cpus, threads, WORK).with_balance(balance);
-    let floor = stealable(threads);
     let mut r = Recovery::default();
     sweep(&scenario, LOPSIDED_SEEDS, |outcome| {
         let ran = outcome.cpus_reached();
@@ -943,13 +931,7 @@ fn recover(cpus: usize, threads: usize, balance: Balance) -> Recovery {
              those CPUs was given work by something that is not the balance path",
             outcome.migrations,
         );
-        assert!(
-            outcome.migrations <= floor,
-            "{balance:?} at {cpus} cpus: the balance path moved {} of {threads} tasks, past the \
-             {floor} that stand above cpu0's surplus floor — a task is being migrated more than \
-             once, which is a thief that became a victim",
-            outcome.migrations,
-        );
+        assert_moves_have_causes(outcome, cpus, threads, &format!("{balance:?}"));
         r.full += usize::from(ran == cpus);
         r.second += usize::from(ran > 1);
         r.best_migrations = r.best_migrations.max(outcome.migrations);
@@ -1075,14 +1057,14 @@ fn a_bounded_re_arm_reaches_every_cpu_the_pull_path_left_asleep() {
                  the timer is not what is waking the CPU.",
                 cured.gap_ns,
             );
-            // And the drain is unchanged: a cure that reaches every CPU by
-            // moving more tasks than cpu0 has to give would be a different
-            // machine, not a repaired one.
-            assert_eq!(
-                cured.best_migrations, floor,
-                "the best of {LOPSIDED_SEEDS} schedules moved {} tasks and the surplus floor \
-                 leaves {floor} stealable — the re-arm changes when a probe is posted and \
-                 nothing about what answering one hands over",
+            // And the drain is the shipped one: the re-arm changes when a probe
+            // is posted and nothing about what answering one hands over, and
+            // `recover` holds every run to the ceiling.
+            let even = even_drain(threads, cpus);
+            assert!(
+                cured.best_migrations >= even,
+                "the best of {LOPSIDED_SEEDS} schedules moved {} tasks, and leaving cpu0 an \
+                 even split takes {even}",
                 cured.best_migrations,
             );
             table.push((cpus, threads, times, cured, control.full, control.gap_ns));
@@ -1117,8 +1099,8 @@ fn a_bounded_re_arm_reaches_every_cpu_the_pull_path_left_asleep() {
 /// **The derivation, and it is the assertion.** A pass pushes to one CPU, and
 /// `SchedPass::push_on_surplus`'s cursor makes consecutive pushes walk the
 /// machine, so `k` sleeping CPUs are reached in `k` passes of the CPU holding the
-/// surplus. That CPU is running a task, so it reaches a pass at each quantum
-/// boundary: `k × DISPATCH_NS`. The kick is an IPI ([`IPI_LATENCY_NS`], which the
+/// surplus. That CPU is running a task, so it reaches a pass at each request's
+/// end: `k × DISPATCH_NS`. The kick is an IPI ([`IPI_LATENCY_NS`], which the
 /// model enforces by disabling every execution step while a delivery is overdue)
 /// and the pass it asks for is one chunk of grace plus the chunk that carries the
 /// clock over it. Here `k` is `cpus − 1`, every CPU but the loaded one, so
@@ -1184,10 +1166,11 @@ fn a_push_on_surplus_reaches_every_cpu_the_pull_path_left_asleep() {
              reaching the same CPU twice instead of walking the machine.",
             cured.gap_ns,
         );
-        assert_eq!(
-            cured.best_migrations, floor,
-            "the best of {LOPSIDED_SEEDS} schedules moved {} tasks and the surplus floor leaves \
-             {floor} stealable — the push changes which CPU asks and nothing about what \
+        let even = even_drain(threads, cpus);
+        assert!(
+            cured.best_migrations >= even,
+            "the best of {LOPSIDED_SEEDS} schedules moved {} tasks, and leaving cpu0 an even \
+             split takes {even} — the push changes which CPU asks and nothing about what \
              answering hands over",
             cured.best_migrations,
         );
@@ -1245,10 +1228,10 @@ fn the_two_cures_are_priced_against_the_pull_path() {
             .iter()
             .position(|p| matches!(p.name, "sleeper" | "waiters" | "client"))
             .expect("every workload here has a thread whose wake latency is the point");
-        // One run queue's worth of rivals plus the leader, exactly as
-        // `an_interactive_wake_waits_out_at_most_the_band_it_is_queued_behind`
-        // derives it. `audio_pipeline` carries its own thread count rather than
-        // a hog parameter, so it is counted from the scenario.
+        // One request per runnable thread one run queue holds, and one more: a
+        // bound loose enough for all three workloads, whose own sharper ones
+        // are the cases above. `audio_pipeline` carries its own thread count
+        // rather than a hog parameter, so it is counted from the scenario.
         let rivals = if hogs > 0 {
             hogs.div_ceil(cpus) as u64 + 1
         } else {
@@ -1284,8 +1267,8 @@ fn the_two_cures_are_priced_against_the_pull_path() {
             assert!(
                 woken.max_ns() <= bound,
                 "{label} [{name}]: a wake waited {} ns against a derived {bound} ns — {rivals} \
-                 runnable thread(s) on one run queue plus the leader, at {DISPATCH_NS} ns a \
-                 dispatch. A balance policy may cost idle wakes; it may not cost wake latency. \
+                 runnable thread(s) on one run queue and one more, at {DISPATCH_NS} ns a \
+                 request. A balance policy may cost idle wakes; it may not cost wake latency. \
                  Distribution: {}",
                 woken.max_ns(),
                 woken.summary(),
@@ -1314,46 +1297,43 @@ fn the_two_cures_are_priced_against_the_pull_path() {
 /// **The starvation bound**: the worst wait of a runnable task under saturation,
 /// measured, against the fair band's own granularity.
 ///
-/// This is the same quantity the two cases above measure from their own ends —
-/// an interactive wake and a storm drain are both a task waiting for a run queue
+/// The same quantity the cases above measure from their own ends — an
+/// interactive wake and a storm drain are both a task waiting for a run queue
 /// to reach it — asked here of *every* task in a workload where nothing ever
 /// blocks and no CPU is ever idle. There is nothing to wait for but the band.
 ///
 /// **What it found**, 20 seeds per point:
 ///
-/// | workload | runnable threads | waits seen | worst wait | in quanta | derived bound | ratio |
+/// | workload | groups | largest group | waits seen | worst wait | derived bound | ratio |
 /// |---|---|---|---|---|---|---|
-/// | `fairness_storm(1)` |  4 |   780 |  50 ms |  5 |  60 ms | 0.83 |
-/// | `sibling_storm`     |  4 | 3,660 |  50 ms |  5 |  60 ms | 0.83 |
-/// | `share_gain(4)`     |  5 |   680 |  70 ms |  7 |  72 ms | 0.97 |
-/// | `share_gain(16)`    | 17 | 2,360 | 200 ms | 20 | 216 ms | 0.93 |
-/// | `share_gain(64)`    | 65 | 9,080 | 680 ms | 68 | 792 ms | 0.86 |
+/// | `fairness_storm(1)` | 2 |  3 | 1,860 |  20 ms |  36 ms | 0.56 |
+/// | `sibling_storm`     | 2 |  3 | 9,060 |  20 ms |  36 ms | 0.56 |
+/// | `share_gain(4)`     | 2 |  4 | 1,580 |  28 ms |  48 ms | 0.58 |
+/// | `share_gain(16)`    | 2 | 16 | 5,420 | 120 ms | 192 ms | 0.63 |
 ///
-/// The bound is `(runnable threads + 1) × (QUANTUM + 2 × RUN_CHUNK)`, which is
-/// invariant I13's bound with a different name on it, and the measurement is at
-/// 0.83–0.97 of it everywhere. **Nothing starves, and the price of that sentence
-/// is a linear one**: a task's worst wait is one dispatch per runnable thread on
-/// its CPU, so a machine carrying 65 runnable threads makes some task wait 680
-/// ms. That is what "no starvation" is worth here, as a number.
+/// A thread in a group of `n` waits for its `n − 1` siblings' requests, served
+/// at the rate its group is — one `groups`-th of the CPU — so the bound is
+/// `groups × n` requests. **Nothing starves, and the price is set by the
+/// thread's own job**: a thread among 16 siblings waits out 15 of their
+/// requests, and no number of other jobs' threads makes a job's thread wait
+/// longer than its group's turn.
 #[test]
-fn a_runnable_task_waits_at_most_one_dispatch_per_rival() {
+fn a_runnable_task_waits_at_most_its_siblings_requests() {
     const STARVE_SEEDS: u64 = 20;
     for scenario in [
         scenarios::fairness_storm(1),
         scenarios::sibling_storm(),
         scenarios::share_gain(4, WORK),
         scenarios::share_gain(16, WORK),
-        scenarios::share_gain(64, WORK),
     ] {
         let name = scenario.name;
         // Every thread of these workloads is runnable from the first dispatch to
         // its own exit, and every one of them is on the one CPU.
         let threads: u64 = scenario.procs.iter().map(|p| p.initial.len() as u64).sum();
-        assert_eq!(
-            scenario.cpus(), 1,
-            "{name}: the bound below is one run queue's"
-        );
-        let bound = (threads + 1) * DISPATCH_NS;
+        let groups = scenario.procs.len() as u64;
+        let largest = scenario.procs.iter().map(|p| p.initial.len() as u64).max().unwrap_or(0);
+        assert_eq!(scenario.cpus(), 1, "{name}: the bound below is one run queue's");
+        let bound = groups * largest * DISPATCH_NS;
 
         let mut worst = 0;
         let mut samples = 0;
@@ -1366,9 +1346,8 @@ fn a_runnable_task_waits_at_most_one_dispatch_per_rival() {
                 .sum::<u64>();
         });
         println!(
-            "starvation {name} ({threads} runnable threads): worst={worst} ns \
-             ({} quanta) bound={bound} ns over {samples} waits",
-            worst / QUANTUM_NS,
+            "starvation {name} ({groups} groups, largest {largest}): worst={worst} ns \
+             bound={bound} ns over {samples} waits",
         );
         assert!(
             samples > threads * STARVE_SEEDS,
@@ -1379,13 +1358,9 @@ fn a_runnable_task_waits_at_most_one_dispatch_per_rival() {
         assert!(
             worst <= bound,
             "{name}: a runnable task waited {worst} ns for a CPU against a derived {bound} ns \
-             — one dispatch per runnable thread on its run queue plus the leader's, at \
-             {DISPATCH_NS} ns each. Past this, the fair band is passing some task over more \
-             times than its insertion-time keys can account for.",
+             — its group's siblings' requests at its group's share of the CPU. Past this, the \
+             fair band is passing some task over more often than EEVDF can account for.",
         );
-        // Tight enough to constrain: the shipped scheduler sits at 0.83–0.97 of
-        // this everywhere, so a factor of two of slack would already be a bound
-        // that had stopped measuring.
         assert!(
             worst * 2 > bound,
             "{name}: the worst wait is {worst} ns against a {bound} ns bound, more than twice \

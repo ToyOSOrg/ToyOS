@@ -9,7 +9,6 @@ opened: 2026-10-14
 Each value below was set as Linux's and cited so. Its citation is gone, and no vendor
 document or published specification states the number; the behaviour is unchanged.
 
-- `lib/xhci/src/ladder.rs`'s `RESET_RECOVERY_NS`, 50 ms. USB 2.0 §7.1.7.5 asks 10 ms (TRSTRCY).
 - `system/fileserver/src/resolve.rs`'s `MAX_LINKS`, 40. POSIX asks `{SYMLOOP_MAX}` of at least
   `{_POSIX_SYMLOOP_MAX}`, 8.
 - `system/netstack/shard/tcp/src/conn.rs`'s `PROBE_SLACK`, 2 ms, added to RFC 8985 §7.2's

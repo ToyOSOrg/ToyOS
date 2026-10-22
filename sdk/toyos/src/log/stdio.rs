@@ -1,15 +1,15 @@
 //! A program's stdout and stderr, and its own lines: records into its log ring
-//! when the stream is one, bytes into the handle when it is anything else.
+//! when the stream is one, bytes into its descriptor when it is anything else.
 //!
-//! **Where a stream goes is what its slot holds.** `/system/bin/supervisor` puts a
-//! program's log ring in slots 1 and 2, so a daemon's output is records; a
-//! program a terminal started holds that terminal's pipes there, so its output
-//! is bytes on the terminal. The first write to a stream asks the slot once
-//! ([`FileType::SharedMemory`] is a ring) and every later one takes the answer,
-//! so a write to a ring makes no syscall. A program a daemon spawns directly
-//! inherits the daemon's slots and so writes into the daemon's ring: its lines
-//! are the daemon's, which is the daemon's decision to have spawned it that
-//! way.
+//! **Where a stream goes is what its descriptor names** (`crate::fd`).
+//! `/system/bin/supervisor` gives a program its log ring as descriptors 1 and
+//! 2, so a daemon's output is records; a program a terminal started holds that
+//! terminal's pipes there, so its output is bytes on the terminal. The first
+//! write to a stream asks the descriptor once ([`FileType::SharedMemory`] is a
+//! ring) and every later one takes the answer, so a write to a ring makes no
+//! syscall. A program a daemon spawns directly inherits the daemon's stdio and
+//! so writes into the daemon's ring: its lines are the daemon's, which is the
+//! daemon's decision to have spawned it that way.
 //!
 //! A write to a ring **never waits, allocates or makes a syscall**: it stamps
 //! the record — time off the clock page, thread off the thread's control
@@ -25,7 +25,7 @@ use toyos_abi::log::Severity;
 
 use super::region::{Body, FLAG_CLOSES, FLAG_UNENDED, TEXT_BYTES};
 
-/// A standard stream, by the slot it is.
+/// A standard stream, by the descriptor it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u32)]
 pub enum Stream {
@@ -160,7 +160,7 @@ impl Held {
 #[cfg(all(target_os = "toyos", not(test)))]
 pub use target::*;
 
-/// The guest's half: slots, rings and syscalls.
+/// The guest's half: descriptors, rings and syscalls.
 #[cfg(all(target_os = "toyos", not(test)))]
 mod target {
     use core::ptr::NonNull;
@@ -168,15 +168,14 @@ mod target {
 
     use toyos_abi::log::Severity;
     use toyos_abi::syscall::{self, FileType, SyscallError};
-    use toyos_abi::RawHandle;
 
     use super::{compose, Held, Stream};
     use crate::log::region::{Body, Lane, Ring, RING_BYTES};
 
-    /// Unasked, being asked, a handle — and past those, a ring's address.
+    /// Unasked, being asked, a descriptor — and past those, a ring's address.
     const UNASKED: usize = 0;
     const ASKING: usize = 1;
-    const HANDLE: usize = 2;
+    const DESCRIPTOR: usize = 2;
 
     static SINKS: [AtomicUsize; 2] = [AtomicUsize::new(UNASKED), AtomicUsize::new(UNASKED)];
     static PENDING: [Held; 2] = [Held::new(Stream::Out), Held::new(Stream::Err)];
@@ -187,14 +186,15 @@ mod target {
     /// Where a stream's bytes go.
     pub enum Sink {
         Ring(Ring),
-        Handle(RawHandle),
+        /// The stream's descriptor (`crate::fd`), 1 or 2.
+        Descriptor(i32),
     }
 
     fn index(stream: Stream) -> usize {
         stream as usize - 1
     }
 
-    /// The stream's sink, asking its slot the first time.
+    /// The stream's sink, asking its descriptor the first time.
     pub fn sink(stream: Stream) -> Sink {
         let word = &SINKS[index(stream)];
         loop {
@@ -203,17 +203,17 @@ mod target {
                     if word.compare_exchange(UNASKED, ASKING, Ordering::Acquire, Ordering::Acquire).is_ok() {
                         match ask(stream) {
                             Ok(answer) => word.store(answer, Ordering::Release),
-                            // The handle first, so the panic's own message has a
+                            // The descriptor first, so the panic's own message has a
                             // stream to go to rather than a probe to wait on.
                             Err(why) => {
-                                word.store(HANDLE, Ordering::Release);
-                                panic!("stdio: slot {} {why}", stream as u32);
+                                word.store(DESCRIPTOR, Ordering::Release);
+                                panic!("stdio: descriptor {} {why}", stream as u32);
                             }
                         }
                     }
                 }
                 ASKING => core::hint::spin_loop(),
-                HANDLE => return Sink::Handle(RawHandle(stream as u32)),
+                DESCRIPTOR => return Sink::Descriptor(stream as i32),
                 // SAFETY: only `ask` stores an address here, and it is the
                 // base of a ring mapping this process keeps for its life.
                 at => return Sink::Ring(unsafe { Ring::at(NonNull::new_unchecked(at as *mut u8)) }),
@@ -221,20 +221,27 @@ mod target {
         }
     }
 
-    /// Ask a stream's slot what it holds, once. A ring is mapped through a
-    /// handle of this process's own, so the mapping outlives whatever later
-    /// happens to the slot. `Err` finishes the sentence the refusal panics with.
+    /// Ask a stream's descriptor what it names, once. A ring is mapped
+    /// through a handle of this process's own, so the mapping outlives
+    /// whatever later happens to the descriptor; a descriptor that is not open
+    /// is written as one, and its bytes go nowhere. `Err` finishes the
+    /// sentence the refusal panics with.
     fn ask(stream: Stream) -> Result<usize, why::Why> {
         use why::Why;
-        let slot = RawHandle(stream as u32);
-        let stat = syscall::fstat(slot).map_err(Why::Fstat)?;
+        // A descriptor that is not open, or names a file a server holds, is
+        // written as a descriptor.
+        let asked = crate::fd::with(stream as i32, |o| o.release.is_none().then(|| syscall::fstat(o.handle)));
+        let Ok(Some(stat)) = asked else { return Ok(DESCRIPTOR) };
+        let stat = stat.map_err(Why::Fstat)?;
         if stat.file_type != FileType::SharedMemory {
-            return Ok(HANDLE);
+            return Ok(DESCRIPTOR);
         }
         if (stat.size as usize) < RING_BYTES {
             return Err(Why::Small(stat.size));
         }
-        let own = syscall::dup(slot).map_err(Why::Dup)?;
+        let own = crate::fd::with(stream as i32, |o| syscall::dup(o.handle))
+            .unwrap_or(Err(SyscallError::NotFound))
+            .map_err(Why::Dup)?;
         // SAFETY: `own` is a live shared-memory handle this process holds and
         // never closes, so the mapping stays for the process's life.
         let at = unsafe { syscall::shm_map(own) }.map_err(Why::Map)?;
@@ -247,7 +254,7 @@ mod target {
         Ok(at.as_ptr() as usize)
     }
 
-    /// Why a slot could not be taken as a stream, in words that need no
+    /// Why a descriptor could not be taken as a stream, in words that need no
     /// allocation to say.
     mod why {
         use core::fmt;
@@ -288,7 +295,7 @@ mod target {
         let _ = sink(Stream::Err);
     }
 
-    /// Forget what a stream's slot held: the slot was just replaced.
+    /// Forget what a stream's descriptor named: it was just replaced.
     pub fn forget(stream: Stream) {
         SINKS[index(stream)].store(UNASKED, Ordering::Release);
     }
@@ -308,10 +315,14 @@ mod target {
     }
 
     /// `buf` onto a stream: whole lines to its ring, or every byte to its
-    /// handle.
-    pub fn write(stream: Stream, buf: &[u8]) -> Result<usize, SyscallError> {
+    /// descriptor, and none anywhere for a descriptor that is not open, as
+    /// std on unix drops a closed stdout's bytes.
+    pub fn write(stream: Stream, buf: &[u8]) -> Result<usize, crate::files::Error> {
         match sink(stream) {
-            Sink::Handle(handle) => syscall::write(handle, buf),
+            Sink::Descriptor(fd) => match crate::files::write(fd, buf) {
+                Err(crate::files::Error::Fd(crate::fd::Error::BadFd)) => Ok(buf.len()),
+                written => written,
+            },
             Sink::Ring(ring) => {
                 PENDING[index(stream)].with(|composer| composer.feed(buf, &mut push(&ring)));
                 Ok(buf.len())
@@ -320,9 +331,8 @@ mod target {
     }
 
     /// Whatever part of a line a stream holds, as a record the line goes on
-    /// from. Never asks the slot: a stream nothing was written to holds
-    /// nothing, and a process spawned with an empty slot is ended for naming
-    /// it.
+    /// from. Never asks the descriptor: a stream nothing was written to holds
+    /// nothing.
     pub fn flush(stream: Stream) {
         finish(stream, false);
     }
@@ -335,8 +345,8 @@ mod target {
 
     fn finish(stream: Stream, ended: bool) {
         let at = SINKS[index(stream)].load(Ordering::Acquire);
-        if at > HANDLE {
-            // SAFETY: as in `sink`, only a ring's base is stored above `HANDLE`.
+        if at > DESCRIPTOR {
+            // SAFETY: as in `sink`, only a ring's base is stored above `DESCRIPTOR`.
             let ring = unsafe { Ring::at(NonNull::new_unchecked(at as *mut u8)) };
             PENDING[index(stream)].with(|composer| composer.finish(ended, &mut push(&ring)));
         }
@@ -349,7 +359,7 @@ mod target {
     pub fn claim_lane() -> Option<Lane> {
         match sink(Stream::Err) {
             Sink::Ring(ring) => ring.claim_lane(PID.load(Ordering::Relaxed), toyos_abi::current_tid().0),
-            Sink::Handle(_) => None,
+            Sink::Descriptor(_) => None,
         }
     }
 
@@ -366,16 +376,17 @@ mod target {
     pub fn say(severity: Severity, args: core::fmt::Arguments<'_>) {
         match sink(Stream::Err) {
             Sink::Ring(ring) => compose(severity, args, &mut push(&ring)),
-            Sink::Handle(handle) => compose(severity, args, &mut |body: &mut Body| {
+            Sink::Descriptor(fd) => compose(severity, args, &mut |body: &mut Body| {
+                let write = |bytes: &[u8]| crate::fd::with(fd, |o| syscall::write(o.handle, bytes));
                 let mut rest = body.text();
                 while !rest.is_empty() {
-                    match syscall::write(handle, rest) {
-                        Ok(n @ 1..) => rest = &rest[n..],
+                    match write(rest) {
+                        Ok(Ok(n @ 1..)) => rest = &rest[n..],
                         _ => return,
                     }
                 }
                 if !body.unended() {
-                    let _ = syscall::write(handle, b"\n");
+                    let _ = write(b"\n");
                 }
             }),
         }
@@ -470,9 +481,9 @@ mod tests {
         use std::sync::{Arc, Mutex};
         let held = Arc::new(Held::new(Stream::Err));
         let got = Arc::new(Mutex::new(Vec::new()));
-        let writers: Vec<_> = [b'a', b'b']
-            .into_iter()
-            .map(|tag| {
+        let writers: Vec<_> = b"ab"
+            .iter()
+            .map(|&tag| {
                 let (held, got) = (Arc::clone(&held), Arc::clone(&got));
                 std::thread::spawn(move || {
                     for _ in 0..200 {
@@ -497,7 +508,7 @@ mod tests {
     }
 }
 
-/// A host's build is a guest program's unit tests: there are no slots and no
+/// A host's build is a guest program's unit tests: there are no descriptors and no
 /// ring, and a line said there is composed and goes nowhere.
 #[cfg(not(all(target_os = "toyos", not(test))))]
 pub use host::*;

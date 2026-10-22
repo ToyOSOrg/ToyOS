@@ -2,15 +2,13 @@
 //! of that role as capabilities.
 //!
 //! **What it holds**: the acceptor of its role's one port, endowed by the
-//! supervisor under `serve:fs:<role>`; for its volume, a claim on each partition
-//! of its role a disk the kernel drives carries, and `block` in its namespace,
-//! a connector to diskserver minted for its role's partition alone — every
-//! DATA partition, or the one the loader named, read-only for the boot
-//! volume; and nothing else of the machine. DATA is one
-//! partition counted over both, and two are refused by name, never guessed
-//! between (`fileserver::data::find`). Argv is the role, and for LOG and BOOT the
-//! unique GUID of the partition the loader named for it when no claim on it
-//! was minted.
+//! supervisor under `serve:fs:<role>`; for its volume, `block` in its
+//! namespace, a connector to the block service minted for its role's
+//! partition alone — every DATA partition, or the one the loader named,
+//! read-only for the boot volume; and nothing else of the machine. Two DATA
+//! partitions are refused by name, never guessed between
+//! (`fileserver::data::find`). Argv is the role, and for LOG and BOOT the
+//! unique GUID of the partition the loader named for it.
 //!
 //! **A connection is what its grant says** (`toyos::fs::Grant`): the badge
 //! the supervisor minted its connector with, which the kernel stamped on it and
@@ -25,6 +23,12 @@
 //! (`toyos_manifest::launch`). Four at their parts take the server
 //! (`issues/four-shares-take-a-file-server.md`).
 //!
+//! **An export is a connection this server makes to itself** through a private
+//! port only it holds a connector to, for its life: connect, then accept, which
+//! answers exactly that connection since this loop is single-threaded. The end
+//! handed out cannot be duplicated, so it has one holder. A restart takes the
+//! port with it, so nothing pending reaches a new instance.
+//!
 //! **A server never blocks on a client.** Accept and the first frame are two
 //! events; a request is buffered until whole; every reply is one `try_send`,
 //! and a client whose pipe will not take one is dropped by name. The window a
@@ -36,13 +40,16 @@
 //! sooner. A kill loses what no sync covered, which is POSIX's promise and no
 //! more.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use fileserver::absent::Absent;
-use fileserver::bounds::{self, Hello, MAX_HANDSHAKES, MAX_SERVED, MAX_STREAMS};
+use fileserver::bounds::{self, Hello, Slot, MAX_HANDSHAKES, MAX_SERVED, MAX_STREAMS};
 use fileserver::data::{DataVolume, Located, Probed};
-use diskserver::disk::{Claimed, Disk, Served};
+use fileserver::descriptions::{self, Description, Ids, Shared};
+use diskserver::disk::{Disk, Served};
 use fileserver::ram::Ram;
 use fileserver::fat::FatVolume;
 use fileserver::resolve::{self, Found, Refusal as Escape, Resolved};
@@ -51,19 +58,31 @@ use fileserver::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
 use fileserver::writeback::WriteBack;
 use toyos::endow::{self, Endowments};
 use toyos::fs::*;
-use toyos::ipc::{self, Connection, RxStep, TrySendError};
+use toyos::ipc::{self, Connection, RxStep};
+use toyos::namespace::Namespace;
 use toyos::poller::{Poller, READABLE};
-use toyos::port::Acceptor;
+use toyos::port::{self, Acceptor};
 use toyos::shm::SharedMemory;
 use toyos::volatile::Window;
 use toyos::Pipe;
-use toyos_abi::syscall::{SyscallError, DEV_PREFIX, MAX_BADGE, SERVE_PREFIX};
-
-/// Files one client holds open at once.
-const MAX_FIDS: usize = 1024;
+use toyos_abi::handle::Rights;
+use toyos_abi::syscall::{self, SyscallError, MAX_BADGE, SERVE_PREFIX};
 
 /// What one turn of a stream appends at most.
 const STREAM_READ: usize = 64 * 1024;
+
+/// The turns that drain what one stream holds before a request on its
+/// description: the kernel's whole pipe ring (`PIPE_SIZE`, 2 MiB), so a
+/// writer that keeps writing cannot hold the loop.
+const STREAM_PRESENT: usize = (2 << 20) / STREAM_READ;
+
+/// The name the private export port has in this server's own namespace.
+const EXPORT_PORT: &str = "export";
+
+/// What the end an export hands out carries: a connection's rights without
+/// `DUP`, so whoever holds it is its one holder, and may pass it on.
+const EXPORTED: Rights =
+    Rights::TRANSFER.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE).union(Rights::MAP);
 
 // One wait watches the acceptor, every connection and every stream at once.
 const _: () = assert!(1 + MAX_SERVED + MAX_HANDSHAKES + MAX_STREAMS <= Poller::MAX_HANDLES as usize);
@@ -110,37 +129,75 @@ impl Role {
     }
 }
 
-/// One file a client holds open.
-struct Fid {
-    node: Node,
-    /// The file's [`Volume::identity`] when it was opened, which its renames keep.
-    identity: u64,
-    write: bool,
-    append: bool,
-}
-
 struct Client {
     conn: Connection,
     rx: ipc::FrameRx<{ core::mem::size_of::<Request>() }>,
-    /// Its grant's root, beneath which every path it names is resolved.
-    root: String,
-    /// Its grant's share, which it spends.
+    /// Its grant's root, beneath which every path it names is resolved:
+    /// `None` for an exported connection, which names no path.
+    root: Option<String>,
+    /// Its grant's share, which it spends; an exported connection's is the
+    /// share of the connection that exported it.
     share: u64,
     /// Its grant is read-write and the volume is: what it may change.
     writes: bool,
     window: Option<SharedMemory>,
-    fids: BTreeMap<u64, Fid>,
-    next_fid: u64,
+    fids: Ids,
     since: Instant,
 }
 
-/// A pipe a program writes and this server appends to a file.
+impl Client {
+    /// Whether it was exported: its served slot was taken then, so it waits on
+    /// no handshake.
+    fn exported(&self) -> bool {
+        self.root.is_none()
+    }
+
+    /// Whether it holds a served slot.
+    fn served(&self) -> bool {
+        self.window.is_some() || self.exported()
+    }
+
+    /// Whether it is a handshake still waiting on its hello.
+    fn waiting(&self) -> bool {
+        !self.served()
+    }
+}
+
+/// A pipe a program writes and this server writes to a file at its
+/// description's offset.
 struct Stream {
     pipe: Pipe,
-    node: Node,
-    offset: u64,
+    file: Shared,
     /// The share of the client that asked for it, which it spends.
     share: u64,
+}
+
+/// The private port exports are made on: its acceptor, and the namespace
+/// holding this server's one connector to it.
+struct Exports {
+    acceptor: Acceptor,
+    names: Namespace,
+}
+
+impl Exports {
+    fn new() -> Self {
+        let (acceptor, connector) = port::create().unwrap_or_else(|e| panic!("fileserver: no export port ({e:?})"));
+        let names = toyos::namespace::build()
+            .add(EXPORT_PORT, &connector)
+            .finish()
+            .unwrap_or_else(|e| panic!("fileserver: no namespace for the export port ({e:?})"));
+        Self { acceptor, names }
+    }
+
+    /// A connection to this server: the end to hand away, narrowed to
+    /// [`EXPORTED`], and this server's.
+    fn connect(&self) -> Result<(Connection, Connection), Error> {
+        let theirs = self.names.open(EXPORT_PORT).map_err(|e| Error::kernel("an export's connection", e))?;
+        let ours = self.acceptor.accept().unwrap_or_else(|e| panic!("fileserver: the export port refused an accept ({e:?})"));
+        let narrowed = syscall::dup_narrowed(toyos::AsHandle::as_handle(&theirs), EXPORTED)
+            .map_err(|e| Error::kernel("an export's narrowed end", e))?;
+        Ok((Connection::received(narrowed), ours))
+    }
 }
 
 fn main() {
@@ -176,23 +233,11 @@ fn main() {
         next_client: 0,
         streams: BTreeMap::new(),
         next_stream: 0,
+        exports: Exports::new(),
         writeback: WriteBack::default(),
         scratch: Vec::new(),
     }
     .serve()
-}
-
-/// The partition claims the supervisor minted: one per partition of the role on a disk
-/// the kernel drives.
-fn claims() -> Vec<toyos::PartitionDev> {
-    let prefix = format!("{DEV_PREFIX}part:");
-    let labels: Vec<String> =
-        Endowments::get().labels().filter(|l| l.starts_with(&prefix)).map(str::to_string).collect();
-    labels.iter().map(|l| Endowments::get().take(l).expect("fileserver: the claim its label names")).collect()
-}
-
-fn describe(claim: toyos::PartitionDev) -> Result<Claimed, String> {
-    Claimed::new(claim).map_err(|why| format!("the partition claim would not describe itself ({why:?})"))
 }
 
 /// A session on the partition diskserver serves under `guid`.
@@ -217,66 +262,43 @@ fn data_partitions() -> Result<Vec<[u8; 16]>, String> {
             Ok(listed.into_iter().filter(|l| l.kind == toyos_gpt::Guid::TOYOS_DATA.0).map(|l| l.unique).collect())
         }
         // No block service in this image: the namespace has no `block`.
-        Err(diskserver::Error::Kernel(SyscallError::NotFound)) => Ok(Vec::new()),
+        Err(diskserver::Error::NotHeld) => Ok(Vec::new()),
         Err(why) => Err(format!("the block service would not list its partitions ({why:?})")),
     }
 }
 
 fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> Box<dyn Volume> {
     match role {
-        Role::Data => {
-            let mut claims = claims();
-            let found = fileserver::data::find(claims.len(), data_partitions().as_deref().map_err(String::clone));
-            let absent = |why: String| -> Box<dyn Volume> {
-                println!("fileserver: {why}; DATA is absent this boot");
-                Box::new(Absent::new(roots, why))
-            };
-            match found {
-                Located::Nowhere => ram(roots, "this machine has no DATA partition"),
-                Located::Claimed => match describe(claims.pop().expect("one claim")) {
-                    Ok(disk) => data_on(disk, roots),
-                    Err(why) => absent(why),
-                },
-                Located::Served(guid) => match served(guid) {
-                    Some(disk) => data_on(disk, roots),
-                    None => absent("the DATA partition would not open".into()),
-                },
-                Located::Refused(why) => absent(why),
-            }
-        }
+        Role::Data => match fileserver::data::find(data_partitions().as_deref().map_err(String::clone)) {
+            Located::Nowhere => ram(roots, "this machine has no DATA partition"),
+            Located::Served(guid) => match served(guid) {
+                Some(disk) => data_on(disk, roots),
+                None => absent(roots, "the DATA partition would not open".into()),
+            },
+            Located::Refused(why) => absent(roots, why),
+        },
         Role::Log | Role::Boot => {
-            let writable = role == Role::Log;
-            let mut claims = claims();
-            let mounted = match claims.pop() {
-                Some(claim) => {
-                    // The supervisor claims by the loader's GUID, which the kernel
-                    // refuses when two partitions carry it.
-                    assert!(claims.is_empty(), "fileserver: the supervisor handed the {role:?} server two claims");
-                    Ok(describe(claim).and_then(|disk| fat_on(disk, writable)))
-                }
-                // The supervisor starts this role with its partition's claim or its GUID, never neither.
-                None => {
-                    let guid = guid.unwrap_or_else(|| {
-                        panic!("fileserver: the {role:?} server was started with neither its partition's claim nor its GUID")
-                    });
-                    let parsed = toyos_abi::part::PartGuid::parse(guid)
-                        .unwrap_or_else(|| panic!("fileserver: {guid} is no partition GUID"));
-                    served(parsed.0).map(|disk| fat_on(disk, writable)).ok_or(guid)
-                }
-            };
-            match mounted {
-                Ok(Ok(volume)) => volume,
-                Ok(Err(why)) => {
+            // The supervisor starts this role with its partition's GUID.
+            let guid = guid.unwrap_or_else(|| panic!("fileserver: the {role:?} server was started without its partition's GUID"));
+            let parsed = toyos_gpt::Guid::parse(guid).unwrap_or_else(|| panic!("fileserver: {guid} is no partition GUID"));
+            match served(parsed.0).map(|disk| fat_on(disk, role == Role::Log)) {
+                Some(Ok(volume)) => volume,
+                Some(Err(why)) => {
                     println!("fileserver: the {role:?} partition does not mount: {why}");
                     Box::new(Absent::new(roots, why))
                 }
-                Err(guid) => Box::new(Absent::new(
+                None => Box::new(Absent::new(
                     roots,
                     format!("the {role:?} partition {guid} is on no disk this server reaches"),
                 )),
             }
         }
     }
+}
+
+fn absent(roots: &[&str], why: String) -> Box<dyn Volume> {
+    println!("fileserver: {why}; DATA is absent this boot");
+    Box::new(Absent::new(roots, why))
 }
 
 fn data_on<D: Disk + 'static>(disk: D, roots: &[&str]) -> Box<dyn Volume> {
@@ -310,6 +332,7 @@ struct Server {
     next_client: u64,
     streams: BTreeMap<u64, Stream>,
     next_stream: u64,
+    exports: Exports,
     /// When the sync nobody asked for is due.
     writeback: WriteBack,
     /// A write's bytes, copied out of the client's window or a stream's pipe
@@ -328,7 +351,7 @@ enum Answer {
     /// The client broke the protocol and is let go.
     Drop(&'static str),
     /// The client is answered this refusal and let go, for this reason.
-    Refuse(SyscallError, String),
+    Refuse(Error, String),
 }
 
 fn stat_reply(meta: Meta, identity: u64) -> Reply {
@@ -364,7 +387,7 @@ impl Server {
         let poller = Poller::new(Poller::MAX_HANDLES);
         let mut ready = Vec::new();
         loop {
-            if self.clients.values().filter(|c| c.window.is_none()).count() < MAX_HANDSHAKES {
+            if self.clients.values().filter(|c| c.waiting()).count() < MAX_HANDSHAKES {
                 poller.watch(&self.acceptor, READABLE, TOKEN_ACCEPTOR);
             }
             for (id, c) in &self.clients {
@@ -377,7 +400,7 @@ impl Server {
             let timeout = self
                 .clients
                 .values()
-                .filter(|c| c.window.is_none())
+                .filter(|c| c.waiting())
                 .map(|c| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(c.since)))
                 .chain(self.writeback.left(now))
                 .min()
@@ -398,7 +421,7 @@ impl Server {
             let late: Vec<u64> = self
                 .clients
                 .iter()
-                .filter(|(_, c)| c.window.is_none() && now.duration_since(c.since) >= HANDSHAKE_TIMEOUT)
+                .filter(|(_, c)| c.waiting() && now.duration_since(c.since) >= HANDSHAKE_TIMEOUT)
                 .map(|(id, _)| *id)
                 .collect();
             for id in late {
@@ -415,7 +438,7 @@ impl Server {
     /// Take the next connection and read its grant. Only the supervisor mints
     /// on this port, so a connection without one this server reads is let go
     /// by name; one whose share already holds its part of the handshakes is
-    /// answered `ResourceExhausted` and let go.
+    /// answered `TooManyConnections` and let go.
     fn accept(&mut self) {
         let conn = match self.acceptor.accept() {
             Ok(conn) => conn,
@@ -429,10 +452,10 @@ impl Server {
             },
             Err(why) => return println!("fileserver: letting a connection go: it carries no grant ({why:?})"),
         };
-        let mine = self.clients.values().filter(|c| c.share == grant.share && c.window.is_none()).count();
+        let mine = self.clients.values().filter(|c| c.share == grant.share && c.waiting()).count();
         if let Err(why) = bounds::handshake(grant.share, mine) {
             // Let go whether or not the refusal went: either way it is said.
-            let _ = conn.try_send(REPLY, &Reply::refused(SyscallError::ResourceExhausted));
+            let _ = conn.try_send(REPLY, &Reply::refused(Error::TooManyConnections));
             return println!("fileserver: letting a connection go: {why}");
         }
         let id = self.next_client;
@@ -440,26 +463,25 @@ impl Server {
         let client = Client {
             conn,
             rx: ipc::FrameRx::new(),
-            root: grant.root.to_string(),
+            root: Some(grant.root.to_string()),
             share: grant.share,
             writes: grant.access == Access::ReadWrite && self.volume.writable(),
             window: None,
-            fids: BTreeMap::new(),
-            next_fid: 1,
+            fids: Ids::default(),
             since: Instant::now(),
         };
         self.clients.insert(id, client);
     }
 
     fn drop_client(&mut self, id: u64, why: &str) {
-        let Some(client) = self.clients.remove(&id) else { return };
+        let Some(mut client) = self.clients.remove(&id) else { return };
         if !why.is_empty() {
             println!("fileserver: dropping client {id} of {:?}, share {}: {why}", client.root, client.share);
         }
-        for fid in client.fids.values() {
+        for node in client.fids.drain() {
             // Nobody is left to answer: a refused close is said, and its node
             // kept for the next sync.
-            let _ = self.volume.close(fid.node);
+            let _ = self.volume.close(node);
         }
     }
 
@@ -475,9 +497,9 @@ impl Server {
             RxStep::Idle => {}
             RxStep::Eof => self.drop_client(id, ""),
             RxStep::Malformed => self.drop_client(id, "it sent a frame this protocol cannot describe"),
-            RxStep::Frame { msg_type, payload_len } => {
+            RxStep::Frame { msg_type, payload_len, .. } => {
                 let Ok(request) = ipc::decode_payload::<Request>(client.rx.payload(payload_len)) else {
-                    return self.drop_client(id, "its request was short");
+                    return self.drop_client(id, "its request was not one `Request` wide");
                 };
                 let answer = self.answer(id, msg_type, request);
                 self.reply(id, answer);
@@ -491,11 +513,7 @@ impl Server {
         let sent = match answer {
             Answer::Reply(reply) => client.conn.try_send(REPLY, &reply),
             Answer::Link(len) => client.conn.try_send(LINK, &Reply { value: len as u64, ..Reply::ok() }),
-            Answer::WithHandle(reply, handle) => client
-                .conn
-                .send_handles([handle])
-                .map_err(TrySendError::Syscall)
-                .and_then(|()| client.conn.try_send(REPLY, &reply)),
+            Answer::WithHandle(reply, handle) => client.conn.try_send_with(REPLY, &reply, [handle]),
             Answer::Drop(why) => return self.drop_client(id, why),
             Answer::Refuse(e, why) => {
                 // Let go whether or not the refusal went: either way it is said.
@@ -508,9 +526,13 @@ impl Server {
         }
     }
 
-    /// A path from the window: `len` bytes at `at`, UTF-8.
-    fn path(&self, id: u64, at: u64, len: u64) -> Result<String, SyscallError> {
-        let window = self.clients[&id].window.as_ref().ok_or(SyscallError::InvalidArgument)?;
+    /// A path from the window: `len` bytes at `at`, UTF-8. A connection that
+    /// was given files and no directory names none.
+    fn path(&self, id: u64, at: u64, len: u64) -> Result<String, Error> {
+        if self.clients[&id].root.is_none() {
+            return Err(Error::NoDirectory);
+        }
+        let window = self.clients[&id].window.as_ref().expect("a request comes after the window");
         let (at, len) = bounds::path_span(at, len)?;
         let mut bytes = vec![0u8; len];
         window_take(window_of(window), at, &mut bytes);
@@ -518,20 +540,20 @@ impl Server {
     }
 
     /// `rel`, from the client's directory, as a volume path.
-    fn resolve(&mut self, id: u64, rel: &str, follow_last: bool) -> Result<Resolved, SyscallError> {
+    fn resolve(&mut self, id: u64, rel: &str, follow_last: bool) -> Result<Resolved, Error> {
         bounds::relative(rel)?;
-        let root = self.clients[&id].root.clone();
+        let root = self.clients[&id].root.clone().ok_or(Error::NoDirectory)?;
         let volume = &mut self.volume;
         let mut lookup = |p: &str| match volume.lstat(p) {
             Ok(meta) if meta.kind == Kind::Symlink => volume.read_link(p).map(Found::Link).map_err(drop),
-            Ok(_) | Err(SyscallError::NotFound) => Ok(Found::Other),
+            Ok(_) | Err(Error::NotFound) => Ok(Found::Other),
             Err(_) => Err(()),
         };
         resolve::resolve(&root, rel, follow_last, &mut lookup).map_err(|e| match e {
-            Escape::Escape => SyscallError::PermissionDenied,
-            Escape::Loop => SyscallError::InvalidArgument,
-            Escape::NotFound => SyscallError::NotFound,
-            Escape::Io => SyscallError::Io,
+            Escape::Escape => Error::Escapes,
+            Escape::Loop => Error::Loop,
+            Escape::NotFound => Error::NotFound,
+            Escape::Io => Error::Io,
         })
     }
 
@@ -543,17 +565,17 @@ impl Server {
 
     fn answer(&mut self, id: u64, op: u32, r: Request) -> Answer {
         if op == HELLO {
-            let share = self.clients[&id].share;
-            let served = self.clients.values().filter(|c| c.window.is_some());
-            let (all, mine) = served.fold((0, 0), |(all, mine), c| (all + 1, mine + usize::from(c.share == share)));
+            let (all, mine) = self.served(self.clients[&id].share);
             let client = self.clients.get_mut(&id).expect("pumped");
             if client.window.is_some() {
                 return Answer::Drop("it lent a second window");
             }
-            let lent = || client.conn.recv_handles_exact::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
-            match bounds::hello(all, mine, lent) {
+            let slot = if client.exported() { Slot::Taken } else { Slot::AtHello };
+            // The window travels in the HELLO frame: its reader took it with the frame.
+            let lent = || client.rx.take_handles::<1>().map(|[lent]| SharedMemory::lent(lent, WINDOW_BYTES));
+            match bounds::hello(slot, all, mine, lent) {
                 Hello::Served(window) => client.window = Some(window),
-                Hello::Refused(why) => return Answer::Refuse(SyscallError::ResourceExhausted, why),
+                Hello::Refused(why) => return Answer::Refuse(Error::TooManyConnections, why),
                 Hello::Dropped(why) => return Answer::Drop(why),
             }
             let granted = if client.writes { RIGHT_WRITE } else { 0 };
@@ -571,8 +593,32 @@ impl Server {
         }
     }
 
-    fn fid(&self, id: u64, fid: u64) -> Result<&Fid, SyscallError> {
-        self.clients[&id].fids.get(&fid).ok_or(SyscallError::InvalidArgument)
+    /// How many clients hold a served slot, and how many of them are `share`'s.
+    fn served(&self, share: u64) -> (usize, usize) {
+        let served = self.clients.values().filter(|c| c.served());
+        served.fold((0, 0), |(all, mine), c| (all + 1, mine + usize::from(c.share == share)))
+    }
+
+    /// The description `fid` names on client `id`.
+    fn fid(&self, id: u64, fid: u64) -> Result<Shared, Error> {
+        self.clients[&id].fids.get(fid).cloned()
+    }
+
+    /// The description `fid` names, with what its streams hold already
+    /// written at its offset, so a request that reads or moves the offset
+    /// comes after every byte a stream was given before it.
+    fn settled(&mut self, id: u64, fid: u64) -> Result<Shared, Error> {
+        let file = self.fid(id, fid)?;
+        let streams: Vec<u64> =
+            self.streams.iter().filter(|(_, s)| Rc::ptr_eq(&s.file, &file)).map(|(sid, _)| *sid).collect();
+        for sid in streams {
+            for _ in 0..STREAM_PRESENT {
+                if !self.drain(sid) {
+                    break;
+                }
+            }
+        }
+        Ok(file)
     }
 
     /// Mark the volume written: the write-back sync is due from here.
@@ -582,31 +628,31 @@ impl Server {
 
     /// `rel` resolved without following its last component, for an operation
     /// on the name itself; an absolute link on the way is the client's.
-    fn name(&mut self, id: u64, rel: &str) -> Result<Result<String, Answer>, SyscallError> {
+    fn name(&mut self, id: u64, rel: &str) -> Result<Result<String, Answer>, Error> {
         Ok(match self.resolve(id, rel, false)? {
             Resolved::Path(p) => Ok(p),
             Resolved::Absolute(p) => Err(self.link(id, &p)),
         })
     }
 
-    fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, SyscallError> {
+    fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, Error> {
         match rights::changes(op, r.flags) {
             None => return Ok(Answer::Drop(NO_SUCH_OPERATION)),
-            Some(true) if !self.clients[&id].writes => return Err(SyscallError::PermissionDenied),
+            Some(true) if !self.clients[&id].writes => return Err(Error::ReadOnly),
             Some(_) => {}
         }
         match op {
             OPEN => {
                 if r.flags & !O_KNOWN != 0 {
-                    return Err(SyscallError::InvalidArgument);
+                    return Err(Error::InvalidRequest);
                 }
                 let rel = self.path(id, 0, r.len)?;
                 let path = match self.resolve(id, &rel, true)? {
                     Resolved::Absolute(p) => return Ok(self.link(id, &p)),
                     Resolved::Path(p) => p,
                 };
-                if self.clients[&id].fids.len() >= MAX_FIDS {
-                    return Err(SyscallError::ResourceExhausted);
+                if self.clients[&id].fids.len() >= descriptions::MAX_IDS {
+                    return Err(Error::TooManyOpen);
                 }
                 let how = OpenHow {
                     create: r.flags & O_CREATE != 0,
@@ -626,86 +672,111 @@ impl Server {
                 if how.create || how.truncate || how.create_new {
                     self.dirtied();
                 }
-                let client = self.clients.get_mut(&id).expect("pumped");
-                let fid = client.next_fid;
-                client.next_fid += 1;
                 let write = r.flags & (O_WRITE | O_APPEND) != 0;
                 let append = r.flags & O_APPEND != 0;
+                let file = Description { node, identity, write, append, offset: 0 };
                 let client = self.clients.get_mut(&id).expect("pumped");
-                client.fids.insert(fid, Fid { node, identity, write, append });
+                let fid = client.fids.insert(Rc::new(RefCell::new(file)))?;
                 Ok(Answer::Reply(Reply { value: fid, ..stat_reply(meta, identity) }))
             }
             CLOSE => {
                 let client = self.clients.get_mut(&id).expect("pumped");
-                let fid = client.fids.remove(&r.fid).ok_or(SyscallError::InvalidArgument)?;
-                self.volume.close(fid.node)?;
+                if let Some(node) = client.fids.close(r.fid)? {
+                    self.volume.close(node)?;
+                }
                 Ok(Answer::Reply(Reply::ok()))
             }
+            DUP => {
+                let client = self.clients.get_mut(&id).expect("pumped");
+                let fid = client.fids.dup(r.fid)?;
+                Ok(Answer::Reply(Reply { value: fid, ..Reply::ok() }))
+            }
             READ => {
-                let node = self.fid(id, r.fid)?.node;
+                let file = self.settled(id, r.fid)?;
                 let len = (r.len as usize).min(WINDOW_BYTES);
                 let window = window_of(self.clients[&id].window.as_ref().expect("lent")).sub(0, len);
-                let n = self.volume.read(node, r.offset, &mut WindowOut(window))?;
+                let (node, at) = {
+                    let f = file.borrow();
+                    (f.node, f.offset)
+                };
+                let n = self.volume.read(node, at, &mut WindowOut(window))?;
+                file.borrow_mut().offset = at + n as u64;
                 Ok(Answer::Reply(Reply { value: n as u64, ..Reply::ok() }))
             }
             WRITE => {
-                let (node, write, append) = {
-                    let f = self.fid(id, r.fid)?;
-                    (f.node, f.write, f.append)
-                };
-                if !write {
-                    return Err(SyscallError::PermissionDenied);
+                let file = self.settled(id, r.fid)?;
+                if !file.borrow().write {
+                    return Err(Error::NotOpenForWriting);
                 }
                 let len = r.len as usize;
                 if len > WINDOW_BYTES {
-                    return Err(SyscallError::InvalidArgument);
+                    return Err(Error::InvalidRequest);
                 }
                 if self.scratch.len() < len {
                     self.scratch.resize(len, 0);
                 }
                 let window = window_of(self.clients[&id].window.as_ref().expect("lent"));
                 window_take(window, 0, &mut self.scratch[..len]);
-                let at = if append { self.volume.node_meta(node)?.size } else { r.offset };
-                bounds::in_a_file(at, len as u64)?;
-                self.volume.write(node, at, &self.scratch[..len])?;
-                self.dirtied();
-                Ok(Answer::Reply(Reply { value: len as u64, value2: at + len as u64, ..Reply::ok() }))
+                let end = self.write_at(&file, len)?;
+                Ok(Answer::Reply(Reply { value: len as u64, value2: end, ..Reply::ok() }))
             }
+            SEEK => {
+                let file = self.settled(id, r.fid)?;
+                let base = match r.flags {
+                    SEEK_START => 0,
+                    SEEK_CURRENT => file.borrow().offset,
+                    SEEK_END => self.volume.node_meta(file.borrow().node)?.size,
+                    _ => return Err(Error::InvalidRequest),
+                };
+                let at = bounds::seek(base, r.offset as i64)?;
+                file.borrow_mut().offset = at;
+                Ok(Answer::Reply(Reply { value: at, ..Reply::ok() }))
+            }
+            EXPORT => self.export(id, r.len),
             FSTAT => {
-                let (node, identity) = self.fid(id, r.fid).map(|f| (f.node, f.identity))?;
+                let (node, identity) = {
+                    let f = self.settled(id, r.fid)?;
+                    let f = f.borrow();
+                    (f.node, f.identity)
+                };
                 let meta = self.volume.node_meta(node)?;
                 Ok(Answer::Reply(stat_reply(meta, identity)))
             }
             TRUNCATE => {
-                let f = self.fid(id, r.fid)?;
-                if !f.write {
-                    return Err(SyscallError::PermissionDenied);
+                let file = self.fid(id, r.fid)?;
+                let (node, write) = {
+                    let f = file.borrow();
+                    (f.node, f.write)
+                };
+                if !write {
+                    return Err(Error::NotOpenForWriting);
                 }
-                let node = f.node;
                 bounds::in_a_file(r.offset, 0)?;
                 self.volume.truncate(node, r.offset)?;
                 self.dirtied();
                 Ok(Answer::Reply(Reply::ok()))
             }
             FSYNC => {
-                let node = self.fid(id, r.fid)?.node;
+                let node = self.settled(id, r.fid)?.borrow().node;
                 self.sync(Some(node))
             }
             SYNC => self.sync(None),
+            ROOM => {
+                let room = self.volume.room()?;
+                Ok(Answer::Reply(Reply { value: room.free, value2: room.unit, ..Reply::ok() }))
+            }
             STREAM => {
-                let f = self.fid(id, r.fid)?;
-                if !f.write {
-                    return Err(SyscallError::PermissionDenied);
+                let file = self.fid(id, r.fid)?;
+                if !file.borrow().write {
+                    return Err(Error::NotOpenForWriting);
                 }
-                let node = f.node;
                 let share = self.clients[&id].share;
                 let mine = self.streams.values().filter(|s| s.share == share).count();
-                bounds::stream(r.offset, self.streams.len(), mine)?;
-                let (read, write) = toyos::pipe_pair()?;
-                self.volume.hold(node);
+                bounds::stream(self.streams.len(), mine)?;
+                let (read, write) = toyos::pipe_pair().map_err(|e| Error::kernel("a stream's pipe", e))?;
                 let sid = self.next_stream;
                 self.next_stream += 1;
-                self.streams.insert(sid, Stream { pipe: read, node, offset: r.offset, share });
+                self.streams.insert(sid, Stream { pipe: read, file, share });
                 Ok(Answer::WithHandle(Reply::ok(), write.into()))
             }
             STAT | LSTAT => {
@@ -728,14 +799,14 @@ impl Server {
                 let mut out = Vec::new();
                 let mut entry = vec![0u8; 11 + MAX_PATH];
                 for (name, meta) in &entries {
-                    let n = encode_entry(&mut entry, meta.kind.wire(), meta.size, name)
-                        .ok_or(SyscallError::InvalidArgument)?;
+                    let n =
+                        encode_entry(&mut entry, meta.kind.wire(), meta.size, name).ok_or(Error::NameTooLong)?;
                     out.extend_from_slice(&entry[..n]);
                 }
                 // Refused rather than cut short: a listing that stops early is a
                 // confidently wrong answer to a caller deleting a tree.
                 if out.len() > WINDOW_BYTES {
-                    return Err(SyscallError::ResourceExhausted);
+                    return Err(Error::LimitExceeded);
                 }
                 self.put(id, &out);
                 Ok(Answer::Reply(Reply { value: out.len() as u64, ..Reply::ok() }))
@@ -753,7 +824,7 @@ impl Server {
             MKDIR | RMDIR | UNLINK => {
                 let rel = self.path(id, 0, r.len)?;
                 if rel.is_empty() {
-                    return Err(if op == MKDIR { SyscallError::AlreadyExists } else { SyscallError::PermissionDenied });
+                    return Err(if op == MKDIR { Error::AlreadyExists } else { Error::Root });
                 }
                 let path = match self.name(id, &rel)? {
                     Ok(p) => p,
@@ -771,14 +842,14 @@ impl Server {
                 let from_rel = self.path(id, 0, r.len)?;
                 let to_rel = self.path(id, r.len, r.len2)?;
                 if from_rel.is_empty() || to_rel.is_empty() {
-                    return Err(SyscallError::PermissionDenied);
+                    return Err(Error::Root);
                 }
                 let (Resolved::Path(from), Resolved::Path(to)) =
                     (self.resolve(id, &from_rel, false)?, self.resolve(id, &to_rel, false)?)
                 else {
                     // A rename through a link that leaves this directory is a
                     // rename across two, which no one directory can do.
-                    return Err(SyscallError::NotSupported);
+                    return Err(Error::CrossesDirectories);
                 };
                 self.volume.rename(&from, &to)?;
                 self.dirtied();
@@ -787,11 +858,14 @@ impl Server {
             SYMLINK => {
                 let link_rel = self.path(id, 0, r.len)?;
                 let target = self.path(id, r.len, r.len2)?;
-                if target.is_empty() || link_rel.is_empty() {
-                    return Err(SyscallError::InvalidArgument);
+                if target.is_empty() {
+                    return Err(Error::InvalidRequest);
+                }
+                if link_rel.is_empty() {
+                    return Err(Error::AlreadyExists);
                 }
                 let Resolved::Path(link) = self.resolve(id, &link_rel, false)? else {
-                    return Err(SyscallError::NotSupported);
+                    return Err(Error::CrossesDirectories);
                 };
                 self.volume.symlink(&link, &target)?;
                 self.dirtied();
@@ -804,7 +878,7 @@ impl Server {
     /// The volume synced, answered as `node`'s file fared, or with none as
     /// every file did. A file whose entry was refused keeps the write-back
     /// due, so the next one tries it again.
-    fn sync(&mut self, node: Option<Node>) -> Result<Answer, SyscallError> {
+    fn sync(&mut self, node: Option<Node>) -> Result<Answer, Error> {
         let unwritten = self.volume.sync()?;
         self.writeback.synced(!unwritten.is_empty(), Instant::now());
         match unwritten.into_iter().find(|&(n, _)| node.is_none_or(|node| n == node)) {
@@ -815,38 +889,77 @@ impl Server {
 
     fn link(&self, id: u64, path: &str) -> Answer {
         if path.len() > MAX_PATH {
-            return Answer::Reply(Reply::refused(SyscallError::InvalidArgument));
+            return Answer::Reply(Reply::refused(Error::NameTooLong));
         }
         self.put(id, path.as_bytes());
         Answer::Link(path.len())
     }
 
-    /// One read of what a stream's writer has put in the pipe, appended to
-    /// its file, and no more: a pipe with more waiting fires at the next
-    /// wait, after every other client that was ready — [`Self::pump`]'s rule.
-    fn drain(&mut self, sid: u64) {
+    /// Write the scratch's first `len` bytes to `file` at its offset, or at
+    /// its end when it appends, and move the offset past them: the offset.
+    fn write_at(&mut self, file: &Shared, len: usize) -> Result<u64, Error> {
+        let (node, append, offset) = {
+            let f = file.borrow();
+            (f.node, f.append, f.offset)
+        };
+        let at = if append { self.volume.node_meta(node)?.size } else { offset };
+        let end = bounds::in_a_file(at, len as u64)?;
+        self.volume.write(node, at, &self.scratch[..len])?;
+        self.dirtied();
+        file.borrow_mut().offset = end;
+        Ok(end)
+    }
+
+    /// A connection to this server for another process, holding the
+    /// descriptions of the `count` ids in client `id`'s window. Its served
+    /// slot is taken here, of `id`'s share, or the export is refused.
+    fn export(&mut self, id: u64, count: u64) -> Result<Answer, Error> {
+        let count = bounds::export_ids(count)?;
+        let mut words = vec![0u8; count * 8];
+        window_take(window_of(self.clients[&id].window.as_ref().expect("lent")), 0, &mut words);
+        let fids: Vec<u64> =
+            words.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().expect("eight bytes"))).collect();
+        let parent = &self.clients[&id];
+        let (share, writes) = (parent.share, parent.writes);
+        let fids = parent.fids.export(&fids)?;
+        let (all, mine) = self.served(share);
+        bounds::export(all, mine)?;
+        let (theirs, ours) = self.exports.connect()?;
+        let client = Client {
+            conn: ours,
+            rx: ipc::FrameRx::new(),
+            root: None,
+            share,
+            writes,
+            window: None,
+            fids,
+            since: Instant::now(),
+        };
+        let child = self.next_client;
+        self.next_client += 1;
+        self.clients.insert(child, client);
+        Ok(Answer::WithHandle(Reply { value: count as u64, ..Reply::ok() }, theirs.into_owned()))
+    }
+
+    /// One read of what a stream's writer has put in the pipe, written to its
+    /// file at its description's offset, and no more: a pipe with more waiting
+    /// fires at the next wait, after every other client that was ready —
+    /// [`Self::pump`]'s rule. Whether it wrote anything.
+    fn drain(&mut self, sid: u64) -> bool {
         if self.scratch.len() < STREAM_READ {
             self.scratch.resize(STREAM_READ, 0);
         }
-        let Some(stream) = self.streams.get_mut(&sid) else { return };
+        let Some(stream) = self.streams.get(&sid) else { return false };
         let ended = match stream.pipe.read_nonblock(&mut self.scratch[..STREAM_READ]) {
-            Err(SyscallError::WouldBlock) => return,
+            Err(SyscallError::WouldBlock) => return false,
             Ok(0) | Err(SyscallError::Gone) => None,
             Err(e) => Some(format!("its pipe would not read ({e:?})")),
             Ok(n) => {
-                let (node, at) = (stream.node, stream.offset);
-                match bounds::in_a_file(at, n as u64).ok() {
-                    None => Some("it reached the largest offset a file has".to_string()),
-                    Some(end) => {
-                        stream.offset = end;
-                        match self.volume.write(node, at, &self.scratch[..n]) {
-                            Ok(()) => {
-                                self.dirtied();
-                                return;
-                            }
-                            Err(e) => Some(format!("its write failed ({e:?})")),
-                        }
-                    }
+                let file = Rc::clone(&stream.file);
+                match self.write_at(&file, n) {
+                    Ok(_) => return true,
+                    Err(Error::FileTooLarge) => Some("it reached the largest offset a file has".to_string()),
+                    Err(e) => Some(format!("its write failed ({e:?})")),
                 }
             }
         };
@@ -854,9 +967,12 @@ impl Server {
             println!("fileserver: a stream is ended: {why}");
         }
         if let Some(stream) = self.streams.remove(&sid) {
-            // Nobody is left to answer: a refused close is said, and its node
-            // kept for the next sync.
-            let _ = self.volume.close(stream.node);
+            if let Some(node) = descriptions::release(stream.file) {
+                // Nobody is left to answer: a refused close is said, and its
+                // node kept for the next sync.
+                let _ = self.volume.close(node);
+            }
         }
+        false
     }
 }

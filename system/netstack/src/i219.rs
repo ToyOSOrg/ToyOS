@@ -109,10 +109,7 @@ pub struct Nic {
 
 /// The claim's register window, and the mapping it points into.
 fn registers(dev: &PciDev) -> Result<(Bar, SharedMemory), Opening> {
-    let info = dev
-        .describe()
-        .map_err(KernelRefused::on("the claim's description"))
-        .map_err(Opening::Kernel)?;
+    let info = toyos_pci_claim::describe(dev).map_err(Opening::Kernel)?;
     // The lowest BAR wide enough, rather than BAR 0 by name: the kernel
     // reports 0 bytes for a BAR it keeps back, and the MSI-X table's is one
     // it keeps.
@@ -135,11 +132,12 @@ fn registers(dev: &PciDev) -> Result<(Bar, SharedMemory), Opening> {
 
 /// Everything the claim is asked for before the part is reached, in the order
 /// it is asked: the register window, the part stopped, then one grant — as the
-/// driver reaches its descriptors — with the two mappings they point into.
+/// driver reaches its descriptors — with the two mappings they point into, and
+/// the function started.
 fn granted(dev: &PciDev) -> Result<(Bar, Grant, SharedMemory, DmaRegion), Opening> {
     let (bar, mapped) = registers(dev)?;
-    // Before the grant: the grant is what starts the function mastering, and a
-    // part a previous holder left receiving would write into its descriptors.
+    // Before the start: a part a previous holder left receiving would write
+    // into its descriptors.
     // Said first: whether the kernel's release reset the part is read here, in
     // the receive and transmit enables it handed over.
     crate::say!(
@@ -148,7 +146,10 @@ fn granted(dev: &PciDev) -> Result<(Bar, Grant, SharedMemory, DmaRegion), Openin
         bar.read32(toyos_i219::regs::TCTL)
     );
     toyos_i219::quiesce(&bar);
+    // Every buffer address a descriptor carries is 64 bits (82574 §7.1.3, §7.2.10.1).
+    toyos_pci_claim::limit(dev, 64).map_err(Opening::Kernel)?;
     let (grant, region) = Grant::alloc(dev, toyos_i219::GRANT_BYTES).map_err(Opening::Kernel)?;
+    toyos_pci_claim::start(dev).map_err(Opening::Kernel)?;
     Ok((bar, grant, mapped, region))
 }
 

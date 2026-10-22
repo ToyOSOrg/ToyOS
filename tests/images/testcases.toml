@@ -25,8 +25,17 @@ receives = ["power"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver", "volume"]
-devices = ["hda-audio", "pci:04:01:00/1af4:1059"]
+serves = ["soundserver", "volume", "sound-output"]
+devices = ["pci:04:01:00/1af4:1059"]
+syscap = ["rt"]
+
+# The Intel HD Audio driver: one process per HDA function the kernel does not
+# drive, each walking its own controller's codecs and offering soundserver the
+# output it reaches. A machine with display audio beside an analog codec runs
+# two, and soundserver plays to the one that offers.
+[programs.hda]
+drives = ["pci:04:03:*"]
+receives = ["sound-output"]
 syscap = ["rt"]
 
 # The test estate's authority.
@@ -54,18 +63,13 @@ syscap = ["rt"]
 # holds its own line, read back off logkeeper.
 # `inventory` because a claim names a PCI function by its arrival, which the
 # jobs that claim one read off the inventory.
+# `jobs` because `job_fairness` starts each of its workloads as a job of its own.
 [programs.test-runner]
 receives = ["soundserver", "volume", "power", "log"]
-syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace", "inventory"]
+syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace", "inventory", "jobs"]
 
 [programs.toybox]
 receives = ["soundserver"]
-
-# One xHCI controller driven from userland: `usbd_spare` claims the controller
-# the kernel was told to leave alone (`xhci-leave=`, `pci:1b36:000d` on the
-# guest and the Type-C controller on the T14), and starts and ends this itself,
-# holding the claim, its `usb` port and its process.
-[programs.usbd]
 
 [symlinks]
 "bin/cat" = "/system/bin/toybox"
@@ -86,16 +90,31 @@ receives = ["soundserver"]
 # `endowment_denied` holds every other applet's grant of it as declared.
 "bin/tone" = "/system/bin/toybox"
 
-# The block service: the NVMe controller this machine's DATA is on, driven
-# from userland through its claim. Started again when it ends; the claim goes
-# back with the process and is minted again for the next.
+# The block service: every disk a driver offers on `disk`, listed and opened
+# for the clients `block` grants, each session handed to its disk's driver.
+# Started again when it ends; its drivers connect again and offer again.
 [programs.diskserver]
 service = true
 restart = true
-serves = ["block"]
-devices = ["pci:01:08:02/1b36:0010"]
+serves = ["block", "disk"]
 
-# The file servers: DATA, the log and the running slot's volume, one process
+# The NVMe driver: one process per such controller, reading its own table and
+# offering its disk to the block service. QEMU's controller alone, so a metal
+# boot leaves the bench's own NVMe disk to its firmware.
+[programs.nvme]
+drives = ["pci:01:08:02/1b36:0010"]
+receives = ["disk"]
+
+# The USB driver, one process per boot controller: QEMU's `nec-usb-xhci`, the
+# T14's 00:14.0 and the AMD bench's 03:00.3. QEMU's spare, the T14's Type-C
+# controller and the AMD bench's 03:00.4 stay free: `usbd_spare` claims the
+# one a machine has and starts its own usbd on it, holding the claim, its
+# `usb` port and its process.
+[programs.usbd]
+drives = ["pci:0c:03:30/1033:0194", "pci:0c:03:30/8086:a0ed", "pci:0c:03:30/1022:1639@03:00.3"]
+receives = ["disk"]
+
+# The file servers: DATA, the log and the boot volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
 [programs.fileserver]

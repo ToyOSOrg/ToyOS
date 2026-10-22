@@ -52,9 +52,7 @@ anything more is built on it.
    kernel reads back from the trace with its number and its program. A
    window's record names its opener by address, which
    `issues/the-cpu-that-spawns-a-toybox-applet-reads-1-4-ms-of-preemption-off-on-the-t14.md`
-   and
-   `issues/the-supervisors-claim-of-a-pci-function-the-t14-lacks-holds-preemption-off-for-3-8-ms.md`
-   need.
+   needs.
 
 **Ruled** (owner, 2026-10-04), on when these steps start, **"Both in
 parallel"**: "Start the trace diary's first steps now, beside latency step 1

@@ -75,11 +75,13 @@ pub enum ObjectKind {
     Console = 10,
     SysCap = 11,
     Process = 12,
-    DeviceSet = 13,
+    Null = 13,
+    Job = 14,
+    DeviceSet = 15,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 14] = [
+    pub const ALL: [ObjectKind; 16] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -93,6 +95,8 @@ impl ObjectKind {
         Self::Console,
         Self::SysCap,
         Self::Process,
+        Self::Null,
+        Self::Job,
         Self::DeviceSet,
     ];
 
@@ -219,10 +223,18 @@ impl Rights {
     /// [`SYS_COUNTERS`]: crate::syscall::SYS_COUNTERS
     /// [`SYS_TRACE_READ`]: crate::syscall::SYS_TRACE_READ
     pub const TRACE: Rights = Rights(1 << 14);
+    /// On a `SysCap`: make a new job, with its own share of the CPU
+    /// ([`SYS_JOB_CREATE`]). Every other process's children join their
+    /// parent's job, so this is what an independently started program needs a
+    /// launcher to hold — and what lets the holder gain aggregate CPU by
+    /// starting many, which is why it rides a bit.
+    ///
+    /// [`SYS_JOB_CREATE`]: crate::syscall::SYS_JOB_CREATE
+    pub const JOBS: Rights = Rights(1 << 15);
 
     /// Every bit that has a caller. A wider set than this is a bug in whoever
     /// composed it, not a right nobody uses.
-    pub const ALL: Rights = Rights(0x7fff);
+    pub const ALL: Rights = Rights(0xffff);
 
     pub const fn from_bits(bits: u32) -> Option<Self> {
         if bits & !Self::ALL.0 == 0 { Some(Rights(bits)) } else { None }
@@ -253,7 +265,7 @@ impl Rights {
 /// refusal saying which right was missing.
 impl core::fmt::Debug for Rights {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        const NAMES: [(Rights, &str); 15] = [
+        const NAMES: [(Rights, &str); 16] = [
             (Rights::DUP, "DUP"),
             (Rights::TRANSFER, "TRANSFER"),
             (Rights::READ, "READ"),
@@ -269,6 +281,7 @@ impl core::fmt::Debug for Rights {
             (Rights::INVENTORY, "INVENTORY"),
             (Rights::COUNTERS, "COUNTERS"),
             (Rights::TRACE, "TRACE"),
+            (Rights::JOBS, "JOBS"),
         ];
         if self.0 == 0 {
             return f.write_str("NONE");

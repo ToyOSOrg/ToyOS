@@ -615,21 +615,27 @@ const SUPERVISOR_PROGRAM: &str = "supervisor";
 /// row receives it.
 const SUPERVISOR_SERVED: &[&str] = &[toyos_swap::PORT, "power", toyos_manifest::grants::PORT];
 
-/// The ports that one row alone may receive, each with that row: the swap
-/// port, whose holder replaces any service's binary, the grants port, whose
-/// holder writes which folder of the home a package sees, the prompt port,
-/// whose holder draws above every window and has every key while it does, the
-/// input port, whose holder types into the focused window, the clipboard
-/// port, whose holder is sent every copy made in the session, and the display
-/// port, whose holder sets the mode and the scale every window is drawn at.
-const HELD_ALONE: &[(&str, &str)] = &[
-    (toyos_swap::PORT, toyos_swap::HOLDER),
-    (toyos_manifest::grants::PORT, toyos_manifest::grants::HOLDER),
-    (toyos_manifest::consent::PROMPT, toyos_manifest::consent::SERVER),
-    (toyos_input::wire::PORT, toyos_input::wire::HOLDER),
-    (toyos_manifest::clipboard::PORT, toyos_manifest::clipboard::HOLDER),
-    (toyos_manifest::display::PORT, toyos_manifest::display::HOLDER),
+/// The ports that named rows alone may receive, each with those rows: the
+/// swap port, whose holder replaces any service's binary, the grants port,
+/// whose holder writes which folder of the home a package sees, the prompt
+/// port, whose holder draws above every window and has every key while it
+/// does, the input port, whose holders type into the focused window, the
+/// clipboard port, whose holder is sent every copy made in the session, and
+/// the display port, whose holder sets the mode and the scale every window is
+/// drawn at.
+const HELD_ALONE: &[(&str, &[&str])] = &[
+    (toyos_swap::PORT, &[toyos_swap::HOLDER]),
+    (toyos_manifest::grants::PORT, &[toyos_manifest::grants::HOLDER]),
+    (toyos_manifest::consent::PROMPT, &[toyos_manifest::consent::SERVER]),
+    (toyos_input::wire::PORT, toyos_input::wire::HOLDERS),
+    (toyos_manifest::clipboard::PORT, &[toyos_manifest::clipboard::HOLDER]),
+    (toyos_manifest::display::PORT, &[toyos_manifest::display::HOLDER]),
 ];
+
+/// Rows, as a refusal names them.
+fn named(rows: &[&str]) -> String {
+    rows.iter().map(|r| format!("`{r}`")).collect::<Vec<_>>().join(" and ")
+}
 
 /// Who may hold the authorities that change what the machine runs or what a
 /// package sees: each of [`HELD_ALONE`]'s ports, its holder and nothing else
@@ -645,9 +651,9 @@ const HELD_ALONE: &[(&str, &str)] = &[
 fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
     use toyos_manifest::consent;
     for (name, program) in &config.programs {
-        for (port, holder) in HELD_ALONE {
-            if name != holder && program.receives.iter().any(|r| r == port) {
-                return Err(format!("`{name}` receives `{port}`, which only `{holder}` may hold"));
+        for (port, holders) in HELD_ALONE {
+            if !holders.contains(&name.as_str()) && program.receives.iter().any(|r| r == port) {
+                return Err(format!("`{name}` receives `{port}`, which only {} may hold", named(holders)));
             }
         }
         if program.receives.iter().any(|r| r == consent::PORT) {
@@ -665,9 +671,9 @@ fn held_by_their_holders_alone(config: &SystemConfig) -> Result<(), String> {
             return Err(format!("`{name}` asks for `slots` and is in `[boot] start`, and the slots are granted to a launch alone"));
         }
     }
-    for (port, holder) in HELD_ALONE {
+    for (port, holders) in HELD_ALONE {
         if config.apps.receives.iter().any(|r| r == port) {
-            return Err(format!("`[apps] receives` names `{port}`, which only `{holder}` may hold"));
+            return Err(format!("`[apps] receives` names `{port}`, which only {} may hold", named(holders)));
         }
     }
     if config.apps.receives.iter().any(|r| r == consent::PORT) {
@@ -2724,16 +2730,22 @@ mod tests {
         "test-actuators",
     ];
 
-    /// Features of a host workspace member that choose a build's world rather
+    /// Features of a host-tested member that choose a build's world rather
     /// than revert a decision: loom's atomics, a crate's `std` and its default
     /// set, the toolchain's `core` and `rustc-dep-of-std`, libc's `std-runtime`,
-    /// the signer's `sign`, `flaws`, which compiles what a simulator's
-    /// negative gates select at run time, and `toyos-crypto`'s `portable`,
-    /// `wpa2` and `rustls-provider`, which `--ci host` tests as forms of its own.
+    /// libc's `fd-owner` and `toyos`'s `fd-table`, which pick the copy that
+    /// owns the descriptor table, the signer's `sign`, `flaws`, which compiles what a simulator's
+    /// negative gates select at run time, `toyos-crypto`'s `portable`, `wpa2`
+    /// and `rustls-provider`, which `--ci host` tests as forms of its own, and
+    /// of the guest libraries, `toyos-font`'s `ttf`, its TrueType rendering,
+    /// and `toyos-pci-claim`'s `host-grant`, which netstack's host tests build.
     const NOT_A_CONTROL: &[&str] = &[
         "core",
         "default",
+        "fd-owner",
+        "fd-table",
         "flaws",
+        "host-grant",
         "loom",
         "portable",
         "rustc-dep-of-std",
@@ -2741,6 +2753,7 @@ mod tests {
         "sign",
         "std",
         "std-runtime",
+        "ttf",
         "wpa2",
     ];
 
@@ -2799,7 +2812,8 @@ mod tests {
 
     /// Every negative control the tree declares: every feature of the kernel's
     /// manifest but its builds and [`KERNEL_CARRIES`], and every feature of every
-    /// host workspace member's but [`NOT_A_CONTROL`].
+    /// host workspace member's and guest library's (`hostws::GUEST_LIBRARIES`,
+    /// which a host tests too) but [`NOT_A_CONTROL`].
     ///
     /// **Every manifest, and no list of the crates that hold a model.** A model
     /// of memory orderings, of the process table's interleavings, of a simulated
@@ -2809,7 +2823,10 @@ mod tests {
     /// Each file's own comment beside a name carries the argument for it.
     fn declared_model_controls(root: &Path) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
-        for dir in std::iter::once(crate::ci::KERNEL_DIR.to_string()).chain(crate::hostws::host_members(root)) {
+        let host_tested = crate::hostws::host_members(root)
+            .into_iter()
+            .chain(crate::hostws::GUEST_LIBRARIES.map(String::from));
+        for dir in std::iter::once(crate::ci::KERNEL_DIR.to_string()).chain(host_tested) {
             let path = root.join(&dir).join("Cargo.toml");
             let text = fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("Failed to read {}: {e}", path.display()));
@@ -3018,6 +3035,38 @@ mod tests {
         }
     }
 
+    /// A config whose rows claim a PCI function starts the `acpi` claim's
+    /// holder: every such claim waits for the root bridges' memory it declares,
+    /// and one made on a boot where nothing does is refused, as are all after
+    /// it. `undeclaredcase` is that boot, booted to judge the refusal.
+    #[test]
+    fn every_config_that_claims_a_pci_function_starts_its_declarer() {
+        const UNDECLARED: &str = "tests/images/undeclaredcase.toml";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for config in ALL_CONFIGS {
+            let parsed = parse_config(&root.join(config));
+            let claimants: Vec<&String> = parsed
+                .programs
+                .iter()
+                .filter(|(name, program)| {
+                    !program.drives.is_empty()
+                        || (parsed.boot.start.contains(name) && program.devices.iter().any(|d| d.starts_with("pci:")))
+                })
+                .map(|(name, _)| name)
+                .collect();
+            let declares = parsed
+                .boot
+                .start
+                .iter()
+                .any(|name| parsed.programs.get(name).is_some_and(|p| p.devices.iter().any(|d| d == "acpi")));
+            assert_eq!(
+                declares || claimants.is_empty(),
+                *config != UNDECLARED,
+                "{config}: {claimants:?} claim PCI functions, and starting the `acpi` claim's holder is {declares}",
+            );
+        }
+    }
+
     /// Every config renders, so a row the manifest refuses — one that serves a
     /// port and is not marked `service` — reds here rather than at a build.
     #[test]
@@ -3094,12 +3143,15 @@ mod tests {
         "images/diag.toml",
         "images/console.toml",
         "tests/images/acpicase.toml",
+        "tests/images/benchcase.toml",
         "tests/images/clipboardcase.toml",
         "tests/images/drivescase.toml",
         "tests/images/hostedclangcase.toml",
         "tests/images/hotplugcase.toml",
         "tests/images/jobcase.toml",
         "tests/images/latencycase.toml",
+        "tests/images/launchcase.toml",
+        "tests/images/libccase.toml",
         "tests/images/metalcase.toml",
         "tests/images/metaldevicecase.toml",
         "tests/images/netcase.toml",
@@ -3107,6 +3159,7 @@ mod tests {
         "tests/images/proctreecase.toml",
         "tests/images/scalecase.toml",
         "tests/images/testcases.toml",
+        "tests/images/undeclaredcase.toml",
         "tests/images/virtclaimcase.toml",
         "tests/images/virtjobcase.toml",
         "tests/images/virtpaniccase.toml",
@@ -3216,14 +3269,15 @@ mod tests {
         }
     }
 
-    /// The input port reaches ps2server alone, and never `[apps]`: a
-    /// connector types into the focused window.
+    /// The input port reaches ps2server and usbd alone, and never `[apps]`:
+    /// a connector types into the focused window.
     #[test]
-    fn only_ps2server_holds_the_input_port() {
+    fn only_the_keyboard_drivers_hold_the_input_port() {
         let gate = |text: &str| held_by_their_holders_alone(&toml::from_str(text).unwrap());
         assert_eq!(gate("[programs.ps2server]\nreceives = [\"input\"]\n[programs.compositor]\nserves = [\"input\"]\n"), Ok(()));
+        assert_eq!(gate("[programs.usbd]\nreceives = [\"input\", \"disk\"]\n[programs.compositor]\nserves = [\"input\"]\n"), Ok(()));
         for (text, said) in [
-            ("[programs.paint]\nreceives = [\"input\"]\n", "`paint` receives `input`, which only `ps2server` may hold"),
+            ("[programs.paint]\nreceives = [\"input\"]\n", "`paint` receives `input`, which only `ps2server` and `usbd` may hold"),
             ("[apps]\nreceives = [\"input\"]\n", "`[apps] receives` names `input`"),
         ] {
             match gate(text) {

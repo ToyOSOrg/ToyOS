@@ -3,7 +3,7 @@
 //! A region is a **handle**, not a token. Holding one is the whole of being
 //! allowed to map it, so there is no grant and no list of pids to keep: giving
 //! a peer access is [`SharedMemory::share`] plus
-//! [`Connection::send_handles`](crate::ipc::Connection::send_handles), and a
+//! a frame that carries it ([`Connection::send_with`](crate::ipc::Connection::send_with)), and a
 //! peer that never receives it can never name it.
 //!
 //! The mapping goes away with the last handle, so dropping this is all the

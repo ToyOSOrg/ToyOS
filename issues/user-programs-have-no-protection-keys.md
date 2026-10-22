@@ -10,9 +10,8 @@ opened: 2026-09-29
 part of its own memory off from itself. Linux at `Ubuntu-6.8.0-142.142` builds
 with `X86_INTEL_MEMORY_PROTECTION_KEYS`
 (`debian.master/config/annotations:15334`). Its ABI is approved in principle
-and shaped in this issue's pull request, which lands after
-`issues/user-programs-use-avx-under-xsave.md`, since PKRU is XSAVE
-state.
+and shaped in this issue's pull request. PKRU is XSAVE state, which
+`kernel::xsave::xcr0` does not yet enable.
 
 **Exit**: under TCG with `+pku` (`target/i386/cpu.c:992` at QEMU v11.1.1), on
 the T14, and on each EPYC guest that enumerates PKU: a write under a key the

@@ -200,7 +200,7 @@ pub fn launch(opts: &Options) {
         .arg("-drive")
         .arg("if=none,id=nvme0,format=raw,file=target/nvme.img")
         .arg("-device")
-        .arg("nvme,serial=deadbeef,drive=nvme0,msix-exclusive-bar=on");
+        .arg("nvme,serial=deadbeef,drive=nvme0");
 
     if shape.usb_hid {
         qemu.arg("-device")

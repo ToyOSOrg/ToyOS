@@ -1,7 +1,5 @@
-//! Wire-format types for HID input devices (keyboard, mouse).
-//!
-//! These cross the kernel→userland boundary as reads on a device handle, and
-//! a source's connection to the owner of input (`toyos-input`).
+//! A key transition and a pointer's axes, as the surface protocol and the
+//! owner of input (`toyos-input`) carry them.
 
 /// Keyboard modifier flags.
 pub const MOD_SHIFT: u8 = 1;
@@ -36,31 +34,10 @@ impl RawKeyEvent {
     pub fn gui(&self) -> bool { self.modifiers & MOD_GUI != 0 }
 }
 
-/// [`MouseEvent::kind`]: `x` and `y` are a movement, in the device's counts.
+/// A pointer report's kind: `x` and `y` are a movement, in the device's counts.
 pub const POINTER_RELATIVE: u8 = 0;
-/// [`MouseEvent::kind`]: `x` and `y` are a position, each in
+/// A pointer report's kind: `x` and `y` are a position, each in
 /// `0..=`[`POINTER_ABSOLUTE_MAX`].
 pub const POINTER_ABSOLUTE: u8 = 1;
 /// The far edge of an absolute axis.
 pub const POINTER_ABSOLUTE_MAX: i16 = 32767;
-
-crate::user_safe! {
-    /// One pointer report, as the device gave it: nothing is integrated or
-    /// merged before the owner of input, which ORs every pointer's buttons
-    /// and keeps the one position (`toyos_input::Pointer`).
-    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-    pub struct MouseEvent {
-        /// Which of its sender's pointers this is.
-        pub source: u8,
-        /// This pointer's own buttons, in HID boot-mouse order: bit 0 left,
-        /// 1 right, 2 middle, then two more.
-        pub buttons: u8,
-        /// Wheel notches, away from the user positive.
-        pub scroll: i8,
-        /// [`POINTER_RELATIVE`] or [`POINTER_ABSOLUTE`].
-        pub kind: u8,
-        pub x: i16,
-        /// Down the screen positive, in either kind.
-        pub y: i16,
-    }
-}

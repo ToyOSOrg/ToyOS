@@ -205,8 +205,7 @@ pub(crate) fn open_stream(
 
     let slot_reader = AudioSlotReader::new(shm, client_period_bytes, slot_count);
 
-    // Handles first, then the frame that announces them, so a client reading
-    // the frame is guaranteed to find them; both are consumed either way.
+    // The handles travel in the frame that announces them, consumed either way.
     let opened = StreamOpenResponse {
         client_period_frames,
         client_period_bytes,
@@ -215,8 +214,7 @@ pub(crate) fn open_stream(
         slot_count: slot_count as u16,
         fade_frames: ramp_frames,
     };
-    let sent = control.send_handles([client_shm, signal_read.into()]);
-    if sent.is_err() || control.send(MSG_STREAM_OPENED, &opened).is_err() {
+    if control.send_with(MSG_STREAM_OPENED, &opened, [client_shm, signal_read.into()]).is_err() {
         // Client died mid-open; the dropped control connection removes it.
         say!("soundserver: client {client_id} vanished during stream open");
     }

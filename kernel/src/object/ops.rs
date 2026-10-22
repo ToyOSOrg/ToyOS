@@ -8,19 +8,18 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use toyos_abi::handle::{RawHandle, Rights};
-use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError};
+use toyos_abi::syscall::{FileType, OpenFlags, SeekFrom, SyscallError, MAX_WHOLE_PIPE_WRITE};
 use kernel::sched::task::WaitClass;
 
 use crate::drivers::serial;
 use crate::file_cache;
-use crate::time::Deadline;
 use crate::pipe::{self, PipeId};
-use kernel::pipe::End;
+use kernel::pipe::{End, Landing};
 use crate::process::PipeMap;
 use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::inbox::PollEntry;
-use crate::watch::{IrqWatch, Watch};
-use crate::{device as device_registry, keyboard, mouse};
+use crate::watch::Watch;
+use crate::device as device_registry;
 
 use super::device::DeviceClaim;
 use super::file::{FileObject, OpenFileState};
@@ -59,6 +58,8 @@ pub fn initial_rights(object: &KObjectRef) -> Rights {
         KObjectRef::Namespace(_) => Rights::DUP.union(Rights::TRANSFER).union(Rights::READ),
         // A spawner gets everything a child handle offers: exit code, kill, and accounting.
         KObjectRef::Process(_) => BASE.union(Rights::READ).union(Rights::MANAGE),
+        KObjectRef::Null(_) => super::null::NullObject::RIGHTS,
+        KObjectRef::Job(_) => super::job::JobObject::RIGHTS,
         // Neither `DUP` nor `TRANSFER`: the set is its minter's alone.
         KObjectRef::DeviceSet(_) => Rights::READ.union(Rights::WAIT),
     }
@@ -187,8 +188,7 @@ pub fn close(
             }
         }
     }
-    // Only a watch this handle's object ends is answered: one it shares (every `Console` and a
-    // `Device(Keyboard)` name the keyboard's) cannot cancel another's poll.
+    // Only a watch this handle's object ends is answered: one it shares cannot cancel another's poll.
     if close_ends_polls(&object) {
         for watch in [read_watch(&object), write_watch(&object), pipe_end_watch(&object)].into_iter().flatten() {
             watch.cancel_polls();
@@ -212,7 +212,7 @@ pub fn pipe_id_read(object: &KObjectRef) -> Option<PipeId> {
 }
 
 pub fn pipe_id_write(object: &KObjectRef) -> Option<PipeId> {
-    pipe_write(object).map(|(id, _)| id)
+    pipe_write(object).map(|(id, _, _)| id)
 }
 
 /// The pipe a blocking read of `object` parks on, and the class its wait is
@@ -225,20 +225,21 @@ pub fn pipe_read(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
-/// [`pipe_read`]'s answer for a blocking write.
-pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
+/// [`pipe_read`]'s answer for a blocking write, and how a write lands in
+/// that pipe.
+pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass, Landing)> {
     match object {
-        KObjectRef::PipeWrite(w) => Some((w.id(), WaitClass::Pipe)),
-        KObjectRef::Connection(c) => Some((c.tx(), WaitClass::Ipc)),
+        KObjectRef::PipeWrite(w) => Some((w.id(), WaitClass::Pipe, Landing::Pipe)),
+        KObjectRef::Connection(c) => Some((c.tx(), WaitClass::Ipc, Landing::Partial)),
         KObjectRef::PipeRead(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -246,9 +247,10 @@ pub fn pipe_write(object: &KObjectRef) -> Option<(PipeId, WaitClass)> {
 /// share of one that goes with its object.
 pub enum WatchRef {
     Static(&'static Watch),
+    /// A static watch an interrupt handler posts: the device set's, which a
+    /// hot-plug slot's handler posts.
+    Irq(&'static crate::watch::IrqWatch),
     Shared(Arc<Watch>),
-    /// A device class's, which its interrupt handler posts.
-    Irq(&'static IrqWatch),
     /// The watch of the function or row a claim holds: named by the claim,
     /// and reached only with what the claim lends.
     Claim(Arc<DeviceClaim>),
@@ -258,8 +260,8 @@ impl WatchRef {
     pub(crate) fn add_poll(&self, entry: PollEntry) {
         match self {
             Self::Static(watch) => watch.add_poll(entry),
-            Self::Shared(watch) => watch.add_poll(entry),
             Self::Irq(watch) => watch.add_poll(entry),
+            Self::Shared(watch) => watch.add_poll(entry),
             Self::Claim(claim) => claim.add_poll(entry),
         }
     }
@@ -267,8 +269,8 @@ impl WatchRef {
     pub fn cancel_polls(&self) {
         match self {
             Self::Static(watch) => watch.cancel_polls(),
-            Self::Shared(watch) => watch.cancel_polls(),
             Self::Irq(watch) => watch.cancel_polls(),
+            Self::Shared(watch) => watch.cancel_polls(),
             // Its release answers them, and its close ends none (`close_ends_polls`).
             Self::Claim(_) => unreachable!("a claim's polls are cancelled by its release alone"),
         }
@@ -284,23 +286,20 @@ pub fn read_watch(object: &KObjectRef) -> Option<WatchRef> {
         KObjectRef::Acceptor(a) => Some(WatchRef::Shared(a.watch().clone())),
         KObjectRef::Process(p) => Some(WatchRef::Shared(p.watch().clone())),
         KObjectRef::DeviceSet(_) => Some(WatchRef::Irq(&crate::pcidev::SET_WATCH)),
-        KObjectRef::Console(_) => Some(WatchRef::Static(&keyboard::WATCH)),
+        // Nothing posts for a serial byte, so a console's readable poll has
+        // no source (`issues/a-console-watch-waits-on-the-keyboard-not-the-serial-line.md`).
+        KObjectRef::Console(_) => None,
         KObjectRef::Device(d) => match d.class() {
-            device_registry::DeviceType::Keyboard => Some(WatchRef::Static(&keyboard::WATCH)),
-            device_registry::DeviceType::Mouse => Some(WatchRef::Static(&mouse::WATCH)),
             device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
             | device_registry::DeviceType::Acpi => Some(WatchRef::Claim(d.clone())),
-            device_registry::DeviceType::HdaAudio => Some(WatchRef::Irq(&crate::drivers::AUDIO_WATCH)),
             device_registry::DeviceType::Framebuffer => None,
-            // A partition answers its description and has nothing to wait for.
-            device_registry::DeviceType::Partition => None,
         },
         // Named unconditionally: the watch alone cannot enforce rights.
         KObjectRef::SysCap(_) => Some(WatchRef::Static(&crate::log::user::WATCH)),
         KObjectRef::PipeWrite(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::Job(_) => None,
     }
 }
 
@@ -314,7 +313,7 @@ pub fn write_watch(object: &KObjectRef) -> Option<WatchRef> {
         | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => None,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -324,10 +323,10 @@ pub fn pipe_end_watch(object: &KObjectRef) -> Option<WatchRef> {
     match object {
         KObjectRef::PipeRead(r) => pipe::left_watch(r.id(), End::Read).map(WatchRef::Shared),
         KObjectRef::PipeWrite(w) => pipe::left_watch(w.id(), End::Write).map(WatchRef::Shared),
-        KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_)
+        KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
-        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::DeviceSet(_) => None,
+        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => None,
     }
 }
 
@@ -337,18 +336,17 @@ pub fn other_end_gone(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::PipeRead(r) => pipe::other_end_gone(r.id(), End::Read),
         KObjectRef::PipeWrite(w) => pipe::other_end_gone(w.id(), End::Write),
-        KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_)
+        KObjectRef::Connection(_) | KObjectRef::Acceptor(_) | KObjectRef::Process(_) | KObjectRef::Job(_)
         | KObjectRef::Console(_) | KObjectRef::Device(_) | KObjectRef::SysCap(_)
         | KObjectRef::File(_) | KObjectRef::Inbox(_) | KObjectRef::Connector(_)
-        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::DeviceSet(_) => false,
+        | KObjectRef::Namespace(_) | KObjectRef::SharedMem(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
 
 /// Whether closing one handle to this object ends what its watches watch, so
 /// every poll on them — in any ring — is answered as gone. `false` for the log
-/// and the keyboard, which the machine ends on its own and which other handles
-/// share: a console closing is not every console's keyboard going away. `false`
-/// for a process, which only its own end ends: closing one handle to it ends no
+/// and a console, which the machine ends on its own and which other handles
+/// share. `false` for a process, which only its own end ends: closing one handle to it ends no
 /// other's watch. `false` for a claim on a function or a row: its one handle's
 /// close is its release, which answers every poll on the watch before the slot
 /// or the row can be held again (`pcidev`'s and `isa::Row`'s release).
@@ -356,23 +354,19 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::SysCap(_) => false,
         KObjectRef::Console(_) => false,
-        KObjectRef::Process(_) => false,
+        KObjectRef::Process(_) | KObjectRef::Job(_) => false,
         // The set's watch is every handle's: one handle's close ends none.
         KObjectRef::DeviceSet(_) => false,
         KObjectRef::Device(d) => match d.class() {
-            device_registry::DeviceType::Keyboard
-            | device_registry::DeviceType::PciFunction
+            device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
             | device_registry::DeviceType::Acpi => false,
-            device_registry::DeviceType::Mouse
-            | device_registry::DeviceType::HdaAudio
-            | device_registry::DeviceType::Framebuffer
-            | device_registry::DeviceType::Partition => true,
+            device_registry::DeviceType::Framebuffer => true,
         },
         KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Inbox(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) => true,
+        | KObjectRef::SharedMem(_) | KObjectRef::Null(_) => true,
     }
 }
 
@@ -421,40 +415,10 @@ pub fn read_device(
     buf: &mut UserBytesMut,
 ) -> Option<u64> {
     match claim.class() {
-        // Reads the queue only and drives no hardware: polling the controller here can block on its recovery engine.
-        // `drain_irqs` calls this same read at the top of every scheduler pass, so skipping the poll here still bounds staleness to one scheduler pass.
-        device_registry::DeviceType::Keyboard | device_registry::DeviceType::Mouse => {
-            match claim.class() {
-            device_registry::DeviceType::Keyboard => {
-                let event_size = core::mem::size_of::<keyboard::RawKeyEvent>();
-                let mut count = 0;
-                while count + event_size <= buf.len() {
-                    let Some(event) = keyboard::try_read_event() else { break };
-                    buf.write_at(count, toyos_abi::usersafe::bytes(&event));
-                    count += event_size;
-                }
-                if count > 0 { Some(count as u64) } else { None }
-            }
-            device_registry::DeviceType::Mouse => {
-                let event_size = core::mem::size_of::<mouse::MouseEvent>();
-                let mut count = 0;
-                while count + event_size <= buf.len() {
-                    let Some(event) = mouse::try_read_event() else { break };
-                    buf.write_at(count, toyos_abi::usersafe::bytes(&event));
-                    count += event_size;
-                }
-                if count > 0 { Some(count as u64) } else { None }
-            }
-            other => panic!("a {other:?} claim answers with events"),
-            }
-        }
         device_registry::DeviceType::Framebuffer => Some(claim.describe(table, buf)),
-        // Every read is the description: a partition's bytes move through
-        // `SYS_PARTITION_READ`, never through a read of the claim.
-        device_registry::DeviceType::Partition => Some(claim.describe(table, buf)),
-        // The description first and interrupts after, the shape the HDA stub
-        // has: a driver reads what it is driving once, and everything it reads
-        // afterwards is what its device has been doing.
+        // The description first and interrupts after: a driver reads what it
+        // is driving once, and everything it reads afterwards is what its
+        // device has been doing.
         device_registry::DeviceType::PciFunction => {
             if !claim.info_read() {
                 return Some(claim.describe(table, buf));
@@ -499,16 +463,6 @@ pub fn read_device(
             buf.write_at(0, record_bytes(&record));
             Some(toyos_abi::pci::DeviceIrqRecord::SIZE as u64)
         }
-        device_registry::DeviceType::HdaAudio => {
-            if !claim.info_read() {
-                return Some(claim.describe(table, buf));
-            }
-            if buf.len() < toyos_abi::audio::AudioCompletionRecord::SIZE {
-                return Some(SyscallError::InvalidArgument.to_u64());
-            }
-            let n = crate::drivers::hda::drain_completed(buf);
-            if n == 0 { None } else { Some(n as u64) }
-        }
     }
 }
 
@@ -534,7 +488,12 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
     match object {
         KObjectRef::File(f) => read_file(f, buf),
         KObjectRef::PipeRead(r) => pipe::try_read(r.id(), buf).map(|n| n as u64),
-        KObjectRef::Connection(c) => pipe::try_read(c.rx(), buf).map(|n| n as u64),
+        // A batch pinned where the reader is answers the read, so no byte
+        // after it is read until the batch is taken.
+        KObjectRef::Connection(c) => c.read(buf).map(|read| match read {
+            Ok(n) => n as u64,
+            Err(crate::pipe::AtBatch) => SyscallError::HandlesPending.to_u64(),
+        }),
         KObjectRef::Device(_) => unreachable!("a device claim is read by `read_device`"),
         KObjectRef::Console(_) => {
             let mut count = 0usize;
@@ -553,20 +512,22 @@ pub fn try_read(object: &KObjectRef, buf: &mut UserBytesMut) -> Option<u64> {
             }
             Some(count as u64)
         }
+        KObjectRef::Null(_) => Some(0),
         KObjectRef::PipeWrite(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => Some(SyscallError::PermissionDenied.to_u64()),
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::DeviceSet(_) => Some(SyscallError::PermissionDenied.to_u64()),
     }
 }
 
-fn write_pipe(id: PipeId, buf: &UserBytes) -> Option<u64> {
-    match pipe::try_write(id, buf) {
+fn write_pipe(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
+    let (id, _, landing) = pipe_write(object).expect("a pipe's write end writes its pipe");
+    match pipe::write(id, buf, landing) {
         // The reader is gone, not absent: `NotFound` means the name is not there and nothing else may say so.
-        Some(pipe::PipeWrite::BrokenPipe) => Some(SyscallError::Gone.to_u64()),
-        Some(pipe::PipeWrite::NoMemory) => Some(SyscallError::ResourceExhausted.to_u64()),
-        Some(pipe::PipeWrite::Wrote(n)) => Some(n as u64),
-        None => None,
+        pipe::PipeWrite::BrokenPipe => Some(SyscallError::Gone.to_u64()),
+        pipe::PipeWrite::NoMemory => Some(SyscallError::ResourceExhausted.to_u64()),
+        pipe::PipeWrite::Wrote { n, .. } => Some(n as u64),
+        pipe::PipeWrite::NoRoom => None,
     }
 }
 
@@ -607,16 +568,16 @@ pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
             file_cache::touch(state.file_id, state.mtime);
             Some(written as u64)
         }),
-        KObjectRef::PipeWrite(w) => write_pipe(w.id(), buf),
-        KObjectRef::Connection(c) => write_pipe(c.tx(), buf),
+        KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) => write_pipe(object, buf),
         // The whole lines `klogd`'s queue has room for, and a trailing partial one:
         // a short count is a writer ahead of the console, told so.
         KObjectRef::Console(c) => Some(c.write(buf) as u64),
         KObjectRef::Device(d) => Some(write_device(d, buf)),
+        KObjectRef::Null(_) => Some(buf.len() as u64),
         KObjectRef::PipeRead(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SharedMem(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => {
+        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::DeviceSet(_) => {
             Some(SyscallError::PermissionDenied.to_u64())
         }
     }
@@ -673,6 +634,7 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         }
         KObjectRef::Connection(_) => plain(FileType::Socket),
         KObjectRef::Console(_) => plain(FileType::Serial),
+        KObjectRef::Null(_) => plain(FileType::Null),
         KObjectRef::Acceptor(_) => plain(FileType::Pipe),
         KObjectRef::SharedMem(m) => Stat {
             // The verdict `pcidev::dma_map` lends a device by: a receiver judges a peer's region on it before mapping.
@@ -684,126 +646,22 @@ pub fn fstat(object: &KObjectRef) -> Stat {
         },
         KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => plain(FileType::Unknown),
+        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::DeviceSet(_) => plain(FileType::Unknown),
         KObjectRef::Device(d) => plain(match d.class() {
-            device_registry::DeviceType::Keyboard => FileType::Keyboard,
-            device_registry::DeviceType::Mouse => FileType::Mouse,
             device_registry::DeviceType::Framebuffer => FileType::Framebuffer,
             device_registry::DeviceType::PciFunction
             | device_registry::DeviceType::Isa
             | device_registry::DeviceType::Acpi => FileType::Unknown,
-            device_registry::DeviceType::HdaAudio => FileType::Unknown,
-            device_registry::DeviceType::Partition => FileType::Unknown,
         }),
     }
 }
 
-/// `SYS_FSYNC`: a partition claim's writes on its device and the device told to
-/// commit them; a kernel file's pages are the file (`/tmp`) or never written
-/// (ROOT), so it owes nothing.
+/// `SYS_FSYNC`: a kernel file's pages are the file (`/tmp`) or never written
+/// (ROOT), so it owes nothing; nothing else here holds writes.
 pub fn fsync(object: &KObjectRef) -> u64 {
     match object {
         KObjectRef::File(_) => 0,
-        KObjectRef::Device(claim) => partition_fsync(claim),
         _ => SyscallError::PermissionDenied.to_u64(),
-    }
-}
-
-/// What a run of [`until_answered`]'s attempts came to.
-pub(crate) enum Answered {
-    /// An attempt answered with a word of the device's own: `Ok`, or a failure
-    /// it named.
-    Answer { answer: Result<(), SyscallError>, attempts: u32, took: crate::time::Duration },
-    /// The caller is being killed; the word dies with its task.
-    Killed,
-    /// Every attempt until [`crate::block::DEADMAN`] was refused on its budget:
-    /// the caller answers `Io`, a device word, rather than another ask-again.
-    Deadman { attempts: u32, took: crate::time::Duration },
-}
-
-/// `attempt` run until it answers anything but `WouldBlock` — a budget that
-/// expired on a live device, never a device fact — each time on a fresh
-/// budget, parked between two (`block::between_attempts`), and given up once
-/// [`crate::block::DEADMAN`] is spent. The one loop in this kernel that asks a
-/// block device again, for a caller holding no spinlock: nothing it holds can
-/// be held across the wait, so no disk wait here is under one.
-pub(crate) fn until_answered(mut attempt: impl FnMut() -> Result<(), SyscallError>) -> Answered {
-    let began = crate::clock::now();
-    // Bounds the run of attempts, never a single attempt's elapsed time.
-    let deadman = Deadline::at(began + crate::block::DEADMAN.duration());
-    let mut attempts = 0u32;
-    loop {
-        attempts += 1;
-        let answer = attempt();
-        if answer != Err(SyscallError::WouldBlock) {
-            return Answered::Answer { answer, attempts, took: crate::clock::now() - began };
-        }
-        // A killed caller stops retrying at the first safe point. The machine's stop is deliberately not read here: `quiesce` claims every filesystem is synced, and a sync it named may not be abandoned by the stop that is about to make that claim.
-        if crate::sched::driver::current_kill_pending() {
-            return Answered::Killed;
-        }
-        if deadman.reached(crate::clock::now()) {
-            return Answered::Deadman { attempts, took: crate::clock::now() - began };
-        }
-        crate::block::between_attempts(attempts);
-    }
-}
-
-/// A block-device failure as the word a syscall returns: a budget that expired
-/// is asked again ([`until_answered`]), anything else is the device's.
-pub(crate) fn block_word(e: crate::block::BlockError) -> SyscallError {
-    match e {
-        crate::block::BlockError::Device => SyscallError::Io,
-        crate::block::BlockError::BudgetExpired => SyscallError::WouldBlock,
-    }
-}
-
-/// `SYS_FSYNC` on a partition claim: every write the claim returned from
-/// before this call durable, or the claim told they may not be. The flush is
-/// the whole device's, and its answer is the claim's own
-/// (`block::Partition::flush`).
-fn partition_fsync(claim: &DeviceClaim) -> u64 {
-    match claim.class() {
-        device_registry::DeviceType::Partition => {}
-        device_registry::DeviceType::Keyboard
-        | device_registry::DeviceType::Mouse
-        | device_registry::DeviceType::Framebuffer
-        | device_registry::DeviceType::HdaAudio
-        | device_registry::DeviceType::PciFunction
-        | device_registry::DeviceType::Isa
-        | device_registry::DeviceType::Acpi => {
-            return SyscallError::PermissionDenied.to_u64();
-        }
-    }
-    let run = until_answered(|| match claim.partition_view() {
-        Some(view) => view.flush().map_err(block_word),
-        None => Err(SyscallError::Gone),
-    });
-    if let (Answered::Answer { answer: Ok(()), attempts, took }, Some((_, guid))) = (&run, claim.partition_on()) {
-        if *attempts > 1 {
-            crate::log!(
-                "partclaim: a flush of {} durable on attempt {attempts} after {took} — a refused \
-                 attempt was asked again on a fresh budget",
-                toyos_gpt::Guid(guid),
-            );
-        }
-    }
-    partition_word("a flush", run)
-}
-
-/// What a partition claim's run of attempts at `what` answers its caller.
-pub(crate) fn partition_word(what: &str, run: Answered) -> u64 {
-    match run {
-        Answered::Answer { answer: Ok(()), .. } => 0,
-        Answered::Answer { answer: Err(e), .. } => e.to_u64(),
-        Answered::Killed => SyscallError::WouldBlock.to_u64(),
-        Answered::Deadman { attempts, took } => {
-            crate::log!(
-                "partclaim: {what} still refused after {attempts} attempt(s) in {took} — {}",
-                crate::block::DEADMAN,
-            );
-            SyscallError::Io.to_u64()
-        }
     }
 }
 
@@ -826,15 +684,14 @@ pub fn ftruncate(object: &KObjectRef, size: u64) -> u64 {
 pub fn has_data(object: &KObjectRef) -> bool {
     match object {
         KObjectRef::PipeRead(r) => pipe::has_data(r.id()),
-        KObjectRef::Connection(c) => pipe::has_data(c.rx()),
+        KObjectRef::Connection(c) => c.has_data(),
         KObjectRef::Console(_) => serial::has_data(),
         KObjectRef::Acceptor(a) => a.has_pending(),
         KObjectRef::Process(p) => p.finished(),
         KObjectRef::DeviceSet(set) => set.changed(),
-        KObjectRef::File(_) => true,
+        KObjectRef::Job(_) => false,
+        KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Device(d) => match d.class() {
-            device_registry::DeviceType::Keyboard => keyboard::has_data(),
-            device_registry::DeviceType::Mouse => mouse::has_data(),
             // A claim its last handle has let go has nothing to read: a poll
             // on it is ended where it registers (`DeviceClaim::add_poll`).
             device_registry::DeviceType::PciFunction => {
@@ -844,10 +701,6 @@ pub fn has_data(object: &KObjectRef) -> bool {
                 !d.info_read() || d.isa(crate::isa::has_irq).unwrap_or(false)
             }
             device_registry::DeviceType::Framebuffer => true,
-            device_registry::DeviceType::Partition => true,
-            device_registry::DeviceType::HdaAudio => {
-                !d.info_read() || crate::drivers::hda::has_pending()
-            }
         },
         KObjectRef::PipeWrite(_) | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
@@ -857,29 +710,29 @@ pub fn has_data(object: &KObjectRef) -> bool {
 
 /// Whether a post on this object's read watch is its readability, which
 /// [`has_data`] cannot be asked for: the log's, whose unread records are a
-/// property of the reader's cursor, which the kernel does not hold; and a
-/// console's, whose watch is the keyboard's while its data is the serial
-/// line's (`issues/a-console-watch-waits-on-the-keyboard-not-the-serial-line.md`).
+/// property of the reader's cursor, which the kernel does not hold.
 pub fn read_posts_are_readiness(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::SysCap(_) | KObjectRef::Console(_) => true,
-        KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
+        KObjectRef::SysCap(_) => true,
+        KObjectRef::Console(_) | KObjectRef::PipeRead(_) | KObjectRef::PipeWrite(_) | KObjectRef::Connection(_)
         | KObjectRef::Acceptor(_) | KObjectRef::File(_) | KObjectRef::Device(_)
         | KObjectRef::Inbox(_) | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => false,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
 
 pub fn has_space(object: &KObjectRef) -> bool {
     match object {
-        KObjectRef::PipeWrite(w) => pipe::has_space(w.id()),
-        KObjectRef::Connection(c) => pipe::has_space(c.tx()),
-        KObjectRef::File(_) => true,
+        // Writable is room for any write that lands whole, so a non-blocking
+        // one refused, retried on readiness, lands.
+        KObjectRef::PipeWrite(w) => pipe::has_space(w.id(), MAX_WHOLE_PIPE_WRITE),
+        KObjectRef::Connection(c) => pipe::has_space(c.tx(), 1),
+        KObjectRef::File(_) | KObjectRef::Null(_) => true,
         KObjectRef::Console(_) => crate::log::console::has_room(),
         KObjectRef::PipeRead(_) | KObjectRef::Device(_) | KObjectRef::Acceptor(_)
         | KObjectRef::Inbox(_) | KObjectRef::SysCap(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => false,
+        | KObjectRef::SharedMem(_) | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::DeviceSet(_) => false,
     }
 }
 
@@ -898,7 +751,7 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
         | KObjectRef::Console(_) | KObjectRef::Acceptor(_) | KObjectRef::Inbox(_)
         | KObjectRef::SysCap(_) | KObjectRef::SharedMem(_)
         | KObjectRef::Connector(_) | KObjectRef::Namespace(_)
-        | KObjectRef::Process(_) | KObjectRef::DeviceSet(_) => SyscallError::InvalidArgument.to_u64(),
+        | KObjectRef::Process(_) | KObjectRef::Job(_) | KObjectRef::Null(_) | KObjectRef::DeviceSet(_) => SyscallError::InvalidArgument.to_u64(),
     }
 }
 
@@ -908,12 +761,9 @@ pub fn mark_tty(object: &KObjectRef) -> u64 {
 fn write_device(claim: &DeviceClaim, buf: &UserBytes) -> u64 {
     match claim.class() {
         device_registry::DeviceType::Isa | device_registry::DeviceType::Acpi => {}
-        device_registry::DeviceType::Keyboard
-        | device_registry::DeviceType::Mouse
-        | device_registry::DeviceType::Framebuffer
-        | device_registry::DeviceType::HdaAudio
-        | device_registry::DeviceType::PciFunction
-        | device_registry::DeviceType::Partition => return SyscallError::PermissionDenied.to_u64(),
+        device_registry::DeviceType::Framebuffer | device_registry::DeviceType::PciFunction => {
+            return SyscallError::PermissionDenied.to_u64();
+        }
     }
     if !claim.info_read() {
         return SyscallError::PermissionDenied.to_u64();

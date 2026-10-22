@@ -54,9 +54,9 @@ fn map_2m() -> *mut u8 {
 
 static THREAD_BLOCK: AtomicU64 = AtomicU64::new(0);
 
-/// Raw thread body. std's `thread::spawn` leaks its 2 MiB stack on every
-/// spawn (`sys::thread::toyos` allocates it and `join` never frees it), which
-/// walks the address space downwards and would swamp what part 3 measures.
+/// Raw thread body, run on one stack this test maps and reuses, so the
+/// address space holds still under what part 3 measures; std's
+/// `thread::spawn` allocates each thread a stack of its own.
 extern "C" fn thread_body(_arg: u64) {
     let r = alloc_block_preserving_dtv(MODULE_EXE);
     THREAD_BLOCK.store(r.unwrap_or(0), Ordering::Release);

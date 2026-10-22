@@ -5,16 +5,18 @@
 // `arch::tlb::shootdown` is the caller's job for the rest of the machine.
 // A leaf is global if and only if it is the same in every root that will ever
 // be loaded, which is the kernel half and only [`kernel_leaf`] writes it; a
-// mapping that differs between roots needs a constructor of its own.
+// mapping that differs between roots needs a constructor of its own. No
+// kernel leaf is both writable and executable, and only the image's text is
+// executable (`mm::audit_wx`).
 
 use crate::log;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use crate::hasher::HashMap;
 
 use kernel::pcid::{Alloc, Pcid, PcidPool};
 
 use crate::mm::{UserAddr, PAGE_2M};
+use toyos_userbound::Leaf;
 use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
 use crate::arch::control_regs::PcidActive;
 use crate::arch::cpu::Invpcid;
@@ -37,10 +39,14 @@ const PAGE_SIZE_BIT: u64 = 1 << 7;
 const PAGE_GLOBAL: u64 = 1 << 8;
 /// In a 4 KiB PTE this bit is bit 7 instead, so flags can't cross a split unmoved.
 const PAGE_PAT_2M: u64 = 1 << 12;
-/// Not-executable only because `arch::control_regs` asserts `EFER.NXE` on every CPU.
+/// The PAT bit of a 4 KiB PTE, where a PDE has its size bit.
+const PAGE_PAT_4K: u64 = 1 << 7;
+/// Not-executable only because `arch::control_regs` sets `EFER.NXE` on every
+/// CPU before it loads these tables.
 const PAGE_NX: u64 = 1 << 63;
 const ADDR_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 const ADDR_MASK_2M: u64 = 0x000F_FFFF_FFE0_0000;
+const PAGE_4K: u64 = crate::mm::PAGE_SIZE;
 
 /// Every upper-level table entry's flags: present, writable, user.
 const TABLE_FLAGS: u64 = PAGE_PRESENT | PAGE_WRITE | PAGE_USER;
@@ -55,14 +61,28 @@ impl Prot {
             Self::ReadExec => common,
         }
     }
+
+    /// The permission bits a kernel leaf carries. A supervisor write to a
+    /// read-only one faults because `CR0.WP` is declared (SDM Vol. 3A §4.6.1).
+    fn kernel_bits(self) -> u64 {
+        match self {
+            Self::Read => PAGE_NX,
+            Self::ReadWrite => PAGE_WRITE | PAGE_NX,
+            Self::ReadExec => 0,
+        }
+    }
 }
 
-/// Every bit of a 2 MiB kernel-half leaf but its address and size: the one
-/// writer of [`PAGE_GLOBAL`]. Writable and executable, because the kernel's
-/// image is in the direct map.
-fn kernel_leaf(cache: CachePolicy) -> u64 {
-    PAGE_PRESENT | PAGE_WRITE | PAGE_GLOBAL | cache.pde_bits()
+/// Every bit of a kernel-half leaf but its address and a 2 MiB leaf's size
+/// bit: the one writer of [`PAGE_GLOBAL`]. Its PAT bit is a 2 MiB leaf's (bit
+/// 12; a 4 KiB one's is bit 7), so a 4 KiB leaf takes it only for `Normal`,
+/// which sets neither.
+fn kernel_leaf(cache: CachePolicy, prot: Prot) -> u64 {
+    PAGE_PRESENT | PAGE_GLOBAL | prot.kernel_bits() | cache.pde_bits()
 }
+
+/// Every upper-level entry over the kernel half: its leaves decide.
+const KERNEL_TABLE: u64 = PAGE_PRESENT | PAGE_WRITE;
 
 /// Which PAT entry a 2 MiB mapping selects: `Normal` is entry 0 (WB), whose
 /// type for a range is the MTRR's (SDM Vol. 3A Table 11-7); `Uncacheable` is
@@ -70,21 +90,37 @@ fn kernel_leaf(cache: CachePolicy) -> u64 {
 /// `WriteCombining` is [`pat::WC_ENTRY`](crate::arch::pat::WC_ENTRY).
 impl CachePolicy {
     fn pde_bits(self) -> u64 {
+        self.bits(PAGE_PAT_2M)
+    }
+
+    fn pte_bits(self) -> u64 {
+        self.bits(PAGE_PAT_4K)
+    }
+
+    fn bits(self, pat: u64) -> u64 {
         match self {
             Self::Normal => 0,
             Self::Uncacheable => PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH,
-            Self::WriteCombining => PAGE_PAT_2M,
+            Self::WriteCombining => pat,
         }
     }
 
-    /// Any other combination is an entry this code never wrote.
     fn from_pde(pde: u64) -> Self {
-        match (pde & PAGE_PAT_2M != 0, pde & (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH)) {
+        Self::from_bits(pde, PAGE_PAT_2M)
+    }
+
+    fn from_pte(pte: u64) -> Self {
+        Self::from_bits(pte, PAGE_PAT_4K)
+    }
+
+    /// Any other combination is an entry this code never wrote.
+    fn from_bits(entry: u64, pat: u64) -> Self {
+        match (entry & pat != 0, entry & (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH)) {
             (false, 0) => Self::Normal,
             (true, 0) => Self::WriteCombining,
             (false, low) if low == PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH => Self::Uncacheable,
             _ => panic!(
-                "CachePolicy::from_pde: {pde:#x} selects a PAT entry outside 0, {} and {}",
+                "CachePolicy::from_bits: {entry:#x} selects a PAT entry outside 0, {} and {}",
                 crate::arch::pat::UC_ENTRY,
                 crate::arch::pat::WC_ENTRY
             ),
@@ -392,8 +428,6 @@ fn alloc_pcid() -> Option<PcidGuard> {
 pub struct AddressSpace {
     root: Box<PageTablePage>,
     children: Vec<Box<PageTablePage>>,
-    /// Physical data pages mapped into user space, keyed by physical address. Freed on drop.
-    pages: HashMap<u64, crate::mm::pmm::PhysPage>,
     /// All virtual memory regions, keyed by start address.
     regions: vma::Regions,
     /// Owned for this space's life: dropping the space returns a user tag, so two
@@ -422,7 +456,6 @@ impl AddressSpace {
         Some(Self {
             root: pml4,
             children: Vec::new(),
-            pages: HashMap::default(),
             regions: vma::Regions::default(),
             pcid: PcidHandle::User(pcid),
         })
@@ -432,7 +465,9 @@ impl AddressSpace {
         Cr3(self.root.phys() | self.pcid.value() as u64)
     }
 
-    /// Empty PDE slots (aligned, asserted) mean nothing can be stale.
+    /// Map `size` bytes of `phys` at `vaddr` in the leaves
+    /// [`toyos_userbound::leaves`] chooses, each table filled before it is
+    /// linked. Empty PDE slots (asserted) mean nothing can be stale.
     pub fn map_range(
         &mut self,
         vaddr: UserAddr,
@@ -441,38 +476,40 @@ impl AddressSpace {
         prot: Prot,
         cache: CachePolicy,
     ) {
-        assert!(
-            vaddr.raw() & (PAGE_2M - 1) == 0,
-            "map_range: vaddr not 2MB-aligned"
-        );
-        assert!(
-            phys & (PAGE_2M - 1) == 0,
-            "map_range: phys {phys:#x} not 2MB-aligned"
-        );
-        let mut offset = 0u64;
-        while offset < size {
-            let va = vaddr.raw() + offset;
-            let pa = phys + offset;
-            let flags = prot.leaf_bits() | cache.pde_bits();
+        for leaf in toyos_userbound::leaves(vaddr.raw(), phys, size) {
+            let (va, entry) = match leaf {
+                Leaf::Block { va, pa } => (va, pa | prot.leaf_bits() | cache.pde_bits() | PAGE_SIZE_BIT),
+                Leaf::Pages { va, pa, count } => {
+                    let mut table = Box::new(PageTablePage([0; 512]));
+                    for i in 0..count as usize {
+                        table.init_entry(i, (pa + i as u64 * PAGE_4K) | prot.leaf_bits() | cache.pte_bits());
+                    }
+                    let table_phys = table.phys();
+                    self.children.push(table);
+                    // No `Prot` here: `NX` would make the whole window
+                    // non-executable whatever the leaves say.
+                    (va, table_phys | TABLE_FLAGS)
+                }
+            };
             let pd_idx = indices(va).2;
             let pd = self.ensure_table(va, TABLE_FLAGS);
-            pd.write_pde(pd_idx, va, pa | flags | PAGE_SIZE_BIT)
-                .expect_install("map_range");
-            offset += PAGE_2M;
+            pd.write_pde(pd_idx, va, entry).expect_install("map_range");
         }
     }
 
     /// Private: leaves a placed `mmap` invisible to the placement search
     /// unless paired with unregistering — [`free_and_unmap`](Self::free_and_unmap) does both.
-    fn unmap_range(&mut self, vaddr: UserAddr, size: u64) {
+    fn unmap_range(&mut self, vaddr: UserAddr, size: u64) -> Detached {
+        let mut detached = Detached(Vec::new());
         let mut offset = 0u64;
         while offset < size {
-            self.unmap(UserAddr::new(vaddr.raw() + offset));
+            detached.0.extend(self.unmap(UserAddr::new(vaddr.raw() + offset)));
             offset += PAGE_2M;
         }
+        detached
     }
 
-    /// Discharges only in this address space — a caller whose mapping may be live elsewhere (e.g. `sys_dlopen`) must shoot down itself.
+    /// Discharges only in this address space — a caller whose mapping may be live elsewhere must shoot down itself.
     pub fn remap(&mut self, vaddr: UserAddr, phys: u64, prot: Prot) {
         let va = vaddr.raw();
         assert!(
@@ -542,11 +579,16 @@ impl AddressSpace {
         true
     }
 
-    /// Runs on every present entry, including shared pages this space does
-    /// not own: unmapping ends any futex wait on the frame (its token is a
-    /// physical address) before the frame can reach the PMM and be reused
-    /// under a waiter's nose — a spurious wake is safe, a use-after-free isn't.
-    pub fn unmap(&mut self, vaddr: UserAddr) {
+    /// Runs on every present entry, shared or not: unmapping ends any futex
+    /// wait on the frame (its token is a physical address) before the frame
+    /// can reach the PMM and be reused under a waiter's nose — a spurious
+    /// wake is safe, a use-after-free isn't.
+    ///
+    /// A table of 4 KiB leaves it unlinks is answered rather than freed: a
+    /// sibling's paging-structure cache may still name it through the PDE
+    /// just cleared (SDM Vol. 3A §4.10.3), so it lives until the caller's
+    /// shootdown ([`Detached`]).
+    fn unmap(&mut self, vaddr: UserAddr) -> Option<Box<PageTablePage>> {
         let va = vaddr.raw();
         assert!(
             va & (PAGE_2M - 1) == 0,
@@ -555,29 +597,24 @@ impl AddressSpace {
 
         let (pml4_idx, pdpt_idx, pd_idx) = indices(va);
         let target = self.root();
-
-        if let Some(pdpt) = self.root.child_mut(pml4_idx) {
-            if let Some(pd) = pdpt.child_mut(pdpt_idx) {
-                let pde = pd[pd_idx];
-                if pde & PAGE_PRESENT != 0 {
-                    // A split window's PDE names a table; every entry in it
-                    // addresses the same 2 MiB frame, so entry 0 names it.
-                    let phys = if pde & PAGE_SIZE_BIT != 0 {
-                        pde & ADDR_MASK_2M
-                    } else {
-                        // SAFETY: PRESENT and not-2-MiB, so this names a
-                        // `map_window`-built table, dropped before `write_pde` touches the slot.
-                        let table = unsafe { PageTablePage::from_phys(pde & ADDR_MASK) };
-                        table[0] & ADDR_MASK_2M
-                    };
-                    // `write_pde`: a PDE naming a page table owes the context.
-                    pd.write_pde(pd_idx, va, 0).discharge(target);
-                    // Before the frame is freed, so waiters stay findable.
-                    crate::sched::futex::revoke_range(phys, PAGE_2M);
-                    self.pages.remove(&phys);
-                }
-            }
+        let pd = self.root.child_mut(pml4_idx).and_then(|pdpt| pdpt.child_mut(pdpt_idx))?;
+        let pde = pd[pd_idx];
+        if pde & PAGE_PRESENT == 0 {
+            return None;
         }
+        // `write_pde`: a PDE naming a page table owes the context.
+        pd.write_pde(pd_idx, va, 0).discharge(target);
+        if pde & PAGE_SIZE_BIT != 0 {
+            crate::sched::futex::revoke_range(pde & ADDR_MASK_2M, PAGE_2M);
+            return None;
+        }
+        let table_phys = pde & ADDR_MASK;
+        // SAFETY: PRESENT and not 2 MiB, so a table `map_range` or
+        // `map_window` built, still owned by `children` and linked nowhere now.
+        let table = unsafe { PageTablePage::from_phys(table_phys) };
+        crate::mm::revoke_frames(table.0.iter().filter(|leaf| *leaf & PAGE_PRESENT != 0).map(|leaf| leaf & ADDR_MASK));
+        let at = self.children.iter().position(|child| child.phys() == table_phys).expect("unmap: a linked table this space owns");
+        Some(self.children.swap_remove(at))
     }
 
     /// Checked here, not at the callers: a user space shallow-copies the
@@ -620,7 +657,7 @@ impl AddressSpace {
         }
         let rights = pml4e & pdpte & pde;
         if pde & PAGE_SIZE_BIT == 0 {
-            // A window `map_window` split, so the leaf is one level down.
+            // A table of 4 KiB leaves, so the leaf is one level down.
             let pt = pd.child(pd_idx)?;
             let pte = pt[((va >> 12) & 0x1FF) as usize];
             if pte & PAGE_PRESENT == 0 {
@@ -647,20 +684,16 @@ impl AddressSpace {
         prot: Prot,
         cache: CachePolicy,
     ) -> Option<(UserAddr, u64)> {
-        assert!(
-            phys & (PAGE_2M - 1) == 0,
-            "alloc_and_map: phys {phys:#x} not 2MB-aligned"
-        );
         let (addr, aligned) = self.regions.alloc_mapped(size)?;
-        self.map_range(addr, phys, aligned, prot, cache);
+        self.map_range(addr, phys, size.next_multiple_of(PAGE_4K), prot, cache);
         Some((addr, aligned))
     }
 
-    /// Free a previously allocated region and unmap it.
-    pub fn free_and_unmap(&mut self, addr: UserAddr) -> Option<u64> {
+    /// Free a previously allocated region and unmap it, answering the tables
+    /// its unmapping unlinked.
+    pub fn free_and_unmap(&mut self, addr: UserAddr) -> Option<Detached> {
         let size = self.regions.remove(addr)?;
-        self.unmap_range(addr, size);
-        Some(size)
+        Some(self.unmap_range(addr, size))
     }
 
     /// Insert a region at a specific address (for ELF segments, stack, etc.)
@@ -696,7 +729,7 @@ impl AddressSpace {
         let end = (phys + size + PAGE_2M - 1) & !(PAGE_2M - 1);
         let mut cur = start;
         while cur < end {
-            self.map_2m(cur, kernel_leaf(cache));
+            self.map_2m(cur, kernel_leaf(cache, Prot::ReadWrite));
             cur += PAGE_2M;
         }
         crate::mm::Mmio::new(crate::mm::DirectMap::from_phys(phys), size)
@@ -710,16 +743,9 @@ impl AddressSpace {
             return None;
         }
         if pde & PAGE_SIZE_BIT == 0 {
-            // A split table: leaves have cache bits clear (`Normal`),
-            // asserted since the two granularities put the PAT bit at different offsets.
             let pte = self.root.child(pml4_idx)?.child(pdpt_idx)?.child(pd_idx)?
                 [((virt >> 12) & 0x1FF) as usize];
-            assert!(
-                pte & (PAGE_CACHE_DISABLE | PAGE_WRITE_THROUGH | PAGE_SIZE_BIT) == 0,
-                "policy_at: the 4 KiB entry {pte:#x} at {virt:#x} selects a PAT entry \
-                 outside 0",
-            );
-            return Some(CachePolicy::Normal);
+            return (pte & PAGE_PRESENT != 0).then(|| CachePolicy::from_pte(pte));
         }
         Some(CachePolicy::from_pde(pde))
     }
@@ -769,7 +795,7 @@ impl AddressSpace {
             }
             let pt_phys = pt.phys();
             self.children.push(pt);
-            pd.write_pde(pd_idx, virt, pt_phys | PAGE_PRESENT | PAGE_WRITE).discharge(target);
+            pd.write_pde(pd_idx, virt, pt_phys | KERNEL_TABLE).discharge(target);
         }
 
         // SAFETY: `pd[pd_idx]` names a page table either way, permanently —
@@ -785,7 +811,7 @@ impl AddressSpace {
     fn map_2m(&mut self, phys: u64, flags: u64) {
         let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
         let pd_idx = indices(virt).2;
-        let pd = self.ensure_table(virt, flags);
+        let pd = self.ensure_table(virt, KERNEL_TABLE);
         let entry = phys | flags | PAGE_SIZE_BIT;
         let existing = pd[pd_idx];
         assert!(
@@ -798,6 +824,22 @@ impl AddressSpace {
         // Neither caller wants the single address: [`map_mmio`] flushes every
         // CPU (type may have changed under a sibling); `init` has no TLB yet.
         pd.write_pde(pd_idx, virt, entry).subsumed_by_flush();
+    }
+
+    /// The 2 MiB page of the direct map at `phys`, which holds more than one of
+    /// the image's protections, in 4 KiB leaves each as the image says. Only
+    /// `init` calls it, before any TLB holds these tables.
+    fn map_image_pages(&mut self, phys: u64, image: &crate::mm::Image) {
+        let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
+        let mut pt = Box::new(PageTablePage([0; 512]));
+        for i in 0..512 {
+            let page = phys + i as u64 * PAGE_4K;
+            pt.init_entry(i, page | kernel_leaf(CachePolicy::Normal, image.prot(page).unwrap_or(Prot::ReadWrite)));
+        }
+        let pt_phys = pt.phys();
+        self.children.push(pt);
+        let pd = self.ensure_table(virt, KERNEL_TABLE);
+        pd.write_pde(indices(virt).2, virt, pt_phys | KERNEL_TABLE).expect_install("map_image_pages");
     }
 
     /// Masks `flags` to `TABLE_FLAGS`: bit 12 is a leaf's PAT bit but an
@@ -847,6 +889,11 @@ impl AddressSpace {
     }
 }
 
+/// Tables of 4 KiB leaves an unmap unlinked, which a CPU's paging-structure
+/// cache may still walk: dropped only after a user-half shootdown.
+#[must_use = "freed before the shootdown, a sibling CPU may still walk these tables"]
+pub struct Detached(Vec<Box<PageTablePage>>);
+
 /// `Arc<Lock<AddressSpace>>`, not `Lock<Option<_>>`: a kernel thread names it
 /// as `KernelPayload.address_space` with no second answer. Leaked, since the
 /// kernel address space outlives every task by construction.
@@ -893,8 +940,7 @@ pub fn load_kernel_flush() {
 /// (`arch::acpi_mode`), who is refused every page one lies in. Its only writer
 /// is the only maker of such a window. One entry a distinct window and none
 /// removed: a boot's drivers map theirs once, and past boot only `pcidev`
-/// maps, a BAR where firmware put it and at each address it tries it at, and
-/// one it has placed it does not try again.
+/// maps, a claimed function's MSI-X entry where firmware put its table.
 static DRIVEN: Lock<Vec<(u64, u64)>> = Lock::new(Vec::new());
 
 /// Run `f` over every window this kernel mapped to drive a device.
@@ -969,7 +1015,7 @@ pub fn debug_global_leaf(how: u64) -> u64 {
         unsafe { core::ptr::write_volatile(at.as_mut_ptr::<u64>(), at.phys()) };
     }
     let (old_phys, new_phys) = (old.direct_map().phys(), new.direct_map().phys());
-    let leaf = kernel_leaf(CachePolicy::Normal) | PAGE_SIZE_BIT;
+    let leaf = kernel_leaf(CachePolicy::Normal, Prot::ReadWrite) | PAGE_SIZE_BIT;
     // SAFETY: every read below is made while `SCRATCH` maps one of the two
     // frames this call owns, or a translation of one of them.
     let read = || unsafe { core::ptr::read_volatile(SCRATCH as *const u64) };
@@ -978,7 +1024,7 @@ pub fn debug_global_leaf(how: u64) -> u64 {
         let mut space = kernel().lock();
         let _closed = crate::arch::IrqGuard::close();
         let target = space.root();
-        let pd = space.ensure_table(SCRATCH, leaf);
+        let pd = space.ensure_table(SCRATCH, KERNEL_TABLE);
         let idx = indices(SCRATCH).2;
         if pd[idx] & PAGE_PRESENT != 0 {
             return SyscallError::AlreadyExists.to_u64();
@@ -1019,11 +1065,16 @@ pub fn debug_global_leaf(how: u64) -> u64 {
     }
 }
 
-/// Build kernel page tables: the direct map in the high half, in 2 MiB pages,
-/// as far as [`toyos_bootmap::x86_64::direct_map_end`] reaches, and answer
-/// that end. The scanout is not mapped for itself: in the low map the MTRRs
-/// type it until `panic_console::remap` gives it a type of its own.
-pub(crate) fn init(memory_map: &[MemoryMapEntry], _scanout: Option<(u64, u64)>) -> toyos_bootmap::DirectMapEnd {
+/// Build kernel page tables: the direct map in the high half, in 2 MiB pages
+/// but where one holds more than one of `image`'s protections, as far as
+/// [`toyos_bootmap::x86_64::direct_map_end`] reaches, and answer that end. The
+/// scanout is not mapped for itself: in the low map the MTRRs type it until
+/// `panic_console::remap` gives it a type of its own.
+pub(crate) fn init(
+    memory_map: &[MemoryMapEntry],
+    _scanout: Option<(u64, u64)>,
+    image: &crate::mm::Image,
+) -> toyos_bootmap::DirectMapEnd {
     let extent = toyos_bootmap::x86_64::direct_map_end(memory_map)
         .unwrap_or_else(|refusal| panic!("paging: firmware's memory map: {refusal}"));
     let end = extent.get();
@@ -1031,7 +1082,6 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry], _scanout: Option<(u64, u64)>) 
     let mut kernel = AddressSpace {
         root: Box::new(PageTablePage([0; 512])),
         children: Vec::new(),
-        pages: HashMap::default(),
         regions: vma::Regions::default(),
         pcid: PcidHandle::Kernel,
     };
@@ -1043,7 +1093,10 @@ pub(crate) fn init(memory_map: &[MemoryMapEntry], _scanout: Option<(u64, u64)>) 
     }
     let mut addr: u64 = 0;
     while addr < end {
-        kernel.map_2m(addr, kernel_leaf(CachePolicy::Normal));
+        match image.block(addr) {
+            Some(prot) => kernel.map_2m(addr, kernel_leaf(CachePolicy::Normal, prot)),
+            None => kernel.map_image_pages(addr, image),
+        }
         addr += PAGE_2M;
     }
     crate::log!("paging: the direct map covers 0x0..{end:#x}");
@@ -1077,6 +1130,40 @@ pub(crate) fn seal_kernel_half() {
             kernel.install_root(slot);
         }
     }
+}
+
+/// [`kernel::wx::audit`] of the kernel's tables, whose kernel half every
+/// address space shares.
+pub fn audit_wx(text: core::ops::Range<u64>) -> kernel::wx::Verdict {
+    let space = kernel().lock();
+    // SAFETY: every table the kernel's root names is one this module linked,
+    // and the lock held keeps them in place while they are read.
+    let table = |phys: u64| unsafe { &PageTablePage::from_phys(phys).0 };
+    kernel::wx::audit::<kernel::wx::X86_64>(&space.root.0, text, &table)
+}
+
+/// `kernel-wx-leaf`: the direct map's leaf over `phys` made executable, so
+/// [`audit_wx`] has a writable executable leaf to find. Answers its address.
+#[cfg(feature = "boot-actuators")]
+pub fn stage_writable_executable(phys: u64) -> u64 {
+    let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
+    let mut space = kernel().lock();
+    let target = space.root();
+    let pd = space.ensure_table(virt, KERNEL_TABLE);
+    let i = indices(virt).2;
+    let pde = pd[i];
+    assert!(pde & PAGE_PRESENT != 0, "kernel-wx-leaf: {phys:#x} is not in the direct map");
+    let (table, slot, at) = if pde & PAGE_SIZE_BIT != 0 {
+        (pd, i, virt & !(PAGE_2M - 1))
+    } else {
+        // SAFETY: a present PDE without the size bit names a table this
+        // module linked; the kernel's lock gives the exclusivity.
+        (unsafe { PageTablePage::from_phys_mut(pde & ADDR_MASK) }, ((virt >> 12) & 0x1FF) as usize, virt & !(PAGE_4K - 1))
+    };
+    let leaf = table[slot];
+    assert!(leaf & PAGE_PRESENT != 0 && leaf & PAGE_WRITE != 0, "kernel-wx-leaf: {phys:#x} is not under a writable leaf");
+    table.write(slot, at, leaf & !PAGE_NX).discharge(target);
+    at
 }
 
 fn has(entry: u64, flag: u64) -> u8 {
@@ -1264,7 +1351,7 @@ pub fn debug_page_walk(addr: u64) {
     }
 
     // SAFETY: PRESENT checked and the 2 MiB branch already returned, so
-    // this is a table `map_window`/`guard_4k` built; same reasoning as above.
+    // this is a table of 4 KiB leaves this file built; same reasoning as above.
     let pt = unsafe { PageTablePage::from_phys(pde & ADDR_MASK) };
     let pte = pt[pt_idx];
     log!(

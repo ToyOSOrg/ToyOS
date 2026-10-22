@@ -1,8 +1,13 @@
-# The ACPI server's death, judged on the T14 by `acpi_server_death`: the server
-# is built into the image and started by nothing but the one job, which holds
-# the claim it hands it. A boot that ends itself, as `tests/images/jobcase.toml` does.
+# The `acpi` claim's own holders: jobs that claim it, starting with the first,
+# on a boot the ACPI server is built into and started by nothing but a job
+# (`acpi_mediated_access`, and on the T14 `acpi_server_death`). A boot that ends
+# itself, as `tests/images/jobcase.toml` does. No row holds the claim, so none
+# declares the root bridges' memory before the supervisor's own claims, and
+# nothing here claims a PCI function: the boot has no storage, and the T14's
+# log has no way to its stick
+# (`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`).
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["logkeeper", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -28,20 +33,3 @@ args = ["test_rs_acpi_mediated", "reboot"]
 
 [symlinks]
 "bin/reboot" = "/system/bin/toybox"
-
-# The block service: the NVMe controller this machine's DATA is on, driven
-# from userland through its claim. Started again when it ends; the claim goes
-# back with the process and is minted again for the next.
-[programs.diskserver]
-service = true
-restart = true
-serves = ["block"]
-devices = ["pci:01:08:02/1b36:0010"]
-
-# The file servers: DATA, the log and the running slot's volume, one process
-# each, serving every program the directories of its role. Started again when
-# one ends, on the same ports.
-[programs.fileserver]
-restart = true
-roles = ["data", "log", "boot"]
-receives = ["block"]

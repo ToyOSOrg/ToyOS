@@ -19,7 +19,7 @@ use crate::log;
 use alloc::vec::Vec;
 
 use crate::iommu::domains::{self, Domains};
-use crate::iommu::{AddressWidth, DomainId, IommuError, Iova, StreamId};
+use crate::iommu::{AddressWidth, DomainId, IommuError, Iova, Limit, StreamId};
 use crate::sync::Lock;
 
 use super::table::{self, Space};
@@ -44,7 +44,7 @@ static DOMAINS: Lock<Vtd> =
     Lock::new(Vtd { agreement: Agreement::None, domains: Domains::new(table::KERNEL_DOMAIN + 1) });
 
 /// Before any domain is made: every one is built clear of these.
-pub fn avoid(reserved: Option<Vec<(u64, u64)>>) {
+pub fn avoid(reserved: Vec<(u64, u64)>) {
     DOMAINS.lock().domains.avoid(reserved);
 }
 
@@ -59,24 +59,25 @@ pub fn unit_agrees(width: AddressWidth, ceiling: u32, mgaw: u8) {
     };
 }
 
-/// A new domain, with `room` bytes of it handed out first: refused, with no id
-/// spent, where the domain would have less than that.
-pub fn create(room: u64) -> Result<(DomainId, Iova), IommuError> {
+/// A new domain, with `room` bytes of it handed out first, clear of the root
+/// bridges' declared `windows`, `None` where none are held: refused, with no
+/// id spent, where it would have less than that.
+pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) -> Result<(DomainId, Iova), IommuError> {
     let mut held = DOMAINS.lock();
     let (width, ceiling, mgaw) = match held.agreement {
         Agreement::None => return Err(IommuError::NoUnit),
         Agreement::Split => return Err(IommuError::WidthsDisagree),
         Agreement::One(width, ceiling, mgaw) => (width, ceiling, mgaw),
     };
-    let next = held.domains.prepare(table::translatable_bits(width, mgaw), ceiling, room)?;
+    let next = held.domains.prepare(table::translatable_bits(width, mgaw), ceiling, room, windows)?;
     let space = Space { root: TABLES.lock().alloc(), width };
     let what = alloc::format!("root={:#x} aw={} mgaw={mgaw}", space.root.phys(), width.bits());
     Ok(held.domains.add(next, space, what))
 }
 
-pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
+pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {
     let mut held = DOMAINS.lock();
-    let (space, at) = held.domains.map(id, phys, bytes)?;
+    let (space, at) = held.domains.map(id, phys, bytes, limit)?;
     put(id, space, at, phys, bytes);
     Ok(at)
 }

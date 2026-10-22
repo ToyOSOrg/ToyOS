@@ -50,6 +50,7 @@ extern crate alloc;
 use loom::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use loom::sync::Arc;
 use kernel_loom::sched::cpu::{CpuHandle, CpuHandles};
+use kernel_loom::sched::topology::Topology;
 use kernel_loom::sched::hw::CpuId;
 use kernel_loom::sched::mailbox::{mailbox, MailboxConsumer};
 use kernel_loom::sched_model::{
@@ -163,7 +164,7 @@ fn world() -> (Arc<World>, MailboxConsumer<Msg>) {
     (
         Arc::new(World {
             watch: Watch::new(watch_list()),
-            cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)]),
+            cpus: CpuHandles::new(vec![CpuHandle::new(CPU0, tx)], Topology::flat(1)),
             kicks: Kicks::new(),
             preempt: PreemptModel::new(),
         }),
@@ -779,7 +780,7 @@ fn poll_ring<const CPUS: usize>(cpus: [CpuId; CPUS]) -> (RingRef, [MailboxConsum
         })
         .unzip();
     let ring = RingRef(Arc::new(PollRing {
-        cpus: CpuHandles::new(handles),
+        cpus: { let count = handles.len() as u32; CpuHandles::new(handles, Topology::flat(count)) },
         kicks: Kicks::new(),
         polls: LoomLock::new(polls::Polls::new()),
         answers: LoomLock::new(0),

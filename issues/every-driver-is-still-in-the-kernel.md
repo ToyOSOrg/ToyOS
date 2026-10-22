@@ -8,12 +8,13 @@ opened: 2026-08-02
 
 The owner's target is that `virtio` does not appear anywhere in the kernel. The
 strongest check on it is not the driver files but the ABI: no syscall name may
-carry a NIC, GPU or audio device operation. `rg '^pub const SYS_(NIC|GPU|AUDIO)_'
+carry a NIC, GPU or audio device operation. `rg '^pub const SYS_(NIC|GPU|AUDIO|HDA)_'
 sdk/abi/src/syscall.rs` is the check, and it finds none: the three `SYS_NIC_*`
 names went with the virtio NIC driver, which is `system/netstack/src/virtio_net.rs`
-now, and the four `SYS_GPU_*` names with virtio-gpu's, which is the
-compositor's (`system/compositor/virtio-gpu`). The kernel's virtio code left is
-its console's.
+now, the four `SYS_GPU_*` names with virtio-gpu's, which is the
+compositor's (`system/compositor/virtio-gpu`), and `SYS_HDA_BIND` with the
+kernel's HDA stub. The kernel's virtio code left is its console's, and it
+drives no audio hardware.
 
 **Ordering ruling, and it is not negotiable: the IOMMU lands first and
 completely, interrupt remapping included, and no driver leaves the kernel before
@@ -31,15 +32,18 @@ is not built.
 
 What is left of the staged work:
 
-1. **HDA, re-scoped.** `drivers/hda.rs` brings its device up and gates
-   soundserver's register access. It leaves when soundserver claims the
-   function as `pci`, as it does its virtio-sound function, retiring the
-   `hda-audio` class and its arms of `SYS_DEVICE_REG_READ`/`WRITE`. HDA
-   leaving feeds soundserver's DLL from a claim's record on every machine, so
-   that diff lands
-   `issues/soundservers-virtio-clock-can-take-a-period-one-notification-early.md`'s
-   exit. GOP stays: it is memory the loader hands over, and the panic console
-   paints it.
+1. Done for HDA: an `hda` process per function of `pci:04:03:*` (a
+   `drives` row, `system/hda`) drives it whole — controller reset, CORB/RIRB,
+   the stream and its descriptor list, the ring soundserver lends it, its
+   interrupt as the claim's record — and offers soundserver its output
+   (`issues/a-device-function-is-driven-from-its-arrival-to-its-end.md`'s
+   stage 3). The `hda-audio` class,
+   `SYS_HDA_BIND`, `SYS_DEVICE_REG_WRITE` and the kernel's HDA vector are
+   gone; `SYS_DEVICE_REG_READ` reads a PCI claim's config space alone. Every
+   machine's DLL is clocked by a claim's record, and a period read before its
+   record's message landed waits for the next record's time (`Dll::update`'s
+   `clocked`). GOP stays: it is memory the loader hands over, and the panic
+   console paints it.
    A virtio holder stands on `toyos-virtio`, which walks the capability list
    too. Before a client ends its device on `UsedRefusal::Written` for a chain
    the device only reads, whose bound is 0, what QEMU's device reports as
@@ -56,29 +60,27 @@ What is left of the staged work:
    accepted wherever offered, and a device that drops `FEATURES_OK`
    refused. `Profile::HeadlessVirtioGpu` stays, the suite's one machine whose
    display a process drives.
-2. Done: **BAR sizing and re-assignment onto 2 MiB boundaries** is
-   `pcidev::place_bar`, with the overlap refusal kept as the assertion that it
-   worked rather than as the mechanism.
+2. Done: **BAR sizing, and each BAR handed over in place in its own 4 KiB
+   pages**, is `pcidev::publish` and `pcidev::bars`.
 3. Done: **the capability itself** is `DeviceType::PciFunction` plus
    `SYS_DEVICE_BAR_MAP` and `SYS_DEVICE_DMA_ALLOC`, with config space readable
    and unwritable and the interrupt delivered as a record on the claim.
 4. **The i8042 (PS/2)**: staged as stage 7 of
    `issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`.
 
-- **USB HID cannot move to userspace without moving the boot block device or
-  splitting the controller.** It shares the controller, the event ring and the
-  lock with the boot disk.
+- **USB HID moved with the boot disk**: usbd drives each xHCI controller
+  whole, its sticks and its HID devices alike (the small-kernel track's step
+  10).
 - **Where each xHCI keeps its MSI-X table**, which decides whether usbd's
   claim arms MSI-X or MSI (`bring_up`, `kernel/src/pcidev/mod.rs`). QEMU
   11.1's `nec-usb-xhci` arms MSI-X and publishes one memory BAR, BAR 0, so
   its table is there, and a claim hands that BAR over with the rest where
-  the machine remaps; the device's `msix=off` leaves it on MSI, as
-  `msix-exclusive-bar=on` moves NVMe's table for blockd. The T14's two xHCI functions each publish
+  the machine remaps; the device's `msix=off` leaves it on MSI. The T14's two xHCI functions each publish
   only BAR 0 and armed MSI in the kernel's own bring-up, with no `MSI-X not
   armed` line and one remapping entry each (a `testcases` readback): no MSI-X
   capability came off either walk, so a claim arms MSI and hands BAR 0 over —
-  if the walk reached the list's terminator. Whether it did is not read:
-  `drivers/xhci/wait/boot.rs`'s `arm_interrupt` falls back to MSI on
+  if the walk reached the list's terminator. Whether it did is not read: the
+  kernel's own xHCI bring-up, which went with step 10, fell back to MSI on
   `NoCapability::Absent` and `Truncated` alike, and the second refuses the
   claim as `CapsTruncated`. One T14 boot printing which, or the PCI inventory
   printing each function's capability ids and how its walk ended, closes it.

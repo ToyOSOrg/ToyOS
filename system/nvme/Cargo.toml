@@ -1,0 +1,16 @@
+[package]
+name = "nvme"
+description = "One NVMe controller driven from userland, its namespace offered to the block service as a disk whose sessions it serves itself."
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+toyos-abi = { path = "../../sdk/abi" }
+toyos = { path = "../../sdk/toyos" }
+toyos-blockring = { path = "../../lib/blockring" }
+toyos-blockserve = { path = "../../lib/blockserve" }
+toyos-gpt = { path = "../../lib/gpt" }
+toyos-quiesce = { path = "../../lib/quiesce" }
+
+[package.metadata.toyos.host]
+exempt.owns = "the NVMe controller ToyOS claims for it"

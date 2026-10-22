@@ -54,12 +54,24 @@ fn is_soundserver_stats(text: &str, at: usize) -> bool {
     text[line_start..at].contains("soundserver: wakes=")
 }
 
-/// The tone client played to its end through the HDA controller soundserver drives
-/// itself, soundserver never fell back to the null sink, and no period of it went
-/// unfilled.
+/// soundserver played to an output driver's device before `job` ran, so the
+/// job's stream did not play to the null sink.
+fn on_an_output(log: &str, job: &str) -> Result<(), String> {
+    let playing = log
+        .find(PLAYING)
+        .ok_or_else(|| format!("soundserver never said `{PLAYING}`: no output was offered, and it stayed the null sink"))?;
+    let head = format!("spawn: /system/bin/{job} ");
+    let spawned = log.find(&head).ok_or_else(|| format!("no `{head}` record: {job} never ran"))?;
+    if playing > spawned {
+        return Err(format!("soundserver played to an output only after {job} spawned, so its stream played to the null sink"));
+    }
+    Ok(())
+}
+
+/// The tone client played to its end through the HDA controller an `hda`
+/// driver drives, played to before it ran, and no period of it went unfilled.
 pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
-    log.must_say("soundserver: hda path configured in")?;
-    log.must_not_say(NULL_SINK)?;
+    on_an_output(log.text(), "test_rs_audio_tone")?;
     let window = job_window(log.text(), "test_rs_audio_tone")?;
     let underruns = sum_field(window, "underruns");
     if underruns != 0 {
@@ -71,11 +83,36 @@ pub fn tone_on_metal(log: &Serial) -> Result<(), String> {
     Ok(())
 }
 
+/// The job that plays `hda_tone`'s tone while it writes the stick.
+pub const TONE_BESIDE_STICK_WRITE: &str = "test_rs_tone_beside_stick_write";
+
+/// That job's tone played to its end through the HDA controller with no
+/// period left to soundserver, while at least a mebibyte of its lines reached
+/// the stick: counted in the file read back off it, not in what the job says.
+pub fn tone_beside_a_stick_write(log: &Serial) -> Result<(), String> {
+    on_an_output(log.text(), TONE_BESIDE_STICK_WRITE)?;
+    let window = job_window(log.text(), TONE_BESIDE_STICK_WRITE)?;
+    let reached = super::metal::bytes_of_lines(window, "tone_beside_stick_write: line ");
+    if reached < 1 << 20 {
+        return Err(format!("{reached} bytes of the job's lines reached the stick beside the tone, under a mebibyte"));
+    }
+    let wrote = format!("{} KiB of lines reached the stick beside the tone", reached >> 10);
+    let underruns = sum_field(window, "underruns");
+    if underruns != 0 {
+        return Err(format!(
+            "soundserver filled {underruns} period(s) the tone client had not covered, beside a stick \
+             write ({}):\n{window}",
+            wrote.trim()
+        ));
+    }
+    eprintln!("  [audio] {}", wrote.trim());
+    Ok(())
+}
+
 /// The resampled tone client played to its end through the HDA controller, at
 /// a rate the device does not run, and no period of it went unfilled.
 pub fn resampled_tone_on_metal(log: &Serial) -> Result<(), String> {
-    log.must_say("soundserver: hda path configured in")?;
-    log.must_not_say(NULL_SINK)?;
+    on_an_output(log.text(), "test_rs_audio_tone_resampled")?;
     let device = rate_after(log.text(), "soundserver: ready, ")
         .ok_or("soundserver never said the rate it runs the device at")?;
     let window = job_window(log.text(), "test_rs_audio_tone_resampled")?;
@@ -105,8 +142,8 @@ fn rate_after(text: &str, marker: &str) -> Option<u32> {
     digits.parse().ok()
 }
 
-/// soundserver's own word for the sink it took when the machine has none.
-pub const NULL_SINK: &str = "soundserver: no audio device, presenting a null sink";
+/// soundserver's word for beginning to play to an output driver's device.
+pub const PLAYING: &str = "soundserver: playing to the output offered";
 
 /// Sum one `soundserver:` counter across every stats window.
 fn sum_field(serial: &str, key: &str) -> u32 {

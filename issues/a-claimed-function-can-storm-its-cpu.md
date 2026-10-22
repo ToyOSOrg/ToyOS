@@ -14,9 +14,10 @@ the ITS (`kernel/src/arch/aarch64/irqchip/its.rs`) — and `pcidev::isr`
 holder programs the device through the BARs it maps, so a hostile or broken
 holder can make the device send messages as fast as the bus carries
 them, and each one is an interrupt cpu0 takes before anything else it runs.
-`issues/an-xhci-storm-starves-the-cpu-that-takes-it.md` measured what
-that does to a CPU for a kernel driver's source; a claim is the same source
-with its holder outside the kernel.
+The kernel's own xHCI measured what that does to a CPU for a kernel
+driver's source, ten timer interrupts in thirty-four seconds on T14 run 20,
+before that driver left the kernel; a claim is the same source with its
+holder outside the kernel, which every xHCI controller now is.
 
 The lever is the claim's own translation: on x86-64 its remapping entry, which
 made not present stops the function's messages at the unit; on AArch64 its

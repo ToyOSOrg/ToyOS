@@ -40,6 +40,17 @@ pub enum Missing {
     Unresolved(Unresolved),
     /// The kernel refused the claim.
     Refused(SyscallError),
+    /// A virtio function that offers no `VIRTIO_F_ACCESS_PLATFORM` uses
+    /// physical addresses whatever translates the bus (virtio 1.2 §6.1), so
+    /// no domain confines what it reaches; or one whose offer could not be
+    /// read, which is the same unknown.
+    Untranslated(Option<String>),
+}
+
+/// Virtio 1.2 §4.1.2: a virtio function's vendor and device ids, transitional
+/// and modern.
+pub fn is_virtio(pci: &Pci) -> bool {
+    pci.vendor == 0x1af4 && (0x1000..=0x107f).contains(&pci.device)
 }
 
 /// Whether a start goes on without `entry`'s claim. A matcher naming several
@@ -74,6 +85,17 @@ mod tests {
     }
 
     #[test]
+    fn a_virtio_function_is_known_by_its_ids_and_an_untranslated_one_is_gone_without() {
+        let virtio = |device| Pci { vendor: 0x1af4, device, ..edu(1, 3, Driven::Free) };
+        assert!(is_virtio(&virtio(0x1000)) && is_virtio(&virtio(0x1041)) && is_virtio(&virtio(0x107f)));
+        assert!(!is_virtio(&virtio(0x1080)) && !is_virtio(&virtio(0x0fff)));
+        assert!(!is_virtio(&edu(1, 3, Driven::Free)));
+        let refused = Missing::Untranslated(None);
+        assert!(goes_on_without("pci:02:00:00", &refused, &[]));
+        assert!(!goes_on_without("pci:02:00:00", &refused, &["pci:02:00:00".to_string()]));
+    }
+
+    #[test]
     fn a_matcher_names_the_one_function_the_kernel_does_not_drive() {
         assert_eq!(function(&EDU, &[edu(3, 3, Driven::Kernel), edu(4, 4, Driven::Free)]), Ok(Arrival(4)));
         // One another process holds is still the function named, and its
@@ -102,7 +124,7 @@ mod tests {
         for missing in [Missing::Unresolved(Unresolved::Absent), Missing::Refused(SyscallError::AlreadyExists)] {
             assert!(goes_on_without(entry, &missing, &[]), "{missing:?}");
             assert!(!goes_on_without(entry, &missing, &owed), "{missing:?}");
-            assert!(goes_on_without("keyboard", &missing, &owed), "{missing:?}");
+            assert!(goes_on_without("acpi", &missing, &owed), "{missing:?}");
         }
     }
 }

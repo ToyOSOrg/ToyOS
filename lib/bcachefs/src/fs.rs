@@ -607,6 +607,12 @@ impl<IO: BlockIO> Mounted<IO, ReadWrite> {
         fs.alloc.count_free(&fs.io)?;
         Ok(fs)
     }
+
+    /// The bytes a change may still take: every free block but those
+    /// [`crate::alloc_bitmap::NODE_RESERVE`] keeps for a delete.
+    pub fn free_bytes(&self) -> u64 {
+        self.alloc.spare() * BLOCK_SIZE as u64
+    }
 }
 
 impl<IO: BlockIO, Mode> Mounted<IO, Mode> {

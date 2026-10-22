@@ -1,0 +1,23 @@
+# A member of the host workspace (root `Cargo.toml`): usbd depends on it by
+# path, and its tests drive it against `src/stub/` on the host.
+
+[package]
+name = "toyos-xhci"
+description = "Every decision usbd makes about one xHCI controller and the devices on it, against the device-memory boundary, and none of the instructions that carry them out."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+toyos-device-memory = { path = "../../../lib/device-memory" }
+# The command a Bulk-Only wrapper carries, and what its answers mean.
+toyos-scsi = { path = "../../../lib/scsi" }
+# HID report descriptors and reports, and the owner of input's records.
+toyos-usbhid = { path = "../../../lib/usbhid" }
+toyos-input = { path = "../../../lib/input" }
+toyos-abi = { path = "../../../sdk/abi" }
+# A disk's partition table, read by the caller's reader over this crate's
+# sectors; a session request's most blocks.
+toyos-gpt = { path = "../../../lib/gpt" }
+toyos-blockring = { path = "../../../lib/blockring" }

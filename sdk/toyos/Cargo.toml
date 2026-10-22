@@ -3,11 +3,14 @@ name = "toyos"
 version = "0.18.0" # never bumped; crates.io's is assigned on publish (build/sdkversion.rs)
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "The ToyOS userland SDK: typed handles, IPC, ports, namespaces, surfaces and net."
+description = "The ToyOS userland SDK: typed handles, IPC, ports, namespaces, surfaces, net and the transport its sessions run over."
 repository = "https://github.com/ToyOSOrg/ToyOS"
 
 [features]
-rustc-dep-of-std = ["core", "toyos-abi/rustc-dep-of-std", "toyos-transport/rustc-dep-of-std"]
+rustc-dep-of-std = ["core", "alloc", "toyos-abi/rustc-dep-of-std", "fd-table"]
+# This copy owns the process's descriptor table (`src/fd.rs`): on in std's
+# build and in libc's C-only build, and in no other.
+fd-table = []
 # The negative control for the log ring's publication. It makes the store that
 # publishes a record `Relaxed`, and `kernel-loom`'s `log_ring` model must red:
 #
@@ -21,6 +24,49 @@ log-ring-publish-relaxed = []
 # swapped.
 log-ring-tail-relaxed = []
 log-ring-loads-swapped = []
+# The transport's controls (`src/transport`), declared, never enabled by any
+# build that ships: each reverts one decision so the model that refuses it is
+# shown able to red at all. `build/ci.rs`'s `CONTROLS` runs each and demands
+# the named test's own FAILED line; `tests/transport_loom.rs` holds the
+# publication edge, the wake handshake, a hostile peer and a session's three
+# waits.
+#
+# A producer publishes its tail `Relaxed`, so a consumer can see the index
+# before the entry's words, or a stream's tail before its bytes.
+transport-publish-relaxed = []
+# A stream's consumer stores its head `Relaxed` and its producer loads it
+# `Relaxed`, so the producer can copy into a byte the consumer is still
+# copying out.
+transport-head-relaxed = []
+# A peer's cursor is believed however far it claims to be, so a hostile
+# producer hands the consumer more entries, or bytes, than the ring holds.
+transport-no-clamp = []
+# A stream's waker clears the peer's want `Relaxed`, so a sleeper whose
+# exchange reads the clear need not see the cursor stored before it, and
+# sleeps over bytes or room nobody rings for.
+transport-want-relaxed = []
+# `Inflight::end` answers nothing and keeps every tag in flight, so a session's
+# requests outlive it unanswered and a late completion answers one.
+transport-end-keeps-inflight = []
+# A session's server rings a writer waiting for room on the connection, the
+# doorbell a reader waits on, so either can take the other's wake.
+transport-one-doorbell = []
+# A thread that took a direction's doorbell leaves it with another waiter
+# counted and passes nothing on, so that waiter sleeps over what the take
+# announced.
+transport-no-pass-on = []
+# A registration looks without arming, so a direction that becomes ready after
+# its look rings nobody.
+transport-register-no-arm = []
+# A registration arms and looks but rings nobody for a direction it found
+# ready, so its first event never comes.
+transport-register-no-ring = []
+# Both of the two above.
+transport-register-neither = ["transport-register-no-arm", "transport-register-no-ring"]
+# A look that arms the send direction, and the server's ring back of it, read
+# only the room and not a failure, so a writer over a full ring sleeps through
+# a reset.
+transport-head-only = []
 
 [lints.rust]
 # The guest's target: its stream sinks are compiled only for it.
@@ -28,5 +74,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("toyos")
 
 [dependencies]
 core = { version = "1.0.0", optional = true, package = "rustc-std-workspace-core" }
+alloc = { version = "1.0.0", optional = true, package = "rustc-std-workspace-alloc" }
 toyos-abi = { path = "../abi", default-features = false }
-toyos-transport = { path = "../../lib/blockring/transport" }
+
+[dev-dependencies]
+loom = "0.7"

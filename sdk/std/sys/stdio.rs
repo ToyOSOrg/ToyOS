@@ -1,13 +1,13 @@
 use core::sync::atomic::{AtomicBool, Ordering};
 
 use toyos::log::stdio::{self as log_stdio, Stream};
-use toyos_abi::RawHandle;
 use toyos_abi::syscall::{self, FileType};
 
 use crate::io::{self, IoSlice, IoSliceMut};
-use crate::sys::to_io_error;
+use crate::sys::{files_error, on_fd};
 
-const STDIN: RawHandle = RawHandle(0);
+/// Standard input's descriptor.
+const STDIN: i32 = 0;
 
 // ---------------------------------------------------------------------------
 // Stdin mode flag (canonical by default, raw when explicitly switched)
@@ -35,9 +35,18 @@ struct LineBuf {
 // is single-threaded, so there is no concurrent access.
 static mut LINE_BUF: LineBuf = LineBuf { buf: [0; LINE_BUF_CAP], len: 0, pos: 0 };
 
+/// A read of stdin, whoever serves it, closed or not: a closed one is at its
+/// end, as std's on unix reads one.
+fn read_stdin(buf: &mut [u8]) -> io::Result<usize> {
+    match toyos::files::read(STDIN, buf) {
+        Err(toyos::files::Error::Fd(toyos::fd::Error::BadFd)) => Ok(0),
+        read => read.map_err(files_error),
+    }
+}
+
 fn read_one() -> io::Result<u8> {
     let mut byte = [0u8; 1];
-    let n = syscall::read(STDIN, &mut byte).map_err(to_io_error)?;
+    let n = read_stdin(&mut byte)?;
     if n == 0 { Err(io::Error::new(io::ErrorKind::UnexpectedEof, "eof")) } else { Ok(byte[0]) }
 }
 
@@ -127,11 +136,10 @@ impl Stdin {
 
 impl io::Read for Stdin {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let stat = syscall::fstat(STDIN).ok();
-        let interactive =
-            stat.is_some_and(|s| s.file_type == FileType::Keyboard || s.file_type == FileType::Tty);
+        let stat = on_fd(STDIN, syscall::fstat).ok();
+        let interactive = stat.is_some_and(|s| s.file_type == FileType::Tty);
         if STDIN_RAW.load(Ordering::Relaxed) || !interactive {
-            syscall::read(STDIN, buf).map_err(to_io_error)
+            read_stdin(buf)
         } else {
             canonical_read(buf)
         }
@@ -158,7 +166,7 @@ impl Stdout {
 
 impl io::Write for Stdout {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        log_stdio::write(Stream::Out, buf).map_err(to_io_error)
+        log_stdio::write(Stream::Out, buf).map_err(files_error)
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -187,7 +195,7 @@ impl Stderr {
 
 impl io::Write for Stderr {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        log_stdio::write(Stream::Err, buf).map_err(to_io_error)
+        log_stdio::write(Stream::Err, buf).map_err(files_error)
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
@@ -210,8 +218,11 @@ impl io::Write for Stderr {
 
 pub const STDIN_BUF_SIZE: usize = 64;
 
+/// No error means a stdio stream is closed: a closed stdin reads its end and
+/// a closed stdout or stderr drops its bytes without one, and every error an
+/// open stream answers is the caller's to see.
 pub fn is_ebadf(_err: &io::Error) -> bool {
-    true
+    false
 }
 
 pub fn panic_output() -> Option<Stderr> {

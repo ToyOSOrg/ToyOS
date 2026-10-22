@@ -24,15 +24,6 @@ pub const MAX_RECORD_MESSAGE: usize = 992;
 /// indexes by shift and the kernel never does length arithmetic.
 pub const RECORD_BYTES: usize = 1024;
 
-/// Shards a cursor can name, which is the machine's CPU count.
-///
-/// Not read from `sched::MAX_CPUS`: this is an ABI struct's width, so it is
-/// fixed by the ABI and the kernel is what must agree with it. A machine with
-/// more CPUs than this is a kernel that cannot answer
-/// [`SYS_LOG_READ`](crate::syscall::SYS_LOG_READ) at all, which is a build-time
-/// disagreement rather than a runtime one.
-pub const MAX_LOG_SHARDS: usize = 8;
-
 /// How much a record matters, in order: a reader may keep what is at or above
 /// a floor, and one that treats a severity specially compares against it.
 ///
@@ -87,7 +78,7 @@ crate::user_safe! {
     pub struct LogRecord {
         /// The record's identity. In the kernel's slot this same word is also the
         /// validity word; by the time a reader holds a copy it is just the sequence
-        /// number, and it is what [`LogCursor::next`] counts in.
+        /// number, and it is what a cursor's positions ([`CursorHead`]) count in.
         pub seq: u64,
         /// Nanoseconds since the counter's zero: [`crate::clock::stamp_ns`]'s reading.
         pub at_ns: u64,
@@ -273,38 +264,46 @@ impl core::fmt::Display for Head<'_> {
     }
 }
 
-crate::user_safe! {
-    /// Per-reader state. **The kernel holds none.**
+/// A read's cursor is its caller's words: [`CURSOR_HEAD_WORDS`] of
+/// [`CursorHead`], then one position per shard, the next sequence number
+/// wanted from it. **The kernel holds no per-reader state**: no object, no
+/// handle lifecycle, no cursor to leak or go stale, and a second reader costs
+/// nothing. The stream is not consumed either: `logkeeper` and a `log-follow`
+/// tool coexist with no coordination.
+///
+/// A shard is a CPU the firmware names, online or not, so a CPU that started,
+/// logged and never came up is read with the rest. A position past the number
+/// its shard issues next is refused; one not yet published issues 1 next, and
+/// a position of 0 reads from the oldest record its shard holds.
+pub const CURSOR_HEAD_WORDS: usize = 2;
+
+/// A cursor's head, as its first two words carry it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CursorHead {
+    /// Out: how many shards the machine has, written by every read that gets
+    /// as far as the cursor, a refused one included. A caller learns it from
+    /// its first read and sizes its positions to it.
+    pub shards: u32,
+    /// In: how many positions follow the head. A read whose count is not
+    /// `shards` is refused.
+    pub slots: u32,
+    /// Out: records this read skipped because they were overwritten. The
+    /// kernel never reads it, so a reader's total is the reader's own sum.
     ///
-    /// No object, no handle lifecycle, no cursor to leak or go stale, and a second
-    /// reader costs nothing. The stream is not consumed either: `logkeeper` and a
-    /// `log-follow` tool coexist with no coordination.
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub struct LogCursor {
-        /// Out: how many shards the machine has. A caller passes a zeroed cursor
-        /// the first time and reads it back.
-        pub shards: u32,
-        pub _pad: u32,
-        /// Out: records this read skipped because they were overwritten. The
-        /// kernel never reads it, so a reader's total is the reader's own sum.
-        ///
-        /// **Derived, never counted by a producer.** The kernel computes it from
-        /// `head` and `next`, which both have to be right anyway, so no counter can
-        /// drift from the ring. It lives here so a reader that ignores loss has to
-        /// actively ignore a field it is already passing.
-        pub lost: u64,
-        /// In/out: the next sequence number wanted from each shard. A number past
-        /// the one the shard issues next is refused, and a shard not yet published
-        /// issues 1 next.
-        pub next: [u64; MAX_LOG_SHARDS],
-    }
+    /// **Derived, never counted by a producer.** The kernel computes it from
+    /// a ring's head and the position, which both have to be right anyway, so
+    /// no counter can drift from the ring.
+    pub lost: u64,
 }
 
-impl LogCursor {
-    /// A cursor that has read nothing. The kernel fills `shards` on the first
-    /// call.
-    pub const fn new() -> Self {
-        Self { shards: 0, _pad: 0, lost: 0, next: [0; MAX_LOG_SHARDS] }
+impl CursorHead {
+    /// Word 0 is `shards` in its low half and `slots` in its high; word 1 is `lost`.
+    pub const fn from_words(words: [u64; CURSOR_HEAD_WORDS]) -> Self {
+        Self { shards: words[0] as u32, slots: (words[0] >> 32) as u32, lost: words[1] }
+    }
+
+    pub const fn to_words(self) -> [u64; CURSOR_HEAD_WORDS] {
+        [self.shards as u64 | (self.slots as u64) << 32, self.lost]
     }
 }
 
@@ -322,7 +321,6 @@ mod tests {
         assert_eq!(core::mem::align_of::<LogRecord>(), 64);
         assert_eq!(core::mem::offset_of!(LogRecord, seq), 0);
         assert_eq!(core::mem::offset_of!(LogRecord, at_ns), 8);
-        assert_eq!(core::mem::size_of::<LogCursor>(), 80);
     }
 
     /// **The encoder is the wire, so the test decodes the wire.**
@@ -459,8 +457,10 @@ mod tests {
     }
 
     #[test]
-    fn a_fresh_cursor_has_read_nothing() {
-        assert_eq!(LogCursor::new(), LogCursor::default());
-        assert_eq!(LogCursor::new().next, [0; MAX_LOG_SHARDS]);
+    fn a_cursor_head_is_its_two_words() {
+        let head = CursorHead { shards: 16, slots: 3, lost: 9 };
+        assert_eq!(head.to_words(), [16 | 3 << 32, 9]);
+        assert_eq!(CursorHead::from_words(head.to_words()), head);
+        assert_eq!(CursorHead::from_words([0; CURSOR_HEAD_WORDS]), CursorHead::default());
     }
 }

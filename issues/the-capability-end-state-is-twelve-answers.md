@@ -145,19 +145,21 @@ table** can still reach:
 - **its own address space** — `SYS_MMAP`, `SYS_MUNMAP`, `SYS_TLS_ALLOC_BLOCK`,
   `SYS_STACK_INFO`;
 - **its own record** — `SYS_GETPID`, `SYS_GET_ENV`, `SYS_ENDOWMENTS`,
-  `SYS_QUERY_MODULES`, `SYS_SCHED_INFO`, `SYS_GETCWD`, `SYS_CHDIR`;
-- **machine facts** — `SYS_CLOCK_REALTIME`, `SYS_CLOCK_EPOCH`,
-  `SYS_CPU_COUNT`, `SYS_RANDOM`, and `SYS_SYSINFO`'s header (total and used
-  memory, the CPU count, the live-thread count, the uptime and the two CPU-time
-  accumulators) but not the roster after it;
+  `SYS_QUERY_MODULES`, `SYS_GETCWD`, `SYS_CHDIR`;
+- **machine facts** — `SYS_CLOCK_EPOCH`, `SYS_CPU_COUNT`, `SYS_RANDOM`, and
+  `SYS_SYSINFO`'s header (total and used memory, the CPU count, the live-thread
+  count, the uptime and the two CPU-time accumulators) but not the roster after
+  it;
 - **object creation, which confers nothing over anything that exists** —
   `SYS_PIPE`, `SYS_PORT_CREATE` ("needs no right and grants none — a port with
   no clients is not authority", `4a98107f^:kernel/src/arch/syscall.rs:1731`),
   `SYS_SHM_CREATE`, `SYS_INBOX_SETUP`;
 - **and four that reach past the process** — the whole filesystem by path
   (`SYS_OPEN`, `SYS_READDIR`, `SYS_DELETE`, `SYS_MKDIR`, `SYS_RMDIR`,
-  `SYS_RENAME`, `SYS_SYMLINK`, `SYS_READLINK`), `SYS_DLOPEN`/`SYS_DLSYM` over
-  the same paths, `SYS_SPAWN`, and `SYS_SHUTDOWN` — plus `SYS_SYSINFO`'s census.
+  `SYS_RENAME`, `SYS_SYMLINK`, `SYS_READLINK`), `SYS_SPAWN`, and
+  `SYS_SHUTDOWN` — plus `SYS_SYSINFO`'s census. `SYS_DLOPEN` was among them
+  and is not now: it loads an image the caller read through its own
+  namespace, and opens nothing by path.
 
 **Smallest decision:** the last group. **Recommendation:** keep the filesystem,
 `SYS_DLOPEN` and `SYS_SPAWN` ambient under question 2's ruling; make
@@ -192,18 +194,19 @@ delegation and not a widening.
 
 ## 7. What authority is implicit in process creation? — COMMITTED
 
-A child starts with an empty `HandleTable` and gets exactly two vectors:
-`slot_map` *duplicates* (the parent keeps its copy) and `endow` *moves*
-(`sdk/abi/src/syscall.rs:283`). Both are all-or-nothing and refuse by name — a
-slot-map pair naming a handle the parent does not hold ends the parent
-(`kernel/src/loader/start.rs:308`), an endowed handle without `TRANSFER` refuses
-the spawn before anything leaves the table (`:206`), and the move is the last
-thing a spawn does (`kernel/src/loader/mod.rs:649`). **Two things are implicit
+A child starts with an empty `HandleTable` and gets exactly one vector,
+`endow`, which *moves* (`sdk/abi/src/syscall.rs`, `SpawnArgs`): its stdio
+and every other descriptor are endowments labelled `fd:<n>`, which its
+userland table numbers, and a console among them is minted for the child. It
+is all-or-nothing and refuses by name — an endowed handle without `TRANSFER`
+refuses the spawn before anything leaves the table
+(`kernel/src/loader/start.rs`, `PendingHandles::commit`), and the move is the
+last thing a spawn does (`kernel/src/loader/mod.rs`). **Two things are implicit
 and nothing else is:**
 
-1. a `Console` slot is *minted fresh* rather than duplicated, at the parent's
-   rights, because the object is the line buffer
-   (`kernel/src/loader/start.rs:325`);
+1. an endowed `Console` is *minted fresh* rather than moved, at the moved
+   handle's rights, because the object is the line buffer
+   (`kernel/src/loader/start.rs`, `PendingHandles::commit`);
 2. the spawner is handed a `Process` handle carrying
    `DUP|TRANSFER|WAIT|READ|MANAGE` by type (`kernel/src/object/ops.rs:74`), and
    must dup-narrow and close if it wants to hold less.
@@ -226,7 +229,7 @@ process has.
 is created with `Rights::NONE` there because "every bit on a `SysCap` is an
 authority init decides per program" — the machine's only one is minted with
 `TRANSFER` at `kernel/src/loader/mod.rs:946`. The mechanisms are
-`SYS_HANDLE_SEND`/`SYS_HANDLE_RECV` over a `Connection`, where the connection
+`SYS_MESSAGE_SEND`/`SYS_HANDLE_RECV` over a `Connection`, where the connection
 and every handle must carry `TRANSFER`, no handle may be named twice, and the
 connection may not be sent over itself (`4a98107f^:kernel/src/arch/syscall.rs:2086`,
 `:2090`); and `SpawnArgs::endow`. Nothing else crosses a process boundary — the

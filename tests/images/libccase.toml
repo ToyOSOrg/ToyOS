@@ -1,0 +1,18 @@
+# The boot `libc_children` runs libc's C programs on: each starts children of
+# its own, `echo` among them, and `system` and `popen` run their commands by
+# `/system/bin/shell -c`.
+[boot]
+start = ["logkeeper", "test-runner"]
+
+[programs.logkeeper]
+service = true
+syscap = ["logread"]
+
+[programs.test-runner]
+
+[programs.toybox]
+
+[programs.shell]
+
+[symlinks]
+"bin/echo" = "/system/bin/toybox"

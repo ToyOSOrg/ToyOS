@@ -15,10 +15,8 @@ that is not there.
 Evidence: the T14's `proctreecase` boot at 1e9cb8c77. The kernel recorded
 `spawn: refused under pid 79 at depth 65, more than 64 below init`, and the
 shell at that depth printed `/system/bin/test_rs_process_tree: not found`.
-`process_tree`'s chain (`tests/guest/rust-tests/src/bin/process_tree.rs`)
-accepts that line as its stop, and the row's judge reads the kernel's record
-for the depth.
+`process_tree` has since spawned its links directly and reads their own
+refusal, so it no longer goes through the shell.
 
 Exit: the shell prints the error the spawn answered, as its `detach` does, and
-says `not found` for `ErrorKind::NotFound` alone; `process_tree`'s chain no
-longer accepts `: not found` as its stop. Owner: the shell.
+says `not found` for `ErrorKind::NotFound` alone. Owner: the shell.

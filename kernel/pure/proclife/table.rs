@@ -10,7 +10,7 @@
 //! A caller that needs an order sorts what it collected, and the two that do
 //! ([`crate::proclife::teardown::retire_set`] and [`crate::proclife::reap::finished_pids`]) say so.
 
-use crate::proclife::{Node, Pid, Pids, ThreadLocation, Tid};
+use crate::proclife::{End, Node, Pid, Pids, ThreadLocation, Tid};
 
 /// One process's lifecycle state: the whole of what a spawn, an exit, a kill, a
 /// join or a reap reads or writes about it.
@@ -19,18 +19,18 @@ pub trait Lifecycle {
     /// builds, but nothing here relies on that.
     fn main_tid(&self) -> Tid;
 
-    /// The exit code of the teardown some path has claimed, or `None`.
-    fn teardown_code(&self) -> Option<i32>;
+    /// The end of the teardown some path has claimed, or `None`.
+    fn teardown_end(&self) -> Option<End>;
 
     /// Whether some path has claimed this process's teardown.
     fn tearing_down(&self) -> bool {
-        self.teardown_code().is_some()
+        self.teardown_end().is_some()
     }
 
-    /// Raise the teardown claim, with the code the exit publishes. [`crate::proclife::teardown::claim_teardown`] is the one
+    /// Raise the teardown claim, with the end it publishes. [`crate::proclife::teardown::claim_teardown`] is the one
     /// caller — the flag exists to be claimed exactly once, so raising it
     /// anywhere else is what that function is written to prevent.
-    fn begin_teardown(&mut self, code: i32);
+    fn begin_teardown(&mut self, end: End);
 
     /// Where `tid` is, or `None` for a thread this process does not have.
     fn location(&self, tid: Tid) -> Option<ThreadLocation>;

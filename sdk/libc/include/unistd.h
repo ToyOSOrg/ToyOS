@@ -43,7 +43,10 @@ int link(const char *existing, const char *newpath);
 int fchown(int fd, uid_t owner, gid_t group);
 int gethostname(char *name, size_t len);
 
+extern char **environ;
+
 pid_t getpid(void);
+pid_t getpgrp(void);
 pid_t getppid(void);
 pid_t getsid(pid_t pid);
 pid_t setsid(void);

@@ -75,8 +75,8 @@ impl fmt::Display for Unseen {
 }
 
 impl Windows {
-    /// No `Default` beside it, for `fair::Frontier::new`'s reason: every
-    /// record is a `static`, which only a `const fn` can build.
+    /// No `Default` beside it: every record is a `static`, which only a
+    /// `const fn` can build.
     #[cfg(not(feature = "loom"))]
     #[allow(clippy::new_without_default)]
     pub const fn new() -> Self {

@@ -17,7 +17,6 @@ each manifest's `[package.metadata.toyos.host] fails` names all three, so
 | `toybox` | `std::os::toyos` in its `stats` and `locale` applets; on Linux, cpal's `alsa-sys`, as doom |
 | `terminal` | `std::os::toyos`: it starts its shell with `CommandExt::provide` |
 | `shell` | `std::os::toyos`: raw stdin, and `CommandExt::provide` to hand each program the connectors the shell was given |
-| `proctest` | `std::os::toyos::io::set_stdin_raw`, and it spawns `/system/bin/echo` and itself by their ToyOS paths |
 
 `editor`, `files`, `paint` and `filepicker` build on all three and run on none:
 `toyos-window` reaches no display but ToyOS's compositor, because

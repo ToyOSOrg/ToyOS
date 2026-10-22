@@ -8,12 +8,15 @@
 //! claim handle. Nothing here is a physical address, and nothing here is
 //! specific to what the function *is*.
 //!
-//! **The function masters the bus from its first grant and not from the
-//! hand-over**, so a driver takes its window and its first grant before the
-//! device can do anything at all, an interrupt included.
+//! **The function masters the bus from [`syscall::device_dma_start`] and not
+//! from the hand-over**, so a driver stops and resets it through its window,
+//! states its address width ([`syscall::device_dma_limit`]) and takes its
+//! grants before the device can do anything at all, an interrupt included.
 //!
 //! [`syscall::device_dma_alloc`]: crate::syscall::device_dma_alloc
 //! [`syscall::device_dma_map`]: crate::syscall::device_dma_map
+//! [`syscall::device_dma_start`]: crate::syscall::device_dma_start
+//! [`syscall::device_dma_limit`]: crate::syscall::device_dma_limit
 
 /// The six BAR slots a Type 0 PCI header has (PCI 3.0 §6.1), and the bound
 /// every index in this module is checked against.
@@ -24,8 +27,7 @@ crate::user_safe! {
     /// mapped anything.
     ///
     /// No addresses: a BAR's *size* is what a driver bounds its own accesses with,
-    /// and where the window sits is [`syscall::device_bar_map`]'s answer, so the
-    /// kernel stays free to move a BAR to a boundary it can map.
+    /// and where the window sits is [`syscall::device_bar_map`]'s answer.
     ///
     /// [`syscall::device_bar_map`]: crate::syscall::device_bar_map
     #[derive(Clone, Copy)]

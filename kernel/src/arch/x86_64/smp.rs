@@ -8,7 +8,11 @@ use crate::clock;
 use crate::drivers::acpi::MadtInfo;
 use crate::smp::{self, ROSTER};
 use crate::time::{Delay, Duration, AP_START};
+use crate::sync::Lock;
 use crate::{log, process};
+use alloc::vec::Vec;
+use kernel::cpu::TopologyRefusal;
+use kernel::sched::topology::CpuKeys;
 
 const TRAMPOLINE_PAGE: u64 = 0x8000;
 const TRAMPOLINE_VECTOR: u8 = 0x08;
@@ -17,12 +21,16 @@ const DATA_OFFSET: usize = 0xF00;
 /// The `rdtsc` the AP being started read on its first instruction in Rust.
 ///
 /// **The whole of the TSC-trail measurement.** `clock::nanos_since_boot`
-/// subtracts one BSP-sampled `TSC_BOOT` whatever CPU asks, so a CPU whose TSC
+/// subtracts one BSP-sampled `COUNTER_AT_BOOT` whatever CPU asks, so a CPU whose TSC
 /// reads below the BSP's has no honest answer to give; the reading is bracketed
 /// by two BSP samples taken either side of this AP's whole bring-up, which is
 /// serialised, so a synchronised TSC lands inside the bracket by construction
 /// and a skewed one is outside it by at least the skew.
 static AP_TSC: AtomicU64 = AtomicU64::new(0);
+
+/// The started AP's [`cpu::topology_keys`], written before its echo and taken
+/// after it, like [`AP_TSC`]: bring-up is serialised, so one slot serves.
+static AP_TOPOLOGY: Lock<Option<Result<CpuKeys, TopologyRefusal>>> = Lock::new(None);
 
 // Field offsets are hardcoded in the global_asm! trampoline below; the static assertion at the bottom checks the match.
 
@@ -66,9 +74,10 @@ struct TrampolineData {
     _pad5: [u8; 2],                          // +0x6E
     cs_reload_addr: u64,                     // +0x70
     percpu_ptr: u64,                         // +0x78
+    efer: u64,                               // +0x80
 }
 
-const _: () = assert!(size_of::<TrampolineData>() == 0x80);
+const _: () = assert!(size_of::<TrampolineData>() == 0x88);
 
 
 
@@ -99,7 +108,9 @@ macro_rules! asm_label_addr {
     }};
 }
 
-/// Copies the trampoline blob to physical page 0x8000 via the direct map; there is no identity map this early.
+/// Copies the trampoline blob to physical page 0x8000 via the direct map, where
+/// it is data and never executed; an AP, started only after the copy, fetches
+/// it through the boot map's identity view.
 fn copy_trampoline() {
     let start = asm_label_addr!(_trampoline_start);
     let end = asm_label_addr!(_trampoline_end);
@@ -159,6 +170,7 @@ fn build_trampoline_data() -> TrampolineData {
         _pad5: [0; 2],
         cs_reload_addr,
         percpu_ptr: 0, // filled per-AP
+        efer: crate::arch::control_regs::EFER_BEFORE_LONG_MODE,
     }
 }
 
@@ -171,7 +183,11 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         bsp_id,
         "smp: the boot CPU reads its own hardware id as {read:#x}, and its roster slot and every IPI name it {bsp_id:#x}"
     );
+    // So every other MADT entry is one attempt and the roster, sized by the
+    // MADT, holds each.
+    assert!(madt.apic_ids.contains(&bsp_id), "smp: the MADT names no CPU with the boot CPU's id {bsp_id:#x}");
     ROSTER.set_bsp(bsp_id);
+    let mut topology = Vec::from([cpu::topology_keys()]);
     copy_trampoline();
 
     let mut data = build_trampoline_data();
@@ -182,11 +198,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
     for &ap_id in &madt.apic_ids {
         if ap_id == bsp_id { continue; }
 
-        // Refused at MAX_CPUS, bounding a firmware that over-reports CPUs.
-        let Some(attempt) = ROSTER.begin_attempt() else {
-            log!("SMP: roster full at {} CPUs; ignoring further MADT entries", smp::cpu_count());
-            break;
-        };
+        let attempt = ROSTER.begin_attempt();
 
         let ap_percpu = percpu::alloc_ap(attempt.id(), attempt.token());
 
@@ -227,6 +239,7 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
                 bracketed += 1;
             }
             ROSTER.commit(attempt, ap_id);
+            topology.push(AP_TOPOLOGY.lock().take().expect("an AP reads its topology before it echoes"));
             log!("SMP: AP cpu{} lapic={} online", attempt.id(), ap_id);
         } else {
             // Neither the id nor the trampoline is reused after a failure: stop here.
@@ -241,6 +254,13 @@ pub fn boot_aps(madt: &MadtInfo, boot_cr3: u64) {
         online.saturating_sub(1),
     );
     crate::arch::control_regs::report(online);
+    smp::set_topology(
+        topology
+            .into_iter()
+            .enumerate()
+            .map(|(cpu, keys)| keys.unwrap_or_else(|e| panic!("smp: cpu{cpu}'s CPUID places it in no tree: {e:?}")))
+            .collect(),
+    );
 }
 
 /// Whether the AP just started read a TSC between the two the BSP took either
@@ -279,7 +299,7 @@ extern "C" fn ap_entry() -> ! {
     AP_TSC.store(cpu::rdtsc(), Ordering::Release);
 
     // Must run before `pat::init`, which restores the CR0 this call sets.
-    crate::arch::control_regs::init_cr0(percpu::cpu_id());
+    crate::arch::control_regs::init_paging(percpu::cpu_id());
     // Before `control_regs::init` reads what an update changes.
     crate::arch::microcode::load(percpu::cpu_id());
 
@@ -297,6 +317,7 @@ extern "C" fn ap_entry() -> ! {
     // Before the echo, so every CPU the roster counts has said its line.
     crate::arch::mtrr::compare(percpu::cpu_id());
 
+    *AP_TOPOLOGY.lock() = Some(cpu::topology_keys());
     // Echo this attempt's token, so the BSP counts this AP for its own attempt.
     ROSTER.echo(percpu::ap_token());
 
@@ -353,10 +374,11 @@ global_asm!(
     "mov eax, [0x8F00]",
     "mov cr3, eax",
 
-    // Enable Long Mode (IA32_EFER.LME)
+    // IA32_EFER from TrampolineData.efer (+0x80): long mode, and `NXE` before
+    // the kernel's tables, where bit 63 is otherwise a reserved bit.
     "mov ecx, 0xC0000080",
-    "rdmsr",
-    "or eax, 0x100",
+    "mov eax, [0x8F80]",
+    "mov edx, [0x8F84]",
     "wrmsr",
 
     // Enable Paging (CR0.PG)

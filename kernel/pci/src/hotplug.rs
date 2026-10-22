@@ -1,6 +1,7 @@
 //! A PCI Express hot-plug slot (PCIe base spec 6.0 §6.7): which port has one,
-//! the Slot Control word this kernel writes, and what a slot in a given state
-//! is owed next.
+//! the Slot Control word this kernel writes, what a slot in a given state is
+//! owed next, and where an arrived function's BARs go inside its port's
+//! windows ([`assign`]).
 //!
 //! **The slot's registers are read; what it is owed is decided here.** The
 //! kernel's handler latches events and the device set's reader acts on
@@ -201,6 +202,88 @@ pub fn pressed_removes(seen: Seen) -> bool {
     seen.listed && seen.powered
 }
 
+/// The Type 1 header's bus numbers and memory windows (PCIe base spec 6.0
+/// §7.5.1.3): the dword at 0x18, which holds Secondary and Subordinate Bus
+/// Number in its second and third bytes.
+pub const BUS_NUMBERS: u64 = 0x18;
+/// Memory Base and Limit, one dword.
+pub const MEMORY_WINDOW: u64 = 0x20;
+/// Prefetchable Memory Base and Limit, one dword, and their upper 32 bits.
+pub const PREFETCHABLE_WINDOW: u64 = 0x24;
+pub const PREFETCHABLE_BASE_UPPER: u64 = 0x28;
+pub const PREFETCHABLE_LIMIT_UPPER: u64 = 0x2C;
+
+/// A window's granularity: bits 15:4 of a base or limit word are address
+/// bits 31:20, and a limit's bits 19:0 are all ones.
+const WINDOW_GRANULE: u64 = 1 << 20;
+
+/// A port's secondary and subordinate bus numbers, from [`BUS_NUMBERS`].
+pub fn buses(dword: u32) -> (u8, u8) {
+    ((dword >> 8) as u8, (dword >> 16) as u8)
+}
+
+/// The memory a port forwards below it, each window as `(start, end)` with
+/// `end` exclusive; `None` for a window whose base is above its limit, which
+/// forwards nothing.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Windows {
+    pub memory: Option<(u64, u64)>,
+    pub prefetchable: Option<(u64, u64)>,
+}
+
+impl Windows {
+    /// From the dwords at [`MEMORY_WINDOW`], [`PREFETCHABLE_WINDOW`],
+    /// [`PREFETCHABLE_BASE_UPPER`] and [`PREFETCHABLE_LIMIT_UPPER`]. The upper
+    /// halves count only where the prefetchable window says it is 64-bit
+    /// (bits 3:0 of its base word, 1).
+    pub fn read(memory: u32, prefetchable: u32, base_upper: u32, limit_upper: u32) -> Self {
+        let window = |base: u64, limit: u64| (base <= limit).then_some((base, limit + WINDOW_GRANULE));
+        let low = |word: u32| u64::from(word & 0xFFF0) << 16;
+        let wide = prefetchable & 0xF == 1;
+        let upper = |word: u32| if wide { u64::from(word) << 32 } else { 0 };
+        Self {
+            memory: window(low(memory), low(memory >> 16)),
+            prefetchable: window(low(prefetchable) | upper(base_upper), low(prefetchable >> 16) | upper(limit_upper)),
+        }
+    }
+}
+
+/// Where a BAR of `kind` and `size` bytes goes below a port with `windows`:
+/// the lowest address in the first window that may hold it, aligned to its
+/// size and to a 4 KiB page, whose pages no range of `taken` touches, so it
+/// is handed over in pages of its own. A prefetchable BAR tries the
+/// prefetchable window first and then the memory window, which may hold
+/// either kind; a 32-bit BAR ends below 4 GiB. `None` where no window has
+/// room.
+pub fn assign(kind: crate::bar::Kind, size: u64, windows: Windows, taken: &[(u64, u64)]) -> Option<u64> {
+    if size == 0 || !size.is_power_of_two() {
+        return None;
+    }
+    let span = size.max(crate::pages::PAGE);
+    let ceiling = if kind.wide { u64::MAX } else { 1 << 32 };
+    let tried = [kind.prefetchable.then_some(windows.prefetchable).flatten(), windows.memory];
+    tried.into_iter().flatten().find_map(|(start, end)| lowest(span, start, end.min(ceiling), taken))
+}
+
+/// The lowest `span`-aligned `at` with `at..at + span` inside `start..end`
+/// and clear of every range of `taken`.
+fn lowest(span: u64, start: u64, end: u64, taken: &[(u64, u64)]) -> Option<u64> {
+    let page = |at: u64| at & !(crate::pages::PAGE - 1);
+    let mut at = start.checked_next_multiple_of(span)?;
+    loop {
+        let stop = at.checked_add(span)?;
+        if stop > end {
+            return None;
+        }
+        // A range's pages, not its bytes: a BAR sharing a page is handed to nobody.
+        let clash = taken.iter().filter(|(from, to)| page(*from) < stop && at < *to).map(|(_, to)| *to).max();
+        match clash {
+            None => return Some(at),
+            Some(past) => at = past.checked_next_multiple_of(span)?,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,5 +389,65 @@ mod tests {
     fn presence_is_bit_six_and_every_event_is_cleared() {
         assert!(occupied(0x0049) && occupied(0x0059) && !occupied(0x0019));
         assert_eq!(EVENTS, 0x011F);
+    }
+
+    /// QEMU 11.1.1's `pcie-root-port` below OVMF, as its registers read: a
+    /// 2 MiB memory window and a 64-bit prefetchable one.
+    const QEMU_MEMORY: u32 = 0xc1e0_c1e0;
+    const QEMU_PREFETCHABLE: u32 = 0x1ff1_0001;
+
+    #[test]
+    fn a_ports_windows_are_read_from_its_bridge_registers() {
+        assert_eq!(buses(0x0001_0100), (1, 1));
+        let windows = Windows::read(QEMU_MEMORY, QEMU_PREFETCHABLE, 0x8, 0x8);
+        assert_eq!(windows.memory, Some((0xc1e0_0000, 0xc1f0_0000)));
+        assert_eq!(windows.prefetchable, Some((0x8_0000_0000, 0x8_2000_0000)));
+        // A 32-bit prefetchable window ignores what its upper registers hold,
+        // and a base past its limit forwards nothing.
+        assert_eq!(Windows::read(QEMU_MEMORY, 0x1ff0_0000, 0x8, 0x8).prefetchable, Some((0, 0x2000_0000)));
+        assert_eq!(Windows::read(0x0000_fff0, 0x0000_fff1, 0, 0), Windows { memory: None, prefetchable: None });
+    }
+
+    fn qemu_windows() -> Windows {
+        Windows::read(QEMU_MEMORY, QEMU_PREFETCHABLE, 0x8, 0x8)
+    }
+
+    const NARROW: crate::bar::Kind = crate::bar::Kind { wide: false, prefetchable: false };
+    const WIDE_PREFETCHABLE: crate::bar::Kind = crate::bar::Kind { wide: true, prefetchable: true };
+
+    /// The lowest aligned address in the window the BAR's kind takes.
+    #[test]
+    fn a_bar_goes_at_the_bottom_of_its_window() {
+        // `edu`'s BAR 0: 1 MiB, 32-bit, not prefetchable.
+        assert_eq!(assign(NARROW, 0x10_0000, qemu_windows(), &[]), Some(0xc1e0_0000));
+        assert_eq!(assign(WIDE_PREFETCHABLE, 0x4000, qemu_windows(), &[]), Some(0x8_0000_0000));
+        // Smaller than a page, it still takes a page of its own.
+        assert_eq!(assign(NARROW, 0x10, qemu_windows(), &[(0xc1e0_0000, 0xc1e0_0010)]), Some(0xc1e0_1000));
+    }
+
+    /// Past every range something already decodes in, by whole pages and at
+    /// the BAR's own alignment.
+    #[test]
+    fn a_bar_is_placed_clear_of_what_is_taken() {
+        let taken = [(0xc1e0_0000, 0xc1e0_1000), (0xc1e4_0000, 0xc1e4_0004)];
+        assert_eq!(assign(NARROW, 0x8_0000, qemu_windows(), &taken), Some(0xc1f0_0000 - 0x8_0000));
+        assert_eq!(assign(NARROW, 0x10_0000, qemu_windows(), &taken), None, "the window's one MiB is taken in part");
+        // A range ending inside the page the candidate starts in pushes it on.
+        assert_eq!(assign(NARROW, 0x1000, qemu_windows(), &[(0xc1e0_0000, 0xc1e0_0800)]), Some(0xc1e0_1000));
+    }
+
+    /// A prefetchable BAR the prefetchable window cannot hold goes to the
+    /// memory window; a 32-bit one never goes above 4 GiB; a size that is no
+    /// power of two is no BAR.
+    #[test]
+    fn a_bar_takes_only_a_window_that_may_hold_it() {
+        let narrow_prefetchable = crate::bar::Kind { wide: false, prefetchable: true };
+        assert_eq!(assign(narrow_prefetchable, 0x1000, qemu_windows(), &[]), Some(0xc1e0_0000));
+        assert_eq!(assign(NARROW, 0x1000, Windows { memory: None, ..qemu_windows() }, &[]), None);
+        assert_eq!(assign(WIDE_PREFETCHABLE, 0x4000_0000, qemu_windows(), &[]), None);
+        assert_eq!(assign(NARROW, 0x3000, qemu_windows(), &[]), None);
+        assert_eq!(assign(NARROW, 0, qemu_windows(), &[]), None);
+        let top = Windows { memory: Some((u64::MAX - 0xFFFFF, u64::MAX)), prefetchable: None };
+        assert_eq!(assign(WIDE_PREFETCHABLE, 0x10_0000, top, &[]), None, "no wrap past the top of the address space");
     }
 }

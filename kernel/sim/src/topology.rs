@@ -1,39 +1,19 @@
-//! The machine's shape: which core, last-level cache and package each dense CPU
-//! id sits in, so that a run can say which level of the cache tree each
-//! migration, wake, failed steal and IPI crossed.
+//! The machines the simulator runs: each a named [`Topology`] built from the
+//! keys its CPUs would read of themselves, and the counts of what one run did at
+//! each level of the tree.
 //!
-//! A shape is what each CPU reads of itself: its x2APIC id, shifted right by the
-//! width of each level — the SMT and package widths of CPUID leaf 0xB, and the
-//! last-level cache's width, the base-2 log of how many ids share it, from the
-//! deterministic cache leaf. Two CPUs share a level when their keys at it are
-//! equal, and the lowest level they share is the one a move between them
-//! crosses; a level whose domains are its parent's collapses into it, because no
-//! pair of CPUs then has it as its lowest.
-//!
-//! Dense ids are the order the firmware listed the CPUs in, which is no topology
-//! order: the T14's SMT siblings are four ids apart and the AMD bench's
-//! adjacent, so a synthetic shape is enumerated under a seeded permutation and
-//! nothing may read locality off an id's value.
-//!
-//! The scheduler core reads none of this. It is the simulator's instrument, and
-//! it prices no level: there is no cache, frequency or SMT cost here.
+//! A shape's keys are x2APIC ids shifted right by each level's width — the SMT
+//! and package widths of CPUID leaf 0xB, and the base-2 log of how many ids
+//! share the last-level cache from the deterministic cache leaf. A synthetic
+//! shape is listed under a seeded permutation, so nothing may read locality off
+//! a dense id. Nothing here prices a level: there is no cache, frequency or SMT
+//! cost.
 
+use kernel::sched::hw::CpuId;
+pub use kernel::sched::topology::{CpuKeys, Level, Topology};
 use rand::rngs::SmallRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
-
-/// The lowest domain two distinct CPUs share.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum Level {
-    /// SMT siblings: one core's hardware threads.
-    Core,
-    /// One last-level cache.
-    Llc,
-    /// One package.
-    Package,
-    /// Different packages.
-    Machine,
-}
 
 /// A count's column in [`LevelCounts`]: 0 is one CPU, then each [`Level`].
 pub fn slot(level: Option<Level>) -> usize {
@@ -93,19 +73,10 @@ impl LevelCounts {
     }
 }
 
-/// One CPU's key at each level.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub struct Keys {
-    pub core: u32,
-    pub llc: u32,
-    pub package: u32,
-}
-
 #[derive(Clone, Debug)]
 pub struct Shape {
     pub name: &'static str,
-    /// Indexed by dense CPU id.
-    keys: Vec<Keys>,
+    topology: Topology,
 }
 
 /// How many low bits of an id a level `count` wide takes.
@@ -133,13 +104,14 @@ impl Shape {
         assert_eq!(seen.len(), ids.len(), "{name}: two CPUs carry one x2APIC id");
         let keys = ids
             .iter()
-            .map(|&id| Keys {
+            .map(|&id| CpuKeys {
                 core: id >> smt_shift,
                 llc: id >> llc_shift,
                 package: id >> package_shift,
             })
             .collect();
-        Self { name, keys }
+        let topology = Topology::new(keys).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        Self { name, topology }
     }
 
     /// `cpus` cores of one thread each, sharing one LLC in one package: the
@@ -190,46 +162,25 @@ impl Shape {
     }
 
     pub fn cpus(&self) -> usize {
-        self.keys.len()
+        self.topology.cpus()
     }
 
-    pub fn keys(&self, cpu: usize) -> Keys {
-        self.keys[cpu]
+    pub fn topology(&self) -> &Topology {
+        &self.topology
+    }
+
+    pub fn keys(&self, cpu: usize) -> CpuKeys {
+        self.topology.keys(id(cpu))
     }
 
     /// The lowest level `a` and `b` share, or `None` when they are one CPU.
     pub fn level(&self, a: usize, b: usize) -> Option<Level> {
-        // By id: SMT siblings share every key.
-        if a == b {
-            return None;
-        }
-        let (a, b) = (self.keys[a], self.keys[b]);
-        Some(if a.core == b.core {
-            Level::Core
-        } else if a.llc == b.llc {
-            Level::Llc
-        } else if a.package == b.package {
-            Level::Package
-        } else {
-            Level::Machine
-        })
+        self.topology.level(id(a), id(b))
     }
 
     /// How many domains the machine has at `level`.
     pub fn domains(&self, level: Level) -> usize {
-        let mut keys: Vec<u32> = self
-            .keys
-            .iter()
-            .map(|k| match level {
-                Level::Core => k.core,
-                Level::Llc => k.llc,
-                Level::Package => k.package,
-                Level::Machine => 0,
-            })
-            .collect();
-        keys.sort_unstable();
-        keys.dedup();
-        keys.len()
+        self.topology.domains(level)
     }
 
     /// `cpus=… cores=… llcs=… packages=…`, the shape as counts per level.
@@ -243,6 +194,10 @@ impl Shape {
             self.domains(Level::Package),
         )
     }
+}
+
+fn id(cpu: usize) -> CpuId {
+    CpuId(u32::try_from(cpu).expect("a dense CPU id fits a u32"))
 }
 
 /// Every shape the topology sweep runs every scenario at: the two benches as

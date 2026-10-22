@@ -115,7 +115,7 @@ pub(super) fn msi_message(vector: u8) -> (u32, u32) {
 /// Calibrated LAPIC timer ticks per 10ms (computed on BSP, reused by APs),
 /// which is one quantum: what the Ring 0 timer branch re-arms with.
 static TIMER_TICKS: AtomicU32 = AtomicU32::new(0);
-const _: () = assert!(kernel::sched::fair::QUANTUM_NS == 10_000_000);
+const _: () = assert!(kernel::sched::task::QUANTUM_NS == 10_000_000);
 
 /// The spurious-interrupt vector register, whole (SDM §13.9, APM §16.4.7): the
 /// APIC enabled, the vector `arch::idt::spurious` gates, and every other bit

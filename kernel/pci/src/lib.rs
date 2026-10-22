@@ -30,15 +30,13 @@ extern crate std;
 pub mod aperture;
 pub mod af;
 pub mod bar;
-pub mod bridge;
 pub mod caps;
 pub mod choose;
 pub mod express;
 pub mod hotplug;
 pub mod msi;
 pub mod msix;
-pub mod placement;
+pub mod pages;
 pub mod pm;
-pub mod probe;
 
 pub use choose::console;

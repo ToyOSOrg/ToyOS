@@ -13,9 +13,10 @@
 //! connection and a writer on the stream's bell, so neither takes the other's
 //! wake. A doorbell says "look", never "there are bytes".
 //!
-//! **A stream belongs to the process that connected or accepted it.** Every
-//! handle of its connection in this process shares one end; a handle with no
-//! end here is refused by name and nothing is written on it
+//! **A stream belongs to the process that connected or accepted it.** Its
+//! connection's one handle reaches its end, and descriptors on it share that
+//! one handle (`crate::fd`); a handle with no end here is refused by name and
+//! nothing is written on it
 //! (`issues/a-stream-cannot-move-between-processes.md`). An end goes once no
 //! handle and no call is left. The table is the instance std links: a program
 //! that also links `toyos` itself and drives these functions holds ends std
@@ -26,18 +27,18 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
-use toyos_transport::session::{self, Bells, Doorbell, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
-use toyos_transport::stream::Place;
-use toyos_transport::Span;
 
 use crate::ipc::Connection;
 use crate::shm::SharedMemory;
 use crate::sync::Lock;
+use crate::transport::session::{self, Bells, Doorbell, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
+use crate::transport::stream::Place;
+use crate::transport::Span;
 use crate::OwnedHandle;
 
 use super::{MsgType, NetError, NetstackConn, TcpAcceptRequest, TcpAcceptResponse, TcpConnectRequest, TcpConnectResponse, TcpSocketId};
 
-pub use toyos_transport::session::Way;
+pub use crate::transport::session::Way;
 
 // ---- the region ----
 
@@ -100,11 +101,21 @@ type Tx = Sending<SEND_BYTES, WORDS>;
 
 /// An end's two halves, each behind its own lock.
 struct Halves {
-    rx: Lock<Option<Rx>>,
-    tx: Lock<Option<Tx>>,
+    rx: Lock<Kept<Rx>>,
+    tx: Lock<Kept<Tx>>,
 }
 
-static HALVES: [Halves; MAX_STREAMS] = [const { Halves { rx: Lock::new(None), tx: Lock::new(None) } }; MAX_STREAMS];
+/// A half, or none. `repr(u8)` puts `Empty` at zero, as it does
+/// [`Slot::Free`], so the tables cost a program that makes no stream no
+/// initialised data.
+#[repr(u8)]
+enum Kept<T> {
+    Empty,
+    Held(T),
+}
+
+static HALVES: [Halves; MAX_STREAMS] =
+    [const { Halves { rx: Lock::new(Kept::Empty), tx: Lock::new(Kept::Empty) } }; MAX_STREAMS];
 
 static TABLE: Lock<Table> = Lock::new(Table::new());
 
@@ -124,6 +135,7 @@ struct End {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
 enum Slot {
     Free,
     /// Reserved: by a connect or an accept that has not answered, or by an end
@@ -199,15 +211,6 @@ impl Table {
         })
     }
 
-    /// `copy`, a new handle of `handle`'s connection, reaches its end too;
-    /// `false` with no room for it.
-    fn add(&mut self, slot: usize, copy: RawHandle) -> bool {
-        let Some(room) = self.handles.iter().position(Option::is_none) else { return false };
-        self.handles[room] = Some((copy, slot));
-        self.end(slot).handles += 1;
-        true
-    }
-
     /// `handle` reaches its end no more: `None` for a handle that reached
     /// none, else its end's slot and the end where it was its last use.
     fn forget(&mut self, handle: RawHandle) -> Option<Option<(usize, End)>> {
@@ -221,8 +224,8 @@ impl Table {
 /// Lets go of an end no handle or call reaches: its halves, its bell and its
 /// region, whose mapping goes with its handle.
 fn free(slot: usize, end: End) {
-    *HALVES[slot].rx.lock() = None;
-    *HALVES[slot].tx.lock() = None;
+    *HALVES[slot].rx.lock() = Kept::Empty;
+    *HALVES[slot].tx.lock() = Kept::Empty;
     syscall::close(end.bell);
     syscall::close(end.region);
     TABLE.lock().unreserve(slot);
@@ -330,11 +333,14 @@ fn call<R>(handle: RawHandle, f: impl FnOnce(&Call) -> R) -> Result<R, Refused> 
 }
 
 /// A half reached through its slot's lock.
-struct Half<T: 'static>(&'static Lock<Option<T>>);
+struct Half<T: 'static>(&'static Lock<Kept<T>>);
 
 impl<T> session::Lock<T> for Half<T> {
     fn with<R>(&self, f: impl FnOnce(&mut T) -> R) -> R {
-        f(self.0.lock().as_mut().expect("a live end has both halves"))
+        match &mut *self.0.lock() {
+            Kept::Held(half) => f(half),
+            Kept::Empty => panic!("a live end has both halves"),
+        }
     }
 }
 
@@ -583,20 +589,6 @@ pub fn adopt(handle: RawHandle) -> Result<(), Misuse> {
     if is_stream(handle) { Ok(()) } else { Err(Misuse::NotThisProcess(handle)) }
 }
 
-/// A new handle of `handle`'s object: of a stream's connection, one that
-/// reaches the same end; of anything else, the bare `dup`.
-pub fn duplicate(handle: RawHandle) -> Result<RawHandle, SyscallError> {
-    let copy = syscall::dup(handle)?;
-    let mut table = TABLE.lock();
-    let Some(slot) = table.find(handle) else { return Ok(copy) };
-    if table.add(slot, copy) {
-        return Ok(copy);
-    }
-    drop(table);
-    syscall::close(copy);
-    Err(SyscallError::ResourceExhausted)
-}
-
 /// Closes `handle`: of a stream's connection, its end goes with the last
 /// handle and the last call; of anything else, the bare `close`.
 pub fn let_go(handle: RawHandle) {
@@ -709,8 +701,8 @@ fn open<A: Answered>(
         let (rx, tx) = session::client(words, LAYOUT);
         let lent = region.share().map_err(|_| NetError::Io)?;
         let (answer, bell, connection) = ask(NetstackConn::connect()?, lent)?;
-        *HALVES[slot].rx.lock() = Some(rx);
-        *HALVES[slot].tx.lock() = Some(tx);
+        *HALVES[slot].rx.lock() = Kept::Held(rx);
+        *HALVES[slot].tx.lock() = Kept::Held(tx);
         let (region, base) = region.into_raw();
         let peer = answer.peer().unwrap_or(peer);
         let end = End { region, base: base as usize, bell, peer, local_port: answer.local_port(), read_shut: false, handles: 0, calls: 0 };
@@ -741,19 +733,16 @@ mod tests {
         End { region: h(1), base: 0x20_0000, bell: h(2), peer: ([192, 0, 2, 2], 80), local_port: 49_152, read_shut: false, handles: 0, calls: 0 }
     }
 
-    /// A handle given out and taken back reaches the end it was given out of,
-    /// and the end goes only with its last handle and its last call.
+    /// The end goes only with its handle and its last call.
     #[test]
-    fn an_end_goes_with_its_last_handle_and_its_last_call() {
+    fn an_end_goes_with_its_handle_and_its_last_call() {
         let mut table = Table::new();
         let slot = table.reserve().unwrap();
         table.enter(slot, end(), h(10));
-        assert!(table.add(slot, h(11)));
-        assert_eq!(table.find(h(11)), Some(slot), "a duplicate reaches the end");
-        let (called, _) = table.call(h(11)).unwrap();
-        assert_eq!(table.forget(h(10)), Some(None), "a handle is left");
-        assert_eq!(table.forget(h(11)), Some(None), "a call is left");
-        assert_eq!(table.find(h(11)), None, "the handle reaches nothing");
+        assert_eq!(table.find(h(10)), Some(slot), "the handle reaches the end");
+        let (called, _) = table.call(h(10)).unwrap();
+        assert_eq!(table.forget(h(10)), Some(None), "a call is left");
+        assert_eq!(table.find(h(10)), None, "the handle reaches nothing");
         assert_eq!(table.returned(called), Some(End { handles: 0, calls: 0, ..end() }), "the last call frees it");
         assert_eq!(table.reserve(), Some(slot + 1), "a freed slot is not taken before its halves are cleared");
         table.unreserve(slot);

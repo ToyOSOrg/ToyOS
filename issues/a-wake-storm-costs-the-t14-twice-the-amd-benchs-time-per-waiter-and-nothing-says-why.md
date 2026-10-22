@@ -22,7 +22,8 @@ An earlier T14 boot read 746 cycles, 308 ns
 figure is one boot's minimum of nine, so the spread across boots is unknown.
 
 The walk claims each waiter and posts to its home CPU's mailbox and doorbell
-(`kernel/pure/sched/mailbox.rs:474-490`), kicking one that sleeps. The T14 runs
+(`kernel/pure/sched/mailbox.rs`), kicking on the doorbell's edge; since #874
+(`347e3313d`) that kicks a busy target too, after the readings above. The T14 runs
 its local APIC in x2APIC mode (`apic=X2apic`,
 https://github.com/ToyOSOrg/ToyOS/pull/861#issuecomment-6113257693) and the
 AMD bench in xAPIC (`apic=Xapic`,

@@ -3,7 +3,7 @@
 //! of the address space it answers for.
 
 /// Which path issued a shootdown, so the census names who pays: `Dlopen` (a
-/// `Shared` window or rollback unmap), `Pcid` (pool reclaim), `Mmio`, `Unmap`
+/// rollback unmap), `Pcid` (pool reclaim), `Mmio`, `Unmap`
 /// (`Unmapped::drop`), `Pipe`, `Staged` (a test actuator's), `Bench`
 /// (`arch::tlb::bench`'s own, so a measured shootdown is never counted as one
 /// a path in this kernel needed), `Stop` (the power-off's, for the answer from

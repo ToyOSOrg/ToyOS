@@ -1,5 +1,5 @@
 //! Listeners and the node's places, against peers the test scripts, at 192.0.2.2 unless a test
-//! puts one elsewhere, and clients that are `toyos_transport::session`'s own client end over a
+//! puts one elsewhere, and clients that are `toyos::transport::session`'s own client end over a
 //! region on the heap (`common::client`). No scenario ids: the specifications' listening
 //! scenarios are `toyos-net-tcp`'s; these are what the node does between [tcp]'s queues, an
 //! owner's wakes and its accepts.
@@ -24,8 +24,8 @@ use common::client::Client;
 use common::{arp, batch, terms, Segment, Wire, A, BUDGET, ELSEWHERE, MAC, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
 use toyos_net_node::{AcceptRefused, Accepted, ConnectRefused, ListenRefused, ListenerId, Node, Refused, StreamEvent, StreamId, Wake, WriteRefusal};
-use toyos_transport::session::Refused as Read;
-use toyos_transport::Violation;
+use toyos::transport::session::Refused as Read;
+use toyos::transport::Violation;
 use toyos_net_tcp::{limits, Counter, Endpoint};
 use toyos_net_wire::{Instant, Port};
 

@@ -14,8 +14,7 @@ listen, an accept and a bind with none left are refused with nothing made:
 `a_connect_past_the_places_is_refused_and_sends_nothing`,
 `a_listener_holds_a_place_and_a_listen_without_one_makes_nothing` and
 `a_datagram_socket_holds_a_place_and_a_bind_without_one_makes_nothing`
-(`system/netstack/node/tests/listeners.rs`), and in a guest the connect past
-them, answered `ERR_RESOURCE_EXHAUSTED` (`netstack_socket_churn`). The sockets
+(`system/netstack/node/tests/listeners.rs`). The sockets
 of the node's own, the responder's for the machine's name and each query's of
 a lookup, hold no place: a lookup is bounded by `toyos_dns::MAX_LOOKUPS` and
 its rounds.

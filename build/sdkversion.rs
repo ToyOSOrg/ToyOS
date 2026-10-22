@@ -20,10 +20,11 @@ pub struct Crate {
 }
 
 /// The published crates, in the order a publisher must take them.
+///
+/// A crate joins only once crates.io holds it with `publish.yml` its trusted
+/// publisher: the token that workflow publishes with cannot create a crate.
 pub const PUBLISHED: &[Crate] = &[
     Crate { name: "toyos-abi", dir: "sdk/abi" },
-    Crate { name: "toyos-untrusted", dir: "lib/untrusted" },
-    Crate { name: "toyos-transport", dir: "lib/blockring/transport" },
     Crate { name: "toyos-keymap", dir: "sdk/keymap" },
     Crate { name: "toyos-font", dir: "sdk/font" },
     Crate { name: "toyos", dir: "sdk/toyos" },

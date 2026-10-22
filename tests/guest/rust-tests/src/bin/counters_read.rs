@@ -32,11 +32,13 @@ use toyos_abi::counters::{Counter, RawRecord, Record};
 use toyos_abi::handle::{Rights, HANDLE_INVALID};
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
+use std::os::toyos::process::ExitStatusExt;
+use toyos_abi::end::{End, Fault};
 
 const SELF_PATH: &str = "/system/bin/test_rs_counters_read";
 
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
+/// How the kernel ends a process that names a handle it does not hold.
+const HANDLE_FAULT: End = End::Fault(Fault::Handle);
 
 /// Reads each of the many readers makes.
 const READS: usize = 50;
@@ -125,7 +127,7 @@ fn rights(full: &[Record]) {
     assert_eq!(read(&none).err(), Some(SyscallError::PermissionDenied), "a cap without COUNTERS read the counters");
     let mut buf = vec![RawRecord::EMPTY; full.len()];
     assert_eq!(
-        syscall::counters(RawHandle(1), &mut buf),
+        syscall::counters(stdout(), &mut buf),
         Err(SyscallError::PermissionDenied),
         "a console was taken as a capability",
     );
@@ -164,5 +166,10 @@ fn unheld() {
         .wait_with_output()
         .expect("wait the unheld child");
     assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "reached unheld", "the child never reached its call");
-    assert_eq!(out.status.code(), Some(HANDLE_FAULT), "SYS_COUNTERS took a handle nobody holds");
+    assert_eq!(End::from_word(out.status.into_raw()), Some(HANDLE_FAULT), "SYS_COUNTERS took a handle nobody holds");
+}
+
+/// The kernel handle this process's standard output is, descriptor 1's.
+fn stdout() -> RawHandle {
+    toyos::fd::with(1, |o| o.handle).expect("the test is given a standard output")
 }

@@ -54,7 +54,6 @@ use std::time::Duration;
 use toyos::endow::{Endowments, SYSCAP_LABEL};
 use toyos::syscap::SysCap;
 use toyos_abi::syscall::{self, MmapFlags, MmapProt};
-use toyos_abi::RawHandle;
 
 #[path = "../roster.rs"]
 mod roster;
@@ -86,10 +85,10 @@ static COUNTS_ARMED: AtomicU32 = AtomicU32::new(0);
 const SELF: &str = "/system/bin/test_rs_futex_wake_counts";
 /// `argv[1]` the sweeper is spawned with.
 const SWEEP: &str = "sweep";
-/// `argv[1]` of [`revoked_while_still_mapped`]'s child, and the slot it finds
-/// the pipe in.
+/// `argv[1]` of [`revoked_while_still_mapped`]'s child, and the descriptor
+/// it finds the pipe at.
 const LET_GO: &str = "let-go";
-const INHERITED_PIPE: RawHandle = RawHandle(3);
+const INHERITED_PIPE: i32 = 3;
 
 /// How many 2 MiB frames the third arm parks a waiter on and then unmaps.
 ///
@@ -502,7 +501,7 @@ fn revoked_while_still_mapped() {
 
     let child = Command::new(SELF)
         .arg(LET_GO)
-        .inherit_handle(INHERITED_PIPE.0, ends.read.0)
+        .inherit_handle(INHERITED_PIPE as u32, ends.read.0)
         .stdout(Stdio::piped())
         .spawn()
         .unwrap_or_else(|e| panic!("spawn the child that lets go: {e}"));
@@ -527,8 +526,10 @@ fn revoked_while_still_mapped() {
 /// The other process of [`revoked_while_still_mapped`]: map the pipe it
 /// inherited, then close its only handle to it, which unmaps its window.
 fn let_go() {
-    syscall::pipe_map(INHERITED_PIPE).expect("map the inherited pipe");
-    syscall::close(INHERITED_PIPE);
+    toyos::fd::with(INHERITED_PIPE, |o| syscall::pipe_map(o.handle))
+        .expect("the pipe was inherited as its descriptor")
+        .expect("map the inherited pipe");
+    toyos::fd::close(INHERITED_PIPE).expect("close the inherited pipe's one descriptor");
     println!("mapped and let go");
 }
 

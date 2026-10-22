@@ -2,14 +2,16 @@
 //! `IA32_APIC_BASE` and the performance request hold on every CPU in this
 //! machine. One declaration, applied by the BSP and every AP and checked on
 //! each; nothing else may write any of them but [`flush_global`], which puts
-//! back the `CR4` it read. Each register is written whole: `CR0` and `EFER` are
-//! constants, `CR4` is required bits plus whatever optional bits this CPU
+//! back the `CR4` it read, and an AP's trampoline, which enters long mode
+//! under [`EFER_BEFORE_LONG_MODE`]. Each register is written whole: `CR0` and
+//! `EFER` are constants, `CR4` is required bits plus whatever optional bits this CPU
 //! offers, `XCR0` and the save form are what `kernel::xsave` makes of this
 //! CPU's CPUID, `IA32_XSS` is zero wherever it exists (no supervisor component
 //! is enabled), and `IA32_APIC_BASE` is the local APIC at its architectural address in the one
 //! mode CPUID offers — x2APIC where it exists, xAPIC where it does not.
 //! `EFER.NXE` lets bit 63 of a paging entry mean *not executable*
-//! ([`Prot`](crate::mm::policy::Prot)).
+//! ([`Prot`](crate::mm::policy::Prot)), and `CR0.WP` makes a read-only one
+//! read-only at CPL 0: both are set before a CPU loads the kernel's tables.
 //!
 //! The performance request is HWP's: `IA32_HWP_INTERRUPT` where it exists,
 //! `IA32_PM_ENABLE`, `IA32_HWP_REQUEST` as `kernel::cpu::hwp_request` derives
@@ -163,6 +165,11 @@ const _: () = assert!(CR4_OPTIONAL & CR4_FORBIDDEN == 0);
 /// here, never by `arch::syscall::init`, so one register keeps one owner.
 pub const EFER: u64 = efer::SCE | efer::LME | efer::LMA | efer::NXE;
 
+/// [`EFER`] but `LMA`, which the CPU sets itself as paging turns on in
+/// long mode (SDM Vol. 3A, "Initializing IA-32e Mode"): what an AP writes
+/// before it does.
+pub const EFER_BEFORE_LONG_MODE: u64 = EFER & !efer::LMA;
+
 /// The declaration as the BSP computed it. Zero means not yet declared — also [`pcid_active`]'s correct answer before then.
 static DECLARED_CR4: AtomicU64 = AtomicU64::new(0);
 
@@ -174,12 +181,24 @@ static DECLARED_XCR0: AtomicU64 = AtomicU64::new(0);
 /// evidence of the check having run and not a restatement of the CPU count.
 static CHECKED: AtomicU64 = AtomicU64::new(0);
 
-/// Puts this CPU's `CR0` into [`CR0`]. [`pat::init`](super::pat::init)
-/// restores the `CR0` it finds, so a firmware `CD` survives that write and is
-/// cleared here: every AP runs this first, and the BSP runs it after, because
-/// the BSP's `pat::init` has to precede the panel it would report a refusal on.
-pub fn init_cr0(cpu_id: u32) {
+/// Puts this CPU's `CR0` into [`CR0`] and its `IA32_EFER` into [`EFER`]: what
+/// the kernel's tables need before this CPU loads them.
+/// [`pat::init`](super::pat::init) restores the `CR0` it finds, so a firmware
+/// `CD` survives that write and is cleared here: every AP runs this first, and
+/// the BSP runs it after, because the BSP's `pat::init` has to precede the
+/// panel it would report a refusal on.
+pub fn init_paging(cpu_id: u32) {
     let before = bench::sample();
+    // `NX` is `CPUID.80000001H:EDX[20]` (SDM Vol. 2A Table 3-8); the extended
+    // leaf must exist before it means anything. Asked first: setting `NXE`
+    // without it is `#GP`, and the BSP has no vectors of its own yet.
+    let (max_ext, _, _, _) = cpu::cpuid(0x8000_0000, 0);
+    let ext_edx = if max_ext >= 0x8000_0001 { cpu::cpuid(0x8000_0001, 0).3 } else { 0 };
+    assert!(
+        ext_edx & (1 << 20) != 0,
+        "control_regs: cpu{cpu_id} has no NX bit, so no mapping this kernel writes could \
+         be made non-executable and W^X would silently not exist",
+    );
     if !skipped(cpu_id) {
         let live = cpu::read_cr0();
         if live & (cr0::CD | cr0::NW) != 0 {
@@ -193,8 +212,12 @@ pub fn init_cr0(cpu_id: u32) {
             }
         }
         // SAFETY: `CR0`'s value is this file's declaration, argued in its own
-        // doc comment.
-        unsafe { cpu::write_cr0(CR0) };
+        // doc comment; `wrmsr` writes [`EFER`], whose `NXE` this CPU has just
+        // said it defines and whose `LMA` it, in long mode, already holds.
+        unsafe {
+            cpu::write_cr0(CR0);
+            cpu::wrmsr(efer::MSR, EFER);
+        }
     }
     bench::report(cpu_id, before);
 }
@@ -234,10 +257,11 @@ fn hwp_declared(cpu_id: u32) -> Option<kernel::cpu::Hwp> {
     verdict.ok()
 }
 
-/// Puts this CPU's `CR4`, `EFER`, `XCR0` and `IA32_XSS` into the declaration,
-/// checks them against it, and declares the save form and the area they imply. Must run
-/// after [`init_cr0`], before `arch::syscall::init`, which needs `SCE` set,
-/// and before the first task starts, which loads and saves by `XCR0`.
+/// Puts this CPU's `CR4`, `XCR0` and `IA32_XSS` into the declaration, checks
+/// them, `CR0` and `EFER` against it, and declares the save form and the area
+/// they imply. Must run after [`init_paging`], before `arch::syscall::init`,
+/// which needs `SCE` set, and before the first task starts, which loads and
+/// saves by `XCR0`.
 pub fn init(cpu_id: u32) {
     let declared = declaration(cpu_id);
     let (xcr0, form) = xsave_declaration(cpu_id);
@@ -245,15 +269,12 @@ pub fn init(cpu_id: u32) {
     if !skipped(cpu_id) {
         // SAFETY: `write_cr4` faults only on an undefined bit, on clearing `PAE`
         // in long mode, or on `PCIDE` with a nonzero PCID — `declaration` checked
-        // the first two for both values and both callers use PCID 0; `wrmsr`
-        // writes [`EFER`], whose bits `declaration` has just confirmed this CPU
-        // defines and whose `LMA` is the one this CPU, in long mode, already holds.
+        // the first two for both values and both callers use PCID 0.
         unsafe {
             // Through `PGE` clear: only a change of `PGE` drops the global
             // translations a firmware that left it set may still hold.
             cpu::write_cr4(declared & !cr4::PGE);
             cpu::write_cr4(declared);
-            cpu::wrmsr(efer::MSR, EFER);
             // SAFETY: `CR4.OSXSAVE` is set by the write above, and
             // `xcr0_declaration` took only components this CPU enumerates,
             // AVX-512's three together and with AVX (SDM Vol. 1 §13.3).
@@ -424,19 +445,12 @@ fn declaration(cpu_id: u32) -> u64 {
     );
     let declared = CR4_REQUIRED | (have & CR4_OPTIONAL);
 
-    // `SYSCALL` and `NX` are `CPUID.80000001H:EDX` bits 11 and 20 (SDM Vol.
-    // 2A Table 3-8); the extended leaf must exist before they mean anything.
-    let (max_ext, _, _, _) = cpu::cpuid(0x8000_0000, 0);
-    let ext_edx = if max_ext >= 0x8000_0001 { cpu::cpuid(0x8000_0001, 0).3 } else { 0 };
+    // `SYSCALL` is `CPUID.80000001H:EDX[11]` (SDM Vol. 2A Table 3-8), a leaf
+    // `init_paging` found.
     assert!(
-        ext_edx & (1 << 11) != 0,
+        cpu::cpuid(0x8000_0001, 0).3 & (1 << 11) != 0,
         "control_regs: cpu{cpu_id} has no SYSCALL/SYSRET, which is this kernel's only \
          way into and out of Ring 3",
-    );
-    assert!(
-        ext_edx & (1 << 20) != 0,
-        "control_regs: cpu{cpu_id} has no NX bit, so no mapping this kernel writes could \
-         be made non-executable and W^X would silently not exist",
     );
 
     // Changing `LA57` with paging on is `#GP`, so this only ever reads it.

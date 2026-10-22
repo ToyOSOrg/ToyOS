@@ -16,9 +16,9 @@ use crate::time::Instant;
 use kernel::clock::{anchor, ticks_to_nanos};
 use toyos_wallclock::Civil;
 
-static TSC_BOOT: AtomicU64 = AtomicU64::new(0);
-static TSC_PERIOD_FS: AtomicU64 = AtomicU64::new(0);
-/// The counter's zero to `TSC_BOOT`, in nanoseconds.
+static COUNTER_AT_BOOT: AtomicU64 = AtomicU64::new(0);
+static COUNTER_PERIOD_FS: AtomicU64 = AtomicU64::new(0);
+/// The counter's zero to `COUNTER_AT_BOOT`, in nanoseconds.
 static STAMP_AT_BOOT: AtomicU64 = AtomicU64::new(0);
 /// One counter tick at the rate the CPU states, in femtoseconds; zero where it
 /// states none, or before [`state`].
@@ -41,8 +41,8 @@ pub fn set_counter(boot: u64, period_fs: u64) {
     let stated = STATED_FS.load(Relaxed);
     let at_boot = ticks_to_nanos(boot, if stated != 0 { stated } else { period_fs });
     STAMP_AT_BOOT.store(at_boot, Relaxed);
-    TSC_BOOT.store(boot, Relaxed);
-    TSC_PERIOD_FS.store(period_fs, Relaxed);
+    COUNTER_AT_BOOT.store(boot, Relaxed);
+    COUNTER_PERIOD_FS.store(period_fs, Relaxed);
     publish_page(boot, period_fs, at_boot);
 }
 
@@ -105,7 +105,7 @@ pub fn map_page(space: &mut crate::mm::paging::AddressSpace) {
 
 /// Whether [`nanos_since_boot`] measures anything yet; false before [`init`].
 pub fn calibrated() -> bool {
-    TSC_PERIOD_FS.load(Relaxed) != 0
+    COUNTER_PERIOD_FS.load(Relaxed) != 0
 }
 
 
@@ -113,7 +113,7 @@ pub fn calibrated() -> bool {
 /// reads it from inside a bracket where panicking would reenter the log.
 /// Saturating, not wrapping: a trailing CPU reads as oldest, not lying newest after a 584-year wrap.
 pub fn nanos_since_boot() -> u64 {
-    ticks_to_nanos(cpu::counter().saturating_sub(TSC_BOOT.load(Relaxed)), TSC_PERIOD_FS.load(Relaxed))
+    ticks_to_nanos(cpu::counter().saturating_sub(COUNTER_AT_BOOT.load(Relaxed)), COUNTER_PERIOD_FS.load(Relaxed))
 }
 
 /// The same reading as an [`Instant`], the type arithmetic on it is allowed in.
@@ -122,9 +122,9 @@ pub fn now() -> Instant {
     Instant::from_nanos_since_boot(nanos_since_boot())
 }
 
-/// The [`cpu::rdtsc`] value `nanos` in the future, for a wait loop that must
+/// The [`cpu::counter`] reading `nanos` in the future, for a wait loop that must
 /// not call the nanosecond clock.
-pub fn tsc_deadline(nanos: u64) -> u64 {
+pub fn counter_deadline(nanos: u64) -> u64 {
     cpu::counter().saturating_add(counter_ticks(nanos))
 }
 
@@ -133,7 +133,7 @@ pub fn tsc_deadline(nanos: u64) -> u64 {
 /// needs. Before [`init`] the period is unknown and this is zero, so a bound
 /// derived from it is one its arm has to refuse.
 pub fn counter_ticks(nanos: u64) -> u64 {
-    let period_fs = TSC_PERIOD_FS.load(Relaxed);
+    let period_fs = COUNTER_PERIOD_FS.load(Relaxed);
     if period_fs == 0 {
         return 0;
     }
@@ -145,12 +145,12 @@ pub fn counter_ticks(nanos: u64) -> u64 {
 /// Zero while the period is unknown, so a span taken on a machine that never
 /// calibrated reads as no time rather than as an invented one.
 pub fn nanos_of_ticks(ticks: u64) -> u64 {
-    ticks_to_nanos(ticks, TSC_PERIOD_FS.load(Relaxed))
+    ticks_to_nanos(ticks, COUNTER_PERIOD_FS.load(Relaxed))
 }
 
 /// Polls `ready` until it holds or `nanos` pass; `false` is the deadline.
-/// Reads the TSC, not [`nanos_since_boot`], because that clock's out-of-line divide
-/// would land an NMI sample's `rip` in `compiler_builtins` rather than in the wait.
+/// Reads the counter, not [`nanos_since_boot`], because that clock's out-of-line divide
+/// would land an NMI sample's PC in `compiler_builtins` rather than in the wait.
 ///
 /// **Before [`init`] there is no period to measure a span with, so this asks
 /// `ready` once and answers it.** A wait nothing can bound is the one thing an
@@ -160,7 +160,7 @@ pub fn settles(nanos: u64, ready: impl Fn() -> bool) -> bool {
     if !calibrated() {
         return ready();
     }
-    let until = tsc_deadline(nanos);
+    let until = counter_deadline(nanos);
     while !ready() {
         if cpu::counter() >= until {
             return false;
@@ -187,7 +187,7 @@ pub fn init_wall(reading: Result<(Civil, u64), impl core::fmt::Display>) {
         }
     };
 
-    BOOT_SECS.store(anchor(civil.to_unix_secs(), at, TSC_BOOT.load(Relaxed), TSC_PERIOD_FS.load(Relaxed)), Relaxed);
+    BOOT_SECS.store(anchor(civil.to_unix_secs(), at, COUNTER_AT_BOOT.load(Relaxed), COUNTER_PERIOD_FS.load(Relaxed)), Relaxed);
     WALL_KNOWN.store(true, Release);
     log!("clock: the RTC reads {civil} UTC");
 }

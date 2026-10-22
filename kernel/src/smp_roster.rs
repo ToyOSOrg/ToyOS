@@ -2,7 +2,8 @@
 //! an id commits only after its AP's handshake and `commit` publishes the slot
 //! before the count, so `0..count()` has no dead slot; and the word `release` sets
 //! is the word `answering` reads. Of the kernel it names only
-//! `crate::arch::cpu::hardware_id`, which `kernel-loom` supplies to compile this file.
+//! `crate::arch::cpu::hardware_id` and [`CpuSlice`], which `kernel-loom`
+//! compiles beside this file.
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -10,8 +11,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
-/// Matches `sched::MAX_CPUS`; the roster refuses an id at or above it.
-pub const MAX_CPUS: usize = 8;
+use crate::cpu_slice::CpuSlice;
 
 const NO_HARDWARE_ID: u32 = u32::MAX;
 
@@ -35,8 +35,9 @@ impl Attempt {
 pub struct Roster {
     /// Committed CPUs; the BSP is 1 from the start, every other write a `commit`.
     count: AtomicU32,
-    /// `hardware_ids[i]` is committed iff `i < count`; [`NO_HARDWARE_ID`] until then.
-    hardware_ids: [AtomicU32; MAX_CPUS],
+    /// One slot per CPU the firmware names; `hardware_ids[i]` is committed iff
+    /// `i < count`, and [`NO_HARDWARE_ID`] until then.
+    hardware_ids: CpuSlice<AtomicU32>,
     /// Released and answering: one fact, one store.
     ready: AtomicBool,
     #[cfg(feature = "smp-ready-split")]
@@ -55,7 +56,7 @@ impl Roster {
     pub const fn new() -> Self {
         Self {
             count: AtomicU32::new(1),
-            hardware_ids: [const { AtomicU32::new(NO_HARDWARE_ID) }; MAX_CPUS],
+            hardware_ids: CpuSlice::new(),
             ready: AtomicBool::new(false),
             #[cfg(feature = "smp-ready-split")]
             answer: AtomicBool::new(false),
@@ -69,13 +70,24 @@ impl Roster {
     pub fn new() -> Self {
         Self {
             count: AtomicU32::new(1),
-            hardware_ids: core::array::from_fn(|_| AtomicU32::new(NO_HARDWARE_ID)),
+            hardware_ids: CpuSlice::new(),
             ready: AtomicBool::new(false),
             #[cfg(feature = "smp-ready-split")]
             answer: AtomicBool::new(false),
             next_token: AtomicU32::new(1),
             echoed: AtomicU64::new(0),
         }
+    }
+
+    /// A slot for each of the `capacity` CPUs the firmware names, before any
+    /// AP is attempted.
+    pub fn size(&self, capacity: usize) {
+        self.hardware_ids.size(capacity, |_| AtomicU32::new(NO_HARDWARE_ID));
+    }
+
+    /// The CPUs the firmware names; 0 before [`Self::size`].
+    pub fn capacity(&self) -> usize {
+        self.hardware_ids.len()
     }
 
     /// The BSP's own `arch::cpu::hardware_id` in slot 0; the count already covers it.
@@ -93,14 +105,14 @@ impl Roster {
         self.hardware_ids[id as usize].load(Ordering::Relaxed)
     }
 
-    /// Reserve the next dense id and a token, committing nothing; `None` at MAX_CPUS.
-    pub fn begin_attempt(&self) -> Option<Attempt> {
+    /// Reserve the next dense id and a token, committing nothing. Bring-up
+    /// attempts each CPU the firmware names at most once, so an id past the
+    /// capacity is a kernel bug.
+    pub fn begin_attempt(&self) -> Attempt {
         let id = self.count.load(Ordering::Relaxed);
-        if id as usize >= MAX_CPUS {
-            return None;
-        }
+        assert!((id as usize) < self.capacity(), "smp: cpu{id} attempted on a roster sized for {}", self.capacity());
         let token = self.next_token.fetch_add(1, Ordering::Relaxed);
-        Some(Attempt { id, token })
+        Attempt { id, token }
     }
 
     /// The AP's half of the handshake, run on that AP once it can take its

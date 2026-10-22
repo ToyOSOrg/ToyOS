@@ -17,10 +17,15 @@ permissions:
 
 jobs:
   # The host cache's writer restores nothing, and `seal` is green only once
-  # build/cicache.rs has sealed the tree the save stores.
+  # build/cicache.rs has sealed the tree the save stores; `stored` reads back
+  # what the save stored.
   host:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    permissions:
+      contents: read
+      # `stored`'s read of the repository's cache list.
+      actions: read
     env:
       # The driver's own target, and no step's: it says this job carries the
       # host cache (build/cicache.rs).
@@ -46,7 +51,14 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: host-sealed-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+          key: &entry host-sealed-${{ runner.os }}-${{ runner.arch }}-${{ github.run_id }}
+
+      # Red where the save stored nothing: it only warns.
+      - if: github.ref == 'refs/heads/main'
+        env:
+          ENTRY: *entry
+          GH_TOKEN: ${{ github.token }}
+        run: cargo run -- --ci stored
 
   toolchain:
     uses: ./.github/workflows/toolchain.yml
@@ -71,6 +83,19 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: cargo run -- --ci release
+
+  kvm:
+    needs: toolchain
+    if: ${{ !cancelled() }}
+    # Its container's pull.
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/guest.yml
+    with:
+      kvm: true
+      sysroot-key: ${{ needs.toolchain.outputs.sysroot-key }}
+      sysroot-path: ${{ needs.toolchain.outputs.sysroot-path }}
 
   tcg:
     needs: toolchain

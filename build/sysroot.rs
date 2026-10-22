@@ -25,7 +25,8 @@
 //! the primary's fork repository at the commit this tree pins and never moved ([`fork_checkout`]).
 //! `library/std` names `toyos-abi` and `toyos` by version, and every bootstrap
 //! run is handed this worktree's by one `[patch]` ([`std_patch`]); each file of
-//! its ToyOS backend, `sdk/std`, it names by a `#[path]` up out of the fork. So
+//! its ToyOS backend, `sdk/std` and the C allocator `sdk/libc/src/malloc.rs`
+//! it includes, it names by a `#[path]` up out of the fork. So
 //! each checkout's std compiles against its own worktree's ABI and backend with
 //! nothing rewritten, and the fork names no path to either crate, so moving one
 //! breaks no fork commit pinned before the move. The build is bootstrap's
@@ -65,14 +66,12 @@ use crate::toolchain::{self, host_triple, GuestTarget, Owner, Role, GUEST_TARGET
 use whole_toolchain::{whole, Whole};
 
 /// The per-worktree sources that end up inside a sysroot: std links the
-/// `toyos-abi`, `toyos`, `toyos-transport` and `toyos-untrusted` [`std_patch`]
-/// hands it and compiles its ToyOS backend from `sdk/std`, and
+/// `toyos-abi` and `toyos` [`std_patch`] hands it and compiles its ToyOS
+/// backend from `sdk/std`, C's allocator among it from `sdk/libc/src`, and
 /// `libtoyos_c.a` is `sdk/libc` with `toyos-elf` and `toyos-osrelease`.
-pub const SYSROOT_SOURCES: [&str; 9] = [
+pub const SYSROOT_SOURCES: [&str; 7] = [
     "sdk/abi/src",
     "sdk/toyos/src",
-    "lib/blockring/transport/src",
-    "lib/untrusted/src",
     "sdk/std",
     "lib/elf/src",
     "sdk/osrelease/src",
@@ -82,11 +81,9 @@ pub const SYSROOT_SOURCES: [&str; 9] = [
 
 /// Their manifests, and the lockfile and cargo configuration libc is built
 /// under: the features, versions and flags of the same build.
-pub(crate) const SYSROOT_MANIFESTS: [&str; 9] = [
+pub(crate) const SYSROOT_MANIFESTS: [&str; 7] = [
     "sdk/abi/Cargo.toml",
     "sdk/toyos/Cargo.toml",
-    "lib/blockring/transport/Cargo.toml",
-    "lib/untrusted/Cargo.toml",
     "lib/elf/Cargo.toml",
     "sdk/osrelease/Cargo.toml",
     "sdk/libc/Cargo.toml",
@@ -97,8 +94,7 @@ pub(crate) const SYSROOT_MANIFESTS: [&str; 9] = [
 /// Of [`SYSROOT_MANIFESTS`], the crates std names by version, which std's
 /// lockfile resolves with the fork's own through [`std_patch`]: what of a
 /// worktree can move a freestanding target's dependency versions.
-const STD_MANIFESTS: [&str; 4] =
-    ["sdk/abi/Cargo.toml", "sdk/toyos/Cargo.toml", "lib/blockring/transport/Cargo.toml", "lib/untrusted/Cargo.toml"];
+const STD_MANIFESTS: [&str; 2] = ["sdk/abi/Cargo.toml", "sdk/toyos/Cargo.toml"];
 
 /// One of the crates std names by version, in a worktree.
 pub(crate) struct StdCrate {
@@ -1279,7 +1275,7 @@ pub(crate) mod tests {
     /// The manifests [`std_crates`] reads, in a worktree at `root` that has
     /// no other source: what a bootstrap run is handed std's patch from.
     pub(crate) fn std_manifests(root: &Path) {
-        for (manifest, name) in STD_MANIFESTS.into_iter().zip(["toyos-abi", "toyos", "toyos-transport", "toyos-untrusted"]) {
+        for (manifest, name) in STD_MANIFESTS.into_iter().zip(["toyos-abi", "toyos"]) {
             write(&root.join(manifest), &format!("[package]\nname = \"{name}\"\n"));
         }
     }
@@ -1320,10 +1316,6 @@ pub(crate) mod tests {
                 format!("patch.crates-io.toyos-abi.path=\"{at}/sdk/abi\""),
                 "--config".to_string(),
                 format!("patch.crates-io.toyos.path=\"{at}/sdk/toyos\""),
-                "--config".to_string(),
-                format!("patch.crates-io.toyos-transport.path=\"{at}/lib/blockring/transport\""),
-                "--config".to_string(),
-                format!("patch.crates-io.toyos-untrusted.path=\"{at}/lib/untrusted\""),
             ],
         );
         for name in ["work tree", "work\"tree", "work\\tree", "work\ttree"] {

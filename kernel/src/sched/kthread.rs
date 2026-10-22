@@ -65,8 +65,8 @@ pub fn current_is_kernel_thread() -> bool {
 }
 
 /// Is `id` a kernel thread?
-// No lock: `drain_irqs` calls this on a machine already suspected of being
-// stuck, where taking one could hang diagnostics.
+// No lock: the stop asks this on a machine already suspected of being stuck,
+// where taking one could hang diagnostics.
 pub fn is_kernel_task(id: TaskId) -> bool {
     let packed = id.pack();
     ROWS.iter().any(|row| row.load(Ordering::Relaxed) == packed)
@@ -85,6 +85,8 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     let mut short = [0u8; THREAD_NAME_LEN];
     let len = name.len().min(THREAD_NAME_LEN - 1);
     short[..len].copy_from_slice(&name.as_bytes()[..len]);
+    // A job of its own: a kernel thread is nobody's helper.
+    let job = crate::object::job::new_job();
 
     // One hold across insert and place: a visible pid already has its thread scheduled.
     let mut guard = PROCESS_TABLE.lock();
@@ -92,7 +94,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     table.insert(ProcessEntry::new(
         crate::object::process::ProcessObject::new(pid),
         short,
-        Arc::new(Lock::new(kernel_process_data(name))),
+        Arc::new(Lock::new(kernel_process_data(name, job.clone()))),
         // No user image: its frames resolve through `symbols::resolve_kernel`.
         None,
         ThreadEntry::new(Arc::new(Lock::new(kernel_thread_data()))),
@@ -108,6 +110,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
         crate::mm::paging::kernel().clone(),
         0,
         None,
+        job,
     );
     table
         .get_mut(pid)
@@ -120,8 +123,8 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
     sched
 }
 
-/// Every field is the empty value: a kernel thread has no user half.
-fn kernel_process_data(name: &str) -> ProcessData {
+/// Every field is the empty value but its job: a kernel thread has no user half.
+fn kernel_process_data(name: &str, job: Arc<kernel::sched::job::Job>) -> ProcessData {
     ProcessData {
         handles: crate::object::HandleTable::new(),
         cwd: String::from("/"),
@@ -138,6 +141,7 @@ fn kernel_process_data(name: &str) -> ProcessData {
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
         endowments: Endowments::empty(),
+        job,
     }
 }
 

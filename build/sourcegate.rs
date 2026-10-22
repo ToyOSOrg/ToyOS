@@ -89,9 +89,9 @@ const NMI_SILENT: &[&str] =
     &["kernel/src/arch/x86_64/idt/nmi.rs", "kernel/src/hardlockup/mod.rs"];
 
 /// Every `enable_bus_master(` site `kernel/src` holds, by file and count.
-/// Arming DMA comes after a site's refusals — virtio parses its capability
-/// chain first and disarms on one it cannot use — and the three early-enabling
-/// MMIO drivers are `issues/bus-mastering-rides-memory-decode.md`'s to fix, not a precedent.
+/// No kernel site leaves a device it declined mastering the bus: virtio
+/// parses its capability chain first, and switches mastering off on a refusal
+/// that comes after arming.
 ///
 /// A function handed to a *process* takes the other path: `pcidev` arms bus
 /// mastering with `start_bus_mastering`, after the address space that bounds it
@@ -101,8 +101,6 @@ const NMI_SILENT: &[&str] =
 const BUS_MASTER_SITES: &[(&str, usize)] = &[
     ("kernel/src/drivers/pci.rs", 1),
     ("kernel/src/drivers/virtio.rs", 1),
-    ("kernel/src/drivers/hda.rs", 1),
-    ("kernel/src/drivers/xhci/wait/boot.rs", 1),
     ("kernel/src/arch/x86_64/amdvi/mod.rs", 1),
     ("kernel/src/pcidev/slot.rs", 1),
 ];
@@ -140,7 +138,6 @@ const SENTINEL_ALLOWED: &[(&str, usize)] = &[
 /// compiling with nobody asked. Per file *and* per count, so an added impl
 /// reds beside a permitted one and a deleted one reds its own stale row.
 const AUTO_TRAIT_IMPLS: &[(&str, usize)] = &[
-    ("kernel/src/drivers/hda.rs", 1),
     ("kernel/src/drivers/panic_console/mod.rs", 3),
     ("kernel/src/drivers/virtio_console.rs", 1),
     ("kernel/src/arch/x86_64/hw.rs", 1),
@@ -311,10 +308,7 @@ const HOSTNAME: &str = "a hostname carrying a personal name";
 /// Every value of a refused shape the tree keeps, by file, each identifying
 /// nobody. A value a shape passes says the same without a row here: a locally
 /// administered MAC, an RFC 5737 or RFC 3849 address.
-const IDENTIFIES_NOBODY: &[(&str, &str)] = &[
-    // Made up, in the kernel's own record of a disk that came back.
-    ("tests/checks/usb.rs", "FEDCBA98765432FEDCBA"),
-];
+const IDENTIFIES_NOBODY: &[(&str, &str)] = &[];
 
 /// Every maximal run of `line`'s bytes that `of` takes, and where it starts.
 /// `of` takes ASCII alone, so a run begins and ends on a character.

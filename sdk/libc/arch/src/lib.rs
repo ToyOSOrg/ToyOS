@@ -9,8 +9,9 @@
 //! `long double` widening against compiler-builtins', the errno codes against
 //! `include/errno.h`, IPv4 addresses and their texts against the host C
 //! library's, the socket option rule against the host's `setsockopt` and
-//! `getsockopt`, a datagram send's bind, and `realpath`'s resolution over a
-//! tree laid out here.
+//! `getsockopt`, a datagram send's bind, printf's numeric conversions against
+//! the C standard's text, `realpath`'s resolution over a tree laid out here,
+//! and C's allocator over a heap that checks every layout it is handed.
 
 #[cfg(test)]
 extern crate alloc;
@@ -21,6 +22,9 @@ mod alarmreq;
 #[cfg(test)]
 #[path = "../../src/arch/mod.rs"]
 mod arch;
+#[cfg(test)]
+#[path = "../../src/conversion.rs"]
+mod conversion;
 #[cfg(test)]
 #[path = "../../src/errcode.rs"]
 // Every code libc answers with, of which the modules here use a few.
@@ -48,6 +52,9 @@ mod linkreq;
 #[path = "../../src/listing.rs"]
 mod listing;
 #[cfg(test)]
+#[path = "../../src/malloc.rs"]
+mod malloc;
+#[cfg(test)]
 #[path = "../../src/memreq.rs"]
 mod memreq;
 #[cfg(test)]
@@ -62,6 +69,9 @@ mod sigmask;
 #[cfg(test)]
 #[path = "../../src/sockopt.rs"]
 mod sockopt;
+#[cfg(test)]
+#[path = "../../src/spawnreq.rs"]
+mod spawnreq;
 #[cfg(test)]
 #[path = "../../src/strtonum.rs"]
 mod strtonum;
@@ -97,17 +107,23 @@ mod listing_reader;
 #[cfg(all(test, target_arch = "aarch64"))]
 mod long_double;
 #[cfg(test)]
+mod malloc_blocks;
+#[cfg(test)]
 mod memory_refusals;
 #[cfg(test)]
 mod path_resolution;
 #[cfg(test)]
 mod poll_requests;
 #[cfg(test)]
+mod printf_conversions;
+#[cfg(test)]
 mod prototypes;
 #[cfg(test)]
 mod signal_masks;
 #[cfg(test)]
 mod socket_options;
+#[cfg(test)]
+mod spawn_requests;
 #[cfg(test)]
 mod strtonum_differential;
 #[cfg(test)]

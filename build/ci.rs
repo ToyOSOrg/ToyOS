@@ -34,12 +34,20 @@ use crate::{flags, release, sdkversion};
 const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
   host              every host test: the build system, the harness's own checks,
                     the workspace's host members, the licences of what ships,
-                    clippy, the model controls, userland and the SDK (ci.yml, nightly)
+                    clippy, the model controls, userland and the SDK (ci.yml, nightly);
+                    for a merge group that changes documentation alone, the
+                    build system's tests and the licences, which read it
+  scope             whether a merge group changes anything but documentation,
+                    told to the jobs that build (ci.yml)
   seal              `host` from a cold tree, then that tree sealed as the host
                     cache's entry, which the step after it saves (nightly)
+  stored            that entry as the repository's cache list says it stores,
+                    held to the repository's limit beside main's toolchain (nightly)
   toolchain         the cache entry of each store of this tree's toolchain
   bootstrap         build the stores of this tree's toolchain its job did not restore
-  guest             the guest suite, on the sysroot its job restored
+  image             the shipped image of every architecture, on the sysroot its
+                    job restored (ci.yml)
+  guest             the guest suite, on the sysroot its job restored (nightly)
   release           put the sysroot main's nightly restored up as its toolchain release
   publish           put main's SDK crates on crates.io (publish.yml)";
 
@@ -47,8 +55,11 @@ const USAGE: &str = "cargo run -- --ci <job>, where <job> is one of:
 enum Job {
     Host,
     Seal,
+    Stored,
+    Scope,
     Toolchain,
     Bootstrap,
+    Image,
     Guest,
     Release,
     Publish,
@@ -58,8 +69,11 @@ fn parse(words: &[String]) -> Result<Job, String> {
     let job = match words.first().map(String::as_str) {
         Some("host") => Job::Host,
         Some("seal") => Job::Seal,
+        Some("stored") => Job::Stored,
+        Some("scope") => Job::Scope,
         Some("toolchain") => Job::Toolchain,
         Some("bootstrap") => Job::Bootstrap,
+        Some("image") => Job::Image,
         Some("guest") => Job::Guest,
         Some("release") => Job::Release,
         Some("publish") => Job::Publish,
@@ -79,10 +93,13 @@ pub fn dispatch(root: &Path, args: &[String]) {
     });
     forget_own_package();
     let steps = match &job {
-        Job::Host => host(root),
+        Job::Host => host(root, scope(root)),
         Job::Seal => seal(root),
+        Job::Stored => vec![step("the host cache's entry, as stored", cicache::stored)],
+        Job::Scope => vec![step("the change's scope", || tell_scope(scope(root)))],
         Job::Toolchain => vec![step("the stores of this tree's toolchain", || release::toolchain(root))],
         Job::Bootstrap => vec![step("this tree's toolchain", || release::bootstrap(root))],
+        Job::Image => image(root),
         Job::Guest => guest(root, &suite_args(&["--jobs", "1"])),
         Job::Release => vec![step("main's toolchain release", || release::release(root))],
         Job::Publish => vec![step("the SDK crates on crates.io", || publish(root))],
@@ -433,7 +450,8 @@ pub(crate) const SDK_DIR: &str = "sdk/toyos";
 const KERNEL_LOOM: &str = "kernel-loom";
 const KERNEL_SIM: &str = "kernel-sim";
 const BLOCKRING: &str = "toyos-blockring";
-const TRANSPORT: &str = "toyos-transport";
+/// The SDK package, whose `transport` module carries its own controls.
+const SDK: &str = "toyos";
 
 /// `toyos-crypto`, tested and linted in each of [`CRYPTO_FORMS`] rather than
 /// with the features the workspace's other members unify onto it.
@@ -478,9 +496,6 @@ pub(crate) const CONTROLS: &[Control] = &[
     ]),
     red(KERNEL_LOOM, "lock-acquire-off", Some("ticket_lock"), &[
         Fails("try_lock_observes_the_previous_owners_writes"),
-    ]),
-    red(KERNEL_LOOM, "owed-fence-off", Some("owed_lock"), &[
-        Fails("a_turned_away_cpu_holds_the_lock_or_is_answered"),
     ]),
     red(KERNEL_LOOM, "seqlock-writer-fence-off", Some("panic_console_publish"), &[
         Fails("a_snapshot_is_one_publication_whole"),
@@ -616,6 +631,12 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("pcid::tests::two_live_address_spaces_never_share_a_pcid"),
         Passes("pcid::oracle::tests::the_counting_allocator_produces_a_cross_space_read"),
     ]),
+    // A grant past its holder's limit is issued, truncated, as another grant.
+    red(KERNEL, "iova-ignores-limit", None, &[
+        Fails("iova::tests::a_function_that_drops_its_upper_bits_reaches_only_its_own_grant"),
+        Fails("iova::tests::every_grant_is_the_lowest_allowed_run_below_its_limit"),
+        Fails("iova::tests::the_amd_benchs_layout"),
+    ]),
     red(KERNEL, "mutate-spawn-skips-the-insert-recheck", None, &[
         Fails("proclife::interleave::tests::a_published_exit_leaves_no_unretired_thread"),
         Fails("proclife::interleave::tests::a_kill_racing_a_spawn_leaves_no_unretired_thread"),
@@ -675,20 +696,20 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(BLOCKRING, "mutate-no-reissue-after-loss", None, &[
         Fails("model::tests::what_a_flush_calls_durable_is_on_the_medium"),
     ]),
-    red(TRANSPORT, "publish-relaxed", Some("loom"), &[
+    red(SDK, "transport-publish-relaxed", Some("transport_loom"), &[
         Fails("a_published_entry_is_read_whole"),
         Fails("a_published_byte_is_read_as_written"),
     ]),
-    red(TRANSPORT, "head-relaxed", Some("loom"), &[Fails("a_published_byte_is_read_as_written")]),
-    red(TRANSPORT, "no-clamp", Some("loom"), &[Fails(
+    red(SDK, "transport-head-relaxed", Some("transport_loom"), &[Fails("a_published_byte_is_read_as_written")]),
+    red(SDK, "transport-no-clamp", Some("transport_loom"), &[Fails(
         "a_hostile_producer_yields_entries_or_a_violation",
     )]),
-    red(TRANSPORT, "no-clamp", None, &[Fails(
-        "stream::tests::a_hostile_producer_hands_the_consumer_at_most_the_ring",
+    red(SDK, "transport-no-clamp", None, &[Fails(
+        "transport::stream::tests::a_hostile_producer_hands_the_consumer_at_most_the_ring",
     )]),
     // The stream's lost wake: a sleeper whose exchange read the waker's clear
     // looks at a cursor from before it, and sleeps with nobody to ring.
-    red(TRANSPORT, "want-relaxed", Some("loom"), &[
+    red(SDK, "transport-want-relaxed", Some("transport_loom"), &[
         Fails("a_consumer_that_looked_again_is_rung_for_bytes_it_missed"),
         Fails("a_producer_that_looked_again_is_rung_for_room_it_missed"),
         Fails("two_sleepers_each_wake_when_room_is_released_first"),
@@ -704,24 +725,24 @@ pub(crate) const CONTROLS: &[Control] = &[
     // A session's lost wakes: a reader and a writer on one doorbell, a take
     // not passed on, a registration that neither arms nor rings, and a reset
     // a look that arms does not see.
-    red(TRANSPORT, "one-doorbell", Some("loom"), &[
+    red(SDK, "transport-one-doorbell", Some("transport_loom"), &[
         Fails("two_sleepers_each_wake_when_room_is_released_first"),
         Fails("two_sleepers_each_wake_when_data_is_published_first"),
     ]),
-    red(TRANSPORT, "no-pass-on", Some("loom"), &[
+    red(SDK, "transport-no-pass-on", Some("transport_loom"), &[
         Fails("a_poll_beside_a_blocking_read_is_answered_for_the_bytes_it_left"),
         Fails("a_poll_beside_a_blocking_read_is_answered_for_the_end_it_left"),
         Fails("a_poll_beside_a_blocking_write_is_answered_for_the_room_it_left"),
     ]),
-    red(TRANSPORT, "register-no-arm", Some("loom"), REGISTERED),
-    red(TRANSPORT, "register-no-ring", Some("loom"), REGISTERED),
-    red(TRANSPORT, "register-neither", Some("loom"), REGISTERED),
-    red(TRANSPORT, "head-only", Some("loom"), &[
+    red(SDK, "transport-register-no-arm", Some("transport_loom"), REGISTERED),
+    red(SDK, "transport-register-no-ring", Some("transport_loom"), REGISTERED),
+    red(SDK, "transport-register-neither", Some("transport_loom"), REGISTERED),
+    red(SDK, "transport-head-only", Some("transport_loom"), &[
         Fails("a_source_registered_over_a_full_ring_after_a_reset_gets_its_first_event"),
         Fails("a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event"),
     ]),
-    red(TRANSPORT, "end-keeps-inflight", None, &[Fails(
-        "inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
+    red(SDK, "transport-end-keeps-inflight", None, &[Fails(
+        "transport::inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
     )]),
 ];
 
@@ -781,13 +802,28 @@ fn run_control(root: &Path, control: &Control) -> Result<String, String> {
 /// end, is a test that fills the host's disk one run at a time.
 ///
 /// Clippy needs none of the ToyOS toolchain — the kernel and the bootloader
-/// lint against every architecture's bare targets ([`crate::clippy::BARE_TARGETS`]),
-/// which any rustup installs, and userland carries no clippy shape
-/// (`build/clippy.rs`).
+/// lint against every architecture's bare targets, and osbench's Linux half
+/// against its Linux one ([`crate::clippy::TARGETS`]), which any rustup
+/// installs; no other userland carries a clippy shape (`build/clippy.rs`).
 ///
 /// In a job that carries the cache ([`cicache::carried`]) the restored entry is
 /// read before any step. A developer's tree keeps the dates its edits gave it.
-fn host(root: &Path) -> Vec<Step> {
+///
+/// A change of [`Scope::Documentation`] runs only the build system's tests and
+/// the licences. **Every host check that reads Markdown is in those two**: the
+/// tracked-file gates, the issues the manifests (`userlandhost::programs`, also
+/// read by the apps step) and the licence exceptions cite, and the ledger's
+/// tracked tree. A check that comes to read Markdown elsewhere belongs there too.
+fn host(root: &Path, scope: Result<(Scope, String), String>) -> Vec<Step> {
+    let mut docs_only = false;
+    let mut steps = vec![step("the change's scope", || {
+        let (scope, said) = scope?;
+        docs_only = scope == Scope::Documentation;
+        Ok(said)
+    })];
+    if steps[0].verdict.is_err() {
+        return steps;
+    }
     let carried = cicache::carried(root, &std::env::current_exe().expect("the driver's own path"));
     let tmp = toyos_tmpdir::TempDir::new("ci-host");
     let short = Path::new(toyos_tmpdir::SHORT_BASE);
@@ -796,17 +832,25 @@ fn host(root: &Path) -> Vec<Step> {
     // concurrently with the write, and every child inherits it.
     std::env::set_var("TMPDIR", tmp.path());
     let host_triple = crate::toolchain::host_triple();
-    let mut steps = Vec::new();
     if carried {
         carry();
-        steps.push(step("the cache entry, read by content", || cicache::read(root)));
+        let read = step("the cache entry, read by content", || cicache::read(root));
         // Every step after an unreadable entry would be judged against it.
-        if steps[0].verdict.is_err() {
+        if read.verdict.is_err() {
+            steps.push(read);
             return steps;
         }
+        steps.push(read);
+    }
+    let build_system = || step("the build system", || cargo(root, &["test", "--lib"]));
+    let licences = || step("the licences of what ships", || crate::licence::judge(root));
+    if docs_only {
+        steps.extend([build_system(), licences()]);
+        steps.push(step("nothing left in $TMPDIR or /tmp", || left_behind(&tmp, short, &before)));
+        return steps;
     }
     steps.extend([
-        step("the build system", || cargo(root, &["test", "--lib"])),
+        build_system(),
         step("the harness's own checks", || cargo(root, &["test", "--test", "toyos-checks"])),
         step("the workspace's host members", || {
             let guests = crate::hostws::guest_packages(root);
@@ -824,12 +868,12 @@ fn host(root: &Path) -> Vec<Step> {
         step("the kernel's library", || {
             cargo(root, &["test", "-p", KERNEL, "--lib", "--features", "sched-check"])
         }),
-        step("the licences of what ships", || crate::licence::judge(root)),
+        licences(),
     ]);
-    steps.push(step("clippy and the bare targets", || {
+    steps.push(step("clippy and its targets", || {
         for args in [
             vec!["component", "add", "clippy"],
-            [&["target", "add"][..], &crate::clippy::BARE_TARGETS].concat(),
+            [&["target", "add"][..], &crate::clippy::TARGETS].concat(),
         ] {
             let status = Command::new("rustup").args(&args).status().map_err(|e| e.to_string())?;
             if !status.success() {
@@ -858,6 +902,8 @@ fn host(root: &Path) -> Vec<Step> {
             "log_body_words",
             "--test",
             "log_cursor",
+            "--test",
+            "cpu_slice",
         ])
     }));
     for control in CONTROLS {
@@ -905,7 +951,7 @@ fn seal(root: &Path) -> Vec<Step> {
         Ok(said)
     })];
     let Some(cold) = cold else { return steps };
-    steps.extend(host(root));
+    steps.extend(host(root, Ok((Scope::Everything, "the cache's entry is every step's".into()))));
     steps.push(step("the tree, sealed as the host cache's entry", || cicache::seal(root, &cold)));
     steps
 }
@@ -1037,6 +1083,103 @@ fn left_behind(tmp: &Path, short: &Path, before: &[PathBuf]) -> Result<String, S
         return Ok("every test took its scratch with it".into());
     }
     Err(said.join("; "))
+}
+
+// --- The change's scope --------------------------------------------------------
+
+/// What a change asks of the jobs that judge it.
+#[derive(Debug, PartialEq, Eq)]
+enum Scope {
+    /// Every check: the change is not documentation alone, or no change is named.
+    Everything,
+    /// Documentation alone ([`documentation`]): the host checks that read it,
+    /// and no toolchain or image.
+    Documentation,
+}
+
+/// Whether `path` is documentation: Markdown, by its name and never by its
+/// directory.
+fn documentation(path: &str) -> bool {
+    path.ends_with(".md")
+}
+
+/// The scope of the change this job judges, and what it found: a merge group's
+/// change against its base, and everything anywhere else.
+///
+/// The base is the merge group's parent: main, or the group of the entry ahead
+/// of this one. That is sound only because the ruleset's merge queue groups
+/// `ALLGREEN`, so every entry passes its own group; a rename is both its paths.
+fn scope(root: &Path) -> Result<(Scope, String), String> {
+    if std::env::var("GITHUB_EVENT_NAME").ok().as_deref() != Some("merge_group") {
+        return Ok((Scope::Everything, "not a merge group, so everything".into()));
+    }
+    let event = std::env::var_os("GITHUB_EVENT_PATH").ok_or("a merge group's job with no GITHUB_EVENT_PATH")?;
+    let event = std::fs::read_to_string(&event).map_err(|e| format!("{}: {e}", Path::new(&event).display()))?;
+    let (base, head) = merge_group(&event)?;
+    git(root, &["fetch", "--no-tags", "--depth=1", "origin", &base])?;
+    let listed = git(root, &["diff", "--name-only", "-z", "--no-renames", &base, &head])?;
+    let paths: Vec<String> = listed
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .map(|p| String::from_utf8_lossy(p).into_owned())
+        .collect();
+    Ok(classify(&paths))
+}
+
+fn classify(paths: &[String]) -> (Scope, String) {
+    match paths.iter().find(|path| !documentation(path)) {
+        Some(other) => (Scope::Everything, format!("{} path(s) changed, {other} among them", paths.len())),
+        None => (Scope::Documentation, format!("{} path(s) changed, documentation alone", paths.len())),
+    }
+}
+
+/// The base and head commits of the merge group a `merge_group` event names.
+fn merge_group(event: &str) -> Result<(String, String), String> {
+    let event: serde_json::Value = serde_json::from_str(event).map_err(|e| format!("the event: {e}"))?;
+    let commit = |field: &str| {
+        let sha = event["merge_group"][field].as_str().unwrap_or_default();
+        if sha.len() == 40 && sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            Ok(sha.to_string())
+        } else {
+            Err(format!("the event's merge_group.{field} is {sha:?}, which names no commit"))
+        }
+    };
+    Ok((commit("base_sha")?, commit("head_sha")?))
+}
+
+/// `git <args>` in `root`, its stdout on success.
+fn git(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+    let out = Command::new("git").current_dir(root).args(args).output().map_err(|e| format!("git: {e}"))?;
+    if out.status.success() {
+        Ok(out.stdout)
+    } else {
+        Err(format!("git {} exited {}: {}", args.join(" "), out.status, String::from_utf8_lossy(&out.stderr).trim()))
+    }
+}
+
+/// `scope`'s answer as the step output `build`: `false` for documentation
+/// alone. A red leaves it unset, which the workflow reads as a change that builds.
+fn tell_scope(scope: Result<(Scope, String), String>) -> Result<String, String> {
+    let (scope, said) = scope?;
+    let file = std::env::var_os("GITHUB_OUTPUT").ok_or("not a runner: no job reads the answer")?;
+    release::tell(Path::new(&file), &format!("build={}\n", scope == Scope::Everything))?;
+    Ok(said)
+}
+
+// --- The image job -------------------------------------------------------------
+
+/// `cargo run -- --build-only` for every architecture, on the sysroot its job
+/// restored: what the merge queue builds in place of the guest suite.
+fn image(root: &Path) -> Vec<Step> {
+    let mut steps = vec![step("the toolchain", || release::install(root))];
+    if steps[0].verdict.is_ok() {
+        for arch in Arch::ALL {
+            steps.push(step(&format!("the {} image", arch.name()), || {
+                cargo(root, &["run", "--", "--build-only", "--arch", arch.name()])
+            }));
+        }
+    }
+    steps
 }
 
 // --- The guest jobs ------------------------------------------------------------
@@ -1538,6 +1681,9 @@ mod tests {
     fn a_job_is_named_and_takes_nothing_after_it() {
         assert_eq!(parse(&words("host")), Ok(Job::Host));
         assert_eq!(parse(&words("seal")), Ok(Job::Seal));
+        assert_eq!(parse(&words("stored")), Ok(Job::Stored));
+        assert_eq!(parse(&words("scope")), Ok(Job::Scope));
+        assert_eq!(parse(&words("image")), Ok(Job::Image));
         assert_eq!(parse(&words("guest")), Ok(Job::Guest));
         assert_eq!(parse(&words("release")), Ok(Job::Release));
         assert!(parse(&words("guest 3/12")).is_err());
@@ -1545,6 +1691,53 @@ mod tests {
         assert!(parse(&words("host extra")).is_err());
         assert!(parse(&words("smoke")).is_err());
         assert!(parse(&[]).is_err());
+    }
+
+    /// **Only a change of Markdown alone is documentation**: one path of anything
+    /// else, under a directory that holds documentation or not, is everything.
+    #[test]
+    fn a_change_is_documentation_only_when_every_path_is_markdown() {
+        let scope = |paths: &[&str]| classify(&paths.iter().map(|p| p.to_string()).collect::<Vec<_>>()).0;
+        assert_eq!(scope(&["README.md", "issues/x.md", ".claude/agents/reviewer.md"]), Scope::Documentation);
+        assert_eq!(scope(&["requirements/README.md"]), Scope::Documentation);
+        assert_eq!(scope(&[]), Scope::Documentation);
+        for other in [".claude/settings.json", "issues/x.txt", "build/ci.rs", "rust", "NOTICE", "README.md.rs", "x.MD"] {
+            assert_eq!(scope(&["README.md", other]), Scope::Everything, "{other}");
+        }
+    }
+
+    #[test]
+    fn a_merge_group_event_names_its_two_commits_or_is_refused() {
+        let base = "0e6716fc09c8b55cd19df0037d2029904d15af16";
+        let head = "a15ac4d84f386077f237dec57673ff18be239b40";
+        let event = |base: &str| format!(r#"{{"merge_group":{{"base_sha":"{base}","head_sha":"{head}"}}}}"#);
+        assert_eq!(merge_group(&event(base)), Ok((base.to_string(), head.to_string())));
+        assert!(merge_group(&event("main")).is_err());
+        assert!(merge_group(&event("")).is_err());
+        assert!(merge_group(r#"{"pull_request":{}}"#).is_err());
+        assert!(merge_group("not json").is_err());
+    }
+
+    /// **No Rust line that `include_str!`s or `include_bytes!`s names a Markdown
+    /// file**: a crate that embedded one, as `#![doc = include_str!(...)]` does,
+    /// would compile and doc-test it, which a change of documentation alone
+    /// skips. Line-local: a split invocation or a build script's read passes.
+    #[test]
+    fn no_source_embeds_documentation() {
+        let root = repo_root();
+        let embeds = ["include_str!", "include_bytes!"];
+        let sources = crate::sysroot::tracked_files(&root, &["*.rs"]).unwrap_or_else(|e| panic!("{e}"));
+        assert!(sources.iter().any(|f| f == "build/ci.rs"), "the walk did not read the tree");
+        let mut found = Vec::new();
+        for file in &sources {
+            let text = std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+            for (n, line) in text.lines().enumerate() {
+                if embeds.iter().any(|e| line.contains(e)) && line.contains(".md") {
+                    found.push(format!("{file}:{}", n + 1));
+                }
+            }
+        }
+        assert!(found.is_empty(), "documentation a build reads is not documentation alone: {found:?}");
     }
 
     /// Teeth for the controls' judge, on libtest's text as a control's run

@@ -40,9 +40,9 @@ Constraints a reader would otherwise pay to re-derive:
 - **QEMU's `virtio-net-pci-non-transitional` on `q35` advertises no PCIe
   function-level reset** — measured, not assumed: `pcidev`'s refusal on that
   ground reddened every netd registration at once. So a re-claim is made safe by
-  ordering instead: bus mastering starts on the claim's **first grant**, never at
-  hand-over, so a function still holding its last holder's queue addresses can
-  act on none of them. `release` asks for a reset where the function advertises
+  ordering instead: bus mastering starts when the claim's holder **starts** it
+  (`device_dma_start`), never at hand-over, so a function still holding its
+  last holder's queue addresses can act on none of them before it is stopped. `release` asks for a reset where the function advertises
   one; the I219 does, so on the T14 both hold.
 - **The machine served its own log, and the Mac found it by name.** `logd`
   served the boot from its first line on a TCP port, and netd answers multicast

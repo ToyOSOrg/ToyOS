@@ -19,6 +19,7 @@ use std::process::Command;
 
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
+use toyos_abi::end::End;
 
 /// Where the child starts: `SpawnArgs` names a working directory or the spawn is refused.
 const CWD: &str = "/";
@@ -237,7 +238,7 @@ fn spawn_path(path: &str) -> Result<RawHandle, SyscallError> {
     spawn_argv(path, &format!("{path}\0"))
 }
 
-/// `path` spawned with `argv`, NUL-separated, and no slot of this process's.
+/// `path` spawned with `argv`, NUL-separated, and no descriptor of this process's.
 fn spawn_argv(path: &str, argv: &str) -> Result<RawHandle, SyscallError> {
     unsafe {
         syscall::spawn(&SpawnArgs {
@@ -245,8 +246,6 @@ fn spawn_argv(path: &str, argv: &str) -> Result<RawHandle, SyscallError> {
             path_len: path.len() as u64,
             argv_ptr: argv.as_ptr() as u64,
             argv_len: argv.len() as u64,
-            slot_map_ptr: 0,
-            slot_map_count: 0,
             env_ptr: 0,
             env_len: 0,
             endow_ptr: 0,
@@ -299,8 +298,6 @@ fn spawn_image(path: &str, bytes: &[u8]) -> Result<RawHandle, SyscallError> {
             path_len: path.len() as u64,
             argv_ptr: argv.as_ptr() as u64,
             argv_len: argv.len() as u64,
-            slot_map_ptr: 0,
-            slot_map_count: 0,
             env_ptr: 0,
             env_len: 0,
             endow_ptr: 0,
@@ -331,8 +328,8 @@ fn dies(name: &str, outcome: Result<RawHandle, SyscallError>) {
         Ok(child) => {
             // SAFETY: the handle `SYS_SPAWN` just answered, held nowhere else.
             let child = unsafe { toyos::process::Process::from_raw(child) };
-            let code = child.wait().unwrap_or_else(|e| panic!("{name}: wait for the child: {e:?}"));
-            assert_ne!(code, 0, "{name}: a child entering at bytes that are no program exited 0");
+            let end = child.wait().unwrap_or_else(|e| panic!("{name}: wait for the child: {e:?}"));
+            assert!(!end.success(), "{name}: a child entering at bytes that are no program exited 0");
         }
         Err(e) => assert!(
             matches!(e, SyscallError::InvalidArgument | SyscallError::ResourceExhausted),
@@ -1041,12 +1038,10 @@ fn tls_refs_so(name: &[u8; 4], addend: i64) -> Vec<u8> {
         .build()
 }
 
-/// What `toyos::relocate` writes to slot 2 when it refuses its own program.
+/// What `toyos::relocate` writes to its stderr, `fd:2`, when it refuses its own program.
 const REFUSED_LINE: &str = "this program's relocations are refused: it cannot start\n";
 /// The status it exits with then.
 const REFUSED_STATUS: i32 = 127;
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
 /// The argument a refused copy is handed, which its `main` panics on.
 const REFUSED_COPY: &str = "--refused-copy";
 
@@ -1073,8 +1068,8 @@ fn own_image_tagged(tag: u64) -> Vec<u8> {
 }
 
 /// A copy of this program tagged `tag` exits [`REFUSED_STATUS`] and says
-/// [`REFUSED_LINE`] on the slot 2 it is handed. Handed no slot 2, it names a
-/// handle it does not hold, and the kernel ends it.
+/// [`REFUSED_LINE`] on the stderr it is endowed. Endowed none, it says
+/// nothing and exits the same.
 fn refuses_itself(name: &str, tag: u64) {
     let path = write_file(name, &own_image_tagged(tag));
     let out = Command::new(&path)
@@ -1086,9 +1081,9 @@ fn refuses_itself(name: &str, tag: u64) {
     assert_eq!(said, REFUSED_LINE, "{name}");
 
     let child = spawn_argv(&path, &format!("{path}\0{REFUSED_COPY}\0"))
-        .unwrap_or_else(|e| panic!("{name} without slot 2: spawn gave {e:?}"));
+        .unwrap_or_else(|e| panic!("{name} without a stderr: spawn gave {e:?}"));
     // SAFETY: the handle `SYS_SPAWN` just answered, held nowhere else.
     let child = unsafe { toyos::process::Process::from_raw(child) };
-    let code = child.wait().unwrap_or_else(|e| panic!("{name} without slot 2: wait: {e:?}"));
-    assert_eq!(code, HANDLE_FAULT, "{name} without slot 2");
+    let end = child.wait().unwrap_or_else(|e| panic!("{name} without a stderr: wait: {e:?}"));
+    assert_eq!(end, End::Exited(REFUSED_STATUS), "{name} without a stderr");
 }

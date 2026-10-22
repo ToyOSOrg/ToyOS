@@ -26,7 +26,7 @@ pub(super) fn sys_thread_exit(code: i32) -> u64 {
 pub(super) fn sys_exit(code: i32) -> u64 {
     #[cfg(feature = "mask-windows")]
     crate::windows::hold_once();
-    process::exit(code);
+    process::exit(toyos_abi::end::End::Exited(code));
 }
 
 /// `SpawnArgs::place`: the caller itself, or the process a handle carrying `WRITE` names — a handle a peer sent, so a wrong type is refused rather than ending the caller.
@@ -61,7 +61,7 @@ pub(super) fn sys_spawn(
     }
 }
 
-/// Take a process's exit code, blocking until there is one; repeatable across waiters, and `WNOHANG` skips the block.
+/// Take how a process ended, blocking until it has; repeatable across waiters, and `WNOHANG` skips the block.
 pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
     // First, so the answer is the bit and not the handle's own refusal — which
     // for an unheld handle is the kill policy, so a call carrying both returns
@@ -91,9 +91,8 @@ pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
             return cancelled();
         }
     }
-    match object.exit_code() {
-        // Zero-extended: sign-extending -1 would collide with SyscallError's encoding.
-        Some(code) => code as u32 as u64,
+    match object.end() {
+        Some(end) => end.to_word(),
         // Reachable from userland (WNOHANG raced the exit), so this refuses rather than asserts.
         None => SyscallError::WouldBlock.to_u64(),
     }
@@ -107,6 +106,30 @@ pub(super) fn sys_rt_enter(syscap: RawHandle) -> u64 {
     }
     crate::scheduler::set_current_rt(true);
     0
+}
+
+/// Make a new job, gated on a `SysCap` carrying [`Rights::JOBS`], and install a handle to it.
+pub(super) fn sys_job_create(syscap: RawHandle) -> u64 {
+    if let Err(e) = demand_syscap(syscap, Rights::JOBS) {
+        return e.refuse();
+    }
+    let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(crate::object::job::new_job()));
+    match process::with_process_data(|data| crate::object::ops::install(&mut data.handles, object)) {
+        Ok(h) => u64::from(h.0),
+        Err(e) => e.to_u64(),
+    }
+}
+
+/// Install a handle to the job the caller runs in.
+pub(super) fn sys_job_own() -> u64 {
+    let installed = process::with_process_data(|data| {
+        let object = crate::object::KObjectRef::Job(crate::object::job::JobObject::new(data.job.clone()));
+        crate::object::ops::install(&mut data.handles, object)
+    });
+    match installed {
+        Ok(h) => u64::from(h.0),
+        Err(e) => e.to_u64(),
+    }
 }
 
 /// Answer this process's endowment table; an empty buffer asks only for its size.

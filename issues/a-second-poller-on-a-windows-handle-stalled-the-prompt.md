@@ -11,7 +11,8 @@ one `Poller` watching both its window's connection and the supervisor's.
 While the branch that made it was built, a version that also drained the
 window with `Window::poll_event(0)` after each wake, which watches the same
 handle through the window's own second `Poller`, stalled the prompt in
-`consent_prompt` (`tests/toyos.rs`) after its first keys. Reading one event per wake off the first poller
+the guest test `consent_prompt` after its first keys; that test was cut in
+`ff1a11dbd`, so nothing drives the prompt now. Reading one event per wake off the first poller
 alone, as `ask` does now, does not stall.
 
 The kernel-side cause was not found. Nothing says the shape is the prompt's

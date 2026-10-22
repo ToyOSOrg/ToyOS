@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
-use toyos::ipc::{Connection, TrySendError};
+use toyos::ipc::Connection;
 use toyos::poller::{Poller, WRITABLE};
 use toyos::{AsHandle, Pipe};
 use toyos_abi::syscall::SyscallError;
@@ -88,8 +88,7 @@ fn hand_over(conn: &Connection, end: u64) -> Option<Pipe> {
             return None;
         }
     };
-    let sent = conn.send_handles([read.into()]).map_err(TrySendError::Syscall);
-    match sent.and_then(|()| conn.try_send(SERVED, &end)) {
+    match conn.try_send_with(SERVED, &end, [read.into()]) {
         Ok(()) => Some(write),
         Err(e) => {
             say!("logkeeper: a reader went before it was answered: {e:?}");

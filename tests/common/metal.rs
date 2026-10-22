@@ -274,6 +274,16 @@ impl Readback {
         bootlog::one_clock(&self.loader, &self.log).map_err(|why| format!("{}: {why}", self.label))
     }
 
+    /// No declaration of the PCI root bridges this boot made was refused: a
+    /// refused one leaves every claim refused, which a row that claims
+    /// nothing would never see.
+    pub fn declaration_not_refused(&self) -> Result<(), String> {
+        match self.kernel.lines().find(|line| line.contains(super::claims::REFUSED_DECLARATION)) {
+            Some(line) => Err(format!("{}: the kernel refused the root bridges' declaration: {}", self.label, line.trim())),
+            None => Ok(()),
+        }
+    }
+
     /// When `Boot: complete` was written, on the same clock.
     pub fn complete_record_ms(&self) -> Option<u64> {
         self.kernel.lines().find(|line| line.contains(bootlog::COMPLETE)).and_then(bootlog::record_millis)
@@ -326,7 +336,7 @@ impl Readback {
         else {
             return Ok(());
         };
-        within_one_period(late?, kernel::sched::fair::QUANTUM_NS)
+        within_one_period(late?, kernel::sched::task::QUANTUM_NS)
             .map_err(|why| format!("{}'s boot deadline {why}", self.label))
     }
 
@@ -375,10 +385,6 @@ impl Readback {
                 self.label,
                 park.sweep.running,
             )),
-            Some(park) if park.in_flight != 0 => Err(format!(
-                "{}'s stop ended with {} block operation(s) open:\n    {park}",
-                self.label, park.in_flight,
-            )),
             Some(_) => Ok(()),
         }
     }
@@ -411,7 +417,7 @@ impl Readback {
     /// cannot ask what a handle it does not hold does re-executes *itself*, one
     /// child per fault, and every child is recorded under that same name with whatever
     /// exit the fault gave it. Measured on a metal-shaped guest that binary left
-    /// forty-two records reading `code=139` and the job's own reading zero, and
+    /// forty-two records of a handle fault and the job's own of exit 0, and
     /// the last of them is a child. The job's is the one with the **lowest
     /// pid**: the runner spawned it before it spawned anything.
     ///
@@ -421,14 +427,19 @@ impl Readback {
     pub fn exit_code(&self, binary: &str) -> Result<i32, String> {
         let name = bootlog::recorded_name(binary);
         let head = format!("{}{name} pid=", bootlog::EXIT);
-        let mut family: Vec<(u64, i32)> = Vec::new();
+        // A kill or a fault carries no code: `killed` or `fault=<kind>` in its place.
+        let mut family: Vec<(u64, Result<i32, String>)> = Vec::new();
         for line in self.kernel.lines().filter_map(bootlog::message).filter(|m| m.starts_with(&head)) {
             let field = |label: &str| -> Option<&str> {
                 line.split_once(label).and_then(|(_, rest)| rest.split_whitespace().next())
             };
-            let (Some(pid), Some(code)) = (field(" pid="), field(" code=")) else { continue };
-            let (Ok(pid), Ok(code)) = (pid.parse(), code.parse()) else {
+            let Some(Ok(pid)) = field(" pid=").map(str::parse) else {
                 return Err(format!("unreadable exit record: {line:?}"));
+            };
+            let code = match field(" code=").map(str::parse) {
+                Some(Ok(code)) => Ok(code),
+                Some(Err(_)) => return Err(format!("unreadable exit record: {line:?}")),
+                None => Err(format!("{binary} ended without an exit code: {line:?}")),
             };
             family.push((pid, code));
         }
@@ -436,11 +447,11 @@ impl Readback {
             .into_iter()
             .min_by_key(|(pid, _)| *pid)
             .map(|(_, code)| code)
-            .ok_or_else(|| {
-                format!(
+            .unwrap_or_else(|| {
+                Err(format!(
                     "no `{head}` record in {}'s log: {binary} never ran, or never ended",
                     self.label
-                )
+                ))
             })
     }
 
@@ -535,6 +546,21 @@ fn within_one_period(late_ms: i64, period_ns: u64) -> Result<(), String> {
 }
 
 /// One image, and every test that rides it.
+/// The bytes of every line of `text` that carries `marker`, newline included:
+/// what of a load's lines a file read back off the stick holds.
+pub fn bytes_of_lines(text: &str, marker: &str) -> usize {
+    text.lines().filter(|l| l.contains(marker)).map(|l| l.len() + 1).sum()
+}
+
+/// The job that writes the boot stick for ever (`stick_load.rs`), so its boot
+/// is reset by its own deadline with a write in flight.
+pub const STICK_LOAD_JOB: &str = "test_rs_stick_load";
+
+/// That boot's deadline: past both benches' `Boot: complete` (12 s on the
+/// T14) and the job's first synced mebibytes, and before the runner's list
+/// bound ([`toyos_tco::JOB_BOUND_MS`]).
+pub const STICK_LOAD_DEADLINE_MS: u64 = 40_000;
+
 pub struct Batch {
     config: &'static str,
     params: Vec<&'static str>,
@@ -563,7 +589,16 @@ impl Batch {
     }
 
     /// The bound the kernel gives this whole boot, in milliseconds.
+    ///
+    /// **A boot carrying [`STICK_LOAD_JOB`] is ended by it on purpose**, with
+    /// the job still writing the stick: [`STICK_LOAD_DEADLINE_MS`], below the
+    /// list's own bound, so the kernel's reset path, which touches no USB
+    /// register, lands before the runner would hand the machine back.
     pub fn deadline_ms(&self) -> u64 {
+        if self.jobs.iter().any(|job| job == STICK_LOAD_JOB) {
+            assert!(STICK_LOAD_DEADLINE_MS < self.bound_ms(), "the load's deadline is past its runner's bound");
+            return STICK_LOAD_DEADLINE_MS;
+        }
         toyos_metal::bound_for(&self.params, self.bound_ms())
     }
 }
@@ -1156,6 +1191,7 @@ pub fn judge_readbacks(
         findings.extend(back.deadline_on_time().err());
         findings.extend(back.lockup_on_time().err());
         findings.extend(back.one_clock().err());
+        findings.extend(back.declaration_not_refused().err());
         for why in &findings {
             eprintln!("    FAIL {why}");
         }

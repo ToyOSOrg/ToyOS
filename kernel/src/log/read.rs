@@ -2,8 +2,17 @@
 //! (the log's, newest first, lock-free, never blocks) and [`drain_ordered`]
 //! (any [`Stream`]'s, oldest first in sequence order per ring, stopping at the
 //! first uncommitted record).
+//!
+//! Both walk a ring per CPU the firmware names and keep one position per ring
+//! in storage their caller owns, so neither allocates nor puts a per-CPU array
+//! on its stack: a fatal path reads the log with positions sized at boot.
 
-use toyos_abi::log::{LogRecord, MAX_LOG_SHARDS};
+use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use toyos_abi::log::LogRecord;
+
+use crate::cpu_slice::CpuSlice;
 
 use super::shard::{Ring, Shard, FIRST_SEQ};
 use super::stamp::LogStamp;
@@ -27,139 +36,127 @@ impl Stream for Shard {
     }
 }
 
-/// One ring per CPU a cursor can name; `None` is a CPU this machine lacks.
-pub type Rings<const W: usize, const N: usize> = [Option<&'static Ring<W, N>>; MAX_LOG_SHARDS];
-
-#[derive(Clone, Copy)]
-struct Descent {
-    shard: Option<&'static Shard>,
-    /// Next sequence number to try, descending.
-    next: u64,
-    /// Oldest sequence number this shard can still answer for.
-    floor: u64,
-    /// This shard's candidate, or `None` when it has nothing in the window.
-    cand: Option<(u64, u64)>,
+/// A ring per CPU the firmware names; `None` is one no reader can reach yet,
+/// a CPU that was never attempted or has not published its ring.
+pub trait Rings<const W: usize, const N: usize> {
+    fn count(&self) -> usize;
+    fn ring(&self, cpu: usize) -> Option<&'static Ring<W, N>>;
 }
 
-const IDLE: Descent = Descent { shard: None, next: 0, floor: u64::MAX, cand: None };
+impl<const W: usize, const N: usize> Rings<W, N> for [Option<&'static Ring<W, N>>] {
+    fn count(&self) -> usize {
+        self.len()
+    }
 
-// Pinned against IST1's 16 KiB double-fault stack budget.
-const _: () = assert!(core::mem::size_of::<Descent>() == 48);
-const _: () = assert!(core::mem::size_of::<[Descent; MAX_LOG_SHARDS]>() == 384);
-
-impl Descent {
-    /// `from` relies on `emit` stamping `at_ns` inside the same interrupt-off
-    /// bracket as the reservation, so sequence order is timestamp order.
-    fn advance(&mut self, from: u64, to: u64) {
-        self.cand = None;
-        let Some(shard) = self.shard else { return };
-        while self.next >= self.floor {
-            let seq = self.next;
-            self.next = seq - 1;
-            let Some(at_ns) = shard.stamp(seq) else { continue };
-            if at_ns > to {
-                continue;
-            }
-            if at_ns < from {
-                return;
-            }
-            self.cand = Some((seq, at_ns));
-            return;
-        }
+    fn ring(&self, cpu: usize) -> Option<&'static Ring<W, N>> {
+        self.get(cpu).copied().flatten()
     }
 }
 
-/// A reader's position across shards, plus records it never saw.
+/// A walk's position in each ring, and what it counted lost.
+pub trait Positions {
+    fn count(&self) -> usize;
+    fn next(&self, ring: usize) -> u64;
+    fn set_next(&mut self, ring: usize, next: u64);
+    fn lose(&mut self, records: u64);
+}
+
+/// A reader's position across rings, plus records it never saw: the walk a
+/// syscall makes of its caller's cursor.
 pub struct Cursor {
-    /// Next sequence number wanted from each shard.
-    next: [u64; MAX_LOG_SHARDS],
+    /// Next sequence number wanted from each ring.
+    next: Vec<u64>,
     /// Overwritten-before-read count, derived as `oldest_readable - next`.
     lost: u64,
 }
 
 impl Cursor {
-    /// A reader that has seen nothing; starts at [`FIRST_SEQ`], not zero, to avoid a phantom first-call loss.
-    pub const fn new() -> Self {
-        Self { next: [FIRST_SEQ; MAX_LOG_SHARDS], lost: 0 }
+    /// A caller's positions as a walk, or `None` for a position past the number its ring issues next; the walk
+    /// counts this read's loss alone.
+    pub fn from_reader<const W: usize, const N: usize>(next: &[u64], rings: &(impl Rings<W, N> + ?Sized)) -> Option<Self> {
+        // An unpublished ring is held to the head it is published with, so no cursor is ahead of one that appears mid-walk.
+        let issued = |cpu: usize| rings.ring(cpu).map_or(FIRST_SEQ, Ring::head);
+        let ahead = next.iter().enumerate().any(|(cpu, &next)| next > issued(cpu));
+        (!ahead).then(|| Self { next: next.to_vec(), lost: 0 })
     }
 
-    /// A caller's `LogCursor` as a walk, or `None` for a position past the number its shard issues
-    /// next; its `lost` is never read, so the walk counts this read's loss alone.
-    pub fn from_reader<const W: usize, const N: usize>(
-        cursor: &toyos_abi::log::LogCursor,
-        rings: &Rings<W, N>,
-    ) -> Option<Self> {
-        // An unpublished shard is held to the head it is published with, so no cursor is ahead of one that appears mid-walk.
-        let issued = |ring: &Option<&'static Ring<W, N>>| ring.map_or(FIRST_SEQ, Ring::head);
-        let ahead = cursor.next.iter().zip(rings).any(|(&next, ring)| next > issued(ring));
-        (!ahead).then_some(Self { next: cursor.next, lost: 0 })
+    pub fn next(&self) -> &[u64] {
+        &self.next
     }
 
-    /// Writes the walk state back into the caller's `LogCursor`.
-    pub fn write_into(&self, cursor: &mut toyos_abi::log::LogCursor) {
-        cursor.next = self.next;
-        cursor.lost = self.lost;
-    }
-
-    /// Clamps this shard's position to what it can still answer for, counting the gap as loss.
-    fn open<const W: usize, const N: usize>(&mut self, i: usize, shard: Option<&'static Ring<W, N>>) -> Option<u64> {
-        let shard = shard?;
-        let oldest = shard.oldest_readable();
-        // Clamped to `FIRST_SEQ`: a zeroed cursor from the syscall boundary must not read as having missed everything.
-        let want = self.next.get(i).copied().unwrap_or(FIRST_SEQ).max(FIRST_SEQ);
-        // Cannot overflow: `lost` starts at zero in every cursor and grows only as far as the clamp below moves `next[i]`, which never passes a head.
-        self.lost += oldest.saturating_sub(want);
-        let want = want.max(oldest);
-        *self.next.get_mut(i)? = want;
-        shard.stamp(want)
+    pub fn lost(&self) -> u64 {
+        self.lost
     }
 }
 
-impl Default for Cursor {
-    fn default() -> Self {
-        Self::new()
+impl Positions for Cursor {
+    fn count(&self) -> usize {
+        self.next.len()
+    }
+
+    fn next(&self, ring: usize) -> u64 {
+        self.next[ring]
+    }
+
+    fn set_next(&mut self, ring: usize, next: u64) {
+        self.next[ring] = next;
+    }
+
+    fn lose(&mut self, records: u64) {
+        // Cannot overflow: `lost` starts at zero and grows only as far as positions move, which never pass a head.
+        self.lost += records;
     }
 }
 
-/// A cursor's position, shared across contexts without a lock.
+/// Positions shared across contexts without a lock: shard 0's from the
+/// start, every other CPU's once [`Published::size`] has run. Exclusion
+/// between walkers is the caller's.
 pub struct Published {
-    // Atomics, not a `Cursor` behind a lock: the panic bypass reads this lock-free.
-    next: [core::sync::atomic::AtomicU64; MAX_LOG_SHARDS],
-    lost: core::sync::atomic::AtomicU64,
+    // Atomics, not a `Cursor` behind a lock: the panic bypass walks this lock-free.
+    boot: AtomicU64,
+    aps: CpuSlice<AtomicU64>,
+    lost: AtomicU64,
 }
 
 impl Published {
     pub const fn new() -> Self {
-        use core::sync::atomic::AtomicU64;
-        Self {
-            next: [const { AtomicU64::new(FIRST_SEQ) }; MAX_LOG_SHARDS],
-            lost: AtomicU64::new(0),
+        Self { boot: AtomicU64::new(FIRST_SEQ), aps: CpuSlice::new(), lost: AtomicU64::new(0) }
+    }
+
+    fn count(&self) -> usize {
+        1 + self.aps.len()
+    }
+
+    /// A position for each of `cpus` CPUs' rings.
+    pub fn size(&self, cpus: usize) {
+        self.aps.size(cpus.saturating_sub(1), |_| AtomicU64::new(FIRST_SEQ));
+    }
+
+    fn word(&self, ring: usize) -> &AtomicU64 {
+        match ring.checked_sub(1) {
+            None => &self.boot,
+            Some(ap) => &self.aps[ap],
         }
     }
 
-    /// The position, as a cursor to walk with.
-    pub fn take(&self) -> Cursor {
-        use core::sync::atomic::Ordering;
-        Cursor {
-            next: core::array::from_fn(|i| self.next[i].load(Ordering::Relaxed)),
-            lost: self.lost.load(Ordering::Relaxed),
-        }
+    /// Records the walks over this position counted lost.
+    pub fn lost(&self) -> u64 {
+        self.lost.load(Ordering::Relaxed)
     }
 
-    /// Makes the walk position visible to lock-free readers; exclusion is the caller's job.
-    pub fn put(&self, cursor: &Cursor) {
-        use core::sync::atomic::Ordering;
-        for (word, next) in self.next.iter().zip(cursor.next) {
-            word.store(next, Ordering::Relaxed);
+    /// Take `other`'s place: what a walk from here reads, `other`'s walkers no
+    /// longer move.
+    pub fn copy_from(&self, other: &Published) {
+        for ring in 0..self.count() {
+            self.word(ring).store(other.word(ring).load(Ordering::Relaxed), Ordering::Relaxed);
         }
-        self.lost.store(cursor.lost, Ordering::Relaxed);
+        self.lost.store(other.lost(), Ordering::Relaxed);
     }
 
     /// Resets the position to the oldest record every shard still holds.
     pub fn rewind(&self) {
-        use core::sync::atomic::Ordering;
-        for word in &self.next {
-            word.store(FIRST_SEQ, Ordering::Relaxed);
+        for ring in 0..self.count() {
+            self.word(ring).store(FIRST_SEQ, Ordering::Relaxed);
         }
         // Also zeroes `lost`: after a rewind it counts only future drops, not what a prior consumer missed.
         self.lost.store(0, Ordering::Relaxed);
@@ -167,120 +164,167 @@ impl Published {
 
     /// Is there a committed record this position has not taken? Lock-free.
     pub fn any_pending(&self) -> bool {
-        any_committed(&self.take())
+        any_committed(self)
     }
 }
 
-/// Every record this cursor has not seen in `shards`, oldest first merged by
-/// stamp; a stalled shard is skipped, not waited for.
+impl Positions for &Published {
+    fn count(&self) -> usize {
+        Published::count(self)
+    }
+
+    fn next(&self, ring: usize) -> u64 {
+        self.word(ring).load(Ordering::Relaxed)
+    }
+
+    fn set_next(&mut self, ring: usize, next: u64) {
+        self.word(ring).store(next, Ordering::Relaxed);
+    }
+
+    fn lose(&mut self, records: u64) {
+        self.lost.fetch_add(records, Ordering::Relaxed);
+    }
+}
+
+/// Clamps `ring`'s position to what it can still answer for, counting the gap as loss, and answers the stamp
+/// there.
+fn open<const W: usize, const N: usize>(at: &mut impl Positions, i: usize, ring: Option<&'static Ring<W, N>>) -> Option<u64> {
+    let ring = ring?;
+    let oldest = ring.oldest_readable();
+    // Clamped to `FIRST_SEQ`: a zeroed cursor from the syscall boundary must not read as having missed everything.
+    let want = at.next(i).max(FIRST_SEQ);
+    at.lose(oldest.saturating_sub(want));
+    let want = want.max(oldest);
+    at.set_next(i, want);
+    ring.stamp(want)
+}
+
+/// Every record `at` has not seen in `rings`, oldest first merged by stamp;
+/// a stalled ring is skipped, not waited for. `at` holds a position per ring.
 pub fn drain_ordered<const W: usize, const N: usize>(
-    shards: &Rings<W, N>,
-    cursor: &mut Cursor,
+    rings: &(impl Rings<W, N> + ?Sized),
+    at: &mut impl Positions,
     out: &mut impl RecordSink<<Ring<W, N> as Stream>::Record>,
 ) -> usize
 where
     Ring<W, N>: Stream,
 {
-    let mut cand = [None; MAX_LOG_SHARDS];
-    for (i, slot) in cand.iter_mut().enumerate() {
-        *slot = cursor.open(i, shards[i]);
-    }
-
+    let count = rings.count().min(at.count());
     let mut emitted = 0;
     loop {
         let mut best: Option<(usize, u64)> = None;
-        for (i, slot) in cand.iter().enumerate() {
-            if let Some(at_ns) = *slot {
+        for i in 0..count {
+            if let Some(at_ns) = open(at, i, rings.ring(i)) {
                 if best.is_none_or(|(_, oldest)| at_ns < oldest) {
                     best = Some((i, at_ns));
                 }
             }
         }
         let Some((i, _)) = best else { return emitted };
-        let Some(shard) = shards[i] else { return emitted };
-
+        let Some(ring) = rings.ring(i) else { return emitted };
         // `match`, not `if let`: the empty arm explains itself below.
         #[allow(clippy::single_match)]
-        match shard.record(cursor.next[i]) {
+        match ring.record(at.next(i)) {
             Some(record) => {
                 if !out.put(&record) {
                     return emitted;
                 }
                 emitted += 1;
-                cursor.next[i] += 1;
+                at.set_next(i, at.next(i) + 1);
             }
-            // The slot was recycled between timestamp and body; `open` below
-            // re-clamps `next[i]` and counts it as loss, so this arm need not advance.
+            // The slot was recycled between timestamp and body; the next `open`
+            // re-clamps the position and counts it as loss.
             None => {}
         }
-        cand[i] = cursor.open(i, shards[i]);
     }
+}
+
+/// The log's shards: cpu0's boot shard, then every AP's the registry holds.
+pub struct Shards;
+
+impl Rings<{ super::shard::BODY_WORDS }, { super::shard::SHARD_RECORDS }> for Shards {
+    fn count(&self) -> usize {
+        super::shard_count()
+    }
+
+    fn ring(&self, cpu: usize) -> Option<&'static Shard> {
+        super::shard(cpu)
+    }
+}
+
+/// The newest committed record in `shard` stamped in `from..=to`, at or below
+/// position `next`, and the position the search reached.
+fn newest_in(shard: &Shard, mut next: u64, from: u64, to: u64) -> (u64, Option<(u64, u64)>) {
+    let floor = shard.oldest_readable();
+    while next >= floor {
+        let Some(at_ns) = shard.stamp(next) else {
+            next -= 1;
+            continue;
+        };
+        if at_ns > to {
+            next -= 1;
+            continue;
+        }
+        if at_ns < from {
+            // Sequence order is stamp order: everything older is older still.
+            return (0, None);
+        }
+        return (next, Some((next, at_ns)));
+    }
+    (0, None)
 }
 
 /// The stamp of the newest committed record, or zero if none: the upper bound
 /// of a snapshot that must not chase records committed while it walks.
 pub fn newest_committed() -> LogStamp {
-    let mut newest = 0;
-    for shard in super::shards().iter().flatten() {
-        let mut descent = IDLE;
-        descent.shard = Some(shard);
-        // `head` counts reservations; the newest usable number is one below it.
-        descent.next = shard.head().saturating_sub(1);
-        descent.floor = shard.oldest_readable();
-        descent.advance(0, u64::MAX);
-        if let Some((_, at_ns)) = descent.cand {
-            newest = newest.max(at_ns);
-        }
-    }
+    let newest = (0..super::shard_count())
+        .filter_map(super::shard)
+        .filter_map(|shard| newest_in(shard, shard.head().saturating_sub(1), 0, u64::MAX).1)
+        .map(|(_, at_ns)| at_ns)
+        .max()
+        .unwrap_or(0);
     LogStamp::since_zero(newest)
 }
 
-/// Is there a committed record this cursor has not taken, without taking it?
-pub fn any_committed(cursor: &Cursor) -> bool {
-    super::shards()
-        .iter()
-        .enumerate()
-        .any(|(i, shard)| match shard {
-            Some(shard) => {
-                let want = cursor.next[i].max(FIRST_SEQ).max(shard.oldest_readable());
-                shard.stamp(want).is_some()
-            }
-            None => false,
-        })
+/// Is there a committed record `at` has not taken, without taking it?
+pub fn any_committed(at: &Published) -> bool {
+    (0..super::shard_count().min(at.count())).any(|i| match super::shard(i) {
+        Some(shard) => {
+            let want = (&at).next(i).max(FIRST_SEQ).max(shard.oldest_readable());
+            shard.stamp(want).is_some()
+        }
+        None => false,
+    })
 }
 
 /// Every committed record stamped in `from..=to`, newest first merged by
-/// `at_ns` until `out` is full; returns nothing, since no caller counts.
-pub fn snapshot_committed(from: LogStamp, to: LogStamp, out: &mut impl RecordSink) {
+/// `at_ns` until `out` is full, walking with `scratch`'s positions, which the
+/// caller holds alone; returns nothing, since no caller counts.
+pub fn snapshot_committed(from: LogStamp, to: LogStamp, out: &mut impl RecordSink, scratch: &Published) {
     let (from, to) = (from.nanos(), to.nanos());
-    let mut descents = [IDLE; MAX_LOG_SHARDS];
-    for (descent, shard) in descents.iter_mut().zip(super::shards()) {
-        let Some(shard) = shard else { continue };
+    let mut at = scratch;
+    let count = super::shard_count().min(at.count());
+    for i in 0..count {
         // `head` counts reservations; the newest usable number is one below it.
-        descent.shard = Some(shard);
-        descent.next = shard.head().saturating_sub(1);
-        descent.floor = shard.oldest_readable();
-        descent.advance(from, to);
+        at.set_next(i, super::shard(i).map_or(0, |shard| shard.head().saturating_sub(1)));
     }
-
     loop {
-        let mut best: Option<(usize, u64)> = None;
-        for (i, descent) in descents.iter().enumerate() {
-            if let Some((_, at_ns)) = descent.cand {
-                if best.is_none_or(|(_, newest)| at_ns > newest) {
-                    best = Some((i, at_ns));
+        let mut best: Option<(usize, u64, u64)> = None;
+        for i in 0..count {
+            let Some(shard) = super::shard(i) else { continue };
+            let (next, found) = newest_in(shard, at.next(i), from, to);
+            at.set_next(i, next);
+            if let Some((seq, at_ns)) = found {
+                if best.is_none_or(|(_, _, newest)| at_ns > newest) {
+                    best = Some((i, seq, at_ns));
                 }
             }
         }
-        let Some((i, _)) = best else { return };
-        let Some(descent) = descents.get_mut(i) else { return };
-        let Some((seq, _)) = descent.cand else { return };
-
+        let Some((i, seq, _)) = best else { return };
+        at.set_next(i, seq - 1);
         // `None` here is a writer that recycled the slot; it's newer than
         // everything left, so skipping it keeps order.
-        let copied = descent.shard.and_then(|shard| shard.read(seq));
-        descent.advance(from, to);
-        if let Some(record) = copied {
+        if let Some(record) = super::shard(i).and_then(|shard| shard.read(seq)) {
             if !out.put(&record) {
                 return;
             }

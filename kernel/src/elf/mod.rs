@@ -10,10 +10,8 @@
 // this `warn` is what turns a missing one into a CI failure.
 #![warn(clippy::undocumented_unsafe_blocks)]
 
-mod cache;
 mod reloc;
 
-pub use cache::{cache_loaded_lib, try_clone_cached, CachedRelocs};
 pub use reloc::{
     apply_dtpmod_relocs, apply_dtpoff_relocs, apply_tpoff_relocs, rebase_relative_relocs,
     resolve_dlopen_relocs,
@@ -46,21 +44,6 @@ pub fn parse_layout(data: &[u8]) -> Result<Layout, &'static str> {
     Ok(layout)
 }
 
-/// Ownership model for a loaded shared library's memory.
-pub enum LibMemory {
-    /// Fresh load: one allocation owns everything.
-    Owned(PageAlloc),
-    /// Cloned from cache: read-only pages are shared, writable pages are private.
-    Shared {
-        rw_alloc: PageAlloc,
-        cached_image: KernelSlice,
-        /// 2 MiB-aligned offset of the private writable region in the cached image.
-        rw_offset: usize,
-        /// Added to a cached address to reach the private writable copy.
-        rw_delta: i64,
-    },
-}
-
 /// One TLS module's placement within a thread's combined TLS block.
 #[derive(Clone)]
 pub struct TlsModule {
@@ -83,7 +66,8 @@ pub struct TlsModuleInfo<'a> {
 }
 
 pub struct LoadedLib {
-    pub memory: LibMemory,
+    /// The one allocation the module's image is loaded into, this process's own.
+    pub memory: PageAlloc,
     pub user_base: UserAddr,
     /// Bounds-checked view of the whole loaded image.
     pub image: KernelSlice,
@@ -94,7 +78,6 @@ pub struct LoadedLib {
     rela: Option<KernelSlice>,
     jmprel: Option<KernelSlice>,
     gnu_hash: Option<KernelSlice>,
-    cached_relocs: Option<CachedRelocs>,
     /// What `load_shared_lib` parsed `rela` and `jmprel` against: every later
     /// walk of those tables parses them again, against the same rules.
     rules: rela::Rules,
@@ -107,8 +90,8 @@ pub struct LoadedLib {
     /// Bytes between the image's lowest and highest virtual address.
     pub span: u64,
     /// Exact (unrounded) writable range within the image; `(span, span)` if none.
-    /// Rounding this outward, unlike `rw_offset`/`rw_size`, would make a page of
-    /// some other module's `.text` writable.
+    /// Rounding this outward would make a page of some other module's `.text`
+    /// writable.
     pub rw_lo: u64,
     pub rw_hi: u64,
 }
@@ -130,21 +113,11 @@ impl LoadedLib {
 
     /// Give this module a virtual address in `pt` and map its pages there.
     /// Maps each window once, at its final protection — mapping the whole
-    /// image writable first would leave `.text` writable in every process.
-    /// A `Shared` module's split window holds a shared tail of `.text` plus
-    /// the private copy, byte-identical there, so `ReadExec` is safe over either.
+    /// image writable first would leave `.text` writable.
     pub fn map_into(&self, pt: &crate::process::PageTables) -> Option<UserAddr> {
         use crate::mm::policy::WindowProt;
 
-        let (image_phys, image_size) = match &self.memory {
-            LibMemory::Owned(alloc) => (
-                crate::DirectMap::phys_of(alloc.ptr()),
-                alloc.size() as u64,
-            ),
-            LibMemory::Shared { cached_image, .. } => {
-                (cached_image.phys(), cached_image.size() as u64)
-            }
-        };
+        let (image_phys, image_size) = (crate::DirectMap::phys_of(self.memory.ptr()), self.memory.size() as u64);
 
         let base = pt
             .lock()
@@ -152,18 +125,7 @@ impl LoadedLib {
 
         let mut offset = 0;
         while offset < image_size {
-            // The cache's shared image, except inside the private writable copy.
-            let phys = match &self.memory {
-                LibMemory::Owned(_) => image_phys + offset,
-                LibMemory::Shared { rw_alloc, rw_offset, .. } => {
-                    let lo = *rw_offset as u64;
-                    if (lo..lo + rw_alloc.size() as u64).contains(&offset) {
-                        crate::DirectMap::phys_of(rw_alloc.ptr()) + (offset - lo)
-                    } else {
-                        image_phys + offset
-                    }
-                }
-            };
+            let phys = image_phys + offset;
             let mut prot = WindowProt::uniform(crate::mm::policy::Prot::Read);
             let mut page = 0;
             while page < PAGE_2M {
@@ -320,7 +282,7 @@ pub(crate) fn read_backing_into(
     backing: &dyn crate::file_backing::FileBacking,
     offset: u64,
     dst: KernelSlice,
-) -> crate::block::BlockResult {
+) -> crate::file_backing::BlockResult {
     let mut remaining = dst.size();
     let mut file_off = offset;
     let mut buf_off = 0usize;
@@ -340,11 +302,8 @@ pub(crate) fn read_backing_into(
 }
 
 /// Load a shared object into one contiguous allocation and apply its
-/// `R_X86_64_RELATIVE` relocations, returning the module plus its 2 MiB-aligned
-/// writable window (must match what `rw_alloc` later covers).
-pub fn load_shared_lib(
-    backing: &dyn crate::file_backing::FileBacking,
-) -> Result<(LoadedLib, usize, usize), &'static str> {
+/// `R_X86_64_RELATIVE` relocations.
+pub fn load_shared_lib(backing: &dyn crate::file_backing::FileBacking) -> Result<LoadedLib, &'static str> {
     let header_size = 4096.min(backing.file_size() as usize);
     let header_data = crate::loader::read_file_range(backing, 0, header_size);
     let layout = parse_layout(&header_data)?;
@@ -362,14 +321,9 @@ pub fn load_shared_lib(
     let (rw_lo, rw_hi) = layout.writable_window().unwrap_or((layout.span(), layout.span()));
 
     // `span` is file-chosen; an unchecked round-up could wrap to a too-small allocation.
-    let (Some(load_size), Some(rw_end_aligned)) = (
-        align_2m_checked(layout.span()).and_then(|v| usize::try_from(v).ok()),
-        align_2m_checked(rw_hi).and_then(|v| usize::try_from(v).ok()),
-    ) else {
+    let Some(load_size) = align_2m_checked(layout.span()).and_then(|v| usize::try_from(v).ok()) else {
         return Err("ELF: image span does not fit an allocation");
     };
-    let rw_offset = rw_lo as usize & !(PAGE_2M as usize - 1);
-    let rw_size = rw_end_aligned - rw_offset;
 
     let alloc =
         PageAlloc::new(load_size).ok_or("dlopen: allocation failed")?;
@@ -447,9 +401,9 @@ pub fn load_shared_lib(
         None => None,
     };
 
-    // The exact writable extent, not `rw_offset`'s 2 MiB-rounded one: the
-    // rounded start is up to 2 MiB below the first writable byte, and the pages
-    // there are mapped `ReadExec` by `page_prot`.
+    // The exact writable extent, not a 2 MiB-rounded one: the rounded start
+    // is up to 2 MiB below the first writable byte, and the pages there are
+    // mapped `ReadExec` by `page_prot`.
     let window = (rw_lo, rw_hi);
     let span_of = |slice: &KernelSlice| {
         let at = (slice.base() as usize - image.base() as usize) as u64;
@@ -481,9 +435,8 @@ pub fn load_shared_lib(
 
     let tls_template = layout.tls().map(|tls| module.at(tls.template()));
 
-    Ok((
-        LoadedLib {
-            memory: LibMemory::Owned(alloc),
+    Ok(LoadedLib {
+            memory: alloc,
             user_base: UserAddr::new(base_phys),
             image,
             dynsym,
@@ -492,7 +445,6 @@ pub fn load_shared_lib(
             rela,
             jmprel,
             gnu_hash,
-            cached_relocs: None,
             rules,
             eh_frame_hdr: layout.eh_frame_hdr(),
             phdrs,
@@ -500,10 +452,7 @@ pub fn load_shared_lib(
             span: layout.span(),
             rw_lo,
             rw_hi,
-        },
-        rw_offset,
-        rw_size,
-    ))
+    })
 }
 
 /// `.dynsym`'s entry count as the section header table declares it, or `None`
