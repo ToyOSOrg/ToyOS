@@ -129,6 +129,42 @@ impl<M: Modulus<N>, const N: usize> Field for Montgomery<M, N> {
     }
 }
 
+/// The same moduli through the `const` forms that build compile-time tables.
+struct MontgomeryConst<M, const N: usize>(PhantomData<M>);
+
+impl<M: Modulus<N>, const N: usize> Field for MontgomeryConst<M, N> {
+    type E = Residue<M, N>;
+    fn modulus(&self) -> BigUint {
+        integer(&M::P)
+    }
+    fn input_bound(&self) -> BigUint {
+        BigUint::from(1u8) << (64 * N)
+    }
+    fn from(&self, value: &BigUint) -> Residue<M, N> {
+        Residue::from_wide(&words(value))
+    }
+    fn value(&self, e: &Residue<M, N>) -> BigUint {
+        let value = integer(&e.integer());
+        assert!(value < self.modulus(), "a residue at or above the modulus");
+        value
+    }
+    fn add(&self, a: &Residue<M, N>, b: &Residue<M, N>) -> Residue<M, N> {
+        a.plus(b)
+    }
+    fn sub(&self, a: &Residue<M, N>, b: &Residue<M, N>) -> Residue<M, N> {
+        a.minus(b)
+    }
+    fn mul(&self, a: &Residue<M, N>, b: &Residue<M, N>) -> Residue<M, N> {
+        a.times(b)
+    }
+    fn square(&self, a: &Residue<M, N>) -> Residue<M, N> {
+        a.times(a)
+    }
+    fn invert(&self, a: &Residue<M, N>) -> Residue<M, N> {
+        a.inverted()
+    }
+}
+
 struct XorShift(u64);
 
 impl XorShift {
@@ -303,6 +339,14 @@ fn nist_fields_and_orders_match_integers() {
     check(&Montgomery::<P256Order, 4>(PhantomData), 2);
     check(&Montgomery::<P384Field, 6>(PhantomData), 3);
     check(&Montgomery::<P384Order, 6>(PhantomData), 4);
+}
+
+#[test]
+fn compile_time_montgomery_forms_match_integers() {
+    check(&MontgomeryConst::<P256Field, 4>(PhantomData), 5);
+    check(&MontgomeryConst::<P256Order, 4>(PhantomData), 6);
+    check(&MontgomeryConst::<P384Field, 6>(PhantomData), 7);
+    check(&MontgomeryConst::<P384Order, 6>(PhantomData), 8);
 }
 
 /// The compile-time Montgomery constants, and the canonical decoding that
