@@ -37,6 +37,24 @@ osbench measures faults (`mem.first_touch`, `mem.anon`), small maps
 (`mem.map_unmap_4k`), partial unmaps and protection changes against Linux on
 one machine.
 
+On the T14 at dadeebe0a against its base 028244feb (osbench p50, one run
+each), what is still slower than the base:
+
+| row | head | base |
+|---|---|---|
+| `mem.first_touch.4k` ns/page | 882 | 11 (2 MiB pages; Linux 927) |
+| `mem.anon.total` ns/MiB | 233,466 | 51,522 (Linux 258,177) |
+| `mem.realloc_grow.1m_256m` ms | 116 | 30 (Linux 131 ns, by `mremap`) |
+| `fs.tmp.seq_read.1048576` MB/s | 6,421 | 9,055 |
+| `fs.tmp.seq_write.1048576` MB/s | 4,595 | 6,080 |
+| `fs.tmp.readdir.1000` ms | 1.20 | 0.74 |
+| `fs.served.read_4k_at` ns | 31,185 | 23,953 |
+| `ipc.reqrep.65536` ns | 48,248 | 38,214 |
+| `pipe.throughput.65536` MB/s | 7,214 | 10,420 |
+
+The copies (`fs.tmp`, `fs.served`, `ipc`, `pipe`) point at the user-copy
+path above.
+
 Owner: the memory track. Exit: each path above measured on the T14 at a
 change and at its base, and against Linux; a regression is fixed or its cost
 accepted by the owner. Cheap remedies when measurement asks: a per-CPU frame
