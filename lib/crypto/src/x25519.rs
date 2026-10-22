@@ -3,7 +3,11 @@
 //! RFC's noncanonical field encodings. All-zero shared secrets are refused.
 //! The caller supplies entropy; this module never queries the CPU for it.
 
-use crate::{Error, Random, ct, field25519::F, secret::Secret};
+use crate::{
+    Error, Random, ct,
+    field25519::{Multiply, Tight},
+    secret::{Secret, Workspace},
+};
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct PublicKey(pub [u8; 32]);
 pub struct SecretKey(Secret<32>);
@@ -27,10 +31,13 @@ impl SecretKey {
     pub fn public_key(&self) -> PublicKey {
         let mut base = [0; 32];
         base[0] = 9;
-        PublicKey(multiply(&self.0.0, &base).0)
+        let mut out = [0; 32];
+        multiply(&self.0.0, &base, &mut out);
+        PublicKey(out)
     }
     pub fn agree(self, peer: &PublicKey) -> Result<SharedSecret, Error> {
-        let result = multiply(&self.0.0, &peer.0);
+        let mut result = Secret([0; 32]);
+        multiply(&self.0.0, &peer.0, &mut result.0);
         if ct::equal(&result.0, &[0; 32]) {
             Err(Error::InvalidPoint)
         } else {
@@ -38,38 +45,36 @@ impl SecretKey {
         }
     }
 }
-fn multiply(scalar: &[u8; 32], point: &[u8; 32]) -> Secret<32> {
-    let x1 = F::from_bytes(point);
-    let mut x2 = F::one();
-    let mut z2 = F::zero();
-    let mut x3 = F::from_bytes(point);
-    let mut z3 = F::one();
+/// The u-coordinate of scalar * u into `out`. The ladder's (x2, z2, x3, z3)
+/// and the shared value x2 / z2 are erased when it returns.
+fn multiply(scalar: &[u8; 32], point: &[u8; 32], out: &mut [u8; 32]) {
+    let x1 = Tight::from_bytes(point);
+    let mut state = Workspace([Tight::ONE, Tight::ZERO, x1, Tight::ONE]);
+    let [x2, z2, x3, z3] = &mut state.0;
     let mut swap = 0;
     for i in (0..255).rev() {
         let bit = u64::from((scalar[i / 8] >> (i % 8)) & 1);
-        swap ^= bit;
-        let xx = F::select(&x2, &x3, swap);
-        x3 = F::select(&x3, &x2, swap);
-        x2 = xx;
-        let zz = F::select(&z2, &z3, swap);
-        z3 = F::select(&z3, &z2, swap);
-        z2 = zz;
+        let mask = ct::mask(swap ^ bit);
+        Tight::swap(x2, x3, mask);
+        Tight::swap(z2, z3, mask);
         swap = bit;
-        let a = x2.add(&z2);
+        let a = x2.add(z2);
         let aa = a.square();
-        let b = x2.sub(&z2);
+        let b = x2.sub(z2);
         let bb = b.square();
         let e = aa.sub(&bb);
-        let c = x3.add(&z3);
-        let d = x3.sub(&z3);
+        let c = x3.add(z3);
+        let d = x3.sub(z3);
         let da = d.mul(&a);
         let cb = c.mul(&b);
-        x3 = da.add(&cb).square();
-        z3 = x1.mul(&da.sub(&cb).square());
-        x2 = aa.mul(&bb);
-        z2 = e.mul(&aa.add(&F::small(121665).mul(&e)));
+        *x3 = da.add(&cb).square();
+        *z3 = x1.mul(&da.sub(&cb).square());
+        *x2 = aa.mul(&bb);
+        *z2 = e.mul(&aa.add(&e.mul_small(121665)));
     }
-    x2 = F::select(&x2, &x3, swap);
-    z2 = F::select(&z2, &z3, swap);
-    Secret(x2.mul(&z2.invert()).bytes())
+    let mask = ct::mask(swap);
+    Tight::swap(x2, x3, mask);
+    Tight::swap(z2, z3, mask);
+    let shared = Workspace(x2.mul(&z2.invert()));
+    *out = shared.0.bytes();
 }

@@ -10,7 +10,7 @@
 use crate::{
     Error,
     montgomery::{self, Modulus, Residue, below, from_be, to_be},
-    secret::wipe64,
+    secret::{Workspace, wipe64},
 };
 
 /// A short Weierstrass curve y^2 = x^3 - 3x + b of prime order and cofactor
@@ -85,6 +85,14 @@ pub(crate) struct Point<C: Curve<N>, const N: usize> {
     y: Coord<C, N>,
     z: Coord<C, N>,
 }
+impl<C: Curve<N>, const N: usize> Clone for Point<C, N> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<C: Curve<N>, const N: usize> Copy for Point<C, N> {}
+// Three residues: zero is a valid point representation.
+unsafe impl<C: Curve<N>, const N: usize> crate::secret::Zeroable for Point<C, N> {}
 impl<C: Curve<N>, const N: usize> Point<C, N> {
     fn identity() -> Self {
         Self {
@@ -143,6 +151,7 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let out = Self::select(&out, self, q.z.is_zero());
         Self::select(&out, q, self.z.is_zero())
     }
+    /// scalar * self on a fixed schedule.
     pub(crate) fn mul(&self, scalar: &Scalar<C, N>) -> Self {
         let mut r = Self::identity();
         for i in (0..N * 64).rev() {
@@ -152,28 +161,27 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         }
         r
     }
-    fn affine(&self) -> Result<([u64; N], [u64; N]), Error> {
+    /// The affine coordinates as integers, into the caller's arrays.
+    fn affine(&self, x: &mut [u64; N], y: &mut [u64; N]) -> Result<(), Error> {
         if self.z.is_zero() == 1 {
             return Err(Error::InvalidPoint);
         }
         let inverse = self.z.invert();
         let inv2 = inverse.square();
-        Ok((
-            self.x.mul(&inv2).to_integer(),
-            self.y.mul(&inv2.mul(&inverse)).to_integer(),
-        ))
+        *x = self.x.mul(&inv2).integer();
+        *y = self.y.mul(&inv2.mul(&inverse)).integer();
+        Ok(())
     }
     /// The uncompressed SEC 1 encoding, 1 + 16N bytes.
     pub(crate) fn encode(&self, out: &mut [u8]) -> Result<(), Error> {
         if out.len() != 1 + N * 16 {
             return Err(Error::Length);
         }
-        let (mut x, mut y) = self.affine()?;
+        let (mut x, mut y) = ([0; N], [0; N]);
+        self.affine(&mut x, &mut y)?;
         out[0] = 4;
         to_be(&x, &mut out[1..1 + N * 8]);
         to_be(&y, &mut out[1 + N * 8..]);
-        wipe64(&mut x);
-        wipe64(&mut y);
         Ok(())
     }
     /// An uncompressed SEC 1 point on the curve.
@@ -203,17 +211,20 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
             z: Residue::one(),
         })
     }
-    /// The x-coordinate of scalar * self into `output`, 8N bytes.
+    /// The x-coordinate of scalar * self into `output`, 8N bytes. The product
+    /// and its affine coordinates are the shared secret's, erased here once
+    /// `output` is written.
     pub(crate) fn agree(&self, scalar: &Scalar<C, N>, output: &mut [u8]) {
+        let product = Workspace(self.mul(scalar));
+        let mut coordinates = Workspace([[0; N]; 2]);
+        let [x, y] = &mut coordinates.0;
         // Both curves have prime order and cofactor one; validated nonzero
         // scalars and finite peers cannot multiply to infinity.
-        let (mut x, mut y) = self
-            .mul(scalar)
-            .affine()
+        product
+            .0
+            .affine(x, y)
             .expect("validated prime-order point and nonzero scalar");
-        to_be(&x, output);
-        wipe64(&mut x);
-        wipe64(&mut y);
+        to_be(x, output);
     }
     /// ECDSA verification of a DER signature over an 8N-byte digest. All
     /// inputs are public.
@@ -226,11 +237,12 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let s = Scalar::<C, N>::from_bytes(&s[..N * 8]).map_err(|_| Error::InvalidSignature)?;
         let z = ModN::<C, N>::from_wide(&from_be(digest));
         let inverse = ModN::<C, N>::from_wide(&s.0).invert();
-        let u = Scalar(z.mul(&inverse).to_integer(), core::marker::PhantomData);
-        let v = Scalar(ModN::<C, N>::from_wide(&r.0).mul(&inverse).to_integer(), core::marker::PhantomData);
+        let u = Scalar(z.mul(&inverse).integer(), core::marker::PhantomData);
+        let v = Scalar(ModN::<C, N>::from_wide(&r.0).mul(&inverse).integer(), core::marker::PhantomData);
         let result = Self::base().mul(&u).add(&self.mul(&v));
-        let (x, _) = result.affine().map_err(|_| Error::InvalidSignature)?;
-        let x = ModN::<C, N>::from_wide(&x).to_integer();
+        let (mut x, mut y) = ([0; N], [0; N]);
+        result.affine(&mut x, &mut y).map_err(|_| Error::InvalidSignature)?;
+        let x = ModN::<C, N>::from_wide(&x).integer();
         if x == r.0 {
             Ok(())
         } else {

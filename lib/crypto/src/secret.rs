@@ -1,4 +1,36 @@
-//! Owned secrets. Volatile stores erase this allocation, not prior moves.
+//! Erasure of secret storage. The crate's erasure contract:
+//!
+//! - **Erased: owners.** A [`Secret`], and every type that owns a key, seed,
+//!   expanded key, key schedule, scalar or shared secret, erases its own
+//!   storage when it drops. So do the hash, HMAC, Keccak, SHA-1 and Poly1305
+//!   states.
+//! - **Erased: key-agreement values.** Each key agreement writes its output
+//!   bytes into a `Secret` it owns, then erases the values they came from:
+//!   X25519's x2 / z2, and P-256/P-384's product point and affine
+//!   coordinates, each held in a [`Workspace`]. The output `Secret` is moved
+//!   into the returned `SharedSecret`, an owner. Not erased: the copies of
+//!   the output bytes that move leaves in the agreement's finished frame, and
+//!   the computation's arithmetic intermediates (below).
+//! - **Erased: workspaces.** A secret operation's explicitly managed state is
+//!   a [`Workspace`], dropped when the operation returns, on every path out of
+//!   it, early returns and `?` included. The X25519 ladder's (x2, z2, x3, z3)
+//!   is one. A workspace erases its own storage; the copies the computation
+//!   works on in registers and other slots are not erased.
+//! - **Erased per value, for now.** Ed25519 scalars (`scalar25519::S`, until
+//!   its reduction is rewritten) and ML-KEM polynomials (`mlkem::Poly`) still
+//!   erase every temporary on drop.
+//! - **How.** Volatile stores of zero over the value's own storage, then a
+//!   sequentially consistent compiler fence. They erase that location and no
+//!   other.
+//! - **Not erased.** Other arithmetic intermediates: 2^255 - 19 field
+//!   elements, NIST residues and both curves' points are `Copy` values.
+//!   Registers; spill slots and every other copy the compiler makes, by-value
+//!   moves and returns included; a moved value's earlier location; finished
+//!   stack frames; the caller's buffers and public outputs. These remain
+//!   until something overwrites them.
+//! - **Panics.** An unwinding panic drops, and so erases, every owner and
+//!   workspace on the unwound frames. Under `panic = "abort"` nothing runs
+//!   after the panic.
 
 use core::sync::atomic::{Ordering, compiler_fence};
 
@@ -27,21 +59,26 @@ pub(crate) fn wipe64(words: &mut [u64]) {
     compiler_fence(Ordering::SeqCst);
 }
 
-/// Element types whose all-zero bytes are a valid value.
-pub(crate) trait Zeroable: Copy {}
-impl Zeroable for u8 {}
-impl Zeroable for u32 {}
-impl Zeroable for u64 {}
-impl Zeroable for u128 {}
-impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
+/// Types whose all-zero bytes are a valid value.
+///
+/// # Safety
+/// The all-zero bit pattern must be a valid `Self`: no references,
+/// `NonZero` fields or enums without a zero discriminant.
+pub(crate) unsafe trait Zeroable: Copy {}
+// Integers and arrays of zeroable elements are valid at zero.
+unsafe impl Zeroable for u8 {}
+unsafe impl Zeroable for u32 {}
+unsafe impl Zeroable for u64 {}
+unsafe impl Zeroable for u128 {}
+unsafe impl<T: Zeroable, const N: usize> Zeroable for [T; N] {}
 
-/// Erases a whole array, 16 bytes per volatile store. A single volatile store
+/// Erases a whole value, 16 bytes per volatile store. A single volatile store
 /// of a large array is lowered through a stack copy, a `memcpy` call.
-pub(crate) fn erase<T: Zeroable, const N: usize>(array: &mut [T; N]) {
-    let bytes = core::mem::size_of::<[T; N]>();
-    let base = (array as *mut [T; N]).cast::<u8>();
+pub(crate) fn erase<T: Zeroable>(value: &mut T) {
+    let bytes = core::mem::size_of::<T>();
+    let base = (value as *mut T).cast::<u8>();
     for i in 0..bytes / 16 {
-        // The 16 bytes lie inside the live, exclusively borrowed array, and
+        // The 16 bytes lie inside the live, exclusively borrowed value, and
         // zero bytes are a valid `T`.
         unsafe { core::ptr::write_volatile(base.add(16 * i).cast::<[u8; 16]>(), [0; 16]) };
     }
@@ -56,6 +93,16 @@ pub(crate) fn erase<T: Zeroable, const N: usize>(array: &mut [T; N]) {
 pub(crate) struct Secret<const N: usize, T: Zeroable = u8>(pub(crate) [T; N]);
 
 impl<const N: usize, T: Zeroable> Drop for Secret<N, T> {
+    fn drop(&mut self) {
+        erase(&mut self.0);
+    }
+}
+
+/// An operation's secret working state, erased when the operation ends, on
+/// every return path.
+pub(crate) struct Workspace<T: Zeroable>(pub(crate) T);
+
+impl<T: Zeroable> Drop for Workspace<T> {
     fn drop(&mut self) {
         erase(&mut self.0);
     }

@@ -2,12 +2,12 @@
 //! words. Each modulus is a type, so a residue modulo one cannot meet a residue
 //! modulo another. Every operation on a residue has a fixed schedule and a
 //! masked final subtraction; inversion's exponent is public. Residues are
-//! erased on drop and workspaces after use.
+//! `Copy` intermediates, not erased (`secret`'s contract).
 #![allow(
     clippy::needless_range_loop,
     reason = "carry chains index parallel fixed-size arrays; iterator adaptors stay out of line in the shipped profile"
 )]
-use crate::{ct, secret::wipe64};
+use crate::ct;
 use core::marker::PhantomData;
 
 /// An odd modulus p with 2^(64N-1) < p < 2^(64N), and its Montgomery
@@ -30,11 +30,14 @@ pub(crate) const fn encode<const N: usize>(x: &[u64; N], p: &[u64; N]) -> [u64; 
 /// A residue modulo `M` in Montgomery form, below `M::P`.
 pub(crate) struct Residue<M: Modulus<N>, const N: usize>([u64; N], PhantomData<M>);
 
-impl<M: Modulus<N>, const N: usize> Drop for Residue<M, N> {
-    fn drop(&mut self) {
-        wipe64(&mut self.0)
+impl<M: Modulus<N>, const N: usize> Clone for Residue<M, N> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
+impl<M: Modulus<N>, const N: usize> Copy for Residue<M, N> {}
+// Words and a zero-sized marker: zero is a valid residue.
+unsafe impl<M: Modulus<N>, const N: usize> crate::secret::Zeroable for Residue<M, N> {}
 
 impl<M: Modulus<N>, const N: usize> Residue<M, N> {
     /// Words already in Montgomery form and below p: a compile-time constant
@@ -58,16 +61,13 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
     }
     /// An integer x < 2^(64N) < 2p, reduced once.
     pub(crate) fn from_wide(x: &[u64; N]) -> Self {
-        let mut v = *x;
-        let reduced = Self(reduce(&v, 0, &M::P), PhantomData);
-        wipe64(&mut v);
-        reduced.mul(&Self(M::R2, PhantomData))
+        Self(reduce(x, 0, &M::P), PhantomData).mul(&Self(M::R2, PhantomData))
     }
     fn from_reduced(x: &[u64; N]) -> Self {
         Self(*x, PhantomData).mul(&Self(M::R2, PhantomData))
     }
     /// The canonical integer this residue represents.
-    pub(crate) fn to_integer(&self) -> [u64; N] {
+    pub(crate) fn integer(&self) -> [u64; N] {
         let one = Self(one(), PhantomData);
         self.mul(&one).0
     }
@@ -77,9 +77,7 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         for i in 0..N {
             (v[i], carry) = carrying_add(self.0[i], b.0[i], carry);
         }
-        let result = Self(reduce(&v, u64::from(carry), &M::P), PhantomData);
-        wipe64(&mut v);
-        result
+        Self(reduce(&v, u64::from(carry), &M::P), PhantomData)
     }
     pub(crate) fn double(&self) -> Self {
         self.add(self)
@@ -119,9 +117,7 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
             // t < 2p after each step, so at most one of the two is set.
             high = u64::from(overflow) | u64::from(carry);
         }
-        let result = Self(reduce(&t, high, &M::P), PhantomData);
-        wipe64(&mut t);
-        result
+        Self(reduce(&t, high, &M::P), PhantomData)
     }
     pub(crate) fn square(&self) -> Self {
         self.mul(self)
@@ -209,7 +205,6 @@ fn reduce<const N: usize>(v: &[u64; N], high: u64, p: &[u64; N]) -> [u64; N] {
     for i in 0..N {
         out[i] = (v[i] & !m) | (d[i] & m);
     }
-    wipe64(&mut d);
     out
 }
 

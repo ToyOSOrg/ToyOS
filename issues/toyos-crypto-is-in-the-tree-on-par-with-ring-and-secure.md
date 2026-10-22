@@ -423,8 +423,14 @@ Not consumers:
 
 ## Weaknesses until the exits hold
 
-- Owned secret storage is wiped on drop. Compiler copies, registers, spills
-  and caller-held bytes are not wiped.
+- Erasure is what `lib/crypto/src/secret.rs`'s contract states: secret
+  owners, each key agreement's shared value and named workspaces are
+  erased. Since the parity work's 5x51 field (#992), 2^255 - 19 field
+  elements, NIST residues and curve points are not erased one by one. The
+  owner approved that on condition of a measured benefit (M1: 0.80–0.94 of
+  per-temporary erasure on the T14, 0.79–0.88 on the AMD bench) and a
+  reviewed contract. Compiler
+  copies, registers, spills and caller-held bytes are not wiped.
 - **Owner**: the orchestrator. **Exit**: stage 4 states what the shipped
   targets keep, and a consumer holding a long-lived key stores it under a
   wiping owner or a Key Locker handle.
