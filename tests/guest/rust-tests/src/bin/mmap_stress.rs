@@ -129,6 +129,18 @@ fn protection() {
     set(three, 1, 0x32);
     assert_eq!(byte(three, 1), 0x32, "a refused protect changed the committed page");
     unsafe { syscall::vm_release(three, 2 * PAGE) }.expect("release the rest");
+
+    // A shared object's pages take no protection past what they were mapped
+    // with: the clock page, one object mapped read-only into every process,
+    // is not made writable for all of them by one.
+    let clock = toyos_abi::clock::CLOCK_PAGE as *mut u8;
+    assert_eq!(
+        unsafe { syscall::vm_protect(clock, PAGE, VmProt::ReadWrite) },
+        Err(SyscallError::PermissionDenied),
+        "the clock page made writable",
+    );
+    // And the page still reads as the clock: `page` asserts its magic.
+    let _ = toyos_abi::clock::page();
     println!("  PASS: protect commits reservations and changes protection with contents kept, all or nothing");
 }
 

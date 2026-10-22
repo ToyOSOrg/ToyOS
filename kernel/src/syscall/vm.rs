@@ -21,9 +21,9 @@ fn whole_pages(size: u64) -> Option<u64> {
     size.checked_next_multiple_of(crate::mm::PAGE_SIZE).filter(|&bytes| bytes != 0)
 }
 
-/// A protection a program may give its own private memory. Executable memory
-/// is not yet one: `ReadExec` is `NotSupported`.
-fn private_prot(word: u64) -> Result<Prot, SyscallError> {
+/// The protection a `VmProt` word names. Executable memory is not yet one a
+/// program may ask for: `ReadExec` is `NotSupported`.
+fn vm_prot(word: u64) -> Result<Prot, SyscallError> {
     match VmProt::from_u64(word).ok_or(SyscallError::InvalidArgument)? {
         VmProt::None => Ok(Prot::None),
         VmProt::Read => Ok(Prot::Read),
@@ -49,7 +49,7 @@ fn answer(done: Result<(), SyscallError>) -> u64 {
 /// exactly at `place` in place of whatever those pages held.
 pub(super) fn sys_vm_reserve(len: u64, prot: u64, place: u64, kind: u64) -> u64 {
     let reserved = (|| {
-        let prot = private_prot(prot)?;
+        let prot = vm_prot(prot)?;
         let len = whole_pages(len).ok_or(SyscallError::InvalidArgument)?;
         let at = match kind {
             VM_AT_ANYWHERE => At::Anywhere(place),
@@ -74,7 +74,7 @@ pub(super) fn sys_vm_release(addr: u64, len: u64) -> u64 {
 
 pub(super) fn sys_vm_protect(addr: u64, len: u64, prot: u64) -> u64 {
     answer((|| {
-        let prot = private_prot(prot)?;
+        let prot = vm_prot(prot)?;
         let (start, len) = range(addr, len)?;
         process::current_address_space().lock().protect(start, len, prot)
     })())

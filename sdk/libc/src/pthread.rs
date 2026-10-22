@@ -14,10 +14,8 @@
 //! `pthread_create` joins it and frees its stack, which no thread can free
 //! while standing on it.
 
-use alloc::alloc::{alloc as heap_alloc, dealloc as heap_dealloc};
 use alloc::boxed::Box;
 use alloc::vec::Vec;
-use core::alloc::Layout;
 use core::cell::Cell;
 use core::ptr;
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, Ordering};
@@ -42,8 +40,9 @@ struct Thread {
     /// Nonzero once `tid` is written; the thread waits for it before it runs.
     published: AtomicU32,
     state: AtomicU32,
-    stack: *mut u8,
-    stack_size: usize,
+    /// The stack's reservation: [`GUARD`] reserved, then the stack committed.
+    reservation: *mut u8,
+    reserved: usize,
     start: StartRoutine,
     arg: *mut u8,
     result: AtomicPtr<u8>,
@@ -69,8 +68,26 @@ static REAPED: Lock<Vec<usize>> = Lock::new(Vec::new());
 
 pub(crate) use toyos::sync::Lock;
 
-fn stack_layout(size: usize) -> Layout {
-    Layout::from_size_align(size, STACK_ALIGN).expect("a thread stack's size is a multiple of its alignment")
+/// Reserved pages below a thread's stack, so that running off it faults:
+/// one page, which C's frames reach through only by skipping it, as a guard
+/// page on every POSIX system can be skipped.
+const GUARD: usize = syscall::PAGE_SIZE;
+
+/// A stack of `size` bytes in whole pages above a [`GUARD`], committed before
+/// the thread starts: the reservation, its length, and the stack's base.
+fn reserve_stack(size: usize) -> Option<(*mut u8, usize, *mut u8)> {
+    let pages = size.checked_next_multiple_of(syscall::PAGE_SIZE)?;
+    let reserved = pages.checked_add(GUARD)?;
+    // SAFETY: placed anywhere, so it replaces nothing.
+    let reservation = unsafe { syscall::vm_reserve(reserved, syscall::VmProt::None, syscall::VmAt::ANYWHERE) }.ok()?;
+    let base = reservation.wrapping_add(GUARD);
+    // SAFETY: the stack's pages, inside the reservation just made.
+    if unsafe { syscall::vm_protect(base, pages, syscall::VmProt::ReadWrite) }.is_err() {
+        // SAFETY: the reservation just made, which nothing reaches.
+        let _ = unsafe { syscall::vm_release(reservation, reserved) };
+        return None;
+    }
+    Some((reservation, reserved, base))
 }
 
 /// Wait for `thread` to be gone, free its stack and block, and answer what it
@@ -80,7 +97,7 @@ unsafe fn reap(thread: *mut Thread) -> *mut u8 {
     syscall::thread_join(t.tid.load(Ordering::Relaxed));
     let result = t.result.load(Ordering::Acquire);
     unsafe {
-        heap_dealloc(t.stack, stack_layout(t.stack_size));
+        let _ = syscall::vm_release(t.reservation, t.reserved);
         drop(Box::from_raw(thread));
     }
     result
@@ -158,29 +175,28 @@ unsafe fn create(attr: *const u64, start_routine: StartRoutine, arg: *mut u8, co
 
     let attr = if attr.is_null() { attr_default() } else { unsafe { *attr } };
     let stack_size = (attr & !ATTR_DETACHED) as usize;
-    let stack = unsafe { heap_alloc(stack_layout(stack_size)) };
-    if stack.is_null() {
+    let Some((reservation, reserved, stack)) = reserve_stack(stack_size) else {
         return Err(EAGAIN);
-    }
+    };
     let state = if attr & ATTR_DETACHED != 0 { DETACHED } else { JOINABLE };
     let block = Box::into_raw(Box::new(Thread {
         tid: AtomicU64::new(0),
         published: AtomicU32::new(0),
         state: AtomicU32::new(state),
-        stack,
-        stack_size,
+        reservation,
+        reserved,
         start: start_routine,
         arg,
         result: AtomicPtr::new(ptr::null_mut()),
         counted,
     }));
-    let top = (stack as usize + stack_size) & !(STACK_ALIGN - 1);
-    // SAFETY: the entry is a function of this library, and the stack is a
-    // fresh allocation of `stack_size` bytes.
+    let top = (reservation as usize + reserved) & !(STACK_ALIGN - 1);
+    // SAFETY: the entry is a function of this library, and the stack is the
+    // committed top of a fresh reservation.
     let tid = unsafe { syscall::thread_spawn(thread_entry as *const () as u64, top as u64, block as u64, stack as u64) };
     if syscall::SyscallError::from_u64(tid).is_some() {
         unsafe {
-            heap_dealloc(stack, stack_layout(stack_size));
+            let _ = syscall::vm_release(reservation, reserved);
             drop(Box::from_raw(block));
         }
         return Err(EAGAIN);
