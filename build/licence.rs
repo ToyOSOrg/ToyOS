@@ -901,6 +901,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         Terms::Spdx("Apache-2.0"),
     ),
     (
+        "lib/crypto/tests/data/ed25519_speccheck_cases.json",
+        "08e47a36d9aead288664930505584f353fff113ab854f2800db1e4f5b3540450",
+        "NOTICE",
+        Terms::Spdx("Apache-2.0"),
+    ),
+    (
         "tests/acvp/nist-hmac-sha1.json",
         "6e96eb5f53065219c437a99fedec7299c916c76e170d6b74507dc5409ed9cd6b",
         "NOTICE",
