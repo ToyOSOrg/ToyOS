@@ -51,7 +51,7 @@ review has been done, and passing vectors does not show it is safer than ring.
   run on the Armv8 SHA instructions where the target promises them, by the
   owner's word (2026-10-22): the development Mac's, where the build hashes
   every image. There (exploratory, an M4 Pro) SHA-256 of 1 MiB runs at
-  2.6 GB/s against the portable rounds' 0.52, and SHA-512 at 1.7 against
+  2.6 GB/s against the portable rounds' 0.52, and SHA-512 at 1.36 against
   0.83. ToyOS's own AArch64 targets do not promise them and nothing detects
   them at run time, so they hash portably; see the weaknesses.
 
@@ -63,7 +63,7 @@ review has been done, and passing vectors does not show it is safer than ring.
 | `toyos-ssh`'s `hostkey` on the signing path. `build/signing.rs` reads the owner's image-signing key through `openssh_seed` and writes a minted one through `openssh_private`; both derive the public key from the seed | `toyos_update::sig::public_of`, since stage 1 | nothing: this derivation is the root of trust's; the verifier itself switches in stage 6 |
 | `system/sshserver` | russh with the RustCrypto stack, including `rsa` (RUSTSEC-2023-0071) | none directly; it reaches the crate through `toyos-ssh` |
 | Image and package signing: `lib/update` (the loader, `/system/bin/update`, `build/signing.rs`, `build/root`, #892's repository keys) | `ed25519-dalek` `verify_strict`, which hashes with the loader's `sha2` under `force-soft`; the crate's SHA-512 over the signed header, since #1016 | strict Ed25519 verification in the soft-float UEFI loader, and signing behind `sign` on the host. The track's last stage, stage 6 (owner, 2026-10-13) |
-| Every SHA-256: the build, `pkg`, `lib/swap`, `system/update`, `lib/update` and the loader | the crate, since #1016: SHA-NI on x86-64, the UEFI loader's in a block that saves the XMM registers it uses; the Armv8 SHA instructions where the target promises them | done once the parity rows show it no slower than `toyos-sha2-hw`, which it replaces |
+| Every SHA-256: the build, `pkg`, `lib/swap`, `system/update`, `lib/update` and the loader | the crate, since #1016: SHA-NI on x86-64, the UEFI loader's in a block that saves the XMM registers it uses; the Armv8 SHA instructions where the target promises them. No slower than `toyos-sha2-hw`, which it replaces, on either bench: on the T14 4.6 times as fast at 64 B and 9 and 6 percent faster at 16 KiB and 1 MiB, on the AMD bench 2.8 times at 64 B, 2 percent at 16 KiB and equal at 1 MiB (#1016's evidence) | nothing |
 | ToyOS's own HTTPS clients. On the host: the build's `ureq` (`build/release.rs`) and doom's build script (`apps/doom/build.rs`). In a guest, none today: `https_tls13` and `pkg install <url>` are stages 3 and 5 of `issues/the-internet-clients-work-unchanged.md` | rustls on `ring`, which is `ToyOSOrg/ring` in a guest | the rustls provider through ureq's `rustls-no-provider` feature. Stage 5, once parity and security hold (owner, 2026-10-13) |
 | Wi-Fi's `wlan` (`issues/there-is-no-wifi.md` P6, W2) | nothing yet | PBKDF2-HMAC-SHA1, the 802.11i PRF and RFC 3394 unwrap, which the crate has. AES-CMAC-128, SAE over P-256 by hash-to-element, a public constant-time comparison and a public wiping secret, which it lacks |
 | `issues/programs-hold-aes-keys-as-key-locker-handles.md` | blocked on a session-long AES key | a TLS client on the crate is that consumer: AES behind a Key Locker handle. SSH holds no AES key |
@@ -409,7 +409,9 @@ Not consumers:
        - Negative controls: 15 checked patches, each red by its named test,
          two only after a test was added for it.
        - Miri over every `portable` unit test but the provider's (ring is
-         C): 25 pass and ML-KEM's exhaustive reduction is ignored under it;
+         C), with `MIRIFLAGS=-Zmiri-disable-isolation` since #1016 moved
+         NIST's ML-KEM keygen vectors to `tests/acvp/`, whose file the test
+         reads: 25 pass and ML-KEM's exhaustive reduction is ignored under it;
          the heavy tests take a spread of their inputs there. A patch that
          writes past `erase`'s array is caught.
        - Evidence: `ToyOSOrg/evidence` `pr-993`,

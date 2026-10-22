@@ -490,11 +490,15 @@ mod tests {
     }
 
     /// The loader's block, which only UEFI dispatches to, against the portable
-    /// rounds on a host that has the instructions.
+    /// rounds. A host without the instructions cannot test it, and says so
+    /// rather than passing.
     #[test]
     fn the_register_saving_sha256_block_matches_the_portable_rounds() {
+        assert!(
+            features().sha() || cfg!(feature = "portable"),
+            "this host's CPU has no SHA extensions, so nothing here can test the register-saving block"
+        );
         if !features().sha() {
-            std::println!("no SHA extensions here: the register-saving SHA-256 block is not tested");
             return;
         }
         let bytes: std::vec::Vec<u8> = (0..64 * 9).map(|i: usize| (i * 151 + i / 7) as u8).collect();

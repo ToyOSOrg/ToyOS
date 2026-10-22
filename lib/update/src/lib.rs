@@ -43,9 +43,8 @@ pub fn sha256(bytes: &[u8]) -> Digest {
 }
 
 /// Why a hash here cannot refuse: FIPS 180-4 bounds a message at 2^61 bytes,
-/// and what these hash is an image's section, a signed header or a signed
-/// archive length, each held in memory or bounded by a `u64` the owner's key
-/// signed.
+/// and what these hash is an image's section or a signed header, each held in
+/// memory, or a streamed archive, which [`repo::ARCHIVE_CAP`] holds to 1 GiB.
 pub(crate) const SHA_BOUND: &str = "a hashed input is far below SHA-2's 2^61-byte bound";
 
 /// A digest in lowercase hex, into `out`.

@@ -379,9 +379,9 @@ mod tests {
     }
 
     /// NIST's keygen vectors are read, not embedded: they sit outside this
-    /// crate's directory, as test input the image does not carry.
+    /// crate's directory, as test input the image does not carry. Miri reads
+    /// the file with its isolation off (`-Zmiri-disable-isolation`).
     #[test]
-    #[cfg_attr(miri, ignore = "Miri's isolation refuses the file read")]
     fn nist_expanded_keygen_secret_matches() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/acvp/nist-mlkem-keygen.json");
         let data: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();

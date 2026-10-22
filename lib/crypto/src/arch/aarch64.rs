@@ -17,7 +17,7 @@ pub(super) fn sha256_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) -> bool {
     if cfg!(feature = "portable") {
         return false;
     }
-    // The target guarantees FEAT_SHA256.
+    // SAFETY: the target guarantees FEAT_SHA256.
     unsafe { sha256(state, blocks) }
     true
 }
@@ -26,14 +26,15 @@ pub(super) fn sha256_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) -> bool {
 #[target_feature(enable = "neon,sha2")]
 fn sha256(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     let k: [uint32x4_t; 16] = core::array::from_fn(|i| {
-        // Four plain words.
+        // SAFETY: four plain words.
         unsafe { vld1q_u32(crate::hash::K256[4 * i..].as_ptr()) }
     });
-    // `state` holds eight plain words.
+    // SAFETY: `state` holds eight plain words.
     let (mut abcd, mut efgh) = unsafe { (vld1q_u32(state.as_ptr()), vld1q_u32(state[4..].as_ptr())) };
     for block in blocks {
         let (saved_abcd, saved_efgh) = (abcd, efgh);
-        // The block's sixteen big-endian words, four to a vector.
+        // SAFETY: the block's 64 bytes, read 16 at a time: its sixteen
+        // big-endian words, four to a vector.
         let mut w: [uint32x4_t; 4] =
             core::array::from_fn(|i| unsafe { vreinterpretq_u32_u8(vrev32q_u8(vld1q_u8(block[16 * i..].as_ptr()))) });
         for i in 0..16 {
@@ -49,7 +50,7 @@ fn sha256(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
         abcd = vaddq_u32(abcd, saved_abcd);
         efgh = vaddq_u32(efgh, saved_efgh);
     }
-    // `state` has room for eight words.
+    // SAFETY: `state` has room for eight words.
     unsafe {
         vst1q_u32(state.as_mut_ptr(), abcd);
         vst1q_u32(state[4..].as_mut_ptr(), efgh);
@@ -73,7 +74,7 @@ pub(super) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool 
     if cfg!(feature = "portable") {
         return false;
     }
-    // The target guarantees FEAT_SHA512.
+    // SAFETY: the target guarantees FEAT_SHA512.
     unsafe { sha512(state, blocks) }
     true
 }
@@ -81,12 +82,13 @@ pub(super) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool 
 #[cfg(target_feature = "sha3")]
 #[target_feature(enable = "neon,sha3")]
 fn sha512(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
-    // `state` holds eight plain words.
+    // SAFETY: `state` holds eight plain words.
     let mut s: [uint64x2_t; 4] = core::array::from_fn(|i| unsafe { vld1q_u64(state[2 * i..].as_ptr()) });
     for block in blocks {
         let saved = s;
         let [mut ab, mut cd, mut ef, mut gh] = s;
-        // The block's sixteen big-endian words, two to a vector.
+        // SAFETY: the block's 128 bytes, read 16 at a time: its sixteen
+        // big-endian words, two to a vector.
         let mut w: [uint64x2_t; 8] =
             core::array::from_fn(|i| unsafe { vreinterpretq_u64_u8(vrev64q_u8(vld1q_u8(block[16 * i..].as_ptr()))) });
         for i in 0..40 {
@@ -96,7 +98,7 @@ fn sha512(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
                 let sigma0 = vsha512su0q_u64(w[i % 8], w[(i + 1) % 8]);
                 w[i % 8] = vsha512su1q_u64(sigma0, w[(i + 7) % 8], vextq_u64::<1>(w[(i + 4) % 8], w[(i + 5) % 8]));
             }
-            // Two plain words of K.
+            // SAFETY: two plain words of K.
             let kw = vaddq_u64(w[i % 8], unsafe { vld1q_u64(crate::hash::K512[2 * i..].as_ptr()) });
             let t1 = vsha512hq_u64(
                 vaddq_u64(gh, vextq_u64::<1>(kw, kw)),
@@ -112,7 +114,7 @@ fn sha512(state: &mut [u64; 8], blocks: &[[u8; 128]]) {
         }
     }
     for i in 0..4 {
-        // `state` has room for eight words.
+        // SAFETY: `state` has room for eight words.
         unsafe { vst1q_u64(state[2 * i..].as_mut_ptr(), s[i]) }
     }
 }
