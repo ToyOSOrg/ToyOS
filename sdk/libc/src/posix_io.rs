@@ -777,11 +777,11 @@ pub struct pollfd {
 }
 
 /// What [`wait_fds`] came to.
-pub(crate) struct Waited {
+struct Waited {
     /// Entries ready, their `revents` written.
-    pub(crate) ready: i32,
+    ready: i32,
     /// Whether the wake pipe beside them was readable.
-    pub(crate) woken: bool,
+    woken: bool,
 }
 
 /// The most entries and doorbells one poll watches: a poller's handles, one of
@@ -801,7 +801,7 @@ const MAX_POLLED: usize = toyos::poller::Poller::MAX_HANDLES as usize - 1;
 ///
 /// # Safety
 /// `fds` points at `n` entries.
-pub(crate) unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>, wake: Option<RawHandle>) -> Result<Waited, i32> {
+unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>, wake: Option<RawHandle>) -> Result<Waited, i32> {
     use toyos::net::stream::{self, Poll, Way};
 
     const POLLIN: i16 = 1;

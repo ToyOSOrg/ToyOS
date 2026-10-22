@@ -97,6 +97,13 @@ fn test() {
 
 // ---- the claims ----
 
+/// The parent said `said` where `what` was owed: how it ended, and its stderr.
+fn parent_failed(parent: &mut Child, what: &str, said: &str) -> ! {
+    let mut why = String::new();
+    let _ = parent.stderr.take().expect("the parent's stderr").read_to_string(&mut why);
+    panic!("{what}: the parent said {said:?}, ended {:?}, and wrote {why}", parent.wait());
+}
+
 /// A dead holder's hang-up comes after its last instruction, and the parent
 /// works on through the departure, step by awaited step.
 fn a_holder_killed_inside_the_gate_leaves_the_parent_working() {
@@ -105,9 +112,7 @@ fn a_holder_killed_inside_the_gate_leaves_the_parent_working() {
     netstack.serve_export(Holder::FIRST);
     let said = line(&mut out);
     if !(said.starts_with("the child ended") && said.contains("Fault(Memory)")) {
-        let mut why = String::new();
-        let _ = parent.stderr.take().expect("the parent's stderr").read_to_string(&mut why);
-        panic!("the faulting child: the parent said {said:?}, ended {:?}, and wrote {why}", parent.wait());
+        parent_failed(&mut parent, "the faulting child", &said);
     }
     assert_eq!(line(&mut out), "contended", "the parent's write did not find the gate held");
     let second = Holder::new(2).expect("a holder's number");
@@ -117,9 +122,7 @@ fn a_holder_killed_inside_the_gate_leaves_the_parent_working() {
     netstack.depart(second);
     let said = line(&mut out);
     if said != "wrote" {
-        let mut why = String::new();
-        let _ = parent.stderr.take().expect("the parent's stderr").read_to_string(&mut why);
-        panic!("the parent's write after the departure: it said {said:?}, ended {:?}, and wrote {why}", parent.wait());
+        parent_failed(&mut parent, "the parent's write after the departure", &said);
     }
     assert_eq!(netstack.sent(), b"p", "what the parent's write published");
     netstack.publish(b"ok");

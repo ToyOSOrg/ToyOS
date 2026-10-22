@@ -391,16 +391,26 @@ pub unsafe extern "C" fn accept(
 
     // A connection's arrival is a byte on the notify pipe.
     let notify = RawHandle(notify_fd as u32);
-    let arrived = interruptibly(fd, |block| match block {
-        true => {
-            let _ = syscall::read(notify, &mut [0u8; 1]);
-            Some(())
-        }
-        false => match syscall::read_nonblock(notify, &mut [0u8; 1]) {
-            Err(syscall::SyscallError::WouldBlock) => None,
-            _ => Some(()),
+    let mut poller = None;
+    let arrived = interruptibly(
+        |block| match block {
+            true => {
+                let _ = syscall::read(notify, &mut [0u8; 1]);
+                Some(())
+            }
+            false => match syscall::read_nonblock(notify, &mut [0u8; 1]) {
+                Err(syscall::SyscallError::WouldBlock) => None,
+                _ => Some(()),
+            },
         },
-    });
+        |wake| {
+            let poller = poller.get_or_insert_with(|| toyos::poller::Poller::new(2));
+            poller.watch_raw(notify, toyos::poller::READABLE, 0);
+            poller.watch_raw(wake, toyos::poller::READABLE, 1);
+            poller.wait(1, u64::MAX, |_| {});
+            Ok(())
+        },
+    );
     if let Err(errno) = arrived {
         set_errno(errno);
         return -1;
@@ -461,16 +471,23 @@ fn write_stream(handle: RawHandle, data: &[u8]) -> isize {
     }
 }
 
-/// `recv` on the stream descriptor `fd` names, and its `read`: a handler
-/// interrupts it as [`interruptibly`] says.
-fn read_stream(fd: i32, handle: RawHandle, data: &mut [u8]) -> isize {
-    let read = interruptibly(fd, |block| {
-        let wait = if block { Wait::Blocking(None) } else { Wait::Nonblocking };
-        match stream::read(handle, data, wait) {
-            Err(stream::Refused::WouldBlock) if !block => None,
-            answer => Some(answer),
-        }
-    });
+/// `recv` on a stream, and `read` of its descriptor: a handler interrupts it
+/// as [`interruptibly`] says.
+fn read_stream(handle: RawHandle, data: &mut [u8]) -> isize {
+    let mut poller = None;
+    let read = interruptibly(
+        |block| {
+            let wait = if block { Wait::Blocking(None) } else { Wait::Nonblocking };
+            match stream::read(handle, data, wait) {
+                Err(stream::Refused::WouldBlock) if !block => None,
+                answer => Some(answer),
+            }
+        },
+        |wake| {
+            let poller = poller.get_or_insert_with(|| toyos::poller::Poller::new(2));
+            stream::wait_ready(handle, stream::Way::Receive, wake, poller).map_err(crate::errcode::of_stream)
+        },
+    );
     match read {
         Ok(Ok(n)) => n as isize,
         Ok(Err(refused)) => { set_errno(crate::errcode::of_stream(refused)); -1 }
@@ -485,7 +502,7 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, _flags: i32) ->
         return 0;
     }
     let mut socket = match sock_from_fd(fd) {
-        Some(Sock::Stream(stream)) => return read_stream(fd, stream.handle, core::slice::from_raw_parts_mut(buf, len)),
+        Some(Sock::Stream(stream)) => return read_stream(stream.handle, core::slice::from_raw_parts_mut(buf, len)),
         Some(Sock::Entry(socket)) => socket,
         None => { set_errno(EBADF); return -1; }
     };
@@ -557,7 +574,7 @@ pub unsafe extern "C" fn recvfrom(
     }
     let mut socket = match sock_from_fd(fd) {
         // A stream's `recvfrom` names no address, as `recv`.
-        Some(Sock::Stream(stream)) => return read_stream(fd, stream.handle, core::slice::from_raw_parts_mut(buf, len)),
+        Some(Sock::Stream(stream)) => return read_stream(stream.handle, core::slice::from_raw_parts_mut(buf, len)),
         Some(Sock::Entry(socket)) => socket,
         None => { set_errno(EBADF); return -1; }
     };
@@ -626,12 +643,16 @@ const SHUT_RD: i32 = 0;
 const SHUT_WR: i32 = 1;
 const SHUT_RDWR: i32 = 2;
 
-/// `attempt`'s answer, asked without blocking until it has one and waiting
-/// between for `fd` to be readable: a handler that interrupts the wait
-/// restarts it if it was installed with `SA_RESTART`, and answers `EINTR` if
-/// not. With no handler kept nothing interrupts it, and `attempt(true)`
-/// blocks for the answer.
-fn interruptibly<T>(fd: i32, mut attempt: impl FnMut(bool) -> Option<T>) -> Result<T, i32> {
+/// `attempt`'s answer, asked without blocking until it has one, with `wait`
+/// between: given what a handler's signal makes readable, it waits for that
+/// or for what the call holds to be ready. A handler that interrupts the
+/// wait restarts it if it was installed with `SA_RESTART`, and answers
+/// `EINTR` if not. With no handler kept nothing interrupts it, and
+/// `attempt(true)` blocks for the answer.
+fn interruptibly<T>(
+    mut attempt: impl FnMut(bool) -> Option<T>,
+    mut wait: impl FnMut(RawHandle) -> Result<(), i32>,
+) -> Result<T, i32> {
     let Some(mut call) = crate::signal::Call::enter(None, false, false) else {
         return Ok(attempt(true).expect("a blocking attempt answers"));
     };
@@ -645,9 +666,7 @@ fn interruptibly<T>(fd: i32, mut attempt: impl FnMut(bool) -> Option<T>) -> Resu
         if let Some(answer) = attempt(false) {
             return Ok(answer);
         }
-        let mut entry = crate::posix_io::pollfd { fd, events: 1, revents: 0 };
-        // SAFETY: one entry, this one.
-        unsafe { crate::posix_io::wait_fds(&mut entry, 1, None, Some(call.wake())) }?;
+        wait(call.wake())?;
     }
 }
 
@@ -656,7 +675,7 @@ fn interruptibly<T>(fd: i32, mut attempt: impl FnMut(bool) -> Option<T>) -> Resu
 /// owner is std's copy of `toyos`, which holds no end of libc's streams.
 pub(crate) fn read_if_stream(fd: i32, data: &mut [u8]) -> Option<isize> {
     match sock_from_fd(fd)? {
-        Sock::Stream(held) if stream::is_stream(held.handle) => Some(read_stream(fd, held.handle, data)),
+        Sock::Stream(held) if stream::is_stream(held.handle) => Some(read_stream(held.handle, data)),
         Sock::Stream(_) | Sock::Entry(_) => None,
     }
 }

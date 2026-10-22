@@ -517,12 +517,9 @@ impl Bells for Doorbells {
     }
 
     fn wait_gate(&self, bell: Doorbell, until: Option<u64>, owner: u16) -> Waited {
-        let way = if bell == Doorbell::Receive { "read" } else { "write" };
+        let way = if bell == Doorbell::Receive { Way::Receive } else { Way::Send };
         gate_wait(until, toyos_abi::clock::nanos_since_boot, |by| self.wait(bell, Some(by)), |waited| {
-            crate::warn!(
-                "toyos::net: a stream's {way} has waited {} s for holder {owner}'s gate: that holder's call has not returned",
-                waited / 1_000_000_000
-            );
+            gate_stalled(way, owner, waited)
         })
     }
 
@@ -568,6 +565,14 @@ fn gate_wait(
             answer => return answer,
         }
     }
+}
+
+fn gate_stalled(way: Way, owner: u16, waited: u64) {
+    let way = if way == Way::Receive { "read" } else { "write" };
+    crate::warn!(
+        "toyos::net: a stream's {way} has waited {} s for holder {owner}'s gate: that holder's call has not returned",
+        waited / 1_000_000_000
+    );
 }
 
 /// How a call waits: not at all, or until ready or a deadline in nanoseconds
@@ -715,6 +720,33 @@ pub fn watch(handle: RawHandle, way: Way) -> Result<Poll, Refused> {
             Ok(Poll::Ready)
         }
     }
+}
+
+/// A wait until `way` of the stream `handle` reaches may be ready, or `wake`
+/// is readable, on `poller`, of two handles, which the caller keeps across its
+/// waits: nothing is copied, and the caller asks again. A wait for another
+/// holder's gate is reported as a blocking call's is.
+pub fn wait_ready(handle: RawHandle, way: Way, wake: RawHandle, poller: &crate::poller::Poller) -> Result<(), Refused> {
+    let Poll::Watching(watching) = watch(handle, way)? else { return Ok(()) };
+    let bell = Call { slot: watching.slot, end: watching.end, base: watching.base }.bells().handle(session::doorbell(way));
+    let wait = |timeout: u64| {
+        poller.watch_raw(bell, crate::poller::READABLE, 0);
+        poller.watch_raw(wake, crate::poller::READABLE, 1);
+        let mut answered = false;
+        poller.wait(1, timeout, |_| answered = true);
+        if answered { Waited::Rung } else { Waited::TimedOut }
+    };
+    match watching.watching.gate() {
+        None => {
+            wait(u64::MAX);
+        }
+        Some(owner) => {
+            let now = toyos_abi::clock::nanos_since_boot;
+            gate_wait(None, now, |by| wait(by.saturating_sub(now())), |waited| gate_stalled(way, owner, waited));
+        }
+    }
+    unwatch(watching);
+    Ok(())
 }
 
 /// The end of a poll [`watch`] counted in: whether its way is ready now.

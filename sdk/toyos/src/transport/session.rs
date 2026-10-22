@@ -886,6 +886,15 @@ where
 #[must_use]
 pub struct Watching {
     took: bool,
+    gate: Option<u16>,
+}
+
+impl Watching {
+    /// The holder whose gate the direction is ready under, where the watch
+    /// waits on its call rather than on the server.
+    pub fn gate(&self) -> Option<u16> {
+        self.gate
+    }
 }
 
 /// What a poll's look found.
@@ -910,7 +919,7 @@ where
 {
     let (polled, ring_server, gone_at) = lock.with(|half| {
         let common = half.common();
-        let (mut counted, mut took) = (false, false);
+        let (mut counted, mut took, mut gate) = (false, false, None);
         let ready = loop {
             match look_counted(half, page, bells, &mut counted, &mut took) {
                 Ok(None) => break gone(page, common.gone),
@@ -924,11 +933,14 @@ where
             match contend(half, page, bells, &mut counted, &mut took, WANT, owner) {
                 Contended::Free => continue,
                 Contended::Gone => break true,
-                Contended::Wanted(_) => break false,
+                Contended::Wanted(owner) => {
+                    gate = Some(owner);
+                    break false;
+                }
             }
         };
         if !ready {
-            return (Polled::Watching(Watching { took }), false, common.gone);
+            return (Polled::Watching(Watching { took, gate }), false, common.gone);
         }
         (Polled::Ready, leave(half, page, counted, took), common.gone)
     });
@@ -1462,6 +1474,26 @@ mod tests {
         };
         assert_eq!(write_one(&page, &tx, &full, Mode::Blocking(None)), (Ok(1), 1));
         assert_eq!(*full.gates.borrow(), [None], "a wait for room");
+    }
+
+    /// A poll of a direction ready under another holder's gate watches for
+    /// that holder's gate, which its waiter reports where it lasts; one that
+    /// is not ready watches for no gate.
+    #[test]
+    fn a_watch_under_another_holders_gate_names_that_holder() {
+        let page = page();
+        let ((_, tx), _) = two(&page);
+        let bells = quiet();
+        let owner = Common { gate: TX_GATE, shut: Some(TX_END), gone: 13, holder: second() };
+        assert_eq!(acquire(&page, owner), Ok(()));
+        let Polled::Watching(gated) = watch(&page, &tx, &bells) else { panic!("ready under another's gate") };
+        assert_eq!(gated.gate(), Some(2));
+        let _ = unwatch(&page, &tx, &bells, gated);
+        let _ = release(&page, owner);
+        assert_eq!(write(&page, &tx, &bells, Mode::Nonblocking, C, |_, _| {}), Ok(C), "the ring filled");
+        let Polled::Watching(full) = watch(&page, &tx, &bells) else { panic!("room in a full ring") };
+        assert_eq!(full.gate(), None, "a watch for room");
+        let _ = unwatch(&page, &tx, &bells, full);
     }
 
     /// Once one holder saw the server hang up, a write with room in another
