@@ -4,15 +4,18 @@
 //!   expanded key, key schedule, scalar or shared secret, erases its own
 //!   storage when it drops. So do the hash, HMAC, Keccak, SHA-1 and Poly1305
 //!   states.
-//! - **Erased: key-equivalent results.** Each key agreement erases its
-//!   shared value before it becomes the returned bytes: X25519's x2 / z2, and
-//!   P-256/P-384's product point with its affine coordinates. The bytes are
-//!   then the caller's `SharedSecret`, an owner.
+//! - **Erased: key-agreement values.** Each key agreement writes its output
+//!   bytes into a `Secret` it owns, then erases the values they came from:
+//!   X25519's x2 / z2, and P-256/P-384's product point and affine
+//!   coordinates, each held in a [`Workspace`]. The output `Secret` is moved
+//!   into the returned `SharedSecret`, an owner. Not erased: the copies of
+//!   the output bytes that move leaves in the agreement's finished frame, and
+//!   the computation's arithmetic intermediates (below).
 //! - **Erased: workspaces.** A secret operation's explicitly managed state is
 //!   a [`Workspace`], dropped when the operation returns, on every path out of
 //!   it, early returns and `?` included. The X25519 ladder's (x2, z2, x3, z3)
-//!   is one. Its slot is what LLVM writes at the ladder's end; the copies the
-//!   loop works on in registers and other slots are not erased.
+//!   is one. A workspace erases its own storage; the copies the computation
+//!   works on in registers and other slots are not erased.
 //! - **Erased per value, for now.** Ed25519 scalars (`scalar25519::S`, until
 //!   its reduction is rewritten) and ML-KEM polynomials (`mlkem::Poly`) still
 //!   erase every temporary on drop.
@@ -59,7 +62,7 @@ pub(crate) fn wipe64(words: &mut [u64]) {
 /// Types whose all-zero bytes are a valid value.
 ///
 /// # Safety
-/// Every bit pattern of zero bytes must be a valid `Self`: no references,
+/// The all-zero bit pattern must be a valid `Self`: no references,
 /// `NonZero` fields or enums without a zero discriminant.
 pub(crate) unsafe trait Zeroable: Copy {}
 // Integers and arrays of zeroable elements are valid at zero.

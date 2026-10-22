@@ -31,10 +31,13 @@ impl SecretKey {
     pub fn public_key(&self) -> PublicKey {
         let mut base = [0; 32];
         base[0] = 9;
-        PublicKey(multiply(&self.0.0, &base).0)
+        let mut out = [0; 32];
+        multiply(&self.0.0, &base, &mut out);
+        PublicKey(out)
     }
     pub fn agree(self, peer: &PublicKey) -> Result<SharedSecret, Error> {
-        let result = multiply(&self.0.0, &peer.0);
+        let mut result = Secret([0; 32]);
+        multiply(&self.0.0, &peer.0, &mut result.0);
         if ct::equal(&result.0, &[0; 32]) {
             Err(Error::InvalidPoint)
         } else {
@@ -42,9 +45,9 @@ impl SecretKey {
         }
     }
 }
-/// The u-coordinate of scalar * u. The ladder's (x2, z2, x3, z3) and the
-/// shared value x2 / z2 are erased when it returns.
-fn multiply(scalar: &[u8; 32], point: &[u8; 32]) -> Secret<32> {
+/// The u-coordinate of scalar * u into `out`. The ladder's (x2, z2, x3, z3)
+/// and the shared value x2 / z2 are erased when it returns.
+fn multiply(scalar: &[u8; 32], point: &[u8; 32], out: &mut [u8; 32]) {
     let x1 = Tight::from_bytes(point);
     let mut state = Workspace([Tight::ONE, Tight::ZERO, x1, Tight::ONE]);
     let [x2, z2, x3, z3] = &mut state.0;
@@ -73,5 +76,5 @@ fn multiply(scalar: &[u8; 32], point: &[u8; 32]) -> Secret<32> {
     Tight::swap(x2, x3, mask);
     Tight::swap(z2, z3, mask);
     let shared = Workspace(x2.mul(&z2.invert()));
-    Secret(shared.0.bytes())
+    *out = shared.0.bytes();
 }
