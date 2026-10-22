@@ -51,6 +51,31 @@ other, which nothing would call (`sdk/libc/src/sigreq.rs`).
 
 init is `/system/bin/supervisor`.
 
+**Ruled** (owner, 2026-10-22): one userland session-owner process per login
+session, which also provides that session's launcher, with no separate session
+or launcher daemon. The supervisor owns the session owners, and each session
+owner owns its desktop or terminal tree and the apps detached from it. An app
+meant to outlive the shell that started it starts under the session owner, not
+the supervisor: closing the shell leaves it running, and switching users keeps
+the session alive. Ordinary shell commands spawn helpers, which inherit only
+what is passed to them; `launch <app>` is the explicit independent launch, with
+the app's own identity and saved decisions, and independent identity does not
+mean detached lifetime. Sign-out coordinates a graceful shutdown, with cancel
+and force, before it ends the session's subtree. A session owner's failure ends
+that session alone, never another session or a system service. SSH
+authentication starts the user's session, and its shell inherits no host key
+and no SSH service authority. The kernel's mechanisms stay ordinary processes,
+parent and child, jobs and capabilities; login and session policy is
+userland's.
+
+**No timer ends a process.** A dropped session or a closed terminal sends its
+tree a hang-up quit, says what stays, by name and how long it has been
+outstanding, and keeps waiting. Only an explicit force ends the rest: a
+sign-out's force, through a capability the supervisor mints scoped to the
+user's own sessions, or the controls' stop. The kernel's second quit, which
+kills a process that has not read the first, is such a force when a person or
+an explicit force issues it, and never a timer's.
+
 ## Stages
 
 1. **Done** (#926, stage 1.2 of
@@ -147,17 +172,23 @@ init is `/system/bin/supervisor`.
    control pipe, so it watches at most 254 children: the 255th is refused
    `EAGAIN`, a `poll` takes 255 descriptors beside its wake pipe, and `SIG_IGN`
    is shown over 255 children.
-5. **A login is a session under init**. Per login init starts a session
-   program that logout ends and that only parents what its user starts — the
-   desktop's at boot, one per SSH connection at sshd's request. As it starts
-   one, init hands the compositor or sshd a right to start programs in that
-   session alone. sshd's right also quits and kills it. Its namespace is
-   `issues/a-user-is-a-home-tree-and-a-login-row.md`'s login row.
-   *Exit*: killing the desktop session ends every program the compositor started
-   and leaves the compositor running; killing the compositor ends none of them;
-   a dropped SSH connection ends its session and all under it. Negative control:
-   the stage reverted whole, where the compositor's programs die with it.
-   Oracle: systemd-logind, whose session scope ends every process of a login.
+5. **A login is a session under its owner**. Per login the supervisor starts
+   one session owner, which provides the session's launcher and parents what
+   its user starts: the desktop's at boot, one per authenticated SSH
+   connection. `launch <app>` asks it for an independent app, which outlives
+   the shell that asked; a bare command is the shell's helper, and the shell's
+   `detach`, which starts a program under the supervisor today, goes. Sign-out
+   asks the session's tree to quit, shows what stays with cancel and force, and
+   ends the subtree only on force. Its namespace is
+   `issues/a-user-is-a-home-tree-and-a-login-row.md`'s login row; the SSH
+   session's shell holds no host key and no SSH service authority. *Exit*:
+   ending the desktop's session owner ends every program of that session and
+   leaves the compositor and every other session running; closing a shell
+   leaves an app it launched running under the session owner; a dropped SSH
+   connection hangs up its session's tree, says what stays and ends it only on
+   a force; the SSH session's shell can name no host key. Negative control: the
+   stage reverted whole, where a launched app dies with its shell. Oracle:
+   systemd-logind, whose session scope ends every process of a login.
 6. **A program is asked to quit**.
    - 6.1 **Done** (#995, the kernel's half): `SYS_PROCESS_QUIT` (135: the 124 this
      stage named went to `SYS_COUNTERS`), `(process, reason)`, needs `MANAGE`
@@ -233,24 +264,40 @@ init is `/system/bin/supervisor`.
      7's. Until a spawn carries them a child starts with every signal at its
      default and none blocked, and a `SETSIGMASK` naming a signal is refused
      `ENOSYS`.
-7. **Job control**. The shell hands its terminal a `MANAGE`-only
-   duplicate of each process of the foreground line over its `surface` port. The
-   terminal turns each Ctrl+C into their interrupt, and a second kills only a
-   program that has not yet taken the first. Before it closes, the terminal asks
-   its shell's tree to hang up and kills what is left at its deadline; sshd does
-   that to a dropped connection's session, and init at shutdown and test-runner
-   at a test's deadline ask with terminate. `&` is a line the shell watches.
-   sshd awaits exits through a ToyOS `tokio/src/process` arm in the tokio fork,
-   shaped as its Linux pidfd arm (`process/unix/pidfd_reaper.rs`). *Exit*:
-   Ctrl+C ends a pipeline whose stage started a child, none of it left and the
-   prompt back, and ends no shell nested on the foreground line; a child that
-   reads each interrupt survives three Ctrl+C, each pressed once it reports its
-   watch armed or the one before read, and one that reports its watch armed and
-   never reads dies on the second; a dropped SSH connection whose session runs a
-   watching child sees it write its file before it ends; tokio's `Child::wait`
-   returns with no loop polling `try_wait`. Negative control: today's terminal
-   and shell, where the pipeline runs on. Mutations: a quit that kills on a
-   reason already read (the reading child dies); a session that never listens
-   (the file unwritten); a shell that ends on an interrupt (the nested shell).
-   Oracle: POSIX's INTR, a `SIGINT` "sent to all processes in the foreground
-   process group" (XBD 11.1.9), and tokio's `tests/process_smoke.rs`.
+7. **Job control**.
+   - 7.1 **Done** (PRNUM): an interactive shell hands its surface, the
+     terminal's or the console's, a duplicate carrying `MANAGE` of each process
+     of the line it waits for (`toyos::surface::Foreground`), and a `-c` shell,
+     itself a process of the line that started it, hands nothing. The surface
+     turns each Ctrl+C into an interrupt of the line set most recently
+     (`Host::interrupt`), so a shell nested on another's line is asked only at
+     its prompt, and passes the key on as its byte when no line is held. The
+     shell and the terminal listen: an interactive shell does not end on an
+     interrupt, a `-c` shell ends once what it runs has, with its status, and a
+     hang-up or a terminate ends either once its line has. Closing a terminal's
+     window, or a hang-up or terminate of the terminal, asks the shell's tree
+     to hang up and waits, saying every ten seconds what it still waits for.
+     One copy of `toyos` takes the notice in a process, the descriptor table's
+     owner, and the others ask it. *Exit*, met by `tty_interrupt` in
+     `libc_children`'s QEMU x86-64 boot, the probe being the shell's surface:
+     Ctrl+C ends a pipeline whose stage started a child, none of it left and
+     the prompt back, and ends no shell nested on the foreground line; a child
+     that reads each interrupt survives three Ctrl+C, each pressed once it has
+     read the one before, and one that listens and never reads dies on the
+     second. Negative control: today's shell, which hands no line (the pipeline
+     runs on). Mutations: a quit that kills on a reason already read (the
+     reading child dies); a shell that ends on an interrupt (the nested shell);
+     and every line asked at once (the reader dies). Oracle: POSIX's INTR, a
+     `SIGINT` "sent to all processes in the foreground process group" (XBD
+     11.1.9).
+   - 7.2 The rest, with stage 5: sshd hangs up a dropped connection's session,
+     says what stays and keeps waiting. A stop of the machine is a request
+     carrying its mode, wait or terminate, and only a terminate request, itself
+     the explicit force, asks with terminate; test-runner's stops are terminate
+     requests. No timeout makes one. `&` is a line the shell watches. sshd
+     awaits exits through a ToyOS `tokio/src/process` arm in the tokio fork,
+     shaped as its Linux pidfd arm (`process/unix/pidfd_reaper.rs`). *Exit*: a
+     dropped SSH connection whose session runs a watching child sees it write
+     its file before it ends; tokio's `Child::wait` returns with no loop
+     polling `try_wait`. Mutation: a session that never listens (the file
+     unwritten). Oracle: tokio's `tests/process_smoke.rs`.

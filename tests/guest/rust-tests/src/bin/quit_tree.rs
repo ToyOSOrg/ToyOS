@@ -165,10 +165,18 @@ fn a_quit_needs_manage_and_an_ended_process_is_no_refusal() {
     let narrowed = own.narrowed(Rights::WAIT).expect("a narrowed duplicate");
     let _ = own.into_raw();
     assert_eq!(narrowed.quit(Reason::Interrupt), Err(SyscallError::PermissionDenied), "a quit without MANAGE");
+    let ends = toyos_abi::syscall::pipe().expect("a pipe");
+    assert_eq!(
+        toyos_abi::syscall::process_quit(ends.read, Reason::Interrupt),
+        Err(SyscallError::PermissionDenied),
+        "a quit of a handle to no process, as a peer may send one: no such handle carries MANAGE, and the caller lives",
+    );
+    toyos_abi::syscall::close(ends.read);
+    toyos_abi::syscall::close(ends.write);
     child.kill().expect("kill");
     assert_eq!(end(&mut child), End::Killed);
     assert_eq!(quit(&child, Reason::Interrupt), Ok(()), "a quit of an ended process");
-    println!("quit_tree: a quit without MANAGE is refused, and one of an ended process answers Ok");
+    println!("quit_tree: a quit without MANAGE or of no process is refused, and one of an ended process answers Ok");
 }
 
 fn notice() -> &'static toyos::quit::Notice {

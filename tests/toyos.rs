@@ -227,6 +227,9 @@ const RUST_SKIP: &[&str] = &[
     // libc's `read` across a handler, ordered by the roster: `libc_children`
     // runs it on tests/images/libccase.toml.
     "libc_read_restarts",
+    // A shell's Ctrl+C, the probe being its surface: `libc_children` runs it
+    // on tests/images/libccase.toml, whose shell and `cat` it drives.
+    "tty_interrupt",
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",

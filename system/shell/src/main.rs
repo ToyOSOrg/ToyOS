@@ -2,11 +2,13 @@ use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::Path;
-use std::os::toyos::process::{CommandExt, ExitStatusExt};
-use std::process::{Command, ExitStatus, Stdio};
-use std::sync::OnceLock;
+use std::os::toyos::process::{ChildExt, CommandExt, ExitStatusExt};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 use toyos::port::Connector;
+use toyos::quit::Reason;
+use toyos::surface::Foreground;
 
 /// This program's own folder, whose `State` keeps the history: `$HOME` itself
 /// once the supervisor makes that folder the shell's `HOME`, and `$HOME/Apps/shell`
@@ -16,13 +18,109 @@ const HISTORY_MAX: usize = 200;
 
 static mut LAST_STATUS: i32 = 0;
 
+/// What a quit asked of this shell. **A shell relays nothing**: a quit of it
+/// reaches what it runs as well, so an interrupt it reads is only noted, and a
+/// hang-up or a terminate ends it once the line it waits for has ended.
+struct Asked {
+    /// Whether it waits for a line now.
+    waiting: bool,
+    /// An interrupt read while it waited.
+    interrupted: bool,
+    /// A hang-up or a terminate read while it waited.
+    ended_by: Option<Reason>,
+}
+
+static ASKED: Mutex<Asked> = Mutex::new(Asked { waiting: false, interrupted: false, ended_by: None });
+
+/// The line it waits for, handed to the surface above it for Ctrl+C.
+static FOREGROUND: Mutex<Option<Foreground>> = Mutex::new(None);
+
+/// Whether it runs one `-c` command and ends, which an interrupt of its line
+/// ends once the line has.
+static mut ONE_COMMAND: bool = false;
+
+/// The exit code a quit's reason ends it with: 128 plus the signal's number,
+/// as a shell reads one.
+fn code_of(reason: Reason) -> i32 {
+    128 + match reason {
+        Reason::Interrupt => 2,
+        Reason::HangUp => 1,
+        Reason::Terminate => 15,
+    }
+}
+
+/// Listen to this shell's notice, before anything is spawned, on a thread of
+/// its own.
+fn listen() {
+    let Some(notice) = toyos::quit::notice() else { return };
+    if notice.listen().is_err() {
+        return;
+    }
+    std::thread::spawn(move || {
+        while let Ok(reason) = notice.read() {
+            let mut asked = ASKED.lock().unwrap();
+            match reason {
+                Reason::Interrupt => asked.interrupted |= asked.waiting,
+                _ if !asked.waiting => std::process::exit(code_of(reason)),
+                _ => asked.ended_by = Some(reason),
+            }
+        }
+    });
+}
+
+/// It waits for `line` from now: an interactive shell hands it to the
+/// surface. A `-c` shell is itself a process of the line that started it, so
+/// a quit of that line reaches what it runs already, and it hands nothing.
+///
+/// A `-c` shell interrupted before its line was whole ends that line itself:
+/// a child spawned after the quit read its tree was not asked.
+fn waiting_for(line: &[&Child]) {
+    if unsafe { ONE_COMMAND } {
+        if ASKED.lock().unwrap().interrupted {
+            for child in line {
+                // `Ok` for one already ended; a spawn's handle carries `MANAGE`.
+                let quit = toyos_abi::syscall::process_quit(toyos::RawHandle(child.as_raw_handle()), Reason::Interrupt);
+                quit.expect("shell: a child's handle refused the quit its spawn gave it");
+            }
+        }
+        return;
+    }
+    let handles: Vec<toyos::RawHandle> = line.iter().map(|c| toyos::RawHandle(c.as_raw_handle())).collect();
+    FOREGROUND.lock().unwrap().get_or_insert_with(Foreground::default).set(&handles);
+    let mut asked = ASKED.lock().unwrap();
+    asked.waiting = true;
+    asked.interrupted = false;
+}
+
+/// The line it waited for has ended: the surface is told, and a quit read
+/// meanwhile ends the shell, a hang-up or a terminate always and an interrupt
+/// in `-c`, with `status` for the last.
+fn waited(status: i32) {
+    if let Some(foreground) = FOREGROUND.lock().unwrap().as_mut() {
+        foreground.clear();
+    }
+    let mut asked = ASKED.lock().unwrap();
+    asked.waiting = unsafe { ONE_COMMAND };
+    if let Some(reason) = asked.ended_by {
+        std::process::exit(code_of(reason));
+    }
+    if core::mem::take(&mut asked.interrupted) && unsafe { ONE_COMMAND } {
+        std::process::exit(status);
+    }
+}
+
 fn main() {
     if env::var_os("PATH").is_none() {
         env::set_var("PATH", "/system/bin");
     }
+    listen();
 
     let args: Vec<String> = env::args().collect();
     if args.len() >= 3 && args[1] == "-c" {
+        unsafe { ONE_COMMAND = true };
+        // Its command is its line from the start: an interrupt is noted
+        // whenever it comes, and ends the shell once what runs has.
+        ASKED.lock().unwrap().waiting = true;
         let input = args[2..].join(" ");
         execute_line(&input);
         std::process::exit(unsafe { LAST_STATUS });
@@ -590,6 +688,7 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
         }
     }
 
+    waiting_for(&children.iter().collect::<Vec<_>>());
     let mut ok = true;
     for mut child in children {
         if let Ok(status) = child.wait() {
@@ -597,6 +696,7 @@ fn execute_pipeline(pipeline: &[SimpleCommand]) -> bool {
             set_status(&status);
         }
     }
+    waited(unsafe { LAST_STATUS });
     ok
 }
 
@@ -659,14 +759,17 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
         // Spawn, write heredoc to stdin, then wait
         match command.spawn() {
             Ok(mut child) => {
+                waiting_for(&[&child]);
                 if let Some(mut stdin) = child.stdin.take() {
                     let _ = stdin.write_all(data.as_bytes());
                     drop(stdin);
                 }
-                match child.wait() {
-                    Ok(status) => { set_status(&status); return status.success(); }
-                    Err(_) => { set_status_code(1); return false; }
-                }
+                let ok = match child.wait() {
+                    Ok(status) => { set_status(&status); status.success() }
+                    Err(_) => { set_status_code(1); false }
+                };
+                waited(unsafe { LAST_STATUS });
+                return ok;
             }
             Err(_) => {
                 println!("{}: not found", cmd.args[0]);
@@ -676,17 +779,27 @@ fn execute_simple(cmd: &SimpleCommand, piped_stdin: Option<std::process::ChildSt
         }
     }
 
-    match command.status() {
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            println!("{}: not found", cmd.args[0]);
+            set_status_code(127);
+            return false;
+        }
+    };
+    waiting_for(&[&child]);
+    let ok = match child.wait() {
         Ok(status) => {
             set_status(&status);
             status.success()
         }
         Err(_) => {
-            println!("{}: not found", cmd.args[0]);
-            set_status_code(127);
+            set_status_code(1);
             false
         }
-    }
+    };
+    waited(unsafe { LAST_STATUS });
+    ok
 }
 
 /// The connectors whoever started this shell transferred to it.
@@ -905,6 +1018,12 @@ fn readline(history: &mut Vec<String>) -> Option<String> {
             '\r' => {
                 term_echo(b"\n");
                 return Some(line);
+            }
+            // Ctrl+C with no line to interrupt: the surface passes it on, and
+            // what is typed so far goes.
+            '\x03' => {
+                term_echo(b"^C\n");
+                return Some(String::new());
             }
             '\x08' | '\x7F' => {
                 if cursor > 0 {

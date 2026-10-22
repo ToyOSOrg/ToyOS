@@ -5,12 +5,20 @@
 //! below it `toyos::surface::Host` lets a child ask for the transitions
 //! instead of the bytes, which is what `locale detect` needs and what a
 //! terminal writing only translated bytes into a pipe could never give it.
+//!
+//! **Ctrl+C is the foreground line's interrupt** ([`Host::interrupt`]), and
+//! the bytes it would have been only when no line is held. Closing the window,
+//! or a hang-up or a terminate of the terminal itself, asks the shell's tree
+//! to hang up, and the terminal ends once the shell has. **No timer ends what
+//! does not**: the terminal says what it is still waiting for, and only a
+//! person's explicit force ends the rest.
 
 use std::io::{Read, Write};
 use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process;
-use std::os::toyos::process::CommandExt;
+use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::Command;
+use std::time::Duration;
 
 use terminal::Console;
 use toyos::poller::{Poller, READABLE};
@@ -24,6 +32,11 @@ const TOKEN_STDERR: u64 = 1;
 const TOKEN_WINDOW: u64 = 2;
 const TOKEN_LISTEN: u64 = 3;
 const TOKEN_CLIENT: u64 = 4;
+const TOKEN_NOTICE: u64 = 5;
+
+/// How often the terminal says it still waits for the shell after its
+/// hang-up: a report of a stall, never a deadline.
+const STILL_WAITING: Duration = Duration::from_secs(10);
 
 /// The desktop's monospace font, which the terminal draws at its window's
 /// scale.
@@ -79,7 +92,8 @@ fn main() {
     let mut shell_stdin = child.stdin.take().unwrap();
     let mut shell_stdout = child.stdout.take().unwrap();
     let mut shell_stderr = child.stderr.take().unwrap();
-    let poller = Poller::new(3 + Host::POLL_HANDLES);
+    let poller = Poller::new(4 + Host::POLL_HANDLES);
+    let notice = toyos::quit::notice();
 
     // The window exists and the shell's stdin is a pipe this process owns, so
     // from here a keystroke the compositor forwards has somewhere to land even
@@ -95,8 +109,11 @@ fn main() {
         for client in host.client_handles() {
             poller.watch_raw(client, READABLE, TOKEN_CLIENT);
         }
+        if let Some(notice) = notice {
+            poller.watch(notice, READABLE, TOKEN_NOTICE);
+        }
 
-        let mut ready = [false; 5];
+        let mut ready = [false; 6];
         poller.wait(1, u64::MAX, |token| {
             if (token as usize) < ready.len() { ready[token as usize] = true; }
         });
@@ -132,6 +149,15 @@ fn main() {
             host.accept();
         }
 
+        // An interrupt is the foreground's, which the quit that asked it
+        // reached already; a hang-up or a terminate closes this terminal.
+        if ready[TOKEN_NOTICE as usize] {
+            let asked = notice.and_then(|n| n.try_read().ok().flatten());
+            if matches!(asked, Some(toyos::quit::Reason::HangUp | toyos::quit::Reason::Terminate)) {
+                break;
+            }
+        }
+
         while let Some(notice) = host.poll() {
             match notice {
                 // Up, not down: the compositor is the root of the tree and
@@ -147,6 +173,8 @@ fn main() {
                 Notice::Dropped { client, why } => {
                     eprintln!("terminal: dropping client {client} — {why}")
                 }
+                // What Ctrl+C reaches; nothing to say about it.
+                Notice::Foreground { .. } => {}
             }
         }
 
@@ -162,6 +190,9 @@ fn main() {
                 }
                 window::Event::KeyInput(key) => {
                     let press = window.press(key);
+                    if press.text() == "\x03" && host.interrupt() {
+                        continue;
+                    }
                     if !press.text().is_empty() {
                         shell_stdin.write_all(press.text().as_bytes()).ok();
                     }
@@ -211,10 +242,30 @@ fn main() {
         }
     }
 
+    drop(window);
+    hang_up(&mut child);
     drop(shell_stdin);
     drop(shell_stdout);
     drop(shell_stderr);
-    child.wait().ok();
+}
+
+/// Ask the shell's tree to hang up, and wait for the shell to end, saying
+/// every [`STILL_WAITING`] how long it has been outstanding.
+fn hang_up(child: &mut std::process::Child) {
+    let shell = toyos::RawHandle(child.as_raw_handle());
+    let _ = toyos_abi::syscall::process_quit(shell, toyos::quit::Reason::HangUp);
+    let poller = Poller::new(1);
+    let mut waited = Duration::ZERO;
+    loop {
+        poller.watch_raw(shell, READABLE, 0);
+        let mut ended = false;
+        poller.wait(1, STILL_WAITING.as_nanos() as u64, |_| ended = true);
+        if ended {
+            return;
+        }
+        waited += STILL_WAITING;
+        eprintln!("terminal: the shell (pid {}) has not ended {}s after its hang-up; still waiting", child.id(), waited.as_secs());
+    }
 }
 
 /// Start the shell: `[programs.shell]`'s own row, plus this terminal's surface.

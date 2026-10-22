@@ -19,3 +19,4 @@ syscap = ["dup", "roster"]
 
 [symlinks]
 "bin/echo" = "/system/bin/toybox"
+"bin/cat" = "/system/bin/toybox"
