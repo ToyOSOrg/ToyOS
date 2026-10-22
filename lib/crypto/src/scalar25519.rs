@@ -89,15 +89,17 @@ fn barrett(x: &[u64; 8]) -> [u64; 4] {
     // q3 = floor(floor(x / b^(k-1)) mu / b^(k+1)) is floor(x / L) or one
     // less: for x < 2^512 the estimate falls short of x / L by under
     // (2^512 / L - mu) + 2^-60 < 1/4 (HAC note 14.44 bounds it by 2 in general).
-    let q1 = [x[3], x[4], x[5], x[6], x[7]];
+    let mut q1 = [x[3], x[4], x[5], x[6], x[7]];
     let mut q2: [u64; 10] = product(&q1, &MU);
-    let q3 = [q2[5], q2[6], q2[7], q2[8], q2[9]];
+    let mut q3 = [q2[5], q2[6], q2[7], q2[8], q2[9]];
     let mut q3l: [u64; 9] = product(&q3, &L);
     // r = x - q3 L modulo b^(k+1), which is below 2L.
     let mut r = sub5(&[x[0], x[1], x[2], x[3], x[4]], &[q3l[0], q3l[1], q3l[2], q3l[3], q3l[4]]);
     subtract_l(&mut r);
     let s = [r[0], r[1], r[2], r[3]];
+    wipe64(&mut q1);
     wipe64(&mut q2);
+    wipe64(&mut q3);
     wipe64(&mut q3l);
     wipe64(&mut r);
     s
