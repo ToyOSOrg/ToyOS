@@ -137,8 +137,13 @@ fn index(va: u64, level: u32) -> usize {
 struct Table([u64; 512]);
 
 impl Table {
-    fn new() -> Box<Self> {
-        Box::new(Self([0; 512]))
+    /// An empty table in a frame of its own, owned from here by the
+    /// descriptor that links it.
+    fn new() -> &'static mut Self {
+        let frame = crate::mm::pmm::alloc_frame().expect("paging: no frame for a translation table");
+        // SAFETY: a zeroed frame just allocated: a table of invalid
+        // descriptors nothing else names.
+        unsafe { Table::at_mut(frame.into_raw()) }
     }
 
     fn phys(&self) -> u64 {
@@ -180,36 +185,46 @@ fn published() {
     unsafe { core::arch::asm!("dsb ishst", "isb", options(nostack, preserves_flags)) };
 }
 
-/// A root and every table under it, freed with the space, or by an unmap
-/// once no walker can reach one ([`Detached`]).
+/// Give back a table [`Table::new`] made, which nothing links any more.
+fn free_table(phys: u64) {
+    // SAFETY: the caller unlinked the table, and every table is a frame
+    // `Table::new` gave up.
+    drop(unsafe { crate::mm::pmm::Frame::from_raw(phys) });
+}
+
+/// A root and every table under it, each a frame the descriptor linking it
+/// owns: freed with the space, or by an unmap once no walker can reach one
+/// ([`Detached`]).
 struct Tables {
-    root: Box<Table>,
-    children: Vec<Box<Table>>,
+    root: u64,
 }
 
 impl Tables {
     fn new() -> Self {
-        Self { root: Table::new(), children: Vec::new() }
+        Self { root: Table::new().phys() }
     }
 
-    fn adopt(&mut self, table: Box<Table>) -> u64 {
-        let phys = table.phys();
-        self.children.push(table);
-        phys
+    fn root(&self) -> &Table {
+        // SAFETY: the root is a table these tables made and own.
+        unsafe { Table::at(self.root) }
+    }
+
+    fn root_mut(&mut self) -> &mut Table {
+        // SAFETY: as `root`; `&mut self` gives the exclusivity.
+        unsafe { Table::at_mut(self.root) }
     }
 
     /// The level-2 table over `va`, built down to it where absent. Only an
     /// invalid entry is written, which owes no invalidation.
     fn directory(&mut self, va: u64) -> &mut Table {
-        let mut table: *mut Table = &mut *self.root;
+        let mut table: *mut Table = self.root_mut();
         for level in 0..2 {
             // SAFETY: `table` is this root or a table it linked, and
             // `&mut self` makes this the only reference.
             let current = unsafe { &mut *table };
             let i = index(va, level);
             if current.0[i] & VALID == 0 {
-                let phys = self.adopt(Table::new());
-                current.set(i, phys | TABLE | VALID);
+                current.set(i, Table::new().phys() | TABLE | VALID);
             }
             let entry = current.0[i];
             assert!(entry & TABLE != 0, "paging: a block at level {level} over {va:#x}, which this kernel never writes");
@@ -222,7 +237,7 @@ impl Tables {
 
     /// The level-2 table over `va`, if the walk reaches one.
     fn find_directory(&self, va: u64) -> Option<&Table> {
-        self.root.child(index(va, 0))?.child(index(va, 1))
+        self.root().child(index(va, 0))?.child(index(va, 1))
     }
 
     /// The leaf that maps `va` and the size it maps, if one does.
@@ -262,7 +277,7 @@ impl Tables {
                 continue;
             }
             let pages = if entry & VALID == 0 {
-                let phys = self.adopt(Table::new());
+                let phys = Table::new().phys();
                 self.directory(va).set(i, phys | TABLE | VALID);
                 phys
             } else {
@@ -372,7 +387,7 @@ impl AddressSpace {
     }
 
     pub fn root(&self) -> Root {
-        Root(u64::from(self.asid.value()) << 48 | self.tables.root.phys())
+        Root(u64::from(self.asid.value()) << 48 | self.tables.root)
     }
 
     /// Replace the level-2 entry over `va`, break-before-make where it was
@@ -405,11 +420,11 @@ impl AddressSpace {
             let (va, entry) = match leaf {
                 Leaf::Block { va, pa } => (va, pa | user_leaf(prot, cache)),
                 Leaf::Pages { va, pa, count } => {
-                    let mut pages = Table::new();
+                    let pages = Table::new();
                     for (j, page) in pages.0.iter_mut().take(count as usize).enumerate() {
                         *page = (pa + j as u64 * PAGE_4K) | user_leaf(prot, cache) | TABLE;
                     }
-                    let table = self.tables.adopt(pages);
+                    let table = pages.phys();
                     // Filled before any walker can reach it through the link.
                     published();
                     (va, table | TABLE | VALID)
@@ -454,7 +469,7 @@ impl AddressSpace {
         let va = vaddr.raw();
         assert!(va & (PAGE_2M - 1) == 0, "map_window: vaddr {va:#x} not 2MB-aligned");
         assert!(phys & (PAGE_2M - 1) == 0, "map_window: phys {phys:#x} not 2MB-aligned");
-        let mut table = Table::new();
+        let table = Table::new();
         for (i, page_prot) in prot.pages().enumerate() {
             let at = phys + i as u64 * PAGE_4K;
             if page_prot == Prot::ReadExec {
@@ -462,7 +477,7 @@ impl AddressSpace {
             }
             table.0[i] = at | user_leaf(page_prot, CachePolicy::Normal) | TABLE;
         }
-        let table = self.tables.adopt(table);
+        let table = table.phys();
         self.replace(va, table | TABLE | VALID);
     }
 
@@ -481,7 +496,7 @@ impl AddressSpace {
     /// A table of 4 KiB pages it unlinks is answered, with no walker left to
     /// reach it: `tlb::asid` drops the ASID's translations on every CPU before
     /// it returns.
-    fn unmap(&mut self, vaddr: UserAddr) -> Option<Box<Table>> {
+    fn unmap(&mut self, vaddr: UserAddr) -> Option<crate::mm::pmm::Frame> {
         let va = vaddr.raw();
         assert!(va & (PAGE_2M - 1) == 0, "unmap: vaddr {va:#x} not 2MB-aligned");
         let asid = self.asid.value();
@@ -499,12 +514,13 @@ impl AddressSpace {
         }
         tlb::asid(asid);
         let table = entry & ADDR;
-        // SAFETY: valid and a table, so one this space linked; still owned by
-        // `children`, and linked nowhere now.
+        // SAFETY: valid and a table, so one this space linked, and linked
+        // nowhere now.
         let pages = unsafe { Table::at(table) };
         crate::mm::revoke_frames(pages.0.iter().filter(|leaf| *leaf & VALID != 0).map(|leaf| leaf & ADDR));
-        let at = self.tables.children.iter().position(|child| child.phys() == table).expect("unmap: a linked table this space owns");
-        Some(self.tables.children.swap_remove(at))
+        // SAFETY: the frame `Table::new` gave up for this table, which the
+        // descriptor just cleared was its one link.
+        Some(unsafe { crate::mm::pmm::Frame::from_raw(table) })
     }
 
     /// Checked here, not at the callers: only a user address names user
@@ -599,11 +615,11 @@ impl AddressSpace {
         assert!(entry & VALID != 0, "guard_4k: {phys:#x} is not in the direct map");
         if entry & TABLE == 0 {
             let base = entry & ADDR_2M;
-            let mut pages = Table::new();
+            let pages = Table::new();
             for (j, page) in pages.0.iter_mut().enumerate() {
                 *page = (base + j as u64 * PAGE_4K) | attributes(entry) | TABLE;
             }
-            let pages = high.adopt(pages);
+            let pages = pages.phys();
             let directory = high.directory(va);
             directory.set(i, 0);
             tlb::kernel_page(va);
@@ -619,11 +635,35 @@ impl AddressSpace {
     }
 }
 
+/// Frees every table under the root, and the root; the frames its leaves map
+/// are their owners' to free. No CPU walks a space that drops: its last thread
+/// has left it, and its ASID is dropped everywhere before it is issued again.
+impl Drop for AddressSpace {
+    fn drop(&mut self) {
+        assert!(matches!(self.asid, Asid::User(_)), "paging: the kernel's address space dropped");
+        let root = self.tables.root();
+        for i in 0..512 {
+            let Some(l1) = root.child(i) else { continue };
+            for j in 0..512 {
+                let Some(l2) = l1.child(j) else { continue };
+                for k in 0..512 {
+                    if let Some(l3) = l2.child(k) {
+                        free_table(l3.phys());
+                    }
+                }
+                free_table(l2.phys());
+            }
+            free_table(l1.phys());
+        }
+        free_table(self.tables.root);
+    }
+}
+
 /// Tables of 4 KiB pages an unmap unlinked, answered as x86-64's are, where
 /// a sibling's walk cache outlives the unlink; here `tlb::asid` already
 /// reached every CPU, so dropping them is safe anywhere.
 #[must_use = "the unmapped tables"]
-pub struct Detached(Vec<Box<Table>>);
+pub struct Detached(Vec<crate::mm::pmm::Frame>);
 
 /// The kernel's own tables, `TTBR1_EL1`'s.
 static HIGH: Lock<Option<Tables>> = Lock::new(None);
@@ -705,13 +745,13 @@ pub(crate) fn init(
                 blocks += 1;
             }
             held => {
-                let mut table = Table::new();
+                let table = Table::new();
                 for j in (0..512).filter(|&j| held.holds(j)) {
                     let page = at + j * PAGE_4K;
                     table.0[j as usize] = page | memory(page) | TABLE;
                     pages += 1;
                 }
-                let table = tables.adopt(table);
+                let table = table.phys();
                 tables.directory(va).set(index(va, 2), table | TABLE | VALID);
             }
         }
@@ -724,7 +764,7 @@ pub(crate) fn init(
         tables.map_direct(scanout, size, kernel_leaf(CachePolicy::WriteCombining, Prot::ReadWrite));
     }
 
-    KERNEL_TTBR1.store(tables.root.phys(), core::sync::atomic::Ordering::Release);
+    KERNEL_TTBR1.store(tables.root, core::sync::atomic::Ordering::Release);
     *high() = Some(tables);
     let space = AddressSpace { tables: Tables::new(), regions: vma::Regions::default(), asid: Asid::Kernel };
     KERNEL_TTBR0.store(space.root().0, core::sync::atomic::Ordering::Release);
@@ -826,15 +866,15 @@ pub(crate) fn check_joined() {
 /// counted may walk it still.
 pub fn bringup_root() -> u64 {
     let high = high();
-    let kernel = &high.as_ref().expect("bringup_root: before the kernel's tables exist").root;
-    let mut root = Table::new();
+    let kernel = high.as_ref().expect("bringup_root: before the kernel's tables exist").root();
+    let root = Table::new();
     let from = index(PHYS_OFFSET, 0);
     for i in from..512 {
         root.0[i - from] = kernel.0[i];
         root.0[i] = kernel.0[i];
     }
     published();
-    Box::leak(root).phys()
+    root.phys()
 }
 
 /// Nothing to seal: every space runs under the one `TTBR1_EL1`, so no space
@@ -849,7 +889,7 @@ pub fn audit_wx(text: core::ops::Range<u64>) -> kernel::wx::Verdict {
     // SAFETY: every table the kernel's root names is one this file linked, and
     // the lock held keeps them in place while they are read.
     let table = |phys: u64| unsafe { &Table::at(phys).0 };
-    kernel::wx::audit::<kernel::wx::Aarch64>(&tables.root.0, text, &table)
+    kernel::wx::audit::<kernel::wx::Aarch64>(&tables.root().0, text, &table)
 }
 
 /// `kernel-wx-leaf`: the direct map's leaf over `phys` made executable at

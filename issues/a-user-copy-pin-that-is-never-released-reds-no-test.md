@@ -9,10 +9,9 @@ opened: 2026-09-29
 `kernel/src/user_ptr.rs`'s `impl Pins for Pmm` is the one pin path no host
 test reaches: the host tests of `toyos_userbound::Pinned` drive a counting
 fake. With its `unpin` emptied (`fn unpin(&mut self, _run: Segment) {}`),
-every frame a syscall ever copied through keeps a pin. `pmm::free_page` still
-counts such a frame free, and `alloc_page` and `alloc_contiguous` skip it for
-the rest of the boot, so the machine loses memory that no free count shows and
-no known guest test reads.
+every frame a syscall ever copied through keeps a pin. A frame freed under a
+pin is deferred until its last unpin, which never comes, so the machine loses
+memory that no free count shows and no known guest test reads.
 
 ## Exit condition
 
