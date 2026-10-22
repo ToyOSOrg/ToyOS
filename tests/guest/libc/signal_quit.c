@@ -161,6 +161,9 @@ int main(int argc, char **argv) {
         if (strcmp(role, "ppolls") == 0)
             return ppolls();
     }
+    /* A hang ceiling, not a timing claim: a child that never ends ends this
+       test with SIGALRM's 142 rather than leaving it to the harness's. */
+    alarm(120);
     int out, in, status;
 
     pid_t pid = start("reads", &out, &in);
