@@ -39,9 +39,13 @@ fn authorized_keys_path() -> String {
 }
 
 /// Connections that have not authenticated, at most: OpenSSH's `MaxStartups`.
-/// One more is closed at once, so clients that never log in hold at most this
-/// many threads, each for at most [`connection::LOGIN_DEADLINE`].
+/// One more is closed at once. Each is closed at [`LOGIN_DEADLINE`] whatever
+/// it does, a client that stops reading included, and gives its place back.
 const UNAUTHENTICATED_CAP: usize = 10;
+
+/// How long a client has to authenticate: OpenSSH's `LoginGraceTime`. It is
+/// what bounds a client that only offers keys, which costs it no attempt.
+const LOGIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// The operating system's randomness.
 pub struct OsRandom;
@@ -172,7 +176,11 @@ fn main() {
                 println!("sshserver: connection from {addr}");
                 let _ = stream.set_nodelay(true);
                 let host = host.clone();
-                std::thread::spawn(move || connection::serve(stream, host, addr.to_string(), place));
+                let serving = std::thread::Builder::new()
+                    .spawn(move || connection::serve(stream, host, Keys, addr.to_string(), place, LOGIN_DEADLINE));
+                if let Err(e) = serving {
+                    println!("sshserver: connection from {addr} closed: no thread to serve it ({e})");
+                }
             }
             // **A listener is a registration netstack holds, and a failed
             // accept is netstack no longer holding it** — netstack was swapped

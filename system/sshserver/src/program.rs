@@ -1,10 +1,10 @@
 //! A program this daemon started, which one thread waits for while another
 //! may end it.
 //!
-//! std's `Child` is waited on and ended through one `&mut`, so the wait
-//! starts only once both output pipes are at their end, which the program's
-//! own end is what does. Until then the program can be ended. A program that
-//! closed both pipes and runs on is waited for and cannot be:
+//! std's `Child` is waited on and ended through one `&mut`. The connection
+//! starts the wait once both output streams reach end of file, and until then
+//! `end` kills the program. A program that closed both and runs on, or whose
+//! own child holds them, is waited for and cannot be ended:
 //! `issues/sshserver-cannot-end-a-program-that-closed-its-output.md`.
 
 use std::process::Child;
@@ -37,10 +37,27 @@ impl Program {
         }
     }
 
-    /// End it, unless a thread is already waiting for its end.
+    /// Kill it and reap it, unless a thread is already waiting for its end.
     pub fn end(&self) {
         if let Ok(mut child) = self.0.try_lock() {
             let _ = child.kill();
+            let _ = child.wait();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::{Command, Stdio};
+
+    /// A program ended is reaped, so it leaves no zombie behind.
+    #[test]
+    fn a_program_ended_is_reaped() {
+        let child = Command::new("sleep").arg("1000").stdin(Stdio::null()).spawn().expect("spawn sleep");
+        let program = Program::new(child);
+        program.end();
+        let status = program.0.lock().unwrap().try_wait().expect("try_wait");
+        assert!(status.is_some_and(|s| !s.success()), "the killed program was reaped: {status:?}");
     }
 }
