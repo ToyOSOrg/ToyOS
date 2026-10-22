@@ -1,7 +1,6 @@
 use alloc::sync::Arc;
 
 use crate::object::device::{DeviceClaim, DeviceInfo};
-use crate::object::shm::Region;
 use toyos_abi::FramebufferInfo;
 use crate::sync::Lock;
 pub use toyos_abi::syscall::DeviceType;
@@ -13,13 +12,14 @@ static FB_INFO: Lock<Option<Screen>> = Lock::new(None);
 
 /// The firmware's framebuffer, as a claim needs it.
 ///
-/// A `Region` rather than a `SharedMemObject` because each claim mints its own
-/// object, and a `SharedMemObject` is retired once its handle count reaches
-/// zero while the screen outlives any single claim.
+/// Where the scanout is rather than a `SharedMemObject` over it, because each
+/// claim mints its own object, and an aperture is taken back from every
+/// process once its handle count reaches zero while the screen outlives any
+/// single claim.
 #[derive(Clone)]
 pub struct Screen {
     pub info: FramebufferInfo,
-    pub scanout: Region,
+    pub scanout: Scanout,
 }
 
 fn taken(class: DeviceType) -> &'static Lock<bool> {
@@ -178,8 +178,15 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
     }
 }
 
-fn shm(region: Region) -> Arc<crate::object::shm::SharedMemObject> {
-    crate::object::shm::SharedMemObject::over(region)
+/// The firmware's framebuffer: whole pages from `phys`, write-combining.
+#[derive(Clone, Copy)]
+pub struct Scanout {
+    pub phys: u64,
+    pub size: u64,
+}
+
+fn shm(scanout: Scanout) -> Arc<crate::object::shm::SharedMemObject> {
+    crate::object::shm::SharedMemObject::aperture(scanout.phys, scanout.size, crate::mm::policy::CachePolicy::WriteCombining)
 }
 
 /// The description a framebuffer claim answers with, over a freshly minted

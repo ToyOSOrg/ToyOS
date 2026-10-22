@@ -246,7 +246,7 @@ const NAME_LEN: usize = 28;
 /// truncated to what [`NAME_LEN`] holds.
 ///
 /// **A predicate looking for the whole name finds nothing on a good boot**:
-/// `test_rs_munmap_reissues_read_window` is `test_rs_munmap_reissues_rea` on the wire.
+/// `test_rs_lent_device_memory_refused` is `test_rs_lent_device_memory_` on the wire.
 pub fn recorded_name(binary: &str) -> String {
     let base = binary.rsplit('/').next().unwrap_or(binary);
     base[..base.len().min(NAME_LEN - 1)].to_string()
@@ -793,7 +793,7 @@ mod tests {
     #[test]
     fn a_long_binarys_record_is_the_prefix_the_kernel_keeps() {
         assert_eq!(recorded_name("test_rs_mkdir_cap"), "test_rs_mkdir_cap");
-        assert_eq!(recorded_name("test_rs_munmap_reissues_read_window"), "test_rs_munmap_reissues_rea");
+        assert_eq!(recorded_name("test_rs_lent_device_memory_refused"), "test_rs_lent_device_memory_");
         assert_eq!(recorded_name("/system/bin/echo"), "echo");
         assert_eq!(recorded_name("").len(), 0);
     }

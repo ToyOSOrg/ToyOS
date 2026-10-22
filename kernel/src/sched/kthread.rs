@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::process::{
-    ElfInfo, Endowments, PageFaultTrace, ProcessAccounting, ProcessData, ProcessEntry, ThreadData,
+    ElfInfo, Endowments, ProcessAccounting, ProcessData, ProcessEntry, ThreadData,
     ThreadEntry, PROCESS_TABLE, THREAD_NAME_LEN,
 };
 use crate::scheduler::{self, TaskId};
@@ -108,7 +108,7 @@ pub fn spawn(name: &str, body: extern "C" fn(u64) -> !, arg: u64) -> ThreadSched
         TaskId(pid, tid),
         stack,
         entry_sp,
-        crate::mm::paging::kernel().clone(),
+        crate::mm::space::kernel(),
         0,
         None,
         job,
@@ -131,13 +131,7 @@ fn kernel_process_data(name: &str, job: Arc<kernel::sched::job::Job>) -> Process
         cwd: String::from("/"),
         env: Vec::new(),
         elf: ElfInfo::none(),
-        mmap_regions: Vec::new(),
-        pipe_maps: Vec::new(),
-        demand_pages: Vec::new(),
-        fault_trace: PageFaultTrace::new(),
-        peak_memory: 0,
-        alloc_count: 0,
-        free_count: 0,
+        space: crate::mm::space::kernel(),
         exe_path: String::from(name),
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
@@ -148,8 +142,7 @@ fn kernel_process_data(name: &str, job: Arc<kernel::sched::job::Job>) -> Process
 
 fn kernel_thread_data() -> ThreadData {
     ThreadData {
-        tls_pages: None,
-        stack_pages: None,
+        tls: None,
         user_stack_base: crate::mm::UserAddr::new(0),
         user_stack_size: 0,
         syscall_counts: [0; toyos_abi::syscall::SYSCALL_PROFILE_BINS],

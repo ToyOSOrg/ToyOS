@@ -390,7 +390,7 @@ impl Claim for VirtioClaim {
     }
 
     fn lend(&mut self, bytes: u64) -> Result<(Lent, u64), SyscallError> {
-        let memory = SharedMemory::create(bytes as usize)?;
+        let memory = SharedMemory::create_for_device(bytes as usize)?;
         let device_addr = self.dev.dma_map(memory.as_handle())?.device_addr;
         Ok((Lent { memory, device_addr }, device_addr))
     }

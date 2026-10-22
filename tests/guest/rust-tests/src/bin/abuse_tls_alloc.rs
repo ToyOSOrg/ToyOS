@@ -110,9 +110,8 @@ fn main() {
     const THEIRS: u8 = 0xC3;
     let first = alloc_block_preserving_dtv(MODULE_EXE).expect("first alloc");
     let block: *mut u8 = core::ptr::with_exposed_provenance_mut(first as usize);
-    for off in (0..PAGE_2M).step_by(4096) {
-        unsafe { block.add(off).write_volatile(MINE) };
-    }
+    // The block is whole pages of the module's TLS; its first is enough.
+    unsafe { block.write_volatile(MINE) };
 
     let second = alloc_block_preserving_dtv(MODULE_EXE).expect("second alloc");
     assert_eq!(
@@ -126,20 +125,13 @@ fn main() {
             unsafe { p.add(off).write_volatile(THEIRS) };
         }
     }
-    for off in (0..PAGE_2M).step_by(4096) {
-        assert_eq!(
-            unsafe { block.add(off).read_volatile() },
-            MINE,
-            "TLS block at {first:#x}+{off:#x} was reissued to another mapping",
-        );
-    }
+    assert_eq!(unsafe { block.read_volatile() }, MINE, "TLS block at {first:#x} was reissued to another mapping");
     for p in claimed {
         unsafe { syscall::munmap(p, PAGE_2M) }.expect("munmap");
     }
 
     // 3. A thread's mappings come back when it exits. Each run gets a fresh
-    //    tid and so its own block; the kernel's `find_gap` is deterministic
-    //    top-down, so if every region a run creates — the thread's own TLS
+    //    tid and so its own block; the kernel's placement is deterministic, so if every region a run creates — the thread's own TLS
     //    block and the one it allocated — is released, every run must land on
     //    the same pair of addresses. A leak pushes each run below the last.
     let stack = map_2m();

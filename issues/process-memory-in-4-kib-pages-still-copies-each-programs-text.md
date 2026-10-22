@@ -4,7 +4,7 @@ kind: track
 opened: 2026-09-08
 ---
 
-# Process memory is 2 MiB pages, and that caps the process count
+# Process memory is in 4 KiB pages, and each process still copies its program's text
 
 **Owner premise (2026-09-08):** ToyOS is a gold-standard OS for modern
 hardware with no restrictions for modern hardware. "The right simplification
@@ -73,33 +73,24 @@ live split of a user leaf.
    deferred to its last unpin, page tables in frames of their own, and every
    2 MiB caller of the PMM unchanged. The watermark is the ledger of
    `issues/toyos-has-its-own-allocator.md`'s migration, which refuses a
-   commitment before the machine runs dry. Owed: `user_copy_spans_windows`
-   and `munmap_reissues_second_read_window` red again under their negative
-   controls on the T14, where they run.
-3. **4 KiB user leaves.** A software `OWNED` bit in the leaf is the ledger of
-   the frames a process owns, with per-process counts; stacks are demand-zero
-   and TLS is 4 KiB. A typed syscall value crossing a page is served in
-   segments, so `is_user_object` stops refusing a straddle and
-   `abuse_page_straddle`'s refusals become delivery verdicts. A 2 MiB window
-   of 4 KiB leaves from arbitrary frames is up to 512 runs, so the one-run
-   bound `user_ptr::window_split` panics on becomes reachable from userland
-   and goes with the stage. Device windows needed none of this: their leaves
-   own no frame, and a BAR's pages are in order, so a typed value straddling
-   two of them is still one run. Exit: a process's floor on the T14 against
-   the 10 to 14 MB above.
-4. **Demand-zero anonymous `mmap`.** A fault installs a 2 MiB leaf only for a
-   whole aligned 2 MiB span of the mapping; unmapping a range no thread touched
-   sends no IPI. `munmap` refuses a size that is not the whole mapping, by the
-   orchestrator's ruling, and that is in: `SYS_MUNMAP` and a `FIXED` `mmap`
-   over a mapping take only the length the mapping's `mmap` was asked for,
-   compared as given, so this stage's rounding moves nothing either accepts.
-   What the refusal costs a C program is
-   `issues/libc-munmap-refuses-part-of-a-mapping.md`. Exit:
-   `mmap` of more than the watermark allows refused at `mmap`, and a guest
-   that touches one page of a large mapping holds one frame.
-5. **File-backed faults at 4 KiB.** ROOT's read-only text is shared
-   zero-copy. Exit: two processes of one binary hold its text once.
+   commitment before the machine runs dry.
+3. **4 KiB user leaves.** Built: one inventory per space (`kernel::vm`,
+   host-tested) is the only record of its ranges, and a software owned bit in
+   the leaf the only record of a private frame; stacks are populated as they
+   are touched, TLS is a page-sized object, and a typed syscall value across
+   a page is copied in pieces (`abuse_page_straddle`'s delivery verdicts).
+   Owed: a process's floor on the T14 against the 10 to 14 MB above.
+4. **Demand-zero anonymous `mmap`.** Built, over 4 KiB pages only: a fault
+   populates one page, unmapping a range no thread touched sends no IPI, and
+   `munmap` and a `FIXED` `mmap` take any run of pages, as POSIX does. What
+   remains of the stage's exit — `mmap` past what memory can hold refused at
+   `mmap` — is the strict charge of the allocator track's migration
+   (`issues/toyos-has-its-own-allocator.md`).
+5. **Shared text.** A spawn copies its program's segments into the process
+   whole; no fault reads a file. ROOT's read-only text shared zero-copy is
+   the memory design's stage 4 (immutable sealed objects). Exit: two
+   processes of one binary hold its text once.
 6. **`/apps` image sharing.** The design is the owner's decision, owed when
    this stage is reached.
-7. **Retire 2 MiB where it no longer pays.** Exit: every remaining 2 MiB user
-   leaf is a stage-4 whole span or a device or DMA grant.
+7. **Large user leaves where they pay.** No user leaf is 2 MiB now; whether
+   whole aligned spans get one again is the memory design's to decide.

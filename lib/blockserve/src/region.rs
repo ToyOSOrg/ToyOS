@@ -19,9 +19,10 @@ pub struct Region {
 }
 
 impl Region {
-    /// A fresh region, for a client opening a session.
+    /// A fresh region, for a client opening a session: memory the disk's
+    /// driver can lend its device.
     pub fn create() -> Result<Self, SyscallError> {
-        Ok(Self { memory: SharedMemory::create(SESSION_BYTES)? })
+        Ok(Self { memory: SharedMemory::create_for_device(SESSION_BYTES)? })
     }
 
     /// A region a client sent, refused unless it is memory the kernel

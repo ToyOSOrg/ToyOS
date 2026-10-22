@@ -10,7 +10,6 @@
 use alloc::vec::Vec;
 
 use crate::watch;
-use crate::mm::policy::Prot;
 use crate::object::{ops, port, KObjectRef};
 use crate::object::service::SendRefused;
 use crate::time::Deadline;
@@ -49,39 +48,6 @@ fn install_pair(first: KObjectRef, second: KObjectRef) -> u64 {
         Ok(word) => word,
         // A refused pair drops here, with the hold given up.
         Err(_pair) => SyscallError::ResourceExhausted.to_u64(),
-    }
-}
-
-/// Map a pipe's ring page into the caller, tracked against the pipe so
-/// closing its last descriptor unmaps it.
-pub(super) fn sys_pipe_map(h: RawHandle) -> u64 {
-    let mapped = process::with_process_data(|data| {
-        let pipe_id = match data.handles.get_ref(h, Rights::MAP) {
-            Ok(object) => ops::pipe_id_read(object).or_else(|| ops::pipe_id_write(object)),
-            Err(e) => return Err(e),
-        };
-        let Some(pipe_id) = pipe_id else {
-            return Ok(SyscallError::InvalidArgument.to_u64());
-        };
-        // A second call returns the existing window, keeping pipe_maps bounded by the handle table.
-        if let Some(existing) = data.pipe_maps.iter().find(|m| m.pipe == pipe_id) {
-            return Ok(existing.addr.raw());
-        }
-        let Some(phys) = pipe::map_page(pipe_id) else {
-            return Ok(SyscallError::ResourceExhausted.to_u64());
-        };
-        let pt = crate::scheduler::current_address_space()
-            .expect("sys_pipe_map: no address space");
-        let Some((vaddr, _aligned)) = process::vma_map(&pt, phys.phys(), pipe::PIPE_SIZE as u64, Prot::ReadWrite) else {
-            return Ok(SyscallError::ResourceExhausted.to_u64());
-        };
-        data.pipe_maps.push(process::PipeMap { pipe: pipe_id, addr: vaddr });
-
-        Ok(vaddr.raw())
-    });
-    match mapped {
-        Ok(word) => word,
-        Err(e) => e.refuse(),
     }
 }
 
@@ -338,8 +304,14 @@ pub(super) fn sys_port_badge(
 }
 
 /// Make a shared region and hand back the one handle to it, carrying MAP, DUP and TRANSFER — naming it is what authorizes mapping it.
-pub(super) fn sys_shm_create(size: u64) -> u64 {
-    let object = match crate::object::shm::SharedMemObject::create(size) {
+/// `SHM_DEVICE` asks for memory a device can be lent; any other bit is refused.
+pub(super) fn sys_shm_create(size: u64, flags: u64) -> u64 {
+    let created = match flags {
+        0 => crate::object::shm::SharedMemObject::create(size),
+        SHM_DEVICE => crate::object::shm::SharedMemObject::create_run(size),
+        _ => return SyscallError::InvalidArgument.to_u64(),
+    };
+    let object = match created {
         Ok(shm) => KObjectRef::SharedMem(shm),
         Err(e) => return e.to_u64(),
     };
@@ -354,10 +326,21 @@ pub(super) fn sys_shm_map(h: RawHandle) -> u64 {
         Err(e) => return e.refuse(),
     };
     let pt = process::current_address_space();
-    match shm.map_into(process::current_process(), &pt) {
-        Ok(vaddr) => vaddr,
-        Err(e) => e.to_u64(),
+    let len = shm.size();
+    // A boot image is mapped read-only, whatever the handle allows.
+    let prot = shm.max_prot();
+    let mapped = pt.lock().map(alloc::sync::Arc::clone(&shm), 0, len, prot, crate::mm::space::At::ANYWHERE);
+    let at = match mapped {
+        Ok(at) => at,
+        Err(e) => return e.to_u64(),
+    };
+    // A device's window is taken back with its last handle, so it says
+    // where it is mapped; one whose last handle went meanwhile is refused.
+    if let Err(e) = shm.mapped_at(&pt, at, len) {
+        pt.lock().release(at, len);
+        return e.to_u64();
     }
+    at.raw()
 }
 
 /// Write a message's bytes to a connection and move its handles to the peer,

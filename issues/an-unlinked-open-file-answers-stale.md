@@ -27,4 +27,4 @@ then; a crash leaves the orphans for the next mount to reclaim; each asserted
 by the file server's host volume tests, replacing today's `Stale` test
 (`system/fileserver/src/data.rs`). A guest test reads a mapping of an
 unlinked file once file mappings exist
-(`issues/process-memory-is-2-mib-pages-and-that-caps-the-process-count.md`).
+(`issues/process-memory-in-4-kib-pages-still-copies-each-programs-text.md`).

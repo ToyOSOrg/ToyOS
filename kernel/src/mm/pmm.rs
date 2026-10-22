@@ -254,6 +254,11 @@ pub fn top() -> u64 {
     FRAMES.lock().as_ref().map_or(0, Frames::top)
 }
 
+/// Frames free now: an answer that may be stale by the time it is read.
+pub fn free_frames() -> u64 {
+    FRAMES.lock().as_ref().map_or(0, Frames::free_frames)
+}
+
 /// Return (total_bytes, used_bytes).
 pub fn stats() -> (u64, u64) {
     let guard = FRAMES.lock();

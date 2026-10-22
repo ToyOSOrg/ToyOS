@@ -30,8 +30,7 @@ fn mmap_refuses_what_the_kernel_cannot_map_and_nothing_else() {
     }
 }
 
-/// The kernel unmaps a mapping only by the length it was asked to map, so
-/// `munmap` names the mapping exactly when both lengths are the same pages.
+/// A length names the whole pages it reaches into, as POSIX maps and unmaps.
 #[test]
 fn a_length_names_the_pages_it_reaches_into() {
     for (len, want) in [
@@ -47,14 +46,6 @@ fn a_length_names_the_pages_it_reaches_into() {
     ] {
         assert_eq!(memreq::whole_pages(len), want, "{len:#x}");
     }
-    // Two pages mapped: their first page alone is another length, and so is a
-    // byte past them; a length ending anywhere in the second page is theirs.
-    let mapped = memreq::whole_pages(8192);
-    for (len, whole) in [(4096, false), (4097, true), (8000, true), (8192, true), (8193, false)] {
-        assert_eq!(memreq::whole_pages(len) == mapped, whole, "munmap of {len} bytes of an 8192-byte mapping");
-    }
-    // And a mapping asked for by a length off a page is named by its pages.
-    assert_eq!(memreq::whole_pages(5000), memreq::whole_pages(8192));
 }
 
 #[test]

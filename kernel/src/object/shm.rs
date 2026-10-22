@@ -1,247 +1,271 @@
-//! A region of memory more than one process can see.
+//! A memory object: bytes more than one address space can map — a region
+//! `SYS_SHM_CREATE` makes, a device's grant, a program's TLS block, an inbox's
+//! ring, the clock page, a boot image the loader handed over — or an aperture
+//! over memory the kernel does not own: a device's registers, firmware's
+//! framebuffer.
 //!
-//! Holding a handle allows mapping it; giving one away is `SYS_MESSAGE_SEND`.
-//! The handle count owns the mappings and the `Arc` count owns the pages: the
-//! last handle takes the list of mappings away for good and tears each one
-//! down, and the pages are freed when the last `Arc` goes, always later since
-//! a handle holds an `Arc`. An `Arc` a syscall cloned out of its table can
-//! outlive the last handle, so a map through one finds no list and is refused
-//! under the lock the teardown took it with.
+//! **A mapping holds the object, and a handle holds nothing of a mapping**:
+//! the object's frames go back when the last of its handles and mappings has.
+//! An aperture is the exception that keeps a list of where it is mapped, since
+//! closing its last handle is how a device's window is taken back from every
+//! process that mapped it.
 //!
-//! **A mapping does not keep its process's address space**: the list holds it
-//! weakly, so a process that ended while another still holds the region has
-//! its space, and everything the space holds, freed with it; its entry is dead
-//! and is passed over.
+//! Frames are the object's from its creation to its end, so a fault on a
+//! mapping of one never allocates.
 
+use alloc::boxed::Box;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 
 use toyos_abi::syscall::SyscallError;
 
-use crate::mm::policy::{CachePolicy, Prot};
-use crate::mm::paging::Detached;
-use crate::mm::{align_2m_checked, pmm, Unmapped, PAGE_2M, PAGE_SIZE};
-use crate::process::{PageTables, Pid};
-use crate::sync::Lock;
+use crate::mm::policy::CachePolicy;
+use crate::mm::pmm::{self, Frame, PhysPage};
+use crate::mm::space::Space;
+use crate::mm::{PAGE_2M, PAGE_SIZE};
 use crate::{DirectMap, UserAddr};
 
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 
-// The ABI's word for what `create` rounds to, which a receiver checks a lent region's length against.
-const _: () = assert!(toyos_abi::syscall::SHM_PAGE as u64 == PAGE_2M);
+/// Frames in one piece of a [`Backing::Frames`]: 256 MiB of them, whose list
+/// is 512 KiB.
+const CHUNK: usize = 1 << 16;
 
-/// Physical pages a region keeps alive; behind an `Arc` since one page set
-/// can back several objects.
-// Unread by design: the vector's job is only to stay alive.
-#[expect(dead_code)]
-pub struct Pages(Vec<pmm::PhysPage>);
-
-/// A physical range and the memory type every mapping of it must carry:
-/// SDM Vol. 3A §11.12.4 forbids one physical page under two memory types.
-#[derive(Clone)]
-pub struct Region {
-    pub phys: DirectMap,
-    pub size: u64,
-    pub cache: CachePolicy,
-    pub memory: Memory,
-}
-
-/// Whose memory a region is.
-#[derive(Clone)]
-pub enum Memory {
-    /// Pages the kernel allocated, freed with the last `Arc`, which the
-    /// field only keeps alive.
-    Owned { _pages: Arc<Pages> },
-    /// A payload the loader verified and handed over, `len` bytes of the
-    /// region's pages: kept for the machine's life and written by nobody, so
-    /// every mapping of it is read-only (`crate::bootimage`).
-    Boot { len: u64 },
-    /// Firmware's framebuffer or an MMIO aperture the kernel does not own.
-    Foreign,
+/// What an object's bytes are.
+enum Backing {
+    /// Frames of its own, one per page, in no order, [`CHUNK`] to a piece so
+    /// that no piece is past one heap allocation.
+    Frames(Vec<Box<[Frame]>>),
+    /// 2 MiB pages of its own in one physical run: what a device may be lent
+    /// or granted, and what a kernel-built image addresses as one slice.
+    Run(Vec<PhysPage>),
+    /// A payload the loader verified and handed over at `phys`, `len` bytes
+    /// of the object's pages: kept for the machine's life and written by
+    /// nobody, so every mapping of it is read-only (`crate::bootimage`).
+    Boot { phys: u64, len: u64 },
+    /// Memory the kernel does not own, at `phys`, with where it is mapped.
+    Aperture { phys: u64, mapped: Held<Vec<(Weak<Space>, UserAddr, u64)>> },
 }
 
 pub struct SharedMemObject {
     pub(super) core: ObjectCore,
-    region: Region,
-    /// Where this region is mapped, per process; released by the zero-handle hook.
-    mapped_in: Held<Vec<Mapping>>,
-}
-
-/// One process's mapping of a region: dead once its address space is gone.
-struct Mapping {
-    pid: Pid,
-    space: Weak<Lock<crate::mm::paging::AddressSpace>>,
-    at: UserAddr,
-}
-
-impl Mapping {
-    fn live(&self) -> Option<PageTables> {
-        self.space.upgrade()
-    }
+    backing: Backing,
+    size: u64,
+    cache: CachePolicy,
 }
 
 impl SharedMemObject {
-    /// A region over memory somebody else owns, whole 4 KiB pages: unmapped
-    /// when the last handle goes, never freed here.
-    pub fn over(region: Region) -> Arc<Self> {
-        assert!(
-            (region.phys.phys() | region.size) & (PAGE_SIZE - 1) == 0,
-            "shm: {:#x} bytes at {:#x} are not whole 4 KiB pages",
-            region.size,
-            region.phys.phys(),
-        );
-        Arc::new(Self {
-            core: Self::new_core(),
-            region,
-            mapped_in: Held::new(Vec::new()),
-        })
+    fn new(backing: Backing, size: u64, cache: CachePolicy) -> Arc<Self> {
+        Arc::new(Self { core: Self::new_core(), backing, size, cache })
     }
 
-    /// A fresh allocation, rounded up to whole 2 MiB pages; `InvalidArgument`
-    /// for an unrepresentable size, `ResourceExhausted` when memory is short
-    /// — no cap above that, since `alloc_contiguous` already refuses more
-    /// than free physical memory.
+    /// `size` bytes of zeroed memory in whole pages, frame by frame;
+    /// `InvalidArgument` for no bytes or a size no page count holds,
+    /// `ResourceExhausted` where frames run out.
     pub fn create(size: u64) -> Result<Arc<Self>, SyscallError> {
-        if size == 0 {
-            return Err(SyscallError::InvalidArgument);
+        let pages = pages(size)?;
+        // Refused whole before any is taken: frames one at a time until none
+        // is left would starve every other allocation meanwhile.
+        if pages > pmm::free_frames() {
+            return Err(SyscallError::ResourceExhausted);
         }
-        // `SYS_SHM_CREATE`'s length, straight from a register: the rounding
-        // itself is the checked sum.
-        let aligned = align_2m_checked(size).ok_or(SyscallError::InvalidArgument)?;
-        let pages = pmm::alloc_contiguous((aligned / PAGE_2M) as usize)
-            .ok_or(SyscallError::ResourceExhausted)?;
-        let phys = DirectMap::from_phys(pages[0].direct_map().phys());
-        Ok(Self::over(Region {
-            phys,
-            size: aligned,
-            cache: CachePolicy::Normal,
-            memory: Memory::Owned { _pages: Arc::new(Pages(pages)) },
-        }))
+        let mut pieces = Vec::new();
+        let mut left = pages as usize;
+        while left > 0 {
+            let n = left.min(CHUNK);
+            let mut piece = Vec::with_capacity(n);
+            for _ in 0..n {
+                piece.push(pmm::alloc_frame().ok_or(SyscallError::ResourceExhausted)?);
+            }
+            pieces.push(piece.into_boxed_slice());
+            left -= n;
+        }
+        Ok(Self::new(Backing::Frames(pieces), pages * PAGE_SIZE, CachePolicy::Normal))
+    }
+
+    /// `size` bytes of zeroed memory in whole pages, over one run of whole
+    /// 2 MiB pages: what a device can be lent, since a domain maps 2 MiB at a
+    /// time and a device with no domain reaches memory by its physical address.
+    pub fn create_run(size: u64) -> Result<Arc<Self>, SyscallError> {
+        let bytes = pages(size)? * PAGE_SIZE;
+        let run = crate::mm::align_2m_checked(bytes).ok_or(SyscallError::InvalidArgument)?;
+        let pages = pmm::alloc_contiguous((run / PAGE_2M) as usize).ok_or(SyscallError::ResourceExhausted)?;
+        Ok(Self::new(Backing::Run(pages), bytes, CachePolicy::Normal))
+    }
+
+    /// An aperture over `size` bytes of memory somebody else owns at `phys`,
+    /// whole 4 KiB pages, mapped as `cache` says: never freed here, and taken
+    /// out of every space that mapped it when its last handle goes.
+    pub fn aperture(phys: u64, size: u64, cache: CachePolicy) -> Arc<Self> {
+        assert!(
+            (phys | size) & (PAGE_SIZE - 1) == 0 && size != 0,
+            "shm: an aperture of {size:#x} bytes at {phys:#x} is not whole 4 KiB pages"
+        );
+        Self::new(Backing::Aperture { phys, mapped: Held::new(Vec::new()) }, size, cache)
+    }
+
+    /// A boot image of `len` bytes at `phys`, in whole 4 KiB pages: never
+    /// freed and never written.
+    pub fn boot(phys: u64, len: u64) -> Arc<Self> {
+        assert!(phys.is_multiple_of(PAGE_SIZE) && len != 0, "shm: a boot image of {len:#x} bytes at {phys:#x}");
+        Self::new(Backing::Boot { phys, len }, len.next_multiple_of(PAGE_SIZE), CachePolicy::Normal)
     }
 
     pub fn size(&self) -> u64 {
-        self.region.size
+        self.size
     }
 
-    /// The physical run and its length, for a region that is ordinary memory
-    /// this kernel allocated and owns — the only kind a device may be lent
-    /// (`pcidev::dma_map`). `None` for anything else: a BAR window aimed into
-    /// a second device's domain would be one device reaching another's
-    /// registers.
-    pub fn ram(&self) -> Option<(u64, u64)> {
-        (matches!(self.region.memory, Memory::Owned { .. }) && self.region.cache == CachePolicy::Normal)
-            .then(|| (self.region.phys.phys(), self.region.size))
+    /// The memory type every mapping of it carries: SDM Vol. 3A §11.12.4
+    /// forbids one physical page under two.
+    pub fn cache(&self) -> CachePolicy {
+        self.cache
     }
 
-    /// The payload's length, for a region the loader handed over: memory
-    /// nobody writes.
+    /// Whether its bytes are memory the kernel allocated to it, rather than a
+    /// device's, firmware's or the loader's.
+    pub fn is_ram(&self) -> bool {
+        matches!(self.backing, Backing::Frames(_) | Backing::Run(_))
+    }
+
+    /// The payload's length, for a boot image: memory nobody writes.
     pub fn immutable(&self) -> Option<u64> {
-        match self.region.memory {
-            Memory::Boot { len } => Some(len),
-            Memory::Owned { .. } | Memory::Foreign => None,
+        match self.backing {
+            Backing::Boot { len, .. } => Some(len),
+            Backing::Frames(_) | Backing::Run(_) | Backing::Aperture { .. } => None,
         }
     }
 
-    /// Whether a program may be paged from it: ordinary memory, never a
+    /// Whether a program may be read from it: ordinary memory, never a
     /// device's, whose read is a device access.
     pub fn is_ordinary(&self) -> bool {
-        self.ram().is_some() || self.immutable().is_some()
+        !matches!(self.backing, Backing::Aperture { .. })
     }
 
-    /// The kernel's own view of the pages, through the direct map; a mapped
-    /// region is memory two writers can share — see `inbox.rs`.
-    pub fn phys(&self) -> DirectMap {
-        self.region.phys
-    }
-
-    /// The same address, before anybody else can see the pages: asserts the
-    /// region is mapped nowhere yet, since after `map_into` a sibling thread
-    /// could otherwise write the same bytes while the kernel is still initialising.
-    pub fn phys_before_mapping(&self) -> DirectMap {
-        assert!(
-            self.mapped_nowhere(),
-            "shm koid {}: the region is mapped into a process already, so a kernel \
-             write through the direct map is not exclusive",
-            self.core.koid().raw(),
-        );
-        self.region.phys
-    }
-
-    fn mapped_nowhere(&self) -> bool {
-        self.mapped_in.with(|mapped| mapped.iter().all(|m| m.space.strong_count() == 0)).unwrap_or(true)
-    }
-
-    /// Map into `pt`, or answer the address it is already mapped at;
-    /// idempotent per process. `Gone` once the last handle has gone.
-    pub fn map_into(&self, pid: Pid, pt: &PageTables) -> Result<u64, SyscallError> {
-        let map = |mapped: &mut Vec<Mapping>| {
-            // A dead entry's pid may be this process's, reused.
-            mapped.retain(|m| m.space.strong_count() > 0);
-            if let Some(m) = mapped.iter().find(|m| m.space.as_ptr() == Arc::as_ptr(pt)) {
-                return Ok(m.at.raw());
-            }
-            let prot = match self.region.memory {
-                Memory::Boot { .. } => Prot::Read,
-                Memory::Owned { .. } | Memory::Foreign => Prot::ReadWrite,
-            };
-            let (addr, _) = pt
-                .lock()
-                .alloc_and_map(self.region.phys.phys(), self.region.size, prot, self.region.cache)
-                .ok_or(SyscallError::ResourceExhausted)?;
-            // Logged only for a non-default policy: this process is the one
-            // paying for it. Read back the installed policy, not the request,
-            // so the line describes the mapping.
-            if self.region.cache != CachePolicy::Normal {
-                let installed = pt.lock().user_policy(addr).expect("shm: just mapped");
-                crate::log!(
-                    "shm: {:#x} mapped {:?} into pid {}",
-                    self.region.phys.phys(),
-                    installed,
-                    pid
-                );
-            }
-            mapped.push(Mapping { pid, space: Arc::downgrade(pt), at: addr });
-            Ok(addr.raw())
-        };
-        self.mapped_in.with_mut(map).unwrap_or(Err(SyscallError::Gone))
-    }
-
-    /// Take this process's mapping away, if it has one; the caller owes a
-    /// shootdown before the freed address can be reissued.
-    #[must_use = "the caller owes a shootdown before the address can be reissued"]
-    pub fn unmap_from(&self, pid: Pid) -> Option<Unmapped<Option<Detached>>> {
-        self.mapped_in.with_mut(|mapped| {
-            mapped.retain(|m| m.space.strong_count() > 0);
-            let pos = mapped.iter().position(|m| m.pid == pid)?;
-            let m = mapped.swap_remove(pos);
-            let detached = m.live().and_then(|pt| pt.lock().free_and_unmap(m.at));
-            Some(Unmapped::new(detached))
-        })?
-    }
-}
-
-/// Every mapping goes, flushed here, and with the list gone no later map can
-/// add one; the pages do not, since a handle holds an `Arc` and
-/// [`Memory::Owned`] frees them only when the last one drops.
-impl ZeroHandles for SharedMemObject {
-    fn on_zero_handles(&self) {
-        let mapped = self.mapped_in.take().expect("the zero-handle hook runs once");
-        if mapped.is_empty() {
-            return;
+    /// The most a mapping of it may allow: a boot image is read-only.
+    pub fn max_prot(&self) -> kernel::vm::Prot {
+        match self.backing {
+            Backing::Boot { .. } => kernel::vm::Prot::Read,
+            Backing::Frames(_) | Backing::Run(_) | Backing::Aperture { .. } => kernel::vm::Prot::ReadWrite,
         }
-        let detached: Vec<_> =
-            mapped.iter().filter_map(|m| m.live().and_then(|pt| pt.lock().free_and_unmap(m.at))).collect();
-        drop(Unmapped::new((mapped, detached)));
+    }
+
+    /// The physical run and its length in whole 2 MiB pages, for ordinary
+    /// memory the kernel allocated in one run — the only kind a device may be
+    /// lent (`pcidev::dma_map`). `None` for anything else.
+    pub fn run(&self) -> Option<(u64, u64)> {
+        match &self.backing {
+            Backing::Run(pages) => Some((pages[0].direct_map().phys(), pages.len() as u64 * PAGE_2M)),
+            Backing::Frames(_) | Backing::Boot { .. } | Backing::Aperture { .. } => None,
+        }
+    }
+
+    /// The physical address of the page `offset` bytes in, which lies inside it.
+    pub fn page(&self, offset: u64) -> u64 {
+        assert!(offset < self.size, "shm koid {}: page {offset:#x} of {:#x} bytes", self.core.koid().raw(), self.size);
+        let page = offset & !(PAGE_SIZE - 1);
+        match &self.backing {
+            Backing::Frames(pieces) => {
+                let frame = (page / PAGE_SIZE) as usize;
+                pieces[frame / CHUNK][frame % CHUNK].direct_map().phys()
+            }
+            Backing::Run(pages) => pages[0].direct_map().phys() + page,
+            Backing::Boot { phys, .. } | Backing::Aperture { phys, .. } => phys + page,
+        }
+    }
+
+    /// Copy `bytes` in at `offset`, through the direct map. For memory the
+    /// kernel lays out before a process can see it, and the words it alone
+    /// writes after; never an aperture.
+    pub fn write(&self, offset: u64, bytes: &[u8]) {
+        assert!(self.is_ram(), "shm koid {}: the kernel writes no aperture", self.core.koid().raw());
+        self.each_piece(offset, bytes.len(), |phys, at, n| {
+            // SAFETY: `each_piece` bounds `[at, at + n)` inside `bytes` and
+            // `phys..+n` inside one of this object's own pages, which the
+            // direct map covers; no reference forms over a page a process may
+            // map, and the two cannot overlap.
+            unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr().add(at), DirectMap::from_phys(phys).as_mut_ptr(), n) }
+        });
+    }
+
+    /// Copy out `out.len()` bytes at `offset`, each read once.
+    pub fn read(&self, offset: u64, out: &mut [u8]) {
+        assert!(self.is_ordinary(), "shm koid {}: the kernel reads no aperture", self.core.koid().raw());
+        let into = out.as_mut_ptr();
+        self.each_piece(offset, out.len(), |phys, at, n| {
+            // SAFETY: as `write`, mirrored; `out` is the caller's own.
+            unsafe { core::ptr::copy_nonoverlapping(DirectMap::from_phys(phys).as_ptr(), into.add(at), n) }
+        });
+    }
+
+    /// `f(phys, at, n)` for each piece of `[offset, offset + len)` inside one
+    /// page, `at` its offset from `offset`.
+    fn each_piece(&self, offset: u64, len: usize, mut f: impl FnMut(u64, usize, usize)) {
+        assert!(
+            offset.checked_add(len as u64).is_some_and(|end| end <= self.size),
+            "shm koid {}: {len} bytes at {offset:#x} of {:#x}",
+            self.core.koid().raw(),
+            self.size
+        );
+        let mut done = 0;
+        while done < len {
+            let at = offset + done as u64;
+            let n = ((PAGE_SIZE - at % PAGE_SIZE) as usize).min(len - done);
+            f(self.page(at) + at % PAGE_SIZE, done, n);
+            done += n;
+        }
+    }
+
+    /// Record that `space` maps this object at `[at, at + len)`, if it is an
+    /// aperture: what its last handle takes back. `Gone` once that has.
+    pub fn mapped_at(&self, space: &Arc<Space>, at: UserAddr, len: u64) -> Result<(), SyscallError> {
+        let Backing::Aperture { mapped, .. } = &self.backing else { return Ok(()) };
+        mapped
+            .with_mut(|mapped| {
+                mapped.retain(|(space, _, _)| space.strong_count() > 0);
+                mapped.push((Arc::downgrade(space), at, len));
+            })
+            .ok_or(SyscallError::Gone)
     }
 }
 
+/// `size` bytes in whole pages, refused for none or one past every page count.
+fn pages(size: u64) -> Result<u64, SyscallError> {
+    match size.checked_next_multiple_of(PAGE_SIZE) {
+        Some(0) | None => Err(SyscallError::InvalidArgument),
+        Some(bytes) => Ok(bytes / PAGE_SIZE),
+    }
+}
+
+/// The frames go back once no space maps the object and nothing holds it:
+/// first every futex wait on a word in them ends, so none is left keyed on a
+/// frame the allocator hands out again.
 impl Drop for SharedMemObject {
     fn drop(&mut self) {
-        debug_assert!(
-            self.mapped_nowhere(),
-            "shm koid {} freed with a live mapping, so the pages go back to the \
-             PMM under somebody's window",
-            self.core.koid().raw(),
-        );
+        match &self.backing {
+            Backing::Frames(pieces) => {
+                for piece in pieces {
+                    let mut phys: Vec<u64> = piece.iter().map(|f| f.direct_map().phys()).collect();
+                    phys.sort_unstable();
+                    crate::sched::futex::revoke_frames(&phys);
+                }
+            }
+            Backing::Run(pages) => {
+                crate::sched::futex::revoke_run(pages[0].direct_map().phys(), pages.len() as u64 * PAGE_2M);
+            }
+            Backing::Boot { .. } | Backing::Aperture { .. } => {}
+        }
+    }
+}
+
+/// An aperture's last handle takes it out of every space that still maps it.
+impl ZeroHandles for SharedMemObject {
+    fn on_zero_handles(&self) {
+        let Backing::Aperture { mapped, .. } = &self.backing else { return };
+        let Some(mapped) = mapped.take() else { return };
+        for (space, at, len) in mapped {
+            if let Some(space) = space.upgrade() {
+                space.release_object(at, len, self);
+            }
+        }
     }
 }

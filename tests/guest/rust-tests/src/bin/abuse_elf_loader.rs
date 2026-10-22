@@ -45,9 +45,9 @@ const BIG: usize = 3 * 1024 * 1024;
 
 /// Kernel constants this test aims at, by value.
 ///
-/// `USER_VM_BASE` (`kernel/src/loader.rs`) is where every exe image is
-/// rebased to; `ALLOC_FLOOR` (`kernel/src/vma.rs`) is the bottom of the arena
-/// `find_gap` serves every library, TLS block and mmap out of; `KERNEL_HALF`
+/// `USER_VM_BASE` was where every exe image was rebased to and `ALLOC_FLOOR`
+/// the bottom of the arena every library, TLS block and mmap came out of;
+/// both are now addresses the space's placement may hand out. `KERNEL_HALF`
 /// is where the direct map starts.  A segment vaddr is only interesting here
 /// relative to one of the three.
 const USER_VM_BASE: u64 = 0x100_0000_0000;

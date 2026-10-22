@@ -10,18 +10,15 @@
 // executable (`mm::audit_wx`).
 
 use crate::log;
-use alloc::boxed::Box;
 use alloc::vec::Vec;
 
 use kernel::pcid::{Alloc, Pcid, PcidPool};
 
-use crate::mm::{UserAddr, PAGE_2M};
-use toyos_userbound::Leaf;
-use crate::mm::policy::{CachePolicy, MmioPolicy, Prot, WindowProt};
+use crate::mm::PAGE_2M;
+use crate::mm::policy::{CachePolicy, MmioPolicy, Prot};
 use crate::arch::control_regs::PcidActive;
 use crate::arch::cpu::Invpcid;
 use crate::sync::Lock;
-use crate::vma::{self, Occupancy, Region, RegionKind};
 use toyos_bootmap::ROOT_HIGH_HALF;
 use crate::MemoryMapEntry;
 
@@ -440,311 +437,26 @@ fn free_table(phys: u64) {
     drop(unsafe { crate::mm::pmm::Frame::from_raw(phys) });
 }
 
-/// PML4[0..255] user, PML4[256..511] kernel direct map (shared).
-pub struct AddressSpace {
-    /// Its tables, each a frame the entry linking it owns.
+/// The kernel half every space shares: PML4[256..511] and what they name.
+/// Only boot fills its root's slots ([`seal_kernel_half`]); a user space
+/// copies them when it is made.
+struct KernelTables {
     root: u64,
-    /// All virtual memory regions, keyed by start address.
-    regions: vma::Regions,
-    /// Owned for this space's life: dropping the space returns a user tag, so two
-    /// live spaces can never share one.
-    pcid: PcidHandle,
 }
 
-impl AddressSpace {
-    /// Create a new user address space with kernel entries shallow-copied, or
-    /// `None` when every user PCID is held by a live space.
-    pub fn new_user() -> Option<Self> {
-        let pcid = alloc_pcid()?;
-        let kernel_as = kernel().lock();
-        let pml4 = PageTablePage::new();
-
-        for slot in ROOT_HIGH_HALF..512 {
-            let entry = kernel_as.root_table()[slot];
-            assert!(
-                entry & PAGE_PRESENT != 0,
-                "new_user: kernel root slot {slot} is absent, and this space would never see what is \
-                 mapped there: `seal_kernel_half` runs before the first user space"
-            );
-            pml4.init_entry(slot, entry);
-        }
-
-        Some(Self {
-            root: pml4.phys(),
-            regions: vma::Regions::default(),
-            pcid: PcidHandle::User(pcid),
-        })
-    }
-
-    pub fn root(&self) -> Cr3 {
-        Cr3(self.root | self.pcid.value() as u64)
+impl KernelTables {
+    fn root(&self) -> Cr3 {
+        Cr3(self.root | kernel::pcid::KERNEL_PCID as u64)
     }
 
     fn root_table(&self) -> &PageTablePage {
-        // SAFETY: the root is a table this space made and owns for its life.
+        // SAFETY: the kernel's root is a table `init` made, which lives forever.
         unsafe { PageTablePage::from_phys(self.root) }
     }
 
     fn root_table_mut(&mut self) -> &mut PageTablePage {
         // SAFETY: as `root_table`; `&mut self` gives the exclusivity.
         unsafe { PageTablePage::from_phys_mut(self.root) }
-    }
-
-    /// Map `size` bytes of `phys` at `vaddr` in the leaves
-    /// [`toyos_userbound::leaves`] chooses, each table filled before it is
-    /// linked. Empty PDE slots (asserted) mean nothing can be stale.
-    pub fn map_range(
-        &mut self,
-        vaddr: UserAddr,
-        phys: u64,
-        size: u64,
-        prot: Prot,
-        cache: CachePolicy,
-    ) {
-        for leaf in toyos_userbound::leaves(vaddr.raw(), phys, size) {
-            let (va, entry) = match leaf {
-                Leaf::Block { va, pa } => (va, pa | prot.leaf_bits() | cache.pde_bits() | PAGE_SIZE_BIT),
-                Leaf::Pages { va, pa, count } => {
-                    let table = PageTablePage::new();
-                    for i in 0..count as usize {
-                        table.init_entry(i, (pa + i as u64 * PAGE_4K) | prot.leaf_bits() | cache.pte_bits());
-                    }
-                    let table_phys = table.phys();
-                    // No `Prot` here: `NX` would make the whole window
-                    // non-executable whatever the leaves say.
-                    (va, table_phys | TABLE_FLAGS)
-                }
-            };
-            let pd_idx = indices(va).2;
-            let pd = self.ensure_table(va, TABLE_FLAGS);
-            pd.write_pde(pd_idx, va, entry).expect_install("map_range");
-        }
-    }
-
-    /// Private: leaves a placed `mmap` invisible to the placement search
-    /// unless paired with unregistering — [`free_and_unmap`](Self::free_and_unmap) does both.
-    fn unmap_range(&mut self, vaddr: UserAddr, size: u64) -> Detached {
-        let mut detached = Detached(Vec::new());
-        let mut offset = 0u64;
-        while offset < size {
-            detached.0.extend(self.unmap(UserAddr::new(vaddr.raw() + offset)));
-            offset += PAGE_2M;
-        }
-        detached
-    }
-
-    /// Discharges only in this address space — a caller whose mapping may be live elsewhere must shoot down itself.
-    pub fn remap(&mut self, vaddr: UserAddr, phys: u64, prot: Prot) {
-        let va = vaddr.raw();
-        assert!(
-            va & (PAGE_2M - 1) == 0,
-            "remap: vaddr {va:#x} not 2MB-aligned"
-        );
-        assert!(
-            phys & (PAGE_2M - 1) == 0,
-            "remap: phys {phys:#x} not 2MB-aligned"
-        );
-
-        let pd_idx = indices(va).2;
-        let target = self.root();
-        let pd = self.ensure_table(va, TABLE_FLAGS);
-        pd.write_pde(pd_idx, va, phys | prot.leaf_bits() | PAGE_SIZE_BIT)
-            .discharge(target);
-    }
-
-    /// A mixed window's page table is written before being linked, so nothing
-    /// can be walking it while filled. Must not be called twice on one
-    /// address — the second call's PDE orphans the first call's table.
-    pub fn map_window(&mut self, vaddr: UserAddr, phys: u64, prot: &WindowProt) {
-        if let Some(uniform) = prot.agreed() {
-            self.remap(vaddr, phys, uniform);
-            return;
-        }
-        let va = vaddr.raw();
-        assert!(
-            va & (PAGE_2M - 1) == 0,
-            "map_window: vaddr {va:#x} not 2MB-aligned"
-        );
-        assert!(
-            phys & (PAGE_2M - 1) == 0,
-            "map_window: phys {phys:#x} not 2MB-aligned"
-        );
-
-        let table = PageTablePage::new();
-        for (i, page_prot) in prot.pages().enumerate() {
-            // No cache bits: `Normal` is the zero pattern at both granularities.
-            table.init_entry(i, (phys + i as u64 * 4096) | page_prot.leaf_bits());
-        }
-        let table_phys = table.phys();
-
-        let pd_idx = indices(va).2;
-        let target = self.root();
-        let pd = self.ensure_table(va, TABLE_FLAGS);
-        // No `Prot` here: `NX` would make the whole window non-executable
-        // whatever the leaves say.
-        pd.write_pde(pd_idx, va, table_phys | TABLE_FLAGS).discharge(target);
-    }
-
-    /// `false` leaves the mapping as found and `phys` the caller's to free.
-    /// The check and the write are one critical section: the demand pager
-    /// fills unlocked, so two threads can both see "unmapped" first, and the
-    /// second must lose here rather than strand the winner's CPU translation.
-    pub fn map_window_if_absent(
-        &mut self,
-        vaddr: UserAddr,
-        phys: u64,
-        prot: &WindowProt,
-    ) -> bool {
-        if self.translate(vaddr).is_some() {
-            return false;
-        }
-        self.map_window(vaddr, phys, prot);
-        true
-    }
-
-    /// Runs on every present entry, shared or not: unmapping ends any futex
-    /// wait on the frame (its token is a physical address) before the frame
-    /// can reach the PMM and be reused under a waiter's nose — a spurious
-    /// wake is safe, a use-after-free isn't.
-    ///
-    /// A table of 4 KiB leaves it unlinks is answered rather than freed: a
-    /// sibling's paging-structure cache may still name it through the PDE
-    /// just cleared (SDM Vol. 3A §4.10.3), so it lives until the caller's
-    /// shootdown ([`Detached`]).
-    fn unmap(&mut self, vaddr: UserAddr) -> Option<crate::mm::pmm::Frame> {
-        let va = vaddr.raw();
-        assert!(
-            va & (PAGE_2M - 1) == 0,
-            "unmap: vaddr {va:#x} not 2MB-aligned"
-        );
-
-        let (pml4_idx, pdpt_idx, pd_idx) = indices(va);
-        let target = self.root();
-        let pd = self.root_table_mut().child_mut(pml4_idx).and_then(|pdpt| pdpt.child_mut(pdpt_idx))?;
-        let pde = pd[pd_idx];
-        if pde & PAGE_PRESENT == 0 {
-            return None;
-        }
-        // `write_pde`: a PDE naming a page table owes the context.
-        pd.write_pde(pd_idx, va, 0).discharge(target);
-        if pde & PAGE_SIZE_BIT != 0 {
-            crate::sched::futex::revoke_range(pde & ADDR_MASK_2M, PAGE_2M);
-            return None;
-        }
-        let table_phys = pde & ADDR_MASK;
-        // SAFETY: PRESENT and not 2 MiB, so a table `map_range` or
-        // `map_window` built, linked nowhere now.
-        let table = unsafe { PageTablePage::from_phys(table_phys) };
-        crate::mm::revoke_frames(table.0.iter().filter(|leaf| *leaf & PAGE_PRESENT != 0).map(|leaf| leaf & ADDR_MASK));
-        // SAFETY: the frame `PageTablePage::new` gave up for this table, which
-        // the PDE just cleared was its one link.
-        Some(unsafe { crate::mm::pmm::Frame::from_raw(table_phys) })
-    }
-
-    /// Checked here, not at the callers: a user space shallow-copies the
-    /// kernel PML4 half, so a kernel address would otherwise walk to a writable kernel page.
-    pub fn translate(&self, vaddr: UserAddr) -> Option<crate::mm::DirectMap> {
-        self.walk(vaddr).map(|(dm, _, _)| dm)
-    }
-
-    /// `vaddr`'s physical address and the bytes from it to the end of the leaf
-    /// that maps it, which that one walk answers for. A `Write` is answered
-    /// only where a user store would land: every level of the walk grants
-    /// `USER` and `WRITE`, as the MMU demands of a ring 3 store under
-    /// `CR0.WP`. A kernel copy into user memory goes through this, so a syscall
-    /// cannot write a page the process itself may not — the clock page, a
-    /// shared library's `.text`.
-    pub fn leaf(&self, vaddr: UserAddr, access: toyos_userbound::Access) -> Option<(u64, u64)> {
-        const STORE: u64 = PAGE_USER | PAGE_WRITE;
-        let (dm, rights, size) = self.walk(vaddr)?;
-        let granted = match access {
-            toyos_userbound::Access::Read => true,
-            toyos_userbound::Access::Write => rights & STORE == STORE,
-        };
-        granted.then(|| (dm.phys(), size - (vaddr.raw() & (size - 1))))
-    }
-
-    /// The direct-map address of `vaddr`, the rights every level of its walk grants in common, and the size of the leaf that maps it.
-    fn walk(&self, vaddr: UserAddr) -> Option<(crate::mm::DirectMap, u64, u64)> {
-        let va = vaddr.raw();
-        if !toyos_userbound::is_user_addr(va) {
-            return None;
-        }
-        let (pml4_idx, pdpt_idx, pd_idx) = indices(va);
-        let pml4e = self.root_table()[pml4_idx];
-        let pdpt = self.root_table().child(pml4_idx)?;
-        let pdpte = pdpt[pdpt_idx];
-        let pd = pdpt.child(pdpt_idx)?;
-        let pde = pd[pd_idx];
-        if pde & PAGE_PRESENT == 0 {
-            return None;
-        }
-        let rights = pml4e & pdpte & pde;
-        if pde & PAGE_SIZE_BIT == 0 {
-            // A table of 4 KiB leaves, so the leaf is one level down.
-            let pt = pd.child(pd_idx)?;
-            let pte = pt[((va >> 12) & 0x1FF) as usize];
-            if pte & PAGE_PRESENT == 0 {
-                return None;
-            }
-            let dm = crate::mm::DirectMap::from_phys((pte & ADDR_MASK) + (va & 0xFFF));
-            return Some((dm, rights & pte, 4096));
-        }
-        let page_phys = pde & ADDR_MASK_2M;
-        let offset = va & (PAGE_2M - 1);
-        Some((crate::mm::DirectMap::from_phys(page_phys + offset), rights, PAGE_2M))
-    }
-
-    /// Allocate a virtual address range and register the region.
-    pub fn alloc_region(&mut self, size: u64, kind: RegionKind) -> Option<UserAddr> {
-        self.regions.alloc(size, kind)
-    }
-
-    /// A mixed-`Prot` image uses [`alloc_region`](Self::alloc_region) plus [`map_window`](Self::map_window) per 2 MiB instead.
-    pub fn alloc_and_map(
-        &mut self,
-        phys: u64,
-        size: u64,
-        prot: Prot,
-        cache: CachePolicy,
-    ) -> Option<(UserAddr, u64)> {
-        let (addr, aligned) = self.regions.alloc_mapped(size)?;
-        self.map_range(addr, phys, size.next_multiple_of(PAGE_4K), prot, cache);
-        Some((addr, aligned))
-    }
-
-    /// Free a previously allocated region and unmap it, answering the tables
-    /// its unmapping unlinked.
-    pub fn free_and_unmap(&mut self, addr: UserAddr) -> Option<Detached> {
-        let size = self.regions.remove(addr)?;
-        Some(self.unmap_range(addr, size))
-    }
-
-    /// Insert a region at a specific address (for ELF segments, stack, etc.)
-    pub fn insert_region(&mut self, addr: UserAddr, region: Region) {
-        self.regions.insert(addr, region);
-    }
-
-    pub fn has_region_room(&self) -> bool {
-        self.regions.has_room()
-    }
-
-    /// Find the region containing `addr`. Returns (start_addr, region).
-    pub fn find_region(&self, addr: UserAddr) -> Option<(UserAddr, &Region)> {
-        self.regions.find(addr)
-    }
-
-    pub fn occupancy(&self, addr: UserAddr, size: u64) -> Occupancy {
-        self.regions.occupancy(addr, size)
-    }
-
-    /// Iterate all regions that overlap the range [start, end).
-    pub fn overlapping_regions(
-        &self,
-        start: UserAddr,
-        end: UserAddr,
-    ) -> impl Iterator<Item = (&UserAddr, &Region)> {
-        self.regions.overlapping(start, end)
     }
 
     /// Private: not safe to use until every CPU is told — the free fn [`map_mmio`] is the whole operation.
@@ -778,10 +490,6 @@ impl AddressSpace {
         self.policy_at(crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64)
     }
 
-    pub fn user_policy(&self, addr: UserAddr) -> Option<CachePolicy> {
-        self.policy_at(addr.raw())
-    }
-
     /// Permanent: the caller must own `phys` for the machine's life, since
     /// handing the enclosing 2 MiB page back to the PMM would reissue memory with a hole.
     pub fn guard_4k(&mut self, phys: u64) {
@@ -795,7 +503,7 @@ impl AddressSpace {
             entry & ADDR_MASK
         };
         // SAFETY: `pd_phys` names the direct map's PD, living forever;
-        // `&mut self` here is `kernel().lock()`'s required exclusivity.
+        // `&mut self` here is `KERNEL.lock()`'s required exclusivity.
         let pd = unsafe { PageTablePage::from_phys_mut(pd_phys) };
         let pde = pd[pd_idx];
         assert!(pde & PAGE_PRESENT != 0, "guard_4k: {phys:#x} is not in the direct map");
@@ -906,54 +614,304 @@ impl AddressSpace {
     }
 }
 
-/// Frees every table under the user half and the root; the frames its leaves
-/// map are their owners' to free. The kernel half is shared and the kernel's
-/// own space never drops. No CPU walks a space that drops: its last thread has
-/// left it, and its tag is flushed everywhere before it is issued again.
-impl Drop for AddressSpace {
-    fn drop(&mut self) {
-        assert!(matches!(self.pcid, PcidHandle::User(_)), "paging: the kernel's address space dropped");
-        let root = self.root_table();
-        for slot in 0..ROOT_HIGH_HALF {
-            let Some(pdpt) = root.child(slot) else { continue };
-            for i in 0..512 {
-                let Some(pd) = pdpt.child(i) else { continue };
-                for j in 0..512 {
-                    let pde = pd[j];
-                    if pde & PAGE_PRESENT != 0 && pde & PAGE_SIZE_BIT == 0 {
-                        free_table(pde & ADDR_MASK);
+/// The kernel half's tables; its root is 0 until `init` builds it.
+static KERNEL: Lock<KernelTables> = Lock::new(KernelTables { root: 0 });
+
+/// The direct map's memory type for `phys`, read off the kernel's tables.
+pub fn direct_map_policy(phys: u64) -> Option<CachePolicy> {
+    KERNEL.lock().direct_map_policy(phys)
+}
+
+/// Take the 4 KiB page at `phys` out of the direct map for good: the caller
+/// owns it for the machine's life.
+pub fn guard_4k(phys: u64) {
+    KERNEL.lock().guard_4k(phys);
+}
+
+/// The kernel wrote instructions into the frame at `phys` that a user leaf
+/// executes: nothing to do, as the instruction and data caches are coherent
+/// (SDM Vol. 3A §11.6).
+pub fn wrote_code(_phys: u64) {}
+
+/// Marks a user leaf whose frame the space owns: one of the bits a PTE leaves
+/// to software (SDM Vol. 3A §4.5, Table 4-19). Kept on a leaf that is not
+/// present, so a frame no access may reach is still recorded.
+const OWNED: u64 = 1 << 9;
+
+/// What one user page's leaf says.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Leaf {
+    Empty,
+    Mapped(Mapping),
+    /// A frame the space owns that no access reaches.
+    Held(u64),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Mapping {
+    pub phys: u64,
+    pub prot: Prot,
+    /// The frame is the space's own, freed with the leaf; otherwise an
+    /// object's or a device's.
+    pub owned: bool,
+    pub cache: CachePolicy,
+}
+
+impl Leaf {
+    fn encode(self) -> u64 {
+        match self {
+            Leaf::Empty => 0,
+            Leaf::Held(phys) => phys | OWNED,
+            Leaf::Mapped(m) => {
+                m.phys | m.prot.leaf_bits() | m.cache.pte_bits() | if m.owned { OWNED } else { 0 }
+            }
+        }
+    }
+
+    fn decode(pte: u64) -> Self {
+        if pte & PAGE_PRESENT == 0 {
+            return if pte & OWNED != 0 { Leaf::Held(pte & ADDR_MASK) } else { Leaf::Empty };
+        }
+        let prot = match (pte & PAGE_WRITE != 0, pte & PAGE_NX != 0) {
+            (true, _) => Prot::ReadWrite,
+            (false, true) => Prot::Read,
+            (false, false) => Prot::ReadExec,
+        };
+        Leaf::Mapped(Mapping { phys: pte & ADDR_MASK, prot, owned: pte & OWNED != 0, cache: CachePolicy::from_pte(pte) })
+    }
+}
+
+/// The indices of `[start, end)`'s entries in the table of entries `1 <<
+/// shift` bytes apart that covers `[base, base + 512 << shift)`.
+fn slots(start: u64, end: u64, base: u64, shift: u32) -> core::ops::Range<usize> {
+    let (lo, hi) = (start.max(base), end.min(base + (512 << shift)));
+    if lo >= hi {
+        return 0..0;
+    }
+    (((lo - base) >> shift) as usize)..(((hi - 1 - base) >> shift) as usize + 1)
+}
+
+/// A table [`UserTables::unlink`] took out of the tree, freed once no CPU can
+/// still walk into it.
+pub struct Unlinked {
+    /// Each table's frame and whether it holds leaves.
+    tables: Vec<(u64, bool)>,
+}
+
+impl Unlinked {
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty()
+    }
+
+    /// Hand every frame a leaf in them still holds to `owned`, then free the
+    /// tables. Only after the shootdown that followed the unlink.
+    pub fn free(self, mut owned: impl FnMut(u64)) {
+        for (table, leaves) in self.tables {
+            if leaves {
+                // SAFETY: a table of leaves `unlink` took out of the tree,
+                // which nothing walks and nothing frees but this.
+                for &pte in unsafe { &PageTablePage::from_phys(table).0 } {
+                    match Leaf::decode(pte) {
+                        Leaf::Held(phys) | Leaf::Mapped(Mapping { phys, owned: true, .. }) => owned(phys),
+                        Leaf::Empty | Leaf::Mapped(_) => {}
                     }
                 }
-                free_table(pd.phys());
             }
-            free_table(pdpt.phys());
+            free_table(table);
         }
+    }
+}
+
+/// One user space's tables: PML4[0..255] its own, PML4[256..511] the
+/// kernel's, copied in when it is made. `mm::space` decides what every leaf
+/// holds; this only reads and writes them. A write here owes no invalidation
+/// when the entry was empty, and the caller's [`shoot_down`](Self::shoot_down)
+/// otherwise.
+pub struct UserTables {
+    root: u64,
+    /// Owned for this space's life: dropping it returns a user tag, so two live
+    /// spaces can never share one.
+    pcid: PcidHandle,
+}
+
+impl UserTables {
+    /// A new space with the kernel half copied in, or `None` when every user
+    /// PCID is held by a live space.
+    pub fn new() -> Option<Self> {
+        let pcid = alloc_pcid()?;
+        let kernel = KERNEL.lock();
+        let pml4 = PageTablePage::new();
+        for slot in ROOT_HIGH_HALF..512 {
+            let entry = kernel.root_table()[slot];
+            assert!(
+                entry & PAGE_PRESENT != 0,
+                "new_user: kernel root slot {slot} is absent, and this space would never see what is \
+                 mapped there: `seal_kernel_half` runs before the first user space"
+            );
+            pml4.init_entry(slot, entry);
+        }
+        Some(Self { root: pml4.phys(), pcid: PcidHandle::User(pcid) })
+    }
+
+    /// The kernel's own space, whose user half is empty: what a kernel thread
+    /// and an idle CPU run under. Never dropped.
+    pub fn kernel() -> Self {
+        let root = KERNEL.lock().root;
+        assert!(root != 0, "paging: the kernel's space before `init`");
+        Self { root, pcid: PcidHandle::Kernel }
+    }
+
+    pub fn root(&self) -> Cr3 {
+        Cr3(self.root | self.pcid.value() as u64)
+    }
+
+    fn root_table(&self) -> &PageTablePage {
+        // SAFETY: the root is a table this space made and owns for its life.
+        unsafe { PageTablePage::from_phys(self.root) }
+    }
+
+    fn root_table_mut(&mut self) -> &mut PageTablePage {
+        // SAFETY: as `root_table`; `&mut self` gives the exclusivity.
+        unsafe { PageTablePage::from_phys_mut(self.root) }
+    }
+
+    /// The table of leaves over `va`, if one is built.
+    fn leaves(&self, va: u64) -> Option<&PageTablePage> {
+        let (a, b, c) = indices(va);
+        let pd = self.root_table().child(a)?.child(b)?;
+        (pd[c] & PAGE_SIZE_BIT == 0).then(|| pd.child(c)).flatten()
+    }
+
+    /// Build every table `[start, end)`'s leaves need; answers how many
+    /// frames that took. Only an empty entry is written, which owes nothing.
+    pub fn build(&mut self, start: u64, end: u64) -> u64 {
+        let mut built = 0;
+        let mut va = start & !(PAGE_2M - 1);
+        while va < end {
+            let (a, b, c) = indices(va);
+            let mut level = self.root_table_mut();
+            for index in [a, b, c] {
+                if level[index] & PAGE_PRESENT == 0 {
+                    let child = PageTablePage::new();
+                    level.write(index, va, child.phys() | TABLE_FLAGS).expect_install("build");
+                    built += 1;
+                }
+                // SAFETY: present, so a table this space linked; `&mut self`.
+                level = unsafe { PageTablePage::from_phys_mut(level[index] & ADDR_MASK) };
+            }
+            va += PAGE_2M;
+        }
+        built
+    }
+
+    /// The leaf over `va`, empty where no table holds one.
+    pub fn get(&self, va: u64) -> Leaf {
+        self.leaves(va).map_or(Leaf::Empty, |t| Leaf::decode(t[((va >> 12) & 0x1FF) as usize]))
+    }
+
+    /// Write the leaf over `va`, whose table [`build`](Self::build) made.
+    pub fn set(&mut self, va: u64, leaf: Leaf) {
+        assert!(toyos_userbound::is_user_addr(va), "paging: a user leaf at {va:#x}");
+        let table = self.leaves(va).map(PageTablePage::phys).unwrap_or_else(|| panic!("paging: no table over {va:#x}"));
+        // SAFETY: a table of leaves this space linked; `&mut self`.
+        let table = unsafe { PageTablePage::from_phys_mut(table) };
+        table.0[((va >> 12) & 0x1FF) as usize] = leaf.encode();
+    }
+
+    /// Call `f` on every leaf in `[start, end)` that is not empty, with its
+    /// address; a `Some` it answers is written in its place.
+    pub fn edit(&mut self, start: u64, end: u64, mut f: impl FnMut(u64, Leaf) -> Option<Leaf>) {
+        self.each_table(start, end, |base, table| {
+            for i in slots(start, end, base, 12) {
+                let leaf = Leaf::decode(table.0[i]);
+                if leaf != Leaf::Empty {
+                    if let Some(new) = f(base + ((i as u64) << 12), leaf) {
+                        table.0[i] = new.encode();
+                    }
+                }
+            }
+        });
+    }
+
+    /// Call `f` on every table of leaves meeting `[start, end)`, with the
+    /// address its first leaf maps.
+    fn each_table(&mut self, start: u64, end: u64, mut f: impl FnMut(u64, &mut PageTablePage)) {
+        let root = self.root_table_mut();
+        for a in slots(start, end, 0, 39).filter(|&a| a < ROOT_HIGH_HALF) {
+            let base_a = (a as u64) << 39;
+            let Some(pdpt) = root.child_mut(a) else { continue };
+            for b in slots(start, end, base_a, 30) {
+                let base_b = base_a + ((b as u64) << 30);
+                let Some(pd) = pdpt.child_mut(b) else { continue };
+                for c in slots(start, end, base_b, 21) {
+                    if pd[c] & PAGE_SIZE_BIT != 0 {
+                        continue;
+                    }
+                    if let Some(pt) = pd.child_mut(c) {
+                        f(base_b + ((c as u64) << 21), pt);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Unlink every table over `[start, end)` whose span `needed` answers
+    /// `false` for, and every table above one that is then empty; a table
+    /// that still links anything stays. Its leaves are freed only by
+    /// [`Unlinked::free`], after the caller's shootdown.
+    pub fn unlink(&mut self, start: u64, end: u64, needed: impl Fn(u64, u64) -> bool) -> Unlinked {
+        let mut tables = Vec::new();
+        let root = self.root_table_mut();
+        for a in slots(start, end, 0, 39).filter(|&a| a < ROOT_HIGH_HALF) {
+            let base_a = (a as u64) << 39;
+            let Some(pdpt) = root.child_mut(a) else { continue };
+            for b in slots(start, end, base_a, 30) {
+                let base_b = base_a + ((b as u64) << 30);
+                let Some(pd) = pdpt.child_mut(b) else { continue };
+                for c in slots(start, end, base_b, 21) {
+                    let span = base_b + ((c as u64) << 21);
+                    if pd[c] & PAGE_PRESENT != 0 && !needed(span, span + PAGE_2M) {
+                        tables.push((pd[c] & ADDR_MASK, true));
+                        pd.0[c] = 0;
+                    }
+                }
+                if pd.0.iter().all(|&e| e == 0) && !needed(base_b, base_b + (1 << 30)) {
+                    tables.push((pdpt[b] & ADDR_MASK, false));
+                    pdpt.0[b] = 0;
+                }
+            }
+            if pdpt.0.iter().all(|&e| e == 0) && !needed(base_a, base_a + (1 << 39)) {
+                tables.push((root[a] & ADDR_MASK, false));
+                root.0[a] = 0;
+            }
+        }
+        Unlinked { tables }
+    }
+
+    /// Every CPU has dropped what it cached of `[start, end)` and of the
+    /// tables `unlinked` took out before this returns: every CPU's user
+    /// translations go, paging-structure caches with them.
+    pub fn shoot_down(&self, _start: u64, _end: u64, _unlinked: &Unlinked) {
+        crate::arch::tlb::shootdown(crate::invalidation::Origin::Unmap, crate::invalidation::Half::User);
+    }
+}
+
+/// Frees every table under the user half and the root; the frames its leaves
+/// map were freed by their owners first. The kernel half is shared, and the
+/// kernel's own space never drops. No CPU walks a space that drops: its last
+/// thread has left it, and its tag is flushed everywhere before it is issued
+/// again.
+impl Drop for UserTables {
+    fn drop(&mut self) {
+        assert!(matches!(self.pcid, PcidHandle::User(_)), "paging: the kernel's address space dropped");
+        let all = self.unlink(0, (ROOT_HIGH_HALF as u64) << 39, |_, _| false);
+        all.free(|phys| panic!("paging: a space dropped still holding the frame {phys:#x}"));
         free_table(self.root);
     }
 }
 
-/// Tables of 4 KiB leaves an unmap unlinked, which a CPU's paging-structure
-/// cache may still walk: dropped only after a user-half shootdown.
-#[must_use = "freed before the shootdown, a sibling CPU may still walk these tables"]
-pub struct Detached(Vec<crate::mm::pmm::Frame>);
-
-/// `Arc<Lock<AddressSpace>>`, not `Lock<Option<_>>`: a kernel thread names it
-/// as `KernelPayload.address_space` with no second answer. Leaked, since the
-/// kernel address space outlives every task by construction.
-static KERNEL: core::sync::atomic::AtomicPtr<alloc::sync::Arc<Lock<AddressSpace>>> =
-    core::sync::atomic::AtomicPtr::new(core::ptr::null_mut());
-
 /// Kernel CR3, cached for lock-free access from panic/crash paths.
 static KERNEL_CR3: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-
-/// The kernel address space. Mapped once at boot, lives forever.
-pub fn kernel() -> &'static alloc::sync::Arc<Lock<AddressSpace>> {
-    let ptr = KERNEL.load(core::sync::atomic::Ordering::Acquire);
-    assert!(!ptr.is_null(), "paging not initialized");
-    // SAFETY: written once in `init` with the `Release` this `Acquire` pairs
-    // with, never cleared, so the pointer is live for the machine's life.
-    unsafe { &*ptr }
-}
 
 /// Kernel CR3. Lock-free — safe to call from panic context.
 pub fn kernel_root() -> Cr3 {
@@ -999,7 +957,7 @@ pub const MMIO_GRAIN: u64 = PAGE_2M;
 /// statements. Not optional — `map_2m` may change memory type under a
 /// sibling's stale entry, which is SDM Vol. 3A §11.12.4 undefined behaviour.
 pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
-    let mmio = kernel().lock().map_mmio(phys, size, policy.cache());
+    let mmio = KERNEL.lock().map_mmio(phys, size, policy.cache());
     {
         let mut driven = DRIVEN.lock();
         if !driven.contains(&(phys, phys + size)) {
@@ -1010,7 +968,7 @@ pub fn map_mmio(phys: u64, size: u64, policy: MmioPolicy) -> crate::mm::Mmio {
     // Read back off the table and logged beside firmware's MTRR verdict: the
     // boot's own evidence that no register window trusts firmware.
     let installed =
-        kernel().lock().direct_map_policy(phys).expect("map_mmio: the window was just mapped");
+        KERNEL.lock().direct_map_policy(phys).expect("map_mmio: the window was just mapped");
     assert!(installed == policy.cache(), "map_mmio: {phys:#x} installed {installed:?}");
     crate::log!(
         "mmio: {phys:#x}+{size:#x} PAT {installed:?} (MTRR {})",
@@ -1064,7 +1022,7 @@ pub fn debug_global_leaf(how: u64) -> u64 {
     let read = || unsafe { core::ptr::read_volatile(SCRATCH as *const u64) };
 
     let (held, widened, seen) = {
-        let mut space = kernel().lock();
+        let mut space = KERNEL.lock();
         let _closed = crate::arch::IrqGuard::close();
         let target = space.root();
         let pd = space.ensure_table(SCRATCH, KERNEL_TABLE);
@@ -1122,11 +1080,8 @@ pub(crate) fn init(
         .unwrap_or_else(|refusal| panic!("paging: firmware's memory map: {refusal}"));
     let end = extent.get();
 
-    let mut kernel = AddressSpace {
-        root: PageTablePage::new().phys(),
-        regions: vma::Regions::default(),
-        pcid: PcidHandle::Kernel,
-    };
+    let mut kernel = KERNEL.lock();
+    kernel.root = PageTablePage::new().phys();
 
     // Only the direct map's slots: the rest wait for `seal_kernel_half`.
     let last_slot = indices(crate::mm::DirectMap::from_phys(end - 1).as_ptr::<u8>() as u64).0;
@@ -1144,15 +1099,8 @@ pub(crate) fn init(
     crate::log!("paging: the direct map covers 0x0..{end:#x}");
 
     let cr3 = kernel.root();
+    drop(kernel);
     KERNEL_CR3.store(cr3.0, core::sync::atomic::Ordering::Release);
-    // Leaked, and `Release` after the space is built: see [`KERNEL`].
-    let published: &'static alloc::sync::Arc<Lock<AddressSpace>> = Box::leak(Box::new(
-        alloc::sync::Arc::new(Lock::new(kernel)),
-    ));
-    KERNEL.store(
-        published as *const _ as *mut _,
-        core::sync::atomic::Ordering::Release,
-    );
     // SAFETY: `cr3` names the space this function just finished building via
     // the `map_2m` loop above; nothing has run under it yet, so live reduces
     // to self-consistent.
@@ -1166,7 +1114,7 @@ pub(crate) fn init(
 /// empty, from the pmm's heap, before the first user space copies the slots:
 /// one installed after a space was made would be missing from that space.
 pub(crate) fn seal_kernel_half() {
-    let mut kernel = kernel().lock();
+    let mut kernel = KERNEL.lock();
     for slot in ROOT_HIGH_HALF..512 {
         if kernel.root_table()[slot] & PAGE_PRESENT == 0 {
             kernel.install_root(slot);
@@ -1177,7 +1125,7 @@ pub(crate) fn seal_kernel_half() {
 /// [`kernel::wx::audit`] of the kernel's tables, whose kernel half every
 /// address space shares.
 pub fn audit_wx(text: core::ops::Range<u64>) -> kernel::wx::Verdict {
-    let space = kernel().lock();
+    let space = KERNEL.lock();
     // SAFETY: every table the kernel's root names is one this module linked,
     // and the lock held keeps them in place while they are read.
     let table = |phys: u64| unsafe { &PageTablePage::from_phys(phys).0 };
@@ -1189,7 +1137,7 @@ pub fn audit_wx(text: core::ops::Range<u64>) -> kernel::wx::Verdict {
 #[cfg(feature = "boot-actuators")]
 pub fn stage_writable_executable(phys: u64) -> u64 {
     let virt = crate::mm::DirectMap::from_phys(phys).as_ptr::<u8>() as u64;
-    let mut space = kernel().lock();
+    let mut space = KERNEL.lock();
     let target = space.root();
     let pd = space.ensure_table(virt, KERNEL_TABLE);
     let i = indices(virt).2;

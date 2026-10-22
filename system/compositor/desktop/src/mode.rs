@@ -4,7 +4,6 @@
 use core::fmt;
 
 use toyos_abi::pci::LEND_WINDOW;
-use toyos_abi::syscall::SHM_PAGE;
 
 use crate::layout::{Chrome, TEXT_CELL};
 
@@ -20,9 +19,10 @@ impl Mode {
         Self { width, height }
     }
 
-    /// One 32-bit scanout of this mode, as the region it is lent in.
+    /// One 32-bit scanout of this mode, as the region it is lent in: whole
+    /// 2 MiB pages, what a device is lent in (`toyos_abi::syscall::SHM_DEVICE`).
     pub const fn scanout_bytes(self) -> u64 {
-        let page = SHM_PAGE as u64;
+        let page = 2 << 20;
         (self.width as u64 * self.height as u64 * 4).div_ceil(page) * page
     }
 

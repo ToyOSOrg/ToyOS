@@ -184,10 +184,6 @@ impl Pipe {
         self.0.write_nonblock(buf)
     }
 
-    pub fn pipe_map(&self) -> Result<*mut u8, toyos_abi::syscall::SyscallError> {
-        toyos_abi::syscall::pipe_map(self.0.raw())
-    }
-
     /// Consume the `Pipe`, giving up the handle without closing it.
     pub fn into_raw(self) -> RawHandle {
         self.0.into_raw()

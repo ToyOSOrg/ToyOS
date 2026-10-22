@@ -13,8 +13,25 @@ pub fn watch_of(addr: DirectMap) -> &'static Watch {
     &FUTEX_WATCH[(addr.phys() >> 2) as usize % FUTEX_BUCKETS]
 }
 
-/// Call only after `[phys, phys + len)` is unmapped, under the address-space lock, so no waiter arms on memory already freed.
-pub fn revoke_range(phys: u64, len: u64) -> usize {
-    // A range spans buckets by construction, so every bucket is walked; an unarmed one costs one lock round trip.
-    FUTEX_WATCH.iter().map(|watch| watch.revoke_range(phys, len)).sum()
+/// End every futex wait on a word in one of `frames`, ascending 4 KiB frames
+/// whose leaves are cleared: called before they can be reissued, under the
+/// address-space lock, so no waiter arms on one again and no later post for a
+/// word in a reused frame reaches a waiter from before.
+///
+/// One call takes each of the 64 bucket locks once, whatever `frames` holds.
+pub fn revoke_frames(frames: &[u64]) -> usize {
+    if frames.is_empty() {
+        return 0;
+    }
+    revoke(|token| frames.binary_search(&(token & !(crate::mm::PAGE_SIZE - 1))).is_ok())
+}
+
+/// [`revoke_frames`] for the frames of `[phys, phys + len)`.
+pub fn revoke_run(phys: u64, len: u64) -> usize {
+    revoke(|token| token.wrapping_sub(phys) < len)
+}
+
+fn revoke(ended: impl Fn(u64) -> bool + Copy) -> usize {
+    // A frame spans buckets by construction, so every bucket is walked.
+    FUTEX_WATCH.iter().map(|watch| watch.revoke(ended)).sum()
 }

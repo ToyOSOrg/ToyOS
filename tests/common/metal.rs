@@ -418,8 +418,8 @@ impl Readback {
     /// **The name is the file's, truncated the way the kernel truncates it.**
     /// `ProcessEntry`'s name is `THREAD_NAME_LEN` bytes and the loader fills it
     /// from the path's last component, so a binary whose name is longer than
-    /// that is recorded under a prefix: the staged `munmap_reissues_read_window`
-    /// ends `…_reissues_rea` on the wire, and a predicate looking for the whole
+    /// that is recorded under a prefix: the staged `lent_device_memory_refused`
+    /// ends `…_device_memory_` on the wire, and a predicate looking for the whole
     /// name would find nothing on a perfectly good boot.
     ///
     /// **And the name alone does not identify one process.** A guest binary that

@@ -306,8 +306,7 @@ pub fn futex_wait(
         let Some(pt) = current_address_space() else {
             return true;
         };
-        let same_frame =
-            pt.lock().translate(addr).is_some_and(|now| now.phys() == phys_addr.phys());
+        let same_frame = pt.lock().get(addr.raw()).is_some_and(|(now, _)| now == phys_addr.phys());
         if !same_frame {
             return true;
         }

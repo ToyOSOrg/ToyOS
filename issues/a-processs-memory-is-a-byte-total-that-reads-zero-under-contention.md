@@ -15,14 +15,14 @@ reuse instead.
 **Three things already exist, and this track is the difference between them and
 a plateau.**
 
-`SYS_SYSINFO` carries a live per-process byte total: `demand_pages + mmap_regions
-+ dynamic_tls_blocks + loaded_libs`, summed at `kernel/src/syscall/machine.rs:146-156`
-into the entry's `memory` word. A userland `mmap` becomes an `mmap_regions`
-entry, so a leaked thread stack is inside that number. **But the sum is taken
-under `try_lock`, and the failure arm writes `0`** (`machine.rs:155-157`). A
-plateau reads a sequence; a spurious zero in that sequence is indistinguishable
-from a release, and it appears exactly when the process is busy — which is when
-a spawn/join loop is running.
+`SYS_SYSINFO` carries a live per-process byte total: the private memory its
+space has populated (`Usage::resident_bytes`, `kernel/src/mm/space.rs`), read
+in `kernel/src/syscall/machine.rs`'s roster. The usage is atomics, but it is
+reached through the process's data **under `try_lock`, and the failure arm
+writes `0`**. A plateau reads a sequence; a spurious zero in that sequence is
+indistinguishable from a release, and it appears exactly when the process is
+busy — which is when a spawn/join loop is running. Objects the process made,
+its TLS blocks and regions among them, are in no part of it.
 
 `ProcessStats` (`SYS_PROCESS_STATS`) carries `alloc_count`, `peak_memory` and
 the two fault counts. Subtracting frees from allocations would not give a live

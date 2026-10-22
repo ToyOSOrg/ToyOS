@@ -27,12 +27,10 @@ use toyos_abi::RawHandle;
 
 const SELF_PATH: &str = "/system/bin/test_rs_abuse_readonly_copyout";
 const CHILD_ARG: &str = "reads-the-clock";
-const PAGE_2M: usize = 2 * 1024 * 1024;
 const PAGE_4K: u64 = 4096;
 /// Covers a `ProcessStats`, and ends inside the file this reads.
 const LEN: usize = core::mem::size_of::<ProcessStats>();
-/// Bytes `0..=255`, so a probe can offer any page its own byte back, then the
-/// bytes the straddling `read` offers, at [`STRADDLE_AT`].
+/// The bytes the straddling `read` offers, at [`STRADDLE_AT`].
 const PROBE_PATH: &[u8] = b"/tmp/abuse_readonly_copyout.bin";
 const STRADDLE_AT: u64 = 256;
 /// The straddling `read`: half on the last writable page, half on the next.
@@ -43,10 +41,6 @@ const MMAP_BIT: i32 = 1;
 const TEXT_BIT: i32 = 2;
 const STRADDLE_BIT: i32 = 4;
 const CLOCK_BIT: i32 = 8;
-
-/// In `.bss`, so its 2 MiB window also holds the pages past the image's end,
-/// which the pager maps read-only.
-static mut BSS: u8 = 0;
 
 fn snapshot(addr: u64) -> [u8; LEN] {
     let mut out = [0u8; LEN];
@@ -101,77 +95,46 @@ fn refused_mmap(stats: RawHandle) -> Result<(), String> {
     let ro = unsafe {
         syscall::mmap(
             core::ptr::null_mut(),
-            PAGE_2M,
+            PAGE_4K as usize,
             MmapProt::READ,
             MmapFlags::ANONYMOUS | MmapFlags::PRIVATE,
         )
     };
     assert!(!ro.is_null(), "mmap a read-only page");
     let verdict = refused("a read-only mmap", ro as u64, stats);
-    unsafe { syscall::munmap(ro, PAGE_2M) }.expect("munmap");
+    unsafe { syscall::munmap(ro, PAGE_4K as usize) }.expect("munmap");
     verdict
 }
 
-/// The first page at or above [`BSS`], inside its 2 MiB window, a `read` may
-/// not write; each page below it took a 1-byte `read` of its own first byte.
-fn first_unwritable_page(probe: RawHandle) -> Option<u64> {
-    let pipe = syscall::pipe().expect("pipe");
-    let bss = &raw const BSS as u64;
-    let window_end = (bss & !(PAGE_2M as u64 - 1)) + PAGE_2M as u64;
-    let mut page = bss & !(PAGE_4K - 1);
-    let mut found = None;
-    while page < window_end {
-        let from = unsafe { core::slice::from_raw_parts(page as *const u8, 1) };
-        assert_eq!(syscall::write(pipe.write, from), Ok(1), "write from {page:#x}, in .bss's window");
-        syscall::read(pipe.read, &mut [0u8; 1]).expect("drain the pipe");
-        let own = unsafe { (page as *const u8).read_volatile() };
-        syscall::seek(probe, SeekFrom::Start(own as u64)).expect("seek the probe");
-        let ret = syscall::read(probe, unsafe { target(page, 1) });
-        if ret == Err(SyscallError::BadAddress) {
-            found = Some(page);
-            break;
-        }
-        assert_eq!(ret, Ok(1), "a 1-byte read into {page:#x}");
-        page += PAGE_4K;
-    }
-    syscall::close(pipe.read);
-    syscall::close(pipe.write);
-    found
-}
-
 /// A `read` that starts on a writable page and runs into the read-only page
-/// after it, in one 2 MiB window, is refused whole.
+/// after it is refused whole.
 fn refused_across_pages() -> Result<(), String> {
     let flags = OpenFlags::READ | OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
     let probe = syscall::open(PROBE_PATH, flags).expect("create the probe file");
-    let every: Vec<u8> = (0..=255).collect();
-    syscall::write(probe, &every).expect("fill the probe file");
-    let verdict = match first_unwritable_page(probe) {
-        None => Err(format!(
-            "no page above .bss at {:#x} refuses a write in its 2 MiB window",
-            &raw const BSS as u64
-        )),
-        Some(page) => {
-            assert!(page > &raw const BSS as u64, "BSS's own page refuses a write");
-            let at = page - (STRADDLE / 2) as u64;
-            let before = snapshot(at);
-            // The writable half is offered its own bytes and the read-only half their
-            // complement, so a write to the read-only page shows and one below harms nothing.
-            let offered: [u8; STRADDLE] =
-                core::array::from_fn(|i| if i < STRADDLE / 2 { before[i] } else { !before[i] });
-            syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
-            syscall::write(probe, &offered).expect("write the straddle's bytes");
-            syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
-            let ret = syscall::read(probe, unsafe { target(at, STRADDLE) });
-            if before != snapshot(at) {
-                Err(format!("read wrote across a writable page into the read-only one at {page:#x}"))
-            } else if ret != Err(SyscallError::BadAddress) {
-                Err(format!("read across into {page:#x}: {ret:?}"))
-            } else {
-                Ok(())
-            }
-        }
+    let rw = MmapProt::READ | MmapProt::WRITE;
+    let anon = MmapFlags::ANONYMOUS | MmapFlags::PRIVATE;
+    let pages = unsafe { syscall::mmap(core::ptr::null_mut(), 2 * PAGE_4K as usize, rw, anon) };
+    assert!(!pages.is_null(), "mmap two pages");
+    let page = pages as u64 + PAGE_4K;
+    let ro = unsafe { syscall::mmap(page as *mut u8, PAGE_4K as usize, MmapProt::READ, anon | MmapFlags::FIXED) };
+    assert_eq!(ro as u64, page, "map the second page read-only in place");
+    let at = page - (STRADDLE / 2) as u64;
+    let before = snapshot(at);
+    // The writable half is offered its own bytes and the read-only half their
+    // complement, so a write to the read-only page shows and one below harms nothing.
+    let offered: [u8; STRADDLE] = core::array::from_fn(|i| if i < STRADDLE / 2 { before[i] } else { !before[i] });
+    syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
+    syscall::write(probe, &offered).expect("write the straddle's bytes");
+    syscall::seek(probe, SeekFrom::Start(STRADDLE_AT)).expect("seek the probe");
+    let ret = syscall::read(probe, unsafe { target(at, STRADDLE) });
+    let verdict = if before != snapshot(at) {
+        Err(format!("read wrote across a writable page into the read-only one at {page:#x}"))
+    } else if ret != Err(SyscallError::BadAddress) {
+        Err(format!("read across into {page:#x}: {ret:?}"))
+    } else {
+        Ok(())
     };
+    unsafe { syscall::munmap(pages, 2 * PAGE_4K as usize) }.expect("munmap");
     syscall::close(probe);
     syscall::delete(PROBE_PATH).expect("delete the probe file");
     verdict

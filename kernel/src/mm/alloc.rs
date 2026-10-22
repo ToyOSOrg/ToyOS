@@ -538,7 +538,7 @@ unsafe impl GlobalAlloc for KernelAllocator {
             PHASE_EARLY => early_alloc(layout),
             PHASE_READY => {
                 assert!(layout.align() < PAGE_2M as usize,
-                    "GlobalAlloc: {:#x} bytes with {:#x} align — use PageAlloc", layout.size(), layout.align());
+                    "GlobalAlloc: {:#x} bytes with {:#x} align — take frames from `mm::pmm`", layout.size(), layout.align());
                 // Checked before the lock: a panic inside `dlmalloc.lock()` would abandon the heap with the lock held.
                 assert!(layout.size() <= MAX_HEAP_ALLOC,
                     "GlobalAlloc: {} bytes exceeds MAX_HEAP_ALLOC ({}) — a caller is using alloc for page-scale memory",
