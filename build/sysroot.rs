@@ -311,7 +311,7 @@ fn hex(digest: &[u8]) -> String {
 
 /// The first 16 hex digits of the SHA-256 of `data`.
 pub(crate) fn short(data: &[u8]) -> String {
-    hex(&toyos_sha2_hw::sha256_digest(data))[..16].to_string()
+    hex(&crate::sha256(data))[..16].to_string()
 }
 
 /// Every file under `dir` a build reads, sorted: no `target/` and no dotted
@@ -375,18 +375,19 @@ pub(crate) fn tree_identity(base: &Path, paths: &[&str], links: Links) -> String
     let mut sources = Vec::new();
     source_files(base, paths, links, &mut sources);
     sources.sort();
-    let mut hasher = toyos_sha2_hw::sha256();
+    let mut hasher = toyos_crypto::hash::Sha256::new();
+    let mut put = |bytes: &[u8]| hasher.update(bytes).expect(crate::SHA256_BOUND);
     for (path, commit) in sources {
-        hasher.update(path.strip_prefix(base).unwrap_or(&path).to_string_lossy().as_bytes());
-        hasher.update([0]);
+        put(path.strip_prefix(base).unwrap_or(&path).to_string_lossy().as_bytes());
+        put(&[0]);
         match commit {
-            Some(commit) => hasher.update(commit.as_bytes()),
+            Some(commit) => put(commit.as_bytes()),
             None => {
                 let data = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-                hasher.update(&*identity::of(&path, &data));
+                put(&identity::of(&path, &data));
             }
         }
-        hasher.update([0]);
+        put(&[0]);
     }
     hex(&hasher.finalize())[..16].to_string()
 }

@@ -20,6 +20,9 @@ compile_error!(
 #[cfg(target_arch = "x86_64")]
 mod x86_64;
 
+#[cfg(target_arch = "aarch64")]
+mod aarch64;
+
 /// Hosted x86-64 alone: the paths below with ordinary register ABI.
 macro_rules! hosted {
     ($hosted:expr, $otherwise:expr) => {{
@@ -39,7 +42,7 @@ macro_rules! hosted {
 #[cfg(not(miri))]
 #[inline(always)]
 pub(crate) fn value_barrier(mut value: u64) -> u64 {
-    // The template reads and writes only the operand's register.
+    // SAFETY: the template reads and writes only the operand's register.
     unsafe {
         core::arch::asm!("/* {0} */", inout(reg) value, options(pure, nomem, nostack, preserves_flags))
     };
@@ -160,13 +163,21 @@ pub(crate) fn chacha_xor(key: &[u8; 32], counter: u64, nonce: &[u8; 8], data: &m
 }
 
 pub(crate) fn sha256_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) -> bool {
-    hosted!(x86_64::sha256_blocks(state, blocks), {
+    #[cfg(target_arch = "x86_64")]
+    return x86_64::sha256_blocks(state, blocks);
+    #[cfg(target_arch = "aarch64")]
+    return aarch64::sha256_blocks(state, blocks);
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
         let _ = (state, blocks);
         false
-    })
+    }
 }
 
 pub(crate) fn sha512_blocks(state: &mut [u64; 8], blocks: &[[u8; 128]]) -> bool {
+    #[cfg(target_arch = "aarch64")]
+    return aarch64::sha512_blocks(state, blocks);
+    #[cfg(not(target_arch = "aarch64"))]
     hosted!(x86_64::sha512_blocks(state, blocks), {
         let _ = (state, blocks);
         false

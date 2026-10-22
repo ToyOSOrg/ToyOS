@@ -318,5 +318,5 @@ const fn square(a: &[u64; 5]) -> Tight {
     carry(v)
 }
 
-// Five words: zero is a valid element.
+// SAFETY: five words, and zero is a valid element.
 unsafe impl crate::secret::Zeroable for Tight {}

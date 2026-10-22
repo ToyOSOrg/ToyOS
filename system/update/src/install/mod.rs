@@ -139,7 +139,7 @@ const STREAM_BLOCKS: usize = 32;
 /// ROOT onto the idle ROOT partition as it arrives, [`STREAM_BLOCKS`] at a
 /// time, and held to `sha256` once whole.
 fn stream_root(input: &mut impl Read, root: &mut dyn Disk, len: u64, sha256: toyos_update::Digest) -> Result<(), String> {
-    let mut hasher = toyos_sha2_hw::sha256();
+    let mut hasher = toyos_crypto::hash::Sha256::new();
     let mut run = vec![0u8; STREAM_BLOCKS * BLOCK];
     let blocks = len / BLOCK as u64;
     let mut at = 0u64;
@@ -147,7 +147,7 @@ fn stream_root(input: &mut impl Read, root: &mut dyn Disk, len: u64, sha256: toy
         let n = (blocks - at).min(STREAM_BLOCKS as u64) as usize;
         let bytes = &mut run[..n * BLOCK];
         input.read_exact(bytes).map_err(|e| format!("the input ended inside ROOT, at block {at}: {e}"))?;
-        hasher.update(&*bytes);
+        hasher.update(bytes).map_err(|_| "ROOT runs past SHA-256's 2^61-byte bound".to_string())?;
         root.write(at, bytes).map_err(|e| format!("ROOT's blocks from {at} would not write: {e:?}"))?;
         at += n as u64;
     }

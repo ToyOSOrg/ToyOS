@@ -3015,9 +3015,8 @@ dependencies = [
  "flate2",
  "tar",
  "toyos",
+ "toyos-crypto",
  "toyos-manifest",
- "toyos-sha2",
- "toyos-sha2-hw",
  "toyos-tmpdir",
 ]
 
@@ -4438,6 +4437,7 @@ dependencies = [
  "toml",
  "toyos-abi",
  "toyos-blackbox",
+ "toyos-crypto",
  "toyos-elf",
  "toyos-fat32",
  "toyos-fat32-check",
@@ -4453,7 +4453,6 @@ dependencies = [
  "toyos-osrelease",
  "toyos-parity",
  "toyos-quiesce",
- "toyos-sha2-hw",
  "toyos-ssh",
  "toyos-swap",
  "toyos-symbols",
@@ -4592,7 +4591,7 @@ name = "toyos-icon"
 version = "0.1.0"
 dependencies = [
  "libm",
- "toyos-sha2-hw",
+ "toyos-crypto",
 ]
 
 [[package]]
@@ -4810,20 +4809,6 @@ name = "toyos-scsi"
 version = "0.1.0"
 
 [[package]]
-name = "toyos-sha2"
-version = "0.1.0"
-dependencies = [
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "toyos-sha2-hw"
-version = "0.1.0"
-dependencies = [
- "toyos-sha2",
-]
-
-[[package]]
 name = "toyos-smmu"
 version = "0.1.0"
 dependencies = [
@@ -4858,8 +4843,8 @@ dependencies = [
 name = "toyos-swap"
 version = "0.1.0"
 dependencies = [
+ "toyos-crypto",
  "toyos-manifest",
- "toyos-sha2-hw",
 ]
 
 [[package]]
@@ -4897,8 +4882,7 @@ name = "toyos-update"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
- "toyos-sha2",
- "toyos-sha2-hw",
+ "toyos-crypto",
  "toyos-wallclock",
 ]
 
@@ -5102,9 +5086,9 @@ version = "0.1.0"
 dependencies = [
  "diskserver",
  "toyos",
+ "toyos-crypto",
  "toyos-disk",
  "toyos-fat32",
- "toyos-sha2-hw",
  "toyos-update",
 ]
 
@@ -5112,10 +5096,10 @@ dependencies = [
 name = "update-copies"
 version = "0.1.0"
 dependencies = [
+ "toyos-crypto",
  "toyos-disk",
  "toyos-fat32",
  "toyos-fat32-check",
- "toyos-sha2-hw",
  "toyos-update",
 ]
 

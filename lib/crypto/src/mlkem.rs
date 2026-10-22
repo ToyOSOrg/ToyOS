@@ -17,6 +17,7 @@ struct Poly([u16; 256]);
 impl Drop for Poly {
     fn drop(&mut self) {
         for word in &mut self.0 {
+            // SAFETY: the address is a live, exclusively borrowed coefficient.
             unsafe { core::ptr::write_volatile(word, 0) }
         }
         core::sync::atomic::compiler_fence(core::sync::atomic::Ordering::SeqCst)
@@ -377,10 +378,13 @@ mod tests {
         }
     }
 
+    /// NIST's keygen vectors are read, not embedded: they sit outside this
+    /// crate's directory, as test input the image does not carry. Miri reads
+    /// the file with its isolation off (`-Zmiri-disable-isolation`).
     #[test]
     fn nist_expanded_keygen_secret_matches() {
-        let data: serde_json::Value =
-            serde_json::from_str(include_str!("../tests/data/nist-mlkem-keygen.json")).unwrap();
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/acvp/nist-mlkem-keygen.json");
+        let data: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         let mut count = 0;
         for group in data["testGroups"].as_array().unwrap() {
             if group["parameterSet"] != "ML-KEM-768" {

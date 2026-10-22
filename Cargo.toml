@@ -64,8 +64,6 @@ members = [
     "lib/random",
     "lib/rootimage",
     "lib/scsi",
-    "lib/sha2",
-    "lib/sha2-hw",
     "lib/swap",
     "lib/symbols",
     "lib/tco",
@@ -267,9 +265,8 @@ toyos-ssh = { path = "build/ssh" }
 # `classify`, so the host reading a log volume and `logkeeper` writing it cannot
 # disagree about which files on it are `logkeeper`'s.
 toyos-wallclock = { path = "lib/wallclock" }
-# Every SHA-256 the build takes: `NOTICE`'s record of a committed file, a
-# store key, a ROOT's name and a release asset's digest.
-toyos-sha2-hw = { path = "lib/sha2-hw" }
+# Every SHA-256 the build takes (`toyos_build::sha256`).
+toyos-crypto = { path = "lib/crypto" }
 # The toolchain release's tarball, packed in-process (`build/release.rs`): Rust's
 # own tar and gzip, where the binaries are hosts' tools.
 tar = { version = "0.4.46", default-features = false }

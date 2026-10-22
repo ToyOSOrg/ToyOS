@@ -113,9 +113,7 @@ pub(crate) fn named_key(text: &str) -> Option<Key> {
     text.lines().next()?.strip_prefix("toolchain ")?.strip_prefix(TAG).and_then(Key::parse)
 }
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
-    toyos_sha2_hw::sha256_digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
-}
+use crate::sha256_hex;
 
 fn on_runner() -> bool {
     std::env::var("GITHUB_ACTIONS").is_ok_and(|v| v == "true")

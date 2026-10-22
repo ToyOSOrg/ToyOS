@@ -1,47 +1,37 @@
-//! SHA-256's compression on the SHA extensions: `SHA256RNDS2` computes two
-//! rounds over the working variables held as ABEF and CDGH, and `SHA256MSG1`
-//! and `SHA256MSG2` the message schedule four words at a time (Intel SDM Vol.
-//! 2B).
+//! SHA-256 on the SHA extensions in one `asm!` block, for the UEFI loader:
+//! `SHA256RNDS2` computes two rounds over the working variables held as ABEF
+//! and CDGH, and `SHA256MSG1` and `SHA256MSG2` the message schedule four words
+//! at a time (Intel SDM Vol. 2B).
 //!
-//! **One `asm!` block saves every XMM register it uses and restores it before
-//! it ends, and so declares none.** The loader's target is soft-float and has
-//! no XMM register class to name a clobber in, and the UEFI calling convention
-//! leaves XMM6–XMM15 the firmware's; every other target runs the same block.
+//! **The block saves every XMM register it uses and restores it before it
+//! ends, and so declares none.** The loader's target is soft-float and has no
+//! XMM register class to name a clobber in, and the UEFI calling convention
+//! leaves XMM6–XMM15 the firmware's.
 
 use core::arch::asm;
-use core::arch::x86_64::{__cpuid, __cpuid_count};
-
-use toyos_sha2::{Compress256, K256};
 
 /// `K256` at an address the block reads it from.
-static K: [u32; 64] = K256;
+static K: [u32; 64] = crate::hash::K256;
 
 /// `PSHUFB`'s control that reverses each 32-bit word's bytes: a block's
 /// big-endian words into the lanes' little-endian ones.
 static FLIP: [u8; 16] = [3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12];
 
-/// The compression, where CPUID reports the SHA extensions and SSSE3, whose
-/// `PSHUFB` and `PALIGNR` the block takes; nothing else hands out [`blocks`].
-pub fn compress() -> Option<Compress256> {
-    // SDM Vol. 2A, CPUID: leaf 7 sub-leaf 0's EBX bit 29 is SHA, leaf 1's ECX
-    // bit 9 is SSSE3, and leaf 0's EAX is the highest leaf there is.
-    let sha = __cpuid(0).eax >= 7 && __cpuid_count(7, 0).ebx & (1 << 29) != 0;
-    let ssse3 = __cpuid(1).ecx & (1 << 9) != 0;
-    (sha && ssse3).then_some(blocks as Compress256)
-}
-
 /// `blocks` into `state`, four rounds to a `rounds4` and the hash value held
 /// in XMM1 and XMM2 across the run.
-fn blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
+///
+/// # Safety
+/// CPUID reports SHA and SSSE3.
+pub(super) unsafe fn sha256(state: &mut [u32; 8], blocks: &[[u8; 64]]) {
     // The loop below runs at least once.
     if blocks.is_empty() {
         return;
     }
     let mut saved = [0u8; 11 * 16];
-    // SAFETY: `compress` hands this function out only where CPUID reports SHA
-    // and SSSE3. The block reads `blocks` from its start to `end`, which is a
-    // whole number of 64-byte blocks past it, reads `state`, `K` and `FLIP`,
-    // writes `state` and `saved`, and leaves XMM0–XMM10 as it found them.
+    // SAFETY: the caller admitted SHA and SSSE3. The block reads `blocks`
+    // from its start to `end`, which is a whole number of 64-byte blocks past
+    // it, reads `state`, `K` and `FLIP`, writes `state` and `saved`, and
+    // leaves XMM0–XMM10 as it found them.
     unsafe {
         asm!(
             "movdqu %xmm0, 0({saved})",

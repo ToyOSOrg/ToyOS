@@ -21,6 +21,8 @@ mod poly1305;
 mod sha;
 #[cfg(not(target_os = "uefi"))]
 mod vaes512;
+#[cfg(any(target_os = "uefi", test))]
+mod sha_saving;
 
 /// What CPUID and XCR0 admit, read once per process. The module contract
 /// makes features uniform across the CPUs a process runs on.
@@ -65,7 +67,6 @@ impl Features {
         self.has(Self::BMI2)
     }
     /// SHA-NI with the SSSE3 and SSE4.1 shuffles its message schedule takes.
-    #[cfg(not(target_os = "uefi"))]
     pub(super) fn sha(self) -> bool {
         self.has(Self::SHA | Self::SSSE3 | Self::SSE41)
     }
@@ -93,16 +94,21 @@ impl Features {
     /// too.
     #[allow(unused_unsafe, reason = "CPUID is unsafe on the supported Rust 1.89")]
     fn read() -> Self {
-        // Leaf 0 and leaf 1 exist on every x86-64 CPU; leaf 7 where leaf 0
-        // says so; XGETBV where OSXSAVE says so.
+        // SAFETY: leaf 0 and leaf 1 exist on every x86-64 CPU.
         let (leaf1, max) = unsafe { (__cpuid(1).ecx, __cpuid(0).eax) };
         let (leaf7b, leaf7c) = if max >= 7 {
+            // SAFETY: leaf 0 says leaf 7 exists.
             let leaf7 = unsafe { __cpuid_count(7, 0) };
             (leaf7.ebx, leaf7.ecx)
         } else {
             (0, 0)
         };
-        let xcr0 = if leaf1 & (3 << 27) == 3 << 27 { unsafe { _xgetbv(0) } } else { 0 };
+        let xcr0 = if leaf1 & (3 << 27) == 3 << 27 {
+            // SAFETY: OSXSAVE says XGETBV is enabled.
+            unsafe { _xgetbv(0) }
+        } else {
+            0
+        };
         Self::decode(leaf1, leaf7b, leaf7c, xcr0)
     }
 
@@ -196,7 +202,7 @@ pub(super) fn ghash_multiply(a: u128, b: u128) -> Option<u128> {
     let b = crate::secret::Secret(b.reverse_bits().to_le_bytes());
     let mut products = crate::secret::Secret([0u8; 48]);
     let mut saved = crate::secret::Secret([0u8; 80]);
-    // CPUID admitted CLMUL. All five used registers are restored; each memory
+    // SAFETY: CPUID admitted CLMUL. All five used registers are restored; each memory
     // operand refers to a distinct live array of the required size.
     unsafe {
         asm!(
@@ -235,7 +241,7 @@ pub(super) fn aes_encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 16])
         return false;
     }
     let mut saved = crate::secret::Secret([0u8; 32]);
-    // CPUID admitted AES. The schedule contains every round, `block` and
+    // SAFETY: CPUID admitted AES. The schedule contains every round, `block` and
     // `saved` are exclusive, and both XMM registers are restored before return.
     unsafe {
         asm!(
@@ -249,6 +255,16 @@ pub(super) fn aes_encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 16])
             keys=inout(reg) keys.as_ptr()=>_,left=inout(reg) rounds-1=>_,options(nostack),
         );
     }
+    true
+}
+
+#[cfg(target_os = "uefi")]
+pub(super) fn sha256_blocks(state: &mut [u32; 8], blocks: &[[u8; 64]]) -> bool {
+    if !features().sha() {
+        return false;
+    }
+    // SAFETY: CPUID admitted SHA and SSSE3.
+    unsafe { sha_saving::sha256(state, blocks) }
     true
 }
 
@@ -470,6 +486,29 @@ mod tests {
         }
         for (bit, feature) in [(9, Features::VAES), (10, Features::VPCLMUL)] {
             assert_eq!(Features::decode(!0, !0, !(1 << bit), 0xe7).0 & feature, 0, "leaf 7 ECX bit {bit}");
+        }
+    }
+
+    /// The loader's block, which only UEFI dispatches to, against the portable
+    /// rounds. A host without the instructions cannot test it, and says so
+    /// rather than passing.
+    #[test]
+    fn the_register_saving_sha256_block_matches_the_portable_rounds() {
+        assert!(
+            features().sha() || cfg!(feature = "portable"),
+            "this host's CPU has no SHA extensions, so nothing here can test the register-saving block"
+        );
+        if !features().sha() {
+            return;
+        }
+        let bytes: std::vec::Vec<u8> = (0..64 * 9).map(|i: usize| (i * 151 + i / 7) as u8).collect();
+        for n in 0..=9 {
+            let (blocks, _) = bytes[..64 * n].as_chunks::<64>();
+            let (mut saving, mut portable) = ([0x89ab_cdefu32; 8], [0x89ab_cdefu32; 8]);
+            // CPUID admitted SHA and SSSE3.
+            unsafe { sha_saving::sha256(&mut saving, blocks) };
+            crate::hash::sha256_rounds(&mut portable, blocks);
+            assert_eq!(saving, portable, "{n} blocks");
         }
     }
 

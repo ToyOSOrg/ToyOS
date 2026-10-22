@@ -212,13 +212,13 @@ fn gunzip<R: Read>(r: R) -> MultiGzDecoder<BufReader<R>> {
 /// A file read through a SHA-256 of every byte read.
 struct Hashed {
     file: fs::File,
-    hash: toyos_sha2::Sha256,
+    hash: toyos_crypto::hash::Sha256,
 }
 
 impl Hashed {
     fn open(path: &Path) -> Result<Self, String> {
         let file = fs::File::open(path).map_err(|e| format!("pkg: cannot read {}: {e}", path.display()))?;
-        Ok(Self { file, hash: toyos_sha2_hw::sha256() })
+        Ok(Self { file, hash: toyos_crypto::hash::Sha256::new() })
     }
 
     /// The whole file's digest: what was read, and the rest, read now. A tar
@@ -233,7 +233,7 @@ impl Hashed {
 impl Read for Hashed {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let n = self.file.read(buf)?;
-        self.hash.update(&buf[..n]);
+        self.hash.update(&buf[..n]).map_err(|_| std::io::Error::other("a file past SHA-256's 2^61-byte bound"))?;
         Ok(n)
     }
 }
@@ -459,7 +459,7 @@ mod tests {
         };
         let mut whole = tool(0);
         whole.extend(vec![0u8; 3 * CHUNK]);
-        assert_eq!(survey_of(&whole).unwrap(), sums::hex(&toyos_sha2_hw::sha256_digest(&whole)));
+        assert_eq!(survey_of(&whole).unwrap(), sums::hex(&toyos_crypto::hash::Sha256::digest(&whole).unwrap()));
         assert!(survey_of(&whole[..tool(0).len() / 3]).unwrap_err().contains("tar:"));
         assert!(survey_of(b"not gzip at all").is_err());
     }

@@ -45,10 +45,15 @@ review has been done, and passing vectors does not show it is safer than ring.
   and 0x7 on the AMD bench (AVX). The parity instrument records what
   feature detection admits there, AVX2 and AES-NI on both benches and
   VAES/AVX-512 on the T14, so both crates' vector paths are open.
-- **AArch64 is scalar.** No ARM bench exists to measure an ARM path, so the
-  crate's AArch64 AES and PMULL paths are not imported. They stay in the
-  archive until an ARM bench measures them. `toyos-sha2-hw` follows the same
-  rule.
+- **AArch64 is scalar but for SHA-2.** No ARM bench exists to measure an ARM
+  path, so the crate's AArch64 AES and PMULL paths are not imported. They
+  stay in the archive until an ARM bench measures them. SHA-256 and SHA-512
+  run on the Armv8 SHA instructions where the target promises them, by the
+  owner's word (2026-10-22): the development Mac's, where the build hashes
+  every image. There (exploratory, an M4 Pro) SHA-256 of 1 MiB runs at
+  2.6 GB/s against the portable rounds' 0.52, and SHA-512 at 1.36 against
+  0.83. ToyOS's own AArch64 targets do not promise them and nothing detects
+  them at run time, so they hash portably; see the weaknesses.
 
 ## Consumers and what each needs
 
@@ -57,8 +62,8 @@ review has been done, and passing vectors does not show it is safer than ring.
 | `toyos-ssh`'s SSH protocol (`build/ssh`: `kex`, the server, the client). Host-only until `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md` stage 2 | the crate, since stage 1 | X25519, ML-KEM-768 and its hybrid, Ed25519 sign/verify, `chacha20-poly1305@openssh.com`, SHA-256/512, and a caller-supplied `Random` for replays |
 | `toyos-ssh`'s `hostkey` on the signing path. `build/signing.rs` reads the owner's image-signing key through `openssh_seed` and writes a minted one through `openssh_private`; both derive the public key from the seed | `toyos_update::sig::public_of`, since stage 1 | nothing: this derivation is the root of trust's; the verifier itself switches in stage 6 |
 | `system/sshserver` | russh with the RustCrypto stack, including `rsa` (RUSTSEC-2023-0071) | none directly; it reaches the crate through `toyos-ssh` |
-| Image and package signing: `lib/update` (the loader, `/system/bin/update`, `build/signing.rs`, `build/root`, #892's repository keys) | `ed25519-dalek` `verify_strict`; `toyos-sha2` SHA-512; the loader's `sha2` with `force-soft` | strict Ed25519 verification in the soft-float UEFI loader, and signing behind `sign` on the host. The track's last stage, stage 6 (owner, 2026-10-13) |
-| Every SHA-256: the build, `pkg`, `lib/swap`, `system/update` | `toyos-sha2` / `toyos-sha2-hw` (SHA-NI on x86-64, scalar on AArch64) | one SHA-2 implementation, no slower than `toyos-sha2-hw` |
+| Image and package signing: `lib/update` (the loader, `/system/bin/update`, `build/signing.rs`, `build/root`, #892's repository keys) | `ed25519-dalek` `verify_strict`, which hashes with the loader's `sha2` under `force-soft`; the crate's SHA-512 over the signed header, since #1016 | strict Ed25519 verification in the soft-float UEFI loader, and signing behind `sign` on the host. The track's last stage, stage 6 (owner, 2026-10-13) |
+| Every SHA-256: the build, `pkg`, `lib/swap`, `system/update`, `lib/update` and the loader | the crate, since #1016: SHA-NI on x86-64, the UEFI loader's in a block that saves the XMM registers it uses; the Armv8 SHA instructions where the target promises them. No slower than `toyos-sha2-hw`, which it replaces, on either bench: on the T14 4.6 times as fast at 64 B and 9 and 6 percent faster at 16 KiB and 1 MiB, on the AMD bench 2.8 times at 64 B, 2 percent at 16 KiB and equal at 1 MiB (#1016's evidence) | nothing |
 | ToyOS's own HTTPS clients. On the host: the build's `ureq` (`build/release.rs`) and doom's build script (`apps/doom/build.rs`). In a guest, none today: `https_tls13` and `pkg install <url>` are stages 3 and 5 of `issues/the-internet-clients-work-unchanged.md` | rustls on `ring`, which is `ToyOSOrg/ring` in a guest | the rustls provider through ureq's `rustls-no-provider` feature. Stage 5, once parity and security hold (owner, 2026-10-13) |
 | Wi-Fi's `wlan` (`issues/there-is-no-wifi.md` P6, W2) | nothing yet | PBKDF2-HMAC-SHA1, the 802.11i PRF and RFC 3394 unwrap, which the crate has. AES-CMAC-128, SAE over P-256 by hash-to-element, a public constant-time comparison and a public wiping secret, which it lacks |
 | `issues/programs-hold-aes-keys-as-key-locker-handles.md` | blocked on a session-long AES key | a TLS client on the crate is that consumer: AES behind a Key Locker handle. SSH holds no AES key |
@@ -404,7 +409,9 @@ Not consumers:
        - Negative controls: 15 checked patches, each red by its named test,
          two only after a test was added for it.
        - Miri over every `portable` unit test but the provider's (ring is
-         C): 25 pass and ML-KEM's exhaustive reduction is ignored under it;
+         C), with `MIRIFLAGS=-Zmiri-disable-isolation` since #1016 moved
+         NIST's ML-KEM keygen vectors to `tests/acvp/`, whose file the test
+         reads: 25 pass and ML-KEM's exhaustive reduction is ignored under it;
          the heavy tests take a spread of their inputs there. A patch that
          writes past `erase`'s array is caught.
        - Evidence: `ToyOSOrg/evidence` `pr-993`,
@@ -451,9 +458,9 @@ Not consumers:
      its primitives. Parity for those primitives is a later stage, not a
      gate.
    - Each consumer's old dependency is deleted in the same landing.
-   - The NIST ML-KEM vectors in `lib/crypto/tests/data` are under
-     `NIST-Software`, which the licence allowlist (`build/licence.rs`) does
-     not name. It decides that licence before `lib/crypto` enters an image.
+   - NIST's ACVP vectors are under `NIST-Software`, which the licence
+     allowlist (`build/licence.rs`) does not name. They are test input in
+     `tests/acvp/`, outside the crate's directory, so no image ships them.
 
    The consumers:
    - `toyos-ssh`'s protocol offers `mlkem768x25519-sha256` first, at any time
@@ -461,13 +468,12 @@ Not consumers:
      (`issues/toyos-ssh-offers-only-a-classical-key-exchange.md`). sshserver's
      switch, stage 2 of the SSH track, is the shipping step. It waits for
      stage 4 on SSH's primitives.
-   - The crate's SHA-2 gains x86-64's SHA instructions; AArch64 stays scalar.
-     These users of `toyos-sha2` and `toyos-sha2-hw` switch to the crate:
-     `build/`'s digests, `pkg` and `lib/swap`. Three keep them until stage 6:
-     - `lib/update`;
-     - the loader;
-     - `system/update`, whose `stream_root` holds ROOT to the signed header's
-       digest.
+   - Every SHA-2 is the crate's since #1016 (owner, 2026-10-22: "use our
+     own crypto where possible"): `build/`'s digests, `pkg`, `lib/swap`,
+     `sdk/icon`'s test, `lib/update`, the loader and `system/update`.
+     `toyos-sha2` and `toyos-sha2-hw` are deleted; the crate's SHAVS tests
+     replace theirs. NIST's ACVP vectors moved to `tests/acvp/`, outside the
+     crate's directory, once the crate entered an image.
    - ToyOS's own HTTPS clients use the crate's rustls provider once stages 3
      and 4 hold for TLS's primitives. The owner ruled this on 2026-10-13:
      the crypto goal overrides his ruling of 2026-10-02 in
@@ -495,8 +501,6 @@ Not consumers:
      its verification time measured on each.
    - An AArch64 QEMU loader boot verifies a signed image, because the crate's
      UEFI path has never run.
-   - `lib/update`, the loader and `system/update` hash with the crate's SHA-2. `toyos-sha2`
-     and `toyos-sha2-hw` are deleted, and their SHAVS tests move to the crate.
    - `ed25519-dalek` and the loader's `sha2` leave `Cargo.lock`'s non-dev
      packages.
 
@@ -510,6 +514,11 @@ Not consumers:
   per-temporary erasure on the T14, 0.79–0.88 on the AMD bench) and a
   reviewed contract. Compiler
   copies, registers, spills and caller-held bytes are not wiped.
+- ToyOS's AArch64 targets hash with the portable SHA-2 rounds: no target
+  promises the Armv8 SHA instructions, and neither the kernel nor the crate
+  detects them at run time. **Owner**: this track. **Exit**: the crate takes
+  them where a run-time word from the kernel says the CPU has them, measured
+  on an ARM bench.
 - **Owner**: the orchestrator. **Exit**: stage 4 states what the shipped
   targets keep, and a consumer holding a long-lived key stores it under a
   wiping owner or a Key Locker handle.
