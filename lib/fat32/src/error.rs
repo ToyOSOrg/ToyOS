@@ -1,4 +1,3 @@
-
 /// Everything that can go wrong, as data rather than a panic.
 ///
 /// Exhaustive on purpose: an adapter mapping these to `SyscallError` should

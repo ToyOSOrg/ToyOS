@@ -11,14 +11,20 @@
 //! **Clean blocks are kept up to [`CLEAN_LIMIT`]** and the oldest-read goes
 //! first; a dirty block is never dropped.
 //!
-//! **Several tasks may use it at once.** No borrow of its state is held
-//! across a disk request, so what a request answers is checked against what
-//! changed meanwhile: a block written while a flush carried an older copy
-//! stays dirty, and a fetch a write overtook is not kept.
+//! **Several tasks may use it at once**, and the disk never has two requests
+//! for one block in flight when either is a write, which the block service's
+//! client forbids because requests in flight together are unordered. One
+//! flush runs at a time; a second waits for it and then takes its own dirty
+//! set. A flush writes no block that a fetch is reading. A fetch reads only
+//! blocks the cache does not hold, so a flush's blocks, which stay held while
+//! it writes them, are never fetched under it. A block written while a flush
+//! carries an older copy of it stays dirty. No borrow of the cache's state is
+//! held across a disk request.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
-use std::future::Future;
+use std::future::{poll_fn, Future};
+use std::task::{Poll, Waker};
 
 use toyos_blockdev::{within, Block, BlockDev, Error, BLOCK};
 
@@ -59,9 +65,6 @@ struct Slot {
 struct Fetch {
     first: u64,
     count: usize,
-    /// A write reached one of them since the read was asked, so what it
-    /// answers may be older than the cache or the disk holds.
-    overtaken: bool,
 }
 
 #[derive(Default)]
@@ -74,6 +77,9 @@ struct Inner {
     versions: u64,
     fetches: BTreeMap<u64, Fetch>,
     fetched: u64,
+    flushing: bool,
+    /// Tasks waiting for a flush to end or a fetch to land.
+    waiting: Vec<Waker>,
     reads: u64,
     hits: u64,
 }
@@ -142,26 +148,26 @@ impl<D: Disk> Cache<D> {
                 }
                 let id = inner.fetched;
                 inner.fetched += 1;
-                inner.fetches.insert(id, Fetch { first: block, count: run, overtaken: false });
+                inner.fetches.insert(id, Fetch { first: block, count: run });
                 (run, id)
             };
             let mut span: Vec<Block> = vec![[0; BLOCK]; run];
             let read = self.disk.read(block, &mut span).await;
-            let mut inner = self.inner.borrow_mut();
-            let fetch = inner.fetches.remove(&id).expect("fileserver: a fetch outlived its record");
+            self.inner.borrow_mut().fetches.remove(&id).expect("fileserver: a fetch outlived its record");
+            self.wake();
             read?;
+            let mut inner = self.inner.borrow_mut();
             for (k, data) in span.iter().enumerate() {
                 let at = block + k as u64;
-                // A block that arrived while this was asked is newer than
-                // what the disk answered, and so is one a write overtook.
+                // A block written while this was asked is newer than what the
+                // disk answered, and stays held until a flush that waited for
+                // this fetch has written it.
                 match inner.slots.get(&at) {
                     Some(slot) => put(i + k, &slot.data),
                     None => {
                         put(i + k, data);
-                        if !fetch.overtaken {
-                            inner.slots.insert(at, Slot { data: Box::new(*data), dirty: false, version: 0 });
-                            inner.order.push_back(at);
-                        }
+                        inner.slots.insert(at, Slot { data: Box::new(*data), dirty: false, version: 0 });
+                        inner.order.push_back(at);
                     }
                 }
             }
@@ -169,6 +175,36 @@ impl<D: Disk> Cache<D> {
         }
         self.inner.borrow_mut().evict();
         Ok(())
+    }
+
+    /// Pending until `ready` holds of the cache's state, rechecked whenever a
+    /// flush ends or a fetch lands.
+    async fn until(&self, ready: impl Fn(&Inner) -> bool) {
+        poll_fn(|cx| {
+            let mut inner = self.inner.borrow_mut();
+            if ready(&inner) {
+                return Poll::Ready(());
+            }
+            inner.waiting.push(cx.waker().clone());
+            Poll::Pending
+        })
+        .await
+    }
+
+    fn wake(&self) {
+        let waiting = std::mem::take(&mut self.inner.borrow_mut().waiting);
+        waiting.into_iter().for_each(Waker::wake);
+    }
+}
+
+/// The one flush running, until this is dropped: when it finishes, is refused
+/// or is abandoned.
+struct Flushing<'a, D: Disk>(&'a Cache<D>);
+
+impl<D: Disk> Drop for Flushing<'_, D> {
+    fn drop(&mut self) {
+        self.0.inner.borrow_mut().flushing = false;
+        self.0.wake();
     }
 }
 
@@ -195,7 +231,6 @@ impl<D: Disk> BlockDev for Cache<D> {
             self.flush().await?;
         }
         let mut inner = self.inner.borrow_mut();
-        inner.overtake(lba, data.len());
         for (block, chunk) in (lba..).zip(data) {
             inner.versions += 1;
             let version = inner.versions;
@@ -220,6 +255,9 @@ impl<D: Disk> BlockDev for Cache<D> {
     /// Every dirty block to the disk, lowest first and in runs, then the disk
     /// made durable. A block the disk refused stays dirty.
     async fn flush(&self) -> Result<(), Error> {
+        self.until(|inner| !inner.flushing).await;
+        self.inner.borrow_mut().flushing = true;
+        let _flushing = Flushing(self);
         let dirty: Vec<u64> = self.inner.borrow().slots.iter().filter(|(_, s)| s.dirty).map(|(b, _)| *b).collect();
         let mut buf: Vec<Block> = vec![[0; BLOCK]; RUN];
         let mut i = 0;
@@ -229,13 +267,15 @@ impl<D: Disk> BlockDev for Cache<D> {
             while i + run < dirty.len() && run < RUN && dirty[i + run] == first + run as u64 {
                 run += 1;
             }
+            let end = first + run as u64;
+            self.until(|inner| !inner.fetches.values().any(|f| f.first < end && first < f.first + f.count as u64))
+                .await;
             let versions: Vec<u64> = {
-                let mut inner = self.inner.borrow_mut();
-                // A fetch beside this write may answer the disk's older copy.
-                inner.overtake(first, run);
+                let inner = self.inner.borrow();
                 (0..run)
                     .map(|k| {
-                        let slot = &inner.slots[&(first + k as u64)];
+                        // Only a flush cleans a block, and this is the one.
+                        let slot = inner.slots.get(&(first + k as u64)).expect("fileserver: a dirty block left the cache during its flush");
                         buf[k] = *slot.data;
                         slot.version
                     })
@@ -245,11 +285,9 @@ impl<D: Disk> BlockDev for Cache<D> {
             let mut inner = self.inner.borrow_mut();
             for (k, version) in versions.into_iter().enumerate() {
                 let block = first + k as u64;
-                // Cleaned meanwhile by another flush, or written again.
-                if let Some(slot) = inner.slots.get_mut(&block)
-                    && slot.dirty
-                    && slot.version == version
-                {
+                // A block written again meanwhile stays dirty.
+                let slot = inner.slots.get_mut(&block).expect("fileserver: a dirty block left the cache during its flush");
+                if slot.version == version {
                     slot.dirty = false;
                     inner.dirty -= 1;
                     inner.order.push_back(block);
@@ -264,16 +302,6 @@ impl<D: Disk> BlockDev for Cache<D> {
 }
 
 impl Inner {
-    /// Every fetch of a block in `first..first + count` overtaken.
-    fn overtake(&mut self, first: u64, count: usize) {
-        let end = first + count as u64;
-        for fetch in self.fetches.values_mut() {
-            if fetch.first < end && first < fetch.first + fetch.count as u64 {
-                fetch.overtaken = true;
-            }
-        }
-    }
-
     /// Drop the oldest clean blocks past [`CLEAN_LIMIT`].
     fn evict(&mut self) {
         while self.slots.len() - self.dirty > CLEAN_LIMIT {
@@ -515,16 +543,28 @@ mod tests {
     }
 
     /// A disk whose every request is pending until the test lets it through,
-    /// so another task can run while one is on the wire.
+    /// so another task can run while one is on the wire. It counts each
+    /// request that went out while another for one of its blocks was in
+    /// flight and either was a write: what the block service's client
+    /// forbids.
     struct Held {
         ram: Ram,
         open: Cell<bool>,
         waiting: RefCell<Vec<Waker>>,
+        /// `(first, count, write)` of each request in flight.
+        flight: RefCell<Vec<(u64, u64, bool)>>,
+        overlaps: Cell<u32>,
     }
 
     impl Held {
         fn new(blocks: u64) -> Self {
-            Self { ram: Ram::new(blocks), open: Cell::new(true), waiting: RefCell::default() }
+            Self {
+                ram: Ram::new(blocks),
+                open: Cell::new(true),
+                waiting: RefCell::default(),
+                flight: RefCell::default(),
+                overlaps: Cell::new(0),
+            }
         }
 
         async fn gate(&self) {
@@ -542,6 +582,25 @@ mod tests {
             self.open.set(true);
             self.waiting.take().into_iter().for_each(Waker::wake);
         }
+
+        fn send(&self, first: u64, count: usize, write: bool) {
+            let end = first + count as u64;
+            let mut flight = self.flight.borrow_mut();
+            if flight.iter().any(|&(f, n, w)| (w || write) && f < end && first < f + n) {
+                self.overlaps.set(self.overlaps.get() + 1);
+            }
+            flight.push((first, count as u64, write));
+        }
+
+        fn landed(&self, first: u64, write: bool) {
+            let mut flight = self.flight.borrow_mut();
+            let at = flight.iter().position(|&(f, _, w)| f == first && w == write).expect("a request in flight");
+            flight.remove(at);
+        }
+
+        fn writes_in_flight(&self) -> usize {
+            self.flight.borrow().iter().filter(|r| r.2).count()
+        }
     }
 
     impl BlockDev for Held {
@@ -551,12 +610,16 @@ mod tests {
         /// What the disk holds when the read is asked, answered when it is
         /// let through.
         async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), Error> {
+            self.send(lba, out.len(), false);
             self.ram.read(lba, out).await?;
             self.gate().await;
+            self.landed(lba, false);
             Ok(())
         }
         async fn write(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+            self.send(lba, data.len(), true);
             self.gate().await;
+            self.landed(lba, true);
             self.ram.write(lba, data).await
         }
         async fn flush(&self) -> Result<(), Error> {
@@ -566,6 +629,13 @@ mod tests {
     }
 
     impl Disk for Held {}
+
+    /// What block `block` holds on the disk.
+    fn on_disk(disk: &Held, block: u64) -> Block {
+        let mut out = [[0; BLOCK]];
+        block_on_ready(disk.ram.read(block, &mut out)).unwrap();
+        out[0]
+    }
 
     #[test]
     fn a_block_written_while_a_flush_carries_its_older_copy_stays_dirty() {
@@ -580,13 +650,36 @@ mod tests {
         assert_eq!(exec.run_until_stalled(), 0);
         assert_eq!(c.counts().dirty, 1, "the second write was not on the disk the flush made durable");
         block_on_ready(c.flush()).unwrap();
-        let mut on_disk = [[0; BLOCK]];
-        block_on_ready(c.disk.ram.read(3, &mut on_disk)).unwrap();
-        assert_eq!(on_disk, [[2; BLOCK]]);
+        assert_eq!(on_disk(&c.disk, 3), [2; BLOCK]);
     }
 
+    /// A second flush asked while the first is writing waits for it, then
+    /// writes the block's newer copy: never both copies in flight at once,
+    /// whose landing order nothing fixes.
     #[test]
-    fn a_fetch_a_write_overtook_is_not_kept() {
+    fn a_flush_asked_during_another_waits_and_then_writes_the_newer_copy() {
+        let c = Cache::new(Held::new(16));
+        block_on_ready(c.write(3, &[[1; BLOCK]])).unwrap();
+        c.disk.open.set(false);
+        let exec = Executor::new();
+        exec.spawn(async { c.flush().await.unwrap() });
+        assert_eq!(exec.run_until_stalled(), 1, "the first flush's write is on the wire");
+        block_on_ready(c.write(3, &[[2; BLOCK]])).unwrap();
+        exec.spawn(async { c.flush().await.unwrap() });
+        assert_eq!(exec.run_until_stalled(), 2);
+        assert_eq!(c.disk.writes_in_flight(), 1, "the second flush wrote beside the first");
+        c.disk.release();
+        assert_eq!(exec.run_until_stalled(), 0);
+        assert_eq!(c.disk.overlaps.get(), 0, "two requests for one block were in flight with a write");
+        assert_eq!(on_disk(&c.disk, 3), [2; BLOCK]);
+        assert_eq!(c.counts().dirty, 0);
+    }
+
+    /// A block fetched, then written into the cache and flushed while the
+    /// fetch is out: the flush waits for the fetch before it writes the
+    /// block, and the cache keeps the write's copy, not the fetch's.
+    #[test]
+    fn a_flush_waits_for_a_fetch_of_its_block_and_the_write_is_kept() {
         let c = Cache::new(Held::new(16));
         block_on_ready(c.disk.ram.write(5, &[[1; BLOCK]])).unwrap();
         c.disk.open.set(false);
@@ -596,13 +689,14 @@ mod tests {
             c.read(5, &mut out).await.unwrap();
         });
         assert_eq!(exec.run_until_stalled(), 1, "the fetch is on the wire with the disk's old copy");
-        // Written, made durable and dropped while the fetch is out.
-        c.disk.open.set(true);
         block_on_ready(c.write(5, &[[2; BLOCK]])).unwrap();
-        block_on_ready(c.flush()).unwrap();
-        c.inner.borrow_mut().slots.remove(&5);
+        exec.spawn(async { c.flush().await.unwrap() });
+        assert_eq!(exec.run_until_stalled(), 2);
+        assert_eq!(c.disk.writes_in_flight(), 0, "the flush wrote the block under its fetch");
         c.disk.release();
         assert_eq!(exec.run_until_stalled(), 0);
-        assert_eq!(read_one(&c, 5), Ok([2; BLOCK]), "the fetch's older copy was kept over the write");
+        assert_eq!(c.disk.overlaps.get(), 0, "a fetch and a write of one block were in flight together");
+        assert_eq!(on_disk(&c.disk, 5), [2; BLOCK]);
+        assert_eq!(read_one(&c, 5), Ok([2; BLOCK]));
     }
 }

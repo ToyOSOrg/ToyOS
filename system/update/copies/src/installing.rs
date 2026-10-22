@@ -1,7 +1,11 @@
 //! update's install over partitions in memory: a signed image written into
 //! the idle slot and marked, and one another key signed writing nothing.
 
-use toyos_blockdev::{block_on_ready, BlockDev, Bytes, BLOCK};
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
+use std::rc::Rc;
+
+use toyos_blockdev::{block_on_ready, Block, BlockDev, Bytes, Error, BLOCK};
 use toyos_update::slots::{Slot, Table};
 
 use toyos_update::image::{Header, Sections, SIGNED_BYTES};
@@ -138,4 +142,143 @@ fn an_image_another_key_signed_writes_nothing() {
     assert!(refused.is_err_and(|why| why.contains("signature")), "an image another key signed was installed");
     let after = (table.into_inner(), boot.into_inner(), root.into_inner());
     assert!(after == before, "a refused image wrote a partition");
+}
+
+/// Above the held volume: the blocks written into it since its last flush,
+/// which it holds.
+struct Holding<'a> {
+    volume: crate::install::volume::Cached<'a, Below>,
+    held: Rc<RefCell<BTreeSet<u64>>>,
+}
+
+impl BlockDev for Holding<'_> {
+    fn blocks(&self) -> u64 {
+        self.volume.blocks()
+    }
+    async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), Error> {
+        self.volume.read(lba, out).await
+    }
+    async fn write(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        self.volume.write(lba, data).await?;
+        self.held.borrow_mut().extend(lba..lba + data.len() as u64);
+        Ok(())
+    }
+    async fn flush(&self) -> Result<(), Error> {
+        self.volume.flush().await?;
+        self.held.borrow_mut().clear();
+        Ok(())
+    }
+}
+
+/// Below the held volume: the partition, counting each read of a block the
+/// volume holds.
+struct Below {
+    disk: Mem,
+    held: Rc<RefCell<BTreeSet<u64>>>,
+    reads: Cell<u32>,
+    of_held: Cell<u32>,
+}
+
+impl BlockDev for Below {
+    fn blocks(&self) -> u64 {
+        self.disk.blocks()
+    }
+    async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), Error> {
+        self.reads.set(self.reads.get() + 1);
+        if self.held.borrow().range(lba..lba + out.len() as u64).next().is_some() {
+            self.of_held.set(self.of_held.get() + 1);
+        }
+        self.disk.read(lba, out).await
+    }
+    async fn write(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        self.disk.write(lba, data).await
+    }
+    async fn flush(&self) -> Result<(), Error> {
+        self.disk.flush().await
+    }
+}
+
+/// A file of many clusters written onto the held volume: every block its
+/// writes touch is read from the partition at most until it is held, and
+/// never again, so a FAT entry's read-modify-write is no round trip.
+#[test]
+fn a_held_block_is_never_read_from_the_partition() {
+    let (_, boot, _) = machine();
+    let held = Rc::new(RefCell::new(BTreeSet::new()));
+    let below = Below { disk: boot, held: Rc::clone(&held), reads: Cell::new(0), of_held: Cell::new(0) };
+    let time = toyos_fat32::FatTime::from_unix_secs(1_717_245_296);
+    let bytes: Vec<u8> = (0..256 * 1024u32).map(|i| (i % 251) as u8).collect();
+    block_on_ready(async {
+        let volume = Holding { volume: crate::install::volume::Cached::new(&below), held: Rc::clone(&held) };
+        let mut fs = toyos_fat32::Fat32::mount(volume).await.expect("the volume mounts");
+        fs.create_dir_all("toyos", time).await.unwrap();
+        let mut file = fs.create(slots::KERNEL_FILE, time).await.unwrap();
+        fs.write(&mut file, 0, &bytes).await.unwrap();
+        fs.flush_meta(&mut file, time).await.unwrap();
+        assert!(held.borrow().len() > 64, "the write held {} blocks", held.borrow().len());
+    });
+    assert!(below.reads.get() > 0);
+    assert_eq!(below.of_held.get(), 0, "{} of {} partition reads were of held blocks", below.of_held.get(), below.reads.get());
+}
+
+/// What reached one of the three partitions, in the order it did.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Op {
+    Write(&'static str),
+    Flush(&'static str),
+}
+
+/// A partition in memory that logs each write and flush beside the others'.
+struct Logged {
+    name: &'static str,
+    disk: Mem,
+    log: Rc<RefCell<Vec<Op>>>,
+}
+
+impl BlockDev for Logged {
+    fn blocks(&self) -> u64 {
+        self.disk.blocks()
+    }
+    async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), Error> {
+        self.disk.read(lba, out).await
+    }
+    async fn write(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        self.log.borrow_mut().push(Op::Write(self.name));
+        self.disk.write(lba, data).await
+    }
+    async fn flush(&self) -> Result<(), Error> {
+        self.log.borrow_mut().push(Op::Flush(self.name));
+        self.disk.flush().await
+    }
+}
+
+/// An install makes ROOT and the volume durable before the table moves the
+/// mark, and the mark durable last: each partition's flush follows its last
+/// write, the table's one write follows both, and its flush ends the install.
+#[test]
+fn the_mark_moves_only_once_the_slot_is_durable() {
+    let (table, boot, root) = machine();
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let logged = |name, disk| Logged { name, disk, log: Rc::clone(&log) };
+    let (table, boot, root) = (logged("table", table), logged("boot", boot), logged("root", root));
+    let image = image(&SEED, 200);
+    block_on_ready(install(
+        &sig::public_of(&SEED),
+        &table,
+        Partition { disk: &boot, unique: SLOT_B.boot },
+        Partition { disk: &root, unique: SLOT_B.root },
+        &mut &image[..],
+        1_717_245_296,
+        |_| {},
+    ))
+    .unwrap();
+    let log = log.borrow();
+    let last = |op| log.iter().rposition(|&o| o == op).unwrap_or_else(|| panic!("no {op:?} in {log:?}"));
+    let first = |op| log.iter().position(|&o| o == op).unwrap_or_else(|| panic!("no {op:?} in {log:?}"));
+    for name in ["root", "boot"] {
+        assert!(last(Op::Write(name)) < last(Op::Flush(name)), "{name} was not flushed after its last write: {log:?}");
+        assert!(last(Op::Flush(name)) < first(Op::Write("table")), "the table moved before {name} was durable: {log:?}");
+    }
+    assert_eq!(log.iter().filter(|&&o| o == Op::Write("table")).count(), 1, "{log:?}");
+    assert_eq!(log.last(), Some(&Op::Flush("table")), "{log:?}");
 }

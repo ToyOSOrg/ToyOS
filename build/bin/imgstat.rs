@@ -48,10 +48,10 @@ fn main() {
             (last - first + 1) * LBA as u64
         );
 
-        let bytes = disk[first as usize * LBA..(last as usize + 1) * LBA].to_vec();
+        let mut bytes = disk[first as usize * LBA..(last as usize + 1) * LBA].to_vec();
         let walked = bytes.len().is_multiple_of(BLOCK).then(|| {
             block_on_ready(async {
-                let mut fs = Fat32::mount(Bytes::new(bytes.clone())).await.ok()?;
+                let mut fs = Fat32::mount(Bytes::new(&mut bytes[..])).await.ok()?;
                 Some(fs.walk("", 64).await)
             })
         });
