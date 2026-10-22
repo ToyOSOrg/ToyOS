@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 use std::collections::HashSet;
 
 use crate::proclife::model::{Climb, World};
-use crate::proclife::quit::{self, Owed, Reason, Visit};
+use crate::proclife::quit::{self, Owed, Reason};
 use crate::proclife::table::{Lifecycle, Processes};
 use crate::proclife::tree::{self, Admit, Admitted};
 use crate::proclife::{join, reap, spawn, teardown, End, Pid, Tid, Watch};
@@ -84,8 +84,9 @@ pub enum Op {
     /// each claim's retires posted with the lock given up, then the kill walk
     /// of what it claimed. `apart` is the claim
     /// `mutate-quit-checks-and-kills-in-two-acts` makes a section after its
-    /// decision.
-    Quit { by: u32, target: Pid, reason: Reason, pc: u32, owed: Owed, retire: Vec<(Pid, Tid)>, apart: Option<Pid> },
+    /// decision, and `late` the process whose children
+    /// `mutate-quit-reads-children-late` reads a section after its ask.
+    Quit { by: u32, target: Pid, reason: Reason, pc: u32, owed: Owed, retire: Vec<(Pid, Tid)>, apart: Option<Pid>, late: Option<Pid> },
     /// A read of a process's notice, which takes its notice's lock alone.
     Read { pid: Pid, pc: u32 },
 }
@@ -127,7 +128,7 @@ impl Op {
         Op::IdlePass { pc: 0 }
     }
     pub fn quit(by: u32, target: Pid, reason: Reason) -> Self {
-        Op::Quit { by, target, reason, pc: 0, owed: Owed::of(target), retire: Vec::new(), apart: None }
+        Op::Quit { by, target, reason, pc: 0, owed: Owed::of(target), retire: Vec::new(), apart: None, late: None }
     }
     pub fn read(pid: Pid) -> Self {
         Op::Read { pid, pc: 0 }
@@ -409,15 +410,20 @@ impl Op {
                 }
                 *pc = DONE;
             }
-            Op::Quit { by, target, reason, pc, owed, retire, apart } => match *pc {
+            Op::Quit { by, target, reason, pc, owed, retire, apart, late } => match *pc {
                 // An ask, or under the mutation a decision to kill, under the
                 // table lock and the notice's.
                 0 | ASK => {
                     if *pc == 0 {
                         world.begin_quit(*by, *target);
                     }
+                    if let Some(pid) = late.take() {
+                        quit::owed_children(world, pid, owed);
+                        *pc = POST;
+                        return;
+                    }
                     match owed.ask.pop() {
-                        Some(Visit::Ask(pid)) => {
+                        Some(pid) => {
                             let deaf = world.get(pid).is_some_and(|p| !p.tearing_down())
                                 && quit::decide(&world.notice(pid)) == quit::Decision::Kill;
                             if deaf && cfg!(feature = "mutate-quit-checks-and-kills-in-two-acts") {
@@ -425,12 +431,17 @@ impl Op {
                                 *pc = APART;
                                 return;
                             }
-                            if world.ask(*by, pid, *reason, owed) == quit::Asked::Killed {
-                                let proc = world.get(pid).expect("just claimed");
-                                *retire = teardown::retire_set(proc, None).into_iter().map(|t| (pid, t)).collect();
+                            match world.ask(*by, pid, *reason, owed) {
+                                quit::Asked::Killed => {
+                                    let proc = world.get(pid).expect("just claimed");
+                                    *retire = teardown::retire_set(proc, None).into_iter().map(|t| (pid, t)).collect();
+                                }
+                                quit::Asked::Notified if cfg!(feature = "mutate-quit-reads-children-late") => {
+                                    *late = Some(pid);
+                                }
+                                quit::Asked::Notified | quit::Asked::Gone => {}
                             }
                         }
-                        Some(Visit::Children(pid)) => quit::owed_children(world, pid, owed),
                         None => unreachable!("a quit asks only while it owes an ask"),
                     }
                     *pc = POST;
@@ -450,7 +461,7 @@ impl Op {
                     for (victim, thread) in retire.drain(..) {
                         world.post_retire(victim, thread);
                     }
-                    *pc = match (owed.ask.is_empty(), owed.kill.is_empty()) {
+                    *pc = match (owed.ask.is_empty() && late.is_none(), owed.kill.is_empty()) {
                         (false, _) => ASK,
                         (true, false) => WALK,
                         (true, true) => DONE,

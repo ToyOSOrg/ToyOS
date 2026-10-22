@@ -7,10 +7,10 @@
 //!
 //! Beside them three Rust programs: std's `stdio_named`, where a std child holds
 //! the stdio its `Command` named, as a C one does, and `Stdio::null()` is a
-//! null handle; and `libc_recv_beside_close`, where libc's `recv` outlives a
+//! null handle; `libc_recv_beside_close`, where libc's `recv` outlives a
 //! `close` of its descriptor on another thread, its own netstack serving it;
-//! and `quit_tree`, stage 6's kernel half: a quit asks every process below it
-//! that listens and kills the rest.
+//! and `quit_tree`, where a quit asks every process below it that listens
+//! and kills the rest.
 //!
 //! On QEMU x86-64 (`tests/images/libccase.toml`), every program in one boot:
 //! what they claim is order, completion, contents and counts, which QEMU

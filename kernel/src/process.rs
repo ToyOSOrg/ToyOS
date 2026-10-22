@@ -1724,17 +1724,10 @@ fn kill(pid: Pid) {
 /// as a kill's.
 pub fn quit_process(object: &crate::object::process::ProcessObject, reason: Reason) {
     let mut owed = quit::Owed::of(object.pid());
-    while let Some(visit) = owed.ask.pop() {
+    while let Some(pid) = owed.ask.pop() {
         let (retire, notified) = {
             let mut guard = PROCESS_TABLE.lock();
-            let table = guard.as_mut().unwrap();
-            match visit {
-                quit::Visit::Ask(pid) => ask(table, pid, reason, &mut owed),
-                quit::Visit::Children(pid) => {
-                    quit::owed_children(table, pid, &mut owed);
-                    (Vec::new(), None)
-                }
-            }
+            ask(guard.as_mut().unwrap(), pid, reason, &mut owed)
         };
         for sched in &retire {
             scheduler::post_retire(sched);

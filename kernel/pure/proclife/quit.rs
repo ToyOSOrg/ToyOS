@@ -1,20 +1,16 @@
 //! A request to quit, and whom it reaches.
 //!
 //! **A quit reaches a process and every process below it, and kills the ones
-//! that cannot answer it.** Each process is started holding its notice, which
+//! that do not listen for it.** Each process is started holding its notice, which
 //! is readable while a reason is asked and not yet read; a read takes it.
 //! [`ask`] puts the reason in a process's notice when the process listens —
 //! it has read its notice or armed a watch on it — and its notice holds none,
 //! and claims the process for [`End::Killed`] otherwise: a process that never
 //! listened, or one that has not yet taken the reason it was last asked. The
 //! check and the claim are one act, so no read comes between them. Below a
-//! process it kills nothing is asked: its end takes its subtree.
-//!
-//! **A child placed under a process whose notice holds a reason starts
-//! holding it too** ([`Notice::under`]), and the quit that put it there asks
-//! that child no second time: [`ask`] reads a process's children in the hold
-//! that puts the reason in its notice, and a child that lands after it is in
-//! none of them.
+//! process it kills nothing is asked: its end takes its subtree. A child
+//! that lands holding an inherited reason ([`Notice::under`]) is not asked
+//! by that quit, so one that never listens is ended only by the next.
 //!
 //! The kernel keeps each notice behind a lock of its own and passes it here
 //! held, under `PROCESS_TABLE`; a read of the notice takes that lock alone.
@@ -79,24 +75,15 @@ impl Notice {
 /// claimed and whose subtrees its kill walk takes.
 #[derive(Clone, Default, PartialEq, Eq, Hash, Debug)]
 pub struct Owed {
-    pub ask: Vec<Visit>,
+    pub ask: Vec<Pid>,
     pub kill: Vec<Pid>,
 }
 
 impl Owed {
     /// A quit of `pid`, and so of everything below it.
     pub fn of(pid: Pid) -> Self {
-        Self { ask: alloc::vec![Visit::Ask(pid)], kill: Vec::new() }
+        Self { ask: alloc::vec![pid], kill: Vec::new() }
     }
-}
-
-/// One step of a quit's walk.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub enum Visit {
-    Ask(Pid),
-    /// `mutate-quit-reads-children-late`'s: a process's children, read a hold
-    /// after the one that asked it.
-    Children(Pid),
 }
 
 /// What [`ask`] did to one process.
@@ -142,17 +129,18 @@ pub fn ask<T: Processes>(table: &mut T, pid: Pid, notice: &mut Notice, reason: R
             // The mutation this feature stages: the walk asks the children of
             // a process it kills, whose end is about to take them.
             if cfg!(feature = "mutate-quit-asks-below-a-kill") {
-                owed.ask.extend(owed.kill.drain(..).map(Visit::Ask));
+                owed.ask.append(&mut owed.kill);
             }
             Asked::Killed
         }
         Decision::Notify => {
             notice.asked = Some(reason);
             // The mutations these features stage: the walk reads the
-            // children a hold later, or reads none.
-            if cfg!(feature = "mutate-quit-reads-children-late") {
-                owed.ask.push(Visit::Children(pid));
-            } else if !cfg!(feature = "mutate-quit-reaches-the-named-process-alone") {
+            // children a hold later (the model's `Op::Quit` does), or reads
+            // none.
+            if !cfg!(feature = "mutate-quit-reads-children-late")
+                && !cfg!(feature = "mutate-quit-reaches-the-named-process-alone")
+            {
                 owed_children(table, pid, owed);
             }
             Asked::Notified
@@ -163,7 +151,7 @@ pub fn ask<T: Processes>(table: &mut T, pid: Pid, notice: &mut Notice, reason: R
 /// `pid`'s children, read now, owed to the walk; none for a process gone.
 pub fn owed_children<T: Processes>(table: &T, pid: Pid, owed: &mut Owed) {
     if let Some(proc) = table.get(pid) {
-        owed.ask.extend(proc.node().children().iter().copied().map(Visit::Ask));
+        owed.ask.extend_from_slice(proc.node().children());
     }
 }
 
@@ -205,6 +193,15 @@ mod tests {
         assert_eq!(notice.read(), Some(Reason::Interrupt));
         assert_eq!(ask(&mut world, pid, &mut notice, Reason::HangUp, &mut owed), Asked::Notified);
         assert_eq!(ask(&mut world, pid, &mut notice, Reason::Terminate, &mut owed), Asked::Killed);
+    }
+
+    /// A first read with nothing asked listens, as an empty read and a watch do.
+    #[test]
+    fn a_read_alone_makes_a_listener() {
+        let mut notice = Notice::new();
+        assert_eq!(decide(&notice), Decision::Kill);
+        assert_eq!(notice.read(), None);
+        assert_eq!(decide(&notice), Decision::Notify);
     }
 
     #[test]
