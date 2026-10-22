@@ -127,13 +127,42 @@ pub(super) unsafe fn encrypt(keys: &[u8; 240], rounds: usize, block: &mut [u8; 1
     store(block, v);
 }
 
+/// The nonce's counter block with a zero counter word.
+#[inline]
+#[target_feature(enable = "sse2")]
+fn iv(nonce: &[u8; 12]) -> __m128i {
+    let mut iv = [0u8; 16];
+    iv[..12].copy_from_slice(nonce);
+    load(&iv)
+}
+
 /// The nonce's counter block with round key 0 folded in.
 #[inline]
 #[target_feature(enable = "sse2")]
 pub(super) fn counter_base(nonce: &[u8; 12], key0: __m128i) -> __m128i {
-    let mut iv = [0u8; 16];
-    iv[..12].copy_from_slice(nonce);
-    _mm_xor_si128(load(&iv), key0)
+    _mm_xor_si128(iv(nonce), key0)
+}
+
+/// Counter blocks `first` to `first + N - 1` with round key 0 folded in,
+/// into `s[..N]`. Where the counter's low byte, the block's byte 15, does
+/// not carry within the run, block j is block 0 plus j by a byte addition:
+/// two vector operations a block in place of a scalar addition, a byte swap
+/// and an insert. The run's carry test reads the public counter alone.
+#[inline]
+#[target_feature(enable = "sse2")]
+fn counters<const N: usize>(iv: __m128i, key0: __m128i, first: u32, s: &mut [__m128i]) {
+    if (first & 0xff) as usize + N <= 0x100 {
+        let c = _mm_xor_si128(iv, _mm_set_epi32(first.to_be() as i32, 0, 0, 0));
+        for j in 0..N {
+            let step = _mm_set_epi8(j as i8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+            s[j] = _mm_xor_si128(_mm_add_epi8(c, step), key0);
+        }
+    } else {
+        let base = _mm_xor_si128(iv, key0);
+        for j in 0..N {
+            s[j] = counter(base, first.wrapping_add(j as u32));
+        }
+    }
 }
 
 #[inline]
@@ -145,11 +174,9 @@ fn counter(base: __m128i, counter: u32) -> __m128i {
 /// `N` counter blocks from `first` through every round.
 #[inline]
 #[target_feature(enable = "aes,sse2")]
-fn encrypt_n<const R: usize, const N: usize>(k: &[__m128i; 15], base: __m128i, first: u32) -> [__m128i; N] {
+fn encrypt_n<const R: usize, const N: usize>(k: &[__m128i; 15], iv: __m128i, first: u32) -> [__m128i; N] {
     let mut s = [_mm_setzero_si128(); N];
-    for j in 0..N {
-        s[j] = counter(base, first.wrapping_add(j as u32));
-    }
+    counters::<N>(iv, k[0], first, &mut s);
     for r in 1..R {
         for j in 0..N {
             s[j] = _mm_aesenc_si128(s[j], k[r]);
@@ -167,10 +194,8 @@ fn encrypt_n<const R: usize, const N: usize>(k: &[__m128i; 15], base: __m128i, f
 /// and its spill is a 240-byte library copy.
 #[inline]
 #[target_feature(enable = "aes,sse2")]
-fn encrypt_into<const R: usize, const N: usize>(keys: &[[u8; 16]; 15], base: __m128i, first: u32, s: &mut [__m128i; 15]) {
-    for j in 0..N {
-        s[j] = counter(base, first.wrapping_add(j as u32));
-    }
+fn encrypt_into<const R: usize, const N: usize>(keys: &[[u8; 16]; 15], iv: __m128i, first: u32, s: &mut [__m128i; 15]) {
+    counters::<N>(iv, load(&keys[0]), first, s);
     for r in 1..R {
         let key = load(&keys[r]);
         for j in 0..N {
@@ -185,8 +210,8 @@ fn encrypt_into<const R: usize, const N: usize>(keys: &[[u8; 16]; 15], base: __m
 
 #[inline]
 #[target_feature(enable = "aes,sse2")]
-fn encrypt8<const R: usize>(k: &[__m128i; 15], base: __m128i, first: u32) -> [__m128i; 8] {
-    encrypt_n::<R, 8>(k, base, first)
+fn encrypt8<const R: usize>(k: &[__m128i; 15], iv: __m128i, first: u32) -> [__m128i; 8] {
+    encrypt_n::<R, 8>(k, iv, first)
 }
 
 #[inline]
@@ -198,12 +223,13 @@ fn xor_into(block: &mut [u8; 16], stream: __m128i) {
 #[target_feature(enable = "aes,sse2")]
 fn ctr_rounds<const R: usize>(keys: &[u8; 240], nonce: &[u8; 12], first: u32, data: &mut [u8]) {
     let k = round_keys(keys);
-    let base = counter_base(nonce, k[0]);
+    let iv = iv(nonce);
+    let base = _mm_xor_si128(iv, k[0]);
     let mut next = first;
     let (batches, rest) = data.as_chunks_mut::<128>();
     for i in 0..batches.len() {
         let (blocks, _) = batches[i].as_chunks_mut::<16>();
-        let s = encrypt8::<R>(&k, base, next);
+        let s = encrypt8::<R>(&k, iv, next);
         for j in 0..8 {
             xor_into(&mut blocks[j], s[j]);
         }
@@ -406,11 +432,12 @@ fn seal_rounds<const R: usize>(
         h[j] = power(powers[j]);
         folds[j] = folded(h[j]);
     }
-    let base = counter_base(nonce, load(&k[0]));
+    let iv = iv(nonce);
+    let key0 = load(&k[0]);
     let mut y = reverse(load(state));
     let (blocks, _) = batches[0].as_chunks_mut::<16>();
     let mut s = [_mm_setzero_si128(); 15];
-    encrypt_into::<R, 8>(k, base, 2, &mut s);
+    encrypt_into::<R, 8>(k, iv, 2, &mut s);
     for j in 0..8 {
         xor_into(&mut blocks[j], s[j]);
     }
@@ -422,8 +449,8 @@ fn seal_rounds<const R: usize>(
         let mut s = [_mm_setzero_si128(); 8];
         for j in 0..8 {
             x[j] = reverse(load(&previous[j]));
-            s[j] = counter(base, first.wrapping_add(j as u32));
         }
+        counters::<8>(iv, key0, first, &mut s);
         let x0 = _mm_xor_si128(x[0], y);
         let mut sum = Product {
             low: _mm_clmulepi64_si128::<0x00>(x0, h[7]),
@@ -498,18 +525,18 @@ fn short_rounds<const R: usize>(
 ) -> [u8; 16] {
     let (slots, _) = keys.as_chunks::<16>();
     let k: &[[u8; 16]; 15] = slots.try_into().unwrap();
-    let base = counter_base(nonce, load(&k[0]));
+    let iv = iv(nonce);
     // E(J0) and the data's keystream, in as small a batch as covers them.
     let mut s = [_mm_setzero_si128(); 15];
     // Each arm encrypts in place: moving a returned array into `s` is a
     // library copy.
     match data.len() {
-        0 => encrypt_into::<R, 1>(k, base, 1, &mut s),
-        1..=16 => encrypt_into::<R, 2>(k, base, 1, &mut s),
-        17..=48 => encrypt_into::<R, 4>(k, base, 1, &mut s),
-        49..=64 => encrypt_into::<R, 5>(k, base, 1, &mut s),
-        65..=112 => encrypt_into::<R, 8>(k, base, 1, &mut s),
-        _ => encrypt_into::<R, 15>(k, base, 1, &mut s),
+        0 => encrypt_into::<R, 1>(k, iv, 1, &mut s),
+        1..=16 => encrypt_into::<R, 2>(k, iv, 1, &mut s),
+        17..=48 => encrypt_into::<R, 4>(k, iv, 1, &mut s),
+        49..=64 => encrypt_into::<R, 5>(k, iv, 1, &mut s),
+        65..=112 => encrypt_into::<R, 8>(k, iv, 1, &mut s),
+        _ => encrypt_into::<R, 15>(k, iv, 1, &mut s),
     }
     let (blocks, tail) = data.as_chunks_mut::<16>();
     let whole = blocks.len();
@@ -582,5 +609,39 @@ pub(super) unsafe fn short(
         short_rounds::<10>(keys, powers, nonce, aad, data, stream)
     } else {
         short_rounds::<14>(keys, powers, nonce, aad, data, stream)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The byte-addition runs equal the per-block construction from every
+    /// low counter byte, so for runs that carry out of byte 15 and runs that
+    /// end exactly at it.
+    #[test]
+    fn counter_runs_match_the_per_block_construction() {
+        // SSE2 is the x86-64 baseline.
+        unsafe {
+            let nonce = [0x5a; 12];
+            let key0 = power(0x0123_4567_89ab_cdef_fedc_ba98_7654_3210);
+            let iv = iv(&nonce);
+            let base = counter_base(&nonce, key0);
+            let as_u128 = |v: __m128i| -> u128 { core::mem::transmute(v) };
+            for high in [0u32, 0x1234_5600, 0xffff_ff00] {
+                for low in 0..=255u32 {
+                    let first = high | low;
+                    let mut s = [_mm_setzero_si128(); 15];
+                    counters::<8>(iv, key0, first, &mut s);
+                    for j in 0..8 {
+                        assert_eq!(as_u128(s[j]), as_u128(counter(base, first.wrapping_add(j as u32))), "{first:#x} + {j}");
+                    }
+                    counters::<15>(iv, key0, first, &mut s);
+                    for j in 0..15 {
+                        assert_eq!(as_u128(s[j]), as_u128(counter(base, first.wrapping_add(j as u32))), "{first:#x} + {j}");
+                    }
+                }
+            }
+        }
     }
 }
