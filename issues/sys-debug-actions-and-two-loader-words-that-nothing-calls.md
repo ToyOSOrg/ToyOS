@@ -20,8 +20,7 @@ finds no caller of:
   `heap_ceiling`'s, for stage C's `heap_ceiling_bounds`;
 - `LOCK_ACROSS_SWITCH` (2), `test_panic_child`'s. Its stage C item is a type
   (`lock_across_switch_halts`), which calls no `SYS_DEBUG`, so no stage brings a caller back;
-- `boot::WRITE_NO_LAYOUT_PARAM` and `boot::WITHHOLD_ROOT_PARAM`, for stage A's
-  `kernel_args_layout_refused` and `root_withheld_refused`.
+- `boot::WRITE_NO_LAYOUT_PARAM`, for stage A's `kernel_args_layout_refused`.
 
 `LOG_PATTERNED` (21) has one caller, `panic_halts_first`, which wants a record and reads none of
 the pattern `kernel/src/log/storm.rs` writes into it: the checksum and payload had test-runner's

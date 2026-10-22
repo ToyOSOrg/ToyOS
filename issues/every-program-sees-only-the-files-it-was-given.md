@@ -98,9 +98,10 @@ nameable by every program and make confused-deputy bugs structural.
    access that the file server enforces on every request that would change
    what it holds, and a package launched from `/apps` is minted its own
    directory read-only and its own folder of the session's home read-write,
-   and nothing else a file server serves (`toyos_manifest::Program::view`).
-   It still reaches `/tmp` and `/system`, which the kernel serves to every
-   program. Every row the image declares still sees the whole tree
+   `/system` read-only, and nothing else a file server serves
+   (`toyos_manifest::Program::view`). It still reaches `/tmp`, which the
+   kernel serves to every program. Every row the image declares still sees
+   the whole tree, `/system` read-only and the rest
    read-write, `/apps` included, so a shell and everything it starts can
    rewrite an installed package; whether the installer alone writes `/apps`
    is `issues/whether-pkg-alone-writes-apps.md`.

@@ -216,6 +216,7 @@ unsafe extern "C" fn toyos_fs_open(path: *const u8, len: usize, how: Open) -> i6
             if how.write || how.append { flags |= OpenFlags::WRITE; }
             if how.append { flags |= OpenFlags::APPEND; }
             if how.create || how.create_new { flags |= OpenFlags::CREATE; }
+            if how.create_new { flags |= OpenFlags::EXCLUSIVE; }
             if how.truncate { flags |= OpenFlags::TRUNCATE; }
             syscall::open(abs.as_bytes(), flags).map(Opened::Kernel)
         },

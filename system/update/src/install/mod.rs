@@ -89,6 +89,8 @@ pub fn install(
 
     let kernel = take(input, header.kernel().len, header.kernel().sha256, "kernel")?;
     let cmdline = take(input, header.cmdline().len, header.cmdline().sha256, "cmdline")?;
+    let supervisor = take(input, header.supervisor().len, header.supervisor().sha256, "supervisor")?;
+    let fileserver = take(input, header.fileserver().len, header.fileserver().sha256, "fileserver")?;
     let streamed = Instant::now();
     stream_root(input, &mut *root.disk, header.root().len, header.root().sha256)?;
     let root_ms = streamed.elapsed().as_millis();
@@ -99,7 +101,14 @@ pub fn install(
         Err(e) => return Err(format!("the input's end would not read: {e}")),
     }
 
-    write_volume(&mut *boot.disk, &kernel, &cmdline, &signed, now)?;
+    let files = [
+        (slots::SIGNED_FILE, &signed[..]),
+        (slots::KERNEL_FILE, &kernel),
+        (slots::CMDLINE_FILE, &cmdline),
+        (slots::SUPERVISOR_FILE, &supervisor),
+        (slots::FILESERVER_FILE, &fileserver),
+    ];
+    write_volume(&mut *boot.disk, &files, now)?;
     root.disk.flush().map_err(|e| format!("slot {}'s ROOT is not durable: {e:?}", idle.letter()))?;
     boot.disk.flush().map_err(|e| format!("slot {}'s volume is not durable: {e:?}", idle.letter()))?;
 
@@ -148,18 +157,14 @@ fn stream_root(input: &mut impl Read, root: &mut dyn Disk, len: u64, sha256: toy
     Ok(())
 }
 
-/// The kernel, its boot parameter and the signed header onto the idle slot's
-/// FAT volume, replacing whatever was there.
-fn write_volume(boot: &mut dyn Disk, kernel: &[u8], cmdline: &[u8], signed: &[u8], now: u64) -> Result<(), String> {
+/// Every file a slot carries onto the idle slot's FAT volume, replacing
+/// whatever was there.
+fn write_volume(boot: &mut dyn Disk, files: &[(&str, &[u8])], now: u64) -> Result<(), String> {
     let mut fs = toyos_fat32::Fat32::mount(volume::Cached::new(boot))
         .map_err(|e| format!("the idle slot's volume does not mount: {e:?}"))?;
     let time = toyos_fat32::FatTime::from_unix_secs(now);
     fs.create_dir_all("toyos", time).map_err(|e| format!("toyos/ on the idle volume: {e:?}"))?;
-    for (path, bytes) in [
-        (slots::SIGNED_FILE, signed),
-        (slots::KERNEL_FILE, kernel),
-        (slots::CMDLINE_FILE, cmdline),
-    ] {
+    for &(path, bytes) in files {
         if fs.exists(path).map_err(|e| format!("{path}: {e:?}"))? {
             fs.remove(path).map_err(|e| format!("removing the old {path}: {e:?}"))?;
         }

@@ -1,4 +1,4 @@
-//! Who may start what through `/system/bin/supervisor`'s launcher.
+//! Who may start what through the supervisor's launcher.
 //!
 //! **A caller starts only the rows its own row's `starts` lists**: program
 //! keys, and [`APPS`] for any installed package. **A row that replaces what the
@@ -259,7 +259,7 @@ mod tests {
     use super::*;
 
     fn row(name: &str) -> Program {
-        Program { name: name.into(), path: format!("/system/bin/{name}"), ..Program::default() }
+        Program { name: name.into(), source: crate::Source::Path(format!("/system/bin/{name}")), ..Program::default() }
     }
 
     fn swap() -> Program {

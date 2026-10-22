@@ -681,6 +681,26 @@ pub(crate) const CONTROLS: &[Control] = &[
     red(KERNEL, "mutate-spawner-handle-before-the-childs-own", None, &[
         Fails("proclife::interleave::tests::a_sibling_closing_a_spawns_handle_before_the_spawn_returns"),
     ]),
+    red(KERNEL, "mutate-quit-checks-and-kills-in-two-acts", None, &[
+        Fails("proclife::interleave::tests::a_notices_read_racing_a_second_quit_kills_only_where_the_read_comes_second"),
+    ]),
+    red(KERNEL, "mutate-quit-spawn-starts-unasked", None, &[
+        Fails("proclife::interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once"),
+        Fails("proclife::quit::tests::a_child_starts_holding_its_parents_unread_reason_and_never_listened"),
+    ]),
+    red(KERNEL, "mutate-quit-reads-children-late", None, &[
+        Fails("proclife::interleave::tests::a_spawn_racing_a_quit_on_its_place_asks_each_child_once"),
+    ]),
+    red(KERNEL, "mutate-quit-asks-below-a-kill", None, &[
+        Fails("proclife::interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it"),
+    ]),
+    red(KERNEL, "mutate-quit-notifies-a-deaf-process", None, &[
+        Fails("proclife::interleave::tests::a_quit_of_a_process_that_never_listened_asks_nothing_below_it"),
+        Fails("proclife::quit::tests::a_listener_is_asked_and_one_that_never_listened_is_killed"),
+    ]),
+    red(KERNEL, "mutate-quit-reaches-the-named-process-alone", None, &[
+        Fails("proclife::interleave::tests::a_quit_reaches_every_process_below_its_target"),
+    ]),
     red(KERNEL_SIM, "placement-ignores-staleness", Some("policy"), &[
         Fails("a_stopped_cpu_stops_taking_work"),
     ]),

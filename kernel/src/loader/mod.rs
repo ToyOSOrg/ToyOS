@@ -175,7 +175,7 @@ pub fn spawn<H>(
     path: &str,
     argv: &[&str],
     commit: impl FnOnce(
-        crate::object::HandleEntry,
+        start::Own,
     ) -> Result<(HandleTable, Endowments, Arc<kernel::sched::job::Job>, H), crate::object::Refusal>,
     cwd: String,
     env: Vec<u8>,
@@ -341,9 +341,10 @@ pub fn spawn<H>(
 
     let pid = admission.pid();
     let object = crate::object::process::ProcessObject::new(pid);
+    let notice = crate::object::notice::NoticeObject::new();
     // The point of no return: every failure above answers the caller with its
     // table untouched.
-    let (handles, endowments, job, held) = commit(start::own_handle(&object))?;
+    let (handles, endowments, job, held) = commit(start::Own::new(&object, &notice))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         cwd,
@@ -400,6 +401,7 @@ pub fn spawn<H>(
             Some(Arc::clone(&image)),
             ThreadEntry::new(thread_data),
             node,
+            notice,
         ));
         let tid = table.get(pid).unwrap().main_tid();
         // Placed while still holding the table lock: kill_process claims teardown
@@ -432,16 +434,17 @@ pub fn spawn<H>(
     Ok((pid, held))
 }
 
-/// The one program the kernel starts. `build/build.rs` puts this binary in every
-/// image, so a missing one is a bad build, not a different boot.
-pub const SUPERVISOR_PATH: &str = "/system/bin/supervisor";
+/// The name the supervisor runs under: no file, since it runs from its boot image.
+const SUPERVISOR: &str = "supervisor";
 
-/// Start `/system/bin/supervisor`, holding the machine's one full-rights `SysCap`.
+/// Start the supervisor from its boot image, holding the machine's one
+/// full-rights `SysCap` and the file server's image and ROOT's
+/// (`toyos_abi::syscall::FILESERVER_IMAGE_LABEL`, `ROOT_IMAGE_LABEL`).
 ///
 /// Nothing else can construct one: what the supervisor endows is the entire set of
 /// processes that can ever claim a device, enter the RT band, or power off.
 /// Panics on failure: a boot that cannot start the supervisor has nowhere to report to.
-pub fn spawn_supervisor() -> Pid {
+pub fn spawn_supervisor(images: crate::bootimage::Objects) -> Pid {
     let mut handles = HandleTable::new();
     let mut entries = Vec::new();
     let mut labels = Vec::new();
@@ -484,12 +487,34 @@ pub fn spawn_supervisor() -> Pid {
         _pad: 0,
     });
     labels.extend_from_slice(label.as_bytes());
+    for (label, object) in [
+        (toyos_abi::syscall::FILESERVER_IMAGE_LABEL, &images.fileserver),
+        (toyos_abi::syscall::ROOT_IMAGE_LABEL, &images.root),
+    ] {
+        let object = KObjectRef::SharedMem(Arc::clone(object));
+        let rights = ops::initial_rights(&object);
+        let handle = handles
+            .install(crate::object::HandleEntry::new(object, rights))
+            .expect("spawn_supervisor: a table of five handles refused a boot image");
+        entries.push(toyos_abi::syscall::EndowEntry {
+            label_off: labels.len() as u32,
+            label_len: label.len() as u32,
+            handle,
+            _pad: 0,
+        });
+        labels.extend_from_slice(label.as_bytes());
+    }
+    let len = images.supervisor.immutable().expect("a boot image is immutable");
+    let image: Arc<dyn crate::file_backing::FileBacking> = Arc::new(
+        crate::file_backing::SharedImage::over(images.supervisor, len)
+            .expect("spawn_supervisor: a boot image is ordinary memory, its length inside it"),
+    );
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
-    let commit = |own| {
-        start::endow_self(&mut handles, &mut entries, &mut labels, own);
+    let commit = |own: start::Own| {
+        own.endow(&mut handles, &mut entries, &mut labels);
         Ok((handles, Endowments::new(entries, labels), crate::object::job::new_job(), ()))
     };
-    match spawn(SUPERVISOR_PATH, &[SUPERVISOR_PATH], commit, String::from("/"), Vec::new(), None, Parent::Root) {
+    match spawn(SUPERVISOR, &[SUPERVISOR], commit, String::from("/"), Vec::new(), Some(image), Parent::Root) {
         Ok((pid, ())) => pid,
         Err(crate::object::Refusal::Error(e)) => panic!("spawn_supervisor: failed to spawn: {e:?}"),
         Err(crate::object::Refusal::Handle(e)) => panic!("spawn_supervisor: {e}"),

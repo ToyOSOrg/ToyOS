@@ -33,6 +33,8 @@ enum WriteBlock {
 /// What `sys_read` parks on when the handle has nothing to give.
 enum ReadBlock {
     Pipe(alloc::sync::Arc<crate::watch::Watch>, pipe::PipeId, WaitClass),
+    /// A notice with no reason in it, until a quit puts one there.
+    Notice(alloc::sync::Arc<crate::object::notice::NoticeObject>),
     /// A console, which reads the serial line and nothing else: nothing posts
     /// a serial byte, so it parks on its own thread's watch until its re-poll.
     Console(Deadline),
@@ -90,6 +92,7 @@ pub(super) fn sys_write(h: RawHandle, buf: &UserBytes) -> u64 {
 fn read_block(object: &KObjectRef) -> ReadBlock {
     match object {
         KObjectRef::Device(_) => unreachable!("a device claim blocks via `read_block_device`"),
+        KObjectRef::Notice(n) => ReadBlock::Notice(n.clone()),
         KObjectRef::Console(_) => {
             // Nothing posts a serial-console key, so the timer alone wakes it.
             const CONSOLE_REPOLL: Cadence = Cadence::every(
@@ -147,6 +150,21 @@ pub(super) fn sys_read(h: RawHandle, buf: &mut UserBytesMut) -> u64 {
                     class,
                     Deadline::never(),
                     || pipe::has_data(id),
+                )
+                .is_err()
+                {
+                    return cancelled();
+                }
+            }
+            Err(ReadBlock::Notice(notice)) => {
+                let parkable = crate::scheduler::Parkable::at_entry();
+                if watch::wait_until(
+                    &parkable,
+                    notice.watch(),
+                    0,
+                    WaitClass::Other,
+                    Deadline::never(),
+                    || notice.readable(),
                 )
                 .is_err()
                 {

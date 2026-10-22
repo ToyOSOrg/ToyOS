@@ -1,5 +1,5 @@
 //! `/system/bin/grants`: which folder of the session's home an installed
-//! package is granted, asked of `/system/bin/supervisor`, which alone keeps
+//! package is granted, asked of the supervisor, which alone keeps
 //! them (`toyos_manifest::grants`).
 //!
 //! - `grants list`: every grant, one line each: package, access, folder.

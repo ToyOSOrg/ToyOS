@@ -27,6 +27,7 @@ pub mod input;
 pub mod inventory;
 pub mod log;
 pub mod pci;
+pub mod quit;
 pub mod ring;
 pub mod syscall;
 pub mod trace;

@@ -77,10 +77,11 @@ pub enum ObjectKind {
     Process = 12,
     Null = 13,
     Job = 14,
+    Notice = 15,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 15] = [
+    pub const ALL: [ObjectKind; 16] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -96,6 +97,7 @@ impl ObjectKind {
         Self::Process,
         Self::Null,
         Self::Job,
+        Self::Notice,
     ];
 
     pub const fn from_word(word: u32) -> Option<Self> {

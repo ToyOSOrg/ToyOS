@@ -34,9 +34,11 @@ name is a `#[test]` in the named crate or a `METAL` row, and reverting the behav
 - host `broken_data_volume_is_absent`, `data_candidate_with_bad_geometry_is_absent`: a bad DATA
   candidate is absent, not formatted.
 - host `block_duplicate_id`: two disks with one identity are refused.
-- metal `root_from_memory`: ROOT mounts from the loader's image with no storage command before init.
-- metal `root_withheld_refused`: a handoff with no ROOT image is refused by name; brings back
-  `loader-withholds-root` in the loader as well as the kernel.
+- metal `root_from_memory`: the supervisor's SYSTEM file server serves ROOT out of the loader's
+  image, with no storage command before the supervisor reads the manifest.
+- metal `boot_image_withheld_refused`: a handoff whose supervisor, file server or ROOT image is
+  empty or outside the loader's memory is refused by name before `mm::init`; brings in a loader
+  word that withholds one, read by the loader and the kernel.
 - metal `kernel_args_layout_refused`: a loader of another `KernelArgs` layout is refused first;
   brings back `loader-writes-no-layout` in the loader as well as the kernel.
 - metal `boot_from_power_on`: the power-on spans are the loader's counts at the kernel's rate.

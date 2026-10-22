@@ -1,14 +1,19 @@
-//! fileserver: one role's file server — DATA, LOG or BOOT — serving the directories
-//! of that role as capabilities.
+//! fileserver: one role's file server — SYSTEM, DATA, LOG or BOOT — serving the
+//! directories of that role as capabilities.
 //!
 //! **What it holds**: the acceptor of its role's one port, endowed by the
-//! supervisor under `serve:fs:<role>`; for its volume, `block` in its
-//! namespace, a connector to the block service minted for its role's
-//! partition alone — every DATA partition, or the one the loader named,
-//! read-only for the boot volume; and nothing else of the machine. Two DATA
-//! partitions are refused by name, never guessed between
-//! (`fileserver::data::find`). Argv is the role, and for LOG and BOOT the
-//! unique GUID of the partition the loader named for it.
+//! supervisor under `serve:fs:<role>`; for its volume, SYSTEM's ROOT image
+//! (`ROOT_IMAGE_LABEL`), which needs no disk, or `block` in its namespace, a
+//! connector to the block service minted for its role's partition alone —
+//! every DATA partition, or the one the loader named, read-only for the boot
+//! volume; and nothing else of the machine. Two DATA partitions are refused by
+//! name, never guessed between (`fileserver::data::find`). Argv is the role,
+//! and for LOG and BOOT the unique GUID of the partition the loader named for
+//! it.
+//!
+//! **SYSTEM is the first program the supervisor starts**, from its boot image
+//! and before any file can be read, so it needs no file and no library to
+//! serve `/system`.
 //!
 //! **A connection is what its grant says** (`toyos::fs::Grant`): the badge
 //! the supervisor minted its connector with, which the kernel stamped on it and
@@ -54,6 +59,7 @@ use fileserver::ram::Ram;
 use fileserver::fat::FatVolume;
 use fileserver::resolve::{self, Found, Refusal as Escape, Resolved};
 use fileserver::rights;
+use fileserver::root::RootVolume;
 use fileserver::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
 use fileserver::writeback::WriteBack;
 use toyos::endow::{self, Endowments};
@@ -105,6 +111,7 @@ const TOKEN_STREAM: u64 = 2 << 32;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Role {
+    System,
     Data,
     Log,
     Boot,
@@ -113,6 +120,7 @@ enum Role {
 impl Role {
     fn parse(text: &str) -> Option<Self> {
         match text {
+            "system" => Some(Self::System),
             "data" => Some(Self::Data),
             "log" => Some(Self::Log),
             "boot" => Some(Self::Boot),
@@ -122,6 +130,7 @@ impl Role {
 
     fn name(self) -> &'static str {
         match self {
+            Self::System => "system",
             Self::Data => "data",
             Self::Log => "log",
             Self::Boot => "boot",
@@ -203,7 +212,7 @@ impl Exports {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let role = args.get(1).and_then(|r| Role::parse(r)).unwrap_or_else(|| {
-        panic!("fileserver: started with {args:?}; the first argument is a role: data, log or boot")
+        panic!("fileserver: started with {args:?}; the first argument is a role: system, data, log or boot")
     });
     let mut guid = None;
     for arg in args.iter().skip(2) {
@@ -269,6 +278,7 @@ fn data_partitions() -> Result<Vec<[u8; 16]>, String> {
 
 fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> Box<dyn Volume> {
     match role {
+        Role::System => Box::new(root()),
         Role::Data => match fileserver::data::find(data_partitions().as_deref().map_err(String::clone)) {
             Located::Nowhere => ram(roots, "this machine has no DATA partition"),
             Located::Served(guid) => match served(guid) {
@@ -294,6 +304,20 @@ fn open_volume(role: Role, guid: Option<&str>, roots: &[&str]) -> Box<dyn Volume
             }
         }
     }
+}
+
+/// ROOT, out of the image the supervisor endowed: for the life of this
+/// process, which is the volume's. Without it there is no `/system`, and the
+/// supervisor that started this server is told by its end.
+fn root() -> RootVolume {
+    let label = toyos_abi::syscall::ROOT_IMAGE_LABEL;
+    let handle = Endowments::get()
+        .take::<toyos::OwnedHandle>(label)
+        .unwrap_or_else(|| panic!("fileserver: the system role was started without `{label}`"));
+    let image = toyos::shm::Immutable::adopt(handle)
+        .unwrap_or_else(|why| panic!("fileserver: `{label}` is no image nobody writes: {why}"));
+    let bytes: &'static [u8] = Box::leak(Box::new(image)).as_slice();
+    RootVolume::mount(bytes).unwrap_or_else(|why| panic!("fileserver: {why}"))
 }
 
 fn absent(roots: &[&str], why: String) -> Box<dyn Volume> {

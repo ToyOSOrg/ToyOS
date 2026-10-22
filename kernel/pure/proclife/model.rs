@@ -13,6 +13,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use crate::proclife::quit::{self, Notice, Owed, Reason};
 use crate::proclife::table::{Lifecycle, Processes};
 use crate::proclife::teardown::{self, Leave};
 use crate::proclife::tree::{self, Admit, Publish};
@@ -150,6 +151,17 @@ pub struct World {
     retired: BTreeSet<Pid>,
     /// Objects a handle was minted on after their last had gone.
     minted_retired: BTreeSet<Pid>,
+    /// Each process's notice, which the kernel keeps on an object of its own.
+    notices: BTreeMap<Pid, Notice>,
+    /// The quit that put the reason a notice holds there, by the quit's
+    /// number: a child placed under one holding it holds the parent's.
+    asked_by: BTreeMap<Pid, u32>,
+    /// Every process each quit asked, by the quit's number.
+    reached: BTreeSet<(u32, Pid)>,
+    /// What each quit found below its target as it began.
+    subtrees: BTreeMap<u32, BTreeSet<Pid>>,
+    /// The quit laws broken so far, each as the moment that broke it said it.
+    quit_faults: BTreeSet<String>,
 }
 
 impl Processes for World {
@@ -203,6 +215,11 @@ impl World {
             handles: BTreeSet::new(),
             retired: BTreeSet::new(),
             minted_retired: BTreeSet::new(),
+            notices: BTreeMap::new(),
+            asked_by: BTreeMap::new(),
+            reached: BTreeSet::new(),
+            subtrees: BTreeMap::new(),
+            quit_faults: BTreeSet::new(),
         }
     }
 
@@ -311,8 +328,28 @@ impl World {
         self.procs.values().filter(|p| p.claims > 0).count() + reaped
     }
 
-    /// `pid`'s entry, with one thread, which is its main one.
+    /// `pid`'s entry, with one thread, which is its main one, and its notice,
+    /// started as `Admission::land` starts it in the same hold.
     pub fn insert(&mut self, pid: Pid, node: Node) {
+        let notice = match node.parent() {
+            None => Notice::new(),
+            Some(parent) => {
+                let held = self.notices[&parent];
+                let notice = Notice::under(&held);
+                // Q3. A child placed under a process asked to quit and unread
+                // starts holding the reason.
+                if held.readable() && !notice.readable() {
+                    self.quit_faults.insert(alloc::format!(
+                        "pid {pid} started unasked under pid {parent}, whose notice held a reason unread",
+                    ));
+                }
+                if let Some(&by) = self.asked_by.get(&parent).filter(|_| notice.readable()) {
+                    self.asked_by.insert(pid, by);
+                }
+                notice
+            }
+        };
+        self.notices.insert(pid, notice);
         let mut threads = BTreeMap::new();
         threads.insert(Tid(0), ThreadLocation::Scheduled);
         self.procs.insert(
@@ -515,6 +552,93 @@ impl World {
         self.published.get(&pid).copied()
     }
 
+    pub fn notice(&self, pid: Pid) -> Notice {
+        self.notices[&pid]
+    }
+
+    /// A process listening to its notice: `listen` for an armed watch, as a
+    /// test builds the tree its ops start from.
+    pub fn listen(&mut self, pid: Pid) {
+        self.notices.get_mut(&pid).expect("listen: a process's notice").listen();
+    }
+
+    /// A read of `pid`'s notice, which takes the reason it holds.
+    pub fn read_notice(&mut self, pid: Pid) -> Option<Reason> {
+        let read = self.notices.get_mut(&pid)?.read();
+        if read.is_some() {
+            self.asked_by.remove(&pid);
+        }
+        read
+    }
+
+    /// Quit number `by` beginning at `target`: what is below it then is what
+    /// it must reach.
+    pub fn begin_quit(&mut self, by: u32, target: Pid) {
+        let mut below = BTreeSet::new();
+        let mut at = alloc::vec![target];
+        while let Some(pid) = at.pop() {
+            if let Some(proc) = self.procs.get(&pid) {
+                below.insert(pid);
+                at.extend_from_slice(proc.node.children());
+            }
+        }
+        self.subtrees.insert(by, below);
+    }
+
+    /// `quit::ask` for quit number `by`, its notice taken out of the table
+    /// and put back as the kernel's lock gives it: one act.
+    pub fn ask(&mut self, by: u32, pid: Pid, reason: Reason, owed: &mut Owed) -> quit::Asked {
+        let Some(mut notice) = self.notices.get(&pid).copied() else { return quit::Asked::Gone };
+        if self.procs.get(&pid).is_some_and(|p| !p.tearing_down()) && quit::decide(&notice) == quit::Decision::Kill {
+            self.judge_kill(by, pid, &notice);
+        }
+        let asked = quit::ask(self, pid, &mut notice, reason, owed);
+        self.notices.insert(pid, notice);
+        if asked == quit::Asked::Notified {
+            self.judge_notice(by, pid);
+        }
+        asked
+    }
+
+    /// A quit's claim of `pid`, made apart from its decision as
+    /// `mutate-quit-checks-and-kills-in-two-acts` makes it.
+    pub fn claim_apart(&mut self, by: u32, pid: Pid, owed: &mut Owed) {
+        let notice = self.notices[&pid];
+        self.judge_kill(by, pid, &notice);
+        let _ = tree::claim(self, pid, End::Killed, &mut owed.kill);
+    }
+
+    /// Q1 and Q2, at a quit's kill of `pid`, whose notice is `notice`.
+    fn judge_kill(&mut self, by: u32, pid: Pid, notice: &Notice) {
+        // Q1. A quit kills a process that never listened or holds a reason
+        // unread, and no other: a read never comes between its check and its kill.
+        if notice.listened() && !notice.readable() {
+            self.quit_faults.insert(alloc::format!("pid {pid} was killed by quit {by} after it read every reason asked of it"));
+        }
+        // Q2. A quit asks a process once.
+        if notice.readable() && self.asked_by.get(&pid) == Some(&by) {
+            self.quit_faults.insert(alloc::format!("pid {pid} was killed by quit {by}, which had already asked it"));
+        }
+    }
+
+    /// Q4 and Q5, as quit `by` puts its reason in `pid`'s notice.
+    fn judge_notice(&mut self, by: u32, pid: Pid) {
+        self.asked_by.insert(pid, by);
+        self.reached.insert((by, pid));
+        // Q4. A quit asks only a process that listens, and nothing below one
+        // that does not.
+        let mut at = Some(pid);
+        while let Some(above) = at {
+            if !self.notices[&above].listened() {
+                self.quit_faults.insert(alloc::format!(
+                    "quit {by} asked pid {pid}, and pid {above}, at or above it, never listened",
+                ));
+            }
+            let below = &self.subtrees[&by];
+            at = self.procs[&above].node.parent().filter(|parent| below.contains(parent));
+        }
+    }
+
     /// The idle pass taking an entry, which is what `reap_finished` returns for
     /// the caller to drop.
     pub fn reap(&mut self, pid: Pid) {
@@ -580,6 +704,7 @@ impl World {
         for pid in &self.landed_under_claimed {
             out.push(alloc::format!("pid {pid} landed unclaimed under a place whose end was already claimed"));
         }
+        out.extend(self.quit_faults.iter().cloned());
         // L13. No handle is minted on an object whose last one has gone:
         // `HandleEntry::new` asserts it.
         for pid in &self.minted_retired {
@@ -618,6 +743,15 @@ impl World {
             let gone = self.departing.get(&(pid, tid)).is_some_and(|d| d.at == Out::Gone);
             if !gone && self.procs.get(&pid).is_some_and(|p| p.location(tid).is_some()) {
                 out.push(alloc::format!("pid {pid} tid {tid} was killed and never left"));
+            }
+        }
+        // Q5. A quit reaches everything below its target: each is asked or ended.
+        for (&by, below) in &self.subtrees {
+            for &pid in below {
+                let ended = self.published.contains_key(&pid) || self.procs.get(&pid).is_some_and(|p| p.claims > 0);
+                if !ended && !self.reached.contains(&(by, pid)) {
+                    out.push(alloc::format!("pid {pid} was below quit {by}'s target, and was neither asked nor ended"));
+                }
             }
         }
         for &block in &self.tls_mapped {

@@ -552,7 +552,7 @@ impl<IO: BlockIO> Formatted<IO> {
         Ok(Self(Mounted { io, sb, alloc, _mode: PhantomData }))
     }
 
-    /// Name this filesystem, so a role's kernel argument can select it.
+    /// Name this filesystem, so whoever serves it can say which one it is.
     ///
     /// A separate act from formatting: a volume nothing names is legal, and
     /// nothing here invents a name for one. Persisted by [`Self::into_io`].

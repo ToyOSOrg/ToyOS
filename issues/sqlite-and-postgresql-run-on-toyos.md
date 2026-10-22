@@ -50,8 +50,7 @@ the owner's challenge):
 
 **What SQLite needs**: record locks the file server serves
 (`issues/std-file-lock-answers-ok-and-locks-nothing.md`), unlink-while-open,
-`O_EXCL` on `/tmp` (`issues/create-new-on-a-kernel-path-is-not-exclusive.md`),
-`st_nlink` 1 (`issues/libc-answers-st-nlink-0.md`), a sub-second clock
+`O_EXCL` on `/tmp` and `st_nlink` 1 (both done), a sub-second clock
 (`issues/userlands-wall-clock-has-whole-seconds-and-an-mtime-has-nanoseconds.md`)
 and a directory `fsync`, which this track owns: SQLite syncs a directory after
 the unlink that commits a transaction in its default journal mode, and

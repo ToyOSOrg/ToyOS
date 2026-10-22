@@ -8,7 +8,8 @@ opened: 2026-09-25
 
 The loader reads ROOT's filesystem whole, the extent its superblock states
 (`loader/src/rootimage.rs`), and the kernel keeps it for the machine's
-life. `Superblock::check` holds that extent equal to the partition, and
+life, read-only, for the supervisor's SYSTEM file server to serve
+(`kernel/src/bootimage.rs`, `system/fileserver/src/root.rs`). `Superblock::check` holds that extent equal to the partition, and
 `build/image.rs` builds the volume at the blocks its contents use, rounded up to
 the 1 MiB partition alignment, so what is read and kept is what ROOT carries.
 The cost is the payload.
@@ -21,10 +22,41 @@ in turn, each carrying at most `SHARED_BOOT_BYTES` (64 MiB) of test binaries;
 carries `tests/images/testcases.toml`'s own programs, 13 MiB (3328 blocks), where every test
 boot carried the whole 619 MiB catalogue before.
 
-**Every resident `/system` page is in RAM twice.** `ReadOnlyBacking::read_page`
-(`kernel/src/file_backing.rs`) copies each page a program touches out of the
-image into a file-cache page, so the image's copy and the cache's are both
-held.
+**A running `/system` program's pages are in RAM three times.** Its spawn
+reads the whole binary through SYSTEM into a memory object of the spawner's
+(`toyos::process::Image`, rounded up to 2 MiB), which lives as long as the
+child pages from it, and `SharedImage::read_page`
+(`kernel/src/file_backing.rs`) copies each page the child touches out of that
+object: ROOT's copy, the image's and the page's are all held. Before ROOT
+left the kernel, the kernel paged a program from ROOT and the image's copy was
+not there. Measured on QEMU's x86-64 machine booting
+`tests/images/testcases.toml`, toybox's `free` after the boot: 330 MiB in use
+at `b9e4c5862`, 384 MiB once ROOT left the kernel, one boot each, the same
+session; the 54 MiB are the running services' images, each rounded up to
+2 MiB, and the SYSTEM file server.
+
+**Per held child, the image is 2 MiB of a 16 MiB cost, and it is what puts
+255 children past a 4 GiB guest.** `libc_children`'s `spawn_children_cap`
+holds 255 unwaited children of one `/system` program. Measured on QEMU's x86-64
+machine, `tests/images/libccase.toml`, 4 GiB, toybox's `free` every 50 held
+children, one boot each in the same session (a scratch patch to the case, not
+committed):
+
+| held | used at `6ae79ccaa` (kernel pages from ROOT) | used at `25d787482` (spawn reads an image) |
+|---|---|---|
+| 0 | 126 MiB | 178 MiB |
+| 50 | 836 MiB | 988 MiB |
+| 100 | 1546 MiB | 1798 MiB |
+| 150 | 2254 MiB | 2606 MiB |
+| 200 | 2964 MiB | 3416 MiB |
+| 250 | 3674 MiB | refused at 241 (`ENOMEM`) |
+
+That is 14.2 MiB a child at the base and 16.2 MiB with the image, the
+difference one image rounded up to 2 MiB. Each child's exit record says
+`peak=2MB allocs=2` in both: `peak` counts what a process allocated, and neither
+its image nor what the kernel holds for it. So the image costs the case its
+last 14 children, and the 14.2 MiB beside it are 2 MiB pages, which
+`process-memory-is-2-mib-pages-and-that-caps-the-process-count.md` removes.
 
 **On the dev host the fast tier's peak host memory is now below `main`'s.** An
 alternating A/B of `cargo test` against `origin/main` at `b0adc600`, three arms
@@ -46,6 +78,11 @@ complete K ms`; a test boot on QEMU reads 1390, 108 (14) and 344.
 Not measured: the T14. What that run owes is that line off the stick and off
 NVMe, against the base's `Boot: complete`.
 
-Exit: either measured and accepted by the owner as the price, or the file
-cache serving the image's own page rather than a copy, before the self-update's signature check makes the whole
-read a fixed cost.
+Exit: a program's pages mapped from ROOT's own read-only pages rather than
+copied, before the self-update's signature check makes the whole read a fixed
+cost. The orchestrator ruled the mechanism (2026-10-22): the memory design's
+stages 2, 4 and 6, namely 4 KiB pages, so an image is a program's size and not
+2 MiB; memory-object subranges; and immutable file objects shared across
+spawns, so that SYSTEM's object for a ROOT file is a subrange of the boot
+image. No dedicated call over part of a boot image is to be built.
+`spawn_children_cap` holds all 255 children again once that has landed.

@@ -10,8 +10,10 @@ What the installed product's disks look like, from the block device up to a
 path. **Where each layer runs is the small-kernel track's**
 (`issues/the-kernel-is-small-interrupts-post-and-threads-wait.md`,
 stages 3 and 4, owner ruling 2026-09-26): block services and file servers are
-userland programs, the VFS is a client library, and the kernel keeps ROOT's
-in-memory read path and nothing else of storage. The plan this track carried
+userland programs and the VFS is a client library. The kernel keeps no
+filesystem of ROOT: owner ruling 2026-10-21, which superseded the in-memory read
+path the 2026-09-26 ruling kept, hands ROOT's bytes to the supervisor and its
+file server serves them (Filesystem, below). The plan this track carried
 before that ruling — a kernel VFS forwarding to userland servers through a
 mount protocol — is superseded, and nothing here builds it.
 
@@ -45,7 +47,7 @@ volume, handed to whichever server recognises its superblock.
 | partition | filesystem | mounts as | writable |
 |---|---|---|---|
 | ESP | FAT32, firmware's rule | `/boot` | kernel only |
-| ROOT | bcachefs image the build writes | `/system` | no; versioned per release |
+| ROOT | bcachefs image the build writes | `/system` | no; signed per release |
 | DATA | bcachefs, formatted on first boot | `/apps`, `/config`, `/home`, `/state` | yes |
 | LOG | FAT32 while a Mac has to read the dev stick | `/log` | yes |
 
@@ -55,18 +57,20 @@ Roles come from partitions, so both shapes are the same code.
 
 ## Filesystem
 
-**The kernel reads ROOT and nothing more.** The loader reads the selected
-slot's ROOT into memory and the kernel mounts it read-only with bcachefs's read
-half; no code that changes a disk is in the kernel. `/system` is immutable by
-design: the installer and the updater write it offline, checkpoint it and mark
-the journal clean; a kernel that finds a dirty journal under `/system` refuses
-by name, because replay is a write-path job and a system image needing one is a
-broken install.
+**ROOT is opaque to the kernel.** The loader reads the selected slot's ROOT,
+the supervisor and the file server into memory, each a section of the slot's
+signed header, and the kernel keeps their pages read-only, starts the
+supervisor from its image and hands it the other two. The supervisor starts the
+file server's SYSTEM role from its image, serving ROOT read-only out of that
+memory, before it reads a file. `/system` is immutable by design: the installer
+and the updater write it offline, checkpoint it and mark the journal clean; a
+server that finds a dirty journal under `/system` refuses by name, because
+replay is a write-path job and a system image needing one is a broken install.
 
-**Every other filesystem is a file server per role** — LOG, DATA, BOOT — over
-its block service's sessions, linking the whole crate it serves: a server that
-crashes loses its own role and nothing else, and no foreign parser runs in the
-kernel on bytes another OS wrote.
+**Every filesystem is a file server per role** — SYSTEM, LOG, DATA, BOOT —
+SYSTEM over ROOT's bytes in memory and every other over its block service's
+sessions, linking the whole crate it serves: a server that crashes loses its
+own role and nothing else, and no filesystem parser runs in the kernel.
 
 **Multi-device is a filesystem property, not a block-layer subsystem.** Pooling
 across disks, replicas per subvolume, tiering with a fast foreground device,
@@ -124,8 +128,9 @@ what is left here is built on them.
 5. Multi-device, replicas, tiering, snapshots, as the bcachefs crate grows into
    them.
 6. A full secure boot chain, the end state of `/system`'s immutability:
-   firmware verifies the bootloader, the bootloader the kernel, the kernel the
-   ROOT image it mounts, and a link that fails is refused by name.
+   firmware verifies the bootloader, the bootloader every section of the slot
+   it boots (built: the signed header binds the kernel, the two boot programs
+   and ROOT), and a link that fails is refused by name.
 7. NTFS read-only, postponed here by the owner.
 
 LOG stays its own FAT32 partition through the dev phase, because a Mac has to

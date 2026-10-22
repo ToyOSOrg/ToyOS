@@ -37,7 +37,7 @@ const _: () = assert!(
 );
 
 /// A filesystem's name: sixteen bytes in its superblock, printed as 32 hex
-/// digits, and what a role's kernel argument names it by.
+/// digits.
 ///
 /// Not a partition GUID and never mixed with one — a partition is where a
 /// filesystem's bytes are, and one filesystem may occupy several.

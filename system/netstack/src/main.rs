@@ -60,7 +60,7 @@ use client::{Client, ClientRx, HANDSHAKE_TIMEOUT, MAX_PENDING_CONNS, PendingConn
 /// identifies the card rather than by the slot firmware put it in, and each
 /// with the driver that opens it. The manifest row spells the same matcher and
 /// the claim arrives under its text, so which of these exists is
-/// `/system/bin/supervisor`'s answer and not this program's — at most one is
+/// the supervisor's answer and not this program's — at most one is
 /// ever endowed, and a machine with none is a machine netstack leaves.
 ///
 /// `1af4:1041` is virtio's transitional device id `1000 + 1` for a network

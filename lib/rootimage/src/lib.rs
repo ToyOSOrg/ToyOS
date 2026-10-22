@@ -1,7 +1,8 @@
-//! ROOT in memory: every decision the loader and the kernel make about the
-//! image, pure. The loader reads the partition its slot names in bounded
-//! [`chunk`]s; the kernel keeps the extent it is handed only once [`handoff`]
-//! finds it inside memory the loader allocated.
+//! ROOT and the boot programs in memory: every decision the loader and the
+//! kernel make about the images, pure. The loader reads the partition its slot
+//! names in bounded [`chunk`]s; the kernel keeps each extent it is handed only
+//! once [`handoff`] finds it inside memory the loader allocated and no other
+//! extent's.
 //!
 //! No `alloc`, no firmware, no `unsafe`: the loader and the kernel supply the
 //! device, the candidates and the map.

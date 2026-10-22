@@ -21,5 +21,6 @@ pub mod ps2server;
 pub mod qemu;
 pub mod screen;
 pub mod serial;
+pub mod slots;
 /// A VNC client, as far as resizing a host window takes one.
 pub mod vnc;

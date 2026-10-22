@@ -560,6 +560,8 @@ fn arm(
         Some(old) => Ok(state.polls.renew(old, poll.clone())),
     });
     match kept {
+        // Only a watch that stands listens: a refused one changes nothing.
+        Ok(Ok(true)) if flags.readable() => ops::watched_readable(object),
         Ok(Ok(true)) => {}
         Ok(Err(full)) => return Err(full),
         // A newer watch took the handle's place during the look, or the

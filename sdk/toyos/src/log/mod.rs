@@ -5,7 +5,7 @@
 //! [`ring`]): its stdout and stderr, and what it says with [`say!`](crate::say),
 //! [`warn!`](crate::warn) and [`error!`](crate::error), each stamped with its
 //! time, severity and thread as it is written ([`stdio`]). Whose lines they are is decided where the ring was made:
-//! `/system/bin/supervisor` names each ring to `/system/bin/logkeeper`, and nothing a
+//! the supervisor names each ring to `/system/bin/logkeeper`, and nothing a
 //! program writes can change the name.
 //!
 //! **The kernel's records** are read with [`LogTail`]. The kernel keeps no

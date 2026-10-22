@@ -19,6 +19,15 @@ extern crate alloc;
 #[cfg(test)]
 #[path = "../../src/alarmreq.rs"]
 mod alarmreq;
+
+#[cfg(test)]
+#[path = "../../src/sigreq.rs"]
+mod sigreq;
+
+#[cfg(test)]
+#[path = "../../src/errtext.rs"]
+mod errtext;
+
 #[cfg(test)]
 #[path = "../../src/arch/mod.rs"]
 mod arch;
@@ -84,6 +93,10 @@ mod utf8;
 
 #[cfg(test)]
 mod alarm_requests;
+#[cfg(test)]
+mod signal_dispositions;
+#[cfg(test)]
+mod error_texts;
 #[cfg(test)]
 mod datagram_sends;
 #[cfg(test)]

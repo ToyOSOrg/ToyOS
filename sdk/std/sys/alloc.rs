@@ -4,7 +4,7 @@ use toyos_abi::syscall::{self, MmapFlags, MmapProt};
 
 use crate::alloc::Layout;
 use crate::ptr;
-use crate::sync::atomic::{AtomicI32, Ordering};
+use crate::sys::sync::Mutex;
 
 /// dlmalloc backing allocator that provides memory via mmap/munmap syscalls.
 struct ToyOsAllocator;
@@ -54,20 +54,21 @@ unsafe impl Sync for SyncDlmalloc {}
 static DLMALLOC: SyncUnsafeCell<SyncDlmalloc> =
     SyncUnsafeCell::new(SyncDlmalloc(dlmalloc::Dlmalloc::new_with_allocator(ToyOsAllocator)));
 
-static LOCKED: AtomicI32 = AtomicI32::new(0);
+/// std's futex mutex: a contended allocation sleeps rather than spinning
+/// through the holder's slice, which may be inside the `mmap` dlmalloc makes.
+static LOCK: Mutex = Mutex::new();
 
 struct DropLock;
 
 fn lock() -> DropLock {
-    while LOCKED.swap(1, Ordering::Acquire) != 0 {
-        core::hint::spin_loop();
-    }
+    LOCK.lock();
     DropLock
 }
 
 impl Drop for DropLock {
     fn drop(&mut self) {
-        LOCKED.store(0, Ordering::Release);
+        // SAFETY: a `DropLock` exists only while `lock` holds `LOCK`.
+        unsafe { LOCK.unlock() }
     }
 }
 

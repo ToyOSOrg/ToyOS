@@ -9,8 +9,8 @@ use toyos_fat32::{BlockAccess, Fat32, FatTime, IoError};
 use toyos_gpt::Guid;
 
 /// The image that goes on the ROOT partition, named by a UUID **derived, never
-/// drawn**: two builds of one tree have to agree on the name the kernel
-/// argument carries.
+/// drawn**: two builds of one tree have to agree on the name the file server
+/// serving it says it by (`toyos_osrelease::ROOT_SAID`).
 ///
 /// **A set, not a sequence.** Both lists are sorted by name here, so the
 /// volume's bytes and the UUID over them are a function of what the caller
@@ -153,9 +153,8 @@ fn root_uuid(files: &[&(String, Vec<u8>)], symlinks: &[&(String, String)]) -> Fs
     FsUuid(uuid)
 }
 
-/// The name the ROOT image `bytes` carries, read back out of its superblock, so
-/// the kernel argument says what the image says rather than what whoever
-/// assembled it meant to stamp.
+/// The name the ROOT image `bytes` carries, read back out of its superblock:
+/// what the image says rather than what whoever assembled it meant to stamp.
 pub fn root_uuid_of(bytes: &[u8]) -> FsUuid {
     superblock_of(bytes).uuid
 }
@@ -190,28 +189,45 @@ pub struct SecondSlot {
     pub root_bytes: u64,
 }
 
-/// The sections of one image, as a slot carries them and an update sends them.
-struct Sections {
-    kernel: Vec<u8>,
+/// What one signed image is made of but its boot parameter: the kernel, the
+/// two programs the kernel starts the machine with — the supervisor, and the
+/// file server that serves ROOT to it — and ROOT, which carries neither
+/// program (`toyos_update::image`).
+#[derive(Clone, Copy)]
+pub struct Release<'a> {
+    pub kernel: &'a [u8],
+    pub supervisor: &'a [u8],
+    pub fileserver: &'a [u8],
+    pub root: &'a [u8],
+}
+
+/// The signed header of one image and the boot parameter it names.
+struct Signed {
     cmdline: Vec<u8>,
     signed: [u8; toyos_update::image::SIGNED_BYTES],
 }
 
-fn sections(kernel: &[u8], root: &[u8], params: &str, signing: Signing<'_>) -> Sections {
-    let cmdline = cmdline_with_root(root_uuid_of(root), params).into_bytes();
-    let header = toyos_update::image::Header::of(signing.version, kernel, &cmdline, root);
-    Sections { kernel: kernel.to_vec(), signed: signing.key.sign(&header), cmdline }
+fn signed(release: Release<'_>, params: &str, signing: Signing<'_>) -> Signed {
+    let cmdline = params.as_bytes().to_vec();
+    let header = toyos_update::image::Header::of(signing.version, &sections(release, &cmdline));
+    Signed { signed: signing.key.sign(&header), cmdline }
+}
+
+/// `release` and `cmdline` as the signed header names them.
+fn sections<'a>(release: Release<'a>, cmdline: &'a [u8]) -> toyos_update::image::Sections<'a> {
+    let Release { kernel, supervisor, fileserver, root } = release;
+    toyos_update::image::Sections { kernel, cmdline, supervisor, fileserver, root }
 }
 
 /// The image `ssh <machine> update` takes on its standard input: the signed
-/// header, then the kernel, the boot parameter and ROOT, in the order the
-/// header names them (`toyos_update::image`).
-pub fn update_image(kernel: &[u8], root: &[u8], params: &str, signing: Signing<'_>) -> Vec<u8> {
-    let s = sections(kernel, root, params, signing);
+/// header, then every section in the order the header names them
+/// (`toyos_update::image`), ROOT last.
+pub fn update_image(release: Release<'_>, params: &str, signing: Signing<'_>) -> Vec<u8> {
+    let s = signed(release, params, signing);
     let mut out = s.signed.to_vec();
-    out.extend_from_slice(&s.kernel);
-    out.extend_from_slice(&s.cmdline);
-    out.extend_from_slice(root);
+    for section in sections(release, &s.cmdline).all() {
+        out.extend_from_slice(section);
+    }
     out
 }
 
@@ -224,9 +240,8 @@ pub fn update_image(kernel: &[u8], root: &[u8], params: &str, signing: Signing<'
 /// slot A's FAT and ROOT, marked, and slot B's where `second` asks for one.
 pub fn create_boot_image(
     arch: Arch,
-    kernel_bytes: &[u8],
     bl_bytes: &[u8],
-    root_bytes: &[u8],
+    release: Release<'_>,
     params: &str,
     signing: Signing<'_>,
     second: Option<SecondSlot>,
@@ -240,11 +255,12 @@ pub fn create_boot_image(
     let a = (crate::gptwrite::random_guid(), crate::gptwrite::random_guid());
     let b = second.map(|room| (crate::gptwrite::random_guid(), crate::gptwrite::random_guid(), room));
 
-    let s = sections(kernel_bytes, root_bytes, params, signing);
-    // Room for a kernel twice this one's size beside it, so an update can
-    // write a new kernel into a slot's volume before the old one is gone.
-    let slot_bytes = round_up_sectors(((kernel_bytes.len() * 2 + ESP_FREE_BYTES) * 64 / 63).max(FAT32_MIN_BYTES));
-    let a_boot = create_slot_volume(Some(&s), slot_bytes);
+    let s = signed(release, params, signing);
+    // Room for the slot's files twice over, so an update can write new ones
+    // into a slot's volume before the old ones are gone.
+    let files = release.kernel.len() + release.supervisor.len() + release.fileserver.len();
+    let slot_bytes = round_up_sectors(((files * 2 + ESP_FREE_BYTES) * 64 / 63).max(FAT32_MIN_BYTES));
+    let a_boot = create_slot_volume(Some(SlotFiles { release, cmdline: &s.cmdline, signed: &s.signed }), slot_bytes);
     let slot = |(boot, root): (Guid, Guid), version| toyos_update::slots::Slot { boot: boot.0, root: root.0, version };
     let table = toyos_update::slots::Table {
         sequence: 1,
@@ -264,7 +280,7 @@ pub fn create_boot_image(
         // Finder, in Windows and in Linux on plug-in, with nothing configured.
         Part::full("log partition", "ToyOS log", Guid::MICROSOFT_BASIC, log_guid, create_log_volume(), Some(Volume::Fat32)),
         Part::full("slot A's volume", "ToyOS slot A", Guid::TOYOS_BOOT, a.0, a_boot, Some(Volume::Fat32)),
-        Part::full("slot A's ROOT", "ToyOS root A", Guid::TOYOS_ROOT, a.1, root_bytes.to_vec(), Some(Volume::Root)),
+        Part::full("slot A's ROOT", "ToyOS root A", Guid::TOYOS_ROOT, a.1, release.root.to_vec(), Some(Volume::Root)),
     ];
     if let Some((boot, root, room)) = b {
         parts.push(Part::full("slot B's volume", "ToyOS slot B", Guid::TOYOS_BOOT, boot, create_slot_volume(None, slot_bytes), Some(Volume::Fat32)));
@@ -274,23 +290,10 @@ pub fn create_boot_image(
     create_gpt_disk(&parts)
 }
 
-/// The boot parameter as a slot carries it: ROOT's name, then `params`.
-fn cmdline_with_root(root: FsUuid, params: &str) -> String {
-    if params.is_empty() {
-        format!("root={root}")
-    } else {
-        format!("root={root},{params}")
-    }
-}
-
 /// The actuator list an image is armed with, read back off the image.
-///
-/// `root=` is not an actuator and is on every image: this answers what a boot
-/// would *arm*, which is the other reading of the same string
-/// (`toyos_abi::boot::actuators`).
 pub fn params_of(path: &Path) -> Result<Vec<String>, String> {
     let text = cmdline_of(path)?;
-    Ok(toyos_abi::boot::actuators(&text).map(str::to_string).collect())
+    Ok(toyos_abi::boot::tokens(&text).map(str::to_string).collect())
 }
 
 /// The whole boot parameter the image's marked slot carries, read back off
@@ -628,22 +631,32 @@ fn create_esp_volume(arch: Arch, bootloader: &[u8], log_guid: Guid) -> Vec<u8> {
     volume
 }
 
-/// A slot's FAT volume of `bytes`: the kernel, its boot parameter and the
-/// signed header naming both and ROOT (`toyos_update::slots`), or nothing for
-/// a slot no image has been installed in yet.
+/// What a slot's volume carries of one image.
+struct SlotFiles<'a> {
+    release: Release<'a>,
+    cmdline: &'a [u8],
+    signed: &'a [u8],
+}
+
+/// A slot's FAT volume of `bytes`: the kernel, its boot parameter, the two
+/// boot programs and the signed header naming them and ROOT
+/// (`toyos_update::slots`), or nothing for a slot no image has been installed
+/// in yet.
 ///
-/// The parameter is ROOT's name and then the actuators this boot arms,
-/// comma-separated: handed to the kernel in `KernelArgs`, because the earliest
-/// actuator fires before `mm::init` and there is nowhere later to fetch it
-/// from. [`params_of`] is how the host asks a finished image which of them a
-/// guest booting it would arm.
-fn create_slot_volume(image: Option<&Sections>, bytes: usize) -> Vec<u8> {
+/// The parameter is the actuators this boot arms, comma-separated: handed to
+/// the kernel in `KernelArgs`, because the earliest actuator fires before
+/// `mm::init` and there is nowhere later to fetch it from. [`params_of`] is
+/// how the host asks a finished image which of them a guest booting it would
+/// arm.
+fn create_slot_volume(image: Option<SlotFiles<'_>>, bytes: usize) -> Vec<u8> {
     let mut volume = format_fat32(bytes, "TOYOS-SLOT");
     let files: Vec<(&str, &[u8])> = match image {
         Some(s) => vec![
-            (toyos_update::slots::KERNEL_FILE, &s.kernel),
-            (toyos_update::slots::CMDLINE_FILE, &s.cmdline),
-            (toyos_update::slots::SIGNED_FILE, &s.signed),
+            (toyos_update::slots::KERNEL_FILE, s.release.kernel),
+            (toyos_update::slots::CMDLINE_FILE, s.cmdline),
+            (toyos_update::slots::SUPERVISOR_FILE, s.release.supervisor),
+            (toyos_update::slots::FILESERVER_FILE, s.release.fileserver),
+            (toyos_update::slots::SIGNED_FILE, s.signed),
         ],
         None => Vec::new(),
     };
@@ -962,7 +975,17 @@ mod tests {
     /// A ROOT image with one file in it, for the tests that need a real one
     /// rather than a placeholder: the assembler reads its superblock.
     fn tiny_root() -> Vec<u8> {
-        create_root_image(&[("bin/supervisor".to_string(), b"supervisor".to_vec())], &[], true)
+        create_root_image(&[("etc/os-release".to_string(), b"release".to_vec())], &[], true)
+    }
+
+    /// Placeholder programs: what these tests judge is where each goes.
+    fn release<'a>(kernel: &'a [u8], root: &'a [u8]) -> Release<'a> {
+        Release { kernel, supervisor: b"\x7fELF supervisor", fileserver: b"\x7fELF fileserver", root }
+    }
+
+    /// What a slot's volume carries of `release`.
+    fn slot_files<'a>(release: Release<'a>, s: &'a Signed) -> SlotFiles<'a> {
+        SlotFiles { release, cmdline: &s.cmdline, signed: &s.signed }
     }
 
     /// A fixed key: what these tests judge is the image, not whose it is.
@@ -1019,10 +1042,11 @@ mod tests {
     #[test]
     fn the_volumes_this_build_writes_break_no_format_rule() {
         let key = key();
-        let s = sections(b"kernel", &tiny_root(), "", signing(&key));
+        let root = tiny_root();
+        let s = signed(release(b"kernel", &root), "", signing(&key));
         for (what, volume) in [
             ("ESP", create_esp_volume(Arch::X86_64, b"bootloader", crate::gptwrite::random_guid())),
-            ("slot volume", create_slot_volume(Some(&s), FAT32_MIN_BYTES)),
+            ("slot volume", create_slot_volume(Some(slot_files(release(b"kernel", &root), &s)), FAT32_MIN_BYTES)),
             ("empty slot volume", create_slot_volume(None, FAT32_MIN_BYTES)),
             ("log volume", create_log_volume()),
         ] {
@@ -1047,7 +1071,7 @@ mod tests {
     fn a_damaged_image_is_refused_by_the_reader_that_caught_it() {
         let root_image = tiny_root();
         let key = key();
-        let disk = create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &root_image, "", signing(&key), None);
+        let disk = create_boot_image(Arch::X86_64, b"bootloader", release(b"kernel", &root_image), "", signing(&key), None);
         let log = only(&disk, toyos_gpt::Guid::MICROSOFT_BASIC);
         let root = root_partition_guid_of(&disk);
         let parts =
@@ -1112,27 +1136,35 @@ mod tests {
             ["EFI/BOOT/BOOTx64.EFI", "toyos/log.guid"]
         );
         let key = key();
-        let s = sections(b"kernel", &tiny_root(), "", signing(&key));
+        let root = tiny_root();
+        let s = signed(release(b"kernel", &root), "", signing(&key));
         assert_eq!(
-            files_of(create_slot_volume(Some(&s), FAT32_MIN_BYTES)),
-            [toyos_update::slots::CMDLINE_FILE, toyos_update::slots::SIGNED_FILE, toyos_update::slots::KERNEL_FILE]
+            files_of(create_slot_volume(Some(slot_files(release(b"kernel", &root), &s)), FAT32_MIN_BYTES)),
+            [
+                toyos_update::slots::CMDLINE_FILE,
+                toyos_update::slots::FILESERVER_FILE,
+                toyos_update::slots::SIGNED_FILE,
+                toyos_update::slots::KERNEL_FILE,
+                toyos_update::slots::SUPERVISOR_FILE,
+            ]
         );
         assert!(files_of(create_slot_volume(None, FAT32_MIN_BYTES)).is_empty());
     }
 
     /// **The host's own reading of what the loader checks**: the marked slot's
     /// signed header verifies under the key the image was signed with and names
-    /// the kernel, the boot parameter and ROOT the image carries, byte for
-    /// byte; the table names the slot's partitions; and an update image for the
-    /// same parts splits into the same header and sections. A second slot is
-    /// present, empty, and not marked.
+    /// the kernel, the boot parameter, the two programs and ROOT the image
+    /// carries, byte for byte, and ROOT carries neither program; the table names
+    /// the slot's partitions; and an update image for the same parts splits into
+    /// the same header and sections. A second slot is present, empty, and not
+    /// marked.
     #[test]
     fn an_image_s_marked_slot_is_signed_over_exactly_what_it_carries() {
         let key = key();
         let root = tiny_root();
         let dir = toyos_tmpdir::TempDir::new("image-slot");
         let path = dir.join("slotted.img");
-        let disk = create_boot_image(Arch::X86_64, b"\x7fELF kernel", b"bootloader", &root, "sched-fast-health", signing(&key), Some(SecondSlot { root_bytes: 8 << 20 }));
+        let disk = create_boot_image(Arch::X86_64, b"bootloader", release(b"\x7fELF kernel", &root), "sched-fast-health", signing(&key), Some(SecondSlot { root_bytes: 8 << 20 }));
         std::fs::write(&path, &disk).expect("write the image");
         let mut file = std::fs::File::open(&path).expect("open the image");
         let table = slot_table_of(&mut file).expect("the slot table");
@@ -1150,18 +1182,24 @@ mod tests {
         toyos_update::sig::verify(&key.public(), &bytes, &toyos_update::image::signature_of(&signed)).expect("the signature");
         let kernel = read_file_on(&mut file, a.boot, toyos_update::slots::KERNEL_FILE).expect("the kernel");
         let cmdline = read_file_on(&mut file, a.boot, toyos_update::slots::CMDLINE_FILE).expect("the cmdline");
+        let supervisor = read_file_on(&mut file, a.boot, toyos_update::slots::SUPERVISOR_FILE).expect("the supervisor");
+        let fileserver = read_file_on(&mut file, a.boot, toyos_update::slots::FILESERVER_FILE).expect("the file server");
         let (at, _) = partition_extent(&mut file, a.root).expect("slot A's ROOT");
         let on_disk = &disk[at as usize..at as usize + header.root().len as usize];
         assert_eq!(kernel, b"\x7fELF kernel");
+        assert_eq!(cmdline, b"sched-fast-health", "the boot parameter is the image's parameters and names no filesystem");
+        let placeholder = release(b"", b"");
+        assert_eq!((&supervisor[..], &fileserver[..]), (placeholder.supervisor, placeholder.fileserver));
         assert_eq!(on_disk, &root[..]);
-        assert_eq!(header, toyos_update::image::Header::of(7, &kernel, &cmdline, on_disk));
+        let carried = toyos_update::image::Sections { kernel: &kernel, cmdline: &cmdline, supervisor: &supervisor, fileserver: &fileserver, root: on_disk };
+        assert_eq!(header, toyos_update::image::Header::of(7, &carried));
         drop(file);
         drop(dir);
 
-        let update = update_image(b"\x7fELF kernel", &root, "sched-fast-health", signing(&key));
+        let update = update_image(release(b"\x7fELF kernel", &root), "sched-fast-health", signing(&key));
         let parts = toyos_update::image::Parts::split(&update).expect("an update image splits");
         assert_eq!(parts.header, header);
-        assert_eq!(toyos_update::image::Header::of(7, parts.kernel, parts.cmdline, parts.root), header);
+        assert_eq!(parts.sections, carried);
         assert_eq!(parts.signed, &signed);
     }
 
@@ -1198,7 +1236,7 @@ mod tests {
     fn an_install_makes_its_disk_and_refuses_one_that_exists() {
         const DATA: u64 = 4 << 20;
         let key = key();
-        let image = create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &tiny_root(), "", signing(&key), None);
+        let image = create_boot_image(Arch::X86_64, b"bootloader", release(b"kernel", &tiny_root()), "", signing(&key), None);
         let dir = toyos_tmpdir::TempDir::new("image-install");
         let path = dir.join("disk.img");
 
@@ -1226,16 +1264,14 @@ mod tests {
         assert_eq!(std::fs::read(&theirs).expect("read it back"), b"somebody's");
     }
 
-    /// **One ordering of one set is one image.** The judge below compares
-    /// `root=` against the superblock the same build stamped, so it is blind to
-    /// this: a `root_uuid` returning a constant satisfies it. This is the arm
-    /// that is not — the same files handed over backwards have to come out as
-    /// one UUID and one byte string, or two builds of one tree are two images
-    /// and the kernel argument names a filesystem the next build has not got.
+    /// **One ordering of one set is one image.** The same files handed over
+    /// backwards have to come out as one UUID and one byte string, or two
+    /// builds of one tree are two images, and the name the file server says
+    /// ROOT by names a filesystem the next build has not got.
     #[test]
     fn one_ordering_of_one_set_is_one_image() {
         let files: Vec<(String, Vec<u8>)> = vec![
-            ("bin/supervisor".to_string(), b"supervisor-binary".to_vec()),
+            ("bin/shell".to_string(), b"shell-binary".to_vec()),
             ("bin/toybox".to_string(), (0..40_000u32).map(|i| (i ^ 0x5A) as u8).collect()),
             ("etc/system.manifest".to_string(), b"[start]\nsupervisor\n".to_vec()),
             ("share/empty".to_string(), Vec::new()),
@@ -1279,18 +1315,16 @@ mod tests {
 
     /// **The independent oracle for ROOT**, asked of the finished image by
     /// readers that did not write it: `toyos-gpt` finds the partition by type
-    /// where the table placed it, `bcachefs`'s mount-and-read path lists
-    /// what its format-and-write path put there, and `toyos-fat32` reads the
-    /// boot parameter off the ESP.
+    /// where the table placed it, and `bcachefs`'s mount-and-read path lists
+    /// what its format-and-write path put there.
     ///
     /// Every name, size, content hash and symlink target against the list
-    /// handed to [`create_root_image`] — a listing that merely parsed would
-    /// pass a far weaker claim — and `root=` against the superblock UUID the
-    /// reader found, which is the whole of how a boot picks its ROOT.
+    /// handed to [`create_root_image`]: a listing that merely parsed would
+    /// pass a far weaker claim.
     #[test]
     fn the_root_partition_reads_back_as_the_files_the_build_put_in_it() {
         let files: Vec<(String, Vec<u8>)> = vec![
-            ("bin/supervisor".to_string(), b"supervisor-binary".to_vec()),
+            ("bin/shell".to_string(), b"shell-binary".to_vec()),
             // Multi-block, so an extent list that stopped after the first is
             // caught by the hash rather than by the size.
             ("bin/toybox".to_string(), (0..40_000u32).map(|i| (i ^ 0x5A) as u8).collect()),
@@ -1301,7 +1335,7 @@ mod tests {
 
         let root_image = create_root_image(&files, &symlinks, true);
         let key = key();
-        let disk = create_boot_image(Arch::X86_64, b"kernel", b"bootloader", &root_image, "", signing(&key), None);
+        let disk = create_boot_image(Arch::X86_64, b"bootloader", release(b"kernel", &root_image), "", signing(&key), None);
 
         // Located by *type*, through the parser the kernel uses, at the offset
         // the table gives — never at the one the writer computed.
@@ -1341,32 +1375,15 @@ mod tests {
                 .unwrap_or_else(|e| panic!("read_link {name}: {e:?}"));
             assert_eq!(read.as_deref(), Some(target.as_str()));
         }
-
-        // And the kernel argument names *this* filesystem: the parameter comes
-        // off the ESP through the FAT driver, the UUID out of the superblock
-        // the mount above read.
-        let scratch = toyos_tmpdir::TempDir::new("root-oracle");
-        let path = scratch.join("root-oracle.img");
-        std::fs::write(&path, &disk).expect("stage the image");
-        let cmdline = cmdline_of(&path).expect("the ESP carries a boot parameter");
-        assert_eq!(
-            toyos_abi::boot::root_uuid(&cmdline),
-            Some(fs.uuid().to_string().as_str()),
-            "the boot parameter {cmdline:?} does not name the ROOT this image carries"
-        );
     }
 
-    /// **The independent oracle for the hierarchy.** ROOT mounts at `/system`, so
-    /// every absolute path the shipped image declares is `/system/` plus a name
-    /// ROOT carries, the two the kernel opens by hard-coded path included. Asked
-    /// of a finished image by readers that did not write it: `toyos-gpt` finds
-    /// ROOT by type where the table says, `bcachefs` mounts it, and
-    /// `toyos-manifest` parses the records out of the volume.
-    ///
-    /// `SUPERVISOR_PATH` comes from the kernel source, and that is a **text scan of
-    /// one spelling** — the `pub const SUPERVISOR_PATH: &str = "…";` line — so a
-    /// kernel computing its spawn path otherwise is walked past. Not finding
-    /// the line fails here rather than skipping.
+    /// **The independent oracle for the hierarchy.** ROOT is served at
+    /// `/system`, so every absolute path the shipped image declares is
+    /// `/system/` plus a name ROOT carries; the file server's row names no
+    /// path, its image being the slot's. Asked of a
+    /// finished image by readers that did not write it: `toyos-gpt` finds ROOT
+    /// by type where the table says, `bcachefs` mounts it, and `toyos-manifest`
+    /// parses the records out of the volume.
     #[test]
     fn every_declared_path_resolves_inside_the_root_partition() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1374,26 +1391,21 @@ mod tests {
         let declared = toyos_manifest::parse(
             std::str::from_utf8(&manifest).expect("the manifest this build renders is text"),
         );
+        let on_root: Vec<&str> = declared.programs.iter().filter_map(|p| p.source.path()).collect();
+        assert_eq!(
+            declared.programs.len() - on_root.len(),
+            1,
+            "the shipped image declares one program run from a boot image, the file server"
+        );
 
         // Placeholders: what this judges is the path scheme, and the bytes of a
         // real binary say nothing about it.
-        let mut files: Vec<(String, Vec<u8>)> = declared
-            .programs
-            .iter()
-            .map(|p| (under_system(&p.path).to_string(), b"placeholder".to_vec()))
-            .collect();
-        files.push(("bin/supervisor".to_string(), b"supervisor".to_vec()));
+        let mut files: Vec<(String, Vec<u8>)> =
+            on_root.iter().map(|path| (under_system(path).to_string(), b"placeholder".to_vec())).collect();
         files.push((toyos_manifest::PATH.to_string(), manifest.clone()));
 
-        let disk = create_boot_image(
-            Arch::X86_64,
-            b"kernel",
-            b"bootloader",
-            &create_root_image(&files, &symlinks, true),
-            "",
-            signing(&key()),
-            None,
-        );
+        let root_image = create_root_image(&files, &symlinks, true);
+        let disk = create_boot_image(Arch::X86_64, b"bootloader", release(b"kernel", &root_image), "", signing(&key()), None);
 
         let part = only_partition(&mut ImageSectors(&disk), toyos_gpt::Guid::TOYOS_ROOT)
             .expect("a boot image carries exactly one TOYOS-ROOT partition");
@@ -1405,45 +1417,31 @@ mod tests {
         .expect("the ROOT partition mounts");
 
         // As the volume holds it, not as the renderer returned it.
-        let on_root = fs
+        let on_volume = fs
             .read_file(toyos_manifest::PATH)
             .expect("ROOT carries the manifest where the guest path names it");
-        assert_eq!(on_root, manifest, "the manifest on ROOT is not the one the build rendered");
+        assert_eq!(on_volume, manifest, "the manifest on ROOT is not the one the build rendered");
         assert_eq!(
             toyos_manifest::GUEST_PATH,
             format!("/system/{}", toyos_manifest::PATH),
             "the path a process opens is not where ROOT carries the manifest"
         );
 
-        let supervisor = supervisor_path_of_the_kernel(root);
         let names: std::collections::BTreeSet<String> = fs
             .list(usize::MAX, &|_| true)
             .expect("list the ROOT partition")
             .into_iter()
             .map(|(name, _)| name)
             .collect();
-        for path in std::iter::once(&supervisor).chain(declared.programs.iter().map(|p| &p.path)) {
+        for &path in &on_root {
             let name = under_system(path);
-            assert_ne!(name, path.as_str(), "{path} is not under the mount ROOT gets");
+            assert_ne!(name, path, "{path} is not under the mount ROOT gets");
             assert!(names.contains(name), "ROOT has no {name} for the declared path {path}");
         }
-        assert!(names.contains("bin/supervisor"), "ROOT carries {names:?} and no bin/supervisor");
     }
 
     /// A declared absolute path as ROOT carries it; unchanged off that mount.
     fn under_system(path: &str) -> &str {
         path.strip_prefix("/system/").unwrap_or(path)
-    }
-
-    /// The literal in `kernel/src/loader/mod.rs`'s `SUPERVISOR_PATH`.
-    fn supervisor_path_of_the_kernel(root: &Path) -> String {
-        const ITEM: &str = "pub const SUPERVISOR_PATH: &str = \"";
-        let source = std::fs::read_to_string(root.join("kernel/src/loader/mod.rs"))
-            .expect("kernel/src/loader/mod.rs");
-        source
-            .lines()
-            .find_map(|line| line.trim_start().strip_prefix(ITEM)?.split('"').next())
-            .expect("no `pub const SUPERVISOR_PATH: &str = \"…\";` in kernel/src/loader/mod.rs")
-            .to_string()
     }
 }

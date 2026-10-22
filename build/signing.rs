@@ -331,7 +331,10 @@ mod tests {
         let key = Key::mint();
         let text = openssh_text(&key.seed);
         assert_eq!(toyos_ssh::hostkey::openssh_seed(&text), Ok(key.seed));
-        let header = Header::of(3, b"k", b"c", &[0; 4096]);
+        let header = Header::of(
+            3,
+            &toyos_update::image::Sections { kernel: b"k", cmdline: b"c", supervisor: b"s", fileserver: b"f", root: &[0; 4096] },
+        );
         let signed = key.sign(&header);
         let sig: [u8; 64] = signed[HEADER_BYTES..].try_into().unwrap();
         let bytes: [u8; HEADER_BYTES] = signed[..HEADER_BYTES].try_into().unwrap();

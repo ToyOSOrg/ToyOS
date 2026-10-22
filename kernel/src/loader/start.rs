@@ -9,6 +9,7 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 
 use crate::object::job::JobObject;
+use crate::object::notice::NoticeObject;
 use crate::object::process::ProcessObject;
 use crate::object::{ops, HandleEntry, HandleTable, KObjectRef, Refusal};
 use crate::process::{
@@ -19,7 +20,7 @@ use crate::user_ptr::UserBytes;
 use toyos_abi::handle::{RawHandle, Rights};
 use kernel::sched::job::Job;
 use toyos_abi::syscall::{
-    EndowEntry, SyscallError, JOB_LABEL, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, SELF_LABEL,
+    EndowEntry, SyscallError, JOB_LABEL, MAX_SPAWN_ENDOWMENTS, MAX_SPAWN_LABELS_LEN, QUIT_LABEL, SELF_LABEL,
 };
 
 /// Where a new context first runs.
@@ -107,9 +108,9 @@ pub struct PendingHandles {
 
 impl PendingHandles {
     /// Take the endowed handles out of the caller's table and put its handle to the child in it, all under one lock hold: a refusal leaves the table unchanged.
-    /// `own` is the child's handle to itself, which its table holds under [`SELF_LABEL`] beside the endowments. The child's job is the one endowed under
+    /// `own` is what the kernel puts in the child's table beside the endowments. The child's job is the one endowed under
     /// [`JOB_LABEL`], or else the caller's; the caller's handle to the child is the last answer.
-    pub fn commit(self, own: HandleEntry) -> Result<(HandleTable, Endowments, Arc<Job>, RawHandle), Refusal> {
+    pub fn commit(self, own: Own) -> Result<(HandleTable, Endowments, Arc<Job>, RawHandle), Refusal> {
         let Self { mut table, endow, mut labels } = self;
         let data_arc = process_data();
         let mut data = data_arc.lock();
@@ -129,7 +130,7 @@ impl PendingHandles {
             }
             let label = &labels[label_off as usize..end];
             // The kernel's own, which a caller's of that name would shadow in the child's lookup.
-            if label == SELF_LABEL.as_bytes() {
+            if Own::LABELS.iter().any(|own| label == own.as_bytes()) {
                 return Err(SyscallError::InvalidArgument.into());
             }
             if label == JOB_LABEL.as_bytes() {
@@ -152,7 +153,7 @@ impl PendingHandles {
             moving.push((EndowEntry { label_off, label_len, handle, _pad: 0 }, handle));
         }
         // Checked before any removal, so a failed install can't strand a handle out of a table that never spawned.
-        if !table.has_room(moving.len() + 1) || !data.handles.has_room(1) {
+        if !table.has_room(moving.len() + Own::LABELS.len()) || !data.handles.has_room(1) {
             return Err(SyscallError::ResourceExhausted.into());
         }
 
@@ -192,34 +193,45 @@ impl PendingHandles {
             entries.push(entry);
         }
         // Minted while `own` is held, and `own` goes into a table no thread reaches until the child lands: another thread of the caller closing this handle never closes the object's last.
-        let held = ops::install(&mut data.handles, own.object().clone())
+        let held = ops::install(&mut data.handles, own.process.object().clone())
             .expect("a caller's table with verified room refused its child");
         let job = endowed_job.unwrap_or_else(|| data.job.clone());
         drop(data);
         drop(displaced);
-        endow_self(&mut table, &mut entries, &mut labels, own);
+        own.endow(&mut table, &mut entries, &mut labels);
         Ok((table, Endowments::new(entries, labels), job, held))
     }
 }
 
-/// A new process's handle to itself, the first its object has: `WRITE` to be named a spawn's place, `DUP` and `TRANSFER` to hand that on.
-pub(super) fn own_handle(object: &Arc<ProcessObject>) -> HandleEntry {
-    let rights = Rights::WRITE.union(Rights::DUP).union(Rights::TRANSFER);
-    HandleEntry::new(KObjectRef::Process(Arc::clone(object)), rights)
+/// What the kernel puts in every new process's table beside its endowments:
+/// its handle to itself under [`SELF_LABEL`], the first its object has, and
+/// its notice under [`QUIT_LABEL`], the only one its object ever has.
+pub struct Own {
+    process: HandleEntry,
+    notice: HandleEntry,
 }
 
-/// Install `own` in its own table under [`SELF_LABEL`]. Its caller verified the room.
-pub(super) fn endow_self(table: &mut HandleTable, entries: &mut Vec<EndowEntry>, labels: &mut Vec<u8>, own: HandleEntry) {
-    let handle = table
-        .install(own)
-        .expect("a child table with verified room refused its own handle");
-    entries.push(EndowEntry {
-        label_off: labels.len() as u32,
-        label_len: SELF_LABEL.len() as u32,
-        handle,
-        _pad: 0,
-    });
-    labels.extend_from_slice(SELF_LABEL.as_bytes());
+impl Own {
+    /// The labels [`Own::endow`] installs under, which no caller's endowment may use.
+    const LABELS: [&str; 2] = [SELF_LABEL, QUIT_LABEL];
+
+    /// `WRITE` to be named a spawn's place, `DUP` and `TRANSFER` to hand that on.
+    pub(super) fn new(object: &Arc<ProcessObject>, notice: &Arc<NoticeObject>) -> Self {
+        let rights = Rights::WRITE.union(Rights::DUP).union(Rights::TRANSFER);
+        Self {
+            process: HandleEntry::new(KObjectRef::Process(Arc::clone(object)), rights),
+            notice: HandleEntry::new(KObjectRef::Notice(Arc::clone(notice)), NoticeObject::RIGHTS),
+        }
+    }
+
+    /// Install both under their labels. The caller verified the room.
+    pub(super) fn endow(self, table: &mut HandleTable, entries: &mut Vec<EndowEntry>, labels: &mut Vec<u8>) {
+        for (entry, label) in [self.process, self.notice].into_iter().zip(Self::LABELS) {
+            let handle = table.install(entry).expect("a child table with verified room refused the kernel's own handles");
+            entries.push(EndowEntry { label_off: labels.len() as u32, label_len: label.len() as u32, handle, _pad: 0 });
+            labels.extend_from_slice(label.as_bytes());
+        }
+    }
 }
 
 /// Reads `SpawnArgs`'s endowments into the child's pending handle state.

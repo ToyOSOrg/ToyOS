@@ -13,14 +13,14 @@ use bcachefs::{BlockBuf, BlockIO, BlockNum, DeviceError, FsError, Mounted, ReadO
 use toyos_bootmap::BOOT_MAP_BYTES;
 
 use crate::efi::{AllocateType, BootServices, PAGE_SIZE};
-use crate::rootimage::RootImage;
+use crate::payload::Payload;
 
 /// The line every answer here is said on.
 pub const SAID: &str = "Microcode:";
 
 /// The patch for this CPU, or `None` where ROOT holds none for it or its
 /// architecture loads none; either way said on [`SAID`]'s line.
-pub fn find(bs: &BootServices, root: &RootImage) -> Option<&'static [u8]> {
+pub fn find(bs: &BootServices, root: &Payload) -> Option<&'static [u8]> {
     let cpu = match crate::arch::microcode_cpu()? {
         Ok(cpu) => cpu,
         Err(why) => {

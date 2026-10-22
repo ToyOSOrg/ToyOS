@@ -15,11 +15,13 @@ stdin — and the machine installs nothing the owner did not sign.
 ## Stage 1 — slots, signatures and `update`, proven in QEMU (done)
 
 - **A signed image** (`toyos-update`): a header naming a monotonic version and
-  the SHA-256 of the kernel, its boot parameter and ROOT, signed with Ed25519
+  the SHA-256 of the kernel, its boot parameter, the supervisor, the file server
+  and ROOT, each by role and length, signed with Ed25519
   over OpenSSH's SSHSIG message in the `toyos-image` namespace — so
   `ssh-keygen -Y sign` signs one and `ssh-keygen -Y verify` checks ours. The
   signature covers hashes, never bytes.
-- **Two slots**, each a FAT volume (kernel, parameter, signed header) and a
+- **Two slots**, each a FAT volume (kernel, parameter, the two boot programs,
+  signed header) and a
   ROOT, named by a slot table (two copies, a sequence, the writer writes the
   copy that is not current). Every image carries slot A; an image built for a
   machine carries an empty slot B.

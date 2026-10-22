@@ -1,5 +1,5 @@
 //! Files by path, and the descriptors that name open ones, wherever they are
-//! served: the kernel serves `/system` and `/tmp`, and every other directory a
+//! served: the kernel serves `/tmp`, and every other directory a
 //! process may reach is a capability in its namespace, `fs:<directory>`,
 //! served by a file server ([`crate::fs`]). A program or a library is read
 //! here into an image the kernel pages it from ([`read_image`]).

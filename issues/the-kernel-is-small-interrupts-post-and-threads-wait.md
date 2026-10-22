@@ -19,7 +19,8 @@ kernel's part of a restart, and named module tests hold each program's
 1. **Step 9's file half** (stage 4). libc is a file server's client
    through `toyos::files`, as std is.
 2. **Step 8's exit** (stage 4). Its empty view needs step 9's file half:
-   until then the kernel serves `/system` and `/tmp` to every process.
+   until then the kernel serves `/tmp` to every process, and every view holds
+   `/system` read-only.
 3. **P1 of the Wi-Fi track** (`issues/there-is-no-wifi.md`): a BAR stays
    where firmware put it, handed over in 4 KiB pages with its MSI-X table's
    page, under the owner's Q2 ruling. The orchestrator ruled on #900 that
@@ -41,8 +42,9 @@ Beside that order, each waiting on something outside it:
 1. **The system image is loaded into memory by the loader.** The UEFI loader
    reads the selected slot's ROOT through the firmware's own block I/O, checks
    its signature on the bytes in memory (the self-update's signing, so one
-   check covers both), and hands the kernel its address and length. The kernel
-   mounts ROOT from memory and needs no storage driver to boot.
+   check covers both), and hands the kernel its address and length. No storage
+   driver is needed to boot: the supervisor's file server serves ROOT out of
+   that memory (owner ruling 2026-10-21, step 9).
    **Exit**: the machine boots in QEMU and on the T14 with the kernel's NVMe
    and USB storage paths never touched before the supervisor runs. The
    boot-time cost on the stick and on NVMe is measured.
@@ -83,8 +85,9 @@ Beside that order, each waiting on something outside it:
    file server per role (LOG, DATA, BOOT), so one crashing cannot take another
    down. A file-server crash is survivable, not invisible: data survives on
    disk, clients reopen, and the few states that cannot be recovered answer
-   `Gone`; invisible restart can come later. The kernel keeps ROOT's
-   in-memory read path and exec from it. USB storage stays in the kernel until
+   `Gone`; invisible restart can come later. The kernel keeps no filesystem
+   of ROOT (owner ruling 2026-10-21, step 9, which replaced this ruling's
+   in-memory read path and exec from it). USB storage stays in the kernel until
    stage 5 moves the whole xHCI out, because its one IOMMU domain is shared
    with the keyboard, and the panic console never depends on a userland USB
    program. Ctrl+Alt+D is removed (owner, 2026-10-10: "i dont want it. i want
@@ -151,22 +154,28 @@ Beside that order, each waiting on something outside it:
       one port, and `fs_escape` is refused a symlink that climbs out, a `..`
       on the wire and a directory it was not given. **Left**: the rest of the
       escape suite, a rename racing a lookup among it, shown red on a
-      global-tree resolver; and the empty view, which names `/system` and
-      `/tmp` while the kernel serves them (step 9's file half).
+      global-tree resolver; and the empty view, which names `/tmp` while the
+      kernel serves it (step 9's file half).
    9. **Delete the kernel storage stack.** **Partly done** (#536). Two
       halves are left, and they land apart:
-      - **The file half**: the VFS down to ROOT's resolver, tmpfs (`tmpfs.rs`,
-        `fs_rename.rs`), the page cache (`file_cache.rs`) and the file
-        syscalls. `/tmp` leaves the kernel per session, as the owner ruled
-        ("Per session", 2026-10-03, in the isolation track), and `/system` is
-        read over the file protocol, which std and libc both reach through
-        `toyos::files`. **Exit**: `tmpfs.rs`,
-        `fs_rename.rs` and `file_cache.rs` are gone, `vfs.rs` resolves ROOT
-        for exec and `SYS_DLOPEN` alone, and `sdk/abi` has no `SYS_OPEN` (9),
+      - **The file half**: the VFS, tmpfs (`tmpfs.rs`, `fs_rename.rs`), the
+        page cache (`file_cache.rs`) and the file syscalls. `/tmp` leaves the
+        kernel per session, as the owner ruled ("Per session", 2026-10-03, in
+        the isolation track). **`/system` is read over the file protocol**,
+        which std and libc both reach through `toyos::files` (owner ruling
+        2026-10-21, "Removing the boot filesystem exception"):
+        the loader hands the kernel the supervisor's and the file server's
+        executables beside ROOT, each a section of the slot's signed header;
+        the kernel keeps their pages read-only, starts the supervisor from its
+        image and hands it the other two, and the supervisor starts the file
+        server's SYSTEM role from its image, serving ROOT out of that memory,
+        before it reads the manifest. The kernel's ROOT mount, its bcachefs
+        adapter and its spawn by `/system` path are deleted. **Exit**:
+        `tmpfs.rs`, `fs_rename.rs`, `file_cache.rs` and `vfs.rs` are gone, and
+        `sdk/abi` has no `SYS_OPEN` (9),
         `SYS_STAT` (16), `SYS_READDIR` (17), `SYS_DELETE` (18), `SYS_CHDIR`
         (20), `SYS_GETCWD` (21), `SYS_RENAME` (52), `SYS_MKDIR` (53),
         `SYS_RMDIR` (54), `SYS_SYMLINK` (81) or `SYS_READLINK` (82).
-        `SYS_DLOPEN` (55) is step 5's.
       - **The block half**, with step 10: the block layer (`block.rs`), GPT
         (`gpt.rs`), USB storage (`drivers/usb_storage.rs`), the refusal chain
         and `SYS_PARTITION_READ/WRITE`. **Exit**: `git grep -n -e
