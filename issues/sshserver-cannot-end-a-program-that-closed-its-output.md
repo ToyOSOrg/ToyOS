@@ -14,7 +14,7 @@ so from then on that thread holds it. A program that closes its stdout and
 stderr and keeps running is waited for, and its connection's end does not
 end it. It runs until it exits on its own.
 
-Before #PR the daemon polled `try_wait` with a backoff to keep the kill,
+Before #1026 the daemon polled `try_wait` with a backoff to keep the kill,
 which is a fixed delay where an event exists.
 
 A `cfg` reaching ToyOS's process handle, whose `wait` and `kill` take `&self`,

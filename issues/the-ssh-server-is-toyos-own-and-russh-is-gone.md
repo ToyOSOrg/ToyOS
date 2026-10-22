@@ -48,7 +48,7 @@ Compromises recorded on their own:
    sessions replay against `toyos-ssh`'s scripted driver, whose SFTP server is
    in memory so that its replies are the same on every host. `sftp.rs` is held
    by its own tests. russh, tokio, `rsa` and the `p384_backend` setting are
-   gone. Landed by #PR.
+   gone. Landed by #1026.
 3. **ML-KEM.** Our own `mlkem768x25519-sha256` (RFC 10042), on
    `toyos-crypto`'s ML-KEM-768 and its hybrid: the server's encapsulation
    side, offered before `curve25519-sha256`. Every OpenSSH recording but one
