@@ -228,7 +228,6 @@ impl DeviceSpace {
 #[derive(Clone, Copy)]
 pub struct OwnSpace(DomainId);
 
-
 impl OwnSpace {
     /// One with `room` bytes of it below 4 GiB handed out at the address
     /// answered, clear of the root bridges' declared `windows`, or the reason

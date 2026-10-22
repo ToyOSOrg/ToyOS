@@ -1,7 +1,8 @@
 //! The hot-plug slots this kernel drives: a PCI Express port's slot (PCIe base
-//! spec 6.0 §6.7), armed only below a host bridge whose `_OSC` granted the
-//! kernel native hot-plug and PCI Express capability structure control (ACPI
-//! 6.5 §6.2.11; PCI Firmware Specification 3.3 §4.5.1).
+//! spec 6.0 §6.7), armed only below a root bridge whose `_OSC` commit granted
+//! the kernel native hot-plug and PCI Express capability structure control
+//! (ACPI 6.5 §6.2.11; PCI Firmware Specification 3.3 §4.5.1), as the `acpi`
+//! claim's holder declared it.
 //!
 //! **The port's own interrupt, on the claim path's remapped message, and a
 //! bounded handler** ([`HotPlug::isr`]): it reads and clears Slot Status,
@@ -103,8 +104,8 @@ pub(super) fn arm(roots: &[RootBridge]) {
         let needed = NATIVE_HOT_PLUG | CAPABILITY_STRUCTURE;
         if granted & needed != needed {
             log!(
-                "pcidev: {port}'s hot-plug slot is not armed: its host bridge's _OSC granted {granted:#x}, \
-                 without native hot-plug and capability structure control ({needed:#x})"
+                "pcidev: {port}'s hot-plug slot is not armed: its root bridge's _OSC commit was granted \
+                 {granted:#x}, without native hot-plug and capability structure control ({needed:#x})"
             );
             continue;
         }
@@ -112,7 +113,7 @@ pub(super) fn arm(roots: &[RootBridge]) {
             Ok(armed) => {
                 MACHINE.lock().ports.iter_mut().filter(|p| p.number == number).for_each(|p| p.armed = true);
                 SLOTS.lock().push(armed);
-                log!("pcidev: {port}'s hot-plug slot is armed: its host bridge's _OSC granted {granted:#x}");
+                log!("pcidev: {port}'s hot-plug slot is armed: its root bridge's _OSC commit was granted {granted:#x}");
                 armed.command(Some(slot.control(armed.seen().occupied && armed.powered())), false);
                 super::changed();
             }

@@ -112,7 +112,7 @@ pub struct Placement {
 pub fn placement(index: u8, low: u32, address: u64) -> Result<Placement, Unusable> {
     let wide = kind(index, low)?.wide;
     assert!(address & !u64::from(MEMORY_ADDRESS) & 0xFFFF_FFFF == 0, "bar: {address:#x} holds a BAR's flag bits");
-    assert!(wide || address <= u64::from(u32::MAX), "bar: {address:#x} is past a 32-bit BAR's reach");
+    assert!(wide || u32::try_from(address).is_ok(), "bar: {address:#x} is past a 32-bit BAR's reach");
     let low = (address as u32 & MEMORY_ADDRESS) | (low & !MEMORY_ADDRESS);
     Ok(Placement { low, high: wide.then_some((address >> 32) as u32) })
 }

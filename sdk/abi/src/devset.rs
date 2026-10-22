@@ -131,7 +131,7 @@ pub fn function(pci: Pci) -> RawRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::inventory::{Arrival, Block, Driven, PciAddr};
+    use crate::inventory::{Arrival, Driven, Loaded, PciAddr, Role};
     use std::vec::Vec;
 
     fn pci(arrival: u32) -> Pci {
@@ -180,7 +180,7 @@ mod tests {
         assert_eq!(decode(&snapshot(header(2), &[pci(5), pci(4)])).unwrap_err(), Malformed::Order { at: 2 });
         assert_eq!(decode(&snapshot(header(1), &[pci(0)])).unwrap_err(), Malformed::NoArrival { at: 1 });
         let mut raw = snapshot(header(1), &[pci(1)]);
-        raw[1] = Record::Block(Block { device: 1, blocks: 8 }).encode();
+        raw[1] = Record::Loaded(Loaded { role: Role::Log, unique_guid: [0x22; 16] }).encode();
         assert_eq!(decode(&raw).unwrap_err(), Malformed::NotAFunction { at: 1 });
         raw[1] = RawRecord::EMPTY;
         assert_eq!(decode(&raw).unwrap_err(), Malformed::Undecodable { at: 1, why: Undecodable::Kind(0) });
