@@ -46,6 +46,7 @@ pub trait Word {
     fn load(&self, order: Ordering) -> u32;
     fn store(&self, value: u32, order: Ordering);
     fn swap(&self, value: u32, order: Ordering) -> u32;
+    fn compare_exchange(&self, current: u32, new: u32, success: Ordering, failure: Ordering) -> Result<u32, u32>;
 }
 
 impl Word for AtomicU32 {
@@ -57,6 +58,9 @@ impl Word for AtomicU32 {
     }
     fn swap(&self, value: u32, order: Ordering) -> u32 {
         AtomicU32::swap(self, value, order)
+    }
+    fn compare_exchange(&self, current: u32, new: u32, success: Ordering, failure: Ordering) -> Result<u32, u32> {
+        AtomicU32::compare_exchange(self, current, new, success, failure)
     }
 }
 
@@ -95,4 +99,7 @@ pub enum Violation {
     Run,
     /// A tag nothing is in flight under.
     Tag,
+    /// This end's own cursor, as another holder of the end stored it, names no
+    /// position.
+    OwnCursor,
 }

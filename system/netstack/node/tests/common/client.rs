@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use toyos::net::stream::{Words, LAYOUT, NODELAY, RECEIVE_BYTES, RECEIVE_RING, REGION_BYTES, SEND_BYTES, SEND_RING};
 use toyos_net_node::Session;
 use toyos_net_tcp::Lent;
-use toyos::transport::session::{self, Bells, Doorbell, Lock, Mode, Receiving, Refused, Rings, Sending, Took, Waited};
+use toyos::transport::session::{self, Bells, Doorbell, HungUp, Lock, Mode, Receiving, Refused, Rings, Sending, Took, Waited};
 
 /// The region and its doorbells, which the client and the node share.
 pub struct Region {
@@ -50,8 +50,9 @@ impl Bells for Region {
         unreachable!("a test's client never waits")
     }
 
-    fn ring(&self) {
+    fn ring(&self) -> Result<(), HungUp> {
         self.rang.set(true);
+        Ok(())
     }
 }
 
@@ -193,12 +194,12 @@ impl Client {
     /// Nagle's algorithm off or on, and netstack rung to read it.
     pub fn set_nodelay(&self, nodelay: bool) {
         self.region.words[NODELAY].store(u32::from(nodelay), Ordering::Relaxed);
-        self.region.ring();
+        LAYOUT.ring(&self.region.words, &*self.region);
     }
 
     /// The source registered for both ways.
     pub fn register(&self) {
-        session::register(&self.region.words, Some(&self.rx), Some(&self.tx), &*self.region).expect("netstack keeps the protocol");
+        session::register(&self.region.words, Some(&self.rx), Some(&self.tx), &*self.region);
     }
 
     /// Whether the client rang netstack since the last call.
@@ -223,7 +224,7 @@ impl Client {
 
     /// Rings netstack as the client's own calls do, for a word written past them.
     pub fn region_ring(&self) {
-        self.region.ring();
+        LAYOUT.ring(&self.region.words, &*self.region);
     }
 
     /// The region's word `at`, which a hostile client may write.
