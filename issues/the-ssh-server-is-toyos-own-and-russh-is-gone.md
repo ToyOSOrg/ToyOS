@@ -59,6 +59,8 @@ Compromises of `toyos-ssh` recorded on their own:
      entry.
    - `Cargo.lock` has no `russh`, `russh-cryptovec`, `rsa`, `pageant` or
      `internal-russh-num-bigint` package.
+   - The guest targets' `--cfg=p384_backend="bignum"` in `.cargo/config.toml`,
+     which keeps fiat-crypto out of russh's `p384`, is gone with it.
    - A recorded `sftp` session and a recorded shell session replay byte for
      byte under `cargo run -- --ci host`.
 3. **ML-KEM.** Our own `mlkem768x25519-sha256`, on `toyos-crypto`'s
