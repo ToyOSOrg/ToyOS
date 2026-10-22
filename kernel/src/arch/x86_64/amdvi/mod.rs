@@ -45,6 +45,11 @@ use toyos_acpi::{
 /// which nothing here reads.
 const REGISTER_WINDOW: u64 = 0x4000;
 
+/// What an untranslated request in it means is fixed by the platform —
+/// interrupts, system management, I/O and configuration — and not by a page
+/// table (48882 Rev. 3.09 §2.1.2, Table 3), so no domain's addresses enter it.
+const SPECIAL_RANGE: (u64, u64) = (0xFD_0000_0000, 0x100_0000_0000);
+
 /// `CONTROL` fields firmware may leave on, each with the `STATUS` bit that
 /// says it stopped, or `None` where `CONTROL` reading back is the answer: each
 /// log stopped before its interrupt and the unit last, since a log's
@@ -141,8 +146,8 @@ struct Ready {
 }
 
 /// Every unit the IVRS describes, switched off, and each this kernel can use
-/// programmed; `false` where firmware published no IVRS. Every IVMD range is
-/// what no claimed function's addresses reach.
+/// programmed; `false` where firmware published no IVRS. Every IVMD range and
+/// the unit's special ranges are what no domain's addresses reach.
 pub fn init(rsdp_addr: u64, devices: &[PciDevice]) -> bool {
     let ivrs = match toyos_acpi::ivrs(crate::drivers::acpi::direct_phys(), rsdp_addr) {
         Ok(ivrs) => ivrs,
@@ -303,15 +308,12 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) -> bool {
         &apics,
         &super::ioapic::ids(),
     );
-    #[cfg(feature = "boot-actuators")]
-    let remap = if crate::actuator::iommu_no_remap() {
-        log!("iommu: iommu-no-remap stands in for a unit that cannot remap, so no message is remapped");
-        None
-    } else {
-        remap
-    };
     let identity = build(devices, &settings, remap.is_some());
-    let reserved = ivmds.iter().map(|m| (m.start, m.start + m.length)).collect();
+    let reserved = ivmds
+        .iter()
+        .map(|m| (m.start, m.start + m.length))
+        .chain([super::iommu_unit::INTERRUPT_RANGE, SPECIAL_RANGE])
+        .collect();
     let mut ids: Vec<u16> = platform.iter().map(|&(id, _)| id).collect();
     ids.sort_unstable();
     ids.dedup();
@@ -587,9 +589,8 @@ fn program(unit: Ready, devices: &[PciDevice], remap: Option<bool>) {
 }
 
 /// Every unit's SMI filter on, once every function this kernel drives is out
-/// of firmware's hands: until then, a controller firmware still owns may
-/// raise SMIs to be handed over (xHCI §4.22.1). A refused SMI is logged as an
-/// `IO_PAGE_FAULT` (§2.1.5.1) for [`fault`].
+/// of firmware's hands. A refused SMI is logged as an `IO_PAGE_FAULT`
+/// (§2.1.5.1) for [`fault`].
 pub fn settle() {
     let mut units = UNITS.lock();
     let mut everywhere = !units.is_empty();

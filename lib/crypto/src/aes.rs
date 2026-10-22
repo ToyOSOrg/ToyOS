@@ -31,11 +31,9 @@ fn sbox(x: u8) -> u8 {
     let y = inverse(x);
     y ^ y.rotate_left(1) ^ y.rotate_left(2) ^ y.rotate_left(3) ^ y.rotate_left(4) ^ 0x63
 }
-fn subword(word: &mut [u8; 4], hardware: bool) {
-    if !hardware || !crate::arch::aes_subword(word) {
-        for byte in word {
-            *byte = sbox(*byte);
-        }
+fn subword(word: &mut [u8; 4]) {
+    for byte in word {
+        *byte = sbox(*byte);
     }
 }
 #[cfg(feature = "wpa2")]
@@ -44,9 +42,8 @@ fn inv_sbox(x: u8) -> u8 {
 }
 
 pub(crate) struct Aes {
-    keys: Secret<240>,
-    rounds: usize,
-    hardware: bool,
+    pub(crate) keys: Secret<240>,
+    pub(crate) rounds: usize,
 }
 impl Aes {
     pub(crate) fn aes128(key: &[u8; 16]) -> Self {
@@ -56,14 +53,9 @@ impl Aes {
         Self::expand(key, 14)
     }
     fn expand(key: &[u8], rounds: usize) -> Self {
-        let hardware = crate::arch::aes_available();
         let mut keys = Secret([0u8; 240]);
-        Self::expand_into(&mut keys.0, key, rounds, hardware);
-        Self {
-            keys,
-            rounds,
-            hardware,
-        }
+        Self::expand_into(&mut keys.0, key);
+        Self { keys, rounds }
     }
     #[cfg(feature = "rustls-provider")]
     pub(crate) fn storage(key_len: usize) -> Self {
@@ -74,26 +66,31 @@ impl Aes {
                 32 => 14,
                 _ => unreachable!("AES key length"),
             },
-            hardware: crate::arch::aes_available(),
         }
     }
     #[cfg(feature = "rustls-provider")]
     pub(crate) fn initialize(&mut self, key: &[u8]) {
         assert_eq!(key.len(), if self.rounds == 10 { 16 } else { 32 });
-        Self::expand_into(&mut self.keys.0, key, self.rounds, self.hardware);
+        Self::expand_into(&mut self.keys.0, key);
     }
-    fn expand_into(keys: &mut [u8; 240], key: &[u8], rounds: usize, hardware: bool) {
+    fn expand_into(keys: &mut [u8; 240], key: &[u8]) {
+        if !crate::arch::aes_expand(key, keys) {
+            Self::expand_portable(keys, key);
+        }
+    }
+    fn expand_portable(keys: &mut [u8; 240], key: &[u8]) {
+        let rounds = key.len() / 4 + 6;
         keys[..key.len()].copy_from_slice(key);
         let mut rcon = 1;
         for at in (key.len()..16 * (rounds + 1)).step_by(4) {
             let mut t: [u8; 4] = keys[at - 4..at].try_into().unwrap();
             if at % key.len() == 0 {
                 t.rotate_left(1);
-                subword(&mut t, hardware);
+                subword(&mut t);
                 t[0] ^= rcon;
                 rcon = xtime(rcon);
             } else if key.len() == 32 && at % 32 == 16 {
-                subword(&mut t, hardware);
+                subword(&mut t);
             }
             for (i, &byte) in t.iter().enumerate() {
                 keys[at + i] = keys[at - key.len() + i] ^ byte;
@@ -102,16 +99,11 @@ impl Aes {
         }
     }
     pub(crate) fn encrypt(&self, block: &mut [u8; 16]) {
-        if self.hardware {
-            crate::arch::aes_encrypt(&self.keys.0, self.rounds, block);
-            return;
+        if !crate::arch::aes_encrypt(&self.keys.0, self.rounds, block) {
+            self.encrypt_portable(block);
         }
-        self.encrypt_portable(block);
     }
-    pub(crate) fn xor_ctr(&self, nonce: &[u8; 12], data: &mut [u8]) -> bool {
-        self.hardware && crate::arch::aes_ctr(&self.keys.0, self.rounds, nonce, data)
-    }
-    fn encrypt_portable(&self, block: &mut [u8; 16]) {
+    pub(crate) fn encrypt_portable(&self, block: &mut [u8; 16]) {
         for (b, k) in block.iter_mut().zip(&self.keys.0[..16]) {
             *b ^= k;
         }
@@ -194,35 +186,47 @@ mod tests {
     use super::*;
     #[test]
     fn fips197_portable_matches_instruction_path() {
-        let key = core::array::from_fn(|i| i as u8);
-        let aes = Aes::aes128(&key);
         let plain = [
             0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee,
             0xff,
         ];
-        let expected = [
-            0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4,
-            0xc5, 0x5a,
+        // FIPS 197 Appendix C.1 and C.3.
+        let cases: [(&[u8], [u8; 16]); 2] = [
+            (
+                &core::array::from_fn::<u8, 16, _>(|i| i as u8),
+                [
+                    0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4,
+                    0xc5, 0x5a,
+                ],
+            ),
+            (
+                &core::array::from_fn::<u8, 32, _>(|i| i as u8),
+                [
+                    0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf, 0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49,
+                    0x60, 0x89,
+                ],
+            ),
         ];
-        let mut portable = plain;
-        aes.encrypt_portable(&mut portable);
-        assert_eq!(portable, expected);
-        let mut accelerated = plain;
-        aes.encrypt(&mut accelerated);
-        assert_eq!(accelerated, expected);
-        if aes.hardware {
-            for x in 0..=255u8 {
-                let word = [x, !x, x ^ 0x55, x.rotate_left(3)];
-                let mut substituted = word;
-                if crate::arch::aes_subword(&mut substituted) {
-                    assert_eq!(substituted, word.map(sbox));
-                }
+        for (key, expected) in cases {
+            let aes = if key.len() == 16 {
+                Aes::aes128(key.try_into().unwrap())
+            } else {
+                Aes::aes256(key.try_into().unwrap())
+            };
+            let mut portable_keys = [0u8; 240];
+            Aes::expand_portable(&mut portable_keys, key);
+            assert_eq!(aes.keys.0, portable_keys, "schedule of a {}-byte key", key.len());
+            let mut portable = plain;
+            aes.encrypt_portable(&mut portable);
+            assert_eq!(portable, expected);
+            let mut dispatched = plain;
+            aes.encrypt(&mut dispatched);
+            assert_eq!(dispatched, expected);
+            #[cfg(feature = "wpa2")]
+            {
+                aes.decrypt(&mut dispatched);
+                assert_eq!(dispatched, plain);
             }
-        }
-        #[cfg(feature = "wpa2")]
-        {
-            aes.decrypt(&mut accelerated);
-            assert_eq!(accelerated, plain);
         }
     }
 }

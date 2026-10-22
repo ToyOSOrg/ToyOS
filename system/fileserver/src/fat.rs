@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
-use toyos_abi::syscall::SyscallError;
+use toyos::fs;
 use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, IoError};
 
 use crate::cache::Cache;
@@ -114,21 +114,24 @@ pub struct FatVolume<D: Disk> {
     ids: Identities<u64>,
 }
 
-fn word(e: Error) -> SyscallError {
+fn word(e: Error) -> fs::Error {
     match e {
-        Error::NotFound => SyscallError::NotFound,
-        Error::AlreadyExists => SyscallError::AlreadyExists,
+        Error::NotFound => fs::Error::NotFound,
+        Error::AlreadyExists => fs::Error::AlreadyExists,
         Error::Io | Error::NotFat32 | Error::Truncated | Error::CorruptChain | Error::CorruptDirectory => {
-            SyscallError::Io
+            fs::Error::Io
         }
-        Error::NotADirectory | Error::IsADirectory | Error::DirectoryNotEmpty | Error::InvalidName => {
-            SyscallError::InvalidArgument
-        }
-        Error::NoSpace | Error::TooLarge | Error::LimitExceeded => SyscallError::ResourceExhausted,
+        Error::NotADirectory => fs::Error::NotADirectory,
+        Error::IsADirectory => fs::Error::IsADirectory,
+        Error::DirectoryNotEmpty => fs::Error::NotEmpty,
+        Error::InvalidName => fs::Error::InvalidName,
+        Error::NoSpace => fs::Error::NoSpace,
+        Error::TooLarge => fs::Error::FileTooLarge,
+        Error::LimitExceeded => fs::Error::LimitExceeded,
     }
 }
 
-fn logged(what: &str, path: &str, e: Error) -> SyscallError {
+fn logged(what: &str, path: &str, e: Error) -> fs::Error {
     if e != Error::NotFound {
         println!("fileserver: {what} of '{path}': {e}");
     }
@@ -169,16 +172,16 @@ impl<D: Disk> FatVolume<D> {
         FatTime::from_unix_secs((self.clock)() / NANOS_PER_SEC)
     }
 
-    fn entry(&mut self, node: Node) -> Result<&mut Open, SyscallError> {
-        let open = self.open.get_mut(&node).ok_or(SyscallError::NotFound)?;
+    fn entry(&mut self, node: Node) -> Result<&mut Open, fs::Error> {
+        let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {
-            return Err(SyscallError::Gone);
+            return Err(fs::Error::Stale);
         }
         Ok(open)
     }
 
     /// Bring one open file's entry level with its chain.
-    fn level(&mut self, node: Node) -> Result<(), SyscallError> {
+    fn level(&mut self, node: Node) -> Result<(), fs::Error> {
         let time = self.time();
         let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
         if open.gone {
@@ -212,9 +215,9 @@ impl<D: Disk> FatVolume<D> {
         }
     }
 
-    fn entry_offset(&mut self, path: &str) -> Result<u64, SyscallError> {
+    fn entry_offset(&mut self, path: &str) -> Result<u64, fs::Error> {
         self.fs.entry_offset(path).map_err(|e| match e {
-            Error::NotADirectory => SyscallError::NotFound,
+            Error::NotADirectory => fs::Error::NotFound,
             e => logged("entry_offset", path, e),
         })
     }
@@ -225,7 +228,7 @@ impl<D: Disk> Volume for FatVolume<D> {
         self.writable
     }
 
-    fn lstat(&mut self, path: &str) -> Result<Meta, SyscallError> {
+    fn lstat(&mut self, path: &str) -> Result<Meta, fs::Error> {
         if path.is_empty() {
             return Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 });
         }
@@ -235,19 +238,19 @@ impl<D: Disk> Volume for FatVolume<D> {
             return Ok(Meta { kind: Kind::File, size: len, mtime: mtime * NANOS_PER_SEC });
         }
         let meta = self.fs.metadata(path).map_err(|e| match e {
-            Error::NotADirectory => SyscallError::NotFound,
+            Error::NotADirectory => fs::Error::NotFound,
             e => logged("metadata", path, e),
         })?;
         let kind = if meta.is_dir { Kind::Dir } else { Kind::File };
         Ok(Meta { kind, size: if meta.is_dir { 0 } else { meta.len }, mtime: meta.modified_unix * NANOS_PER_SEC })
     }
 
-    fn read_link(&mut self, path: &str) -> Result<String, SyscallError> {
+    fn read_link(&mut self, path: &str) -> Result<String, fs::Error> {
         self.lstat(path)?;
-        Err(SyscallError::InvalidArgument)
+        Err(fs::Error::NotALink)
     }
 
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, SyscallError> {
+    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, fs::Error> {
         let entries = self.fs.read_dir(dir, MAX_LIST).map_err(|e| logged("list", dir, e))?;
         Ok(entries
             .into_iter()
@@ -258,25 +261,25 @@ impl<D: Disk> Volume for FatVolume<D> {
             .collect())
     }
 
-    fn open(&mut self, path: &str, how: OpenHow) -> Result<Node, SyscallError> {
+    fn open(&mut self, path: &str, how: OpenHow) -> Result<Node, fs::Error> {
         if path.is_empty() {
-            return Err(SyscallError::InvalidArgument);
+            return Err(fs::Error::IsADirectory);
         }
         let node = match self.by_path.get(path).copied() {
-            Some(_) if how.create_new => return Err(SyscallError::AlreadyExists),
+            Some(_) if how.create_new => return Err(fs::Error::AlreadyExists),
             Some(node) => node,
             None => {
                 let existing = match self.fs.metadata(path) {
-                    Ok(meta) if meta.is_dir => return Err(SyscallError::InvalidArgument),
+                    Ok(meta) if meta.is_dir => return Err(fs::Error::IsADirectory),
                     Ok(_) => true,
                     Err(Error::NotFound | Error::NotADirectory) => false,
                     Err(e) => return Err(logged("metadata", path, e)),
                 };
                 let file = match existing {
-                    true if how.create_new => return Err(SyscallError::AlreadyExists),
+                    true if how.create_new => return Err(fs::Error::AlreadyExists),
                     true => self.fs.open(path).map_err(|e| logged("open", path, e))?,
-                    false if !(how.create || how.create_new) => return Err(SyscallError::NotFound),
-                    false if !self.writable => return Err(SyscallError::PermissionDenied),
+                    false if !(how.create || how.create_new) => return Err(fs::Error::NotFound),
+                    false if !self.writable => return Err(fs::Error::ReadOnly),
                     false => {
                         let time = self.time();
                         let dir = parent(path);
@@ -304,7 +307,7 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(node)
     }
 
-    fn close(&mut self, node: Node) -> Result<(), SyscallError> {
+    fn close(&mut self, node: Node) -> Result<(), fs::Error> {
         let Some(open) = self.open.get_mut(&node) else { return Ok(()) };
         open.holders -= 1;
         if open.holders > 0 {
@@ -320,28 +323,22 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(())
     }
 
-    fn hold(&mut self, node: Node) {
-        if let Some(open) = self.open.get_mut(&node) {
-            open.holders += 1;
-        }
-    }
-
-    fn node_meta(&mut self, node: Node) -> Result<Meta, SyscallError> {
+    fn node_meta(&mut self, node: Node) -> Result<Meta, fs::Error> {
         let open = self.entry(node)?;
         let (path, size) = (open.path.clone(), open.file.len());
         let mtime = self.fs.metadata(&path).map_err(|e| logged("metadata", &path, e))?.modified_unix;
         Ok(Meta { kind: Kind::File, size, mtime: mtime * NANOS_PER_SEC })
     }
 
-    fn identity(&mut self, path: &str) -> Result<u64, SyscallError> {
+    fn identity(&mut self, path: &str) -> Result<u64, fs::Error> {
         let key = self.entry_offset(path)?;
         Ok(self.ids.of(key))
     }
 
-    fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, SyscallError> {
-        let open = self.open.get_mut(&node).ok_or(SyscallError::NotFound)?;
+    fn read(&mut self, node: Node, offset: u64, out: &mut dyn Out) -> Result<usize, fs::Error> {
+        let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {
-            return Err(SyscallError::Gone);
+            return Err(fs::Error::Stale);
         }
         if self.scratch.len() < out.len() {
             self.scratch.resize(out.len(), 0);
@@ -352,18 +349,18 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(n)
     }
 
-    fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), SyscallError> {
-        let open = self.open.get_mut(&node).ok_or(SyscallError::NotFound)?;
+    fn write(&mut self, node: Node, offset: u64, data: &[u8]) -> Result<(), fs::Error> {
+        let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {
-            return Err(SyscallError::Gone);
+            return Err(fs::Error::Stale);
         }
         self.fs.write(&mut open.file, offset, data).map_err(|e| logged("write", &open.path, e))
     }
 
-    fn truncate(&mut self, node: Node, size: u64) -> Result<(), SyscallError> {
-        let open = self.open.get_mut(&node).ok_or(SyscallError::NotFound)?;
+    fn truncate(&mut self, node: Node, size: u64) -> Result<(), fs::Error> {
+        let open = self.open.get_mut(&node).ok_or(fs::Error::Stale)?;
         if open.gone {
-            return Err(SyscallError::Gone);
+            return Err(fs::Error::Stale);
         }
         if open.file.len() == size {
             return Ok(());
@@ -371,14 +368,14 @@ impl<D: Disk> Volume for FatVolume<D> {
         self.fs.set_len(&mut open.file, size).map_err(|e| logged("set_len", &open.path, e))
     }
 
-    fn mkdir(&mut self, path: &str) -> Result<(), SyscallError> {
+    fn mkdir(&mut self, path: &str) -> Result<(), fs::Error> {
         let time = self.time();
         self.fs.create_dir(path, time).map_err(|e| logged("mkdir", path, e))
     }
 
-    fn rmdir(&mut self, path: &str) -> Result<(), SyscallError> {
+    fn rmdir(&mut self, path: &str) -> Result<(), fs::Error> {
         if path.is_empty() {
-            return Err(SyscallError::PermissionDenied);
+            return Err(fs::Error::Root);
         }
         let key = self.entry_offset(path)?;
         self.fs.remove_dir(path).map_err(|e| logged("rmdir", path, e))?;
@@ -386,9 +383,9 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(())
     }
 
-    fn unlink(&mut self, path: &str) -> Result<(), SyscallError> {
+    fn unlink(&mut self, path: &str) -> Result<(), fs::Error> {
         if self.fs.metadata(path).map_err(|e| logged("metadata", path, e))?.is_dir {
-            return Err(SyscallError::InvalidArgument);
+            return Err(fs::Error::IsADirectory);
         }
         let key = self.entry_offset(path)?;
         // Asked of the volume first: a delete the device refused leaves every
@@ -399,7 +396,7 @@ impl<D: Disk> Volume for FatVolume<D> {
         Ok(())
     }
 
-    fn rename(&mut self, from: &str, to: &str) -> Result<(), SyscallError> {
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), fs::Error> {
         // The source is judged before the destination is disturbed, and a
         // rename onto the entry it already is — FAT names one entry by strings
         // that differ in case — is POSIX's no-op and never a delete of it.
@@ -413,7 +410,7 @@ impl<D: Disk> Volume for FatVolume<D> {
         let from_key = self.entry_offset(from)?;
         let displaced = match self.entry_offset(to) {
             Ok(key) => Some(key),
-            Err(SyscallError::NotFound) => None,
+            Err(fs::Error::NotFound) => None,
             Err(e) => return Err(e),
         };
         let replaced = self.fs.replace_rename(from, to).map_err(|e| {
@@ -440,11 +437,11 @@ impl<D: Disk> Volume for FatVolume<D> {
         released
     }
 
-    fn symlink(&mut self, _path: &str, _target: &str) -> Result<(), SyscallError> {
-        Err(SyscallError::NotSupported)
+    fn symlink(&mut self, _path: &str, _target: &str) -> Result<(), fs::Error> {
+        Err(fs::Error::Unsupported)
     }
 
-    fn sync(&mut self) -> Result<Vec<(Node, SyscallError)>, SyscallError> {
+    fn sync(&mut self) -> Result<Vec<(Node, fs::Error)>, fs::Error> {
         let mut unlevel = Vec::new();
         if !self.writable {
             return Ok(unlevel);
@@ -459,6 +456,15 @@ impl<D: Disk> Volume for FatVolume<D> {
         }
         self.fs.sync().map_err(|e| logged("sync", "", e))?;
         Ok(unlevel)
+    }
+
+    fn room(&mut self) -> Result<fs::Room, fs::Error> {
+        let unit = u64::from(self.fs.geometry().bytes_per_cluster());
+        if !self.writable {
+            return Ok(fs::Room { free: 0, unit });
+        }
+        let free = self.fs.free_bytes().map_err(|e| logged("free space", "", e))?;
+        Ok(fs::Room { free, unit })
     }
 
     fn describe(&self) -> String {
@@ -624,12 +630,12 @@ mod tests {
         evict(&v);
         refused.set(root);
 
-        assert_eq!(v.sync(), Ok(vec![(a, SyscallError::Io)]), "only the file that did not level is named");
+        assert_eq!(v.sync(), Ok(vec![(a, fs::Error::Io)]), "only the file that did not level is named");
         assert!(!v.open[&b].file.needs_reconcile(), "the other file was brought level");
         assert!(v.open[&a].file.needs_reconcile());
-        assert_eq!(v.close(a), Err(SyscallError::Io), "a close that left the entry behind is refused");
+        assert_eq!(v.close(a), Err(fs::Error::Io), "a close that left the entry behind is refused");
         assert!(v.open.contains_key(&a), "and its node kept");
-        assert_eq!(v.sync(), Ok(vec![(a, SyscallError::Io)]), "a sync the entry still refuses names it again");
+        assert_eq!(v.sync(), Ok(vec![(a, fs::Error::Io)]), "a sync the entry still refuses names it again");
         assert!(v.open.contains_key(&a), "and keeps its node");
 
         refused.set(u64::MAX);
@@ -652,8 +658,8 @@ mod tests {
         evict(&v);
         refused.set((spec_volume::cluster_offset(spec_volume::ROOT_CLUSTER) / BLOCK) as u64);
 
-        assert_eq!(v.lstat("a.txt"), Err(SyscallError::Io));
-        assert_eq!(v.node_meta(a), Err(SyscallError::Io));
+        assert_eq!(v.lstat("a.txt"), Err(fs::Error::Io));
+        assert_eq!(v.node_meta(a), Err(fs::Error::Io));
     }
 
     /// A file's number is one through every spelling of its name and across a
@@ -676,7 +682,7 @@ mod tests {
         assert!(all.iter().all(|&n| n != 0 && all.iter().filter(|&&m| m == n).count() == 1), "{all:?}");
         assert_eq!(v.identity("A.TXT"), Ok(a), "FAT names one entry by either case");
         assert_eq!(v.identity("SUB/b.TXT"), Ok(b));
-        assert_eq!(v.identity("missing.txt"), Err(SyscallError::NotFound));
+        assert_eq!(v.identity("missing.txt"), Err(fs::Error::NotFound));
 
         v.rename("a.txt", "moved.txt").unwrap();
         assert_eq!(v.identity("moved.txt"), Ok(a), "a rename keeps the file's number");
@@ -825,6 +831,9 @@ mod tests {
         let whole = [&held[..], &appended[..]].concat();
         written(&mut image, epochs[..synced].iter().flatten());
 
+        // Whether a stop between the chain's growth and the size's write was
+        // reached, the state a reset mid-append leaves on the stick.
+        let mut grown_before_its_size = false;
         for (e, epoch) in epochs.iter().enumerate().skip(synced) {
             for kept in 0..1u32 << epoch.len() {
                 let stop = format!("stopped in flush epoch {e} of {} with writes {kept:#b} of its {}", epochs.len(), epoch.len());
@@ -834,7 +843,9 @@ mod tests {
                 // Clusters no entry reaches yet, and the last sync's entry over
                 // the append's chain: the window between the chain and its
                 // entry, closed once the sync is whole on the disk.
-                let refused: Vec<_> = check(&bytes)
+                let complaints = check(&bytes);
+                grown_before_its_size |= complaints.iter().any(|c| matches!(c, Complaint::ChainTooLong { .. }));
+                let refused: Vec<_> = complaints
                     .into_iter()
                     .filter(|c| match c {
                         _ if synced_whole => true,
@@ -859,13 +870,14 @@ mod tests {
             }
             written(&mut image, epoch);
         }
+        assert!(grown_before_its_size, "no stop fell between the chain's growth and the size's write");
     }
 
     /// What the driver says of a volume that stopped answering is `Io`, which
     /// no caller takes for a name that is not there.
     #[test]
     fn a_device_error_is_io_and_not_not_found() {
-        assert_eq!(word(Error::Io), SyscallError::Io);
-        assert_eq!(word(Error::NotFound), SyscallError::NotFound);
+        assert_eq!(word(Error::Io), fs::Error::Io);
+        assert_eq!(word(Error::NotFound), fs::Error::NotFound);
     }
 }

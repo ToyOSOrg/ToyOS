@@ -33,6 +33,9 @@ netcase image among them. Load averages 69.67, 65.99 and 62.40 as the suite
 began and 44.91, 57.07 and 59.57 as it ended, with other worktrees' work
 beside it; the 16550 file was not kept.
 
+The tests named here were cut: `netstack_socket_churn` in `c6a2861e8`,
+`https_fetch`, `libc_sockets` and `netstack_streams` in `ff1a11dbd`.
+
 Not reduced: whether the firmware is stuck or starved, which a QMP read of a
 silent guest's registers would say (`tests/CLAUDE.md`'s method for a death
 during boot), and at what rate.

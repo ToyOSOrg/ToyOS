@@ -12,7 +12,6 @@ use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
 
 use kernel::sched::cpu::{Action, Balance, CpuHandle, CpuHandles, CpuSched, Env, SchedPass};
-use kernel::sched::fair::Frontier;
 use kernel::sched::hw::{CpuId, Hw, Kicker, Machine, Nanos};
 use kernel::sched::mailbox::{mailbox, Kick, PreemptGuard, Urgency};
 use kernel::sched::msg::Msg;
@@ -28,9 +27,8 @@ use crate::process::{OwnedAlloc, PageTables, TaskId};
 use crate::process::KERNEL_STACK_SIZE;
 
 use super::payload::{
-    KMsg, KShare, KShared, KernelCtx, KernelPayload, RawTicket, Runs, TaskHandle, ThreadSched,
+    KMsg, KShared, KernelCtx, KernelPayload, RawTicket, Runs, TaskHandle, ThreadSched,
 };
-use super::MAX_CPUS;
 
 /// Proof that preemption is disabled for as long as the borrow lasts.
 pub struct PreemptOff(());
@@ -59,28 +57,20 @@ pub fn irq_off<R>(f: impl FnOnce(&IrqOff) -> R) -> R {
 }
 
 static CPUS: AtomicPtr<CpuHandles<KMsg>> = AtomicPtr::new(ptr::null_mut());
-static FRONTIER: Frontier = Frontier::new();
 static NEXT_KEY: AtomicU64 = AtomicU64::new(1);
 
-/// Per-CPU CPU-time counters, for `total_cpu_ns`. Cache-line padded.
-#[repr(align(64))]
-struct CpuTime(AtomicU64);
-static CPU_TIME_NS: [CpuTime; MAX_CPUS] = [const { CpuTime(AtomicU64::new(0)) }; MAX_CPUS];
 
 /// Nanoseconds between two pass-cost reports — wall-clock, not per-pass, since `klogd`'s own wake is itself a pass.
 #[cfg(feature = "sched-check")]
 const PASS_COST_REPORT_EVERY_NS: u64 = 200_000_000;
 
-/// When each CPU last reported, owned by that CPU alone.
-#[cfg(feature = "sched-check")]
-static PASS_COST_REPORTED: [CpuTime; MAX_CPUS] = [const { CpuTime(AtomicU64::new(0)) }; MAX_CPUS];
 
 /// Publish this CPU's pass-cost distribution, at most once every
 /// [`PASS_COST_REPORT_EVERY_NS`], outside the pass: `log::emit` may take no lock and does not.
 #[cfg(feature = "sched-check")]
 fn report_pass_costs(now: Nanos) {
     let cpu = current_cpu();
-    let last = &PASS_COST_REPORTED[cpu.0 as usize].0;
+    let last = &crate::cpu_local::of(cpu.0).sched.pass_cost_reported;
     if now.0 < last.load(Ordering::Relaxed) + PASS_COST_REPORT_EVERY_NS {
         return;
     }
@@ -159,10 +149,6 @@ pub fn cpus() -> &'static CpuHandles<KMsg> {
     unsafe { &*ptr }
 }
 
-pub fn frontier() -> &'static Frontier {
-    &FRONTIER
-}
-
 /// Monotonic and never reused, so a message names a dead task unambiguously. Not `TaskId`: pids and tids are
 /// recycled.
 fn next_key() -> TaskKey {
@@ -171,7 +157,7 @@ fn next_key() -> TaskKey {
 
 pub fn total_cpu_ns() -> u64 {
     (0..crate::smp::cpu_count() as usize)
-        .map(|i| CPU_TIME_NS[i].0.load(Ordering::Relaxed))
+        .map(|cpu| crate::cpu_local::of(cpu as u32).sched.cpu_time_ns.load(Ordering::Relaxed))
         .sum()
 }
 
@@ -180,40 +166,70 @@ struct SchedSlot(UnsafeCell<Option<CpuSched<KernelPayload>>>);
 // SAFETY: reached only through `with_cpu`, indexed by the calling CPU's own id, so no other CPU can alias this cell.
 unsafe impl Sync for SchedSlot {}
 
-static SCHEDS: [SchedSlot; MAX_CPUS] = [const { SchedSlot(UnsafeCell::new(None)) }; MAX_CPUS];
-static IN_PASS: [AtomicBool; MAX_CPUS] = [const { AtomicBool::new(false) }; MAX_CPUS];
+/// A CPU's scheduler record and what this driver keeps beside it.
+pub struct Local {
+    sched: SchedSlot,
+    in_pass: AtomicBool,
+    /// Busy time, for `total_cpu_ns`, and the pass that last charged it.
+    cpu_time_ns: AtomicU64,
+    last_charged: AtomicU64,
+    /// When this CPU last reported its pass costs, owned by that CPU alone.
+    #[cfg(feature = "sched-check")]
+    pass_cost_reported: AtomicU64,
+    #[cfg(feature = "sched-tripwire")]
+    shadow: tripwire::Shadow,
+}
+
+impl Local {
+    pub fn new() -> Self {
+        Self {
+            sched: SchedSlot(UnsafeCell::new(None)),
+            in_pass: AtomicBool::new(false),
+            cpu_time_ns: AtomicU64::new(0),
+            last_charged: AtomicU64::new(0),
+            #[cfg(feature = "sched-check")]
+            pass_cost_reported: AtomicU64::new(0),
+            #[cfg(feature = "sched-tripwire")]
+            shadow: tripwire::Shadow::new(),
+        }
+    }
+}
+
+fn local(cpu: usize) -> &'static Local {
+    &crate::cpu_local::of(cpu as u32).sched
+}
 
 /// Is this CPU inside a pass? A nested pass is a bug, never deferred.
 pub fn in_pass() -> bool {
-    IN_PASS[percpu::cpu_id() as usize].load(Ordering::Relaxed)
+    local(percpu::cpu_id() as usize).in_pass.load(Ordering::Relaxed)
 }
 
 /// The only accessor. Panics on reentry: a nested pass would alias `&mut`.
 ///
-/// Nothing else in the kernel writes `SCHEDS` between one exit from here and the next entry — the window `sched-tripwire` holds to.
+/// Nothing else in the kernel writes a CPU's scheduler record between one exit from here and the next entry — the window `sched-tripwire` holds to.
 fn with_cpu<R>(f: impl FnOnce(&mut CpuSched<KernelPayload>) -> R) -> R {
     let cpu = percpu::cpu_id() as usize;
     assert!(
-        !IN_PASS[cpu].swap(true, Ordering::Acquire),
+        !local(cpu).in_pass.swap(true, Ordering::Acquire),
         "nested scheduler pass on cpu {cpu}",
     );
     // SAFETY: exclusive by the flag above, and by CpuId — no other CPU
     // indexes this slot.
-    let sched = unsafe { (*SCHEDS[cpu].0.get()).as_mut() }
+    let sched = unsafe { (*local(cpu).sched.0.get()).as_mut() }
         .unwrap_or_else(|| panic!("cpu {cpu} has no CpuSched"));
     #[cfg(feature = "sched-tripwire")]
     tripwire::verify(cpu, sched);
     let result = f(&mut *sched);
     #[cfg(feature = "sched-tripwire")]
     tripwire::record(cpu, sched);
-    IN_PASS[cpu].store(false, Ordering::Release);
+    local(cpu).in_pass.store(false, Ordering::Release);
     result
 }
 
 /// The stray-write tripwire's storage: per CPU, touched by that CPU alone inside `with_cpu`'s exclusive region.
 #[cfg(feature = "sched-tripwire")]
 mod tripwire {
-    use super::{CpuSched, KernelPayload, MAX_CPUS};
+    use super::{local, CpuSched, KernelPayload};
     use core::cell::UnsafeCell;
     use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -224,21 +240,20 @@ mod tripwire {
         "the CpuSched outgrew its shadow: raise WORDS",
     );
 
-    struct Shadow {
+    pub(super) struct Shadow {
         words: UnsafeCell<[u64; WORDS]>,
         taken: AtomicBool,
     }
 
-    // SAFETY: each element is read and written by the CPU whose index it is and
-    // by no other, inside `with_cpu`'s exclusive region.
-    unsafe impl Sync for Shadow {}
-
-    static SHADOW: [Shadow; MAX_CPUS] = [const {
-        Shadow {
-            words: UnsafeCell::new([0; WORDS]),
-            taken: AtomicBool::new(false),
+    impl Shadow {
+        pub(super) fn new() -> Self {
+            Self { words: UnsafeCell::new([0; WORDS]), taken: AtomicBool::new(false) }
         }
-    }; MAX_CPUS];
+    }
+
+    // SAFETY: each is read and written by the CPU whose record holds it and by
+    // no other, inside `with_cpu`'s exclusive region.
+    unsafe impl Sync for Shadow {}
 
     /// The record's bytes as little-endian words, with the remotely-written field's words read back as zero.
     /// Volatile: a non-volatile read could be folded away instead of catching a stray write.
@@ -271,20 +286,20 @@ mod tripwire {
         // the pass or something outside it broke the record.
         walk(cpu, sched);
         // SAFETY: this CPU's own slot, inside the exclusive region.
-        let slot = unsafe { &mut *SHADOW[cpu].words.get() };
+        let slot = unsafe { &mut *local(cpu).shadow.words.get() };
         snapshot(sched, slot);
-        SHADOW[cpu].taken.store(true, Ordering::Relaxed);
+        local(cpu).shadow.taken.store(true, Ordering::Relaxed);
     }
 
     /// Entering it: anything that differs was written by something with no business writing it.
     pub fn verify(cpu: usize, sched: &CpuSched<KernelPayload>) {
-        if !SHADOW[cpu].taken.load(Ordering::Relaxed) {
+        if !local(cpu).shadow.taken.load(Ordering::Relaxed) {
             return;
         }
         let mut now = [0u64; WORDS];
         snapshot(sched, &mut now);
         // SAFETY: as `record`.
-        let was = unsafe { &*SHADOW[cpu].words.get() };
+        let was = unsafe { &*local(cpu).shadow.words.get() };
         let words = CpuSched::<KernelPayload>::tripwire_words();
         let mut hit = false;
         for i in 0..words {
@@ -342,32 +357,29 @@ mod tripwire {
 
 /// A read-only peek for diagnostics that must not fail while a pass runs.
 fn try_with_cpu<R>(f: impl FnOnce(&CpuSched<KernelPayload>) -> R) -> Option<R> {
-    let cpu = percpu::cpu_id() as usize;
-    if IN_PASS[cpu].load(Ordering::Relaxed) {
+    let local = &crate::cpu_local::get(percpu::cpu_id())?.sched;
+    if local.in_pass.load(Ordering::Relaxed) {
         return None;
     }
     // SAFETY: as `with_cpu`, and shared rather than exclusive.
-    let sched = unsafe { (*SCHEDS[cpu].0.get()).as_ref() }?;
+    let sched = unsafe { (*local.sched.0.get()).as_ref() }?;
     Some(f(sched))
 }
 
 /// Build every CPU's mailbox and handle, and the BSP's `CpuSched`. Called once, before any task exists.
 pub fn init() {
     let count = crate::smp::cpu_count() as usize;
-    assert!(count <= MAX_CPUS, "cpu count {count} exceeds MAX_CPUS");
     let mut handles = Vec::with_capacity(count);
-    // A CPU number, not a walk of `SCHEDS`: `SCHEDS` is `MAX_CPUS` long whatever `count` is.
-    #[allow(clippy::needless_range_loop)]
     for cpu in 0..count {
         let (tx, rx) = mailbox::<KMsg>();
         handles.push(CpuHandle::new(CpuId(cpu as u32), tx));
         // SAFETY: single-threaded boot; the APs have not joined yet.
         unsafe {
-            *SCHEDS[cpu].0.get() = Some(CpuSched::new(CpuId(cpu as u32), rx, idle_ctx()));
+            *local(cpu).sched.0.get() = Some(CpuSched::new(CpuId(cpu as u32), rx, idle_ctx()));
         }
     }
     CPUS.store(
-        Box::into_raw(Box::new(CpuHandles::new(handles))),
+        Box::into_raw(Box::new(CpuHandles::new(handles, crate::smp::topology().clone()))),
         Ordering::Release,
     );
 }
@@ -404,7 +416,8 @@ pub struct NewTask {
     pub entry_sp: u64,
     pub address_space: PageTables,
     pub thread_pointer: u64,
-    pub share: Arc<KShare>,
+    /// The job the thread's time is charged to.
+    pub job: Arc<kernel::sched::job::Job>,
     /// The process's image; `None` for a kernel thread.
     pub image: Option<Arc<crate::process::UserImage>>,
 }
@@ -429,7 +442,7 @@ pub fn spawn(new: NewTask) -> (ThreadSched, CpuId) {
     let handle = Arc::new(TaskHandle::new());
     let task = TaskBuilder {
         key: next_key(),
-        share: new.share,
+        job: new.job,
         ctx,
         ext: KernelPayload {
             id: new.id,
@@ -482,7 +495,6 @@ fn env(preempt: &PreemptOff) -> Env<'_, crate::hw::KernelHw, PreemptOff> {
     Env {
         hw: &HW,
         cpus: cpus(),
-        frontier: &FRONTIER,
         preempt,
         balance: Balance::PushOnSurplus {
             threshold: kernel::sched::cpu::PUSH_THRESHOLD,
@@ -500,11 +512,10 @@ pub fn pass(dispose: Dispose) {
     crate::preempt::disable();
     #[cfg(feature = "boot-actuators")]
     crate::deadline::wedge_if_staged();
-    // Must clear before it drains, so a wake from this pass's own drain survives into the next poll.
+    // Cleared before the pass, so a wake landing during it survives into the next poll.
     crate::preempt::clear_need_resched();
-    drain_irqs();
-    // After `drain_irqs` and before the pass picks, so a wake this
-    // posts is in the run queue by the time the pass chooses.
+    // Before the pass picks, so a wake this posts is in the run queue by the
+    // time the pass chooses.
     crate::object::drain_zero_handles();
     let now = HW.now();
     crate::arch::watchdog::feed(now.0);
@@ -584,7 +595,6 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
     // No `preempt::disable()` of its own: the ticket has held the count raised since registration; that guard is this bracket.
     let ticket = ticket.into_raw();
     crate::preempt::clear_need_resched();
-    drain_irqs();
     let now = HW.now();
     let (action, parked) = with_cpu(|cpu| {
         let pass = SchedPass::begin(cpu, env(&PreemptOff(())), now);
@@ -618,13 +628,10 @@ pub fn pass_block(ticket: Ticket, deadline: Option<Nanos>) {
 
 /// Per-CPU busy time, for `sysinfo`, derived from the pass's own `now`.
 fn charge_cpu_time(now: Nanos) {
-    let cpu = percpu::cpu_id() as usize;
-    static LAST: [CpuTime; MAX_CPUS] = [const { CpuTime(AtomicU64::new(0)) }; MAX_CPUS];
-    let last = LAST[cpu].0.swap(now.0, Ordering::Relaxed);
+    let local = local(percpu::cpu_id() as usize);
+    let last = local.last_charged.swap(now.0, Ordering::Relaxed);
     if last != 0 && percpu::current_tid().is_some() {
-        CPU_TIME_NS[cpu]
-            .0
-            .fetch_add(now.0.saturating_sub(last), Ordering::Relaxed);
+        local.cpu_time_ns.fetch_add(now.0.saturating_sub(last), Ordering::Relaxed);
     }
 }
 
@@ -641,10 +648,8 @@ fn execute(action: Action<KernelPayload>) {
             let cpu = CpuId(percpu::cpu_id());
             let awake = cpus().get(cpu).doorbell().kick_pending()
                 || crate::preempt::need_resched()
-                || !with_cpu(|c| c.mailbox_is_empty())
-                // No log condition here: a log to write means a runnable process, covered above. A pending
-                // root-hub port needs a pass too — no interrupt is coming.
-                || crate::drivers::xhci::port_work_pending();
+                // No log condition here: a log to write means a runnable process, covered above.
+                || !with_cpu(|c| c.mailbox_is_empty());
             if awake {
                 crate::arch::cpu::enable_interrupts();
                 drop(token);
@@ -653,11 +658,6 @@ fn execute(action: Action<KernelPayload>) {
             HW.idle_wait(token);
         }
     }
-}
-
-/// Consume this CPU's `irq_ring` records into wakes, before the mailbox drain, so a wake posted here reaches this pass's pick.
-fn drain_irqs() {
-    crate::drivers::xhci::poll_if_pending();
 }
 
 /// Leave the current stack for this CPU's idle stack and never come back.
@@ -706,11 +706,6 @@ pub fn current_handle() -> Option<Arc<crate::sched::payload::TaskHandle>> {
     try_with_cpu(|cpu| cpu.running().map(|t| t.ext().handle.clone())).flatten()
 }
 
-/// The same face, borrowed rather than cloned, for a peek that does not outlive it — [`current_handle`]'s clone is a hot-path RMW.
-pub fn with_current_handle<R>(f: impl FnOnce(&crate::sched::payload::TaskHandle) -> R) -> Option<R> {
-    try_with_cpu(|cpu| cpu.running().map(|t| f(t.ext().handle.as_ref())))?
-}
-
 /// The image of the task this CPU is running, `None` inside for a kernel thread.
 ///
 /// Takes no lock: the image is immutable and the `Arc` outlives teardown. `None`: a pass already holds this
@@ -747,11 +742,11 @@ pub fn with_current_acct<R>(
 }
 
 pub fn set_current_rt(permanent: bool) {
-    with_cpu(|cpu| cpu.set_current_rt(permanent));
+    with_cpu(|cpu| cpu.set_current_rt(HW.now(), permanent));
 }
 
 pub fn boost_current(until: Nanos) {
-    with_cpu(|cpu| cpu.boost_current(until));
+    with_cpu(|cpu| cpu.boost_current(HW.now(), until));
 }
 
 pub fn current_is_rt() -> bool {

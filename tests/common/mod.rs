@@ -9,6 +9,8 @@ pub mod devices;
 pub mod faults;
 pub mod hostedclang;
 pub mod iommu;
+pub mod launchstdio;
+pub mod libcchildren;
 pub mod irqcensus;
 /// The `isa` claim's rows on the T14.
 pub mod isa;
@@ -19,6 +21,5 @@ pub mod ps2server;
 pub mod qemu;
 pub mod screen;
 pub mod serial;
-pub mod usb;
 /// A VNC client, as far as resizing a host window takes one.
 pub mod vnc;

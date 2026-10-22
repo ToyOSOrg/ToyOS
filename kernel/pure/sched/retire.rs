@@ -106,6 +106,7 @@ mod tests {
 
     use super::*;
     use crate::sched::cpu::{CpuHandle, CpuHandles};
+    use crate::sched::topology::Topology;
     use crate::sched::mailbox::{mailbox, MailboxConsumer, NoPreempt};
     use crate::sched::task::{Claim, TaskKey, WakeCause, WakeReason};
     use alloc::vec;
@@ -161,7 +162,7 @@ mod tests {
         let (tx0, rx0) = mailbox();
         let (tx1, rx1) = mailbox();
         (
-            CpuHandles::new(vec![CpuHandle::new(C0, tx0), CpuHandle::new(C1, tx1)]),
+            CpuHandles::new(vec![CpuHandle::new(C0, tx0), CpuHandle::new(C1, tx1)], Topology::flat(2)),
             vec![rx0, rx1],
         )
     }

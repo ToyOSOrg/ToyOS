@@ -24,6 +24,7 @@ use super::percpu::{self, CpuFaultState};
 use super::{cpu, irqchip};
 use crate::irq_census::Source;
 use crate::{alert, log};
+use toyos_abi::end::Fault;
 
 /// The interrupted context, as the entry stores it: `x0`–`x30`, the stack
 /// pointer before the exception, then the four system registers that say
@@ -348,7 +349,22 @@ fn user_fatal(frame: &Frame) -> ! {
     user_report(frame);
     percpu::set_fault_state(CpuFaultState::Normal);
     crate::panic::forget();
-    crate::syscall::kill_process(-1);
+    crate::syscall::fault_process(fault_of(frame.esr));
+}
+
+/// The `<signal.h>` class an EL0 exception nothing serves ends its process as,
+/// by `ESR_EL1`'s class (Arm ARM K.a, D24.2.40) and, for a data abort, its
+/// `DFSC`; every other class is an instruction it would not run.
+fn fault_of(esr: u64) -> Fault {
+    const DFSC_ALIGNMENT: u64 = 0b10_0001;
+    match esr >> 26 {
+        EC_DABT_LOWER if esr & 0x3F == DFSC_ALIGNMENT => Fault::Alignment,
+        EC_IABT_LOWER | EC_DABT_LOWER => Fault::Memory,
+        0x22 | 0x26 => Fault::Alignment,
+        0x2C => Fault::Arithmetic,
+        0x30 | 0x32 | 0x34 | 0x3C => Fault::Trap,
+        _ => Fault::Instruction,
+    }
 }
 
 /// What a fault from EL0 says about the thread: the signal it would be
@@ -511,23 +527,6 @@ pub fn install() {
         );
     }
 }
-
-/// What a driver in this kernel names its function's interrupt by, which
-/// it is refused a message for (`irqchip::its::msi`).
-#[derive(Clone, Copy, Debug)]
-pub enum DriverIrq {
-    Xhci,
-    Hda,
-}
-
-impl core::fmt::Display for DriverIrq {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{self:?}'s")
-    }
-}
-
-pub const XHCI_VECTOR: DriverIrq = DriverIrq::Xhci;
-pub const HDA_VECTOR: DriverIrq = DriverIrq::Hda;
 
 /// The crash report for a panic, from the frame pointer the panic handler
 /// stood on: the backtrace, which CPU is on which stack, and what the

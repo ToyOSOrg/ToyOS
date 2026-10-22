@@ -19,9 +19,7 @@ What that costs, today:
   through `std` as well: every daemon.
 - A partial line is joined only within one instance. `print!("a")` followed by
   `toyos::log::stdio::write(Stream::Out, b"b\n")` is two records on two lines,
-  and a process's exit ends only what `std`'s instance holds —
-  `tests/guest/rust-tests/src/bin/console_line_atomicity.rs` writes its
-  unended line through `std` for exactly that reason.
+  and a process's exit ends only what `std`'s instance holds.
 
 Both records reach the one ring, so nothing is lost and no line is spliced; the
 weakness is the doubled state and the unjoined piece.

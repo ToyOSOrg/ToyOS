@@ -41,7 +41,6 @@ pub enum Event {
     TimerStop,
     TimerFire,
     TimerFireBurst { fires: u32 },
-    IrqDrain { source: u8, latency_us: u32 },
     Mark { index: u32 },
 }
 
@@ -66,7 +65,6 @@ impl Event {
             Self::TimerStop => "timer-stop",
             Self::TimerFire => "timer-fire",
             Self::TimerFireBurst { .. } => "timer-fires",
-            Self::IrqDrain { .. } => "irq-drain",
             Self::Mark { .. } => "mark",
         }
     }
@@ -120,7 +118,6 @@ impl Entry {
             Kind::TimerStop => Event::TimerStop,
             Kind::TimerFire => Event::TimerFire,
             Kind::TimerFireBurst => Event::TimerFireBurst { fires: raw.data },
-            Kind::IrqDrain => Event::IrqDrain { source: (raw.data >> 24) as u8, latency_us: raw.data & 0x00FF_FFFF },
             Kind::Mark => Event::Mark { index: raw.data },
         };
         let thread = (raw.pid != NO_THREAD || raw.tid != NO_THREAD).then_some(Thread { pid: raw.pid, tid: raw.tid });
@@ -156,7 +153,6 @@ impl fmt::Display for Line<'_> {
             Event::Migrate { to } => write!(f, " to=cpu{to}"),
             Event::TimerArm { span_ns } => write!(f, " in={span_ns}ns"),
             Event::TimerFireBurst { fires } => write!(f, " fires={fires}"),
-            Event::IrqDrain { source, latency_us } => write!(f, " source={source} after={latency_us}us"),
             Event::Mark { index } => write!(f, " index={index}"),
             Event::Pick
             | Event::Wake
@@ -233,7 +229,6 @@ mod tests {
             (Kind::TimerArm, 250_000, Event::TimerArm { span_ns: 250_000 }, " in=250000ns"),
             (Kind::TimerStop, 0, Event::TimerStop, ""),
             (Kind::TimerFireBurst, 3, Event::TimerFireBurst { fires: 3 }, " fires=3"),
-            (Kind::IrqDrain, 2 << 24 | 13, Event::IrqDrain { source: 2, latency_us: 13 }, " source=2 after=13us"),
             (Kind::Mark, 41, Event::Mark { index: 41 }, " index=41"),
         ];
         for (kind, data, event, tail) in cases {

@@ -55,7 +55,7 @@ fn records_of(pid: u32) -> Vec<String> {
     let cap: SysCap = Endowments::get()
         .take(SYSCAP_LABEL)
         .expect("test-runner endows every binary it spawns a system capability");
-    let mut tail = LogTail::new();
+    let mut tail = LogTail::new(vec![0; toyos::log::cursor_words(&cap).expect("the capability sizes a log cursor")]);
     let mut records = vec![Record::EMPTY; 64];
     let mut lines = Vec::new();
     loop {

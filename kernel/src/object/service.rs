@@ -1,52 +1,96 @@
 //! A connection: two pipes for the bytes, two handle queues for the handles.
 
-use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
+use kernel::message::{Batches, Refused, Window};
+use kernel::pipe::Landing;
 use toyos_abi::syscall::{SyscallError, MAX_QUEUED_BATCHES};
 
-use crate::pipe::{PipeId, PipeReader, PipeWriter};
+use crate::pipe::{self, AtBatch, PipeId, PipeReader, PipeWrite, PipeWriter};
+use crate::user_ptr::{UserBytes, UserBytesMut};
 use crate::sync::Lock;
 
 use super::handle::HandleEntry;
 use super::port::{PendingConnection, Stamp};
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 
-/// Handles in flight in one direction of a connection; `None` once the reader is gone.
-pub struct HandleQueue(Lock<Option<VecDeque<Vec<HandleEntry>>>>);
+/// Handles in flight in one direction of a connection, each batch pinned at
+/// the stream position it follows (`kernel::message`); `None` once the reader
+/// is gone.
+///
+/// **Its lock is taken before the pipe's**, by the sender for the whole of a
+/// message and by the reader for a read or a receive, so a reader that has
+/// read a message's bytes finds its batch pinned.
+pub struct HandleQueue(Lock<Option<Batches<Vec<HandleEntry>>>>);
+
+/// Why a message was not sent; nothing of it was.
+pub enum SendRefused {
+    /// No room for the whole message now: wait on the write watch.
+    NoRoom,
+    Error(SyscallError),
+}
 
 impl HandleQueue {
     fn open() -> Arc<Self> {
-        Arc::new(Self(Lock::new(Some(VecDeque::new()))))
+        Arc::new(Self(Lock::new(Some(Batches::new()))))
     }
 
-    /// A refusal hands the batch back: dropped here, it would be capabilities destroyed silently.
-    fn push(&self, batch: Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, SyscallError)> {
+    /// Write `bytes` to `tx` and pin `batch` just past them, whole or not at
+    /// all. A refusal hands the batch back: dropped here, it would be
+    /// capabilities destroyed silently.
+    fn send(&self, tx: PipeId, bytes: &UserBytes, batch: Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, SendRefused)> {
         let mut guard = self.0.lock();
-        let Some(queue) = guard.as_mut() else { return Err((batch, SyscallError::Gone)) };
-        if queue.len() >= MAX_QUEUED_BATCHES {
-            return Err((batch, SyscallError::ResourceExhausted));
+        let Some(batches) = guard.as_mut() else { return Err((batch, SendRefused::Error(SyscallError::Gone))) };
+        let carries = !batch.is_empty();
+        match batches.admit(bytes.len(), carries, MAX_QUEUED_BATCHES) {
+            Ok(()) => {}
+            Err(Refused::Empty) => return Err((batch, SendRefused::Error(SyscallError::InvalidArgument))),
+            Err(Refused::QueueFull) => return Err((batch, SendRefused::Error(SyscallError::ResourceExhausted))),
         }
-        queue.push_back(batch);
-        Ok(())
+        match pipe::write(tx, bytes, Landing::Whole) {
+            PipeWrite::Wrote { end, .. } => {
+                if carries {
+                    batches.pin(end, batch);
+                }
+                Ok(())
+            }
+            PipeWrite::NoRoom => Err((batch, SendRefused::NoRoom)),
+            PipeWrite::BrokenPipe => Err((batch, SendRefused::Error(SyscallError::Gone))),
+            PipeWrite::NoMemory => Err((batch, SendRefused::Error(SyscallError::ResourceExhausted))),
+        }
     }
 
-    /// Refuses without taking when the batch is wider than `cap`, leaving it queued to retry.
-    fn pop_bounded(&self, cap: usize) -> Result<Option<Vec<HandleEntry>>, SyscallError> {
-        // One acquisition covers the check and the take: the batch measured is the batch returned.
+    /// A read of `rx`, stopping at the next pinned batch.
+    fn read(&self, rx: PipeId, buf: &mut UserBytesMut) -> Option<Result<usize, AtBatch>> {
+        let guard = self.0.lock();
+        pipe::try_read_within(rx, buf, |read, available| match guard.as_ref() {
+            Some(batches) => batches.window(read, available),
+            None => Window::Bytes(available),
+        })
+    }
+
+    /// Take the batch pinned at `rx`'s read position, refusing without taking
+    /// when it is wider than `cap`, and leaving it pinned when `room` refuses.
+    fn take(&self, rx: PipeId, cap: usize, room: impl FnOnce(usize) -> bool) -> Result<Option<Vec<HandleEntry>>, SyscallError> {
         let mut guard = self.0.lock();
-        let Some(queue) = guard.as_mut() else { return Ok(None) };
-        match queue.front() {
-            None => Ok(None),
-            Some(batch) if batch.len() > cap => Err(SyscallError::InvalidArgument),
-            Some(_) => Ok(queue.pop_front()),
+        let Some(batches) = guard.as_mut() else { return Ok(None) };
+        let Some(read) = pipe::read_position(rx) else { return Ok(None) };
+        let Some(width) = batches.at(read).map(Vec::len) else { return Ok(None) };
+        if width > cap {
+            return Err(SyscallError::InvalidArgument);
         }
+        if !room(width) {
+            return Err(SyscallError::ResourceExhausted);
+        }
+        Ok(batches.take(read))
     }
 
-    /// How wide the oldest batch is, without taking it; the front this reports is what `pop_bounded` takes.
-    fn front_width(&self) -> Option<usize> {
-        self.0.lock().as_ref()?.front().map(Vec::len)
+    /// Whether a batch is pinned where the reader is, which is something to receive.
+    fn pinned_here(&self, rx: PipeId) -> bool {
+        let guard = self.0.lock();
+        let Some(batches) = guard.as_ref() else { return false };
+        pipe::read_position(rx).is_some_and(|read| batches.at(read).is_some())
     }
 
     /// Drops the batches outside the lock: releasing a handle can run another object's hook.
@@ -118,21 +162,24 @@ impl ConnectionEnd {
         self.tx
     }
 
-    /// See [`HandleQueue::push`]: a refusal comes back with the batch.
-    pub fn send(
-        &self,
-        batch: Vec<HandleEntry>,
-    ) -> Result<(), (Vec<HandleEntry>, SyscallError)> {
-        self.outbox.push(batch)
+    /// See [`HandleQueue::send`]: a refusal comes back with the batch.
+    pub fn send(&self, bytes: &UserBytes, batch: Vec<HandleEntry>) -> Result<(), (Vec<HandleEntry>, SendRefused)> {
+        self.outbox.send(self.tx, bytes, batch)
     }
 
-    pub fn recv_bounded(&self, cap: usize) -> Result<Option<Vec<HandleEntry>>, SyscallError> {
-        self.inbox.pop_bounded(cap)
+    /// See [`HandleQueue::read`].
+    pub fn read(&self, buf: &mut UserBytesMut) -> Option<Result<usize, AtBatch>> {
+        self.inbox.read(self.rx, buf)
     }
 
-    /// See [`HandleQueue::front_width`].
-    pub fn peek_width(&self) -> Option<usize> {
-        self.inbox.front_width()
+    /// See [`HandleQueue::take`].
+    pub fn recv(&self, cap: usize, room: impl FnOnce(usize) -> bool) -> Result<Option<Vec<HandleEntry>>, SyscallError> {
+        self.inbox.take(self.rx, cap, room)
+    }
+
+    /// Bytes to read, the peer's end, or a batch pinned where the reader is.
+    pub fn has_data(&self) -> bool {
+        pipe::has_data(self.rx) || self.inbox.pinned_here(self.rx)
     }
 }
 

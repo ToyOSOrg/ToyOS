@@ -49,7 +49,6 @@ pub use idt as trap;
 pub use iommu_unit::interrupt as message_unit;
 
 pub use apic::MSI_DOORBELL;
-pub use idt::DriverIrq;
 
 /// The machine every program image this kernel loads must be built for.
 pub const ELF_MACHINE: toyos_elf::Machine = toyos_elf::Machine::X86_64;
@@ -118,4 +117,28 @@ pub unsafe fn percpu_fetch_add(
         );
     }
     previous
+}
+
+/// This architecture's part of a CPU's `cpu_local` record.
+pub struct CpuLocal {
+    pub counters: counters::Local,
+    #[cfg(feature = "switch-witness")]
+    pub hw: hw::Local,
+}
+
+impl CpuLocal {
+    pub fn new() -> Self {
+        Self {
+            counters: counters::Local::new(),
+            #[cfg(feature = "switch-witness")]
+            hw: hw::Local::new(),
+        }
+    }
+}
+
+/// What this architecture keeps for each of the `cpus` CPUs the firmware
+/// names outside that record: the TLB's and the SMI command port's rounds.
+pub fn size(cpus: usize) {
+    tlb::size(cpus);
+    smi_cmd::size(cpus);
 }

@@ -6,36 +6,33 @@ opened: 2026-09-16
 
 # A 120000 ms boot deadline fired 132859 ms late on the T14, and the hard-lockup bound armed beside it was silent too
 
-`kernel/src/deadline.rs` reads the bound off the parameter line (`claim`,
-`:150-162`), turns it into a TSC deadline once there is a clock (`start`,
-`:168-183`), and `poll` (`:194-200`) compares one relaxed load of `AT_TSC`
-against `rdtsc` from the timer interrupt entry — `kernel/src/arch/x86_64/idt/timer.rs:71`
-(`:79`) in Ring 0 and `:96` in Ring 3 — and calls `expire` (`:208-225`), which
-seals the record and writes the reset register through `acpi::reset_now`.
-`start` arms the other half of the same parameter at `:182`,
+`kernel/src/deadline.rs` reads the bound off the parameter line (`claim`),
+turns it into a counter deadline once there is a clock (`start`), and `poll`
+compares one relaxed load of `AT_COUNTER` against `arch::cpu::counter` from the
+timer interrupt entry — `kernel/src/arch/x86_64/idt/timer.rs`, through
+`poll_in_kernel` in Ring 0 and `poll` in Ring 3 — and calls `expire`, which
+seals the record and writes the reset register through `power::reset_now`.
+`start` arms the other half of the same parameter,
 `crate::hardlockup::start(ms)`: a bound of `toyos_tco::hard_lockup_bound_ms`,
-`deadline_ms / 2` (`lib/tco/src/lib.rs:154-156`), sampled by an NMI every
-second on every CPU (`kernel/src/hardlockup/mod.rs:1-31`). The two share one
-seal (`claim_the_reset`, `deadline.rs:69-71`).
+`deadline_ms / 2` (`lib/tco/src/lib.rs`), sampled by an NMI every
+second on every CPU (`kernel/src/hardlockup/mod.rs`'s header). The two share
+one seal (`deadline::claim_the_reset`).
 
 A boot armed with `boot-deadline=120000` prints both arms at 0.060 s — quoted
-from bench run 42's kernel log, the text `deadline.rs:174-177` and
-`hardlockup/mod.rs:193-198` write:
+from bench run 42's kernel log, the text `deadline::start` and
+`hardlockup`'s `Armed` write:
 
     boot deadline: 120000 ms, after which this kernel seals a WEDGED record and writes the reset register itself
     hard lockup: 60000 ms, sampled every 1000 ms by each cpu's own performance counter, after which a cpu that has taken no interrupt seals a WEDGED record and resets the machine
 
-Run 55's boot — armed at 2026-09-14 20:54:57Z, the `lancase` image of the
-branch `i219-delivery` (#461) at `4d604c86`, whose `kernel/src/deadline.rs`,
-`kernel/src/hardlockup/mod.rs` and `kernel/src/drivers/acpi.rs` are
-byte-identical to this tree's (`git diff --stat 4d604c86 HEAD -- <those>` is
-empty) — did not come back inside the loop's 420 s, and its own kernel log
-never reached the stick, so its print of the two lines is inferred from
-`start` and not read. Its `WEDGED` record was read by run 56's loader pass:
-a pass that printed the record and ended the chain without booting a kernel
-(`loader/src/blackbox.rs:149-154`, `loader/src/main.rs:857-860`), so
-that the machine came back to Ubuntu after 100 s and the loop read the
-stick's `loader.log`, which reads, whole above the ring tail:
+Run 55's boot — armed at 2026-09-14 20:54:57Z, the `lancase` image of the branch
+`i219-delivery` (#461) at `4d604c86` — did not come back inside the loop's 420
+s, and its own kernel log never reached the stick, so its print of the two lines
+is inferred from `start` and not read. Its `WEDGED` record was read by run 56's
+loader pass: a pass that printed the record and ended the chain without booting
+a kernel (`loader/src/blackbox.rs`'s `harvest`), so that the machine came back
+to Ubuntu after 100 s and the loop read the stick's `loader.log`, which reads,
+whole above the ring tail:
 
     --- the pass after the reset, reading what the boot above left
     ToyOS Bootloader 1.0
@@ -49,7 +46,7 @@ stick's `loader.log`, which reads, whole above the ring tail:
 it. In the same boot the 60000 ms hard-lockup bound sealed nothing — the seal
 is the deadline's — and that detector seals only for a CPU whose interrupt
 count is stale for its bound *and* whose sampled frame has `IF` clear
-(`hardlockup/mod.rs:21-31`). So for 133 s past the bound no CPU's timer entry
+(`hardlockup/mod.rs`'s header). So for 133 s past the bound no CPU's timer entry
 ran `poll`, and no CPU met both of the detector's conditions for 60 s, or none
 was sampled; which of those is unmeasured.
 
@@ -108,19 +105,20 @@ runner asks for no reboot; the deadline was the only bound left, and it fired
 now.** The next occurrence carries one census, the deadline's own: `expire`
 seals the machine's census into the `WEDGED` record above the ring's tail
 (`kernel/src/census.rs`), read at the moment the bound fired rather than at
-whichever process last died before it.
+whichever process last died before it, and names where each CPU's timer last
+found the kernel (`deadline::KernelPcs`).
 
 ## The instrument that measures this already exists
 
 `tests/metal/src/lib.rs`'s `deadline_lateness_ms` computes exactly
-`reached − bound` out of the `DEADLINE_EXPIRED` line (`build/bootlog.rs:28`).
+`reached − bound` out of the `DEADLINE_EXPIRED` line (`build/bootlog.rs`).
 The arithmetic above is the instrument's own, done by hand because the run
 was `toyos-metal` invoked directly and not the harness. No second instrument
 is owed; a cause is.
 
 ## What is known and what is not
 
-- `issues/an-xhci-storm-starves-the-cpu-that-takes-it.md` carries the
+- The kernel's xHCI storm, closed when that driver left the kernel (the small-kernel track's step 10), carried the
   same shape, over the 34 s the stick was being written, on run 20's
   `metaldevicecase` boot at tip `f46f91eb`
   (`[2026-09-07 08:51:28 34.609 cpu1] irq: cpu0 total=103171 timer=10 xhci=103161 net=0 sound=0 i8042=0 dmafault=0 hda=0 tlb=0 nmi=0 spurious=0 unclaimed=0`)
@@ -129,10 +127,9 @@ is owed; a cause is.
   Run 55's census shows cpu0 in that state at 3.47 s and other CPUs not; it
   does not show what held every CPU's timer entry off `poll` for 133 s.
 - The earlier deadline-ended T14 boot — run 25's `ccorpus`, back after 187 s
-  with no record because the reset left its stick unenumerable — was tracked
-  as a defect whose exit condition was a `loader.log` from a boot that ran to
-  its deadline with the ring tail naming what the machine was doing; this
-  record is that, and the commit that added this file closed it. Its
+  with no record because the reset left its stick unenumerable — is
+  `issues/a-job-list-hangs-with-interrupts-on-and-the-deadline-ends-it.md`,
+  restored in `14186a833` because run 55 ran no job list. Its
   inference — that a deadline which fires is a machine on which some CPU was
   still taking a timer interrupt — holds for the instant it fired; this record
   shows the 133 s before it in which none did.

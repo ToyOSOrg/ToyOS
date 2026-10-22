@@ -11,8 +11,7 @@ menu on `std::env::current_dir()` (`src/main.rs:471`) and walks it with
 `std::fs::read_dir` (`src/menu.rs:308`). A package's view is its own
 `/apps/<name>` read-only and its own `/home/toy/Apps/<name>`
 (`toyos_manifest::Program::view`), and nothing else a file server serves, so
-that menu reaches no ROM anywhere. The package track records the opposite:
-"It lists a directory itself and reads the ROM the user picks out of it"
+that menu reaches no ROM anywhere, as the package track now records
 (`issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`).
 
 Evidence, in a QEMU guest on `tests/images/proctreecase.toml`, a package launched from

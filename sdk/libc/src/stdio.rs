@@ -1,26 +1,13 @@
 use core::ptr;
-use toyos_abi::RawHandle;
-use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
+use toyos::files;
+use toyos_abi::syscall::SeekFrom;
 
 // Platform fd operations
 
-fn sys_open(path: &[u8], read: bool, write: bool, create: bool, truncate: bool, append: bool) -> i32 {
-    let mut flags = OpenFlags(0);
-    if read { flags |= OpenFlags::READ; }
-    if write { flags |= OpenFlags::WRITE; }
-    if create { flags |= OpenFlags::CREATE; }
-    if truncate { flags |= OpenFlags::TRUNCATE; }
-    if append { flags |= OpenFlags::APPEND; }
-    match syscall::open(path, flags) {
-        Ok(fd) => fd.0 as i32,
-        Err(_) => -1,
-    }
-}
-
-fn sys_close(fd: i32) { syscall::close(RawHandle(fd as u32)); }
+fn sys_close(fd: i32) { let _ = toyos::fd::close(fd); }
 
 fn sys_read(fd: i32, buf: &mut [u8]) -> isize {
-    match syscall::read(RawHandle(fd as u32), buf) {
+    match files::read(fd, buf) {
         Ok(n) => n as isize,
         Err(_) => -1,
     }
@@ -40,24 +27,17 @@ fn sys_seek(fd: i32, offset: i64, whence: i32) -> i64 {
         2 => SeekFrom::End(offset),
         _ => return -1,
     };
-    match syscall::seek(RawHandle(fd as u32), pos) {
+    match files::seek(fd, pos) {
         Ok(n) => n as i64,
         Err(_) => -1,
     }
 }
 
-fn sys_fsync(fd: i32) { let _ = syscall::fsync(RawHandle(fd as u32)); }
+fn sys_fsync(fd: i32) { let _ = files::fsync(fd); }
 
-fn sys_delete(path: &[u8]) -> i32 {
-    match syscall::delete(path) { Ok(()) => 0, Err(_) => -1 }
-}
-
-fn sys_rename(old: &[u8], new: &[u8]) -> i32 {
-    match syscall::rename(old, new) { Ok(()) => 0, Err(_) => -1 }
-}
-
-fn sys_mkdir(path: &[u8]) -> i32 {
-    match syscall::mkdir(path) { Ok(()) => 0, Err(_) => -1 }
+/// `0`, or `-1` with `errno` set for the refusal.
+fn answered(done: Result<(), files::Error>) -> i32 {
+    done.map_or_else(super::posix_io::refuse_files, |()| 0)
 }
 
 // FILE struct
@@ -177,11 +157,9 @@ unsafe fn unregister_stream(f: *mut FILE) {
 /// failure mode that is hardest to tell apart from the program never having run.
 /// C's rule is "interactive device", not "terminal", and a serial console is one.
 unsafe fn fd_is_interactive(fd: i32) -> bool {
-    match syscall::fstat(RawHandle(fd as u32)) {
-        Ok(st) => matches!(
-            st.file_type,
-            syscall::FileType::Tty | syscall::FileType::Serial | syscall::FileType::Keyboard
-        ),
+    use toyos_abi::syscall::FileType;
+    match files::fstat(fd) {
+        Ok(st) => matches!(st.file_type, FileType::Tty | FileType::Serial),
         Err(_) => false,
     }
 }
@@ -331,25 +309,22 @@ unsafe fn c_str_bytes(s: *const u8) -> &'static [u8] {
 
 #[no_mangle]
 pub unsafe extern "C" fn fopen(path: *const u8, mode: *const u8) -> *mut FILE {
-    let path_bytes = unsafe { c_str_bytes(path) };
-
-    let (read, write, create, truncate, append) = match unsafe { *mode } {
-        b'r' => {
-            let plus = unsafe { *mode.add(1) == b'+' || (*mode.add(1) != 0 && *mode.add(2) == b'+') };
-            (true, plus, false, false, false)
+    use super::posix_io::{O_APPEND, O_CREAT, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+    let plus = unsafe { *mode != 0 && (*mode.add(1) == b'+' || (*mode.add(1) != 0 && *mode.add(2) == b'+')) };
+    let flags = match (unsafe { *mode }, plus) {
+        (b'r', false) => O_RDONLY,
+        (b'r', true) => O_RDWR,
+        (b'w', false) => O_WRONLY | O_CREAT | O_TRUNC,
+        (b'w', true) => O_RDWR | O_CREAT | O_TRUNC,
+        (b'a', false) => O_WRONLY | O_CREAT | O_APPEND,
+        (b'a', true) => O_RDWR | O_CREAT | O_APPEND,
+        _ => {
+            crate::errno::set(crate::errcode::EINVAL);
+            return ptr::null_mut();
         }
-        b'w' => {
-            let plus = unsafe { *mode.add(1) == b'+' || (*mode.add(1) != 0 && *mode.add(2) == b'+') };
-            (plus, true, true, true, false)
-        }
-        b'a' => {
-            let plus = unsafe { *mode.add(1) == b'+' || (*mode.add(1) != 0 && *mode.add(2) == b'+') };
-            (plus, true, true, false, true)
-        }
-        _ => return ptr::null_mut(),
     };
-
-    let fd = sys_open(path_bytes, read, write, create, truncate, append);
+    // `open`'s own path, so a name libc answers itself (`/dev/null`) opens here too.
+    let fd = unsafe { super::posix_io::open(path, flags, 0o666) };
     if fd < 0 {
         return ptr::null_mut();
     }
@@ -641,12 +616,12 @@ pub(crate) unsafe fn unget(f: *mut FILE, bytes: &[u8]) -> bool {
 
 #[no_mangle]
 pub unsafe extern "C" fn remove(path: *const u8) -> i32 {
-    sys_delete(unsafe { c_str_bytes(path) })
+    answered(files::unlink(unsafe { c_str_bytes(path) }))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rename(old: *const u8, new: *const u8) -> i32 {
-    sys_rename(unsafe { c_str_bytes(old) }, unsafe { c_str_bytes(new) })
+    answered(files::rename(unsafe { c_str_bytes(old) }, unsafe { c_str_bytes(new) }))
 }
 
 #[no_mangle]
@@ -664,16 +639,13 @@ pub unsafe extern "C" fn perror(s: *const u8) {
 // Remaining stdio-adjacent functions
 
 #[no_mangle]
-pub unsafe extern "C" fn system(_command: *const u8) -> i32 { -1 }
-
-#[no_mangle]
 pub unsafe extern "C" fn atof(s: *const u8) -> f64 {
     super::misc::strtod(s, ptr::null_mut())
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn mkdir(path: *const u8, _mode: u32) -> i32 {
-    sys_mkdir(unsafe { c_str_bytes(path) })
+    answered(files::mkdir(unsafe { c_str_bytes(path) }))
 }
 
 #[no_mangle]

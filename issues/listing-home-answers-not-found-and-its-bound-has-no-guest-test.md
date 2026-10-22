@@ -20,8 +20,10 @@ count:
 So on `main` the arm created 32,769 files through the DATA server (364 s and
 442 s of `readdir_bound` on #536's two whole runs, against 46-181 s before it)
 to reach an answer an empty `/home` gives too. The arm is deleted; what is left
-untested is the one refusal the DATA server has for a listing too large, the
-`WINDOW_BYTES` check in `userland/fsd/src/main.rs`'s `READDIR`.
+untested is the one refusal the DATA server has for a listing too large,
+`Error::LimitExceeded` past `WINDOW_BYTES` in `system/fileserver/src/main.rs`'s
+`READDIR`. Whether listing `/home` itself still answers `NotFound` has not been
+read since #536's branch.
 
 ## Owner
 
@@ -30,5 +32,5 @@ The storage track, which moved `/home` behind the DATA server.
 ## What would close it
 
 `read_dir("/home")` on a machine with a DATA volume answers `/home`'s entries,
-and a guest test lists a served directory past `WINDOW_BYTES` and is refused
-with `ResourceExhausted` by name rather than by any error.
+and a test lists a served directory past `WINDOW_BYTES` and is refused with
+`LimitExceeded` by name rather than by any error.

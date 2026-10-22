@@ -22,8 +22,9 @@ head minutes later was green (345 passed).
 
 Not measured: whether the base reds the same way, or at what rate. The split
 is either the guest writing the line in two console writes with something
-between them, or the host's capture cutting it (`tests/common/console.rs`
-unjoins a line without a trailing newline from the next writer's). Which one
+between them, or the host's capture cutting it (`tests/common/console.rs`,
+deleted since in `520c0d129`, unjoined a line without a trailing newline from
+the next writer's). Which one
 is the question; `console_line_atomicity` is the gate that should hold the
 first.
 

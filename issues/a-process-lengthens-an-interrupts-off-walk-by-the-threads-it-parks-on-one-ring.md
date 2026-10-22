@@ -57,7 +57,7 @@ mutated kernels) read the same report of the same load at 1980239
 - 2 × 5075290 is one of eight: every CPU reads 2 × 5014552 to 2 × 5075290
   (`:416` to `:430`), beside `tlb: shootdowns=282 wait=131633us max=10038us`
   (`:431`). It is a log write's all-CPU shape
-  (`issues/xhci-waits-are-spins.md`) by reading.
+  (the kernel's xHCI waits, since gone with that driver) by reading.
 - 4725822 is cpu0's, a firmware step's length by reading
   (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
   The other seven read 544283 to 1018355.

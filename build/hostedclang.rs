@@ -22,8 +22,13 @@
 //! `hosted-clang/<key>/` in the store holds `bin/clang`, `bin/ld.lld` and
 //! clang's resource headers in `lib/clang/<version>/include`, where clang looks
 //! beside itself; once its [`SOURCE`] file exists it is read-only.
+//!
+//! **What a ToyOS machine installs is a package of it** ([`HostedClang::package`]):
+//! `clang-v<version>-toyos-x86_64.tar.gz` beside the `SHA256SUMS` that verifies
+//! it, which `/system/bin/pkg` installs as `/apps/clang`.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -92,11 +97,17 @@ const BINARIES: [(&str, &str); 2] = [("clang", "clang"), ("lld", "ld.lld")];
 /// A ToyOS-hosted clang and LLD, held in use for as long as this lives.
 pub struct HostedClang {
     pub dir: PathBuf,
+    /// The C sysroot it was built against, which is the one it compiles
+    /// against.
+    pub c: CSysroot,
+    /// The licence of the LLVM it was built from: clang's, LLD's, libc++'s
+    /// and the resource headers'.
+    licence: PathBuf,
     _using: Guard,
 }
 
-/// `cargo run -- --hosted-clang`: make this tree's, and name each binary with
-/// its size.
+/// `cargo run -- --hosted-clang`: make this tree's, name each binary with its
+/// size, and package it in `target/hosted-clang`.
 pub fn dispatch(root: &Path) {
     let hosted = ensure(root);
     for (_, kept) in BINARIES {
@@ -104,6 +115,111 @@ pub fn dispatch(root: &Path) {
         let size = fs::metadata(&binary).unwrap_or_else(|e| panic!("stat {}: {e}", binary.display())).len();
         println!("{} ({size} bytes)", binary.display());
     }
+    let packaged = hosted.package(&root.join("target/hosted-clang"));
+    println!("{}, verified by {}", packaged.archive.display(), packaged.sums.display());
+}
+
+/// The package in its directory: the archive, and `SHA256SUMS` beside it.
+pub struct Packaged {
+    pub archive: PathBuf,
+    pub sums: PathBuf,
+}
+
+/// The package's name: the directory it is under `/apps`, and the program in
+/// its `bin` that a launch starts.
+const PACKAGE: &str = "clang";
+
+/// The links of the package's `bin`: the driver's other names, which it reads
+/// its language from.
+const LINKS: [(&str, &str); 2] = [("cc", "clang"), ("clang++", "clang")];
+
+impl HostedClang {
+    /// Write the package and its `SHA256SUMS` into `into`, and answer where.
+    /// **A function of the product and the sysroot**: every entry in one
+    /// order, with no owner or time, so one toolchain packs to one digest.
+    ///
+    /// Beside the binaries it holds clang's resource headers where clang looks
+    /// for them, `lib/clang`, and the sysroot's `include` and `lib` at
+    /// `sysroot`, which the configuration file clang reads beside itself names
+    /// (`<triple>.cfg`, `clang/docs/UsersManual.rst`, "Configuration files"),
+    /// so a compile there needs no `--sysroot`.
+    pub fn package(&self, into: &Path) -> Packaged {
+        pack(&self.dir, &self.c.dir, &self.licence, &said_version(&self.c.clang).0, into)
+    }
+}
+
+/// [`HostedClang::package`] of the product at `product` and the C sysroot at
+/// `sysroot`, LLVM `version` under the licence at `licence`.
+fn pack(product: &Path, sysroot: &Path, licence: &Path, version: &str, into: &Path) -> Packaged {
+    let name = format!("{PACKAGE}-v{version}-toyos-{}.tar.gz", TARGET.name());
+    fs::create_dir_all(into).unwrap_or_else(|e| panic!("create {}: {e}", into.display()));
+    let archive = into.join(&name);
+    let file = fs::File::create(&archive).unwrap_or_else(|e| panic!("create {}: {e}", archive.display()));
+    let gzip = flate2::write::GzEncoder::new(std::io::BufWriter::new(file), flate2::Compression::default());
+    let mut tar = tar::Builder::new(gzip);
+    let mut append = |path: &str, mode: u32, data: &[u8]| {
+        let mut header = tar::Header::new_ustar();
+        header.set_size(data.len() as u64);
+        header.set_mode(mode);
+        header.set_mtime(0);
+        tar.append_data(&mut header, format!("{PACKAGE}/{path}"), data).unwrap_or_else(|e| panic!("pack {path}: {e}"));
+    };
+    append("LICENSE.TXT", 0o644, &read(licence));
+    for (_, kept) in BINARIES {
+        append(&format!("bin/{kept}"), 0o755, &read(&product.join("bin").join(kept)));
+    }
+    append(&format!("bin/{}.cfg", TARGET.userland()), 0o644, b"--sysroot=<CFGDIR>/../sysroot\n");
+    for (rel, from) in files(&product.join("lib/clang")) {
+        append(&format!("lib/clang/{rel}"), 0o644, &read(&from));
+    }
+    for part in ["include", "lib"] {
+        for (rel, from) in files(&sysroot.join(part)) {
+            append(&format!("sysroot/{part}/{rel}"), 0o644, &read(&from));
+        }
+    }
+    for (link, target) in LINKS {
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_mtime(0);
+        tar.append_link(&mut header, format!("{PACKAGE}/bin/{link}"), target)
+            .unwrap_or_else(|e| panic!("pack bin/{link}: {e}"));
+    }
+    let packed = tar.into_inner().and_then(|gzip| gzip.finish()).and_then(|mut file| file.flush());
+    packed.unwrap_or_else(|e| panic!("{}: {e}", archive.display()));
+
+    let digest: String = toyos_sha2_hw::sha256_digest(read(&archive)).iter().map(|b| format!("{b:02x}")).collect();
+    let sums = into.join("SHA256SUMS");
+    fs::write(&sums, format!("{digest}  {name}\n")).unwrap_or_else(|e| panic!("write {}: {e}", sums.display()));
+    Packaged { archive, sums }
+}
+
+fn read(path: &Path) -> Vec<u8> {
+    fs::read(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// Every file under `dir`, by its path relative to `dir`, in sorted order. A
+/// link in a product is a defect of its maker, refused here rather than packed
+/// as the file it points at.
+fn files(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(at) = pending.pop() {
+        for entry in fs::read_dir(&at).unwrap_or_else(|e| panic!("read {}: {e}", at.display())) {
+            let path = entry.unwrap_or_else(|e| panic!("read {}: {e}", at.display())).path();
+            let kind = fs::symlink_metadata(&path).unwrap_or_else(|e| panic!("stat {}: {e}", path.display())).file_type();
+            assert!(!kind.is_symlink(), "{} is a link, which no product of the store holds", path.display());
+            if kind.is_dir() {
+                pending.push(path);
+            } else {
+                let rel = path.strip_prefix(dir).expect("under the walked directory");
+                out.push((rel.to_string_lossy().into_owned(), path));
+            }
+        }
+    }
+    out.sort();
+    out
 }
 
 /// This tree's, made if nobody on this host has made it.
@@ -124,7 +240,7 @@ fn resolve(store: &Path, fork: &Path, llvm: &Path, sysroot: &Path, ninja: &Path)
     let dir = Keyed::HostedClang.store(store).join(&key);
     let make = || place(fork, llvm, sysroot, ninja, &key, &dir);
     let using = keystore::made(store, Keyed::HostedClang, &key, || defect(&dir), make);
-    HostedClang { dir, _using: using }
+    HostedClang { dir, c: CSysroot::of(sysroot, TARGET), licence: llvm.join("src/llvm/LICENSE.TXT"), _using: using }
 }
 
 /// The key the store product at `dir` is filed under.
@@ -213,7 +329,7 @@ fn build(fork: &Path, sources: &Path, built: &Path, c: &CSysroot, ninja: &Path, 
     native.extend(crate::llvm::NO_HOST_LIBRARIES.iter().map(|name| format!("-D{name}=OFF")));
     let mut definitions = options();
     definitions.extend(crate::llvm::stamp_options(fork));
-    definitions.push(("LLVM_VERSION_SUFFIX".to_string(), version_suffix(&c.clang)));
+    definitions.push(("LLVM_VERSION_SUFFIX".to_string(), said_version(&c.clang).1));
     definitions.extend([
         ("CMAKE_TOOLCHAIN_FILE".to_string(), path(&c.cmake_toolchain())),
         ("CMAKE_C_COMPILER".to_string(), path(&c.clang)),
@@ -233,10 +349,11 @@ fn build(fork: &Path, sources: &Path, built: &Path, c: &CSysroot, ninja: &Path, 
     run(make, "build", ninja);
 }
 
-/// What the host's clang, the sysroot's, says it is beyond LLVM's version:
-/// bootstrap's `LLVM_VERSION_SUFFIX`. Every object a clang compiles carries
-/// what it says in its `.comment`, so this one says it too.
-fn version_suffix(clang: &Path) -> String {
+/// What the host's clang, the sysroot's, says its version is: LLVM's release,
+/// which the package is named by, and what it says beyond it, bootstrap's
+/// `LLVM_VERSION_SUFFIX`. Every object a clang compiles carries the whole in
+/// its `.comment`, so the ToyOS-hosted one is built to say it too.
+fn said_version(clang: &Path) -> (String, String) {
     let mut command = Command::new(clang);
     command.arg("--version");
     crate::llvm::clear(&mut command);
@@ -244,14 +361,15 @@ fn version_suffix(clang: &Path) -> String {
     assert!(out.status.success(), "{command:?} failed: {}", String::from_utf8_lossy(&out.stderr));
     let said = String::from_utf8_lossy(&out.stdout);
     let first = said.lines().next().unwrap_or_default();
-    suffix(first).unwrap_or_else(|| panic!("{} says no version: {said}", clang.display()))
+    split_version(first).unwrap_or_else(|| panic!("{} says no version: {said}", clang.display()))
 }
 
-/// The suffix of the version `line`, clang's first line of `--version`, names:
-/// what follows its first `-`, and none without one.
-fn suffix(line: &str) -> Option<String> {
+/// The version `line`, clang's first line of `--version`, names, split at its
+/// first `-`: the suffix is empty without one.
+fn split_version(line: &str) -> Option<(String, String)> {
     let version = line.strip_prefix("clang version ")?.split_whitespace().next()?;
-    Some(version.find('-').map_or(String::new(), |at| version[at..].to_string()))
+    let at = version.find('-').unwrap_or(version.len());
+    Some((version[..at].to_string(), version[at..].to_string()))
 }
 
 /// Run `command` seeing nothing of this process's environment but what the
@@ -299,11 +417,73 @@ mod tests {
     /// **The suffix is what follows the version's first `-`**, none without
     /// one, and a line that names no clang version names none.
     #[test]
-    fn the_suffix_is_what_follows_the_version() {
+    fn the_version_splits_at_its_first_dash() {
         let rev = "(https://github.com/ToyOSOrg/llvm-project.git ceaf0fbb8440)";
-        assert_eq!(suffix(&format!("clang version 22.1.8-rust-dev {rev}")).as_deref(), Some("-rust-dev"));
-        assert_eq!(suffix(&format!("clang version 22.1.8 {rev}")).as_deref(), Some(""));
-        assert_eq!(suffix("Apple clang version 17.0.0 (clang-1700.0.13.5)"), None);
+        let split = split_version;
+        assert_eq!(split(&format!("clang version 22.1.8-rust-dev {rev}")), Some(("22.1.8".into(), "-rust-dev".into())));
+        assert_eq!(split(&format!("clang version 22.1.8 {rev}")), Some(("22.1.8".into(), String::new())));
+        assert_eq!(split("Apple clang version 17.0.0 (clang-1700.0.13.5)"), None);
+    }
+
+    /// **The package is the product and the sysroot under one `clang`,
+    /// POSIX ustar throughout**, with the driver's other names as links and
+    /// the configuration that names the sysroot, and one input packs to one
+    /// digest.
+    #[test]
+    fn the_package_is_the_product_and_the_sysroot_under_one_directory() {
+        let scratch = TempDir::new("hosted-clang-package");
+        let write = |rel: &str| {
+            let path = scratch.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, rel).unwrap();
+        };
+        for rel in ["product/bin/clang", "product/bin/ld.lld", "product/lib/clang/22/include/stddef.h", "product/SOURCE"] {
+            write(rel);
+        }
+        for rel in ["c/include/stdio.h", "c/include/c++/v1/vector", "c/lib/libtoyos_c.a", "c/toolchain.cmake", "LICENSE.TXT"] {
+            write(rel);
+        }
+        let (product, c) = (scratch.join("product"), scratch.join("c"));
+        let licence = scratch.join("LICENSE.TXT");
+        let first = pack(&product, &c, &licence, "22.1.8", &scratch.join("one"));
+        assert_eq!(first.archive.file_name().unwrap(), "clang-v22.1.8-toyos-x86_64.tar.gz");
+
+        let gz = fs::File::open(&first.archive).unwrap();
+        let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(gz));
+        let mut got = Vec::new();
+        for entry in tar.entries().unwrap() {
+            let mut entry = entry.unwrap();
+            assert_eq!(&entry.header().as_bytes()[257..265], b"ustar\x0000", "a header that is not POSIX ustar");
+            let path = entry.path().unwrap().to_string_lossy().into_owned();
+            let held = match entry.link_name().unwrap() {
+                Some(target) => format!("-> {}", target.display()),
+                None => {
+                    let mut text = String::new();
+                    std::io::Read::read_to_string(&mut entry, &mut text).unwrap();
+                    text
+                }
+            };
+            got.push((path, held));
+        }
+        let want = [
+            ("clang/LICENSE.TXT", "LICENSE.TXT"),
+            ("clang/bin/clang", "product/bin/clang"),
+            ("clang/bin/ld.lld", "product/bin/ld.lld"),
+            ("clang/bin/x86_64-unknown-toyos.cfg", "--sysroot=<CFGDIR>/../sysroot\n"),
+            ("clang/lib/clang/22/include/stddef.h", "product/lib/clang/22/include/stddef.h"),
+            ("clang/sysroot/include/c++/v1/vector", "c/include/c++/v1/vector"),
+            ("clang/sysroot/include/stdio.h", "c/include/stdio.h"),
+            ("clang/sysroot/lib/libtoyos_c.a", "c/lib/libtoyos_c.a"),
+            ("clang/bin/cc", "-> clang"),
+            ("clang/bin/clang++", "-> clang"),
+        ];
+        let want: Vec<(String, String)> = want.iter().map(|(p, h)| (p.to_string(), h.to_string())).collect();
+        assert_eq!(got, want);
+
+        let digest = |sums: &Path| fs::read_to_string(sums).unwrap();
+        let again = pack(&product, &c, &licence, "22.1.8", &scratch.join("two"));
+        assert_eq!(digest(&first.sums), digest(&again.sums), "one input packed to two digests");
+        assert!(digest(&first.sums).ends_with("  clang-v22.1.8-toyos-x86_64.tar.gz\n"));
     }
 
     /// **A product missing a binary or clang's headers is not whole**, nor one

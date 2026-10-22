@@ -17,8 +17,6 @@ on:
 
 jobs:
   suite:
-    # ci.yml's pull request run reports this check skipped.
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     # A wedge guard, not a budget.
     timeout-minutes: 60
@@ -76,7 +74,8 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: serial-${{ github.job }}
+          # One per lane: nightly calls this twice in one run.
+          name: serial-${{ inputs.kvm && 'kvm' || 'tcg' }}
           path: target/red-run-serial/**/uart-*.log
           if-no-files-found: warn
           retention-days: 7

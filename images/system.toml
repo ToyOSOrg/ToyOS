@@ -81,13 +81,15 @@ receives = ["power"]
 # `screen`. `volume` is soundserver's master level and mute, which the volume
 # keys set and no other row receives. The display is a virtio-gpu function the
 # compositor drives, where the machine has one, and the firmware's framebuffer
-# otherwise.
+# otherwise. `jobs` makes each program it starts a job of its own, with its own
+# share of the CPU.
 [programs.compositor]
 service = true
 serves = ["compositor", "prompt", "clipboard", "input", "display"]
 receives = ["soundserver", "filepicker", "volume"]
-devices = ["pci:03:80:00/1af4:1050", "framebuffer", "keyboard", "mouse"]
+devices = ["pci:03:80:00/1af4:1050", "framebuffer"]
 starts = ["terminal", "files", "/apps"]
+syscap = ["jobs"]
 login = true
 
 # The i8042, driven from userland: its ports and its two lines are this
@@ -102,8 +104,17 @@ devices = ["isa:0060,0064:1,12"]
 
 [programs.soundserver]
 service = true
-serves = ["soundserver", "volume"]
-devices = ["hda-audio", "pci:04:01:00/1af4:1059"]
+serves = ["soundserver", "volume", "sound-output"]
+devices = ["pci:04:01:00/1af4:1059"]
+syscap = ["rt"]
+
+# The Intel HD Audio driver: one process per HDA function the kernel does not
+# drive, each walking its own controller's codecs and offering soundserver the
+# output it reaches. A machine with display audio beside an analog codec runs
+# two, and soundserver plays to the one that offers.
+[programs.hda]
+drives = ["pci:04:03:*"]
+receives = ["sound-output"]
 syscap = ["rt"]
 
 # netstack holds the NIC's PCI function and drives it: the virtqueues, the register
@@ -254,16 +265,29 @@ starts = ["toybox", "shell", "terminal", "doom", "snake", "calc", "editor", "pai
 "bin/stats" = "/system/bin/toybox"
 "bin/tone" = "/system/bin/toybox"
 
-# The block service: the NVMe controller this machine's DATA is on, driven
-# from userland through its claim. Started again when it ends; the claim goes
-# back with the process and is minted again for the next.
+# The block service: every disk a driver offers on `disk`, listed and opened
+# for the clients `block` grants, each session handed to its disk's driver.
+# Started again when it ends; its drivers connect again and offer again.
 [programs.diskserver]
 service = true
 restart = true
-serves = ["block"]
-devices = ["pci:01:08:02/1b36:0010"]
+serves = ["block", "disk"]
 
-# The file servers: DATA, the log and the running slot's volume, one process
+# The NVMe driver: one process per such controller, reading its own table and
+# offering its disk to the block service. QEMU's controller alone, so a metal
+# boot leaves the bench's own NVMe disk to its firmware.
+[programs.nvme]
+drives = ["pci:01:08:02/1b36:0010"]
+receives = ["disk"]
+
+# The USB driver: one process per xHCI controller, its sticks offered to the
+# block service as disks it serves, its keyboards and pointers reported to the
+# owner of input.
+[programs.usbd]
+drives = ["pci:0c:03:30"]
+receives = ["disk", "input"]
+
+# The file servers: DATA, the log and the boot volume, one process
 # each, serving every program the directories of its role. Started again when
 # one ends, on the same ports.
 [programs.fileserver]

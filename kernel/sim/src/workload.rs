@@ -12,7 +12,6 @@
 //! one.
 
 use kernel::sched::cpu::Balance;
-use kernel::sched::queue::FairOrder;
 use kernel::sched::task::WaitClass;
 
 use crate::topology::Shape;
@@ -192,39 +191,45 @@ pub enum AgeShape {
     RtOutranksEveryCorpse,
 }
 
-/// What a fair share is a share *of*: all threads of one process share a
-/// vruntime.
+/// What a job is: the owner a thread's CPU time is shared out by.
 ///
 /// A scenario dimension rather than a constant for the same reason
 /// [`BlockShape`] and [`ParkShape`] are, except that the other answer is one
-/// the design *rejected* rather than one it shipped: per-thread
-/// weight-division fairness was turned down, and per-thread vruntime is that
-/// policy in its simplest form. Invariant I5 has to be able to tell the two
+/// the design *rejected* rather than one it shipped: a share per thread lets a
+/// process buy CPU by forking. Invariant I5 has to be able to tell the two
 /// apart, or it is not measuring the shipped policy at all.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ShareShape {
-    /// The shipped policy: one [`kernel::sched::fair::FairShare`] per process,
-    /// reached through every thread of it.
+pub enum JobShape {
+    /// The shipped policy: one [`kernel::sched::job::Job`] per process,
+    /// held by every thread of it.
     PerProcess,
-    /// One share per thread, so a process buys CPU by forking. See
-    /// `scenarios::fair_share_per_thread`.
+    /// One job per thread. See `scenarios::fair_job_per_thread`.
     PerThread,
 }
 
-/// How much vruntime a running task's share is charged for the time it runs.
+/// What a running thread's job group is charged for the time it runs.
 ///
-/// The honest answer is "the time it ran", and it is the core that computes it
-/// (`SchedPass::begin`). This dimension lets the VM charge a named process a
-/// second time on top, which is the shape of a charge applied at two
-/// transitions instead of one — and the shape invariant I5 must notice,
-/// because a share whose vruntime outruns its service is a share being
-/// throttled for work it never did.
+/// The honest answer is "the time it ran", and it is the core that charges it
+/// (`SchedPass::begin`). The other charges a named process's group twice, the
+/// shape of a charge applied at two transitions instead of one — and the shape
+/// invariant I5 must notice, because a job whose group is charged past its
+/// service is a job throttled for work it never did.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ChargeShape {
     Honest,
-    /// Charge this process's share twice for every nanosecond it runs. See
-    /// `scenarios::fair_double_charge`.
+    /// See `scenarios::fair_double_charge`.
     Double { process: &'static str },
+}
+
+/// Which of a job group's threads the fair band runs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroupPick {
+    /// What ships: EEVDF over the group's threads.
+    Eevdf,
+    /// The group's lowest-keyed thread, every time, so one thread takes all of
+    /// its job's time on its CPU while its siblings wait. See
+    /// `scenarios::fair_lowest_key_within_group`.
+    LowestKey,
 }
 
 /// Where a spawn is placed.
@@ -299,7 +304,7 @@ pub struct Scenario {
     pub park: ParkShape,
     pub migrate: MigrateShape,
     pub age: AgeShape,
-    pub share: ShareShape,
+    pub job: JobShape,
     pub charge: ChargeShape,
     pub placement: PlacementShape,
     /// A CPU that takes no scheduler pass for the whole run — the machine a
@@ -319,32 +324,22 @@ pub struct Scenario {
     /// policies the decision was priced across ([`Balance::Pull`], the pull
     /// half alone, and [`Balance::PullWithRearm`], the declined cure).
     ///
-    /// **The core's own type rather than a parallel copy of it**, exactly as
-    /// [`Scenario::order`] carries `FairOrder`: every setting is a policy the
-    /// core implements, so the simulator drives the real code whichever one a
-    /// scenario names.
+    /// **The core's own type rather than a parallel copy of it**: every setting
+    /// is a policy the core implements, so the simulator drives the real code
+    /// whichever one a scenario names.
     pub balance: Balance,
     pub surplus: SurplusShape,
-    /// How the fair band picks between two ready threads of one share. A
-    /// scenario dimension for the same reason [`ShareShape`] is, and the type is
-    /// the core's own rather than a parallel copy of it: the broken orderings
-    /// live in `queue.rs` behind `protocol-port`, so the kernel cannot reach
-    /// them and the simulator drives the real code either way.
-    pub order: FairOrder,
+    /// Which of a group's threads the fair band runs. The broken pick lives in
+    /// `queue.rs` behind `protocol-port`, so the kernel cannot reach it and the
+    /// simulator drives the real code either way.
+    pub group_pick: GroupPick,
     /// What one scheduler pass is modelled to cost. Zero everywhere but
     /// `scenarios::overlong_pass`; see [`crate::hw_impl::SimHwState`].
     pub pass_cost_ns: u64,
-    /// Invariant I5's *recorded* ceiling, where the shipped scheduler does not
-    /// meet the derived one — `scenarios::FAIRNESS_SAMPLE`. Zero means the
-    /// derived bound is the ceiling, which is the only honest default: an
-    /// allowance is a statement that a measurement was taken, and a scenario
-    /// nobody has measured has no allowance to offer.
+    /// Invariant I5's ceiling, lifted above the derived bound only by a control
+    /// that measures what a rejected policy does rather than asserting that it
+    /// fails. Zero means the derived bound is the ceiling.
     pub fair_allowance_ns: u64,
-    /// Invariant I13's recorded ceiling, in the same role and with the same
-    /// default as `fair_allowance_ns`: zero unless somebody has measured this
-    /// scenario and found the shipped scheduler past the derived per-thread
-    /// bound.
-    pub thread_allowance_ns: u64,
     /// Safety net: a run that has not quiesced by here is reported as a
     /// non-termination failure rather than looping forever.
     pub max_steps: usize,
@@ -412,8 +407,8 @@ impl Scenario {
         self
     }
 
-    pub fn with_share(mut self, share: ShareShape) -> Self {
-        self.share = share;
+    pub fn with_job(mut self, job: JobShape) -> Self {
+        self.job = job;
         self
     }
 
@@ -468,8 +463,8 @@ impl Scenario {
         self
     }
 
-    pub fn with_order(mut self, order: FairOrder) -> Self {
-        self.order = order;
+    pub fn with_group_pick(mut self, pick: GroupPick) -> Self {
+        self.group_pick = pick;
         self
     }
 

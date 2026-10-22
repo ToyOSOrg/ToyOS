@@ -13,6 +13,7 @@ use toyos::shm::SharedMemory;
 use toyos::AsHandle;
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::{self, SpawnArgs, SyscallError};
+use toyos_abi::end::End;
 
 const SELF: &str = "/system/bin/test_rs_spawn_image_object";
 const CHILD: &str = "spawned-from-an-object";
@@ -37,8 +38,6 @@ fn spawn(image: RawHandle, len: u64) -> Result<RawHandle, SyscallError> {
             path_len: SELF.len() as u64,
             argv_ptr: argv.as_ptr() as u64,
             argv_len: argv.len() as u64,
-            slot_map_ptr: 0,
-            slot_map_count: 0,
             env_ptr: 0,
             env_len: 0,
             endow_ptr: 0,
@@ -58,8 +57,8 @@ fn runs(what: &str) {
     let (object, len) = object_of(SELF);
     let child = spawn(object.as_handle(), len).unwrap_or_else(|e| panic!("{what}: spawn from an object: {e:?}"));
     drop(object);
-    let code = syscall::process_wait(child).unwrap_or_else(|e| panic!("{what}: wait: {e:?}"));
-    assert_eq!(code, 0, "{what}: the child spawned from an object exited {code}");
+    let end = syscall::process_wait(child).unwrap_or_else(|e| panic!("{what}: wait: {e:?}"));
+    assert_eq!(end, End::Exited(0), "{what}: the child spawned from an object ended {end}");
     println!("spawn_image_object: {what}: a program in a memory object runs");
 }
 
@@ -84,8 +83,8 @@ fn main() {
     // SAFETY: the region is `object.len()` long and mapped here; the kernel
     // reads it only by copying, which is what this races.
     unsafe { core::ptr::write_bytes(object.as_ptr(), 0xF4, object.len()) };
-    let code = syscall::process_wait(child).expect("the overwritten child is waited for");
-    println!("spawn_image_object: a child whose object was overwritten after the spawn ended ({code})");
+    let end = syscall::process_wait(child).expect("the overwritten child is waited for");
+    println!("spawn_image_object: a child whose object was overwritten after the spawn ended ({end})");
     drop(object);
     runs("after the overwrite");
 

@@ -38,7 +38,7 @@ The demand-fault path in `kernel/src/process.rs` and the exception report in
 ## Exit condition
 
 A fault left unhandled because the backing refused the read ends the process
-with a report and an exit that name the device failure and the file, not a
-protection or mapping fault, and a guest test that fails a DATA-backed
-binary's page-in (the `blkdebug` pattern `root_chunk_refused` uses) asserts
+with a report and an exit that name the backing's refusal and the file, not a
+protection or mapping fault, and a guest test that maps a `/tmp` file and
+has it deleted under the mapping, the one refusal still reachable, asserts
 that report and that it contains no `SEGFAULT` line.

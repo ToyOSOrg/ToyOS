@@ -1,7 +1,5 @@
 use crate::arch::barrier;
 
-use toyos_untrusted::{Refused, Untrusted};
-
 use crate::mm::Mmio;
 use super::pci::PciDevice;
 use crate::mm::policy::MmioPolicy;
@@ -92,8 +90,21 @@ struct VirtioPciConfig {
 /// Why a virtio PCI capability names no config window, or the window it names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapWindow {
-    Refused(Refused),
     Unmapped,
+    NoBar { index: u8 },
+    PastBar { offset: u32, length: u32, window: u64 },
+}
+
+impl core::fmt::Display for CapWindow {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Unmapped => write!(f, "names a BAR no window was mapped for"),
+            Self::NoBar { index } => write!(f, "names BAR {index}, past the six a header has"),
+            Self::PastBar { offset, length, window } => {
+                write!(f, "names {length:#x} bytes at {offset:#x}, past its BAR's {window:#x}")
+            }
+        }
+    }
 }
 
 /// The required capability a device's chain never produced a window for; its
@@ -168,15 +179,16 @@ fn cap_subwindow(
     offset: u32,
     length: u32,
 ) -> Result<Mmio, CapWindow> {
-    let bar_idx = Untrusted::new(bar_byte).index(mapped_bars.len()).map_err(CapWindow::Refused)?;
-    let bar = mapped_bars[bar_idx].as_ref().ok_or(CapWindow::Unmapped)?;
+    let slot = mapped_bars.get(usize::from(bar_byte)).ok_or(CapWindow::NoBar { index: bar_byte })?;
+    let bar = slot.as_ref().ok_or(CapWindow::Unmapped)?;
     // The mapped window is the BAR's advertised size or the ceiling, never under 16 bytes.
     let window = bar.size();
-    let size = (length as u64).max(4);
-    // length ≤ window keeps `window - size` from underflowing and offset + size inside the window.
-    Untrusted::new(length).at_most(window).map_err(CapWindow::Refused)?;
-    let offset = Untrusted::new(offset).at_most(window - size).map_err(CapWindow::Refused)?;
-    Ok(bar.subregion(offset, size))
+    let size = u64::from(length).max(4);
+    // size ≤ window keeps `window - size` from underflowing and offset + size inside the window.
+    if size > window || u64::from(offset) > window - size {
+        return Err(CapWindow::PastBar { offset, length, window });
+    }
+    Ok(bar.subregion(u64::from(offset), size))
 }
 
 impl VirtioPciConfig {
@@ -191,7 +203,10 @@ impl VirtioPciConfig {
         for cap in pci_dev.capabilities() {
             if cap.id() != PCI_CAP_ID_VENDOR { continue; }
             // The BAR index is the device's; one past the six the array holds skips the capability rather than indexing it.
-            let Ok(bar_idx) = Untrusted::new(cap.read_u8(4)).index(mapped_bars.len()) else { continue };
+            let bar_idx = usize::from(cap.read_u8(4));
+            if bar_idx >= mapped_bars.len() {
+                continue;
+            }
             if mapped_bars[bar_idx].is_none() {
                 // A capability naming a non-memory or unsizable BAR maps to no window.
                 match pci_dev.memory_bar(bar_idx as u8) {
@@ -226,7 +241,7 @@ impl VirtioPciConfig {
             let mmio = match cap_subwindow(&mapped_bars, cap.read_u8(4), cap.read_u32(8), cap.read_u32(12)) {
                 Ok(mmio) => mmio,
                 Err(CapWindow::Unmapped) => continue,
-                Err(CapWindow::Refused(why)) => {
+                Err(why) => {
                     log!("VirtIO: PCI {:02x}:{:02x}.{} capability {why} — skipped",
                         pci_dev.bus, pci_dev.dev, pci_dev.func);
                     continue;
@@ -354,13 +369,12 @@ impl<'pool> Virtqueue<'pool> {
         USED_RING_OFF + i as usize * USED_ELEM_SIZE
     }
 
-    /// The two fields of a used element, returned as [`Untrusted`] so no caller can use them without naming a bound.
-    /// The only reads of a used element's fields in this queue; nothing else here touches them unwrapped.
-    fn used_ring_id(&self, i: u16) -> Untrusted<u32> {
-        Untrusted::new(self.used.read(self.used_elem_at(i)))
+    /// The two fields of a used element, as the device wrote them: [`Self::parse_used`] is their only reader.
+    fn used_ring_id(&self, i: u16) -> u32 {
+        self.used.read(self.used_elem_at(i))
     }
-    fn used_ring_len(&self, i: u16) -> Untrusted<u32> {
-        Untrusted::new(self.used.read(self.used_elem_at(i) + 4))
+    fn used_ring_len(&self, i: u16) -> u32 {
+        self.used.read(self.used_elem_at(i) + 4)
     }
 
     /// The initial pool of descriptor slots; call once after construction.
@@ -462,17 +476,15 @@ impl<'pool> Virtqueue<'pool> {
     /// What a used-ring element must satisfy: a head inside this queue's table, at a published
     /// chain, written no further than that chain. Refused rather than clamped: there is nothing
     /// here to recover from a forged completion.
-    fn parse_used(&self, id: Untrusted<u32>, len: Untrusted<u32>) -> Option<(DescSlot, u32)> {
+    fn parse_used(&self, id: u32, len: u32) -> Option<(DescSlot, u32)> {
         // `chain_bytes` is exactly `size` long: the descriptor table's own bound, not a constant beside it.
-        let head = id.index(self.chain_bytes.len()).ok()?;
+        let head = usize::try_from(id).ok().filter(|&head| head < self.chain_bytes.len())?;
         let chain = self.chain_bytes[head];
-        if chain == 0 {
+        if chain == 0 || len > chain {
             return None;
         }
-        let written = len.at_most(chain as u64).ok()?;
-        // Exact: `index` proved `head < size`, a `u16`, and `at_most` that `written` is no more
-        // than `chain`, a `u32`.
-        Some((DescSlot(head as u16), written as u32))
+        // Exact: `head < size`, a `u16`.
+        Some((DescSlot(head as u16), len))
     }
 
     /// Submit a descriptor chain and block until the device completes it, returning the recovered `DescSlot`.
@@ -563,7 +575,9 @@ pub fn cap_selftest() {
     // guess but inside the BAR's real size has a case to be accepted by.
     const WINDOW: u64 = 0x8000;
     // One buffer for both the config space and the BAR window, so a permitted subregion stays inside it.
-    let pool = DmaPool::alloc_in(WINDOW as usize, crate::iommu::DeviceSpace::Untranslated);
+    // No device is told it: it stands in for config space.
+    let pool = DmaPool::alloc_in(WINDOW as usize, crate::iommu::DeviceSpace::Untranslated, crate::iommu::Limit::WIDEST)
+        .expect("pci-cap-selftest: a 64-bit untranslated pool is never refused");
     let phys = pool.view().host_phys();
     // SAFETY: the pool owns this page until it drops at end of function, and no Mmio built over it escapes.
     let cfg = unsafe { Mmio::over_phys(DirectMap::from_phys(phys), WINDOW) };

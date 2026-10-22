@@ -35,7 +35,7 @@ use core::sync::atomic::Ordering;
 use std::collections::HashSet;
 
 use toyos_blockhold::Holds;
-use toyos_transport::{Consumer, Place, Producer, Untrusted, Violation, Word};
+use toyos::transport::{Consumer, Place, Producer, Violation, Word};
 
 use crate::client::{Client, Outcome, Ticket, MAX_ATTEMPTS};
 use crate::entry::{Completion, Op, Request};
@@ -156,7 +156,7 @@ impl Queues {
     }
 
     /// The oldest request, as the server's ring gives it.
-    fn take(&mut self) -> Option<[Untrusted<u32>; SQE_WORDS]> {
+    fn take(&mut self) -> Option<[u32; SQE_WORDS]> {
         let want = self.sq.pop_front()?;
         let words = self.server.0.pop(&self.page).expect("an honest client's tail");
         let words = words.expect("the ring holds what the queue does");
@@ -174,7 +174,7 @@ impl Queues {
     /// The oldest completion, as the client's ring gives it.
     fn read(&mut self) -> Option<Completion> {
         let want = self.cq.pop_front()?;
-        let words: [Untrusted<u32>; CQE_WORDS] =
+        let words: [u32; CQE_WORDS] =
             self.client.1.pop(&self.page).expect("an honest server's tail").expect("the ring holds what the queue does");
         self.client.1.release(&self.page);
         assert_eq!(Completion::decode(words), Some(want), "the ring gave the client what the queue holds");

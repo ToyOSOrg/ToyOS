@@ -20,9 +20,10 @@ before the panic:
     [2026-09-29 18:49:34 10.010 cpu4] exit: test_rs_mutual_kill pid=155 code=0 cpu=10ms
     [2026-09-29 18:49:34 10.010 cpu5] exit: test_rs_mutual_kill pid=156 code=137 cpu=10ms
 
-Then pid 28 itself, under the runner's name:
+Then pid 28 itself, under the runner's name (the checkout's parent directory
+masked as `<parent>`):
 
-    {2026-09-29 18:49:34 10.011 error pid=28 test-runner} thread 'main' (1) panicked at /Users/jan/Dev/jan/toyos-phdr/toyos/src/log/stdio.rs:209:33:
+    {2026-09-29 18:49:34 10.011 error pid=28 test-runner} thread 'main' (1) panicked at <parent>/toyos-phdr/toyos/src/log/stdio.rs:209:33:
     {2026-09-29 18:49:34 10.011 error pid=28 test-runner} stdio: slot 1 holds a region that is not a log ring
     ...
       11:      0x1000006e6be - toyos[db68fa2b5c494fe7]::log::stdio::target::sink

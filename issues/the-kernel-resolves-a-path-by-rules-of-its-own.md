@@ -12,7 +12,7 @@ A path on the kernel's own mounts, ROOT and `/tmp`, is resolved by
 - `..` is read off the text before any name is looked up (`normalize`), so
   `/tmp/d/dir/../f`, where `dir` links to `/tmp/x`, names `/tmp/d/f` and not
   `/tmp/f`.
-- Only the last name's link is followed (`resolve_for_open_depth`): a path
+- Only the last name's link is followed (`resolve_for_open`): a path
   through a link to a directory, `/tmp/d/dir/f`, names nothing.
 - A relative link is read against the mount it is on, the first name of its
   path, and not against its own directory.
@@ -26,9 +26,11 @@ A path on the kernel's own mounts, ROOT and `/tmp`, is resolved by
 A file server resolves its own paths POSIX's way, with a bound of its own
 (`system/fileserver/src/resolve.rs`, `MAX_LINKS`), so the same link reads
 differently on `/tmp` and on a served directory. libc's `realpath`
-(`sdk/libc/src/resolve.rs`) answers by the kernel's rules, so that a
-program that canonicalises a path and then opens it opens the same file;
-`sdk/libc/arch/src/path_resolution.rs` pins those rules.
+(`sdk/libc/src/resolve.rs`, `resolve_path`) resolves the names a file server
+holds POSIX's way and hands the kernel the rest at the first name it holds,
+answering that part by the kernel's rules, so that a program that
+canonicalises a path and then opens it opens the same file;
+`sdk/libc/arch/src/path_resolution.rs` pins both.
 
 **Owner**: the kernel VFS, `kernel/src/vfs.rs`.
 

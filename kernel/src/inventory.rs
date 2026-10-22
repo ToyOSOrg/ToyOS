@@ -2,10 +2,8 @@
 //! `SYS_DEVICE_INVENTORY` answers.
 //!
 //! **Assembled from what each subsystem already keeps**: the PCI functions and
-//! their identities are `pcidev`'s from enumeration, the USB devices are the
-//! ones the xHCI driver bound, and the block devices are the ones registered.
-//! A partition's state is the block layer's hold on exactly its span, the
-//! record every view is refused against.
+//! their identities are `pcidev`'s from enumeration, and the partitions the
+//! loader named are `loaded`'s.
 //!
 //! **A holder is found where its handle is**: every process's table is walked
 //! for device claims, one table at a time and with the process table dropped
@@ -14,42 +12,17 @@
 use alloc::sync::Arc;
 use alloc::vec::Vec;
 
-use toyos_abi::inventory::{Block, Claim, Claimed, Holder, Loaded, PartState, Partition, Record, NAME_BYTES};
+use toyos_abi::inventory::{Claim, Claimed, Holder, Loaded, Record, NAME_BYTES};
 
 use crate::object::KObjectRef;
 use crate::process;
 
-/// Every record, in a fixed order: PCI, USB, block devices, partitions,
-/// claims, and the partitions the loader named.
+/// Every record, in a fixed order: PCI, claims, and the partitions the loader
+/// named.
 pub fn collect() -> Vec<Record> {
     let mut out: Vec<Record> = crate::pcidev::inventory().into_iter().map(Record::Pci).collect();
-    out.extend(crate::drivers::xhci::inventory().into_iter().map(Record::Usb));
-    out.extend(
-        crate::block::registered()
-            .iter()
-            .map(|h| Record::Block(Block { device: h.device_id(), blocks: h.block_count() })),
-    );
-    for (device, part, holder) in crate::gpt::inventory() {
-        out.push(Record::Partition(Partition {
-            device,
-            index: part.index(),
-            type_guid: part.type_guid().0,
-            unique_guid: part.unique_guid().0,
-            first_lba: part.first_lba(),
-            lbas: part.lba_count().get(),
-            state: match holder {
-                None => PartState::Free,
-                Some(crate::block::Holder::Kernel(_)) => PartState::Kernel,
-                Some(crate::block::Holder::Claim(_)) => PartState::Claimed,
-            },
-        }));
-    }
     out.extend(claims().into_iter().map(Record::Claim));
-    out.extend(
-        crate::gpt::loaded()
-            .into_iter()
-            .map(|(role, guid)| Record::Loaded(Loaded { role, unique_guid: guid.0 })),
-    );
+    out.extend(crate::loaded::loaded().into_iter().map(|(role, unique_guid)| Record::Loaded(Loaded { role, unique_guid })));
     out
 }
 
@@ -72,10 +45,6 @@ fn claims() -> Vec<Claim> {
                 // A function the last handle has let go names nothing.
                 let Some(at) = claim.pci(crate::pcidev::held_at) else { continue };
                 Claimed::Pci(at)
-            } else if claim.class() == toyos_abi::syscall::DeviceType::Partition {
-                // A partition the last handle has let go names nothing.
-                let Some((device, unique_guid)) = claim.partition_on() else { continue };
-                Claimed::Partition { device, unique_guid }
             } else {
                 Claimed::Class(claim.class())
             };

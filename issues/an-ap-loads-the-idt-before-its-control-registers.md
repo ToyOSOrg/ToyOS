@@ -16,7 +16,7 @@ ordering is stated at the site.
 trampoline's long-mode half sets `CR4.PAE` and nothing else, then sets the GS
 base, then `lidt`s the kernel's table — and `CR4.OSFXSR` is not set until
 `percpu::init_ap` reaches `control_regs::init`, several Rust statements later.
-Between them an AP runs `control_regs::init_cr0`, `pat::init` (MSR writes and a
+Between them an AP runs `control_regs::init_paging`, `pat::init` (MSR writes and a
 CR0 round trip) and `mm::paging::load_kernel_flush` (a CR3 reload) with a table
 loaded whose every stub is `#UD` on entry. Any exception in that window is a
 triple fault with nothing on any channel.
@@ -29,7 +29,7 @@ Neither obvious fix is available without a ruling:
 
 - **Set `CR4.OSFXSR` in the trampoline before the `lidt`.** This is the direct
   fix and it puts a second decider on a control register, which `CLAUDE.md`
-  forbids by name — "a CPU's control registers come from one declaration".
+  forbids by name — "CPU control registers come from one declaration".
 - **Move the `lidt` out of the trampoline into `init_ap`, after
   `control_regs::init`.** This matches the BSP exactly, but it needs an
   `idt::load` separate from `idt::init` (which fills the table and is BSP-only),

@@ -22,12 +22,6 @@ const MODIFIERS: Usages = Usages([0, 0, 0, 0xFF << (MODIFIER % 64)]);
 impl Usages {
     pub const NONE: Self = Self([0; 4]);
 
-    /// The modifiers a boot keyboard report's byte 0 holds: its bit n is
-    /// usage `MODIFIER + n`.
-    pub const fn modifier_byte(byte: u8) -> Self {
-        Self([0, 0, 0, (byte as u64) << (MODIFIER % 64)])
-    }
-
     pub fn contains(self, usage: u8) -> bool {
         let (word, mask) = bit(usage);
         self.0[word] & mask != 0
@@ -47,14 +41,19 @@ impl Usages {
         Self(core::array::from_fn(|w| self.0[w] | other.0[w]))
     }
 
-    /// The modifiers among these.
-    pub fn modifiers(self) -> Self {
-        Self(core::array::from_fn(|w| self.0[w] & MODIFIERS.0[w]))
+    /// The usages in exactly one of `a` and `b`.
+    pub fn symmetric(a: Self, b: Self) -> Self {
+        Self(core::array::from_fn(|w| a.0[w] ^ b.0[w]))
     }
 
-    /// Every one of these but the modifiers.
-    pub fn keys(self) -> Self {
-        Self(core::array::from_fn(|w| self.0[w] & !MODIFIERS.0[w]))
+    /// How many usages are held.
+    pub fn count(self) -> u32 {
+        self.0.iter().map(|w| w.count_ones()).sum()
+    }
+
+    /// These, but none of `other`.
+    pub fn without(self, other: Self) -> Self {
+        Self(core::array::from_fn(|w| self.0[w] & !other.0[w]))
     }
 }
 

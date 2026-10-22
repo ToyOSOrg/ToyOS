@@ -94,6 +94,10 @@ pub const OPT_NODELAY: u32 = 1;
 /// A datagram socket may send to a broadcast address: [`udp_set_option`].
 pub const OPT_BROADCAST: u32 = 2;
 
+/// The widest request payload netstack reads: a [`dns_lookup`]'s hostname,
+/// since every typed request is far smaller.
+pub const MAX_REQUEST: usize = 256;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetError {
     NetstackNotFound,
@@ -315,20 +319,21 @@ impl NetstackConn {
     }
 
     pub fn request<Req: IpcPayload>(self, msg_type: MsgType, payload: &Req) -> Result<PendingResponse, NetError> {
+        const { assert!(core::mem::size_of::<Req>() <= MAX_REQUEST) };
         self.0.send(msg_type as u32, payload).map_err(hangup)?;
         Ok(PendingResponse(self))
     }
 
-    /// A request that hands netstack pipe ends, consumed whether or not this
-    /// answers `Ok` ([`Connection::send_handles`]).
+    /// A request that hands netstack pipe ends, in the request's own frame,
+    /// consumed whether or not this answers `Ok` ([`Connection::send_with`]).
     pub fn request_with_handles<Req: IpcPayload>(
         self,
         handles: impl IntoIterator<Item = OwnedHandle>,
         msg_type: MsgType,
         payload: &Req,
     ) -> Result<PendingResponse, NetError> {
-        self.0.send_handles(handles).map_err(|e| hangup(IpcError::Syscall(e)))?;
-        self.0.send(msg_type as u32, payload).map_err(hangup)?;
+        const { assert!(core::mem::size_of::<Req>() <= MAX_REQUEST) };
+        self.0.send_with(msg_type as u32, payload, handles).map_err(hangup)?;
         Ok(PendingResponse(self))
     }
 
@@ -351,21 +356,20 @@ impl NetstackConn {
 /// rather than exiting with the line it has for exactly this.
 ///
 /// **`Disconnected` is only the word for a hang-up this endpoint *read*, and a
-/// request writes twice before it reads at all.** `IpcError::Disconnected` is
+/// request is sent before anything is read.** `IpcError::Disconnected` is
 /// raised in one place — `ipc::read_exact`, on a `read` that answered zero — so
 /// it is what a peer that left while this endpoint was waiting for the response
 /// looks like. A peer that left *before* the request went out is refused by the
-/// kernel at one of the two writes instead, and both answer `Gone` on a
-/// connection whose handle is still live and still this process's: when the
-/// server end's last handle goes, `port::Acceptor::on_zero_handles` closes
-/// every queued connection's inbox — this end's *outbox*, so `HandleQueue::push`
-/// refuses `SYS_HANDLE_SEND` rather than filling a queue nobody will drain —
-/// and drops the connection, which drops the server's read end, so `SYS_WRITE`
-/// is a pipe with no readers.
+/// kernel at the send instead, which answers `Gone` on a connection whose
+/// handle is still live and still this process's: when the server end's last
+/// handle goes, `port::Acceptor::on_zero_handles` closes every queued
+/// connection's inbox — this end's *outbox*, so `SYS_MESSAGE_SEND` refuses a
+/// message rather than filling a queue nobody will drain — and drops the
+/// connection, which drops the server's read end, so the stream has no reader.
 ///
-/// `Gone` cannot mean anything else here. This is applied only to `read`,
-/// `write` and `handle_send` on a connection this process holds, and a handle a
-/// process does not hold ends it at the kernel rather than answering a word.
+/// `Gone` cannot mean anything else here. This is applied only to `read` and
+/// `message_send` on a connection this process holds, and a handle a process
+/// does not hold ends it at the kernel rather than answering a word.
 fn hangup(e: IpcError) -> NetError {
     match e {
         IpcError::Disconnected
@@ -406,7 +410,7 @@ impl PendingResponse {
     pub fn answer_with_handle<Resp: IpcPayload>(self) -> Result<(Resp, RawHandle, Connection), NetError> {
         let header = self.recv_checked_header()?;
         let answer = self.conn().recv_payload(&header).map_err(hangup)?;
-        let [handle] = self.conn().recv_handles_exact::<1>().ok_or(NetError::Protocol(header.msg_type))?;
+        let [handle] = self.conn().recv_handles_exact::<1>(&header).ok_or(NetError::Protocol(header.msg_type))?;
         Ok((answer, handle, (self.0).0))
     }
 
@@ -526,6 +530,9 @@ pub fn udp_set_option(socket_id: UdpSocketId, option: u32, value: u32) -> Result
 }
 
 pub fn dns_lookup(hostname: &str, results: &mut [[u8; 4]]) -> Result<usize, NetError> {
+    if hostname.len() > MAX_REQUEST {
+        return Err(NetError::InvalidInput);
+    }
     let mut buf = [0u8; 256];
     let n = NetstackConn::connect()?
         .request_bytes(MsgType::DnsLookup, hostname.as_bytes())?
@@ -565,16 +572,14 @@ mod tests {
     use super::*;
     use toyos_abi::syscall::SyscallError;
 
-    /// `SYS_HANDLE_SEND` into a connection whose server end has gone. The first
-    /// refusal a `tcp_bind` can meet, because a request that hands netstack pipe
-    /// ends moves the handles before it writes the frame.
+    /// `SYS_MESSAGE_SEND` into a connection whose server end has gone: the
+    /// first refusal any request can meet, a `tcp_bind`'s included.
     #[test]
     fn a_gone_handle_transfer_is_a_netstack_that_is_not_there() {
         assert_eq!(hangup(IpcError::Syscall(SyscallError::Gone)), NetError::NetstackNotFound);
     }
 
-    /// `SYS_WRITE` into the same connection a moment later reaches the same
-    /// word, so `NotFound` is not this fact and no longer reaches it.
+    /// `NotFound` is not this fact and does not reach it.
     #[test]
     fn a_not_found_is_not_a_netstack_that_is_not_there() {
         assert_eq!(hangup(IpcError::Syscall(SyscallError::NotFound)), NetError::Io);

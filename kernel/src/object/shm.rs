@@ -1,6 +1,6 @@
 //! A region of memory more than one process can see.
 //!
-//! Holding a handle allows mapping it; giving one away is `SYS_HANDLE_SEND`.
+//! Holding a handle allows mapping it; giving one away is `SYS_MESSAGE_SEND`.
 //! The handle count owns the mappings and the `Arc` count owns the pages: the
 //! last handle takes the list of mappings away for good and tears each one
 //! down, and the pages are freed when the last `Arc` goes, always later since
@@ -14,7 +14,8 @@ use alloc::vec::Vec;
 use toyos_abi::syscall::SyscallError;
 
 use crate::mm::policy::{CachePolicy, Prot};
-use crate::mm::{align_2m_checked, pmm, Unmapped, PAGE_2M};
+use crate::mm::paging::Detached;
+use crate::mm::{align_2m_checked, pmm, Unmapped, PAGE_2M, PAGE_SIZE};
 use crate::process::{PageTables, Pid};
 use crate::{DirectMap, UserAddr};
 
@@ -49,12 +50,13 @@ pub struct SharedMemObject {
 }
 
 impl SharedMemObject {
-    /// A region over memory somebody else owns: unmapped when the last
-    /// handle goes, never freed here.
+    /// A region over memory somebody else owns, whole 4 KiB pages: unmapped
+    /// when the last handle goes, never freed here.
     pub fn over(region: Region) -> Arc<Self> {
         assert!(
-            region.phys.phys() & (PAGE_2M - 1) == 0,
-            "shm: {:#x} is not 2 MiB aligned",
+            (region.phys.phys() | region.size) & (PAGE_SIZE - 1) == 0,
+            "shm: {:#x} bytes at {:#x} are not whole 4 KiB pages",
+            region.size,
             region.phys.phys(),
         );
         Arc::new(Self {
@@ -155,12 +157,12 @@ impl SharedMemObject {
     /// Take this process's mapping away, if it has one; the caller owes a
     /// shootdown before the freed address can be reissued.
     #[must_use = "the caller owes a shootdown before the address can be reissued"]
-    pub fn unmap_from(&self, pid: Pid) -> Option<Unmapped<()>> {
+    pub fn unmap_from(&self, pid: Pid) -> Option<Unmapped<Option<Detached>>> {
         self.mapped_in.with_mut(|mapped| {
             let pos = mapped.iter().position(|(p, _, _)| *p == pid)?;
             let (_, pt, vaddr) = mapped.swap_remove(pos);
-            pt.lock().free_and_unmap(vaddr);
-            Some(Unmapped::new(()))
+            let detached = pt.lock().free_and_unmap(vaddr);
+            Some(Unmapped::new(detached))
         })?
     }
 }
@@ -174,10 +176,8 @@ impl ZeroHandles for SharedMemObject {
         if mapped.is_empty() {
             return;
         }
-        for (_, pt, vaddr) in &mapped {
-            pt.lock().free_and_unmap(*vaddr);
-        }
-        drop(Unmapped::new(mapped));
+        let detached: Vec<_> = mapped.iter().filter_map(|(_, pt, vaddr)| pt.lock().free_and_unmap(*vaddr)).collect();
+        drop(Unmapped::new((mapped, detached)));
     }
 }
 

@@ -6,11 +6,11 @@ opened: 2026-09-01
 
 # A process's memory is a byte total that reads zero under contention, so no plateau can be trusted
 
-`issues/std-leaks-a-thread-stack-per-spawn.md` is the immediate consumer:
-ToyOS std allocates a 2 MiB stack per spawn and `join` performs the join syscall
-and nothing else. Deciding whether the mapping and its frames come back means
+Deciding whether a process's mappings and their frames come back means
 reading a *plateau* — a sequence that climbs and returns — and that is what this
-tree cannot do honestly today.
+tree cannot do honestly today. std's thread stacks did without one: a stack
+still allocated cannot share a base with the next, so `std_threads` reads
+reuse instead.
 
 **Three things already exist, and this track is the difference between them and
 a plateau.**
@@ -38,9 +38,9 @@ number which never returns. `peak_memory` is a high-water mark, which means a
 *fix* is invisible in it: a leak that stops leaking leaves the peak where it was.
 
 `tests/guest/rust-tests/src/bin/abuse_tls_alloc.rs` has the harness shape. It
-runs raw `thread_spawn`/`thread_join` over an explicitly `mmap`ed stack, and its
-comment at `:57-59` names this exact leak as the reason it avoids
-`std::thread::spawn`. What it does not do is read a number.
+runs raw `thread_spawn`/`thread_join` over one explicitly `mmap`ed stack, so
+the address space holds still while it measures. What it does not do is read a
+number.
 
 **So what is missing is narrow and worth building.** A test-only per-process
 *count* of live mappings and resident frames — counts, not bytes — read without
@@ -52,7 +52,3 @@ not retain the objects it counts. Both are proved by comparing its total against
 a quiescent page-table and PMM walk at the start and at the end.
 
 Accounting is a pillar of `issues/toyos-explains-itself.md`.
-
-**Half the defect is not the joined half.** A `JoinHandle` dropped without `join`
-detaches, and the record's exit condition currently closes only the joined path.
-The plateau must cover both.

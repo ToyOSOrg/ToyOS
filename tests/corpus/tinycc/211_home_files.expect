@@ -1,0 +1,30 @@
+mkdir makes the directory: yes
+open makes the file: yes
+write writes it: yes
+close closes it: yes
+O_EXCL refuses it again with EEXIST: yes
+read reads it back: yes
+lseek moves the offset: yes
+read reads from the offset: yes
+fstat answers a regular file and its size: yes
+isatty answers no, with ENOTTY: yes
+write to a file open to read is EBADF: yes
+fopen appends: yes
+stat answers the appended size: yes
+symlink makes a link: yes
+symlink refuses a name that exists with EEXIST: yes
+readlink answers its target: yes
+readlink of a file is EINVAL: yes
+lstat answers the link: yes
+stat follows it: yes
+realpath resolves it: yes
+chdir enters the directory: yes
+rename renames by a relative path: yes
+the old name is gone with ENOENT: yes
+the listing has the file: yes
+the listing has the link: yes
+rmdir of a full directory is ENOTEMPTY: yes
+chdir leaves it: yes
+unlink removes the file and the link: yes
+rmdir removes the directory: yes
+it is gone with ENOENT: yes

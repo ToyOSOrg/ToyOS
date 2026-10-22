@@ -7,7 +7,7 @@ opened: 2026-09-29
 # Every syscall runs at one kernel stack offset
 
 `syscall_entry` loads the thread's fixed stack top
-(`kernel/src/arch/x86_64/syscall.rs:107`), so each of a thread's syscall
+(`kernel/src/arch/x86_64/syscall.rs`, `mov rsp, gs:[{kernel_rsp}]`), so each of a thread's syscall
 frames sits at the same address on every syscall, and a stack address leaked
 by one syscall or an overwrite laid out against one frame carries to the next.
 Linux at `Ubuntu-6.8.0-142.142`, under the T14's

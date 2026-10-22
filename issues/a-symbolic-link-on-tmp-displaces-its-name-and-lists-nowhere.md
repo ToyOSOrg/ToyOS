@@ -8,16 +8,18 @@ opened: 2026-10-01
 
 Read from the code, not run. The kernel's `/tmp` (`kernel/src/tmpfs.rs`)
 makes a link over whatever file its name held, where POSIX's `symlink` refuses
-a name that exists `EEXIST`, so libc's `symlink` refuses `ENOSYS`
-(`sdk/libc/src/refused.rs`). Its `list` answers files alone, so no
-`readdir` of a directory shows a link it holds.
+a name that exists `EEXIST`, so libc's `symlink` refuses `ENOSYS` for a link
+the kernel would hold (`sdk/libc/src/posix_io.rs`). Its `list` answers files
+alone, so no `readdir` of a directory shows a link it holds.
 
-**Exit**: `symlink` is the file server's, not the kernel's. libc's `symlink`
-sends the request to the server of the directory that is to hold the link, as
-std's does (`on_path` in `sdk/std/sys/fs.rs`), with nothing
-asked first, and answers its `AlreadyExists` `EEXIST`. fsd makes the link in
-the one request that refuses a name that exists, and libc's `readdir` of that
-directory names the link, each asserted by a test. The kernel's `SYS_SYMLINK`
+libc's `symlink` already sends a link a file server is to hold to that
+server, through `toyos::files` as std's does, which refuses a name that
+exists, answered `EEXIST`, and `readdir` there names the link; corpus case
+`211_home_files` asserts both under `/home`. What is left is `/tmp`.
+
+**Exit**: `/tmp` is a file server's, so every `symlink` is one, sent with
+nothing asked first and answered `EEXIST` for a name that exists, and libc's
+`readdir` of `/tmp` names the link, each asserted by a test. The kernel's `SYS_SYMLINK`
 and its symlink code (`kernel/src/vfs.rs`, `kernel/src/tmpfs.rs`) go wherever
 nothing calls them. That `EEXIST` is how LLVM's `LockFileManager` takes its
 lock (`create_link`, `::symlink` in `llvm/lib/Support/Unix/Path.inc`). An LLVM

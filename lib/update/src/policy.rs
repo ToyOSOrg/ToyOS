@@ -45,6 +45,8 @@ pub enum Refusal {
     Hash(&'static str),
     /// A section could not be read.
     Unreadable(&'static str),
+    /// The partition the slot table names for a section is not of its type.
+    Type(&'static str),
 }
 
 impl Refusal {
@@ -60,6 +62,7 @@ impl Refusal {
             Self::BelowFloor { .. } | Self::Older { .. } => "version",
             Self::Hash(_) => "hash",
             Self::Unreadable(_) => "unreadable",
+            Self::Type(_) => "type",
         }
     }
 }
@@ -78,6 +81,7 @@ impl core::fmt::Display for Refusal {
             Self::Older { version, than } => write!(f, "its version {version} is older than {than}"),
             Self::Hash(section) => write!(f, "its {section} is not the bytes its signed header names"),
             Self::Unreadable(what) => write!(f, "its {what} could not be read"),
+            Self::Type(what) => write!(f, "its {what} partition is not typed as one"),
         }
     }
 }
@@ -163,6 +167,7 @@ mod tests {
             Refusal::BelowFloor { version: 1, floor: 2 },
             Refusal::Hash("kernel"),
             Refusal::Unreadable("root"),
+            Refusal::Type("root"),
         ] {
             assert!(!r.word().is_empty() && !r.word().contains([',', ' ', ':', '=']), "{r:?}");
         }

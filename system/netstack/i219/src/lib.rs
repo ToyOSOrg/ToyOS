@@ -607,11 +607,11 @@ pub(crate) enum Whole {
     WithThePhy { after: Option<u64> },
 }
 
-/// Stop what a previous holder left the part doing, before this driver's first
-/// grant lets it master the bus again: every interrupt masked, receive and
-/// transmit off.
+/// Stop what a previous holder left the part doing, before this driver starts
+/// it mastering the bus again: every interrupt masked, receive and transmit
+/// off.
 ///
-/// **The function keeps its rings across a release**, and the grant is the
+/// **The function keeps its rings across a release**, and the start is the
 /// instant it may use them — an enabled receive unit would write the next
 /// frame into the previous holder's descriptors. The kernel resets a released
 /// function where it advertises a reset; this is the driver not trusting that

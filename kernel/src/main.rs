@@ -15,6 +15,8 @@ pub use mm::{UserAddr, DirectMap, PHYS_OFFSET};
 mod invalidation;
 mod seqlock;
 mod shootdown;
+mod cpu_local;
+mod cpu_slice;
 mod sleeplock;
 mod smp;
 mod smp_roster;
@@ -40,15 +42,8 @@ mod panic;
 mod panic_reboot;
 mod power;
 
-mod keyboard;
-mod mouse;
-#[cfg(feature = "boot-actuators")]
-mod usb_gate;
-#[cfg(feature = "boot-actuators")]
-mod sched_gate;
-mod block;
-mod gpt;
 mod inventory;
+mod loaded;
 mod rollback;
 mod rootfs;
 mod file_cache;
@@ -74,7 +69,6 @@ mod census;
 mod irq_census;
 #[cfg(feature = "mask-windows")]
 mod windows;
-mod irq_ring;
 mod trace;
 mod time;
 mod clock;
@@ -106,7 +100,7 @@ mod late_panic {
 
 use alloc::boxed::Box;
 use arch::{cpu, percpu};
-use drivers::{acpi, gop, pci, serial, virtio_console, xhci};
+use drivers::{acpi, gop, pci, serial, virtio_console};
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry};
 use toyos_rootimage::handoff::{held, Descriptor};
 
@@ -202,29 +196,11 @@ fn report_power_on(args: &KernelArgs, complete: u64) {
 
 /// Says where this boot's log can be read, on the last surface still showing it once userland owns the screen.
 fn report_log_destination() {
-    // Kernel-side because panic_console owns the panel; logkeeper reports which file it opened separately.
-    // Whether the partition is on a disk this kernel reads, not whether its file server mounted it:
-    // that server says so itself, and this kernel mounts nothing but ROOT.
-    let console = drivers::serial::has_console();
-    let has_log = match gpt::log_place() {
-        gpt::LogPlace::Driven => true,
-        gpt::LogPlace::Unnamed | gpt::LogPlace::Absent => false,
-        gpt::LogPlace::Undriven => {
-            log!("log: /log is on a disk this kernel does not drive; its file server says whether it mounted");
-            return;
-        }
-    };
+    // Kernel-side because panic_console owns the panel; `/log` is its file server's, which says whether it mounted.
     // ASCII only: the panel's font renders anything outside 0x20..=0x7E as a dot.
-    match (console, has_log) {
-        (true, true) => log!("log: this boot is on the console and on /log"),
-        (false, true) => log!("log: no serial console - this boot is on /log and on the screen"),
-        // alert! reddens the panel's Level for exactly the two states that leave no account of this boot anywhere.
-        (true, false) => {
-            alert!("log: no /log - this boot is on the console only, and nothing outlives the power")
-        }
-        (false, false) => {
-            alert!("log: no serial console and no /log - this boot is on this screen and nowhere else")
-        }
+    match drivers::serial::has_console() {
+        true => log!("log: this boot is on the console, and on /log once its file server mounts it"),
+        false => log!("log: no serial console - this boot is on the screen, and on /log once its file server mounts it"),
     }
 }
 
@@ -408,28 +384,32 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // what `mm::init` withholds.
     let [image, elf, black_box, root, map, microcode] = loader;
     let reserved = [image, elf, black_box, root, map, microcode, arch::boot::reserved()];
+    let layout = toyos_elf::Layout::parse(kernel_elf, arch::ELF_MACHINE)
+        .unwrap_or_else(|e| panic!("boot: the loader's kernel.elf: {e}"));
+    let image = mm::Image::new(&layout, image);
 
     // Before the first hash container, `mm::init`'s address space.
     hasher::seed();
 
-    mm::init(maps, &reserved);
+    mm::init(maps, &reserved, &image);
     drivers::panic_console::remap();
 
     // Before the first table is decoded for its contents: what a machine owner
     // reads off a refusal below is which tables the firmware published at all.
     acpi::inventory(kernel_args.rsdp_addr);
 
+    // Before this CPU's own per-CPU block: everything sized per CPU is sized
+    // here, once, while it runs alone.
+    smp::size(acpi::madt_processors(kernel_args.rsdp_addr));
     let platform = arch::boot::interrupts(kernel_args.rsdp_addr);
     counters::bring_up();
     symbols::set_kernel_base(kernel_args.kernel_memory_addr);
-    if !kernel_elf.is_empty() {
-        symbols::load_kernel(kernel_elf, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);
-    }
+    symbols::load_kernel(kernel_elf, mm::PHYS_OFFSET + kernel_args.kernel_memory_addr);
 
     arch::boot::clock(kernel_args);
     trace::enable();
     arch::boot::timer();
-    // After both halves of what it needs: a TSC period to convert its bound
+    // After both halves of what it needs: a counter period to convert its bound
     // with, and a timer whose every tick polls it.
     deadline::start();
 
@@ -442,7 +422,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // Before any driver `init`: this sizes every BAR on the machine, and the
     // spec's probe takes memory decode off the function it is sizing for the
     // length of it. Nothing has bound yet, so nothing is mid-transfer.
-    pcidev::publish(&pci_devices, toyos_acpi::SEGMENT_GROUP, maps);
+    pcidev::publish(&pci_devices, toyos_acpi::SEGMENT_GROUP);
     #[cfg(feature = "boot-actuators")]
     if actuator::pci_cap_selftest() {
         drivers::virtio::cap_selftest();
@@ -454,7 +434,7 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // boot, and a wedge down there is the reason to have one.
     arch::watchdog::init(&pci_devices);
     file_cache::init();
-    gpt::init(kernel_args);
+    loaded::init(kernel_args);
 
     boot_phase!("peripherals ready", t_periph);
 
@@ -464,11 +444,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     vfs::init();
     process::init();
     scheduler::init();
-    // Task-less half of the operation-nesting gate: this boot phase has no current task, so it establishes into the per-CPU slot.
-    #[cfg(feature = "boot-actuators")]
-    if actuator::sched_operation_nesting() {
-        sched_gate::run("boot");
-    }
     pipe::init();
 
     // ROOT is the loader's image in memory, so nothing from here to the supervisor's
@@ -488,29 +463,10 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     let pid = process::spawn_supervisor();
     log!("spawned {} pid={pid}", process::SUPERVISOR_PATH);
 
-    // The proof the boot up to here needed no disk: ROOT and the supervisor's image both
-    // came out of memory.
-    log!("{} {}", rootfs::SUPERVISOR_WITHOUT_A_DISK, block::census::commands_issued());
-
-    // After the supervisor's spawn and before it runs: nothing runs a task until
-    // `smp::set_ready` below. This kernel mounts no disk: `/apps`, `/config`,
-    // `/home`, `/state`, `/log` and `/boot` are file servers' (`/system/bin/fileserver`),
-    // and an NVMe controller is `/system/bin/diskserver`'s. The USB disks are still
-    // this kernel's, served to their file servers as partition claims, until
-    // usbd drives the controller.
-    let t_storage = clock::nanos_since_boot();
-
-    xhci::init(&pci_devices);
-    // After xhci::init: a USB-booted disk doesn't exist until the controller binds it.
-    gpt::probe_usb_disks();
-    rootfs::hold_source();
-
     #[cfg(feature = "boot-actuators")]
     if actuator::revoked_backing_selftest() {
         revoke_selftest::run();
     }
-
-    boot_phase!("storage ready", t_storage);
 
     let t_devices = clock::nanos_since_boot();
 
@@ -522,8 +478,6 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     arch::boot::interrupt_selftests();
 
     virtio_console::init(&pci_devices);
-
-    drivers::hda::init(&pci_devices);
 
     if kernel_args.gop_framebuffer != 0 {
         log!("GPU: using UEFI GOP");
@@ -548,6 +502,18 @@ pub(crate) unsafe extern "C" fn kernel_main(loader_args: &mut KernelArgs) -> ! {
     // After every kernel driver took its functions from firmware, before
     // userland runs and asks for a claim.
     iommu::drivers_settled();
+
+    // Once the boot's own mappings are made: every later kernel leaf is
+    // written by the same constructors.
+    #[cfg(feature = "boot-actuators")]
+    if actuator::kernel_wx_leaf() {
+        let frame = mm::pmm::alloc_page().expect("kernel-wx-leaf: no frame to stage on");
+        let at = mm::paging::stage_writable_executable(frame.direct_map().phys());
+        log!("kernel-wx-leaf: the leaf at {at:#x} is writable and executable");
+        #[expect(clippy::disallowed_methods, reason = "the audit below ends this boot on the leaf staged over it")]
+        core::mem::forget(frame);
+    }
+    mm::audit_wx(&image);
 
     report_log_destination();
     let complete = cpu::counter();

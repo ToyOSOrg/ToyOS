@@ -1,13 +1,14 @@
 //! The domains a unit translates for, whatever the backend: their ids, each
-//! one's device addresses, and which 2 MiB leaves a map or a place covers. A
-//! backend owns the tables these name and the invalidation that publishes
-//! them, and holds this under the lock it writes those under.
+//! one's device addresses (`kernel::iova`), and which 2 MiB leaves a map or a
+//! place covers. A backend owns the tables these name and the invalidation
+//! that publishes them, and holds this under the lock it writes those under.
 
 use alloc::vec::Vec;
 
 use toyos_abi::acpi::RootBridgeWindow;
 
-use crate::iommu::window::Window;
+use kernel::iova::{Limit, Window};
+
 use crate::iommu::{DomainId, IommuError, Iova};
 use crate::mm::PAGE_2M;
 
@@ -18,9 +19,9 @@ pub struct Domains<S> {
     /// By id minus `first`; never shrinks, since a released id would name a
     /// domain some unit may still have cached.
     live: Vec<(S, Window)>,
-    /// The regions firmware reserved for a device, as `(start, end)`, which
-    /// no domain's addresses reach beside the declared windows
-    /// ([`Window::new`]).
+    /// The regions firmware reserved and the backend's own special ranges, as
+    /// `(start, end)`, which no domain's addresses reach beside the root
+    /// bridges' declared windows.
     reserved: Vec<(u64, u64)>,
 }
 
@@ -41,28 +42,35 @@ impl<S: Copy> Domains<S> {
         self.reserved = reserved;
     }
 
-    /// The next domain's id and its window over `translatable` bits, with
-    /// `room` bytes handed out first, clear of the root bridges' declared
-    /// `windows`, `None` where no declaration is held; refused, with no id
-    /// spent, where ids reach `ceiling` or the window would hold less.
+    /// The next domain's id and its addresses over `translatable` bits, clear
+    /// of the root bridges' declared `windows`, with `room` bytes below 4 GiB
+    /// handed out first, which any holder can reach; refused, with no id
+    /// spent, where no declaration is held (`None`), ids reach `ceiling` or
+    /// the room is not there.
     pub fn prepare(&self, translatable: u8, ceiling: u32, room: u64, windows: Option<&[RootBridgeWindow]>) -> Result<Next, IommuError> {
         let id = u16::try_from(usize::from(self.first) + self.live.len())
             .ok()
             .filter(|id| u32::from(*id) < ceiling)
             .ok_or(IommuError::DomainsExhausted(ceiling))?;
-        let reserved: Option<Vec<(u64, u64)>> =
-            windows.map(|windows| windows.iter().map(|w| (w.base, w.end())).chain(self.reserved.iter().copied()).collect());
-        let (addresses, first) = Window::new(translatable, reserved.as_deref(), room)?;
-        Ok(Next { id, addresses, first })
+        let windows = windows.ok_or(IommuError::Undeclared)?;
+        let reserved: Vec<(u64, u64)> = windows.iter().map(|w| (w.base, w.end())).chain(self.reserved.iter().copied()).collect();
+        let mut addresses = Window::new(translatable, &reserved);
+        let first = match room {
+            0 => 0,
+            room => addresses.reserve(room, Limit::NARROWEST).ok_or(IommuError::NoRoom { room })?,
+        };
+        Ok(Next { id, addresses, first: Iova::translated(first) })
     }
 
     /// `next`, made over `space`, which `what` describes in its record.
     pub fn add(&mut self, next: Next, space: S, what: impl core::fmt::Display) -> (DomainId, Iova) {
+        let allowed = next.addresses.allowed();
         log!(
-            "iommu: domain{} {what} addresses from {:#x} to {:#x}",
+            "iommu: domain{} {what} addresses in {} ranges from {:#x} to {:#x}",
             next.id,
-            next.addresses.floor(),
-            next.addresses.ceiling()
+            allowed.len(),
+            allowed.first().map_or(0, |range| range.0),
+            allowed.last().map_or(0, |range| range.1),
         );
         self.live.push((space, next.addresses));
         (DomainId::new(next.id), next.first)
@@ -72,15 +80,15 @@ impl<S: Copy> Domains<S> {
         self.live[usize::from(id.raw() - self.first)].0
     }
 
-    /// Room for `bytes` at `phys`, never handed out before: the domain's
-    /// tables, and where the leaves go.
-    pub fn map(&mut self, id: DomainId, phys: u64, bytes: u64) -> Result<(S, Iova), IommuError> {
+    /// Room for `bytes` at `phys`, never handed out before and ending at or
+    /// below `limit`: the domain's tables, and where the leaves go.
+    pub fn map(&mut self, id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<(S, Iova), IommuError> {
         aligned(phys)?;
         // A `DomainId` only `add` mints, so the index is always in range.
         let (space, window) = &mut self.live[usize::from(id.raw() - self.first)];
-        let at = window.reserve(bytes).ok_or(IommuError::AddressesExhausted(window.ceiling()))?;
-        log!("iommu: domain{} maps {phys:#x}..{:#x} at {:#x}", id.raw(), phys + bytes.next_multiple_of(PAGE_2M), at.raw());
-        Ok((*space, at))
+        let at = window.reserve(bytes, limit).ok_or(IommuError::AddressesExhausted(limit))?;
+        log!("iommu: domain{} maps {phys:#x}..{:#x} at {at:#x}", id.raw(), phys + bytes.next_multiple_of(PAGE_2M));
+        Ok((*space, Iova::translated(at)))
     }
 
     /// The domain's tables, for `bytes` at `phys` placed at `at`, room this
@@ -89,7 +97,7 @@ impl<S: Copy> Domains<S> {
     pub fn place(&self, id: DomainId, at: Iova, phys: u64, bytes: u64) -> Result<S, IommuError> {
         aligned(phys)?;
         let (space, window) = &self.live[usize::from(id.raw() - self.first)];
-        assert!(window.handed_out(at, bytes), "iommu: domain{} never handed out {:#x}+{bytes:#x}", id.raw(), at.raw());
+        assert!(window.handed_out(at.raw(), bytes), "iommu: domain{} never handed out {:#x}+{bytes:#x}", id.raw(), at.raw());
         Ok(*space)
     }
 }

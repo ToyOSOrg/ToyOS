@@ -1,0 +1,242 @@
+//! What a mass-storage device's transport is owed after a break: a ladder of
+//! three rungs, each ended by the device's own answer and by nothing else.
+//!
+//! 1. [`Rung::ClassReset`] — Bulk-Only Transport 1.0 §5.3.4's Reset Recovery
+//!    (`msc`'s class reset), which the class defines and a device may
+//!    answer without honouring: §3.1 has it "ready … for the next CBW" once it
+//!    answers the reset, and the requests give a host no way to tell a device
+//!    that is from one that is still inside the command it was given.
+//! 2. [`Rung::PortReset`] — the reset no USB device may ignore (USB 2.0 §9.1.1,
+//!    Figure 9-1: every state returns to Default on it), and the enumeration
+//!    that follows it, the disk held for the device's return under the number
+//!    it already has, so the volume on it carries on (`identity`).
+//! 3. [`Rung::Offline`] — the device did not answer after a port reset. Its
+//!    endpoints are stopped and **the last thing it is sent is a reset**, so
+//!    whatever command it was inside is over and the next host finds a device
+//!    in its Default state.
+//!
+//! **Verified means a TEST UNIT READY answered under its own tag.** It is the
+//! one command with no data phase, so it asks the device to move nothing.
+//!
+//! **A device owed Data-Out bytes is not given the class reset** ([`enters_at`]).
+//! The rung's verification is itself 31 bytes on the Bulk-Out, and a device
+//! that answered the class reset without leaving its data phase takes them as
+//! the data it is owed: the question cannot be asked there without being part
+//! of the answer. The port reset's can — after a reset and a
+//! SET_CONFIGURATION no data phase is open (USB 2.0 §9.1.1, §9.4.7) — so that
+//! is where such a break enters, and nothing reaches the Bulk-Out before it.
+//!
+//! **A rung is climbed once per run of breaks.** A rung that verified and whose
+//! command then broke again has not brought the transport back, and asking it
+//! again asks the same question of the same device: the next break climbs on.
+//! Only a completed round trip ends the run.
+
+/// One rung of the ladder.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Rung {
+    ClassReset,
+    PortReset,
+    Offline,
+}
+
+impl Rung {
+    /// What a line about this rung calls it.
+    pub fn named(self) -> &'static str {
+        match self {
+            Self::ClassReset => "class reset",
+            Self::PortReset => "port reset",
+            Self::Offline => "last reset",
+        }
+    }
+}
+
+/// The most breaks a run can hold before its device is offline: one per rung.
+pub const MOST_BREAKS: u8 = 3;
+
+/// Where in its round trip a break left the device.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Left {
+    /// Inside a Data-Out phase: it holds a command block and is owed bytes the
+    /// host has stopped sending.
+    OwedDataOut,
+    /// Anywhere else: no command block taken, a Data-In it is sending, or a
+    /// status it is holding.
+    Elsewhere,
+}
+
+/// Where a break in `phase` of a command left the device; `data_out` is whether
+/// the command has a Data-Out phase.
+///
+/// **A command-phase break of such a command is a device owed data too**: a CBW
+/// whose handshake was lost after the device took it is a command the device
+/// holds, and the bytes it then waits for are the Data-Out phase's. Only a break
+/// in the status phase is past the data.
+pub fn left(phase: crate::bot::Phase, data_out: bool) -> Left {
+    use crate::bot::Phase;
+    match phase {
+        Phase::Command | Phase::DataOwed | Phase::Data if data_out => Left::OwedDataOut,
+        _ => Left::Elsewhere,
+    }
+}
+
+/// The lowest rung a break that left the device there may be answered with.
+pub fn enters_at(left: Left) -> Rung {
+    match left {
+        Left::OwedDataOut => Rung::PortReset,
+        Left::Elsewhere => Rung::ClassReset,
+    }
+}
+
+/// The rung a break climbs to: above every rung this run of breaks has climbed
+/// (`climbed` is the highest), and never below where the break itself enters.
+/// A rung that did not verify is the next break, [`Left::Elsewhere`].
+pub fn next(climbed: Option<Rung>, left: Left) -> Rung {
+    let above = match climbed {
+        None => Rung::ClassReset,
+        Some(Rung::ClassReset) => Rung::PortReset,
+        Some(Rung::PortReset | Rung::Offline) => Rung::Offline,
+    };
+    above.max(enters_at(left))
+}
+
+/// A device's run of breaks: how many, and the highest rung among them.
+///
+/// **Per device, not per command**: the run it bounds is the device's, however
+/// many callers and operations it is spread over, and only a completed round
+/// trip ends it ([`Self::over`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Run {
+    breaks: u8,
+    climbed: Option<Rung>,
+}
+
+/// What one break costs the run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Climb {
+    pub rung: Rung,
+    /// The run's first rung is above the class reset: the device is owed the
+    /// Data-Out of the command that broke ([`enters_at`]).
+    pub skips_class_reset: bool,
+}
+
+impl Run {
+    pub const NONE: Self = Self { breaks: 0, climbed: None };
+
+    /// Breaks in the run so far.
+    pub fn breaks(self) -> u8 {
+        self.breaks
+    }
+
+    /// A break that left the device `left`: counted, and the rung it climbs.
+    pub fn broke(&mut self, left: Left) -> Climb {
+        self.breaks = self.breaks.saturating_add(1);
+        let rung = next(self.climbed, left);
+        let skips_class_reset = self.climbed.is_none() && rung != Rung::ClassReset;
+        self.climbed = Some(rung);
+        Climb { rung, skips_class_reset }
+    }
+
+    /// A round trip completed: the run is over. How many breaks it held.
+    pub fn over(&mut self) -> u8 {
+        core::mem::replace(self, Self::NONE).breaks
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LEFT: [Left; 2] = [Left::OwedDataOut, Left::Elsewhere];
+
+    /// Every run, however its breaks left the device: no rung is climbed
+    /// twice, none below where a break enters, the run is offline within
+    /// [`MOST_BREAKS`], and offline is never reached before a port reset.
+    #[test]
+    fn every_run_of_breaks_climbs_strictly_and_ends_offline_after_a_port_reset() {
+        for first in LEFT {
+            for second in LEFT {
+                for third in LEFT {
+                    let mut climbed = None;
+                    let mut rungs = [None; MOST_BREAKS as usize];
+                    for (at, left) in [first, second, third].into_iter().enumerate() {
+                        let rung = next(climbed, left);
+                        assert!(climbed.is_none_or(|last| rung > last), "{climbed:?} then {rung:?}");
+                        assert!(rung >= enters_at(left));
+                        rungs[at] = Some(rung);
+                        climbed = Some(rung);
+                        if rung == Rung::Offline {
+                            break;
+                        }
+                    }
+                    assert_eq!(climbed, Some(Rung::Offline), "{first:?} {second:?} {third:?}");
+                    let offline = rungs.iter().position(|r| *r == Some(Rung::Offline)).expect("reached");
+                    assert_eq!(rungs[offline - 1], Some(Rung::PortReset), "{rungs:?}");
+                }
+            }
+        }
+    }
+
+    /// The run is the device's: every break climbs above the last, the count
+    /// reaches [`MOST_BREAKS`] exactly where the run is offline, and a completed
+    /// round trip starts the next run at the bottom.
+    #[test]
+    fn a_run_climbs_one_rung_per_break_until_a_round_trip_ends_it() {
+        let mut run = Run::NONE;
+        assert_eq!(run.broke(Left::Elsewhere), Climb { rung: Rung::ClassReset, skips_class_reset: false });
+        assert_eq!(run.broke(Left::Elsewhere), Climb { rung: Rung::PortReset, skips_class_reset: false });
+        assert_eq!(run.broke(Left::Elsewhere).rung, Rung::Offline);
+        assert_eq!(run.breaks(), MOST_BREAKS);
+        assert_eq!(run.over(), MOST_BREAKS);
+        assert_eq!(run, Run::NONE);
+        assert_eq!(run.broke(Left::Elsewhere).rung, Rung::ClassReset, "a run begun again climbs from the bottom");
+    }
+
+    /// Said once, at the first rung of a run, and only when that rung is the
+    /// port reset.
+    #[test]
+    fn only_a_run_that_begins_owed_data_out_skips_the_class_reset() {
+        let mut run = Run::NONE;
+        assert_eq!(run.broke(Left::OwedDataOut), Climb { rung: Rung::PortReset, skips_class_reset: true });
+        assert_eq!(run.broke(Left::OwedDataOut), Climb { rung: Rung::Offline, skips_class_reset: false });
+        let mut run = Run::NONE;
+        run.broke(Left::Elsewhere);
+        assert!(!run.broke(Left::OwedDataOut).skips_class_reset, "the class reset was climbed");
+    }
+
+    /// Every run that reaches a rung below [`Rung::Offline`], each way that
+    /// rung can end unverified: its device left exactly where its port no
+    /// longer holds it, which is no break; otherwise the rung is the next
+    /// break, and the next rung quiesces against the event that ended the
+    /// TEST UNIT READY, where one did.
+
+    #[test]
+    fn a_break_elsewhere_climbs_every_rung() {
+        assert_eq!(next(None, Left::Elsewhere), Rung::ClassReset);
+        assert_eq!(next(Some(Rung::ClassReset), Left::Elsewhere), Rung::PortReset);
+        assert_eq!(next(Some(Rung::PortReset), Left::Elsewhere), Rung::Offline);
+    }
+
+    #[test]
+    fn a_device_owed_data_out_is_never_given_the_class_reset() {
+        for climbed in [None, Some(Rung::ClassReset), Some(Rung::PortReset)] {
+            assert_ne!(next(climbed, Left::OwedDataOut), Rung::ClassReset, "{climbed:?}");
+        }
+        assert_eq!(next(None, Left::OwedDataOut), Rung::PortReset);
+    }
+
+    /// A command that sends data leaves its device owed it from the moment its
+    /// CBW may have been taken until its data phase is done; nothing else does.
+    #[test]
+    fn a_break_before_a_data_out_phase_is_done_leaves_the_device_owed_it() {
+        use crate::bot::Phase;
+        for phase in [Phase::Command, Phase::DataOwed, Phase::Data] {
+            assert_eq!(left(phase, true), Left::OwedDataOut, "{phase:?}");
+            assert_eq!(left(phase, false), Left::Elsewhere, "{phase:?} of a command sending nothing");
+        }
+        for phase in [Phase::Closed, Phase::StatusOwed, Phase::Status] {
+            for data_out in [true, false] {
+                assert_eq!(left(phase, data_out), Left::Elsewhere, "{phase:?}");
+            }
+        }
+    }
+}

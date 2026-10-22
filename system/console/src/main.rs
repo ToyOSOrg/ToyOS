@@ -24,7 +24,7 @@
 //!   whose mapping is the scanout, so it is the one that pays for a read.
 
 use std::io::{Read, Write};
-use std::os::fd::AsRawFd;
+use std::os::toyos::io::AsRawHandle;
 use std::os::toyos::process;
 use std::os::toyos::process::CommandExt;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
@@ -36,10 +36,10 @@ use toyos::shm::SharedMemory;
 use toyos::endow;
 use toyos::port::{self, Connector};
 use toyos::surface::{self, Delivery, Host, Notice};
-use toyos::{FramebufferDev, Keyboard, Pipe};
+use toyos::{FramebufferDev, Pipe};
 use toyos_abi::input::RawKeyEvent;
 use toyos_abi::syscall::{DeviceType, SyscallError};
-use toyos_input::wire::{self, Record, CONNECTIONS, KEEP, KEY_LEN};
+use toyos_input::wire::{self, Record, CONNECTIONS, DEVICES, MAX_PAYLOAD};
 use toyos_input::{Merge, Slot};
 use toyos_logstream::{Lines, Showing, Source};
 use window::Screen;
@@ -202,13 +202,10 @@ fn main() {
         }
     };
 
-    let kb: Keyboard = endow::device(DeviceType::Keyboard)
-        .expect("the manifest gives this program the keyboard");
-    // The `input` port and its sources, merged with the kernel's keyboard
-    // stream. Their pointer reports are read and moved by nothing: this
-    // program draws no pointer.
+    // The `input` port and its sources, merged. Their pointer reports are
+    // read and moved by nothing: this program draws no pointer.
     let inputs = endow::acceptor(wire::PORT).expect("the manifest declares this program serves `input`");
-    let mut sources: [Option<(Connection, FrameRx<KEEP>)>; CONNECTIONS] = Default::default();
+    let mut sources: [Option<(Connection, FrameRx<MAX_PAYLOAD>)>; CONNECTIONS] = Default::default();
     let mut merge = Merge::default();
     // What the panel cost, on a machine whose only instrument is the panel.
     // The seed is the heaviest thing this program ever draws — a screenful of
@@ -220,13 +217,12 @@ fn main() {
         info.width, info.height
     );
 
-    // The declared set: the shell's two output pipes, the keyboard, the log,
+    // The declared set: the shell's two output pipes, the log,
     // this console's own surface listener and its clients, and the `input`
     // port's listener and sources.
-    let poller = Poller::new(4 + Host::POLL_HANDLES + 1 + CONNECTIONS as u32);
+    let poller = Poller::new(3 + Host::POLL_HANDLES + 1 + CONNECTIONS as u32);
     const TOKEN_STDOUT: u64 = 0;
     const TOKEN_STDERR: u64 = 1;
-    const TOKEN_KEYBOARD: u64 = 2;
     const TOKEN_LISTEN: u64 = 3;
     const TOKEN_CLIENT: u64 = 4;
     const TOKEN_LOG: u64 = 5;
@@ -238,9 +234,8 @@ fn main() {
     // as it wrote it, for a line of the log to be drawn above.
     let mut partial: Vec<u8> = Vec::new();
     loop {
-        poller.watch_raw(toyos::RawHandle(shell.stdout.as_raw_fd() as u32), READABLE, TOKEN_STDOUT);
-        poller.watch_raw(toyos::RawHandle(shell.stderr.as_raw_fd() as u32), READABLE, TOKEN_STDERR);
-        poller.watch(&kb, READABLE, TOKEN_KEYBOARD);
+        poller.watch_raw(toyos::RawHandle(shell.stdout.as_raw_handle()), READABLE, TOKEN_STDOUT);
+        poller.watch_raw(toyos::RawHandle(shell.stderr.as_raw_handle()), READABLE, TOKEN_STDERR);
         poller.watch_raw(host.acceptor_handle(), READABLE, TOKEN_LISTEN);
         for client in host.client_handles() {
             poller.watch_raw(client, READABLE, TOKEN_CLIENT);
@@ -364,12 +359,18 @@ fn main() {
                         ended = Some("a frame no protocol here can make".to_string());
                         break;
                     }
-                    RxStep::Frame { msg_type, payload_len } => wire::decode(msg_type, rx.payload(payload_len)),
+                    RxStep::Frame { msg_type, payload_len, .. } => wire::decode(msg_type, rx.payload(payload_len)),
                 };
                 match record {
-                    Ok(Record::Key(key)) => keys.extend(merge.key(slot, key)),
+                    Ok(Record::Key { source, key }) => match merge.key(slot, source, key) {
+                        Ok(delivered) => keys.extend(delivered),
+                        Err(full) => {
+                            ended = Some(format!("{full:?}: more than {DEVICES} of its devices hold something"));
+                            break;
+                        }
+                    },
                     Ok(Record::Pointer(_)) => {}
-                    Ok(Record::Lost) => keys.extend(merge.end(slot)),
+                    Ok(Record::Gone { source }) => keys.extend(merge.gone(slot, source)),
                     Err(why) => {
                         ended = Some(format!("a record refused: {why:?}"));
                         break;
@@ -380,18 +381,6 @@ fn main() {
                 eprintln!("console: dropping input source {n} — {why}");
                 sources[n] = None;
                 keys.extend(merge.end(slot));
-            }
-        }
-        if ready[TOKEN_KEYBOARD as usize] {
-            let mut buf = [0u8; 16 * KEY_LEN];
-            // Non-blocking for the reason `Keyboard::read_nonblock` documents:
-            // an event loop that can park on an empty queue is a frozen screen.
-            let n = kb.read_nonblock(&mut buf).unwrap_or(0);
-            for raw in buf[..n].as_chunks::<KEY_LEN>().0 {
-                match wire::key(raw) {
-                    Ok(key) => keys.extend(merge.key(Slot::KERNEL, key)),
-                    Err(why) => eprintln!("console: the kernel's keyboard stream carried {raw:02x?}, refused: {why:?}"),
-                }
             }
         }
         for event in keys {

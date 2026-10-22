@@ -210,6 +210,10 @@ const SYSCAP_RIGHTS: &[(&str, Rights)] = &[
     // Read what times every other program: each CPU's frequency, its busy
     // fraction and its wake-ups. An admin tool's, and no applet's.
     ("trace", Rights::TRACE),
+    // Start programs as independent jobs, each with its own share of the CPU:
+    // a launcher's. Every other child joins its parent's job, so this is what
+    // lets a program gain aggregate CPU by starting many.
+    ("jobs", Rights::JOBS),
 ];
 
 /// The whole right set a program's `syscap` list asks for.
@@ -624,7 +628,7 @@ mod tests {
                     path: "/system/bin/compositor".into(),
                     serves: vec!["compositor".into()],
                     receives: vec!["soundserver".into()],
-                    devices: vec!["framebuffer".into(), "keyboard".into()],
+                    devices: vec!["framebuffer".into(), "acpi".into()],
                     service: true,
                     starts: vec!["terminal".into(), "/apps".into()],
                     login: true,
@@ -634,7 +638,7 @@ mod tests {
                     name: "soundserver".into(),
                     path: "/system/bin/soundserver".into(),
                     serves: vec!["soundserver".into()],
-                    devices: vec!["hda-audio".into(), "pci:04:01:00/1af4:1059".into()],
+                    devices: vec!["pci:04:01:00/1af4:1059".into()],
                     syscap: vec!["rt".into()],
                     service: true,
                     ..Program::default()
@@ -951,14 +955,9 @@ mod tests {
     /// and a `drives` matcher alike, and a fixed name written twice.
     #[test]
     fn two_entries_one_device_can_answer_are_refused_by_name() {
-        let cases: [(&[Row<'_>], _, _); 7] = [
+        let cases: [(&[Row<'_>], _, _); 6] = [
             (&[("a", &["framebuffer"], &[]), ("b", &["framebuffer"], &[])], ("a", "framebuffer"), ("b", "framebuffer")),
             (&[("a", &["isa:0060,0064:1,12"], &[]), ("b", &["isa:0060,0064:1,12"], &[])], ("a", "isa:0060,0064:1,12"), ("b", "isa:0060,0064:1,12")),
-            (
-                &[("a", &["part:0FC63DAF-8483-4772-8E79-3D69D8477DE4"], &[]), ("b", &["part:0FC63DAF-8483-4772-8E79-3D69D8477DE4"], &[])],
-                ("a", "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4"),
-                ("b", "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4"),
-            ),
             (&[("a", &["pci:01:08:02/1b36:0010"], &[]), ("b", &[], &["pci:01:08:02"])], ("a", "pci:01:08:02/1b36:0010"), ("b", "pci:01:08:02")),
             (&[("a", &[], &["pci:0c:03:30"]), ("b", &[], &["pci:0c:03:30/1b36:000d"])], ("a", "pci:0c:03:30"), ("b", "pci:0c:03:30/1b36:000d")),
             (&[("a", &["pci:02:00:00", "pci:02:00:00/1af4:1041"], &[])], ("a", "pci:02:00:00"), ("a", "pci:02:00:00/1af4:1041")),
@@ -969,7 +968,7 @@ mod tests {
         }
         let apart = with_rows(&[
             ("a", &["framebuffer", "pci:01:08:02/1b36:0010"], &[]),
-            ("b", &["keyboard", "pci:01:08:02/144d:a808"], &[]),
+            ("b", &["acpi", "pci:01:08:02/144d:a808"], &[]),
             ("c", &[], &["pci:0c:03:30"]),
         ]);
         assert!(render(&apart).is_ok());
@@ -980,7 +979,7 @@ mod tests {
         for (devices, drives, entry) in [
             (&["gpu"][..], &[][..], "gpu"),
             (&["pci:1af4:1041"], &[], "pci:1af4:1041"),
-            (&[], &["keyboard"], "keyboard"),
+            (&[], &["acpi"], "acpi"),
             (&[], &["pci:01:08"], "pci:01:08"),
         ] {
             let refused = RenderError::NoSuchDevice { program: "a".into(), entry: entry.into() };
@@ -1001,15 +1000,15 @@ mod tests {
         assert!(drives(|_| {}).is_ok());
         assert_eq!(drives(|m| m.programs[0].serves = vec!["edu".into()]), refused("serves"));
         assert_eq!(drives(|m| m.programs[0].roles = vec!["data".into()]), refused("roles"));
-        assert_eq!(drives(|m| m.programs[0].devices = vec!["keyboard".into()]), refused("devices"));
+        assert_eq!(drives(|m| m.programs[0].devices = vec!["acpi".into()]), refused("devices"));
         assert_eq!(drives(|m| m.start = vec!["a".into()]), refused("[boot] start"));
         assert_eq!(drives(|m| m.programs[0].starts = vec!["a".into()]), refused("starts"));
     }
 
     #[test]
     fn a_device_class_name_is_the_abi_s() {
-        assert_eq!(DeviceType::from_class_name("hda-audio"), Some(DeviceType::HdaAudio));
-        assert_eq!(DeviceType::HdaAudio.class_name(), "hda-audio");
-        assert_eq!(DeviceType::from_class_name("hda_audio"), None);
+        assert_eq!(DeviceType::from_class_name("framebuffer"), Some(DeviceType::Framebuffer));
+        assert_eq!(DeviceType::Framebuffer.class_name(), "framebuffer");
+        assert_eq!(DeviceType::from_class_name("frame_buffer"), None);
     }
 }

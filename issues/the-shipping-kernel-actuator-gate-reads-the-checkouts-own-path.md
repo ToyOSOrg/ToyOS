@@ -11,7 +11,8 @@ carries an actuator by searching the kernel image for each declared name as a
 byte string. The kernel image embeds absolute source paths, so the search also
 matches the directory the checkout sits in.
 
-Measured on the worktree `/Users/jan/Dev/jan/toyos-heartbeat`, at `dc38a054`:
+Measured on the worktree `<parent>/toyos-heartbeat`, at `dc38a054` (`<parent>`
+masks the directory the worktrees sit in):
 
 ```
 $ cargo run -- --build-only
@@ -20,13 +21,13 @@ the shipping kernel names 1 of the 111 actuators `kernel/src/actuator.rs`
 declares: ["heartbeat"].
 $ strings -a target/kernel-42942dede1d2807a | grep -c heartbeat
 48
-$ strings -a target/kernel-42942dede1d2807a | grep -c 'Dev/jan/toyos-heartbeat'
+$ strings -a target/kernel-42942dede1d2807a | grep -c '<parent>/toyos-heartbeat'
 48
 ```
 
 All forty-eight hits are the checkout path. No symbol, string or record in the
 shipping kernel names the actuator; the gate is reading `toyos-heartbeat` out of
-`/Users/jan/Dev/jan/toyos-heartbeat/kernel/src/...`. The test kernel built in
+`<parent>/toyos-heartbeat/kernel/src/...`. The test kernel built in
 the same tree passes, because its direction of the same assertion wants every
 name present.
 

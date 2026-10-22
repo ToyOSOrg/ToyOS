@@ -9,21 +9,25 @@
 //!
 //! **No clipboard byte is ever logged**: a refusal names a length and a client.
 
+use std::os::toyos::process::CommandExt;
 use std::process::Command;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use toyos::endow;
+use toyos::job::JOB_LABEL;
+use toyos::syscap::SysCap;
 use toyos::ipc::{Connection, FrameRx, RxStep};
 use toyos::poller::{Poller, READABLE};
 use toyos::port::Acceptor;
 use toyos::shm::SharedMemory;
-use toyos::{ipc, system, AsHandle, Keyboard, Mouse};
+use toyos::{ipc, system, AsHandle};
 use toyos_abi::input::RawKeyEvent;
-use toyos_abi::syscall::DeviceType;
+use toyos_abi::syscall::SYSCAP_LABEL;
 use toyos_abi::RawHandle;
-use toyos_input::wire::{self, Record, CONNECTIONS, KEEP, KEY_LEN, POINTER_LEN};
-use toyos_input::{Merge, Pointer, Slot, State};
+use toyos_input::wire::{self, Record, CONNECTIONS, MAX_PAYLOAD};
+use toyos_input::wire::DEVICES;
+use toyos_input::{Full, Merge, Pointer, Slot, State};
 use toyos_desktop::clipboard::{Landing, Watch};
 use toyos_desktop::volume::{overlay_rect, Overlay, Request, Requests, Shown};
 use toyos::audio::{Volume, VolumeStep, MSG_VOLUME, MSG_VOLUME_MUTE, MSG_VOLUME_STEP, MSG_VOLUME_UNAVAILABLE};
@@ -39,7 +43,7 @@ use window::Screen;
 use crate::client::{
     announce, deliver, deliver_signal, deliver_with_handle, mark_dead, note_closed, note_opened,
     Buffer, Client, ClientFrame, ClientRx, CopyRegion, Dead, DropReason, PendingConn, Watcher, Win,
-    HANDSHAKE_TIMEOUT, MAX_KEPT_PAYLOAD, MAX_PENDING_CONNS,
+    HANDSHAKE_TIMEOUT, MAX_PENDING_CONNS,
 };
 use crate::display::Display;
 use crate::render::{self, Assets, BackBuffer, SystemStats, TitleBarIcons};
@@ -50,17 +54,13 @@ use crate::{
     VOLUME_POLL_HANDLES,
 };
 
-/// The widest answer on the `volume` port, plus one, so an over-long frame is
-/// refused rather than truncated into an answer.
-const VOLUME_KEPT_PAYLOAD: usize = std::mem::size_of::<Volume>() + 1;
-
 /// The most frames one source's turn takes before the others are served.
 const SOURCE_FRAMES: usize = 64;
 
 /// One connection on the `input` port: a source of keys and pointer reports.
 struct Source {
     conn: Connection,
-    rx: FrameRx<KEEP>,
+    rx: FrameRx<MAX_PAYLOAD>,
 }
 
 const _: () = assert!(
@@ -249,12 +249,10 @@ pub struct Session {
     /// whose package asks a question only once the question is answered,
     /// through this loop.
     launcher: mpsc::Sender<String>,
-    kb: Keyboard,
-    mouse: Mouse,
     /// The `input` port, and the sources on it, by their slot.
     inputs: Acceptor,
     sources: [Option<Source>; CONNECTIONS],
-    /// Every source's keys and pointers, the kernel's streams among them.
+    /// Every source's keys and pointers.
     merge: Merge,
     pointers: Pointer,
     poller: Poller,
@@ -299,7 +297,7 @@ pub struct Session {
 
     /// soundserver's `volume` port, connected on the first volume key and
     /// again after it ends; the requests on it; and the overlay its answers show.
-    volume: Option<(toyos::Connection, ipc::FrameRx<VOLUME_KEPT_PAYLOAD>)>,
+    volume: Option<(toyos::Connection, ipc::FrameRx<{ std::mem::size_of::<Volume>() }>)>,
     volume_requests: Requests,
     overlay: Overlay,
     /// What the overlay's clock counts from.
@@ -327,10 +325,6 @@ impl Session {
             .expect("the manifest declares this program serves `clipboard`");
         let settings = endow::acceptor(toyos_manifest::display::PORT)
             .expect("the manifest declares this program serves `display`");
-        let kb: Keyboard = endow::device(DeviceType::Keyboard)
-            .expect("the manifest gives this program the keyboard");
-        let mouse: Mouse = endow::device(DeviceType::Mouse)
-            .expect("the manifest gives this program the mouse");
         let inputs = endow::acceptor(wire::PORT)
             .expect("the manifest declares this program serves `input`");
         let (mut display, panel) = Display::claim();
@@ -386,8 +380,6 @@ impl Session {
                 + VOLUME_POLL_HANDLES,
         );
         poller.watch(&inputs, READABLE, inputs.as_handle().0 as u64);
-        poller.watch(&kb, READABLE, kb.as_handle().0 as u64);
-        poller.watch(&mouse, READABLE, mouse.as_handle().0 as u64);
         poller.watch(&acceptor, READABLE, acceptor.as_handle().0 as u64);
         poller.watch(&prompts, READABLE, prompts.as_handle().0 as u64);
         poller.watch(&clipboards, READABLE, clipboards.as_handle().0 as u64);
@@ -419,8 +411,6 @@ impl Session {
             watcher: None,
             watch: Watch::default(),
             launcher,
-            kb,
-            mouse,
             inputs,
             sources: Default::default(),
             merge: Merge::default(),
@@ -503,8 +493,6 @@ impl Session {
         self.poller.wait(1, timeout.as_nanos() as u64, |token| ready.push(token));
         self.ready = ready;
 
-        let kb_ready = self.is_ready(self.kb.as_handle());
-        let mouse_ready = self.is_ready(self.mouse.as_handle());
         let inputs_ready = self.is_ready(self.inputs.as_handle());
         let sources_ready: Vec<usize> = (0..CONNECTIONS)
             .filter(|&n| self.sources[n].as_ref().is_some_and(|s| self.is_ready(s.conn.as_handle())))
@@ -533,9 +521,7 @@ impl Session {
         }
         self.pending.retain(|p| now.duration_since(p.since) < HANDSHAKE_TIMEOUT);
 
-        if !kb_ready
-            && !mouse_ready
-            && !inputs_ready
+        if !inputs_ready
             && sources_ready.is_empty()
             && !accept_ready
             && !prompt_ready
@@ -551,12 +537,6 @@ impl Session {
         self.dead.clear();
         if display_ready {
             self.display.woke();
-        }
-        if kb_ready {
-            self.keys();
-        }
-        if mouse_ready {
-            self.pointer();
         }
         if inputs_ready {
             self.admit();
@@ -584,7 +564,7 @@ impl Session {
         self.watched();
         self.reap();
         self.prompt_gone();
-        self.rearm(kb_ready, mouse_ready, inputs_ready, accept_ready, prompt_ready, clipboard_ready, settings_ready);
+        self.rearm(inputs_ready, accept_ready, prompt_ready, clipboard_ready, settings_ready);
         true
     }
 
@@ -629,7 +609,7 @@ impl Session {
             let Some((conn, rx)) = self.volume.as_mut() else { return };
             let shown = match rx.pump(conn) {
                 RxStep::Idle => return,
-                RxStep::Frame { msg_type: MSG_VOLUME, payload_len } => {
+                RxStep::Frame { msg_type: MSG_VOLUME, payload_len, .. } => {
                     match ipc::decode_payload::<Volume>(rx.payload(payload_len)) {
                         Ok(v) if v.muted != 0 => Shown::Muted,
                         Ok(v) => Shown::Level { position: v.position, bottom: v.bottom },
@@ -671,30 +651,21 @@ impl Session {
         self.display.screen().pixel_format_raw()
     }
 
-    /// The kernel's keyboard stream, one source to the merge.
-    fn keys(&mut self) {
-        let mut buf = [0u8; 8 * KEY_LEN];
-        // Never read blocking here. The kernel wakes only when a report queued
-        // an event, so readiness and `has_data` agree — but a blocking read on
-        // an empty queue parks the compositor until the next real key, and one
-        // spurious wake anywhere would freeze it.
-        let n = self.kb.read_nonblock(&mut buf).unwrap_or(0);
-        let (events, torn) = buf[..n].as_chunks::<KEY_LEN>();
-        assert!(torn.is_empty(), "compositor: the keyboard read {n} bytes, not whole events");
-        for raw in events {
-            match wire::key(raw) {
-                Ok(key) => self.merged_key(Slot::KERNEL, key),
-                Err(why) => eprintln!("compositor: the kernel's keyboard stream carried {raw:02x?}, refused: {why:?}"),
-            }
-        }
-    }
-
-    /// `key` from `slot`, and whatever it changed of the merged keyboard.
-    fn merged_key(&mut self, slot: Slot, key: RawKeyEvent) {
-        let delivered: Vec<RawKeyEvent> = self.merge.key(slot, key).collect();
+    /// `key` from `slot`'s device `source`, and whatever it changed of the
+    /// merged keyboard.
+    fn merged_key(&mut self, slot: Slot, source: u16, key: RawKeyEvent) -> Result<(), Full> {
+        let delivered: Vec<RawKeyEvent> = self.merge.key(slot, source, key)?.collect();
         for event in delivered {
             self.key(event);
         }
+        Ok(())
+    }
+
+    /// `slot`'s device `source` went: what it held is released.
+    fn gone(&mut self, slot: Slot, source: u16) -> State {
+        let released: Vec<RawKeyEvent> = self.merge.gone(slot, source).collect();
+        released.into_iter().for_each(|key| self.key(key));
+        self.pointers.gone(slot, source)
     }
 
     /// One transition of the merged keyboard.
@@ -767,22 +738,6 @@ impl Session {
                 self.damage_all();
             }
         }
-    }
-
-    /// The kernel's mouse stream, one source to the merge.
-    fn pointer(&mut self) {
-        let mut buf = [0u8; 64 * POINTER_LEN];
-        let n = self.mouse.read_nonblock(&mut buf).unwrap_or(0);
-        let (reports, torn) = buf[..n].as_chunks::<POINTER_LEN>();
-        assert!(torn.is_empty(), "compositor: the mouse read {n} bytes, not whole reports");
-        let mut states = Vec::with_capacity(reports.len());
-        for raw in reports {
-            match wire::pointer(raw) {
-                Ok(report) => states.push(self.pointers.report(Slot::KERNEL, report)),
-                Err(why) => eprintln!("compositor: the kernel's mouse stream carried {raw:02x?}, refused: {why:?}"),
-            }
-        }
-        self.motion(&states);
     }
 
     /// What the merged pointer did over `states`.
@@ -1025,15 +980,23 @@ impl Session {
                     ended = Some("a frame no protocol here can make".to_string());
                     break;
                 }
-                RxStep::Frame { msg_type, payload_len } => wire::decode(msg_type, source.rx.payload(payload_len)),
+                RxStep::Frame { msg_type, payload_len, .. } => wire::decode(msg_type, source.rx.payload(payload_len)),
             };
             match record {
-                Ok(Record::Key(key)) => self.merged_key(slot, key),
-                Ok(Record::Pointer(report)) => states.push(self.pointers.report(slot, report)),
-                Ok(Record::Lost) => {
-                    let released: Vec<RawKeyEvent> = self.merge.end(slot).collect();
-                    released.into_iter().for_each(|key| self.key(key));
+                Ok(Record::Key { source, key }) => {
+                    if let Err(full) = self.merged_key(slot, source, key) {
+                        ended = Some(format!("{full:?}: more than {DEVICES} of its devices hold something"));
+                        break;
+                    }
                 }
+                Ok(Record::Pointer(report)) => match self.pointers.report(slot, report) {
+                    Ok(state) => states.push(state),
+                    Err(full) => {
+                        ended = Some(format!("{full:?}: more than {DEVICES} of its devices hold something"));
+                        break;
+                    }
+                },
+                Ok(Record::Gone { source }) => states.push(self.gone(slot, source)),
                 Err(why) => {
                     ended = Some(format!("a record refused: {why:?}"));
                     break;
@@ -1128,7 +1091,7 @@ impl Session {
                 RxStep::Malformed => {
                     mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol)
                 }
-                RxStep::Frame { msg_type, payload_len } => {
+                RxStep::Frame { msg_type, payload_len, .. } => {
                     let mut frame = ClientFrame::new(handle, msg_type);
                     frame.set_payload(self.pending[i].rx.payload(payload_len));
                     // A connection is identified by its first frame and by
@@ -1163,7 +1126,7 @@ impl Session {
                 RxStep::Malformed => {
                     mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol)
                 }
-                RxStep::Frame { msg_type, payload_len } => {
+                RxStep::Frame { msg_type, payload_len, .. } => {
                     let mut frame = ClientFrame::new(handle, msg_type);
                     frame.set_payload(win.client.rx.payload(payload_len));
                     out.push(frame);
@@ -1176,17 +1139,6 @@ impl Session {
     fn dispatch(&mut self, frames: Vec<ClientFrame>) {
         for mut frame in frames {
             let handle = frame.handle;
-            // A payload filling the kept buffer declared more than any client
-            // may inline, so what arrived is a prefix of what was sent.
-            if frame.payload().len() >= MAX_KEPT_PAYLOAD {
-                eprintln!(
-                    "compositor: refusing an inline payload past {} bytes from client {}",
-                    window::MAX_INLINE_PAYLOAD,
-                    handle.0
-                );
-                mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
-                continue;
-            }
             // A connection holding a region may send its commit and nothing
             // else, and a commit is only ever of a region held.
             match (frame.copy.take(), frame.msg_type) {
@@ -1464,10 +1416,8 @@ impl Session {
     /// and hold the connection for its commit.
     fn copy_begin(&mut self, frame: ClientFrame) {
         let handle = frame.handle;
-        // Exactly one `ClipboardShmMsg`: bytes past it are not this protocol.
-        let exact = frame.payload().len() == std::mem::size_of::<window::ClipboardShmMsg>();
         let info = ipc::decode_payload::<window::ClipboardShmMsg>(frame.payload());
-        let (Ok(info), Some(conn), true) = (info, frame.conn, exact) else {
+        let (Ok(info), Some(conn)) = (info, frame.conn) else {
             mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
             return;
         };
@@ -1500,11 +1450,7 @@ impl Session {
                 return;
             }
         };
-        if let Err(e) = conn.send_handles([theirs]) {
-            mark_dead(&mut self.dead, handle, e.into());
-            return;
-        }
-        if let Err(e) = conn.try_signal(window::MSG_COPY_REGION) {
+        if let Err(e) = conn.try_signal_with(window::MSG_COPY_REGION, [theirs]) {
             mark_dead(&mut self.dead, handle, e.into());
             return;
         }
@@ -1560,11 +1506,8 @@ impl Session {
             RxStep::Idle => return,
             RxStep::Eof => return mark_dead(&mut self.dead, handle, DropReason::Gone),
             RxStep::Malformed => return mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol),
-            RxStep::Frame { msg_type, payload_len } => (msg_type, payload_len),
+            RxStep::Frame { msg_type, payload_len, .. } => (msg_type, payload_len),
         };
-        if len >= MAX_KEPT_PAYLOAD {
-            return mark_dead(&mut self.dead, handle, DropReason::OutOfProtocol);
-        }
         let payload = w.rx.payload(len).to_vec();
         match msg_type {
             window::MSG_CLIPBOARD_WATCH if payload.is_empty() => self.watcher_asks(),
@@ -1611,8 +1554,7 @@ impl Session {
     /// `MSG_COPY_BEGIN` from the watcher: the region its set goes into, held
     /// until its commit.
     fn watcher_begins(&mut self, from: RawHandle, payload: &[u8]) {
-        let exact = payload.len() == std::mem::size_of::<window::ClipboardShmMsg>();
-        let (Ok(info), true) = (ipc::decode_payload::<window::ClipboardShmMsg>(payload), exact) else {
+        let Ok(info) = ipc::decode_payload::<window::ClipboardShmMsg>(payload) else {
             return mark_dead(&mut self.dead, from, DropReason::OutOfProtocol);
         };
         let len = info.len as usize;
@@ -1630,10 +1572,7 @@ impl Session {
             return mark_dead(&mut self.dead, from, DropReason::OutOfProtocol);
         }
         let w = self.watcher.as_ref().expect("a region is opened only off the watcher");
-        if let Err(e) = w.conn.send_handles([theirs]) {
-            return mark_dead(&mut self.dead, from, e.into());
-        }
-        if let Err(e) = w.conn.try_signal(window::MSG_COPY_REGION) {
+        if let Err(e) = w.conn.try_signal_with(window::MSG_COPY_REGION, [theirs]) {
             mark_dead(&mut self.dead, from, e.into());
         }
     }
@@ -1653,13 +1592,8 @@ impl Session {
             }) {
                 Ok(theirs) => w
                     .conn
-                    .send_handles([theirs])
-                    .map_err(DropReason::from)
-                    .and_then(|()| {
-                        w.conn
-                            .try_send(window::MSG_CLIPBOARD_PASTE_SHM, &window::ClipboardShmMsg { len: len as u32 })
-                            .map_err(DropReason::from)
-                    }),
+                    .try_send_with(window::MSG_CLIPBOARD_PASTE_SHM, &window::ClipboardShmMsg { len: len as u32 }, [theirs])
+                    .map_err(DropReason::from),
                 Err(e) => Err(DropReason::Refused(e)),
             }
         };
@@ -1917,8 +1851,6 @@ impl Session {
     /// Re-arm the one-shot poll registrations for every handle that fired.
     fn rearm(
         &mut self,
-        kb: bool,
-        mouse: bool,
         inputs: bool,
         acceptor: bool,
         prompts: bool,
@@ -1951,12 +1883,6 @@ impl Session {
             if self.is_ready(handle) {
                 self.poller.watch(&w.conn, READABLE, handle.0 as u64);
             }
-        }
-        if kb {
-            self.poller.watch(&self.kb, READABLE, self.kb.as_handle().0 as u64);
-        }
-        if mouse {
-            self.poller.watch(&self.mouse, READABLE, self.mouse.as_handle().0 as u64);
         }
         if acceptor {
             let h = self.acceptor.as_handle();
@@ -2215,13 +2141,29 @@ fn text(from: RawHandle, bytes: Vec<u8>) -> Option<String> {
 
 /// The thread every launch is made on, and the channel to it: one at a time,
 /// in order, since a launch waits as long as its question does.
+///
+/// **Everything the desktop starts is a job of its own**, made with the
+/// `jobs` right this row's system capability carries: a program started from
+/// the taskbar is no helper of the compositor's, and must not share its CPU.
 fn launcher() -> mpsc::Sender<String> {
     let (launches, queue) = mpsc::channel::<String>();
     std::thread::Builder::new()
         .name("launcher".into())
         .spawn(move || {
+            let jobs = endow::Endowments::get().take::<SysCap>(SYSCAP_LABEL);
             for program in queue {
-                if let Err(e) = Command::new(&program).spawn() {
+                let Some(jobs) = &jobs else {
+                    eprintln!("compositor: {program} did not start: this row holds no `jobs` right to start it as its own job");
+                    continue;
+                };
+                let job = match jobs.new_job() {
+                    Ok(job) => job,
+                    Err(e) => {
+                        eprintln!("compositor: {program} did not start: no job for it: {e:?}");
+                        continue;
+                    }
+                };
+                if let Err(e) = Command::new(&program).endow(JOB_LABEL, job.into_raw().0).spawn() {
                     eprintln!("compositor: {program} did not start: {e}");
                 }
             }

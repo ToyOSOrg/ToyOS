@@ -8,8 +8,8 @@
 //! `kernel::proclife` decides lifecycle transitions; this file only performs them.
 //!
 //! **What a process writes into the log is two records**: one where its spawn
-//! lands (`crate::loader`) and one where it ends, `exit: <name> pid=N code=N
-//! cpu=Nms …`, the verdict first and then what that process itself consumed.
+//! lands (`crate::loader`) and one where it ends, `exit: <name> pid=N
+//! code=N|killed|fault=<kind> cpu=Nms …`, the verdict first and then what that process itself consumed.
 //! Each is written every time and charged to the process it names: nothing
 //! here is rate-limited, and a thread's end writes nothing. A reading of the
 //! whole machine is `crate::census`'s, taken once, where the machine ends, by
@@ -42,6 +42,7 @@ use crate::loader::{alloc_kernel_stack, Start, TlsBlock};
 
 pub use toyos_abi::{Pid, Tid};
 pub use crate::scheduler::TaskId;
+use toyos_abi::end::{End, Fault};
 use toyos_abi::syscall::{EndowEntry, SyscallError, MAX_LIBRARIES, MAX_REGIONS};
 
 /// The lifecycle's decisions; this file only performs them.
@@ -212,9 +213,9 @@ impl MappedPages {
     fn unmap_from(
         self,
         addr_space: &mut crate::mm::paging::AddressSpace,
-    ) -> crate::mm::Unmapped<PageAlloc> {
-        addr_space.free_and_unmap(self.vaddr);
-        crate::mm::Unmapped::new(self.pages)
+    ) -> crate::mm::Unmapped<(PageAlloc, Option<crate::mm::paging::Detached>)> {
+        let detached = addr_space.free_and_unmap(self.vaddr);
+        crate::mm::Unmapped::new((self.pages, detached))
     }
 
     pub fn release(self, pt: &PageTables) {
@@ -231,7 +232,7 @@ fn release_thread_mappings(
     tls: Option<MappedPages>,
     pt: &PageTables,
     tid: Tid,
-) -> Vec<crate::mm::Unmapped<PageAlloc>> {
+) -> Vec<crate::mm::Unmapped<(PageAlloc, Option<crate::mm::paging::Detached>)>> {
     let keys: Vec<(Tid, u64)> = data.elf.dynamic_tls_blocks.keys()
         .filter(|&&(t, _)| t == tid)
         .copied()
@@ -344,8 +345,8 @@ pub struct ProcessEntry {
     image: Option<Arc<UserImage>>,
     main_tid: Tid,
     threads: crate::id_map::IdMap<Tid, ThreadEntry>,
-    /// Set once, with the exit's code, by the exit or kill that claims teardown; checked by `spawn_thread` so no thread appears after the retire set.
-    teardown_code: Option<i32>,
+    /// Set once, with the end, by the exit or kill that claims teardown; checked by `spawn_thread` so no thread appears after the retire set.
+    teardown_end: Option<End>,
     /// Its parent, children and depth, answered by no syscall; `kernel::proclife::tree` reads and writes it.
     node: Node,
     /// The exit its teardown made, kept until every end below it is published.
@@ -372,7 +373,7 @@ impl ProcessEntry {
             image,
             main_tid,
             threads,
-            teardown_code: None,
+            teardown_end: None,
             node,
             exit: None,
         }
@@ -390,14 +391,14 @@ impl ProcessEntry {
 
 impl ProcessEntry {
     /// Mirrors [`Lifecycle::tearing_down`], usable without the trait in scope.
-    pub fn tearing_down(&self) -> bool { self.teardown_code.is_some() }
+    pub fn tearing_down(&self) -> bool { self.teardown_end.is_some() }
 }
 
 /// The lifecycle face of an entry: only the fields `kernel::proclife` decides against, and nothing else this type carries.
 impl Lifecycle for ProcessEntry {
     fn main_tid(&self) -> Tid { self.main_tid }
-    fn teardown_code(&self) -> Option<i32> { self.teardown_code }
-    fn begin_teardown(&mut self, code: i32) { self.teardown_code = Some(code); }
+    fn teardown_end(&self) -> Option<End> { self.teardown_end }
+    fn begin_teardown(&mut self, end: End) { self.teardown_end = Some(end); }
     fn location(&self, tid: Tid) -> Option<ThreadLocation> {
         self.threads.get(tid).map(|t| t.state)
     }
@@ -441,13 +442,6 @@ impl Processes for ProcessTable {
     }
     fn pids(&mut self) -> &mut kernel::proclife::Pids {
         &mut self.pids
-    }
-}
-
-impl Drop for ProcessEntry {
-    fn drop(&mut self) {
-        // vruntime must live as long as the table entry: a zombified process's threads still yield inside their own exit path and read it.
-        scheduler::remove_vruntime(self.pid);
     }
 }
 
@@ -572,6 +566,9 @@ pub struct ProcessData {
     pub accounting: ProcessAccounting,
     /// What this process's parent called each handle it moved in at spawn.
     pub endowments: Endowments,
+    /// The job its threads, and its children unless a spawn names another,
+    /// run in.
+    pub job: Arc<kernel::sched::job::Job>,
 }
 
 /// The labels a parent put on the handles it endowed — names, not authority: the handle is in the table whether or not the child ever asks.
@@ -650,18 +647,20 @@ pub fn revoke_pipe_maps(maps: &mut Vec<PipeMap>, pt: &PageTables, pipe: pipe::Pi
     if !maps.iter().any(|m| m.pipe == pipe) {
         return;
     }
+    let mut detached = Vec::new();
     {
         let mut addr_space = pt.lock();
         maps.retain(|m| {
             if m.pipe != pipe {
                 return true;
             }
-            addr_space.free_and_unmap(m.addr);
+            detached.extend(addr_space.free_and_unmap(m.addr));
             false
         });
     }
     // Outside the block: it waits, and a sibling can be spinning on this lock.
     crate::arch::tlb::shootdown(crate::invalidation::Origin::Pipe, crate::invalidation::Half::User);
+    drop(detached);
 }
 
 /// One live `mmap` and its physical pages; the range's registration in the address space's `regions` is separate (placement search, `munmap`).
@@ -763,7 +762,7 @@ pub fn stats_of(
 }
 
 /// Take every entry whose process has published its exit.
-/// Entries come back rather than being dropped here: the caller holds the table lock, and an entry's drop reaches `remove_vruntime`.
+/// Entries come back rather than being dropped here: the caller holds the table lock, and an entry's drop releases what its process held.
 #[must_use = "the reaped entries must be dropped outside the table lock"]
 pub fn reap_finished(table: &mut ProcessTable, _proof: IdleProof) -> Vec<ProcessEntry> {
     reap::finished_pids(table).into_iter().filter_map(|pid| table.remove(pid)).collect()
@@ -876,7 +875,7 @@ impl Admission {
     ) -> (R, Vec<ThreadSched>) {
         let admitted = self.0.take().expect("Admission: landed once");
         let pid = admitted.pid();
-        let (inserted, retire) = tree::land_child(table, admitted, KILLED_EXIT_CODE, insert);
+        let (inserted, retire) = tree::land_child(table, admitted, End::Killed, insert);
         (inserted, scheds(table, pid, retire))
     }
 }
@@ -918,9 +917,9 @@ pub fn spawn_thread(
             .expect("spawn_thread: the spawning thread runs in an address space");
         (addr_space, Arc::clone(&proc.process_data))
     };
-    let (tls_modules, tls) = {
+    let (tls_modules, tls, job) = {
         let data = process_data_arc.lock();
-        (data.elf.tls_modules.clone(), data.elf.tls)
+        (data.elf.tls_modules.clone(), data.elf.tls, data.job.clone())
     };
 
     // Phase 2: build the TLS block outside any lock, then publish it into the
@@ -992,6 +991,7 @@ pub fn spawn_thread(
         parent_addr_space,
         thread_pointer,
         image,
+        job,
     );
     proc.threads.get_mut(tid).unwrap().set_sched(sched);
     drop(guard);
@@ -1071,14 +1071,14 @@ fn teardown_resources(
 
 /// Table-side teardown bookkeeping: drop the image record, total the CPU time of every thread still in the table, and write the one record of the process's end.
 /// Caller must hold `PROCESS_TABLE`, be the last thread out and have freed the resources.
-fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, code: i32, consumed: &Consumed) -> u64 {
+fn teardown_bookkeeping(table: &mut ProcessTable, process_pid: Pid, end: End, consumed: &Consumed) -> u64 {
     let proc = table.get_mut(process_pid)
         .expect("teardown_bookkeeping: process not found");
     proc.image = None;
     let cpu_ns: u64 = proc.threads.iter().map(|(_, t)| t.sched().map_or(0, scheduler::task_cpu_ns)).sum();
     let name = proc.name_str();
     // The verdict first: a record past `MAX_RECORD_MESSAGE` loses its end.
-    log!("exit: {name} pid={process_pid} code={code} cpu={}ms {consumed}", cpu_ns / 1_000_000);
+    log!("exit: {name} pid={process_pid} {end} cpu={}ms {consumed}", cpu_ns / 1_000_000);
     cpu_ns
 }
 
@@ -1139,7 +1139,7 @@ pub fn stats_from(
 /// The thread is in the process until the last table section marks it, so a machine stop waits for every record and release here.
 /// Waits on nothing: it runs on a killed thread whose one cancel may be spent, and at the exit boundary's preempt depth, where a park asserts.
 /// The section that marks it also lets the teardown's own hold on the publication go: the exit is published here when nothing below it is left, and otherwise by the last end below it.
-fn teardown(pid: Pid, tid: Tid, code: i32, mark: i32, process_data: &Arc<Lock<ProcessData>>) {
+fn teardown(pid: Pid, tid: Tid, end: End, mark: i32, process_data: &Arc<Lock<ProcessData>>) {
     let main_thread_data = {
         let guard = PROCESS_TABLE.lock();
         let proc = guard.as_ref().unwrap().get(pid).expect("teardown: the process its last thread is in");
@@ -1150,7 +1150,7 @@ fn teardown(pid: Pid, tid: Tid, code: i32, mark: i32, process_data: &Arc<Lock<Pr
     let released = releases.run();
     let cpu_ns = {
         let mut guard = PROCESS_TABLE.lock();
-        teardown_bookkeeping(guard.as_mut().unwrap(), pid, code, &consumed)
+        teardown_bookkeeping(guard.as_mut().unwrap(), pid, end, &consumed)
     };
     let stats = stats_from(&process_data.lock(), pid, cpu_ns, consumed.syscall_total, consumed.syscall_total_ns);
     let ready = {
@@ -1158,7 +1158,7 @@ fn teardown(pid: Pid, tid: Tid, code: i32, mark: i32, process_data: &Arc<Lock<Pr
         let table = guard.as_mut().unwrap();
         proclife::torn_down(table, pid, tid, mark);
         table.get_mut(pid).expect("teardown: the process its last thread is in").exit =
-            Some(crate::object::process::Exit::new(code, stats, released));
+            Some(crate::object::process::Exit::new(end, stats, released));
         tree::teardown_done(table, pid)
     };
     // The table says zombie now, which a sweep counts as nothing left to stop.
@@ -1180,15 +1180,15 @@ pub fn leave(chosen: Option<i32>) {
     match out {
         // The table says zombie now, which a sweep counts as nothing left to stop.
         proclife::Leave::NotLast => crate::quiesce::note_progress(),
-        proclife::Leave::Last { code, mark } => teardown(pid, tid, code, mark, &process_data),
+        proclife::Leave::Last { end, mark } => teardown(pid, tid, end, mark, &process_data),
     }
 }
 
-/// Claim `pid`'s teardown for `code`, in one hold of the table lock: the winner gets the threads it retires, every one still in the process but `caller`, and owes `pid`'s children to its walk; a loser, or a process already gone, gets none.
-fn claim(pid: Pid, code: i32, caller: Option<Tid>, owed: &mut Vec<Pid>) -> Vec<ThreadSched> {
+/// Claim `pid`'s teardown for `end`, in one hold of the table lock: the winner gets the threads it retires, every one still in the process but `caller`, and owes `pid`'s children to its walk; a loser, or a process already gone, gets none.
+fn claim(pid: Pid, end: End, caller: Option<Tid>, owed: &mut Vec<Pid>) -> Vec<ThreadSched> {
     let mut guard = PROCESS_TABLE.lock();
     let table = guard.as_mut().unwrap();
-    if !tree::claim(table, pid, code, owed) {
+    if !tree::claim(table, pid, end, owed) {
         return Vec::new();
     }
     let proc = table.get(pid).expect("claim: a claimed process is in the table");
@@ -1209,7 +1209,7 @@ fn scheds(table: &ProcessTable, pid: Pid, tids: Vec<Tid>) -> Vec<ThreadSched> {
 /// End every process an end owes, on the ending or killing thread: one claim per hold of the table lock, each claim's retires posted with it given up, and a reschedule owed between two claims served with nothing held.
 fn walk(mut owed: Vec<Pid>) {
     while let Some(pid) = owed.pop() {
-        for sched in claim(pid, KILLED_EXIT_CODE, None, &mut owed) {
+        for sched in claim(pid, End::Killed, None, &mut owed) {
             scheduler::post_retire(&sched);
         }
         if !owed.is_empty() && crate::preempt::need_resched() {
@@ -1218,11 +1218,11 @@ fn walk(mut owed: Vec<Pid>) {
     }
 }
 
-/// End the calling thread's process with `code`, and everything below it.
-pub fn exit(code: i32) -> ! {
+/// End the calling thread's process as `end` says, and everything below it.
+pub fn exit(end: End) -> ! {
     let tid = current_tid();
     let mut owed = Vec::new();
-    for sched in claim(current_process(), code, Some(tid), &mut owed) {
+    for sched in claim(current_process(), end, Some(tid), &mut owed) {
         scheduler::post_retire(&sched);
     }
     walk(owed);
@@ -1240,7 +1240,7 @@ pub fn thread_exit(code: i32) -> ! {
         proclife::route_thread_exit(table, process_pid, tid)
     };
     let post = match route {
-        proclife::ThreadExit::Process => exit(code),
+        proclife::ThreadExit::Process => exit(End::Exited(code)),
         proclife::ThreadExit::Sibling { post } => post,
     };
 
@@ -1701,7 +1701,7 @@ pub fn kill_process(object: &crate::object::process::ProcessObject) -> u64 {
 
 fn kill(pid: Pid) {
     let mut owed = Vec::new();
-    for sched in claim(pid, KILLED_EXIT_CODE, None, &mut owed) {
+    for sched in claim(pid, End::Killed, None, &mut owed) {
         scheduler::post_retire(&sched);
     }
     walk(owed);
@@ -1756,12 +1756,6 @@ pub fn debug_hold_marked_spawn(parent: Parent, child: &crate::object::process::P
     }
 }
 
-/// The shell convention for "died on SIGKILL"; kept because every test that reads one already spells it.
-pub const KILLED_EXIT_CODE: i32 = 137;
-
-/// The shell convention for "died on SIGSEGV" (same mistake class, pointer instead of handle).
-pub const HANDLE_FAULT_EXIT_CODE: i32 = 139;
-
 /// End a process that named a handle it does not hold — userland's bug, not the kernel's, so the process dies alone rather than panicking the kernel.
 /// Must be reached with nothing held: this calls `exit`, which takes the process's own lock, the table lock, and whatever a released object reaches for.
 pub fn handle_fault(error: crate::object::HandleError) -> ! {
@@ -1771,7 +1765,7 @@ pub fn handle_fault(error: crate::object::HandleError) -> ! {
         current_tid(),
         percpu::syscall_num(),
     );
-    exit(HANDLE_FAULT_EXIT_CODE)
+    exit(End::Fault(Fault::Handle))
 }
 
 /// An AP's way into the idle loop on either architecture, once it has answered

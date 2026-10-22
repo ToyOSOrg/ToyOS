@@ -18,7 +18,7 @@ use crate::mm::policy::{CachePolicy, Prot};
 use crate::vma::Occupancy;
 use crate::user_ptr::UserBytesMut;
 use crate::UserAddr;
-use crate::{process, vfs};
+use crate::process;
 
 use toyos_abi::syscall::*;
 
@@ -119,10 +119,10 @@ pub(super) fn sys_mmap(req_addr: u64, size: u64, prot: MmapProt, flags: MmapFlag
             // `insert_region` never overlaps.
             let old = replacing.map(|idx| {
                 let old = data.mmap_regions.swap_remove(idx);
-                as_guard
+                let detached = as_guard
                     .free_and_unmap(old.addr)
                     .expect("an mmap region is registered in the address space it was placed in");
-                old
+                (old, detached)
             });
             as_guard.insert_region(
                 start,
@@ -201,10 +201,11 @@ pub(super) fn sys_munmap(addr: u64, size: u64) -> u64 {
         }
         let region = data.mmap_regions.swap_remove(idx);
         data.free_count += 1;
-        pt.lock()
+        let detached = pt
+            .lock()
             .free_and_unmap(region.addr)
             .expect("an mmap region is registered in the address space it was placed in");
-        Ok(crate::mm::Unmapped::new(region))
+        Ok(crate::mm::Unmapped::new((region, detached)))
     });
     // Dropped here, outside the closure: the drop shoots down and waits, and a
     // sibling can be spinning on the process-data lock.
@@ -231,10 +232,15 @@ pub(super) fn shared_image(handle: u64, len: u64) -> Result<crate::file_backing:
     crate::file_backing::SharedImage::over(object, len).map_err(|e| e.to_u64())
 }
 
-pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init_out: Option<UserAddr>) -> u64 {
-    let cwd = process::with_process_data(|d| d.cwd.clone());
-    let resolved = vfs::lock().resolve_absolute(&cwd, path);
-
+/// Load the library `image` holds into this process as `name` (`DlopenArgs`).
+/// The image is the caller's, read by the load and kept by nothing: the module
+/// is this process's own copy.
+pub(super) fn sys_dlopen(
+    ctx: &crate::user_ptr::SyscallContext,
+    resolved: alloc::string::String,
+    image: &crate::file_backing::SharedImage,
+    init_out: Option<UserAddr>,
+) -> u64 {
     // A repeat load of a name this process holds shares that module and maps
     // nothing again — a `dlopen` loop used to grow the address space unbounded.
     // POSIX-shaped: the shared module's initializers do not re-run, so empty init.
@@ -249,37 +255,11 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         return idx as u64;
     }
 
-    // Opened before the cache is consulted: the answer depends on what the path holds *now*, and the fast path above is what keeps a `dlopen` loop from paying.
-    let (backing, id) = match vfs::lock().open_backing_identified(&resolved) {
-        Ok(pair) => pair,
-        Err(e) => {
-            log!("dlopen: {}: {e}", resolved);
-            return e.to_u64();
-        }
-    };
-    let mut lib = match crate::elf::try_clone_cached(&resolved, id) {
-        Ok(Some(lib)) => lib,
-        Err(e) => {
-            log!(
-                "dlopen: {}: the cached image is stale — the file behind this path changed since \
-                 it was loaded, and the image cannot be replaced while a process has it mapped",
-                resolved
-            );
-            return e.to_u64();
-        }
-        Ok(None) => {
-            let (lib, rw_offset, rw_size) = match crate::elf::load_shared_lib(backing.as_ref()) {
-                Ok(result) => result,
-                Err(msg) => {
-                    log!("dlopen: {}", msg);
-                    return SyscallError::Unknown.to_u64();
-                }
-            };
-
-            match crate::elf::cache_loaded_lib(&resolved, id, lib, rw_offset, rw_size) {
-                Ok(lib) => lib,
-                Err(e) => return e.to_u64(),
-            }
+    let mut lib = match crate::elf::load_shared_lib(image) {
+        Ok(lib) => lib,
+        Err(msg) => {
+            log!("dlopen: {}: {}", resolved, msg);
+            return SyscallError::InvalidArgument.to_u64();
         }
     };
 
@@ -289,12 +269,6 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
         // and which executable; mapping the whole image writable would make
         // it executable too.
         let vaddr = lib.map_into(&pt).ok_or(SyscallError::ResourceExhausted)?;
-        // A `Shared` module's windows may reuse a range already handed out;
-        // `map_window`'s shootdown reached only this CPU, so the rest of the
-        // machine is told here.
-        if matches!(lib.memory, crate::elf::LibMemory::Shared { .. }) {
-            crate::arch::tlb::shootdown(crate::invalidation::Origin::Dlopen, crate::invalidation::Half::User);
-        }
         if vaddr != lib.user_base {
             lib.user_base = vaddr;
             crate::elf::rebase_relative_relocs(&lib);
@@ -313,10 +287,9 @@ pub(super) fn sys_dlopen(ctx: &crate::user_ptr::SyscallContext, path: &str, init
     // unwinds it — VA region and its shootdown — if the copy-out refuses, so a
     // refused dlopen leaves no library mapped or registered.
     let mapping = crate::rollback::Rollback::new(move || {
-        process::with_process_data(|_data| {
-            pt.lock().free_and_unmap(base);
-        });
+        let detached = process::with_process_data(|_data| pt.lock().free_and_unmap(base));
         crate::arch::tlb::shootdown(crate::invalidation::Origin::Dlopen, crate::invalidation::Half::User);
+        drop(detached);
     });
 
     let lib_tls = lib.tls().and_then(toyos_elf::TlsSegment::occupied);

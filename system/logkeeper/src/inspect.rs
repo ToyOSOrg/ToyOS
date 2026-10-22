@@ -119,8 +119,7 @@ impl Published {
 /// A reader accepted and not yet answered.
 struct Pending {
     conn: Connection,
-    /// One byte kept, so a request that carries a payload is seen to.
-    rx: FrameRx<1>,
+    rx: FrameRx<0>,
     since: Instant,
 }
 
@@ -167,11 +166,11 @@ fn run(acceptor: &Acceptor, published: &Published, hub: &Hub) -> ! {
             }
             match p.rx.pump(&p.conn) {
                 RxStep::Idle => true,
-                RxStep::Frame { msg_type: toyos_inspect::MSG_INSPECT, payload_len: 0 } => {
+                RxStep::Frame { msg_type: toyos_inspect::MSG_INSPECT, .. } => {
                     let _ = p.conn.try_send_bytes(toyos_inspect::MSG_SNAPSHOT, &published.snapshot());
                     false
                 }
-                RxStep::Frame { msg_type: READ, payload_len: 0 } => {
+                RxStep::Frame { msg_type: READ, .. } => {
                     hub.read(&p.conn);
                     false
                 }

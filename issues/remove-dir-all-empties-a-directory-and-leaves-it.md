@@ -4,40 +4,18 @@ kind: defect
 opened: 2026-09-05
 ---
 
-# `std::fs::remove_dir_all` empties a directory and never removes it
+# pkg keeps a tree walk for a `remove_dir_all` that no longer leaves the directory
 
-`sdk/std/sys/fs.rs`'s `remove_dir_all` walks the directory,
-unlinks every file and recurses into every subdirectory, and returns `Ok(())`
-without ever calling `rmdir` on anything — its own path included. Every
-directory in the tree it walked survives, empty.
+std's `remove_dir_all` (`sdk/std/sys/fs.rs`) once emptied a directory and
+returned `Ok(())` without removing it or any directory under it, so
+`pkg remove gbae` reported success and the next `pkg install` of the same
+archive answered `/apps/gbae is already there`. It now ends with `rmdir(path)`
+at every level, as it has since the backend moved to `sdk/std` (`3831f291b`).
 
-`SYS_RMDIR` (54) exists and `rmdir` in the same file wraps it; nothing calls it
-on this path.
+What is left is the workaround. `system/pkg/src/main.rs`'s `remove_tree` gives
+that defect as the reason it is not `fs::remove_dir_all`, in a doc comment that
+is now false. Its other reason may stand: it walks with an explicit stack where
+std's recurses once per level.
 
-## Reproduction
-
-Measured in `pkg_install_gbae`'s guest on 2026-09-05, before `system/pkg`
-stopped using it. `pkg remove gbae` reported success and `pkg list` was empty —
-`/apps/gbae/manifest.toml` was gone, so init refused a launch out of it — and
-the next `pkg install` of the same archive answered
-
-    pkg: /apps/gbae is already there — remove it first, this installer does not replace
-
-The kernel's own syscall census for that process is the shorter proof: four
-`SYS_DELETE` and no `SYS_RMDIR` at all.
-
-    [kernel 1.004 cpu1] syscalls: pid=14 total=18 syscall_wall=11ms 0=1 1=2 6=1
-    9=1 10=1 14=1 17=1 18=4 63=2 72=1 73=2 91=1
-
-`/system/bin/rm -r` is the other caller (`system/toybox/src/rm.rs:30`) and has
-the same hole.
-
-## Exit condition
-
-`remove_dir_all` removes the directory it was given and every directory under
-it. Closes when that lands and `system/pkg`'s own `remove_tree`
-is deleted with it — that walk exists only because this one does not finish.
-
-The fix is one `rmdir(path)` after the loop, and it is in a sysroot
-source (`sdk/std`), so it lands on its own branch with the machine's
-sysroot claim.
+**Exit**: `remove_tree` either goes for `fs::remove_dir_all`, or keeps a doc
+comment that states only the reason that holds.

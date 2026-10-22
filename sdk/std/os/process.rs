@@ -12,13 +12,11 @@ pub fn tty_piped() -> crate::process::Stdio {
 /// ToyOS-specific extensions to [`process::Command`].
 #[stable(feature = "toyos_ext", since = "1.0.0")]
 pub trait CommandExt {
-    /// Pass an additional handle to the child process.
-    ///
-    /// The child process will inherit `parent_handle` at slot `child_slot`.
-    /// This is useful for passing pipe handles (e.g., for jobserver
-    /// protocols) to child processes.
+    /// Give the child descriptor `child_fd`, naming the kernel handle
+    /// `parent_handle`, which this process keeps: the spawn duplicates it.
+    /// One of 0 to 2 replaces what the command's stdio would have given.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
-    fn inherit_handle(&mut self, child_slot: u32, parent_handle: u32) -> &mut Self;
+    fn inherit_handle(&mut self, child_fd: u32, parent_handle: u32) -> &mut Self;
 
     /// Give the child a handle under a name it can look itself up by.
     ///
@@ -89,7 +87,7 @@ pub trait CommandExt {
     /// **A launch or nothing.** The supervisor starts a program its manifest declares,
     /// holding what its row says, so with no `launcher` connector, for a
     /// program no row declares, or for a command that endows a handle or names
-    /// a slot beyond stdio, the spawn answers `PermissionDenied` and starts
+    /// a descriptor beyond stdio, the spawn answers `PermissionDenied` and starts
     /// nothing.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn under_supervisor(&mut self) -> &mut Self;
@@ -97,8 +95,8 @@ pub trait CommandExt {
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
 impl CommandExt for crate::process::Command {
-    fn inherit_handle(&mut self, child_slot: u32, parent_handle: u32) -> &mut Self {
-        self.as_inner_mut().inherit_handle(child_slot, parent_handle);
+    fn inherit_handle(&mut self, child_fd: u32, parent_handle: u32) -> &mut Self {
+        self.as_inner_mut().inherit_handle(child_fd, parent_handle);
         self
     }
 
@@ -134,6 +132,32 @@ impl CommandExt for crate::process::Command {
     fn under_supervisor(&mut self) -> &mut Self {
         self.as_inner_mut().under_supervisor();
         self
+    }
+}
+
+/// ToyOS-specific extensions to [`process::ExitStatus`].
+#[stable(feature = "toyos_ext", since = "1.0.0")]
+pub trait ExitStatusExt {
+    /// The word `SYS_PROCESS_WAIT` answered for this end: an exit, a kill or a
+    /// fault, which `toyos_abi::end::End::from_word` reads. std names no type of
+    /// that crate.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn into_raw(self) -> u64;
+
+    /// The `<signal.h>` number a kill or a fault ends a process as, as Unix's
+    /// `ExitStatusExt::signal` answers: `None` for an exit.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn signal(&self) -> Option<i32>;
+}
+
+#[stable(feature = "toyos_ext", since = "1.0.0")]
+impl ExitStatusExt for crate::process::ExitStatus {
+    fn into_raw(self) -> u64 {
+        self.as_inner().into_raw()
+    }
+
+    fn signal(&self) -> Option<i32> {
+        self.as_inner().signal()
     }
 }
 

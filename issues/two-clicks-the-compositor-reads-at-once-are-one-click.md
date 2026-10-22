@@ -17,8 +17,8 @@ click land on a closed launcher.
 `consent_prompt` (`tests/toyos.rs`) met it on a loaded host (load average
 57 when its batch of runs ended): it clicked `+` and then the launcher row
 with nothing between them, and no launch was made, which these two clicks
-folded into one on the row of a launcher not yet open accounts for. The test
-now waits for the launcher on the panel before its second click.
+folded into one on the row of a launcher not yet open accounts for. That
+test went with the integration tests `ff1a11dbd` cut.
 
 ## Owner
 

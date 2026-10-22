@@ -52,7 +52,7 @@ The design and its roast are PR #863's body.
   `DeviceMemory`, and a receiver judges a lent region through `fstat` before
   it maps it.
 - Stage 2, done (PR #878): a byte ring with untrusted cursors and want words
-  in `toyos-transport` (`lib/blockring/transport`), host-tested and modelled
+  in the SDK's `toyos::transport` (`sdk/toyos/src/transport`), host-tested and modelled
   in loom.
 - Stage 3, done (PR #905): a TCP stream, connected or accepted, is one
   region whose two rings are [tcp]'s buffers and the connection it was opened
@@ -112,7 +112,7 @@ The design and its roast are PR #863's body.
   over a full send ring, each answers a refusal only netstack judges that
   lands meanwhile; each is red when the look reads `pending` before it arms,
   red when netstack exchanges the wants before it stores `pending`, and red
-  under `want-relaxed`, and the sender's is red when netstack rings only
+  under `transport-want-relaxed`, and the sender's is red when netstack rings only
   `rx_data`. In the other, [udp]'s queue starts full and a datagram leaves
   it as its own step, interleaved with netstack's looks, so netstack can find
   a published record while the queue is full and hold it; a sender that
@@ -120,7 +120,7 @@ The design and its roast are PR #863's body.
   every record sent, in order, none refused. It is red when netstack refuses
   a record at the full queue, red when it rings `tx_room` on the connection,
   red when after the leave it waits for the client's next ring without
-  looking at the send ring again, and red under `want-relaxed`.
+  looking at the send ring again, and red under `transport-want-relaxed`.
 
 Owner: the orchestrator, who stages it.
 

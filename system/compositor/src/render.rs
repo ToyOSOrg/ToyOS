@@ -287,8 +287,11 @@ fn draw_taskbar(
     if clip.overlaps(status) {
         // Dashes and not 00:00 on a machine whose clock never answered: a
         // reader cannot tell a plausible midnight from a missing clock.
-        let clock = match toyos::system::clock_realtime() {
-            Some(time) => format!("{:02}:{:02}", time.hours, time.minutes),
+        let clock = match toyos::system::clock_epoch() {
+            Some(secs) => {
+                let now = toyos_wallclock::Civil::from_unix_secs(secs);
+                format!("{:02}:{:02}", now.hour, now.min)
+            }
             None => String::from("--:--"),
         };
         let text: String =

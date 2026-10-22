@@ -16,7 +16,7 @@ before it maps one (`sdk/toyos/src/shm.rs`), and only a `Connection` answers
 as a pipe end does (`fstat` in `kernel/src/object/ops.rs`).
 
 Every typed use of a handle resolves through `HandleTable::get::<T>`, and
-`HandleError::WrongType` ends the caller, exit 139, everywhere but
+`HandleError::WrongType` ends the caller with a handle fault everywhere but
 `HandleTable::get_sent` (`kernel/src/object/handle.rs`). That is right for a
 handle the process made or was endowed, and wrong for one a peer sent: a
 correct program cannot know.

@@ -3,7 +3,7 @@
 //! in it — a write into memory under the paths the owner's data lives at would
 //! be taken and then lost, which is the harm a missing volume must not do.
 
-use toyos_abi::syscall::SyscallError;
+use toyos::fs::Error;
 
 use crate::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
 
@@ -27,81 +27,83 @@ impl Volume for Absent {
         false
     }
 
-    fn lstat(&mut self, path: &str) -> Result<Meta, SyscallError> {
+    fn lstat(&mut self, path: &str) -> Result<Meta, Error> {
         match self.is_root(path) {
             true => Ok(Meta { kind: Kind::Dir, size: 0, mtime: 0 }),
-            false => Err(SyscallError::NotFound),
+            false => Err(Error::NotFound),
         }
     }
 
-    fn read_link(&mut self, _path: &str) -> Result<String, SyscallError> {
-        Err(SyscallError::NotFound)
+    fn read_link(&mut self, _path: &str) -> Result<String, Error> {
+        Err(Error::NotFound)
     }
 
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, SyscallError> {
+    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, Error> {
         match self.is_root(dir) {
             true => Ok(Vec::new()),
-            false => Err(SyscallError::NotFound),
+            false => Err(Error::NotFound),
         }
     }
 
-    fn open(&mut self, _path: &str, _how: OpenHow) -> Result<Node, SyscallError> {
-        Err(SyscallError::NotFound)
+    fn open(&mut self, _path: &str, _how: OpenHow) -> Result<Node, Error> {
+        Err(Error::NotFound)
     }
 
-    fn close(&mut self, _node: Node) -> Result<(), SyscallError> {
+    fn close(&mut self, _node: Node) -> Result<(), Error> {
         Ok(())
     }
 
-    fn hold(&mut self, _node: Node) {}
-
-    fn node_meta(&mut self, _node: Node) -> Result<Meta, SyscallError> {
-        Err(SyscallError::NotFound)
+    fn node_meta(&mut self, _node: Node) -> Result<Meta, Error> {
+        Err(Error::NotFound)
     }
 
     /// The volume's root 1, each served directory its place after it.
-    fn identity(&mut self, path: &str) -> Result<u64, SyscallError> {
+    fn identity(&mut self, path: &str) -> Result<u64, Error> {
         if path.is_empty() {
             return Ok(1);
         }
-        let at = self.roots.iter().position(|r| r == path).ok_or(SyscallError::NotFound)?;
+        let at = self.roots.iter().position(|r| r == path).ok_or(Error::NotFound)?;
         Ok(at as u64 + 2)
     }
 
-    fn read(&mut self, _node: Node, _offset: u64, _out: &mut dyn Out) -> Result<usize, SyscallError> {
-        Err(SyscallError::NotFound)
+    fn read(&mut self, _node: Node, _offset: u64, _out: &mut dyn Out) -> Result<usize, Error> {
+        Err(Error::NotFound)
     }
 
-    fn write(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> Result<(), SyscallError> {
-        Err(SyscallError::NotFound)
+    fn write(&mut self, _node: Node, _offset: u64, _data: &[u8]) -> Result<(), Error> {
+        Err(Error::NotFound)
     }
 
-    fn truncate(&mut self, _node: Node, _size: u64) -> Result<(), SyscallError> {
-        Err(SyscallError::NotFound)
+    fn truncate(&mut self, _node: Node, _size: u64) -> Result<(), Error> {
+        Err(Error::NotFound)
     }
 
-    fn mkdir(&mut self, _path: &str) -> Result<(), SyscallError> {
-        Err(SyscallError::NotFound)
+    fn mkdir(&mut self, _path: &str) -> Result<(), Error> {
+        Err(Error::NotFound)
     }
 
-    fn rmdir(&mut self, _path: &str) -> Result<(), SyscallError> {
-        Err(SyscallError::NotFound)
+    fn rmdir(&mut self, _path: &str) -> Result<(), Error> {
+        Err(Error::NotFound)
     }
 
-    fn unlink(&mut self, _path: &str) -> Result<(), SyscallError> {
-        Err(SyscallError::NotFound)
+    fn unlink(&mut self, _path: &str) -> Result<(), Error> {
+        Err(Error::NotFound)
     }
 
-    fn rename(&mut self, _from: &str, _to: &str) -> Result<(), SyscallError> {
-        Err(SyscallError::NotFound)
+    fn rename(&mut self, _from: &str, _to: &str) -> Result<(), Error> {
+        Err(Error::NotFound)
     }
 
-    fn symlink(&mut self, _path: &str, _target: &str) -> Result<(), SyscallError> {
-        Err(SyscallError::NotFound)
+    fn symlink(&mut self, _path: &str, _target: &str) -> Result<(), Error> {
+        Err(Error::NotFound)
     }
 
-    fn sync(&mut self) -> Result<Vec<(Node, SyscallError)>, SyscallError> {
+    fn sync(&mut self) -> Result<Vec<(Node, Error)>, Error> {
         Ok(Vec::new())
+    }
+
+    fn room(&mut self) -> Result<toyos::fs::Room, Error> {
+        Ok(toyos::fs::Room { free: 0, unit: 1 })
     }
 
     fn describe(&self) -> String {

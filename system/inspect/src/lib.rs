@@ -39,7 +39,7 @@ pub fn ask(owner: Owner) -> Result<BTreeMap<String, Value>, String> {
     let deadline = Instant::now() + ANSWER_BOUND;
     loop {
         match rx.pump(&conn) {
-            RxStep::Frame { msg_type: MSG_SNAPSHOT, payload_len } => {
+            RxStep::Frame { msg_type: MSG_SNAPSHOT, payload_len, .. } => {
                 return toyos_inspect::decode(rx.payload(payload_len), owner)
                     .map_err(|why| format!("`{}` answered something that is not a snapshot: {why}", owner.port));
             }

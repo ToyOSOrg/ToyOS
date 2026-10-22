@@ -231,7 +231,7 @@ impl Submitter<Ring> for Kernel {
 }
 
 /// A peer's write of no bytes posts the pipe all the same
-/// (`pipe::try_write` answers `Wrote(0)` and `sys_write` wakes the readers).
+/// (`pipe::write` answers zero bytes and `sys_write` wakes the readers).
 /// Nothing is there to read, so nothing is answered, and the poll armed again
 /// answers the bytes that do come.
 #[test]

@@ -1,8 +1,9 @@
-//! std's C allocator, as C code in a Rust program reaches it: `aligned_alloc`
-//! answers a block at a multiple of its alignment, and `realloc` and `free`
-//! release each block at the layout it was allocated with. The allocator
-//! under them, dlmalloc, asserts a released block's size, so a block released
-//! at another layout ends this program rather than passing.
+//! C's allocator (`sdk/libc/src/malloc.rs`), as std compiles it and C code in
+//! a Rust program reaches it: `aligned_alloc` answers a block at a multiple of
+//! its alignment, and `realloc` and `free` release each block at the layout it
+//! was allocated with. The allocator under them, dlmalloc, asserts a released
+//! block's size, so a block released at another layout ends this program
+//! rather than passing.
 
 extern "C" {
     fn aligned_alloc(align: usize, size: usize) -> *mut u8;

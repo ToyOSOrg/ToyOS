@@ -20,7 +20,9 @@ pub mod device;
 pub mod file;
 pub mod handle;
 pub mod inbox;
+pub mod job;
 pub mod namespace;
+pub mod null;
 pub mod ops;
 pub mod pipe;
 pub mod port;
@@ -252,6 +254,9 @@ kobject! {
     immediate SysCap => syscap::SysCap,
     // The last handle's loss is the loss of the *ability to wait*, not proof the process should stop.
     immediate Process => process::ProcessObject,
+    immediate Null => null::NullObject,
+    // A job outlives its handles while a thread of it runs: what ends it is its last reference.
+    immediate Job => job::JobObject,
 }
 
 /// Objects whose last handle has gone, waiting for release with nothing held;

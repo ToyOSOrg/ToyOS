@@ -74,35 +74,3 @@ pub(super) fn sys_handle_dup(h: RawHandle, want: u64) -> u64 {
     }
 }
 
-/// A second handle to `old`, installed at `slot`.
-///
-/// `slot` is a slot, not a handle: a handle carries a generation this call has no business being told.
-///
-/// Displacing a handle wakes nobody: dropping the entry is what gives back the reference a wake is owed for.
-pub(super) fn sys_dup2(old: RawHandle, slot: u64) -> u64 {
-    let Ok(slot) = u16::try_from(slot) else {
-        return SyscallError::ResourceExhausted.to_u64();
-    };
-    let result = process::with_process_data(|data| {
-        let rights = data.handles.rights_of(old)?;
-        let entry = data.handles.duplicate_entry(old, rights)?;
-        data.handles
-            .install_at(slot, entry)
-            .map_err(|_| SyscallError::ResourceExhausted.into())
-            .map(|(new_h, displaced)| (new_h, Displaced(displaced)))
-    });
-    match result {
-        // Dropped here, outside the process lock: `HandleEntry`'s Drop can take
-        // `vfs::lock()`, which every sibling thread's page-fault handler also nests under.
-        Ok((new_h, displaced)) => {
-            drop(displaced);
-            new_h.0 as u64
-        }
-        Err(e) => crate::object::Refusal::refuse(e),
-    }
-}
-
-/// A displaced handle's drop obligation, carried out of a closure by [`sys_dup2`].
-// Never read: dropping it is the effect.
-#[expect(dead_code)]
-struct Displaced(Option<crate::object::HandleEntry>);

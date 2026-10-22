@@ -1,7 +1,6 @@
 pub(crate) mod exceptions;
 mod device_irq;
 mod dma_fault;
-mod hda;
 mod isa;
 mod kick;
 mod nmi;
@@ -10,7 +9,6 @@ mod timer;
 mod tlb;
 pub(crate) mod unclaimed;
 pub(crate) mod user_dev;
-mod xhci;
 
 pub(crate) use user_dev::ClaimVector;
 
@@ -37,29 +35,6 @@ pub const ISA_VECTORS: [u8; crate::isa::MAX_ROWS] = [Vector::Isa0 as u8, Vector:
 
 /// The vector an IOMMU writes into its own `FEDATA`.
 pub const DMA_FAULT_VECTOR: u8 = Vector::DmaFault as u8;
-
-/// The vector a driver in this kernel arms its function's message with: one
-/// of the two below, each its own gate.
-#[derive(Clone, Copy)]
-pub struct DriverIrq(Vector);
-
-impl DriverIrq {
-    pub(crate) const fn vector(self) -> u8 {
-        self.0 as u8
-    }
-}
-
-impl core::fmt::Display for DriverIrq {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "vector {:#x}", self.vector())
-    }
-}
-
-/// The vector the xHCI controller's message-signalled interrupt carries.
-pub const XHCI_VECTOR: DriverIrq = DriverIrq(Vector::Xhci);
-
-/// The vector the HDA controller's message-signalled interrupt carries.
-pub const HDA_VECTOR: DriverIrq = DriverIrq(Vector::Hda);
 
 const PF_PRESENT: u64 = 1 << 0;
 const PF_WRITE: u64 = 1 << 1;
@@ -111,6 +86,13 @@ impl IdtEntry {
             offset_high: (handler >> 32) as u32,
             reserved: 0,
         }
+    }
+
+    /// DPL 3: what `INT n` from Ring 3 may name (SDM Vol. 3A §6.12.1.1);
+    /// any other gate it names raises `#GP` instead.
+    fn reachable_from_ring3(mut self) -> Self {
+        self.type_attr = 0xEE; // interrupt gate, DPL=3, present
+        self
     }
 
     fn with_ist(mut self, ist_index: u8) -> Self {
@@ -259,9 +241,7 @@ idt_vectors! {
         // ist 2: SYSCALL's brief CPL0-on-user-stack window would fault SMAP without it.
         Nmi          = 0x02, nmi::nmi_entry, ist 2;
         Timer        = 0x20, timer::timer_entry;
-        Xhci         = 0x21, xhci::xhci_entry;
         DmaFault     = 0x25, dma_fault::dma_fault_entry;
-        Hda          = 0x26, hda::hda_entry;
         Isa0         = 0x2C, isa::isa0_entry;
         Isa1         = 0x2D, isa::isa1_entry;
         Kick         = 0xFC, kick::kick_entry;
@@ -453,6 +433,13 @@ pub fn init() {
     disable_pic();
 
     install_gates(&mut IDT.lock());
+    // `INT3` from Ring 3 arrives as the `#BP` it is, and ends its process as a
+    // trap, as `BRK` does on AArch64.
+    {
+        let mut idt = IDT.lock();
+        let breakpoint = &mut idt.entries[Vector::Breakpoint as usize];
+        *breakpoint = breakpoint.reachable_from_ring3();
+    }
     user_dev::install(&mut IDT.lock());
     // Every slot no row filled: delivery through a P = 0 gate is a
     // contributory fault, and the machine would halt as #DF with no name.

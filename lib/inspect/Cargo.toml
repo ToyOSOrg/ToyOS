@@ -8,3 +8,5 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 # The inventory records `dev` renders, whose layout the ABI owns.
 toyos-abi = { path = "../../sdk/abi" }
+# The registry text a loaded partition's GUID renders as.
+toyos-gpt = { path = "../gpt" }

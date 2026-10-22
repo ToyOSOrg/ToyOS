@@ -16,8 +16,7 @@ The one tracked path that does not read today is `rust`, the fork's gitlink,
 a commit and not a file. `no_tracked_file_identifies_a_machine_or_its_network`,
 in the same file, skips it by name and panics on any other.
 
-**Evidence.** With `issues/xhci-waits-are-spins.md` moved out of the
-worktree, `cargo test --lib every_committed_binary_file_is_declared` exits 0.
+**Evidence.** With a tracked issue file moved out of the worktree, `cargo test --lib every_committed_binary_file_is_declared` exits 0.
 
 A declared file that stops reading still reds, as a stale row. What passes is
 an undeclared path; by `std::fs::read`'s contract and not measured, a second

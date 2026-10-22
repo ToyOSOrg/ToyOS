@@ -18,6 +18,7 @@ use std::vec::Vec;
 use std::{thread_local, vec};
 
 use crate::sched::cpu::{CpuHandle, CpuHandles};
+use crate::sched::topology::Topology;
 use crate::sched::hw::{CpuId, Kicker};
 use crate::sched::mailbox::{mailbox, PreemptGuard, SchedMsg};
 use crate::sched::park::{prepare, Cancel, Commit, CurrentTask};
@@ -177,7 +178,7 @@ fn clean(phase: &str) {
 #[test]
 fn nothing_allocates_or_frees_under_the_list_lock_and_a_post_in_place_frees_nothing() {
     let (tx, mut rx) = mailbox::<Msg>();
-    let cpus = CpuHandles::new(vec![CpuHandle::new(C0, tx)]);
+    let cpus = CpuHandles::new(vec![CpuHandle::new(C0, tx)], Topology::flat(1));
     let env = Poster { cpus: &cpus, kicker: &NoKick, preempt: &NoPreempt };
     let w = watch();
 
@@ -264,7 +265,7 @@ fn owned(fired: &Arc<AtomicU32>) -> Owned {
 /// with the list lock let go.
 fn post_live(n: usize) -> OwnedWatch {
     let (tx, _rx) = mailbox::<Msg>();
-    let cpus = CpuHandles::new(vec![CpuHandle::new(C0, tx)]);
+    let cpus = CpuHandles::new(vec![CpuHandle::new(C0, tx)], Topology::flat(1));
     let env = Poster { cpus: &cpus, kicker: &NoKick, preempt: &NoPreempt };
     let w: OwnedWatch = Watch::new(Watched(Mutex::new(Waiters::new())));
     let fired: Vec<_> = (0..n).map(|_| Arc::new(AtomicU32::new(0))).collect();

@@ -11,12 +11,12 @@
 //! this file owns the protocol above them and does not model memory ordering
 //! at all.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc as StdArc;
 
-use kernel::sched::fair::{MAX_VRUNTIME_LAG_NS, QUANTUM_NS};
 use kernel::sched::invariants::{residents, Container};
-use kernel::sched::task::{TaskKey, TaskState};
+use kernel::sched::queue::{LAG_BOUND_NS, SLICE_NS};
+use kernel::sched::task::{TaskKey, TaskState, QUANTUM_NS};
 
 use kernel::sched::cpu::{Balance, DYING_AGE_NS, DYING_CHUNK_NS};
 
@@ -74,8 +74,8 @@ fn rt_latency_bound(max_kernel_section: u64) -> u64 {
 ///    when the interrupt lands.
 /// 3. `QUANTUM_NS` — the pass drains the retire and the victim reaches the
 ///    dying list, but the pick can only take it once the CPU is free to switch:
-///    a *running* fair task keeps the CPU until its quantum expires, which is
-///    what bounds this hop.
+///    a *running* task keeps the CPU until its next decision — a fair thread's
+///    request or a real-time task's quantum — which is what bounds this hop.
 /// 4. **`(1 + peers) × UNWIND_NS × STRETCH`** — the unwind itself, the unwinds
 ///    already queued ahead of it on that CPU, and the real-time band's bounded
 ///    share of the same CPU. See [`rt_deferral_stretch`].
@@ -88,8 +88,7 @@ fn rt_latency_bound(max_kernel_section: u64) -> u64 {
 /// plus `2 × RUN_CHUNK_NS`, invariant I4's granularity term: the model observes
 /// each hop up to one execution chunk late.
 ///
-/// **`peers` is a workload-shaped term**, exactly as invariant I5's
-/// `(runnable threads + 1)` factor is. Two corpses on one CPU means the second
+/// **`peers` is a workload-shaped term.** Two corpses on one CPU means the second
 /// waits out the first: one CPU cannot run two unwinds at once, and pretending
 /// otherwise would price the machine rather than the protocol. `peers` is the
 /// greatest number of *other* corpses that CPU has held since this retire was
@@ -124,59 +123,26 @@ pub fn check_all(vm: &mut Vm<'_>) {
     check_retires(vm);
     let rt_present = note_rt_service(vm);
     check_fairness(vm, rt_present);
-    check_share_refcounts(vm);
+    check_waits(vm);
+    check_job_counts(vm);
     check_address_spaces(vm);
     check_boost_windows(vm);
     check_work_conservation(vm);
     note_run_latency(vm);
 }
 
-/// What one walk of the containers has to yield for both fairness invariants:
-/// the per-process runnable counts I5's member test needs, the same counts
-/// broken down per CPU for I13's balance test, and the set of individual
-/// threads that are owed service.
-///
-/// A task in transit between CPUs is in none of the three. It is in no
-/// container — invariant I1 requires its state word to say so — it has left its
-/// share's refcount, and it is exactly a thread whose competition is changing,
-/// which is the one thing I13 declines to measure across.
-fn runnable_now(vm: &Vm<'_>) -> (Vec<u32>, Vec<u32>, BTreeSet<TaskKey>) {
+/// Each process's fair-band threads, Ready or Running, per CPU: row `process`,
+/// column `cpu`. A task in transit is in no band, nor is a corpse or a stopped
+/// task: none of them competes for its job's share.
+fn fair_per_cpu(vm: &Vm<'_>) -> Vec<u32> {
     let cpus = vm.scenario.cpus();
-    let mut counted = vec![0u32; vm.procs.len()];
-    let mut per_cpu = vec![0u32; vm.procs.len() * cpus];
-    let mut threads = BTreeSet::new();
-    for cpu in 0..cpus {
-        for (key, container) in residents(&vm.cpus[cpu]) {
-            if !matches!(
-                container,
-                Container::Running | Container::Ready | Container::Dying
-            ) {
-                continue;
-            }
-            threads.insert(key);
+    let mut counted = vec![0u32; vm.procs.len() * cpus];
+    for (cpu, sched) in vm.cpus.iter().enumerate() {
+        let running = sched.running().filter(|_| sched.rq().running_is_fair()).map(|t| t.key());
+        let ready = sched.rq().tasks().filter(|t| !t.rt().is_rt()).map(|t| t.key());
+        for key in running.into_iter().chain(ready) {
             if let Some(process) = vm.process_of(key) {
-                counted[process] += 1;
-                per_cpu[process * cpus + cpu] += 1;
-            }
-        }
-    }
-    (counted, per_cpu, threads)
-}
-
-/// How many Ready-or-Running tasks each process has right now. Invariants I5
-/// and I6 both need it and it is the more expensive half of either.
-fn runnable_per_process(vm: &Vm<'_>) -> Vec<u32> {
-    let mut counted = vec![0u32; vm.procs.len()];
-    for cpu in 0..vm.scenario.cpus() {
-        for (key, container) in residents(&vm.cpus[cpu]) {
-            if !matches!(
-                container,
-                Container::Running | Container::Ready | Container::Dying
-            ) {
-                continue;
-            }
-            if let Some(process) = vm.process_of(key) {
-                counted[process] += 1;
+                counted[process * cpus + cpu] += 1;
             }
         }
     }
@@ -316,6 +282,9 @@ fn check_retires(vm: &mut Vm<'_>) {
     // case claims a machine drains in parallel, and that claim is only about the
     // balance path if the balance path moved something.
     vm.migrations += migrated.len() as u64;
+    if vm.exits == 0 {
+        vm.migrations_before_exit += migrated.len() as u64;
+    }
     for (key, to) in migrated {
         if vm.killed.contains_key(&key) {
             problems.push(format!(
@@ -408,7 +377,7 @@ fn retire_elapsed(vm: &Vm<'_>, key: TaskKey) -> u64 {
 fn check_timers(vm: &mut Vm<'_>) {
     for cpu in 0..vm.scenario.cpus() {
         let armed = vm.cpus[cpu].armed();
-        let quantum = vm.cpus[cpu].running().map(|_| vm.cpus[cpu].quantum_end());
+        let quantum = vm.cpus[cpu].running().map(|_| vm.cpus[cpu].decide_at());
         let deadline = vm.cpus[cpu].parked().filter_map(|p| p.deadline()).min();
         let earliest = match (quantum, deadline) {
             (Some(q), Some(d)) => Some(q.min(d)),
@@ -502,188 +471,62 @@ fn note_rt_service(vm: &mut Vm<'_>) -> bool {
     occupied
 }
 
-/// I5: **equal shares receive equal service, to within the granularity the
-/// policy chooses.**
+/// I5: **equal jobs receive equal service on a machine that holds them alike.**
 ///
 /// Fairness is a statement about service, so this measures service — the
 /// nanoseconds the virtual CPUs actually delivered to each process — and not
-/// the vruntime bookkeeping that is supposed to produce it. Checking the
-/// bookkeeping against itself is how an instrument stops measuring: a lag that
-/// `ShareState::leave_runnable` clamps on the way in satisfies `|lag| ≤ 50 ms`
-/// no matter what the scheduler did with the CPU.
+/// the bookkeeping that is supposed to produce it.
 ///
-/// **The window.** Fairness owes nothing across a block: a process with no
-/// runnable thread is not being starved, it is waiting. Nor on an unsaturated
-/// machine: a CPU with nothing on it is denying nobody. Nor to a process with
-/// fewer runnable threads than its even share of the CPUs, which is limited by
-/// its own thread count and not by the scheduler. Nor while the RT band is
-/// occupied, because the RT band exists to be unfair and invariant I4 is what
-/// bounds it. So service is compared over a *contention window* — a maximal
-/// interval during which the same set of fair-band processes was continuously
-/// runnable, every CPU had a task loaded, every member could absorb its share,
-/// and the RT band was empty — and the comparison restarts the moment any of
-/// those stops holding. In a workload where everyone blocks the windows are
-/// short and this says little; in `fairness_storm`, where nothing blocks and no
-/// RT exists, the window is the whole run and it says everything.
+/// **The window.** Fairness owes nothing across a block, nor on an unsaturated
+/// machine, nor while the RT band is occupied (invariant I4 bounds that). And a
+/// job's aggregate share follows its placement (owner decision J1): each CPU
+/// splits its own time among the groups it holds, so two jobs placed unalike
+/// are owed unalike. So service is compared over a *contention window* — a
+/// maximal interval during which the same fair-band processes were runnable,
+/// every CPU had a task loaded, the RT band was empty, and every CPU held the
+/// same number of each member's runnable threads, which gives every member's
+/// group the same weight on every CPU — and restarts when any of those stops
+/// holding.
 ///
-/// **The bound is derived, and it does not move.** Two terms, both of them a
-/// granularity the policy picked:
+/// **The bound is derived.** On each CPU EEVDF holds every group's lag inside
+/// one request plus the granularity a decision is taken late by (Stoica and
+/// Abdel-Wahab, Theorem 3): the slice, a preempt-off section that overruns it,
+/// and the two chunks the model observes an expiry late by. A window's spread
+/// on one CPU is at most twice that, plus the lag a group carries in when it
+/// re-forms, and the machine's is the sum over its CPUs.
 ///
-/// * `lag_spread` — the stored lags of the contending shares. A share that
-///   parked 50 ms behind the frontier is *entitled* to that much catch-up, so
-///   the clamp and the intended service difference are the same number.
-///   Asserted against `MAX_VRUNTIME_LAG_NS` here rather than assumed, because
-///   the bound is only worth what the clamp is worth.
-/// * `(runnable threads + 1) × (QUANTUM + max KernelSection + 2 × RUN_CHUNK)` —
-///   the fair band is keyed by the vruntime a task had *when it was inserted*,
-///   ties broken by insertion sequence, so a process with T threads carries up
-///   to T−1 of its own dispatches' worth of stale keys and can be picked that
-///   many times over before its slowest thread comes up. Both sides carry it
-///   and the leader is spending one more quantum on top, hence `ΣT_i + 1`.
-///   The kernel-section and chunk terms are I9's, for I9's reason: a
-///   preempt-off section overruns the quantum it started in, and the model
-///   observes the expiry one chunk late.
-///
-/// Earlier drafts of this check widened that expression twice, because the
-/// shipped scheduler brushed it — 74 ms against 72, then 109 ms against 108.
-/// Widening was the wrong move and the near-misses were the signal: a bound
-/// calibrated to what the code already does cannot detect the code getting
-/// worse. The bound is therefore back to the derived form, and where the shipped
-/// scheduler does not meet it, that is recorded as a gap rather than absorbed
-/// (`scenarios::FAIRNESS_SAMPLE`, which has the measurements and names the four
-/// widths of ten where the standard is currently crossed).
-///
-/// **What reds a run** is `max(derived bound, recorded allowance)`, so a
-/// scenario with a sample is gated on not regressing against it. The allowance
-/// never hides the standard: `Vm::fair_over_bound` records every crossing of the
-/// derived bound whatever the allowance permits, and the sweep prints it.
+/// **What reds a run** is `max(derived bound, lifted ceiling)`; only a control
+/// measuring a rejected policy lifts it, and `Vm::fair_over_bound` records
+/// every crossing of the derived bound regardless.
 fn check_fairness(vm: &mut Vm<'_>, rt_present: bool) {
-    // Both cleared here and re-established only by a comparison that actually
-    // happened, so `Vm::thread_covered_ns` and `Vm::fair_covered_ns` count the
-    // reach each check has and not the reach it would have if every window
-    // stayed open. I5's is cleared on the same line as I13's because every one
-    // of the four conditions below can close it — an RT task, a CPU going idle,
-    // the member set changing, or a member falling under its even share — and a
-    // flag cleared anywhere but the top would miss whichever of them returns
-    // early.
     vm.fair_window_open = false;
-    vm.thread_window_open = false;
-    let (runnable, per_cpu, live_threads) = runnable_now(vm);
-    let saturated = (0..vm.scenario.cpus()).all(|cpu| vm.cpus[cpu].running().is_some());
+    let cpus = vm.scenario.cpus();
+    let per_cpu = fair_per_cpu(vm);
+    let saturated = (0..cpus).all(|cpu| vm.cpus[cpu].running().is_some());
+    let row = |p: usize| &per_cpu[p * cpus..(p + 1) * cpus];
     let mut members: Vec<usize> = if rt_present || !saturated {
         Vec::new()
     } else {
         (0..vm.procs.len())
-            .filter(|&p| runnable[p] > 0 && !vm.procs[p].rt_service)
+            .filter(|&p| row(p).iter().any(|&n| n > 0) && !vm.procs[p].rt_service)
             .collect()
     };
-    // A process cannot run on more CPUs than it has runnable threads, so one
-    // with fewer than its even share of the machine is limited by its own thread
-    // count and not by the scheduler. Measuring it would be measuring the
-    // workload: at 16 CPUs it is what the late windows of `fairness_storm` are,
-    // once enough threads have exited that the wide process is the only one that
-    // can still fill the machine.
-    if members
-        .iter()
-        .any(|&p| runnable[p] as usize * members.len() < vm.scenario.cpus())
-    {
+    if !members.iter().all(|&p| row(p).iter().min() == row(p).iter().max()) {
         members.clear();
     }
-
-    // I13's narrowing: every CPU must carry the same number of each member's
-    // runnable threads. Two siblings on differently composed CPUs are limited by
-    // where they were placed and not by the order the fair band picks them in,
-    // and the policy makes no per-thread placement promise to hold them to.
-    // Measured rather than assumed, because it is what `fairness_storm`'s
-    // "balanced by construction" is worth once threads start exiting: at two
-    // CPUs the shipped scheduler separates two trio threads by 49 ms with one of
-    // them sharing a CPU with a solo thread that is catching up, which is I5's
-    // entitlement being honoured and not a sibling being cheated.
-    let balanced = members.iter().all(|&process| {
-        let row = &per_cpu[process * vm.scenario.cpus()..(process + 1) * vm.scenario.cpus()];
-        row.iter().min() == row.iter().max()
-    });
-    let threads: u32 = members.iter().map(|&p| runnable[p]).sum();
-    // What one CPU's fair band holds. Read off CPU 0 rather than divided out of
-    // the machine-wide total, so it is the quantity itself and not an average
-    // that happens to equal it; `balanced` is what makes every CPU's the same.
-    let rivals: u32 = members.iter().map(|&p| per_cpu[p * vm.scenario.cpus()]).sum();
-
     if members != vm.fair_epoch.members {
-        vm.fair_epoch = FairEpoch {
-            members,
-            base: vm.service_ns.clone(),
-            threads: 0,
-            lag_spread: 0,
-            thread_base: BTreeMap::new(),
-            thread_rivals: 0,
-        };
-        open_thread_window(vm, balanced, &live_threads);
+        vm.fair_epoch = FairEpoch { members, base: vm.service_ns.clone() };
         return;
     }
-    if !balanced {
-        vm.fair_epoch.thread_base.clear();
-    } else if vm.fair_epoch.thread_base.is_empty() {
-        open_thread_window(vm, balanced, &live_threads);
-    } else {
-        // A thread that stopped being runnable is owed nothing further, so it
-        // drops out of the comparison for the rest of this window rather than
-        // closing it: a share whose threads exit one by one is still a share
-        // whose *remaining* threads must be sharing evenly.
-        vm.fair_epoch
-            .thread_base
-            .retain(|key, _| live_threads.contains(key));
-        vm.fair_epoch.thread_rivals = vm.fair_epoch.thread_rivals.max(rivals);
-        check_thread_service(vm, &members);
-    }
-
     if members.len() < 2 {
         return;
     }
-    vm.fair_epoch.threads = vm.fair_epoch.threads.max(threads);
-
-    let mut lag_low = i64::MAX;
-    let mut lag_high = i64::MIN;
-    let mut over_clamp = Vec::new();
-    for &process in &members {
-        for share in &vm.procs[process].shares {
-            let lag = share.lag();
-            if lag.unsigned_abs() > MAX_VRUNTIME_LAG_NS {
-                over_clamp.push(format!(
-                    "I5: {}'s stored lag is {lag} ns, past the ±{MAX_VRUNTIME_LAG_NS} ns clamp \
-                     the service bound is derived from",
-                    vm.procs[process].name,
-                ));
-            }
-            lag_low = lag_low.min(lag);
-            lag_high = lag_high.max(lag);
-        }
-    }
-    for problem in over_clamp {
-        vm.violate(problem);
-    }
-
-    vm.fair_epoch.lag_spread = vm
-        .fair_epoch
-        .lag_spread
-        .max(lag_high.saturating_sub(lag_low).unsigned_abs());
-
-    let bound = vm.fair_epoch.lag_spread
-        + (vm.fair_epoch.threads as u64 + 1)
-            * (QUANTUM_NS + vm.max_kernel_section() + 2 * RUN_CHUNK_NS);
-    let served: Vec<u64> = members
-        .iter()
-        .map(|&p| vm.service_ns[p] - vm.fair_epoch.base[p])
-        .collect();
-    let (low, high) = (
-        served.iter().copied().min().unwrap_or(0),
-        served.iter().copied().max().unwrap_or(0),
-    );
+    let bound = cpus as u64 * 2 * (SLICE_NS + LAG_BOUND_NS + vm.max_kernel_section() + 2 * RUN_CHUNK_NS);
+    let served: Vec<u64> = members.iter().map(|&p| vm.service_ns[p] - vm.fair_epoch.base[p]).collect();
+    let (low, high) = (served.iter().copied().min().unwrap_or(0), served.iter().copied().max().unwrap_or(0));
     let spread = high - low;
-    // The comparison is made from here on, so this is where the window counts as
-    // open. Set after the early returns rather than before them: `members` being
-    // unchanged is not enough — a window that restarted this step has a zero
-    // baseline and separates nothing yet.
+    // Set after the early returns: a window that restarted this step has a
+    // zero baseline and separates nothing yet.
     vm.fair_window_open = true;
     if spread > vm.fair_spread {
         vm.fair_spread = spread;
@@ -692,179 +535,50 @@ fn check_fairness(vm: &mut Vm<'_>, rt_present: bool) {
     if spread > bound {
         vm.fair_over_bound = vm.fair_over_bound.max(spread);
     }
-    // The ceiling is the bound, except where a recorded sample says the shipped
-    // scheduler does not meet it (`scenarios::FAIRNESS_SAMPLE`). There the run is
-    // gated on not getting *worse*, and the gap between the two is reported by
-    // `Outcome::fair_over_bound` on every run rather than left in a document.
     let ceiling = bound.max(vm.scenario.fair_allowance_ns);
     if spread > ceiling {
-        let detail: Vec<String> = members
-            .iter()
-            .zip(&served)
-            .map(|(&p, ns)| format!("{}={ns}", vm.procs[p].name))
-            .collect();
+        let detail: Vec<String> =
+            members.iter().zip(&served).map(|(&p, ns)| format!("{}={ns}", vm.procs[p].name)).collect();
         vm.violate(format!(
-            "I5: {spread} ns of service separates equal shares over one contention \
-             window (bound {bound} ns, recorded allowance {} ns): {}",
+            "I5: {spread} ns of service separates equal jobs over one contention window \
+             (bound {bound} ns, lifted ceiling {} ns): {}",
             vm.scenario.fair_allowance_ns,
             detail.join(" "),
         ));
     }
 }
 
-/// (Re-)baseline invariant I13's measurement at this instant: every runnable
-/// thread of a member, with the service it has had so far. A no-op while the
-/// members' threads are unevenly spread across the CPUs, because that is
-/// exactly the interval the comparison declines to make.
-fn open_thread_window(vm: &mut Vm<'_>, balanced: bool, live_threads: &BTreeSet<TaskKey>) {
-    if !balanced {
+/// I13: **a ready fair thread is not passed over without bound**, measured as
+/// the service its CPU owed it while it waited ([`Vm::owed_waiting`]): its
+/// group's weight over the CPU's summed group weight, shared among the group's
+/// threads there, for as long as the CPU ran fair work.
+///
+/// The bound is the host model's (`kernel/pure/sched/job_sched.rs`): a
+/// thread's group waits out the request running ahead of it, the EEVDF lag
+/// bound and the lag it carried in, and the thread does the same inside its
+/// group — `3 × SLICE + 2 × LAG_BOUND` — plus, at each of the two levels, a
+/// preempt-off section and the two chunks a decision is observed late by.
+/// Equal-service checks cannot see a group that runs one thread and starves
+/// the rest: its job's total is unchanged. This can, and
+/// `scenarios::fair_lowest_key_within_group` is its gate.
+fn check_waits(vm: &mut Vm<'_>) {
+    let bound = 3 * SLICE_NS + 2 * LAG_BOUND_NS + 2 * (vm.max_kernel_section() + 2 * RUN_CHUNK_NS);
+    let Some((&key, &owed)) = vm.owed_waiting.iter().max_by(|a, b| a.1.total_cmp(b.1)) else {
         return;
+    };
+    let owed = owed as u64;
+    if owed > vm.wait_owed {
+        vm.wait_owed = owed;
+        vm.wait_bound = bound;
     }
-    let base: BTreeMap<TaskKey, u64> = vm
-        .fair_epoch
-        .members
-        .iter()
-        .flat_map(|&process| vm.procs[process].live.iter().copied())
-        .filter(|key| live_threads.contains(key))
-        .map(|key| (key, vm.thread_service.get(&key).copied().unwrap_or(0)))
-        .collect();
-    vm.fair_epoch.thread_base = base;
-    vm.fair_epoch.thread_rivals = 0;
-}
-
-/// I13: **threads of one share receive equal service**, measured over the same
-/// contention windows invariant I5 measures processes over.
-///
-/// I5 is structurally blind to this. A fair share is per *process*, so every
-/// thread of a process charges one pot and `service_ns` adds all of
-/// them together: a share that runs one thread flat out and never dispatches
-/// its siblings delivers exactly the per-process total that a share
-/// round-robining them delivers, and I5 reports a perfectly even split while a
-/// thread never runs. What prevents that today is the fair band's
-/// insertion-sequence tie-break (`queue.rs`), and this check is what measures
-/// it.
-///
-/// **The window is I5's**, taken from the same `fair_epoch` and opened and
-/// closed by the same rules — the runnable set changing, a CPU idling, a member
-/// with fewer runnable threads than its even share of the CPUs, an occupied RT
-/// band. Two definitions of one word would be a defect rather than a design.
-/// I13's is that interval with three changes, two of them narrowings:
-///
-/// * **One further narrowing of its own: every CPU must carry the same number
-///   of each member's runnable threads.** Two siblings on differently composed
-///   CPUs are limited by where they were placed, and the policy makes no
-///   per-thread placement promise to hold them to; I13's window re-baselines
-///   the instant that stops holding, so it is a sub-interval of I5's rather
-///   than a second notion of contention. This is not a hypothetical: at two
-///   CPUs the shipped scheduler separates two `trio` threads by 49 ms with one
-///   of them sharing a CPU with a `solo` thread that is catching up — I5's
-///   entitlement being honoured, not a sibling being cheated.
-/// * The measured set is fixed when the window opens and only ever shrinks. A
-///   thread that blocks or exits mid-window is owed nothing further and leaves
-///   the comparison — it does not close the window, because the siblings still
-///   runnable are still owed an even split.
-/// * A window with a *single* member is still measured, which is the one
-///   relaxation. I5 needs two processes before it has a spread at all; one
-///   process with two threads is already a comparison.
-///
-/// **The bound is derived, and it does not move.** It is I5's bound with the
-/// lag term deleted, and the deletion is the whole content of it:
-///
-/// * `(ΣT_i + 1) × (QUANTUM + max KernelSection + 2 × RUN_CHUNK)` — I5's own
-///   staleness term, unchanged and computed from the same running maximum. The
-///   fair band is keyed by the vruntime a thread held when it was *inserted*,
-///   and a dispatched thread is re-inserted with its share's pot as it stands
-///   after the charge — strictly above the key it was holding. So every other
-///   ready thread in the window, sibling or not, can be picked at most once
-///   ahead of a waiting thread on the strength of a key that was already stale
-///   when the wait began, and the leader spends one more dispatch on top. It is
-///   `ΣT_i` and not the share's own thread count because a thread waits behind
-///   the *whole* fair band on its CPU: an earlier draft of this check counted
-///   only siblings, which is a derivation that assumes the rest of the machine
-///   away, and the shipped scheduler crossed it at every width above one. The
-///   running maximum is I13's own (`thread_threads`) because I13's window is
-///   the shorter of the two.
-/// * **No lag term.** I5 carries `lag_spread` because two different shares may
-///   hold stored lags up to ±[`MAX_VRUNTIME_LAG_NS`] apart and are entitled to
-///   that much catch-up. [`kernel::sched::fair::ShareState`] holds one vruntime
-///   and one lag for every thread of a process, so the intra-share lag spread
-///   is identically zero — there is no per-thread entitlement to be behind.
-///   That absence is exactly why a per-share check can be tighter than I5, and
-///   why it can see what I5 cannot.
-///
-/// **What it does not cover is placement.** The insertion-order argument is
-/// about one run queue, and two threads of one share on differently loaded CPUs
-/// sit in two of them; nothing in the policy equalizes those, and a check that
-/// asserted it would be measuring the workload. `scenarios::fairness_storm`
-/// hands every CPU the identical mix by construction (its own doc says why),
-/// which is what makes the number reported there a statement about the
-/// ordering.
-///
-/// **What reds a run** is `max(derived bound, recorded allowance)`, and
-/// `Vm::thread_over_bound` records every crossing of the derived bound whatever
-/// the allowance permits. I5's recording pattern, for I5's reason: an allowance
-/// that can quietly become the standard is a gate that has stopped measuring.
-fn check_thread_service(vm: &mut Vm<'_>, members: &[usize]) {
-    let bound = (u64::from(vm.fair_epoch.thread_rivals) + 1)
-        * (QUANTUM_NS + vm.max_kernel_section() + 2 * RUN_CHUNK_NS);
-    // Measured without allocating per member: this runs after every step of
-    // every scenario, and the detail line is built only where one is owed.
-    let mut measured: Vec<(usize, u64)> = Vec::new();
-    for &process in members {
-        let (mut low, mut high, mut counted) = (u64::MAX, 0u64, 0usize);
-        for key in &vm.procs[process].live {
-            let Some(base) = vm.fair_epoch.thread_base.get(key) else {
-                continue;
-            };
-            let served = vm.thread_service.get(key).copied().unwrap_or(0) - base;
-            low = low.min(served);
-            high = high.max(served);
-            counted += 1;
-        }
-        if counted < 2 {
-            continue;
-        }
-        measured.push((process, high - low));
-    }
-    vm.thread_window_open = !measured.is_empty();
-
-    let mut problems = Vec::new();
-    for (process, spread) in measured {
-        if spread > vm.thread_spread {
-            vm.thread_spread = spread;
-            vm.thread_bound = bound;
-        }
-        if spread > bound {
-            vm.thread_over_bound = vm.thread_over_bound.max(spread);
-        }
-        if spread <= bound.max(vm.scenario.thread_allowance_ns) {
-            continue;
-        }
-        let detail: Vec<String> = vm.procs[process]
-            .live
-            .iter()
-            .filter_map(|key| {
-                let base = vm.fair_epoch.thread_base.get(key)?;
-                let served = vm.thread_service.get(key).copied().unwrap_or(0) - base;
-                // Which run queue each thread is in, because that is the first
-                // question a per-thread spread raises and the answer is one
-                // scan on a path that has already failed.
-                let at = (0..vm.scenario.cpus())
-                    .find(|&cpu| residents(&vm.cpus[cpu]).any(|(k, _)| k == *key))
-                    .map_or_else(|| "?".to_string(), |cpu| cpu.to_string());
-                Some(format!("{}@cpu{at}={served}", key.0))
-            })
-            .collect();
-        problems.push(format!(
-            "I13: {spread} ns of service separates threads of {}'s one share over one \
-             contention window (bound {bound} ns, recorded allowance {} ns): {}",
-            vm.procs[process].name,
-            vm.scenario.thread_allowance_ns,
-            detail.join(" "),
+    if owed > bound {
+        vm.wait_over_bound = vm.wait_over_bound.max(owed);
+        let at = (0..vm.scenario.cpus())
+            .find(|&cpu| residents(&vm.cpus[cpu]).any(|(k, _)| k == key))
+            .map_or_else(|| "in transit".to_string(), |cpu| format!("on cpu{cpu}"));
+        vm.violate(format!(
+            "I13: {key:?} waited {at} through {owed} ns of service its CPU owed it (bound {bound} ns)",
         ));
-    }
-    for problem in problems {
-        vm.violate(problem);
     }
 }
 
@@ -1044,26 +758,29 @@ fn note_run_latency(vm: &mut Vm<'_>) {
     vm.prev_container = seen;
 }
 
-/// I6: `FairShare.runnable_threads` equals the actual Ready+Running count of
-/// that share. The refcount and the containers are driven by the same linear
-/// moves, so a drift means a transition forgot one of the two.
-fn check_share_refcounts(vm: &mut Vm<'_>) {
-    let counted = runnable_per_process(vm);
+/// I6: each job's runnable count equals its threads in a fair band, Ready or
+/// Running, on every CPU. The count and the bands are driven by the same moves,
+/// so a drift means a transition forgot one of the two.
+fn check_job_counts(vm: &mut Vm<'_>) {
+    let mut in_band: BTreeMap<kernel::sched::job::JobKey, u32> = BTreeMap::new();
+    for sched in &vm.cpus {
+        let running = sched.running().filter(|_| sched.rq().running_is_fair()).map(|t| t.job().key());
+        for job in running.into_iter().chain(sched.rq().tasks().filter(|t| !t.rt().is_rt()).map(|t| t.job().key())) {
+            *in_band.entry(job).or_default() += 1;
+        }
+    }
     let mut problems = Vec::new();
-    for (process, expected) in counted.iter().enumerate() {
-        // A sum, because a process holds one share under the shipped policy and
-        // one per thread under the `PerThread` negative gate. With one share it
-        // is a single `runnable_threads()` read.
-        let actual: u32 = vm.procs[process]
-            .shares
-            .iter()
-            .map(|share| share.runnable_threads())
-            .sum();
-        if actual != *expected {
-            problems.push(format!(
-                "I6: {} has {actual} runnable thread(s) counted but {expected} in queues",
-                vm.procs[process].name,
-            ));
+    for process in &vm.procs {
+        for job in &process.jobs {
+            let expected = in_band.get(&job.key()).copied().unwrap_or(0);
+            if job.runnable() != expected {
+                problems.push(format!(
+                    "I6: {}'s job {:?} counts {} runnable thread(s) but {expected} are in a fair band",
+                    process.name,
+                    job.key(),
+                    job.runnable(),
+                ));
+            }
         }
     }
     for problem in problems {
@@ -1112,7 +829,7 @@ fn check_boost_windows(vm: &mut Vm<'_>) {
     // a preempt-off section can overrun the quantum it started inside, and the
     // model advances the clock in chunks, so the quantum's expiry is observed
     // one chunk late and the pass that acts on it lands a chunk after that.
-    let bound = kernel::sched::fair::QUANTUM_NS + vm.max_kernel_section() + 2 * RUN_CHUNK_NS;
+    let bound = QUANTUM_NS + vm.max_kernel_section() + 2 * RUN_CHUNK_NS;
     let problems: Vec<String> = vm
         .boosted_run
         .iter()

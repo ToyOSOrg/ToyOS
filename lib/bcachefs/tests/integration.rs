@@ -1336,7 +1336,7 @@ impl bcachefs::BlockIO for Postpones {
 
 /// The retry discriminant crosses this crate unchanged: a `Refused` sync comes
 /// out of `Mounted::sync` still `Refused`, never widened into the device's own
-/// word — the erasure `kernel/CLAUDE.md`'s BudgetExpired rule forbids.
+/// word.
 #[test]
 fn a_refused_sync_stays_refused_through_the_filesystem() {
     let raw = volume_with("doc.bin", b"small");

@@ -8,7 +8,7 @@ The mechanics live where the work is: profiles and shapes in `tests/common/`, re
 - **A machine-wide kernel panic reds whichever test was running** — that red's name is the workload, never the cause. `QEMU died before ===READY=== (status 0)` is the same thing said silently: a guest that reset itself is a kernel death, and its evidence is the boot log.
 - **A machine-wide death during boot is reproduced by boots, not by suites** — parallel `bootable.img` guests, each waited on its completion marker and never on a fixed timer; the baseline is measured in the same session as the arm; a death counts whether or not a marker printed, so run guests with `-action reboot=shutdown -action shutdown=pause` and read a silent one's registers over QMP; a defect whose rate is set by interrupts per unit of guest work is measured on the *slowest* instrument — TCG can be the stronger oracle.
 - **`/system/bin/supervisor` speaks in every program's name before that program runs** — a predicate keyed on a `<program>: ` prefix is satisfied by the wrong speaker; wait for the whole line, in the constant the assertion also reads.
-- **A guest binary cannot ask what a handle it does not hold does** — the probe ends its caller with exit 139, so it runs in a child, one fault per child.
+- **A guest binary cannot ask what a handle it does not hold does** — the probe ends its caller with a handle fault, so it runs in a child, one fault per child.
 - **A boot's capture has two pieces** — `boot_log()` ends at the ready marker, `run_test`'s capture begins at `===TEST_START===`, and a job's capture is every program's lines of its window, a server's late boot lines among them.
 - **A guest of an architecture the host is not runs under TCG** (`Arch::accel`) — TCG prices an uncontended atomic read-modify-write unlike hardware, and an x86-64 guest there boots `qemu64`, which has no PCID: every `INVPCID` path is dead, so a change gated on a CPUID feature is unverified by a green TCG suite.
 - **A liveness ceiling scales by two host facts** — boot-derived host speed *and* the guest's own `vcpus/cores` oversubscription. Widen a *liveness* guard for this, never a correctness bound.
@@ -19,3 +19,7 @@ The mechanics live where the work is: profiles and shapes in `tests/common/`, re
 - **A harness field that can be silently inert is this suite's worst defect class** — where two options can describe the same guest they refuse each other by name, and an image is asked what it is armed with.
 - **A test whose premise is arranged by a defect passes for the wrong reason** — a staging device's resource has to survive its own enumeration.
 - **Host suites** are the root `Cargo.toml`'s `[workspace]` members a host builds (`build/hostws.rs`), the kernel's library, the SDK and every program directly under `system/`, `apps/` and `tests/guest/` that `build/userlandhost.rs` finds a test in; `build/ci.rs`'s `host` runs them all. `kernel/loom/` is the memory-ordering check — x86 TSO hides a missing acquire edge from every guest test.
+
+## C corpus
+
+`tests/corpus/` contains only the pinned TinyCC corpus and its licence; changed membership updates the licence count, and `46_grep.c` stays excluded. `NOTICE` accounts for committed third-party files.

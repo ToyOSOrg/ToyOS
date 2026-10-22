@@ -18,6 +18,7 @@ toyos-manifest = { path = "../../lib/manifest" }
 toyos-pci-claim = { path = "../../lib/pci-claim" }
 toyos-virtio = { path = "../../lib/virtio" }
 toyos-virtio-gpu = { path = "virtio-gpu" }
+toyos-wallclock = { path = "../../lib/wallclock" }
 toyos-window = { path = "../../sdk/window" }
 
 [package.metadata.toyos.host]

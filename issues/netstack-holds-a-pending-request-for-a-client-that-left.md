@@ -4,19 +4,20 @@ kind: defect
 opened: 2026-09-26
 ---
 
-# netd holds a pending request for a client that left
+# netstack holds a pending receive for a client that left
 
-A UDP receive with no datagram yet and a connect waiting for its handshake keep
-their client's connection in `Sockets::receiving` and `Sockets::connecting`
-(`system/netstack/src/serve.rs`) until what they wait for happens. Neither
-watches the connection, so a client that hangs up is noticed only when netstack
-writes its answer: a receive on a socket nothing sends to holds its entry for
-the life of the socket, and a connect with no timeout holds its stream and its
-place until [tcp] gives the handshake up.
+A UDP receive with no datagram yet keeps its client's connection in
+`Sockets::receiving` (`system/netstack/src/serve.rs`) until a datagram arrives.
+Nothing watches that connection (`Sockets::watch` watches each stream's
+connection, each listener's wake pipe, each datagram socket's pipe and each
+waiting lookup's connection), so a client that hangs up is noticed only when
+netstack writes its answer: a receive on a socket nothing sends to holds its
+entry for the life of the socket.
 
-A lookup's client is watched and let go at once (`Node::let_go`, reached from
-the `TOKEN_LOOKUP` watches in `Sockets::watch`).
+A lookup's client is watched and let go at once (`TOKEN_LOOKUP`), and so is a
+stream's from its connect: a stream is the connection it was asked on, watched
+for its hang-up.
 
-Exit condition: both pending lists watch their clients' connections the same
-way, and a guest test that hangs up a pending receive and a pending connect
-sees the socket and the slot freed without any traffic.
+Exit condition: a waiting receive's connection is watched the same way, and a
+test of `serve.rs` that hangs up a pending receive sees its entry freed without
+any traffic.

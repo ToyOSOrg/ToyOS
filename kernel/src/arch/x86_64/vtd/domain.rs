@@ -19,7 +19,7 @@ use crate::log;
 use alloc::vec::Vec;
 
 use crate::iommu::domains::{self, Domains};
-use crate::iommu::{AddressWidth, DomainId, IommuError, Iova, StreamId};
+use crate::iommu::{AddressWidth, DomainId, IommuError, Iova, Limit, StreamId};
 use crate::sync::Lock;
 
 use super::table::{self, Space};
@@ -43,7 +43,7 @@ struct Vtd {
 static DOMAINS: Lock<Vtd> =
     Lock::new(Vtd { agreement: Agreement::None, domains: Domains::new(table::KERNEL_DOMAIN + 1) });
 
-/// Before any domain is made: every claimed function's is built clear of these.
+/// Before any domain is made: every one is built clear of these.
 pub fn avoid(reserved: Vec<(u64, u64)>) {
     DOMAINS.lock().domains.avoid(reserved);
 }
@@ -75,9 +75,9 @@ pub fn create(room: u64, windows: Option<&[toyos_abi::acpi::RootBridgeWindow]>) 
     Ok(held.domains.add(next, space, what))
 }
 
-pub fn map(id: DomainId, phys: u64, bytes: u64) -> Result<Iova, IommuError> {
+pub fn map(id: DomainId, phys: u64, bytes: u64, limit: Limit) -> Result<Iova, IommuError> {
     let mut held = DOMAINS.lock();
-    let (space, at) = held.domains.map(id, phys, bytes)?;
+    let (space, at) = held.domains.map(id, phys, bytes, limit)?;
     put(id, space, at, phys, bytes);
     Ok(at)
 }

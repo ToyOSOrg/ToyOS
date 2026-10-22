@@ -1,6 +1,5 @@
-//! A partition as a program that reads and writes its blocks holds it: one a
-//! block service serves ([`Served`]), or one the kernel's own disk serves
-//! through a claim ([`Claimed`]), until usbd serves the stick.
+//! A partition as a program that reads and writes its blocks holds it: one
+//! the block service serves ([`Served`]).
 //!
 //! **A block service that ends is survived, not hidden**: a [`Served`] disk
 //! whose session ended reconnects through the same name and issues again every
@@ -10,64 +9,11 @@
 //! twice.
 
 use crate::{Error as SessionError, Outcome, Session};
-use toyos::PartitionDev;
-use toyos_abi::part::{Block, MAX_BLOCKS_PER_CALL};
 use toyos_blockring::MAX_REQUEST_BLOCKS;
 
 pub use toyos_disk::{span, Disk, DiskError, BLOCK};
 
-/// A partition the kernel's own disk serves: the stick, until usbd serves it.
-pub struct Claimed {
-    claim: PartitionDev,
-    blocks: u64,
-}
-
-impl Claimed {
-    pub fn new(claim: PartitionDev) -> Result<Self, DiskError> {
-        let info = claim.describe().map_err(|_| DiskError::Device)?;
-        Ok(Self { claim, blocks: info.blocks })
-    }
-}
-
-impl Disk for Claimed {
-    fn blocks(&self) -> u64 {
-        self.blocks
-    }
-
-    fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
-        span(first, out.len(), self.blocks)?;
-        let mut buf: Vec<Block> = vec![[0u8; BLOCK]; MAX_BLOCKS_PER_CALL];
-        for (i, chunk) in out.chunks_mut(BLOCK * MAX_BLOCKS_PER_CALL).enumerate() {
-            let n = chunk.len() / BLOCK;
-            let at = first + (i * MAX_BLOCKS_PER_CALL) as u64;
-            self.claim.read(at, &mut buf[..n]).map_err(|_| DiskError::Device)?;
-            for (dst, src) in chunk.chunks_exact_mut(BLOCK).zip(&buf[..n]) {
-                dst.copy_from_slice(src);
-            }
-        }
-        Ok(())
-    }
-
-    fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
-        span(first, data.len(), self.blocks)?;
-        let mut buf: Vec<Block> = vec![[0u8; BLOCK]; MAX_BLOCKS_PER_CALL];
-        for (i, chunk) in data.chunks(BLOCK * MAX_BLOCKS_PER_CALL).enumerate() {
-            let n = chunk.len() / BLOCK;
-            for (dst, src) in buf[..n].iter_mut().zip(chunk.chunks_exact(BLOCK)) {
-                dst.copy_from_slice(src);
-            }
-            let at = first + (i * MAX_BLOCKS_PER_CALL) as u64;
-            self.claim.write(at, &buf[..n]).map_err(|_| DiskError::Device)?;
-        }
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<(), DiskError> {
-        self.claim.sync().map_err(|_| DiskError::Device)
-    }
-}
-
-/// A partition diskserver serves.
+/// A partition the block service serves.
 pub struct Served {
     session: Session,
     blocks: u64,

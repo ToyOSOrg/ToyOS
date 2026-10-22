@@ -16,8 +16,9 @@ that most rows ride:
 
 - `test_rs_pci_reclaim` exited 1, `claim 1 of 8086:15fc was refused:
   NotFound`: the job claims the T14's I219, which that bench has not. The
-  `claim_reuses_its_remapping_entry` and `claim_refused_without_remapping`
-  rows read that job.
+  `claim_reuses_its_remapping_entry` row reads that job (and so did
+  `claim_refused_without_remapping`, deleted by #971: without remapping a
+  bench drives no USB, so its boot left no `/log`).
 
 That run asked for `blackbox_unclaimed_page` alone, which passed. An
 unfiltered `cargo test --test toyos-build -- --metal --metal-host

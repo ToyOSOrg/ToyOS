@@ -12,7 +12,7 @@ Implement the simplest coherent solution across the components it requires. Pref
 
 Challenge a brief that forces a workaround. Propose the overarching simplification, what it removes, its tradeoffs and what remains uncertain. Crossing a file or component boundary does not need special permission. If the solution changes an architectural decision the owner approved, or the architecture is uncertain, return that decision through the orchestrator before implementing it. Continue independent work where possible.
 
-Routine fixes under the agreed architecture need no separate design round. New ownership, protocols, dependencies, policy or mechanisms require a design discussion first. Keep the owner-facing proposal short or visual; give the implementing agents the technical detail they need. Distinguish an idea from a verified result.
+Routine fixes and internal techniques under the agreed architecture need no separate design round. An internal helper or implementation mechanism does not itself require owner approval. When an architectural discussion is needed, keep the owner-facing proposal short or visual and provide the technical detail the decision requires. Distinguish an idea from a verified result.
 
 Use vendor documentation, specifications and research under root's source policy. A cheap investigation should precede building on an uncertain assumption. Follow `reviewer.md`'s source and dependency checks. Do not compromise a general design to fit one bench, preserve an ABI or make a test easier.
 
@@ -50,7 +50,7 @@ Commit with `git commit -F <file>`. Push your branch, never `main`, and create a
 
 Keep the title and body true of the final change: problem and resulting behavior, consequential decisions, checks and evidence, unresolved risks. Explain why any integration test needs its environment, which targets support it and why a new dependency or mechanism earns its place. Use `gh pr edit --title <title> --body-file <file>`, not `--fill`. Do not mark ready, arm merging or wait on CI unless briefed to do so.
 
-Before handoff, commit the work and ensure `git status --porcelain --ignore-submodules=none` is empty; push any consumed fork commits you made. Report the head, the outcome, verification and unresolved decisions concisely. Do not hide risks to meet a line limit. End a T14 request with `T14 RUN REQUESTED: <dir>/request.txt`.
+Before handoff, commit the work and ensure `git status --porcelain --ignore-submodules=none` is empty; push any consumed fork commits you made. Save `handoff.md` in the assignment's scratch directory with the branch head, PR, outcome, verification and evidence links, and unresolved decisions or risks. Return its path with a short summary so the report survives a lost return message. Do not hide risks to meet a line limit. End a T14 request with `T14 RUN REQUESTED: <dir>/request.txt`.
 
 ## Review response
 

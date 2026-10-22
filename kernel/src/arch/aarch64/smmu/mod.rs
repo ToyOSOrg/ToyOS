@@ -255,7 +255,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     };
 
     crate::iommu::fault::describe(devices);
-    let segment = u32::from(crate::pcidev::segment());
+    let segment = u32::from(toyos_acpi::SEGMENT_GROUP);
     let mut routes = Vec::new();
     for device in devices {
         let function = StreamId::pci(device.bus, device.dev, device.func);
@@ -271,7 +271,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
             Err(why) => log!("IOMMU: {function}'s IORT route is refused: {why:?}"),
         }
     }
-    let Some(live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes) else {
+    // The ITS's doorbell page is mapped at its own address in every domain
+    // (`domain::create`), so no grant may be handed out over it.
+    let doorbell = super::irqchip::its::doorbell_page().map(|page| (page, page + crate::mm::PAGE_SIZE));
+    let Some(live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, doorbell.into_iter().collect()) else {
         return;
     };
     *UNIT.lock() = Some(live);
@@ -328,6 +331,7 @@ fn program(
     coherent_override: bool,
     event: Option<core::num::NonZeroU32>,
     routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
+    reserved: Vec<(u64, u64)>,
 ) -> Option<Live> {
     let refused = |why: core::fmt::Arguments<'_>| log!("IOMMU: the SMMUv3 at {base:#x} is left aborting: {why}");
     let (idr0, idr1, idr5) = (regs.read(reg::IDR0), regs.read(reg::IDR1), regs.read(reg::IDR5));
@@ -402,6 +406,7 @@ fn program(
         routes,
         domains: crate::iommu::domains::Domains::new(domain::FIRST),
     };
+    live.domains.avoid(reserved);
     live.issue(&[Command::ForgetAll, Command::InvalidateAll]);
 
     regs.write64(reg::EVENTQ_BASE, events_base);

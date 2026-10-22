@@ -19,13 +19,14 @@ while `std::thread::panicking()`; its `Arc` does not.
 
 **Evidence** ([ToyOSOrg/evidence `29c8ebcb`, `arc-probe/`](https://github.com/ToyOSOrg/evidence/tree/29c8ebcb04eae318598ff7cb0a045e6e9a1c4f53/arc-probe)):
 at `6d2e78400`, with the stream model in
-`lib/blockring/transport/tests/loom.rs` on `loom::sync::Arc` in place of
+`sdk/transport/tests/loom.rs` on `loom::sync::Arc` in place of
 std's, `cargo test -p toyos-transport --features want-relaxed --test loom --
 a_consumer_that_looked_again_is_rung_for_bytes_it_missed --exact` kills the
 test binary with SIGABRT, `panic in a destructor during cleanup`, through
 `<loom::sync::arc::Arc<Stream> as Drop>::drop` and `rt::arc::Arc::ref_dec`.
 On std's `Arc` the same run prints the test's `FAILED` line and loom's
-`deadlock; threads = ...`.
+`deadlock; threads = ...`. That model is now `sdk/toyos/tests/transport_loom.rs`,
+its control `transport-want-relaxed` of `toyos`.
 
 **Owner**: the orchestrator. Nobody holds it.
 

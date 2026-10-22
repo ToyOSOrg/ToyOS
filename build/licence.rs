@@ -411,6 +411,12 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "ours: QEMU `virt`'s own DSDT, captured by the commit that declares its root bridge's `_CRS`",
         Terms::Spdx("MIT OR Apache-2.0"),
     ),
+    (
+        "lib/acpi/fixtures/qemu-11.1.1-virt-pptt/pptt.bin",
+        "fff116c865c8081e748e03fee505f2ed4fc1b01b8fbd3b131a8d1720552c86ec",
+        "ours: QEMU `virt`'s own PPTT, captured by the commit that decodes it",
+        Terms::Spdx("MIT OR Apache-2.0"),
+    ),
     // A bcachefs volume upstream's own tools wrote, gzipped. The bytes inside
     // it are this repository's test material; `NOTICE` carries the raw digest,
     // the commands, and the fsck that called it clean.
@@ -598,12 +604,6 @@ pub const COMMITTED_FILES: &[(&str, &str, &str, Terms)] = &[
         "394ad30f37b493b58cc7c26e816d7ec0bf7acc4a583fa39c9aed438c19b5fc57",
         "NOTICE",
         Terms::Spdx("MIT"),
-    ),
-    (
-        "assets/hello.rs",
-        "f30395cdbe2fff2c6ff6fe6dd270ded78a6b236ecfb598b9476cb71dc6cea214",
-        "ours: the smallest guest binary's source, built by tests/common/compile.rs",
-        Terms::Spdx("MIT OR Apache-2.0"),
     ),
     (
         "assets/soundfont.sf2",

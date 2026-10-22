@@ -4,17 +4,16 @@ kind: defect
 opened: 2026-08-20
 ---
 
-# `write_volatile`/`read_volatile` over a whole DMA/MMIO struct, ten times
+# `write_volatile`/`read_volatile` over a whole DMA/MMIO struct
 
-`clippy::volatile_composites` (nursery) measured **10**, kernel-only, all in
-driver code that hands a composite type straight to `write_volatile` or
-`read_volatile` instead of touching each primitive field on its own. Two were
-the NVMe driver's queue entries and one virtio-gpu's EDID answer, which left
-the kernel with their drivers; the rest:
-
-- `drivers/xhci/wait/boot.rs:446` — `ErstEntry`.
-- `drivers/xhci/mod.rs:560,593,1093` — `Trb`, three sites.
-- `drivers/virtio.rs:414,487` — the virtio descriptor.
+`clippy::volatile_composites` (nursery) measured ten sites in the kernel that
+hand a composite type straight to `write_volatile` or `read_volatile` instead
+of touching each primitive field on its own. The NVMe driver's queue entries,
+virtio-gpu's EDID answer and the xHCI's `ErstEntry` and `Trb` left the kernel
+with their drivers. What is left is the virtio descriptor: `Virtqueue`'s
+submission writes a whole `VirtqDesc` (`kernel/src/drivers/virtio.rs`) through
+`Dma::write`, whose generic `write_volatile` (`kernel/src/mm/dma.rs`) takes any
+`T: Copy`.
 
 The lint's own docs put the reason plainly: volatile ops are well-defined for
 a primitive because the compiler must emit exactly the load/store the source
@@ -22,23 +21,10 @@ says, in order — the property MMIO needs. That guarantee is **not** extended
 to composite types; how rustc lowers a whole-struct `write_volatile` (one
 store, several, in what order) is implementation-defined and can change
 between compiler versions. The fix the lint wants is per-field volatile
-access via pointer arithmetic.
+access.
 
-**Not adopted this pass.** This is not mechanical: at least the xHCI `Trb`
-sites carry a real protocol constraint the lint can't see — hardware must not
-observe the TRB as valid until its Control field (Cycle bit) is written, so
-splitting a `write_volatile(ptr, trb)` into per-field stores has to preserve
-that ordering by hand, on a path this driver depends on for every command and
-transfer. Getting that wrong silently (works in QEMU, wrong on some real
-controller's stricter timing, or vice versa) is worse than the current
-implementation-defined-but-tested state. Virtio's descriptor likely has its
-own per-field ordering rules from its spec, not derived here.
-
-Fixing this is real driver work: read each device's spec for what field
-ordering its rings actually require, decide per site whether one
-`write_volatile` is provably fine (e.g. the struct is small enough that the
-target's ISA guarantees a single-instruction store, which is again not
-something the *language* promises) or needs splitting, and add the
-regression coverage that would have caught the difference. Filed rather than
-fixed — `issues/clippy-stage-two-is-lints-one-at-a-time.md` records the measurement
-and the reason it wasn't attempted here.
+Fixing it is driver work: read the virtio specification for what field
+ordering the descriptor table requires before the available ring publishes
+it, decide whether one `write_volatile` is provably fine or needs splitting,
+and add the coverage that would catch the difference.
+`issues/clippy-stage-two-is-lints-one-at-a-time.md` records the measurement.

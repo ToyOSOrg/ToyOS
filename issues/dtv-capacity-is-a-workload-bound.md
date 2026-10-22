@@ -6,8 +6,8 @@ opened: 2026-08-17
 
 # The DTV's capacity is a fixed bound over a quantity the workload sets, and its refusal is unrecoverable
 
-`kernel/src/loader/tls.rs:16` fixes `DTV_INITIAL_CAPACITY = 64`, and
-`tls_alloc_block` (`arch/syscall.rs:2724`) refuses a `module_id` above it
+`kernel/src/loader/tls.rs` fixes `DTV_INITIAL_CAPACITY = 64`, and
+`tls_alloc_block` (`kernel/src/syscall/vm.rs`) refuses a `module_id` above it
 with `ResourceExhausted`, deliberately: the DTV is a fixed-capacity array the
 kernel wrote, so there is nowhere to record the answer. `abuse_tls_alloc` gates
 the refusal.
@@ -45,7 +45,6 @@ came out of the 2026-08-17 scoping of exactly that move.
 argues it: a fixed bound over a quantity the workload sets is a defect rather
 than a policy by this tree's own rule, and this one's refusal has no recoverable
 form — the 65th TLS-carrying module is an `rtabort!` at an arbitrary point, not
-an error a `dlopen` caller can handle. The syscall split moved the refusal: it
-is `kernel/src/syscall/vm.rs`'s `tls_alloc_block`, not `arch/syscall.rs:2724`.
+an error a `dlopen` caller can handle.
 Owed by the Ring-3 loader move, which is where the DTV stops being the kernel's
 to size.

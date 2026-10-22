@@ -16,8 +16,8 @@ between the census at 54.000 s and the one at 54.430 s. Run 121's boot, which
 rebooted cleanly, took 2,244 between its last census and its own
 `Syncing filesystems...` 381 ms later (`t14-run122/sda3-before-flash.img`, the
 stick as run 121 left it): the same rate, because that span is the log's last
-writes to the stick. `issues/an-xhci-storm-starves-the-cpu-that-takes-it.md`
-is a different shape — ten timer interrupts in thirty-four seconds; here cpu0
+writes to the stick. The kernel xHCI's storm on run 20, closed with that
+driver, was a different shape — ten timer interrupts in thirty-four seconds; here cpu0
 took 43 in the same 430 ms.
 
 **What a clean reboot has and this one lacks** is everything after
@@ -32,6 +32,6 @@ swapped-in netd's first grant started it mastering while it still ran the old
 netd's rings, its write faulted at the unit, and the fault handler cleared its
 bus mastering with receive still enabled. It stayed that way to the reset. The
 swap's fix (the kernel resets a released function, netd stops the part before
-its first grant) removes that state; the next swap run says whether the hang
+it starts it mastering) removes that state; the next swap run says whether the hang
 goes with it. If it does not, the reboot path is owed a quiesce of every
-function a process holds, as it already does for its own xHCI controllers.
+function a process holds.

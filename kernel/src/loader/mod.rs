@@ -19,7 +19,7 @@
 mod start;
 mod tls;
 
-pub use start::{build_child_handles, PendingHandles, SLOT_PAIR_LEN};
+pub use start::{build_child_handles, PendingHandles};
 pub(crate) use start::{alloc_kernel_stack, KernelStack, Start};
 pub use tls::{TlsBlock, DTV_INITIAL_CAPACITY, VARIANT as TLS_VARIANT};
 
@@ -163,7 +163,7 @@ fn segment_prot(seg: &toyos_elf::Segment) -> crate::mm::policy::Prot {
 /// Load a program and place its main thread under `parent`, answering its pid
 /// and what `commit` left its caller holding of it. `commit` builds the
 /// child's handle table around the child's handle to itself, once nothing is
-/// left to refuse.
+/// left to refuse, and names the job it runs in.
 ///
 /// `path` is the program, opened here — or, with `image`, the bytes the caller
 /// read from it itself, and then nothing opens it. `argv[0]` is only the name the child goes by.
@@ -174,7 +174,9 @@ fn segment_prot(seg: &toyos_elf::Segment) -> crate::mm::policy::Prot {
 pub fn spawn<H>(
     path: &str,
     argv: &[&str],
-    commit: impl FnOnce(crate::object::HandleEntry) -> Result<(HandleTable, Endowments, H), crate::object::Refusal>,
+    commit: impl FnOnce(
+        crate::object::HandleEntry,
+    ) -> Result<(HandleTable, Endowments, Arc<kernel::sched::job::Job>, H), crate::object::Refusal>,
     cwd: String,
     env: Vec<u8>,
     image: Option<Arc<dyn crate::file_backing::FileBacking>>,
@@ -341,7 +343,7 @@ pub fn spawn<H>(
     let object = crate::object::process::ProcessObject::new(pid);
     // The point of no return: every failure above answers the caller with its
     // table untouched.
-    let (handles, endowments, held) = commit(start::own_handle(&object))?;
+    let (handles, endowments, job, held) = commit(start::own_handle(&object))?;
     let proc_data = Arc::new(Lock::new(ProcessData {
         handles,
         cwd,
@@ -372,6 +374,7 @@ pub fn spawn<H>(
         spawn_ns: crate::clock::nanos_since_boot(),
         accounting: ProcessAccounting::default(),
         endowments,
+        job: job.clone(),
     }));
 
     let thread_data = Arc::new(Lock::new(ThreadData {
@@ -408,6 +411,7 @@ pub fn spawn<H>(
             child_pt.clone(),
             thread_pointer,
             Some(image),
+            job,
         );
         table.get_mut(pid).unwrap().threads_mut().get_mut(tid).unwrap().set_sched(sched);
     });
@@ -439,16 +443,18 @@ pub const SUPERVISOR_PATH: &str = "/system/bin/supervisor";
 /// Panics on failure: a boot that cannot start the supervisor has nowhere to report to.
 pub fn spawn_supervisor() -> Pid {
     let mut handles = HandleTable::new();
+    let mut entries = Vec::new();
+    let mut labels = Vec::new();
+    // One console, the supervisor's descriptors 0 to 2.
     let console = KObjectRef::Console(crate::object::device::ConsoleObject::new());
-    for slot in 0..3 {
-        let entry = crate::object::HandleEntry::new(
-            console.clone(),
-            ops::initial_rights(&console),
-        );
-        let (_, displaced) = handles
-            .install_at(slot, entry)
-            .expect("spawn_supervisor: three slots cannot exhaust an empty table");
-        assert!(displaced.is_none(), "an empty table had something at slot {slot}");
+    for fd in ["0", "1", "2"] {
+        let entry = crate::object::HandleEntry::new(console.clone(), ops::initial_rights(&console));
+        let handle = handles.install(entry).expect("spawn_supervisor: three handles cannot exhaust an empty table");
+        let label_off = labels.len() as u32;
+        labels.extend_from_slice(toyos_abi::syscall::FD_PREFIX.as_bytes());
+        labels.extend_from_slice(fd.as_bytes());
+        let label_len = labels.len() as u32 - label_off;
+        entries.push(toyos_abi::syscall::EndowEntry { label_off, label_len, handle, _pad: 0 });
     }
     let cap = KObjectRef::SysCap(crate::object::syscap::SysCap::new());
     // Every machine-wide authority the system has: rights only shrink from
@@ -458,6 +464,7 @@ pub fn spawn_supervisor() -> Pid {
     let rights = Rights::DUP
         .union(Rights::TRANSFER)
         .union(Rights::DEVICE)
+        .union(Rights::JOBS)
         .union(Rights::RT)
         .union(Rights::LOG)
         .union(Rights::WAIT)
@@ -470,17 +477,17 @@ pub fn spawn_supervisor() -> Pid {
         .install(crate::object::HandleEntry::new(cap, rights))
         .expect("spawn_supervisor: an empty table refused the system capability");
     let label = toyos_abi::syscall::SYSCAP_LABEL;
-    let mut entries = alloc::vec![toyos_abi::syscall::EndowEntry {
-        label_off: 0,
+    entries.push(toyos_abi::syscall::EndowEntry {
+        label_off: labels.len() as u32,
         label_len: label.len() as u32,
         handle: cap_handle,
         _pad: 0,
-    }];
-    let mut labels = label.as_bytes().to_vec();
+    });
+    labels.extend_from_slice(label.as_bytes());
     // Built by the kernel and owing nobody anything: no table but the supervisor's own holds it.
     let commit = |own| {
         start::endow_self(&mut handles, &mut entries, &mut labels, own);
-        Ok((handles, Endowments::new(entries, labels), ()))
+        Ok((handles, Endowments::new(entries, labels), crate::object::job::new_job(), ()))
     };
     match spawn(SUPERVISOR_PATH, &[SUPERVISOR_PATH], commit, String::from("/"), Vec::new(), None, Parent::Root) {
         Ok((pid, ())) => pid,

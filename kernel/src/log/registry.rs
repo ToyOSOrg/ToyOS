@@ -1,12 +1,12 @@
 //! Registry mapping each AP's cpu id to its published `Shard` pointer.
-//! Compiled a second time by `kernel-loom`; may name only what `shard.rs` shims for that crate.
+//! Compiled a second time by `kernel-loom`; may name only what `shard.rs` shims for that crate, and [`CpuSlice`].
 
 #[cfg(not(feature = "loom"))]
 use core::sync::atomic::{AtomicPtr, Ordering};
 #[cfg(feature = "loom")]
 use loom::sync::atomic::{AtomicPtr, Ordering};
 
-use toyos_abi::log::MAX_LOG_SHARDS;
+use crate::cpu_slice::CpuSlice;
 
 // Orders the shard's zeroing before the pointer; relaxed is loom's negative control only.
 #[cfg(not(feature = "shard-publish-relaxed"))]
@@ -20,33 +20,31 @@ const OBSERVE: Ordering = Ordering::Relaxed;
 
 use super::shard::Shard;
 
-// cpu0 has no slot: its shard is the boot shard, reachable without a lookup.
+/// A slot per AP: cpu0 has none, its shard being the boot shard, reachable
+/// without a lookup.
+pub type Slots = CpuSlice<AtomicPtr<Shard>>;
+
 #[cfg(not(feature = "loom"))]
-static AP_SHARDS: [AtomicPtr<Shard>; MAX_LOG_SHARDS - 1] =
-    [const { AtomicPtr::new(core::ptr::null_mut()) }; MAX_LOG_SHARDS - 1];
+static AP_SHARDS: Slots = Slots::new();
 
-/// Loom's atomics have no `const` constructor; callers build slots and pass them to `publish`/`published` instead of a static.
-#[cfg(feature = "loom")]
-pub type Slots = [AtomicPtr<Shard>; MAX_LOG_SHARDS - 1];
-
-#[cfg(feature = "loom")]
-pub fn slots() -> Slots {
-    core::array::from_fn(|_| AtomicPtr::new(core::ptr::null_mut()))
+/// A slot for each AP of a machine of `cpus` CPUs, none published.
+pub fn size(slots: &Slots, cpus: usize) {
+    slots.size(cpus.saturating_sub(1), |_| AtomicPtr::new(core::ptr::null_mut()));
 }
 
 /// Publishes `shard` as the shard for `cpu`.
 /// # Safety
 /// `shard` must be a live, initialised [`Shard`] that is never freed.
-pub unsafe fn publish(slots: &[AtomicPtr<Shard>], cpu: u32, shard: *mut Shard) {
+pub unsafe fn publish(slots: &Slots, cpu: u32, shard: *mut Shard) {
     let slot = (cpu as usize)
         .checked_sub(1)
         .and_then(|ap| slots.get(ap))
-        .unwrap_or_else(|| panic!("log: cpu{cpu} has no shard slot in an ABI of {MAX_LOG_SHARDS}"));
+        .unwrap_or_else(|| panic!("log: cpu{cpu} has no shard slot among {} APs", slots.len()));
     slot.store(shard, PUBLISH);
 }
 
-/// The shard `cpu` published, or `None` if it has none yet.
-pub fn published(slots: &[AtomicPtr<Shard>], ap: usize) -> Option<&'static Shard> {
+/// The shard AP `ap` (cpu `ap + 1`) published, or `None` if it has none yet.
+pub fn published(slots: &Slots, ap: usize) -> Option<&'static Shard> {
     let ptr = slots.get(ap)?.load(OBSERVE);
     // SAFETY: `publish`'s contract guarantees a live, never-freed shard written once.
     (!ptr.is_null()).then(|| unsafe { &*ptr })
@@ -54,6 +52,6 @@ pub fn published(slots: &[AtomicPtr<Shard>], ap: usize) -> Option<&'static Shard
 
 /// The kernel's own registry, which is the one `emit`'s readers walk.
 #[cfg(not(feature = "loom"))]
-pub fn kernel_slots() -> &'static [AtomicPtr<Shard>] {
+pub fn kernel_slots() -> &'static Slots {
     &AP_SHARDS
 }

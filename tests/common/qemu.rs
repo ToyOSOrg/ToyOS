@@ -686,14 +686,22 @@ pub enum Profile {
     /// its claim.
     HeadlessVirtioGpu,
     /// [`Profile::Headless`] with a second controller at [`SPARE_AT`], QEMU's
-    /// `qemu-xhci` on MSI and with no MSI-X, carrying a stick and a keyboard:
-    /// the controller `xhci-leave=00:10.0` leaves to `usbd`, armed on MSI as
-    /// the T14's two are.
+    /// default `qemu-xhci`, its MSI-X table in the BAR that holds its
+    /// registers, carrying a stick and a keyboard: the controller no image's
+    /// `drives` row names, which `usbd_spare` claims.
     HeadlessUsbSpare,
     /// [`Profile::Headless`] with its virtio NIC behind a `pcie-root-port`:
     /// a function a claim may take whose BAR has to land inside the port's
     /// windows, as every function behind a bridge on a laptop does.
     HeadlessNicBehindPort,
+    /// [`Profile::Headless`] with its virtio NIC created without
+    /// `iommu_platform=on`, so behind the unit on paper and bypassing it in
+    /// fact: the function a claim must never be handed.
+    HeadlessNicUntranslated,
+    /// [`Profile::Headless`] with the kernel's virtio console created without
+    /// `iommu_platform=on`: a device the kernel itself must tell physical
+    /// addresses.
+    HeadlessConsoleUntranslated,
     /// [`Profile::Headless`] with two of QEMU's `edu`, which the kernel drives
     /// neither of: two identical functions, each a `drives` row's to start a
     /// process on.
@@ -706,6 +714,14 @@ pub enum Profile {
     /// ===TEST_START=== protocol like any other. [`BootOptions::mute`] takes
     /// it away for the one test that certifies the T14's literal shape.
     Metal,
+    /// [`Profile::Metal`] with two Intel HDA controllers behind the unit, the
+    /// first with no codec and the second with an output codec: a machine
+    /// whose drivers do not both reach an output, as the AMD bench's do not.
+    MetalTwoHda,
+    /// [`Profile::Metal`] with a `usb-kbd` beside the stick, which every key
+    /// QMP sends goes to ([`Shape::usb`]): it reaches the owner of input
+    /// through usbd.
+    MetalUsbKeyboard,
     /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
@@ -783,8 +799,12 @@ impl Profile {
             | Self::HeadlessVirtioGpu
             | Self::HeadlessUsbSpare
             | Self::HeadlessNicBehindPort
+            | Self::HeadlessNicUntranslated
+            | Self::HeadlessConsoleUntranslated
             | Self::HeadlessTwoEdu
             | Self::Metal
+            | Self::MetalTwoHda
+            | Self::MetalUsbKeyboard
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
@@ -869,11 +889,9 @@ const XHCI_DEFAULT: &str = "nec-usb-xhci,id=xhci";
 
 /// [`Profile::HeadlessUsbSpare`]'s second controller, and the stick on it,
 /// whose bytes are zeros and whose writes go nowhere: what is on it is no
-/// question this machine asks. `msi=on` stated, because with MSI-X off and
-/// MSI left `auto` this QEMU's `qemu-xhci` offers neither, and the kernel
-/// refuses the claim for it.
-const XHCI_SPARE: &str = "qemu-xhci,id=spare,addr=0x10,msix=off,msi=on";
-/// Where [`XHCI_SPARE`] puts the spare, which `xhci-leave=` names.
+/// question this machine asks.
+const XHCI_SPARE: &str = "qemu-xhci,id=spare,addr=0x10";
+/// Where [`XHCI_SPARE`] puts the spare.
 pub const SPARE_AT: &str = "00:10.0";
 const SPARE_STICK: &str = "driver=null-co,node-name=spare-stick,size=67108864,read-zeroes=on";
 
@@ -905,6 +923,8 @@ enum Nic {
     Virtio,
     /// The virtio NIC on the secondary bus of a root port of its own.
     BehindPort,
+    /// The virtio NIC without `iommu_platform=on`, whatever unit the machine has.
+    Untranslated,
 }
 
 /// Everything a profile decides about the machine, in one table. A new
@@ -924,6 +944,9 @@ struct Shape {
     /// channel on a virtio-serial function of its own.
     virtio: Virtio,
     nic: Nic,
+    /// The virtio console created without `iommu_platform=on` on a machine
+    /// with a unit, so its DMA bypasses the unit.
+    console_bypasses: bool,
     /// The `-device` argument for each xHCI controller, port and slot counts
     /// included. A list because a machine can have more than one and the T14
     /// does — its keyboard is on the second.
@@ -953,6 +976,10 @@ struct Shape {
     rng: bool,
     /// A virtio-gpu, which the compositor drives.
     virtio_gpu: bool,
+    /// Two of QEMU's ICH9 HDA controllers, the first with no codec and the
+    /// second with one output codec, on an audio backend that plays nothing:
+    /// a machine with no virtio-sound, whose drivers do not both offer.
+    hda: bool,
 }
 
 /// The devices a machine has for a test to aim a DMA or a message from, and
@@ -987,7 +1014,7 @@ enum Storage {
     Stick { nvme_bytes: u64 },
     /// One NVMe disk and no stick: DATA, of this many bytes, and the image
     /// installed after it (`toyos_build::image::install`). The firmware boots
-    /// it, and after the loader every partition of it is `diskserver`'s.
+    /// it, and after the loader every partition of it is the block service's.
     Disk { data_bytes: u64 },
 }
 
@@ -1035,6 +1062,8 @@ impl Profile {
                 probes: Probes::Absent,
                 rng: true,
                 virtio_gpu: false,
+                hda: false,
+                console_bypasses: false,
             },
             Self::Headless => Shape {
                 vga: "none",
@@ -1049,6 +1078,8 @@ impl Profile {
                 probes: Probes::Absent,
                 rng: false,
                 virtio_gpu: false,
+                hda: false,
+                console_bypasses: false,
             },
             Self::Metal => Shape {
                 vga: "std",
@@ -1067,8 +1098,12 @@ impl Profile {
                 probes: Probes::Absent,
                 rng: false,
                 virtio_gpu: false,
+                hda: false,
+                console_bypasses: false,
             },
             Self::MetalNoX2apic => Self::Metal.shape(),
+            Self::MetalTwoHda => Shape { hda: true, ..Self::Metal.shape() },
+            Self::MetalUsbKeyboard => Shape { usb: &["usb-kbd,bus=xhci.0"], ..Self::Metal.shape() },
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
             Self::HeadlessUsbSpareAmdVi => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
@@ -1081,6 +1116,8 @@ impl Profile {
             Self::HeadlessNoUsb => Shape { xhci: &[], usb: &[], ..Self::Headless.shape() },
             Self::HeadlessVirtioGpu => Shape { virtio_gpu: true, ..Self::Headless.shape() },
             Self::HeadlessNicBehindPort => Shape { nic: Nic::BehindPort, ..Self::Headless.shape() },
+            Self::HeadlessNicUntranslated => Shape { nic: Nic::Untranslated, ..Self::Headless.shape() },
+            Self::HeadlessConsoleUntranslated => Shape { console_bypasses: true, ..Self::Headless.shape() },
             Self::HeadlessTwoEdu => Shape { probes: Probes::Edus, ..Self::Headless.shape() },
             Self::HeadlessUsbSpare => Shape {
                 xhci: &[XHCI_DEFAULT, XHCI_SPARE],
@@ -1138,6 +1175,9 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
+    /// DATA's size in place of the profile's, for a boot that writes more
+    /// than [`NVME_SMALL`] holds, on a profile whose disk carries the image.
+    pub data_bytes: Option<u64>,
     /// Have QEMU record every PSCI call a vCPU makes into this file, with the
     /// calling CPU's affinity: the firmware side's own account of what the
     /// kernel asked of it.
@@ -1182,6 +1222,7 @@ impl Default for BootOptions {
             mute: false,
             ready_marker: DEFAULT_READY,
             extra_root_files: Vec::new(),
+            data_bytes: None,
             psci_trace: None,
             rtc_base: None,
         }
@@ -1415,7 +1456,11 @@ impl QemuInstance {
             &params,
             options.debug_wait,
         );
-        let storage = options.profile.shape().storage;
+        let storage = match (options.profile.shape().storage, options.data_bytes) {
+            (storage, None) => storage,
+            (Storage::Disk { .. }, Some(data_bytes)) => Storage::Disk { data_bytes },
+            (Storage::Stick { .. }, Some(_)) => panic!("[qemu] a DATA size is a profile's whose disk carries its image"),
+        };
         match storage {
             Storage::Stick { .. } => fs::write(&boot_image, image).expect("Failed to write test boot image"),
             Storage::Disk { data_bytes } => toyos_build::image::install(&image, &boot_image, data_bytes),
@@ -1603,6 +1648,12 @@ impl QemuInstance {
     /// and carries everything; empty when [`BootOptions::mute`] takes it away.
     pub fn boot_log(&self) -> &str {
         &self.boot_log
+    }
+
+    /// The disk image this boot runs from: the stick under a stick profile.
+    /// What the guest wrote to it is whole once [`Self::await_exit`] answers.
+    pub fn boot_image(&self) -> &Path {
+        &self.boot_image
     }
 
     pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
@@ -2315,10 +2366,9 @@ fn qemu_command(
     // with no NVMe is a shape, and the argv is the only place it is visible:
     // no console line and no screendump can see a device that is absent.
     //
-    // Its MSI-X table in a BAR of its own, because diskserver drives it and a claim
-    // never maps the BAR holding the table. One controller and one namespace
-    // whichever disk it is: diskserver reads namespace 1 of the one controller
-    // its row names.
+    // Its MSI-X table in BAR 0, QEMU's default, which the nvme driver's claim maps
+    // with the registers. One controller and one namespace whichever disk it
+    // is: the nvme driver reads namespace 1 of the controller it drives.
     let namespace = match shape.storage {
         Storage::Stick { nvme_bytes: 0 } => None,
         Storage::Stick { .. } => {
@@ -2329,7 +2379,7 @@ fn qemu_command(
     };
     if let Some(namespace) = namespace {
         qemu.arg("-device")
-            .arg("nvme,serial=deadbeef,id=nvme0ctl,msix-exclusive-bar=on")
+            .arg("nvme,serial=deadbeef,id=nvme0ctl")
             .arg("-device")
             .arg(format!("nvme-ns,{namespace},bus=nvme0ctl,logical_block_size=512,physical_block_size=512"));
     }
@@ -2351,6 +2401,16 @@ fn qemu_command(
         // The size the device prefers at start, stated rather than QEMU's
         // default: `the_compositor_drives_the_virtio_gpu` reads it back.
         qemu.arg("-device").arg(format!("virtio-gpu-pci,xres=1280,yres=800{platform}"));
+    }
+    if shape.hda {
+        qemu.arg("-audiodev")
+            .arg("none,id=hdaout")
+            .arg("-device")
+            .arg("ich9-intel-hda,id=hdanone")
+            .arg("-device")
+            .arg("ich9-intel-hda,id=hda0")
+            .arg("-device")
+            .arg("hda-output,audiodev=hdaout,bus=hda0.0");
     }
     if shape.probes == Probes::Testdevs {
         // Two, the first enumerated below the second: the SMMU's selftest
@@ -2380,6 +2440,9 @@ fn qemu_command(
             qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg(format!(
                 "virtio-net-pci-non-transitional,netdev=net0{platform}"
             ));
+        }
+        Nic::Untranslated => {
+            qemu.arg("-netdev").arg("user,id=net0").arg("-device").arg("virtio-net-pci-non-transitional,netdev=net0");
         }
         Nic::BehindPort => {
             qemu.arg("-device").arg("pcie-root-port,id=nicport,chassis=9");
@@ -2412,7 +2475,8 @@ fn qemu_command(
             .arg("stdio,id=cs0,signal=off")
             .arg("-device")
             .arg(format!(
-                "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{platform}"
+                "virtio-serial-pci-non-transitional,id=virtio-serial0,max_ports=1{}",
+                if shape.console_bypasses { "" } else { platform }
             ))
             .arg("-device")
             .arg("virtconsole,chardev=cs0,id=console0");

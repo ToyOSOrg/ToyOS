@@ -74,6 +74,8 @@ struct LoadedKernel {
     pub entry_offset: usize,
     pub stack_offset: usize,
     pub stack_size: usize,
+    /// The text's whole pages, `(offset, len)` in `memory`.
+    pub text: (usize, usize),
 }
 
 /// `path` on the volume firmware loaded this image from: `LoadedImage`'s
@@ -291,6 +293,20 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
         process_mem[vstart..vstart + src.len()].copy_from_slice(src);
     }
 
+    // The boot map's read-only text (`toyos_bootmap::Access`): the image's one
+    // executable segment, which no writable byte shares a page with.
+    let page = PAGE_SIZE as u64;
+    let mut executable = layout.segments().iter().filter(|segment| segment.flags().executable());
+    let (Some(text), None) = (executable.next(), executable.next()) else {
+        panic!("kernel.elf: the boot map maps one executable segment, and this image has another number of them");
+    };
+    assert!(!text.writable(), "kernel.elf: its executable segment is writable");
+    if let Some((a, b)) = layout.overlapping_load_pages(page) {
+        panic!("kernel.elf: PT_LOAD segments {a} and {b} share a page, which cannot have both their protections");
+    }
+    let (text_start, text_end) = text.page_range(page);
+    let text = ((extent.min() + text_start) as usize, (text_end - text_start) as usize);
+
     let rela_sections =
         sections.rela_sections().unwrap_or_else(|form| panic!("kernel.elf: {form} is not supported"));
 
@@ -342,6 +358,7 @@ fn load_kernel_elf(kernel_elf_bytes: &[u8]) -> LoadedKernel {
         entry_offset: at(layout.entry()),
         stack_offset: placed.stack as usize,
         stack_size,
+        text,
     }
 }
 
@@ -514,7 +531,7 @@ fn report_reach(what: &str, at: u64, len: u64) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, microcode: Option<&'static [u8]>, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
+fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: vec::Vec<u8>, rsdp_addr: u64, gop: Option<GopInfo>, boot_part: Option<BootPartition>, log_partition_guid: [u8; 16], root_image: rootimage::RootImage, slot_volume_guid: [u8; 16], microcode: Option<&'static [u8]>, entry_counter: u64, wall_clock: Option<(toyos_wallclock::Civil, u64)>, system_table: SystemTable) -> ! {
     // Said before it is refused, for `report_reach`'s reason.
     match arch::cpu_as_entered() {
         Ok(None) => {}
@@ -544,9 +561,13 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     // pages by it. Before the exit, while the map can still be asked for; the
     // attributes a descriptor carries do not change across it.
     let write_back = write_back_memory(&system_table);
+    let kernel_phys = kernel.memory.as_ptr() as u64;
+    report_reach("Kernel image", kernel_phys, kernel.memory.len() as u64);
+    let text = (kernel_phys + kernel.text.0 as u64, kernel.text.1 as u64);
     let planned = Plan::new(
         gop.as_ref().map(|g| (g.framebuffer, g.framebuffer_size)),
         loader,
+        text,
         arch::typing(&write_back),
     );
     match &planned {
@@ -562,11 +583,12 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
             }
             let (at, len) = plan.loader();
             println!("Loader image: {:#x}+{:#x}, mapped at identity as {at:#x}+{len:#x}", loader.0, loader.1);
+            println!("Kernel text: {:#x}+{:#x}, mapped read-only", text.0, text.1);
         }
         Err(why) => println!("Boot map: NO MAP HOLDS THIS MACHINE, {why}"),
     }
     let plan = planned
-        .unwrap_or_else(|why| panic!("the boot map cannot hold the scanout and the loader: {why}"));
+        .unwrap_or_else(|why| panic!("the boot map cannot hold the scanout, the loader and the kernel's text: {why}"));
 
     // SAFETY: `pt_mem` is the zeroed allocation of `pt_layout` above, which
     // nothing else holds, so it is a valid `[Table; MAX_PAGES]` of empty
@@ -575,9 +597,6 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
     let pool = unsafe { &mut *pt_mem.cast::<[Table; MAX_PAGES]>() };
     let pml4_phys = plan.write(arch::encoding::ENCODING, pool, pt_mem as u64);
     println!("Boot map: root {pml4_phys:#x}, {BOOT_MAP_BYTES:#x} bytes at identity and at PHYS_OFFSET");
-
-    let kernel_phys = kernel.memory.as_ptr() as u64;
-    report_reach("Kernel image", kernel_phys, kernel.memory.len() as u64);
 
     // An empty cmdline's pointer names nothing and is not reported as reachable.
     match (!cmdline.is_empty()).then_some((cmdline.as_ptr() as u64, cmdline.len() as u64)) {
@@ -650,6 +669,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         gop_edid_len: 0,
         microcode_addr,
         microcode_len,
+        slot_volume_guid,
     };
     if let Some(edid) = gop.as_ref().and_then(|g| g.edid) {
         kernel_args.gop_edid = edid;
@@ -980,5 +1000,5 @@ fn main(handle: Handle, system_table: SystemTable) -> Status {
     watchdog::arm(&system_table, rsdp_addr, params);
 
     println!("Starting kernel...");
-    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, microcode, entry_counter, wall_clock, system_table);
+    start_kernel(loaded_kernel, kernel_bytes, cmdline, rsdp_addr, gop, boot_part, log_guid, chosen.root, chosen.volume, microcode, entry_counter, wall_clock, system_table);
 }

@@ -8,11 +8,11 @@ opened: 2026-10-03
 
 Nothing that identifies the owner's machines or network goes into the tree, a
 commit message or anything posted on GitHub (root `CLAUDE.md`). ToyOS prints
-three such values in full on every boot of the T14, so every T14 log pasted in
-public carries them unless whoever pastes it masks them by hand:
+two such values in full on every boot of the T14, so every T14 log pasted in
+public carries them unless whoever pastes it masks them by hand (the USB
+stick's serial was a third, until usbd took the stick; usbd reads it to tell a
+returning disk apart and prints it nowhere):
 
-- the USB stick's serial number: `kernel/src/drivers/xhci/wait/msc.rs:1407`,
-  on every bind, and `:1415`, when a disk comes back;
 - the network card's MAC: `system/netstack/src/main.rs`, `main`;
 - the resolvers the lease named, which on the bench are the provider's public
   ones: `system/netstack/src/main.rs`, `Leases::pass`.

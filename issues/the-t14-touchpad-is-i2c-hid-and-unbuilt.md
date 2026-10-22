@@ -25,12 +25,11 @@ Machine facts it will need, none of which QEMU can supply:
   bit must not gate the i8042 probe; a floating-bus `0xff` from port 0x64 is the
   real absence test.
 - The keyboard will not report its scancode set: the argument byte of the query
-  answers `0xEE`, which is the echo command's own reply. The driver reads the set
-  and never writes it, falling back to the firmware's translate bit — `0x77` on
-  this machine.
+  answers `0xEE`, which is the echo command's own reply. `/system/bin/ps2server`
+  asks for no set: it resets the keyboard with translation on, which leaves
+  set 2 translated (`system/ps2server/src/probe.rs`).
 - Metal boot is about **1151 ms against QEMU's 196 ms**, roughly 5.9×.
 
-Three T14 defects are open beside this one:
-`issues/t14-lost-every-integrated-input.md`,
-`issues/pulling-the-boot-stick-freezes-the-t14.md`,
-`issues/t14-keyboard-will-not-report-its-scancode-set.md`.
+T14 defects open beside this one include
+`issues/t14-lost-every-integrated-input.md` and
+`issues/pulling-the-boot-stick-freezes-the-t14.md`.

@@ -6,7 +6,7 @@ opened: 2026-09-26
 
 # toyos-dns decodes DNS wire format that a published crate already decodes
 
-Resolving names is the system's job and belongs in netd; decoding DNS
+Resolving names is the system's job and belongs in netstack; decoding DNS
 messages is not ToyOS's job. `toyos-dns` carries its own reader for names,
 compression pointers and records (#511), where `hickory-proto` is the
 widely used published decoder. The own reader was kept for size and a

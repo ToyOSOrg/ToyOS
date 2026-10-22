@@ -1,16 +1,19 @@
 //! A virtio function's claim, brought to the features its driver and device
 //! agreed: the capability walk, the register window, and §3.1.1 up to
-//! `FEATURES_OK`, in the order `toyos-virtio`'s types fix.
+//! `FEATURES_OK`, in the order `toyos-virtio`'s types fix; then its 64-bit
+//! address width stated and the function started.
 //!
 //! What is the device type's own — its queues, their vectors, its
 //! configuration — begins at the [`Setup`] this answers.
 
 use toyos::shm::SharedMemory;
 use toyos::PciDev;
-use toyos_abi::syscall::{RegWidth, SyscallError};
-use toyos_virtio::pci::{vendor_caps, ConfigSpace, Layout, Offer, Setup, WalkRefusal, VIRTIO_F_ACCESS_PLATFORM};
+use toyos_abi::syscall::RegWidth;
+use toyos_virtio::pci::{
+    offered_features, vendor_caps, ConfigSpace, Layout, Offer, Setup, WalkRefusal, VIRTIO_F_ACCESS_PLATFORM,
+};
 
-use crate::{Bar, KernelRefused};
+use crate::{Bar, KernelRefused, Why};
 
 /// Why the function was not brought up. Each keeps its own word: a machine
 /// whose kernel refused a call and a device that refused a feature set ask
@@ -19,7 +22,7 @@ use crate::{Bar, KernelRefused};
 pub enum Refusal {
     Kernel(KernelRefused),
     /// The capability list, as the walk refused it.
-    Walk(WalkRefusal<SyscallError>),
+    Walk(WalkRefusal<Why>),
     /// What the device published or answered, as the transport refused it.
     Device(toyos_virtio::pci::Refusal),
 }
@@ -47,18 +50,18 @@ impl std::fmt::Display for Refusal {
 }
 
 /// The claim's configuration space, as the capability walk reads it: each
-/// read one `config_read` of its width, and its refusal the kernel's word.
+/// read one `config_read` of its width, refused for a [`Why`].
 struct ClaimConfig<'a>(&'a PciDev);
 
 impl ConfigSpace for ClaimConfig<'_> {
-    type Refused = SyscallError;
+    type Refused = Why;
 
-    fn read8(&self, at: u16) -> Result<u8, SyscallError> {
-        self.0.config_read(at as u32, RegWidth::U8).map(|byte| byte as u8)
+    fn read8(&self, at: u16) -> Result<u8, Why> {
+        self.0.config_read(at as u32, RegWidth::U8).map(|byte| byte as u8).map_err(|e| Why::of("a config read", e))
     }
 
-    fn read32(&self, at: u16) -> Result<u32, SyscallError> {
-        self.0.config_read(at as u32, RegWidth::U32)
+    fn read32(&self, at: u16) -> Result<u32, Why> {
+        self.0.config_read(at as u32, RegWidth::U32).map_err(|e| Why::of("a config read", e))
     }
 }
 
@@ -94,12 +97,23 @@ impl std::fmt::Display for Features {
     }
 }
 
+/// Whether the claim's virtio function offers `VIRTIO_F_ACCESS_PLATFORM`,
+/// read without resetting it. One that does not uses physical addresses
+/// whatever translates the bus (virtio 1.2 §6.1): no domain confines it.
+///
+/// Not the claim's description, which is its holder's to read once.
+pub fn offers_access_platform(dev: &PciDev) -> Result<bool, Refusal> {
+    let layout = Layout::of(&vendor_caps(&ClaimConfig(dev)).map_err(Refusal::Walk)?)?;
+    let (window, _mapping) = Bar::map(dev, u32::from(layout.bar()), layout.common_end())?;
+    Ok(offered_features(&window, &layout)? & VIRTIO_F_ACCESS_PLATFORM != 0)
+}
+
 /// Walk the claim's capabilities, map the BAR they name, and negotiate
 /// `wanted` beside what `toyos-virtio` accepts wherever it is offered.
 ///
 /// Takes the claim's one description (`PciDev::describe`).
 pub fn negotiate(dev: &PciDev, wanted: u64) -> Result<Negotiated, Refusal> {
-    let info = dev.describe().map_err(KernelRefused::on("the claim's description"))?;
+    let info = crate::describe(dev)?;
     let layout = Layout::of(&vendor_caps(&ClaimConfig(dev)).map_err(Refusal::Walk)?)?;
     // The kernel reports 0 bytes for a BAR it keeps back.
     let bar = layout.bar();
@@ -112,6 +126,10 @@ pub fn negotiate(dev: &PciDev, wanted: u64) -> Result<Negotiated, Refusal> {
     let offer = Offer::acknowledge(window, &layout)?;
     let offered = offer.features();
     let setup = offer.accept(wanted)?;
+    // Every address a virtqueue carries is 64 bits (virtio 1.2 §2.7.5), and
+    // the device just reset (§3.1.1) uses none before `DRIVER_OK`.
+    crate::limit(dev, 64)?;
+    crate::start(dev)?;
     let features = Features { at: (info.bus, info.dev, info.func), offered, negotiated: setup.features() };
     Ok(Negotiated { setup, mapping, features })
 }

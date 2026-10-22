@@ -23,7 +23,7 @@ use toyos_abi::syscall::SyscallError;
 
 use crate::arch::{irqchip, percpu, IrqGuard};
 use crate::irq_census::Source;
-use crate::scheduler::{Parkable, MAX_CPUS};
+use crate::scheduler::Parkable;
 use crate::seqlock::Published;
 use crate::shootdown::{Generation, Reach, Shootdown};
 use crate::sync::Lock;
@@ -73,7 +73,24 @@ pub struct Envelope {
 const WORDS: usize = 2 + Counter::COUNT;
 
 static ROUNDS: Shootdown = Shootdown::new();
-static BLOCKS: [Published<WORDS>; MAX_CPUS] = [const { Published::new() }; MAX_CPUS];
+
+/// A CPU's block, published by that CPU and read by whoever asked the round.
+pub struct Local(Published<WORDS>);
+
+impl Local {
+    pub fn new() -> Self {
+        Self(Published::new())
+    }
+}
+
+fn block(cpu: usize) -> &'static Published<WORDS> {
+    &crate::cpu_local::of(cpu as u32).counters.0
+}
+
+/// A round's answer for each of the `cpus` CPUs the firmware names.
+pub fn size(cpus: usize) {
+    ROUNDS.size(cpus);
+}
 /// Posted by every answer; a reader parks on it.
 static ANSWERED: IrqWatch = IrqWatch::new();
 /// The last round issued, and when.
@@ -85,7 +102,7 @@ pub fn bring_up() {
     crate::arch::counters::bring_up();
     let me = percpu::cpu_id() as usize;
     let words = sample(me);
-    BLOCKS[me].publish(words);
+    block(me).publish(words);
     let [smi, aperf, mperf, request, pkg, epb] = [
         Counter::Smi,
         Counter::Aperf,
@@ -151,7 +168,7 @@ fn answer(kick: bool) {
         if deaf::DEAF.load(core::sync::atomic::Ordering::Relaxed) == me {
             return;
         }
-        ROUNDS.serve_if_owed(me, |_| BLOCKS[me].publish(sample(me)))
+        ROUNDS.serve_if_owed(me, |_| block(me).publish(sample(me)))
     };
     if served {
         ANSWERED.post_in_place();
@@ -197,7 +214,7 @@ pub fn read(rights: Rights, out: &mut UserBytesMut) -> Result<usize, SyscallErro
 fn record(cpu: usize, generation: Generation, rights: Rights) -> Record {
     // Before the snapshot: a CPU read as answered is one whose block holds that answer or a later one.
     let fresh = ROUNDS.served(cpu, generation);
-    let words = BLOCKS[cpu].snapshot();
+    let words = block(cpu).snapshot();
     let mut values = [None; Counter::COUNT];
     if let Some(words) = &words {
         for counter in Counter::ALL.into_iter().filter(|&c| held(words, c) && rights.contains(c.needs())) {

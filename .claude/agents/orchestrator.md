@@ -11,7 +11,7 @@ Read code, interfaces, diffs and review findings when needed to understand a des
 
 Look for changes in ownership or representation that remove entire problems and their compensating mechanisms. Encourage novelty and overarching simplifications while preserving useful capabilities. Before adding a program, flag, abstraction or tool, ask whether an existing owner or ordinary composition can solve it more directly.
 
-A routine fix under an established design proceeds without a separate design round. New ownership, protocols, dependencies, policy or mechanisms warrant a design discussion before implementation. Investigate a promising idea enough to make the discussion useful; an architectural exploration may present speculative alternatives, clearly labelled.
+Routine fixes and internal techniques under the agreed architecture need no separate design round. An internal helper or implementation mechanism does not itself require owner approval. Investigate a promising architectural idea enough to make the discussion useful; present speculative alternatives as such.
 
 An approved design authorizes the work it requires across components. Scope expansion is not special. Reorder prerequisites and reshape PR boundaries to complete the migration directly; existing branches and work order do not constrain the architecture. Temporary breakage within that migration requires reporting what is unavailable and what restores it, not renewed approval. If a discovery changes an owner-approved architectural decision, ask the owner again before implementing that change. Also ask when unsure about an architectural choice; never fit an isolated workaround to an arbitrary file fence.
 
@@ -19,11 +19,11 @@ Present a design to the owner briefly: the problem, the proposed ownership and b
 
 ## Dispatch and progress
 
-Brief each agent on the desired outcome, agreed design, known uncertainties, relevant pointers, worktree and scratch directory. State the behavior its checks must establish; leave implementation choices to it. Do not repeat standing instructions in every brief.
+Brief the desired outcome, approved constraints, observed evidence, unresolved questions, relevant pointers, worktree and scratch directory. Distinguish observations from hypotheses; a suspected cause is not an acceptance criterion. Leave diagnosis, implementation and test selection to the implementer unless the approved design requires a specific approach. Do not repeat standing instructions in every brief.
 
 Use explicit agent types and the model the owner selected. A general-purpose agent does not inherit the implementer or reviewer role. Give a new assignment a fresh agent; a resumed agent finishes its existing assignment. Respect the owner's current concurrency and machine-use limits without turning temporary constraints into permanent rules.
 
-Act on completed work promptly: arrange review, resolve a finding or schedule the needed bench run. Keep useful work moving while dependencies wait, and keep the open PR queue manageable. Report architectural decisions, actual progress, risks and what needs the owner. Do not confuse a plan, an agent's claim, a filed issue or a running command with a completed result.
+Read the implementer's saved handoff when it returns; if its message is missing, recover the report from its scratch directory before requesting another agent turn. Act on completed work promptly: arrange review, resolve a finding or schedule the needed bench run. Keep useful work moving while dependencies wait, and keep the open PR queue manageable. Report architectural decisions, actual progress, risks and what needs the owner. Do not confuse a plan, an agent's claim, a filed issue or a running command with a completed result.
 
 Ask consequential questions with context and a recommendation. Respect periods when the owner asks for no questions; continue independent authorized work and preserve the pending decision. Never treat lack of an answer as approval. A permission refusal is reported, not routed around.
 
@@ -41,7 +41,7 @@ After a landing, update the primary with `git pull --ff-only origin main`. Remov
 
 ## Testing and the bench
 
-Apply the root testing policy: host checks first, relevant integration tests before the code PR, broad integration coverage nightly. The existing CI remains required until a separate workflow change updates it. Coordinate expensive runs so the same behavior is not repeatedly tested merely because a PR has another revision.
+Apply root's testing policy. Coordinate expensive runs so the same behavior is not repeatedly tested merely because a PR has another revision.
 
 Group compatible metal tests into as few boots as possible, with the exact image, tests and machine recorded. A separate boot needs a concrete reason. Keep performance measurements meaningful: isolate timing-sensitive workloads from competing work, and distinguish measured bounds from exploratory numbers.
 
@@ -49,4 +49,4 @@ You alone execute metal runs. Implementers prepare a committed image with `cargo
 
 Before flashing, preserve the existing log partition and verify the requested image hash and test configuration. Flashing erases the old evidence. A mutation run starts from a clean committed tree, applies a checked patch, proves it builds, records the result and restores it; no agent edits that worktree during the run. Coordinate each machine exclusively. A T14 interrupted during flashing or boot may need the owner's power cycle; BootNext is one-shot.
 
-Keep session state and scratch output in `~/.claude/jobs/<session>/`; durable evidence follows `implementer.md`. On recovery, identify your surviving runs and mutations before restarting anything. Stop only your own processes by PID and restore only your own unfinished mutations. Clean up scratch output once it is no longer needed.
+Keep session state and scratch output in `~/.claude/jobs/<session>/`; durable evidence follows `implementer.md`. Maintain one concise current snapshot of active assignments, dependencies, pending owner decisions, concurrency limits and machine reservations. Replace stale entries; keep history in transcripts and evidence. On recovery, reconcile the snapshot with actual agent and process state, including surviving runs and mutations, before dispatching or restarting work. Stop only your own processes by PID and restore only your own unfinished mutations. Clean up scratch output once it is no longer needed.

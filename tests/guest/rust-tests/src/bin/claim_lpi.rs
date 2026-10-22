@@ -44,7 +44,9 @@ fn main() {
     let regs = unsafe { Window::new(bar.as_ptr(), info.bar_bytes[0] as usize) };
     let id = regs.read::<u32>(IDENTIFICATION);
     assert_eq!(id & 0xff, EDU_ID, "claim_lpi: BAR 0 answers {id:#010x}, which is not edu's identification");
-    let _grant = dev.dma_alloc(4096).expect("claim_lpi: a grant");
+    // A message is a write only a started function masters; edu's own DMA
+    // engine is not used, so it needs no grant.
+    dev.dma_start().expect("claim_lpi: the start");
     assert_eq!(dev.irq().map(|r| r.count), Err(SyscallError::WouldBlock), "claim_lpi: an interrupt before any was raised");
 
     let poller = Poller::new(1);

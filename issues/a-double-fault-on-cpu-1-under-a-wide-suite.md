@@ -61,7 +61,8 @@ itself is recovered too. That hole's general form — a death with no report
 vocabulary in it at all, where the arm prints an empty `serial` — is closed at
 the same field: `WaitVerdict::for_test` carries the window when `started` is
 false. Gated in both directions under `serial_vocabulary`, and against the real
-`#DF` `double_fault_stack` already puts on the wire.
+`#DF` `double_fault_stack` put on the wire (that guest test was cut in
+`520c0d129`).
 
 **So what the next sighting shows that this one did not** — every line of it,
 verbatim, in the failure message:
@@ -119,13 +120,14 @@ are written on every context switch from the incoming task's id
 (`kernel/src/arch/x86_64/hw.rs`), and the idle context's id is `None`
 (`sched/driver::enter_idle_loop` sets both to `None` before it moves `rsp`). A
 live pid therefore means CPU 1 was running a task. The idle stack is the one
-with an unmapped page under it (`IDLE_GUARD_SIZE`, `guard_kernel_page`), and an
+with an unmapped page under it (`kernel/src/sched/idle_stack.rs`'s `GUARD`,
+unmapped by `guard_4k`), and an
 unmapped page under a stack is what turns an overflow into a `#PF` the CPU
 cannot deliver — because the frame it must push goes to the same bad `rsp`.
 
 **And the stack it *was* on does not fault on overflow.** A thread's kernel
 stack is `KERNEL_STACK_SIZE` = 128 KiB of ordinary heap (`OwnedAlloc::new` in
-`loader::alloc_kernel_stack`) with a canary word at the bottom
+`alloc_kernel_stack`, `kernel/src/loader/start.rs`) with a canary word at the bottom
 (`write_stack_canary`) checked at every scheduler pass (`sched::driver::check_stack_canary`)
 and **no unmapped page beneath it**. An overflow off it writes into whatever the
 allocator put there and is reported later, from ordinary context, as
@@ -139,7 +141,7 @@ reaching for it.
 IST1 cannot be the cause either: `ist 1` is on the `DoubleFault` row alone
 (`arch/idt/mod.rs`), so nothing but a `#DF` ever runs on it. It can only be
 overrun *while reporting* one, and the report says whether it was —
-`[ist1] used N of M bytes, guard intact` against the `IST1_STACK_SIZE` of 16384
+`[ist1] used N of M bytes, guard intact` against the `IST_STACK_SIZE` of 16384
 that `0b4f305` and `9148057` sized, whose declared margin is half the stack.
 Measured on this tree on 2026-08-18, two `double_fault_stack` runs minutes
 apart: **6688** and **5312** bytes used of 16384, guard intact both times. The

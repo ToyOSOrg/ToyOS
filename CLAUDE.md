@@ -56,7 +56,7 @@ Rust and QEMU are the development prerequisites. Other host tools must be builda
 - **Investigate reds.** Do not rerun a failure merely to get green. Fix a defect introduced by the change. A real unrelated defect may be recorded without blocking the PR once its independence is established. Repair or delete a defective or redundant test according to its value, preserving evidence of any real bug it exposed. Host load invalidates timing claims in guest tests, not evidence of an actual race or lost progress.
 - **Show evidence.** Record commands, exit codes, logs, revisions and machines. Identify earlier evidence reused and why later edits do not invalidate it. Use an independent oracle where available and a negative control where a defect would otherwise land unseen; the whole change reverted onto the measured base is the control for the whole change. Another agent is not an independent oracle. Do not add a test for what a type or straightforward inspection already establishes.
 
-Agents may run their own selected guest tests. Metal runs are coordinated and executed by the orchestrator; implementers prepare them with `--metal-readback`, which touches no machine. Preserve the existing required CI checks until a separately scoped workflow change implements the agreed scheduling policy.
+Agents may run their own selected guest tests. Metal runs are coordinated and executed by the orchestrator; implementers prepare them with `--metal-readback`, which touches no machine.
 
 ## Working safely
 
@@ -74,4 +74,4 @@ Comments are a maintenance cost. Prefer expressive code and names. Delete false,
 
 A module header is not an essay or an inventory. Keep only what a reader needs to use or safely change the module. Durable rules belong at their relevant boundary; do not build a second specification in comments or private agent memory.
 
-Change instruction files when the owner briefs it or a change removes or renames something they instruct agents to use. Replace conflicting rules instead of appending exceptions. Keep these files short, give each rule one home, and prefer judgment over a procedure for every incident. Existing issues are edited only when taking them up or when a rule explicitly requires recording something there.
+Change instruction files when the owner briefs it or a change removes or renames something they instruct agents to use. Replace conflicting rules instead of appending exceptions. Keep these files short, give each rule one home, and prefer judgment over a procedure for every incident. Update issue records directly affected by the change so they remain accurate. Record unrelated discoveries without expanding the assignment into their implementation or a general tracker cleanup.

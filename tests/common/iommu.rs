@@ -68,7 +68,7 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
         // supervisor started before it.
         let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
         let said: Vec<String> = if behind_unit {
-            vec![bar_moved(), msix_armed()]
+            vec![bar_handed(), msix_armed()]
         } else {
             vec![
                 not_handed_over(CLAIMED_AT, NOT_REMAPPED),
@@ -98,7 +98,7 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
             // same machine the arm below requires to be unspent. Without this
             // pair those `must_not_say`s would pass against a kernel that had
             // stopped writing either line.
-            log.must_say(&bar_moved())?;
+            log.must_say(&bar_handed())?;
             log.must_say(&msix_armed())?;
         } else {
             no_unit_is_no_claim(&log)?;
@@ -152,8 +152,12 @@ pub fn iommu_virtio_platform() -> Result<(), String> {
 }
 
 /// The slot QEMU's `-device` order puts `tests/images/netcase.toml`'s NVMe controller on,
-/// the one its diskserver row claims.
+/// the one its nvme row drives.
 const NVME_AT: &str = "00:02.0";
+
+/// The slot QEMU's `-device` order puts the boot controller on, the one the
+/// image's usbd row drives.
+const XHCI_AT: &str = "00:01.0";
 
 /// The slot QEMU's `-device` order puts the virtio-sound function on, the one
 /// `tests/images/netcase.toml`'s soundserver row claims.
@@ -180,11 +184,17 @@ fn not_handed_over(at: &str, why: &str) -> String {
 /// would fail. The NVMe controller and the virtio-sound function are refused
 /// the same.
 fn no_unit_is_no_claim(log: &Serial) -> Result<(), String> {
-    refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[NVME_AT, SOUND_AT])?;
+    refused_claim(log, NETSTACK_CLAIMS, NOT_REMAPPED, &[XHCI_AT, NVME_AT, SOUND_AT])?;
+    log.must_say(&not_handed_over(XHCI_AT, NOT_REMAPPED))?;
+    log.must_say(&format!(
+        "supervisor: usbd was not started on PCI {XHCI_AT}: pci:0c:03:30/1033:0194 is on this machine and could not be handed over"
+    ))?;
     log.must_say(&not_handed_over(SOUND_AT, NOT_REMAPPED))?;
     log.must_say("supervisor: soundserver: pci:04:01:00/1af4:1059 is on this machine and could not be handed over")?;
     log.must_say(&not_handed_over(NVME_AT, NOT_REMAPPED))?;
-    log.must_say("supervisor: diskserver: pci:01:08:02/1b36:0010 is on this machine and could not be handed over")?;
+    log.must_say(&format!(
+        "supervisor: nvme was not started on PCI {NVME_AT}: pci:01:08:02/1b36:0010 is on this machine and could not be handed over"
+    ))?;
     // And this machine handed *nothing* over, which is more than the claim's
     // own refusal says: with no unit there is no function any process could be
     // given an address space for.
@@ -205,7 +215,7 @@ const CLAIMED_AT: &str = "00:03.0";
 /// The two lines a hand-over of that function spends. One arm requires them and
 /// [`refused_claim`] requires their absence, and both read them here: a kernel
 /// that stopped writing either line would otherwise satisfy both.
-fn bar_moved() -> String {
+fn bar_handed() -> String {
     format!("pcidev: PCI {CLAIMED_AT} BAR")
 }
 
@@ -244,12 +254,10 @@ fn functions_named<'a>(log: &'a Serial, marker: &str) -> Result<Vec<&'a str>, St
 }
 
 /// **The claim on [`CLAIMED_AT`] was refused for `why`, and the refusal spent
-/// nothing**: no BAR of that function moved, neither of its two message
+/// nothing**: no BAR of that function was handed over, neither of its two message
 /// mechanisms is armed, `claims` reached no holder, and the supervisor said so in the
 /// boot config's own spelling. `beside` is every other function this machine
 /// refuses, each judged by its own caller.
-///
-/// `slot_space` put back below `place_bars` reds on the two unspent lines.
 fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Result<(), String> {
     let refused = functions_named(log, "NOT HANDED OVER")?;
     let others: BTreeSet<&str> = refused.iter().copied().filter(|at| *at != CLAIMED_AT).collect();
@@ -267,7 +275,7 @@ fn refused_claim(log: &Serial, claims: &str, why: &str, beside: &[&str]) -> Resu
     log.must_not_say(&format!("[{claims}] handed over"))?;
     log.must_not_say(&msix_armed())?;
     log.must_not_say(&msi_armed())?;
-    log.must_not_say(&bar_moved())?;
+    log.must_not_say(&bar_handed())?;
     // All the way out to userland, rather than a kernel that logged a refusal
     // and handed netstack a NIC anyway. The supervisor names what it could not mint in the
     // config's own spelling, and **with this refusal's own word**: the machine
@@ -305,7 +313,7 @@ pub(crate) fn unit_fields(line: &str) -> BTreeMap<String, String> {
 }
 
 /// Every function `pci::enumerate` printed. Anchored on the class field that
-/// follows the address, so `xHCI: found at PCI 00:02.0` is not one of them.
+/// follows the address, so `pcidev: PCI 00:02.0 [...]` is not one of them.
 fn enumerated_functions(log: &Serial) -> BTreeSet<String> {
     log.text()
         .lines()
@@ -325,12 +333,10 @@ const AMDVI_SERVES_XHCI: &str = "iommu: amdvi unit0 serves 00:03.0 data=0x00";
 const AMDVI_OFF: &str = "iommu: amdvi unit0 @0xfed80000 switched off control=0x0000000000000000";
 /// The unit programmed and on.
 const AMDVI_TRANSLATING: &str = "iommu: amdvi unit0 @0xfed80000 translating control=";
-/// The boot stick's controller on the first domain a driver made, the one
-/// past the identity domain.
-const XHCI_MOVED: &str = "iommu: 00:03.0 moves to domain2";
-/// The USB gate: the boot stick bound through the controller behind the unit,
-/// which only DMA the unit lets through can do.
-const STICK_BOUND: &str = "usb-storage: 1 device(s)";
+/// The boot stick's controller refused to a claim: this unit remaps no
+/// message, so no function behind it is handed to a process, and the
+/// controller's DMA is no question this machine can answer.
+const XHCI_REFUSED: &str = "pcidev: PCI 00:03.0 NOT HANDED OVER — its interrupts would not be remapped on this machine";
 
 /// What the actuator leaves on an AMD-Vi unit, in the kernel's words for
 /// `unit`: one line per field the hand-over switches off by its own write.
@@ -339,20 +345,19 @@ pub(crate) fn amdvi_left_on(unit: &str) -> [String; 3] {
         .map(|field| format!("iommu: amdvi {unit} was handed over with {field} on; it goes off"))
 }
 
-/// **A unit an AMD machine's firmware left on is switched off and programmed,
-/// and the boot stick's DMA reaches memory through its controller's own
-/// domain.** QEMU's `amd-iommu` is the only AMD-Vi unit
-/// the merge queue runs: the T14 is an Intel machine, and the hand-over's
-/// register sequence and the DMA it frees are neither of them a host test's.
-/// Two boots: the shipped kernel finds a unit nothing left on and switches
-/// nothing off; the test kernel's `iommu-firmware-left` leaves the unit blocking
-/// every device's DMA with its command buffer and event log running, and
-/// each goes off by its own write before the stick is driven. With the
-/// switch-off reverted that boot reds on the fields' lines and on `control`
-/// reading back zero, and its stick still binds: QEMU 11.1.1 moves no
-/// function to translation on `INVALIDATE_IOMMU_ALL`
-/// (`issues/qemus-invalidate-iommu-all-leaves-every-function-untranslated.md`),
-/// so the AMD bench's `iommu_firmware_left` row holds the DMA half.
+/// **A unit an AMD machine's firmware left on is switched off and
+/// programmed.** QEMU's `amd-iommu` is the only AMD-Vi unit the nightly guest
+/// suite runs: the T14 is an Intel machine, and the hand-over's register
+/// sequence is no host test's. Two boots: the shipped kernel finds a unit
+/// nothing left on and switches nothing off; the test kernel's
+/// `iommu-firmware-left` leaves the unit blocking every device's DMA with its
+/// command buffer and event log running, and each goes off by its own write.
+/// With the switch-off reverted that boot reds on the fields' lines and on
+/// `control` reading back zero. **The DMA half is the AMD bench's
+/// `iommu_firmware_left` row's**: the kernel drives no function behind this
+/// unit, and this one remaps no message, so the boot stick's controller is
+/// refused to usbd here; QEMU's unit that remaps filters no SMI, which is
+/// refused too (`usbd_refused_without_smi_filter`).
 pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
     let profile = Profile::MetalAmdVi;
     let argv = qemu::profile_argv(&BootOptions { profile, ..Default::default() });
@@ -367,14 +372,13 @@ pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
         let log = Serial::boot(&qemu);
         log.must_be_clean()?;
         log.must_say("Boot: complete")?;
-        log.must_say(STICK_BOUND)?;
+        log.must_say(XHCI_REFUSED)?;
         log.must_say("iommu: IVRS rev=1 ivinfo=0x00002801 efr_images=y preboot_dma_protection=n pa=40 va=0")?;
         log.must_say(AMDVI_UNIT)?;
         log.must_say(AMDVI_SUPERSEDED)?;
         log.must_say(AMDVI_SERVES_XHCI)?;
         log.must_say(AMDVI_OFF)?;
         log.must_say(AMDVI_TRANSLATING)?;
-        log.must_say(XHCI_MOVED)?;
         log.must_not_say("isolates no device")?;
         log.must_not_say("no DMAR or IVRS table")?;
         let handed = log.must_say("iommu: amdvi unit0 handed over control=")?;
@@ -392,7 +396,7 @@ pub fn amdvi_firmware_left(test_config: &Path) -> Result<(), String> {
         } else {
             log.must_not_say("was handed over with")?;
         }
-        eprintln!("  [amdvi] left on = {left}: {handed}; the stick bound behind the unit");
+        eprintln!("  [amdvi] left on = {left}: {handed}; the stick's controller refused to a claim behind it");
     }
     Ok(())
 }
@@ -466,5 +470,47 @@ pub fn amdvi_selftest(test_config: &Path) -> Result<(), String> {
     if let Some(death) = lines.iter().find(|l| super::serial::died(l).is_some() && !l.contains("owner=kernel")) {
         return Err(format!("the machine died of something other than the record: {death}\nserial:\n{serial}"));
     }
+    Ok(())
+}
+
+/// What the supervisor says refusing netcase's NIC to netstack, on a machine
+/// whose virtio NIC was created without `iommu_platform=on`.
+pub const UNTRANSLATED_NIC: &str = "supervisor: netstack: pci:02:00:00/1af4:1041 is a virtio function that offers \
+     no VIRTIO_F_ACCESS_PLATFORM, so no unit translates its DMA (virtio 1.2 §6.1): refused";
+
+/// A virtio NIC that bypasses the unit ([`Profile::HeadlessNicUntranslated`])
+/// is never handed to netstack: the supervisor reads its offer through the
+/// claim, refuses it by name, and netstack runs with no NIC. Only a QEMU
+/// machine can make one: every bench function is behind its unit.
+pub fn a_virtio_function_without_access_platform_is_refused() -> Result<(), String> {
+    let options = BootOptions { profile: Profile::HeadlessNicUntranslated, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
+    let gone = "netstack: no NIC on this machine";
+    let mut text = qemu.boot_log().to_string();
+    qemu::await_guest(&mut qemu, &mut text, "the supervisor's refusal and netstack without a NIC", |t| {
+        t.contains(UNTRANSLATED_NIC) && t.contains(gone)
+    })
+    .map_err(|e| format!("{e}\n{text}"))?;
+    let log = Serial::named("boot console", text);
+    log.must_be_clean()?;
+    log.must_not_say("netstack: VirtIO: PCI")?;
+    eprintln!("  [iommu] {UNTRANSLATED_NIC}");
+    Ok(())
+}
+
+/// The kernel's virtio console created without `iommu_platform=on`
+/// ([`Profile::HeadlessConsoleUntranslated`]) bypasses the unit, so the kernel
+/// tells it physical addresses and the boot reaches its ready marker over it.
+/// Given a domain's addresses instead, it reads and writes whatever memory
+/// those are, and the boot's console is lost. q35 only: no bench has a virtio
+/// function.
+pub fn the_kernel_tells_a_bypassing_console_physical_addresses() -> Result<(), String> {
+    let options = BootOptions { profile: Profile::HeadlessConsoleUntranslated, ..Default::default() };
+    let qemu = QemuInstance::boot_with_options(&netcase(), &[], &[], options);
+    let log = Serial::named("boot console", qemu.boot_log().to_string());
+    log.must_be_clean()?;
+    log.must_say("offers no ACCESS_PLATFORM, so it is told physical addresses")?;
+    log.must_say("Boot: complete")?;
+    eprintln!("  [iommu] the console bypassing the unit was told physical addresses and carried the boot");
     Ok(())
 }

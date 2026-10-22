@@ -1,7 +1,8 @@
 //! ToyOS userland SDK.
 //!
 //! Typed handles, IPC framing, ports and namespaces, shared memory, and
-//! ergonomic wrappers over the kernel ABI defined in `toyos-abi`.
+//! ergonomic wrappers over the kernel ABI defined in `toyos-abi`, and the
+//! [`transport`] client/server sessions run over.
 
 // `not(test)` so this crate's own decisions can be unit-tested on the host.
 // [`net::hangup`] is a total function from a kernel word to a [`net::NetError`]
@@ -11,15 +12,20 @@
 // directory is the only build that is not, and it links no syscall.
 #![cfg_attr(not(test), no_std)]
 
+extern crate alloc;
+
 pub mod audio;
 pub mod census;
 pub mod device;
 pub mod endow;
+pub mod fd;
+pub mod files;
 pub mod fs;
 pub mod poller;
 pub mod power;
 pub mod wake;
 pub mod ipc;
+pub mod job;
 pub mod namespace;
 pub mod launch;
 pub mod log;
@@ -29,14 +35,16 @@ pub mod process;
 pub mod relocate;
 pub mod surface;
 pub mod shm;
+pub mod spawn;
 pub mod syscap;
 pub mod sync;
 pub mod system;
+pub mod transport;
 pub mod volatile;
 
 pub use ipc::Connection;
 pub use device::{
-    AcpiDev, DmaRegion, FramebufferDev, HdaDev, Keyboard, Mouse, PartitionDev, PciDev,
+    AcpiDev, DmaRegion, FramebufferDev, PciDev,
 };
 
 pub use toyos_abi::RawHandle;
@@ -65,6 +73,11 @@ pub fn pipe_pair() -> Result<(Pipe, Pipe), toyos_abi::syscall::SyscallError> {
     Ok((Pipe(OwnedHandle(ends.read)), Pipe(OwnedHandle(ends.write))))
 }
 
+/// A fresh null handle carrying `rights` ([`toyos_abi::syscall::null`]).
+pub fn null(rights: toyos_abi::handle::Rights) -> Result<OwnedHandle, toyos_abi::syscall::SyscallError> {
+    toyos_abi::syscall::null(rights).map(OwnedHandle)
+}
+
 /// One owned handle, closed when it drops.
 ///
 /// `!Copy` and `!Clone`, so a handle cannot be closed twice and cannot be
@@ -72,7 +85,7 @@ pub fn pipe_pair() -> Result<(Pipe, Pipe), toyos_abi::syscall::SyscallError> {
 /// giving up ownership, and the single thing to grep for when asking who does.
 ///
 /// Consumers hold the typed wrappers below; this is what a handle is while it
-/// travels, the currency of [`Connection::send_handles`].
+/// travels, the currency of [`Connection::send_with`].
 pub struct OwnedHandle(pub(crate) RawHandle);
 
 impl OwnedHandle {

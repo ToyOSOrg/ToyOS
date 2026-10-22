@@ -21,8 +21,6 @@ macro_rules! device_info {
 device_info!(
     toyos_abi::FramebufferInfo,
     toyos_abi::pci::PciFunctionInfo,
-    toyos_abi::hda::HdaInfo,
-    toyos_abi::part::PartitionInfo,
     toyos_abi::acpi::AcpiInfo,
 );
 
@@ -50,41 +48,6 @@ pub(crate) fn read_info<T: IpcPayload>(dev: &Device) -> Result<T, SyscallError> 
     assert_eq!(n, size, "device info size mismatch");
     // SAFETY: the assertion above proves the read filled all `size` bytes.
     Ok(unsafe { val.assume_init() })
-}
-
-pub struct Keyboard(pub(crate) Device);
-
-impl Keyboard {
-    /// Non-blocking read of pending key events; empty surfaces as `Err(WouldBlock)`.
-    ///
-    /// Event loops must only ever read this handle non-blocking. The kernel wakes
-    /// keyboard watchers only when a report queued an event, so readiness and
-    /// "there is data" agree today — but a blocking read that loses the race
-    /// with another reader parks the caller until the next real key, and an
-    /// event loop that stops pumping is a frozen window.
-    pub fn read_nonblock(&self, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        self.0.0.read_nonblock(buf)
-    }
-}
-
-impl AsHandle for Keyboard {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
-}
-
-pub struct Mouse(pub(crate) Device);
-
-impl Mouse {
-    /// Non-blocking read of pending mouse events; empty surfaces as `Err(WouldBlock)`.
-    ///
-    /// Same rationale as [`Keyboard::read_nonblock`]: an event loop that can
-    /// park on an empty queue is a frozen window.
-    pub fn read_nonblock(&self, buf: &mut [u8]) -> Result<usize, SyscallError> {
-        self.0.0.read_nonblock(buf)
-    }
-}
-
-impl AsHandle for Mouse {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 
 pub struct FramebufferDev(pub(crate) Device);
@@ -139,15 +102,33 @@ impl PciDev {
 
     /// Map memory BAR `bar`, bounded to the `bar_bytes` the description gave.
     ///
-    /// The kernel's window is whole 2 MiB pages and so is wider than the BAR;
-    /// the length here is the BAR's, because the bytes past it belong to no
-    /// device and answer every read with ones.
+    /// The kernel's window is whole 4 KiB pages, so a BAR smaller than one is
+    /// mapped with the rest of its page; the length here is the BAR's.
     pub fn map_bar(&self, bar: u32, bytes: u64) -> Result<crate::shm::SharedMemory, SyscallError> {
         let handle = syscall::device_bar_map(self.0.as_handle(), bar)?;
         crate::shm::SharedMemory::adopt(handle, bytes as usize)
     }
 
-    /// `bytes` of memory this function can reach and nothing else can.
+    /// Give up ownership, for a claim about to be endowed.
+    pub fn into_raw(self) -> RawHandle {
+        self.0.into_raw()
+    }
+
+    /// State that this function issues `bits`-bit device addresses, before any
+    /// grant or lend: every one is placed below `1 << bits`.
+    pub fn dma_limit(&self, bits: u8) -> Result<(), SyscallError> {
+        syscall::device_dma_limit(self.0.as_handle(), bits)
+    }
+
+    /// Let this function master the bus, once its driver has stopped it and
+    /// laid out what it may reach. Until then it issues nothing, an interrupt
+    /// included.
+    pub fn dma_start(&self) -> Result<(), SyscallError> {
+        syscall::device_dma_start(self.0.as_handle())
+    }
+
+    /// `bytes` of memory this function can reach and nothing else can, below
+    /// the width [`Self::dma_limit`] stated.
     pub fn dma_alloc(&self, bytes: u64) -> Result<DmaRegion, SyscallError> {
         let grant = syscall::device_dma_alloc(self.0.as_handle(), bytes)?;
         let memory = crate::shm::SharedMemory::adopt(grant.shm, grant.bytes as usize)?;
@@ -249,101 +230,3 @@ impl AsHandle for PciDev {
     fn as_handle(&self) -> RawHandle { self.0.as_handle() }
 }
 
-/// One GPT partition, read and written in its own block numbers
-/// ([`toyos_abi::part`]); a neighbour's blocks have no spelling here.
-pub struct PartitionDev(pub(crate) Device);
-
-impl PartitionDev {
-    /// Which partition this is and how long; read once per claim.
-    pub fn describe(&self) -> Result<toyos_abi::part::PartitionInfo, SyscallError> {
-        read_info(&self.0)
-    }
-
-    /// `buf.len()` blocks from the partition's block `first`.
-    pub fn read(&self, first: u64, buf: &mut [toyos_abi::part::Block]) -> Result<(), SyscallError> {
-        syscall::partition_read(self.0.as_handle(), first, buf)
-    }
-
-    /// `buf.len()` blocks to the partition's block `first`; durable only once
-    /// [`Self::sync`] answers `Ok`.
-    pub fn write(&self, first: u64, buf: &[toyos_abi::part::Block]) -> Result<(), SyscallError> {
-        syscall::partition_write(self.0.as_handle(), first, buf)
-    }
-
-    /// Every write this claim returned from, out of the device's cache.
-    pub fn sync(&self) -> Result<(), SyscallError> {
-        syscall::fsync(self.0.as_handle())
-    }
-}
-
-impl AsHandle for PartitionDev {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
-}
-
-/// The Intel HDA controllers the kernel brought up and drives no policy on.
-///
-/// What the claimant gets is a PCM ring it may write, an interrupt it may wait
-/// on, two register calls checked against the kernel's allow-list, and the
-/// choice of which listed controller the stream is bound to. It gets no
-/// register window and no physical address, so there is nothing here that can
-/// point a device at memory.
-pub struct HdaDev(pub(crate) Device);
-
-impl HdaDev {
-    pub fn info(&self) -> Result<toyos_abi::hda::HdaInfo, SyscallError> {
-        read_info(&self.0)
-    }
-
-    /// The periods that have played since the last read, or `Err(WouldBlock)`.
-    ///
-    /// One record and not a queue: the kernel accumulates, so a reader that
-    /// slept through several interrupts is told about all of them at once and
-    /// there is no ring for it to overflow.
-    pub fn completions(&self) -> Result<toyos_abi::audio::AudioCompletionRecord, SyscallError> {
-        let mut record = toyos_abi::audio::AudioCompletionRecord {
-            mask: 0,
-            _pad: 0,
-            timestamp_nanos: 0,
-        };
-        let buf = unsafe {
-            core::slice::from_raw_parts_mut(
-                &mut record as *mut _ as *mut u8,
-                toyos_abi::audio::AudioCompletionRecord::SIZE,
-            )
-        };
-        let n = syscall::read_nonblock(self.0.0.0, buf)?;
-        assert_eq!(
-            n,
-            toyos_abi::audio::AudioCompletionRecord::SIZE,
-            "partial HDA completion record ({n} bytes)"
-        );
-        Ok(record)
-    }
-
-    pub fn reg_read(
-        &self,
-        reg: toyos_abi::hda::Reg,
-        width: toyos_abi::syscall::RegWidth,
-    ) -> Result<u32, SyscallError> {
-        syscall::device_reg_read(self.0.as_handle(), reg.wire(), width)
-    }
-
-    pub fn reg_write(
-        &self,
-        reg: toyos_abi::hda::Reg,
-        width: toyos_abi::syscall::RegWidth,
-        value: u32,
-    ) -> Result<(), SyscallError> {
-        syscall::device_reg_write(self.0.as_handle(), reg.wire(), width, value)
-    }
-
-    /// Bind the stream to the listed controller at `controller`; see
-    /// [`syscall::hda_bind`]. From then on that controller is index 0.
-    pub fn bind(&self, controller: u8) -> Result<(), SyscallError> {
-        syscall::hda_bind(self.0.as_handle(), controller)
-    }
-}
-
-impl AsHandle for HdaDev {
-    fn as_handle(&self) -> RawHandle { self.0.as_handle() }
-}

@@ -58,7 +58,7 @@ static PROBE_LOCK: crate::sync::Lock<()> = crate::sync::Lock::new(());
 /// Called from `deadline`'s staged wedge as each CPU arrives there, and from
 /// nowhere else. Two CPUs have a part; the rest go back and spin out the wedge.
 pub fn stage() {
-    let cpus = (smp::cpu_count() as usize).min(crate::sched::MAX_CPUS);
+    let cpus = smp::cpu_count() as usize;
     let bound_ms = super::bound_ms();
     // Refused by name: two CPUs, one to hold the lock and one to go deaf
     // wanting it, and a bound for the deaf one to outlast. A control that
@@ -114,7 +114,7 @@ fn hold_and_sample(victim: usize) -> ! {
     );
     loop {
         irqchip::send_nmi(victim as u32);
-        let until = crate::clock::tsc_deadline(SEND_EVERY_NS);
+        let until = crate::clock::counter_deadline(SEND_EVERY_NS);
         while cpu::counter() < until {
             core::hint::spin_loop();
         }
@@ -133,7 +133,7 @@ fn go_deaf(me: usize, bound_ms: u64) -> ! {
         deaf_ns / 1_000_000,
     );
     // Read before `IF` goes, because the record above has to be out first.
-    let until = crate::clock::tsc_deadline(deaf_ns);
+    let until = crate::clock::counter_deadline(deaf_ns);
     STAGE.store(DEAF, Ordering::Release);
     // Not an `IrqGuard`: nothing here re-enables them, which is the point.
     cpu::disable_interrupts();

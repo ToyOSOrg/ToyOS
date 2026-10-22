@@ -17,31 +17,30 @@ use toyos_abi::handle::{RawHandle, Rights};
 #[cfg(feature = "test-actuators")]
 use toyos_abi::syscall::debug_action as DA;
 use toyos_abi::syscall::*;
-use toyos_untrusted::Untrusted;
 
 use super::HANDLE_LEN;
 #[cfg(feature = "test-actuators")]
 use super::debug::{canary, debug_heap_alloc, ring0_timer_in_syscall, FATAL_HALT_NONCE, LOCK_ACROSS_SWITCH};
 use super::device::{
-    sys_acpi, sys_hda_bind, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
-    sys_device_dma_unmap,
-    sys_device_reg, sys_partition_transfer, Transfer,
+    sys_acpi, sys_device_bar_map, sys_device_claim, sys_device_dma_alloc, sys_device_dma_map,
+    sys_device_dma_limit, sys_device_dma_start, sys_device_dma_unmap,
+    sys_device_reg_read,
 };
 use super::fs::{
     spawn_cwd, sys_chdir, sys_delete, sys_getcwd, sys_mkdir, sys_open, sys_readdir, sys_readlink,
     sys_rename, sys_rmdir, sys_stat, sys_symlink,
 };
-use super::handles::{sys_close, sys_dup2, sys_handle_dup, with_object, with_object_ref};
+use super::handles::{sys_close, sys_handle_dup, with_object, with_object_ref};
 use super::io::{
-    sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
+    sys_null, sys_random, sys_read, sys_read_nonblock, sys_write, sys_write_nonblock,
 };
 use super::ipc::{
-    sys_accept, sys_handle_recv, sys_handle_send, sys_inbox_setup,
+    sys_accept, sys_handle_recv, sys_inbox_setup, sys_message_send,
     sys_inbox_submit, sys_namespace_build, sys_namespace_open, sys_pipe, sys_pipe_map,
     sys_port_badge, sys_port_create, sys_port_mint, sys_shm_create, sys_shm_map,
 };
 use super::machine::{
-    sys_counters, sys_device_inventory, sys_log_read, sys_reboot, sys_sched_info, sys_shutdown, sys_sysinfo,
+    sys_counters, sys_device_inventory, sys_log_read, sys_reboot, sys_shutdown, sys_sysinfo,
     sys_trace_read,
     MAX_INVENTORY_RECORDS,
 };
@@ -49,28 +48,20 @@ use super::machine::{
 use super::machine::lower_sysinfo_bound;
 use super::proc::{
     spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
-    sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
+    sys_job_create, sys_job_own, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
 use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
 
-/// `sched-operation-nesting`'s task half and `sysret-ss-probe`, run once a boot
-/// on the first syscall: a task's own deadline slot, and a park that switches
-/// away from it and back.
+/// `sysret-ss-probe`, run once a boot on the first syscall: a park that
+/// switches away from it and back.
 #[cfg(feature = "boot-actuators")]
 fn task_probes() {
     use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
     static RAN: AtomicBool = AtomicBool::new(false);
-    let nesting = crate::actuator::sched_operation_nesting();
-    let ss = crate::actuator::sysret_ss_probe();
-    if !(nesting || ss) || RAN.swap(true, Relaxed) {
+    if !crate::actuator::sysret_ss_probe() || RAN.swap(true, Relaxed) {
         return;
     }
-    if nesting {
-        crate::sched_gate::run("syscall");
-    }
-    if ss {
-        crate::arch::hw::sysret_ss_probe(&crate::scheduler::Parkable::at_entry());
-    }
+    crate::arch::hw::sysret_ss_probe(&crate::scheduler::Parkable::at_entry());
 }
 
 pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> u64 {
@@ -201,14 +192,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             {
                 return SyscallError::InvalidArgument.to_u64();
             }
-            // slot_map and endow stay windows, not copies: both counts are userland's
-            // and each entry is read once. labels is copied because the child keeps it.
-            let Some(slot_map) = (args.slot_map_count as usize)
-                .checked_mul(crate::loader::SLOT_PAIR_LEN)
-                .and_then(|len| ctx.user_bytes(UserAddr::new(args.slot_map_ptr), len as u64))
-            else {
-                return bad_addr;
-            };
+            // endow stays a window, not a copy: its count is userland's and each entry
+            // is read once. labels is copied because the child keeps it.
             let Some(endow) = (args.endow_count as usize)
                 .checked_mul(core::mem::size_of::<toyos_abi::syscall::EndowEntry>())
                 .and_then(|len| ctx.user_bytes(UserAddr::new(args.endow_ptr), len as u64))
@@ -219,7 +204,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
                 Ok(bytes) => bytes,
                 Err(e) => return e.to_u64(),
             };
-            let pending = match process::build_child_handles(&slot_map, &endow, &labels) {
+            let pending = match process::build_child_handles(&endow, &labels) {
                 Ok(built) => built,
                 Err(e) => return e.refuse(),
             };
@@ -254,15 +239,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_MARK_TTY => with_object(RawHandle(a1 as u32), Rights::NONE, ops::mark_tty),
         SYS_THREAD_SPAWN => sys_thread_spawn(a1, a2, a3, a4),
         SYS_THREAD_JOIN => sys_thread_join(a1),
-        // Both answer from the boot-time anchor, never the CMOS: NotSupported beats a
+        // Answers from the boot-time anchor, never the CMOS: NotSupported beats a
         // 1970-epoch number a caller cannot tell from real time.
-        SYS_CLOCK_REALTIME => crate::clock::utc_secs().map_or(
-            SyscallError::NotSupported.to_u64(),
-            |secs| {
-                let now = toyos_wallclock::Civil::from_unix_secs(secs);
-                (now.hour << 16) | (now.min << 8) | now.sec
-            },
-        ),
         SYS_CLOCK_EPOCH => {
             crate::clock::utc_secs().unwrap_or(SyscallError::NotSupported.to_u64())
         }
@@ -275,9 +253,10 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // A census of the hardware and of who drives it, so it costs
         // Rights::INVENTORY. The count is bounded before it becomes a window.
         SYS_DEVICE_INVENTORY => {
-            let Ok(count) = Untrusted::new(a3).at_most(MAX_INVENTORY_RECORDS) else {
+            let count = a3;
+            if count > MAX_INVENTORY_RECORDS {
                 return SyscallError::InvalidArgument.to_u64();
-            };
+            }
             let len = count * toyos_abi::inventory::RECORD_BYTES as u64;
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
             sys_device_inventory(RawHandle(a1 as u32), &mut buf)
@@ -285,16 +264,17 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // What every CPU counts, so it costs Rights::COUNTERS; a CPU per record,
         // so the count is bounded by the most CPUs there can be.
         SYS_COUNTERS => {
-            let Ok(count) = Untrusted::new(a3).at_most(crate::scheduler::MAX_CPUS as u64) else {
+            let count = a3;
+            if count > crate::smp::capacity() as u64 {
                 return SyscallError::InvalidArgument.to_u64();
-            };
+            }
             let len = count * toyos_abi::counters::RECORD_BYTES as u64;
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), len) else { return bad_addr };
             sys_counters(RawHandle(a1 as u32), &mut buf)
         }
         SYS_NANOSLEEP => sys_nanosleep(a1),
         SYS_HANDLE_DUP => sys_handle_dup(RawHandle(a1 as u32), a2),
-        SYS_HANDLE_DUP_AT => sys_dup2(RawHandle(a1 as u32), a2),
+        SYS_NULL => sys_null(a1),
         SYS_GETPID => process::current_process().raw() as u64,
         SYS_RENAME => {
             let old = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
@@ -310,18 +290,23 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_rmdir(&path)
         }
         SYS_DLOPEN => {
-            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
+            let Ok(args) = ctx.copy_in::<toyos_abi::syscall::DlopenArgs>(UserAddr::new(a1)) else { return bad_addr };
+            let name = match ctx.user_str(UserAddr::new(args.name_ptr), args.name_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             // Refused here rather than at the write, so a bad address never leaves a
             // library the caller was never told about.
-            let init_out = match a3 {
+            let init_out = match args.init_out {
                 0 => None,
                 raw => match UserAddr::checked(raw) {
                     Some(addr) => Some(addr),
                     None => return bad_addr,
                 },
             };
+            let image = match shared_image(args.image, args.image_len) {
+                Ok(image) => image,
+                Err(refused) => return refused,
+            };
             // ctx carries the copy-out: sys_dlopen writes init_out only once the load succeeds.
-            sys_dlopen(&ctx, &path, init_out)
+            sys_dlopen(&ctx, name, &image, init_out)
         }
         SYS_DLSYM => {
             let name = match ctx.user_str(UserAddr::new(a2), a3) { Ok(s) => s, Err(e) => return e.to_u64() };
@@ -394,6 +379,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_device_dma_map(&ctx, RawHandle(a1 as u32), RawHandle(a2 as u32), out)
         }
         SYS_DEVICE_DMA_UNMAP => sys_device_dma_unmap(RawHandle(a1 as u32), a2),
+        SYS_DEVICE_DMA_LIMIT => sys_device_dma_limit(RawHandle(a1 as u32), a2),
+        SYS_DEVICE_DMA_START => sys_device_dma_start(RawHandle(a1 as u32)),
         SYS_SYMLINK => {
             let target = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
             let link = match ctx.user_str(UserAddr::new(a3), a4) { Ok(s) => s, Err(e) => return e.to_u64() };
@@ -409,29 +396,9 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_endowments(&mut buf)
         }
         SYS_DEVICE_CLAIM => sys_device_claim(RawHandle(a1 as u32), a2, [a3, a4]),
-        // The count is bounded before it becomes a window, and a transfer of
-        // nothing is refused rather than sent to a device as a zero-length command.
-        SYS_PARTITION_READ | SYS_PARTITION_WRITE => {
-            let Ok(count) = Untrusted::new(a4).at_most(toyos_abi::part::MAX_BLOCKS_PER_CALL as u64)
-            else {
-                return SyscallError::InvalidArgument.to_u64();
-            };
-            if count == 0 {
-                return SyscallError::InvalidArgument.to_u64();
-            }
-            let len = count * toyos_abi::part::BLOCK_BYTES as u64;
-            let handle = RawHandle(a1 as u32);
-            if num == SYS_PARTITION_READ {
-                let Some(mut into) = ctx.user_bytes_mut(UserAddr::new(a3), len) else {
-                    return bad_addr;
-                };
-                sys_partition_transfer(handle, a2, count as u32, Transfer::Read(&mut into))
-            } else {
-                let Some(from) = ctx.user_bytes(UserAddr::new(a3), len) else { return bad_addr };
-                sys_partition_transfer(handle, a2, count as u32, Transfer::Write(&from))
-            }
-        }
         SYS_RT_ENTER => sys_rt_enter(RawHandle(a1 as u32)),
+        SYS_JOB_CREATE => sys_job_create(RawHandle(a1 as u32)),
+        SYS_JOB_OWN => sys_job_own(),
         SYS_LOG_READ => {
             // checked_mul before mapping: a product that doesn't fit is a bad argument,
             // not kernel arithmetic wrapping into a window it then trusts.
@@ -455,17 +422,26 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_trace_read(&ctx, RawHandle(a1 as u32), UserAddr::new(a2), &mut out, a4 as usize)
         }
         SYS_ACCEPT => sys_accept(RawHandle(a1 as u32)),
-        SYS_HANDLE_SEND => {
-            if a3 as usize > MAX_TRANSFER_HANDLES {
+        SYS_MESSAGE_SEND => {
+            let Ok(args) = ctx.copy_in::<MessageSend>(UserAddr::new(a2)) else { return bad_addr };
+            let unknown_flags = args.flags & !MESSAGE_NONBLOCK != 0;
+            if unknown_flags || args.count as usize > MAX_TRANSFER_HANDLES || args.len as usize > MAX_MESSAGE_LEN {
                 return SyscallError::InvalidArgument.to_u64();
             }
-            let Some(handles) = (a3 as usize)
+            let Some(bytes) = ctx.user_bytes(UserAddr::new(args.bytes), args.len) else { return bad_addr };
+            let Some(handles) = (args.count as usize)
                 .checked_mul(HANDLE_LEN)
-                .and_then(|len| ctx.user_bytes(UserAddr::new(a2), len as u64))
+                .and_then(|len| ctx.user_bytes(UserAddr::new(args.handles), len as u64))
             else {
                 return bad_addr;
             };
-            sys_handle_send(RawHandle(a1 as u32), &handles, a3 as usize)
+            sys_message_send(
+                RawHandle(a1 as u32),
+                &bytes,
+                &handles,
+                args.count as usize,
+                args.flags & MESSAGE_NONBLOCK != 0,
+            )
         }
         SYS_HANDLE_RECV => {
             if a3 as usize > MAX_TRANSFER_HANDLES {
@@ -484,10 +460,8 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_PORT_CREATE => sys_port_create(),
         SYS_PORT_MINT => {
             // Copied in before any handle is looked up: the kernel holds the badge, never the caller's page.
-            let Ok(len) = Untrusted::new(a3).at_most(MAX_BADGE as u64) else {
-                return SyscallError::InvalidArgument.to_u64();
-            };
-            if len == 0 {
+            let len = a3;
+            if len == 0 || len > MAX_BADGE as u64 {
                 return SyscallError::InvalidArgument.to_u64();
             }
             let Some(bytes) = ctx.user_bytes(UserAddr::new(a2), len) else { return bad_addr };
@@ -609,20 +583,13 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             // bound and its stale answer are the shipped paths.
             DA::COUNTERS_DEAF => crate::counters::deaf::stage(a2),
             DA::COUNTERS_HEAR => crate::counters::deaf::end(),
-            DA::TRACE_FLOOD => match Untrusted::new(a2).at_most(DA::TRACE_FLOOD_MOST) {
-                Ok(count) => crate::trace::flood(count),
-                Err(_) => SyscallError::InvalidArgument.to_u64(),
-            },
+            DA::TRACE_FLOOD if a2 <= DA::TRACE_FLOOD_MOST => crate::trace::flood(a2),
             // An interrupt inside a syscall's body, which nothing a guest does puts there on demand.
             DA::RING0_TIMER_IN_SYSCALL => ring0_timer_in_syscall(),
             DA::ACPI_FIRMWARE_LOCK => crate::arch::acpi_mode::debug_firmware_lock(a2),
             // A translation outliving its entry, which only a TLB that keeps one shows.
             DA::GLOBAL_LEAF_REWRITE => crate::mm::paging::debug_global_leaf(a2),
             _ => SyscallError::InvalidArgument.to_u64(),
-        },
-        SYS_SCHED_INFO => match ctx.copy_out(UserAddr::new(a1), &sys_sched_info()) {
-            Ok(()) => 0,
-            Err(e) => e.to_u64(),
         },
         SYS_PROCESS_STATS => {
             let stats_size = core::mem::size_of::<toyos_abi::syscall::ProcessStats>() as u64;
@@ -634,11 +601,11 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_SET_THREAD_NAME => {
             // Refused by name, not clamped: a length past the bound is the caller's
             // bad argument, not a shorter name to silently write.
-            let Ok(len) = Untrusted::new(a2).at_most(process::THREAD_NAME_LEN as u64) else {
+            if a2 > process::THREAD_NAME_LEN as u64 {
                 return SyscallError::InvalidArgument.to_u64();
-            };
-            let len = len as usize;
-            let Some(bytes) = ctx.user_bytes(UserAddr::new(a1), len as u64) else {
+            }
+            let len = a2 as usize;
+            let Some(bytes) = ctx.user_bytes(UserAddr::new(a1), a2) else {
                 return bad_addr;
             };
             let mut name = [0u8; process::THREAD_NAME_LEN];
@@ -649,9 +616,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         // Gated by the claim handle alone, as a PCI function's calls are: the
         // kernel decides each access by what its address is.
         SYS_ACPI => sys_acpi(&ctx, RawHandle(a1 as u32), a2, a3),
-        SYS_DEVICE_REG_READ => sys_device_reg(RawHandle(a1 as u32), a2, a3, None),
-        SYS_DEVICE_REG_WRITE => sys_device_reg(RawHandle(a1 as u32), a2, a3, Some(a4)),
-        SYS_HDA_BIND => sys_hda_bind(RawHandle(a1 as u32), a2),
+        SYS_DEVICE_REG_READ => sys_device_reg_read(RawHandle(a1 as u32), a2, a3),
         _ => SyscallError::InvalidArgument.to_u64(),
     } })();
 

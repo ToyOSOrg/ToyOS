@@ -106,9 +106,11 @@ measurement: the model of the T14's AML that was read makes two calls in one
 evaluation at the most, and retries a call its handler has not answered once
 a millisecond, ten thousand times; eight holds that storm to eight calls a
 second and refuses the rest, and whether it refuses a call a healthy machine
-needs is unread. No call but the kernel's own enable and disable has been
-made on the T14: the server passes no write its AML asks for to the kernel
-yet (`system/acpiserver/src/host.rs`), so nothing there asks for one. On QEMU's q35 the chipset model keeps the byte and its
+needs is unread. Since `d2006cc65` the server
+asks the kernel for a byte its AML writes to `SMI_CMD`
+(`system/acpiserver/src/host.rs`), and since `15536e2e0` for every port write
+it makes, so the T14's AML can make calls; no reading of what those calls
+cost there is recorded. On QEMU's q35 the chipset model keeps the byte and its
 `SMI_EN` reads 0, so no guest's call interrupts a firmware, and what a guest
 reads of one is that it was written, where, and how often.
 
@@ -122,9 +124,10 @@ beside `issues/the-acpi-servers-holder-drives-the-embedded-controller-unfiltered
 to the port, checked by something other than the holder, or the owner rules
 the bound above is the one ToyOS keeps; and the rate is held against the
 calls a T14 row reads the machine's own AML making, with the time each held
-the boot processor; and the span is ruled. The slice that passes the first
-write its AML asks for to the kernel reads on the T14 the time each call its
-AML makes holds cpu0, and the owner rules, against those readings, whether a
-handler that returns after `DEAF_CPU` ends the machine. Where the interrupt
-stops every CPU the kernel such a handler returns to is whole, so the panic
-there is this kernel's choice. That slice does not land without the ruling.
+the boot processor; and the span is ruled.
+The T14 reading owed is the time each call its AML makes holds cpu0 (the
+slice that passes those writes landed in `d2006cc65`, and no such reading or
+ruling is recorded here), and the owner rules, against those readings,
+whether a handler that returns after `DEAF_CPU` ends the machine. Where the
+interrupt stops every CPU the kernel such a handler returns to is whole, so
+the panic there is this kernel's choice.

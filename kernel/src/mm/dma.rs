@@ -6,10 +6,9 @@
 
 use alloc::vec::Vec;
 use core::marker::PhantomData;
-use core::ptr::{copy_nonoverlapping, read_unaligned, read_volatile, write_bytes,
-                write_unaligned, write_volatile};
+use core::ptr::{copy_nonoverlapping, read_unaligned, read_volatile, write_bytes, write_volatile};
 
-use crate::iommu::DeviceSpace;
+use crate::iommu::{DeviceSpace, IommuError, Limit};
 
 use super::pmm::PhysPage;
 use super::DirectMap;
@@ -59,12 +58,6 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         Self { base, device, size, pool: PhantomData, how: PhantomData }
     }
 
-    /// How many bytes this view covers.
-    #[inline]
-    pub fn size(self) -> usize {
-        self.size
-    }
-
     /// The address to program a device with for the first byte; never a
     /// physical address once a unit translates this pool's domain.
     #[inline]
@@ -72,28 +65,13 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         self.device
     }
 
-    /// Where the first byte is: what a page table maps, not what a descriptor carries.
+    /// Where the first byte is: what a page table maps, not what a descriptor
+    /// carries. The virtio parse selftest's alone, which lays a config space
+    /// over a pool.
+    #[cfg(feature = "boot-actuators")]
     #[inline]
     pub fn host_phys(self) -> u64 {
         DirectMap::phys_of(self.base)
-    }
-
-    /// This view's base as a number, to be handed back to [`Self::from_addr`].
-    #[inline]
-    pub fn addr(self) -> u64 {
-        self.base as u64
-    }
-
-    /// Rebuild a view from an [`addr`](Self::addr), a
-    /// [`device_addr`](Self::device_addr) and a [`size`](Self::size) taken off a
-    /// live one.
-    ///
-    /// # Safety
-    /// The three must be one live view's own, over a pool that lives for the
-    /// machine's life.
-    #[inline]
-    pub unsafe fn from_addr(addr: u64, device: u64, size: usize) -> Self {
-        Self::new(addr as *mut u8, device, size)
     }
 
     /// The `size` bytes at `offset`, refused if not wholly inside `self`.
@@ -119,15 +97,7 @@ impl<'pool, D: Discipline> Dma<'pool, D> {
         unsafe { copy_nonoverlapping(src.as_ptr(), self.base.add(offset), src.len()) }
     }
 
-    /// Copy `dst.len()` bytes at `offset` into `dst`, never a borrow into DMA memory.
-    #[inline]
-    pub fn copy_to(self, offset: usize, dst: &mut [u8]) {
-        self.check(offset, dst.len());
-        // SAFETY: `check` bounded the source for `dst.len()` bytes; the two cannot overlap, as `copy_from` explains.
-        unsafe { copy_nonoverlapping(self.base.add(offset), dst.as_mut_ptr(), dst.len()) }
-    }
-
-    // Panics, not `Result`: every offset/length here is the driver's own arithmetic, never a device-chosen number (those arrive as `Untrusted` and are bounded before becoming an offset).
+    // Panics, not `Result`: every offset/length here is the driver's own arithmetic, never a device-chosen number (those are bounded at their decode before becoming an offset).
     #[inline]
     fn check(self, offset: usize, len: usize) {
         if let Err(why) = toyos_dma::within(offset, len, self.size) {
@@ -191,14 +161,6 @@ impl Dma<'_, Unaligned> {
         // SAFETY: `check` refused anything but `size_of::<T>()` bytes; not volatile, since this discipline is for a structure the device has finished writing.
         unsafe { read_unaligned(self.base.add(offset) as *const T) }
     }
-
-    /// Write `value` to the `T` at `offset`, whatever it is aligned to.
-    #[inline]
-    pub fn write<T: Copy>(self, offset: usize, value: T) {
-        self.check(offset, core::mem::size_of::<T>());
-        // SAFETY: `check` refused anything but `size_of::<T>()` bytes; not volatile, since this discipline is for a structure written before the device is told where it is.
-        unsafe { write_unaligned(self.base.add(offset) as *mut T, value) }
-    }
 }
 
 /// Contiguous DMA memory backed by 2 MiB physical pages; dropping it frees them.
@@ -214,22 +176,28 @@ pub struct DmaPool {
 
 impl DmaPool {
     /// Take enough contiguous 2 MiB pages to cover `size` bytes, mapped into
-    /// `space` and reachable by nothing outside it.
-    pub fn alloc_in(size: usize, space: DeviceSpace) -> Self {
+    /// `space` below `limit`, the device's address width, and reachable by
+    /// nothing outside it; refused where none below it is left — for an
+    /// untranslated device, where the pages lie above it.
+    pub fn alloc_in(size: usize, space: DeviceSpace, limit: Limit) -> Result<Self, IommuError> {
         let pages_2m = size.div_ceil(super::PAGE_2M as usize);
         let pages = super::pmm::alloc_contiguous(pages_2m)
             .expect("DmaPool: out of physical memory");
         let base = pages[0].direct_map();
         let size = pages_2m * super::PAGE_2M as usize;
-        // A domain this kernel cannot map into is a kernel bug, not a device's
-        // answer: the addresses are the allocator's own and the pages are 2 MiB.
-        let device = space
-            .map(base.phys(), size as u64)
-            .unwrap_or_else(|why| panic!("DmaPool: {why}"));
-        Self { pages, base, size, space, device }
+        // A device's width is its answer; any other refusal is a kernel bug:
+        // the addresses are the allocator's own and the pages are 2 MiB.
+        let device = match space.map(base.phys(), size as u64, limit) {
+            Ok(device) => device,
+            Err(why @ IommuError::AddressesExhausted(_)) => return Err(why),
+            Err(why) => panic!("DmaPool: {why}"),
+        };
+        Ok(Self { pages, base, size, space, device })
     }
 
-    /// The whole pool as a view, borrowed so it cannot outlive `self`.
+    /// The whole pool as a view, borrowed so it cannot outlive `self`: the
+    /// virtio parse selftest's alone.
+    #[cfg(feature = "boot-actuators")]
     pub fn view(&self) -> Dma<'_> {
         Dma::new(self.base.as_mut_ptr(), self.device, self.size)
     }

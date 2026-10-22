@@ -23,6 +23,7 @@ mod iort;
 mod ivrs;
 mod madt;
 mod mcfg;
+mod pptt;
 mod resource;
 mod spcr;
 
@@ -46,6 +47,7 @@ pub use madt::{
     Polarity, SourceOverride, Trigger, MADT_ENTRIES,
 };
 pub use gtdt::{gtdt, Gtdt, TimerInterrupt, GTDT_NEEDED};
+pub use pptt::{pptt, Place, Pptt, PpttRefused};
 pub use mcfg::{ecam_allocations, AllocationRefused, Allocations, ConfigRegister, EcamWindow, SEGMENT_GROUP};
 pub use resource::{io_ports, root_bridge, ResourceError, RootResources, MAX_LIST_BYTES};
 pub use spcr::{spcr, Gas, SerialInterface, Spcr, GAS_SYSTEM_MEMORY, SPCR_NEEDED};

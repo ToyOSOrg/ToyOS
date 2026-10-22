@@ -6,10 +6,10 @@ opened: 2026-09-03
 
 # The kernel cannot tell "no display" from "a display that published no framebuffer"
 
-Both arrive in `KernelArgs` as zeros, so `kernel/src/main.rs:284-288` records the
-same line for a machine with no display device at all and for one whose firmware
-published a Graphics Output Protocol that has no linear framebuffer to hand over.
-Three shapes, one image, the guest's own 16550:
+Both arrive in `KernelArgs` as zeros, so `kernel/src/main.rs`'s `boot: gop` line
+records the same line for a machine with no display device at all and for one
+whose firmware published a Graphics Output Protocol that has no linear
+framebuffer to hand over. Three shapes, one image, the guest's own 16550:
 
 ```
 == no-display            (-vga none)

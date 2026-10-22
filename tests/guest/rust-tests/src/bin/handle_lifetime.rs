@@ -23,11 +23,12 @@
 //! what it can about it, and waits to be killed.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::toyos::process::CommandExt;
+use std::os::toyos::process::{CommandExt, ExitStatusExt};
 use std::process::{Child, ChildStdout, Command, Stdio};
 
 use toyos::census::Census;
 use toyos::{namespace, port, AsHandle};
+use toyos_abi::end::{End, Fault};
 use toyos_abi::handle::ObjectKind;
 use toyos_abi::inbox::RingLayout;
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom, SyscallError, SERVE_PREFIX};
@@ -43,8 +44,8 @@ const PATH: &[u8] = b"/tmp/handle-lifetime.txt";
 const KILLED_PATH: &[u8] = b"/tmp/handle-lifetime-killed.txt";
 const PAYLOAD: &[u8] = b"a file outlives the handle that was closed first";
 const KILLED_PAYLOAD: &[u8] = b"written by a process that was killed before it could close";
-/// `process::HANDLE_FAULT_EXIT_CODE`.
-const HANDLE_FAULT: i32 = 139;
+/// How the kernel ends a process that names a handle it does not hold.
+const HANDLE_FAULT: End = End::Fault(Fault::Handle);
 /// How many rings the `ring` holder makes. Eight rather than one because the
 /// arrival check has to be able to fail: a holder that made none would leave
 /// nothing for the reclaim assertion to be about.
@@ -171,7 +172,7 @@ fn ring_survives_one_close() {
         "the closed-ring probe never reached its call",
     );
     assert_eq!(
-        out.status.code(),
+        End::from_word(out.status.into_raw()),
         Some(HANDLE_FAULT),
         "the last close left the ring's handle behind",
     );

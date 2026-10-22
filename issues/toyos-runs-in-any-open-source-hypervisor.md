@@ -30,7 +30,6 @@ signature. What they do depend on, each filed:
 
 - `issues/diskserver-claims-qemus-nvme-by-its-pci-id.md`
 - `issues/the-virtio-drivers-match-only-a-non-transitional-device-id.md`
-- `issues/a-virtio-function-that-offers-no-access-platform-is-handed-over-as-translated.md`
 - `issues/the-x86-clock-calibrates-against-an-hpet-or-the-boot-panics.md`
 - `issues/a-hardware-reduced-x86-machine-has-no-power-off-and-no-power-button.md`
 - `issues/no-claim-gets-an-address-space-under-virtio-iommu.md`
@@ -41,9 +40,6 @@ and, filed before this track:
 - `issues/a-machine-without-an-iommu-refuses-every-claim.md` — bhyve; crosvm
   for every device it emulates; and VirtualBox, QEMU and Cloud Hypervisor by
   default (`issues/no-claim-gets-an-address-space-under-virtio-iommu.md`).
-- `issues/a-hid-interface-outside-the-boot-subclass-is-read-as-qemus-tablet.md`
-  — VirtualBox's USB tablet, a subclass-0 interface; bhyve's declares the
-  boot mouse subclass and protocol.
 - `issues/getsockname-answers-an-address-nobody-asked-netstack-for.md` —
   QEMU's user-mode network address in `sdk/libc`.
 - `issues/pci-is-enumerated-on-segment-group-0-alone.md` — Cloud
@@ -54,10 +50,10 @@ target is asked for AMD-Vi, VirtualBox's `--iommu amd` and QEMU's
 `amd-iommu`, and no target's default asks; QEMU's unit has no SMI filter, so
 a claim is refused there.
 
-Three of the launcher's QEMU options keep three of these off every guest
-test: the `-non-transitional` virtio devices the transitional id,
-`iommu_platform=on` the missing `ACCESS_PLATFORM`, and `msix-exclusive-bar=on`
-the MSI-X table (`build/qemu.rs`, `tests/common/qemu.rs`). The rest of what is
+Two of the launcher's QEMU options keep two of these off every guest test:
+the `-non-transitional` virtio devices the transitional id, and
+`iommu_platform=on` the missing `ACCESS_PLATFORM` (`build/qemu.rs`,
+`tests/common/qemu.rs`). The rest of what is
 QEMU's there — the xHCI models, the boot stick, `-vga std`, `ramfb` under
 AArch64's edk2, `caching-mode=on`, `kernel-irqchip`, `iommu-testdev`, QMP — is
 the harness's alone.
@@ -96,7 +92,7 @@ its NVMe, GOP, i8042, xHCI and HDA are driven here, and its virtio-net once its
 transitional id is.
 
 Unsupported, and not owed: bhyve's HDA, which raises INTx alone. ToyOS arms
-MSI-X or MSI only (`kernel/src/drivers/hda.rs`'s `arm_interrupt`, `pcidev`)
+MSI-X or MSI only (`pcidev`'s `bring_up`)
 and takes up no line-based interrupt (the orchestrator's ruling, #896,
 issuecomment-6131213771, ruling 3), so bhyve has no sound.
 

@@ -22,7 +22,6 @@ pub const SYS_SPAWN: u64 = 25;
 pub const SYS_MARK_TTY: u64 = 28;
 pub const SYS_THREAD_SPAWN: u64 = 40;
 pub const SYS_THREAD_JOIN: u64 = 41;
-pub const SYS_CLOCK_REALTIME: u64 = 42;
 /// A header describing the machine, optionally followed by the roster of every
 /// live thread in it. See [`sysinfo`].
 ///
@@ -101,9 +100,6 @@ pub const SYS_READ_NONBLOCK: u64 = 66;
 pub const SYS_WRITE_NONBLOCK: u64 = 67;
 pub const SYS_EXIT: u64 = 72;
 pub const SYS_GET_ENV: u64 = 73;
-/// A second handle to the same object, at a slot the caller picks. See
-/// [`dup2`].
-pub const SYS_HANDLE_DUP_AT: u64 = 74;
 pub const SYS_CLOCK_EPOCH: u64 = 75;
 pub const SYS_PIPE_MAP: u64 = 77;
 pub const SYS_SYMLINK: u64 = 81;
@@ -126,13 +122,16 @@ pub const SYS_QUERY_MODULES: u64 = 91;
 ///   0 = kernel panic (triggers panic!() in syscall context)
 ///   1 = kernel fault (null pointer deref in kernel context)
 pub const SYS_DEBUG: u64 = 92;
-pub const SYS_SCHED_INFO: u64 = 93;
+/// Make a new job — the owner its threads share CPU time under — gated by
+/// [`Rights::JOBS`] on a `SysCap`. See [`job_create`].
+///
+/// [`Rights::JOBS`]: crate::handle::Rights::JOBS
+pub const SYS_JOB_CREATE: u64 = 93;
 pub const SYS_PROCESS_STATS: u64 = 94;
 pub const SYS_SET_THREAD_NAME: u64 = 95;
-/// Read one register of a claimed device. See [`device_reg_read`].
+/// Read one register of a claimed PCI function's config space. See
+/// [`device_reg_read`].
 pub const SYS_DEVICE_REG_READ: u64 = 97;
-/// Write one register of a claimed device. See [`device_reg_write`].
-pub const SYS_DEVICE_REG_WRITE: u64 = 98;
 
 /// Read this process's endowment table back: the `(label, handle)` pairs its
 /// parent gave it at spawn, as an `[EndowEntry]` count followed by the entries
@@ -164,13 +163,8 @@ pub const SYS_NAMESPACE_BUILD: u64 = 101;
 /// no other place to ask, and a name it was not given resolves to nothing.
 pub const SYS_NAMESPACE_OPEN: u64 = 102;
 
-/// Move handles to the peer of a connection. See [`handle_send`].
-///
-/// The batch is queued on the connection, not interleaved with its bytes, so
-/// **handles are sent before the frame that announces them** and a receiver
-/// that has the frame already has the handles.
-pub const SYS_HANDLE_SEND: u64 = 103;
-/// Take the oldest batch of handles the peer sent. See [`handle_recv`].
+/// Take the batch of handles at the reader's place in the connection's bytes.
+/// See [`handle_recv`].
 pub const SYS_HANDLE_RECV: u64 = 104;
 /// Make a shared-memory region, sized up to whole [`SHM_PAGE`]s.
 /// See [`shm_create`].
@@ -182,14 +176,14 @@ pub const SYS_SHM_MAP: u64 = 106;
 /// What [`SYS_SHM_CREATE`] rounds a length up to a whole number of.
 pub const SHM_PAGE: usize = 2 << 20;
 
-/// Wait for the process a handle names and take its exit code, gated by
-/// [`Rights::WAIT`]. See [`process_wait`].
+/// Wait for the process a handle names and take how it ended, an [`End`]'s
+/// word, gated by [`Rights::WAIT`]. See [`process_wait`].
 ///
-/// **An exit code is a property of the object, not of a table entry**, so this
+/// **An end is a property of the object, not of a table entry**, so this
 /// answers whether or not the process is still around: a spawner that waits a
-/// second time gets the same code, and one that waits for the first time long
+/// second time gets the same end, and one that waits for the first time long
 /// after the process is gone gets it too. There is nothing to reap and no
-/// window in which an exit is missed.
+/// window in which an end is missed.
 ///
 /// [`Rights::WAIT`]: crate::handle::Rights::WAIT
 pub const SYS_PROCESS_WAIT: u64 = 108;
@@ -234,11 +228,8 @@ pub const SYS_DEVICE_BAR_MAP: u64 = 117;
 /// [`device_dma_alloc`].
 pub const SYS_DEVICE_DMA_ALLOC: u64 = 118;
 
-/// Read blocks of a claimed partition. See [`partition_read`].
-pub const SYS_PARTITION_READ: u64 = 119;
-
-/// Write blocks of a claimed partition. See [`partition_write`].
-pub const SYS_PARTITION_WRITE: u64 = 120;
+// 119 and 120 were `SYS_PARTITION_READ` and `SYS_PARTITION_WRITE`, a
+// partition claim's blocks on a disk this kernel drove; it drives none.
 
 /// What the machine is made of, and who holds each part of it, as
 /// [`crate::inventory`] records. Gated by [`Rights::INVENTORY`] on a `SysCap`.
@@ -284,10 +275,19 @@ pub const SYS_TRACE_READ: u64 = 127;
 /// kernel mediates, the firmware's Global Lock, or the power-off's sleep type.
 /// See [`acpi_access`], [`acpi_lock_take`], [`acpi_s5`] and [`acpi_declare`].
 pub const SYS_ACPI: u64 = 128;
-
-/// Bind the `hda-audio` claim's stream to the listed controller it names. See
-/// [`hda_bind`].
-pub const SYS_HDA_BIND: u64 = 129;
+/// A fresh null handle: every read answers end of file and every write takes
+/// all it is given. See [`null`].
+pub const SYS_NULL: u64 = 130;
+/// State the address width a claimed PCI function issues. See
+/// [`device_dma_limit`].
+pub const SYS_DEVICE_DMA_LIMIT: u64 = 131;
+/// Let a claimed PCI function master the bus. See [`device_dma_start`].
+pub const SYS_DEVICE_DMA_START: u64 = 132;
+/// Write a message's bytes to a connection and move the handles it carries,
+/// together or not at all. See [`message_send`].
+pub const SYS_MESSAGE_SEND: u64 = 133;
+/// A handle to the job the caller runs in. See [`job_own`].
+pub const SYS_JOB_OWN: u64 = 134;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -295,40 +295,37 @@ pub const SYS_HDA_BIND: u64 = 129;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 131;
+pub const SYSCALL_PROFILE_BINS: usize = 136;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_HDA_BIND < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_JOB_OWN < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
 crate::user_safe! {
     /// Arguments for the `SYS_SPAWN` syscall, passed as a single pointer.
     ///
-    /// **Two vectors, two verbs.** `slot_map` *duplicates* — the parent keeps its
-    /// stdout — and `endow` *moves*, so a parent that wants to keep what it endows
-    /// duplicates first. That is what makes endowing a device claim work with no
-    /// special case: a claim carries no [`Rights::DUP`], so the move is the only
-    /// expressible form and the parent provably no longer holds it.
+    /// **Every handle a child starts with is endowed, and an endowment moves**,
+    /// so a parent that wants to keep what it endows duplicates first. That is
+    /// what makes endowing a device claim work with no special case: a claim
+    /// carries no [`Rights::DUP`], so the move is the only expressible form and
+    /// the parent provably no longer holds it. A child's descriptors are
+    /// endowments labelled [`FD_PREFIX`] and their number; a console among
+    /// them is the child's own, minted for it.
     ///
     /// [`Rights::DUP`]: crate::handle::Rights::DUP
     #[derive(Clone, Copy)]
     pub struct SpawnArgs {
-        /// The program: the file the kernel opens and pages the child from — its
-        /// libraries are found beside it — or, with an `image`, the path the caller
-        /// read that from. **Never `argv[0]`**, which is the child's first argument
+        /// The program: the file the kernel opens and pages the child from, or,
+        /// with an `image`, the path the caller read that from. **Never `argv[0]`**, which is the child's first argument
         /// and the name it goes by, and which nothing opens.
         pub path_ptr: u64,
         pub path_len: u64,
         pub argv_ptr: u64,
         pub argv_len: u64,
-        /// `[[child_slot: u32, parent_handle: RawHandle]]`, duplicated into the
-        /// child. Stdio and nothing else, in practice.
-        pub slot_map_ptr: u64,
-        pub slot_map_count: u64,
         pub env_ptr: u64,
         pub env_len: u64,
         /// `[EndowEntry]`, moved out of the parent's table.
@@ -353,7 +350,7 @@ crate::user_safe! {
         /// hold, or an object that is no memory the kernel allocated. The object
         /// stays the caller's: what the kernel reads of it, and when, is
         /// `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is then opened by
-        /// nobody, and the libraries are found in `/system/lib` alone.
+        /// nobody.
         pub image: u64,
         pub image_len: u64,
         /// The process the child is placed under, whose end takes it down: a
@@ -366,6 +363,26 @@ crate::user_safe! {
         ///
         /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
         pub place: u64,
+    }
+}
+
+crate::user_safe! {
+    /// Arguments for the `SYS_DLOPEN` syscall, passed as a single pointer.
+    #[derive(Clone, Copy)]
+    pub struct DlopenArgs {
+        /// The name the module goes by: what `SYS_QUERY_MODULES` answers for
+        /// it, and what a second load is known by, which answers the module
+        /// already loaded and runs no initialiser again. Nothing opens it.
+        pub name_ptr: u64,
+        pub name_len: u64,
+        /// The library's bytes, in a shared memory object the caller read them
+        /// into, as [`SpawnArgs::image`] names a program's: a handle carrying
+        /// `MAP`, and how many of its first bytes the library is.
+        pub image: u64,
+        pub image_len: u64,
+        /// Where the kernel writes the module's `[.init_array address, count]`,
+        /// or 0 for nowhere.
+        pub init_out: u64,
     }
 }
 
@@ -399,10 +416,22 @@ pub const SVC_LABEL: &str = "svc";
 /// `WRITE`, `DUP` and `TRANSFER`: what it hands on for a child to be placed
 /// under it ([`SpawnArgs::place`]). The kernel puts it in every table.
 pub const SELF_LABEL: &str = "self";
+/// The label a spawn endows a job under to put its child in it: the owner its
+/// threads, and its children's unless a spawn names another, share CPU time
+/// under. It takes a handle carrying [`Rights::WRITE`] to a job — the caller's
+/// own is [`job_own`]'s, and a new one [`job_create`]'s. A spawn naming none
+/// puts the child in its spawner's job.
+///
+/// [`Rights::WRITE`]: crate::handle::Rights::WRITE
+pub const JOB_LABEL: &str = "job";
 /// `serve:<name>`: the acceptor of a machine-wide port this program serves.
 pub const SERVE_PREFIX: &str = "serve:";
 /// `dev:<class>`: the claim for a device class this program was given.
 pub const DEV_PREFIX: &str = "dev:";
+/// `fd:<n>`: the child's descriptor `n`, which its descriptor table installs
+/// at that number (`toyos::fd`). Numbering is userland's: the kernel only
+/// moves the handle.
+pub const FD_PREFIX: &str = "fd:";
 /// `provide:<name>`: a connector a *launching client* transferred, beside the
 /// namespace entry the launcher made from it.
 ///
@@ -420,20 +449,12 @@ pub const PROVIDE_PREFIX: &str = "provide:";
 pub const MAX_ENDOWMENTS: usize = 32;
 /// `(label, handle)` pairs one spawn may carry: the kernel adds [`SELF_LABEL`].
 pub const MAX_SPAWN_ENDOWMENTS: usize = MAX_ENDOWMENTS - 1;
-/// `(child slot, parent handle)` pairs one spawn may carry.
-///
-/// **Derived rather than chosen.** A slot map installs into the child's table,
-/// which has [`RawHandle::MAX_SLOTS`] slots, so a longer one necessarily names
-/// a slot twice and the second pair says everything the first did. Without it
-/// the only bound is the 2 MiB window the arguments are read through, and every
-/// pair is a `duplicate_entry` under the parent's own lock — enough of them to
-/// pass `MAX_HEAP_ALLOC`, where the allocator's refusal is a kernel panic.
-pub const MAX_SLOT_MAP: usize = RawHandle::MAX_SLOTS;
 /// Bytes of label blob one endowment table holds, [`SELF_LABEL`]'s among them.
 pub const MAX_LABELS_LEN: usize = 4096;
 /// Bytes of label blob one spawn may carry: the kernel adds [`SELF_LABEL`]'s.
 pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len();
 
+use crate::end::End;
 use crate::handle::Rights;
 use crate::pci::{DmaGrant, DmaMapping};
 use crate::{Pid, RawHandle, HANDLE_INVALID};
@@ -477,6 +498,9 @@ pub enum SyscallError {
     /// the same rule the storage layer already obeys applies here: a dead peer
     /// must not be indistinguishable from a handle that was never there.
     Gone = 10,
+    /// A read of a connection reached a batch of handles the peer sent with
+    /// the bytes before it: take the batch ([`handle_recv`]) before reading on.
+    HandlesPending = 11,
 }
 
 impl SyscallError {
@@ -501,6 +525,7 @@ impl SyscallError {
             8 => Some(Self::NotSupported),
             9 => Some(Self::Io),
             10 => Some(Self::Gone),
+            11 => Some(Self::HandlesPending),
             _ => Some(Self::Unknown),
         }
     }
@@ -520,6 +545,7 @@ impl core::fmt::Display for SyscallError {
             Self::NotSupported => f.write_str("not supported"),
             Self::Io => f.write_str("the device did not complete the transfer"),
             Self::Gone => f.write_str("the other end is gone"),
+            Self::HandlesPending => f.write_str("handles the peer sent wait at this point of the stream"),
         }
     }
 }
@@ -545,11 +571,11 @@ pub enum FileType {
     Unknown = 0,
     File = 1,
     Pipe = 2,
-    Keyboard = 3,
+    // 3 was `Keyboard` and 7 `Mouse`, the kernel's input streams: input is
+    // userland's, over the `input` port.
     Serial = 4,
     Framebuffer = 5,
     Tty = 6,
-    Mouse = 7,
     Socket = 8,
     // 9 was `Nic`, the type a claim on the kernel's own NIC driver reported.
     // A claim on a PCI function reports `Unknown`: what it is, is the driver's
@@ -565,6 +591,8 @@ pub enum FileType {
     /// Any other shared-memory region, such as a device's registers; `size`
     /// is its length. A peer's buffer is never one.
     DeviceMemory = 13,
+    /// A [null](null) handle.
+    Null = 14,
 }
 
 impl FileType {
@@ -573,16 +601,15 @@ impl FileType {
             0 => Some(Self::Unknown),
             1 => Some(Self::File),
             2 => Some(Self::Pipe),
-            3 => Some(Self::Keyboard),
             4 => Some(Self::Serial),
             5 => Some(Self::Framebuffer),
             6 => Some(Self::Tty),
-            7 => Some(Self::Mouse),
             8 => Some(Self::Socket),
             10 => Some(Self::SharedMemory),
             11 => Some(Self::Directory),
             12 => Some(Self::Symlink),
             13 => Some(Self::DeviceMemory),
+            14 => Some(Self::Null),
             _ => None,
         }
     }
@@ -665,14 +692,6 @@ pub struct PipeEnds {
     pub write: RawHandle,
 }
 
-/// Wall-clock time from RTC.
-#[derive(Debug, Clone, Copy)]
-pub struct RealTime {
-    pub hours: u8,
-    pub minutes: u8,
-    pub seconds: u8,
-}
-
 /// File metadata returned by [`fstat`] and [`stat`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -747,7 +766,8 @@ fn encode_timeout(timeout: Option<u64>) -> u64 {
 }
 
 /// Write bytes to a handle. Returns number of bytes written; a pipe or
-/// connection whose other end has closed is [`SyscallError::Gone`].
+/// connection whose other end has closed is [`SyscallError::Gone`]. A pipe
+/// write of at most [`MAX_WHOLE_PIPE_WRITE`] bytes writes all of them.
 pub fn write(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_WRITE, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
@@ -965,18 +985,22 @@ pub fn endowments(buf: &mut [u8]) -> usize {
     syscall(SYS_ENDOWMENTS, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0) as usize
 }
 
-/// Block until the process `proc` names has exited, and take its exit code.
-pub fn process_wait(proc: RawHandle) -> Result<i32, SyscallError> {
-    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, 0, 0, 0)).map(|code| code as i32)
+/// Block until the process `proc` names has ended, and take how.
+pub fn process_wait(proc: RawHandle) -> Result<End, SyscallError> {
+    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, 0, 0, 0)).map(end_of)
 }
 
-/// The exit code if the process has already exited, `Err(WouldBlock)` if it has
-/// not.
+/// How the process ended if it has, `Err(WouldBlock)` if it has not.
 ///
 /// [`WNOHANG`] rather than a syscall of its own: this is the same question with
 /// the wait taken out, and a caller that polls is asking about the same object.
-pub fn process_wait_nonblock(proc: RawHandle) -> Result<i32, SyscallError> {
-    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, WNOHANG, 0, 0)).map(|code| code as i32)
+pub fn process_wait_nonblock(proc: RawHandle) -> Result<End, SyscallError> {
+    check(syscall(SYS_PROCESS_WAIT, proc.0 as u64, WNOHANG, 0, 0)).map(end_of)
+}
+
+/// The end the kernel answered, which is one it defines or a kernel bug.
+fn end_of(word: u64) -> End {
+    End::from_word(word).unwrap_or_else(|| panic!("SYS_PROCESS_WAIT answered {word:#x}, which names no end"))
 }
 
 /// Kill the process `proc` names. Answers `Ok` for one already dead: the
@@ -993,25 +1017,31 @@ pub fn process_kill(proc: RawHandle) -> Result<(), SyscallError> {
 /// source and parks; a syscall that waited would be a second blocking mechanism
 /// in a kernel that is converging on one.
 ///
-/// `out` is whole [`crate::log::LogRecord`]s at a fixed stride, so the caller
-/// indexes by shift and the kernel does no length arithmetic. A buffer that
-/// cannot hold one record, or that cannot hold what the machine's shard count
-/// requires, is `InvalidArgument` — untrusted input that cannot be satisfied is
-/// refused, never truncated to fit. So is a `cursor` ahead of a shard
-/// ([`crate::log::LogCursor::next`]).
+/// `cursor` is a [`crate::log::CursorHead`] and its positions; this stores
+/// how many positions follow into the head. `out` is whole
+/// [`crate::log::LogRecord`]s at a fixed stride, so the caller indexes by shift
+/// and the kernel does no length arithmetic. A buffer of no records, a cursor
+/// with other than a position per shard, and a position ahead of its shard are
+/// `InvalidArgument` — untrusted input that cannot be satisfied is refused,
+/// never truncated to fit — and a refusal past the head still answers the
+/// shard count in it.
 pub fn log_read(
     syscap: RawHandle,
-    cursor: &mut crate::log::LogCursor,
+    cursor: &mut [u64],
     out: &mut [crate::log::LogRecord],
 ) -> Result<usize, SyscallError> {
-    check(syscall(
-        SYS_LOG_READ,
-        syscap.0 as u64,
-        cursor as *mut crate::log::LogCursor as u64,
-        out.as_mut_ptr() as u64,
-        out.len() as u64,
-    ))
-    .map(|n| n as usize)
+    let cursor = sized_cursor(cursor)?;
+    check(syscall(SYS_LOG_READ, syscap.0 as u64, cursor as u64, out.as_mut_ptr() as u64, out.len() as u64))
+        .map(|n| n as usize)
+}
+
+/// `cursor`'s head told how many positions follow it, as the address a read takes.
+fn sized_cursor(cursor: &mut [u64]) -> Result<*mut u64, SyscallError> {
+    use crate::log::{CursorHead, CURSOR_HEAD_WORDS};
+    let (head, positions) = cursor.split_first_chunk_mut::<CURSOR_HEAD_WORDS>().ok_or(SyscallError::InvalidArgument)?;
+    let slots = u32::try_from(positions.len()).map_err(|_| SyscallError::InvalidArgument)?;
+    *head = CursorHead { slots, ..CursorHead::from_words(*head) }.to_words();
+    Ok(cursor.as_mut_ptr())
 }
 
 /// Mark this handle as the controlling TTY for this process.
@@ -1051,6 +1081,12 @@ pub const MAX_LINKS: u32 = 10;
 /// The longest path a file server's wire carries (`sdk/toyos/src/fs.rs`), and
 /// libc's `PATH_MAX` (`sdk/libc/include/limits.h`).
 pub const MAX_PATH: usize = 4096;
+
+/// The longest pipe write that lands whole: never interleaved with another
+/// writer's bytes, it waits for room for all of it, and a pipe end polls
+/// writable only with this much room. A longer write may land in parts.
+/// libc's `PIPE_BUF` (`sdk/libc/include/limits.h`).
+pub const MAX_WHOLE_PIPE_WRITE: usize = 4096;
 
 /// Open a file.
 pub fn open(path: &[u8], flags: OpenFlags) -> Result<RawHandle, SyscallError> {
@@ -1177,22 +1213,12 @@ pub fn random(buf: &mut [u8]) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_RANDOM, buf.as_mut_ptr() as u64, buf.len() as u64, 0, 0))
 }
 
+/// Seconds since the Unix epoch (1970-01-01 00:00:00 UTC).
+///
 /// `None` is a machine that never said what time it is — an RTC that is absent,
 /// wedged, or answering with something that is not a date. It is `None` for the
 /// whole of such a boot rather than intermittently, because the kernel reads
 /// the clock once.
-pub fn clock_realtime() -> Option<RealTime> {
-    let raw = check(syscall(SYS_CLOCK_REALTIME, 0, 0, 0, 0)).ok()?;
-    Some(RealTime {
-        hours: ((raw >> 16) & 0xFF) as u8,
-        minutes: ((raw >> 8) & 0xFF) as u8,
-        seconds: (raw & 0xFF) as u8,
-    })
-}
-
-/// Seconds since the Unix epoch (1970-01-01 00:00:00 UTC).
-///
-/// `None` on the same machine and for the same reason as [`clock_realtime`].
 /// Cheap: the kernel serves it from an anchor it took at boot plus the
 /// monotonic clock, so this is a syscall and not a device access.
 pub fn clock_epoch() -> Option<u64> {
@@ -1265,12 +1291,8 @@ macro_rules! device_classes {
 }
 
 device_classes! {
-    Keyboard = 0 => "keyboard",
-    Mouse = 1 => "mouse",
+    // 0 was `keyboard` and 1 `mouse`, the kernel's input streams.
     Framebuffer = 2 => "framebuffer",
-    /// An Intel HDA controller the kernel has brought up but drives no policy
-    /// on.
-    HdaAudio = 5 => "hda-audio",
     /// One PCI function, driven by whoever holds the claim: the kernel binds no
     /// driver to it, keeps config space, puts it in an address space of its own
     /// before it lets it master the bus, and programs its interrupt vector.
@@ -1280,12 +1302,7 @@ device_classes! {
     /// here: which functions a manifest row asks for is `toyos-manifest`'s
     /// grammar, resolved against the inventory.
     PciFunction = 7 => "pci",
-    /// One GPT partition, named by its unique partition GUID: the holder reads
-    /// and writes its blocks and no other's ([`crate::part`]).
-    ///
-    /// Like `pci`, a class whose name is not the whole of the entry —
-    /// `part:<GUID>` — and [`DeviceRequest`] is the one parser.
-    Partition = 8 => "part",
+    // 8 was `part`, one GPT partition of a disk this kernel drove.
     /// One legacy ISA function, driven by whoever holds the claim: the process
     /// that first reads the claim may `in` and `out` the function's ports for
     /// the rest of its life and no other process may, and the function's lines
@@ -1311,14 +1328,6 @@ pub struct PciId {
 }
 
 impl PciId {
-    /// `"<vendor>:<device>"`, four lowercase hex digits each: the kernel's
-    /// `xhci-leave=` boot parameter. A manifest matcher's card is spelled by
-    /// `toyos-manifest`'s own rule.
-    pub fn parse(text: &str) -> Option<Self> {
-        let (vendor, device) = text.split_once(':')?;
-        Some(Self { vendor: hex16(vendor)?, device: hex16(device)? })
-    }
-
     /// The id as one word.
     pub const fn wire(self) -> u64 {
         ((self.vendor as u64) << 16) | self.device as u64
@@ -1480,8 +1489,7 @@ fn decimal_line(text: &str) -> Option<u8> {
 }
 
 /// What a claim asks for: a class, and for [`DeviceType::PciFunction`] which
-/// function, for a partition which partition, and for an ISA function which
-/// ports and lines.
+/// function, and for an ISA function which ports and lines.
 ///
 /// Every request but a PCI function's is also a `devices` entry, spelled once
 /// here ([`Self::parse`], [`Self::write_name`]): the manifest that names it and
@@ -1490,35 +1498,28 @@ fn decimal_line(text: &str) -> Option<u8> {
 pub enum DeviceRequest {
     Class(DeviceType),
     Function(crate::inventory::Arrival),
-    Partition(crate::part::PartGuid),
     Isa(IsaId),
 }
 
 impl DeviceRequest {
-    /// The spelling that carries a unique partition GUID.
-    pub const PART_PREFIX: &'static str = "part:";
-
     /// The spelling that carries an ISA function's ports and lines.
     pub const ISA_PREFIX: &'static str = "isa:";
 
     /// The longest a `devices` entry, and so a `dev:` label's tail, can be:
-    /// `part:` and a GUID, rounded up to a multiple of eight.
-    pub const MAX_NAME: usize = 48;
+    /// an `isa:` entry's whole set, rounded up to a multiple of eight.
+    pub const MAX_NAME: usize = 40;
 
     /// The request a `devices` entry spells, or `None`; never a
     /// [`Self::Function`], which has no spelling.
     pub fn parse(name: &str) -> Option<Self> {
-        if let Some(guid) = name.strip_prefix(Self::PART_PREFIX) {
-            return crate::part::PartGuid::parse(guid).map(Self::Partition);
-        }
         if let Some(set) = name.strip_prefix(Self::ISA_PREFIX) {
             return IsaId::parse(set).map(Self::Isa);
         }
         let class = DeviceType::from_class_name(name)?;
         match class {
-            // A bare `pci`, `part` or `isa` names no device, and would
-            // otherwise leave the selector at zero.
-            DeviceType::PciFunction | DeviceType::Partition | DeviceType::Isa => None,
+            // A bare `pci` or `isa` names no device, and would otherwise leave
+            // the selector at zero.
+            DeviceType::PciFunction | DeviceType::Isa => None,
             _ => Some(Self::Class(class)),
         }
     }
@@ -1527,7 +1528,6 @@ impl DeviceRequest {
         match self {
             Self::Class(class) => class,
             Self::Function(_) => DeviceType::PciFunction,
-            Self::Partition(_) => DeviceType::Partition,
             Self::Isa(_) => DeviceType::Isa,
         }
     }
@@ -1538,7 +1538,6 @@ impl DeviceRequest {
         match self {
             Self::Class(_) => [0, 0],
             Self::Function(arrival) => [arrival.0 as u64, 0],
-            Self::Partition(guid) => guid.wire(),
             Self::Isa(set) => set.wire(),
         }
     }
@@ -1548,21 +1547,12 @@ impl DeviceRequest {
     /// none. The name is also the tail of the `dev:` label the claim arrives
     /// under, and it is composed here so the two cannot drift.
     pub fn write_name(self, buf: &mut [u8; Self::MAX_NAME]) -> Option<&str> {
-        use crate::part::GUID_TEXT_LEN;
         Some(match self {
             Self::Function(_) => return None,
             Self::Class(class) => {
                 let name = class.class_name();
                 buf[..name.len()].copy_from_slice(name.as_bytes());
                 core::str::from_utf8(&buf[..name.len()]).expect("a class name is ASCII")
-            }
-            Self::Partition(guid) => {
-                let at = Self::PART_PREFIX.len();
-                buf[..at].copy_from_slice(Self::PART_PREFIX.as_bytes());
-                let mut text = [0u8; GUID_TEXT_LEN];
-                guid.write_text(&mut text);
-                buf[at..at + GUID_TEXT_LEN].copy_from_slice(&text);
-                core::str::from_utf8(&buf[..at + GUID_TEXT_LEN]).expect("a prefix and a GUID's text are ASCII")
             }
             Self::Isa(set) => {
                 let mut at = Self::ISA_PREFIX.len();
@@ -1619,44 +1609,21 @@ pub fn device_claim(syscap: RawHandle, request: DeviceRequest) -> Result<RawHand
         .map(|v| RawHandle(v as u32))
 }
 
-/// Read `buf.len()` blocks of the partition `claim` holds, from its block
-/// `first` — the partition's own number, from 0.
+/// Make a new job, presenting a `SysCap` handle that carries
+/// [`Rights::JOBS`], and answer a handle to it carrying `WRITE`, `DUP` and
+/// `TRANSFER`: what a spawn endows under [`JOB_LABEL`] to start an independent
+/// job, with its own share of the CPU.
 ///
-/// `InvalidArgument` for a run that does not end inside the partition or is
-/// longer than [`crate::part::MAX_BLOCKS_PER_CALL`], `Io` for a device that
-/// did not do it, and `Gone` for a claim whose last handle has been let go.
-pub fn partition_read(
-    claim: RawHandle,
-    first: u64,
-    buf: &mut [crate::part::Block],
-) -> Result<(), SyscallError> {
-    check_unit(syscall(
-        SYS_PARTITION_READ,
-        claim.0 as u64,
-        first,
-        buf.as_mut_ptr() as u64,
-        buf.len() as u64,
-    ))
+/// [`Rights::JOBS`]: crate::handle::Rights::JOBS
+pub fn job_create(syscap: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_JOB_CREATE, syscap.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
-/// Write `buf.len()` blocks to the partition `claim` holds, from its block
-/// `first`, refused as [`partition_read`] is.
-///
-/// `Ok` is the device having taken the blocks, and **not** their being
-/// durable: that is [`fsync`] on the claim, which a writer that must survive a
-/// power cut calls before it tells anyone the write happened.
-pub fn partition_write(
-    claim: RawHandle,
-    first: u64,
-    buf: &[crate::part::Block],
-) -> Result<(), SyscallError> {
-    check_unit(syscall(
-        SYS_PARTITION_WRITE,
-        claim.0 as u64,
-        first,
-        buf.as_ptr() as u64,
-        buf.len() as u64,
-    ))
+/// A handle to the job the caller runs in, carrying `WRITE`, `DUP` and
+/// `TRANSFER`: what a launch carries for its program to join the caller's job.
+/// Asks no right: it names only what the caller is already in.
+pub fn job_own() -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_JOB_OWN, 0, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
 /// Enter the real-time scheduling band, presenting a `SysCap` handle that
@@ -1670,10 +1637,8 @@ pub fn rt_enter(syscap: RawHandle) -> Result<(), SyscallError> {
 
 /// How wide a register access is.
 ///
-/// Not a convenience: a device's registers are 8, 16 and 32 bits and a 32-bit
-/// write to a 16-bit register is a write to its neighbour — HDA's `SDnCTL` and
-/// `SDnSTS` are adjacent bytes of one dword, and the second is the kernel's
-/// alone.
+/// Not a convenience: config space holds 8-, 16- and 32-bit registers, and a
+/// wider read than a register names reads its neighbour too.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u64)]
 pub enum RegWidth {
@@ -1707,13 +1672,9 @@ impl RegWidth {
     }
 }
 
-/// Read one register of the device `handle` claims.
-///
-/// `offset` names a register inside that device's register window, as the
-/// claim's class spells it: a byte offset, or for an HDA claim a
-/// [`crate::hda::Reg`]'s word. The kernel checks it against the device's read
-/// allow-list and refuses anything else by name; there is no way to name an
-/// address here and no way to reach a register the list does not carry.
+/// Read one register of the config space of the PCI function `handle`
+/// claims, at byte `offset`. There is no write: every write config space takes
+/// is the kernel's.
 pub fn device_reg_read(
     handle: RawHandle,
     offset: u64,
@@ -1721,40 +1682,6 @@ pub fn device_reg_read(
 ) -> Result<u32, SyscallError> {
     check(syscall(SYS_DEVICE_REG_READ, handle.0 as u64, offset, width.bytes(), 0))
         .map(|v| v as u32)
-}
-
-/// Write one register of the device `handle` claims.
-///
-/// The allow-list is positive and per-device: an entry is on it because its
-/// value is not an address and indexes nothing the kernel allocated. A missing
-/// entry costs a driver that cannot bring its stream up and says so, which is
-/// the failure mode a refusal list does not have.
-pub fn device_reg_write(
-    handle: RawHandle,
-    offset: u64,
-    width: RegWidth,
-    value: u32,
-) -> Result<(), SyscallError> {
-    check(syscall(
-        SYS_DEVICE_REG_WRITE,
-        handle.0 as u64,
-        offset,
-        width.bytes(),
-        value as u64,
-    ))
-    .map(|_| ())
-}
-
-/// Bind the `hda-audio` claim's stream to the listed controller at
-/// `controller`, and put every other listed controller back into reset.
-///
-/// One-shot for the boot: once a bind has run, the claim's list is the bound
-/// controller alone, at index 0, and binding index 0 again answers success.
-/// [`SyscallError::WouldBlock`] while another bind runs, and
-/// [`SyscallError::Io`] for every call once a bind failed on the device; the
-/// kernel's `hda:` line says why.
-pub fn hda_bind(claim: RawHandle, controller: u8) -> Result<(), SyscallError> {
-    check_unit(syscall(SYS_HDA_BIND, claim.0 as u64, controller as u64, 0, 0))
 }
 
 // Ports and namespaces
@@ -1910,7 +1837,7 @@ pub fn accept(acceptor: RawHandle) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_ACCEPT, acceptor.0 as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
-/// Handles one [`handle_send`] may carry.
+/// Handles one [`message_send`] may carry.
 ///
 /// Policy on the primitive: a caller asking for one more is refused by name
 /// and never truncated to fit.
@@ -1919,31 +1846,62 @@ pub const MAX_TRANSFER_HANDLES: usize = 8;
 /// Batches one direction of a connection may hold unreceived.
 pub const MAX_QUEUED_BATCHES: usize = 16;
 
-/// Move `handles` to the peer of `conn`.
-///
-/// Each handle must carry [`Rights::TRANSFER`], and so must `conn`. The move is
-/// all-or-nothing: a refusal leaves every handle where it was.
-///
-/// **Send the handles before the frame that announces them.** They travel in a
-/// queue of their own rather than interleaved with the connection's bytes, so a
-/// peer that has read the frame is guaranteed to find them only in that order.
-///
-/// [`Rights::TRANSFER`]: crate::handle::Rights::TRANSFER
-pub fn handle_send(conn: RawHandle, handles: &[RawHandle]) -> Result<(), SyscallError> {
-    check_unit(syscall(
-        SYS_HANDLE_SEND,
-        conn.0 as u64,
-        handles.as_ptr() as u64,
-        handles.len() as u64,
-        0,
-    ))
+/// The most bytes one [`message_send`] writes. Policy on the primitive: the
+/// bytes are copied whole under the connection's locks, so the copy is
+/// bounded, and every frame a protocol here sends is far smaller.
+pub const MAX_MESSAGE_LEN: usize = 16 * 1024;
+
+/// [`message_send`] answers `WouldBlock` rather than waiting for room.
+pub const MESSAGE_NONBLOCK: u64 = 1;
+
+crate::user_safe! {
+    /// Arguments for `SYS_MESSAGE_SEND`, passed as a single pointer.
+    #[derive(Clone, Copy)]
+    pub struct MessageSend {
+        pub bytes: u64,
+        pub len: u64,
+        pub handles: u64,
+        pub count: u64,
+        /// [`MESSAGE_NONBLOCK`] or none; any other bit is `InvalidArgument`.
+        pub flags: u64,
+    }
 }
 
-/// Take the oldest batch the peer sent, into `out`. Answers how many it wrote.
+/// Write `bytes` to `conn` and move `handles` to its peer, as one message.
 ///
-/// Never blocks: zero means nothing is queued right now. A batch larger than
-/// `out` is `InvalidArgument` and stays queued — `out` should be
-/// [`MAX_TRANSFER_HANDLES`] long.
+/// **All or nothing, and in order.** The bytes go into the connection's
+/// stream whole, and the handles are queued at the byte just past them: the
+/// peer reads the bytes, then takes the batch ([`handle_recv`]), and no read
+/// of its crosses the batch before it is taken. Nothing is written and no
+/// handle moves on a refusal:
+/// - every handle must carry [`Rights::TRANSFER`], and so must `conn` when
+///   there are any; `conn` itself and a handle named twice are refused;
+/// - handles need bytes (`InvalidArgument`), and past [`MAX_MESSAGE_LEN`]
+///   bytes or [`MAX_TRANSFER_HANDLES`] handles is `InvalidArgument`;
+/// - a peer already holding [`MAX_QUEUED_BATCHES`] is `ResourceExhausted`, and
+///   a peer that is gone is `Gone`;
+/// - a stream without room for the whole message waits for it, or with
+///   `nonblock` answers `WouldBlock`.
+///
+/// [`Rights::TRANSFER`]: crate::handle::Rights::TRANSFER
+pub fn message_send(conn: RawHandle, bytes: &[u8], handles: &[RawHandle], nonblock: bool) -> Result<(), SyscallError> {
+    let args = MessageSend {
+        bytes: bytes.as_ptr() as u64,
+        len: bytes.len() as u64,
+        handles: handles.as_ptr() as u64,
+        count: handles.len() as u64,
+        flags: if nonblock { MESSAGE_NONBLOCK } else { 0 },
+    };
+    check_unit(syscall(SYS_MESSAGE_SEND, conn.0 as u64, &args as *const MessageSend as u64, 0, 0))
+}
+
+/// Take the batch the peer sent at this reader's place in the connection's
+/// bytes, into `out`. Answers how many it wrote.
+///
+/// Never blocks: zero means no batch sits here, which for a reader that has
+/// just read a message carrying handles is a peer that broke its protocol. A
+/// batch larger than `out` is `InvalidArgument` and stays queued — `out`
+/// should be [`MAX_TRANSFER_HANDLES`] long.
 pub fn handle_recv(conn: RawHandle, out: &mut [RawHandle]) -> Result<usize, SyscallError> {
     check(syscall(
         SYS_HANDLE_RECV,
@@ -2049,24 +2007,18 @@ pub fn counters(
 /// merged across CPUs by stamp, advancing `cursor`. Answers how many were
 /// written, and `0` when there is nothing new; it never blocks.
 ///
-/// `out` is whole [`crate::trace::TraceRecord`]s. A buffer that cannot hold one
-/// record per CPU, and a `cursor` ahead of a CPU's ring, are
-/// [`SyscallError::InvalidArgument`]. `syscap` must carry
+/// `cursor` and `out` are as [`log_read`]'s, over the diary's rings, a ring
+/// per CPU the firmware names, and refused as its are. `syscap` must carry
 /// [`crate::handle::Rights::TRACE`]: a capability without it is refused with
 /// a word, and a handle the caller does not hold ends it.
 pub fn trace_read(
     syscap: RawHandle,
-    cursor: &mut crate::trace::TraceCursor,
+    cursor: &mut [u64],
     out: &mut [crate::trace::TraceRecord],
 ) -> Result<usize, SyscallError> {
-    check(syscall(
-        SYS_TRACE_READ,
-        syscap.0 as u64,
-        cursor as *mut crate::trace::TraceCursor as u64,
-        out.as_mut_ptr() as u64,
-        out.len() as u64,
-    ))
-    .map(|n| n as usize)
+    let cursor = sized_cursor(cursor)?;
+    check(syscall(SYS_TRACE_READ, syscap.0 as u64, cursor as u64, out.as_mut_ptr() as u64, out.len() as u64))
+        .map(|n| n as usize)
 }
 
 /// Have the kernel make one access on the `acpi` claim `claim`, or refuse it
@@ -2129,7 +2081,7 @@ pub fn nanosleep(nanos: u64) {
 /// source's own set.
 ///
 /// A wire encoding of `Option<Rights>`, decoded at the syscall boundary and
-/// never carried inward: `Rights::ALL` is twelve bits, so this value is not a
+/// never carried inward: `Rights::ALL` fits in sixteen bits, so this value is not a
 /// rights set and never becomes one. The two wrappers below are the only
 /// writers, so no caller ever spells it.
 pub const RIGHTS_UNCHANGED: u64 = u64::MAX;
@@ -2151,18 +2103,13 @@ pub fn dup_narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, Sysc
         .map(|v| RawHandle(v as u32))
 }
 
-/// A second handle to the same object, at a **slot** the caller picks.
-///
-/// A slot and not a handle: a handle carries a generation the caller has no
-/// business choosing, and the one this hands back is the slot's own — so the
-/// answer is not the number that went in. Whatever was at that slot is closed
-/// first.
-/// The rights are the source's: narrowing at a slot is [`dup_narrowed`]
-/// followed by this, and a third argument no caller writes would be a right
-/// nobody can request.
-pub fn dup2(handle: RawHandle, slot: u16) -> Result<RawHandle, SyscallError> {
-    check(syscall(SYS_HANDLE_DUP_AT, handle.0 as u64, slot as u64, 0, 0))
-        .map(|v| RawHandle(v as u32))
+/// A fresh null handle carrying `rights`: a read answers 0 bytes, a write of
+/// n bytes answers n, and a poll is ready at once in either direction. It
+/// names nothing and so carries no authority; `rights` may be any subset of
+/// `READ | WRITE | DUP | TRANSFER | WAIT`, and anything else is refused
+/// `InvalidArgument`.
+pub fn null(rights: Rights) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_NULL, rights.bits() as u64, 0, 0, 0)).map(|v| RawHandle(v as u32))
 }
 
 /// Get the current process ID.
@@ -2199,11 +2146,18 @@ pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
 /// name it does not hold past it is `ResourceExhausted`.
 pub const MAX_LIBRARIES: usize = 1024;
 
-/// Load a shared library (.so) into the current process.
-/// Runs .init_array constructors after loading.
-pub fn dl_open(path: &[u8]) -> Result<u64, SyscallError> {
+/// Load the shared library `image`'s first `image_len` bytes hold into this
+/// process as `name` ([`DlopenArgs`]), and run its `.init_array`.
+pub fn dl_open(name: &[u8], image: RawHandle, image_len: u64) -> Result<u64, SyscallError> {
     let mut init_info: [u64; 2] = [0; 2];
-    let handle = check(syscall(SYS_DLOPEN, path.as_ptr() as u64, path.len() as u64, init_info.as_mut_ptr() as u64, 0))?;
+    let args = DlopenArgs {
+        name_ptr: name.as_ptr() as u64,
+        name_len: name.len() as u64,
+        image: u64::from(image.0),
+        image_len,
+        init_out: init_info.as_mut_ptr() as u64,
+    };
+    let handle = dl_open_args(&args)?;
     // Run .init_array constructors (e.g. EH frame finder registration in cdylib std)
     let init_array_ptr = init_info[0];
     let init_count = init_info[1];
@@ -2224,6 +2178,12 @@ pub fn dl_open(path: &[u8]) -> Result<u64, SyscallError> {
         }
     }
     Ok(handle)
+}
+
+/// `SYS_DLOPEN` as `args` say, running nothing it loads: [`dl_open`]'s call,
+/// for a caller that names `init_out` itself.
+pub fn dl_open_args(args: &DlopenArgs) -> Result<u64, SyscallError> {
+    check(syscall(SYS_DLOPEN, args as *const DlopenArgs as u64, 0, 0, 0))
 }
 
 /// Look up a symbol in a loaded shared library. Returns the address.
@@ -2333,7 +2293,9 @@ pub fn read_nonblock(handle: RawHandle, buf: &mut [u8]) -> Result<usize, Syscall
 }
 
 /// Non-blocking write. Returns bytes written, `Err(WouldBlock)` if no space is
-/// available, or [`SyscallError::Gone`] if the other end has closed.
+/// available, or [`SyscallError::Gone`] if the other end has closed. A pipe
+/// write of at most [`MAX_WHOLE_PIPE_WRITE`] bytes writes all of them or
+/// answers `WouldBlock`.
 pub fn write_nonblock(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_WRITE_NONBLOCK, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
 }
@@ -2355,8 +2317,8 @@ pub fn pipe_map(handle: RawHandle) -> Result<*mut u8, SyscallError> {
 /// Every call answers an object of its own over the same window, so a BAR
 /// whose handle was closed can be asked for again.
 ///
-/// A window alone drives nothing: the function masters the bus from its first
-/// [`device_dma_alloc`] and not before.
+/// A window alone drives nothing: the function masters the bus from
+/// [`device_dma_start`] and not before.
 pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallError> {
     check(syscall(SYS_DEVICE_BAR_MAP, claim.0 as u64, bar as u64, 0, 0))
         .map(|v| RawHandle(v as u32))
@@ -2367,15 +2329,9 @@ pub fn device_bar_map(claim: RawHandle, bar: u32) -> Result<RawHandle, SyscallEr
 ///
 /// An address the caller invents instead of the one this answers is one the
 /// function's domain does not map, and the unit refuses the access. `bytes` is
-/// rounded up to whole 2 MiB pages.
-///
-/// **The function issues no bus transaction at all until this call returns
-/// once.** A claim is handed over with Bus Master Enable clear, because what
-/// comes back from a dead holder still holds device addresses of a domain that
-/// no longer maps them; the first grant is what starts it, after that grant is
-/// in the function's domain. An MSI-X message is a memory write, so a driver
-/// that maps its BAR and waits on its claim without ever calling this is never
-/// interrupted.
+/// rounded up to whole 2 MiB pages, and the grant ends below the claim's
+/// [`device_dma_limit`]: `InvalidArgument` before one is stated, and
+/// `ResourceExhausted` once nothing below it is left.
 pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, SyscallError> {
     let mut grant =
         DmaGrant { shm: HANDLE_INVALID, _pad: 0, device_addr: 0, bytes: 0 };
@@ -2387,6 +2343,30 @@ pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, Syscal
         0,
     ))?;
     Ok(grant)
+}
+
+/// State that the function `claim` holds issues device addresses of `bits`
+/// bits, 32 to 64: every grant and lend of the claim is placed below `1 <<
+/// bits`. Once per claim, before any grant: `AlreadyExists` for a second, and
+/// `InvalidArgument` outside that range.
+///
+/// What the device's own capability bits say where they can be trusted, and
+/// the driver's own statement where they cannot: a function that drops its
+/// upper bits issues an address above its width as another grant's.
+pub fn device_dma_limit(claim: RawHandle, bits: u8) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DEVICE_DMA_LIMIT, claim.0 as u64, bits as u64, 0, 0))
+}
+
+/// Let the function `claim` holds master the bus; nothing on a second call.
+///
+/// **The function issues no bus transaction at all, an MSI-X message
+/// included, until this is called.** A claim is handed over with Bus Master
+/// Enable clear, because a previous holder or firmware may have left it
+/// running queues at addresses its domain no longer maps; its driver stops and
+/// resets it through its registers first, lays out its grants, and then starts
+/// it. What it does from then on reaches only what its domain maps.
+pub fn device_dma_start(claim: RawHandle) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_DEVICE_DMA_START, claim.0 as u64, 0, 0, 0))
 }
 
 /// Put the region `shm` names into the address space of the function `claim`
@@ -2401,8 +2381,8 @@ pub fn device_dma_alloc(claim: RawHandle, bytes: u64) -> Result<DmaGrant, Syscal
 /// `InvalidArgument` for a region that is not ordinary memory this kernel
 /// allocated — a BAR window, firmware's framebuffer — and for one already
 /// mapped for this claim; `ResourceExhausted` with no run of the region's
-/// length left in the claim's [`LEND_WINDOW`](crate::pci::LEND_WINDOW). Like a
-/// grant, the first mapping is what starts the function mastering the bus.
+/// length left in the claim's [`LEND_WINDOW`](crate::pci::LEND_WINDOW), and
+/// `InvalidArgument` before the claim's [`device_dma_limit`] is stated.
 pub fn device_dma_map(claim: RawHandle, shm: RawHandle) -> Result<DmaMapping, SyscallError> {
     let mut mapping = DmaMapping { device_addr: 0, bytes: 0 };
     check_unit(syscall(
@@ -2548,32 +2528,6 @@ pub fn modules(answer: &[u8]) -> impl Iterator<Item = (ModuleInfo, &[u8])> {
 }
 
 crate::user_safe! {
-    /// Scheduler info for the calling process.
-    #[derive(Clone, Copy, Debug)]
-    pub struct SchedInfo {
-        /// Current vruntime of this process (nanoseconds of virtual CPU time).
-        pub vruntime: u64,
-        /// Global min_vruntime frontier (monotonic non-decreasing).
-        pub min_vruntime: u64,
-        /// Signed contract lag, frozen at the most recent runnable-state
-        /// transition. Positive = process was behind the frontier when it last
-        /// woke / blocked (entitled to catch up); negative = process ran ahead
-        /// and will be throttled. Bounded to [-50ms, +50ms] (MAX_VRUNTIME_LAG_NS)
-        /// by construction. This is the scheduler's contract, not the live
-        /// `min_vruntime - vruntime` drift that accumulates while running on
-        /// multi-CPU systems — compute that at the call site if you need it.
-        pub lag: i64,
-    }
-}
-
-/// Get scheduler info for the calling process.
-pub fn sched_info() -> SchedInfo {
-    let mut info = SchedInfo { vruntime: 0, min_vruntime: 0, lag: 0 };
-    syscall(SYS_SCHED_INFO, &mut info as *mut SchedInfo as u64, 0, 0, 0);
-    info
-}
-
-crate::user_safe! {
     /// Per-process accounting statistics, as [`SYS_PROCESS_STATS`] answers them.
     #[derive(Clone, Copy, Default)]
     pub struct ProcessStats {
@@ -2696,15 +2650,6 @@ mod tests {
         modules(&answer).for_each(drop);
     }
 
-    /// `xhci-leave=`'s id, four lowercase hex digits each.
-    #[test]
-    fn the_xhci_leave_parameter_is_an_id_in_four_lowercase_hex_digits_each() {
-        assert_eq!(PciId::parse("8086:9a13"), Some(PciId { vendor: 0x8086, device: 0x9a13 }));
-        for bad in ["8086:9A13", "8086:9a1", "8086", "8086:9a13:"] {
-            assert_eq!(PciId::parse(bad), None, "{bad:?} parsed");
-        }
-    }
-
     /// The four readers of a `devices` entry share this parser, so what it
     /// accepts is what a config may say; a PCI function is named by its
     /// arrival, which no entry spells.
@@ -2757,31 +2702,16 @@ mod tests {
     #[test]
     fn a_request_writes_back_the_name_it_parsed() {
         for name in [
-            "hda-audio",
-            "mouse",
-            // The longest entry there is, which is what `MAX_NAME` is for.
-            "part:0FC63DAF-8483-4772-8E79-3D69D8477DE4",
+            "framebuffer",
             "isa:0060,0064:1,12",
             "isa:0001:0",
-            // The longest an ISA entry can be.
+            // The longest entry there is, which is what `MAX_NAME` is for.
             "isa:fff0,fff1,fff2,fffe:12,13,14,15",
         ] {
             let request = DeviceRequest::parse(name).expect("a name this table has");
             let mut buf = [0u8; DeviceRequest::MAX_NAME];
             assert_eq!(request.write_name(&mut buf), Some(name));
         }
-    }
-
-    /// A `part:` entry is the partition class carrying its GUID's sixteen bytes
-    /// in both selector words.
-    #[test]
-    fn a_partition_entry_carries_its_guid_in_both_selector_words() {
-        use crate::part::PartGuid;
-        let guid = PartGuid::parse("0FC63DAF-8483-4772-8E79-3D69D8477DE4").expect("a GUID");
-        let request = DeviceRequest::parse("part:0FC63DAF-8483-4772-8E79-3D69D8477DE4");
-        assert_eq!(request, Some(DeviceRequest::Partition(guid)));
-        assert_eq!(request.map(DeviceRequest::class), Some(DeviceType::Partition));
-        assert_eq!(request.map(DeviceRequest::selector), Some(guid.wire()));
     }
 
     /// An `isa:` entry is its ports in the first selector word and its lines in

@@ -2,7 +2,6 @@ use alloc::sync::Arc;
 
 use crate::object::device::{DeviceClaim, DeviceInfo};
 use crate::object::shm::Region;
-use crate::{keyboard, mouse};
 use toyos_abi::FramebufferInfo;
 use crate::sync::Lock;
 pub use toyos_abi::syscall::DeviceType;
@@ -40,9 +39,8 @@ pub struct Claim {
 
 /// What one claim holds. A class is at most one device on this machine and a
 /// per-class flag says whether it is taken; a PCI function is one of several,
-/// so what it gives back is its `pcidev` slot; a partition's exclusivity is its
-/// view's own hold on the blocks (`block::Partition::of`); an ISA function's and
-/// the ACPI fixed hardware's is its `isa` row's.
+/// so what it gives back is its `pcidev` slot; an ISA function's and the ACPI
+/// fixed hardware's exclusivity is its `isa` row's.
 ///
 /// The slot and the row are held as what their modules' calls take, and the
 /// drop of each is its release: a call borrows one from the claim's `Held`, so
@@ -50,7 +48,6 @@ pub struct Claim {
 enum Claimed {
     Class(DeviceType),
     PciFunction(crate::pcidev::Binding),
-    Partition(crate::block::Partition),
     Isa(crate::isa::Row),
     Acpi(crate::isa::Row),
 }
@@ -75,7 +72,7 @@ impl Claim {
     pub(crate) fn binding(&self) -> Option<&crate::pcidev::Binding> {
         match &self.what {
             Claimed::PciFunction(binding) => Some(binding),
-            Claimed::Class(_) | Claimed::Partition(_) | Claimed::Isa(_) | Claimed::Acpi(_) => None,
+            Claimed::Class(_) | Claimed::Isa(_) | Claimed::Acpi(_) => None,
         }
     }
 
@@ -84,7 +81,7 @@ impl Claim {
     pub(crate) fn row(&self) -> Option<&crate::isa::Row> {
         match &self.what {
             Claimed::Isa(row) | Claimed::Acpi(row) => Some(row),
-            Claimed::Class(_) | Claimed::PciFunction(_) | Claimed::Partition(_) => None,
+            Claimed::Class(_) | Claimed::PciFunction(_) => None,
         }
     }
 
@@ -93,15 +90,7 @@ impl Claim {
         match &self.what {
             Claimed::PciFunction(binding) => crate::pcidev::add_poll(binding, entry),
             Claimed::Isa(row) | Claimed::Acpi(row) => crate::isa::add_poll(row, entry),
-            Claimed::Class(_) | Claimed::Partition(_) => unreachable!("a poll registered through a claim on no function or row"),
-        }
-    }
-
-    /// The view a partition claim transfers through, or `None` for any other.
-    pub(crate) fn partition(&self) -> Option<&crate::block::Partition> {
-        match &self.what {
-            Claimed::Partition(view) => Some(view),
-            Claimed::Class(_) | Claimed::PciFunction(_) | Claimed::Isa(_) | Claimed::Acpi(_) => None,
+            Claimed::Class(_) => unreachable!("a poll registered through a claim on no function or row"),
         }
     }
 }
@@ -109,26 +98,11 @@ impl Claim {
 impl Drop for Claim {
     fn drop(&mut self) {
         match &self.what {
-            &Claimed::Class(class) => {
-                // Before the flag goes: a poll the next holder registers is not this claim's to answer.
-                match class {
-                    DeviceType::HdaAudio => crate::drivers::AUDIO_WATCH.cancel_polls(),
-                    DeviceType::Keyboard
-                    | DeviceType::Mouse
-                    | DeviceType::Framebuffer
-                    | DeviceType::PciFunction
-                    | DeviceType::Partition
-                    | DeviceType::Isa
-                    | DeviceType::Acpi => {}
-                }
-                *taken(class).lock() = false;
-            }
+            &Claimed::Class(class) => *taken(class).lock() = false,
             // Bus mastering off, then the domain, then the pages: the
             // binding's drop owns that order, and this is where a dying
             // process reaches it.
             Claimed::PciFunction(_) => {}
-            // The view drops with this, and its hold with the last clone of it.
-            Claimed::Partition(_) => {}
             // The row's drop is its release.
             Claimed::Isa(_) => {}
             // Back to the mode the firmware handed over, and then the row's
@@ -155,9 +129,6 @@ pub enum ClaimError {
     Owned,
     /// This machine has no such device — no driver ever registered one.
     Absent,
-    /// The partition GUID is carried twice. Refused rather than resolved to
-    /// the first: picking would be the kernel deciding.
-    Ambiguous,
     /// A driver in this kernel already binds the device; two drivers on one
     /// device is not something a claim may create.
     KernelDriven,
@@ -176,22 +147,11 @@ pub enum ClaimError {
 /// failure after `acquire` cannot leave a device held by nobody.
 ///
 /// `selector` says *which* device where the class alone does not — a PCI
-/// function's arrival in its first word, a partition's GUID in both — and the
+/// function's arrival in its first word, an ISA set's ports and lines — and the
 /// syscall has refused a word the class does not read.
 pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClaim>, ClaimError> {
     // Availability is checked before acquiring, so an absent device reports `Absent`, not `Owned`.
     match class {
-        DeviceType::Keyboard => {
-            let claim = Claim::acquire(class)?;
-            // Keystrokes queued before this claim belong to no one; delivering them would leak them to the new owner.
-            keyboard::discard_queued();
-            Ok(DeviceClaim::new(class, DeviceInfo::Events, claim))
-        }
-        DeviceType::Mouse => {
-            let claim = Claim::acquire(class)?;
-            mouse::discard_queued();
-            Ok(DeviceClaim::new(class, DeviceInfo::Events, claim))
-        }
         DeviceType::Framebuffer => {
             let screen = (*FB_INFO.lock()).clone().ok_or(ClaimError::Absent)?;
             let claim = Claim::acquire(class)?;
@@ -207,16 +167,6 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let (info, claim) = crate::pcidev::claim(toyos_abi::inventory::Arrival(arrival))?;
             Ok(DeviceClaim::new(class, DeviceInfo::PciFunction(info), claim))
         }
-        DeviceType::Partition => {
-            let found = crate::gpt::claimable(toyos_abi::part::PartGuid::from_wire(selector))?;
-            let view = partition_view(&found)?;
-            let info = toyos_abi::part::PartitionInfo {
-                blocks: view.block_count(),
-                unique_guid: found.unique.0,
-            };
-            let claim = Claim { what: Claimed::Partition(view) };
-            Ok(DeviceClaim::new(class, DeviceInfo::Partition(info), claim))
-        }
         DeviceType::Isa => {
             let set = toyos_abi::syscall::IsaId::from_wire(selector).ok_or(ClaimError::Absent)?;
             // The row's own guard, taken inside as a PCI function's is.
@@ -229,59 +179,6 @@ pub fn try_claim(class: DeviceType, selector: [u64; 2]) -> Result<Arc<DeviceClai
             let (row, info) = crate::arch::acpi_mode::claim()?;
             let claim = Claim { what: Claimed::Acpi(row) };
             Ok(DeviceClaim::new(class, DeviceInfo::Acpi(info), claim))
-        }
-        DeviceType::HdaAudio => {
-            let (info, pcm) = crate::drivers::hda::describe()?;
-            let claim = Claim::acquire(class)?;
-            Ok(DeviceClaim::new(class, DeviceInfo::Hda(info, shm(pcm)), claim))
-        }
-    }
-}
-
-/// The unit a claim transfers in is the block layer's, so a partition that is
-/// whole blocks of one is whole blocks of the other.
-const _: () = assert!(toyos_abi::part::BLOCK_BYTES as u64 == crate::mm::PAGE_SIZE);
-
-/// The claim's view of `found`, held against every other holder of any of its
-/// blocks. A partition the kernel mounted is the kernel's, one another claim
-/// holds is that claim's, and one that begins or ends inside a block would
-/// share that block with its neighbour, so it is not claimable at all.
-fn partition_view(found: &crate::gpt::Claimable) -> Result<crate::block::Partition, ClaimError> {
-    use crate::block::{span_blocks, Holder, SpanRefused, ViewRefused};
-    let volume = found.volume;
-    let guid = found.unique;
-    let handle = crate::block::open(volume.device).ok_or(ClaimError::Absent)?;
-    let (first_block, blocks) =
-        match span_blocks(volume.start_lba, volume.blocks, volume.lba_bytes) {
-            Ok(span) => span,
-            Err(SpanRefused::Overflow) => {
-                log!("partclaim: {guid} claims LBA {}+{} of {} bytes, which is no byte range",
-                    volume.start_lba, volume.blocks, volume.lba_bytes);
-                return Err(ClaimError::Unusable);
-            }
-            Err(SpanRefused::NotWhole { start_bytes, len_bytes }) => {
-                log!(
-                    "partclaim: {guid} is at {start_bytes}+{len_bytes} bytes on device {}, which \
-                     is not whole {}-byte blocks — a transfer would share one with its neighbour",
-                    volume.device,
-                    crate::mm::PAGE_SIZE
-                );
-                return Err(ClaimError::Unusable);
-            }
-        };
-    match crate::block::Partition::of(handle, first_block, blocks, Holder::Claim(guid)) {
-        Ok(view) => Ok(view),
-        Err(ViewRefused::Held(Holder::Kernel(what))) => {
-            log!("partclaim: {guid} is held by the kernel ({what}) and cannot be claimed");
-            Err(ClaimError::KernelDriven)
-        }
-        Err(ViewRefused::Held(Holder::Claim(_))) => Err(ClaimError::Owned),
-        Err(ViewRefused::OffDevice) => {
-            log!(
-                "partclaim: {guid} is at {first_block}+{blocks} blocks, off device {}",
-                volume.device
-            );
-            Err(ClaimError::Unusable)
         }
     }
 }

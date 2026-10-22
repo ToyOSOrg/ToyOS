@@ -1,7 +1,4 @@
 //! Syscalls that drive a claimed device.
-//!
-//! [`holds_claim`] checks a claim's class against what the syscall requires;
-//! device register access and protocol stay in the device's own code.
 
 use alloc::sync::Arc;
 
@@ -14,122 +11,45 @@ use crate::{device, process};
 use toyos_abi::handle::{RawHandle, Rights};
 use toyos_abi::syscall::*;
 
-use super::handles::{demand_syscap, handle_result, with_object_ref};
+use super::handles::{demand_syscap, handle_result};
 
-/// Refuses `WrongType` unless the handle's claim is on `class`.
-pub(super) fn holds_claim(
-    h: RawHandle,
-    class: device::DeviceType,
-) -> Result<(), crate::object::HandleError> {
-    let held = with_object_ref(h, Rights::WRITE, |object| match object {
-        KObjectRef::Device(d) => Ok(d.class()),
-        other => Err(crate::object::HandleError::WrongType {
-            held: other.kind(),
-            wanted: "Device",
-        }),
-    })??;
-    if held == class {
-        Ok(())
-    } else {
-        Err(crate::object::HandleError::WrongType {
-            held: held.class_name(),
-            wanted: class.class_name(),
-        })
-    }
-}
-
-/// The register-access stub a device claim's class selects.
-enum RegTarget {
-    Hda,
-    /// A claimed PCI function's own config space, **read-only**, through the
-    /// claim itself: what names the function is lent by it for each access.
-    ///
-    /// There is no writing counterpart and that is the point: a driver cannot
-    /// find its own registers without its capability chain — virtio's four
-    /// config windows are named by vendor capabilities and nothing else — while
-    /// every write config space takes is a decision this kernel keeps. Bus
-    /// mastering, the BARs and the MSI-X control word are all writes, and
-    /// refusing them is what stops a holder aiming its device at memory or its
-    /// interrupt at a vector.
-    PciConfig(Arc<DeviceClaim>),
-}
-
-/// Reads or writes one register of the claimed device; the device owns its allow-list.
-pub(super) fn sys_device_reg(handle: RawHandle, offset: u64, width: u64, value: Option<u64>) -> u64 {
+/// Reads one register of a claimed PCI function's own config space, through
+/// the claim itself: what names the function is lent by it for the access.
+///
+/// **There is no writing counterpart, and that is the point**: a driver cannot
+/// find its own registers without its capability chain — virtio's four config
+/// windows are named by vendor capabilities and nothing else — while every
+/// write config space takes is a decision this kernel keeps. Bus mastering,
+/// the BARs and the MSI and MSI-X control words are all writes, and the absence
+/// of a path for them is what stops a holder aiming its device at memory or
+/// its interrupt at a vector.
+pub(super) fn sys_device_reg_read(handle: RawHandle, offset: u64, width: u64) -> u64 {
     let Some(width) = toyos_abi::syscall::RegWidth::from_raw(width) else {
         return SyscallError::InvalidArgument.to_u64();
     };
-    let target = process::with_process_data(|data| {
-        data.handles.get::<DeviceClaim>(handle, Rights::NONE).map(|claim| match claim.class() {
-            device::DeviceType::HdaAudio => Some(RegTarget::Hda),
-            device::DeviceType::PciFunction => Some(RegTarget::PciConfig(claim)),
-            _ => None,
+    let claim = process::with_process_data(|data| {
+        data.handles.get::<DeviceClaim>(handle, Rights::NONE).map(|claim| {
+            (claim.class() == device::DeviceType::PciFunction).then_some(claim)
         })
     });
     // `refuse` must run with nothing held; the guard above has already been dropped.
-    let target = match target {
-        Ok(t) => t,
+    let claim = match claim {
+        Ok(claim) => claim,
         Err(e) => return e.refuse(),
     };
-    // A claim with no register stub answers `NotSupported`, distinct from no such device.
-    let Some(target) = target else {
+    // A claim with no registers to read answers `NotSupported`, distinct from no such device.
+    let Some(claim) = claim else {
         return SyscallError::NotSupported.to_u64();
     };
-    match value {
-        None => {
-            let read = match target {
-                RegTarget::Hda => match toyos_abi::hda::Reg::from_wire(offset) {
-                    Some(reg) => crate::drivers::hda::reg_read(reg, width),
-                    None => Err(SyscallError::InvalidArgument),
-                },
-                // The one place a caller's offset becomes an access: the
-                // witness `pcidev::config_window` answers is the only thing
-                // the register read takes, so an unchecked number cannot
-                // reach the register file.
-                RegTarget::PciConfig(claim) => match crate::pcidev::config_window(offset, width) {
-                    Ok(at) => on_function(&claim, |function| {
-                        crate::pcidev::config_read(function, at, width)
-                    }),
-                    Err(_) => Err(SyscallError::InvalidArgument),
-                },
-            };
-            match read {
-                Ok(v) => v as u64,
-                Err(e) => e.to_u64(),
-            }
-        }
-        Some(value) => match u32::try_from(value) {
-            Ok(value) => {
-                let written = match target {
-                    RegTarget::Hda => match toyos_abi::hda::Reg::from_wire(offset) {
-                        Some(reg) => crate::drivers::hda::reg_write(reg, width, value),
-                        None => Err(SyscallError::InvalidArgument),
-                    },
-                    // Config space has no write path from userland at all.
-                    RegTarget::PciConfig(_) => Err(SyscallError::NotSupported),
-                };
-                match written {
-                    Ok(()) => 0,
-                    Err(e) => e.to_u64(),
-                }
-            }
-            Err(_) => SyscallError::InvalidArgument.to_u64(),
-        },
-    }
-}
-
-/// Bind the `hda-audio` claim's stream to the listed controller `controller`
-/// names (`toyos_abi::syscall::hda_bind`). Its waits run on the caller's
-/// thread with no lock held, and nothing is copied to the caller.
-pub(super) fn sys_hda_bind(handle: RawHandle, controller: u64) -> u64 {
-    if let Err(e) = holds_claim(handle, device::DeviceType::HdaAudio) {
-        return e.refuse();
-    }
-    let Ok(controller) = u8::try_from(controller) else {
-        return SyscallError::InvalidArgument.to_u64();
+    // The one place a caller's offset becomes an access: the witness
+    // `pcidev::config_window` answers is the only thing the register read
+    // takes, so an unchecked number cannot reach the register file.
+    let read = match crate::pcidev::config_window(offset, width) {
+        Ok(at) => on_function(&claim, |function| crate::pcidev::config_read(function, at, width)),
+        Err(_) => Err(SyscallError::InvalidArgument),
     };
-    match crate::drivers::hda::bind(controller) {
-        Ok(()) => 0,
+    match read {
+        Ok(v) => v as u64,
         Err(e) => e.to_u64(),
     }
 }
@@ -199,7 +119,7 @@ pub(super) fn sys_acpi(ctx: &SyscallContext, handle: RawHandle, op: u64, at: u64
 /// Mints a device claim, gated on a `SysCap` carrying [`Rights::DEVICE`].
 ///
 /// `selector` says which device where the class alone does not — a PCI
-/// function's arrival, a partition's GUID — and a word the class
+/// function's arrival, an ISA set — and a word the class
 /// does not read is refused, never dropped: whoever set it meant a device this
 /// claim would not name.
 pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]) -> u64 {
@@ -207,13 +127,9 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
         return SyscallError::InvalidArgument.to_u64();
     };
     let read = match class {
-        device::DeviceType::Keyboard
-        | device::DeviceType::Mouse
-        | device::DeviceType::Framebuffer
-        | device::DeviceType::HdaAudio
-        | device::DeviceType::Acpi => 0,
+        device::DeviceType::Framebuffer | device::DeviceType::Acpi => 0,
         device::DeviceType::PciFunction => 1,
-        device::DeviceType::Partition | device::DeviceType::Isa => 2,
+        device::DeviceType::Isa => 2,
     };
     if selector[read..].iter().any(|&word| word != 0) {
         return SyscallError::InvalidArgument.to_u64();
@@ -227,7 +143,6 @@ pub(super) fn sys_device_claim(syscap: RawHandle, class: u64, selector: [u64; 2]
         Ok(c) => c,
         Err(device::ClaimError::Absent) => return SyscallError::NotFound.to_u64(),
         Err(device::ClaimError::Owned) => return SyscallError::AlreadyExists.to_u64(),
-        Err(device::ClaimError::Ambiguous) => return SyscallError::InvalidArgument.to_u64(),
         Err(device::ClaimError::KernelDriven) => {
             return SyscallError::PermissionDenied.to_u64()
         }
@@ -400,6 +315,30 @@ pub(super) fn sys_device_dma_unmap(handle: RawHandle, device_addr: u64) -> u64 {
     }
 }
 
+/// State the address width the claimed function issues.
+pub(super) fn sys_device_dma_limit(handle: RawHandle, bits: u64) -> u64 {
+    let claim = match pci_claim(handle) {
+        Ok(claim) => claim,
+        Err(e) => return e.refuse(),
+    };
+    match on_function(&claim, |function| crate::pcidev::dma_limit(function, bits)) {
+        Ok(()) => 0,
+        Err(e) => e.to_u64(),
+    }
+}
+
+/// Let the claimed function master the bus.
+pub(super) fn sys_device_dma_start(handle: RawHandle) -> u64 {
+    let claim = match pci_claim(handle) {
+        Ok(claim) => claim,
+        Err(e) => return e.refuse(),
+    };
+    match on_function(&claim, crate::pcidev::dma_start) {
+        Ok(()) => 0,
+        Err(e) => e.to_u64(),
+    }
+}
+
 /// The grant as the bytes that cross the boundary; its `const _` in `toyos-abi`
 /// proves the layout has no gap, so nothing of this kernel's stack goes with it.
 fn grant_bytes(grant: &toyos_abi::pci::DmaGrant) -> &[u8] {
@@ -411,85 +350,5 @@ fn grant_bytes(grant: &toyos_abi::pci::DmaGrant) -> &[u8] {
             grant as *const _ as *const u8,
             core::mem::size_of::<toyos_abi::pci::DmaGrant>(),
         )
-    }
-}
-
-/// Which way one partition transfer moves bytes, with the caller's window.
-pub(super) enum Transfer<'a, 'u> {
-    Read(&'a mut crate::user_ptr::UserBytesMut<'u>),
-    Write(&'a crate::user_ptr::UserBytes<'u>),
-}
-
-/// `count` blocks of a claimed partition from its block `first`, through a
-/// kernel buffer: the device never sees a user address.
-///
-/// The view is taken from the claim for each attempt and dropped before the
-/// wait between two: while an operation is on the device its view holds the
-/// partition, so a close on another thread cannot hand the partition to a
-/// second holder under a write in flight, and no view is left on a stack a
-/// kill could strand. A run that does not end inside the partition is refused
-/// here without a word to the log — a caller can ask at syscall rate — and
-/// `block::Partition::locate` stands behind this as the one check between a
-/// block number and the device.
-pub(super) fn sys_partition_transfer(
-    handle: RawHandle,
-    first: u64,
-    count: u32,
-    transfer: Transfer<'_, '_>,
-) -> u64 {
-    let right = match transfer {
-        Transfer::Read(_) => Rights::READ,
-        Transfer::Write(_) => Rights::WRITE,
-    };
-    let claim = match process::with_process_data(|data| {
-        data.handles.get::<crate::object::device::DeviceClaim>(handle, right)
-    }) {
-        Ok(claim) => claim,
-        Err(e) => return e.refuse(),
-    };
-    let class = claim.class();
-    match class {
-        device::DeviceType::Partition => {}
-        device::DeviceType::Keyboard
-        | device::DeviceType::Mouse
-        | device::DeviceType::Framebuffer
-        | device::DeviceType::HdaAudio
-        | device::DeviceType::PciFunction
-        | device::DeviceType::Isa
-        | device::DeviceType::Acpi => {
-            drop(claim);
-            return crate::object::HandleError::WrongType {
-                held: class.class_name(),
-                wanted: "a partition claim",
-            }
-            .refuse();
-        }
-    }
-    match claim.partition_view().map(|view| view.fits(first, count)) {
-        None => return SyscallError::Gone.to_u64(),
-        Some(false) => return SyscallError::InvalidArgument.to_u64(),
-        Some(true) => {}
-    }
-    let mut bounce = alloc::vec![0u8; count as usize * toyos_abi::part::BLOCK_BYTES];
-    match transfer {
-        Transfer::Write(from) => {
-            from.read_at(0, &mut bounce);
-            let run = ops::until_answered(|| match claim.partition_view() {
-                Some(view) => view.write_blocks(first, count, &bounce).map_err(ops::block_word),
-                None => Err(SyscallError::Gone),
-            });
-            ops::partition_word("a write", run)
-        }
-        Transfer::Read(into) => {
-            let run = ops::until_answered(|| match claim.partition_view() {
-                Some(view) => view.read_blocks(first, count, &mut bounce).map_err(ops::block_word),
-                None => Err(SyscallError::Gone),
-            });
-            let word = ops::partition_word("a read", run);
-            if word == 0 {
-                into.write_at(0, &bounce);
-            }
-            word
-        }
     }
 }

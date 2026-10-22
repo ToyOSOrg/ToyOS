@@ -22,14 +22,18 @@ so `Consent::prompt_up`, which only the prompt's line starts, never ran. The
 log:
 https://github.com/ToyOSOrg/evidence/blob/c7a625ddef468380faaca0e94f0be7ffb52dfed3/build/guest.log#L1259
 
-The host waits for the launcher before its second click because two clicks
+The host waited for the launcher before its second click because two clicks
 in one read are one click
 (`issues/two-clicks-the-compositor-reads-at-once-are-one-click.md`). That
-wait ends when any pixel of the row's rectangle changes (`Consent::begin`,
-`tests/toyos.rs`), which is not the row being drawn.
+wait ended when any pixel of the row's rectangle changed (`Consent::begin`,
+`tests/toyos.rs` at `c24bee1db`), which is not the row being drawn.
 
 Owner: the desktop track, `issues/toyos-has-a-desktop.md`.
 
+**Its test is deleted**: `ff1a11dbd` cut `consent_prompt` with its image and
+the harness's `Consent` steps, under the testing ruling that a test which
+launches software and drives it through steps is cut. Nothing now clicks the
+launcher's row.
+
 **Exit**: why a click on the open launcher's row made no launch is named and
-fixed, and the host's step reds by name, within a bound of its own, when its
-click launches nothing.
+fixed.
