@@ -1,7 +1,7 @@
 //! The handoff's bounds: an extent is kept only when it is whole blocks inside
 //! one descriptor of the loader's type, and each edge of that is its own test.
 
-use toyos_rootimage::handoff::{held, Descriptor};
+use toyos_rootimage::handoff::{held, overlapping, Descriptor};
 
 const PAGE: u64 = 4096;
 const LOADER_DATA: u32 = 2;
@@ -62,4 +62,17 @@ fn a_start_that_is_not_block_aligned_is_refused() {
 #[test]
 fn an_extent_inside_a_descriptor_of_another_type_is_refused() {
     assert_eq!(held(map(), LOADER_DATA, 2 * PAGE, 4 * PAGE, PAGE), None);
+}
+
+/// Two handed extents that share a byte are named by index, whichever end
+/// overlaps; ones that only touch, or are empty, share nothing.
+#[test]
+fn extents_that_share_a_byte_are_named() {
+    let (a, b, c) = (16 * PAGE..20 * PAGE, 20 * PAGE..24 * PAGE, 30 * PAGE..32 * PAGE);
+    assert_eq!(overlapping(&[a.clone(), b.clone(), c.clone()]), None, "touching extents share nothing");
+    assert_eq!(overlapping(&[a.clone(), b, 23 * PAGE..31 * PAGE]), Some((1, 2)));
+    assert_eq!(overlapping(&[c, a.clone(), 31 * PAGE..33 * PAGE]), Some((0, 2)));
+    assert_eq!(overlapping(&[a.clone(), 17 * PAGE..18 * PAGE]), Some((0, 1)), "one inside another");
+    assert_eq!(overlapping(&[a.clone(), a.clone()]), Some((0, 1)), "the same extent twice");
+    assert_eq!(overlapping(&[a, 18 * PAGE..18 * PAGE]), None, "an empty extent");
 }

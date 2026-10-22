@@ -3,7 +3,7 @@
 //! Minting a device claim, entering the RT band, and turning a pid into a
 //! process handle are each reachable only through one bit on a handle to
 //! this. The kernel creates exactly one full-rights `SysCap`, at boot, for
-//! `/system/bin/supervisor`; nothing else can construct one, so the set of processes
+//! the supervisor; nothing else can construct one, so the set of processes
 //! that can ever do the three is exactly what the supervisor endowed.
 
 use alloc::sync::Arc;

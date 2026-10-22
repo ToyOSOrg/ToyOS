@@ -135,6 +135,9 @@ pub enum Refusal {
     Table(String),
     /// The table does not hold exactly one partition of a type the loop needs.
     Partitions { what: &'static str, matched: u32 },
+    /// The table holds neither one nor two ROOTs, which are the slots the
+    /// loader boots.
+    Roots { matched: u32 },
     /// The image is armed with a parameter [`FLASHABLE`] does not clear.
     Armed { name: String },
     /// **The image carries no bound on its own boot.** Every metal image is
@@ -229,6 +232,9 @@ impl fmt::Display for Refusal {
             Self::Table(why) => write!(f, "the image carries no readable partition table: {why}"),
             Self::Partitions { what, matched } => {
                 write!(f, "the image carries {matched} {what} partitions and this loop needs one")
+            }
+            Self::Roots { matched } => {
+                write!(f, "the image carries {matched} TOYOS-ROOT partitions and this loop needs one or two")
             }
             Self::NoBound { staged_a_wedge } => write!(
                 f,
@@ -899,19 +905,26 @@ pub fn judge_arms(armed: &[String]) -> Result<u64, Refusal> {
     }
 }
 
-/// [`whole_disk`], and exactly one partition of each of the three types at the
-/// numbers the installed rule names.
+/// [`whole_disk`]: exactly one ESP and one TOYOS-LOG at the numbers the
+/// installed rule names, one slot table, and one or two ROOTs, the slots the
+/// loader boots.
 fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
     let (mut file, bytes) = whole_disk(path).map_err(Refusal::Disk)?;
     let esp = one_partition(&mut file, toyos_gpt::Guid::EFI_SYSTEM, "ESP")?;
     let log = one_partition(&mut file, toyos_gpt::Guid::MICROSOFT_BASIC, "TOYOS-LOG")?;
-    one_partition(&mut file, toyos_gpt::Guid::TOYOS_ROOT, "TOYOS-ROOT")?;
+    one_partition(&mut file, toyos_gpt::Guid::TOYOS_SLOTS, "TOYOS-SLOTS")?;
     for (what, got, want) in
         [("the ESP", esp.index, target.esp_part), ("TOYOS-LOG", log.index, target.log_part)]
     {
         if got != want {
             return Err(Refusal::PartitionIndex { what, want, got });
         }
+    }
+    let roots = toyos_gpt::locate_type(&mut toyos_build::image::FileSectors(&mut file), toyos_gpt::Guid::TOYOS_ROOT, &mut [])
+        .map_err(|e| Refusal::Table(format!("{e:?}")))?
+        .matched;
+    if !(1..=2).contains(&roots) {
+        return Err(Refusal::Roots { matched: roots });
     }
     Ok(Flashable { path: path.to_path_buf(), bytes, esp, log })
 }
@@ -3062,7 +3075,8 @@ mod tests {
             std::fs::write(&at, bytes).expect("write");
             at
         };
-        let (esp, basic, root) = (toyos_gpt::Guid::EFI_SYSTEM, toyos_gpt::Guid::MICROSOFT_BASIC, toyos_gpt::Guid::TOYOS_ROOT);
+        let (esp, basic, slots, root) =
+            (toyos_gpt::Guid::EFI_SYSTEM, toyos_gpt::Guid::MICROSOFT_BASIC, toyos_gpt::Guid::TOYOS_SLOTS, toyos_gpt::Guid::TOYOS_ROOT);
 
         assert_eq!(
             admit(&write("ragged.img", &vec![0u8; 1000]), &t),
@@ -3082,24 +3096,36 @@ mod tests {
             Err(Refusal::Disk(Unfit::BackupHeader { .. }))
         ));
 
-        let two = disk(&[("a", esp), ("b", esp), ("log", basic), ("root", root)]);
+        let two = disk(&[("a", esp), ("b", esp), ("log", basic), ("slots", slots)]);
         assert_eq!(
             admit(&write("two-esps.img", &two), &t),
             Err(Refusal::Partitions { what: "ESP", matched: 2 })
         );
-        let no_log = disk(&[("esp", esp), ("root", root)]);
+        let no_log = disk(&[("esp", esp), ("slots", slots)]);
         assert_eq!(
             admit(&write("no-log.img", &no_log), &t),
             Err(Refusal::Partitions { what: "TOYOS-LOG", matched: 0 })
         );
         // The log where the installed rule does not name it: p2, not p3.
-        let moved = disk(&[("esp", esp), ("log", basic), ("root", root)]);
+        let moved = disk(&[("esp", esp), ("log", basic), ("slots", slots)]);
         assert_eq!(
             admit(&write("moved-log.img", &moved), &t),
             Err(Refusal::PartitionIndex { what: "TOYOS-LOG", want: 3, got: 2 })
         );
-        // And the shape `build/image.rs` writes, which is the one admitted.
-        let built = disk(&[("esp", esp), ("root", root), ("log", basic)]);
+        let rootless = disk(&[("esp", esp), ("slots", slots), ("log", basic)]);
+        assert_eq!(admit(&write("rootless.img", &rootless), &t), Err(Refusal::Roots { matched: 0 }));
+        let three = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("a", root), ("b", root), ("c", root)]);
+        assert_eq!(admit(&write("three-roots.img", &three), &t), Err(Refusal::Roots { matched: 3 }));
+        let no_table = disk(&[("esp", esp), ("root", root), ("log", basic)]);
+        assert_eq!(
+            admit(&write("no-table.img", &no_table), &t),
+            Err(Refusal::Partitions { what: "TOYOS-SLOTS", matched: 0 })
+        );
+        // And the shapes `build/image.rs` writes, one slot or two, which are
+        // the ones admitted.
+        let two_slots = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("a", root), ("b", root)]);
+        assert!(admit(&write("two-slots.img", &two_slots), &t).is_ok(), "a two-slot image is refused");
+        let built = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("root", root)]);
         let ok = admit(&write("built.img", &built), &t).expect("the built shape is admitted");
         assert_eq!((ok.esp.index, ok.log.index), (1, 3));
         assert_eq!(ok.bytes % u64::from(LBA), 0);

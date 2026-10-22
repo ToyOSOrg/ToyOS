@@ -14,9 +14,7 @@ sends `Unknown`, `BadAddress`, `ResourceExhausted` and `NotSupported` through
 full (`fd_errno`, `sdk/libc/src/posix_io.rs`), but a full kernel handle table
 (`kernel/src/object/handle.rs`) refuses the `open` or `pipe` beneath it first
 with `ResourceExhausted`, which reaches the caller as `EINVAL` where POSIX has
-`EMFILE`; a full
-bcachefs volume (`kernel/src/bcachefs_adapter.rs`) `write` `EINVAL` where it
-has `ENOSPC`, and an operation a filesystem lacks `EINVAL` where it has
+`EMFILE`; and an operation a filesystem lacks `EINVAL` where it has
 `ENOTSUP`. A refusal that is truly `EINVAL` reads the same as each of them, so
 a case asserting `EINVAL` passes whichever happened.
 

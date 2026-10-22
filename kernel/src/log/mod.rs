@@ -74,7 +74,7 @@ const TAIL_HEAD: &str = "log: this boot's newest records follow, newest first";
 /// records a stop writes is the machine's to decide, by its CPUs and its disks.
 ///
 /// **The kernel does not wait for `/system/bin/logkeeper`, so it does not know what
-/// reached `/log`.** `/system/bin/supervisor` has `logkeeper` flush before it asks for the
+/// reached `/log`.** The supervisor has `logkeeper` flush before it asks for the
 /// stop; everything committed after that — the stop's own record, the last
 /// word — is on the console, and here, where the next
 /// loader pass prints it into `loader.log`.

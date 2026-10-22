@@ -9,7 +9,7 @@
 //! the fixture is a signature over bytes this crate writes, not over a file it
 //! only carries. Nothing runs `ssh-keygen` at test time.
 
-use toyos_update::image::{Header, HEADER_BYTES};
+use toyos_update::image::{Header, Sections, HEADER_BYTES};
 
 const SIGNATURE: &str = include_str!("fixtures/ssh-keygen-signed-header.sig");
 const PUBLIC: &str = include_str!("fixtures/ssh-keygen-signer.pub");
@@ -18,9 +18,13 @@ const PUBLIC: &str = include_str!("fixtures/ssh-keygen-signer.pub");
 fn oracle_header() -> [u8; HEADER_BYTES] {
     Header::of(
         20260926,
-        b"\x7fELF oracle kernel",
-        b"root=00000000-0000-0000-0000-000000000000",
-        &[0x5A; 4096],
+        &Sections {
+            kernel: b"\x7fELF oracle kernel",
+            cmdline: b"slot=A",
+            supervisor: b"\x7fELF oracle supervisor",
+            fileserver: b"\x7fELF oracle fileserver",
+            root: &[0x5A; 4096],
+        },
     )
     .encode()
 }

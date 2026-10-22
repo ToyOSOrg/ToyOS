@@ -1,7 +1,8 @@
-//! Whether the extent the loader names as ROOT's image is memory the kernel
-//! may keep: whole blocks, every byte of it inside one descriptor of the type
-//! the loader allocated it as. The kernel then keeps it out of its allocator
-//! by address, as it keeps the black box's page.
+//! Whether an extent the loader hands the kernel is memory the kernel may
+//! keep: whole blocks, every byte of it inside one descriptor of the type the
+//! loader allocated it as, and no byte of it another handed extent's. The
+//! kernel then keeps it out of its allocator by address, as it keeps the black
+//! box's page.
 
 /// `[start, end)` of UEFI memory type `ty`, as a memory map describes it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,4 +32,13 @@ pub fn held(
     map.into_iter()
         .any(|entry| entry.ty == ty && entry.start <= at && end <= entry.end)
         .then_some(at..end)
+}
+
+/// The first two of `extents` that share a byte, by index; `None` when no two
+/// do. An empty extent shares nothing.
+pub fn overlapping(extents: &[core::ops::Range<u64>]) -> Option<(usize, usize)> {
+    let shares = |a: &core::ops::Range<u64>, b: &core::ops::Range<u64>| {
+        !a.is_empty() && !b.is_empty() && a.start < b.end && b.start < a.end
+    };
+    (0..extents.len()).find_map(|i| (i + 1..extents.len()).find(|&j| shares(&extents[i], &extents[j])).map(|j| (i, j)))
 }

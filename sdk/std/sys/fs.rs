@@ -1,5 +1,5 @@
-//! Files on ToyOS: a path is served by the kernel (`/system`, `/tmp`) or by a
-//! file server behind one of the process's directory capabilities, and
+//! Files on ToyOS: a path is served by the kernel (`/tmp`) or by a file
+//! server behind one of the process's directory capabilities, and
 //! `toyos::files` routes it, follows its links and keeps what it opened. A
 //! `File` is one descriptor of the process's table either way.
 

@@ -31,10 +31,12 @@ const BODY_BYTES: usize = 8 + 4 + 4 + 8 + 2 * SLOT_BYTES;
 /// A copy's bytes, checksum included; the rest of its block is zero.
 pub const TABLE_BYTES: usize = BODY_BYTES + 4;
 
-/// Where each slot's kernel, boot parameter and signed header are on its FAT
-/// partition, as paths from the volume's root.
+/// Where each slot's kernel, boot parameter, two programs and signed header
+/// are on its FAT partition, as paths from the volume's root.
 pub const KERNEL_FILE: &str = "toyos/kernel.elf";
 pub const CMDLINE_FILE: &str = "toyos/cmdline";
+pub const SUPERVISOR_FILE: &str = "toyos/supervisor.elf";
+pub const FILESERVER_FILE: &str = "toyos/fileserver.elf";
 pub const SIGNED_FILE: &str = "toyos/image.sig";
 
 /// A slot's two partitions, by their unique GUIDs as a GPT entry stores them.
@@ -217,7 +219,7 @@ pub fn next_write(current: (Table, usize), mut next: Table) -> (usize, [u8; BLOC
     (1 - current.1, next.encode())
 }
 
-/// The labels `/system/bin/supervisor` endows a `slots` grant under, and
+/// The labels the supervisor endows a `slots` grant under, and
 /// `/system/bin/update` takes it by: the slot table's partition, and the idle
 /// slot's FAT volume and ROOT.
 pub const TABLE_LABEL: &str = "slots:table";

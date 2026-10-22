@@ -1,5 +1,5 @@
 //! A boot's log as `logkeeper` writes it and serves it: the form a program's line
-//! takes beside the kernel's records, the frame `/system/bin/supervisor` hands `logkeeper`
+//! takes beside the kernel's records, the frame the supervisor hands `logkeeper`
 //! a program's output on, the replay a reader who connects late is served
 //! from, and the one reader of a line's head ([`parse`]).
 //!

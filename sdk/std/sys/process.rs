@@ -34,6 +34,9 @@ pub struct Command {
     /// it read: kept across a later working directory, so a spawn starts the
     /// bytes the caller saw ([`Command::prepared_image`]).
     image: Option<(OsString, toyos::process::Image)>,
+    /// A boot image this process holds, which the child runs instead of any
+    /// file ([`Command::boot_image`]).
+    boot_image: Option<u32>,
 }
 
 /// The file reads a spawn needs, made ahead of it ([`Command::prepare`]).
@@ -83,6 +86,7 @@ impl Command {
             image_path: None,
             prepared: None,
             image: None,
+            boot_image: None,
         }
     }
 
@@ -94,6 +98,17 @@ impl Command {
     /// stays the child's first argument.
     pub fn image_from(&mut self, path: &OsStr) {
         self.image_path = Some(path.to_owned());
+        self.prepared = None;
+        self.image = None;
+        self.boot_image = None;
+    }
+
+    /// Run the immutable region `handle` names, which this process keeps,
+    /// rather than any file: `argv[0]` is the program the command names, and
+    /// nothing opens it.
+    pub fn boot_image(&mut self, handle: u32) {
+        self.boot_image = Some(handle);
+        self.image_path = None;
         self.prepared = None;
         self.image = None;
     }
@@ -117,7 +132,7 @@ impl Command {
         let kept = self.image.as_ref().is_some_and(|(read, _)| *read == source);
         if !kept {
             self.image = None;
-            if crate::sys::fs::is_served(Path::new(&source)) {
+            if self.boot_image.is_none() && crate::sys::fs::is_served(Path::new(&source)) {
                 let image = crate::sys::fs::read_image(Path::new(&source))?;
                 self.image = Some((source, image));
             }
@@ -208,7 +223,7 @@ impl Command {
 
     fn resolve_program(&self) -> io::Result<OsString> {
         let prog = self.program.to_str().unwrap_or("");
-        if prog.contains('/') {
+        if prog.contains('/') || self.boot_image.is_some() {
             return Ok(self.program.clone());
         }
         // Search PATH for the executable
@@ -323,10 +338,19 @@ impl Command {
         // this process's own that the kernel pages the child from: the kernel
         // opens only what it serves itself.
         let source = Path::new(image_path.unwrap_or(program));
-        let image = match prepared_image {
-            Some(image) => Some(image),
-            None if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source)?),
-            None => None,
+        let image = match (prepared_image, self.boot_image) {
+            (Some(image), _) => Some(image),
+            (None, Some(handle)) => {
+                let copy = toyos_abi::syscall::dup(toyos_abi::RawHandle(handle)).map_err(crate::sys::to_io_error)?;
+                // SAFETY: `dup` answered a fresh handle nothing else answers for.
+                let copy = unsafe { toyos::OwnedHandle::from_raw(copy) };
+                let region = toyos::shm::Immutable::adopt(copy).map_err(|why| {
+                    io::Error::new(io::ErrorKind::InvalidInput, format!("the boot image is no immutable region: {why}"))
+                })?;
+                Some(toyos::process::Image::boot(region))
+            }
+            (None, None) if crate::sys::fs::is_served(source) => Some(crate::sys::fs::read_image(source)?),
+            (None, None) => None,
         };
         let spawned = request.direct(&direct_env, image.as_ref());
         // The child keeps the object alive; this process's handle, and with it

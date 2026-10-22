@@ -2,7 +2,7 @@
 //!
 //! [`sys_log_read`], [`sys_trace_read`], the roster half of [`sys_sysinfo`], and both of
 //! [`sys_shutdown`] and [`sys_reboot`] each require a `SysCap` bit from
-//! `/system/bin/supervisor`'s `system.toml`; `SYS_SYSINFO`'s header is ambient.
+//! the supervisor's `system.toml`; `SYS_SYSINFO`'s header is ambient.
 
 use alloc::vec::Vec;
 
@@ -114,7 +114,7 @@ fn quiesce(last: &str) -> Result<(crate::quiesce::Stopping, StopWire), SyscallEr
     // First: what follows outlasts a feed cadence, and no pass runs to feed again.
     crate::arch::watchdog::disarm();
     // Every userland thread stops here, the log's writer with the rest:
-    // `/system/bin/supervisor` had it flush before it asked for this stop.
+    // the supervisor had it flush before it asked for this stop.
     let (stopped, stopping) = crate::quiesce::stop();
     // From here on nothing carries a record to a file: the seal below takes
     // every one stamped after this one, the newest the stop found.

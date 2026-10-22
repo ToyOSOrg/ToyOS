@@ -11,7 +11,7 @@ use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, ProcessStats, SyscallError};
 
 use crate::endow::FromHandle;
-use crate::shm::SharedMemory;
+use crate::shm::{Immutable, SharedMemory};
 use crate::{AsHandle, OwnedHandle, RawHandle};
 
 /// The `<signal.h>` number POSIX names an end by, as libc's `WTERMSIG`
@@ -101,12 +101,19 @@ impl FromHandle for Process {
     }
 }
 
-/// A program's bytes in a memory object of this process's own, which the
-/// kernel pages a child from: how a program the kernel does not serve is
-/// spawned (`SpawnArgs::image`).
+/// A program's bytes in a memory object this process holds, which the kernel
+/// pages a child from: how a program the kernel does not serve is spawned
+/// (`SpawnArgs::image`).
 pub struct Image {
-    object: SharedMemory,
+    object: Object,
     len: u64,
+}
+
+enum Object {
+    /// Read into memory of this process's own.
+    Read(SharedMemory),
+    /// A boot image the kernel handed over.
+    Boot(Immutable),
 }
 
 /// Why [`Image::read`] made no image.
@@ -141,18 +148,32 @@ impl Image {
                 n => done += n,
             }
         }
-        Ok(Self { object, len })
+        Ok(Self { object: Object::Read(object), len })
+    }
+
+    /// The program a boot image is, whole.
+    pub fn boot(image: Immutable) -> Self {
+        let len = image.as_slice().len() as u64;
+        Self { object: Object::Boot(image), len }
     }
 
     /// The program's bytes, as they were read.
     pub fn bytes(&self) -> &[u8] {
-        &self.object.as_slice()[..self.len as usize]
+        let bytes = match &self.object {
+            Object::Read(object) => object.as_slice(),
+            Object::Boot(image) => image.as_slice(),
+        };
+        &bytes[..self.len as usize]
     }
 
     /// What `SpawnArgs::image` and `SpawnArgs::image_len` carry. The object is
     /// this process's until the spawn returns; the child keeps its own.
     pub fn spawn_words(&self) -> (u64, u64) {
-        (u64::from(self.object.as_handle().0), self.len)
+        let handle = match &self.object {
+            Object::Read(object) => object.as_handle(),
+            Object::Boot(image) => image.as_handle(),
+        };
+        (u64::from(handle.0), self.len)
     }
 }
 

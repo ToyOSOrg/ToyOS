@@ -7,7 +7,7 @@
 # claimed it tens of milliseconds after the last checkpoint, so every line the
 # kernel logged was on screen for about a tenth of a second and then gone.
 #
-# `/system/bin/supervisor` is in every image and holds the one `SysCap`, so the
+# The supervisor is in every image and holds the one `SysCap`, so the
 # guarantee is that this config declares no `devices`, which
 # `no_diag_program_claims_the_screen` checks.
 [boot]

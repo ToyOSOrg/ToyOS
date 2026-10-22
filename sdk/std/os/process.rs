@@ -46,7 +46,7 @@ pub trait CommandExt {
     /// find the program, judge the working directory, and read a program on a
     /// file server into memory. The spawn then calls no file server for them —
     /// for a caller whose spawning thread may not wait on one, as
-    /// `/system/bin/supervisor`'s loop may not wait on the file servers it starts
+    /// the supervisor's loop may not wait on the file servers it starts
     /// again. A later [`current_dir`](crate::process::Command::current_dir)
     /// undoes it but for the program read, which a prepare after it keeps and
     /// a later [`image_from`](CommandExt::image_from) does not.
@@ -69,6 +69,13 @@ pub trait CommandExt {
     /// [`provide`](CommandExt::provide) the spawn answers `PermissionDenied`.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn image_from(&mut self, path: &crate::path::Path) -> &mut Self;
+
+    /// Run the boot image `image` names, an immutable region this process
+    /// holds and keeps, rather than any file: the command's program is the
+    /// child's `argv[0]` and nothing opens it. What the supervisor starts the
+    /// file server with before any file can be read.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn boot_image(&mut self, image: u32) -> &mut Self;
 
     /// Place the child under the process `place` names rather than under this
     /// one, so that its end, not this process's, takes the child down.
@@ -121,6 +128,11 @@ impl CommandExt for crate::process::Command {
 
     fn image_from(&mut self, path: &crate::path::Path) -> &mut Self {
         self.as_inner_mut().image_from(path.as_os_str());
+        self
+    }
+
+    fn boot_image(&mut self, image: u32) -> &mut Self {
+        self.as_inner_mut().boot_image(image);
         self
     }
 

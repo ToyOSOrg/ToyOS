@@ -1,4 +1,4 @@
-//! The supervisor's lifecycle decisions, pure: `/system/bin/supervisor` holds
+//! The supervisor's lifecycle decisions, pure: the supervisor holds
 //! the handles, makes the spawns and runs the loop, and asks here what to do.
 //!
 //! [`restart`] is when a process that ended is started again, [`claims`] which
