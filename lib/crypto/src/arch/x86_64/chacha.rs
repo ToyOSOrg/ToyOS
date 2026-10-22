@@ -229,11 +229,11 @@ macro_rules! chacha256 {
             v
         }
 
-        /// Pair rows as `128P` bytes of keystream in `halves`' first `4P`,
-        /// XORed in or written over them.
+        /// The first `n` of the pairs' `2P` blocks of keystream in `halves`'
+        /// first `2n`, XORed in or written over them.
         #[inline]
         #[target_feature(enable = $features)]
-        fn emit<const P: usize>(rows: [[__m256i; 4]; P], halves: &mut [[u8; 32]], xor: bool) {
+        fn emit<const P: usize>(rows: [[__m256i; 4]; P], n: usize, halves: &mut [[u8; 32]], xor: bool) {
             for p in 0..P {
                 let rows = rows[p];
                 let blocks = [
@@ -242,7 +242,8 @@ macro_rules! chacha256 {
                     _mm256_permute2x128_si256::<0x31>(rows[0], rows[1]),
                     _mm256_permute2x128_si256::<0x31>(rows[2], rows[3]),
                 ];
-                for i in 0..4 {
+                // Halves 4p and 4p + 1 are block 2p.
+                for i in 0..4.min((2 * n).saturating_sub(4 * p)) {
                     if xor {
                         xor_into(&mut halves[4 * p + i], blocks[i]);
                     } else {
@@ -273,7 +274,7 @@ macro_rules! chacha256 {
         #[target_feature(enable = $features)]
         pub(super) fn pairs_of<const P: usize>(key: &[u8; 32], nonce: u64, counter: u64, out: &mut [u8], beside: impl FnMut(usize)) {
             let (halves, _) = out.as_chunks_mut::<32>();
-            emit(pairs::<P>(counter_rows::<P>(key, nonce, counter), beside), halves, true);
+            emit(pairs::<P>(counter_rows::<P>(key, nonce, counter), beside), 2 * P, halves, true);
         }
 
         /// The rows of the pair of lanes `2p` and `2p + 1`, one per register.
@@ -328,7 +329,7 @@ macro_rules! chacha256 {
                 let mut stream = crate::secret::Secret([0u8; 256]);
                 if rest.len() <= 128 {
                     let (halves, _) = stream.0.as_chunks_mut::<32>();
-                    emit(pairs::<1>(counter_rows::<1>(key, nonce, counter), |_| {}), halves, false);
+                    emit(pairs::<1>(counter_rows::<1>(key, nonce, counter), |_| {}), 2, halves, false);
                 } else {
                     four(key, nonce, counter, &mut stream.0, false);
                 }
@@ -350,7 +351,7 @@ pub(super) mod avx2 {
     #[target_feature(enable = "avx2")]
     fn four(key: &[u8; 32], nonce: u64, counter: u64, out: &mut [u8; 256], xor: bool) {
         let (halves, _) = out.as_chunks_mut::<32>();
-        emit(pairs::<2>(counter_rows::<2>(key, nonce, counter), |_| {}), halves, xor);
+        emit(pairs::<2>(counter_rows::<2>(key, nonce, counter), |_| {}), 4, halves, xor);
     }
 
     /// The keystream of the first `n` of four lanes, `n` 2 to 4, into
@@ -364,9 +365,9 @@ pub(super) mod avx2 {
         let nonce = u64::from_le_bytes(*nonce);
         let (halves, _) = out.as_chunks_mut::<32>();
         if n <= 2 {
-            emit(pairs::<1>(lane_rows::<1>(keys, counters, nonce), |_| {}), halves, false);
+            emit(pairs::<1>(lane_rows::<1>(keys, counters, nonce), |_| {}), n, halves, false);
         } else {
-            emit(pairs::<2>(lane_rows::<2>(keys, counters, nonce), |_| {}), halves, false);
+            emit(pairs::<2>(lane_rows::<2>(keys, counters, nonce), |_| {}), n, halves, false);
         }
     }
 }
@@ -456,12 +457,12 @@ pub(super) mod avx512 {
         ]
     }
 
-    /// The four blocks into `out`, XORed in or written over it. Caller data
-    /// is accessed 16 bytes at a time, as [`load_data`]'s alignment note
-    /// explains.
+    /// The first `n` blocks into `out`'s first `64n` bytes, XORed in or
+    /// written over them. Caller data is accessed 16 bytes at a time, as
+    /// [`load_data`]'s alignment note explains.
     #[inline]
     #[target_feature(enable = "avx512f")]
-    fn quad_emit(rows: Quad, out: &mut [u8; 256], xor: bool) {
+    fn quad_emit(rows: Quad, n: usize, out: &mut [u8; 256], xor: bool) {
         let [a, b, c, d] = rows;
         // Lanes a0 a1 b0 b1, c0 c1 d0 d1, a2 a3 b2 b3 and c2 c3 d2 d3; then
         // block i is lane i of a, b, c and d.
@@ -474,7 +475,7 @@ pub(super) mod avx512 {
             _mm512_shuffle_i32x4::<0xdd>(ab23, cd23),
         ];
         let (rows, _) = out.as_chunks_mut::<16>();
-        for i in 0..4 {
+        for i in 0..n {
             let v = blocks[i];
             let lanes = [
                 _mm512_castsi512_si128(v),
@@ -495,7 +496,7 @@ pub(super) mod avx512 {
     #[inline]
     #[target_feature(enable = "avx2,avx512f,avx512vl")]
     fn four(key: &[u8; 32], nonce: u64, counter: u64, out: &mut [u8; 256], xor: bool) {
-        quad_emit(quad(counter_quad(key, nonce, counter)), out, xor);
+        quad_emit(quad(counter_quad(key, nonce, counter)), 4, out, xor);
     }
 
     /// As [`super::avx2::blocks`], with four blocks in one register set.
@@ -507,9 +508,9 @@ pub(super) mod avx512 {
         let nonce = u64::from_le_bytes(*nonce);
         if n <= 2 {
             let (halves, _) = out.as_chunks_mut::<32>();
-            emit(pairs::<1>(lane_rows::<1>(keys, counters, nonce), |_| {}), halves, false);
+            emit(pairs::<1>(lane_rows::<1>(keys, counters, nonce), |_| {}), n, halves, false);
         } else {
-            quad_emit(quad(lane_quad(keys, counters, nonce)), out, false);
+            quad_emit(quad(lane_quad(keys, counters, nonce)), n, out, false);
         }
     }
 }
