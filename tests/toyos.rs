@@ -4562,7 +4562,8 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
 }
 
 /// An `edu` plugged into an empty `pcie-root-port` and pulled out of it, and
-/// plugged in again: each plug is an arrival with a number of its own and a
+/// plugged in again: each plug is an arrival with a number of its own, its
+/// unassigned BAR given an address inside the port's window, and a
 /// `pciholder` of its own; the pull — the slot's attention button, which is
 /// what `device_del` presses — answers `Gone` to every call the holder's
 /// claim makes, the holder ends, the supervisor's set no longer lists the
@@ -4586,11 +4587,16 @@ fn a_function_arrives_and_leaves() -> Result<(), String> {
         .map_err(|e| format!("{e}\n{console}"))?;
     let first = arrival(&console, 0).expect("awaited");
     let at = console.lines().find_map(|l| l.split_once(HOLDING)).map(|(_, at)| at.trim().to_string()).expect("awaited");
+    // `edu`'s one BAR, 1 MiB, which QEMU leaves unassigned on a plug.
+    let assigned = format!("pcidev: PCI {at} BAR 0 (0x100000 bytes) assigned ");
+    if !console.contains(&assigned) {
+        return Err(format!("the plugged function's BAR was not assigned (`{assigned}`):\n{console}"));
+    }
 
     qemu.device_del("plugged", Duration::from_secs(30)).map_err(|e| format!("{e}\n{console}"))?;
     let gone = format!("pciholder: gone PCI {at}: irq=Gone config=Some(Gone) bar=Some(Gone) dma=Some(Gone)");
     let left = format!("supervisor: PCI {at} (arrival {first}) left the device set");
-    let ended = format!("pciholder on PCI {at} ended with 0");
+    let ended = format!("pciholder on PCI {at} ended, code=0");
     await_guest(&mut qemu, &mut console, "the holder's end", |t| t.contains(&gone) && t.contains(&left) && t.contains(&ended))
         .map_err(|e| format!("{e}\n{console}"))?;
 

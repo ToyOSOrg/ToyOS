@@ -123,6 +123,9 @@ struct Live {
     /// StreamID, and the DeviceID the unit's own node maps that stream on to
     /// at an ITS.
     routes: Vec<(StreamId, u32, Option<ItsDevice>)>,
+    /// Every function enumerated when the unit was programmed: the ones
+    /// [`Self::routes`] was read for.
+    enumerated: Vec<StreamId>,
     domains: crate::iommu::domains::Domains<domain::Space>,
 }
 
@@ -274,9 +277,10 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice]) {
     // The ITS's doorbell page is mapped at its own address in every domain
     // (`domain::create`), so no grant may be handed out over it.
     let doorbell = super::irqchip::its::doorbell_page().map(|page| (page, page + crate::mm::PAGE_SIZE));
-    let Some(live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, doorbell.into_iter().collect()) else {
+    let Some(mut live) = program(regs, smmu.base, smmu.coherent_override, smmu.event, routes, doorbell.into_iter().collect()) else {
         return;
     };
+    live.enumerated = devices.iter().map(|device| StreamId::pci(device.bus, device.dev, device.func)).collect();
     *UNIT.lock() = Some(live);
     #[cfg(feature = "boot-actuators")]
     if crate::actuator::smmu_selftest() {
@@ -404,6 +408,7 @@ fn program(
         streams,
         memory,
         routes,
+        enumerated: Vec::new(),
         domains: crate::iommu::domains::Domains::new(domain::FIRST),
     };
     live.domains.avoid(reserved);

@@ -92,12 +92,12 @@ pub fn untranslated(_function: StreamId) -> Option<&'static str> {
     None
 }
 
-/// Why no claim may have `function`: the IORT routes it through no unit this
-/// kernel programmed. Routes are read for the functions enumerated when the
-/// unit was programmed, so one that arrived since has none.
+/// Why no claim may have `function`: it arrived after the unit was
+/// programmed, and its IORT route was read only for the functions enumerated
+/// then.
 pub fn unclaimable(function: StreamId) -> Option<&'static str> {
-    let routed = UNIT.lock().as_ref().is_some_and(|live| live.routes.iter().any(|(rid, ..)| *rid == function));
-    (!routed).then_some("the IORT routes it through no unit this kernel programmed")
+    let arrived = UNIT.lock().as_ref().is_some_and(|live| !live.enumerated.contains(&function));
+    arrived.then_some("it arrived after the SMMUv3 was programmed, and its IORT route is read for the functions enumerated then")
 }
 
 /// A new domain, with `room` bytes of it handed out first, clear of the root
