@@ -738,7 +738,7 @@ fn seeded_pbkdf2_against_ring() {
 
 /// scrypt's, and so Salsa20/8's, BlockMix's and ROMix's, against RustCrypto's.
 fn scrypt_case(passphrase: &[u8], salt: &[u8], log_n: u8, r: u32, p: u32, n: usize) -> Result<(), String> {
-    let params = toyos_crypto::scrypt::Params::new(log_n, r, p).unwrap();
+    let params = toyos_crypto::scrypt::Params::new(log_n, r, p, toyos_crypto::scrypt::MAX_MEMORY).unwrap();
     let mut workspace = vec![0; params.workspace_len()];
     let mut out = vec![0; n];
     toyos_crypto::scrypt::derive(passphrase, salt, params, &mut workspace, &mut out).unwrap();

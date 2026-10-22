@@ -1,8 +1,8 @@
 //! scrypt (RFC 7914), for keys derived from passphrases.
 //!
 //! Untrusted cost parameters become a [`Params`] only within RFC 7914 §2's
-//! bounds and [`MAX_MEMORY`], so a caller sizes the workspace from a
-//! [`Params`] alone. Parameters, lengths and the workspace's size are public.
+//! bounds and the caller's memory limit, itself capped at [`MAX_MEMORY`], so
+//! a caller sizes the workspace from a [`Params`] alone. Parameters, lengths and the workspace's size are public.
 //!
 //! PBKDF2 and Salsa20/8 do not let contents choose branches or addresses.
 //! ROMix does, by design: its second loop reads the table entry the secret
@@ -20,8 +20,8 @@ use crate::{
     secret::{Secret, Workspace, wipe32},
 };
 
-/// The most ROMix's table, 128 * r * N bytes, may occupy: 1 GiB, which RFC
-/// 7914 §12's largest vector fills.
+/// The most ROMix's table, 128 * r * N bytes, may occupy under any caller's
+/// limit: 1 GiB, which RFC 7914 §12's largest vector fills.
 pub const MAX_MEMORY: usize = 1 << 30;
 
 /// scrypt's cost: N = 2^`log_n`, block size r and parallelization p.
@@ -35,14 +35,16 @@ pub struct Params {
 impl Params {
     /// Refuses all but RFC 7914 §2's parameters, N > 1, N < 2^(16 r), r and
     /// p positive, p * 128 * r <= (2^32 - 1) * 32, and a table past
-    /// [`MAX_MEMORY`].
-    pub fn new(log_n: u8, r: u32, p: u32) -> Result<Self, Error> {
+    /// `memory_limit` bytes or [`MAX_MEMORY`]. The workspace is two table
+    /// entries, 256 * r bytes, more than the table.
+    pub fn new(log_n: u8, r: u32, p: u32, memory_limit: usize) -> Result<Self, Error> {
+        let limit = memory_limit.min(MAX_MEMORY) as u128;
         let r128 = u128::from(r);
         let valid = log_n >= 1
             && r >= 1
             && p >= 1
             && u128::from(log_n) < 16 * r128
-            && 128 * r128 <= (MAX_MEMORY as u128).checked_shr(log_n.into()).unwrap_or(0)
+            && 128 * r128 <= limit.checked_shr(log_n.into()).unwrap_or(0)
             && u128::from(p) * 128 * r128 <= u128::from(u32::MAX) * 32;
         if valid { Ok(Self { log_n, r, p }) } else { Err(Error::InvalidParameters) }
     }
@@ -248,27 +250,30 @@ mod tests {
     }
 
     #[test]
-    fn parameters_past_the_rfc_or_the_memory_limit_are_refused() {
+    fn parameters_past_the_rfc_or_either_memory_limit_are_refused() {
         let refused = Err(Error::InvalidParameters);
-        assert_eq!(Params::new(0, 1, 1), refused, "N = 1");
-        assert_eq!(Params::new(1, 0, 1), refused, "r = 0");
-        assert_eq!(Params::new(1, 1, 0), refused, "p = 0");
-        assert!(Params::new(15, 1, 1).is_ok());
-        assert_eq!(Params::new(16, 1, 1), refused, "N = 2^(16 r)");
-        assert!(Params::new(20, 8, 1).is_ok(), "a table of exactly MAX_MEMORY");
-        assert_eq!(Params::new(21, 8, 1), refused, "a table past MAX_MEMORY");
-        assert!(Params::new(1, 1 << 22, 1).is_ok(), "two entries of exactly MAX_MEMORY");
-        assert_eq!(Params::new(1, (1 << 22) + 1, 1), refused, "two entries past MAX_MEMORY");
-        assert_eq!(Params::new(255, u32::MAX, 1), refused);
+        assert_eq!(Params::new(0, 1, 1, MAX_MEMORY), refused, "N = 1");
+        assert_eq!(Params::new(1, 0, 1, MAX_MEMORY), refused, "r = 0");
+        assert_eq!(Params::new(1, 1, 0, MAX_MEMORY), refused, "p = 0");
+        assert!(Params::new(15, 1, 1, MAX_MEMORY).is_ok());
+        assert_eq!(Params::new(16, 1, 1, MAX_MEMORY), refused, "N = 2^(16 r)");
+        assert!(Params::new(20, 8, 1, MAX_MEMORY).is_ok(), "a table of exactly MAX_MEMORY");
+        assert_eq!(Params::new(21, 8, 1, MAX_MEMORY), refused, "a table past MAX_MEMORY");
+        assert!(Params::new(1, 1 << 22, 1, MAX_MEMORY).is_ok(), "two entries of exactly MAX_MEMORY");
+        assert_eq!(Params::new(1, (1 << 22) + 1, 1, MAX_MEMORY), refused, "two entries past MAX_MEMORY");
+        assert_eq!(Params::new(255, u32::MAX, 1, MAX_MEMORY), refused);
+        assert!(Params::new(14, 8, 16, 16 << 20).is_ok(), "a table of exactly the caller's limit");
+        assert_eq!(Params::new(15, 8, 16, 16 << 20), refused, "a table past the caller's limit");
+        assert_eq!(Params::new(21, 8, 1, usize::MAX), refused, "a caller's limit past MAX_MEMORY");
         let most = u32::MAX / 4;
-        assert!(Params::new(1, 1, most).is_ok(), "p * 128 * r = (2^32 - 1) * 32 less 96");
-        assert_eq!(Params::new(1, 1, most + 1), refused, "p * 128 * r past (2^32 - 1) * 32");
-        assert_eq!(Params::new(1, 1, u32::MAX), refused);
+        assert!(Params::new(1, 1, most, MAX_MEMORY).is_ok(), "p * 128 * r = (2^32 - 1) * 32 less 96");
+        assert_eq!(Params::new(1, 1, most + 1, MAX_MEMORY), refused, "p * 128 * r past (2^32 - 1) * 32");
+        assert_eq!(Params::new(1, 1, u32::MAX, MAX_MEMORY), refused);
     }
 
     #[test]
     fn a_workspace_of_any_other_length_and_an_empty_output_are_refused() {
-        let params = Params::new(1, 1, 1).unwrap();
+        let params = Params::new(1, 1, 1, MAX_MEMORY).unwrap();
         assert_eq!(params.workspace_len(), 4 * 32);
         let mut out = [0; 32];
         for len in [0, 4 * 32 - 1, 4 * 32 + 1] {
@@ -279,7 +284,7 @@ mod tests {
 
     #[test]
     fn the_workspace_is_erased() {
-        let params = Params::new(2, 2, 2).unwrap();
+        let params = Params::new(2, 2, 2, MAX_MEMORY).unwrap();
         let mut workspace = std::vec![u32::MAX; params.workspace_len()];
         derive(b"passphrase", b"salt", params, &mut workspace, &mut [0; 32]).unwrap();
         assert!(workspace.iter().all(|&w| w == 0));

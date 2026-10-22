@@ -543,6 +543,14 @@ Not consumers:
   detects them at run time. **Owner**: this track. **Exit**: the crate takes
   them where a run-time word from the kernel says the CPU has them, measured
   on an ARM bench.
+- scrypt (`lib/crypto/src/scrypt.rs`) runs portable Salsa20/8 and BlockMix
+  on every target, with no vector path, and its speed is unmeasured on
+  either bench and against any other implementation. A slow derivation
+  costs only unlock time at bcachefs's default cost (N = 2^14, r = 8,
+  p = 16), but it also lowers the work factor a key holder can afford for
+  the same wait. **Owner**: this track. **Exit**: a bench measurement
+  against a reference implementation at that cost, and a vector path if
+  the measurement calls for one.
 - **Owner**: the orchestrator. **Exit**: stage 4 states what the shipped
   targets keep, and a consumer holding a long-lived key stores it under a
   wiping owner or a Key Locker handle.
