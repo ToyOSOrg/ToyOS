@@ -26,7 +26,6 @@
 //! **No kernel leaf is both writable and executable**, and only the image's
 //! text is executable (`mm::audit_wx`).
 
-use alloc::vec::Vec;
 
 use toyos_bootmap::aarch64::{coverage, direct_map_end, Coverage, ATTR_DEVICE, ATTR_NORMAL, ATTR_NORMAL_NC};
 use kernel::pcid::{Alloc, Pcid, PcidPool};
@@ -474,33 +473,41 @@ fn slots(start: u64, end: u64, base: u64, shift: u32) -> core::ops::Range<usize>
 }
 
 /// Tables [`UserTables::unlink`] took out of the tree, freed once no CPU can
-/// still walk into them.
+/// still walk into them. Each holds no leaf, so they are chained through
+/// their first entry, which holds the next one's frame: a value with its low
+/// bit clear, which a walker that still reaches one reads as no entry.
 pub struct Unlinked {
-    /// Each table's frame and whether it holds leaves.
-    tables: Vec<(u64, bool)>,
+    head: u64,
 }
 
 impl Unlinked {
-    /// Hand every frame a leaf in them still holds to `owned`, then free the
-    /// tables. Only after the shootdown that followed the unlink.
-    pub fn free(self, mut owned: impl FnMut(u64)) {
-        for (table, leaves) in self.tables {
-            if leaves {
-                // SAFETY: a table of leaves `unlink` took out of the tree,
-                // which nothing walks and nothing frees but this.
-                for &descriptor in unsafe { &Table::at(table).0 } {
-                    match Leaf::decode(descriptor) {
-                        Leaf::Held(phys) | Leaf::Mapped(Mapping { phys, owned: true, .. }) => owned(phys),
-                        Leaf::Empty | Leaf::Mapped(_) => {}
-                    }
-                }
-            }
-            free_table(table);
-        }
+    /// No table: what a change that keeps every table owes.
+    pub fn none() -> Self {
+        Self { head: 0 }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.tables.is_empty()
+        self.head == 0
+    }
+
+    fn push(&mut self, phys: u64) {
+        // SAFETY: a table `unlink` just took out of the tree, which nothing
+        // else frees, holding no entry.
+        let table = unsafe { Table::at_mut(phys) };
+        assert!(table.0.iter().all(|&e| e == 0), "paging: a table unlinked at {phys:#x} still holds an entry");
+        table.set(0, self.head);
+        self.head = phys;
+    }
+
+    /// Free the tables, only after the shootdown that followed the unlink.
+    pub fn free(self) {
+        let mut at = self.head;
+        while at != 0 {
+            // SAFETY: a table of the chain, which only this frees.
+            let next = unsafe { Table::at_mut(at) }.0[0];
+            free_table(at);
+            at = next;
+        }
     }
 }
 
@@ -596,6 +603,27 @@ impl UserTables {
         published();
     }
 
+    /// Empty every leaf of `[start, end)` holding a frame the space owns, one
+    /// table of leaves at a time, handing each table's frames to `taken`: at
+    /// most 512 at once, in a buffer of its own, so nothing is allocated.
+    pub fn take_owned(&mut self, start: u64, end: u64, mut taken: impl FnMut(&mut [u64])) {
+        self.each_table(start, end, |base, table| {
+            let mut frames = [0u64; 512];
+            let mut n = 0;
+            for i in slots(start, end, base, 12) {
+                if let Leaf::Held(phys) | Leaf::Mapped(Mapping { phys, owned: true, .. }) = Leaf::decode(table.0[i]) {
+                    table.set(i, Leaf::Empty.encode());
+                    frames[n] = phys;
+                    n += 1;
+                }
+            }
+            if n > 0 {
+                taken(&mut frames[..n]);
+            }
+        });
+        published();
+    }
+
     fn each_table(&mut self, start: u64, end: u64, mut f: impl FnMut(u64, &mut Table)) {
         let root = self.tables.root;
         // SAFETY: this space's root, and every table below it one it linked;
@@ -622,10 +650,11 @@ impl UserTables {
     }
 
     /// Unlink every table over `[start, end)` whose span `needed` answers
-    /// `false` for, and every table above one that is then empty. Its leaves
-    /// are freed only by [`Unlinked::free`], after the caller's shootdown.
+    /// `false` for, and every table above one that is then empty. A table
+    /// unlinked holds no leaf: a span no range needs maps nothing. They are
+    /// freed by [`Unlinked::free`], after the caller's shootdown.
     pub fn unlink(&mut self, start: u64, end: u64, needed: impl Fn(u64, u64) -> bool) -> Unlinked {
-        let mut tables = Vec::new();
+        let mut unlinked = Unlinked::none();
         // SAFETY: as `each_table`'s.
         let root = unsafe { Table::at_mut(self.tables.root) };
         for a in slots(start, end, 0, 39) {
@@ -642,23 +671,25 @@ impl UserTables {
                     let span = base_b + ((c as u64) << 21);
                     if let Some(l3) = l2.child(c).map(Table::phys) {
                         if !needed(span, span + PAGE_2M) {
-                            tables.push((l3, true));
                             l2.set(c, 0);
+                            unlinked.push(l3);
                         }
                     }
                 }
                 if l2.0.iter().all(|&e| e == 0) && !needed(base_b, base_b + (1 << 30)) {
-                    tables.push((l2.phys(), false));
+                    let table = l2.phys();
                     l1.set(b, 0);
+                    unlinked.push(table);
                 }
             }
             if l1.0.iter().all(|&e| e == 0) && !needed(base_a, base_a + (1 << 39)) {
-                tables.push((l1.phys(), false));
+                let table = l1.phys();
                 root.set(a, 0);
+                unlinked.push(table);
             }
         }
         published();
-        Unlinked { tables }
+        unlinked
     }
 
     /// Every CPU has dropped what it cached of `[start, end)` before this
@@ -683,7 +714,7 @@ impl Drop for UserTables {
     fn drop(&mut self) {
         assert!(matches!(self.asid, Asid::User(_)), "paging: the kernel's address space dropped");
         let all = self.unlink(0, toyos_userbound::USER_TOP, |_, _| false);
-        all.free(|phys| panic!("paging: a space dropped still holding the frame {phys:#x}"));
+        all.free();
         free_table(self.tables.root);
     }
 }

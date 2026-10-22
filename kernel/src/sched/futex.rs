@@ -14,16 +14,21 @@ pub fn watch_of(addr: DirectMap) -> &'static Watch {
 }
 
 /// End every futex wait on a word in one of `frames`, ascending 4 KiB frames
-/// whose leaves are cleared: called before they can be reissued, under the
-/// address-space lock, so no waiter arms on one again and no later post for a
-/// word in a reused frame reaches a waiter from before.
+/// no leaf maps any more: called after the clear and its shootdown and before
+/// the frames can be reissued, so no waiter arms on one again and no later
+/// post for a word in a reused frame reaches a waiter from before.
 ///
 /// One call takes each of the 64 bucket locks once, whatever `frames` holds.
 pub fn revoke_frames(frames: &[u64]) -> usize {
-    if frames.is_empty() {
+    revoke_sorted(frames, |&phys| phys)
+}
+
+/// [`revoke_frames`] for `sorted`, ascending by the frame `phys` answers.
+pub fn revoke_sorted<T>(sorted: &[T], phys: impl Fn(&T) -> u64 + Copy) -> usize {
+    if sorted.is_empty() {
         return 0;
     }
-    revoke(|token| frames.binary_search(&(token & !(crate::mm::PAGE_SIZE - 1))).is_ok())
+    revoke(|token| sorted.binary_search_by_key(&(token & !(crate::mm::PAGE_SIZE - 1)), phys).is_ok())
 }
 
 /// [`revoke_frames`] for the frames of `[phys, phys + len)`.

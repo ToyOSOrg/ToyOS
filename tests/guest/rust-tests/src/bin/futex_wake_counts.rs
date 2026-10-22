@@ -22,7 +22,7 @@
 //! is not a shared wake. A page-aligned static is what makes their physical
 //! offset equal their virtual one.
 //!
-//! **Four questions, and each one had to be given a schedule rather than
+//! **Three questions, and each one had to be given a schedule rather than
 //! offered a race.**
 //!
 //! 1. [`counts`] — a count-limited wake names its word and answers how many.
@@ -81,13 +81,13 @@ const SELF: &str = "/system/bin/test_rs_futex_wake_counts";
 /// `argv[1]` the sweeper is spawned with.
 const SWEEP: &str = "sweep";
 
-/// How many 2 MiB frames the third arm parks a waiter on and then unmaps.
+/// How many regions the third arm parks a waiter in and then unmaps.
 ///
-/// More than one because `sys_mmap` allocates the *lowest* free frame
-/// (`pmm::alloc_contiguous` scans the bitmap from index 0), so any allocation
-/// anywhere in the machine between the unmap and the sweeper's first `mmap`
-/// takes one of these back. Four of them means an ordinary stray allocation
-/// costs the arm one frame of reach rather than all of it.
+/// More than one because a freed frame goes back to the head of the frame
+/// allocator's partial list, so any allocation anywhere in the machine between
+/// the unmap and the sweeper's first touch may take one of these back. Four of
+/// them means an ordinary stray allocation costs the arm one region of reach
+/// rather than all of it.
 const STALE_FRAMES: usize = 4;
 /// How many fresh frames the sweeper asks about. Comfortably more than
 /// [`STALE_FRAMES`], for the same reason.

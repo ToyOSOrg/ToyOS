@@ -1,11 +1,12 @@
 //! `mmap` and `munmap` as POSIX states them, over 4 KiB pages: no two
 //! mappings overlap, `munmap` takes away any run of pages — part of a mapping,
 //! across two, or a hole — and `MAP_FIXED` replaces whatever the pages it names
-//! held while leaving the rest of each mapping as it was.
+//! held while leaving the rest of each mapping as it was; and the ranges one
+//! space holds are bounded.
 
 use std::collections::HashSet;
 
-use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt, SyscallError};
+use toyos_abi::syscall::{mmap, munmap, MmapFlags, MmapProt, SyscallError, MAX_RANGES};
 
 const PAGE: usize = 4096;
 const RW: MmapProt = MmapProt(MmapProt::READ.0 | MmapProt::WRITE.0);
@@ -81,5 +82,24 @@ fn main() {
     let again = map(core::ptr::null_mut(), PAGE, ANON);
     assert!(!again.is_null(), "mmap after an munmap");
 
-    println!("mmap and munmap take and give back any run of pages");
+    // A space holds a bounded number of ranges: pages alternately reserved
+    // and readable never join, so each is one range more until the next is
+    // refused, and every one is still given back at the bound.
+    let mut held = Vec::new();
+    loop {
+        let prot = if held.len() % 2 == 0 { MmapProt::NONE } else { MmapProt::READ };
+        let p = unsafe { mmap(core::ptr::null_mut(), PAGE, prot, ANON) };
+        if p.is_null() {
+            break;
+        }
+        held.push(p);
+        assert!(held.len() <= MAX_RANGES, "{} ranges placed, past the bound of {MAX_RANGES}", held.len());
+    }
+    assert!(held.len() > MAX_RANGES - 64, "refused at {} ranges, well short of {MAX_RANGES}", held.len());
+    for p in held {
+        unsafe { munmap(p, PAGE) }.expect("munmap a whole range at the bound");
+    }
+    assert!(!map(core::ptr::null_mut(), PAGE, ANON).is_null(), "mmap after the ranges went back");
+
+    println!("mmap and munmap take and give back any run of pages, up to a bound of ranges");
 }

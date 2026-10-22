@@ -337,7 +337,7 @@ pub(super) fn sys_shm_map(h: RawHandle) -> u64 {
     // A device's window is taken back with its last handle, so it says
     // where it is mapped; one whose last handle went meanwhile is refused.
     if let Err(e) = shm.mapped_at(&pt, at, len) {
-        pt.lock().release(at, len);
+        pt.lock().release_object(at, len, &shm);
         return e.to_u64();
     }
     at.raw()

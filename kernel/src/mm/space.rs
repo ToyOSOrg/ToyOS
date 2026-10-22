@@ -15,15 +15,14 @@
 //! waits on the lock, whose spin answers the shootdown, and finds it gone.
 
 use alloc::sync::Arc;
-use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use kernel::vm::{self, Access, Entry, Kind, Prot};
 use toyos_abi::syscall::SyscallError;
 
-use super::paging::{Leaf, Mapping, Root, UserTables};
+use super::paging::{Leaf, Mapping, Root, Unlinked, UserTables};
 use super::policy::{self, CachePolicy};
-use super::{PAGE_2M, PAGE_SIZE};
+use super::{pmm, PAGE_2M, PAGE_SIZE};
 use crate::object::shm::SharedMemObject;
 use crate::sync::{Lock, LockGuard};
 use crate::UserAddr;
@@ -226,9 +225,31 @@ impl AddressSpace {
         }
     }
 
+    /// `ResourceExhausted` unless the space may still hold `added` ranges
+    /// more and those a change over `[start, end)` adds by cutting a range at
+    /// either end. The bound keeps what a space's ranges take of the kernel
+    /// heap finite.
+    pub fn room(&self, start: u64, end: u64, added: usize) -> Result<(), SyscallError> {
+        let cut = |at: u64| self.inventory.find(at).is_some_and(|(s, _)| s != at);
+        let cuts = usize::from(cut(start)) + usize::from(cut(end));
+        if self.inventory.len() + added + cuts > toyos_abi::syscall::MAX_RANGES {
+            return Err(SyscallError::ResourceExhausted);
+        }
+        Ok(())
+    }
+
+    /// [`room`](Self::room) for one range more placed `at`.
+    fn room_at(&self, len: u64, at: At) -> Result<(), SyscallError> {
+        match at {
+            At::Fixed(start) => self.room(start.raw(), start.raw().saturating_add(len), 1),
+            At::Anywhere(_) => self.room(0, 0, 1),
+        }
+    }
+
     /// `len` bytes of private memory, committed unless `prot` is `None`, which
     /// reserves the range and nothing more.
     pub fn reserve(&mut self, len: u64, at: At, prot: Prot) -> Result<UserAddr, SyscallError> {
+        self.room_at(len, at)?;
         let start = self.locate(len, at)?;
         let committed = prot != Prot::None;
         self.inventory.insert(start, Entry { end: start + len, prot, kind: Kind::Private { committed } });
@@ -246,6 +267,7 @@ impl AddressSpace {
         if !within {
             return Err(SyscallError::InvalidArgument);
         }
+        self.room_at(len, at)?;
         let start = self.locate(len, at)?;
         self.inventory.insert(start, Entry { end: start + len, prot, kind: Kind::Object { object, offset } });
         self.tables.build(start, start + len);
@@ -271,77 +293,71 @@ impl AddressSpace {
         drop(removed);
     }
 
-    /// [`release`](Self::release), only where every page of the range is
-    /// `object`'s: one the process replaced is its own to keep.
+    /// [`release`](Self::release) of every page of `[start, start + len)`
+    /// that still maps `object` where a mapping of it from its start at
+    /// `start` would: a page the process unmapped or replaced since is left as
+    /// it is, and the rest goes.
     pub fn release_object(&mut self, start: UserAddr, len: u64, object: &SharedMemObject) {
         let Some(end) = pages(start.raw(), len) else { return };
-        let all_object = self.inventory.covered(start.raw(), end)
-            && self.inventory.meeting(start.raw(), end).all(|(_, entry)| match &entry.kind {
-                Kind::Object { object: held, .. } => core::ptr::eq(Arc::as_ptr(held), object),
-                Kind::Private { .. } => false,
-            });
-        if all_object {
-            self.release(start, len);
-        }
-    }
-
-    /// [`clear_chunk`](Self::clear_chunk) over `[start, end)`, one bounded
-    /// piece at a time: what one piece frees is listed on the heap, and the
-    /// list stays inside one heap allocation.
-    fn clear(&mut self, start: u64, end: u64) {
-        /// 64 Ki frames, whose list is 512 KiB.
-        const CHUNK: u64 = 256 << 20;
+        let start = start.raw();
         let mut at = start;
         while at < end {
-            let next = (at + CHUNK).min(end);
-            self.clear_chunk(at, next);
-            at = next;
+            let next = self.inventory.meeting(at, end).find_map(|(s, entry)| match &entry.kind {
+                Kind::Object { object: held, offset, .. }
+                    if core::ptr::eq(Arc::as_ptr(held), object) && *offset + at.saturating_sub(s) == at.max(s) - start =>
+                {
+                    Some((at.max(s), entry.end.min(end)))
+                }
+                _ => None,
+            });
+            let Some((from, to)) = next else { return };
+            self.release(UserAddr::new(from), to - from);
+            at = to;
         }
     }
 
     /// Stop every leaf of `[start, end)` mapping, drop what every CPU cached
     /// of them, end every futex wait on a frame they owned, then free those
-    /// frames and every table over them no range still backed needs. The
-    /// inventory no longer holds the range. One shootdown and one walk of the
-    /// futex buckets, whatever the range holds.
-    fn clear_chunk(&mut self, start: u64, end: u64) {
+    /// frames and every table over them no range the inventory still backs
+    /// needs. Answers the frames freed.
+    ///
+    /// Nothing is allocated: the frames go one table of leaves at a time, at
+    /// most 512, each batch sorted in place and its futex waits ended by one
+    /// walk of the 64 buckets, so a clear costs one walk per table of leaves
+    /// that held an owned frame and one shootdown, two where tables go too.
+    fn clear(&mut self, start: u64, end: u64) -> u64 {
         let mut present = false;
-        let mut owned = Vec::new();
         self.tables.edit(start, end, |_, leaf| match leaf {
-            Leaf::Mapped(Mapping { phys, owned: true, .. }) | Leaf::Held(phys) => {
-                present |= matches!(leaf, Leaf::Mapped(_));
-                owned.push(phys);
+            Leaf::Mapped(Mapping { phys, owned: true, .. }) => {
+                present = true;
                 Some(Leaf::Held(phys))
             }
             Leaf::Mapped(_) => {
                 present = true;
                 Some(Leaf::Empty)
             }
-            Leaf::Empty => None,
+            Leaf::Held(_) | Leaf::Empty => None,
+        });
+        if present {
+            self.tables.shoot_down(start, end, &Unlinked::none());
+        }
+        let mut freed = 0;
+        self.tables.take_owned(start, end, |frames| {
+            frames.sort_unstable();
+            crate::sched::futex::revoke_frames(frames);
+            // SAFETY: frames owned leaves gave up, which no leaf maps on any
+            // CPU now and no waiter is keyed on.
+            unsafe { pmm::free_raw(frames) };
+            freed += frames.len() as u64;
         });
         let inventory = &self.inventory;
         let unlinked = self.tables.unlink(start, end, |s, e| inventory.backed(s, e));
-        if present || !unlinked.is_empty() {
+        if !unlinked.is_empty() {
             self.tables.shoot_down(start, end, &unlinked);
         }
-        owned.sort_unstable();
-        crate::sched::futex::revoke_frames(&owned);
-        let mut freed = 0;
-        let mut free = |phys: u64| {
-            // SAFETY: an owned leaf's frame is one `populate` gave up into it,
-            // and the leaf that held it maps nothing on any CPU now.
-            drop(unsafe { super::pmm::Frame::from_raw(phys) });
-            freed += 1;
-        };
-        self.tables.edit(start, end, |_, leaf| match leaf {
-            Leaf::Held(phys) => {
-                free(phys);
-                Some(Leaf::Empty)
-            }
-            Leaf::Mapped(_) | Leaf::Empty => None,
-        });
-        unlinked.free(&mut free);
+        unlinked.free();
         self.usage.freed(freed);
+        freed
     }
 
     /// Serve a fault at `va` for `access`: populate its page if its range
@@ -459,21 +475,19 @@ fn page_leaf(start: u64, entry: &Entry<Arc<SharedMemObject>>, page: u64) -> Opti
 }
 
 /// Every frame the space owns goes back; its tables go with `UserTables`.
-/// No CPU runs in a space that drops.
+///
+/// Not through [`AddressSpace::clear`]: no thread runs in a space that drops,
+/// and a private frame is mapped in no other, so no CPU caches its leaves, no
+/// futex waiter is keyed on its frames and no copy pins them.
 impl Drop for AddressSpace {
     fn drop(&mut self) {
         assert!(!self.kernel, "space: the kernel's dropped");
+        self.tables.edit(FLOOR, TOP, |_, leaf| matches!(leaf, Leaf::Mapped(Mapping { owned: false, .. })).then_some(Leaf::Empty));
         let mut freed = 0;
-        self.tables.edit(FLOOR, TOP, |_, leaf| match leaf {
-            Leaf::Mapped(Mapping { phys, owned: true, .. }) | Leaf::Held(phys) => {
-                // SAFETY: an owned leaf's frame, which nothing maps once its
-                // space drops.
-                drop(unsafe { super::pmm::Frame::from_raw(phys) });
-                freed += 1;
-                Some(Leaf::Empty)
-            }
-            Leaf::Mapped(_) => Some(Leaf::Empty),
-            Leaf::Empty => None,
+        self.tables.take_owned(FLOOR, TOP, |frames| {
+            // SAFETY: the space's own frames, which nothing maps once it drops.
+            unsafe { pmm::free_raw(frames) };
+            freed += frames.len() as u64;
         });
         self.usage.freed(freed);
     }

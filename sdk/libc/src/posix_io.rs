@@ -750,18 +750,25 @@ pub unsafe extern "C" fn madvise(addr: *mut u8, _len: usize, advice: i32) -> i32
 
 /// Unmaps every whole page `[addr, addr + len)` reaches into
 /// (`memreq::whole_pages`), as POSIX does: of any mappings, and none at all is
-/// no refusal. `EINVAL` is the one error POSIX gives `munmap`, for an `addr`
-/// off a page or a `len` of zero.
+/// no refusal. `EINVAL` for an `addr` off a page or a `len` of zero, as POSIX
+/// says, and `ENOMEM`, as Linux answers past its map count, where the space
+/// holds as many ranges as it may and the call would cut one in two.
 #[no_mangle]
 pub unsafe extern "C" fn munmap(addr: *mut u8, len: usize) -> i32 {
-    let unmapped = crate::memreq::whole_pages(len)
+    let unmapped = match crate::memreq::whole_pages(len) {
+        None => Err(EINVAL),
         // SAFETY: the caller's, as C's `munmap` leaves it.
-        .is_some_and(|len| unsafe { syscall::munmap(addr, len) }.is_ok());
-    if unmapped {
-        0
-    } else {
-        crate::errno::set(EINVAL);
-        -1
+        Some(len) => unsafe { syscall::munmap(addr, len) }.map_err(|e| match e {
+            syscall::SyscallError::ResourceExhausted => crate::errcode::ENOMEM,
+            _ => EINVAL,
+        }),
+    };
+    match unmapped {
+        Ok(()) => 0,
+        Err(errno) => {
+            crate::errno::set(errno);
+            -1
+        }
     }
 }
 

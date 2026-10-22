@@ -175,9 +175,12 @@ pub const SYS_SHM_MAP: u64 = 106;
 /// length up to a whole number of.
 pub const PAGE_SIZE: usize = 4096;
 
-/// [`shm_create_flags`]: memory a device can be lent, in whole 2 MiB pages of
-/// one physical run, as a device's domain maps it.
+/// [`shm_create_flags`]: memory a device can be lent, in whole
+/// [`SHM_DEVICE_PAGE`]s of one physical run, as a device's domain maps it.
 pub const SHM_DEVICE: u64 = 1;
+
+/// What a [`SHM_DEVICE`] region is a whole number of.
+pub const SHM_DEVICE_PAGE: u64 = 2 * 1024 * 1024;
 
 /// Wait for the process a handle names and take how it ended, an [`End`]'s
 /// word, gated by [`Rights::WAIT`]. See [`process_wait`].
@@ -2344,9 +2347,15 @@ pub unsafe fn mmap(addr: *mut u8, size: usize, prot: MmapProt, flags: MmapFlags)
     }
 }
 
+/// Ranges one address space holds, each a run of pages with one kind and
+/// protection: a call that could pass it is `ResourceExhausted`.
+pub const MAX_RANGES: usize = 32_768;
+
 /// Take away every page of `[addr, addr + size)`, as POSIX's `munmap` does:
 /// any run of whole pages, across mappings and the holes between them. `addr`
-/// off a page, or a `size` of zero, is `InvalidArgument` and takes nothing.
+/// off a page, or a `size` of zero, is `InvalidArgument` and takes nothing;
+/// so does a space holding nearly [`MAX_RANGES`], `ResourceExhausted`, since
+/// cutting a range in two adds one.
 ///
 /// # Safety
 /// Nothing reaches those pages after this answers `Ok`.

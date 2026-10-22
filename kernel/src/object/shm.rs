@@ -27,6 +27,9 @@ use crate::{DirectMap, UserAddr};
 
 use super::{Held, KObjectVariant, ObjectCore, ZeroHandles};
 
+// What a device-lendable region is whole pages of, as the ABI says.
+const _: () = assert!(toyos_abi::syscall::SHM_DEVICE_PAGE == PAGE_2M);
+
 /// Frames in one piece of a [`Backing::Frames`]: 256 MiB of them, whose list
 /// is 512 KiB.
 const CHUNK: usize = 1 << 16;
@@ -238,15 +241,17 @@ fn pages(size: u64) -> Result<u64, SyscallError> {
 
 /// The frames go back once no space maps the object and nothing holds it:
 /// first every futex wait on a word in them ends, so none is left keyed on a
-/// frame the allocator hands out again.
+/// frame the allocator hands out again. Nothing is allocated: each piece is
+/// sorted in place, its waits ended by one walk of the 64 buckets, and its
+/// frames freed under one hold of the allocator's lock.
 impl Drop for SharedMemObject {
     fn drop(&mut self) {
-        match &self.backing {
+        match &mut self.backing {
             Backing::Frames(pieces) => {
-                for piece in pieces {
-                    let mut phys: Vec<u64> = piece.iter().map(|f| f.direct_map().phys()).collect();
-                    phys.sort_unstable();
-                    crate::sched::futex::revoke_frames(&phys);
+                for mut piece in pieces.drain(..) {
+                    piece.sort_unstable_by_key(|frame| frame.direct_map().phys());
+                    crate::sched::futex::revoke_sorted(&piece, |frame| frame.direct_map().phys());
+                    pmm::free_all(piece);
                 }
             }
             Backing::Run(pages) => {

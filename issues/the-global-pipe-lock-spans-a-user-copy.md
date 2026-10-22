@@ -29,20 +29,22 @@ The size is bounded only by the ring: `PIPE_SIZE` is `PAGE_2M`, and the
 capacity is that less the 64-byte `RingHeader`, so **2,097,088 bytes** is the
 largest single copy under the lock. Nothing above caps it: `SYS_READ` and
 `SYS_WRITE` pass the caller's length through (`kernel/src/syscall/dispatch.rs`),
-`object::ops::try_read` hands the whole buffer to `pipe::try_read`, and
-`user_ptr`'s bulk buffer is pinned run by run before the lock, so a buffer that
-spans several physical runs is copied whole as well.
+and `object::ops::try_read` hands the whole buffer to `pipe::try_read`, which
+copies it under the lock. Each 16 pages of that copy take the caller's space
+lock and populate any page not yet touched — a frame from the allocator and a
+4 KiB zeroing — inside `PIPES`, where the window used to be filled before the
+lock was taken.
 
 A pipe's **first** write is worse, because the page is allocated lazily under the
 same lock. `write` calls `Pipe::back`, which calls `pmm::alloc_page`: the frame
 allocator's lock nested inside `PIPES` for a free superframe, then a 2 MiB
 zeroing (`kernel/src/mm/pmm.rs`), before `Ring::new` and the user
-copy that follows it. `map_page` allocates the same way.
+copy that follows it.
 
 ## What queues behind it
 
 Everything pipe-shaped in the kernel goes through the same static: `create`,
-`map_page`, `has_data` and `has_space` — which the blocking read and write
+`has_data` and `has_space` — which the blocking read and write
 wrappers call per attempt (`kernel/src/syscall/io.rs`) — every
 `PipeReader`/`PipeWriter` clone and close, and the read and write watches. A
 compositor client, netstack, logkeeper and the shell all contend the same word.

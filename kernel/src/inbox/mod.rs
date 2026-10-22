@@ -82,7 +82,9 @@ impl Drop for InboxRef {
         state.polls.withdraw_all();
         // Unless the process replaced the mapping itself; the pages go once
         // neither the mapping nor these hold the object.
-        completions.mapping.release(&state.owner_space);
+        if let Some(space) = state.owner_space.upgrade() {
+            completions.mapping.release(&space);
+        }
     }
 }
 
@@ -195,8 +197,10 @@ struct RingState {
     ring: Arc<SharedMemObject>,
     submission_size: u32,
     polls: Polls<Arc<Inbox>>,
-    /// The space the rings are mapped in, which the teardown takes them out of.
-    owner_space: crate::process::PageTables,
+    /// The space the rings are mapped in, which the teardown takes them out
+    /// of: held weakly, so an inbox sent on does not keep an ended process's
+    /// space alive.
+    owner_space: alloc::sync::Weak<crate::mm::space::Space>,
 }
 
 // No accessor below returns a Rust reference into a ring's page — the process
@@ -356,7 +360,7 @@ pub fn create(depth: u32) -> Result<(InboxRef, u64), SyscallError> {
             ring: Arc::clone(&ring),
             submission_size,
             polls: Polls::new(),
-            owner_space: space,
+            owner_space: Arc::downgrade(&space),
         })),
         completions: Lock::new(Some(Completions {
             mapping: process::KernelMapping { object: ring, at },

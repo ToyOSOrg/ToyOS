@@ -64,7 +64,12 @@ pub(super) fn sys_munmap(addr: u64, size: u64) -> u64 {
     if !addr.is_multiple_of(crate::mm::PAGE_SIZE) {
         return SyscallError::InvalidArgument.to_u64();
     }
-    process::current_address_space().lock().release(start, len);
+    let space = process::current_address_space();
+    let mut space = space.lock();
+    if let Err(e) = space.room(start.raw(), start.raw() + len, 0) {
+        return e.to_u64();
+    }
+    space.release(start, len);
     0
 }
 

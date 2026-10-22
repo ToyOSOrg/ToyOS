@@ -20,9 +20,9 @@ impl Mode {
     }
 
     /// One 32-bit scanout of this mode, as the region it is lent in: whole
-    /// 2 MiB pages, what a device is lent in (`toyos_abi::syscall::SHM_DEVICE`).
+    /// pages of what a device is lent in.
     pub const fn scanout_bytes(self) -> u64 {
-        let page = 2 << 20;
+        let page = toyos_abi::syscall::SHM_DEVICE_PAGE;
         (self.width as u64 * self.height as u64 * 4).div_ceil(page) * page
     }
 

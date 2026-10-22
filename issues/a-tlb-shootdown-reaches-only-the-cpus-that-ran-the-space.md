@@ -6,8 +6,8 @@ opened: 2026-09-29
 
 # A TLB shootdown reaches only the CPUs that ran the space
 
-A shootdown blocks on every other CPU (`kernel/src/mm/unmapped.rs:5`),
-whether or not it ever ran the address space. It waits on
+A shootdown blocks on every other CPU (`kernel/src/arch/x86_64/tlb.rs`,
+`shootdown`), whether or not it ever ran the address space. It waits on
 `issues/no-test-can-hold-a-thread-on-a-named-cpu.md`. A CPU that
 switches away keeps the space's entries: under PCID every CR3 load sets
 NOFLUSH (`kernel/src/arch/x86_64/paging.rs:295-306`), so a CPU leaves the

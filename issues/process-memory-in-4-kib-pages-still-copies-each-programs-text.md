@@ -18,15 +18,13 @@ IOMMU's superpages, the kernel's own mappings. One paging design serves both,
 on x86-64 and on the ARM64 the tree is kept portable for
 (`issues/toyos-runs-on-arm64.md`).
 
-**A large program spawned from a large parent is refused.** A program a file
-server holds is spawned from a copy in one memory object, and `SYS_SHM_CREATE`
-allocates that object physically contiguous (`kernel/src/object/shm.rs`,
-`alloc_contiguous`): about 148 MB for the hosted clang. A small std parent
-spawns `ld.lld` that way, but clang's driver, starting `cc1` and `ld.lld` from
-`/apps/clang`, is refused `ResourceExhausted` (`ENOMEM` in libc), so
-`hosted_clang_hello` compiles and cannot link. That the contiguous allocation
-is the one refused is inferred: the errno is measured, the allocation is
-not. Removing contiguous user memory is the exit's; this row is its check.
+**A large program is spawned from scattered frames.** A program a file server
+holds is spawned from a copy in one memory object, which `SYS_SHM_CREATE` now
+makes of 4 KiB frames in any order (`kernel/src/object/shm.rs`), so the hosted
+clang's 148 MB image no longer needs one physical run; `hosted_clang_hello`,
+which was refused `ENOMEM` linking, is the check. What is still one physical
+run is a device-lendable object (`SHM_DEVICE`, `SharedMemObject::create_run`)
+and each `dlopen` image (`issues/a-dlopen-image-is-one-contiguous-run.md`).
 
 **The constraint that makes this a track, measured on the T14** (run 29
 readback, `PMM: 100/16038MB used` at 11 s with four user processes and three
@@ -43,12 +41,8 @@ kernel's idle report (the owner's ruling of 2026-10-04: "Delete the periodic
 report and its counters"); stage 3's floor is read from the used memory
 `SYS_SYSINFO` reports.
 
-**Device windows are already 4 KiB leaves**: a claimed function's BAR is
-mapped in place in the pages it covers (P1 of `issues/there-is-no-wifi.md`).
-`map_range` maps any run of 4 KiB-aligned pages, a 2 MiB leaf wherever a whole
-aligned frame lands on a 2 MiB boundary and a table of 4 KiB leaves for the
-rest (`toyos_userbound::leaves`), and unmapping a slot of 4 KiB leaves frees
-its table once no CPU can walk it.
+**Device windows are 4 KiB leaves**: a claimed function's BAR is an aperture
+object mapped in the pages it covers (P1 of `issues/there-is-no-wifi.md`).
 
 ## Stages
 
@@ -59,27 +53,26 @@ reserves its frame count when it is made and is refused by name then, never
 killed at a fault. No promotion (the kernel has no thread to do it) and no
 live split of a user leaf.
 
-1. **Scatter-gather user copies** (#593) owe one measurement: what the bulk
-   window's `Vec<Segment>` costs under the kernel heap's lock. It is one
-   heap allocation per bulk copy, taken before the address-space lock; the
-   host A/B in #593's review put a 64 MiB `read` at 1.28–1.31× main's, 32
-   to 40 ns more. No job measures it in-guest yet: the stage owes
-   `copy_cost`, a job beside `syscall_cost` that times `read` into a 64 KiB
-   and a 64 MiB window, and its metal row, so that
-   `cargo test --test toyos-build -- --metal copy_cost` at the stage's merge
-   and at its base is the A/B.
+1. **Chunked user copies** owe one measurement: what a copy costs now that
+   each 16 pages take one round trip of the space's lock, an inventory
+   lookup and a table walk per page. No job measures it in-guest yet: the
+   stage owes `copy_cost`, a job beside `syscall_cost` that times `read` into
+   a 64 KiB and a 64 MiB window, fresh and warm, and its metal row, so that
+   `cargo test --test toyos-build -- --metal copy_cost` at a change and at
+   its base is the A/B.
 2. **Superframe frame allocator.** Built (`kernel::frames`): 4 KiB frames
    carved from 2 MiB superframes, pins per frame, a frame freed while pinned
    deferred to its last unpin, page tables in frames of their own, and every
-   2 MiB caller of the PMM unchanged. The watermark is the ledger of
-   `issues/toyos-has-its-own-allocator.md`'s migration, which refuses a
-   commitment before the machine runs dry.
+   2 MiB caller of the PMM unchanged.
 3. **4 KiB user leaves.** Built: one inventory per space (`kernel::vm`,
    host-tested) is the only record of its ranges, and a software owned bit in
    the leaf the only record of a private frame; stacks are populated as they
    are touched, TLS is a page-sized object, and a typed syscall value across
-   a page is copied in pieces (`abuse_page_straddle`'s delivery verdicts).
-   Owed: a process's floor on the T14 against the 10 to 14 MB above.
+   a page is copied in pieces (`abuse_page_straddle`'s delivery verdicts). A
+   space holds at most `MAX_RANGES` ranges, refused past it, until a range's
+   kernel memory is charged to its process.
+   Owed: a process's floor on the T14 against the 10 to 14 MB above, and the
+   hot paths' costs in `issues/user-memory-hot-paths-are-unmeasured-against-2-mib-pages.md`.
 4. **Demand-zero anonymous `mmap`.** Built, over 4 KiB pages only: a fault
    populates one page, unmapping a range no thread touched sends no IPI, and
    `munmap` and a `FIXED` `mmap` take any run of pages, as POSIX does. What
@@ -87,10 +80,14 @@ live split of a user leaf.
    `mmap` — is the strict charge of the allocator track's migration
    (`issues/toyos-has-its-own-allocator.md`).
 5. **Shared text.** A spawn copies its program's segments into the process
-   whole; no fault reads a file. ROOT's read-only text shared zero-copy is
-   the memory design's stage 4 (immutable sealed objects). Exit: two
-   processes of one binary hold its text once.
+   whole; no fault reads a file. ROOT's read-only text shared zero-copy, from
+   immutable sealed objects, is the next step. Exit: two processes of one
+   binary hold its text once.
 6. **`/apps` image sharing.** The design is the owner's decision, owed when
    this stage is reached.
-7. **Large user leaves where they pay.** No user leaf is 2 MiB now; whether
-   whole aligned spans get one again is the memory design's to decide.
+7. **Large user leaves where they pay.** No user leaf is 2 MiB now, so every
+   user page costs a 4 KiB TLB entry and a table walk the 2 MiB windows did
+   not: a binary's text and data, a heap, a stack, a large buffer. Unpriced:
+   nothing measures the TLB misses of a workload against 2 MiB leaves. Exit:
+   whole aligned spans of one range get a 2 MiB leaf where a measurement
+   shows it pays, or the measurement shows it does not.
