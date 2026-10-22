@@ -393,14 +393,28 @@ pub(super) unsafe fn seal(
     384 * n
 }
 
+/// The state with a zero counter. Indexing, not slice copies or iterator
+/// adaptors, whose debug precondition checks the shipped profile calls out
+/// of line on every message.
 fn initial(key: &[u8; 32], nonce: &[u8; 8]) -> crate::secret::Secret<16, u32> {
-    let mut initial = [0u32; 16];
-    initial[..4].copy_from_slice(&SIGMA);
-    for (word, bytes) in initial[4..12].iter_mut().zip(key.as_chunks::<4>().0) {
-        *word = u32::from_le_bytes(*bytes);
-    }
-    for (word, bytes) in initial[14..].iter_mut().zip(nonce.as_chunks::<4>().0) {
-        *word = u32::from_le_bytes(*bytes);
-    }
-    crate::secret::Secret(initial)
+    let k = |i: usize| u32::from_le_bytes([key[4 * i], key[4 * i + 1], key[4 * i + 2], key[4 * i + 3]]);
+    let n = |i: usize| u32::from_le_bytes([nonce[4 * i], nonce[4 * i + 1], nonce[4 * i + 2], nonce[4 * i + 3]]);
+    crate::secret::Secret([
+        SIGMA[0],
+        SIGMA[1],
+        SIGMA[2],
+        SIGMA[3],
+        k(0),
+        k(1),
+        k(2),
+        k(3),
+        k(4),
+        k(5),
+        k(6),
+        k(7),
+        0,
+        0,
+        n(0),
+        n(1),
+    ])
 }
