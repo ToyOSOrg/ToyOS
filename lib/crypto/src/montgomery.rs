@@ -14,12 +14,27 @@ use core::marker::PhantomData;
 /// constants for R = 2^(64N), evaluated at compile time.
 pub(crate) trait Modulus<const N: usize>: 'static {
     const P: [u64; N];
+    /// How a reduction step forms q p.
+    const FORM: Form = Form::Generic;
     /// -p^-1 mod 2^64.
     const N0: u64 = n0(Self::P[0]);
     /// R mod p, the Montgomery form of one.
     const ONE: [u64; N] = shift_mod(&one(), &Self::P, 64 * N);
     /// R^2 mod p.
     const R2: [u64; N] = shift_mod(&one(), &Self::P, 128 * N);
+}
+
+/// The shape of a modulus that its reduction step exploits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Form {
+    Generic,
+    /// p = 2^256 - 2^224 + 2^192 + 2^96 - 1. Its low word is 2^64 - 1, so
+    /// -p^-1 = 1 mod 2^64 and a step's quotient digit is the low word q
+    /// itself; t0 + q (2^64 - 1) + q (2^32 - 1) 2^64 leaves q 2^32 at word
+    /// one, and only q p3 needs a multiplication (Gueron and Krasnov, "Fast
+    /// prime field elliptic-curve cryptography with 256-bit primes", J.
+    /// Cryptogr. Eng. 2015).
+    P256,
 }
 
 /// x * R mod p, the Montgomery form of an integer x < p, for constants.
@@ -99,24 +114,7 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
     /// reduction step (CIOS; Koc, Acar and Kaliski, "Analyzing and comparing
     /// Montgomery multiplication algorithms", IEEE Micro 1996).
     pub(crate) fn mul(&self, b: &Self) -> Self {
-        let mut t = [0u64; N];
-        let mut high = 0u64;
-        for i in 0..N {
-            let mut c = 0;
-            for j in 0..N {
-                (t[j], c) = mac(t[j], self.0[i], b.0[j], c);
-            }
-            let (top, overflow) = high.overflowing_add(c);
-            let q = t[0].wrapping_mul(M::N0);
-            let (_, mut c) = mac(t[0], q, M::P[0], 0);
-            for j in 1..N {
-                (t[j - 1], c) = mac(t[j], q, M::P[j], c);
-            }
-            let (top, carry) = top.overflowing_add(c);
-            t[N - 1] = top;
-            // t < 2p after each step, so at most one of the two is set.
-            high = u64::from(overflow) | u64::from(carry);
-        }
+        let (t, high) = product::<M, N>(&self.0, &b.0);
         Self(reduce(&t, high, &M::P), PhantomData)
     }
     pub(crate) fn square(&self) -> Self {
@@ -193,6 +191,48 @@ pub(crate) fn to_be<const N: usize>(words: &[u64; N], bytes: &mut [u8]) {
     }
 }
 
+/// a b / R as N words and a top bit, below 2p: each product row followed by
+/// its reduction step (CIOS).
+#[inline(always)]
+const fn product<M: Modulus<N>, const N: usize>(a: &[u64; N], b: &[u64; N]) -> ([u64; N], u64) {
+    let mut t = [0u64; N];
+    let mut high = 0u64;
+    let mut i = 0;
+    while i < N {
+        let mut c = 0;
+        let mut j = 0;
+        while j < N {
+            (t[j], c) = mac(t[j], a[i], b[j], c);
+            j += 1;
+        }
+        let (top, overflow) = high.overflowing_add(c);
+        let q = t[0].wrapping_mul(M::N0);
+        let mut c;
+        match M::FORM {
+            Form::Generic => {
+                (_, c) = mac(t[0], q, M::P[0], 0);
+                let mut j = 1;
+                while j < N {
+                    (t[j - 1], c) = mac(t[j], q, M::P[j], c);
+                    j += 1;
+                }
+            }
+            Form::P256 => {
+                let carry;
+                (t[0], carry) = t[1].overflowing_add(q << 32);
+                (t[1], c) = mac(t[2], q >> 32, 1, carry as u64);
+                (t[2], c) = mac(t[3], q, M::P[3], c);
+            }
+        }
+        let (top, carry) = top.overflowing_add(c);
+        t[N - 1] = top;
+        // t < 2p after each step, so at most one of the two is set.
+        high = (overflow | carry) as u64;
+        i += 1;
+    }
+    (t, high)
+}
+
 /// v mod p for v + high * 2^(64N) < 2p: p subtracted under a mask.
 fn reduce<const N: usize>(v: &[u64; N], high: u64, p: &[u64; N]) -> [u64; N] {
     let mut d = [0; N];
@@ -210,11 +250,11 @@ fn reduce<const N: usize>(v: &[u64; N], high: u64, p: &[u64; N]) -> [u64; N] {
 
 /// (lo, hi) of t + a * b + c, which cannot exceed 2^128 - 1.
 #[inline(always)]
-pub(crate) fn mac(t: u64, a: u64, b: u64, c: u64) -> (u64, u64) {
-    let v = u128::from(a)
-        .wrapping_mul(u128::from(b))
-        .wrapping_add(u128::from(t))
-        .wrapping_add(u128::from(c));
+pub(crate) const fn mac(t: u64, a: u64, b: u64, c: u64) -> (u64, u64) {
+    let v = (a as u128)
+        .wrapping_mul(b as u128)
+        .wrapping_add(t as u128)
+        .wrapping_add(c as u128);
     (v as u64, (v >> 64) as u64)
 }
 
