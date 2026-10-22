@@ -18,8 +18,10 @@ Before #1026 the daemon polled `try_wait` with a backoff to keep the kill,
 which is a fixed delay where an event exists.
 
 A `cfg` reaching ToyOS's process handle, whose `wait` and `kill` take `&self`,
-would close the hole on ToyOS. The host gate refuses that `cfg` in a program
-crate that holds tests (`build/userlandhost.rs`).
+closes the hole on ToyOS. The host gate refuses that `cfg` in a program crate
+that holds tests (`build/userlandhost.rs`) until #1024, after which a `cfg`
+counts only in a file that holds a test or declares a module: the fix is a
+ToyOS-only leaf file, as #1024's `system/sshserver/src/spawn.rs` is.
 
 **Owner**: `sshserver`.
 
