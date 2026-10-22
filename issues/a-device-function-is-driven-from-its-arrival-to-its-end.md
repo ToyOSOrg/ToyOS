@@ -167,6 +167,15 @@ started. Nothing reaches userland when a device arrives or leaves.
    - acpiserver commits native hot-plug before the kernel knows whether a
      slot can be armed; a machine whose units remap no interrupt has its
      slots left unserved after firmware gave them up.
+   - **No root with an external-facing port is committed native hot-plug**
+     (orchestrator, 2026-10-22, holding the owner's "refuse external"):
+     a port whose `_DSD` names it `ExternalFacingPort` (Microsoft's Kernel
+     DMA Protection property, the Thunderbolt ports), or whose `_DSD` cannot
+     be read, keeps every slot below its root the firmware's, since no claim
+     behind such a port is refused in code yet
+     (`issues/the-iommu-refuses-nothing-yet.md`). A firmware that marks no
+     port reads as all-internal. Exit: claims behind an external-facing port
+     are refused by name, and then its slot is armed.
    - §6.7.1.5's five seconds in which a second press cancels a removal are
      not offered: a press removes at once.
    - A bridge below a slot (a switch) is not read: the kernel assigns no bus

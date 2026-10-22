@@ -33,7 +33,7 @@ use crate::init::Names;
 /// A UUID's 16 bytes from its text, `aabbccdd-eeff-gghh-iijj-kkllmmnnoopp`,
 /// as ToUUID lays them out (Table 19.41): the first three fields' bytes
 /// reversed, the rest in order.
-const fn uuid(text: &[u8; 36]) -> [u8; 16] {
+pub(crate) const fn uuid(text: &[u8; 36]) -> [u8; 16] {
     const fn digit(c: u8) -> u8 {
         match c {
             b'0'..=b'9' => c - b'0',
@@ -160,14 +160,14 @@ const ROOT_SUPPORT: u32 = 1 << 0 | 1 << 4;
 pub const ROOT_CONTROL: u32 = toyos_abi::acpi::NATIVE_HOT_PLUG | toyos_abi::acpi::CAPABILITY_STRUCTURE;
 
 /// What a root's `_OSC` at `path` offers of [`ROOT_CONTROL`] (§4.5.1), and
-/// what a commit was granted: the query, then a commit of [`ROOT_CONTROL`]
-/// only where the query offered all of it, since the kernel's slots need
-/// both bits and take nothing less. Nothing is offered where the query
+/// what a commit was granted: the query, then, where `commit` allows it, a
+/// commit of [`ROOT_CONTROL`] only where the query offered all of it, since
+/// the kernel's slots need both bits and take nothing less. Nothing is offered where the query
 /// answered failure, an unrecognised UUID or revision; a commit's grant is
 /// what it answered of what was offered, nothing where it answered failure.
 /// An answer that is no buffer of the three DWORDs passed refuses the
 /// negotiation by name.
-pub fn negotiate_root<K: Kernel>(aml: &mut Aml<'_, K>, path: &str) -> Result<(u32, Option<u32>), String> {
+pub fn negotiate_root<K: Kernel>(aml: &mut Aml<'_, K>, path: &str, commit: bool) -> Result<(u32, Option<u32>), String> {
     const REFUSED: u32 = FAILURE | UNRECOGNIZED_UUID | UNRECOGNIZED_REVISION;
     let [query, _, offered] = evaluate(aml, path, &HOST_BRIDGE, [QUERY, ROOT_SUPPORT, ROOT_CONTROL])?;
     if query & REFUSED != 0 {
@@ -175,7 +175,7 @@ pub fn negotiate_root<K: Kernel>(aml: &mut Aml<'_, K>, path: &str) -> Result<(u3
         return Ok((0, None));
     }
     let offered = offered & ROOT_CONTROL;
-    if offered != ROOT_CONTROL {
+    if offered != ROOT_CONTROL || !commit {
         return Ok((offered, None));
     }
     let [commit, _, granted] = evaluate(aml, path, &HOST_BRIDGE, [0, ROOT_SUPPORT, ROOT_CONTROL])?;

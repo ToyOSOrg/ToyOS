@@ -11,6 +11,11 @@
 //! negotiated, and what it offers and what a commit was granted recorded
 //! (`crate::osc::negotiate_root`).
 //!
+//! **No root with an external-facing port below it is committed native
+//! hot-plug**, nor one whose port's `_DSD` cannot be read: the owner's
+//! "refuse external" holds no claim behind such a port refused yet, so its
+//! slot stays the firmware's ([`external_facing`]).
+//!
 //! **The declaration is every root together, or none at all**: a root whose
 //! `_STA`, `_SEG` or `_CRS` is refused, a list the decoder refuses or that
 //! names no bus range, more roots or windows than a declaration carries, and
@@ -76,7 +81,18 @@ pub fn read<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, census: &mut Census)
         };
         let buses = found.buses.ok_or_else(|| said(&path, "a root bridge's _CRS names no bus range"))?;
         room -= found.windows;
-        let (osc, committed) = osc(aml, names, root);
+        let commit = match external_ports(aml, names, root) {
+            Ok(external) if external.is_empty() => true,
+            Ok(external) => {
+                println!("{OWN}{root} has external-facing ports ({}), so native hot-plug is not committed", external.join(", "));
+                false
+            }
+            Err(why) => {
+                println!("{OWN}{root}'s ports are not known to be internal ({why}), so native hot-plug is not committed");
+                false
+            }
+        };
+        let (osc, committed) = osc(aml, names, root, commit);
         roots.push(Root { segment, buses, windows: windows[..found.windows].to_vec(), osc, committed });
     }
     let counts: Vec<String> = roots.iter().map(|root| root.windows.len().to_string()).collect();
@@ -86,12 +102,12 @@ pub fn read<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, census: &mut Census)
 
 /// What `root`'s `_OSC` offers and what a commit was granted, said under
 /// [`OWN`] where it was refused.
-fn osc<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, root: &str) -> (Osc, Option<u32>) {
+fn osc<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, root: &str, commit: bool) -> (Osc, Option<u32>) {
     let path = format!("{root}._OSC");
     if !names.paths.contains(&path) {
         return (Osc::Absent, None);
     }
-    match crate::osc::negotiate_root(aml, &path) {
+    match crate::osc::negotiate_root(aml, &path, commit) {
         Ok((offered, committed)) => (Osc::Offered(offered), committed),
         Err(why) => {
             println!("{OWN}{path} was refused: {why}");
@@ -134,6 +150,62 @@ pub fn declare<K: Kernel>(kernel: &K, read: Result<Vec<Root>, String>) -> Result
     Ok(())
 }
 
+/// Microsoft's `_DSD` UUID for a PCIe root port's `ExternalFacingPort`
+/// property ("Kernel DMA Protection", Microsoft Learn): a port a device
+/// outside the machine plugs into, such as a Thunderbolt one.
+const EXTERNAL_FACING_UUID: [u8; 16] = crate::osc::uuid(b"EFCC06CC-73AC-4BC3-BFF0-76143807C389");
+
+/// The devices directly below `root` whose `_DSD` says they face outside the
+/// machine; an error where one's `_DSD` is refused or cannot be read.
+fn external_ports<K: Kernel>(aml: &mut Aml<'_, K>, names: &Names, root: &str) -> Result<Vec<String>, String> {
+    let ports: Vec<String> = names
+        .objects
+        .iter()
+        .filter(|named| named.kind == Kind::Device && below(&named.path, root) && !named.path[root.len() + 1..].contains('.'))
+        .filter(|named| names.paths.contains(&format!("{}._DSD", named.path)))
+        .map(|named| named.path.clone())
+        .collect();
+    let mut external = Vec::new();
+    for port in ports {
+        let path = format!("{port}._DSD");
+        let dsd = aml.interpreter.evaluate(&mut aml.host, &path, &[]).map_err(|why| said(&path, &format!("refused: {}", kind(&why))))?;
+        if external_facing(&dsd).map_err(|why| said(&path, &why))? {
+            external.push(port);
+        }
+    }
+    Ok(external)
+}
+
+/// Whether a `_DSD` package (ACPI 6.5 §6.2.5) says its device is an external
+/// facing port: a property `ExternalFacingPort` of non-zero value under
+/// [`EXTERNAL_FACING_UUID`]. A package that is not UUID-and-package pairs, or
+/// whose property is no integer, is refused rather than taken as internal.
+pub fn external_facing(dsd: &Value) -> Result<bool, String> {
+    let Value::Package(pairs) = dsd else { return Err("a _DSD is no package".into()) };
+    if pairs.len() % 2 != 0 {
+        return Err("a _DSD is not UUID and package pairs".into());
+    }
+    for pair in pairs.chunks(2) {
+        let (Value::Buffer(uuid), Value::Package(properties)) = (&pair[0], &pair[1]) else {
+            return Err("a _DSD is not UUID and package pairs".into());
+        };
+        if uuid[..] != EXTERNAL_FACING_UUID {
+            continue;
+        }
+        for property in properties {
+            match property {
+                Value::Package(kv) if kv.len() == 2 && kv[0] == Value::String(b"ExternalFacingPort".to_vec()) => match kv[1] {
+                    Value::Integer(value) => return Ok(value != 0),
+                    _ => return Err("its ExternalFacingPort is no integer".into()),
+                },
+                Value::Package(kv) if kv.len() == 2 => {}
+                _ => return Err("a _DSD property is no key and value".into()),
+            }
+        }
+    }
+    Ok(false)
+}
+
 /// Whether `device` lies in `above`'s scope.
 fn below(device: &str, above: &str) -> bool {
     device.strip_prefix(above).is_some_and(|rest| rest.starts_with('.'))
@@ -163,7 +235,7 @@ mod tests {
     use super::*;
     use crate::aml::load;
     use crate::aml::tests::{sealed, CRAFTED_RSDP};
-    use crate::common::{buffer, cat, def_name, device, int, method, ret, string};
+    use crate::common::{buffer, cat, def_name, device, int, method, package, ret, string};
     use crate::host::tests::Scripted;
     use crate::osc::ROOT_CONTROL;
 
@@ -369,6 +441,47 @@ mod tests {
         let integer = |aml: &mut Aml<'_, Scripted>, path| aml.interpreter.evaluate(&mut aml.host, path, &[]);
         assert!(matches!(integer(&mut aml, "\\_SB_.PCI0.CNT_"), Ok(Value::Integer(2))));
         assert!(matches!(integer(&mut aml, "\\_SB_.PCI0.QFLG"), Ok(Value::Integer(0))));
+    }
+
+    /// A Thunderbolt root port's `_DSD`, as Microsoft's Kernel DMA
+    /// Protection page gives it: external facing; the same with a value of 0,
+    /// or under another UUID, or with no such property: not; and a package
+    /// that is not UUID-and-package pairs, or whose value is no integer:
+    /// refused, never taken as internal.
+    #[test]
+    fn an_external_facing_port_is_read_off_its_dsd() {
+        let property = |key: &str, value: Value| Value::Package(vec![Value::String(key.as_bytes().to_vec()), value]);
+        let dsd = |uuid: [u8; 16], properties: Vec<Value>| Value::Package(vec![Value::Buffer(uuid.to_vec()), Value::Package(properties)]);
+        let thunderbolt = dsd(EXTERNAL_FACING_UUID, vec![property("ExternalFacingPort", Value::Integer(1)), property("UID", Value::Integer(0))]);
+        assert_eq!(external_facing(&thunderbolt), Ok(true));
+        assert_eq!(external_facing(&dsd(EXTERNAL_FACING_UUID, vec![property("ExternalFacingPort", Value::Integer(0))])), Ok(false));
+        assert_eq!(external_facing(&dsd(EXTERNAL_FACING_UUID, vec![property("UID", Value::Integer(0))])), Ok(false));
+        let other = crate::osc::uuid(b"DAFFD814-6EBA-4D8C-8A91-BC9BBF4AA301");
+        assert_eq!(external_facing(&dsd(other, vec![property("ExternalFacingPort", Value::Integer(1))])), Ok(false));
+        assert!(external_facing(&Value::Integer(1)).is_err());
+        assert!(external_facing(&Value::Package(vec![Value::Buffer(EXTERNAL_FACING_UUID.to_vec())])).is_err());
+        assert!(external_facing(&dsd(EXTERNAL_FACING_UUID, vec![property("ExternalFacingPort", Value::String(b"1".to_vec()))])).is_err());
+        assert!(external_facing(&dsd(EXTERNAL_FACING_UUID, vec![Value::Integer(1)])).is_err());
+    }
+
+    /// A root whose firmware offers native hot-plug is committed it only
+    /// where no port below it faces outside the machine: a Thunderbolt-like
+    /// port's `_DSD` keeps the slot the firmware's, and one that cannot be
+    /// read keeps it too.
+    #[test]
+    fn a_root_with_an_external_facing_port_is_not_committed() {
+        let uuid_bytes = EXTERNAL_FACING_UUID.to_vec();
+        let port = |value: u64| {
+            let property = package(&[string("ExternalFacingPort"), int(value)]);
+            let dsd = package(&[buffer(&int(16), &uuid_bytes), package(&[property])]);
+            device("RP01", &cat(&[&def_name("_ADR", &int(0x0007_0000)), &def_name("_DSD", &dsd)]))
+        };
+        let negotiated = |rest: &[u8]| declared(&root(&crs(), rest)).map(|roots| (roots[0].osc, roots[0].committed));
+        let rest = |port: &[u8]| cat(&[&osc(&[0x6B]), port]);
+        assert_eq!(negotiated(&rest(&port(1))), Ok((Osc::Offered(ROOT_CONTROL), None)));
+        assert_eq!(negotiated(&rest(&port(0))), Ok((Osc::Offered(ROOT_CONTROL), Some(ROOT_CONTROL))));
+        let unreadable = device("RP01", &def_name("_DSD", &int(1)));
+        assert_eq!(negotiated(&rest(&unreadable)), Ok((Osc::Offered(ROOT_CONTROL), None)));
     }
 
     /// A root that is not a list of windows, one whose `_CRS` is refused or
