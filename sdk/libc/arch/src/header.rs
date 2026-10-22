@@ -29,6 +29,13 @@ pub(crate) fn int(header: &str, name: &str) -> i32 {
     as_int(found.unwrap_or_else(|| panic!("no integer #define {name}"))).1
 }
 
+/// `name`'s value in `header`, as a flag word: `SA_RESETHAND` is no `int`.
+pub(crate) fn flags(header: &str, name: &str) -> u64 {
+    let found = defines(header).find(|&(n, _)| n == name);
+    let (_, value) = found.unwrap_or_else(|| panic!("no integer #define {name}"));
+    u64::try_from(value).unwrap_or_else(|_| panic!("{name} {value:#x} is no flag word"))
+}
+
 #[test]
 fn pipe_buf_is_the_kernels_whole_pipe_write() {
     assert_eq!(toyos_abi::syscall::MAX_WHOLE_PIPE_WRITE, int(LIMITS_H, "PIPE_BUF") as usize);

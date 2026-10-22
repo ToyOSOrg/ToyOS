@@ -7,6 +7,7 @@ use toyos_abi::syscall::SyscallError;
 pub(crate) const EPERM: i32 = 1;
 pub(crate) const ENOENT: i32 = 2;
 pub(crate) const ESRCH: i32 = 3;
+pub(crate) const EINTR: i32 = 4;
 pub(crate) const EIO: i32 = 5;
 pub(crate) const E2BIG: i32 = 7;
 pub(crate) const ENOEXEC: i32 = 8;

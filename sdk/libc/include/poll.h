@@ -20,6 +20,9 @@ struct pollfd {
 
 int poll(struct pollfd *fds, unsigned int nfds, int timeout);
 
+struct timespec;
+int ppoll(struct pollfd *fds, unsigned int nfds, const struct timespec *timeout, const unsigned long *sigmask);
+
 #ifdef __cplusplus
 }
 #endif

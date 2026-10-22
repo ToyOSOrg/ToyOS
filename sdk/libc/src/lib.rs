@@ -4,8 +4,8 @@
 
 extern crate alloc;
 
-mod alarm;
 mod alarmreq;
+mod signal;
 mod sigreq;
 mod errtext;
 mod arch;

@@ -86,7 +86,7 @@ An owner is an issue under `issues/`, or this track.
 | 14 | Record locks the file server serves, and std's and cargo's locks on them | direction set | `std-file-lock-answers-ok-and-locks-nothing`, `libc-refuses-what-toyos-cannot-yet-answer` | engineering: the lock design, part of 13's |
 | 15 | An unlinked open file lives until its last close or unmap | direction set | `an-unlinked-open-file-answers-stale` | 13 for the mapping |
 | 16 | An exclusive create on `/tmp` (`O_CREAT\|O_EXCL`, `create_new`): the kernel's `OpenFlags::EXCLUSIVE` | done | this track | — |
-| 17 | libc tells the truth: `sigaction` refuses a handler it never calls, `st_nlink` is 1 and `strerror` names each code (done), and the user and group ids are the process's own | in progress | `libc-answers-uid-0-for-every-process` | — |
+| 17 | libc tells the truth: `sigaction` refuses a handler for a signal nothing raises, `st_nlink` is 1 and `strerror` names each code (done), and the user and group ids are the process's own | in progress | `libc-answers-uid-0-for-every-process` | — |
 | 18 | libc gains `select`, `setvbuf` and `socketpair`. A descriptor is a small table number since #978, so `FD_SETSIZE` holds | not started | this track | — |
 | 19 | The `libc` crate gains a ToyOS module, checked by `ctest` against `sdk/libc`'s headers | not started | this track | 18 |
 | 20 | Children: `SIGCHLD`, sessions, a quit notice and Ctrl+C, the process track's stages 4–7 | not started | `a-childs-end-is-an-event-and-a-parent-takes-its-children-down` | — |

@@ -1,9 +1,8 @@
 //! What `alarm` answers and arms: the seconds an earlier alarm has left,
-//! rounded up and 0 once it is due or when there is none; 0 seconds arm
-//! nothing; and a due alarm ends the process unless `SIGALRM` is ignored, the
-//! signal `signal.h` numbers.
+//! rounded up and 0 once it is due or when there is none; and 0 seconds arm
+//! nothing.
 
-use crate::alarmreq::{due, ends, left, SIGALRM, SIG_DFL, SIG_IGN};
+use crate::alarmreq::{due, left, SIG_DFL, SIG_IGN};
 use crate::header::{self, SIGNAL_H};
 
 const SEC: u64 = 1_000_000_000;
@@ -28,14 +27,14 @@ fn the_seconds_left_round_up_and_end_at_zero() {
     assert_eq!(left(due(0, u32::MAX), 0), u32::MAX);
 }
 
+/// Every signal number `sigreq` names is the one `signal.h` gives it, and
+/// `SIG_DFL` and `SIG_IGN` its addresses.
 #[test]
-fn a_due_alarm_ends_the_process_unless_sigalrm_is_ignored() {
-    assert!(!ends(SIG_IGN), "an ignored SIGALRM ended the process");
-    assert!(ends(SIG_DFL));
-    assert!(ends(0x40_1000), "a handler, which never runs, kept the process");
-}
-
-#[test]
-fn sigalrm_is_the_number_signal_h_gives_it() {
-    assert_eq!(SIGALRM, header::int(SIGNAL_H, "SIGALRM"));
+fn the_signals_libc_names_are_the_numbers_signal_h_gives_them() {
+    use crate::sigreq::{SIGALRM, SIGCHLD, SIGHUP, SIGINT, SIGKILL, SIGTERM};
+    for (name, number) in [("SIGHUP", SIGHUP), ("SIGINT", SIGINT), ("SIGKILL", SIGKILL), ("SIGALRM", SIGALRM), ("SIGTERM", SIGTERM), ("SIGCHLD", SIGCHLD)] {
+        assert_eq!(number, header::int(SIGNAL_H, name), "{name}");
+    }
+    assert_eq!(SIG_DFL, 0);
+    assert_eq!(SIG_IGN, 1);
 }

@@ -47,8 +47,8 @@ struct Thread {
     start: StartRoutine,
     arg: *mut u8,
     result: AtomicPtr<u8>,
-    /// Its creator's signal mask, which POSIX has the thread start with.
-    mask: u64,
+    /// Whether a signal is routed by its mask: every thread but libc's own.
+    counted: bool,
 }
 
 /// The bit a `pthread_t` of a thread this library did not start carries.
@@ -63,10 +63,6 @@ static SELF: Cell<*mut Thread> = Cell::new(ptr::null_mut());
 
 #[thread_local]
 static MARKER: u8 = 0;
-
-/// The calling thread's signal mask (`sigmask`).
-#[thread_local]
-static MASK: Cell<u64> = Cell::new(0);
 
 /// Blocks of detached threads that have ended, for the next creator to reap.
 static REAPED: Lock<Vec<usize>> = Lock::new(Vec::new());
@@ -98,7 +94,6 @@ unsafe extern "C" fn thread_entry(arg: u64) {
         unsafe { syscall::futex_wait(t.published.as_ptr(), 0, None) };
     }
     SELF.set(thread);
-    MASK.set(t.mask);
     let result = unsafe { (t.start)(t.arg) };
     unsafe { exit_thread(result) }
 }
@@ -112,6 +107,9 @@ unsafe fn exit_thread(result: *mut u8) -> ! {
     let thread = SELF.get();
     if !thread.is_null() {
         let t = unsafe { &*thread };
+        if t.counted {
+            crate::signal::thread_ended(toyos_abi::current_tid().raw());
+        }
         t.result.store(result, Ordering::Release);
         if t.state.swap(EXITED, Ordering::AcqRel) == DETACHED {
             REAPED.lock().push(thread as usize);
@@ -127,6 +125,32 @@ pub unsafe extern "C" fn pthread_create(
     start_routine: StartRoutine,
     arg: *mut u8,
 ) -> i32 {
+    match unsafe { create(attr, start_routine, arg, true) } {
+        Ok(block) => {
+            if !thread.is_null() {
+                unsafe { *thread = block as PthreadT };
+            }
+            0
+        }
+        Err(errno) => errno,
+    }
+}
+
+/// A detached thread of libc's own running `start`, which no signal is
+/// routed by.
+pub(crate) fn spawn_own(start: StartRoutine) {
+    let attr = attr_default() | ATTR_DETACHED;
+    // SAFETY: `attr` is a `pthread_attr_t`, and `start` takes no argument.
+    let started = unsafe { create(&attr, start, ptr::null_mut(), false) };
+    started.expect("libc: no thread of its own");
+}
+
+/// Start a thread, `counted` among those a signal is routed by: its block,
+/// or an `errno`.
+///
+/// # Safety
+/// `attr` is null or a `pthread_attr_t`, and `start_routine` takes `arg`.
+unsafe fn create(attr: *const u64, start_routine: StartRoutine, arg: *mut u8, counted: bool) -> Result<*mut Thread, i32> {
     let reaped = core::mem::take(&mut *REAPED.lock());
     for block in reaped {
         unsafe { reap(block as *mut Thread) };
@@ -136,7 +160,7 @@ pub unsafe extern "C" fn pthread_create(
     let stack_size = (attr & !ATTR_DETACHED) as usize;
     let stack = unsafe { heap_alloc(stack_layout(stack_size)) };
     if stack.is_null() {
-        return EAGAIN;
+        return Err(EAGAIN);
     }
     let state = if attr & ATTR_DETACHED != 0 { DETACHED } else { JOINABLE };
     let block = Box::into_raw(Box::new(Thread {
@@ -148,7 +172,7 @@ pub unsafe extern "C" fn pthread_create(
         start: start_routine,
         arg,
         result: AtomicPtr::new(ptr::null_mut()),
-        mask: MASK.get(),
+        counted,
     }));
     let top = (stack as usize + stack_size) & !(STACK_ALIGN - 1);
     // SAFETY: the entry is a function of this library, and the stack is a
@@ -159,7 +183,11 @@ pub unsafe extern "C" fn pthread_create(
             heap_dealloc(stack, stack_layout(stack_size));
             drop(Box::from_raw(block));
         }
-        return EAGAIN;
+        return Err(EAGAIN);
+    }
+    // Before it runs: it starts with its creator's mask, as POSIX has it.
+    if counted {
+        crate::signal::thread_started(tid as u32, crate::signal::mask());
     }
     // Taken before the store: once `published` is set the thread may run, end
     // detached and be reaped, so nothing after it reads the block.
@@ -171,10 +199,7 @@ pub unsafe extern "C" fn pthread_create(
     // At a freed block's address this is a spurious wake, which every futex
     // waiter here re-checks its word against.
     unsafe { syscall::futex_wake(published, u32::MAX) };
-    if !thread.is_null() {
-        unsafe { *thread = block as PthreadT };
-    }
-    0
+    Ok(block)
 }
 
 #[no_mangle]
@@ -228,27 +253,27 @@ pub extern "C" fn pthread_equal(t1: PthreadT, t2: PthreadT) -> i32 {
     (t1 == t2) as i32
 }
 
-/// The calling thread's signal mask, as `pthread_sigmask` keeps it.
-pub(crate) fn mask() -> u64 {
-    MASK.get()
-}
-
 /// The calling thread's signal mask, changed as `how` says when `set` is not
-/// null, answered in `old` when that is not. The mask is kept, answered and
-/// inherited; a blocked signal is never held pending, so `raise` refuses it.
+/// null, answered in `old` when that is not. A pending signal the change
+/// unblocks is delivered before this returns. `ENOSYS`, the mask unchanged,
+/// for blocking a quit's signal in a process that holds no notice to listen to.
 #[no_mangle]
 pub unsafe extern "C" fn pthread_sigmask(how: i32, set: *const u64, old: *mut u64) -> i32 {
-    let mask = MASK.get();
-    if !set.is_null() {
-        match crate::sigmask::changed(mask, how, unsafe { *set }) {
-            Some(next) => MASK.set(next),
+    let mask = crate::signal::mask();
+    let next = match unsafe { set.as_ref() } {
+        None => None,
+        Some(&set) => match crate::sigmask::changed(mask, how, set) {
+            Some(next) => Some(next),
             None => return EINVAL,
-        }
-    }
+        },
+    };
     if !old.is_null() {
         unsafe { *old = mask };
     }
-    0
+    match next.map(crate::signal::set_mask) {
+        Some(Err(errno)) => errno,
+        Some(Ok(())) | None => 0,
+    }
 }
 
 #[no_mangle]

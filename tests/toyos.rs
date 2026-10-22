@@ -224,6 +224,9 @@ const RUST_SKIP: &[&str] = &[
     // A quit's walk over a tree of its own children: `libc_children` runs it
     // beside the children libc starts, on tests/images/libccase.toml.
     "quit_tree",
+    // libc's `read` across a handler, ordered by the roster: `libc_children`
+    // runs it on tests/images/libccase.toml.
+    "libc_read_restarts",
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",

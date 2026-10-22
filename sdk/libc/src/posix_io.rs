@@ -13,7 +13,8 @@ use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
 use toyos::files::{self, Open};
 
-use crate::errcode::{EBADF, EINVAL};
+use crate::errcode::{EBADF, EINTR, EINVAL};
+use crate::signal::Call;
 use crate::time::Timespec;
 
 // The values `<fcntl.h>` declares.
@@ -172,13 +173,49 @@ pub unsafe extern "C" fn close(raw_fd: i32) -> i32 {
     }
 }
 
+/// A handler that interrupts a read of a kernel object restarts it if it was
+/// installed with `SA_RESTART` and answers `EINTR` if not. A descriptor no
+/// watch can be armed on, a console's, and a file a server serves, which
+/// answers without waiting on any event, read as they block, and nothing
+/// interrupts them.
 #[no_mangle]
 pub unsafe extern "C" fn read(raw_fd: i32, buf: *mut u8, count: usize) -> isize {
     if buf.is_null() || count == 0 { return 0; }
     let slice = core::slice::from_raw_parts_mut(buf, count);
-    match files::read(raw_fd, slice) {
+    let blocking = |slice: &mut [u8]| match files::read(raw_fd, slice) {
         Ok(n) => n as isize,
         Err(e) => refuse_files(e) as isize,
+    };
+    let Some(mut call) = Call::enter(None, false, false) else { return blocking(slice) };
+    // Held for the call, so a `close` on another thread releases nothing it waits on.
+    let Ok((_held, object)) = toyos::fd::hold(raw_fd) else { return blocking(slice) };
+    if object.release.is_some() || object.handle == toyos_abi::HANDLE_INVALID {
+        drop(call);
+        return blocking(slice);
+    }
+    loop {
+        if let Some(delivery) = call.take() {
+            if !call.interrupted(delivery) {
+                return refuse(EINTR) as isize;
+            }
+            continue;
+        }
+        match syscall::read_nonblock(object.handle, slice) {
+            Ok(n) => return n as isize,
+            Err(syscall::SyscallError::WouldBlock) => {}
+            Err(e) => return set_errno(e) as isize,
+        }
+        let poller = toyos::poller::Poller::new(2);
+        poller.watch_raw(object.handle, toyos::poller::READABLE, 0);
+        poller.watch_raw(call.wake(), toyos::poller::READABLE, 1);
+        let mut refused = false;
+        poller.wait_answers(1, u64::MAX, |token, answer| {
+            refused |= token == 0 && answer == Err(syscall::SyscallError::NotSupported);
+        });
+        if refused {
+            drop(call);
+            return blocking(slice);
+        }
     }
 }
 
@@ -733,32 +770,43 @@ pub struct pollfd {
     pub revents: i16,
 }
 
+/// What [`wait_fds`] came to.
+pub(crate) struct Waited {
+    /// Entries ready, their `revents` written.
+    pub(crate) ready: i32,
+    /// Whether the wake pipe beside them was readable.
+    pub(crate) woken: bool,
+}
+
+/// The most entries and doorbells one poll watches: a poller's handles, one of
+/// them the wake pipe a handler interrupts it by.
+const MAX_POLLED: usize = toyos::poller::Poller::MAX_HANDLES as usize - 1;
+
+/// `poll`'s wait over the `n` entries at `fds` until `deadline`, in the
+/// monotonic clock's nanoseconds, watching `wake` beside them where given: it
+/// answers once an entry is ready, `wake` is readable, or the deadline passes.
+///
 /// A stream socket is asked its rings first, so a level-triggered `poll` of
 /// one that is ready answers at once; a direction that is not is counted in,
 /// drained, armed and looked at again (`toyos::net::stream::watch`), and its
 /// doorbell watched for reading: the connection for `POLLIN`, the bell for
 /// `POLLOUT`. Every other descriptor, a listener's wake pipe and a datagram
 /// socket's receive pipe for a socket's, is watched as it is.
-#[no_mangle]
-pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 {
+///
+/// # Safety
+/// `fds` points at `n` entries.
+pub(crate) unsafe fn wait_fds(fds: *mut pollfd, n: usize, deadline: Option<u64>, wake: Option<RawHandle>) -> Result<Waited, i32> {
     use toyos::net::stream::{self, Poll, Way};
 
     const POLLIN: i16 = 1;
     const POLLOUT: i16 = 4;
     const POLLNVAL: i16 = 0x20;
 
-    if nfds == 0 {
-        if timeout > 0 {
-            syscall::nanosleep(timeout as u64 * 1_000_000);
-        }
-        return 0;
+    if n == 0 && wake.is_none() {
+        let left = deadline.map_or(u64::MAX, |at| at.saturating_sub(toyos_abi::clock::nanos_since_boot()));
+        syscall::nanosleep(left);
+        return Ok(Waited { ready: 0, woken: false });
     }
-
-    // A poller watches at most `MAX_HANDLES` fds and now says so by panicking
-    // rather than by quietly handing back a smaller ring. A C caller asking to
-    // watch more is not a bug in this library, so it gets POSIX's own answer
-    // for an nfds it cannot serve.
-    let n = nfds as usize;
     let entries: alloc::vec::Vec<(i32, i16)> = (0..n).map(|i| ((*fds.add(i)).fd, (*fds.add(i)).events)).collect();
     // Every open descriptor held until `poll` returns, and each one's handles
     // taken from its held object once: a `close` on another thread meanwhile
@@ -770,12 +818,12 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     let streams: alloc::vec::Vec<Option<RawHandle>> = objects().map(|object| object.and_then(crate::socket::stream_of)).collect();
     let ways = |events: i16| [(POLLIN, Way::Receive), (POLLOUT, Way::Send)].into_iter().filter(move |(flag, _)| events & flag != 0);
     let doorbells: usize = entries.iter().zip(&streams).filter(|(_, stream)| stream.is_some()).map(|((_, events), _)| ways(*events).count()).sum();
-    if nfds as usize + doorbells > toyos::poller::Poller::MAX_HANDLES as usize {
-        crate::errno::set(EINVAL);
-        return -1;
+    // A C caller asking to watch more than a poller can is not a bug in this
+    // library, so it gets POSIX's own answer for an nfds it cannot serve.
+    if n + doorbells > MAX_POLLED {
+        return Err(EINVAL);
     }
 
-    let deadline = (timeout >= 0).then(|| toyos_abi::clock::nanos_since_boot().saturating_add(timeout as u64 * 1_000_000));
     // The descriptors that are no stream, each as the kernel handle it is watched by.
     let others: alloc::vec::Vec<(i32, i16)> = entries
         .iter()
@@ -812,7 +860,8 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
             None => u64::MAX,
             Some(at) => at.saturating_sub(toyos_abi::clock::nanos_since_boot()),
         };
-        let poller = toyos::poller::Poller::new((n + watching.len()) as u32);
+        let wake_token = (n + watching.len()) as u64;
+        let poller = toyos::poller::Poller::new((n + watching.len()) as u32 + 1);
         for (entry, fd, interest) in crate::pollreq::watches(&others) {
             if fd >= 0 {
                 poller.watch_raw(toyos_abi::RawHandle(fd as u32), interest, entry as u64);
@@ -823,9 +872,15 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
                 poller.watch_raw(*doorbell, toyos::poller::READABLE, (n + k) as u64);
             }
         }
+        if let Some(wake) = wake {
+            poller.watch_raw(wake, toyos::poller::READABLE, wake_token);
+        }
         let mut answered = alloc::vec![false; n + watching.len()];
+        let mut woken = false;
         poller.wait(if ready_now { 0 } else { 1 }, left, |token| {
-            if let Some(slot) = answered.get_mut(token as usize) {
+            if token == wake_token {
+                woken = true;
+            } else if let Some(slot) = answered.get_mut(token as usize) {
                 *slot = true;
             }
         });
@@ -841,11 +896,73 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
         }
         let ready = revents.iter().filter(|&&r| r != 0).count();
         let expired = deadline.is_some_and(|at| toyos_abi::clock::nanos_since_boot() >= at);
-        if ready > 0 || expired {
+        if ready > 0 || expired || woken {
             for (i, r) in revents.into_iter().enumerate() {
                 (*fds.add(i)).revents = r;
             }
-            return ready as i32;
+            return Ok(Waited { ready: ready as i32, woken });
         }
     }
+}
+
+/// `deadline` from now in `timeout` milliseconds, none for a negative one.
+fn after_ms(timeout: i32) -> Option<u64> {
+    (timeout >= 0).then(|| toyos_abi::clock::nanos_since_boot().saturating_add(timeout as u64 * 1_000_000))
+}
+
+/// `poll`'s and `ppoll`'s work, `mask` the thread's while it waits where
+/// given: the ready count, 0 past the deadline, or `EINTR` once a handler ran,
+/// which no `SA_RESTART` restarts.
+///
+/// # Safety
+/// `fds` points at `n` entries.
+unsafe fn poll_until(fds: *mut pollfd, n: usize, deadline: Option<u64>, mask: Option<u64>) -> i32 {
+    let mut call = Call::enter(mask, false, mask.is_some());
+    loop {
+        if let Some(call) = call.as_mut() {
+            if let Some(delivery) = call.take() {
+                call.interrupted(delivery);
+                return refuse(EINTR);
+            }
+        }
+        match unsafe { wait_fds(fds, n, deadline, call.as_ref().map(Call::wake)) } {
+            Ok(Waited { ready, woken: false }) => return ready,
+            Ok(Waited { ready, .. }) if ready > 0 => return ready,
+            Ok(_) => {}
+            Err(errno) => return refuse(errno),
+        }
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 {
+    unsafe { poll_until(fds, nfds as usize, after_ms(timeout), None) }
+}
+
+/// `poll` with `sigmask`, when not null, the thread's mask while it waits: a
+/// signal it unblocks is taken there, and once it returns the thread's own
+/// mask is back.
+#[no_mangle]
+pub unsafe extern "C" fn ppoll(fds: *mut pollfd, nfds: u32, timeout: *const Timespec, sigmask: *const u64) -> i32 {
+    let deadline = match unsafe { timeout.as_ref() } {
+        None => None,
+        Some(ts) => match crate::time::nanos_of(ts) {
+            Some(nanos) => Some(toyos_abi::clock::nanos_since_boot().saturating_add(nanos)),
+            None => return refuse(EINVAL),
+        },
+    };
+    let mask = unsafe { sigmask.as_ref() }.copied().unwrap_or_else(crate::signal::mask);
+    unsafe { poll_until(fds, nfds as usize, deadline, Some(mask)) }
+}
+
+/// Wait for a handler to run: `-1` and `EINTR` once one has.
+#[no_mangle]
+pub unsafe extern "C" fn pause() -> i32 {
+    unsafe { poll_until(ptr::null_mut(), 0, None, Some(crate::signal::mask())) }
+}
+
+/// [`pause`], with `mask` the thread's while it waits.
+#[no_mangle]
+pub unsafe extern "C" fn sigsuspend(mask: *const u64) -> i32 {
+    unsafe { poll_until(ptr::null_mut(), 0, None, Some(*mask)) }
 }

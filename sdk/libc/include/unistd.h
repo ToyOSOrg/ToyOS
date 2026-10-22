@@ -26,6 +26,7 @@ int access(const char *path, int mode);
 unsigned int sleep(unsigned int seconds);
 unsigned int alarm(unsigned int seconds);
 int usleep(unsigned int usec);
+int pause(void);
 int isatty(int fd);
 int execvp(const char *file, char *const argv[]);
 int execv(const char *path, char *const argv[]);
