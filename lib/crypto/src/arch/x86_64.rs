@@ -127,16 +127,25 @@ impl Features {
     }
 }
 
+/// The cache publishes only this public word, not any other memory.
+static FEATURES: AtomicU32 = AtomicU32::new(0);
+
+/// Inline: every instruction path asks, several times per message.
+#[inline(always)]
 pub(super) fn features() -> Features {
     if cfg!(feature = "portable") {
         return Features(Features::READ);
     }
-    // The cache publishes only this public word, not any other memory.
-    static FEATURES: AtomicU32 = AtomicU32::new(0);
     let cached = FEATURES.load(Ordering::Relaxed);
     if cached & Features::READ != 0 {
         return Features(cached);
     }
+    first_features()
+}
+
+#[cold]
+#[inline(never)]
+fn first_features() -> Features {
     let read = Features::read();
     FEATURES.store(read.0, Ordering::Relaxed);
     read
