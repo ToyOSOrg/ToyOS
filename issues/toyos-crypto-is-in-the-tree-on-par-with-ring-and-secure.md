@@ -422,11 +422,13 @@ Not consumers:
        - **Finding, the T14:** P-256 public key LEAKS (max |t| 73.1, raw
          t 66.9) and P-256 agreement LEAKS (max |t| 83.4, raw t 76.0); the
          fixed scalar is about 510 ticks slower of about 1.5 M. P-384
-         agreement reads 5.79, marginal. P-384 public key and Ed25519 pass.
-         Owner: crypto-perf, the NIST arithmetic. Exit: a T14 pass on the
-         current NIST code (#1000's Booth windows, at 954b4587b), which a
-         boot of #993's head re-measures. A hypothesis, not established:
-         value-dependent instruction latency with Intel's DOITM off, which
+         agreement LEAKS (max |t| 5.79, raw t 5.77). P-384 public key and
+         Ed25519 pass. Owner: this track's parity stage, the NIST
+         arithmetic (`lib/crypto/src/nist.rs`). Exit: a T14 pass of P-256
+         and P-384 agreement on the current NIST code (#1000's Booth
+         windows, at 954b4587b), which a boot of #993's head re-measures.
+         A hypothesis, not established: value-dependent instruction latency
+         with Intel's DOITM off, which
          a T14 boot with DOITM set on every CPU tests. Its scalar 1 holds
          the running total at the identity for 51 of 52 windows, so the two
          classes run the same instructions on very different values.

@@ -156,7 +156,8 @@ mod tests {
         }
     }
 
-    /// The drop of a secret owner leaves its storage zero.
+    /// The drop of a secret owner, or of an operation's workspace, leaves its
+    /// storage zero.
     #[test]
     fn a_dropped_secret_leaves_zeros() {
         let mut secret = ManuallyDrop::new(Secret([0x3cu8; 61]));
@@ -167,5 +168,8 @@ mod tests {
         let mut words = ManuallyDrop::new(Secret([[u32::MAX; 16]; 4]));
         unsafe { ManuallyDrop::drop(&mut words) };
         assert_eq!(words.0, [[0; 16]; 4]);
+        let mut workspace = ManuallyDrop::new(Workspace([[u64::MAX; 5]; 3]));
+        unsafe { ManuallyDrop::drop(&mut workspace) };
+        assert_eq!(workspace.0, [[0; 5]; 3]);
     }
 }
