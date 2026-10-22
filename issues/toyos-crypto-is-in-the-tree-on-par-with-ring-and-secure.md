@@ -229,8 +229,14 @@ Not consumers:
            ns on the T14. At 1 KiB on the T14 it is about 37 ns, with
            Poly1305 alone (the reject row) at 377 ns.
          - The candidates are Poly1305's key setup, its powers up to r^8 and
-           its finish, erasing the keystream and state buffers, and the
-           scalar block 0. Their shares are not measured.
+           its finish, erasing the keystream buffer, and the scalar block 0.
+           Their shares are not measured. The short path no longer fills or
+           erases state buffers; removing them left the T14's 1 B seal at
+           1.10 (1.107 to 1.097).
+         - The short path's step at 80 B is gone on the T14: with three or
+           four blocks in one AVX-512 register set, seal at 80 B fell from
+           1.27 to 1.12 against ring. The AMD bench, AVX2 only, is
+           unmeasured since.
          - Exit: the rows pass on both benches.
        - **One ChaCha20 block on the AMD bench (`chacha20-poly1305-openssh/length`),
          1.087.**

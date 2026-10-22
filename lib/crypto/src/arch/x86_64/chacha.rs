@@ -3,11 +3,11 @@
 //! (Goll and Gueron, "Vectorization on ChaCha Stream Cipher", ITNG 2014). On
 //! AVX2 alone, and for shorter runs, blocks run in pairs with each 128-bit
 //! lane holding one block's row; with AVX-512F, four blocks run in one
-//! register set with a block per lane, in one pair's instructions. Rows are
-//! built from the key bytes in registers, never from a state in memory.
-//! Rounds, shuffles and addresses depend only on public lengths and
-//! counters. Only hosted targets with OS-enabled YMM state enter here. Hot
-//! loops index fixed-size arrays, as `aesni`'s header explains.
+//! register set with a block per lane. Rows are built from the key bytes in
+//! registers, never from a state in memory. Rounds, shuffles and addresses
+//! depend only on public lengths and counters. Only hosted targets with
+//! OS-enabled YMM state enter here. Hot loops index fixed-size arrays, as
+//! `aesni`'s header explains.
 
 #![allow(clippy::needless_range_loop, reason = "see `aesni`'s header")]
 
