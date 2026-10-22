@@ -64,7 +64,7 @@ review has been done, and passing vectors does not show it is safer than ring.
 | `system/sshserver` | russh with the RustCrypto stack, including `rsa` (RUSTSEC-2023-0071) | none directly; it reaches the crate through `toyos-ssh` |
 | Image and package signing: `lib/update` (the loader, `/system/bin/update`, `build/signing.rs`, `build/root`, #892's repository keys) | the crate's strict Ed25519 and SHA-2, since #1019; signing and a seed's public key behind `sign`, on the host | stage 6's bench readings |
 | Every SHA-256: the build, `pkg`, `lib/swap`, `system/update`, `lib/update` and the loader | the crate, since #1016: SHA-NI on x86-64, the UEFI loader's in a block that saves the XMM registers it uses; the Armv8 SHA instructions where the target promises them. No slower than `toyos-sha2-hw`, which it replaces, on either bench: on the T14 4.6 times as fast at 64 B and 9 and 6 percent faster at 16 KiB and 1 MiB, on the AMD bench 2.8 times at 64 B, 2 percent at 16 KiB and equal at 1 MiB (#1016's evidence) | nothing |
-| ToyOS's own HTTPS clients. On the host: the build's `ureq` (`build/release.rs`) and doom's build script (`apps/doom/build.rs`). In a guest, none today: `https_tls13` and `pkg install <url>` are stages 3 and 5 of `issues/the-internet-clients-work-unchanged.md` | rustls on `ring`, which is `ToyOSOrg/ring` in a guest | the rustls provider through ureq's `rustls-no-provider` feature. Stage 5, once parity and security hold (owner, 2026-10-13) |
+| ToyOS's own HTTPS clients. On the host: the build's `ureq` (`build/release.rs`) and doom's build script (`apps/doom/build.rs`). In a guest, none today: `https_tls13` and `pkg install <url>` are stages 3 and 5 of `issues/the-internet-clients-work-unchanged.md` | the host's two: the crate's rustls provider through ureq's `rustls-no-provider`, since HTTPS_PR, its key exchange on X25519 and X25519MLKEM768 alone while the T14 finding stands. In a guest, none | the NIST groups back once the T14 finding is resolved |
 | Wi-Fi's `wlan` (`issues/there-is-no-wifi.md` P6, W2) | nothing yet | PBKDF2-HMAC-SHA1, the 802.11i PRF and RFC 3394 unwrap, which the crate has. AES-CMAC-128, SAE over P-256 by hash-to-element, a public constant-time comparison and a public wiping secret, which it lacks |
 | `issues/programs-hold-aes-keys-as-key-locker-handles.md` | blocked on a session-long AES key | a TLS client on the crate is that consumer: AES behind a Key Locker handle. SSH holds no AES key |
 
@@ -534,6 +534,12 @@ Not consumers:
   per-temporary erasure on the T14, 0.79–0.88 on the AMD bench) and a
   reviewed contract. Compiler
   copies, registers, spills and caller-held bytes are not wiped.
+- The host's HTTPS clients exchange keys on X25519 and X25519MLKEM768
+  alone: no P-256 or P-384 secret meets a server's input while the T14
+  finding stands, and a server offering only those groups is refused. Each
+  client keeps the two groups itself (`build/release.rs`,
+  `apps/doom/build.rs`). **Owner**: this track. **Exit**: the T14 finding is
+  resolved and the clients take the provider's groups whole.
 - ToyOS's AArch64 targets hash with the portable SHA-2 rounds: no target
   promises the Armv8 SHA instructions, and neither the kernel nor the crate
   detects them at run time. **Owner**: this track. **Exit**: the crate takes
