@@ -148,6 +148,15 @@ impl PageTablePage {
         unsafe { Self::from_phys_mut(frame.into_raw()) }
     }
 
+    /// A table of a user space, or `None` where taking a frame would cut into
+    /// what the kernel keeps (`pmm::alloc_table_frame`).
+    fn try_new() -> Option<&'static mut PageTablePage> {
+        let frame = crate::mm::pmm::alloc_table_frame()?;
+        // SAFETY: a zeroed frame just allocated, so a table of empty entries
+        // nothing else names.
+        Some(unsafe { Self::from_phys_mut(frame.into_raw()) })
+    }
+
     fn phys(&self) -> u64 {
         crate::mm::DirectMap::phys_of(self)
     }
@@ -762,11 +771,14 @@ pub struct UserTables {
 
 impl UserTables {
     /// A new space with the kernel half copied in, or `None` when every user
-    /// PCID is held by a live space.
+    /// PCID is held by a live space or no frame is free for its root.
     pub fn new() -> Option<Self> {
-        let pcid = alloc_pcid()?;
+        let pml4 = PageTablePage::try_new()?;
+        let Some(pcid) = alloc_pcid() else {
+            free_table(pml4.phys());
+            return None;
+        };
         let kernel = KERNEL.lock();
-        let pml4 = PageTablePage::new();
         for slot in ROOT_HIGH_HALF..512 {
             let entry = kernel.root_table()[slot];
             assert!(
@@ -809,8 +821,10 @@ impl UserTables {
     }
 
     /// Build every table `[start, end)`'s leaves need; answers how many
-    /// frames that took. Only an empty entry is written, which owes nothing.
-    pub fn build(&mut self, start: u64, end: u64) -> u64 {
+    /// frames that took, or `None` where a frame ran out, leaving what it
+    /// built linked for an [`unlink`](Self::unlink). Only an empty entry is
+    /// written, which owes nothing.
+    pub fn build(&mut self, start: u64, end: u64) -> Option<u64> {
         let mut built = 0;
         let mut va = start & !(PAGE_2M - 1);
         while va < end {
@@ -818,7 +832,7 @@ impl UserTables {
             let mut level = self.root_table_mut();
             for index in [a, b, c] {
                 if level[index] & PAGE_PRESENT == 0 {
-                    let child = PageTablePage::new();
+                    let child = PageTablePage::try_new()?;
                     level.write(index, va, child.phys() | TABLE_FLAGS).expect_install("build");
                     built += 1;
                 }
@@ -827,7 +841,7 @@ impl UserTables {
             }
             va += PAGE_2M;
         }
-        built
+        Some(built)
     }
 
     /// The leaf over `va`, empty where no table holds one.
@@ -854,6 +868,36 @@ impl UserTables {
                     if let Some(new) = f(base + ((i as u64) << 12), leaf) {
                         table.store(i, new.encode());
                     }
+                }
+            }
+        });
+    }
+
+    /// [`take_owned`](Self::take_owned), where `decide` says of each frame of
+    /// a table's batch, with the address its leaf maps, whether the leaf
+    /// keeps it: a kept frame's leaf stays, every other is emptied.
+    pub fn discard_owned(&mut self, start: u64, end: u64, mut decide: impl FnMut(&[u64], &[u64], &mut [bool])) {
+        self.each_table(start, end, |base, table| {
+            let mut frames = [0u64; 512];
+            let mut vas = [0u64; 512];
+            let mut slot = [0usize; 512];
+            let mut n = 0;
+            for i in slots(start, end, base, 12) {
+                if let Leaf::Held(phys) | Leaf::Mapped(Mapping { phys, owned: true, .. }) = Leaf::decode(table.0[i]) {
+                    frames[n] = phys;
+                    vas[n] = base + ((i as u64) << 12);
+                    slot[n] = i;
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                return;
+            }
+            let mut kept = [false; 512];
+            decide(&frames[..n], &vas[..n], &mut kept[..n]);
+            for k in 0..n {
+                if !kept[k] {
+                    table.store(slot[k], Leaf::Empty.encode());
                 }
             }
         });

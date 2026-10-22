@@ -4,7 +4,8 @@
 //! pages it names held; `vm_protect` commits a reservation and changes
 //! protection in place, contents kept; `vm_discard` keeps the pages and reads
 //! back zeros; `vm_decommit` makes them a reservation again. The ranges one
-//! space holds are bounded.
+//! space holds are bounded, and a commitment past what memory holds is
+//! refused when it is asked for.
 //!
 //! A page left unreachable must fault, which ends the process, so each such
 //! case runs in a child that makes the page itself and then loads from it.
@@ -74,8 +75,23 @@ fn placement_and_release() {
         unsafe { syscall::vm_release(ptr, pages * PAGE) }.expect("release a whole range");
     }
 
-    // A reservation costs no memory, so a tebibyte of one is placed.
+    // A reservation costs no memory, so a tebibyte of one is placed; a
+    // commitment is promised its frames, so a tebibyte of one is refused
+    // when it is asked for, whether it is reserved committed or committed
+    // later, and the reservation is as it was.
     let tib = reserve(1 << 40, VmProt::None);
+    assert_eq!(
+        unsafe { syscall::vm_reserve(1 << 40, VmProt::ReadWrite, VmAt::ANYWHERE) },
+        Err(SyscallError::ResourceExhausted),
+        "a committed tebibyte",
+    );
+    assert_eq!(
+        unsafe { syscall::vm_protect(tib, 1 << 40, VmProt::ReadWrite) },
+        Err(SyscallError::ResourceExhausted),
+        "a tebibyte reservation committed",
+    );
+    unsafe { syscall::vm_protect(tib, PAGE, VmProt::ReadWrite) }.expect("commit one page of the reservation");
+    set(tib, 0, 0x7E);
     unsafe { syscall::vm_release(tib, 1 << 40) }.expect("release the tebibyte");
 
     // Part of a range goes, and the rest stays as it was.

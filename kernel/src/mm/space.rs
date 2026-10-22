@@ -231,16 +231,16 @@ impl AddressSpace {
         self.tables.root()
     }
 
-    /// Where a range of `len` bytes goes; a `Fixed` one takes away whatever
-    /// was there first. `len` is whole pages.
-    fn locate(&mut self, len: u64, at: At) -> Result<u64, SyscallError> {
+    /// Where a range of `len` bytes goes, changing nothing: a `Fixed` one is
+    /// put in place of what is there by [`put`](Self::put). `len` is whole
+    /// pages.
+    fn place(&self, len: u64, at: At) -> Result<u64, SyscallError> {
         match at {
             At::Fixed(start) => {
                 let end = pages(start.raw(), len).ok_or(SyscallError::InvalidArgument)?;
                 if !self.inventory.holds(start.raw(), end) {
                     return Err(SyscallError::InvalidArgument);
                 }
-                self.release(start, len);
                 Ok(start.raw())
             }
             At::Anywhere(align) => {
@@ -253,6 +253,30 @@ impl AddressSpace {
                 self.inventory.place(len, align.max(PAGE_SIZE)).ok_or(SyscallError::ResourceExhausted)
             }
         }
+    }
+
+    /// Hold `entry` from `start`, in place of whatever those pages held: the
+    /// new range is in the inventory before the old leaves are cleared, so the
+    /// clear keeps the tables it needs. It cannot be refused.
+    fn put(&mut self, start: u64, entry: SpaceEntry) {
+        let end = entry.end;
+        if self.inventory.is_free(start, end) {
+            self.inventory.insert(start, entry);
+        } else {
+            let removed = self.inventory.remove(start, end);
+            let committed: u64 = removed
+                .iter()
+                .filter(|(_, old)| old.committed())
+                .map(|(s, old)| (old.end - s) / PAGE_SIZE)
+                .sum();
+            self.inventory.insert(start, entry);
+            let freed = self.clear(start, end);
+            pmm::unpromise(committed - freed);
+            self.usage.taken.fetch_add(1, Relaxed);
+            // The objects go here, after every CPU has stopped reaching them.
+            drop(removed);
+        }
+        self.usage.made.fetch_add(1, Relaxed);
     }
 
     /// `ResourceExhausted` unless the space may still hold `added` ranges
@@ -277,7 +301,11 @@ impl AddressSpace {
     }
 
     /// `len` bytes of private memory, committed unless `prot` is `None`, which
-    /// reserves the range and nothing more.
+    /// reserves the range and nothing more. A commitment is promised its
+    /// frames here, so it is refused here, `ResourceExhausted`, and never at a
+    /// later touch. All or nothing: a refused `Fixed` range leaves what the
+    /// pages held; one that is not refused needs its frames promised beside
+    /// those of what it replaces.
     pub fn reserve(&mut self, len: u64, at: At, prot: Prot) -> Result<UserAddr, SyscallError> {
         self.private(len, at, prot, Kind::Private { committed: prot != Prot::None })
     }
@@ -285,35 +313,78 @@ impl AddressSpace {
     /// `len` bytes of private memory, committed, whose pages start as a copy
     /// of `source` from `offset` as far as their first `copied` bytes go and
     /// zeros past them, each taken at its first touch: a program's segment
-    /// read lazily out of its file.
+    /// read lazily out of its file. Promised and all or nothing, as
+    /// [`reserve`](Self::reserve).
     pub fn copy(&mut self, len: u64, at: At, prot: Prot, source: Arc<dyn CopySource>, offset: u64, copied: u64) -> Result<UserAddr, SyscallError> {
         self.private(len, at, prot, Kind::Copy { source, offset, len: copied })
     }
 
     fn private(&mut self, len: u64, at: At, prot: Prot, kind: SpaceKind) -> Result<UserAddr, SyscallError> {
-        self.room_at(len, at)?;
-        let start = self.locate(len, at)?;
-        let backed = !matches!(kind, Kind::Private { committed: false });
-        self.inventory.insert(start, Entry { end: start + len, prot, kind });
-        if backed {
-            self.tables.build(start, start + len);
+        // A length no placement could hold is the caller's mistake, whatever
+        // memory is left to promise.
+        if len > self.inventory.top() - self.inventory.floor() {
+            return Err(SyscallError::InvalidArgument);
         }
-        self.usage.made.fetch_add(1, Relaxed);
+        self.room_at(len, at)?;
+        let start = self.place(len, at)?;
+        let entry = Entry { end: start + len, prot, kind };
+        let promised = if entry.committed() { len / PAGE_SIZE } else { 0 };
+        if !pmm::promise(promised) {
+            return Err(SyscallError::ResourceExhausted);
+        }
+        if entry.backed() {
+            self.build(start, start + len).inspect_err(|_| pmm::unpromise(promised))?;
+        }
+        self.put(start, entry);
         Ok(UserAddr::new(start))
     }
 
+    /// Build the tables `[start, end)` needs, or none of those it needs alone:
+    /// `ResourceExhausted` where taking a frame would cut into what the
+    /// kernel keeps.
+    fn build(&mut self, start: u64, end: u64) -> Result<(), SyscallError> {
+        if self.tables.build(start, end).is_some() {
+            return Ok(());
+        }
+        let inventory = &self.inventory;
+        let unlinked = self.tables.unlink(start, end, |s, e| inventory.backed(s, e));
+        if !unlinked.is_empty() {
+            self.tables.shoot_down(start, end, &unlinked);
+        }
+        unlinked.free();
+        Err(SyscallError::ResourceExhausted)
+    }
+
+    /// Committed private pages of `[start, end)`.
+    fn committed_pages(&self, start: u64, end: u64) -> u64 {
+        self.inventory
+            .meeting(start, end)
+            .filter(|(_, entry)| entry.committed())
+            .map(|(s, entry)| (entry.end.min(end) - s.max(start)) / PAGE_SIZE)
+            .sum()
+    }
+
+    /// Pages of `[start, end)` whose range's kind `which` answers `true` for.
+    fn pages_where(&self, start: u64, end: u64, which: impl Fn(&SpaceKind) -> bool) -> u64 {
+        self.inventory
+            .meeting(start, end)
+            .filter(|(_, entry)| which(&entry.kind))
+            .map(|(s, entry)| (entry.end.min(end) - s.max(start)) / PAGE_SIZE)
+            .sum()
+    }
+
     /// `len` bytes of `object` from `offset`, as `prot` allows; the caller
-    /// bounds `prot` by what its handle grants.
+    /// bounds `prot` by what its handle grants. All or nothing, as
+    /// [`reserve`](Self::reserve).
     pub fn map(&mut self, object: Arc<SharedMemObject>, offset: u64, len: u64, prot: Prot, at: At) -> Result<UserAddr, SyscallError> {
         let within = pages(offset, len).is_some_and(|end| end <= object.size());
         if !within {
             return Err(SyscallError::InvalidArgument);
         }
         self.room_at(len, at)?;
-        let start = self.locate(len, at)?;
-        self.inventory.insert(start, Entry { end: start + len, prot, kind: Kind::Object { object, offset, max: prot } });
-        self.tables.build(start, start + len);
-        self.usage.made.fetch_add(1, Relaxed);
+        let start = self.place(len, at)?;
+        self.build(start, start + len)?;
+        self.put(start, Entry { end: start + len, prot, kind: Kind::Object { object, offset, max: prot } });
         Ok(UserAddr::new(start))
     }
 
@@ -329,19 +400,26 @@ impl AddressSpace {
         if removed.is_empty() {
             return;
         }
-        self.clear(start, end);
+        let committed: u64 = removed
+            .iter()
+            .filter(|(_, entry)| entry.committed())
+            .map(|(s, entry)| (entry.end - s) / PAGE_SIZE)
+            .sum();
+        let freed = self.clear(start, end);
+        pmm::unpromise(committed - freed);
         self.usage.taken.fetch_add(1, Relaxed);
         // The objects go here, after every CPU has stopped reaching them.
         drop(removed);
     }
 
     /// Give every page of `[start, start + len)` protection `prot`: a reserved
-    /// private page is committed unless `prot` is `None`, and a committed one
-    /// keeps its frame and commitment whatever `prot` is. An object's page
-    /// takes nothing past what it was mapped with. All or nothing: every page
-    /// is held (`BadAddress`) and allowed `prot` (`PermissionDenied`) first.
-    /// Every CPU stops using a present leaf's old protection before this
-    /// returns, a widening included.
+    /// private page is committed unless `prot` is `None`, promised its frame
+    /// here, and a committed one keeps its frame and commitment whatever
+    /// `prot` is. An object's page takes nothing past what it was mapped
+    /// with. All or nothing: every page is held (`BadAddress`), allowed `prot`
+    /// (`PermissionDenied`) and promised (`ResourceExhausted`) first. Every
+    /// CPU stops using a present leaf's old protection before this returns, a
+    /// widening included.
     pub fn protect(&mut self, start: UserAddr, len: u64, prot: Prot) -> Result<(), SyscallError> {
         let (start, end) = self.held(start, len)?;
         self.room(start, end, 0)?;
@@ -352,19 +430,22 @@ impl AddressSpace {
         if !allowed {
             return Err(SyscallError::PermissionDenied);
         }
-        let mut commits = false;
+        let commits = match prot {
+            Prot::None => 0,
+            _ => self.pages_where(start, end, |kind| matches!(kind, Kind::Private { committed: false })),
+        };
+        if !pmm::promise(commits) {
+            return Err(SyscallError::ResourceExhausted);
+        }
+        if commits > 0 {
+            self.build(start, end).inspect_err(|_| pmm::unpromise(commits))?;
+        }
         self.inventory.update(start, end, |_, entry| {
             entry.prot = prot;
             if let Kind::Private { committed } = &mut entry.kind {
-                if !*committed && prot != Prot::None {
-                    *committed = true;
-                    commits = true;
-                }
+                *committed |= prot != Prot::None;
             }
         });
-        if commits {
-            self.tables.build(start, end);
-        }
         let leaf = leaf_prot(prot);
         let mut present = false;
         self.tables.edit(start, end, |_, old| match (old, leaf) {
@@ -387,11 +468,62 @@ impl AddressSpace {
     }
 
     /// Free every frame behind `[start, start + len)` and keep its ranges as
-    /// they are: a private page reads zeros at its next touch, an object's
-    /// page is mapped again from the object.
+    /// they are: a private page reads zeros at its next touch, a copied one
+    /// its source again, an object's page is mapped again from the object.
+    ///
+    /// A private page's frame is freed and the page promised a frame again;
+    /// one a user copy pins is zeroed in place instead and kept, since freed
+    /// it would come back only at its last unpin and the promise would be
+    /// backed by nothing meanwhile (`Frames::discard`). No pin is taken
+    /// meanwhile: a copy pins under this space's lock, which this holds.
     pub fn discard(&mut self, start: UserAddr, len: u64) -> Result<(), SyscallError> {
         let (start, end) = self.held(start, len)?;
-        self.clear(start, end);
+        let mut present = false;
+        self.tables.edit(start, end, |_, leaf| match leaf {
+            Leaf::Mapped(Mapping { phys, owned: true, .. }) => {
+                present = true;
+                Some(Leaf::Held(phys))
+            }
+            Leaf::Mapped(_) => {
+                present = true;
+                Some(Leaf::Empty)
+            }
+            Leaf::Held(_) | Leaf::Empty => None,
+        });
+        if present {
+            self.tables.shoot_down(start, end, &Unlinked::none());
+        }
+        let mut freed = 0;
+        let inventory = &self.inventory;
+        self.tables.discard_owned(start, end, |frames, vas, kept| {
+            let mut sorted = [0u64; 512];
+            let sorted = &mut sorted[..frames.len()];
+            sorted.copy_from_slice(frames);
+            sorted.sort_unstable();
+            crate::sched::futex::revoke_frames(sorted);
+            for ((&phys, &va), kept) in frames.iter().zip(vas).zip(kept.iter_mut()) {
+                // SAFETY: a frame an owned leaf held, which no leaf on any CPU
+                // maps now and no waiter is keyed on; one kept is the page's.
+                *kept = match unsafe { pmm::discard(phys) } {
+                    pmm::Discarded::Freed => {
+                        freed += 1;
+                        false
+                    }
+                    pmm::Discarded::Kept => {
+                        // SAFETY: the page's own frame, which a copy may be
+                        // reading or writing as the page's contents; zeroing
+                        // it is what the discard makes those contents.
+                        unsafe { core::ptr::write_bytes(super::DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE_SIZE as usize) };
+                        // A copied page's contents start as its source's again.
+                        if let Some((s, Entry { kind: Kind::Copy { source, offset, len }, .. })) = inventory.find(va) {
+                            copy_in(&**source, offset + (va - s), len.saturating_sub(va - s), phys);
+                        }
+                        true
+                    }
+                };
+            }
+        });
+        self.usage.freed(freed);
         Ok(())
     }
 
@@ -403,11 +535,13 @@ impl AddressSpace {
         if !self.inventory.meeting(start, end).all(|(_, entry)| matches!(entry.kind, Kind::Private { .. } | Kind::Copy { .. })) {
             return Err(SyscallError::InvalidArgument);
         }
+        let committed = self.committed_pages(start, end);
         self.inventory.update(start, end, |_, entry| {
             entry.prot = Prot::None;
             entry.kind = Kind::Private { committed: false };
         });
-        self.clear(start, end);
+        let freed = self.clear(start, end);
+        pmm::unpromise(committed - freed);
         Ok(())
     }
 
@@ -514,7 +648,13 @@ impl AddressSpace {
         let page = va & !(PAGE_SIZE - 1);
         let phys = match self.tables.get(page) {
             Leaf::Mapped(m) => m.phys,
-            Leaf::Held(_) => return None,
+            // A frame the page keeps while no leaf maps it: a discard that
+            // zeroed a pinned frame in place.
+            Leaf::Held(phys) => {
+                let prot = leaf_prot(entry.prot)?;
+                self.tables.set(page, Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal }));
+                phys
+            }
             Leaf::Empty => {
                 let leaf = page_leaf(start, entry, page)?;
                 let Leaf::Mapped(m) = leaf else { return None };
@@ -577,8 +717,7 @@ impl AddressSpace {
             Leaf::Mapped(m) => m.phys,
             Leaf::Held(phys) => phys,
             Leaf::Empty => {
-                let frame = super::pmm::alloc_frame().unwrap_or_else(|| panic!("space: no frame for {va:#x}"));
-                let phys = frame.into_raw();
+                let phys = pmm::alloc_promised().into_raw();
                 let leaf = match leaf_prot(entry.prot) {
                     Some(prot) => Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal }),
                     None => Leaf::Held(phys),
@@ -599,21 +738,13 @@ fn page_leaf(start: u64, entry: &SpaceEntry, page: u64) -> Option<Leaf> {
     Some(match &entry.kind {
         Kind::Private { committed: false } => return None,
         Kind::Private { committed: true } => {
-            let Some(frame) = super::pmm::alloc_frame() else {
-                crate::log!("space: no frame to populate {page:#x}");
-                return None;
-            };
-            Leaf::Mapped(Mapping { phys: frame.into_raw(), prot, owned: true, cache: CachePolicy::Normal })
+            Leaf::Mapped(Mapping { phys: pmm::alloc_promised().into_raw(), prot, owned: true, cache: CachePolicy::Normal })
         }
         Kind::Object { object, offset, .. } => {
             Leaf::Mapped(Mapping { phys: object.page(offset + (page - start)), prot, owned: false, cache: object.cache() })
         }
         Kind::Copy { source, offset, len } => {
-            let Some(frame) = super::pmm::alloc_frame() else {
-                crate::log!("space: no frame to populate {page:#x}");
-                return None;
-            };
-            let phys = frame.into_raw();
+            let phys = pmm::alloc_promised().into_raw();
             copy_in(&**source, offset + (page - start), len.saturating_sub(page - start), phys);
             Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
         }
@@ -641,6 +772,7 @@ fn copy_in(source: &dyn CopySource, offset: u64, len: u64, phys: u64) {
 impl Drop for AddressSpace {
     fn drop(&mut self) {
         assert!(!self.kernel, "space: the kernel's dropped");
+        let committed = self.committed_pages(FLOOR, TOP);
         self.tables.edit(FLOOR, TOP, |_, leaf| matches!(leaf, Leaf::Mapped(Mapping { owned: false, .. })).then_some(Leaf::Empty));
         let mut freed = 0;
         self.tables.take_owned(FLOOR, TOP, |frames| {
@@ -649,5 +781,6 @@ impl Drop for AddressSpace {
             freed += frames.len() as u64;
         });
         self.usage.freed(freed);
+        pmm::unpromise(committed - freed);
     }
 }

@@ -8,6 +8,7 @@
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use kernel::frames::{self, Frames, Pins, Super, Unpinned, FRAME, SUPER};
+pub use kernel::frames::Discarded;
 
 use super::{DirectMap, PAGE_2M};
 use crate::sync::Lock;
@@ -205,6 +206,63 @@ fn place(entries: &[MemoryMapEntry], reserved: &[Region], bytes: u64) -> Option<
     entries.iter().filter(|e| is_usable(e)).filter_map(lowest_in).min()
 }
 
+/// The free frames no commitment may promise, so that the kernel's own
+/// allocations meet room when commitments have taken the rest: 1/256 of
+/// managed memory, and 16 MiB at least.
+fn kept(frames: &Frames) -> u64 {
+    (frames.usable_frames() / 256).max((16 << 20) / FRAME)
+}
+
+/// Promise `frames` to a commitment, which draws each with
+/// [`alloc_promised`] when it is first touched; `false`, and nothing
+/// promised, where that would leave less than the kernel keeps.
+pub fn promise(frames: u64) -> bool {
+    FRAMES.lock().as_mut().is_some_and(|f| {
+        let keep = kept(f);
+        f.promise(frames, keep)
+    })
+}
+
+/// Take back promises no commitment holds any more.
+pub fn unpromise(frames: u64) {
+    if frames > 0 {
+        FRAMES.lock().as_mut().expect("pmm: a promise outlived no allocator").unpromise(frames);
+    }
+}
+
+/// [`Frames::discard`] of `phys`, a committed page's frame the caller holds
+/// the lock of the mapping space for.
+///
+/// # Safety
+/// `phys` is an owned leaf's frame, which no leaf on any CPU maps any more,
+/// unless this answers [`Discarded::Kept`].
+pub unsafe fn discard(phys: u64) -> Discarded {
+    FRAMES.lock().as_mut().expect("pmm: a frame outlived no allocator").discard(phys, &pins())
+}
+
+/// A zeroed frame a promise held, which the promise guarantees is free.
+pub fn alloc_promised() -> Frame {
+    let phys = FRAMES.lock().as_mut().expect("pmm: a promise outlived no allocator").alloc_promised();
+    let frame = Frame { phys };
+    // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
+    unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
+    frame
+}
+
+/// A zeroed frame for a page table a process causes, refused unless it
+/// leaves the frames the kernel keeps: a process's tables are not promised,
+/// so this is what keeps them out of the kernel's room.
+pub fn alloc_table_frame() -> Option<Frame> {
+    let phys = FRAMES.lock().as_mut().and_then(|f| {
+        let keep = kept(f);
+        f.alloc_frame_keeping(keep)
+    })?;
+    let frame = Frame { phys };
+    // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
+    unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
+    Some(frame)
+}
+
 /// Allocate one 2MB physical page.
 pub fn alloc_page() -> Option<PhysPage> {
     let page = claim()?;
@@ -284,16 +342,12 @@ pub fn top() -> u64 {
     FRAMES.lock().as_ref().map_or(0, Frames::top)
 }
 
-/// Frames free now: an answer that may be stale by the time it is read.
-pub fn free_frames() -> u64 {
-    FRAMES.lock().as_ref().map_or(0, Frames::free_frames)
-}
-
-/// Return (total_bytes, used_bytes).
+/// Managed bytes, and those in use or promised.
 pub fn stats() -> (u64, u64) {
     let guard = FRAMES.lock();
     let Some(frames) = guard.as_ref() else { return (0, 0) };
-    (frames.usable_frames() * FRAME, (frames.usable_frames() - frames.free_frames()) * FRAME)
+    let used = frames.usable_frames() - frames.free_frames() + frames.promised();
+    (frames.usable_frames() * FRAME, used * FRAME)
 }
 
 fn is_usable(entry: &MemoryMapEntry) -> bool {
