@@ -561,7 +561,13 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
 pub fn words_take_rows_members_and_whole_boots() {
     static ROWS: [(&str, Metal); 2] = [
         ("alpha_row", Metal { arms: &[metal::once("own", "tests/images/testcases.toml", &[], &[])], judge: |_| Ok(()) }),
-        ("beta_row", Metal { arms: &[metal::once("shared", "tests/images/testcases.toml", &[], &[])], judge: |_| Ok(()) }),
+        (
+            "beta_row",
+            Metal {
+                arms: &[metal::Arm { named_only: true, ..metal::once("shared", "tests/images/testcases.toml", &[], &[]) }],
+                judge: |_| Ok(()),
+            },
+        ),
     ];
     let boot = |boot: &str, jobs: &[&str]| metal::SharedBoot {
         boot: boot.to_string(),
@@ -578,7 +584,7 @@ pub fn words_take_rows_members_and_whole_boots() {
     let profile = [boot("shared", &["test_rs_a1", "test_rs_a2", "test_rs_b1"]), boot("ccorpus", &["c1", "c2"])];
     let jobs_of = |boot: &metal::SharedBoot| boot.members.iter().map(|m| m.job.clone()).collect::<Vec<_>>();
     let taken = |names: &[&str], boots: &[&str]| {
-        metal::select(names, boots, &ROWS, &["beta_row"], &profile).map(|(rows, shared)| {
+        metal::select(names, boots, &ROWS, &profile).map(|(rows, shared)| {
             let rows: Vec<&str> = rows.iter().map(|(name, _)| *name).collect();
             let shared: Vec<String> =
                 shared.iter().map(|boot| format!("{}={}", boot.boot, jobs_of(boot).join("+"))).collect();
@@ -599,7 +605,7 @@ pub fn words_take_rows_members_and_whole_boots() {
     assert_eq!(taken(&["alpha"], &["ccorpus"]), took("alpha_row", "ccorpus=c1+c2"));
     assert_eq!(taken(&[], &["own"]), took("alpha_row", ""));
     // A member taken by name brings its own files and links and no other's.
-    let (_, shared) = metal::select(&["c2"], &[], &ROWS, &["beta_row"], &profile).expect("a member's name");
+    let (_, shared) = metal::select(&["c2"], &[], &ROWS, &profile).expect("a member's name");
     let paths: Vec<&str> = shared[0].files.iter().map(|(path, _)| path.as_str()).collect();
     assert_eq!(paths, ["expect/c2", "bin/test_c_c2"]);
     assert_eq!(shared[0].links, [("bin/c2".to_string(), "/system/bin/test_rs_ccheck".to_string())]);

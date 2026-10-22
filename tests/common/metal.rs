@@ -70,6 +70,10 @@ pub struct Arm {
     /// image whole (`super::slots`): a boot whose subject is the loader's
     /// refusal and fallback. `None` for the one-slot image every other boot is.
     pub bent: Option<&'static str>,
+    /// A pass takes this arm's row only by the row's whole name or this
+    /// arm's boot, never unfiltered or by part of a name ([`select`]): a boot
+    /// a bench gives hours to evidence no suite pass asks for.
+    pub named_only: bool,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -83,7 +87,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], last: None, adds_ms: 0, bent: None }
+    Arm { boot, config, params, jobs, features: &[], last: None, adds_ms: 0, bent: None, named_only: false }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -158,16 +162,15 @@ pub type Taken = (Vec<(&'static str, &'static Metal)>, Vec<SharedBoot>);
 /// What a run's words take of the profile: every row and shared member a
 /// `names` word is part of, and every boot a `boots` word names, whole — all
 /// its shared members, and every row with an arm on it, which brings that
-/// row's other boots. No word at all takes everything but `named_only`'s
-/// rows, which a `names` word takes only by being the row's whole name, and
-/// a `boots` word by naming its boot.
+/// row's other boots. No word at all takes everything but the rows with a
+/// [`Arm::named_only`] arm, which a `names` word takes only by being the
+/// row's whole name, and a `boots` word by naming its boot.
 ///
 /// **A word that takes nothing is refused**: it would be dropped in silence.
 pub fn select(
     names: &[&str],
     boots: &[&str],
     rows: &'static [(&'static str, Metal)],
-    named_only: &[&str],
     shared: &[SharedBoot],
 ) -> Result<Taken, String> {
     // A shared Rust member is filtered by the name its source file has.
@@ -175,11 +178,12 @@ pub fn select(
         job.strip_prefix("test_rs_").unwrap_or(job)
     }
     let all = names.is_empty() && boots.is_empty();
-    let takes = |word: &str, row: &str| if named_only.contains(&row) { word == row } else { row.contains(word) };
+    let named_only = |decl: &Metal| decl.arms.iter().any(|arm| arm.named_only);
+    let takes = |word: &str, (row, decl): &(&str, Metal)| if named_only(decl) { word == *row } else { row.contains(word) };
     let jobs = || shared.iter().flat_map(|boot| &boot.members).map(|member| bare(&member.job));
     if let Some(dead) = names
         .iter()
-        .find(|word| !rows.iter().any(|(name, _)| takes(word, name)) && !jobs().any(|job| job.contains(**word)))
+        .find(|word| !rows.iter().any(|row| takes(word, row)) && !jobs().any(|job| job.contains(**word)))
     {
         return Err(format!("{dead:?} is part of no metal registration's name and no shared member's"));
     }
@@ -194,12 +198,10 @@ pub fn select(
         .iter()
         .filter_map(|boot| boot.keeping(|job| boots.contains(&boot.boot.as_str()) || named(bare(job))))
         .collect();
-    let row_named = |name: &str| {
-        if named_only.contains(&name) { names.contains(&name) } else { named(name) }
-    };
+    let row_named = |name: &str, decl: &Metal| if named_only(decl) { names.contains(&name) } else { named(name) };
     let rows = rows
         .iter()
-        .filter(|(name, decl)| row_named(name) || decl.arms.iter().any(|arm| boots.contains(&arm.boot)))
+        .filter(|(name, decl)| row_named(name, decl) || decl.arms.iter().any(|arm| boots.contains(&arm.boot)))
         .map(|(name, decl)| (*name, decl))
         .collect();
     Ok((rows, taken))

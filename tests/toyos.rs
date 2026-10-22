@@ -1423,32 +1423,25 @@ const METAL: &[(&str, metal::Metal)] = &[
     ),
 ];
 
-/// Rows a metal pass takes only when a word is the row's whole name, or names
-/// its boot: evidence a bench is given hours for, which stage 4 of
-/// `issues/toyos-crypto-is-in-the-tree-on-par-with-ring-and-secure.md` keeps
-/// out of the suite and reruns when the routine or the compiler changes.
-const METAL_NAMED_ONLY: &[&str] = &["crypto_secret_timing", "crypto_secret_timing_curves"];
+/// What `crypto_constant_time` adds to its list's bound: its job took 970 s
+/// on the T14 and 822 s on the AMD bench (at 7a36687d0), and half as much
+/// again.
+const CRYPTO_CT_MS: u64 = 1_455_000;
 
-/// What `crypto_constant_time` adds to its list's bound: its job took 968 s
-/// on the T14 and 823 s on the AMD bench (at ec5a0cd18, two controls fewer),
-/// and half as much again.
-const CRYPTO_CT_MS: u64 = 1_452_000;
-
-/// What `crypto_constant_time_curves` adds: not yet measured on a bench. On
-/// the development Mac (exploratory) one run of each of its five routines
-/// together took 34 times an X25519 agreement, which took 0.28 ms on the
-/// T14 (its `crypto_constant_time` line), so 1,011,000 runs of each take
-/// about 9,630 s there; half as much again.
-const CRYPTO_CT_CURVES_MS: u64 = 14_445_000;
+/// What `crypto_constant_time_curves` adds: its job took 7,036 s on the T14
+/// and 6,234 s on the AMD bench (at 7a36687d0), and half as much again.
+const CRYPTO_CT_CURVES_MS: u64 = 10_554_000;
 
 /// Each constant-time job alone in its boot, which nothing else shares: a
 /// job beside it would be noise in what it times.
 const CRYPTO_CT: &[metal::Arm] = &[metal::Arm {
     adds_ms: CRYPTO_CT_MS,
+    named_only: true,
     ..metal::once("cryptoctcase", "tests/images/testcases.toml", &[], &["test_rs_crypto_constant_time"])
 }];
 const CRYPTO_CT_CURVES: &[metal::Arm] = &[metal::Arm {
     adds_ms: CRYPTO_CT_CURVES_MS,
+    named_only: true,
     ..metal::once("cryptoctcurvescase", "tests/images/testcases.toml", &[], &["test_rs_crypto_constant_time_curves"])
 }];
 
@@ -7448,7 +7441,7 @@ fn main() {
     if let Some(mode) = parsed.metal {
         let (c_bins, rust_bins) = build_shared_bins();
         let boots = shared_metal(&c_bins);
-        let (selected, boots) = match metal::select(filters, &parsed.boots, METAL, METAL_NAMED_ONLY, &boots) {
+        let (selected, boots) = match metal::select(filters, &parsed.boots, METAL, &boots) {
             Ok(selection) => selection,
             Err(refusal) => {
                 eprintln!("[toyos] {refusal}");

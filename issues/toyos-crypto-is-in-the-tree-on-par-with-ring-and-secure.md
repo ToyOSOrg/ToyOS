@@ -411,15 +411,28 @@ Not consumers:
        - Evidence: `ToyOSOrg/evidence` `pr-993`,
          https://github.com/ToyOSOrg/evidence/tree/187abe7793116cbbbfb4dec63098032b1b8d61de/pr-993/r2
          and the first round's beside it.
-     - **Built, not yet judged:** the constant-time harness
-       (`tests/guest/rust-tests/src/constant_time.rs`), in two programs
-       because the curves take a bench for hours, with a null and a leaky
-       control in each. Their judge asks only that the job ran and its
-       controls held. The first bench boots, of the fast program at
-       ec5a0cd18, read LEAKS for every routine on both benches; that harness
-       made each random input next to the clock, a confound the review of
-       #993 named, so those readings are no finding. The verdicts are
-       recorded here when the benches have run the fixed harness.
+     - **Constant time, first verdicts** at 7a36687d0 (#993's base
+       b9e4c5862, before #990 rewrote the NIST arithmetic), 1,000,000
+       measurements a routine, the pinned `rust` at a56b4057c. The harness
+       (`tests/guest/rust-tests/src/constant_time.rs`) runs a null and a
+       leaky control at the start and end of each program, and they held on
+       every boot: null |t| 0.9 to 2.2, leaky 74 to 1,311.
+       - The fast program passes every routine on the T14 (Intel signature
+         0x806c1) and the AMD bench (0x860f01).
+       - The curves program passes every routine on the AMD bench.
+       - **Finding, the T14:** P-256 public key LEAKS (max |t| 73.1, raw
+         t 66.9) and P-256 agreement LEAKS (max |t| 83.4, raw t 76.0); the
+         fixed scalar is about 510 ticks slower of about 1.5 M. P-384
+         agreement reads 5.79, marginal. P-384 public key and Ed25519 pass.
+         Owner: crypto-perf, the NIST arithmetic. Exit: a T14 pass on the
+         current NIST code, re-measured after the rebase. A hypothesis, not
+         established: value-dependent instruction latency with Intel's DOITM
+         off, which a boot with DOITM set tests.
+       - Their judge asks only that each job ran and its controls held; the
+         verdicts are this record's. The first boots, of the fast program at
+         ec5a0cd18, read LEAKS everywhere: that harness made each random
+         input next to the clock, so those readings are no finding.
+       - Evidence: https://github.com/ToyOSOrg/evidence/tree/18e8243a9e9fb4ec4edaeec68ace23abe98c16b9/pr-993/r3
      - **Not timed:** ML-KEM key generation. Its matrix expansion rejects
        samples by rho, a public output of the secret seed, so no two classes
        can share it. Exit: a measurement with rho held fixed, which needs an
