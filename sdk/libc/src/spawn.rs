@@ -413,17 +413,20 @@ pub(crate) fn forget_ended() {
     UNWAITED.fetch_sub(ended.len(), Ordering::Relaxed);
 }
 
-/// Each child whose end has not raised `SIGCHLD`, by pid and a copy of its
-/// handle to watch its end on, the caller's to close: a wait on another
-/// thread closes the table's own, whose number another handle may then take.
-pub(crate) fn unraised() -> Vec<(i32, toyos::OwnedHandle)> {
+/// Each child whose end has not raised `SIGCHLD`, by pid.
+pub(crate) fn unraised() -> Vec<i32> {
+    CHILDREN.lock().iter().filter(|c| !c.raised).map(|c| c.pid).collect()
+}
+
+/// A copy of child `pid`'s handle to watch its end on, the caller's to close:
+/// a wait on another thread closes the table's own, whose number another
+/// handle may then take. `None` for a child gone, or a table with no room.
+pub(crate) fn copy_of(pid: i32) -> Option<toyos::OwnedHandle> {
     let children = CHILDREN.lock();
-    let copies = children.iter().filter(|c| !c.raised).map(|c| {
-        let copy = syscall::dup(toyos::AsHandle::as_handle(&c.process)).expect("SIGCHLD: no copy of a child's handle");
-        // SAFETY: a copy just made, which nothing else answers for.
-        (c.pid, unsafe { toyos::OwnedHandle::from_raw(copy) })
-    });
-    copies.collect()
+    let child = children.iter().find(|c| c.pid == pid)?;
+    let copy = syscall::dup(toyos::AsHandle::as_handle(&child.process)).ok()?;
+    // SAFETY: a copy just made, which nothing else answers for.
+    Some(unsafe { toyos::OwnedHandle::from_raw(copy) })
 }
 
 /// Whether `pid` has ended and not yet raised `SIGCHLD`, which it now has.
@@ -558,11 +561,12 @@ pub unsafe extern "C" fn wait4(pid: i32, status: *mut i32, options: i32, usage: 
 }
 
 /// `SIGKILL` for a child or a group of them, `SIGINT`, `SIGHUP` and
-/// `SIGTERM` as a quit with that reason, and 0 to ask whether one is there;
-/// no other signal reaches another process, so it is `EINVAL`. A process
-/// holds no right to kill itself, so `SIGKILL` for its own pid is `EPERM`,
-/// and one of the three is raised in it; a kill of its own group reaches its
-/// children in it and not itself.
+/// `SIGTERM` as a quit with that reason, which asks the child and everything
+/// below it as a POSIX `kill` does not, and 0 to ask whether one is there; no
+/// other signal reaches another process, so it is `EINVAL`. A process holds
+/// no right to kill itself, so `SIGKILL` for its own pid is `EPERM`, and one
+/// of the three is raised in it, as it is by a kill of its own group, which
+/// reaches its children in it too.
 #[no_mangle]
 pub unsafe extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     let me = own_group();
@@ -572,14 +576,20 @@ pub unsafe extern "C" fn kill(pid: i32, sig: i32) -> i32 {
             let mut any = false;
             for child in CHILDREN.lock().iter().filter(|c| names(pid, c)) {
                 any = true;
-                // `Ok` for one already ended, which is still unwaited.
-                let _ = match quit {
+                // `Ok` for one already ended, which is still unwaited, and
+                // `MANAGE` is on every child's handle libc holds.
+                let asked = match quit {
                     Some(reason) => child.process.quit(reason),
                     None if sig == SIGKILL => child.process.kill(),
                     None => Ok(()),
                 };
+                asked.expect("kill: a child's handle refused what its spawn gave it");
             }
-            (!any).then_some(ESRCH)
+            let own_group = pid == 0 || pid == -me;
+            match quit.is_some() && own_group {
+                true => crate::signal::raise(sig).err(),
+                false => (!any).then_some(ESRCH),
+            }
         }
         (0, true) => None,
         (SIGKILL, true) => Some(EPERM),

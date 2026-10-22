@@ -115,30 +115,38 @@ init is `/system/bin/supervisor`.
    child refused `EAGAIN` beside a `poll` of 255 descriptors answering (no
    capacity check); a negative descriptor beside a pipe, the pipe answering
    (passed to the kernel, which ends the caller).
-4. **Done** (#1011): **libc imitates `SIGCHLD`**. A handler for any signal
-   libc imitates runs at once, beside the program: inside a blocking call of
-   a thread that leaves the signal unblocked (`ppoll` and `sigsuspend` under
-   their mask), and, while no thread is in one, on libc's own thread. After
-   it `read` of a kernel object, `recv`, `accept`, `wait`, `waitpid` and
-   `wait4` restart if it was installed with `SA_RESTART` and answer `EINTR`
-   if not, and `poll`, `ppoll`, `pause`, `sigsuspend`, `nanosleep` and
-   `usleep` answer `EINTR`, `sleep` the time left; while every thread blocks
-   the signal, it stays pending, as `sigpending` reports, until one unblocks
-   it. libc's own thread watches the unwaited children, at most 254, beside
-   its control pipe and the process's notice, and wakes a thread in a
-   blocking call through one pipe, so `poll` takes at most 255 descriptors. A
-   wait for children looks again at each child started while it waits, and an
-   alarm raises `SIGALRM`. Under `SIG_IGN` an ended child is kept for no wait.
-   *Exit*, met in `libc_children`'s QEMU x86-64 boot: `signal_sigchld_ignored`
-   (255 children under `SIG_IGN`, then `ECHILD`), `signal_sigchld_ppoll` (one
-   `SIGCHLD`, `EINTR`, then the readable pipe, then a block until a second
-   child writes), `libc_read_restarts` (a `read` across a handler, ordered by
-   the roster, restarted with `SA_RESTART` and `EINTR` without),
-   `signal_alarm` (a handler interrupting `wait4`, a blocked alarm pending
-   until its unblock ends the process 142, an ignored one dropped) and
-   `spawn_children_cap`; the routing laws are host tests
-   (`signal_dispositions.rs`). Oracle: POSIX's `waitpid`, `poll` and
-   `SA_RESTART`, and signal(7).
+4. **Done** (#1011): **libc imitates `SIGCHLD`**. A handler for any signal libc
+   imitates runs at once, beside the program: inside a blocking call of a
+   thread that leaves the signal unblocked (`ppoll` and `sigsuspend` under
+   their mask), and, while no thread is in one, on libc's own thread. After it
+   `read`, `recv`, `accept`, `wait`, `waitpid` and `wait4` restart if it was
+   installed with `SA_RESTART` and answer `EINTR` if not, and `poll`, `ppoll`,
+   `pause`, `sigsuspend`, `nanosleep` and `usleep` answer `EINTR`, `sleep` the
+   time left; while every thread blocks the signal, it stays pending, as
+   `sigpending` reports, until one unblocks it. libc's own thread watches the
+   unwaited children, at most 255 as stage 3 bounds them, the 256th watch being
+   stage 6's notice, on its own inbox, and wakes a thread in a blocking call
+   through one pipe, so `poll` takes at most 255 descriptors and children never
+   count against them; stage 3's `waitpid(-1)` watches the children unwaited
+   when it was called, so one another thread starts after it, ending first,
+   does not wake it, which libc's own thread ends. `ppoll`, `sigpending` and
+   `sigsuspend` come with it. *Exit*, C corpus files beside stage 3's, the
+   mutation that reds an arm after it: under `SIG_IGN`, 256 children each
+   ending before the next all spawned, then `ECHILD` (ended children kept); a
+   `ppoll` unblocking `SIGCHLD` answering `EINTR` once a child ends, and a
+   second, the child unwaited, answering its readable pipe, and with nothing
+   ready blocking until a second child writes (`SIGCHLD` raised again at every
+   blocking call, or at every one that finds nothing ready); a `read` of an
+   empty pipe, `SIGCHLD` handled with `SA_RESTART`, answering the byte a second
+   child writes after the first ends (`SA_RESTART` ignored). Oracle: POSIX's
+   `waitpid`, `poll` and `SA_RESTART`, and signal(7). *Met* in
+   `libc_children`'s QEMU x86-64 boot by `signal_sigchld_ignored`,
+   `signal_sigchld_ppoll` and `libc_read_restarts`, each red under its mutation
+   and the stage reverted whole, beside `signal_alarm`; the routing laws are
+   host tests (`signal_dispositions.rs`). libc's own thread also watches its
+   control pipe, so it watches at most 254 children: the 255th is refused
+   `EAGAIN`, a `poll` takes 255 descriptors beside its wake pipe, and `SIG_IGN`
+   is shown over 255 children.
 5. **A login is a session under init**. Per login init starts a session
    program that logout ends and that only parents what its user starts — the
    desktop's at boot, one per SSH connection at sshd's request. As it starts
@@ -175,45 +183,55 @@ init is `/system/bin/supervisor`.
      it unread, a second quit kills a reason left unread, a reader survives
      three, and a quit without `MANAGE` is refused. Negative control: a
      readable watch that listens to nothing reds the watch arm.
-   - 6.2 **Done** (#1011, libc's half): libc takes the three reasons as
-     `SIGINT`, `SIGHUP` and `SIGTERM`, and listens to the notice before the
-     call that handles, ignores or blocks one returns, refusing it `ENOSYS`
-     where the process holds no notice: an ignored reason is dropped, a blocked
-     one pending, and an unhandled one ends the process with exit code 128 plus
-     the signal's number. `kill` with one of the three is a quit with that
-     reason, and raises it in the caller's own process. A child starts with
-     every signal at its default and none blocked, so `SETSIGDEF` is what it
-     gets and a `SETSIGMASK` naming a signal is refused `ENOSYS`; that it does
-     not inherit an ignore or a mask is
-     `issues/a-spawned-c-child-inherits-no-ignored-signal-and-no-mask.md`.
-     *Exit*, met by `signal_quit` in `libc_children`'s QEMU x86-64 boot: a C
-     child's `read` of an empty pipe, `SIGINT` handled without `SA_RESTART`,
-     answers `EINTR` on an interrupt; one in `pause` whose `SIGHUP` handler
-     reloads returns from it after a hang-up and exits on a terminate; one that
-     only ignores `SIGINT` runs on after an interrupt; one blocking it ends 130
-     once `sigsuspend` unblocks it; and one with LLVM's handler (restore the
-     default, raise) that computes without calling libc ends 130. Mutations,
-     each red in that boot: libc that listens only once its own thread's watch
-     is armed (the ignoring child killed), a handler that never restarts (the
-     `SA_RESTART` read), and ended children kept under `SIG_IGN` (a wait
-     answers the child).
-   - 6.3 The rest. std's `os::toyos` hands a program its notice; the `ctrlc`
-     fork `rust/Cargo.toml` patches in waits there for the reasons its Unix arm
-     maps; rustc stops skipping its handler on ToyOS
-     (`rust/compiler/rustc_driver_impl/src/lib.rs`, `install_ctrlc_handler`).
-     One owner takes the notice in a process, which libc's copy of `toyos` and
-     a program's own both reach today. Stage 5's session,
-     `/system/bin/terminal` and `/system/bin/shell` listen and relay nothing,
-     each ending once what it runs has, `-c` with its status, but an
-     interactive shell does not end on an interrupt. *Exit*, guest: under
-     `shell -c`, a child that reports its watch armed and holds its interrupt
-     unread until released survives the quit and ends 130, and so does its
-     shell; a desktop session asked to hang up sees a watching child under a
-     terminal's shell write its file; a Rust child's `ctrlc` handler writes its
-     file and exits 0. Mutations: `ctrlc` parked as today (killed); a shell
-     that never listens, and one that relays (the held child reads killed); a
-     terminal that never listens (the desktop child's file unwritten). Oracle:
-     POSIX's signal actions (XSH 2.4.3).
+   - 6.2 **In progress** (#1011 lands libc's arms). std's `os::toyos` hands a
+     program its notice; the `ctrlc` fork `rust/Cargo.toml` patches in waits
+     there for the reasons its Unix arm maps; rustc stops skipping its handler
+     on ToyOS (`rust/compiler/rustc_driver_impl/src/lib.rs`,
+     `install_ctrlc_handler`). Stage 5's session, `/system/bin/terminal` and
+     `/system/bin/shell` listen and relay nothing, each ending once what it
+     runs has, `-c` with its status, but an interactive shell does not end on
+     an interrupt. libc takes the three reasons as `SIGINT`, `SIGHUP` and
+     `SIGTERM`, watching the notice once one is handled, ignored or blocked: an
+     ignored reason is dropped and an unhandled one ends the process with exit
+     code 128 plus the signal's number. `kill` with one of the three is a quit
+     with that reason. *Exit*, guest: under `shell -c`, a child that reports
+     its watch armed and holds its interrupt unread until released survives the
+     quit and ends 130, and so does its shell; a desktop session asked to hang
+     up sees a watching child under a terminal's shell write its file; a Rust
+     child's `ctrlc` handler writes its file and exits 0; a C child with LLVM's
+     handlers — restore the default, remove its output, raise — that computes
+     without calling libc, asked with interrupt, ends at once with its output
+     gone and code 130; a C child's `read` of an empty pipe, `SIGINT` handled
+     without `SA_RESTART`, answers `EINTR` on an interrupt; a C child in
+     `pause` whose `SIGHUP` handler reloads returns from it after a hang-up and
+     exits on a terminate; a C child that only ignores `SIGINT` runs on after
+     an interrupt, and so does one spawned ignoring it, while one spawned
+     blocking it, by its caller's mask or `SETSIGMASK`, shows it in
+     `sigpending` and ends with 130 on unblocking it, and one whose `SETSIGDEF`
+     names it reads killed; a quit that arrives while `SIGINT` is blocked and
+     `ppoll` answers a ready descriptor shows in `sigpending`, and the next
+     `ppoll` runs the handler and answers `EINTR`. Negative control: the stage
+     reverted whole, where a parent can only kill. Mutations: `ctrlc` parked as
+     today (killed); a shell that never listens, and one that relays (the held
+     child reads killed); a terminal that never listens (the desktop child's
+     file unwritten); handlers run only in blocking libc calls (the LLVM child
+     to the hang ceiling); `EINTR` from `poll` alone (`read` and `pause` never
+     return); a quit without its reason (the reload exits); watching only from
+     a handler's install (the ignoring child is killed); a spawn carrying no
+     ignore, no mask or no `SETSIGDEF` (each spawned child in turn). Oracle:
+     POSIX's signal actions (XSH 2.4.3) and `posix_spawn`. *Met by #1011* in
+     `libc_children`'s QEMU x86-64 boot (`signal_quit`): the LLVM child, the
+     `read` answering `EINTR`, the reload in `pause` and its terminate, the
+     child that only ignores `SIGINT`, and the quit held over a ready `ppoll`;
+     with the stage's libc reverted whole the same cases red, and the mutations
+     for handlers run only in blocking calls, `EINTR` from `poll` alone, a quit
+     without its reason and watching only from a handler's install each red its
+     arm. *Open*: the spawned children's ignore, mask and `SETSIGDEF`, whose
+     carrying across a spawn is a decision with the owner, and with it their
+     spawn mutations; and the shell, terminal, session and `ctrlc` arms, stage
+     7's. Until a spawn carries them a child starts with every signal at its
+     default and none blocked, and a `SETSIGMASK` naming a signal is refused
+     `ENOSYS`.
 7. **Job control**. The shell hands its terminal a `MANAGE`-only
    duplicate of each process of the foreground line over its `surface` port. The
    terminal turns each Ctrl+C into their interrupt, and a second kills only a

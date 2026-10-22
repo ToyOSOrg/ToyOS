@@ -113,12 +113,13 @@ fn an_arrival_goes_to_a_blocking_call_then_to_libcs_own_thread_and_waits_while_e
     assert!(!signals.wake_wanted());
     signals.leave(0);
 
-    signals.set_mask(0, bit(chld));
-    signals.set_mask(7, bit(chld));
+    assert!(signals.set_mask(0, bit(chld)), "the first thread's");
+    assert!(!signals.set_mask(7, bit(chld)), "a thread libc did not start has no mask here");
+    signals.thread_started(7, bit(chld));
     assert_eq!(signals.arrive(chld), Raised::Pending, "every thread blocks it");
     assert_eq!(signals.pending(), bit(chld));
     assert_eq!(signals.take(bit(chld)), None, "a blocking mask takes nothing");
-    signals.set_mask(7, 0);
+    assert!(signals.set_mask(7, 0));
     assert!(signals.take(signals.mask(7)).is_some(), "the thread that unblocks it takes it");
     assert_eq!(signals.pending(), 0);
     signals.thread_ended(7);
@@ -132,12 +133,12 @@ fn an_ignore_drops_what_is_pending_and_a_quit_signal_off_its_default_listens() {
     let (term, hup, alrm) = (sig("SIGTERM"), sig("SIGHUP"), sig("SIGALRM"));
     let mut signals = Signals::new();
     assert!(!signals.listens());
-    signals.set_mask(0, bit(alrm));
+    assert!(signals.set_mask(0, bit(alrm)));
     assert_eq!(signals.arrive(alrm), Raised::Pending);
     signals.act(alrm, Some(SigAction::of(SIG_IGN))).unwrap();
     assert_eq!(signals.pending(), 0, "ignoring a pending signal drops it");
     assert!(!signals.listens(), "SIGALRM is no quit's");
-    signals.set_mask(3, bit(term));
+    signals.thread_started(3, bit(term));
     assert!(signals.listens(), "a thread blocks SIGTERM");
     signals.thread_ended(3);
     assert!(!signals.listens());
@@ -170,10 +171,39 @@ fn a_raise_a_thread_blocks_waits_for_it_to_unblock() {
     assert!(!signals.any_handler());
     signals.act(int, Some(handler(0))).unwrap();
     assert!(signals.any_handler());
-    signals.set_mask(4, bit(int));
+    signals.thread_started(4, bit(int));
     assert_eq!(signals.raise(4, int), Raised::Pending);
     assert!(matches!(signals.raise(0, int), Raised::Deliver(Delivery::Handle { .. })), "another thread takes it at once");
     assert_eq!(signals.raise(4, usr1), Raised::Deliver(Delivery::End(128 + usr1)));
     assert_eq!(signals.raise(4, 0), Raised::Refused(EINVAL));
     assert!(matches!(signals.take(0), Some(Delivery::Handle { sig, .. }) if sig == int));
+}
+
+/// A blocking call that leaves without taking a signal it would have taken
+/// leaves it to libc's own thread, once a thread in no call leaves it
+/// unblocked; one every thread blocks stays pending.
+#[test]
+fn a_signal_a_leaving_call_did_not_take_goes_to_libcs_own_thread() {
+    let (int, term) = (sig("SIGINT"), sig("SIGTERM"));
+    let mut signals = Signals::new();
+    signals.act(int, Some(handler(0))).unwrap();
+    signals.enter(0, 0, false);
+    assert_eq!(signals.arrive(int), Raised::Pending, "the call takes it");
+    assert!(!signals.has_orphan(), "a call that would take it is still there");
+    signals.leave(0);
+    assert!(signals.has_orphan());
+    assert!(matches!(signals.orphan(), Some(Delivery::Handle { sig, .. }) if sig == int));
+    assert_eq!(signals.pending(), 0);
+
+    assert!(signals.set_mask(0, bit(term)));
+    signals.enter(0, 0, false);
+    assert_eq!(signals.arrive(int), Raised::Pending);
+    signals.enter(9, bit(int), false);
+    signals.leave(0);
+    assert!(signals.has_orphan(), "the first thread left the call and blocks only SIGTERM");
+    signals.leave(9);
+    assert!(signals.set_mask(0, bit(int)));
+    assert!(!signals.has_orphan(), "every thread blocks it now");
+    assert_eq!(signals.orphan(), None);
+    assert_eq!(signals.pending(), bit(int));
 }

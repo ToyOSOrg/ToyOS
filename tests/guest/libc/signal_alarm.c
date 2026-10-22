@@ -2,8 +2,10 @@
    a wait4 on a child that has not ended answers EINTR; with SIGALRM blocked
    in every thread a due alarm leaves the process running and sigpending names
    it, until an unblock ends the process with 142; and with it ignored a due
-   alarm leaves the process running. An alarm is a clock, so each arm waits
-   out one: armed at a second, looked at past two. */
+   alarm leaves the process running. The blocked arm waits for sigpending to
+   name it, which the harness's bound ends if it never does; the ignored arm
+   is a claim that nothing happens, looked at a second past the alarm, so a
+   guest late by more than that passes it without the alarm having come due. */
 #include <signal.h>
 #include <sys/resource.h>
 
@@ -31,9 +33,11 @@ static int blocked(void) {
     sigaddset(&alarm_only, SIGALRM);
     CHECK(sigprocmask(SIG_BLOCK, &alarm_only, NULL) == 0, "sigprocmask");
     alarm(1);
-    sleep(2);
     sigset_t pending;
-    CHECK(sigpending(&pending) == 0 && sigismember(&pending, SIGALRM) == 1, "a due alarm blocked is not pending");
+    do {
+        usleep(10000);
+        CHECK(sigpending(&pending) == 0, "sigpending");
+    } while (sigismember(&pending, SIGALRM) != 1);
     sigprocmask(SIG_UNBLOCK, &alarm_only, NULL);
     printf("signal_alarm: unblocking a pending SIGALRM left the process running\n");
     return 1;

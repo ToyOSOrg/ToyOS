@@ -12,9 +12,11 @@
 //! **A signal raised runs at once, beside the program**: in a blocking call of
 //! a thread that leaves it unblocked, or else on libc's own thread while some
 //! thread leaves it unblocked. While every thread blocks it, it is pending
-//! until one unblocks it. A thread is the kernel's tid: the first (0), each
-//! one libc started, and any other once it sets its mask, which outlives a
-//! thread libc did not start.
+//! until one unblocks it, and a signal pending that no blocking call takes
+//! goes to libc's own thread once some thread leaves it unblocked. The
+//! threads a signal is routed by are the first (tid 0) and each one libc
+//! started: no other thread may set a mask, since nothing tells libc when it
+//! ends, and libc's own thread is none of them.
 
 use alloc::vec::Vec;
 
@@ -256,17 +258,25 @@ impl Signals {
         }
     }
 
-    /// `tid`'s mask is now `mask`, without `SIGKILL` and `SIGSTOP`.
-    pub(crate) fn set_mask(&mut self, tid: u32, mask: u64) {
+    /// `tid`'s mask is now `mask`, without `SIGKILL` and `SIGSTOP`: `false`,
+    /// and nothing changed, for a thread neither the first nor started by
+    /// libc.
+    pub(crate) fn set_mask(&mut self, tid: u32, mask: u64) -> bool {
         let mask = mask & !UNCATCHABLE;
         if tid == FIRST {
             self.first_mask = mask;
-            return;
+            return true;
         }
         match self.masks.iter_mut().find(|(t, _)| *t == tid) {
             Some((_, m)) => *m = mask,
-            None => self.masks.push((tid, mask)),
+            None => return false,
         }
+        true
+    }
+
+    /// A thread libc started runs from now with `mask`.
+    pub(crate) fn thread_started(&mut self, tid: u32, mask: u64) {
+        self.masks.push((tid, mask & !UNCATCHABLE));
     }
 
     /// A thread libc started has ended.
@@ -281,16 +291,43 @@ impl Signals {
             Ok(Some(delivery)) if self.pending & bit(sig) == 0 => delivery,
             Ok(_) | Err(_) => return Raised::Nothing,
         };
-        let waiting = |tid: u32| self.waiters.iter().any(|w| w.tid == tid);
-        let a_waiter_takes = self.waiters.iter().any(|w| w.mask & bit(sig) == 0);
-        let first_free = !waiting(FIRST) && self.first_mask & bit(sig) == 0;
-        let a_thread_free = first_free || self.masks.iter().any(|&(t, m)| !waiting(t) && m & bit(sig) == 0);
-        if a_waiter_takes || !a_thread_free {
+        if self.a_waiter_takes(sig) || !self.a_thread_free(sig) {
             self.pending |= bit(sig);
             return Raised::Pending;
         }
         self.reset(sig);
         Raised::Deliver(delivery)
+    }
+
+    fn a_waiter_takes(&self, sig: i32) -> bool {
+        self.waiters.iter().any(|w| w.mask & bit(sig) == 0)
+    }
+
+    /// Whether a thread in no blocking call leaves `sig` unblocked.
+    fn a_thread_free(&self, sig: i32) -> bool {
+        let waiting = |tid: u32| self.waiters.iter().any(|w| w.tid == tid);
+        let first_free = !waiting(FIRST) && self.first_mask & bit(sig) == 0;
+        first_free || self.masks.iter().any(|&(t, m)| !waiting(t) && m & bit(sig) == 0)
+    }
+
+    /// The lowest pending signal no blocking call will take and some thread
+    /// in none leaves unblocked, taken for libc's own thread: what a call
+    /// that left without taking it, or a mask that unblocked it in another
+    /// thread, left behind.
+    pub(crate) fn orphan(&mut self) -> Option<Delivery> {
+        let sig = (1..=SIGNALS as i32).find(|&sig| self.pending & bit(sig) != 0 && self.orphaned(sig))?;
+        self.pending &= !bit(sig);
+        let delivery = delivery(sig, self.kept(sig)).ok().flatten()?;
+        self.reset(sig);
+        Some(delivery)
+    }
+
+    pub(crate) fn has_orphan(&self) -> bool {
+        (1..=SIGNALS as i32).any(|sig| self.pending & bit(sig) != 0 && self.orphaned(sig))
+    }
+
+    fn orphaned(&self, sig: i32) -> bool {
+        !self.a_waiter_takes(sig) && self.a_thread_free(sig)
     }
 
     /// `raise(sig)` in thread `tid`.

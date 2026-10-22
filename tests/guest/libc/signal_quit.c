@@ -8,9 +8,13 @@
      default then ends the child with 130.
    - SIGINT handled while the child computes and calls nothing: the handler
      runs beside it, restores the default and raises, and the child ends 130.
+   - SIGINT handled and blocked: the quit shows in sigpending while a ppoll
+     that leaves it blocked answers a ready descriptor, and the next ppoll,
+     unblocking it, runs the handler and answers EINTR.
    Each child says "armed" once its disposition is kept; the test asks only
    after that, and asks a second time only after the child said it took the
    first. */
+#include <poll.h>
 #include <signal.h>
 
 #include "check.h"
@@ -117,6 +121,30 @@ static pid_t start(const char *role, int *out, int *in) {
     return pid;
 }
 
+static int ppolls(void) {
+    keep(SIGINT, take, 0);
+    sigset_t interrupt, none, pending;
+    sigemptyset(&interrupt);
+    sigaddset(&interrupt, SIGINT);
+    sigemptyset(&none);
+    CHECK(sigprocmask(SIG_BLOCK, &interrupt, NULL) == 0, "sigprocmask");
+    armed();
+    do {
+        usleep(10000);
+        CHECK(sigpending(&pending) == 0, "sigpending");
+    } while (sigismember(&pending, SIGINT) != 1);
+    int ready[2];
+    CHECK(pipe(ready) == 0 && write(ready[1], "r", 1) == 1, "a ready pipe");
+    struct pollfd fd = {.fd = ready[0], .events = POLLIN};
+    int got = ppoll(&fd, 1, NULL, &interrupt);
+    CHECK(got == 1 && taken == 0, "the blocking ppoll answered %d, the handler run %d times", got, (int)taken);
+    CHECK(sigpending(&pending) == 0 && sigismember(&pending, SIGINT) == 1, "the quit is no longer pending");
+    errno = 0;
+    got = ppoll(&fd, 1, NULL, &none);
+    CHECK(got == -1 && errno == EINTR && taken == 1, "the unblocking ppoll answered %d, the handler run %d times", got, (int)taken);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc == 3) {
         const char *role = argv[1];
@@ -130,6 +158,8 @@ int main(int argc, char **argv) {
             return blocks();
         if (strcmp(role, "computes") == 0)
             return computes();
+        if (strcmp(role, "ppolls") == 0)
+            return ppolls();
     }
     int out, in, status;
 
@@ -161,6 +191,11 @@ int main(int argc, char **argv) {
     status = waited(pid);
     CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 128 + SIGINT, "the computing child's status %#x", status);
 
-    printf("signal_quit: a quit reached each child as its signal: EINTR, a reload then an end, an ignore, a pending default, and a handler beside a busy child\n");
+    pid = start("ppolls", &out, &in);
+    CHECK(kill(pid, SIGINT) == 0, "kill(SIGINT)");
+    status = waited(pid);
+    CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0, "the ppolling child's status %#x", status);
+
+    printf("signal_quit: a quit reached each child as its signal: EINTR, a reload then an end, an ignore, a pending default, a handler beside a busy child, and one held over a ready ppoll\n");
     return 0;
 }

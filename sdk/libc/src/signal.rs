@@ -13,7 +13,7 @@
 //! kills the process, which is what the default would do. A reason read is
 //! raised as `SIGINT`, `SIGHUP` or `SIGTERM`.
 
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use toyos::poller::{Poller, READABLE};
 use toyos::quit::Reason;
@@ -67,6 +67,9 @@ struct State {
     /// Children a wait took before libc's own thread saw them end, each owed
     /// its `SIGCHLD`.
     unseen_ends: u32,
+    /// The mask a handler running on libc's own thread set, which routes
+    /// nothing and lasts that run.
+    keeper_mask: u64,
 }
 
 static STATE: Lock<State> = Lock::new(State {
@@ -77,7 +80,23 @@ static STATE: Lock<State> = Lock::new(State {
     alarm: None,
     listening: false,
     unseen_ends: 0,
+    keeper_mask: 0,
 });
+
+/// libc's own thread's tid, `u32::MAX` before it runs.
+static KEEPER: AtomicU32 = AtomicU32::new(u32::MAX);
+
+/// The signals whose handlers run on libc's own thread now, decided under
+/// the lock: a mask that newly blocks one waits until its run ends, so a
+/// block a program makes excludes the handler it blocks.
+static RUNNING: AtomicU64 = AtomicU64::new(0);
+
+/// Moved at every run's end on libc's own thread, which such a mask waits on.
+static RAN: AtomicU32 = AtomicU32::new(0);
+
+fn on_keeper(tid: u32) -> bool {
+    KEEPER.load(Ordering::Acquire) == tid
+}
 
 /// Whether any handler is kept, read without the lock by a blocking call
 /// deciding whether it can be interrupted, and written under it.
@@ -185,7 +204,11 @@ pub(crate) fn pending() -> u64 {
 
 /// The calling thread's mask.
 pub(crate) fn mask() -> u64 {
-    STATE.lock().signals.mask(tid())
+    let state = STATE.lock();
+    match on_keeper(tid()) {
+        true => state.keeper_mask,
+        false => state.signals.mask(tid()),
+    }
 }
 
 /// `raise(sig)` in the calling thread: `Err` with an `errno` for a signal it
@@ -193,7 +216,13 @@ pub(crate) fn mask() -> u64 {
 pub(crate) fn raise(sig: i32) -> Result<(), i32> {
     let raised = {
         let mut state = STATE.lock();
-        let raised = state.signals.raise(tid(), sig);
+        let raised = match on_keeper(tid()) {
+            true => {
+                let mask = state.keeper_mask;
+                crate::sigreq::raised(sig, state.signals.kept(sig), mask)
+            }
+            false => state.signals.raise(tid(), sig),
+        };
         state.settle();
         raised
     };
@@ -207,20 +236,38 @@ pub(crate) fn raise(sig: i32) -> Result<(), i32> {
     }
 }
 
-/// The calling thread's mask is now `mask`, and whatever was pending that it
-/// leaves unblocked is delivered before this returns. Refused, the mask
-/// unchanged, where the process would have to listen to a notice it does not
-/// hold.
+/// The calling thread's mask is now `mask`: once a handler running on
+/// libc's own thread for a signal it newly blocks has ended, and with
+/// whatever was pending that it leaves unblocked delivered before this
+/// returns. Refused `ENOSYS`, the mask unchanged, on a thread neither the
+/// first nor libc's, and where the process would have to listen to a notice
+/// it does not hold.
 pub(crate) fn set_mask(mask: u64) -> Result<(), i32> {
     let tid = tid();
-    {
+    if on_keeper(tid) {
+        // A handler's own: it routes nothing.
+        STATE.lock().keeper_mask = mask;
+        return Ok(());
+    }
+    let newly = {
         let mut state = STATE.lock();
         let old = state.signals.mask(tid);
-        state.signals.set_mask(tid, mask);
+        if !state.signals.set_mask(tid, mask) {
+            return Err(ENOSYS);
+        }
         if let Err(errno) = state.listen() {
             state.signals.set_mask(tid, old);
             return Err(errno);
         }
+        mask & !old
+    };
+    loop {
+        let ran = RAN.load(Ordering::Acquire);
+        if RUNNING.load(Ordering::Acquire) & newly == 0 {
+            break;
+        }
+        // SAFETY: `RAN` is a live, aligned u32.
+        unsafe { syscall::futex_wait(RAN.as_ptr(), ran, None) };
     }
     deliver_pending(tid);
     Ok(())
@@ -241,7 +288,7 @@ fn deliver_pending(tid: u32) {
 
 /// A thread libc started runs from now with `mask`, its creator's.
 pub(crate) fn thread_started(tid: u32, mask: u64) {
-    STATE.lock().signals.set_mask(tid, mask);
+    STATE.lock().signals.thread_started(tid, mask);
 }
 
 pub(crate) fn thread_ended(tid: u32) {
@@ -361,11 +408,21 @@ impl Call {
 }
 
 impl Drop for Call {
+    /// A signal the call would have taken and did not is delivered here,
+    /// before the call returns, where the thread's own mask leaves it
+    /// unblocked, and else goes to libc's own thread if another thread does.
     fn drop(&mut self) {
         if self.inside {
             let mut state = STATE.lock();
             state.signals.leave(self.tid);
             state.settle();
+        }
+        if !on_keeper(self.tid) {
+            deliver_pending(self.tid);
+        }
+        let mut state = STATE.lock();
+        if state.signals.has_orphan() {
+            state.kick();
         }
     }
 }
@@ -409,16 +466,26 @@ fn signal_of(reason: Reason) -> i32 {
 unsafe extern "C" fn keep(_: *mut u8) -> *mut u8 {
     const CONTROL: u64 = u64::MAX;
     const NOTICE: u64 = u64::MAX - 1;
+    KEEPER.store(tid(), Ordering::Release);
     let poller = Poller::new(Poller::MAX_HANDLES);
+    // A copy of each watched child's handle, kept until it raises or is
+    // reaped, so no watch is armed on a number another handle takes.
+    let mut children: alloc::vec::Vec<(i32, toyos::OwnedHandle)> = alloc::vec::Vec::new();
     loop {
-        let (control, listening, children, due) = {
+        let (control, listening, due) = {
             let state = STATE.lock();
             let control = state.keeper.expect("libc's own thread runs only once its pipe is made").read;
-            let children = match state.signals.kept(SIGCHLD) {
+            let watched = match state.signals.kept(SIGCHLD) {
                 Kept::Handle(_) => crate::spawn::unraised(),
                 _ => alloc::vec::Vec::new(),
             };
-            (control, state.listening, children, state.alarm)
+            children.retain(|(pid, _)| watched.contains(pid));
+            for pid in watched {
+                if !children.iter().any(|(p, _)| *p == pid) {
+                    children.extend(crate::spawn::copy_of(pid).map(|copy| (pid, copy)));
+                }
+            }
+            (control, state.listening, state.alarm)
         };
         poller.watch_raw(control, READABLE, CONTROL);
         if listening {
@@ -463,10 +530,29 @@ unsafe extern "C" fn keep(_: *mut u8) -> *mut u8 {
                     deliveries.push(delivery);
                 }
             }
+            while let Some(orphan) = state.signals.orphan() {
+                deliveries.push(orphan);
+            }
+            let running = deliveries.iter().fold(0, |all, d| match d {
+                Delivery::Handle { sig, .. } => all | crate::sigreq::bit(*sig),
+                Delivery::End(_) => all,
+            });
+            RUNNING.store(running, Ordering::Release);
             state.settle();
         }
         for delivery in deliveries {
+            let sig = match delivery {
+                Delivery::Handle { sig, .. } => Some(sig),
+                Delivery::End(_) => None,
+            };
             run(delivery, None);
+            STATE.lock().keeper_mask = 0;
+            if let Some(sig) = sig {
+                RUNNING.fetch_and(!crate::sigreq::bit(sig), Ordering::Release);
+                RAN.fetch_add(1, Ordering::Release);
+                // SAFETY: `RAN` is a live, aligned u32.
+                unsafe { syscall::futex_wake(RAN.as_ptr(), u32::MAX) };
+            }
         }
     }
 }
