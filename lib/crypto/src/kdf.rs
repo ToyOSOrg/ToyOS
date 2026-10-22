@@ -175,9 +175,9 @@ pub(crate) fn pbkdf2_blocks<H: Digest>(
     }
     let mut u = Secret([0u8; 64]);
     let mut t = Secret([0u8; 64]);
-    for (index, chunk) in (first..).zip(output.chunks_mut(H::OUTPUT_LEN)) {
+    for (k, chunk) in output.chunks_mut(H::OUTPUT_LEN).enumerate() {
         let mut mac = salted.fork();
-        mac.update(&index.to_be_bytes())?;
+        mac.update(&(first + k as u32).to_be_bytes())?;
         mac.finish(&mut u.0[..H::OUTPUT_LEN])?;
         t.0 = u.0;
         for _ in 1..iterations.get() {

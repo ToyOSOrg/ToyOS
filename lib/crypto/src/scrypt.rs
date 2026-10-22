@@ -5,10 +5,9 @@
 //! [`Params`] alone. Parameters, lengths and the workspace's size are public.
 //!
 //! PBKDF2 and Salsa20/8 do not let contents choose branches or addresses.
-//! ROMix does, by design: its second loop reads the table entry that the
-//! secret state names (RFC 7914 §5), so the derivation's memory access
-//! pattern depends on the passphrase. ROMix is therefore not held to the
-//! constant-time measurement, and its timing decides nothing.
+//! ROMix does, by design: its second loop reads the table entry the secret
+//! state names (RFC 7914 §5), so its memory access pattern depends on the
+//! passphrase. ROMix is exempt from the constant-time measurement.
 //!
 //! The workspace is erased before [`derive`] returns.
 
@@ -38,13 +37,13 @@ impl Params {
     /// p positive, p * 128 * r <= (2^32 - 1) * 32, and a table past
     /// [`MAX_MEMORY`].
     pub fn new(log_n: u8, r: u32, p: u32) -> Result<Self, Error> {
-        let (r64, p64) = (u64::from(r), u64::from(p));
+        let r128 = u128::from(r);
         let valid = log_n >= 1
             && r >= 1
             && p >= 1
-            && u64::from(log_n) < 16 * r64
-            && 128 * r64 <= (MAX_MEMORY as u64).checked_shr(log_n.into()).unwrap_or(0)
-            && p64 * 128 * r64 <= u64::from(u32::MAX) * 32;
+            && u128::from(log_n) < 16 * r128
+            && 128 * r128 <= (MAX_MEMORY as u128).checked_shr(log_n.into()).unwrap_or(0)
+            && u128::from(p) * 128 * r128 <= u128::from(u32::MAX) * 32;
         if valid { Ok(Self { log_n, r, p }) } else { Err(Error::InvalidParameters) }
     }
 
