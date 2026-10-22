@@ -1,10 +1,17 @@
 # One table per guest triple, since the workspace builds for all of them and for
-# the host: a guest build names its triple with `--target`, and a host build
-# takes no flags from here.
+# the host: a guest build names its triple with `--target`. A build for a triple
+# with no table here, the host's and the host apps' included, takes `[build]`'s.
 
 # A checkout's own configuration, untracked: a fork clone under edit is listed
 # there (`.claude/agents/implementer.md`, "A fork").
 include = [{ path = "local.toml", optional = true }]
+
+# `p384`'s field and scalar arithmetic in its own `bignum` backend, here and in
+# the ToyOS tables, whose flags replace these: its default is fiat-crypto, which
+# ToyOS takes as a dependency of no kind. Only russh reaches `p384` 0.14
+# (`system/sshserver`, on the host and the guest), and this goes with it.
+[build]
+rustflags = ["--cfg=p384_backend=\"bignum\""]
 
 [target.x86_64-unknown-none]
 rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes"]
@@ -38,10 +45,10 @@ rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes", "--cfg=curve25519_dalek
 rustflags = ["-Dwarnings", "-Cforce-frame-pointers=yes", "--cfg=curve25519_dalek_backend=\"serial\"", "-Clink-arg=/Brepro", "-Clink-arg=/DEBUG:NONE"]
 
 [target.x86_64-unknown-toyos]
-rustflags = ["-Dwarnings"]
+rustflags = ["-Dwarnings", "--cfg=p384_backend=\"bignum\""]
 
 [target.aarch64-unknown-toyos]
-rustflags = ["-Dwarnings"]
+rustflags = ["-Dwarnings", "--cfg=p384_backend=\"bignum\""]
 
 # `tests/guest/osbench`'s Linux build, static so a bench runs it without a
 # toolchain, linked by the toolchain's own LLD so no C toolchain is needed, and
