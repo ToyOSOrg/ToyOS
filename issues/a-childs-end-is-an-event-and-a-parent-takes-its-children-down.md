@@ -265,7 +265,7 @@ an explicit force issues it, and never a timer's.
      default and none blocked, and a `SETSIGMASK` naming a signal is refused
      `ENOSYS`.
 7. **Job control**.
-   - 7.1 **Done** (PRNUM): an interactive shell hands its surface, the
+   - 7.1 **Done** (#1017): an interactive shell hands its surface, the
      terminal's or the console's, a duplicate carrying `MANAGE` of each process
      of the line it waits for (`toyos::surface::Foreground`), and a `-c` shell,
      itself a process of the line that started it, hands nothing. The surface
