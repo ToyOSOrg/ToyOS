@@ -223,11 +223,18 @@ pub(crate) fn poly1305_blocks(r: &[u64; 3], h: &mut [u64; 3], blocks: &[[u8; 16]
     })
 }
 
-/// The keystream of the first `n` of four independent ChaCha20 states, `n`
-/// 2 to 4, each 16 words.
-pub(crate) fn chacha_blocks(states: &[[u32; 16]; 4], n: usize, out: &mut [u8; 256]) -> bool {
-    hosted!(x86_64::chacha_blocks(states, n, out), {
-        let _ = (states, n, out);
+/// The ChaCha20 keystream of the first `n` of four lanes, `n` 2 to 4: lane
+/// i is block `counters[i]` of `keys[i]` under `nonce`, in the original
+/// construction's layout.
+pub(crate) fn chacha_blocks(
+    keys: [&[u8; 32]; 4],
+    counters: [u64; 4],
+    nonce: &[u8; 8],
+    n: usize,
+    out: &mut [u8; 256],
+) -> bool {
+    hosted!(x86_64::chacha_blocks(keys, counters, nonce, n, out), {
+        let _ = (keys, counters, nonce, n, out);
         false
     })
 }

@@ -57,7 +57,7 @@ pub(crate) fn legacy_block(key: &[u8; 32], nonce: &[u8; 8], counter: u64) -> Sec
 }
 
 /// The original construction's state: a 64-bit counter and an 8-byte nonce.
-pub(crate) fn fill_legacy_state(state: &mut [u32; 16], key: &[u8; 32], nonce: &[u8; 8], counter: u64) {
+fn fill_legacy_state(state: &mut [u32; 16], key: &[u8; 32], nonce: &[u8; 8], counter: u64) {
     words(key, state);
     state[12] = counter as u32;
     state[13] = (counter >> 32) as u32;
@@ -66,21 +66,31 @@ pub(crate) fn fill_legacy_state(state: &mut [u32; 16], key: &[u8; 32], nonce: &[
 }
 
 /// RFC 8439's state for block `counter`.
-pub(crate) fn fill_state(state: &mut [u32; 16], key: &[u8; 32], nonce: &[u8; 12], counter: u32) {
+fn fill_state(state: &mut [u32; 16], key: &[u8; 32], nonce: &[u8; 12], counter: u32) {
     let (counter, nonce) = ietf(nonce, counter);
     fill_legacy_state(state, key, &nonce, counter);
 }
 
-/// The keystream of the first `n` of four independent states, at most four:
-/// two or more run together where SIMD admits them, in about one block's
-/// latency.
-pub(crate) fn blocks(states: &[[u32; 16]; 4], n: usize, out: &mut [u8; 256]) {
-    if n >= 2 && crate::arch::chacha_blocks(states, n, out) {
+/// The keystream of the first `n` of four lanes, at most four: lane i is
+/// block `counters[i]` of `keys[i]` under the original construction's
+/// `nonce`. Two or more run together where SIMD admits them, in about one
+/// block's latency.
+pub(crate) fn blocks(keys: [&[u8; 32]; 4], counters: [u64; 4], nonce: &[u8; 8], n: usize, out: &mut [u8; 256]) {
+    if n >= 2 && crate::arch::chacha_blocks(keys, counters, nonce, n, out) {
         return;
     }
-    for (i, chunk) in out.as_chunks_mut::<64>().0.iter_mut().take(n).enumerate() {
-        *chunk = rounds(&states[i]).0;
+    let (chunks, _) = out.as_chunks_mut::<64>();
+    for i in 0..n {
+        chunks[i] = legacy_block(keys[i], nonce, counters[i]).0;
     }
+}
+
+/// Blocks `counter` to `counter + n - 1` of `key` under an RFC 8439
+/// `nonce`, as [`blocks`] computes them; the caller bounded the counter.
+pub(crate) fn ietf_blocks(key: &[u8; 32], nonce: &[u8; 12], counter: u32, n: usize, out: &mut [u8; 256]) {
+    let (counter, nonce) = ietf(nonce, counter);
+    let c = |i: u64| counter.wrapping_add(i);
+    blocks([key; 4], [c(0), c(1), c(2), c(3)], &nonce, n, out);
 }
 
 /// IETF's 32-bit counter and first nonce word as the original 64-bit
@@ -189,19 +199,20 @@ mod tests {
     }
 
     #[test]
-    fn independent_blocks_match_one_at_a_time() {
-        // Four states of two keys and scattered counters, as SSH's packets take them.
-        let mut states = [[0u32; 16]; 4];
-        fill_legacy_state(&mut states[0], &[1; 32], &[2; 8], 0);
-        fill_legacy_state(&mut states[1], &[3; 32], &[4; 8], u64::from(u32::MAX));
-        fill_legacy_state(&mut states[2], &[3; 32], &[4; 8], u64::MAX);
-        fill_state(&mut states[3], &[5; 32], &[6; 12], 7);
+    fn lanes_match_one_block_at_a_time() {
+        // Three keys and scattered counters, word carries included, as SSH's
+        // packets take them; every key byte and counter word differs per lane.
+        let keys: [[u8; 32]; 4] = core::array::from_fn(|lane| core::array::from_fn(|i| (lane * 89 + i * 7 + 1) as u8));
+        let keys = [&keys[0], &keys[1], &keys[1], &keys[3]];
+        let counters = [0, u64::from(u32::MAX), u64::MAX, 0x0123_4567_89ab_cdef];
+        let nonce = [0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe];
         for n in 1..=4 {
-            let mut together = Secret([0u8; 256]);
-            blocks(&states, n, &mut together.0);
-            for (i, state) in states.iter().enumerate().take(n) {
-                assert_eq!(together.0[64 * i..64 * i + 64], rounds(state).0, "block {i} of {n}");
+            let mut together = Secret([0xa5u8; 256]);
+            blocks(keys, counters, &nonce, n, &mut together.0);
+            for i in 0..n {
+                assert_eq!(together.0[64 * i..64 * i + 64], legacy_block(keys[i], &nonce, counters[i]).0, "lane {i} of {n}");
             }
+            assert!(together.0[64 * n..].iter().all(|&b| b == 0xa5), "{n} lanes write only their blocks");
         }
     }
 
