@@ -19,3 +19,5 @@ toyos-tco = { path = "../../lib/tco" }
 
 [dev-dependencies]
 toyos-tmpdir = { path = "../../lib/tmpdir" }
+# The slot table an image an internal install admits carries.
+toyos-update = { path = "../../lib/update" }

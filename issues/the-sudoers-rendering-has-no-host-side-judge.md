@@ -23,6 +23,11 @@ other half is the sudoers parser's unescaping, and a model of it written here
 would be the author's reading again — the same thing that was wrong — so the
 pair would prove the renderer agrees with this file and not with sudo.
 
+`--install-sudoers` now asks `sudo -n -l` about every job's argv once the rule
+is installed, with each mask filled by a sample, and `--dry-run` asks it of every
+line it would run: sudo's own matching, end to end, on the machine. Neither has
+been run yet, so the rendering is still unjudged.
+
 **Exit condition**: either sudo's own parser answers (`cvtsudoers` or `visudo -c`
 reading back what a rule matches, if either can be made to say it without
 installing the file), or the rendering is checked end to end by a run against

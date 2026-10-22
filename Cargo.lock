@@ -4665,6 +4665,7 @@ dependencies = [
  "toyos-quiesce",
  "toyos-tco",
  "toyos-tmpdir",
+ "toyos-update",
 ]
 
 [[package]]
