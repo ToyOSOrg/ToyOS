@@ -26,7 +26,7 @@ use alloc::vec::Vec;
 
 pub use boot::{AllocateType, BootServices, MemoryDescriptor, MemoryMap, Scoped, PAGE_SIZE};
 pub use proto::{
-    BlockIo, DevicePath, EdidActive, File, Gop, GopModeInfo, HardDrive, LoadedImage, Mode, PartitionInfo, PciRootBridgeIo,
+    BlockIo, DevicePath, EdidActive, File, Gop, GopModeInfo, HardDrive, LoadedImage, Mode, PartitionInfo, PciIo, PciRootBridgeIo,
     PixelFormat, Rng, SimpleFileSystem,
 };
 pub use runtime::{ResetType, RuntimeServices, Time, VariableAttributes, GLOBAL_VARIABLE};

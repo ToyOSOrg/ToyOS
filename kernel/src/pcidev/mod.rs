@@ -442,8 +442,10 @@ pub fn inventory() -> Vec<toyos_abi::inventory::Pci> {
         let machine = MACHINE.lock();
         (machine.identities.clone(), machine.kernel_driven.clone())
     };
+    let boot = crate::loaded::boot_function();
     let mut out = Vec::with_capacity(identities.len());
     for (mut pci, function) in identities.into_iter().zip(functions()) {
+        pci.boot_path = boot == Some(pci.at);
         pci.driven = if kernel_driven.contains(&function.who) {
             Driven::Kernel
         } else if function.held.load(Ordering::Acquire) {

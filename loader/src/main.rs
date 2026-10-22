@@ -30,6 +30,7 @@ macro_rules! println {
 mod arch;
 mod attempt;
 mod blackbox;
+mod bootfunction;
 mod bootnext;
 mod efi;
 mod floor;
@@ -552,6 +553,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         }
     }
 
+    let boot_function = bootfunction::of(&system_table);
     // The last of the firmware questions, and asked here for the same reason
     // the GOP's was asked before this: the protocol dies with boot services.
     //
@@ -695,6 +697,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         slot_volume_guid,
         supervisor_image,
         fileserver_image,
+        boot_function,
     };
     if let Some(edid) = gop.as_ref().and_then(|g| g.edid) {
         kernel_args.gop_edid = edid;

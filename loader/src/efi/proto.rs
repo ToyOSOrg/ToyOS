@@ -692,3 +692,56 @@ impl super::Scoped<'_, PciRootBridgeIo> {
         unsafe { (self.configuration)(self.this(), &mut resources) }.ok().map(|()| resources)
     }
 }
+
+/// `EFI_PCI_IO_PROTOCOL` (UEFI 2.10 §14.4.1), on one handle per PCI function:
+/// only `GetLocation()` is called.
+#[repr(C)]
+pub struct PciIo {
+    poll_mem: Unused,
+    poll_io: Unused,
+    mem_read: Unused,
+    mem_write: Unused,
+    io_read: Unused,
+    io_write: Unused,
+    pci_read: Unused,
+    pci_write: Unused,
+    copy_mem: Unused,
+    map: Unused,
+    unmap: Unused,
+    allocate_buffer: Unused,
+    free_buffer: Unused,
+    flush: Unused,
+    get_location: unsafe extern "efiapi" fn(
+        this: *mut PciIo,
+        segment: *mut usize,
+        bus: *mut usize,
+        device: *mut usize,
+        function: *mut usize,
+    ) -> Status,
+    attributes: Unused,
+    get_bar_attributes: Unused,
+    set_bar_attributes: Unused,
+    rom_size: u64,
+    rom_image: Unused,
+}
+
+const _: () = {
+    assert!(offset_of!(PciIo, get_location) == 14 * 8);
+    assert!(size_of::<PciIo>() == 20 * 8);
+};
+
+// SAFETY: §14.4.1's layout, under its GUID.
+unsafe impl Protocol for PciIo {
+    const GUID: Guid = Guid::new(0x4cf5b200, 0x68b8, 0x4ca5, [0x9e, 0xec, 0xb2, 0x3e, 0x3f, 0x50, 0x02, 0x9a]);
+}
+
+impl super::Scoped<'_, PciIo> {
+    /// `GetLocation()` (§14.4.13): the function's segment, bus, device and
+    /// function numbers.
+    pub fn location(&self) -> Result<[usize; 4], Status> {
+        let mut at = [0usize; 4];
+        let [segment, bus, device, function] = &mut at;
+        // SAFETY: the open interface, and four live out parameters.
+        unsafe { (self.get_location)(self.this(), segment, bus, device, function) }.ok().map(|()| at)
+    }
+}

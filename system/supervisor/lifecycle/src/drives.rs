@@ -144,6 +144,7 @@ mod tests {
             subclass: 0,
             prog_if: 0,
             driven,
+            boot_path: false,
         }
     }
 

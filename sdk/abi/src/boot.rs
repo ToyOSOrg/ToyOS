@@ -152,6 +152,40 @@ pub struct KernelArgs {
     /// descriptor or overlapping another region the loader handed.
     pub supervisor_image: BootImage,
     pub fileserver_image: BootImage,
+    /// The PCI function firmware loaded this image through: the controller of
+    /// the boot disk, which the loader finds as the PCI I/O handle whose device
+    /// path is the longest prefix of the boot device's, and asks its location
+    /// (UEFI 2.10 §14.4.1, `GetLocation()`). Absent on a machine that boots off
+    /// no PCI device or whose firmware would not say.
+    pub boot_function: BootFunction,
+}
+
+/// [`KernelArgs::boot_function`]: `present` is 1 where the other fields name a
+/// function, and 0 where they are zero and name none.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BootFunction {
+    pub present: u8,
+    pub bus: u8,
+    pub dev: u8,
+    pub func: u8,
+    pub segment: u16,
+    pub reserved: [u8; 2],
+}
+
+/// What the kernel logs [`KernelArgs::boot_function`] under, followed by the
+/// address as its `pcidev:` lines spell one, `bb:dd.f`.
+pub const BOOT_FUNCTION_LINE: &str = "boot: firmware loaded this boot through PCI ";
+
+impl BootFunction {
+    pub fn at(&self) -> Option<crate::inventory::PciAddr> {
+        (self.present == 1).then_some(crate::inventory::PciAddr {
+            segment: self.segment,
+            bus: self.bus,
+            dev: self.dev,
+            func: self.func,
+        })
+    }
 }
 
 /// One payload the loader hands the kernel: `len` bytes at the physical
@@ -277,7 +311,9 @@ const _: () = {
     assert!(offset_of!(KernelArgs, slot_volume_guid) == 1488);
     assert!(offset_of!(KernelArgs, supervisor_image) == 1504);
     assert!(offset_of!(KernelArgs, fileserver_image) == 1520);
-    assert!(size_of::<KernelArgs>() == 1536);
+    assert!(offset_of!(KernelArgs, boot_function) == 1536);
+    assert!(size_of::<KernelArgs>() == 1544);
+    assert!(size_of::<BootFunction>() == 8);
     assert!(size_of::<BootImage>() == 16);
     assert!(LAYOUT as i32 > 1440 || (LAYOUT as i32) < -1440);
     assert!(align_of::<KernelArgs>() == 8);
@@ -362,7 +398,17 @@ mod tests {
         slot_volume_guid: [0; 16],
         supervisor_image: BootImage { addr: 0, len: 0 },
         fileserver_image: BootImage { addr: 0, len: 0 },
+        boot_function: BootFunction { present: 0, bus: 0, dev: 0, func: 0, segment: 0, reserved: [0; 2] },
     };
+
+    #[test]
+    fn a_boot_function_names_a_place_only_where_it_is_present() {
+        assert_eq!(ZEROED.boot_function.at(), None);
+        let named = BootFunction { present: 1, bus: 3, dev: 0, func: 3, segment: 0, reserved: [0; 2] };
+        let at = crate::inventory::PciAddr { segment: 0, bus: 3, dev: 0, func: 3 };
+        assert_eq!(named.at(), Some(at));
+        assert_eq!(BootFunction { present: 2, ..named }.at(), None);
+    }
 
     #[test]
     fn the_kernel_is_handed_the_windows_firmware_named_and_none_of_the_array_behind_them() {

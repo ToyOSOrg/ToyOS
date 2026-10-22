@@ -89,6 +89,10 @@ pub struct Pci {
     pub subclass: u8,
     pub prog_if: u8,
     pub driven: Driven,
+    /// Whether firmware loaded this boot's loader through this function: the
+    /// controller the boot disk is on, as the loader read it off the boot
+    /// device's path ([`crate::boot::KernelArgs::boot_function`]).
+    pub boot_path: bool,
 }
 
 /// What a claim is on.
@@ -241,6 +245,7 @@ impl Record {
                         Driven::Claimed => 2,
                     },
                 );
+                o.u8(14, u8::from(p.boot_path));
                 o.u32(16, p.arrival.0);
             }
             Self::Claim(c) => {
@@ -291,6 +296,7 @@ impl Record {
                     2 => Some(Driven::Claimed),
                     _ => None,
                 })?,
+                boot_path: r.variant(14, |b| (b <= 1).then_some(b == 1))?,
             }),
             KIND_CLAIM => Self::Claim(Claim {
                 on: match r.variant(1, |b| (b <= 1).then_some(b))? {
@@ -343,6 +349,7 @@ mod tests {
                 subclass: 0,
                 prog_if: 0,
                 driven: Driven::Claimed,
+                boot_path: true,
             }),
             Record::Claim(Claim { on: Claimed::Pci(at), holder }),
             Record::Claim(Claim { on: Claimed::Class(DeviceType::Framebuffer), holder }),

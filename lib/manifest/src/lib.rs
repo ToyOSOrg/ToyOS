@@ -574,9 +574,11 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
 }
 
 /// Every entry names a device, a `drives` row is one process per function and
-/// nothing else, and no device can answer two entries.
+/// nothing else, and no device can answer two entries — but two `drives`
+/// entries of one row, which start one process on a function either way,
+/// under the first that matches it.
 fn claims_apart(manifest: &Manifest) -> Result<(), RenderError> {
-    let mut seen: Vec<(&str, &str, device::Entry)> = Vec::new();
+    let mut seen: Vec<(&str, &str, device::Entry, bool)> = Vec::new();
     for program in &manifest.programs {
         let refused = |entry: &String| RenderError::NoSuchDevice { program: program.name.clone(), entry: entry.clone() };
         if !program.drives.is_empty() {
@@ -591,20 +593,24 @@ fn claims_apart(manifest: &Manifest) -> Result<(), RenderError> {
                 return Err(RenderError::Drives { program: program.name.clone(), also });
             }
         }
-        let devices = program.devices.iter().map(|e| device::Entry::parse(e).ok_or_else(|| refused(e)).map(|p| (e, p)));
+        let devices =
+            program.devices.iter().map(|e| device::Entry::parse(e).ok_or_else(|| refused(e)).map(|p| (e, p, false)));
         let drives = program.drives.iter().map(|e| match device::Entry::parse(e) {
-            Some(parsed @ device::Entry::Pci(_)) => Ok((e, parsed)),
+            Some(parsed @ device::Entry::Pci(_)) => Ok((e, parsed, true)),
             _ => Err(refused(e)),
         });
         for entry in devices.chain(drives) {
-            let (text, parsed) = entry?;
-            if let Some((row, other, _)) = seen.iter().find(|(_, _, earlier)| earlier.overlaps(&parsed)) {
+            let (text, parsed, driven) = entry?;
+            let apart = |row: &str, earlier_driven: bool| driven && earlier_driven && row == program.name;
+            if let Some((row, other, ..)) =
+                seen.iter().find(|(row, _, earlier, was)| earlier.overlaps(&parsed) && !apart(row, *was))
+            {
                 return Err(RenderError::Overlap {
                     first: (row.to_string(), other.to_string()),
                     second: (program.name.clone(), text.clone()),
                 });
             }
-            seen.push((&program.name, text, parsed));
+            seen.push((&program.name, text, parsed, driven));
         }
     }
     Ok(())
@@ -1068,17 +1074,17 @@ mod tests {
     }
 
     /// **Two entries one device can answer are refused where the image is
-    /// built, naming both**: across rows and within one, a `devices` entry
-    /// and a `drives` matcher alike, and a fixed name written twice.
+    /// built, naming both**: across rows, within one row's `devices`, and a
+    /// fixed name written twice. Two `drives` entries of one row are not: the
+    /// row starts one process on the function under the first.
     #[test]
     fn two_entries_one_device_can_answer_are_refused_by_name() {
-        let cases: [(&[Row<'_>], _, _); 6] = [
+        let cases: [(&[Row<'_>], _, _); 5] = [
             (&[("a", &["framebuffer"], &[]), ("b", &["framebuffer"], &[])], ("a", "framebuffer"), ("b", "framebuffer")),
             (&[("a", &["isa:0060,0064:1,12"], &[]), ("b", &["isa:0060,0064:1,12"], &[])], ("a", "isa:0060,0064:1,12"), ("b", "isa:0060,0064:1,12")),
             (&[("a", &["pci:01:08:02/1b36:0010"], &[]), ("b", &[], &["pci:01:08:02"])], ("a", "pci:01:08:02/1b36:0010"), ("b", "pci:01:08:02")),
             (&[("a", &[], &["pci:0c:03:30"]), ("b", &[], &["pci:0c:03:30/1b36:000d"])], ("a", "pci:0c:03:30"), ("b", "pci:0c:03:30/1b36:000d")),
             (&[("a", &["pci:02:00:00", "pci:02:00:00/1af4:1041"], &[])], ("a", "pci:02:00:00"), ("a", "pci:02:00:00/1af4:1041")),
-            (&[("a", &[], &["pci:ff:00:00", "pci:ff:00:00"])], ("a", "pci:ff:00:00"), ("a", "pci:ff:00:00")),
         ];
         for (rows, first, second) in cases {
             assert_eq!(render(&with_rows(rows)), overlap(first, second), "{rows:?}");
@@ -1089,6 +1095,8 @@ mod tests {
             ("c", &[], &["pci:0c:03:30"]),
         ]);
         assert!(render(&apart).is_ok());
+        let one_row = with_rows(&[("usbd", &[], &["pci:0c:03:30/1033:0194", "pci:0c:03:30@boot"])]);
+        assert!(render(&one_row).is_ok());
     }
 
     #[test]
