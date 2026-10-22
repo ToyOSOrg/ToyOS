@@ -1,5 +1,5 @@
 //! A file server's decisions: the blocks memory stands in for a partition
-//! with ([`ram`]) — a partition's own are `diskserver::disk`'s — the one
+//! with ([`ram`]) — a partition's own is `diskserver::disk::Served` — the one
 //! cache every byte of its volume passes through ([`cache`]), the volumes it
 //! can serve ([`data`] for the bcachefs DATA role, [`root`] for the SYSTEM
 //! role's ROOT in memory, [`fat`] for FAT32's LOG and BOOT, [`absent`] for a

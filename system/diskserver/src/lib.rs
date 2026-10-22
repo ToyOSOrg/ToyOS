@@ -1,6 +1,6 @@
 //! What a program that opens a partition through the block service links:
-//! the session itself ([`session`]), and a partition's blocks however it is
-//! held ([`disk`]). The service is `src/main.rs` beside this.
+//! the session itself ([`session`]), and the partition as a block device over
+//! it ([`disk`]). The service is `src/main.rs` beside this.
 
 pub mod disk;
 pub mod session;

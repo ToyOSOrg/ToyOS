@@ -3,7 +3,7 @@
 //!
 //! A refused write may already be on the medium. So a refusal says
 //! nothing about which of the two states an entry is in, and nothing here reads
-//! to find out — a cache under [`BlockAccess`] may still serve the bytes the
+//! to find out — a cache under the [`BlockDev`] may still serve the bytes the
 //! refusal did not update. What is known is the state the call wanted and the
 //! state it started from, and writing either one is idempotent.
 //!
@@ -52,7 +52,7 @@
 //!   on the mount path repairs them.
 
 use crate::boot::Cluster;
-use crate::device::BlockAccess;
+use toyos_blockdev::BlockDev;
 use crate::dir::RawEntry;
 use crate::error::Error;
 use crate::fs::Fat32;
@@ -82,21 +82,21 @@ pub(crate) enum Repair {
     Entry { offset: u64, raw: RawEntry },
 }
 
-impl<D: BlockAccess> Fat32<D> {
+impl<D: BlockDev> Fat32<D> {
     /// Run one mutating call so that an `Err` leaves the volume where the
     /// repair takes it.
     ///
     /// A call inside another panics: the inner one's success would discard a
     /// repair its caller still needs, so a call built from other calls uses
     /// their bodies.
-    pub(crate) fn atomic<T>(
+    pub(crate) async fn atomic<T>(
         &mut self,
-        op: impl FnOnce(&mut Self) -> Result<T, Error>,
+        op: impl AsyncFnOnce(&mut Self) -> Result<T, Error>,
     ) -> Result<T, Error> {
         assert!(!self.in_call, "toyos-fat32: a mutating call nested inside another");
-        self.settle()?;
+        self.settle().await?;
         self.in_call = true;
-        let result = op(self);
+        let result = op(self).await;
         self.in_call = false;
         let committed = core::mem::take(&mut self.committed);
         match result {
@@ -105,9 +105,9 @@ impl<D: BlockAccess> Fat32<D> {
             // device still refuses stays queued for the next call to finish
             // and report.
             Ok(v) if committed => {
-                let mut driven = self.settle();
+                let mut driven = self.settle().await;
                 if driven == Err(Error::Io) {
-                    driven = self.settle();
+                    driven = self.settle().await;
                 }
                 match driven {
                     Ok(()) | Err(Error::Io) => Ok(v),
@@ -121,7 +121,7 @@ impl<D: BlockAccess> Fat32<D> {
             Err(e) if self.repair.is_empty() => Err(e),
             // An unlanded re-drive is what the volume is waiting on, so it is
             // the answer rather than the error that started the rollback.
-            Err(e) => self.settle().map_or_else(Err, |()| Err(e)),
+            Err(e) => self.settle().await.map_or_else(Err, |()| Err(e)),
         }
     }
 
@@ -148,23 +148,23 @@ impl<D: BlockAccess> Fat32<D> {
     }
 
     /// Re-drive every queued repair, the most recent write's first.
-    pub(crate) fn settle(&mut self) -> Result<(), Error> {
+    pub(crate) async fn settle(&mut self) -> Result<(), Error> {
         while let Some(&step) = self.repair.last() {
             match step {
                 Repair::Put { cluster, value } => {
-                    self.set_fat_entry(cluster, value)?;
+                    self.set_fat_entry(cluster, value).await?;
                     self.repair.pop();
                     if value == 0 {
                         self.released(cluster);
                     }
                 }
                 Repair::Entry { offset, raw } => {
-                    self.put_entry_at(offset, &raw)?;
+                    self.put_entry_at(offset, &raw).await?;
                     self.repair.pop();
                 }
                 Repair::Free { start, anchor } => {
                     self.repair.pop();
-                    self.free_chain(start, anchor)?;
+                    self.free_chain(start, anchor).await?;
                 }
             }
         }

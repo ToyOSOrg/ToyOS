@@ -8,97 +8,73 @@
 //! code with this crate — so the ground truth on both sides of every test is
 //! something other than the driver under test.
 //!
-//! **A device here standing in for the kernel adapter models that adapter's
-//! cache wherever the two can differ.** A write refused after it reached the
-//! medium leaves `FatDevice`'s resident blocks and the medium disagreeing, so a
-//! device that refuses writes that way serves reads through [`AdapterCache`]
-//! and never straight from the medium, and a judge of the volume reads the
-//! medium and never through the crate's device. A device that refuses only
-//! before a write is issued keeps the two equal and needs no model.
+//! Every device here answers each request as it is asked, so a call is driven
+//! with [`now`].
 
 #![allow(dead_code)]
 
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
+use std::future::Future;
 use std::io::Read;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 
-use toyos_fat32::{BlockAccess, IoError};
+use toyos_blockdev::{block_on_ready, within, Block, BlockDev, Error as DevError, BLOCK};
 use toyos_tmpdir::TempDir;
+
+/// A call on a volume over devices that answer every request as it is asked.
+pub fn now<F: Future>(call: F) -> F::Output {
+    block_on_ready(call)
+}
+
+/// `buf.len()` bytes from `offset` of `dev`, read in the whole blocks they lie
+/// on: the device's own bytes, not the crate's reading of them.
+pub fn read_at<D: BlockDev>(dev: &D, offset: u64, buf: &mut [u8]) {
+    let first = offset / BLOCK as u64;
+    let count = (offset + buf.len() as u64).div_ceil(BLOCK as u64) - first;
+    let mut blocks = vec![[0u8; BLOCK]; count as usize];
+    now(dev.read(first, &mut blocks)).expect("a device read");
+    let at = (offset % BLOCK as u64) as usize;
+    buf.copy_from_slice(&blocks.as_flattened()[at..at + buf.len()]);
+}
 
 // ---------------------------------------------------------------- devices
 
-/// A device backed by a file, which only ever issues whole 4096-byte block
-/// reads and writes to it.
-///
-/// This is the kernel's `BlockDevice` shape, and it is what the tests run on
-/// so that the claim in [`BlockAccess`]'s documentation — that a caller with a
-/// 4096-byte block size can serve a driver working in 512-byte sectors — is
-/// exercised rather than asserted. Every partial request becomes a
-/// read-modify-write here, exactly as it will in the kernel adapter.
+/// A device backed by a file, in whole blocks: what the crate's own bridge
+/// from its sectors to a device's blocks is exercised against.
 pub struct BlockyFile {
     file: File,
-    capacity: u64,
-    block: usize,
+    blocks: u64,
 }
 
 impl BlockyFile {
-    pub fn open(path: &Path, block: usize) -> BlockyFile {
+    pub fn open(path: &Path) -> BlockyFile {
         let file = OpenOptions::new().read(true).write(true).open(path).expect("open image");
-        let capacity = file.metadata().expect("stat image").len();
-        BlockyFile { file, capacity, block }
-    }
-
-    fn check(&self, offset: u64, len: usize) -> Result<(), IoError> {
-        let end = offset.checked_add(len as u64).ok_or(IoError::Device)?;
-        if end > self.capacity {
-            return Err(IoError::Device);
-        }
-        Ok(())
+        let len = file.metadata().expect("stat image").len();
+        assert!(len.is_multiple_of(BLOCK as u64), "{}: {len} bytes, no whole blocks", path.display());
+        BlockyFile { file, blocks: len / BLOCK as u64 }
     }
 }
 
-impl BlockAccess for BlockyFile {
-    fn capacity(&self) -> u64 {
-        self.capacity
+impl BlockDev for BlockyFile {
+    fn blocks(&self) -> u64 {
+        self.blocks
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        self.check(offset, buf.len())?;
-        let mut block = vec![0u8; self.block];
-        let mut done = 0usize;
-        while done < buf.len() {
-            let pos = offset + done as u64;
-            let base = pos / self.block as u64 * self.block as u64;
-            let within = (pos - base) as usize;
-            let n = (self.block - within).min(buf.len() - done);
-            self.file.read_exact_at(&mut block, base).map_err(|_| IoError::Device)?;
-            buf[done..done + n].copy_from_slice(&block[within..within + n]);
-            done += n;
-        }
-        Ok(())
+    async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), DevError> {
+        within(lba, out.len(), self.blocks)?;
+        self.file.read_exact_at(out.as_flattened_mut(), lba * BLOCK as u64).map_err(|_| DevError::Device)
     }
 
-    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        self.check(offset, buf.len())?;
-        let mut block = vec![0u8; self.block];
-        let mut done = 0usize;
-        while done < buf.len() {
-            let pos = offset + done as u64;
-            let base = pos / self.block as u64 * self.block as u64;
-            let within = (pos - base) as usize;
-            let n = (self.block - within).min(buf.len() - done);
-            self.file.read_exact_at(&mut block, base).map_err(|_| IoError::Device)?;
-            block[within..within + n].copy_from_slice(&buf[done..done + n]);
-            self.file.write_all_at(&block, base).map_err(|_| IoError::Device)?;
-            done += n;
-        }
-        Ok(())
+    async fn write(&self, lba: u64, data: &[Block]) -> Result<(), DevError> {
+        within(lba, data.len(), self.blocks)?;
+        self.file.write_all_at(data.as_flattened(), lba * BLOCK as u64).map_err(|_| DevError::Device)
     }
 
-    fn flush(&mut self) -> Result<(), IoError> {
-        self.file.sync_all().map_err(|_| IoError::Device)
+    async fn flush(&self) -> Result<(), DevError> {
+        self.file.sync_all().map_err(|_| DevError::Device)
     }
 }
 
@@ -111,39 +87,38 @@ impl BlockAccess for BlockyFile {
 /// zeroes.
 #[derive(Clone)]
 pub struct SparseDevice {
-    sectors: HashMap<u64, [u8; 512]>,
-    capacity: u64,
+    sectors: RefCell<HashMap<u64, [u8; 512]>>,
+    blocks: u64,
+    /// A read whose last byte is past this is refused.
     pub fail_reads_past: Option<u64>,
-    /// Whether [`BlockAccess::flush`] refuses, which is the one call
+    /// Whether [`BlockDev::flush`] refuses, which is the one call
     /// `Fat32::sync` makes into the device after the FSInfo write.
     pub flush_refuses: bool,
     /// The volume's own declared size, when the device is deliberately larger
-    /// than it — a partition with slack, or an adapter that reports the whole
-    /// device. Requests past it are still served, and counted.
+    /// than it — a partition with slack. Requests for blocks wholly past it
+    /// are still served, and counted.
     pub volume_bytes: Option<u64>,
-    /// Requests the crate made outside the volume. Must stay zero: the
-    /// `BlockAccess` contract says the crate never asks for bytes it has not
-    /// bounded, and an adapter is entitled to build on that. Counting rather
-    /// than refusing is the point — refusing would let a crate that asks look
-    /// identical to one that does not.
-    pub out_of_volume: u32,
+    /// Requests the crate made for blocks outside the volume. Must stay zero:
+    /// the crate never asks for bytes it has not bounded, and a device is
+    /// entitled to build on that. Counting rather than refusing is the point —
+    /// refusing would let a crate that asks look identical to one that does
+    /// not.
+    pub out_of_volume: Cell<u32>,
 }
 
 impl SparseDevice {
-    pub fn from_prefix(prefix: &[u8], capacity: u64) -> SparseDevice {
+    /// `prefix` at the start of a device of `bytes`, whole blocks.
+    pub fn from_prefix(prefix: &[u8], bytes: u64) -> SparseDevice {
+        assert!(bytes.is_multiple_of(BLOCK as u64), "a device of {bytes} bytes, no whole blocks");
         let mut dev = SparseDevice {
-            sectors: HashMap::new(),
-            capacity,
+            sectors: RefCell::new(HashMap::new()),
+            blocks: bytes / BLOCK as u64,
             fail_reads_past: None,
             flush_refuses: false,
             volume_bytes: None,
-            out_of_volume: 0,
+            out_of_volume: Cell::new(0),
         };
-        for (i, chunk) in prefix.chunks(512).enumerate() {
-            let mut s = [0u8; 512];
-            s[..chunk.len()].copy_from_slice(chunk);
-            dev.sectors.insert(i as u64, s);
-        }
+        dev.poke(0, prefix);
         dev
     }
 
@@ -154,32 +129,39 @@ impl SparseDevice {
     }
 
     pub fn poke(&mut self, offset: u64, bytes: &[u8]) {
+        Self::put(self.sectors.get_mut(), offset, bytes);
+    }
+
+    fn put(sectors: &mut HashMap<u64, [u8; 512]>, offset: u64, bytes: &[u8]) {
         let mut done = 0usize;
         while done < bytes.len() {
             let pos = offset + done as u64;
             let sector = pos / 512;
             let within = (pos % 512) as usize;
             let n = (512 - within).min(bytes.len() - done);
-            let slot = self.sectors.entry(sector).or_insert([0u8; 512]);
+            let slot = sectors.entry(sector).or_insert([0u8; 512]);
             slot[within..within + n].copy_from_slice(&bytes[done..done + n]);
             done += n;
         }
     }
 
-    fn note_range(&mut self, end: u64) {
-        if self.volume_bytes.is_some_and(|v| end > v) {
-            self.out_of_volume += 1;
+    /// Count a request for blocks `lba..lba + count` that lies wholly past
+    /// the volume.
+    fn note_range(&self, lba: u64, count: usize) {
+        if count > 0 && self.volume_bytes.is_some_and(|v| lba * BLOCK as u64 >= v.next_multiple_of(BLOCK as u64)) {
+            self.out_of_volume.set(self.out_of_volume.get() + 1);
         }
     }
 
     fn read_bytes(&self, offset: u64, buf: &mut [u8]) {
+        let sectors = self.sectors.borrow();
         let mut done = 0usize;
         while done < buf.len() {
             let pos = offset + done as u64;
             let sector = pos / 512;
             let within = (pos % 512) as usize;
             let n = (512 - within).min(buf.len() - done);
-            match self.sectors.get(&sector) {
+            match sectors.get(&sector) {
                 Some(s) => buf[done..done + n].copy_from_slice(&s[within..within + n]),
                 None => buf[done..done + n].fill(0),
             }
@@ -188,212 +170,34 @@ impl SparseDevice {
     }
 }
 
-impl BlockAccess for SparseDevice {
-    fn capacity(&self) -> u64 {
-        self.capacity
+impl BlockDev for SparseDevice {
+    fn blocks(&self) -> u64 {
+        self.blocks
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        let end = offset.checked_add(buf.len() as u64).ok_or(IoError::Device)?;
-        if end > self.capacity {
-            return Err(IoError::Device);
+    async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), DevError> {
+        within(lba, out.len(), self.blocks)?;
+        let end = (lba + out.len() as u64) * BLOCK as u64;
+        if self.fail_reads_past.is_some_and(|limit| end > limit) {
+            return Err(DevError::Device);
         }
-        if let Some(limit) = self.fail_reads_past {
-            if end > limit {
-                return Err(IoError::Device);
-            }
-        }
-        self.note_range(end);
-        self.read_bytes(offset, buf);
+        self.note_range(lba, out.len());
+        self.read_bytes(lba * BLOCK as u64, out.as_flattened_mut());
         Ok(())
     }
 
-    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        let end = offset.checked_add(buf.len() as u64).ok_or(IoError::Device)?;
-        if end > self.capacity {
-            return Err(IoError::Device);
-        }
-        self.note_range(end);
-        self.poke(offset, buf);
+    async fn write(&self, lba: u64, data: &[Block]) -> Result<(), DevError> {
+        within(lba, data.len(), self.blocks)?;
+        self.note_range(lba, data.len());
+        Self::put(&mut self.sectors.borrow_mut(), lba * BLOCK as u64, data.as_flattened());
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<(), IoError> {
+    async fn flush(&self) -> Result<(), DevError> {
         if self.flush_refuses {
-            return Err(IoError::Device);
+            return Err(DevError::Device);
         }
         Ok(())
-    }
-}
-
-pub const ADAPTER_BLOCK: usize = 4096;
-
-pub const ADAPTER_RESIDENT_BLOCKS: usize = 8;
-
-/// Where a refused block write got to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Landing {
-    /// The write never reached the medium.
-    NotReached,
-    /// The write reached the medium and was answered as refused anyway.
-    Reached,
-}
-
-/// A medium in memory behind `FatDevice`'s resident blocks, served and written
-/// the way `FatDevice::read_at` and `FatDevice::write_at` serve and write it.
-///
-/// A request moves in 4 KiB blocks. A whole block bypasses the resident copy,
-/// and a whole-block write forgets it. A partial block is read through `load`,
-/// which serves the resident copy and fills it from the medium on a miss, and
-/// is written read-modify-write over that copy: the whole block reaches the
-/// medium, carrying the resident neighbours with it, and is retained only once
-/// the write answers. Eight blocks are resident, evicted round-robin.
-///
-/// A refusal falls on a request's first block write, and the request stops
-/// there as the adapter's `?` stops it. A request refused at a later block, the
-/// earlier ones written and retained, is not generated, which is sound only
-/// while no metadata write crosses a block.
-pub struct AdapterCache {
-    /// Padded to whole blocks, as the partition under a volume is.
-    medium: Vec<u8>,
-    /// The volume's own length.
-    len: usize,
-    resident: Vec<u8>,
-    tags: [Option<usize>; ADAPTER_RESIDENT_BLOCKS],
-    next_victim: usize,
-    scratch: Vec<u8>,
-}
-
-impl AdapterCache {
-    pub fn new(mut medium: Vec<u8>) -> AdapterCache {
-        let len = medium.len();
-        medium.resize(len.next_multiple_of(ADAPTER_BLOCK), 0);
-        AdapterCache {
-            medium,
-            len,
-            resident: vec![0u8; ADAPTER_RESIDENT_BLOCKS * ADAPTER_BLOCK],
-            tags: [None; ADAPTER_RESIDENT_BLOCKS],
-            next_victim: 0,
-            scratch: vec![0u8; ADAPTER_BLOCK],
-        }
-    }
-
-    pub fn len(&self) -> u64 {
-        self.len as u64
-    }
-
-    /// The volume as the medium holds it, which is what a judge reads.
-    pub fn medium(&self) -> &[u8] {
-        &self.medium[..self.len]
-    }
-
-    pub fn into_medium(mut self) -> Vec<u8> {
-        self.medium.truncate(self.len);
-        self.medium
-    }
-
-    /// Change the medium behind the adapter's back, dropping the blocks it
-    /// touches from the resident copy.
-    pub fn poke(&mut self, offset: usize, bytes: &[u8]) {
-        self.medium[offset..offset + bytes.len()].copy_from_slice(bytes);
-        let first = offset / ADAPTER_BLOCK;
-        let last = (offset + bytes.len()).div_ceil(ADAPTER_BLOCK);
-        self.forget(first, last - first);
-    }
-
-    fn slot_of(&self, block: usize) -> Option<usize> {
-        self.tags.iter().position(|&t| t == Some(block))
-    }
-
-    fn load(&mut self, block: usize) {
-        if let Some(slot) = self.slot_of(block) {
-            let at = slot * ADAPTER_BLOCK;
-            self.scratch.copy_from_slice(&self.resident[at..at + ADAPTER_BLOCK]);
-            return;
-        }
-        let at = block * ADAPTER_BLOCK;
-        self.scratch.copy_from_slice(&self.medium[at..at + ADAPTER_BLOCK]);
-        self.retain(block);
-    }
-
-    fn retain(&mut self, block: usize) {
-        let slot = self.slot_of(block).unwrap_or_else(|| {
-            let s = self.next_victim;
-            self.next_victim = (s + 1) % ADAPTER_RESIDENT_BLOCKS;
-            s
-        });
-        let at = slot * ADAPTER_BLOCK;
-        self.resident[at..at + ADAPTER_BLOCK].copy_from_slice(&self.scratch);
-        self.tags[slot] = Some(block);
-    }
-
-    fn forget(&mut self, first: usize, count: usize) {
-        for tag in &mut self.tags {
-            if tag.is_some_and(|b| b >= first && b < first + count) {
-                *tag = None;
-            }
-        }
-    }
-
-    /// `FatDevice::read_at`, over a range the caller has bounded.
-    pub fn read(&mut self, offset: u64, buf: &mut [u8]) {
-        let base = offset as usize;
-        let mut done = 0usize;
-        while done < buf.len() {
-            let at = base + done;
-            let block = at / ADAPTER_BLOCK;
-            let within = at % ADAPTER_BLOCK;
-            let left = buf.len() - done;
-            if within == 0 && left >= ADAPTER_BLOCK {
-                let end = done + left / ADAPTER_BLOCK * ADAPTER_BLOCK;
-                buf[done..end].copy_from_slice(&self.medium[at..at + (end - done)]);
-                done = end;
-            } else {
-                let n = (ADAPTER_BLOCK - within).min(left);
-                self.load(block);
-                buf[done..done + n].copy_from_slice(&self.scratch[within..within + n]);
-                done += n;
-            }
-        }
-    }
-
-    /// `FatDevice::write_at`, over a range the caller has bounded: every block
-    /// written, or with `refusal` the first block write refused where it got
-    /// to and nothing after it issued.
-    pub fn write(&mut self, offset: u64, buf: &[u8], refusal: Option<Landing>) {
-        let base = offset as usize;
-        let reaches = refusal != Some(Landing::NotReached);
-        let mut done = 0usize;
-        while done < buf.len() {
-            let at = base + done;
-            let block = at / ADAPTER_BLOCK;
-            let within = at % ADAPTER_BLOCK;
-            let left = buf.len() - done;
-            if within == 0 && left >= ADAPTER_BLOCK {
-                let count = left / ADAPTER_BLOCK;
-                self.forget(block, count);
-                let issued = if refusal.is_some() { ADAPTER_BLOCK } else { count * ADAPTER_BLOCK };
-                if reaches {
-                    self.medium[at..at + issued].copy_from_slice(&buf[done..done + issued]);
-                }
-                done += count * ADAPTER_BLOCK;
-            } else {
-                let n = (ADAPTER_BLOCK - within).min(left);
-                self.load(block);
-                self.scratch[within..within + n].copy_from_slice(&buf[done..done + n]);
-                if reaches {
-                    let start = block * ADAPTER_BLOCK;
-                    self.medium[start..start + ADAPTER_BLOCK].copy_from_slice(&self.scratch);
-                }
-                if refusal.is_none() {
-                    self.retain(block);
-                }
-                done += n;
-            }
-            if refusal.is_some() {
-                return;
-            }
-        }
     }
 }
 
@@ -437,7 +241,7 @@ impl Image {
     }
 
     pub fn device(&self) -> BlockyFile {
-        BlockyFile::open(&self.path, 4096)
+        BlockyFile::open(&self.path)
     }
 
     pub fn bytes(&self, len: usize) -> Vec<u8> {
@@ -477,15 +281,15 @@ impl Image {
 /// A free function rather than `unwrap_err`, because that would need `Debug`
 /// on the whole filesystem — and a `Debug` on `Fat32` exists only to serve
 /// this line, which is not a reason for a public trait impl.
-pub fn mount_err<D: BlockAccess>(dev: D) -> toyos_fat32::Error {
-    match toyos_fat32::Fat32::mount(dev) {
+pub fn mount_err<D: BlockDev>(dev: D) -> toyos_fat32::Error {
+    match now(toyos_fat32::Fat32::mount(dev)) {
         Ok(_) => panic!("mount succeeded on a volume that should have been refused"),
         Err(e) => e,
     }
 }
 
-pub fn sorted_walk<D: BlockAccess>(fs: &mut toyos_fat32::Fat32<D>) -> Vec<(String, u64)> {
-    let mut v = fs.walk("", 4096).expect("walk");
+pub fn sorted_walk<D: BlockDev>(fs: &mut toyos_fat32::Fat32<D>) -> Vec<(String, u64)> {
+    let mut v = now(fs.walk("", 4096)).expect("walk");
     v.sort();
     v
 }
@@ -509,24 +313,24 @@ pub fn walk_expectation(files: &[(String, Vec<u8>)]) -> Vec<(String, u64)> {
 }
 
 /// Read a whole file through the crate.
-pub fn read_all<D: BlockAccess>(fs: &mut toyos_fat32::Fat32<D>, path: &str) -> Vec<u8> {
-    let mut f = fs.open(path).unwrap_or_else(|e| panic!("open {path}: {e}"));
+pub fn read_all<D: BlockDev>(fs: &mut toyos_fat32::Fat32<D>, path: &str) -> Vec<u8> {
+    let mut f = now(fs.open(path)).unwrap_or_else(|e| panic!("open {path}: {e}"));
     let mut out = vec![0u8; f.len() as usize];
-    let n = fs.read(&mut f, 0, &mut out).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let n = now(fs.read(&mut f, 0, &mut out)).unwrap_or_else(|e| panic!("read {path}: {e}"));
     assert_eq!(n, out.len(), "short read of {path}");
     out
 }
 
 /// Write a whole file through the crate, creating it.
-pub fn write_new<D: BlockAccess>(
+pub fn write_new<D: BlockDev>(
     fs: &mut toyos_fat32::Fat32<D>,
     path: &str,
     data: &[u8],
     time: toyos_fat32::FatTime,
 ) {
-    let mut f = fs.create(path, time).unwrap_or_else(|e| panic!("create {path}: {e}"));
-    fs.write(&mut f, 0, data).unwrap_or_else(|e| panic!("write {path}: {e}"));
-    fs.flush_meta(&mut f, time).unwrap_or_else(|e| panic!("flush {path}: {e}"));
+    let mut f = now(fs.create(path, time)).unwrap_or_else(|e| panic!("create {path}: {e}"));
+    now(fs.write(&mut f, 0, data)).unwrap_or_else(|e| panic!("write {path}: {e}"));
+    now(fs.flush_meta(&mut f, time)).unwrap_or_else(|e| panic!("flush {path}: {e}"));
 }
 
 /// Assert every FAT holds the same bytes on `medium`, the volume from its
@@ -556,7 +360,7 @@ pub fn assert_fats_agree(g: &toyos_fat32::Geometry, medium: &[u8]) {
 /// reports the *long* name, and duplicate short names are invisible from
 /// there — which is why a build that stopped uniquifying them once passed
 /// everything, `fsck_msdos` and a real mount included.
-pub fn short_names_in<D: BlockAccess>(
+pub fn short_names_in<D: BlockDev>(
     fs: &mut toyos_fat32::Fat32<D>,
     first_cluster: u32,
 ) -> Vec<[u8; 11]> {
@@ -565,7 +369,7 @@ pub fn short_names_in<D: BlockAccess>(
     let mut cluster = g.cluster(first_cluster).expect("directory cluster is in the volume");
     let mut buf = vec![0u8; g.bytes_per_cluster() as usize];
     for _ in 0..4096 {
-        fs.device().read_at(g.cluster_offset(cluster), &mut buf).expect("read directory cluster");
+        read_at(fs.device(), g.cluster_offset(cluster), &mut buf);
         for entry in buf.as_chunks::<32>().0 {
             if entry[0] == 0x00 {
                 return out;
@@ -580,9 +384,7 @@ pub fn short_names_in<D: BlockAccess>(
             out.push(short);
         }
         let mut link = [0u8; 4];
-        fs.device()
-            .read_at(g.fat_entry_offset(0, cluster), &mut link)
-            .expect("read chain link");
+        read_at(fs.device(), g.fat_entry_offset(0, cluster), &mut link);
         match g.cluster(u32::from_le_bytes(link) & 0x0FFF_FFFF) {
             Some(next) => cluster = next,
             None => return out,

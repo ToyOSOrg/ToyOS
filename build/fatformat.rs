@@ -180,13 +180,15 @@ mod tests {
     fn an_empty_volume_mounts_free_and_checks_clean() {
         for bytes in SIZES {
             let mut volume = format(bytes, *b"TOYOS-LOG  ");
-            let mut fs = toyos_fat32::Fat32::mount(crate::image::VolumeIo(&mut volume)).expect("it mounts");
-            assert!(fs.walk("", 8).expect("it walks").is_empty(), "{bytes}: an empty volume lists files");
-            let geometry = *fs.geometry();
-            let cluster = u64::from(geometry.bytes_per_cluster());
-            assert_eq!(fs.free_bytes().expect("it counts"), (u64::from(geometry.cluster_count) - 1) * cluster, "{bytes}");
-            fs.sync().expect("it records the count");
-            drop(fs);
+            toyos_blockdev::block_on_ready(async {
+                let mut fs = toyos_fat32::Fat32::mount(toyos_blockdev::Bytes::new(&mut volume[..])).await.expect("it mounts");
+                assert!(fs.walk("", 8).await.expect("it walks").is_empty(), "{bytes}: an empty volume lists files");
+                let geometry = *fs.geometry();
+                let cluster = u64::from(geometry.bytes_per_cluster());
+                let free = fs.free_bytes().await.expect("it counts");
+                assert_eq!(free, (u64::from(geometry.cluster_count) - 1) * cluster, "{bytes}");
+                fs.sync().await.expect("it records the count");
+            });
             let complaints = toyos_fat32_check::check(&volume);
             assert!(complaints.is_empty(), "{bytes}:\n{}", toyos_fat32_check::describe(&complaints));
         }

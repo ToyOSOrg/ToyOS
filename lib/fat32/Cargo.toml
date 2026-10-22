@@ -1,27 +1,28 @@
-# A member of the host workspace (root `Cargo.toml`): the
-# kernel depends on it by path and its tests run on the host, with no
-# target-triple juggling. Membership adds no dependency edge — a
+# A member of the host workspace (root `Cargo.toml`): its tests run on the
+# host, with no target-triple juggling. Membership adds no dependency edge — a
 # workspace shares a lockfile and nothing else.
 #
-# **One dependency, and the rule it is the exception to is the reason for it.**
-# A filesystem driver that pulls in a crate graph cannot be audited for the one
-# property that matters here, which is that no path reachable from on-disk
-# bytes can panic. So the graph stays a single leaf: `toyos-wallclock` is ours,
-# `no_std`, `forbid(unsafe_code)`, and depends on nothing itself. What the edge
-# replaced was a third copy of Hinnant's algorithm — byte-identical to that
-# crate's, reachable from a directory entry's raw bit-fields, and read by
-# nothing outside `src/time.rs`. The audit is now over arithmetic that nine
+# **Two dependencies, both leaves, and the rule they are the exception to is
+# the reason for it.** A filesystem driver that pulls in a crate graph cannot
+# be audited for the one property that matters here, which is that no path
+# reachable from on-disk bytes can panic. So the graph stays two leaves of
+# ours, each `no_std`, `forbid(unsafe_code)` and depending on nothing:
+# `toyos-blockdev`, the device every volume is read through, and
+# `toyos-wallclock`, whose edge replaced a third copy of Hinnant's algorithm —
+# byte-identical to that crate's, reachable from a directory entry's raw
+# bit-fields, and read by nothing outside `src/time.rs`. The audit is now over arithmetic that nine
 # host tests stand behind, and `every_bit_pattern_decodes` is where its
 # totality against hostile bytes is still asserted here.
 
 [package]
 name = "toyos-fat32"
-description = "FAT32 driver, read and write, over a byte-addressed volume; no format path by design."
+description = "FAT32 driver, read and write, over a block device; no format path by design."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+toyos-blockdev = { path = "../blockdev" }
 toyos-wallclock = { path = "../wallclock" }
 
 [dev-dependencies]

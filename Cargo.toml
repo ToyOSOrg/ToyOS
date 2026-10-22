@@ -38,13 +38,13 @@ members = [
     "lib/acpiserver-api",
     "lib/bcachefs",
     "lib/blackbox",
+    "lib/blockdev",
     "lib/blockhold",
     "lib/blockring",
     "lib/blockserve",
     "lib/bootmap",
     "lib/crypto",
     "lib/device-memory",
-    "lib/disk",
     "lib/elf",
     "lib/edid",
     "lib/elide",
@@ -220,6 +220,9 @@ toyos-symbols = { path = "lib/symbols" }
 # `llvm-objdump`, is a C++ tool where a Rust one does the job.
 iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "instr_info"] }
 toyos-fat32 = { path = "lib/fat32" }
+# The device `toyos-fat32` writes and reads a volume through: here, the bytes
+# being built.
+toyos-blockdev = { path = "lib/blockdev" }
 # The names the loader looks a CPU's microcode up by, which `microcode` writes
 # each patch it splits out of a vendor's file under.
 toyos-microcode = { path = "lib/microcode" }

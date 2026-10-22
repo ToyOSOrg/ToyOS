@@ -47,18 +47,22 @@
 //!   error from its own `create_symlink`, and `read_link` must always answer
 //!   `None`. Succeeding silently would leave a caller holding a regular file
 //!   it believes is a link.
-//! - **No caching.** The kernel's page cache sits directly under
-//!   [`BlockAccess`]. A second cache here would be a coherence hazard for no
-//!   gain, since every FAT sector this crate re-reads is a hit in that one.
+//! - **No caching.** A volume that wants a cache mounts over one: the file
+//!   server's is a [`BlockDev`](toyos_blockdev::BlockDev) under this crate. A
+//!   second cache here would be a coherence hazard for no gain, since every
+//!   FAT sector this crate re-reads is a hit in that one.
 //! - **No FAT12/FAT16.** The cluster count decides the FAT type, per the
 //!   specification, and a volume with fewer than [`MIN_FAT32_CLUSTERS`]
 //!   clusters is not FAT32 no matter what its boot sector says.
 //!
 //! # Shape
 //!
-//! [`Fat32`] owns a [`BlockAccess`] and nothing else that persists. Path-based
-//! calls ([`Fat32::create`], [`Fat32::remove`], [`Fat32::metadata`], …) resolve
-//! from the root every time; [`Fat32::open`] hands back a [`File`] that caches
+//! [`Fat32`] owns a [`BlockDev`](toyos_blockdev::BlockDev) and nothing else
+//! that persists, and every call that reaches it is `async` (`src/device.rs`
+//! is how bytes become its blocks); a caller with nothing else to run drives
+//! one with `toyos_blockdev::block_on`. Path-based calls ([`Fat32::create`],
+//! [`Fat32::remove`], [`Fat32::metadata`], …) resolve from the root every
+//! time; [`Fat32::open`] hands back a [`File`] that caches
 //! the directory-entry location and a chain position, so repeated I/O on one
 //! file does not re-resolve the path or re-walk the chain from cluster zero.
 //! A [`File`] is plain data with no lifetime tie to the volume, so it can go
@@ -82,7 +86,6 @@ mod repair;
 mod time;
 
 pub use boot::{Cluster, Geometry, MIN_FAT32_CLUSTERS};
-pub use device::{BlockAccess, IoError};
 pub use dir::MAX_DIR_ENTRIES;
 pub use error::Error;
 pub use fs::{DirEntry, Extent, Fat32, File, Metadata, ReplaceFailed, Replaced};

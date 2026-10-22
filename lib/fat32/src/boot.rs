@@ -1,4 +1,5 @@
-use crate::device::BlockAccess;
+use toyos_blockdev::BlockDev;
+use crate::device::Volume as _;
 use crate::error::Error;
 
 /// Below this cluster count the volume is FAT12 or FAT16, whatever its boot
@@ -280,10 +281,10 @@ impl FsInfo {
     /// A bad FSInfo does not fail the mount. It carries no information the FAT
     /// does not already hold, so refusing to mount over it would turn a
     /// cosmetic inconsistency into an unbootable machine.
-    pub fn read<D: BlockAccess>(dev: &mut D, geom: &Geometry, buf: &mut [u8]) -> FsInfo {
+    pub async fn read<D: BlockDev>(dev: &D, geom: &Geometry, buf: &mut [u8]) -> FsInfo {
         let Some(sector) = geom.fsinfo_sector else { return FsInfo::UNKNOWN };
         let Some(buf) = buf.get_mut(..geom.bytes_per_sector as usize) else { return FsInfo::UNKNOWN };
-        if dev.read_at(geom.sector_offset(sector), buf).is_err() {
+        if dev.read_at(geom.sector_offset(sector), buf).await.is_err() {
             return FsInfo::UNKNOWN;
         }
         if u32_at(buf, 0) != 0x4161_5252
@@ -307,11 +308,11 @@ impl FsInfo {
     /// and the reserved regions belong to whoever formatted the volume, and
     /// rewriting them from our own idea of the layout is how a driver corrupts
     /// a filesystem it only meant to update a counter in.
-    pub fn write<D: BlockAccess>(&self, dev: &mut D, geom: &Geometry, buf: &mut [u8]) -> Result<(), Error> {
+    pub async fn write<D: BlockDev>(&self, dev: &D, geom: &Geometry, buf: &mut [u8]) -> Result<(), Error> {
         let Some(sector) = geom.fsinfo_sector else { return Ok(()) };
         let Some(buf) = buf.get_mut(..geom.bytes_per_sector as usize) else { return Ok(()) };
         let offset = geom.sector_offset(sector);
-        dev.read_at(offset, buf)?;
+        dev.read_at(offset, buf).await?;
         if u32_at(buf, 0) != 0x4161_5252 || u32_at(buf, 484) != 0x6141_7272 {
             return Ok(());
         }
@@ -322,7 +323,7 @@ impl FsInfo {
         };
         put(buf, 488, self.free_count.unwrap_or(0xFFFF_FFFF));
         put(buf, 492, self.next_free.map_or(0xFFFF_FFFF, Cluster::raw));
-        dev.write_at(offset, buf)?;
+        dev.write_at(offset, buf).await?;
         Ok(())
     }
 }

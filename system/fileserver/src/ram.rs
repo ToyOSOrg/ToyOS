@@ -1,50 +1,54 @@
 //! The blocks memory stands in for a partition with.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 
-use diskserver::disk::{span, Disk, DiskError, BLOCK};
+use toyos_blockdev::{within, Block, BlockDev, Error};
+
+use crate::cache::Disk;
 
 /// A volume in memory: the DATA role on a machine with no DATA partition, as
 /// the kernel's tmpfs was. Sparse, so what nothing wrote costs nothing.
 pub struct Ram {
     blocks: u64,
-    written: BTreeMap<u64, Box<[u8; BLOCK]>>,
+    written: RefCell<BTreeMap<u64, Box<Block>>>,
 }
 
 impl Ram {
     pub fn new(blocks: u64) -> Self {
-        Self { blocks, written: BTreeMap::new() }
+        Self { blocks, written: RefCell::default() }
     }
 }
 
-impl Disk for Ram {
+impl BlockDev for Ram {
     fn blocks(&self) -> u64 {
         self.blocks
     }
 
-    fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
-        span(first, out.len(), self.blocks)?;
-        for (i, chunk) in out.chunks_exact_mut(BLOCK).enumerate() {
-            match self.written.get(&(first + i as u64)) {
-                Some(block) => chunk.copy_from_slice(&block[..]),
-                None => chunk.fill(0),
+    async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), Error> {
+        within(lba, out.len(), self.blocks)?;
+        let written = self.written.borrow();
+        for (block, out) in (lba..).zip(out) {
+            match written.get(&block) {
+                Some(data) => *out = **data,
+                None => out.fill(0),
             }
         }
         Ok(())
     }
 
-    fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
-        span(first, data.len(), self.blocks)?;
-        for (i, chunk) in data.chunks_exact(BLOCK).enumerate() {
-            let mut block = Box::new([0u8; BLOCK]);
-            block.copy_from_slice(chunk);
-            self.written.insert(first + i as u64, block);
+    async fn write(&self, lba: u64, data: &[Block]) -> Result<(), Error> {
+        within(lba, data.len(), self.blocks)?;
+        let mut written = self.written.borrow_mut();
+        for (block, data) in (lba..).zip(data) {
+            written.insert(block, Box::new(*data));
         }
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<(), DiskError> {
+    async fn flush(&self) -> Result<(), Error> {
         Ok(())
     }
 }
 
+impl Disk for Ram {}
