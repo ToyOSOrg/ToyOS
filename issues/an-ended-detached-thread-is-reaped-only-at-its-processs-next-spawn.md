@@ -14,10 +14,8 @@ process joins it, which frees its 2 MiB stack and its `MAX_THREADS` place.
 
 Until that spawn, the ended thread stays in its process's table. `ps` shows it
 as `Z`, and its stack stays allocated. A process that detaches threads and then
-never spawns another keeps all of them for its whole life. That covers a
-service whose last thread start is a detached worker: the supervisor detaches
-`sync-{role}` (`system/supervisor/src/main.rs`), and anything that drops a
-`JoinHandle` does the same. The cost is bounded by the threads detached since
+never spawns another keeps all of them for its whole life: any program that
+drops a `JoinHandle` and starts no thread after it. The cost is bounded by the threads detached since
 the last spawn, not by the number of spawns. #987 made it bounded; before #987
 nothing reaped these threads at all.
 
