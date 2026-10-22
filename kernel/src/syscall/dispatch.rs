@@ -565,6 +565,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             DA::CANARY_CHANGED => canary::changed() as u64,
             DA::TLB_ACK_DELAY_ARM => crate::arch::tlb::debug_arm_ack_delay(a2),
             DA::TLB_ACK_DELAY_DISARM => crate::arch::tlb::debug_disarm_ack_delay(),
+            DA::SPACE_REACHED => crate::process::current_address_space().usage().reached(),
             // The two leaks this object model accepts — a stranded Arc, the cross-pair
             // connection cycle — are visible in no other way than this census.
             // Per kind, not total: a total would hide one kind's leak behind another's churn.

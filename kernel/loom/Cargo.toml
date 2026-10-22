@@ -182,6 +182,9 @@ log-ring-publish-relaxed = []
 # room that is not there.
 log-ring-tail-relaxed = []
 log-ring-loads-swapped = []
+# The negative control of `tests/tlb_tags.rs`: `Tags::enter` with its pairing
+# relaxed, which must red the model.
+tlb-tags-enter-relaxed = []
 
 # The negative control for the panic console's published descriptor. It drops
 # the publisher's `Release` fence between its odd mark and its words, so a

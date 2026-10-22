@@ -511,6 +511,9 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("an_acknowledged_flush_postdates_the_page_table_write"),
         Fails("one_serve_answers_two_concurrent_shootdowns"),
     ]),
+    red(KERNEL_LOOM, "tlb-tags-enter-relaxed", Some("tlb_tags"), &[
+        Fails("a_change_reaches_a_runner_or_the_entering_cpu_flushes"),
+    ]),
     red(KERNEL_LOOM, "shootdown-served-relaxed", Some("counters_round"), &[
         Fails("a_cpu_read_as_answered_is_read_with_its_answer"),
     ]),

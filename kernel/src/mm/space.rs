@@ -64,9 +64,17 @@ pub struct Usage {
     /// Pages a fault populated, and the time faults took.
     faults: AtomicU64,
     fault_ns: AtomicU64,
+    /// Changes to the space's leaves that reached another CPU by interrupt.
+    reached: AtomicU64,
 }
 
 impl Usage {
+    /// Read only by the test kernel's `SYS_DEBUG`.
+    #[cfg(feature = "test-actuators")]
+    pub fn reached(&self) -> u64 {
+        self.reached.load(Relaxed)
+    }
+
     pub fn resident_bytes(&self) -> u64 {
         self.resident.load(Relaxed) * PAGE_SIZE
     }
@@ -339,7 +347,7 @@ impl AddressSpace {
             (Leaf::Held(_), None) | (Leaf::Empty, _) => None,
         });
         if present {
-            self.tables.shoot_down(start, end, &Unlinked::none());
+            self.shoot_down(start, end, &Unlinked::none());
         }
         Ok(())
     }
@@ -376,6 +384,14 @@ impl AddressSpace {
             return Err(SyscallError::BadAddress);
         }
         Ok((start.raw(), end))
+    }
+
+    /// Every CPU has dropped what it cached of `[start, end)` and of the
+    /// tables `unlinked` took out, counting the changes that reached another.
+    fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) {
+        if self.tables.shoot_down(start, end, unlinked) {
+            self.usage.reached.fetch_add(1, Relaxed);
+        }
     }
 
     /// [`release`](Self::release) of every page of `[start, start + len)`
@@ -424,7 +440,7 @@ impl AddressSpace {
             Leaf::Held(_) | Leaf::Empty => None,
         });
         if present {
-            self.tables.shoot_down(start, end, &Unlinked::none());
+            self.shoot_down(start, end, &Unlinked::none());
         }
         let mut freed = 0;
         self.tables.take_owned(start, end, |frames| {
@@ -438,7 +454,7 @@ impl AddressSpace {
         let inventory = &self.inventory;
         let unlinked = self.tables.unlink(start, end, |s, e| inventory.backed(s, e));
         if !unlinked.is_empty() {
-            self.tables.shoot_down(start, end, &unlinked);
+            self.shoot_down(start, end, &unlinked);
         }
         unlinked.free();
         self.usage.freed(freed);

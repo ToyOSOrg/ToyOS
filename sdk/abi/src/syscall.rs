@@ -909,6 +909,10 @@ pub mod debug_action {
     /// whichever comes first.
     pub const TLB_ACK_DELAY_ARM: u64 = 12;
     pub const TLB_ACK_DELAY_DISARM: u64 = 13;
+    /// How many changes to the caller's own address space have reached
+    /// another CPU by interrupt: what a change no other CPU runs the space on
+    /// must leave as it was.
+    pub const SPACE_REACHED: u64 = 29;
     /// How many kernel objects of one kind are alive right now. The argument is
     /// an [`ObjectKind`](crate::handle::ObjectKind) word.
     ///

@@ -171,6 +171,9 @@ pub mod cpu_slice;
 #[path = "../../src/shootdown.rs"]
 pub mod shootdown;
 
+#[path = "../../src/tlb_tags.rs"]
+pub mod tlb_tags;
+
 /// The CPU roster and the release/answer word, driven by `tests/smp_bringup.rs`;
 /// under `loom` alone, as is the [`arch::cpu`] shim it names.
 #[cfg(feature = "loom")]

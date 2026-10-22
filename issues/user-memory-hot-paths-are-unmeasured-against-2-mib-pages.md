@@ -23,8 +23,10 @@ did, and none is measured on the T14 against the base or against Linux:
   inventory lookup and a table walk per page.
 - **Spawn.** The whole image is copied when the process is made.
 
-The x86 shootdown that reaches every CPU for any change to a present leaf has
-its own record (`issues/a-tlb-shootdown-reaches-only-the-cpus-that-ran-the-space.md`).
+- **Shootdowns.** A change to a present leaf reaches the CPUs running the
+  space, each of which flushes every user translation, and a CPU entering a
+  space that changed flushes them all too
+  (`issues/a-tlb-shootdown-reaches-only-the-cpus-that-ran-the-space.md`).
 
 osbench measures faults (`mem.first_touch`, `mem.anon`), small maps
 (`mem.map_unmap_4k`), partial unmaps and protection changes against Linux on
