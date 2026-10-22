@@ -227,14 +227,16 @@ fn signed_header(bs: &BootServices, which: Which, slot: &Slot) -> Result<(Header
     let header_bytes: &[u8; toyos_update::image::HEADER_BYTES] =
         signed[..toyos_update::image::HEADER_BYTES].try_into().expect("a signed header begins with its header");
     let signature: [u8; SIGNATURE_BYTES] = toyos_update::image::signature_of(&signed);
+    let began = crate::arch::counter();
     sig::verify(&KEY, header_bytes, &signature).map_err(|why| {
         println!("{HEAD} {letter}: {why}");
         Refusal::Signature
     })?;
+    let ticks = crate::arch::counter().wrapping_sub(began);
     let digest = toyos_update::sha256(&signed);
     let mut hex = [0u8; 64];
     println!(
-        "{HEAD} {letter}: signed header {} verifies under this loader's key, version {}",
+        "{HEAD} {letter}: signed header {} verifies under this loader's key, version {}, in {ticks} counter ticks",
         toyos_update::hex(&digest, &mut hex),
         header.version
     );

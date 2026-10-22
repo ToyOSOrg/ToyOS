@@ -16,7 +16,7 @@
 //! anything else — a git commit, a package repository's targets, an image —
 //! from verifying as this.
 
-use ed25519_dalek::{Signature, VerifyingKey};
+use toyos_crypto::ed25519::PublicKey;
 use toyos_crypto::hash::Sha512;
 
 use crate::image::{HEADER_BYTES, SIGNATURE_BYTES};
@@ -98,26 +98,26 @@ impl core::fmt::Display for Refused {
 
 /// Whether `signature` is `key`'s over `signed`, in its namespace.
 ///
-/// `verify_strict`: a signature with a non-canonical `S`, or a key of small
-/// order, is refused rather than accepted by one implementation and not
-/// another.
+/// Strict RFC 8032: a signature with a non-canonical `S` or a small-order
+/// `R`, and a key that is small-order or not canonically encoded, are refused
+/// rather than accepted by one implementation and not another.
 pub fn verify<S: Signed + ?Sized>(key: &[u8; 32], signed: &S, signature: &[u8; SIGNATURE_BYTES]) -> Result<(), Refused> {
-    let key = VerifyingKey::from_bytes(key).map_err(|_| Refused::Key)?;
-    key.verify_strict(message(signed).as_bytes(), &Signature::from_bytes(signature))
-        .map_err(|_| Refused::Signature)
+    let key = PublicKey::from_bytes(*key).map_err(|_| Refused::Key)?;
+    key.verify(message(signed).as_bytes(), signature).map_err(|_| Refused::Signature)
 }
 
-/// The public key of the seed `seed`.
+/// The public key of the seed `seed`: the host's, like [`sign`].
+#[cfg(any(test, feature = "sign"))]
 pub fn public_of(seed: &[u8; 32]) -> [u8; 32] {
-    ed25519_dalek::SigningKey::from_bytes(seed).verifying_key().to_bytes()
+    *toyos_crypto::ed25519::SigningKey::from_seed(*seed).public_key().as_bytes()
 }
 
 /// `seed`'s signature over `signed`: the host's half, and no binary on the
 /// machine is built with it.
 #[cfg(any(test, feature = "sign"))]
 pub fn sign<S: Signed + ?Sized>(seed: &[u8; 32], signed: &S) -> [u8; SIGNATURE_BYTES] {
-    use ed25519_dalek::Signer as _;
-    ed25519_dalek::SigningKey::from_bytes(seed).sign(message(signed).as_bytes()).to_bytes()
+    // The message is SSHSIG's few hundred bytes, far below SHA-512's bound.
+    toyos_crypto::ed25519::SigningKey::from_seed(*seed).sign(message(signed).as_bytes()).expect(crate::SHA_BOUND)
 }
 
 /// A seed as a key file holds it: 64 lowercase hex digits and a newline.
@@ -218,16 +218,16 @@ mod tests {
     fn rfc_8032_vectors_verify_and_a_flipped_bit_does_not() {
         for (seed, public, msg, sig) in [RFC_1, RFC_2, RFC_3] {
             assert_eq!(public_of(&seed), public, "the public key derived from the RFC's seed");
-            let key = VerifyingKey::from_bytes(&public).expect("the RFC's key");
-            key.verify_strict(msg, &Signature::from_bytes(&sig)).expect("the RFC's signature");
+            let key = PublicKey::from_bytes(public).expect("the RFC's key");
+            key.verify(msg, &sig).expect("the RFC's signature");
             for bit in [0, 255, 256, 511] {
                 let mut bent = sig;
                 bent[bit / 8] ^= 1 << (bit % 8);
-                assert!(key.verify_strict(msg, &Signature::from_bytes(&bent)).is_err(), "bit {bit}");
+                assert!(key.verify(msg, &bent).is_err(), "bit {bit}");
             }
             let mut longer = msg.to_vec();
             longer.push(0);
-            assert!(key.verify_strict(&longer, &Signature::from_bytes(&sig)).is_err());
+            assert!(key.verify(&longer, &sig).is_err());
         }
     }
 

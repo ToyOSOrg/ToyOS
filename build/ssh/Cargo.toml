@@ -16,5 +16,5 @@ publish = false
 toyos-crypto = { path = "../../lib/crypto", features = ["sign"] }
 # The one `SHA256:` fingerprint a key is named by, the one the package
 # repository's keys are named by too; and the public key of a seed, which the
-# image-signing key read through `hostkey` is derived with.
-toyos-update = { path = "../../lib/update" }
+# image-signing key read through `hostkey` is derived with, which is `sign`'s.
+toyos-update = { path = "../../lib/update", features = ["sign"] }

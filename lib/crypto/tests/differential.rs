@@ -500,6 +500,32 @@ fn seeded_ed25519_against_ring_and_dalek() {
     });
 }
 
+/// The twelve cases of "Taming the many EdDSAs" (Chalkias et al., 2020):
+/// every verdict is `verify_strict`'s, a refused key counting as a refused
+/// signature. ring accepts four that strict verification refuses: the
+/// small-order key of cases 0 and 1, the small-order R of case 2, and case
+/// 11's non-canonical R, so its verdicts are pinned, not followed.
+#[test]
+#[cfg_attr(not(feature = "portable"), ignore = "the same code in every form: run in the portable one")]
+fn speccheck_cases_against_dalek_strict_and_ring() {
+    let cases = support::data("ed25519_speccheck_cases.json");
+    let cases = cases.as_array().unwrap();
+    assert_eq!(cases.len(), 12);
+    for (i, case) in cases.iter().enumerate() {
+        let field = |name: &str| support::hex(case[name].as_str().unwrap());
+        let (message, public, signature) = (field("message"), field("pub_key"), field("signature"));
+        let public: [u8; 32] = public.try_into().unwrap();
+        let ours = toyos_crypto::ed25519::PublicKey::from_bytes(public).is_ok_and(|key| key.verify(&message, &signature).is_ok());
+        let strict = ed25519_dalek::VerifyingKey::from_bytes(&public).is_ok_and(|key| {
+            key.verify_strict(&message, &ed25519_dalek::Signature::from_bytes(&signature[..].try_into().unwrap())).is_ok()
+        });
+        let ring = ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, public).verify(&message, &signature).is_ok();
+        assert_eq!(ours, strict, "case {i}: verify_strict");
+        assert_eq!(ours, i == 3, "case {i}: only case 3 is a signature strict verification takes");
+        assert_eq!(ring, [0, 1, 2, 3, 11].contains(&i), "case {i}: ring's verdict moved");
+    }
+}
+
 /// One case of key derivation and agreement beside RustCrypto's, and
 /// verification of its deterministic signature, changed or not, beside
 /// ring's verifier.

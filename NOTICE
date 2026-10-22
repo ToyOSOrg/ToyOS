@@ -474,6 +474,22 @@ image carries them. These are every file of that directory for an interface the
 crate offers.
 
 
+lib/crypto/tests/data/ed25519_speccheck_cases.json — "Taming the many EdDSAs" cases, Apache-2.0
+-----------------------------------------------------------------------------------------------
+
+    ed25519_speccheck_cases.json  sha256 08e47a36d9aead288664930505584f353fff113ab854f2800db1e4f5b3540450
+    Upstream: https://github.com/novifinancial/ed25519-speccheck, `cases.json`
+    at commit 65519336fda78a3d016e947df6d82848aca0c9da, byte for byte
+    Licence text: lib/crypto/tests/data/speccheck-LICENSE (upstream's `LICENSE`,
+    sha256 c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4)
+    SPDX-License-Identifier: Apache-2.0
+
+The twelve edge cases of Chalkias, Garillot, Kondi and Nikolaenko, "Taming the
+many EdDSAs" (2020): small-order and non-canonical keys and points, and S
+past the group order. `toyos-crypto`'s host tests read them
+(`lib/crypto/tests/differential.rs`); no image carries them.
+
+
 tests/acvp/nist-*.json — NIST ACVP HMAC and ML-KEM vectors, NIST-Software
 -------------------------------------------------------------------------
 
