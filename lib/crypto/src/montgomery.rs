@@ -136,8 +136,8 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         Self(reduce(&t, high, &M::P), PhantomData)
     }
     /// The `const` forms of [`Self::mul`], [`Self::add`] and [`Self::sub`],
-    /// for tables built at compile time; their final subtraction is a plain
-    /// select.
+    /// for tables built at compile time and for tests: not for secrets. They
+    /// lack the register barrier, and `minus` branches on its borrow.
     pub(crate) const fn times(&self, b: &Self) -> Self {
         let (t, high) = product::<M, N>(&self.0, &b.0);
         Self(reduce_const(&t, high, &M::P), PhantomData)
@@ -201,7 +201,7 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         }
         r
     }
-    /// The `const` form of [`Self::square_times`].
+    /// The `const` form of [`Self::square_times`], as [`Self::times`].
     const fn squared_times(&self, k: u32) -> Self {
         let mut r = *self;
         let mut i = 0;
@@ -236,7 +236,8 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
             }
         }
     }
-    /// The `const` form of [`Self::invert`].
+    /// The `const` form of [`Self::invert`], for compile time and tests, as
+    /// [`Self::times`].
     pub(crate) const fn inverted(&self) -> Self {
         match M::FORM {
             Form::P256 => inversion_chain!(self, squared_times, times),

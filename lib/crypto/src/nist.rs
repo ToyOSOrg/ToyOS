@@ -318,7 +318,7 @@ impl<C: Curve<N>, const N: usize> Build<C, N> {
     }
 }
 
-/// P-256's comb: j 2^(5i) G for j = 1..=16 in 52 rows (53 KiB).
+/// P-256's comb: j 2^(5i) G for j = 1..=16 in 52 rows (52 KiB).
 // Building it runs some ten thousand field multiplications at compile time.
 #[allow(long_running_const_eval)]
 static P256_COMB: [[Affine<P256, 4>; 16]; windows(4)] = Build::<P256, 4>::comb();
@@ -393,9 +393,11 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
     /// (`Curve::OFFSET`), T >= 1 for every i < top; and as k' < 4n, for i >= 1
     /// 32 T <= k' / 2^(5i) + 16 < 4n / 32 + 16. So 0 < 32 T -+ d < n for
     /// every |d| <= 16: the running point is not the identity and neither
-    /// equals nor opposes dP, the addend or the discarded table[0]. Only the
-    /// last addition, i = 0, can double, and it does so by mask; it cannot
-    /// cancel, since k' is not 0 mod n.
+    /// equals nor opposes dP, the addend or the discarded table[0]. At i = 0,
+    /// 32 T = k' - d0 is a nonzero multiple of 32 below 4n + 16, and n is odd,
+    /// so it is not a multiple of n: the running point is not the identity.
+    /// That last addition can double, and does so by mask; it cannot cancel,
+    /// since k' is not 0 mod n.
     pub(crate) fn mul(&self, scalar: &Scalar<C, N>) -> Self {
         let mut table = [*self; 16];
         table[1] = self.double();
@@ -474,8 +476,8 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
     /// S_i G for the odd S_i = k' mod 2^(5i) - b 2^(5i), b = bit 5i - 1 of
     /// the representative k', so 0 < |S_i| <= 2^(5i - 1): never the identity.
     /// It equals or opposes the addend d 2^(5i) G only if
-    /// S_i -+ d 2^(5i) = 0 mod n, while 0 < |S_i -+ d 2^(5i)| <= 16.5 2^(5i),
-    /// which is below n for i < R - 1. At the top window S + d 2^(5i) = k' is
+    /// S_i -+ d 2^(5i) = 0 mod n, while S_i is odd and d 2^(5i) even, so
+    /// 0 < |S_i -+ d 2^(5i)| <= 16.5 2^(5i), which is below n for i < R - 1. At the top window S + d 2^(5i) = k' is
     /// not 0 mod n, but S = d 2^(5i) can hold, for k = 2^256 d mod n; that one
     /// addition doubles by mask instead. A zero digit's addition is
     /// discarded by mask.
@@ -991,7 +993,8 @@ mod tests {
     }
 
     /// The comb equals the public path for every test scalar and for the
-    /// ones whose top addition doubles, k = 2^256 d mod n with d = 1, 2.
+    /// ones k = 2^256 d mod n for d = 1..=4, among them those whose top
+    /// addition doubles.
     #[test]
     fn the_comb_matches_the_public_path() {
         use num_bigint::BigInt;
