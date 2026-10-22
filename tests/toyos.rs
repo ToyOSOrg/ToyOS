@@ -181,8 +181,10 @@ const RUST_SKIP: &[&str] = &[
     "tone_beside_stick_write",
     "volume_step",
     // It hands the ACPI claim to a server of its own and kills it, which needs
-    // a boot that starts none: the `acpi_server_death` metal row runs it on
-    // tests/images/acpicase.toml.
+    // a boot that starts none, and no QEMU firmware hands over in legacy mode
+    // for its release to return to: no row runs it until
+    // `issues/the-acpi-servers-death-has-no-readback-on-the-t14.md` gives its
+    // T14 boot a log.
     "acpi_release",
     // It waits for the ACPI server's power sources, and no guest's machine
     // has a battery: the `acpi_tables_loaded`, `acpi_server_events` and
@@ -786,15 +788,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: TESTCASES_HELD,
             judge: |b| battery_on_metal(b[0]),
-        },
-    ),
-    (
-        // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
-        // and `SCI_EN` reads clear after it.
-        "acpi_server_death",
-        metal::Metal {
-            arms: &[metal::once("acpicase", "tests/images/acpicase.toml", &[], &["test_rs_acpi_release"])],
-            judge: |b| acpi_death_on_metal(b[0]),
         },
     ),
     (
@@ -6296,44 +6289,6 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     Ok(())
 }
-
-/// The server's death on the T14: the kernel put the machine in ACPI mode for
-/// the job's claim, and when the killed server's claim went it wrote
-/// `ACPI_DISABLE` (the FADT's 0xf1) and read `SCI_EN` clear: the firmware has
-/// the buttons again. Each write was made on the boot processor, and the
-/// enable was asked from another CPU: the job claims from a thread it found
-/// off the boot processor, so that write is the one that crossed. And the
-/// Global Lock this machine's firmware keeps: the kernel read the FACS its
-/// FADT names through the direct map and found the lock word in memory the
-/// firmware's own map does not report as `AddressRangeMemory`, which ACPI 6.5
-/// §5.2.10 forbids the FACS.
-fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
-    back.job_passed("test_rs_acpi_release")?;
-    let kernel = back.kernel();
-    let lock = kernel.must_say("acpi: the Global Lock is the FACS's at ")?.trim();
-    let uefi_type = lock
-        .rsplit_once(", in memory the firmware's map types ")
-        .and_then(|(_, ty)| ty.parse::<u8>().ok())
-        .ok_or_else(|| format!("the Global Lock's line names no memory type: {lock}"))?;
-    if ADDRESS_RANGE_MEMORY.contains(&uefi_type) {
-        return Err(format!("the Global Lock's word is in AddressRangeMemory: {lock}"));
-    }
-    eprintln!("  [acpi] {lock}");
-    let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ")?;
-    // The kernel says this only of a `PM1a_CNT` it read with `SCI_EN` clear.
-    let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD 0xb2 ")?;
-    for line in [enabled, left] {
-        smi_cmd_writer(line)?;
-        eprintln!("  [acpi] {}", line.trim());
-    }
-    if number_between(enabled, ", asked from cpu", "; the write held cpu")? == 0 {
-        return Err(format!("the job's claim was asked from the boot processor, so no CPU asked it for this write: {enabled}"));
-    }
-    Ok(())
-}
-
-/// The UEFI memory types ACPI 6.5 Table 15.6 maps to `AddressRangeMemory`.
-const ADDRESS_RANGE_MEMORY: [u8; 5] = [1, 2, 3, 4, 7];
 
 /// The CPU a kernel line says wrote `SMI_CMD`, read on that CPU beside the
 /// `out`: the boot processor, cpu0, or the line is refused (ACPI 6.5 Table
