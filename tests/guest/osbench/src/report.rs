@@ -1,4 +1,4 @@
-//! The one output format: every line starts `osbench v=1 os=<os>` and is
+//! The one output format: every line starts `osbench v=2 os=<os>` and is
 //! otherwise `key=value` words, so a run's stdout is its data.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,7 +13,7 @@ pub fn word(value: impl std::fmt::Display) -> String {
 }
 
 fn emit(body: &str) {
-    println!("osbench v=1 os={OS} {body}");
+    println!("osbench v=2 os={OS} {body}");
 }
 
 /// A fact about the machine or the run that its numbers depend on.
@@ -38,12 +38,31 @@ pub fn unmeasured(bench: &str, why: &str, extra: &[(&str, String)]) {
     emit(&line);
 }
 
+/// A facility this system does not offer, which is a result and not a
+/// failure: its line says what was asked and what the system answered.
+pub fn unsupported(bench: &str, why: impl std::fmt::Display) {
+    emit(&format!("bench={bench} unsupported={}", word(why)));
+}
+
+/// An investigation's record, not a distribution: `<what> key=value...`.
+pub fn note(what: &str, fields: &[(&str, String)]) {
+    let mut line = format!("note={what}");
+    for (key, value) in fields {
+        line.push_str(&format!(" {key}={}", word(value)));
+    }
+    emit(&line);
+}
+
 pub fn any_refused() -> bool {
     REFUSED.load(Ordering::Relaxed)
 }
 
 /// One measured distribution, by nearest rank. A percentile the sample count
 /// cannot resolve prints `-`: p99 needs 100 samples and p99.9 a thousand.
+/// `mhz` is the reporting CPU's clock read just after the measurement
+/// (`clock::mhz`), and `mhz_settled` the clock the benchmark's warm-up
+/// reached before it (`clock::settle`), so every number says the clock it
+/// was taken at.
 pub fn result(bench: &str, unit: &str, samples: &mut [u64], extra: &[(&str, String)]) {
     if samples.is_empty() {
         refuse(bench, "no samples");
@@ -66,6 +85,11 @@ pub fn result(bench: &str, unit: &str, samples: &mut [u64], extra: &[(&str, Stri
     for (key, value) in extra {
         line.push_str(&format!(" {key}={}", word(value)));
     }
+    match crate::clock::take_settled() {
+        0 => {}
+        settled => line.push_str(&format!(" mhz_settled={settled}")),
+    }
+    line.push_str(&format!(" mhz={}", crate::clock::mhz()));
     emit(&line);
 }
 

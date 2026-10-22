@@ -20,7 +20,18 @@ across ToyOS's groups. Under all-CPU load the two run one clock: 2.389 M and
 is therefore no normalisation: the memory bandwidths, equal raw, come out a
 quarter apart.
 
-**Exit**: each benchmark runs after a steady-state warm-up of the CPUs it
-uses and prints the chunk time measured beside it, and a T14 run on each
-system shows `cpu.chunk` agreeing with the all-CPU rate per CPU within the
-run-to-run spread.
+`cpu.chunk`'s loop compiles to the same 3,125 dependent multiply-adds on
+both builds (`llvm-objdump` of `chunk_rate` in each), so its ratio is a
+clock ratio: at the four cycles a step takes, 10.5 µs is about 1.2 GHz and
+3.3 µs about 3.8 GHz, an inference from the instruction latencies and not a
+counter reading.
+
+Since round 2 every benchmark but the wake and fairness groups' (whose CPUs
+idle or are all busy by design) runs after `clock::settle`, which spins the
+measuring CPU until three probes of a dependent `add` chain agree within 1%,
+and every result line prints that clock as `mhz_settled` and the clock just
+after as `mhz`; each group also prints `cpu.clock`, 200 probes from idle.
+
+**Exit**: a T14 run on each system shows `mhz_settled` near the all-CPU rate
+per CPU within the run-to-run spread, or names the benchmark whose CPU did
+not settle.

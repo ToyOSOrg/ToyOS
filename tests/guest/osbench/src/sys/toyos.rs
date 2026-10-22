@@ -59,3 +59,318 @@ pub unsafe fn unmap(ptr: *mut u8, len: usize) {
 /// Nothing a program can read: the kernel's frequency request and the
 /// machine's power source are the boot log's and the operator's to record.
 pub fn conditions() {}
+
+/// Nothing: a process's handle to itself carries no `READ`, which reading
+/// its accounting takes (`kernel/src/loader/start.rs`'s `own_handle`). The
+/// kernel's exit record of each job counts its syscalls instead.
+pub fn counts() -> super::Counts {
+    super::Counts { switches: None, faults: None }
+}
+
+/// A log line's time for a reading of [`monotonic_ns`]: the kernel log's
+/// stamps count from the counter's zero, not from boot.
+pub fn log_time_ns(monotonic: u64) -> u64 {
+    monotonic + toyos_abi::clock::page().stamp_at_boot
+}
+
+/// ToyOS raises every thread stack to std's floor (`sys/thread.rs`'s
+/// `DEFAULT_MIN_STACK_SIZE`), whatever the builder asks.
+pub const STACK_FLOOR: &str = "2MiB";
+
+/// What [`current_cpu`] names a CPU by, for the fields that print one.
+pub const CPU_NAMING: &str = "apic";
+
+/// Native IPC: a connection through a port, between this process and a child
+/// it endows the port's acceptor.
+pub mod ipc {
+    use std::io;
+    use std::os::toyos::process::CommandExt;
+    use std::process::{Child, Command, Stdio};
+
+    use toyos::endow::{Endowments, FromHandle};
+    use toyos::ipc::{Connection, MAX_FRAME_LEN};
+    use toyos::port::{self, Acceptor};
+    use toyos::{OwnedHandle, Pipe};
+
+    const LABEL: &str = "osbench-ipc";
+    const NAME: &str = "osbench";
+    const FRAME: usize = MAX_FRAME_LEN as usize;
+
+    /// One end of a connection. A message longer than one frame
+    /// ([`MAX_FRAME_LEN`]) goes as consecutive frames: a ToyOS connection
+    /// frames each message, and a frame carries at most that much.
+    pub struct Peer(Connection);
+
+    /// What a message carries beside its bytes: one end of a pipe.
+    pub type Token = Pipe;
+
+    fn failed(what: &str, e: impl std::fmt::Debug) -> io::Error {
+        io::Error::other(format!("{what}: {e:?}"))
+    }
+
+    /// Frames one message takes.
+    pub fn frames(len: usize) -> usize {
+        len.div_ceil(FRAME).max(1)
+    }
+
+    impl Peer {
+        pub fn send(&self, data: &[u8]) -> io::Result<()> {
+            if data.is_empty() {
+                return self.0.send_bytes(1, data).map_err(|e| failed("send", e));
+            }
+            for chunk in data.chunks(FRAME) {
+                self.0.send_bytes(1, chunk).map_err(|e| failed("send", e))?;
+            }
+            Ok(())
+        }
+
+        pub fn recv(&self, buf: &mut [u8]) -> io::Result<()> {
+            let mut at = 0;
+            loop {
+                let header = self.0.recv_header().map_err(|e| failed("receive", e))?;
+                at += self.0.recv_bytes(&header, &mut buf[at..]).map_err(|e| failed("receive", e))?;
+                if at >= buf.len() {
+                    return Ok(());
+                }
+            }
+        }
+
+        /// One frame of `data` (at most one frame's worth) and `token`, moved.
+        pub fn send_with(&self, data: &[u8], token: Token) -> io::Result<()> {
+            self.0.send_bytes_with(1, data, [OwnedHandle::from(token)]).map_err(|e| failed("send", e))
+        }
+
+        pub fn recv_with(&self, buf: &mut [u8]) -> io::Result<Token> {
+            let header = self.0.recv_header().map_err(|e| failed("receive", e))?;
+            self.0.recv_bytes(&header, buf).map_err(|e| failed("receive", e))?;
+            let [raw] = self.0.recv_handles_exact::<1>(&header).ok_or_else(|| io::Error::other("no handle came"))?;
+            // SAFETY: the kernel moved this handle into this process's table
+            // for this frame alone, and the peer sends only pipe ends.
+            Ok(unsafe { Pipe::from_handle(raw) })
+        }
+    }
+
+    pub fn token() -> io::Result<Token> {
+        let (read, _write) = toyos::pipe_pair().map_err(|e| failed("pipe", e))?;
+        Ok(read)
+    }
+
+    /// `exe ipc-serve`, endowed a fresh port's acceptor, and this process's
+    /// connection to it.
+    pub fn start_server(exe: &std::path::Path) -> io::Result<(Child, Peer)> {
+        let (acceptor, connector) = port::create().map_err(|e| failed("port", e))?;
+        let names = toyos::namespace::build().add(NAME, &connector).finish().map_err(|e| failed("namespace", e))?;
+        let conn = names.open(NAME).map_err(|e| failed("connect", e))?;
+        let child = Command::new(exe)
+            .arg("ipc-serve")
+            .endow(LABEL, acceptor.into_raw().0)
+            .stdin(Stdio::null())
+            .spawn()?;
+        Ok((child, Peer(conn)))
+    }
+
+    /// The child's end: the connection its parent made to the port it was
+    /// endowed.
+    pub fn served() -> io::Result<Peer> {
+        let acceptor: Acceptor = Endowments::get().take(LABEL).ok_or_else(|| io::Error::other("no port endowed"))?;
+        acceptor.accept().map(Peer).map_err(|e| failed("accept", e))
+    }
+
+    /// A port this process both connects to and accepts on, for timing a
+    /// connection's setup alone.
+    pub struct Rendezvous {
+        acceptor: Acceptor,
+        names: toyos::namespace::Namespace,
+    }
+
+    impl Rendezvous {
+        pub fn new() -> io::Result<Self> {
+            let (acceptor, connector) = port::create().map_err(|e| failed("port", e))?;
+            let names = toyos::namespace::build().add(NAME, &connector).finish().map_err(|e| failed("namespace", e))?;
+            Ok(Self { acceptor, names })
+        }
+
+        /// Open a connection and accept it; both ends close on return.
+        pub fn connect_accept(&self) -> io::Result<()> {
+            let client = self.names.open(NAME).map_err(|e| failed("connect", e))?;
+            let server = self.acceptor.accept().map_err(|e| failed("accept", e))?;
+            drop((client, server));
+            Ok(())
+        }
+    }
+}
+
+/// What the tail group reads to say where a late wake's time went, through
+/// the runner's capability: each CPU's firmware interrupts and clock, the
+/// scheduler's diary and the roster's names. Read-only observation rights;
+/// `None` where this boot did not grant them.
+pub mod diag {
+    use std::collections::BTreeMap;
+
+    use toyos::endow::{Endowments, SYSCAP_LABEL};
+    use toyos::syscap::{SysCap, TraceCursor};
+    use toyos_abi::counters::{Counter, RawRecord, Record};
+    use toyos_abi::syscall::{SYSINFO_ENTRY_SIZE, SYSINFO_HEADER_SIZE};
+    use toyos_abi::trace::TraceRecord;
+    use toyos_trace::{Entry, Event};
+
+    pub struct Diag {
+        cap: SysCap,
+        cursor: Option<TraceCursor<Vec<u64>>>,
+    }
+
+    /// One CPU's counters, by the kernel's index of the CPU and the APIC id
+    /// it read off itself, which is what [`current_cpu`](super::current_cpu)
+    /// names it by.
+    #[derive(Clone)]
+    pub struct CpuCounts {
+        pub cpu: u32,
+        pub apic: u32,
+        pub smi: Option<u64>,
+        pub aperf: Option<u64>,
+        pub mperf: Option<u64>,
+        pub kicks: Option<u64>,
+    }
+
+    pub fn open() -> Option<Diag> {
+        let cap: SysCap = Endowments::get().take(SYSCAP_LABEL)?;
+        let cursor = cap.trace_cursor_words().ok().map(|n| TraceCursor::new(vec![0u64; n]));
+        Some(Diag { cap, cursor })
+    }
+
+    impl Diag {
+        /// Every CPU's counters, or why the read failed.
+        pub fn counters(&self) -> Result<Vec<CpuCounts>, String> {
+            let mut raw = vec![RawRecord::EMPTY; toyos_abi::syscall::cpu_count() as usize];
+            let read = self.cap.counters(&mut raw).map_err(|e| format!("the counters read was refused: {e:?}"))?;
+            raw[..read]
+                .iter()
+                .map(|r| {
+                    let r = Record::decode(r).map_err(|e| format!("a counters record did not decode: {e:?}"))?;
+                    Ok(CpuCounts {
+                        cpu: r.cpu,
+                        apic: r.hardware_id,
+                        smi: r.get(Counter::Smi),
+                        aperf: r.get(Counter::Aperf),
+                        mperf: r.get(Counter::Mperf),
+                        kicks: r.get(Counter::Kicks),
+                    })
+                })
+                .collect()
+        }
+
+        pub fn has_diary(&self) -> bool {
+            self.cursor.is_some()
+        }
+
+        /// Every diary record since the last read, decoded, with its time as
+        /// nanoseconds since boot, oldest first; how many the rings had
+        /// overwritten before this read reached them; and why the read ended
+        /// early, if it did.
+        pub fn diary(&mut self) -> (Vec<(u64, Entry)>, u64, Option<String>) {
+            let Some(cursor) = self.cursor.as_mut() else { return (Vec::new(), 0, None) };
+            let page = toyos_abi::clock::page();
+            let lost_before = cursor.lost();
+            let mut out = Vec::new();
+            let mut buf = vec![TraceRecord::EMPTY; 4096];
+            let mut failed = None;
+            loop {
+                let n = match self.cap.trace(cursor, &mut buf) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        failed = Some(format!("the diary read was refused: {e:?}"));
+                        break;
+                    }
+                };
+                for raw in &buf[..n] {
+                    if let Ok(entry) = Entry::decode(raw) {
+                        let since_boot = page.stamp_of(entry.stamp).saturating_sub(page.stamp_at_boot);
+                        out.push((since_boot, entry));
+                    }
+                }
+                if n < buf.len() {
+                    break;
+                }
+            }
+            (out, cursor.lost() - lost_before, failed)
+        }
+
+        /// Every live thread's process and name, and the CPU nanoseconds it
+        /// has run, by `(pid, tid)`.
+        pub fn roster(&self) -> BTreeMap<(u32, u32), (String, u64)> {
+            const ENTRIES: usize = 2048;
+            let mut buf = vec![0u8; SYSINFO_HEADER_SIZE + SYSINFO_ENTRY_SIZE * ENTRIES];
+            let n = self.cap.roster(&mut buf).min(buf.len());
+            let mut rows = BTreeMap::new();
+            if n < SYSINFO_HEADER_SIZE {
+                return rows;
+            }
+            let mut pos = SYSINFO_HEADER_SIZE;
+            while pos + SYSINFO_ENTRY_SIZE <= n {
+                let u32_at = |at: usize| u32::from_le_bytes(buf[at..at + 4].try_into().expect("four"));
+                let name = &buf[pos + 32..pos + 60];
+                let len = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+                let cpu_ns = u64::from_le_bytes(buf[pos + 24..pos + 32].try_into().expect("eight"));
+                rows.insert((u32_at(pos), u32_at(pos + 4)), (String::from_utf8_lossy(&name[..len]).into_owned(), cpu_ns));
+                pos += SYSINFO_ENTRY_SIZE;
+            }
+            rows
+        }
+    }
+
+    /// An event's short name and its thread, for a note.
+    pub fn describe(entry: &Entry) -> String {
+        let what = match entry.event {
+            Event::Pick => "pick",
+            Event::Wake => "wake",
+            Event::Park => "park",
+            Event::Preempt => "preempt",
+            Event::Migrate { .. } => "migrate",
+            Event::Adopt => "adopt",
+            Event::Retire => "retire",
+            Event::IdleEnter => "idle",
+            Event::TimerArm { .. } => "arm",
+            Event::TimerStop => "stop",
+            Event::TimerFire => "fire",
+            Event::TimerFireBurst { .. } => "fires",
+            Event::Mark { .. } => "mark",
+        };
+        match entry.thread {
+            Some(t) => format!("{what}:{}/{}", t.pid, t.tid),
+            None => what.to_string(),
+        }
+    }
+}
+
+/// ToyOS has no call that changes a mapping's protection: `toyos_abi`
+/// declares none.
+pub fn protect(_ptr: *mut u8, _len: usize, _writable: bool) -> Result<(), super::Refused> {
+    Err(super::Refused::Absent("toyos_abi has no mprotect: a mapping keeps the protection mmap gave it".into()))
+}
+
+/// Give back part of a mapping, which ToyOS refuses: `munmap` takes a whole
+/// mapping (`toyos_abi::syscall::munmap`).
+///
+/// # Safety
+/// `ptr` and `len` lie inside one mapping from [`map_anon`] that nothing
+/// reaches in that range afterwards.
+pub unsafe fn unmap_part(ptr: *mut u8, len: usize) -> Result<(), super::Refused> {
+    // SAFETY: as the caller promises.
+    unsafe { syscall::munmap(ptr, len) }.map_err(|e| match e {
+        syscall::SyscallError::InvalidArgument => {
+            super::Refused::Absent("munmap takes a whole mapping and answers InvalidArgument for a part".into())
+        }
+        e => super::Refused::Failed(format!("munmap of a part answered {e:?}")),
+    })
+}
+
+/// A mapping whose first touch of each 4 KiB page is what is measured: every
+/// ToyOS anonymous mapping is in 2 MiB pages, committed inside `mmap`.
+pub fn map_anon_4k(len: usize) -> *mut u8 {
+    map_anon(len)
+}
+
+/// The one writable persistent volume a benchcase boot has, and what it is.
+pub fn persistent_dir() -> Option<(String, String)> {
+    Some(("/log".into(), "boot USB stick TOYOS-LOG partition, FAT32, LOG file server over usbd mass storage".into()))
+}

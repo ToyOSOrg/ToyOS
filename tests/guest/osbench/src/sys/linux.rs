@@ -301,3 +301,285 @@ pub fn autogroup_enabled() -> bool {
 pub fn autogroup() -> String {
     read("/proc/self/autogroup").and_then(|s| s.split_whitespace().next().map(str::to_string)).unwrap_or_default()
 }
+
+/// This process's own accounting, from `getrusage`: Linux counts no
+/// syscalls for a process to read.
+pub fn counts() -> super::Counts {
+    // SAFETY: a zeroed rusage is a valid out-buffer.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    // SAFETY: `usage` is a valid out-pointer.
+    assert_eq!(unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) }, 0);
+    super::Counts {
+        switches: Some((usage.ru_nvcsw + usage.ru_nivcsw) as u64),
+        faults: Some((usage.ru_minflt + usage.ru_majflt) as u64),
+    }
+}
+
+/// `CLOCK_MONOTONIC` is the clock Linux's own timestamps use.
+pub fn log_time_ns(monotonic: u64) -> u64 {
+    monotonic
+}
+
+/// Linux gives a thread the stack its builder asks for.
+pub const STACK_FLOOR: &str = "none";
+
+/// What [`current_cpu`] names a CPU by, for the fields that print one.
+pub const CPU_NAMING: &str = "cpu";
+
+pub fn protect(ptr: *mut u8, len: usize, writable: bool) -> Result<(), super::Refused> {
+    let prot = if writable { libc::PROT_READ | libc::PROT_WRITE } else { libc::PROT_READ };
+    // SAFETY: the caller's mapping; a protection change moves no memory.
+    match unsafe { libc::mprotect(ptr.cast(), len, prot) } {
+        0 => Ok(()),
+        _ => Err(super::Refused::Failed(format!("mprotect: {}", std::io::Error::last_os_error()))),
+    }
+}
+
+/// # Safety
+/// `ptr` and `len` lie inside one mapping from [`map_anon`] that nothing
+/// reaches in that range afterwards.
+pub unsafe fn unmap_part(ptr: *mut u8, len: usize) -> Result<(), super::Refused> {
+    // SAFETY: as the caller promises.
+    match unsafe { libc::munmap(ptr.cast(), len) } {
+        0 => Ok(()),
+        _ => Err(super::Refused::Failed(format!("munmap: {}", std::io::Error::last_os_error()))),
+    }
+}
+
+/// An anonymous mapping that faults in 4 KiB pages: transparent huge pages
+/// are refused for it.
+pub fn map_anon_4k(len: usize) -> *mut u8 {
+    let ptr = map_anon(len);
+    // SAFETY: an advice changes no contents.
+    unsafe { libc::madvise(ptr.cast(), len, libc::MADV_NOHUGEPAGE) };
+    ptr
+}
+
+/// IPC between this process and a child: a Unix stream socket pair, the
+/// child's end its stdin; a descriptor rides as `SCM_RIGHTS`.
+pub mod ipc {
+    use std::io::{self, Read, Write};
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixListener, UnixStream};
+    use std::process::{Child, Command, Stdio};
+
+    pub struct Peer(UnixStream);
+
+    /// What a message carries beside its bytes: one end of a pipe.
+    pub type Token = OwnedFd;
+
+    /// A stream carries a message of any length as one write.
+    pub fn frames(_len: usize) -> usize {
+        1
+    }
+
+    const CONTROL: usize = 64;
+
+    impl Peer {
+        pub fn send(&self, data: &[u8]) -> io::Result<()> {
+            (&self.0).write_all(data)
+        }
+
+        pub fn recv(&self, buf: &mut [u8]) -> io::Result<()> {
+            (&self.0).read_exact(buf)
+        }
+
+        /// `data` and `token` in one `sendmsg`, then this process's copy
+        /// closed, so the descriptor ends up the peer's alone as a ToyOS
+        /// handle moved would.
+        pub fn send_with(&self, data: &[u8], token: Token) -> io::Result<()> {
+            let mut control = [0u8; CONTROL];
+            let mut iov = libc::iovec { iov_base: data.as_ptr() as *mut _, iov_len: data.len() };
+            // SAFETY: a zeroed msghdr is an empty one.
+            let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.as_mut_ptr().cast();
+            // SAFETY: CMSG_SPACE is arithmetic.
+            msg.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as _;
+            // SAFETY: `msg`'s control buffer holds one header and one int,
+            // which CMSG_SPACE just sized.
+            unsafe {
+                let header = libc::CMSG_FIRSTHDR(&msg);
+                (*header).cmsg_level = libc::SOL_SOCKET;
+                (*header).cmsg_type = libc::SCM_RIGHTS;
+                (*header).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as _;
+                libc::CMSG_DATA(header).cast::<libc::c_int>().write_unaligned(token.as_raw_fd());
+            }
+            // SAFETY: every pointer in `msg` is live for the call.
+            let sent = unsafe { libc::sendmsg(self.0.as_raw_fd(), &msg, 0) };
+            if sent < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if sent as usize != data.len() {
+                return Err(io::Error::other(format!("sendmsg sent {sent} of {} bytes", data.len())));
+            }
+            drop(token);
+            Ok(())
+        }
+
+        pub fn recv_with(&self, buf: &mut [u8]) -> io::Result<Token> {
+            let mut control = [0u8; CONTROL];
+            let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() };
+            // SAFETY: a zeroed msghdr is an empty one.
+            let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+            msg.msg_iov = &mut iov;
+            msg.msg_iovlen = 1;
+            msg.msg_control = control.as_mut_ptr().cast();
+            msg.msg_controllen = CONTROL as _;
+            // SAFETY: every pointer in `msg` is live for the call.
+            let got = unsafe { libc::recvmsg(self.0.as_raw_fd(), &mut msg, libc::MSG_CMSG_CLOEXEC | libc::MSG_WAITALL) };
+            if got < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if got as usize != buf.len() {
+                return Err(io::Error::other(format!("recvmsg read {got} of {} bytes", buf.len())));
+            }
+            // SAFETY: the kernel wrote `msg_controllen` bytes of headers.
+            unsafe {
+                let header = libc::CMSG_FIRSTHDR(&msg);
+                if header.is_null() || (*header).cmsg_type != libc::SCM_RIGHTS {
+                    return Err(io::Error::other("no descriptor came"));
+                }
+                let fd = libc::CMSG_DATA(header).cast::<libc::c_int>().read_unaligned();
+                Ok(OwnedFd::from_raw_fd(fd))
+            }
+        }
+    }
+
+    pub fn token() -> io::Result<Token> {
+        let (read, _write) = std::io::pipe()?;
+        Ok(OwnedFd::from(read))
+    }
+
+    pub fn start_server(exe: &std::path::Path) -> io::Result<(Child, Peer)> {
+        let (ours, theirs) = UnixStream::pair()?;
+        let child = Command::new(exe).arg("ipc-serve").stdin(Stdio::from(OwnedFd::from(theirs))).spawn()?;
+        Ok((child, Peer(ours)))
+    }
+
+    /// The child's end, which its parent made its stdin.
+    pub fn served() -> io::Result<Peer> {
+        // SAFETY: the parent made descriptor 0 a socket this process owns
+        // and nothing else here reads stdin.
+        Ok(Peer(UnixStream::from(unsafe { OwnedFd::from_raw_fd(0) })))
+    }
+
+    /// A listening socket in the abstract namespace, which this process both
+    /// connects to and accepts on, for timing a connection's setup alone.
+    pub struct Rendezvous {
+        listener: UnixListener,
+        addr: SocketAddr,
+    }
+
+    impl Rendezvous {
+        pub fn new() -> io::Result<Self> {
+            let addr = SocketAddr::from_abstract_name(format!("osbench-{}", std::process::id()))?;
+            let listener = UnixListener::bind_addr(&addr)?;
+            Ok(Self { listener, addr })
+        }
+
+        pub fn connect_accept(&self) -> io::Result<()> {
+            let client = UnixStream::connect_addr(&self.addr)?;
+            let (server, _) = self.listener.accept()?;
+            drop((client, server));
+            Ok(())
+        }
+    }
+}
+
+/// The mount holding `path`, off `/proc/self/mountinfo`: its filesystem
+/// type, its source and its options.
+fn mount_of(path: &str) -> Option<(String, String, String)> {
+    let mounts = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    // `id parent major:minor root mountpoint options... - fstype source superoptions`
+    mounts
+        .lines()
+        .filter_map(|line| {
+            let (left, right) = line.split_once(" - ")?;
+            let mut left = left.split_whitespace();
+            let point = left.nth(4)?;
+            let options = left.next()?;
+            let mut right = right.split_whitespace();
+            let (fstype, source) = (right.next()?, right.next()?);
+            let under = path == point || point == "/" || path.starts_with(&format!("{point}/"));
+            under.then(|| (point.len(), (fstype.to_string(), source.to_string(), options.to_string())))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, mount)| mount)
+}
+
+/// How `dir` is mounted, for a condition: its filesystem and options.
+pub fn mount_options(dir: &str) -> String {
+    mount_of(dir).map_or_else(|| "unknown".into(), |(fstype, _, options)| format!("{fstype} {options}"))
+}
+
+/// The runner's home, and the filesystem and disk model holding it; the
+/// path itself names the user and is never printed.
+pub fn persistent_dir() -> Option<(String, String)> {
+    let home = std::env::var("HOME").ok()?;
+    let (fstype, source, _) = mount_of(&home)?;
+    // btrfs reports an anonymous `0:NN` that names no block device; its
+    // source device's own number does.
+    let sysfs = |devno: String| fs::canonicalize(format!("/sys/dev/block/{devno}")).ok();
+    let device = device_number_of(&home).and_then(sysfs).or_else(|| {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let meta = fs::metadata(source.strip_prefix("/dev/").map(|_| source.as_str())?).ok()?;
+        let rdev = meta.file_type().is_block_device().then(|| meta.rdev())?;
+        sysfs(format!("{}:{}", libc::major(rdev), libc::minor(rdev)))
+    });
+    let Some(device) = device else {
+        return Some((home, format!("{fstype}, on no block device")));
+    };
+    let (disk, mapped) = backing_disk(device);
+    let model = read(&disk.join("device/model").to_string_lossy()).unwrap_or_else(|| "unknown".into());
+    let name = disk.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let kind = [("nvme", "NVMe"), ("sd", "SCSI, SATA or USB"), ("mmcblk", "MMC"), ("vd", "virtio")]
+        .iter()
+        .find(|(prefix, _)| name.starts_with(prefix))
+        .map_or("other", |(_, kind)| kind);
+    let through = if mapped { " through device-mapper" } else { "" };
+    // The device's own name is never printed: an installer or a user chose
+    // a mapper's (`luks-<UUID>`, a volume group named for the host).
+    Some((home, format!("{fstype}{through}, {kind} disk, model {model}")))
+}
+
+/// The `major:minor` of the filesystem holding `path`, off mountinfo's third
+/// field for the deepest mount over it.
+fn device_number_of(path: &str) -> Option<String> {
+    let mounts = fs::read_to_string("/proc/self/mountinfo").ok()?;
+    mounts
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let devno = fields.nth(2)?;
+            let point = fields.nth(1)?;
+            let under = path == point || point == "/" || path.starts_with(&format!("{point}/"));
+            under.then(|| (point.len(), devno.to_string()))
+        })
+        .max_by_key(|(len, _)| *len)
+        .map(|(_, devno)| devno)
+}
+
+/// The whole disk under a sysfs block device: through each device-mapper
+/// layer's first `slaves` entry, then from a partition to its disk; and
+/// whether a mapper was crossed.
+fn backing_disk(mut device: std::path::PathBuf) -> (std::path::PathBuf, bool) {
+    let mut mapped = false;
+    while let Some(lower) = fs::read_dir(device.join("slaves")).ok().and_then(|mut d| d.next()).and_then(Result::ok) {
+        match fs::canonicalize(lower.path()) {
+            Ok(next) => {
+                device = next;
+                mapped = true;
+            }
+            Err(_) => break,
+        }
+    }
+    if device.join("partition").exists() {
+        if let Some(parent) = device.parent() {
+            device = parent.to_path_buf();
+        }
+    }
+    (device, mapped)
+}

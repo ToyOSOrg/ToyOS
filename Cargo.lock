@@ -2752,8 +2752,10 @@ name = "osbench"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "miniz_oxide",
  "toyos",
  "toyos-abi",
+ "toyos-trace",
 ]
 
 [[package]]
