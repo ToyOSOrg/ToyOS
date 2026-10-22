@@ -452,6 +452,13 @@ Not consumers:
      - **Not timed, by design:** scrypt's ROMix. Its second loop reads the
        table entry the secret state names (RFC 7914 §5); that access pattern
        is what makes it memory-hard. Its PBKDF2 and Salsa20/8 are timed.
+     - **PBKDF2 and Salsa20/8**, at #1029's ba90ee11c on the T14 (Intel
+       signature 0x806c1, microcode 0xbe), 1,000,000 measurements each:
+       PBKDF2-HMAC-SHA-256 (32 B secret password and salt, 2 iterations,
+       64 B) passes with max |t| 1.35, and the Salsa20/8 core with max
+       |t| 1.99. The controls held (null 1.51 and 1.56, leaky 100.9 and
+       1,177.7). Not yet run on the AMD bench. Evidence:
+       https://github.com/ToyOSOrg/evidence/tree/e7a381d2136c205e32a6812845abde6ce7fd5fd1/pr-1029/r2
      - **Open:** typed domains (the speed work's); each secret routine's
        module contract naming its secret inputs; the code inspection; the
        audit.
