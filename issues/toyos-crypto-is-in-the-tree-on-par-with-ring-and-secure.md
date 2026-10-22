@@ -60,9 +60,9 @@ review has been done, and passing vectors does not show it is safer than ring.
 | Consumer | Today | Needs from the crate |
 |---|---|---|
 | `toyos-ssh`'s SSH protocol (`build/ssh`: `kex`, the server, the client). Host-only until `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md` stage 2 | the crate, since stage 1 | X25519, ML-KEM-768 and its hybrid, Ed25519 sign/verify, `chacha20-poly1305@openssh.com`, SHA-256/512, and a caller-supplied `Random` for replays |
-| `toyos-ssh`'s `hostkey` on the signing path. `build/signing.rs` reads the owner's image-signing key through `openssh_seed` and writes a minted one through `openssh_private`; both derive the public key from the seed | `toyos_update::sig::public_of`, the crate's since ED_PR | nothing |
+| `toyos-ssh`'s `hostkey` on the signing path. `build/signing.rs` reads the owner's image-signing key through `openssh_seed` and writes a minted one through `openssh_private`; both derive the public key from the seed | `toyos_update::sig::public_of`, the crate's since #1019 | nothing |
 | `system/sshserver` | russh with the RustCrypto stack, including `rsa` (RUSTSEC-2023-0071) | none directly; it reaches the crate through `toyos-ssh` |
-| Image and package signing: `lib/update` (the loader, `/system/bin/update`, `build/signing.rs`, `build/root`, #892's repository keys) | the crate's strict Ed25519 and SHA-2, since ED_PR; signing and a seed's public key behind `sign`, on the host | stage 6's bench readings |
+| Image and package signing: `lib/update` (the loader, `/system/bin/update`, `build/signing.rs`, `build/root`, #892's repository keys) | the crate's strict Ed25519 and SHA-2, since #1019; signing and a seed's public key behind `sign`, on the host | stage 6's bench readings |
 | Every SHA-256: the build, `pkg`, `lib/swap`, `system/update`, `lib/update` and the loader | the crate, since #1016: SHA-NI on x86-64, the UEFI loader's in a block that saves the XMM registers it uses; the Armv8 SHA instructions where the target promises them. No slower than `toyos-sha2-hw`, which it replaces, on either bench: on the T14 4.6 times as fast at 64 B and 9 and 6 percent faster at 16 KiB and 1 MiB, on the AMD bench 2.8 times at 64 B, 2 percent at 16 KiB and equal at 1 MiB (#1016's evidence) | nothing |
 | ToyOS's own HTTPS clients. On the host: the build's `ureq` (`build/release.rs`) and doom's build script (`apps/doom/build.rs`). In a guest, none today: `https_tls13` and `pkg install <url>` are stages 3 and 5 of `issues/the-internet-clients-work-unchanged.md` | rustls on `ring`, which is `ToyOSOrg/ring` in a guest | the rustls provider through ureq's `rustls-no-provider` feature. Stage 5, once parity and security hold (owner, 2026-10-13) |
 | Wi-Fi's `wlan` (`issues/there-is-no-wifi.md` P6, W2) | nothing yet | PBKDF2-HMAC-SHA1, the 802.11i PRF and RFC 3394 unwrap, which the crate has. AES-CMAC-128, SAE over P-256 by hash-to-element, a public constant-time comparison and a public wiping secret, which it lacks |
@@ -325,7 +325,7 @@ Not consumers:
        `cfg(curve25519_dalek_backend = "fiat")`, which nothing in the tree
        sets, so no build compiles it. It is reached through `toyos-crypto`'s
        own oracles `x25519-dalek` 2.0.1 and `ed25519-dalek` 2.2.0, and
-       `lib/update`'s `ed25519-dalek` oracle: test-only since ED_PR.
+       `lib/update`'s `ed25519-dalek` oracle: test-only since #1019.
      - Under russh (`system/sshserver`), `curve25519-dalek` 5.0.0-pre.6
        names `fiat-crypto` 0.3.0 behind the same unset `cfg`.
      - Under russh, `p384` 0.14.0-rc.8 names `fiat-crypto` 0.3.0 unless
@@ -493,23 +493,23 @@ Not consumers:
    signs, with the crate. The owner ruled on 2026-10-13 that this is the
    track's last stage, taken only after every stage 4 exit holds, and on
    2026-10-22 that the tree uses the crate now and improves it in place
-   ("use our own crypto where possible"); ED_PR takes it.
+   ("use our own crypto where possible"); #1019 takes it.
    **Exit**:
    - Ring stays a host differential oracle of the verifier.
    - The edge corpus is Wycheproof's `ed25519` and the vectors of Chalkias
      et al., "Taming the many EdDSAs" (2020). On both corpora the crate agrees
      with `ed25519-dalek`'s `verify_strict`, and with ring where ring is
-     strict. Done (ED_PR): every verdict on the twelve cases is
+     strict. Done (#1019): every verdict on the twelve cases is
      `verify_strict`'s; ring accepts cases 0, 1, 2 and 11, which strict
      verification refuses, and its verdicts are pinned.
    - The loader verifies a signed image on the T14 and the AMD bench, with
      its verification time measured on each. The loader logs it in counter
-     ticks since ED_PR.
+     ticks since #1019.
    - An AArch64 QEMU loader boot verifies a signed image. Done:
      `a_bent_supervisor_is_refused_and_the_other_slot_boots` boots QEMU's
      AArch64 machine too.
    - `ed25519-dalek` and the loader's `sha2` leave `Cargo.lock`'s non-dev
-     packages. Done (ED_PR).
+     packages. Done (#1019).
    - **One verdict differs from `verify_strict`, for the owner to accept or
      refuse:** the crate refuses a public key whose y is p or more, as
      RFC 8032 section 5.1.3 requires, where `verify_strict` accepts it when
