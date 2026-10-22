@@ -1,13 +1,20 @@
 [package]
 name = "osbench"
-description = "Scheduler and system benchmarks run unchanged on ToyOS and on Linux, so the two can be compared on one machine: one result line per measured distribution."
+description = "System benchmarks run unchanged on ToyOS and on Linux, so the two can be compared on one machine: one result line per measured distribution."
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 
+[dependencies]
+# The work group's compression, pure Rust and the same code on both systems.
+miniz_oxide = "0.9"
+
 [target.'cfg(target_os = "toyos")'.dependencies]
 toyos-abi = { path = "../../../sdk/abi" }
+# Native IPC (ports, connections, endowments) and the observation rights the
+# tail group reads the diary, the counters and the roster with.
 toyos = { path = "../../../sdk/toyos" }
+toyos-trace = { path = "../../../lib/trace" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
