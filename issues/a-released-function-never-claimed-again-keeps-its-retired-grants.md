@@ -16,11 +16,13 @@ A function that stays, reset, released and never claimed again keeps up to
 its next claim frees them (`finish_retired`). Across the machine that is
 bounded only by the functions released and not reclaimed.
 
-Freeing them once the reset is quiet needs work to run at a deadline on
-nobody's thread, which the kernel has no way to ask for: the deferred
-callback `issues/hotplug-blocks-a-scheduler-pass.md` names.
+Freeing them once the reset is quiet is work at a deadline that no thread
+of the claim's is left to do, and the kernel runs no work of its own: some
+thread that asks the kernel anything about the function, or the device
+set's reader, has to be charged with it.
 
-Exit condition: that callback exists, a released function's retired grants
-are freed by it once its reset is quiet, whether or not it is claimed again,
-and a test that releases a reset-capable function and never claims it again
-sees the pages go back.
+Owner: `issues/a-device-function-is-driven-from-its-arrival-to-its-end.md`.
+
+Exit condition: a released function's retired grants are freed once its
+reset is quiet, whether or not it is claimed again, and a test that releases
+a reset-capable function and never claims it again sees the pages go back.
