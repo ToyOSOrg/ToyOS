@@ -6,6 +6,16 @@ opened: 2026-08-20
 
 # The capability end-state is twelve answers, written before APIs answer them accidentally
 
+**Historical audit, not a current implementation brief.** The runtime
+permission/capability consolidation is proposed in
+`issues/permissions-and-capabilities-need-one-runtime-contract.md`. Later owner
+decisions take precedence: filesystem isolation is required; service-name
+lookup moves to supervisor/SDK; EDF/CBS reservations were rejected. Their
+owning tracks are `issues/every-program-sees-only-the-files-it-was-given.md`,
+`issues/ipc-rings-do-not-yet-make-filesystem-io-concurrent.md`, and
+`issues/the-scheduler-and-the-clocks-never-talk.md`. Counts, historical
+recommendations and COMMITTED/OPEN labels below are not a present-day census.
+
 From the external review of 2026-08-20, adopted by the owner: the tree is
 making strong capability commitments, and postponing the conceptual model
 lets dozens of local API decisions harden into architecture by accident. The

@@ -15,13 +15,42 @@ contention.
 Each pillar's own track carries its steps and its exits; this track holds the
 counters and sizes pillars, which no other track does.
 
-## The owner's rulings (2026-10-03)
+## The owner's rulings
 
+- **AI-assisted troubleshooting** (2026-10-18): the owner expects an agent to
+  perform troubleshooting. Diagnostic and repair tools must be usable by an
+  ordinary authorized program, under the same capability rules as any other
+  program. This grants no special AI authority or automatic diagnostic upload.
+  Owner refinement, 2026-10-18: cloud AI is sufficient; offline AI and a local
+  model/inference runtime are not required. Local diagnostic and recovery tools
+  must remain usable without the agent, with explicit report export for analysis
+  elsewhere. Agent delivery and concrete failure paths remain design work in
+  the ordinary permission model; no bundled agent is
+  commissioned by this direction alone.
+  Owner refinement, 2026-10-20: files, terminals and diagnostic APIs suffice
+  for first-release development and troubleshooting. General desktop
+  automation is deferred; ordinary user-facing graphical controls remain.
+
+- **Basic graphical controls for release one** (2026-10-18): users must be
+  able to inspect resource use and stop apps through graphical system controls.
+  Detailed profiling may remain in developer tools. Respect inspection and
+  termination authority across user sessions; define metrics and overload
+  usability under pressure without requiring detailed profiling in the GUI.
+- **Local reporting only for release one** (2026-10-18): diagnostics remain on
+  the machine unless the user explicitly exports and shares them. No automatic
+  crash reporting, including opt-in uploads, is required for the first release.
+  Owner refinement, 2026-10-18: smaller crash reports by default; capture a
+  program's memory only when detailed troubleshooting is explicitly enabled.
+  Smaller reports/logs may still contain sensitive data. Exact contents, opt-in
+  scope, retention and export/access controls remain to design. This does not
+  override the reset-memory-wiping rule below.
 - On the diary's reader: "its obvious that we want to be able to understand
   kernel metrics from within toyos ... thats an important and productive tool
   that should be shipped with toyos."
-- **"Keep crash records"**: ToyOS does not ask the firmware to wipe memory at
-  reset, and crash records survive a reset in RAM
+- **Memory wiping takes priority** (2026-10-17): request supported firmware
+  wiping after unexpected resets, accepting loss of unsaved crash records.
+  This replaces the earlier RAM-retention decision; diagnostics must not
+  disable or bypass the mitigation
   (`issues/the-loader-never-sets-the-firmwares-memory-overwrite-request.md`).
 - **"Only with permission"**, the option he chose: "A program needs a
   permission to read counters; the revealing ones (power, per-device

@@ -18,8 +18,9 @@ blit, then every window, then the taskbar, then the cursor, each a separate
 pass over the mapping — to one `memcpy` of the damaged rows. Closing it needs
 to know where the beam is, and GOP does not say: there is no vblank interrupt,
 no scanline register and no page flip in the protocol. It is the display
-driver's to close, and the owner's ruling is that the driver comes later and
-whole. Double-buffering does not help without the flip either — with one
+driver's to close. Owner refinement, 2026-10-18: userland display-control
+drivers are allowed for the first release while rendering stays on the CPU;
+the earlier blanket deferral of display drivers is superseded. Double-buffering does not help without the flip either — with one
 scanout and no way to swap it, a second buffer is what the back buffer already
 is.
 
@@ -47,9 +48,9 @@ whoever next touches those clients' present path.
 ## The exit path for residual #2, worked out 2026-08-31
 
 Residual #1 — the scanout blit against the beam — is untouched by any of this
-and stays where the owner's ruling left it: GOP publishes no vblank, no scanline
-register and no page flip, so the display driver closes it and the driver comes
-later and whole. **Residual #2 is the tractable half**, and it is closer than a
+because GOP publishes no vblank, no scanline register and no page flip.
+A display-control driver can close it; the owner allowed these drivers on
+2026-10-18 while retaining software rendering. **Residual #2 is the tractable half**, and it is closer than a
 reading of this file suggests. Recorded because a wave-4 skip claimed three
 things were missing and two of them ship today.
 

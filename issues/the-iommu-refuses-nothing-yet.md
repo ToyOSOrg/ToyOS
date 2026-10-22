@@ -29,11 +29,13 @@ What the harness cannot measure:
   so are cache-snooping walks, real access-control enforcement, and mid-DMA
   function reset on a real device.
 
-**Ruled** (owner, 2026-10-04), on the threat model, **"Refuse external,
-record reflash"**: "External-port devices can't be claimed by userland
-drivers for now; reflashing is a recorded weakness with an exit (firmware
-verification) to design later." The weakness is
-`issues/a-driver-that-reflashes-its-device-escapes-its-isolation.md`.
+Owner decision, 2026-10-17: external DMA-capable devices require established
+isolation even when their driver ships in the distro. The distro-wide
+no-isolation policy applies only to eligible internal devices and drivers,
+as recorded in `issues/a-machine-without-an-iommu-refuses-every-claim.md`.
+The earlier blanket external-port refusal must not be relaxed until the
+required isolation is established. Device reflashing remains a separate weakness
+in `issues/a-driver-that-reflashes-its-device-escapes-its-isolation.md`.
 On the T14 the external ports are the Thunderbolt root ports `00:07.0` and
 `00:07.2`, under units 1 and 2 (the orchestrator's reading of that machine's
 `iommu:` lines).
@@ -75,8 +77,8 @@ negative control:
 - the isolation-scope rule: a non-singleton scope is refused by name for a
   function behind a PCIe switch, and admitted for a root-complex-integrated
   function;
-- a userland claim of a function below an external port (on the T14,
-  `00:07.0` or `00:07.2`) is refused by name;
+- a claim below an external port (on the T14, `00:07.0` or `00:07.2`)
+  without established isolation is refused even for a distro driver;
 - a claim of a function an RMRR names is refused unless it is a display or USB
   controller that RMRR names alone, whose region is then mapped into its
   driver's domain (the T14's iGPU row);

@@ -120,14 +120,29 @@ is the slice's that evaluates the methods which call.
 Owned by `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`,
 beside `issues/the-acpi-servers-holder-drives-the-embedded-controller-unfiltered.md`.
 
-**Exit**: a call is made only for a byte the machine's loaded tables store
-to the port, checked by something other than the holder, or the owner rules
-the bound above is the one ToyOS keeps; and the rate is held against the
-calls a T14 row reads the machine's own AML making, with the time each held
-the boot processor; and the span is ruled.
-The T14 reading owed is the time each call its AML makes holds cpu0 (the
-slice that passes those writes landed in `d2006cc65`, and no such reading or
-ruling is recorded here), and the owner rules, against those readings,
-whether a handler that returns after `DEAF_CPU` ends the machine. Where the
-interrupt stops every CPU the kernel such a handler returns to is whole, so
-the panic there is this kernel's choice.
+## Owner decisions, 2026-10-21
+
+Firmware is necessarily trusted on the supported machines; acpiserver is
+trusted platform code. Keep explicit authority and inexpensive checks protecting
+kernel-owned memory and registers. Do not add a second AML interpreter/checker
+merely to independently approve its firmware requests. This does not make
+firmware access available to ordinary programs or contain firmware behavior.
+
+Owner correction, 2026-10-21: retain the five-second fatal firmware-stall
+policy, even if the call eventually returns. This supersedes the earlier
+continue-after-return direction. Name the firmware call and elapsed duration in
+the failure report. Five seconds is a catastrophic-stall threshold, not an
+acceptable normal latency budget. Fatal handling is a chosen policy; elapsed
+time alone does not prove corruption. Preserve independent safety checks and
+review watchdog/completion interactions. The threshold cannot interrupt firmware
+holding every CPU; enforcement requires kernel execution to resume or another
+CPU still running. Never-returning firmware may leave no software recovery path.
+
+**Exit**: verify the approved fatal-stall policy and watchdog/completion
+interactions, with accurate firmware attribution. Establish the command-rate
+policy against actual platform needs and record the duration and frequency of
+calls from the machine's AML. The existing eight-per-second figure is not
+established as universally adequate and does not bound all possible sources of
+SMI. Keep measurement scope and remaining non-returning-firmware limits explicit.
+The trust/checker and five-second fatal-stall choices no longer await an owner
+ruling.

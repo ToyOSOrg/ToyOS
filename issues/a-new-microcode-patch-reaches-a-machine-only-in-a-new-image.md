@@ -16,6 +16,15 @@ saying so.
 
 Owner: the orchestrator.
 
-**Exit**: a new patch for a machine arrives as a file on ROOT through the
-package path, and the loader hands it over on the next boot without a new
-image.
+Owner decision, 2026-10-18: the minimal base image carries no microcode-update
+payloads. Updates come through package management, which recommends applicable
+microcode for the actual CPU. CPU identification already exists in
+`lib/microcode`; the package catalogue, installed/current revision handling and
+recommendation path still need design.
+
+**Exit**: a compatible authenticated patch arrives through the package path,
+and the loader hands it to the kernel on the next boot without a new OS image.
+Define package storage available before personal-data unlock while preserving
+the verified boot and immutable-system contracts; do not assume packages can
+write arbitrary files into signed ROOT. Package distribution does not move
+privileged CPU-update application into an ordinary package-manager process.

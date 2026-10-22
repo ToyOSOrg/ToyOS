@@ -92,8 +92,11 @@ Beside that order, each waiting on something outside it:
    zero-copy block I/O. FAT32 on `/log` in the installed product is deferred.
    **Owed**, the orchestrator's to dispatch, for the restart beyond the
    bytes stage 3 holds: a module test in `sdk/toyos/src/fs.rs` that a call
-   on an id from an ended connection answers `Gone` and a path call
-   reconnects once, red with the generation check removed; and a module
+   on an id from an ended connection answers `Gone`, red with the generation
+   check removed. Retry follows the approved recovery policy in
+   `issues/ipc-rings-do-not-yet-make-filesystem-io-concurrent.md`: test safe
+   reconnection separately from repeating an operation, and ensure a lost
+   reply does not silently repeat a possibly completed mutation. Also a module
    test in `system/supervisor` that an ended role is started again until
    `toyos_manifest::RESTARTS` ends inside the window and is then closed with
    its clients answered `Gone`, red on a supervisor that restarts without
@@ -161,8 +164,8 @@ Beside that order, each waiting on something outside it:
         ("Per session", 2026-10-03, in the isolation track), and `/system` is
         read over the file protocol, which std and libc both reach through
         `toyos::files`. **Exit**: `tmpfs.rs`,
-        `fs_rename.rs` and `file_cache.rs` are gone, `vfs.rs` resolves ROOT
-        for exec and `SYS_DLOPEN` alone, and `sdk/abi` has no `SYS_OPEN` (9),
+        `fs_rename.rs` and `file_cache.rs` are gone, `vfs.rs` is gone after authenticated bootstrap images and userland
+        linking replace its last callers, and `sdk/abi` has no `SYS_OPEN` (9),
         `SYS_STAT` (16), `SYS_READDIR` (17), `SYS_DELETE` (18), `SYS_CHDIR`
         (20), `SYS_GETCWD` (21), `SYS_RENAME` (52), `SYS_MKDIR` (53),
         `SYS_RMDIR` (54), `SYS_SYMLINK` (81) or `SYS_READLINK` (82).

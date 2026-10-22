@@ -358,7 +358,11 @@ machine, the disk taken out, or a program holding the disk's claim or
 serving the file. With it they join that network, decrypt every handshake
 they saw under PSK, and hold the passphrase wherever else it is used.
 - **Owner:** the orchestrator.
-- **Exit:** a ToyOS key store, a concept the owner rules on.
+- **Exit:** protected credential storage with a defined Wi-Fi ownership and
+  unlock policy, including availability before login and migration from plain
+  text. The local app-credential facility approved in
+  `issues/storage-is-layers-and-a-role-is-a-filesystem.md` does not settle those
+  machine-service requirements.
 
 **A network's Transition Disable mark lasts only the boot until W11.** From
 W4's landing a reboot loses every mark. Until a network's first SAE join of

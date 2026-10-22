@@ -13,6 +13,24 @@ with lld, one build of one fork, `ToyOSOrg/llvm-project`. The C
 library stays `sdk/libc`, ours. Each stage lands on x86-64 first and on
 AArch64 one step behind, on `issues/toyos-runs-on-arm64.md`'s track.
 
+Owner release-scope decision, 2026-10-18: reproducible OS builds are required
+for release one. Published source and specified toolchain/inputs must reproduce
+distributed system contents, excluding signatures and machine-specific
+installation data. Define the payload boundary and repeatable comparison.
+Owner refinement, 2026-10-18: rebuilding and modifying the Rust and C/C++
+compiler toolchain within ToyOS also gates release one, including its build
+dependencies. The approved downloaded binary seed remains allowed. The existing
+M5 fixed-point target remains on the roadmap; specify compiler reproducibility
+acceptance separately from the now-required ability to rebuild the compilers.
+
+Owner release-performance requirement, 2026-10-18: ToyOS and toolchain builds
+must be at least as fast as Linux on the same bench hardware with equivalent
+inputs, settings, cache state and power/thermal conditions. Define repeatable
+comparisons that account for measurement noise. The earlier make-it-work-first
+engineering sequence remains; it is not a waiver of the release performance
+requirement. Background builds intentionally slowed for video are assessed
+separately from controlled throughput.
+
 - **M2 — clang and lld as a package inside ToyOS.** clang, lld
   and their runtime built *for* ToyOS on the host and installed by
   `/system/bin/pkg`; `clang hello.c && ./a.out` works in the guest. *Exit*:

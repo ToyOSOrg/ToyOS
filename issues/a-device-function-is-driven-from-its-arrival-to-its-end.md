@@ -17,8 +17,10 @@ started. Nothing reaches userland when a device arrives or leaves.
 **Ruled** (owner, 2026-10-13):
 
 1. The kernel hands out only what the IOMMU can tell apart: PCI functions, ISA
-   rows, platform devices. The supervisor brokers those from `system.toml`, at
-   boot and whenever one arrives later, by moving the claim to a driver. A bus
+   rows, platform devices. The supervisor brokers those at boot and whenever
+   one arrives later, by moving the claim to a driver. Image drivers come from
+   `system.toml`; the owner's 2026-10-16 package decision below adds authorized
+   installed drivers. A bus
    service (usbd, one per xHCI controller) owns everything behind its
    controller, keeps its device classes (HID, mass storage) inside its process,
    and speaks the client protocols directly (input, block). The supervisor
@@ -50,8 +52,7 @@ started. Nothing reaches userland when a device arrives or leaves.
 - A driver instance reaches its consumer as a client of the consumer's port,
   wired as ports are today. It never serves a name for connect-by-name.
 - The claim-slot limit is removed by stage 1 if cheap, otherwise by its own
-  pull request before stage 1's guest smoke
-  (`issues/a-cargo-run-boot-claims-every-pcidev-slot.md`).
+  pull request before stage 1's guest smoke.
 
 **Ruled** (orchestrator, 2026-10-20, on the step-10 brief; it replaces #901's
 `block@<location>` ports, `each`, `pci@` and several block services):
@@ -91,6 +92,25 @@ started. Nothing reaches userland when a device arrives or leaves.
     `DEVICE_DELETED` follows a `device_del` within 6 s.
   - With `ICH9-LPC.acpi-pci-hotplug-with-bridge-support=off`, the delete
     completes at once.
+
+## Installed driver integration
+
+The separate-driver-package decision is owned by
+`issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`.
+The supervisor starts authorized installed drivers through the same
+function-claim lifecycle and process/protocol boundaries above. usbd continues
+to own its whole controller and device classes within one process.
+
+Privileges beyond normal isolated device claims remain restricted to
+image-shipped programs under `CLAUDE.md`. Preserve the image-only exception in
+`issues/a-machine-without-an-iommu-refuses-every-claim.md` and the external-device
+DMA-isolation requirement and persistent firmware weakness in
+`issues/a-driver-that-reflashes-its-device-escapes-its-isolation.md`.
+
+Protected registration, matching conflicts, authorization scope and coordinated
+device release, restart, update and uninstall remain design work. Drivers needed
+to reach installed-package storage must be available before that storage mounts.
+The target does not establish seamless live driver replacement.
 
 ## Stages
 

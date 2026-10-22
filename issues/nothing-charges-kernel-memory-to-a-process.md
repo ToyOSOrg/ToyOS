@@ -25,6 +25,13 @@ each other.
 
 Accounting is a pillar of `issues/toyos-explains-itself.md`.
 
+The approved attribution scope is now an application and its helper processes,
+as recorded in `issues/no-physical-memory-fairness.md`. Per-process attribution
+may remain useful for diagnosis, but it must roll up to that resource owner;
+helpers remain charged to the same owner. Grouping does not impose a default
+memory quota; reserve protection and refusal follow that track's policy. The
+owner lifecycle and rules for shared allocations remain design work.
+
 Blocked on nothing. Two things worth knowing before it is restarted, because
 both cost a day to discover:
 

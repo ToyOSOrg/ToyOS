@@ -52,9 +52,11 @@ before that day. Independent of everything else; may run as soon as a slot frees
 
 **Move 2 — filesystem daemons**, sequenced after the completion architecture. A
 crafted image attacks the kernel rather than a sandboxed daemon. The FS daemon
-needs the blocking story to be efficient, and the boot path needs its story told
-first: the kernel mounts ROOT itself, but what mounts `/boot` and `/home`, and
-with what authority, is the open question.
+uses the asynchronous storage core with blocking adapters. The loader supplies
+authenticated bootstrap executables explicitly; userland mounts ROOT and the
+other volumes through granted device capabilities. Remove the remaining kernel
+boot-filesystem reader and move temporary storage to a userland RAM filesystem.
+The kernel provides generic mappings, capabilities and process startup.
 
 **Move 3 — the panic-time symbol resolver**, small and independent. Ruled
 (owner, 2026-10-03, `issues/toyos-explains-itself.md`): he chose
@@ -88,9 +90,9 @@ only by explicit exit; the main thread stops being special either way.
 
 **Non-moves, recorded so nobody re-proposes them.**
 
-- **2 MiB pages stay.** The fragmentation is a memory cost, not attack surface,
-  and the smaller mm it buys is itself security. Revisit only on measured memory
-  pressure, never for this.
+- **Ordinary pages are 4 KiB.** The approved memory migration separates
+  reservation, commitment and population; large mappings do not require
+  physically contiguous backing. This supersedes the earlier 2 MiB-only rule.
 - **Invalid handles keep killing the caller.** A process naming a handle it does
   not hold is buggy or probing, and the kill stops handle-guessing cold.
   Compatibility lives in `sdk/libc`, which tracks its own fds.

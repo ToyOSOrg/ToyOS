@@ -18,10 +18,11 @@ driver: the next holder, and the next boot's firmware before any IOMMU is
 on, drive what the last holder wrote. That reach is the IOMMU design's
 reading, not a measurement.
 
-**Ruled** (owner, 2026-10-04, "Refuse external, record reflash"):
-"External-port devices can't be claimed by userland drivers for now;
-reflashing is a recorded weakness with an exit (firmware verification) to
-design later."
+Owner decision, 2026-10-17: external DMA-capable devices still require
+isolation, even when operated by distro drivers. The no-isolation policy in
+`issues/a-machine-without-an-iommu-refuses-every-claim.md` does not waive that
+boundary or solve firmware persistence. Reflashing remains the recorded
+weakness whose firmware-verification exit needs design.
 
 Owner: the orchestrator, under `issues/the-iommu-refuses-nothing-yet.md`.
 
