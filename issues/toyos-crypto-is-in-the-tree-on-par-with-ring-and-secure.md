@@ -323,10 +323,8 @@ Not consumers:
        through `lib/update`'s `ed25519-dalek`.
      - Under russh (`system/sshserver`), `curve25519-dalek` 5.0.0-pre.6
        names `fiat-crypto` 0.3.0 behind the same unset `cfg`.
-     - Under russh, `p384` 0.14.0-rc.8 depends on `fiat-crypto` 0.3.0
-       unless `p384_backend = "bignum"`, which nothing sets: fiat code is
-       compiled into sshserver today. It goes with russh, at stage 2 of
-       `issues/the-ssh-server-is-toyos-own-and-russh-is-gone.md`.
+     - Under russh, `p384` 0.14.0-rc.8 names `fiat-crypto` 0.3.0 unless
+       `p384_backend = "bignum"`, which the guest targets set once #1005 lands.
 
      `num-bigint`, the crate's test-only integer oracle, holds:
      - `field25519` and `scalar25519`;
@@ -425,9 +423,12 @@ Not consumers:
          fixed scalar is about 510 ticks slower of about 1.5 M. P-384
          agreement reads 5.79, marginal. P-384 public key and Ed25519 pass.
          Owner: crypto-perf, the NIST arithmetic. Exit: a T14 pass on the
-         current NIST code, re-measured after the rebase. A hypothesis, not
-         established: value-dependent instruction latency with Intel's DOITM
-         off, which a boot with DOITM set tests.
+         current NIST code (#1000's Booth windows, at 954b4587b), which a
+         boot of #993's head re-measures. A hypothesis, not established:
+         value-dependent instruction latency with Intel's DOITM off, which
+         a T14 boot with DOITM set on every CPU tests. Its scalar 1 holds
+         the running total at the identity for 51 of 52 windows, so the two
+         classes run the same instructions on very different values.
        - Their judge asks only that each job ran and its controls held; the
          verdicts are this record's. The first boots, of the fast program at
          ec5a0cd18, read LEAKS everywhere: that harness made each random
