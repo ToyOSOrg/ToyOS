@@ -28,8 +28,7 @@ The owner's rulings:
   development instrument that records sessions for replay. No test runs it, and
   the guest suite runs no host `ssh` or `sftp`.
 
-Compromises of `toyos-ssh` recorded on their own:
-`issues/toyos-ssh-offers-only-a-classical-key-exchange.md` and
+A compromise of `toyos-ssh` recorded on its own:
 `issues/toyos-ssh-leaves-its-secrets-in-freed-memory.md`.
 
 A compromise of the server shipped today, until stage 2: russh's `p384`
@@ -61,8 +60,7 @@ Owner: this track's. Exit: stage 2, which deletes russh and the setting.
    login deadline is what bounds a client that only offers keys, because an
    offer answered `PK_OK` counts as no failure. This stage closes
    `issues/sshserver-holds-one-channel-and-does-not-say-so.md` and
-   `issues/sshserver-still-speaks-rsa.md`. It waits for stage 3, and for
-   stage 4 of `issues/toyos-crypto-is-in-the-tree-on-par-with-ring-and-secure.md`
+   `issues/sshserver-still-speaks-rsa.md`. It waits for stage 4 of `issues/toyos-crypto-is-in-the-tree-on-par-with-ring-and-secure.md`
    on SSH's primitives.
    **Exit**:
    - `system/sshserver/Cargo.toml` names `toyos-ssh`, and names neither
@@ -74,14 +72,11 @@ Owner: this track's. Exit: stage 2, which deletes russh and the setting.
    - `.cargo/config.toml` sets no `p384_backend`.
    - A recorded `sftp` session and a recorded shell session replay byte for
      byte under `cargo run -- --ci host`.
-3. **ML-KEM.** Our own `mlkem768x25519-sha256`, on `toyos-crypto`'s
-   ML-KEM-768 and its hybrid: the server's encapsulation side, as one more
-   `kex::METHODS` entry. Lands before stage 2.
-   **Exit**:
-   - NIST's ML-KEM-768 encapsulation known answers pass.
-   - An OpenSSH recording that negotiated `mlkem768x25519-sha256` replays
-     byte for byte, and its client's log has no post-quantum warning.
-   - `issues/toyos-ssh-offers-only-a-classical-key-exchange.md` is closed.
+3. **ML-KEM.** Our own `mlkem768x25519-sha256` (RFC 10042), on
+   `toyos-crypto`'s ML-KEM-768 and its hybrid: the server's encapsulation
+   side, offered before `curve25519-sha256`. Every OpenSSH recording but one
+   negotiated it; the one forced onto `curve25519-sha256` keeps the classical
+   method's replay. Landed by #1023.
 4. **The forks retire.** After stage 2, tokio has no consumer in the
    workspace, and mio and socket2 remain only as host dev-dependencies of
    `system/netstack/node`.

@@ -19,7 +19,7 @@ mod common;
 
 use std::collections::BTreeMap;
 
-use common::client::{ed25519_blob, open_packet, pair, publickey_request, signed_request, string, Client};
+use common::client::{ed25519_blob, open_packet, pair, publickey_request, signed_request, string, Client, CURVE25519};
 use common::driver::{host_key, public_blob, Fixed, Keys, Side, Transcript, USER};
 use toyos_ssh::{Event, Random, Refusal, Server};
 
@@ -158,7 +158,7 @@ fn message(rng: &mut Rng, session_id: &[u8; 32]) -> (Vec<u8>, bool) {
             out.push([2, 4, 3][rng.below(3)]);
             out.extend(rng.bytes(12));
         }
-        22 => out = common::client::kexinit("curve25519-sha256"),
+        22 => out = common::client::kexinit(CURVE25519),
         23 => {
             out.push(1);
             out.extend_from_slice(&11u32.to_be_bytes());
@@ -365,6 +365,7 @@ fn every_bent_recording_is_total_and_a_bend_before_the_login_prevents_it() {
     let recordings = [
         Recording::read(include_str!("fixtures/exec.transcript")),
         Recording::read(include_str!("fixtures/stdin.transcript")),
+        Recording::read(include_str!("fixtures/curve25519.transcript")),
     ];
     let mut outcomes = BTreeMap::new();
     let mut held = 0;

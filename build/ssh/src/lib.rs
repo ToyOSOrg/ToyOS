@@ -2,8 +2,8 @@
 //! [`Event`]s for the driver out. No socket, no thread and no clock; the
 //! randomness is the caller's [`Random`].
 //!
-//! **One algorithm set, and nothing else offered**: `curve25519-sha256` with
-//! strict key exchange, an `ssh-ed25519` host key,
+//! **One algorithm set, and nothing else offered**: `mlkem768x25519-sha256`,
+//! then `curve25519-sha256`, with strict key exchange; an `ssh-ed25519` host key,
 //! `chacha20-poly1305@openssh.com` both ways, no compression; `publickey`
 //! authentication with `ssh-ed25519` keys; `session` channels serving `exec`.
 //!
@@ -49,6 +49,8 @@ mod msg {
     pub(crate) const EXT_INFO: u8 = 7;
     pub(crate) const KEXINIT: u8 = 20;
     pub(crate) const NEWKEYS: u8 = 21;
+    /// `SSH_MSG_KEX_ECDH_INIT` (RFC 5656 §7.1) and `SSH_MSG_KEX_HYBRID_INIT`
+    /// (RFC 10042 §2.2) share their numbers, as do the replies.
     pub(crate) const KEX_ECDH_INIT: u8 = 30;
     pub(crate) const KEX_ECDH_REPLY: u8 = 31;
     /// The first number of the layers above the transport.

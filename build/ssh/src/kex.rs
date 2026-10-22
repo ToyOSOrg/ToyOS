@@ -1,10 +1,11 @@
-//! Algorithm negotiation (RFC 4253 §7.1), the curve25519-sha256 exchange hash
-//! (RFC 8731 §3) and key derivation (RFC 4253 §7.2).
+//! Algorithm negotiation (RFC 4253 §7.1), the exchange hash of
+//! `mlkem768x25519-sha256` (RFC 10042 §2.5) and `curve25519-sha256` (RFC 8731
+//! §3), and key derivation (RFC 4253 §7.2).
 //!
 //! **One algorithm per slot, and the key exchange a list.** The server offers
 //! `ssh-ed25519`, `chacha20-poly1305@openssh.com` and no compression; the
 //! cipher is an AEAD, so the MAC lists are empty and never negotiated. The key
-//! exchange methods are [`METHODS`], chosen in the client's order, so a second
+//! exchange methods are [`METHODS`], chosen in the client's order, so another
 //! method is one more entry and one more arm of [`Method`].
 
 use toyos_crypto::hash::Sha256;
@@ -15,19 +16,21 @@ use crate::wire::{put_bool, put_string, put_u32, NameList, Reader, Refusal};
 /// A key exchange method this server runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Method {
+    MlKem768X25519Sha256,
     Curve25519Sha256,
 }
 
 impl Method {
     fn name(self) -> &'static str {
         match self {
+            Self::MlKem768X25519Sha256 => "mlkem768x25519-sha256",
             Self::Curve25519Sha256 => "curve25519-sha256",
         }
     }
 }
 
-/// The methods offered, most preferred first.
-pub(crate) const METHODS: &[Method] = &[Method::Curve25519Sha256];
+/// The methods offered, the post-quantum hybrid first.
+pub(crate) const METHODS: &[Method] = &[Method::MlKem768X25519Sha256, Method::Curve25519Sha256];
 
 /// Strict key exchange (OpenSSH `PROTOCOL` §1.10): the server's marker, and the
 /// client's, without which no session runs.
@@ -111,16 +114,19 @@ pub(crate) fn negotiate(payload: &[u8], first: bool) -> Result<Negotiated, Refus
     Ok(Negotiated { method, ext_info: first && kex.contains(EXT_INFO_CLIENT) })
 }
 
-/// The inputs of the exchange hash, in RFC 8731 §3's order.
+/// The inputs of the exchange hash, in RFC 8731 §3's and RFC 10042 §2.5's
+/// order; both methods hash with SHA-256.
 pub(crate) struct Exchange<'a> {
     pub(crate) client_version: &'a [u8],
     pub(crate) server_version: &'a [u8],
     pub(crate) client_kexinit: &'a [u8],
     pub(crate) server_kexinit: &'a [u8],
     pub(crate) host_key: &'a [u8],
+    /// `Q_C`, or the hybrid's `C_INIT`.
     pub(crate) client_public: &'a [u8],
+    /// `Q_S`, or the hybrid's `S_REPLY`.
     pub(crate) server_public: &'a [u8],
-    /// `K` as an `mpint`, length included.
+    /// `K` encoded as its method says, length included.
     pub(crate) secret: &'a [u8],
 }
 
@@ -145,7 +151,8 @@ impl Exchange<'_> {
 }
 
 /// The 64 bytes of key `letter` (RFC 4253 §7.2): `HASH(K || H || letter ||
-/// session_id)`, extended by `HASH(K || H || K1)`. `secret` is `K` as an `mpint`.
+/// session_id)`, extended by `HASH(K || H || K1)`. `secret` is `K` encoded as
+/// in the exchange hash.
 pub(crate) fn derive(secret: &[u8], hash: &[u8; 32], letter: u8, session_id: &[u8; 32]) -> [u8; 64] {
     let first = sha256(&[secret, hash, &[letter], session_id]);
     let second = sha256(&[secret, hash, &first]);
