@@ -12,6 +12,66 @@ playground, so a broken driver may wipe that NVMe and the next install writes it
 again. Updates are `ssh <machine> update < image` — a normal `exec`, the image on
 stdin — and the machine installs nothing the owner did not sign.
 
+## Finished-distro update policy
+
+Owner decision, 2026-10-18: personally modified ToyOS system code is maintained
+as the user's own build, with upstream merges and rebuilds through ordinary
+development tools. The updater need not carry local source modifications across
+distro updates. This does not change preservation of settings, data or installed
+apps. Custom-build update-source selection and return to distro builds remain
+to design under the existing image-verification and trust authority rules.
+
+Owner decision, 2026-10-18: maintain one current stable release. Ongoing
+security fixes target it; users must upgrade to remain supported.
+Release cadence and transition communication remain product requirements to
+refine; this does not change postponement or the no-forced-restart policy.
+
+Owner decision, 2026-10-20: fix forward. No OS downgrades or rollbacks in the
+current release scope, including automatic fallback to an older OS after an
+activated update fails to boot. Ship a newer fixed version. This supersedes
+the older-image recovery direction and the fallback target in stage 1 below.
+That stage records prior implementation evidence, not the newly approved end
+state. Reconcile loader selection, activation and version-floor rules; do not
+claim the current fallback behavior satisfies this decision. Safe staging
+remains required. A failed download or incomplete staging must not damage the
+current installation. Owner confirmation, 2026-10-20: a boot-medium workflow
+that applies a newer fixed release while preserving data remains deferred.
+Manual rescue or fresh installation is acceptable initially after an unbootable
+update. This does not authorize erasing data or claim fresh installation
+preserves it. Implementation is not commissioned by this record.
+
+Owner decision, 2026-10-16: prepare verified OS updates automatically and
+activate them at the next normal reboot, with an option to postpone. Never
+force a restart. This is the product target, not a change to the current
+development deployment loop or a claim that automatic fetching exists.
+
+Reuse the signed-image and inactive-slot installation path. Fetching,
+scheduling and the user's choice belong in userland. The current `update`
+command installs and selects the new slot in one operation; preparation and
+next-boot selection must support postponement coherently, including a reboot
+or interrupted download. A downloaded image is not an activated update.
+Application updates remain a separate policy.
+
+## Authority to change OS trust
+
+Owner decision, 2026-10-20: first-release installation may require documented
+one-time firmware trust setup. Verified boot must be active afterward;
+unchanged factory trust settings are not a release gate. Validate enrollment,
+key ownership and recovery on both benches. This installation allowance does
+not change the separate authorization policy below.
+
+Owner decision, 2026-10-16: an explicitly authorized administrator may change
+which OS signing keys the machine trusts remotely. Local presence is not a
+ToyOS policy requirement for that operation. This authority is distinct from
+permission to install an ordinary update signed by an already-trusted key;
+remote login alone grants neither.
+
+Enrollment, key replacement, firmware support and coordination with encrypted
+storage's key-release policy remain design work. Changing OS trust does not
+itself grant recovery of a user's locked storage. A replacement OS can observe
+data when subsequently unlocked; do not promise isolation from an OS the
+machine has been authorized to run.
+
 ## Stage 1 — slots, signatures and `update`, proven in QEMU (done)
 
 - **A signed image** (`toyos-update`): a header naming a monotonic version and
@@ -37,6 +97,18 @@ stdin — and the machine installs nothing the owner did not sign.
   installed on the owner's machine, whose loader keeps the machine's floor.
 
 ## Stage 2 — the T14 installs ToyOS on its NVMe
+
+Owner decision, revised 2026-10-18: the first-release installation medium boots
+into ToyOS's desktop. A desktop entry opens a graphical installer, replacing
+the earlier console/CLI requirement. It offers independent language, regional
+format, keyboard and time-zone selection, also available later in settings.
+Installation and first-account
+setup must work offline from a small base image; optional applications are
+downloaded separately.
+
+Owner decision, 2026-10-18: the boot-medium workflow for reinstalling a broken
+system while preserving existing user data is deferred beyond the first
+release. Safe installation and the update-failure contract remain required.
 
 The machine boots the stick and installs onto its own NVMe, then takes
 `ssh t14 update < image` for every change after. It waits on stage 5 of

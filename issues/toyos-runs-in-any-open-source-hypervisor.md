@@ -6,6 +6,9 @@ opened: 2026-10-12
 
 # ToyOS runs in any open-source hypervisor
 
+Hosting guest operating systems on ToyOS is a separate later target in
+`issues/toyos-hosts-hardware-accelerated-virtual-machines.md`.
+
 The owner's aim, as the orchestrator briefed this audit: ToyOS runs in any
 popular open-source virtual machine — QEMU under KVM, HVF or TCG, Cloud
 Hypervisor, VirtualBox, bhyve and crosvm — with QEMU still the launcher and the

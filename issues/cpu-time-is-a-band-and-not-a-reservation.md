@@ -1,10 +1,20 @@
 ---
-status: open
-kind: track
+status: none
+kind: rejected
 opened: 2026-08-14
 ---
 
 # CPU time is a band, not a reservation, so nothing anyone is promised is priced
+
+The owner rejected this reservation redesign on 2026-10-16. The current
+direction and the unresolved starvation/blocking investigation live in
+`issues/the-scheduler-and-the-clocks-never-talk.md`: realtime priority with
+trusted-service authorization and runtime safeguards, without EDF/CBS.
+None of the implementation stages or policy commitments below remains approved.
+The historical measurements are retained as evidence to investigate, not proof
+that the rejected design is necessary or that its replacement is implemented.
+
+## Historical proposal — not implementation instructions
 
 Real-time work outranks normal work by right, fairness is a share of whatever is
 left, and no entity is promised anything a number can check. Measured

@@ -22,6 +22,13 @@ The log is a pillar of `issues/toyos-explains-itself.md`. The
 orchestrator's plan, not ruled: step 1's ring is the reset-surviving region's,
 and step 2's keys are how a program writes an event.
 
+## Storage topology remains unapproved
+
+Per-CPU and global storage are alternatives, not prerequisites of the CPU-count
+migration. Keep log and trace contracts distinct. Settle bounded writer progress,
+overflow, stalled readers and allocation-free panic handling before changing
+ring topology. Firmware wiping takes precedence over retained RAM logs.
+
 What is left, in order:
 
 **1. The kernel's ring, rebuilt as one lockless variable-length ring with a
@@ -31,15 +38,11 @@ the firmware names today, `toyos_abi::log::CursorHead`); the k-way merge and
 the shard registry go, and with them the merge's per-record cost: a stamp read
 and a position store per CPU the firmware names, recomputed each record so no
 fatal path holds a per-CPU array; the loom models are
-rewritten. The ring lives in persistent RAM, so a triple fault or a firmware
-reset — which seal nothing today — leaves the last boot's tail, and the next
-boot's `logd` reads it through `SYS_LOG_READ` under a flag and writes it to
-`/log` rather than the loader copying a rendering of it. That is also what puts
-a stopped boot's own last records — its stop record, its census, `Rebooting.` —
-into `/log` rather than only the next loader pass's page. High-risk: a
+rewritten. Firmware memory wiping takes priority over unsaved crash records.
+Readers must tolerate an absent or invalid prior-boot tail. High-risk: a
 loom-checked primitive and the ABI.
-*Exit:* one ring, one sequence, a `u64` cursor, and a guest test that resets a
-machine mid-boot finding the tail in the next boot's `/log`.
+*Exit:* one ring, one sequence, a `u64` cursor, and readers that handle absent
+or invalid prior-boot records without requiring RAM retention.
 
 **2. Verdicts that match on fields instead of English.** A record carries its
 severity and origin; the tests and metal verdicts this change touched match on

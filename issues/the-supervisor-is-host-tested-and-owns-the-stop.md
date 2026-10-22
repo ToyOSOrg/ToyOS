@@ -9,6 +9,33 @@ opened: 2026-09-28
 Held by the orchestrator. Stage 1 landed before the latency work
 (`issues/toyos-beats-linuxs-latency-on-the-t14.md`; owner, 2026-10-03).
 
+## First-release failure recovery
+
+Owner decision, 2026-10-17: service failures may interrupt the affected feature.
+Recover safely and report failures; uninterrupted recovery is not a general
+first-release requirement. Restarting a process does not restore its previous
+connections, streams or client state. Keep bounded restart attempts and make
+exhaustion visible. Reconnection is protocol-specific; retry only when proven
+safe, and report uncertain outcomes rather than replaying arbitrary operations.
+The filesystem contract is in
+`issues/ipc-rings-do-not-yet-make-filesystem-io-concurrent.md`.
+
+Device reuse requires safe cleanup and reinitialization; not every device can
+recover. Owner decision, 2026-10-17: if a failed device is safely contained but
+cannot be restored, leave it unavailable, report the failure and let the user
+choose when to reboot. Do not reboot automatically for that contained failure.
+This does not settle failures whose effects cannot be contained or change the
+separate whole-machine watchdog policy.
+
+Owner decision, 2026-10-17: first-release automatic recovery covers process
+crashes, not general detection and restart of hung services. Bound waits and
+report their failures; provide an authorized manual restart path for a stuck
+service. A timeout alone does not authorize killing or restarting its process.
+Defer general service-health monitoring and automatic hang recovery. Existing
+protocol-specific timeout handling and whole-machine freeze protection remain
+separate. The manual restart path must use the same safe teardown and device
+reuse rules as crash recovery.
+
 ## Stages
 
 Every guest test this track names is registered. A deleted test covers

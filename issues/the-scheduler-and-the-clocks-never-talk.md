@@ -6,26 +6,30 @@ opened: 2026-08-16
 
 # The scheduler and the clocks never talk
 
-Queued track from the 2026-08-16 owner conversation on scheduler direction; the
-furthest out of the set.
+## Combined scheduler, audio and idle direction
 
-Two couplings every production scheduler has and ours lacks:
+Use per-CPU EEVDF job groups and bounded realtime audio. No EDF/CBS admission
+or per-stream CPU reservation. Focus changes responsiveness, not sustained
+shares; equal-weight jobs compete across users without an outer user hierarchy.
+Independent jobs need launch authority; helpers share their existing job.
 
-- **Frequency (DVFS)**: the scheduler knows every core's utilization and nobody
-  else does, so it should feed whoever sets clock speeds (the schedutil
-  arrangement) — including the race-to-idle question of whether finishing fast
-  and sleeping beats pacing slow.
-- **Idle-state awareness**: a deeply sleeping core takes real microseconds to
-  wake. A latency-sensitive wake should prefer a shallow-idle core; a
-  throughput task can pay to wake a deep one.
+Accept new audio streams best-effort. Genuine audio overload may cause dropouts;
+a client missing a block contributes silence without delaying other clients.
+Grant realtime authority only to the relevant workers, not every thread in an
+application. Preallocate realtime work and avoid blocking/allocation in callbacks.
+Owner-keyed abuse handling remains distinct from legitimate aggregate overload.
 
-Both wait for an AML interpreter
-(`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`),
-because the kernel reads no C-state on metal and chooses no P-state: it
-declares HWP's bounds (`kernel/src/arch/x86_64/control_regs.rs`), and the CPU
-chooses within them.
-Filed so the placement track (see `placement-has-no-migration-cost-or-wake-affinity.md`)
-leaves room for an idle-state input when it designs wake placement.
+Idle selection uses predicted idle duration, known next wake and permitted exit
+latency. Placement considers wake cost without sacrificing ordinary progress.
+Run batch work promptly with no power target; let idle cores sleep. Detailed
+frequency optimization is later work. Scheduling, timer programming and the idle
+entry recheck must prevent lost wakeups; firmware latency is not a hard guarantee.
+
+Reconcile the old CPU/idle drafts with this direction. Complete kernel scheduling,
+then realtime authorization/limits and the soundserver client path, then idle-state
+integration. Validate accounting on the host and actual wake/audio behavior on
+metal in focused, batched runs. Do not require a new latency-hint API before its
+first caller. Existing model results below do not establish hardware performance.
 
 ## Realtime exhaustion (owner decision J2, 2026-10-20; stage 4)
 

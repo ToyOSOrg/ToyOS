@@ -28,6 +28,31 @@ so the native shape is smaller:
    a connection, so a crashed registrant releases its inhibit by the same
    teardown that releases everything else.
 
+## Whole-machine sleep
+
+Owner decision, 2026-10-17: the first release targets ordinary sleep with the
+session retained in powered RAM. Defer hibernation and its encrypted session
+image and authenticated-resume design. Ordinary sleep retains sensitive memory;
+it does not cryptographically lock personal storage. This is separate from
+idle CPU core sleep. Safe device suspend/resume and platform sleep support
+remain implementation work.
+
+## Automatic sleep
+
+Owner decision, 2026-10-18: lid-close sleep behaviour is configurable,
+including whether an app's keep-awake request may prevent it. The default and
+setting scope remain to define; neither precedence is mandated as the sole
+behaviour. This does not change the separate idle-sleep request rules below.
+
+Owner decision, 2026-10-16: applications may temporarily prevent automatic
+whole-machine sleep while doing work without separate per-app approval or a
+prompt for every request. Show the requesting application and its stated
+reason, and let the user override the request. Tie each request to its
+connection lifetime so disconnect releases it. The request does not grant
+`POWER`, prevent idle CPU cores from sleeping, or authorize control over
+shutdown or reboot. The broker protocol, override lifetime and whole-machine
+suspend/resume implementation remain design work.
+
 Unstaffed until the owner opens it; sequenced naturally with the userland/
 product era. What must not happen meanwhile is the accident this track
 exists to prevent: `POWER` spreading to more manifest rows.

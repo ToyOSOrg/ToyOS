@@ -23,6 +23,12 @@ Owner rulings, 2026-09-26:
 - **Rendering:** CPU rendering is the first-class path; there is no CPU
   Vulkan. Later, a display-only driver for the T14's Iris Xe (Gen12 Xe-LP),
   then a Vulkan driver so wgpu apps get the GPU.
+  Owner release-scope ruling, revised 2026-10-18: one active monitor with
+  software rendering. Userland display-control drivers are allowed for refresh
+  synchronization, page flips and display power/resume, superseding GOP-only
+  output. GOP boot display and unaccelerated virtio-gpu remain supported. GPU
+  rendering and multi-monitor support remain later work; this does not authorize
+  hardware video decoding. Software-rendered Chromium and sleep/resume still need feasibility evidence.
 - **Window management:** both floating and tiling.
 - **Look and feel:** the familiar style every desktop shares — a taskbar with
   pinned and running apps together, one start menu with search, clear window
@@ -37,6 +43,59 @@ Owner rulings, 2026-09-26:
   desktop environment on plain upstream iced; its ambition is to be a real
   competitor to COSMIC, not a port of it. `cosmic-text` (MIT OR Apache-2.0)
   remains in use.
+
+## Background work
+
+Owner release-scope decision, 2026-10-18: a desktop/display-service crash may
+end the affected desktop session, potentially losing unsaved work. Application
+reconnection and recovery across a desktop restart are deferred. Safe session
+cleanup and reporting remain required; failure of the desktop alone is not
+authorization to reboot or terminate unrelated work. Recovery controls when the
+desktop is unavailable remain to design.
+
+Owner decision, 2026-10-16: programs may continue running without windows,
+including after their last window closes, without separate background
+permission. This applies to CLI jobs too; window count does not determine
+execution authority. Make running applications and background work visible,
+with clear controls to stop them. Closing a window and quitting an application
+are distinct actions. Application resource accounting and existing capability
+limits still apply; background execution grants no additional access.
+
+Owner decision, 2026-10-16: an installed application needs explicit user
+approval to start automatically at sign-in. Remember the choice and let the
+user change it in settings. Installation alone does not approve startup.
+Requests and stored choices belong in the trusted userland permission and
+session-launch path; the package manifest does not itself grant authority.
+This policy does not govern the image's system services.
+
+Desktop sign-out ends that session's work under
+`issues/a-user-is-a-home-tree-and-a-login-row.md`. Terminal job lifetimes and
+the concrete app-wide quit mechanism still need design; allowing background
+execution does not promise that every job survives those events.
+
+## Desktop notifications
+
+Owner decision, 2026-10-16: apps need approval before showing desktop
+notifications. Ask through the common runtime-consent path and remember the
+decision; a recorded denial does not trigger repeated prompts. The user can
+change it in settings. Messages inside an app's own windows are unaffected.
+Use the shared saved-decision lifecycle for verified updates and uninstall.
+
+## Camera and microphone privacy
+
+Owner decision, 2026-10-16: camera and microphone are separate per-app
+permissions. Ask through the common runtime-consent path and remember each
+approval until removed; do not ask again for every recording session. Removing
+saved approval affects future direct grants and does not stop already-authorized
+recording, following
+`issues/permissions-and-capabilities-need-one-runtime-contract.md`.
+Use its verified-update and uninstall rules for saved decisions too.
+
+The desktop shows which app is actively using each sensor, including background
+use. Activity must come from the service enforcing capture access, not from an
+app's claim to be recording or merely having saved permission. The capture and
+activity-reporting protocols remain design work. This does not change the
+separate per-session selection rule for screen sharing below.
 
 ## Why CPU rendering, not a CPU Vulkan
 
@@ -98,26 +157,46 @@ until the Rust target is upstream.
 2. **A shell**, written in iced: the compositor's window management for
    floating and tiling with edge snapping; a taskbar or panel with pinned and
    running apps; a start menu or launcher with search.
-3. **Core apps**: files, terminal, editor and settings. The login greeter
+3. **Core apps**: files, terminal and settings. Owner refinement, 2026-10-18:
+   the minimal base omits a text editor and SSH, and includes graphical package
+   management as well as its CLI. Optional applications are downloadable;
+   the login greeter
    waits on the users track
    (`issues/a-user-is-a-home-tree-and-a-login-row.md`).
 4. **Compositor services**: clipboard, drag and drop, notifications and
-   screenshots. Clipboard reads and screenshots are privileges granted under
-   the package track's request ∩ grant ∩ ceiling rule
+   screenshots. Owner decision, 2026-10-16: an ordinary application receives
+   clipboard contents when the user pastes them; focus alone does not authorize
+   a read. Background reading, including by clipboard managers, needs separate
+   approval under the package track's request ∩ grant ∩ ceiling rule
    (`issues/a-package-is-a-directory-under-apps-and-the-installer-is-a-program.md`).
+   The compositor's paste shortcut and separate clipboard-watcher connection
+   are foundations; trusted paste-menu actions and toolkit integration still
+   need a design. An application claiming a paste action is not proof of user
+   intent. Screenshot access also follows the package permission rule.
+   Owner decision, 2026-10-16: ordinary screen sharing and recording require
+   the user to choose a window or display through trusted UI each time sharing
+   starts. Grant capture of only that target for that sharing session; access
+   ends when sharing stops. Do not turn a prior session's approval into
+   remembered permission to start another. The capture protocol, target
+   lifetime, buffer ownership and stop semantics remain design work; this
+   ruling does not implement them or decide unattended remote access.
 5. **Fractional scaling**: `issues/the-desktop-draws-at-the-panels-scale.md`.
-6. **Accessibility**: accesskit, keyboard-only navigation, high contrast.
+6. **Accessibility**: owner decision, 2026-10-18: keyboard-only navigation is
+   required for the first release. Screen-reader support, adjustable text size
+   and other accessibility features are outside that initial requirement.
+   Accesskit and high contrast remain later candidates, not release blockers.
 7. **Input**: the T14 touchpad
    (`issues/the-t14-touchpad-is-i2c-hid-and-unbuilt.md`), scrolling
    and gestures, and input methods building on `toyos-keymap`.
 8. **Laptop basics**: battery, lid, brightness and volume keys, suspend,
-   Wi-Fi status and multiple monitors.
+   Wi-Fi status; multiple monitors deferred beyond the first release.
 9. **One visual design**: theme, icons (licence-clean sources) and spacing.
 10. **A performance budget**: 60 fps at the T14's resolution with CPU
     rendering, measured by a test.
 11. **Screenshot tests**: golden images per app.
-12. **GPU**: a display-only Xe-LP (Gen12 Xe-LP, PCI ID 8086:9A49 on the
-    tree's own T14) driver, then a Vulkan driver so wgpu apps get the GPU.
+12. **Display control and later GPU rendering**: display-only drivers may
+    support first-release refresh and power management. Vulkan and accelerated
+    rendering remain beyond the first release.
 
 ## Standing
 

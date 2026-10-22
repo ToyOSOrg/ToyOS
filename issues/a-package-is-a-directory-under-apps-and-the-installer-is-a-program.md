@@ -6,9 +6,48 @@ opened: 2026-09-04
 
 # A package is a directory under /apps, and the installer is a program
 
-The milestone the owner set on 2026-09-03: download and install
-github.com/Japabu/gbae from its GitHub release and run it, in QEMU first,
-with no shortcut past what an ordinary OS target does.
+## Approved package behavior
+
+- Keep the base small. Ship package GUI and CLI with one catalogue/state/authority
+  model; download browsers, development tools, editor, SSH and additional drivers.
+  Bundle drivers needed to boot, install offline, use the desktop and reach packages.
+  Recommend applicable driver and CPU microcode packages; microcode payloads are
+  distributed separately from the OS image.
+- Ordinary app-specific libraries travel with the app. No custom install, update
+  or uninstall scripts. Apps initialize/migrate private data on launch, including
+  selecting separately supplied game data. Driver/OS activation needs its own design.
+- Support the distro catalogue and external package files; additional catalogues
+  are deferred. Unsigned packages require explicit approval and an unverified
+  publisher indication. No silent enrollment of an external update source.
+- Personal installs require the user's approval; all-user installs and system
+  changes require system authority. An installer is an ordinary authorized
+  program, not a privileged executable name. Protect committed installed versions
+  from arbitrary writes, using private staging and authorized activation.
+- Package identity comes from protected installation records and verified update
+  transitions. A name or digest alone grants nothing. Verified updates preserve
+  approvals and denials; unverified replacement cannot inherit them.
+- Prepare verified app updates automatically, activate while stopped and allow
+  per-app pause. No automatic private-data recovery points or built-in backup product.
+- Quit before uninstalling; offer keep/delete for private data, preserve unrelated
+  documents and forget saved permissions. Updates are not uninstall/reinstall.
+- Allow unpackaged unsigned native programs. Direct approvals last only that run;
+  ordinary inherited/delegated access follows its existing lifetime.
+- Apps manage plugins with general isolation tools; no OS extension framework.
+  Separately installed drivers require explicit device authority and supported
+  isolation; being signed does not confer the distro's isolation exception.
+- Native source ports and libc are the compatibility path; Linux binary execution
+  is deferred. Stabilize the app contract within a defined support window when
+  ready; current development remains free to change interfaces.
+
+The final package metadata, protected identity and activation protocol remain to
+design. Ordinary runtime permission requests require no manifest category list.
+Network consent and delegation are owned by the permission-runtime track; do not
+implement a separate package-specific policy.
+
+## Milestone
+
+Install and launch gbae as an ordinary package with authorized access to selected
+game data. Use the same package behavior for DOOM and other native ports.
 
 ## What exists on the other side
 
@@ -26,12 +65,11 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
   fetching a source tree and building it on the machine waits for a hosted
   compiler and is no part of this track.
 - **A package is a directory.** `/apps/<name>/` holds the binaries, data and
-  licence the archive carried, unpacked as-is, plus one file the installer
-  writes: `manifest.toml` naming the package, version, the archive's digest,
-  and the program to launch. Nothing is registered anywhere else: the
-  desktop's launcher lists `/apps` and reads each manifest; init grants an
-  app its namespace from that row the same way `system.toml` grants a system
-  program's. Removal is deleting the directory.
+  licence the archive carried. Today's installer adds a `manifest.toml` naming
+  the package, version, archive digest and program to launch. The launcher can
+  discover packages by listing `/apps`; this does not exclude protected
+  installation/source identity records. Package metadata is not authority.
+  The final metadata format remains open.
 - **A package is a program, whole** (owner, 2026-10-02): self-contained and
   fixed at build time. No library packages, no dependency solver, no install
   scripts; a fix in what a package carries is a rebuild of the package.
@@ -39,27 +77,27 @@ the binary in a ToyOS guest is this track's harness's job, not gbae's.
   library can be a build input named exactly by hash, never an installed
   thing; shared objects stay, only library packages go.
 - **`/apps/<name>` is immutable by stage-then-commit** (owner, 2026-10-02).
-  `pkg` unpacks into a private staging directory and commits it in one step,
-  one operation the file server gains; nothing writes a committed package.
+  An authorized installer unpacks into private staging and activates the
+  verified version in one step. Follow the installed-code protection policy
+  above; the activation interface remains to be designed.
 - **A standalone C program's ToyOS changes are patch files in a recipe**
   (owner, 2026-10-02), against an upstream archive pinned by hash; a delta too
   large to read as patches moves to a fork repository pinned by commit. Forks
   stay for crates, `rust/` and LLVM. Recipes and patches live in this
   repository, where `NOTICE` and the licence gate carry them, not in a ports
   repository.
-- **The installer is an ordinary program**, `/system/bin/pkg`, with no
-  authority a shell does not have: it fetches, verifies, unpacks and writes
-  under `/apps` because `/apps` is writable to it, and it asks the user
-  before it installs — at install, the moment the user typed the command,
-  never at first run, so a refusal leaves nothing on disk and no answer has
-  to be stored. `pkg install <name>`, `pkg install <file>`, `pkg remove
+- **The installer is an ordinary program**, `/system/bin/pkg`, with explicit
+  installation authority as approved above. It fetches, verifies, stages and
+  activates packages. Manual installation keeps its confirmation, separate from
+  runtime resource consent. `pkg install <name>`, `pkg install <file>`, `pkg remove
   <name>`, `pkg list`.
 - **Verification is by a signed repository** (owner ruling: `pkg install
   <url>` and the release's `SHA256SUMS` behind it are retired): a root pinned
   in the image, then a timestamp and a targets naming each archive by length
   and SHA-256 (`lib/update/src/repo.rs`, written by `build/publish.rs`).
-  `pkg install <file>` stays for local and offline installs, checked against
-  the `SHA256SUMS` beside it.
+  `pkg install <file>` stays for local and offline installs. Today's adjacent
+  `SHA256SUMS` check establishes consistency with that file, not an authenticated
+  source identity; it cannot confer an existing signed app's saved permissions.
 - **Fetching is HTTPS.** GitHub serves releases only over TLS, so `pkg`
   carries a TLS client; the network stack under it is netd's. A crate that
   does TLS is not our job to write and is widely used; it takes the fork
@@ -92,8 +130,11 @@ The storage track's users and mount-protocol stages do not block this one.
    runs on the host in Rust; then once against GitHub itself, by hand, with the owner
    watching. No registered test fetches anything.
 3. Updates: `pkg install` of a newer version replaces the directory whole
-   after the new archive verified; the old one is gone only after the new
-   one is in place.
+   after verification and through explicit installation authority. Implement
+   the installed-code protection and finished-distro activation policies above.
+   **Exit**: direct writes cannot change a committed version, failed verification
+   cannot activate one, and activation cannot mix old and new files in a running
+   application. The old version remains available until replacement succeeds.
 4. The signed repository. Landed: the verifier and the publisher, on the
    host. Owed: `pkg install <name>` from a mirror list whose one kind is a
    local directory, the pinned root and its floors under `/system/etc/pkg/`,
@@ -104,19 +145,18 @@ The storage track's users and mount-protocol stages do not block this one.
    the session user's home, `/home/toy/Apps/<name>`, which is its `HOME` and
    the one part of the home it sees; its own `/apps/<name>` is read-only to
    it (`toyos_manifest::Program::view`).
-6. **An app's rights are its request ∩ the user's grant ∩ the image's
-   ceiling** (owner ruling, 2026-09-24; the ceiling's shape, 2026-09-26). The
-   package's manifest *requests* rights; the user *grants* them per user
-   (from a user action — the file picker hands over one file — or asked on
-   first use for the risky ones, remembered and revocable; harmless ones such
-   as a window, sound and the app's own data directory are free); the image
-   holds the *ceiling*. **The ceiling names rights, never apps**: it is the
-   set any installed app may be granted at all, so installing an app never
-   edits the image and the image never lists an app by name. The `[apps]`
-   row of stage 1 becomes that ceiling. **Exit**: an app installed by `pkg`
-   from a release runs with exactly the intersection, a request beyond the
-   ceiling is refused by name, and no file under `/apps` can widen what it
-   gets.
+6. **New access needs authorization within the image's ceiling** (amended
+   owner ruling, 2026-10-16). Follow the runtime consent and delegation rules
+   in `issues/permissions-and-capabilities-need-one-runtime-contract.md`;
+   package declarations are no longer a prerequisite for a permission request.
+   Ordinary access such as a window, sound playback and the app's own data
+   directory remains part of the default app environment. **The ceiling names
+   rights, never apps**: it is the set any installed app may be granted at all,
+   so installing an app never edits the image and the image never lists an
+   installed app by name. The `[apps]` row of stage 1 becomes that ceiling.
+   **Exit**: an installed app obtains additional authority only through an
+   authorized grant or transfer; requests beyond the ceiling are refused by
+   name, and changing package metadata grants nothing.
 7. **The apps leave this repository.** Each app (snake first, as the pilot:
    it builds unchanged for every OS) moves to its own repository, built with
    only the published SDK crates and the released toolchain, and published as
@@ -132,6 +172,5 @@ The storage track's users and mount-protocol stages do not block this one.
 ## Open with the owner
 
 - The libraries the machine provides: GPU, video.
-- A C program's optional requests.
-- ABI stability.
+- The future application compatibility boundary and support window.
 - Scale.

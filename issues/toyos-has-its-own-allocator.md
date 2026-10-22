@@ -14,12 +14,13 @@ std's front, for programs, comes later, after it is measured against the
 `dlmalloc` ToyOS's std allocates with (`sdk/std/sys/alloc.rs`). The 2 MiB heap-growth stall is fixed now, on
 `dlmalloc`, and waits for neither front.
 
-The stall: when the kernel heap grows, `dlmalloc` calls
-`KernelPageSource::alloc` (`kernel/src/mm/alloc.rs`) inside
-`ALLOCATOR.dlmalloc.lock()`, and `pmm::alloc_page` (`kernel/src/mm/pmm.rs`)
-scans the page bitmap and zeroes the whole 2 MiB page before it returns, so
-every CPU that allocates from the heap meanwhile spins on its lock. How long
-that takes on the T14 is unmeasured.
+**Owner reaffirmed, 2026-10-22:** prioritize the backing-memory migration
+(4 KiB ordinary pages, noncontiguous physical backing and lazy population
+under the agreed commitment contract) and eliminate unbounded userland heap
+spinning before evaluating the replacement heap's performance. Carry the lock
+fix in the direct migration where practical; no temporary allocator or bridge
+is required. Preserve ordinary Rust allocation contracts. The replacement
+remains ToyOS-owned, with the kernel and std fronts above.
 
 **Ruled** (owner, 2026-10-04, "Yes, that bar"): "Within 10% of mimalloc
 for time and peak memory on a pinned benchmark set; faster than dlmalloc
