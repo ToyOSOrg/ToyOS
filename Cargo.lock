@@ -3730,6 +3730,9 @@ dependencies = [
 [[package]]
 name = "toyos-net-wire"
 version = "0.1.0"
+dependencies = [
+ "toyos-crypto",
+]
 
 [[package]]
 name = "toyos-osrelease"
