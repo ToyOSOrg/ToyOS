@@ -311,7 +311,7 @@ pub const SYS_DEVICE_SET_READ: u64 = 140;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 141;
+pub const SYSCALL_PROFILE_BINS: usize = 142;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
