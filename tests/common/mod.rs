@@ -7,6 +7,7 @@ pub mod compile;
 /// The device boot: what `tests/images/metaldevicecase.toml` measures.
 pub mod devices;
 pub mod faults;
+pub mod hostdisk;
 pub mod hostedclang;
 pub mod iommu;
 pub mod launchstdio;

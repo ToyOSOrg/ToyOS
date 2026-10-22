@@ -63,10 +63,10 @@ pub fn say(name: &str, read: Result<Vec<Partition>, String>) -> Vec<Partition> {
         }
     };
     for part in &parts {
-        let guid = crate::guid_text(part.unique);
+        let (guid, kind) = (crate::guid_text(part.unique), crate::guid_text(part.kind));
         match &part.span {
-            Ok((first, blocks)) => println!("{name}: partition {guid} at block {first}, {blocks} blocks"),
-            Err(why) => println!("{name}: partition {guid} is not served: {why}"),
+            Ok((first, blocks)) => println!("{name}: partition {guid} of type {kind} at block {first}, {blocks} blocks"),
+            Err(why) => println!("{name}: partition {guid} of type {kind} is not served: {why}"),
         }
     }
     parts

@@ -21,7 +21,7 @@ restart = true
 serves = ["block", "disk"]
 
 [programs.nvme]
-drives = ["pci:01:08:02/1b36:0010"]
+drives = ["pci:01:08:02"]
 receives = ["disk"]
 
 [programs.fileserver]

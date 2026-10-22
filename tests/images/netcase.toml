@@ -43,11 +43,11 @@ service = true
 restart = true
 serves = ["block", "disk"]
 
-# The NVMe driver: one process per such controller, reading its own table and
-# offering its disk to the block service. QEMU's controller alone, so a metal
-# boot leaves the bench's own NVMe disk to its firmware.
+# The NVMe driver: one process per NVMe controller, whatever its maker, reading
+# its own table and offering its disk to the block service. Another system's
+# partitions on that disk are reached by no grant (`toyos_supervisor::storage`).
 [programs.nvme]
-drives = ["pci:01:08:02/1b36:0010"]
+drives = ["pci:01:08:02"]
 receives = ["disk"]
 
 # The USB driver, one process per boot controller: QEMU's `nec-usb-xhci`, the
