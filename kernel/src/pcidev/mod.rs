@@ -483,6 +483,7 @@ static MACHINE: Lock<Machine> = Lock::new(Machine {
 });
 
 /// A port with a hot-plug slot, as [`publish`] found it.
+#[derive(Clone, Copy)]
 struct Port {
     number: usize,
     /// Where its PCI Express capability is.

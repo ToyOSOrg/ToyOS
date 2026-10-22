@@ -79,14 +79,11 @@ struct Command {
 /// granted both controls, and say for every port why its slot is or is not
 /// armed. Once the declaration is held, on its declarer's thread.
 pub(super) fn arm(roots: &[RootBridge]) {
-    let (ports, segment): (Vec<(usize, u64, hotplug::Slot, (u8, u8))>, u16) = {
+    let (ports, segment): (Vec<super::Port>, u16) = {
         let machine = MACHINE.lock();
-        (machine.ports.iter().filter(|port| !port.armed).map(|p| (p.number, p.express, p.slot, p.buses)).collect(), machine.segment)
+        (machine.ports.iter().filter(|port| !port.armed).copied().collect(), machine.segment)
     };
-    if ports.is_empty() {
-        return;
-    }
-    for (number, express, slot, buses) in ports {
+    for super::Port { number, express, slot, buses, .. } in ports {
         let port = function(number);
         let bus = port.pci.bus;
         let declared = roots.iter().find(|root| root.segment == segment && (root.buses.0..=root.buses.1).contains(&bus));
@@ -422,7 +419,7 @@ impl HotPlug {
             };
             let base = match pci.memory_bar(index) {
                 Ok(memory) => Some(memory.address()),
-                Err(bar::Unusable::Unassigned) => self.place(pci, index, low, kind, size, windows, declared, &taken),
+                Err(bar::Unusable::Unassigned) => self.place(pci, (index, low, kind, size), Room { windows, declared, taken: &taken }),
                 Err(_) => None,
             };
             if let Some(base) = base {
@@ -434,11 +431,11 @@ impl HotPlug {
         decoded
     }
 
-    /// One address for BAR `index`, which its device left unassigned, inside
-    /// the port's `windows` and the `declared` memory and clear of `taken`;
+    /// One address in `room` for BAR `index`, of `kind` and `size` bytes,
+    /// whose low dword reads `low` and which its device left unassigned;
     /// written, and kept where the register reads it back.
-    #[allow(clippy::too_many_arguments)]
-    fn place(&self, pci: &PciDevice, index: u8, low: u32, kind: bar::Kind, size: u64, windows: hotplug::Windows, declared: &[RootBridgeWindow], taken: &[(u64, u64)]) -> Option<u64> {
+    fn place(&self, pci: &PciDevice, (index, low, kind, size): (u8, u32, bar::Kind, u64), room: Room<'_>) -> Option<u64> {
+        let Room { windows, declared, taken } = room;
         let (b, d, f) = (pci.bus, pci.dev, pci.func);
         let Some(at) = hotplug::assign(kind, size, windows, taken) else {
             log!("pcidev: PCI {b:02x}:{d:02x}.{f} BAR {index} ({size:#x} bytes) fits in no window of its port {windows:x?}, so it is given no address");
@@ -465,6 +462,15 @@ impl HotPlug {
         log!("pcidev: PCI {b:02x}:{d:02x}.{f} BAR {index} ({size:#x} bytes) assigned {at:#x}, inside its port's window");
         Some(at)
     }
+}
+
+/// Where an arrived function's BAR may go: inside its port's `windows` and
+/// the `declared` root bridges' memory, clear of what is `taken`.
+#[derive(Clone, Copy)]
+struct Room<'a> {
+    windows: hotplug::Windows,
+    declared: &'a [RootBridgeWindow],
+    taken: &'a [(u64, u64)],
 }
 
 /// `pci` in the device set as a new arrival, decoding `bars`.
