@@ -12,25 +12,25 @@ mod constant_time;
 #[path = "../arch/counter.rs"]
 mod counter;
 
-use constant_time::{leaky_control, measure, Class, Rng};
+use constant_time::{finish, leaky_control, measure, null_control, secret, Class, Rng};
 use toyos_crypto::ecc::{p256, p384};
 
-/// A secret scalar: 1 for the fixed class, a uniform one otherwise, redrawn
-/// on the rare string at or past the order.
+/// A secret scalar: 1 for the fixed class, a uniform one otherwise. Both
+/// draw until a string is below the order, so making either costs the same.
 macro_rules! scalar {
     ($curve:ident, $bytes:literal) => {
         |class: Class, rng: &mut Rng| -> $curve::SecretKey {
-            match class {
-                Class::Fixed => {
-                    let mut one = [0; $bytes];
-                    one[$bytes - 1] = 1;
-                    $curve::SecretKey::from_bytes(one).unwrap()
+            let random = loop {
+                if let Ok(key) = $curve::SecretKey::from_bytes(rng.array()) {
+                    break key;
                 }
-                Class::Random => loop {
-                    if let Ok(key) = $curve::SecretKey::from_bytes(rng.array()) {
-                        break key;
-                    }
-                },
+            };
+            let mut one = [0; $bytes];
+            one[$bytes - 1] = 1;
+            let one = $curve::SecretKey::from_bytes(one).unwrap();
+            match class {
+                Class::Fixed => one,
+                Class::Random => random,
             }
         }
     };
@@ -38,7 +38,7 @@ macro_rules! scalar {
 
 fn main() {
     let mut rng = Rng(0x0c0f_fee6);
-    leaky_control(&mut rng);
+    let mut held = leaky_control(&mut rng) & null_control(&mut rng);
 
     let peer = p256::SecretKey::from_bytes([0x5a; 32]).unwrap().public_key();
     measure("p-256 public key", &mut rng, scalar!(p256, 32), |k| {
@@ -57,12 +57,12 @@ fn main() {
     measure(
         "ed25519 key derivation and signature, 64 B",
         &mut rng,
-        |class, rng| match class {
-            Class::Fixed => [0; 32],
-            Class::Random => rng.array(),
-        },
+        |class, rng| secret(class, rng, [0; 32]),
         |seed| {
             std::hint::black_box(toyos_crypto::ed25519::SigningKey::from_seed(seed).sign(&[0x6d; 64]).unwrap());
         },
     );
+    // Again after hours of measurements, which a drifting machine would fail.
+    held &= leaky_control(&mut rng) & null_control(&mut rng);
+    finish(held);
 }

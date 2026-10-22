@@ -14,7 +14,7 @@ mod constant_time;
 #[path = "../arch/counter.rs"]
 mod counter;
 
-use constant_time::{leaky_control, measure, Class, Rng};
+use constant_time::{finish, leaky_control, measure, null_control, secret, Class, Rng};
 use toyos_crypto::aead::{OpeningKey, SealingKey};
 use toyos_crypto::hash::Sha256;
 use toyos_crypto::kdf::{Hkdf, Hmac};
@@ -27,10 +27,7 @@ const AAD: [u8; 5] = [0x17, 0x03, 0x03, 0x00, 0x50];
 const IV: [u8; 12] = [0x24; 12];
 
 fn key<const N: usize>(class: Class, rng: &mut Rng) -> [u8; N] {
-    match class {
-        Class::Fixed => [0; N],
-        Class::Random => rng.array(),
-    }
+    secret(class, rng, [0; N])
 }
 
 /// Entropy of given bytes, for ML-KEM's seeds and messages.
@@ -50,7 +47,7 @@ type Open = fn([u8; 32]) -> OpeningKey;
 
 fn main() {
     let mut rng = Rng(0x0c0f_fee5);
-    leaky_control(&mut rng);
+    let mut held = leaky_control(&mut rng) & null_control(&mut rng);
 
     let aes128: Seal = |k| SealingKey::aes128_gcm(k[..16].try_into().unwrap(), IV);
     let aes256: Seal = |k| SealingKey::aes256_gcm(k, IV);
@@ -130,15 +127,11 @@ fn main() {
     measure(
         "ml-kem-768 decapsulation, valid or rejected",
         &mut rng,
-        |class, rng| {
-            let ct = match class {
-                Class::Fixed => valid,
-                Class::Random => core::array::from_fn(|_| rng.next() as u8),
-            };
-            (dk(), ct)
-        },
+        |class, rng| (dk(), secret(class, rng, valid)),
         |(dk, ct)| {
             std::hint::black_box(dk.decapsulate(&ct).unwrap());
         },
     );
+    held &= leaky_control(&mut rng) & null_control(&mut rng);
+    finish(held);
 }

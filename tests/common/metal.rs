@@ -158,13 +158,16 @@ pub type Taken = (Vec<(&'static str, &'static Metal)>, Vec<SharedBoot>);
 /// What a run's words take of the profile: every row and shared member a
 /// `names` word is part of, and every boot a `boots` word names, whole — all
 /// its shared members, and every row with an arm on it, which brings that
-/// row's other boots. No word at all takes everything.
+/// row's other boots. No word at all takes everything but `named_only`'s
+/// rows, which a `names` word takes only by being the row's whole name, and
+/// a `boots` word by naming its boot.
 ///
 /// **A word that takes nothing is refused**: it would be dropped in silence.
 pub fn select(
     names: &[&str],
     boots: &[&str],
     rows: &'static [(&'static str, Metal)],
+    named_only: &[&str],
     shared: &[SharedBoot],
 ) -> Result<Taken, String> {
     // A shared Rust member is filtered by the name its source file has.
@@ -172,10 +175,12 @@ pub fn select(
         job.strip_prefix("test_rs_").unwrap_or(job)
     }
     let all = names.is_empty() && boots.is_empty();
+    let takes = |word: &str, row: &str| if named_only.contains(&row) { word == row } else { row.contains(word) };
     let jobs = || shared.iter().flat_map(|boot| &boot.members).map(|member| bare(&member.job));
-    if let Some(dead) = names.iter().find(|word| {
-        !rows.iter().any(|(name, _)| name.contains(**word)) && !jobs().any(|job| job.contains(**word))
-    }) {
+    if let Some(dead) = names
+        .iter()
+        .find(|word| !rows.iter().any(|(name, _)| takes(word, name)) && !jobs().any(|job| job.contains(**word)))
+    {
         return Err(format!("{dead:?} is part of no metal registration's name and no shared member's"));
     }
     let arms = || rows.iter().flat_map(|(_, decl)| decl.arms).map(|arm| arm.boot);
@@ -189,9 +194,12 @@ pub fn select(
         .iter()
         .filter_map(|boot| boot.keeping(|job| boots.contains(&boot.boot.as_str()) || named(bare(job))))
         .collect();
+    let row_named = |name: &str| {
+        if named_only.contains(&name) { names.contains(&name) } else { named(name) }
+    };
     let rows = rows
         .iter()
-        .filter(|(name, decl)| named(name) || decl.arms.iter().any(|arm| boots.contains(&arm.boot)))
+        .filter(|(name, decl)| row_named(name) || decl.arms.iter().any(|arm| boots.contains(&arm.boot)))
         .map(|(name, decl)| (*name, decl))
         .collect();
     Ok((rows, taken))

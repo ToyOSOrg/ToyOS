@@ -7,20 +7,26 @@
 //! set cropped at a percentile of a calibration run; a routine passes below
 //! [`THRESHOLD`].
 //!
-//! Each routine's input is made before its clock starts, so only the routine
-//! is timed. The verdicts are evidence, printed one line per routine; the
-//! program fails only where its leaky control goes unseen, which makes every
-//! verdict of that run worthless.
+//! Inputs are made a [`BLOCK`] at a time before any of them is timed, and a
+//! maker does the same work for either class, so what runs between two
+//! counter reads is the routine alone, and nothing next to the clock
+//! depends on the class. Each run has two controls: a [`null_control`],
+//! whose classes are one distribution and whose |t| must stay below
+//! [`THRESHOLD`], and a [`leaky_control`], a 16-byte early-exit comparison
+//! that must exceed [`CONTROL`]. A run in which either fails exits nonzero,
+//! since its verdicts cannot be read; every verdict is printed regardless.
 
 use std::hint::black_box;
 
-use crate::counter::ticks;
+use crate::counter::{start, stop};
 
 /// Measurements per routine, behind those that warm it and calibrate the
 /// crops.
 pub const MEASUREMENTS: usize = 1_000_000;
 const WARMUP: usize = 1_000;
 const CALIBRATION: usize = 10_000;
+/// Inputs made ahead of their measurements, at a time.
+pub const BLOCK: usize = 1_000;
 /// The crops: dudect's 100 percentiles, 1 - 0.5^(10(k+1)/100), dense near
 /// the top where a leak in a slow tail hides.
 const CROPS: usize = 100;
@@ -54,6 +60,16 @@ pub enum Class {
     Random,
 }
 
+/// `fixed` for the fixed class, uniform bytes for the random one: drawn for
+/// both, so that making either costs the same.
+pub fn secret<const N: usize>(class: Class, rng: &mut Rng, fixed: [u8; N]) -> [u8; N] {
+    let random = rng.array();
+    match class {
+        Class::Fixed => fixed,
+        Class::Random => random,
+    }
+}
+
 /// Welford's running mean and variance, per class.
 #[derive(Clone, Copy, Default)]
 struct Welch {
@@ -79,26 +95,40 @@ impl Welch {
     }
 }
 
-/// One routine's verdict.
-pub struct Verdict {
-    pub max_t: f64,
+/// `n` measurements of `run`, their inputs made a [`BLOCK`] ahead.
+fn measured<I>(
+    n: usize,
+    rng: &mut Rng,
+    make: &mut impl FnMut(Class, &mut Rng) -> I,
+    run: &mut impl FnMut(I),
+    mut record: impl FnMut(Class, f64),
+) {
+    let mut left = n;
+    while left > 0 {
+        let size = left.min(BLOCK);
+        left -= size;
+        let inputs: Vec<(Class, I)> = (0..size)
+            .map(|_| {
+                let class = if rng.next() & 1 == 0 { Class::Fixed } else { Class::Random };
+                (class, make(class, rng))
+            })
+            .collect();
+        for (class, input) in inputs {
+            let input = black_box(input);
+            let begun = start();
+            run(input);
+            record(class, stop().wrapping_sub(begun) as f64);
+        }
+    }
 }
 
-/// Times `run` on `MEASUREMENTS` inputs from `make`, and prints its line:
-/// the raw t, the largest |t| and the crop it was found at, and each
-/// class's mean in ticks.
-pub fn measure<I>(name: &str, rng: &mut Rng, mut make: impl FnMut(Class, &mut Rng) -> I, mut run: impl FnMut(I)) -> Verdict {
-    let mut once = |rng: &mut Rng| {
-        let class = if rng.next() & 1 == 0 { Class::Fixed } else { Class::Random };
-        let input = make(class, rng);
-        let start = ticks();
-        run(black_box(input));
-        (class, ticks().wrapping_sub(start) as f64)
-    };
-    for _ in 0..WARMUP {
-        once(rng);
-    }
-    let mut calibration: Vec<f64> = (0..CALIBRATION).map(|_| once(rng).1).collect();
+/// Times `run` on `MEASUREMENTS` inputs from `make` and prints its line: the
+/// raw t, the largest |t| and the crop it was found at, and each class's
+/// mean in ticks. Returns the largest |t|.
+pub fn measure<I>(name: &str, rng: &mut Rng, mut make: impl FnMut(Class, &mut Rng) -> I, mut run: impl FnMut(I)) -> f64 {
+    measured(WARMUP, rng, &mut make, &mut run, |_, _| {});
+    let mut calibration = Vec::with_capacity(CALIBRATION);
+    measured(CALIBRATION, rng, &mut make, &mut run, |_, x| calibration.push(x));
     calibration.sort_by(f64::total_cmp);
     let crops: Vec<f64> = (0..CROPS)
         .map(|k| {
@@ -108,15 +138,14 @@ pub fn measure<I>(name: &str, rng: &mut Rng, mut make: impl FnMut(Class, &mut Rn
         .collect();
     let mut raw = Welch::default();
     let mut cropped = vec![Welch::default(); CROPS];
-    for _ in 0..MEASUREMENTS {
-        let (class, x) = once(rng);
+    measured(MEASUREMENTS, rng, &mut make, &mut run, |class, x| {
         raw.push(class, x);
         for (set, &bound) in cropped.iter_mut().zip(&crops) {
             if x <= bound {
                 set.push(class, x);
             }
         }
-    }
+    });
     let (mut max_t, mut at) = (raw.t().abs(), "raw".to_string());
     for (k, set) in cropped.iter().enumerate() {
         if set.judged() && set.t().abs() > max_t {
@@ -132,25 +161,54 @@ pub fn measure<I>(name: &str, rng: &mut Rng, mut make: impl FnMut(Class, &mut Rn
         raw.mean[0],
         raw.mean[1],
     );
-    Verdict { max_t }
+    max_t
 }
 
-/// The control: a byte-at-a-time comparison that stops at the first
-/// difference, the leak a tag check must not have. The fixed class equals
-/// the expected bytes and compares all of them; a random one stops at once.
-pub fn leaky_control(rng: &mut Rng) {
-    const EXPECTED: [u8; 64] = [0; 64];
-    let verdict = measure(
-        "leaky control (an early-exit comparison)",
+const CONTROL_KEY: [u8; 32] = [0x6b; 32];
+const CONTROL_IV: [u8; 12] = [0x24; 12];
+
+/// A 64-byte ChaCha20-Poly1305 seal under the public control key: the work
+/// both controls time, and the tag the leaky one compares.
+fn sealed_tag() -> [u8; 16] {
+    let mut data = [0x70; 64];
+    let mut key = toyos_crypto::aead::SealingKey::chacha20_poly1305(CONTROL_KEY, CONTROL_IV);
+    key.seal(&[], &mut data).unwrap().1
+}
+
+/// The same seal for both classes, whose received tags are uniform: one
+/// distribution, so any |t| at or past [`THRESHOLD`] is the harness's own.
+pub fn null_control(rng: &mut Rng) -> bool {
+    let max_t = measure(
+        "null control (one distribution in both classes)",
         rng,
-        |class, rng| match class {
-            Class::Fixed => EXPECTED,
-            Class::Random => rng.array(),
+        |_, rng| rng.array::<16>(),
+        |received| {
+            black_box((sealed_tag(), received));
         },
-        |secret| {
+    );
+    let held = max_t < THRESHOLD;
+    if !held {
+        eprintln!("ct: the null control reached |t| {max_t:.2}, past {THRESHOLD}: this run's verdicts cannot be read");
+    }
+    held
+}
+
+/// The seal, then the leak a tag check must not have: a comparison that stops
+/// at the first differing byte. The fixed class's received tag is the
+/// expected one with its last byte changed, so 15 bytes agree; a random
+/// one's differs at its first byte but one time in 256.
+pub fn leaky_control(rng: &mut Rng) -> bool {
+    let mut forged = sealed_tag();
+    forged[15] ^= 1;
+    let max_t = measure(
+        "leaky control (a 16-byte early-exit tag comparison)",
+        rng,
+        |class, rng| secret(class, rng, forged),
+        |received| {
+            let expected = sealed_tag();
             let mut equal = true;
-            for (a, b) in secret.iter().zip(black_box(&EXPECTED)) {
-                if black_box(*a) != *b {
+            for (a, b) in expected.iter().zip(black_box(&received)) {
+                if a != b {
                     equal = false;
                     break;
                 }
@@ -158,8 +216,16 @@ pub fn leaky_control(rng: &mut Rng) {
             black_box(equal);
         },
     );
-    if verdict.max_t <= CONTROL {
-        eprintln!("ct: the leaky control reached only |t| {:.2}, not {CONTROL}: this run sees no leak", verdict.max_t);
+    let seen = max_t > CONTROL;
+    if !seen {
+        eprintln!("ct: the leaky control reached only |t| {max_t:.2}, not {CONTROL}: this run sees no leak");
+    }
+    seen
+}
+
+/// Ends the run: nonzero where a control failed.
+pub fn finish(controls_held: bool) {
+    if !controls_held {
         std::process::exit(1);
     }
 }
