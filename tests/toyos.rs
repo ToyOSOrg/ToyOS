@@ -218,6 +218,9 @@ const RUST_SKIP: &[&str] = &[
     // A std child's stdio, beside libc's: `libc_children` runs it on
     // tests/images/libccase.toml.
     "stdio_named",
+    // libc's `recv` across a `close` of its descriptor, as its own netstack:
+    // `libc_children` runs it on tests/images/libccase.toml.
+    "libc_recv_beside_close",
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",
