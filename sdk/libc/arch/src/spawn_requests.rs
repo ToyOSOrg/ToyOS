@@ -7,7 +7,7 @@ use toyos_abi::end::{End, Fault};
 
 use crate::errcode::{EBADF, EINVAL};
 use crate::header::{self, FCNTL_H, SIGNAL_H};
-use crate::spawnreq::{any_fd, child_fd, plan, wait_status, Action, Plan};
+use crate::spawnreq::{any_fd, child_fd, plan, turn, wait_status, Action, Plan, Turn};
 
 const STDIN: u32 = 0x1000;
 const STDOUT: u32 = 0x1001;
@@ -182,4 +182,23 @@ fn each_end_reads_as_its_wait_status() {
         let s = wait_status(end);
         assert!(!wifexited(s) && wtermsig(s) == signal(name), "{end:?}: {s:#x}");
     }
+}
+
+/// **With `SIGCHLD` ignored a wait answers no child**: a child that ended is
+/// forgotten, and a wait whose every child ended answers `ECHILD`.
+#[test]
+fn an_ignored_sigchld_answers_no_ended_child() {
+    assert_eq!(turn(&[true], true), Turn::Gone);
+    assert_eq!(turn(&[true, true], true), Turn::Gone);
+    assert_eq!(turn(&[true, false], true), Turn::Watch);
+    assert_eq!(turn(&[false], true), Turn::Watch);
+    assert_eq!(turn(&[], true), Turn::Gone);
+}
+
+/// A wait otherwise answers the first named child that ended.
+#[test]
+fn a_wait_takes_the_first_ended_child() {
+    assert_eq!(turn(&[false, true, true], false), Turn::Take(1));
+    assert_eq!(turn(&[false, false], false), Turn::Watch);
+    assert_eq!(turn(&[], false), Turn::Gone);
 }

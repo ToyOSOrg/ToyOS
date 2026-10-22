@@ -168,7 +168,8 @@ an explicit force issues it, and never a timer's.
    `libc_children`'s QEMU x86-64 boot by `signal_sigchld_ignored`,
    `signal_sigchld_ppoll` and `libc_read_restarts`, each red under its mutation
    and the stage reverted whole, beside `signal_alarm`; the routing laws are
-   host tests (`signal_dispositions.rs`). libc's own thread also watches its
+   host tests (`signal_dispositions.rs`), and so is a wait deciding from one
+   read of each child's end (`spawn_requests.rs`). libc's own thread also watches its
    control pipe, so it watches at most 254 children: the 255th is refused
    `EAGAIN`, a `poll` takes 255 descriptors beside its wake pipe, and `SIG_IGN`
    is shown over 255 children.

@@ -30,7 +30,7 @@ use toyos_abi::RawHandle;
 
 use crate::errcode::{E2BIG, EACCES, EAGAIN, EBADF, ECHILD, EINTR, EINVAL, ENOENT, EPERM, ESRCH};
 use crate::pthread::Lock;
-use crate::spawnreq::{self, Action};
+use crate::spawnreq::{self, Action, Turn};
 
 const SIGKILL: i32 = 9;
 const WNOHANG: i32 = 1;
@@ -404,13 +404,20 @@ fn reap(pid: i32) -> Option<(i32, End, toyos_abi::syscall::ProcessStats)> {
 /// Every child that has ended, out of the table and kept for no wait, as
 /// `SIGCHLD` ignored has it.
 pub(crate) fn forget_ended() {
-    let ended: Vec<Child> = {
-        let mut children = CHILDREN.lock();
-        let (ended, live) = core::mem::take(&mut *children).into_iter().partition(|c| c.process.try_wait().is_ok());
-        *children = live;
-        ended
-    };
-    UNWAITED.fetch_sub(ended.len(), Ordering::Relaxed);
+    let mut children = CHILDREN.lock();
+    let ended: Vec<bool> = children.iter().map(|c| c.process.try_wait().is_ok()).collect();
+    forget(&mut children, &ended);
+}
+
+/// Take the children `ended` read as ended out of `children`, kept for no
+/// wait.
+fn forget(children: &mut Vec<Child>, ended: &[bool]) {
+    let mut at = 0;
+    children.retain(|_| {
+        at += 1;
+        !ended[at - 1]
+    });
+    UNWAITED.fetch_sub(ended.iter().filter(|&&e| e).count(), Ordering::Relaxed);
 }
 
 /// Each child whose end has not raised `SIGCHLD`, by pid.
@@ -461,30 +468,35 @@ fn wait_child(pid: i32, block: bool) -> Result<Option<(i32, End, toyos_abi::sysc
         // Before the table is read: a child started after it moves the turn
         // this records, and the wake pipe says so.
         call.children_seen();
-        if crate::signal::children_ignored() {
-            forget_ended();
-        }
+        let ignored = crate::signal::children_ignored();
         // Copies of the handles, watched with the table given up: a reap on
         // another thread closes the table's own.
         let watched: Vec<(i32, RawHandle)> = {
-            let children = CHILDREN.lock();
-            let named: Vec<&Child> = children.iter().filter(|c| names(pid, c)).collect();
-            if named.is_empty() {
-                return Err(ECHILD);
+            let mut children = CHILDREN.lock();
+            // Each child's end is read once, and that read alone decides: a
+            // child that ends after it is the next turn's.
+            let ended: Vec<bool> = children.iter().map(|c| c.process.try_wait().is_ok()).collect();
+            let named: Vec<usize> = (0..children.len()).filter(|&i| names(pid, &children[i])).collect();
+            let named_ended: Vec<bool> = named.iter().map(|&i| ended[i]).collect();
+            let turn = spawnreq::turn(&named_ended, ignored);
+            if ignored {
+                forget(&mut children, &ended);
             }
-            if let Some(ended) = named.iter().find(|c| c.process.try_wait().is_ok()) {
-                let pid = ended.pid;
-                drop(children);
-                if let Some(reaped) = reap(pid) {
-                    return Ok(Some(reaped));
+            let running: Vec<&Child> = match turn {
+                Turn::Gone => return Err(ECHILD),
+                Turn::Take(at) => {
+                    let pid = children[named[at]].pid;
+                    drop(children);
+                    if let Some(reaped) = reap(pid) {
+                        return Ok(Some(reaped));
+                    }
+                    continue;
                 }
-                continue;
-            }
-            if !block {
-                return Ok(None);
-            }
-            let mut copies = Vec::with_capacity(named.len());
-            for child in named {
+                Turn::Watch if !block => return Ok(None),
+                Turn::Watch => children.iter().filter(|c| names(pid, c)).collect(),
+            };
+            let mut copies = Vec::with_capacity(running.len());
+            for child in running {
                 match syscall::dup(toyos::AsHandle::as_handle(&child.process)) {
                     Ok(copy) => copies.push((child.pid, copy)),
                     Err(e) => {

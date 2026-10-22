@@ -116,6 +116,32 @@ pub(crate) fn plan<P>(
     Ok(Plan { fds, opened })
 }
 
+/// What one turn of a wait does with the children it names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Turn {
+    /// None is left to wait for: `ECHILD`.
+    Gone,
+    /// The named child at this index has ended and is answered.
+    Take(usize),
+    /// Every named child left is running.
+    Watch,
+}
+
+/// The turn for the named children whose ends `ended` holds, each read once.
+/// **With `SIGCHLD` ignored an ended child is forgotten, never answered**: the
+/// caller drops every child this read saw ended, and a child that ends after
+/// the read is the next turn's.
+pub(crate) fn turn(ended: &[bool], ignored: bool) -> Turn {
+    if ignored {
+        return if ended.contains(&false) { Turn::Watch } else { Turn::Gone };
+    }
+    match ended.iter().position(|&e| e) {
+        Some(at) => Turn::Take(at),
+        None if ended.is_empty() => Turn::Gone,
+        None => Turn::Watch,
+    }
+}
+
 /// The status `waitpid` writes for an end, as `<sys/wait.h>`'s macros read
 /// it: an exit's low byte above the low eight bits, or the signal
 /// `toyos::process::signal` names the end by in the low seven.
