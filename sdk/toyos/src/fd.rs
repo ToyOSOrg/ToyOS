@@ -7,10 +7,11 @@
 //! further descriptors that share one object. Each descriptor carries its own
 //! **inheritable** flag; whether a child is given it is the launchers' rule.
 //!
-//! **A call on a descriptor holds its object for the call** ([`with`]): a
-//! descriptor closed meanwhile goes at once, and its object is released when
-//! the last descriptor and the last call are done. So a racing close makes
-//! the next lookup `BadFd`, and never a call on a handle that was closed.
+//! **A call on a descriptor holds its object for the call** ([`with`],
+//! [`hold`]): a descriptor closed meanwhile goes at once, and its object is
+//! released when the last descriptor and the last call are done. So a racing
+//! close makes the next lookup `BadFd`, and never a call on a handle that was
+//! closed.
 //!
 //! **One copy of this crate owns the table**, the one the `fd-table` feature
 //! is on in: std's (`rustc-dep-of-std`) in a Rust program, libc's own in a C
@@ -136,20 +137,31 @@ pub fn install(object: Object, inheritable: bool, floor: Fd) -> Result<Fd, Error
     decode(unsafe { toyos_fd_install(object, inheritable, floor) })
 }
 
-/// `f` on `fd`'s object, held for the call: `BadFd` for a descriptor not
-/// open.
-pub fn with<R>(fd: Fd, f: impl FnOnce(Object) -> R) -> Result<R, Error> {
+/// `fd`'s object, held until the [`Hold`] drops: `BadFd` for a descriptor
+/// not open.
+pub fn hold(fd: Fd) -> Result<(Hold, Object), Error> {
     let mut object = Object::handle(toyos_abi::HANDLE_INVALID);
     // SAFETY: `object` is a live place for the answer.
     let token = decode(unsafe { toyos_fd_acquire(fd, &mut object) })?;
-    struct Unuse(i32);
-    impl Drop for Unuse {
-        fn drop(&mut self) {
-            // SAFETY: a token `toyos_fd_acquire` answered, given back once.
-            unsafe { toyos_fd_unuse(self.0) }
-        }
+    Ok((Hold(token), object))
+}
+
+/// A call's hold of a descriptor's object: a `close` meanwhile releases the
+/// object only once this drops.
+#[must_use]
+pub struct Hold(i32);
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        // SAFETY: a token `toyos_fd_acquire` answered, given back once.
+        unsafe { toyos_fd_unuse(self.0) }
     }
-    let _unuse = Unuse(token);
+}
+
+/// `f` on `fd`'s object, held for the call: `BadFd` for a descriptor not
+/// open.
+pub fn with<R>(fd: Fd, f: impl FnOnce(Object) -> R) -> Result<R, Error> {
+    let (_held, object) = hold(fd)?;
     Ok(f(object))
 }
 

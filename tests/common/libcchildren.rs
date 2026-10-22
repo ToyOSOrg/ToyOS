@@ -5,8 +5,10 @@
 //! `popen` and `/dev/null` answered as POSIX has them, or with ToyOS's stated
 //! departure.
 //!
-//! Beside them std's `stdio_named`: a std child holds the stdio its `Command`
-//! named, as a C one does, and `Stdio::null()` is a null handle.
+//! Beside them two Rust programs: std's `stdio_named`, where a std child holds
+//! the stdio its `Command` named, as a C one does, and `Stdio::null()` is a
+//! null handle; and `libc_recv_beside_close`, where libc's `recv` outlives a
+//! `close` of its descriptor on another thread, its own netstack serving it.
 //!
 //! On QEMU x86-64 (`tests/images/libccase.toml`), every program in one boot:
 //! what they claim is order, completion, contents and counts, which QEMU
@@ -18,8 +20,8 @@ use std::time::Duration;
 use super::{compile, qemu};
 use qemu::{BootOptions, QemuInstance};
 
-/// std's probe, a binary of `tests/guest/rust-tests`.
-const STD_PROBE: &str = "stdio_named";
+/// The Rust programs, binaries of `tests/guest/rust-tests`.
+const RUST_PROBES: [&str; 2] = ["stdio_named", "libc_recv_beside_close"];
 
 /// Each program's bound: `spawn_children_cap` starts and waits for 255.
 const BOUND: Duration = Duration::from_secs(300);
@@ -36,10 +38,15 @@ pub fn libc_children() -> Result<(), String> {
         .map(|name| (name.clone(), compile::link_toyos(&[compile::compile_own_c(&dir, name)], name)))
         .collect();
     let case = compile::repo_root().join("tests/images/libccase.toml");
-    let std_probe = (STD_PROBE.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), STD_PROBE));
-    let mut qemu = QemuInstance::boot_with_options(&case, &bins, &[std_probe], BootOptions::default());
+    let rust_tests = compile::repo_root().join("tests/guest/rust-tests");
+    let probes: Vec<(String, Vec<u8>)> =
+        RUST_PROBES.iter().map(|name| (name.to_string(), qemu::build_toyos_bin(qemu::SUITE_ARCH, &rust_tests, name))).collect();
+    let mut qemu = QemuInstance::boot_with_options(&case, &bins, &probes, BootOptions::default());
     let mut failed = Vec::new();
-    let jobs = names.iter().map(|name| (name.as_str(), format!("test_c_{name}"))).chain([(STD_PROBE, format!("test_rs_{STD_PROBE}"))]);
+    let jobs = names
+        .iter()
+        .map(|name| (name.as_str(), format!("test_c_{name}")))
+        .chain(RUST_PROBES.iter().map(|name| (*name, format!("test_rs_{name}"))));
     for (name, job) in jobs {
         let result = qemu.run_test(&job, BOUND);
         match (&result.error, result.exit_code) {
