@@ -1,5 +1,7 @@
-//! RFC 7748 X25519. Secret multiplication uses the 255-step Montgomery ladder
-//! with masked swaps and fixed-schedule inversion. Public inputs accept the
+//! RFC 7748 X25519. Agreement uses the 255-step Montgomery ladder with masked
+//! swaps and fixed-schedule inversion; a public key is the Edwards base
+//! point's fixed-base comb multiple, mapped to u. Both run on a fixed
+//! schedule. Public inputs accept the
 //! RFC's noncanonical field encodings. All-zero shared secrets are refused.
 //! The caller supplies entropy; this module never queries the CPU for it.
 
@@ -29,11 +31,7 @@ impl SecretKey {
         Ok(Self::from_bytes(b.0))
     }
     pub fn public_key(&self) -> PublicKey {
-        let mut base = [0; 32];
-        base[0] = 9;
-        let mut out = [0; 32];
-        multiply(&self.0.0, &base, &mut out);
-        PublicKey(out)
+        PublicKey(crate::ed25519::x25519_public(&self.0.0))
     }
     pub fn agree(self, peer: &PublicKey) -> Result<SharedSecret, Error> {
         let mut result = Secret([0; 32]);
@@ -77,4 +75,38 @@ fn multiply(scalar: &[u8; 32], point: &[u8; 32], out: &mut [u8; 32]) {
     Tight::swap(z2, z3, mask);
     let shared = Workspace(x2.mul(&z2.invert()));
     *out = shared.0.bytes();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The public key by the Edwards comb is the ladder's multiple of u = 9,
+    /// for clamped scalars of every kind of digit.
+    #[test]
+    fn public_keys_by_the_comb_are_the_ladders() {
+        let mut base = [0; 32];
+        base[0] = 9;
+        let mut seed = 0x9e3779b97f4a7c15u64;
+        for case in 0..64 {
+            let mut bytes = [0u8; 32];
+            for byte in &mut bytes {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                *byte = seed as u8;
+            }
+            match case {
+                0 => bytes = [0; 32],
+                1 => bytes = [0xff; 32],
+                2 => bytes = [0x88; 32],
+                3 => bytes = [0x77; 32],
+                _ => {}
+            }
+            let key = SecretKey::from_bytes(bytes);
+            let mut ladder = [0; 32];
+            multiply(&key.0.0, &base, &mut ladder);
+            assert_eq!(key.public_key().0, ladder, "case {case}");
+        }
+    }
 }

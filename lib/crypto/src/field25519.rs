@@ -183,7 +183,6 @@ impl Tight {
         z_250_0.square_times(2).times(self)
     }
 
-    #[cfg(feature = "sign")]
     pub(crate) fn select(a: &Self, b: &Self, bit: u64) -> Self {
         let m = ct::mask(bit);
         let (a, b) = (&a.0, &b.0);

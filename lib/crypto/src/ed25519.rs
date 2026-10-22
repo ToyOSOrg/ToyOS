@@ -2,14 +2,17 @@
 //! rejects noncanonical encodings, negative zero, noncanonical S and small-
 //! order R or public keys. Verification's inputs are all public: it decodes,
 //! recodes and multiplies in variable time, through [`PublicScalar`] only.
-//! Signing (feature `sign`) multiplies on a fixed schedule with complete
-//! Edwards addition; neither tables nor branches depend on its secrets.
+//! Signing (feature `sign`) and key generation multiply the base point by a
+//! fixed-base comb on a fixed schedule: every table entry of a row is read
+//! and the choice is masked, so neither branches nor addresses depend on
+//! the secret scalar.
 
 use crate::{
     Error, ct,
     field25519::{Loose, Multiply, Tight},
     hash::Sha512,
     scalar25519::PublicScalar,
+    secret::Workspace,
 };
 #[cfg(feature = "sign")]
 use crate::{Random, scalar25519::S, secret::Secret};
@@ -129,7 +132,6 @@ struct Niels {
 }
 
 impl Point {
-    #[cfg(feature = "sign")]
     fn identity() -> Self {
         Self {
             x: Tight::ZERO,
@@ -138,7 +140,7 @@ impl Point {
             t: Tight::ZERO,
         }
     }
-    #[cfg(any(test, feature = "sign"))]
+    #[cfg(test)]
     fn base() -> Self {
         Self {
             x: B_X,
@@ -191,11 +193,6 @@ impl Point {
         }
         .encode()
     }
-    /// RFC 8032 section 5.1.4's addition, complete on the curve.
-    #[cfg(feature = "sign")]
-    fn add(&self, q: &Self) -> Self {
-        self.add_cached(&q.cached()).point()
-    }
     fn cached(&self) -> Cached {
         Cached {
             y_plus_x: self.y.add(&self.x).carry(),
@@ -240,26 +237,6 @@ impl Point {
         }
         .double()
         .point()
-    }
-    #[cfg(feature = "sign")]
-    fn select(a: &Self, b: &Self, bit: u64) -> Self {
-        Self {
-            x: Tight::select(&a.x, &b.x, bit),
-            y: Tight::select(&a.y, &b.y, bit),
-            z: Tight::select(&a.z, &b.z, bit),
-            t: Tight::select(&a.t, &b.t, bit),
-        }
-    }
-    /// scalar * self, on a fixed schedule.
-    #[cfg(feature = "sign")]
-    fn mul(&self, scalar: &[u8; 32]) -> Self {
-        let mut r = Self::identity();
-        for i in (0..256).rev() {
-            let double = r.double();
-            let added = double.add(self);
-            r = Self::select(&double, &added, u64::from((scalar[i / 8] >> (i % 8)) & 1));
-        }
-        r
     }
 }
 
@@ -320,60 +297,199 @@ impl Projective {
 }
 
 impl Niels {
-    /// B, 3B, 5B, ..., normalised to affine with one inversion (Montgomery's
-    /// simultaneous-inversion trick).
+    /// B, 3B, 5B, ...
     const fn odd_multiples_of_b<const N: usize>() -> [Niels; N] {
-        const fn add(p: &[Tight; 4], q: &[Tight; 4]) -> [Tight; 4] {
-            let [x1, y1, z1, t1] = p;
-            let [x2, y2, z2, t2] = q;
-            let a = y1.sub(x1).carry().times(&y2.sub(x2).carry());
-            let b = y1.add(x1).carry().times(&y2.add(x2).carry());
-            let c = t1.times(t2).times(&D2);
-            let zz = z1.times(z2);
-            let d = zz.add(&zz).carry();
-            let e = b.sub(&a).carry();
-            let f = d.sub(&c).carry();
-            let g = d.add(&c).carry();
-            let h = b.add(&a).carry();
-            [e.times(&f), g.times(&h), f.times(&g), e.times(&h)]
-        }
         let base = [B_X, B_Y, Tight::ONE, B_T];
-        let twice = add(&base, &base);
+        let twice = add_const(&base, &base);
         let mut points = [base; N];
         let mut i = 1;
         while i < N {
-            points[i] = add(&points[i - 1], &twice);
+            points[i] = add_const(&points[i - 1], &twice);
             i += 1;
         }
-        // prefix[i] = z_0 z_1 ... z_i.
-        let mut prefix = [Tight::ONE; N];
-        prefix[0] = points[0][2];
-        let mut i = 1;
-        while i < N {
-            prefix[i] = prefix[i - 1].times(&points[i][2]);
+        normalize(&points)
+    }
+}
+
+/// RFC 8032 section 5.1.4's addition of extended points, for constants.
+const fn add_const(p: &[Tight; 4], q: &[Tight; 4]) -> [Tight; 4] {
+    let [x1, y1, z1, t1] = p;
+    let [x2, y2, z2, t2] = q;
+    let a = y1.sub(x1).carry().times(&y2.sub(x2).carry());
+    let b = y1.add(x1).carry().times(&y2.add(x2).carry());
+    let c = t1.times(t2).times(&D2);
+    let zz = z1.times(z2);
+    let d = zz.add(&zz).carry();
+    let e = b.sub(&a).carry();
+    let f = d.sub(&c).carry();
+    let g = d.add(&c).carry();
+    let h = b.add(&a).carry();
+    [e.times(&f), g.times(&h), f.times(&g), e.times(&h)]
+}
+
+/// Extended points in affine Niels form, with one inversion for all of them
+/// (Montgomery's simultaneous-inversion trick).
+const fn normalize<const N: usize>(points: &[[Tight; 4]; N]) -> [Niels; N] {
+    // prefix[i] = z_0 z_1 ... z_i.
+    let mut prefix = [Tight::ONE; N];
+    prefix[0] = points[0][2];
+    let mut i = 1;
+    while i < N {
+        prefix[i] = prefix[i - 1].times(&points[i][2]);
+        i += 1;
+    }
+    let mut inverse = prefix[N - 1].invert();
+    let mut table = [Niels::IDENTITY; N];
+    let mut i = N;
+    while i > 0 {
+        i -= 1;
+        let z_inverse = if i == 0 { inverse } else { inverse.times(&prefix[i - 1]) };
+        inverse = inverse.times(&points[i][2]);
+        let x = points[i][0].times(&z_inverse);
+        let y = points[i][1].times(&z_inverse);
+        table[i] = Niels {
+            y_plus_x: y.add(&x).carry(),
+            y_minus_x: y.sub(&x).carry(),
+            xy2d: x.times(&y).times(&D2),
+        };
+    }
+    table
+}
+
+const fn flatten(rows: &[[[Tight; 4]; 8]; 32]) -> [[Tight; 4]; 256] {
+    let mut flat = [rows[0][0]; 256];
+    let mut n = 0;
+    while n < 256 {
+        flat[n] = rows[n / 8][n % 8];
+        n += 1;
+    }
+    flat
+}
+
+/// The fixed-base comb's table: row i holds j 16^(2i) B for j = 1..=8, in
+/// affine form, built at compile time (Bernstein, Duif, Lange, Schwabe and
+/// Yang, "High-speed high-security signatures", J. Cryptogr. Eng. 2012,
+/// section 4).
+static COMB: [[Niels; 8]; 32] = Niels::comb_table();
+
+impl Niels {
+    const IDENTITY: Self = Self {
+        y_plus_x: Tight::ONE,
+        y_minus_x: Tight::ONE,
+        xy2d: Tight::ZERO,
+    };
+
+    const fn comb_table() -> [[Niels; 8]; 32] {
+        let base = [B_X, B_Y, Tight::ONE, B_T];
+        let mut points = [[base; 8]; 32];
+        let mut row = base;
+        let mut i = 0;
+        while i < 32 {
+            points[i][0] = row;
+            let mut j = 1;
+            while j < 8 {
+                points[i][j] = add_const(&points[i][j - 1], &row);
+                j += 1;
+            }
+            // The next row's base is 16^2 times this one's: eight doublings.
+            let mut k = 0;
+            while k < 8 {
+                row = add_const(&row, &row);
+                k += 1;
+            }
             i += 1;
         }
-        let mut inverse = prefix[N - 1].invert();
-        let mut table = [Niels {
-            y_plus_x: Tight::ZERO,
-            y_minus_x: Tight::ZERO,
-            xy2d: Tight::ZERO,
-        }; N];
-        let mut i = N;
-        while i > 0 {
-            i -= 1;
-            let z_inverse = if i == 0 { inverse } else { inverse.times(&prefix[i - 1]) };
-            inverse = inverse.times(&points[i][2]);
-            let x = points[i][0].times(&z_inverse);
-            let y = points[i][1].times(&z_inverse);
-            table[i] = Niels {
-                y_plus_x: y.add(&x).carry(),
-                y_minus_x: y.sub(&x).carry(),
-                xy2d: x.times(&y).times(&D2),
-            };
+        let flat = normalize::<256>(&flatten(&points));
+        let mut table = [[Self::IDENTITY; 8]; 32];
+        let mut n = 0;
+        while n < 256 {
+            table[n / 8][n % 8] = flat[n];
+            n += 1;
         }
         table
     }
+
+    /// row[|d| - 1], negated when d < 0, or the identity when d = 0. Every
+    /// entry is read and the choice is masked, so neither the time nor the
+    /// addresses depend on d.
+    fn select(row: &[Niels; 8], d: i8) -> Niels {
+        let negative = u64::from((d as u8) >> 7);
+        let magnitude = ((d ^ (0i8.wrapping_sub(negative as i8))).wrapping_add(negative as i8)) as u64;
+        let mut chosen = Self::IDENTITY;
+        for (j, entry) in row.iter().enumerate() {
+            let take = 1 ^ ct::nonzero(magnitude ^ (j as u64 + 1));
+            chosen = Self {
+                y_plus_x: Tight::select(&chosen.y_plus_x, &entry.y_plus_x, take),
+                y_minus_x: Tight::select(&chosen.y_minus_x, &entry.y_minus_x, take),
+                xy2d: Tight::select(&chosen.xy2d, &entry.xy2d, take),
+            };
+        }
+        // -(x, y) = (-x, y): exchange y + x with y - x and negate 2dxy.
+        let mask = ct::mask(negative);
+        let (mut y_plus_x, mut y_minus_x) = (chosen.y_plus_x, chosen.y_minus_x);
+        Tight::swap(&mut y_plus_x, &mut y_minus_x, mask);
+        Self {
+            y_plus_x,
+            y_minus_x,
+            xy2d: Tight::select(&chosen.xy2d, &chosen.xy2d.neg().carry(), negative),
+        }
+    }
+}
+
+/// a = sum of e[i] 16^i with every e[i] in [-8, 8], for a below 2^255, by
+/// arithmetic alone: each nibble is moved into [-8, 8) and the rest carried
+/// up, and the top digit, at most 7 plus a carry, stays at most 8.
+fn recode(a: &[u8; 32], e: &mut [i8; 64]) {
+    for i in 0..32 {
+        e[2 * i] = (a[i] & 15) as i8;
+        e[2 * i + 1] = (a[i] >> 4) as i8;
+    }
+    // Wrapping operations: every value stays within [-8, 16], and the shipped
+    // profile's overflow checks would branch on the secret digits.
+    let mut carry = 0i8;
+    for digit in &mut e[..63] {
+        *digit = digit.wrapping_add(carry);
+        carry = digit.wrapping_add(8) >> 4;
+        *digit = digit.wrapping_sub(carry << 4);
+    }
+    e[63] = e[63].wrapping_add(carry);
+}
+
+/// The X25519 public key of a clamped scalar s: u = (1 + y) / (1 - y) of the
+/// Edwards point [s]B, the birational map between the curves (RFC 7748
+/// section 4.1), which takes B to the base point u = 9.
+pub(crate) fn x25519_public(s: &[u8; 32]) -> [u8; 32] {
+    let p = base_mul(s);
+    // A clamped s is a multiple of 8 below 2^255 with bit 254 set, so it is
+    // no multiple of L and [s]B is not the identity: Z - Y is nonzero.
+    p.z.add(&p.y).mul(&p.z.sub(&p.y).carry().invert()).bytes()
+}
+
+/// [a]B for a 32-byte little-endian a below 2^255, on a fixed schedule: the
+/// 64 signed radix-16 digits of a, 64 masked table reads and mixed
+/// additions, and 4 doublings. The digits are the operation's secret state,
+/// erased when it returns.
+fn base_mul(a: &[u8; 32]) -> Point {
+    let mut digits = Workspace([0i8; 64]);
+    let e = &mut digits.0;
+    recode(a, e);
+    let mut r = Point::identity();
+    for i in 0..32 {
+        r = r.add_niels(&Niels::select(&COMB[i], e[2 * i + 1])).point();
+    }
+    let mut p = Projective {
+        x: r.x,
+        y: r.y,
+        z: r.z,
+    };
+    for _ in 0..3 {
+        p = p.double().projective();
+    }
+    r = p.double().point();
+    for i in 0..32 {
+        r = r.add_niels(&Niels::select(&COMB[i], e[2 * i])).point();
+    }
+    r
 }
 
 /// [s]B - [k]A by one doubling chain over both scalars' NAFs (Straus's
@@ -472,7 +588,7 @@ impl SigningKey {
         let scalar = S::reduce32(expanded.0[..32].try_into().unwrap());
         let prefix = Secret(expanded.0[32..].try_into().unwrap());
         // B has order L, so the reduced scalar gives the clamped one's point.
-        let point = Point::base().mul(&Secret(scalar.bytes()).0);
+        let point = base_mul(&Secret(scalar.bytes()).0);
         let public = PublicKey {
             encoded: point.encode(),
             point,
@@ -494,7 +610,7 @@ impl SigningKey {
         let digest = Secret(h.finalize());
         let r = S::reduce(&digest.0);
         let r_bytes = Secret(r.bytes());
-        let encoded = Point::base().mul(&r_bytes.0).encode();
+        let encoded = base_mul(&r_bytes.0).encode();
         let mut h = Sha512::new();
         h.update(&encoded)?;
         h.update(self.public.as_bytes())?;
@@ -595,6 +711,83 @@ mod tests {
         let point = verification_point(&s, &PublicScalar::reduce(&digest), &key.public.point);
         assert_eq!(point.encode(), r);
         assert_eq!(key.public_key().verify(b"forged", &signature), Err(Error::InvalidSignature));
+    }
+
+    /// The comb's rows are j 16^(2i) B, against run-time additions.
+    #[test]
+    fn comb_table_holds_its_multiples() {
+        let mut row = Point::base();
+        for (i, entries) in COMB.iter().enumerate() {
+            let mut p = row;
+            for (j, entry) in entries.iter().enumerate() {
+                if j > 0 {
+                    p = p.add_cached(&row.cached()).point();
+                }
+                let zi = p.z.invert();
+                let (x, y) = (p.x.mul(&zi), p.y.mul(&zi));
+                assert_eq!(entry.y_plus_x.bytes(), y.add(&x).carry().bytes(), "row {i}, entry {j}");
+                assert_eq!(entry.y_minus_x.bytes(), y.sub(&x).carry().bytes(), "row {i}, entry {j}");
+                assert_eq!(entry.xy2d.bytes(), x.mul(&y).mul(&D2).bytes(), "row {i}, entry {j}");
+            }
+            for _ in 0..8 {
+                row = row.double();
+            }
+        }
+    }
+
+    fn scalars() -> std::vec::Vec<[u8; 32]> {
+        let mut out = std::vec![[0; 32], [0x88; 32], [0x77; 32], [0xff; 32]];
+        for a in &mut out {
+            a[31] &= 0x7f;
+        }
+        let mut seed = 0x2545f4914f6cdd1du64;
+        for _ in 0..60 {
+            let mut a = [0u8; 32];
+            for byte in &mut a {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                *byte = seed as u8;
+            }
+            a[31] &= 0x7f;
+            out.push(a);
+        }
+        out
+    }
+
+    /// The digits lie in [-8, 8] and recompose the scalar, up to 2^255 - 1.
+    #[test]
+    fn radix_16_digits_recompose_the_scalar() {
+        use num_bigint::BigInt;
+        for a in scalars() {
+            let mut e = [0i8; 64];
+            recode(&a, &mut e);
+            let mut sum = BigInt::from(0);
+            for (i, &d) in e.iter().enumerate() {
+                assert!((-8..=8).contains(&d));
+                sum += BigInt::from(d) << (4 * i);
+            }
+            assert_eq!(sum, BigInt::from_bytes_le(num_bigint::Sign::Plus, &a));
+        }
+    }
+
+    /// The comb agrees with the verification path's table and recoding, a
+    /// different route to [s]B, for scalars below L.
+    #[test]
+    fn the_comb_agrees_with_straus() {
+        let zero = PublicScalar::canonical(&[0; 32]).unwrap();
+        for a in scalars() {
+            let s = PublicScalar::reduce(&{
+                let mut wide = [0; 64];
+                wide[..32].copy_from_slice(&a);
+                wide
+            });
+            let reduced = s.bytes();
+            let comb = base_mul(&reduced);
+            let straus = verification_point(&s, &zero, &Point::base());
+            let comb = Projective { x: comb.x, y: comb.y, z: comb.z };
+            assert_eq!(comb.encode(), straus.encode());
+        }
     }
 
     /// The static table is B's odd multiples, against repeated addition.
