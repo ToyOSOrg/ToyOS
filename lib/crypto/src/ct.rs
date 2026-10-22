@@ -1,12 +1,12 @@
 //! Content-independent comparisons and selection. Lengths are public.
 //!
-//! The volatile barrier prevents LLVM from retaining a boolean's provenance;
-//! deployed machine code must still be inspected and tested for timing leakage.
+//! The register barrier prevents LLVM from retaining a boolean's provenance,
+//! which would let it turn a masked select into a branch; deployed machine
+//! code must still be inspected and tested for timing leakage.
 
 #[inline(always)]
 pub(crate) fn opaque(value: u64) -> u64 {
-    // The local word remains live for this volatile read.
-    unsafe { core::ptr::read_volatile(&value) }
+    crate::arch::value_barrier(value)
 }
 
 #[inline(always)]

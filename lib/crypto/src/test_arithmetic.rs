@@ -1,7 +1,8 @@
 //! Integer-oracle checks of reductions, carry chains and representation changes.
 use crate::{
     field25519::F,
-    montgomery::{Mod, V},
+    montgomery::{Modulus, Residue},
+    nist::{P256Field, P256Order, P384Field, P384Order},
     scalar25519::S,
 };
 use num_bigint::BigUint;
@@ -93,58 +94,48 @@ fn scalar25519_reduction_and_signing_arithmetic_match_integer_oracle() {
     }
 }
 
-fn check_montgomery<const N: usize>(m: &Mod<N>) {
-    let p = BigUint::from_bytes_le(
-        &m.p.iter()
-            .flat_map(|word| word.to_le_bytes())
-            .collect::<Vec<_>>(),
-    );
-    let values = fixtures(&p, N * 8);
+fn check_montgomery<M: Modulus<N>, const N: usize>() {
+    let integer = |words: &[u64; N]| {
+        BigUint::from_bytes_le(&words.iter().flat_map(|word| word.to_le_bytes()).collect::<Vec<_>>())
+    };
+    let p = integer(&M::P);
+    let r = BigUint::from(1u8) << (64 * N);
+    assert_eq!(integer(&M::ONE), &r % &p);
+    assert_eq!(integer(&M::R2), (&r * &r) % &p);
+    assert_eq!(M::P[0].wrapping_mul(M::N0), u64::MAX);
     let words = |value: &BigUint| {
         let source = value.to_bytes_le();
         let mut bytes = std::vec![0; N * 8];
         bytes[..source.len()].copy_from_slice(&source);
-        V(core::array::from_fn(|i| {
-            u64::from_le_bytes(bytes[8 * i..8 * i + 8].try_into().unwrap())
-        }))
+        core::array::from_fn(|i| u64::from_le_bytes(bytes[8 * i..8 * i + 8].try_into().unwrap()))
     };
-    let integer = |value: &V<N>| {
-        BigUint::from_bytes_le(
-            &value
-                .0
-                .iter()
-                .flat_map(|word| word.to_le_bytes())
-                .collect::<Vec<_>>(),
-        )
-    };
-    assert_eq!(integer(&m.raw(&m.one())), BigUint::from(1u8));
+    let values = fixtures(&p, N * 8);
+    assert!(Residue::<M, N>::from_integer(&M::P).is_none());
+    assert_eq!(integer(&Residue::<M, N>::one().to_integer()), BigUint::from(1u8));
+    let all_ones = (BigUint::from(1u8) << (64 * N)) - 1u8;
+    assert_eq!(integer(&Residue::<M, N>::from_wide(&words(&all_ones)).to_integer()), &all_ones % &p);
     for (i, a) in values.iter().enumerate() {
-        let a = words(a);
-        let a_encoded = m.encode_raw(&a);
-        assert_eq!(integer(&m.raw(&a_encoded)), integer(&a));
+        let a_encoded = Residue::<M, N>::from_integer(&words(a)).unwrap();
+        assert_eq!(&integer(&a_encoded.to_integer()), a);
         for b in [&values[(i * 17 + 3) % values.len()], &values[2]] {
-            let b_encoded = m.encode_raw(&words(b));
-            let sum = m.add(&a_encoded, &b_encoded);
-            let difference = m.sub(&a_encoded, &b_encoded);
-            let product = m.mul(&a_encoded, &b_encoded);
-            for value in [&sum, &difference, &product] {
-                assert_eq!(m.valid(value), 1);
-            }
-            assert_eq!(integer(&m.raw(&sum)), (integer(&a) + b) % &p);
-            assert_eq!(integer(&m.raw(&difference)), (integer(&a) + &p - b) % &p);
-            assert_eq!(integer(&m.raw(&product)), (integer(&a) * b) % &p);
+            let b_encoded = Residue::<M, N>::from_integer(&words(b)).unwrap();
+            let sum = a_encoded.add(&b_encoded);
+            let difference = a_encoded.sub(&b_encoded);
+            let product = a_encoded.mul(&b_encoded);
+            assert_eq!(integer(&sum.to_integer()), (a + b) % &p);
+            assert_eq!(integer(&difference.to_integer()), (a + &p - b) % &p);
+            assert_eq!(integer(&product.to_integer()), (a * b) % &p);
+            assert_eq!(integer(&a_encoded.square().to_integer()), (a * a) % &p);
         }
         if (1..=4).contains(&i) {
-            assert_eq!(m.mul(&a_encoded, &m.invert(&a_encoded)).eq(&m.one()), 1);
+            assert_eq!(a_encoded.mul(&a_encoded.invert()).eq(&Residue::one()), 1);
         }
     }
 }
 #[test]
 fn nist_montgomery_domains_and_carries_match_integer_oracle() {
-    let c = crate::nist::p256();
-    check_montgomery(&c.p);
-    check_montgomery(&c.n);
-    let c = crate::nist::p384();
-    check_montgomery(&c.p);
-    check_montgomery(&c.n);
+    check_montgomery::<P256Field, 4>();
+    check_montgomery::<P256Order, 4>();
+    check_montgomery::<P384Field, 6>();
+    check_montgomery::<P384Order, 6>();
 }
