@@ -64,7 +64,10 @@ syscap = ["rt"]
 # `inventory` because a claim names a PCI function by its arrival, which the
 # jobs that claim one read off the inventory.
 # `jobs` because `job_fairness` starts each of its workloads as a job of its own.
+# `state` because `state_view` holds that a job reaches its row's own
+# `/state/test-runner` and nothing else of `/state`.
 [programs.test-runner]
+state = true
 receives = ["soundserver", "volume", "power", "log"]
 syscap = ["device", "dup", "logread", "power", "roster", "counters", "trace", "inventory", "jobs"]
 

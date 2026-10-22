@@ -5,7 +5,7 @@
 //!
 //! The `<target>` in each name says where it ran: `shm` is Linux's
 //! `/dev/shm`; `tmp` is ToyOS's `/tmp`, which the kernel serves; `served` is
-//! ToyOS's `/state`, which the DATA file server serves, and which a boot with
+//! this job's `HOME`, which the DATA file server serves, and which a boot with
 //! no DATA partition keeps in memory (the file server says so in the log).
 
 use std::fs::{self, File, OpenOptions};
@@ -20,18 +20,19 @@ const MIB: usize = 1 << 20;
 /// A directory to measure under, and what serves it.
 pub struct Target {
     pub name: &'static str,
-    pub dir: &'static str,
+    pub dir: String,
     pub served_by: &'static str,
 }
 
 pub fn memory_targets() -> Vec<Target> {
     if cfg!(target_os = "toyos") {
+        let home = std::env::var("HOME").expect("osbench: the supervisor starts every program with HOME");
         vec![
-            Target { name: "tmp", dir: "/tmp", served_by: "the kernel's tmpfs, through syscalls" },
-            Target { name: "served", dir: "/state", served_by: "the DATA file server, through IPC" },
+            Target { name: "tmp", dir: "/tmp".into(), served_by: "the kernel's tmpfs, through syscalls" },
+            Target { name: "served", dir: home, served_by: "the DATA file server, through IPC" },
         ]
     } else {
-        vec![Target { name: "shm", dir: "/dev/shm", served_by: "tmpfs, through the VFS" }]
+        vec![Target { name: "shm", dir: "/dev/shm".into(), served_by: "tmpfs, through the VFS" }]
     }
 }
 
@@ -80,11 +81,11 @@ fn page_at(i: usize, pages: usize) -> u64 {
 /// Every benchmark under `target`. Each one's comment is its warm-up and
 /// repetitions.
 pub fn suite(target: &Target) {
-    condition(&format!("fs.{}.dir", target.name), target.dir);
+    condition(&format!("fs.{}.dir", target.name), &target.dir);
     condition(&format!("fs.{}.served_by", target.name), target.served_by);
     #[cfg(target_os = "linux")]
-    condition(&format!("fs.{}.mount", target.name), crate::sys::mount_options(target.dir));
-    let scratch = match Scratch::new(target.dir) {
+    condition(&format!("fs.{}.mount", target.name), crate::sys::mount_options(&target.dir));
+    let scratch = match Scratch::new(&target.dir) {
         Ok(s) => s,
         Err(e) => return refuse(&format!("fs.{}", target.name), format!("no scratch directory under {}: {e}", target.dir)),
     };

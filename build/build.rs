@@ -185,6 +185,10 @@ struct ProgramConfig {
     /// A system service: the supervisor starts it with `HOME` at its own `/state/<name>`
     /// and makes that directory, where every other row gets the session's.
     service: bool,
+    /// It keeps machine state of its own: the supervisor makes `/state/<name>`
+    /// and puts it in its view beside the session's `HOME`. A service's is
+    /// implied. No row's view holds another's (`toyos_manifest::Program::view`).
+    state: bool,
     /// The file-server roles this binary serves, one process each
     /// (`toyos_manifest::Program::roles`).
     roles: Vec<String>,
@@ -800,6 +804,7 @@ fn render_manifest(config: &SystemConfig) -> Vec<u8> {
                     syscap: cfg.syscap.clone(),
                     slots: cfg.slots,
                     service: cfg.service,
+                    state: cfg.state,
                     roles: cfg.roles.clone(),
                     restart: cfg.restart,
                     starts: cfg.starts.clone(),

@@ -130,7 +130,7 @@ pub enum Holder {
     /// The image's, under `/system/etc/pkg`: vouched for by the image's
     /// signature.
     Image,
-    /// The machine's, under `/state/pkg`: what this client last accepted.
+    /// The machine's, in pkg's own `/state/pkg`: what this client last accepted.
     Machine,
 }
 
