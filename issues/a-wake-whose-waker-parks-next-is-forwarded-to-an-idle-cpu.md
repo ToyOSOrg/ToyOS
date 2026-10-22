@@ -20,8 +20,9 @@ median went from 1,025 to 1,029 µs on the T14 and from 2,054 to 2,086 µs on
 the AMD bench, base to head, one boot each, read from the second judgement's
 `testcases` readbacks.
 
-Owned by stage S3 of the scheduler design (#872), whose 1:1 pair rule decides
-where a pair's wakes go.
+Owned by the placement track (`issues/placement-has-no-migration-cost-or-wake-affinity.md`), whose wake-affine
+decision is where a pair's wakes go.
 
-**Exit**: S3 decides this case, with a simulator scenario of a wake whose waker
-parks next and a metal row that prices the forward against the local switch.
+**Exit**: that decision covers this case, with a simulator scenario of a wake
+whose waker parks next and a metal row that prices the forward against the
+local switch.

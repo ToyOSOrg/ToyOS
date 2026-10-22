@@ -33,10 +33,14 @@
 //! still gets its acceptor by move and is started once per boot.
 //!
 //! **A `drives` row has one process per PCI function it names**, each holding
-//! that function's claim and started when the inventory shows the function
-//! free ([`toyos_supervisor::drives`]). **Every end is readiness on the
-//! process's handle**, watched on the loop's own poller: the supervisor reads
-//! the inventory again after each, and what an end owes is
+//! that function's claim and started when the kernel's device set
+//! ([`toyos::devset`]) shows the function free
+//! ([`toyos_supervisor::drives`]). The supervisor alone holds the set, minted
+//! from its `DEVICE` right, and reads it whenever it changes, by the time its
+//! snapshot names, and after every end: a function that arrives is answered
+//! by the same start as one at boot, and one that leaves has its process left
+//! to end on its claim's `Gone`. **Every end is readiness on the process's
+//! handle**, watched on the loop's own poller, and what an end owes is
 //! [`toyos_supervisor`]'s to decide.
 //!
 //! **The supervisor never waits on a file server it supervises from its loop alone**:
@@ -123,7 +127,7 @@ use toyos_blockring::wire::{Grant as BlockGrant, Scope};
 use toyos_logstream::{
     Registration, Tag, ALIVE, CONSOLE, FLUSH, FLUSHED, LOGKEEPER, MAX_TAG, ORIGINS, REGISTER, RESUME, STOPPING,
 };
-use toyos_abi::inventory::{Arrival, Pci, PciAddr, Record};
+use toyos_abi::inventory::{Arrival, Pci, PciAddr};
 use toyos_abi::syscall::{
     DeviceRequest, FileType, SyscallError, DEV_PREFIX, FILESERVER_IMAGE_LABEL, JOB_LABEL, MAX_BADGE, PROVIDE_PREFIX,
     ROOT_IMAGE_LABEL, SERVE_PREFIX, SVC_LABEL, SYSCAP_LABEL,
@@ -214,7 +218,9 @@ const TOKEN_GRANTS_ACCEPTOR: u64 = 5;
 /// The parked launch's caller, and its question's connection ([`Parked`]).
 const TOKEN_PARKED_CALLER: u64 = 6;
 const TOKEN_CONSENT: u64 = 7;
-const TOKEN_PENDING_BASE: u64 = 8;
+/// The device set changed.
+const TOKEN_DEVICES: u64 = 8;
+const TOKEN_PENDING_BASE: u64 = 9;
 
 /// The processes whose end the supervisor watches at once: its services and
 /// its `drives` processes, in what a poller holds beside the loop's own
@@ -542,6 +548,9 @@ fn main() {
         services: vec![system_service],
         drivers: drives::matchers(system),
         drives: Drives::default(),
+        devices: syscap.device_set().expect("supervisor: its system capability mints the device set"),
+        listed: Vec::new(),
+        settle: None,
         instances: Vec::new(),
         undriven: Vec::new(),
         log,
@@ -638,6 +647,12 @@ fn is_disk_driver(program: &Program) -> bool {
     !program.drives.is_empty() && program.receives.iter().any(|r| r == toyos_blockring::disk::PORT)
 }
 
+/// A row holding the `acpi` claim, whose holder declares the memory every PCI
+/// claim waits for: started before every other row.
+fn declares(program: &Program) -> bool {
+    program.devices.iter().any(|device| device == "acpi")
+}
+
 /// A row serving the block port.
 fn is_block(program: &Program) -> bool {
     program.serves.iter().any(|s| s == toyos_blockring::PORT)
@@ -673,6 +688,11 @@ struct Supervisor<'a> {
     drivers: Vec<(&'static Program, PciMatch)>,
     /// Which functions have a `drives` process, and which are owed one.
     drives: Drives,
+    /// The kernel's device set, and the arrivals its last reading listed.
+    devices: toyos::devset::DeviceSet,
+    listed: Vec<Pci>,
+    /// When the set may next change with no wake to say so.
+    settle: Option<Instant>,
     /// The `drives` processes running.
     instances: Vec<Instance>,
     /// Every disk driver's function on this machine the boot started no
@@ -875,22 +895,26 @@ impl Flight {
 impl<'a> Supervisor<'a> {
     /// Start `[boot] start`, kept for the machine's life: the supervisor is the only
     /// thing that can kill a daemon, and there is no other way back to a
-    /// process it started. The storage rows go first, the block service
-    /// before the file servers its grants are minted on — every other start
-    /// may make a directory, and a directory is a file server's — and the
-    /// session's home is made before the first row that is not one.
+    /// process it started. The `acpi` claim's holder goes first: it declares
+    /// the memory the PCI root bridges decode, which every PCI claim minted
+    /// after it waits for. Then the disk drivers and the storage rows, the
+    /// block service before the file servers its grants are minted on — every
+    /// other start may make a directory, and a directory is a file server's —
+    /// and the session's home is made before the first row that is neither;
+    /// the ACPI holder's own home with it, which it is started without.
     ///
     /// **Every service holds its acceptors before any is started**, so what a
     /// start mints on another service's port — a role's directories, a
     /// partition, `netstack` — does not depend on the order `[boot] start`
     /// lists them in. The `drives` processes start last, on what the
-    /// inventory says then.
+    /// device set says then.
     fn boot(&mut self, role_acceptors: &mut BTreeMap<&str, Acceptor>) {
         let system = self.system;
         let rank = |name: &&String| match system.program(name) {
-            Some(p) if is_block(p) => 0,
-            Some(p) if is_storage(p) => 1,
-            _ => 2,
+            Some(p) if declares(p) => 0,
+            Some(p) if is_block(p) => 1,
+            Some(p) if is_storage(p) => 2,
+            _ => 3,
         };
         let mut storage_first: Vec<&String> = system.start.iter().collect();
         storage_first.sort_by_key(rank);
@@ -935,52 +959,76 @@ impl<'a> Supervisor<'a> {
                 self.services.push(service);
             }
         }
-        // The disk drivers first, so the block service is started knowing how
-        // many to wait for and a file server's disk is coming before it asks.
-        self.undriven = self.drive_where(is_disk_driver);
+        // The `acpi` claim's holder first, since every claim waits for its
+        // declaration; then the disk drivers, so the block service is started
+        // knowing how many to wait for and a file server's disk is coming
+        // before it asks.
+        // SYSTEM, started before the manifest was read, is first in the list.
+        let (declaring, rest): (Vec<usize>, Vec<usize>) =
+            (0..self.services.len()).partition(|&at| declares(self.services[at].program));
         let mut homes_made = false;
-        for at in 0..self.services.len() {
-            let program = self.services[at].program;
-            if !is_storage(program) && !homes_made {
-                self.make_session_home();
-                homes_made = true;
-            }
-            self.make_home(program);
-            let block = self.block_args();
-            let service = &mut self.services[at];
-            // SYSTEM was started before the manifest was read.
-            if service.child.is_some() {
-                continue;
-            }
-            let started = service.spawn(
-                &program.source,
-                &[],
-                block,
-                system,
-                self.syscap,
-                &self.connectors,
-                &self.grants,
-                &self.minted,
-                self.boot,
-                &mut self.log,
-            );
-            match started {
-                Ok(_) => {}
-                Err(StartError::Refused(why)) => {
-                    service.ports.borrow_mut().clear();
-                    say!("supervisor: {} did not start ({why}); its ports are closed this boot", service.label());
-                }
-                Err(e) => panic!("supervisor: cannot start {}: {e}", program.name),
-            }
+        for at in declaring {
+            self.start_service(at, &mut homes_made);
+        }
+        self.undriven = self.drive_where(is_disk_driver);
+        for at in rest {
+            self.start_service(at, &mut homes_made);
         }
         if !homes_made {
             self.make_session_home();
+            for early in self.services.iter().map(|s| s.program).filter(|p| declares(p)).collect::<Vec<_>>() {
+                self.make_home(early);
+            }
         }
         self.load_grants();
         self.drive();
     }
 
-    /// Start a `drives` process on each function the inventory says is owed
+    /// [`Self::boot`]'s start of service `at`, making the session's home before
+    /// the first row that is neither storage nor the `acpi` claim's holder.
+    fn start_service(&mut self, at: usize, homes_made: &mut bool) {
+        let system = self.system;
+        let program = self.services[at].program;
+        if !is_storage(program) && !declares(program) && !*homes_made {
+            self.make_session_home();
+            *homes_made = true;
+            for early in self.services.iter().map(|s| s.program).filter(|p| declares(p)).collect::<Vec<_>>() {
+                self.make_home(early);
+            }
+        }
+        if !declares(program) {
+            self.make_home(program);
+        }
+        let block = self.block_args();
+        let service = &mut self.services[at];
+        // SYSTEM was started before the manifest was read.
+        if service.child.is_some() {
+            return;
+        }
+        let started = service.spawn(
+            &program.source,
+            &[],
+            block,
+            system,
+            self.syscap,
+            &self.connectors,
+            &self.grants,
+            &self.minted,
+            self.boot,
+            &mut self.log,
+        );
+        match started {
+            Ok(_) => {}
+            Err(StartError::Refused(why)) => {
+                service.ports.borrow_mut().clear();
+                say!("supervisor: {} did not start ({why}); its ports are closed this boot", service.label());
+            }
+            Err(e) => panic!("supervisor: cannot start {}: {e}", program.name),
+        }
+    }
+
+    /// Read the device set, say what arrived and what left since the last
+    /// reading, start a `drives` process on each function it says is owed
     /// one, and say which functions are given up on.
     fn drive(&mut self) {
         self.drive_where(|_| true);
@@ -991,14 +1039,29 @@ impl<'a> Supervisor<'a> {
     fn drive_where(&mut self, which: fn(&Program) -> bool) -> Vec<String> {
         let mut refused = Vec::new();
         let rows: Vec<(&'static Program, PciMatch)> = self.drivers.iter().filter(|(row, _)| which(row)).copied().collect();
-        let records = match pci_records(self.syscap) {
-            Ok(records) => records,
+        let read = self.devices.read(|n| vec![toyos_abi::inventory::RawRecord::EMPTY; n], |set| {
+            (set.functions().collect::<Vec<Pci>>(), set.header.settle_in)
+        });
+        let records = match read {
+            Ok((records, settle_in)) => {
+                self.settle = settle_in.map(|nanos| Instant::now() + Duration::from_nanos(nanos));
+                records
+            }
             Err(why) => {
                 say!("supervisor: {why}, so no `drives` process starts on it");
                 return refused;
             }
         };
-        for act in self.drives.decide(&rows, &records, Instant::now()) {
+        for pci in records.iter().filter(|pci| !self.listed.iter().any(|seen| seen.arrival == pci.arrival)) {
+            if !self.listed.is_empty() {
+                say!("supervisor: PCI {} [{:04x}:{:04x}] joined the device set as arrival {}", pci_at(pci.at), pci.vendor, pci.device, pci.arrival.0);
+            }
+        }
+        for gone in self.listed.iter().filter(|seen| !records.iter().any(|pci| pci.arrival == seen.arrival)) {
+            say!("supervisor: PCI {} (arrival {}) left the device set", pci_at(gone.at), gone.arrival.0);
+        }
+        self.listed = records;
+        for act in self.drives.decide(&rows, &self.listed, Instant::now()) {
             match act {
                 Act::Start { row, entry, function } => match self.start_instance(row, entry, function) {
                     Ok((child, stop)) => self.instances.push(Instance { row, function, child, stop }),
@@ -1009,7 +1072,7 @@ impl<'a> Supervisor<'a> {
                     }
                 },
                 Act::GiveUp { row, function } => say!(
-                    "supervisor: {} was started on PCI {} {} times in {} s and is given up on",
+                    "supervisor: {} was started at PCI {} {} times in {} s and is given up on there",
                     row.name,
                     pci_at(function.at),
                     restart::RESTARTS + 1,
@@ -1164,7 +1227,8 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// A service's own `HOME`, made before it first runs.
+    /// A service's own `HOME`, made before it first runs; the `acpi` claim's
+    /// holder's once storage is up, after it ([`Supervisor::boot`]).
     fn make_home(&mut self, program: &Program) {
         if !program.service || is_storage(program) {
             return;
@@ -1320,6 +1384,7 @@ impl<'a> Supervisor<'a> {
             poller.watch(&self.minted.grants, READABLE, TOKEN_GRANTS_ACCEPTOR);
             poller.watch(swap, READABLE, TOKEN_SWAP_ACCEPTOR);
             poller.watch(power, READABLE, TOKEN_POWER_ACCEPTOR);
+            poller.watch(&self.devices, READABLE, TOKEN_DEVICES);
             self.watch_children(&poller);
             if let Some(Flight { phase: Phase::Answered { conn, .. }, .. }) = &flight {
                 poller.watch(conn, READABLE, TOKEN_HANGUP);
@@ -1348,6 +1413,7 @@ impl<'a> Supervisor<'a> {
                 .iter()
                 .map(|p| HANDSHAKE_TIMEOUT.saturating_sub(now.duration_since(p.since)))
                 .chain(flight.iter().map(|f| f.deadline().saturating_duration_since(now)))
+                .chain(self.settle.map(|at| at.saturating_duration_since(now)))
                 .min()
                 .map_or(u64::MAX, |left| left.as_nanos() as u64);
             ready.clear();
@@ -1459,6 +1525,9 @@ impl<'a> Supervisor<'a> {
 
             if ready.contains(&TOKEN_ENDED) {
                 self.ended();
+            }
+            if ready.contains(&TOKEN_DEVICES) || self.settle.is_some_and(|at| at <= Instant::now()) {
+                self.drive();
             }
         }
     }
@@ -1811,7 +1880,7 @@ impl<'a> Supervisor<'a> {
     /// Act on every end since the last: a service is started again on the
     /// ports it kept, or has them closed and its clients answered `Gone`
     /// ([`restart::after_end`]); a `drives` process's function is owed
-    /// another or left alone ([`Drives::ended`]); and the inventory is read
+    /// another or left alone ([`Drives::ended`]); and the device set is read
     /// again.
     fn ended(&mut self) {
         self.restarting = true;
@@ -3236,10 +3305,11 @@ fn inventory(syscap: &SysCap) -> Result<Vec<toyos_abi::inventory::Record>, Strin
         .map_err(|why| why.to_string())
 }
 
-/// Every PCI function the kernel's inventory answers.
+/// Every PCI function in the kernel's device set, read through a handle of
+/// its own: a start reads it where the loop's handle is not to be marked read.
 fn pci_records(syscap: &SysCap) -> Result<Vec<Pci>, String> {
-    let records = inventory(syscap).map_err(|why| format!("the inventory was not read: {why}"))?;
-    Ok(records.into_iter().filter_map(|r| if let Record::Pci(pci) = r { Some(pci) } else { None }).collect())
+    let set = syscap.device_set().map_err(|e| format!("the device set was not minted: {e:?}"))?;
+    set.read(|n| vec![toyos_abi::inventory::RawRecord::EMPTY; n], |set| set.functions().collect()).map_err(|why| why.to_string())
 }
 
 /// The claim `request` asks for.

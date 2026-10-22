@@ -33,6 +33,7 @@ pub mod bar;
 pub mod caps;
 pub mod choose;
 pub mod express;
+pub mod hotplug;
 pub mod msi;
 pub mod msix;
 pub mod pages;

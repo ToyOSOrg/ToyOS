@@ -273,7 +273,7 @@ pub const SYS_TRACE_READ: u64 = 127;
 
 /// One operation on the `acpi` claim ([`crate::acpi::op`]): an access the
 /// kernel mediates, the firmware's Global Lock, or the power-off's sleep type.
-/// See [`acpi_access`], [`acpi_lock_take`] and [`acpi_s5`].
+/// See [`acpi_access`], [`acpi_lock_take`], [`acpi_s5`] and [`acpi_declare`].
 pub const SYS_ACPI: u64 = 128;
 /// A fresh null handle: every read answers end of file and every write takes
 /// all it is given. See [`null`].
@@ -295,19 +295,29 @@ pub const SYS_JOB_OWN: u64 = 134;
 /// [`Rights::MANAGE`]: crate::handle::Rights::MANAGE
 pub const SYS_PROCESS_QUIT: u64 = 135;
 
+/// Mint a handle to the device set ([`crate::devset`]), which carries `READ`
+/// and `WAIT` and neither `DUP` nor `TRANSFER`. Gated by
+/// [`Rights::DEVICE`] on a `SysCap`. See [`device_set`].
+///
+/// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
+pub const SYS_DEVICE_SET: u64 = 139;
+
+/// The device set's snapshot, read whole. See [`device_set_read`].
+pub const SYS_DEVICE_SET_READ: u64 = 140;
+
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
 ///
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 137;
+pub const SYSCALL_PROFILE_BINS: usize = 142;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_PROCESS_QUIT < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_DEVICE_SET_READ < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 
@@ -2019,6 +2029,21 @@ pub fn device_inventory(
     .map(|n| n as usize)
 }
 
+/// A handle to the device set ([`crate::devset`]); `syscap` must carry
+/// [`crate::handle::Rights::DEVICE`]: a capability without it is refused with
+/// a word, and a handle the caller does not hold ends it.
+pub fn device_set(syscap: RawHandle) -> Result<RawHandle, SyscallError> {
+    check(syscall(SYS_DEVICE_SET, syscap.0 as u64, 0, 0, 0)).map(|h| RawHandle(h as u32))
+}
+
+/// The device set's snapshot into `buf`, header first; answers how many
+/// records were written. An empty `buf` asks how many there are; one too short
+/// for all of them is refused whole with [`SyscallError::ResourceExhausted`].
+/// A read marks the handle's watch as having seen this generation.
+pub fn device_set_read(set: RawHandle, buf: &mut [crate::inventory::RawRecord]) -> Result<usize, SyscallError> {
+    check(syscall(SYS_DEVICE_SET_READ, set.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
+}
+
 /// One [`crate::counters`] record per online CPU, into `buf`; answers how many
 /// were written. An empty `buf` asks how many CPUs there are and asks no CPU
 /// anything; one with room for fewer is refused with
@@ -2094,6 +2119,15 @@ pub fn acpi_lock_release(claim: RawHandle) -> Result<(), SyscallError> {
 /// [`SyscallError::AlreadyExists`], and nothing is kept of either.
 pub fn acpi_s5(claim: RawHandle, slp_typ_a: u64) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::S5, slp_typ_a, 0))
+}
+
+/// Declare the PCI root bridges ([`crate::acpi::op::DECLARE`]).
+/// `Ok` is the declaration held; [`SyscallError::InvalidArgument`] one the
+/// kernel refused, said in its log by name and leaving every PCI claim refused;
+/// [`SyscallError::AlreadyExists`] a declaration made after the first, or after
+/// the kernel stopped waiting for one.
+pub fn acpi_declare(claim: RawHandle, declared: &crate::acpi::Apertures) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::DECLARE, declared as *const crate::acpi::Apertures as u64, 0))
 }
 
 /// Sleep for the given number of nanoseconds.

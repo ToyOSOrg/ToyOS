@@ -14,7 +14,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
-# The window type the bootloader hands the kernel, declared once in the ABI and
-# read here rather than mirrored: a second spelling of a base and a length is
+# The window type an ACPI server declares to the kernel, declared once in the
+# ABI and read here rather than mirrored: a second spelling of a base and a length is
 # two readers that can disagree about one machine's aperture.
 toyos-abi = { path = "../../sdk/abi" }

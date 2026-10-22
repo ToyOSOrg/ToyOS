@@ -214,6 +214,12 @@ impl AcpiDev {
     pub fn s5(&self, slp_typ_a: u64) -> Result<(), SyscallError> {
         syscall::acpi_s5(self.as_handle(), slp_typ_a)
     }
+
+    /// Declare the PCI root bridges
+    /// ([`syscall::acpi_declare`]).
+    pub fn declare(&self, declared: &toyos_abi::acpi::Apertures) -> Result<(), SyscallError> {
+        syscall::acpi_declare(self.as_handle(), declared)
+    }
 }
 
 impl AsHandle for AcpiDev {

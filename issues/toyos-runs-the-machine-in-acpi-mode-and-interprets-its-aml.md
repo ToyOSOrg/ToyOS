@@ -13,10 +13,10 @@ every CPU every 2.2 s
 The ACPI server loads a machine's DSDT and SSDTs, evaluates `\_S5` and hands
 the kernel its sleep type, which the kernel powers the machine off with and
 has from nowhere else. It initialises the namespace, negotiates `_OSC`,
-serves the runtime GPEs and delivers Notifies (#875). What else
-ToyOS takes from them it takes another way: the loader asks UEFI for the root
-bridges' windows `_CRS` would name (`loader/src/rootbridge.rs`). Nothing
-reads `_CST`, which names a CPU's C-states.
+serves the runtime GPEs and delivers Notifies (#875), and declares each PCI
+root bridge's `_CRS` windows and `_OSC` offer to the kernel
+(`system/acpiserver/src/apertures.rs`). Nothing reads `_CST`, which names a
+CPU's C-states.
 
 **Ruled** (owner, 2026-10-03, on the scout in #681's comment 5966817345): the
 switch to ACPI mode lands as stage 1, together with a userland server that
@@ -109,9 +109,10 @@ and that stop in the boot's log. On the T14, `counters` reads
 and holds the count to what ToyOS asked for over the interval the firmware
 issue's exit defines, every CPU's delta equal to the boot processor's
 `firmware_calls` delta, and the machine still in ACPI mode; `acpi_server_events` reads each EC query number
-once with its count; and `acpi_server_death` kills the server and reads
+once with its count; and `acpi_server_death` killed the server and read
 `SCI_EN` clear in `PM1_CNT` afterwards, the kernel having written
-`ACPI_DISABLE` to `SMI_CMD`.
+`ACPI_DISABLE` to `SMI_CMD`, a row unregistered until its boot has a log
+again (`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`).
 
 Two things stage 1 lands are read by no T14 row, and neither is in its exit.
 The T14's own button, and that every press of it stops the machine, is
@@ -502,8 +503,7 @@ Not in finished:
 - the PCI host bridges' `_OSC`;
 - sleep states;
 - `_CST`, which no part of this track reads: idle CPUs entering the states
-  it names read it (`issues/idle-cpus-enter-the-c-states-cst-names.md`,
-  #870);
+  it names read it (`issues/idle-cpus-enter-the-c-states-cst-names.md`);
 - `_PDC`, which Intel deprecated in favour of `_OSC` in ACPI 3.0 and which
   ACPI 6.5 does not define.
 

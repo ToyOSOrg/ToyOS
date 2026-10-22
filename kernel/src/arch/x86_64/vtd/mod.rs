@@ -20,7 +20,6 @@ use alloc::vec::Vec;
 
 use crate::drivers::acpi::TableError;
 use crate::drivers::pci::PciDevice;
-use toyos_abi::boot::RootBridgeWindow;
 use crate::iommu::{AddressWidth, StreamId};
 use crate::mm::Mmio;
 use crate::sync::Lock;
@@ -105,7 +104,7 @@ impl Live {
     /// Moves `stream` onto `domain` in this unit's tables, and out of
     /// whatever this unit still holds for it under its old one.
     pub(super) fn attach(&mut self, stream: StreamId, id: u16, space: table::Space) {
-        let displaced = table::bind(self.root, stream, id, space);
+        let displaced = table::bind(&mut TABLES.lock(), self.root, stream, id, space);
         self.queue.invalidate_context(self.regs, displaced);
     }
 }
@@ -117,9 +116,9 @@ pub(super) fn invalidate_interrupt_entries() {
     }
 }
 
-/// `windows` and every region firmware reserved are what no domain's addresses
-/// reach. `false` where firmware published no DMAR.
-pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeWindow]>) -> bool {
+/// Every region firmware reserved and the interrupt range are what no domain's
+/// addresses reach. `false` where firmware published no DMAR.
+pub fn init(rsdp_addr: u64, devices: &[PciDevice]) -> bool {
     let dmar = match Dmar::open(rsdp_addr) {
         Ok(dmar) => dmar,
         Err(TableError::Absent) => return false,
@@ -151,10 +150,9 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
     // Described and planned before any unit is armed: whether sources may move
     // to the remappable format is one decision, taken before the first `IRE`.
     let mut ready: Vec<(Unit, Plan)> = Vec::new();
-    // What no domain's addresses may reach, RMRRs added below as the walk
-    // meets them; nothing where no declaration is held.
-    let mut reserved: Option<Vec<(u64, u64)>> = windows
-        .map(|w| w.iter().map(|w| (w.base, w.end())).chain([super::iommu_unit::INTERRUPT_RANGE]).collect());
+    // What no domain's addresses may reach beside the declared windows, RMRRs
+    // added as the walk meets them.
+    let mut reserved: Vec<(u64, u64)> = alloc::vec![super::iommu_unit::INTERRUPT_RANGE];
     for structure in dmar.structures() {
         match structure {
             Ok(Structure::Drhd(drhd)) => {
@@ -201,9 +199,7 @@ pub fn init(rsdp_addr: u64, devices: &[PciDevice], windows: Option<&[RootBridgeW
                          identity domain 0x0..{identity_top:#x}"
                     );
                 }
-                if let Some(reserved) = reserved.as_mut() {
-                    reserved.push((base, limit.saturating_add(1)));
-                }
+                reserved.push((base, limit.saturating_add(1)));
                 describe_scopes("rmrr", regions, rmrr.scopes());
                 regions += 1;
                 held_regions += usize::from(held);

@@ -17,6 +17,7 @@ use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use crate::sync::Lock;
 
 pub mod device;
+pub mod devset;
 pub mod file;
 pub mod handle;
 pub mod inbox;
@@ -260,6 +261,8 @@ kobject! {
     immediate Job => job::JobObject,
     // Its one handle is its process's, and goes with it.
     immediate Notice => notice::NoticeObject,
+    // A view of the kernel's set: losing it changes nothing in the set.
+    immediate DeviceSet => devset::DeviceSet,
 }
 
 /// Objects whose last handle has gone, waiting for release with nothing held;

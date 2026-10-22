@@ -96,11 +96,13 @@ const NMI_SILENT: &[&str] =
 /// A function handed to a *process* takes the other path: `pcidev` arms bus
 /// mastering with `start_bus_mastering`, after the address space that bounds it
 /// exists, so `enable_bus_master` stays what a kernel driver calls and the
-/// count below stays the census of drivers this kernel has.
+/// count below stays the census of drivers this kernel has, and of the one
+/// port the kernel takes: a hot-plug slot's, once its message is armed.
 const BUS_MASTER_SITES: &[(&str, usize)] = &[
     ("kernel/src/drivers/pci.rs", 1),
     ("kernel/src/drivers/virtio.rs", 1),
     ("kernel/src/arch/x86_64/amdvi/mod.rs", 1),
+    ("kernel/src/pcidev/slot.rs", 1),
 ];
 
 /// The one place in `kernel/` a `!!!` may still appear, and how many times.
