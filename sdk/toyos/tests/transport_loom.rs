@@ -529,6 +529,10 @@ impl Bells for By<'_> {
         Waited::Rung
     }
 
+    fn wait_gate(&self, bell: Doorbell, until: Option<()>, _: u16) -> Waited {
+        self.wait(bell, until)
+    }
+
     fn ring(&self) -> Result<(), HungUp> {
         if lives(self.fate) {
             self.s.rang.store(true, Ordering::Release);

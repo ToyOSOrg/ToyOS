@@ -29,7 +29,9 @@
 //! [`Server::rung`] rings back each holder whose direction is ready. A holder
 //! that left with the gate held is let go of by [`Server::departed`], which
 //! frees the gate and rings the same way. So no wait on a gate outlives the
-//! owner's call, its death or the server's.
+//! owner's call, its death or the server's; one that waits on a live owner's
+//! call is [`Bells::wait_gate`], whose adapter reports it as stalled while it
+//! lasts.
 //!
 //! **The client waits on one doorbell a direction** ([`doorbell`]), the one the
 //! server rings for that direction's want, so a reader and a writer never take
@@ -285,6 +287,10 @@ pub trait Bells {
     fn drain(&self, bell: Doorbell) -> Took;
     /// Waits for a ring and takes it.
     fn wait(&self, bell: Doorbell, until: Option<Self::Until>) -> Waited;
+    /// Waits as [`Self::wait`] does, for a gate holder `owner` has: what ends
+    /// the wait is that holder's copy returning, so one that lasts is stalled
+    /// progress, which the adapter reports and waits on through.
+    fn wait_gate(&self, bell: Doorbell, until: Option<Self::Until>, owner: u16) -> Waited;
     /// Rings the server.
     fn ring(&self) -> Result<(), HungUp>;
 }
@@ -548,16 +554,16 @@ fn acquire<W: Word, const N: usize>(page: &[W; N], common: Common) -> Result<(),
 }
 
 /// Sets `bits` in the word of the gate `owner` holds, after the caller armed
-/// its direction's want: `false` where the gate was let go first. The
-/// exchange is `AcqRel`, so the release that reads it carries the arm before
-/// it to the server.
-fn want<W: Word, const N: usize>(page: &[W; N], gate: usize, bits: u32, mut owner: u32) -> bool {
+/// its direction's want: the number of the holder whose release answers it,
+/// or `None` where the gate was let go first. The exchange is `AcqRel`, so
+/// the release that reads it carries the arm before it to the server.
+fn want<W: Word, const N: usize>(page: &[W; N], gate: usize, bits: u32, mut owner: u32) -> Option<u16> {
     loop {
         if owner == 0 {
-            return false;
+            return None;
         }
         match word(page, gate).compare_exchange(owner, owner | bits, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => return true,
+            Ok(_) => return Some(u16::try_from(owner & OWNER).unwrap_or(u16::MAX)),
             Err(now) => owner = now,
         }
     }
@@ -618,8 +624,9 @@ impl<W: Word, B: Bells, const N: usize> Drop for Gated<'_, W, B, N> {
 
 /// What a holder that found its direction ready and the gate another's did.
 enum Contended {
-    /// It armed its want and set the gate's: it may sleep.
-    Wanted,
+    /// It armed its want and set the gate's, which this holder has: it may
+    /// sleep.
+    Wanted(u16),
     /// The gate was let go first.
     Free,
     /// Its doorbell found the server gone.
@@ -665,7 +672,7 @@ fn contend<const N: usize, H: Half<N>, W: Word, B: Bells>(
     if arms && !arm_first {
         let _ = half.arm(page);
     }
-    if wanted { Contended::Wanted } else { Contended::Free }
+    wanted.map_or(Contended::Free, Contended::Wanted)
 }
 
 /// Counts a waiter out and, where it took the doorbell and another waits,
@@ -719,8 +726,9 @@ where
 {
     let (mut took, mut counted, mut expired) = (false, false, false);
     loop {
-        let (answer, ring_server, gone_at) = lock.with(|half| {
+        let (answer, ring_server, gone_at, gate) = lock.with(|half| {
             let common = half.common();
+            let mut gate = None;
             let unready = |expired: bool| match mode {
                 _ if gone(page, common.gone) => Some(Err(Refused::Gone)),
                 Mode::Nonblocking => Some(Err(Refused::WouldBlock)),
@@ -745,7 +753,10 @@ where
                     match contend(half, page, bells, &mut counted, &mut took, WANT, owner) {
                         Contended::Free => continue,
                         Contended::Gone => break Some(Err(Refused::Gone)),
-                        Contended::Wanted => break unready(expired),
+                        Contended::Wanted(owner) => {
+                            gate = Some(owner);
+                            break unready(expired);
+                        }
                     }
                 }
                 let gated = Gated::new(page, common, bells);
@@ -766,7 +777,7 @@ where
             if answer.is_some() {
                 ring_server |= leave(half, page, counted, took);
             }
-            (answer, ring_server, common.gone)
+            (answer, ring_server, common.gone, gate)
         });
         if ring_server {
             ring(page, gone_at, bells);
@@ -775,7 +786,11 @@ where
             return answer;
         }
         let Mode::Blocking(until) = mode else { return Err(Refused::WouldBlock) };
-        match bells.wait(doorbell(H::WAY), until) {
+        let waited = match gate {
+            Some(owner) => bells.wait_gate(doorbell(H::WAY), until, owner),
+            None => bells.wait(doorbell(H::WAY), until),
+        };
+        match waited {
             Waited::Rung => took = true,
             Waited::TimedOut => expired = true,
             Waited::Gone => hang_up(page, gone_at),
@@ -903,7 +918,7 @@ where
             match contend(half, page, bells, &mut counted, &mut took, WANT, owner) {
                 Contended::Free => continue,
                 Contended::Gone => break true,
-                Contended::Wanted => break false,
+                Contended::Wanted(_) => break false,
             }
         };
         if !ready {
@@ -947,7 +962,7 @@ fn registered<const N: usize, H: Half<N>, W: Word>(half: &mut H, page: &[W; N]) 
         Ok(Some(_)) | Err(_) => {
             let gate = half.common().gate;
             let owner = word(page, gate).load(Ordering::Acquire);
-            !want(page, gate, WANT, owner)
+            want(page, gate, WANT, owner).is_none()
         }
     }
 }
@@ -995,9 +1010,10 @@ where
 {
     let (mut took, mut counted) = (false, false);
     loop {
-        let (done, ring_server, gone_at) = lock.with(|half: &mut Sending<C, N>| {
+        let (done, ring_server, gone_at, gate) = lock.with(|half: &mut Sending<C, N>| {
             let common = half.common;
             let mut ring_server = false;
+            let mut gate = None;
             let done = loop {
                 if half.shut(page) || gone(page, common.gone) {
                     break true;
@@ -1017,14 +1033,17 @@ where
                     Err(owner) => match contend(half, page, bells, &mut counted, &mut took, WANT | SHUT, owner) {
                         Contended::Free => continue,
                         Contended::Gone => break true,
-                        Contended::Wanted => break false,
+                        Contended::Wanted(owner) => {
+                            gate = Some(owner);
+                            break false;
+                        }
                     },
                 }
             };
             if done {
                 ring_server |= leave(half, page, counted, took);
             }
-            (done, ring_server, common.gone)
+            (done, ring_server, common.gone, gate)
         });
         if ring_server {
             ring(page, gone_at, bells);
@@ -1032,7 +1051,11 @@ where
         if done {
             return;
         }
-        match bells.wait(doorbell(Way::Send), None) {
+        let waited = match gate {
+            Some(owner) => bells.wait_gate(doorbell(Way::Send), None, owner),
+            None => bells.wait(doorbell(Way::Send), None),
+        };
+        match waited {
             Waited::Rung => took = true,
             Waited::TimedOut => {}
             Waited::Gone => hang_up(page, gone_at),
@@ -1214,10 +1237,13 @@ mod tests {
         /// The server hung up: a drain or a ring finds it gone.
         gone: bool,
         waited: Option<F>,
+        /// The owner of the gate each wait was for, `None` for a wait that
+        /// was for no gate.
+        gates: RefCell<Vec<Option<u16>>>,
     }
 
     fn quiet() -> Quiet {
-        Quiet { rang: Cell::new(0), gone: false, waited: None }
+        Quiet { rang: Cell::new(0), gone: false, waited: None, gates: RefCell::new(Vec::new()) }
     }
 
     impl<F: Fn()> Bells for Quiet<F> {
@@ -1226,6 +1252,12 @@ mod tests {
             if self.gone { Took::Gone } else { Took::Nothing }
         }
         fn wait(&self, _: Doorbell, _: Option<()>) -> Waited {
+            self.gates.borrow_mut().push(None);
+            (self.waited.as_ref().expect("a call that may not wait waited"))();
+            Waited::Rung
+        }
+        fn wait_gate(&self, _: Doorbell, _: Option<()>, owner: u16) -> Waited {
+            self.gates.borrow_mut().push(Some(owner));
             (self.waited.as_ref().expect("a call that may not wait waited"))();
             Waited::Rung
         }
@@ -1298,10 +1330,10 @@ mod tests {
         assert_eq!(acquire(&page, first), Ok(()));
         assert_eq!(acquire(&page, other), Err(1), "the first holder's");
         assert!(!release(&page, first), "nobody wanted it");
-        assert!(!want(&page, TX_GATE, WANT, 0), "a want of a free gate");
+        assert_eq!(want(&page, TX_GATE, WANT, 0), None, "a want of a free gate");
         assert_eq!(page[TX_GATE].load(Ordering::Relaxed), 0, "a free gate stays free");
         assert_eq!(acquire(&page, other), Ok(()));
-        assert!(want(&page, TX_GATE, WANT, 2));
+        assert_eq!(want(&page, TX_GATE, WANT, 2), Some(2), "the holder the want waits on");
         assert_eq!(page[TX_GATE].load(Ordering::Relaxed), 2 | WANT);
         assert!(release(&page, other), "a holder wanted it");
         assert_eq!(page[TX_GATE].load(Ordering::Relaxed), 0);
@@ -1368,9 +1400,11 @@ mod tests {
                 assert!(release(&page, owner), "the owner rings for the shutdown");
                 released.set(true);
             }),
+            gates: RefCell::new(Vec::new()),
         };
         shutdown(&page, &tx, &bells);
         assert!(released.get(), "the shutdown returned before the owner let go");
+        assert_eq!(*bells.gates.borrow(), [Some(2)], "the shutdown's wait is for the second holder's gate");
         assert_eq!(page[TX_END].load(Ordering::Relaxed), ORDERLY);
         assert_eq!(page[TX_GATE].load(Ordering::Relaxed), 0);
         assert_eq!(server.rung(&page), Ok(Rings { connection: false, bell: true }), "the shut rings the holder asleep over a full ring");
@@ -1390,6 +1424,40 @@ mod tests {
         assert_eq!(page[TX_ROOM].load(Ordering::Relaxed), 1);
     }
 
+    /// A blocking write under another holder's gate waits as a wait for that
+    /// holder's gate, which the adapter reports where it lasts, and the
+    /// write goes on once the gate is let go; a write that waits for room
+    /// waits for no gate.
+    #[test]
+    fn a_blocking_write_under_another_holders_gate_waits_for_that_holders_gate() {
+        let page = page();
+        let ((_, tx), _) = two(&page);
+        let server = RefCell::new(Server::new(&page, LAYOUT));
+        let owner = Common { gate: TX_GATE, shut: Some(TX_END), gone: 13, holder: second() };
+        assert_eq!(acquire(&page, owner), Ok(()));
+        let gated = Quiet {
+            rang: Cell::new(0),
+            gone: false,
+            waited: Some(|| {
+                let _ = release(&page, owner);
+            }),
+            gates: RefCell::new(Vec::new()),
+        };
+        assert_eq!(write_one(&page, &tx, &gated, Mode::Blocking(None)), (Ok(1), 1));
+        assert_eq!(*gated.gates.borrow(), [Some(2)]);
+        assert_eq!(write(&page, &tx, &quiet(), Mode::Nonblocking, C, |_, _| {}), Ok(C - 1), "the ring filled");
+        let full = Quiet {
+            rang: Cell::new(0),
+            gone: false,
+            waited: Some(|| {
+                let _ = server.borrow_mut().release(&page, 1);
+            }),
+            gates: RefCell::new(Vec::new()),
+        };
+        assert_eq!(write_one(&page, &tx, &full, Mode::Blocking(None)), (Ok(1), 1));
+        assert_eq!(*full.gates.borrow(), [None], "a wait for room");
+    }
+
     /// Once one holder saw the server hang up, a write with room in another
     /// answers it and copies nothing, and a read answers it after the bytes.
     #[test]
@@ -1398,7 +1466,7 @@ mod tests {
         let mut server = Server::new(&page, LAYOUT);
         let ((rx, _), (other_rx, other_tx)) = two(&page);
         let _ = server.publish(&page, 1);
-        let hung = Quiet::<fn()> { rang: Cell::new(0), gone: true, waited: None };
+        let hung = Quiet::<fn()> { rang: Cell::new(0), gone: true, waited: None, gates: RefCell::new(Vec::new()) };
         assert_eq!(read(&page, &rx, &hung, Mode::Nonblocking, 1, |_, _| {}), Ok(1), "the byte before the hang-up");
         assert_eq!(read(&page, &rx, &hung, Mode::Nonblocking, 1, |_, _| {}), Err(Refused::Gone));
         let quiet = quiet();
@@ -1427,6 +1495,9 @@ mod tests {
             Took::Nothing
         }
         fn wait(&self, _: Doorbell, _: Option<()>) -> Waited {
+            unreachable!("a nonblocking call waited")
+        }
+        fn wait_gate(&self, _: Doorbell, _: Option<()>, _: u16) -> Waited {
             unreachable!("a nonblocking call waited")
         }
         fn ring(&self) -> Result<(), HungUp> {

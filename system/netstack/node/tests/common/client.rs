@@ -50,6 +50,10 @@ impl Bells for Region {
         unreachable!("a test's client never waits")
     }
 
+    fn wait_gate(&self, _: Doorbell, _: Option<()>, _: u16) -> Waited {
+        unreachable!("a test's client never waits")
+    }
+
     fn ring(&self) -> Result<(), HungUp> {
         self.rang.set(true);
         Ok(())

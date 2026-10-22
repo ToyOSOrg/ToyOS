@@ -410,12 +410,56 @@ impl Bells for Doorbells {
         }
     }
 
+    fn wait_gate(&self, bell: Doorbell, until: Option<u64>, owner: u16) -> Waited {
+        let way = if bell == Doorbell::Connection { "read" } else { "write" };
+        gate_wait(until, toyos_abi::clock::nanos_since_boot, |by| self.wait(bell, Some(by)), |waited| {
+            crate::warn!(
+                "toyos::net: a stream's {way} has waited {} s for holder {owner}'s gate: that holder's call has not returned",
+                waited / 1_000_000_000
+            );
+        })
+    }
+
     fn ring(&self) -> Result<(), HungUp> {
         match syscall::write_nonblock(self.connection, &[1]) {
             Err(SyscallError::Gone) => Err(HungUp),
             // Full is rung already, and anything else is no hang-up: the next
             // call's wait answers whatever it is.
             _ => Ok(()),
+        }
+    }
+}
+
+/// How long a wait for another holder's gate goes before it is reported as
+/// stalled, and between reports. A report, never an end: the call waits as
+/// long as its caller asked, and its owner's copy may be stretched by
+/// preemption or a page fault on its own buffer, which nothing here can tell
+/// from a stall. Policy, chosen as long beside one copy of a ring.
+const GATE_STALL_NANOS: u64 = 10_000_000_000;
+
+/// A wait for a gate, until `until` or, given none, until rung: each
+/// [`GATE_STALL_NANOS`] it lasts is reported to `stalled`, with how long it
+/// has waited, and the wait goes on.
+fn gate_wait(
+    until: Option<u64>,
+    now: impl Fn() -> u64,
+    mut wait: impl FnMut(u64) -> Waited,
+    mut stalled: impl FnMut(u64),
+) -> Waited {
+    let started = now();
+    let mut report = started.saturating_add(GATE_STALL_NANOS);
+    loop {
+        let by = until.map_or(report, |until| until.min(report));
+        match wait(by) {
+            Waited::TimedOut if until.is_some_and(|until| now() >= until) => return Waited::TimedOut,
+            Waited::TimedOut => {
+                let at = now();
+                if at >= report {
+                    stalled(at.saturating_sub(started));
+                    report = at.saturating_add(GATE_STALL_NANOS);
+                }
+            }
+            answer => return answer,
         }
     }
 }
@@ -768,6 +812,40 @@ mod tests {
         assert_eq!(table.reserve(), Some(slot + 1), "a freed slot is not taken before its halves are cleared");
         table.unreserve(slot);
         assert_eq!(table.slots[slot], Slot::Free);
+    }
+
+    /// A wait for a gate that lasts is reported each stall interval and goes
+    /// on until rung; one with a deadline ends at the deadline, reported only
+    /// where it reached a stall interval first.
+    #[test]
+    fn a_gate_wait_that_lasts_is_reported_and_goes_on() {
+        let clock = core::cell::Cell::new(0u64);
+        let mut reports = Vec::new();
+        let mut waits = 0;
+        let answer = gate_wait(None, || clock.get(), |by| {
+            waits += 1;
+            clock.set(by);
+            if waits == 4 { Waited::Rung } else { Waited::TimedOut }
+        }, |waited| reports.push(waited));
+        assert_eq!(answer, Waited::Rung);
+        assert_eq!(reports, [GATE_STALL_NANOS, 2 * GATE_STALL_NANOS, 3 * GATE_STALL_NANOS]);
+
+        clock.set(0);
+        let mut reports = Vec::new();
+        let until = GATE_STALL_NANOS + GATE_STALL_NANOS / 2;
+        let answer = gate_wait(Some(until), || clock.get(), |by| {
+            clock.set(by);
+            Waited::TimedOut
+        }, |waited| reports.push(waited));
+        assert_eq!(answer, Waited::TimedOut);
+        assert_eq!(reports, [GATE_STALL_NANOS]);
+
+        clock.set(0);
+        let early = gate_wait(Some(5), || clock.get(), |by| {
+            clock.set(by);
+            Waited::TimedOut
+        }, |_| panic!("a wait shorter than a stall interval was reported"));
+        assert_eq!(early, Waited::TimedOut);
     }
 
     /// A handle no end was made for is no stream, and forgetting it frees
