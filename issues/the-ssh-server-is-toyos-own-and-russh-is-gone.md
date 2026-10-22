@@ -76,7 +76,7 @@ Owner: this track's. Exit: stage 2, which deletes russh and the setting.
    `toyos-crypto`'s ML-KEM-768 and its hybrid: the server's encapsulation
    side, offered before `curve25519-sha256`. Every OpenSSH recording but one
    negotiated it; the one forced onto `curve25519-sha256` keeps the classical
-   method's replay. Landed by #PR.
+   method's replay. Landed by #1023.
 4. **The forks retire.** After stage 2, tokio has no consumer in the
    workspace, and mio and socket2 remain only as host dev-dependencies of
    `system/netstack/node`.
