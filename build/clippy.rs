@@ -217,7 +217,11 @@ const SHAPES: &[Shape] = &[
     },
     // osbench's Linux half, which no image builds: a check, so nothing links.
     Shape {
-        before: &["-p", "osbench", "--target", OSBENCH_LINUX],
+        before: &["-p", "osbench", "--target", OSBENCH_LINUX[0]],
+        after: &["$ADOPTED", "-D", "warnings"],
+    },
+    Shape {
+        before: &["-p", "osbench", "--target", OSBENCH_LINUX[1]],
         after: &["$ADOPTED", "-D", "warnings"],
     },
     // Its own target directory: cargo keeps one check of a unit, so a unit
@@ -229,14 +233,21 @@ const SHAPES: &[Shape] = &[
     },
 ];
 
-/// The Linux target `tests/guest/osbench` is built for beside ToyOS.
-const OSBENCH_LINUX: &str = "x86_64-unknown-linux-musl";
+/// The Linux targets `tests/guest/osbench` is built for beside ToyOS, one
+/// per architecture.
+const OSBENCH_LINUX: [&str; 2] = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"];
 
 /// The targets the shapes lint against, which `rustup target add` installs:
 /// every architecture's bare targets for the kernel and bootloader, and
-/// osbench's Linux one.
-pub const TARGETS: [&str; 5] =
-    [Arch::X86_64.kernel(), Arch::X86_64.loader(), Arch::Aarch64.kernel(), Arch::Aarch64.loader(), OSBENCH_LINUX];
+/// osbench's Linux ones.
+pub const TARGETS: [&str; 6] = [
+    Arch::X86_64.kernel(),
+    Arch::X86_64.loader(),
+    Arch::Aarch64.kernel(),
+    Arch::Aarch64.loader(),
+    OSBENCH_LINUX[0],
+    OSBENCH_LINUX[1],
+];
 
 impl Shape {
     /// The command as a reader writes it, its tokens unexpanded.

@@ -18,6 +18,7 @@ const MIB: usize = 1 << 20;
 /// the clock a CPU leaving idle has, not the clock it settles at.
 pub fn chunk_rate() {
     chunk();
+    crate::clock::settle();
     let mut ns: Vec<u64> = (0..200)
         .map(|_| {
             let t = Instant::now();
@@ -40,6 +41,7 @@ pub fn null_syscall() {
         ns_since(t) * 1000 / CALLS
     };
     round();
+    crate::clock::settle();
     let mut picos: Vec<u64> = (0..15).map(|_| round()).collect();
     result("syscall.null", "ps", &mut picos, &[("calls_per_sample", CALLS.to_string())]);
 }
@@ -54,6 +56,7 @@ pub fn thread_spawn() {
     for _ in 0..50 {
         once();
     }
+    crate::clock::settle();
     let mut ns: Vec<u64> = (0..1000).map(|_| once()).collect();
     result("thread.spawn_join", "ns", &mut ns, &[]);
 }
@@ -84,6 +87,7 @@ pub fn process_spawn() {
         for _ in 0..10 {
             once()?;
         }
+        crate::clock::settle();
         (0..100).map(|_| once()).collect()
     };
     match run() {
@@ -127,6 +131,7 @@ pub fn pipe_throughput(size: usize) {
     };
     let run = || -> std::io::Result<Vec<u64>> {
         round()?;
+        crate::clock::settle();
         (0..7).map(|_| round()).collect()
     };
     match run() {
@@ -160,6 +165,7 @@ pub fn anon_memory() {
         [map, touch, unmap]
     };
     round();
+    crate::clock::settle();
     let rounds: Vec<[u64; 3]> = (0..10).map(|_| round()).collect();
     let per_mib = |pick: &dyn Fn(&[u64; 3]) -> u64| -> Vec<u64> { rounds.iter().map(|r| pick(r) / MIBS).collect() };
     let extra = [("mapping_bytes", LEN.to_string())];
@@ -181,6 +187,7 @@ pub fn map_unmap_small() {
     for _ in 0..50 {
         once();
     }
+    crate::clock::settle();
     let mut ns: Vec<u64> = (0..2000).map(|_| once()).collect();
     result("mem.map_unmap_4k", "ns", &mut ns, &[]);
 }
@@ -209,6 +216,7 @@ pub fn bandwidth() {
             (LEN as u64) * 1000 / ns_since(t).max(1)
         };
         round();
+        crate::clock::settle();
         let mut mbps: Vec<u64> = (0..7).map(|_| round()).collect();
         result(&format!("mem.bw.{name}"), "MB/s", &mut mbps, &huge);
     };

@@ -61,6 +61,11 @@ pub struct Arm {
     /// arms that name different ones. The members riding the boot run behind
     /// it: it is a row's job, and a row's jobs have the machine first.
     pub last: Option<&'static str>,
+    /// What this arm's jobs add to their boot's list bound past
+    /// [`toyos_tco::JOB_BOUND_MS`], in milliseconds: zero for a row whose jobs
+    /// fit the bound every boot has, and a measurement's own span for one that
+    /// runs longer on purpose. Two arms on one boot add both.
+    pub adds_ms: u64,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -74,7 +79,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], last: None }
+    Arm { boot, config, params, jobs, features: &[], last: None, adds_ms: 0 }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -557,8 +562,8 @@ pub struct Batch {
     features: &'static [&'static str],
     /// What the runner spawns, in order.
     pub jobs: Vec<String>,
-    /// What the members riding it add to the bound of its list.
-    members_ms: u64,
+    /// What its arms and the members riding it add to the bound of its list.
+    adds_ms: u64,
     last: Option<&'static str>,
     files: Vec<(String, Vec<u8>)>,
     links: Vec<(String, String)>,
@@ -575,7 +580,7 @@ impl Batch {
 
     /// The bound the runner gives this boot's whole list, in milliseconds.
     pub fn bound_ms(&self) -> u64 {
-        toyos_tco::list_bound_ms(self.members_ms)
+        toyos_tco::list_bound_ms(self.adds_ms)
     }
 
     /// The bound the kernel gives this whole boot, in milliseconds.
@@ -608,7 +613,7 @@ fn ride<'a>(
         params: params.to_vec(),
         features,
         jobs: Vec::new(),
-        members_ms: 0,
+        adds_ms: 0,
         last: None,
         files: Vec::new(),
         links: Vec::new(),
@@ -651,6 +656,7 @@ pub fn batches(
         for arm in *arms {
             let batch = ride(&mut out, name, arm.boot, arm.config, arm.params, arm.features)?;
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
+            batch.adds_ms += arm.adds_ms;
             match (batch.last, arm.last) {
                 (Some(was), Some(now)) if was != now => {
                     return Err(format!(
@@ -678,7 +684,7 @@ pub fn batches(
         let who = format!("the shared boot {:?}", boot.boot);
         let batch = ride(&mut out, &who, &boot.boot, boot.config, boot.params, boot.features)?;
         batch.add(boot.members.iter().map(|member| member.job.clone()));
-        batch.members_ms += boot.members_ms();
+        batch.adds_ms += boot.members_ms();
         batch.files.extend(boot.files.iter().cloned());
         batch.links.extend(boot.links.iter().cloned());
     }
