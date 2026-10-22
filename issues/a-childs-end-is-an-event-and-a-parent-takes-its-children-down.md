@@ -172,8 +172,11 @@ init is `/system/bin/supervisor`.
      exit 0, one that never listened is killed and its listening child with
      it unread, a second quit kills a reason left unread, a reader survives
      three, and a quit without `MANAGE` is refused. Negative control: a
-     readable watch that listens to nothing reds the watch arm.
-   - 6.2 The rest. std's `os::toyos` hands a program its notice; the
+     readable watch that listens to nothing reds the watch arm. No shipped
+     program sends a quit yet.
+   - 6.2 The rest. The landing whose program first sends a quit also lets
+   libc keep a handler for `SIGINT`, `SIGHUP` and `SIGTERM`, which it refuses
+   until then, so that an ignore libc keeps is one a quit honours. std's `os::toyos` hands a program its notice; the
    `ctrlc` fork `rust/Cargo.toml` patches in waits there for the reasons its
    Unix arm maps; rustc stops skipping its handler on ToyOS
    (`rust/compiler/rustc_driver_impl/src/lib.rs`, `install_ctrlc_handler`).
