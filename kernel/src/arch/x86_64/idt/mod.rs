@@ -338,7 +338,16 @@ extern "sysv64" fn trap_dispatch(frame: *mut TrapFrame) {
     // vector, the page fault included: a diagnostic that skips the commonest
     // fault class is one that misses the answer, and a returning fault's record
     // is simply overwritten by the next.
-    crate::blackbox::record_fault(&fault_of(frame));
+    //
+    // **But not a Ring 3 page fault**, the one fault ordinary work takes on
+    // every first touch of every page: it is served or it ends its process
+    // through the crash path, which reports, and a fault inside its handler is
+    // a Ring 0 fault that records itself here. Sealing it would write back the
+    // whole box on every first touch, from every CPU at once.
+    let user_page_fault = Vector::from_raw(frame.vector) == Vector::PageFault && toyos_userbound::Ring::of_cs(frame.cs).is_user();
+    if !user_page_fault {
+        crate::blackbox::record_fault(&fault_of(frame));
+    }
     match Vector::from_raw(frame.vector) {
         Vector::DoubleFault => exceptions::double_fault_handler(frame),
         Vector::MachineCheck => exceptions::machine_check_handler(frame),
