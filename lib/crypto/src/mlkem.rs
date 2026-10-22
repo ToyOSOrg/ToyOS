@@ -332,6 +332,51 @@ mod tests {
             .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
             .collect()
     }
+    /// Every pair of reduced coefficients, against 64-bit integers.
+    #[test]
+    #[cfg_attr(miri, ignore = "3329^2 pairs")]
+    fn reduction_modulo_q_is_exact_over_its_whole_input_range() {
+        for a in 0..Q as u16 {
+            for b in 0..Q as u16 {
+                let (x, y, q) = (u64::from(a), u64::from(b), u64::from(Q));
+                assert_eq!(u64::from(add(a, b)), (x + y) % q, "{a} + {b}");
+                assert_eq!(u64::from(sub(a, b)), (x + q - y) % q, "{a} - {b}");
+                assert_eq!(u64::from(mul(a, b)), x * y % q, "{a} * {b}");
+            }
+        }
+    }
+
+    /// FIPS 203 §4.2.1's rounding, for each width ML-KEM-768 uses, over
+    /// every input: Compress_d(x) = ⌈(2^d / q)·x⌋ mod 2^d and
+    /// Decompress_d(y) = ⌈(q / 2^d)·y⌋, ties rounding up.
+    #[test]
+    fn compression_rounds_as_fips_203_for_every_input() {
+        for d in [1, 4, 10] {
+            let mut x = Poly::zero();
+            for start in (0..Q as u16).step_by(256) {
+                for (i, word) in x.0.iter_mut().enumerate() {
+                    *word = (start + i as u16).min(Q as u16 - 1);
+                }
+                let compressed = Poly(x.0).compress(d);
+                for (i, &value) in x.0.iter().enumerate() {
+                    let want = ((u64::from(value) << (d + 1)) + u64::from(Q)) / (2 * u64::from(Q)) % (1 << d);
+                    assert_eq!(u64::from(compressed.0[i]), want, "Compress_{d}({value})");
+                }
+            }
+            let mut y = Poly::zero();
+            for start in (0..1u32 << d).step_by(256) {
+                for (i, word) in y.0.iter_mut().enumerate() {
+                    *word = (start + i as u32).min((1 << d) - 1) as u16;
+                }
+                let decompressed = Poly(y.0).decompress(d);
+                for (i, &value) in y.0.iter().enumerate() {
+                    let want = (2 * u64::from(Q) * u64::from(value) + (1 << d)) >> (d + 1);
+                    assert_eq!(u64::from(decompressed.0[i]), want, "Decompress_{d}({value})");
+                }
+            }
+        }
+    }
+
     #[test]
     fn nist_expanded_keygen_secret_matches() {
         let data: serde_json::Value =
@@ -341,7 +386,8 @@ mod tests {
             if group["parameterSet"] != "ML-KEM-768" {
                 continue;
             }
-            for test in group["tests"].as_array().unwrap() {
+            // Miri interprets each key generation: one case there.
+            for test in group["tests"].as_array().unwrap().iter().take(if cfg!(miri) { 1 } else { usize::MAX }) {
                 let mut bytes = hex(test["d"].as_str().unwrap());
                 bytes.extend(hex(test["z"].as_str().unwrap()));
                 let key = DecapsulationKey::generate(&mut Input { bytes }).unwrap();

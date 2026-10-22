@@ -109,3 +109,67 @@ impl<T: Zeroable> Drop for Workspace<T> {
         erase(&mut self.0);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::mem::ManuallyDrop;
+
+    fn wiped<T: Zeroable, const N: usize>(value: [T; N]) {
+        let mut array = value;
+        erase(&mut array);
+        // The array's bytes are initialised and live for this borrow.
+        let bytes = unsafe { core::slice::from_raw_parts(array.as_ptr().cast::<u8>(), core::mem::size_of_val(&array)) };
+        assert!(bytes.iter().all(|&b| b == 0), "{} bytes", bytes.len());
+    }
+
+    /// `erase` over sizes around its 16-byte stores and alignments below
+    /// theirs, including nested arrays and none at all.
+    #[test]
+    fn erase_zeroes_every_byte_of_every_shape() {
+        wiped::<u8, 0>([]);
+        wiped([0xffu8; 1]);
+        wiped([0xffu8; 15]);
+        wiped([0xffu8; 16]);
+        wiped([0xffu8; 17]);
+        wiped([0xffu8; 255]);
+        wiped([u32::MAX; 3]);
+        wiped([u64::MAX; 5]);
+        wiped([u128::MAX; 2]);
+        wiped([[u32::MAX; 16]; 4]);
+    }
+
+    #[test]
+    fn wipes_zero_their_slices() {
+        let mut bytes = [0xa5u8; 37];
+        wipe(&mut bytes[3..]);
+        assert_eq!(bytes[..3], [0xa5; 3]);
+        assert!(bytes[3..].iter().all(|&b| b == 0));
+        let mut words = [u64::MAX; 7];
+        wipe64(&mut words);
+        assert_eq!(words, [0; 7]);
+        #[cfg(feature = "wpa2")]
+        {
+            let mut words = [u32::MAX; 5];
+            wipe32(&mut words);
+            assert_eq!(words, [0; 5]);
+        }
+    }
+
+    /// The drop of a secret owner, or of an operation's workspace, leaves its
+    /// storage zero.
+    #[test]
+    fn a_dropped_secret_leaves_zeros() {
+        let mut secret = ManuallyDrop::new(Secret([0x3cu8; 61]));
+        // The storage stays allocated, so it can be read after the drop;
+        // `u8` has no invalid bit patterns.
+        unsafe { ManuallyDrop::drop(&mut secret) };
+        assert_eq!(secret.0, [0; 61]);
+        let mut words = ManuallyDrop::new(Secret([[u32::MAX; 16]; 4]));
+        unsafe { ManuallyDrop::drop(&mut words) };
+        assert_eq!(words.0, [[0; 16]; 4]);
+        let mut workspace = ManuallyDrop::new(Workspace([[u64::MAX; 5]; 3]));
+        unsafe { ManuallyDrop::drop(&mut workspace) };
+        assert_eq!(workspace.0, [[0; 5]; 3]);
+    }
+}

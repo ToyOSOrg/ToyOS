@@ -552,7 +552,8 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
     assert!(refused.contains("the kernel records both as \"test_rs_a_name_past_what_is\""), "{refused}");
 }
 
-/// **What a run's words take**: no word the whole profile; a name word every
+/// **What a run's words take**: no word the whole profile but its named-only
+/// rows, which only their whole name or their boot takes; a name word every
 /// row and member it is part of, and of a shared boot only the files its
 /// members name; a boot word that boot whole, with every row that rides it,
 /// whatever name words stand beside it; and a word that takes nothing is
@@ -560,7 +561,13 @@ pub fn rows_run_before_members_under_a_bound_the_members_widen() {
 pub fn words_take_rows_members_and_whole_boots() {
     static ROWS: [(&str, Metal); 2] = [
         ("alpha_row", Metal { arms: &[metal::once("own", "tests/images/testcases.toml", &[], &[])], judge: |_| Ok(()) }),
-        ("beta_row", Metal { arms: &[metal::once("shared", "tests/images/testcases.toml", &[], &[])], judge: |_| Ok(()) }),
+        (
+            "beta_row",
+            Metal {
+                arms: &[metal::Arm { named_only: true, ..metal::once("shared", "tests/images/testcases.toml", &[], &[]) }],
+                judge: |_| Ok(()),
+            },
+        ),
     ];
     let boot = |boot: &str, jobs: &[&str]| metal::SharedBoot {
         boot: boot.to_string(),
@@ -585,10 +592,11 @@ pub fn words_take_rows_members_and_whole_boots() {
         })
     };
     let took = |rows: &str, shared: &str| Ok::<_, String>((rows.to_string(), shared.to_string()));
-    assert_eq!(
-        taken(&[], &[]),
-        took("alpha_row,beta_row", "shared=test_rs_a1+test_rs_a2+test_rs_b1,ccorpus=c1+c2")
-    );
+    // `beta_row` is named-only: no word, a part of its name or a word for
+    // another row leaves it, its whole name or its boot takes it.
+    assert_eq!(taken(&[], &[]), took("alpha_row", "shared=test_rs_a1+test_rs_a2+test_rs_b1,ccorpus=c1+c2"));
+    assert_eq!(taken(&["_row"], &[]), took("alpha_row", ""));
+    assert_eq!(taken(&["beta_row"], &[]), took("beta_row", ""));
     assert_eq!(taken(&["b1"], &[]), took("", "shared=test_rs_b1"));
     assert_eq!(taken(&["alpha", "c1"], &[]), took("alpha_row", "ccorpus=c1"));
     assert_eq!(taken(&[], &["shared"]), took("beta_row", "shared=test_rs_a1+test_rs_a2+test_rs_b1"));
@@ -601,9 +609,10 @@ pub fn words_take_rows_members_and_whole_boots() {
     let paths: Vec<&str> = shared[0].files.iter().map(|(path, _)| path.as_str()).collect();
     assert_eq!(paths, ["expect/c2", "bin/test_c_c2"]);
     assert_eq!(shared[0].links, [("bin/c2".to_string(), "/system/bin/test_rs_ccheck".to_string())]);
-    let refused: [(&[&str], &[&str], &str); 3] = [
+    let refused: [(&[&str], &[&str], &str); 4] = [
         (&["a1", "nope"], &[], "\"nope\" is part of no"),
         (&["rs_a1"], &[], "\"rs_a1\" is part of no"),
+        (&["beta"], &[], "\"beta\" is part of no"),
         (&[], &["shared", "shared-2"], "boot:shared-2 names no boot"),
     ];
     for (names, boots, refusal) in refused {

@@ -174,8 +174,8 @@ Where this differs from the tree the owner adopted:
   sshserver serves on russh (rule step 4).
 - `tests/metal/` is the metal loop. A machine's records are in the host's
   store since #852, so there is no `tests/machines/t14/` and no descriptor.
-- `tests/cavp/` stays: `lib/sha2`'s SHAVS driver reads it and `lib/sha2-hw`'s
-  tests include that driver. The orchestrator ruled it shared test data,
+- `tests/cavp/` stays: `lib/sha2`'s SHAVS driver and `toyos-crypto`'s
+  `tests/nist.rs` read it, and `lib/sha2-hw`'s tests include that driver. The orchestrator ruled it shared test data,
   which inside `lib/sha2` the licence gate would count as shipping.
 - There is no `tests/judges/ssh/`: no SSH judge is in the tree.
 

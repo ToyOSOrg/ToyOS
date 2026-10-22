@@ -35,3 +35,31 @@ pub(crate) fn equal(a: &[u8], b: &[u8]) -> bool {
     }
     opaque(nonzero(difference)) == 0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masks_selection_and_equality_at_their_edges() {
+        for (bit, m) in [(0, 0), (1, u64::MAX), (2, 0), (3, u64::MAX)] {
+            assert_eq!(mask(bit), m);
+        }
+        for (a, b) in [(0, u64::MAX), (0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210)] {
+            assert_eq!((select(a, b, 0), select(a, b, 1)), (a, b));
+        }
+        for value in [0, 1, 1 << 63, u64::MAX] {
+            assert_eq!(nonzero(value), u64::from(value != 0));
+            assert_eq!(opaque(value), value);
+        }
+        assert!(equal(&[], &[]));
+        assert!(!equal(&[0], &[]));
+        let a = [0x5au8; 33];
+        for i in 0..a.len() {
+            let mut b = a;
+            b[i] ^= 0x80;
+            assert!(!equal(&a, &b), "a difference at byte {i}");
+        }
+        assert!(equal(&a, &[0x5a; 33]));
+    }
+}

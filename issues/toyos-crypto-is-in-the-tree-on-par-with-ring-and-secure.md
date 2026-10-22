@@ -311,14 +311,30 @@ Not consumers:
      owner's in-place initialisation is enforced by its type rather than by
      call order. Debug assertions remain only for the limb bounds types cannot
      express.
-   - **Machine-checked arithmetic as oracle.** These modules are differentially
-     tested against `fiat-crypto` (`curve25519_64`, `curve25519_scalar_64`,
-     `p256_64`, `p256_scalar_64`, `p384_64`, `p384_scalar_64`,
-     `poly1305_64`), as a dev-dependency:
+   - **Arithmetic held against integers.** The owner rejected fiat-crypto
+     (2026-10-21): ToyOS keeps its own crypto stack, with no fiat code as a
+     dependency of any kind, and ring and RustCrypto only as test-only
+     oracles. The crate's dependencies of every kind name none since #993.
+     `Cargo.lock` still does:
+     - `curve25519-dalek` 4.1.3 names `fiat-crypto` 0.2.9 behind
+       `cfg(curve25519_dalek_backend = "fiat")`, which nothing in the tree
+       sets, so no build compiles it. It is reached through `toyos-crypto`'s
+       own oracles `x25519-dalek` 2.0.1 and `ed25519-dalek` 2.2.0, and
+       through `lib/update`'s `ed25519-dalek`.
+     - Under russh (`system/sshserver`), `curve25519-dalek` 5.0.0-pre.6
+       names `fiat-crypto` 0.3.0 behind the same unset `cfg`.
+     - Under russh, `p384` 0.14.0-rc.8 names `fiat-crypto` 0.3.0 unless
+       `p384_backend = "bignum"`. #1005 sets that for every build, host and
+       guest; before it, fiat compiled into sshserver.
+
+     `num-bigint`, the crate's test-only integer oracle, holds:
      - `field25519` and `scalar25519`;
      - P-256/P-384's field and scalar arithmetic;
      - Poly1305.
 
+     It holds them on every pair of limb and modulus boundary values, on
+     seeded values, on chains that feed each result back unreduced, on
+     inversion, and on distributivity and subtraction (`test_arithmetic`).
      The rest is covered as follows:
      - ML-KEM's modulo-3329 reduction is tested exhaustively over its input
        range.
@@ -355,7 +371,10 @@ Not consumers:
        `aarch64-unknown-toyos` and the UEFI loader target.
      - **Record.** The result is evidence recorded in this issue, with its
        run, revision and compiler. It is not a suite row, and it is rerun when
-       the routine or the compiler changes.
+       the routine or the compiler changes. Its metal rows,
+       `crypto_secret_timing` and `crypto_secret_timing_curves`, are
+       named-only: a metal pass takes them by their whole name or their boot,
+       never unfiltered.
    - **Negative controls.** Each check a forgery would pass is mutated as a
        checked patch, and its exact test fails: the tag compare, point and
        range validation, S < L, and the lengths. No mutation runner is
@@ -365,6 +384,66 @@ Not consumers:
      recorded as evidence.
    - **Audit.** Whether a human cryptographer audits the crate is the owner's
      decision, and it is open.
+   - **Status: the test-side items, #993.** They hold whatever
+     arithmetic sits underneath, so the speed work's rewrite is held to them.
+     - **Done:**
+       - The vectors: 43 Wycheproof files, every case judged or counted
+         outside the interface by a named reason and held to the file's
+         `numberOfTests`; CAVP's SHAVS (SHA-256/384/512), GCMVS encryption
+         (AES-128/256) and ECDSA SigVer and PKV, and ACVP's HMAC and ML-KEM,
+         each held to a count taken from its text apart from the parse
+         (`lib/crypto/tests/wycheproof.rs`, `nist.rs`).
+       - The integer oracle above, which replaced fiat-crypto in Poly1305's
+         test, and ML-KEM's exhaustive reduction and compression.
+       - The differential (`tests/differential.rs`) and the fuzz
+         (`tests/fuzz.rs`), over every CPU. A primitive with no instruction
+         path runs in the `portable` form alone. On the development Mac the
+         crate's three forms took 20 s of wall time and 15 s of CPU on main,
+         and take 74 s and 396 s with this, nearly all of it ours and
+         RustCrypto's curve arithmetic in the `portable` form.
+       - Negative controls: 15 checked patches, each red by its named test,
+         two only after a test was added for it.
+       - Miri over every `portable` unit test but the provider's (ring is
+         C): 25 pass and ML-KEM's exhaustive reduction is ignored under it;
+         the heavy tests take a spread of their inputs there. A patch that
+         writes past `erase`'s array is caught.
+       - Evidence: `ToyOSOrg/evidence` `pr-993`,
+         https://github.com/ToyOSOrg/evidence/tree/187abe7793116cbbbfb4dec63098032b1b8d61de/pr-993/r2
+         and the first round's beside it.
+     - **Constant time, first verdicts** at 7a36687d0 (#993's base
+       b9e4c5862, before #990 rewrote the NIST arithmetic), 1,000,000
+       measurements a routine, the pinned `rust` at a56b4057c. The harness
+       (`tests/guest/rust-tests/src/constant_time.rs`) runs a null and a
+       leaky control at the start and end of each program, and they held on
+       every boot: null |t| 0.9 to 2.2, leaky 74 to 1,311.
+       - The fast program passes every routine on the T14 (Intel signature
+         0x806c1) and the AMD bench (0x860f01).
+       - The curves program passes every routine on the AMD bench.
+       - **Finding, the T14:** P-256 public key LEAKS (max |t| 73.1, raw
+         t 66.9) and P-256 agreement LEAKS (max |t| 83.4, raw t 76.0); the
+         fixed scalar is about 510 ticks slower of about 1.5 M. P-384
+         agreement LEAKS (max |t| 5.79, raw t 5.77). P-384 public key and
+         Ed25519 pass. Owner: this track's parity stage, the NIST
+         arithmetic (`lib/crypto/src/nist.rs`). Exit: a T14 pass of P-256
+         and P-384 agreement on the current NIST code (#1000's Booth
+         windows, at 954b4587b), which a boot of #993's head re-measures.
+         A hypothesis, not established: value-dependent instruction latency
+         with Intel's DOITM off, which
+         a T14 boot with DOITM set on every CPU tests. Its scalar 1 holds
+         the running total at the identity for 51 of 52 windows, so the two
+         classes run the same instructions on very different values.
+       - Their judge asks only that each job ran and its controls held; the
+         verdicts are this record's. The first boots, of the fast program at
+         ec5a0cd18, read LEAKS everywhere: that harness made each random
+         input next to the clock, so those readings are no finding.
+       - Evidence: https://github.com/ToyOSOrg/evidence/tree/18e8243a9e9fb4ec4edaeec68ace23abe98c16b9/pr-993/r3
+     - **Not timed:** ML-KEM key generation. Its matrix expansion rejects
+       samples by rho, a public output of the secret seed, so no two classes
+       can share it. Exit: a measurement with rho held fixed, which needs an
+       entry below the seed (a proposal; no API takes rho today).
+     - **Open:** typed domains (the speed work's); each secret routine's
+       module contract naming its secret inputs; the code inspection; the
+       audit.
 5. **Consumers switch.** Rules for every consumer:
    - A consumer on ring today switches only after stages 3 and 4 hold for
      every primitive it uses.
