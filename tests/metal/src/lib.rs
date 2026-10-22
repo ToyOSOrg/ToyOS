@@ -135,6 +135,9 @@ pub enum Refusal {
     Table(String),
     /// The table does not hold exactly one partition of a type the loop needs.
     Partitions { what: &'static str, matched: u32 },
+    /// The table holds neither one nor two ROOTs, which are the slots the
+    /// loader boots.
+    Roots { matched: u32 },
     /// The image is armed with a parameter [`FLASHABLE`] does not clear.
     Armed { name: String },
     /// **The image carries no bound on its own boot.** Every metal image is
@@ -229,6 +232,9 @@ impl fmt::Display for Refusal {
             Self::Table(why) => write!(f, "the image carries no readable partition table: {why}"),
             Self::Partitions { what, matched } => {
                 write!(f, "the image carries {matched} {what} partitions and this loop needs one")
+            }
+            Self::Roots { matched } => {
+                write!(f, "the image carries {matched} TOYOS-ROOT partitions and this loop needs one or two")
             }
             Self::NoBound { staged_a_wedge } => write!(
                 f,
@@ -900,8 +906,8 @@ pub fn judge_arms(armed: &[String]) -> Result<u64, Refusal> {
 }
 
 /// [`whole_disk`]: exactly one ESP and one TOYOS-LOG at the numbers the
-/// installed rule names, and one slot table, which names the slots the loader
-/// boots — one or two ROOTs.
+/// installed rule names, one slot table, and one or two ROOTs, the slots the
+/// loader boots.
 fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
     let (mut file, bytes) = whole_disk(path).map_err(Refusal::Disk)?;
     let esp = one_partition(&mut file, toyos_gpt::Guid::EFI_SYSTEM, "ESP")?;
@@ -913,6 +919,12 @@ fn admit(path: &Path, target: &Target) -> Result<Flashable, Refusal> {
         if got != want {
             return Err(Refusal::PartitionIndex { what, want, got });
         }
+    }
+    let roots = toyos_gpt::locate_type(&mut toyos_build::image::FileSectors(&mut file), toyos_gpt::Guid::TOYOS_ROOT, &mut [])
+        .map_err(|e| Refusal::Table(format!("{e:?}")))?
+        .matched;
+    if !(1..=2).contains(&roots) {
+        return Err(Refusal::Roots { matched: roots });
     }
     Ok(Flashable { path: path.to_path_buf(), bytes, esp, log })
 }
@@ -3100,6 +3112,10 @@ mod tests {
             admit(&write("moved-log.img", &moved), &t),
             Err(Refusal::PartitionIndex { what: "TOYOS-LOG", want: 3, got: 2 })
         );
+        let rootless = disk(&[("esp", esp), ("slots", slots), ("log", basic)]);
+        assert_eq!(admit(&write("rootless.img", &rootless), &t), Err(Refusal::Roots { matched: 0 }));
+        let three = disk(&[("esp", esp), ("slots", slots), ("log", basic), ("a", root), ("b", root), ("c", root)]);
+        assert_eq!(admit(&write("three-roots.img", &three), &t), Err(Refusal::Roots { matched: 3 }));
         let no_table = disk(&[("esp", esp), ("root", root), ("log", basic)]);
         assert_eq!(
             admit(&write("no-table.img", &no_table), &t),
