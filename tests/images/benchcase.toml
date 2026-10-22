@@ -1,10 +1,11 @@
 # The boot `osbench` measures ToyOS on, for a comparison with the same program
 # on the bench's own Linux (`tests/guest/osbench`).
 #
-# Only what a job list needs to run and to reach the log on the boot stick: no
-# compositor, sound, ACPI server or network, so little but the measurement asks
-# for a CPU. DATA is memory here, the stick having no DATA partition, and the
-# log volume is the one persistent volume a job can write (`osbench persist`).
+# Only what a job list needs to run and to reach the log on the boot stick, and
+# the ACPI server: no compositor, sound or network, so little but the
+# measurement asks for a CPU. DATA is memory here, the stick having no DATA
+# partition, and the log volume is the one persistent volume a job can write
+# (`osbench persist`).
 #
 # The runner's capability carries `jobs`, for the fairness run that starts each
 # workload as a job of its own; `counters`, `trace` and `roster`, so `osbench
@@ -13,11 +14,20 @@
 # handed a duplicate. No other benchmark's path uses them. An unprivileged
 # Linux program has no observation rights to match, which the report says.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+
+# ACPI mode, as a shipped image and the bench's Linux run it. In the legacy
+# mode the T14's firmware hands over, it stops every CPU for 4.5 ms every 2.2 s
+# (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
+# Started before `test-runner`, so its claim's enable precedes every job.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
 
 # The order `osbench all` runs the groups in. The bound is the metal row's, its
 # 240 s on the 60 s every list has (`tests/toyos.rs`), restated for a boot of

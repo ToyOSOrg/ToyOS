@@ -974,6 +974,7 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: LATENCYCASE,
             judge: |b| {
+                in_acpi_mode_before_any_job(b[0])?;
                 b[0].job_passed("test_rs_sched_stress")?;
                 wake_latency_recorded(b[0])
             },
@@ -1457,10 +1458,32 @@ const BENCHCASE: &[metal::Arm] = &[metal::Arm {
 /// Every group exited 0, which `osbench` does only once each of its
 /// benchmarks measured, and said it was done.
 fn osbench_ran(boot: &metal::Readback) -> Result<(), String> {
+    in_acpi_mode_before_any_job(boot)?;
     for job in OSBENCH_GROUPS {
         boot.job_passed(job)?;
         let group = job.strip_prefix("osbench_").expect("a group's job");
         boot.log().must_say(&format!("group={group} done"))?;
+    }
+    Ok(())
+}
+
+/// A timing boot was in ACPI mode before its first job and stayed there, as a
+/// shipped image and the bench's Linux are. In legacy mode the T14's firmware
+/// stops every CPU every 2.2 s, and its time would be measured as ToyOS's
+/// (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
+fn in_acpi_mode_before_any_job(boot: &metal::Readback) -> Result<(), String> {
+    let log = boot.log();
+    let text = log.text();
+    let first_job = text.find("===TEST_START").ok_or("the boot started no job")?;
+    let in_acpi_mode = ["the firmware handed over in ACPI mode", "acpi: ACPI mode: ACPI_ENABLE "]
+        .iter()
+        .filter_map(|said| text.find(said))
+        .min();
+    if !in_acpi_mode.is_some_and(|at| at < first_job) {
+        return Err("the machine was not in ACPI mode before the first job: the boot measured the firmware's legacy mode".to_string());
+    }
+    if let Ok(left) = log.must_say("acpi: legacy mode again") {
+        return Err(format!("the machine left ACPI mode inside the boot: {left}"));
     }
     Ok(())
 }
