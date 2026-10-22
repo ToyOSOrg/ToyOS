@@ -181,26 +181,9 @@ mod runtime {
         }
     }
 
-    struct SyncDlmalloc(core::cell::UnsafeCell<dlmalloc::Dlmalloc<MmapAllocator>>);
-    unsafe impl Sync for SyncDlmalloc {}
-
-    static DLMALLOC: SyncDlmalloc =
-        SyncDlmalloc(core::cell::UnsafeCell::new(dlmalloc::Dlmalloc::new_with_allocator(MmapAllocator)));
-    static LOCKED: core::sync::atomic::AtomicI32 = core::sync::atomic::AtomicI32::new(0);
-
-    fn lock() -> DropLock {
-        while LOCKED.swap(1, core::sync::atomic::Ordering::Acquire) != 0 {
-            core::hint::spin_loop();
-        }
-        DropLock
-    }
-
-    struct DropLock;
-    impl Drop for DropLock {
-        fn drop(&mut self) {
-            LOCKED.store(0, core::sync::atomic::Ordering::Release);
-        }
-    }
+    /// A contended allocation sleeps on the lock's futex rather than spinning.
+    static DLMALLOC: toyos::sync::Lock<dlmalloc::Dlmalloc<MmapAllocator>> =
+        toyos::sync::Lock::new(dlmalloc::Dlmalloc::new_with_allocator(MmapAllocator));
 
     pub(crate) struct LibcAllocator;
 
@@ -209,16 +192,13 @@ mod runtime {
 
     unsafe impl core::alloc::GlobalAlloc for LibcAllocator {
         unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
-            let _lock = lock();
-            unsafe { (*DLMALLOC.0.get()).malloc(layout.size(), layout.align()) }
+            unsafe { DLMALLOC.lock().malloc(layout.size(), layout.align()) }
         }
         unsafe fn dealloc(&self, ptr: *mut u8, layout: core::alloc::Layout) {
-            let _lock = lock();
-            unsafe { (*DLMALLOC.0.get()).free(ptr, layout.size(), layout.align()) }
+            unsafe { DLMALLOC.lock().free(ptr, layout.size(), layout.align()) }
         }
         unsafe fn realloc(&self, ptr: *mut u8, layout: core::alloc::Layout, new_size: usize) -> *mut u8 {
-            let _lock = lock();
-            unsafe { (*DLMALLOC.0.get()).realloc(ptr, layout.size(), layout.align(), new_size) }
+            unsafe { DLMALLOC.lock().realloc(ptr, layout.size(), layout.align(), new_size) }
         }
     }
 }
