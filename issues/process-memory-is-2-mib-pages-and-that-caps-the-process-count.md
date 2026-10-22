@@ -68,14 +68,14 @@ live split of a user leaf.
    and a 64 MiB window, and its metal row, so that
    `cargo test --test toyos-build -- --metal copy_cost` at the stage's merge
    and at its base is the A/B.
-2. **Superframe frame allocator.** 4 KiB frames carved from 2 MiB
-   superframes; the pin rule held per superframe, so no pinned frame is
-   reissued and no superframe holding one is handed out whole; a watermark
-   refuses an allocation before the machine runs dry. Exit: host tests of
-   carve, free, pin and the refusal; every 2 MiB caller of the PMM unchanged;
-   `user_copy_spans_windows` and `munmap_reissues_second_read_window` red
-   again under their negative controls, because each is two physical runs
-   only while the allocator hands out the lowest free frame first.
+2. **Superframe frame allocator.** Built (`kernel::frames`): 4 KiB frames
+   carved from 2 MiB superframes, pins per frame, a frame freed while pinned
+   deferred to its last unpin, page tables in frames of their own, and every
+   2 MiB caller of the PMM unchanged. The watermark is the ledger of
+   `issues/toyos-has-its-own-allocator.md`'s migration, which refuses a
+   commitment before the machine runs dry. Owed: `user_copy_spans_windows`
+   and `munmap_reissues_second_read_window` red again under their negative
+   controls on the T14, where they run.
 3. **4 KiB user leaves.** A software `OWNED` bit in the leaf is the ledger of
    the frames a process owns, with per-process counts; stacks are demand-zero
    and TLS is 4 KiB. A typed syscall value crossing a page is served in

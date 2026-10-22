@@ -34,9 +34,9 @@ largest single copy under the lock. Nothing above caps it: `SYS_READ` and
 spans several physical runs is copied whole as well.
 
 A pipe's **first** write is worse, because the page is allocated lazily under the
-same lock. `write` calls `Pipe::back`, which calls `pmm::alloc_page`: a scan of
-the physical bitmap under `BITMAP`, nested inside `PIPES`, for a free frame,
-then a 2 MiB zeroing (`kernel/src/mm/pmm.rs`), before `Ring::new` and the user
+same lock. `write` calls `Pipe::back`, which calls `pmm::alloc_page`: the frame
+allocator's lock nested inside `PIPES` for a free superframe, then a 2 MiB
+zeroing (`kernel/src/mm/pmm.rs`), before `Ring::new` and the user
 copy that follows it. `map_page` allocates the same way.
 
 ## What queues behind it

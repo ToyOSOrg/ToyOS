@@ -1,3 +1,14 @@
+//! Physical memory: `kernel::frames`' allocator over every usable frame
+//! firmware's map names, its records laid out at boot in memory it manages.
+//!
+//! [`Frame`] owns one 4 KiB frame and [`PhysPage`] one 2 MiB superframe; each
+//! returns its memory when it drops. Pins ([`pin_range`]) are taken without
+//! the allocator's lock.
+
+use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+
+use kernel::frames::{self, Frames, Pins, Super, Unpinned, FRAME, SUPER};
+
 use super::{DirectMap, PAGE_2M};
 use crate::sync::Lock;
 use crate::MemoryMapEntry;
@@ -11,7 +22,7 @@ pub struct Region {
 
 /// Owns one 2MB physical page; dropping it returns the page to the free list.
 pub struct PhysPage {
-    phys: u64,       // raw physical address, 2MB-aligned
+    phys: u64,
 }
 
 impl PhysPage {
@@ -21,155 +32,153 @@ impl PhysPage {
     }
 
     /// Access this page through the kernel direct map.
-    pub fn direct_map(&self) -> super::DirectMap {
-        super::DirectMap::from_phys(self.phys)
+    pub fn direct_map(&self) -> DirectMap {
+        DirectMap::from_phys(self.phys)
     }
-
 }
 
 impl Drop for PhysPage {
     fn drop(&mut self) {
-        free_page(self.phys);
+        FRAMES.lock().as_mut().expect("pmm: a page outlived no allocator").free_super(self.phys, &pins());
     }
 }
 
-/// Maximum physical memory: 64 GB → 32768 2MB pages → 4096 bytes bitmap.
-const MAX_PAGES: usize = 32768;
-
-struct Bitmap {
-    /// One bit per 2MB page. 1 = free, 0 = allocated.
-    bits: [u64; MAX_PAGES / 64],
-    /// Live user-copy windows covering each page; a non-zero count is never handed out by a scan, so a frame a syscall is mid-copy on cannot be reissued under it.
-    pins: [u32; MAX_PAGES],
-    /// Physical address of page index 0 (lowest usable page).
-    base: u64,
-    /// Number of valid page indices (base..base + page_count * PAGE_2M).
-    page_count: usize,
-    free_count: usize,
-    total_usable: usize,
-    /// Hint for next free page scan — avoids re-scanning already-allocated prefix.
-    next_hint: usize,
+/// Owns one 4 KiB frame, zeroed when it was allocated; dropping it returns
+/// the frame.
+pub struct Frame {
+    phys: u64,
 }
 
-impl Bitmap {
-    const fn new() -> Self {
-        Self {
-            bits: [0; MAX_PAGES / 64],
-            pins: [0; MAX_PAGES],
-            base: 0,
-            page_count: 0,
-            free_count: 0,
-            total_usable: 0,
-            next_hint: 0,
-        }
+impl Frame {
+
+    pub fn direct_map(&self) -> DirectMap {
+        DirectMap::from_phys(self.phys)
     }
 
-    /// The managed frame indices the byte range `[phys, phys + len)` touches; empty for a range outside this bitmap, which the PMM never allocates.
-    fn frame_span(&self, phys: u64, len: usize) -> core::ops::Range<usize> {
-        let lo = phys.max(self.base);
-        let hi = (phys + len as u64).min(self.base + self.page_count as u64 * PAGE_2M);
-        if lo >= hi {
-            return 0..0;
-        }
-        (((lo - self.base) / PAGE_2M) as usize)..(((hi - 1 - self.base) / PAGE_2M) as usize + 1)
+    /// Give the frame's ownership to whatever records `phys`, which must
+    /// return it through [`Frame::from_raw`].
+    pub fn into_raw(self) -> u64 {
+        core::mem::ManuallyDrop::new(self).phys
     }
 
-    fn set_free(&mut self, idx: usize) {
-        self.bits[idx / 64] |= 1u64 << (idx % 64);
-    }
-
-    fn set_used(&mut self, idx: usize) {
-        self.bits[idx / 64] &= !(1u64 << (idx % 64));
-    }
-
-    fn is_free(&self, idx: usize) -> bool {
-        self.bits[idx / 64] & (1u64 << (idx % 64)) != 0
-    }
-
-    fn phys_to_idx(&self, phys: u64) -> usize {
-        ((phys - self.base) / PAGE_2M) as usize
-    }
-
-    fn idx_to_phys(&self, idx: usize) -> u64 {
-        self.base + idx as u64 * PAGE_2M
+    /// # Safety
+    /// `phys` is a frame [`Frame::into_raw`] gave up, taken back once.
+    pub unsafe fn from_raw(phys: u64) -> Self {
+        Self { phys }
     }
 }
 
-static BITMAP: Lock<Bitmap> = Lock::new(Bitmap::new());
+impl Drop for Frame {
+    fn drop(&mut self) {
+        FRAMES.lock().as_mut().expect("pmm: a frame outlived no allocator").free_frame(self.phys, &pins());
+    }
+}
 
-/// Initialize the bitmap from the UEFI memory map.
+static FRAMES: Lock<Option<Frames<'static>>> = Lock::new(None);
+
+/// The pin counters, published once by [`init`]: where they are, how many,
+/// and the physical address the first one counts for.
+static PINS: (AtomicPtr<AtomicU32>, AtomicUsize, AtomicU64) =
+    (AtomicPtr::new(core::ptr::null_mut()), AtomicUsize::new(0), AtomicU64::new(0));
+
+fn pins() -> Pins<'static> {
+    let at = PINS.0.load(Ordering::Acquire);
+    if at.is_null() {
+        return Pins::new(0, &[]);
+    }
+    // SAFETY: `init` stored a `'static` slice's pointer before its length and
+    // base, and the counters are never freed or moved.
+    let words = unsafe { core::slice::from_raw_parts(at, PINS.1.load(Ordering::Acquire)) };
+    Pins::new(PINS.2.load(Ordering::Acquire), words)
+}
+
+/// Describe every usable frame of `entries` but `reserved`, and lay the
+/// allocator's records out of one stretch of that memory the boot map reaches.
 pub(super) fn init(entries: &[MemoryMapEntry], reserved: &[Region]) {
-    let mut bm = BITMAP.lock();
+    let usable = || entries.iter().filter(|e| is_usable(e));
+    let lo = usable().map(|e| e.start & !(SUPER - 1)).min();
+    let hi = usable().map(|e| e.end.next_multiple_of(SUPER)).max();
+    let (Some(base), Some(top)) = (lo, hi) else { return };
+    let supers = frames::supers_for(base, top);
+    let pins = frames::pins_for(supers);
+    let records = (supers * core::mem::size_of::<Super>()).next_multiple_of(core::mem::align_of::<AtomicU32>());
+    let bytes = (records + pins * core::mem::size_of::<AtomicU32>()) as u64;
+    let at = place(entries, reserved, bytes).unwrap_or_else(|| {
+        panic!("pmm: no {bytes} usable bytes below {:#x} outside every reserved region for the allocator's records", toyos_bootmap::BOOT_MAP_BYTES)
+    });
+    let start = DirectMap::from_phys(at).as_mut_ptr::<u8>();
+    // SAFETY: `place` found `[at, at + bytes)` usable, outside every reserved
+    // region and inside the boot map, and it is withheld from the allocator
+    // below, so nothing else ever reaches it; zeroed whole, so every pin
+    // counter starts at zero and the records are overwritten by `Frames::new`.
+    let (records, words) = unsafe {
+        core::ptr::write_bytes(start, 0, bytes as usize);
+        (
+            core::slice::from_raw_parts_mut(start.cast::<Super>(), supers),
+            core::slice::from_raw_parts(start.add(records).cast::<AtomicU32>(), pins),
+        )
+    };
 
-    let mut lo = u64::MAX;
-    let mut hi = 0u64;
-    for entry in entries.iter().filter(|e| is_usable(e)) {
-        let start = (entry.start + PAGE_2M - 1) & !(PAGE_2M - 1);
-        let end = entry.end & !(PAGE_2M - 1);
-        if start < end {
-            lo = lo.min(start);
-            hi = hi.max(end);
-        }
-    }
-    if lo >= hi { return; }
-
-    bm.base = lo;
-    bm.page_count = ((hi - lo) / PAGE_2M) as usize;
-    assert!(bm.page_count <= MAX_PAGES, "pmm: physical memory exceeds {} GB", MAX_PAGES * 2 / 1024);
-
-    let mut usable_entries = 0u64;
+    let mut frames = Frames::new(base, records);
     let mut firmware_bytes = 0u64;
-    let mut withheld = 0u64;
-    for entry in entries.iter().filter(|e| is_usable(e)) {
+    let mut usable_entries = 0u64;
+    for entry in usable() {
         usable_entries += 1;
         firmware_bytes += entry.end - entry.start;
-        let start = (entry.start + PAGE_2M - 1) & !(PAGE_2M - 1);
-        let end = entry.end & !(PAGE_2M - 1);
-        let mut addr = start;
-        while addr + PAGE_2M <= end {
-            if !overlaps_reserved(addr, addr + PAGE_2M, reserved) {
-                let idx = bm.phys_to_idx(addr);
-                bm.set_free(idx);
-                bm.free_count += 1;
-                bm.total_usable += 1;
-            } else {
-                withheld += 1;
-            }
-            addr += PAGE_2M;
-        }
+        frames.add(entry.start, entry.end);
     }
+    let described = frames.usable_frames();
+    // Frame 0 too: physical address zero is what every device table and
+    // register that names nothing holds.
+    let own = [Region { start: at, end: at + bytes }, Region { start: 0, end: FRAME }];
+    for region in reserved.iter().chain(&own) {
+        frames.withhold(region.start, region.end);
+    }
+    frames.seal();
+    let managed = frames.usable_frames() * FRAME;
+    let withheld = (described - frames.usable_frames()) * FRAME;
 
-    // **Exact, and it has to be**: every byte the firmware called usable is
-    // either a whole 2 MiB frame this bitmap manages, a frame withheld because
-    // a reserved region touches it, or a fragment lost to the alignment of an
-    // entry that does not begin and end on a 2 MiB boundary. Nothing else can
-    // become of one, so the three sum to the first, and a reader who cannot
-    // reproduce that sum is reading a defect.
-    let managed = bm.total_usable as u64 * PAGE_2M;
-    let withheld_bytes = withheld * PAGE_2M;
-    let (frames, base, span) = (bm.total_usable, bm.base, bm.page_count);
-    // The record is written with the lock released: `log!`'s own path may reach
-    // the allocator, and the allocator's page comes from this bitmap.
-    drop(bm);
-    // **Saturating, because the map this arithmetic is over is firmware's and
-    // firmware is not trusted** (`crate::drivers::acpi`'s rule, and the same
-    // tables). Overlapping usable entries make the accounted total exceed the
-    // firmware's own, and a subtraction that panicked here would take the
-    // machine down before it has a console to say so on. A zero here is a sum
-    // that does not balance, which is what the record claims and what
-    // `pmm_accounting` reads it for.
+    PINS.2.store(base, Ordering::Release);
+    PINS.1.store(pins, Ordering::Release);
+    PINS.0.store(words.as_ptr().cast_mut(), Ordering::Release);
+    *FRAMES.lock() = Some(frames);
+
+    // **Exact, and it has to be**: every byte the firmware called usable is a
+    // frame this allocator manages, a frame withheld because a reserved region
+    // or the allocator's own records touch it, or a fragment of an entry that
+    // is not whole frames. Saturating, because the map is firmware's and
+    // overlapping usable entries make the accounted total exceed its own: a
+    // zero then is a sum that does not balance, which `pmm_accounting` reads.
     crate::log!(
         "pmm: the firmware map calls {firmware_bytes} bytes usable in {usable_entries} entries; \
-         managed={managed} withheld={withheld_bytes} unaligned={}, and the three sum to it; \
-         frames={frames} reserved_frames={withheld} base={base:#x} span={span}",
-        firmware_bytes.saturating_sub(managed).saturating_sub(withheld_bytes),
+         managed={managed} withheld={withheld} unaligned={}, and the three sum to it; \
+         frames={} superframes={supers} records={bytes} at {at:#x} base={base:#x}",
+        firmware_bytes.saturating_sub(managed).saturating_sub(withheld),
+        managed / FRAME,
     );
+}
+
+/// The lowest frame-aligned `bytes` of usable memory below the boot map's
+/// reach that no reserved region touches.
+fn place(entries: &[MemoryMapEntry], reserved: &[Region], bytes: u64) -> Option<u64> {
+    let reach = toyos_bootmap::BOOT_MAP_BYTES;
+    let lowest_in = |entry: &MemoryMapEntry| {
+        let mut at = entry.start.next_multiple_of(FRAME);
+        while at.checked_add(bytes)? <= entry.end.min(reach) {
+            match reserved.iter().find(|r| at < r.end && r.start < at + bytes) {
+                Some(r) => at = r.end.next_multiple_of(FRAME),
+                None => return Some(at),
+            }
+        }
+        None
+    };
+    entries.iter().filter(|e| is_usable(e)).filter_map(lowest_in).min()
 }
 
 /// Allocate one 2MB physical page.
 pub fn alloc_page() -> Option<PhysPage> {
     let page = claim()?;
-    // SAFETY: `claim` just took the frame off the bitmap, so it is unaliased, and the direct map covers every address the bitmap can name.
+    // SAFETY: `claim` just took the frame off the allocator, so it is unaliased, and the direct map covers every address it can name.
     unsafe {
         core::ptr::write_bytes(page.direct_map().as_mut_ptr::<u8>(), 0, PAGE_2M as usize);
     }
@@ -178,125 +187,80 @@ pub fn alloc_page() -> Option<PhysPage> {
 
 /// One 2MB physical page holding what its last owner left in it. Only the kernel heap takes one as it is: the heap answers uninitialized memory, and `alloc_zeroed` writes its own zeros. Does not heap-allocate: the heap calls it when it is full.
 pub(super) fn claim() -> Option<PhysPage> {
-    let mut bm = BITMAP.lock();
-    if bm.free_count == 0 { return None; }
-    let start = bm.next_hint;
-    for offset in 0..bm.page_count {
-        let idx = (start + offset) % bm.page_count;
-        if bm.is_free(idx) && bm.pins[idx] == 0 {
-            bm.set_used(idx);
-            bm.free_count -= 1;
-            bm.next_hint = if idx + 1 < bm.page_count { idx + 1 } else { 0 };
-            let phys = bm.idx_to_phys(idx);
-            drop(bm);
-            return Some(PhysPage { phys });
-        }
-    }
-    None
+    let phys = FRAMES.lock().as_mut()?.alloc_super()?;
+    Some(PhysPage { phys })
+}
+
+/// One zeroed 4 KiB frame.
+pub fn alloc_frame() -> Option<Frame> {
+    let phys = FRAMES.lock().as_mut()?.alloc_frame()?;
+    let frame = Frame { phys };
+    // SAFETY: just taken off the allocator, so unaliased, and inside the direct map.
+    unsafe { core::ptr::write_bytes(frame.direct_map().as_mut_ptr::<u8>(), 0, FRAME as usize) };
+    Some(frame)
 }
 
 /// Allocate `count` physically contiguous 2MB pages.
 pub fn alloc_contiguous(count: usize) -> Option<alloc::vec::Vec<PhysPage>> {
     // `count` comes from userland, so a bogus 0 and a legitimate `mmap(0)` can't be told apart here — refuse, don't assert.
-    if count == 0 { return None; }
-    let mut bm = BITMAP.lock();
-    if bm.free_count < count { return None; }
-
-    let mut run = 0usize;
-    let mut run_start = 0usize;
-    for idx in 0..bm.page_count {
-        if bm.is_free(idx) && bm.pins[idx] == 0 {
-            if run == 0 { run_start = idx; }
-            run += 1;
-            if run == count {
-                for i in run_start..run_start + count {
-                    bm.set_used(i);
-                }
-                bm.free_count -= count;
-                let base_phys = bm.idx_to_phys(run_start);
-                drop(bm);
-                let mut pages = alloc::vec::Vec::with_capacity(count);
-                for i in 0..count {
-                    let phys = base_phys + i as u64 * PAGE_2M;
-                    // SAFETY: every index in this run was just `set_used` under `BITMAP`'s lock, so it is unaliased and within the direct map.
-                    unsafe {
-                        core::ptr::write_bytes(
-                            DirectMap::from_phys(phys).as_mut_ptr::<u8>(), 0, PAGE_2M as usize,
-                        );
-                    }
-                    pages.push(PhysPage { phys });
-                }
-                return Some(pages);
-            }
-        } else {
-            run = 0;
-        }
+    if count == 0 {
+        return None;
     }
-    None
+    let base = FRAMES.lock().as_mut()?.alloc_run(count)?;
+    let mut pages = alloc::vec::Vec::with_capacity(count);
+    for i in 0..count as u64 {
+        let page = PhysPage { phys: base + i * PAGE_2M };
+        // SAFETY: every superframe of the run was just taken off the allocator, so it is unaliased and within the direct map.
+        unsafe { core::ptr::write_bytes(page.direct_map().as_mut_ptr::<u8>(), 0, PAGE_2M as usize) };
+        pages.push(page);
+    }
+    Some(pages)
 }
 
-/// Returns a page to the free bitmap.
-fn free_page(phys: u64) {
-    let mut bm = BITMAP.lock();
-    let idx = bm.phys_to_idx(phys);
-    assert!(!bm.is_free(idx), "double free of physical page at {:#x}", phys);
-    bm.set_free(idx);
-    bm.free_count += 1;
-    bm.next_hint = bm.next_hint.min(idx);
-}
-
-/// Pin every managed frame `[phys, phys + len)` touches so no scan reissues one while a user-copy window covers it; `false`, and nothing pinned, on a pin-count overflow.
+/// Pin every managed frame `[phys, phys + len)` touches so none is reissued while a user-copy window covers it; `false`, and nothing pinned, on a pin-count overflow.
 pub fn pin_range(phys: u64, len: usize) -> bool {
-    if len == 0 {
-        return true;
-    }
-    let mut bm = BITMAP.lock();
-    let span = bm.frame_span(phys, len);
-    for idx in span.clone() {
-        if bm.pins[idx] == u32::MAX {
-            for undo in span.start..idx {
-                bm.pins[undo] -= 1;
-            }
+    let pins = pins();
+    let frames = frame_span(phys, len);
+    for (n, frame) in frames.clone().enumerate() {
+        if !pins.pin(frame) {
+            frames.take(n).for_each(|undo| unpin(&pins, undo));
             return false;
         }
-        bm.pins[idx] += 1;
     }
     true
 }
 
 /// Release a pin [`pin_range`] took over the same range.
 pub fn unpin_range(phys: u64, len: usize) {
-    if len == 0 {
-        return;
-    }
-    let mut bm = BITMAP.lock();
-    let span = bm.frame_span(phys, len);
-    for idx in span {
-        bm.pins[idx] = bm.pins[idx]
-            .checked_sub(1)
-            .expect("unpin of a frame that was not pinned");
+    let pins = pins();
+    frame_span(phys, len).for_each(|frame| unpin(&pins, frame));
+}
+
+fn unpin(pins: &Pins, frame: u64) {
+    if pins.unpin(frame) == Unpinned::Release {
+        FRAMES.lock().as_mut().expect("pmm: a pinned frame outlived no allocator").release(frame);
     }
 }
 
+/// Every frame `[phys, phys + len)` touches.
+fn frame_span(phys: u64, len: usize) -> impl Iterator<Item = u64> + Clone {
+    let end = if len == 0 { phys & !(FRAME - 1) } else { phys + len as u64 };
+    ((phys & !(FRAME - 1))..end).step_by(FRAME as usize)
+}
+
 /// One past the highest physical frame this kernel manages; the IOMMU identity domain's exclusive upper bound.
-/// Taken from the bitmap, not the firmware memory map, whose backing buffer is ordinary free RAM by the time anything asks.
+/// Taken from the allocator, not the firmware memory map, whose backing buffer is ordinary free RAM by the time anything asks.
 pub fn top() -> u64 {
-    let bm = BITMAP.lock();
-    bm.base + bm.page_count as u64 * PAGE_2M
+    FRAMES.lock().as_ref().map_or(0, Frames::top)
 }
 
 /// Return (total_bytes, used_bytes).
 pub fn stats() -> (u64, u64) {
-    let bm = BITMAP.lock();
-    let total = bm.total_usable as u64 * PAGE_2M;
-    let used = (bm.total_usable - bm.free_count) as u64 * PAGE_2M;
-    (total, used)
+    let guard = FRAMES.lock();
+    let Some(frames) = guard.as_ref() else { return (0, 0) };
+    (frames.usable_frames() * FRAME, (frames.usable_frames() - frames.free_frames()) * FRAME)
 }
 
 fn is_usable(entry: &MemoryMapEntry) -> bool {
     toyos_bootmap::is_usable_type(entry.uefi_type)
-}
-
-fn overlaps_reserved(start: u64, end: u64, reserved: &[Region]) -> bool {
-    reserved.iter().any(|r| start < r.end && end > r.start)
 }
