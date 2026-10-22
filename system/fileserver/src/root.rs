@@ -282,6 +282,11 @@ impl Volume for RootVolume {
         Ok(Vec::new())
     }
 
+    /// None: ROOT is read-only.
+    fn room(&mut self) -> Result<toyos::fs::Room, Error> {
+        Ok(toyos::fs::Room { free: 0, unit: BLOCK as u64 })
+    }
+
     fn describe(&self) -> String {
         format!("{}{}, {} blocks read-only from memory", toyos_osrelease::ROOT_SAID, self.uuid(), self.fs.io().block_count())
     }
