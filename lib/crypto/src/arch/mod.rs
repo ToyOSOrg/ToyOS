@@ -57,6 +57,17 @@ pub(crate) fn value_barrier(value: u64) -> u64 {
     unsafe { core::ptr::read_volatile(&value) }
 }
 
+/// For a, b < m and n a multiple of four up to 64, by an instruction path:
+/// out and the returned top word are a b / 2^(64n) mod m plus at most one
+/// m, below 2m and unreduced; `None` where the CPU has no such path. RSA's
+/// data is public.
+pub(crate) fn rsa_mul(a: &[u64], b: &[u64], m: &[u64], n0: u64, n: usize, out: &mut [u64]) -> Option<u64> {
+    hosted!(x86_64::rsa_mul(a, b, m, n0, n, out), {
+        let _ = (a, b, m, n0, n, out);
+        None
+    })
+}
+
 /// GHASH key powers, (H^(i+1))' at index i in the instruction paths' form.
 pub(crate) type Powers = [u128; 16];
 
