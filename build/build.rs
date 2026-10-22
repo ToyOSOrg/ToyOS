@@ -3069,7 +3069,9 @@ mod tests {
     /// A config whose rows claim a PCI function starts the `acpi` claim's
     /// holder: every such claim waits for the root bridges' memory it declares,
     /// and one made on a boot where nothing does is refused, as are all after
-    /// it. `undeclaredcase` is that boot, booted to judge the refusal.
+    /// it. `undeclaredcase` is that boot, booted to judge the refusal. A claim
+    /// a program makes at run time through a `device` syscap is not a row's
+    /// and is not seen here: its image's own test meets the refusal.
     #[test]
     fn every_config_that_claims_a_pci_function_starts_its_declarer() {
         const UNDECLARED: &str = "tests/images/undeclaredcase.toml";

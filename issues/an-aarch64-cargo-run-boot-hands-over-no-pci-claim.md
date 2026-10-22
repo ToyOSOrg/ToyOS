@@ -17,8 +17,8 @@ declared the root bridges' windows, and every domain is built clear of
 them (`kernel::iova`), so the console is given no domain of its own
 (`iommu: no domain of its own for a device: no declaration of the root
 bridges' windows is held`) and keeps the machine's addresses. On VT-d that
-is the identity domain: the console works, isolated by no domain of its own
-as it was on `main`. On the SMMUv3 a stream with no domain aborts what it is
+is the identity domain: the console works, but loses the domain of its own
+`main` gives it, built clear of the loader's window list. On the SMMUv3 a stream with no domain aborts what it is
 given, so the console's DMA reaches nothing.
 Measured at #935's merge of `main` (`3962d606f`), QEMU 11.1.1 under HVF.
 

@@ -349,7 +349,7 @@ const STORMED: [u64; 2] = [0x54, 0x55];
 const STORM: usize = 10_000;
 
 /// Threads started in turn before one must have found itself off the boot
-/// processor, as `acpi_release`'s.
+/// processor.
 const STARTS: usize = 64;
 
 /// What the boot processor counts of the kernel's writes to `SMI_CMD`, read

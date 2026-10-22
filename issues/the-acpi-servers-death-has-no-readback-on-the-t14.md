@@ -21,13 +21,15 @@ so usbd's claim would wait out its 30 s deadline and leave every claim of the
 boot refused. `acpicase` therefore starts no storage, and the row has no log
 to judge. Measured at #935's `4e32df68c`: the boot ran its job and stopped
 cleanly (its black box reads `Rebooting.` and DONE), and `kernel.log` came
-back empty. The row's registration went with #935; `acpi_release` stays,
-run by nothing (QEMU's firmware hands over in ACPI mode, so its release has
-no legacy mode to return to).
+back empty. The row's registration, its judge and its job,
+`tests/guest/rust-tests/src/bin/acpi_release.rs`, went with #935: nothing
+else runs the job, and QEMU's firmware hands over in ACPI mode, so its
+release has no legacy mode to return to.
 
-**Owner**: the PCI apertures track (#935).
+**Owner**: the ACPI track
+(`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`).
 
-**Exit**: `acpi_server_death` is registered again, its judge
+**Exit**: `acpi_server_death` is registered again, with its job and its judge
 (`ACPI_ENABLE` asked off the boot processor for the job's claim,
 `ACPI_DISABLE` written and `SCI_EN` read clear at the server's death, the
 FACS outside `AddressRangeMemory`) restored from the tree before #935, on a boot

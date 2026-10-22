@@ -180,12 +180,6 @@ const RUST_SKIP: &[&str] = &[
     "audio_tone_resampled",
     "tone_beside_stick_write",
     "volume_step",
-    // It hands the ACPI claim to a server of its own and kills it, which needs
-    // a boot that starts none, and no QEMU firmware hands over in legacy mode
-    // for its release to return to: no row runs it until
-    // `issues/the-acpi-servers-death-has-no-readback-on-the-t14.md` gives its
-    // T14 boot a log.
-    "acpi_release",
     // It waits for the ACPI server's power sources, and no guest's machine
     // has a battery: the `acpi_tables_loaded`, `acpi_server_events` and
     // `battery_read` metal rows end their boot on it.

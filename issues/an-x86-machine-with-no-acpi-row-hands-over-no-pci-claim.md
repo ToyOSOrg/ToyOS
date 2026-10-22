@@ -24,7 +24,8 @@ lines); a hardware-reduced x86 guest (Cloud Hypervisor, QEMU's `microvm`)
 would not, as `issues/a-hardware-reduced-x86-machine-has-no-power-off-and-no-power-button.md`
 records for its power-off.
 
-**Owner**: the PCI apertures track (#916, #935).
+**Owner**: the ACPI track
+(`issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`).
 
 **Exit**: such a machine declares its root bridges through a path that needs
 no `acpi` claim row, or the gap is measured absent on every supported machine.
