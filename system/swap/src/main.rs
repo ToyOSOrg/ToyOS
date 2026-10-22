@@ -1,5 +1,5 @@
 //! `/system/bin/swap <service> <sha256> <length>`: a running service's binary
-//! replaced by the one on standard input, handed to `/system/bin/supervisor`, which
+//! replaced by the one on standard input, handed to the supervisor, which
 //! alone can swap it.
 //!
 //! An ordinary program: `ssh <machine> swap netstack <sha256> <length> < netstack`

@@ -56,6 +56,11 @@ impl Node {
     pub fn depth(&self) -> u32 {
         self.depth
     }
+
+    /// Placed under it and not yet published.
+    pub fn children(&self) -> &[Pid] {
+        &self.children
+    }
 }
 
 /// A spawn's first answer.

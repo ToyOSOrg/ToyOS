@@ -182,9 +182,11 @@ pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
     p
 }
 
+/// The text of `errnum` (`errtext`), "Unknown error" for a number no code
+/// has.
 #[no_mangle]
-pub unsafe extern "C" fn strerror(_errnum: i32) -> *const u8 {
-    b"unknown error\0".as_ptr()
+pub unsafe extern "C" fn strerror(errnum: i32) -> *const u8 {
+    crate::errtext::text(errnum).unwrap_or(crate::errtext::UNKNOWN).as_ptr()
 }
 
 /// POSIX's `strerror_r`: `strerror`'s text in `buf`, or `ERANGE` when it does

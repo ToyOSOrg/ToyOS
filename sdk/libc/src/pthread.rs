@@ -228,9 +228,14 @@ pub extern "C" fn pthread_equal(t1: PthreadT, t2: PthreadT) -> i32 {
     (t1 == t2) as i32
 }
 
+/// The calling thread's signal mask, as `pthread_sigmask` keeps it.
+pub(crate) fn mask() -> u64 {
+    MASK.get()
+}
+
 /// The calling thread's signal mask, changed as `how` says when `set` is not
-/// null, answered in `old` when that is not. No signal is ever raised, so a
-/// blocked one is never held back: the mask is kept, answered, and inherited.
+/// null, answered in `old` when that is not. The mask is kept, answered and
+/// inherited; a blocked signal is never held pending, so `raise` refuses it.
 #[no_mangle]
 pub unsafe extern "C" fn pthread_sigmask(how: i32, set: *const u64, old: *mut u64) -> i32 {
     let mask = MASK.get();

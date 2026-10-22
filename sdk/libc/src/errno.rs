@@ -17,3 +17,6 @@ pub(crate) fn set(code: i32) {
     ERRNO.set(code);
 }
 
+pub(crate) fn get() -> i32 {
+    ERRNO.get()
+}

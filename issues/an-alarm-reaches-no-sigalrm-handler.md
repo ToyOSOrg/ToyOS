@@ -12,8 +12,9 @@ of libc's drops it if `SIGALRM` is ignored and otherwise ends the process with
 exit code 142, `SIGALRM`'s default action. POSIX keeps the process in two of
 those cases:
 
-- **A handler.** `signal` and `sigaction` keep `SIGALRM`'s disposition, and a
-  handler never runs. LLVM bounds its wait on a child with one: a `SIGALRM`
+- **A handler.** `signal` and `sigaction` refuse a handler `EINVAL`, as none
+  would run (`sdk/libc/src/sigreq.rs`), and keep `SIGALRM`'s default or
+  ignored disposition. LLVM bounds its wait on a child with one: a `SIGALRM`
   handler makes `wait4` answer `EINTR` (`llvm/lib/Support/Unix/Program.inc`,
   `Wait`).
 - **A mask.** `SIGALRM` blocked in every thread stays pending until a thread

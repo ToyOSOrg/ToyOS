@@ -14,6 +14,9 @@
 //!
 //! Every wait is unbounded: the runner's deadline is the only clock.
 
+#[path = "../image.rs"]
+mod image;
+
 use toyos_abi::syscall::{self, debug_action, EndowEntry, SpawnArgs, SyscallError};
 use toyos_abi::RawHandle;
 use toyos_abi::end::End;
@@ -89,6 +92,8 @@ fn spawn(role: &str, stdout: Option<RawHandle>) -> Result<RawHandle, SyscallErro
     const LABEL: &str = "fd:1";
     let endow: Vec<EndowEntry> =
         stdout.into_iter().map(|handle| EndowEntry { label_off: 0, label_len: LABEL.len() as u32, handle, _pad: 0 }).collect();
+    let own = image::image_of(SELF_PATH);
+    let (image, image_len) = own.spawn_words();
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
@@ -102,8 +107,8 @@ fn spawn(role: &str, stdout: Option<RawHandle>) -> Result<RawHandle, SyscallErro
         labels_len: LABEL.len() as u64,
         cwd_ptr: "/".as_ptr() as u64,
         cwd_len: 1,
-        image: 0,
-        image_len: 0,
+        image,
+        image_len,
         place: u64::from(toyos_abi::HANDLE_INVALID.0),
     };
     // SAFETY: every pointer names a buffer of this frame that outlives the call.

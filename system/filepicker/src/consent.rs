@@ -1,4 +1,4 @@
-//! The question `/system/bin/supervisor` asks before an installed package's
+//! The question the supervisor asks before an installed package's
 //! launch, drawn in the compositor's prompt layer ([`toyos_manifest::consent`]).
 //!
 //! **A chooser bounded by the folder rules**: it starts at the session user's

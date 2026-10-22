@@ -24,6 +24,9 @@
 //!
 //! Every wait is unbounded: the harness ceiling is the only clock.
 
+#[path = "../image.rs"]
+mod image;
+
 use std::io::{BufRead, BufReader};
 use std::os::toyos::process::{ChildExt, CommandExt};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -224,6 +227,8 @@ fn launcher_copy() -> RawHandle {
 /// `SYS_SPAWN` of this binary as a C under `place`, killed again if it starts.
 fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
     let argv = format!("{SELF_PATH}\0c");
+    let own = image::image_of(SELF_PATH);
+    let (image, image_len) = own.spawn_words();
     let args = SpawnArgs {
         path_ptr: SELF_PATH.as_ptr() as u64,
         path_len: SELF_PATH.len() as u64,
@@ -237,8 +242,8 @@ fn spawn_under(place: RawHandle) -> Result<Process, SyscallError> {
         labels_len: 0,
         cwd_ptr: "/".as_ptr() as u64,
         cwd_len: 1,
-        image: 0,
-        image_len: 0,
+        image,
+        image_len,
         place: u64::from(place.0),
     };
     // SAFETY: every pointer names a buffer of this frame that outlives the call.

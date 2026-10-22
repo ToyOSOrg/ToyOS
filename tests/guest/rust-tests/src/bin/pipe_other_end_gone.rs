@@ -21,6 +21,9 @@
 //! it moved to a child that still lives: the watch stays armed through each,
 //! and is answered once that holder goes.
 
+#[path = "../image.rs"]
+mod image;
+
 use std::io::Read;
 use std::os::toyos::process::CommandExt;
 use std::process::{Command, Stdio};
@@ -74,7 +77,8 @@ fn test() {
 
     let (client, server) = connection();
     refused(client.as_handle(), "a connection");
-    let file = syscall::open(SELF_PATH.as_bytes(), OpenFlags::READ).expect("this binary's own file");
+    let own = image::in_tmp(SELF_PATH);
+    let file = syscall::open(own.as_bytes(), OpenFlags::READ).expect("this binary's own file");
     refused(file, "a file");
     syscall::close(file);
     println!("  a connection and a file were refused the question");

@@ -6,7 +6,8 @@
 //! booted only once, in this order: its signed header is on its FAT
 //! partition, the signature is [`KEY`]'s, its image did not die on its last
 //! boot, its version is at or above the floor a boot has proven, and its
-//! kernel, boot parameter and ROOT each hash to what the header names. Each
+//! kernel, boot parameter, supervisor, file server and ROOT each hash to what
+//! the header names. Each
 //! refusal is said by name, and the boot that falls back tells the kernel
 //! which slot it refused and why, so the next boot's log carries it.
 //!
@@ -22,13 +23,14 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use toyos_update::image::{Header, SIGNATURE_BYTES, SIGNED_BYTES};
+use toyos_update::image::{Header, Section, SIGNATURE_BYTES, SIGNED_BYTES};
 use toyos_update::policy::{self, Refusal};
 use toyos_update::record::{self, Booted, Record};
 use toyos_update::slots::{self, Slot, Which};
 use toyos_update::{sig, Digest};
 use crate::efi::{BootServices, CString16, Handle, Mode, SimpleFileSystem, Status, SystemTable};
 
+use crate::payload::Payload;
 use crate::rootimage::{Disk, RootImage};
 
 /// The owner's public key, embedded at build time: the only key this loader
@@ -46,6 +48,8 @@ pub struct Chosen {
     pub digest: Digest,
     pub kernel: Vec<u8>,
     pub cmdline: Vec<u8>,
+    pub supervisor: Payload,
+    pub fileserver: Payload,
     pub root: RootImage,
     /// The unique GUID of its volume, which the kernel and its parameter were read from.
     pub volume: [u8; 16],
@@ -144,20 +148,64 @@ fn verify(
     held(&kernel, header.kernel().sha256, "kernel")?;
     let cmdline = read_section(bs, &slot.boot, slots::CMDLINE_FILE, header.cmdline().len, "cmdline")?;
     held(&cmdline, header.cmdline().sha256, "cmdline")?;
+    let supervisor = program(bs, &slot.boot, slots::SUPERVISOR_FILE, header.supervisor(), "supervisor")?;
+    let fileserver = match program(bs, &slot.boot, slots::FILESERVER_FILE, header.fileserver(), "fileserver") {
+        Ok(fileserver) => fileserver,
+        Err(why) => {
+            supervisor.free(bs);
+            return Err(why);
+        }
+    };
 
-    let root = disk.read_root(bs, &part, header.root().len).map_err(|why| {
-        println!("{HEAD} {letter}: ROOT: {why}");
-        Refusal::Unreadable("root")
-    })?;
+    let root = match disk.read_root(bs, &part, header.root().len) {
+        Ok(root) => root,
+        Err(why) => {
+            println!("{HEAD} {letter}: ROOT: {why}");
+            supervisor.free(bs);
+            fileserver.free(bs);
+            return Err(Refusal::Unreadable("root"));
+        }
+    };
     let began = crate::arch::counter();
-    let root_hash = toyos_update::sha256(root.bytes());
+    let root_hash = toyos_update::sha256(root.pages.bytes());
     println!("{HEAD} {letter}: ROOT hashed in {} counter ticks", crate::arch::counter().wrapping_sub(began));
     if root_hash != header.root().sha256 {
-        root.free(bs);
+        root.pages.free(bs);
+        supervisor.free(bs);
+        fileserver.free(bs);
         return Err(Refusal::Hash("root"));
     }
-    println!("{HEAD} {letter}: kernel, cmdline and ROOT are the bytes the signed header names");
-    Ok(Chosen { which, version: header.version, digest, kernel, cmdline, root, volume: slot.boot, refused: None })
+    println!("{HEAD} {letter}: kernel, cmdline, supervisor, fileserver and ROOT are the bytes the signed header names");
+    Ok(Chosen {
+        which,
+        version: header.version,
+        digest,
+        kernel,
+        cmdline,
+        supervisor,
+        fileserver,
+        root,
+        volume: slot.boot,
+        refused: None,
+    })
+}
+
+/// The program section at `path`, in pages of its own and held to `section`'s
+/// hash.
+fn program(bs: &BootServices, guid: &[u8; 16], path: &str, section: Section, name: &'static str) -> Result<Payload, Refusal> {
+    let bytes = read_section(bs, guid, path, section.len, name)?;
+    let mut pages = Payload::allocate(bs, section.len).map_err(|why| {
+        println!("{HEAD}: {path}: {why}");
+        Refusal::Unreadable(name)
+    })?;
+    pages.bytes_mut().copy_from_slice(&bytes);
+    drop(bytes);
+    // Over the pages the kernel is handed, not over the buffer they came from.
+    if let Err(why) = held(pages.bytes(), section.sha256, name) {
+        pages.free(bs);
+        return Err(why);
+    }
+    Ok(pages)
 }
 
 /// `slot`'s signed header, held to [`KEY`], and its SHA-256.

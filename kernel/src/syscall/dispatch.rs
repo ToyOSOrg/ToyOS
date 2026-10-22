@@ -48,7 +48,7 @@ use super::machine::{
 use super::machine::lower_sysinfo_bound;
 use super::proc::{
     spawn_place, sys_endowments, sys_exit, sys_nanosleep, sys_process_stats,
-    sys_job_create, sys_job_own, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
+    sys_job_create, sys_job_own, sys_process_quit, sys_process_wait, sys_rt_enter, sys_spawn, sys_thread_exit, sys_thread_join, sys_thread_spawn,
 };
 use super::vm::{shared_image, sys_dlopen, sys_dlsym, sys_mmap, sys_munmap, sys_query_modules, sys_tls_alloc_block};
 
@@ -410,6 +410,7 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         SYS_RT_ENTER => sys_rt_enter(RawHandle(a1 as u32)),
         SYS_JOB_CREATE => sys_job_create(RawHandle(a1 as u32)),
         SYS_JOB_OWN => sys_job_own(),
+        SYS_PROCESS_QUIT => sys_process_quit(RawHandle(a1 as u32), a2),
         SYS_LOG_READ => {
             // checked_mul before mapping: a product that doesn't fit is a bad argument,
             // not kernel arithmetic wrapping into a window it then trusts.

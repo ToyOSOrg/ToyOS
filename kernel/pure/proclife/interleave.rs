@@ -23,7 +23,8 @@ use alloc::vec::Vec;
 use std::collections::HashSet;
 
 use crate::proclife::model::{Climb, World};
-use crate::proclife::table::Processes;
+use crate::proclife::quit::{self, Owed, Reason};
+use crate::proclife::table::{Lifecycle, Processes};
 use crate::proclife::tree::{self, Admit, Admitted};
 use crate::proclife::{join, reap, spawn, teardown, End, Pid, Tid, Watch};
 
@@ -79,6 +80,15 @@ pub enum Op {
     Close { by: (Pid, Tid), object: Pid, pc: u32 },
     /// The idle loop's `reap_finished`.
     IdlePass { pc: u32 },
+    /// `process::quit_process`, quit number `by`: one ask per lock section,
+    /// each claim's retires posted with the lock given up, then the kill walk
+    /// of what it claimed. `apart` is the claim
+    /// `mutate-quit-checks-and-kills-in-two-acts` makes a section after its
+    /// decision, and `late` the process whose children
+    /// `mutate-quit-reads-children-late` reads a section after its ask.
+    Quit { by: u32, target: Pid, reason: Reason, pc: u32, owed: Owed, retire: Vec<(Pid, Tid)>, apart: Option<Pid>, late: Option<Pid> },
+    /// A read of a process's notice, which takes its notice's lock alone.
+    Read { pid: Pid, pc: u32 },
 }
 
 impl Op {
@@ -117,6 +127,12 @@ impl Op {
     pub fn idle_pass() -> Self {
         Op::IdlePass { pc: 0 }
     }
+    pub fn quit(by: u32, target: Pid, reason: Reason) -> Self {
+        Op::Quit { by, target, reason, pc: 0, owed: Owed::of(target), retire: Vec::new(), apart: None, late: None }
+    }
+    pub fn read(pid: Pid) -> Self {
+        Op::Read { pid, pc: 0 }
+    }
 
     /// The thread running the op, in the kernel until it returns.
     fn actor(&self) -> Option<(Pid, Tid)> {
@@ -125,7 +141,7 @@ impl Op {
             Op::Join { pid, waiter, .. } => Some((pid, waiter)),
             Op::Kill { by, .. } => by,
             Op::SpawnUnder { by, .. } | Op::Close { by, .. } => Some(by),
-            Op::Spawn { .. } | Op::IdlePass { .. } => None,
+            Op::Spawn { .. } | Op::IdlePass { .. } | Op::Quit { .. } | Op::Read { .. } => None,
         }
     }
 
@@ -138,7 +154,9 @@ impl Op {
             | Op::ThreadExit { pc, .. }
             | Op::Join { pc, .. }
             | Op::Close { pc, .. }
-            | Op::IdlePass { pc, .. } => *pc == DONE,
+            | Op::IdlePass { pc, .. }
+            | Op::Quit { pc, .. }
+            | Op::Read { pc, .. } => *pc == DONE,
         }
     }
 
@@ -161,6 +179,8 @@ impl Op {
             Op::Join { .. } => "thread_join",
             Op::Close { .. } => "close",
             Op::IdlePass { .. } => "idle pass",
+            Op::Quit { .. } => "quit",
+            Op::Read { .. } => "read notice",
         }
     }
 
@@ -390,6 +410,72 @@ impl Op {
                 }
                 *pc = DONE;
             }
+            Op::Quit { by, target, reason, pc, owed, retire, apart, late } => match *pc {
+                // An ask, or under the mutation a decision to kill, under the
+                // table lock and the notice's.
+                0 | ASK => {
+                    if *pc == 0 {
+                        world.begin_quit(*by, *target);
+                    }
+                    if let Some(pid) = late.take() {
+                        quit::owed_children(world, pid, owed);
+                        *pc = POST;
+                        return;
+                    }
+                    match owed.ask.pop() {
+                        Some(pid) => {
+                            let deaf = world.get(pid).is_some_and(|p| !p.tearing_down())
+                                && quit::decide(&world.notice(pid)) == quit::Decision::Kill;
+                            if deaf && cfg!(feature = "mutate-quit-checks-and-kills-in-two-acts") {
+                                *apart = Some(pid);
+                                *pc = APART;
+                                return;
+                            }
+                            match world.ask(*by, pid, *reason, owed) {
+                                quit::Asked::Killed => {
+                                    let proc = world.get(pid).expect("just claimed");
+                                    *retire = teardown::retire_set(proc, None).into_iter().map(|t| (pid, t)).collect();
+                                }
+                                quit::Asked::Notified if cfg!(feature = "mutate-quit-reads-children-late") => {
+                                    *late = Some(pid);
+                                }
+                                quit::Asked::Notified | quit::Asked::Gone => {}
+                            }
+                        }
+                        None => unreachable!("a quit asks only while it owes an ask"),
+                    }
+                    *pc = POST;
+                }
+                // The mutation's claim, in a section of its own.
+                APART => {
+                    let pid = apart.take().expect("decided a section back");
+                    world.claim_apart(*by, pid, owed);
+                    if let Some(proc) = world.get(pid).filter(|p| p.tearing_down()) {
+                        *retire = teardown::retire_set(proc, None).into_iter().map(|t| (pid, t)).collect();
+                    }
+                    *pc = POST;
+                }
+                // With the locks given up: the retires, then the next ask, or
+                // the kill walk's next claim.
+                POST => {
+                    for (victim, thread) in retire.drain(..) {
+                        world.post_retire(victim, thread);
+                    }
+                    *pc = match (owed.ask.is_empty() && late.is_none(), owed.kill.is_empty()) {
+                        (false, _) => ASK,
+                        (true, false) => WALK,
+                        (true, true) => DONE,
+                    };
+                }
+                _ => {
+                    walk_claim(world, &mut owed.kill, retire);
+                    *pc = POST;
+                }
+            },
+            Op::Read { pid, pc } => {
+                world.read_notice(*pid);
+                *pc = DONE;
+            }
         }
     }
 }
@@ -409,6 +495,10 @@ const LAND: u32 = 2;
 const LANDED: u32 = 3;
 /// A failed spawn's climb.
 const CLIMB: u32 = 5;
+/// A quit's next ask.
+const ASK: u32 = 3;
+/// `mutate-quit-checks-and-kills-in-two-acts`' claim.
+const APART: u32 = 4;
 
 /// The walk's next claim, under the table lock: one process, its retires and
 /// the children it owes. Under `mutate-walk-in-one-hold`, every process the
@@ -895,5 +985,109 @@ mod tests {
             "no ordering landed the unrelated spawn between the walk's two claims below the end: \
              the walk holds the table across its claims",
         );
+    }
+
+    /// A process asked once that has not read it, its parent the supervisor,
+    /// listening, and the number of the quit that asked it.
+    fn asked_once(world: &mut World) -> Pid {
+        let supervisor = world.spawn_process();
+        let pid = world.spawn_child(supervisor);
+        world.listen(pid);
+        let mut first = Op::quit(0, pid, Reason::Interrupt);
+        while !first.done() {
+            first.step(world);
+        }
+        assert_eq!(world.notice(pid).asked(), Some(Reason::Interrupt), "the first quit asked nothing");
+        pid
+    }
+
+    /// **A notice's read racing a second quit**, every ordering: the second
+    /// quit kills the process where it comes before the read, and asks it
+    /// again where it comes after, and in no ordering does it kill a process
+    /// that has read every reason asked of it.
+    ///
+    /// Reds under `mutate-quit-checks-and-kills-in-two-acts`, where the read
+    /// lands between the second quit's check and its kill.
+    #[test]
+    fn a_notices_read_racing_a_second_quit_kills_only_where_the_read_comes_second() {
+        let mut world = World::new();
+        let pid = asked_once(&mut world);
+        let ops = vec![Op::quit(1, pid, Reason::Interrupt), Op::read(pid)];
+        holds(&world, ops.clone());
+        let killed = |leaf: &World| leaf.get(pid).is_some_and(|p| p.tearing_down()) || leaf.published(pid).is_some();
+        let some_killed = explore_any(&world, &ops, killed).unwrap_or_else(|found| panic!("{found}"));
+        let some_asked = explore_any(&world, &ops, |leaf| !killed(leaf)).unwrap_or_else(|found| panic!("{found}"));
+        assert!(some_killed && some_asked, "the two orderings did not both happen: killed {some_killed}, asked {some_asked}");
+    }
+
+    /// **A spawn racing a quit on its place**, every ordering, the place
+    /// listening and its own read of the reason among them: a child that
+    /// lands before the quit asks the place is asked by it, and killed for
+    /// never having listened; one that lands after the ask and before the read
+    /// starts holding the reason; one after the read starts holding none. No
+    /// child is asked twice.
+    ///
+    /// Reds under `mutate-quit-spawn-starts-unasked`, where a child landed
+    /// under the unread reason starts unasked, and under
+    /// `mutate-quit-reads-children-late`, where the walk asks such a child
+    /// again and kills it.
+    #[test]
+    fn a_spawn_racing_a_quit_on_its_place_asks_each_child_once() {
+        let mut world = World::new();
+        let supervisor = world.spawn_process();
+        let place = world.spawn_child(supervisor);
+        world.listen(place);
+        let launcher = (supervisor, world.main_tid(supervisor));
+        let states = holds(
+            &world,
+            vec![Op::quit(1, place, Reason::Terminate), Op::spawn_under(place, launcher), Op::read(place)],
+        );
+        std::println!("a spawn racing a quit on its place: {states} states");
+    }
+
+    /// A quit of a process that never listened, with two listening
+    /// generations below it: it is killed, its end takes them, and no notice
+    /// below it is readable at any point.
+    ///
+    /// Reds under `mutate-quit-asks-below-a-kill`, where the walk asks the
+    /// children of the process it kills, and under
+    /// `mutate-quit-notifies-a-deaf-process`, where it asks the process itself.
+    #[test]
+    fn a_quit_of_a_process_that_never_listened_asks_nothing_below_it() {
+        let mut world = World::new();
+        let supervisor = world.spawn_process();
+        let deaf = world.spawn_child(supervisor);
+        let child = world.spawn_child(deaf);
+        let grandchild = world.spawn_child(child);
+        world.listen(child);
+        world.listen(grandchild);
+        holds(&world, vec![Op::quit(1, deaf, Reason::Interrupt)]);
+    }
+
+    /// A quit of a listening process reaches every listening process below
+    /// it, two generations deep, and kills the one beside them that never
+    /// listened.
+    ///
+    /// Reds under `mutate-quit-reaches-the-named-process-alone`.
+    #[test]
+    fn a_quit_reaches_every_process_below_its_target() {
+        let mut world = World::new();
+        let supervisor = world.spawn_process();
+        let target = world.spawn_child(supervisor);
+        let child = world.spawn_child(target);
+        let grandchild = world.spawn_child(child);
+        let deaf = world.spawn_child(target);
+        for pid in [target, child, grandchild] {
+            world.listen(pid);
+        }
+        holds(&world, vec![Op::quit(1, target, Reason::HangUp)]);
+        let mut quit = Op::quit(1, target, Reason::HangUp);
+        while !quit.done() {
+            quit.step(&mut world);
+        }
+        for pid in [target, child, grandchild] {
+            assert_eq!(world.notice(pid).asked(), Some(Reason::HangUp), "pid {pid} was not asked");
+        }
+        assert_eq!(world.get(deaf).unwrap().teardown_end(), Some(End::Killed));
     }
 }

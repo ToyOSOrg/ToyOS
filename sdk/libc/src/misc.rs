@@ -2,7 +2,7 @@
 
 use alloc::vec::Vec;
 use core::ptr;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU8, Ordering};
 
 use toyos_abi::syscall;
 
@@ -119,8 +119,8 @@ pub unsafe extern "C" fn abort() -> ! {
     syscall::exit(134) // SIGABRT
 }
 
-// Signal (stubs — ToyOS has no signals, but `SIGALRM`'s disposition decides
-// what a due `alarm` does)
+// Signals. libc delivers none to a handler (`sigreq`); what it keeps is a
+// disposition already true, and `SIGALRM`'s decides what a due `alarm` does.
 
 /// `signal.h`'s `struct sigaction`.
 #[repr(C)]
@@ -139,25 +139,53 @@ impl SigAction {
     }
 }
 
-/// A handler by its address: `SIG_DFL` and `SIG_IGN` are no functions.
+/// Each signal's kept disposition but `SIGALRM`'s: 0 the default, 1 ignored.
+static KEPT: [AtomicU8; crate::sigreq::SIGNALS] = [const { AtomicU8::new(0) }; crate::sigreq::SIGNALS];
+
+/// Set `signum`'s disposition to `new` if it is given, answering the one it
+/// replaces, or the `errno` it is refused with.
+fn disposition(signum: i32, new: Option<SigAction>) -> Result<SigAction, i32> {
+    use crate::sigreq::{index, set, Kept};
+    let slot = &KEPT[index(signum)?];
+    let kept = new.map(|new| set(signum, new.handler)).transpose()?;
+    if signum == SIGALRM {
+        // Kept whole, flags and mask with it, as `alarm` reads it.
+        return Ok(crate::alarm::act(new));
+    }
+    let old = match kept {
+        Some(kept) => slot.swap((kept == Kept::Ignore) as u8, Ordering::Relaxed),
+        None => slot.load(Ordering::Relaxed),
+    };
+    Ok(SigAction::of(if old == 1 { Kept::Ignore.handler() } else { Kept::Default.handler() }))
+}
+
+/// A disposition by its address: `SIG_DFL` and `SIG_IGN` are no functions,
+/// and a function is refused, as `sigaction` refuses it.
 #[no_mangle]
 pub unsafe extern "C" fn signal(signum: i32, handler: *const u8) -> *const u8 {
-    match signum {
-        SIGALRM => crate::alarm::act(Some(SigAction::of(handler as usize))).handler as *const u8,
-        _ => handler, // return the handler as "previous", effectively a no-op
+    match disposition(signum, Some(SigAction::of(handler as usize))) {
+        Ok(old) => old.handler as *const u8,
+        Err(errno) => {
+            crate::errno::set(errno);
+            usize::MAX as *const u8 // SIG_ERR
+        }
     }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn sigaction(signum: i32, act: *const SigAction, oldact: *mut SigAction) -> i32 {
-    if signum != SIGALRM {
-        return 0; // success
+    match disposition(signum, unsafe { act.as_ref() }.copied()) {
+        Ok(old) => {
+            if let Some(oldact) = unsafe { oldact.as_mut() } {
+                *oldact = old;
+            }
+            0
+        }
+        Err(errno) => {
+            crate::errno::set(errno);
+            -1
+        }
     }
-    let old = crate::alarm::act(unsafe { act.as_ref() }.copied());
-    if let Some(oldact) = unsafe { oldact.as_mut() } {
-        *oldact = old;
-    }
-    0
 }
 
 /// The calling thread's mask, which is what POSIX's process mask is in a
@@ -199,9 +227,28 @@ pub unsafe extern "C" fn sigaddset(set: *mut u64, signo: i32) -> i32 {
     }
 }
 
+/// What the signal's disposition does, as no handler is ever installed
+/// (`sigreq::raised`): nothing for one ignored, the process ended for a
+/// default that ends it, and a refusal otherwise.
 #[no_mangle]
-pub unsafe extern "C" fn raise(_sig: i32) -> i32 {
-    0
+pub unsafe extern "C" fn raise(sig: i32) -> i32 {
+    use crate::sigreq::{raised, Kept, Raised};
+    let kept = match disposition(sig, None) {
+        Ok(now) if now.handler == crate::alarmreq::SIG_IGN => Kept::Ignore,
+        Ok(_) => Kept::Default,
+        Err(errno) => {
+            crate::errno::set(errno);
+            return -1;
+        }
+    };
+    match raised(sig, kept, crate::pthread::mask()) {
+        Raised::Nothing => 0,
+        Raised::End(code) => _exit(code),
+        Raised::Refused(errno) => {
+            crate::errno::set(errno);
+            -1
+        }
+    }
 }
 
 // sysconf

@@ -66,6 +66,10 @@ pub struct Arm {
     /// fit the bound every boot has, and a measurement's own span for one that
     /// runs longer on purpose. Two arms on one boot add both.
     pub adds_ms: u64,
+    /// A slot file bent in the marked slot, with the other slot carrying the
+    /// image whole (`super::slots`): a boot whose subject is the loader's
+    /// refusal and fallback. `None` for the one-slot image every other boot is.
+    pub bent: Option<&'static str>,
 }
 
 /// The ordinary arm: one boot, and the fields a caller must still say.
@@ -79,7 +83,7 @@ pub const fn once(
     params: &'static [&'static str],
     jobs: &'static [&'static str],
 ) -> Arm {
-    Arm { boot, config, params, jobs, features: &[], last: None, adds_ms: 0 }
+    Arm { boot, config, params, jobs, features: &[], last: None, adds_ms: 0, bent: None }
 }
 
 /// One boot carrying members that are **discovered rather than registered**.
@@ -570,6 +574,7 @@ pub struct Batch {
     config: &'static str,
     params: Vec<&'static str>,
     features: &'static [&'static str],
+    bent: Option<&'static str>,
     /// What the runner spawns, in order.
     pub jobs: Vec<String>,
     /// What its arms and the members riding it add to the bound of its list.
@@ -610,6 +615,7 @@ impl Batch {
 
 /// The batch of the boot `boot`, which `who` rides as `(config, params,
 /// features)`: a new one, or the one an earlier rider made where the two agree.
+#[allow(clippy::too_many_arguments)]
 fn ride<'a>(
     out: &'a mut BTreeMap<String, Batch>,
     who: &str,
@@ -617,22 +623,24 @@ fn ride<'a>(
     config: &'static str,
     params: &'static [&'static str],
     features: &'static [&'static str],
+    bent: Option<&'static str>,
 ) -> Result<&'a mut Batch, String> {
     let batch = out.entry(boot.to_string()).or_insert_with(|| Batch {
         config,
         params: params.to_vec(),
         features,
+        bent,
         jobs: Vec::new(),
         adds_ms: 0,
         last: None,
         files: Vec::new(),
         links: Vec::new(),
     });
-    if batch.config != config || batch.params != params || batch.features != features {
+    if batch.config != config || batch.params != params || batch.features != features || batch.bent != bent {
         return Err(format!(
-            "{who} rides the boot {boot:?} as ({config}, {params:?}, {features:?}) and another rides \
-             it as ({}, {:?}, {:?}); one boot is one image",
-            batch.config, batch.params, batch.features
+            "{who} rides the boot {boot:?} as ({config}, {params:?}, {features:?}, bent {bent:?}) and another \
+             rides it as ({}, {:?}, {:?}, bent {:?}); one boot is one image",
+            batch.config, batch.params, batch.features, batch.bent
         ));
     }
     Ok(batch)
@@ -664,7 +672,7 @@ pub fn batches(
     for (name, decl) in tests {
         let Metal { arms, .. } = decl;
         for arm in *arms {
-            let batch = ride(&mut out, name, arm.boot, arm.config, arm.params, arm.features)?;
+            let batch = ride(&mut out, name, arm.boot, arm.config, arm.params, arm.features, arm.bent)?;
             batch.add(arm.jobs.iter().map(|j| (*j).to_string()));
             batch.adds_ms += arm.adds_ms;
             match (batch.last, arm.last) {
@@ -692,7 +700,7 @@ pub fn batches(
             return Err(format!("two shared boots are both named {:?}", boot.boot));
         }
         let who = format!("the shared boot {:?}", boot.boot);
-        let batch = ride(&mut out, &who, &boot.boot, boot.config, boot.params, boot.features)?;
+        let batch = ride(&mut out, &who, &boot.boot, boot.config, boot.params, boot.features, None)?;
         batch.add(boot.members.iter().map(|member| member.job.clone()));
         batch.adds_ms += boot.members_ms();
         batch.files.extend(boot.files.iter().cloned());
@@ -847,7 +855,14 @@ fn build(
     params.push(&deadline);
     let mut plan = toyos_build::build::Plan::new(toyos_build::arch::Arch::X86_64, &config, features, &params);
     plan.machines = toyos_build::microcode::Machines::Benches;
-    let bytes = toyos_build::build::build_test_image(root, &plan, quiet, &extra);
+    let bytes = match batch.bent {
+        None => toyos_build::build::build_test_image(root, &plan, quiet, &extra),
+        Some(file) => {
+            let parts = toyos_build::build::build_test_parts(root, &plan, quiet, &extra);
+            let signing = toyos_build::image::Signing { key: toyos_build::signing::key(), version: plan.version };
+            super::slots::bent_fallback(plan.arch, &parts, &plan.params.join(","), signing, file)
+        }
+    };
     let image = home.join("image.img");
     std::fs::write(&image, &bytes).map_err(|e| format!("{}: {e}", image.display()))?;
     Ok(image)

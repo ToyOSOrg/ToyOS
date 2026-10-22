@@ -1200,6 +1200,9 @@ pub struct BootOptions {
     /// The instant the machine's RTC starts at, as QEMU's `-rtc base=` takes
     /// it, and the host's own UTC with `None`.
     pub rtc_base: Option<&'static str>,
+    /// A slot file (`toyos_update::slots::*_FILE`) bent in the marked slot,
+    /// with the other slot carrying the image whole ([`super::slots`]).
+    pub bent: Option<&'static str>,
 }
 
 impl BootOptions {
@@ -1240,6 +1243,7 @@ impl Default for BootOptions {
             data_bytes: None,
             psci_trace: None,
             rtc_base: None,
+            bent: None,
         }
     }
 }
@@ -1276,6 +1280,9 @@ pub struct QemuInstance {
     boot_image: PathBuf,
     /// The variable store this boot copied for itself.
     vars: PathBuf,
+    /// The 16550's file, where a machine whose console is virtio-serial keeps
+    /// what the loader said.
+    uart_log: PathBuf,
     boot_log: String,
     /// This guest's vCPU count, kept so its liveness ceilings can be widened by
     /// its own oversubscription on a host with fewer cores than vCPUs — see
@@ -1306,7 +1313,7 @@ fn kernel_of(options: &BootOptions) -> Vec<&'static str> {
     toyos_build::build::TEST_KERNEL.to_vec()
 }
 
-// Eight, because an image is its architecture as much as its files and its kernel.
+// Nine, because an image is its architecture and its slots as much as its files and its kernel.
 #[allow(clippy::too_many_arguments)]
 fn build_boot_image_with(
     arch: Arch,
@@ -1317,6 +1324,7 @@ fn build_boot_image_with(
     kernel_features: &[&str],
     kernel_params: &[&str],
     debug_wait: bool,
+    bent: Option<&str>,
 ) -> Vec<u8> {
     // **The two fields have the same type, so swapping them compiles.** It
     // happened once, in this file's own conversion: the shared boot handed
@@ -1383,7 +1391,15 @@ fn build_boot_image_with(
 
     let quiet = !VERBOSE.load(Ordering::Relaxed);
     let plan = toyos_build::build::Plan::new(arch, config, kernel_features, kernel_params);
-    toyos_build::build::build_test_image(&compile::repo_root(), &plan, quiet, &extra_files)
+    let root = compile::repo_root();
+    match bent {
+        None => toyos_build::build::build_test_image(&root, &plan, quiet, &extra_files),
+        Some(file) => {
+            let parts = toyos_build::build::build_test_parts(&root, &plan, quiet, &extra_files);
+            let signing = toyos_build::image::Signing { key: toyos_build::signing::key(), version: plan.version };
+            super::slots::bent_fallback(arch, &parts, &plan.params.join(","), signing, file)
+        }
+    }
 }
 
 /// Build all binaries in a test crate.
@@ -1470,6 +1486,7 @@ impl QemuInstance {
             &features,
             &params,
             options.debug_wait,
+            options.bent,
         );
         let storage = match (options.profile.shape().storage, options.data_bytes) {
             (storage, None) => storage,
@@ -1679,6 +1696,14 @@ impl QemuInstance {
     /// and carries everything; empty when [`BootOptions::mute`] takes it away.
     pub fn boot_log(&self) -> &str {
         &self.boot_log
+    }
+
+    /// What the loader said: the 16550's file so far on a machine whose
+    /// console is virtio-serial, and [`Self::boot_log`] on one whose console
+    /// is the serial port the loader writes too.
+    pub fn loader_log(&self) -> String {
+        let uart = fs::read_to_string(&self.uart_log).unwrap_or_default();
+        format!("{uart}\n{}", self.boot_log)
     }
 
     /// The disk image this boot runs from: the stick under a stick profile.
@@ -2680,15 +2705,16 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         wait_for_ready(&mut child, &rx, &options, &uart_log)
     };
     // The ready marker is test-runner's, which the supervisor starts after its
-    // first line, so a boot that reached it has said its build, and the kernel
-    // named the ROOT that carries it before that. Both are read off the image
-    // this boot was handed, never off the checkout, which may have moved since.
+    // first line, so a boot that reached it has said its build, and the file
+    // server serving `/system` named the ROOT that carries it before that.
+    // Both are read off the image this boot was handed, never off the
+    // checkout, which may have moved since.
     if options.ready_marker == DEFAULT_READY && !options.mute {
         let (root, bytes) = toyos_build::image::root_file_on(&boot_image, toyos_osrelease::PATH)
             .unwrap_or_else(|why| panic!("[qemu] {why}"));
         let release = toyos_osrelease::parse(&bytes)
             .unwrap_or_else(|why| panic!("[qemu] {} on {} is not the build's: {why:?}", toyos_osrelease::PATH, boot_image.display()));
-        let named = format!("boot: root={root}");
+        let named = format!("{}{root}", toyos_osrelease::ROOT_SAID);
         let said = format!(
             "{}{} {}, committed {} UTC, toolchain {}, {}",
             toyos_osrelease::SAID,
@@ -2717,6 +2743,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         screendump,
         boot_image,
         vars,
+        uart_log,
         boot_log,
         smp: options.smp,
         carried,

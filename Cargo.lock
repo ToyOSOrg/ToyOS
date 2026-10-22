@@ -1306,6 +1306,7 @@ dependencies = [
  "toyos-fat32-check",
  "toyos-gpt",
  "toyos-manifest",
+ "toyos-osrelease",
 ]
 
 [[package]]
@@ -1955,7 +1956,6 @@ dependencies = [
 name = "kernel"
 version = "0.1.0"
 dependencies = [
- "bcachefs",
  "dlmalloc",
  "hashbrown 0.16.1",
  "toyos-abi",

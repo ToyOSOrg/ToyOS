@@ -1,4 +1,4 @@
-//! The question `/system/bin/supervisor` asks the person at the screen before
+//! The question the supervisor asks the person at the screen before
 //! an installed package's launch, and the answer it honours.
 //!
 //! **Only the supervisor asks, and only its question grants anything.** It

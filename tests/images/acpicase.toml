@@ -1,10 +1,10 @@
 # The `acpi` claim's own holders: jobs that claim it, starting with the first,
 # on a boot the ACPI server is built into and started by nothing but a job
-# (`acpi_mediated_access`, and on the T14 `acpi_server_death`). A boot that ends
-# itself, as `tests/images/jobcase.toml` does. No row holds the claim, so none
-# declares the root bridges' memory before the supervisor's own claims, and
-# nothing here claims a PCI function: the boot has no storage, and the T14's
-# log has no way to its stick
+# (`acpi_mediated_access` and the rows beside it). A boot that ends itself, as
+# `tests/images/jobcase.toml` does. No row holds the claim, so none declares
+# the root bridges' memory before the supervisor's own claims, and nothing
+# here claims a PCI function: the boot has no storage, and on the T14 its log
+# has no way to its stick
 # (`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`).
 [boot]
 start = ["logkeeper", "test-runner"]

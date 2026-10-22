@@ -1,5 +1,5 @@
 //! `/system/etc/os-release`: which build an image is, written by the build
-//! system into ROOT and read by `/system/bin/supervisor`, libc's `uname` and
+//! system into ROOT and read by the supervisor, libc's `uname` and
 //! the sysinfo fork.
 //!
 //! The freedesktop os-release format (`os-release(5)`), ToyOS's own fields
@@ -50,8 +50,13 @@ pub const NAME: &str = "ToyOS";
 /// `ID`, the operating system's identifier.
 pub const ID: &str = "toyos";
 
-/// What `/system/bin/supervisor` says a release under, followed by its commit.
+/// What the supervisor says a release under, followed by its commit.
 pub const SAID: &str = "supervisor: build ";
+
+/// What the file server serving `/system` says ROOT under, followed by its
+/// filesystem's UUID: a name derived from every file ROOT carries, so the
+/// build again, said by the server that serves it.
+pub const ROOT_SAID: &str = "fileserver: ROOT is filesystem ";
 
 /// The architecture an image is built for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

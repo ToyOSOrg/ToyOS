@@ -23,8 +23,39 @@ fn main() {
     assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
 
     file_types();
+    create_new_is_exclusive_on_tmp();
 
     println!("all fs tests passed");
+}
+
+/// `create_new` on the kernel's `/tmp` makes a file once and refuses the name
+/// after, as a lock file needs.
+fn create_new_is_exclusive_on_tmp() {
+    let path = "/tmp/std_fs_create_new";
+    let _ = fs::remove_file(path);
+    let new = || fs::OpenOptions::new().write(true).create_new(true).open(path);
+    new().expect("the first create_new makes the file");
+    let again = new().expect_err("a second create_new of one path opened the file the first made");
+    assert_eq!(again.kind(), std::io::ErrorKind::AlreadyExists);
+    fs::remove_file(path).expect("remove the file");
+
+    // A dangling link is a name that is there, and its target stays absent.
+    let (link, target) = ("/tmp/std_fs_create_new_link", "/tmp/std_fs_create_new_target");
+    let _ = fs::remove_file(link);
+    let _ = fs::remove_file(target);
+    symlink(target, link).expect("make a dangling link");
+    let through = fs::OpenOptions::new().write(true).create_new(true).open(link);
+    assert_eq!(through.map(drop).map_err(|e| e.kind()), Err(std::io::ErrorKind::AlreadyExists), "create_new through a dangling link");
+    assert!(fs::symlink_metadata(target).is_err(), "create_new made the dangling link's target");
+    fs::remove_file(link).expect("remove the link");
+
+    // So is a directory.
+    let dir = "/tmp/std_fs_create_new_dir";
+    let _ = fs::remove_dir(dir);
+    fs::create_dir(dir).expect("make a directory on /tmp");
+    let over = fs::OpenOptions::new().write(true).create_new(true).open(dir);
+    assert_eq!(over.map(drop).map_err(|e| e.kind()), Err(std::io::ErrorKind::AlreadyExists), "create_new over a directory");
+    fs::remove_dir(dir).expect("remove the directory");
 }
 
 /// What `Metadata::file_type` answers for each kind of thing this machine has.

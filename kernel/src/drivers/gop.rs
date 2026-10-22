@@ -42,7 +42,7 @@ pub fn init(
         phys: DirectMap::from_phys(addr),
         size: aligned_size,
         cache: CachePolicy::WriteCombining,
-        pages: None,
+        memory: crate::object::shm::Memory::Foreign,
     };
     log!("GOP: {}x{} stride={} format={} at {:#x}",
         width, height, stride, pixel_format, addr);

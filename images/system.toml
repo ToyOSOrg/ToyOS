@@ -11,7 +11,7 @@
 # day delete it.
 assets = ["assets"]
 
-# What `/system/bin/supervisor` starts at boot. Program keys, not paths, and the order means
+# What the supervisor starts at boot. Program keys, not paths, and the order means
 # nothing: every port exists before any server runs.
 [boot]
 # `filepicker` is a `serves` daemon like the three beside it: a machine-wide

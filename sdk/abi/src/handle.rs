@@ -77,11 +77,12 @@ pub enum ObjectKind {
     Process = 12,
     Null = 13,
     Job = 14,
-    DeviceSet = 15,
+    Notice = 15,
+    DeviceSet = 16,
 }
 
 impl ObjectKind {
-    pub const ALL: [ObjectKind; 16] = [
+    pub const ALL: [ObjectKind; 17] = [
         Self::PipeRead,
         Self::PipeWrite,
         Self::Connection,
@@ -97,6 +98,7 @@ impl ObjectKind {
         Self::Process,
         Self::Null,
         Self::Job,
+        Self::Notice,
         Self::DeviceSet,
     ];
 

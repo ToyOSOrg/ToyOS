@@ -53,8 +53,9 @@ before that day. Independent of everything else; may run as soon as a slot frees
 **Move 2 — filesystem daemons**, sequenced after the completion architecture. A
 crafted image attacks the kernel rather than a sandboxed daemon. The FS daemon
 needs the blocking story to be efficient, and the boot path needs its story told
-first: the kernel mounts ROOT itself, but what mounts `/boot` and `/home`, and
-with what authority, is the open question.
+first. Told (owner ruling 2026-10-21): the kernel parses no filesystem of
+ROOT; the supervisor's file server serves it out of the memory the loader
+verified, and every other role is a file server too.
 
 **Move 3 — the panic-time symbol resolver**, small and independent. Ruled
 (owner, 2026-10-03, `issues/toyos-explains-itself.md`): he chose

@@ -161,7 +161,7 @@ pub trait Kernel {
     fn latched(&self) -> Option<u32>;
     /// Acknowledge the SCI, whose status this server has cleared.
     fn ack(&self);
-    /// Ask `/system/bin/supervisor` to power the machine off
+    /// Ask the supervisor to power the machine off
     /// (`toyos::power::stop`), which answers only where it did not.
     fn power_off(&self) -> toyos::power::Refused;
 }

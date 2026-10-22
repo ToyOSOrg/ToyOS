@@ -66,7 +66,7 @@ fn root_refuses_every_way_of_changing_it() {
         "rmdir of a mount point was permitted"
     );
     assert_eq!(
-        syscall::symlink(b"/system/bin/supervisor", b"/intruder"),
+        syscall::symlink(b"/system/etc/os-release", b"/intruder"),
         Err(SyscallError::PermissionDenied),
         "a symlink at / was permitted"
     );
@@ -74,7 +74,7 @@ fn root_refuses_every_way_of_changing_it() {
     // The machine is still here, and / still holds what it held.
     let after = names("/");
     assert_eq!(after, ROOT_ENTRIES, "a refused operation changed / to {after:?}");
-    assert!(fs::metadata("/system/bin/supervisor").is_ok(), "/system is unreadable after the refusals");
+    assert!(fs::metadata("/system/etc/os-release").is_ok(), "/system is unreadable after the refusals");
     println!("  PASS create, unlink, rename, mkdir, rmdir and symlink are all refused at /");
 }
 

@@ -288,16 +288,22 @@ pub const SYS_DEVICE_DMA_START: u64 = 132;
 pub const SYS_MESSAGE_SEND: u64 = 133;
 /// A handle to the job the caller runs in. See [`job_own`].
 pub const SYS_JOB_OWN: u64 = 134;
+/// Ask the process a handle names, and every process below it, to quit, for
+/// a [`crate::quit::Reason`], gated by [`Rights::MANAGE`] as a kill is. See
+/// [`process_quit`].
+///
+/// [`Rights::MANAGE`]: crate::handle::Rights::MANAGE
+pub const SYS_PROCESS_QUIT: u64 = 135;
 
 /// Mint a handle to the device set ([`crate::devset`]), which carries `READ`
 /// and `WAIT` and neither `DUP` nor `TRANSFER`. Gated by
 /// [`Rights::DEVICE`] on a `SysCap`. See [`device_set`].
 ///
 /// [`Rights::DEVICE`]: crate::handle::Rights::DEVICE
-pub const SYS_DEVICE_SET: u64 = 135;
+pub const SYS_DEVICE_SET: u64 = 139;
 
 /// The device set's snapshot, read whole. See [`device_set_read`].
-pub const SYS_DEVICE_SET_READ: u64 = 136;
+pub const SYS_DEVICE_SET_READ: u64 = 140;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -305,7 +311,7 @@ pub const SYS_DEVICE_SET_READ: u64 = 136;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 138;
+pub const SYSCALL_PROFILE_BINS: usize = 141;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
@@ -345,7 +351,7 @@ crate::user_safe! {
         pub labels_ptr: u64,
         pub labels_len: u64,
         /// The child's working directory, absolute, or the spawn is refused
-        /// `InvalidArgument`. Under a name the kernel serves (`/system`, `/tmp`) it
+        /// `InvalidArgument`. Under the name the kernel serves (`/tmp`) it
         /// must be a directory there or the spawn is `NotFound`; under any other
         /// name it is a file server's directory, which the caller's client asked
         /// that server about and the kernel cannot. **Always the caller's
@@ -422,10 +428,19 @@ const _: () = assert!(core::mem::size_of::<EndowEntry>() == 16);
 pub const SYSCAP_LABEL: &str = "syscap";
 /// The label for a program's namespace — what its manifest `receives` becomes.
 pub const SVC_LABEL: &str = "svc";
+/// The labels the kernel puts on the immutable memory objects it hands the
+/// supervisor beside the system capability: the file server's executable and
+/// ROOT's bytes, both as the loader verified them (`boot::KernelArgs`).
+pub const FILESERVER_IMAGE_LABEL: &str = "boot:fileserver";
+pub const ROOT_IMAGE_LABEL: &str = "boot:root";
 /// The label every process starts holding a handle to itself under, carrying
 /// `WRITE`, `DUP` and `TRANSFER`: what it hands on for a child to be placed
 /// under it ([`SpawnArgs::place`]). The kernel puts it in every table.
 pub const SELF_LABEL: &str = "self";
+/// The label every process starts holding its notice under: readable while a
+/// quit has asked it a reason it has not read, which a read takes
+/// ([`SYS_PROCESS_QUIT`]). The kernel puts it in every table.
+pub const QUIT_LABEL: &str = "quit";
 /// The label a spawn endows a job under to put its child in it: the owner its
 /// threads, and its children's unless a spawn names another, share CPU time
 /// under. It takes a handle carrying [`Rights::WRITE`] to a job — the caller's
@@ -454,15 +469,16 @@ pub const FD_PREFIX: &str = "fd:";
 pub const PROVIDE_PREFIX: &str = "provide:";
 
 /// `(label, handle)` pairs one endowment table holds, the kernel's own
-/// [`SELF_LABEL`] among them. Policy on the primitive, refused by name, never
-/// truncated — the widest manifest row plus stdio.
+/// [`SELF_LABEL`] and [`QUIT_LABEL`] among them. Policy on the primitive,
+/// refused by name, never truncated — the widest manifest row plus stdio.
 pub const MAX_ENDOWMENTS: usize = 32;
-/// `(label, handle)` pairs one spawn may carry: the kernel adds [`SELF_LABEL`].
-pub const MAX_SPAWN_ENDOWMENTS: usize = MAX_ENDOWMENTS - 1;
-/// Bytes of label blob one endowment table holds, [`SELF_LABEL`]'s among them.
+/// `(label, handle)` pairs one spawn may carry: the kernel adds [`SELF_LABEL`]
+/// and [`QUIT_LABEL`].
+pub const MAX_SPAWN_ENDOWMENTS: usize = MAX_ENDOWMENTS - 2;
+/// Bytes of label blob one endowment table holds, the kernel's labels among them.
 pub const MAX_LABELS_LEN: usize = 4096;
-/// Bytes of label blob one spawn may carry: the kernel adds [`SELF_LABEL`]'s.
-pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len();
+/// Bytes of label blob one spawn may carry: the kernel adds its two labels.
+pub const MAX_SPAWN_LABELS_LEN: usize = MAX_LABELS_LEN - SELF_LABEL.len() - QUIT_LABEL.len();
 
 use crate::end::End;
 use crate::handle::Rights;
@@ -603,6 +619,10 @@ pub enum FileType {
     DeviceMemory = 13,
     /// A [null](null) handle.
     Null = 14,
+    /// A region nobody can write, which every mapping of is read-only: a
+    /// payload the loader verified (`boot::BootImage`); `size` is the
+    /// payload's length, within the region's pages.
+    ImmutableMemory = 15,
 }
 
 impl FileType {
@@ -620,6 +640,7 @@ impl FileType {
             12 => Some(Self::Symlink),
             13 => Some(Self::DeviceMemory),
             14 => Some(Self::Null),
+            15 => Some(Self::ImmutableMemory),
             _ => None,
         }
     }
@@ -642,6 +663,10 @@ impl OpenFlags {
     pub const CREATE: Self = Self(4);
     pub const TRUNCATE: Self = Self(8);
     pub const APPEND: Self = Self(16);
+    /// With [`Self::CREATE`] only: refused `AlreadyExists` when the name is
+    /// there, a link or a directory included, decided in the one call that
+    /// creates it.
+    pub const EXCLUSIVE: Self = Self(32);
 
     pub const fn contains(self, flag: Self) -> bool { self.0 & flag.0 != 0 }
 }
@@ -1017,6 +1042,14 @@ fn end_of(word: u64) -> End {
 /// caller asked for it to be gone and it is.
 pub fn process_kill(proc: RawHandle) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_PROCESS_KILL, proc.0 as u64, 0, 0, 0))
+}
+
+/// Ask the process `proc` names, and every process below it, to quit for
+/// `reason`. A process that listens to its notice finds the reason in it; one
+/// that never listened, or has not yet read the reason it was last asked, is
+/// killed. Answers `Ok` for one already ended, as [`process_kill`] does.
+pub fn process_quit(proc: RawHandle, reason: crate::quit::Reason) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_PROCESS_QUIT, proc.0 as u64, u64::from(reason.to_byte()), 0, 0))
 }
 
 /// Copy records into `out`, oldest first and merged by `at_ns`, advancing

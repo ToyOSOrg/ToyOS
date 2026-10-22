@@ -1,5 +1,5 @@
 //! Replacing a running service's binary: every word `/system/bin/swap` and
-//! `/system/bin/supervisor` say about it, and every decision the supervisor makes
+//! the supervisor say about it, and every decision the supervisor makes
 //! about one. Pure.
 //!
 //! **A swap is asked by `/system/bin/swap` and done by the supervisor, and nothing else

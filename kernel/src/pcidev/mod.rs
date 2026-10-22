@@ -1647,7 +1647,7 @@ pub fn bar_object(binding: &Binding, index: u64) -> Result<Arc<SharedMemObject>,
             // Registers, and the memory type is not firmware's to decide.
             cache: CachePolicy::Uncacheable,
             // The kernel owns no pages here: this is a device's aperture.
-            pages: None,
+            memory: crate::object::shm::Memory::Foreign,
         }))
     })
 }

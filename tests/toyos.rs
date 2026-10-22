@@ -181,8 +181,10 @@ const RUST_SKIP: &[&str] = &[
     "tone_beside_stick_write",
     "volume_step",
     // It hands the ACPI claim to a server of its own and kills it, which needs
-    // a boot that starts none: the `acpi_server_death` metal row runs it on
-    // tests/images/acpicase.toml.
+    // a boot that starts none, and no QEMU firmware hands over in legacy mode
+    // for its release to return to: no row runs it until
+    // `issues/the-acpi-servers-death-has-no-readback-on-the-t14.md` gives its
+    // T14 boot a log.
     "acpi_release",
     // It waits for the ACPI server's power sources, and no guest's machine
     // has a battery: the `acpi_tables_loaded`, `acpi_server_events` and
@@ -221,6 +223,9 @@ const RUST_SKIP: &[&str] = &[
     // libc's `recv` across a `close` of its descriptor, as its own netstack:
     // `libc_children` runs it on tests/images/libccase.toml.
     "libc_recv_beside_close",
+    // A quit's walk over a tree of its own children: `libc_children` runs it
+    // beside the children libc starts, on tests/images/libccase.toml.
+    "quit_tree",
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",
@@ -524,6 +529,17 @@ const MACHINE_TESTS: &[&str] = &[
     // `images/console.toml`'s image, which runs no job and hands no machine
     // back: a metal boot of it ends with a hand on the power button.
     "console_image_boots",
+    // The UEFI loader's check of a boot program, which no host test reaches:
+    // a slot whose supervisor is bent is refused before boot services end,
+    // and the other slot boots. On both architectures' QEMU machines; the
+    // `bent_supervisor_falls_back` metal row runs it on a bench.
+    "a_bent_supervisor_is_refused_and_the_other_slot_boots",
+    // Memory the kernel frees only when a process's address space goes: a
+    // child spawned from an image (every program of `/system` is) holds the
+    // image until then, and a region its parent still maps must not keep
+    // that space alive. The kernel's object lifetimes, which no host test
+    // holds; one boot of QEMU's x86-64 machine.
+    "a_spawn_from_an_image_frees_it_when_the_child_ends",
     // The boot's log written through usbd onto the stick it booted from, and
     // still there once the machine has stopped: the path every metal boot's
     // `/log` takes, which no other QEMU row reads, because their console is
@@ -550,8 +566,9 @@ const MACHINE_TESTS: &[&str] = &[
     // not. On demand: [`ON_DEMAND`]. Red at the link until item 5 of
     // `issues/toyos-builds-itself.md` lands.
     "hosted_clang_hello",
-    // libc's children: each program starts and waits for its own, which is
-    // order, completion, contents and counts, and no hardware is in it.
+    // libc's children, and a quit's walk over a tree of std children: each
+    // program starts and waits for its own, which is order, completion,
+    // contents and counts, and no hardware is in it.
     "libc_children",
     // A launch's unsent stdio slots: its own boot, because the launcher it
     // needs makes every spawn of a declared program a launch.
@@ -619,6 +636,10 @@ const MACHINE_TESTS: &[&str] = &[
 /// than derived from its config and parameters, because sharing is not always
 /// safe and only the author knows.
 const METAL: &[(&str, metal::Metal)] = &[
+    (
+        "bent_supervisor_falls_back",
+        metal::Metal { arms: BENT_SUPERVISOR, judge: |b| bent_supervisor_fell_back(&b[0].loader(), &b[0].kernel()) },
+    ),
     // ---- one image: tests/images/testcases.toml, no parameters, one job list ----
     (
         "blackbox_unclaimed_page",
@@ -794,15 +815,6 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal {
             arms: TESTCASES_HELD,
             judge: |b| battery_on_metal(b[0]),
-        },
-    ),
-    (
-        // The server killed: the kernel writes `ACPI_DISABLE` as its claim goes,
-        // and `SCI_EN` reads clear after it.
-        "acpi_server_death",
-        metal::Metal {
-            arms: &[metal::once("acpicase", "tests/images/acpicase.toml", &[], &["test_rs_acpi_release"])],
-            judge: |b| acpi_death_on_metal(b[0]),
         },
     ),
     (
@@ -2476,6 +2488,47 @@ fn console_image_boots() -> Result<(), String> {
     said.must_be_clean()
 }
 
+/// Megabytes in use, by `free`'s line, after `free` itself has ended.
+fn used_mib(qemu: &mut QemuInstance) -> Result<u64, String> {
+    let said = qemu.run_test("free", Duration::from_secs(30)).stdout;
+    let line = said.lines().find(|l| l.trim_end().ends_with('M')).ok_or_else(|| format!("free said no figures:\n{said}"))?;
+    let used = line.split_whitespace().nth(1).and_then(|w| w.strip_suffix('M')?.parse().ok());
+    used.ok_or_else(|| format!("free's line {line:?} names no used megabytes"))
+}
+
+/// Eight spawns of a program read from `/system` into an image, each of a
+/// child that maps the log ring its parent keeps: what is in use after them is
+/// what was before, give or take one 2 MiB image. A child's ended address
+/// space kept alive by its parent's ring holds the image, 2 MiB a spawn.
+fn a_spawn_from_an_image_frees_it_when_the_child_ends(test_config: &Path) -> Result<(), String> {
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], BootOptions::default());
+    let before = used_mib(&mut qemu)?;
+    for _ in 0..8 {
+        used_mib(&mut qemu)?;
+    }
+    let after = used_mib(&mut qemu)?;
+    match after <= before + 2 {
+        true => Ok(()),
+        false => Err(format!("{} MiB more is in use after eight spawns than before them: {before} MiB, then {after}", after - before)),
+    }
+}
+
+/// What a boot whose marked slot's supervisor is bent says: the loader refused
+/// that slot by the section, and the kernel was booted from the other.
+fn bent_supervisor_fell_back(loader: &serial::Serial, kernel: &serial::Serial) -> Result<(), String> {
+    let refused = toyos_update::policy::Refusal::Hash(toyos_update::image::SUPERVISOR);
+    loader.must_say(&format!("Slot A: REFUSED, {refused}"))?;
+    // `kernel/src/params.rs`'s `SLOT_RECORD`, which the kernel's binary keeps.
+    kernel.must_say(&format!("boot: slot B, because the marked slot A was refused: {}", refused.word()))?;
+    Ok(())
+}
+
+/// [`bent_supervisor_fell_back`] on a bench, whose loader keeps its own log.
+const BENT_SUPERVISOR: &[metal::Arm] = &[metal::Arm {
+    bent: Some(toyos_update::slots::SUPERVISOR_FILE),
+    ..metal::once("bentsupervisor", "tests/images/testcases.toml", &[], &[])
+}];
+
 /// Boot `tests/images/testcases.toml` from a USB stick, as a metal boot does,
 /// write the stick through usbd ([`metal::STICK_LOAD_JOB`]), press the power
 /// button while it writes, and read the stick's log volume back with the metal
@@ -3800,7 +3853,7 @@ fn run_screen_test(name: &str, profile: qemu::Profile, test_config: &Path) -> Re
                 "percpu: BSP cpu_id=0",
                 "GIC: v",
                 "clock: the generic timer counts at",
-                "spawned /system/bin/supervisor pid=",
+                "spawned the supervisor pid=",
                 SPAWNED,
             ] {
                 if !serial.contains(want) {
@@ -4139,6 +4192,16 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "bar_map_behind_a_bridge" => bar_map_behind_a_bridge(test_config),
         "lent_device_memory_refused" => lent_device_memory_refused(test_config),
         "console_image_boots" => console_image_boots(),
+        "a_spawn_from_an_image_frees_it_when_the_child_ends" => a_spawn_from_an_image_frees_it_when_the_child_ends(test_config),
+        "a_bent_supervisor_is_refused_and_the_other_slot_boots" => {
+            [qemu::Profile::Headless, qemu::Profile::Virt].into_iter().try_for_each(|profile| {
+                let options = BootOptions { profile, bent: Some(toyos_update::slots::SUPERVISOR_FILE), ..Default::default() };
+                let qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+                let loader = serial::Serial::named("loader's serial", qemu.loader_log());
+                let kernel = serial::Serial::named("boot's console", qemu.boot_log().to_string());
+                bent_supervisor_fell_back(&loader, &kernel)
+            })
+        }
         "the_log_lands_on_the_boot_stick" => the_log_lands_on_the_boot_stick(test_config),
         "a_usb_key_reaches_the_console" => a_usb_key_reaches_the_console(),
         "desktop_without_x2apic" => desktop_without_x2apic(),
@@ -6356,44 +6419,6 @@ fn battery_on_metal(back: &metal::Readback) -> Result<(), String> {
     }
     Ok(())
 }
-
-/// The server's death on the T14: the kernel put the machine in ACPI mode for
-/// the job's claim, and when the killed server's claim went it wrote
-/// `ACPI_DISABLE` (the FADT's 0xf1) and read `SCI_EN` clear: the firmware has
-/// the buttons again. Each write was made on the boot processor, and the
-/// enable was asked from another CPU: the job claims from a thread it found
-/// off the boot processor, so that write is the one that crossed. And the
-/// Global Lock this machine's firmware keeps: the kernel read the FACS its
-/// FADT names through the direct map and found the lock word in memory the
-/// firmware's own map does not report as `AddressRangeMemory`, which ACPI 6.5
-/// §5.2.10 forbids the FACS.
-fn acpi_death_on_metal(back: &metal::Readback) -> Result<(), String> {
-    back.job_passed("test_rs_acpi_release")?;
-    let kernel = back.kernel();
-    let lock = kernel.must_say("acpi: the Global Lock is the FACS's at ")?.trim();
-    let uefi_type = lock
-        .rsplit_once(", in memory the firmware's map types ")
-        .and_then(|(_, ty)| ty.parse::<u8>().ok())
-        .ok_or_else(|| format!("the Global Lock's line names no memory type: {lock}"))?;
-    if ADDRESS_RANGE_MEMORY.contains(&uefi_type) {
-        return Err(format!("the Global Lock's word is in AddressRangeMemory: {lock}"));
-    }
-    eprintln!("  [acpi] {lock}");
-    let enabled = kernel.must_say("acpi: ACPI mode: ACPI_ENABLE 0xf0 written to SMI_CMD 0xb2 ")?;
-    // The kernel says this only of a `PM1a_CNT` it read with `SCI_EN` clear.
-    let left = kernel.must_say("acpi: legacy mode again: ACPI_DISABLE 0xf1 written to SMI_CMD 0xb2 ")?;
-    for line in [enabled, left] {
-        smi_cmd_writer(line)?;
-        eprintln!("  [acpi] {}", line.trim());
-    }
-    if number_between(enabled, ", asked from cpu", "; the write held cpu")? == 0 {
-        return Err(format!("the job's claim was asked from the boot processor, so no CPU asked it for this write: {enabled}"));
-    }
-    Ok(())
-}
-
-/// The UEFI memory types ACPI 6.5 Table 15.6 maps to `AddressRangeMemory`.
-const ADDRESS_RANGE_MEMORY: [u8; 5] = [1, 2, 3, 4, 7];
 
 /// The CPU a kernel line says wrote `SMI_CMD`, read on that CPU beside the
 /// `out`: the boot processor, cpu0, or the line is refused (ACPI 6.5 Table
