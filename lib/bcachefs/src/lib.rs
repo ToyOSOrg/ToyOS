@@ -1,6 +1,6 @@
-//! The `/home` filesystem. [`upstream`] implements the real bcachefs on-disk
-//! format, read side; the modules beside it are the interim ToyOS format the
-//! kernel still links.
+//! bcachefs. [`engine`] implements its on-disk format; the modules beside it
+//! are the interim ToyOS format the build, the loader and the file server
+//! still use.
 //!
 //! **Every number this crate parses came off a disk it does not own, and a
 //! CRC is not authentication — whoever writes the image writes the CRC.** Each
@@ -21,7 +21,8 @@ mod superblock;
 mod alloc_bitmap;
 mod btree;
 mod fs;
-pub mod upstream;
+#[warn(dead_code)]
+pub mod engine;
 
 pub use block_io::{BlockIO, BlockBuf, BlockNum, DeviceError, TransferError};
 #[cfg(feature = "std")]

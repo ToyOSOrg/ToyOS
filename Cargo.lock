@@ -191,6 +191,8 @@ name = "bcachefs"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "toyos-blockdev",
+ "toyos-crypto",
 ]
 
 [[package]]
