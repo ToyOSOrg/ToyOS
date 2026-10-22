@@ -1,7 +1,7 @@
 //! A stream's holders across processes, on the real kernel: what host tests
 //! and the loom models of `toyos::transport::session` cannot show.
 //!
-//! - **A holder killed inside the gate leaves the others working (E2).** A
+//! - **A holder killed inside the gate leaves the others working.** A
 //!   child adopts an exported stream and faults copying its write, holding
 //!   the send ring's gate. The kernel ends it and only then hangs its
 //!   connection up, and the gate still names it. The parent's write
@@ -97,7 +97,8 @@ fn test() {
 
 // ---- the claims ----
 
-/// E2 on the real kernel, step by awaited step.
+/// A dead holder's hang-up comes after its last instruction, and the parent
+/// works on through the departure, step by awaited step.
 fn a_holder_killed_inside_the_gate_leaves_the_parent_working() {
     let (mut parent, mut netstack) = run("parent", &[]);
     let mut out = BufReader::new(parent.stdout.take().expect("the parent's stdout"));

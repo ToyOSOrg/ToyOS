@@ -33,6 +33,12 @@
 //! call is [`Bells::wait_gate`], whose adapter reports it as stalled while it
 //! lasts.
 //!
+//! **A thread inside a gate section runs to its release.** Nothing may suspend
+//! it, leave the section by a non-local exit, or re-enter the stream from it:
+//! a signal handler, a debugger's stop or a `longjmp` there would stall that
+//! direction in every holder of the stream, in every process. A panic that
+//! unwinds out of one is the exception the release guard handles.
+//!
 //! **The client waits on one doorbell a direction** ([`doorbell`]), the one the
 //! server rings for that direction's want, so a reader and a writer never take
 //! each other's wake. The server waits on one, which every client ring writes.

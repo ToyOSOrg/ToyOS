@@ -14,7 +14,6 @@ use crate::time::Duration;
 
 // --- Helpers ---
 
-/// A kernel handle this process just got, as an owned descriptor.
 /// A stream's handle this process just got, as an owned descriptor.
 fn stream_fd(handle: RawHandle) -> io::Result<OwnedFd> {
     let fd = toyos::fd::install(stream::descriptor(handle), false, 0).map_err(crate::sys::fd_error)?;
@@ -22,6 +21,7 @@ fn stream_fd(handle: RawHandle) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
+/// A kernel handle this process just got, as an owned descriptor.
 fn owned(handle: RawHandle) -> io::Result<OwnedFd> {
     let fd = crate::sys::new_fd(handle)?;
     // SAFETY: a descriptor just installed for this handle alone.

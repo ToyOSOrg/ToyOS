@@ -144,10 +144,12 @@ crate::ipc_payload! {
     }
 }
 
-/// What a holder keeps of each handle it holds: what the kernel made it with,
-/// less `TRANSFER` (`kernel/src/object/ops.rs`'s `initial_rights`).
-const HELD_CONNECTION: Rights = Rights::DUP.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE).union(Rights::MAP);
-const HELD_BELL: Rights = Rights::DUP.union(Rights::WAIT).union(Rights::READ).union(Rights::MAP);
+/// What a holder keeps of each handle it holds: what it uses, and no
+/// `TRANSFER`. It reads, writes and waits on its connection, reads and waits
+/// on its bells, maps its region, and duplicates each for the end's own
+/// handle and for a descriptor's.
+const HELD_CONNECTION: Rights = Rights::DUP.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE);
+const HELD_BELL: Rights = Rights::DUP.union(Rights::WAIT).union(Rights::READ);
 const HELD_REGION: Rights = Rights::DUP.union(Rights::MAP);
 
 /// `handle` held with `rights` alone, the original closed: refused, the

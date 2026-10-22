@@ -919,15 +919,7 @@ impl Sockets {
             }
         };
         let Some(number) = Holder::new(next) else { return refuse(ERR_RESOURCE_EXHAUSTED) };
-        let made = (|| {
-            let (theirs, ours) = self.exports.connect()?;
-            let (handed, rung) = bells()?;
-            Ok::<_, SyscallError>((theirs, ours, handed, rung, holders.region()?))
-        })();
-        let Ok((theirs, ours, [receive_read, send_read], [receive, send], region)) = made else {
-            say!("netstack: refusing an export — the kernel made no connection, bells or region for it: {made:?}", made = made.err());
-            return refuse(ERR_RESOURCE_EXHAUSTED);
-        };
+        // The place first: a holder asking past them costs no handle.
         let (peer, local) = match node.export(id) {
             Ok(endpoints) => endpoints,
             Err(ExportRefused::Full) => {
@@ -935,6 +927,16 @@ impl Sockets {
                 return refuse(ERR_RESOURCE_EXHAUSTED);
             }
             Err(ExportRefused::NoStream) => return refuse(ERR_NOT_CONNECTED),
+        };
+        let made = (|| {
+            let (theirs, ours) = self.exports.connect()?;
+            let (handed, rung) = bells()?;
+            Ok::<_, SyscallError>((theirs, ours, handed, rung, holders.region()?))
+        })();
+        let Ok((theirs, ours, [receive_read, send_read], [receive, send], region)) = made else {
+            say!("netstack: refusing an export — the kernel made no connection, bells or region for it: {made:?}", made = made.err());
+            node.departed(now, id, number);
+            return refuse(ERR_RESOURCE_EXHAUSTED);
         };
         let adopt = Adopt {
             holder: number.number(),
