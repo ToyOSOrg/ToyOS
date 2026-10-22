@@ -69,7 +69,7 @@ impl<T: ?Sized> Object for alloc::sync::Arc<T> {
 
 /// What backs a range.
 #[derive(Clone, Debug)]
-pub enum Kind<O> {
+pub enum Kind<O, S = O> {
     /// Memory of this space's own, its frames recorded in the leaves that map
     /// them. Uncommitted, it is a reservation: no page of it can be touched.
     Private { committed: bool },
@@ -79,17 +79,17 @@ pub enum Kind<O> {
     /// copy of `source` from `offset` on as far as the range's first `len`
     /// bytes go, and zeros past them: taken at the page's first touch, as a
     /// program's segments are.
-    Copy { source: O, offset: u64, len: u64 },
+    Copy { source: S, offset: u64, len: u64 },
 }
 
 #[derive(Clone, Debug)]
-pub struct Entry<O> {
+pub struct Entry<O, S = O> {
     pub end: u64,
     pub prot: Prot,
-    pub kind: Kind<O>,
+    pub kind: Kind<O, S>,
 }
 
-impl<O: Object> Entry<O> {
+impl<O: Object, S: Object> Entry<O, S> {
     /// Whether its pages are this space's own, committed: each owns a frame
     /// once touched, and a promise of one before.
     pub fn committed(&self) -> bool {
@@ -135,17 +135,17 @@ impl<O: Object> Entry<O> {
     }
 }
 
-pub struct Inventory<O> {
+pub struct Inventory<O, S = O> {
     floor: u64,
     top: u64,
-    entries: BTreeMap<u64, Entry<O>>,
+    entries: BTreeMap<u64, Entry<O, S>>,
     /// Free ranges by start, each to its end.
     free: BTreeMap<u64, u64>,
     /// The same ranges by `(length, start)`.
     by_len: BTreeSet<(u64, u64)>,
 }
 
-impl<O: Object> Inventory<O> {
+impl<O: Object, S: Object> Inventory<O, S> {
     /// Nothing held in `[floor, top)`, both on pages.
     pub fn new(floor: u64, top: u64) -> Self {
         assert!(floor.is_multiple_of(PAGE) && top.is_multiple_of(PAGE) && floor < top, "vm: {floor:#x}..{top:#x}");
@@ -177,14 +177,14 @@ impl<O: Object> Inventory<O> {
     }
 
     /// The entry holding `at`, and where it starts.
-    pub fn find(&self, at: u64) -> Option<(u64, &Entry<O>)> {
+    pub fn find(&self, at: u64) -> Option<(u64, &Entry<O, S>)> {
         let (&start, entry) = self.entries.range(..=at).next_back()?;
         (at < entry.end).then_some((start, entry))
     }
 
     /// Every entry `[start, end)` meets, in address order, each with where it
     /// starts: the first may start below `start` and the last end past `end`.
-    pub fn meeting(&self, start: u64, end: u64) -> impl Iterator<Item = (u64, &Entry<O>)> {
+    pub fn meeting(&self, start: u64, end: u64) -> impl Iterator<Item = (u64, &Entry<O, S>)> {
         let first = self.find(start).map(|(s, _)| s).unwrap_or(start);
         self.entries.range(first..end).map(|(&s, e)| (s, e))
     }
@@ -222,7 +222,7 @@ impl<O: Object> Inventory<O> {
     }
 
     /// Hold `[start, entry.end)`, which is free.
-    pub fn insert(&mut self, start: u64, entry: Entry<O>) {
+    pub fn insert(&mut self, start: u64, entry: Entry<O, S>) {
         assert!(self.holds(start, entry.end), "vm: {start:#x}..{:#x} is not pages of this space", entry.end);
         let (free_start, free_end) = self.free.range(..=start).next_back().map(|(&s, &e)| (s, e)).expect("vm: inserted over held memory");
         assert!(entry.end <= free_end, "vm: {start:#x}..{:#x} inserted over held memory", entry.end);
@@ -240,11 +240,11 @@ impl<O: Object> Inventory<O> {
 
     /// Take every entry out of `[start, end)`, cutting any that crosses its
     /// ends, and answer what was there, in address order.
-    pub fn remove(&mut self, start: u64, end: u64) -> Vec<(u64, Entry<O>)> {
+    pub fn remove(&mut self, start: u64, end: u64) -> Vec<(u64, Entry<O, S>)> {
         self.split_at(start);
         self.split_at(end);
         let starts: Vec<u64> = self.entries.range(start..end).map(|(&s, _)| s).collect();
-        let removed: Vec<(u64, Entry<O>)> =
+        let removed: Vec<(u64, Entry<O, S>)> =
             starts.into_iter().map(|s| (s, self.entries.remove(&s).expect("vm: a start just listed"))).collect();
         for (s, entry) in &removed {
             self.release(*s, entry.end);
@@ -254,7 +254,7 @@ impl<O: Object> Inventory<O> {
 
     /// Change every entry inside `[start, end)`, cutting any that crosses its
     /// ends, with `change`; neighbours that become one range are joined.
-    pub fn update(&mut self, start: u64, end: u64, mut change: impl FnMut(u64, &mut Entry<O>)) {
+    pub fn update(&mut self, start: u64, end: u64, mut change: impl FnMut(u64, &mut Entry<O, S>)) {
         self.split_at(start);
         self.split_at(end);
         for (&s, entry) in self.entries.range_mut(start..end) {
@@ -264,7 +264,7 @@ impl<O: Object> Inventory<O> {
     }
 
     /// Every entry, in address order.
-    pub fn entries(&self) -> impl Iterator<Item = (u64, &Entry<O>)> {
+    pub fn entries(&self) -> impl Iterator<Item = (u64, &Entry<O, S>)> {
         self.entries.iter().map(|(&s, e)| (s, e))
     }
 

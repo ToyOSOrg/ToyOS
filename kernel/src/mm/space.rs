@@ -27,7 +27,28 @@ use crate::object::shm::SharedMemObject;
 use crate::sync::{Lock, LockGuard};
 use crate::UserAddr;
 
-type Inventory = vm::Inventory<Arc<SharedMemObject>>;
+type Inventory = vm::Inventory<Arc<SharedMemObject>, Arc<dyn CopySource>>;
+type SpaceEntry = Entry<Arc<SharedMemObject>, Arc<dyn CopySource>>;
+type SpaceKind = Kind<Arc<SharedMemObject>, Arc<dyn CopySource>>;
+
+/// The bytes a copied range's pages start as. A read runs under the space
+/// lock, from a fault or a user copy, so it may take no lock a user copy can
+/// hold, and it cannot fail: what it reads was fixed when the range was made.
+pub trait CopySource: Send + Sync {
+    fn size(&self) -> u64;
+    /// `out.len()` bytes from `offset`, all inside [`size`](Self::size).
+    fn read(&self, offset: u64, out: &mut [u8]);
+}
+
+impl CopySource for SharedMemObject {
+    fn size(&self) -> u64 {
+        SharedMemObject::size(self)
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) {
+        SharedMemObject::read(self, offset, out)
+    }
+}
 
 /// Nothing is placed below this, so a null pointer and the pages above it
 /// fault.
@@ -263,12 +284,12 @@ impl AddressSpace {
     /// `len` bytes of private memory, committed, whose pages start as a copy
     /// of `source` from `offset` as far as their first `copied` bytes go and
     /// zeros past them, each taken at its first touch: a program's segment
-    /// read lazily out of the object it was handed in.
-    pub fn copy(&mut self, len: u64, at: At, prot: Prot, source: Arc<SharedMemObject>, offset: u64, copied: u64) -> Result<UserAddr, SyscallError> {
+    /// read lazily out of its file.
+    pub fn copy(&mut self, len: u64, at: At, prot: Prot, source: Arc<dyn CopySource>, offset: u64, copied: u64) -> Result<UserAddr, SyscallError> {
         self.private(len, at, prot, Kind::Copy { source, offset, len: copied })
     }
 
-    fn private(&mut self, len: u64, at: At, prot: Prot, kind: Kind<Arc<SharedMemObject>>) -> Result<UserAddr, SyscallError> {
+    fn private(&mut self, len: u64, at: At, prot: Prot, kind: SpaceKind) -> Result<UserAddr, SyscallError> {
         self.room_at(len, at)?;
         let start = self.locate(len, at)?;
         let backed = !matches!(kind, Kind::Private { committed: false });
@@ -570,7 +591,7 @@ impl AddressSpace {
 
 /// The leaf a fault puts at `page`, inside the range `entry` starting at
 /// `start`: a fresh frame of private memory, or the object's own page.
-fn page_leaf(start: u64, entry: &Entry<Arc<SharedMemObject>>, page: u64) -> Option<Leaf> {
+fn page_leaf(start: u64, entry: &SpaceEntry, page: u64) -> Option<Leaf> {
     let prot = leaf_prot(entry.prot)?;
     Some(match &entry.kind {
         Kind::Private { committed: false } => return None,
@@ -590,15 +611,15 @@ fn page_leaf(start: u64, entry: &Entry<Arc<SharedMemObject>>, page: u64) -> Opti
                 return None;
             };
             let phys = frame.into_raw();
-            copy_in(source, offset + (page - start), len.saturating_sub(page - start), phys);
+            copy_in(&**source, offset + (page - start), len.saturating_sub(page - start), phys);
             Leaf::Mapped(Mapping { phys, prot, owned: true, cache: CachePolicy::Normal })
         }
     })
 }
 
 /// Write `source`'s bytes from `offset` into the zeroed frame at `phys`, as
-/// many of the page's as `len` and the object both hold.
-fn copy_in(source: &SharedMemObject, offset: u64, len: u64, phys: u64) {
+/// many of the page's as `len` and the source both hold.
+fn copy_in(source: &dyn CopySource, offset: u64, len: u64, phys: u64) {
     let n = len.min(PAGE_SIZE).min(source.size().saturating_sub(offset)) as usize;
     if n == 0 {
         return;

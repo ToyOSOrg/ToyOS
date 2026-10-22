@@ -1,5 +1,6 @@
 use alloc::sync::Arc;
 
+use crate::mm::space::CopySource;
 use crate::object::shm::SharedMemObject;
 use toyos_abi::syscall::SyscallError;
 
@@ -25,12 +26,9 @@ pub trait FileBacking: Send + Sync {
     /// Total file size in bytes.
     fn file_size(&self) -> u64;
 
-    /// The memory object the file's bytes are, from its start, where they
-    /// are one: what a spawn copies a segment out of page by page as each is
-    /// first touched, rather than whole when the process is made.
-    fn object(&self) -> Option<&Arc<SharedMemObject>> {
-        None
-    }
+    /// The file's bytes as a spawn's segments copy them, each page at its
+    /// first touch: `None` once the file is gone.
+    fn source(&self) -> Option<Arc<dyn CopySource>>;
 }
 
 /// An executable in a shared memory object handed over by handle: one a
@@ -78,7 +76,7 @@ impl FileBacking for SharedImage {
         self.size
     }
 
-    fn object(&self) -> Option<&Arc<SharedMemObject>> {
-        Some(&self.object)
+    fn source(&self) -> Option<Arc<dyn CopySource>> {
+        Some(self.object.clone())
     }
 }

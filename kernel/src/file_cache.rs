@@ -3,7 +3,10 @@ use alloc::collections::btree_map::Entry;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
 
+use alloc::vec::Vec;
+
 use crate::file_backing::{BlockError, FileBacking};
+use crate::mm::space::CopySource;
 use crate::sync::Lock;
 use crate::user_ptr::{ByteSource, UserBytesMut};
 
@@ -16,8 +19,12 @@ const PAGE_SIZE: usize = crate::mm::PAGE_SIZE as usize;
 /// this it would wrap and alias a low page — seek, write and truncate refuse it.
 pub const MAX_FILE_SIZE: u64 = (u32::MAX as u64 + 1) * PAGE_SIZE as u64;
 
+/// A page's bytes, shared with each [`Snapshot`] taken while it was the
+/// file's: a write to a shared page writes a copy of it.
+type PageData = Arc<Box<[u8; PAGE_SIZE]>>;
+
 struct CachedPage {
-    data: Box<[u8; PAGE_SIZE]>,
+    data: PageData,
     /// CLOCK's second-chance bit: set on every hit, cleared when the sweep passes it over.
     referenced: bool,
 }
@@ -278,7 +285,7 @@ fn apply_write<S: ByteSource + ?Sized>(
 ) {
     let page = file.pages.get_mut(&page_idx).expect("write_page: page not resident");
     let end = (offset + data.len()).min(PAGE_SIZE);
-    data.read_at(0, &mut page.data[offset..end]);
+    data.read_at(0, &mut Arc::make_mut(&mut page.data)[offset..end]);
     page.referenced = true;
 
     let write_end = page_idx as u64 * PAGE_SIZE as u64 + end as u64;
@@ -293,8 +300,48 @@ pub fn copy_page_out(file_id: FileId, page_idx: u32, buf: &mut [u8; PAGE_SIZE]) 
     let Some(page) = cache.files.get(&file_id).and_then(|file| file.pages.get(&page_idx)) else {
         return false;
     };
-    *buf = *page.data;
+    *buf = **page.data;
     true
+}
+
+/// A file's bytes as they were when it was taken, which no later write,
+/// truncation or delete changes: a spawn's program, read without the cache's
+/// lock.
+pub struct Snapshot {
+    size: u64,
+    /// The resident pages by index; an absent one is a hole and reads zeros.
+    pages: Vec<(u32, PageData)>,
+}
+
+/// `file_id`'s bytes now, or `None` for a file the cache no longer holds. Only
+/// a file with no backing: an absent page of one with a backing was evicted,
+/// not a hole.
+pub fn snapshot(file_id: FileId) -> Option<Snapshot> {
+    let cache = FILE_CACHE.lock();
+    let file = cache.files.get(&file_id)?;
+    assert!(file.backing.is_none(), "file cache: a snapshot of file {file_id}, whose absent pages are on its backing");
+    Some(Snapshot { size: file.size, pages: file.pages.iter().map(|(&idx, page)| (idx, Arc::clone(&page.data))).collect() })
+}
+
+impl CopySource for Snapshot {
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn read(&self, offset: u64, out: &mut [u8]) {
+        assert!(offset.checked_add(out.len() as u64).is_some_and(|end| end <= self.size), "file cache: a snapshot read past its end");
+        let mut done = 0;
+        while done < out.len() {
+            let at = offset + done as u64;
+            let (idx, within) = ((at / PAGE_SIZE as u64) as u32, (at % PAGE_SIZE as u64) as usize);
+            let n = (PAGE_SIZE - within).min(out.len() - done);
+            match self.pages.binary_search_by_key(&idx, |&(i, _)| i) {
+                Ok(i) => out[done..done + n].copy_from_slice(&self.pages[i].1[within..within + n]),
+                Err(_) => out[done..done + n].fill(0),
+            }
+            done += n;
+        }
+    }
 }
 
 /// Get the authoritative file size.
@@ -327,7 +374,7 @@ fn set_size_locked(cache: &mut FileCache, file_id: FileId, new_size: u64) {
             if tail != 0 {
                 let straddled = (new_size / PAGE_SIZE as u64) as u32;
                 if let Some(page) = file.pages.get_mut(&straddled) {
-                    page.data[tail..].fill(0);
+                    Arc::make_mut(&mut page.data)[tail..].fill(0);
                 }
             }
             if is_cache { removed.len() } else { 0 }
@@ -352,7 +399,7 @@ pub fn mark_deleted(file_id: FileId) {
 
 impl CachedPage {
     fn new(data: Box<[u8; PAGE_SIZE]>) -> Self {
-        Self { data, referenced: false }
+        Self { data: Arc::new(data), referenced: false }
     }
 }
 

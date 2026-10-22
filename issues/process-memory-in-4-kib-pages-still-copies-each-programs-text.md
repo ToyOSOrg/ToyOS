@@ -83,8 +83,10 @@ live split of a user leaf.
    remains of the stage's exit — `mmap` past what memory can hold refused at
    `mmap` — is the strict charge of the allocator track's migration
    (`issues/toyos-has-its-own-allocator.md`).
-5. **Shared text.** A spawn copies its program's segments into the process
-   whole; no fault reads a file. ROOT's read-only text shared zero-copy, from
+5. **Shared text.** A spawn copies each page of its program's segments into
+   the process at the page's first touch, out of the image object or out of
+   a snapshot of its `/tmp` file; no fault reads a file. ROOT's read-only
+   text shared zero-copy, from
    immutable sealed objects, is the next step. Exit: two processes of one
    binary hold its text once.
 6. **`/apps` image sharing.** The design is the owner's decision, owed when
