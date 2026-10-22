@@ -4481,6 +4481,7 @@ dependencies = [
  "rcgen",
  "ring",
  "rustls",
+ "scrypt",
  "serde_json",
  "sha2 0.10.9",
  "x25519-dalek",

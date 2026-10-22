@@ -1,7 +1,9 @@
 //! `toyos-crypto`'s secret routines but the NIST curves' and Ed25519's,
 //! timed fixed against random (`../constant_time.rs`): the AEADs' and
-//! OpenSSH's sealing and refusal, HMAC, HKDF, X25519 and ML-KEM-768's
-//! encapsulation and decapsulation. Its
+//! OpenSSH's sealing and refusal, HMAC, HKDF, PBKDF2, scrypt's Salsa20/8,
+//! X25519 and ML-KEM-768's encapsulation and decapsulation. scrypt's ROMix
+//! is not timed: the entry it reads is a function of the secret by design
+//! (RFC 7914 §5). Its
 //! product is a line per routine on a bench's own CPU; the
 //! `crypto_secret_timing` metal row runs it on the T14 and the AMD bench.
 //!
@@ -17,7 +19,7 @@ mod counter;
 use constant_time::{finish, leaky_control, measure, null_control, secret, Class, Rng};
 use toyos_crypto::aead::{OpeningKey, SealingKey};
 use toyos_crypto::hash::Sha256;
-use toyos_crypto::kdf::{Hkdf, Hmac};
+use toyos_crypto::kdf::{pbkdf2, Hkdf, Hmac};
 use toyos_crypto::mlkem::{DecapsulationKey, EncapsulationKey};
 use toyos_crypto::x25519;
 
@@ -102,6 +104,18 @@ fn main() {
         let mut out = [0; 32];
         Hkdf::<Sha256>::from_prk(&prk).unwrap().expand(&[b"tls13 key"], &mut out).unwrap();
         std::hint::black_box(out);
+    });
+    // scrypt's PBKDF2 takes the passphrase as its password and, at its end,
+    // ROMix's secret output as its salt: both are the secret here.
+    measure("pbkdf2-hmac-sha256, 32 B password and salt, 2 iterations, 64 B", &mut rng, key::<64>, |k| {
+        let mut out = [0; 64];
+        pbkdf2::<Sha256>(&k[..32], &k[32..], 2.try_into().unwrap(), &mut out).unwrap();
+        std::hint::black_box(out);
+    });
+    measure("scrypt salsa20/8 core", &mut rng, key::<64>, |k| {
+        let mut block: [u32; 16] = core::array::from_fn(|i| u32::from_le_bytes(k[4 * i..4 * i + 4].try_into().unwrap()));
+        toyos_crypto::scrypt::salsa20_8(&mut block);
+        std::hint::black_box(block);
     });
 
     let peer = x25519::SecretKey::from_bytes([0x5a; 32]).public_key();

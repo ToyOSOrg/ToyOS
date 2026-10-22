@@ -712,3 +712,60 @@ fn seeded_wpa2_against_ring() {
 /// PMK derivations, each 4,096 iterations of the HMAC above.
 #[cfg(feature = "wpa2")]
 const PMK_CASES: usize = 200;
+
+#[test]
+fn seeded_pbkdf2_against_ring() {
+    use ring::pbkdf2;
+    use toyos_crypto::kdf::pbkdf2;
+    support::seeded(CASES / 10, 0x8018, |case, rng| {
+        let (password, salt) = (rng.bytes(200), rng.bytes(80));
+        let iterations = (rng.below(40) + 1) as u32;
+        let n = rng.below(300) + 1;
+        macro_rules! check {
+            ($ours:ident, $ring:ident) => {
+                let mut want = vec![0; n];
+                pbkdf2::derive(pbkdf2::$ring, iterations.try_into().unwrap(), &salt, &password, &mut want);
+                let mut out = vec![0; n];
+                pbkdf2::<$ours>(&password, &salt, iterations.try_into().unwrap(), &mut out).unwrap();
+                assert_eq!(out, want, "case {case}: {iterations} iterations, {n} bytes");
+            };
+        }
+        check!(Sha256, PBKDF2_HMAC_SHA256);
+        check!(Sha384, PBKDF2_HMAC_SHA384);
+        check!(Sha512, PBKDF2_HMAC_SHA512);
+    });
+}
+
+/// scrypt's, and so Salsa20/8's, BlockMix's and ROMix's, against RustCrypto's.
+fn scrypt_case(passphrase: &[u8], salt: &[u8], log_n: u8, r: u32, p: u32, n: usize) -> Result<(), String> {
+    let params = toyos_crypto::scrypt::Params::new(log_n, r, p).unwrap();
+    let mut workspace = vec![0; params.workspace_len()];
+    let mut out = vec![0; n];
+    toyos_crypto::scrypt::derive(passphrase, salt, params, &mut workspace, &mut out).unwrap();
+    let mut want = vec![0; n];
+    scrypt::scrypt(passphrase, salt, &scrypt::Params::new(log_n, r, p).unwrap(), &mut want).unwrap();
+    if out == want { Ok(()) } else { Err(format!("N = 2^{log_n}, r = {r}, p = {p}, {n} bytes")) }
+}
+
+#[test]
+fn seeded_scrypt_against_rustcrypto() {
+    support::seeded(CASES / 10, 0x7914, |case, rng| {
+        let (passphrase, salt) = (rng.bytes(100), rng.bytes(40));
+        let log_n = (rng.below(8) + 1) as u8;
+        let (r, p) = ((rng.below(8) + 1) as u32, (rng.below(4) + 1) as u32);
+        let n = rng.below(200) + 1;
+        if let Err(e) = scrypt_case(&passphrase, &salt, log_n, r, p, n) {
+            panic!("case {case}: {e}");
+        }
+    });
+}
+
+/// Upstream bcachefs's default cost, N = 2^14, r = 8 and p = 16, and the
+/// smallest, N = 2, r = 1 and p = 1, over a 64-character hex passphrase and
+/// the format's salt.
+#[test]
+fn scrypt_at_the_bcachefs_costs() {
+    let passphrase = b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    scrypt_case(passphrase, b"bcache\0", 14, 8, 16, 32).unwrap();
+    scrypt_case(passphrase, b"bcache\0", 1, 1, 1, 32).unwrap();
+}

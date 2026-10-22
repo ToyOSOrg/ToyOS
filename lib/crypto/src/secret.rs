@@ -16,7 +16,8 @@
 //!   it, early returns and `?` included. The X25519 ladder's (x2, z2, x3, z3)
 //!   and the Ed25519 comb's signed digits are workspaces. A workspace erases
 //!   its own storage; the copies the computation works on in registers and
-//!   other slots are not erased.
+//!   other slots are not erased. scrypt's workspace is the caller's, and
+//!   `scrypt::derive` erases it on every path out.
 //! - **Erased per value.** Ed25519's secret scalars (`scalar25519::S`) are
 //!   owners, and their reduction erases its workspaces; ML-KEM polynomials
 //!   (`mlkem::Poly`) erase every temporary on drop.
@@ -43,7 +44,6 @@ pub(crate) fn wipe(bytes: &mut [u8]) {
     compiler_fence(Ordering::SeqCst);
 }
 
-#[cfg(feature = "wpa2")]
 pub(crate) fn wipe32(words: &mut [u32]) {
     for word in words {
         // SAFETY: the address is a live, exclusively borrowed word.
@@ -153,12 +153,9 @@ mod tests {
         let mut words = [u64::MAX; 7];
         wipe64(&mut words);
         assert_eq!(words, [0; 7]);
-        #[cfg(feature = "wpa2")]
-        {
-            let mut words = [u32::MAX; 5];
-            wipe32(&mut words);
-            assert_eq!(words, [0; 5]);
-        }
+        let mut words = [u32::MAX; 5];
+        wipe32(&mut words);
+        assert_eq!(words, [0; 5]);
     }
 
     /// The drop of a secret owner, or of an operation's workspace, leaves its
