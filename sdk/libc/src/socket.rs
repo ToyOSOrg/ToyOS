@@ -87,15 +87,31 @@ const SOCKET_TAG: u64 = 0x6c69_6263 << 32;
 
 static mut SOCKETS: [Option<SocketEntry>; MAX_SOCKETS] = [None; MAX_SOCKETS];
 
-/// The socket descriptor `fd` names, or `None` for a descriptor that is no
-/// socket of this library's.
-fn sock_from_fd(fd: i32) -> Option<&'static mut Option<SocketEntry>> {
-    let word = toyos::fd::with(fd, |o| o.release.map(|_| o.word)).ok().flatten()?;
-    if word & !0xffff_ffff != SOCKET_TAG {
+/// The socket descriptor `fd` names, held for the call: a `close` on another
+/// thread meanwhile lets the socket go only once this drops, so a call never
+/// meets a handle closed under it. `None` for a descriptor that is no socket
+/// of this library's.
+fn sock_from_fd(fd: i32) -> Option<Socket> {
+    let (held, object) = toyos::fd::hold(fd).ok()?;
+    object.release?;
+    if object.word & !0xffff_ffff != SOCKET_TAG {
         return None;
     }
-    let idx = usize::try_from(word & 0xffff_ffff).ok().filter(|&i| i < MAX_SOCKETS)?;
-    unsafe { Some(&mut SOCKETS[idx]) }
+    let idx = usize::try_from(object.word & 0xffff_ffff).ok().filter(|&i| i < MAX_SOCKETS)?;
+    Some(Socket { _held: held, idx })
+}
+
+/// A socket descriptor's entry, for as long as its descriptor is held.
+struct Socket {
+    _held: toyos::fd::Held,
+    idx: usize,
+}
+
+impl Socket {
+    fn slot(&mut self) -> &mut Option<SocketEntry> {
+        // SAFETY: the held descriptor keeps `release_socket` off this entry.
+        unsafe { &mut *core::ptr::addr_of_mut!(SOCKETS[self.idx]) }
+    }
 }
 
 /// `entry` as a socket descriptor, the lowest free and inherited, or `-1`
@@ -247,10 +263,11 @@ pub unsafe extern "C" fn socket(domain: i32, sock_type: i32, _protocol: i32) -> 
 
 #[no_mangle]
 pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: SocklenT) -> i32 {
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_mut() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -285,10 +302,11 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 
 #[no_mangle]
 pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT) -> i32 {
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_mut() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -332,10 +350,11 @@ pub unsafe extern "C" fn accept(
     addr: *mut Sockaddr,
     addrlen: *mut SocklenT,
 ) -> i32 {
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_ref() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -379,10 +398,11 @@ pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, _flags: i32) 
     if buf.is_null() || len == 0 {
         return 0;
     }
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_ref() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -413,10 +433,11 @@ pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, _flags: i32) ->
     if buf.is_null() || len == 0 {
         return 0;
     }
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_ref() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -448,10 +469,11 @@ pub unsafe extern "C" fn sendto(
     if buf.is_null() || len == 0 {
         return 0;
     }
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_mut() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -488,10 +510,11 @@ pub unsafe extern "C" fn recvfrom(
     if buf.is_null() || len == 0 {
         return 0;
     }
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_ref() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -530,10 +553,11 @@ pub unsafe extern "C" fn recvfrom(
 
 #[no_mangle]
 pub unsafe extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_mut() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -576,16 +600,19 @@ fn stream_errno(refused: Refused) -> i32 {
     }
 }
 
-/// The handle of the stream a socket descriptor is, for `poll`.
+/// The handle of the stream a socket descriptor is, for `poll`, which holds
+/// the descriptor while it uses the handle.
 pub(crate) fn stream_of(fd: i32) -> Option<RawHandle> {
-    let entry = sock_from_fd(fd)?.as_ref()?;
+    let mut socket = sock_from_fd(fd)?;
+    let entry = socket.slot().as_ref()?;
     (matches!(entry.kind, SocketKind::Tcp) && entry.stream != 0).then_some(RawHandle(entry.stream as u32))
 }
 
 /// The kernel handle a socket descriptor that is no stream is watched by,
 /// for `poll`: a listener's wake pipe, a datagram socket's receive pipe.
 pub(crate) fn watched_of(fd: i32) -> Option<RawHandle> {
-    let entry = sock_from_fd(fd)?.as_ref()?;
+    let mut socket = sock_from_fd(fd)?;
+    let entry = socket.slot().as_ref()?;
     let handle = if entry.notify_fd != 0 { entry.notify_fd } else { entry.rx_fd };
     (handle != 0).then_some(RawHandle(handle as u32))
 }
@@ -609,10 +636,11 @@ pub unsafe extern "C" fn setsockopt(
     optval: *const u8,
     optlen: SocklenT,
 ) -> i32 {
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_mut() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -668,10 +696,11 @@ pub unsafe extern "C" fn getsockopt(
     optval: *mut u8,
     optlen: *mut SocklenT,
 ) -> i32 {
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_ref() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -701,10 +730,11 @@ pub unsafe extern "C" fn getpeername(
     addr: *mut Sockaddr,
     addrlen: *mut SocklenT,
 ) -> i32 {
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_ref() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }
@@ -723,10 +753,11 @@ pub unsafe extern "C" fn getsockname(
     addr: *mut Sockaddr,
     addrlen: *mut SocklenT,
 ) -> i32 {
-    let slot = match sock_from_fd(fd) {
+    let mut socket = match sock_from_fd(fd) {
         Some(s) => s,
         None => { set_errno(EBADF); return -1; }
     };
+    let slot = socket.slot();
     let entry = match slot.as_ref() {
         Some(e) => e,
         None => { set_errno(EBADF); return -1; }

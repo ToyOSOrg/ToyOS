@@ -767,6 +767,9 @@ pub unsafe extern "C" fn poll(fds: *mut pollfd, nfds: u32, timeout: i32) -> i32 
     // for an nfds it cannot serve.
     let n = nfds as usize;
     let entries: alloc::vec::Vec<(i32, i16)> = (0..n).map(|i| ((*fds.add(i)).fd, (*fds.add(i)).events)).collect();
+    // Every open descriptor held until `poll` returns, so a `close` on another
+    // thread meanwhile releases no handle this call still watches or drains.
+    let _held: alloc::vec::Vec<toyos::fd::Held> = entries.iter().filter_map(|&(fd, _)| toyos::fd::hold(fd).ok().map(|(held, _)| held)).collect();
     let ways = |events: i16| [(POLLIN, Way::Receive), (POLLOUT, Way::Send)].into_iter().filter(move |(flag, _)| events & flag != 0);
     let doorbells: usize = entries.iter().filter(|(fd, _)| crate::socket::stream_of(*fd).is_some()).map(|(_, events)| ways(*events).count()).sum();
     if nfds as usize + doorbells > toyos::poller::Poller::MAX_HANDLES as usize {
