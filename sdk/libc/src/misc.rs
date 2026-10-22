@@ -448,7 +448,10 @@ pub unsafe extern "C" fn dlopen(path: *const u8, _flags: i32) -> *mut u8 {
     match toyos::files::dl_open(path_bytes) {
         Ok(index) => (index + 1) as *mut u8,
         Err(refused) => {
-            crate::errno::set(crate::errcode::of_image(refused));
+            crate::errno::set(match refused {
+                toyos::files::DlOpenRefused::Image(refused) => crate::errcode::of_image(refused),
+                toyos::files::DlOpenRefused::Load(e) => crate::errcode::of(e),
+            });
             ptr::null_mut()
         }
     }

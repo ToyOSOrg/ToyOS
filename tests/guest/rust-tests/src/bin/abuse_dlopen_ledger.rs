@@ -2,8 +2,7 @@
 //! name it does not hold is refused by name having registered nothing, and a
 //! name it holds still answers.
 
-use toyos::files::{self, Error};
-use toyos::process::ImageRefused;
+use toyos::files::{self, DlOpenRefused};
 use toyos_abi::syscall::{self, SyscallError, MAX_LIBRARIES};
 
 const DIR: &str = "/tmp/dlopen-ledger";
@@ -71,7 +70,7 @@ fn main() {
         panic!("{loaded} names of one library all loaded: the library count is unbounded")
     });
     assert!(
-        matches!(refusal, ImageRefused::Read(Error::Kernel(SyscallError::ResourceExhausted))),
+        matches!(refusal, DlOpenRefused::Load(SyscallError::ResourceExhausted)),
         "the load after {loaded} was refused for another reason: {refusal:?}",
     );
     assert_eq!(held + loaded, MAX_LIBRARIES, "refused after {loaded} loads beside the {held} it started with");

@@ -302,8 +302,7 @@ pub(crate) fn read_backing_into(
 }
 
 /// Load a shared object into one contiguous allocation and apply its
-/// `R_X86_64_RELATIVE` relocations, returning the module plus its 2 MiB-aligned
-/// writable window (must match what `rw_alloc` later covers).
+/// `R_X86_64_RELATIVE` relocations.
 pub fn load_shared_lib(backing: &dyn crate::file_backing::FileBacking) -> Result<LoadedLib, &'static str> {
     let header_size = 4096.min(backing.file_size() as usize);
     let header_data = crate::loader::read_file_range(backing, 0, header_size);

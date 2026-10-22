@@ -264,18 +264,26 @@ pub fn read_image(path: &[u8]) -> Result<Image, ImageRefused<Error>> {
     image
 }
 
+/// Why [`dl_open`] loaded nothing.
+#[derive(Debug)]
+pub enum DlOpenRefused {
+    /// The library was not read into an image.
+    Image(ImageRefused<Error>),
+    /// The kernel refused to load the image it was handed.
+    Load(SyscallError),
+}
+
 /// Load the shared library at `path` into this process, under its absolute
 /// path as the name it goes by, and run its initialisers: the module's handle.
 /// A second load of one name answers the module the first loaded.
-pub fn dl_open(path: &[u8]) -> Result<u64, ImageRefused<Error>> {
-    let text = core::str::from_utf8(path).map_err(|_| ImageRefused::Read(Error::NotUtf8))?;
+pub fn dl_open(path: &[u8]) -> Result<u64, DlOpenRefused> {
+    let text = core::str::from_utf8(path).map_err(|_| DlOpenRefused::Image(ImageRefused::Read(Error::NotUtf8)))?;
     let mut cwd = alloc::vec![0u8; toyos_abi::syscall::MAX_PATH];
     let n = toyos_abi::syscall::getcwd(&mut cwd);
     let name = absolute(&String::from_utf8_lossy(&cwd[..n.min(cwd.len())]), text);
-    let image = read_image(name.as_bytes())?;
+    let image = read_image(name.as_bytes()).map_err(DlOpenRefused::Image)?;
     let (handle, len) = image.spawn_words();
-    toyos_abi::syscall::dl_open(name.as_bytes(), toyos_abi::RawHandle(handle as u32), len)
-        .map_err(|e| ImageRefused::Read(Error::Kernel(e)))
+    toyos_abi::syscall::dl_open(name.as_bytes(), toyos_abi::RawHandle(handle as u32), len).map_err(DlOpenRefused::Load)
 }
 
 /// Whether `path` is on a file server rather than the kernel.

@@ -72,7 +72,6 @@ pub(crate) fn of(e: SyscallError) -> i32 {
     }
 }
 
-/// The errno a refusal of `toyos::files` is answered with.
 /// Why a program or a library was not read into an image, as POSIX words it.
 pub(crate) fn of_image(refused: toyos::process::ImageRefused<toyos::files::Error>) -> i32 {
     use toyos::process::ImageRefused;
@@ -84,6 +83,7 @@ pub(crate) fn of_image(refused: toyos::process::ImageRefused<toyos::files::Error
     }
 }
 
+/// The errno a refusal of `toyos::files` is answered with.
 pub(crate) fn of_files(e: toyos::files::Error) -> i32 {
     use toyos::files::Error;
     match e {
