@@ -184,37 +184,10 @@ impl PublicScalar {
         bytes(&self.0)
     }
 
-    /// The width-w non-adjacent form, w in 2..=8: odd digits below 2^(w-1) in
-    /// magnitude, any two nonzero ones at least w positions apart (Hankerson,
-    /// Menezes and Vanstone, Guide to Elliptic Curve Cryptography, algorithm
-    /// 3.35). Variable time: the scalar is public.
+    /// The width-w NAF (`naf::naf`); k < L < 2^253, so 256 digits hold it.
     pub(crate) fn naf(&self, w: u32) -> [i8; 256] {
-        debug_assert!((2..=8).contains(&w));
-        let mut k = self.0;
         let mut digits = [0i8; 256];
-        let mut i = 0;
-        while k != [0; 4] {
-            if k[0] & 1 == 1 {
-                let window = (k[0] & ((1 << w) - 1)) as i32;
-                let d = if window >= 1 << (w - 1) { window - (1 << w) } else { window };
-                digits[i] = d as i8;
-                // k - d, where |d| < 2^7 and k < 2^253 + 2^7: no word overflows.
-                if d >= 0 {
-                    k[0] -= d as u64;
-                } else {
-                    let (s, mut carry) = k[0].overflowing_add((-d) as u64);
-                    k[0] = s;
-                    for word in &mut k[1..] {
-                        if !carry {
-                            break;
-                        }
-                        (*word, carry) = word.overflowing_add(1);
-                    }
-                }
-            }
-            k = [k[0] >> 1 | k[1] << 63, k[1] >> 1 | k[2] << 63, k[2] >> 1 | k[3] << 63, k[3] >> 1];
-            i += 1;
-        }
+        crate::naf::naf(&self.0, w, &mut digits);
         digits
     }
 }

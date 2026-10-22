@@ -36,6 +36,7 @@ pub mod kdf;
 mod keccak;
 pub mod mlkem;
 mod montgomery;
+mod naf;
 mod nist;
 mod poly1305;
 pub mod rsa;

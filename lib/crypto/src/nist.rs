@@ -1,7 +1,10 @@
-//! SEC 1 NIST P-256/P-384 arithmetic. ECDH uses fixed-width scalars and a
-//! double-and-add schedule with complete masked handling of exceptional points.
-//! SEC 1 decoding, DER decoding, ECDSA verification and key-validity refusals
-//! depend on public data. Only uncompressed SEC 1 points are accepted.
+//! SEC 1 NIST P-256/P-384 arithmetic. Secret scalar multiplication (ECDH
+//! and key generation) runs Booth's signed 5-bit windows on a fixed schedule
+//! with masked table reads and complete masked handling of exceptional
+//! additions. SEC 1 decoding, DER decoding, ECDSA verification and
+//! key-validity refusals depend on public data; verification multiplies in
+//! variable time, through `PublicScalar` only. Only uncompressed SEC 1
+//! points are accepted.
 #![allow(
     clippy::needless_range_loop,
     reason = "masked selects index parallel fixed-size arrays, as `montgomery` does"
@@ -9,7 +12,7 @@
 
 use crate::{
     Error,
-    montgomery::{self, Modulus, Residue, below, from_be, to_be},
+    montgomery::{self, Form, Modulus, Residue, below, from_be, to_be},
     secret::{Workspace, wipe64},
 };
 
@@ -73,10 +76,44 @@ impl<C: Curve<N>, const N: usize> Scalar<C, N> {
         }
         Ok(scalar)
     }
-    fn bit(&self, i: usize) -> u64 {
-        (self.0[i / 64] >> (i % 64)) & 1
+    /// Booth digit i in [-16, 16]: with u the six bits 5i - 1 ..= 5i + 4
+    /// (bit -1 and bits past the top are zero), d = (u + 1) / 2 - 32 u_5, so
+    /// that the scalar is the sum of d_i 2^(5i). The index is public; the
+    /// arithmetic does not branch.
+    fn booth(&self, i: usize) -> i8 {
+        let bits = |from: usize| -> u64 {
+            // The six bits from `from`, a public position.
+            let (word, shift) = (from / 64, from % 64);
+            let low = if word < N { self.0[word] >> shift } else { 0 };
+            let high = if shift > 58 && word + 1 < N { self.0[word + 1] << (64 - shift) } else { 0 };
+            (low | high) & 63
+        };
+        let u = if i == 0 { bits(0) << 1 & 63 } else { bits(5 * i - 1) };
+        (((u + 1) >> 1) as i8).wrapping_sub(((u >> 5) << 5) as i8)
     }
 }
+
+/// A public scalar below n, for variable-time verification only; a secret
+/// [`Scalar`] does not convert to it.
+struct PublicScalar<const N: usize>([u64; N]);
+
+impl<const N: usize> PublicScalar<N> {
+    /// The width-w NAF; k < n < 2^(64N) - 2^7, and 385 digits hold N = 6.
+    fn naf(&self, w: u32) -> [i8; 385] {
+        let mut digits = [0i8; 385];
+        crate::naf::naf(&self.0, w, &mut digits);
+        digits
+    }
+}
+
+/// The windows of [`Point::mul`]: 5-bit Booth windows over 64N bits, plus
+/// the one that absorbs the top window's carry.
+const fn windows(n: usize) -> usize {
+    (64 * n) / 5 + 1
+}
+
+/// The odd multiples P, 3P, ..., 15P of a public point, for verification.
+type OddMultiples<C, const N: usize> = [Point<C, N>; 8];
 
 /// Jacobian coordinates (X : Y : Z) for x = X/Z^2, y = Y/Z^3; Z = 0 is the
 /// point at infinity.
@@ -151,13 +188,100 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let out = Self::select(&out, self, q.z.is_zero());
         Self::select(&out, q, self.z.is_zero())
     }
-    /// scalar * self on a fixed schedule.
+    /// scalar * self on a fixed schedule: Booth's signed 5-bit windows over
+    /// the multiples P, 2P, ..., 16P, each window five doublings and one
+    /// complete addition of a masked table read. self is public; neither
+    /// branches nor addresses depend on the scalar.
     pub(crate) fn mul(&self, scalar: &Scalar<C, N>) -> Self {
+        let mut table = [*self; 16];
+        table[1] = self.double();
+        for j in 2..16 {
+            table[j] = table[j - 1].add(self);
+        }
+        let top = windows(N) - 1;
+        let mut r = Self::lookup(&table, scalar.booth(top));
+        for i in (0..top).rev() {
+            for _ in 0..5 {
+                r = r.double();
+            }
+            r = r.add(&Self::lookup(&table, scalar.booth(i)));
+        }
+        r
+    }
+    /// d P from table[j] = (j + 1) P, for d in [-16, 16], reading every
+    /// entry: the identity for zero, and Y negated by mask for d < 0.
+    fn lookup(table: &[Self; 16], d: i8) -> Self {
+        let negative = u64::from((d as u8) >> 7);
+        let magnitude = ((d ^ 0i8.wrapping_sub(negative as i8)).wrapping_add(negative as i8)) as u64;
+        let mut chosen = Self::identity();
+        for (j, entry) in table.iter().enumerate() {
+            chosen = Self::select(&chosen, entry, 1 ^ crate::ct::nonzero(magnitude ^ (j as u64 + 1)));
+        }
+        let negated = Residue::zero().sub(&chosen.y);
+        chosen.y = Residue::select(&chosen.y, &negated, negative);
+        chosen
+    }
+    /// self + q for public points, branching on their values: no masked
+    /// doubling or selects.
+    fn add_public(&self, q: &Self) -> Self {
+        if self.z.is_zero() == 1 {
+            return *q;
+        }
+        if q.z.is_zero() == 1 {
+            return *self;
+        }
+        let z1 = self.z.square();
+        let z2 = q.z.square();
+        let u1 = self.x.mul(&z2);
+        let u2 = q.x.mul(&z1);
+        let s1 = self.y.mul(&q.z.mul(&z2));
+        let s2 = q.y.mul(&self.z.mul(&z1));
+        let h = u2.sub(&u1);
+        let r = s2.sub(&s1);
+        if h.is_zero() == 1 {
+            return if r.is_zero() == 1 { self.double() } else { Self::identity() };
+        }
+        let h2 = h.square();
+        let h3 = h.mul(&h2);
+        let u = u1.mul(&h2);
+        let x = r.square().sub(&h3).sub(&u.double());
+        let y = r.mul(&u.sub(&x)).sub(&s1.mul(&h3));
+        let z = h.mul(&self.z.mul(&q.z));
+        Self { x, y, z }
+    }
+    fn neg(&self) -> Self {
+        Self {
+            x: self.x,
+            y: Residue::zero().sub(&self.y),
+            z: self.z,
+        }
+    }
+    fn odd_multiples(&self) -> OddMultiples<C, N> {
+        let twice = self.double();
+        let mut odd = [*self; 8];
+        for j in 1..8 {
+            odd[j] = odd[j - 1].add_public(&twice);
+        }
+        odd
+    }
+    /// u1 G + u2 self in one doubling chain over both scalars' width-5 NAFs
+    /// (Straus's method), in variable time: every input is public.
+    fn joint(&self, u1: &PublicScalar<N>, u2: &PublicScalar<N>) -> Self {
+        let (g, q) = (Self::base().odd_multiples(), self.odd_multiples());
+        let (d1, d2) = (u1.naf(5), u2.naf(5));
+        let Some(top) = (0..64 * N + 1).rev().find(|&i| d1[i] != 0 || d2[i] != 0) else {
+            return Self::identity();
+        };
         let mut r = Self::identity();
-        for i in (0..N * 64).rev() {
-            let doubled = r.double();
-            let added = doubled.add(self);
-            r = Self::select(&doubled, &added, scalar.bit(i))
+        for i in (0..=top).rev() {
+            r = r.double();
+            for (d, table) in [(d1[i], &g), (d2[i], &q)] {
+                if d > 0 {
+                    r = r.add_public(&table[d as usize / 2]);
+                } else if d < 0 {
+                    r = r.add_public(&table[(-d) as usize / 2].neg());
+                }
+            }
         }
         r
     }
@@ -237,16 +361,30 @@ impl<C: Curve<N>, const N: usize> Point<C, N> {
         let s = Scalar::<C, N>::from_bytes(&s[..N * 8]).map_err(|_| Error::InvalidSignature)?;
         let z = ModN::<C, N>::from_wide(&from_be(digest));
         let inverse = ModN::<C, N>::from_wide(&s.0).invert();
-        let u = Scalar(z.mul(&inverse).integer(), core::marker::PhantomData);
-        let v = Scalar(ModN::<C, N>::from_wide(&r.0).mul(&inverse).integer(), core::marker::PhantomData);
-        let result = Self::base().mul(&u).add(&self.mul(&v));
-        let (mut x, mut y) = ([0; N], [0; N]);
-        result.affine(&mut x, &mut y).map_err(|_| Error::InvalidSignature)?;
-        let x = ModN::<C, N>::from_wide(&x).integer();
-        if x == r.0 {
-            Ok(())
-        } else {
-            Err(Error::InvalidSignature)
+        let u1 = PublicScalar(z.mul(&inverse).integer());
+        let u2 = PublicScalar(ModN::<C, N>::from_wide(&r.0).mul(&inverse).integer());
+        let result = self.joint(&u1, &u2);
+        if result.z.is_zero() == 1 {
+            return Err(Error::InvalidSignature);
+        }
+        // x(R) = X / Z^2 is r mod n exactly when X = r' Z^2 for r' = r, or
+        // r' = r + n where that is still below p: no inversion.
+        let z2 = result.z.square();
+        let r_field = Coord::<C, N>::from_integer(&r.0).expect("r < n < p");
+        if result.x.eq(&r_field.mul(&z2)) == 1 {
+            return Ok(());
+        }
+        let mut r_plus_n = [0; N];
+        let mut carry = false;
+        for i in 0..N {
+            let (sum, c1) = r.0[i].overflowing_add(C::Order::P[i]);
+            let (sum, c2) = sum.overflowing_add(u64::from(carry));
+            r_plus_n[i] = sum;
+            carry = c1 | c2;
+        }
+        match (carry, Coord::<C, N>::from_integer(&r_plus_n)) {
+            (false, Some(r_field)) if result.x.eq(&r_field.mul(&z2)) == 1 => Ok(()),
+            _ => Err(Error::InvalidSignature),
         }
     }
 }
@@ -296,7 +434,12 @@ macro_rules! modulus {
         }
     };
 }
-modulus!(P256Field, 4, [0xffffffffffffffff, 0x00000000ffffffff, 0, 0xffffffff00000001]);
+/// P-256's prime, with its special reduction step.
+pub(crate) struct P256Field;
+impl Modulus<4> for P256Field {
+    const P: [u64; 4] = [0xffffffffffffffff, 0x00000000ffffffff, 0, 0xffffffff00000001];
+    const FORM: Form = Form::P256;
+}
 modulus!(P256Order, 4, [0xf3b9cac2fc632551, 0xbce6faada7179e84, 0xffffffffffffffff, 0xffffffff00000000]);
 modulus!(
     P384Field,
@@ -397,5 +540,120 @@ mod tests {
         assert_eq!(Scalar::<P256, 4>::first_valid(&candidates).unwrap().0, from_be::<4>(&k1));
         let invalid = [n, [0; 32], [0xff; 32], n].concat();
         assert!(matches!(Scalar::<P256, 4>::first_valid(&invalid), Err(Error::Entropy)));
+    }
+
+    fn scalars<const N: usize>(order: &[u64; N]) -> std::vec::Vec<[u64; N]> {
+        let mut out = std::vec![[0; N], [u64::MAX; N]];
+        let mut n_minus_1 = *order;
+        n_minus_1[0] -= 1;
+        out.push(n_minus_1);
+        let mut one = [0; N];
+        one[0] = 1;
+        out.push(one);
+        // Every window's six bits 0b011111 or 0b100000: digits +16 and -16.
+        out.push([0x7bdef7bdef7bdef7; N]);
+        out.push([0x8421084210842108; N]);
+        let mut seed = 0x0123456789abcdefu64;
+        for _ in 0..40 {
+            out.push(core::array::from_fn(|_| {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed
+            }));
+        }
+        out
+    }
+
+    fn integer<const N: usize>(words: &[u64; N]) -> num_bigint::BigInt {
+        num_bigint::BigInt::from_bytes_le(
+            num_bigint::Sign::Plus,
+            &words.iter().flat_map(|w| w.to_le_bytes()).collect::<std::vec::Vec<_>>(),
+        )
+    }
+
+    /// Booth digits lie in [-16, 16] and recompose the scalar, for both word
+    /// counts and at the patterns that give digits of +16 and -16.
+    fn check_booth<C: Curve<N>, const N: usize>() {
+        use num_bigint::BigInt;
+        let mut extremes = [false; 2];
+        for k in scalars(&C::Order::P) {
+            let scalar = Scalar::<C, N>(k, core::marker::PhantomData);
+            let mut sum = BigInt::from(0);
+            for i in 0..windows(N) {
+                let d = scalar.booth(i);
+                assert!((-16..=16).contains(&d));
+                extremes[0] |= d == 16;
+                extremes[1] |= d == -16;
+                sum += BigInt::from(d) << (5 * i);
+            }
+            assert_eq!(sum, integer(&k));
+        }
+        assert_eq!(extremes, [true, true]);
+    }
+
+    #[test]
+    fn booth_digits_recompose_the_scalar() {
+        check_booth::<P256, 4>();
+        check_booth::<P384, 6>();
+    }
+
+    /// The width-w NAF of 384-bit scalars recomposes them.
+    #[test]
+    fn naf_digits_recompose_384_bit_scalars() {
+        use num_bigint::BigInt;
+        for k in scalars(&P384Order::P) {
+            let k = Coord::<P384, 6>::from_wide(&k).integer();
+            for w in [2u32, 5, 8] {
+                let digits = PublicScalar(k).naf(w);
+                let sum = digits.iter().enumerate().fold(BigInt::from(0), |s, (i, &d)| s + (BigInt::from(d) << i));
+                assert_eq!(sum, integer(&k));
+            }
+        }
+    }
+
+    /// The fixed-schedule Booth multiplication equals the public joint
+    /// multiplication, a different recoding and addition, for scalars below
+    /// n including those with extreme digits.
+    fn check_mul<C: Curve<N>, const N: usize>() {
+        let zero = PublicScalar([0; N]);
+        for k in scalars(&C::Order::P) {
+            let k = ModN::<C, N>::from_wide(&k).integer();
+            let ours = Point::<C, N>::base().mul(&Scalar(k, core::marker::PhantomData));
+            let theirs = Point::<C, N>::identity().joint(&PublicScalar(k), &zero);
+            let (mut a, mut b) = ([0; N], [0; N]);
+            let (mut c, mut d) = ([0; N], [0; N]);
+            match (ours.affine(&mut a, &mut b), theirs.affine(&mut c, &mut d)) {
+                (Ok(()), Ok(())) => assert_eq!((a, b), (c, d)),
+                (Err(_), Err(_)) => assert_eq!(k, [0; N]),
+                _ => panic!("one side is the identity"),
+            }
+        }
+    }
+
+    /// The public path's exceptional sums: equal summands double, and
+    /// opposite ones cancel to the identity.
+    fn check_exceptional_sums<C: Curve<N>, const N: usize>() {
+        let mut one = [0; N];
+        one[0] = 1;
+        let (mut a, mut b) = ([0; N], [0; N]);
+        let (mut c, mut d) = ([0; N], [0; N]);
+        let g = Point::<C, N>::base();
+        g.joint(&PublicScalar(one), &PublicScalar(one)).affine(&mut a, &mut b).unwrap();
+        g.double().affine(&mut c, &mut d).unwrap();
+        assert_eq!((a, b), (c, d));
+        assert_eq!(g.add_public(&g.neg()).z.is_zero(), 1);
+    }
+
+    #[test]
+    fn public_sums_of_equal_and_opposite_points() {
+        check_exceptional_sums::<P256, 4>();
+        check_exceptional_sums::<P384, 6>();
+    }
+
+    #[test]
+    fn booth_multiplication_matches_the_public_path() {
+        check_mul::<P256, 4>();
+        check_mul::<P384, 6>();
     }
 }
