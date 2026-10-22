@@ -11,11 +11,20 @@
 # `power` because the job list is what ends the boot: there is no host on the
 # other end of the console on the machine this config exists for.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["logkeeper", "diskserver", "fileserver", "acpiserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
 syscap = ["logread"]
+
+# ACPI mode, as a shipped image and the bench's Linux run it. In the legacy
+# mode the T14's firmware hands over, it stops every CPU for 4.5 ms every 2.2 s
+# (`issues/the-t14s-firmware-interrupts-every-cpu-every-2-2-s-under-toyos.md`).
+# Started before `test-runner`, so its claim's enable precedes every job.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
 
 [programs.test-runner]
 receives = ["power"]

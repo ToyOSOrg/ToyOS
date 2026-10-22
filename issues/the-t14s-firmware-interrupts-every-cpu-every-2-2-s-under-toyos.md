@@ -81,6 +81,16 @@ The `mask-windows` kernel prints such a window as its CPU's own: cpu4's
 (`issues/a-process-lengthens-an-interrupts-off-walk-by-the-threads-it-parks-on-one-ring.md`),
 are this by reading, those kernels not reading the count.
 
+**An image that starts no `/system/bin/acpiserver` stays in legacy mode**, by
+design: the kernel enables ACPI mode only for the `acpi` claim's holder. The
+`osbench` and `latency_wake` images started none before 2026-10-22, so their T14
+readings carried this stop. Three `osbench` boots at `588c821ee` (#989), each
+`legacy mode` in its log, read 27 or 28 SMIs per 60 s on every CPU and 27
+wakes past 1 ms late, 4.1 to 4.6 ms, spaced 2.2165 to 2.248 s; each boot's
+30 s `tail.diag` run read 14 of each. With the server started (#1009), one `osbench`
+boot at `e6d6170d8` read no SMI on any CPU over either run and no wake later
+than 37 µs.
+
 **Owner**: stage 1 of
 `issues/toyos-runs-the-machine-in-acpi-mode-and-interprets-its-aml.md`,
 for the fix and for the reading: its exit holds the count on the T14 to what
