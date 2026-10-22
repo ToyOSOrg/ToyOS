@@ -239,7 +239,7 @@ fn rfc7914_scrypt() {
                            8e 56 fd 8f 4b a5 d0 9f fa 1c 6d 92 7c 40 f4 c3 37 30 40 49 e8 a9 52 fb cb f4 5c 6f a7 7a 41 a4"),
     ];
     for (passphrase, salt, log_n, r, p, expected) in cases {
-        let params = scrypt::Params::new(log_n, r, p, scrypt::MAX_MEMORY).unwrap();
+        let params = scrypt::Params::new(log_n, r, p, scrypt::Limits { memory: usize::MAX, work: u64::MAX }).unwrap();
         let mut workspace = vec![0; params.workspace_len()];
         let mut out = [0; 64];
         scrypt::derive(passphrase, salt, params, &mut workspace, &mut out).unwrap();
