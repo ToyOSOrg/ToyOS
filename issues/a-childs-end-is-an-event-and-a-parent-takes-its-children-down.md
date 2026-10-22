@@ -115,7 +115,7 @@ init is `/system/bin/supervisor`.
    child refused `EAGAIN` beside a `poll` of 255 descriptors answering (no
    capacity check); a negative descriptor beside a pipe, the pipe answering
    (passed to the kernel, which ends the caller).
-4. **Done** (PRNUM): **libc imitates `SIGCHLD`**. A handler for any signal
+4. **Done** (#1011): **libc imitates `SIGCHLD`**. A handler for any signal
    libc imitates runs at once, beside the program: inside a blocking call of
    a thread that leaves the signal unblocked (`ppoll` and `sigsuspend` under
    their mask), and, while no thread is in one, on libc's own thread. After
@@ -175,7 +175,7 @@ init is `/system/bin/supervisor`.
      it unread, a second quit kills a reason left unread, a reader survives
      three, and a quit without `MANAGE` is refused. Negative control: a
      readable watch that listens to nothing reds the watch arm.
-   - 6.2 **Done** (PRNUM, libc's half): libc takes the three reasons as
+   - 6.2 **Done** (#1011, libc's half): libc takes the three reasons as
      `SIGINT`, `SIGHUP` and `SIGTERM`, and listens to the notice before the
      call that handles, ignores or blocks one returns, refusing it `ENOSYS`
      where the process holds no notice: an ignored reason is dropped, a blocked
