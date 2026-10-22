@@ -412,9 +412,10 @@ impl Bells for Doorbells {
 
     fn ring(&self) -> Result<(), HungUp> {
         match syscall::write_nonblock(self.connection, &[1]) {
-            // Full is rung already.
-            Ok(_) | Err(SyscallError::WouldBlock) => Ok(()),
-            Err(_) => Err(HungUp),
+            Err(SyscallError::Gone) => Err(HungUp),
+            // Full is rung already, and anything else is no hang-up: the next
+            // call's wait answers whatever it is.
+            _ => Ok(()),
         }
     }
 }

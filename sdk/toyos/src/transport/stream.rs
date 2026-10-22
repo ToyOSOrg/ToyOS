@@ -316,14 +316,14 @@ impl<const C: u32, const N: usize> Consumer<C, N> {
 
     /// The producer asked to be rung back: `true`, and its want exchanged for
     /// 0, if it is set and the producer has room past what this end released,
-    /// or `fatal`. With neither, nothing is exchanged and the want waits for
-    /// the next release.
-    pub fn ring_back<W: Word>(&self, page: &[W; N], fatal: bool) -> Result<bool, Violation> {
+    /// or its direction `answers` without room. With neither, nothing is
+    /// exchanged and the want waits for the next release.
+    pub fn ring_back<W: Word>(&self, page: &[W; N], answers: bool) -> Result<bool, Violation> {
         let tail = word(page, self.place.tail).load(Ordering::Acquire);
         let released = self.released;
         let unreleased =
             Place::<C, N>::reach(tail, |tail| Place::<C, N>::distance(released, tail), Violation::TailPastDepth)?;
-        Ok((unreleased < C || fatal) && word(page, self.place.room).swap(0, WAKE) != 0)
+        Ok((unreleased < C || answers) && word(page, self.place.room).swap(0, WAKE) != 0)
     }
 }
 

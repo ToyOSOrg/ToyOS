@@ -1346,11 +1346,16 @@ mod tests {
 
     /// A shutdown while another holder has the gate is that holder's to store
     /// as it lets go, and the shutdown returns once it did: the write the
-    /// owner was making is published before it.
+    /// owner was making is published before it. Over a full send ring the
+    /// shut alone is what `Server::rung` wakes the shutting holder for.
     #[test]
     fn a_shutdown_under_another_holders_gate_is_stored_by_its_release() {
         let page = page();
         let ((_, tx), _) = two(&page);
+        let mut server = Server::new(&page, LAYOUT);
+        // A full send ring: no room rings the shutting holder, only the shut.
+        let filled = write(&page, &tx, &quiet(), Mode::Nonblocking, C, |_, _| {});
+        assert_eq!(filled, Ok(C));
         let owner = Common { gate: TX_GATE, shut: Some(TX_END), gone: 13, holder: second() };
         assert_eq!(acquire(&page, owner), Ok(()));
         let released = Cell::new(false);
@@ -1368,6 +1373,7 @@ mod tests {
         assert!(released.get(), "the shutdown returned before the owner let go");
         assert_eq!(page[TX_END].load(Ordering::Relaxed), ORDERLY);
         assert_eq!(page[TX_GATE].load(Ordering::Relaxed), 0);
+        assert_eq!(server.rung(&page), Ok(Rings { connection: false, bell: true }), "the shut rings the holder asleep over a full ring");
     }
 
     /// A nonblocking write that finds room under another holder's gate arms
