@@ -10,7 +10,7 @@
 //!   reader and a writer asleep at once, a poll beside a blocking call of one
 //!   direction, and a source registered while its direction is ready. Each
 //!   case names the controls that red it.
-//! - **An end with two holders** (L1-L5): whole calls in gate order, bytes
+//! - **An end with two holders**: whole calls in gate order, bytes
 //!   read once, a gate's waiter woken by the release or the owner's
 //!   departure, a shutdown no holder writes past, and looks without the gate
 //!   that lose no wake, with one holder killed at every point of its call.
@@ -974,7 +974,7 @@ fn whenever_it_dies(model: impl Fn(Option<u32>)) {
     }
 }
 
-/// L1. Two holders write a byte each, the second killed after `dies` of its
+/// Two holders write a byte each, the second killed after `dies` of its
 /// effects or never: the server holds whole calls in the order the gate
 /// passed, the dead holder's byte only where it published it, and the
 /// survivor's call returns. `transport-departure-no-pass` leaves the survivor
@@ -1013,26 +1013,25 @@ fn two_writers(dies: Option<u32>) {
 }
 
 #[test]
-fn l1_two_holders_write_whole_calls_in_gate_order_whenever_one_dies() {
+fn two_holders_write_whole_calls_in_gate_order_whenever_one_dies() {
     whenever_it_dies(two_writers);
 }
 
-/// L3. A holder that finds the gate another's is woken by the owner's
+/// A holder that finds the gate another's is woken by the owner's
 /// release.
 #[test]
-fn l3_a_holder_waiting_for_the_gate_is_woken_by_its_release() {
+fn a_holder_waiting_for_the_gate_is_woken_by_its_release() {
     two_writers(None);
 }
 
-/// L3's departure variant. The owner dies after its copy into the byte, with
-/// the gate held: the waiter is rung by the departure, and its copy follows
-/// the dead holder's.
+/// The owner dies after its copy into the byte, with the gate held: the
+/// waiter is rung by the departure, and its copy follows the dead holder's.
 #[test]
-fn l3_a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure() {
+fn a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure() {
     two_writers(Some(2));
 }
 
-/// L2. Two holders read two bytes and the orderly end, the second killed
+/// Two holders read two bytes and the orderly end, the second killed
 /// after `dies` of its effects or never: every byte is read once and in
 /// order, the survivor reads exactly what the dead holder did not release,
 /// and its reads return. `transport-departure-no-pass` leaves the survivor
@@ -1071,21 +1070,21 @@ fn two_readers(dies: Option<u32>) {
 }
 
 #[test]
-fn l2_two_holders_read_each_byte_once_whenever_one_dies() {
+fn two_holders_read_each_byte_once_whenever_one_dies() {
     whenever_it_dies(two_readers);
 }
 
 #[test]
-fn l2_two_holders_read_each_byte_once() {
+fn two_holders_read_each_byte_once() {
     two_readers(None);
 }
 
-/// L4. One holder shuts the sending half down and, once it returned, another
+/// One holder shuts the sending half down and, once it returned, another
 /// writes: the write answers `Shut` and the server holds nothing.
 /// `transport-shut-local` has the second holder write past the first's
 /// shutdown.
 #[test]
-fn l4_a_write_after_another_holders_shutdown_answers_shut() {
+fn a_write_after_another_holders_shutdown_answers_shut() {
     bounded(|| {
         let (s, mut server) = Session::new(2);
         let net = {
@@ -1115,7 +1114,7 @@ fn l4_a_write_after_another_holders_shutdown_answers_shut() {
     });
 }
 
-/// L4's race. One holder shuts the sending half down while another, killed
+/// One holder shuts the sending half down while another, killed
 /// after `dies` of its effects or never, writes: the shutdown returns, and no
 /// byte is published after the `end` the server saw. A shutdown under the
 /// writer's gate is the writer's to store, or its departure's.
@@ -1168,16 +1167,16 @@ fn shutdown_racing_a_write(dies: Option<u32>) {
 }
 
 #[test]
-fn l4_a_shutdown_racing_a_write_is_never_written_past() {
+fn a_shutdown_racing_a_write_is_never_written_past() {
     shutdown_racing_a_write(None);
 }
 
 #[test]
-fn l4_a_shutdown_racing_a_write_is_never_written_past_whenever_the_writer_dies() {
+fn a_shutdown_racing_a_write_is_never_written_past_whenever_the_writer_dies() {
     whenever_it_dies(shutdown_racing_a_write);
 }
 
-/// L5. Two holders read until the end while the server fills the ring, takes
+/// Two holders read until the end while the server fills the ring, takes
 /// a byte of room back and publishes a third: a look without the gate, over a
 /// cursor the other holder moved, can see that third byte past a head from
 /// before the room was released, which overstates and loses no wake, and
@@ -1185,7 +1184,7 @@ fn l4_a_shutdown_racing_a_write_is_never_written_past_whenever_the_writer_dies()
 /// such a look. The stale head is a load loom answers with an older store,
 /// which takes no preemption, so the model's bound is two.
 #[test]
-fn l5_looks_without_the_gate_lose_no_wake() {
+fn looks_without_the_gate_lose_no_wake() {
     bounded_by(2, || {
         let (s, mut server) = Session::new(2);
         s.publish_at(&mut server, 0, &[0xA, 0xB]);

@@ -746,25 +746,25 @@ pub(crate) const CONTROLS: &[Control] = &[
     // past another holder's shutdown, a byte read twice, and a look without
     // the gate believed.
     red(SDK, "transport-gate-no-want", Some("transport_loom"), &[Fails(
-        "l3_a_holder_waiting_for_the_gate_is_woken_by_its_release",
+        "a_holder_waiting_for_the_gate_is_woken_by_its_release",
     )]),
     red(SDK, "transport-contended-no-arm", Some("transport_loom"), &[Fails(
-        "l3_a_holder_waiting_for_the_gate_is_woken_by_its_release",
+        "a_holder_waiting_for_the_gate_is_woken_by_its_release",
     )]),
     red(SDK, "transport-want-before-arm", Some("transport_loom"), &[Fails(
-        "l3_a_holder_waiting_for_the_gate_is_woken_by_its_release",
+        "a_holder_waiting_for_the_gate_is_woken_by_its_release",
     )]),
     red(SDK, "transport-departure-no-pass", Some("transport_loom"), &[Fails(
-        "l3_a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure",
+        "a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure",
     )]),
     red(SDK, "transport-departure-relaxed", Some("transport_loom"), &[Fails(
-        "l3_a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure",
+        "a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure",
     )]),
     red(SDK, "transport-shut-local", Some("transport_loom"), &[Fails(
-        "l4_a_write_after_another_holders_shutdown_answers_shut",
+        "a_write_after_another_holders_shutdown_answers_shut",
     )]),
-    red(SDK, "transport-no-resume", Some("transport_loom"), &[Fails("l2_two_holders_read_each_byte_once")]),
-    red(SDK, "transport-ungated-violation", Some("transport_loom"), &[Fails("l5_looks_without_the_gate_lose_no_wake")]),
+    red(SDK, "transport-no-resume", Some("transport_loom"), &[Fails("two_holders_read_each_byte_once")]),
+    red(SDK, "transport-ungated-violation", Some("transport_loom"), &[Fails("looks_without_the_gate_lose_no_wake")]),
     red(SDK, "transport-end-keeps-inflight", None, &[Fails(
         "transport::inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
     )]),
