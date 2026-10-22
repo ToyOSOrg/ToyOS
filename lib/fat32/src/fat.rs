@@ -1,5 +1,6 @@
 use crate::boot::Cluster;
-use crate::device::BlockAccess;
+use toyos_blockdev::BlockDev;
+use crate::device::Volume as _;
 use crate::error::Error;
 use crate::fs::Fat32;
 use crate::repair::Repair;
@@ -14,16 +15,16 @@ pub(crate) const END_OF_CHAIN: u32 = 0x0FFF_FFFF;
 /// reads before it writes.
 const ENTRY_MASK: u32 = 0x0FFF_FFFF;
 
-impl<D: BlockAccess> Fat32<D> {
+impl<D: BlockDev> Fat32<D> {
     /// One FAT entry, masked to its 28 significant bits.
     ///
     /// Reads the *active* FAT — the mirrors are written but never read, since
     /// a driver that reads one FAT and writes another has two answers for the
     /// same question and no way to say which is right.
-    pub(crate) fn fat_entry(&mut self, cluster: Cluster) -> Result<u32, Error> {
+    pub(crate) async fn fat_entry(&mut self, cluster: Cluster) -> Result<u32, Error> {
         let fat = self.geom.active_fat.unwrap_or(0);
         let mut raw = [0u8; 4];
-        self.dev.read_at(self.geom.fat_entry_offset(fat, cluster), &mut raw)?;
+        self.dev.read_at(self.geom.fat_entry_offset(fat, cluster), &mut raw).await?;
         Ok(u32::from_le_bytes(raw) & ENTRY_MASK)
     }
 
@@ -35,25 +36,25 @@ impl<D: BlockAccess> Fat32<D> {
     /// ([`crate::repair`]), and re-driving it rewrites every copy. The active
     /// copy goes last so that a refusal of the first write leaves the copy
     /// every read serves from as it was until the repair lands.
-    pub(crate) fn set_fat_entry(&mut self, cluster: Cluster, value: u32) -> Result<(), Error> {
+    pub(crate) async fn set_fat_entry(&mut self, cluster: Cluster, value: u32) -> Result<(), Error> {
         self.invalidate_sector();
         let active = self.geom.active_fat.unwrap_or(0);
         for fat in self.geom.fat_mirrors() {
             if fat != active {
-                self.write_fat_entry(fat, cluster, value)?;
+                self.write_fat_entry(fat, cluster, value).await?;
             }
         }
-        self.write_fat_entry(active, cluster, value)
+        self.write_fat_entry(active, cluster, value).await
     }
 
     /// One FAT copy's entry, preserving the four reserved high bits the format
     /// leaves to whoever made the volume.
-    fn write_fat_entry(&mut self, fat: u32, cluster: Cluster, value: u32) -> Result<(), Error> {
+    async fn write_fat_entry(&mut self, fat: u32, cluster: Cluster, value: u32) -> Result<(), Error> {
         let offset = self.geom.fat_entry_offset(fat, cluster);
         let mut raw = [0u8; 4];
-        self.dev.read_at(offset, &mut raw)?;
+        self.dev.read_at(offset, &mut raw).await?;
         let reserved = u32::from_le_bytes(raw) & !ENTRY_MASK;
-        Ok(self.dev.write_at(offset, &(reserved | (value & ENTRY_MASK)).to_le_bytes())?)
+        Ok(self.dev.write_at(offset, &(reserved | (value & ENTRY_MASK)).to_le_bytes()).await?)
     }
 
     /// The next cluster in a chain, or `None` at the end.
@@ -68,8 +69,8 @@ impl<D: BlockAccess> Fat32<D> {
     /// A cluster linking to itself is rejected here because the check is free.
     /// A longer cycle is not detected — see [`Self::advance`] for why the
     /// bound rather than the detection is what makes that safe.
-    pub(crate) fn next_cluster(&mut self, cluster: Cluster) -> Result<Option<Cluster>, Error> {
-        let v = self.fat_entry(cluster)?;
+    pub(crate) async fn next_cluster(&mut self, cluster: Cluster) -> Result<Option<Cluster>, Error> {
+        let v = self.fat_entry(cluster).await?;
         if v >= 0x0FFF_FFF8 {
             return Ok(None);
         }
@@ -100,14 +101,14 @@ impl<D: BlockAccess> Fat32<D> {
     /// instead is that no cycle can make a *write* unsound, and that is
     /// [`Self::verify_acyclic`] and [`Self::free_chain`]'s anchor rather than
     /// anything here.
-    pub(crate) fn advance(
+    pub(crate) async fn advance(
         &mut self,
         cluster: Cluster,
         steps: u64,
     ) -> Result<Option<Cluster>, Error> {
         let mut c = cluster;
         for _ in 0..steps {
-            match self.next_cluster(c)? {
+            match self.next_cluster(c).await? {
                 Some(next) => c = next,
                 None => return Ok(None),
             }
@@ -120,11 +121,11 @@ impl<D: BlockAccess> Fat32<D> {
     /// The refusal is what bounds a directory walk: a cyclic directory chain
     /// is indistinguishable from a very long one until you have counted past
     /// what the structure can legally be.
-    pub(crate) fn chain_len(&mut self, start: Cluster, limit: u64) -> Result<u64, Error> {
+    pub(crate) async fn chain_len(&mut self, start: Cluster, limit: u64) -> Result<u64, Error> {
         let mut c = start;
         let mut n = 1u64;
         loop {
-            match self.next_cluster(c)? {
+            match self.next_cluster(c).await? {
                 Some(next) => {
                     n += 1;
                     if n > limit {
@@ -138,10 +139,10 @@ impl<D: BlockAccess> Fat32<D> {
     }
 
     /// The last cluster of a chain, walking at most `limit` links.
-    pub(crate) fn chain_last(&mut self, start: Cluster, limit: u64) -> Result<Cluster, Error> {
+    pub(crate) async fn chain_last(&mut self, start: Cluster, limit: u64) -> Result<Cluster, Error> {
         let mut c = start;
         for _ in 0..limit {
-            match self.next_cluster(c)? {
+            match self.next_cluster(c).await? {
                 Some(next) => c = next,
                 None => return Ok(c),
             }
@@ -155,7 +156,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// Scans the FAT a sector at a time from the FSInfo hint, wrapping once.
     /// The hint is only a starting point: a hostile FSInfo can make the scan
     /// begin in the wrong place, which costs a wrap and nothing else.
-    pub(crate) fn alloc_cluster(&mut self) -> Result<Cluster, Error> {
+    pub(crate) async fn alloc_cluster(&mut self) -> Result<Cluster, Error> {
         let bps = self.geom.bytes_per_sector as u64;
         let entries_per_sector = bps / 4;
         let last_sector = self.geom.max_cluster() as u64 * 4 / bps;
@@ -169,7 +170,7 @@ impl<D: BlockAccess> Fat32<D> {
             let base = sector * entries_per_sector;
             let offset = self.geom.fat_base_offset(fat) + sector * bps;
             let buf = self.scratch.get_mut(..bps as usize).ok_or(Error::CorruptChain)?;
-            self.dev.read_at(offset, buf)?;
+            self.dev.read_at(offset, buf).await?;
 
             for e in 0..entries_per_sector {
                 let Ok(number) = u32::try_from(base + e) else { continue };
@@ -186,7 +187,7 @@ impl<D: BlockAccess> Fat32<D> {
                 self.fsinfo.next_free = self.geom.cluster(number.saturating_add(1));
                 self.fsinfo.free_count = self.fsinfo.free_count.map(|n| n.saturating_sub(1));
                 self.fsinfo.dirty = true;
-                self.set_fat_entry(cluster, END_OF_CHAIN)?;
+                self.set_fat_entry(cluster, END_OF_CHAIN).await?;
                 return Ok(cluster);
             }
         }
@@ -199,10 +200,10 @@ impl<D: BlockAccess> Fat32<D> {
     /// The link is written after the new cluster is claimed and terminated, so
     /// a stop between the two leaks a cluster rather than producing a chain
     /// that runs into free space, which is a filesystem two files can share.
-    pub(crate) fn append_cluster(&mut self, last: Cluster) -> Result<Cluster, Error> {
-        let new = self.alloc_cluster()?;
+    pub(crate) async fn append_cluster(&mut self, last: Cluster) -> Result<Cluster, Error> {
+        let new = self.alloc_cluster().await?;
         self.queue(Repair::Put { cluster: last, value: END_OF_CHAIN });
-        self.set_fat_entry(last, new.raw())?;
+        self.set_fat_entry(last, new.raw()).await?;
         Ok(new)
     }
 
@@ -227,7 +228,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// retained cluster closes the exit.
     ///
     /// Bounded by the volume's cluster count, which no legal chain exceeds.
-    pub(crate) fn free_chain(
+    pub(crate) async fn free_chain(
         &mut self,
         start: Cluster,
         anchor: Option<Cluster>,
@@ -238,7 +239,7 @@ impl<D: BlockAccess> Fat32<D> {
             if Some(c) == anchor {
                 return Err(Error::CorruptChain);
             }
-            let next = match self.next_cluster(c) {
+            let next = match self.next_cluster(c).await {
                 Ok(next) => next,
                 Err(Error::CorruptChain) => return Err(Error::CorruptChain),
                 Err(e) => {
@@ -250,7 +251,7 @@ impl<D: BlockAccess> Fat32<D> {
                 self.queue(Repair::Free { start: n, anchor });
             }
             self.queue(Repair::Put { cluster: c, value: 0 });
-            self.set_fat_entry(c, 0)?;
+            self.set_fat_entry(c, 0).await?;
             self.repair.truncate(mark);
             self.released(c);
             match next {
@@ -277,14 +278,14 @@ impl<D: BlockAccess> Fat32<D> {
     /// already walks the whole chain, so this adds half a walk to an
     /// operation that is O(chain) either way, and it runs *before* anything
     /// is written, so a cyclic chain leaves the volume untouched.
-    pub(crate) fn verify_acyclic(&mut self, start: Cluster) -> Result<(), Error> {
+    pub(crate) async fn verify_acyclic(&mut self, start: Cluster) -> Result<(), Error> {
         let mut slow = start;
         let mut fast = start;
         for _ in 0..self.geom.cluster_count as u64 {
-            let Some(once) = self.next_cluster(fast)? else { return Ok(()) };
-            let Some(twice) = self.next_cluster(once)? else { return Ok(()) };
+            let Some(once) = self.next_cluster(fast).await? else { return Ok(()) };
+            let Some(twice) = self.next_cluster(once).await? else { return Ok(()) };
             fast = twice;
-            slow = self.next_cluster(slow)?.ok_or(Error::CorruptChain)?;
+            slow = self.next_cluster(slow).await?.ok_or(Error::CorruptChain)?;
             if slow == fast {
                 return Err(Error::CorruptChain);
             }
@@ -297,13 +298,13 @@ impl<D: BlockAccess> Fat32<D> {
     ///
     /// A commit from its first write, like [`Self::free_chain`]: a refused
     /// terminator leaves itself and then the tail's free queued.
-    pub(crate) fn truncate_chain(&mut self, cluster: Cluster, tail: Cluster) -> Result<(), Error> {
+    pub(crate) async fn truncate_chain(&mut self, cluster: Cluster, tail: Cluster) -> Result<(), Error> {
         let mark = self.repair.len();
         self.queue(Repair::Free { start: tail, anchor: Some(cluster) });
         self.queue(Repair::Put { cluster, value: END_OF_CHAIN });
-        self.set_fat_entry(cluster, END_OF_CHAIN)?;
+        self.set_fat_entry(cluster, END_OF_CHAIN).await?;
         self.repair.truncate(mark);
-        self.free_chain(tail, Some(cluster))
+        self.free_chain(tail, Some(cluster)).await
     }
 
     /// Allocate a cluster with its contents zeroed, for a new directory.
@@ -312,20 +313,20 @@ impl<D: BlockAccess> Fat32<D> {
     /// it allocates — but a directory's free slots are recognised by being
     /// zero, so a new directory cluster full of stale bytes would read as
     /// entries.
-    pub(crate) fn alloc_zeroed_cluster(&mut self) -> Result<Cluster, Error> {
-        let cluster = self.alloc_cluster()?;
-        self.zero_cluster(cluster)?;
+    pub(crate) async fn alloc_zeroed_cluster(&mut self) -> Result<Cluster, Error> {
+        let cluster = self.alloc_cluster().await?;
+        self.zero_cluster(cluster).await?;
         Ok(cluster)
     }
 
-    pub(crate) fn zero_cluster(&mut self, cluster: Cluster) -> Result<(), Error> {
+    pub(crate) async fn zero_cluster(&mut self, cluster: Cluster) -> Result<(), Error> {
         let bps = self.geom.bytes_per_sector as usize;
         let base = self.geom.cluster_offset(cluster);
         self.invalidate_sector();
         let buf = self.scratch.get_mut(..bps).ok_or(Error::CorruptChain)?;
         buf.fill(0);
         for s in 0..self.geom.sectors_per_cluster as u64 {
-            self.dev.write_at(base + s * bps as u64, &self.scratch[..bps])?;
+            self.dev.write_at(base + s * bps as u64, &self.scratch[..bps]).await?;
         }
         Ok(())
     }
@@ -333,7 +334,7 @@ impl<D: BlockAccess> Fat32<D> {
     /// Count free clusters by scanning the FAT.
     ///
     /// Used when FSInfo has no answer, and to produce one worth writing back.
-    pub(crate) fn count_free(&mut self) -> Result<u32, Error> {
+    pub(crate) async fn count_free(&mut self) -> Result<u32, Error> {
         let bps = self.geom.bytes_per_sector as u64;
         let entries_per_sector = bps / 4;
         let last_sector = self.geom.max_cluster() as u64 * 4 / bps;
@@ -344,7 +345,7 @@ impl<D: BlockAccess> Fat32<D> {
         for sector in 0..=last_sector {
             let offset = self.geom.fat_base_offset(fat) + sector * bps;
             let buf = self.scratch.get_mut(..bps as usize).ok_or(Error::CorruptChain)?;
-            self.dev.read_at(offset, buf)?;
+            self.dev.read_at(offset, buf).await?;
             let base = sector * entries_per_sector;
             for e in 0..entries_per_sector {
                 let Ok(number) = u32::try_from(base + e) else { continue };

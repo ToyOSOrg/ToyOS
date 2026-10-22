@@ -19,8 +19,9 @@ and `wait` (`system/diskserver/src/session.rs`) hold a `Region`, a
 `Connection` and a `Poller`, so no host reaches them. A page whose completion
 ring holds the dead session's answer ends the session only through `drain`'s
 refusal of a completion for no ticket in flight (`Violation::Tag`, through
-`client.complete`); `disk::Served` then answers its caller `Gone`, which a file
-server's caller hears as `Io`. That nothing else ends it is
+`client.complete`); `disk::Served` then reconnects and asks again, and answers
+its caller `Gone` once a reconnect fails or the request has been refused across
+more than `MAX_RECONNECTS` ends, which a file server's caller hears as `Io`. That nothing else ends it is
 `issues/a-block-session-waits-forever-on-a-server-past-its-submission-ring.md`.
 
 **Exit**: a host test reopens a client's session over a page a killed server

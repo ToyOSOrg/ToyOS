@@ -14,7 +14,7 @@ publish = false
 doctest = false
 
 [dev-dependencies]
-toyos-disk = { path = "../../../lib/disk" }
+toyos-blockdev = { path = "../../../lib/blockdev" }
 # The tests sign the image they install, as the host that holds the key does.
 toyos-update = { path = "../../../lib/update", features = ["sign"] }
 toyos-fat32 = { path = "../../../lib/fat32" }

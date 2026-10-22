@@ -1,0 +1,14 @@
+[package]
+name = "toyos-blockdev"
+description = "A block device as its filesystems await it: the trait, the single-threaded executor that drives it, a device over memory, and the crash model filesystems are tested against."
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[features]
+# The crash model (`src/model.rs`), for the tests of what is written through a
+# device. This crate's own tests build it regardless.
+model = []
+
+[lib]
+doctest = false

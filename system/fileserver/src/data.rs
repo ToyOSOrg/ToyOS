@@ -37,8 +37,9 @@ use std::rc::Rc;
 use bcachefs::{Extent, Formatted, FsError, Mounted, ReadWrite};
 use toyos::fs::Error;
 
-use crate::cache::{Cache, Shared};
-use diskserver::disk::{Disk, DiskError, BLOCK};
+use toyos_blockdev::{Block, BlockDev, BLOCK};
+
+use crate::cache::{Cache, Disk, Shared};
 use crate::volume::{join, parent, Identities, Kind, Meta, Node, OpenHow, Out, Volume};
 
 /// The longest symlink target read back: the wire's path bound.
@@ -140,10 +141,10 @@ pub(crate) fn mapped<T>(what: &str, path: &str, r: Result<T, FsError>) -> Result
 
 /// A block service that ended is a device that did not do it, as far as a
 /// client of this volume can act on.
-fn disk_word(e: DiskError) -> Error {
+fn disk_word(e: toyos_blockdev::Error) -> Error {
     match e {
-        DiskError::Device | DiskError::Range | DiskError::Gone => Error::Io,
-        DiskError::ReadOnly => Error::ReadOnly,
+        toyos_blockdev::Error::Device | toyos_blockdev::Error::Range | toyos_blockdev::Error::Gone => Error::Io,
+        toyos_blockdev::Error::ReadOnly => Error::ReadOnly,
     }
 }
 
@@ -184,11 +185,12 @@ fn keep_blocks(extents: &mut Vec<Extent>, keep: u64) -> Vec<Extent> {
 
 /// Whether block 0 carries a designation stamp naming this disk's size.
 fn designated<D: Disk>(cache: &Cache<D>) -> bool {
-    let mut block0 = [0u8; BLOCK];
-    if cache.read_block(0, &mut block0).is_err() {
+    let mut block0 = [[0u8; BLOCK]];
+    if cache.block_on(cache.read(0, &mut block0)).is_err() {
         println!("fileserver: block 0 would not read; this disk is not ours to format");
         return false;
     }
+    let [block0] = block0;
     let magic = bcachefs::DESIGNATION_MAGIC;
     let at = bcachefs::DESIGNATION_BLOCKS_OFFSET;
     if block0[..magic.len()] != magic {
@@ -500,7 +502,8 @@ impl<D: Disk> Volume for DataVolume<D> {
                         run += 1;
                     }
                     let base = done;
-                    cache.visit(first, run as usize, |k, block| out.put(base + k * BLOCK, block)).map_err(disk_word)?;
+                    let visit = cache.visit(first, run as usize, |k, block| out.put(base + k * BLOCK, block));
+                    cache.block_on(visit).map_err(disk_word)?;
                     done += run as usize * BLOCK;
                     continue;
                 }
@@ -509,7 +512,8 @@ impl<D: Disk> Volume for DataVolume<D> {
             match block_for(&open.extents, page) {
                 Some(block) => {
                     let base = done;
-                    cache.visit(block, 1, |_, b| out.put(base, &b[within..within + take])).map_err(disk_word)?;
+                    let visit = cache.visit(block, 1, |_, b| out.put(base, &b[within..within + take]));
+                    cache.block_on(visit).map_err(disk_word)?;
                 }
                 // Past the extents: a hole, whose bytes are zeros.
                 None => out.zero(done, take),
@@ -552,7 +556,7 @@ impl<D: Disk> Volume for DataVolume<D> {
             }
         }
         let mut done = 0;
-        let mut page_buf = vec![0u8; BLOCK];
+        let mut page_buf: [Block; 1] = [[0; BLOCK]];
         while done < data.len() {
             let at = offset + done as u64;
             let page = at / BLOCK as u64;
@@ -560,17 +564,18 @@ impl<D: Disk> Volume for DataVolume<D> {
             let take = (BLOCK - within).min(data.len() - done);
             let block = block_for(&open.extents, page).expect("allocated above");
             if take == BLOCK {
-                cache.write(block, &data[done..done + BLOCK]).map_err(disk_word)?;
+                let whole = data[done..done + BLOCK].as_chunks::<BLOCK>().0;
+                cache.block_on(cache.write(block, whole)).map_err(disk_word)?;
             } else {
                 // A page written in part keeps the rest of what it held, which
                 // for a page the file never reached is zeros.
                 if page < covered && page * (BLOCK as u64) < open.size {
-                    cache.read(block, &mut page_buf).map_err(disk_word)?;
+                    cache.block_on(cache.read(block, &mut page_buf)).map_err(disk_word)?;
                 } else {
-                    page_buf.fill(0);
+                    page_buf[0].fill(0);
                 }
-                page_buf[within..within + take].copy_from_slice(&data[done..done + take]);
-                cache.write(block, &page_buf).map_err(disk_word)?;
+                page_buf[0][within..within + take].copy_from_slice(&data[done..done + take]);
+                cache.block_on(cache.write(block, &page_buf)).map_err(disk_word)?;
             }
             done += take;
         }
@@ -598,10 +603,10 @@ impl<D: Disk> Volume for DataVolume<D> {
         let within = (size % BLOCK as u64) as usize;
         if within != 0 {
             if let Some(block) = block_for(&open.extents, size / BLOCK as u64) {
-                let mut page = vec![0u8; BLOCK];
-                cache.read(block, &mut page).map_err(disk_word)?;
-                page[within..].fill(0);
-                cache.write(block, &page).map_err(disk_word)?;
+                let mut page: [Block; 1] = [[0; BLOCK]];
+                cache.block_on(cache.read(block, &mut page)).map_err(disk_word)?;
+                page[0][within..].fill(0);
+                cache.block_on(cache.write(block, &page)).map_err(disk_word)?;
             }
         }
         let dropped = keep_blocks(&mut open.extents, size.div_ceil(BLOCK as u64));
@@ -1200,54 +1205,57 @@ mod tests {
         blocks: u64,
         /// Shared, so a test reads what the disk holds while the server runs.
         image: Rc<std::cell::RefCell<Image>>,
-        writes: usize,
+        writes: std::cell::Cell<usize>,
         keep: usize,
         refuse: Option<usize>,
     }
 
     impl Stops {
         fn new(blocks: u64) -> Self {
-            Self { blocks, image: Rc::default(), writes: 0, keep: usize::MAX, refuse: None }
+            Self { blocks, image: Rc::default(), writes: Default::default(), keep: usize::MAX, refuse: None }
         }
 
         fn from(image: &Image, blocks: u64, keep: usize, refuse: Option<usize>) -> Self {
-            Self { blocks, image: Rc::new(image.clone().into()), writes: 0, keep, refuse }
+            Self { blocks, image: Rc::new(image.clone().into()), writes: Default::default(), keep, refuse }
         }
     }
 
-    impl Disk for Stops {
+    impl BlockDev for Stops {
         fn blocks(&self) -> u64 {
             self.blocks
         }
 
-        fn read(&mut self, first: u64, out: &mut [u8]) -> Result<(), DiskError> {
-            for (i, chunk) in out.chunks_exact_mut(BLOCK).enumerate() {
-                match self.image.borrow().get(&(first + i as u64)) {
-                    Some(block) => chunk.copy_from_slice(&block[..]),
-                    None => chunk.fill(0),
+        async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), toyos_blockdev::Error> {
+            let image = self.image.borrow();
+            for (block, out) in (lba..).zip(out) {
+                match image.get(&block) {
+                    Some(data) => *out = **data,
+                    None => out.fill(0),
                 }
             }
             Ok(())
         }
 
-        fn write(&mut self, first: u64, data: &[u8]) -> Result<(), DiskError> {
-            for (i, chunk) in data.chunks_exact(BLOCK).enumerate() {
-                let n = self.writes;
-                self.writes += 1;
+        async fn write(&self, lba: u64, data: &[Block]) -> Result<(), toyos_blockdev::Error> {
+            for (block, data) in (lba..).zip(data) {
+                let n = self.writes.get();
+                self.writes.set(n + 1);
                 if Some(n) == self.refuse {
-                    return Err(DiskError::Device);
+                    return Err(toyos_blockdev::Error::Device);
                 }
                 if n < self.keep {
-                    self.image.borrow_mut().insert(first + i as u64, Box::new(chunk.try_into().expect("a block")));
+                    self.image.borrow_mut().insert(block, Box::new(*data));
                 }
             }
             Ok(())
         }
 
-        fn flush(&mut self) -> Result<(), DiskError> {
+        async fn flush(&self) -> Result<(), toyos_blockdev::Error> {
             Ok(())
         }
     }
+
+    impl Disk for Stops {}
 
     fn take(v: DataVolume<Stops>) -> Stops {
         let DataVolume { fs, cache, .. } = v;
@@ -1344,7 +1352,7 @@ mod tests {
         v.rename(STAGED, INSTALLED).unwrap();
         assert_eq!(v.sync(), Ok(Vec::new()));
         assert_eq!(whole_under_one(&mut v, &want), Ok(true));
-        let writes = take(v).writes;
+        let writes = take(v).writes.get();
         assert!(writes > 4, "the rename and its sync wrote {writes} blocks");
 
         let mut torn = Vec::new();
@@ -1371,7 +1379,7 @@ mod tests {
         let mut v = mounted(Stops::from(&image, blocks, usize::MAX, None)).unwrap();
         v.rename(STAGED, INSTALLED).unwrap();
         assert_eq!(v.sync(), Ok(Vec::new()));
-        let writes = take(v).writes;
+        let writes = take(v).writes.get();
         let held = |on_disk: &Image| {
             mounted(Stops::from(on_disk, blocks, usize::MAX, None)).and_then(|mut v| whole_under_one(&mut v, &want))
         };

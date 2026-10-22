@@ -11,10 +11,10 @@ toyos = { path = "../../sdk/toyos" }
 # the block service.
 diskserver = { path = "../diskserver" }
 # A slot's partition, read and written in whole blocks, whoever drives it.
-toyos-disk = { path = "../../lib/disk" }
+toyos-blockdev = { path = "../../lib/blockdev" }
 # The format, the verifier and the slot table the loader reads the same way.
 toyos-update = { path = "../../lib/update" }
-# A slot's volume is FAT, written with the driver the kernel mounts FAT with.
+# A slot's volume is FAT, written with the driver the file server mounts FAT with.
 toyos-fat32 = { path = "../../lib/fat32" }
 # ROOT is hashed as it streams onto its partition, never held whole.
 toyos-crypto = { path = "../../lib/crypto" }

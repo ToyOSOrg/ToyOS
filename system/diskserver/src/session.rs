@@ -129,9 +129,6 @@ pub struct Session {
     poller: Poller,
     /// The most requests this session has had on the wire at once.
     peak: usize,
-    /// Answers a synchronous call read on its way to its own, handed out by
-    /// the next [`Session::wait`].
-    stash: Vec<Answer>,
 }
 
 impl Session {
@@ -157,7 +154,6 @@ impl Session {
             pending: BTreeMap::new(),
             poller: Poller::new(1),
             peak: 0,
-            stash: Vec::new(),
         })
     }
 
@@ -249,7 +245,7 @@ impl Session {
     /// Every answer there is; with `block`, wait until there is at least one
     /// or the service has ended.
     pub fn wait(&mut self, block: bool) -> Waited {
-        let mut waited = Waited { answers: core::mem::take(&mut self.stash), ended: false };
+        let mut waited = Waited::default();
         if self.conn.is_none() {
             waited.ended = true;
             return waited;
@@ -370,60 +366,6 @@ impl Session {
         self.client.session_started();
         self.pump();
         Ok(())
-    }
-
-    /// Wait for one ticket, across nothing: an end is an error here.
-    pub fn run(&mut self, ticket: Ticket) -> Result<Answer, Error> {
-        loop {
-            let waited = self.wait(true);
-            let mut found = None;
-            for answer in waited.answers {
-                if answer.ticket == ticket {
-                    found = Some(answer);
-                } else {
-                    self.stash.push(answer);
-                }
-            }
-            if let Some(answer) = found {
-                return Ok(answer);
-            }
-            if waited.ended {
-                return Err(Error::Ended);
-            }
-        }
-    }
-
-    /// Write `data` at `lba` and wait for its answer; a full arena is made
-    /// room in by a flush first.
-    pub fn write(&mut self, lba: u64, data: &[u8]) -> Result<Outcome, Error> {
-        let ticket = match self.submit_write(lba, data) {
-            Ok(ticket) => ticket,
-            Err(Unsent::Ended) => return Err(Error::Ended),
-            Err(Unsent::ArenaFull) => {
-                self.flush()?;
-                self.submit_write(lba, data).map_err(|_| Error::Ended)?
-            }
-        };
-        self.run(ticket).map(|a| a.outcome)
-    }
-
-    /// Read `blocks` from `lba`.
-    pub fn read(&mut self, lba: u64, blocks: u32) -> Result<(Outcome, Option<Vec<u8>>), Error> {
-        let ticket = match self.submit_read(lba, blocks) {
-            Ok(ticket) => ticket,
-            Err(Unsent::Ended) => return Err(Error::Ended),
-            Err(Unsent::ArenaFull) => {
-                self.flush()?;
-                self.submit_read(lba, blocks).map_err(|_| Error::Ended)?
-            }
-        };
-        self.run(ticket).map(|a| (a.outcome, a.data))
-    }
-
-    /// Flush, and wait for it.
-    pub fn flush(&mut self) -> Result<Outcome, Error> {
-        let ticket = self.submit_flush().map_err(|_| Error::Ended)?;
-        self.run(ticket).map(|a| a.outcome)
     }
 }
 

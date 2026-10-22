@@ -2527,7 +2527,7 @@ fn served_slots(
     boots: Connector,
     roots: Connector,
 ) -> Result<(toyos_update::slots::Table, [u8; 16], Vec<toyos_update::slots::Listed>), String> {
-    use diskserver::disk::Disk as _;
+    use toyos_blockdev::{BlockDev as _, BLOCK};
     let names = |connector: &Connector| {
         namespace::build()
             .add(toyos_blockring::PORT, connector)
@@ -2552,9 +2552,12 @@ fn served_slots(
     let session = diskserver::Session::open(names(&tables)?, toyos_blockring::PORT, table_part.unique)
         .map_err(|why| format!("the slot table would not open: {why:?}"))?;
     let table_unique = table_part.unique;
-    let mut disk = diskserver::disk::Served::new(session);
-    let (table, _) =
-        toyos_update::slots::read(|copies| disk.read(0, copies.as_flattened_mut())).map_err(|why| why.to_string())?;
+    let disk = diskserver::disk::Served::new(session);
+    let mut copies = [[0; BLOCK]; toyos_update::slots::COPIES as usize];
+    toyos_blockdev::block_on(disk.read(0, &mut copies), || disk.wait())
+        .map_err(|why| format!("the slot table would not read: {why:?}"))?;
+    let (table, _) = toyos_update::slots::current([&copies[0], &copies[1]])
+        .map_err(|why| format!("the slot table's partition holds {why}"))?;
     let mut listed = table_parts;
     listed.extend(list(&boots)?);
     listed.extend(root_parts);

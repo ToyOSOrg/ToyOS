@@ -4,13 +4,13 @@
 //! A refused write may already be on the medium. So each
 //! write is refused twice over — once before it reaches the bytes, once after —
 //! and then in bursts that also refuse the call's own repair and the next
-//! attempts, as a stopping machine refuses every retry for a while. Reads and
-//! writes go through a model of the kernel adapter's resident blocks, which a
-//! refused write does not update, so reading back cannot stand in for knowing;
-//! a read is refused too, at every read of a truncation. The judge is
-//! `toyos-fat32-check`, written from fatgen103 and sharing no code with the
-//! writer, over a volume that same crate's fixture built from the
-//! specification.
+//! attempts, as a stopping machine refuses every retry for a while. A write is
+//! the device's, whole blocks, and a refused one has landed whole or not at
+//! all: the call hears the same refusal either way, so reading back cannot
+//! stand in for knowing. A read is refused too, at every read of a
+//! truncation. The judge is `toyos-fat32-check`, written from fatgen103 and
+//! sharing no code with the writer, over a volume that same crate's fixture
+//! built from the specification.
 //!
 //! What must hold: after a single refusal the call has left the volume
 //! consistent by the time it returns; after any refusals, retrying until the
@@ -22,11 +22,12 @@ mod common;
 #[path = "../check/tests/common/mod.rs"]
 mod spec_volume;
 
+use std::cell::{Cell, Ref, RefCell};
+
+use common::now;
 use spec_volume::{fat_offset, Volume, BYTES_PER_SECTOR, CLUSTERS, FAT_SECTORS, NUM_FATS};
-use common::{AdapterCache, Landing};
-use toyos_fat32::{
-    BlockAccess, Error, Fat32, FatTime, File, IoError, MAX_LFN_CHARS, MAX_REPAIR_STEPS,
-};
+use toyos_blockdev::{within, Block, BlockDev, Error as DevError, BLOCK};
+use toyos_fat32::{Error, Fat32, FatTime, File, MAX_LFN_CHARS, MAX_REPAIR_STEPS};
 use toyos_fat32_check::Complaint;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,103 +38,150 @@ enum Outcome {
     Landed,
 }
 
-impl Outcome {
-    fn landing(self) -> Landing {
-        match self {
-            Outcome::Refused => Landing::NotReached,
-            Outcome::Landed => Landing::Reached,
-        }
+/// One write as the device took it: where, and the bytes it would replace.
+struct Write<'a> {
+    offset: u64,
+    before: &'a [u8],
+    after: &'a [u8],
+}
+
+impl Write<'_> {
+    fn touches(&self, lo: u64, hi: u64) -> bool {
+        self.offset < hi && self.offset + self.after.len() as u64 > lo
+    }
+
+    /// Where each 4-byte word this write changes lies: a FAT entry, or a
+    /// directory entry's part.
+    fn changed_words(&self) -> impl Iterator<Item = u64> + '_ {
+        (0..self.after.len()).step_by(4).filter(|&i| self.before[i..i + 4] != self.after[i..i + 4]).map(|i| self.offset + i as u64)
     }
 }
 
-type Plan = Box<dyn FnMut(u64, u64, usize) -> Option<Outcome>>;
+type Plan = Box<dyn FnMut(u64, &Write<'_>) -> Option<Outcome>>;
 
 /// Whether to refuse read `index` since the plan was armed.
 type ReadPlan = Box<dyn FnMut(u64) -> bool>;
 
 type Call = fn(&mut Fat32<Faulty>, &mut Option<File>, u32) -> Result<(), Error>;
 
-/// The volume behind the kernel adapter's resident blocks, refusing whichever
-/// reads and writes the plans name.
-///
-/// A refused write does not update the resident copy, even when it landed on
-/// the medium, so a call that reads to learn a refused write's outcome learns
-/// the wrong one here, as it would on the stick.
+/// The volume, refusing whichever reads and writes the plans name.
 struct Faulty {
-    /// The medium, which the checker judges, and the adapter's view of it.
-    cache: AdapterCache,
+    /// The medium, which the checker judges, padded to whole blocks as the
+    /// partition under a volume is.
+    medium: RefCell<Vec<u8>>,
+    /// The volume's own length.
+    len: usize,
     /// Writes since the plan was armed.
-    writes: u64,
-    plan: Option<Plan>,
+    writes: Cell<u64>,
+    plan: RefCell<Option<Plan>>,
     /// Reads since the read plan was armed.
-    reads: u64,
-    read_plan: Option<ReadPlan>,
-    refused: u32,
+    reads: Cell<u64>,
+    read_plan: RefCell<Option<ReadPlan>>,
+    refused: Cell<u32>,
 }
 
 impl Faulty {
-    fn new(bytes: Vec<u8>) -> Faulty {
-        Faulty { cache: AdapterCache::new(bytes), writes: 0, plan: None, reads: 0, read_plan: None, refused: 0 }
+    fn new(mut bytes: Vec<u8>) -> Faulty {
+        let len = bytes.len();
+        bytes.resize(len.next_multiple_of(BLOCK), 0);
+        Faulty {
+            medium: RefCell::new(bytes),
+            len,
+            writes: Cell::new(0),
+            plan: RefCell::new(None),
+            reads: Cell::new(0),
+            read_plan: RefCell::new(None),
+            refused: Cell::new(0),
+        }
     }
 
-    fn medium(&self) -> &[u8] {
-        self.cache.medium()
+    /// The volume as the medium holds it, which is what a judge reads.
+    fn medium(&self) -> Ref<'_, [u8]> {
+        Ref::map(self.medium.borrow(), |m| &m[..self.len])
+    }
+
+    fn into_medium(self) -> Vec<u8> {
+        let mut medium = self.medium.into_inner();
+        medium.truncate(self.len);
+        medium
+    }
+
+    /// Change the medium behind the volume's back.
+    fn poke(&mut self, offset: usize, bytes: &[u8]) {
+        self.medium.get_mut()[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
 
     fn arm(&mut self, plan: Plan) {
-        self.writes = 0;
-        self.refused = 0;
-        self.plan = Some(plan);
+        self.writes.set(0);
+        self.refused.set(0);
+        *self.plan.get_mut() = Some(plan);
     }
 
     fn arm_reads(&mut self, plan: ReadPlan) {
-        self.reads = 0;
-        self.refused = 0;
-        self.read_plan = Some(plan);
+        self.reads.set(0);
+        self.refused.set(0);
+        *self.read_plan.get_mut() = Some(plan);
     }
 
-    fn bound(&self, offset: u64, len: usize) -> Result<(), IoError> {
-        let end = offset.checked_add(len as u64).ok_or(IoError::Device)?;
-        if end > self.cache.len() {
-            return Err(IoError::Device);
-        }
-        Ok(())
+    fn disarm(&mut self) {
+        *self.plan.get_mut() = None;
+    }
+
+    fn refused(&self) -> u32 {
+        self.refused.get()
+    }
+
+    fn reads(&self) -> u64 {
+        self.reads.get()
+    }
+
+    fn blocks_of(&self) -> u64 {
+        (self.medium.borrow().len() / BLOCK) as u64
     }
 }
 
-impl BlockAccess for Faulty {
-    fn capacity(&self) -> u64 {
-        self.cache.len()
+impl BlockDev for Faulty {
+    fn blocks(&self) -> u64 {
+        self.blocks_of()
     }
 
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        self.bound(offset, buf.len())?;
-        let index = self.reads;
-        self.reads += 1;
-        if self.read_plan.as_mut().is_some_and(|p| p(index)) {
-            self.refused += 1;
-            return Err(IoError::Device);
+    async fn read(&self, lba: u64, out: &mut [Block]) -> Result<(), DevError> {
+        within(lba, out.len(), self.blocks_of())?;
+        let index = self.reads.get();
+        self.reads.set(index + 1);
+        if self.read_plan.borrow_mut().as_mut().is_some_and(|p| p(index)) {
+            self.refused.set(self.refused.get() + 1);
+            return Err(DevError::Device);
         }
-        self.cache.read(offset, buf);
+        let at = lba as usize * BLOCK;
+        let out = out.as_flattened_mut();
+        out.copy_from_slice(&self.medium.borrow()[at..at + out.len()]);
         Ok(())
     }
 
-    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        self.bound(offset, buf.len())?;
-        let index = self.writes;
-        self.writes += 1;
-        let verdict = self.plan.as_mut().and_then(|p| p(index, offset, buf.len()));
-        self.cache.write(offset, buf, verdict.map(Outcome::landing));
+    async fn write(&self, lba: u64, data: &[Block]) -> Result<(), DevError> {
+        within(lba, data.len(), self.blocks_of())?;
+        let index = self.writes.get();
+        self.writes.set(index + 1);
+        let (at, after) = (lba as usize * BLOCK, data.as_flattened());
+        let verdict = {
+            let medium = self.medium.borrow();
+            let write = Write { offset: at as u64, before: &medium[at..at + after.len()], after };
+            self.plan.borrow_mut().as_mut().and_then(|p| p(index, &write))
+        };
+        if verdict != Some(Outcome::Refused) {
+            self.medium.borrow_mut()[at..at + after.len()].copy_from_slice(after);
+        }
         match verdict {
             None => Ok(()),
             Some(_) => {
-                self.refused += 1;
-                Err(IoError::Device)
+                self.refused.set(self.refused.get() + 1);
+                Err(DevError::Device)
             }
         }
     }
 
-    fn flush(&mut self) -> Result<(), IoError> {
+    async fn flush(&self) -> Result<(), DevError> {
         Ok(())
     }
 }
@@ -154,8 +202,8 @@ fn complaints(bytes: &[u8], synced: bool) -> Vec<Complaint> {
 
 fn assert_clean(fs: &mut Fat32<Faulty>, synced: bool, context: &str) {
     let g = *fs.geometry();
-    common::assert_fats_agree(&g, fs.device().medium());
-    let said = complaints(fs.device().medium(), synced);
+    common::assert_fats_agree(&g, &fs.device().medium());
+    let said = complaints(&fs.device().medium(), synced);
     assert!(said.is_empty(), "{context}:\n{}", toyos_fat32_check::describe(&said));
 }
 
@@ -179,16 +227,16 @@ struct Scenario {
 fn fixture(s: &Scenario) -> (Vec<u8>, Option<File>) {
     let mut v = Volume::new();
     v.finish();
-    let mut fs = Fat32::mount(Faulty::new(v.bytes)).expect("mount the fixture");
+    let mut fs = now(Fat32::mount(Faulty::new(v.bytes))).expect("mount the fixture");
     let handle = (s.setup)(&mut fs);
-    fs.sync().expect("sync the setup");
+    now(fs.sync()).expect("sync the setup");
     assert_clean(&mut fs, true, &format!("{}: the setup itself", s.name));
-    (fs.into_device().cache.into_medium(), handle)
+    (fs.into_device().into_medium(), handle)
 }
 
 /// Refuse `count` writes from write `from`, each with `outcome`.
 fn burst(from: u64, count: u64, outcome: Outcome) -> Plan {
-    Box::new(move |i, _, _| (i >= from && i - from < count).then_some(outcome))
+    Box::new(move |i, _| (i >= from && i - from < count).then_some(outcome))
 }
 
 /// Every write of `s.call`, refused each way, alone and in bursts. Returns how
@@ -243,12 +291,12 @@ fn refused_case(
     single: bool,
     context: &str,
 ) -> bool {
-    let mut fs = Fat32::mount(Faulty::new(base.to_vec())).expect("mount");
+    let mut fs = now(Fat32::mount(Faulty::new(base.to_vec()))).expect("mount");
     let mut h = handle;
     arm(fs.device());
 
     let first = (s.call)(&mut fs, &mut h, 0);
-    if fs.device().refused == 0 {
+    if fs.device().refused() == 0 {
         assert_eq!(first, Ok(()), "{context}: nothing was refused");
         return false;
     }
@@ -269,7 +317,7 @@ fn refused_case(
         result = (s.call)(&mut fs, &mut h, attempt);
     }
     let mut syncs = 0;
-    while let Err(e) = fs.sync() {
+    while let Err(e) = now(fs.sync()) {
         syncs += 1;
         assert!(syncs <= 24, "{context}: sync still refused: {e}");
     }
@@ -283,16 +331,16 @@ fn refused_case(
 const LOG: &str = "dated.log";
 
 fn one_cluster_logged(fs: &mut Fat32<Faulty>) -> Option<File> {
-    let mut f = fs.create(LOG, stamp()).expect("create");
-    fs.write(&mut f, 0, &common::pattern(512, 1)).expect("first cluster");
-    fs.flush_meta(&mut f, stamp()).expect("flush");
+    let mut f = now(fs.create(LOG, stamp())).expect("create");
+    now(fs.write(&mut f, 0, &common::pattern(512, 1))).expect("first cluster");
+    now(fs.flush_meta(&mut f, stamp())).expect("flush");
     Some(f)
 }
 
 fn append_two_clusters(fs: &mut Fat32<Faulty>, h: &mut Option<File>, _: u32) -> Result<(), Error> {
     let f = h.as_mut().expect("a handle");
-    fs.write(f, 512, &common::pattern(1024, 2))?;
-    fs.flush_meta(f, stamp())
+    now(fs.write(f, 512, &common::pattern(1024, 2)))?;
+    now(fs.flush_meta(f, stamp()))
 }
 
 fn appended_in_place(fs: &mut Fat32<Faulty>, _: &mut Option<File>) {
@@ -301,7 +349,7 @@ fn appended_in_place(fs: &mut Fat32<Faulty>, _: &mut Option<File>) {
     assert_eq!(common::read_all(fs, LOG), want);
     // One run: the retry claimed the clusters the refusal gave back, rather
     // than stepping over one it had leaked.
-    assert_eq!(fs.extents(LOG, 8).expect("extents").len(), 1, "the retry did not reuse the claim");
+    assert_eq!(now(fs.extents(LOG, 8)).expect("extents").len(), 1, "the retry did not reuse the claim");
 }
 
 /// `append_cluster`: claim, then link, per cluster; then the entry.
@@ -315,18 +363,18 @@ fn first_allocation() -> Scenario {
         name: "first allocation",
         commits: false,
         setup: |fs| {
-            let mut f = fs.create(LOG, stamp()).expect("create");
-            fs.flush_meta(&mut f, stamp()).expect("flush");
+            let mut f = now(fs.create(LOG, stamp())).expect("create");
+            now(fs.flush_meta(&mut f, stamp())).expect("flush");
             Some(f)
         },
         call: |fs, h, _| {
             let f = h.as_mut().expect("a handle");
-            fs.write(f, 0, &common::pattern(1536, 3))?;
-            fs.flush_meta(f, stamp())
+            now(fs.write(f, 0, &common::pattern(1536, 3)))?;
+            now(fs.flush_meta(f, stamp()))
         },
         verify: |fs, _| {
             assert_eq!(common::read_all(fs, LOG), common::pattern(1536, 3));
-            assert_eq!(fs.extents(LOG, 8).expect("extents").len(), 1);
+            assert_eq!(now(fs.extents(LOG, 8)).expect("extents").len(), 1);
         },
     }
 }
@@ -341,7 +389,7 @@ fn append_and_sync() -> Scenario {
         setup: one_cluster_logged,
         call: |fs, h, a| {
             append_two_clusters(fs, h, a)?;
-            fs.sync()
+            now(fs.sync())
         },
         verify: appended_in_place,
     }
@@ -354,15 +402,15 @@ fn truncate() -> Scenario {
         name: "truncate",
         commits: false,
         setup: |fs| {
-            let mut f = fs.create(LOG, stamp()).expect("create");
-            fs.write(&mut f, 0, &common::pattern(5 * 512, 5)).expect("write");
-            fs.flush_meta(&mut f, stamp()).expect("flush");
+            let mut f = now(fs.create(LOG, stamp())).expect("create");
+            now(fs.write(&mut f, 0, &common::pattern(5 * 512, 5))).expect("write");
+            now(fs.flush_meta(&mut f, stamp())).expect("flush");
             Some(f)
         },
         call: |fs, h, _| {
             let f = h.as_mut().expect("a handle");
-            fs.set_len(f, 700)?;
-            fs.flush_meta(f, stamp())
+            now(fs.set_len(f, 700))?;
+            now(fs.flush_meta(f, stamp()))
         },
         verify: |fs, _| {
             assert_eq!(common::read_all(fs, LOG), common::pattern(5 * 512, 5)[..700].to_vec());
@@ -379,13 +427,13 @@ fn truncate_to_zero() -> Scenario {
         setup: truncate().setup,
         call: |fs, h, _| {
             let f = h.as_mut().expect("a handle");
-            fs.set_len(f, 0)?;
-            fs.flush_meta(f, stamp())
+            now(fs.set_len(f, 0))?;
+            now(fs.flush_meta(f, stamp()))
         },
         verify: |fs, _| {
-            assert_eq!(fs.metadata(LOG).expect("metadata").len, 0);
-            assert!(fs.extents(LOG, 8).expect("extents").is_empty(), "the entry still names a chain");
-            let free = fs.free_bytes().expect("free");
+            assert_eq!(now(fs.metadata(LOG)).expect("metadata").len, 0);
+            assert!(now(fs.extents(LOG, 8)).expect("extents").is_empty(), "the entry still names a chain");
+            let free = now(fs.free_bytes()).expect("free");
             assert_eq!(free, fs.total_bytes() - 2 * 512, "only the root's two clusters stay taken");
         },
     }
@@ -399,15 +447,15 @@ const ROOT_SLOTS: u32 = 32;
 
 fn full_root(fs: &mut Fat32<Faulty>) -> Option<File> {
     for i in 0..ROOT_SLOTS {
-        let mut f = fs.create(&format!("F{i:02}.TXT"), stamp()).expect("fill the root");
-        fs.flush_meta(&mut f, stamp()).expect("flush");
+        let mut f = now(fs.create(&format!("F{i:02}.TXT"), stamp())).expect("fill the root");
+        now(fs.flush_meta(&mut f, stamp())).expect("flush");
     }
     None
 }
 
 fn root_intact(fs: &mut Fat32<Faulty>) {
     for i in 0..ROOT_SLOTS {
-        assert!(fs.exists(&format!("F{i:02}.TXT")).expect("exists"), "F{i:02}.TXT went missing");
+        assert!(now(fs.exists(&format!("F{i:02}.TXT"))).expect("exists"), "F{i:02}.TXT went missing");
     }
 }
 
@@ -418,10 +466,10 @@ fn extend_dir() -> Scenario {
         name: "extend-dir",
         commits: false,
         setup: full_root,
-        call: |fs, _, _| fs.create("A name long enough for three entries.txt", stamp()).map(drop),
+        call: |fs, _, _| now(fs.create("A name long enough for three entries.txt", stamp())).map(drop),
         verify: |fs, _| {
             root_intact(fs);
-            let m = fs.metadata("A name long enough for three entries.txt").expect("created");
+            let m = now(fs.metadata("A name long enough for three entries.txt")).expect("created");
             assert_eq!(m.len, 0);
         },
     }
@@ -435,10 +483,10 @@ fn long_name_create() -> Scenario {
         name: "create",
         commits: false,
         setup: |_| None,
-        call: |fs, _, _| fs.create("2026-09-21-083539.log", stamp()).map(drop),
+        call: |fs, _, _| now(fs.create("2026-09-21-083539.log", stamp())).map(drop),
         verify: |fs, _| {
-            assert_eq!(fs.read_dir("", 64).expect("read_dir").len(), 1, "one name, once");
-            assert!(fs.exists("2026-09-21-083539.log").expect("exists"));
+            assert_eq!(now(fs.read_dir("", 64)).expect("read_dir").len(), 1, "one name, once");
+            assert!(now(fs.exists("2026-09-21-083539.log")).expect("exists"));
         },
     }
 }
@@ -450,13 +498,13 @@ fn nested_create_dir() -> Scenario {
         name: "create_dir",
         commits: false,
         setup: full_root,
-        call: |fs, _, _| fs.create_dir("A directory with a long name", stamp()),
+        call: |fs, _, _| now(fs.create_dir("A directory with a long name", stamp())),
         verify: |fs, _| {
             root_intact(fs);
-            assert!(fs.metadata("A directory with a long name").expect("created").is_dir);
+            assert!(now(fs.metadata("A directory with a long name")).expect("created").is_dir);
             common::write_new(fs, "A directory with a long name/inner.bin", &[7u8; 700], stamp());
-            fs.sync().expect("sync");
-            let said = complaints(fs.device().medium(), true);
+            now(fs.sync()).expect("sync");
+            let said = complaints(&fs.device().medium(), true);
             assert!(said.is_empty(), "{}", toyos_fat32_check::describe(&said));
         },
     }
@@ -469,14 +517,14 @@ fn rename() -> Scenario {
         name: "rename",
         commits: false,
         setup: |fs| {
-            fs.create_dir("into", stamp()).expect("mkdir");
-            fs.create_dir("moving", stamp()).expect("mkdir");
+            now(fs.create_dir("into", stamp())).expect("mkdir");
+            now(fs.create_dir("moving", stamp())).expect("mkdir");
             common::write_new(fs, "moving/kept.bin", &common::pattern(700, 6), stamp());
             None
         },
-        call: |fs, _, _| fs.rename("moving", "into/A moved directory"),
+        call: |fs, _, _| now(fs.rename("moving", "into/A moved directory")),
         verify: |fs, _| {
-            assert!(!fs.exists("moving").expect("exists"));
+            assert!(!now(fs.exists("moving")).expect("exists"));
             assert_eq!(common::read_all(fs, "into/A moved directory/kept.bin"), common::pattern(700, 6));
         },
     }
@@ -495,10 +543,10 @@ fn remove() -> Scenario {
             common::write_new(fs, DOOMED, &common::pattern(5 * 512, 4), stamp());
             None
         },
-        call: |fs, _, _| fs.remove(DOOMED),
+        call: |fs, _, _| now(fs.remove(DOOMED)),
         verify: |fs, _| {
-            assert!(!fs.exists(DOOMED).expect("exists"));
-            let free = fs.free_bytes().expect("free");
+            assert!(!now(fs.exists(DOOMED)).expect("exists"));
+            let free = now(fs.free_bytes()).expect("free");
             assert_eq!(free, fs.total_bytes() - 2 * 512, "only the root's two clusters stay taken");
         },
     }
@@ -510,13 +558,13 @@ fn remove_dir() -> Scenario {
         name: "remove_dir",
         commits: true,
         setup: |fs| {
-            fs.create_dir("A directory with a long name", stamp()).expect("mkdir");
+            now(fs.create_dir("A directory with a long name", stamp())).expect("mkdir");
             None
         },
-        call: |fs, _, _| fs.remove_dir("A directory with a long name"),
+        call: |fs, _, _| now(fs.remove_dir("A directory with a long name")),
         verify: |fs, _| {
-            assert!(!fs.exists("A directory with a long name").expect("exists"));
-            assert_eq!(fs.free_bytes().expect("free"), fs.total_bytes() - 2 * 512);
+            assert!(!now(fs.exists("A directory with a long name")).expect("exists"));
+            assert_eq!(now(fs.free_bytes()).expect("free"), fs.total_bytes() - 2 * 512);
         },
     }
 }
@@ -638,14 +686,14 @@ fn a_stop_at_any_write_leaves_only_the_named_windows() {
         let moved = allocation_moved(&s, &base, handle);
         for outcome in [Outcome::Refused, Outcome::Landed] {
             for from in 0u64.. {
-                let mut fs = Fat32::mount(Faulty::new(base.clone())).expect("mount");
+                let mut fs = now(Fat32::mount(Faulty::new(base.clone()))).expect("mount");
                 let mut h = handle;
                 fs.device().arm(burst(from, u64::MAX, outcome));
                 let _ = (s.call)(&mut fs, &mut h, 0);
-                if fs.device().refused == 0 {
+                if fs.device().refused() == 0 {
                     break;
                 }
-                let said = complaints(fs.device().medium(), false);
+                let said = complaints(&fs.device().medium(), false);
                 let context = format!("{}: stopped at write {from}, {outcome:?}", s.name);
                 let splits = said.iter().filter(|c| matches!(c, Complaint::FatMirror { .. })).count();
                 assert!(splits <= 1, "{context}: {splits} split entries");
@@ -683,10 +731,12 @@ fn a_stop_at_any_write_leaves_only_the_named_windows() {
 
 // ----------------------------------------------- the shape a stop produces
 
-/// Where FAT copy 0 lives on the fixture.
+/// The blocks FAT copy 0 alone lives in on the fixture: its last block is the
+/// mirror's first too.
 fn active_fat() -> (u64, u64) {
     let lo = fat_offset(0, 0) as u64;
-    (lo, lo + (FAT_SECTORS * BYTES_PER_SECTOR) as u64)
+    let end = lo + (FAT_SECTORS * BYTES_PER_SECTOR) as u64;
+    (lo, end - end % BLOCK as u64)
 }
 
 /// T14 run 139 and `quiesce_leaves_the_volume_whole`'s forced shape, on the
@@ -699,50 +749,50 @@ fn a_stop_that_refuses_every_retry_for_a_while_leaks_nothing() {
     assert_eq!(NUM_FATS, 2);
     let s = append();
     let (base, handle) = fixture(&s);
-    let mut fs = Fat32::mount(Faulty::new(base)).expect("mount");
+    let mut fs = now(Fat32::mount(Faulty::new(base))).expect("mount");
     let mut h = handle;
     let (lo, hi) = active_fat();
-    let active = move |offset: u64, len: usize| offset < hi && offset + len as u64 > lo;
+    let active = move |w: &Write<'_>| w.touches(lo, hi);
 
     // Attempt 1 lets its first active-FAT write through — the claim — and
     // refuses every one after it.
     let mut seen = 0u32;
-    fs.device().arm(Box::new(move |_, offset, len| {
-        if !active(offset, len) {
+    fs.device().arm(Box::new(move |_, w| {
+        if !active(w) {
             return None;
         }
         seen += 1;
         (seen > 1).then_some(Outcome::Refused)
     }));
     assert_eq!(append_two_clusters(&mut fs, &mut h, 0), Err(Error::Io));
-    assert!(fs.device().refused >= 2, "the link and the rollback's re-drive were both refused");
+    assert!(fs.device().refused() >= 2, "the link and the rollback's re-drive were both refused");
     assert!(fs.pending_repair() > 0, "the refused rollback is queued");
 
     // Each later attempt, and a sync, meets the first attempt's repair still
     // unlanded.
     for attempt in 2..=9 {
-        fs.device().arm(Box::new(move |_, offset, len| active(offset, len).then_some(Outcome::Refused)));
+        fs.device().arm(Box::new(move |_, w| active(w).then_some(Outcome::Refused)));
         assert_eq!(append_two_clusters(&mut fs, &mut h, attempt), Err(Error::Io));
-        assert_eq!(fs.sync(), Err(Error::Io), "sync on attempt {attempt}");
+        assert_eq!(now(fs.sync()), Err(Error::Io), "sync on attempt {attempt}");
         assert!(fs.pending_repair() > 0, "the repair, still pending on attempt {attempt}");
     }
-    fs.device().plan = None;
+    fs.device().disarm();
     append_two_clusters(&mut fs, &mut h, 10).expect("attempt 10 on an answering device");
     assert_eq!(fs.pending_repair(), 0);
 
     let mut seen = 0u32;
-    fs.device().arm(Box::new(move |_, offset, len| {
-        if !active(offset, len) {
+    fs.device().arm(Box::new(move |_, w| {
+        if !active(w) {
             return None;
         }
         seen += 1;
         (seen > 1).then_some(Outcome::Refused)
     }));
     let f = h.as_mut().expect("a handle");
-    assert_eq!(fs.write(f, 1536, &common::pattern(1024, 7)), Err(Error::Io));
+    assert_eq!(now(fs.write(f, 1536, &common::pattern(1024, 7))), Err(Error::Io));
     assert!(fs.pending_repair() > 0, "the later refusal's repair is queued");
-    fs.device().plan = None;
-    fs.sync().expect("sync lands the later repair");
+    fs.device().disarm();
+    now(fs.sync()).expect("sync lands the later repair");
     assert_eq!(fs.pending_repair(), 0);
     assert_clean(&mut fs, true, "after the tenth attempt and the refused write after it");
     (s.verify)(&mut fs, &mut h);
@@ -752,10 +802,10 @@ fn a_stop_that_refuses_every_retry_for_a_while_leaks_nothing() {
 /// clean run of `s.call` claims and frees, which bounds what a stop inside it
 /// can orphan.
 fn allocation_moved(s: &Scenario, base: &[u8], handle: Option<File>) -> u32 {
-    let mut fs = Fat32::mount(Faulty::new(base.to_vec())).expect("mount");
+    let mut fs = now(Fat32::mount(Faulty::new(base.to_vec()))).expect("mount");
     let mut h = handle;
     (s.call)(&mut fs, &mut h, 0).expect("the call on an answering device");
-    let after = fs.into_device().cache.into_medium();
+    let after = fs.into_device().into_medium();
     let taken = |bytes: &[u8], cluster: u32| {
         let at = fat_offset(0, cluster);
         u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]]) & 0x0FFF_FFFF != 0
@@ -776,26 +826,26 @@ fn the_deepest_repair_reaches_its_bound_and_no_further() {
     let (from, to) = (format!("from/{}", long('L')), format!("into/{}", long('M')));
     let mut v = Volume::new();
     v.finish();
-    let mut fs = Fat32::mount(Faulty::new(v.bytes)).expect("mount");
-    fs.create_dir("into", stamp()).expect("mkdir");
+    let mut fs = now(Fat32::mount(Faulty::new(v.bytes))).expect("mount");
+    now(fs.create_dir("into", stamp())).expect("mkdir");
     // One 512-byte cluster: `.`, `..` and these fourteen fill it.
     for i in 0..14 {
-        let mut f = fs.create(&format!("into/F{i:02}.TXT"), stamp()).expect("fill");
-        fs.flush_meta(&mut f, stamp()).expect("flush");
+        let mut f = now(fs.create(&format!("into/F{i:02}.TXT"), stamp())).expect("fill");
+        now(fs.flush_meta(&mut f, stamp())).expect("flush");
     }
-    fs.create_dir("from", stamp()).expect("mkdir");
-    fs.create_dir(&from, stamp()).expect("mkdir");
-    fs.sync().expect("sync");
-    let base = fs.into_device().cache.into_medium();
+    now(fs.create_dir("from", stamp())).expect("mkdir");
+    now(fs.create_dir(&from, stamp())).expect("mkdir");
+    now(fs.sync()).expect("sync");
+    let base = fs.into_device().into_medium();
 
     let mut deepest = 0;
     for stop in 0u64.. {
-        let mut fs = Fat32::mount(Faulty::new(base.clone())).expect("mount");
+        let mut fs = now(Fat32::mount(Faulty::new(base.clone()))).expect("mount");
         fs.device().arm(burst(stop, u64::MAX, Outcome::Refused));
-        let result = fs.rename(&from, &to);
-        if fs.device().refused == 0 {
+        let result = now(fs.rename(&from, &to));
+        if fs.device().refused() == 0 {
             result.expect("the rename on an answering device");
-            assert!(fs.metadata(&to).expect("moved").is_dir);
+            assert!(now(fs.metadata(&to)).expect("moved").is_dir);
             break;
         }
         deepest = deepest.max(fs.pending_repair());
@@ -811,19 +861,19 @@ fn the_deepest_repair_reaches_its_bound_and_no_further() {
 fn a_call_that_refused_nothing_keeps_the_free_count() {
     let mut v = Volume::new();
     v.finish();
-    let mut fs = Fat32::mount(Faulty::new(v.bytes)).expect("mount");
-    let before = fs.free_bytes().expect("free");
-    fs.sync().expect("sync the counted hint");
-    let mut f = fs.create(LOG, stamp()).expect("create");
+    let mut fs = now(Fat32::mount(Faulty::new(v.bytes))).expect("mount");
+    let before = now(fs.free_bytes()).expect("free");
+    now(fs.sync()).expect("sync the counted hint");
+    let mut f = now(fs.create(LOG, stamp())).expect("create");
     let too_big = vec![0u8; (before + 512) as usize];
-    assert_eq!(fs.write(&mut f, 0, &too_big), Err(Error::NoSpace));
+    assert_eq!(now(fs.write(&mut f, 0, &too_big)), Err(Error::NoSpace));
     assert_eq!(fs.pending_repair(), 0);
 
     fs.device().arm_reads(Box::new(|_| false));
-    fs.sync().expect("sync");
-    let reads = fs.device().reads;
+    now(fs.sync()).expect("sync");
+    let reads = fs.device().reads();
     assert!(reads < FAT_SECTORS as u64, "the sync read {reads} times: it counted the FAT again");
-    assert_eq!(fs.free_bytes().expect("free"), before);
+    assert_eq!(now(fs.free_bytes()).expect("free"), before);
     assert_clean(&mut fs, true, "after the refused write and its sync");
 }
 
@@ -834,25 +884,29 @@ fn a_call_that_refused_nothing_keeps_the_free_count() {
 fn an_unlanded_rollback_is_the_answer() {
     let mut v = Volume::new();
     v.finish();
-    let mut fs = Fat32::mount(Faulty::new(v.bytes)).expect("mount");
-    let before = fs.free_bytes().expect("free");
-    let mut f = fs.create(LOG, stamp()).expect("create");
+    let mut fs = now(Fat32::mount(Faulty::new(v.bytes))).expect("mount");
+    let before = now(fs.free_bytes()).expect("free");
+    let mut f = now(fs.create(LOG, stamp())).expect("create");
     // Every FAT entry the growth claims is written as a claim, then as a link;
     // the third write to one is its rollback's free.
     let mut seen = std::collections::HashMap::<u64, u32>::new();
-    fs.device().arm(Box::new(move |_, offset, _| {
-        let n = seen.entry(offset).or_insert(0);
-        *n += 1;
-        (*n >= 3).then_some(Outcome::Refused)
+    fs.device().arm(Box::new(move |_, w| {
+        let mut third = false;
+        for word in w.changed_words() {
+            let n = seen.entry(word).or_insert(0);
+            *n += 1;
+            third |= *n >= 3;
+        }
+        third.then_some(Outcome::Refused)
     }));
     let too_big = vec![0u8; (before + 512) as usize];
-    assert_eq!(fs.write(&mut f, 0, &too_big), Err(Error::Io));
+    assert_eq!(now(fs.write(&mut f, 0, &too_big)), Err(Error::Io));
     assert!(fs.pending_repair() > 0);
 
-    fs.device().plan = None;
-    fs.sync().expect("sync lands the rollback");
+    fs.device().disarm();
+    now(fs.sync()).expect("sync lands the rollback");
     assert_eq!(fs.pending_repair(), 0);
-    assert_eq!(fs.free_bytes().expect("free"), before);
+    assert_eq!(now(fs.free_bytes()).expect("free"), before);
     assert_clean(&mut fs, true, "after the rollback landed");
 }
 
@@ -863,20 +917,20 @@ fn an_unlanded_rollback_is_the_answer() {
 fn a_remove_reports_a_corrupt_chain_under_the_name_it_erased() {
     let mut v = Volume::new();
     v.finish();
-    let mut fs = Fat32::mount(Faulty::new(v.bytes)).expect("mount");
+    let mut fs = now(Fat32::mount(Faulty::new(v.bytes))).expect("mount");
     common::write_new(&mut fs, DOOMED, &common::pattern(5 * 512, 4), stamp());
     let third = {
-        let f = fs.extents(DOOMED, 8).expect("extents");
+        let f = now(fs.extents(DOOMED, 8)).expect("extents");
         assert_eq!(f.len(), 1, "one run");
         ((f[0].offset as usize - spec_volume::cluster_offset(2)) / spec_volume::BYTES_PER_CLUSTER) as u32 + 2 + 2
     };
     // Cluster 1 is reserved, so a link to it is a link to nothing.
     for copy in 0..NUM_FATS {
         let at = fat_offset(copy, third);
-        fs.device().cache.poke(at, &1u32.to_le_bytes());
+        fs.device().poke(at, &1u32.to_le_bytes());
     }
-    assert_eq!(fs.remove(DOOMED), Err(Error::CorruptChain));
-    assert!(!fs.exists(DOOMED).expect("exists"), "the name is gone either way");
+    assert_eq!(now(fs.remove(DOOMED)), Err(Error::CorruptChain));
+    assert!(!now(fs.exists(DOOMED)).expect("exists"), "the name is gone either way");
     assert_eq!(fs.pending_repair(), 0);
 }
 
@@ -887,27 +941,28 @@ fn a_remove_reports_a_corrupt_chain_under_the_name_it_erased() {
 fn a_remove_whose_free_the_device_fails_answers_ok_and_the_next_call_the_failure() {
     let s = remove();
     let (base, _) = fixture(&s);
-    let mut fs = Fat32::mount(Faulty::new(base)).expect("mount");
+    let mut fs = now(Fat32::mount(Faulty::new(base))).expect("mount");
     let lo = fat_offset(0, 0) as u64;
     let hi = fat_offset(NUM_FATS, 0) as u64;
-    let fat = move |offset: u64, len: usize| offset < hi && offset + len as u64 > lo;
-    fs.device().arm(Box::new(move |_, offset, len| fat(offset, len).then_some(Outcome::Refused)));
+    // By the bytes it changes: the root directory's first sectors share a block
+    // with the mirror's last.
+    fs.device().arm(Box::new(move |_, w| w.changed_words().any(|at| (lo..hi).contains(&at)).then_some(Outcome::Refused)));
 
-    assert_eq!(fs.remove(DOOMED), Ok(()));
-    assert!(fs.device().refused >= 2, "the free was driven twice and failed both times");
+    assert_eq!(now(fs.remove(DOOMED)), Ok(()));
+    assert!(fs.device().refused() >= 2, "the free was driven twice and failed both times");
     assert!(fs.pending_repair() > 0, "the free is queued");
-    assert!(!fs.exists(DOOMED).expect("exists"), "the name is gone");
+    assert!(!now(fs.exists(DOOMED)).expect("exists"), "the name is gone");
 
-    let refused = fs.device().refused;
-    assert_eq!(fs.create("after.txt", stamp()).map(drop), Err(Error::Io));
-    assert!(fs.device().refused > refused, "the next call drove the free first");
-    assert!(!fs.exists("after.txt").expect("exists"), "a call behind an unlanded free starts nothing");
-    assert_eq!(fs.sync(), Err(Error::Io));
+    let refused = fs.device().refused();
+    assert_eq!(now(fs.create("after.txt", stamp())).map(drop), Err(Error::Io));
+    assert!(fs.device().refused() > refused, "the next call drove the free first");
+    assert!(!now(fs.exists("after.txt")).expect("exists"), "a call behind an unlanded free starts nothing");
+    assert_eq!(now(fs.sync()), Err(Error::Io));
 
-    fs.device().plan = None;
-    fs.create("after.txt", stamp()).expect("create once the device answers");
+    fs.device().disarm();
+    now(fs.create("after.txt", stamp())).expect("create once the device answers");
     assert_eq!(fs.pending_repair(), 0);
-    fs.sync().expect("sync");
+    now(fs.sync()).expect("sync");
     assert_clean(&mut fs, true, "after the failed free landed");
     (s.verify)(&mut fs, &mut None);
 }

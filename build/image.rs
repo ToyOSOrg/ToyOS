@@ -5,7 +5,8 @@ use std::path::Path;
 use bcachefs::{BlockBuf, BlockIO, BlockNum, Formatted, FsUuid, Superblock, VecBlockIO};
 
 use crate::arch::Arch;
-use toyos_fat32::{BlockAccess, Fat32, FatTime, IoError};
+use toyos_blockdev::{block_on_ready, Bytes, BLOCK};
+use toyos_fat32::{Fat32, FatTime};
 use toyos_gpt::Guid;
 
 /// The image that goes on the ROOT partition, named by a UUID **derived, never
@@ -372,11 +373,14 @@ pub fn read_file_on(file: &mut std::fs::File, guid: [u8; 16], name: &str) -> Res
     file.seek(SeekFrom::Start(start))
         .and_then(|_| file.read_exact(&mut volume))
         .map_err(|e| format!("reading the volume at byte {start}: {e}"))?;
-    let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("the volume does not mount: {e}"))?;
-    let mut found = fs.open(name).map_err(|e| format!("the volume has no {name}: {e}"))?;
-    let mut bytes = vec![0u8; usize::try_from(found.len()).unwrap_or(usize::MAX)];
-    fs.read(&mut found, 0, &mut bytes).map_err(|e| format!("reading {name}: {e}"))?;
-    Ok(bytes)
+    let device = device_of(&mut volume)?;
+    block_on_ready(async {
+        let mut fs = Fat32::mount(device).await.map_err(|e| format!("the volume does not mount: {e}"))?;
+        let mut found = fs.open(name).await.map_err(|e| format!("the volume has no {name}: {e}"))?;
+        let mut bytes = vec![0u8; usize::try_from(found.len()).unwrap_or(usize::MAX)];
+        fs.read(&mut found, 0, &mut bytes).await.map_err(|e| format!("reading {name}: {e}"))?;
+        Ok(bytes)
+    })
 }
 
 /// Every file in the root of the image's log volume (its one Microsoft basic
@@ -389,17 +393,29 @@ pub fn log_volume_files(file: &mut std::fs::File) -> Result<Vec<(String, Vec<u8>
     file.seek(SeekFrom::Start(start))
         .and_then(|_| file.read_exact(&mut volume))
         .map_err(|e| format!("reading the log volume at byte {start}: {e}"))?;
-    let mut fs = Fat32::mount(VolumeIo(&mut volume)).map_err(|e| format!("the log volume does not mount: {e}"))?;
-    let entries = fs.read_dir("/", usize::MAX).map_err(|e| format!("listing the log volume: {e}"))?;
-    let mut files = Vec::new();
-    for entry in entries.into_iter().filter(|e| !e.is_dir) {
-        let path = format!("/{}", entry.name);
-        let mut found = fs.open(&path).map_err(|e| format!("opening {path}: {e}"))?;
-        let mut bytes = vec![0u8; usize::try_from(found.len()).unwrap_or(usize::MAX)];
-        fs.read(&mut found, 0, &mut bytes).map_err(|e| format!("reading {path}: {e}"))?;
-        files.push((entry.name, bytes));
+    let device = device_of(&mut volume)?;
+    block_on_ready(async {
+        let mut fs = Fat32::mount(device).await.map_err(|e| format!("the log volume does not mount: {e}"))?;
+        let entries = fs.read_dir("/", usize::MAX).await.map_err(|e| format!("listing the log volume: {e}"))?;
+        let mut files = Vec::new();
+        for entry in entries.into_iter().filter(|e| !e.is_dir) {
+            let path = format!("/{}", entry.name);
+            let mut found = fs.open(&path).await.map_err(|e| format!("opening {path}: {e}"))?;
+            let mut bytes = vec![0u8; usize::try_from(found.len()).unwrap_or(usize::MAX)];
+            fs.read(&mut found, 0, &mut bytes).await.map_err(|e| format!("reading {path}: {e}"))?;
+            files.push((entry.name, bytes));
+        }
+        Ok(files)
+    })
+}
+
+/// A volume read off an image, as the device `toyos-fat32` mounts: whole
+/// blocks, which every partition this build writes is ([`PARTITION_ALIGN`]).
+fn device_of(volume: &mut [u8]) -> Result<Bytes<&mut [u8]>, String> {
+    match volume.len().is_multiple_of(BLOCK) {
+        true => Ok(Bytes::new(volume)),
+        false => Err(format!("a {}-byte volume, which is no whole {BLOCK}-byte blocks", volume.len())),
     }
-    Ok(files)
 }
 
 /// Why a scan's `out[0]` and `matched` count did not pick out exactly one
@@ -521,47 +537,6 @@ fn format_fat32(bytes: usize, label: &str) -> Vec<u8> {
     crate::fatformat::format(bytes, fat_label(label))
 }
 
-/// The volume being built, as [`toyos_fat32`] sees it.
-///
-/// Byte-addressed with no block size of its own, because there is none: the
-/// volume is a `Vec` in this process. The kernel's adapter is where the
-/// read-modify-write against 4 KiB device blocks lives, and `toyos-fat32`'s own
-/// host suite is where that shape is exercised.
-pub(crate) struct VolumeIo<'a>(pub(crate) &'a mut [u8]);
-
-impl VolumeIo<'_> {
-    fn range(&self, offset: u64, len: usize) -> Result<core::ops::Range<usize>, IoError> {
-        let start = usize::try_from(offset).map_err(|_| IoError::Device)?;
-        let end = start.checked_add(len).ok_or(IoError::Device)?;
-        if end > self.0.len() {
-            return Err(IoError::Device);
-        }
-        Ok(start..end)
-    }
-}
-
-impl BlockAccess for VolumeIo<'_> {
-    fn capacity(&self) -> u64 {
-        self.0.len() as u64
-    }
-
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        let at = self.range(offset, buf.len())?;
-        buf.copy_from_slice(&self.0[at]);
-        Ok(())
-    }
-
-    fn write_at(&mut self, offset: u64, buf: &[u8]) -> Result<(), IoError> {
-        let at = self.range(offset, buf.len())?;
-        self.0[at].copy_from_slice(buf);
-        Ok(())
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        Ok(())
-    }
-}
-
 /// When the build ran, which is what the files on the stick are dated.
 ///
 /// A host with a clock behind 1980 or past 2107 gets FAT's nearest
@@ -587,24 +562,23 @@ fn build_time() -> FatTime {
 /// counts the FAT when the volume arrived without a hint and `sync` writes it.
 fn populate(volume: &mut [u8], label: &str, files: &[(&str, &[u8])]) {
     let time = build_time();
-    let mut fs = Fat32::mount(VolumeIo(volume))
-        .unwrap_or_else(|e| panic!("the freshly formatted {label} volume does not mount: {e}"));
-    for (path, data) in files {
-        if let Some((dir, _)) = path.rsplit_once('/') {
-            fs.create_dir_all(dir, time)
-                .unwrap_or_else(|e| panic!("creating {dir}/ on {label}: {e}"));
+    block_on_ready(async {
+        let mut fs = Fat32::mount(Bytes::new(volume))
+            .await
+            .unwrap_or_else(|e| panic!("the freshly formatted {label} volume does not mount: {e}"));
+        for (path, data) in files {
+            if let Some((dir, _)) = path.rsplit_once('/') {
+                fs.create_dir_all(dir, time).await.unwrap_or_else(|e| panic!("creating {dir}/ on {label}: {e}"));
+            }
+            let mut file = fs.create(path, time).await.unwrap_or_else(|e| panic!("creating {path} on {label}: {e}"));
+            fs.write(&mut file, 0, data)
+                .await
+                .unwrap_or_else(|e| panic!("writing {} bytes to {path} on {label}: {e}", data.len()));
+            fs.flush_meta(&mut file, time).await.unwrap_or_else(|e| panic!("recording {path} on {label}: {e}"));
         }
-        let mut file = fs
-            .create(path, time)
-            .unwrap_or_else(|e| panic!("creating {path} on {label}: {e}"));
-        fs.write(&mut file, 0, data)
-            .unwrap_or_else(|e| panic!("writing {} bytes to {path} on {label}: {e}", data.len()));
-        fs.flush_meta(&mut file, time)
-            .unwrap_or_else(|e| panic!("recording {path} on {label}: {e}"));
-    }
-    fs.free_bytes()
-        .unwrap_or_else(|e| panic!("counting the {label} volume's free clusters: {e}"));
-    fs.sync().unwrap_or_else(|e| panic!("syncing the {label} volume: {e}"));
+        fs.free_bytes().await.unwrap_or_else(|e| panic!("counting the {label} volume's free clusters: {e}"));
+        fs.sync().await.unwrap_or_else(|e| panic!("syncing the {label} volume: {e}"));
+    })
 }
 
 /// The partition firmware boots from: the bootloader, and the name of the
@@ -1112,10 +1086,12 @@ mod tests {
     }
 
     /// Every file on `volume`, sorted.
-    fn files_of(mut volume: Vec<u8>) -> Vec<String> {
-        let mut fs = Fat32::mount(VolumeIo(&mut volume)).expect("mount a volume we just built");
-        let mut found: Vec<String> = fs
-            .walk("", 64)
+    fn files_of(volume: Vec<u8>) -> Vec<String> {
+        let walked = block_on_ready(async {
+            let mut fs = Fat32::mount(Bytes::new(volume)).await.expect("mount a volume we just built");
+            fs.walk("", 64).await
+        });
+        let mut found: Vec<String> = walked
             .expect("walk the volume")
             .into_iter()
             .map(|(path, _)| path.trim_start_matches('/').to_string())

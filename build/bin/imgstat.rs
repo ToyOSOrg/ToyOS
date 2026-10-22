@@ -12,34 +12,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use bcachefs::{Mounted, VecBlockIO};
-use toyos_fat32::{BlockAccess, Fat32, IoError};
-
-/// A partition, in memory, byte-addressed. Read-only: this reports.
-struct Volume(Vec<u8>);
-
-impl BlockAccess for Volume {
-    fn capacity(&self) -> u64 {
-        self.0.len() as u64
-    }
-
-    fn read_at(&mut self, offset: u64, buf: &mut [u8]) -> Result<(), IoError> {
-        let start = usize::try_from(offset).map_err(|_| IoError::Device)?;
-        let end = start.checked_add(buf.len()).ok_or(IoError::Device)?;
-        if end > self.0.len() {
-            return Err(IoError::Device);
-        }
-        buf.copy_from_slice(&self.0[start..end]);
-        Ok(())
-    }
-
-    fn write_at(&mut self, _offset: u64, _buf: &[u8]) -> Result<(), IoError> {
-        Err(IoError::Device)
-    }
-
-    fn flush(&mut self) -> Result<(), IoError> {
-        Ok(())
-    }
-}
+use toyos_blockdev::{block_on_ready, Bytes, BLOCK};
+use toyos_fat32::Fat32;
 
 /// GPT geometry, as `build/image.rs` writes it.
 const LBA: usize = 512;
@@ -74,9 +48,15 @@ fn main() {
             (last - first + 1) * LBA as u64
         );
 
-        let bytes = disk[first as usize * LBA..(last as usize + 1) * LBA].to_vec();
-        if let Ok(mut fs) = Fat32::mount(Volume(bytes.clone())) {
-            match fs.walk("", 64) {
+        let mut bytes = disk[first as usize * LBA..(last as usize + 1) * LBA].to_vec();
+        let walked = bytes.len().is_multiple_of(BLOCK).then(|| {
+            block_on_ready(async {
+                let mut fs = Fat32::mount(Bytes::new(&mut bytes[..])).await.ok()?;
+                Some(fs.walk("", 64).await)
+            })
+        });
+        if let Some(Some(walked)) = walked {
+            match walked {
                 Ok(entries) => {
                     for (file, size) in &entries {
                         println!("      {file:40} {size}");

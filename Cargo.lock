@@ -990,9 +990,9 @@ version = "0.0.0"
 dependencies = [
  "toyos",
  "toyos-abi",
+ "toyos-blockdev",
  "toyos-blockring",
  "toyos-blockserve",
- "toyos-disk",
 ]
 
 [[package]]
@@ -1303,6 +1303,7 @@ dependencies = [
  "diskserver",
  "toyos",
  "toyos-abi",
+ "toyos-blockdev",
  "toyos-blockring",
  "toyos-fat32",
  "toyos-fat32-check",
@@ -4049,6 +4050,7 @@ dependencies = [
  "diskserver",
  "toyos",
  "toyos-abi",
+ "toyos-blockdev",
  "toyos-blockring",
  "toyos-gpt",
  "toyos-logstream",
@@ -4391,6 +4393,10 @@ name = "toyos-blackbox"
 version = "0.1.0"
 
 [[package]]
+name = "toyos-blockdev"
+version = "0.1.0"
+
+[[package]]
 name = "toyos-blockhold"
 version = "0.1.0"
 
@@ -4442,6 +4448,7 @@ dependencies = [
  "toml",
  "toyos-abi",
  "toyos-blackbox",
+ "toyos-blockdev",
  "toyos-crypto",
  "toyos-elf",
  "toyos-fat32",
@@ -4516,10 +4523,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "toyos-disk"
-version = "0.1.0"
-
-[[package]]
 name = "toyos-dma"
 version = "0.1.0"
 
@@ -4547,6 +4550,7 @@ name = "toyos-fat32"
 version = "0.1.0"
 dependencies = [
  "fatfs",
+ "toyos-blockdev",
  "toyos-fat32-check",
  "toyos-tmpdir",
  "toyos-wallclock",
@@ -5092,8 +5096,8 @@ version = "0.1.0"
 dependencies = [
  "diskserver",
  "toyos",
+ "toyos-blockdev",
  "toyos-crypto",
- "toyos-disk",
  "toyos-fat32",
  "toyos-update",
 ]
@@ -5102,8 +5106,8 @@ dependencies = [
 name = "update-copies"
 version = "0.1.0"
 dependencies = [
+ "toyos-blockdev",
  "toyos-crypto",
- "toyos-disk",
  "toyos-fat32",
  "toyos-fat32-check",
  "toyos-update",

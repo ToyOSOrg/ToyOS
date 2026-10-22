@@ -2769,7 +2769,9 @@ mod tests {
     /// negative gates select at run time, `toyos-crypto`'s `portable`, `wpa2`
     /// and `rustls-provider`, which `--ci host` tests as forms of its own, and
     /// of the guest libraries, `toyos-font`'s `ttf`, its TrueType rendering,
-    /// and `toyos-pci-claim`'s `host-grant`, which netstack's host tests build.
+    /// `toyos-pci-claim`'s `host-grant`, which netstack's host tests build, and
+    /// `toyos-blockdev`'s `model`, the crash model a filesystem's tests check
+    /// its writes against, which the crate's own tests build regardless.
     const NOT_A_CONTROL: &[&str] = &[
         "core",
         "default",
@@ -2778,6 +2780,7 @@ mod tests {
         "flaws",
         "host-grant",
         "loom",
+        "model",
         "portable",
         "rustc-dep-of-std",
         "rustls-provider",

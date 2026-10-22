@@ -28,8 +28,8 @@ mod common;
 
 use std::sync::OnceLock;
 
-use common::{pattern, Image, SparseDevice};
-use toyos_fat32::{BlockAccess, Error, Fat32, FatTime, MAX_DIR_ENTRIES};
+use common::{now, pattern, Image, SparseDevice};
+use toyos_fat32::{Error, Fat32, FatTime, MAX_DIR_ENTRIES};
 
 /// Enough of the volume to hold the reserved sectors, both FATs, and the first
 /// thousand data clusters. Everything past it reads as zeroes, which is what
@@ -105,37 +105,37 @@ impl Layout {
 /// The point is that none of them panics, hangs, or allocates by a number the
 /// volume supplied. Errors are expected and ignored; a panic fails the test.
 fn exercise(dev: SparseDevice) {
-    let Ok(mut fs) = Fat32::mount(dev) else { return };
+    let Ok(mut fs) = now(Fat32::mount(dev)) else { return };
     let t = FatTime::EPOCH;
-    let _ = fs.free_bytes();
-    let _ = fs.walk("", 2048);
+    let _ = now(fs.free_bytes());
+    let _ = now(fs.walk("", 2048));
 
-    if let Ok(entries) = fs.read_dir("", 2048) {
+    if let Ok(entries) = now(fs.read_dir("", 2048)) {
         for e in entries.iter().take(32) {
-            let _ = fs.metadata(&e.name);
-            let _ = fs.read_dir(&e.name, 2048);
-            let _ = fs.extents(&e.name, 64);
-            if let Ok(mut f) = fs.open(&e.name) {
+            let _ = now(fs.metadata(&e.name));
+            let _ = now(fs.read_dir(&e.name, 2048));
+            let _ = now(fs.extents(&e.name, 64));
+            if let Ok(mut f) = now(fs.open(&e.name)) {
                 let mut buf = vec![0u8; 4096];
-                let _ = fs.read(&mut f, 0, &mut buf);
-                let _ = fs.read(&mut f, 3000, &mut buf);
-                let _ = fs.read(&mut f, u32::MAX as u64 - 10, &mut buf);
+                let _ = now(fs.read(&mut f, 0, &mut buf));
+                let _ = now(fs.read(&mut f, 3000, &mut buf));
+                let _ = now(fs.read(&mut f, u32::MAX as u64 - 10, &mut buf));
             }
         }
     }
 
-    if let Ok(mut f) = fs.create("probe.tmp", t) {
-        let _ = fs.write(&mut f, 0, &[1, 2, 3, 4]);
-        let _ = fs.write(&mut f, 100_000, &[5, 6]);
-        let _ = fs.set_len(&mut f, 10);
-        let _ = fs.flush_meta(&mut f, t);
+    if let Ok(mut f) = now(fs.create("probe.tmp", t)) {
+        let _ = now(fs.write(&mut f, 0, &[1, 2, 3, 4]));
+        let _ = now(fs.write(&mut f, 100_000, &[5, 6]));
+        let _ = now(fs.set_len(&mut f, 10));
+        let _ = now(fs.flush_meta(&mut f, t));
     }
-    let _ = fs.create_dir("probedir", t);
-    let _ = fs.create_dir_all("a/b/c", t);
-    let _ = fs.rename("probe.tmp", "probedir/moved.tmp");
-    let _ = fs.remove("probedir/moved.tmp");
-    let _ = fs.remove_dir("probedir");
-    let _ = fs.sync();
+    let _ = now(fs.create_dir("probedir", t));
+    let _ = now(fs.create_dir_all("a/b/c", t));
+    let _ = now(fs.rename("probe.tmp", "probedir/moved.tmp"));
+    let _ = now(fs.remove("probedir/moved.tmp"));
+    let _ = now(fs.remove_dir("probedir"));
+    let _ = now(fs.sync());
 }
 
 // ------------------------------------------------------- the corpus itself
@@ -143,8 +143,8 @@ fn exercise(dev: SparseDevice) {
 /// If this fails, every test below is testing against a fantasy.
 #[test]
 fn the_corpus_is_a_volume_we_can_read() {
-    let mut fs = Fat32::mount(pristine()).expect("mount");
-    let mut names: Vec<String> = fs.walk("", 1024).expect("walk").into_iter().map(|(n, _)| n).collect();
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
+    let mut names: Vec<String> = now(fs.walk("", 1024)).expect("walk").into_iter().map(|(n, _)| n).collect();
     names.sort();
     assert_eq!(
         names,
@@ -229,14 +229,17 @@ fn a_volume_larger_than_its_device_is_truncated() {
     let dev = SparseDevice::from_prefix(prefix, cap / 2);
     assert_eq!(common::mount_err(dev), Error::Truncated);
 
-    // And the boundary: one sector short of what the boot sector declares.
+    // And the boundary: the fewest whole blocks that hold what the boot
+    // sector declares mount, and one block fewer, the least a device can be
+    // short by, is refused.
     let dev = SparseDevice::from_prefix(prefix, *cap);
     let total = u32::from_le_bytes(dev.peek(32, 4).try_into().expect("4 bytes")) as u64;
     let l = layout();
-    let dev = SparseDevice::from_prefix(prefix, total * l.bps - 1);
+    let holds = (total * l.bps).next_multiple_of(toyos_blockdev::BLOCK as u64);
+    let dev = SparseDevice::from_prefix(prefix, holds - toyos_blockdev::BLOCK as u64);
     assert_eq!(common::mount_err(dev), Error::Truncated);
-    let dev = SparseDevice::from_prefix(prefix, total * l.bps);
-    assert!(Fat32::mount(dev).is_ok(), "exactly the declared size must mount");
+    let dev = SparseDevice::from_prefix(prefix, holds);
+    assert!(now(Fat32::mount(dev)).is_ok(), "the blocks that hold the declared size must mount");
 }
 
 /// A device that stops answering part way through. Nothing may panic on the
@@ -252,8 +255,8 @@ fn a_device_that_fails_mid_read_reports_it() {
     let mut dev = pristine();
     // Enough for the boot sector and FSInfo, not enough for the root cluster.
     dev.fail_reads_past = Some(l.first_data * l.bps);
-    let mut fs = Fat32::mount(dev).expect("mount");
-    assert_eq!(fs.walk("", 1024).unwrap_err(), Error::Io);
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    assert_eq!(now(fs.walk("", 1024)).unwrap_err(), Error::Io);
 }
 
 /// The flush is the call `/system/bin/logkeeper`'s durability claim rests on: a
@@ -262,11 +265,11 @@ fn a_device_that_fails_mid_read_reports_it() {
 fn a_refused_flush_is_io() {
     let mut dev = pristine();
     dev.flush_refuses = true;
-    let mut fs = Fat32::mount(dev).expect("mount");
-    assert_eq!(fs.sync().unwrap_err(), Error::Io);
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    assert_eq!(now(fs.sync()).unwrap_err(), Error::Io);
 
-    let mut fs = Fat32::mount(pristine()).expect("mount");
-    assert_eq!(fs.sync(), Ok(()));
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
+    assert_eq!(now(fs.sync()), Ok(()));
 }
 
 // ----------------------------------------------------------- broken chains
@@ -275,16 +278,16 @@ fn a_refused_flush_is_io() {
 fn a_cluster_that_links_to_itself_is_refused() {
     let l = layout();
     let mut dev = pristine();
-    let mut fs = Fat32::mount(pristine()).expect("mount");
-    let first = fs.extents("A Long Name For Entries.bin", 64).expect("extents")[0].offset;
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
+    let first = now(fs.extents("A Long Name For Entries.bin", 64)).expect("extents")[0].offset;
     let cluster = ((first / l.bps - l.first_data) / l.spc + 2) as u32;
     drop(fs);
 
     l.set_chain(&mut dev, cluster, cluster);
-    let mut fs = Fat32::mount(dev).expect("mount");
-    let mut f = fs.open("A Long Name For Entries.bin").expect("open");
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    let mut f = now(fs.open("A Long Name For Entries.bin")).expect("open");
     let mut buf = vec![0u8; 20_000];
-    assert_eq!(fs.read(&mut f, 0, &mut buf).unwrap_err(), Error::CorruptChain);
+    assert_eq!(now(fs.read(&mut f, 0, &mut buf)).unwrap_err(), Error::CorruptChain);
 }
 
 /// A longer cycle is bounded rather than detected — see `Fat32::advance`. What
@@ -293,37 +296,37 @@ fn a_cluster_that_links_to_itself_is_refused() {
 #[test]
 fn a_longer_cycle_is_bounded_rather_than_endless() {
     let l = layout();
-    let mut fs = Fat32::mount(pristine()).expect("mount");
-    let ext = fs.extents("A Long Name For Entries.bin", 64).expect("extents");
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
+    let ext = now(fs.extents("A Long Name For Entries.bin", 64)).expect("extents");
     let first = ((ext[0].offset / l.bps - l.first_data) / l.spc + 2) as u32;
     drop(fs);
 
     let mut dev = pristine();
     // …→ first+3 → first, a four-cluster ring under a 20,000-byte file.
     l.set_chain(&mut dev, first + 3, first);
-    let mut fs = Fat32::mount(dev).expect("mount");
-    let mut f = fs.open("A Long Name For Entries.bin").expect("open");
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    let mut f = now(fs.open("A Long Name For Entries.bin")).expect("open");
     let mut buf = vec![0u8; 20_000];
-    let n = fs.read(&mut f, 0, &mut buf).expect("read");
+    let n = now(fs.read(&mut f, 0, &mut buf)).expect("read");
     assert_eq!(n, 20_000, "the size field still bounds the read");
 }
 
 #[test]
 fn a_chain_link_outside_the_volume_is_refused() {
     let l = layout();
-    let mut fs = Fat32::mount(pristine()).expect("mount");
-    let ext = fs.extents("A Long Name For Entries.bin", 64).expect("extents");
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
+    let ext = now(fs.extents("A Long Name For Entries.bin", 64)).expect("extents");
     let first = ((ext[0].offset / l.bps - l.first_data) / l.spc + 2) as u32;
     drop(fs);
 
     for bad in [0u32, 1, 0x0FFF_FFF7, 0x0F00_0000] {
         let mut dev = pristine();
         l.set_chain(&mut dev, first, bad);
-        let mut fs = Fat32::mount(dev).expect("mount");
-        let mut f = fs.open("A Long Name For Entries.bin").expect("open");
+        let mut fs = now(Fat32::mount(dev)).expect("mount");
+        let mut f = now(fs.open("A Long Name For Entries.bin")).expect("open");
         let mut buf = vec![0u8; 20_000];
         assert_eq!(
-            fs.read(&mut f, 0, &mut buf).unwrap_err(),
+            now(fs.read(&mut f, 0, &mut buf)).unwrap_err(),
             Error::CorruptChain,
             "link value {bad:#x} was followed"
         );
@@ -351,8 +354,8 @@ fn a_directory_entry_pointing_outside_the_volume_is_refused() {
     dev.poke(at + 26, &[0xFF, 0xFF]);
     dev.poke(at + 20, &[0xFF, 0x0F]);
 
-    let mut fs = Fat32::mount(dev).expect("mount");
-    assert_eq!(fs.walk("", 1024).unwrap_err(), Error::CorruptDirectory);
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    assert_eq!(now(fs.walk("", 1024)).unwrap_err(), Error::CorruptDirectory);
 }
 
 /// One cluster of a directory, packed with entries and no end marker, so a
@@ -388,8 +391,8 @@ fn a_cyclic_directory_chain_terminates() {
     l.set_chain(&mut dev, root, root + 1);
     l.set_chain(&mut dev, root + 1, root);
 
-    let mut fs = Fat32::mount(dev).expect("mount");
-    let err = fs.walk("", 1024).unwrap_err();
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    let err = now(fs.walk("", 1024)).unwrap_err();
     assert!(
         matches!(err, Error::CorruptDirectory | Error::CorruptChain | Error::LimitExceeded),
         "unexpected {err:?}"
@@ -397,7 +400,7 @@ fn a_cyclic_directory_chain_terminates() {
     // The other way in. Creating an entry both scans the directory for a
     // short-name collision and measures its chain, and either bound is enough
     // to refuse — the scan happens first, so that is the one seen here.
-    let err = fs.create("new.txt", FatTime::EPOCH).map(|_| ()).unwrap_err();
+    let err = now(fs.create("new.txt", FatTime::EPOCH)).map(|_| ()).unwrap_err();
     assert!(matches!(err, Error::CorruptDirectory | Error::CorruptChain), "unexpected {err:?}");
 }
 
@@ -417,10 +420,10 @@ fn a_directory_tree_cycle_terminates() {
             break;
         }
     }
-    let mut fs = Fat32::mount(dev).expect("mount");
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
     // Either answer is sound: the visited set stops the descent, and the
     // budget stops a tree that is merely enormous.
-    match fs.walk("", 1024) {
+    match now(fs.walk("", 1024)) {
         Ok(files) => assert!(files.len() <= 1024),
         Err(e) => assert!(matches!(e, Error::LimitExceeded | Error::CorruptDirectory)),
     }
@@ -451,46 +454,46 @@ fn a_directory_longer_than_the_entry_bound_is_refused() {
     dev.poke(l.cluster(base + needed), &filler);
     l.set_chain(&mut dev, base + needed, 0x0FFF_FFFF);
 
-    let mut fs = Fat32::mount(dev).expect("mount");
-    let err = fs.read_dir("", 1_000_000).unwrap_err();
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    let err = now(fs.read_dir("", 1_000_000)).unwrap_err();
     assert_eq!(err, Error::CorruptDirectory);
     // The listing bound is the caller's; this one is the crate's, and it has
     // to hold even when the caller offers a bound larger than it.
-    assert_eq!(fs.walk("", 1_000_000).unwrap_err(), Error::CorruptDirectory);
+    assert_eq!(now(fs.walk("", 1_000_000)).unwrap_err(), Error::CorruptDirectory);
 }
 
 /// The caller's own bound has to hold too, and it has to refuse rather than
 /// hand back a listing that is short of the truth.
 #[test]
 fn the_caller_limit_refuses_rather_than_truncates() {
-    let mut fs = Fat32::mount(pristine()).expect("mount");
-    assert_eq!(fs.walk("", 1).unwrap_err(), Error::LimitExceeded);
-    assert_eq!(fs.read_dir("", 1).unwrap_err(), Error::LimitExceeded);
-    assert_eq!(fs.read_dir("", 0).unwrap_err(), Error::LimitExceeded);
-    assert!(fs.walk("", 64).is_ok());
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
+    assert_eq!(now(fs.walk("", 1)).unwrap_err(), Error::LimitExceeded);
+    assert_eq!(now(fs.read_dir("", 1)).unwrap_err(), Error::LimitExceeded);
+    assert_eq!(now(fs.read_dir("", 0)).unwrap_err(), Error::LimitExceeded);
+    assert!(now(fs.walk("", 64)).is_ok());
 }
 
 /// And it is spent on the named subtree, so a bound the whole volume exceeds
 /// still lists a directory inside it.
 #[test]
 fn the_caller_limit_is_the_named_directorys_and_not_the_volumes() {
-    let mut fs = Fat32::mount(pristine()).expect("mount");
-    let whole = fs.walk("", 64).expect("walk");
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
+    let whole = now(fs.walk("", 64)).expect("walk");
     assert_eq!(whole.len(), 6, "the corpus walked to {whole:?}");
 
-    assert_eq!(fs.walk("", whole.len() - 1).unwrap_err(), Error::LimitExceeded);
+    assert_eq!(now(fs.walk("", whole.len() - 1)).unwrap_err(), Error::LimitExceeded);
     assert_eq!(
-        fs.walk("sub/deeper", whole.len() - 1).expect("walk one directory"),
+        now(fs.walk("sub/deeper", whole.len() - 1)).expect("walk one directory"),
         vec![(String::from("sub/deeper/"), 0), (String::from("sub/deeper/leaf.txt"), 4)],
     );
-    assert_eq!(fs.walk("sub/deeper", 1).unwrap_err(), Error::LimitExceeded);
+    assert_eq!(now(fs.walk("sub/deeper", 1)).unwrap_err(), Error::LimitExceeded);
     assert_eq!(
-        fs.walk("plain.txt", 1).expect("walk a file"),
+        now(fs.walk("plain.txt", 1)).expect("walk a file"),
         vec![(String::from("plain.txt"), 12)],
     );
     // A file's own entry is an entry, so the caller's bound governs it too.
-    assert_eq!(fs.walk("plain.txt", 0).unwrap_err(), Error::LimitExceeded);
-    assert_eq!(fs.walk("nope", 64).unwrap_err(), Error::NotFound);
+    assert_eq!(now(fs.walk("plain.txt", 0)).unwrap_err(), Error::LimitExceeded);
+    assert_eq!(now(fs.walk("nope", 64)).unwrap_err(), Error::NotFound);
 }
 
 /// A zero-length file has no first cluster, which is what no data looks like.
@@ -502,20 +505,20 @@ fn the_caller_limit_is_the_named_directorys_and_not_the_volumes() {
 fn an_empty_file_is_not_a_corrupt_directory() {
     let image = Image::fixture("empty-file");
     image.fsck();
-    let mut fs = Fat32::mount(SparseDevice::from_prefix(&image.bytes(PREFIX_BYTES), image.size()))
+    let mut fs = now(Fat32::mount(SparseDevice::from_prefix(&image.bytes(PREFIX_BYTES), image.size())))
         .expect("mount");
 
-    let mut whole = fs.walk("", 64).expect("walk the volume");
+    let mut whole = now(fs.walk("", 64)).expect("walk the volume");
     whole.sort();
     assert_eq!(
         whole,
         vec![(String::from("empty.txt"), 0), (String::from("full.txt"), 12)],
     );
     assert_eq!(
-        fs.walk("empty.txt", 64).expect("walk the empty file"),
+        now(fs.walk("empty.txt", 64)).expect("walk the empty file"),
         vec![(String::from("empty.txt"), 0)],
     );
-    assert_eq!(fs.metadata("empty.txt").expect("metadata").len, 0);
+    assert_eq!(now(fs.metadata("empty.txt")).expect("metadata").len, 0);
 }
 
 // -------------------------------------------------------------- long names
@@ -538,8 +541,8 @@ fn a_long_name_with_a_wrong_checksum_falls_back_to_the_short_one() {
     }
     assert!(patched, "the corpus has no long-name entries to break");
 
-    let mut fs = Fat32::mount(dev).expect("mount");
-    let names: Vec<String> = fs.read_dir("", 256).expect("read_dir").into_iter().map(|e| e.name).collect();
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    let names: Vec<String> = now(fs.read_dir("", 256)).expect("read_dir").into_iter().map(|e| e.name).collect();
     assert!(names.iter().any(|n| n == "plain.txt"), "{names:?}");
     assert!(!names.iter().any(|n| n.contains(' ')), "a broken run was trusted: {names:?}");
     assert!(names.len() >= 3, "entries disappeared: {names:?}");
@@ -559,8 +562,8 @@ fn nonsense_long_name_ordinals_do_not_break_the_scan() {
                 dev.poke(root + i * 32, &[ord]);
             }
         }
-        let mut fs = Fat32::mount(dev).expect("mount");
-        let entries = fs.read_dir("", 256).expect("read_dir");
+        let mut fs = now(Fat32::mount(dev)).expect("mount");
+        let entries = now(fs.read_dir("", 256)).expect("read_dir");
         assert!(entries.iter().any(|e| e.name == "plain.txt"), "ordinal {ord:#x}");
     }
 }
@@ -583,8 +586,8 @@ fn lone_surrogates_in_a_long_name_produce_a_name() {
             }
         }
     }
-    let mut fs = Fat32::mount(dev).expect("mount");
-    let entries = fs.read_dir("", 256).expect("read_dir");
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    let entries = now(fs.read_dir("", 256)).expect("read_dir");
     assert!(!entries.is_empty());
 }
 
@@ -667,40 +670,40 @@ fn random_damage_to_directory_entries_never_panics() {
 /// sanitised, so nobody ends up with a file under a name they did not choose.
 #[test]
 fn impossible_names_are_refused_not_mangled() {
-    let mut fs = Fat32::mount(pristine()).expect("mount");
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
     let t = FatTime::EPOCH;
     let too_long: String = core::iter::repeat_n('x', 256).collect();
     for bad in ["", ".", "..", "a<b.txt", "a>b.txt", "a|b.txt", "a?b.txt", "trailing.", "trailing "] {
-        let e = fs.create(bad, t).map(|_| ()).unwrap_err();
+        let e = now(fs.create(bad, t)).map(|_| ()).unwrap_err();
         assert!(matches!(e, Error::InvalidName | Error::AlreadyExists), "{bad:?} gave {e:?}");
     }
-    assert_eq!(fs.create(&too_long, t).map(|_| ()).unwrap_err(), Error::InvalidName);
-    assert_eq!(fs.create("", t).map(|_| ()).unwrap_err(), Error::InvalidName);
+    assert_eq!(now(fs.create(&too_long, t)).map(|_| ()).unwrap_err(), Error::InvalidName);
+    assert_eq!(now(fs.create("", t)).map(|_| ()).unwrap_err(), Error::InvalidName);
 }
 
 /// A handle that outlives what it named. Writing through it must not resize
 /// whatever took its directory slot.
 #[test]
 fn a_stale_handle_is_refused() {
-    let mut fs = Fat32::mount(pristine()).expect("mount");
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
     let t = FatTime::EPOCH;
-    let mut f = fs.open("plain.txt").expect("open");
-    fs.remove("plain.txt").expect("remove");
-    assert_eq!(fs.flush_meta(&mut f, t).unwrap_err(), Error::NotFound);
+    let mut f = now(fs.open("plain.txt")).expect("open");
+    now(fs.remove("plain.txt")).expect("remove");
+    assert_eq!(now(fs.flush_meta(&mut f, t)).unwrap_err(), Error::NotFound);
 }
 
 /// FAT32's size field is 32 bits. A write past it has nowhere to record its
 /// length, and must say so before it allocates anything.
 #[test]
 fn writes_past_the_format_limit_are_refused() {
-    let mut fs = Fat32::mount(pristine()).expect("mount");
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
     let t = FatTime::EPOCH;
-    let mut f = fs.create("huge.bin", t).expect("create");
-    let before = fs.free_bytes().expect("free");
-    assert_eq!(fs.write(&mut f, u32::MAX as u64, &[1, 2, 3]).unwrap_err(), Error::TooLarge);
-    assert_eq!(fs.write(&mut f, u64::MAX, &[1]).unwrap_err(), Error::TooLarge);
-    assert_eq!(fs.set_len(&mut f, 1 << 40).unwrap_err(), Error::TooLarge);
-    assert_eq!(fs.free_bytes().expect("free"), before, "a refused write still allocated");
+    let mut f = now(fs.create("huge.bin", t)).expect("create");
+    let before = now(fs.free_bytes()).expect("free");
+    assert_eq!(now(fs.write(&mut f, u32::MAX as u64, &[1, 2, 3])).unwrap_err(), Error::TooLarge);
+    assert_eq!(now(fs.write(&mut f, u64::MAX, &[1])).unwrap_err(), Error::TooLarge);
+    assert_eq!(now(fs.set_len(&mut f, 1 << 40)).unwrap_err(), Error::TooLarge);
+    assert_eq!(now(fs.free_bytes()).expect("free"), before, "a refused write still allocated");
 }
 
 // ------------------------------------- the write path, after the 2026-08-01 audit
@@ -741,10 +744,8 @@ fn a_crafted_zero_size_entry_cannot_write_outside_the_volume() {
     let (prefix, _) = corpus();
     // Twice the volume, so an out-of-volume offset is inside the device and
     // the device cannot mask the bug by refusing.
-    let volume = l.bps * u64::from(u32::from_le_bytes(
-        SparseDevice::from_prefix(prefix, 1).peek(32, 4).try_into().expect("4 bytes"),
-    ));
-    let mut dev = SparseDevice::from_prefix(prefix, volume * 2);
+    let volume = l.bps * u64::from(u32::from_le_bytes(prefix[32..36].try_into().expect("4 bytes")));
+    let mut dev = SparseDevice::from_prefix(prefix, (volume * 2).next_multiple_of(toyos_blockdev::BLOCK as u64));
     dev.volume_bytes = Some(volume);
 
     let mut entry = [0u8; 32];
@@ -754,16 +755,16 @@ fn a_crafted_zero_size_entry_cannot_write_outside_the_volume() {
     entry[20..22].copy_from_slice(&0x2000u16.to_le_bytes());
     craft_root_entry(&mut dev, &l, &entry);
 
-    let mut fs = Fat32::mount(dev).expect("mount");
-    assert_eq!(fs.open("CRAFTED.BIN").map(|_| ()).unwrap_err(), Error::CorruptDirectory);
-    assert_eq!(fs.metadata("CRAFTED.BIN").unwrap_err(), Error::CorruptDirectory);
-    assert_eq!(fs.extents("CRAFTED.BIN", 16).unwrap_err(), Error::CorruptDirectory);
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    assert_eq!(now(fs.open("CRAFTED.BIN")).map(|_| ()).unwrap_err(), Error::CorruptDirectory);
+    assert_eq!(now(fs.metadata("CRAFTED.BIN")).unwrap_err(), Error::CorruptDirectory);
+    assert_eq!(now(fs.extents("CRAFTED.BIN", 16)).unwrap_err(), Error::CorruptDirectory);
     // A listing validates only what it follows, so the crafted entry is
     // *reported*: it is on the disk, and saying so computes no offset from it.
     // One bad entry making a whole directory unlistable would be a denial of
     // service on a volume that is otherwise fine.
-    assert!(fs.walk("", 1024).expect("walk").iter().any(|(n, _)| n == "CRAFTED.BIN"));
-    assert_eq!(fs.device().out_of_volume, 0, "the crate asked for bytes outside the volume");
+    assert!(now(fs.walk("", 1024)).expect("walk").iter().any(|(n, _)| n == "CRAFTED.BIN"));
+    assert_eq!(fs.device().out_of_volume.get(), 0, "the crate asked for bytes outside the volume");
 }
 
 /// F6, the other half of the same entry: it must still be deletable.
@@ -782,17 +783,17 @@ fn a_crafted_entry_can_still_be_deleted() {
     entry[20..22].copy_from_slice(&0x0FFFu16.to_le_bytes());
     craft_root_entry(&mut dev, &l, &entry);
 
-    let mut fs = Fat32::mount(dev).expect("mount");
-    assert!(fs.read_dir("", 256).expect("read_dir").iter().any(|e| e.name == "CRAFTED.BIN"));
-    fs.remove("CRAFTED.BIN").expect("a crafted entry must still be removable");
-    assert!(!fs.read_dir("", 256).expect("read_dir").iter().any(|e| e.name == "CRAFTED.BIN"));
-    assert_eq!(fs.metadata("CRAFTED.BIN").unwrap_err(), Error::NotFound);
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    assert!(now(fs.read_dir("", 256)).expect("read_dir").iter().any(|e| e.name == "CRAFTED.BIN"));
+    now(fs.remove("CRAFTED.BIN")).expect("a crafted entry must still be removable");
+    assert!(!now(fs.read_dir("", 256)).expect("read_dir").iter().any(|e| e.name == "CRAFTED.BIN"));
+    assert_eq!(now(fs.metadata("CRAFTED.BIN")).unwrap_err(), Error::NotFound);
 }
 
 /// The head cluster of the corpus file that spans several clusters.
 fn multi_cluster_head(l: &Layout) -> u32 {
-    let mut fs = Fat32::mount(pristine()).expect("mount");
-    let ext = fs.extents("A Long Name For Entries.bin", 64).expect("extents");
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
+    let ext = now(fs.extents("A Long Name For Entries.bin", 64)).expect("extents");
     ((ext[0].offset / l.bps - l.first_data) / l.spc + 2) as u32
 }
 
@@ -811,9 +812,9 @@ fn truncating_a_cyclic_chain_does_not_free_the_clusters_it_keeps() {
     // head → head+1 → head+2 → head, a rho closing above the truncation point.
     l.set_chain(&mut dev, head + 2, head);
 
-    let mut fs = Fat32::mount(dev).expect("mount");
-    let mut f = fs.open("A Long Name For Entries.bin").expect("open");
-    assert_eq!(fs.set_len(&mut f, 600).unwrap_err(), Error::CorruptChain);
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    let mut f = now(fs.open("A Long Name For Entries.bin")).expect("open");
+    assert_eq!(now(fs.set_len(&mut f, 600)).unwrap_err(), Error::CorruptChain);
 
     // The kept cluster must still be allocated. Reading it back through the
     // FAT is the only way to see this: the directory entry looks fine either
@@ -821,7 +822,7 @@ fn truncating_a_cyclic_chain_does_not_free_the_clusters_it_keeps() {
     let g = *fs.geometry();
     let mut link = [0u8; 4];
     let cluster = g.cluster(head).expect("head is in the volume");
-    fs.device().read_at(g.fat_entry_offset(0, cluster), &mut link).expect("read link");
+    common::read_at(fs.device(), g.fat_entry_offset(0, cluster), &mut link);
     assert_ne!(
         u32::from_le_bytes(link) & 0x0FFF_FFFF,
         0,
@@ -842,10 +843,10 @@ fn removing_a_cyclic_chain_never_leaves_an_entry_naming_free_clusters() {
     let mut dev = pristine();
     l.set_chain(&mut dev, head + 2, head);
 
-    let mut fs = Fat32::mount(dev).expect("mount");
-    let result = fs.remove("A Long Name For Entries.bin");
+    let mut fs = now(Fat32::mount(dev)).expect("mount");
+    let result = now(fs.remove("A Long Name For Entries.bin"));
     assert_eq!(
-        fs.metadata("A Long Name For Entries.bin").unwrap_err(),
+        now(fs.metadata("A Long Name For Entries.bin")).unwrap_err(),
         Error::NotFound,
         "the entry survived a remove that reported {result:?}"
     );
@@ -861,19 +862,19 @@ fn removing_a_cyclic_chain_never_leaves_an_entry_naming_free_clusters() {
 /// the `is_free` branch and never reaches the comparison at all.
 #[test]
 fn a_stale_handle_over_a_reused_empty_slot_is_refused() {
-    let mut fs = Fat32::mount(pristine()).expect("mount");
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
     let t = FatTime::EPOCH;
 
-    let mut stale = fs.create("AAA.TXT", t).expect("create");
-    fs.flush_meta(&mut stale, t).expect("flush");
-    fs.remove("AAA.TXT").expect("remove");
+    let mut stale = now(fs.create("AAA.TXT", t)).expect("create");
+    now(fs.flush_meta(&mut stale, t)).expect("flush");
+    now(fs.remove("AAA.TXT")).expect("remove");
 
-    let mut newcomer = fs.create("BBB.TXT", t).expect("create");
-    fs.flush_meta(&mut newcomer, t).expect("flush");
+    let mut newcomer = now(fs.create("BBB.TXT", t)).expect("create");
+    now(fs.flush_meta(&mut newcomer, t)).expect("flush");
 
-    assert_eq!(fs.write(&mut stale, 0, &[1u8; 4096]).unwrap_err(), Error::NotFound);
-    assert_eq!(fs.flush_meta(&mut stale, t).unwrap_err(), Error::NotFound);
-    assert_eq!(fs.metadata("BBB.TXT").expect("metadata").len, 0, "the newcomer was rewritten");
+    assert_eq!(now(fs.write(&mut stale, 0, &[1u8; 4096])).unwrap_err(), Error::NotFound);
+    assert_eq!(now(fs.flush_meta(&mut stale, t)).unwrap_err(), Error::NotFound);
+    assert_eq!(now(fs.metadata("BBB.TXT")).expect("metadata").len, 0, "the newcomer was rewritten");
 }
 
 /// F5. Writing through a handle whose entry is gone.
@@ -884,14 +885,14 @@ fn a_stale_handle_over_a_reused_empty_slot_is_refused() {
 /// this write did not fail, so no rollback ran.
 #[test]
 fn a_write_through_a_dead_handle_allocates_nothing() {
-    let mut fs = Fat32::mount(pristine()).expect("mount");
+    let mut fs = now(Fat32::mount(pristine())).expect("mount");
     let t = FatTime::EPOCH;
-    let mut f = fs.create("DOOMED.BIN", t).expect("create");
-    fs.flush_meta(&mut f, t).expect("flush");
-    fs.remove("DOOMED.BIN").expect("remove");
+    let mut f = now(fs.create("DOOMED.BIN", t)).expect("create");
+    now(fs.flush_meta(&mut f, t)).expect("flush");
+    now(fs.remove("DOOMED.BIN")).expect("remove");
 
-    let before = fs.free_bytes().expect("free");
-    assert_eq!(fs.write(&mut f, 0, &[7u8; 65_536]).unwrap_err(), Error::NotFound);
-    assert_eq!(fs.set_len(&mut f, 65_536).unwrap_err(), Error::NotFound);
-    assert_eq!(fs.free_bytes().expect("free"), before, "a dead handle took clusters with it");
+    let before = now(fs.free_bytes()).expect("free");
+    assert_eq!(now(fs.write(&mut f, 0, &[7u8; 65_536])).unwrap_err(), Error::NotFound);
+    assert_eq!(now(fs.set_len(&mut f, 65_536)).unwrap_err(), Error::NotFound);
+    assert_eq!(now(fs.free_bytes()).expect("free"), before, "a dead handle took clusters with it");
 }

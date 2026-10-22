@@ -24,6 +24,7 @@ toyos-gpt = { path = "../../lib/gpt" }
 toyos-fat32 = { path = "../../lib/fat32" }
 bcachefs = { path = "../../lib/bcachefs" }
 diskserver = { path = "../diskserver" }
+toyos-blockdev = { path = "../../lib/blockdev" }
 
 [dev-dependencies]
 # The volumes the FAT role leaves, judged by the checker that shares no code
