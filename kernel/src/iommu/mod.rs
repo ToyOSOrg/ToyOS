@@ -166,12 +166,12 @@ pub enum DeviceSpace {
 }
 
 impl DeviceSpace {
-    /// One for whichever of `functions` is attached to it, or the machine's
-    /// own with the reason: the machine's own where any of them keeps it, so
-    /// the one attached reaches what its device addresses name, and where the
-    /// unit has no room above the CPU's addresses, since a driver in this
-    /// kernel comes up before the root bridges are declared. For a driver
-    /// **in this kernel**, whose addresses are the kernel's either way.
+    /// The machine's own, with the reason, for a driver **in this kernel**,
+    /// whose addresses are the kernel's either way: where any of `functions`
+    /// keeps the machine's addresses, and otherwise because every domain is
+    /// built clear of the root bridges' declared windows and a driver in this
+    /// kernel comes up before they are declared. So no driver here is given a
+    /// domain of its own (`issues/an-aarch64-cargo-run-boot-hands-over-no-pci-claim.md`).
     pub fn create(functions: &[crate::drivers::pci::PciDevice]) -> Self {
         for function in functions {
             let stream = StreamId::pci(function.bus, function.dev, function.func);

@@ -355,9 +355,9 @@ impl RootBridgeWindow {
 /// The most root bridges one declaration carries.
 pub const MAX_BRIDGES: usize = 16;
 /// The most memory windows one declaration carries, every root's together.
-/// Measured: QEMU's `virt` declares 2, q35 4, the ThinkPad T14 3; the AMD
-/// bench's one root more than 8, the per-root bound that refused it. Four
-/// times what any machine in reach needs is a bound no firmware should meet.
+/// Measured: QEMU's `virt` declares 2, q35 4, the ThinkPad T14 3 and the AMD
+/// bench's one root 16. Four times what any machine in reach needs is a
+/// bound no firmware should meet.
 pub const MAX_WINDOWS: usize = 64;
 
 /// The PCI host bridge `_OSC` Control field's bits ToyOS asks for (PCI
@@ -374,8 +374,7 @@ pub enum Osc {
     /// Its evaluation, or its answer, was refused: nothing is granted.
     Refused,
     /// Its query offered these Control bits: what a commit would be
-    /// granted. Stage B makes no commit; the hot-plug service that acts on
-    /// the control makes it.
+    /// granted. A commit is made only where its control is acted on.
     Offered(u32),
 }
 

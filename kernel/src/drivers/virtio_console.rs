@@ -232,8 +232,10 @@ pub fn init(devices: &[PciDevice]) -> bool {
     };
     log!("virtio-console: found at PCI {:02x}:{:02x}.{}", pci_dev.bus, pci_dev.dev, pci_dev.func);
 
-    // An address space of this device's own, holding one pool and nothing
-    // else — unless it does not offer ACCESS_PLATFORM: then it uses physical
+    // The space `DeviceSpace::create` answers, which is the machine's own
+    // while the root bridges are undeclared, as they always are this early
+    // (`issues/an-aarch64-cargo-run-boot-hands-over-no-pci-claim.md`) —
+    // unless it does not offer ACCESS_PLATFORM: then it uses physical
     // addresses whatever translates the bus, and a driver MUST give it physical
     // ones (virtio 1.2 §6.1); a domain's addresses would be other memory's.
     let space = if offered.features & VIRTIO_F_ACCESS_PLATFORM != 0 {

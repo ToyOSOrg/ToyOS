@@ -276,8 +276,8 @@ mod tests {
     /// A root with many windows is declared whole: the bound is the
     /// declaration's, not a root's. The legacy windows a laptop's firmware
     /// lists 16 KiB each from 0xc0000, a low and a high window, 18 in all,
-    /// past the per-root bound of 8 that refused the AMD bench's root; and
-    /// a root past the declaration's own bound is refused by name.
+    /// more than the AMD bench's 16; and a root past the declaration's own
+    /// bound is refused by name.
     #[test]
     fn a_root_with_many_windows_is_declared_and_only_an_absurd_one_refused() {
         let legacy = (0..16u32).map(|i| (0xc_0000 + i * 0x4000, 0x4000));
