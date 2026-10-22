@@ -394,9 +394,10 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libloading"
 version = "0.8.9"
-source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12#bad8d494d4faaa8dacbe8963ca27c1c538894953"
+source = "git+https://github.com/ToyOSOrg/rust_libloading?branch=toyos-sdk-0.12#da187608c2662c6e251386192ee1297c83d3ebd8"
 dependencies = [
  "cfg-if",
+ "toyos",
  "toyos-abi",
  "windows-link",
 ]

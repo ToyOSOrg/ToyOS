@@ -156,8 +156,10 @@ table** can still reach:
   `SYS_SHM_CREATE`, `SYS_INBOX_SETUP`;
 - **and four that reach past the process** — the whole filesystem by path
   (`SYS_OPEN`, `SYS_READDIR`, `SYS_DELETE`, `SYS_MKDIR`, `SYS_RMDIR`,
-  `SYS_RENAME`, `SYS_SYMLINK`, `SYS_READLINK`), `SYS_DLOPEN`/`SYS_DLSYM` over
-  the same paths, `SYS_SPAWN`, and `SYS_SHUTDOWN` — plus `SYS_SYSINFO`'s census.
+  `SYS_RENAME`, `SYS_SYMLINK`, `SYS_READLINK`), `SYS_SPAWN`, and
+  `SYS_SHUTDOWN` — plus `SYS_SYSINFO`'s census. `SYS_DLOPEN` was among them
+  and is not now: it loads an image the caller read through its own
+  namespace, and opens nothing by path.
 
 **Smallest decision:** the last group. **Recommendation:** keep the filesystem,
 `SYS_DLOPEN` and `SYS_SPAWN` ambient under question 2's ruling; make

@@ -509,7 +509,7 @@ impl AddressSpace {
         detached
     }
 
-    /// Discharges only in this address space — a caller whose mapping may be live elsewhere (e.g. `sys_dlopen`) must shoot down itself.
+    /// Discharges only in this address space — a caller whose mapping may be live elsewhere must shoot down itself.
     pub fn remap(&mut self, vaddr: UserAddr, phys: u64, prot: Prot) {
         let va = vaddr.raw();
         assert!(

@@ -291,10 +291,7 @@ pub(super) fn sys_sysinfo(syscap: RawHandle, out: &mut UserBytesMut) -> u64 {
             let demand = data.demand_pages.iter().map(|p| p.size() as u64).sum::<u64>();
             let mmap = data.mmap_regions.iter().filter_map(|r| r._pages.as_ref()).map(|p| p.size() as u64).sum::<u64>();
             let tls = data.elf.dynamic_tls_blocks.values().map(|p| p.size() as u64).sum::<u64>();
-            let libs: u64 = data.elf.loaded_libs.iter().map(|l| match &l.memory {
-                crate::elf::LibMemory::Owned(alloc) => alloc.size() as u64,
-                crate::elf::LibMemory::Shared { rw_alloc, .. } => rw_alloc.size() as u64,
-            }).sum();
+            let libs: u64 = data.elf.loaded_libs.iter().map(|l| l.memory.size() as u64).sum();
             demand + mmap + tls + libs
         } else {
             0

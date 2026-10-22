@@ -290,18 +290,23 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
             sys_rmdir(&path)
         }
         SYS_DLOPEN => {
-            let path = match ctx.user_str(UserAddr::new(a1), a2) { Ok(s) => s, Err(e) => return e.to_u64() };
+            let Ok(args) = ctx.copy_in::<toyos_abi::syscall::DlopenArgs>(UserAddr::new(a1)) else { return bad_addr };
+            let name = match ctx.user_str(UserAddr::new(args.name_ptr), args.name_len) { Ok(s) => s, Err(e) => return e.to_u64() };
             // Refused here rather than at the write, so a bad address never leaves a
             // library the caller was never told about.
-            let init_out = match a3 {
+            let init_out = match args.init_out {
                 0 => None,
                 raw => match UserAddr::checked(raw) {
                     Some(addr) => Some(addr),
                     None => return bad_addr,
                 },
             };
+            let image = match shared_image(args.image, args.image_len) {
+                Ok(image) => image,
+                Err(refused) => return refused,
+            };
             // ctx carries the copy-out: sys_dlopen writes init_out only once the load succeeds.
-            sys_dlopen(&ctx, &path, init_out)
+            sys_dlopen(&ctx, name, &image, init_out)
         }
         SYS_DLSYM => {
             let name = match ctx.user_str(UserAddr::new(a2), a3) { Ok(s) => s, Err(e) => return e.to_u64() };

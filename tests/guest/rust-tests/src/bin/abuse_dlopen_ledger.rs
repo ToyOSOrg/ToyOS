@@ -2,6 +2,7 @@
 //! name it does not hold is refused by name having registered nothing, and a
 //! name it holds still answers.
 
+use toyos::files::{self, DlOpenRefused};
 use toyos_abi::syscall::{self, SyscallError, MAX_LIBRARIES};
 
 const DIR: &str = "/tmp/dlopen-ledger";
@@ -10,9 +11,8 @@ const DIR: &str = "/tmp/dlopen-ledger";
 /// heap allocation.
 const ATTEMPTS: usize = 4 * MAX_LIBRARIES;
 
-/// One `PT_LOAD`, read-only and exactly 2 MiB long, so the image has no
-/// writable window and the shared-object cache keeps none of it: every load is
-/// its own, and nothing of this test outlives it.
+/// One `PT_LOAD`, read-only and exactly 2 MiB long: every load is its own,
+/// and nothing of this test outlives it.
 fn image() -> Vec<u8> {
     const LEN: usize = 0x1000;
     const SPAN: u64 = 2 * 1024 * 1024;
@@ -55,7 +55,7 @@ fn main() {
         // A name of its own for one file: the ledger is keyed by name.
         let name = format!("{DIR}/{i}.so");
         syscall::symlink(lib.as_bytes(), name.as_bytes()).unwrap_or_else(|e| panic!("link {name}: {e:?}"));
-        match syscall::dl_open(name.as_bytes()) {
+        match files::dl_open(name.as_bytes()) {
             Ok(handle) => {
                 first.get_or_insert((name, handle));
                 loaded += 1;
@@ -69,16 +69,16 @@ fn main() {
     let refusal = refusal.unwrap_or_else(|| {
         panic!("{loaded} names of one library all loaded: the library count is unbounded")
     });
-    assert_eq!(
-        refusal,
-        SyscallError::ResourceExhausted,
-        "the load after {loaded} was refused for another reason",
+    assert!(
+        matches!(refusal, DlOpenRefused::Load(SyscallError::ResourceExhausted)),
+        "the load after {loaded} was refused for another reason: {refusal:?}",
     );
     assert_eq!(held + loaded, MAX_LIBRARIES, "refused after {loaded} loads beside the {held} it started with");
     assert_eq!(libraries(), MAX_LIBRARIES, "the refused load is registered");
 
     let (name, handle) = first.expect("a library was loaded");
-    assert_eq!(syscall::dl_open(name.as_bytes()), Ok(handle), "a name already held was refused at the bound");
+    let again = files::dl_open(name.as_bytes()).unwrap_or_else(|e| panic!("a name already held was refused at the bound: {e:?}"));
+    assert_eq!(again, handle, "a name already held answered another module");
 
     println!("{loaded} libraries loaded and the next name refused; a name held still answers");
 }

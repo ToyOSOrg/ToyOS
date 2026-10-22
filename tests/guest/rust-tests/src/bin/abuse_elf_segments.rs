@@ -245,10 +245,9 @@ fn main() {
         ("dyn_rela_far", &[(DT_RELA, 0x7000_0000), (DT_RELASZ, 24)][..]),
         ("dyn_reloc_oob", &[(DT_RELA, 0x3800), (DT_RELASZ, 24)][..]),
         // Every written relocation type, not just RELATIVE, has to be bounds
-        // checked at load: once the module is cached the write lands in a
-        // *smaller* private allocation than the image, so the image's bounds do
-        // not cover it. DTPOFF64 with `r_sym == 0` writes `r_addend` verbatim,
-        // which makes the value file-chosen too.
+        // checked at load against the module's allocation. DTPOFF64 with
+        // `r_sym == 0` writes `r_addend` verbatim, which makes the value
+        // file-chosen too.
         ("dyn_dtpoff_oob", &[(DT_RELA, 0x3800), (DT_RELASZ, 24)][..]),
         ("dyn_globdat_oob", &[(DT_RELA, 0x3800), (DT_RELASZ, 24)][..]),
         // An in-range r_offset whose r_sym indexes past .dynsym: the symbol

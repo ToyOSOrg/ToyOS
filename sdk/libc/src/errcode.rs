@@ -9,6 +9,7 @@ pub(crate) const ENOENT: i32 = 2;
 pub(crate) const ESRCH: i32 = 3;
 pub(crate) const EIO: i32 = 5;
 pub(crate) const E2BIG: i32 = 7;
+pub(crate) const ENOEXEC: i32 = 8;
 pub(crate) const EBADF: i32 = 9;
 pub(crate) const ECHILD: i32 = 10;
 pub(crate) const EAGAIN: i32 = 11;
@@ -68,6 +69,17 @@ pub(crate) fn of(e: SyscallError) -> i32 {
         // A read of a connection met handles no frame announced: the peer broke its protocol.
         SyscallError::HandlesPending => EPROTO,
         _ => EINVAL,
+    }
+}
+
+/// Why a program or a library was not read into an image, as POSIX words it.
+pub(crate) fn of_image(refused: toyos::process::ImageRefused<toyos::files::Error>) -> i32 {
+    use toyos::process::ImageRefused;
+    match refused {
+        ImageRefused::Empty => ENOEXEC,
+        ImageRefused::Shrank => EIO,
+        ImageRefused::Memory(e) => of(e),
+        ImageRefused::Read(e) => of_files(e),
     }
 }
 

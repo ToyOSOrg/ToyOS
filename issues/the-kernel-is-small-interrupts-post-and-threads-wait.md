@@ -118,12 +118,14 @@ Beside that order, each waiting on something outside it:
       are deleted.
    5. **Spawn and dlopen from an image handle.** **Exit**: a program in
       `/apps` runs having been read by userland, its faults served from the
-      image object and not the VFS. **Partly done** (#536): spawn
-      (`SpawnArgs::image`). **Left**: dlopen. `SYS_DLOPEN` opens a path the
-      kernel serves, so no library on a file server loads
-      (`issues/a-package-cannot-ship-its-own-libraries.md`). Its exit: a
-      library in `/apps` loads having been read by userland, its faults
-      served from the image object, and `SYS_DLOPEN` takes no path.
+      image object and not the VFS; and `SYS_DLOPEN` takes no path.
+      **Done**: spawn (#536, `SpawnArgs::image`), and dlopen: libc's and the
+      SDK's `dlopen` read the library through `toyos::files::read_image`
+      wherever it is served, `SYS_DLOPEN` loads it from the image handle
+      (`DlopenArgs`) under a name it opens nothing by, and the kernel's
+      cross-process library cache is deleted, each process holding its own
+      library pages (orchestrator, under the memory design, whose later
+      stages bring sharing back through memory objects).
    6. **fileserver for DATA over diskserver.** **Done** (#536). #660 cut
       its guest tests and #890 keeps them cut.
       `apps_and_home_are_one_filesystem`'s claim, `/apps` and `/home` one

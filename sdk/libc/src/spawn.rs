@@ -330,7 +330,13 @@ fn start(path: &str, argv: &[u8], env: &[u8], fds: &[(u32, u32)]) -> Result<Proc
     };
     let mut direct = Vec::new();
     spawn::direct_env(env, crate::env::names_home(env), home, &mut direct);
-    request.direct(&direct, None).map_err(errno_of)
+    // A program on a file server is read here into an image the kernel pages
+    // the child from: the kernel opens only what it serves itself.
+    let image = match toyos::files::is_served(path.as_bytes()) {
+        true => Some(toyos::files::read_image(path.as_bytes()).map_err(crate::errcode::of_image)?),
+        false => None,
+    };
+    request.direct(&direct, image.as_ref()).map_err(errno_of)
 }
 
 fn errno_of(refused: Refused) -> i32 {
