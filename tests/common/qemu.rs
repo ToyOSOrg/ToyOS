@@ -1175,6 +1175,9 @@ pub struct BootOptions {
     /// the image is memoized on their names and bytes, so two boots staging
     /// different fixtures do not share one.
     pub extra_root_files: Vec<(String, Vec<u8>)>,
+    /// DATA's size in place of the profile's, for a boot that writes more
+    /// than [`NVME_SMALL`] holds, on a profile whose disk carries the image.
+    pub data_bytes: Option<u64>,
     /// Have QEMU record every PSCI call a vCPU makes into this file, with the
     /// calling CPU's affinity: the firmware side's own account of what the
     /// kernel asked of it.
@@ -1219,6 +1222,7 @@ impl Default for BootOptions {
             mute: false,
             ready_marker: DEFAULT_READY,
             extra_root_files: Vec::new(),
+            data_bytes: None,
             psci_trace: None,
             rtc_base: None,
         }
@@ -1452,7 +1456,11 @@ impl QemuInstance {
             &params,
             options.debug_wait,
         );
-        let storage = options.profile.shape().storage;
+        let storage = match (options.profile.shape().storage, options.data_bytes) {
+            (storage, None) => storage,
+            (Storage::Disk { .. }, Some(data_bytes)) => Storage::Disk { data_bytes },
+            (Storage::Stick { .. }, Some(_)) => panic!("[qemu] a DATA size is a profile's whose disk carries its image"),
+        };
         match storage {
             Storage::Stick { .. } => fs::write(&boot_image, image).expect("Failed to write test boot image"),
             Storage::Disk { data_bytes } => toyos_build::image::install(&image, &boot_image, data_bytes),

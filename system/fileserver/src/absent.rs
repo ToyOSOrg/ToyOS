@@ -102,6 +102,10 @@ impl Volume for Absent {
         Ok(Vec::new())
     }
 
+    fn room(&mut self) -> Result<toyos::fs::Room, Error> {
+        Ok(toyos::fs::Room { free: 0, unit: 1 })
+    }
+
     fn describe(&self) -> String {
         format!("absent: {}", self.why)
     }

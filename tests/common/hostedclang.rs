@@ -1,19 +1,17 @@
-//! clang and LLD built for ToyOS (`build/hostedclang.rs`), run inside a guest:
-//! M2 of `issues/toyos-builds-itself.md`.
+//! clang and LLD built for ToyOS (`build/hostedclang.rs`), installed by `pkg`
+//! and run inside a guest: M2 of `issues/toyos-builds-itself.md`.
 //!
-//! The binaries, clang's resource headers and the C sysroot's headers and
-//! `libtoyos_c.a` go on the ROOT of `tests/images/hostedclangcase.toml`, as fixtures
-//! beside the image's own files: ROOT is memory the loader filled, so the
-//! guest reads them with no disk and no server behind it. The job compiles
-//! `hello.c` there and has the driver link it, which starts LLD as a child,
-//! runs it, and compares each product with what the host's clang and LLD, of
-//! the same LLVM commit, made of the same input on the same command line.
+//! The package and its `SHA256SUMS` go on the ROOT of
+//! `tests/images/hostedclangcase.toml` as fixtures, beside `hello.c` and what
+//! the host's clang and LLD, of the same LLVM commit, made of it on the same
+//! command line. The job installs the package into `/apps` on DATA with
+//! `/system/bin/pkg`, compiles `hello.c` with the installed clang, has its
+//! driver link it, which starts LLD as a child, runs it, and compares each
+//! product with the host's.
 
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
-
 
 use super::{compile, qemu};
 use qemu::{BootOptions, QemuInstance};
@@ -27,51 +25,51 @@ const STAGED: &str = "share/hosted-clang";
 /// What `hello.c` prints.
 const HELLO: &str = "hello from a C program compiled and linked inside ToyOS";
 
-/// The host's half: its clang and LLD on `hello.c`, the guest's on the same
-/// file with the same arguments, and the guest's verdict on their bytes.
+/// DATA's size: the installed toolchain is about 300 MB, which the profile's
+/// 128 MiB does not hold.
+const DATA_BYTES: u64 = 1 << 30;
+
+/// The host's half: the package, its clang and LLD on `hello.c`, and the
+/// guest's verdict on the bytes its own made of the same file with the same
+/// arguments.
 pub fn hosted_clang_hello() -> Result<(), String> {
     let hosted = toyos_build::hostedclang::ensure(&compile::repo_root());
-    let c = compile::c_sysroot();
-    let (case, sources) = (compile::repo_root().join("tests/images/hostedclangcase.toml"), compile::repo_root().join("tests/guest/c"));
+    let sources = compile::repo_root().join("tests/guest/c");
+    let case = compile::repo_root().join("tests/images/hostedclangcase.toml");
 
     let scratch = super::lane::dir().join(JOB);
     fs::create_dir_all(&scratch).map_err(|e| format!("create {}: {e}", scratch.display()))?;
     let (object, linked) = (scratch.join("hello.o"), scratch.join("a.out"));
     for (args, to) in [(&["-c"][..], &object), (&[][..], &linked)] {
-        let mut cc = Command::new(&c.clang);
-        cc.args(c.args()).args(args).arg("hello.c").arg("-o").arg(to).current_dir(&sources);
+        let mut cc = Command::new(&hosted.c.clang);
+        cc.args(hosted.c.args()).args(args).arg("hello.c").arg("-o").arg(to).current_dir(&sources);
         host_run(cc)?;
     }
+    let packaged = hosted.package(&scratch.join("package"));
 
     let mut staged: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut stage = |rel: &str, from: &Path| {
-        let bytes = fs::read(from).unwrap_or_else(|e| panic!("read {}: {e}", from.display()));
+    let mut stage = |rel: &str, from: &std::path::Path| -> Result<(), String> {
+        let bytes = fs::read(from).map_err(|e| format!("read {}: {e}", from.display()))?;
         staged.push((format!("{STAGED}/{rel}"), bytes));
+        Ok(())
     };
-    stage("bin/clang", &hosted.dir.join("bin/clang"));
-    stage("bin/ld.lld", &hosted.dir.join("bin/ld.lld"));
-    stage("sysroot/lib/libtoyos_c.a", &c.dir.join("lib/libtoyos_c.a"));
-    stage("src/hello.c", &sources.join("hello.c"));
+    let archive = packaged.archive.file_name().and_then(|n| n.to_str()).expect("a package file name").to_string();
+    stage(&archive, &packaged.archive)?;
+    stage("SHA256SUMS", &packaged.sums)?;
+    stage("src/hello.c", &sources.join("hello.c"))?;
     for (name, product) in [("hello.o", &object), ("a.out", &linked)] {
         let bytes = fs::read(product).map_err(|e| format!("read {}: {e}", product.display()))?;
         let sha256: String = toyos_sha2_hw::sha256_digest(&bytes).iter().map(|b| format!("{b:02x}")).collect();
         eprintln!("  [{JOB}] the host's {name}: {} bytes, sha256 {sha256}", bytes.len());
-        stage(&format!("host/{name}"), product);
+        stage(&format!("host/{name}"), product)?;
     }
-    // clang finds its resource headers beside itself, `../lib/clang`.
-    for (rel, from) in tree(&hosted.dir.join("lib/clang")) {
-        stage(&format!("lib/clang/{rel}"), &from);
-    }
-    // The C headers alone: `include/c++` is libc++'s, which no C compile reads.
-    for (rel, from) in tree(&c.dir.join("include")).into_iter().filter(|(rel, _)| !rel.starts_with("c++/")) {
-        stage(&format!("sysroot/include/{rel}"), &from);
-    }
+    eprintln!("  [{JOB}] the package: {archive}, {}", fs::read_to_string(&packaged.sums).unwrap_or_default().trim());
     fs::remove_dir_all(&scratch).map_err(|e| format!("remove {}: {e}", scratch.display()))?;
 
-    let options = BootOptions { extra_root_files: staged, ..Default::default() };
+    let options = BootOptions { extra_root_files: staged, data_bytes: Some(DATA_BYTES), ..Default::default() };
     let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &compile::repo_root().join("tests/guest/rust-tests"), JOB);
     let mut qemu = QemuInstance::boot_with_options(&case, &[], &[(JOB.to_string(), bin)], options);
-    let result = qemu.run_test(&format!("test_rs_{JOB} /system/{STAGED}"), Duration::from_secs(600));
+    let result = qemu.run_test(&format!("test_rs_{JOB} /system/{STAGED} {archive}"), Duration::from_secs(900));
     if let Some(why) = &result.error {
         return Err(format!("{why}\nthe job said:\n{}", result.stdout));
     }
@@ -83,7 +81,7 @@ pub fn hosted_clang_hello() -> Result<(), String> {
             return Err(format!("the job never said `{said}`:\n{}", result.stdout));
         }
     }
-    for line in result.stdout.lines().filter(|l| l.contains(&format!("{JOB}: "))) {
+    for line in result.stdout.lines().filter(|l| l.contains(&format!("{JOB}: ")) || l.contains("pkg: ")) {
         eprintln!("  [{JOB}] {}", line.trim());
     }
     Ok(())
@@ -101,22 +99,4 @@ fn host_run(mut command: Command) -> Result<(), String> {
         ));
     }
     Ok(())
-}
-
-/// Every file under `dir`, by its path relative to `dir`.
-fn tree(dir: &Path) -> Vec<(String, std::path::PathBuf)> {
-    let mut files = Vec::new();
-    let mut pending = vec![dir.to_path_buf()];
-    while let Some(at) = pending.pop() {
-        for entry in fs::read_dir(&at).unwrap_or_else(|e| panic!("read {}: {e}", at.display())) {
-            let path = entry.unwrap_or_else(|e| panic!("read {}: {e}", at.display())).path();
-            if path.is_dir() {
-                pending.push(path);
-            } else {
-                let rel = path.strip_prefix(dir).expect("under the walked directory");
-                files.push((rel.to_string_lossy().into_owned(), path));
-            }
-        }
-    }
-    files
 }

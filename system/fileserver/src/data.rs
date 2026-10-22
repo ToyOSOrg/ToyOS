@@ -769,6 +769,10 @@ impl<D: Disk> Volume for DataVolume<D> {
         Ok(unwritten)
     }
 
+    fn room(&mut self) -> Result<toyos::fs::Room, Error> {
+        Ok(toyos::fs::Room { free: self.fs.free_bytes(), unit: BLOCK as u64 })
+    }
+
     fn describe(&self) -> String {
         let c = self.cache.counts();
         format!(
@@ -1419,5 +1423,20 @@ mod tests {
         let mut v = remount(v);
         assert_eq!(names(&mut v, "home/staged"), ["a", "z"]);
         assert_eq!(v.lstat(&to), Err(Error::NotFound));
+    }
+
+    /// What a write takes is what the room answers less, block for block,
+    /// and the room never names the blocks the reserve keeps for a delete.
+    #[test]
+    fn a_write_takes_its_blocks_out_of_the_room() {
+        let mut v = vol();
+        let n = v.open("apps/x", CREATE).unwrap();
+        let before = v.room().unwrap();
+        assert_eq!(before.unit, BLOCK as u64);
+        v.write(n, 0, &vec![7u8; 3 * BLOCK + 1]).unwrap();
+        assert_eq!(v.room().unwrap().free, before.free - 4 * BLOCK as u64);
+        v.close(n).unwrap();
+        let free = free_blocks(&mut v);
+        assert!(v.room().unwrap().free < free * BLOCK as u64, "the reserve's blocks were counted as room");
     }
 }

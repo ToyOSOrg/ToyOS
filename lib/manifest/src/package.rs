@@ -36,8 +36,8 @@ pub struct Package {
     /// The archive this directory was unpacked from, as the release's own
     /// `SHA256SUMS` spelled it.
     pub digest: String,
-    /// The whole guest path a launch starts, always a file directly inside
-    /// this package's own directory.
+    /// The whole guest path a launch starts, always a file inside this
+    /// package's own directory.
     pub program: String,
 }
 
@@ -181,13 +181,14 @@ pub fn package_of(path: &str) -> Option<&str> {
     Some(name)
 }
 
-/// Whether `program` names a file directly inside package `name`'s directory.
+/// Whether `program` names a file inside package `name`'s directory, by a path
+/// with no empty, `.` or `..` component.
 pub fn program_is_inside(name: &str, program: &str) -> bool {
     if name_is_bad(name) {
         return false;
     }
     let Some(file) = program.strip_prefix(&format!("{DIR}/{name}/")) else { return false };
-    !file.is_empty() && !file.contains('/') && file != "." && file != ".."
+    file.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
 }
 
 fn name_is_bad(name: &str) -> bool {
@@ -249,13 +250,17 @@ mod tests {
             "/system/bin/supervisor",
             "/apps/other/other",
             "/apps/gbae/../../system/bin/supervisor",
-            "/apps/gbae/sub/x",
+            "/apps/gbae/bin/../../other/other",
+            "/apps/gbae/bin//gbae",
+            "/apps/gbae/./gbae",
+            "/apps/gbae/bin/",
             "/apps/gbae/",
         ] {
             let bad = Package { program: program.into(), ..sample() };
             assert!(bad.render().is_err(), "{program} was accepted");
         }
         assert!(sample().render().is_ok());
+        assert!(Package { program: "/apps/gbae/bin/gbae".into(), ..sample() }.render().is_ok());
     }
 
     #[test]
