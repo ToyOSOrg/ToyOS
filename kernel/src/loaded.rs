@@ -1,9 +1,9 @@
 //! The partitions the loader named: the ROOT it read, the booted slot's
-//! volume, the log's, and the ESP firmware loaded it from (`Role::Boot`); and
-//! the PCI function that ESP's disk is on.
+//! volume, the log's, and the ESP firmware loaded it from (`Role::Boot`).
 //! This kernel reads none of them; it answers their GUIDs in the inventory, so
 //! the log and boot file servers find theirs and the supervisor knows the
-//! running slot, whoever drives the disk.
+//! running slot, whoever drives the disk. And the PCI function that ESP's disk
+//! is on, which the inventory marks as `Pci::boot_path`.
 
 use alloc::vec::Vec;
 

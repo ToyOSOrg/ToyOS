@@ -155,7 +155,7 @@ pub struct KernelArgs {
     /// The PCI function firmware loaded this image through: the controller of
     /// the boot disk, which the loader finds as the PCI I/O handle whose device
     /// path is the longest prefix of the boot device's, and asks its location
-    /// (UEFI 2.10 §14.4.1, `GetLocation()`). Absent on a machine that boots off
+    /// (UEFI 2.10 §14.4.13, `GetLocation()`). Absent on a machine that boots off
     /// no PCI device or whose firmware would not say.
     pub boot_function: BootFunction,
 }
@@ -178,7 +178,11 @@ pub struct BootFunction {
 pub const BOOT_FUNCTION_LINE: &str = "boot: firmware loaded this boot through PCI ";
 
 impl BootFunction {
+    /// # Panics
+    /// Where `present` is neither 0 nor 1: only a loader of this layout
+    /// writes the field, so another value is a bug in it.
     pub fn at(&self) -> Option<crate::inventory::PciAddr> {
+        assert!(self.present <= 1, "the loader wrote boot_function.present = {}", self.present);
         (self.present == 1).then_some(crate::inventory::PciAddr {
             segment: self.segment,
             bus: self.bus,
@@ -407,7 +411,12 @@ mod tests {
         let named = BootFunction { present: 1, bus: 3, dev: 0, func: 3, segment: 0, reserved: [0; 2] };
         let at = crate::inventory::PciAddr { segment: 0, bus: 3, dev: 0, func: 3 };
         assert_eq!(named.at(), Some(at));
-        assert_eq!(BootFunction { present: 2, ..named }.at(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "boot_function.present = 2")]
+    fn a_boot_function_neither_present_nor_absent_is_a_loader_bug() {
+        let _ = BootFunction { present: 2, ..BootFunction::default() }.at();
     }
 
     #[test]

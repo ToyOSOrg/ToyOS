@@ -4754,7 +4754,7 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
     Ok(())
 }
 
-/// The AMD bench's `03:00.4` left to a claim and driven by usbd: handed over
+/// The AMD bench's spare xHCI ([`spare_xhci`]) left to a claim and driven by usbd: handed over
 /// with its MSI-X table's BAR, armed through a present entry of its own table
 /// at its claim's vector, its No-Op answered by that interrupt; then aimed
 /// past its grant and recorded against the claim at the aimed address; then

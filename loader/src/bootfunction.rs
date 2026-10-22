@@ -16,9 +16,24 @@ use crate::efi::{DevicePath, Handle, LoadedImage, PciIo, SystemTable};
 pub fn of(system_table: &SystemTable) -> BootFunction {
     let none = BootFunction::default();
     let bs = system_table.boot_services();
-    let Ok(image) = bs.exclusive::<LoadedImage>(bs.image_handle()) else { return none };
-    let Some(device) = image.device() else { return none };
-    let Ok(path) = bs.get::<DevicePath>(device) else { return none };
+    let image = match bs.exclusive::<LoadedImage>(bs.image_handle()) {
+        Ok(image) => image,
+        Err(e) => {
+            println!("Boot function: this image's LoadedImage would not open ({e}), so none is named");
+            return none;
+        }
+    };
+    let Some(device) = image.device() else {
+        println!("Boot function: firmware names no device this image was loaded from, so none is named");
+        return none;
+    };
+    let path = match bs.get::<DevicePath>(device) {
+        Ok(path) => path,
+        Err(e) => {
+            println!("Boot function: the boot device has no device path ({e}), so none is named");
+            return none;
+        }
+    };
     let boot: alloc::vec::Vec<&[u8]> = path.nodes().collect();
     let Ok(handles) = bs.handles::<PciIo>() else {
         println!("Boot function: no handle carries PCI I/O, so none is named");
