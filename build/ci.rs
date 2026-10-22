@@ -761,6 +761,30 @@ pub(crate) const CONTROLS: &[Control] = &[
         Fails("a_source_registered_over_a_full_ring_after_a_reset_gets_its_first_event"),
         Fails("a_source_registered_over_a_full_ring_as_a_reset_arrives_gets_its_first_event"),
     ]),
+    // An end with two holders: a gate's waiter asleep after the release or
+    // the owner's departure, a copy unordered after a dead owner's, a write
+    // past another holder's shutdown, a byte read twice, and a look without
+    // the gate believed.
+    red(SDK, "transport-gate-no-want", Some("transport_loom"), &[Fails(
+        "a_holder_waiting_for_the_gate_is_woken_by_its_release",
+    )]),
+    red(SDK, "transport-contended-no-arm", Some("transport_loom"), &[Fails(
+        "a_holder_waiting_for_the_gate_is_woken_by_its_release",
+    )]),
+    red(SDK, "transport-want-before-arm", Some("transport_loom"), &[Fails(
+        "a_holder_waiting_for_the_gate_is_woken_by_its_release",
+    )]),
+    red(SDK, "transport-departure-no-pass", Some("transport_loom"), &[Fails(
+        "a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure",
+    )]),
+    red(SDK, "transport-departure-relaxed", Some("transport_loom"), &[Fails(
+        "a_holder_waiting_for_the_gate_is_woken_by_its_owners_departure",
+    )]),
+    red(SDK, "transport-shut-local", Some("transport_loom"), &[Fails(
+        "a_write_after_another_holders_shutdown_answers_shut",
+    )]),
+    red(SDK, "transport-no-resume", Some("transport_loom"), &[Fails("two_holders_read_each_byte_once")]),
+    red(SDK, "transport-ungated-violation", Some("transport_loom"), &[Fails("looks_without_the_gate_lose_no_wake")]),
     red(SDK, "transport-end-keeps-inflight", None, &[Fails(
         "transport::inflight::tests::an_end_answers_every_tag_once_and_a_late_completion_nothing",
     )]),

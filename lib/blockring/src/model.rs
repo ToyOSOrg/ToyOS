@@ -101,6 +101,15 @@ impl Word for Shared {
     fn swap(&self, value: u32, _: Ordering) -> u32 {
         self.0.replace(value)
     }
+    fn compare_exchange(&self, current: u32, new: u32, _: Ordering, _: Ordering) -> Result<u32, u32> {
+        let was = self.0.get();
+        if was == current {
+            self.0.set(new);
+            Ok(was)
+        } else {
+            Err(was)
+        }
+    }
 }
 
 /// How deep the model's rings are: shallow enough that a script fills and

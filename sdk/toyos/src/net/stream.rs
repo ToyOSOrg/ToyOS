@@ -6,18 +6,20 @@
 //! netstack fills and the send ring the client fills. The receive ring's `end`
 //! is the peer's FIN, [`RESET`], [`TIMED_OUT`] or [`UNREACHABLE`]; the send
 //! ring's is the client's shutdown; [`NODELAY`] is the client's Nagle switch
-//! (RFC 9293 §3.7.4).
+//! (RFC 9293 §3.7.4). The rest of the header is the session's: the gates, the
+//! receiving half's shutdown and the hang-up any holder saw.
 //!
 //! **The connection carries the request and its answer, then only doorbells
 //! and the hang-up** (virtio 1.2 §2.9). netstack rings a reader on the
 //! connection and a writer on the stream's bell, so neither takes the other's
 //! wake. A doorbell says "look", never "there are bytes".
 //!
-//! **A stream belongs to the process that connected or accepted it.** Its
-//! connection's one handle reaches its end, and descriptors on it share that
-//! one handle (`crate::fd`); a handle with no end here is refused by name and
-//! nothing is written on it
-//! (`issues/a-stream-cannot-move-between-processes.md`). An end goes once no
+//! **A stream belongs to the process that connected or accepted it.** The
+//! handle the connect or the accept answered reaches its end, and descriptors
+//! on it share that one handle (`crate::fd`); a handle with no end here is
+//! refused by name and nothing is written on it
+//! (`issues/a-stream-cannot-move-between-processes.md`). The end rings and
+//! waits through a handle of the connection of its own, and goes once no
 //! handle and no call is left. The table is the instance std links: a program
 //! that also links `toyos` itself and drives these functions holds ends std
 //! cannot see.
@@ -31,7 +33,7 @@ use toyos_abi::RawHandle;
 use crate::ipc::Connection;
 use crate::shm::SharedMemory;
 use crate::sync::Lock;
-use crate::transport::session::{self, Bells, Doorbell, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
+use crate::transport::session::{self, Bells, Doorbell, HungUp, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
 use crate::transport::stream::Place;
 use crate::transport::Span;
 use crate::OwnedHandle;
@@ -62,7 +64,14 @@ const fn line(n: usize) -> usize {
 /// The client's Nagle's algorithm: any word but 0 turns it off.
 pub const NODELAY: usize = line(10);
 
-pub const LAYOUT: Layout<RECEIVE_BYTES, SEND_BYTES, WORDS> = Layout::new::<{ line(8) }, { line(9) }>(
+pub const LAYOUT: Layout<RECEIVE_BYTES, SEND_BYTES, WORDS> = Layout::new::<
+    { line(8) },
+    { line(9) },
+    { line(11) },
+    { line(12) },
+    { line(13) },
+    { line(14) },
+>(
     Place::new::<{ line(0) }, { line(1) }, { line(2) }, { line(3) }, RECEIVE_RING>(),
     Place::new::<{ line(4) }, { line(5) }, { line(6) }, { line(7) }, SEND_RING>(),
 );
@@ -125,11 +134,13 @@ struct End {
     region: RawHandle,
     /// The region's mapping.
     base: usize,
+    /// The end's own handle of the connection, which every call rings and
+    /// waits through and only [`free`] closes: a descriptor closed under a call
+    /// hangs nothing up.
+    connection: RawHandle,
     bell: RawHandle,
     peer: ([u8; 4], u16),
     local_port: u16,
-    /// `shutdown` was asked for the receiving half.
-    read_shut: bool,
     handles: u32,
     calls: u32,
 }
@@ -221,11 +232,12 @@ impl Table {
     }
 }
 
-/// Lets go of an end no handle or call reaches: its halves, its bell and its
-/// region, whose mapping goes with its handle.
+/// Lets go of an end no handle or call reaches: its halves, its connection,
+/// its bell and its region, whose mapping goes with its handle.
 fn free(slot: usize, end: End) {
     *HALVES[slot].rx.lock() = Kept::Empty;
     *HALVES[slot].tx.lock() = Kept::Empty;
+    syscall::close(end.connection);
     syscall::close(end.bell);
     syscall::close(end.region);
     TABLE.lock().unreserve(slot);
@@ -300,8 +312,6 @@ impl fmt::Display for Misuse {
 struct Call {
     slot: usize,
     end: End,
-    /// The handle the call came in through: a handle of the connection.
-    connection: RawHandle,
 }
 
 impl Call {
@@ -317,14 +327,14 @@ impl Call {
     }
 
     fn bells(&self) -> Doorbells {
-        Doorbells { connection: self.connection, bell: self.end.bell }
+        Doorbells { connection: self.end.connection, bell: self.end.bell }
     }
 }
 
 /// Runs `f` as a call through `handle`, its end kept until it returns.
 fn call<R>(handle: RawHandle, f: impl FnOnce(&Call) -> R) -> Result<R, Refused> {
     let (slot, end) = TABLE.lock().call(handle).ok_or(Refused::NotThisProcess(handle))?;
-    let answer = f(&Call { slot, end, connection: handle });
+    let answer = f(&Call { slot, end });
     let freed = TABLE.lock().returned(slot);
     if let Some(end) = freed {
         free(slot, end);
@@ -344,8 +354,8 @@ impl<T> session::Lock<T> for Half<T> {
     }
 }
 
-/// A call's doorbells: the connection it came in through and the stream's
-/// bell.
+/// A call's doorbells: the end's own handle of the connection and the
+/// stream's bell.
 struct Doorbells {
     connection: RawHandle,
     bell: RawHandle,
@@ -400,9 +410,57 @@ impl Bells for Doorbells {
         }
     }
 
-    fn ring(&self) {
-        // Full is rung already, and gone is the next look's to find.
-        let _ = syscall::write_nonblock(self.connection, &[1]);
+    fn wait_gate(&self, bell: Doorbell, until: Option<u64>, owner: u16) -> Waited {
+        let way = if bell == Doorbell::Connection { "read" } else { "write" };
+        gate_wait(until, toyos_abi::clock::nanos_since_boot, |by| self.wait(bell, Some(by)), |waited| {
+            crate::warn!(
+                "toyos::net: a stream's {way} has waited {} s for holder {owner}'s gate: that holder's call has not returned",
+                waited / 1_000_000_000
+            );
+        })
+    }
+
+    fn ring(&self) -> Result<(), HungUp> {
+        match syscall::write_nonblock(self.connection, &[1]) {
+            Err(SyscallError::Gone) => Err(HungUp),
+            // Full is rung already, and anything else is no hang-up: the next
+            // call's wait answers whatever it is.
+            _ => Ok(()),
+        }
+    }
+}
+
+/// How long a wait for another holder's gate goes before it is reported as
+/// stalled, and between reports. A report, never an end: the call waits as
+/// long as its caller asked, and its owner's copy may be stretched by
+/// preemption or a page fault on its own buffer, which nothing here can tell
+/// from a stall. Policy, chosen as long beside one copy of a ring.
+const GATE_STALL_NANOS: u64 = 10_000_000_000;
+
+/// A wait for a gate, until `until` or, given none, until rung: each
+/// [`GATE_STALL_NANOS`] it lasts is reported to `stalled`, with how long it
+/// has waited, and the wait goes on.
+fn gate_wait(
+    until: Option<u64>,
+    now: impl Fn() -> u64,
+    mut wait: impl FnMut(u64) -> Waited,
+    mut stalled: impl FnMut(u64),
+) -> Waited {
+    let started = now();
+    let mut report = started.saturating_add(GATE_STALL_NANOS);
+    loop {
+        let by = until.map_or(report, |until| until.min(report));
+        match wait(by) {
+            Waited::TimedOut if until.is_some_and(|until| now() >= until) => return Waited::TimedOut,
+            Waited::TimedOut => {
+                let at = now();
+                if at >= report {
+                    stalled(at.saturating_sub(started));
+                    report = at.saturating_add(GATE_STALL_NANOS);
+                }
+            }
+            answer => return answer,
+        }
     }
 }
 
@@ -428,9 +486,6 @@ impl Wait {
 pub fn read(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<usize, Refused> {
     let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     call(handle, |call| {
-        if call.end.read_shut {
-            return Ok(0);
-        }
         let base = call.end.base;
         let out = buf.as_mut_ptr();
         let copy = |span: Span, at: usize| {
@@ -469,17 +524,14 @@ pub fn shutdown_write(handle: RawHandle) -> Result<(), Refused> {
 
 /// The receiving half reads no more: every read answers 0.
 pub fn shutdown_read(handle: RawHandle) -> Result<(), Refused> {
-    let mut table = TABLE.lock();
-    let slot = table.find(handle).ok_or(Refused::NotThisProcess(handle))?;
-    table.end(slot).read_shut = true;
-    Ok(())
+    call(handle, |call| session::shutdown_read(call.words(), &Half(&call.halves().rx), &call.bells()))
 }
 
 /// Nagle's algorithm off or on, netstack rung to read it.
 pub fn set_nodelay(handle: RawHandle, nodelay: bool) -> Result<(), Refused> {
     call(handle, |call| {
         call.words()[NODELAY].store(u32::from(nodelay), Ordering::Relaxed);
-        call.bells().ring();
+        LAYOUT.ring(call.words(), &call.bells());
     })
 }
 
@@ -514,9 +566,8 @@ pub fn doorbell(handle: RawHandle, way: Way) -> Result<RawHandle, Refused> {
 pub fn register(handle: RawHandle, receive: bool, send: bool) -> Result<(), Refused> {
     call(handle, |call| {
         let (rx, tx) = (Half(&call.halves().rx), Half(&call.halves().tx));
-        session::register(call.words(), receive.then_some(&rx), send.then_some(&tx), &call.bells())
-            .map_err(|_| Refused::Aborted)
-    })?
+        session::register(call.words(), receive.then_some(&rx), send.then_some(&tx), &call.bells());
+    })
 }
 
 /// A poll of one way that found it not ready: its end kept until
@@ -525,7 +576,6 @@ pub fn register(handle: RawHandle, receive: bool, send: bool) -> Result<(), Refu
 pub struct Watching {
     slot: usize,
     end: End,
-    connection: RawHandle,
     way: Way,
     watching: session::Watching,
 }
@@ -542,14 +592,14 @@ pub enum Poll {
 /// again.
 pub fn watch(handle: RawHandle, way: Way) -> Result<Poll, Refused> {
     let (slot, end) = TABLE.lock().call(handle).ok_or(Refused::NotThisProcess(handle))?;
-    let call = Call { slot, end, connection: handle };
+    let call = Call { slot, end };
     let polled = match way {
         Way::Receive => session::watch(call.words(), &Half(&call.halves().rx), &call.bells()),
         Way::Send => session::watch(call.words(), &Half(&call.halves().tx), &call.bells()),
     };
     match polled {
-        Ok(Polled::Watching(watching)) => Ok(Poll::Watching(Watching { slot, end, connection: handle, way, watching })),
-        Ok(Polled::Ready) | Err(_) => {
+        Polled::Watching(watching) => Ok(Poll::Watching(Watching { slot, end, way, watching })),
+        Polled::Ready => {
             ended(slot);
             Ok(Poll::Ready)
         }
@@ -558,14 +608,14 @@ pub fn watch(handle: RawHandle, way: Way) -> Result<Poll, Refused> {
 
 /// The end of a poll [`watch`] counted in: whether its way is ready now.
 pub fn unwatch(watching: Watching) -> bool {
-    let Watching { slot, end, connection, way, watching } = watching;
-    let call = Call { slot, end, connection };
+    let Watching { slot, end, way, watching } = watching;
+    let call = Call { slot, end };
     let ready = match way {
         Way::Receive => session::unwatch(call.words(), &Half(&call.halves().rx), &call.bells(), watching),
         Way::Send => session::unwatch(call.words(), &Half(&call.halves().tx), &call.bells(), watching),
     };
     ended(slot);
-    ready.unwrap_or(true)
+    ready
 }
 
 fn ended(slot: usize) {
@@ -701,11 +751,22 @@ fn open<A: Answered>(
         let (rx, tx) = session::client(words, LAYOUT);
         let lent = region.share().map_err(|_| NetError::Io)?;
         let (answer, bell, connection) = ask(NetstackConn::connect()?, lent)?;
+        let bell = OwnedHandle(bell);
+        let own = syscall::dup(connection.0.raw()).map_err(|_| NetError::ResourceExhausted)?;
         *HALVES[slot].rx.lock() = Kept::Held(rx);
         *HALVES[slot].tx.lock() = Kept::Held(tx);
         let (region, base) = region.into_raw();
         let peer = answer.peer().unwrap_or(peer);
-        let end = End { region, base: base as usize, bell, peer, local_port: answer.local_port(), read_shut: false, handles: 0, calls: 0 };
+        let end = End {
+            region,
+            base: base as usize,
+            connection: own,
+            bell: bell.into_raw(),
+            peer,
+            local_port: answer.local_port(),
+            handles: 0,
+            calls: 0,
+        };
         Ok((connection.0.into_raw(), end, answer))
     })();
     let mut table = TABLE.lock();
@@ -730,23 +791,61 @@ mod tests {
     }
 
     fn end() -> End {
-        End { region: h(1), base: 0x20_0000, bell: h(2), peer: ([192, 0, 2, 2], 80), local_port: 49_152, read_shut: false, handles: 0, calls: 0 }
+        End { region: h(1), base: 0x20_0000, connection: h(3), bell: h(2), peer: ([192, 0, 2, 2], 80), local_port: 49_152, handles: 0, calls: 0 }
     }
 
-    /// The end goes only with its handle and its last call.
+    /// The end goes only with its handle and its last call, and so does its
+    /// own handle of the connection, which [`free`] closes: the last
+    /// descriptor closed under a call hangs the session up only once the call
+    /// returns.
     #[test]
     fn an_end_goes_with_its_handle_and_its_last_call() {
         let mut table = Table::new();
         let slot = table.reserve().unwrap();
         table.enter(slot, end(), h(10));
         assert_eq!(table.find(h(10)), Some(slot), "the handle reaches the end");
-        let (called, _) = table.call(h(10)).unwrap();
+        let (called, during) = table.call(h(10)).unwrap();
+        assert_eq!(during.connection, h(3), "the call rings and waits through the end's own handle");
         assert_eq!(table.forget(h(10)), Some(None), "a call is left");
         assert_eq!(table.find(h(10)), None, "the handle reaches nothing");
         assert_eq!(table.returned(called), Some(End { handles: 0, calls: 0, ..end() }), "the last call frees it");
         assert_eq!(table.reserve(), Some(slot + 1), "a freed slot is not taken before its halves are cleared");
         table.unreserve(slot);
         assert_eq!(table.slots[slot], Slot::Free);
+    }
+
+    /// A wait for a gate that lasts is reported each stall interval and goes
+    /// on until rung; one with a deadline ends at the deadline, reported only
+    /// where it reached a stall interval first.
+    #[test]
+    fn a_gate_wait_that_lasts_is_reported_and_goes_on() {
+        let clock = core::cell::Cell::new(0u64);
+        let mut reports = Vec::new();
+        let mut waits = 0;
+        let answer = gate_wait(None, || clock.get(), |by| {
+            waits += 1;
+            clock.set(by);
+            if waits == 4 { Waited::Rung } else { Waited::TimedOut }
+        }, |waited| reports.push(waited));
+        assert_eq!(answer, Waited::Rung);
+        assert_eq!(reports, [GATE_STALL_NANOS, 2 * GATE_STALL_NANOS, 3 * GATE_STALL_NANOS]);
+
+        clock.set(0);
+        let mut reports = Vec::new();
+        let until = GATE_STALL_NANOS + GATE_STALL_NANOS / 2;
+        let answer = gate_wait(Some(until), || clock.get(), |by| {
+            clock.set(by);
+            Waited::TimedOut
+        }, |waited| reports.push(waited));
+        assert_eq!(answer, Waited::TimedOut);
+        assert_eq!(reports, [GATE_STALL_NANOS]);
+
+        clock.set(0);
+        let early = gate_wait(Some(5), || clock.get(), |by| {
+            clock.set(by);
+            Waited::TimedOut
+        }, |_| panic!("a wait shorter than a stall interval was reported"));
+        assert_eq!(early, Waited::TimedOut);
     }
 
     /// A handle no end was made for is no stream, and forgetting it frees

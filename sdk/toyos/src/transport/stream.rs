@@ -25,7 +25,12 @@
 //!
 //! **The peer's want words cost at most a doorbell**: any value but 0 is set.
 //!
+//! **An end may have several holders**, which take turns under a gate of the
+//! session's. Such a holder keeps no cursor between turns: it [`resume`]s its
+//! own from the word the last holder stored, and refuses one past the lap.
+//!
 //! [`arm`]: Consumer::arm
+//! [`resume`]: Consumer::resume
 
 use core::sync::atomic::Ordering;
 
@@ -77,6 +82,12 @@ pub struct Place<const C: u32, const N: usize> {
 impl<const C: u32, const N: usize> Place<C, N> {
     /// What a cursor counts modulo.
     const LAP: u32 = C.wrapping_mul(2);
+
+    /// The cursor at word `at`, as an end's own last stored it.
+    fn own<W: Word>(page: &[W; N], at: usize) -> Result<u32, Violation> {
+        let cursor = word(page, at).load(Ordering::Acquire);
+        if cursor < Self::LAP { Ok(cursor) } else { Err(Violation::OwnCursor) }
+    }
 
     pub const fn new<const HEAD: usize, const TAIL: usize, const DATA: usize, const ROOM: usize, const BASE: usize>(
     ) -> Self {
@@ -143,6 +154,22 @@ impl<const C: u32, const N: usize> Producer<C, N> {
     pub fn new<W: Word>(page: &[W; N], place: Place<C, N>) -> Self {
         word(page, place.tail).store(0, Ordering::Release);
         Self { place, local: 0, published: 0, room: C }
+    }
+
+    /// The end at `place` as its holders left it, its tail resumed before each
+    /// use ([`Self::resume`]).
+    pub const fn joining(place: Place<C, N>) -> Self {
+        Self { place, local: 0, published: 0, room: 0 }
+    }
+
+    /// Takes up the tail the end's last holder stored, nothing advanced past it.
+    pub fn resume<W: Word>(&mut self, page: &[W; N]) -> Result<(), Violation> {
+        if cfg!(feature = "transport-no-resume") {
+            return Ok(());
+        }
+        let tail = Place::<C, N>::own(page, self.place.tail)?;
+        *self = Self { local: tail, published: tail, room: 0, ..*self };
+        Ok(())
     }
 
     /// How many bytes past the tail may be written, the consumer's head read
@@ -224,6 +251,22 @@ impl<const C: u32, const N: usize> Consumer<C, N> {
         Self { place, local: 0, released: 0, ready: 0 }
     }
 
+    /// The end at `place` as its holders left it, its head resumed before each
+    /// use ([`Self::resume`]).
+    pub const fn joining(place: Place<C, N>) -> Self {
+        Self { place, local: 0, released: 0, ready: 0 }
+    }
+
+    /// Takes up the head the end's last holder stored, nothing advanced past it.
+    pub fn resume<W: Word>(&mut self, page: &[W; N]) -> Result<(), Violation> {
+        if cfg!(feature = "transport-no-resume") {
+            return Ok(());
+        }
+        let head = Place::<C, N>::own(page, self.place.head)?;
+        *self = Self { local: head, released: head, ready: 0, ..*self };
+        Ok(())
+    }
+
     /// How many bytes past the head are published, the producer's tail read
     /// again.
     pub fn ready<W: Word>(&mut self, page: &[W; N]) -> Result<u32, Violation> {
@@ -273,14 +316,14 @@ impl<const C: u32, const N: usize> Consumer<C, N> {
 
     /// The producer asked to be rung back: `true`, and its want exchanged for
     /// 0, if it is set and the producer has room past what this end released,
-    /// or `fatal`. With neither, nothing is exchanged and the want waits for
-    /// the next release.
-    pub fn ring_back<W: Word>(&self, page: &[W; N], fatal: bool) -> Result<bool, Violation> {
+    /// or its direction `answers` without room. With neither, nothing is
+    /// exchanged and the want waits for the next release.
+    pub fn ring_back<W: Word>(&self, page: &[W; N], answers: bool) -> Result<bool, Violation> {
         let tail = word(page, self.place.tail).load(Ordering::Acquire);
         let released = self.released;
         let unreleased =
             Place::<C, N>::reach(tail, |tail| Place::<C, N>::distance(released, tail), Violation::TailPastDepth)?;
-        Ok((unreleased < C || fatal) && word(page, self.place.room).swap(0, WAKE) != 0)
+        Ok((unreleased < C || answers) && word(page, self.place.room).swap(0, WAKE) != 0)
     }
 }
 
@@ -425,9 +468,11 @@ mod tests {
         }
     }
 
-    /// Whatever a producer stores in any of the four words, the consumer holds
-    /// at most the ring past what it released, every span it is handed lies in
-    /// the ring, and a tail it does not believe is `TailPastDepth`.
+    /// Whatever a producer, or another holder of this end, stores in any of
+    /// the four words, the consumer holds at most the ring past what it
+    /// released, every span it is handed lies in the ring, a tail it does not
+    /// believe is `TailPastDepth` and a head it resumes past the lap is
+    /// `OwnCursor`.
     fn hostile_producer<const C: u32>(seed: u64) {
         let page = page();
         let mut rx = Consumer::new(&page, place::<C>());
@@ -435,7 +480,14 @@ mod tests {
         let mut held = 0;
         for _ in 0..2000 {
             page[rng.below(4) as usize].store(hostile::<C>(&mut rng), Ordering::Release);
-            let seen = match rng.below(4) {
+            let seen = match rng.below(5) {
+                4 => {
+                    match rx.resume(&page) {
+                        Ok(()) => held = 0,
+                        Err(violation) => assert_eq!(violation, Violation::OwnCursor),
+                    }
+                    continue;
+                }
                 0 => rx.ready(&page),
                 1 => rx.arm(&page),
                 2 => {
@@ -475,10 +527,11 @@ mod tests {
         }
     }
 
-    /// Whatever a consumer stores in any of the four words, the producer
-    /// writes at most the ring past the head it was shown, every span it is
-    /// handed lies in the ring, and a head it does not believe is
-    /// `HeadPastTail`.
+    /// Whatever a consumer, or another holder of this end, stores in any of
+    /// the four words, the producer writes at most the ring past the head it
+    /// was shown, every span it is handed lies in the ring, a head it does not
+    /// believe is `HeadPastTail` and a tail it resumes past the lap is
+    /// `OwnCursor`.
     fn hostile_consumer<const C: u32>(seed: u64) {
         let page = page();
         let mut tx = Producer::new(&page, place::<C>());
@@ -486,7 +539,14 @@ mod tests {
         let mut pending = 0;
         for _ in 0..2000 {
             page[rng.below(4) as usize].store(hostile::<C>(&mut rng), Ordering::Release);
-            let seen = match rng.below(4) {
+            let seen = match rng.below(5) {
+                4 => {
+                    match tx.resume(&page) {
+                        Ok(()) => pending = 0,
+                        Err(violation) => assert_eq!(violation, Violation::OwnCursor),
+                    }
+                    continue;
+                }
                 0 => tx.room(&page),
                 1 => tx.arm(&page),
                 2 => {
@@ -564,6 +624,27 @@ mod tests {
             assert_eq!(rx.ready(&page), Ok(1));
             assert!(rx.advance(1));
             let _ = rx.release(&page);
+        }
+    }
+
+    /// A holder resumes its own cursor from any position below the lap, and
+    /// refuses the lap and past it.
+    #[test]
+    fn a_resumed_cursor_is_believed_below_the_lap_and_no_further() {
+        const C: u32 = 5;
+        let page = page();
+        let (mut tx, mut rx) = (Producer::joining(place::<C>()), Consumer::joining(place::<C>()));
+        for at in [0, 1, C, 2 * C - 1] {
+            page[0].store(at, Ordering::Release);
+            page[1].store(at, Ordering::Release);
+            assert_eq!((rx.resume(&page), tx.resume(&page)), (Ok(()), Ok(())), "a cursor at {at}");
+            assert_eq!((rx.ready(&page), tx.room(&page)), (Ok(0), Ok(C)), "the ring at {at} is empty");
+        }
+        for at in [2 * C, 2 * C + 1, u32::MAX] {
+            page[0].store(at, Ordering::Release);
+            page[1].store(at, Ordering::Release);
+            assert_eq!(rx.resume(&page), Err(Violation::OwnCursor), "a head at {at}");
+            assert_eq!(tx.resume(&page), Err(Violation::OwnCursor), "a tail at {at}");
         }
     }
 
