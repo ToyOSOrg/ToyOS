@@ -319,9 +319,8 @@ crate::user_safe! {
     /// [`Rights::DUP`]: crate::handle::Rights::DUP
     #[derive(Clone, Copy)]
     pub struct SpawnArgs {
-        /// The program: the file the kernel opens and pages the child from — its
-        /// libraries are found beside it — or, with an `image`, the path the caller
-        /// read that from. **Never `argv[0]`**, which is the child's first argument
+        /// The program: the file the kernel opens and pages the child from, or,
+        /// with an `image`, the path the caller read that from. **Never `argv[0]`**, which is the child's first argument
         /// and the name it goes by, and which nothing opens.
         pub path_ptr: u64,
         pub path_len: u64,
@@ -351,7 +350,7 @@ crate::user_safe! {
         /// hold, or an object that is no memory the kernel allocated. The object
         /// stays the caller's: what the kernel reads of it, and when, is
         /// `kernel/src/file_backing.rs`'s (`SharedImage`). `path` is then opened by
-        /// nobody, and the libraries are found in `/system/lib` alone.
+        /// nobody.
         pub image: u64,
         pub image_len: u64,
         /// The process the child is placed under, whose end takes it down: a
@@ -364,6 +363,26 @@ crate::user_safe! {
         ///
         /// [`Rights::WRITE`]: crate::handle::Rights::WRITE
         pub place: u64,
+    }
+}
+
+crate::user_safe! {
+    /// Arguments for the `SYS_DLOPEN` syscall, passed as a single pointer.
+    #[derive(Clone, Copy)]
+    pub struct DlopenArgs {
+        /// The name the module goes by: what `SYS_QUERY_MODULES` answers for
+        /// it, and what a second load is known by, which answers the module
+        /// already loaded and runs no initialiser again. Nothing opens it.
+        pub name_ptr: u64,
+        pub name_len: u64,
+        /// The library's bytes, in a shared memory object the caller read them
+        /// into, as [`SpawnArgs::image`] names a program's: a handle carrying
+        /// `MAP`, and how many of its first bytes the library is.
+        pub image: u64,
+        pub image_len: u64,
+        /// Where the kernel writes the module's `[.init_array address, count]`,
+        /// or 0 for nowhere.
+        pub init_out: u64,
     }
 }
 
@@ -2118,11 +2137,18 @@ pub fn readlink(path: &[u8], buf: &mut [u8]) -> Result<usize, SyscallError> {
 /// name it does not hold past it is `ResourceExhausted`.
 pub const MAX_LIBRARIES: usize = 1024;
 
-/// Load a shared library (.so) into the current process.
-/// Runs .init_array constructors after loading.
-pub fn dl_open(path: &[u8]) -> Result<u64, SyscallError> {
+/// Load the shared library `image`'s first `image_len` bytes hold into this
+/// process as `name` ([`DlopenArgs`]), and run its `.init_array`.
+pub fn dl_open(name: &[u8], image: RawHandle, image_len: u64) -> Result<u64, SyscallError> {
     let mut init_info: [u64; 2] = [0; 2];
-    let handle = check(syscall(SYS_DLOPEN, path.as_ptr() as u64, path.len() as u64, init_info.as_mut_ptr() as u64, 0))?;
+    let args = DlopenArgs {
+        name_ptr: name.as_ptr() as u64,
+        name_len: name.len() as u64,
+        image: u64::from(image.0),
+        image_len,
+        init_out: init_info.as_mut_ptr() as u64,
+    };
+    let handle = dl_open_args(&args)?;
     // Run .init_array constructors (e.g. EH frame finder registration in cdylib std)
     let init_array_ptr = init_info[0];
     let init_count = init_info[1];
@@ -2143,6 +2169,12 @@ pub fn dl_open(path: &[u8]) -> Result<u64, SyscallError> {
         }
     }
     Ok(handle)
+}
+
+/// `SYS_DLOPEN` as `args` say, running nothing it loads: [`dl_open`]'s call,
+/// for a caller that names `init_out` itself.
+pub fn dl_open_args(args: &DlopenArgs) -> Result<u64, SyscallError> {
+    check(syscall(SYS_DLOPEN, args as *const DlopenArgs as u64, 0, 0, 0))
 }
 
 /// Look up a symbol in a loaded shared library. Returns the address.

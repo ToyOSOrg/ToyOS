@@ -3,8 +3,9 @@
 //! two ways: handle identity (64 loads of one path return one handle, not
 //! 0, 1, 2, …), and the ELF/POSIX same-object guarantee (a TLS global written
 //! through the first handle's symbol is read back through the last's — one
-//! module, one TLS block; a fresh second module would read zero). Raw `dl_*`
-//! syscalls, not `libloading`, so the handle integer is observable.
+//! module, one TLS block; a fresh second module would read zero). The SDK's
+//! `dl_open` and raw `dl_sym`, not `libloading`, so the handle integer is
+//! observable.
 
 use std::sync::{Arc, Barrier};
 
@@ -25,7 +26,7 @@ fn main() {
 /// The mechanism: repeated loads of one name are one handle.
 fn handle_identity() -> Vec<u64> {
     let handles: Vec<u64> = (0..LOADS)
-        .map(|i| syscall::dl_open(LIB).unwrap_or_else(|e| panic!("dlopen #{i}: {e:?}")))
+        .map(|i| toyos::files::dl_open(LIB).unwrap_or_else(|e| panic!("dlopen #{i}: {e:?}")))
         .collect();
 
     assert!(
@@ -80,7 +81,7 @@ fn one_name_under_contention() {
             let line = Arc::clone(&line);
             std::thread::spawn(move || {
                 line.wait();
-                syscall::dl_open(OTHER_LIB).unwrap_or_else(|e| panic!("racer {i}: {e:?}"))
+                toyos::files::dl_open(OTHER_LIB).unwrap_or_else(|e| panic!("racer {i}: {e:?}"))
             })
         })
         .collect();

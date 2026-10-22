@@ -1,7 +1,8 @@
 //! Files by path, and the descriptors that name open ones, wherever they are
 //! served: the kernel serves `/system` and `/tmp`, and every other directory a
 //! process may reach is a capability in its namespace, `fs:<directory>`,
-//! served by a file server ([`crate::fs`]).
+//! served by a file server ([`crate::fs`]). A program or a library is read
+//! here into an image the kernel pages it from ([`read_image`]).
 //!
 //! **A path goes to the capability with the longest matching prefix**, at
 //! most [`MAX_CAPABILITY_DEPTH`] components deep, relative to it; a path under
@@ -23,6 +24,7 @@ use toyos_abi::syscall::{SeekFrom, Stat, SyscallError};
 
 use crate::fd::{self, Fd};
 use crate::fs;
+use crate::process::{Image, ImageRefused};
 use crate::OwnedHandle;
 
 /// The deepest directory a capability names, in components.
@@ -246,6 +248,34 @@ pub fn read_dir(path: &[u8]) -> Result<Vec<u8>, Error> {
         }
         out.resize(n, 0);
     }
+}
+
+/// The whole of the file at `path`, read into a memory object of this
+/// process's own, wherever it is served: what a spawn names as its program
+/// (`SpawnArgs::image`) and [`dl_open`] loads, since the kernel opens neither.
+pub fn read_image(path: &[u8]) -> Result<Image, ImageRefused<Error>> {
+    let fd = open(path, Open { read: true, cloexec: true, ..Open::default() }).map_err(ImageRefused::Read)?;
+    let image = match fstat(fd) {
+        Ok(stat) => Image::read(stat.size, |buf| read(fd, buf)),
+        Err(e) => Err(ImageRefused::Read(e)),
+    };
+    // A refused close leaves nothing this read depends on.
+    let _ = fd::close(fd);
+    image
+}
+
+/// Load the shared library at `path` into this process, under its absolute
+/// path as the name it goes by, and run its initialisers: the module's handle.
+/// A second load of one name answers the module the first loaded.
+pub fn dl_open(path: &[u8]) -> Result<u64, ImageRefused<Error>> {
+    let text = core::str::from_utf8(path).map_err(|_| ImageRefused::Read(Error::NotUtf8))?;
+    let mut cwd = alloc::vec![0u8; toyos_abi::syscall::MAX_PATH];
+    let n = toyos_abi::syscall::getcwd(&mut cwd);
+    let name = absolute(&String::from_utf8_lossy(&cwd[..n.min(cwd.len())]), text);
+    let image = read_image(name.as_bytes())?;
+    let (handle, len) = image.spawn_words();
+    toyos_abi::syscall::dl_open(name.as_bytes(), toyos_abi::RawHandle(handle as u32), len)
+        .map_err(|e| ImageRefused::Read(Error::Kernel(e)))
 }
 
 /// Whether `path` is on a file server rather than the kernel.

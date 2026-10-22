@@ -670,30 +670,8 @@ impl Vfs {
     }
 
     pub fn open_backing(&mut self, path: &str) -> Result<alloc::sync::Arc<dyn crate::file_backing::FileBacking>, SyscallError> {
-        self.open_backing_identified(path).map(|(backing, _)| backing)
-    }
-
-    /// [`open_backing`](Self::open_backing) plus what the mount says about the
-    /// file now, for a caller that keeps something derived from the bytes.
-    pub fn open_backing_identified(
-        &mut self,
-        path: &str,
-    ) -> Result<(alloc::sync::Arc<dyn crate::file_backing::FileBacking>, BackingId), SyscallError> {
         let target = self.resolve_for_open(path, ResolveIntent::KernelOrRead)?;
         let (fs, fs_path, _) = self.fs_for_target(&target)?;
-        let mtime = fs.file_mtime(&fs_path)?;
-        let backing = fs.open_backing(&fs_path)?;
-        let id = BackingId { size: backing.file_size(), mtime };
-        Ok((backing, id))
+        fs.open_backing(&fs_path)
     }
-}
-
-/// What a mount said about a file when its backing was opened: metadata the open
-/// had already reached, so it reads no page of the file. **It refuses a rewrite;
-/// it does not identify a file** — two files can carry the same size and mtime,
-/// and a mount whose mtime does not move under a same-size write hides one.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub struct BackingId {
-    pub size: u64,
-    pub mtime: u64,
 }

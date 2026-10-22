@@ -109,7 +109,7 @@ fn two_names_at_once_are_two_modules() {
                 let path = core::str::from_utf8(name).expect("a library path");
                 std::fs::read(path).unwrap_or_else(|e| panic!("warm {path}: {e}"));
                 line.wait();
-                syscall::dl_open(name).unwrap_or_else(|e| panic!("dlopen {path}: {e:?}"))
+                toyos::files::dl_open(name).unwrap_or_else(|e| panic!("dlopen {path}: {e:?}"))
             })
         })
         .collect();

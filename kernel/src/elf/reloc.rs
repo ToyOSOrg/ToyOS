@@ -13,7 +13,7 @@
 //! none is a record of its own, since a file chooses how many there are. A resolved TLS
 //! reference whose `S + A` leaves the defining module's segment is refused.
 
-use super::{relocated_symbol, CachedRelocs, LibMemory, LoadedLib, TlsModule, TlsModuleInfo};
+use super::{relocated_symbol, LoadedLib, TlsModule, TlsModuleInfo};
 use toyos_elf::sym::{Sym, SymTab};
 use toyos_elf::{ImageOffset, Op, RelocError, SymIndex, TlsOffset, TlsRef, TlsSegment};
 
@@ -21,56 +21,31 @@ impl LoadedLib {
     /// Write a value at a byte offset within this module's kernel mapping.
     ///
     /// # Safety
-    /// Caller must be the sole writer of this module's image (or `rw_alloc`) for the duration of the call.
+    /// Caller must be the sole writer of this module's image for the duration of the call.
     pub(super) unsafe fn write_at<T: Copy>(&self, offset: u64, value: T) {
         let end = (offset as usize)
             .checked_add(core::mem::size_of::<T>())
             .expect("LoadedLib::write_at: r_offset + width overflows");
-        // Each arm asserts the bound protecting its own destination.
-        match &self.memory {
-            LibMemory::Owned(_) => {
-                assert!(
-                    end <= self.image.size(),
-                    "LoadedLib::write_at: r_offset {:#x} outside image of {:#x}",
-                    offset,
-                    self.image.size()
-                );
-                self.image.write(offset as usize, value)
-            }
-            LibMemory::Shared { rw_alloc, rw_offset, rw_delta, .. } => {
-                assert!(
-                    offset as usize >= *rw_offset && end <= *rw_offset + rw_alloc.size(),
-                    "LoadedLib::write_at: r_offset {:#x} outside the writable window [{:#x}, {:#x})",
-                    offset,
-                    rw_offset,
-                    rw_offset + rw_alloc.size()
-                );
-                let ptr = (self.image.base().add(offset as usize) as i64 + rw_delta) as *mut T;
-                ptr.write_unaligned(value);
-            }
-        }
+        assert!(
+            end <= self.image.size(),
+            "LoadedLib::write_at: r_offset {:#x} outside image of {:#x}",
+            offset,
+            self.image.size()
+        );
+        self.image.write(offset as usize, value)
     }
 
-    /// Every slot of one kind and what it names — from the cache when a clone
-    /// holds one, else scanned off the image, the two never both present.
-    fn entries<'a, T: Copy + 'a>(
-        &'a self,
-        of: fn(Op) -> Option<T>,
-        pick: fn(&CachedRelocs) -> &alloc::vec::Vec<(u64, T)>,
-    ) -> impl Iterator<Item = (u64, T)> + 'a {
-        let cached = self.cached_relocs.as_ref().map(|r| pick(r).iter().copied());
-        let scanned = self.cached_relocs.is_none().then(move || {
-            self.relocations().filter_map(move |r| Some((r.offset(), of(r.op())?)))
-        });
-        cached.into_iter().flatten().chain(scanned.into_iter().flatten())
+    /// Every slot of one kind and what it names, scanned off the image.
+    fn entries<'a, T: Copy + 'a>(&'a self, of: fn(Op) -> Option<T>) -> impl Iterator<Item = (u64, T)> + 'a {
+        self.relocations().filter_map(move |r| Some((r.offset(), of(r.op())?)))
     }
 
     fn bind_entries(&self) -> impl Iterator<Item = (u64, SymIndex)> + '_ {
-        self.entries(|op| match op { Op::Bind(sym) => Some(sym), _ => None }, |c| &c.bind)
+        self.entries(|op| match op { Op::Bind(sym) => Some(sym), _ => None })
     }
 
     fn dtpmod_entries(&self) -> impl Iterator<Item = (u64, Option<SymIndex>)> + '_ {
-        self.entries(|op| match op { Op::DtpMod64(sym) => Some(sym), _ => None }, |c| &c.dtpmod64)
+        self.entries(|op| match op { Op::DtpMod64(sym) => Some(sym), _ => None })
     }
 
     /// Every `RELATIVE` slot and the position in the image it points at.
@@ -131,21 +106,21 @@ pub fn apply_tpoff_relocs(
         _ => None,
     };
     let tpoff = |r| compute_tpoff(r, lib_base_offset, lib.tls(), lib.symbols(), tls, tls_info);
-    for (_, r) in lib.entries(tpoff64, |c| &c.tpoff64) {
+    for (_, r) in lib.entries(tpoff64) {
         tpoff(r)?;
     }
-    for (_, r) in lib.entries(tpoff32, |c| &c.tpoff32) {
+    for (_, r) in lib.entries(tpoff32) {
         tpoff32_value(tpoff(r)?.unwrap_or(0))?;
     }
 
     let mut unresolved = 0;
-    for (offset, r) in lib.entries(tpoff64, |c| &c.tpoff64) {
+    for (offset, r) in lib.entries(tpoff64) {
         let value = tpoff(r)?;
         unresolved += u64::from(value.is_none());
         // SAFETY: see write_at's `# Safety`.
         unsafe { lib.write_at::<i64>(offset, value.unwrap_or(0)) };
     }
-    for (offset, r) in lib.entries(tpoff32, |c| &c.tpoff32) {
+    for (offset, r) in lib.entries(tpoff32) {
         let value = tpoff(r)?;
         unresolved += u64::from(value.is_none());
         // SAFETY: see write_at's `# Safety`.
@@ -184,11 +159,11 @@ pub fn apply_dtpoff_relocs(lib: &LoadedLib, tls_info: &TlsModuleInfo) -> Result<
         _ => None,
     };
     let resolve = |r| resolve_tls_ref(r, 0, lib.tls(), lib.symbols(), tls_info);
-    for (_, r) in lib.entries(dtpoff, |c| &c.dtpoff64) {
+    for (_, r) in lib.entries(dtpoff) {
         resolve(r)?;
     }
     let mut unresolved = 0;
-    for (offset, r) in lib.entries(dtpoff, |c| &c.dtpoff64) {
+    for (offset, r) in lib.entries(dtpoff) {
         let value = resolve(r)?;
         unresolved += u64::from(value.is_none());
         // SAFETY: see write_at's `# Safety`.

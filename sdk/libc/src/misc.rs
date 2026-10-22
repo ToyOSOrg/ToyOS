@@ -445,9 +445,12 @@ fn module_index(handle: *mut u8) -> Option<u64> {
 pub unsafe extern "C" fn dlopen(path: *const u8, _flags: i32) -> *mut u8 {
     if path.is_null() { return ptr::null_mut(); }
     let path_bytes = super::posix_io::c_str_to_bytes(path);
-    match syscall::dl_open(path_bytes) {
+    match toyos::files::dl_open(path_bytes) {
         Ok(index) => (index + 1) as *mut u8,
-        Err(_) => ptr::null_mut(),
+        Err(refused) => {
+            crate::errno::set(crate::errcode::of_image(refused));
+            ptr::null_mut()
+        }
     }
 }
 
