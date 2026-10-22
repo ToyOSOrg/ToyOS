@@ -474,18 +474,18 @@ Not consumers:
      `toyos-sha2` and `toyos-sha2-hw` are deleted; the crate's SHAVS tests
      replace theirs. NIST's ACVP vectors moved to `tests/acvp/`, outside the
      crate's directory, once the crate entered an image.
-   - ToyOS's own HTTPS clients use the crate's rustls provider once stages 3
-     and 4 hold for TLS's primitives. The owner ruled this on 2026-10-13:
-     the crypto goal overrides his ruling of 2026-10-02 in
-     `issues/the-internet-clients-work-unchanged.md` stage 3. Until then ring
-     stays the provider. `ToyOSOrg/ring` stays as a fork so that unmodified
-     programs build.
+   - ToyOS's own HTTPS clients use the crate's rustls provider. The owner
+     ruled on 2026-10-13 that the crypto goal overrides his ruling of
+     2026-10-02 in `issues/the-internet-clients-work-unchanged.md` stage 3,
+     and on 2026-10-22 that the tree uses the crate now. The host's two, the
+     build's agent and doom's build script, take it since #1020, on X25519
+     groups alone while the T14 finding stands. `ToyOSOrg/ring` stays as a
+     fork so that unmodified programs build.
      - The `https_tls13` metal row passes on it.
      - The `cc` row of
-       `issues/the-build-runs-host-tools-outside-rust-and-qemu.md` stops
-       naming ring for the build system's HTTP agent. It still names ring as
-       `lib/crypto`'s dev-dependency oracle, whose C and assembly every
-       `--ci host` run compiles.
+       `issues/the-build-runs-host-tools-outside-rust-and-qemu.md` names ring
+       only as the crate's and `lib/update`'s dev-dependency oracle, whose C
+       and assembly every `--ci host` run compiles. Done (#1020).
    - Wi-Fi's P6 is this crate's AES-CMAC, SAE by hash-to-element, public
      constant-time comparison and public wiping secret, each against its RFC
      or Annex J vectors.
@@ -538,8 +538,9 @@ Not consumers:
   alone: no P-256 or P-384 secret meets a server's input while the T14
   finding stands, and a server offering only those groups is refused. Each
   client keeps the two groups itself (`build/release.rs`,
-  `apps/doom/build.rs`). **Owner**: this track. **Exit**: the T14 finding is
-  resolved and the clients take the provider's groups whole.
+  `apps/doom/build.rs`). **Owner**: this track. **Exit**: stage 4's T14
+  finding (P-256 key derivation and agreement, and P-384 agreement, leak) is
+  resolved, and the clients take the provider's groups whole.
 - ToyOS's AArch64 targets hash with the portable SHA-2 rounds: no target
   promises the Armv8 SHA instructions, and neither the kernel nor the crate
   detects them at run time. **Owner**: this track. **Exit**: the crate takes
