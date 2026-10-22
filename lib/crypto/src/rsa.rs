@@ -350,6 +350,18 @@ mod tests {
     /// at the largest residues.
     #[test]
     fn instruction_path_matches_the_portable_multiplication() {
+        // Which path this run compares, for a reader of `--nocapture` output.
+        #[cfg(target_arch = "x86_64")]
+        {
+            // CPUID is unsafe on the supported Rust 1.89.
+            #[allow(unused_unsafe)]
+            let leaf7 = unsafe { core::arch::x86_64::__cpuid_count(7, 0) }.ebx;
+            std::println!("cpuid leaf 7 ebx: bmi2 {} adx {}", leaf7 >> 8 & 1, leaf7 >> 19 & 1);
+        }
+        let probe = [1u64; WORDS];
+        let mut out = [0u64; WORDS];
+        let kernel = crate::arch::rsa_mul(&probe, &probe, &probe, 1, 4, &mut out).is_some();
+        std::println!("instruction path: {}", if kernel { "the BMI2/ADX kernel" } else { "none; portable against itself" });
         let mut seed = 0x2545f4914f6cdd1du64;
         let mut next = move || {
             seed ^= seed << 13;
