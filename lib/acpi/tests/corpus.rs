@@ -8,12 +8,11 @@
 
 mod common;
 
-use common::{declare_len, entry, madt, rsdp, sdt, t14_root_bridge, xsdt, Machine, OVMF_ROOT_BRIDGE};
-use toyos_abi::boot::RootBridgeWindow;
+use common::{declare_len, entry, madt, rsdp, sdt, xsdt, Machine};
 use toyos_abi::acpi::Block;
 use toyos_acpi::{
     definition_blocks, dsdt_address, ecam_allocations, find_by_id, find_table, fixed_hardware, hpet_base, isa_line,
-    madt_entries, memory_windows, pm1a_control, psci, reset_register, rtc_century, sci_line, Century,
+    madt_entries, pm1a_control, psci, reset_register, rtc_century, sci_line, Century,
     Field, FixedRefused, LegacyMode, Line, MadtEntry, MadtHalt, Phys, Polarity, PowerButton, Psci, SmiCmd,
     Reset, SourceOverride, Table, TableError, Trigger,
     FADT_FOR_FIXED_HARDWARE, MADT_ENTRIES, MAX_TABLE_LEN,
@@ -714,44 +713,6 @@ fn a_fadt_that_ends_before_arm_boot_arch_is_short() {
         declare_len(&mut short, len);
         assert_eq!(psci_of(&short), Psci::Short, "a FADT of {len} bytes");
     }
-}
-
-/// Where the two firmwares' descriptor lists sit for the sweep below.
-const ROOT_BRIDGE_AT: u64 = 0x4_0000;
-
-/// **No panic and no unbounded walk, over every byte of both firmwares' real
-/// descriptor lists.** Each byte takes each of its 255 other values in turn and
-/// the whole list is decoded over it. A resource list carries no checksum,
-/// unlike the tables above, so a single byte reaches the decode directly.
-#[test]
-fn no_single_byte_mutation_of_a_firmwares_descriptor_list_panics_or_runs_away() {
-    let mut mutations = 0u64;
-    let mut refused = 0u64;
-    for (which, original) in [("ovmf", OVMF_ROOT_BRIDGE.to_vec()), ("thinkpad-t14", t14_root_bridge())] {
-        for offset in 0..original.len() {
-            for value in 0..=255u8 {
-                if original[offset] == value {
-                    continue;
-                }
-                let mut mutated = original.to_vec();
-                mutated[offset] = value;
-                let regions: &[(u64, &[u8])] = &[(ROOT_BRIDGE_AT, &mutated)];
-                let mut out = [RootBridgeWindow::default(); 8];
-                match memory_windows(Machine { regions }, ROOT_BRIDGE_AT, &mut out) {
-                    Ok(count) => assert!(
-                        out[..count].iter().all(|w| w.length != 0),
-                        "{which} byte {offset} as {value:#04x}: a window of no length was carried"
-                    ),
-                    Err(_) => refused += 1,
-                }
-                mutations += 1;
-            }
-        }
-    }
-    // Both arms are reached: a sweep that only ever refused, or only ever
-    // decoded, would be measuring one path.
-    assert_eq!(mutations, 2 * 186 * 255);
-    assert!(refused > 0 && refused < mutations, "{refused} of {mutations} refused");
 }
 
 /// A revision-6 FADT of 276 bytes naming q35's fixed hardware in both forms,

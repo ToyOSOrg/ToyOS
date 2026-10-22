@@ -10,7 +10,10 @@ opened: 2026-10-07
 `SMI_CMD` on the boot processor: a caller on another CPU kicks it and spins
 until it has written. The T14's `acpi_server_death` row reads that crossing
 for the enable, because its job claims from a thread it found off the boot
-processor and the judge refuses `asked from cpu0` there. Three things it
+processor and the judge refuses `asked from cpu0` there. That row is
+unregistered, with its job and judge, until its boot has a log
+(`issues/the-acpi-servers-death-has-no-readback-on-the-t14.md`); what
+follows is of the row as it was and comes back with it. Three things it
 leaves to the scheduler or does not read:
 
 - **The disable asked from another CPU.** `acpi_mode::release` runs in the
@@ -28,8 +31,7 @@ leaves to the scheduler or does not read:
   kick or from a spin.
 - **The enable's arrangement has a window.** The job's claiming thread reads
   its x2APIC id and then enters the kernel
-  (`tests/guest/rust-tests/src/bin/acpi_release.rs`,
-  `claim_off_the_boot_processor`). The kernel moves no running thread, so the
+  (`acpi_release`'s `claim_off_the_boot_processor`). The kernel moves no running thread, so the
   asker is the CPU the thread read, unless a preemption between that read and
   the kernel's lock in `smi_cmd::write` queues the thread behind another and
   an idle boot processor takes it. With no affinity in the tree the window

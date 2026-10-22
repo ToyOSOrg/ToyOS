@@ -273,7 +273,7 @@ pub const SYS_TRACE_READ: u64 = 127;
 
 /// One operation on the `acpi` claim ([`crate::acpi::op`]): an access the
 /// kernel mediates, the firmware's Global Lock, or the power-off's sleep type.
-/// See [`acpi_access`], [`acpi_lock_take`] and [`acpi_s5`].
+/// See [`acpi_access`], [`acpi_lock_take`], [`acpi_s5`] and [`acpi_declare`].
 pub const SYS_ACPI: u64 = 128;
 /// A fresh null handle: every read answers end of file and every write takes
 /// all it is given. See [`null`].
@@ -2094,6 +2094,15 @@ pub fn acpi_lock_release(claim: RawHandle) -> Result<(), SyscallError> {
 /// [`SyscallError::AlreadyExists`], and nothing is kept of either.
 pub fn acpi_s5(claim: RawHandle, slp_typ_a: u64) -> Result<(), SyscallError> {
     check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::S5, slp_typ_a, 0))
+}
+
+/// Declare the PCI root bridges ([`crate::acpi::op::DECLARE`]).
+/// `Ok` is the declaration held; [`SyscallError::InvalidArgument`] one the
+/// kernel refused, said in its log by name and leaving every PCI claim refused;
+/// [`SyscallError::AlreadyExists`] a declaration made after the first, or after
+/// the kernel stopped waiting for one.
+pub fn acpi_declare(claim: RawHandle, declared: &crate::acpi::Apertures) -> Result<(), SyscallError> {
+    check_unit(syscall(SYS_ACPI, claim.0 as u64, crate::acpi::op::DECLARE, declared as *const crate::acpi::Apertures as u64, 0))
 }
 
 /// Sleep for the given number of nanoseconds.

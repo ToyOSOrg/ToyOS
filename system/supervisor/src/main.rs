@@ -638,6 +638,12 @@ fn is_disk_driver(program: &Program) -> bool {
     !program.drives.is_empty() && program.receives.iter().any(|r| r == toyos_blockring::disk::PORT)
 }
 
+/// A row holding the `acpi` claim, whose holder declares the memory every PCI
+/// claim waits for: started before every other row.
+fn declares(program: &Program) -> bool {
+    program.devices.iter().any(|device| device == "acpi")
+}
+
 /// A row serving the block port.
 fn is_block(program: &Program) -> bool {
     program.serves.iter().any(|s| s == toyos_blockring::PORT)
@@ -875,10 +881,13 @@ impl Flight {
 impl<'a> Supervisor<'a> {
     /// Start `[boot] start`, kept for the machine's life: the supervisor is the only
     /// thing that can kill a daemon, and there is no other way back to a
-    /// process it started. The storage rows go first, the block service
-    /// before the file servers its grants are minted on — every other start
-    /// may make a directory, and a directory is a file server's — and the
-    /// session's home is made before the first row that is not one.
+    /// process it started. The `acpi` claim's holder goes first: it declares
+    /// the memory the PCI root bridges decode, which every PCI claim minted
+    /// after it waits for. Then the disk drivers and the storage rows, the
+    /// block service before the file servers its grants are minted on — every
+    /// other start may make a directory, and a directory is a file server's —
+    /// and the session's home is made before the first row that is neither;
+    /// the ACPI holder's own home with it, which it is started without.
     ///
     /// **Every service holds its acceptors before any is started**, so what a
     /// start mints on another service's port — a role's directories, a
@@ -888,9 +897,10 @@ impl<'a> Supervisor<'a> {
     fn boot(&mut self, role_acceptors: &mut BTreeMap<&str, Acceptor>) {
         let system = self.system;
         let rank = |name: &&String| match system.program(name) {
-            Some(p) if is_block(p) => 0,
-            Some(p) if is_storage(p) => 1,
-            _ => 2,
+            Some(p) if declares(p) => 0,
+            Some(p) if is_block(p) => 1,
+            Some(p) if is_storage(p) => 2,
+            _ => 3,
         };
         let mut storage_first: Vec<&String> = system.start.iter().collect();
         storage_first.sort_by_key(rank);
@@ -935,49 +945,72 @@ impl<'a> Supervisor<'a> {
                 self.services.push(service);
             }
         }
-        // The disk drivers first, so the block service is started knowing how
-        // many to wait for and a file server's disk is coming before it asks.
-        self.undriven = self.drive_where(is_disk_driver);
+        // The `acpi` claim's holder first, since every claim waits for its
+        // declaration; then the disk drivers, so the block service is started
+        // knowing how many to wait for and a file server's disk is coming
+        // before it asks.
+        // SYSTEM, started before the manifest was read, is first in the list.
+        let (declaring, rest): (Vec<usize>, Vec<usize>) =
+            (0..self.services.len()).partition(|&at| declares(self.services[at].program));
         let mut homes_made = false;
-        for at in 0..self.services.len() {
-            let program = self.services[at].program;
-            if !is_storage(program) && !homes_made {
-                self.make_session_home();
-                homes_made = true;
-            }
-            self.make_home(program);
-            let block = self.block_args();
-            let service = &mut self.services[at];
-            // SYSTEM was started before the manifest was read.
-            if service.child.is_some() {
-                continue;
-            }
-            let started = service.spawn(
-                &program.source,
-                &[],
-                block,
-                system,
-                self.syscap,
-                &self.connectors,
-                &self.grants,
-                &self.minted,
-                self.boot,
-                &mut self.log,
-            );
-            match started {
-                Ok(_) => {}
-                Err(StartError::Refused(why)) => {
-                    service.ports.borrow_mut().clear();
-                    say!("supervisor: {} did not start ({why}); its ports are closed this boot", service.label());
-                }
-                Err(e) => panic!("supervisor: cannot start {}: {e}", program.name),
-            }
+        for at in declaring {
+            self.start_service(at, &mut homes_made);
+        }
+        self.undriven = self.drive_where(is_disk_driver);
+        for at in rest {
+            self.start_service(at, &mut homes_made);
         }
         if !homes_made {
             self.make_session_home();
+            for early in self.services.iter().map(|s| s.program).filter(|p| declares(p)).collect::<Vec<_>>() {
+                self.make_home(early);
+            }
         }
         self.load_grants();
         self.drive();
+    }
+
+    /// [`Self::boot`]'s start of service `at`, making the session's home before
+    /// the first row that is neither storage nor the `acpi` claim's holder.
+    fn start_service(&mut self, at: usize, homes_made: &mut bool) {
+        let system = self.system;
+        let program = self.services[at].program;
+        if !is_storage(program) && !declares(program) && !*homes_made {
+            self.make_session_home();
+            *homes_made = true;
+            for early in self.services.iter().map(|s| s.program).filter(|p| declares(p)).collect::<Vec<_>>() {
+                self.make_home(early);
+            }
+        }
+        if !declares(program) {
+            self.make_home(program);
+        }
+        let block = self.block_args();
+        let service = &mut self.services[at];
+        // SYSTEM was started before the manifest was read.
+        if service.child.is_some() {
+            return;
+        }
+        let started = service.spawn(
+            &program.source,
+            &[],
+            block,
+            system,
+            self.syscap,
+            &self.connectors,
+            &self.grants,
+            &self.minted,
+            self.boot,
+            &mut self.log,
+        );
+        match started {
+            Ok(_) => {}
+            Err(StartError::Refused(why)) => {
+                service.ports.borrow_mut().clear();
+                say!("supervisor: {} did not start ({why}); its ports are closed this boot", service.label());
+            }
+            Err(e) => panic!("supervisor: cannot start {}: {e}", program.name),
+        }
     }
 
     /// Start a `drives` process on each function the inventory says is owed
@@ -1164,7 +1197,8 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// A service's own `HOME`, made before it first runs.
+    /// A service's own `HOME`, made before it first runs; the `acpi` claim's
+    /// holder's once storage is up, after it ([`Supervisor::boot`]).
     fn make_home(&mut self, program: &Program) {
         if !program.service || is_storage(program) {
             return;

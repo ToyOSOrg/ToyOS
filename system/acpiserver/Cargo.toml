@@ -1,6 +1,6 @@
 [package]
 name = "acpiserver"
-description = "The machine's ACPI fixed hardware, served from userland: the SCI, the power button and the embedded controller's events, and its AML loaded."
+description = "The machine's ACPI, served from userland: its AML loaded, the PCI root bridges' memory declared, and the SCI, the power button and the embedded controller's events."
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"

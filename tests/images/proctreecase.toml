@@ -15,7 +15,7 @@
 # login session the shell opens is answered.
 
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "test-runner"]
 
 [apps]
 folder = "read-write"
@@ -78,3 +78,10 @@ receives = ["disk"]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
