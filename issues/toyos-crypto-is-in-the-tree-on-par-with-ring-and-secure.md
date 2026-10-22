@@ -324,7 +324,8 @@ Not consumers:
      - Under russh (`system/sshserver`), `curve25519-dalek` 5.0.0-pre.6
        names `fiat-crypto` 0.3.0 behind the same unset `cfg`.
      - Under russh, `p384` 0.14.0-rc.8 names `fiat-crypto` 0.3.0 unless
-       `p384_backend = "bignum"`, which the guest targets set once #1005 lands.
+       `p384_backend = "bignum"`. #1005 sets that for every build, host and
+       guest; before it, fiat compiled into sshserver.
 
      `num-bigint`, the crate's test-only integer oracle, holds:
      - `field25519` and `scalar25519`;
