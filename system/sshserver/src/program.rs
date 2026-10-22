@@ -3,8 +3,8 @@
 //!
 //! std's `Child` is waited on and ended through one `&mut`. The connection
 //! starts the wait once both output streams reach end of file, and until then
-//! `end` kills the program. A program that closed both and runs on, or whose
-//! own child holds them, is waited for and cannot be ended:
+//! `end` kills the program. A program that closed both and runs on is waited
+//! for and cannot be ended:
 //! `issues/sshserver-cannot-end-a-program-that-closed-its-output.md`.
 
 use std::process::Child;

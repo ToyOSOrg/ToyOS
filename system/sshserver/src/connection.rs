@@ -196,18 +196,12 @@ impl<A: Authorizer> Connection<A> {
         }
     }
 
-    /// Write what the protocol has for the client, by `deadline` if there is
-    /// one: whether all of it went.
+    /// Write what the protocol has for the client, all of it by `deadline` if
+    /// there is one: whether all of it went. A write timeout bounds one send,
+    /// so each send is given only the time left.
     fn write_out(&mut self, deadline: Option<Instant>) -> bool {
         let out = self.server.output();
-        if out.is_empty() {
-            return true;
-        }
-        let timeout = match deadline.map(|at| at.saturating_duration_since(Instant::now())) {
-            Some(Duration::ZERO) => return false,
-            timeout => timeout,
-        };
-        self.socket.set_write_timeout(timeout).is_ok() && self.socket.write_all(&out).is_ok()
+        write_by(&mut self.socket, TcpStream::set_write_timeout, &out, deadline)
     }
 
     /// Whether the connection goes on.
@@ -402,6 +396,29 @@ impl<A: Authorizer> Connection<A> {
     }
 }
 
+/// Write all of `bytes` to `sink`, by `deadline` if there is one: whether all
+/// of it went. `set_timeout` bounds the next send, and is given the time left
+/// before each one.
+fn write_by<W: Write>(sink: &mut W, set_timeout: impl Fn(&W, Option<Duration>) -> std::io::Result<()>, bytes: &[u8], deadline: Option<Instant>) -> bool {
+    let mut rest = bytes;
+    while !rest.is_empty() {
+        let timeout = match deadline.map(|at| at.saturating_duration_since(Instant::now())) {
+            Some(Duration::ZERO) => return false,
+            timeout => timeout,
+        };
+        if set_timeout(sink, timeout).is_err() {
+            return false;
+        }
+        match sink.write(rest) {
+            Ok(0) => return false,
+            Ok(n) => rest = &rest[n..],
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 /// End what runs on a channel: its program, whose pipes then end its readers.
 fn end(running: Running) {
     if let Some((program, _)) = running.program {
@@ -497,6 +514,39 @@ mod tests {
         let stderr: Vec<u8> = sent.iter().filter(|(e, _)| *e).flat_map(|(_, d)| d.clone()).collect();
         assert_eq!((stdout.as_slice(), stderr.as_slice()), (&b"abcdefghijklmnopqrstuvwxyz"[..], &b"123"[..]));
         assert!(output.0.is_empty());
+    }
+
+    /// A reader too slow to keep up: one byte a send, each send 20 ms.
+    struct Trickle(Vec<u8>);
+
+    impl Write for Trickle {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            // The pace is the stimulus: every send makes progress.
+            std::thread::sleep(Duration::from_millis(20));
+            self.0.push(bytes[0]);
+            Ok(1)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// **The deadline bounds the whole write, not one send**: a reader that
+    /// takes a byte at a time is given up at the deadline, though every send
+    /// made progress within its timeout.
+    #[test]
+    fn a_write_to_a_slow_reader_ends_at_the_deadline() {
+        let mut sink = Trickle(Vec::new());
+        let start = Instant::now();
+        let deadline = start + Duration::from_millis(200);
+        let wrote = write_by(&mut sink, |_, _| Ok(()), &[7; 200], Some(deadline));
+        assert!(!wrote, "the write outlived its deadline: {} bytes in {:?}", sink.0.len(), start.elapsed());
+        assert!(sink.0.len() < 20, "{} bytes went after the deadline", sink.0.len());
+        // With no deadline, all of it goes.
+        let mut sink = Trickle(Vec::new());
+        assert!(write_by(&mut sink, |_, _| Ok(()), &[7; 5], None));
+        assert_eq!(sink.0, [7; 5]);
     }
 
     /// Names every key, so every offer is answered `PK_OK` and costs nothing.
