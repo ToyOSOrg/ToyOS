@@ -14,8 +14,8 @@ unusable, its fixed hardware is refused (`HW_REDUCED_ACPI` among the
 refusals), no PM1a control block is declared, its `SMI_CMD` was not declared,
 no I/O APIC carries the SCI, or the SCI's line is another row's. On such a
 machine acpiserver gets no claim and declares nothing, so the first PCI claim
-waits its 30 s deadline and every claim of the boot is refused, the block
-service's NVMe among them. Before #935 the loader's window list handed those
+waits its 30 s deadline and every claim of the boot is refused, the disk
+drivers' among them. Before #935 the loader's window list handed those
 claims over.
 
 Measured: none of the machines in reach is such a machine. q35, the

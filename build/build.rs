@@ -3035,6 +3035,38 @@ mod tests {
         }
     }
 
+    /// A config whose rows claim a PCI function starts the `acpi` claim's
+    /// holder: every such claim waits for the root bridges' memory it declares,
+    /// and one made on a boot where nothing does is refused, as are all after
+    /// it. `undeclaredcase` is that boot, booted to judge the refusal.
+    #[test]
+    fn every_config_that_claims_a_pci_function_starts_its_declarer() {
+        const UNDECLARED: &str = "tests/images/undeclaredcase.toml";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for config in ALL_CONFIGS {
+            let parsed = parse_config(&root.join(config));
+            let claimants: Vec<&String> = parsed
+                .programs
+                .iter()
+                .filter(|(name, program)| {
+                    !program.drives.is_empty()
+                        || (parsed.boot.start.contains(name) && program.devices.iter().any(|d| d.starts_with("pci:")))
+                })
+                .map(|(name, _)| name)
+                .collect();
+            let declares = parsed
+                .boot
+                .start
+                .iter()
+                .any(|name| parsed.programs.get(name).is_some_and(|p| p.devices.iter().any(|d| d == "acpi")));
+            assert_eq!(
+                declares || claimants.is_empty(),
+                *config != UNDECLARED,
+                "{config}: {claimants:?} claim PCI functions, and starting the `acpi` claim's holder is {declares}",
+            );
+        }
+    }
+
     /// Every config renders, so a row the manifest refuses — one that serves a
     /// port and is not marked `service` — reds here rather than at a build.
     #[test]

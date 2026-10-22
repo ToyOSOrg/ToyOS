@@ -75,8 +75,6 @@ is nothing to enable.
 - **The wake storm's per-waiter gap** between the benches; next, its split
   (`issues/a-wake-storm-costs-the-t14-twice-the-amd-benchs-time-per-waiter-and-nothing-says-why.md`).
 
-The CPU cap is PR #865's (`wt/toyos-cpus`), a design round of its own.
-
 **Exit**: every issue below is closed. They are listed in the order they are
 taken: the instruments, then what is measured, then the design rounds not
 yet measured.

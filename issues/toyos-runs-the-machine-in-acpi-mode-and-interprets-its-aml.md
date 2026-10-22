@@ -13,10 +13,10 @@ every CPU every 2.2 s
 The ACPI server loads a machine's DSDT and SSDTs, evaluates `\_S5` and hands
 the kernel its sleep type, which the kernel powers the machine off with and
 has from nowhere else. It initialises the namespace, negotiates `_OSC`,
-serves the runtime GPEs and delivers Notifies (#875). What else
-ToyOS takes from them it takes another way: the loader asks UEFI for the root
-bridges' windows `_CRS` would name (`loader/src/rootbridge.rs`). Nothing
-reads `_CST`, which names a CPU's C-states.
+serves the runtime GPEs and delivers Notifies (#875), and declares each PCI
+root bridge's `_CRS` windows and `_OSC` offer to the kernel
+(`system/acpiserver/src/apertures.rs`). Nothing reads `_CST`, which names a
+CPU's C-states.
 
 **Ruled** (owner, 2026-10-03, on the scout in #681's comment 5966817345): the
 switch to ACPI mode lands as stage 1, together with a userland server that
@@ -502,8 +502,7 @@ Not in finished:
 - the PCI host bridges' `_OSC`;
 - sleep states;
 - `_CST`, which no part of this track reads: idle CPUs entering the states
-  it names read it (`issues/idle-cpus-enter-the-c-states-cst-names.md`,
-  #870);
+  it names read it (`issues/idle-cpus-enter-the-c-states-cst-names.md`);
 - `_PDC`, which Intel deprecated in favour of `_OSC` in ACPI 3.0 and which
   ACPI 6.5 does not define.
 

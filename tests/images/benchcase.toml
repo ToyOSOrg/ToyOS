@@ -2,13 +2,13 @@
 # on the bench's own Linux (`tests/guest/osbench`).
 #
 # Only what a job list needs to run and to reach the log on the boot stick: no
-# compositor, sound, ACPI server or network, so little but the measurement asks
-# for a CPU.
+# compositor, sound or network, so little but the measurement asks for a CPU.
+# The ACPI server is that need too: the stick's claim waits for its declaration.
 #
 # The runner's capability carries `jobs`, for the fairness run that starts each
 # workload as a job of its own, and `dup`, to hand it down.
 [boot]
-start = ["logkeeper", "diskserver", "fileserver", "test-runner"]
+start = ["acpiserver", "logkeeper", "diskserver", "fileserver", "test-runner"]
 
 [programs.logkeeper]
 service = true
@@ -59,3 +59,10 @@ receives = ["disk"]
 restart = true
 roles = ["data", "log", "boot"]
 receives = ["block"]
+
+# Started before every PCI claimant: it declares the memory the root bridges
+# decode, which every claim of a PCI function waits for.
+[programs.acpiserver]
+service = true
+devices = ["acpi"]
+receives = ["power"]
