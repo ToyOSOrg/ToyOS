@@ -12,8 +12,10 @@
 //! bound refuse no lookup and no answer for the name. A lookup is a client's too, and its bound
 //! is `resolve`'s own: `toyos_dns::MAX_LOOKUPS` lookups, each with the queries of its rounds.
 //!
-//! The number is the shell's: each stream is its client's region, connection and bell kept
-//! alive and its connection watched, each listener its wake pipe. A new node has none.
+//! The number is the shell's: each stream is its client's region and its first holder's
+//! connection and two bells kept alive and its connection watched, each holder past the first
+//! its own connection and bells, priced as a place and one watch, each listener its wake pipe.
+//! A new node has none.
 //!
 //! **A place is not one size.** A stream or a connection [tcp] finishes is its client's region,
 //! and a datagram socket [udp]'s two queues of `limits::RX_DATAGRAMS` and `limits::TX_DATAGRAMS`
@@ -37,10 +39,14 @@ impl Node {
         self.wake_owners(now);
     }
 
-    /// The places taken: streams, listeners, datagram sockets, and connections [tcp] is
-    /// finishing alone.
+    /// The places taken: streams and their holders past the first, listeners, datagram sockets,
+    /// and connections [tcp] is finishing alone.
     pub fn held(&self) -> usize {
-        self.streams().saturating_add(self.listeners()).saturating_add(self.sockets).saturating_add(self.stack.tcp_orphans())
+        self.streams()
+            .saturating_add(self.streams.more_holders())
+            .saturating_add(self.listeners())
+            .saturating_add(self.sockets)
+            .saturating_add(self.stack.tcp_orphans())
     }
 
     pub(crate) fn room(&self) -> usize {

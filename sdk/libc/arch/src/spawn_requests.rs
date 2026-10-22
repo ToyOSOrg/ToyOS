@@ -27,7 +27,7 @@ const UNCOPYABLE_FD: u32 = 10;
 /// The plan, for this process's `stdio` and its descriptor [`PIPE_FD`], with
 /// `open` handing out handles from 0x5000 and recording each close of a
 /// handle it opened.
-fn planned(stdio: [Option<(u32, bool)>; 3], actions: &[Action<&str>]) -> (Result<Plan, i32>, Vec<u32>) {
+fn planned(stdio: [Option<(u32, bool)>; 3], actions: &[Action<&str>]) -> (Result<Plan<u32>, i32>, Vec<u32>) {
     let next = RefCell::new(0x5000);
     let closed = RefCell::new(Vec::new());
     let held = |fd: u32| match fd {

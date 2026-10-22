@@ -2171,8 +2171,16 @@ impl Supervisor<'_> {
             }
         };
         let session = starts.session(&mut self.sessions);
-        let caller_fds: Vec<(u32, toyos::RawHandle)> =
-            request.fd_numbers().zip(fds.0.iter().copied()).collect();
+        let caller_fds: Option<Vec<(u32, toyos::RawHandle, toyos::fd::Kind)>> = request
+            .fds()
+            .zip(fds.0.iter().copied())
+            .map(|((fd, kind), handle)| Some((fd, handle, kind?)))
+            .collect();
+        let Some(caller_fds) = caller_fds else {
+            say!("supervisor: launcher: refused a descriptor of a kind no launch carries");
+            let _ = conn.try_signal(launch::MSG_REFUSED);
+            return;
+        };
         let launch = Launch {
             conn,
             program,
@@ -2369,7 +2377,7 @@ struct Launch {
     session: Session,
     /// The caller's stdio, owned until the spawn duplicates it.
     fds: Moved,
-    caller_fds: Vec<(u32, toyos::RawHandle)>,
+    caller_fds: Vec<(u32, toyos::RawHandle, toyos::fd::Kind)>,
     /// The place the child is spawned under, owned until then.
     _place: Moved,
     /// Whether it names a place, or the supervisor.
@@ -2897,15 +2905,22 @@ fn start<'a>(
         }
         Output::Launch { log, fds, .. } => {
             command.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-            for &(fd, handle) in fds {
+            for &(fd, handle, kind) in fds {
                 let caller_ring = matches!(fd, 1 | 2)
+                    && kind == toyos::fd::Kind::Handle
                     && toyos_abi::syscall::fstat(handle)
                         .is_ok_and(|stat| stat.file_type == FileType::SharedMemory);
-                if caller_ring {
-                    let own = ring.get_or_insert_with(new_ring).as_handle();
-                    command.inherit_handle(fd, own.0);
-                } else {
-                    command.inherit_handle(fd, handle.0);
+                match kind {
+                    _ if caller_ring => {
+                        let own = ring.get_or_insert_with(new_ring).as_handle();
+                        command.inherit_handle(fd, own.0);
+                    }
+                    toyos::fd::Kind::Handle => {
+                        command.inherit_handle(fd, handle.0);
+                    }
+                    toyos::fd::Kind::Stream => {
+                        command.inherit_exported(fd, handle.0);
+                    }
                 }
             }
             log
@@ -2964,7 +2979,7 @@ fn start<'a>(
 /// a launch, the job its caller named, which `start` owns from its first line.
 enum Output<'l> {
     Boot(&'l mut Log),
-    Launch { log: &'l mut Log, fds: &'l [(u32, toyos::RawHandle)], job: toyos::RawHandle },
+    Launch { log: &'l mut Log, fds: &'l [(u32, toyos::RawHandle, toyos::fd::Kind)], job: toyos::RawHandle },
 }
 
 /// The namespace this program's `receives` names, [`toyos_swap::PORT`] and

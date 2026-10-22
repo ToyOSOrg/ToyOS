@@ -99,17 +99,22 @@ const TCP_BUFFER: u32 = toyos::net::stream::RECEIVE_BYTES;
 /// allocates it, and netstack holding its far end is what keeps it alive.
 const PIPE_BYTES: u64 = 2 * 1024 * 1024;
 
-/// What one place can make this machine hold, at the largest of the three
+/// What one holder of a stream holds of this machine: the two pipes of its
+/// connection and its two bells, each a page once written
+/// (`issues/a-pipe-is-a-two-mebibyte-page-for-a-mapping-nothing-makes.md`).
+const HOLDER_BYTES: u64 = 4 * PIPE_BYTES;
+
+/// What one place can make this machine hold, at the largest of the four
 /// things a place is (`toyos-net-node`'s `places`): a stream, its region and
-/// the pipes of its connection and its bell; a listener, whose peers fill its
-/// queue of `LISTEN_READY` finished connections with an initial receive buffer
-/// of text each, nobody reading them to grow one, and its wake pipe; a
-/// datagram socket, its two pipes and two queues.
+/// its first holder; a holder past a stream's first; a listener, whose peers
+/// fill its queue of `LISTEN_READY` finished connections with an initial
+/// receive buffer of text each, nobody reading them to grow one, and its wake
+/// pipe; a datagram socket, its two pipes and two queues.
 const PLACE_BYTES: u64 = {
-    let stream = toyos::net::stream::REGION_BYTES as u64 + 3 * PIPE_BYTES;
+    let stream = toyos::net::stream::REGION_BYTES as u64 + HOLDER_BYTES;
     let listener = toyos_net_tcp::limits::LISTEN_READY as u64 * toyos_net_tcp::limits::RECEIVE_BUFFER_INITIAL as u64 + PIPE_BYTES;
     let datagram = 2 * PIPE_BYTES + (toyos_net_udp::limits::RX_BYTES + toyos_net_udp::limits::TX_BYTES) as u64;
-    assert!(stream >= listener && stream >= datagram);
+    assert!(stream >= listener && stream >= datagram && stream >= HOLDER_BYTES);
     stream
 };
 
@@ -126,8 +131,8 @@ const PLACE_BUDGET_SHARE: u64 = 8;
 const FIXED_WATCHES: u32 = 2;
 
 /// The most places one poller can watch: each place is one watched handle, a
-/// stream's connection, a listener's wake pipe or a datagram socket's receive
-/// pipe, asked about in the same batch as the fixed watches, the connections
+/// stream holder's connection, a listener's wake pipe or a datagram socket's
+/// receive pipe, asked about in the same batch as the fixed watches, the connections
 /// that have not said what they want and the lookups' clients.
 const MAX_PLACES: u32 = Poller::MAX_HANDLES - FIXED_WATCHES - MAX_PENDING_CONNS - serve::LOOKUP_WATCHES;
 

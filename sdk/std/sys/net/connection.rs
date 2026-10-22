@@ -15,6 +15,13 @@ use crate::time::Duration;
 // --- Helpers ---
 
 /// A kernel handle this process just got, as an owned descriptor.
+/// A stream's handle this process just got, as an owned descriptor.
+fn stream_fd(handle: RawHandle) -> io::Result<OwnedFd> {
+    let fd = toyos::fd::install(stream::descriptor(handle), false, 0).map_err(crate::sys::fd_error)?;
+    // SAFETY: a descriptor just installed for this stream alone.
+    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+}
+
 fn owned(handle: RawHandle) -> io::Result<OwnedFd> {
     let fd = crate::sys::new_fd(handle)?;
     // SAFETY: a descriptor just installed for this handle alone.
@@ -73,7 +80,7 @@ const SHUT_DOWN: io::Error =
 
 /// What std answers for a stream's refusal. netstack gone is
 /// `ConnectionAborted`: neither the peer's reset nor its FIN.
-fn stream_refused(refusal: Refused) -> io::Error {
+pub fn stream_refused(refusal: Refused) -> io::Error {
     match refusal {
         Refused::NotThisProcess(handle) => {
             io::Error::new(io::ErrorKind::InvalidInput, stream::Misuse::NotThisProcess(handle).to_string())
@@ -151,7 +158,7 @@ impl TcpStream {
     pub fn connect_timeout(addr: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
         let (ip, port) = addr_to_v4(addr)?;
         let connected = stream::connect(ip, port, duration_to_ms(Some(timeout)), false).map_err(net_err_to_io)?;
-        Ok(TcpStream::from_fd(owned(connected.handle)?))
+        Ok(TcpStream::from_fd(stream_fd(connected.handle)?))
     }
 
     fn handle(&self) -> RawHandle {
@@ -296,9 +303,17 @@ impl TcpStream {
         self.fd.as_raw_fd()
     }
 
-    /// The stream's bell: the handle a watch for room is made on, for reading.
+    /// The stream's send bell: the handle a watch for room is made on, for
+    /// reading.
     pub fn bell(&self) -> io::Result<u32> {
         let bell = stream::doorbell(self.handle(), stream::Way::Send).map_err(stream_refused)?;
+        Ok(bell.0)
+    }
+
+    /// The stream's receive bell: the handle a watch for bytes is made on,
+    /// for reading.
+    pub fn receive_bell(&self) -> io::Result<u32> {
+        let bell = stream::doorbell(self.handle(), stream::Way::Receive).map_err(stream_refused)?;
         Ok(bell.0)
     }
 
@@ -365,7 +380,7 @@ impl TcpListener {
             Ipv4Addr::from(accepted.remote_addr),
             accepted.remote_port,
         ));
-        Ok((TcpStream::from_fd(owned(accepted.handle)?), peer))
+        Ok((TcpStream::from_fd(stream_fd(accepted.handle)?), peer))
     }
 
     pub fn duplicate(&self) -> io::Result<TcpListener> {

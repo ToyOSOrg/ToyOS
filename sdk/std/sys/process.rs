@@ -23,7 +23,7 @@ pub struct Command {
     stdin: Option<Stdio>,
     stdout: Option<Stdio>,
     stderr: Option<Stdio>,
-    extra_fds: Vec<(u32, u32)>,
+    extra_fds: Vec<(u32, u32, toyos::fd::Kind)>,
     endowments: Vec<(String, u32)>,
     provided: Vec<(String, u32)>,
     parent: toyos::spawn::Parent,
@@ -188,10 +188,22 @@ impl Command {
     }
 
     /// Give the child descriptor `child_fd`, naming this process's
-    /// `parent_handle`, which this process keeps: the spawn duplicates it.
+    /// `parent_handle`, which this process keeps: the spawn duplicates it, or,
+    /// for a stream's, gives the child a holder of the stream of its own.
     pub fn inherit_handle(&mut self, child_fd: u32, parent_handle: u32) {
-        self.extra_fds.retain(|&(fd, _)| fd != child_fd);
-        self.extra_fds.push((child_fd, parent_handle));
+        self.inherit(child_fd, parent_handle, toyos::fd::Kind::Handle);
+    }
+
+    /// Give the child descriptor `child_fd` as the stream end `end`, which
+    /// `toyos::net::stream::export` made: the spawn duplicates it, and the
+    /// child takes it up as a holder of the stream.
+    pub fn inherit_exported(&mut self, child_fd: u32, end: u32) {
+        self.inherit(child_fd, end, toyos::fd::Kind::Stream);
+    }
+
+    fn inherit(&mut self, child_fd: u32, handle: u32, kind: toyos::fd::Kind) {
+        self.extra_fds.retain(|&(fd, _, _)| fd != child_fd);
+        self.extra_fds.push((child_fd, handle, kind));
     }
 
     /// Give the child `handle` under the name `label`.
@@ -286,7 +298,7 @@ impl Command {
 
         // The handles the child's descriptors are, each held here until the
         // spawn has duplicated it into the child.
-        let mut held: Vec<(u32, toyos::OwnedHandle)> = Vec::new();
+        let mut held: Vec<(u32, toyos::OwnedHandle, toyos::fd::Kind)> = Vec::new();
         let mut stdin_pipe: Option<Pipe> = None;
         let mut stdout_pipe: Option<Pipe> = None;
         let mut stderr_pipe: Option<Pipe> = None;
@@ -294,16 +306,24 @@ impl Command {
             [(&mut stdin_pipe, stdin, 0, true), (&mut stdout_pipe, stdout, 1, false), (&mut stderr_pipe, stderr, 2, false)]
         {
             // A descriptor `inherit_handle` names is that handle's.
-            if self.extra_fds.iter().any(|&(child, _)| child == fd) {
+            if self.extra_fds.iter().any(|&(child, _, _)| child == fd) {
                 continue;
             }
-            if let Some(handle) = Self::child_stdio(pipe, stdio, fd, is_input)? {
-                held.push((fd, handle));
+            if let Some((handle, kind)) = Self::child_stdio(pipe, stdio, fd, is_input)? {
+                held.push((fd, handle, kind));
             }
         }
-        let mut fds: Vec<(u32, toyos_abi::RawHandle)> =
-            held.iter().map(|(fd, h)| (*fd, toyos::AsHandle::as_handle(h))).collect();
-        fds.extend(self.extra_fds.iter().map(|&(fd, h)| (fd, toyos_abi::RawHandle(h))));
+        let mut fds: Vec<(u32, toyos_abi::RawHandle, toyos::fd::Kind)> = Vec::new();
+        for &(fd, handle, kind) in &self.extra_fds {
+            let handle = toyos_abi::RawHandle(handle);
+            if toyos::net::stream::is_stream(handle) {
+                let end = toyos::net::stream::export(handle).map_err(|e| refused(toyos::spawn::Refused::Export(e)))?;
+                held.push((fd, end, toyos::fd::Kind::Stream));
+            } else {
+                fds.push((fd, handle, kind));
+            }
+        }
+        fds.extend(held.iter().map(|(fd, h, kind)| (*fd, toyos::AsHandle::as_handle(h), *kind)));
 
         let capture = self.env.capture();
         let env_buf = env_blob(&capture);
@@ -369,12 +389,13 @@ impl Command {
         stdio: &Stdio,
         fd: u32,
         is_input: bool,
-    ) -> io::Result<Option<toyos::OwnedHandle>> {
+    ) -> io::Result<Option<(toyos::OwnedHandle, toyos::fd::Kind)>> {
         // What this process's own descriptor names, if it is open: one it
         // closed is closed in the child too.
         let inherit = |from: i32| toyos::fd::copy(from).map_err(refused);
         // SAFETY: each `dup` answers a fresh handle nothing else answers for.
         let copy = |pipe: &Pipe| pipe.with_handle(toyos_abi::syscall::dup)?.map(|h| unsafe { toyos::OwnedHandle::from_raw(h) }).map_err(crate::sys::to_io_error);
+        let handle = |handle| Some((handle, toyos::fd::Kind::Handle));
         Ok(match stdio {
             Stdio::Inherit => inherit(fd as i32)?,
             Stdio::MakePipe | Stdio::MakeTtyPipe => {
@@ -385,10 +406,10 @@ impl Command {
                 }
                 let (theirs, ours) = if is_input { (r, w) } else { (w, r) };
                 *parent_pipe = Some(ours);
-                Some(copy(&theirs)?)
+                handle(copy(&theirs)?)
             }
-            Stdio::InheritFile(file) => Some(file.as_child_stdio()?),
-            Stdio::InheritPipe(pipe) => Some(copy(pipe)?),
+            Stdio::InheritFile(file) => handle(file.as_child_stdio()?),
+            Stdio::InheritPipe(pipe) => handle(copy(pipe)?),
             Stdio::ParentStdout => inherit(1)?,
             Stdio::ParentStderr => inherit(2)?,
             Stdio::Null => {
@@ -396,7 +417,7 @@ impl Command {
                 let direction = if is_input { Rights::READ } else { Rights::WRITE };
                 let null = toyos::null(direction.union(Rights::DUP).union(Rights::TRANSFER).union(Rights::WAIT))
                     .map_err(crate::sys::to_io_error)?;
-                Some(null)
+                handle(null)
             }
         })
     }

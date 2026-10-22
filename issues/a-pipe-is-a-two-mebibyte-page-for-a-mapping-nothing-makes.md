@@ -19,6 +19,13 @@ request. It also keeps `Pipe::publish_ends` writing reader and writer flags
 into the page for a reader that no longer exists, and the ring's header
 contract over a page a process may write (`sdk/abi/src/ring.rs`).
 
+A stream's holder is a connection and two bells, four pipes, so each holder
+costs 8 MiB of pages once it has rung, rung back and been answered
+(`HOLDER_BYTES`, `system/netstack/src/main.rs`): a stream exported to N
+children holds about N × 8 MiB beside its 8 MiB region, and netstack prices
+each holder past the first as a place. Shared listeners and datagram sockets
+multiply it again, so this is fixed before they share.
+
 Owner: the orchestrator, who stages
 `issues/netstack-moves-every-byte-through-two-kernel-pipes.md`, whose streams
 ring their doorbells through pipes and pay a page for each until this closes.

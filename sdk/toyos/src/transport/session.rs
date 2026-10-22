@@ -81,7 +81,7 @@ const SHUT: u32 = 1 << 30;
 const DEPART: Ordering = if cfg!(feature = "transport-departure-relaxed") { Ordering::Relaxed } else { Ordering::AcqRel };
 
 /// One holder of the client's end, by the number its server gave it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Holder(NonZeroU16);
 
 impl Holder {
@@ -112,21 +112,21 @@ pub enum Way {
     Send,
 }
 
-/// A pipe the server writes and the client waits on.
+/// A pipe of a holder's that the server writes and the holder waits on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Doorbell {
-    /// The connection the session was opened on.
-    Connection,
-    /// A pipe of the session's own.
-    Bell,
+    /// Rung for a reader.
+    Receive,
+    /// Rung for a writer.
+    Send,
 }
 
-/// The doorbell the server rings for a client waiting on `way`.
+/// The doorbell the server rings for a holder waiting on `way`.
 pub const fn doorbell(way: Way) -> Doorbell {
     match way {
-        Way::Receive => Doorbell::Connection,
-        Way::Send if cfg!(feature = "transport-one-doorbell") => Doorbell::Connection,
-        Way::Send => Doorbell::Bell,
+        Way::Receive => Doorbell::Receive,
+        Way::Send if cfg!(feature = "transport-one-doorbell") => Doorbell::Receive,
+        Way::Send => Doorbell::Send,
     }
 }
 
@@ -134,21 +134,21 @@ pub const fn doorbell(way: Way) -> Doorbell {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[must_use]
 pub struct Rings {
-    pub connection: bool,
-    pub bell: bool,
+    pub receive: bool,
+    pub send: bool,
 }
 
 impl Rings {
     fn of(way: Way, rung: bool) -> Self {
         match doorbell(way) {
-            Doorbell::Connection => Self { connection: rung, bell: false },
-            Doorbell::Bell => Self { connection: false, bell: rung },
+            Doorbell::Receive => Self { receive: rung, send: false },
+            Doorbell::Send => Self { receive: false, send: rung },
         }
     }
 
     /// Both sets of rings.
     pub fn and(self, other: Self) -> Self {
-        Self { connection: self.connection || other.connection, bell: self.bell || other.bell }
+        Self { receive: self.receive || other.receive, send: self.send || other.send }
     }
 }
 
@@ -1355,7 +1355,7 @@ mod tests {
         assert!(!server.shut(&page));
         page[TX_GATE].store(2 | WANT | SHUT, Ordering::Relaxed);
         page[TX_ROOM].store(1, Ordering::Relaxed);
-        assert_eq!(server.departed(&page, second()), Ok(Rings { connection: false, bell: true }), "the shutdown's waiter");
+        assert_eq!(server.departed(&page, second()), Ok(Rings { receive: false, send: true }), "the shutdown's waiter");
         assert_eq!(page[TX_GATE].load(Ordering::Relaxed), 0);
         assert!(server.shut(&page), "the shutdown asked of the departed owner");
     }
@@ -1407,7 +1407,7 @@ mod tests {
         assert_eq!(*bells.gates.borrow(), [Some(2)], "the shutdown's wait is for the second holder's gate");
         assert_eq!(page[TX_END].load(Ordering::Relaxed), ORDERLY);
         assert_eq!(page[TX_GATE].load(Ordering::Relaxed), 0);
-        assert_eq!(server.rung(&page), Ok(Rings { connection: false, bell: true }), "the shut rings the holder asleep over a full ring");
+        assert_eq!(server.rung(&page), Ok(Rings { receive: false, send: true }), "the shut rings the holder asleep over a full ring");
     }
 
     /// A nonblocking write that finds room under another holder's gate arms
@@ -1516,7 +1516,7 @@ mod tests {
         assert_eq!(read(&page, &other_rx, &bells, Mode::Nonblocking, 1, |_, _| {}), Err(Refused::WouldBlock), "armed");
         shutdown_read(&page, &rx, &bells);
         assert_eq!(bells.rang.get(), 1);
-        assert_eq!(server.rung(&page), Ok(Rings { connection: true, bell: false }), "the reader that armed");
+        assert_eq!(server.rung(&page), Ok(Rings { receive: true, send: false }), "the reader that armed");
         let _ = server.publish(&page, 2);
         assert_eq!(read(&page, &other_rx, &bells, Mode::Nonblocking, 1, |_, _| {}), Ok(0));
         assert_eq!(server.held(&page), Ok(2), "a byte was read after the shutdown");

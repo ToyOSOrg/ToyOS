@@ -20,11 +20,11 @@ use common::client::Client;
 use common::{arp, batch, terms, Segment, Wire, A, BUDGET, MAC, MAC_B, MAC_R, R};
 use etherparse::{ArpOperation, LinkSlice, NetSlice, PacketBuilder, SlicedPacket, TcpOptionElement, TransportSlice};
 use toyos::net::stream::RESET;
-use toyos_net_node::{ConnectRefused, Node, StreamEvent, StreamId};
+use toyos_net_node::{ConnectRefused, ExportRefused, Node, StreamEvent, StreamId};
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{Counter, Endpoint, Failure};
 use toyos_net_wire::{Instant, Port};
-use toyos::transport::session::Refused;
+use toyos::transport::session::{Holder, Refused};
 use toyos::transport::Violation;
 
 const B: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 2);
@@ -38,6 +38,8 @@ const ISS: u32 = 5000;
 /// ring's tail (`toyos::net::stream::LAYOUT`).
 const RX_HEAD: usize = 0;
 const TX_TAIL: usize = 5 * 16;
+/// The send ring's gate, which a holder that dies may hold.
+const TX_GATE: usize = 12 * 16;
 
 fn peer() -> Endpoint {
     Endpoint { addr: B, port: Port::new(PORT).unwrap() }
@@ -1037,4 +1039,76 @@ fn no_flipped_bit_of_a_segment_delivers_other_bytes() {
             assert_eq!(net.node.streams(), 1, "byte {index} bit {bit}");
         }
     }
+}
+
+// ---- holders ----
+
+/// The second holder of a stream.
+fn second() -> Holder {
+    Holder::new(2).unwrap()
+}
+
+// A holder past a stream's first takes a place of its own, so netstack's bound on what clients
+// make it hold holds for holders too; past the places an export makes nothing.
+#[test]
+fn a_holder_past_the_first_takes_a_place_and_none_is_made_past_the_places() {
+    let (mut net, id, _client) = established();
+    net.node.set_places(net.now, 2);
+    assert_eq!(net.node.held(), 1);
+    let (remote, _) = net.node.export(id).expect("a place for the second holder");
+    assert_eq!(remote, peer(), "the holder is told the stream's peer");
+    assert_eq!(net.node.held(), 2);
+    assert_eq!(net.node.export(id), Err(ExportRefused::Full));
+    assert_eq!(net.node.held(), 2, "a refused export took nothing");
+    net.node.departed(net.now, id, second());
+    assert_eq!((net.node.held(), net.node.streams()), (1, 1), "the departed holder's place is back, and the stream stays");
+}
+
+// A holder that dies holding the send ring's gate, while another holder waits for it, has the
+// gate let go and the waiter rung: the stream goes on for the holder that stays.
+#[test]
+fn a_holder_that_left_holding_the_gate_lets_the_one_that_stays_write() {
+    let (mut net, id, first) = established();
+    net.node.export(id).expect("a place for the second holder");
+    let _second = first.holder(2);
+    first.word(TX_GATE).store(2, Ordering::Release);
+    assert_eq!(first.write(b"after"), Err(Refused::WouldBlock), "the gate is the second holder's");
+    let bell = first.bell();
+    net.node.departed(net.now, id, second());
+    assert!(first.bell() > bell, "the departure rang the holder waiting for the gate");
+    net.writes(&first, b"after");
+    assert_eq!(net.far.received, b"after");
+    assert!(!net.far.fin, "a holder stays");
+}
+
+// Bytes that arrive ring every holder that waits for them, and the one that reads first takes
+// them.
+#[test]
+fn bytes_that_arrive_ring_every_holder_waiting_for_them() {
+    let (mut net, id, first) = established();
+    net.node.export(id).expect("a place for the second holder");
+    let other = first.holder(2);
+    assert_eq!(first.read(8), Err(Refused::WouldBlock));
+    assert_eq!(other.read(8), Err(Refused::WouldBlock));
+    let frame = net.far.text(b"hi");
+    net.deliver(&frame);
+    assert!(first.receive_bell() > 0 && other.receive_bell() > 0, "a holder waiting for the bytes was not rung");
+    assert_eq!(other.read(8), Ok(b"hi".to_vec()));
+    assert_eq!(first.read(8), Err(Refused::WouldBlock), "bytes another holder took");
+}
+
+// The last holder's leaving is the stream's: what was written is sent, then the FIN.
+#[test]
+fn the_last_holder_leaving_is_the_streams_close() {
+    let (mut net, id, first) = established();
+    net.node.export(id).expect("a place for the second holder");
+    let other = first.holder(2);
+    assert_eq!(other.write(b"from the second"), Ok(15));
+    net.node.departed(net.now, id, second());
+    net.pump();
+    assert_eq!((net.far.received.as_slice(), net.far.fin), (&b"from the second"[..], false), "the departure's pass sent what the holder published");
+    net.node.departed(net.now, id, Holder::FIRST);
+    net.pump();
+    assert!(net.far.fin, "the last holder left");
+    assert_eq!((first.dropped(), net.node.streams()), (true, 0));
 }

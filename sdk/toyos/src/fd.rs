@@ -20,9 +20,11 @@
 //! share one table. Nothing catches a second owner at link time: the feature
 //! is set in those two builds and nowhere else.
 //!
-//! **A process's descriptors arrive as endowments**, `fd:<n>` (`FD_PREFIX`),
-//! each installed at its number at the table's first use; its stdio is
-//! descriptors 0 to 2 among them.
+//! **A process's descriptors arrive as endowments**, `fd:<n>` (`FD_PREFIX`)
+//! or `fd:<n>:<kind>` ([`Kind`]), each installed at its number at the table's
+//! first use; its stdio is descriptors 0 to 2 among them. A stream's arrives
+//! as an exported end, which the table takes up as this process's holder
+//! (`net::stream::adopt_exported`).
 
 use toyos_abi::RawHandle;
 
@@ -49,6 +51,10 @@ pub enum Error {
 pub const UNTAGGED: u32 = 0;
 /// The tag of a file a file server holds open (`crate::files`).
 pub const SERVED_FILE: u32 = 1;
+/// The tag of a stream's descriptor (`crate::net::stream`): a kernel handle,
+/// let go by the copy of this crate that holds the stream's end, which only
+/// that copy knows.
+pub const STREAM: u32 = 2;
 
 /// What a descriptor names.
 #[repr(C)]
@@ -70,6 +76,18 @@ impl Object {
     /// object is released.
     pub const fn handle(handle: RawHandle) -> Self {
         Self { handle, tag: UNTAGGED, word: 0, release: None }
+    }
+
+    /// A stream's handle, which `release`, of the copy of this crate holding
+    /// the stream's end, lets go of once no descriptor and no call names it.
+    pub const fn stream(handle: RawHandle, release: extern "C" fn(u64)) -> Self {
+        Self { handle, tag: STREAM, word: handle.0 as u64, release: Some(release) }
+    }
+
+    /// The kernel handle a kernel call on the descriptor is made on: `None`
+    /// for an object a library keeps that is no handle.
+    pub fn kernel_handle(&self) -> Option<RawHandle> {
+        (self.release.is_none() || self.tag == STREAM).then_some(self.handle)
     }
 
     /// An object a library keeps itself, `word`, which `release` is called
@@ -190,19 +208,45 @@ pub fn replace(fd: Fd, object: Object) -> Result<(), Error> {
     decode(unsafe { toyos_fd_replace(fd, object) }).map(drop)
 }
 
-/// A copy of the kernel handle `fd` names, for a child: `None` for a
-/// descriptor that is not open, as a child of POSIX's holds no closed one.
-/// Refused for a stream's end, which `net::stream` answers for here alone,
-/// for an object that is no kernel handle, and for one the kernel will not
-/// duplicate.
-pub fn copy(fd: Fd) -> Result<Option<crate::OwnedHandle>, crate::spawn::Refused> {
+/// What a child is given for `fd`, and its kind: a copy of the kernel handle
+/// it names, or for a stream an end of a new holder of it
+/// (`net::stream::export`). `None` for a descriptor that is not open, as a
+/// child of POSIX's holds no closed one. Refused for an object that is no
+/// kernel handle, for one the kernel will not duplicate, and for a stream
+/// netstack makes no holder of.
+pub fn copy(fd: Fd) -> Result<Option<(crate::OwnedHandle, Kind)>, crate::spawn::Refused> {
     use crate::spawn::Refused;
-    let copied = with(fd, |o| match o.release {
-        None if crate::net::stream::is_stream(o.handle) => Err(Refused::Stream(o.handle)),
-        None => toyos_abi::syscall::dup(o.handle).map(crate::OwnedHandle).map_err(Refused::Syscall),
-        Some(_) => Err(Refused::Syscall(toyos_abi::syscall::SyscallError::NotSupported)),
+    let copied = with(fd, |o| match o.kernel_handle() {
+        Some(handle) if crate::net::stream::is_stream(handle) => {
+            crate::net::stream::export(handle).map(|end| (end, Kind::Stream)).map_err(Refused::Export)
+        }
+        Some(handle) if o.tag != STREAM => {
+            toyos_abi::syscall::dup(handle).map(|copy| (crate::OwnedHandle(copy), Kind::Handle)).map_err(Refused::Syscall)
+        }
+        // A stream another copy of this crate holds the end of, or no handle.
+        _ => Err(Refused::Syscall(toyos_abi::syscall::SyscallError::NotSupported)),
     });
     copied.map_or(Ok(None), |copied| copied.map(Some))
+}
+
+/// What an `fd:` endowment's handle is, as its label's suffix names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// The kernel handle the descriptor names: `fd:<n>`.
+    Handle,
+    /// A stream's exported end, which the child takes up as its holder:
+    /// `fd:<n>:stream`.
+    Stream,
+}
+
+impl Kind {
+    /// What a label carries past the number.
+    pub const fn suffix(self) -> &'static str {
+        match self {
+            Self::Handle => "",
+            Self::Stream => ":stream",
+        }
+    }
 }
 
 pub fn inheritable(fd: Fd) -> Result<bool, Error> {
@@ -215,13 +259,19 @@ pub fn set_inheritable(fd: Fd, inheritable: bool) -> Result<(), Error> {
     decode(unsafe { toyos_fd_set_inheritable(fd, inheritable) }).map(drop)
 }
 
-/// The descriptor an `fd:<n>` endowment's label names, `n` in canonical
-/// decimal: `None` for any other label, and for a number past the table.
-pub fn endowed_fd(label: &str) -> Option<Fd> {
-    let digits = label.strip_prefix(toyos_abi::syscall::FD_PREFIX)?;
+/// The descriptor an `fd:<n>` or `fd:<n>:<kind>` endowment's label names, `n`
+/// in canonical decimal, and its kind: `None` for any other label, and for a
+/// number past the table.
+pub fn endowed_fd(label: &str) -> Option<(Fd, Kind)> {
+    let rest = label.strip_prefix(toyos_abi::syscall::FD_PREFIX)?;
+    let (digits, kind) = match rest.split_once(':') {
+        None => (rest, Kind::Handle),
+        Some((digits, "stream")) => (digits, Kind::Stream),
+        Some(_) => return None,
+    };
     let canonical = digits.bytes().all(|b| b.is_ascii_digit()) && (digits == "0" || !digits.starts_with('0'));
     let n: Fd = digits.parse().ok().filter(|_| canonical)?;
-    (0..MAX_FDS as Fd).contains(&n).then_some(n)
+    (0..MAX_FDS as Fd).contains(&n).then_some((n, kind))
 }
 
 /// The table itself, in the copy that owns it.
@@ -264,18 +314,30 @@ mod owner {
         })
     }
 
-    /// Install each `fd:<n>` endowment at `n`. One whose number another
-    /// already took is refused, its handle closed: how many were.
+    /// Install each `fd:` endowment at its number, a stream's taken up as
+    /// this process's holder first. One whose number another already took,
+    /// or whose stream this process holds no room for, is refused, its handle
+    /// closed: how many were.
     fn endow(table: &mut Table<MAX_FDS>, endowed: &Endowments) -> Result<usize, Fault> {
         let mut refused = 0;
         for label in endowed.labels() {
-            let Some(fd) = endowed_fd(label) else { continue };
+            let Some((fd, kind)) = endowed_fd(label) else { continue };
             let Some(handle) = endowed.take::<OwnedHandle>(label) else { continue };
-            match table.install_at(fd, Object::handle(handle.0), true) {
-                // The table owns the handle from here on.
-                Ok(()) => drop(handle.into_raw()),
+            let object = match kind {
+                Kind::Handle => Object::handle(handle.into_raw()),
+                Kind::Stream => match crate::net::stream::adopt_exported(handle) {
+                    Some(descriptor) => crate::net::stream::descriptor(descriptor),
+                    None => {
+                        refused += 1;
+                        continue;
+                    }
+                },
+            };
+            match table.install_at(fd, object, true) {
+                // The table owns the object from here on.
+                Ok(()) => {}
                 Err(Fault::Refused(_)) => {
-                    drop(handle);
+                    object.release();
                     refused += 1;
                 }
                 Err(Fault::Broken) => return Err(Fault::Broken),
@@ -373,10 +435,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn an_fd_label_names_its_number_and_no_other_label_names_one() {
-        assert_eq!(endowed_fd("fd:0"), Some(0));
-        assert_eq!(endowed_fd("fd:4095"), Some(4095));
-        for other in ["fd:4096", "fd:-1", "fd:", "fd:1x", "svc", "fd1", "dev:fd:1", "fd:+3", "fd:03", "fd:00", "fd: 3"] {
+    fn an_fd_label_names_its_number_and_kind_and_no_other_label_names_one() {
+        assert_eq!(endowed_fd("fd:0"), Some((0, Kind::Handle)));
+        assert_eq!(endowed_fd("fd:4095"), Some((4095, Kind::Handle)));
+        assert_eq!(endowed_fd("fd:3:stream"), Some((3, Kind::Stream)));
+        for kind in [Kind::Handle, Kind::Stream] {
+            assert_eq!(endowed_fd(&format!("fd:7{}", kind.suffix())), Some((7, kind)), "a label of its own");
+        }
+        for other in [
+            "fd:4096", "fd:-1", "fd:", "fd:1x", "svc", "fd1", "dev:fd:1", "fd:+3", "fd:03", "fd:00", "fd: 3",
+            "fd:3:", "fd:3:file", "fd:3:stream:", "fd::stream", "fd:4096:stream",
+        ] {
             assert_eq!(endowed_fd(other), None, "{other}");
         }
     }

@@ -45,9 +45,9 @@ pub fn on_fd<T>(
     fd: i32,
     f: impl FnOnce(toyos_abi::RawHandle) -> Result<T, toyos_abi::syscall::SyscallError>,
 ) -> crate::io::Result<T> {
-    let answer = toyos::fd::with(fd, |object| match object.release {
-        None => f(object.handle).map_err(to_io_error),
-        Some(_) => Err(crate::io::const_error!(
+    let answer = toyos::fd::with(fd, |object| match object.kernel_handle() {
+        Some(handle) => f(handle).map_err(to_io_error),
+        None => Err(crate::io::const_error!(
             crate::io::ErrorKind::Unsupported,
             "the descriptor names an object of a library's own",
         )),
@@ -118,6 +118,7 @@ pub fn files_error(e: toyos::files::Error) -> crate::io::Error {
             io::const_error!(io::ErrorKind::CrossesDevices, "the two paths are on different servers")
         }
         files::Error::NotAFile => io::const_error!(io::ErrorKind::InvalidInput, "the descriptor names no file"),
+        files::Error::Stream(refused) => crate::sys::net::stream_refused(refused),
     }
 }
 
@@ -132,6 +133,11 @@ pub fn refused(refused: toyos::spawn::Refused) -> crate::io::Error {
         Refused::Stream(handle) => {
             Error::new(ErrorKind::InvalidInput, toyos::net::stream::Misuse::Moved(handle).to_string())
         }
+        Refused::Export(e) => match e {
+            toyos::net::NetError::NetstackNotFound => Error::from(ErrorKind::ConnectionAborted),
+            toyos::net::NetError::ResourceExhausted => Error::from(ErrorKind::QuotaExceeded),
+            _ => Error::from(ErrorKind::Other),
+        },
         Refused::NotStarted => Error::from(ErrorKind::Other),
         Refused::Syscall(e) => to_io_error(e),
     }

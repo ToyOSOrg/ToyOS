@@ -438,19 +438,19 @@ impl<T> Lock<T> for Held<T> {
 struct Holding {
     rx: Held<Rx>,
     tx: Held<Tx>,
-    connection: Pipe,
-    bell: Pipe,
+    receive: Pipe,
+    send: Pipe,
 }
 
 impl Holding {
     fn new((rx, tx): (Rx, Tx)) -> Self {
-        Self { rx: Held(Mutex::new(rx)), tx: Held(Mutex::new(tx)), connection: Pipe::new(), bell: Pipe::new() }
+        Self { rx: Held(Mutex::new(rx)), tx: Held(Mutex::new(tx)), receive: Pipe::new(), send: Pipe::new() }
     }
 
     fn pipe(&self, bell: Doorbell) -> &Pipe {
         match bell {
-            Doorbell::Connection => &self.connection,
-            Doorbell::Bell => &self.bell,
+            Doorbell::Receive => &self.receive,
+            Doorbell::Send => &self.send,
         }
     }
 }
@@ -590,11 +590,11 @@ impl Session {
     /// The server's rings, of every holder.
     fn rings(&self, rings: Rings) {
         for holding in &self.holders {
-            if rings.connection {
-                holding.connection.ring();
+            if rings.receive {
+                holding.receive.ring();
             }
-            if rings.bell {
-                holding.bell.ring();
+            if rings.send {
+                holding.send.ring();
             }
         }
     }

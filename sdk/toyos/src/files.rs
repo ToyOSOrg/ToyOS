@@ -64,6 +64,9 @@ pub enum Error {
     CrossesServers,
     /// A descriptor that names no file, but an object of a library's own.
     NotAFile,
+    /// A read or a write of a stream's descriptor, refused as the stream
+    /// refuses it (`crate::net::stream`).
+    Stream(crate::net::stream::Refused),
 }
 
 // The C interface's words: a negative answer is an `Error`.
@@ -75,6 +78,7 @@ const CROSSES: i64 = -5;
 const NOT_A_FILE: i64 = -6;
 const KERNEL: i64 = 0x100;
 const SERVED: i64 = 0x200;
+const STREAM: i64 = 0x300;
 
 #[cfg(any(feature = "fd-table", test))]
 fn encode(e: Error) -> i64 {
@@ -87,6 +91,12 @@ fn encode(e: Error) -> i64 {
         Error::NotAFile => NOT_A_FILE,
         Error::Kernel(e) => -(KERNEL + (u64::MAX - e.to_u64()) as i64),
         Error::Served(e) => -(SERVED + i64::from(e.byte())),
+        Error::Stream(refused) => match crate::net::stream::Refused::byte(refused) {
+            Some(byte) => -(STREAM + i64::from(byte)),
+            // A handle the descriptor's own stream refused as no stream of
+            // the process's: a descriptor that names no file.
+            None => NOT_A_FILE,
+        },
     }
 }
 
@@ -103,9 +113,14 @@ fn decode(word: i64) -> Result<u64, Error> {
             let code = -word;
             let kernel = (KERNEL..SERVED).contains(&code).then(|| SyscallError::from_u64(u64::MAX - (code - KERNEL) as u64)).flatten();
             let served = (SERVED..SERVED + 256).contains(&code).then(|| fs::Error::from_byte((code - SERVED) as u8)).flatten();
-            match (kernel, served) {
-                (Some(e), _) => Err(Error::Kernel(e)),
-                (_, Some(e)) => Err(Error::Served(e)),
+            let stream = (STREAM..STREAM + 256)
+                .contains(&code)
+                .then(|| crate::net::stream::Refused::from_byte((code - STREAM) as u8))
+                .flatten();
+            match (kernel, served, stream) {
+                (Some(e), _, _) => Err(Error::Kernel(e)),
+                (_, Some(e), _) => Err(Error::Served(e)),
+                (_, _, Some(e)) => Err(Error::Stream(e)),
                 _ => panic!("toyos::files: an answer {word} no error encodes"),
             }
         }
@@ -339,6 +354,10 @@ mod tests {
         ];
         every.extend((0..=255).filter_map(|code| SyscallError::from_u64(u64::MAX - code)).map(Error::Kernel));
         every.extend((0..=255u8).filter_map(fs::Error::from_byte).map(Error::Served));
+        let streams: alloc::vec::Vec<Error> =
+            (0..=255u8).filter_map(crate::net::stream::Refused::from_byte).map(Error::Stream).collect();
+        assert_eq!(streams.len(), 7, "every stream refusal but a foreign handle's");
+        every.extend(streams);
         assert!(every.len() > 40, "only {} errors", every.len());
         for e in every {
             let word = encode(e);
@@ -347,5 +366,7 @@ mod tests {
         }
         assert_eq!(decode(0), Ok(0));
         assert_eq!(decode(i64::MAX), Ok(i64::MAX as u64));
+        let foreign = Error::Stream(crate::net::stream::Refused::NotThisProcess(toyos_abi::RawHandle(7)));
+        assert_eq!(decode(encode(foreign)), Err(Error::NotAFile), "a handle no stream of the process's names no file");
     }
 }

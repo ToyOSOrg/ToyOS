@@ -230,6 +230,13 @@ const RUST_SKIP: &[&str] = &[
     // A shell's Ctrl+C, the probe being its surface: `libc_children` runs it
     // on tests/images/libccase.toml, whose shell and `cat` it drives.
     "tty_interrupt",
+    // A stream exported to a child through real netstack: it connects out to
+    // the harness, which only `stream_exported_to_a_child`'s boot sets up.
+    "stream_export",
+    // A stream's holders across processes, as their own netstack: it spawns a
+    // child that faults, which a shared boot's other members must not watch,
+    // and `stream_holders` runs it.
+    "stream_handles",
     // It needs a launcher: `a_launch_gives_each_unsent_stdio_slot_a_null`
     // runs it on tests/images/launchcase.toml.
     "launch_unsent_stdio",
@@ -565,6 +572,19 @@ const MACHINE_TESTS: &[&str] = &[
     // program starts and waits for its own, which is order, completion,
     // contents and counts, and no hardware is in it.
     "libc_children",
+    // A stream shared by a parent and the child it was exported to, the test
+    // its own netstack: when a dead holder's handles close, and that the
+    // survivor's write and read then work, are the kernel's, which no host
+    // build has; no hardware is in it. x86-64 alone, the architecture the
+    // suite builds guest binaries for (`qemu::SUITE_ARCH`).
+    "stream_holders",
+    // One stream exported through std's `Command` and adopted in the child,
+    // through the real netstack of `tests/images/netcase.toml`: the export,
+    // the endowment and the adoption cross real processes and the real
+    // netstack, which no host test and `stream_holders`' stand-in show. The
+    // harness is the peer, on the host's loopback that QEMU's user network
+    // reaches, so no public network. x86-64 alone (`qemu::SUITE_ARCH`).
+    "stream_exported_to_a_child",
     // A launch's unsent stdio slots: its own boot, because the launcher it
     // needs makes every spawn of a declared program a launch.
     "a_launch_gives_each_unsent_stdio_slot_a_null",
@@ -4289,6 +4309,8 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "nvme_disk_boots" => nvme_disk_boots(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "libc_children" => common::libcchildren::libc_children(),
+        "stream_holders" => stream_holders(test_config),
+        "stream_exported_to_a_child" => stream_exported_to_a_child(),
         "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
         "a_row_reaches_its_own_state_and_no_other" => common::stateview::a_row_reaches_its_own_state_and_no_other(),
         "usbd_drives_the_spare" => usbd_drives_the_spare(test_config),
@@ -5037,6 +5059,76 @@ fn crypto_instrument_prints_its_table(test_config: &Path) -> Result<(), String> 
 /// A hang ceiling for one crypto job under QEMU, whose clock decides nothing
 /// else.
 const CRYPTO_JOB_CEILING_SECS: u64 = 300;
+
+/// `test_rs_stream_export` on `tests/images/netcase.toml`'s boot, the
+/// harness its stream's peer: the child's line, then the parent's, then the
+/// FIN once both holders are gone.
+fn stream_exported_to_a_child() -> Result<(), String> {
+    use std::io::Read;
+    const JOB: &str = "stream_export";
+    /// netstack's line once its lease landed: before it, a connect is refused.
+    const LEASED: &str = "netstack: ready, at most";
+    let peer = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("no loopback listener: {e}"))?;
+    let port = peer.local_addr().map_err(|e| format!("the listener's port: {e}"))?.port();
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
+    let config = compile::repo_root().join("tests/images/netcase.toml");
+    let mut qemu = QemuInstance::boot_with_options(&config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    if !qemu.boot_log().contains(LEASED) && !qemu.drain_until(Duration::from_secs(60), |l| l.contains(LEASED)).contains(LEASED) {
+        return Err("netstack never said its lease landed".into());
+    }
+    // The peer's side on a thread of its own: the job's lines arrive while it runs.
+    let heard = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+        let (mut conn, _) = peer.accept().map_err(|e| format!("the guest's connect: {e}"))?;
+        conn.set_read_timeout(Some(Duration::from_secs(120))).map_err(|e| e.to_string())?;
+        let mut all = Vec::new();
+        conn.read_to_end(&mut all).map_err(|e| format!("the stream's bytes, until its FIN: {e} after {all:?}"))?;
+        Ok(all)
+    });
+    let result = qemu.run_test(&format!("test_rs_stream_export {port}"), Duration::from_secs(120));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    let heard = heard.join().map_err(|_| "the peer's thread panicked".to_string())??;
+    let owed = b"adopted by the child\nstill the parent's\n";
+    if heard != owed {
+        return Err(format!("the peer heard {:?}, not {:?}", String::from_utf8_lossy(&heard), String::from_utf8_lossy(owed)));
+    }
+    Ok(())
+}
+
+/// `test_rs_stream_handles` on a boot of its own: a holder killed inside its
+/// gate leaves the other working, netstack's exit ends a blocked read in each,
+/// and within a process a stream's handles are one end
+/// (`tests/guest/rust-tests/src/bin/stream_handles.rs`).
+fn stream_holders(test_config: &Path) -> Result<(), String> {
+    const JOB: &str = "stream_handles";
+    let tests = compile::repo_root().join("tests/guest/rust-tests");
+    let bin = qemu::build_toyos_bin(qemu::SUITE_ARCH, &tests, JOB);
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[(JOB.to_string(), bin)], BootOptions::default());
+    serial::Serial::boot(&qemu).must_be_clean()?;
+    let result = qemu.run_test("test_rs_stream_handles", Duration::from_secs(300));
+    if let Some(why) = &result.error {
+        return Err(format!("{why}\nthe job said:\n{}", result.stdout));
+    }
+    if result.exit_code != Some(0) {
+        return Err(format!("the job ended {:?}:\n{}", result.exit_code, result.stdout));
+    }
+    for claim in [
+        "a holder killed inside the gate: its hang-up came after it, and the parent wrote and read",
+        "netstack's exit: a blocked read in each holder answered ConnectionAborted",
+        "given out and taken back: one end; its own handle endowed or provided: refused",
+    ] {
+        if !result.stdout.contains(claim) {
+            return Err(format!("the job never said {claim:?}:\n{}", result.stdout));
+        }
+    }
+    Ok(())
+}
 
 /// A claim's memory BAR asked for again — while an earlier answer is held, and
 /// once its handle is gone, closed or never installed for want of room: each

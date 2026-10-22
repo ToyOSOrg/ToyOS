@@ -23,11 +23,11 @@ pub enum MsgType {
     TcpListenerSetOption = 14,
     UdpSetOption = 15,
     TcpBindPiped = 21,
-    /// A stream's region with [`TcpConnectRequest`], answered with its bell
-    /// ([`stream::connect`]).
+    /// A stream's region with [`TcpConnectRequest`], answered with its two
+    /// bells ([`stream::connect`]).
     TcpConnect = 23,
-    /// A stream's region with [`TcpAcceptRequest`], answered with its bell
-    /// ([`stream::accept`]).
+    /// A stream's region with [`TcpAcceptRequest`], answered with its two
+    /// bells ([`stream::accept`]).
     TcpAccept = 24,
 }
 
@@ -168,7 +168,8 @@ ipc_payload! {
         pub timeout_ms: u32,
     }
 
-    /// The answer to [`MsgType::TcpConnect`], with the stream's bell.
+    /// The answer to [`MsgType::TcpConnect`], with the stream's two bells
+    /// (`net::stream::BELLS`).
     pub struct TcpConnectResponse {
         pub local_port: u16,
         pub _pad: u16,
@@ -204,7 +205,7 @@ ipc_payload! {
         nodelay: u32,
     }
 
-    /// The answer to [`MsgType::TcpAccept`], with the stream's bell: the peer,
+    /// The answer to [`MsgType::TcpAccept`], with the stream's two bells: the peer,
     /// and whether Nagle's algorithm is off for the stream as its listener
     /// had it, which netstack has written into the region's header too.
     pub struct TcpAcceptResponse {
@@ -370,7 +371,7 @@ impl NetstackConn {
 /// `Gone` cannot mean anything else here. This is applied only to `read` and
 /// `message_send` on a connection this process holds, and a handle a process
 /// does not hold ends it at the kernel rather than answering a word.
-fn hangup(e: IpcError) -> NetError {
+pub(crate) fn hangup(e: IpcError) -> NetError {
     match e {
         IpcError::Disconnected
         | IpcError::Syscall(toyos_abi::syscall::SyscallError::Gone) => NetError::NetstackNotFound,
@@ -405,13 +406,13 @@ impl PendingResponse {
         self.conn().recv_bytes(&header, buf).map_err(hangup)
     }
 
-    /// The answer, the one handle it hands over, and the connection, which
+    /// The answer, the `N` handles it hands over, and the connection, which
     /// is then the caller's.
-    pub fn answer_with_handle<Resp: IpcPayload>(self) -> Result<(Resp, RawHandle, Connection), NetError> {
+    pub fn answer_with_handles<Resp: IpcPayload, const N: usize>(self) -> Result<(Resp, [RawHandle; N], Connection), NetError> {
         let header = self.recv_checked_header()?;
         let answer = self.conn().recv_payload(&header).map_err(hangup)?;
-        let [handle] = self.conn().recv_handles_exact::<1>(&header).ok_or(NetError::Protocol(header.msg_type))?;
-        Ok((answer, handle, (self.0).0))
+        let handles = self.conn().recv_handles_exact::<N>(&header).ok_or(NetError::Protocol(header.msg_type))?;
+        Ok((answer, handles, (self.0).0))
     }
 
     pub fn status(self) -> Result<(), NetError> {

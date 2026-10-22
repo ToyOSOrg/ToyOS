@@ -8,11 +8,15 @@
 //! datagram's bytes travel in the socket's own pipes, which are netstack's and
 //! not the node's, and reach no call.
 //!
-//! **A stream is its region and the connection its connect or accept came on**
-//! (`toyos::net::stream`): netstack judges the region before it maps it
-//! (`lent`), makes the stream's bell, answers once with the bell, and from then
-//! watches the connection once, for the client's rings and its hang-up, which
-//! is the stream's close. A client names no stream by a number.
+//! **A stream is its region and its holders** (`toyos::net::stream`): the
+//! connection its connect or accept came on, and one more for each export.
+//! netstack judges the region before it maps it (`lent`), makes the first
+//! holder's two bells and answers once with them, and from then watches each
+//! holder's connection for its frames, rings and exports, and its hang-up,
+//! which is that holder's leaving and, for the last, the stream's close. A
+//! holder netstack makes is a connection of its private port's, its `ADOPT`
+//! queued on it before the asker is answered. A client names no stream by a
+//! number, and a frame no holder of the protocol sends drops that holder.
 //!
 //! **Untrusted input.** A request's every field is its client's number: an id
 //! that names nothing, or a socket of another kind, is refused
@@ -42,22 +46,24 @@ use std::time::Duration;
 use std::rc::{Rc, Weak};
 
 use toyos::net::*;
-use toyos::net::stream;
+use toyos::net::stream::{self, Adopt, ADOPT, BELLS, EXPORT, EXPORTED, REFUSED, RING};
+use toyos::transport::session::Holder;
 use toyos::poller::{OTHER_END_GONE, READABLE};
 use toyos::port::Acceptor;
+use toyos::ipc::RxStep;
 use toyos::{ipc, say, AsHandle, Connection, OwnedHandle, Pipe};
 use toyos_abi::syscall::{SyscallError, MAX_BADGE};
 use toyos_inspect::Snapshot;
 use toyos_net_node::{
-    AcceptRefused, ConnectRefused, DatagramId, Ended, Event, ListenRefused, ListenerId, LookupId, Node, NotStarted,
-    Refused, Resolving, StreamEvent, StreamId, WriteRefusal,
+    AcceptRefused, ConnectRefused, DatagramId, Ended, Event, ExportRefused, ListenRefused, ListenerId, LookupId, Node,
+    NotStarted, Refused, Resolving, StreamEvent, StreamId, WriteRefusal,
 };
 use toyos_net_shard::ConnectError;
 use toyos_net_tcp::{Endpoint, Failure};
 use toyos_net_wire::{Instant, Port};
 
 use crate::client::{Client, Request};
-use crate::lent::Region;
+use crate::lent::{Holders, Holding, Region};
 use crate::pipes::{self, Watched};
 use crate::watches::Watches;
 use crate::HOSTNAME;
@@ -95,14 +101,53 @@ struct Datagram {
     from_client: Pipe,
 }
 
-/// A stream's connection as netstack watches it, for as long as the node
-/// holds the stream's session.
+/// A stream's holders as netstack watches them, for as long as the node holds
+/// the stream's session.
 struct Stream {
     id: StreamId,
-    connection: Weak<Connection>,
-    /// The connect not yet answered: its connection, and the bell's read end
-    /// its answer hands over.
-    answer: Option<(Rc<Connection>, Pipe)>,
+    holders: Weak<Holders>,
+    /// The connect not yet answered: the bells' read ends its answer hands
+    /// over, and the holders, kept for the answer past a session the node let
+    /// go of.
+    answer: Option<([Pipe; BELLS], Rc<Holders>)>,
+    /// The number the next holder made is given.
+    next: u16,
+}
+
+/// The most frames one holder's connection is read for in a wake: one that
+/// always has another cannot keep the rest from being served.
+const FRAMES_A_WAKE: usize = 64;
+
+/// The name the private port holders are made on has in netstack's own
+/// namespace.
+const EXPORT_PORT: &str = "export";
+
+/// The private port every holder netstack makes past a stream's first is a
+/// connection of: its acceptor, and the namespace holding netstack's one
+/// connector to it. It dies with netstack, so nothing pending reaches a
+/// restarted one.
+struct Exports {
+    acceptor: Acceptor,
+    names: toyos::namespace::Namespace,
+}
+
+impl Exports {
+    fn new() -> Self {
+        let (acceptor, connector) = toyos::port::create().unwrap_or_else(|e| panic!("netstack: no export port ({e:?})"));
+        let names = toyos::namespace::build()
+            .add(EXPORT_PORT, &connector)
+            .finish()
+            .unwrap_or_else(|e| panic!("netstack: no namespace for the export port ({e:?})"));
+        Self { acceptor, names }
+    }
+
+    /// A connection to netstack: the end to hand away, which keeps every right
+    /// a connection is made with, `TRANSFER` among them, and netstack's.
+    fn connect(&self) -> Result<(Connection, Connection), SyscallError> {
+        let theirs = self.names.open(EXPORT_PORT)?;
+        let ours = self.acceptor.accept().unwrap_or_else(|e| panic!("netstack: the export port refused an accept ({e:?})"));
+        Ok((theirs, ours))
+    }
 }
 
 /// A client waiting for a datagram to reach its socket.
@@ -114,10 +159,14 @@ struct Receiving {
 pub struct Sockets {
     ids: HashMap<u32, Socket>,
     next_id: u32,
-    /// Each stream by the key its watch's token carries.
+    /// Each stream by its key.
     streams: HashMap<u32, Stream>,
     /// The key each stream is kept under.
     by_stream: BTreeMap<StreamId, u32>,
+    /// Each holder, by the key its watch's token carries: its stream's key
+    /// and its number.
+    holders: HashMap<u32, (u32, Holder)>,
+    exports: Exports,
     lookups: Vec<(LookupId, Client)>,
     /// At most one receive waits on a socket, so a client's requests alone
     /// hold no more of netstack's handles than its sockets do.
@@ -131,31 +180,43 @@ pub struct Sockets {
     rung: Vec<StreamId>,
 }
 
-/// A stream's region off a request's connection, judged, and its bell made:
-/// the session the node is lent and the bell's read end the answer hands
-/// over. Refused by name, nothing is mapped.
-fn lend(client: Client, handles: ipc::Batch) -> Result<(Region, Pipe, Rc<Connection>), (Client, u32)> {
+/// Two bells: the read ends, which a holder is handed, and the write ends
+/// netstack rings.
+fn bells() -> Result<([Pipe; BELLS], [Pipe; BELLS]), SyscallError> {
+    let (receive_read, receive) = toyos::pipe_pair()?;
+    let (send_read, send) = toyos::pipe_pair()?;
+    Ok(([receive_read, send_read], [receive, send]))
+}
+
+/// What a lent region makes: the session, the bells' read ends and the holders.
+type Lent = (Region, [Pipe; BELLS], Rc<Holders>);
+
+/// A stream's region off a request's connection, judged, and its first
+/// holder's bells made: the session the node is lent, the bells' read ends the
+/// answer hands over, and the holders. Refused by name, nothing is mapped.
+fn lend(client: Client, handles: ipc::Batch) -> Result<Lent, (Client, u32)> {
     let Some([region]) = handles.exact::<1>() else { return Err((client, ERR_INVALID_INPUT)) };
-    let Ok((bell, ring)) = toyos::pipe_pair() else {
-        // The handle is consumed either way.
-        toyos_abi::syscall::close(region);
-        return Err((client, ERR_RESOURCE_EXHAUSTED));
-    };
-    let connection = Rc::new(client.conn);
-    match Region::lent(region, connection.clone(), ring) {
-        Ok(session) => Ok((session, bell, connection)),
+    let mapping = match Region::judged(region) {
+        Ok(mapping) => mapping,
         Err(why) => {
             say!("netstack: refusing a stream's region — {why}");
-            let Ok(conn) = Rc::try_unwrap(connection) else { unreachable!("a refused region shares its connection") };
-            Err((Client { conn }, ERR_INVALID_INPUT))
+            return Err((client, ERR_INVALID_INPUT));
         }
+    };
+    let Ok((theirs, [receive, send])) = bells() else { return Err((client, ERR_RESOURCE_EXHAUSTED)) };
+    let first = Holding { connection: client.conn, frames: ipc::FrameRx::new(), receive, send };
+    match Region::new(mapping, first) {
+        Ok((session, holders)) => Ok((session, theirs, holders)),
+        Err(why) => panic!("netstack: the kernel would not duplicate a region it mapped: {why:?}"),
     }
 }
 
-/// Answers a stream's request with its bell and `answer`, on the connection
-/// that is the stream's from here on.
-fn hand_over<T: ipc::IpcPayload>(connection: &Connection, bell: Pipe, answer: &T) {
-    if let Err(why) = connection.try_send_with(RespType::Result as u32, answer, [OwnedHandle::from(bell)]) {
+/// Answers a stream's request with its bells and `answer`, on its first
+/// holder's connection.
+fn hand_over<T: ipc::IpcPayload>(holders: &Holders, bells: [Pipe; BELLS], answer: &T) {
+    let by_number = holders.by_number.borrow();
+    let Some(first) = by_number.get(&Holder::FIRST) else { return };
+    if let Err(why) = first.connection.try_send_with(RespType::Result as u32, answer, bells.map(OwnedHandle::from)) {
         say!("netstack: a stream's client left before its answer: {why:?}");
     }
 }
@@ -266,6 +327,8 @@ impl Sockets {
             next_id: first_id.max(1),
             streams: HashMap::new(),
             by_stream: BTreeMap::new(),
+            holders: HashMap::new(),
+            exports: Exports::new(),
             lookups: Vec::new(),
             receiving: BTreeMap::new(),
             places,
@@ -282,17 +345,19 @@ impl Sockets {
                 0 => 1,
                 next => next,
             };
-            if !self.ids.contains_key(&id) && !self.streams.contains_key(&id) {
+            if !self.ids.contains_key(&id) && !self.streams.contains_key(&id) && !self.holders.contains_key(&id) {
                 return id;
             }
         }
     }
 
-    fn hold_stream(&mut self, id: StreamId, connection: &Rc<Connection>, answer: Option<Pipe>) {
+    fn hold_stream(&mut self, id: StreamId, holders: &Rc<Holders>, answer: Option<[Pipe; BELLS]>) {
         let key = self.alloc_id();
-        let answer = answer.map(|bell| (connection.clone(), bell));
-        self.streams.insert(key, Stream { id, connection: Rc::downgrade(connection), answer });
+        let answer = answer.map(|bells| (bells, holders.clone()));
+        self.streams.insert(key, Stream { id, holders: Rc::downgrade(holders), answer, next: 2 });
         self.by_stream.insert(id, key);
+        let watch = self.alloc_id();
+        self.holders.insert(watch, (key, Holder::FIRST));
     }
 
     fn listener(&self, socket_id: u32) -> Option<ListenerId> {
@@ -394,20 +459,19 @@ impl Sockets {
             msg.client.error(ERR_INVALID_INPUT);
             return;
         };
-        let (session, bell, connection) = match lend(msg.client, msg.handles) {
+        let (session, bells, holders) = match lend(msg.client, msg.handles) {
             Ok(lent) => lent,
             Err((client, code)) => return client.error(code),
         };
         let remote = Endpoint { addr: Ipv4Addr::from(req.addr), port };
         let timeout = (req.timeout_ms > 0).then(|| Duration::from_millis(u64::from(req.timeout_ms)));
         match node.connect(now, remote, timeout, Box::new(session)) {
-            Ok(stream) => self.hold_stream(stream, &connection, Some(bell)),
+            Ok(stream) => self.hold_stream(stream, &holders, Some(bells)),
             Err(refusal) => {
                 if refusal == ConnectRefused::Full {
                     say!("netstack: refusing connect, {} of {} places held", node.held(), self.places);
                 }
-                let Ok(conn) = Rc::try_unwrap(connection) else { unreachable!("a refused connect kept its session") };
-                Client { conn }.error(connect_refused(refusal));
+                answer_refused(&holders, connect_refused(refusal));
             }
         }
     }
@@ -445,7 +509,7 @@ impl Sockets {
             msg.client.error(accept_refused(AcceptRefused::NoListener));
             return;
         };
-        let (session, bell, connection) = match lend(msg.client, msg.handles) {
+        let (session, bells, holders) = match lend(msg.client, msg.handles) {
             Ok(lent) => lent,
             Err((client, code)) => {
                 // Refused, the accept still spends its wake.
@@ -455,20 +519,19 @@ impl Sockets {
         };
         match node.accept(now, listener, Some(Box::new(session))) {
             Ok(accepted) => {
-                hand_over(&connection, bell, &TcpAcceptResponse {
+                hand_over(&holders, bells, &TcpAcceptResponse {
                     remote_addr: accepted.remote.addr.octets(),
                     remote_port: accepted.remote.port.get(),
                     local_port: accepted.local.get(),
                     nodelay: u32::from(accepted.nodelay),
                 });
-                self.hold_stream(accepted.id, &connection, None);
+                self.hold_stream(accepted.id, &holders, None);
             }
             Err(refusal) => {
                 if refusal == AcceptRefused::Full {
                     say!("netstack: refusing accept, {} of {} places held", node.held(), self.places);
                 }
-                let Ok(conn) = Rc::try_unwrap(connection) else { unreachable!("a refused accept kept its session") };
-                Client { conn }.error(accept_refused(refusal));
+                answer_refused(&holders, accept_refused(refusal));
             }
         }
     }
@@ -667,14 +730,10 @@ impl Sockets {
                 }
             };
             let answer_to = self.by_stream.get(&id).and_then(|key| self.streams.get_mut(key)?.answer.take());
-            let Some((connection, bell)) = answer_to else { unreachable!("the node answered a connect nobody waits for") };
+            let Some((bells, holders)) = answer_to else { unreachable!("the node answered a connect nobody waits for") };
             match answer {
-                Ok(local) => hand_over(&connection, bell, &TcpConnectResponse { local_port: local.get(), _pad: 0 }),
-                Err(code) => {
-                    if let Err(why) = connection.try_send(RespType::Error as u32, &ErrorResponse { code }) {
-                        say!("netstack: a stream's client left before its answer: {why:?}");
-                    }
-                }
+                Ok(local) => hand_over(&holders, bells, &TcpConnectResponse { local_port: local.get(), _pad: 0 }),
+                Err(code) => answer_refused(&holders, code),
             }
         }
 
@@ -718,16 +777,18 @@ impl Sockets {
             }
         }
 
-        // A stream the node let go holds no session, and its key names nothing
-        // from then.
+        // A stream the node let go holds no session, and its key and its
+        // holders' name nothing from then.
         let by_stream = &mut self.by_stream;
         self.streams.retain(|_, stream| {
-            let held = stream.connection.strong_count() > 0;
+            let held = stream.holders.strong_count() > 0;
             if !held {
                 by_stream.remove(&stream.id);
             }
             held
         });
+        let streams = &self.streams;
+        self.holders.retain(|_, (key, _)| streams.contains_key(key));
     }
 
     /// Asks the kernel about everything a pass could be owed for: each
@@ -736,9 +797,11 @@ impl Sockets {
     /// owner's leaving, and the connection of each client that waits for a
     /// lookup, which hangs up by closing it.
     pub fn watch(&self, poller: &mut Watches) {
-        for (key, stream) in &self.streams {
-            let Some(connection) = stream.connection.upgrade() else { continue };
-            poller.watch(&*connection, stream::SERVER_WATCH, TOKEN_STREAM | u64::from(*key));
+        for (key, (stream, number)) in &self.holders {
+            let Some(holders) = self.streams.get(stream).and_then(|stream| stream.holders.upgrade()) else { continue };
+            if let Some(holding) = holders.by_number.borrow().get(number) {
+                poller.watch(&holding.connection, stream::SERVER_WATCH, TOKEN_STREAM | u64::from(*key));
+            }
         }
         for (socket_id, socket) in &self.ids {
             match socket {
@@ -761,24 +824,7 @@ impl Sockets {
     pub fn answered(&mut self, node: &mut Node, now: Instant, token: u64, answer: Result<u32, SyscallError>) -> bool {
         let socket_id = token as u32;
         match token & TOKEN_KIND {
-            TOKEN_STREAM => {
-                let Some(stream) = self.streams.get(&socket_id) else { return true };
-                let Some(connection) = stream.connection.upgrade() else { return true };
-                let left = match answer {
-                    Err(why) => {
-                        say!("netstack: closing a stream — the kernel refused the watch of its connection: {why:?}");
-                        true
-                    }
-                    // Doorbells, all taken, or the end: a ring is the pass's to find.
-                    Ok(_) => drained(&connection),
-                };
-                if left {
-                    node.left(now, stream.id);
-                } else {
-                    self.rung.push(stream.id);
-                    self.bridge = true;
-                }
-            }
+            TOKEN_STREAM => self.holder_answered(node, now, socket_id, answer),
             TOKEN_LISTENER => {
                 let gone = answer.map_or(true, |met| met & OTHER_END_GONE != 0);
                 if let (true, Some(id)) = (gone, self.listener(socket_id)) {
@@ -817,6 +863,105 @@ impl Sockets {
         true
     }
 
+    /// What a holder's connection had, frame by frame: its rings for the pass,
+    /// its exports answered, and its hang-up, or a frame no holder sends, its
+    /// leaving.
+    fn holder_answered(&mut self, node: &mut Node, now: Instant, key: u32, answer: Result<u32, SyscallError>) {
+        let Some(&(stream_key, number)) = self.holders.get(&key) else { return };
+        let Some(stream) = self.streams.get(&stream_key) else { return };
+        let id = stream.id;
+        let Some(holders) = stream.holders.upgrade() else { return };
+        let (mut rang, mut exports, mut left) = (false, 0usize, answer.is_err());
+        if let Err(why) = answer {
+            say!("netstack: dropping a stream's holder — the kernel refused the watch of its connection: {why:?}");
+        }
+        if let Some(holding) = holders.by_number.borrow_mut().get_mut(&number).filter(|_| !left) {
+            for _ in 0..FRAMES_A_WAKE {
+                match heard(holding.frames.pump(&holding.connection)) {
+                    Heard::Nothing => break,
+                    Heard::Ring => rang = true,
+                    Heard::Export => exports += 1,
+                    Heard::Leaving(why) => {
+                        if let Some(step) = why {
+                            say!("netstack: dropping a stream's holder — it sent {step:?}, which no holder sends");
+                        }
+                        left = true;
+                        break;
+                    }
+                }
+            }
+        }
+        for _ in 0..exports {
+            self.export(node, now, stream_key, number);
+        }
+        if left {
+            holders.by_number.borrow_mut().remove(&number);
+            self.holders.remove(&key);
+            node.departed(now, id, number);
+        } else if rang {
+            self.rung.push(id);
+            self.bridge = true;
+        }
+    }
+
+    /// A holder more of the stream `stream_key` names, for `asker`, which
+    /// is answered [`EXPORTED`] with the new holder's end, its `ADOPT` queued
+    /// on it first, or [`REFUSED`].
+    fn export(&mut self, node: &mut Node, now: Instant, stream_key: u32, asker: Holder) {
+        let Some(stream) = self.streams.get(&stream_key) else { return };
+        let (id, next) = (stream.id, stream.next);
+        let Some(holders) = stream.holders.upgrade() else { return };
+        let refuse = |code: u32| {
+            if let Some(holding) = holders.by_number.borrow().get(&asker)
+                && let Err(why) = holding.connection.try_send(REFUSED, &code)
+            {
+                say!("netstack: a holder left before its export's answer: {why:?}");
+            }
+        };
+        let Some(number) = Holder::new(next) else { return refuse(ERR_RESOURCE_EXHAUSTED) };
+        let made = (|| {
+            let (theirs, ours) = self.exports.connect()?;
+            let (handed, rung) = bells()?;
+            Ok::<_, SyscallError>((theirs, ours, handed, rung, holders.region()?))
+        })();
+        let Ok((theirs, ours, [receive_read, send_read], [receive, send], region)) = made else {
+            say!("netstack: refusing an export — the kernel made no connection, bells or region for it: {made:?}", made = made.err());
+            return refuse(ERR_RESOURCE_EXHAUSTED);
+        };
+        let (peer, local) = match node.export(id) {
+            Ok(endpoints) => endpoints,
+            Err(ExportRefused::Full) => {
+                say!("netstack: refusing an export, {} of {} places held", node.held(), self.places);
+                return refuse(ERR_RESOURCE_EXHAUSTED);
+            }
+            Err(ExportRefused::NoStream) => return refuse(ERR_NOT_CONNECTED),
+        };
+        let adopt = Adopt {
+            holder: number.number(),
+            peer_port: peer.port.get(),
+            peer_addr: peer.addr.octets(),
+            local_port: local.get(),
+            _pad: 0,
+        };
+        let handles = [region, OwnedHandle::from(receive_read), OwnedHandle::from(send_read)];
+        if let Err(why) = ours.try_send_with(ADOPT, &adopt, handles) {
+            say!("netstack: refusing an export — its ADOPT would not queue: {why:?}");
+            node.departed(now, id, number);
+            return refuse(ERR_RESOURCE_EXHAUSTED);
+        }
+        holders.by_number.borrow_mut().insert(number, Holding { connection: ours, frames: ipc::FrameRx::new(), receive, send });
+        if let Some(stream) = self.streams.get_mut(&stream_key) {
+            stream.next = next.wrapping_add(1);
+        }
+        let watch = self.alloc_id();
+        self.holders.insert(watch, (stream_key, number));
+        if let Some(holding) = holders.by_number.borrow().get(&asker)
+            && let Err(why) = holding.connection.try_signal_with(EXPORTED, [theirs.into_owned()])
+        {
+            say!("netstack: a holder left before its export's answer: {why:?}");
+        }
+    }
+
     /// The pass over the streams the last wake's answers asked for, once.
     pub fn bridge(&mut self, node: &mut Node, now: Instant) {
         if std::mem::take(&mut self.bridge) {
@@ -835,6 +980,7 @@ impl Sockets {
             }
         }
         snap.put("sockets.tcp", self.streams.len() as u32);
+        snap.put("streams.holders", self.holders.len() as u32);
         snap.put("sockets.listeners", listeners);
         snap.put("sockets.udp", udp);
         snap.put("streams.live", node.streams());
@@ -843,16 +989,63 @@ impl Sockets {
     }
 }
 
-/// Takes every ring a stream's client wrote on its connection: `true` where
-/// the client hung up instead.
-fn drained(connection: &Connection) -> bool {
-    let mut bytes = [0u8; 64];
-    loop {
-        match connection.read_nonblock(&mut bytes) {
-            Ok(0) => return true,
-            Ok(_) => {}
-            Err(SyscallError::WouldBlock) => return false,
-            Err(_) => return true,
+/// What one read of a holder's connection said.
+#[derive(Debug)]
+enum Heard {
+    Nothing,
+    Ring,
+    Export,
+    /// It hung up, or, with what it sent, wrote what no holder writes.
+    Leaving(Option<RxStep>),
+}
+
+/// A holder's frame as netstack takes it: [`RING`] and [`EXPORT`], bare,
+/// and anything else its leaving.
+fn heard(step: RxStep) -> Heard {
+    match step {
+        RxStep::Idle => Heard::Nothing,
+        RxStep::Frame { msg_type: RING, payload_len: 0, handles: 0 } => Heard::Ring,
+        RxStep::Frame { msg_type: EXPORT, payload_len: 0, handles: 0 } => Heard::Export,
+        RxStep::Eof => Heard::Leaving(None),
+        step @ (RxStep::Malformed | RxStep::Frame { .. }) => Heard::Leaving(Some(step)),
+    }
+}
+
+/// A stream's request refused, on its first holder's connection.
+fn answer_refused(holders: &Holders, code: u32) {
+    if let Some(first) = holders.by_number.borrow().get(&Holder::FIRST)
+        && let Err(why) = first.connection.try_send(RespType::Error as u32, &ErrorResponse { code })
+    {
+        say!("netstack: a stream's client left before its answer: {why:?}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a bare ring and a bare export are a holder's: any payload, any
+    /// handle, any other type and broken framing are its leaving, and none
+    /// panics.
+    #[test]
+    fn a_holder_frame_no_holder_sends_is_its_leaving() {
+        let frame = |msg_type, payload_len, handles| RxStep::Frame { msg_type, payload_len, handles };
+        assert!(matches!(heard(RxStep::Idle), Heard::Nothing));
+        assert!(matches!(heard(frame(RING, 0, 0)), Heard::Ring));
+        assert!(matches!(heard(frame(EXPORT, 0, 0)), Heard::Export));
+        assert!(matches!(heard(RxStep::Eof), Heard::Leaving(None)));
+        for step in [
+            RxStep::Malformed,
+            frame(RING, 1, 0),
+            frame(RING, 0, 1),
+            frame(EXPORT, 4, 0),
+            frame(EXPORT, 0, 1),
+            frame(EXPORTED, 0, 1),
+            frame(ADOPT, 12, 3),
+            frame(0, 0, 0),
+            frame(u32::MAX, 0, 0),
+        ] {
+            assert!(matches!(heard(step), Heard::Leaving(Some(_))), "{step:?}");
         }
     }
 }

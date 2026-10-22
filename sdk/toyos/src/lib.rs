@@ -96,8 +96,8 @@ impl OwnedHandle {
     /// `raw` must be a live handle in this process's table that nothing else
     /// answers for: this closes it when it drops. A handle
     /// [`net::stream`](crate::net::stream) answers for, a stream's, is never
-    /// one: it reaches its end only through that module, and a stream does not
-    /// move between processes.
+    /// one: it reaches its end only through that module, and it stays in its
+    /// process, which another reaches only through an export.
     pub unsafe fn from_raw(raw: RawHandle) -> Self {
         Self(raw)
     }

@@ -9,36 +9,50 @@
 //! (RFC 9293 §3.7.4). The rest of the header is the session's: the gates, the
 //! receiving half's shutdown and the hang-up any holder saw.
 //!
-//! **The connection carries the request and its answer, then only doorbells
-//! and the hang-up** (virtio 1.2 §2.9). netstack rings a reader on the
-//! connection and a writer on the stream's bell, so neither takes the other's
-//! wake. A doorbell says "look", never "there are bytes".
+//! **A stream has holders, each a process's session**: its connection to
+//! netstack and two bells netstack writes, a reader's and a writer's, so
+//! neither takes the other's wake. A doorbell says "look", never "there are
+//! bytes" (virtio 1.2 §2.9). The process that connected or accepted is the
+//! first holder; [`export`] asks netstack for another, whose connection end a
+//! spawn endows and the child takes up ([`adopt_exported`]). Every holder
+//! shares the one region, and the session's gates make their calls take turns
+//! (`crate::transport::session`).
 //!
-//! **A stream belongs to the process that connected or accepted it.** The
-//! handle the connect or the accept answered reaches its end, and descriptors
-//! on it share that one handle (`crate::fd`); a handle with no end here is
-//! refused by name and nothing is written on it
-//! (`issues/a-stream-cannot-move-between-processes.md`). The end rings and
-//! waits through a handle of the connection of its own, and goes once no
-//! handle and no call is left. The table is the instance std links: a program
-//! that also links `toyos` itself and drives these functions holds ends std
-//! cannot see.
+//! **A holder's connection carries frames**: the request and its answer, then
+//! [`RING`] and [`EXPORT`] from the holder, and netstack's answers to an
+//! export. Its hang-up is the holder's leaving.
+//!
+//! **A holder stays in its process.** Its connection, bells and region are
+//! held without `TRANSFER` once taken up, so no spawn or message can move one;
+//! the only way into another process is an export, whose end arrives with
+//! `TRANSFER` because the spawn must endow it. Netstack's death or the
+//! holder's own is then exact: a hang-up comes once the holder's last thread
+//! is out.
+//!
+//! **A handle with no end here is refused by name** and nothing is written on
+//! it. The handle the connect, the accept or the adoption answered reaches its
+//! end, and descriptors on it share that one handle (`crate::fd`). The end
+//! rings and waits through a handle of the connection of its own, and goes
+//! once no handle and no call is left. The table is the instance std links: a
+//! program that also links `toyos` itself and drives these functions holds
+//! ends std cannot see.
 
 use core::fmt;
 use core::sync::atomic::{AtomicU32, Ordering};
 
+use toyos_abi::handle::Rights;
 use toyos_abi::syscall::{self, SyscallError};
 use toyos_abi::RawHandle;
 
-use crate::ipc::Connection;
+use crate::ipc::{self, Connection, FrameRx, RxStep, TrySendError};
 use crate::shm::SharedMemory;
 use crate::sync::Lock;
-use crate::transport::session::{self, Bells, Doorbell, HungUp, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
+use crate::transport::session::{self, Bells, Doorbell, Holder, HungUp, Layout, Mode, Polled, Receiving, Refused as Answer, Sending, Took, Waited};
 use crate::transport::stream::Place;
 use crate::transport::Span;
 use crate::OwnedHandle;
 
-use super::{MsgType, NetError, NetstackConn, TcpAcceptRequest, TcpAcceptResponse, TcpConnectRequest, TcpConnectResponse, TcpSocketId};
+use super::{hangup, MsgType, NetError, NetstackConn, TcpAcceptRequest, TcpAcceptResponse, TcpConnectRequest, TcpConnectResponse, TcpSocketId};
 
 pub use crate::transport::session::Way;
 
@@ -97,6 +111,53 @@ pub const TIMED_OUT: u32 = 3;
 /// The receive ring's `end`: an ICMP error ended the connection.
 pub const UNREACHABLE: u32 = 4;
 
+// ---- a holder's connection ----
+
+/// A holder rang: it moved a cursor or armed a want netstack is to look at.
+pub const RING: u32 = 1;
+/// A holder asks for another holder of its stream: answered [`EXPORTED`] or
+/// [`REFUSED`]. One at a time on a holder's connection.
+pub const EXPORT: u32 = 2;
+/// The answer to an [`EXPORT`], carrying the new holder's connection end,
+/// with `TRANSFER`, on which [`ADOPT`] waits.
+pub const EXPORTED: u32 = 0x81;
+/// The answer to an [`EXPORT`] that made no holder: a `u32`, the pipe ABI's
+/// error code.
+pub const REFUSED: u32 = 0x82;
+/// The first frame on an exported end, carrying [`Adopt`] and, in order, the
+/// region and the holder's receive and send bells.
+pub const ADOPT: u32 = 0x83;
+
+/// The bells a connect's or an accept's answer and an [`ADOPT`] carry: the
+/// receive bell, then the send bell.
+pub const BELLS: usize = 2;
+
+crate::ipc_payload! {
+    /// Who an exported end's holder is, and the stream's endpoints, as netstack
+    /// keeps them.
+    pub struct Adopt {
+        pub holder: u16,
+        pub peer_port: u16,
+        pub peer_addr: [u8; 4],
+        pub local_port: u16,
+        pub _pad: u16,
+    }
+}
+
+/// What a holder keeps of each handle it holds: what the kernel made it with,
+/// less `TRANSFER` (`kernel/src/object/ops.rs`'s `initial_rights`).
+const HELD_CONNECTION: Rights = Rights::DUP.union(Rights::WAIT).union(Rights::READ).union(Rights::WRITE).union(Rights::MAP);
+const HELD_BELL: Rights = Rights::DUP.union(Rights::WAIT).union(Rights::READ).union(Rights::MAP);
+const HELD_REGION: Rights = Rights::DUP.union(Rights::MAP);
+
+/// `handle` held with `rights` alone, the original closed: refused, the
+/// original is closed all the same.
+fn narrowed(handle: RawHandle, rights: Rights) -> Result<RawHandle, NetError> {
+    let narrowed = syscall::dup_narrowed(handle, rights);
+    syscall::close(handle);
+    narrowed.map_err(|_| NetError::Io)
+}
+
 // ---- the process's ends ----
 
 /// The most streams one process holds: the per-process bound libc's socket
@@ -108,10 +169,12 @@ const MAX_HANDLES: usize = 2 * MAX_STREAMS;
 type Rx = Receiving<RECEIVE_BYTES, WORDS>;
 type Tx = Sending<SEND_BYTES, WORDS>;
 
-/// An end's two halves, each behind its own lock.
+/// An end's two halves, each behind its own lock, and the turn its export
+/// requests take on the connection.
 struct Halves {
     rx: Lock<Kept<Rx>>,
     tx: Lock<Kept<Tx>>,
+    control: Lock<()>,
 }
 
 /// A half, or none. `repr(u8)` puts `Empty` at zero, as it does
@@ -124,21 +187,22 @@ enum Kept<T> {
 }
 
 static HALVES: [Halves; MAX_STREAMS] =
-    [const { Halves { rx: Lock::new(Kept::Empty), tx: Lock::new(Kept::Empty) } }; MAX_STREAMS];
+    [const { Halves { rx: Lock::new(Kept::Empty), tx: Lock::new(Kept::Empty), control: Lock::new(()) } }; MAX_STREAMS];
 
 static TABLE: Lock<Table> = Lock::new(Table::new());
 
 /// What an end holds besides its halves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct End {
-    region: RawHandle,
-    /// The region's mapping.
-    base: usize,
+    /// The region's handle and its mapping; `None` for an exported end whose
+    /// netstack said nothing of it, on which every call answers `Aborted`.
+    region: Option<(RawHandle, usize)>,
     /// The end's own handle of the connection, which every call rings and
     /// waits through and only [`free`] closes: a descriptor closed under a call
     /// hangs nothing up.
     connection: RawHandle,
-    bell: RawHandle,
+    receive_bell: RawHandle,
+    send_bell: RawHandle,
     peer: ([u8; 4], u16),
     local_port: u16,
     handles: u32,
@@ -233,13 +297,16 @@ impl Table {
 }
 
 /// Lets go of an end no handle or call reaches: its halves, its connection,
-/// its bell and its region, whose mapping goes with its handle.
+/// its bells and its region, whose mapping goes with its handle.
 fn free(slot: usize, end: End) {
     *HALVES[slot].rx.lock() = Kept::Empty;
     *HALVES[slot].tx.lock() = Kept::Empty;
-    syscall::close(end.connection);
-    syscall::close(end.bell);
-    syscall::close(end.region);
+    let region = end.region.map(|(region, _)| region);
+    for handle in [Some(end.connection), Some(end.receive_bell), Some(end.send_bell), region].into_iter().flatten() {
+        if handle != toyos_abi::HANDLE_INVALID {
+            syscall::close(handle);
+        }
+    }
     TABLE.lock().unreserve(slot);
 }
 
@@ -264,6 +331,37 @@ pub enum Refused {
     Shut,
 }
 
+impl Refused {
+    /// The byte `files`' C interface carries it in: `None` for
+    /// [`Self::NotThisProcess`], which names a handle no byte holds.
+    #[cfg(any(feature = "fd-table", test))]
+    pub(crate) fn byte(self) -> Option<u8> {
+        Some(match self {
+            Self::NotThisProcess(_) => return None,
+            Self::WouldBlock => 0,
+            Self::TimedOut => 1,
+            Self::Reset => 2,
+            Self::ConnectionTimedOut => 3,
+            Self::Unreachable => 4,
+            Self::Aborted => 5,
+            Self::Shut => 6,
+        })
+    }
+
+    pub(crate) fn from_byte(byte: u8) -> Option<Self> {
+        Some(match byte {
+            0 => Self::WouldBlock,
+            1 => Self::TimedOut,
+            2 => Self::Reset,
+            3 => Self::ConnectionTimedOut,
+            4 => Self::Unreachable,
+            5 => Self::Aborted,
+            6 => Self::Shut,
+            _ => return None,
+        })
+    }
+}
+
 impl From<Answer> for Refused {
     fn from(answer: Answer) -> Self {
         match answer {
@@ -285,7 +383,7 @@ pub enum Misuse {
     NotThisProcess(RawHandle),
     /// A stream's, taken as a file.
     AsFile(RawHandle),
-    /// A stream's, moved into another process.
+    /// A stream's own handle, moved into another process.
     Moved(RawHandle),
 }
 
@@ -294,15 +392,20 @@ impl fmt::Display for Misuse {
         match self {
             Self::NotThisProcess(handle) => write!(
                 f,
-                "toyos::net: handle {} is no stream of this process's: a stream belongs to the process that connected or \
-                 accepted it",
+                "toyos::net: handle {} is no stream of this process's: a stream reaches a process by its connect, its \
+                 accept, or a spawn that gave it a holder of one",
                 handle.0
             ),
             Self::AsFile(handle) => {
                 write!(f, "toyos::net: handle {} is a stream's, which is read and written through its region, not as a file", handle.0)
             }
             Self::Moved(handle) => {
-                write!(f, "toyos::net: handle {} is a stream's, and a stream does not move into another process", handle.0)
+                write!(
+                    f,
+                    "toyos::net: handle {} is a stream's own, which stays in its process: a spawn gives a child a \
+                     descriptor of a stream as a holder of its own",
+                    handle.0
+                )
             }
         }
     }
@@ -312,6 +415,8 @@ impl fmt::Display for Misuse {
 struct Call {
     slot: usize,
     end: End,
+    /// The region's mapping.
+    base: usize,
 }
 
 impl Call {
@@ -319,7 +424,7 @@ impl Call {
         // SAFETY: the region is mapped at `base`, 2 MiB aligned, for as long as
         // a call is counted, and its header is `WORDS` words reached only as
         // atomics.
-        unsafe { &*(self.end.base as *const Words) }
+        unsafe { &*(self.base as *const Words) }
     }
 
     fn halves(&self) -> &'static Halves {
@@ -327,19 +432,17 @@ impl Call {
     }
 
     fn bells(&self) -> Doorbells {
-        Doorbells { connection: self.end.connection, bell: self.end.bell }
+        Doorbells { connection: self.end.connection, receive: self.end.receive_bell, send: self.end.send_bell }
     }
 }
 
-/// Runs `f` as a call through `handle`, its end kept until it returns.
+/// Runs `f` as a call through `handle`, its end kept until it returns. An end
+/// with no region answers `Aborted`.
 fn call<R>(handle: RawHandle, f: impl FnOnce(&Call) -> R) -> Result<R, Refused> {
     let (slot, end) = TABLE.lock().call(handle).ok_or(Refused::NotThisProcess(handle))?;
-    let answer = f(&Call { slot, end });
-    let freed = TABLE.lock().returned(slot);
-    if let Some(end) = freed {
-        free(slot, end);
-    }
-    Ok(answer)
+    let answer = end.region.map(|(_, base)| f(&Call { slot, end, base }));
+    ended(slot);
+    answer.ok_or(Refused::Aborted)
 }
 
 /// A half reached through its slot's lock.
@@ -354,18 +457,19 @@ impl<T> session::Lock<T> for Half<T> {
     }
 }
 
-/// A call's doorbells: the end's own handle of the connection and the
-/// stream's bell.
+/// A call's doorbells, and the end's own handle of the connection it rings
+/// netstack on.
 struct Doorbells {
     connection: RawHandle,
-    bell: RawHandle,
+    receive: RawHandle,
+    send: RawHandle,
 }
 
 impl Doorbells {
     fn handle(&self, bell: Doorbell) -> RawHandle {
         match bell {
-            Doorbell::Connection => self.connection,
-            Doorbell::Bell => self.bell,
+            Doorbell::Receive => self.receive,
+            Doorbell::Send => self.send,
         }
     }
 }
@@ -411,7 +515,7 @@ impl Bells for Doorbells {
     }
 
     fn wait_gate(&self, bell: Doorbell, until: Option<u64>, owner: u16) -> Waited {
-        let way = if bell == Doorbell::Connection { "read" } else { "write" };
+        let way = if bell == Doorbell::Receive { "read" } else { "write" };
         gate_wait(until, toyos_abi::clock::nanos_since_boot, |by| self.wait(bell, Some(by)), |waited| {
             crate::warn!(
                 "toyos::net: a stream's {way} has waited {} s for holder {owner}'s gate: that holder's call has not returned",
@@ -421,10 +525,10 @@ impl Bells for Doorbells {
     }
 
     fn ring(&self) -> Result<(), HungUp> {
-        match syscall::write_nonblock(self.connection, &[1]) {
-            Err(SyscallError::Gone) => Err(HungUp),
-            // Full is rung already, and anything else is no hang-up: the next
-            // call's wait answers whatever it is.
+        match ipc::try_signal(self.connection, RING) {
+            Err(TrySendError::Syscall(SyscallError::Gone)) => Err(HungUp),
+            // Frames netstack has not read yet are a ring already, and
+            // anything else is no hang-up: the next call's wait answers it.
             _ => Ok(()),
         }
     }
@@ -486,7 +590,7 @@ impl Wait {
 pub fn read(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<usize, Refused> {
     let max = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     call(handle, |call| {
-        let base = call.end.base;
+        let base = call.base;
         let out = buf.as_mut_ptr();
         let copy = |span: Span, at: usize| {
             // SAFETY: the span lies in the region's receive ring, mapped for the
@@ -505,7 +609,7 @@ pub fn read(handle: RawHandle, buf: &mut [u8], wait: Wait) -> Result<usize, Refu
 pub fn write(handle: RawHandle, buf: &[u8], wait: Wait) -> Result<usize, Refused> {
     let len = u32::try_from(buf.len()).unwrap_or(u32::MAX);
     call(handle, |call| {
-        let base = call.end.base;
+        let base = call.base;
         let from = buf.as_ptr();
         let copy = |span: Span, at: usize| {
             // SAFETY: as in `read`, with the two sides swapped.
@@ -555,8 +659,8 @@ pub fn endpoints(handle: RawHandle) -> Result<(([u8; 4], u16), u16), Refused> {
     Ok((end.peer, end.local_port))
 }
 
-/// The handle a watch of `way` is made on, for reading: the connection for
-/// [`Way::Receive`], the bell for [`Way::Send`].
+/// The handle a watch of `way` is made on, for reading: the holder's receive
+/// bell or its send bell.
 pub fn doorbell(handle: RawHandle, way: Way) -> Result<RawHandle, Refused> {
     call(handle, |call| call.bells().handle(session::doorbell(way)))
 }
@@ -576,6 +680,7 @@ pub fn register(handle: RawHandle, receive: bool, send: bool) -> Result<(), Refu
 pub struct Watching {
     slot: usize,
     end: End,
+    base: usize,
     way: Way,
     watching: session::Watching,
 }
@@ -589,16 +694,20 @@ pub enum Poll {
 }
 
 /// A poll of `way`: ready at once, or counted in, drained, armed and looked at
-/// again.
+/// again. An end with no region is ready, and its call answers `Aborted`.
 pub fn watch(handle: RawHandle, way: Way) -> Result<Poll, Refused> {
     let (slot, end) = TABLE.lock().call(handle).ok_or(Refused::NotThisProcess(handle))?;
-    let call = Call { slot, end };
+    let Some((_, base)) = end.region else {
+        ended(slot);
+        return Ok(Poll::Ready);
+    };
+    let call = Call { slot, end, base };
     let polled = match way {
         Way::Receive => session::watch(call.words(), &Half(&call.halves().rx), &call.bells()),
         Way::Send => session::watch(call.words(), &Half(&call.halves().tx), &call.bells()),
     };
     match polled {
-        Polled::Watching(watching) => Ok(Poll::Watching(Watching { slot, end, way, watching })),
+        Polled::Watching(watching) => Ok(Poll::Watching(Watching { slot, end, base, way, watching })),
         Polled::Ready => {
             ended(slot);
             Ok(Poll::Ready)
@@ -608,8 +717,8 @@ pub fn watch(handle: RawHandle, way: Way) -> Result<Poll, Refused> {
 
 /// The end of a poll [`watch`] counted in: whether its way is ready now.
 pub fn unwatch(watching: Watching) -> bool {
-    let Watching { slot, end, way, watching } = watching;
-    let call = Call { slot, end };
+    let Watching { slot, end, base, way, watching } = watching;
+    let call = Call { slot, end, base };
     let ready = match way {
         Way::Receive => session::unwatch(call.words(), &Half(&call.halves().rx), &call.bells(), watching),
         Way::Send => session::unwatch(call.words(), &Half(&call.halves().tx), &call.bells(), watching),
@@ -639,6 +748,20 @@ pub fn adopt(handle: RawHandle) -> Result<(), Misuse> {
     if is_stream(handle) { Ok(()) } else { Err(Misuse::NotThisProcess(handle)) }
 }
 
+/// `handle`, which reaches one of this process's stream ends, as a
+/// descriptor's object: let go by this copy of the crate, which holds the end
+/// (`crate::fd::STREAM`).
+pub fn descriptor(handle: RawHandle) -> crate::fd::Object {
+    crate::fd::Object::stream(handle, released)
+}
+
+/// A stream descriptor's object let go: its handle, by [`let_go`].
+extern "C" fn released(word: u64) {
+    if let Ok(handle) = u32::try_from(word) {
+        let_go(RawHandle(handle));
+    }
+}
+
 /// Closes `handle`: of a stream's connection, its end goes with the last
 /// handle and the last call; of anything else, the bare `close`.
 pub fn let_go(handle: RawHandle) {
@@ -666,7 +789,7 @@ pub struct Connected {
 pub fn connect(addr: [u8; 4], port: u16, timeout_ms: u32, nodelay: bool) -> Result<Connected, NetError> {
     let request = TcpConnectRequest { addr, port, _pad: 0, timeout_ms };
     let opened = open(nodelay, (addr, port), |netstack, region| {
-        netstack.request_with_handles([region], MsgType::TcpConnect, &request)?.answer_with_handle::<TcpConnectResponse>()
+        netstack.request_with_handles([region], MsgType::TcpConnect, &request)?.answer_with_handles::<TcpConnectResponse, BELLS>()
     })?;
     Ok(Connected { handle: opened.handle, local_port: opened.answer.local_port })
 }
@@ -687,7 +810,7 @@ pub struct Accepted {
 pub fn accept(listener: TcpSocketId) -> Result<Accepted, NetError> {
     let request = TcpAcceptRequest { listener: listener.0 };
     let opened = open(false, ([0; 4], 0), |netstack, region| {
-        netstack.request_with_handles([region], MsgType::TcpAccept, &request)?.answer_with_handle::<TcpAcceptResponse>()
+        netstack.request_with_handles([region], MsgType::TcpAccept, &request)?.answer_with_handles::<TcpAcceptResponse, BELLS>()
     })?;
     let answer = opened.answer;
     Ok(Accepted {
@@ -731,12 +854,12 @@ impl Answered for TcpAcceptResponse {
 }
 
 /// Makes a stream: a slot, a region, then `ask`'s request on a new connection
-/// to netstack carrying it, whose answer hands over the bell. Nothing made
-/// outlives a refusal.
+/// to netstack carrying it, whose answer hands over the bells. The process is
+/// the stream's first holder. Nothing made outlives a refusal.
 fn open<A: Answered>(
     nodelay: bool,
     peer: ([u8; 4], u16),
-    ask: impl FnOnce(NetstackConn, OwnedHandle) -> Result<(A, RawHandle, Connection), NetError>,
+    ask: impl FnOnce(NetstackConn, OwnedHandle) -> Result<(A, [RawHandle; BELLS], Connection), NetError>,
 ) -> Result<Opened<A>, NetError> {
     let slot = TABLE.lock().reserve().ok_or(NetError::ResourceExhausted)?;
     let made = (|| {
@@ -750,24 +873,13 @@ fn open<A: Answered>(
         words[NODELAY].store(u32::from(nodelay), Ordering::Relaxed);
         let (rx, tx) = session::client(words, LAYOUT);
         let lent = region.share().map_err(|_| NetError::Io)?;
-        let (answer, bell, connection) = ask(NetstackConn::connect()?, lent)?;
-        let bell = OwnedHandle(bell);
-        let own = syscall::dup(connection.0.raw()).map_err(|_| NetError::ResourceExhausted)?;
+        let (answer, bells, connection) = ask(NetstackConn::connect()?, lent)?;
+        let (region, base) = region.into_raw();
+        let held = take_up(connection.into_owned(), bells, region)?;
         *HALVES[slot].rx.lock() = Kept::Held(rx);
         *HALVES[slot].tx.lock() = Kept::Held(tx);
-        let (region, base) = region.into_raw();
         let peer = answer.peer().unwrap_or(peer);
-        let end = End {
-            region,
-            base: base as usize,
-            connection: own,
-            bell: bell.into_raw(),
-            peer,
-            local_port: answer.local_port(),
-            handles: 0,
-            calls: 0,
-        };
-        Ok((connection.0.into_raw(), end, answer))
+        Ok((held.descriptor, held.end(base as usize, peer, answer.local_port()), answer))
     })();
     let mut table = TABLE.lock();
     match made {
@@ -782,6 +894,155 @@ fn open<A: Answered>(
     }
 }
 
+/// What a holder holds of its stream, each handle narrowed to keep no
+/// `TRANSFER`: the descriptor's handle of the connection and the end's own.
+struct Held {
+    descriptor: RawHandle,
+    connection: RawHandle,
+    receive_bell: RawHandle,
+    send_bell: RawHandle,
+    region: RawHandle,
+}
+
+impl Held {
+    /// The end, its region mapped at `base`.
+    fn end(&self, base: usize, peer: ([u8; 4], u16), local_port: u16) -> End {
+        let (connection, receive_bell, send_bell) = (self.connection, self.receive_bell, self.send_bell);
+        End { region: Some((self.region, base)), connection, receive_bell, send_bell, peer, local_port, handles: 0, calls: 0 }
+    }
+}
+
+/// The descriptor's handle and the end's own: `connection` narrowed, then
+/// duplicated. Refused, it is closed.
+fn hold_connection(connection: OwnedHandle) -> Result<(RawHandle, RawHandle), NetError> {
+    let descriptor = narrowed(connection.into_raw(), HELD_CONNECTION)?;
+    syscall::dup(descriptor).map(|own| (descriptor, own)).map_err(|_| {
+        syscall::close(descriptor);
+        NetError::ResourceExhausted
+    })
+}
+
+/// A holder's connection, its bells and its region, taken up as [`Held`].
+/// Refused, every one is closed, and the region's mapping goes with it.
+fn take_up(connection: OwnedHandle, bells: [RawHandle; BELLS], region: RawHandle) -> Result<Held, NetError> {
+    let connection = hold_connection(connection);
+    let [receive, send] = bells.map(|bell| narrowed(bell, HELD_BELL));
+    let region = narrowed(region, HELD_REGION);
+    match (connection, receive, send, region) {
+        (Ok((descriptor, connection)), Ok(receive_bell), Ok(send_bell), Ok(region)) => {
+            Ok(Held { descriptor, connection, receive_bell, send_bell, region })
+        }
+        (connection, receive, send, region) => {
+            let connection = connection.map(|(descriptor, own)| [descriptor, own]).into_iter().flatten();
+            connection.chain(receive).chain(send).chain(region).for_each(syscall::close);
+            Err(NetError::Io)
+        }
+    }
+}
+
+// ---- export and adoption ----
+
+/// A new holder of the stream `handle` reaches, for another process: the end
+/// of its connection, which carries `TRANSFER` so a spawn can endow it, and
+/// which [`adopt_exported`] takes up there. netstack gone is
+/// [`NetError::NetstackNotFound`]; netstack out of places for it is
+/// [`NetError::ResourceExhausted`].
+pub fn export(handle: RawHandle) -> Result<OwnedHandle, NetError> {
+    let asked = call(handle, |call| {
+        let _turn = call.halves().control.lock();
+        ask_export(call.end.connection)
+    });
+    match asked {
+        Ok(answer) => answer,
+        Err(Refused::Aborted) => Err(NetError::NetstackNotFound),
+        Err(_) => Err(NetError::NotConnected),
+    }
+}
+
+/// [`EXPORT`] on a holder's connection, and netstack's answer to it.
+fn ask_export(connection: RawHandle) -> Result<OwnedHandle, NetError> {
+    ipc::signal(connection, EXPORT).map_err(hangup)?;
+    let header = ipc::recv_header(connection).map_err(hangup)?;
+    match header.msg_type {
+        EXPORTED => {
+            let mut handles = [toyos_abi::HANDLE_INVALID; syscall::MAX_TRANSFER_HANDLES];
+            match ipc::recv_handles(connection, &header, &mut handles) {
+                Ok(1) if header.is_empty() => Ok(OwnedHandle(handles[0])),
+                Ok(n) => {
+                    handles[..n].iter().for_each(|&h| syscall::close(h));
+                    Err(NetError::Protocol(EXPORTED))
+                }
+                Err(e) => Err(hangup(e)),
+            }
+        }
+        REFUSED => {
+            let code: u32 = ipc::recv_payload(connection, &header).map_err(hangup)?;
+            Err(NetError::from_error_code(code))
+        }
+        other => Err(NetError::Protocol(other)),
+    }
+}
+
+/// An exported end taken up as this process's holder of its stream: the
+/// [`ADOPT`] frame netstack queued on it read, its region judged and mapped,
+/// and the end, the region and the bells narrowed to keep no `TRANSFER`. The
+/// descriptor's handle. Where the frame is missing or malformed, or the region
+/// refused, the end is a stream still, every call on which answers `Aborted`.
+/// `None`, the end closed, where the process holds [`MAX_STREAMS`] or the
+/// kernel will not narrow it.
+pub fn adopt_exported(end: OwnedHandle) -> Option<RawHandle> {
+    let slot = TABLE.lock().reserve()?;
+    let connection = Connection::received(end.into_raw());
+    let taken = adoption(&connection).and_then(|(holder, adopt, [region, receive, send])| {
+        let Ok(region) = SharedMemory::lent(region, REGION_BYTES) else {
+            [receive, send].into_iter().for_each(syscall::close);
+            return None;
+        };
+        let (region, base) = region.into_raw();
+        Some((holder, adopt, base, [receive, send], region))
+    });
+    let made = match taken {
+        Some((holder, adopt, base, bells, region)) => take_up(connection.into_owned(), bells, region).map(|held| {
+            let (rx, tx) = session::holder(LAYOUT, holder);
+            *HALVES[slot].rx.lock() = Kept::Held(rx);
+            *HALVES[slot].tx.lock() = Kept::Held(tx);
+            (held.descriptor, held.end(base as usize, (adopt.peer_addr, adopt.peer_port), adopt.local_port))
+        }),
+        None => hold_connection(connection.into_owned()).map(|(descriptor, connection)| {
+            let invalid = toyos_abi::HANDLE_INVALID;
+            let end = End { region: None, connection, receive_bell: invalid, send_bell: invalid, peer: ([0; 4], 0), local_port: 0, handles: 0, calls: 0 };
+            (descriptor, end)
+        }),
+    };
+    let mut table = TABLE.lock();
+    match made {
+        Ok((descriptor, end)) => {
+            table.enter(slot, end, descriptor);
+            Some(descriptor)
+        }
+        Err(_) => {
+            table.unreserve(slot);
+            None
+        }
+    }
+}
+
+/// The [`ADOPT`] frame on an exported end, read without waiting: netstack
+/// queued it before it answered the export, so it is there or never sent.
+fn adoption(connection: &Connection) -> Option<(Holder, Adopt, [RawHandle; BELLS + 1])> {
+    let mut frames: FrameRx<{ core::mem::size_of::<Adopt>() }> = FrameRx::new();
+    let RxStep::Frame { msg_type: ADOPT, payload_len, .. } = frames.pump(connection) else { return None };
+    let adopt: Adopt = ipc::decode_payload(frames.payload(payload_len)).ok()?;
+    let handles = frames.take_handles::<{ BELLS + 1 }>()?;
+    match Holder::new(adopt.holder) {
+        Some(holder) => Some((holder, adopt, handles)),
+        None => {
+            handles.into_iter().for_each(syscall::close);
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -791,7 +1052,16 @@ mod tests {
     }
 
     fn end() -> End {
-        End { region: h(1), base: 0x20_0000, connection: h(3), bell: h(2), peer: ([192, 0, 2, 2], 80), local_port: 49_152, handles: 0, calls: 0 }
+        End {
+            region: Some((h(1), 0x20_0000)),
+            connection: h(3),
+            receive_bell: h(2),
+            send_bell: h(4),
+            peer: ([192, 0, 2, 2], 80),
+            local_port: 49_152,
+            handles: 0,
+            calls: 0,
+        }
     }
 
     /// The end goes only with its handle and its last call, and so does its
