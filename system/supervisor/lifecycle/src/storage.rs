@@ -12,21 +12,21 @@ use toyos_abi::inventory::Role;
 use toyos_blockring::wire::{Grant, Scope};
 
 /// The block grant file-server `role` is started with, given the partition
-/// the loader named for each role: `None` for SYSTEM, which ROOT's image
-/// serves, and `Err` for a log or boot role the loader named none for.
+/// the loader named for each role: `Err` for a log or boot role the loader
+/// named none for.
 ///
 /// # Panics
-/// On a role [`toyos_manifest::ROLES`] does not name, which the build refuses.
-pub fn grant(role: &str, loaded: impl Fn(Role) -> Option<[u8; 16]>) -> Result<Option<Grant>, String> {
+/// On SYSTEM, which ROOT's image serves and no grant reaches, and on a role
+/// [`toyos_manifest::ROLES`] does not name, which the build refuses.
+pub fn grant(role: &str, loaded: impl Fn(Role) -> Option<[u8; 16]>) -> Result<Grant, String> {
     let (which, writes) = match role {
-        toyos_manifest::SYSTEM => return Ok(None),
-        "data" => return Ok(Some(Grant { scope: Scope::Kind(toyos_gpt::Guid::TOYOS_DATA.0), writes: true })),
+        "data" => return Ok(Grant { scope: Scope::Kind(toyos_gpt::Guid::TOYOS_DATA.0), writes: true }),
         "log" => (Role::Log, true),
         "boot" => (Role::Boot, false),
-        other => panic!("supervisor: `{other}` is no role; the build refuses it"),
+        other => panic!("supervisor: `{other}` is no block role"),
     };
     let guid = loaded(which).ok_or_else(|| format!("the loader named no `{role}` partition"))?;
-    Ok(Some(Grant { scope: Scope::Unique(guid), writes }))
+    Ok(Grant { scope: Scope::Unique(guid), writes })
 }
 
 #[cfg(test)]
@@ -80,7 +80,7 @@ mod tests {
             Role::Log => Some(log),
             _ => None,
         };
-        let grant = grant(role, loaded).expect("the loader named it").expect("a block role");
+        let grant = grant(role, loaded).expect("the loader named it");
         let all = INTERNAL.iter().chain(&STICK);
         (all.filter(|p| grant.admits(p.unique, p.kind.0)).map(|p| p.name).collect(), grant.writes)
     }
@@ -102,8 +102,7 @@ mod tests {
     }
 
     #[test]
-    fn system_takes_no_grant_and_a_role_the_loader_did_not_name_is_refused() {
-        assert_eq!(grant(toyos_manifest::SYSTEM, |_| None), Ok(None));
+    fn a_role_the_loader_did_not_name_is_refused() {
         assert_eq!(grant("log", |_| None), Err("the loader named no `log` partition".to_string()));
         assert_eq!(grant("boot", |_| None), Err("the loader named no `boot` partition".to_string()));
     }

@@ -2417,7 +2417,7 @@ fn qemu_command(
     // Its MSI-X table in BAR 0, QEMU's default, which the nvme driver's claim maps
     // with the registers. One controller and one namespace whichever disk it
     // is: the nvme driver reads namespace 1 of the controller it drives.
-    let (namespace, id) = match shape.storage {
+    let (namespace, vendor_id_option) = match shape.storage {
         Storage::Stick { beside: Beside::Nothing } => (None, ""),
         Storage::Stick { beside } => {
             qemu.arg("-drive").arg(format!("if=none,id=nvme0,format=raw,file={}", nvme_image.display()));
@@ -2427,7 +2427,7 @@ fn qemu_command(
     };
     if let Some(namespace) = namespace {
         qemu.arg("-device")
-            .arg(format!("nvme,serial=deadbeef,id=nvme0ctl{id}"))
+            .arg(format!("nvme,serial=deadbeef,id=nvme0ctl{vendor_id_option}"))
             .arg("-device")
             .arg(format!("nvme-ns,{namespace},bus=nvme0ctl,logical_block_size=512,physical_block_size=512"));
     }

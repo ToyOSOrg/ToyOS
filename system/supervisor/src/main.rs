@@ -3279,13 +3279,14 @@ fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>, b
         return Ok(storage);
     };
     storage.args.push(role.to_string());
-    let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
-    let Some(served) = toyos_supervisor::storage::grant(role, |which| loaded(&records, which)).map_err(StartError::Refused)? else {
+    if role == toyos_manifest::SYSTEM {
         let root = toyos_abi::syscall::dup(boot.root.as_handle())
             .map_err(|e| std::io::Error::other(format!("ROOT's image did not duplicate: {e:?}")))?;
         storage.root = Some(root);
         return Ok(storage);
-    };
+    }
+    let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
+    let served = toyos_supervisor::storage::grant(role, |which| loaded(&records, which)).map_err(StartError::Refused)?;
     if let Scope::Unique(guid) = served.scope {
         storage.args.push(guid_text(guid));
     }

@@ -56,7 +56,7 @@ fn said_by_nvme(line: &str) -> Option<&str> {
 
 /// A boot off a stick drove an NVMe disk that is another system's and left
 /// it alone: a driver brought a controller up and offered its partitions, it
-/// opened a session on no partition but a ToyOS DATA one, and the file server
+/// opened at least one session and each on a ToyOS DATA partition, and the file server
 /// found that DATA neither ours nor designated, and so neither mounted nor
 /// formatted it. Answers how many partitions the disks' tables named.
 pub fn left_alone(log: &Serial) -> Result<usize, String> {
@@ -75,8 +75,16 @@ pub fn left_alone(log: &Serial) -> Result<usize, String> {
         return Err(format!("no nvme driver named a partition of its disk\n{}", log.text()));
     }
     let data = Guid::TOYOS_DATA.to_string();
-    for opened in said.iter().filter_map(|s| s.strip_prefix("session ")).filter_map(|s| s.split_once(" opened ")) {
-        let guid = opened.1.split(' ').next().unwrap_or_default();
+    let opened: Vec<&str> = said
+        .iter()
+        .filter_map(|s| s.strip_prefix("session "))
+        .filter_map(|s| s.split_once(" opened "))
+        .map(|(_, rest)| rest.split(' ').next().unwrap_or_default())
+        .collect();
+    if opened.is_empty() {
+        return Err(format!("no nvme driver opened a session, so none was seen on DATA\n{}", log.text()));
+    }
+    for guid in opened {
         match kinds.iter().find(|(g, _)| *g == guid) {
             Some((_, kind)) if *kind == data => {}
             other => return Err(format!("an nvme driver opened a session on {guid}, of type {other:?}, which is no ToyOS DATA")),
