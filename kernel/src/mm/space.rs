@@ -669,10 +669,22 @@ impl AddressSpace {
     }
 
     /// Whether every page of `[start, end)` is in a range that allows
-    /// `access`: what a copy the kernel makes for a thread asks first.
+    /// `access` and is memory the kernel can copy through the direct map:
+    /// what a copy the kernel makes for a thread asks first. A device's
+    /// registers or firmware's framebuffer, an aperture, are no buffer.
     pub fn allows(&self, start: u64, end: u64, access: Access) -> bool {
         self.inventory.covered(start & !(PAGE_SIZE - 1), end)
-            && self.inventory.meeting(start, end).all(|(_, entry)| entry.prot.allows(access) && entry.backed())
+            && self.inventory.meeting(start, end).all(|(_, entry)| entry.prot.allows(access) && entry.backed() && copyable(entry))
+    }
+
+    /// [`reach`](Self::reach) for a copy the kernel makes: `None` for a page
+    /// of an aperture, which a range made since the copy's window was checked
+    /// may have put there.
+    pub fn reach_copyable(&mut self, va: u64, access: Access) -> Option<u64> {
+        if !copyable(self.inventory.find(va)?.1) {
+            return None;
+        }
+        self.reach(va, access)
     }
 
     /// The frame and protection a present leaf maps `va` with, populating
@@ -728,6 +740,14 @@ impl AddressSpace {
             }
         };
         Some(phys + va % PAGE_SIZE)
+    }
+}
+
+/// Whether a range's pages are memory the direct map reaches.
+fn copyable(entry: &SpaceEntry) -> bool {
+    match &entry.kind {
+        Kind::Object { object, .. } => object.is_ordinary(),
+        Kind::Private { .. } | Kind::Copy { .. } => true,
     }
 }
 
