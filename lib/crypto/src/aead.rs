@@ -3,8 +3,9 @@
 //! caller must not import the same key into independent sealing owners.
 //!
 //! Nonces are `iv XOR (0^32 || sequence_be64)`. Public lengths select buffering;
-//! contents and keys do not select branches or addresses. Opening authenticates
-//! ciphertext before modifying it; refusal leaves the ciphertext unchanged.
+//! contents and keys do not select branches or addresses. A refusal releases no
+//! plaintext: AES-GCM decrypts as it authenticates and zeroes a refused buffer,
+//! and ChaCha20-Poly1305 authenticates first and leaves it unchanged.
 
 use crate::{Error, chacha, poly1305::Poly1305, secret::Secret};
 

@@ -1,7 +1,8 @@
 //! `toyos-crypto`'s secret routines but the NIST curves' and Ed25519's,
 //! timed fixed against random (`../constant_time.rs`): the AEADs' and
-//! OpenSSH's sealing and refusal, HMAC, HKDF, PBKDF2, scrypt's Salsa20/8,
-//! X25519 and ML-KEM-768's encapsulation and decapsulation. scrypt's ROMix
+//! OpenSSH's sealing and refusal (AES-GCM's at 1 KiB too), HMAC, HKDF,
+//! PBKDF2, scrypt's Salsa20/8, X25519 and ML-KEM-768's encapsulation and
+//! decapsulation. scrypt's ROMix
 //! is not timed: the entry it reads is a function of the secret by design
 //! (RFC 7914 §5). Its
 //! product is a line per routine on a bench's own CPU; the
@@ -25,6 +26,9 @@ use toyos_crypto::x25519;
 
 /// A TLS record's worth: one 64-byte payload and its 5-byte header.
 const PAYLOAD: [u8; 64] = [0x70; 64];
+/// A record long enough for AES-GCM's stitched paths, whose refusal zeroes
+/// what it decrypted.
+const RECORD: [u8; 1024] = [0x70; 1024];
 const AAD: [u8; 5] = [0x17, 0x03, 0x03, 0x00, 0x50];
 const IV: [u8; 12] = [0x24; 12];
 
@@ -70,6 +74,19 @@ fn main() {
         let (_, mut forged) = seal([0; 32]).seal(&AAD, &mut sealed).unwrap();
         forged[15] ^= 1;
         measure(&format!("{name} key setup and refusal, 64 B"), &mut rng, key::<32>, |k| {
+            let mut data = sealed;
+            assert!(open(k).open(&IV, &AAD, &mut data, &forged).is_err());
+        });
+    }
+    for (name, seal, open) in &aeads[..2] {
+        measure(&format!("{name} key setup and seal, 1 KiB"), &mut rng, key::<32>, |k| {
+            let mut data = RECORD;
+            std::hint::black_box(seal(k).seal(&AAD, &mut data).unwrap());
+        });
+        let mut sealed = RECORD;
+        let (_, mut forged) = seal([0; 32]).seal(&AAD, &mut sealed).unwrap();
+        forged[15] ^= 1;
+        measure(&format!("{name} key setup and refusal, 1 KiB"), &mut rng, key::<32>, |k| {
             let mut data = sealed;
             assert!(open(k).open(&IV, &AAD, &mut data, &forged).is_err());
         });

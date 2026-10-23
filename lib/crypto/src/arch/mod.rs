@@ -103,8 +103,10 @@ pub(crate) fn f25519_square(a: &[u64; 4]) -> Option<[u64; 4]> {
     x86_64::f25519_square(a)
 }
 
-/// GHASH key powers, (H^(i+1))' at index i in the instruction paths' form.
-pub(crate) type Powers = [u128; 16];
+/// GHASH key powers in the instruction paths' form, highest first:
+/// `powers[48 - n]` is (H^n)'. The 512-bit path fills all 48 and the AES-NI
+/// path H^16..H^1.
+pub(crate) type Powers = [u128; 48];
 
 /// FIPS 197 key expansion of a 16- or 32-byte key.
 pub(crate) fn aes_expand(key: &[u8], keys: &mut [u8; 240]) -> bool {
@@ -136,7 +138,7 @@ pub(crate) fn ghash_multiply(a: u128, b: u128) -> Option<u128> {
     }
 }
 
-/// The hash key's powers in the form [`ghash_blocks`] and [`gcm_seal`] take.
+/// The hash key's powers in the form [`ghash_blocks`] and [`gcm_crypt`] take.
 pub(crate) fn ghash_powers(h: &[u8; 16], powers: &mut Powers) -> bool {
     hosted!(x86_64::ghash_powers(h, powers), {
         let _ = (h, powers);
@@ -161,18 +163,21 @@ pub(crate) fn gcm_ctr(keys: &[u8; 240], rounds: usize, nonce: &[u8; 12], counter
     })
 }
 
-/// Encrypts from counter 2 and hashes a prefix of whole batches, returning
-/// its length; `powers` came from [`ghash_powers`].
-pub(crate) fn gcm_seal(
+/// CTR from counter 2 over a prefix of whole batches, which it hashes in
+/// the same pass, returning the prefix's length: the ciphertext it writes
+/// when sealing, the ciphertext it reads when `open`. `powers` came from
+/// [`ghash_powers`].
+pub(crate) fn gcm_crypt(
     keys: &[u8; 240],
     rounds: usize,
     powers: &Powers,
     nonce: &[u8; 12],
     state: &mut [u8; 16],
     data: &mut [u8],
+    open: bool,
 ) -> usize {
-    hosted!(x86_64::gcm_seal(keys, rounds, powers, nonce, state, data), {
-        let _ = (keys, rounds, powers, nonce, state, data);
+    hosted!(x86_64::gcm_crypt(keys, rounds, powers, nonce, state, data, open), {
+        let _ = (keys, rounds, powers, nonce, state, data, open);
         0
     })
 }

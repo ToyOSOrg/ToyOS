@@ -46,15 +46,15 @@ fn sha2_streaming_boundaries() {
 fn aead_all_algorithms_and_partial_blocks() {
     for n in [
         0, 1, 15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 127, 128, 129, 191, 192, 193, 208,
-        223, 224, 225, 255, 256, 257, 383, 384, 385, 767, 768, 769, 1024, 1151, 1152, 1153, 4096,
-        16384,
+        223, 224, 225, 255, 256, 257, 383, 384, 385, 511, 512, 513, 767, 768, 769, 1023, 1024, 1025,
+        1151, 1152, 1153, 1279, 1280, 1281, 1535, 1536, 1537, 1792, 1793, 4096, 4111, 16384, 16400,
     ] {
         for a in [0, 1, 15, 16, 17, 31, 32, 33] {
             let k = bytes::<32>(n + a);
             let nonce = bytes::<12>(a);
             let aad = bytes::<33>(n);
             let aad = &aad[..a];
-            let input = bytes::<16384>(a);
+            let input = bytes::<16400>(a);
             let input = &input[..n];
             for alg in 0..3 {
                 let mut ours = input.to_vec();
@@ -87,12 +87,15 @@ fn aead_all_algorithms_and_partial_blocks() {
                 };
                 assert_eq!(ours, reference);
                 assert_eq!(tag.as_slice(), expected.as_slice());
+                // AES-GCM zeroes a refused record; ChaCha20-Poly1305
+                // authenticates first and leaves it as it was.
+                let refused = if alg == 2 { ours.clone() } else { vec![0; n] };
                 for i in 0..16 {
                     let mut bad = tag;
                     bad[i] ^= 1;
                     let mut ciphertext = ours.clone();
                     assert!(opener.open(&nonce, aad, &mut ciphertext, &bad).is_err());
-                    assert_eq!(ciphertext, ours);
+                    assert_eq!(ciphertext, refused);
                 }
                 opener.open(&nonce, aad, &mut ours, &tag).unwrap();
                 assert_eq!(ours, input);
@@ -387,7 +390,8 @@ fn seeded_aead_against_ring_and_rustcrypto() {
         }
         let changed = ct.clone();
         assert!(opener.open(&nonce, &bad_aad, &mut ct, &bad_tag).is_err(), "case {case}: a changed record opened");
-        assert_eq!(ct, changed, "case {case}: a refusal changed the ciphertext");
+        let left = if algorithm == 2 { changed.clone() } else { vec![0; changed.len()] };
+        assert_eq!(ct, left, "case {case}: what a refusal left");
         let mut ring_ct = [changed.as_slice(), &bad_tag].concat();
         assert!(ring_key.open_in_place(aead::Nonce::assume_unique_for_key(nonce), aead::Aad::from(&bad_aad), &mut ring_ct).is_err(), "case {case}");
         opener.open(&nonce, &aad, &mut sealed, &tag).unwrap();
