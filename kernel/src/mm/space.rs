@@ -85,12 +85,13 @@ pub struct Usage {
     /// Pages a fault populated, and the time faults took.
     faults: AtomicU64,
     fault_ns: AtomicU64,
-    /// Changes to the space's leaves that reached another CPU by interrupt.
+    /// Changes to the space's leaves that reached another CPU by interrupt,
+    /// for the test kernel's `SYS_DEBUG`.
+    #[cfg(feature = "test-actuators")]
     reached: AtomicU64,
 }
 
 impl Usage {
-    /// Read only by the test kernel's `SYS_DEBUG`.
     #[cfg(feature = "test-actuators")]
     pub fn reached(&self) -> u64 {
         self.reached.load(Relaxed)
@@ -420,9 +421,11 @@ impl AddressSpace {
     }
 
     /// Every CPU has dropped what it cached of `[start, end)` and of the
-    /// tables `unlinked` took out, counting the changes that reached another.
+    /// tables `unlinked` took out.
     fn shoot_down(&self, start: u64, end: u64, unlinked: &Unlinked) {
-        if self.tables.shoot_down(start, end, unlinked) {
+        let _reached = self.tables.shoot_down(start, end, unlinked);
+        #[cfg(feature = "test-actuators")]
+        if _reached {
             self.usage.reached.fetch_add(1, Relaxed);
         }
     }

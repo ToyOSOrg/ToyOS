@@ -1,8 +1,10 @@
 //! A program spawned from a file in the kernel's `/tmp` runs the file's bytes
-//! as they were at the spawn: the file overwritten with `hlt` and deleted the
-//! moment the spawn returns, the child reads every page of its data after
-//! that, at each page's first touch, and finds the bytes it was built with.
+//! as they were at the spawn: the file overwritten in place with bytes other
+//! than its own, cut to nothing and deleted the moment the spawn returns, the
+//! child reads every page of its data after that, at each page's first touch,
+//! and finds the bytes it was built with.
 
+use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
@@ -33,11 +35,14 @@ fn main() {
     let bytes = std::fs::read(SELF).expect("read this program");
     std::fs::write(COPY, &bytes).expect("copy this program into /tmp");
     let mut child = Command::new(COPY).arg(CHILD).stdin(Stdio::piped()).spawn().expect("spawn the copy in /tmp");
-    std::fs::write(COPY, vec![0xF4; bytes.len()]).expect("overwrite the copy with hlt");
+    let mut file = OpenOptions::new().write(true).open(COPY).expect("open the copy to overwrite it");
+    file.write_all(&vec![0xF4; bytes.len()]).expect("overwrite the copy in place");
+    file.set_len(0).expect("cut the copy to nothing");
+    drop(file);
     std::fs::remove_file(COPY).expect("delete the copy");
     child.stdin.take().expect("the child's stdin").write_all(&[1]).expect("tell the child to read its data");
     let status = child.wait().expect("wait for the child");
-    assert!(status.success(), "the child spawned from /tmp, its file overwritten and deleted: {status}");
+    assert!(status.success(), "the child spawned from /tmp, its file overwritten, cut and deleted: {status}");
     println!("spawn_from_tmp: a child spawned from /tmp read its data as it was at the spawn");
     println!("spawn_from_tmp: PASS");
 }
