@@ -1,6 +1,7 @@
 //! x86-64 instruction paths, admitted by CPUID and, for AVX state, XCR0.
-//! UEFI preserves every used register inside each assembly block and takes
-//! only AES and CLMUL. Ordinary hosts use Rust intrinsics and the ABI.
+//! UEFI takes AES, CLMUL and SHA, whose assembly blocks preserve every vector
+//! register they use, and the general-register 2^255 - 19 kernels. Ordinary
+//! hosts use Rust intrinsics and the ABI.
 //! Unaligned loads admit byte-aligned keys and buffers.
 
 #[cfg(target_os = "uefi")]
@@ -15,6 +16,7 @@ use super::Powers;
 mod aesni;
 #[cfg(not(target_os = "uefi"))]
 mod chacha;
+mod f25519;
 #[cfg(not(target_os = "uefi"))]
 mod montgomery;
 #[cfg(not(target_os = "uefi"))]
@@ -72,7 +74,6 @@ impl Features {
         self.has(Self::BMI2)
     }
     /// MULX and ADCX/ADOX.
-    #[cfg(not(target_os = "uefi"))]
     pub(super) fn bmi2_adx(self) -> bool {
         self.has(Self::BMI2 | Self::ADX)
     }
@@ -201,6 +202,27 @@ pub(super) fn p256_square(a: &[u64; 4]) -> Option<[u64; 4]> {
     }
     // CPUID admitted BMI2 and ADX.
     Some(unsafe { p256::square(a) })
+}
+
+/// 2^255 - 19 multiplication by `f25519::mul` where BMI2 and ADX are
+/// admitted. The kernels use general registers alone, so UEFI takes them too.
+#[inline]
+pub(super) fn f25519_mul(a: &[u64; 4], b: &[u64; 4]) -> Option<[u64; 4]> {
+    if !features().bmi2_adx() {
+        return None;
+    }
+    // SAFETY: CPUID admitted BMI2 and ADX.
+    Some(unsafe { f25519::mul(a, b) })
+}
+
+/// 2^255 - 19 squaring by `f25519::square`, as [`f25519_mul`].
+#[inline]
+pub(super) fn f25519_square(a: &[u64; 4]) -> Option<[u64; 4]> {
+    if !features().bmi2_adx() {
+        return None;
+    }
+    // SAFETY: CPUID admitted BMI2 and ADX.
+    Some(unsafe { f25519::square(a) })
 }
 
 /// A vector from 16 bytes by value. With no pointer there is no copy
