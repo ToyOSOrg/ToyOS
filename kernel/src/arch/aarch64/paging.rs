@@ -142,6 +142,15 @@ impl Table {
         unsafe { Table::at_mut(frame.into_raw()) }
     }
 
+    /// A table of a user space, or `None` where taking a frame would cut into
+    /// what the kernel keeps (`pmm::alloc_table_frame`).
+    fn try_new() -> Option<&'static mut Self> {
+        let frame = crate::mm::pmm::alloc_table_frame()?;
+        // SAFETY: a zeroed frame just allocated: a table of invalid
+        // descriptors nothing else names.
+        Some(unsafe { Table::at_mut(frame.into_raw()) })
+    }
+
     fn phys(&self) -> u64 {
         DirectMap::phys_of(self)
     }
@@ -521,10 +530,15 @@ pub struct UserTables {
 }
 
 impl UserTables {
-    /// An empty user half, or `None` when every user ASID is held.
+    /// An empty user half, or `None` when every user ASID is held or no
+    /// frame is free for its root.
     pub fn new() -> Option<Self> {
-        let asid = alloc_asid()?;
-        Some(Self { tables: Tables::new(), asid: Asid::User(asid) })
+        let root = Table::try_new()?.phys();
+        let Some(asid) = alloc_asid() else {
+            free_table(root);
+            return None;
+        };
+        Some(Self { tables: Tables { root }, asid: Asid::User(asid) })
     }
 
     /// The kernel's own space, whose user half is empty: what a kernel thread
@@ -545,8 +559,10 @@ impl UserTables {
     }
 
     /// Build every table `[start, end)`'s leaves need; answers how many
-    /// frames that took. Only an invalid entry is written, which owes nothing.
-    pub fn build(&mut self, start: u64, end: u64) -> u64 {
+    /// frames that took, or `None` where a frame ran out, leaving what it
+    /// built linked for an [`unlink`](Self::unlink). Only an invalid entry is
+    /// written, which owes nothing.
+    pub fn build(&mut self, start: u64, end: u64) -> Option<u64> {
         let mut built = 0;
         let mut va = start & !(PAGE_2M - 1);
         while va < end {
@@ -556,7 +572,11 @@ impl UserTables {
                 let table = unsafe { Table::at_mut(level) };
                 let i = index(va, depth);
                 if table.0[i] & VALID == 0 {
-                    table.set(i, Table::new().phys() | TABLE | VALID);
+                    let Some(child) = Table::try_new() else {
+                        published();
+                        return None;
+                    };
+                    table.set(i, child.phys() | TABLE | VALID);
                     built += 1;
                 }
                 level = table.0[i] & ADDR;
@@ -564,7 +584,7 @@ impl UserTables {
             va += PAGE_2M;
         }
         published();
-        built
+        Some(built)
     }
 
     /// The leaf over `va`, empty where no table holds one.
@@ -597,6 +617,37 @@ impl UserTables {
                         }
                         table.set(i, new.encode());
                     }
+                }
+            }
+        });
+        published();
+    }
+
+    /// [`take_owned`](Self::take_owned), where `decide` says of each frame of
+    /// a table's batch, with the address its leaf maps, whether the leaf
+    /// keeps it: a kept frame's leaf stays, every other is emptied.
+    pub fn discard_owned(&mut self, start: u64, end: u64, mut decide: impl FnMut(&[u64], &[u64], &mut [bool])) {
+        self.each_table(start, end, |base, table| {
+            let mut frames = [0u64; 512];
+            let mut vas = [0u64; 512];
+            let mut slot = [0usize; 512];
+            let mut n = 0;
+            for i in slots(start, end, base, 12) {
+                if let Leaf::Held(phys) | Leaf::Mapped(Mapping { phys, owned: true, .. }) = Leaf::decode(table.0[i]) {
+                    frames[n] = phys;
+                    vas[n] = base + ((i as u64) << 12);
+                    slot[n] = i;
+                    n += 1;
+                }
+            }
+            if n == 0 {
+                return;
+            }
+            let mut kept = [false; 512];
+            decide(&frames[..n], &vas[..n], &mut kept[..n]);
+            for k in 0..n {
+                if !kept[k] {
+                    table.set(slot[k], Leaf::Empty.encode());
                 }
             }
         });

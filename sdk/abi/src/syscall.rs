@@ -48,6 +48,8 @@ pub const SYSINFO_HEADER_SIZE: usize = 48;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SysinfoHeader {
     pub memory_total: u64,
+    /// Bytes in use or promised to commitments not yet touched: what no
+    /// new commitment can have.
     pub memory_used: u64,
     pub cpus: u32,
     /// Live threads in the roster this same call would answer with

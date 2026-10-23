@@ -67,9 +67,9 @@ impl SharedMemObject {
     /// `ResourceExhausted` where frames run out.
     pub fn create(size: u64) -> Result<Arc<Self>, SyscallError> {
         let pages = pages(size)?;
-        // Refused whole before any is taken: frames one at a time until none
+        // Promised whole before any is taken: frames one at a time until none
         // is left would starve every other allocation meanwhile.
-        if pages > pmm::free_frames() {
+        if !pmm::promise(pages) {
             return Err(SyscallError::ResourceExhausted);
         }
         let mut pieces = Vec::new();
@@ -78,7 +78,7 @@ impl SharedMemObject {
             let n = left.min(CHUNK);
             let mut piece = Vec::with_capacity(n);
             for _ in 0..n {
-                piece.push(pmm::alloc_frame().ok_or(SyscallError::ResourceExhausted)?);
+                piece.push(pmm::alloc_promised());
             }
             pieces.push(piece.into_boxed_slice());
             left -= n;

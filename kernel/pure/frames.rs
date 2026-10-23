@@ -13,6 +13,13 @@
 //! not take it back until its last pin goes, and [`Pins::unpin`] says when
 //! that is.
 //!
+//! **A promise is a frame no other allocation may take.** A commitment of
+//! memory that is populated later [`promise`](Frames::promise)s its frames
+//! when it is made, and each is drawn with
+//! [`alloc_promised`](Frames::alloc_promised) when it is first touched; every
+//! other allocation is refused rather than take a frame promised. So a
+//! commitment is refused when it is made, never at its first touch.
+//!
 //! The storage is the caller's, sized by [`supers_for`] and [`pins_for`] for
 //! the span of physical memory it manages, because the kernel lays it out of
 //! that memory before it has a heap.
@@ -87,6 +94,15 @@ enum Which {
     Partial,
 }
 
+/// What [`Frames::discard`] did with a frame.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Discarded {
+    /// Freed, and its page promised a frame again.
+    Freed,
+    /// Pinned by a copy, so kept for its page.
+    Kept,
+}
+
 /// The allocator. Every method but the constructors takes the caller's lock.
 pub struct Frames<'m> {
     base: u64,
@@ -95,6 +111,8 @@ pub struct Frames<'m> {
     partial: List,
     free: u64,
     usable: u64,
+    /// Frames promised and not yet drawn: never more than `free`.
+    promised: u64,
 }
 
 impl<'m> Frames<'m> {
@@ -105,7 +123,7 @@ impl<'m> Frames<'m> {
         assert!(base.is_multiple_of(SUPER), "frames: base {base:#x} is not on a superframe");
         assert!(supers.len() < NIL as usize, "frames: {} superframes do not fit the list links", supers.len());
         supers.fill(Super::ABSENT);
-        Self { base, supers, whole: List::EMPTY, partial: List::EMPTY, free: 0, usable: 0 }
+        Self { base, supers, whole: List::EMPTY, partial: List::EMPTY, free: 0, usable: 0, promised: 0 }
     }
 
     /// One past the last byte the records cover.
@@ -191,9 +209,77 @@ impl<'m> Frames<'m> {
         }
     }
 
-    /// One frame, from a split superframe if one has a frame free and from a
-    /// whole one otherwise.
+    /// Frames promised and not yet drawn.
+    pub fn promised(&self) -> u64 {
+        self.promised
+    }
+
+    /// Promise `frames` if that leaves `keep` free frames unpromised.
+    pub fn promise(&mut self, frames: u64, keep: u64) -> bool {
+        let room = self.free.saturating_sub(self.promised).saturating_sub(keep);
+        if frames > room {
+            return false;
+        }
+        self.promised += frames;
+        true
+    }
+
+    /// Free the frame at `phys` of a page that stays committed, promising
+    /// the page a frame again — or, where a user copy pins the frame, keep it
+    /// for the page: the caller zeroes it in place and leaves it in the
+    /// page's leaf, not present, for the next touch to map again.
+    ///
+    /// Sound only where no pin can be taken meanwhile: a copy pins a frame
+    /// under the lock of the space that maps it, which the caller holds, so a
+    /// frame read unpinned here stays unpinned. Then every promise is backed
+    /// by a frame that is free now, never by one deferred to a later unpin.
+    pub fn discard(&mut self, phys: u64, pins: &Pins) -> Discarded {
+        if pins.pinned(phys) {
+            return Discarded::Kept;
+        }
+        self.free_frame(phys, pins);
+        self.repromise(1);
+        Discarded::Freed
+    }
+
+    /// Promise `frames` again, which a commitment still holds and whose
+    /// frames just came back free.
+    fn repromise(&mut self, frames: u64) {
+        self.promised += frames;
+        assert!(self.promised <= self.free, "frames: {} promised of {} free", self.promised, self.free);
+    }
+
+    /// Take back promises of `frames` no commitment holds any more.
+    pub fn unpromise(&mut self, frames: u64) {
+        assert!(frames <= self.promised, "frames: {frames} unpromised of {} promised", self.promised);
+        self.promised -= frames;
+    }
+
+    /// One frame a promise held, which a promise guarantees is free.
+    pub fn alloc_promised(&mut self) -> u64 {
+        assert!(self.promised > 0, "frames: a promised frame drawn and none was promised");
+        let phys = self.take_frame().unwrap_or_else(|| panic!("frames: {} promised and none free", self.promised));
+        self.promised -= 1;
+        phys
+    }
+
+    /// One frame no promise holds, from a split superframe if one has a frame
+    /// free and from a whole one otherwise.
     pub fn alloc_frame(&mut self) -> Option<u64> {
+        self.alloc_frame_keeping(0)
+    }
+
+    /// [`alloc_frame`](Self::alloc_frame), refused unless it leaves `keep`
+    /// frames neither promised nor taken: what a frame a process causes
+    /// without a promise, such as its page tables, may not take.
+    pub fn alloc_frame_keeping(&mut self, keep: u64) -> Option<u64> {
+        if self.free <= self.promised + keep {
+            return None;
+        }
+        self.take_frame()
+    }
+
+    fn take_frame(&mut self) -> Option<u64> {
         let s = match self.partial.head {
             NIL => {
                 let s = self.pop(Which::Whole)?;
@@ -253,6 +339,9 @@ impl<'m> Frames<'m> {
 
     /// One whole superframe.
     pub fn alloc_super(&mut self) -> Option<u64> {
+        if self.free < self.promised + PER_SUPER as u64 {
+            return None;
+        }
         let s = self.pop(Which::Whole)?;
         self.supers[s].state = State::Taken;
         self.free -= PER_SUPER as u64;
@@ -278,7 +367,7 @@ impl<'m> Frames<'m> {
 
     /// `count` superframes in a row, lowest address first; `None` for none.
     pub fn alloc_run(&mut self, count: usize) -> Option<u64> {
-        if count == 0 || count as u64 > u64::from(self.whole.len) {
+        if count == 0 || count as u64 > u64::from(self.whole.len) || self.free < self.promised + (count * PER_SUPER) as u64 {
             return None;
         }
         let mut run = 0;
@@ -389,6 +478,11 @@ impl<'m> Pins<'m> {
         self.words.get(usize::try_from(frame).ok()?)
     }
 
+    /// Whether a copy holds the frame at `phys` pinned.
+    pub fn pinned(&self, phys: u64) -> bool {
+        self.word(phys).is_some_and(|word| word.load(Ordering::Acquire) & COUNT != 0)
+    }
+
     /// Pin the frame holding `phys`, which is handed out; `false`, with
     /// nothing pinned, at the count's limit. Memory outside the records — a
     /// device's — has nothing to reissue and pins as `true`.
@@ -489,6 +583,68 @@ mod tests {
         // A frame freed into the first goes out before the second is used up.
         m.frames.free_frame(first[7], &m.pins);
         assert_eq!(m.frames.alloc_frame(), Some(first[7]));
+    }
+
+    /// What is promised is refused to every other allocation and drawn by
+    /// its holder alone; a promise past what is free, less what must be kept,
+    /// is refused whole.
+    #[test]
+    fn a_promise_holds_its_frames_against_every_other_allocation() {
+        let mut m = whole(2);
+        let all = 2 * PER_SUPER as u64;
+        assert!(!m.frames.promise(all - 9, 10), "a promise into the kept frames");
+        assert!(m.frames.promise(all - 10, 10));
+        assert_eq!(m.frames.promised(), all - 10);
+        assert_eq!(m.frames.alloc_super(), None, "a superframe out of promised frames");
+        assert_eq!(m.frames.alloc_run(1), None, "a run out of promised frames");
+        let free: Vec<u64> = core::iter::from_fn(|| m.frames.alloc_frame()).collect();
+        assert_eq!(free.len(), 10, "only the unpromised frames go to anyone else");
+        assert!(!m.frames.promise(1, 0), "nothing is left to promise");
+
+        let drawn: Vec<u64> = (0..all - 10).map(|_| m.frames.alloc_promised()).collect();
+        assert_eq!((m.frames.promised(), m.frames.free_frames()), (0, 0));
+
+        // A frame a commitment still holds, given back, is promised to it
+        // again; one given back by none is anyone's.
+        assert_eq!(m.frames.discard(drawn[0], &m.pins), Discarded::Freed);
+        assert_eq!((m.frames.promised(), m.frames.free_frames()), (1, 1));
+        assert_eq!(m.frames.alloc_frame(), None, "a frame promised again went to another");
+        m.frames.free_frame(drawn[1], &m.pins);
+        assert!(m.frames.alloc_frame().is_some(), "a frame no promise holds was refused");
+        assert_eq!(m.frames.alloc_frame(), None, "the promised one went too");
+        m.frames.unpromise(1);
+        assert!(m.frames.alloc_frame().is_some(), "an unpromised frame stayed held");
+    }
+
+    /// What a process's page tables may take leaves the kept frames to the
+    /// kernel, as a promise does.
+    #[test]
+    fn a_frame_kept_for_the_kernel_goes_to_the_kernel_alone() {
+        let mut m = whole(1);
+        let all = PER_SUPER as u64;
+        let keep = 10;
+        let taken: Vec<u64> = core::iter::from_fn(|| m.frames.alloc_frame_keeping(keep)).collect();
+        assert_eq!(taken.len() as u64, all - keep, "a table took a kept frame");
+        assert!(m.frames.alloc_frame().is_some(), "the kernel was refused a kept frame");
+    }
+
+    /// A frame a copy pins is kept by a discard rather than freed: freed, it
+    /// would come back only at its last unpin, and the promise made for it
+    /// meanwhile would be backed by no free frame, so a touch of the page, or
+    /// any other promised page, could find none.
+    #[test]
+    fn a_discard_keeps_a_pinned_frame_and_promises_only_what_came_back() {
+        let mut m = whole(1);
+        let all = PER_SUPER as u64;
+        assert!(m.frames.promise(all, 0));
+        let drawn: Vec<u64> = (0..all).map(|_| m.frames.alloc_promised()).collect();
+        assert!(m.pins.pin(drawn[0]));
+        assert_eq!(m.frames.discard(drawn[0], &m.pins), Discarded::Kept, "a pinned frame was freed");
+        assert_eq!(m.frames.discard(drawn[1], &m.pins), Discarded::Freed);
+        assert_eq!((m.frames.promised(), m.frames.free_frames()), (1, 1));
+        // The touch of the page whose frame went finds its frame.
+        assert_eq!(m.frames.alloc_promised(), drawn[1]);
+        assert_eq!(m.pins.unpin(drawn[0]), Unpinned::Kept, "a kept frame was deferred");
     }
 
     #[test]

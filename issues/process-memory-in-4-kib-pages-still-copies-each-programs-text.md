@@ -63,7 +63,8 @@ live split of a user leaf.
 2. **Superframe frame allocator.** Built (`kernel::frames`): 4 KiB frames
    carved from 2 MiB superframes, pins per frame, a frame freed while pinned
    deferred to its last unpin, page tables in frames of their own, and every
-   2 MiB caller of the PMM unchanged.
+   2 MiB caller of the PMM unchanged. Promises, below, refuse a commitment
+   before the machine runs dry.
 3. **4 KiB user leaves.** Built: one inventory per space (`kernel::vm`,
    host-tested) is the only record of its ranges, and a software owned bit in
    the leaf the only record of a private frame; stacks are populated as they
@@ -72,17 +73,20 @@ live split of a user leaf.
    space holds at most `MAX_RANGES` ranges, refused past it, until a range's
    kernel memory is charged to its process.
    Owed: a process's floor on the T14 against the 10 to 14 MB above, and the
-   hot paths' costs in `issues/user-memory-hot-paths-are-unmeasured-against-2-mib-pages.md`.
+   hot paths' costs in `issues/user-memory-hot-paths-are-slower-than-2-mib-pages.md`.
 4. **Demand-zero anonymous `mmap`.** Built, over 4 KiB pages only: a fault
    populates one page, unmapping a range no thread touched sends no IPI, and
    `munmap` and a `FIXED` `mmap` take any run of pages, as POSIX does.
    `vm_reserve`, `vm_protect`, `vm_discard`, `vm_decommit` and `vm_release`
    are the calls, behind libc's `mmap`, `mprotect`, `madvise` and `munmap`
    and std's allocator, which trims, and its thread stacks, each reserved
-   at the size asked with a guard page below. What
-   remains of the stage's exit — `mmap` past what memory can hold refused at
-   `mmap` — is the strict charge of the allocator track's migration
-   (`issues/toyos-has-its-own-allocator.md`).
+   at the size asked with a guard page below. A commitment is promised its
+   frames when it is made, and every other allocation is refused rather than
+   take a promised frame (`kernel::frames`), so a commitment past what memory
+   holds is refused at the call, not at a fault; its page tables are taken
+   then too. Kernel objects a process makes are still drawn from the frames
+   no commitment may promise, uncharged
+   (`issues/nothing-charges-kernel-memory-to-a-process.md`).
 5. **Shared text.** A spawn copies each page of its program's segments into
    the process at the page's first touch, out of the image object or out of
    a snapshot of its `/tmp` file; no fault reads a file. ROOT's read-only

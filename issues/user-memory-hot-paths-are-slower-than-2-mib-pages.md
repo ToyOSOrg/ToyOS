@@ -4,11 +4,11 @@ kind: defect
 opened: 2026-10-22
 ---
 
-# User memory's hot paths are unmeasured against 2 MiB pages
+# User memory's hot paths are slower than 2 MiB pages
 
 User memory moved from 2 MiB pages filled when mapped to 4 KiB pages filled
 at first touch (`kernel/src/mm/space.rs`). Each of these costs more than it
-did, and none is measured on the T14 against the base or against Linux:
+did; the T14's numbers are below:
 
 - **Faults.** About 512 times as many per byte touched. Each takes the
   space's lock, an inventory lookup, two table walks (`reach` reads the leaf
@@ -36,6 +36,23 @@ did, and none is measured on the T14 against the base or against Linux:
 osbench measures faults (`mem.first_touch`, `mem.anon`), small maps
 (`mem.map_unmap_4k`), partial unmaps and protection changes against Linux on
 one machine.
+
+On the T14 at 53049d55c against its base 35e930136 (osbench p50, one run
+each), what is still slower than the base:
+
+| row | head | base |
+|---|---|---|
+| `mem.first_touch.4k` ns/page | 887 | 11 (2 MiB pages; Linux 927) |
+| `mem.map_touch_unmap.4k` ns/page | 909 | 207 |
+| `mem.anon.total` ns/MiB | 228,677 | 51,612 (Linux 258,177) |
+| `mem.realloc_grow.1m_256m` ms | 116 | 30 (Linux 131 ns, by `mremap`) |
+| `fs.tmp.seq_read.1048576` MB/s | 6,060 | 9,425 |
+| `fs.tmp.seq_write.1048576` MB/s | 4,297 | 5,889 |
+| `fs.tmp.readdir.1000` ms | 1.20 | 0.74 |
+| `ipc.reqrep.65536` ns | 47,887 | 38,508 |
+| `pipe.throughput.65536` MB/s | 7,021 | 10,902 |
+
+The copies (`fs.tmp`, `ipc`, `pipe`) point at the user-copy path above.
 
 Owner: the memory track. Exit: each path above measured on the T14 at a
 change and at its base, and against Linux; a regression is fixed or its cost
