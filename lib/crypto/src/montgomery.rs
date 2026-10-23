@@ -1,14 +1,16 @@
 //! Montgomery arithmetic modulo the NIST curves' primes and orders, N = 4 or 6
 //! words. Each modulus is a type, so a residue modulo one cannot meet a residue
-//! modulo another. Every operation on a residue has a fixed schedule and a
-//! masked final subtraction; inversion's exponent is public. Residues are
-//! `Copy` intermediates, not erased (`secret`'s contract).
+//! modulo another. Every operation on a residue has a fixed schedule: masked
+//! final subtractions, and inversion by a fixed count of divsteps. Residues
+//! are `Copy` intermediates, not erased (`secret`'s contract).
 #![allow(
     clippy::needless_range_loop,
     reason = "carry chains index parallel fixed-size arrays; iterator adaptors stay out of line in the shipped profile"
 )]
 use crate::ct;
 use core::marker::PhantomData;
+
+mod divsteps;
 
 /// An odd modulus p with 2^(64N-1) < p < 2^(64N), and its Montgomery
 /// constants for R = 2^(64N), evaluated at compile time.
@@ -212,99 +214,40 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         }
         Self(v, PhantomData)
     }
-    /// self^(2^k), with the masked final subtraction.
-    fn square_times(&self, k: u32) -> Self {
-        let mut r = *self;
-        for _ in 0..k {
-            r = r.square();
-        }
-        r
-    }
-    /// The `const` form of [`Self::square_times`], as [`Self::times`].
-    const fn squared_times(&self, k: u32) -> Self {
-        let mut r = *self;
-        let mut i = 0;
-        while i < k {
-            let (t, high) = redc::<M, N>(&mut square_wide(&r.0));
-            r = Self(reduce_const(&t, high, &M::P), PhantomData);
-            i += 1;
-        }
-        r
-    }
-    /// self^(p - 2), the inverse of a nonzero residue. The exponent is
-    /// public, so the schedule is fixed: P-256's prime by an addition chain of
-    /// 255 squarings and 12 multiplications, other moduli by 4-bit windows.
-    pub(crate) fn invert(&self) -> Self {
-        match M::FORM {
-            Form::P256 => inversion_chain!(self, square_times, mul),
-            Form::Generic => {
-                let e = exponent::<M, N>();
-                let mut powers = [Self::one(); 16];
-                for j in 1..16 {
-                    powers[j] = powers[j - 1].mul(self);
-                }
-                let mut r = Self::one();
-                for nibble in (0..N * 16).rev() {
-                    r = r.square_times(4);
-                    let digit = (e[nibble / 16] >> (4 * (nibble % 16))) & 15;
-                    if digit != 0 {
-                        r = r.mul(&powers[digit as usize]);
-                    }
-                }
-                r
-            }
-        }
-    }
-    /// The `const` form of [`Self::invert`], for compile time and tests, as
+    /// self^(p - 2) by 4-bit windows, the inverse of a nonzero residue: the
+    /// `const` form of [`Self::invert`], for compile time and tests, as
     /// [`Self::times`].
     pub(crate) const fn inverted(&self) -> Self {
-        match M::FORM {
-            Form::P256 => inversion_chain!(self, squared_times, times),
-            Form::Generic => {
-                let e = exponent::<M, N>();
-                let mut powers = [Self::one(); 16];
-                let mut j = 1;
-                while j < 16 {
-                    powers[j] = powers[j - 1].times(self);
-                    j += 1;
-                }
-                let mut r = Self::one();
-                let mut nibble = N * 16;
-                while nibble > 0 {
-                    nibble -= 1;
-                    r = r.squared_times(4);
-                    let digit = (e[nibble / 16] >> (4 * (nibble % 16))) & 15;
-                    if digit != 0 {
-                        r = r.times(&powers[digit as usize]);
-                    }
-                }
-                r
+        let e = exponent::<M, N>();
+        let mut powers = [Self::one(); 16];
+        let mut j = 1;
+        while j < 16 {
+            powers[j] = powers[j - 1].times(self);
+            j += 1;
+        }
+        let mut r = Self::one();
+        let mut nibble = N * 16;
+        while nibble > 0 {
+            nibble -= 1;
+            let mut k = 0;
+            while k < 4 {
+                r = r.times(&r);
+                k += 1;
+            }
+            let digit = (e[nibble / 16] >> (4 * (nibble % 16))) & 15;
+            if digit != 0 {
+                r = r.times(&powers[digit as usize]);
             }
         }
+        r
+    }
+    /// The inverse of a nonzero residue, and zero for zero, by divsteps; the
+    /// time does not depend on the residue.
+    pub(crate) fn invert(&self) -> Self {
+        // (x R)^-1 R^2 = x^-1 R.
+        Self(divsteps::invert::<M, N>(&self.0, &M::R2), PhantomData)
     }
 }
-
-/// x^(p - 2) for P-256's prime p: p - 2 = 2^256 - 2^224 + 2^192 + 2^96 - 3
-/// reads, from the top, 32 ones, 31 zeros and a one, 96 zeros, 94 ones, a
-/// zero and a one.
-macro_rules! inversion_chain {
-    ($x:expr, $square_times:ident, $mul:ident) => {{
-        let x = $x;
-        let x2 = x.$square_times(1).$mul(x);
-        let x3 = x2.$square_times(1).$mul(x);
-        let x6 = x3.$square_times(3).$mul(&x3);
-        let x12 = x6.$square_times(6).$mul(&x6);
-        let x15 = x12.$square_times(3).$mul(&x3);
-        let x30 = x15.$square_times(15).$mul(&x15);
-        let x32 = x30.$square_times(2).$mul(&x2);
-        let r = x32.$square_times(32).$mul(x);
-        let r = r.$square_times(128).$mul(&x32);
-        let r = r.$square_times(32).$mul(&x32);
-        let r = r.$square_times(30).$mul(&x30);
-        r.$square_times(2).$mul(x)
-    }};
-}
-use inversion_chain;
 
 /// p - 2 for M's p.
 const fn exponent<M: Modulus<N>, const N: usize>() -> [u64; N] {

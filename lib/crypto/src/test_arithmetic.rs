@@ -229,11 +229,11 @@ fn check<A: Field>(field: &A, seed: u64) {
         assert_eq!(field.value(&field.square(&x)), (&a * &a) % &p, "{a}^2");
     }
 
-    // Inversion is a^(p-2) for every edge and some seeded values.
-    for a in values.iter().take(if cfg!(miri) { 3 } else { edges + 16 }) {
+    // Inversion is a^(p-2), the inverse and zero for zero, for every value.
+    for a in values.iter().take(if cfg!(miri) { 3 } else { values.len() }) {
         let x = field.from(a);
         let inverse = field.invert(&x);
-        assert_eq!(field.value(&inverse), (a % &p).modpow(&(&p - 2u8), &p), "1 / {a}");
+        assert_eq!(field.value(&inverse), (a % &p).modinv(&p).unwrap_or_default(), "1 / {a}");
         if a % &p != BigUint::from(0u8) {
             assert_eq!(field.value(&field.mul(&x, &inverse)), BigUint::from(1u8), "{a} / {a}");
         }
