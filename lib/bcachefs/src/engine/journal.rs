@@ -7,18 +7,18 @@
 //! entry's records only when its checksum or MAC holds, and
 //! [`Scan::window`] refuses a window holding any other.
 
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec::Vec;
 
 use toyos_blockdev::BlockDev;
 
 use super::bkey::{Bpos, Format, Key, Version, KEY_U64S};
 use super::crypt::{MasterKey, Nonce};
-use super::node::check_kind;
+use super::node::check_key;
 use super::read::read_bytes;
 use super::superblock::{entries, entry_type, Entry, Root, Superblock, KEY_VERSION};
 use super::value::csum_type as csum;
-use super::{kind, le32, le64, Btree, Error, Result, SECTOR, VERSION};
+use super::{kind, le32, le64, put32, put64, Btree, Error, Result, SECTOR, VERSION};
 use crate::crc32c::crc32c;
 
 /// Bytes of an entry's header, before its records.
@@ -36,7 +36,6 @@ fn magic(internal_uuid: &[u8; 16]) -> u64 {
 
 /// One entry as written: its sequence, the oldest sequence it keeps in the
 /// replay window, and its records.
-#[cfg(test)]
 pub(crate) struct Jset<'a> {
     pub seq: u64,
     pub last_seq: u64,
@@ -45,7 +44,6 @@ pub(crate) struct Jset<'a> {
 }
 
 /// Appends a record to an entry area.
-#[cfg(test)]
 pub(crate) fn record(area: &mut Vec<u8>, kind_: u8, btree: u8, level: u8, payload: &[u8]) {
     assert!(payload.len().is_multiple_of(8) && u16::try_from(payload.len() / 8).is_ok(), "a record of {} bytes", payload.len());
     let mut header = [0u8; 8];
@@ -57,12 +55,27 @@ pub(crate) fn record(area: &mut Vec<u8>, kind_: u8, btree: u8, level: u8, payloa
     area.extend_from_slice(payload);
 }
 
+/// Appends what every entry carries after its keys (A2.18): a root record
+/// for each btree with a root, each its btree id, level and pointer key;
+/// the datetime, in seconds; the key version; and the read and write clocks.
+pub(crate) fn tail<'a>(area: &mut Vec<u8>, roots: impl Iterator<Item = (u8, u8, &'a [u8])>, datetime: u64, key_version: u64, clocks: [u64; 2]) {
+    for (btree, level, key) in roots {
+        record(area, entry_type::BTREE_ROOT, btree, level, key);
+    }
+    record(area, entry_type::DATETIME, 0, 0, &datetime.to_le_bytes());
+    record(area, entry_type::USAGE, KEY_VERSION, 0, &key_version.to_le_bytes());
+    for (rw, time) in clocks.iter().enumerate() {
+        let mut clock = [0u8; 16];
+        clock[0] = rw as u8;
+        clock[8..].copy_from_slice(&time.to_le_bytes());
+        record(area, entry_type::CLOCK, 0, 0, &clock);
+    }
+}
+
 /// The bytes of `entry`, padded to whole blocks, checksummed for an
 /// unencrypted volume or encrypted and MACed under `key`. A flush entry,
 /// always: v1 writes no other.
-#[cfg(test)]
 pub(crate) fn encode(internal_uuid: &[u8; 16], block: usize, key: Option<&MasterKey>, entry: &Jset) -> Result<Vec<u8>> {
-    use super::{put32, put64};
     let end = HEADER + entry.area.len();
     let mut b = alloc::vec![0u8; end.next_multiple_of(block)];
     put64(&mut b, 16, magic(internal_uuid));
@@ -80,6 +93,8 @@ pub(crate) fn encode(internal_uuid: &[u8; 16], block: usize, key: Option<&Master
         }
         Some(key) => {
             let nonce = Nonce::journal(entry.seq);
+            #[cfg(test)]
+            super::crypt::oracle::record(key, nonce, &b[ENCRYPTED_FROM..end]);
             key.xor(nonce, &mut b[ENCRYPTED_FROM..end])?;
             let tag = key.mac(nonce, &b[16..end])?;
             b[..16].copy_from_slice(&tag);
@@ -249,8 +264,8 @@ pub(crate) enum Record {
     Keys { btree: Btree, level: u8, keys: Vec<(Key, Vec<u8>)> },
     Root(Root),
     KeyVersion(u64),
-    /// A read or write clock.
-    Clock { write: bool },
+    /// The read or the write IO clock.
+    Clock { write: bool, time: u64 },
     Datetime,
     /// A record replay passes over: padding, a log, the keys an update
     /// replaced, another usage counter.
@@ -279,7 +294,7 @@ fn decode_record(e: Entry<'_>) -> Result<Record> {
         entry_type::BLACKLIST | entry_type::BLACKLIST_V2 => return Err(Error::Unsupported("blacklist record in the journal")),
         entry_type::USAGE if words == 1 && e.btree == KEY_VERSION => Record::KeyVersion(word(0)),
         entry_type::USAGE if words == 1 => Record::Ignored,
-        entry_type::CLOCK if words == 2 && e.payload[0] <= 1 => Record::Clock { write: e.payload[0] == 1 },
+        entry_type::CLOCK if words == 2 && e.payload[0] <= 1 => Record::Clock { write: e.payload[0] == 1, time: word(1) },
         entry_type::DATETIME if words >= 1 => Record::Datetime,
         entry_type::USAGE | entry_type::CLOCK | entry_type::DATETIME => return Err(Error::Corrupt("journal record of the wrong size")),
         entry_type::WRITE_BUFFER_KEYS => return Err(Error::Corrupt("write-buffer keys, which no writer puts on the medium")),
@@ -297,7 +312,7 @@ fn keys(btree: Btree, level: u8, mut b: &[u8]) -> Result<Vec<(Key, Vec<u8>)>> {
             return Err(Error::Corrupt("journal key packed, past its record or of no size"));
         }
         let (key, value) = Format::UNPACKED.key(b)?;
-        check_kind(btree, level, &key)?;
+        check_key(btree, level, &key, value)?;
         out.push((key, value.to_vec()));
         b = &b[len..];
     }
@@ -307,18 +322,26 @@ fn keys(btree: Btree, level: u8, mut b: &[u8]) -> Result<Vec<(Key, Vec<u8>)>> {
 /// A key replay lays over a node's, or its deletion.
 pub(crate) type Replayed = Option<(Key, Vec<u8>)>;
 
+/// A replayed key and the sequence of the entry it came from.
+pub(crate) struct Logged {
+    pub seq: u64,
+    pub key: Replayed,
+}
+
 /// The window's records laid over the btrees: what a reader of an unclean
 /// volume sees in place of the nodes' keys.
 #[derive(Default)]
 pub(crate) struct Replay {
     /// Every replayed key but accounting's, by btree, level and position, the
     /// latest winning; a deletion as `None`.
-    pub keys: BTreeMap<(Btree, u8, Bpos), Replayed>,
+    pub keys: BTreeMap<(Btree, u8, Bpos), Logged>,
     /// Accounting deltas by position, in journal order.
     pub accounting: BTreeMap<Bpos, Vec<(Version, Vec<u64>)>>,
     /// The latest root record of each btree.
     pub roots: Vec<Root>,
     pub key_version: Option<u64>,
+    /// The latest read and write clocks.
+    pub clocks: [u64; 2],
     /// Keys the window's btree_keys records hold, before later ones
     /// replace earlier.
     pub read: usize,
@@ -343,7 +366,7 @@ pub(crate) fn replay(scan: &Scan, sb: &Superblock, w: &Window) -> Result<Replay>
                             continue;
                         }
                         let replayed = (key.kind != kind::DELETED).then_some((key, value));
-                        r.keys.insert((btree, level, key.pos), replayed);
+                        r.keys.insert((btree, level, key.pos), Logged { seq: found.seq, key: replayed });
                     }
                 }
                 Record::Root(root) => {
@@ -351,7 +374,8 @@ pub(crate) fn replay(scan: &Scan, sb: &Superblock, w: &Window) -> Result<Replay>
                     r.roots.push(root);
                 }
                 Record::KeyVersion(v) => r.key_version = Some(v),
-                Record::Clock { .. } | Record::Datetime | Record::Ignored => {}
+                Record::Clock { write, time } => r.clocks[usize::from(write)] = time,
+                Record::Datetime | Record::Ignored => {}
             }
         }
     }
@@ -397,13 +421,220 @@ impl Replay {
                 }
             }
         } else {
-            for ((_, _, pos), replayed) in self.keys.range((btree, level, min)..=(btree, level, max)) {
-                match replayed {
+            for ((_, _, pos), logged) in self.keys.range((btree, level, min)..=(btree, level, max)) {
+                match &logged.key {
                     Some(kv) => merged.insert(*pos, kv.clone()),
                     None => merged.remove(pos),
                 };
             }
         }
         Ok(merged.into_values().collect())
+    }
+}
+
+/// Entries that may exist beyond the newest durable flush entry: the open
+/// one and those closed and not yet written. A bset on the medium may name
+/// any of them, so the post-crash skip must exceed it.
+pub(crate) const DEPTH: usize = 4;
+
+/// How far an unclean mount advances the journal past the newest entry it
+/// found, blacklisting the sequences between: more than any writer, ToyOS or
+/// upstream, can have named beyond its newest flush entry (A2.15).
+pub(crate) const SKIP: u64 = 4096;
+const _: () = assert!((DEPTH as u64) < SKIP, "the post-crash skip covers the journal's depth");
+
+/// The largest entry written.
+const MAX_ENTRY: usize = 64 << 10;
+/// Bytes an entry's tail may take: a root record for each of the 29
+/// btrees, the datetime, the key version and both clocks.
+pub(crate) const TAIL: usize = 29 * (8 + 40 + 48) + 16 + 16 + 2 * 24;
+
+/// Which share of the journal a reservation draws on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Class {
+    Ordinary,
+    /// Journal reclaim's, which ordinary reservations leave untouched.
+    Reclaim,
+}
+
+/// The entry being filled.
+pub(crate) struct Open {
+    pub seq: u64,
+    pub area: Vec<u8>,
+}
+
+/// An entry closed and encoded, waiting to be written whole.
+pub(crate) struct Closed {
+    pub seq: u64,
+    pub last_seq: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// The journal of a mounted volume: where it writes, what is reserved in it,
+/// and which ring buckets still hold entries replay could need.
+pub(crate) struct Writer {
+    /// Each ring bucket's device bucket.
+    pub ring: Vec<u64>,
+    pub bucket_sectors: u64,
+    /// Entries are at most this many bytes, `per_bucket` of them to a bucket.
+    entry: usize,
+    per_bucket: u64,
+    /// The ring bucket written to, and its sectors used.
+    pub head: usize,
+    pub head_sectors: u64,
+    /// Each bucket's newest entry while replay may need it; `None` when the
+    /// bucket may be written over.
+    pub newest: Vec<Option<u64>>,
+    /// The last sequence of the newest durable flush entry.
+    pub durable_last: u64,
+    pub open: Option<Open>,
+    pub closed: VecDeque<Closed>,
+    pub next_seq: u64,
+    reserved: u64,
+    /// A commit waits to close the open entry: reservations count none of
+    /// its room.
+    pub closing: bool,
+    /// The largest reservation any transaction makes, in u64s.
+    pub max_tx: u64,
+    /// Entries of the ring reclaim needs to journal the pointer update of
+    /// every node that can pin it. Ordinary reservations leave twice this:
+    /// one share for reclaim as it runs, and one for the reclaim that writes
+    /// out a replayed window after a crash, when the first may be spent.
+    pub reclaim_entries: u64,
+    /// The mount is writing out a replayed window, and reclaim may take
+    /// both shares.
+    pub replaying: bool,
+}
+
+impl Writer {
+    pub(crate) fn new(ring: Vec<u64>, bucket_sectors: u64, block: usize, max_tx: u64) -> Writer {
+        let bucket = bucket_sectors as usize * SECTOR;
+        let entry = bucket.min(MAX_ENTRY) / block * block;
+        assert!(entry > HEADER + TAIL + 2 * max_tx as usize * 8, "journal buckets of {bucket} bytes hold no transaction");
+        let newest = alloc::vec![None; ring.len()];
+        Writer {
+            ring,
+            bucket_sectors,
+            entry,
+            per_bucket: (bucket / entry) as u64,
+            head: 0,
+            head_sectors: 0,
+            newest,
+            durable_last: 0,
+            open: None,
+            closed: VecDeque::new(),
+            next_seq: 1,
+            reserved: 0,
+            closing: false,
+            max_tx,
+            reclaim_entries: 0,
+            replaying: false,
+        }
+    }
+
+    /// Entries the whole ring holds.
+    pub(crate) fn slots(&self) -> u64 {
+        self.ring.len() as u64 * self.per_bucket
+    }
+
+    /// Body u64s an entry holds for transactions.
+    pub(crate) fn body(&self) -> u64 {
+        ((self.entry - HEADER - TAIL) / 8) as u64
+    }
+
+    /// Entries the ring still has room for, past those open or closed.
+    pub(crate) fn ring_free(&self) -> u64 {
+        let outstanding = (self.closed.len() + usize::from(self.open.is_some())) as u64;
+        let free = (0..self.ring.len()).filter(|&i| i != self.head && self.newest[i].is_none()).count() as u64;
+        let entry_sectors = (self.entry / SECTOR) as u64;
+        (free * self.per_bucket + (self.bucket_sectors - self.head_sectors) / entry_sectors).saturating_sub(outstanding)
+    }
+
+    /// Entries that can be opened now: ring room and pipeline depth both.
+    /// Depth comes back by itself as closed entries are written; ring room
+    /// only as reclaim lets the journal's last sequence move on.
+    pub(crate) fn openable(&self) -> u64 {
+        let outstanding = (self.closed.len() + usize::from(self.open.is_some())) as u64;
+        self.ring_free().min((DEPTH as u64).saturating_sub(outstanding))
+    }
+
+    /// The open entry's room for transactions, short of the largest one.
+    fn room(&self) -> u64 {
+        match &self.open {
+            Some(o) if !self.closing => (self.body() - (o.area.len() / 8) as u64).saturating_sub(self.max_tx),
+            _ => 0,
+        }
+    }
+
+    /// Takes `n` u64s if they fit `class`'s share. Every outstanding
+    /// reservation together must apply without a wait: packed in order,
+    /// each at most `max_tx`, into the open entry's room and then new
+    /// entries, they waste less than `max_tx` of each. Each must also leave
+    /// the ring the shares of [`Writer::reclaim_entries`] it may not take.
+    pub(crate) fn reserve(&mut self, n: u64, class: Class) -> bool {
+        assert!(n <= self.max_tx, "a transaction of {n} u64s, past the largest any makes");
+        let per_entry = self.body() - self.max_tx;
+        let total = self.reserved + n;
+        let now = total <= self.room() + self.openable() * per_entry;
+        let keep = match class {
+            Class::Ordinary => 2 * self.reclaim_entries,
+            Class::Reclaim if self.replaying => 0,
+            Class::Reclaim => self.reclaim_entries,
+        };
+        let leaves = total <= self.room() + self.ring_free().saturating_sub(keep) * per_entry;
+        let fits = now && leaves;
+        if fits {
+            self.reserved = total;
+        }
+        fits
+    }
+
+    pub(crate) fn unreserve(&mut self, n: u64) {
+        self.reserved -= n;
+    }
+
+    /// Whether the open entry may close without leaving a reservation
+    /// unable to apply.
+    pub(crate) fn may_close(&self) -> bool {
+        self.reserved <= self.openable() * (self.body() - self.max_tx)
+    }
+
+    /// Whether the open entry has room for `n` more u64s.
+    pub(crate) fn fits(&self, n: u64) -> bool {
+        self.open.as_ref().is_some_and(|o| (o.area.len() / 8) as u64 + n <= self.body())
+    }
+
+    /// Opens the next entry. The reservation being applied guaranteed one.
+    pub(crate) fn open_new(&mut self) {
+        assert!(self.open.is_none() && self.openable() > 0, "a reservation applied with no entry to take it");
+        self.open = Some(Open { seq: self.next_seq, area: Vec::new() });
+        self.next_seq += 1;
+    }
+
+    /// The device sector the next entry of `sectors` goes to, moving to the
+    /// next ring bucket when the head has too little left; and its ring
+    /// bucket.
+    pub(crate) fn place(&mut self, sectors: u64) -> (u64, usize) {
+        if self.head_sectors + sectors > self.bucket_sectors {
+            let next = (self.head + 1) % self.ring.len();
+            assert!(self.newest[next].is_none(), "the journal ring overran an entry replay may need");
+            self.head = next;
+            self.head_sectors = 0;
+        }
+        (self.ring[self.head] * self.bucket_sectors + self.head_sectors, self.head)
+    }
+
+    /// An entry written at the head: it is durable, and so is its last
+    /// sequence, which frees every bucket holding only older entries.
+    pub(crate) fn written(&mut self, seq: u64, last_seq: u64, sectors: u64) {
+        self.newest[self.head] = Some(seq);
+        self.head_sectors += sectors;
+        self.durable_last = last_seq;
+        let head = self.head;
+        for (i, newest) in self.newest.iter_mut().enumerate() {
+            if i != head && newest.is_some_and(|n| n < last_seq) {
+                *newest = None;
+            }
+        }
     }
 }

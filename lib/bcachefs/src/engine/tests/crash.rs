@@ -1,0 +1,255 @@
+//! The read-write mount stopped at every block request: what a crash there
+//! leaves replays to a prefix of the operations, holding every one whose
+//! commit returned, and checks clean.
+
+use std::boxed::Box;
+use std::cell::Cell;
+use std::collections::BTreeSet;
+use std::string::String;
+use std::vec::Vec;
+
+use toyos_blockdev::executor::Executor;
+use toyos_blockdev::model::Model;
+use toyos_blockdev::{block_on_ready, Block, BlockDev, Bytes};
+
+use super::mount::{random, MEMORY, NOW, OWNER};
+use super::*;
+
+/// A device that, after each write and flush it passes on, hands the model
+/// to `after`.
+pub(super) struct Watched<'a> {
+    pub model: &'a Model,
+    pub after: Box<dyn Fn(&Model) + 'a>,
+}
+
+impl BlockDev for Watched<'_> {
+    fn blocks(&self) -> u64 {
+        self.model.blocks()
+    }
+
+    async fn read(&self, lba: u64, out: &mut [Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.model.read(lba, out).await
+    }
+
+    async fn write(&self, lba: u64, data: &[Block]) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.model.write(lba, data).await?;
+        (self.after)(self.model);
+        Ok(())
+    }
+
+    async fn flush(&self) -> core::result::Result<(), toyos_blockdev::Error> {
+        self.model.flush().await?;
+        (self.after)(self.model);
+        Ok(())
+    }
+}
+
+const MIN_LIMITS: toyos_crypto::scrypt::Limits = toyos_crypto::scrypt::Limits { memory: 1 << 20, work: 1 << 20 };
+
+/// One namespace operation in the root directory.
+#[derive(Clone)]
+pub(super) enum Op {
+    Create(Vec<u8>),
+    Mkdir(Vec<u8>),
+    /// A second name for the first.
+    Link(Vec<u8>, Vec<u8>),
+    /// The first name moved to the second, replacing what is there.
+    Rename(Vec<u8>, Vec<u8>),
+    Unlink(Vec<u8>),
+    Rmdir(Vec<u8>),
+    /// A file with no name, never released: an orphan at the crash.
+    Unnamed,
+}
+
+/// The root's names after each prefix of `ops`: `[0]` before any. A rename
+/// between two names of one node does nothing, as POSIX has it.
+fn names_after(ops: &[Op]) -> Vec<BTreeSet<Vec<u8>>> {
+    // Each name and the node it holds, numbered as made.
+    let mut now: std::collections::BTreeMap<Vec<u8>, usize> = std::collections::BTreeMap::new();
+    let mut out = alloc::vec![BTreeSet::new()];
+    for (i, op) in ops.iter().enumerate() {
+        match op {
+            Op::Create(n) | Op::Mkdir(n) => {
+                now.insert(n.clone(), i);
+            }
+            Op::Link(a, b) => {
+                now.insert(b.clone(), now[a]);
+            }
+            Op::Rename(a, b) => {
+                if now.get(b) != Some(&now[a]) {
+                    let node = now.remove(a).unwrap();
+                    now.insert(b.clone(), node);
+                }
+            }
+            Op::Unlink(n) | Op::Rmdir(n) => {
+                now.remove(n);
+            }
+            Op::Unnamed => {}
+        }
+        out.push(now.keys().cloned().collect());
+    }
+    out
+}
+
+/// A mixed workload of `n` operations, each valid where it lands: files
+/// and directories made, files linked and renamed over one another, files
+/// unlinked, empty directories removed, unnamed files made.
+pub(super) fn mixed(n: usize) -> Vec<Op> {
+    let (mut files, mut dirs): (Vec<Vec<u8>>, Vec<Vec<u8>>) = (Vec::new(), Vec::new());
+    let mut ops = Vec::new();
+    for i in 0..n {
+        let name = format!("n{i}").into_bytes();
+        let op = match i % 7 {
+            0 | 1 => Op::Create(name),
+            2 => Op::Mkdir(name),
+            3 if !files.is_empty() => Op::Link(files[i % files.len()].clone(), name),
+            4 if files.len() > 1 => Op::Rename(files[0].clone(), files[files.len() - 1].clone()),
+            5 if !files.is_empty() => Op::Unlink(files[i % files.len()].clone()),
+            6 if !dirs.is_empty() && i % 2 == 0 => Op::Rmdir(dirs[i % dirs.len()].clone()),
+            6 => Op::Unnamed,
+            _ => Op::Create(name),
+        };
+        match &op {
+            Op::Create(n) | Op::Link(_, n) => files.push(n.clone()),
+            Op::Mkdir(n) => dirs.push(n.clone()),
+            Op::Rename(a, b) => {
+                files.retain(|f| f != a);
+                if !files.contains(b) {
+                    files.push(b.clone());
+                }
+            }
+            Op::Unlink(n) => files.retain(|f| f != n),
+            Op::Rmdir(n) => dirs.retain(|d| d != n),
+            Op::Unnamed => {}
+        }
+        ops.push(op);
+    }
+    ops
+}
+
+pub(super) async fn apply<D: BlockDev>(m: &Mount<D>, op: &Op) {
+    let r = m.root();
+    match op {
+        Op::Create(n) => drop(m.create(r, n, New::File, OWNER, NOW).await.unwrap()),
+        Op::Mkdir(n) => drop(m.create(r, n, New::Dir, OWNER, NOW).await.unwrap()),
+        Op::Link(a, b) => {
+            let ino = m.lookup(r, a).await.unwrap().unwrap().ino;
+            m.link(ino, r, b, Link::New, NOW).await.unwrap();
+        }
+        Op::Rename(a, b) => drop(m.rename((r, a), (r, b), Rename::Replace, NOW).await.unwrap()),
+        Op::Unlink(n) => drop(m.unlink(r, n, false, NOW).await.unwrap()),
+        Op::Rmdir(n) => drop(m.unlink(r, n, true, NOW).await.unwrap()),
+        Op::Unnamed => drop(m.create_unnamed(r, OWNER, NOW).await.unwrap()),
+    }
+}
+
+/// The judge of one crash state: it mounts read-write, replaying; its root
+/// holds the names of some prefix of the operations, no shorter than the
+/// committed one; and unmounted clean, its orphans released, it checks
+/// clean.
+fn judge(image: &[u8], states: &[BTreeSet<Vec<u8>>], applied: usize, committed: usize, passphrase: Option<&[u8]>) -> core::result::Result<(), String> {
+    let dev = Bytes::new(image.to_vec());
+    let mount = match passphrase {
+        Some(p) => block_on_ready(Mount::unlock(&dev, p, MIN_LIMITS, MEMORY, random())),
+        None => block_on_ready(Mount::open(&dev, MEMORY, random())),
+    }
+    .map_err(|e| format!("mount: {e:?}"))?;
+    let (entries, more) = block_on_ready(mount.readdir(mount.root(), 0, 10_000)).map_err(|e| format!("readdir: {e:?}"))?;
+    assert!(!more);
+    let seen: BTreeSet<Vec<u8>> = entries.into_iter().map(|e| e.name).collect();
+    if !(committed..=applied).any(|k| states[k] == seen) {
+        return Err(format!("{} names visible: no prefix from the {committed} committed to the {applied} applied", seen.len()));
+    }
+    block_on_ready(mount.unmount()).map_err(|e| format!("unmount: {e:?}"))?;
+    let v = match passphrase {
+        Some(p) => block_on_ready(Volume::unlock(&dev, p, MIN_LIMITS)),
+        None => block_on_ready(Volume::open(&dev)),
+    }
+    .map_err(|e| format!("reopen: {e:?}"))?;
+    let found = block_on_ready(fsck(&v)).map_err(|e| format!("fsck: {e:?}"))?;
+    if !found.is_empty() {
+        return Err(format!("fsck: {found:?}"));
+    }
+    Ok(())
+}
+
+/// `ops` in the root directory, a commit after every `every`, with every
+/// crash state sampled `samples` times after each request.
+fn ops_survive_a_crash_anywhere(encryption: Option<Encryption>, ops: &[Op], every: usize, samples: u64) {
+    let passphrase = encryption.as_ref().map(|e| e.passphrase.to_vec());
+    let image = formatted(64 << 20, encryption).into_inner();
+    let model = Model::new(image, 512);
+    let states = names_after(ops);
+    // Operations begun, so possibly applied, and committed.
+    let applied = Cell::new(0);
+    let committed = Cell::new(0);
+    let judged = Cell::new(0u64);
+    let seed = Cell::new(0xc4a5_4000u64);
+    let dev = Watched {
+        model: &model,
+        after: Box::new(|m: &Model| {
+            seed.set(seed.get() + 1);
+            m.check(samples, seed.get(), |image| {
+                judged.set(judged.get() + 1);
+                judge(image, &states, applied.get(), committed.get(), passphrase.as_deref())
+            })
+            .unwrap_or_else(|v| panic!("{v}"));
+        }),
+    };
+    let mount = match &passphrase {
+        Some(p) => block_on_ready(Mount::unlock(&dev, p, MIN_LIMITS, MEMORY, random())),
+        None => block_on_ready(Mount::open(&dev, MEMORY, random())),
+    }
+    .unwrap();
+    Executor::new().block_on(
+        async {
+            for (i, op) in ops.iter().enumerate() {
+                applied.set(i + 1);
+                apply(&mount, op).await;
+                if (i + 1) % every == 0 {
+                    mount.commit().await.unwrap();
+                    committed.set(i + 1);
+                }
+            }
+        },
+        || panic!("stalled"),
+    );
+    block_on_ready(mount.unmount()).unwrap();
+    assert!(judged.get() > 500, "{} crash states judged", judged.get());
+}
+
+fn creates(n: usize) -> Vec<Op> {
+    (0..n).map(|i| Op::Create(format!("c{i}").into_bytes())).collect()
+}
+
+#[test]
+fn creates_survive_a_crash_at_every_request() {
+    ops_survive_a_crash_anywhere(None, &creates(60), 5, 32);
+}
+
+#[test]
+fn encrypted_creates_survive_a_crash_at_every_request() {
+    let secret = hex_secret();
+    ops_survive_a_crash_anywhere(Some(Encryption { passphrase: &secret, kdf: MIN_KDF }), &creates(30), 3, 32);
+}
+
+/// More creates than the journal holds: reclaim writes nodes and journals
+/// their pointer updates between them, and a crash lands among those too.
+#[test]
+fn creates_through_reclaim_survive_a_crash_at_every_request() {
+    ops_survive_a_crash_anywhere(None, &creates(240), 40, 16);
+}
+
+/// Every namespace operation, a crash at every request: links, renames over
+/// files, unlinks leaving orphans, removed directories, unnamed files.
+#[test]
+fn namespace_operations_survive_a_crash_at_every_request() {
+    ops_survive_a_crash_anywhere(None, &mixed(140), 10, 16);
+}
+
+#[test]
+fn encrypted_namespace_operations_survive_a_crash_at_every_request() {
+    let secret = hex_secret();
+    ops_survive_a_crash_anywhere(Some(Encryption { passphrase: &secret, kdf: MIN_KDF }), &mixed(70), 7, 24);
+}
+

@@ -502,6 +502,9 @@ pub(crate) mod data_type {
 /// The fields of an alloc_v4 value a check compares.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AllocV4 {
+    pub journal_seq_nonempty: u64,
+    /// Bit 0 need_discard, bit 1 needs-gen-increment.
+    pub flags: u32,
     pub gen: u8,
     pub oldest_gen: u8,
     pub data_type: u8,
@@ -510,6 +513,7 @@ pub(crate) struct AllocV4 {
     pub stripe_refcount: u32,
     pub stripe_sectors: u32,
     pub journal_seq_empty: u64,
+    pub io_time_write: u64,
 }
 
 impl AllocV4 {
@@ -529,6 +533,9 @@ impl AllocV4 {
         }
         let get32 = |at: usize| if v.len() >= at + 4 { le32(v, at) } else { 0 };
         Ok(AllocV4 {
+            journal_seq_nonempty: le64(v, 0),
+            flags,
+            io_time_write: le64(v, 32),
             gen: v[12],
             oldest_gen: v[13],
             data_type: v[14],

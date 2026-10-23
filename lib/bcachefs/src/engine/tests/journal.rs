@@ -302,7 +302,8 @@ fn a_window_with_an_entry_missing_or_failing_its_checksum_is_refused() {
         flip(dev, block * BLOCK as u64 + 100);
     });
     assert_eq!(window_of(&damaged), Err(Error::Checksum("journal entry")));
-    assert_eq!(window_of(&unclean_with(&[], |_, _| {})), Ok(None));
+    // With nothing laid in, the ring holds mkfs's own clean entry.
+    assert_eq!(window_of(&unclean_with(&[], |_, _| {})).unwrap().map(|w| (w.first, w.last, w.next)), Some((1, 1, 2)));
 }
 
 /// What the ring holds past a bucket's newest entry is left over from an
@@ -356,5 +357,26 @@ fn an_unlinked_file_is_an_orphan_only_with_its_key_and_a_directory_never() {
     assert_eq!(
         orphan_findings(0o40755, true),
         [Finding::Inode { ino, rule: "unlinked directory" }, Finding::Inode { ino, rule: "orphan and deleted_inodes key disagree" }]
+    );
+}
+
+/// A clean volume holds no orphan and no logged operation (A8.14): fsck
+/// finds a `deleted_inodes` key and a logged truncate left on one.
+#[test]
+fn a_clean_volume_holding_an_orphan_key_or_a_logged_op_is_found() {
+    let dev = formatted(8 << 20, None);
+    let ino = mkfs::FIRST_INODE;
+    let orphan = Bpos::new(0, ino, mkfs::ROOT_SNAPSHOT);
+    let op = Bpos::new(0, 1, 0);
+    rewrite_leaf(&dev, Btree::DeletedInodes, Bpos::MIN, 0, |keys| keys.push((Key::new(kind::SET, orphan), vec![])));
+    rewrite_leaf(&dev, Btree::LoggedOps, Bpos::MIN, 0, |keys| keys.push((Key::new(kind::LOGGED_OP_TRUNCATE, op), vec![0; 24])));
+    let rules = ["deleted_inodes key on a clean volume", "logged operation on a clean volume"];
+    let found: Vec<Finding> = findings_of(&dev).into_iter().filter(|f| matches!(f, Finding::Key { rule, .. } if rules.contains(rule))).collect();
+    assert_eq!(
+        found,
+        [
+            Finding::Key { btree: Btree::DeletedInodes, pos: orphan, rule: rules[0] },
+            Finding::Key { btree: Btree::LoggedOps, pos: op, rule: rules[1] },
+        ]
     );
 }

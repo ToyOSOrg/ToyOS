@@ -14,7 +14,7 @@ use super::bkey::{Bpos, Key};
 use super::derive::{Space, Tally};
 use super::mkfs::{self, COMPAT_CLEAN, COMPAT_INITIALIZED, DOWNGRADE, EXTENT_TYPE_U64S, FEATURES};
 use super::journal::{records, Found, Record};
-use super::read::{hash, read_bytes, Volume};
+use super::read::{hash, read_bytes, Source, Volume};
 use super::superblock::{field_type, member_flag, Root, Superblock, HEADER};
 use super::value::mode::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
 use super::value::{self, csum_type, data_type, inode_field, inode_flag, AllocV4, Dirent, DirentType, Extent, InodeValue, NodePtr, Subvolume, SUBVOLUME_LIVE};
@@ -203,7 +203,7 @@ async fn journal<D: BlockDev>(v: &Volume<D>) -> Result<Vec<Finding>> {
             (carried.is_superset(&roots), "no root record for a btree with a root"),
             (has(&|r| matches!(r, Record::Datetime)), "no datetime record"),
             (has(&|r| matches!(r, Record::KeyVersion(_))), "no key-version record"),
-            (has(&|r| matches!(r, Record::Clock { write: false })) && has(&|r| matches!(r, Record::Clock { write: true })), "not both clock records"),
+            (has(&|r| matches!(r, Record::Clock { write: false, .. })) && has(&|r| matches!(r, Record::Clock { write: true, .. })), "not both clock records"),
         ] {
             if !ok {
                 found.push(Finding::Journal { seq: e.seq, rule });
@@ -630,10 +630,9 @@ impl<'a> Walk<'a> {
                 if names != 1 || backref == (0, 0) {
                     bad("directory not named once, by its back-reference");
                 }
-                let parent_depth = self.inodes.get(&backref.0).map(|p| p.field(inode_field::DEPTH));
-                if parent_depth.is_none_or(|d| d.checked_add(1) != Some(v.field(inode_field::DEPTH))) {
-                    bad("depth other than its parent's plus one");
-                }
+                // A depth is not checked: a moved directory takes its new
+                // parent's plus one, but its subtree keeps theirs, which
+                // upstream renumbers silently (A9.42).
                 if !reachable.contains(&ino) {
                     bad("directory unreachable from the root");
                 }
@@ -643,9 +642,8 @@ impl<'a> Walk<'a> {
             if nlink != names {
                 bad("link count other than its names");
             }
-            if names > 0 && backref == (0, 0) {
-                bad("named without a back-reference");
-            }
+            // A file's back-reference may be cleared while other names
+            // remain (A5.20).
             let (sectors, end) = data.get(&ino).copied().unwrap_or((0, 0));
             if v.flags & inode_flag::I_SECTORS_DIRTY == 0 && v.sectors != sectors {
                 bad("sectors other than its extents'");

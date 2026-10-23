@@ -221,6 +221,8 @@ pub(crate) struct Clean {
     pub roots: Vec<Root>,
     /// The key-version counter.
     pub key_version: Option<u64>,
+    /// The read and write IO clocks.
+    pub clocks: [u64; 2],
 }
 
 /// scrypt's cost as `crypt` stores it, each a log2.
@@ -554,7 +556,7 @@ fn clean(body: &[u8]) -> Result<Clean> {
     if body.len() < 16 {
         return Err(Error::Corrupt("clean field shorter than 16 bytes"));
     }
-    let mut clean = Clean { journal_seq: le64(body, 8), roots: Vec::new(), key_version: None };
+    let mut clean = Clean { journal_seq: le64(body, 8), roots: Vec::new(), key_version: None, clocks: [0; 2] };
     for Entry { btree, level, kind: kind_, payload } in entries(&body[16..])? {
         match kind_ {
             entry_type::BTREE_ROOT => {
@@ -563,6 +565,7 @@ fn clean(body: &[u8]) -> Result<Clean> {
                 clean.roots.push(root);
             }
             entry_type::USAGE if btree == KEY_VERSION && payload.len() >= 8 => clean.key_version = Some(le64(payload, 0)),
+            entry_type::CLOCK if payload.len() == 16 && payload[0] <= 1 => clean.clocks[usize::from(payload[0])] = le64(payload, 8),
             _ => {}
         }
     }
