@@ -123,6 +123,10 @@ pub trait Volume {
 
     fn truncate(&mut self, node: Node, size: u64) -> Result<(), Error>;
 
+    /// Stamp the open file `node` as last written at `mtime`; `Unsupported`
+    /// where the format stamps its files itself.
+    fn set_mtime(&mut self, node: Node, mtime: u64) -> Result<(), Error>;
+
     fn mkdir(&mut self, path: &str) -> Result<(), Error>;
 
     fn rmdir(&mut self, path: &str) -> Result<(), Error>;

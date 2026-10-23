@@ -7,11 +7,12 @@
 //! `core::str::from_utf8`, the number reader against the host C library's and
 //! IEEE 754's rounding of hexadecimal input computed exactly, AArch64's
 //! `long double` widening against compiler-builtins', the errno codes against
-//! `include/errno.h`, IPv4 addresses and their texts against the host C
-//! library's, the socket option rule against the host's `setsockopt` and
-//! `getsockopt`, a datagram send's bind, printf's numeric conversions against
-//! the C standard's text, `realpath`'s resolution over a tree laid out here,
-//! and C's allocator over a heap that checks every layout it is handed.
+//! `include/errno.h`, the `*at` calls' directory, open flags and times, IPv4
+//! addresses and their texts against the host C library's, the socket option
+//! rule against the host's `setsockopt` and `getsockopt`, a datagram send's
+//! bind, printf's numeric conversions against the C standard's text,
+//! `realpath`'s resolution over a tree laid out here, and C's allocator over
+//! a heap that checks every layout it is handed.
 
 #[cfg(test)]
 extern crate alloc;
@@ -31,6 +32,9 @@ mod errtext;
 #[cfg(test)]
 #[path = "../../src/arch/mod.rs"]
 mod arch;
+#[cfg(test)]
+#[path = "../../src/atreq.rs"]
+mod atreq;
 #[cfg(test)]
 #[path = "../../src/conversion.rs"]
 mod conversion;
@@ -99,6 +103,8 @@ mod signal_dispositions;
 mod error_texts;
 #[cfg(test)]
 mod datagram_sends;
+#[cfg(test)]
+mod at_requests;
 #[cfg(test)]
 mod descriptor_requests;
 #[cfg(test)]

@@ -620,6 +620,13 @@ impl<D: Disk> Volume for DataVolume<D> {
         mapped("a truncate's free", &path, self.fs.free_extents(&dropped))
     }
 
+    fn set_mtime(&mut self, node: Node, mtime: u64) -> Result<(), Error> {
+        let open = self.entry(node)?;
+        open.mtime = mtime;
+        open.dirty = true;
+        Ok(())
+    }
+
     fn mkdir(&mut self, path: &str) -> Result<(), Error> {
         if self.names.contains_key(path) || self.is_dir(path) {
             return Err(Error::AlreadyExists);

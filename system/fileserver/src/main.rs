@@ -53,7 +53,8 @@ use std::time::{Duration, Instant};
 use fileserver::absent::Absent;
 use fileserver::bounds::{self, Hello, Slot, MAX_HANDSHAKES, MAX_SERVED, MAX_STREAMS};
 use fileserver::data::{DataVolume, Located, Probed};
-use fileserver::descriptions::{self, Description, Ids, Shared};
+use fileserver::descriptions::{self, Description, Held, Ids, Shared};
+use fileserver::listing;
 use diskserver::disk::Served;
 use fileserver::cache::Disk;
 use fileserver::ram::Ram;
@@ -246,6 +247,7 @@ fn main() {
         exports: Exports::new(),
         writeback: WriteBack::default(),
         scratch: Vec::new(),
+        volume_id: u64::from(toyos_abi::syscall::getpid().0),
     }
     .serve()
 }
@@ -364,13 +366,16 @@ struct Server {
     /// into this process's own memory before the volume sees them. Kept, so a
     /// write allocates nothing.
     scratch: Vec<u8>,
+    /// The volume every node is on: this start's pid, which the kernel never
+    /// issues again, since a restart numbers its files afresh.
+    volume_id: u64,
 }
 
 /// What one request is answered.
 enum Answer {
     Reply(Reply),
-    /// A path the client resolves again, `len` bytes of the window.
-    Link(usize),
+    /// A path the client resolves again, `len` bytes of the request's span.
+    Follow(usize),
     /// A reply that carries a handle.
     WithHandle(Reply, toyos::OwnedHandle),
     /// The client broke the protocol and is let go.
@@ -379,8 +384,11 @@ enum Answer {
     Refuse(Error, String),
 }
 
-fn stat_reply(meta: Meta, identity: u64) -> Reply {
-    Reply { kind: meta.kind.wire(), value2: meta.size, mtime: meta.mtime, node: identity, ..Reply::ok() }
+/// What `meta` and `identity` say a node is, on `volume`. These volumes keep
+/// one name per file and no access or change time.
+fn stat_reply(meta: Meta, identity: u64, volume: u64) -> Reply {
+    let stat = Stat { kind: meta.kind.wire(), size: meta.size, nlink: 1, atime: 0, mtime: meta.mtime, ctime: 0, volume, node: identity };
+    Reply::stat(&stat)
 }
 
 fn window_of(w: &SharedMemory) -> Window {
@@ -527,22 +535,23 @@ impl Server {
                     return self.drop_client(id, "its request was not one `Request` wide");
                 };
                 let answer = self.answer(id, msg_type, request);
-                self.reply(id, answer);
+                self.reply(id, request.tag, answer);
             }
         }
     }
 
-    /// Send `answer`, or let the client go when it will not take it.
-    fn reply(&mut self, id: u64, answer: Answer) {
+    /// Send `answer` under the request's `tag`, or let the client go when it
+    /// will not take it.
+    fn reply(&mut self, id: u64, tag: u64, answer: Answer) {
         let Some(client) = self.clients.get(&id) else { return };
         let sent = match answer {
-            Answer::Reply(reply) => client.conn.try_send(REPLY, &reply),
-            Answer::Link(len) => client.conn.try_send(LINK, &Reply { value: len as u64, ..Reply::ok() }),
-            Answer::WithHandle(reply, handle) => client.conn.try_send_with(REPLY, &reply, [handle]),
+            Answer::Reply(reply) => client.conn.try_send(REPLY, &Reply { tag, ..reply }),
+            Answer::Follow(len) => client.conn.try_send(FOLLOW, &Reply { tag, value: len as u64, ..Reply::ok() }),
+            Answer::WithHandle(reply, handle) => client.conn.try_send_with(REPLY, &Reply { tag, ..reply }, [handle]),
             Answer::Drop(why) => return self.drop_client(id, why),
             Answer::Refuse(e, why) => {
                 // Let go whether or not the refusal went: either way it is said.
-                let _ = client.conn.try_send(REPLY, &Reply::refused(e));
+                let _ = client.conn.try_send(REPLY, &Reply { tag, ..Reply::refused(e) });
                 return self.drop_client(id, &why);
             }
         };
@@ -551,30 +560,66 @@ impl Server {
         }
     }
 
-    /// A path from the window: `len` bytes at `at`, UTF-8. A connection that
-    /// was given files and no directory names none.
-    fn path(&self, id: u64, at: u64, len: u64) -> Result<String, Error> {
-        if self.clients[&id].root.is_none() {
-            return Err(Error::NoDirectory);
-        }
-        let window = self.clients[&id].window.as_ref().expect("a request comes after the window");
-        let (at, len) = bounds::path_span(at, len)?;
-        let mut bytes = vec![0u8; len];
-        window_take(window_of(window), at, &mut bytes);
-        bounds::path(bytes)
+    /// The client's window.
+    fn window(&self, id: u64) -> Window {
+        window_of(self.clients[&id].window.as_ref().expect("a request comes after the window"))
     }
 
-    /// `rel`, from the client's directory, as a volume path.
-    fn resolve(&mut self, id: u64, rel: &str, follow_last: bool) -> Result<Resolved, Error> {
+    /// The request's span: where it starts in the window and how long it is.
+    fn span(r: &Request) -> Result<(usize, usize), Error> {
+        bounds::span(r.at, r.span)
+    }
+
+    /// The request's two paths out of its span, UTF-8: the second is a path
+    /// or a symlink's target.
+    fn paths(&self, id: u64, r: &Request) -> Result<(String, String), Error> {
+        let (at, room) = Self::span(r)?;
+        let (len, len2) = bounds::paths(room, r.len, r.len2)?;
+        let mut bytes = vec![0u8; len + len2];
+        window_take(self.window(id), at, &mut bytes);
+        let second = bytes.split_off(len);
+        Ok((bounds::path(bytes)?, bounds::path(second)?))
+    }
+
+    /// The request's first path.
+    fn path(&self, id: u64, r: &Request) -> Result<String, Error> {
+        self.paths(id, r).map(|(first, _)| first)
+    }
+
+    /// The directory a path from `fid` starts in, on the volume, and the
+    /// grant's root beneath which it must stay: a directory moved out from
+    /// under the root is refused `Escapes`, one removed names nothing, and a
+    /// connection given no directory names no path.
+    fn start(&self, id: u64, fid: u64) -> Result<(String, String), Error> {
+        let client = &self.clients[&id];
+        let root = client.root.clone().ok_or(Error::NoDirectory)?;
+        if fid == ROOT {
+            return Ok((root.clone(), root));
+        }
+        let shared = client.fids.get(fid)?;
+        let start = match &shared.borrow().held {
+            Held::Dir { removed: true, .. } => return Err(Error::NotFound),
+            Held::Dir { path, .. } => path.clone(),
+            Held::File(_) => return Err(Error::NotADirectory),
+        };
+        let beneath = root.is_empty() || start == root || start.strip_prefix(&root).is_some_and(|rest| rest.starts_with('/'));
+        match beneath {
+            true => Ok((root, start)),
+            false => Err(Error::Escapes),
+        }
+    }
+
+    /// `rel` from `fid`, as a volume path.
+    fn resolve(&mut self, id: u64, fid: u64, rel: &str, follow_last: bool) -> Result<Resolved, Error> {
         bounds::relative(rel)?;
-        let root = self.clients[&id].root.clone().ok_or(Error::NoDirectory)?;
+        let (root, start) = self.start(id, fid)?;
         let volume = &mut self.volume;
         let mut lookup = |p: &str| match volume.lstat(p) {
             Ok(meta) if meta.kind == Kind::Symlink => volume.read_link(p).map(Found::Link).map_err(drop),
             Ok(_) | Err(Error::NotFound) => Ok(Found::Other),
             Err(_) => Err(()),
         };
-        resolve::resolve(&root, rel, follow_last, &mut lookup).map_err(|e| match e {
+        resolve::resolve(&root, &start, rel, follow_last, &mut lookup).map_err(|e| match e {
             Escape::Escape => Error::Escapes,
             Escape::Loop => Error::Loop,
             Escape::NotFound => Error::NotFound,
@@ -582,10 +627,24 @@ impl Server {
         })
     }
 
-    /// Put `bytes` in the client's window at 0.
-    fn put(&self, id: u64, bytes: &[u8]) {
-        let window = self.clients[&id].window.as_ref().expect("a request comes after the window");
-        window_put(window_of(window), 0, bytes);
+    /// `rel` from `fid` resolved without following its last component, for an
+    /// operation on the name itself; an absolute link on the way is the
+    /// client's, answered in the request's span.
+    fn name(&mut self, id: u64, r: &Request, fid: u64, rel: &str) -> Result<Result<String, Answer>, Error> {
+        Ok(match self.resolve(id, fid, rel, false)? {
+            Resolved::Path(p) => Ok(p),
+            Resolved::Absolute(p) => Err(self.follow(id, r, &p)?),
+        })
+    }
+
+    /// Put `bytes` in the request's span, which they must fit.
+    fn put(&self, id: u64, r: &Request, bytes: &[u8]) -> Result<(), Error> {
+        let (at, room) = Self::span(r)?;
+        if bytes.len() > room {
+            return Err(Error::NameTooLong);
+        }
+        window_put(self.window(id), at, bytes);
+        Ok(())
     }
 
     fn answer(&mut self, id: u64, op: u32, r: Request) -> Answer {
@@ -604,10 +663,7 @@ impl Server {
                 Hello::Dropped(why) => return Answer::Drop(why),
             }
             let granted = if client.writes { RIGHT_WRITE } else { 0 };
-            // The volume is this start's pid, which the kernel never issues
-            // again: a restart numbers its files afresh, so it is another volume.
-            let volume = u64::from(toyos_abi::syscall::getpid().0);
-            return Answer::Reply(Reply { value: granted, value2: volume, ..Reply::ok() });
+            return Answer::Reply(Reply { value: granted, ..Reply::ok() });
         }
         if self.clients[&id].window.is_none() {
             return Answer::Drop("it asked before it lent a window");
@@ -651,13 +707,39 @@ impl Server {
         self.writeback.dirtied(Instant::now());
     }
 
-    /// `rel` resolved without following its last component, for an operation
-    /// on the name itself; an absolute link on the way is the client's.
-    fn name(&mut self, id: u64, rel: &str) -> Result<Result<String, Answer>, Error> {
-        Ok(match self.resolve(id, rel, false)? {
-            Resolved::Path(p) => Ok(p),
-            Resolved::Absolute(p) => Err(self.link(id, &p)),
-        })
+    /// What the volume path `path` is.
+    fn stat_path(&mut self, path: &str) -> Result<Answer, Error> {
+        let meta = self.volume.lstat(path)?;
+        let identity = self.volume.identity(path)?;
+        Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id)))
+    }
+
+    /// What a description holds open is.
+    fn stat_held(&mut self, file: &Shared) -> Result<Answer, Error> {
+        let (held, identity) = {
+            let f = file.borrow();
+            let held = match &f.held {
+                Held::File(node) => Ok(*node),
+                Held::Dir { path, removed } => Err((path.clone(), *removed)),
+            };
+            (held, f.identity)
+        };
+        let meta = match held {
+            Ok(node) => self.volume.node_meta(node)?,
+            // A removed directory is what it was, with nothing in it.
+            Err((_, true)) => Meta { kind: Kind::Dir, size: 0, mtime: 0 },
+            Err((path, false)) => self.volume.lstat(&path)?,
+        };
+        Ok(Answer::Reply(stat_reply(meta, identity, self.volume_id)))
+    }
+
+    /// The open file `fid` names, a directory refused `IsADirectory`, and the
+    /// span its data travels in.
+    fn file_and_span(&mut self, id: u64, r: &Request) -> Result<(Shared, Node, Window), Error> {
+        let file = self.settled(id, r.fid)?;
+        let node = file.borrow().node()?;
+        let (at, len) = Self::span(r)?;
+        Ok((file, node, self.window(id).sub(at, len)))
     }
 
     fn serve_one(&mut self, id: u64, op: u32, r: Request) -> Result<Answer, Error> {
@@ -667,43 +749,9 @@ impl Server {
             Some(_) => {}
         }
         match op {
-            OPEN => {
-                if r.flags & !O_KNOWN != 0 {
-                    return Err(Error::InvalidRequest);
-                }
-                let rel = self.path(id, 0, r.len)?;
-                let path = match self.resolve(id, &rel, true)? {
-                    Resolved::Absolute(p) => return Ok(self.link(id, &p)),
-                    Resolved::Path(p) => p,
-                };
-                if self.clients[&id].fids.len() >= descriptions::MAX_IDS {
-                    return Err(Error::TooManyOpen);
-                }
-                let how = OpenHow {
-                    create: r.flags & O_CREATE != 0,
-                    create_new: r.flags & O_CREATE_NEW != 0,
-                    truncate: r.flags & O_TRUNCATE != 0,
-                };
-                let node = self.volume.open(&path, how)?;
-                let (meta, identity) = match self.volume.node_meta(node).and_then(|meta| {
-                    self.volume.identity(&path).map(|identity| (meta, identity))
-                }) {
-                    Ok(answer) => answer,
-                    Err(e) => {
-                        let _ = self.volume.close(node);
-                        return Err(e);
-                    }
-                };
-                if how.create || how.truncate || how.create_new {
-                    self.dirtied();
-                }
-                let write = r.flags & (O_WRITE | O_APPEND) != 0;
-                let append = r.flags & O_APPEND != 0;
-                let file = Description { node, identity, write, append, offset: 0 };
-                let client = self.clients.get_mut(&id).expect("pumped");
-                let fid = client.fids.insert(Rc::new(RefCell::new(file)))?;
-                Ok(Answer::Reply(Reply { value: fid, ..stat_reply(meta, identity) }))
-            }
+            OPEN => self.open(id, &r),
+            // These volumes keep no file without a name.
+            CREATE_UNNAMED => Err(Error::Unsupported),
             CLOSE => {
                 let client = self.clients.get_mut(&id).expect("pumped");
                 if let Some(node) = client.fids.close(r.fid)? {
@@ -716,74 +764,68 @@ impl Server {
                 let fid = client.fids.dup(r.fid)?;
                 Ok(Answer::Reply(Reply { value: fid, ..Reply::ok() }))
             }
-            READ => {
-                let file = self.settled(id, r.fid)?;
-                let len = (r.len as usize).min(WINDOW_BYTES);
-                let window = window_of(self.clients[&id].window.as_ref().expect("lent")).sub(0, len);
-                let (node, at) = {
-                    let f = file.borrow();
-                    (f.node, f.offset)
-                };
+            READ | PREAD => {
+                let (file, node, window) = self.file_and_span(id, &r)?;
+                let at = if op == READ { file.borrow().offset } else { r.offset };
                 let n = self.volume.read(node, at, &mut WindowOut(window))?;
-                file.borrow_mut().offset = at + n as u64;
+                if op == READ {
+                    file.borrow_mut().offset = at + n as u64;
+                }
                 Ok(Answer::Reply(Reply { value: n as u64, ..Reply::ok() }))
             }
-            WRITE => {
-                let file = self.settled(id, r.fid)?;
+            WRITE | PWRITE => {
+                let (file, _, window) = self.file_and_span(id, &r)?;
                 if !file.borrow().write {
                     return Err(Error::NotOpenForWriting);
                 }
-                let len = r.len as usize;
-                if len > WINDOW_BYTES {
-                    return Err(Error::InvalidRequest);
-                }
+                let len = window.bytes();
                 if self.scratch.len() < len {
                     self.scratch.resize(len, 0);
                 }
-                let window = window_of(self.clients[&id].window.as_ref().expect("lent"));
                 window_take(window, 0, &mut self.scratch[..len]);
-                let end = self.write_at(&file, len)?;
+                let end = match op {
+                    WRITE => self.write_at(&file, len)?,
+                    _ => self.write_to(&file, r.offset, len)?,
+                };
                 Ok(Answer::Reply(Reply { value: len as u64, value2: end, ..Reply::ok() }))
             }
             SEEK => {
                 let file = self.settled(id, r.fid)?;
+                let node = file.borrow().node()?;
                 let base = match r.flags {
                     SEEK_START => 0,
                     SEEK_CURRENT => file.borrow().offset,
-                    SEEK_END => self.volume.node_meta(file.borrow().node)?.size,
+                    SEEK_END => self.volume.node_meta(node)?.size,
                     _ => return Err(Error::InvalidRequest),
                 };
                 let at = bounds::seek(base, r.offset as i64)?;
                 file.borrow_mut().offset = at;
                 Ok(Answer::Reply(Reply { value: at, ..Reply::ok() }))
             }
-            EXPORT => self.export(id, r.len),
-            FSTAT => {
-                let (node, identity) = {
-                    let f = self.settled(id, r.fid)?;
-                    let f = f.borrow();
-                    (f.node, f.identity)
-                };
-                let meta = self.volume.node_meta(node)?;
-                Ok(Answer::Reply(stat_reply(meta, identity)))
-            }
-            TRUNCATE => {
-                let file = self.fid(id, r.fid)?;
-                let (node, write) = {
-                    let f = file.borrow();
-                    (f.node, f.write)
-                };
-                if !write {
-                    return Err(Error::NotOpenForWriting);
+            EXPORT => self.export(id, &r),
+            STAT => {
+                if r.flags & !FOLLOW_LAST != 0 {
+                    return Err(Error::InvalidRequest);
                 }
-                bounds::in_a_file(r.offset, 0)?;
-                self.volume.truncate(node, r.offset)?;
-                self.dirtied();
-                Ok(Answer::Reply(Reply::ok()))
+                let rel = self.path(id, &r)?;
+                if rel.is_empty() && r.fid != ROOT {
+                    let file = self.settled(id, r.fid)?;
+                    return self.stat_held(&file);
+                }
+                match self.resolve(id, r.fid, &rel, r.flags & FOLLOW_LAST != 0)? {
+                    Resolved::Absolute(p) => self.follow(id, &r, &p),
+                    Resolved::Path(p) => self.stat_path(&p),
+                }
             }
+            SETATTR => self.set_attr(id, &r),
             FSYNC => {
-                let node = self.settled(id, r.fid)?.borrow().node;
-                self.sync(Some(node))
+                let file = self.settled(id, r.fid)?;
+                let node = match file.borrow().held {
+                    Held::File(node) => Some(node),
+                    // A directory's names are made durable with the volume.
+                    Held::Dir { .. } => None,
+                };
+                self.sync(node)
             }
             SYNC => self.sync(None),
             ROOM => {
@@ -792,6 +834,7 @@ impl Server {
             }
             STREAM => {
                 let file = self.fid(id, r.fid)?;
+                file.borrow().node()?;
                 if !file.borrow().write {
                     return Err(Error::NotOpenForWriting);
                 }
@@ -804,99 +847,235 @@ impl Server {
                 self.streams.insert(sid, Stream { pipe: read, file, share });
                 Ok(Answer::WithHandle(Reply::ok(), write.into()))
             }
-            STAT | LSTAT => {
-                let rel = self.path(id, 0, r.len)?;
-                match self.resolve(id, &rel, op == STAT)? {
-                    Resolved::Absolute(p) => Ok(self.link(id, &p)),
-                    Resolved::Path(p) => {
-                        let meta = self.volume.lstat(&p)?;
-                        Ok(Answer::Reply(stat_reply(meta, self.volume.identity(&p)?)))
-                    }
-                }
-            }
             READDIR => {
-                let rel = self.path(id, 0, r.len)?;
-                let dir = match self.resolve(id, &rel, true)? {
-                    Resolved::Absolute(p) => return Ok(self.link(id, &p)),
-                    Resolved::Path(p) => p,
+                let file = self.fid(id, r.fid)?;
+                let dir = match &file.borrow().held {
+                    Held::Dir { removed: true, .. } => None,
+                    Held::Dir { path, .. } => Some(path.clone()),
+                    Held::File(_) => return Err(Error::NotADirectory),
                 };
-                let entries = self.volume.list(&dir)?;
-                let mut out = Vec::new();
-                for listed in &entries {
-                    let (meta, name) = (&listed.meta, &listed.name);
-                    let entry = Entry { kind: meta.kind.wire(), size: meta.size, node: listed.identity, name };
-                    encode_entry(&mut out, &entry).ok_or(Error::NameTooLong)?;
-                }
-                // Refused rather than cut short: a listing that stops early is a
-                // confidently wrong answer to a caller deleting a tree.
-                if out.len() > WINDOW_BYTES {
-                    return Err(Error::LimitExceeded);
-                }
-                self.put(id, &out);
-                Ok(Answer::Reply(Reply { value: out.len() as u64, ..Reply::ok() }))
+                let (_, room) = Self::span(&r)?;
+                let (out, next) = match dir {
+                    Some(dir) => listing::batch(&self.volume.list(&dir)?, r.offset, room)?,
+                    None => (Vec::new(), READDIR_END),
+                };
+                self.put(id, &r, &out)?;
+                Ok(Answer::Reply(Reply { value: out.len() as u64, value2: next, ..Reply::ok() }))
             }
             READLINK => {
-                let rel = self.path(id, 0, r.len)?;
-                let path = match self.name(id, &rel)? {
+                let rel = self.path(id, &r)?;
+                let path = match self.name(id, &r, r.fid, &rel)? {
                     Ok(p) => p,
-                    Err(link) => return Ok(link),
+                    Err(follow) => return Ok(follow),
                 };
                 let target = self.volume.read_link(&path)?;
-                self.put(id, target.as_bytes());
+                self.put(id, &r, target.as_bytes())?;
                 Ok(Answer::Reply(Reply { value: target.len() as u64, ..Reply::ok() }))
             }
-            MKDIR | RMDIR | UNLINK => {
-                let rel = self.path(id, 0, r.len)?;
+            MKDIR => {
+                let rel = self.path(id, &r)?;
                 if rel.is_empty() {
-                    return Err(if op == MKDIR { Error::AlreadyExists } else { Error::Root });
+                    return Err(Error::AlreadyExists);
                 }
-                let path = match self.name(id, &rel)? {
+                let path = match self.name(id, &r, r.fid, &rel)? {
                     Ok(p) => p,
-                    Err(link) => return Ok(link),
+                    Err(follow) => return Ok(follow),
                 };
-                match op {
-                    MKDIR => self.volume.mkdir(&path)?,
-                    RMDIR => self.volume.rmdir(&path)?,
-                    _ => self.volume.unlink(&path)?,
+                self.volume.mkdir(&path)?;
+                self.dirtied();
+                Ok(Answer::Reply(Reply::ok()))
+            }
+            UNLINK => {
+                if r.flags & !UNLINK_DIR != 0 {
+                    return Err(Error::InvalidRequest);
+                }
+                let rel = self.path(id, &r)?;
+                let path = match self.name(id, &r, r.fid, &rel)? {
+                    Ok(p) => p,
+                    Err(follow) => return Ok(follow),
+                };
+                if path.is_empty() || self.clients[&id].root.as_deref() == Some(path.as_str()) {
+                    return Err(Error::Root);
+                }
+                match r.flags & UNLINK_DIR != 0 {
+                    true => {
+                        self.volume.rmdir(&path)?;
+                        self.each_dir(|held, removed| {
+                            if *held == path {
+                                *removed = true;
+                            }
+                        });
+                    }
+                    false => self.volume.unlink(&path)?,
                 }
                 self.dirtied();
                 Ok(Answer::Reply(Reply::ok()))
             }
             RENAME => {
-                let from_rel = self.path(id, 0, r.len)?;
-                let to_rel = self.path(id, r.len, r.len2)?;
-                if from_rel.is_empty() || to_rel.is_empty() {
-                    return Err(Error::Root);
-                }
+                let (from_rel, to_rel) = self.paths(id, &r)?;
                 let (Resolved::Path(from), Resolved::Path(to)) =
-                    (self.resolve(id, &from_rel, false)?, self.resolve(id, &to_rel, false)?)
+                    (self.resolve(id, r.fid, &from_rel, false)?, self.resolve(id, r.fid2, &to_rel, false)?)
                 else {
                     // A rename through a link that leaves this directory is a
                     // rename across two, which no one directory can do.
                     return Err(Error::CrossesDirectories);
                 };
+                let root = self.clients[&id].root.clone();
+                if from.is_empty() || to.is_empty() || root.as_deref() == Some(from.as_str()) {
+                    return Err(Error::Root);
+                }
                 self.volume.rename(&from, &to)?;
+                self.each_dir(|held, _| descriptions::moved(held, &from, &to));
                 self.dirtied();
                 Ok(Answer::Reply(Reply::ok()))
             }
             SYMLINK => {
-                let link_rel = self.path(id, 0, r.len)?;
-                let target = self.path(id, r.len, r.len2)?;
+                let (link_rel, target) = self.paths(id, &r)?;
                 if target.is_empty() {
                     return Err(Error::InvalidRequest);
                 }
                 if link_rel.is_empty() {
                     return Err(Error::AlreadyExists);
                 }
-                let Resolved::Path(link) = self.resolve(id, &link_rel, false)? else {
+                let Resolved::Path(link) = self.resolve(id, r.fid, &link_rel, false)? else {
                     return Err(Error::CrossesDirectories);
                 };
                 self.volume.symlink(&link, &target)?;
                 self.dirtied();
                 Ok(Answer::Reply(Reply::ok()))
             }
+            LINK => {
+                if r.flags & !LINK_KNOWN != 0 {
+                    return Err(Error::InvalidRequest);
+                }
+                // These volumes keep one name per file.
+                Err(Error::Unsupported)
+            }
             _ => Ok(Answer::Drop(NO_SUCH_OPERATION)),
         }
+    }
+
+    /// `f` on every held directory's path and removal, on every connection.
+    fn each_dir(&mut self, mut f: impl FnMut(&mut String, &mut bool)) {
+        for client in self.clients.values() {
+            for shared in client.fids.dirs() {
+                if let Held::Dir { path, removed } = &mut shared.borrow_mut().held {
+                    f(path, removed);
+                }
+            }
+        }
+    }
+
+    fn open(&mut self, id: u64, r: &Request) -> Result<Answer, Error> {
+        if r.flags & !O_KNOWN != 0 {
+            return Err(Error::InvalidRequest);
+        }
+        let rel = self.path(id, r)?;
+        let path = match self.resolve(id, r.fid, &rel, true)? {
+            Resolved::Absolute(p) => return self.follow(id, r, &p),
+            Resolved::Path(p) => p,
+        };
+        if self.clients[&id].fids.len() >= descriptions::MAX_IDS {
+            return Err(Error::TooManyOpen);
+        }
+        let writes = r.flags & (O_WRITE | O_APPEND | O_TRUNCATE) != 0;
+        let found = match self.volume.lstat(&path) {
+            Ok(meta) => Some(meta.kind),
+            Err(Error::NotFound) => None,
+            Err(e) => return Err(e),
+        };
+        let (held, meta) = match found {
+            Some(Kind::Dir) if r.flags & O_CREATE_NEW != 0 => return Err(Error::AlreadyExists),
+            Some(Kind::Dir) if writes => return Err(Error::IsADirectory),
+            Some(Kind::Dir) => (Held::Dir { path: path.clone(), removed: false }, self.volume.lstat(&path)?),
+            _ if r.flags & O_DIRECTORY != 0 => return Err(if found.is_some() { Error::NotADirectory } else { Error::NotFound }),
+            _ => {
+                let how = OpenHow {
+                    create: r.flags & O_CREATE != 0,
+                    create_new: r.flags & O_CREATE_NEW != 0,
+                    truncate: r.flags & O_TRUNCATE != 0,
+                };
+                let node = self.volume.open(&path, how)?;
+                match self.volume.node_meta(node) {
+                    Ok(meta) => {
+                        if how.create || how.truncate || how.create_new {
+                            self.dirtied();
+                        }
+                        (Held::File(node), meta)
+                    }
+                    Err(e) => {
+                        let _ = self.volume.close(node);
+                        return Err(e);
+                    }
+                }
+            }
+        };
+        let identity = match self.volume.identity(&path) {
+            Ok(identity) => identity,
+            Err(e) => {
+                if let Held::File(node) = held {
+                    let _ = self.volume.close(node);
+                }
+                return Err(e);
+            }
+        };
+        let write = r.flags & (O_WRITE | O_APPEND) != 0;
+        let append = r.flags & O_APPEND != 0;
+        let file = Description { held, identity, write, append, offset: 0 };
+        let client = self.clients.get_mut(&id).expect("pumped");
+        let fid = client.fids.insert(Rc::new(RefCell::new(file)))?;
+        Ok(Answer::Reply(Reply { value: fid, ..stat_reply(meta, identity, self.volume_id) }))
+    }
+
+    /// `SETATTR`: a size only through an id opened to write and no path; an
+    /// access time is kept by none of these volumes, and a directory's time
+    /// by none either.
+    fn set_attr(&mut self, id: u64, r: &Request) -> Result<Answer, Error> {
+        let change = Change::decode(r).filter(|_| r.flags & !SETATTR_KNOWN == 0).ok_or(Error::InvalidRequest)?;
+        let rel = self.path(id, r)?;
+        let held = rel.is_empty() && r.fid != ROOT;
+        if change.atime.is_some() {
+            return Err(Error::Unsupported);
+        }
+        if let Some(size) = change.size {
+            if !held {
+                return Err(Error::InvalidRequest);
+            }
+            let file = self.fid(id, r.fid)?;
+            let (node, write) = {
+                let f = file.borrow();
+                (f.node()?, f.write)
+            };
+            if !write {
+                return Err(Error::NotOpenForWriting);
+            }
+            bounds::in_a_file(size, 0)?;
+            self.volume.truncate(node, size)?;
+            self.dirtied();
+        }
+        let Some(mtime) = change.mtime else { return Ok(Answer::Reply(Reply::ok())) };
+        let mtime = match mtime {
+            Time::Now => fileserver::volume::now_nanos(),
+            Time::At(nanos) => nanos,
+        };
+        if held {
+            let node = self.fid(id, r.fid)?.borrow().node().map_err(|_| Error::Unsupported)?;
+            self.volume.set_mtime(node, mtime)?;
+        } else {
+            let path = match self.resolve(id, r.fid, &rel, r.flags & FOLLOW_LAST != 0)? {
+                Resolved::Absolute(p) => return self.follow(id, r, &p),
+                Resolved::Path(p) => p,
+            };
+            if self.volume.lstat(&path)?.kind != Kind::File {
+                return Err(Error::Unsupported);
+            }
+            let node = self.volume.open(&path, OpenHow { create: false, create_new: false, truncate: false })?;
+            let set = self.volume.set_mtime(node, mtime);
+            let closed = self.volume.close(node);
+            set.and(closed)?;
+        }
+        self.dirtied();
+        Ok(Answer::Reply(Reply::ok()))
     }
 
     /// The volume synced, answered as `node`'s file fared, or with none as
@@ -911,12 +1090,14 @@ impl Server {
         }
     }
 
-    fn link(&self, id: u64, path: &str) -> Answer {
+    /// The absolute `path` an absolute link led to, for the client to
+    /// resolve again, in the request's span.
+    fn follow(&self, id: u64, r: &Request, path: &str) -> Result<Answer, Error> {
         if path.len() > MAX_PATH {
-            return Answer::Reply(Reply::refused(Error::NameTooLong));
+            return Err(Error::NameTooLong);
         }
-        self.put(id, path.as_bytes());
-        Answer::Link(path.len())
+        self.put(id, r, path.as_bytes())?;
+        Ok(Answer::Follow(path.len()))
     }
 
     /// Write the scratch's first `len` bytes to `file` at its offset, or at
@@ -924,23 +1105,35 @@ impl Server {
     fn write_at(&mut self, file: &Shared, len: usize) -> Result<u64, Error> {
         let (node, append, offset) = {
             let f = file.borrow();
-            (f.node, f.append, f.offset)
+            (f.node()?, f.append, f.offset)
         };
         let at = if append { self.volume.node_meta(node)?.size } else { offset };
-        let end = bounds::in_a_file(at, len as u64)?;
-        self.volume.write(node, at, &self.scratch[..len])?;
-        self.dirtied();
+        let end = self.write_to(file, at, len)?;
         file.borrow_mut().offset = end;
         Ok(end)
     }
 
+    /// Write the scratch's first `len` bytes to `file` at `at`: the offset
+    /// after them.
+    fn write_to(&mut self, file: &Shared, at: u64, len: usize) -> Result<u64, Error> {
+        let node = file.borrow().node()?;
+        let end = bounds::in_a_file(at, len as u64)?;
+        self.volume.write(node, at, &self.scratch[..len])?;
+        self.dirtied();
+        Ok(end)
+    }
+
     /// A connection to this server for another process, holding the
-    /// descriptions of the `count` ids in client `id`'s window. Its served
-    /// slot is taken here, of `id`'s share, or the export is refused.
-    fn export(&mut self, id: u64, count: u64) -> Result<Answer, Error> {
-        let count = bounds::export_ids(count)?;
+    /// descriptions of the ids in client `id`'s span. Its served slot is
+    /// taken here, of `id`'s share, or the export is refused.
+    fn export(&mut self, id: u64, r: &Request) -> Result<Answer, Error> {
+        let count = bounds::export_ids(r.len)?;
+        let (at, room) = Self::span(r)?;
+        if count * 8 > room {
+            return Err(Error::InvalidRequest);
+        }
         let mut words = vec![0u8; count * 8];
-        window_take(window_of(self.clients[&id].window.as_ref().expect("lent")), 0, &mut words);
+        window_take(self.window(id), at, &mut words);
         let fids: Vec<u64> =
             words.chunks_exact(8).map(|w| u64::from_le_bytes(w.try_into().expect("eight bytes"))).collect();
         let parent = &self.clients[&id];

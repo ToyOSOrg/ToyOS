@@ -316,6 +316,11 @@ impl<D: Disk> Volume for FatVolume<D> {
         self.cache.block_on(self.fs.set_len(&mut open.file, size)).map_err(|e| logged("set_len", &open.path, e))
     }
 
+    /// FAT stamps a file at the flush that writes it, at its own resolution.
+    fn set_mtime(&mut self, _node: Node, _mtime: u64) -> Result<(), fs::Error> {
+        Err(fs::Error::Unsupported)
+    }
+
     fn mkdir(&mut self, path: &str) -> Result<(), fs::Error> {
         let time = self.time();
         self.cache.block_on(self.fs.create_dir(path, time)).map_err(|e| logged("mkdir", path, e))

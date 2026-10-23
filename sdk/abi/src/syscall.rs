@@ -302,6 +302,12 @@ pub const SYS_MACHINE_STOPS: u64 = 136;
 ///
 /// [`Rights::INVENTORY`]: crate::handle::Rights::INVENTORY
 pub const SYS_BOOT_SOURCES: u64 = 137;
+/// Read a kernel file at an offset, leaving its handle's offset where it is.
+/// See [`pread`].
+pub const SYS_PREAD: u64 = 138;
+/// Write a kernel file at an offset, whether or not its handle appends, and
+/// leaving the handle's offset where it is. See [`pwrite`].
+pub const SYS_PWRITE: u64 = 139;
 
 /// Bins in the per-process syscall profile — one for every number this ABI
 /// issues, and one at the end for every number it does not.
@@ -309,13 +315,13 @@ pub const SYS_BOOT_SOURCES: u64 = 137;
 /// **The profile's parts sum to its total, and that is the whole requirement.**
 /// A bin array narrower than the ABI reaches drops calls out of the line while
 /// the total goes on counting them.
-pub const SYSCALL_PROFILE_BINS: usize = 139;
+pub const SYSCALL_PROFILE_BINS: usize = 141;
 
 /// Where a number this ABI does not issue is counted. Merging is a degradation
 /// a reader can see in the line; dropping is one nobody can.
 pub const SYSCALL_PROFILE_OTHER: usize = SYSCALL_PROFILE_BINS - 1;
 
-const _: () = assert!(SYS_BOOT_SOURCES < SYSCALL_PROFILE_OTHER as u64);
+const _: () = assert!(SYS_PWRITE < SYSCALL_PROFILE_OTHER as u64);
 
 pub const WNOHANG: u64 = 1;
 /// Every bit `SYS_PROCESS_WAIT`'s flag word defines; a wait carrying another
@@ -819,6 +825,18 @@ pub fn write(handle: RawHandle, buf: &[u8]) -> Result<usize, SyscallError> {
 /// Read bytes from a handle. Returns number of bytes read.
 pub fn read(handle: RawHandle, buf: &mut [u8]) -> Result<usize, SyscallError> {
     check(syscall(SYS_READ, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, 0)).map(|n| n as usize)
+}
+
+/// Read a file at `offset`: how many bytes, 0 at or past its end. Any handle
+/// but a file's is [`SyscallError::NotSupported`].
+pub fn pread(handle: RawHandle, buf: &mut [u8], offset: u64) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PREAD, handle.0 as u64, buf.as_mut_ptr() as u64, buf.len() as u64, offset)).map(|n| n as usize)
+}
+
+/// Write a file at `offset`: how many bytes. Any handle but a file's is
+/// [`SyscallError::NotSupported`].
+pub fn pwrite(handle: RawHandle, buf: &[u8], offset: u64) -> Result<usize, SyscallError> {
+    check(syscall(SYS_PWRITE, handle.0 as u64, buf.as_ptr() as u64, buf.len() as u64, offset)).map(|n| n as usize)
 }
 
 /// Exit the current thread only. Does not return.

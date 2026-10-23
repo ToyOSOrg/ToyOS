@@ -1,5 +1,6 @@
 /* What libc refuses: each call answers failure in its own POSIX form, errno
-   says why, and nothing is done: ENOSYS where ToyOS lacks the function, ECHILD
+   says why, and nothing is done: ENOSYS where ToyOS lacks the function,
+   ENOTSUP where the kernel's /tmp keeps no second name or set time, ECHILD
    for a wait with no child to wait for, and the errno POSIX names for a
    lock, a limit or a mapping it cannot take, or memory it cannot give. */
 #include <errno.h>

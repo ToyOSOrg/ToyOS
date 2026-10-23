@@ -616,12 +616,12 @@ pub(crate) unsafe fn unget(f: *mut FILE, bytes: &[u8]) -> bool {
 
 #[no_mangle]
 pub unsafe extern "C" fn remove(path: *const u8) -> i32 {
-    answered(files::unlink(unsafe { c_str_bytes(path) }))
+    answered(files::unlink(files::At::Cwd, unsafe { c_str_bytes(path) }, false))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rename(old: *const u8, new: *const u8) -> i32 {
-    answered(files::rename(unsafe { c_str_bytes(old) }, unsafe { c_str_bytes(new) }))
+    answered(files::rename((files::At::Cwd, unsafe { c_str_bytes(old) }), (files::At::Cwd, unsafe { c_str_bytes(new) })))
 }
 
 #[no_mangle]
@@ -648,7 +648,7 @@ pub unsafe extern "C" fn atof(s: *const u8) -> f64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn mkdir(path: *const u8, _mode: u32) -> i32 {
-    answered(files::mkdir(unsafe { c_str_bytes(path) }))
+    answered(files::mkdir(files::At::Cwd, unsafe { c_str_bytes(path) }))
 }
 
 #[no_mangle]

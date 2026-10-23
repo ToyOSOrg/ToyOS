@@ -15,8 +15,9 @@ struct dirent {
     char d_name[256];
 };
 
-/* What d_type can say. ToyOS's listing tells a directory from everything
-   else, so readdir answers DT_DIR or DT_UNKNOWN. */
+/* What d_type can say. A file server's listing tells a directory, a file
+   and a symlink apart; the kernel's tells a directory from anything else,
+   which it answers DT_UNKNOWN. */
 #define DT_UNKNOWN 0
 #define DT_FIFO    1
 #define DT_CHR     2
@@ -27,6 +28,8 @@ struct dirent {
 #define DT_SOCK    12
 
 DIR *opendir(const char *path);
+DIR *fdopendir(int fd);
+int dirfd(DIR *dir);
 struct dirent *readdir(DIR *dir);
 int closedir(DIR *dir);
 

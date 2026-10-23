@@ -96,6 +96,7 @@ pub(crate) fn of_files(e: toyos::files::Error) -> i32 {
         Error::NotUtf8 => EILSEQ,
         Error::Loop => ELOOP,
         Error::CrossesServers => EXDEV,
+        Error::NotADirectory => ENOTDIR,
         Error::Stream(refused) => of_stream(refused),
     }
 }

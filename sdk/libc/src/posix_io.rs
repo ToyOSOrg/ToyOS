@@ -11,22 +11,14 @@ use core::ptr;
 use toyos_abi::{RawHandle, Rights};
 use toyos_abi::syscall::{self, OpenFlags, SeekFrom};
 
-use toyos::files::{self, Open};
+use toyos::files::{self, At};
 
 use crate::errcode::{EBADF, EINTR, EINVAL};
 use crate::signal::Call;
 use crate::time::Timespec;
 
-// The values `<fcntl.h>` declares.
-
-pub(crate) const O_RDONLY: i32 = 0;
-pub(crate) const O_WRONLY: i32 = 1;
-pub(crate) const O_RDWR: i32 = 2;
-pub(crate) const O_CREAT: i32 = 0x40;
-pub(crate) const O_EXCL: i32 = 0x80;
-pub(crate) const O_TRUNC: i32 = 0x200;
-pub(crate) const O_APPEND: i32 = 0x400;
-pub(crate) const O_CLOEXEC: i32 = 0x80000;
+pub(crate) use crate::atreq::{O_APPEND, O_CREAT, O_EXCL, O_RDONLY, O_RDWR, O_TRUNC, O_WRONLY};
+use crate::atreq::{read_write, AT_EMPTY_PATH, AT_FDCWD, AT_REMOVEDIR, AT_SYMLINK_FOLLOW, AT_SYMLINK_NOFOLLOW};
 
 const SEEK_SET: i32 = 0;
 const SEEK_CUR: i32 = 1;
@@ -98,32 +90,27 @@ pub fn c_str_to_bytes(s: *const u8) -> &'static [u8] {
 // File descriptor operations
 
 #[no_mangle]
-pub unsafe extern "C" fn open(path: *const u8, flags: i32, _mode: u32) -> i32 {
+pub unsafe extern "C" fn open(path: *const u8, flags: i32, mode: u32) -> i32 {
+    unsafe { openat(AT_FDCWD, path, flags, mode) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, _mode: u32) -> i32 {
     let path = c_str_to_bytes(path);
-    let cloexec = flags & O_CLOEXEC != 0;
-    let (readable, writable) = read_write(flags);
+    let how = match crate::atreq::how(flags) {
+        Ok(how) => how,
+        Err(e) => return refuse(e),
+    };
     if path == DEV_NULL {
-        return match syscall::null(null_rights(readable, writable)) {
-            Ok(handle) => install(handle, cloexec).unwrap_or_else(refuse),
+        return match syscall::null(null_rights(how.read, how.write)) {
+            Ok(handle) => install(handle, how.cloexec).unwrap_or_else(refuse),
             Err(e) => set_errno(e),
         };
     }
-    let how = Open {
-        read: readable,
-        write: writable,
-        append: flags & O_APPEND != 0,
-        create: flags & O_CREAT != 0 && flags & O_EXCL == 0,
-        create_new: flags & O_CREAT != 0 && flags & O_EXCL != 0,
-        truncate: flags & O_TRUNC != 0,
-        cloexec,
-    };
-    files::open(path, how).unwrap_or_else(refuse_files)
-}
-
-/// Whether `open`'s `flags` ask to read and to write.
-fn read_write(flags: i32) -> (bool, bool) {
-    let access = flags & 3;
-    (access == O_RDONLY || access == O_RDWR, access == O_WRONLY || access == O_RDWR)
+    match crate::atreq::at(dirfd, path) {
+        Ok(at) => files::open(at, path, how).unwrap_or_else(refuse_files),
+        Err(e) => refuse(e),
+    }
 }
 
 /// A spawn's `addopen` file, as a handle of this process's for the child.
@@ -255,7 +242,7 @@ pub unsafe extern "C" fn fstat(raw_fd: i32, buf: *mut Stat) -> i32 {
 }
 
 /// `buf` filled from `answer`, or `errno` from its refusal.
-unsafe fn answered(answer: Result<syscall::Stat, files::Error>, buf: *mut Stat) -> i32 {
+unsafe fn answered(answer: Result<files::Stat, files::Error>, buf: *mut Stat) -> i32 {
     let st = match answer {
         Ok(st) => st,
         Err(e) => return refuse_files(e),
@@ -266,13 +253,12 @@ unsafe fn answered(answer: Result<syscall::Stat, files::Error>, buf: *mut Stat) 
         let s = unsafe { &mut *buf };
         s.st_dev = st.volume;
         s.st_ino = st.node;
-        // Neither the kernel's `/tmp` nor the file server has hard links.
-        s.st_nlink = 1;
+        s.st_nlink = st.nlink;
         s.st_size = st.size as i64;
-        s.st_mtim = Timespec {
-            tv_sec: (st.mtime / NANOS_PER_SEC) as i64,
-            tv_nsec: (st.mtime % NANOS_PER_SEC) as i64,
-        };
+        let time = |nanos: u64| Timespec { tv_sec: (nanos / NANOS_PER_SEC) as i64, tv_nsec: (nanos % NANOS_PER_SEC) as i64 };
+        s.st_atim = time(st.atime);
+        s.st_mtim = time(st.mtime);
+        s.st_ctim = time(st.ctime);
         s.st_mode = match st.file_type {
             syscall::FileType::File => S_IFREG | 0o644,
             syscall::FileType::Directory => S_IFDIR | 0o755,
@@ -378,14 +364,72 @@ pub unsafe extern "C" fn pipe(pipefd: *mut i32) -> i32 {
 
 // Path operations
 
+/// `path` from `dirfd`, as the `*at` calls name it, with `f`'s answer as
+/// theirs: 0, or `-1` and `errno`.
+fn on_at(dirfd: i32, path: *const u8, f: impl FnOnce(At, &[u8]) -> Result<(), files::Error>) -> i32 {
+    let path = c_str_to_bytes(path);
+    match crate::atreq::at(dirfd, path) {
+        Ok(at) => f(at, path).map_or_else(refuse_files, |()| 0),
+        Err(e) => refuse(e),
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn unlink(path: *const u8) -> i32 {
-    files::unlink(c_str_to_bytes(path)).map_or_else(refuse_files, |()| 0)
+    unsafe { unlinkat(AT_FDCWD, path, 0) }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rmdir(path: *const u8) -> i32 {
-    files::rmdir(c_str_to_bytes(path)).map_or_else(refuse_files, |()| 0)
+    unsafe { unlinkat(AT_FDCWD, path, AT_REMOVEDIR) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
+    match crate::atreq::only(flags, AT_REMOVEDIR) {
+        Ok(flags) => on_at(dirfd, path, |at, path| files::unlink(at, path, flags & AT_REMOVEDIR != 0)),
+        Err(e) => refuse(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mkdirat(dirfd: i32, path: *const u8, _mode: u32) -> i32 {
+    on_at(dirfd, path, files::mkdir)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn renameat(from_dirfd: i32, from: *const u8, to_dirfd: i32, to: *const u8) -> i32 {
+    let (from, to) = (c_str_to_bytes(from), c_str_to_bytes(to));
+    match (crate::atreq::at(from_dirfd, from), crate::atreq::at(to_dirfd, to)) {
+        (Ok(a), Ok(b)) => files::rename((a, from), (b, to)).map_or_else(refuse_files, |()| 0),
+        (Err(e), _) | (_, Err(e)) => refuse(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn link(existing: *const u8, new: *const u8) -> i32 {
+    unsafe { linkat(AT_FDCWD, existing, AT_FDCWD, new, 0) }
+}
+
+/// The empty path from a descriptor, with `AT_EMPTY_PATH`, names what it
+/// names: an unnamed file given its name. Without `AT_SYMLINK_FOLLOW` a
+/// symlink is linked itself.
+#[no_mangle]
+pub unsafe extern "C" fn linkat(from_dirfd: i32, from: *const u8, to_dirfd: i32, to: *const u8, flags: i32) -> i32 {
+    let (from, to) = (c_str_to_bytes(from), c_str_to_bytes(to));
+    let flags = match crate::atreq::only(flags, AT_SYMLINK_FOLLOW | AT_EMPTY_PATH) {
+        Ok(flags) => flags,
+        Err(e) => return refuse(e),
+    };
+    if from.is_empty() && flags & AT_EMPTY_PATH == 0 {
+        return refuse(crate::errcode::ENOENT);
+    }
+    match (crate::atreq::at(from_dirfd, from), crate::atreq::at(to_dirfd, to)) {
+        (Ok(a), Ok(b)) => {
+            files::link((a, from), flags & AT_SYMLINK_FOLLOW != 0, (b, to)).map_or_else(refuse_files, |()| 0)
+        }
+        (Err(e), _) | (_, Err(e)) => refuse(e),
+    }
 }
 
 #[no_mangle]
@@ -407,13 +451,31 @@ pub unsafe extern "C" fn chdir(path: *const u8) -> i32 {
 
 #[no_mangle]
 pub unsafe extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
-    unsafe { answered(files::stat(c_str_to_bytes(path), true), buf) }
+    unsafe { fstatat(AT_FDCWD, path, buf, 0) }
 }
 
 /// `stat` that does not follow a final symbolic link.
 #[no_mangle]
 pub unsafe extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
-    unsafe { answered(files::stat(c_str_to_bytes(path), false), buf) }
+    unsafe { fstatat(AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW) }
+}
+
+/// The empty path from a descriptor names what it names, with
+/// `AT_EMPTY_PATH`.
+#[no_mangle]
+pub unsafe extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i32) -> i32 {
+    let path = c_str_to_bytes(path);
+    let flags = match crate::atreq::only(flags, AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH) {
+        Ok(flags) => flags,
+        Err(e) => return refuse(e),
+    };
+    if path.is_empty() && flags & AT_EMPTY_PATH == 0 {
+        return refuse(crate::errcode::ENOENT);
+    }
+    match crate::atreq::at(dirfd, path) {
+        Ok(at) => unsafe { answered(files::stat(at, path, flags & AT_SYMLINK_NOFOLLOW == 0), buf) },
+        Err(e) => refuse(e),
+    }
 }
 
 /// `SYS_READLINK` answers `NotFound` for a path that is no link as for one
@@ -421,11 +483,20 @@ pub unsafe extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
 /// file server tells them apart itself.
 #[no_mangle]
 pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) -> isize {
+    unsafe { readlinkat(AT_FDCWD, path, buf, size) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, size: usize) -> isize {
     let Some(len) = crate::linkreq::target_len(size) else {
         crate::errno::set(EINVAL);
         return -1;
     };
-    match files::read_link(c_str_to_bytes(path)) {
+    let at = match crate::atreq::at(dirfd, c_str_to_bytes(path)) {
+        Ok(at) => at,
+        Err(e) => return refuse(e) as isize,
+    };
+    match files::read_link(at, c_str_to_bytes(path)) {
         Ok(target) => {
             let n = target.len().min(len);
             // SAFETY: C's caller hands `size` bytes at `buf`, and `len` is at most it.
@@ -434,7 +505,7 @@ pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) ->
         }
         Err(files::Error::Kernel(syscall::SyscallError::NotFound)) => {
             // `stat` sets `errno` for a path that names nothing.
-            if unsafe { stat(path, ptr::null_mut()) } == 0 {
+            if unsafe { fstatat(dirfd, path, ptr::null_mut(), AT_SYMLINK_NOFOLLOW) } == 0 {
                 crate::errno::set(EINVAL);
             }
             -1
@@ -448,11 +519,21 @@ pub unsafe extern "C" fn readlink(path: *const u8, buf: *mut u8, size: usize) ->
 /// races its answer, so a link the kernel would hold is refused `ENOSYS`.
 #[no_mangle]
 pub unsafe extern "C" fn symlink(target: *const u8, link: *const u8) -> i32 {
-    let link = c_str_to_bytes(link);
-    if !files::is_served(link) {
-        return refuse(crate::errcode::ENOSYS);
+    unsafe { symlinkat(target, AT_FDCWD, link) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn symlinkat(target: *const u8, dirfd: i32, link: *const u8) -> i32 {
+    let (target, link) = (c_str_to_bytes(target), c_str_to_bytes(link));
+    let at = match crate::atreq::at(dirfd, link) {
+        Ok(at) => at,
+        Err(e) => return refuse(e),
+    };
+    match files::is_served_at(at, link) {
+        Ok(true) => files::symlink(target, (at, link)).map_or_else(refuse_files, |()| 0),
+        Ok(false) => refuse(crate::errcode::ENOSYS),
+        Err(e) => refuse_files(e),
     }
-    files::symlink(c_str_to_bytes(target), link).map_or_else(refuse_files, |()| 0)
 }
 
 struct TheServers;
@@ -463,9 +544,11 @@ impl crate::resolve::Served for TheServers {
     }
 
     fn name(&mut self, at: &[u8]) -> Result<crate::resolve::Name, i32> {
-        let st = files::stat(at, false).map_err(crate::errcode::of_files)?;
+        let st = files::stat(At::Cwd, at, false).map_err(crate::errcode::of_files)?;
         match st.file_type {
-            syscall::FileType::Symlink => files::read_link(at).map(crate::resolve::Name::Link).map_err(crate::errcode::of_files),
+            syscall::FileType::Symlink => {
+                files::read_link(At::Cwd, at).map(crate::resolve::Name::Link).map_err(crate::errcode::of_files)
+            }
             _ => Ok(crate::resolve::Name::Other),
         }
     }
@@ -550,7 +633,7 @@ pub unsafe extern "C" fn umask(mask: u32) -> u32 {
 
 /// Whether `path` names a file, and not a directory.
 pub(crate) fn is_file(path: &[u8]) -> bool {
-    files::stat(path, true).is_ok_and(|st| st.file_type == syscall::FileType::File)
+    files::stat(At::Cwd, path, true).is_ok_and(|st| st.file_type == syscall::FileType::File)
 }
 
 /// `arg` is the register C's variadic third argument arrives in (`fdreq`).
@@ -569,17 +652,14 @@ pub unsafe extern "C" fn fcntl(raw_fd: i32, cmd: i32, arg: u64) -> i32 {
 
 // Directory operations
 
-/// An open directory: its whole listing, and where the next `readdir` starts.
+/// An open directory: its descriptor, the batch of its listing read last, and
+/// where the next batch starts.
 pub struct DIR {
-    listing: Listing,
+    fd: i32,
+    entries: Vec<(u64, u8, Box<[u8]>)>,
     at: usize,
-}
-
-/// A listing as its server answered it: the kernel's, or a file server's
-/// entries, each its node, `d_type` and name.
-enum Listing {
-    Kernel(Vec<u8>),
-    Served(Vec<(u64, u8, Box<[u8]>)>),
+    /// `None` once the last batch was read.
+    cursor: Option<u64>,
 }
 
 #[repr(C)]
@@ -589,7 +669,6 @@ pub struct dirent {
     pub d_name: [u8; crate::listing::D_NAME],
 }
 
-/// `d_type`s: the listing tells a directory from everything else, and no more.
 const DT_UNKNOWN: u8 = 0;
 const DT_DIR: u8 = 4;
 const DT_REG: u8 = 8;
@@ -597,24 +676,48 @@ const DT_LNK: u8 = 10;
 
 #[no_mangle]
 pub unsafe extern "C" fn opendir(path: *const u8) -> *mut DIR {
-    let path = c_str_to_bytes(path);
-    let listing = match files::is_served(path) {
-        false => crate::listing::whole(|buf| syscall::readdir(path, buf)).map(Listing::Kernel).map_err(crate::errcode::of),
-        true => served_listing(path),
-    };
-    match listing {
-        Ok(listing) => Box::into_raw(Box::new(DIR { listing, at: 0 })),
+    let fd = unsafe { openat(AT_FDCWD, path, O_RDONLY | crate::atreq::O_DIRECTORY | crate::atreq::O_CLOEXEC, 0) };
+    if fd < 0 {
+        return ptr::null_mut();
+    }
+    let dir = unsafe { fdopendir(fd) };
+    if dir.is_null() {
+        let _ = toyos::fd::close(fd);
+    }
+    dir
+}
+
+/// The directory `fd` names, read through it from here on, and closed with
+/// it.
+#[no_mangle]
+pub unsafe extern "C" fn fdopendir(fd: i32) -> *mut DIR {
+    match files::fstat(fd) {
+        Ok(st) if st.file_type == syscall::FileType::Directory => {
+            Box::into_raw(Box::new(DIR { fd, entries: Vec::new(), at: 0, cursor: Some(0) }))
+        }
+        Ok(_) => {
+            crate::errno::set(crate::errcode::ENOTDIR);
+            ptr::null_mut()
+        }
         Err(e) => {
-            crate::errno::set(e);
+            refuse_files(e);
             ptr::null_mut()
         }
     }
 }
 
-/// A file server's listing of `path`, each entry's node and `d_type` beside
+#[no_mangle]
+pub unsafe extern "C" fn dirfd(dir: *mut DIR) -> i32 {
+    match unsafe { dir.as_ref() } {
+        Some(dir) => dir.fd,
+        None => refuse(EINVAL),
+    }
+}
+
+/// The next batch of `dir`'s listing, each entry's node and `d_type` beside
 /// its name.
-fn served_listing(path: &[u8]) -> Result<Listing, Errno> {
-    let listing = files::read_dir(path).map_err(crate::errcode::of_files)?;
+fn next_batch(dir: &mut DIR, cursor: u64) -> Result<(), i32> {
+    let (listing, next) = files::read_dir(dir.fd, cursor).map_err(crate::errcode::of_files)?;
     let mut entries = Vec::new();
     toyos::fs::for_each_entry(&listing, |entry| {
         let d_type = match entry.kind {
@@ -626,24 +729,25 @@ fn served_listing(path: &[u8]) -> Result<Listing, Errno> {
         entries.push((entry.node, d_type, Box::from(entry.name.as_bytes())));
     })
     .map_err(|e| crate::errcode::of_files(files::Error::Served(e)))?;
-    Ok(Listing::Served(entries))
+    (dir.entries, dir.at, dir.cursor) = (entries, 0, next);
+    Ok(())
 }
 
+/// The end of the listing is null with `errno` left as it was; a refused
+/// batch is null with `errno` set.
 #[no_mangle]
 pub unsafe extern "C" fn readdir(dir: *mut DIR) -> *mut dirent {
-    if dir.is_null() { return ptr::null_mut(); }
-    let d = &mut *dir;
-    let (d_ino, d_type, name) = match &d.listing {
-        Listing::Kernel(listing) => {
-            let Some(entry) = syscall::dirent(listing, &mut d.at) else { return ptr::null_mut() };
-            (entry.node, if entry.is_dir { DT_DIR } else { DT_UNKNOWN }, entry.name)
+    let Some(d) = (unsafe { dir.as_mut() }) else { return ptr::null_mut() };
+    while d.at == d.entries.len() {
+        let Some(cursor) = d.cursor else { return ptr::null_mut() };
+        if let Err(e) = next_batch(d, cursor) {
+            d.cursor = None;
+            crate::errno::set(e);
+            return ptr::null_mut();
         }
-        Listing::Served(entries) => {
-            let Some((node, d_type, name)) = entries.get(d.at) else { return ptr::null_mut() };
-            d.at += 1;
-            (*node, *d_type, &name[..])
-        }
-    };
+    }
+    let (d_ino, d_type, name) = &d.entries[d.at];
+    d.at += 1;
     let Some(d_name) = crate::listing::d_name(name) else {
         crate::errno::set(crate::errcode::EOVERFLOW);
         return ptr::null_mut();
@@ -652,16 +756,74 @@ pub unsafe extern "C" fn readdir(dir: *mut DIR) -> *mut dirent {
     // Use a static buffer for the dirent (not thread-safe, matching POSIX convention)
     static mut DIRENT_BUF: dirent = dirent { d_ino: 0, d_type: 0, d_name: [0; crate::listing::D_NAME] };
     let ent = &raw mut DIRENT_BUF;
-    ent.write(dirent { d_ino, d_type, d_name });
+    unsafe { ent.write(dirent { d_ino: *d_ino, d_type: *d_type, d_name }) };
     ent
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn closedir(dir: *mut DIR) -> i32 {
     if dir.is_null() { return -1; }
-    // SAFETY: a `DIR` `opendir` answered, closed once.
-    drop(unsafe { Box::from_raw(dir) });
-    0
+    // SAFETY: a `DIR` `opendir` or `fdopendir` answered, closed once.
+    let dir = unsafe { Box::from_raw(dir) };
+    toyos::fd::close(dir.fd).map_or_else(|e| refuse(fd_errno(e)), |()| 0)
+}
+
+// Positions and times
+
+/// Never moves the descriptor's offset.
+#[no_mangle]
+pub unsafe extern "C" fn pread(raw_fd: i32, buf: *mut u8, count: usize, offset: i64) -> isize {
+    let Ok(offset) = u64::try_from(offset) else { return refuse(EINVAL) as isize };
+    if count == 0 { return 0; }
+    // SAFETY: C's caller hands `count` writable bytes at `buf`.
+    let slice = unsafe { core::slice::from_raw_parts_mut(buf, count) };
+    files::pread(raw_fd, slice, offset).map_or_else(|e| refuse_files(e) as isize, |n| n as isize)
+}
+
+/// Never moves the descriptor's offset, and writes at `offset` whether or
+/// not it appends, as POSIX has it.
+#[no_mangle]
+pub unsafe extern "C" fn pwrite(raw_fd: i32, buf: *const u8, count: usize, offset: i64) -> isize {
+    let Ok(offset) = u64::try_from(offset) else { return refuse(EINVAL) as isize };
+    if count == 0 { return 0; }
+    // SAFETY: C's caller hands `count` bytes at `buf`.
+    let slice = unsafe { core::slice::from_raw_parts(buf, count) };
+    files::pwrite(raw_fd, slice, offset).map_or_else(|e| refuse_files(e) as isize, |n| n as isize)
+}
+
+/// The two `(tv_sec, tv_nsec)` or `(tv_sec, tv_usec)` pairs at `times`,
+/// none where it is null.
+///
+/// # Safety
+/// `times` is null or names two `{long, long}` pairs.
+unsafe fn pairs(times: *const [i64; 2]) -> Option<[(i64, i64); 2]> {
+    // SAFETY: the caller's.
+    unsafe { times.as_ref().map(|_| [((*times)[0], (*times)[1]), ((*times.add(1))[0], (*times.add(1))[1])]) }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn utimensat(dirfd: i32, path: *const u8, times: *const [i64; 2], flags: i32) -> i32 {
+    let change = match crate::atreq::only(flags, AT_SYMLINK_NOFOLLOW).and_then(|_| crate::atreq::times(unsafe { pairs(times) })) {
+        Ok(change) => change,
+        Err(e) => return refuse(e),
+    };
+    on_at(dirfd, path, |at, path| files::set_times(at, path, flags & AT_SYMLINK_NOFOLLOW == 0, &change))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn futimens(fd: i32, times: *const [i64; 2]) -> i32 {
+    match crate::atreq::times(unsafe { pairs(times) }) {
+        Ok(change) => files::set_times(At::Fd(fd), b"", false, &change).map_or_else(refuse_files, |()| 0),
+        Err(e) => refuse(e),
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn utimes(path: *const u8, times: *const [i64; 2]) -> i32 {
+    match crate::atreq::utimes(unsafe { pairs(times) }) {
+        Ok(change) => on_at(AT_FDCWD, path, |at, path| files::set_times(at, path, true, &change)),
+        Err(e) => refuse(e),
+    }
 }
 
 // struct stat

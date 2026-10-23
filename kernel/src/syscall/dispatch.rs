@@ -351,6 +351,14 @@ pub(crate) fn syscall_dispatch(num: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> 
         },
         SYS_MMAP => sys_mmap(a1, a2, MmapProt(a3), MmapFlags(a4)),
         SYS_MUNMAP => sys_munmap(a1, a2),
+        SYS_PREAD => {
+            let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
+            with_object(RawHandle(a1 as u32), Rights::READ, |o| ops::pread(o, a4, &mut buf))
+        }
+        SYS_PWRITE => {
+            let Some(buf) = ctx.user_bytes(UserAddr::new(a2), a3) else { return bad_addr };
+            with_object(RawHandle(a1 as u32), Rights::WRITE, |o| ops::pwrite(o, a4, &buf))
+        }
         SYS_READ_NONBLOCK => {
             let Some(mut buf) = ctx.user_bytes_mut(UserAddr::new(a2), a3) else { return bad_addr };
             sys_read_nonblock(RawHandle(a1 as u32), &mut buf)

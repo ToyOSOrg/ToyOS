@@ -199,6 +199,10 @@ impl Volume for RootVolume {
         Err(Error::ReadOnly)
     }
 
+    fn set_mtime(&mut self, _: Node, _: u64) -> Result<(), Error> {
+        Err(Error::ReadOnly)
+    }
+
     fn mkdir(&mut self, _: &str) -> Result<(), Error> {
         Err(Error::ReadOnly)
     }

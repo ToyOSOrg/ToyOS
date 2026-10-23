@@ -1,4 +1,4 @@
-use crate::fs::Metadata;
+use crate::fs::{File, Metadata};
 use crate::io;
 use crate::path::Path;
 use crate::sys::AsInner;
@@ -15,6 +15,9 @@ pub trait MetadataExt {
     /// that reaches the file and no other existing file's.
     #[stable(feature = "toyos_ext", since = "1.0.0")]
     fn ino(&self) -> u64;
+    /// The names the file has, as Unix's `nlink`.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn nlink(&self) -> u64;
 }
 
 #[stable(feature = "toyos_ext", since = "1.0.0")]
@@ -24,6 +27,32 @@ impl MetadataExt for Metadata {
     }
     fn ino(&self) -> u64 {
         self.as_inner().node()
+    }
+    fn nlink(&self) -> u64 {
+        self.as_inner().nlink()
+    }
+}
+
+/// Reads and writes at an offset, which leave the file's own where it is, as
+/// Unix's `FileExt` does.
+#[stable(feature = "toyos_ext", since = "1.0.0")]
+pub trait FileExt {
+    /// Read at `offset`: how many bytes, 0 at or past the file's end.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
+    /// Write at `offset`, whether or not the file was opened to append:
+    /// how many bytes.
+    #[stable(feature = "toyos_ext", since = "1.0.0")]
+    fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize>;
+}
+
+#[stable(feature = "toyos_ext", since = "1.0.0")]
+impl FileExt for File {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        self.as_inner().read_at(buf, offset)
+    }
+    fn write_at(&self, buf: &[u8], offset: u64) -> io::Result<usize> {
+        self.as_inner().write_at(buf, offset)
     }
 }
 

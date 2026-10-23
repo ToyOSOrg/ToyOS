@@ -391,40 +391,80 @@ fn close_ends_polls(object: &KObjectRef) -> bool {
 
 fn read_file(file: &FileObject, buf: &mut UserBytesMut) -> Option<u64> {
     file.with(|state| {
-        let size = file_cache::size(state.file_id) as usize;
-        let available = size.saturating_sub(state.position);
-        let count = buf.len().min(available);
-        if count == 0 {
-            return Some(0);
-        }
-        let mut read = 0;
-        let mut refused = false;
-        while read < count {
-            let abs_pos = state.position + read;
-            let page_idx = (abs_pos / 4096) as u32;
-            let offset_in_page = abs_pos % 4096;
-            let remaining_in_page = 4096 - offset_in_page;
-            let to_read = remaining_in_page.min(count - read);
-            // A refused page is not a page of zeros: stop short rather than fake a hole under a success.
-            if file_cache::read_page(
-                state.file_id,
-                page_idx,
-                offset_in_page,
-                &mut buf.sub(read, to_read),
-            )
-            .is_err()
-            {
-                refused = true;
-                break;
-            }
-            read += to_read;
-        }
-        if read == 0 && refused {
-            return Some(SyscallError::Io.to_u64());
-        }
+        let (answer, read) = read_file_at(state.file_id, state.position, buf);
         state.position += read;
-        Some(read as u64)
+        Some(answer)
     })
+}
+
+/// Read file `file_id` at `position` into `buf`: the syscall's answer, and how
+/// many bytes it read.
+fn read_file_at(file_id: file_cache::FileId, position: usize, buf: &mut UserBytesMut) -> (u64, usize) {
+    let size = file_cache::size(file_id) as usize;
+    let count = buf.len().min(size.saturating_sub(position));
+    let mut read = 0;
+    let mut refused = false;
+    while read < count {
+        let abs_pos = position + read;
+        let page_idx = (abs_pos / 4096) as u32;
+        let offset_in_page = abs_pos % 4096;
+        let to_read = (4096 - offset_in_page).min(count - read);
+        // A refused page is not a page of zeros: stop short rather than fake a hole under a success.
+        if file_cache::read_page(file_id, page_idx, offset_in_page, &mut buf.sub(read, to_read)).is_err() {
+            refused = true;
+            break;
+        }
+        read += to_read;
+    }
+    if read == 0 && refused {
+        return (SyscallError::Io.to_u64(), 0);
+    }
+    (read as u64, read)
+}
+
+/// Write `buf` to file `file_id` at `position`, stamping it: the syscall's
+/// answer, and how many bytes it wrote.
+fn write_file_at(state: &mut OpenFileState, position: usize, buf: &UserBytes) -> (u64, usize) {
+    // Refused, never wrapped: past this the `u32` page index would alias a low page.
+    if (position as u64).saturating_add(buf.len() as u64) > file_cache::MAX_FILE_SIZE {
+        return (SyscallError::InvalidArgument.to_u64(), 0);
+    }
+    let mut written = 0;
+    let mut refused = false;
+    while written < buf.len() {
+        let abs_pos = position + written;
+        let page_idx = (abs_pos / 4096) as u32;
+        let offset_in_page = abs_pos % 4096;
+        let to_write = (4096 - offset_in_page).min(buf.len() - written);
+        // A page that cannot be re-read off the device is refused, not merged into zeros.
+        if file_cache::write_page(state.file_id, page_idx, offset_in_page, &buf.sub(written, to_write)).is_err() {
+            refused = true;
+            break;
+        }
+        written += to_write;
+    }
+    if written == 0 && refused {
+        return (SyscallError::Io.to_u64(), 0);
+    }
+    state.mtime = crate::clock::mtime_now();
+    file_cache::touch(state.file_id, state.mtime);
+    (written as u64, written)
+}
+
+/// Read a file at `offset`, leaving its position: any other object is
+/// refused `NotSupported`, as a pipe has no offset to read at.
+pub fn pread(object: &KObjectRef, offset: u64, buf: &mut UserBytesMut) -> u64 {
+    let KObjectRef::File(file) = object else { return SyscallError::NotSupported.to_u64() };
+    let Ok(position) = usize::try_from(offset) else { return 0 };
+    file.with(|state| read_file_at(state.file_id, position, buf).0)
+}
+
+/// Write a file at `offset`, leaving its position: any other object is
+/// refused `NotSupported`.
+pub fn pwrite(object: &KObjectRef, offset: u64, buf: &UserBytes) -> u64 {
+    let KObjectRef::File(file) = object else { return SyscallError::NotSupported.to_u64() };
+    let Ok(position) = usize::try_from(offset) else { return SyscallError::InvalidArgument.to_u64() };
+    file.with(|state| write_file_at(state, position, buf).0)
 }
 
 /// Read a device claim; takes `table` because describing a device installs handles into it.
@@ -562,39 +602,9 @@ fn write_pipe(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
 pub fn try_write(object: &KObjectRef, buf: &UserBytes) -> Option<u64> {
     match object {
         KObjectRef::File(f) => f.with(|state| {
-            // Refused, never wrapped: past this the `u32` page index would alias a low page.
-            if (state.position as u64).saturating_add(buf.len() as u64) > file_cache::MAX_FILE_SIZE {
-                return Some(SyscallError::InvalidArgument.to_u64());
-            }
-            let mut written = 0;
-            let mut refused = false;
-            while written < buf.len() {
-                let abs_pos = state.position + written;
-                let page_idx = (abs_pos / 4096) as u32;
-                let offset_in_page = abs_pos % 4096;
-                let remaining_in_page = 4096 - offset_in_page;
-                let to_write = remaining_in_page.min(buf.len() - written);
-                // A page that cannot be re-read off the device is refused, not merged into zeros.
-                if file_cache::write_page(
-                    state.file_id,
-                    page_idx,
-                    offset_in_page,
-                    &buf.sub(written, to_write),
-                )
-                .is_err()
-                {
-                    refused = true;
-                    break;
-                }
-                written += to_write;
-            }
-            if written == 0 && refused {
-                return Some(SyscallError::Io.to_u64());
-            }
+            let (answer, written) = write_file_at(state, state.position, buf);
             state.position += written;
-            state.mtime = crate::clock::mtime_now();
-            file_cache::touch(state.file_id, state.mtime);
-            Some(written as u64)
+            Some(answer)
         }),
         KObjectRef::PipeWrite(_) | KObjectRef::Connection(_) => write_pipe(object, buf),
         // The whole lines `klogd`'s queue has room for, and a trailing partial one:

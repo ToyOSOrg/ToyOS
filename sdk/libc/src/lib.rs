@@ -9,6 +9,7 @@ mod signal;
 mod sigreq;
 mod errtext;
 mod arch;
+mod atreq;
 mod conversion;
 mod ctype;
 mod dgramreq;
