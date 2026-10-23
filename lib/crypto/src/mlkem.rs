@@ -8,7 +8,7 @@
 //!
 //! Coefficients are signed 16-bit representatives, reduced only where a bound
 //! requires it (Seiler, IACR ePrint 2018/039). The reductions, transforms and
-//! products state their input bounds; additions are checked against overflow.
+//! products state their input bounds.
 
 use crate::{
     Error, Random, ct,
@@ -405,7 +405,7 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "13.8 M quotients")]
     fn division_by_q_is_exact_over_its_whole_input_range() {
-        for n in 0..((1u64 << 33) / 623) as u32 {
+        for n in 0..=((1u64 << 33) / 623) as u32 {
             assert_eq!(divide(n), n / Q as u32, "{n}");
         }
     }
