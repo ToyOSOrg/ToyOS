@@ -2761,10 +2761,14 @@ fn wait_for_ready(
             // With what it did say. A timeout that discards the console is the
             // one failure in this harness that arrives with no evidence at all,
             // and "the guest printed nothing" and "the guest printed sixty
-            // lines and then stopped" are different machines.
+            // lines and then stopped" are different machines. The 16550's
+            // too: a kernel that dies before virtio-console arrives said why
+            // only there.
+            let uart = fs::read_to_string(uart_log).unwrap_or_default();
             panic!(
-                "[qemu] Boot timed out waiting for {ready}; the console carried:\n{}",
-                if seen.is_empty() { "nothing at all".to_string() } else { seen.clone() }
+                "[qemu] Boot timed out waiting for {ready}; the console carried:\n{}\nuart:\n{}",
+                if seen.is_empty() { "nothing at all" } else { &seen },
+                if uart.is_empty() { "nothing at all" } else { &uart },
             );
         }
         match rx.recv_timeout(Duration::from_secs(1)) {

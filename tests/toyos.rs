@@ -1290,8 +1290,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         metal::Metal { arms: TESTCASES, judge: |b| amdvi_remaps(&b[0].kernel(), &b[0].log()) },
     ),
     (
-        // The AMD bench's Bluetooth controller's xHCI, `03:00.4`, which no
-        // row of the image names, claimed and driven by usbd through an entry of its own table, its
+        // The AMD bench's xHCI that does not hold the stick, which the
+        // image's usbd row leaves, claimed and driven by usbd through an entry of its own table, its
         // MSI-X table in the register BAR it hands over; then aimed past its
         // grant, recorded against the claim; then its holder rewriting its
         // own table entry to a vector not its own, refused and recorded.
@@ -1335,8 +1335,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // The boot controller handed over to the image's usbd row (the T14's
-        // 00:14.0, the AMD bench's 03:00.3), its message through its remapping
+        // The boot controller handed over to the image's usbd row (the one
+        // holding the stick), its message through its remapping
         // entry, its No-Op answered by that interrupt, and the boot stick
         // served through it: what every metal boot's `/log` now rides.
         // `Boot: complete` and the log volume's mount are printed, not judged.
@@ -1363,8 +1363,8 @@ const METAL: &[(&str, metal::Metal)] = &[
         },
     ),
     (
-        // The Type-C controller, which no row of the image names, claimed,
-        // and usbd driving it: handed
+        // The T14's xHCI that does not hold the stick, which the image's
+        // usbd row leaves, claimed, and usbd driving it: handed
         // over, MSI armed through remapping, and the No-Op answered by an
         // interrupt; usbd is killed, so the release says which reset the
         // function advertises. Then a holder of it is killed and the claim
@@ -4593,9 +4593,35 @@ fn job_window(qemu: &mut QemuInstance, command: &str) -> Result<String, String> 
     Ok(result.serial)
 }
 
-/// The AMD bench's Bluetooth controller's xHCI, which no row of the test
-/// images names: the stick is on the other, `03:00.3`.
-const AMD_XHCI_SPARE: &str = "03:00.4";
+/// The xHCI controller a job's claim took on a metal boot, by address and
+/// card: handed over, and not the one the supervisor says `@boot` is, which
+/// the image's usbd row drives — so whichever port holds the stick, the spare
+/// is the other controller.
+fn spare_xhci(kernel: &serial::Serial, log: &serial::Serial) -> Result<(String, String), String> {
+    let text = kernel.text();
+    let boot = boot_xhci(log)?;
+    let mut spares: Vec<(String, String)> = Vec::new();
+    for line in text.lines() {
+        let Some((at, rest)) = line.split_once("pcidev: PCI ").and_then(|(_, l)| l.split_once(" [")) else { continue };
+        let Some((id, rest)) = rest.split_once(']') else { continue };
+        let spare = (at.to_string(), id.to_string());
+        if USB_XHCI.contains(&id) && rest.starts_with(" handed over") && at != boot && !spares.contains(&spare) {
+            spares.push(spare);
+        }
+    }
+    match <[_; 1]>::try_from(spares) {
+        Ok([spare]) => Ok(spare),
+        Err(spares) => Err(format!("not one xHCI controller beside the boot one at {boot} was handed over: {spares:?}")),
+    }
+}
+
+/// The controller the supervisor says `@boot` is, as `bb:dd.f`.
+fn boot_xhci(log: &serial::Serial) -> Result<&str, String> {
+    log.text()
+        .lines()
+        .find_map(|l| l.split_once(toyos_manifest::device::BOOT_SAID)?.1.split_whitespace().next())
+        .ok_or_else(|| format!("the supervisor never said which controller `@boot` is:\n{}", log.text()))
+}
 
 /// The job that kills a holder of the spare and claims it again at once, in
 /// `usbd_spare`'s boots.
@@ -4733,7 +4759,7 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
     Ok(())
 }
 
-/// The AMD bench's `03:00.4` left to a claim and driven by usbd: handed over
+/// The AMD bench's spare xHCI ([`spare_xhci`]) left to a claim and driven by usbd: handed over
 /// with its MSI-X table's BAR, armed through a present entry of its own table
 /// at its claim's vector, its No-Op answered by that interrupt; then aimed
 /// past its grant and recorded against the claim at the aimed address; then
@@ -4741,9 +4767,9 @@ fn a_drives_row_holds_one_process_per_function() -> Result<(), String> {
 /// refused and recorded against the claim, which usbd ends on, never told of
 /// its No-Op.
 fn amdvi_usbd(kernel: &serial::Serial, log: &serial::Serial, after: &serial::Serial) -> Result<(), String> {
-    const ID: &str = "1022:1639";
-    let at = AMD_XHCI_SPARE;
-    let handed = format!("pcidev: PCI {at} [{ID}] handed over, vector ");
+    let (at, id) = spare_xhci(kernel, log)?;
+    let at = at.as_str();
+    let handed = format!("pcidev: PCI {at} [{id}] handed over, vector ");
     let vector = kernel
         .text()
         .lines()
@@ -4845,29 +4871,33 @@ fn hda_plays_to_the_controller_that_reaches_an_output(test_config: &Path) -> Res
     Ok(())
 }
 
+/// Every xHCI card a boot of the test images can have: QEMU's two, the T14's
+/// two and the AMD bench's.
+const USB_XHCI: [&str; 5] = ["1033:0194", "8086:a0ed", "8086:9a13", "1022:1639", "1b36:000d"];
+
 /// Every xHCI controller handed over to a usbd: by the kernel's hand-over
-/// record, of the ids the test images' usbd rows and spares name.
+/// record, of [`USB_XHCI`].
 fn usb_controllers(kernel: &serial::Serial) -> Vec<String> {
-    const XHCI: [&str; 5] = ["1033:0194", "8086:a0ed", "8086:9a13", "1022:1639", "1b36:000d"];
     kernel
         .text()
         .lines()
         .filter_map(|l| {
             let (at, rest) = l.split_once("pcidev: PCI ")?.1.split_once(" [")?;
             let (id, rest) = rest.split_once(']')?;
-            (XHCI.contains(&id) && rest.starts_with(" handed over")).then(|| at.to_string())
+            (USB_XHCI.contains(&id) && rest.starts_with(" handed over")).then(|| at.to_string())
         })
         .collect()
 }
 
 /// No DMA refused on the AMD bench's testcases boot but the spare's: that boot
-/// also carries `amdvi_usbd_drives_its_own_entry`, whose jobs aim
-/// [`AMD_XHCI_SPARE`] past its grant and at a vector not its own, and which
+/// also carries `amdvi_usbd_drives_its_own_entry`, whose jobs aim the spare
+/// ([`spare_xhci`]) past its grant and at a vector not its own, and which
 /// judges those records itself.
-fn no_fault_but_the_spares(kernel: &serial::Serial) -> Result<(), String> {
+fn no_fault_but_the_spares(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
     kernel.alive()?;
-    let spares = format!(" stream={AMD_XHCI_SPARE} ");
-    match kernel.text().lines().find(|l| l.contains("iommu: DMA FAULT") && !l.contains(&spares)) {
+    let spares = spare_xhci(kernel, log).map(|(at, _)| format!(" stream={at} ")).ok();
+    let theirs = |l: &str| spares.as_deref().is_some_and(|spares| l.contains(spares));
+    match kernel.text().lines().find(|l| l.contains("iommu: DMA FAULT") && !theirs(l)) {
         Some(line) => Err(format!("a DMA refusal no job asked for: {line:?}")),
         None => Ok(()),
     }
@@ -4886,7 +4916,7 @@ fn amdvi_translates(kernel: &serial::Serial, log: &serial::Serial) -> Result<(),
         return Err(format!("no AMD-Vi unit is translating:\n{text}"));
     }
     kernel.must_not_say("isolates no device")?;
-    no_fault_but_the_spares(kernel)?;
+    no_fault_but_the_spares(kernel, log)?;
     let controllers = usb_controllers(kernel);
     if controllers.is_empty() {
         return Err(format!("no xHCI controller was handed over:\n{text}"));
@@ -4939,7 +4969,7 @@ fn amdvi_remaps(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), Str
     if !remaps.contains(&format!(" {apics} I/O APIC(s) named")) {
         return Err(format!("{remaps:?} does not name the {apics} I/O APIC(s) the MADT has"));
     }
-    no_fault_but_the_spares(kernel)?;
+    no_fault_but_the_spares(kernel, log)?;
     let controllers = usb_controllers(kernel);
     for at in &controllers {
         let data = text
@@ -4961,10 +4991,11 @@ fn amdvi_remaps(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), Str
     Ok(())
 }
 
-/// The controller the boot stick is on, handed over once to the image's
-/// usbd, its message armed in remappable format through an entry of its own
-/// (VT-d's Interrupt Format, bit 4 of an MSI address; AMD-Vi's entry for its
-/// source), its No-Op answered, and the stick served by it.
+/// The controller the boot stick is on, the one the supervisor says `@boot`
+/// is, handed over once to the image's usbd, its message armed in remappable
+/// format through an entry of its own (VT-d's Interrupt Format, bit 4 of an MSI
+/// address; AMD-Vi's entry for its source), its No-Op answered, and the stick
+/// served by it. The supervisor's lines for the boot sources are printed.
 fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
     let served: Vec<String> = usb_controllers(kernel)
         .into_iter()
@@ -4973,6 +5004,10 @@ fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> 
     let [at] = &served[..] else {
         return Err(format!("not one controller served the stick: {served:?}\n{}", log.text()));
     };
+    let boot = boot_xhci(log)?;
+    if at != boot {
+        return Err(format!("the stick was served on {at}, and the supervisor says `@boot` is {boot}"));
+    }
     let handed = format!("pcidev: PCI {at} [");
     let handovers: Vec<&str> =
         kernel.text().lines().filter(|l| l.contains(&handed) && l.contains("] handed over")).collect();
@@ -4989,6 +5024,9 @@ fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> 
     }
     log.must_say(&usbd_noop(at))?;
     eprintln!("  [usbd] {}", line.trim());
+    for source in log.text().lines().filter(|l| l.contains("supervisor: the loader came off") || l.contains("supervisor: the slot volume came off")) {
+        eprintln!("  [usbd] {}", source.trim());
+    }
     for complete in kernel.text().lines().filter(|l| l.contains("Boot: complete")) {
         eprintln!("  [usbd] {}", complete.trim());
     }
@@ -4998,19 +5036,14 @@ fn usbd_serves_the_boot_stick(kernel: &serial::Serial, log: &serial::Serial) -> 
     Ok(())
 }
 
-/// The T14's Type-C controller left to a claim and driven by usbd: the
-/// kernel left it, the claim was handed over with its MSI in remappable
-/// format and its remapping entry written, the message reached its claim, and
-/// the No-Op completed. What reset the function advertises is read off the
-/// release and printed, not judged.
+/// The T14's spare controller — the Type-C one, or 00:14.0 where the stick is
+/// in a Type-C port — left to a claim and driven by usbd: the claim was
+/// handed over with its MSI in remappable format and its remapping entry
+/// written, the message reached its claim, and the No-Op completed. What
+/// reset the function advertises is read off the release and printed, not
+/// judged.
 fn usbd_on_metal(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), String> {
-    const TYPE_C: &str = "8086:9a13";
-    let handed = format!(" [{TYPE_C}] handed over, vector ");
-    let at = kernel
-        .text()
-        .lines()
-        .find_map(|l| l.split_once("pcidev: PCI ")?.1.split_once(&handed).map(|(at, _)| at.to_string()))
-        .ok_or_else(|| format!("{TYPE_C} was never handed over:\n{}", kernel.text()))?;
+    let (at, id) = spare_xhci(kernel, log)?;
     let message = kernel
         .text()
         .lines()
@@ -5025,7 +5058,7 @@ fn usbd_on_metal(kernel: &serial::Serial, log: &serial::Serial) -> Result<(), St
     kernel.must_say(&format!(" source={at} p=1 "))?;
     kernel.must_say("took its first message on vector")?;
     log.must_say(&usbd_noop(&at))?;
-    for released in kernel.text().lines().filter(|l| l.contains(&format!("pcidev: PCI {at} [{TYPE_C}] released; "))) {
+    for released in kernel.text().lines().filter(|l| l.contains(&format!("pcidev: PCI {at} [{id}] released; "))) {
         eprintln!("  [usbd] {}", released.trim());
     }
     eprintln!("  [usbd] {at}: handed over, MSI {address:#010x} through its remapping entry, the No-Op answered");

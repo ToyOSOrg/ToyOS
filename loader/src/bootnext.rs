@@ -15,7 +15,9 @@
 //! that booted us from a removable-media fallback path has no entry of ours at
 //! all and must be told so rather than have one guessed at.
 
-use crate::efi::{cstr16, CStr16, DevicePath, Handle, HardDrive, LoadedImage, SystemTable, VariableAttributes, GLOBAL_VARIABLE};
+use toyos_devicepath::{HardDrive, Path};
+
+use crate::efi::{cstr16, CStr16, DevicePath, Handle, LoadedImage, SystemTable, VariableAttributes, GLOBAL_VARIABLE};
 
 /// The head of every line this module writes.
 const HEAD: &str = "Boot chain:";
@@ -70,15 +72,15 @@ fn our_partition(handle: Handle, system_table: &SystemTable) -> Option<[u8; 16]>
     let bs = system_table.boot_services();
     let image = bs.exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
-    let path = bs.exclusive::<DevicePath>(device).ok()?;
-    hard_drive_guid(path.nodes())
+    let firmware = bs.exclusive::<DevicePath>(device).ok()?;
+    hard_drive_guid(firmware.path().ok()?)
 }
 
 /// The GPT signature of the first HARDDRIVE node in a device path, or `None`
 /// where the path has none — a network boot, or a disk with no GPT.
-fn hard_drive_guid<'a>(nodes: impl Iterator<Item = &'a [u8]>) -> Option<[u8; 16]> {
-    for node in nodes.filter(|node| (node[0], node[1]) == HardDrive::TYPE) {
-        let hd = HardDrive::parse(node)?;
+fn hard_drive_guid(path: Path<'_>) -> Option<[u8; 16]> {
+    for node in path.nodes().filter(|node| node.kind() == HardDrive::TYPE) {
+        let hd = HardDrive::parse(node.bytes())?;
         if hd.signature_type == HardDrive::GUID_SIGNATURE {
             return Some(hd.signature);
         }

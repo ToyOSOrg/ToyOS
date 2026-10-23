@@ -1,6 +1,6 @@
 //! `usbd_spare`'s arms, one binary each for a metal job and all of them
-//! behind one for QEMU. The xHCI controller no `drives` row of the image
-//! names, claimed by this job and driven by `/system/bin/usbd`, which it
+//! behind one for QEMU. The xHCI controller the image's `drives` rows leave,
+//! claimed by this job and driven by `/system/bin/usbd`, which it
 //! starts itself so it can end it: this job holds the claim, the port usbd
 //! answers `inspect` on, and usbd's process.
 //!
@@ -46,11 +46,12 @@ pub fn cap() -> SysCap {
     Endowments::get().take(SYSCAP_LABEL).expect("test-runner endows a device-minting capability")
 }
 
-/// The controllers a boot of this job leaves to a claim: QEMU's `qemu-xhci`
-/// on the guest profiles, the T14's Type-C controller, and the AMD bench's
-/// xHCI, whose id its other controller shares (`claim` takes the one the
-/// kernel left). A machine has one of them.
-const SPARES: [PciId; 3] = [
+/// The controllers a boot of this job can leave to a claim: QEMU's
+/// `qemu-xhci` on the guest profiles, either of the T14's two and the AMD
+/// bench's, whose two controllers share an id. The image's usbd row drives the
+/// one holding the stick, so `claim` takes the one of them nobody holds.
+const SPARES: [PciId; 4] = [
+    PciId { vendor: 0x8086, device: 0xa0ed },
     PciId { vendor: 0x1b36, device: 0x000d },
     PciId { vendor: 0x8086, device: 0x9a13 },
     PciId { vendor: 0x1022, device: 0x1639 },

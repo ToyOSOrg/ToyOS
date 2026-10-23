@@ -7,10 +7,11 @@ use core::mem;
 
 use alloc::vec;
 use alloc::alloc::Layout;
+use toyos_devicepath::HardDrive;
 use toyos_elf::section::SectionTable;
 use toyos_elf::{rela, ImageOffset, Op, RelaTable, SymTab};
 use efi::{
-    cstr16, CStr16, DevicePath, EdidActive, Gop, Handle, HardDrive, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
+    cstr16, CStr16, DevicePath, EdidActive, Gop, Handle, LoadedImage, MemoryDescriptor, Mode, PixelFormat, ResetType,
     SimpleFileSystem, Status, SystemTable, ACPI2_GUID, PAGE_SIZE,
 };
 use toyos_abi::boot::{KernelArgs, MemoryMapEntry, RootBridgeWindow, EDID_BLOCK, MAX_ROOT_BRIDGE_WINDOWS};
@@ -30,6 +31,7 @@ macro_rules! println {
 mod arch;
 mod attempt;
 mod blackbox;
+mod bootsource;
 mod bootnext;
 mod efi;
 mod floor;
@@ -168,19 +170,26 @@ fn boot_partition(handle: Handle, system_table: &SystemTable) -> Option<BootPart
     let bs = system_table.boot_services();
     let image = bs.exclusive::<LoadedImage>(handle).ok()?;
     let device = image.device()?;
-    let path = bs.exclusive::<DevicePath>(device).ok()?;
+    let firmware = bs.exclusive::<DevicePath>(device).ok()?;
+    let path = match firmware.path() {
+        Ok(path) => path,
+        Err(why) => {
+            println!("Boot partition: the boot device's path is not read ({why}), so it is ignored");
+            return None;
+        }
+    };
 
     // Exactly one, not the last one. A path with two HARDDRIVE nodes describes
     // a partition inside a partition, and picking either is guessing which of
     // the two the kernel's block device will be looking at.
-    let mut nodes = path.nodes().filter(|node| (node[0], node[1]) == HardDrive::TYPE);
+    let mut nodes = path.nodes().filter(|node| node.kind() == HardDrive::TYPE);
     let node = nodes.next()?;
     if nodes.next().is_some() {
         println!("Boot partition: the device path has more than one HARDDRIVE node, so it is ignored");
         return None;
     }
 
-    let hd = HardDrive::parse(node)?;
+    let hd = HardDrive::parse(node.bytes())?;
     if hd.format != HardDrive::GPT {
         println!("Boot partition: firmware says this is not a GPT partition, so it is ignored");
         return None;
@@ -552,6 +561,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         }
     }
 
+    let boot_sources = bootsource::sources(&system_table, &slot_volume_guid);
     // The last of the firmware questions, and asked here for the same reason
     // the GOP's was asked before this: the protocol dies with boot services.
     //
@@ -695,6 +705,7 @@ fn start_kernel(kernel: LoadedKernel, kernel_elf_bytes: vec::Vec<u8>, cmdline: v
         slot_volume_guid,
         supervisor_image,
         fileserver_image,
+        boot_sources,
     };
     if let Some(edid) = gop.as_ref().and_then(|g| g.edid) {
         kernel_args.gop_edid = edid;

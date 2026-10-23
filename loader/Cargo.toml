@@ -37,3 +37,6 @@ toyos-tsc = { path = "../lib/tsc" }
 toyos-update = { path = "../lib/update" }
 # Where on ROOT the patch for this CPU is, as the build names it.
 toyos-microcode = { path = "../lib/microcode" }
+# Every handle's device path this loader reads, held to one bounded check, and
+# the HARDDRIVE node.
+toyos-devicepath = { path = "../lib/devicepath" }

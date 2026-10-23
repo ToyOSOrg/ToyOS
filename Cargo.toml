@@ -44,6 +44,7 @@ members = [
     "lib/bootmap",
     "lib/crypto",
     "lib/device-memory",
+    "lib/devicepath",
     "lib/elf",
     "lib/edid",
     "lib/elide",

@@ -22,9 +22,10 @@ pub enum Unresolved {
     Ambiguous(Vec<PciAddr>),
 }
 
-/// The function `matcher` names on a machine whose inventory is `records`.
-pub fn function(matcher: &PciMatch, records: &[Pci]) -> Result<Arrival, Unresolved> {
-    let matched: Vec<&Pci> = records.iter().filter(|pci| matcher.matches(pci)).collect();
+/// The function `matcher` names on a machine whose inventory is `records` and
+/// whose boot controller is `boot`.
+pub fn function(matcher: &PciMatch, records: &[Pci], boot: Option<PciAddr>) -> Result<Arrival, Unresolved> {
+    let matched: Vec<&Pci> = records.iter().filter(|pci| matcher.matches(pci, boot)).collect();
     let undriven: Vec<&Pci> = matched.iter().copied().filter(|pci| pci.driven != Driven::Kernel).collect();
     match (&undriven[..], &matched[..]) {
         ([one], _) => Ok(one.arrival),
@@ -97,19 +98,19 @@ mod tests {
 
     #[test]
     fn a_matcher_names_the_one_function_the_kernel_does_not_drive() {
-        assert_eq!(function(&EDU, &[edu(3, 3, Driven::Kernel), edu(4, 4, Driven::Free)]), Ok(Arrival(4)));
+        assert_eq!(function(&EDU, &[edu(3, 3, Driven::Kernel), edu(4, 4, Driven::Free)], None), Ok(Arrival(4)));
         // One another process holds is still the function named, and its
         // claim is refused by the kernel, which says so.
-        assert_eq!(function(&EDU, &[edu(4, 4, Driven::Claimed)]), Ok(Arrival(4)));
-        assert_eq!(function(&EDU, &[]), Err(Unresolved::Absent));
-        assert_eq!(function(&EDU, &[edu(3, 3, Driven::Kernel)]), Err(Unresolved::KernelDriven(vec![at(3)])));
+        assert_eq!(function(&EDU, &[edu(4, 4, Driven::Claimed)], None), Ok(Arrival(4)));
+        assert_eq!(function(&EDU, &[], None), Err(Unresolved::Absent));
+        assert_eq!(function(&EDU, &[edu(3, 3, Driven::Kernel)], None), Err(Unresolved::KernelDriven(vec![at(3)])));
     }
 
     /// Two functions a single-process row's matcher names are both named back,
     /// and its start is refused whatever it was owed.
     #[test]
     fn two_matching_functions_refuse_the_start_naming_both() {
-        let two = function(&EDU, &[edu(3, 3, Driven::Free), edu(4, 4, Driven::Claimed)]);
+        let two = function(&EDU, &[edu(3, 3, Driven::Free), edu(4, 4, Driven::Claimed)], None);
         assert_eq!(two, Err(Unresolved::Ambiguous(vec![at(3), at(4)])));
         let missing = Missing::Unresolved(two.unwrap_err());
         assert!(!goes_on_without("pci:ff:00:00/1234:11e8", &missing, &[]));

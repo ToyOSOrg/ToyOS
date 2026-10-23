@@ -3,15 +3,17 @@
 //! A class or an ISA set is the ABI's own spelling
 //! ([`DeviceRequest::parse`]). A PCI function is matched here, by its class
 //! code and optionally its card and its place: `pci:CC:SS:PP`, then
-//! `/VVVV:DDDD`, then `@BB:DD.F`, lowercase hex, where `PP` may be `*` for
-//! every programming interface of the subclass. A place tells apart two
-//! functions of one card, as two controllers on one bridge are. **Every matcher carries its class**, so whether two entries
+//! `/VVVV:DDDD`, then `@BB:DD.F` or `@boot`, lowercase hex, where `PP` may be
+//! `*` for every programming interface of the subclass. A place tells apart two
+//! functions of one card, as two controllers on one bridge are; `@boot` is the
+//! controller of the device firmware loaded the loader from, wherever that is
+//! ([`toyos_abi::boot::BootSources::loader`]). **Every matcher carries its class**, so whether two entries
 //! can name one function is decided from their text alone ([`Entry::overlaps`]),
 //! and a claim names the function a matcher found by its arrival.
 
 use core::fmt;
 
-use toyos_abi::inventory::Pci;
+use toyos_abi::inventory::{Pci, PciAddr};
 use toyos_abi::syscall::{DeviceRequest, PciId};
 
 /// One entry of a row's `devices` or `drives`.
@@ -36,7 +38,11 @@ impl Entry {
         match (self, other) {
             (Self::Fixed(a), Self::Fixed(b)) => a == b,
             (Self::Pci(a), Self::Pci(b)) => {
-                a.class == b.class && either(a.prog_if, b.prog_if) && either(a.id, b.id) && either(a.at, b.at)
+                let places = match (a.at, b.at) {
+                    (Some(Place::At(x)), Some(Place::At(y))) => x == y,
+                    _ => true,
+                };
+                a.class == b.class && either(a.prog_if, b.prog_if) && either(a.id, b.id) && places
             }
             _ => false,
         }
@@ -60,8 +66,20 @@ pub struct PciMatch {
     /// Audio's 00 and 80) is driven alike whichever a function reports.
     pub prog_if: Option<u8>,
     pub id: Option<PciId>,
+    pub at: Option<Place>,
+}
+
+/// What the supervisor says the boot controller is under, followed by its
+/// address as the kernel's `pcidev:` lines spell one, `bb:dd.f`.
+pub const BOOT_SAID: &str = "supervisor: `@boot` is PCI ";
+
+/// Where a matched function is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Place {
     /// Bus, device and function, on segment 0.
-    pub at: Option<(u8, u8, u8)>,
+    At((u8, u8, u8)),
+    /// The boot controller, where the loader named one.
+    Boot,
 }
 
 impl PciMatch {
@@ -81,6 +99,7 @@ impl PciMatch {
     pub fn parse(text: &str) -> Option<Self> {
         let rest = text.strip_prefix(Self::PREFIX)?;
         let (rest, at) = match rest.split_once('@') {
+            Some((rest, "boot")) => (rest, Some(Place::Boot)),
             Some((rest, place)) => {
                 let (bus, slot) = place.split_once(':')?;
                 let (dev, func) = slot.split_once('.')?;
@@ -88,7 +107,7 @@ impl PciMatch {
                     [digit @ b'0'..=b'7'] => digit - b'0',
                     _ => return None,
                 };
-                (rest, Some((hex8(bus)?, hex8(dev).filter(|d| *d < 32)?, func)))
+                (rest, Some(Place::At((hex8(bus)?, hex8(dev).filter(|d| *d < 32)?, func))))
             }
             None => (rest, None),
         };
@@ -111,11 +130,16 @@ impl PciMatch {
         Some(Self { class, prog_if, id: card, at })
     }
 
-    pub fn matches(&self, pci: &Pci) -> bool {
+    /// Whether `pci` is a function this names, on a machine whose boot
+    /// controller is `boot`: with none, `@boot` names nothing.
+    pub fn matches(&self, pci: &Pci, boot: Option<PciAddr>) -> bool {
         [pci.class, pci.subclass] == self.class
             && self.prog_if.is_none_or(|prog_if| prog_if == pci.prog_if)
             && self.id.is_none_or(|id| id.vendor == pci.vendor && id.device == pci.device)
-            && self.at.is_none_or(|at| pci.at.segment == 0 && (pci.at.bus, pci.at.dev, pci.at.func) == at)
+            && self.at.is_none_or(|place| match place {
+                Place::At(at) => pci.at.segment == 0 && (pci.at.bus, pci.at.dev, pci.at.func) == at,
+                Place::Boot => boot == Some(pci.at),
+            })
     }
 }
 
@@ -131,7 +155,8 @@ impl fmt::Display for PciMatch {
             write!(f, "/{:04x}:{:04x}", id.vendor, id.device)?;
         }
         match self.at {
-            Some((bus, dev, func)) => write!(f, "@{bus:02x}:{dev:02x}.{func}"),
+            Some(Place::At((bus, dev, func))) => write!(f, "@{bus:02x}:{dev:02x}.{func}"),
+            Some(Place::Boot) => f.write_str("@boot"),
             None => Ok(()),
         }
     }
@@ -159,7 +184,7 @@ fn lower_hex(text: &str, digits: usize) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use toyos_abi::inventory::{Arrival, Driven, PciAddr};
+    use toyos_abi::inventory::{Arrival, Driven};
     use toyos_abi::syscall::DeviceType;
 
     const NVME: PciMatch = PciMatch::new([0x01, 0x08, 0x02], Some(PciId { vendor: 0x1b36, device: 0x0010 }));
@@ -181,7 +206,7 @@ mod tests {
     fn a_matcher_writes_back_the_text_it_parsed() {
         for text in
             ["pci:01:08:02/1b36:0010", "pci:0c:03:30", "pci:ff:00:00/1234:11e8", "pci:00:00:00", "pci:04:03:*", "pci:04:03:*/8086:a0c8",
-             "pci:0c:03:30/1022:1639@03:00.3", "pci:0c:03:30@00:14.0"]
+             "pci:0c:03:30/1022:1639@03:00.3", "pci:0c:03:30@00:14.0", "pci:0c:03:30@boot"]
         {
             let parsed = PciMatch::parse(text).unwrap_or_else(|| panic!("{text} did not parse"));
             assert_eq!(parsed.to_string(), text);
@@ -205,7 +230,7 @@ mod tests {
             "pci:02:00:00/:", "pci:02:00:00/zzzz:1041", "pci:02:00:00/1af4:104g", "pci:02:00:00/+af4:1041",
             // A place is two digits, two digits below 0x20, and one octal one.
             "pci:0c:03:30@3:00.3", "pci:0c:03:30@03:20.0", "pci:0c:03:30@03:00.8", "pci:0c:03:30@03:00", "pci:0c:03:30@03:00.3/1022:1639",
-            "pci:0c:03:30@", "pci:0c:03:30@03:0A.0",
+            "pci:0c:03:30@", "pci:0c:03:30@03:0A.0", "pci:0c:03:30@Boot", "pci:0c:03:30@boot/1022:1639",
         ] {
             assert_eq!(PciMatch::parse(bad), None, "{bad} parsed");
             assert_eq!(Entry::parse(bad), None, "{bad} parsed as an entry");
@@ -221,11 +246,11 @@ mod tests {
 
     #[test]
     fn a_matcher_matches_its_class_and_its_card() {
-        assert!(NVME.matches(&function([0x01, 0x08, 0x02], 0x1b36, 0x0010)));
-        assert!(!NVME.matches(&function([0x01, 0x08, 0x02], 0x144d, 0xa808)));
-        assert!(!NVME.matches(&function([0x01, 0x08, 0x01], 0x1b36, 0x0010)));
+        assert!(NVME.matches(&function([0x01, 0x08, 0x02], 0x1b36, 0x0010), None));
+        assert!(!NVME.matches(&function([0x01, 0x08, 0x02], 0x144d, 0xa808), None));
+        assert!(!NVME.matches(&function([0x01, 0x08, 0x01], 0x1b36, 0x0010), None));
         let any_nvme = PciMatch::new([0x01, 0x08, 0x02], None);
-        assert!(any_nvme.matches(&function([0x01, 0x08, 0x02], 0x144d, 0xa808)));
+        assert!(any_nvme.matches(&function([0x01, 0x08, 0x02], 0x144d, 0xa808), None));
     }
 
     /// A place tells two functions of one card apart, and two matchers of
@@ -235,11 +260,29 @@ mod tests {
         let at = |func: u8| Pci { at: PciAddr { segment: 0, bus: 3, dev: 0, func }, ..function([0x0c, 0x03, 0x30], 0x1022, 0x1639) };
         let three = PciMatch::parse("pci:0c:03:30/1022:1639@03:00.3").unwrap();
         let four = PciMatch::parse("pci:0c:03:30/1022:1639@03:00.4").unwrap();
-        assert!(three.matches(&at(3)) && !three.matches(&at(4)));
+        assert!(three.matches(&at(3), None) && !three.matches(&at(4), None));
         assert!(!Entry::Pci(three).overlaps(&Entry::Pci(four)));
         assert!(Entry::Pci(three).overlaps(&Entry::Pci(PciMatch::parse("pci:0c:03:30").unwrap())));
         let elsewhere = Pci { at: PciAddr { segment: 1, bus: 3, dev: 0, func: 3 }, ..at(3) };
-        assert!(!three.matches(&elsewhere), "a place is on segment 0");
+        assert!(!three.matches(&elsewhere, None), "a place is on segment 0");
+    }
+
+    /// `@boot` matches the boot controller, wherever it is, and nothing else;
+    /// on a machine the loader named none for it matches nothing. It names one
+    /// function, so it may be the one a place names and overlaps it.
+    #[test]
+    fn the_boot_place_matches_the_boot_controller() {
+        let at = |func: u8| PciAddr { segment: 0, bus: 3, dev: 0, func };
+        let xhci = |func: u8| Pci { at: at(func), ..function([0x0c, 0x03, 0x30], 0x1022, 0x1639) };
+        let boot = PciMatch::parse("pci:0c:03:30@boot").unwrap();
+        assert!(boot.matches(&xhci(3), Some(at(3))) && !boot.matches(&xhci(4), Some(at(3))));
+        assert!(boot.matches(&xhci(4), Some(at(4))) && !boot.matches(&xhci(3), Some(at(4))));
+        assert!(!boot.matches(&xhci(3), None) && !boot.matches(&xhci(4), None));
+        let nvme = function([0x01, 0x08, 0x02], 0x1b36, 0x0010);
+        assert!(!boot.matches(&nvme, Some(nvme.at)), "its class still holds");
+        let four = PciMatch::parse("pci:0c:03:30/1022:1639@03:00.4").unwrap();
+        assert!(Entry::Pci(boot).overlaps(&Entry::Pci(four)));
+        assert!(!Entry::Pci(boot).overlaps(&Entry::Pci(PciMatch::parse("pci:01:08:02@boot").unwrap())));
     }
 
     /// The T14's HD Audio controller reports programming interface 0x80 and
@@ -247,10 +290,10 @@ mod tests {
     #[test]
     fn a_wildcard_interface_matches_every_interface_of_its_subclass() {
         let hda = PciMatch::parse("pci:04:03:*").unwrap();
-        assert!(hda.matches(&function([0x04, 0x03, 0x80], 0x8086, 0xa0c8)));
-        assert!(hda.matches(&function([0x04, 0x03, 0x00], 0x8086, 0x293e)));
-        assert!(!hda.matches(&function([0x04, 0x01, 0x00], 0x1af4, 0x1059)));
-        assert!(!PciMatch::parse("pci:04:03:00").unwrap().matches(&function([0x04, 0x03, 0x80], 0x8086, 0xa0c8)));
+        assert!(hda.matches(&function([0x04, 0x03, 0x80], 0x8086, 0xa0c8), None));
+        assert!(hda.matches(&function([0x04, 0x03, 0x00], 0x8086, 0x293e), None));
+        assert!(!hda.matches(&function([0x04, 0x01, 0x00], 0x1af4, 0x1059), None));
+        assert!(!PciMatch::parse("pci:04:03:00").unwrap().matches(&function([0x04, 0x03, 0x80], 0x8086, 0xa0c8), None));
     }
 
     /// Whether two entries can name one device, decided from their text: the

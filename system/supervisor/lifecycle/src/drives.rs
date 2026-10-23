@@ -14,7 +14,7 @@
 use std::collections::BTreeMap;
 use std::time::Instant;
 
-use toyos_abi::inventory::{Arrival, Driven, Pci};
+use toyos_abi::inventory::{Arrival, Driven, Pci, PciAddr};
 use toyos_manifest::device::PciMatch;
 use toyos_manifest::{Manifest, Program};
 
@@ -66,14 +66,21 @@ enum Phase {
 }
 
 impl Drives {
-    /// What to do about the functions `records` lists, which `rows` match.
-    pub fn decide<'m>(&mut self, rows: &[(&'m Program, PciMatch)], records: &[Pci], now: Instant) -> Vec<Act<'m>> {
+    /// What to do about the functions `records` lists, which `rows` match on
+    /// a machine whose boot controller is `boot`.
+    pub fn decide<'m>(
+        &mut self,
+        rows: &[(&'m Program, PciMatch)],
+        records: &[Pci],
+        boot: Option<PciAddr>,
+        now: Instant,
+    ) -> Vec<Act<'m>> {
         self.functions.retain(|arrival, function| {
             matches!(function.phase, Phase::Running) || records.iter().any(|pci| pci.arrival == *arrival)
         });
         let mut acts = Vec::new();
         for pci in records.iter().filter(|pci| pci.driven != Driven::Kernel) {
-            let Some(&(row, entry)) = rows.iter().find(|(_, matcher)| matcher.matches(pci)) else { continue };
+            let Some(&(row, entry)) = rows.iter().find(|(_, matcher)| matcher.matches(pci, boot)) else { continue };
             let function = self.functions.entry(pci.arrival).or_default();
             if let Phase::Held(seen) = &mut function.phase {
                 match seen {
@@ -166,12 +173,12 @@ mod tests {
         nic.vendor = 0x1af4;
         let machine = [edu(3, Driven::Free), edu(4, Driven::Free), edu(5, Driven::Kernel), edu(6, Driven::Claimed), nic];
         let mut drives = Drives::default();
-        let acts = drives.decide(&rows, &machine, now);
+        let acts = drives.decide(&rows, &machine, None, now);
         assert_eq!(started(&acts), [3, 4]);
         assert!(matches!(acts[0], Act::Start { row: r, entry, .. } if r.name == "holder" && entry == EDU));
-        assert!(drives.decide(&rows, &machine, now).is_empty());
+        assert!(drives.decide(&rows, &machine, None, now).is_empty());
         // Read again once each process holds its function.
-        assert!(drives.decide(&rows, &[edu(3, Driven::Claimed), edu(4, Driven::Claimed)], now).is_empty());
+        assert!(drives.decide(&rows, &[edu(3, Driven::Claimed), edu(4, Driven::Claimed)], None, now).is_empty());
     }
 
     /// **A refused start is not asked for again until its record changes**:
@@ -182,14 +189,14 @@ mod tests {
         let rows = [(&row, EDU)];
         let machine = [edu(3, Driven::Free)];
         let mut drives = Drives::default();
-        assert_eq!(started(&drives.decide(&rows, &machine, now)), [3]);
+        assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3]);
         drives.refused(Arrival(3));
         for round in 0..2 * RESTARTS {
-            assert!(drives.decide(&rows, &machine, now).is_empty(), "round {round} started it again");
+            assert!(drives.decide(&rows, &machine, None, now).is_empty(), "round {round} started it again");
         }
         // Another holder took it and gave it back: a change.
-        drives.decide(&rows, &[edu(3, Driven::Claimed)], now);
-        assert_eq!(started(&drives.decide(&rows, &machine, now)), [3]);
+        drives.decide(&rows, &[edu(3, Driven::Claimed)], None, now);
+        assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3]);
     }
 
     /// Every start after a function's first spends its budget, and a function
@@ -203,7 +210,7 @@ mod tests {
         let mut starts = 0;
         let mut given_up = 0;
         for _ in 0..4 * RESTARTS {
-            for act in drives.decide(&rows, &free, now) {
+            for act in drives.decide(&rows, &free, None, now) {
                 match act {
                     Act::Start { .. } => {
                         starts += 1;
@@ -215,10 +222,10 @@ mod tests {
                     }
                 }
             }
-            drives.decide(&rows, &taken, now);
+            drives.decide(&rows, &taken, None, now);
         }
         assert_eq!((starts, given_up), (RESTARTS + 1, 1));
-        assert!(drives.decide(&rows, &free, now + 2 * WINDOW).is_empty());
+        assert!(drives.decide(&rows, &free, None, now + 2 * WINDOW).is_empty());
     }
 
     /// An end owed a restart starts another at once, on the budget; one owed
@@ -229,11 +236,11 @@ mod tests {
         let rows = [(&row, EDU)];
         let machine = [edu(3, Driven::Free), edu(4, Driven::Free)];
         let mut drives = Drives::default();
-        assert_eq!(started(&drives.decide(&rows, &machine, now)), [3, 4]);
+        assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3, 4]);
         drives.ended(Arrival(3), true);
         drives.ended(Arrival(4), false);
-        assert_eq!(started(&drives.decide(&rows, &machine, now)), [3]);
-        assert!(drives.decide(&rows, &machine, now).is_empty());
+        assert_eq!(started(&drives.decide(&rows, &machine, None, now)), [3]);
+        assert!(drives.decide(&rows, &machine, None, now).is_empty());
     }
 
     #[test]

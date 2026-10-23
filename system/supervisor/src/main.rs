@@ -452,6 +452,12 @@ fn main() {
         .take(SYSCAP_LABEL)
         .expect("supervisor: the kernel spawns this program holding the system capability");
     let boot: &'static Boot = Box::leak(Box::new(Boot::take()));
+    let sources = syscap.boot_sources().expect("supervisor: the kernel answers the system capability its boot sources");
+    let booted = toyos_supervisor::boot::read(&sources);
+    for line in &booted.lines {
+        say!("{line}");
+    }
+    BOOT_CONTROLLER.set(booted.controller).expect("supervisor: the boot sources are read once");
 
     // **Everything the supervisor's own files and the SYSTEM server need is
     // made before a file is read**, since the manifest is a file of `/system`
@@ -1065,7 +1071,7 @@ impl<'a> Supervisor<'a> {
                 return refused;
             }
         };
-        for act in self.drives.decide(&rows, &records, Instant::now()) {
+        for act in self.drives.decide(&rows, &records, boot_controller(), Instant::now()) {
             match act {
                 Act::Start { row, entry, function } => match self.start_instance(row, entry, function) {
                     Ok((child, stop)) => self.instances.push(Instance { row, function, child, stop }),
@@ -2934,7 +2940,7 @@ fn start<'a>(
                     Some(records) => records,
                     None => functions.insert(pci_records(syscap).map_err(StartError::Refused)?),
                 };
-                let found = claims::function(&matcher, records);
+                let found = claims::function(&matcher, records, boot_controller());
                 let function = found.as_ref().ok().and_then(|at| records.iter().find(|pci| pci.arrival == *at)).copied();
                 (found.map(DeviceRequest::Function).map_err(Missing::Unresolved), function)
             }
@@ -3358,6 +3364,14 @@ struct Extra {
     stop: Option<Pipe>,
     /// Handles endowed by label, owned by the start until the spawn moves them.
     endow: Vec<(&'static str, toyos::RawHandle)>,
+}
+
+/// The controller a `@boot` entry names, read once at start
+/// ([`toyos_supervisor::boot`]).
+static BOOT_CONTROLLER: std::sync::OnceLock<Option<PciAddr>> = std::sync::OnceLock::new();
+
+fn boot_controller() -> Option<PciAddr> {
+    *BOOT_CONTROLLER.get().expect("supervisor: the boot sources are read before any start")
 }
 
 /// Every record the kernel's inventory answers.

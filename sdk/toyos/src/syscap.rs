@@ -132,6 +132,14 @@ impl SysCap {
         syscall::device_inventory(self.0.raw(), buf)
     }
 
+    /// Where firmware loaded this boot from, as the loader handed it: see
+    /// [`toyos_abi::boot::BootSources`].
+    ///
+    /// Needs [`Rights::INVENTORY`].
+    pub fn boot_sources(&self) -> Result<toyos_abi::boot::BootSources, SyscallError> {
+        syscall::boot_sources(self.0.raw())
+    }
+
     /// One `toyos_abi::counters` record per online CPU, into `buf`; answers
     /// how many. An empty `buf` asks how many CPUs there are — see
     /// [`syscall::counters`].
