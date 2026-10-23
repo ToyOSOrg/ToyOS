@@ -86,8 +86,8 @@ impl<M: Modulus<N>, const N: usize> Residue<M, N> {
         let one = Self(one(), PhantomData);
         self.mul(&one).0
     }
-    /// P-256's field operations inline into the point formulas, with only the
-    /// portable multiplication out of line; every other modulus's are calls.
+    /// P-256's operations inline into the point formulas; its portable
+    /// multiplication and squaring stay out of line.
     #[inline(always)]
     pub(crate) fn add(&self, b: &Self) -> Self {
         if let Form::P256 = M::FORM {

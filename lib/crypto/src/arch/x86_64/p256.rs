@@ -1,17 +1,17 @@
-//! P-256 field multiplication and squaring on BMI2 and ADX, in registers,
-//! with P-256's reduction step (`montgomery`'s `Form::P256`). Multiplication
-//! is the portable field's CIOS; its product rows add low halves on CF
-//! through `adcx` and high halves on OF through `adox` (Intel SDM Vol. 2A,
-//! ADCX, ADOX and MULX). No branch or address depends on the operands.
+//! P-256 field multiplication and squaring on BMI2 and ADX (Intel SDM Vol.
+//! 2A, ADCX, ADOX and MULX). No branch or address depends on the operands.
 
 use core::arch::asm;
 
-/// p's top word; its other words enter the reduction step as shifts.
-const P3: u64 = 0xffff_ffff_0000_0001;
+/// p's top word; its other words enter the reduction step as shifts and
+/// immediates.
+const P3: u64 = <crate::nist::P256Field as crate::montgomery::Modulus<4>>::P[3];
 
-/// a b / 2^256 mod p for a, b < p.
+/// a b / 2^256 mod p for a, b < p, by the portable field's CIOS with P-256's
+/// reduction step (`montgomery`'s `Form::P256`).
 ///
-/// Row i adds a_i b to the five running words, carrying into a sixth; its
+/// Row i adds a_i b to the five running words, carrying into a sixth: low
+/// halves on CF through `adcx`, high halves on OF through `adox`. Its
 /// reduction step, with q the low word (-p^-1 = 1 mod 2^64), adds q 2^96 as
 /// q << 32 at word one and q >> 32 at word two, and q p3 at words three and
 /// four, which leaves word zero zero and drops it. Each row's six words
@@ -166,11 +166,9 @@ pub(super) unsafe fn mul(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     [r0, r1, r2, r3]
 }
 
-/// a^2 / 2^256 mod p for a < p: the six cross products once, doubled, the
-/// four squares added, then four reduction steps in place, each with q the
-/// lowest word left and its carry rippled into the words above; the word
-/// each step clears holds the bit that carries out of the top. The sum is
-/// below 2p, and p is subtracted as in [`mul`].
+/// a^2 / 2^256 mod p for a < p: the cross products once, doubled, the
+/// squares added, then [`mul`]'s reduction steps in place, the word each
+/// step clears gathering the carry out of the top.
 ///
 /// # Safety
 /// The CPU has BMI2 and ADX.
