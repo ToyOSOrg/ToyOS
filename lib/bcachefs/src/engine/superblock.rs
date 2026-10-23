@@ -150,6 +150,16 @@ impl Member {
         }
     }
 
+    /// Writes what a mount changes into a stored entry `e`, of at least
+    /// [`Member::BYTES`]: the rest, such as upstream's error counts, stays.
+    pub(crate) fn patch(&self, e: &mut [u8]) {
+        e[28] = self.bitmap_shift;
+        put64(e, 120, self.seq);
+        put64(e, 128, self.bitmap);
+        put32(e, 136, self.journal_bucket);
+        put32(e, 140, self.journal_offset);
+    }
+
     pub(crate) fn encode(&self) -> [u8; Self::BYTES] {
         let mut b = [0u8; Self::BYTES];
         b[..16].copy_from_slice(&self.uuid);
@@ -198,6 +208,22 @@ pub(crate) struct Root {
     pub ptr: NodePtr,
 }
 
+impl Root {
+    /// A btree_root record's payload: one btree_ptr_v2 key at `Bpos::MAX`,
+    /// for the root node of `btree` at `level`.
+    pub(crate) fn decode(btree: u8, level: u8, payload: &[u8]) -> Result<Root> {
+        let btree = Btree::from_id(u32::from(btree)).ok_or(Error::Unsupported("root of a btree this reader does not know"))?;
+        let (key, value) = Format::UNPACKED.key(payload)?;
+        if key.kind != kind::BTREE_PTR_V2 || key.size != 0 || usize::from(payload[0]) * 8 != payload.len() {
+            return Err(Error::Corrupt("btree root record"));
+        }
+        if key.pos != Bpos::MAX || level > 3 {
+            return Err(Error::Corrupt("btree root at a level or position no root has"));
+        }
+        Ok(Root { btree, level, key, ptr: NodePtr::decode(value)? })
+    }
+}
+
 /// `clean`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Clean {
@@ -205,6 +231,8 @@ pub(crate) struct Clean {
     pub roots: Vec<Root>,
     /// The key-version counter.
     pub key_version: Option<u64>,
+    /// The read and write IO clocks.
+    pub clocks: [u64; 2],
 }
 
 /// scrypt's cost as `crypt` stores it, each a log2.
@@ -293,6 +321,10 @@ impl Superblock {
         let clean = find(field_type::CLEAN).map(clean).transpose()?;
         let crypt = find(field_type::CRYPT).map(crypt).transpose()?;
         let blacklist = find(field_type::BLACKLIST).map(pairs).unwrap_or_default();
+        // Half-open ranges, sorted and apart (A1.38).
+        if blacklist.iter().any(|&(start, end)| start >= end) || blacklist.windows(2).any(|w| w[0].1 >= w[1].0) {
+            return Err(Error::Corrupt("journal sequence blacklist"));
+        }
         let replicas = match (find(field_type::REPLICAS_V0), find(field_type::REPLICAS)) {
             (Some(v0), _) => replicas(v0, false)?,
             (None, Some(v1)) => replicas(v1, true)?,
@@ -371,6 +403,12 @@ impl Superblock {
 
     pub(crate) fn blacklisted(&self, seq: u64) -> bool {
         self.blacklist.iter().any(|&(start, end)| (start..end).contains(&seq))
+    }
+
+    /// Whether every sequence of `[start, end)` is blacklisted. Ranges are
+    /// disjoint and never adjacent, so one must hold it all.
+    pub(crate) fn blacklisted_span(&self, start: u64, end: u64) -> bool {
+        start >= end || self.blacklist.iter().any(|&(s, e)| s <= start && end <= e)
     }
 
     /// The internal UUID, which seeds the node magic and the key wrap.
@@ -516,11 +554,16 @@ pub(crate) fn entries(b: &[u8]) -> Result<Vec<Entry<'_>>> {
     Ok(out)
 }
 
-/// `jset_entry` types `clean` holds.
+/// `jset_entry` record types.
 pub(crate) mod entry_type {
+    pub const BTREE_KEYS: u8 = 0;
     pub const BTREE_ROOT: u8 = 1;
+    pub const BLACKLIST: u8 = 3;
+    pub const BLACKLIST_V2: u8 = 4;
     pub const USAGE: u8 = 5;
     pub const CLOCK: u8 = 7;
+    pub const WRITE_BUFFER_KEYS: u8 = 11;
+    pub const DATETIME: u8 = 12;
 }
 /// The usage record's counter id for the key version.
 pub(crate) const KEY_VERSION: u8 = 2;
@@ -529,22 +572,16 @@ fn clean(body: &[u8]) -> Result<Clean> {
     if body.len() < 16 {
         return Err(Error::Corrupt("clean field shorter than 16 bytes"));
     }
-    let mut clean = Clean { journal_seq: le64(body, 8), roots: Vec::new(), key_version: None };
+    let mut clean = Clean { journal_seq: le64(body, 8), roots: Vec::new(), key_version: None, clocks: [0; 2] };
     for Entry { btree, level, kind: kind_, payload } in entries(&body[16..])? {
         match kind_ {
             entry_type::BTREE_ROOT => {
-                let btree = Btree::from_id(u32::from(btree)).ok_or(Error::Unsupported("root of a btree this reader does not know"))?;
-                let (key, value) = Format::UNPACKED.key(payload)?;
-                if key.kind != kind::BTREE_PTR_V2 || key.size != 0 || usize::from(payload[0]) * 8 != payload.len() {
-                    return Err(Error::Corrupt("btree root record"));
-                }
-                if key.pos != Bpos::MAX || level > 3 {
-                    return Err(Error::Corrupt("btree root at a level or position no root has"));
-                }
-                clean.roots.retain(|r: &Root| r.btree != btree);
-                clean.roots.push(Root { btree, level, key, ptr: NodePtr::decode(value)? });
+                let root = Root::decode(btree, level, payload)?;
+                clean.roots.retain(|r: &Root| r.btree != root.btree);
+                clean.roots.push(root);
             }
             entry_type::USAGE if btree == KEY_VERSION && payload.len() >= 8 => clean.key_version = Some(le64(payload, 0)),
+            entry_type::CLOCK if payload.len() == 16 && payload[0] <= 1 => clean.clocks[usize::from(payload[0])] = le64(payload, 8),
             _ => {}
         }
     }

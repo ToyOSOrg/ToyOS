@@ -90,7 +90,7 @@ fn the_fixtures_type_5_values_are_the_uninverted_crc32c() {
     let v = block_on_ready(Volume::open(&dev)).unwrap();
     let ino = path(&v, "Documents/deep/seq.txt");
     let mut first = None;
-    block_on_ready(v.walk(Btree::Extents, Bpos::new(ino, 1, 0), |_, value| {
+    block_on_ready(super::read::Source::walk(&v, Btree::Extents, Bpos::new(ino, 1, 0), |_, value| {
         first = Some(Extent::decode(value)?.crc.unwrap());
         Ok(false)
     }))
@@ -147,7 +147,7 @@ fn a_flipped_byte_in_an_encrypted_extent_or_node_fails_its_mac() {
         let v = block_on_ready(Volume::unlock(&dev, PASSPHRASE, LIMITS)).unwrap();
         let ino = path(&v, "seq.txt");
         let mut first = None;
-        block_on_ready(v.walk(Btree::Extents, Bpos::new(ino, 1, 0), |k, value| {
+        block_on_ready(super::read::Source::walk(&v, Btree::Extents, Bpos::new(ino, 1, 0), |k, value| {
             first = Some(Extent::decode(value)?.ptr.sector);
             assert_eq!(k.kind, kind::EXTENT);
             Ok(false)
@@ -274,8 +274,14 @@ fn rewrite_leaf(dev: &Image, btree: Btree, at: Bpos, bset_seq: u64, edit: impl F
     let crc = crate::crc32c::crc32c(&bytes[16..end]);
     bytes[..4].copy_from_slice(&crc.to_le_bytes());
     assert!(bytes.len() <= usize::from(ptr.written) * 512, "the rewrite outgrew the node's written sectors");
-    // Zeros over any later bset, which an upstream node may hold.
-    bytes.resize(usize::from(ptr.written) * 512, 0);
+    // The written sectors past it, where an upstream node may hold later
+    // bsets, each a later bset restating the first key: every record up to
+    // the pointer's count is the node's.
+    while bytes.len() < usize::from(ptr.written) * 512 {
+        let at = bytes.len();
+        let later = node::Later { btree, level: 0, seq: ptr.seq, offset: at, journal_seq: bset_seq, keys: &encoded[..1] };
+        bytes.extend(node::encode_later(BLOCK, None, &later).unwrap());
+    }
     let mut blocks = vec![[0u8; BLOCK]; bytes.len() / BLOCK];
     blocks.as_flattened_mut().copy_from_slice(&bytes);
     block_on_ready(dev.write(ptr.ptr.sector / 8, &blocks)).unwrap();
@@ -300,13 +306,14 @@ fn a_journal_sequence_stamped_past_clean_is_found() {
     assert_eq!(block_on_ready(fsck(&v)).unwrap(), [], "the rewrite alone changes nothing");
     let sector = v.roots().iter().find(|r| r.btree == Btree::Inodes).unwrap().ptr.ptr.sector;
 
-    stamp(&dev, 1, 0);
+    // mkfs's volume is clean at its journal's one entry, sequence 1.
+    stamp(&dev, 2, 0);
     let v = block_on_ready(Volume::open(&dev)).unwrap();
-    assert_eq!(block_on_ready(fsck(&v)).unwrap(), [Finding::BsetAboveClean { btree: Btree::Inodes, sector, seq: 1 }]);
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), [Finding::BsetPastJournal { btree: Btree::Inodes, sector, seq: 2 }]);
 
-    stamp(&dev, 0, 1);
+    stamp(&dev, 0, 2);
     let v = block_on_ready(Volume::open(&dev)).unwrap();
-    assert_eq!(block_on_ready(fsck(&v)).unwrap(), [Finding::InodeAboveClean { ino: 4096, seq: 1 }]);
+    assert_eq!(block_on_ready(fsck(&v)).unwrap(), [Finding::InodePastJournal { ino: 4096, seq: 2 }]);
 }
 
 #[test]
@@ -953,7 +960,7 @@ fn findings(dev: &Image) -> Vec<Finding> {
 fn rewrite_extents(dev: &Image, entry: impl Fn(&[u8], &Extent) -> Vec<u8>) {
     let v = block_on_ready(Volume::open(dev)).unwrap();
     let mut data = Vec::new();
-    block_on_ready(v.walk(Btree::Extents, Bpos::MIN, |k, value| {
+    block_on_ready(super::read::Source::walk(&v, Btree::Extents, Bpos::MIN, |k, value| {
         let e = Extent::decode(value)?;
         data.push((k.pos, block_on_ready(super::read::read_bytes(dev, e.ptr.sector * 512, e.crc.unwrap().compressed as usize * 512))?));
         Ok(true)
@@ -1006,14 +1013,13 @@ fn edit_inode(dev: &Image, ino: u64, edit: impl FnOnce(&mut InodeValue)) {
 }
 
 #[test]
-fn a_link_count_size_or_depth_its_keys_disagree_with_is_found() {
+fn a_link_count_or_size_its_keys_disagree_with_is_found() {
     use super::value::inode_field;
     let f = FIRST + 1;
     for (ino, edit, rule) in [
         (f, (|i: &mut InodeValue| i.set(inode_field::NLINK, 2)) as fn(&mut InodeValue), "link count other than its names"),
         (FIRST + 2, |i| i.sectors -= 8, "sectors other than its extents'"),
         (FIRST + 2, |i| i.size = 4096, "extent past its size"),
-        (FIRST, |i| i.set(inode_field::DEPTH, 2), "depth other than its parent's plus one"),
         (FIRST, |i| i.set(inode_field::NLINK, 1), "directory link count other than its subdirectories"),
         (FIRST, |i| i.set(inode_field::DIR_OFFSET, 3), "back-reference to no dirent naming it"),
     ] {
@@ -1046,7 +1052,7 @@ fn a_dirent_off_its_hash_slot_or_naming_a_second_directory_name_is_found() {
 /// The slot `name` hashes to in directory `dir`.
 fn hash_of<D: BlockDev>(v: &Volume<D>, dir: u64, name: &[u8]) -> u64 {
     let mut value = None;
-    block_on_ready(v.walk(Btree::Inodes, Bpos::new(0, dir, u32::MAX), |_, val| {
+    block_on_ready(super::read::Source::walk(v, Btree::Inodes, Bpos::new(0, dir, u32::MAX), |_, val| {
         value = Some(InodeValue::decode(val)?);
         Ok(false)
     }))
@@ -1164,7 +1170,7 @@ fn journal_buckets_keep_their_listed_order() {
 
 fn keys_of<D: BlockDev>(v: &Volume<D>, btree: Btree) -> usize {
     let mut n = 0;
-    block_on_ready(v.walk(btree, Bpos::MIN, |_, _| {
+    block_on_ready(super::read::Source::walk(v, btree, Bpos::MIN, |_, _| {
         n += 1;
         Ok(true)
     }))
@@ -1249,3 +1255,10 @@ fn read_file_reads_a_file_whole_and_refuses_other_nodes() {
     edit_inode(&dev, FIRST + 1, |i| i.size = volume + 1);
     assert_eq!(read_file(&dev.into_inner(), b"d/f"), Err(Error::Corrupt("a file larger than its volume")));
 }
+
+mod admission;
+mod crash;
+mod interleave;
+mod journal;
+mod mount;
+mod ops;

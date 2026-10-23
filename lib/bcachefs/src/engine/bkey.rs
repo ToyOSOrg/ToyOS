@@ -59,6 +59,9 @@ pub struct Key {
 
 /// u64s of an unpacked key header.
 pub(crate) const KEY_U64S: usize = 5;
+/// u64s a key's value takes at most, so that it unpacks into a size byte
+/// (A3.16).
+pub(crate) const MAX_VALUE_U64S: usize = 255 - KEY_U64S;
 /// Format byte of an unpacked key.
 const UNPACKED: u8 = 1;
 
@@ -146,7 +149,11 @@ impl Format {
             UNPACKED => (unpacked(b, len)?, KEY_U64S * 8),
             _ => return Err(Error::Corrupt("key in an unknown format")),
         };
-        Ok((Key { kind, ..key }, &b[header..len]))
+        let value = &b[header..len];
+        if value.len() > MAX_VALUE_U64S * 8 {
+            return Err(Error::Corrupt("key value past 250 u64s"));
+        }
+        Ok((Key { kind, ..key }, value))
     }
 
     fn unpack(&self, b: &[u8], len: usize) -> Result<Key> {
@@ -217,6 +224,24 @@ mod tests {
         let (read, value) = Format::UNPACKED.key(&bytes).unwrap();
         assert_eq!(read, key);
         assert_eq!(value, &[[0xab; 9].as_slice(), &[0; 7]].concat()[..]);
+    }
+
+    /// A packed key of one word may claim up to 254 u64s of value by its
+    /// size byte; past A3.16's 250 it could not be written unpacked, and is
+    /// refused where it is read.
+    #[test]
+    fn a_packed_key_whose_value_could_not_unpack_is_refused() {
+        let mut format = [0u8; 56];
+        format[0] = 1;
+        format[1] = 6;
+        let format = Format::decode(&format).unwrap();
+        let key = |size: u8| {
+            let mut b = alloc::vec![0u8; usize::from(size) * 8];
+            b[..8].copy_from_slice(&(u64::from(size) | 34 << 16).to_le_bytes());
+            b
+        };
+        assert_eq!(format.key(&key(251)).unwrap().1.len(), 250 * 8);
+        assert_eq!(format.key(&key(255)).err(), Some(Error::Corrupt("key value past 250 u64s")));
     }
 
     /// An upstream alloc leaf's format: one word, offset 16 bits

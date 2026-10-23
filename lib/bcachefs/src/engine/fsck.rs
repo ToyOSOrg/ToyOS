@@ -13,8 +13,9 @@ use toyos_blockdev::{BlockDev, BLOCK};
 use super::bkey::{Bpos, Key};
 use super::derive::{Space, Tally};
 use super::mkfs::{self, COMPAT_CLEAN, COMPAT_INITIALIZED, DOWNGRADE, EXTENT_TYPE_U64S, FEATURES};
-use super::read::{hash, read_bytes, Volume};
-use super::superblock::{field_type, member_flag, Superblock, HEADER};
+use super::journal::{records, Found, Record};
+use super::read::{hash, read_bytes, Source, Volume};
+use super::superblock::{field_type, member_flag, Root, Superblock, HEADER};
 use super::value::mode::{S_IFDIR, S_IFLNK, S_IFMT, S_IFREG};
 use super::value::{self, csum_type, data_type, inode_field, inode_flag, AllocV4, Dirent, DirentType, Extent, InodeValue, NodePtr, Subvolume, SUBVOLUME_LIVE};
 use super::{kind, le64, Btree, Result, SECTOR, VERSION};
@@ -32,10 +33,11 @@ pub enum Finding {
     Root(&'static str),
     /// A node outside the member's btree bitmap.
     Bitmap { btree: Btree, sector: u64 },
-    /// A bset stamped with a journal sequence past `clean`'s.
-    BsetAboveClean { btree: Btree, sector: u64, seq: u64 },
-    /// An inode stamped with a journal sequence past `clean`'s.
-    InodeAboveClean { ino: u64, seq: u64 },
+    /// A bset stamped with a journal sequence past the volume's: `clean`'s,
+    /// or the last its journal replays.
+    BsetPastJournal { btree: Btree, sector: u64, seq: u64 },
+    /// An inode stamped with a journal sequence past the volume's.
+    InodePastJournal { ino: u64, seq: u64 },
     /// A key of a type its btree, at that level, does not hold. The reader
     /// passes the non-strict types; ToyOS writes none out of place.
     KeyType { btree: Btree, level: u8, kind: u8, pos: Bpos },
@@ -53,6 +55,9 @@ pub enum Finding {
     Inode { ino: u64, rule: &'static str },
     /// A dirent whose directory, target or slot is wrong, by rule.
     Dirent { dir: u64, offset: u64, rule: &'static str },
+    /// A journal entry breaking a rule every entry ToyOS writes keeps, or
+    /// disagreeing with the superblock, by its sequence and the rule.
+    Journal { seq: u64, rule: &'static str },
     /// A key of a derived btree that the volume's keys do not derive
     /// (`unexpected`), that they derive and it lacks (`missing`), or that
     /// they derive with another value (`differs`).
@@ -64,9 +69,10 @@ pub async fn fsck<D: BlockDev>(volume: &Volume<D>) -> Result<Vec<Finding>> {
     let sb = volume.superblock();
     let mut found = superblock(sb);
     found.extend(copies(volume.dev(), sb).await?);
+    found.extend(journal(volume).await?);
     found.extend(root_world(volume).await?);
     let space = Space::of(sb)?;
-    let mut walk = Walk::new(&space, sb);
+    let mut walk = Walk::new(&space, volume);
     walk.nodes(volume).await?;
     found.append(&mut walk.findings);
     found.extend(walk.namespace(volume.root(), sb));
@@ -81,7 +87,8 @@ fn superblock(sb: &Superblock) -> Vec<Finding> {
     let ext = sb.field(field_type::EXT).unwrap_or(&[]);
     let flags = sb.member.flags;
     let expected_features = FEATURES | if sb.blacklist.is_empty() { 0 } else { 1 << 5 };
-    let expected_compat = COMPAT_INITIALIZED | if clean { COMPAT_CLEAN } else { 0 };
+    // Going read-write leaves the compat bits as they are (A1.41).
+    let expected_compat = COMPAT_INITIALIZED | COMPAT_CLEAN;
     let has_replicas = |t: u8| sb.replicas.iter().any(|r| r.data_type == t && r.devs == [0] && r.required == 1);
     let padded = |kind: u32, want: &[u8]| {
         sb.field(kind).is_some_and(|b| b.len() >= want.len() && b[..want.len()] == *want && b[want.len()..].iter().all(|&x| x == 0))
@@ -100,7 +107,7 @@ fn superblock(sb: &Superblock) -> Vec<Finding> {
         (sb.flag(0, 40, 4) == 1 && sb.flag(0, 44, 4) == 1, "crc32c metadata and data checksum options"),
         (sb.flag(1, 10, 4) <= 1 && (sb.flag(1, 10, 4) == 0 || sb.flag(1, 9, 1) == 1), "encrypted only as ChaCha20/Poly1305 with wide_macs"),
         (h.features == [expected_features, 0], "format's feature set"),
-        (h.compat == [expected_compat, 0], "compat bits 2-5, and 0-1 exactly when clean"),
+        (h.compat == [expected_compat, 0], "compat bits 0-5"),
         (has_replicas(data_type::BTREE), "btree replicas entry"),
         (has_replicas(data_type::JOURNAL) != clean, "journal replicas entry exactly while dirty"),
         (flags & member_flag::FREESPACE_INITIALIZED != 0 && flags & member_flag::INIT_STATE == 0, "member freespace initialized"),
@@ -137,6 +144,70 @@ async fn copies(dev: &impl BlockDev, sb: &Superblock) -> Result<Vec<Finding>> {
         want[..16].fill(0);
         if copy != want {
             found.push(Finding::Copy(offset));
+        }
+    }
+    Ok(found)
+}
+
+/// The journal against the superblock (A1.42, A1.43, A2.13, A2.18). On a
+/// clean volume its newest entry, if it has one, is `clean`'s: of its
+/// sequence, empty, with its roots and key version, and the member resumes
+/// after it. On an unclean volume no flush entry of the window is
+/// blacklisted. Every entry checked carries a root for every btree with one,
+/// a datetime, the key version and both clocks.
+async fn journal<D: BlockDev>(v: &Volume<D>) -> Result<Vec<Finding>> {
+    let sb = v.superblock();
+    let scan = v.scan_journal().await?;
+    let mut found = Vec::new();
+    let roots: BTreeSet<Btree> = v.roots().iter().map(|r| r.btree).collect();
+    let mut checked: Vec<&Found> = Vec::new();
+    if let Some((window, _)) = v.replayed() {
+        for e in scan.entries.range(window.first..=window.last).map(|(_, e)| e) {
+            if sb.blacklisted(e.seq) && e.flush {
+                found.push(Finding::Journal { seq: e.seq, rule: "flush entry of the window blacklisted" });
+            }
+        }
+        checked.extend(scan.in_window(sb, window));
+    } else {
+        let clean = sb.clean.as_ref().expect("a volume opens clean only with its clean field");
+        if let Some(last) = scan.entries.values().rev().find(|e| e.good && !sb.blacklisted(e.seq)) {
+            let records = records(&last.area)?;
+            let mut bad = |ok: bool, rule| {
+                if !ok {
+                    found.push(Finding::Journal { seq: last.seq, rule });
+                }
+            };
+            bad(last.seq == clean.journal_seq, "newest entry of another sequence than clean's");
+            let keys = records.iter().any(|r| matches!(r, Record::Keys { keys, .. } if !keys.is_empty()));
+            bad(last.last_seq == last.seq && !keys, "clean volume's newest entry not empty");
+            let mut entry_roots: Vec<&Root> = records.iter().filter_map(|r| if let Record::Root(root) = r { Some(root) } else { None }).collect();
+            entry_roots.sort_by_key(|r| r.btree);
+            let mut clean_roots: Vec<&Root> = clean.roots.iter().collect();
+            clean_roots.sort_by_key(|r| r.btree);
+            bad(entry_roots == clean_roots, "newest entry's roots other than clean's");
+            let version = records.iter().rev().find_map(|r| if let Record::KeyVersion(v) = r { Some(*v) } else { None });
+            bad(version == clean.key_version, "newest entry's key version other than clean's");
+            let m = &sb.member;
+            bad(
+                (m.journal_bucket as usize, u64::from(m.journal_offset)) == (last.bucket, last.offset + last.sectors),
+                "member's journal position other than after the newest entry",
+            );
+            checked.push(last);
+        }
+    }
+    for e in checked {
+        let records = records(&e.area)?;
+        let has = |want: &dyn Fn(&Record) -> bool| records.iter().any(want);
+        let carried: BTreeSet<Btree> = records.iter().filter_map(|r| if let Record::Root(root) = r { Some(root.btree) } else { None }).collect();
+        for (ok, rule) in [
+            (carried.is_superset(&roots), "no root record for a btree with a root"),
+            (has(&|r| matches!(r, Record::Datetime)), "no datetime record"),
+            (has(&|r| matches!(r, Record::KeyVersion(_))), "no key-version record"),
+            (has(&|r| matches!(r, Record::Clock { write: false, .. })) && has(&|r| matches!(r, Record::Clock { write: true, .. })), "not both clock records"),
+        ] {
+            if !ok {
+                found.push(Finding::Journal { seq: e.seq, rule });
+            }
         }
     }
     Ok(found)
@@ -192,7 +263,7 @@ struct Walk<'a> {
     tally: Tally<'a>,
     findings: Vec<Finding>,
     /// What every bset and inode stamp is at most.
-    clean_seq: u64,
+    journal_seq: u64,
     /// What every non-accounting key's version is at most.
     key_version: u64,
     /// The data checksum type the volume's options imply.
@@ -211,11 +282,15 @@ struct Walk<'a> {
     /// Extent-btree keys by inode and end: type and size.
     extents: BTreeMap<(u64, u64), (u8, u32)>,
     cursor: Option<u64>,
+    /// Orphans: each deleted_inodes key's inode number.
+    orphans: BTreeSet<u64>,
+    /// Logged operations: each key's type, by its position.
+    logged_ops: BTreeMap<Bpos, u8>,
 }
 
 impl<'a> Walk<'a> {
-    fn new(space: &'a Space, sb: &Superblock) -> Self {
-        let clean = sb.clean.as_ref();
+    fn new<D: BlockDev>(space: &'a Space, volume: &Volume<D>) -> Self {
+        let sb = volume.superblock();
         let data_csum = match (sb.encrypted(), sb.flag(1, 9, 1), sb.flag(0, 44, 4)) {
             (true, 1, _) => csum_type::CHACHA_POLY_128,
             (true, _, _) => csum_type::CHACHA_POLY_80,
@@ -226,8 +301,8 @@ impl<'a> Walk<'a> {
             space,
             tally: Tally::new(space),
             findings: Vec::new(),
-            clean_seq: clean.map_or(0, |c| c.journal_seq),
-            key_version: clean.and_then(|c| c.key_version).unwrap_or(0),
+            journal_seq: volume.journal_seq(),
+            key_version: volume.key_version(),
             data_csum,
             alloc: BTreeMap::new(),
             freespace: Vec::new(),
@@ -240,18 +315,25 @@ impl<'a> Walk<'a> {
             dirents: BTreeMap::new(),
             extents: BTreeMap::new(),
             cursor: None,
+            orphans: BTreeSet::new(),
+            logged_ops: BTreeMap::new(),
         }
     }
 
     /// Every node from every root: inside the bitmap, its children tiling
-    /// it, no bset or inode stamped past `clean`'s journal sequence
-    /// (upstream's fsck reports an inode above it, and upstream's
+    /// it, no bset or inode stamped past the volume's journal sequence
+    /// (upstream's fsck reports an inode past it, and upstream's
     /// read-write mount of such a volume loses it), and every key of a type
     /// its btree holds and by its btree's rules.
     async fn nodes<D: BlockDev>(&mut self, v: &Volume<D>) -> Result<()> {
         let sb = v.superblock();
         let node_sectors = u64::from(sb.node_sectors());
         let mut seen = BTreeSet::new();
+        for btree in Btree::ALL.into_iter().filter(|b| v.roots().iter().all(|r| r.btree != *b)) {
+            for (key, value) in v.rootless(btree)? {
+                self.leaf(btree, &key, &value)?;
+            }
+        }
         for root in v.roots() {
             let btree = root.btree;
             if root.ptr.min != Bpos::MIN {
@@ -270,8 +352,8 @@ impl<'a> Walk<'a> {
                     self.findings.push(Finding::Bitmap { btree, sector });
                 }
                 let node = v.node(btree, level, &ptr, max).await?;
-                for &seq in node.bset_seqs.iter().filter(|&&s| s > self.clean_seq) {
-                    self.findings.push(Finding::BsetAboveClean { btree, sector, seq });
+                for &seq in node.bset_seqs.iter().filter(|&&s| s > self.journal_seq) {
+                    self.findings.push(Finding::BsetPastJournal { btree, sector, seq });
                 }
                 if level > 0 && node.keys.is_empty() {
                     self.findings.push(Finding::Topology { btree, sector, rule: "interior node with no children" });
@@ -333,13 +415,18 @@ impl<'a> Walk<'a> {
                 self.backpointers.insert(pos, value.to_vec());
             }
             (Btree::Accounting, kind::ACCOUNTING) => {
-                self.accounting.insert(pos, value.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect());
+                // A stored total of zero is valid and compared as absent, as
+                // upstream compares it (A7.26-A7.28).
+                let counters: Vec<u64> = value.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect();
+                if counters.iter().any(|&c| c != 0) {
+                    self.accounting.insert(pos, counters);
+                }
             }
             (Btree::Inodes, kind::INODE | kind::INODE_V2) => return Err(super::Error::Unsupported("inode in a format before inode_v3")),
             (Btree::Inodes, kind::INODE_V3) if root_snapshot => {
                 let inode = InodeValue::decode(value)?;
-                if inode.journal_seq > self.clean_seq {
-                    self.findings.push(Finding::InodeAboveClean { ino: pos.offset, seq: inode.journal_seq });
+                if inode.journal_seq > self.journal_seq {
+                    self.findings.push(Finding::InodePastJournal { ino: pos.offset, seq: inode.journal_seq });
                 }
                 self.inodes.insert(pos.offset, inode);
             }
@@ -354,6 +441,13 @@ impl<'a> Walk<'a> {
                 self.extents.insert((pos.inode, pos.offset), (key.kind, key.size));
             }
             (Btree::LoggedOps, kind::INODE_ALLOC_CURSOR) if pos == Bpos::new(1, 1, 0) && value.len() >= 16 => self.cursor = Some(le64(value, 8)),
+            (Btree::LoggedOps, _) if pos.inode == 0 => {
+                self.logged_ops.insert(pos, key.kind);
+            }
+            (Btree::DeletedInodes, kind::SET) if pos.inode == 0 && root_snapshot => {
+                self.orphans.insert(pos.offset);
+            }
+            (Btree::DeletedInodes, _) => self.findings.push(Finding::Key { btree, pos, rule: "deleted_inodes key of another snapshot or shape" }),
             _ => {}
         }
         let snapshots = matches!(btree, Btree::Extents | Btree::Inodes | Btree::Dirents | Btree::Xattrs | Btree::Damage);
@@ -405,6 +499,23 @@ impl<'a> Walk<'a> {
     /// names and extents, directories against the tree they form.
     fn namespace(&self, root: u64, sb: &Superblock) -> Vec<Finding> {
         let mut found = Vec::new();
+        let clean = sb.clean_flag();
+        for &ino in self.orphans.iter().filter(|ino| !self.inodes.contains_key(ino)) {
+            found.push(Finding::Key { btree: Btree::DeletedInodes, pos: Bpos::new(0, ino, mkfs::ROOT_SNAPSHOT), rule: "deleted_inodes key of no inode" });
+        }
+        if clean {
+            for &ino in &self.orphans {
+                found.push(Finding::Key { btree: Btree::DeletedInodes, pos: Bpos::new(0, ino, mkfs::ROOT_SNAPSHOT), rule: "deleted_inodes key on a clean volume" });
+            }
+        }
+        for (&pos, &kind_) in &self.logged_ops {
+            if clean {
+                found.push(Finding::Key { btree: Btree::LoggedOps, pos, rule: "logged operation on a clean volume" });
+            }
+            if kind_ != kind::LOGGED_OP_TRUNCATE {
+                found.push(Finding::Key { btree: Btree::LoggedOps, pos, rule: "logged operation other than a truncate" });
+            }
+        }
         let mut names_of: BTreeMap<u64, u64> = BTreeMap::new();
         let mut subdirs: BTreeMap<u64, u64> = BTreeMap::new();
         // Where the run of consecutive keys holding the current one starts:
@@ -490,7 +601,12 @@ impl<'a> Walk<'a> {
                 (v.flags & inode_flag::ACLS == 0, "ACL flag without its xattr"),
                 (v.field(inode_field::PARENT_SUBVOL) == 0, "parent subvolume"),
                 ((v.field(inode_field::SUBVOL) != 0) == (ino == root), "subvolume id other than the root directory's"),
-                (v.flags & inode_flag::UNLINKED == 0, "unlinked on a clean volume"),
+                // A directory is reclaimed in the transaction that removes
+                // its last name; only a file or symlink is an orphan, and
+                // only while the volume is unclean (A8.10, A8.14, C5.1).
+                (v.flags & inode_flag::UNLINKED == 0 || v.mode() & S_IFMT != S_IFDIR, "unlinked directory"),
+                (v.flags & inode_flag::UNLINKED == 0 || v.mode() & S_IFMT == S_IFDIR || !clean, "unlinked on a clean volume"),
+                ((v.flags & inode_flag::UNLINKED != 0 && v.mode() & S_IFMT != S_IFDIR) == self.orphans.contains(&ino), "orphan and deleted_inodes key disagree"),
             ];
             for (ok, rule) in rules {
                 if !ok {
@@ -519,10 +635,9 @@ impl<'a> Walk<'a> {
                 if names != 1 || backref == (0, 0) {
                     bad("directory not named once, by its back-reference");
                 }
-                let parent_depth = self.inodes.get(&backref.0).map(|p| p.field(inode_field::DEPTH));
-                if parent_depth.is_none_or(|d| d.checked_add(1) != Some(v.field(inode_field::DEPTH))) {
-                    bad("depth other than its parent's plus one");
-                }
+                // A depth is not checked: a moved directory takes its new
+                // parent's plus one, but its subtree keeps theirs, which
+                // upstream renumbers silently (A9.42).
                 if !reachable.contains(&ino) {
                     bad("directory unreachable from the root");
                 }
@@ -532,9 +647,8 @@ impl<'a> Walk<'a> {
             if nlink != names {
                 bad("link count other than its names");
             }
-            if names > 0 && backref == (0, 0) {
-                bad("named without a back-reference");
-            }
+            // A file's back-reference may be cleared while other names
+            // remain (A5.20).
             let (sectors, end) = data.get(&ino).copied().unwrap_or((0, 0));
             if v.flags & inode_flag::I_SECTORS_DIRTY == 0 && v.sectors != sectors {
                 bad("sectors other than its extents'");
@@ -639,7 +753,7 @@ impl<'a> Walk<'a> {
             }
         }
         for (pos, v) in &self.bucket_gens {
-            let want = d.bucket_gens.get(&pos.offset).copied().unwrap_or([0; 256]);
+            let want = d.bucket_gens.get(&pos.offset).copied().unwrap_or([0; value::BUCKET_GENS_BYTES]);
             if pos.inode != 0 || pos.offset >= s.nbuckets.div_ceil(256) || v[..] != want[..] {
                 put(Btree::BucketGens, *pos, "differs");
             }

@@ -13,11 +13,11 @@ use toyos_crypto::Random;
 use super::bkey::{Bpos, Key};
 use super::crypt::MasterKey;
 use super::node::{self, Build};
-use super::superblock::{entry_type, field_type, member_flag, Crypt, Field, Header, Kdf, Layout, Member, Superblock, KEY_VERSION, LAYOUT, MAX_NODE_SECTORS, PRIMARY};
+use super::superblock::{field_type, member_flag, Crypt, Field, Header, Kdf, Layout, Member, Superblock, LAYOUT, MAX_NODE_SECTORS, PRIMARY};
 use super::derive::{Space, Tally};
 use super::tree::{Populated, Tree};
 use super::value::{self, data_type, Alloc, NodePtr, Ptr};
-use super::{kind, put16, put64, Btree, Error, Result, SECTOR, VERSION};
+use super::{journal, kind, put16, put64, Btree, Error, Result, SECTOR, VERSION};
 
 /// What a volume is formatted with.
 pub struct Options<'a> {
@@ -285,17 +285,7 @@ fn fields(geometry: &Geometry, member: &Member, crypt: Option<&Crypt>, roots: &[
     put64(&mut journal, 0, geometry.journal.0);
     put64(&mut journal, 8, geometry.journal.1);
 
-    // `clean`: sequence 0, the key version, both clocks at 0, every root.
-    let mut clean = alloc::vec![0u8; 16];
-    record(&mut clean, KEY_VERSION, 0, entry_type::USAGE, &0u64.to_le_bytes());
-    for rw in 0..2u8 {
-        let mut clock = [0u8; 16];
-        clock[0] = rw;
-        record(&mut clean, 0, 0, entry_type::CLOCK, &clock);
-    }
-    for (btree, level, key) in roots {
-        record(&mut clean, *btree as u8, *level, entry_type::BTREE_ROOT, key);
-    }
+    let clean = journal::clean_body(0, roots.iter().map(|(b, l, k)| (*b, *l, &k[..])), 0, [0; 2]);
 
     let mut out = alloc::vec![
         Field { kind: field_type::EXT, body: ext },
@@ -315,18 +305,7 @@ fn fields(geometry: &Geometry, member: &Member, crypt: Option<&Crypt>, roots: &[
     out
 }
 
-/// Appends a `jset_entry` record.
-fn record(out: &mut Vec<u8>, btree: u8, level: u8, kind_: u8, payload: &[u8]) {
-    let mut header = [0u8; 8];
-    put16(&mut header, 0, (payload.len() / 8) as u16);
-    header[2] = btree;
-    header[3] = level;
-    header[4] = kind_;
-    out.extend_from_slice(&header);
-    out.extend_from_slice(payload);
-}
-
-async fn write(dev: &impl BlockDev, sector: u64, bytes: &[u8]) -> Result<()> {
+pub(crate) async fn write(dev: &impl BlockDev, sector: u64, bytes: &[u8]) -> Result<()> {
     let at = sector * SECTOR as u64;
     assert!(at.is_multiple_of(BLOCK as u64), "a write off a block boundary");
     let mut blocks = alloc::vec![[0u8; BLOCK]; bytes.len().div_ceil(BLOCK)];
@@ -449,7 +428,7 @@ impl Geometry {
 }
 
 /// A first bset fills at most two thirds of its node, as upstream splits.
-fn capacity(node_bytes: usize) -> usize {
+pub(crate) const fn capacity(node_bytes: usize) -> usize {
     node_bytes * 2 / 3
 }
 
@@ -664,7 +643,7 @@ fn shape(sizes: impl Iterator<Item = usize>, node_bytes: usize) -> Result<Vec<Ve
 /// grows until the even split fits. Each boundary leaves every later node
 /// at least one entry, so no node is empty, and one node per entry always
 /// fits, so the count stops there at the latest.
-fn spread(sizes: &[usize], cap: usize) -> Vec<core::ops::Range<usize>> {
+pub(crate) fn spread(sizes: &[usize], cap: usize) -> Vec<core::ops::Range<usize>> {
     let total: usize = sizes.iter().sum();
     let mut prefix = alloc::vec![0];
     prefix.extend(sizes.iter().scan(0, |sum, &size| {

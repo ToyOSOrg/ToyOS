@@ -35,14 +35,23 @@ implementation, and the gap between the two formats recorded above is the measur
 of it. The format is implemented clean-room (root `CLAUDE.md`): an analyst reads
 upstream and writes the specification, and a different agent implements from it.
 
-**Where it stands.** `lib/bcachefs/src/engine` reads clean single-device 1.39
-volumes, crc32c and ChaCha20/Poly1305, and formats a clean volume holding a tree
+**Where it stands.** `lib/bcachefs/src/engine` reads single-device 1.39
+volumes, crc32c and ChaCha20/Poly1305, replaying the journal of one not cleanly
+unmounted, and formats a clean volume holding a tree
 of directories, files, symlinks and hard links (directories alone when
 encrypted), with all its allocator and accounting state, that upstream's
 `bcachefs fsck -n -K` passes. Its fsck derives
 that state from a volume's keys and compares, and the derivation agrees with
-what upstream stored in its own volumes. It replaced a read side written from
-upstream's headers. Its tests read volumes upstream's tools wrote
+what upstream stored in its own volumes, a replayed journal's included; it
+checks the journal against the superblock. It mounts a volume read-write
+(`Mount`): namespace operations as journaled transactions, nodes appended to or
+split by reclaim, a crash replayed and a clean unmount, which upstream's fsck
+also passes. It refuses to write a volume of blocks under 4 KiB or nodes under
+16 KiB (`issues/the-bcachefs-writer-refuses-small-blocks-and-nodes.md`). Btree buckets are not yet reused (B6), file data is not yet written
+(B7), so symlinks are not yet created online, and its reclaim reserves are
+sized for common rewrites
+(`issues/bcachefs-reclaim-reserves-are-sized-for-common-rewrites.md`). It
+replaced a read side written from upstream's headers. Its tests read volumes upstream's tools wrote
 (`lib/bcachefs/tests/fixtures/`). The build writes ROOT with it, at the
 smallest size that leaves no bucket free, and the loader, `imgstat` and the
 SYSTEM file server read ROOT through its reader. The rest of the crate is

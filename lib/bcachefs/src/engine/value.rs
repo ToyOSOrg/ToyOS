@@ -502,6 +502,9 @@ pub(crate) mod data_type {
 /// The fields of an alloc_v4 value a check compares.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct AllocV4 {
+    pub journal_seq_nonempty: u64,
+    /// Bit 0 need_discard, bit 1 needs-gen-increment.
+    pub flags: u32,
     pub gen: u8,
     pub oldest_gen: u8,
     pub data_type: u8,
@@ -510,6 +513,7 @@ pub(crate) struct AllocV4 {
     pub stripe_refcount: u32,
     pub stripe_sectors: u32,
     pub journal_seq_empty: u64,
+    pub io_time_write: u64,
 }
 
 impl AllocV4 {
@@ -529,6 +533,9 @@ impl AllocV4 {
         }
         let get32 = |at: usize| if v.len() >= at + 4 { le32(v, at) } else { 0 };
         Ok(AllocV4 {
+            journal_seq_nonempty: le64(v, 0),
+            flags,
+            io_time_write: le64(v, 32),
             gen: v[12],
             oldest_gen: v[13],
             data_type: v[14],
@@ -558,8 +565,15 @@ impl Alloc {
 /// A backpointer value: the key holding the pointer, in `btree` at
 /// `level` (a node's level plus one for a node pointer, 0 for an extent)
 /// and at `pos`, and the pointer's data type, generation and sectors.
-pub(crate) fn backpointer(btree: u8, level: u8, data_type: u8, gen: u8, sectors: u32, pos: Bpos) -> [u8; 32] {
-    let mut v = [0u8; 32];
+/// Bytes of a backpointer's value.
+pub(crate) const BACKPOINTER_BYTES: usize = 32;
+/// Bytes of a bucket_gens value: one generation of each of 256 buckets.
+pub(crate) const BUCKET_GENS_BYTES: usize = 256;
+/// Counters an accounting value holds at most (A7.4).
+pub(crate) const MAX_COUNTERS: usize = 3;
+
+pub(crate) fn backpointer(btree: u8, level: u8, data_type: u8, gen: u8, sectors: u32, pos: Bpos) -> [u8; BACKPOINTER_BYTES] {
+    let mut v = [0u8; BACKPOINTER_BYTES];
     v[0] = btree;
     v[1] = level;
     v[2] = data_type;

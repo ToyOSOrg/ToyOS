@@ -22,6 +22,7 @@ pub const MIN_KDF: Kdf = Kdf { log_n: 1, log_r: 0, log_p: 0 };
 pub(crate) enum Domain {
     Extent = 0x1000_0000,
     Node = 0x2000_0000,
+    Journal = 0x3000_0000,
 }
 /// Selects the MAC key's nonce.
 const MAC: u32 = 0x8000_0000;
@@ -35,6 +36,11 @@ impl Nonce {
     /// stamped `journal_seq`.
     pub(crate) fn node(offset: u32, seq: u64, journal_seq: u64) -> Nonce {
         Nonce([offset, seq as u32, (seq >> 32) as u32, journal_seq as u32 ^ Domain::Node as u32])
+    }
+
+    /// The journal entry of sequence `seq`.
+    pub(crate) fn journal(seq: u64) -> Nonce {
+        Nonce([0, seq as u32, (seq >> 32) as u32, Domain::Journal as u32])
     }
 
     /// An uncompressed extent of version `(hi, lo)` whose crc
@@ -169,4 +175,51 @@ fn wrap(key: &[u8; 32], uuid: &[u8; 16], bytes: &mut [u8; 40]) -> Result<()> {
     let mut nonce = [0u8; 12];
     nonce[4..].copy_from_slice(&uuid[..8]);
     chacha::xor(key, &nonce, 0, bytes).map_err(|_| Error::Corrupt("keystream past its counter"))
+}
+
+/// Every nonce the engine encrypts under, with what it encrypted: a nonce
+/// used twice under one key over two plaintexts leaks both (§3.5). Tests
+/// read it; the engine only records.
+#[cfg(test)]
+pub(crate) mod oracle {
+    use alloc::collections::BTreeMap;
+    use alloc::vec::Vec;
+    use core::cell::RefCell;
+
+    use toyos_crypto::hash::Sha256;
+
+    use super::{MasterKey, Nonce};
+
+    /// (key digest, nonce) to the digest of each plaintext seen under it.
+    type Seen = BTreeMap<([u8; 32], [u32; 4]), Vec<[u8; 32]>>;
+
+    std::thread_local! {
+        static SEEN: RefCell<Seen> = RefCell::default();
+    }
+
+    pub(crate) fn record(key: &MasterKey, nonce: Nonce, plaintext: &[u8]) {
+        let entry = (Sha256::digest(&key.0).unwrap(), nonce.0);
+        let digest = Sha256::digest(plaintext).unwrap();
+        SEEN.with(|s| {
+            let mut s = s.borrow_mut();
+            let seen = s.entry(entry).or_default();
+            if !seen.contains(&digest) {
+                seen.push(digest);
+            }
+        });
+    }
+
+    /// The nonces used over more than one plaintext.
+    pub(crate) fn reused() -> Vec<[u32; 4]> {
+        SEEN.with(|s| s.borrow().iter().filter(|(_, d)| d.len() > 1).map(|((_, n), _)| *n).collect())
+    }
+
+    pub(crate) fn reset() {
+        SEEN.with(|s| s.borrow_mut().clear());
+    }
+
+    /// How many nonces have been used.
+    pub(crate) fn nonces() -> usize {
+        SEEN.with(|s| s.borrow().len())
+    }
 }

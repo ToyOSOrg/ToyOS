@@ -1,8 +1,9 @@
-//! A clean volume, read: its superblock chosen among the copies, its
-//! btrees from `clean`'s roots, and files, directories and symlinks over
-//! them.
+//! A volume, read: its superblock chosen among the copies, its btrees from
+//! `clean`'s roots or, when it was not cleanly unmounted, from its journal's
+//! replay laid over the nodes, and files, directories and symlinks over them.
 
 use alloc::collections::BTreeSet;
+use alloc::rc::Rc;
 use alloc::vec::Vec;
 
 use toyos_blockdev::{block_on_ready, BlockDev, ReadOnlyBytes, BLOCK};
@@ -10,7 +11,10 @@ use toyos_crypto::{scrypt, siphash};
 
 use super::bkey::{Bpos, Key};
 use super::crypt::{MasterKey, Nonce};
+use super::journal::{self, Replay, Window};
 use super::node::{self, Expect, Node};
+use super::cache::Keys;
+use super::mkfs::ROOT_SNAPSHOT;
 use super::superblock::{Layout, Root, Superblock, HEADER, LAYOUT, MAX_BYTES, PRIMARY};
 use super::value::mode::{S_IFDIR, S_IFLNK, S_IFMT};
 use super::value::csum_type as csum;
@@ -18,14 +22,31 @@ use super::value::{inode_field, inode_flag, Dirent, DirentType, Extent, InodeVal
 use super::{kind, le32, Btree, Error, Result, SECTOR};
 use crate::crc32c::{crc32c, crc32c_zero};
 
-/// A clean volume open for reading.
+/// A volume open for reading.
 pub struct Volume<D> {
     dev: D,
     sb: Superblock,
     key: Option<MasterKey>,
-    /// The root subvolume's snapshot, the only one read.
-    snapshot: u32,
+    roots: Vec<Root>,
+    /// The key-version counter.
+    key_version: u64,
+    /// The newest journal sequence whose keys are visible: `clean`'s, or the
+    /// replayed window's last.
+    journal_seq: u64,
+    /// What an unclean volume's journal lays over its nodes.
+    replay: Option<(Window, Replay)>,
     root: u64,
+}
+
+/// What a [`Volume`] opened: the parts a read-write mount takes over.
+pub(crate) struct Parts<D> {
+    pub dev: D,
+    pub sb: Superblock,
+    pub key: Option<MasterKey>,
+    pub roots: Vec<Root>,
+    pub key_version: u64,
+    pub replay: Option<(Window, Replay)>,
+    pub root: u64,
 }
 
 /// A file's attributes.
@@ -104,14 +125,20 @@ impl<D: BlockDev> Volume<D> {
         if sb.encrypted() != sb.crypt.is_some() {
             return Err(Error::Corrupt("encryption option and crypt field disagree"));
         }
-        if !sb.clean_flag() || sb.clean.is_none() {
-            return Err(Error::Unsupported("a volume not cleanly unmounted: its journal needs replay"));
-        }
         let m = &sb.member;
         if m.nbuckets * u64::from(m.bucket_sectors) > dev.blocks() * (BLOCK / SECTOR) as u64 {
             return Err(Error::Corrupt("member's buckets past the device"));
         }
-        let mut volume = Volume { dev, sb, key, snapshot: 0, root: 0 };
+        let (roots, key_version, journal_seq, replay) = if sb.clean_flag() {
+            let clean = sb.clean.as_ref().ok_or(Error::Corrupt("a volume marked clean without its clean field"))?;
+            (clean.roots.clone(), clean.key_version.unwrap_or(0), clean.journal_seq, None)
+        } else {
+            let scan = journal::scan(&dev, &sb, key.as_ref()).await?;
+            let window = scan.window(&sb)?.ok_or(Error::Corrupt("a volume not cleanly unmounted with no journal entry"))?;
+            let replay = journal::replay(&scan, &sb, &window)?;
+            (replay.roots.clone(), replay.key_version.unwrap_or(0), window.last, Some((window, replay)))
+        };
+        let mut volume = Volume { dev, sb, key, roots, key_version, journal_seq, replay, root: 0 };
         let (k, v) = volume.get(Btree::Subvolumes, Bpos::new(0, u64::from(super::mkfs::ROOT_SUBVOLUME), 0)).await?.ok_or(Error::Corrupt("no root subvolume"))?;
         if k.kind != kind::SUBVOLUME {
             return Err(Error::Corrupt("root subvolume of another type"));
@@ -122,9 +149,14 @@ impl<D: BlockDev> Volume<D> {
         if subvolume.snapshot != super::mkfs::ROOT_SNAPSHOT {
             return Err(Error::Unsupported("a root subvolume that has been snapshotted"));
         }
-        volume.snapshot = subvolume.snapshot;
         volume.root = subvolume.inode;
         Ok(volume)
+    }
+
+    /// Its parts, for a read-write mount to take over.
+    pub(crate) fn into_parts(self) -> Parts<D> {
+        let Volume { dev, sb, key, roots, key_version, replay, root, .. } = self;
+        Parts { dev, sb, key, roots, key_version, replay, root }
     }
 
     pub fn superblock(&self) -> &Superblock {
@@ -135,57 +167,91 @@ impl<D: BlockDev> Volume<D> {
         &self.dev
     }
 
+    /// Every entry of the journal's ring.
+    pub(crate) async fn scan_journal(&self) -> Result<journal::Scan> {
+        journal::scan(&self.dev, &self.sb, self.key.as_ref()).await
+    }
+
     /// The root directory's inode number.
     pub fn root(&self) -> u64 {
         self.root
     }
 
     pub(crate) fn roots(&self) -> &[Root] {
-        &self.sb.clean.as_ref().expect("opened clean").roots
+        &self.roots
     }
 
-    fn root_of(&self, btree: Btree) -> Option<&Root> {
-        self.roots().iter().find(|r| r.btree == btree)
+    /// The key-version counter: every key's version but accounting's is at
+    /// most this.
+    pub(crate) fn key_version(&self) -> u64 {
+        self.key_version
     }
 
-    /// The node `ptr` points at, `level` of `btree`, spanning `[min, max]`.
+    /// The newest journal sequence a visible key or bset may carry.
+    pub(crate) fn journal_seq(&self) -> u64 {
+        self.journal_seq
+    }
+
+    /// The replay window and what it replayed, on an unclean volume.
+    pub(crate) fn replayed(&self) -> Option<&(Window, Replay)> {
+        self.replay.as_ref()
+    }
+
+    /// The node `ptr` points at, `level` of `btree`, spanning `[min, max]`,
+    /// with the journal's replay laid over its keys.
     pub(crate) async fn node(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Node> {
-        let sectors = u32::from(ptr.written);
-        if sectors > self.sb.node_sectors() || ptr.ptr.dev != 0 {
-            return Err(Error::Corrupt("btree pointer past its node, or to another device"));
+        let mut node = self.stored(btree, level, ptr, max).await?;
+        if let Some((_, replay)) = &self.replay {
+            node.keys = replay.over(btree, level, ptr.min, max, node.keys)?;
         }
-        self.in_one_bucket(ptr.ptr.sector, u64::from(self.sb.node_sectors()))?;
-        let bytes = read_bytes(&self.dev, ptr.ptr.sector * SECTOR as u64, sectors as usize * SECTOR).await?;
-        let expect = Expect { btree, level, seq: ptr.seq, min: ptr.min, max };
-        node::decode(&self.sb, self.key.as_ref(), &expect, bytes)
+        Ok(node)
     }
 
-    /// A pointed range lies in one bucket of the device.
-    fn in_one_bucket(&self, sector: u64, sectors: u64) -> Result<()> {
-        let m = &self.sb.member;
-        let bucket = u64::from(m.bucket_sectors);
-        let first = sector / bucket;
-        if first < u64::from(m.first_bucket) || first >= m.nbuckets || sector % bucket + sectors > bucket {
-            return Err(Error::Corrupt("pointer outside one bucket of the device"));
-        }
-        Ok(())
+    /// The node `ptr` points at as the medium holds it.
+    pub(crate) async fn stored(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Node> {
+        read_node(&self.dev, &self.sb, self.key.as_ref(), btree, level, ptr, max).await
     }
+}
+
+/// What the namespace reads stand on: a volume's btrees, their nodes read
+/// from the medium or held in memory, under the root subvolume's snapshot.
+#[allow(async_fn_in_trait)]
+pub(crate) trait Source {
+    type Dev: BlockDev;
+
+    fn dev(&self) -> &Self::Dev;
+    fn superblock(&self) -> &Superblock;
+    fn master_key(&self) -> Option<&MasterKey>;
+    /// The root directory's inode number.
+    fn root_dir(&self) -> u64;
+    fn root_of(&self, btree: Btree) -> Option<Root>;
+    /// The keys of `btree` while it has no root.
+    fn rootless(&self, btree: Btree) -> Result<Vec<(Key, Vec<u8>)>>;
+    /// The keys of the node `ptr` points at, `level` of `btree`, spanning
+    /// `[ptr.min, max]`.
+    async fn keys(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Keys>;
 
     /// Visits `btree`'s keys from `from` in order until `visit` answers
     /// `false`.
-    pub(crate) async fn walk(&self, btree: Btree, from: Bpos, mut visit: impl FnMut(&Key, &[u8]) -> Result<bool>) -> Result<()> {
-        let Some(root) = self.root_of(btree) else { return Ok(()) };
-        let mut stack: Vec<(Node, usize)> = Vec::new();
-        let node = self.node(btree, root.level, &root.ptr, root.key.pos).await?;
-        let start = node.keys.partition_point(|(k, _)| k.pos < from);
-        stack.push((node, start));
-        while let Some((node, i)) = stack.last_mut() {
-            let Some((key, value)) = node.keys.get(*i) else {
+    async fn walk(&self, btree: Btree, from: Bpos, mut visit: impl FnMut(&Key, &[u8]) -> Result<bool>) -> Result<()> {
+        let Some(root) = self.root_of(btree) else {
+            for (key, value) in self.rootless(btree)?.iter().filter(|(k, _)| k.pos >= from) {
+                if !visit(key, value)? {
+                    break;
+                }
+            }
+            return Ok(());
+        };
+        let keys = self.keys(btree, root.level, &root.ptr, root.key.pos).await?;
+        let start = keys.partition_point(|(k, _)| k.pos < from);
+        let mut stack: Vec<(u8, Keys, usize)> = alloc::vec![(root.level, keys, start)];
+        while let Some((level, keys, i)) = stack.last_mut() {
+            let Some((key, value)) = keys.get(*i) else {
                 stack.pop();
                 continue;
             };
             *i += 1;
-            if node.level == 0 {
+            if *level == 0 {
                 if !visit(key, value)? {
                     return Ok(());
                 }
@@ -194,16 +260,16 @@ impl<D: BlockDev> Volume<D> {
             if key.kind != kind::BTREE_PTR_V2 {
                 return Err(Error::Unsupported("interior key other than btree_ptr_v2, such as a v1 btree_ptr"));
             }
-            let (level, ptr, max) = (node.level - 1, NodePtr::decode(value)?, key.pos);
-            let child = self.node(btree, level, &ptr, max).await?;
-            let start = child.keys.partition_point(|(k, _)| k.pos < from);
-            stack.push((child, start));
+            let (level, ptr, max) = (*level - 1, NodePtr::decode(value)?, key.pos);
+            let child = self.keys(btree, level, &ptr, max).await?;
+            let start = child.partition_point(|(k, _)| k.pos < from);
+            stack.push((level, child, start));
         }
         Ok(())
     }
 
     /// The key at `pos` in `btree`, if any.
-    pub(crate) async fn get(&self, btree: Btree, pos: Bpos) -> Result<Option<(Key, Vec<u8>)>> {
+    async fn get(&self, btree: Btree, pos: Bpos) -> Result<Option<(Key, Vec<u8>)>> {
         let mut found = None;
         self.walk(btree, pos, |k, v| {
             if k.pos == pos {
@@ -216,8 +282,8 @@ impl<D: BlockDev> Volume<D> {
     }
 
     /// The inode numbered `ino`.
-    pub async fn inode(&self, ino: u64) -> Result<Inode> {
-        let (key, value) = self.get(Btree::Inodes, Bpos::new(0, ino, self.snapshot)).await?.ok_or(Error::NotFound)?;
+    async fn inode(&self, ino: u64) -> Result<Inode> {
+        let (key, value) = self.get(Btree::Inodes, Bpos::new(0, ino, ROOT_SNAPSHOT)).await?.ok_or(Error::NotFound)?;
         match key.kind {
             kind::INODE_V3 => {}
             kind::INODE | kind::INODE_V2 => return Err(Error::Unsupported("inode in a format before inode_v3")),
@@ -253,8 +319,8 @@ impl<D: BlockDev> Volume<D> {
     /// A stored time, signed units since the time base, in
     /// nanoseconds since the epoch.
     fn time(&self, stored: u64) -> i64 {
-        let precision = i128::from(self.sb.header.time_precision);
-        let ns = (i128::from(stored as i64) + i128::from(self.sb.header.time_base) / precision) * precision;
+        let precision = i128::from(self.superblock().header.time_precision);
+        let ns = (i128::from(stored as i64) + i128::from(self.superblock().header.time_base) / precision) * precision;
         ns.clamp(i128::from(i64::MIN), i128::from(i64::MAX)) as i64
     }
 
@@ -269,9 +335,9 @@ impl<D: BlockDev> Volume<D> {
 
     /// The entry `name` in directory `dir`: its name's hash slot, then the run
     /// of entries and whiteouts after it.
-    pub async fn lookup(&self, dir: u64, name: &[u8]) -> Result<Option<DirEntry>> {
+    async fn lookup(&self, dir: u64, name: &[u8]) -> Result<Option<DirEntry>> {
         let inode = self.directory(dir).await?;
-        let start = Bpos::new(dir, hash(&inode.value, name)?, self.snapshot);
+        let start = Bpos::new(dir, hash(&inode.value, name)?, ROOT_SNAPSHOT);
         let mut expected = start;
         let mut found = None;
         let mut failed = None;
@@ -306,8 +372,8 @@ impl<D: BlockDev> Volume<D> {
 
     /// The node at `path`, names separated by `/`, from the root directory
     /// and following no symlink; the empty path is the root.
-    pub async fn resolve(&self, path: &[u8]) -> Result<u64> {
-        let mut ino = self.root;
+    async fn resolve(&self, path: &[u8]) -> Result<u64> {
+        let mut ino = self.root_dir();
         for name in path.split(|&b| b == b'/').filter(|name| !name.is_empty()) {
             ino = self.lookup(ino, name).await?.ok_or(Error::NotFound)?.ino;
         }
@@ -316,10 +382,10 @@ impl<D: BlockDev> Volume<D> {
 
     /// Every name under the root directory, each with its path from the
     /// root, `/`-separated, a directory's before its own names.
-    pub async fn names(&self) -> Result<Vec<(Vec<u8>, DirEntry)>> {
+    async fn names(&self) -> Result<Vec<(Vec<u8>, DirEntry)>> {
         let mut out = Vec::new();
-        let mut seen = BTreeSet::from([self.root]);
-        let mut dirs = alloc::vec![(self.root, Vec::new())];
+        let mut seen = BTreeSet::from([self.root_dir()]);
+        let mut dirs = alloc::vec![(self.root_dir(), Vec::new())];
         while let Some((dir, prefix)) = dirs.pop() {
             let mut cursor = 0;
             loop {
@@ -348,7 +414,7 @@ impl<D: BlockDev> Volume<D> {
     /// Up to `max` entries of `dir` from `cursor` on, in hash order, and
     /// whether more follow. Cursor 0 starts the listing; an entry's `next`
     /// resumes after it.
-    pub async fn readdir(&self, dir: u64, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, bool)> {
+    async fn readdir(&self, dir: u64, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, bool)> {
         self.directory(dir).await?;
         let mut out = Vec::new();
         let mut more = false;
@@ -356,7 +422,7 @@ impl<D: BlockDev> Volume<D> {
             if k.pos.inode != dir {
                 return Ok(false);
             }
-            if k.pos.snapshot != self.snapshot || k.kind != kind::DIRENT {
+            if k.pos.snapshot != ROOT_SNAPSHOT || k.kind != kind::DIRENT {
                 return Ok(true);
             }
             if out.len() == max {
@@ -371,7 +437,7 @@ impl<D: BlockDev> Volume<D> {
     }
 
     /// The target of the symlink `ino`.
-    pub async fn readlink(&self, ino: u64) -> Result<Vec<u8>> {
+    async fn readlink(&self, ino: u64) -> Result<Vec<u8>> {
         let inode = self.inode(ino).await?;
         if inode.mode & S_IFMT != S_IFLNK || inode.size == 0 {
             return Err(Error::Invalid("readlink of a node that is no symlink"));
@@ -390,7 +456,7 @@ impl<D: BlockDev> Volume<D> {
 
     /// Bytes of file `ino` from `offset` into `out`, as many as the file
     /// holds there. Holes read as zeros.
-    pub async fn read(&self, ino: u64, offset: u64, out: &mut [u8]) -> Result<usize> {
+    async fn read(&self, ino: u64, offset: u64, out: &mut [u8]) -> Result<usize> {
         let inode = self.inode(ino).await?;
         let len = inode.size.saturating_sub(offset).min(out.len() as u64) as usize;
         let out = &mut out[..len];
@@ -408,7 +474,7 @@ impl<D: BlockDev> Volume<D> {
             if first >= end {
                 return Ok(false);
             }
-            if k.pos.snapshot == self.snapshot {
+            if k.pos.snapshot == ROOT_SNAPSHOT {
                 extents.push((*k, v.to_vec()));
             }
             Ok(true)
@@ -458,12 +524,12 @@ impl<D: BlockDev> Volume<D> {
         if u64::from(crc.offset) + u64::from(key.size) > u64::from(crc.uncompressed) {
             return Err(Error::Corrupt("extent past its checksummed range"));
         }
-        self.in_one_bucket(extent.ptr.sector, u64::from(crc.compressed))?;
+        in_one_bucket(self.superblock(), extent.ptr.sector, u64::from(crc.compressed))?;
         // An encrypted volume MACs all its data.
-        if self.sb.encrypted() && !matches!(crc.csum_type, csum::CHACHA_POLY_80 | csum::CHACHA_POLY_128) {
+        if self.superblock().encrypted() && !matches!(crc.csum_type, csum::CHACHA_POLY_80 | csum::CHACHA_POLY_128) {
             return Err(Error::Corrupt("unauthenticated extent on an encrypted volume"));
         }
-        let mut data = read_bytes(&self.dev, extent.ptr.sector * SECTOR as u64, crc.compressed as usize * SECTOR).await?;
+        let mut data = read_bytes(self.dev(), extent.ptr.sector * SECTOR as u64, crc.compressed as usize * SECTOR).await?;
         match crc.csum_type {
             csum::NONE => {}
             // Over the whole encoded extent, the value zero-extended to the
@@ -479,7 +545,7 @@ impl<D: BlockDev> Volume<D> {
             // An 80-bit MAC in a crc64 entry, a 128-bit one in a
             // crc128.
             csum::CHACHA_POLY_80 | csum::CHACHA_POLY_128 if crc.csum_len == csum::bytes(crc.csum_type) => {
-                let master = self.key.as_ref().ok_or(Error::Locked)?;
+                let master = self.master_key().ok_or(Error::Locked)?;
                 let nonce = Nonce::extent(key.version.hi, key.version.lo, crc.nonce);
                 if crc.csum_type == csum::CHACHA_POLY_80 {
                     master.verify::<10>(nonce, &data, crc.csum.first_chunk().unwrap(), "extent")?;
@@ -493,6 +559,88 @@ impl<D: BlockDev> Volume<D> {
         let at = crc.offset as usize * SECTOR + skip as usize;
         dst.copy_from_slice(&data[at..at + dst.len()]);
         Ok(())
+    }
+}
+
+impl<D: BlockDev> Source for Volume<D> {
+    type Dev = D;
+
+    fn dev(&self) -> &D {
+        &self.dev
+    }
+
+    fn superblock(&self) -> &Superblock {
+        &self.sb
+    }
+
+    fn master_key(&self) -> Option<&MasterKey> {
+        self.key.as_ref()
+    }
+
+    fn root_dir(&self) -> u64 {
+        self.root
+    }
+
+    fn root_of(&self, btree: Btree) -> Option<Root> {
+        self.roots.iter().find(|r| r.btree == btree).cloned()
+    }
+
+    fn rootless(&self, btree: Btree) -> Result<Vec<(Key, Vec<u8>)>> {
+        match &self.replay {
+            Some((_, replay)) => replay.over(btree, 0, Bpos::MIN, Bpos::MAX, Vec::new()),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    async fn keys(&self, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Keys> {
+        Ok(Rc::new(self.node(btree, level, ptr, max).await?.keys))
+    }
+}
+
+/// The namespace reads, as [`Source`] gives them.
+impl<D: BlockDev> Volume<D> {
+    pub(crate) async fn get(&self, btree: Btree, pos: Bpos) -> Result<Option<(Key, Vec<u8>)>> {
+        Source::get(self, btree, pos).await
+    }
+
+    /// The inode numbered `ino`.
+    pub async fn inode(&self, ino: u64) -> Result<Inode> {
+        Source::inode(self, ino).await
+    }
+
+    /// The entry `name` in directory `dir`.
+    pub async fn lookup(&self, dir: u64, name: &[u8]) -> Result<Option<DirEntry>> {
+        Source::lookup(self, dir, name).await
+    }
+
+    /// The node at `path`, names separated by `/`, from the root directory
+    /// and following no symlink; the empty path is the root.
+    pub async fn resolve(&self, path: &[u8]) -> Result<u64> {
+        Source::resolve(self, path).await
+    }
+
+    /// Every name under the root directory, each with its path from the
+    /// root, `/`-separated, a directory's before its own names.
+    pub async fn names(&self) -> Result<Vec<(Vec<u8>, DirEntry)>> {
+        Source::names(self).await
+    }
+
+    /// Up to `max` entries of `dir` from `cursor` on, in hash order, and
+    /// whether more follow. Cursor 0 starts the listing; an entry's `next`
+    /// resumes after it.
+    pub async fn readdir(&self, dir: u64, cursor: u64, max: usize) -> Result<(Vec<DirEntry>, bool)> {
+        Source::readdir(self, dir, cursor, max).await
+    }
+
+    /// The target of the symlink `ino`.
+    pub async fn readlink(&self, ino: u64) -> Result<Vec<u8>> {
+        Source::readlink(self, ino).await
+    }
+
+    /// Bytes of file `ino` from `offset` into `out`, as many as the file
+    /// holds there. Holes read as zeros.
+    pub async fn read(&self, ino: u64, offset: u64, out: &mut [u8]) -> Result<usize> {
+        Source::read(self, ino, offset, out).await
     }
 }
 
@@ -514,6 +662,30 @@ pub fn read_file(bytes: &[u8], path: &[u8]) -> Result<Vec<u8>> {
         volume.read(ino, 0, &mut out).await?;
         Ok(out)
     })
+}
+
+/// The node `ptr` points at on `dev`, `level` of `btree`, spanning
+/// `[ptr.min, max]`, as far as the pointer's written sectors.
+pub(crate) async fn read_node(dev: &impl BlockDev, sb: &Superblock, key: Option<&MasterKey>, btree: Btree, level: u8, ptr: &NodePtr, max: Bpos) -> Result<Node> {
+    let sectors = u32::from(ptr.written);
+    if sectors > sb.node_sectors() || ptr.ptr.dev != 0 {
+        return Err(Error::Corrupt("btree pointer past its node, or to another device"));
+    }
+    in_one_bucket(sb, ptr.ptr.sector, u64::from(sb.node_sectors()))?;
+    let bytes = read_bytes(dev, ptr.ptr.sector * SECTOR as u64, sectors as usize * SECTOR).await?;
+    let expect = Expect { btree, level, seq: ptr.seq, min: ptr.min, max };
+    node::decode(sb, key, &expect, bytes)
+}
+
+/// A pointed range lies in one bucket of the device.
+fn in_one_bucket(sb: &Superblock, sector: u64, sectors: u64) -> Result<()> {
+    let m = &sb.member;
+    let bucket = u64::from(m.bucket_sectors);
+    let first = sector / bucket;
+    if first < u64::from(m.first_bucket) || first >= m.nbuckets || sector % bucket + sectors > bucket {
+        return Err(Error::Corrupt("pointer outside one bucket of the device"));
+    }
+    Ok(())
 }
 
 /// The byte an extent key's range starts at: its position is its end.
@@ -585,7 +757,7 @@ pub(crate) async fn read_superblock(dev: &impl BlockDev) -> Result<Superblock> {
     best.ok_or(failure.unwrap_or(Error::Corrupt("no superblock copy")))
 }
 
-async fn read_copy(dev: &impl BlockDev, sector: u64) -> Result<Superblock> {
+pub(crate) async fn read_copy(dev: &impl BlockDev, sector: u64) -> Result<Superblock> {
     let device = dev.blocks() * BLOCK as u64;
     let fits = |len: usize| sector.checked_mul(SECTOR as u64).and_then(|at| at.checked_add(len as u64)).is_some_and(|end| end <= device);
     if !fits(BLOCK) {

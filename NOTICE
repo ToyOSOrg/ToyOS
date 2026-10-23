@@ -288,6 +288,11 @@ lib/bcachefs/tests/fixtures/ — volumes upstream's tools wrote
     sha256 e2a3ed35d27023693192c35e833e405a240aa6feccde9412e8f5a9e881a47999
     raw    330587c6be9b8c61067e31020838b0dc0b005398200a8458a98da38602793074
 
+    lib/bcachefs/tests/fixtures/unclean.img.gz
+    129,177 bytes gzip -9n, of a 33,554,432-byte raw volume
+    sha256 2393f9e1aafcbecdbea55d851acc88e711033df7cf9a1814e49cda0f31274adb
+    raw    26fa074b6d7e0b24607c5445f5d6bb71b0a2170fa8fb31459dc5b60464bded19
+
     SPDX-License-Identifier: MIT OR Apache-2.0
 
 `lib/bcachefs/src/engine` reads upstream's on-disk format, and the only honest
@@ -403,6 +408,27 @@ directory, a symlink, the numbers 1 to 600 and an empty `lost+found`; the
 UUIDs and hash seeds inside are generated values; the member's device name is
 the image file's basename, and no model or serial is recorded. Timestamps are
 2026-10-23, the guest's clock. The same reasoning as for `crc32c.img.gz` makes
+the bytes this project's own.
+
+`unclean.img.gz` is a volume upstream's tools left mid-write, which the
+engine reads by replaying its journal. It was produced by the same tools, in
+the guest that made the encrypted fixtures, on the same terms. The commands,
+against a raw image file:
+
+    truncate -s 32M dirty.img
+    bcachefs format --block_size=4096 dirty.img
+    bcachefs fusemount dirty.img /mnt/t
+    for i in $(seq 1 200); do echo $i > /mnt/t/f$i; done; sync
+    kill -STOP <the FUSE daemon>     # stopped, so the copy is atomic
+    cp --sparse=always dirty.img dirty-crash.img
+    kill -CONT <the FUSE daemon>
+    bcachefs fsck -n -K dirty-crash.img          # exit 0: replays 61-62
+    gzip -9n < dirty-crash.img > dirty-crash.img.gz
+
+The files are the numbers 1 to 200 and an empty `lost+found`; the UUIDs and
+hash seeds inside are generated values; the member's device name is the image
+file's basename, and no model or serial is recorded. Timestamps are
+2026-10-22, the guest's clock. The same reasoning as for `crc32c.img.gz` makes
 the bytes this project's own.
 
 

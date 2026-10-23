@@ -1,6 +1,7 @@
 //! bcachefs as bcachefs-tools v1.39.4 defines metadata version 1.39 (1063),
-//! on one device: a reader of clean volumes, [`mkfs`] of a clean volume
-//! holding a [`Tree`], and ToyOS's check of what it writes ([`fsck`]).
+//! on one device: a reader, which replays the journal of a volume not cleanly
+//! unmounted, [`mkfs`] of a clean volume holding a [`Tree`], and ToyOS's check
+//! of what it writes ([`fsck`]).
 //!
 //! **Everything read came off a disk this crate does not own.** Bytes become
 //! typed values in one place each, the superblock in [`superblock`], a node
@@ -9,13 +10,18 @@
 //! name ([`Error::Unsupported`]), never guessed at.
 
 mod bkey;
+mod bucket;
+mod cache;
 mod crypt;
 mod derive;
 mod fsck;
+mod journal;
 mod mkfs;
 mod node;
+mod mount;
 mod read;
 mod superblock;
+mod sync;
 mod tree;
 mod value;
 
@@ -23,6 +29,7 @@ pub use bkey::{Bpos, Key, Version};
 pub use crypt::MIN_KDF;
 pub use fsck::{fsck, Finding};
 pub use mkfs::{fit, mkfs, Encryption, Options};
+pub use mount::{Link, Mount, MountOptions, New, Owner, Removed, Rename};
 pub use read::{read_file, DirEntry, Inode, Volume};
 pub use superblock::{Kdf, Superblock};
 pub use tree::{Meta, NodeRef, Tree};
@@ -51,6 +58,18 @@ pub enum Error {
     Small { blocks: u64 },
     /// The random source failed.
     Entropy,
+    /// A name already in the directory.
+    Exists,
+    /// A directory where a file was asked for.
+    IsDirectory,
+    /// A directory removed that still holds names.
+    NotEmpty,
+    /// A replacement whose expected node no longer holds the name.
+    Stale,
+    /// No room left on the volume, by what had none.
+    NoSpace(&'static str),
+    /// The mount stopped writing, and why.
+    ReadOnly(&'static str),
 }
 
 impl From<toyos_blockdev::Error> for Error {
@@ -252,6 +271,7 @@ pub(crate) mod kind {
     pub const BUCKET_GENS: u8 = 30;
     pub const INODE_V3: u8 = 29;
     pub const SNAPSHOT_TREE: u8 = 31;
+    pub const LOGGED_OP_TRUNCATE: u8 = 32;
     pub const ACCOUNTING: u8 = 34;
     pub const INODE_ALLOC_CURSOR: u8 = 35;
     pub const EXTENT_WHITEOUT: u8 = 36;

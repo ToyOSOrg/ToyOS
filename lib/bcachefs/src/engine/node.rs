@@ -7,16 +7,16 @@ use alloc::vec::Vec;
 use super::bkey::{Bpos, Format, Key};
 use super::crypt::{MasterKey, Nonce};
 use super::superblock::Superblock;
-use super::value::csum_type as csum;
+use super::value::{csum_type as csum, NodePtr};
 use super::{field, kind, le16, le32, le64, put16, put32, put64, Btree, Error, Result, SECTOR, VERSION};
 use crate::crc32c::crc32c;
 
 /// The node magic's XOR with the internal UUID's first eight bytes.
 const NODE_MAGIC: u64 = 0x9013_5c78_b99e_07f5;
 /// Bytes before the first bset's keys: header, format and bset header.
-const FIRST_KEYS: usize = 160;
+pub(crate) const FIRST_KEYS: usize = 160;
 /// Bytes before a later bset's keys: checksum and bset header.
-const LATER_KEYS: usize = 40;
+pub(crate) const LATER_KEYS: usize = 40;
 /// Node flags bit 8, set on every node.
 const NEW_EXTENT_OVERWRITE: u64 = 1 << 8;
 
@@ -37,7 +37,6 @@ pub(crate) struct Expect {
 
 /// A node, its bsets merged.
 pub(crate) struct Node {
-    pub level: u8,
     /// Live keys in position order, each with its value.
     pub keys: Vec<(Key, Vec<u8>)>,
     /// Each bset's journal sequence, in the order written.
@@ -73,11 +72,10 @@ pub(crate) fn decode(sb: &Superblock, key: Option<&MasterKey>, expect: &Expect, 
         if bset + 24 > bytes.len() {
             return Err(Error::Corrupt("bset header past the node's written sectors"));
         }
+        // Every record up to the pointer's written sectors is the node's: a
+        // record of another node there is one cut short.
         if le64(&bytes, bset) != expect.seq {
-            if first {
-                return Err(Error::Corrupt("btree node of another sequence than its pointer's"));
-            }
-            break;
+            return Err(Error::Corrupt(if first { "btree node of another sequence than its pointer's" } else { "btree node shorter than its pointer's written sectors" }));
         }
         let keys = if first { FIRST_KEYS } else { at + LATER_KEYS };
         let end = keys + 8 * usize::from(le16(&bytes, bset + 22));
@@ -110,7 +108,7 @@ pub(crate) fn decode(sb: &Superblock, key: Option<&MasterKey>, expect: &Expect, 
         }
         at = next;
     }
-    Ok(Node { level: expect.level, keys: merge(bsets), bset_seqs })
+    Ok(Node { keys: merge(bsets), bset_seqs })
 }
 
 fn check_bset(sb: &Superblock, flags: u32, version: u16, at: usize) -> Result<()> {
@@ -182,7 +180,7 @@ fn parse_keys(format: &Format, mut b: &[u8], expect: &Expect) -> Result<Vec<(Key
         if key.pos < expect.min || key.pos > expect.max {
             return Err(Error::Corrupt("key outside its node's range"));
         }
-        check_kind(expect.btree, expect.level, &key)?;
+        check_key(expect.btree, expect.level, &key, value)?;
         if let Some((last, _)) = keys.last() {
             let ordered = last.pos < key.pos || (last.pos == key.pos && last.kind == kind::DELETED && key.kind != kind::DELETED);
             if !ordered {
@@ -195,18 +193,28 @@ fn parse_keys(format: &Format, mut b: &[u8], expect: &Expect) -> Result<Vec<(Key
     Ok(keys)
 }
 
-/// A key's type against its node: in an interior node only pointers, of
-/// size 0; in a leaf a type its btree holds, which a read checks only for
-/// the strict types.
-fn check_kind(btree: Btree, level: u8, key: &Key) -> Result<()> {
+/// A key against its node: in an interior node only pointers, of size 0,
+/// each decoding; in a leaf a type its btree holds, which a read checks
+/// only for the strict types, and an accounting key of one to three
+/// counters.
+pub(crate) fn check_key(btree: Btree, level: u8, key: &Key, value: &[u8]) -> Result<()> {
     if key.kind >= kind::UNKNOWN {
         return Err(Error::Unsupported("key type v1.39.4 does not define"));
     }
     if level > 0 && (!btree.allows(level, key.kind) || key.size != 0) {
         return Err(Error::Corrupt("interior key that is no size-0 pointer"));
     }
+    if level > 0 && key.kind == kind::BTREE_PTR {
+        return Err(Error::Unsupported("btree_ptr before btree_ptr_v2"));
+    }
+    if level > 0 && key.kind == kind::BTREE_PTR_V2 {
+        NodePtr::decode(value)?;
+    }
     if level == 0 && kind::strict(key.kind) && !btree.allows(0, key.kind) {
         return Err(Error::Corrupt("key of a type its btree does not hold"));
+    }
+    if key.kind == kind::ACCOUNTING {
+        super::journal::counters(value)?;
     }
     Ok(())
 }
@@ -271,6 +279,8 @@ pub(crate) fn encode(sb_magic: u64, block: usize, key: Option<&MasterKey>, build
         }
         Some(key) => {
             let nonce = Nonce::node(0, build.seq, build.journal_seq);
+            #[cfg(test)]
+            super::crypt::oracle::record(key, nonce, &[&b[24..136], &b[FIRST_KEYS..end]].concat());
             key.xor(nonce, &mut b[24..136])?;
             key.xor(nonce.plus(2), &mut b[FIRST_KEYS..end])?;
             let tag = key.mac(nonce, &b[16..end])?;
@@ -278,4 +288,73 @@ pub(crate) fn encode(sb_magic: u64, block: usize, key: Option<&MasterKey>, build
         }
     }
     Ok(b)
+}
+
+/// A later record's bytes: [`LATER_KEYS`] plus the keys.
+pub(crate) fn later_record_bytes(keys: impl Iterator<Item = usize>) -> usize {
+    LATER_KEYS + keys.sum::<usize>()
+}
+
+#[derive(Clone, Copy)]
+/// A record appended to a node: its btree and level, the node's sequence,
+/// the byte offset it goes to, its bset's journal sequence, and its keys,
+/// encoded, in position order, a `deleted` key where one is removed.
+pub(crate) struct Later<'a> {
+    pub btree: Btree,
+    pub level: u8,
+    pub seq: u64,
+    pub offset: usize,
+    pub journal_seq: u64,
+    pub keys: &'a [Vec<u8>],
+}
+
+/// `later`'s record, padded to whole blocks, checksummed or encrypted and
+/// MACed as the first record is.
+pub(crate) fn encode_later(block: usize, key: Option<&MasterKey>, later: &Later) -> Result<Vec<u8>> {
+    let Later { btree, level, seq, offset, journal_seq, keys } = *later;
+    assert!(offset > 0 && offset.is_multiple_of(block), "a later bset at byte {offset}");
+    let end = later_record_bytes(keys.iter().map(Vec::len));
+    let mut b = alloc::vec![0u8; end.next_multiple_of(block)];
+    put64(&mut b, 16, seq);
+    put64(&mut b, 24, journal_seq);
+    let csum_type = if key.is_some() { csum::CHACHA_POLY_128 } else { csum::CRC32C_NONZERO };
+    put32(&mut b, 32, u32::from(csum_type) | ((offset / SECTOR) as u32) << 16);
+    put16(&mut b, 36, VERSION);
+    put16(&mut b, 38, ((end - LATER_KEYS) / 8) as u16);
+    let mut at = LATER_KEYS;
+    for k in keys {
+        assert!(k[2] == kind::DELETED || btree.allows(level, k[2]), "a key of type {} in a {btree:?} node at level {level}", k[2]);
+        b[at..at + k.len()].copy_from_slice(k);
+        at += k.len();
+    }
+    match key {
+        None => {
+            let crc = crc32c(&b[16..end]);
+            put32(&mut b, 0, crc);
+        }
+        Some(key) => {
+            let nonce = Nonce::node(offset as u32, seq, journal_seq);
+            #[cfg(test)]
+            super::crypt::oracle::record(key, nonce, &b[LATER_KEYS..end]);
+            key.xor(nonce, &mut b[LATER_KEYS..end])?;
+            let tag = key.mac(nonce, &b[16..end])?;
+            b[..16].copy_from_slice(&tag);
+        }
+    }
+    Ok(b)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_whose_value_the_mount_would_decode_is_checked_at_its_boundary() {
+        let key = |k| Key::new(k, Bpos::MAX);
+        assert!(check_key(Btree::Accounting, 0, &key(kind::ACCOUNTING), &[0; 8]).is_ok());
+        assert!(matches!(check_key(Btree::Accounting, 0, &key(kind::ACCOUNTING), &[0; 4]), Err(Error::Corrupt(_))));
+        assert!(matches!(check_key(Btree::Accounting, 0, &key(kind::ACCOUNTING), &[0; 32]), Err(Error::Corrupt(_))));
+        assert!(matches!(check_key(Btree::Extents, 1, &key(kind::BTREE_PTR_V2), &[0; 40]), Err(Error::Corrupt(_))));
+        assert!(matches!(check_key(Btree::Extents, 1, &key(kind::BTREE_PTR), &[]), Err(Error::Unsupported(_))));
+    }
 }
