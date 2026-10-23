@@ -126,23 +126,28 @@ impl Poly {
     fn minus(&self, b: &Self) -> Self {
         Self(core::array::from_fn(|i| sub(self.0[i], b.0[i])))
     }
-    fn encode(&self, d: usize, output: &mut [u8]) {
-        assert_eq!(output.len(), 32 * d);
-        output.fill(0);
-        for i in 0..256 {
-            for bit in 0..d {
-                let at = i * d + bit;
-                output[at / 8] |= (((self.0[i] >> bit) & 1) as u8) << (at % 8)
+    /// ByteEncode_D (FIPS 203 Algorithm 5) of coefficients below 2^D: each
+    /// eight fill D bytes.
+    fn encode<const D: usize>(&self, output: &mut [u8]) {
+        assert_eq!(output.len(), 32 * D);
+        for (coefficients, bytes) in self.0.as_chunks::<8>().0.iter().zip(output.as_chunks_mut::<D>().0) {
+            let mut word = 0u128;
+            for (i, &c) in coefficients.iter().enumerate() {
+                word |= u128::from(c) << (D * i)
             }
+            bytes.copy_from_slice(&word.to_le_bytes()[..D])
         }
     }
-    fn decode(d: usize, input: &[u8]) -> Self {
-        assert_eq!(input.len(), 32 * d);
+    /// ByteDecode_D (Algorithm 6), whose coefficients are below 2^D.
+    fn decode<const D: usize>(input: &[u8]) -> Self {
+        assert_eq!(input.len(), 32 * D);
         let mut out = Self::zero();
-        for i in 0..256 {
-            for bit in 0..d {
-                let at = i * d + bit;
-                out.0[i] |= u16::from((input[at / 8] >> (at % 8)) & 1) << bit
+        for (coefficients, bytes) in out.0.as_chunks_mut::<8>().0.iter_mut().zip(input.as_chunks::<D>().0) {
+            let mut word = [0; 16];
+            word[..D].copy_from_slice(bytes);
+            let word = u128::from_le_bytes(word);
+            for (i, c) in coefficients.iter_mut().enumerate() {
+                *c = (word >> (D * i)) as u16 & ((1 << D) - 1)
             }
         }
         out
@@ -214,7 +219,7 @@ impl EncapsulationKey {
             return Err(Error::Length);
         }
         for chunk in input[..1152].as_chunks::<384>().0 {
-            let p = Poly::decode(12, chunk);
+            let p = Poly::decode::<12>(chunk);
             if p.0.iter().any(|&x| u32::from(x) >= Q) {
                 return Err(Error::InvalidKey);
             }
@@ -252,17 +257,17 @@ impl EncapsulationKey {
             sum.inverse()
                 .plus(&noise(coins, (i + 3) as u8))
                 .compress(10)
-                .encode(10, &mut out[i * 320..i * 320 + 320]);
+                .encode::<10>(&mut out[i * 320..i * 320 + 320]);
         }
         let mut sum = Poly::zero();
         for (j, yp) in y.iter().enumerate() {
-            sum = sum.plus(&Poly::decode(12, &self.bytes[j * 384..j * 384 + 384]).product(yp))
+            sum = sum.plus(&Poly::decode::<12>(&self.bytes[j * 384..j * 384 + 384]).product(yp))
         }
         sum.inverse()
             .plus(&noise(coins, 6))
-            .plus(&Poly::decode(1, message).decompress(1))
+            .plus(&Poly::decode::<1>(message).decompress(1))
             .compress(4)
-            .encode(4, &mut out[960..]);
+            .encode::<4>(&mut out[960..]);
         out
     }
 }
@@ -280,7 +285,7 @@ impl DecapsulationKey {
             for (j, s) in secret.iter().enumerate() {
                 sum = sum.plus(&sample(rho, i, j).product(s))
             }
-            sum.encode(12, &mut bytes[i * 384..i * 384 + 384])
+            sum.encode::<12>(&mut bytes[i * 384..i * 384 + 384])
         }
         bytes[1152..].copy_from_slice(rho);
         let hash = keccak::h(&[&bytes]);
@@ -304,18 +309,18 @@ impl DecapsulationKey {
         for (i, s) in self.secret.iter().enumerate() {
             sum = sum.plus(
                 &s.product(
-                    &Poly::decode(10, &ciphertext[i * 320..i * 320 + 320])
+                    &Poly::decode::<10>(&ciphertext[i * 320..i * 320 + 320])
                         .decompress(10)
                         .ntt(),
                 ),
             )
         }
         let mut message = Secret([0; 32]);
-        Poly::decode(4, &ciphertext[960..])
+        Poly::decode::<4>(&ciphertext[960..])
             .decompress(4)
             .minus(&sum.inverse())
             .compress(1)
-            .encode(1, &mut message.0);
+            .encode::<1>(&mut message.0);
         let kr = Secret(keccak::g(&[&message.0, &self.hash]));
         let rejected = Secret(keccak::j(&[&self.rejection.0, ciphertext]));
         let mut expected = self
@@ -428,7 +433,7 @@ mod tests {
                 let expected = hex(test["dk"].as_str().unwrap());
                 let mut actual = Secret([0; 2400]);
                 for (i, p) in key.secret.iter().enumerate() {
-                    p.encode(12, &mut actual.0[384 * i..384 * i + 384])
+                    p.encode::<12>(&mut actual.0[384 * i..384 * i + 384])
                 }
                 actual.0[1152..2336].copy_from_slice(key.public.as_bytes());
                 actual.0[2336..2368].copy_from_slice(&key.hash);
