@@ -5,8 +5,9 @@
 //! page included (PCI 3.0 §6.8.2: the table is read and written through a
 //! memory BAR).
 //!
-//! The functions are the radios and the disk P1 of `issues/there-is-no-wifi.md`
-//! names on the benches, and QEMU's virtio NIC, which a guest row reads.
+//! The functions are the radios P1 of `issues/there-is-no-wifi.md` names on
+//! the benches, which no image drives, and QEMU's virtio NIC, which a guest
+//! row reads.
 
 #[path = "../function.rs"]
 mod function;
@@ -20,7 +21,6 @@ use toyos_pci::msix;
 
 const FUNCTIONS: &[(&str, PciId)] = &[
     ("the T14's AX210", PciId { vendor: 0x8086, device: 0x2725 }),
-    ("the T14's NVMe", PciId { vendor: 0x1c5c, device: 0x1327 }),
     ("the AMD bench's AX200", PciId { vendor: 0x8086, device: 0x2723 }),
     ("QEMU's virtio NIC", PciId { vendor: 0x1af4, device: 0x1041 }),
 ];
