@@ -217,8 +217,9 @@ pub(crate) mod kind {
     /// The first key type v1.39.4 does not define.
     pub const UNKNOWN: u8 = 39;
 
-    /// Types whose btree a read of a leaf does not check: upstream refuses
-    /// them in the wrong btree only when it commits them.
+    /// Whether a read of a leaf checks this type against its btree. The
+    /// others (deleted, whiteout, error, cookie, set) upstream refuses in the
+    /// wrong btree only when it commits them.
     pub fn strict(kind: u8) -> bool {
         !matches!(kind, DELETED | WHITEOUT | ERROR | COOKIE | SET)
     }

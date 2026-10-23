@@ -179,7 +179,7 @@ impl<D: BlockDev> Volume<D> {
                 continue;
             }
             if key.kind != kind::BTREE_PTR_V2 {
-                return Err(Error::Corrupt("interior key that is no btree pointer"));
+                return Err(Error::Unsupported("interior key other than btree_ptr_v2, such as a v1 btree_ptr"));
             }
             let (level, ptr, max) = (node.level - 1, NodePtr::decode(value)?, key.pos);
             let child = self.node(btree, level, &ptr, max).await?;
