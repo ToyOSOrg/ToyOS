@@ -24,6 +24,7 @@
 //! syscap <right>            a right on the SysCap dup the supervisor endows
 //! slots                     the idle slot's partitions and the slot table
 //! service                   a system service: its `HOME` is `/state/<name>`, not the session's
+//! state                     it keeps machine state of its own in `/state/<name>`
 //! role <role>               a file server for `<role>`: one process of it per role
 //! restart                   the supervisor starts it again when it ends
 //! supervisor-serve <name>   a name the supervisor serves itself
@@ -91,8 +92,8 @@ pub fn row_named(name: &str) -> String {
 /// data, cache and state. English on disk, as every home folder is.
 pub const APP_FOLDERS: [&str; 4] = ["Config", "Data", "Cache", "State"];
 
-/// Where each system service keeps its own persistent data, one directory per
-/// program key.
+/// Where machine state lives, one directory per program key that keeps any
+/// ([`Program::state_dir`]); a row's view holds its own and no other.
 pub const STATE: &str = "/state";
 
 /// One directory a file-server role serves.
@@ -143,8 +144,8 @@ pub struct View {
     pub write: bool,
 }
 
-/// Every directory every role serves, each read-write but `/system`: the view
-/// of a program no narrower one is declared for.
+/// Every directory every role serves, each read-write but `/system`: the
+/// supervisor's own view.
 pub fn whole_tree() -> Vec<View> {
     ROLES
         .iter()
@@ -311,8 +312,12 @@ pub struct Program {
     pub slots: bool,
     /// A system service: its `HOME` is its own [`STATE`] directory rather
     /// than the session user's home, so what it keeps is machine state and no
-    /// user's.
+    /// user's. It keeps state ([`Self::state_dir`]) whether or not
+    /// [`Self::state`] says so.
     pub service: bool,
+    /// It keeps machine state of its own in [`STATE`]`/<name>` beside the
+    /// session's `HOME`: pkg's accepted repository metadata, say.
+    pub state: bool,
     /// The file-server roles this row serves, one process each: the supervisor starts
     /// the binary once per role, with the role as its argument and the
     /// acceptor of the role's port ([`role_dirs`] are the grants on it).
@@ -346,11 +351,17 @@ impl Program {
         package::package_of(self.source.path()?)
     }
 
+    /// Its own directory of machine state, which its view holds and no other
+    /// row's does: a service's, or a row's that declares [`Self::state`].
+    pub fn state_dir(&self) -> Option<String> {
+        (self.service || self.state).then(|| format!("{STATE}/{}", self.name))
+    }
+
     /// The `HOME` the supervisor starts this row with. A location grants nothing: what
     /// the program can reach is its view's business, never this string's.
     pub fn home(&self) -> String {
         match (self.service, self.package()) {
-            (true, _) => format!("{STATE}/{}", self.name),
+            (true, _) => self.state_dir().expect("a service keeps state"),
             (false, Some(name)) => app_home(name),
             (false, None) => session_home(),
         }
@@ -361,8 +372,10 @@ impl Program {
     /// home read-write and the folder its launch was granted, and nothing else
     /// any role serves**: no other package, no other part of the home, no
     /// `/config`, `/state`, `/log` or `/boot`.
-    /// Every other row sees the whole tree, until each declares its own
-    /// (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2).
+    /// **Every other row sees the whole tree but [`STATE`], and of that only its
+    /// own [`Self::state_dir`]**: no row's view holds another row's, the
+    /// supervisor's included. The rest stays whole until each row
+    /// declares its own view (`issues/every-program-sees-only-the-files-it-was-given.md`, stage 2).
     pub fn view(&self) -> Vec<View> {
         match self.package() {
             Some(name) => {
@@ -372,7 +385,11 @@ impl Program {
                     .chain(granted)
                     .collect()
             }
-            None => whole_tree(),
+            None => whole_tree()
+                .into_iter()
+                .filter(|view| view.dir != STATE)
+                .chain(self.state_dir().map(|dir| data_dir(dir, true)))
+                .collect(),
         }
     }
 }
@@ -516,6 +533,9 @@ pub fn render(manifest: &Manifest) -> Result<Vec<u8>, RenderError> {
         }
         if program.service {
             out.push_str("service\n");
+        }
+        if program.state {
+            out.push_str("state\n");
         }
         for role in &program.roles {
             if role_dirs(role).is_none() {
@@ -673,6 +693,7 @@ pub fn parse(text: &str) -> Manifest {
                     "syscap" => program.syscap.push(rest.to_string()),
                     "slots" if rest.is_empty() => program.slots = true,
                     "service" => program.service = true,
+                    "state" if rest.is_empty() => program.state = true,
                     "role" => program.roles.push(rest.to_string()),
                     "restart" if rest.is_empty() => program.restart = true,
                     "starts" => program.starts.push(rest.to_string()),
@@ -716,6 +737,7 @@ mod tests {
                     name: "update".into(),
                     source: Source::Path("/system/bin/update".into()),
                     slots: true,
+                    state: true,
                     ..Program::default()
                 },
                 Program {
@@ -874,25 +896,39 @@ mod tests {
         }
     }
 
-    /// Every row the image declares sees the whole tree read-write but
-    /// `/system`, the installer and the shell included: neither has authority
-    /// over `/apps` the other lacks, and nobody writes the signed image.
+    /// **Every row the image declares sees the whole tree read-write but
+    /// `/system` and `/state`, and of `/state` only its own directory**: a
+    /// service's and a row's that declares state, none for any other. The
+    /// installer and the shell are alike: neither has authority over `/apps`
+    /// the other lacks, nobody writes the signed image, and nobody reads or
+    /// rewrites another program's machine state, the supervisor's included.
     #[test]
-    fn every_declared_row_sees_the_whole_tree_read_write() {
-        let m = parse("program pkg /system/bin/pkg\nprogram shell /system/bin/shell\n");
-        let whole: Vec<_> = std::iter::once(system())
-            .chain(
-                ["/apps", "/config", "/home", "/state", "/log", "/boot"]
-                    .iter()
-                    .zip(["apps", "config", "home", "state", "", ""])
-                    .zip(["data", "data", "data", "data", "log", "boot"])
-                    .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), true)),
-            )
-            .collect();
+    fn a_declared_row_sees_the_whole_tree_but_state_and_of_state_its_own() {
+        let m = parse("program pkg /system/bin/pkg\nstate\nprogram shell /system/bin/shell\n");
+        let whole_but_state = |own: Option<&str>| -> Vec<_> {
+            std::iter::once(system())
+                .chain(
+                    ["/apps", "/config", "/home", "/log", "/boot"]
+                        .iter()
+                        .zip(["apps", "config", "home", "", ""])
+                        .zip(["data", "data", "data", "log", "boot"])
+                        .map(|((dir, root), role)| (role, dir.to_string(), root.to_string(), true)),
+                )
+                .chain(own.map(|name| ("data", format!("/state/{name}"), format!("state/{name}"), true)))
+                .collect()
+        };
         let s = sample();
-        for row in [m.program("pkg").unwrap(), m.program("shell").unwrap(), s.program("compositor").unwrap()] {
-            assert_eq!(views(row), whole, "{}", row.name);
+        for (row, own) in [
+            (m.program("shell").unwrap(), None),
+            (m.program("pkg").unwrap(), Some("pkg")),
+            (s.program("compositor").unwrap(), Some("compositor")),
+        ] {
+            assert_eq!(views(row), whole_but_state(own), "{}", row.name);
         }
+        // A row that keeps state keeps its session `HOME`; a service's is its state.
+        assert_eq!(m.program("pkg").unwrap().home(), session_home());
+        assert_eq!(s.program("compositor").unwrap().home(), "/state/compositor");
+        assert_eq!(m.program("shell").unwrap().state_dir(), None);
     }
 
     #[test]

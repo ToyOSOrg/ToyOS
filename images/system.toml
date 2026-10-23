@@ -39,11 +39,13 @@ folder = "read-write"
 
 # `service = true` makes a row a system service: the supervisor starts it with `HOME` at
 # its own `/state/<name>` and makes that directory first. Every other row runs
-# with the session user's home.
+# with the session user's home, and `state = true` gives it a `/state/<name>`
+# beside it. No row's view holds any other part of `/state`.
 [programs]
-# The installer. It holds nothing: it writes under `/apps` because `/apps` is
-# writable to it, and a row that gave it more would make that untrue.
-pkg = {}
+# The installer. It writes under `/apps` because `/apps` is writable to it.
+# `/state/pkg` is where the machine's copy of the repository metadata it last
+# accepted belongs (`toyos_update::repo::Holder::Machine`).
+pkg = { state = true }
 
 # **Every image that carries a `TOYOS-LOG` partition runs this**, and every
 # image does. The kernel keeps the record ring and the console and writes no

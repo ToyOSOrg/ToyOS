@@ -9,9 +9,10 @@ opened: 2026-09-24
 Owner ruling, 2026-09-24: isolation is non-negotiable, and the filesystem is no
 longer the declared exception to the capability model. This reverses question
 2 of `issues/the-capability-end-state-is-twelve-answers.md`. Today any
-process opens, deletes or spawns any path, so there is no boundary between two
-programs, let alone between two people: any process can append a line to
-sshd's key list and log in remotely (`issues/sshserver-authorized-keys-unprotected.md`).
+process opens, deletes or spawns any path outside `/state`, so there is no
+boundary between two programs, let alone between two people. Of `/state` each
+row holds only its own directory, so sshd's key list is reachable from sshd
+and what it spawns directly (`issues/sshserver-authorized-keys-unprotected.md`).
 
 ## The model
 
@@ -101,8 +102,10 @@ nameable by every program and make confused-deputy bugs structural.
    `/system` read-only, and nothing else a file server serves
    (`toyos_manifest::Program::view`). It still reaches `/tmp`, which the
    kernel serves to every program. Every row the image declares still sees
-   the whole tree, `/system` read-only and the rest
-   read-write, `/apps` included, so a shell and everything it starts can
+   the whole tree, `/system` read-only and the rest read-write but `/state`,
+   of which each row holds only its own directory where it keeps state
+   (`service = true` or `state = true`: the daemons' own state is built).
+   `/apps` is included, so a shell and everything it starts can
    rewrite an installed package; whether the installer alone writes `/apps`
    is `issues/whether-pkg-alone-writes-apps.md`.
    `/dev/null` is a name only libc's `open` knows, answered with a kernel

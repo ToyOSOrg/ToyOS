@@ -21,8 +21,9 @@ use toyos_ssh::{hostkey, Authorizer, HostKey, Random};
 
 /// Where this machine keeps its SSH identity and the keys it trusts: this
 /// daemon's own `HOME`, which the supervisor makes `/state/sshserver`. Machine
-/// state, so it is in no user's home; where DATA is a tmpfs the identity lasts
-/// one boot, which the fingerprint printed at every start makes visible.
+/// state, so it is in no user's home and no other row's view; where DATA is a
+/// tmpfs the identity lasts one boot, which the fingerprint printed at every
+/// start makes visible.
 fn state() -> String {
     let home = std::env::home_dir().expect("sshserver: the supervisor starts every service with HOME");
     home.to_str().expect("sshserver: HOME is not UTF-8").to_string()
@@ -32,8 +33,8 @@ fn host_key_path() -> String {
     format!("{}/host_ed25519", state())
 }
 
-/// The file that names who may log in. It is protected from nothing else on
-/// the machine — see `issues/sshserver-authorized-keys-unprotected.md`.
+/// The file that names who may log in. No other row's view holds it, but what
+/// this daemon spawns directly does: see `issues/sshserver-authorized-keys-unprotected.md`.
 fn authorized_keys_path() -> String {
     format!("{}/authorized_keys", state())
 }

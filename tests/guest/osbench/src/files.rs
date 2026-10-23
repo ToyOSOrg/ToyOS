@@ -5,7 +5,7 @@
 //!
 //! The `<target>` in each name says where it ran: `shm` is Linux's
 //! `/dev/shm`; `tmp` is ToyOS's `/tmp`, which the kernel serves; `served` is
-//! ToyOS's `/state`, which the DATA file server serves, and which a boot with
+//! ToyOS's `/home`, which the DATA file server serves, and which a boot with
 //! no DATA partition keeps in memory (the file server says so in the log).
 
 use std::fs::{self, File, OpenOptions};
@@ -28,7 +28,7 @@ pub fn memory_targets() -> Vec<Target> {
     if cfg!(target_os = "toyos") {
         vec![
             Target { name: "tmp", dir: "/tmp", served_by: "the kernel's tmpfs, through syscalls" },
-            Target { name: "served", dir: "/state", served_by: "the DATA file server, through IPC" },
+            Target { name: "served", dir: "/home", served_by: "the DATA file server, through IPC" },
         ]
     } else {
         vec![Target { name: "shm", dir: "/dev/shm", served_by: "tmpfs, through the VFS" }]

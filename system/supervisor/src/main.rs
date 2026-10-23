@@ -57,7 +57,8 @@
 //! **Every program it starts holds the directories its row's view names**
 //! (`Program::view`), each a grant minted for that start ([`Grants`]): an
 //! installed package its own directory read-only and its own folder
-//! read-write, and every other row the whole tree.
+//! read-write, and every other row the whole tree but `/state`, of which it
+//! holds its own directory alone, where it keeps any (`Program::state_dir`).
 //! A launch of a program no row names is answered with the session's, which
 //! the caller's direct spawn carries in place of its own.
 //!
@@ -945,7 +946,7 @@ impl<'a> Supervisor<'a> {
                 self.make_session_home();
                 homes_made = true;
             }
-            self.make_home(program);
+            self.make_state_dir(program);
             let block = self.block_args();
             let service = &mut self.services[at];
             // SYSTEM was started before the manifest was read.
@@ -1043,7 +1044,7 @@ impl<'a> Supervisor<'a> {
         let name = entry.to_string();
         let claim = self.syscap.claim_function::<toyos::Device>(function.arrival).map_err(|e| refused(&name, e))?;
         let claim = translated(claim, &function).map_err(|why| missing(&name, &why))?;
-        self.make_home(row);
+        self.make_state_dir(row);
         let mut extra = Extra { claims: vec![(format!("{DEV_PREFIX}{name}"), claim)], ..Extra::default() };
         // A disk driver is who this start says it is: its `disk` connector
         // carries the function's arrival, which the block service keys it by.
@@ -1164,17 +1165,15 @@ impl<'a> Supervisor<'a> {
         }
     }
 
-    /// A service's own `HOME`, made before it first runs.
-    fn make_home(&mut self, program: &Program) {
-        if !program.service || is_storage(program) {
-            return;
-        }
-        let home = program.home();
-        let asked = home.clone();
-        match self.files("a service's home", move || make_dir(&asked)) {
+    /// A row's own directory of machine state, a service's `HOME` among them,
+    /// made before it first runs.
+    fn make_state_dir(&mut self, program: &Program) {
+        let Some(dir) = program.state_dir().filter(|_| !is_storage(program)) else { return };
+        let asked = dir.clone();
+        match self.files("a row's state directory", move || make_dir(&asked)) {
             Ok(Ok(())) => {}
-            Ok(Err(e)) => say!("supervisor: {}: {home} could not be made: {e}", program.name),
-            Err(why) => say!("supervisor: {}: {home} was not made: {why}", program.name),
+            Ok(Err(e)) => say!("supervisor: {}: {dir} could not be made: {e}", program.name),
+            Err(why) => say!("supervisor: {}: {dir} was not made: {why}", program.name),
         }
     }
 
@@ -1590,7 +1589,7 @@ impl<'a> Supervisor<'a> {
         // binary a failed swap starts again are each owed.
         let owed = self.services[index].devices.clone();
         let program = self.services[index].program;
-        self.make_home(program);
+        self.make_state_dir(program);
         let block = self.block_args();
         let service = &mut self.services[index];
         swapped(
@@ -1834,7 +1833,7 @@ impl<'a> Supervisor<'a> {
                 }
                 AfterEnd::Restart => {
                     let (source, owed, program) = (service.source.clone(), service.devices.clone(), service.program);
-                    self.make_home(program);
+                    self.make_state_dir(program);
                     let block = self.block_args();
                     let service = &mut self.services[index];
                     let (system, syscap, connectors, grants) = (self.system, self.syscap, &self.connectors, &self.grants);
@@ -1869,7 +1868,7 @@ impl<'a> Supervisor<'a> {
     /// when that will not start either.
     fn restore(&mut self, index: usize, previous: &Source, owed: &[String]) {
         let program = self.services[index].program;
-        self.make_home(program);
+        self.make_state_dir(program);
         let block = self.block_args();
         let service = &mut self.services[index];
         let name = service.program.name.clone();
@@ -2311,7 +2310,7 @@ impl Supervisor<'_> {
 
         // `inherit_handle` duplicates into the child, so the supervisor's own copies go with
         // `fds` when this returns.
-        self.make_home(program);
+        self.make_state_dir(program);
         if program.package().is_some() {
             if let Err(why) = self.make_app_home(program) {
                 say!("supervisor: launcher: {} was not started: {why}", program.name);
@@ -2682,7 +2681,7 @@ fn start<'a>(
 
     // **Set here, over whatever a launching caller carried**: the row decides
     // where a program's home is, and a service's is made before this
-    // (`Supervisor::make_home`), on the supervisor's file worker.
+    // (`Supervisor::make_state_dir`), on the supervisor's file worker.
     command.env("HOME", program.home());
 
     // **Everything endowed stays owned until the spawn that moves it
