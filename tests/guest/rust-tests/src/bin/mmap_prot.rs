@@ -119,12 +119,9 @@ fn none_is_a_mapping_and_not_an_error() {
 fn an_undefined_bit_in_either_word_is_refused() {
     const PROT: MmapProt = MmapProt(MmapProt::READ.0 | MmapProt::WRITE.0);
     const FLAGS: MmapFlags = MmapFlags(MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0);
-    const UNDEFINED_PROT: u64 = 4;
-    const UNDEFINED_FLAG: u64 = 8;
-    const _: () = assert!(UNDEFINED_PROT & (MmapProt::READ.0 | MmapProt::WRITE.0) == 0);
-    const _: () = assert!(
-        UNDEFINED_FLAG & (MmapFlags::ANONYMOUS.0 | MmapFlags::PRIVATE.0 | MmapFlags::FIXED.0) == 0
-    );
+    // The lowest bit each word does not define.
+    const UNDEFINED_PROT: u64 = 1 << MmapProt::KNOWN.0.trailing_ones();
+    const UNDEFINED_FLAG: u64 = 1 << MmapFlags::KNOWN.0.trailing_ones();
 
     for (prot, flags, what) in [
         (MmapProt(PROT.0 | UNDEFINED_PROT), FLAGS, "a prot"),

@@ -17,7 +17,7 @@ use bcachefs::{BlockBuf, BlockIO, BlockNum, DeviceError, Extent, Mounted, ReadOn
 use toyos::fs::Error;
 
 use crate::data::{block_for, mapped};
-use crate::volume::{join, Identities, Kind, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{join, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Volume};
 
 /// The longest symlink target read back: the wire's path bound.
 const MAX_LINK: u64 = toyos::fs::MAX_PATH as u64;
@@ -144,7 +144,7 @@ impl Volume for RootVolume {
         mapped("readlink", path, self.fs.read_link(path, MAX_LINK))?.ok_or(Error::Io)
     }
 
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, Error> {
+    fn list(&mut self, dir: &str) -> Result<Vec<Listed>, Error> {
         if !self.is_dir(dir) {
             return Err(if self.names.contains_key(dir) { Error::NotADirectory } else { Error::NotFound });
         }
@@ -163,11 +163,12 @@ impl Volume for RootVolume {
         }
         let mut out = Vec::with_capacity(children.len());
         for (name, kind) in children {
+            let path = join(dir, &name);
             let meta = match kind {
                 Kind::Dir => Meta { kind, size: 0, mtime: 0 },
-                _ => self.lstat(&join(dir, &name))?,
+                _ => self.lstat(&path)?,
             };
-            out.push((name, meta));
+            out.push(Listed { name, meta, identity: self.ids.of(path) });
         }
         Ok(out)
     }
@@ -337,13 +338,26 @@ mod tests {
         assert_eq!(v.lstat("bin/toybox").unwrap().mtime, 9);
         assert_eq!(v.read_link("bin/ls").unwrap(), "/system/bin/toybox");
         assert_eq!(v.read_link("bin/toybox"), Err(Error::NotALink));
-        let listed: Vec<(String, Kind)> = v.list("").unwrap().into_iter().map(|(n, m)| (n, m.kind)).collect();
+        let listed: Vec<(String, Kind)> = v.list("").unwrap().into_iter().map(|e| (e.name, e.meta.kind)).collect();
         assert_eq!(listed, [("bin".into(), Kind::Dir), ("etc".into(), Kind::Dir), ("share".into(), Kind::Dir)]);
-        let bin: Vec<String> = v.list("bin").unwrap().into_iter().map(|(n, _)| n).collect();
+        let bin: Vec<String> = v.list("bin").unwrap().into_iter().map(|e| e.name).collect();
         assert_eq!(bin, ["ls", "toybox"]);
         assert_eq!(v.lstat("share/fonts").unwrap().kind, Kind::Dir);
         assert_eq!(v.lstat("nothing"), Err(Error::NotFound));
         assert!(v.describe().starts_with(toyos_osrelease::ROOT_SAID));
+    }
+
+    /// A listing names each entry, directory, file and link, by the identity
+    /// a stat of its path answers.
+    #[test]
+    fn a_listing_names_each_entry_by_its_identity() {
+        let mut v = root();
+        for dir in ["", "bin", "share"] {
+            for e in v.list(dir).unwrap() {
+                let path = join(dir, &e.name);
+                assert_eq!(Ok(e.identity), v.identity(&path), "{path}");
+            }
+        }
     }
 
     /// Every request that would change ROOT is refused read-only, and an open

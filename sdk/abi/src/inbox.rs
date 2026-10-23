@@ -32,6 +32,9 @@ pub const WRITABLE: u32 = 4;
 /// whatever the pipe still holds. It stays so. A handle that is no pipe end
 /// has no other end, and a watch that asks this of it is refused.
 pub const OTHER_END_GONE: u32 = 16;
+/// Every readiness flag defined above; a watch asking another is refused
+/// `InvalidArgument`.
+pub const WATCH_FLAGS_KNOWN: u32 = READABLE | WRITABLE | OTHER_END_GONE;
 
 /// One piece of work. Written by userspace into the submission array.
 #[repr(C)]

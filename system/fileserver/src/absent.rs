@@ -5,7 +5,7 @@
 
 use toyos::fs::Error;
 
-use crate::volume::{Kind, Meta, Node, OpenHow, Out, Volume};
+use crate::volume::{Kind, Listed, Meta, Node, OpenHow, Out, Volume};
 
 pub struct Absent {
     roots: Vec<String>,
@@ -38,7 +38,7 @@ impl Volume for Absent {
         Err(Error::NotFound)
     }
 
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, Error> {
+    fn list(&mut self, dir: &str) -> Result<Vec<Listed>, Error> {
         match self.is_root(dir) {
             true => Ok(Vec::new()),
             false => Err(Error::NotFound),

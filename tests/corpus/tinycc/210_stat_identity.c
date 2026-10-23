@@ -2,7 +2,8 @@
    through every path, a link and its open descriptor, and across a rename;
    two files are two; and the two kernel mounts are two volumes. A kernel
    directory and symlink are each one as well, and `d_ino` is its entry's
-   `st_ino`. */
+   `st_ino` within one volume; a mount point's entry is not promised the
+   mounted root's. */
 #include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -113,7 +114,6 @@ int main(void) {
     judge("d_ino is a directory's st_ino", listed("/system", "bin") == bin.st_ino, 1);
     judge("d_ino is a file's st_ino", listed("/system/bin", "toybox") == toybox.st_ino, 1);
     judge("d_ino is a link's st_ino", listed("/system/bin", "cat") == catlink.st_ino, 1);
-    judge("d_ino is a mount's st_ino", listed("/", "system") == sys.st_ino, 1);
     judge("d_ino on /tmp is st_ino", listed("/tmp", "210_b") == b.st_ino && listed("/tmp", "210_d") == tmpdir.st_ino, 1);
 
     rmdir("/tmp/210_d");

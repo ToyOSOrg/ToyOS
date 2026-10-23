@@ -85,8 +85,8 @@ fn test() {
 /// it had asked for a plain wait. The differential is the bit: the same call
 /// without it reads the code.
 fn an_undefined_wait_flag_bit_is_refused() {
-    const UNDEFINED: u64 = 2;
-    const _: () = assert!(UNDEFINED & syscall::WNOHANG == 0);
+    // The lowest bit the word does not define.
+    const UNDEFINED: u64 = 1 << syscall::PROCESS_WAIT_FLAGS_KNOWN.trailing_ones();
 
     let (mut child, release) = start(5);
     drop(release);

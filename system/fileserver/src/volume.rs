@@ -39,6 +39,15 @@ pub struct Meta {
     pub mtime: u64,
 }
 
+/// One entry [`Volume::list`] answers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    pub name: String,
+    pub meta: Meta,
+    /// What [`Volume::identity`] answers for it.
+    pub identity: u64,
+}
+
 /// How an open treats what is, or is not, at its path.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OpenHow {
@@ -88,8 +97,8 @@ pub trait Volume {
     /// What the symlink at `path` holds.
     fn read_link(&mut self, path: &str) -> Result<String, Error>;
 
-    /// The entries directly under `dir`: name and what it is.
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, Error>;
+    /// The entries directly under `dir`.
+    fn list(&mut self, dir: &str) -> Result<Vec<Listed>, Error>;
 
     fn open(&mut self, path: &str, how: OpenHow) -> Result<Node, Error>;
 

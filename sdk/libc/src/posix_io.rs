@@ -570,10 +570,10 @@ pub struct DIR {
 }
 
 /// A listing as its server answered it: the kernel's, or a file server's
-/// entries, `d_type` and name.
+/// entries, each its node, `d_type` and name.
 enum Listing {
     Kernel(Vec<u8>),
-    Served(Vec<(u8, Box<[u8]>)>),
+    Served(Vec<(u64, u8, Box<[u8]>)>),
 }
 
 #[repr(C)]
@@ -605,18 +605,19 @@ pub unsafe extern "C" fn opendir(path: *const u8) -> *mut DIR {
     }
 }
 
-/// A file server's listing of `path`, each entry's `d_type` beside its name.
+/// A file server's listing of `path`, each entry's node and `d_type` beside
+/// its name.
 fn served_listing(path: &[u8]) -> Result<Listing, Errno> {
     let listing = files::read_dir(path).map_err(crate::errcode::of_files)?;
     let mut entries = Vec::new();
-    toyos::fs::for_each_entry(&listing, |kind, _, name| {
-        let d_type = match kind {
+    toyos::fs::for_each_entry(&listing, |entry| {
+        let d_type = match entry.kind {
             toyos::fs::KIND_DIR => DT_DIR,
             toyos::fs::KIND_FILE => DT_REG,
             toyos::fs::KIND_SYMLINK => DT_LNK,
             _ => DT_UNKNOWN,
         };
-        entries.push((d_type, Box::from(name.as_bytes())));
+        entries.push((entry.node, d_type, Box::from(entry.name.as_bytes())));
     })
     .map_err(|e| crate::errcode::of_files(files::Error::Served(e)))?;
     Ok(Listing::Served(entries))
@@ -632,10 +633,9 @@ pub unsafe extern "C" fn readdir(dir: *mut DIR) -> *mut dirent {
             (entry.node, if entry.is_dir { DT_DIR } else { DT_UNKNOWN }, entry.name)
         }
         Listing::Served(entries) => {
-            let Some((d_type, name)) = entries.get(d.at) else { return ptr::null_mut() };
+            let Some((node, d_type, name)) = entries.get(d.at) else { return ptr::null_mut() };
             d.at += 1;
-            // A file server answers no node in a listing.
-            (0, *d_type, &name[..])
+            (*node, *d_type, &name[..])
         }
     };
     let Some(d_name) = crate::listing::d_name(name) else {

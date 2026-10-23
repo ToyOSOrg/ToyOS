@@ -65,9 +65,8 @@ pub(super) fn sys_spawn(
 pub(super) fn sys_process_wait(h: RawHandle, flags: u64) -> u64 {
     // First, so the answer is the bit and not the handle's own refusal — which
     // for an unheld handle is the kill policy, so a call carrying both returns
-    // instead of ending the caller. `WNOHANG` is the whole of this word,
-    // hand-copied and unchecked (`syscall/vm.rs`'s `MMAP_PROT_KNOWN`).
-    if flags & !WNOHANG != 0 {
+    // instead of ending the caller.
+    if flags & !PROCESS_WAIT_FLAGS_KNOWN != 0 {
         return SyscallError::InvalidArgument.to_u64();
     }
     let object = match process::with_process_data(|data| {

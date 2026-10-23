@@ -37,6 +37,8 @@
 //! here keeps a write the server acknowledged and never made durable: that is
 //! what `Fsync` is for.
 
+use alloc::vec::Vec;
+
 use toyos_abi::syscall::{SyscallError, MAX_BADGE, MAX_SERVICE_NAME, MAX_TRANSFER_HANDLES};
 
 use crate::ipc::{Connection, IpcError};
@@ -874,33 +876,45 @@ fn counted(value: u64, most: usize) -> Result<usize, Error> {
     usize::try_from(value).ok().filter(|&n| n <= most).ok_or(Error::Malformed)
 }
 
-/// Each entry of a listing [`Dir::read_dir`] answered: `(kind, size, name)`.
-/// An entry is its kind byte, its size, its name's length and the name.
-pub fn for_each_entry(listing: &[u8], mut f: impl FnMut(u64, u64, &str)) -> Result<(), Error> {
+/// One entry of a listing [`Dir::read_dir`] answers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Entry<'a> {
+    pub kind: u64,
+    pub size: u64,
+    /// What [`Dir::stat`] answers as the entry's `node`, without following it.
+    pub node: u64,
+    pub name: &'a str,
+}
+
+/// An entry's kind byte, size, node, and its name's length before the name.
+const ENTRY_HEAD: usize = 19;
+
+/// Each entry of a listing [`Dir::read_dir`] answered.
+pub fn for_each_entry(listing: &[u8], mut f: impl FnMut(Entry<'_>)) -> Result<(), Error> {
     let mut at = 0;
     while at < listing.len() {
-        let head = listing.get(at..at + 11).ok_or(Error::Malformed)?;
-        let kind = head[0] as u64;
-        let size = u64::from_le_bytes(head[1..9].try_into().expect("eight bytes"));
-        let len = u16::from_le_bytes([head[9], head[10]]) as usize;
-        let name = listing.get(at + 11..at + 11 + len).ok_or(Error::Malformed)?;
-        f(kind, size, core::str::from_utf8(name).map_err(|_| Error::Malformed)?);
-        at += 11 + len;
+        let head = listing.get(at..at + ENTRY_HEAD).ok_or(Error::Malformed)?;
+        let word = |at: usize| u64::from_le_bytes(head[at..at + 8].try_into().expect("eight bytes"));
+        let (kind, size, node) = (head[0] as u64, word(1), word(9));
+        let len = u16::from_le_bytes([head[17], head[18]]) as usize;
+        let name = listing.get(at + ENTRY_HEAD..at + ENTRY_HEAD + len).ok_or(Error::Malformed)?;
+        let name = core::str::from_utf8(name).map_err(|_| Error::Malformed)?;
+        f(Entry { kind, size, node, name });
+        at += ENTRY_HEAD + len;
     }
     Ok(())
 }
 
-/// One listing entry's encoding, for the server: `None` once `out` is full.
-pub fn encode_entry(out: &mut [u8], kind: u64, size: u64, name: &str) -> Option<usize> {
-    let need = 11 + name.len();
-    if need > out.len() || name.len() > u16::MAX as usize {
-        return None;
-    }
-    out[0] = kind as u8;
-    out[1..9].copy_from_slice(&size.to_le_bytes());
-    out[9..11].copy_from_slice(&(name.len() as u16).to_le_bytes());
-    out[11..need].copy_from_slice(name.as_bytes());
-    Some(need)
+/// One listing entry's encoding, appended to `out` for the server: `None` for
+/// a name longer than the encoding holds.
+pub fn encode_entry(out: &mut Vec<u8>, entry: &Entry<'_>) -> Option<()> {
+    let len = u16::try_from(entry.name.len()).ok()?;
+    out.push(entry.kind as u8);
+    out.extend_from_slice(&entry.size.to_le_bytes());
+    out.extend_from_slice(&entry.node.to_le_bytes());
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(entry.name.as_bytes());
+    Some(())
 }
 
 fn close_all(handles: &[RawHandle]) {
@@ -1044,13 +1058,20 @@ mod tests {
 
     #[test]
     fn a_listing_entry_round_trips_and_a_short_one_is_refused() {
-        let mut buf = [0u8; 64];
-        let n = encode_entry(&mut buf, KIND_DIR, 42, "Documents").unwrap();
+        let entries = [
+            Entry { kind: KIND_DIR, size: 42, node: 7, name: "Documents" },
+            Entry { kind: KIND_FILE, size: 3, node: u64::MAX, name: "a" },
+        ];
+        let mut buf = Vec::new();
+        for entry in &entries {
+            encode_entry(&mut buf, entry).unwrap();
+        }
         let mut seen = Vec::new();
-        for_each_entry(&buf[..n], |k, s, name| seen.push((k, s, name.to_string()))).unwrap();
-        assert_eq!(seen, [(KIND_DIR, 42, "Documents".to_string())]);
-        assert_eq!(for_each_entry(&buf[..n - 1], |_, _, _| {}), Err(Error::Malformed));
-        assert_eq!(encode_entry(&mut buf[..10], KIND_FILE, 0, "x"), None);
+        for_each_entry(&buf, |e| seen.push((e.kind, e.size, e.node, e.name.to_string()))).unwrap();
+        assert_eq!(seen, entries.map(|e| (e.kind, e.size, e.node, e.name.to_string())));
+        assert_eq!(for_each_entry(&buf[..buf.len() - 1], |_| {}), Err(Error::Malformed));
+        let long = "x".repeat(usize::from(u16::MAX) + 1);
+        assert_eq!(encode_entry(&mut Vec::new(), &Entry { kind: KIND_FILE, size: 0, node: 1, name: &long }), None);
     }
 
     /// Every refusal a server sends reads back as itself, and 0 — a reply's

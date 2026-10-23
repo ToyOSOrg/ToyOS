@@ -28,7 +28,7 @@ use toyos_blockdev::BlockDev;
 use toyos_fat32::{Error, Fat32, FatTime};
 
 use crate::cache::{Cache, Disk};
-use crate::volume::{parent, Identities, Kind, Meta, Node, OpenHow, Out, Volume, NANOS_PER_SEC};
+use crate::volume::{parent, Identities, Kind, Listed, Meta, Node, OpenHow, Out, Volume, NANOS_PER_SEC};
 
 /// The most entries one directory listing materialises.
 const MAX_LIST: usize = 16_384;
@@ -197,13 +197,14 @@ impl<D: Disk> Volume for FatVolume<D> {
         Err(fs::Error::NotALink)
     }
 
-    fn list(&mut self, dir: &str) -> Result<Vec<(String, Meta)>, fs::Error> {
+    fn list(&mut self, dir: &str) -> Result<Vec<Listed>, fs::Error> {
         let entries = self.cache.block_on(self.fs.read_dir(dir, MAX_LIST)).map_err(|e| logged("list", dir, e))?;
         Ok(entries
             .into_iter()
             .map(|e| {
                 let kind = if e.is_dir { Kind::Dir } else { Kind::File };
-                (e.name, Meta { kind, size: if e.is_dir { 0 } else { e.len }, mtime: e.modified_unix * NANOS_PER_SEC })
+                let meta = Meta { kind, size: if e.is_dir { 0 } else { e.len }, mtime: e.modified_unix * NANOS_PER_SEC };
+                Listed { name: e.name, meta, identity: self.ids.of(e.entry_offset) }
             })
             .collect())
     }
@@ -612,6 +613,26 @@ mod tests {
         v.close(n).unwrap();
         let again = v.identity("moved.txt").unwrap();
         assert!(!all.contains(&again), "a file made where one was removed is a new one: {again} of {all:?}");
+    }
+
+    /// A listing names each entry by the identity a stat of its path
+    /// answers, asked before or after the stat.
+    #[test]
+    fn a_listing_names_each_entry_by_its_identity() {
+        const CREATE: OpenHow = OpenHow { create: true, create_new: false, truncate: false };
+        let (mut v, _, _) = spec_fat();
+        for path in ["a.txt", "sub/b.txt"] {
+            let n = v.open(path, CREATE).unwrap();
+            v.close(n).unwrap();
+        }
+        let b = v.identity("sub/b.txt").unwrap();
+        for dir in ["", "sub"] {
+            for e in v.list(dir).unwrap() {
+                let path = if dir.is_empty() { e.name.clone() } else { format!("{dir}/{}", e.name) };
+                assert_eq!(Ok(e.identity), v.identity(&path), "{path}");
+            }
+        }
+        assert!(v.list("sub").unwrap().iter().any(|e| e.identity == b));
     }
 
     /// A disk whose grant does not write: every write and flush is refused.

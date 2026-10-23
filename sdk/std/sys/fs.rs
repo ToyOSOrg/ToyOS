@@ -412,8 +412,9 @@ fn kernel_file_type(ty: syscall::FileType) -> FileType {
 pub fn readdir(p: &Path) -> io::Result<ReadDir> {
     let listing = files::read_dir(bytes(p)).map_err(files_error)?;
     let mut entries = Vec::new();
-    toyos::fs::for_each_entry(&listing, |kind, _, name| {
-        entries.push(DirEntry { dir_path: p.to_path_buf(), name: OsString::from(name), file_type: FileType::of_kind(kind) })
+    toyos::fs::for_each_entry(&listing, |entry| {
+        let (name, file_type) = (OsString::from(entry.name), FileType::of_kind(entry.kind));
+        entries.push(DirEntry { dir_path: p.to_path_buf(), name, file_type })
     })
     .map_err(served_error)?;
     Ok(ReadDir { entries, index: 0 })

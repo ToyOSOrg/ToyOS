@@ -12,10 +12,8 @@ passing boot must leave. Two literals, no shared declaration: reword the
 kernel's and every metal run refuses with `the log's last line is … and not
 "Rebooting."` while the kernel is behaving exactly as intended.
 
-It fails closed, so it is a maintenance hazard and not a hole — the same shape
-as `issues/a-known-mask-is-copied-out-of-toyos-abi-by-hand.md`, and with
-the same cause: the only crate a `no_std` kernel and a host build crate both
-read is `toyos-abi`.
+It fails closed, so it is a maintenance hazard and not a hole. Its cause: the
+only crate a `no_std` kernel and a host build crate both read is `toyos-abi`.
 
 **Exit condition**: the word declared once in `toyos-abi` and named by both
 `quiesce` and `build/bootlog.rs`, so `git grep '"Rebooting\.'` returns the one
