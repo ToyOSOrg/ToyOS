@@ -8,11 +8,11 @@ opened: 2026-10-22
 
 The kernel parses no filesystem of ROOT: ROOT is an opaque signed section the
 supervisor's file server serves. The loader still does. `loader/src/microcode.rs`
-mounts ROOT read-only with the `bcachefs` crate after the slot's header has
-verified it, and reads the patch `toyos_microcode` names for this CPU out of
-`/system/share/microcode/`, so a filesystem reader of ROOT's whole format runs
-in the loader on every x86-64 boot. It is outside the kernel scope of the
-owner's 2026-10-21 ruling and was left as it is.
+reads the patch `toyos_microcode` names for this CPU out of
+`/system/share/microcode/` with `bcachefs::engine::read_file`, after the
+slot's header has verified ROOT, so a reader of ROOT's whole format runs in the
+loader on every x86-64 boot. It is outside the kernel scope of the owner's
+2026-10-21 ruling and was left as it is.
 
 Owner: the orchestrator.
 

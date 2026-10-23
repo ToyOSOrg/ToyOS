@@ -1,6 +1,5 @@
 //! bcachefs. [`engine`] implements its on-disk format; the modules beside it
-//! are the interim ToyOS format the build, the loader and the file server
-//! still use.
+//! are the interim ToyOS format DATA's file server still uses.
 //!
 //! **Every number this crate parses came off a disk it does not own, and a
 //! CRC is not authentication — whoever writes the image writes the CRC.** Each

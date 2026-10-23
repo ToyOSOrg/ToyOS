@@ -9,7 +9,7 @@
 
 use alloc::string::ToString;
 
-use bcachefs::{BlockBuf, BlockIO, BlockNum, DeviceError, FsError, Mounted, ReadOnly, TransferError};
+use bcachefs::engine::{self, Error};
 use toyos_bootmap::BOOT_MAP_BYTES;
 
 use crate::efi::{AllocateType, BootServices, PAGE_SIZE};
@@ -29,14 +29,13 @@ pub fn find(bs: &BootServices, root: &Payload) -> Option<&'static [u8]> {
         }
     };
     let path = cpu.path().to_string();
-    let read = Mounted::<_, ReadOnly>::open(Image(root.bytes())).and_then(|fs| fs.read_file(&path));
-    let bytes = match read {
+    let bytes = match engine::read_file(root.bytes(), path.as_bytes()) {
         Ok(bytes) if !bytes.is_empty() => bytes,
         Ok(_) => {
             println!("{SAID} /system/{path} is empty: none handed over");
             return None;
         }
-        Err(FsError::NotFound) => {
+        Err(Error::NotFound) => {
             println!("{SAID} ROOT holds no /system/{path}: none handed over");
             return None;
         }
@@ -61,37 +60,4 @@ pub fn find(bs: &BootServices, root: &Payload) -> Option<&'static [u8]> {
     patch.copy_from_slice(&bytes);
     println!("{SAID} /system/{path}, {} bytes at {at:#x}, handed over", patch.len());
     Some(patch)
-}
-
-/// ROOT's image as its filesystem reads it, blocks of it and none past it.
-struct Image<'a>(&'a [u8]);
-
-/// A block outside the image, or a write to it.
-struct Outside;
-
-impl TransferError for Outside {
-    fn refused_before_attempt(&self) -> bool {
-        false
-    }
-}
-
-impl BlockIO for Image<'_> {
-    fn read_block(&self, block: BlockNum, buf: &mut BlockBuf) -> Result<(), DeviceError> {
-        let bytes = usize::try_from(block.raw())
-            .ok()
-            .and_then(|block| block.checked_mul(buf.0.len()))
-            .and_then(|at| self.0.get(at..at.checked_add(buf.0.len())?))
-            .ok_or(DeviceError::classify(&Outside))?;
-        buf.0.copy_from_slice(bytes);
-        Ok(())
-    }
-
-    /// A `ReadOnly` mount has no path here.
-    fn write_block(&self, _: BlockNum, _: &BlockBuf) -> Result<(), DeviceError> {
-        Err(DeviceError::classify(&Outside))
-    }
-
-    fn block_count(&self) -> u64 {
-        (self.0.len() / size_of::<BlockBuf>()) as u64
-    }
 }

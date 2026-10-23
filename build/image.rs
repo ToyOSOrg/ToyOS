@@ -1,140 +1,98 @@
+use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::num::NonZeroU64;
 use std::path::Path;
 
-use bcachefs::{BlockBuf, BlockIO, BlockNum, Formatted, FsUuid, Superblock, VecBlockIO};
+use bcachefs::engine::{self, Meta, NodeRef, Tree};
 
 use crate::arch::Arch;
-use toyos_blockdev::{block_on_ready, Bytes, BLOCK};
+use toyos_blockdev::{block_on_ready, Bytes, ReadOnlyBytes, BLOCK};
+use toyos_crypto::Random;
 use toyos_fat32::{Fat32, FatTime};
 use toyos_gpt::Guid;
 
-/// The image that goes on the ROOT partition, named by a UUID **derived, never
-/// drawn**: two builds of one tree have to agree on the name the file server
-/// serving it says it by (`toyos_osrelease::ROOT_SAID`).
+/// The image that goes on the ROOT partition: a bcachefs volume holding
+/// `files` and `symlinks`, every directory their paths name, and nothing
+/// free.
 ///
-/// **A set, not a sequence.** Both lists are sorted by name here, so the
-/// volume's bytes and the UUID over them are a function of what the caller
-/// holds and not of the order it happened to hand it over in — a caller that
-/// walked a hash map, or a directory, would otherwise make one tree two images.
-/// `one_ordering_of_one_set_is_one_image` is the arm.
-pub fn create_root_image(
-    files: &[(String, Vec<u8>)],
-    symlinks: &[(String, String)],
-    quiet: bool,
-) -> Vec<u8> {
+/// **A function of the set, not of the order or the clock.** Paths are
+/// sorted, so inode numbers follow sorted path order from 2^31; every
+/// identifier, seed and node sequence mkfs draws comes from a digest of the
+/// contents ([`Drawn`]); every time is 0. Two builds of one tree are one
+/// image, and the volume's UUID, the name the file server serving it says
+/// it by (`toyos_osrelease::ROOT_SAID`), names that tree.
+pub fn create_root_image(files: &[(String, Vec<u8>)], symlinks: &[(String, String)], quiet: bool) -> Vec<u8> {
     let mut files: Vec<&(String, Vec<u8>)> = files.iter().collect();
     files.sort_by(|a, b| a.0.cmp(&b.0));
     let mut symlinks: Vec<&(String, String)> = symlinks.iter().collect();
     symlinks.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut random = Drawn::from(root_digest(&files, &symlinks));
 
-    let data_size: usize = files.iter().map(|(_, d)| d.len()).sum::<usize>();
-    let total_entries = files.len() + symlinks.len();
-    // Estimate: superblock(1) + bitmap + btree nodes + data blocks + backup(1) + 10% padding
-    let data_blocks = data_size.div_ceil(4096);
-    let btree_blocks = (total_entries / 30).max(2);
-    let overhead = 64;
-    let total_blocks = (1 + overhead + btree_blocks + data_blocks) * 11 / 10;
-    let estimate = align_up(total_blocks.max(64), PARTITION_ALIGN / 4096) as u64;
-    let spacious = format_root(&files, &symlinks, estimate, quiet);
-    trim_root(spacious)
-}
-
-/// `spacious`, cut to the blocks its own build claimed and no more: ROOT is
-/// read-only, and the loader reads and the kernel keeps every block of it, so
-/// a free block on it is a read and a page for nothing.
-///
-/// Trimmed, never rebuilt at the smaller count: mkfs draws its hash seed from
-/// `block_count` (`Formatted::format`'s "deterministic for reproducible
-/// builds"), so a second mkfs at a different device size keys every name
-/// differently and can shape a bigger btree than the first build's headroom
-/// ever measured — the reformat this replaced ran out by one block on
-/// exactly that, on a file set nothing about its *bytes* explains. Cutting
-/// the same bytes down needs nothing the first build did not already prove:
-/// mkfs never frees a block once claimed, so every allocation sits below
-/// `next_alloc` with no hole beneath it, and everything from there to the
-/// alignment boundary is free to discard but for the one block the trimmed
-/// image's own backup superblock claims.
-fn trim_root(spacious: Vec<u8>) -> Vec<u8> {
-    let sb = superblock_of(&spacious);
-    assert!(sb.next_alloc > 0, "an mkfs cursor at zero claims nothing was allocated");
-    let kept = (align_up((sb.next_alloc + 1) as usize, PARTITION_ALIGN / 4096) as u64).min(sb.block_count);
-
-    let mut bytes = spacious;
-    bytes.truncate((kept * 4096) as usize);
-    let io = VecBlockIO::from_vec(bytes);
-
-    // The kept bitmap already marks every block below `next_alloc` used and
-    // was sized for a device at least this large (`Superblock::check` allows
-    // a bitmap bigger than a device needs, never smaller), so the one bit
-    // this trim must still set is the backup superblock's new block: free in
-    // that bitmap, since it sits at or past every allocation mkfs made.
-    let backup = BlockNum::new(kept - 1);
-    let (bitmap_block, byte_off, bit) = bitmap_location(&sb, backup);
-    let mut buf = BlockBuf::zeroed();
-    io.read_block(bitmap_block, &mut buf).expect("read a bitmap block this trim kept");
-    buf.as_bytes_mut()[byte_off] |= 1 << bit;
-    io.write_block(bitmap_block, &buf).expect("write a bitmap block this trim kept");
-
-    let mut trimmed = sb;
-    trimmed.block_count = kept;
-    trimmed.free_blocks = kept - trimmed.next_alloc - 1;
-    trimmed.write(&io).expect("write the trimmed superblock");
-    io.into_vec()
-}
-
-/// Where `block`'s bit lives in `sb`'s bitmap: the bitmap block, the byte
-/// within it, and the bit within that byte. `BitmapAllocator::bit_of` computes
-/// the same triple from the allocator's own fields; this is the version a
-/// caller outside the crate can reach, over an image it did not format.
-fn bitmap_location(sb: &Superblock, block: BlockNum) -> (BlockNum, usize, u8) {
-    let byte_idx = block.raw() / 8;
-    (
-        BlockNum::new(sb.bitmap_start.raw() + byte_idx / 4096),
-        (byte_idx % 4096) as usize,
-        (block.raw() % 8) as u8,
-    )
-}
-
-/// A ROOT volume of `total_blocks`, holding `files` and `symlinks` in the
-/// order given. Whole alignment units: `Superblock::check` refuses a
-/// superblock whose block count is not its view's exactly, so a partitioner
-/// rounding the size up to the alignment would leave an image nothing can
-/// mount.
-fn format_root(
-    files: &[&(String, Vec<u8>)],
-    symlinks: &[&(String, String)],
-    total_blocks: u64,
-    quiet: bool,
-) -> Vec<u8> {
-    let io = VecBlockIO::new(total_blocks);
-    let mut fs = Formatted::format(io).expect("format an in-memory image");
-
-    for (name, data) in files {
-        if !quiet {
-            eprintln!("root: adding '{}' ({} bytes)", name, data.len());
+    let mut entries: BTreeMap<&str, RootEntry<'_>> = BTreeMap::new();
+    let entered = files.iter().map(|(name, data)| (name.as_str(), RootEntry::File(data)));
+    for (path, entry) in entered.chain(symlinks.iter().map(|(name, target)| (name.as_str(), RootEntry::Symlink(target)))) {
+        if entries.insert(path, entry).is_some() {
+            panic!("root: '{path}' is given twice, or is a directory another path names");
         }
-        fs.create(name, data, 0)
-            .unwrap_or_else(|e| panic!("root: failed to add '{}': {:?}", name, e));
+        for (at, _) in path.match_indices('/') {
+            match entries.entry(&path[..at]).or_insert(RootEntry::Dir) {
+                RootEntry::Dir => {}
+                _ => panic!("root: '{}' is a file and the directory '{path}' is under", &path[..at]),
+            }
+        }
     }
 
-    for (name, target) in symlinks {
-        if !quiet {
-            eprintln!("root: symlink '{}' -> '{}'", name, target);
-        }
-        fs.create_symlink(name, target, 0)
-            .unwrap_or_else(|e| panic!("root: failed to symlink '{}' -> '{}': {:?}", name, target, e));
+    let mut tree = Tree::new();
+    let mut dirs: BTreeMap<&str, NodeRef> = BTreeMap::from([("", Tree::ROOT)]);
+    for (&path, entry) in &entries {
+        let (parent, name) = path.rsplit_once('/').unwrap_or(("", path));
+        let parent = dirs[parent];
+        let added = match entry {
+            RootEntry::Dir => tree.dir(parent, name.as_bytes(), ROOT_DIR).map(|dir| {
+                dirs.insert(path, dir);
+            }),
+            RootEntry::File(data) => {
+                if !quiet {
+                    eprintln!("root: adding '{path}' ({} bytes)", data.len());
+                }
+                tree.file(parent, name.as_bytes(), data, ROOT_FILE).map(drop)
+            }
+            RootEntry::Symlink(target) => {
+                if !quiet {
+                    eprintln!("root: symlink '{path}' -> '{target}'");
+                }
+                tree.symlink(parent, name.as_bytes(), target.as_bytes(), ROOT_SYMLINK).map(drop)
+            }
+        };
+        added.unwrap_or_else(|e| panic!("root: '{path}' cannot be put on ROOT: {e:?}"));
     }
 
-    fs.set_uuid(root_uuid(files, symlinks));
-    fs.into_io().expect("write an in-memory image").into_vec()
+    let options = engine::Options { label: b"ROOT", time: 0, encryption: None };
+    let blocks = engine::fit(&options, &tree, &random).unwrap_or_else(|e| panic!("root: no size holds these files: {e:?}"));
+    let device = Bytes::new(vec![0u8; usize::try_from(blocks).expect("a ROOT this host can hold") * BLOCK]);
+    block_on_ready(engine::mkfs(&device, &options, &tree, &mut random))
+        .unwrap_or_else(|e| panic!("root: mkfs at the size it fits refused: {e:?}"));
+    device.into_inner()
 }
 
-/// A name for exactly this set of files and symlinks, in the order
+/// What one path on ROOT is.
+enum RootEntry<'a> {
+    Dir,
+    File(&'a [u8]),
+    Symlink(&'a str),
+}
+
+/// Owner and permissions of ROOT's directories, files and symlinks: root's,
+/// and read-only to everyone else, whatever the build host's were.
+const ROOT_DIR: Meta = Meta { perm: 0o755, uid: 0, gid: 0 };
+const ROOT_FILE: Meta = Meta { perm: 0o644, uid: 0, gid: 0 };
+const ROOT_SYMLINK: Meta = Meta { perm: 0o777, uid: 0, gid: 0 };
+
+/// A digest of exactly this set of files and symlinks, in the order
 /// [`create_root_image`] sorted them into. Lengths go into the digest beside
 /// the bytes, so no two entries can run together into an input a different
 /// split would also produce.
-fn root_uuid(files: &[&(String, Vec<u8>)], symlinks: &[&(String, String)]) -> FsUuid {
+fn root_digest(files: &[&(String, Vec<u8>)], symlinks: &[&(String, String)]) -> [u8; 32] {
     let mut hasher = toyos_crypto::hash::Sha256::new();
     let mut field = |bytes: &[u8]| {
         hasher.update(&(bytes.len() as u64).to_le_bytes()).expect(crate::SHA256_BOUND);
@@ -148,21 +106,57 @@ fn root_uuid(files: &[&(String, Vec<u8>)], symlinks: &[&(String, String)]) -> Fs
         field(name.as_bytes());
         field(target.as_bytes());
     }
-    let digest = hasher.finalize();
-    let mut uuid = [0u8; 16];
-    uuid.copy_from_slice(&digest[..16]);
-    FsUuid(uuid)
+    hasher.finalize()
 }
 
-/// The name the ROOT image `bytes` carries, read back out of its superblock:
-/// what the image says rather than what whoever assembled it meant to stamp.
-pub fn root_uuid_of(bytes: &[u8]) -> FsUuid {
-    superblock_of(bytes).uuid
+/// The bytes mkfs draws for ROOT, a function of [`root_digest`] alone:
+/// SHA-256 of the digest and a block counter, in counter order.
+#[derive(Clone)]
+struct Drawn {
+    digest: [u8; 32],
+    counter: u64,
+    block: [u8; 32],
+    used: usize,
 }
 
-fn superblock_of(bytes: &[u8]) -> Superblock {
-    let block = <[u8; 4096]>::try_from(&bytes[..4096]).expect("a bcachefs image is at least one block");
-    Superblock::parse(&BlockBuf(block)).expect("the ROOT image this build wrote carries a superblock")
+impl From<[u8; 32]> for Drawn {
+    fn from(digest: [u8; 32]) -> Self {
+        Self { digest, counter: 0, block: [0; 32], used: 32 }
+    }
+}
+
+impl Random for Drawn {
+    fn fill(&mut self, out: &mut [u8]) -> Result<(), toyos_crypto::Error> {
+        for byte in out {
+            if self.used == self.block.len() {
+                self.block = crate::sha256(&[&self.digest[..], &self.counter.to_le_bytes()].concat());
+                self.counter += 1;
+                self.used = 0;
+            }
+            *byte = self.block[self.used];
+            self.used += 1;
+        }
+        Ok(())
+    }
+}
+
+/// ROOT's name, as the file server serving it says it: its volume's UUID,
+/// 32 hex digits.
+pub fn root_uuid_of(volume: &[u8]) -> Result<String, String> {
+    let root = mount_root(volume)?;
+    Ok(root.superblock().user_uuid().iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The ROOT volume `bytes`, opened by the reader the loader and the file
+/// server read it with.
+fn mount_root(bytes: &[u8]) -> Result<engine::Volume<ReadOnlyBytes<'_>>, String> {
+    let device = ReadOnlyBytes::new(bytes).ok_or_else(|| format!("a {}-byte ROOT, which is no whole {BLOCK}-byte blocks", bytes.len()))?;
+    block_on_ready(engine::Volume::open(device)).map_err(|e| format!("ROOT does not mount: {e:?}"))
+}
+
+/// The file `path` on the ROOT volume `bytes`, following no symlink.
+pub fn root_file(bytes: &[u8], path: &str) -> Result<Vec<u8>, String> {
+    engine::read_file(bytes, path.as_bytes()).map_err(|e| format!("ROOT: reading {path}: {e:?}"))
 }
 
 /// What an image is signed with: the key, and the monotonic version the
@@ -311,9 +305,9 @@ fn cmdline_of(path: &Path) -> Result<String, String> {
 }
 
 /// The ROOT of the image's marked slot, read back off the image at `path`:
-/// its name, and the file `name` it carries, read with the driver the kernel
-/// mounts it with.
-pub fn root_file_on(path: &Path, name: &str) -> Result<(FsUuid, Vec<u8>), String> {
+/// its name, and the file `name` it carries, read with the reader the file
+/// server serves it with.
+pub fn root_file_on(path: &Path, name: &str) -> Result<(String, Vec<u8>), String> {
     let mut file = std::fs::File::open(path).map_err(|e| format!("opening {}: {e}", path.display()))?;
     let table = slot_table_of(&mut file).map_err(|why| format!("{}: {why}", path.display()))?;
     let slot = table.slot(table.marked).expect("a table marks a slot it carries");
@@ -323,11 +317,8 @@ pub fn root_file_on(path: &Path, name: &str) -> Result<(FsUuid, Vec<u8>), String
     file.seek(SeekFrom::Start(start))
         .and_then(|_| file.read_exact(&mut volume))
         .map_err(|e| format!("reading {}'s ROOT at byte {start}: {e}", path.display()))?;
-    let uuid = root_uuid_of(&volume);
-    let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(volume))
-        .map_err(|e| format!("{}'s ROOT does not mount: {e:?}", path.display()))?;
-    let bytes = fs.read_file(name).map_err(|e| format!("{}'s ROOT: reading {name}: {e:?}", path.display()))?;
-    Ok((uuid, bytes))
+    let on = |why: String| format!("{}: {why}", path.display());
+    Ok((root_uuid_of(&volume).map_err(on)?, root_file(&volume, name).map_err(on)?))
 }
 
 /// The slot table on the disk image `file`, as the loader reads it.
@@ -901,15 +892,16 @@ enum Volume {
     Root,
 }
 
-/// Why the image at `disk` may not be published, or `Ok` because readers that
-/// did not write it agree it is sound.
+/// Why the image at `disk` may not be published, or `Ok` because its checks
+/// find it sound.
 ///
 /// `toyos-gpt` finds each partition by the unique GUID the table claims for it,
 /// then `toyos-fat32-check` judges a FAT volume against fatgen103 and
-/// `bcachefs`'s mount path judges ROOT, so no writer defect is waved through by
-/// its own judge. A volume the table misplaces fails its format check on
-/// whatever it does land on, which is why the extents are not compared
-/// separately.
+/// bcachefs's reader and fsck judge ROOT. The fsck shares the writer's
+/// specification, so it catches the writer contradicting itself; upstream's
+/// fsck is ROOT's independent judge, outside the build. A volume the table
+/// misplaces fails its format check on whatever it does land on, which is why
+/// the extents are not compared separately.
 fn certify(disk: &[u8], parts: &[(&str, toyos_gpt::Guid, Volume)]) -> Result<(), String> {
     for (what, guid, kind) in parts {
         let located = toyos_gpt::locate(&mut ImageSectors(disk), *guid)
@@ -930,12 +922,12 @@ fn certify(disk: &[u8], parts: &[(&str, toyos_gpt::Guid, Volume)]) -> Result<(),
                 }
             }
             Volume::Root => {
-                bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(
-                    volume.to_vec(),
-                ))
-                .map_err(|e| {
-                    format!("bcachefs will not mount the {what} of the image this build wrote: {e:?}")
-                })?;
+                let refused = |why: String| format!("bcachefs refuses the {what} of the image this build wrote: {why}");
+                let root = mount_root(volume).map_err(refused)?;
+                let found = block_on_ready(engine::fsck(&root)).map_err(|e| refused(format!("{e:?}")))?;
+                if !found.is_empty() {
+                    return Err(refused(format!("{found:?}")));
+                }
             }
         }
     }
@@ -945,6 +937,7 @@ fn certify(disk: &[u8], parts: &[(&str, toyos_gpt::Guid, Volume)]) -> Result<(),
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bcachefs::engine::DirentType;
 
     /// A ROOT image with one file in it, for the tests that need a real one
     /// rather than a placeholder: the assembler reads its superblock.
@@ -971,41 +964,55 @@ mod tests {
         Signing { key, version: 7 }
     }
 
-    /// A file set whose spacious build's `next_alloc` lands one alignment
-    /// unit's rounding away from `block_count` — the shape that made a second,
-    /// from-scratch mkfs at the smaller size reseed its hashes into a btree
-    /// one block bigger than the first build's slack, and panic with
-    /// `NoSpace` on the last symlink. `trim_root` needs no second mkfs, so it
-    /// keeps whatever tree the first build already proved fits.
-    #[test]
-    fn a_second_build_at_the_boundary_does_not_run_out() {
-        let n = 80u32;
-        let files: Vec<(String, Vec<u8>)> = (0..n)
-            .map(|i| (format!("bin/prog{i:04}"), vec![(i % 251) as u8; 200_000 + i as usize * 17]))
-            .collect();
-        let symlinks: Vec<(String, String)> = (0..n)
-            .map(|i| (format!("bin/alias{i:04}"), format!("/system/bin/prog{i:04}")))
-            .collect();
-
-        let image = create_root_image(&files, &symlinks, true);
-
-        let sb = superblock_of(&image);
-        assert_eq!(sb.block_count * 4096, image.len() as u64);
-        assert!(sb.free_blocks < (PARTITION_ALIGN / 4096) as u64, "{} free blocks", sb.free_blocks);
-        bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(image))
-            .expect("a trimmed image mounts");
+    /// Every name on the ROOT volume `bytes`, files and symlinks with their
+    /// sizes, directories with 0, as the reader lists them.
+    fn root_names(bytes: &[u8]) -> Vec<(String, DirentType, u64)> {
+        let root = mount_root(bytes).expect("ROOT mounts");
+        let mut out: Vec<(String, DirentType, u64)> = block_on_ready(async {
+            let mut out = Vec::new();
+            for (path, entry) in root.names().await.expect("ROOT lists") {
+                let size = if entry.kind == DirentType::Directory { 0 } else { root.inode(entry.ino).await.expect("its inode").size };
+                out.push((String::from_utf8(path).expect("a name the build gave"), entry.kind, size));
+            }
+            out
+        });
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
-    /// ROOT carries its contents and less than one alignment unit of free
-    /// blocks: the loader reads every block of it and the kernel keeps them.
+    /// One file set built twice is one byte string: nothing the build
+    /// writes on ROOT comes from the clock or from a random source.
     #[test]
-    fn root_carries_less_than_an_alignment_unit_of_free_blocks() {
+    fn one_set_built_twice_is_one_image() {
         let files: Vec<(String, Vec<u8>)> =
-            (0..8u8).map(|i| (format!("bin/f{i}"), vec![i; 3 << 20])).collect();
-        let image = create_root_image(&files, &[], true);
-        let sb = superblock_of(&image);
-        assert_eq!(sb.block_count * 4096, image.len() as u64);
-        assert!(sb.free_blocks < (PARTITION_ALIGN / 4096) as u64, "{} free blocks", sb.free_blocks);
+            (0..40u32).map(|i| (format!("bin/prog{i:02}"), vec![(i % 251) as u8; 20_000 + i as usize * 17])).collect();
+        let symlinks = vec![("bin/ls".to_string(), "/system/bin/prog00".to_string())];
+        let first = create_root_image(&files, &symlinks, true);
+        let second = create_root_image(&files, &symlinks, true);
+        assert!(first == second, "one file set built twice wrote two {}-byte images", first.len());
+    }
+
+    /// Bucket sizes double as a device crosses 64 MiB, so a ROOT around it
+    /// is laid out in 16 KiB buckets on one side and 32 KiB ones on the
+    /// other. Every file set across that edge fits the size the build
+    /// gives it, checks clean and reads back whole.
+    #[test]
+    fn file_sets_across_a_bucket_size_edge_fit_and_read_back() {
+        let mut sides = std::collections::BTreeSet::new();
+        for kib in (58880..59904).step_by(256) {
+            let big: Vec<u8> = (0..kib << 10).map(|i| (i / 4096 + kib) as u8).collect();
+            let files: Vec<(String, Vec<u8>)> = std::iter::once(("bin/big".to_string(), big))
+                .chain((0..200u32).map(|i| (format!("share/s{i:03}"), vec![i as u8; 3000 + i as usize])))
+                .collect();
+            let image = create_root_image(&files, &[], true);
+            sides.insert(image.len() > 64 << 20);
+            let root = mount_root(&image).expect("it mounts");
+            assert_eq!(block_on_ready(engine::fsck(&root)), Ok(Vec::new()), "{kib} KiB");
+            for (name, data) in &files {
+                assert!(root_file(&image, name).expect("it reads") == *data, "{kib} KiB: {name}");
+            }
+        }
+        assert_eq!(sides.len(), 2, "the file sets do not straddle the edge");
     }
 
     /// The volumes this build writes break no rule of the format, and the
@@ -1071,13 +1078,12 @@ mod tests {
         let refusal = certify(&broken, &parts).expect_err("that volume is not FAT32");
         assert!(refusal.contains("toyos-fat32-check"), "{refusal}");
 
-        // Both superblock copies, because one is the other's backup.
+        // A ROOT of zeros: no superblock copy at all.
         let root_at = start_of(root);
         let mut broken = disk.clone();
-        broken[root_at] ^= 0xff;
-        broken[root_at + root_image.len() - 4096] ^= 0xff;
+        broken[root_at..root_at + root_image.len()].fill(0);
         let refusal = certify(&broken, &parts).expect_err("that volume is not bcachefs");
-        assert!(refusal.contains("bcachefs will not mount"), "{refusal}");
+        assert!(refusal.contains("bcachefs refuses"), "{refusal}");
     }
 
     /// The unique GUID the table drew for the one TOYOS-ROOT-typed partition.
@@ -1267,8 +1273,8 @@ mod tests {
         let backwards = create_root_image(&backwards_files, &backwards_symlinks, true);
 
         assert_eq!(
-            root_uuid_of(&forwards),
-            root_uuid_of(&backwards),
+            root_uuid_of(&forwards).unwrap(),
+            root_uuid_of(&backwards).unwrap(),
             "one set of files named two filesystems"
         );
         assert_eq!(forwards.len(), backwards.len());
@@ -1276,23 +1282,22 @@ mod tests {
             forwards == backwards,
             "one set of files wrote two different {}-byte volumes under one name {}",
             forwards.len(),
-            root_uuid_of(&forwards)
+            root_uuid_of(&forwards).unwrap()
         );
 
         // And it is not a constant: a different set is a different name.
         let mut other = files;
         other[0].1.push(b'!');
         assert_ne!(
-            root_uuid_of(&forwards),
-            root_uuid_of(&create_root_image(&other, &symlinks, true)),
+            root_uuid_of(&forwards).unwrap(),
+            root_uuid_of(&create_root_image(&other, &symlinks, true)).unwrap(),
             "one byte of one file changed and the filesystem kept its name"
         );
     }
 
-    /// **The independent oracle for ROOT**, asked of the finished image by
-    /// readers that did not write it: `toyos-gpt` finds the partition by type
-    /// where the table placed it, and `bcachefs`'s mount-and-read path lists
-    /// what its format-and-write path put there.
+    /// **ROOT reads back as it was given**, asked of the finished image:
+    /// `toyos-gpt` finds the partition by type where the table placed it, and
+    /// bcachefs's reader lists what its mkfs put there.
     ///
     /// Every name, size, content hash and symlink target against the list
     /// handed to [`create_root_image`]: a listing that merely parsed would
@@ -1321,22 +1326,17 @@ mod tests {
         let bytes = part.lba_count().get() as usize * LBA as usize;
         let volume = disk[at..at + bytes].to_vec();
 
-        let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(volume))
-            .expect("the ROOT partition mounts");
+        let listed = root_names(&volume);
+        let mut want: Vec<(String, DirentType, u64)> = ["bin", "etc", "share"].iter().map(|d| (d.to_string(), DirentType::Directory, 0)).collect();
+        want.extend(files.iter().map(|(name, data)| (name.clone(), DirentType::Regular, data.len() as u64)));
+        // A symlink's size counts the NUL stored after its target.
+        want.extend(symlinks.iter().map(|(name, to)| (name.clone(), DirentType::Symlink, to.len() as u64 + 1)));
+        want.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(listed, want, "ROOT does not hold the names, kinds and sizes it was built from");
 
-        let mut listed: Vec<(String, u64)> =
-            fs.list(usize::MAX, &|_| true).expect("list the ROOT partition");
-        listed.sort();
-        let mut want: Vec<(String, u64)> = files
-            .iter()
-            .map(|(name, data)| (name.clone(), data.len() as u64))
-            .chain(symlinks.iter().map(|(name, to)| (name.clone(), to.len() as u64)))
-            .collect();
-        want.sort();
-        assert_eq!(listed, want, "ROOT does not hold the names and sizes it was built from");
-
+        let root = mount_root(&volume).expect("the ROOT partition mounts");
         for (name, data) in &files {
-            let read = fs.read_file(name).unwrap_or_else(|e| panic!("read {name}: {e:?}"));
+            let read = root_file(&volume, name).unwrap_or_else(|e| panic!("read {name}: {e}"));
             assert_eq!(
                 crate::sha256(&read),
                 crate::sha256(data),
@@ -1346,10 +1346,9 @@ mod tests {
             );
         }
         for (name, target) in &symlinks {
-            let read = fs
-                .read_link(name, 4096)
-                .unwrap_or_else(|e| panic!("read_link {name}: {e:?}"));
-            assert_eq!(read.as_deref(), Some(target.as_str()));
+            let read = block_on_ready(async { root.readlink(root.resolve(name.as_bytes()).await?).await })
+                .unwrap_or_else(|e| panic!("readlink {name}: {e:?}"));
+            assert_eq!(read, target.as_bytes());
         }
     }
 
@@ -1357,9 +1356,9 @@ mod tests {
     /// `/system`, so every absolute path the shipped image declares is
     /// `/system/` plus a name ROOT carries; the file server's row names no
     /// path, its image being the slot's. Asked of a
-    /// finished image by readers that did not write it: `toyos-gpt` finds ROOT
-    /// by type where the table says, `bcachefs` mounts it, and `toyos-manifest`
-    /// parses the records out of the volume.
+    /// finished image: `toyos-gpt` finds ROOT by type where the table says,
+    /// bcachefs's reader opens it, and `toyos-manifest` parses the records out
+    /// of the volume.
     #[test]
     fn every_declared_path_resolves_inside_the_root_partition() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1387,14 +1386,10 @@ mod tests {
             .expect("a boot image carries exactly one TOYOS-ROOT partition");
         let at = part.first_lba() as usize * LBA as usize;
         let bytes = part.lba_count().get() as usize * LBA as usize;
-        let fs = bcachefs::Mounted::<_, bcachefs::ReadOnly>::open(VecBlockIO::from_vec(
-            disk[at..at + bytes].to_vec(),
-        ))
-        .expect("the ROOT partition mounts");
+        let volume = &disk[at..at + bytes];
 
         // As the volume holds it, not as the renderer returned it.
-        let on_volume = fs
-            .read_file(toyos_manifest::PATH)
+        let on_volume = root_file(volume, toyos_manifest::PATH)
             .expect("ROOT carries the manifest where the guest path names it");
         assert_eq!(on_volume, manifest, "the manifest on ROOT is not the one the build rendered");
         assert_eq!(
@@ -1403,12 +1398,7 @@ mod tests {
             "the path a process opens is not where ROOT carries the manifest"
         );
 
-        let names: std::collections::BTreeSet<String> = fs
-            .list(usize::MAX, &|_| true)
-            .expect("list the ROOT partition")
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect();
+        let names: std::collections::BTreeSet<String> = root_names(volume).into_iter().map(|(name, _, _)| name).collect();
         for &path in &on_root {
             let name = under_system(path);
             assert_ne!(name, path, "{path} is not under the mount ROOT gets");

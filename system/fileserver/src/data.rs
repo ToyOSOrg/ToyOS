@@ -132,7 +132,7 @@ pub(crate) fn refusal(e: &FsError) -> Error {
 }
 
 /// Logs the format's own account, answers the word a client can act on.
-pub(crate) fn mapped<T>(what: &str, path: &str, r: Result<T, FsError>) -> Result<T, Error> {
+fn mapped<T>(what: &str, path: &str, r: Result<T, FsError>) -> Result<T, Error> {
     r.map_err(|e| {
         println!("fileserver: {what} of '{path}' failed: {e:?}");
         refusal(&e)
@@ -149,7 +149,7 @@ fn disk_word(e: toyos_blockdev::Error) -> Error {
 }
 
 /// The block holding page `page`, if the extents reach it.
-pub(crate) fn block_for(extents: &[Extent], page: u64) -> Option<u64> {
+fn block_for(extents: &[Extent], page: u64) -> Option<u64> {
     let mut at = 0u64;
     for e in extents {
         let end = at.checked_add(e.block_count as u64)?;
