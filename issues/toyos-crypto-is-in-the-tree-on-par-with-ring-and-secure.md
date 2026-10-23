@@ -439,6 +439,13 @@ Not consumers:
          removed it is not measured. The AMD bench has not run the curves program on
          current code. Evidence:
          https://github.com/ToyOSOrg/evidence/tree/6993f41cdaa886860b4d40bf766ac092cbe4d14f/pr-1036/r3
+       - **The T14 at #1046's 6ea592362** (2^255 - 19 in four words with
+         BMI2/ADX kernels on x86-64), signature 0x806c1, microcode 0xbe,
+         1,000,000 measurements a routine: X25519 agreement passes with max
+         |t| 2.30, X25519 public key 1.83, Ed25519 derivation and signature
+         2.58. The controls held: null 1.25 to 2.29, leaky 1,258 to 1,309.
+         The AMD bench has not run them on this code. Evidence:
+         https://github.com/ToyOSOrg/evidence/tree/84fd34d3e1ad6f631101c8c559bdc2511e7d0677/pr-1046/r3
        - Their judge asks only that each job ran and its controls held; the
          verdicts are this record's. The first boots, of the fast program at
          ec5a0cd18, read LEAKS everywhere: that harness made each random
