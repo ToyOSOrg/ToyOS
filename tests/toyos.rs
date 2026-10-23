@@ -555,6 +555,12 @@ const MACHINE_TESTS: &[&str] = &[
     // block service's sessions through have no host build, and the T14 boots
     // from a stick beside an NVMe disk that is another system's.
     "nvme_disk_boots",
+    // A stick boot beside an NVMe disk that is another system's, on a
+    // controller under Intel's id: the row drives it by its class through the
+    // kernel's claim, the block service and the file servers, none of which a
+    // host test runs together, and the disk is read back whole on the host
+    // after the stop. QEMU x86-64; on a bench it is `nvme_leaves_the_benchs_disk_alone`.
+    "a_host_disk_beside_the_stick_is_left_alone",
     // clang and LLD built for ToyOS, installed by `pkg` and compiling and
     // linking inside it: the claim is that they install and run on ToyOS,
     // which no host test can make, and the T14 would read nothing a guest does
@@ -1308,6 +1314,14 @@ const METAL: &[(&str, metal::Metal)] = &[
         // `Boot: complete` and the log volume's mount are printed, not judged.
         "usbd_serves_the_boot_stick",
         metal::Metal { arms: TESTCASES, judge: |b| usbd_serves_the_boot_stick(&b[0].kernel(), &b[0].log()) },
+    ),
+    (
+        // The bench's own NVMe disk, its host's partitions and the owner's
+        // unformatted ToyOS DATA, driven beside the stick by the row's class
+        // and left alone (`hostdisk::left_alone`). The T14 and the AMD bench;
+        // the metal loop's next boot of the host off that disk is the other half.
+        "nvme_leaves_the_benchs_disk_alone",
+        metal::Metal { arms: TESTCASES, judge: |b| common::hostdisk::left_alone(&b[0].log()).map(|_| ()) },
     ),
     (
         // The stick written through usbd while the boot deadline resets the
@@ -4287,6 +4301,7 @@ fn run_machine_test(name: &str, test_config: &Path) -> Result<(), String> {
         "a_usb_key_reaches_the_console" => a_usb_key_reaches_the_console(),
         "desktop_without_x2apic" => desktop_without_x2apic(),
         "nvme_disk_boots" => nvme_disk_boots(test_config),
+        "a_host_disk_beside_the_stick_is_left_alone" => a_host_disk_beside_the_stick_is_left_alone(test_config),
         "hosted_clang_hello" => common::hostedclang::hosted_clang_hello(),
         "libc_children" => common::libcchildren::libc_children(),
         "a_launch_gives_each_unsent_stdio_slot_a_null" => common::launchstdio::a_launch_gives_each_unsent_stdio_slot_a_null(),
@@ -4498,6 +4513,33 @@ fn nvme_disk_boots(test_config: &Path) -> Result<(), String> {
         log.must_say(&format!("fileserver: {role}"))?;
     }
     Ok(())
+}
+
+/// `hostdisk::left_alone` of a stick boot beside [`common::hostdisk`]'s disk,
+/// whose four partitions the driver of QEMU's controller under Intel's id
+/// named, and every byte of the disk as it was once the machine has stopped.
+fn a_host_disk_beside_the_stick_is_left_alone(test_config: &Path) -> Result<(), String> {
+    let options = BootOptions { profile: qemu::Profile::MetalBesideAHostDisk, qmp: true, ..Default::default() };
+    let mut qemu = QemuInstance::boot_with_options(test_config, &[], &[], options);
+    let mut console = qemu.boot_log().to_string();
+    qemu::await_marker(&mut qemu, &mut console, "fileserver: Data serving", "DATA's file server to serve")?;
+    qemu::await_marker(&mut qemu, &mut console, toyos_logstream::LOG_OPENED, "logkeeper to open the log")?;
+    qemu::QmpShutdown::open(qemu.qmp_socket(), qemu.budget(qemu::GUEST_QUIET)).power_button();
+    let by = qemu.budget(Duration::from_secs(60));
+    console.push_str(&qemu.await_exit(by)?);
+    let log = serial::Serial::named("the boot", console);
+    log.must_say("vendor=8086 device=5845 prog_if=02")?;
+    match common::hostdisk::left_alone(&log)? {
+        4 => {}
+        named => return Err(format!("the driver named {named} partitions of a disk that has 4")),
+    }
+    let after = std::fs::read(qemu.nvme_image()).map_err(|e| e.to_string())?;
+    let before = common::hostdisk::bytes();
+    match before.iter().zip(&after).position(|(b, a)| b != a) {
+        None if before.len() == after.len() => Ok(()),
+        None => Err(format!("the disk was {} bytes and is {}", before.len(), after.len())),
+        Some(at) => Err(format!("the disk was written: byte {at} (sector {}) differs", at / 512)),
+    }
 }
 
 /// How each file server says its role is served off `nvme_disk_boots`'s disk.

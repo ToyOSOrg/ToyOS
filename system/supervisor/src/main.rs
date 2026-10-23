@@ -3267,38 +3267,28 @@ fn guid_text(guid: [u8; 16]) -> String {
 
 /// A file server's arguments and the volume it is endowed for one start.
 ///
-/// A file server is told its role. SYSTEM is handed ROOT's image. For LOG and BOOT, the partition's GUID
-/// the loader named, with `block` minted for that partition alone, writing for
-/// the log and reading for the boot volume; DATA it finds by type, through
-/// `block` minted for every DATA partition. A log or boot role the loader
-/// named no partition for, and a block port closed for good, each refuse the
-/// start: the role is then absent, never served from memory.
+/// A file server is told its role. SYSTEM is handed ROOT's image; every other
+/// role `block` minted with its grant (`toyos_supervisor::storage`), and LOG
+/// and BOOT the GUID of the partition the loader named. A log or boot role the
+/// loader named no partition for, and a block port closed for good, each
+/// refuse the start: the role is then absent, never served from memory.
 fn storage_endowment(role: Option<&str>, syscap: &SysCap, grants: &Grants<'_>, boot: &Boot) -> Result<Extra, StartError> {
-    use toyos_abi::inventory::Role;
     let mut storage = Extra::default();
     let Some(role) = role else {
         return Ok(storage);
     };
     storage.args.push(role.to_string());
-    let served = match role {
-        toyos_manifest::SYSTEM => {
-            let root = toyos_abi::syscall::dup(boot.root.as_handle())
-                .map_err(|e| std::io::Error::other(format!("ROOT's image did not duplicate: {e:?}")))?;
-            storage.root = Some(root);
-            return Ok(storage);
-        }
-        "data" => BlockGrant { scope: Scope::Kind(toyos_gpt::Guid::TOYOS_DATA.0), writes: true },
-        "log" | "boot" => {
-            let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
-            let which = if role == "log" { Role::Log } else { Role::Boot };
-            let Some(guid) = loaded(&records, which) else {
-                return Err(StartError::Refused(format!("the loader named no `{role}` partition")));
-            };
-            storage.args.push(guid_text(guid));
-            BlockGrant { scope: Scope::Unique(guid), writes: role == "log" }
-        }
-        other => panic!("supervisor: `{other}` is no role; the build refuses it"),
-    };
+    if role == toyos_manifest::SYSTEM {
+        let root = toyos_abi::syscall::dup(boot.root.as_handle())
+            .map_err(|e| std::io::Error::other(format!("ROOT's image did not duplicate: {e:?}")))?;
+        storage.root = Some(root);
+        return Ok(storage);
+    }
+    let records = inventory(syscap).map_err(|why| StartError::Other(std::io::Error::other(why)))?;
+    let served = toyos_supervisor::storage::grant(role, |which| loaded(&records, which)).map_err(StartError::Refused)?;
+    if let Scope::Unique(guid) = served.scope {
+        storage.args.push(guid_text(guid));
+    }
     if let Some(port) = grants.partitions(served).map_err(StartError::Refused)? {
         storage.ports.push((toyos_blockring::PORT.to_string(), port));
     }

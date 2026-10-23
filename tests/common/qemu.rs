@@ -722,6 +722,11 @@ pub enum Profile {
     /// QMP sends goes to ([`Shape::usb`]): it reaches the owner of input
     /// through usbd.
     MetalUsbKeyboard,
+    /// [`Profile::Metal`] whose NVMe disk is another system's, laid out as a
+    /// bench's internal disk is before ToyOS is installed on it
+    /// ([`super::hostdisk`]), on QEMU's controller under Intel's id
+    /// (`use-intel-id=on`, `8086:5845`) rather than its own.
+    MetalBesideAHostDisk,
     /// [`Profile::Metal`] on a CPU whose CPUID offers no x2APIC, emulated
     /// whatever the host, so its local APICs run in xAPIC mode: the machine
     /// an AMD laptop without x2APIC is.
@@ -805,6 +810,7 @@ impl Profile {
             | Self::Metal
             | Self::MetalTwoHda
             | Self::MetalUsbKeyboard
+            | Self::MetalBesideAHostDisk
             | Self::MetalNoX2apic
             | Self::MetalAmdVi
             | Self::MetalAmdViTestdev
@@ -1008,14 +1014,24 @@ enum Probes {
 /// backing file is sparse either way.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Storage {
-    /// The image on a USB stick on the first xHCI, which the kernel drives,
-    /// and DATA on an NVMe disk of its own of this many bytes; zero is a
-    /// machine with no NVMe controller.
-    Stick { nvme_bytes: u64 },
+    /// The image on a USB stick on the first xHCI, and beside it what one
+    /// NVMe controller carries.
+    Stick { beside: Beside },
     /// One NVMe disk and no stick: DATA, of this many bytes, and the image
     /// installed after it (`toyos_build::image::install`). The firmware boots
     /// it, and after the loader every partition of it is the block service's.
     Disk { data_bytes: u64 },
+}
+
+/// The NVMe disk beside a boot stick.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Beside {
+    /// No NVMe controller.
+    Nothing,
+    /// A blank disk of this many bytes, for DATA.
+    Blank(u64),
+    /// [`super::hostdisk`]'s, on a controller under Intel's id.
+    HostDisk,
 }
 
 impl Storage {
@@ -1057,7 +1073,7 @@ impl Profile {
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
                 blockdevs: &[],
-                storage: Storage::Stick { nvme_bytes: 0 },
+                storage: Storage::Stick { beside: Beside::Nothing },
                 iommu: None,
                 probes: Probes::Absent,
                 rng: true,
@@ -1093,7 +1109,7 @@ impl Profile {
                 xhci: &[XHCI_DEFAULT],
                 usb: &[],
                 blockdevs: &[],
-                storage: Storage::Stick { nvme_bytes: NVME_SMALL },
+                storage: Storage::Stick { beside: Beside::Blank(NVME_SMALL) },
                 iommu: Some(Unit::Vtd(IOMMU_DEFAULT)),
                 probes: Probes::Absent,
                 rng: false,
@@ -1104,6 +1120,7 @@ impl Profile {
             Self::MetalNoX2apic => Self::Metal.shape(),
             Self::MetalTwoHda => Shape { hda: true, ..Self::Metal.shape() },
             Self::MetalUsbKeyboard => Shape { usb: &["usb-kbd,bus=xhci.0"], ..Self::Metal.shape() },
+            Self::MetalBesideAHostDisk => Shape { storage: Storage::Stick { beside: Beside::HostDisk }, ..Self::Metal.shape() },
             Self::MetalAmdVi => Shape { iommu: Some(Unit::AmdVi { intremap: false }), ..Self::Metal.shape() },
             Self::HeadlessUsbSpareAmdVi => {
                 Shape { iommu: Some(Unit::AmdVi { intremap: true }), ..Self::HeadlessUsbSpare.shape() }
@@ -1258,7 +1275,7 @@ pub struct QemuInstance {
     rx: Receiver<String>,
     _reader_thread: thread::JoinHandle<String>,
     /// Held for the claim: one live guest per NVMe image.
-    _nvme: NvmeClaim,
+    nvme: NvmeClaim,
     sockets: Sockets,
     screendump: PathBuf,
     /// The image this boot built for itself.
@@ -1502,23 +1519,24 @@ impl QemuInstance {
         // One live guest per image, claimed here rather than discovered from
         // QEMU's stderr after the second process has already exited — see
         // [`NvmeClaim`] — and claimed before the remaking, which truncates.
-        let nvme_bytes = match storage {
-            Storage::Stick { nvme_bytes } => nvme_bytes,
-            Storage::Disk { .. } => 0,
+        let beside = match storage {
+            Storage::Stick { beside } => beside,
+            Storage::Disk { .. } => Beside::Nothing,
         };
-        let nvme_image = if nvme_bytes == 0 {
+        let nvme = match beside {
             // A profile with no NVMe disk beside its image gets no backing
             // file either; the path is never passed to QEMU.
-            test_dir.join("no-nvme")
-        } else {
-            test_dir.join(format!("test-nvme-{nvme_bytes}.img"))
-        };
-        let nvme = if nvme_bytes == 0 {
-            NvmeClaim::unattached(&nvme_image)
-        } else {
-            let claim = NvmeClaim::take(&nvme_image).unwrap_or_else(|why| panic!("[qemu] {why}"));
-            toyos_build::build::create_sparse(claim.path(), nvme_bytes);
-            claim
+            Beside::Nothing => NvmeClaim::unattached(&test_dir.join("no-nvme")),
+            Beside::Blank(bytes) => {
+                let claim = NvmeClaim::take(&test_dir.join(format!("test-nvme-{bytes}.img"))).unwrap_or_else(|why| panic!("[qemu] {why}"));
+                toyos_build::build::create_sparse(claim.path(), bytes);
+                claim
+            }
+            Beside::HostDisk => {
+                let claim = NvmeClaim::take(&test_dir.join("host-disk.img")).unwrap_or_else(|why| panic!("[qemu] {why}"));
+                fs::write(claim.path(), super::hostdisk::bytes()).expect("[qemu] the host disk's file");
+                claim
+            }
         };
 
         let sockets = Sockets::new(&options);
@@ -1679,6 +1697,11 @@ impl QemuInstance {
     /// What the guest wrote to it is whole once [`Self::await_exit`] answers.
     pub fn boot_image(&self) -> &Path {
         &self.boot_image
+    }
+
+    /// The file the NVMe disk beside a stick is.
+    pub fn nvme_image(&self) -> &Path {
+        self.nvme.path()
     }
 
     pub fn stdin_mut(&mut self) -> &mut BufWriter<ChildStdin> {
@@ -2394,17 +2417,17 @@ fn qemu_command(
     // Its MSI-X table in BAR 0, QEMU's default, which the nvme driver's claim maps
     // with the registers. One controller and one namespace whichever disk it
     // is: the nvme driver reads namespace 1 of the controller it drives.
-    let namespace = match shape.storage {
-        Storage::Stick { nvme_bytes: 0 } => None,
-        Storage::Stick { .. } => {
+    let (namespace, vendor_id_option) = match shape.storage {
+        Storage::Stick { beside: Beside::Nothing } => (None, ""),
+        Storage::Stick { beside } => {
             qemu.arg("-drive").arg(format!("if=none,id=nvme0,format=raw,file={}", nvme_image.display()));
-            Some("drive=nvme0")
+            (Some("drive=nvme0"), if beside == Beside::HostDisk { ",use-intel-id=on" } else { "" })
         }
-        Storage::Disk { .. } => Some("drive=disk,bootindex=0"),
+        Storage::Disk { .. } => (Some("drive=disk,bootindex=0"), ""),
     };
     if let Some(namespace) = namespace {
         qemu.arg("-device")
-            .arg("nvme,serial=deadbeef,id=nvme0ctl")
+            .arg(format!("nvme,serial=deadbeef,id=nvme0ctl{vendor_id_option}"))
             .arg("-device")
             .arg(format!("nvme-ns,{namespace},bus=nvme0ctl,logical_block_size=512,physical_block_size=512"));
     }
@@ -2678,7 +2701,7 @@ fn spawn_and_wait_ready(mut qemu: Command, options: BootOptions, files: Files) -
         stdin,
         rx,
         _reader_thread: reader_thread,
-        _nvme: nvme,
+        nvme,
         sockets,
         screendump,
         boot_image,
