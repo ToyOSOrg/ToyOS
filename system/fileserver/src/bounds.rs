@@ -18,13 +18,14 @@
 //! names, and an offset a stream grows by what it drains, stay at or below the
 //! largest a file has ([`MAX_FILE_BYTES`]).
 //!
-//! **A path is the window's bytes the request names, UTF-8**, and one the
-//! server resolves is canonical ([`toyos::fs::canonical`]): a `..` a client
-//! puts on the wire past std is refused before anything is looked up. A
-//! link's target is stored as it was written, never resolved here, so it is
-//! held to UTF-8 alone.
+//! **A request reaches only its span of the window**, which lies inside it.
+//! **A path is the span's bytes the request names, UTF-8**, and one the
+//! server resolves is relative ([`toyos::fs::relative`]): an empty or `.`
+//! component is refused before anything is looked up, and a `..` is the
+//! resolver's to bound. A link's target is stored as it was written, never
+//! resolved here, so it is held to UTF-8 alone.
 
-use toyos::fs::{canonical, Error, MAX_FILE_BYTES, MAX_PATH, WINDOW_BYTES};
+use toyos::fs::{Error, MAX_FILE_BYTES, MAX_PATH, WINDOW_BYTES};
 
 use crate::descriptions::MAX_IDS;
 use toyos::shm::Lent;
@@ -143,16 +144,27 @@ pub fn stream(streams: usize, of_share: usize) -> Result<(), Error> {
     }
 }
 
-/// Where in the window a path of `len` bytes at `at` is: `NameTooLong` for
-/// one longer than a path, `InvalidPath` for one past the window.
-pub fn path_span(at: u64, len: u64) -> Result<(usize, usize), Error> {
-    if len > MAX_PATH as u64 {
+/// The bytes of the window a request's `at` and `span` name, inside it, or
+/// `InvalidRequest`.
+pub fn span(at: u64, span: u64) -> Result<(usize, usize), Error> {
+    let fits = |at: usize, len: usize| at.checked_add(len).is_some_and(|end| end <= WINDOW_BYTES);
+    match (usize::try_from(at), usize::try_from(span)) {
+        (Ok(at), Ok(len)) if fits(at, len) => Ok((at, len)),
+        _ => Err(Error::InvalidRequest),
+    }
+}
+
+/// Where in a span of `room` bytes a request's two paths are, `len` bytes
+/// from its start and `len2` after them: `NameTooLong` for one longer than a
+/// path, `InvalidPath` for two that run past the span.
+pub fn paths(room: usize, len: u64, len2: u64) -> Result<(usize, usize), Error> {
+    if len > MAX_PATH as u64 || len2 > MAX_PATH as u64 {
         return Err(Error::NameTooLong);
     }
-    let len = len as usize;
-    match usize::try_from(at) {
-        Ok(at) if at.checked_add(len).is_some_and(|end| end <= WINDOW_BYTES) => Ok((at, len)),
-        _ => Err(Error::InvalidPath),
+    let (len, len2) = (len as usize, len2 as usize);
+    match len + len2 <= room {
+        true => Ok((len, len2)),
+        false => Err(Error::InvalidPath),
     }
 }
 
@@ -161,10 +173,10 @@ pub fn path(bytes: Vec<u8>) -> Result<String, Error> {
     String::from_utf8(bytes).map_err(|_| Error::InvalidPath)
 }
 
-/// `rel`, a path the server resolves from a client's directory: canonical, or
+/// `rel`, a path the server resolves from a client's directory: relative, or
 /// `InvalidPath`.
 pub fn relative(rel: &str) -> Result<(), Error> {
-    match canonical(rel) {
+    match toyos::fs::relative(rel) {
         true => Ok(()),
         false => Err(Error::InvalidPath),
     }
@@ -263,16 +275,16 @@ mod tests {
         assert_eq!(stream(MAX_STREAMS - 1, STREAM_SHARE - 1), Ok(()));
     }
 
-    /// A path put on the wire past std is held to what std would have sent
-    /// before anything is looked up: a `..` that climbs, a `.` and an
-    /// absolute path are refused.
+    /// A path on the wire that is absolute or has an empty or `.` component
+    /// is refused before anything is looked up; a climb is the resolver's.
     #[test]
-    fn a_path_on_the_wire_that_climbs_or_is_absolute_is_refused() {
-        for bad in ["../state/secret", "a/../../state/secret", "/state", "./a", "a//b"] {
+    fn a_path_on_the_wire_that_is_absolute_or_not_relative_is_refused() {
+        for bad in ["/state", "./a", "a//b", "a/", "a/./b"] {
             assert_eq!(relative(bad), Err(Error::InvalidPath), "{bad:?}");
         }
-        assert_eq!(relative("a/b.txt"), Ok(()));
-        assert_eq!(relative(""), Ok(()), "the directory itself");
+        for good in ["a/b.txt", "", "../x", "a/../b"] {
+            assert_eq!(relative(good), Ok(()), "{good:?}");
+        }
     }
 
     /// A link's target is the client's text, stored as written: an absolute
@@ -285,12 +297,19 @@ mod tests {
         assert_eq!(path(b"\xff".to_vec()), Err(Error::InvalidPath));
     }
 
+    /// A span is inside the window or refused, at every overflow; its paths
+    /// are inside the span and each at most a path long.
     #[test]
-    fn a_path_longer_than_a_path_or_past_the_window_is_refused() {
-        assert_eq!(path_span(0, MAX_PATH as u64), Ok((0, MAX_PATH)));
-        assert_eq!(path_span(0, MAX_PATH as u64 + 1), Err(Error::NameTooLong));
-        assert_eq!(path_span(0, u64::MAX), Err(Error::NameTooLong));
-        assert_eq!(path_span((WINDOW_BYTES - 1) as u64, 2), Err(Error::InvalidPath));
-        assert_eq!(path_span(u64::MAX, 1), Err(Error::InvalidPath));
+    fn a_span_past_the_window_and_a_path_past_its_span_are_refused() {
+        assert_eq!(span(0, WINDOW_BYTES as u64), Ok((0, WINDOW_BYTES)));
+        assert_eq!(span(WINDOW_BYTES as u64, 0), Ok((WINDOW_BYTES, 0)));
+        for (at, len) in [(1, WINDOW_BYTES as u64), (WINDOW_BYTES as u64 + 1, 0), (u64::MAX, 1), (1, u64::MAX)] {
+            assert_eq!(span(at, len), Err(Error::InvalidRequest), "{at:#x}+{len:#x}");
+        }
+        assert_eq!(paths(MAX_PATH * 2, MAX_PATH as u64, MAX_PATH as u64), Ok((MAX_PATH, MAX_PATH)));
+        assert_eq!(paths(usize::MAX, MAX_PATH as u64 + 1, 0), Err(Error::NameTooLong));
+        assert_eq!(paths(usize::MAX, 0, u64::MAX), Err(Error::NameTooLong));
+        assert_eq!(paths(7, 4, 4), Err(Error::InvalidPath));
+        assert_eq!(paths(8, 4, 4), Ok((4, 4)));
     }
 }

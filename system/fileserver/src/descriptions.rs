@@ -1,11 +1,16 @@
-//! Open files as POSIX has them: a **description** is the file, the access an
-//! open fixed and the offset; a connection names descriptions by **id**, and
-//! two ids, on one connection or on two, may name one description and share
-//! its offset.
+//! Open files and directories as POSIX has them: a **description** is the
+//! file or directory, the access an open fixed and the offset; a connection
+//! names descriptions by **id**, and two ids, on one connection or on two, may
+//! name one description and share its offset. Id 0 is `toyos::fs::ROOT`, the
+//! grant's directory, and never a description's.
 //!
-//! A description lives while an id or a stream holds it, and its node is
+//! A description lives while an id or a stream holds it, and a file's node is
 //! closed when the last goes: every removal answers the node that is then
 //! no longer held, for the server to close on the volume.
+//!
+//! **A directory is held by its volume path**, which the server moves with
+//! every rename it makes and marks removed at its removal: the volume keys
+//! nothing else that could follow it.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -18,11 +23,24 @@ use crate::volume::Node;
 /// Ids one connection holds at once.
 pub const MAX_IDS: usize = 1024;
 
-/// One open of a file, shared by every id and stream that names it.
+/// What a description holds open.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Held {
+    File(Node),
+    Dir {
+        /// Where it is on the volume now.
+        path: String,
+        /// Removed since it was opened: it lists nothing and names nothing.
+        removed: bool,
+    },
+}
+
+/// One open of a file or a directory, shared by every id and stream that
+/// names it.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Description {
-    pub node: Node,
-    /// The file's `Volume::identity` when it was opened, which its renames keep.
+    pub held: Held,
+    /// Its `Volume::identity` when it was opened, which its renames keep.
     pub identity: u64,
     pub write: bool,
     pub append: bool,
@@ -33,9 +51,22 @@ pub struct Description {
 /// A description, shared.
 pub type Shared = Rc<RefCell<Description>>;
 
-/// The node `shared` held, when it was its last holder.
+/// The file's node `shared` held, when it was its last holder.
 pub fn release(shared: Shared) -> Option<Node> {
-    Rc::try_unwrap(shared).ok().map(|d| d.into_inner().node)
+    match Rc::try_unwrap(shared).ok()?.into_inner().held {
+        Held::File(node) => Some(node),
+        Held::Dir { .. } => None,
+    }
+}
+
+impl Description {
+    /// The open file's node: `IsADirectory` for a directory.
+    pub fn node(&self) -> Result<Node, Error> {
+        match self.held {
+            Held::File(node) => Ok(node),
+            Held::Dir { .. } => Err(Error::IsADirectory),
+        }
+    }
 }
 
 /// One connection's ids.
@@ -96,6 +127,20 @@ impl Ids {
     pub fn drain(&mut self) -> Vec<Node> {
         core::mem::take(&mut self.ids).into_values().filter_map(release).collect()
     }
+
+    /// Every directory description an id names, once per id.
+    pub fn dirs(&self) -> impl Iterator<Item = &Shared> {
+        self.ids.values().filter(|d| matches!(d.borrow().held, Held::Dir { .. }))
+    }
+}
+
+/// The directory at `from`, never the volume's root, is at `to` now with
+/// everything beneath it: move `path` with it.
+pub fn moved(path: &mut String, from: &str, to: &str) {
+    let beneath = path.len() > from.len() && path.starts_with(from) && path.as_bytes()[from.len()] == b'/';
+    if path == from || beneath {
+        *path = crate::volume::join(to, &path[from.len()..].trim_start_matches('/').to_string());
+    }
 }
 
 #[cfg(test)]
@@ -103,7 +148,7 @@ mod tests {
     use super::*;
 
     fn opened(node: Node) -> Shared {
-        Rc::new(RefCell::new(Description { node, identity: node, write: true, append: false, offset: 0 }))
+        Rc::new(RefCell::new(Description { held: Held::File(node), identity: node, write: true, append: false, offset: 0 }))
     }
 
     #[test]
@@ -126,8 +171,8 @@ mod tests {
         let a = parent.insert(opened(1)).unwrap();
         let b = parent.insert(opened(2)).unwrap();
         let mut child = parent.export(&[b, a]).unwrap();
-        assert_eq!(child.get(1).unwrap().borrow().node, 2);
-        assert_eq!(child.get(2).unwrap().borrow().node, 1);
+        assert_eq!(child.get(1).unwrap().borrow().node(), Ok(2));
+        assert_eq!(child.get(2).unwrap().borrow().node(), Ok(1));
         child.get(1).unwrap().borrow_mut().offset = 9;
         assert_eq!(parent.get(b).unwrap().borrow().offset, 9, "the child moved an offset of its own");
         assert_eq!(parent.drain(), Vec::<Node>::new(), "the parent's end closed nodes the child holds");
@@ -143,6 +188,24 @@ mod tests {
         assert!(matches!(parent.export(&[]), Err(Error::InvalidRequest)));
         assert!(matches!(parent.export(&[a, a + 1]), Err(Error::UnknownFile)));
         assert_eq!(parent.close(a), Ok(Some(1)), "a refused export kept a holder");
+    }
+
+    /// A directory's path follows a rename of it or of a directory above it,
+    /// and nothing that only shares its prefix.
+    #[test]
+    fn a_held_directory_moves_with_every_rename_above_it() {
+        let cases = [
+            ("a/b", "a", "c", "c/b"),
+            ("a", "a", "x/y", "x/y"),
+            ("a/b/c", "a/b", "z", "z/c"),
+            ("ab/c", "a", "z", "ab/c"),
+            ("a", "a/b", "z", "a"),
+        ];
+        for (held, from, to, now) in cases {
+            let mut path = held.to_string();
+            moved(&mut path, from, to);
+            assert_eq!(path, now, "{held} after {from} -> {to}");
+        }
     }
 
     #[test]

@@ -71,7 +71,7 @@ impl Write for Field<'_> {
 
 /// As much of the file at `path` as `into` holds.
 fn read(path: &str, into: &mut [u8]) -> Result<usize, files::Error> {
-    let fd = files::open(path.as_bytes(), Open { read: true, ..Open::default() })?;
+    let fd = files::open(files::At::Cwd, path.as_bytes(), Open { read: true, ..Open::default() })?;
     let mut len = 0;
     let read = loop {
         match files::read(fd, &mut into[len..]) {

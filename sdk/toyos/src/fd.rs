@@ -49,12 +49,15 @@ pub enum Error {
 
 /// The tag of a handle and of an object another library keeps.
 pub const UNTAGGED: u32 = 0;
-/// The tag of a file a file server holds open (`crate::files`).
+/// The tag of a file or directory a file server holds open (`crate::files`).
 pub const SERVED_FILE: u32 = 1;
 /// The tag of a stream's descriptor (`crate::net::stream`): a kernel handle,
 /// let go by the copy of this crate that holds the stream's end, which only
 /// that copy knows.
 pub const STREAM: u32 = 2;
+/// The tag of a directory the kernel serves, which has no handle
+/// (`crate::files`).
+pub const KERNEL_DIR: u32 = 3;
 
 /// What a descriptor names.
 #[repr(C)]

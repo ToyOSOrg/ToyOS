@@ -90,14 +90,16 @@ pub fn served_error(e: toyos::fs::Error) -> crate::io::Error {
         Error::Io => io::const_error!(Kind::Other, "the volume's device failed, or its structures do not decode"),
         Error::Stale => io::const_error!(
             Kind::StaleNetworkFileHandle,
-            "the file was removed, or its file server restarted, since it was opened",
+            "the file was removed or replaced, or its file server restarted, since it was opened",
         ),
         Error::UnknownFile => io::const_error!(Kind::InvalidInput, "the file server holds no such open file"),
         Error::InvalidPath => io::const_error!(Kind::InvalidInput, "the path is not one the file server takes"),
         Error::InvalidRequest => io::const_error!(Kind::InvalidInput, "the file server takes no such request"),
         Error::Unsupported => io::const_error!(Kind::Unsupported, "the volume's format has no such thing"),
         Error::OutOfResources => io::const_error!(Kind::OutOfMemory, "the kernel had no room for the request"),
-        Error::NoDirectory => io::const_error!(Kind::NotADirectory, "the connection was given files and no directory"),
+        Error::NoDirectory => {
+            io::const_error!(Kind::NotADirectory, "the connection was given open files and no directory")
+        }
         Error::Gone => io::const_error!(Kind::StaleNetworkFileHandle, "the file server is gone"),
         Error::NotHeld => io::const_error!(Kind::NotFound, "this process holds no such directory"),
         Error::Malformed => io::const_error!(Kind::InvalidData, "the file server answered outside its protocol"),
@@ -118,6 +120,9 @@ pub fn files_error(e: toyos::files::Error) -> crate::io::Error {
             io::const_error!(io::ErrorKind::CrossesDevices, "the two paths are on different servers")
         }
         files::Error::NotAFile => io::const_error!(io::ErrorKind::InvalidInput, "the descriptor names no file"),
+        files::Error::NotADirectory => {
+            io::const_error!(io::ErrorKind::NotADirectory, "the descriptor names no directory")
+        }
         files::Error::Stream(refused) => crate::sys::net::stream_refused(refused),
     }
 }

@@ -78,6 +78,10 @@ impl Volume for Absent {
         Err(Error::NotFound)
     }
 
+    fn set_mtime(&mut self, _node: Node, _mtime: u64) -> Result<(), Error> {
+        Err(Error::NotFound)
+    }
+
     fn mkdir(&mut self, _path: &str) -> Result<(), Error> {
         Err(Error::NotFound)
     }

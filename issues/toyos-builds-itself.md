@@ -72,7 +72,7 @@ An owner is an issue under `issues/`, or this track.
 | # | Item | Status | Owner | Blocked on |
 |---|---|---|---|---|
 | 7 | Threads mature enough for LLVM | not started | `std-and-libc-drop-the-answer-thread-join-gives` | — |
-| 8 | Concurrent reads and writes of one file: `pread` and `pwrite`. Without them LLVM reads a file slice with `lseek` and `read`, which moves an offset other threads share | not started | `libc-has-no-pread-or-pwrite` | — |
+| 8 | Concurrent reads and writes of one file: `pread` and `pwrite`, on a served file and a kernel one, which never move a shared offset (`tests/corpus/tinycc/214_at_calls.c`) | done | this track | — |
 | 9 | LLVM, clang and lld built by bootstrap for a ToyOS host, and the libc names they call | not started | `bootstrap-cannot-build-llvm-clang-and-lld-for-a-toyos-host`, `rustc-llvm-cannot-build-for-a-toyos-host`, `libc-lacks-names-llvm-for-a-toyos-host-calls`, `a-toyos-hosted-llvm-is-configured-as-running-on-the-build-machine` | — |
 | 10 | A std binary links the C++ runtime | not started | `a-rust-std-binary-cannot-link-the-cxx-runtime` | 9 |
 | 11 | A package ships its own libraries (`librustc_driver`); moot for M2's static PIEs | not started | `a-package-cannot-ship-its-own-libraries` | 3 |

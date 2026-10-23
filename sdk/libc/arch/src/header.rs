@@ -5,17 +5,23 @@ pub(crate) const ERRNO_H: &str = include_str!("../../include/errno.h");
 pub(crate) const FCNTL_H: &str = include_str!("../../include/fcntl.h");
 pub(crate) const LIMITS_H: &str = include_str!("../../include/limits.h");
 pub(crate) const SIGNAL_H: &str = include_str!("../../include/signal.h");
+pub(crate) const STAT_H: &str = include_str!("../../include/sys/stat.h");
 
 /// Each integer `#define` in `header`, in its order.
 fn defines(header: &str) -> impl Iterator<Item = (&str, i64)> {
     header.lines().filter_map(|line| {
         let mut words = line.strip_prefix("#define ")?.split_whitespace();
         let (name, value) = (words.next()?, words.next()?);
+        let (negative, value) = match value.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, value),
+        };
         let value = match value.strip_prefix("0x") {
             Some(hex) => i64::from_str_radix(hex, 16),
             None => value.parse(),
         };
-        Some((name, value.ok()?))
+        let value = value.ok()?;
+        Some((name, if negative { -value } else { value }))
     })
 }
 

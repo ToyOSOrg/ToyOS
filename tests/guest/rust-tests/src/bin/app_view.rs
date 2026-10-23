@@ -35,7 +35,7 @@ use std::io::ErrorKind;
 use std::os::toyos::process::CommandExt;
 use std::process::Command;
 
-use toyos::fs::{Dir, Error, Refused, O_APPEND, O_CREATE, O_CREATE_NEW, O_READ, O_TRUNCATE, O_WRITE};
+use toyos::fs::{Base, Dir, Error, Refused, O_APPEND, O_CREATE, O_CREATE_NEW, O_READ, O_TRUNCATE, O_WRITE};
 
 const SELF: &str = "/system/bin/test_rs_app_view";
 const PACKAGE: &str = "/apps/appview";
@@ -173,8 +173,8 @@ fn app() {
             if dir.writable() {
                 red.push(format!("fs:{PACKAGE} says it is writable"));
             }
-            match dir.open("manifest.toml", O_READ) {
-                Ok(opened) => dir.close(opened.fid, opened.generation),
+            match dir.open(Base::Root, "manifest.toml", O_READ) {
+                Ok(opened) => dir.close(opened.fid),
                 Err(e) => red.push(format!("an open to read its manifest was refused: {e:?}")),
             }
             let denied = Refused::Error(Error::ReadOnly);
@@ -187,18 +187,18 @@ fn app() {
                 (O_READ | O_APPEND, "an open to append"),
                 (O_READ | O_TRUNCATE, "an open to truncate"),
             ] {
-                each(what, dir.open("manifest.toml", flags).map(|o| dir.close(o.fid, o.generation)));
+                each(what, dir.open(Base::Root, "manifest.toml", flags).map(|o| dir.close(o.fid)));
             }
-            each("an open to create", dir.open("made", O_WRITE | O_CREATE).map(|o| dir.close(o.fid, o.generation)));
+            each("an open to create", dir.open(Base::Root, "made", O_WRITE | O_CREATE).map(|o| dir.close(o.fid)));
             each(
                 "an open to create anew",
-                dir.open("made", O_WRITE | O_CREATE_NEW).map(|o| dir.close(o.fid, o.generation)),
+                dir.open(Base::Root, "made", O_WRITE | O_CREATE_NEW).map(|o| dir.close(o.fid)),
             );
-            each("mkdir", dir.mkdir("made"));
-            each("rmdir", dir.rmdir("sub"));
-            each("unlink", dir.unlink("manifest.toml"));
-            each("rename", dir.rename("manifest.toml", "moved"));
-            each("symlink", dir.symlink("manifest.toml", "link").map_err(Refused::Error));
+            each("mkdir", dir.mkdir(Base::Root, "made"));
+            each("rmdir", dir.unlink(Base::Root, "sub", true));
+            each("unlink", dir.unlink(Base::Root, "manifest.toml", false));
+            each("rename", dir.rename((Base::Root, "manifest.toml"), (Base::Root, "moved")));
+            each("symlink", dir.symlink("manifest.toml", (Base::Root, "link")));
         }
     }
     match Dir::connect(names, &format!("fs:{HOME}")) {
