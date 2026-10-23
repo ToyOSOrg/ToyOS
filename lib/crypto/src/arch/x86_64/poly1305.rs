@@ -49,13 +49,14 @@ impl Multiplier {
         let [r0, r1, r2, r3, r4] = self.r;
         let [s1, s2, s3, s4] = self.s;
         let m = |a, b| _mm256_mul_epu32(a, b);
-        let sum = |terms: [__m256i; 5]| terms.into_iter().reduce(|a, b| _mm256_add_epi64(a, b)).unwrap();
+        let add = |a, b| _mm256_add_epi64(a, b);
+        let sum = |a, b, c, d, e| add(add(add(a, b), add(c, d)), e);
         let [h0, h1, h2, h3, h4] = h;
-        let d0 = sum([m(h0, r0), m(h1, s4), m(h2, s3), m(h3, s2), m(h4, s1)]);
-        let d1 = sum([m(h0, r1), m(h1, r0), m(h2, s4), m(h3, s3), m(h4, s2)]);
-        let d2 = sum([m(h0, r2), m(h1, r1), m(h2, r0), m(h3, s4), m(h4, s3)]);
-        let d3 = sum([m(h0, r3), m(h1, r2), m(h2, r1), m(h3, r0), m(h4, s4)]);
-        let d4 = sum([m(h0, r4), m(h1, r3), m(h2, r2), m(h3, r1), m(h4, r0)]);
+        let d0 = sum(m(h0, r0), m(h1, s4), m(h2, s3), m(h3, s2), m(h4, s1));
+        let d1 = sum(m(h0, r1), m(h1, r0), m(h2, s4), m(h3, s3), m(h4, s2));
+        let d2 = sum(m(h0, r2), m(h1, r1), m(h2, r0), m(h3, s4), m(h4, s3));
+        let d3 = sum(m(h0, r3), m(h1, r2), m(h2, r1), m(h3, r0), m(h4, s4));
+        let d4 = sum(m(h0, r4), m(h1, r3), m(h2, r2), m(h3, r1), m(h4, r0));
         [d0, d1, d2, d3, d4]
     }
 }
