@@ -432,6 +432,19 @@ pub fn dl_open(path: &[u8]) -> Result<u64, DlOpenRefused> {
     toyos_abi::syscall::dl_open(name.as_bytes(), toyos_abi::RawHandle(handle as u32), len).map_err(DlOpenRefused::Load)
 }
 
+/// `path` as a path names something: UTF-8, and not empty, which names
+/// nothing, as POSIX resolves no empty path. A call that takes the empty path
+/// as the descriptor itself (`stat` and `set_times` of `At::Fd`, a `link`
+/// from one) says so before it asks for a path.
+#[cfg_attr(not(all(feature = "fd-table", not(test))), allow(dead_code))]
+fn named(path: &[u8]) -> Result<&str, Error> {
+    match core::str::from_utf8(path) {
+        Ok("") => Err(Error::Served(fs::Error::NotFound)),
+        Ok(path) => Ok(path),
+        Err(_) => Err(Error::NotUtf8),
+    }
+}
+
 /// Whether `path` is on a file server rather than the kernel.
 pub fn is_served(path: &[u8]) -> bool {
     is_served_at(At::Cwd, path) == Ok(true)
@@ -477,6 +490,16 @@ mod tests {
         assert_eq!(absolute("/home/a", "../b"), "/home/b");
         assert_eq!(absolute("/home/a", "/tmp//x/"), "/tmp/x");
         assert_eq!(absolute("/", "../../.."), "/");
+    }
+
+    /// The empty path names nothing, whoever would resolve it; any other
+    /// UTF-8 path is itself.
+    #[test]
+    fn the_empty_path_names_nothing() {
+        assert_eq!(named(b""), Err(Error::Served(fs::Error::NotFound)));
+        assert_eq!(named(b"."), Ok("."));
+        assert_eq!(named(b"/"), Ok("/"));
+        assert_eq!(named(b"\xff"), Err(Error::NotUtf8));
     }
 
     #[test]

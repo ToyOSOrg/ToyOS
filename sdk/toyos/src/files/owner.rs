@@ -103,15 +103,20 @@ fn route(abs: &str) -> Result<Place, Error> {
     Ok(Place::Kernel(String::from(abs)))
 }
 
-/// Where `path` from `at` is resolved. A descriptor that names no directory
-/// is [`Error::NotADirectory`] for any path but an absolute one.
+/// Where `path` from `at` is resolved: the empty path names nothing
+/// ([`super::named`]). A descriptor that names no directory is
+/// [`Error::NotADirectory`] for any path but an absolute one.
 fn place(at: At, path: &[u8]) -> Result<Place, Error> {
-    let path = utf8(path)?;
-    let fd = match at {
-        _ if path.starts_with('/') => return route(&super::absolute("/", path)),
-        At::Cwd => return route(&super::absolute(&cwd(), path)),
-        At::Fd(fd) => fd,
-    };
+    let path = super::named(path)?;
+    match at {
+        _ if path.starts_with('/') => route(&super::absolute("/", path)),
+        At::Cwd => route(&super::absolute(&cwd(), path)),
+        At::Fd(fd) => from_dir(fd, path),
+    }
+}
+
+/// `path` from the directory `fd` names; the empty path is that directory.
+fn from_dir(fd: Fd, path: &str) -> Result<Place, Error> {
     let named = fd::with(fd, |o| match o.tag {
         SERVED_FILE | KERNEL_DIR if o.kernel_handle().is_none() => held(o.word),
         _ => None,
@@ -502,7 +507,11 @@ enum Pair {
 }
 
 fn pair(from: (At, &[u8]), to: (At, &[u8])) -> Result<Pair, Error> {
-    match (place(from.0, from.1)?, place(to.0, to.1)?) {
+    pair_of(place(from.0, from.1)?, place(to.0, to.1)?)
+}
+
+fn pair_of(from: Place, to: Place) -> Result<Pair, Error> {
+    match (from, to) {
         (Place::Kernel(a), Place::Kernel(b)) => Ok(Pair::Kernel(a, b)),
         (Place::Served(ca, ba, a), Place::Served(cb, bb, b)) if Arc::ptr_eq(&ca, &cb) => Ok(Pair::Served(ca, (ba, a), (bb, b))),
         _ => Err(Error::CrossesServers),
@@ -546,7 +555,12 @@ unsafe extern "C" fn toyos_fs_link(
 ) -> i64 {
     // SAFETY: the caller's.
     let (from, to) = unsafe { (bytes(from, from_len), bytes(to, to_len)) };
-    let linked = pair((At::of(from_at), from), (At::of(to_at), to)).and_then(|pair| match pair {
+    // An empty `from` from a descriptor is what it names (`AT_EMPTY_PATH`).
+    let from_place = match (At::of(from_at), from.is_empty()) {
+        (At::Fd(fd), true) => from_dir(fd, ""),
+        (at, _) => place(at, from),
+    };
+    let linked = from_place.and_then(|from| pair_of(from, place(At::of(to_at), to)?)).and_then(|pair| match pair {
         Pair::Kernel(..) => Err(Error::Kernel(SyscallError::NotSupported)),
         Pair::Served(cap, (ba, a), (bb, b)) => cap.dir.lock().link((ba, &a), follow, (bb, &b), None).map_err(crossing),
     });

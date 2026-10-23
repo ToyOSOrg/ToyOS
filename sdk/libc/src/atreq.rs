@@ -34,17 +34,23 @@ pub(crate) const UTIME_OMIT: i64 = (1 << 30) - 2;
 
 /// Where `path` is resolved from, `dirfd` as the `*at` calls take it: an
 /// absolute path from neither, and a negative descriptor but [`AT_FDCWD`]
-/// `EBADF` for any other. The empty path names nothing, `ENOENT`, but where
-/// `itself`, `AT_EMPTY_PATH`'s, it is what `dirfd` names.
-pub(crate) fn at(dirfd: i32, path: &[u8], itself: bool) -> Result<At, i32> {
-    if path.is_empty() && !itself {
-        return Err(ENOENT);
-    }
+/// `EBADF` for any other. `toyos::files` refuses an empty path.
+pub(crate) fn at(dirfd: i32, path: &[u8]) -> Result<At, i32> {
     match dirfd {
         _ if path.first() == Some(&b'/') => Ok(At::Cwd),
         AT_FDCWD => Ok(At::Cwd),
         fd if fd < 0 => Err(EBADF),
         fd => Ok(At::Fd(fd)),
+    }
+}
+
+/// For `fstatat`, `linkat` and `utimensat`, whose `toyos::files` call reads
+/// the empty path from a descriptor as the descriptor itself: that only with
+/// `AT_EMPTY_PATH`, and `ENOENT` without it, as for every other call.
+pub(crate) fn empty_path(path: &[u8], flags: i32) -> Result<(), i32> {
+    match path.is_empty() && flags & AT_EMPTY_PATH == 0 {
+        true => Err(ENOENT),
+        false => Ok(()),
     }
 }
 
@@ -126,26 +132,22 @@ mod tests {
 
     #[test]
     fn a_path_is_resolved_from_the_working_directory_a_descriptor_or_neither() {
-        assert_eq!(at(AT_FDCWD, b"a", false), Ok(At::Cwd));
-        assert_eq!(at(3, b"a", false), Ok(At::Fd(3)));
-        assert_eq!(at(-1, b"a", false), Err(EBADF));
-        assert_eq!(at(-101, b"a", false), Err(EBADF));
+        assert_eq!(at(AT_FDCWD, b"a"), Ok(At::Cwd));
+        assert_eq!(at(3, b"a"), Ok(At::Fd(3)));
+        assert_eq!(at(-1, b"a"), Err(EBADF));
+        assert_eq!(at(-101, b"a"), Err(EBADF));
         // POSIX: an absolute path ignores the descriptor, a bad one included.
-        assert_eq!(at(-1, b"/tmp/a", false), Ok(At::Cwd));
-        assert_eq!(at(7, b"/tmp/a", false), Ok(At::Cwd));
+        assert_eq!(at(-1, b"/tmp/a"), Ok(At::Cwd));
+        assert_eq!(at(7, b"/tmp/a"), Ok(At::Cwd));
     }
 
-    /// POSIX resolves no empty path: it names nothing, from a descriptor or
-    /// the working directory, and only `AT_EMPTY_PATH` makes it what the
-    /// descriptor names.
+    /// Only `AT_EMPTY_PATH` lets the empty path name the descriptor itself.
     #[test]
-    fn the_empty_path_is_enoent_unless_it_names_the_descriptor_itself() {
-        for dirfd in [AT_FDCWD, 0, 3] {
-            assert_eq!(at(dirfd, b"", false), Err(ENOENT), "{dirfd}");
-        }
-        assert_eq!(at(3, b"", true), Ok(At::Fd(3)));
-        assert_eq!(at(AT_FDCWD, b"", true), Ok(At::Cwd));
-        assert_eq!(at(-1, b"", true), Err(EBADF));
+    fn the_empty_path_is_the_descriptor_only_with_at_empty_path() {
+        assert_eq!(empty_path(b"", 0), Err(ENOENT));
+        assert_eq!(empty_path(b"", AT_SYMLINK_NOFOLLOW), Err(ENOENT));
+        assert_eq!(empty_path(b"", AT_EMPTY_PATH), Ok(()));
+        assert_eq!(empty_path(b"a", 0), Ok(()));
     }
 
     #[test]

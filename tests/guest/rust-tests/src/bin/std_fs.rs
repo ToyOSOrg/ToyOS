@@ -24,8 +24,28 @@ fn main() {
 
     file_types();
     create_new_is_exclusive_on_tmp();
+    the_empty_path_names_nothing();
 
     println!("all fs tests passed");
+}
+
+/// The empty path names nothing, wherever the working directory is served:
+/// an open, a stat and a removal of it are `NotFound`, and the empty working
+/// directory a removal would take is still there.
+fn the_empty_path_names_nothing() {
+    for cwd in ["/tmp", "/home"] {
+        let dir = format!("{cwd}/std_fs_empty_path");
+        let _ = fs::remove_dir(&dir);
+        fs::create_dir(&dir).expect("make the working directory");
+        std::env::set_current_dir(&dir).expect("enter it");
+        let kind = |r: std::io::Result<()>| r.map_err(|e| e.kind());
+        assert_eq!(kind(fs::File::open("").map(drop)), Err(std::io::ErrorKind::NotFound), "open of \"\" in {cwd}");
+        assert_eq!(kind(fs::metadata("").map(drop)), Err(std::io::ErrorKind::NotFound), "stat of \"\" in {cwd}");
+        assert_eq!(kind(fs::remove_dir("")), Err(std::io::ErrorKind::NotFound), "remove_dir of \"\" in {cwd}");
+        std::env::set_current_dir("/").expect("leave it");
+        assert!(fs::metadata(&dir).is_ok_and(|m| m.is_dir()), "{dir} went with a removal of \"\"");
+        fs::remove_dir(&dir).expect("remove the directory");
+    }
 }
 
 /// `create_new` on the kernel's `/tmp` makes a file once and refuses the name

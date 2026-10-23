@@ -107,7 +107,7 @@ pub unsafe extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, _mode: 
             Err(e) => set_errno(e),
         };
     }
-    match crate::atreq::at(dirfd, path, false) {
+    match crate::atreq::at(dirfd, path) {
         Ok(at) => files::open(at, path, how).unwrap_or_else(refuse_files),
         Err(e) => refuse(e),
     }
@@ -368,7 +368,7 @@ pub unsafe extern "C" fn pipe(pipefd: *mut i32) -> i32 {
 /// theirs: 0, or `-1` and `errno`.
 fn on_at(dirfd: i32, path: *const u8, f: impl FnOnce(At, &[u8]) -> Result<(), files::Error>) -> i32 {
     let path = c_str_to_bytes(path);
-    match crate::atreq::at(dirfd, path, false) {
+    match crate::atreq::at(dirfd, path) {
         Ok(at) => f(at, path).map_or_else(refuse_files, |()| 0),
         Err(e) => refuse(e),
     }
@@ -400,7 +400,7 @@ pub unsafe extern "C" fn mkdirat(dirfd: i32, path: *const u8, _mode: u32) -> i32
 #[no_mangle]
 pub unsafe extern "C" fn renameat(from_dirfd: i32, from: *const u8, to_dirfd: i32, to: *const u8) -> i32 {
     let (from, to) = (c_str_to_bytes(from), c_str_to_bytes(to));
-    match (crate::atreq::at(from_dirfd, from, false), crate::atreq::at(to_dirfd, to, false)) {
+    match (crate::atreq::at(from_dirfd, from), crate::atreq::at(to_dirfd, to)) {
         (Ok(a), Ok(b)) => files::rename((a, from), (b, to)).map_or_else(refuse_files, |()| 0),
         (Err(e), _) | (_, Err(e)) => refuse(e),
     }
@@ -421,7 +421,10 @@ pub unsafe extern "C" fn linkat(from_dirfd: i32, from: *const u8, to_dirfd: i32,
         Ok(flags) => flags,
         Err(e) => return refuse(e),
     };
-    match (crate::atreq::at(from_dirfd, from, flags & AT_EMPTY_PATH != 0), crate::atreq::at(to_dirfd, to, false)) {
+    if let Err(e) = crate::atreq::empty_path(from, flags) {
+        return refuse(e);
+    }
+    match (crate::atreq::at(from_dirfd, from), crate::atreq::at(to_dirfd, to)) {
         (Ok(a), Ok(b)) => {
             files::link((a, from), flags & AT_SYMLINK_FOLLOW != 0, (b, to)).map_or_else(refuse_files, |()| 0)
         }
@@ -466,7 +469,10 @@ pub unsafe extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, fl
         Ok(flags) => flags,
         Err(e) => return refuse(e),
     };
-    match crate::atreq::at(dirfd, path, flags & AT_EMPTY_PATH != 0) {
+    if let Err(e) = crate::atreq::empty_path(path, flags) {
+        return refuse(e);
+    }
+    match crate::atreq::at(dirfd, path) {
         Ok(at) => unsafe { answered(files::stat(at, path, flags & AT_SYMLINK_NOFOLLOW == 0), buf) },
         Err(e) => refuse(e),
     }
@@ -486,7 +492,7 @@ pub unsafe extern "C" fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, s
         crate::errno::set(EINVAL);
         return -1;
     };
-    let at = match crate::atreq::at(dirfd, c_str_to_bytes(path), false) {
+    let at = match crate::atreq::at(dirfd, c_str_to_bytes(path)) {
         Ok(at) => at,
         Err(e) => return refuse(e) as isize,
     };
@@ -519,7 +525,7 @@ pub unsafe extern "C" fn symlink(target: *const u8, link: *const u8) -> i32 {
 #[no_mangle]
 pub unsafe extern "C" fn symlinkat(target: *const u8, dirfd: i32, link: *const u8) -> i32 {
     let (target, link) = (c_str_to_bytes(target), c_str_to_bytes(link));
-    let at = match crate::atreq::at(dirfd, link, false) {
+    let at = match crate::atreq::at(dirfd, link) {
         Ok(at) => at,
         Err(e) => return refuse(e),
     };
@@ -797,7 +803,10 @@ unsafe fn pairs(times: *const [i64; 2]) -> Option<[(i64, i64); 2]> {
 
 #[no_mangle]
 pub unsafe extern "C" fn utimensat(dirfd: i32, path: *const u8, times: *const [i64; 2], flags: i32) -> i32 {
-    let change = match crate::atreq::only(flags, AT_SYMLINK_NOFOLLOW).and_then(|_| crate::atreq::times(unsafe { pairs(times) })) {
+    let checked = crate::atreq::only(flags, AT_SYMLINK_NOFOLLOW)
+        .and_then(|flags| crate::atreq::empty_path(c_str_to_bytes(path), flags))
+        .and_then(|()| crate::atreq::times(unsafe { pairs(times) }));
+    let change = match checked {
         Ok(change) => change,
         Err(e) => return refuse(e),
     };
